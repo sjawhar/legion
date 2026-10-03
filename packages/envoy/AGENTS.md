@@ -45,6 +45,28 @@ captured update in the same Postgres transaction as any resulting version and ev
 and compares canonical markdown. `envoy-dispatch backfill-block-ids` runs that closure across every
 document. Every write path that changes a document queues that closer once its transaction commits: a live edit (`POST /api/v1/artifacts/{id}/edits`), an uploaded document version (`POST /api/v1/issues/{key}/artifacts`, `POST /api/v1/projects/{key}/artifacts`), and a spec seeded at issue creation - so ask blocks written by any of them become asks without waiting for a later live change. The closer attributes the asks it indexes to the room's most recent mutating actor (`roomState.lastActor`, set by every edit, replacement and seed) when no pending author remains - an edit's own version write has already consumed `pending` by the time settlement runs. A free-text ask block (no bullet list) carries `options: []` on the wire, never JSON null.
 
+The closer's timer lives in memory, so the database says which documents still owe it: every
+durable document update writes the document's `doc_settlements_pending` row in its own transaction
+(`markSettlementPending`, migration 0063), and the settlement that has read every update deletes it
+in the transaction that commits its writes. A settlement that did not commit - one a shutdown's
+budget cut short or a room failure dropped - is armed again from that row two ways: a room's load
+arms one when the row is there (`onLoadDocument`, unless the load is a settlement's own warm-up),
+and `cmd/dispatch` runs `docs.Service.RunSettlementResumption`, which at start and every minute
+arms the settlement of each document whose row is a minute old and whose issue is open
+(`resumeOwedSettlements`), so a document nobody opens settles too. It runs on an interval because a
+rolling deploy stops the old task after the new one has started. A closed issue's rooms arm none
+until it reopens. `docs.Service.Shutdown` runs the settlement of each loaded room whose document has
+that row, and no other, inside its 5 s drain budget (`shutdownDrainBudget`, within the caller's
+deadline: `cmd/dispatch` gives HTTP shutdown and document shutdown one 5 s context between them,
+`shutdownTimout`); a settled document's repeat would spend the budget for nothing. It cancels the
+database work of any settlement the budget cuts short so its transaction rolls back, and logs for
+each document that owed one whether it settled or was left to resume (`dispatch: document settled
+before shutdown`, `dispatch: document settlement left to resume after shutdown` with
+`shutdown_budget_ended`). A settlement cut short is not an error; a caller's deadline
+that passes before Shutdown can read that back is, and its error names the documents that owed
+one. A 1 MiB `a_b*` document's settlement took 4.5-6.8 s at load 90-170 on the development
+machine, past that budget.
+
 A write never puts one block id on two blocks. `EnsureBlockIDs` keeps a repeated id for the first
 holder in document order, and ask rows and anchors are keyed on block ids, so a block written ahead
 of an answered ask under its id would take the ask's row and answer, and the question would come
@@ -154,7 +176,8 @@ transaction rolls back, and the caller retries once the room has reloaded; so do
 room fails before its first append, since the reloaded room may lack it. A room's own load never
 waits for that recovery either - the eviction waits in ygo's `CloseRoom` for the load's ready
 barrier, so the two would hold each other - and refuses instead, which ends the eviction; the
-replacement room's load then runs the one settlement the failure dropped.
+replacement room's load then runs the settlement the failure dropped, which the document's
+`doc_settlements_pending` row still names.
 
 Successful Dispatch writes on an issue may return top-level `advice` with the issue status, the
 count of session-authored messages/comments/asks since the last human event, and the calling
@@ -1509,19 +1532,22 @@ state (`self`, `status --json`) or `syscall.Exec`s a command with the granted va
 its environment. The broker holds no Dispatch credential and opens no Dispatch ask anywhere. Every
 human decision — approving or denying a secret request, approving or denying a machine login,
 revoking a grant — reaches the broker's UI routes from Dispatch's server, carrying the UI bearer
-and the deciding human's Dispatch login in the body's `approver` field. The bearer vouches for
-that login: Dispatch fills it from its own signed-in session, never from the browser, and the
-broker checks it against the record's approver and records it on the decision event. The UI
-bearer is therefore an approval credential, and keeping it and Dispatch's identity closed to
+and the deciding person's Dispatch login, their email, in the body's `approver` field. The bearer
+vouches for that login: Dispatch fills it from its own signed-in session, never from the browser,
+and the broker checks it against the record's approver and records it on the decision event. The
+UI bearer is therefore an approval credential, and keeping it and Dispatch's identity closed to
 agents is the deployment's job. `internal/broker/enroll` turns a launcher credential into a leased
 enrollment keyed by the caller's own signing key thumbprint (and, for a pod, a projected
-service-account token). A live enrollment is unique per launcher credential, runtime id and slot:
-`POST /v1/enrollments` takes an optional pod-only `slot` (`^[a-z][a-z0-9-]{0,62}$`, else `400
-INVALID_SLOT`, and a slot on a box or host is refused the same way) naming one of several
-independent identities in one pod. The launcher whose proof authenticates the enrollment chooses
-the slot; a session's proof cannot enroll anything (`401 LAUNCHER_INVALID`). So each slot of a pod
-holds its own key, lease, requests and grants, while a pod's `runtime_id` stays the pod UID its
-token proves. Omitted or `""` is the runtime's one enrollment, every box's and host's. The same key
+service-account token). An operator credential's enrollment is its operator's, the email of the
+person who approved its machine login: a launcher may leave `operator` out of the enrollment, and
+one naming anyone else is `403 OPERATOR_MISMATCH`. A live enrollment is unique per launcher
+credential, runtime id and slot: `POST /v1/enrollments` takes an optional pod-only `slot`
+(`^[a-z][a-z0-9-]{0,62}$`, else `400 INVALID_SLOT`, and a slot on a box or host is refused the
+same way) naming one of several independent identities in one pod. The launcher whose proof
+authenticates the enrollment chooses the slot; a session's proof cannot enroll anything
+(`401 LAUNCHER_INVALID`). So each slot of a pod holds its own key, lease, requests and grants,
+while a pod's `runtime_id` stays the pod UID its token proves. Omitted or `""` is the runtime's
+one enrollment, every box's and host's. The same key
 in the same slot gets its live enrollment back (200), a different key in a live slot is `409
 ALREADY_ENROLLED`, and the rules never see the slot: every slot of a pod matches on its verified
 service account alone. Migration 0007 is forward-only: an older broker binary's conflict lookup
@@ -1738,7 +1764,7 @@ a no-op, writing no second audit row. Audit rows never carry secret values: `aud
 
 `internal/broker/machine.Service` decides the other kind of credential request: a typed-code
 machine login. `Login` verifies a machine's signed request object (`login_hint` required — the
-approving operator's login — and exactly one `launcher_credential` authorization detail), mints an
+approving operator's email — and exactly one `launcher_credential` authorization detail), mints an
 eight-symbol confirmation code (`XXXX-XXXX`) and a separate opaque
 `pending_id` the machine polls with, and writes the record plus its `machine_login_polls` row
 (keyed by the pending id's own SHA-256 hash, never the raw capability). The operator's UI resolves a

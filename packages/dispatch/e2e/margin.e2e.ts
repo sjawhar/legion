@@ -21,7 +21,9 @@ import {
   expectMark,
   marginCard,
   markSpan,
+  openedThreadCard,
   selectEditorText,
+  setSheet,
 } from "./editor";
 import { commentWithBody, setSheet } from "./margin-helpers";
 import { resetDatabase, setCommentAuthorService } from "./seed";
@@ -507,10 +509,7 @@ test("a document mark opens its thread in the margin and stays on the document",
     // Proof's model: the thread opens beside the document (in the phone's Thread dialog on a
     // small viewport); the reader never leaves the document.
     const phoneThread = page.getByRole("dialog", { name: "Thread" });
-    const card =
-      testInfo.project.name === "iphone"
-        ? phoneThread.getByTestId(`margin-comment-${comment.id}`)
-        : marginCard(page, comment.id);
+    const card = openedThreadCard(page, testInfo.project.name, comment.id);
     await expect(card).toHaveAttribute("aria-current", "true");
     await expect(card).toContainText("focus this");
     await expect(card).toContainText("brown");
@@ -834,11 +833,7 @@ test("a comment a verified service token wrote names its service account in the 
     await setSheet(page, testInfo.project.name, true);
     // Only an expanded thread carries the author line under each comment.
     await marginCard(page, comment.id).locator('button[aria-expanded="false"]').click();
-    const phoneThread = page.getByRole("dialog", { name: "Thread" });
-    const thread =
-      (await phoneThread.count()) === 0
-        ? marginCard(page, comment.id)
-        : phoneThread.getByTestId(`margin-comment-${comment.id}`);
+    const thread = openedThreadCard(page, testInfo.project.name, comment.id);
     await expect(thread).toContainText("Implementer (as legion/legion-worker)");
   } finally {
     await alice.close();

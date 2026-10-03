@@ -10,12 +10,13 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/sjawhar/envoy/internal/goroutinetest"
 )
 
 // lapseRig is a logged-in rig whose one session (this test process) enrolls and then has its
@@ -372,16 +373,7 @@ func freshEnrollment(t *testing.T, replies <-chan registerAnswer, stale ...strin
 // lets the test pass: TestRegisterWaitWaitsForTheReEnrollmentAfterALapse then fails after about
 // 10 s.
 func blockedInRegisterReply() bool {
-	buf := make([]byte, 1<<20)
-	for {
-		n := runtime.Stack(buf, true)
-		if n < len(buf) {
-			buf = buf[:n]
-			break
-		}
-		buf = make([]byte, 2*len(buf))
-	}
-	for _, g := range strings.Split(string(buf), "\n\n") {
+	for _, g := range goroutinetest.Traces() {
 		header, _, _ := strings.Cut(g, "\n")
 		if strings.Contains(header, "[select") && strings.Contains(g, ").registerReply(") {
 			return true
@@ -488,7 +480,7 @@ func TestASecondRestartBeforeTheLoginStillRevokesThePriorEnrollment(t *testing.T
 	pid := recordPrior(t, state, "enr-prior")
 
 	// The first restart: Recover re-pins and saves, and the helper exits before any login.
-	first := &Server{Registry: NewRegistry(state), Broker: &Broker{URL: "http://127.0.0.1:1", OperatorFile: operatorFile(t, "sjawhar")},
+	first := &Server{Registry: NewRegistry(state), Broker: &Broker{URL: "http://127.0.0.1:1", OperatorFile: operatorFile(t, "ada@example.com")},
 		Hostname: "testhost", PeerOf: PeerOf, Log: slog.New(slog.NewTextHandler(os.Stderr, nil)), MinRenew: time.Second}
 	ctx, cancel := context.WithCancel(context.Background())
 	first.Recover(ctx)

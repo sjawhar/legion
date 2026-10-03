@@ -144,9 +144,9 @@ func TestApproversSectionIsRefused(t *testing.T) {
 	}
 }
 
-// TestLoginsCompareCaseInsensitively pins that a rules author's casing of a GitHub login never
-// makes a rule unsatisfiable: operators and login: approvers are compared the way Dispatch
-// compares logins, trimmed and lowercased.
+// TestLoginsCompareCaseInsensitively pins that a rules author's casing of a person's email or a
+// `login:` approver never makes a rule unsatisfiable: operators and login: approvers are compared
+// the way Dispatch compares logins, trimmed and lowercased.
 func TestLoginsCompareCaseInsensitively(t *testing.T) {
 	data := oneSecret("{kind: box, operator: SJawhar, decision: approval, approver: 'login:Xodarap'}")
 	set, err := Parse(data)

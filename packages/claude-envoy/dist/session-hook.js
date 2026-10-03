@@ -14066,6 +14066,8 @@ function dispatchToolSchema(spec, z2, opts) {
 }
 var ISSUE_REFERENCE = "An issue is a native KEY or external owner/repo#n reference. An external reference addresses an existing Dispatch issue, including one linked to that GitHub pull request; only dispatch_issue with external creates a native issue.";
 var OWNER_REFERENCE = "Exactly one of issue and project is required. An issue is a native KEY or external owner/repo#n reference; a project is a project key such as CORE and addresses an unlinked project document named by artifact.";
+var ASK_QUESTION_CONTRACT = "The question carries the problem the reader recognises and why it matters now, what constrains " + "the answer, and the recommendation with its reason. It asks how to solve the problem or which " + "outcome is wanted; never enumerate choices in the question.";
+var ASK_OPTIONS_CONTRACT = "Options carry the genuinely different approaches. Each option has a label, and its description " + "says what that approach costs.";
 function documentOwnerValidation(requireArtifact, alwaysRequireArtifact = false) {
   return {
     check: (value) => {
@@ -14213,18 +14215,31 @@ var dispatchToolSpecs = [
   },
   {
     name: "dispatch_ask",
-    example: { issue: "DSP-1", question: "Ship this?" },
-    description: "Open a durable, answerable decision on an issue or project document. Do not use it for a status update or discussion; " + "use dispatch_message instead. A to-do a human must complete is a question phrased as that to-do, with the options you want (for example Done / Can't). " + "Anything you are blocked on a human for, including a credential or grant to renew, an approval, or a decision, is an ask, never a message. " + "Anchor a document question, thread reply_to/reply_to_ask, or cite a dispatch:// " + `reference \u2014 it must be answerable from its own text and anchor alone, never "see above". A quote anchor is pinned to its block. Question is at most ${ASK_QUESTION_MAX} ` + `characters and has at most 8 options. ${OWNER_REFERENCE}`,
+    example: {
+      issue: "DSP-1",
+      question: "The release cannot pass its review gate because the revised plan is unreviewed. " + "How should we proceed? Recommendation: review the plan before release to keep the review gate.",
+      options: [
+        {
+          label: "Review the revised plan",
+          description: "Delays release for review but keeps the release gate."
+        },
+        {
+          label: "Release without review",
+          description: "Ships sooner but bypasses the review gate."
+        }
+      ]
+    },
+    description: "Open a durable, answerable decision on an issue or project document. Do not use it for a " + "status update or discussion; use dispatch_message instead. " + ASK_QUESTION_CONTRACT + " " + ASK_OPTIONS_CONTRACT + " For an action only a human can perform, state what it changes and risks as constraints. " + "Anything you are blocked on a human for, including a credential or grant to renew, an " + "approval, or a decision, is an ask, never a message. " + "Anchor a document question, thread reply_to/reply_to_ask, or cite a dispatch:// " + `reference \u2014 it must be answerable from its own text and anchor alone, never "see above". ` + `A quote anchor is pinned to its block. Question is at most ${ASK_QUESTION_MAX} characters ` + `and has at most 8 options. ${OWNER_REFERENCE}`,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE).optional(),
       project: z2.string().describe("Project key owning the document.").optional(),
       artifact: z2.string().describe("Project document artifact id, slug, or filename.").optional(),
       ref: z2.string().describe("Optional dispatch:// reference (issue, document, message, or ask); appended to the question and rendered as a link.").optional(),
-      question: z2.string({ max: ASK_QUESTION_MAX }).describe(`Decision question, at most ${ASK_QUESTION_MAX} characters.`),
+      question: z2.string({ max: ASK_QUESTION_MAX }).describe(`${ASK_QUESTION_CONTRACT} At most ${ASK_QUESTION_MAX} characters.`),
       options: z2.array(z2.object({
         label: z2.string().describe("Selectable option label."),
-        description: z2.string().describe("Optional option context.").optional()
-      }), { max: 8 }).describe("Up to 8 choices, each an object { label, description? } (never a bare string).").optional(),
+        description: z2.string().optional().describe("What this option costs.")
+      }), { max: 8 }).optional().describe(`${ASK_OPTIONS_CONTRACT} Up to 8 objects { label, description? }.`),
       multiple: z2.boolean().describe("Whether multiple choices may be selected.").optional(),
       urgency: z2.enum(ASK_URGENCIES).describe("Optional decision urgency.").optional(),
       anchor: z2.object({
@@ -14239,16 +14254,26 @@ var dispatchToolSpecs = [
     name: "dispatch_edit_ask",
     example: {
       ask: "01234567-0000-4000-8000-000000000001",
-      question: "Ship the revised plan?"
+      question: "The release cannot pass its review gate because the revised plan is unreviewed. " + "How should we proceed? Recommendation: review the plan before release to keep the review gate.",
+      options: [
+        {
+          label: "Review the revised plan",
+          description: "Delays release for review but keeps the release gate."
+        },
+        {
+          label: "Release without review",
+          description: "Ships sooner but bypasses the review gate."
+        }
+      ]
     },
-    description: "Edit an open question in place. Use it to correct or refine the same decision; retract the " + "old ask and open a new one when the decision itself changes. Previous text remains in the " + "event log. Only the asking session can edit it; answered or resolved asks cannot be edited. " + "An ask that lives as an `ask` block in a document is written in the document too, changing " + "only the fields you name - pass urgency alone and the question's wording, formatting, links " + "and comment anchors are untouched - so the edit writes a document version and closes a " + "spec's design gate until that version is " + "approved; text the block cannot carry back unchanged is refused, naming the field - an " + 'option label containing ": ", the separator between a label and its description, is one ' + "example.",
+    description: "Edit an open question in place. Use it to correct or refine the same decision; retract the " + "old ask and open a new one when the decision itself changes. " + ASK_QUESTION_CONTRACT + " " + ASK_OPTIONS_CONTRACT + " Previous text remains in the event log. Only the asking session can edit it; answered or " + "resolved asks cannot be edited. An ask that lives as an `ask` block in a document is written " + "in the document too, changing only the fields you name - pass urgency alone and the " + "question's wording, formatting, links and comment anchors are untouched - so the edit " + "writes a document version and closes a spec's design gate until that version is approved; " + "text the block cannot carry back unchanged is refused, naming the field - an option label " + 'containing ": ", the separator between a label and its description, is one example.',
     arguments: (z2) => ({
       ask: z2.string().describe("Ask id (uuid); an 8+ hex prefix unique among this session's own open asks works too."),
-      question: z2.string({ max: ASK_QUESTION_MAX }).describe(`Replacement decision question, at most ${ASK_QUESTION_MAX} characters.`).optional(),
+      question: z2.string({ max: ASK_QUESTION_MAX }).optional().describe(`${ASK_QUESTION_CONTRACT} Replaces the ask's question; at most ${ASK_QUESTION_MAX} characters.`),
       options: z2.array(z2.object({
         label: z2.string().describe("Selectable option label."),
-        description: z2.string().describe("Optional option context.").optional()
-      }), { max: 8 }).describe("Replacement choices, at most 8.").optional(),
+        description: z2.string().optional().describe("What this option costs.")
+      }), { max: 8 }).optional().describe(`${ASK_OPTIONS_CONTRACT} Replaces the ask's options; up to 8 objects { label, description? }.`),
       multiple: z2.boolean().describe("Whether multiple choices may be selected.").optional(),
       urgency: z2.enum(ASK_URGENCIES).describe("Replacement decision urgency.").optional()
     }),
@@ -14410,7 +14435,7 @@ var dispatchToolSpecs = [
     name: "dispatch_artifact",
     example: { issue: "DSP-1", name: "design.md", content: `# Design
 ` },
-    description: "Attach a local file or inline text as an issue artifact or project document. Do not use it to edit a live document; use " + "dispatch_doc_edit instead. Exactly one of path or content is required; artifacts are limited to 25 MiB. " + "Markdown holding an ask block whose body breaks its content rule (one or more question paragraphs, then at most one bullet list of options, last) is refused with 400 INVALID_ASK_BLOCK; a new version of a document is held to it only for the asks it writes or changes. " + `${OWNER_REFERENCE}`,
+    description: "Attach a local file or inline text as an issue artifact or project document. Do not use it to edit a live document; use " + "dispatch_doc_edit instead. Exactly one of path or content is required; a markdown document is at most 1 MiB and any other file at most 25 MiB. " + "Markdown holding an ask block whose body breaks its content rule (one or more question paragraphs, then at most one bullet list of options, last) is refused with 400 INVALID_ASK_BLOCK; a new version of a document is held to it only for the asks it writes or changes. " + `${OWNER_REFERENCE}`,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE).optional(),
       project: z2.string().describe("Project key for an unlinked document.").optional(),

@@ -606,6 +606,7 @@ func (r *renderer) writeInlineText(node *Node, position *inlinePosition, prefix 
 	}
 
 	value := node.Text
+	context.scan = newForwardScan(value)
 	segmentStart := 0
 	// Where the current line's text begins inside this node, or -1 when it began in an earlier
 	// one: lineStart for a line of its own whose first character is yet to be judged, and

@@ -147,12 +147,12 @@ type liveEnv struct {
 	// audience filled in, the operator's pod every launch carries; operatorConfigMap is the run's
 	// copy of the ConfigMap it names.
 	operatorPodFile, operatorConfigMap string
-	// The agent-secrets checks' inputs (AGENTC-393): the production broker, the login this run's
-	// machine login is approved by (an attended step: the operator enters the printed code on the
-	// Dispatch credential page and clicks Approve during the run), and the sha256 of the
-	// automatic rule's dummy value, and the checkout's agent-secrets binary. Every field here is
-	// read with os.Getenv, unlike the rest of liveEnv: unset is a blocked run of the secrets-*
-	// checks, never a refusal to start (secretsBlocked).
+	// The agent-secrets checks' inputs (AGENTC-393): the production broker, the email of the
+	// person this run's machine login is approved by (an attended step: the operator enters the
+	// printed code on the Dispatch credential page and clicks Approve during the run), and the
+	// sha256 of the automatic rule's dummy value, and the checkout's agent-secrets binary. Every
+	// field here is read with os.Getenv, unlike the rest of liveEnv: unset is a blocked run of the
+	// secrets-* checks, never a refusal to start (secretsBlocked).
 	agentSecretsURL, agentSecretsOperator, agentSecretsAutoSHA, agentSecretsBin string
 }
 

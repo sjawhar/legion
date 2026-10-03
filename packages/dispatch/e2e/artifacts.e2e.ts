@@ -6,6 +6,7 @@ import { expect, type Locator, type Page, test } from "@playwright/test";
 import { createAsk, createComment, createIssue, createIssueArtifact, createProject } from "./api";
 import { countDocumentSockets, documentEditor } from "./editor";
 import { resetDatabase } from "./seed";
+import { signIn } from "./users";
 
 const fixtureDirectory = fileURLToPath(new URL("./fixtures", import.meta.url));
 const diagramPath = join(fixtureDirectory, "diagram.png");
@@ -13,16 +14,15 @@ const notesPath = join(fixtureDirectory, "notes.md");
 const tinyPng =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL0eAAAAABJRU5ErkJggg==";
 
-test.use({ extraHTTPHeaders: { "X-Dispatch-User": "alice" } });
-
 test.beforeAll(async () => {
   await mkdir(fixtureDirectory, { recursive: true });
   await access(diagramPath).catch(() => writeFile(diagramPath, Buffer.from(tinyPng, "base64")));
   await writeFile(notesPath, "# Review notes\n\nThese notes replace the initial spec.\n");
 });
 
-test.beforeEach(async () => {
+test.beforeEach(async ({ context }) => {
   await resetDatabase();
+  await signIn(context, "alice");
 });
 
 async function openArtifacts(page: Page, isPhone: boolean) {
