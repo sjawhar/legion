@@ -65,6 +65,33 @@
 
 ### Changed
 
+- A Dispatch approval request follows its document's versions instead of being retracted and
+  reopened on every edit (LEGION-470). A version write moves the open request to the new version
+  (`ask.edited`), keeping its thread and summary, and leaves it Waiting on agents until its agent
+  calls `POST /api/v1/artifacts/{id}/approval-requests` again. Only the move that takes the request
+  from the human wakes its asker and followers; each later move while it already waits on its agent
+  is recorded quiet (`quiet: true` on its `ask.edited`, `notify: false`, no follower route), as a
+  human's unnamed version is, so a person typing in a document with a request open sends one
+  delivery, not one per settled version. While the request waits on its agent
+  (moved, or answered in its thread), that call hands it back to the human with the new event
+  `ask.handed_back`, rewording it first when the summary is new (`ask.edited`); a hand-back that
+  rewords nothing leaves the question and `edited_at` alone, so an answer the human had started is
+  still saved. While the request already waits on the human, the same summary is a repeat that
+  writes nothing and a different one is refused `409 APPROVAL_WAITS_ON_HUMAN`, since an approval
+  request carries nothing new. The route answers 201 when it wrote anything and 200 when the
+  request already stood as asked. A summary's limit is counted against a ten-digit version, so no
+  version move takes the question past the ask cap. `ask.approval` gains `requested_version`, the
+  version last handed to the human, and a document's `approval` gains `waiting_on` while it is
+  `awaiting`. Every route that writes a comment (both comment routes and the delivery callback
+  `POST /api/v1/comments/{id}/reply`) answers `ask_waiting_on`, the value the comment's event
+  already carries, beside the comment on a reply to an open ask; a replayed delivery callback,
+  which writes nothing, answers the stored reply alone. Migration `0064`
+  backfills `requested_version` and adds `asks.handed_back_reply_id`, `0065` makes
+  `comments.created_at` default to `clock_timestamp()` so an ask's newest reply is the one that
+  committed last, and `0066` adds the column's foreign key to `comments` under a 500 ms
+  `lock_timeout` of its own; each census answers `0`. The pre-deploy census judges a pending
+  migration's lock holders against the `lock_timeout` the migration itself sets, so an autovacuum
+  on `asks` or `comments` refuses `0066` where `deadlock_timeout` is not shorter than its 500 ms.
 - A markdown document uploaded as an artifact is at most 1 MiB, the bound an issue's spec and
   every edit already have; other artifacts keep the 25 MiB limit. The dashboard shows the
   server's message for a refused upload (LEGION-465).
@@ -150,7 +177,14 @@
   or Claude Code plugin built from the same executor) keeps that URL from being sent at all,
   because its `dispatch_search` refuses the same rules before any request.
 
+- A Markdown document now nests at most 100 blocks, and a document tree with a node more than 1,000 levels below the document, or an attribute value nesting more than 100 arrays and objects, is outside the Proof schema (LEGION-465). The bounds sit where every read serves the tree: past about 5,000 levels the document token is JSON that `encoding/json` will not write from Go 1.27 or read in any version, and `GET /blocks`, which hashes each block's subtree apart, does work growing with the square of the depth. A live tree past either tree bound is treated as any other tree outside the schema: settlement writes no version and its reads answer `500 DOC_SCHEMA`, and once its room's last peer leaves, every later load of the room refuses it, so the document websocket, edits and uploads refuse the document until it is repaired (LEGION-469). A textblock's inline markdown nests at most 100 marks inside one another - emphasis, strong, strikethrough, links, images and code - and deeper content is refused naming the line. An accepted suggestion whose own markdown nests within 100 blocks but lands deep enough that the document would nest past them is refused as `400 INVALID_OP` on `replace_with`, naming how many blocks the result nests (LEGION-465).
+
 ### Fixed
+- One MiB of `>` formed 1,048,576 nested quotes inside the document cap and eventually ended the process in a stack overflow while its tree was validated. Dispatch now refuses the document before building that tree (LEGION-465).
+- Reading a textblock's inline markdown took one stack frame per nested mark, so the stack and memory it needed grew with the nesting the caller wrote: one 1 MiB upload of 262,140 nested strong marks read with no error but peaked at about 0.9 GB of memory. The inline bound above is checked before any walk of those marks that recurses, and goldmark's own walk through a link's label, which enters every image the label holds, meets each image held to the bound as it is made (LEGION-465).
+- A table whose rows hold an escaped pipe in a code span parsed in time quadratic in its size: goldmark's table transformer checked every code span's text against every escaped pipe in the document, and 1 MiB of such rows took over two minutes. Dispatch takes the backslash out of those pipes itself, in one pass, and 1 MiB parses in about two seconds (LEGION-465).
+- Marking or unmarking a document's text, and checking whether a concurrent change removed the text a write inserted, walked the live tree one stack frame per level with no bound, where an authenticated peer can grow the tree through any number of small websocket updates. Each now refuses a node more than 1,000 levels deep, text included, as the document's reads do, and a peer's update that deepens the tree between a write's read and its transaction is answered `500 DOC_SCHEMA` rather than `500 INTERNAL` (LEGION-465).
+- Deleting an element of a live document took one stack frame per level of nesting inside it, so an ordinary delete of a tree an authenticated peer had grown through any number of small websocket updates needed more stack than the goroutine had. Dispatch pins `github.com/reearth/ygo` to the `sjawhar/ygo` fork at `v1.49.6-sami.3` (commit `7cf8e9ff`), which walks the deleted children iteratively and carries the transactional GC fix; the change is open upstream (LEGION-465).
 
 - Saving a document, comment, ask, or message with a long run of underscore-joined characters
   no longer takes quadratic time in Postgres search indexing. `pmdoc` also avoids quadratic work

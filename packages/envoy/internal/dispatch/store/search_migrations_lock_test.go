@@ -5,7 +5,6 @@ import (
 	"errors"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/sjawhar/envoy/internal/pgmigrate"
 )
@@ -33,20 +32,7 @@ func TestSearchMigrationsLockOneTableAtATime(t *testing.T) {
 	go func() { migrated <- store.Migrate(ctx) }()
 
 	// Wait until the runner is queued on messages, then read issues with a one-second bound.
-	deadline := time.Now().Add(20 * time.Second)
-	waiting := false
-	for !waiting && time.Now().Before(deadline) {
-		if err := store.Pool.QueryRow(ctx, `
-			select exists(select 1 from pg_locks l join pg_stat_activity a using (pid)
-			              where l.relation = 'messages'::regclass and l.mode = 'AccessExclusiveLock' and not l.granted)
-		`).Scan(&waiting); err != nil {
-			t.Fatalf("read pg_locks: %v", err)
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	if !waiting {
-		t.Fatal("the runner was never seen waiting for messages' ACCESS EXCLUSIVE lock")
-	}
+	waitForQueuedLock(t, store, "messages", "AccessExclusiveLock")
 	var version int
 	var issues int
 	err = func() error {
