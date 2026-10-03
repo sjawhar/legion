@@ -1,14 +1,11 @@
-// Package sandbox is the runtime that runs every agent as the pod of an Agent Sandbox
-// (agents.x-k8s.io/v1beta1 Sandbox, kubernetes-sigs/agent-sandbox v1.0.3): one Sandbox per claim,
-// named for the claim's token, whose pod runs `legion workspace-init` on the tree volume and then
-// `legion worker-shim` dialing the daemon's worker stream, with Oh My Pi under it.
+// Package sandbox runs each issue in one Agent Sandbox (agents.x-k8s.io/v1beta1 Sandbox,
+// kubernetes-sigs/agent-sandbox v1.0.3). Six role containers share its workspace and network;
+// each has a private launcher that starts and stops only its own worker-shim child.
 //
-// A claim's Sandbox outlives its processes. A process is the Sandbox's pod, and the pod's uid is
-// the incarnation every locator records; the controller names the pod after its Sandbox and owns
-// it, so the runtime reads both from two informers, label-selected on the project, and joins them
-// by name. Every relaunch goes through `operatingMode: Suspended` — the only mode in which the
-// controller deletes a pod — waits the old pod out, rewrites the claim's Secret, and patches
-// `Running` (LEGION-208 Stage 4 plan, decisions 1–6).
+// Process Suspend and Release leave the shared Sandbox running. The durable issue close first
+// stops every stored role, then sets its Sandbox Suspended and waits for the pod to disappear,
+// retaining the volume and sessions until linger cleanup. Re-admission resumes the Sandbox,
+// while an individual role's recovery in a healthy pod does not replace that pod.
 //
 // The Sandbox structs are Legion's own (types.go): importing sigs.k8s.io/agent-sandbox would move
 // grpc, otel, and controller-runtime for every module under go.work.

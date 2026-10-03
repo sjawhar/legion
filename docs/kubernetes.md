@@ -346,10 +346,11 @@ never waits on the kubelet to refresh a Secret, and no credential is in an argv,
 value, a log or an error. The role's own agent runs as the same user in the same container, so it
 can read its own generation's credentials, as a pane can; it cannot read another role's. A role
 process is addressed by the pod's uid, its
-container and its generation (the incarnation `<pod uid>/<generation>`): starting, suspending or
-recovering one role never restarts the pod or touches another role, and a new generation of a role
-in a running pod is a new child of its launcher. The pod itself is replaced only when it dies or
-was not made by this runtime (`packages/daemon/internal/runtime/sandbox`).
+container and its generation (the incarnation `<pod uid>/<generation>`): in a healthy running pod,
+starting, suspending or recovering one role never restarts the pod or touches another role. A new generation of a role
+in a running pod is a new child of its launcher. A pod is replaced after it dies, when it was not
+made by this runtime, or when a closed issue is re-admitted after suspension
+(`packages/daemon/internal/runtime/sandbox`).
 
 Releasing a role ends only its process. The issue owns its Sandbox, its role Secrets and, for a
 root, the tree PVC, recorded in the daemon's store (`issue_resources`) before any role of it starts.
@@ -362,7 +363,17 @@ retry binds again before it launches, all under the fact path's one global seria
 epoch refuses those writes with a named wait that keeps the start's outbox row and charges no
 launch failure; a confirmed epoch admits nothing until a fresh root admission opens the next one.
 
-A workflow close reserves its tree only while the root still lingers at the close's generation, so
+A workflow close or withdrawal queues a separate `issue_suspend` effect for each affected issue,
+after its per-role stops. The effect checks both workflow generations, later starts, unfinished
+stop effects and every stored role, including a launch not yet present in the runtime's watch.
+A held turn, unfinished or uncertain launch, or Kubernetes error keeps the effect pending;
+a superseded close finishes without acting. Once the roles have stopped, the daemon sets that
+issue's Sandbox to `Suspended` and waits for its pod to disappear. The Sandbox, tree volume and
+recorded sessions remain until linger cleanup. A daemon restart retries the stored effect.
+Re-admission during linger reuses those resources and resumes the recorded sessions; the issue's
+launch lock orders a concurrent resume after any suspension already in flight.
+
+Linger expiry reserves its tree only while the root still lingers at the close's generation, so
 a re-admission that committed first fences it; an operator close reserves after it authenticated
 the root close. Either reservation comes before the census, which then reads every stored claim of
 the tree, including one that persisted before the reservation but has not admitted resources yet,
