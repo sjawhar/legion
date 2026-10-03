@@ -2,6 +2,7 @@ package bus
 
 import (
 	"errors"
+	"maps"
 	"strings"
 	"testing"
 
@@ -16,7 +17,8 @@ import (
 // (`a..b`, which nats.go allows) names a subject no stream matches; one outside nats.go's key
 // alphabet (`ses:bad`) nats.go refuses itself. The handle a bucket opens with refuses each as the
 // ErrRefused it is, naming the key or its size, before sending anything, on every call that builds a
-// subject from its key, whether the open created the bucket or found it.
+// subject from its key, and the key outside the alphabet on a get by revision too, which builds none,
+// whether the open created the bucket or found it.
 func TestAKeyValueHandleRefusesAKeyNATSWouldRefuse(t *testing.T) {
 	client, err := Connect([]string{testnats.URL(t)})
 	if err != nil {
@@ -77,6 +79,10 @@ func requireKeysChecked(t *testing.T, client *Client, kv nats.KeyValue, letter s
 			return err
 		},
 	}
+	// A get by revision names the revision, not the key, in its subject, so only nats.go's alphabet
+	// check refuses a key there.
+	everyCall := maps.Clone(calls)
+	everyCall["GetRevision"] = func(key string) error { _, err := kv.GetRevision(key, 1); return err }
 	for _, tc := range []struct {
 		name string
 		key  string
@@ -84,12 +90,14 @@ func requireKeysChecked(t *testing.T, client *Client, kv nats.KeyValue, letter s
 		says string
 		// also is nats.go's own error, which a caller that asks for it still finds.
 		also error
+		// calls are the calls that refuse key.
+		calls map[string]func(key string) error
 	}{
-		{"a key past the server's protocol line", strings.Repeat("k", 5000), ErrTooLarge, "a key of 5000 bytes", nil},
-		{"a key holding an empty token", "sess..x", ErrInvalidSubject, `"sess..x"`, nil},
-		{"a key outside nats.go's key alphabet", "ses:bad", ErrInvalidKey, `"ses:bad"`, nats.ErrInvalidKey},
+		{"a key past the server's protocol line", strings.Repeat("k", 5000), ErrTooLarge, "a key of 5000 bytes", nil, calls},
+		{"a key holding an empty token", "sess..x", ErrInvalidSubject, `"sess..x"`, nil, calls},
+		{"a key outside nats.go's key alphabet", "ses:bad", ErrInvalidKey, `"ses:bad"`, nats.ErrInvalidKey, everyCall},
 	} {
-		for name, call := range calls {
+		for name, call := range tc.calls {
 			t.Run(tc.name+"/"+name, func(t *testing.T) {
 				err := call(tc.key)
 				if !errors.Is(err, tc.want) || !errors.Is(err, ErrRefused) {
@@ -110,11 +118,15 @@ func requireKeysChecked(t *testing.T, client *Client, kv nats.KeyValue, letter s
 	// The control: the same handle still takes a key that fits, the longest one included.
 	longest := strings.Repeat(letter, maxSubjectBytes-watchOverhead("kv_key_check"))
 	for _, key := range []string{"fits-" + letter, longest} {
-		if _, err := kv.Put(key, []byte("v")); err != nil {
+		revision, err := kv.Put(key, []byte("v"))
+		if err != nil {
 			t.Fatalf("put %d-byte key: %v", len(key), err)
 		}
 		if _, err := kv.Get(key); err != nil {
 			t.Fatalf("get %d-byte key: %v", len(key), err)
+		}
+		if entry, err := kv.GetRevision(key, revision); err != nil || entry.Revision() != revision {
+			t.Fatalf("get %d-byte key at revision %d = %v; want that revision", len(key), revision, err)
 		}
 		history, err := kv.History(key)
 		if err != nil || len(history) != 1 {

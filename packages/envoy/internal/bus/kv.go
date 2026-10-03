@@ -96,6 +96,13 @@ func (kv KeyValue) Get(key string) (nats.KeyValueEntry, error) {
 	return entry, invalidKey(key, err)
 }
 
+// GetRevision gets key by revision, which names the revision rather than the key in its subject, so
+// only nats.go's alphabet check refuses a key here.
+func (kv KeyValue) GetRevision(key string, revision uint64) (nats.KeyValueEntry, error) {
+	entry, err := kv.KeyValue.GetRevision(key, revision)
+	return entry, invalidKey(key, err)
+}
+
 func (kv KeyValue) Put(key string, value []byte) (uint64, error) {
 	if err := kv.write(key); err != nil {
 		return 0, err
