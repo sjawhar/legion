@@ -118,41 +118,30 @@ async function setEditorRange(page: Page, target: EditorRange): Promise<void> {
       if (last === null) throw new Error("the editor holds no text a caret can enter");
       range.setStart(last, last.textContent?.length ?? 0);
     } else {
+      // Reads the text nodes as one text, so a quote another mark's span splits is found as
+      // readily as one a single node holds, and maps the quote's two ends back to their nodes.
       const { extent, quote } = target;
-      let found = false;
+      const runs: { node: Node; start: number; end: number }[] = [];
+      let text = "";
       for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
-        const index = node.textContent?.indexOf(quote) ?? -1;
-        if (index < 0) continue;
-        range.setStart(node, extent === "after" ? index + quote.length : index);
-        range.setEnd(node, extent === "before" ? index : index + quote.length);
-        found = true;
-        break;
+        const start = text.length;
+        text += node.textContent ?? "";
+        runs.push({ end: text.length, node, start });
       }
-      if (!found) {
-        // The quote runs across text nodes: read them as one text and map its two ends back.
-        const runs: { node: Node; start: number; end: number }[] = [];
-        let text = "";
-        const across = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-        for (let node = across.nextNode(); node !== null; node = across.nextNode()) {
-          const start = text.length;
-          text += node.textContent ?? "";
-          runs.push({ end: text.length, node, start });
-        }
-        const index = text.indexOf(quote);
-        const first = runs.find((run) => run.start <= index && index < run.end);
-        const last = runs.find(
-          (run) => run.start < index + quote.length && index + quote.length <= run.end
-        );
-        if (index < 0 || first === undefined || last === undefined) {
-          throw new Error(`quote is not in the editor: ${quote}`);
-        }
-        const startAt = { node: first.node, offset: index - first.start };
-        const endAt = { node: last.node, offset: index + quote.length - last.start };
-        const from = extent === "after" ? endAt : startAt;
-        const to = extent === "before" ? startAt : endAt;
-        range.setStart(from.node, from.offset);
-        range.setEnd(to.node, to.offset);
+      const index = text.indexOf(quote);
+      const first = runs.find((run) => run.start <= index && index < run.end);
+      const last = runs.find(
+        (run) => run.start < index + quote.length && index + quote.length <= run.end
+      );
+      if (index < 0 || first === undefined || last === undefined) {
+        throw new Error(`quote is not in the editor: ${quote}`);
       }
+      const startAt = { node: first.node, offset: index - first.start };
+      const endAt = { node: last.node, offset: index + quote.length - last.start };
+      const from = extent === "after" ? endAt : startAt;
+      const to = extent === "before" ? startAt : endAt;
+      range.setStart(from.node, from.offset);
+      range.setEnd(to.node, to.offset);
     }
     const selection = window.getSelection();
     selection?.removeAllRanges();
