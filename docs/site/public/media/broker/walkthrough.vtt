@@ -3,47 +3,47 @@ WEBVTT
 00:00:00.073 --> 00:00:04.323
 This command just got a key that a person approved.
 
-00:00:04.473 --> 00:00:10.154
+00:00:04.473 --> 00:00:10.065
 First, the machine logs in, and prints a code to enter in Dispatch.
 
-00:00:10.882 --> 00:00:15.451
+00:00:10.834 --> 00:00:15.425
 There, alice types it into the machine login page.
 
-00:00:15.451 --> 00:00:20.725
+00:00:15.425 --> 00:00:20.685
 It names example-host-build. She approves it.
 
-00:00:20.856 --> 00:00:25.004
+00:00:20.790 --> 00:00:24.945
 Back on the machine, the login is issued.
 
-00:00:25.004 --> 00:00:29.548
+00:00:24.945 --> 00:00:29.490
 Next, it registers a session for an agent.
 
-00:00:29.548 --> 00:00:35.776
+00:00:29.490 --> 00:00:35.913
 The broker calls this session an enrollment; its operator is alice.
 
-00:00:35.989 --> 00:00:44.025
+00:00:36.123 --> 00:00:43.859
 Now the session asks for the demo API key to run one command, and says why.
 
-00:00:44.025 --> 00:00:47.026
+00:00:43.859 --> 00:00:46.660
 Now it waits for a person.
 
-00:00:47.056 --> 00:00:50.752
+00:00:46.689 --> 00:00:50.270
 The request is in alice's Inbox.
 
-00:00:50.752 --> 00:00:57.279
+00:00:50.270 --> 00:00:56.849
 Its page shows the enrollment, the lifetime, and the agent's reason.
 
-00:00:57.279 --> 00:00:59.254
+00:00:56.849 --> 00:00:58.805
 She approves it.
 
-00:00:59.456 --> 00:01:03.456
+00:00:59.022 --> 00:01:03.022
 The waiting command gets the key, and runs.
 
-00:01:05.709 --> 00:01:09.009
+00:01:05.232 --> 00:01:08.532
 Its status says alice decided it.
 
-00:01:11.083 --> 00:01:16.200
+00:01:10.598 --> 00:01:15.725
 Settings lists the live grant, with alice as its approver.
 
-00:01:16.200 --> 00:01:19.326
+00:01:15.725 --> 00:01:18.953
 Each live grant has a Revoke button.

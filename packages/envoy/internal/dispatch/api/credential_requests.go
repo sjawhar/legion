@@ -3,7 +3,8 @@
 // dispatch://AGENTC-393/artifact/plan-overview-md). Every handler does the same five things:
 // require a human caller, require the broker to be configured, resolve or read its input, call
 // the matching agentsecrets.Client method, and forward the broker's exact status and body — the
-// broker decides. The one thing Dispatch supplies is who decides: approve, deny and revoke send the
+// broker decides. The pending list alone answers null rather than 404 FEATURE_OFF without a broker.
+// The one thing Dispatch supplies is who decides: approve, deny and revoke send the
 // login requireHuman resolved, in Dispatch's canonical lowercase form, as the approver, and never
 // forward the browser's body, so nothing a browser sends can name the approver (AGENTC-393).
 package api
@@ -19,7 +20,8 @@ import (
 )
 
 // requireAgentSecrets answers 404 FEATURE_OFF when this Dispatch has no broker configured
-// (DISPATCH_AGENT_SECRETS_URL unset); every credential-request route needs it after requireHuman.
+// (DISPATCH_AGENT_SECRETS_URL unset); every credential-request route but the pending list needs it
+// after requireHuman.
 func (s *server) requireAgentSecrets(w http.ResponseWriter) (*agentsecrets.Client, bool) {
 	if s.deps.AgentSecrets == nil {
 		writeError(w, "FEATURE_OFF", http.StatusNotFound, "agent-secrets is not configured on this Dispatch")
@@ -100,12 +102,12 @@ func (s *server) decisionFor(w http.ResponseWriter, r *http.Request, actor model
 
 // --- GET /api/v1/credential-requests, GET .../{id} ---
 
+// listCredentialPending answers the viewer's pending list, or null when this Dispatch has no broker.
+// Every page reads this list (the Needs-you badge counts it), and a deployment without a broker is
+// an ordinary one, so "no broker" is an answer here rather than the 404 FEATURE_OFF the other
+// credential routes give: a 404 made every page of such a deployment log a failed request.
 func (s *server) listCredentialPending(w http.ResponseWriter, r *http.Request) {
 	actor, ok := s.requireHuman(w, r)
-	if !ok {
-		return
-	}
-	client, ok := s.requireAgentSecrets(w)
 	if !ok {
 		return
 	}
@@ -113,7 +115,11 @@ func (s *server) listCredentialPending(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	body, err := client.Pending(r.Context(), login)
+	if s.deps.AgentSecrets == nil {
+		WriteJSON(w, http.StatusOK, nil)
+		return
+	}
+	body, err := s.deps.AgentSecrets.Pending(r.Context(), login)
 	relayBrokerResponse(w, body, err)
 }
 

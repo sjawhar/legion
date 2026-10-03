@@ -77,13 +77,20 @@ jobs:
         working-directory: docs/site
       - name: Take the screenshots
         run: bun run docs:media
+        # A step of the run that hangs fails it within two minutes (STEP_TIMEOUT_MS in
+        # docs/site/media/harness.ts); this bounds the rest, the build and the boot.
+        timeout-minutes: 15
         env:
           DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
+      # What each failed shot's page showed, and the harness's process logs: a hang leaves the
+      # Dispatch server's goroutines at the end of dispatch.log.
       - if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: docs-failed-shots-${{ github.run_attempt }}
-          path: docs/site/media/.work/failed-shots
+          path: |
+            docs/site/media/.work/failed-shots
+            docs/site/media/.work/harness
           if-no-files-found: ignore
       # Generates the reference pages, then builds the site; starlight-links-validator fails it on a
       # broken internal link.
