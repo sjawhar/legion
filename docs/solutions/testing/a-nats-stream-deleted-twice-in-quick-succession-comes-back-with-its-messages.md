@@ -56,12 +56,24 @@ No watcher carries anything between tests. Each registry's watcher applies only 
 and a finished test's watcher ended when its connection closed; the new test's own watcher faithfully
 mirrors a bucket the server had filled with the old stream's messages.
 
-`error creating store for stream`, which `internal/store` and `internal/cistore` saw while their
-tests shared one account, is another symptom of deleting and recreating a stream name on a shared
-server. It more likely comes from a single delete and create racing the background cleanup, where
-this one needs two deletes and a failed rename (an inference from the code, not reproduced).
+`error creating store for stream` is a second race in the same cleanup, and one delete is enough
+for it. After `fileStore.Delete` returns, `stream.stop` removes the account's `streams` directory
+and then the account's directory from another goroutine (`server/stream.go` 5286-5293 at v2.10.29,
+unchanged through v2.15.0). `os.Remove` only removes an empty directory, so the goroutine removes
+anything only when the deleted stream was the account's last and `.<stream>` is already gone. A
+create that arrives before it runs can lose `streams` between `os.MkdirAll` finding it and making
+`streams/<stream>` inside it. The server logs `Stream create failed for '<account> > <stream>':
+could not create storage directory - mkdir .../streams/<stream>: no such file or directory` and
+answers `error creating store for stream`. It hit `internal/store` on 2026-09-23, while its tests
+reset one shared account by deleting both of its buckets, and `internal/kvwatch`'s
+`TestAWatchOfTheOldStreamDoesNotReplaceANewerOne` on 2026-10-03, which deletes and recreates the
+only bucket on a server of its own. On a loaded devbox it did not reproduce at the server's own
+timing: no failure in 6,600 creates, nor in 556 runs of that test. A v2.10.29 built from the
+module cache with a random delay of up to 2 ms before that goroutine's `os.Remove`, and up to 1 ms
+inside the create's `os.MkdirAll`, failed 312 of 1,000 creates; with one more stream kept in the
+account it failed none of 1,000.
 
-## Reproducing it without load
+## Reproducing the double delete without load
 
 Plant the state the background removal leaves: a non-empty
 `<store>/jetstream/<account>/streams/.KV_<bucket>` directory. With it in place, create the bucket,
@@ -88,7 +100,13 @@ CI registries, the listener, `internal/bus`, `internal/kvwatch`, `internal/dispa
 `internal/integration`. A delete a test makes of its own stream is the first of that name in its
 account, so it renames as it should.
 
-One test still deletes a name twice, and the race cannot fail it:
+That keeps another test's deletes away, not a test's own. A test that deletes a bucket and creates
+it again in the same account meets the single-delete race whenever that bucket was the account's
+only stream, and no API says when the server's cleanup goroutine has run, so it creates the bucket
+again with `testnats.RecreateKeyValue`. That retries the create on exactly `error creating store
+for stream` and fails the test on any other answer.
+
+One test still deletes a name twice, and the double-delete race cannot fail it:
 `internal/kvwatch`'s `TestARewatchOntoABucketRestoredWithAnOlderStreamRefillsTheCache` deletes
 `kvwatch-test` twice on a server of its own and restores a stream snapshot right after the second
 delete. The restore removes any directory left at the stream's name before it moves the snapshot in
@@ -100,10 +118,14 @@ restore failed with the live bucket's key still in it (`live-key=true`).
 
 ## In production
 
-No Envoy code deletes a stream: a listener's rebuild opens a bucket and never creates one. An operator
-who deletes a bucket under running listeners reaches the race by deleting it twice in quick
-succession. #1620's deep review drove that against a single v2.10.29 server with the listener's own
-calls (a replicated bucket was not tried): about 20 s after the delete the session watcher stops,
+No Envoy or Legion daemon code deletes a stream: a listener's rebuild opens a bucket and never
+creates one, and the only creates are a start's `bus.EnsureKeyValue` of a bucket that is missing.
+The single-delete race cannot reach them either, since the deployed account always holds
+`ENVOY_NOTIFICATIONS` beside its buckets, so deleting one bucket never empties its `streams`
+directory. An operator who deletes a bucket under running listeners reaches the double-delete race
+by deleting it twice in quick succession. #1620's deep review drove that against a single v2.10.29
+server with the listener's own calls (a replicated bucket was not tried): about 20 s after the
+delete the session watcher stops,
 registrations fail and lookups answer from the last cache; the self-health check cannot reopen a
 missing bucket, so the listener restarts itself after three failed 30 s rebuilds
 (`cmd/listener/main.go` 890-911) and the restart creates the bucket again. With a pending removal in

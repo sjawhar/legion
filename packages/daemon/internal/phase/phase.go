@@ -20,6 +20,12 @@ const (
 	Held            Phase = "held"
 )
 
+// All is every phase, in the transition table's order.
+var All = []Phase{
+	Admitted, Planning, Implementing, Testing, Reviewing, Retro, Merging, AwaitingMerge,
+	ProductionCheck, Done, Held,
+}
+
 // HandoffFile is the handoff a phase ends with, .legion/<word>.json, and whether it ends with one
 // its role writes and commits: the planner's, the implementer's implementing rounds, the tester's,
 // and the reviewer's, each under the word its role's prompt passes to the legion tool's

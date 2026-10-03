@@ -14,13 +14,25 @@ interface Instant {
   second: number;
 }
 
-function instant(value: string): Instant {
+function parseInstant(value: string): Instant | undefined {
   const match = RFC3339.exec(value);
-  const second = match === null ? Number.NaN : Date.parse(`${match[1]}${match[3]}`);
-  if (match === null || Number.isNaN(second)) {
+  if (match === null) return undefined;
+  const second = Date.parse(`${match[1]}${match[3]}`);
+  return Number.isNaN(second) ? undefined : { fraction: match[2] ?? "", second };
+}
+
+function instant(value: string): Instant {
+  const parsed = parseInstant(value);
+  if (parsed === undefined) {
     throw new Error(`not an RFC 3339 timestamp: ${JSON.stringify(value)}`);
   }
-  return { fraction: match[2] ?? "", second };
+  return parsed;
+}
+
+/** Whether `compareTimestamps` accepts `value`. A caller ordering times it did not write, such as
+ *  the broker's `requested_at` relayed verbatim, asks first and leaves a refused value out. */
+export function isTimestamp(value: string): boolean {
+  return parseInstant(value) !== undefined;
 }
 
 /**

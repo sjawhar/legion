@@ -26,8 +26,12 @@ python3 build.py           # builds build/walkthrough.mp4 and checks it, writes 
 `build.py` refuses footage whose length is off its section's wall clock (a browser recording
 shorter than its actions or longer than its page's life, by more than 5%; a cast more than 1.5 s
 shorter than its section, or longer), a clip or part naming a mark its section did not record, a
-window outside its file, a narration part that starts before its clip, overlaps the next or runs
-past its clip's end, and a part whose text in `narration.json` is missing or blank.
+window outside its file, a cast's clip that ends within 0.2 s of the cast's last event, a narration
+part that starts before its clip, overlaps the next or runs past its clip's end, and a part whose
+text in `narration.json` is missing or blank. A cast's last event is the detached client's
+farewell, which clears the screen to `[detached (from session agent)]`, and agg's frames can show
+it on a clip's last frame or two, so `build.py` places a cast's `end` mark 0.2 s before it
+(`FAREWELL_GUARD`): a clip that plays to the end of a cast ends at `At("end")`.
 Nothing is stretched or held: a clip is its window of the file, at its own speed, and the audio is
 padded with silence, never the video with frames. It prints the cut it resolved (each clip's
 window in its file and where each part falls in the video). It writes the video into `build/`,
@@ -87,104 +91,111 @@ no mark names gets a new `mark(...)` in the recorder and a new take.
 
 ## Review
 
-This take was recorded on 2026-10-03, and both independent video reviews passed it the same day,
-on the file shipped then (79.36 s, sha256 `d380e0b466f2692c4f13f684be7124b97440af5ab5a861efaa4bf4aeda8be04d`):
+This take was recorded on 2026-10-03 against `main` at the merge of LEGION-500 (#1717), after
+which the Inbox lists and counts a pending credential request: from the `approve` clip's first
+frame the Inbox shows Secret request DEMO_API_KEY under Credential requests, **Needs you 1** beside
+Inbox in the sidebar and `Blocked on you: 1 item, oldest 0m`, and no `Nothing needs you`. The take
+before it, recorded before #1717, showed `Nothing needs you` under the pending request and no
+count. Every section was recorded again in this one take, rather than the Inbox's section alone:
+the sections show each other's ids (the terminal prints the request id and the record's address,
+Dispatch shows the session's enrollment, the status names the grant), and footage from two takes
+would show ids that disagree across a cut.
 
-- **Strategic review: PASS** (2026-10-03). Nothing to cut, and nothing narrated that is not on
-  screen. `approve` opening on its `inbox` mark shows the loaded Inbox, with the request in it, from
-  its first frame, and the jump at the status command's request id reads as typing.
-- **Frame-reading review: PASS** (2026-10-03). Every cut is clean, and the status join falls at the
-  word boundary, at frames 1944-1947 as the author's frame-by-frame read below gives them. Its sweep
-  transcribed 41 frames (every 2 s from 0.5 s, and 79.3 s) and four around each cut, and found no
-  error text, no host but `example-host-build` and `127.0.0.1:28570`, no person but `alice`, and
-  never the secret's value (only its length and last four characters). It found no silence of 2 s
-  or more over a frozen frame: the longest silent still is about 1.4 s (58.15-59.57 s, across the
-  `approve` to `ran` cut). That file's audio peaked at -2.06 dBFS, at -18.3 LUFS integrated.
+Both independent video reviews, strategic and frame-reading, passed the take before this one
+(2026-10-03, 79.36 s, sha256 `d380e0b466f2692c4f13f684be7124b97440af5ab5a861efaa4bf4aeda8be04d`).
+This take's read below is the author's.
 
-The take before this one passed both reviews but for one cut, where the jump over the status
-command's request id began mid-word (`agent-secrets s`, then the whole command). This take's
-recorder marks `status-word` between typing `agent-secrets status ` and typing the id, and
-`ran-status` ends at that mark.
-
-The shipped `walkthrough.mp4` is that reviewed file with its narration normalized: its video stream
-is the reviewed file's packet for packet (each file's
-`ffmpeg -i <file> -map 0:v -c copy -f framemd5 -` is the same), and its audio is the same mix at
+The shipped `walkthrough.mp4` is 79.03 s, 1280x720 at 30 fps, with AAC stereo: 4,368,976 bytes,
+sha256 `fc5ceb7fbb42ed5367df2bc82043359bda30c76a76f9447cb76c42f3ea8d1ffa`. Its narration is at
 -16.0 LUFS integrated with a true peak of -1.9 dBTP (ffmpeg's `ebur128`; loudnorm measures
--16.06 LUFS and -1.90 dBTP). It is 79.36 s, 1280x720 at 30 fps, with AAC stereo: 4,231,516 bytes,
-sha256 `7e5528b3fc81d5477ad947c542c461e5b64b3c1b35c95215f3624b96a9a22d75`. The cut as `build.py`
-resolves it reads
-`10 clips, 79.2s, all narration and its 16 captions inside their clips`, and `build.py` found no
-silence of 2 s or more over a frozen frame in it. Each clip's window in its file, and where each
-narration part falls in the video:
+-16.03 LUFS and -1.93 dBTP). The cut as `build.py` resolves it reads
+`10 clips, 78.8s, all narration and its 16 captions inside their clips`, and `build.py` found no
+silence of 2 s or more over a frozen frame in it; the longest silent still is 1.34 s (62.28-63.62
+s, across the `ran` to `ran-status` join). Each clip's window in its file, and where each narration
+part falls in the video:
 
 ```
   0.0s open: t4-ran.cast 20.71-25.01s (4.30s); open at 0.1s
-  4.3s login: t1-login.cast 0.20-6.03s (5.83s); login at 4.5s
- 10.1s machine: b1-machine.webm 0.66-11.22s (10.57s); machine-code at 10.9s, machine-approve at 15.4s
- 20.7s session: t2-session.cast 0.98-16.00s (15.02s); session-issued at 20.8s, session-register at 24.9s, session-self at 29.5s
- 35.7s request: t3-request.cast 0.91-12.15s (11.24s); request-ask at 35.9s, request-wait at 44.0s
- 47.0s approve: b2-approve.webm 0.39-12.59s (12.20s); approve-inbox at 47.0s, approve-record at 50.7s, approve-click at 57.2s
- 59.2s ran: t4-ran.cast 19.16-23.36s (4.20s); ran-runs at 59.4s
- 63.4s ran-status: t4-ran.cast 24.96-26.50s (1.54s)
- 64.9s ran-result: t4-ran.cast 28.64-32.63s (3.99s); ran-status at 65.6s
- 68.9s grants: b3-grants.webm 2.04-12.34s (10.30s); grants-list at 70.9s, grants-revoke at 76.1s
+  4.3s login: t1-login.cast 0.20-5.94s (5.74s); login at 4.4s
+ 10.0s machine: b1-machine.webm 0.63-11.22s (10.60s); machine-code at 10.8s, machine-approve at 15.4s
+ 20.6s session: t2-session.cast 0.98-16.20s (15.22s); session-issued at 20.7s, session-register at 24.9s, session-self at 29.4s
+ 35.9s request: t3-request.cast 0.88-11.61s (10.74s); request-ask at 36.1s, request-wait at 43.8s
+ 46.6s approve: b2-approve.webm 0.30-12.42s (12.12s); approve-inbox at 46.6s, approve-record at 50.2s, approve-click at 56.8s
+ 58.7s ran: t4-ran.cast 19.16-23.36s (4.20s); ran-runs at 58.9s
+ 62.9s ran-status: t4-ran.cast 24.96-26.48s (1.52s)
+ 64.4s ran-result: t4-ran.cast 28.40-32.38s (3.98s); ran-status at 65.1s
+ 68.4s grants: b3-grants.webm 2.34-12.73s (10.40s); grants-list at 70.5s, grants-revoke at 75.6s
 ```
 
-Every offset in `edl.py` is the last take's but two. `ran-status` ends at `status-word` - 0.04 s:
-in the cast the space after `status` is at 26.474 s, the mark at 26.540 s and the id's first
-character at 26.542 s, since the mark is set just before that character is sent. `approve` opens on
-its `inbox` mark rather than 0.3 s before it: Dispatch loaded faster in this take (the request was
-in the Inbox 0.39 s into the recording, 1.84 s in the last take), and 0.3 s earlier showed four
-frames of the page's loading placeholder and one of the Inbox before the request arrived.
+Every offset in `edl.py` is the last take's. `login` and `request` play to the end of their casts,
+at `end`, which `build.py` places 0.2 s before the detached client's farewell: in this take, cut at
+the farewell itself, agg's frames showed its cleared screen on the last frame of `login` and the
+last two of `request`, where the take before it had ended on the waiting cursor. The narration and
+its MP3s are unchanged: every part still fits its clip and says only what the new footage shows.
 
 Capture rates, as `build.py` prints them (file length against the section's wall clock), and how
 closely each browser section's last frames match its result (`sections.json`):
 
 | Footage | Length | Wall clock | Ratio | Result similarity (end, before end) |
 | --- | --- | --- | --- | --- |
-| `t1-login.cast` | 6.03 s | 6.49 s | x0.930 | |
-| `b1-machine.webm` | 15.88 s | actions 15.27 s, page life 16.78 s | x1.040, x0.946 | 0.985, 0.983 |
-| `t2-session.cast` | 18.10 s | 18.41 s | x0.983 | |
-| `t3-request.cast` | 12.15 s | 12.57 s | x0.966 | |
-| `b2-approve.webm` | 17.44 s | actions 16.91 s, page life 17.96 s | x1.032, x0.971 | 0.992, 0.987 |
-| `t4-ran.cast` | 32.93 s | 33.26 s | x0.990 | |
-| `b3-grants.webm` | 17.08 s | actions 16.55 s, page life 17.97 s | x1.032, x0.951 | 0.996, 0.996 |
+| `t1-login.cast` | 6.14 s | 6.49 s | x0.946 | |
+| `b1-machine.webm` | 15.80 s | actions 15.45 s, page life 16.52 s | x1.023, x0.956 | 0.985, 0.982 |
+| `t2-session.cast` | 18.31 s | 18.60 s | x0.984 | |
+| `t3-request.cast` | 11.81 s | 12.11 s | x0.975 | |
+| `b2-approve.webm` | 17.32 s | actions 16.87 s, page life 17.87 s | x1.026, x0.969 | 0.992, 0.987 |
+| `t4-ran.cast` | 32.69 s | 33.01 s | x0.990 | |
+| `b3-grants.webm` | 18.12 s | actions 16.91 s, page life 19.18 s | x1.072, x0.945 | 0.996, 0.997 |
 
 No frame is held or stretched: each clip is its window of the file at the file's own speed. The
 casts hold none of `error`, `fail`, `denied`, `refus`, `warn`, `panic`, `traceback`, `exception`,
-`not found` or `invalid`.
+`not found` or `invalid`, and no address but `127.0.0.1:26709`, the rig's Dispatch.
 
-Read by the author at native size: the two frames either side of each of the nine cuts, the last
-frame, and the status join frame by frame. At the join, frame 1944 (64.96 s) reads
-`agent-secrets status`, frames 1945 and 1946 read `agent-secrets status ` with the cursor after the
-space, and frame 1947 (65.06 s), the first of `ran-result`, reads
-`agent-secrets status 0784fb68-0003-440c-a4e6-2745967d8` with the id's last three characters still
-to type. The `ran` to `ran-status` join shows the same picture on both sides (frames 1899 and 1900
-differ by encoder noise alone, at most 11 of 255 luma levels).
+Read by the author at native size: 40 frames every 2 s from 0.5 s, the last frame, the frames
+either side of each of the nine cuts, and the `approve` clip's first frames, its request page and
+the frames after the click. No frame shows an error, a host but `example-host-build` and
+`127.0.0.1:26709`, a person but `alice`, or the secret's value (only its length and last four
+characters). The `approve` clip opens on the loaded Inbox, its controls fading in over its first
+four frames (46.72-46.82 s); after the click the sidebar's count is gone. At the status join, frame
+1930 (64.49 s) reads
+`agent-secrets status` with the cursor after it, frame 1931 `agent-secrets status ` with the cursor
+after the space, and frame 1932 (64.59 s), the first of `ran-result`, reads
+`agent-secrets status 698db854-416e-486c-b041-a1182898` with `fd34` still to type: in the cast the
+space is at 26.447 s, the `status-word` mark at 26.522 s and the id's first character at
+26.524 s.
+
+The ids agree wherever more than one section shows them:
+
+| Id | Where |
+| --- | --- |
+| Machine login code `EYJG-P9SW` | `login` prints it; `machine` types it |
+| Request `698db854-416e-486c-b041-a1182898fd34` | `request` prints it waiting; `ran-result` types it into `agent-secrets status` |
+| Record `00d1166a18f6…201375dc3` | the address `request` prints; `grants` opens that record (`/credentials/<record>`) |
+| Enrollment `0b783c81-74db-4288-80cf-2ac057fce10a` | `session`'s `agent-secrets self`; the helper's log enrolls it as `example-host-build:1185970:340037382` |
+| Session `host · example-host-build:1185970:340037382 · alice` | the request page in `approve`, the approved record and the Live grants row in `grants` |
+| Grant `94ae2da5-2ffb-4ec5-b317-14ca21f7b57f` | `ran-result`'s status; `grants` lists one live grant, on that session |
+| `DEMO_API_KEY reached this command: 31 characters, ending in 7f3a` | `open` and `ran`; the rig's made-up value is 31 characters and ends in `7f3a` |
 
 Script to screen, line by line (narration as `build.py` places it, the screen by the shipped file's
 frames):
 
 | At | Narration | On screen |
 | --- | --- | --- |
-| 0.1 s | This command just got a key that a person approved. | The request command, its two waiting lines and `DEMO_API_KEY reached this command: 31 characters, ending in 7f3a`, one still to 4.3 s. The key arrives live at 60.69 s. |
-| 4.5 s | First, the machine logs in, and prints a code to enter in Dispatch. | `agent-secrets launcher login` typed from 5.4 s; `machine login code: U5PD-Z4Y3` and `enter it at http://127.0.0.1:28570/credentials/machine` by 7.6 s. |
-| 10.9 s | There, alice types it into the machine login page. | Enter machine login code from 10.16 s; the code typed from 12.1 s; the sidebar reads Signed in as alice. |
-| 15.4 s | It names example-host-build. She approves it. | The record by 14.8 s: Identifiers example-host-build, Approver alice. Approve clicked and `Approved. example-host-build can start agent sessions as you.` by 19.25 s. |
-| 20.8 s | Back on the machine, the login is issued. | `agent-secrets launcher login-status` typed from 21.1 s; `issued` by 23.6 s. |
+| 0.1 s | This command just got a key that a person approved. | The request command, its two waiting lines and `DEMO_API_KEY reached this command: 31 characters, ending in 7f3a`, one still to 4.3 s. The key arrives live at 60.26 s. |
+| 4.5 s | First, the machine logs in, and prints a code to enter in Dispatch. | `agent-secrets launcher login` typed from 5.5 s; `machine login code: EYJG-P9SW` and `enter it at http://127.0.0.1:26709/credentials/machine` by 7.8 s. |
+| 10.8 s | There, alice types it into the machine login page. | Enter machine login code from 10.09 s, with Needs you 1 beside Inbox; the code typed from 12.0 s; the sidebar reads Signed in as alice. |
+| 15.4 s | It names example-host-build. She approves it. | The record by 14.8 s: Identifiers example-host-build, Approver alice. Approve clicked and `Approved. example-host-build can start agent sessions as you.` by 19.3 s. |
+| 20.8 s | Back on the machine, the login is issued. | `agent-secrets launcher login-status` typed from 21.0 s; `issued` by 23.6 s, then the note that the launcher credential expires in 7 days and a new machine login must replace it. |
 | 24.9 s | Next, it registers a session for an agent. | `agent-secrets register --wait 10 --exec -- bash` typed from 25.1 s. |
-| 29.5 s | The broker calls this session an enrollment; its operator is alice. | `agent-secrets self` typed from 29.9 s; `enrollment_id: …`, `kind: host` and `operator: alice` by 31.35 s. |
-| 35.9 s | Now the session asks for the demo API key to run one command, and says why. | The request typed from 36.2 s with `--reason "Publish the docs preview for PR 42 with the demo API" -- ./check-demo-key.sh`. |
-| 44.0 s | Now it waits for a person. | `request 0784fb68-… is waiting for approval; waiting up to 30m0s` and the page to approve it at, by 44.0 s. |
-| 47.0 s | The request is in alice's Inbox. | Inbox, Credential requests: Secret request DEMO_API_KEY just now, from the clip's first frame (47.06 s). |
-| 50.7 s | Its page shows the enrollment, the lifetime, and the agent's reason. | The request page by 50.9 s: Enrollment `host · example-host-build:… · alice`, Lifetime 1 hour, The agent's stated reason. |
-| 57.2 s | She approves it. | Approve clicked; `Approved just now` by 57.85 s, with the pointer just below it by 58.0 s. |
-| 59.4 s | The waiting command gets the key, and runs. | The waiting cursor from 59.26 s; `DEMO_API_KEY reached this command: 31 characters, ending in 7f3a` at 60.69 s, about 2.8 s after the click. |
-| 65.6 s | Its status says alice decided it. | `agent-secrets status ` typed from 63.7 s, then the request id jumped at 65.06 s; `state: granted` and `decided_by: alice` by 65.8 s. |
-| 70.9 s | Settings lists the live grant, with alice as its approver. | Settings clicked at 69.8 s, scrolled to Live grants by 71.2 s: the example-host-build enrollment, DEMO_API_KEY, Approver alice. |
-| 76.1 s | Each live grant has a Revoke button. | The pointer on Revoke from 74.9 s to 77.9 s. |
+| 29.5 s | The broker calls this session an enrollment; its operator is alice. | `agent-secrets self` typed from 29.8 s; `enrollment_id: …`, `kind: host` and `operator: alice` by 31.5 s. |
+| 36.1 s | Now the session asks for the demo API key to run one command, and says why. | The request typed from 36.3 s with `--reason "Publish the docs preview for PR 42 with the demo API" -- ./check-demo-key.sh`. |
+| 43.9 s | Now it waits for a person. | `request 698db854-… is waiting for approval; waiting up to 30m0s` and the page to approve it at, by 43.9 s. |
+| 46.7 s | The request is in alice's Inbox. | Inbox, Credential requests: Secret request DEMO_API_KEY just now, Needs you 1 and `Blocked on you: 1 item, oldest 0m`, from the clip's first frame (46.72 s). |
+| 50.3 s | Its page shows the enrollment, the lifetime, and the agent's reason. | The request page by 50.5 s: Enrollment `host · example-host-build:… · alice`, Lifetime 1 hour, The agent's stated reason. |
+| 56.8 s | She approves it. | Approve clicked at 57.45 s; `Approved just now` by 57.5 s, the sidebar's count gone, with the pointer just below it by 57.8 s. |
+| 59.0 s | The waiting command gets the key, and runs. | The waiting cursor from 58.82 s; `DEMO_API_KEY reached this command: 31 characters, ending in 7f3a` at 60.26 s, about 2.8 s after the click. |
+| 65.2 s | Its status says alice decided it. | `agent-secrets status ` typed from 63.2 s, then the request id jumped at 64.59 s; `state: granted` and `decided_by: alice` by 65.3 s. |
+| 70.6 s | Settings lists the live grant, with alice as its approver. | Settings clicked at 69.4 s, scrolled to Live grants by 70.6 s: the example-host-build enrollment, DEMO_API_KEY, Approver alice. |
+| 75.7 s | Each live grant has a Revoke button. | The pointer on Revoke from about 74.4 s to 77.5 s. |
 
-Outside the video: the Inbox shows "Nothing needs you" directly under the pending credential
-request, since that line speaks for asks and the Inbox renders credential requests in a section of
-their own above it; and the cut shows about 2.8 s from the click to the key, where the agent's poll
-took 8.1 s (the cast's `approve` and `key` marks), which the walkthrough page says.
+Outside the video: the cut shows about 2.8 s from the click to the key, where the agent's poll took
+8.3 s (the cast's `approve` and `key` marks), which the walkthrough page says.
