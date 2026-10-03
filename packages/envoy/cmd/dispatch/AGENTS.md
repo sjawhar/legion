@@ -221,12 +221,18 @@ to the SPA shell. Every page the static handler serves (`index.html` and that fa
 server holds, and gets this server's page in place of any other, since the servers behind one load
 balancer can hold different builds whose pages' file times say nothing about which is newer (a
 rollback serves the older file). A file under `/assets`, Vite's content-hashed output, carries
-`public, max-age=31536000, immutable`. With `DISPATCH_ASSET_STORE_BUCKET` set, a local miss under
-`/assets/` fetches the same key from the bucket through the AWS SDK default credential chain,
-bounded to three seconds and 8 MiB; it never reads a page or another path from the bucket. An
-absent object stays a 404 without caching, while a store failure or invalid object is a 502 without
-caching. Unset, the setting leaves every local asset miss a 404. Any other file (the favicon)
-carries no cache header.
+`public, max-age=31536000, immutable`. With `DISPATCH_ASSET_STORE_BUCKET` set, a local miss below an
+asset root (`isRetainedAssetPath`) asks the bucket for the same key through the AWS SDK default
+credential chain (`routes/assets.go`). `AssetStore.GetAsset` returns the whole object as bytes, read
+within three seconds and refused over 8 MiB or when its body is not the length S3 declared; only
+then does `serveRetainedAsset` set the immutable header and write it through `http.ServeContent`,
+so a slow, failed or short read is a 502 with no cache header, and the browser's download is not
+held to the three seconds. A `NoSuchKey` is a 404 without caching. S3 answers one only to a role
+that also holds `s3:ListBucket` on the bucket and otherwise answers 403, a 502 like any store
+failure. Every 502 logs `dispatch: retained asset store failed` at ERROR with the key and the
+error, and the SDK's own log lines go through slog, its debug lines below the default level. It
+never reads a page or another path from the bucket. Unset, the setting leaves every local asset
+miss a 404. Any other file (the favicon) carries no cache header.
 
 Every `/api/v1` route accepts an authenticated user or an agent bearer unless
 the table says human only.

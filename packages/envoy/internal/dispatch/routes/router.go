@@ -16,14 +16,13 @@ import (
 	"errors"
 	"fmt"
 	"html"
-	"io"
 	"io/fs"
 	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
-	"strconv"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -500,45 +499,32 @@ func (r *router) staticHandler(w http.ResponseWriter, req *http.Request) {
 	servePage(w, req, filepath.Join(r.ctx.WebDistDir, "index.html"))
 }
 
+// isRetainedAssetPath reports whether normalized names a file below an asset root: the only paths
+// the retained-asset store is asked for, never a page or an asset root itself.
 func isRetainedAssetPath(normalized string) bool {
-	return strings.HasPrefix(normalized, "/assets/")
+	return isReservedPath(normalized, assetRoots) && !slices.Contains(assetRoots, normalized)
 }
 
+// serveRetainedAsset answers a local asset miss from the retained-asset store. The whole object is
+// read under retainedAssetFetchTimeout before anything is written, so a slow, failed or short read
+// is an uncached 502 and never a 200 carrying the immutable header; the browser's download of the
+// bytes read is not bounded by that timeout.
 func (r *router) serveRetainedAsset(w http.ResponseWriter, req *http.Request, key string) {
-	if req.Method != http.MethodGet && req.Method != http.MethodHead {
-		w.Header().Set("Allow", "GET, HEAD")
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		return
-	}
 	ctx, cancel := context.WithTimeout(req.Context(), retainedAssetFetchTimeout)
-	defer cancel()
 	asset, err := r.ctx.AssetStore.GetAsset(ctx, key)
-	switch {
-	case errors.Is(err, ErrAssetNotFound):
+	cancel()
+	if errors.Is(err, ErrAssetNotFound) {
 		writeError(w, http.StatusNotFound, "not found")
 		return
-	case err != nil:
+	}
+	if err != nil {
+		slog.Error("dispatch: retained asset store failed", "key", key, "error", err)
 		writeError(w, http.StatusBadGateway, "retained asset store unavailable")
 		return
-	case asset.Body == nil || asset.ContentLength < 0 || asset.ContentLength > maxRetainedAssetSize:
-		if asset.Body != nil {
-			_ = asset.Body.Close()
-		}
-		writeError(w, http.StatusBadGateway, "retained asset store returned an invalid object")
-		return
 	}
-	defer asset.Body.Close()
-
 	w.Header().Set("Cache-Control", assetCacheControl)
-	w.Header().Set("Content-Length", strconv.FormatInt(asset.ContentLength, 10))
 	w.Header().Set("Content-Type", contentType(key))
-	if req.Method == http.MethodHead {
-		w.WriteHeader(http.StatusOK)
-		return
-	}
-	if _, err := io.Copy(w, asset.Body); err != nil {
-		slog.Error("dispatch: serve retained asset", "key", key, "error", err)
-	}
+	http.ServeContent(w, req, key, time.Time{}, bytes.NewReader(asset))
 }
 
 // isBrowserRoute reports whether an unmatched, non-static path should fall

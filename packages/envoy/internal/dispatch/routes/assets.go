@@ -5,32 +5,34 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
-	"github.com/aws/smithy-go"
+	"github.com/aws/smithy-go/logging"
 )
 
 const (
-	maxRetainedAssetSize      int64 = 8 << 20
-	retainedAssetFetchTimeout       = 3 * time.Second
+	// maxRetainedAssetSize bounds what one request may read from the store, and so the memory one
+	// retained miss holds while it is answered.
+	maxRetainedAssetSize int64 = 8 << 20
+	// retainedAssetFetchTimeout bounds the whole read of a retained asset from the store, object
+	// body included. The browser's download of the bytes read is not bounded by it.
+	retainedAssetFetchTimeout = 3 * time.Second
 )
 
 // ErrAssetNotFound distinguishes an absent retained asset from a store failure.
 var ErrAssetNotFound = errors.New("retained asset not found")
 
-// RetainedAsset is an immutable asset fetched from a prior dashboard build.
-type RetainedAsset struct {
-	Body          io.ReadCloser
-	ContentLength int64
-}
-
-// AssetStore provides retained assets after the current dashboard build misses locally.
+// AssetStore holds the hashed assets of earlier dashboard builds, which the static handler serves
+// when the current build does not hold the file a browser asks for.
 type AssetStore interface {
-	GetAsset(ctx context.Context, key string) (RetainedAsset, error)
+	// GetAsset returns the whole object stored under key, at most maxRetainedAssetSize bytes, or
+	// ErrAssetNotFound when there is none. Any other error is a store failure.
+	GetAsset(ctx context.Context, key string) ([]byte, error)
 }
 
 type s3API interface {
@@ -42,37 +44,58 @@ type s3AssetStore struct {
 	bucket string
 }
 
-// NewS3AssetStore uses the AWS SDK's default credential chain to read retained assets.
+// NewS3AssetStore reads retained assets from bucket with the AWS SDK's default credential chain.
+// Loading it reads only the environment and shared config files; credentials are fetched on the
+// first request.
 func NewS3AssetStore(ctx context.Context, bucket string) (AssetStore, error) {
-	cfg, err := awsconfig.LoadDefaultConfig(ctx)
+	cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithLogger(logging.LoggerFunc(logSDK)))
 	if err != nil {
 		return nil, fmt.Errorf("load AWS configuration for retained assets: %w", err)
 	}
 	return &s3AssetStore{client: s3.NewFromConfig(cfg), bucket: bucket}, nil
 }
 
-func (s *s3AssetStore) GetAsset(ctx context.Context, key string) (RetainedAsset, error) {
+// logSDK hands the AWS SDK's log lines to slog, so they are structured like Dispatch's own and its
+// debug lines (an object stored without a checksum) stay below slog's default level.
+func logSDK(classification logging.Classification, format string, v ...any) {
+	level := slog.LevelDebug
+	if classification == logging.Warn {
+		level = slog.LevelWarn
+	}
+	slog.Log(context.Background(), level, "dispatch: aws sdk", "message", fmt.Sprintf(format, v...))
+}
+
+func (s *s3AssetStore) GetAsset(ctx context.Context, key string) ([]byte, error) {
 	object, err := s.client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(s.bucket),
 		Key:    aws.String(key),
 	})
 	if err != nil {
+		// S3 answers a missing key with NoSuchKey only to a caller that may also list the bucket;
+		// without s3:ListBucket it is AccessDenied, a store failure.
 		var missing *types.NoSuchKey
 		if errors.As(err, &missing) {
-			return RetainedAsset{}, ErrAssetNotFound
+			return nil, ErrAssetNotFound
 		}
-		var apiErr smithy.APIError
-		if errors.As(err, &apiErr) && (apiErr.ErrorCode() == "NoSuchKey" || apiErr.ErrorCode() == "NotFound") {
-			return RetainedAsset{}, ErrAssetNotFound
-		}
-		return RetainedAsset{}, fmt.Errorf("get retained asset %q: %w", key, err)
+		return nil, fmt.Errorf("get retained asset %q: %w", key, err)
 	}
 	if object.Body == nil {
-		return RetainedAsset{}, fmt.Errorf("get retained asset %q: empty response body", key)
+		return nil, fmt.Errorf("get retained asset %q: no body", key)
 	}
-	if object.ContentLength == nil || *object.ContentLength < 0 {
-		_ = object.Body.Close()
-		return RetainedAsset{}, fmt.Errorf("get retained asset %q: missing content length", key)
+	defer object.Body.Close()
+	if object.ContentLength == nil {
+		return nil, fmt.Errorf("get retained asset %q: no content length", key)
 	}
-	return RetainedAsset{Body: object.Body, ContentLength: *object.ContentLength}, nil
+	size := *object.ContentLength
+	if size < 0 || size > maxRetainedAssetSize {
+		return nil, fmt.Errorf("get retained asset %q: %d bytes, limit %d", key, size, maxRetainedAssetSize)
+	}
+	data, err := io.ReadAll(io.LimitReader(object.Body, size+1))
+	if err != nil {
+		return nil, fmt.Errorf("read retained asset %q: %w", key, err)
+	}
+	if int64(len(data)) != size {
+		return nil, fmt.Errorf("read retained asset %q: body is not the %d bytes declared", key, size)
+	}
+	return data, nil
 }
