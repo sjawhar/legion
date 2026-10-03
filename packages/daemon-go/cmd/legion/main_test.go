@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"maps"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -320,14 +319,14 @@ func usageOf(help string, words ...string) bool {
 // reads each subcommand from; and each subcommand answers --help with its own usage.
 func TestDispatchersAnswerHelpWithTheirSubcommands(t *testing.T) {
 	for _, tc := range []struct {
-		command     string
-		subcommands []string
+		command string
+		table   map[string]command
 	}{
-		{"claims", slices.Collect(maps.Keys(claimsCommands))},
-		{"handoff", slices.Collect(maps.Keys(handoffCommands))},
-		{"workspace-init", slices.Collect(maps.Keys(workspaceInitCommands))},
-		{"controller", []string{"start"}},
-		{"threads", []string{"resolve"}},
+		{"claims", claimsCommands},
+		{"handoff", handoffCommands},
+		{"workspace-init", workspaceInitCommands},
+		{"controller", controllerCommands},
+		{"threads", threadsCommands},
 	} {
 		var out, errb bytes.Buffer
 		code := run(context.Background(), []string{"legion", tc.command, "--help"}, &out, &errb)
@@ -338,7 +337,7 @@ func TestDispatchersAnswerHelpWithTheirSubcommands(t *testing.T) {
 			continue
 		}
 		named := strings.Split(strings.Fields(strings.TrimPrefix(line, prefix))[0], "|")
-		for _, sub := range tc.subcommands {
+		for sub := range tc.table {
 			if !slices.Contains(named, sub) {
 				t.Errorf("legion %s --help names %v, not %s: %q", tc.command, named, sub, line)
 			}

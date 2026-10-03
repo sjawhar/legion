@@ -28,8 +28,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/runtime/workerbin"
 )
 
-const controllerUsage = "usage: legion controller start --config <controller.yaml> [--daemon-url <url>]"
-
 // controllerSecretVariable names the controller capability's secret: its file is written under it,
 // and the session finds that file through the variable with "_FILE" appended, as every pane finds
 // a secret file.
@@ -41,19 +39,21 @@ const controllerSecretVariable = "LEGION_CONTROLLER_SECRET"
 // plugin alone would leave the session idle until a wake.
 const controllerStartMessage = "Legion controller start: follow skill://legion-controller's start procedure now (\"What happened before you started\"), then end the turn."
 
+// controllerCommands is `legion controller`'s subcommands, the one list of them `legion controller
+// --help` names.
+var controllerCommands = map[string]command{
+	"start": runControllerStart,
+}
+
 func runController(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	if len(args) > 0 && helpRequested(args[0]) {
-		fmt.Fprintln(stderr, controllerUsage)
-		return 0
-	}
-	if len(args) == 0 || args[0] != "start" {
-		fmt.Fprintln(stderr, controllerUsage)
-		return 2
-	}
-	flags := newFlags("controller start", controllerUsage, stderr)
+	return runSubcommand(ctx, "controller", controllerCommands, args, stdout, stderr)
+}
+
+func runControllerStart(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	flags := newFlags("controller start", "usage: legion controller start --config <controller.yaml> [--daemon-url <url>]", stderr)
 	configPath := flags.String("config", "", "path to the operator-side controller.yaml (required)")
 	daemonURL := flags.String("daemon-url", "", "the daemon's API address, overriding the file's daemon_url")
-	if code, ok := parseFlags(flags, args[1:]); !ok {
+	if code, ok := parseFlags(flags, args); !ok {
 		return code
 	}
 	if *configPath == "" || flags.NArg() > 0 {

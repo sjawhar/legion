@@ -10,6 +10,8 @@
 #
 # A deploy/kubernetes holding no example fails the build rather than writing an empty page.
 set -euo pipefail
+# shellcheck source=SCRIPTDIR/lib/fence.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/fence.sh"
 
 me=${0##*/}
 fail() {
@@ -30,15 +32,6 @@ source_dir=deploy/kubernetes
 tracked=$(git ls-files -- "$source_dir/*.example" "$source_dir/*.yml" "$source_dir/*.yaml")
 [ -n "$tracked" ] || fail "$source_dir holds no tracked example file"
 mapfile -t files <<<"$tracked"
-
-# fence prints the code fence for the text on stdin: one backtick more than its longest run of
-# backticks, and at least three, so no line of the text can close the block early.
-fence() {
-  local longest
-  longest=$(awk '{ while (match($0, /`+/)) { if (RLENGTH > n) n = RLENGTH; $0 = substr($0, RSTART + RLENGTH) } } END { print n + 0 }')
-  [ "$longest" -ge 3 ] || longest=2
-  printf '%*s' $((longest + 1)) '' | tr ' ' '`'
-}
 
 out=$content/legion/reference
 mkdir -p "$out"

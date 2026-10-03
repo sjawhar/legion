@@ -91,8 +91,9 @@ The daemon reads one file, `legion.yaml`. Relative paths in it resolve against t
 directory. The repository's `deploy/kubernetes/daemon/legion.yaml.example`, rendered in the
 [configuration reference](/legion/legion/reference/config/), is a complete file for a Kubernetes
 deployment: copy it and replace every value. Each one is a placeholder (documentation addresses,
-made-up App ids, an all-zero image digest) that passes the
-[configuration check](#check-and-start-the-daemon) and reaches nothing.
+made-up App ids, an all-zero image digest) that reaches nothing. As written, the file passes the
+[configuration check](#check-and-start-the-daemon) once the three token files and the kubeconfig it
+names exist and `LEGION_POSTGRES_DSN` (or `postgres_dsn`) names a Postgres.
 
 What each part is for:
 

@@ -10,12 +10,14 @@
 #
 # Every help is run with a scrubbed environment (no LEGION_* variable, a scratch HOME, stdin from
 # /dev/null), so no command can find a grant, a daemon or a workspace to act on. A help that exits
-# with anything but 0 or does not begin with a usage line (`usage: legion …`, or the flag
-# package's `Usage of legion …`), or a `legion` whose --help lists no commands, fails the build:
-# no page is published from a binary it cannot read, and none shows a panic or an error.
+# with anything but 0 or does not begin with the CLI's usage line (`usage: legion …`), or a `legion`
+# whose --help lists no commands, fails the build: no page is published from a binary it cannot
+# read, and none shows a panic or an error.
 set -euo pipefail
 # bash 5.2 reads `&` in a ${var//pattern/replacement} as the match; escape() needs it literal.
 shopt -u patsub_replacement 2>/dev/null || true
+# shellcheck source=SCRIPTDIR/lib/fence.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/fence.sh"
 
 me=${0##*/}
 fail() {
@@ -42,7 +44,7 @@ help() {
   [ "$code" = 0 ] || fail "legion $* exited $code: $output"
   if [ "${*: -1}" = --help ]; then
     case $output in
-    "usage: legion "* | "Usage of legion "*) ;;
+    "usage: legion "*) ;;
     *) fail "legion $* printed no usage: $output" ;;
     esac
   fi
@@ -57,15 +59,6 @@ escape() {
   text=${text//>/&gt;}
   text=${text//|/\\|}
   printf '%s' "$text"
-}
-
-# fence prints the code fence for the text on stdin: one backtick more than its longest run of
-# backticks, and at least three, so no line of the text can close the block early.
-fence() {
-  local longest
-  longest=$(awk '{ while (match($0, /`+/)) { if (RLENGTH > n) n = RLENGTH; $0 = substr($0, RSTART + RLENGTH) } } END { print n + 0 }')
-  [ "$longest" -ge 3 ] || longest=2
-  printf '%*s' $((longest + 1)) '' | tr ' ' '`'
 }
 
 top=$(help --help)
