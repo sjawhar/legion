@@ -197,12 +197,9 @@ func (s *Service) forkLive(ctx context.Context, write *liveWrite) (*crdt.Doc, er
 }
 
 // writerAfter is the client id a transaction's writes to a document take, where writers are the
-// document's: one past the highest of them. ygo loads a document's state writer by writer in order
-// of their ids and parks every item it reads before the writer that item builds on, so a write by
-// a writer read after every writer it builds on parks none of its own items, and the same write
-// to the same document leaves the same state (refuseUnloadable). A random id, ygo's default, put a
-// new version before the first version it replaced about half the time, and every item it wrote
-// was parked. Only a peer can hold the highest id there is, and a write then takes a random one.
+// document's: one past the highest of them. A writer ordered after every writer it builds on avoids
+// adding temporary dependency work to an incremental room update. Only a peer can hold the highest
+// id there is, and a write then takes a random one.
 func writerAfter(writers crdt.StateVector) crdt.ClientID {
 	var highest crdt.ClientID
 	for writer := range writers {

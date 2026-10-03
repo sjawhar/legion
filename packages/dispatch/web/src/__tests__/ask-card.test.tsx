@@ -852,9 +852,7 @@ test("an approval-kind ask submits Approve with an optional note", async () => {
 });
 
 // A refusal of what the answer says, or of the ask it answers, is refused again however often it
-// is sent, so the card says why and offers no Retry; anything else may pass on a retry. The server
-// takes an answer its document has no room for and leaves it out of the document, so the one 413
-// left is a write that would leave the document unable to load, and the card shows its reason.
+// is sent, so the card says why and offers no Retry; anything else may pass on a retry.
 for (const refusal of [
   {
     code: "ASK_CLOSED",
@@ -869,13 +867,6 @@ for (const refusal of [
     status: 409,
   },
   { code: "ASK_EDITED", error: "question changed", message: "the question changed", status: 409 },
-  {
-    code: "CAP_EXCEEDED",
-    error:
-      "document too large to store: this change would leave the document too large for the server to load again with room to spare (its live copy would park more than 90000 of the 100000 items a load may wait on); shorten the change, or split the document",
-    message: "too large for the server to load again",
-    status: 413,
-  },
 ]) {
   test(`an answer refused with ${refusal.code} says so and offers no Retry`, async () => {
     let calls = 0;

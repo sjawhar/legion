@@ -306,15 +306,9 @@
   bound's own, opening `document too large to store`, on every route. A spec, a new document or the
   markdown a rebuild is given (`POST /api/v1/artifacts/{id}/rebuild`) whose stored markdown (its
   rendering, which can run longer than what was sent) is past either limit is refused the same way,
-  where a rebuild from the latest version restores it whatever it weighs; so is a write that would
-  leave a live document parking more than 90,000 of the 100,000 items ygo waits on while it loads
-  one (any write that would leave it unloadable at all is refused). ygo loads a document writer by
-  writer in order of their client ids and parks what a
-  writer builds on a writer it has not read yet, so each transaction's writes now take the id after
-  every writer the document holds rather than a random one: the same write to the same document gets
-  the same answer, and a new version over a one-line first version, which a random id put ahead of
-  that line's writer about half the time (7 of 12 tries of 16,384 headings refused), parks nothing.
-  A document's margin - the record of every comment and suggestion it has had, which every load
+  where a rebuild from the latest version restores it whatever it weighs. Each transaction's writes
+  take the id after every writer the document holds, so server updates follow the state they build
+  on. A document's margin - the record of every comment and suggestion it has had, which every load
   builds though no rendering carries it - is weighed too: one record (a comment's body and replies,
   a suggestion's replacement) holds at most 256 KiB of text and the margin 1 MiB, and a comment,
   suggestion, reply or edit that would leave either past its bound and bigger is `413

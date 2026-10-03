@@ -26,8 +26,6 @@ import (
 //   - its margin, the comment and suggestion records a browser shows beside the document, which
 //     every load builds though no rendering carries them (marginWatch).
 //   - the actor ids its anchor marks carry, which no rendering carries either (anchorWatch).
-//   - the live document it leaves, which must load again with room to spare under the item cap ygo
-//     loads a document under (refuseUnloadable).
 //
 // A write that leaves the document no bigger and no heavier than it was passes, so a document
 // already past the bound - stored before it, or grown by browser edits, which no server write
@@ -46,9 +44,6 @@ import (
 
 // growth is what one write leaves a document, as refuseGrowth weighs it.
 type growth struct {
-	// fork is the transaction's copy of the live document the write leaves, which
-	// refuseUnloadable loads.
-	fork *crdt.Doc
 	// before and after are the document's renderings before the write and after it, and unchanged
 	// whether they are the same.
 	before, after string
@@ -68,8 +63,7 @@ type growth struct {
 // refuseGrowth is the refusal of the write g describes, or nil. Its rendering is weighed by
 // weighRendering. A rendering the write left as it was - an anchor mark, a margin record, an
 // attribute no rendering carries - is not measured again, and one that changed only the server's
-// state of a typed block (serverState) is taken whatever the measures say of it; neither counts as
-// growth to the trial load.
+// state of a typed block (serverState) is taken whatever the measures say of it.
 func refuseGrowth(g growth) error {
 	if err := g.margin.refusal(); err != nil {
 		return err
@@ -78,13 +72,10 @@ func refuseGrowth(g growth) error {
 		return err
 	}
 	if g.unchanged || g.serverState() {
-		return refuseUnloadable(g.fork, func() bool { return false })
+		return nil
 	}
-	grew, err := weighRendering(g.before, g.after)
-	if err != nil {
-		return err
-	}
-	return refuseUnloadable(g.fork, grew)
+	_, err := weighRendering(g.before, g.after)
+	return err
 }
 
 // weighRendering is the refusal of after, a document's rendering once a write has run, against
@@ -321,49 +312,4 @@ func elements(size pmdoc.DocumentSize) string {
 		return fmt.Sprint(size.Elements)
 	}
 	return fmt.Sprintf("more than %d", pmdoc.MaxDocumentElements)
-}
-
-// maxPendingItems is how many items ygo parks while it loads a document's state into a new
-// document, items whose neighbour or parent belongs to a writer it has not read yet: ygo's
-// defaultMaxPendingItems, which it does not export. Every load of a live document - its room, a
-// transaction's fork, a read of a document no room holds - is such a load, and one that parks more
-// is refused as an invalid update: the document is then unreadable (503) and unwritable. ygo reads
-// writers in order of their ids, and a writer it reads before one it builds on has every item from
-// there on parked. A transaction's writes take an id past every writer the document holds
-// (writerAfter), so what parks is a browser's edits, whose ids are random, and a write that builds
-// on items that park themselves.
-const maxPendingItems = 100_000
-
-// loadableItems is how many items the state a growing write leaves may park when it is loaded: the
-// tenth of maxPendingItems left is the room that the writes that leave the rendering as it was - a
-// comment's anchor, a margin record, settlement's repairs - and a browser's edits have before the
-// document stops loading.
-const loadableItems = maxPendingItems - maxPendingItems/10
-
-// refuseUnloadable is the refusal of a write that leaves fork, its transaction's copy of the live
-// document, a state that would not load parking at most loadableItems, or nil. A state that would
-// still load under maxPendingItems is refused only when the write grew the document (grew, as
-// refuseGrowth measures it), so a document past the margin can still be trimmed; one that would not
-// load at all is always refused, since storing it would leave the document unreadable. The check is
-// the load itself, on a copy: nothing short of reading the state tells how many items its writers'
-// order parks. A state that holds no more items than the margin - each item spans at least one
-// clock tick - is not loaded.
-func refuseUnloadable(fork *crdt.Doc, grew func() bool) error {
-	var clocks uint64
-	for _, clock := range fork.StateVector() {
-		clocks += clock
-	}
-	if clocks <= loadableItems {
-		return nil
-	}
-	state := crdt.EncodeStateAsUpdateV1(fork, nil)
-	if crdt.ApplyUpdateV1(crdt.New(crdt.WithMaxPendingItems(loadableItems)), state, nil) == nil {
-		return nil
-	}
-	loads := crdt.ApplyUpdateV1(crdt.New(crdt.WithMaxPendingItems(maxPendingItems)), state, nil) == nil
-	if loads && !grew() {
-		return nil
-	}
-	return fmt.Errorf("%w: this change would leave the document too large for the server to load again with room to spare (its live copy would park more than %d of the %d items a load may wait on); shorten the change, or split the document",
-		ErrDocumentTooLarge, loadableItems, maxPendingItems)
 }

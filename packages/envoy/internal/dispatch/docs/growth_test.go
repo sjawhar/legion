@@ -126,15 +126,11 @@ func TestAMarginMayNotGrowPastWhatADocumentMayHold(t *testing.T) {
 		"this change would make it hold 1050141 bytes (it held 1050140)")
 }
 
-// The same write to the same document gets the same answer. ygo loads a document's state writer
-// by writer in order of their client ids, and a writer read before one whose items it builds on
-// has all of its items parked until that writer is read; a load that parks more than ygo's
-// pending-item cap fails. A transaction's writes take the id after every writer the document holds
-// (writerAfter), so a new version of 16,384 headings, what one upload may hold, is read after the
-// first version it replaces whichever id that version's writer drew - the lowest or the highest a
-// browser can - and parks nothing. Under a random id it was read first whenever it drew an id
-// below that writer's, about half the time, parked every item it wrote, and the load margin
-// refused it: the same upload taken on one try and refused on the next.
+// A new version is taken whichever id its first version's writer drew. A transaction's writes take
+// the id after every writer the document holds (writerAfter), so the update stays after the version
+// it replaces. ygo resolves dependencies carried in a complete document state before it charges
+// unresolved items to its pending queue, so the cold load below succeeds for both browser-id
+// extremes.
 func TestANewVersionIsTakenWhicheverIDItsFirstVersionsWriterDrew(t *testing.T) {
 	service, _ := newTestService(t)
 	alice := model.Actor{Kind: "user", ID: "alice"}
@@ -175,68 +171,6 @@ func seedByWriter(t *testing.T, service *Service, artifactID string, client crdt
 	}); err != nil {
 		t.Fatal(err)
 	}
-}
-
-// A write is refused only for a state the server's own load cannot hold. ygo v1.50.1-sami.2 fills
-// the clock gap client 1's headings previously left ahead of client 2^32-1's version, so this
-// history no longer parks its 98,316 or 102,012 items when the server copies it. Each write passes:
-// the server must not reject a state it can reload merely because the old decoder parked it.
-func TestGapFillingWritesDoNotLookUnloadable(t *testing.T) {
-	parks := gapFillingDocument(t, 16_384)
-	fails := gapFillingDocument(t, 17_000)
-	write := func(fork *crdt.Doc, before, after string, serverState bool) growth {
-		empty := &pmdoc.Node{Type: "doc"}
-		return growth{fork: fork, before: before, after: after, unchanged: before == after, margin: &marginWatch{}, anchors: anchorWatch{before: empty, after: empty},
-			serverState: func() bool { return serverState }}
-	}
-	for _, test := range []struct {
-		name    string
-		write   growth
-		refused bool
-	}{
-		{"a write that grows a document whose old decoder parked 98,316 items", write(parks, "a\n", "a\n\nb\n", false), false},
-		{"a write that leaves the rendering of that document as it was", write(parks, "a\n", "a\n", false), false},
-		{"a change of an ask's state that lengthens that document", write(parks, "a\n", "a b\n", true), false},
-		{"a write that leaves the old 102,012-item case unchanged", write(fails, "a\n", "a\n", false), false},
-		{"a change of an ask's state on the old 102,012-item case", write(fails, "a\n", "a b\n", true), false},
-	} {
-		err := refuseGrowth(test.write)
-		if refused := errors.Is(err, ErrDocumentTooLarge) && strings.Contains(err.Error(), "load again"); refused != test.refused || (err != nil && !refused) {
-			t.Errorf("%s: %v, want refused %t", test.name, err, test.refused)
-		}
-	}
-}
-
-// gapFillingDocument is the client order that ygo v1.50.1-sami.2 fills while it copies: a first
-// version by client 2^32-1 and headings by client 1. Earlier ygo versions parked the headings.
-func gapFillingDocument(t *testing.T, headings int) *crdt.Doc {
-	t.Helper()
-	write := func(doc *crdt.Doc, tree *pmdoc.Node) {
-		fragment := doc.GetXmlFragment(fragmentName)
-		if err := doc.TransactE(func(txn *crdt.Transaction) error { return pmdoc.Update(txn, fragment, tree) }); err != nil {
-			t.Fatal(err)
-		}
-	}
-	parse := func(markdown string) *pmdoc.Node {
-		tree, err := pmdoc.Parse(markdown)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return tree
-	}
-	first := crdt.New(crdt.WithClientID(math.MaxUint32))
-	write(first, parse("One line.\n"))
-	browser := crdt.New(crdt.WithClientID(1))
-	if err := crdt.ApplyUpdateV1(browser, crdt.EncodeStateAsUpdateV1(first, nil), nil); err != nil {
-		t.Fatal(err)
-	}
-	// One parse makes at most the 16,384 headings one upload may hold, so more are parsed apart.
-	version := parse(strings.Repeat("# a\n", min(headings, 16_384)))
-	if headings > 16_384 {
-		version.Children = append(version.Children, parse(strings.Repeat("# a\n", headings-16_384)).Children...)
-	}
-	write(browser, version)
-	return browser
 }
 
 // An ask's state and who answered it and when are what the server knows of the ask's text rather

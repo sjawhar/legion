@@ -70,10 +70,9 @@ func producedSchemaError(err error) error {
 }
 
 // ErrDocumentTooLarge is the refusal of a write that would leave a document larger than the server
-// stores: past what one upload of it may hold (refuseGrowth), unloadable with room to spare
-// (refuseUnloadable), or holding more items than one document update can store (ygo's cap of
-// 1,048,576, maxUpdateItems). It is served as 413 CAP_EXCEEDED, as markdown making more elements
-// than one write may (pmdoc.ErrTooManyElements) is.
+// stores: past what one upload of it may hold (refuseGrowth), or holding more items than one
+// document update can store (ygo's cap of 1,048,576, maxUpdateItems). It is served as 413
+// CAP_EXCEEDED, as markdown making more elements than one write may (pmdoc.ErrTooManyElements) is.
 var ErrDocumentTooLarge = errors.New("document too large to store")
 
 // IsTooLarge reports a refusal of a write too large to store: markdown making more elements than

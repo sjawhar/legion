@@ -147,7 +147,7 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 	if err == nil {
 		contentChanged, weighedFrom = !unchanged, before
 	}
-	if err := refuseGrowth(growth{fork: fork, before: beforeMarkdown, after: markdown, unchanged: unchanged, margin: margin, anchors: anchorWatch{before: weighedFrom, after: tree}, serverState: func() bool {
+	if err := refuseGrowth(growth{before: beforeMarkdown, after: markdown, unchanged: unchanged, margin: margin, anchors: anchorWatch{before: weighedFrom, after: tree}, serverState: func() bool {
 		return weighedFrom != nil && tree.EqualOutsideServerState(weighedFrom)
 	}}); err != nil {
 		return err
