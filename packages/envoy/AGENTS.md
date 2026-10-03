@@ -54,29 +54,33 @@ update. A repair reports whether its transaction wrote anything; one that wrote 
 committed that transaction, and ygo hands the worker an update for it too (the document's delete
 set), so its slot is finished with that update and the worker takes it rather than storing it. A
 settlement that wrote into the room renders its version from the document as it stands after the
-repairs (`lockedTreeOf`), so a peer's edit made since its read is in that version too, and credits
-that edit's author, whose own settlement then writes no version. It takes the authors with that
-tree, so an edit made while the version renders is credited on the version its own settlement
-writes, not on this one. Every version's commit releases only the pending authors' entries it took
-(`docs/authors.go`): each entry carries the content change it credits, so an author who edits
-again after a version took its authors stays pending for the second edit, and so does one whose
-edit the version's tree holds while its update observer, which ygo runs only once the edit's
-transaction has released the document, had not yet credited it. That edit's own settlement writes
-no version and releases nothing, and the next version credits them (LEGION-503). An upload, whose
-route writes its version itself, records what that version credits (`Ledger.WroteVersion`), so its
-uploader is not credited again on the next version. A settlement that wrote into the room commits
-what it wrote even when the document moved after its read, since the room and its browsers hold it;
-one that wrote nothing leaves a moved document to the settlement the move scheduled. A repair is
-written only into the document the settlement read (`applySuppressed`): one whose room was evicted
-and reloaded since is refused and retried, and one whose room left the server while its transaction
-committed is given up and fails the room, its update discarded without waiting for its slot, since
-ygo then stores it on the committing goroutine itself (`persistStranded`). The room worker's
-compaction, except a failed room's eviction, skips a room whose lock another holder has
-(`compactIfIdle`), so a settlement holding the lock does not wait for that worker's exit. Two cases
-still hang until the server restarts (LEGION-498): a room that fails while a settlement commits
-into it, and a second writer committing into a room while it retires under a repair's commit.
+repairs (`readSettlementTree`), so a peer's edit made since its read is in that version too, and
+credits that edit's author, whose own settlement then writes no version. It takes the authors under
+the room's state lock while it copies that tree, so an edit made while the version renders is
+credited on the version its own settlement writes, not on this one. Every version takes its authors
+no later than it reads the tree it records - a settlement, and a version read straight from the
+room, with the copy; a transaction's version before its fork reads the room; an upload as of its
+write's last read of the room (`liveWrite.forkSeq`) - and its commit releases only the pending
+authors' entries it took (`docs/authors.go`): each entry carries the content change it credits, so
+an author who edits again after a version took its authors stays pending for the second edit, and
+so does one whose edit the version's tree holds while its update observer, which ygo runs only once
+the edit's transaction has released the document, had not yet credited it. That edit's own
+settlement writes no version and releases nothing, and the next version credits them (LEGION-503).
+An upload, whose route writes its version itself, records what that version credits
+(`Ledger.WroteVersion`), so its uploader is not credited again on the next version. A settlement
+that wrote into the room commits what it wrote even when the document moved after its read, since
+the room and its browsers hold it; one that wrote nothing leaves a moved document to the settlement
+the move scheduled. A repair is written only into the document the settlement read
+(`applySuppressed`): one whose room was evicted and reloaded since is refused and retried, and one
+whose room left the server while its transaction committed is given up and fails the room, its
+update discarded without waiting for its slot, since ygo then stores it on the committing goroutine
+itself (`persistStranded`). The room worker's compaction, except a failed room's eviction, skips a
+room whose lock another holder has (`compactIfIdle`), so a settlement holding the lock does not
+wait for that worker's exit. Two cases still hang until the server restarts (LEGION-498): a room
+that fails while a settlement commits into it, and a second writer committing into a room while it
+retires under a repair's commit.
 `envoy-dispatch backfill-block-ids` runs the same stamp through `applySuppressed` across every
-document. Every write path that changes a document queues that closer once its transaction commits: a live edit (`POST /api/v1/artifacts/{id}/edits`), an uploaded document version (`POST /api/v1/issues/{key}/artifacts`, `POST /api/v1/projects/{key}/artifacts`), and a spec seeded at issue creation - so ask blocks written by any of them become asks without waiting for a later live change. The closer attributes the asks it indexes to the room's most recent mutating actor (`roomState.lastActor`, set by every edit, replacement and seed) when no pending author remains - an edit's own version write has already consumed `pending` by the time settlement runs. A free-text ask block (no bullet list) carries `options: []` on the wire, never JSON null.
+document. Every write path that changes a document queues that closer once its transaction commits: a live edit (`POST /api/v1/artifacts/{id}/edits`), an uploaded document version (`POST /api/v1/issues/{key}/artifacts`, `POST /api/v1/projects/{key}/artifacts`), and a spec seeded at issue creation - so ask blocks written by any of them become asks without waiting for a later live change. The closer attributes the asks it indexes to the room's most recent mutating actor (`roomState.lastActor`, set by every edit, replacement and seed) when its version credits that actor or no pending author remains - an edit's own version write has already released the authors it credited by the time settlement runs - and otherwise to the first pending author (`settlementAuthors`), so an author left pending from an earlier change is not named for the latest editor's asks. A free-text ask block (no bullet list) carries `options: []` on the wire, never JSON null.
 
 The closer's timer lives in memory, so the database says which documents still owe it: every
 durable document update writes the document's `doc_settlements_pending` row in its own transaction
@@ -279,19 +283,21 @@ A read of a resident room reads a copy taken under its document lock (`snapshotD
 `crdt.EncodeStateAsUpdateV1`), never the live tree: `GET /text` and the document websocket's
 admission check (`loadDocument`), a version's capture (`captureLiveTextAndAuthors`), a read
 outside any transaction (`docView`), and settlement's reads of the room (`settleRoomWithin`'s first
-read and its version's, and the block-id backfill's read, through `lockedTreeOf`), so a torn read is
-never versioned as the document; a repair reads the tree inside the transaction that writes it
-(`rewriteLive`), and the unrecorded-mark sweep (`sweepUnrecordedMarks`) inside the transaction that
-unmarks it. A walk of the live tree takes no lock (reearth/ygo v1.49.5, `crdt/yxml.go`) while every
-peer update and service write holds that lock as it applies, so the walk can read a write halfway
-through as a tree outside the schema and answer a healthy document 409 with the repair. A version's
-capture holds the room's state lock across the copy and the authors it captures, so an author the
-update observer credits is captured only with that update's text; the order - state lock, then
-document lock - is never reversed, since only a Yjs transaction's own function holds a document's
-lock and none takes a room's state lock. A read that may load its room (a version's capture,
-`docView`, `VerifyMark`'s subscription) takes what it reads inside the `Server.Apply` that loads
-and holds the room: a room looked up again with `GetDoc` once that Apply returned can have been
-evicted in between.
+read and its version's, through `readSettlementTree`, and the block-id backfill's read, through
+`lockedTreeOf`), so a torn read is never versioned as the document; a repair reads the tree inside
+the transaction that writes it (`rewriteLive`), and the unrecorded-mark sweep
+(`sweepUnrecordedMarks`) inside the transaction that unmarks it. A walk of the live tree takes no
+lock (reearth/ygo v1.49.5, `crdt/yxml.go`) while every peer update and service write holds that
+lock as it applies, so the walk can read a write halfway through as a tree outside the schema and
+answer a healthy document 409 with the repair. A version's capture read straight from the room and
+each settlement read hold the room's state lock across the copy and the authors they take, so an
+author the update observer credits is taken only with that update's text; the order - state lock,
+then document lock - is never reversed, since only a Yjs transaction's own function holds a
+document's lock and none takes a room's state lock. A transaction's version takes its authors
+before its fork reads the room instead (`docs/authors.go`). A read that may load its room (a
+version's capture, `docView`, `VerifyMark`'s subscription) takes what it reads inside the
+`Server.Apply` that loads and holds the room: a room looked up again with `GetDoc` once that Apply
+returned can have been evicted in between.
 
 Every decode of a document's whole state takes a pending queue as long as the most items one
 update can carry (`newDocumentCopy`, `maxUpdateItems`): the copy, a write's fork (`forkLive`), and

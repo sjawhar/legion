@@ -1308,24 +1308,22 @@ func TestSuggestionAcceptClearsPendingAuthorBeforeNextVersion(t *testing.T) {
 	}
 }
 
-// An upload's version credits its uploader and holds the upload's write to the document, so the
-// next version, a session's named edit, credits that session alone (LEGION-503).
+// An upload's version credits its uploader and holds the upload's write to the document, and the
+// uploader's browser edits it is written over, so the next version, a session's named edit,
+// credits that session alone (LEGION-503).
 func TestUploadClearsItsUploaderBeforeNextVersion(t *testing.T) {
-	var documentService *docs.Service
-	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
-		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})
-		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
-		return documentService
-	})
+	documentService, handler, _ := browserDocumentService(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Uploaded author", "before")
 	path := "/api/v1/issues/" + issue.Key + "/artifacts"
-	for _, content := range []string{"before\n", "after\n"} {
+	upload := func(content string) {
+		t.Helper()
 		if response := dispatchRequest(t, handler, http.MethodPost, path, map[string]string{
 			"name": "notes.md", "content": content,
 		}, "alice"); response.Code != http.StatusCreated {
 			t.Fatalf("upload %q: status=%d body=%s", content, response.Code, response.Body.String())
 		}
 	}
+	upload("before\n")
 	listed := dispatchRequest(t, handler, http.MethodGet, path, nil, "alice")
 	var notes model.Artifact
 	for _, artifact := range decodeBody[[]model.Artifact](t, listed) {
@@ -1336,6 +1334,12 @@ func TestUploadClearsItsUploaderBeforeNextVersion(t *testing.T) {
 	if notes.ID == "" {
 		t.Fatalf("uploaded document missing from %s", listed.Body.String())
 	}
+	// alice types in her browser before she uploads again: the room credits her with it.
+	browser := connectBrowserPeer(t, documentService, notes.ID)
+	t.Cleanup(browser.close)
+	browser.appendParagraph(t, "Typed in the browser.")
+	browser.barrier(t)
+	upload("after\n")
 
 	next := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+notes.ID+"/edits", map[string]any{
 		"ops":     []map[string]string{{"op": "replace", "find": "after", "with": "next"}},

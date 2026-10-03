@@ -97,6 +97,10 @@ type Service struct {
 	// capture (captureLiveTextAndAuthors) and VerifyMark - and before the read takes anything from
 	// it. Nil outside tests; tests use it to evict the room in that window.
 	afterReadWarm func(room string)
+	// afterCaptureFork runs once a version's capture (captureLiveTextAndAuthors) has brought the
+	// calling transaction's fork up to date with the room, and before it renders the fork. Nil
+	// outside tests; tests use it to edit the room in that window.
+	afterCaptureFork func(room string)
 	// afterSettleRead runs after settleRoom has read the document and before it stamps block ids
 	// into the room. Nil outside tests; tests use it to edit the room in that window.
 	afterSettleRead func(room string)
@@ -168,13 +172,14 @@ type roomState struct {
 	mu        sync.Mutex
 	connected map[uint64]model.Actor
 	// pending holds the authors of content changes no committed version has credited, each with
-	// the change it credits; credits numbers those changes, the latest last (see authors.go).
-	pending map[string]pendingAuthor
-	credits uint64
+	// the change it credits; creditSeq numbers those changes, the latest last (see authors.go).
+	pending   map[string]pendingAuthor
+	creditSeq uint64
 	// lastActor is the most recent edit's source: the actor of a service mutation, or the sole
-	// connected peer of a browser edit. Version writes clear `pending`, so a settlement that
-	// runs after an edit's own version was committed would otherwise attribute the block asks
-	// it indexes to nobody.
+	// connected peer of a browser edit. A settlement's events name it when its version credits
+	// it, or credits no one (settlementAuthors): a version write releases the authors it credits,
+	// so a settlement that runs after an edit's own version was committed would otherwise attribute
+	// the block asks it indexes to nobody, or to an author still pending from an earlier change.
 	lastActor *model.Actor
 	// contentMarkdown is the live document's rendered markdown when the room's update observer
 	// last saw it change, nil until the room loads.
@@ -994,19 +999,51 @@ func stampBlockIDs(doc *crdt.Doc, origin any) (*pmdoc.Node, int, error) {
 	return stamped, minted, err
 }
 
-// settlementAuthors takes state's pending authors, which a settlement's version credits, and names
-// the actor its events carry: the first of those authors, or else the room's latest editor. The
-// caller holds state.mu.
-func settlementAuthors(state *roomState) (authorCapture, []model.Actor, model.Actor) {
-	capture := state.takeAuthors()
-	authors := actorSlice(capture.authors)
-	actor := model.Actor{}
-	if len(authors) > 0 {
-		actor = authors[0]
-	} else if state.lastActor != nil {
-		actor = *state.lastActor
+// settlementCredit is whom a settlement's version credits, taken with the tree it records
+// (readSettlementTree): capture, its authors in order, and actor, whom the settlement's events
+// name.
+type settlementCredit struct {
+	capture authorCapture
+	authors []model.Actor
+	actor   model.Actor
+}
+
+// readSettlementTree reads the tree a settlement reconciles or versions from a copy of doc taken
+// under its document lock, as lockedTreeOf does, and takes the authors its version credits with
+// the copy: the room's state lock is held across it, state lock then document lock, the order
+// captureLiveTextAndAuthors holds them in. An update observer credits a change only once the room
+// holds it, so every author taken made a change the copy holds; one credited later stays pending
+// (authors.go).
+func readSettlementTree(state *roomState, doc *crdt.Doc) (*pmdoc.Node, settlementCredit, error) {
+	state.mu.Lock()
+	copied, err := snapshotDocument(doc)
+	credit := settlementAuthors(state)
+	state.mu.Unlock()
+	if err != nil {
+		return nil, settlementCredit{}, err
 	}
-	return capture, authors, actor
+	tree, err := treeOf(copied)
+	return tree, credit, err
+}
+
+// settlementAuthors takes state's pending authors, which a settlement's version credits, and names
+// the actor its events carry: the room's latest editor when the version credits them or credits no
+// one, and otherwise the first of its authors. An author can stay pending past the version that
+// holds their change (authors.go), so the latest editor, not the first pending author, wrote what
+// the settlement indexes when both are pending. The caller holds state.mu.
+func settlementAuthors(state *roomState) settlementCredit {
+	capture := state.takeAuthors()
+	credit := settlementCredit{capture: capture, authors: actorSlice(capture.authors)}
+	if latest := state.lastActor; latest != nil {
+		if _, credited := capture.authors[actorKey(*latest)]; credited || len(credit.authors) == 0 {
+			credit.actor = *latest
+			return credit
+		}
+	}
+	if len(credit.authors) > 0 {
+		credit.actor = credit.authors[0]
+	}
+	return credit
 }
 
 func (s *Service) settleRoom(room string, generation uint64) {
@@ -1144,10 +1181,14 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	// stamp's when it stamped ids; versioned is the one the version is rendered from, read again
 	// after the repairs when the settlement wrote any. A browser's edit made in between is in a
 	// later one and not an earlier one. read and versioned are each taken from a copy under the
-	// document's lock (lockedTreeOf), and the stamp reads inside its own transaction: the room's
-	// peers and the service can write it while a walk of the live tree, which takes no lock, reads
-	// it, and a torn read would be versioned as the document.
-	read, err := lockedTreeOf(doc)
+	// document's lock, and the stamp reads inside its own transaction: the room's peers and the
+	// service can write it while a walk of the live tree, which takes no lock, reads it, and a torn
+	// read would be versioned as the document. read and versioned each take with their copy the
+	// authors the version credits (readSettlementTree), so the version credits no edit it lacks.
+	// The one change read can lack whose author it takes is a committed transaction's write,
+	// credited at its commit and published after read's copy; the supersession check below then
+	// writes no version, since the write still holds its slot or its publish moved the generation.
+	read, credit, err := readSettlementTree(state, doc)
 	if err != nil {
 		if errors.Is(err, ErrDocSchema) {
 			slog.Error("dispatch: settle document outside Proof schema", "room", room, "error", err)
@@ -1255,9 +1296,8 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		finishSlots()
 		return
 	}
-	capture, authors, eventActor := settlementAuthors(state)
 	state.mu.Unlock()
-	reconciliation, err := s.reconcileAskBlocks(ctx, tx, room, owner, reconciled, eventActor)
+	reconciliation, err := s.reconcileAskBlocks(ctx, tx, room, owner, reconciled, credit.actor)
 	if err != nil {
 		abandon(err)
 		return
@@ -1300,25 +1340,20 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		// The version is the document as it stands after the repairs, read under its lock, not the
 		// tree settlement reconciled before them: a peer's edit made since is in the room, its
 		// browsers and its stored updates, and a version rendered from the earlier tree would leave
-		// it out (LEGION-479).
-		versioned, err = lockedTreeOf(doc)
+		// it out (LEGION-479). The authors are taken again with this copy, so the version credits
+		// the authors of the edits it holds - an edit's own settlement finds the document already
+		// versioned and writes no version to credit them on - and no author of an edit it lacks.
+		// An edit made after the copy, while the version renders, is credited after this take, so
+		// this version's commit leaves its author pending for the version its own settlement
+		// writes. An edit the copy holds whose update observer had not yet credited it - ygo runs
+		// the observer only once the edit's transaction has released the document - is credited
+		// after the take too, and its own settlement writes no version: the next version, which
+		// holds it as well, credits its author (authors.go).
+		versioned, credit, err = readSettlementTree(state, doc)
 		if err != nil {
 			abandon(err)
 			return
 		}
-		// That tree holds the edits made since the authors were taken above, so the version is
-		// credited to their authors too, taken again with the tree: an edit's own settlement finds
-		// the document already versioned and writes no version to credit them on. They are taken
-		// here, not after the render, where an edit made while the version renders would be
-		// credited on this version, which lacks it, rather than on the version its own settlement
-		// writes. ygo runs the update observer that credits an edit after the edit's transaction
-		// releases the document, so an edit this tree holds that its observer has not yet credited
-		// is not credited here. Its author's entry is credited after this take, so this version's
-		// commit leaves it pending, and so does the edit's own settlement, which writes no version:
-		// the next version, which holds the edit too, credits them (authors.go).
-		state.mu.Lock()
-		capture, authors, eventActor = settlementAuthors(state)
-		state.mu.Unlock()
 		if s.afterSettleVersionRead != nil {
 			s.afterSettleVersionRead(room)
 		}
@@ -1392,8 +1427,8 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		return
 	}
 	if versioning {
-		result, writeErr := s.writeVersionTx(ctx, tx, room, markdown, versioned, eventActor, &versionWrite{
-			authors:          authors,
+		result, writeErr := s.writeVersionTx(ctx, tx, room, markdown, versioned, credit.actor, &versionWrite{
+			authors:          credit.authors,
 			docUpdateVersion: &snapshotCursor,
 		})
 		if writeErr != nil {
@@ -1406,7 +1441,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		versionEvent := model.Event{
 			IssueKey: owner.IssueKey,
 			Type:     "artifact.version",
-			Actor:    eventActor,
+			Actor:    credit.actor,
 			Payload:  ArtifactVersionEventPayload(room, owner.Name, result.version, nil, result.changes),
 		}
 		if owner.IssueKey == nil {
@@ -1443,7 +1478,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	// settlement that wrote no version releases nothing: the version it found can hold an edit
 	// whose author was credited only after that version took its authors (authors.go).
 	if versioning {
-		capture.release()
+		credit.capture.release()
 	}
 	for _, event := range published {
 		s.events.Publish(event)

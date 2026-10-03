@@ -263,14 +263,22 @@
   version holding that edit credited nobody for it: a settlement's commit did so when the edit
   landed while its update observer was between crediting and arming its settlement, and a named
   version's or snapshot's commit whenever the edit landed while the transaction held the writer
-  slot. An edit a version's tree held before its update observer had credited it (ygo runs the
+  slot. A named version or snapshot over a transaction's own write also took its authors after it
+  read its tree, so an edit made in between was credited on that version, which lacked it, and on
+  no other. An edit a version's tree held before its update observer had credited it (ygo runs the
   observer once the edit's transaction has released the document, and observers wait for each
   other's renders) was credited on no version: the edit's own settlement found the document
   versioned, wrote none, and released the author. Each pending author now carries the change it
-  credits, a version's commit releases only the entries it took, and a settlement that writes no
-  version releases nothing, so the next version credits such an author. That includes an author
-  whose edits came to nothing, typed and undone before a settlement. An upload's version records
-  that it credits its uploader, who is not credited again on the next version.
+  credits, every version takes its authors no later than it reads the tree it records, a version's
+  commit releases only the entries it took, and a settlement that writes no version releases
+  nothing, so the next version credits such an author. That includes an author whose edits came to
+  nothing, typed and undone before a settlement, and one whose text an upload replaced, since the
+  upload's version credits its uploader alone. An upload's version records that it credits its
+  uploader, who is not credited again on the next version for the upload or for browser edits the
+  upload was written over. A settlement's events, and the asks it indexes, now name the room's
+  latest editor whenever its version credits them, rather than whichever of its authors sorts
+  first, so an author still pending from an earlier change is not named as the writer of the
+  latest editor's ask.
 - Saving a document, comment, ask, or message with a long run of underscore-joined characters
   no longer takes quadratic time in Postgres search indexing. `pmdoc` also avoids quadratic work
   in Goldmark's email and delimiter scans and in renderer closer scans. A document that exceeds

@@ -1679,6 +1679,35 @@ func TestSettleAttributesServiceWrittenAskBlockToTheAPIActorWhilePeerConnected(t
 	}
 }
 
+// A settlement attributes the block ask it indexes to the room's latest editor, whose change its
+// version credits, not to an author still pending from an earlier change: an author whose edits
+// came to nothing - typed and undone - stays pending past the settlement that found nothing to
+// version (LEGION-503), and sorts ahead of the ask's writer here.
+func TestSettleAttributesAnAskBlockToItsLatestEditorOverAnEarlierPendingAuthor(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "before")
+	settleCurrentGeneration(t, service, artifactID)
+	typed := model.Actor{Kind: "user", ID: "bob"}
+	connectionID := service.nextConnection.Add(1)
+	service.addConnection(artifactID, connectionID, typed)
+	editLiveTree(t, service, artifactID, replaceRun("before", "before, typed"))
+	editLiveTree(t, service, artifactID, replaceRun("before, typed", "before"))
+	settleCurrentGeneration(t, service, artifactID)
+	service.removeConnection(artifactID, connectionID)
+
+	writer := model.Actor{Kind: "user", ID: "carol"}
+	if _, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{{
+		Op: "insert", After: "end", Markdown: ":::ask{#carol-ask urgency=\"med\" multiple=\"false\"}\nShip it?\n:::\n",
+	}}, writer, nil); err != nil {
+		t.Fatalf("carol's edit: %v", err)
+	}
+	settleCurrentGeneration(t, service, artifactID)
+	if author := blockAskAuthor(t, service, artifactID, "carol-ask"); author != writer {
+		t.Fatalf("ask author = %#v, want %v, who wrote it", author, writer)
+	}
+}
+
 // snapshotAndCommitVersion versions the live text the way an anchored comment does, which
 // consumes the room's pending authors ahead of the next settlement.
 func snapshotAndCommitVersion(t *testing.T, service *Service, artifactID string, actor model.Actor) {
