@@ -49,7 +49,6 @@ interface OpenCompose {
 
 interface MarginContextValue {
   blockFilterId: string | undefined;
-  blockFocusRequest: { blockId: string; seq: number } | undefined;
   blockPlacements: ReadonlyMap<string, MarkPlacement>;
   clearBlockFilter(): void;
   composeForMark(request: MarkComposeRequest): Promise<void>;
@@ -89,7 +88,6 @@ const unavailableMargin = (): never => {
 
 const MarginContext = createContext<MarginContextValue>({
   blockFilterId: undefined,
-  blockFocusRequest: undefined,
   blockPlacements: new Map(),
   clearBlockFilter: unavailableMargin,
   composeForMark: unavailableMargin,
@@ -118,10 +116,6 @@ const MarginContext = createContext<MarginContextValue>({
 
 export function MarginProvider({ children }: { children: ReactNode }): ReactNode {
   const [blockFilterId, setBlockFilterId] = useState<string>();
-  const [blockFocusRequest, setBlockFocusRequest] = useState<{
-    blockId: string;
-    seq: number;
-  }>();
   const [blockPlacements, setBlockPlacements] = useState<ReadonlyMap<string, MarkPlacement>>(
     () => new Map()
   );
@@ -216,8 +210,6 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
   }, []);
   const focusBlock = useCallback(
     (blockId: string) => {
-      sequence.current += 1;
-      setBlockFocusRequest({ blockId, seq: sequence.current });
       documentBridge?.focusBlock(blockId);
     },
     [documentBridge]
@@ -267,7 +259,6 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
   const value = useMemo<MarginContextValue>(
     () => ({
       blockFilterId,
-      blockFocusRequest,
       blockPlacements,
       clearBlockFilter,
       composeForMark,
@@ -295,7 +286,6 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
     }),
     [
       blockFilterId,
-      blockFocusRequest,
       blockPlacements,
       clearBlockFilter,
       composeForMark,

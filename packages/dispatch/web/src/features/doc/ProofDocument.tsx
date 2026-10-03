@@ -148,7 +148,7 @@ export function ProofDocument({
   } = useContext(DocumentRuntime);
   const navigate = useNavigate();
   const margin = useMargin();
-  const { blockFocusRequest, blockPlacements } = margin;
+  const { blockPlacements } = margin;
   // The editor effect and its callbacks reach the margin's latest functions through this ref
   // rather than listing them as dependencies, so a margin re-render never rebuilds the editor.
   const marginRef = useRef(margin);
@@ -456,16 +456,6 @@ export function ProofDocument({
   useEffect(() => {
     editorRef.current?.setReadOnly(isClosed || schemaReadOnlyRef.current);
   }, [isClosed]);
-
-  useEffect(() => {
-    if (blockFocusRequest === undefined) {
-      return;
-    }
-    const frame = requestAnimationFrame(() => {
-      editorRef.current?.focusBlock(blockFocusRequest.blockId);
-    });
-    return () => cancelAnimationFrame(frame);
-  }, [blockFocusRequest]);
 
   useEffect(() => {
     const editor = editorRef.current;
