@@ -61,11 +61,18 @@ func resolveApproverMe(w http.ResponseWriter, r *http.Request, actor model.Actor
 }
 
 // readRelayBody reads a mutation's body verbatim, capped like every other JSON mutation, and
-// hands it to the broker unparsed: Dispatch relays, it does not model these shapes.
-func readRelayBody(w http.ResponseWriter, r *http.Request) (json.RawMessage, bool) {
+// hands it to the broker unparsed: Dispatch relays, it does not model these shapes. A string the
+// body holds that carries U+0000 is refused as decodeJSON refuses one: the broker reads these
+// strings against PostgreSQL too (a machine login's typed code is a query's parameter there), and
+// Dispatch is these routes' only caller.
+func (s *server) readRelayBody(w http.ResponseWriter, r *http.Request) (json.RawMessage, bool) {
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxJSONRequestBytes))
 	if err != nil {
 		writeError(w, "REQUEST_TOO_LARGE", http.StatusRequestEntityTooLarge, "request body exceeds the size limit")
+		return nil, false
+	}
+	if refusal := unstorableJSON("", body); refusal != nil {
+		s.writeHandlerError(w, refusal)
 		return nil, false
 	}
 	return json.RawMessage(body), true
@@ -75,8 +82,8 @@ func readRelayBody(w http.ResponseWriter, r *http.Request) (json.RawMessage, boo
 // caller's canonical login, and the one field read from the browser's body is a machine login's
 // typed code. Any other field the browser sends, an approver among them, is ignored, never
 // forwarded. An empty body is a decision with no code.
-func decisionFor(w http.ResponseWriter, r *http.Request, actor model.Actor) (agentsecrets.Decision, bool) {
-	body, ok := readRelayBody(w, r)
+func (s *server) decisionFor(w http.ResponseWriter, r *http.Request, actor model.Actor) (agentsecrets.Decision, bool) {
+	body, ok := s.readRelayBody(w, r)
 	if !ok {
 		return agentsecrets.Decision{}, false
 	}
@@ -138,7 +145,7 @@ func (s *server) approveCredentialRecord(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
-	decision, ok := decisionFor(w, r, actor)
+	decision, ok := s.decisionFor(w, r, actor)
 	if !ok {
 		return
 	}
@@ -155,7 +162,7 @@ func (s *server) denyCredentialRecord(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	decision, ok := decisionFor(w, r, actor)
+	decision, ok := s.decisionFor(w, r, actor)
 	if !ok {
 		return
 	}
@@ -171,7 +178,7 @@ func (s *server) lookupMachineCredential(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
-	relayBody, ok := readRelayBody(w, r)
+	relayBody, ok := s.readRelayBody(w, r)
 	if !ok {
 		return
 	}

@@ -197,7 +197,7 @@ dispatch_issues({ project: "<PROJECT>", status: "todo", priority: [0], limit: 25
 
 When the first line ends `(showing 1-250 of N)`, the next page is `offset: 250`, then `500`. Read
 pages only as far as you need: stop listing once the free slots are filled. `<PROJECT>` is the
-Dispatch project key, the prefix of this deployment's issue keys (`ACME-12` → `ACME`), which is
+Dispatch project key, the prefix of this deployment's issue keys (`PROJ-12` → `PROJ`), which is
 also `daemon.project` in `legion state --json`: the project key exactly as `legion.yaml` writes it.
 A row that shows `claimed by …` and does not end its claim with `· not running` (the route, when
 the row shows one, comes after the claim) is claimed, as the table below says: skip it without
