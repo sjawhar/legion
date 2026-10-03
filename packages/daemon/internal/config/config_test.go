@@ -2,9 +2,7 @@ package config
 
 import (
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -87,25 +85,6 @@ func TestAbsoluteStateDirIsTakenAsItIs(t *testing.T) {
 	if cfg.StateDir != "/var/lib/legion" {
 		t.Fatalf("StateDir = %q, want /var/lib/legion", cfg.StateDir)
 	}
-}
-
-// captureLog swaps the default logger for a JSON one writing to the returned builder, so a test
-// can read the accepted-and-ignored lines Load emits.
-func captureLog(t *testing.T) *strings.Builder {
-	t.Helper()
-	out := &strings.Builder{}
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewJSONHandler(out, &slog.HandlerOptions{Level: slog.LevelInfo})))
-	t.Cleanup(func() { slog.SetDefault(previous) })
-	return out
-}
-
-func ignoredLine(key string, stage int) string {
-	quoted, err := json.Marshal(key)
-	if err != nil {
-		panic(err)
-	}
-	return fmt.Sprintf(`"key":%s,"stage":%d`, quoted, stage)
 }
 
 // defaultsFor is the Config minimalFile resolves to on port: every key it leaves out at its default,
@@ -989,20 +968,18 @@ func TestLoadReadsRuntimeAsItsDiscriminator(t *testing.T) {
 }
 
 // Every top-level key of the earlier schema (38 keys, nats_daemon_nkey_seed_file among them since
-// #1494) plus the new postgres_dsn, and the class it is in at Stage 2. No shipped key may fall
-// through to the typo refusal. Stage 2 moved fifteen keys from known-later to modelled.
+// #1494) plus the new postgres_dsn, and the class it is in. No shipped key may fall through to the
+// typo refusal, and none is accepted without being modelled.
 func TestLoadClassifiesEveryShippedKey(t *testing.T) {
 	const (
-		modelled   = "modelled"
-		knownLater = "known-later"
-		tossed     = "tossed"
-		migration  = "migration-only"
+		modelled  = "modelled"
+		tossed    = "tossed"
+		migration = "migration-only"
 	)
 	for _, tc := range []struct {
 		key   string
 		line  string
 		class string
-		stage int
 		want  string
 	}{
 		{key: "project", class: modelled},
@@ -1036,7 +1013,6 @@ func TestLoadClassifiesEveryShippedKey(t *testing.T) {
 		{key: "projects", line: "projects: {DEMO: {repo: acme/widgets}}", class: modelled},
 		{key: "gates", line: "gates: {design: off}", class: modelled},
 		{key: "github_apps", line: "github_apps: {implement: {app_id: \"1\", private_key: key}, review: {app_id: \"2\", private_key: key}}", class: modelled},
-		{key: "max_recursion_depth", line: "max_recursion_depth: 8", class: knownLater, stage: 3},
 		{key: "linger_hours", line: "linger_hours: 72", class: modelled},
 		{key: "review_round_cap", line: "review_round_cap: 3", class: modelled},
 		{key: "max_fix_attempts", line: "max_fix_attempts: 3", class: modelled},
@@ -1053,6 +1029,10 @@ func TestLoadClassifiesEveryShippedKey(t *testing.T) {
 			key: "resync_interval_seconds", line: "resync_interval_seconds: 600", class: tossed,
 			want: "unknown key resync_interval_seconds: the mirror of Dispatch and GitHub as truth, and resync's drift healing, no longer exist (LEGION-208 Design, \"Ported, and tossed\")",
 		},
+		{
+			key: "max_recursion_depth", line: "max_recursion_depth: 8", class: tossed,
+			want: "unknown key max_recursion_depth: an architect spawns no worker and no sub-architect (the daemon starts every phase, and only the operator starts any other claim), so there is no spawn recursion to bound",
+		},
 
 		{key: "dispatch_mcp_url", line: "dispatch_mcp_url: https://dispatch.example/mcp", class: migration, want: wantDispatchMcpURLMessage},
 		{key: "dispatch_project", line: "dispatch_project: DEMO", class: migration, want: wantDispatchProjectMessage},
@@ -1062,7 +1042,6 @@ func TestLoadClassifiesEveryShippedKey(t *testing.T) {
 		{key: "worker_budget", line: "worker_budget: 6", class: migration, want: wantWorkerBudgetMessage},
 	} {
 		t.Run(tc.key, func(t *testing.T) {
-			out := captureLog(t)
 			body := minimalFile
 			if tc.line != "" {
 				body += tc.line + "\n"
@@ -1074,16 +1053,6 @@ func TestLoadClassifiesEveryShippedKey(t *testing.T) {
 			case modelled:
 				if err != nil {
 					t.Fatalf("Load: %v", err)
-				}
-				if strings.Contains(out.String(), fmt.Sprintf(`"key":%q`, tc.key)) {
-					t.Errorf("a modelled key was logged as accepted and ignored: %s", out.String())
-				}
-			case knownLater:
-				if err != nil {
-					t.Fatalf("Load: %v", err)
-				}
-				if !strings.Contains(out.String(), ignoredLine(tc.key, tc.stage)) {
-					t.Errorf("log does not name %s at stage %d; log was:\n%s", tc.key, tc.stage, out.String())
 				}
 			default:
 				if err == nil {

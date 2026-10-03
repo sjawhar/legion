@@ -1,15 +1,11 @@
 // Package config loads the daemon's `legion.yaml` and its `LEGION_*` environment.
 //
-// The file keeps the key names the shipped TypeScript daemon reads, so a key an operator carries
-// across means the same thing in either daemon, with one exception: `runtime.kubernetes.resources`
-// is keyed by role here and by profile (small, medium, large) there, and this loader refuses the
-// profile shape by name. A key the Go daemon does not model falls into one
-// of three classes the loader decides once, here: known-later keys a later stage models, accepted
-// and ignored with one log line each; tossed keys, refused naming the key and why the setting no
-// longer exists; and migration-only keys, refused with the TypeScript loader's own message text so
-// an operator searching for those words finds the same answer. Anything else is a typo. Under
-// `runtime: kubernetes` the loader also refuses what a pod could not run with: the
-// `runtime.kubernetes` block's own values, and the keys outside it every pod needs.
+// The loader refuses every key it does not model, in one of three ways it decides once, here: a
+// tossed key is refused naming the key and why its setting no longer exists; a migration-only key
+// is refused with the message that names its replacement, worded exactly as operators have met it;
+// anything else is a typo, refused as an unknown key. Under `runtime: kubernetes` the loader also
+// refuses what a pod could not run with: the `runtime.kubernetes` block's own values, and the keys
+// outside it every pod needs.
 //
 // Load reads the file and nothing it names: a path key (`instructions`, `envoy_token_file`,
 // `nats_nkey_seed_file`, `nats_daemon_nkey_seed_file`, `operator_token_file`,
@@ -23,7 +19,6 @@ package config
 import (
 	"errors"
 	"fmt"
-	"log/slog"
 	"math"
 	"net/url"
 	"os"
@@ -178,20 +173,14 @@ var countKeys = []struct {
 	{"prompt_retire_limit", 2, func(c *Config) *int { return &c.PromptRetireLimit }},
 }
 
-// knownLaterKeys is every top-level key the shipped loader accepts, that no stage so far models
-// and a later stage does, mapped to that stage. A file carrying one loads; the key is logged and
-// dropped. The stage is the plan's that models the key.
-var knownLaterKeys = map[string]int{
-	"max_recursion_depth": 3,
-}
-
-// tossedKeys are the settings the rewrite removed, mapped to why. A file carrying one is refused
-// rather than silently ignored: each was load-bearing for the TypeScript daemon, so leaving it in
-// place would misstate what the daemon does.
+// tossedKeys are the settings that no longer exist, mapped to why. A file carrying one is refused
+// rather than ignored: an operator who sets one expects it to act, and the daemon has nothing that
+// would.
 var tossedKeys = map[string]string{
 	"worker_cap":                 "the running-worker cap no longer exists (LEGION-208 Requirement 8)",
 	"worker_idle_retire_seconds": `a worker is suspended when its phase ends, never after an idle window (LEGION-208 Design, "Process supervision")`,
 	"resync_interval_seconds":    `the mirror of Dispatch and GitHub as truth, and resync's drift healing, no longer exist (LEGION-208 Design, "Ported, and tossed")`,
+	"max_recursion_depth":        "an architect spawns no worker and no sub-architect (the daemon starts every phase, and only the operator starts any other claim), so there is no spawn recursion to bound",
 }
 
 // migrationKeys are the keys refused with a migration message, mapped to that message verbatim.
@@ -207,7 +196,7 @@ var migrationKeys = map[string]string{
 	"worker_budget":     "worker_budget was replaced by worker_cap",
 }
 
-// gatesMergeMessage is `parseGates`'s own refusal (config.ts).
+// gatesMergeMessage is readGates' refusal of `gates.merge`.
 const gatesMergeMessage = "gates.merge is not a Legion setting: human approval of a pull request is the repository's own branch protection or CODEOWNERS rule, which Legion never reads or writes"
 
 // fileConfig holds the modelled keys as they were read: a pointer per key, so a key the file
@@ -372,7 +361,7 @@ func readKeys(root *yaml.Node) (fileConfig, error) {
 			if isDurationKey(key) || isCountKey(key) {
 				err = readPositive(value, key, file)
 			} else {
-				err = classify(key, value)
+				err = classify(key)
 			}
 		}
 		if err != nil {
@@ -422,48 +411,15 @@ func readPositive(value *yaml.Node, key string, file fileConfig) error {
 	return nil
 }
 
-// classify decides an unmodelled key's class, refusing or logging it.
-func classify(key string, value *yaml.Node) error {
+// classify refuses an unmodelled key, naming its class.
+func classify(key string) error {
 	if reason, ok := tossedKeys[key]; ok {
 		return fmt.Errorf("unknown key %s: %s", key, reason)
 	}
 	if message, ok := migrationKeys[key]; ok {
 		return errors.New(message)
 	}
-	stage, ok := knownLaterKeys[key]
-	if !ok {
-		return fmt.Errorf("unknown key %s", key)
-	}
-	// `gates` is the one known-later block walked a level, as the shipped loader walks it
-	// (config.ts CONFIG_SCHEMA's gates): `merge` is a refusal, not a key a later stage models.
-	if key == "gates" {
-		if err := checkGates(value); err != nil {
-			return err
-		}
-	}
-	logIgnored(key, stage)
-	return nil
-}
-
-// checkGates walks `gates` one level: `merge` carries the shipped refusal, `design` is accepted
-// and ignored under the `gates` line until Stage 3 models the design gate.
-func checkGates(value *yaml.Node) error {
-	if value.Tag == "!!null" {
-		return nil
-	}
-	if value.Kind != yaml.MappingNode {
-		return errors.New("gates must be a mapping")
-	}
-	for i := 0; i+1 < len(value.Content); i += 2 {
-		switch key := value.Content[i].Value; key {
-		case "merge":
-			return errors.New(gatesMergeMessage)
-		case "design":
-		default:
-			return fmt.Errorf("unknown key gates.%s", key)
-		}
-	}
-	return nil
+	return fmt.Errorf("unknown key %s", key)
 }
 
 // readRuntime reads `runtime`: the `tmux` scalar (nil), or the shipped one-key `{kubernetes: {...}}`
@@ -488,10 +444,6 @@ func readRuntime(value *yaml.Node) (*Kubernetes, error) {
 		return nil, errors.New("runtime accepts tmux, kubernetes, or a mapping with the single key kubernetes")
 	}
 	return readKubernetes(value.Content[1])
-}
-
-func logIgnored(key string, stage int) {
-	slog.Info("legion.yaml key accepted and ignored", "key", key, "stage", stage)
 }
 
 // readString reads a string key; nil for an unset one (absent from its mapping, or null).
