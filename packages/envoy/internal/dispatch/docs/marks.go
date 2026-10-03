@@ -89,7 +89,7 @@ type Anchored struct {
 // MarkQuote marks one matching quote and returns what the new mark anchors to.
 func (s *Service) MarkQuote(ctx context.Context, artifactID string, mark MarkSpec, quote string, occurrence *int) (Anchored, error) {
 	var anchored Anchored
-	err := s.applyLive(ctx, artifactID, mark.By, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) error {
+	err := s.applyLive(ctx, artifactID, mark.By, func(doc *crdt.Doc, _ *pmdoc.Node, transact func(func(*crdt.Transaction))) error {
 		fragment := doc.GetXmlFragment(fragmentName)
 		tree, err := treeOf(doc)
 		if err != nil {
@@ -265,7 +265,7 @@ func (s *Service) RejectSuggestion(ctx context.Context, artifactID, id string, a
 }
 
 func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWith string, actor model.Actor, accept bool) error {
-	return s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) error {
+	return s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, _ *pmdoc.Node, transact func(func(*crdt.Transaction))) error {
 		fragment := doc.GetXmlFragment(fragmentName)
 		// Read before the Yjs transaction opens: the state vector takes the document lock.
 		since := authoredClock(ctx, artifactID, doc)
@@ -444,7 +444,7 @@ func (s *Service) ProjectMark(ctx context.Context, artifactID, markID string, re
 	if err != nil {
 		return err
 	}
-	return s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) error {
+	return s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, _ *pmdoc.Node, transact func(func(*crdt.Transaction))) error {
 		marks := doc.GetMap(marksMapName)
 		transact(func(txn *crdt.Transaction) {
 			marks.Set(txn, markID, plain)

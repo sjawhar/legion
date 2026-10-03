@@ -1,9 +1,11 @@
 package pmdoc
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"reflect"
 	"regexp"
 	"sort"
@@ -566,22 +568,73 @@ func (n *Node) JSON() ([]byte, error) {
 // concurrency. Block identity and typed-block server state are excluded, while
 // inline marks remain part of the state a document edit can destroy.
 func (n *Node) TokenJSON() ([]byte, error) {
-	if err := n.Validate(); err != nil {
+	var encoded bytes.Buffer
+	if err := n.WriteTokenJSON(&encoded); err != nil {
 		return nil, err
 	}
-	value, err := n.tokenJSON()
-	if err != nil {
-		return nil, err
-	}
-	return json.Marshal(value)
+	return encoded.Bytes(), nil
 }
 
-type tokenNode struct {
-	Type    string       `json:"type"`
-	Attrs   Attrs        `json:"attrs,omitempty"`
-	Content []*tokenNode `json:"content,omitempty"`
-	Text    string       `json:"text,omitempty"`
-	Marks   []tokenMark  `json:"marks,omitempty"`
+// WriteTokenJSON writes TokenJSON's representation to w as it encodes it, so a caller that only
+// hashes it - every document and block token - never holds it whole: built as a tree of its own
+// and then encoded in one piece, a heavy document's representation took two more copies of the
+// document for each token (LEGION-504). It is what encoding/json makes of a node with the fields
+// type, attrs, content, text and marks, in that order and each but type left out when empty: each
+// value is encoded by encoding/json, and only the punctuation between them is written here.
+func (n *Node) WriteTokenJSON(w io.Writer) error {
+	if err := n.Validate(); err != nil {
+		return err
+	}
+	return n.writeTokenJSON(w)
+}
+
+func (n *Node) writeTokenJSON(w io.Writer) error {
+	out := tokenWriter{w: w}
+	out.raw(`{"type":`)
+	out.value(n.Type)
+	if attrs := tokenAttrs(n.Type, n.Attrs); len(attrs) > 0 {
+		out.raw(`,"attrs":`)
+		out.value(attrs)
+	}
+	if len(n.Children) > 0 {
+		out.raw(`,"content":[`)
+		for index, child := range n.Children {
+			if index > 0 {
+				out.raw(",")
+			}
+			if out.err == nil {
+				out.err = child.writeTokenJSON(w)
+			}
+		}
+		out.raw("]")
+	}
+	if n.Text != "" {
+		out.raw(`,"text":`)
+		out.value(n.Text)
+	}
+	if len(n.Marks) > 0 {
+		// Marks are written in the order of their encodings, so a node's marks in any order are
+		// one token.
+		marks := make([][]byte, 0, len(n.Marks))
+		for _, mark := range n.Marks {
+			encoded, err := json.Marshal(tokenMark{Type: mark.Type, Attrs: canonicalAttrs(mark.Attrs)})
+			if err != nil {
+				return err
+			}
+			marks = append(marks, encoded)
+		}
+		sort.Slice(marks, func(left, right int) bool { return string(marks[left]) < string(marks[right]) })
+		out.raw(`,"marks":[`)
+		for index, mark := range marks {
+			if index > 0 {
+				out.raw(",")
+			}
+			out.bytes(mark)
+		}
+		out.raw("]")
+	}
+	out.raw("}")
+	return out.err
 }
 
 type tokenMark struct {
@@ -589,24 +642,34 @@ type tokenMark struct {
 	Attrs Attrs  `json:"attrs,omitempty"`
 }
 
-func (n *Node) tokenJSON() (*tokenNode, error) {
-	out := &tokenNode{Type: n.Type, Attrs: tokenAttrs(n.Type, n.Attrs), Text: n.Text}
-	for _, mark := range n.Marks {
-		out.Marks = append(out.Marks, tokenMark{Type: mark.Type, Attrs: canonicalAttrs(mark.Attrs)})
+// tokenWriter writes a token's encoding to w, keeping the first error and writing nothing after it.
+type tokenWriter struct {
+	w   io.Writer
+	err error
+}
+
+func (t *tokenWriter) raw(text string) {
+	if t.err == nil {
+		_, t.err = io.WriteString(t.w, text)
 	}
-	sort.Slice(out.Marks, func(left, right int) bool {
-		leftJSON, _ := json.Marshal(out.Marks[left])
-		rightJSON, _ := json.Marshal(out.Marks[right])
-		return string(leftJSON) < string(rightJSON)
-	})
-	for _, child := range n.Children {
-		value, err := child.tokenJSON()
-		if err != nil {
-			return nil, err
-		}
-		out.Content = append(out.Content, value)
+}
+
+func (t *tokenWriter) bytes(encoded []byte) {
+	if t.err == nil {
+		_, t.err = t.w.Write(encoded)
 	}
-	return out, nil
+}
+
+func (t *tokenWriter) value(value any) {
+	if t.err != nil {
+		return
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		t.err = err
+		return
+	}
+	t.bytes(encoded)
 }
 
 func tokenAttrs(nodeType string, attrs Attrs) Attrs {

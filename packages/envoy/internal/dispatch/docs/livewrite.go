@@ -53,12 +53,18 @@ type liveWrite struct {
 	state      *roomState
 	// clientID authors every item the transaction writes, on fork: the room's state with the
 	// transaction's updates applied, brought up to date before each operation (forkLive). It is
-	// chosen when the transaction first forks the room (writerAfter), and zero until then.
+	// chosen when the transaction first forks the document (writerAfter), and zero until then.
 	clientID crdt.ClientID
 	fork     *crdt.Doc
-	// forkedFrom is the room document fork was last brought up to date from.
+	// forkedFrom is the room document fork was last brought up to date from, or nil for a fork
+	// built from the stored document while no room held it (coldFork).
 	forkedFrom *crdt.Doc
-	updates    [][]byte
+	// loads reports that fork, but for this transaction's own writes, is a state ygo loads parking
+	// at most loadableItems: it was built from one encoding of the document under that cap
+	// (decodeFork), and nothing has reached it since but this transaction's writes
+	// (refuseUnloadable).
+	loads   bool
+	updates [][]byte
 	// tree and markdown are the document as this transaction's latest operation left it,
 	// rendered once by that operation (applyLive) for the version its transaction may write.
 	// forkLive drops them whenever the fork they describe moves.
@@ -162,8 +168,12 @@ func (s *Service) awaitLiveWriter(ctx context.Context, artifactID string) error 
 // call brings it up to date with only what the room gained since, so an operation does not
 // re-encode the whole room. A room that was reloaded in between is a different document, which
 // may lack state the kept fork still holds (a browser update whose append failed), so the fork is
-// then rebuilt from the reloaded room and the transaction's writes.
+// then rebuilt from the reloaded room and the transaction's writes. A document no room holds is
+// forked from the store instead (coldFork).
 func (s *Service) forkLive(ctx context.Context, write *liveWrite) (*crdt.Doc, error) {
+	if s.srv.GetDoc(write.artifactID) == nil {
+		return s.coldFork(ctx, write)
+	}
 	var gained []byte
 	var room *crdt.Doc
 	var incremental bool
@@ -182,7 +192,15 @@ func (s *Service) forkLive(ctx context.Context, write *liveWrite) (*crdt.Doc, er
 	if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
 		return nil, err
 	}
-	fork, err := buildFork(write, incremental, gained)
+	var fork *crdt.Doc
+	if incremental {
+		fork, err = catchUpFork(write, gained)
+	} else {
+		// The fork being replaced goes before its replacement is built, so the two are never
+		// held at once.
+		write.fork, write.forkedFrom = nil, nil
+		fork, err = decodeFork(write, gained)
+	}
 	if err != nil {
 		// A fork an update failed to reach is in an unknown state, and so is the rendering taken
 		// from it: the next operation rebuilds both.
@@ -191,6 +209,43 @@ func (s *Service) forkLive(ctx context.Context, write *liveWrite) (*crdt.Doc, er
 		return nil, err
 	}
 	write.fork, write.forkedFrom = fork, room
+	return fork, nil
+}
+
+// coldFork returns the fork of a write to a document no room holds: the stored document, which is
+// all of it then, with the transaction's writes applied. It loads no room, which would hold a
+// second copy of the document for as long as the write runs (LEGION-504); the room loads when the
+// write is published, from the store, which by then holds the write. A fork it built is kept for
+// the transaction's next operation while no room has loaded since, as nothing else can have
+// written the document meanwhile: the transaction's writer slot holds off every other writer and
+// settlement, and a browser's edits reach a room. A room that has loaded since is forked from
+// again (forkLive).
+func (s *Service) coldFork(ctx context.Context, write *liveWrite) (*crdt.Doc, error) {
+	if write.fork != nil && write.forkedFrom == nil {
+		return write.fork, nil
+	}
+	// What the room's Apply checks before it would load the room: the document is not shutting
+	// down, its room has not failed, and its issue is open.
+	if err := s.allowInject(ctx, websocket.InjectInfo{Room: write.artifactID, Op: websocket.OpApply}); err != nil {
+		return nil, fmt.Errorf("%w: %w", websocket.ErrInjectRefused, err)
+	}
+	// A fork kept from a room that has since been evicted goes before the new one is built.
+	write.fork, write.forkedFrom = nil, nil
+	write.dropRendering()
+	loaded, err := s.persistence.Load(ctx, write.artifactID)
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, err
+		}
+		s.failRoom(write.artifactID, err)
+		return nil, fmt.Errorf("%w: %w", ErrServiceUnavailable, err)
+	}
+	fork, err := decodeFork(write, loaded.Update)
+	if err != nil {
+		s.failRoom(write.artifactID, err)
+		return nil, fmt.Errorf("%w: %w", ErrServiceUnavailable, err)
+	}
+	write.fork = fork
 	return fork, nil
 }
 
@@ -212,36 +267,51 @@ func writerAfter(writers crdt.StateVector) crdt.ClientID {
 	return highest + 1
 }
 
-// buildFork brings write's kept fork up to date with gained, what its room gained since the fork
-// was last brought up to date, or, when the fork cannot be kept, builds a new one from gained,
-// the room's whole state, and the transaction's writes. Either way it drops a rendering the
-// fork has moved past.
-func buildFork(write *liveWrite, incremental bool, gained []byte) (*crdt.Doc, error) {
-	if incremental {
-		// Content the room gained moves the fork, so the rendering taken from it no longer
-		// describes the document. What says the fork moved is the fork itself, read on either
-		// side of this one apply: nothing else can be trusted. Two reads of the room are two
-		// snapshots - Server.Apply holds no lock across its callback - so an update landing
-		// between them is in one and not the other, and the fork would keep a rendering it
-		// has already moved past. The fork's own state vector and delete set together are the
-		// whole answer, because a deletion creates no struct and so advances no clock, while
-		// the update and every observer fire even for an update that integrates nothing.
-		var wasClocks crdt.StateVector
-		var wasDeletes *crdt.IDSet
-		if write.tree != nil {
-			wasClocks, wasDeletes = write.fork.StateVector(), crdt.DeleteSetFromDoc(write.fork)
-		}
-		if err := crdt.ApplyUpdateV1(write.fork, gained, nil); err != nil {
-			return nil, fmt.Errorf("bring live document fork up to date: %w", err)
-		}
-		if write.tree != nil && !forkHeld(wasClocks, wasDeletes, write.fork) {
-			write.dropRendering()
-		}
-		return write.fork, nil
+// catchUpFork brings write's kept fork up to date with gained, what its room gained since the
+// fork was last brought up to date, and drops a rendering the fork has moved past.
+func catchUpFork(write *liveWrite, gained []byte) (*crdt.Doc, error) {
+	// Content the room gained moves the fork, so the rendering taken from it no longer describes
+	// the document, and the fork no longer holds only the encoding it was loaded from and this
+	// transaction's writes (liveWrite.loads). What says the fork moved is the fork itself, read on
+	// either side of this one apply: nothing else can be trusted. Two reads of the room are two
+	// snapshots - Server.Apply holds no lock across its callback - so an update landing between
+	// them is in one and not the other, and the fork would keep a rendering it has already moved
+	// past. The fork's own state vector and delete set together are the whole answer, because a
+	// deletion creates no struct and so advances no clock, while the update and every observer
+	// fire even for an update that integrates nothing.
+	watched := write.tree != nil || write.loads
+	var wasClocks crdt.StateVector
+	var wasDeletes *crdt.IDSet
+	if watched {
+		wasClocks, wasDeletes = write.fork.StateVector(), crdt.DeleteSetFromDoc(write.fork)
 	}
-	fork := crdt.New(crdt.WithClientID(write.clientID))
-	if err := crdt.ApplyUpdateV1(fork, gained, nil); err != nil {
+	if err := crdt.ApplyUpdateV1(write.fork, gained, nil); err != nil {
+		return nil, fmt.Errorf("bring live document fork up to date: %w", err)
+	}
+	if watched && !forkHeld(wasClocks, wasDeletes, write.fork) {
+		write.dropRendering()
+		write.loads = false
+	}
+	return write.fork, nil
+}
+
+// decodeFork builds a new fork for write from state, one encoding of the document's whole state,
+// and the transaction's writes. It loads state under the cap refuseUnloadable holds a growing
+// write to, and records whether it loaded there (liveWrite.loads); a state that parks more is
+// loaded again under ygo's own cap, as a room loads it. A transaction with no writer id yet takes
+// one past the writers state holds (writerAfter), which only a load of state names, so its first
+// fork reads state twice: once for the writers, once under its id.
+func decodeFork(write *liveWrite, state []byte) (*crdt.Doc, error) {
+	fork, loads, err := loadForkState(write.clientID, state)
+	if err != nil {
 		return nil, fmt.Errorf("fork live document: %w", err)
+	}
+	if write.clientID == 0 {
+		write.clientID = writerAfter(fork.StateVector())
+		fork = nil
+		if fork, loads, err = loadForkState(write.clientID, state); err != nil {
+			return nil, fmt.Errorf("fork live document: %w", err)
+		}
 	}
 	for _, update := range write.updates {
 		if err := crdt.ApplyUpdateV1(fork, update, nil); err != nil {
@@ -250,7 +320,33 @@ func buildFork(write *liveWrite, incremental bool, gained []byte) (*crdt.Doc, er
 	}
 	// A rebuilt fork is a different document from the one the rendering was taken from.
 	write.dropRendering()
+	write.loads = loads
 	return fork, nil
+}
+
+// loadForkState loads state into a new document whose writes client authors (ygo's random id
+// for zero), under loadableItems and, failing that, under maxPendingItems, and reports whether it
+// loaded under the first. Empty state, a document nothing has stored yet, is an empty document.
+func loadForkState(client crdt.ClientID, state []byte) (*crdt.Doc, bool, error) {
+	load := func(pending int) (*crdt.Doc, error) {
+		options := []crdt.DocOption{crdt.WithMaxPendingItems(pending)}
+		if client != 0 {
+			options = append(options, crdt.WithClientID(client))
+		}
+		doc := crdt.New(options...)
+		if len(state) == 0 {
+			return doc, nil
+		}
+		return doc, crdt.ApplyUpdateV1(doc, state, nil)
+	}
+	if doc, err := load(loadableItems); err == nil {
+		return doc, true, nil
+	}
+	doc, err := load(maxPendingItems)
+	if err != nil {
+		return nil, false, err
+	}
+	return doc, false, nil
 }
 
 // dropRendering forgets the rendering and the anchor refresh taken from a fork that has moved.
@@ -355,6 +451,9 @@ func (s *Service) creditLiveWrite(write *liveWrite, actor model.Actor) {
 // error, and every write to the document until it recovered again would be refused.
 func (s *Service) publishLiveWrite(write *liveWrite) {
 	defer s.finishLiveWrite(write)
+	// Committed, the write has no more use for its fork, so the fork goes before the publish,
+	// which loads the room when no room holds the document (coldFork).
+	write.releaseFork()
 	for _, update := range write.updates {
 		err := s.publishLiveUpdate(write.artifactID, update)
 		if err == nil {
@@ -442,12 +541,15 @@ func (s *Service) publishLiveUpdate(room string, update []byte) error {
 
 // finishLiveWrite releases write's room: its writer slot, and the settlement it suppressed,
 // which is armed again when opening the write stopped one or a settlement was asked for while
-// it was open.
+// it was open. It drops what the write held for its transaction's operations, its fork and their
+// updates, keeping the verdict LostOps reads.
 func (s *Service) finishLiveWrite(write *liveWrite) {
 	if write.finished {
 		return
 	}
 	write.finished = true
+	write.releaseFork()
+	write.updates = nil
 	state := write.state
 	state.mu.Lock()
 	state.liveWriter = nil
@@ -457,4 +559,15 @@ func (s *Service) finishLiveWrite(write *liveWrite) {
 	}
 	state.mu.Unlock()
 	close(write.done)
+}
+
+// releaseFork drops write's fork and the rendering taken from it, which serve the transaction's
+// operations alone. A write can outlive its transaction by a long way: whatever holds the
+// transaction's context holds its ledger and so the write, and a pooled pgx connection keeps the
+// context of the queries it last served. Kept, a heavy document's fork and tree stayed resident
+// after the edit that built them had answered (LEGION-504).
+func (w *liveWrite) releaseFork() {
+	w.fork, w.forkedFrom = nil, nil
+	w.loads = false
+	w.dropRendering()
 }

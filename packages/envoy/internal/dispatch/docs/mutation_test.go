@@ -197,10 +197,13 @@ func TestReplaceTextWithTransactionRollsBackUpdate(t *testing.T) {
 		t.Fatalf("rollback replace transaction: %v", err)
 	}
 	ledger.Discard()
-	if err := service.srv.CloseRoom(artifactID, true); err != nil {
-		t.Fatalf("close live document: %v", err)
+	// The durable document is what is read once no room holds it.
+	if service.srv.GetDoc(artifactID) != nil {
+		if err := service.srv.CloseRoom(artifactID, true); err != nil {
+			t.Fatalf("close live document: %v", err)
+		}
+		waitForNoLiveDocument(t, service, artifactID)
 	}
-	waitForNoLiveDocument(t, service, artifactID)
 
 	got, err := service.Text(ctx, artifactID)
 	if err != nil {

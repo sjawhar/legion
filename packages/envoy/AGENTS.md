@@ -186,9 +186,14 @@ margin record - each of which `applyLive` also weighs by what it leaves (`docs/g
 only server writes outside it are settlement's repairs, the block-id backfill and the sweep of
 unrecorded marks, which add no caller text. A joined operation never writes the room: it runs on
 the transaction's fork of the room's document (`docs/livewrite.go`), appends its update inside the
-transaction, and reads through the same fork. The handler ends the transaction with
+transaction, and reads through the same fork. A document no room holds is forked from the store
+without loading its room (`coldFork`), so a cold write holds one copy of the document rather than
+a room and a fork of it; its room loads when the write is published, from the store, which then
+holds the write. The handler ends the transaction with
 `ledger.Commit`, which commits, credits the writes' actor to their rooms, releases the authors a
-version the transaction wrote named, then applies and broadcasts the updates, and last publishes
+version the transaction wrote named, drops the writes' forks (`releaseFork`: whatever holds the
+transaction's context holds its ledger, a pooled pgx connection among them), then applies and
+broadcasts the updates, and last publishes
 the events its document operations appended, ahead of the handler's own; it defers
 `ledger.Discard`, so a transaction that does not commit leaves the room, every connected browser,
 every version and the durable document as they were.

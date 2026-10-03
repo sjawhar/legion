@@ -2413,6 +2413,15 @@ func joinedWrite(service *Service, write func(ctx context.Context) error) error 
 	return ledger.Commit(ctx)
 }
 
+// warmLiveDocument loads artifactID's room, as a browser's connection or a read does.
+func (s *Service) warmLiveDocument(ctx context.Context, artifactID string) error {
+	err := s.srv.Apply(ctx, artifactID, func(_ *crdt.Doc, _ func(func(*crdt.Transaction))) {})
+	if err != nil && !errors.Is(err, ygws.ErrNoChanges) {
+		return err
+	}
+	return nil
+}
+
 func joinedReplaceText(service *Service, artifactID, markdown string, actor model.Actor) (string, error) {
 	var canonical string
 	err := joinedWrite(service, func(ctx context.Context) (err error) {

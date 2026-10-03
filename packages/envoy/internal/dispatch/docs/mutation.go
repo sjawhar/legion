@@ -57,7 +57,12 @@ func recoverMutation(room string, err *error) {
 // does not commit never reaches the room, a browser or a version's authors. It returns
 // websocket.ErrNoChanges when mutate wrote nothing, as the room's Apply does, and
 // ErrServiceUnavailable when the room its slot is on failed before its append.
-func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.Actor, mutate func(*crdt.Doc, func(func(*crdt.Transaction))) error) error {
+//
+// mutate is handed the fork and current, the fork's tree as the operation starts, which applyLive
+// reads anyway to weigh the write against: a mutate that starts from it reads no tree of its own,
+// and so holds no third copy of a heavy document beside the fork and the tree it writes. current
+// is applyLive's to compare with what the write leaves, so a mutate never changes it.
+func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.Actor, mutate func(doc *crdt.Doc, current *pmdoc.Node, transact func(func(*crdt.Transaction))) error) error {
 	if s.shuttingDown(artifactID) {
 		return ErrServiceUnavailable
 	}
@@ -81,11 +86,10 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 	recorded := false
 	defer func() {
 		if !recorded && len(updates) > 0 {
-			write.fork, write.forkedFrom = nil, nil
-			// The rendering describes that fork, so it goes with it. forkLive's rebuild drops
-			// it too; keeping the two lines that abandon a fork together is what covers an
-			// operation that recorded the rendering and then failed to version.
-			write.dropRendering()
+			// The rendering describes that fork, so it goes with it (releaseFork). forkLive's
+			// rebuild drops it too; abandoning both in one call is what covers an operation that
+			// recorded the rendering and then failed to version.
+			write.releaseFork()
 		}
 	}()
 	before, err := treeOf(fork)
@@ -98,7 +102,7 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 	margin, stopMargin := watchMargin(fork)
 	mutateErr := func() (err error) {
 		defer recoverMutation(artifactID, &err)
-		return mutate(fork, func(inner func(*crdt.Transaction)) { fork.Transact(inner) })
+		return mutate(fork, before, func(inner func(*crdt.Transaction)) { fork.Transact(inner) })
 	}()
 	stopMargin()
 	unsubscribe()
@@ -108,14 +112,6 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 	if len(updates) == 0 {
 		return websocket.ErrNoChanges
 	}
-	tree, err := treeOf(fork)
-	if err != nil {
-		return err
-	}
-	markdown, err := renderTree(tree)
-	if err != nil {
-		return err
-	}
 	// The measure the room's update observer classifies a live update by (updateChangesMarkdown):
 	// a write that leaves the rendered markdown alone - an anchor mark, a mark record's projection,
 	// an attribute no rendering carries - changes nothing a version stores.
@@ -123,9 +119,22 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 	if err != nil {
 		return err
 	}
-	if err := refuseGrowth(growth{fork: fork, before: beforeMarkdown, after: markdown, margin: margin, serverState: func() bool {
-		return tree.EqualOutsideServerState(before)
-	}}); err != nil {
+	tree, err := treeOf(fork)
+	if err != nil {
+		return err
+	}
+	// What refuseGrowth asks of the tree before the write is asked now, so that tree is not held
+	// through the rendering, the measure and the rest of the write beside the tree after it.
+	outsideServerState := tree.EqualOutsideServerState(before)
+	markdown, err := renderTree(tree)
+	if err != nil {
+		return err
+	}
+	serverState := beforeMarkdown != markdown && outsideServerState
+	if err := refuseGrowth(growth{
+		fork: fork, loads: loadsAsForked(write), before: beforeMarkdown, after: markdown, margin: margin,
+		serverState: func() bool { return serverState },
+	}); err != nil {
 		return err
 	}
 	update, err := mergeUpdates(updates)
@@ -229,7 +238,7 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 	}
 	var canonical string
 	var unchanged bool
-	err = s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) error {
+	err = s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, _ *pmdoc.Node, transact func(func(*crdt.Transaction))) error {
 		fragment := doc.GetXmlFragment(fragmentName)
 		current, err := treeOf(doc)
 		if err != nil {
@@ -672,14 +681,6 @@ func lockTableAnchorRows(ctx context.Context, tx pgx.Tx, artifactID string, snap
 	return &ErrInvalidOp{Field: "index", Reason: fmt.Sprintf("%s index %d would remove active anchors: %s", first.axis, first.index, strings.Join(active, ", "))}
 }
 
-func (s *Service) warmLiveDocument(ctx context.Context, artifactID string) error {
-	err := s.srv.Apply(ctx, artifactID, func(_ *crdt.Doc, _ func(func(*crdt.Transaction))) {})
-	if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
-		return err
-	}
-	return nil
-}
-
 // currentToken is the whole-document token of the document the caller sees, for an edit that
 // applies no operation and so writes no tree of its own to take one from.
 func (s *Service) currentToken(ctx context.Context, artifactID string) (string, error) {
@@ -713,12 +714,10 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 		return s.applyOpsUnconditional(ctx, artifactID, ops, actor)
 	}
 	// The live document's locks, in their order (see liveWrite): its owner row and, unless the
-	// room has failed, its writer slot; then, with the room loaded, its advisory lock, held from
-	// before the precondition is read.
+	// room has failed, its writer slot; then its advisory lock, held from before the precondition
+	// is read. A document no room holds is forked from the store under that lock (coldFork), which
+	// loads no room while the lock is held.
 	if _, err := s.joinLiveWrite(ctx, ledgerFrom(ctx), artifactID); err != nil {
-		return EditOutcome{}, err
-	}
-	if err := s.warmLiveDocument(ctx, artifactID); err != nil {
 		return EditOutcome{}, err
 	}
 	if err := lockDocumentRoom(ctx, tx, artifactID); err != nil {
@@ -764,17 +763,15 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 	if err := lockTableAnchorRows(ctx, tx, artifactID, snapshots); err != nil {
 		return EditOutcome{}, err
 	}
-	err = s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) error {
+	err = s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, current *pmdoc.Node, transact func(func(*crdt.Transaction))) error {
 		fragment := doc.GetXmlFragment(fragmentName)
 		// Read before the Yjs transaction opens: the state vector takes the document lock.
 		since := authoredClock(ctx, artifactID, doc)
 		var mutationErr error
 		transact(func(transaction *crdt.Transaction) {
-			tree, err := treeOfTransaction(transaction, fragment)
-			if err != nil {
-				mutationErr = err
-				return
-			}
+			// The fork is this transaction's alone, so current is the tree this Yjs transaction
+			// would read.
+			tree := current
 			if err := checkEditPrecondition(tree, *precondition); err != nil {
 				mutationErr = err
 				return
@@ -787,8 +784,16 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 			}
 			// Block addressing (delete/move by id, whole-text delete) needs every block
 			// identified; a browser-authored block the closer has not yet stamped gets its id
-			// here, and the same ids persist through the update below.
-			pmdoc.EnsureBlockIDs(tree)
+			// here, and the same ids persist through the update below. current is applyLive's
+			// to compare with, so the ids go on a tree read for the edit.
+			if pmdoc.BlockIDRepairCount(tree) > 0 {
+				var err error
+				if tree, err = treeOfTransaction(transaction, fragment); err != nil {
+					mutationErr = err
+					return
+				}
+				pmdoc.EnsureBlockIDs(tree)
+			}
 			batch, err := applyOperations(tree, ops)
 			if err != nil {
 				mutationErr = err
@@ -843,14 +848,19 @@ func (s *Service) applyOpsUnconditional(ctx context.Context, artifactID string, 
 		return EditOutcome{Token: token}, nil
 	}
 	var outcome EditOutcome
-	err := s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) error {
+	err := s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, current *pmdoc.Node, transact func(func(*crdt.Transaction))) error {
 		fragment := doc.GetXmlFragment(fragmentName)
 		since := authoredClock(ctx, artifactID, doc)
-		tree, err := treeOf(doc)
-		if err != nil {
-			return err
+		// Block addressing needs every block identified (see ApplyOps). current is applyLive's to
+		// compare with, so the ids a browser-authored block lacks go on a tree read for the edit.
+		tree := current
+		if pmdoc.BlockIDRepairCount(tree) > 0 {
+			var err error
+			if tree, err = treeOf(doc); err != nil {
+				return err
+			}
+			pmdoc.EnsureBlockIDs(tree)
 		}
-		pmdoc.EnsureBlockIDs(tree)
 		batch, err := s.applyOperations(ctx, artifactID, tree, ops)
 		if err != nil {
 			return err
@@ -891,7 +901,7 @@ func (s *Service) SetBlockAttributes(
 	attributes map[string]any,
 	actor model.Actor,
 ) error {
-	err := s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) error {
+	err := s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, _ *pmdoc.Node, transact func(func(*crdt.Transaction))) error {
 		fragment := doc.GetXmlFragment(fragmentName)
 		tree, err := treeOf(doc)
 		if err != nil {

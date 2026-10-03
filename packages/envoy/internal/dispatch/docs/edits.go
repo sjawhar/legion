@@ -175,13 +175,14 @@ func (e *ErrPreconditionFailed) Error() string {
 }
 
 // nodeToken hashes a canonical semantic Proof representation, including inline
-// marks but excluding stable block identity and server-owned typed attributes.
+// marks but excluding stable block identity and server-owned typed attributes. The
+// representation is hashed as it is encoded (pmdoc.WriteTokenJSON), never held whole.
 func nodeToken(node *pmdoc.Node) (string, error) {
-	encoded, err := node.TokenJSON()
-	if err != nil {
+	hash := sha256.New()
+	if err := node.WriteTokenJSON(hash); err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("sha256:%x", sha256.Sum256(encoded)), nil
+	return fmt.Sprintf("sha256:%x", hash.Sum(nil)), nil
 }
 
 func blockTokens(tree *pmdoc.Node) (map[string]string, error) {

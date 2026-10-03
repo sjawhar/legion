@@ -46,6 +46,9 @@ type growth struct {
 	// refuseUnloadable loads, or nil for a new document, which one writer wrote and so parks
 	// nothing.
 	fork *crdt.Doc
+	// loads reports that fork is already known to load parking at most loadableItems
+	// (loadsAsForked), so refuseUnloadable has nothing to try.
+	loads bool
 	// before and after are the document's renderings before the write ("" for a new document)
 	// and after it.
 	before, after string
@@ -69,7 +72,7 @@ func refuseGrowth(g growth) error {
 		return err
 	}
 	if g.after == g.before {
-		if g.fork == nil {
+		if g.fork == nil || g.loads {
 			return nil
 		}
 		return refuseUnloadable(g.fork, func() bool { return false })
@@ -87,7 +90,7 @@ func refuseGrowth(g growth) error {
 	if err != nil {
 		return err
 	}
-	if g.fork == nil {
+	if g.fork == nil || g.loads {
 		return nil
 	}
 	return refuseUnloadable(g.fork, grew)
@@ -265,7 +268,7 @@ const loadableItems = maxPendingItems - maxPendingItems/10
 // load at all is always refused, since storing it would leave the document unreadable. The check is
 // the load itself, on a copy: nothing short of reading the state tells how many items its writers'
 // order parks. A state that holds no more items than the margin - each item spans at least one
-// clock tick - is not loaded.
+// clock tick - is not loaded, nor is one loadsAsForked already answers for.
 func refuseUnloadable(fork *crdt.Doc, grew func() bool) error {
 	var clocks uint64
 	for _, clock := range fork.StateVector() {
@@ -284,4 +287,24 @@ func refuseUnloadable(fork *crdt.Doc, grew func() bool) error {
 	}
 	return fmt.Errorf("%w: this change would leave the document too large for the server to load again with room to spare (its live copy would park more than %d of the %d items a load may wait on); shorten the change, or split the document",
 		ErrDocumentTooLarge, loadableItems, maxPendingItems)
+}
+
+// loadsAsForked reports whether the state write leaves on its fork is known to load parking at
+// most loadableItems without loading it: the fork was loaded from one encoding of the document
+// under that cap and has taken nothing since but the transaction's own writes
+// (liveWrite.loads), and their writer is read after every writer the fork holds. A load reads
+// writers in order of their ids and parks an item only for a writer it has not read yet, so items
+// by the last writer read park nothing, and the state parks no more than the encoding the fork
+// was loaded from did. Loading a heavy document's state to learn that again held a third copy of
+// it beside the room and the fork (LEGION-504).
+func loadsAsForked(write *liveWrite) bool {
+	if !write.loads || write.fork == nil {
+		return false
+	}
+	for writer := range write.fork.StateVector() {
+		if writer > write.clientID {
+			return false
+		}
+	}
+	return true
 }
