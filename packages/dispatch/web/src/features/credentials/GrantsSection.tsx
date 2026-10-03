@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 
 import { api, apiErrorMessage } from "../../api/client";
+import type { CredentialGrant } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import {
@@ -22,12 +23,19 @@ import { Timestamp } from "../refs/Timestamp";
 import { settingsTableWrapper } from "../settings/classes";
 import { credentialGrantsQuery } from "./grants";
 
+/** How a grant came to be, for its Live grants row: the policy's, or the person who approved it. */
+function grantedBy(grant: CredentialGrant): string {
+  return grant.granted === "automatic" ? "Automatically" : `Approved by ${grant.approver ?? "—"}`;
+}
+
 /**
- * The live approval-granted credential grants the viewer approved, and those on enrollments the
- * viewer operates whoever approved them, each naming its approver and revocable with one click:
- * Dispatch sends the broker the viewer's own login, and the broker allows the revoke only when that
- * login is the grant's approver or its enrollment's operator. A pod enrollment's slot shows under
- * its enrollment, so the grants of two roles in one pod read apart. Rendered on the Settings page.
+ * The viewer's live credential grants: every grant of a session the viewer operates, whether the
+ * policy gave it without asking or someone approved it, and every grant the viewer approved on
+ * anyone's session. Each row names how it was granted and is revocable with one click: Dispatch
+ * sends the broker the viewer's own login, and the broker allows the revoke only when that login
+ * is the grant's approver or its enrollment's operator. Revoking an automatic grant also makes
+ * that session ask before it gets those secrets again. A pod enrollment's slot shows under its
+ * enrollment, so the grants of two roles in one pod read apart. Rendered on the Settings page.
  */
 export function GrantsSection(): ReactNode {
   const queryClient = useQueryClient();
@@ -46,8 +54,9 @@ export function GrantsSection(): ReactNode {
         Live grants
       </h2>
       <p className={`mt-1 text-sm ${textSecondaryOnCanvas}`}>
-        Live credential grants you approved, and those on enrollments you operate, whoever approved
-        them. Revoking one ends its access immediately.
+        Every live grant of your sessions, given automatically or on approval, and the grants you
+        approved. Revoking one ends its access immediately; after you revoke an automatic grant,
+        that session asks before it gets those secrets again.
       </p>
 
       {grants.isPending ? <p className={`mt-6 ${textMutedOnCanvas}`}>Loading grants…</p> : null}
@@ -72,7 +81,7 @@ export function GrantsSection(): ReactNode {
                   Names
                 </th>
                 <th className="px-4 py-3 font-semibold" scope="col">
-                  Approver
+                  Granted
                 </th>
                 <th className="px-4 py-3 font-semibold" scope="col">
                   Created
@@ -107,7 +116,7 @@ export function GrantsSection(): ReactNode {
                     <td className={`px-4 py-3 ${textSecondaryOnSurface}`}>
                       {grant.names.join(", ")}
                     </td>
-                    <td className={`px-4 py-3 ${textSecondaryOnSurface}`}>{grant.approver}</td>
+                    <td className={`px-4 py-3 ${textSecondaryOnSurface}`}>{grantedBy(grant)}</td>
                     <td className={`px-4 py-3 ${textSecondaryOnSurface}`}>
                       <Timestamp at={grant.created_at} />
                     </td>

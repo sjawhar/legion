@@ -5,8 +5,9 @@
 # running on one machine on example data. It starts
 #
 #   - the broker (packages/envoy/cmd/broker) on its fake secrets file (internal/broker/secrets'
-#     development stand-in for Secrets Manager), holding one secret, DEMO_API_KEY, owned by
-#     alice@example.com at the human tier, whose value is made up, in a database of its own beside
+#     development stand-in for Secrets Manager), holding three secrets with made-up values:
+#     DEMO_API_KEY, alice@example.com's at the human tier; DEMO_READ_TOKEN, hers at the agent tier;
+#     and DEMO_SHARED_KEY, shared at the human tier; in a database of its own beside
 #     DATABASE_URL's, created and dropped by this run;
 #   - the Dispatch e2e harness (packages/dispatch/e2e: fake Envoy, fake GitHub, run-server.sh) on
 #     DATABASE_URL, emptied, pointed at that broker; its signed-in human is `alice@example.com`;
@@ -152,13 +153,19 @@ PGOPTIONS="-c client_min_messages=warning" psql "$admin_url" -v ON_ERROR_STOP=1 
   -c "create database ${run_database}"
 broker_database=$run_database
 
-# --- The broker, on a made-up secret of the operator's at the human tier, so the operator approves
-# every request for it, and a grant lives an hour. -----------------------------------------------
+# --- The broker, on made-up secrets: one of the operator's at the human tier, so she approves every
+# request for it; one of hers at the agent tier, which her own sessions get without asking; and a
+# shared one at the human tier, which anyone signed in to Dispatch approves. A grant lives an hour.
 secrets_prefix="example/agent-secrets/"
 secrets_key="arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab"
 cat >"$work/fake-secrets.json" <<EOF
-{"secrets": [{"name": "${secrets_prefix}demo-api-key", "kms_key_id": "${secrets_key}",
-  "tags": {"owner": "${OPERATOR}", "tier": "human"}, "value": "demo-key-not-a-real-secret-7f3a"}]}
+{"secrets": [
+  {"name": "${secrets_prefix}demo-api-key", "kms_key_id": "${secrets_key}",
+   "tags": {"owner": "${OPERATOR}", "tier": "human"}, "value": "demo-key-not-a-real-secret-7f3a"},
+  {"name": "${secrets_prefix}demo-read-token", "kms_key_id": "${secrets_key}",
+   "tags": {"owner": "${OPERATOR}", "tier": "agent"}, "value": "demo-read-token-not-a-real-secret-41c2"},
+  {"name": "${secrets_prefix}demo-shared-key", "kms_key_id": "${secrets_key}",
+   "tags": {"owner": "shared", "tier": "human"}, "value": "demo-shared-key-not-a-real-secret-9b0e"}]}
 EOF
 chmod 600 "$work/fake-secrets.json"
 # The broker's UI bearer, which Dispatch sends it, reaches both through a file, never an argv.

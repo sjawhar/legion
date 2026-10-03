@@ -2,9 +2,10 @@
 
 The scripts that make the secrets broker's screenshots and narrated walkthrough. Everything they
 show runs on one machine on example data: an empty Dispatch e2e workspace (whose signed-in human is
-`alice@example.com`), a broker whose one secret, `DEMO_API_KEY`, is hers at the human tier and
-holds a made-up value, and an agent machine whose hostname is `example-host-build`. No credential,
-private hostname or production service is involved.
+`alice@example.com`), a broker holding three secrets with made-up values (`DEMO_API_KEY`, hers at
+the human tier, which the flow asks for; `DEMO_READ_TOKEN`, hers at the agent tier; and
+`DEMO_SHARED_KEY`, shared at the human tier), and an agent machine whose hostname is
+`example-host-build`. No credential, private hostname or production service is involved.
 
 | File | What it is |
 | --- | --- |
@@ -26,9 +27,10 @@ DATABASE_URL=<url> bash docs/site/media/broker/rig.sh
 
 It builds the broker, `agent-secrets` and `agent-secrets-helper`; creates the broker's database
 beside `DATABASE_URL`'s and starts the broker on its development secrets file, which stands in for
-Secrets Manager and tags `DEMO_API_KEY` `owner=alice@example.com`, `tier=human`, with grants
-lasting an hour (`BROKER_MAX_GRANT_SECONDS=3600`); starts the Dispatch e2e harness's three servers
-on `DATABASE_URL` with the server pointed at the broker (`packages/dispatch/e2e/run-server.sh`'s
+Secrets Manager and tags `DEMO_API_KEY` `owner=alice@example.com`, `tier=human`, `DEMO_READ_TOKEN`
+`owner=alice@example.com`, `tier=agent`, and `DEMO_SHARED_KEY` `owner=shared`, `tier=human`, with
+grants lasting an hour (`BROKER_MAX_GRANT_SECONDS=3600`); starts the Dispatch e2e harness's three
+servers on `DATABASE_URL` with the server pointed at the broker (`packages/dispatch/e2e/run-server.sh`'s
 `DISPATCH_E2E_AGENT_SECRETS_URL`), and empties its database; and starts the agent machine,
 `agent-secrets-helper` for `alice@example.com` under the hostname
 `example-host-build`, alone in a UTS namespace of its own, with the agent's shells on this

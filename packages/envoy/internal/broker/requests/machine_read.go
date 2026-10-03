@@ -378,9 +378,10 @@ func (m *Machine) ReadRecord(ctx context.Context, recordID string) (RecordDetail
 	return detail, nil
 }
 
-// ApproverGrant is one live, approval-granted grant an approver (or its enrollment's operator) may
-// revoke, for GET /v1/grants?approver=<login>. Approver is the login that approved it, which for an
-// operator's own list can be another login.
+// ApproverGrant is one live grant a person may revoke, for GET /v1/grants?approver=<login>.
+// Approver is the login that approved it, which for an operator's own list can be another login,
+// and "" for a grant the policy gave the session without asking (an automatic grant, which has no
+// RecordID either).
 type ApproverGrant struct {
 	GrantID    string
 	RecordID   *string
@@ -391,17 +392,17 @@ type ApproverGrant struct {
 	CreatedAt  time.Time
 }
 
-// GrantsForApprover lists every live grant approver (or its enrollment's operator) may revoke:
-// only grants an approval actually decided — an automatic grant carries no approver and never
-// appears here — newest first.
+// GrantsForApprover lists every live grant approver may revoke, newest first: each grant of a
+// session approver operates, approved or automatic, and each grant approver approved on anyone's
+// session.
 func (m *Machine) GrantsForApprover(ctx context.Context, approver string) ([]ApproverGrant, error) {
 	login := record.CanonicalLogin(approver)
-	rows, err := m.Store.Pool.Query(ctx, `select g.id, r.record_id, e.kind, e.runtime_id, coalesce(e.operator,''), e.slot, g.approver, g.expires_at, g.created_at,
+	rows, err := m.Store.Pool.Query(ctx, `select g.id, r.record_id, e.kind, e.runtime_id, coalesce(e.operator,''), e.slot, coalesce(g.approver,''), g.expires_at, g.created_at,
 		coalesce((select array_agg(rs.name order by rs.name) from request_secrets rs where rs.request_id=r.id and rs.decision<>'deny'), '{}')
 		from grants g
 		join requests r on r.id=g.request_id
 		join enrollments e on e.id=g.enrollment_id
-		where g.revoked_at is null and g.expires_at > now() and g.approver is not null and g.approver<>''
+		where g.revoked_at is null and g.expires_at > now()
 		and (g.approver=$1 or e.operator=$1)
 		order by g.created_at desc`, login)
 	if err != nil {

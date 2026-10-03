@@ -99,6 +99,13 @@ to that person for approval. An owner may also be a service, whose secrets go on
 service's own sessions; the broker has no way yet to register a service, so it refuses a secret
 whose owner tag names one.
 
+One thing besides the tags changes what a session gets at once: a person who revokes a grant a
+session got without asking **withholds** its secrets from that session
+(`packages/envoy/internal/broker/requests/machine_state.go`, `RevokeByApprover`). From then on the
+session's requests for them are sent to the owner for approval, or to anyone signed in to Dispatch
+for a shared secret, for as long as the session lives. Other sessions, the person's own included,
+still get them at once.
+
 The broker reads the namespace when it starts, and refuses to start when it cannot, then again every
 five minutes, a fixed time rather than a setting (`policyRefresh` in
 `packages/envoy/cmd/broker/main.go`). A tag change takes effect at the next read. A read that fails
@@ -145,22 +152,24 @@ what its environment holds (`printenv NAME` prints it). A session holding a gran
 the value: approve a secret only for a session you would trust with the value itself.
 
 A grant ends when it expires, when its session revokes it (`agent-secrets revoke`), when its
-approver or its enrollment's operator revokes it in Dispatch (an approved grant) or through the
-broker's revoke route, or when its enrollment ends. Ending a grant ends access only to a secret
-someone must approve: a secret granted automatically is granted again at the session's next
-request. To end access to one, change its tags
-([revoke a session or a grant](/legion/broker/guides/revoke-a-session/#end-access-to-an-automatic-secret)).
+approver or its enrollment's operator revokes it in Dispatch, or when its enrollment ends. A grant
+the session got without asking is revoked like any other, and its session's next request for the
+same secrets asks for approval instead of getting them again (the person
+[withholds](#owner-and-tier-who-may-have-which-secret) them); a session revoking its own grant
+withholds nothing. To end every session's automatic access to a secret, change its tags
+([revoke a session or a grant](/legion/broker/guides/revoke-a-session/#end-every-sessions-access-to-a-secret)).
 
 ## Approvals
 
 An approval happens in Dispatch, never in the broker. The broker holds no Dispatch credential and
 sends Dispatch nothing: Dispatch's server reads the broker's pending list and records for the
 person signed in, and when that person clicks **Approve** or **Deny**, Dispatch's server calls the
-broker with the shared UI token (`BROKER_UI_TOKEN`) and that person's Dispatch login, taken from
-their Dispatch session. The broker then checks that login against the record's approver: anyone
-else is refused `NOT_APPROVER`, whatever state the record is in. A request for a shared human-tier
-secret names the approver `anyone`: it waits on every person's pending list, and any person signed
-in to Dispatch may decide it.
+broker with the shared UI token (`BROKER_UI_TOKEN`) and that person's email, taken from their
+Dispatch session. The broker then checks that email against the record's approver: anyone else is
+refused `NOT_APPROVER`, whatever state the record is in. A request for a shared human-tier secret,
+or for a shared agent-tier secret a person withheld from its session, names the approver `anyone`:
+it waits in every person's Inbox, any person signed in to Dispatch may decide it, and the broker
+records the email of whoever did.
 
 An approval belongs to the person who gave it, so a change to a secret's tags reaches what was
 approved before it wherever the new tags want the secret approved for that session:
@@ -206,7 +215,8 @@ approved record behind it releases nothing.
 Beside the records, the broker keeps an append-only `audit` table with one row per event:
 `enrollment.created`, `enrollment.revoked`, `enrollment.expired`, `request.created`,
 `request.granted`, `request.denied`, `request.cancelled`, `request.expired`, `grant.used` (each time
-a session reads a grant, naming the secrets released) and `grant.revoked`. Each row names its actor:
-`human:<login>`, `session:<enrollment id>`, `launcher:<credential id>` or `broker`. No record, event
+a session reads a grant, naming the secrets released) and `grant.revoked` (naming, under
+`withheld`, the secrets a person's revoke withheld from the session). Each row names its actor:
+`human:<email>`, `session:<enrollment id>`, `launcher:<credential id>` or `broker`. No record, event
 or audit row ever holds a secret value. [Operating the broker](/legion/broker/operate/#the-audit-record)
 shows how to read them.

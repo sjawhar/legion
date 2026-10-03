@@ -64,7 +64,13 @@ func newContractRig(t *testing.T) *contractRig {
 	t.Helper()
 	brokerStore := brokerstoretest.Open(t)
 
-	local := secrets.NewLocal(policytest.Secret("DEEL_API_KEY", contractApprover, policy.TierHuman, "deel-v1"))
+	local := secrets.NewLocal(
+		policytest.Secret("DEEL_API_KEY", contractApprover, policy.TierHuman, "deel-v1"),
+		// contractApprover's own sessions get it without asking.
+		policytest.Secret("AUTO_TOKEN", contractApprover, policy.TierAgent, "auto-v1"),
+		// Any signed-in person approves a request for it.
+		policytest.Secret("SHARED_KEY", policy.OwnerShared, policy.TierHuman, "shared-v1"),
+	)
 	cur := policytest.Current(t, local)
 
 	brokerMux := http.NewServeMux()
@@ -178,29 +184,41 @@ func (rig *contractRig) brokerReq(t *testing.T, method, path string, headers map
 	return response.StatusCode, respBody
 }
 
-// pendingAgentSecret is a pending agent_secret record and the session that asked for it, which
-// alone can read a grant's value back.
-type pendingAgentSecret struct {
+// contractSession is an agent's enrolled session, which alone can ask for secrets and read a
+// grant's value back, and RecordID, the pending record its last request made, if it made one.
+type contractSession struct {
 	RecordID     string
 	EnrollmentID string
 	Key          *ecdsa.PrivateKey
 }
 
-// createPendingAgentSecretRecord signs a real request object with a fresh session enrollment's
-// key and posts it straight to the broker's own session route — the only way a pending
-// agent_secret record comes to exist — returning the record Dispatch's routes then decide.
-func (rig *contractRig) createPendingAgentSecretRecord(t *testing.T, reason string, names ...string) pendingAgentSecret {
+// contractRequested is POST /v1/requests's answer as these tests read it.
+type contractRequested struct {
+	State    string  `json:"state"`
+	GrantID  *string `json:"grant_id"`
+	RecordID *string `json:"record_id"`
+}
+
+// newSession enrolls a fresh session operator's machine runs.
+func (rig *contractRig) newSession(t *testing.T, operator string) contractSession {
 	t.Helper()
-	enrollmentID, key := rig.newSessionEnrollment(t, contractApprover)
+	enrollmentID, key := rig.newSessionEnrollment(t, operator)
+	return contractSession{EnrollmentID: enrollmentID, Key: key}
+}
+
+// request signs a real request object with session's key and posts it straight to the broker's own
+// session route — the only way a request, and a pending agent_secret record, comes to exist.
+func (rig *contractRig) request(t *testing.T, session contractSession, reason string, names ...string) contractRequested {
+	t.Helper()
 	details := make([]record.AuthorizationDetail, len(names))
 	for i, name := range names {
 		details[i] = record.AuthorizationDetail{Type: "agent_secret", Identifier: name, Actions: []string{"inject"}}
 	}
-	compact, err := record.Sign(key, rig.BrokerURL, details, reason, "", time.Now())
+	compact, err := record.Sign(session.Key, rig.BrokerURL, details, reason, "", time.Now())
 	if err != nil {
 		t.Fatalf("record.Sign: %v", err)
 	}
-	p, err := proof.Sign(key, enrollmentID, http.MethodPost, rig.BrokerURL+"/v1/requests", time.Now())
+	p, err := proof.Sign(session.Key, session.EnrollmentID, http.MethodPost, rig.BrokerURL+"/v1/requests", time.Now())
 	if err != nil {
 		t.Fatalf("proof.Sign: %v", err)
 	}
@@ -209,17 +227,28 @@ func (rig *contractRig) createPendingAgentSecretRecord(t *testing.T, reason stri
 	if status != http.StatusOK {
 		t.Fatalf("POST /v1/requests = %d: %s", status, body)
 	}
-	created := struct {
-		RecordID *string `json:"record_id"`
-	}{}
-	if err := json.Unmarshal(body, &created); err != nil || created.RecordID == nil {
+	var created contractRequested
+	if err := json.Unmarshal(body, &created); err != nil {
 		t.Fatalf("decode create-request response: %v (body: %s)", err, body)
 	}
-	return pendingAgentSecret{RecordID: *created.RecordID, EnrollmentID: enrollmentID, Key: key}
+	return created
+}
+
+// createPendingAgentSecretRecord asks for names from a fresh session of contractApprover's,
+// returning the pending record Dispatch's routes then decide.
+func (rig *contractRig) createPendingAgentSecretRecord(t *testing.T, reason string, names ...string) contractSession {
+	t.Helper()
+	session := rig.newSession(t, contractApprover)
+	created := rig.request(t, session, reason, names...)
+	if created.State != "pending" || created.RecordID == nil {
+		t.Fatalf("create-request = %+v, want pending with a record", created)
+	}
+	session.RecordID = *created.RecordID
+	return session
 }
 
 // values reads a grant's released values as the session that holds it, straight from the broker.
-func (rig *contractRig) values(t *testing.T, pending pendingAgentSecret, grantID string) (int, map[string]string) {
+func (rig *contractRig) values(t *testing.T, pending contractSession, grantID string) (int, map[string]string) {
 	t.Helper()
 	path := "/v1/grants/" + grantID + "/values"
 	p, err := proof.Sign(pending.Key, pending.EnrollmentID, http.MethodPost, rig.BrokerURL+path, time.Now())
@@ -429,5 +458,144 @@ func TestGrantsListAndRevokeByApproverThroughDispatch(t *testing.T) {
 		if g.GrantID == grantID {
 			t.Fatalf("revoked grant %s still listed: %+v", grantID, grantsAfter.Grants)
 		}
+	}
+}
+
+// contractPending is one row of Dispatch's pending list.
+type contractPending struct {
+	RecordID    string   `json:"record_id"`
+	Kind        string   `json:"kind"`
+	Identifiers []string `json:"identifiers"`
+}
+
+// pendingFor reads login's credential inbox through Dispatch.
+func (rig *contractRig) pendingFor(t *testing.T, login string) []contractPending {
+	t.Helper()
+	resp := dispatchRequest(t, rig.Dispatch, http.MethodGet, "/api/v1/credential-requests?approver=me", nil, login)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("GET pending as %s = %d: %s", login, resp.Code, resp.Body.String())
+	}
+	return decodeBody[struct {
+		Pending []contractPending `json:"pending"`
+	}](t, resp).Pending
+}
+
+// TestASharedSecretsRequestIsInEveryInboxAndAnyoneApprovesIt drives a request whose approver is
+// anyone (a shared human-tier secret) through Dispatch: it is in both signed-in people's
+// credential inboxes, the second person, who neither owns nor operates anything, approves it, the
+// broker records the email Dispatch sent as the deciding login, the session gets the value, and
+// the request leaves both inboxes.
+func TestASharedSecretsRequestIsInEveryInboxAndAnyoneApprovesIt(t *testing.T) {
+	rig := newContractRig(t)
+	pending := rig.createPendingAgentSecretRecord(t, "deploy the preview", "SHARED_KEY")
+
+	for _, login := range []string{contractApprover, contractOther} {
+		rows := rig.pendingFor(t, login)
+		if len(rows) != 1 || rows[0].RecordID != pending.RecordID || rows[0].Kind != "agent_secret" || len(rows[0].Identifiers) != 1 || rows[0].Identifiers[0] != "SHARED_KEY" {
+			t.Fatalf("%s's inbox = %+v, want the SHARED_KEY request %s", login, rows, pending.RecordID)
+		}
+	}
+	readResp := dispatchRequest(t, rig.Dispatch, http.MethodGet, "/api/v1/credential-requests/"+pending.RecordID, nil, contractOther)
+	if read := decodeBody[contractRecord](t, readResp); read.State != "pending" || read.Approver != record.AnyoneApprover {
+		t.Fatalf("record read = %s, want pending with approver %s", readResp.Body.String(), record.AnyoneApprover)
+	}
+
+	resp := dispatchRequest(t, rig.Dispatch, http.MethodPost, "/api/v1/credential-requests/"+pending.RecordID+"/approve", map[string]any{}, contractOther)
+	approved := decodeBody[struct {
+		State   string  `json:"state"`
+		GrantID *string `json:"grant_id"`
+	}](t, resp)
+	if resp.Code != http.StatusOK || approved.State != "approved" || approved.GrantID == nil {
+		t.Fatalf("approve as %s = %d %s, want approved with a grant", contractOther, resp.Code, resp.Body.String())
+	}
+	var decidedBy string
+	if err := rig.brokerStore.Pool.QueryRow(context.Background(),
+		`select login from credential_request_events where record_id=$1 and event='approved'`, pending.RecordID).Scan(&decidedBy); err != nil || decidedBy != contractOther {
+		t.Fatalf("approved event login = %q (%v), want %s", decidedBy, err, contractOther)
+	}
+	if status, released := rig.values(t, pending, *approved.GrantID); status != http.StatusOK || released["SHARED_KEY"] != "shared-v1" {
+		t.Fatalf("values = %d %v, want SHARED_KEY=shared-v1", status, released)
+	}
+	for _, login := range []string{contractApprover, contractOther} {
+		if rows := rig.pendingFor(t, login); len(rows) != 0 {
+			t.Fatalf("%s's inbox after the approval = %+v, want empty", login, rows)
+		}
+	}
+}
+
+// contractGrant is one row of Dispatch's Live grants list.
+type contractGrant struct {
+	GrantID  string   `json:"grant_id"`
+	Granted  string   `json:"granted"`
+	RecordID *string  `json:"record_id"`
+	Approver *string  `json:"approver"`
+	Names    []string `json:"names"`
+}
+
+// grantsOf reads login's Live grants through Dispatch.
+func (rig *contractRig) grantsOf(t *testing.T, login string) []contractGrant {
+	t.Helper()
+	resp := dispatchRequest(t, rig.Dispatch, http.MethodGet, "/api/v1/credential-grants?approver=me", nil, login)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("GET grants as %s = %d: %s", login, resp.Code, resp.Body.String())
+	}
+	return decodeBody[struct {
+		Grants []contractGrant `json:"grants"`
+	}](t, resp).Grants
+}
+
+// TestAnAutomaticGrantIsListedRevokedAndThenAsksItsOwner drives an automatic grant through
+// Dispatch's Live grants: the person whose session holds it sees it listed as automatic, with no
+// approver and no record, and nobody else does; another person cannot revoke it and its operator
+// can, through the same route as an approved grant; after that, the same session's next request for
+// the secret is an approval request to its owner, while another of the person's sessions still
+// gets it at once.
+func TestAnAutomaticGrantIsListedRevokedAndThenAsksItsOwner(t *testing.T) {
+	rig := newContractRig(t)
+	session := rig.newSession(t, contractApprover)
+	auto := rig.request(t, session, "", "AUTO_TOKEN")
+	if auto.State != "granted" || auto.GrantID == nil || auto.RecordID != nil {
+		t.Fatalf("request = %+v, want an automatic grant", auto)
+	}
+	grantID := *auto.GrantID
+
+	listed := rig.grantsOf(t, contractApprover)
+	if len(listed) != 1 || listed[0].GrantID != grantID || listed[0].Granted != "automatic" || listed[0].Approver != nil || listed[0].RecordID != nil ||
+		len(listed[0].Names) != 1 || listed[0].Names[0] != "AUTO_TOKEN" {
+		t.Fatalf("%s's grants = %+v, want the AUTO_TOKEN grant %s listed as automatic", contractApprover, listed, grantID)
+	}
+	if others := rig.grantsOf(t, contractOther); len(others) != 0 {
+		t.Fatalf("%s's grants = %+v, want none", contractOther, others)
+	}
+
+	revokePath := "/api/v1/credential-grants/" + grantID + "/revoke"
+	if resp := dispatchRequest(t, rig.Dispatch, http.MethodPost, revokePath, map[string]any{}, contractOther); resp.Code != http.StatusForbidden {
+		t.Fatalf("revoke as %s = %d %s, want 403", contractOther, resp.Code, resp.Body.String())
+	}
+	if resp := dispatchRequest(t, rig.Dispatch, http.MethodPost, revokePath, map[string]any{}, contractApprover); resp.Code != http.StatusOK {
+		t.Fatalf("revoke = %d: %s", resp.Code, resp.Body.String())
+	}
+	if status, _ := rig.values(t, session, grantID); status != http.StatusForbidden {
+		t.Fatalf("values after the revoke = %d, want 403", status)
+	}
+	if listed := rig.grantsOf(t, contractApprover); len(listed) != 0 {
+		t.Fatalf("grants after the revoke = %+v, want none", listed)
+	}
+
+	again := rig.request(t, session, "need it again", "AUTO_TOKEN")
+	if again.State != "pending" || again.RecordID == nil || again.GrantID != nil {
+		t.Fatalf("the same session's next request = %+v, want an approval request", again)
+	}
+	readResp := dispatchRequest(t, rig.Dispatch, http.MethodGet, "/api/v1/credential-requests/"+*again.RecordID, nil, contractApprover)
+	if read := decodeBody[contractRecord](t, readResp); read.State != "pending" || read.Approver != contractApprover {
+		t.Fatalf("record read = %s, want pending with approver %s, the owner", readResp.Body.String(), contractApprover)
+	}
+	if rows := rig.pendingFor(t, contractApprover); len(rows) != 1 || rows[0].RecordID != *again.RecordID {
+		t.Fatalf("the owner's inbox = %+v, want the request %s", rows, *again.RecordID)
+	}
+
+	elsewhere := rig.request(t, rig.newSession(t, contractApprover), "", "AUTO_TOKEN")
+	if elsewhere.State != "granted" || elsewhere.GrantID == nil {
+		t.Fatalf("another session's request = %+v, want an automatic grant", elsewhere)
 	}
 }

@@ -11,7 +11,10 @@
 //   - a shared agent-tier secret goes to any session or pod;
 //   - a human-tier secret needs its owner's approval, or anyone's if it is shared;
 //   - a service's secret goes only to that service's own sessions, and anyone else's request is
-//     refused.
+//     refused;
+//   - a session a person withheld a secret from, by revoking an automatic grant of it the session
+//     held, asks before it gets the secret again: its owner, or anyone for a shared secret
+//     (EvaluateWithheld).
 package policy
 
 import (
@@ -117,6 +120,26 @@ func (s *Set) Evaluate(name string, r Requester) (Decision, error) {
 		d.Outcome, d.Approver = Approval, secret.Owner
 	case secret.kind == ownerShared, record.CanonicalLogin(r.Operator) == secret.Owner:
 		d.Outcome = Automatic
+	default:
+		d.Outcome, d.Approver = Approval, secret.Owner
+	}
+	return d, nil
+}
+
+// EvaluateWithheld answers r's ask for name once a person has withheld name from r's session by
+// revoking an automatic grant of it the session held: what Evaluate would grant at once is an
+// approval request to the secret's owner instead, or to anyone for a shared secret, and a
+// service's own secret, which no person approves, is denied. Every other answer is Evaluate's.
+func (s *Set) EvaluateWithheld(name string, r Requester) (Decision, error) {
+	d, err := s.Evaluate(name, r)
+	if err != nil || d.Outcome != Automatic {
+		return d, err
+	}
+	switch secret := s.Secrets[name]; secret.kind {
+	case ownerService:
+		d.Outcome = Deny
+	case ownerShared:
+		d.Outcome, d.Approver = Approval, record.AnyoneApprover
 	default:
 		d.Outcome, d.Approver = Approval, secret.Owner
 	}

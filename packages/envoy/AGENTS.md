@@ -1957,9 +1957,23 @@ missing from the secrets store is `404 SECRET_NOT_IN_STORE`.
 Migration 0009 defaults `request_secrets.delivery` to `inject`, which this broker neither writes nor
 reads, so a binary from before it can still be rolled back to.
 `RevokeGrant` lets a session end only its own grant (session proof); `RevokeByApprover` ends a grant
-on a human's Dispatch login, allowed only when that login is the grant's approver or its
+on a human's Dispatch email, allowed only when that email is the grant's approver or its
 enrollment's operator (`mayRevoke`, else `403 NOT_APPROVER`); revoking an already-revoked grant is
-a no-op, writing no second audit row. Audit rows never carry secret values: `audit()` takes only
+a no-op, writing no second audit row. A person's revoke also withholds from the grant's session
+every name its request was granted automatically (`withhold`, a `withheld_secrets` row per
+session and name, migration 0010; the `grant.revoked` audit detail lists them under `withheld`):
+`Create` evaluates a withheld name with `policy.Set.EvaluateWithheld`, which turns an automatic
+answer into an approval request to the owner (`anyone` for a shared secret; a service's own secret
+is denied), and `reuseLiveGrant` never hands back a live grant holding a withheld name it granted
+automatically, so the session asks before it gets the name again while every other session is
+unaffected; a session revoking its own grant withholds nothing. `RevokeByApprover` locks the
+session's row `for no key update` before the grant's, and `createDecided` reads the withheld names
+after taking that row `for share`, retrying `Create`'s decision when a withholding landed
+meanwhile (`errWithheldMeanwhile`), so no automatic grant is written after the revoke that
+withheld it. `GrantsForApprover` (`GET /v1/grants?approver=`) lists every live grant of the
+person's sessions, automatic ones included, and every grant the person approved, each answering
+`granted` (`automatic` or `approval`) with a null `approver` and `record_id` for an automatic
+one. Audit rows never carry secret values: `audit()` takes only
 `kind`, `enrollment_id`, `request_id`, an optional
 `grant_id`, `actor` (`human:<login>`, `session:<enrollment id>`, `launcher:<credential id>`, or
 `broker`), and a non-secret JSON `detail`. The granted value itself is read fresh from
