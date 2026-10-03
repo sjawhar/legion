@@ -379,9 +379,10 @@ PROCEEDING. An open ask or `opened_since` never suppresses this check.
 Only a reply whose first word is WAITING, and which does not also name PROCEEDING (a model echoing
 the choice rather than making it), produces the one hidden `dispatch-ask-reminder` steer with
 `triggerTurn`: it says the agent is waiting on a human for something no open ask covers, and tells
-it to open an ask with `dispatch_ask`, naming exactly what it needs and from whom. It never offers
-`dispatch_request_approval`: an approval request is for a settled spec, not a way to wait on a
-human. The parse is case-sensitive and first-word-only because a false
+it to open one now: a decision block in the document the wait concerns (`dispatch_doc_edit` with an
+ask block), or `dispatch_ask` for a to-do only a human can do, naming exactly what it needs and from
+whom. It never offers `dispatch_request_approval`: an approval request is for a settled spec, not a
+way to wait on a human. The parse is case-sensitive and first-word-only because a false
 WAITING is the expensive error — its steer tells an agent to page a human with a question it does
 not need — while a false PROCEEDING is only silence. PROCEEDING, an unparsable reply, a side-turn
 failure, the timeout, and a host with no side turn at all are silent; the last also arms no period.
@@ -400,9 +401,10 @@ and a post-race staleness re-check abort the in-flight call; an ask opened mid-c
 its verdict. A failure is logged once per session (`logger.warn`), never notified.
 
 The check is owed and spent like the host's todo reminder rather than once per period: the arming
-turn owes one, running it spends it whatever came back, the agent opening the ask itself
-(`dispatch_ask`, `dispatch_request_approval`) spends it too, and the agent's next real work — a
-successful `tool_result` whose tool is not a `dispatch_*` one — owes another. A settled turn that
+turn owes one, running it spends it whatever came back, the agent opening the ask itself spends it
+too (`dispatch_ask`, `dispatch_request_approval`, or a `dispatch_doc_edit` that inserts an ask block
+or retypes a block into one: `opensAsk`), and the agent's next real work — a successful
+`tool_result` whose tool is not a `dispatch_*` one — owes another. A settled turn that
 only replies calls no tool, so the nudge's continuation cannot re-arm itself; work is bounded by
 `ASK_CHECKS_PER_PERIOD` (5).
 

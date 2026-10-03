@@ -23,6 +23,11 @@
   waiting on the agent until it hands the request back once the human has agreed to every point,
   and a call while the request already waits on the human hands nothing back, refusing a different
   summary (LEGION-470).
+- `dispatch_ask`'s description scopes it to a to-do or permission only a human can give, or a
+  decision with no document to live in: a question about the design an issue's document records is
+  a decision block in that document, at every phase and whether or not it was approved, and an ask
+  never carries an Approve option. `dispatch_message`'s description sends a design decision to a
+  decision block and a human to-do to `dispatch_ask` (LEGION-470).
 - `dispatch_request_approval` requires `summary`, the proposals in the document's latest version
   the human hasn't already agreed to (LEGION-387). `SPEC_SECTIONS` is removed: `dispatch_issue`'s
   `spec` and `dispatch_doc_edit` point at the dispatch skill's "Writing a spec" instead of listing
