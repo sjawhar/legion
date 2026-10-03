@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/reearth/ygo/crdt"
 
 	"github.com/sjawhar/envoy/internal/dispatch/asks"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
@@ -63,12 +64,14 @@ func (r *settlementReconciliation) repairLive(live *pmdoc.Node) bool {
 	for _, repair := range r.repairs {
 		holders[repair.blockID] = nil
 	}
+	unfound := len(holders)
 	pmdoc.Walk(live, func(node *pmdoc.Node) bool {
 		id, _ := node.Attrs[pmdoc.BlockIDAttr].(string)
 		if holder, wanted := holders[id]; id != "" && wanted && holder == nil {
 			holders[id] = node
+			unfound--
 		}
-		return true
+		return unfound > 0
 	})
 	changed := false
 	for _, repair := range r.repairs {
@@ -77,6 +80,13 @@ func (r *settlementReconciliation) repairLive(live *pmdoc.Node) bool {
 		}
 	}
 	return changed
+}
+
+// writeLive writes the reconciliation's repairs into doc as it stands (rewriteLive, repairLive) and
+// reports whether any changed it.
+func (r *settlementReconciliation) writeLive(doc *crdt.Doc, origin any) (bool, error) {
+	_, repaired, err := rewriteLive(doc, origin, r.repairLive)
+	return repaired, err
 }
 
 // nameVersion completes the reconciliation at the version the settled document is at, writing

@@ -10,8 +10,10 @@ import (
 
 	"github.com/reearth/ygo/crdt"
 
+	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
+	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
 // Settlement repairs an ask block's server-owned attributes into the document as it stands when
@@ -209,6 +211,69 @@ func TestSettlementReleasesTheSlotOfAStampTheDocumentNoLongerNeeds(t *testing.T)
 		requireNoSuppressedSlots(t, service, artifactID, fmt.Sprintf("round %d", round))
 	}
 	waitForPersistedProofText(t, service.store, artifactID, want)
+}
+
+// The block-id backfill decides from a read of a document that it needs stamping, then stamps the
+// document as it stands, which another writer can have stamped in between. That stamp's transaction
+// writes nothing and still reports an update; the backfill holds it from the room's persistence as
+// it holds every stamp it writes, so the room stores no row for it, least of all one recording a
+// content change, for which the next settlement would version a document nobody edited
+// (LEGION-479).
+func TestBackfillStoresNothingForAStampTheDocumentNoLongerNeeds(t *testing.T) {
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "before")
+	seedUnidentifiedProofDocument(t, database, artifactID, "before")
+	service := New(Deps{Store: database, Events: events.NewBroker(), Settle: time.Hour})
+	t.Cleanup(func() {
+		if err := service.Shutdown(context.Background()); err != nil {
+			t.Errorf("shutdown document service: %v", err)
+		}
+	})
+	alignLatestVersionWithUpdates(t, service, artifactID)
+
+	var stampedFirst atomic.Bool
+	service.afterBackfillRead = func(room string) {
+		if room == artifactID && stampedFirst.CompareAndSwap(false, true) {
+			// Another writer identifies the block first, as an agent's edit stamps every block it
+			// addresses.
+			editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+				pmdoc.EnsureBlockIDs(tree)
+				return tree
+			})
+		}
+	}
+	reports, err := service.BackfillBlockIDs(context.Background())
+	if err != nil {
+		t.Fatalf("backfill documents: %v", err)
+	}
+	if !stampedFirst.Load() {
+		t.Fatal("the backfill never reached the window between its read and its stamp")
+	}
+	if len(reports) != 1 || reports[0].Err != nil || reports[0].Stamped != 0 {
+		t.Fatalf("backfill reports = %#v, want the one document, stamping nothing", reports)
+	}
+	requireNoSuppressedSlots(t, service, artifactID, "after the backfill")
+
+	// The room hands its persistence its updates in order, so once an update written after the
+	// backfill is stored, so is anything the backfill left the room to store. The marker gives the
+	// paragraph another block id, which no rendering carries, so its update is no content change,
+	// and its bytes are its own: an update that wrote nothing has the same bytes as any other that
+	// wrote nothing, and would take the marker's classification.
+	editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+		tree.Children[0].Attrs[pmdoc.BlockIDAttr] = "marker"
+		return tree
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := service.waitForPendingUpdates(ctx, artifactID); err != nil {
+		t.Fatalf("wait for the room's updates to reach persistence: %v", err)
+	}
+	if err := service.waitForDurableAppends(ctx, artifactID); err != nil {
+		t.Fatalf("wait for the room's updates to become durable: %v", err)
+	}
+	if rows := contentRowsPastLatestVersion(t, database, artifactID); rows != 0 {
+		t.Fatalf("the backfill left %d content-class rows past the latest version's cursor; it wrote nothing", rows)
+	}
 }
 
 // A settlement that both stamps block ids and repairs an ask block writes two updates into the

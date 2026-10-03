@@ -117,6 +117,31 @@ func treeOfTransaction(txn *crdt.Transaction, fragment *crdt.YXmlFragment) (*pmd
 	return tree, nil
 }
 
+// rewriteLive rewrites doc's tree in one transaction tagged with origin. edit is handed the tree as
+// it stands, read inside that transaction, which holds the document's lock, and reports whether it
+// changed the tree; only a changed tree is written. A repair computed on a tree read before the
+// transaction and written back would revert whatever another writer wrote after that read
+// (LEGION-479). It returns the tree as the transaction left it and whether edit changed it.
+func rewriteLive(doc *crdt.Doc, origin any, edit func(live *pmdoc.Node) bool) (*pmdoc.Node, bool, error) {
+	fragment := doc.GetXmlFragment(fragmentName)
+	var live *pmdoc.Node
+	changed := false
+	err := doc.TransactE(func(transaction *crdt.Transaction) error {
+		var readErr error
+		if live, readErr = treeOfTransaction(transaction, fragment); readErr != nil {
+			return readErr
+		}
+		if changed = edit(live); !changed {
+			return nil
+		}
+		return pmdoc.Update(transaction, fragment, live)
+	}, origin)
+	if err != nil {
+		return nil, false, err
+	}
+	return live, changed, nil
+}
+
 func renderTree(tree *pmdoc.Node) (string, error) {
 	markdown, err := pmdoc.Render(tree)
 	if err != nil {
@@ -126,15 +151,6 @@ func renderTree(tree *pmdoc.Node) (string, error) {
 		return "", err
 	}
 	return markdown, nil
-}
-
-// renderDocument is what doc renders now, or the error that stopped it being read or rendered.
-func renderDocument(doc *crdt.Doc) (string, error) {
-	tree, err := treeOf(doc)
-	if err != nil {
-		return "", err
-	}
-	return renderTree(tree)
 }
 
 // closureChangedMarkdown reports whether a document closure that produced after changed the
