@@ -322,7 +322,9 @@ func (s *server) putUserAgentState(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	changed := clearedBefore != nil || readThrough != nil
+	// A Clear or a read mark is announced whenever it is given; replies read by id only when one
+	// of them was not read already (below).
+	announce := clearedBefore != nil || readThrough != nil
 	if readThrough != nil {
 		if _, err := tx.Exec(r.Context(), `
 			insert into user_agent_read (login, session_id, read_through)
@@ -366,12 +368,12 @@ func (s *server) putUserAgentState(w http.ResponseWriter, r *http.Request) {
 			s.writeHandlerError(w, err)
 			return
 		}
-		changed = changed || inserted.RowsAffected() > 0
+		announce = announce || inserted.RowsAffected() > 0
 	}
 	// Replies read by id that were all read already change nothing, so nothing is announced: a
 	// broadcast page sends its replies again on every visit while the session has an unread reply
 	// elsewhere, and each event would refetch the badge in every tab the viewer has open.
-	if !changed {
+	if !announce {
 		// Nothing was written; end the transaction before the state is read through the pool.
 		if err := tx.Rollback(r.Context()); err != nil {
 			s.writeHandlerError(w, err)
