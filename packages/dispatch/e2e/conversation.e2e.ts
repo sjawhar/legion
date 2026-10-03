@@ -61,9 +61,6 @@ const planner: FakeSession = {
 
 test.beforeEach(async () => {
   await resetDatabase();
-  if (!process.env.PLAYWRIGHT_BASE_URL) {
-    await setLiveSessions([]);
-  }
 });
 
 test("Conversation owns the route, groups chronological Markdown turns, and resolves live agent names", async ({
@@ -93,9 +90,9 @@ test("Conversation owns the route, groups chronological Markdown turns, and reso
   }
   await setEventCreatedAt(first.id, new Date(Date.now() - 20 * 60 * 1_000).toISOString());
   await setEventCreatedAt(code.id, new Date(Date.now() - 10 * 60 * 1_000).toISOString());
-  if (!process.env.PLAYWRIGHT_BASE_URL) {
-    await setLiveSessions([{ session_id: "e2e-conv-agent", title: "Planner (e2e)" }]);
-    await setInterests([
+  await Promise.all([
+    setLiveSessions([{ session_id: "e2e-conv-agent", title: "Planner (e2e)" }]),
+    setInterests([
       {
         session_id: "e2e-conv-agent",
         topics: [
@@ -103,21 +100,17 @@ test("Conversation owns the route, groups chronological Markdown turns, and reso
           `notifications.dispatch.issue.${issue.key}.>`,
         ],
       },
-    ]);
-  }
+    ]),
+  ]);
 
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
     await page.goto(`/issues/${issue.key}/conversation`);
-    if (!process.env.PLAYWRIGHT_BASE_URL) {
-      await page.getByRole("button", { name: "Subscribers: 1" }).click();
-      const subscribedAgents = page.getByRole("region", { name: "Subscribed agents" });
-      await expect(subscribedAgents.getByText("Planner (e2e)", { exact: true })).toBeVisible();
-      await expect(subscribedAgents.getByText("ghost-session-0000", { exact: true })).toHaveCount(
-        0
-      );
-    }
+    await page.getByRole("button", { name: "Subscribers: 1" }).click();
+    const subscribedAgents = page.getByRole("region", { name: "Subscribed agents" });
+    await expect(subscribedAgents.getByText("Planner (e2e)", { exact: true })).toBeVisible();
+    await expect(subscribedAgents.getByText("ghost-session-0000", { exact: true })).toHaveCount(0);
 
     await expect(page.getByRole("tab", { name: "Conversation" })).toHaveAttribute(
       "aria-selected",
@@ -142,9 +135,7 @@ test("Conversation owns the route, groups chronological Markdown turns, and reso
     await expect(turn(page, "Another from bob")).toHaveAttribute("data-continued", "false");
     await expect(turn(page, "First bold line").locator("strong")).toHaveText("bold");
     await expect(turn(page, "const x = 1;").locator("pre code")).toContainText("const x = 1;");
-    if (!process.env.PLAYWRIGHT_BASE_URL) {
-      await expect(turn(page, "First bold line")).toContainText("Planner (e2e)");
-    }
+    await expect(turn(page, "First bold line")).toContainText("Planner (e2e)");
     await expect(turn(page, "From a disconnected agent")).toContainText("session:ghost-se…");
 
     // The pin is the shared icon toggle at the turn's top-right, not a text button beside it.
@@ -283,7 +274,6 @@ test("a message reply nests under its parent with the quoted link, and deep link
 test("a reply in a session-authored comment thread pre-fills a deletable agent mention", async ({
   browser,
 }) => {
-  test.skip(process.env.PLAYWRIGHT_BASE_URL !== undefined, "drives the fake Envoy listener");
   await setLiveSessions([planner]);
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Threaded comment follow-up" });
@@ -292,11 +282,24 @@ test("a reply in a session-authored comment thread pre-fills a deletable agent m
     { body: "Can this ship?" },
     { actor: { id: "s1", kind: "session" }, as: "agent" }
   );
+  // The reply's mention reads the session's live title from the agents list, which lands after
+  // the turns render, and a collapsed comment card shows no author. A later message from the same
+  // session heads its turn with that title once the list is in, from the same render the Reply
+  // button reads, so the click waits for it.
+  await createMessage(
+    issue.key,
+    { body: "Build is green." },
+    {
+      actor: { id: "s1", kind: "session" },
+      as: "agent",
+    }
+  );
   const alice = await asUser(browser, "alice");
 
   try {
     const page = await alice.newPage();
     await page.goto(`/issues/${issue.key}/conversation`);
+    await expect(turn(page, "Build is green.")).toContainText("planner");
     const card = turn(page, "Can this ship?");
     await card.getByRole("button", { name: "Reply" }).click();
     const composer = page.getByRole("form", { name: "Comment composer" });
@@ -329,7 +332,6 @@ test("a reply in a session-authored comment thread pre-fills a deletable agent m
 test("an agent's answer on a failed attempt is accepted and shown as the answer", async ({
   browser,
 }) => {
-  test.skip(process.env.PLAYWRIGHT_BASE_URL !== undefined, "drives the fake Envoy listener");
   await setLiveSessions([planner]);
   await setSessionSendStatus("s1", 404);
   await createProject({ key: "CORE", name: "Core" });
@@ -490,12 +492,10 @@ test("Conversation divides unread turns by day, sends with Ctrl+Enter, and jumps
     setEventCreatedAt(second.id, yesterday),
   ]);
   await putIssueState(issue.key, { last_read_seq: second.seq });
-  if (!process.env.PLAYWRIGHT_BASE_URL) {
-    await setLiveSessions([
-      { session_id: "e2e-conv-agent", title: "Planner (e2e)" },
-      { session_id: "e2e-conv-reviewer", title: "Reviewer (e2e)" },
-    ]);
-  }
+  await setLiveSessions([
+    { session_id: "e2e-conv-agent", title: "Planner (e2e)" },
+    { session_id: "e2e-conv-reviewer", title: "Reviewer (e2e)" },
+  ]);
 
   const alice = await asUser(browser, "alice");
   try {
@@ -671,9 +671,7 @@ test("a long session title never widens the Conversation past its column", async
     { content: "# Sketch\n", name: "Transcript sketch" },
     { actor: { id: sessionId, kind: "session" }, as: "agent" }
   );
-  if (!process.env.PLAYWRIGHT_BASE_URL) {
-    await setLiveSessions([{ session_id: sessionId, title: longTitle }]);
-  }
+  await setLiveSessions([{ session_id: sessionId, title: longTitle }]);
 
   const context = await asUser(browser, "alice");
   const page = await context.newPage();

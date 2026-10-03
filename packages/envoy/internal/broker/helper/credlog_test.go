@@ -31,7 +31,7 @@ var proofShaped = regexp.MustCompile(`eyJ[A-Za-z0-9_-]{8,}|[A-Za-z0-9_-]{16,}\.[
 func TestTheHelperLogsEveryChangeOfTheLauncherCredential(t *testing.T) {
 	var out syncBuffer
 	f := newFakeBroker(t)
-	operator := operatorFile(t, "sjawhar")
+	operator := operatorFile(t, "ada@example.com")
 	b := &Broker{URL: f.srv.URL, OperatorFile: operator, HTTP: f.srv.Client(),
 		Log: slog.New(slog.NewJSONHandler(&out, nil))}
 	sess, _ := newSession(1, 1, "h:1:1", nil)
@@ -76,7 +76,7 @@ func TestTheHelperLogsEveryChangeOfTheLauncherCredential(t *testing.T) {
 		records = append(records, rec)
 	}
 	want := []map[string]any{
-		{"level": "INFO", "msg": "machine login issued; the helper holds a launcher credential", "credential_id": credentialID, "operator": "sjawhar"},
+		{"level": "INFO", "msg": "machine login issued; the helper holds a launcher credential", "credential_id": credentialID, "operator": "ada@example.com"},
 		{"level": "WARN", "msg": "launcher credential refused; cleared", "credential_id": credentialID, "code": "LAUNCHER_INVALID"},
 	}
 	if len(records) != len(want) {

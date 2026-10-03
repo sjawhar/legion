@@ -99,7 +99,7 @@ func TestIdentityWhileAHelperWithACredentialEnrolls(t *testing.T) {
 	defer broker.Close()
 
 	binary := buildAgentSecrets(t)
-	srv, sock := serveRealHelper(t, broker.URL)
+	srv, sock := serveRealHelper(t, broker.URL, "ada@example.com")
 	if _, err := srv.Broker.Login(context.Background(), srv.Hostname); err != nil {
 		t.Fatal(err)
 	}
