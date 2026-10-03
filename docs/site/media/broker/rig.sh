@@ -36,9 +36,9 @@
 #                    own (passwordless sudo; for a machine where containers are unavailable),
 #                    with the sessions on this machine.
 #
-# Needs go, bun, psql, curl and openssl on PATH, and docker for its own Postgres or the docker
-# agent runtime; nothing else from the machine: no credential, private hostname or production
-# service.
+# Needs go, bun, psql, curl, openssl and setsid on PATH, and docker for its own Postgres or the
+# docker agent runtime; nothing else from the machine: no credential, private hostname or
+# production service.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -64,7 +64,7 @@ elif [ "$#" -gt 0 ]; then
   exit 2
 fi
 
-tools=(go bun psql curl openssl)
+tools=(go bun psql curl openssl setsid)
 case "$AGENT_RUNTIME" in
   docker) tools+=(docker) ;;
   unshare) tools+=(sudo unshare setpriv) ;;
@@ -93,9 +93,18 @@ admin_url=""
 
 cleanup() {
   local status=$?
-  for pid in "${pids[@]}" $helper_pid; do
-    kill "$pid" 2>/dev/null || true
+  if [ -z "$helper_pid" ] && [ -s "$WORK_DIR/agent/helper.pid" ]; then
+    helper_pid="$(cat "$WORK_DIR/agent/helper.pid")"
+  fi
+  # Every process the rig starts (but the unshare runtime's sudo) leads a process group of its
+  # own, so this reaches its children too: run-server.sh's `go run` leaves the compiled Dispatch
+  # server running when only it is signalled.
+  for pid in "${pids[@]}"; do
+    kill -- "-$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
   done
+  if [ -n "$helper_pid" ]; then
+    kill "$helper_pid" 2>/dev/null || true
+  fi
   for pid in "${pids[@]}"; do
     wait "$pid" 2>/dev/null || true
   done
@@ -178,7 +187,7 @@ chmod 600 "$WORK_DIR/fake-secrets.env"
 ui_token="$(openssl rand -hex 32)"
 
 echo "rig: starting the broker" >&2
-env -i PATH="$PATH" \
+setsid env -i PATH="$PATH" \
   BROKER_DATABASE_URL="$broker_database_url" \
   BROKER_LISTEN_ADDR=127.0.0.1:0 \
   BROKER_PUBLIC_URL=http://127.0.0.1:0 \
@@ -199,12 +208,17 @@ if [ ! -f "$ROOT/packages/dispatch/web/dist/index.html" ]; then
   (cd "$ROOT/packages/dispatch" && bun run build:web >/dev/null)
 fi
 echo "rig: starting Dispatch at $DISPATCH_URL" >&2
-bun "$ROOT/packages/dispatch/e2e/fake-envoy.ts" >"$LOG_DIR/fake-envoy.log" 2>&1 &
+if curl -s -o /dev/null "$DISPATCH_URL/"; then
+  # Its readiness check below would pass on that server rather than the rig's.
+  echo "rig: something already answers at $DISPATCH_URL; stop it or set DISPATCH_E2E_PORT" >&2
+  exit 1
+fi
+setsid bun "$ROOT/packages/dispatch/e2e/fake-envoy.ts" >"$LOG_DIR/fake-envoy.log" 2>&1 &
 pids+=("$!")
-bun "$ROOT/packages/dispatch/e2e/fake-github.ts" >"$LOG_DIR/fake-github.log" 2>&1 &
+setsid bun "$ROOT/packages/dispatch/e2e/fake-github.ts" >"$LOG_DIR/fake-github.log" 2>&1 &
 pids+=("$!")
 DISPATCH_E2E_AGENT_SECRETS_URL="$BROKER_URL" DISPATCH_E2E_AGENT_SECRETS_TOKEN="$ui_token" \
-  bash "$ROOT/packages/dispatch/e2e/run-server.sh" >"$LOG_DIR/dispatch.log" 2>&1 &
+  setsid bash "$ROOT/packages/dispatch/e2e/run-server.sh" >"$LOG_DIR/dispatch.log" 2>&1 &
 pids+=("$!")
 wait_for 600 "Dispatch" curl -sf "$DISPATCH_URL/"
 echo "rig: seeding the e2e workspace" >&2
