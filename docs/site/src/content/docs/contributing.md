@@ -95,8 +95,9 @@ description in its `SKILL.md`, as [Skills](/legion/legion/reference/skills/).
 
 ## Media
 
-Screenshots and narrated walkthroughs are produced by scripts in `docs/site/media/`, and what they
-produce is served from `docs/site/public/media/`. A file at `public/media/<path>` is published at
-`/legion/media/<path>`, so a page embeds a screenshot as `![The Inbox](/legion/media/<path>.png)`.
+Scripts that produce screenshots and narrated walkthroughs go in `docs/site/media/`; none are in the
+tree yet, and they arrive with a README there saying how to run them. Their output goes in
+`docs/site/public/media/`. A file at `public/media/<path>` is published at `/legion/media/<path>`,
+so a page embeds a screenshot as `![The Inbox](/legion/media/<path>.png)`.
 Media shows example data only: this repository is public, so no real hostname, account, token or
 private URL appears in a page, image or video.
