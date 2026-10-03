@@ -14,7 +14,7 @@ import { narrate } from "../../narration";
 import narration from "./narration.json";
 
 const here = import.meta.dir;
-/** narration.json, in speaking order; edl.py loads it too. */
+/** narration.json, in speaking order; edl.py loads it too, for the captions build.py writes. */
 const parts: Record<string, string> = narration;
 const ids = Object.keys(parts);
 const wanted = process.argv.slice(2);

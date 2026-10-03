@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Builds docs/site/public/media/broker/walkthrough.mp4 from the footage and narration beside this file.
+"""Builds docs/site/public/media/broker/walkthrough.mp4, with its captions (walkthrough.vtt) and
+poster frame (walkthrough.jpg), from the footage and narration beside this file.
 
   raw/*.cast, raw/*.webm   footage, one file per section (docs/site/media/broker/walkthrough.record.ts)
   raw/sections.json        each section's wall-clock length and its marks: named on-screen events
                            in the file's own seconds
+  narration.json           each narration part's text, in speaking order
   narration/<id>.mp3       one file per narration part (narrate.ts)
   edl.py                   the cut: each clip a source and a window between two marks (each plus an
                            offset), and the narration parts laid at marks inside it
@@ -11,14 +13,17 @@
 Every cast is rendered through agg with idle time kept, so a cast's seconds are the video's
 seconds. Every source is normalized to 1280x720 at 30 fps (the browser recordings are that size
 already); each clip is cut hard to its window, with no speed change and no held frame; its audio
-is silence the clip's length with its narration parts laid at their marks. The build fails when a
-clip or part names a mark its section did not record, a window falls outside its file, a part
-starts before its clip, runs past its clip's end or overlaps the next part, or a section's file
-duration is off its wall-clock length (a browser recording outside its actions' and its page's
-lengths by more than 5%, a cast more than 1.5 s shorter than its section or any longer). The clips
-are concatenated into build/walkthrough.mp4, which then fails the build if it holds DEAD_AIR
-seconds or more of silence over a frozen frame; only a video that passes is copied to OUT, the
-video the site publishes, so a failed build leaves OUT as it was.
+is silence the clip's length with its narration parts laid at their marks. Each part's caption is
+its text, shown from where the part starts until the next part in its clip starts or the clip
+ends. The build fails when a clip or part names a mark its section did not record, a window falls
+outside its file, a part starts before its clip, runs past its clip's end or overlaps the next
+part, a part has no text or its caption falls outside its clip, or a section's file duration is
+off its wall-clock length (a browser recording outside its actions' and its page's lengths by
+more than 5%, a cast more than 1.5 s shorter than its section or any longer). The clips are
+concatenated into build/walkthrough.mp4, which then fails the build if it holds DEAD_AIR seconds
+or more of silence over a frozen frame; only a video that passes is copied to OUT, the video the
+site publishes, with its captions and its poster (the video's first frame), so a failed build
+leaves all three as they were.
 
   python3 build.py            # rebuild (renders casts once, into build/) and publish to OUT
   python3 build.py --check    # verify the EDL against the footage and narration, write nothing
@@ -27,6 +32,7 @@ video the site publishes, so a failed build leaves OUT as it was.
 from __future__ import annotations
 
 import functools
+import itertools
 import json
 import re
 import shutil
@@ -35,12 +41,16 @@ import sys
 from pathlib import Path
 
 from edl import CLIPS, At, Clip
+from edl import NARRATION as TEXT
 
 HERE = Path(__file__).resolve().parent
 RAW = HERE / "raw"
 NARRATION = HERE / "narration"
 BUILD = HERE / "build"
 BUILT = BUILD / "walkthrough.mp4"
+# The video's captions and poster frame, as the site's other videos have them; each is published
+# beside OUT with the video.
+CAPTIONS, POSTER = BUILT.with_suffix(".vtt"), BUILT.with_suffix(".jpg")
 OUT = HERE.parents[2] / "public" / "media" / "broker" / "walkthrough.mp4"
 W, H, FPS = 1280, 720, 30
 BACKGROUND = "0x272822"  # agg's monokai background, so a terminal's padding is invisible
@@ -104,6 +114,12 @@ class Resolved:
     @property
     def span(self) -> float:
         return self.end - self.start
+
+    def captions(self) -> list[tuple[float, float, str]]:
+        """Each narration part's caption, in the clip's own seconds: the part's text in
+        narration.json, from the part's start until the next part starts or the clip ends."""
+        ends = [offset for _, offset in self.narration[1:]] + [self.span]
+        return [(offset, end, TEXT[part]) for (part, offset), end in zip(self.narration, ends)]
 
 
 def normalized(source: str) -> Path:
@@ -171,6 +187,13 @@ def check(clips: list[Clip]) -> tuple[list[Resolved], list[str]]:
             if offset + spoken > r.span:
                 problems.append(f"{clip.id}: {part} runs {offset + spoken - r.span:.2f}s past the clip's end ({r.span:.2f}s); shorten the words or move it")
             cursor = offset + spoken
+        untexted = [part for part, _ in r.narration if part not in TEXT]
+        if untexted:
+            problems.append(f"{clip.id}: narration.json has no text for {', '.join(untexted)}")
+            continue
+        for start, end, text in r.captions():
+            if not 0 <= start < end <= r.span:
+                problems.append(f"{clip.id}: caption {text!r} at {start:.2f}-{end:.2f}s falls outside the clip (0-{r.span:.2f}s)")
     return resolved, problems
 
 
@@ -230,6 +253,21 @@ def dead_air(video: Path) -> list[tuple[float, float]]:
     return found
 
 
+def vtt_time(seconds: float) -> str:
+    ms = round(seconds * 1000)
+    return f"{ms // 3_600_000:02d}:{ms // 60_000 % 60:02d}:{ms // 1000 % 60:02d}.{ms % 1000:03d}"
+
+
+def vtt(resolved: list[Resolved], starts: list[float]) -> str:
+    """WebVTT of every clip's captions, each clip's moved to where it starts in the video."""
+    lines = ["WEBVTT", ""]
+    for r, start in zip(resolved, starts):
+        for begin, end, text in r.captions():
+            lines += [f"{vtt_time(start + begin)} --> {vtt_time(start + end)}", text, ""]
+    return "\n".join(lines)
+
+
+
 def main() -> int:
     for tool in ("agg", "ffmpeg", "ffprobe"):
         if shutil.which(tool) is None:
@@ -250,7 +288,8 @@ def main() -> int:
         print(f"build.py: {at:5.1f}s {r.clip.id}: {r.clip.source} {r.start:.2f}-{r.end:.2f}s ({r.span:.2f}s){'; ' + parts if parts else ''}")
         at += r.span
     if "--check" in sys.argv[1:]:
-        print(f"build.py: {len(resolved)} clips, {at:.1f}s, all narration inside its clip")
+        captions = sum(len(r.narration) for r in resolved)
+        print(f"build.py: {len(resolved)} clips, {at:.1f}s, all narration and its {captions} captions inside their clips")
         return 0
     rendered = [render(r, i) for i, r in enumerate(resolved)]
     listing = BUILD / "concat.txt"
@@ -264,11 +303,18 @@ def main() -> int:
     if dead:
         print(f"build.py: {BUILT.name} holds silence over a frozen frame for {DEAD_AIR:.0f}s or more at:",
               *(f"{start:.2f}-{end:.2f}s ({end - start:.2f}s)" for start, end in dead), sep="\n  ", file=sys.stderr)
-        print(f"build.py: {OUT} is unchanged", file=sys.stderr)
+        print(f"build.py: {OUT} and its captions and poster are unchanged", file=sys.stderr)
         return 1
     print(f"build.py: no silence of {DEAD_AIR:.0f}s or more over a frozen frame")
-    shutil.copyfile(BUILT, OUT)
-    print(f"build.py: published {OUT}")
+    # The concat starts each clip where the one before it ends: at the clips' rendered lengths, which
+    # a frame or an audio packet can take past their spans.
+    starts = list(itertools.accumulate(map(duration, rendered[:-1]), initial=0.0))
+    CAPTIONS.write_text(vtt(resolved, starts))
+    # The poster is the first frame: the opening payoff, the command's line once the key reached it.
+    run("ffmpeg", "-y", "-v", "error", "-i", str(BUILT), "-frames:v", "1", "-q:v", "3", str(POSTER))
+    for built in (BUILT, CAPTIONS, POSTER):
+        shutil.copyfile(built, OUT.with_suffix(built.suffix))
+        print(f"build.py: published {OUT.with_suffix(built.suffix)}")
     return 0
 
 

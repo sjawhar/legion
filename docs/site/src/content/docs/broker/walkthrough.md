@@ -9,8 +9,9 @@ Before you start, the agent's machine needs `agent-secrets-helper serve` running
 from. The video's machine also sets `AGENT_SECRETS_APPROVE_URL` to Dispatch's address, which makes
 the commands below print the Dispatch page to open.
 
-<video controls preload="metadata" playsinline style="width: 100%" src="/legion/media/broker/walkthrough.mp4">
-  Your browser cannot play this video. <a href="/legion/media/broker/walkthrough.mp4">Download it</a>.
+<video controls preload="metadata" poster="/legion/media/broker/walkthrough.jpg" style="width: 100%" aria-label="Walkthrough: an agent requests a secret and a person approves it in Dispatch">
+  <source src="/legion/media/broker/walkthrough.mp4" type="video/mp4">
+  <track kind="captions" src="/legion/media/broker/walkthrough.vtt" srclang="en" label="English" default>
 </video>
 
 A narrated tour of one secret request, recorded on example data: the Dispatch workspace's person is
