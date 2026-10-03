@@ -1,23 +1,23 @@
 package api
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"maps"
-	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
-	"net/textproto"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	gws "github.com/gorilla/websocket"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -30,8 +30,8 @@ const nulText = "a\x00b"
 // nulPath is nulText as a URL path segment or query value.
 const nulPath = "a%00b"
 
-// nulRequest is one request a refusal row sends: a JSON body, or a multipart upload, as a human
-// (alice) or as a bearer session.
+// nulRequest is one request a refusal row sends: a JSON body, or a multipart upload of form and a
+// markdown file, as a human (alice) or as a bearer session.
 type nulRequest struct {
 	method string
 	target string
@@ -45,49 +45,24 @@ type nulRequest struct {
 
 func (request nulRequest) send(t *testing.T, handler http.Handler) *httptest.ResponseRecorder {
 	t.Helper()
-	var body bytes.Buffer
-	contentType := "application/json"
 	switch {
+	case request.form != nil && request.bearer:
+		bearer := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			r.Header.Set("Authorization", "Bearer agent-token")
+			handler.ServeHTTP(w, r)
+		})
+		return multipartRequest(t, bearer, request.target, request.form, "notes.md", "text/markdown", request.file, "")
 	case request.form != nil:
-		writer := multipart.NewWriter(&body)
-		for _, name := range slices.Sorted(maps.Keys(request.form)) {
-			if err := writer.WriteField(name, request.form[name]); err != nil {
-				t.Fatalf("write multipart field %s: %v", name, err)
-			}
-		}
-		header := textproto.MIMEHeader{}
-		header.Set("Content-Disposition", `form-data; name="file"; filename="notes.md"`)
-		header.Set("Content-Type", "text/markdown")
-		part, err := writer.CreatePart(header)
-		if err != nil {
-			t.Fatalf("create multipart file: %v", err)
-		}
-		if _, err := part.Write(request.file); err != nil {
-			t.Fatalf("write multipart file: %v", err)
-		}
-		if err := writer.Close(); err != nil {
-			t.Fatalf("finish multipart body: %v", err)
-		}
-		contentType = writer.FormDataContentType()
-	case request.body != nil:
-		if err := json.NewEncoder(&body).Encode(request.body); err != nil {
-			t.Fatalf("encode request body: %v", err)
-		}
+		return multipartRequest(t, handler, request.target, request.form, "notes.md", "text/markdown", request.file, "alice")
+	case request.bearer:
+		return sessionRequest(t, handler, request.method, request.target, request.body)
+	default:
+		return dispatchRequest(t, handler, request.method, request.target, request.body, "alice")
 	}
-	httpRequest := httptest.NewRequest(request.method, request.target, &body)
-	httpRequest.Header.Set("Content-Type", contentType)
-	if request.bearer {
-		httpRequest.Header.Set("Authorization", "Bearer agent-token")
-	} else {
-		httpRequest.Header.Set("X-Dispatch-User", "alice")
-	}
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, httpRequest)
-	return response
 }
 
-// databaseFingerprint hashes every row of every table, so a test can tell a refused request wrote
-// nothing anywhere: no row inserted, updated or deleted.
+// databaseFingerprint hashes every row of every table, so a test can tell a request wrote nothing
+// anywhere: no row inserted, updated or deleted.
 func databaseFingerprint(t *testing.T, database *store.Store) map[string]string {
 	t.Helper()
 	ctx := context.Background()
@@ -98,6 +73,9 @@ func databaseFingerprint(t *testing.T, database *store.Store) map[string]string 
 	tables, err := pgx.CollectRows(rows, pgx.RowTo[string])
 	if err != nil {
 		t.Fatalf("read table names: %v", err)
+	}
+	if len(tables) == 0 {
+		t.Fatal("the schema has no tables; a fingerprint of it proves nothing")
 	}
 	fingerprint := make(map[string]string, len(tables))
 	for _, table := range tables {
@@ -312,6 +290,47 @@ func TestAReadRefusesANulInItsParameters(t *testing.T) {
 	}
 }
 
+// Text that is not UTF-8 is refused like a U+0000, and for the same reason: PostgreSQL's text
+// cannot hold it (invalid byte sequence for encoding "UTF8"). JSON cannot carry it, since decoding
+// writes each invalid byte as U+FFFD, so it reaches only the channels the JSON check does not read:
+// a path or query parameter, whose query failed with a 500, and a multipart upload's fields and its
+// markdown file, which failed with a 500 or, for the file, panicked the document writer and dropped
+// the connection.
+func TestCallerTextThatIsNotUTF8IsRefused(t *testing.T) {
+	handler, database, _ := newTestServer(t, testServerOptions{settle: time.Hour})
+	issue := createInteractionIssue(t, handler, "TEST", "Not UTF-8", "before\n")
+	artifacts := "/api/v1/issues/" + issue.Key + "/artifacts"
+	for _, row := range []struct {
+		name    string
+		request nulRequest
+		field   string
+	}{
+		{"read a document: slug", nulRequest{method: http.MethodGet, target: artifacts + "/a%FFb"}, "path parameter slug"},
+		{"search: query", nulRequest{method: http.MethodGet, target: "/api/v1/search?q=ab%FFcd"}, "query parameter q"},
+		{"upload a file: name", nulRequest{method: http.MethodPost, target: artifacts, form: map[string]string{"name": "notes\xff.md"}, file: []byte("# Notes\n")}, "name"},
+		{"upload a file: markdown", nulRequest{method: http.MethodPost, target: artifacts, form: map[string]string{"name": "notes.md"}, file: []byte("# a\xffb\n")}, "file"},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			before := databaseFingerprint(t, database)
+			response := row.request.send(t, handler)
+			var refusal struct {
+				Code  string `json:"code"`
+				Error string `json:"error"`
+			}
+			_ = json.Unmarshal(response.Body.Bytes(), &refusal)
+			if response.Code != http.StatusBadRequest || refusal.Code != "INVALID_UTF8" || !strings.HasPrefix(refusal.Error, row.field+" holds a byte that is not UTF-8") {
+				t.Errorf("%s %s = %d %s %q, want 400 INVALID_UTF8 naming %s", row.request.method, row.request.target, response.Code, refusal.Code, refusal.Error, row.field)
+			}
+			after := databaseFingerprint(t, database)
+			for _, table := range slices.Sorted(maps.Keys(after)) {
+				if before[table] != after[table] {
+					t.Errorf("%s %s changed table %s", row.request.method, row.request.target, table)
+				}
+			}
+		})
+	}
+}
+
 // A credential decision's or lookup's typed code is relayed to the secrets broker, which reads it
 // against its own PostgreSQL, and Dispatch is the only caller of those routes: a code holding a NUL
 // is refused here and never relayed.
@@ -427,11 +446,10 @@ func TestABrowsersNulLeavesTheDocumentVersionable(t *testing.T) {
 	}
 }
 
-// A hand-built client can set a block's id to any string, such as one holding a U+0000, which an
-// ask row cannot store and a typed block's `#id` cannot render. Settlement mints such an id again
-// as it mints a missing one, so the document settles: the ask is indexed under the new id and the
-// version holds no NUL.
-func TestABlockIDOutsideTheIDFormatIsMintedAgain(t *testing.T) {
+// A hand-built client can set a block's id to text holding a U+0000, which an ask row cannot
+// store. Settlement mints such an id again as it mints a missing one, so the document settles: the
+// ask is indexed under the new id and the version holds no NUL.
+func TestABlockIDHoldingANulIsMintedAgain(t *testing.T) {
 	for _, test := range []struct {
 		name string
 		spec string
@@ -475,6 +493,190 @@ func TestABlockIDOutsideTheIDFormatIsMintedAgain(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The browser editor keeps the id a pasted typed block's `#id` names, which its parser reads up to
+// a quote, `#`, `.`, `<`, `=`, `>`, a backtick, `}` or whitespace, so `q:1` and `décision` are ids it
+// makes. PostgreSQL stores them, so settlement keeps them: an ask pasted under one is indexed under
+// it, takes its answer, and stays that one answered ask through the browser's next edit. Minting
+// such an id again would leave the answered row behind and index the block as a fresh open ask, the
+// question the human already answered back in their inbox.
+func TestABlockIDTheEditorKeepsFromAPasteSurvivesSettlement(t *testing.T) {
+	for _, id := range []string{"q:1", "décision"} {
+		t.Run(id, func(t *testing.T) {
+			documentService, handler, database := browserDocumentService(t)
+			issue := createInteractionIssue(t, handler, "TEST", "Pasted block id", "before\n")
+			pasted, err := pmdoc.Parse(":::ask{#pasted urgency=\"med\"}\nWhich one?\n\n- A\n- B\n:::\n")
+			if err != nil {
+				t.Fatal(err)
+			}
+			pasted.Children[0].Attrs[pmdoc.BlockIDAttr] = id
+			peer := connectBrowserPeer(t, documentService, issue.PrimaryArtifactID)
+			peer.edit(t, func(tree *pmdoc.Node) error {
+				tree.Children = append(tree.Children, pasted.Children...)
+				return nil
+			})
+			peer.barrier(t)
+			peer.closeAndWait(t)
+			asks := decodeBody[[]model.Ask](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/asks", nil, "alice"))
+			if len(asks) != 1 || asks[0].BlockID == nil || *asks[0].BlockID != id || asks[0].State != "open" {
+				t.Fatalf("after the paste, asks = %s; want one open ask under %q", describeAsks(asks), id)
+			}
+			if answered := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+asks[0].ID+"/answer", map[string]any{
+				"selected": []string{"A"},
+			}, "alice"); answered.Code != http.StatusOK {
+				t.Fatalf("answer the pasted ask: status=%d body=%s", answered.Code, answered.Body.String())
+			}
+
+			peer = connectBrowserPeer(t, documentService, issue.PrimaryArtifactID)
+			peer.appendToFirstParagraph(t, " more")
+			peer.barrier(t)
+			peer.closeAndWait(t)
+			asks = decodeBody[[]model.Ask](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/asks", nil, "alice"))
+			if len(asks) != 1 || asks[0].BlockID == nil || *asks[0].BlockID != id || asks[0].State != "answered" {
+				t.Fatalf("after the next browser edit, asks = %s; want the one answered ask under %q", describeAsks(asks), id)
+			}
+			var markdown string
+			if err := database.Pool.QueryRow(context.Background(), `
+				select markdown from artifact_versions where artifact_id = $1 order by number desc limit 1
+			`, issue.PrimaryArtifactID).Scan(&markdown); err != nil {
+				t.Fatalf("read the latest version: %v", err)
+			}
+			if !strings.Contains(markdown, "{#"+id+" ") {
+				t.Fatalf("latest version = %q, want the ask written under %q", markdown, id)
+			}
+		})
+	}
+}
+
+func describeAsks(asks []model.Ask) string {
+	described := make([]string, 0, len(asks))
+	for _, ask := range asks {
+		blockID := "<none>"
+		if ask.BlockID != nil {
+			blockID = *ask.BlockID
+		}
+		described = append(described, fmt.Sprintf("{block %q, %s}", blockID, ask.State))
+	}
+	return "[" + strings.Join(described, " ") + "]"
+}
+
+// While a browser's block id holding a U+0000 is live and settlement has not yet minted it again,
+// a comment or an ask anchored inside that block is pinned to no block, as one spanning top-level
+// blocks is, rather than storing an id its row cannot hold.
+func TestAnAnchorInABlockWhoseLiveIDHoldsANulIsUnpinned(t *testing.T) {
+	documentService, handler, _ := browserDocumentService(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Unsettled NUL id", "before\n")
+	peer := connectBrowserPeer(t, documentService, issue.PrimaryArtifactID)
+	t.Cleanup(peer.close)
+	peer.edit(t, func(tree *pmdoc.Node) error {
+		tree.Children[0].Attrs[pmdoc.BlockIDAttr] = "x" + nulText
+		return nil
+	})
+	peer.barrier(t)
+	anchor := map[string]any{"artifact": "spec", "quote": "before"}
+
+	comment := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body": "On this.", "anchor": anchor,
+	}, "alice")
+	if comment.Code != http.StatusCreated {
+		t.Fatalf("comment anchored in the block: status=%d body=%s", comment.Code, comment.Body.String())
+	}
+	if created := decodeBody[model.Comment](t, comment); created.Anchor == nil || created.Anchor.BlockID != nil {
+		t.Fatalf("comment anchor = %+v, want it pinned to no block", created.Anchor)
+	}
+	ask := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"question": "This one?", "anchor": anchor, "actor": sessionActor(),
+	})
+	if ask.Code != http.StatusCreated {
+		t.Fatalf("ask anchored in the block: status=%d body=%s", ask.Code, ask.Body.String())
+	}
+	if created := decodeBody[model.Ask](t, ask); created.Anchor == nil || created.Anchor.BlockID != nil {
+		t.Fatalf("ask anchor = %+v, want it pinned to no block", created.Anchor)
+	}
+}
+
+// Every read serves a U+0000 a browser left in the document as U+FFFD, so a quote is matched against
+// that text too: a quote copied from GET /text anchors a comment and finds a replace's target,
+// where a quote holding the U+0000 itself is refused at the input layer.
+func TestAQuoteMatchesABrowsersNulAsEveryReadServesIt(t *testing.T) {
+	documentService, handler, _ := browserDocumentService(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Quote over a NUL", "before\n")
+	peer := connectBrowserPeer(t, documentService, issue.PrimaryArtifactID)
+	peer.edit(t, func(tree *pmdoc.Node) error {
+		tree.Children[0].Children[0].Text = "bef" + nulText + "ore"
+		return nil
+	})
+	peer.barrier(t)
+	peer.closeAndWait(t)
+	const served = "befa\uFFFDbore"
+	text := decodeBody[struct {
+		Markdown string `json:"markdown"`
+	}](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/text", nil, "alice"))
+	if text.Markdown != served+"\n" {
+		t.Fatalf("GET /text = %q, want %q", text.Markdown, served+"\n")
+	}
+
+	comment := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body": "On this.", "anchor": map[string]any{"artifact": "spec", "quote": served},
+	}, "alice")
+	if comment.Code != http.StatusCreated {
+		t.Fatalf("comment anchored on the served text: status=%d body=%s", comment.Code, comment.Body.String())
+	}
+	if created := decodeBody[model.Comment](t, comment); created.Anchor == nil || created.Anchor.Quote != served {
+		t.Fatalf("comment anchor = %+v, want the quote %q", created.Anchor, served)
+	}
+	if edit := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"ops": []map[string]any{{"op": "replace", "find": served, "with": "after"}},
+	}, "alice"); edit.Code != http.StatusOK {
+		t.Fatalf("replace the served text: status=%d body=%s", edit.Code, edit.Body.String())
+	}
+}
+
+// A document websocket's bearer names its session in the X-Dispatch-Actor header, JSON whose
+// escapes can spell U+0000, which the author a version records cannot store. The connection is
+// refused before it is upgraded, naming where the character stands, as a body holding one is; the
+// same session without it connects.
+func TestTheDocumentWebsocketRefusesANulInItsBearersActor(t *testing.T) {
+	var documentService *docs.Service
+	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
+		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour, AgentToken: "agent-token"})
+		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+		return documentService
+	})
+	issue := createInteractionIssue(t, handler, "TEST", "Websocket actor", "before\n")
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+	room := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws/doc/" + issue.PrimaryArtifactID + "?schema_version=" + strconv.Itoa(pmdoc.SchemaVersion())
+	dial := func(actor string) (*gws.Conn, *http.Response, error) {
+		return gws.DefaultDialer.Dial(room, http.Header{"Authorization": {"Bearer agent-token"}, "X-Dispatch-Actor": {actor}})
+	}
+	for _, row := range []struct{ actor, field string }{
+		{`{"kind":"session","id":"a\u0000b"}`, "X-Dispatch-Actor.id"},
+		{`{"kind":"session","id":"s1","origin":{"cwd":"a\u0000b"}}`, "X-Dispatch-Actor.origin.cwd"},
+	} {
+		connection, response, err := dial(row.actor)
+		if err == nil {
+			_ = connection.Close()
+			t.Fatalf("a bearer whose actor holds a NUL at %s connected to the document", row.field)
+		}
+		if response == nil {
+			t.Fatalf("dial with a NUL at %s: %v, want a refused handshake", row.field, err)
+		}
+		var refusal struct {
+			Code  string `json:"code"`
+			Error string `json:"error"`
+		}
+		_ = json.NewDecoder(response.Body).Decode(&refusal)
+		if response.StatusCode != http.StatusBadRequest || refusal.Code != "NUL_CHARACTER" || !strings.HasPrefix(refusal.Error, row.field+" holds a NUL character") {
+			t.Errorf("dial with a NUL at %s = %d %s %q, want 400 NUL_CHARACTER naming it", row.field, response.StatusCode, refusal.Code, refusal.Error)
+		}
+	}
+	connection, response, err := dial(`{"kind":"session","id":"s1"}`)
+	if err != nil {
+		t.Fatalf("dial with a clean actor: response=%v err=%v", response, err)
+	}
+	_ = connection.Close()
 }
 
 func assertNulRefusal(t *testing.T, response *httptest.ResponseRecorder, request, field string) {
