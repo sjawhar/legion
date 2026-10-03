@@ -61,7 +61,7 @@ this one.
 ## Signing in as the Legion machine user
 
 A gateway that admits Cognito user tokens takes a token from `legion model-token`, which the worker
-image carries at `/opt/legion/go/bin/legion`. Oh My Pi runs it as the model `apiKey` and runs it
+image carries at `/opt/legion/bin/legion`. Oh My Pi runs it as the model `apiKey` and runs it
 again after a 401. It signs in with Cognito's custom authentication (`InitiateAuth` with
 `CUSTOM_AUTH`, then `RespondToAuthChallenge`), answering the challenge with the pod's projected
 service-account token, and prints the access token. It signs in on every run and keeps no token,
@@ -72,14 +72,12 @@ code on stderr, never the endpoint's own text, and prints no token. It reaches C
 trusts only the image's certificate store: Oh My Pi runs it with the workspace's `.env` in its
 environment, so no `HTTPS_PROXY`, `SSL_CERT_FILE` or `SSL_CERT_DIR` steers it.
 
-The daemon's image probe runs the command too, so every probe performs a real sign-in. The probe's
-pod runs on the image's `PATH`, where `legion` is the TypeScript CLI, which has no `model-token`;
-that is why the line names the Go `legion` by its full path.
+The daemon's image probe runs the command too, so every probe performs a real sign-in.
 
 Every value is the operator's, passed as flags in their own `models.yml`:
 
 ```yaml
-    apiKey: "!/opt/legion/go/bin/legion model-token --region <pool region> --client-id <app client id> --username <machine user> --service-account-token-file /var/run/operator/token"
+    apiKey: "!/opt/legion/bin/legion model-token --region <pool region> --client-id <app client id> --username <machine user> --service-account-token-file /var/run/operator/token"
 ```
 
 The service-account token is the projected token `pod.yml` already mounts at
