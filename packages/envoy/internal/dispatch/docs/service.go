@@ -154,8 +154,9 @@ type Service struct {
 	// preloads holds, per room, the durable state a document socket's admission check decoded
 	// (*preloadedDocument), for the room load that socket makes next (takePreload).
 	preloads sync.Map
-	// replicas holds, per room, the replica its resident document's update observer keeps
-	// (*renderedReplica), which the room's reads walk (readLive).
+	// replicas holds, for each resident room document, the replica its update observer keeps
+	// (*renderedReplica), which the document's reads walk (readLive), keyed by a weak pointer to
+	// that document (keepReplica).
 	replicas sync.Map
 }
 
@@ -169,9 +170,6 @@ type roomState struct {
 	// it indexes to nobody.
 	lastActor       *model.Actor
 	pendingVersions map[int]versionPending
-	// contentMarkdown is the live document's rendered markdown when the room's update observer
-	// last saw it change, nil until the room loads.
-	contentMarkdown *string
 	updateClasses   []documentUpdateClass
 	pendingUpdates  int
 	settle          *time.Timer
