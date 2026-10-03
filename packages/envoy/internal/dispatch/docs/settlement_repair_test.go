@@ -156,6 +156,48 @@ func TestSettlementRepairCreditsTheAuthorOfAnEditItsVersionHolds(t *testing.T) {
 	}
 }
 
+// An edit a browser makes after a repairing settlement has read the tree its version is rendered
+// from - while that version renders - is not in the version, so the version does not credit its
+// author. The version the edit's own settlement writes holds it and credits them (LEGION-479).
+func TestSettlementRepairCreditsNoAuthorOfAnEditMadeWhileItsVersionRenders(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, ":::ask{#ask-block urgency=\"med\" multiple=\"false\" state=\"open\"}\nShip it?\n:::\n\nContext before.\n")
+	service.settleRoom(artifactID, 0)
+	answer := answerBlockAsk(t, service, artifactID)
+	bob := model.Actor{Kind: "user", ID: "bob"}
+	service.addConnection(artifactID, 1, bob)
+
+	var edited atomic.Bool
+	service.afterSettleVersionRead = func(room string) {
+		if room == artifactID && edited.CompareAndSwap(false, true) {
+			editAsPeer(t, service, artifactID, replaceRun("Context before.", "Context after."))
+		}
+	}
+	settleCurrentGeneration(t, service, artifactID)
+	if !edited.Load() {
+		t.Fatal("settlement never reached the window between its version's read and its render")
+	}
+	repaired := ":::ask{#ask-block urgency=\"med\" multiple=\"false\" state=\"answered\" answered_by=\"alice\" answered_at=\"" +
+		answer.At.Format(time.RFC3339Nano) + "\" selected=\"[]\"}\nShip it?\n:::\n\n"
+	requireLatestVersionMarkdown(t, service, artifactID, repaired+"Context before.\n")
+	repairVersion := latestVersionNumber(t, service, artifactID)
+	if authors := latestVersionAuthors(t, service, artifactID); slices.Contains(authors, bob) {
+		t.Fatalf("version %d authors = %#v, want no bob, whose edit it lacks", repairVersion, authors)
+	}
+
+	service.afterSettleVersionRead = nil
+	settleCurrentGeneration(t, service, artifactID)
+	requireLatestVersionMarkdown(t, service, artifactID, repaired+"Context after.\n")
+	editVersion := latestVersionNumber(t, service, artifactID)
+	if editVersion != repairVersion+1 {
+		t.Fatalf("latest version = %d, want %d, the edit's own", editVersion, repairVersion+1)
+	}
+	if authors := latestVersionAuthors(t, service, artifactID); !slices.Contains(authors, bob) {
+		t.Fatalf("version %d authors = %#v, want bob, whose edit it holds", editVersion, authors)
+	}
+}
+
 // latestVersionAuthors is the authors the document's latest version credits.
 func latestVersionAuthors(t *testing.T, service *Service, artifactID string) []model.Actor {
 	t.Helper()

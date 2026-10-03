@@ -92,6 +92,10 @@ type Service struct {
 	// their rows and before it writes their repairs into the room. Nil outside tests; tests use it
 	// to edit the room in that window.
 	afterSettleReconcile func(room string)
+	// afterSettleVersionRead runs after a settlement that wrote into the room has read the tree
+	// its version is rendered from, and before it renders it. Nil outside tests; tests use it to
+	// edit the room while the version renders.
+	afterSettleVersionRead func(room string)
 	// afterBackfillRead runs after the block-id backfill has read a document that needs stamping
 	// and before it stamps it. Nil outside tests; tests use it to edit the room in that window.
 	afterBackfillRead func(room string)
@@ -1248,6 +1252,20 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 			abandon(err)
 			return
 		}
+		// That tree holds the edits made since the authors were taken above, so the version is
+		// credited to their authors too, taken again with the tree: an edit's own settlement finds
+		// the document already versioned and writes no version to credit them on. They are taken
+		// here, not after the render, where an edit made while the version renders would be
+		// credited on this version, which lacks it, rather than on the version its own settlement
+		// writes. ygo runs the update observer that credits an edit after the edit's transaction
+		// releases the document, so an edit this tree holds that its observer has not yet credited
+		// is not credited here; its author stays pending for a later version.
+		state.mu.Lock()
+		pending, authors, eventActor = settlementAuthors(state)
+		state.mu.Unlock()
+		if s.afterSettleVersionRead != nil {
+			s.afterSettleVersionRead(room)
+		}
 	}
 	markdown, err := renderTree(versioned)
 	if err != nil {
@@ -1270,12 +1288,6 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		state.mu.Unlock()
 		s.discardSuppressedPersistence(room, slots...)
 		return
-	}
-	// That version holds the edits made since the authors were taken above, so it is credited to
-	// their authors too: they are taken again here. An edit's own settlement finds the document
-	// already versioned and writes no version to credit them on.
-	if len(slots) > 0 {
-		pending, authors, eventActor = settlementAuthors(state)
 	}
 	state.mu.Unlock()
 
