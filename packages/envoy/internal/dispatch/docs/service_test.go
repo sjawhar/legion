@@ -54,7 +54,7 @@ func TestRepairingAnUnreadableAskBlockCountsTheAskItOpens(t *testing.T) {
 		return tree
 	})
 	settleCurrentGeneration(t, service, artifactID)
-	outcome, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{
+	outcome, err := joinedApplyOps(service, artifactID, []model.EditOp{
 		{Op: "replace", Find: ": 60 seconds", With: "Short: 60 seconds"},
 	}, model.Actor{Kind: "session", ID: "session-0123456789abcdef"}, nil)
 	if err != nil {
@@ -79,7 +79,7 @@ func TestEditingBesideAnUnreadableAskBlockAddsNoAsk(t *testing.T) {
 		return tree
 	})
 	settleCurrentGeneration(t, service, artifactID)
-	outcome, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{
+	outcome, err := joinedApplyOps(service, artifactID, []model.EditOp{
 		{Op: "insert", After: "end", Markdown: "A plain revision."},
 	}, model.Actor{Kind: "session", ID: "session-0123456789abcdef"}, nil)
 	if err != nil {
