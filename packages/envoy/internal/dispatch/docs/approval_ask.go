@@ -37,8 +37,9 @@ func OpenApprovalAsk(ctx context.Context, tx pgx.Tx, artifactID string) (*model.
 
 // MoveApprovalAsk advances the document's one open approval ask to a new settled version. The
 // row and its thread stay open; requested_version records that the agent must hand it back before
-// a human sees it in Waiting on you again. Only the move that takes the request from the human
-// wakes anyone; a later one, while it already waits on its agent, is quiet (RewriteApprovalAsk).
+// a human sees it in Waiting on you again. Only the first move since the request was opened or
+// handed back wakes anyone, even when a thread reply already left it waiting on its agent; a later
+// one, while requested_version is already below the version it named, is quiet (RewriteApprovalAsk).
 func MoveApprovalAsk(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifactID string, version model.Version, serverURL string) ([]model.Event, error) {
 	ask, err := OpenApprovalAsk(ctx, tx, artifactID)
 	if err != nil {

@@ -72,19 +72,20 @@
 - A Dispatch approval request follows its document's versions instead of being retracted and
   reopened on every edit (LEGION-470). A version write moves the open request to the new version
   (`ask.edited`), keeping its thread and summary, and leaves it Waiting on agents until its agent
-  calls `POST /api/v1/artifacts/{id}/approval-requests` again. Only the move that takes the request
-  from the human wakes its asker and followers; each later move while it already waits on its agent
-  is recorded quiet (`quiet: true` on its `ask.edited`, `notify: false`, no follower route), as a
-  human's unnamed version is, so a person typing in a document with a request open sends one
-  delivery, not one per settled version. While the request waits on its agent
-  (moved, or answered in its thread), that call hands it back to the human with the new event
-  `ask.handed_back`, rewording it first when the summary is new (`ask.edited`); a hand-back that
-  rewords nothing leaves the question and `edited_at` alone, so an answer the human had started is
-  still saved. While the request already waits on the human, the same summary is a repeat that
-  writes nothing and a different one is refused `409 APPROVAL_WAITS_ON_HUMAN`, since an approval
-  request carries nothing new. The route answers 201 when it wrote anything and 200 when the
-  request already stood as asked. A summary's limit is counted against a ten-digit version, so no
-  version move takes the question past the ask cap. `ask.approval` gains `requested_version`, the
+  calls `POST /api/v1/artifacts/{id}/approval-requests` again. Only the first move since the
+  request was opened or handed back wakes its asker and followers, even when a reply in its thread
+  had already left it waiting on its agent; each later move, while `requested_version` is already
+  below the version it named, is recorded quiet (`quiet: true` on its `ask.edited`,
+  `notify: false`, no follower route), as a human's unnamed version is, so a person typing in a
+  document with a request open sends one delivery, not one per settled version. While the request
+  waits on its agent (moved, or answered in its thread), that call hands it back to the human with
+  the new event `ask.handed_back`, rewording it first when the summary is new (`ask.edited`); a
+  hand-back that rewords nothing leaves the question and `edited_at` alone, so an answer the human
+  had started is still saved. While the request already waits on the human, the same summary is a
+  repeat that writes nothing and a different one is refused `409 APPROVAL_WAITS_ON_HUMAN`, since an
+  approval request carries nothing new. The route answers 201 when it wrote anything and 200 when
+  the request already stood as asked. A summary's limit is counted against a ten-digit version, so
+  no version move takes the question past the ask cap. `ask.approval` gains `requested_version`, the
   version last handed to the human, and a document's `approval` gains `waiting_on` while it is
   `awaiting`. Every route that writes a comment (both comment routes and the delivery callback
   `POST /api/v1/comments/{id}/reply`) answers `ask_waiting_on`, the value the comment's event
