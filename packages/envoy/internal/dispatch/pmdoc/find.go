@@ -671,7 +671,7 @@ func MarkSpans(doc *Node, markType, id string) []Range {
 		if node.Type != "text" {
 			return true
 		}
-		if nodeMarkID(node, markType) != id {
+		if !nodeHasMarkID(node, markType, id) {
 			between = true
 			return true
 		}
@@ -714,7 +714,10 @@ func FindMark(doc *Node, markType, id string) (Range, string, bool) {
 }
 
 // anchorMarkTypes are the marks an ask or comment row anchors to: its quote is the text they
-// cover (FindMark).
+// cover (FindMark). They are exactly the marks whose schema declares an empty excludes (the fork's
+// proofComment and proofSuggestion, packages/proof-editor's dispatchAsk), so two of one type may
+// cover one character and each is stored under its own Y attribute key (markAttributeKey). The
+// set moves with those schemas.
 var anchorMarkTypes = map[string]bool{"proofComment": true, "proofSuggestion": true, "dispatchAsk": true}
 
 // AnchorMarksCovering returns each anchor mark that every text run inside r carries, which is
@@ -818,36 +821,39 @@ func MarkAttrs(doc *Node, markType, id string) (Attrs, bool) {
 	var attrs Attrs
 	found := false
 	walk(doc, func(node *Node, _ []int, _, _ int) bool {
-		if node.Type != "text" || nodeMarkID(node, markType) != id {
+		if node.Type != "text" {
 			return true
 		}
 		for _, mark := range node.Marks {
-			if mark.Type != markType {
-				continue
+			if markHasID(mark, markType, id) {
+				attrs = cloneAttrs(mark.Attrs)
+				found = true
+				return false
 			}
-			markID, ok := mark.Attrs["id"].(string)
-			if !ok || markID != id {
-				continue
-			}
-			attrs = cloneAttrs(mark.Attrs)
-			found = true
-			return false
 		}
 		return true
 	})
 	return attrs, found
 }
 
-func nodeMarkID(node *Node, markType string) string {
+// nodeHasMarkID reports whether node carries a markType mark whose id is id. A record mark's type
+// does not exclude itself (anchorMarkTypes), so a run may carry two of one type, and the mark asked
+// for need not be the first of them.
+func nodeHasMarkID(node *Node, markType, id string) bool {
 	for _, mark := range node.Marks {
-		if mark.Type != markType {
-			continue
-		}
-		if id, ok := mark.Attrs["id"].(string); ok {
-			return id
+		if markHasID(mark, markType, id) {
+			return true
 		}
 	}
-	return ""
+	return false
+}
+
+func markHasID(mark Mark, markType, id string) bool {
+	if mark.Type != markType {
+		return false
+	}
+	markID, ok := mark.Attrs["id"].(string)
+	return ok && markID == id
 }
 
 // MarkRange adds mark to every selected text run. A mark may cross textblocks
@@ -877,7 +883,7 @@ func MarkRange(txn *crdt.Transaction, frag *crdt.YXmlFragment, r Range, mark Mar
 		return ErrTargetNotFound
 	}
 
-	attributes := crdt.Attributes{mark.Type: markAttributeValue(mark)}
+	attributes := crdt.Attributes{markAttributeKey(mark): markAttributeValue(mark)}
 	for _, span := range affected {
 		from := max(r.From, span.From) - span.From
 		to := min(r.To, span.To) - span.From

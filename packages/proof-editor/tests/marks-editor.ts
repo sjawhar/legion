@@ -14,6 +14,8 @@ export interface MarksEditor {
   press(chord: "Mod-z" | "Mod-Shift-z"): void;
   /** The undo steps each manager holds: prosemirror-history's, and y-prosemirror's UndoManager's. */
   depths(): { history: number; yjs: number };
+  /** The Y.Doc the editor is bound to, for a test that applies a collaborator's update to it. */
+  readonly ydoc: Y.Doc;
 }
 
 /**
@@ -65,6 +67,7 @@ export async function withMarksEditor(
           view.someProp("handleKeyDown", (handleKeyDown) => handleKeyDown(view, event));
         },
         view,
+        ydoc,
       });
     } finally {
       handle.destroy();

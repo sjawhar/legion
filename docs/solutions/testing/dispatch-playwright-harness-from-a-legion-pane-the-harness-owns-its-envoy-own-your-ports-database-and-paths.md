@@ -63,7 +63,7 @@ builds the server with the caller's `go`, in the caller's environment, before it
 isolates the server process. It then reads the harness ports, unsets every
 inherited `DISPATCH_*`, `ENVOY_*` and `NATS_*` variable, and supplies the
 server's configuration in full: `ENVOY_URL` built from `FAKE_ENVOY_PORT`, fake
-GitHub and dashboard origins, and a fresh App key, with no cookie signing key: the server
+GitHub, fake secrets broker and dashboard origins, and a fresh App key, with no cookie signing key: the server
 generates one for its own process under `DISPATCH_DEV_SIGNIN`. The server runs
 with no caller Home or XDG directory, so
 `~/.config/opencode/envoy.json` and
@@ -88,12 +88,13 @@ a harness failure. What can: the ports and the explicitly named database below.
 ## 2. On a shared box, own the ports and the database
 
 The server and listener defaults — Go server on `8777`, fake Envoy on
-`9021`, fake GitHub on `9022`, plain-HTTP proxy on `9023` — are shared by every agent running the
+`9021`, fake GitHub on `9022`, plain-HTTP proxy on `9023`, fake secrets broker on `9024` — are
+shared by every agent running the
 suite on the box. The database is deliberately not a default: `e2e/seed.ts` truncates it
 before every scenario, so each run must name its own isolated database.
 
 Sharing a port is no longer silent: before any web server starts, the Playwright config probes
-the ports it starts (all four locally, `FAKE_ENVOY_PORT` and `PLAIN_HTTP_PORT` for a deployed run)
+the ports it starts (all five locally, `FAKE_ENVOY_PORT` and `PLAIN_HTTP_PORT` for a deployed run)
 and fails naming
 every taken port beside its own variable, so a local run can no longer truncate the database behind
 another lane's server. Sharing a database still is silent — nothing
@@ -104,11 +105,11 @@ invocations skip the probe.
 ```sh
 docker exec dispatch-pg createdb -U postgres dispatch_<issue>      # once
 DATABASE_URL='postgres://postgres:dispatch@127.0.0.1:55432/dispatch_<issue>?sslmode=disable' \
-DISPATCH_E2E_PORT=87NN FAKE_ENVOY_PORT=90NN FAKE_GITHUB_PORT=91NN PLAIN_HTTP_PORT=92NN \
+DISPATCH_E2E_PORT=87NN FAKE_ENVOY_PORT=90NN FAKE_GITHUB_PORT=91NN PLAIN_HTTP_PORT=92NN FAKE_BROKER_PORT=93NN \
   bun run e2e
 ```
 
-`DATABASE_URL` is read by the server script and by `e2e/seed.ts`. The four ports are resolved for
+`DATABASE_URL` is read by the server script and by `e2e/seed.ts`. The five ports are resolved for
 the whole TypeScript suite by `e2e/harness-ports.ts`, the only TypeScript module that reads them
 from the environment; every other module, `e2e/seed.ts` included, reaches a harness server through
 it or through `e2e/api.ts`. So those variables move the whole harness together. Start nothing else:
