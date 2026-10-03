@@ -152,17 +152,25 @@ func (l *Ledger) endRebuilds() {
 // WroteVersion records a version of artifactID that the caller wrote itself in this transaction,
 // outside the document service, over the transaction's write to the document - an upload, which
 // credits authors, its uploader, to whom that write is credited. Commit then leaves the write out
-// of the document's pending authors, since the version holds and credits it, and releases the
-// authors' entries credited before the write last read the room (liveWrite.forkSeq), whose changes
-// the version is written over. An entry credited after that read, for a change the write never
-// read, stays pending for the next version. A version of a document the transaction seeded
-// (SeedText) has no write to hold and no pending author to release.
+// of the document's pending authors, since the version holds and credits it, and clears every
+// pending entry credited before the write last read the room (liveWrite.forkSeq): the replacement
+// overwrote those changes, so no later version may credit them. An entry credited after that read,
+// for a change the write never read, stays pending for the next version. A version of a document
+// the transaction seeded (SeedText) has no write to hold and no pending author to release.
 func (l *Ledger) WroteVersion(artifactID string, authors []model.Actor) {
 	write := l.liveWriteFor(artifactID)
 	if write == nil {
 		return
 	}
-	capture := write.state.captureThrough(write.forkSeq, len(authors))
+	state := write.state
+	state.mu.Lock()
+	capture := state.captureThrough(write.forkSeq, len(authors))
+	for key, pending := range state.pending {
+		if pending.seq <= write.forkSeq {
+			capture.supersede(key)
+		}
+	}
+	state.mu.Unlock()
 	for _, author := range authors {
 		capture.credit(author)
 	}
@@ -215,6 +223,9 @@ func (l *Ledger) addLiveWrite(write *liveWrite) {
 func (l *Ledger) credit() {
 	for _, artifactID := range l.order {
 		write := l.live[artifactID]
+		if len(write.credits) == 0 && write.askBlocks == nil {
+			continue
+		}
 		state := l.service.room(artifactID)
 		state.mu.Lock()
 		state.trackCommittedAskBlocks(write)
@@ -225,6 +236,7 @@ func (l *Ledger) credit() {
 				}
 			}
 			state.lastActor = write.actor
+			state.lastActorCredit = state.creditSeq
 		}
 		state.mu.Unlock()
 	}

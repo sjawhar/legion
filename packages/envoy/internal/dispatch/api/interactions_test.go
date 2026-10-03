@@ -1350,6 +1350,52 @@ func TestAnUploadKeepsTheCreditOfAnEditItsUploaderMakesWhileItWrites(t *testing.
 	}
 }
 
+// An upload replacing another browser author's pending edit consumes that edit's credit: the
+// upload version does not hold the edit, so no later version may credit it (LEGION-503).
+func TestUploadClearsAnotherAuthorItsReplacementOverwrites(t *testing.T) {
+	documentService, handler, _ := browserDocumentService(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Overwritten author", "before")
+	path := "/api/v1/issues/" + issue.Key + "/artifacts"
+	upload := func(login, content string) {
+		t.Helper()
+		if response := dispatchRequest(t, handler, http.MethodPost, path, map[string]string{
+			"name": "notes.md", "content": content,
+		}, login); response.Code != http.StatusCreated {
+			t.Fatalf("%s uploads %q: status=%d body=%s", login, content, response.Code, response.Body.String())
+		}
+	}
+	upload("bob", "before\n")
+	var notes model.Artifact
+	for _, artifact := range decodeBody[[]model.Artifact](t, dispatchRequest(t, handler, http.MethodGet, path, nil, "alice")) {
+		if artifact.Name == "notes.md" {
+			notes = artifact
+		}
+	}
+	if notes.ID == "" {
+		t.Fatal("uploaded document is missing")
+	}
+	browser := connectBrowserPeer(t, documentService, notes.ID)
+	t.Cleanup(browser.close)
+	browser.appendParagraph(t, "Alice wrote this.")
+	browser.barrier(t)
+	upload("bob", "after\n")
+
+	next := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+notes.ID+"/edits", map[string]any{
+		"ops":     []map[string]string{{"op": "replace", "find": "after", "with": "next"}},
+		"summary": "Next version",
+		"actor":   sessionActor(),
+	})
+	if next.Code != http.StatusOK {
+		t.Fatalf("create next version: status=%d body=%s", next.Code, next.Body.String())
+	}
+	version := decodeBody[struct {
+		Version *model.Version `json:"version"`
+	}](t, next).Version
+	if version == nil || len(version.Authors) != 1 || version.Authors[0] != (model.Actor{Kind: "session", ID: "session-0123456789abcdef"}) {
+		t.Fatalf("next version = %#v, want only the session editor: Bob's upload overwrote Alice's pending edit", version)
+	}
+}
+
 // An upload's version credits its uploader and holds the upload's write to the document, and the
 // uploader's browser edits it is written over, so the next version, a session's named edit,
 // credits that session alone (LEGION-503).

@@ -541,6 +541,66 @@ func TestNamedVersionCreditsNoAuthorOfAnEditMadeAfterItsForkRead(t *testing.T) {
 	}
 }
 
+// A room-backed snapshot takes its authors before it copies the document. A browser edit between
+// those steps is in that snapshot but credited afterwards, so it stays pending for the next version
+// that holds it (LEGION-503).
+func TestSnapshotCreditsAnEditMadeBetweenItsAuthorsAndCopyOnTheNextVersion(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
+	settleCurrentGeneration(t, service, artifactID)
+	alice := model.Actor{Kind: "user", ID: "alice"}
+	if _, err := service.ReplaceText(context.Background(), artifactID, "First, alice.\n\nSecond.\n", alice); err != nil {
+		t.Fatalf("alice's edit: %v", err)
+	}
+	bob := model.Actor{Kind: "user", ID: "bob"}
+	service.addConnection(artifactID, 1, bob)
+
+	ctx := context.Background()
+	tx, err := service.store.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin snapshot transaction: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	joined, ledger := service.Join(ctx, tx)
+	defer ledger.Discard()
+	var release func()
+	service.afterCaptureAuthorsTake = func(room string) {
+		if room == artifactID && release == nil {
+			release = holdPeerEdit(t, service, artifactID, &service.afterCreditUpdate, replaceRun("Second.", "Second, bob."))
+		}
+	}
+	snapshot, err := service.SnapshotVersion(joined, artifactID, alice)
+	if err != nil {
+		t.Fatalf("snapshot document: %v", err)
+	}
+	if !snapshot.Wrote || release == nil {
+		t.Fatalf("snapshot = %#v, release=%t, want a version and the author-to-copy window", snapshot, release != nil)
+	}
+	if !reflect.DeepEqual(snapshot.Version.Authors, []model.Actor{alice}) {
+		t.Fatalf("snapshot authors = %#v, want alice alone: Bob's credit follows the take", snapshot.Version.Authors)
+	}
+	if err := ledger.Commit(ctx); err != nil {
+		t.Fatalf("commit snapshot: %v", err)
+	}
+
+	service.afterCaptureAuthorsTake = nil
+	release()
+	settleCurrentGeneration(t, service, artifactID)
+	if latest := latestVersionNumber(t, service, artifactID); latest != snapshot.Version.Number {
+		t.Fatalf("latest version = %d, want %d, which already holds Bob's edit", latest, snapshot.Version.Number)
+	}
+	const both = "First, alice.\n\nSecond, bob.\n"
+	carol := model.Actor{Kind: "user", ID: "carol"}
+	if _, err := service.ReplaceText(context.Background(), artifactID, both+"\nThird, carol.\n", carol); err != nil {
+		t.Fatalf("carol's edit: %v", err)
+	}
+	settleCurrentGeneration(t, service, artifactID)
+	if authors := latestVersionAuthors(t, service, artifactID); !reflect.DeepEqual(authors, []model.Actor{bob, carol}) {
+		t.Fatalf("version %d authors = %#v, want Bob and Carol", latestVersionNumber(t, service, artifactID), authors)
+	}
+}
+
 func TestColdSnapshotCapturesFirstEditAfterWarm(t *testing.T) {
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "before")

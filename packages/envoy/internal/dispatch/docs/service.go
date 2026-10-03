@@ -98,6 +98,9 @@ type Service struct {
 	// capture (captureLiveTextAndAuthors) and VerifyMark - and before the read takes anything from
 	// it. Nil outside tests; tests use it to evict the room in that window.
 	afterReadWarm func(room string)
+	// afterCaptureAuthorsTake runs after a room-backed version capture takes its authors and before
+	// it copies the document. Nil outside tests; tests use it to edit the room in that window.
+	afterCaptureAuthorsTake func(room string)
 	// afterCaptureFork runs once a version's capture (captureLiveTextAndAuthors) has brought the
 	// calling transaction's fork up to date with the room, and before it renders the fork. Nil
 	// outside tests; tests use it to edit the room in that window.
@@ -186,7 +189,8 @@ type roomState struct {
 	// connected peer of a browser edit. A settlement uses it for derived events and approval moves
 	// when its version credits that actor or credits nobody; ambiguous browser edits use
 	// SettlementActor instead.
-	lastActor *model.Actor
+	lastActor       *model.Actor
+	lastActorCredit uint64
 	// contentMarkdown is the live document's rendered markdown when the room's update observer
 	// last saw it change, nil until the room loads.
 	contentMarkdown *string
@@ -995,12 +999,17 @@ type settlementCredit struct {
 	authors           []model.Actor
 	actor             model.Actor
 	authoredAskBlocks map[string]model.Actor
+	// afterCopyActor credited a browser update after this settlement took its actor. Reconciliation
+	// defers an unknown new ask block rather than assigning it the pre-copy actor.
+	afterCopyActor *model.Actor
 }
 
 // readSettlementTree takes the authors a settlement's version credits before it copies doc. An
 // update observer credits a change only once the room holds it, so every author taken made a change
-// the copy holds; one credited after the take stays pending (authors.go). Holding state.mu across
-// the copy would block the update observer that credits and broadcasts every peer's keystroke.
+// the copy holds; one credited after the take stays pending (authors.go). It notices a later known
+// browser actor after the copy, so reconciliation defers an ask block the earlier actor cannot
+// name. Holding state.mu across the copy would block the update observer that credits and broadcasts
+// every peer's keystroke.
 func readSettlementTree(state *roomState, doc *crdt.Doc, room string, afterTake func(room string)) (*pmdoc.Node, settlementCredit, error) {
 	state.mu.Lock()
 	credit := settlementAuthors(state)
@@ -1009,7 +1018,15 @@ func readSettlementTree(state *roomState, doc *crdt.Doc, room string, afterTake 
 		afterTake(room)
 	}
 	tree, err := lockedTreeOf(doc)
-	return tree, credit, err
+	if err != nil {
+		return nil, settlementCredit{}, err
+	}
+	state.mu.Lock()
+	if state.lastActor != nil && state.lastActorCredit > credit.capture.through {
+		credit.afterCopyActor = new(*state.lastActor)
+	}
+	state.mu.Unlock()
+	return tree, credit, nil
 }
 
 // settlementAuthors takes state's pending authors, which a settlement's version credits, and names
@@ -1301,7 +1318,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		return
 	}
 	state.mu.Unlock()
-	reconciliation, err := s.reconcileAskBlocks(ctx, tx, room, owner, reconciled, credit.actor, credit.authoredAskBlocks)
+	reconciliation, err := s.reconcileAskBlocks(ctx, tx, room, owner, reconciled, credit.actor, credit.authoredAskBlocks, credit.afterCopyActor)
 	if err != nil {
 		abandon(err)
 		return

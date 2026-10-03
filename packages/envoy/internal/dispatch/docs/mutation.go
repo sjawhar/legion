@@ -1063,6 +1063,7 @@ func (s *Service) recordLastActor(room string, actor model.Actor) {
 	state := s.room(room)
 	state.mu.Lock()
 	state.lastActor = new(actor)
+	state.lastActorCredit = 0
 	state.mu.Unlock()
 }
 
@@ -1100,14 +1101,10 @@ func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, ac
 		if _, err := s.joinRead(ctx, room); err != nil {
 			return nil, "", authorCapture{}, nil, err
 		}
-		// The room's state lock is held from the read to the authors it captures, so an author
-		// the update observer credits (creditContentChange, after the update is in the room) is
-		// captured only with that update's text. The room itself is read through a copy taken
-		// under its document lock (snapshotDocument), as a peer or service write holds that lock
-		// while it applies and a direct walk of the live tree takes none. The order - state lock,
-		// then document lock - is never reversed: nothing that holds a document's lock, which only
-		// a Yjs transaction's own function does, takes a room's state lock. The copy is taken
-		// inside the Apply that loads and holds the room, as docView reads it: a room looked up
+		// The room's state lock protects only the author take. A change credited before that take
+		// is already in live, so the copy after it holds every taken change; one credited later
+		// stays pending for the next version. snapshotDocument takes the document lock while it
+		// copies, and the Apply that loads and holds the room contains both steps: a room looked up
 		// again once that Apply returned can have been evicted in between.
 		var copyErr error
 		err := s.srv.Apply(ctx, room, func(live *crdt.Doc, _ func(func(*crdt.Transaction))) {
@@ -1116,10 +1113,12 @@ func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, ac
 			}
 			state := s.room(room)
 			state.mu.Lock()
-			defer state.mu.Unlock()
-			if doc, copyErr = snapshotDocument(live); copyErr == nil {
-				capture, authors = captureAuthors(state, nil, actor)
+			capture, authors = captureAuthors(state, nil, actor)
+			state.mu.Unlock()
+			if s.afterCaptureAuthorsTake != nil {
+				s.afterCaptureAuthorsTake(room)
 			}
+			doc, copyErr = snapshotDocument(live)
 		})
 		if copyErr != nil {
 			return nil, "", authorCapture{}, nil, copyErr
@@ -1144,8 +1143,8 @@ func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, ac
 func captureAuthors(state *roomState, write *liveWrite, actor *model.Actor) (authorCapture, []model.Actor) {
 	capture := state.takeAuthors()
 	if write != nil {
-		for _, credited := range write.credits {
-			capture.credit(credited)
+		for key, credited := range write.credits {
+			capture.creditKey(key, credited)
 		}
 	}
 	if actor != nil {

@@ -165,6 +165,7 @@ func (s *Service) reconcileAskBlocks(
 	tree *pmdoc.Node,
 	actor model.Actor,
 	authoredAskBlocks map[string]model.Actor,
+	afterCopyActor *model.Actor,
 ) (settlementReconciliation, error) {
 	blocks, invalidBlocks, err := collectAskBlocksForSettlement(tree)
 	if err != nil {
@@ -198,9 +199,14 @@ func (s *Service) reconcileAskBlocks(
 	for _, block := range blocks {
 		ask, exists := rows[block.id]
 		if !exists {
-			blockActor := actor
-			if authored, known := authoredAskBlocks[block.id]; known {
-				blockActor = authored
+			blockActor, known := authoredAskBlocks[block.id]
+			if !known {
+				if afterCopyActor != nil {
+					// The block appeared after this settlement took its actor. Its update
+					// scheduled another settlement, which attributes it from that update.
+					continue
+				}
+				blockActor = actor
 			}
 			ask, err = createAskBlock(ctx, tx, artifactID, owner, block, blockActor)
 			if err != nil {
@@ -376,8 +382,11 @@ func askFingerprints(tree *pmdoc.Node, fingerprint func(*pmdoc.Node) (string, er
 // follows block ids rather than the block body's content: a service write that edits an existing
 // ask does not introduce a new author for it.
 func changedAskBlockIDs(before, after *pmdoc.Node) (map[string]struct{}, map[string]struct{}) {
-	beforeIDs := askBlockIDs(before)
 	afterIDs := askBlockIDs(after)
+	if len(afterIDs) == 0 {
+		return afterIDs, nil
+	}
+	beforeIDs := askBlockIDs(before)
 	introduced := make(map[string]struct{})
 	for id := range afterIDs {
 		if _, held := beforeIDs[id]; !held {
@@ -406,27 +415,23 @@ func askBlockIDs(tree *pmdoc.Node) map[string]struct{} {
 
 // trackAuthoredAskBlocks retains the actor that introduced each new ask block until settlement
 // indexes it. A joined write records the association on its liveWrite, which reaches roomState only
-// once Ledger.Commit has made the write durable; an immediate service write records it directly.
+// once Ledger.Commit has made the write; an immediate service write records it directly.
 func (s *Service) trackAuthoredAskBlocks(ctx context.Context, artifactID string, before, after *pmdoc.Node, actor model.Actor) {
+	askBlocks, introduced := changedAskBlockIDs(before, after)
 	if write := joinedLiveWrite(ctx, artifactID); write != nil {
-		write.trackAuthoredAskBlocks(before, after, actor)
+		write.trackAuthoredAskBlocks(askBlocks, introduced, actor)
 		return
 	}
 	state := s.room(artifactID)
 	state.mu.Lock()
-	state.trackAuthoredAskBlocks(before, after, actor)
+	state.trackAuthoredAskBlocks(askBlocks, introduced, actor)
 	state.mu.Unlock()
 }
 
 // trackAuthoredAskBlocks records this immediate service write's new ask blocks. The caller holds
 // state.mu.
-func (state *roomState) trackAuthoredAskBlocks(before, after *pmdoc.Node, actor model.Actor) {
-	askBlocks, introduced := changedAskBlockIDs(before, after)
-	for id := range state.authoredAskBlocks {
-		if _, held := askBlocks[id]; !held {
-			delete(state.authoredAskBlocks, id)
-		}
-	}
+func (state *roomState) trackAuthoredAskBlocks(askBlocks, introduced map[string]struct{}, actor model.Actor) {
+	pruneAskBlockAuthors(state.authoredAskBlocks, askBlocks)
 	if len(introduced) == 0 {
 		return
 	}
@@ -440,14 +445,9 @@ func (state *roomState) trackAuthoredAskBlocks(before, after *pmdoc.Node, actor 
 
 // trackAuthoredAskBlocks retains the service write's final ask blocks and the blocks it introduced
 // until its transaction commits.
-func (write *liveWrite) trackAuthoredAskBlocks(before, after *pmdoc.Node, actor model.Actor) {
-	askBlocks, introduced := changedAskBlockIDs(before, after)
+func (write *liveWrite) trackAuthoredAskBlocks(askBlocks, introduced map[string]struct{}, actor model.Actor) {
 	write.askBlocks = askBlocks
-	for id := range write.authoredAskBlocks {
-		if _, held := askBlocks[id]; !held {
-			delete(write.authoredAskBlocks, id)
-		}
-	}
+	pruneAskBlockAuthors(write.authoredAskBlocks, askBlocks)
 	if len(introduced) == 0 {
 		return
 	}
@@ -465,11 +465,7 @@ func (state *roomState) trackCommittedAskBlocks(write *liveWrite) {
 	if write.askBlocks == nil {
 		return
 	}
-	for id := range state.authoredAskBlocks {
-		if _, held := write.askBlocks[id]; !held {
-			delete(state.authoredAskBlocks, id)
-		}
-	}
+	pruneAskBlockAuthors(state.authoredAskBlocks, write.askBlocks)
 	if len(write.authoredAskBlocks) == 0 {
 		return
 	}
@@ -478,6 +474,14 @@ func (state *roomState) trackCommittedAskBlocks(write *liveWrite) {
 	}
 	for id, actor := range write.authoredAskBlocks {
 		state.authoredAskBlocks[id] = actor
+	}
+}
+
+func pruneAskBlockAuthors(authored map[string]model.Actor, askBlocks map[string]struct{}) {
+	for id := range authored {
+		if _, held := askBlocks[id]; !held {
+			delete(authored, id)
+		}
 	}
 }
 
