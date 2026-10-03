@@ -228,14 +228,20 @@
   render and the live document. A caller's markdown - a spec, an uploaded document or version,
   an edit batch's inserts and replaces, the `find` of an edit and the quote of a comment or ask -
   may now make at most 65,536 elements (a block weighs 3, a table cell 4, a hard line break 3, an
-  autolink 2, a piece of inline syntax, a mark or a line of text 1); past that a write is `413
-  CAP_EXCEEDED`, refused while goldmark parses, naming the line where the markdown passes the limit
-  or, where the parse stopped first, the line it stopped reading at; a quote is matched by its text
-  alone. Every markdown file of 4 KiB or more in this repository weighs 1.5 to 379 elements a
-  kibibyte, so prose passes to the 1 MiB cap and the densest of them, a comparison matrix, to about
-  173 KiB; smaller files run denser, up to 1,296 a kibibyte for a 147-byte test fixture. A
-  paragraph of link reference definitions, which goldmark took time quadratic in its lines
-  to read (a mebibyte of them took a minute to refuse), is read only as far as its first 1,024 lines.
+  autolink 2, a piece of inline syntax, a mark, a line of text or an escape 1); past that a write is
+  `413 CAP_EXCEEDED`, refused while goldmark parses, naming the line where the markdown passes the
+  limit or, where the parse stopped first, the line it stopped reading at; a quote is matched by its
+  text alone. An escape - a backslash before punctuation, or a character reference, in text outside
+  a code span - makes no node in goldmark's tree, but the document holds the character it spells
+  bare, every rendering spells it again, and the renderer reads it back as the delimiter or link
+  opener it would be unescaped: a mebibyte of `\~a`, `)\_`, `\)\_` or `\[a` weighed four elements
+  and allocated 330 to 720 MiB to parse and 260 to 620 MiB to render, and the stored `\)\_` held 256
+  MiB to read cold and 973 MiB for four reads at once. Every markdown file of 4 KiB or more among
+  this repository's 606 weighs 1.5 to 379 elements a kibibyte, so prose passes to the 1 MiB cap and
+  the densest of them, a comparison matrix, to about 173 KiB; smaller files run denser, up to 986 a
+  kibibyte for a 189-byte test fixture of adjacent lists. A paragraph of link reference
+  definitions, which goldmark took time quadratic in its lines to read (a mebibyte of them took a
+  minute to refuse), is read only as far as its first 1,024 lines.
 - A write may no longer grow a stored document past what one upload may hold, measured as an
   upload is measured. Thirty-two 900 KB inserts of prose, each within both limits, grew one document
   to 29.5 MB, on which a one-word edit then held a gigabyte; a few dozen thousand headings' worth
@@ -248,16 +254,28 @@
   markdown it leaves the document storing (what `GET .../text` answers), with an upload's own
   measures: it is `413 CAP_EXCEEDED` when that is longer than 1 MiB and longer than the document's
   was, or makes more than 65,536 elements and more than the document's did, counted as an upload's
-  parse counts them (front matter apart). One that keeps or lowers both passes, so an over-limit
-  document can still be trimmed or split, and any document a write leaves can be uploaded again from
-  its own text. An ask's state, who answered it and when, and the options chosen are the server's,
-  not text a caller writes, so the asks of an over-limit document can still be answered with a
-  choice and resolved; an answer's own words are weighed. Each refusal's message is the bound's own,
-  opening `document too large to store`, on every route. A spec or new document whose stored
-  markdown (its rendering, which can run longer than what was sent) is past either limit is refused the
-  same way, as is a write that would leave a live document parking more than 90,000 of the 100,000
-  items ygo waits on while it loads one (any write that would leave it unloadable at all is
-  refused). ygo loads a document writer by writer in order of their client ids and parks what a
+  parse counts them (front matter apart, and a table whose short rows would take more padding than
+  one write may add counted as past the limit: a 101-column header over 200 one-cell rows measured
+  407 elements, the paragraph the parse leaves of it, where written whole it weighs 82,111). One
+  that keeps or lowers both passes, so an over-limit document can still be trimmed or split, and any
+  document a write leaves can be uploaded again from its own text. An ask's state and who answered
+  it and when are the server's, not text a caller writes, so the asks of an over-limit document can
+  still be answered and resolved. An answer's words and the options it chooses, whose labels are the
+  asker's text, are weighed: where the document has no room for them, the ask takes the whole answer
+  and its block is written without it, saying who answered and when, where one choice of a
+  1,000,000-character option took a 1 MB document to 8 MB. An ask's
+  edited question and options are weighed before they are made into markdown - an element for each
+  backslash, `*`, `_`, `~`, backtick, `[`, `]` and `<`, which the markdown escapes or reads as
+  syntax, and two for each line feed - and that markdown is parsed on the edit's element budget, so
+  text past the 65,536 elements one write may make is `413 CAP_EXCEEDED` before it is rendered,
+  where an option description of 400 KB of `)_` used to be taken. Each refusal's message is the
+  bound's own, opening `document too large to store`, on every route. A spec, a new document or the
+  markdown a rebuild is given (`POST /api/v1/artifacts/{id}/rebuild`) whose stored markdown (its
+  rendering, which can run longer than what was sent) is past either limit is refused the same way,
+  where a rebuild from the latest version restores it whatever it weighs; so is a write that would
+  leave a live document parking more than 90,000 of the 100,000 items ygo waits on while it loads
+  one (any write that would leave it unloadable at all is refused). ygo loads a document writer by
+  writer in order of their client ids and parks what a
   writer builds on a writer it has not read yet, so each transaction's writes now take the id after
   every writer the document holds rather than a random one: the same write to the same document gets
   the same answer, and a new version over a one-line first version, which a random id put ahead of
@@ -268,11 +286,15 @@
   suggestion, reply or edit that would leave either past its bound and bigger is `413
   CAP_EXCEEDED`, naming the bound and both sizes; a status change (accept, reject, resolve) is not
   text a caller writes and passes. Thirty-two open suggestions of 900 KB took one cold websocket
-  load to 296 MiB, and sixty-four four cold reads at once to 1,223 MiB. An answer is stored on its
-  ask as well as in its block, and settlement writes it back into a block that returns to the
-  document: that is weighed the same way, and where the answer would leave the document past
-  either limit and bigger, settlement restores the block's state and who answered, and leaves the
-  answer's text and selection on the ask until the document has room for them. Twenty-four answers
+  load to 296 MiB, and sixty-four four cold reads at once to 1,223 MiB. The marks a document's
+  comments, suggestions and asks hold on its text carry at most 1 MiB of ids and authors, which no
+  rendering carries either: an anchored comment, suggestion or ask that would leave them past it and
+  carrying more is `413 CAP_EXCEEDED`, where thirty asks anchored by a session whose id was 200 KB
+  left a 210-byte rendering over six megabytes of live document. An answer is stored on its ask as
+  well as in its block, and settlement writes it back into a block that returns to the document:
+  that is weighed the same way, each returning answer on its own in document order, and an answer
+  that would leave the document past either limit and bigger stays on its ask alone, its block
+  restored to its state and who answered, until the document has room for it. Twenty-four answers
   of 900 KB returned by one 1,540-byte edit had left a 21.6 MB document whose cold text read held
   368 MiB.
   Browser edits over the websocket are applied before any check and are not bounded by
