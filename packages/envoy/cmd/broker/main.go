@@ -150,7 +150,7 @@ func main() {
 		}
 	}
 	sweeper := &requests.Sweeper{
-		Machine: reqMachine, MachineLogins: mach,
+		Enrollments: enr, Machine: reqMachine, MachineLogins: mach,
 		Interval: time.Duration(cfg.SweepSeconds) * time.Second, Wake: waker,
 	}
 	go sweeper.Run(ctx)

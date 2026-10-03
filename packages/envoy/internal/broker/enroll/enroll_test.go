@@ -692,6 +692,49 @@ func TestLapsedLeaseReleasesTheRuntimeID(t *testing.T) {
 	}
 }
 
+// TestEndLapsedEndsEveryLapsedEnrollmentAcrossBatches pins that one EndLapsed call ends every
+// lapsed enrollment however many there are (more than one batch's worth here), leaves a live one
+// alone, and that a second call finds nothing left to end.
+func TestEndLapsedEndsEveryLapsedEnrollmentAcrossBatches(t *testing.T) {
+	svc := newService(t)
+	ctx := context.Background()
+	cred := mintCredential(t, svc, str("ada@example.com"), nil, "devbox")
+	live, err := svc.Create(ctx, cred, Enrollment{Kind: "box", RuntimeID: "box-live", Operator: str("ada@example.com"), Thumbprint: "tp-live"})
+	if err != nil {
+		t.Fatalf("Create(live): %v", err)
+	}
+	lapsed := lapsedBatch + 20
+	if _, err := svc.Store.Pool.Exec(ctx, `insert into enrollments (id, kind, runtime_id, operator, thumbprint, launcher_credential_id, lease_expires_at)
+		select gen_random_uuid(), 'box', 'box-batch-'||g, 'ada@example.com', 'tp-batch-'||g, $1, now() - interval '1 minute'
+		from generate_series(1, $2::int) g`, cred.ID, lapsed); err != nil {
+		t.Fatalf("insert lapsed enrollments: %v", err)
+	}
+
+	ended, err := svc.EndLapsed(ctx)
+	if err != nil {
+		t.Fatalf("EndLapsed: %v", err)
+	}
+	if len(ended) != lapsed {
+		t.Fatalf("EndLapsed ended %d enrollments, want all %d lapsed ones", len(ended), lapsed)
+	}
+	var unended, expiredAudits int
+	if err := svc.Store.Pool.QueryRow(ctx, `select (select count(*) from enrollments where runtime_id like 'box-batch-%' and revoked_at is null),
+		(select count(*) from audit where kind='enrollment.expired' and actor='broker')`).Scan(&unended, &expiredAudits); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if unended != 0 || expiredAudits != lapsed {
+		t.Fatalf("after EndLapsed: %d lapsed enrollments still unrevoked, %d enrollment.expired audit rows; want 0 and %d", unended, expiredAudits, lapsed)
+	}
+	if _, err := svc.Renew(ctx, live.ID.String()); err != nil {
+		t.Fatalf("the live enrollment must be untouched and still renew: %v", err)
+	}
+
+	again, err := svc.EndLapsed(ctx)
+	if err != nil || len(again) != 0 {
+		t.Fatalf("a second EndLapsed = %d ended, %v; want nothing left to end", len(again), err)
+	}
+}
+
 // TestPodEnrollmentRecordsTheVerifiedSubject pins that a pod enrollment stores the service-account
 // subject its projected token proved, and a box enrollment stores none.
 func TestPodEnrollmentRecordsTheVerifiedSubject(t *testing.T) {

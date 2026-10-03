@@ -2,10 +2,12 @@ package requests
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/broker/enroll"
 	"github.com/sjawhar/envoy/internal/broker/machine"
 )
 
@@ -59,6 +61,7 @@ func TestSweeperTickExpiresPendingRequestsAndMachineLogins(t *testing.T) {
 	var mu sync.Mutex
 	var woken []wakeCall
 	sweeper := &Sweeper{
+		Enrollments:   &enroll.Service{Store: m.Store},
 		Machine:       m,
 		MachineLogins: machineLogins,
 		Interval:      time.Hour,
@@ -110,5 +113,88 @@ func TestSweeperTickExpiresPendingRequestsAndMachineLogins(t *testing.T) {
 	}
 	if loginEvent != "expired" {
 		t.Fatalf("machine login event = %q, want expired", loginEvent)
+	}
+}
+
+// TestSweeperEndsLapsedEnrollments pins that one Tick ends an enrollment whose lease has lapsed,
+// as a launcher's revoke ends one: its live grant is revoked, its pending request is cancelled and
+// its record closed, so the approver's pending list (GET /v1/pending) stops offering it. An
+// enrollment still within its lease keeps its grant and its pending request, and a second Tick
+// changes nothing.
+func TestSweeperEndsLapsedEnrollments(t *testing.T) {
+	m, gone, goneKey, approver := newFixture(t)
+	ctx := context.Background()
+	live, liveKey := newEnrollment(t, m.Store, "box", "box-live-"+t.Name(), new("sjawhar"), nil)
+
+	type session struct{ grantID, pendingID, recordID string }
+	open := func(enr string, key *ecdsa.PrivateKey) session {
+		t.Helper()
+		granted, err := m.Create(ctx, enr, signRequest(t, m, key, "automatic", "AUTO_TOKEN"), "")
+		if err != nil || granted.GrantID == nil {
+			t.Fatalf("Create(AUTO_TOKEN) = %+v, %v, want a grant", granted, err)
+		}
+		pending, err := m.Create(ctx, enr, signRequest(t, m, key, "needs approval", "DEEL_API_KEY"), "")
+		if err != nil || pending.State != "pending" || pending.RecordID == nil {
+			t.Fatalf("Create(DEEL_API_KEY) = %+v, %v, want pending with a record", pending, err)
+		}
+		return session{grantID: *granted.GrantID, pendingID: pending.ID, recordID: *pending.RecordID}
+	}
+	goneSession, liveSession := open(gone, goneKey), open(live, liveKey)
+	if _, err := m.Store.Pool.Exec(ctx, `update enrollments set lease_expires_at = now() - interval '1 second' where id=$1`, gone); err != nil {
+		t.Fatalf("lapse the lease: %v", err)
+	}
+
+	sweeper := &Sweeper{Enrollments: &enroll.Service{Store: m.Store}, Machine: m, MachineLogins: &machine.Service{Store: m.Store}, Interval: time.Hour}
+	sweeper.Tick(ctx)
+
+	var revoked bool
+	var expiredAudits int
+	if err := m.Store.Pool.QueryRow(ctx, `select revoked_at is not null,
+		(select count(*) from audit where kind='enrollment.expired' and enrollment_id=$1 and actor='broker')
+		from enrollments where id=$1`, gone).Scan(&revoked, &expiredAudits); err != nil {
+		t.Fatalf("read the lapsed enrollment: %v", err)
+	}
+	if !revoked || expiredAudits != 1 {
+		t.Fatalf("lapsed enrollment: revoked=%v, enrollment.expired audit rows=%d; want revoked with one", revoked, expiredAudits)
+	}
+	grantLive := func(id string) bool {
+		t.Helper()
+		var live bool
+		if err := m.Store.Pool.QueryRow(ctx, `select revoked_at is null from grants where id=$1`, id).Scan(&live); err != nil {
+			t.Fatalf("read grant %s: %v", id, err)
+		}
+		return live
+	}
+	if grantLive(goneSession.grantID) {
+		t.Fatal("the lapsed enrollment's grant is still live")
+	}
+	if got, err := m.Get(ctx, goneSession.pendingID); err != nil || got.State != "cancelled" || got.DecidedBy == nil || *got.DecidedBy != "broker" {
+		t.Fatalf("the lapsed enrollment's pending request = %+v, %v; want cancelled by broker", got, err)
+	}
+	if !grantLive(liveSession.grantID) {
+		t.Fatal("the live enrollment's grant was revoked")
+	}
+	if got, err := m.Get(ctx, liveSession.pendingID); err != nil || got.State != "pending" {
+		t.Fatalf("the live enrollment's pending request = %+v, %v; want still pending", got, err)
+	}
+	pendingList, err := m.PendingForApprover(ctx, approver)
+	if err != nil || len(pendingList) != 1 || pendingList[0].RecordID != liveSession.recordID {
+		t.Fatalf("PendingForApprover = %+v, %v; want only the live enrollment's record %s", pendingList, err, liveSession.recordID)
+	}
+
+	snapshot := func() [4]int {
+		t.Helper()
+		var s [4]int
+		if err := m.Store.Pool.QueryRow(ctx, `select (select count(*) from audit), (select count(*) from credential_request_events),
+			(select count(*) from grants where revoked_at is null), (select count(*) from enrollments where revoked_at is null)`).
+			Scan(&s[0], &s[1], &s[2], &s[3]); err != nil {
+			t.Fatalf("snapshot: %v", err)
+		}
+		return s
+	}
+	before := snapshot()
+	sweeper.Tick(ctx)
+	if after := snapshot(); after != before {
+		t.Fatalf("a second Tick changed audit/events/live grants/live enrollments from %v to %v", before, after)
 	}
 }

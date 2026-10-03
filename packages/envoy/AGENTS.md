@@ -1587,10 +1587,11 @@ NOT_ENROLLED naming the refused renew, and `register --wait N` waits for its re-
 helper revokes a lapsed id before the session enrolls again, and while the session lives its
 record keeps that id until the revoke lands, so a restart meanwhile, even a second one before any
 login, still revokes it. A session that ends first takes its record with it and hands the id to a
-bounded revoke (three tries); before a login those fail, and the id ends with its lease. A revoke
-refused 403 `OPERATOR_MISMATCH` (an enrollment made under another operator's launcher credential)
-counts as done, and the session enrolls afresh. `agent-secrets launcher login-status`, which the
-helper answers, exits 0 while the helper holds a launcher credential and prints `issued`. A
+bounded revoke (three tries); before a login those fail, and the broker's sweeper ends the id once
+its lease lapses. A revoke refused 403 `OPERATOR_MISMATCH` (an enrollment made under another
+operator's launcher credential) counts as done, and the session enrolls afresh.
+`agent-secrets launcher login-status`, which the helper answers, exits 0 while the helper holds a
+launcher credential and prints `issued`. A
 re-login that is denied, expires unapproved or is still pending leaves the credential an earlier
 login installed in place, and the helper keeps enrolling sessions with it, so login-status still
 exits 0 and prints `issued`, and stderr names the most recent login and its code
@@ -1798,10 +1799,16 @@ behind it never authenticates. `proof.Verifier.Verify` distinguishes a session p
 carries `eid`) from a launcher proof (payload carries `lid`, never both or neither) but otherwise
 checks the same things: `alg` exactly ES256, the embedded JWK's thumbprint matching the stored one,
 signature, `iat` skew, `htm`/`htu`, and `jti` replay. `internal/broker/requests.Sweeper` is the one
-thing that moves pending state without a human: every `BROKER_SWEEP_SECONDS` tick it expires
-overdue pending `agent_secret` requests (waking each one's owner through the Envoy wake seam) and
-overdue pending machine logins, reading fresh from Postgres every time so a restart resumes
-exactly where the rows are.
+thing that moves state without a human: every `BROKER_SWEEP_SECONDS` tick it first ends every
+enrollment whose lease has lapsed (`enroll.Service.EndLapsed`: a gone pod, a box whose launcher
+stopped renewing, a host session whose helper died), as a revoke ends one, so its grants are
+revoked and its pending requests cancelled and dropped from the approver's list, with an
+`enrollment.expired` audit row and one log line each; then it expires overdue pending
+`agent_secret` requests (waking each one's owner through the Envoy wake seam) and overdue pending
+machine logins. It reads fresh from Postgres every time, so a restart resumes exactly where the
+rows are. Lapsed means what proof lookup means by not live (`lease_expires_at` no later than
+Postgres's `now()`), so a session that keeps renewing is never ended, and rows a concurrent renew
+or revoke holds are left to the next tick.
 
 Tests: `cd packages/envoy && go vet ./... && go test ./internal/broker/... ./cmd/broker/...
 ./cmd/agent-secrets/... ./cmd/agent-secrets-devrelay/...`. The Postgres-backed tests skip, rather
