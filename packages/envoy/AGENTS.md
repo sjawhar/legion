@@ -57,8 +57,11 @@ arms the settlement of each document whose row is a minute old and whose issue i
 rolling deploy stops the old task after the new one has started. A closed issue's rooms arm none
 until it reopens. `docs.Service.Shutdown` runs the settlement of each loaded room whose document has
 that row, and no other, inside its 5 s drain budget (`shutdownDrainBudget`, within the caller's
-deadline: `cmd/dispatch` gives HTTP shutdown and document shutdown one 5 s context between them,
-`shutdownTimout`); a settled document's repeat would spend the budget for nothing. It cancels the
+deadline: `cmd/dispatch` gives document shutdown a 10 s context of its own,
+`documentShutdownTimeout`, started once HTTP shutdown has returned within its 5 s,
+`httpShutdownTimeout`; every open event stream ends at the signal through `api.Deps.Lifetime`, so
+HTTP shutdown waits only for the requests in flight); a settled document's repeat would spend the
+budget for nothing. It cancels the
 database work of any settlement the budget cuts short so its transaction rolls back, and logs for
 each document that owed one whether it settled or was left to resume (`dispatch: document settled
 before shutdown`, `dispatch: document settlement left to resume after shutdown` with
