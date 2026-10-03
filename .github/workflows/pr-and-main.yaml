@@ -32,19 +32,24 @@ jobs:
       - name: Check image triggers cover every image input
         run: .github/scripts/check-image-trigger-paths.sh
 
+      # No Go cache here: gofmt needs none, and this job, which ends first, would save a nearly
+      # empty one under the key the typecheck and test jobs share (the daemon's go.sum), where the
+      # first save is the one every later run restores.
       - uses: actions/setup-go@v5
         with:
           go-version-file: packages/daemon/go.mod
+          cache: false
 
+      # The grant rig's daemon-pane.go belongs to no module (it runs with `go run -overlay` inside
+      # packages/daemon), so it is formatted here with the daemon.
       - name: Check the Go daemon's formatting
         run: |
-          unformatted=$(gofmt -l .)
+          unformatted=$(gofmt -l packages/daemon packages/pi-envoy/scripts/grant-rig/daemon-pane.go)
           if [ -n "$unformatted" ]; then
             echo "::error::gofmt -l lists files that are not gofmt-formatted; run gofmt -w on them:"
             echo "$unformatted"
             exit 1
           fi
-        working-directory: packages/daemon
 
 
   typecheck:
@@ -56,6 +61,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: packages/daemon/go.mod
+          cache-dependency-path: packages/daemon/go.sum
 
       # With the e2e tag, vet also compiles the live proofs behind it (the Stage 4a harness,
       # sandbox/live*_test.go), which run on the devbox against a real cluster.
@@ -114,6 +120,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: packages/daemon/go.mod
+          cache-dependency-path: packages/daemon/go.sum
 
       # The tmux runtime's tests drive a real tmux server and skip without one, and the daemon
       # supervises under tmux and refuses to start without it.

@@ -71,8 +71,8 @@ type Deps struct {
 	// deployment with no NATS, where the viewer route answers 503 rather than hanging.
 	AgentStream agentstream.Source
 	// AgentSecrets relays the credential-request UI to the secrets broker; nil (the broker URL
-	// is unconfigured) means the feature is off, and every handler that needs it answers
-	// 404 FEATURE_OFF.
+	// is unconfigured) means the feature is off: the pending list answers null, and every other
+	// handler that needs it answers 404 FEATURE_OFF.
 	AgentSecrets *agentsecrets.Client
 	// Lifetime bounds work a handler starts and does not wait for: it is the process's own
 	// context, cancelled when the server is shutting down, so a deploy stops a broadcast's

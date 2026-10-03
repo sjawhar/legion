@@ -62,14 +62,8 @@ func install(root, legion string) error {
 	return nil
 }
 
-// phases is the phase vocabulary in the transition table's order (internal/phase).
-var phases = []phase.Phase{
-	phase.Admitted, phase.Planning, phase.Implementing, phase.Testing, phase.Reviewing, phase.Retro,
-	phase.Merging, phase.AwaitingMerge, phase.ProductionCheck, phase.Done, phase.Held,
-}
-
 func printPhase(role claim.Role) error {
-	for _, p := range phases {
+	for _, p := range phase.All {
 		if workflow.RoleFor(p) == role {
 			fmt.Println(p)
 			return nil

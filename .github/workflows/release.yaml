@@ -42,16 +42,64 @@ concurrency:
 jobs:
   changes:
     runs-on: ubuntu-24.04
+    # Job-level permissions replace the workflow's: the checkout, and the run list the base step
+    # reads.
+    permissions:
+      contents: read
+      actions: read
     outputs:
       legion: ${{ steps.filter.outputs.legion }}
       envoy_plugin: ${{ steps.filter.outputs.envoy_plugin }}
       pi_envoy: ${{ steps.filter.outputs.pi_envoy }}
       worker_image: ${{ steps.filter.outputs.worker_image }}
     steps:
+      # Full history, for the base step's ancestry check.
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      # The filters compare against the commit the last successful run of this workflow on main
+      # checked out, not against the push's own before-sha. GitHub keeps one pending run per
+      # concurrency group and cancels it when a newer push queues behind it, and a run can fail
+      # after releasing some packages and before others; comparing against the push alone would
+      # leave those commits to no run. Every job versions from its package's last tag, so a commit
+      # two ranges hold releases once. The range also holds the version-bump commits
+      # (`[skip ci]`) that run pushed after its checkout: after each npm release, the next run
+      # starts that package's job, which finds nothing since its tag and skips, and builds a
+      # sha- worker image.
+      #
+      # Only push and workflow_dispatch runs count: only the repository's writers create those,
+      # and a fork's pull request run can carry a branch named main and a commit of the fork's
+      # choosing. The base must also be in this commit's history. The lookup reads this run's own
+      # workflow, so a renamed file reads its own runs, and a workflow_dispatch skips it and the
+      # filters, since every job runs on a dispatch; a dispatch on main is how a renamed workflow
+      # gets its first base.
+      - name: Find the commit the last successful run checked out
+        id: base
+        if: github.event_name != 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          workflow=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" --jq .workflow_id)
+          newest() {
+            gh api "repos/$GITHUB_REPOSITORY/actions/workflows/$workflow/runs?branch=main&event=$1&status=success&per_page=1" \
+              --jq '.workflow_runs[] | "\(.created_at) \(.head_sha)"'
+          }
+          sha=$({ newest push; newest workflow_dispatch; } | sort -r | awk 'NR == 1 { print $2 }')
+          if [ -z "$sha" ]; then
+            echo "::error::No successful push or workflow_dispatch run of this workflow on main to compare against; run it once with workflow_dispatch on main"
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$sha" HEAD; then
+            echo "::error::$sha, the commit the last successful run checked out, is not in the history of $GITHUB_SHA"
+            exit 1
+          fi
+          echo "Changes since $sha"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
       - uses: dorny/paths-filter@v3
         id: filter
+        if: github.event_name != 'workflow_dispatch'
         with:
+          base: ${{ steps.base.outputs.sha }}
           filters: |
             # The Go `legion` the legion job releases and worker.Dockerfile's go stage compiles: its
             # module, which embeds the role prompts, and the modules go.work binds it to
