@@ -41,7 +41,7 @@ The rest of the copied tree stays, `secretsd` and the other plugins included. Th
 needs none of it: its bundles inline every dependency except the `@oh-my-pi/*` packages Oh My Pi
 itself provides.
 
-Why: Sami's ruling (2026-09-13, AGENTC-79) after pi-envoy 1.17.1 shipped broken — proven on a rig
+Why: Sami's ruling (2026-09-13) after pi-envoy 1.17.1 shipped broken — proven on a rig
 that loaded the Legion extension alone, it failed on the first real worker because `secretsd`
 (`github:sjawhar/forward#v3.0.2`) replaces the bash tool with Oh My Pi's legacy `{command,
 timeout}` shim, which discards the tool call's `env`. Pre-merge proof runs against the production
