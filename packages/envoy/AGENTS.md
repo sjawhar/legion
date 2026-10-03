@@ -341,9 +341,12 @@ a room for it, loaded or loading, or something on the document still holds the s
 is the one list of those holders. Every lookup takes a state through `lockState` or
 `lockExistingState`, which never hand out a forgotten state, and ends with `unlockState`, which
 forgets a state that holds nothing once its room has gone, so whatever ends last - ygo's
-`OnUnloadDocument` when the room goes, or a holder's own end - releases it. An issue's close
-clears the authors its documents' settlements were waiting for, since a closed issue settles
-nothing, and the documents' pending-settlement rows settle them once it reopens. The document
+`OnUnloadDocument` when the room goes, or a holder's own end - releases it. The durable row that
+says a document's settlement is owed (`doc_settlements_pending`, migration 0063) also carries the
+authors that settlement needs (0068): a browser update records them in the update's own transaction,
+and a committed joined write records them before it publishes. Closing an issue writes every
+unsettled state into that row before it releases the state, so the reopened document's settlement
+credits the same version, ask and event authors even after a room release or restart. The document
 socket's cap of 1,000 rooms (`maxLiveRooms`, `canOpenRoom`) counts ygo's live rooms, never
 documents touched since the process started (LEGION-513). A room an `Apply` opened with no peer is
 idle-evicted only by a ygo whose `Apply` stamps the empty room idle (LEGION-484). `PgVersioned`'s

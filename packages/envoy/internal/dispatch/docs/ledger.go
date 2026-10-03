@@ -202,9 +202,10 @@ func (l *Ledger) credit(ctx context.Context) {
 		state := l.service.lockState(artifactID)
 		state.lastActor = new(actor)
 		state.unsettled = true
-		credit := state.settlementCreditLocked()
+		state.creditVersion++
+		credit, creditVersion := state.settlementCreditLocked(), state.creditVersion
 		l.service.unlockState(artifactID, state)
-		l.service.recordSettlementCredit(ctx, artifactID, credit)
+		l.service.recordSettlementCredit(ctx, artifactID, credit, creditVersion)
 	}
 	for _, artifactID := range l.order {
 		write := l.live[artifactID]
@@ -217,9 +218,10 @@ func (l *Ledger) credit(ctx context.Context) {
 		}
 		state.lastActor = write.actor
 		state.unsettled = true
-		credit := state.settlementCreditLocked()
+		state.creditVersion++
+		credit, creditVersion := state.settlementCreditLocked(), state.creditVersion
 		l.service.unlockState(artifactID, state)
-		l.service.recordSettlementCredit(ctx, artifactID, credit)
+		l.service.recordSettlementCredit(ctx, artifactID, credit, creditVersion)
 	}
 }
 

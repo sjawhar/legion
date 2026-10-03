@@ -89,11 +89,30 @@ func (s *Service) persistSettlementCredit(ctx context.Context, room string, cred
 
 // recordSettlementCredit retains a committed write's attribution when persisting it fails only by
 // leaving the room state unsettled; the committed document itself must still be published. A later
-// close retries the record before it releases that state.
-func (s *Service) recordSettlementCredit(ctx context.Context, room string, credit settlementCredit) {
+// close retries the record before it releases that state. When the issue is already closed, a
+// successful record clears exactly the credit snapshot it received.
+func (s *Service) recordSettlementCredit(ctx context.Context, room string, credit settlementCredit, creditVersion uint64) {
 	if err := s.persistSettlementCredit(ctx, room, credit); err != nil {
 		slog.Error("dispatch: record document settlement authors", "room", room, "error", err)
+		return
 	}
+	s.settlementCreditPersisted(room, creditVersion)
+}
+
+// settlementCreditPersisted releases authors from an already-closed document only when its state
+// still holds the exact credit snapshot that reached the pending-settlement row. A later write
+// increments creditVersion and keeps its own authors until it persists them.
+func (s *Service) settlementCreditPersisted(room string, creditVersion uint64) {
+	state := s.lockExistingState(room)
+	if state == nil {
+		return
+	}
+	if state.closed && state.creditVersion == creditVersion {
+		clear(state.pending)
+		state.lastActor = nil
+		state.unsettled = false
+	}
+	s.unlockState(room, state)
 }
 
 // pendingSettlementCredit reads the durable settlement credit with the row that says a document

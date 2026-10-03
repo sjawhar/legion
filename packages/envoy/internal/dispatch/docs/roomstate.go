@@ -36,10 +36,12 @@ type roomState struct {
 	lastActor *model.Actor
 	// unsettled marks authors recorded in pending or lastActor that no settlement has read since:
 	// the settlement they were recorded for credits them, so the state holds them until one
-	// commits (settleRoomWithin). An issue's close clears it with them (SetIssueClosed), since a
-	// closed issue's documents settle nothing; the document's pending-settlement row settles it
-	// once the issue reopens (RunSettlementResumption) or its room next loads.
+	// commits (settleRoomWithin). Closing persists them on the pending-settlement row before
+	// clearing them (SetIssueClosed), so that row carries them through a room release or restart.
+	// creditVersion identifies the snapshot the row has durably received, so a late write cannot
+	// be cleared by an earlier close's flush.
 	unsettled       bool
+	creditVersion   uint64
 	pendingVersions map[int]versionPending
 	// contentMarkdown is the live document's rendered markdown when the room's update observer
 	// last saw it change, nil until the room loads.
@@ -75,6 +77,7 @@ type documentUpdateClass struct {
 	contentChanged bool
 	durable        bool
 	credit         settlementCredit
+	creditVersion  uint64
 }
 
 // lockState returns room's state locked, creating it when the service holds none.
@@ -167,11 +170,12 @@ func (s *Service) unusedLocked(state *roomState) bool {
 		state.pendingUpdates == 0 && state.durableAppends.Load() == 0 && len(state.pendingVersions) == 0
 }
 
-func (s *Service) recordUpdateClass(room string, update []byte, contentChanged, durable bool, credit settlementCredit) {
+func (s *Service) recordUpdateClass(room string, update []byte, contentChanged, durable bool, credit settlementCredit, creditVersion uint64) {
 	state := s.lockState(room)
 	defer s.unlockState(room, state)
 	state.updateClasses = append(state.updateClasses, documentUpdateClass{
-		update: append([]byte(nil), update...), contentChanged: contentChanged, durable: durable, credit: credit,
+		update: append([]byte(nil), update...), contentChanged: contentChanged, durable: durable,
+		credit: credit, creditVersion: creditVersion,
 	})
 	state.pendingUpdates++
 	if durable {
@@ -179,10 +183,10 @@ func (s *Service) recordUpdateClass(room string, update []byte, contentChanged, 
 	}
 }
 
-func (s *Service) consumeUpdateClass(room string, update []byte) (bool, bool, settlementCredit, bool) {
+func (s *Service) consumeUpdateClass(room string, update []byte) (bool, bool, settlementCredit, uint64, bool) {
 	state := s.lockExistingState(room)
 	if state == nil {
-		return true, false, settlementCredit{}, false
+		return true, false, settlementCredit{}, 0, false
 	}
 	defer s.unlockState(room, state)
 	for index, class := range state.updateClasses {
@@ -191,9 +195,9 @@ func (s *Service) consumeUpdateClass(room string, update []byte) (bool, bool, se
 		}
 		state.updateClasses = append(state.updateClasses[:index], state.updateClasses[index+1:]...)
 		state.pendingUpdates--
-		return class.contentChanged, class.durable, class.credit, true
+		return class.contentChanged, class.durable, class.credit, class.creditVersion, true
 	}
-	return true, false, settlementCredit{}, false
+	return true, false, settlementCredit{}, 0, false
 }
 
 func (s *Service) hasPendingUpdates(room string) bool {
