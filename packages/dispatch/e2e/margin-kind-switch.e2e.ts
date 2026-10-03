@@ -1,6 +1,5 @@
 import { type Browser, expect, type Page, test } from "@playwright/test";
 
-import { refusePosts } from "./agents";
 import { createComment, createIssue, createProject, getAsk, listComments } from "./api";
 import {
   barAction,
@@ -14,6 +13,7 @@ import {
   selectEditorText,
 } from "./editor";
 import { resetDatabase } from "./seed";
+import { refusePosts } from "./sends";
 import { asUser } from "./users";
 
 // The margin composer a selection-bar action opens can switch between Comment, Suggest and Ask;

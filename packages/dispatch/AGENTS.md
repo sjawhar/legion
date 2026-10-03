@@ -645,12 +645,13 @@ once keeps its conversation and composer inside it, hidden, while it is collapse
 `shownAgentRows(page)` (`e2e/agents.ts`) for the rows a reader sees, `agentRow(page, id)` for one
 row shown or hidden with `toBeVisible`/`toBeHidden` saying which is expected, `includeHidden: true`
 or `hidden: true` where a hidden element is the point, and `filter({ visible: true })` on text. A
-count of 0 no longer means a folded, filtered or collapsed row's content is gone, only that the
+count of 0 does not mean a folded, filtered or collapsed row's content is gone, only that the
 query did not look for hidden elements. `toBeHidden()` also passes when nothing matches at all, so
 wherever it means "mounted but hidden" it needs `toHaveCount(1)` beside it. A hidden row is off
 screen for every purpose: its list marks nothing read (`open` is expanded and not hidden).
-`holdPosts` and `refusePosts` hold a route's `POST`s until released or refused, as a slow or
-failing server would, and `pasteFile` pastes a file into a field as the clipboard does. Every
+`e2e/sends.ts` holds what a send needs from the network and the clipboard: `holdPosts` and
+`refusePosts` hold a route's `POST`s until released or refused, as a slow or failing server
+would, and `pasteFile` pastes a file into a field as the clipboard does. Every
 margin ask card, open or decided, is one keyed list in the Comments tab, with `Needs you` a heading
 item in it (the Inbox's pattern), so an answered ask moves out of the group in place, and a reply
 the reader started typing in its thread stays; the group is each card's `data-margin-section`,

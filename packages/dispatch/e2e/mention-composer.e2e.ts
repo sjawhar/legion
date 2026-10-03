@@ -1,12 +1,5 @@
 import { expect, type Locator, type Page, test } from "@playwright/test";
-import {
-  type FakeSession,
-  getSentMessages,
-  holdPosts,
-  refusePosts,
-  setLiveSessions,
-  setSessionSendStatus,
-} from "./agents";
+import { type FakeSession, getSentMessages, setLiveSessions, setSessionSendStatus } from "./agents";
 import {
   createComment,
   createIssue,
@@ -19,6 +12,7 @@ import {
 } from "./api";
 import { barAction, documentEditor, selectEditorText } from "./editor";
 import { resetDatabase } from "./seed";
+import { holdPosts, refusePosts } from "./sends";
 import { asUser } from "./users";
 
 const planner: FakeSession = {

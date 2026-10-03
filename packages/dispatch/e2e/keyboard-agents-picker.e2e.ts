@@ -1,16 +1,9 @@
 import { expect, type Locator, type Page, test } from "@playwright/test";
 
-import {
-  agentRow,
-  holdPosts,
-  openAgents,
-  plannerSession,
-  refusePosts,
-  seedAgents,
-  shownAgentRows,
-} from "./agents";
+import { agentRow, openAgents, plannerSession, seedAgents, shownAgentRows } from "./agents";
 import { createAgentMessage, createMessage, patchIssue } from "./api";
 import { resetDatabase } from "./seed";
+import { holdPosts, refusePosts } from "./sends";
 import { asUser } from "./users";
 
 // The issue picker's keyboard-step rule (`markKeyStep` in `AgentMessageComposer.tsx`) holds only

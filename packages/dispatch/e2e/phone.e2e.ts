@@ -1,5 +1,5 @@
 import { expect, type Locator, type Page, test } from "@playwright/test";
-import { refusePosts, setLiveSessions } from "./agents";
+import { setLiveSessions } from "./agents";
 
 import {
   createArtifactAsk,
@@ -17,6 +17,7 @@ import {
 } from "./api";
 import { actionBar, barAction, documentEditor, needsYouCards, selectEditorText } from "./editor";
 import { insertExternalLink, resetDatabase } from "./seed";
+import { refusePosts } from "./sends";
 import { asUser } from "./users";
 
 const session = {

@@ -3,11 +3,8 @@ import { expect, type Locator, type Page, test } from "@playwright/test";
 import {
   agentRow,
   type FakeSession,
-  holdPosts,
   openAgents,
-  pasteFile,
   plannerSession,
-  refusePosts,
   reviewerSession,
   seedAgents,
   setLiveSessions,
@@ -15,6 +12,7 @@ import {
 } from "./agents";
 import { createAgentMessage, createMessage, replyToMessageDelivery } from "./api";
 import { resetDatabase } from "./seed";
+import { holdPosts, pasteFile, refusePosts } from "./sends";
 import { asUser } from "./users";
 
 // What an Agents row keeps when it moves between the open list and a fold - by Shift+P, or by

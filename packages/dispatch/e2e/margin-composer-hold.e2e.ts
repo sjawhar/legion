@@ -1,40 +1,38 @@
 import { expect, type Page, test } from "@playwright/test";
 
-import { holdPosts, refusePosts } from "./agents";
 import { createComment, createIssue, createProject, patchIssue } from "./api";
-import { barAction, composer, connectedDot, documentEditor, selectEditorText } from "./editor";
+import {
+  barAction,
+  composer,
+  connectedDot,
+  documentEditor,
+  selectEditorText,
+  setSheet,
+} from "./editor";
 import { resetDatabase } from "./seed";
+import { holdPosts, refusePosts } from "./sends";
 import { asUser } from "./users";
 
 // The composer a selection-bar action opens holds a send's draft until the server answers, like
-// every composer. These rows put each thing that used to unmount it, or move it to another mark,
-// in the middle of a send, and expect the send's draft and its refusal back on the composer that
-// sent it.
+// every composer. These rows put each thing that would unmount it, or move it to another mark, in
+// the middle of a send, and expect the send's draft and its refusal back on the composer that sent
+// it.
 const spec = "The quick brown fox";
 
 test.beforeEach(async () => {
   await resetDatabase();
 });
 
-function compact(page: Page): boolean {
-  return (page.viewportSize()?.width ?? 1280) < 1280;
-}
-
 /** What the margin's open composer says while a newer selection-bar action waits on its send. */
 const stillSending =
   "This one is still sending, so the new selection wasn't kept. Select it again once this one is sent.";
 
-/** Below `xl` the margin is a sheet: open or close it so the composer in it is on screen or not. */
-async function setSheet(page: Page, open: boolean): Promise<void> {
-  if (!compact(page)) return;
-  const sheet = page.getByTestId("margin-sheet");
-  const expanded = open ? "true" : "false";
-  if ((await sheet.getAttribute("data-expanded")) !== expanded) {
-    await page
-      .getByRole("button", { name: open ? /Open review panel/ : /Close review panel/ })
-      .click();
-  }
-  await expect(sheet).toHaveAttribute("data-expanded", expanded);
+/** In-app navigation, as a link does: a reload would drop a send with the page. */
+async function navigateInApp(page: Page, path: string): Promise<void> {
+  await page.evaluate((to) => {
+    window.history.pushState(null, "", to);
+    window.dispatchEvent(new PopStateEvent("popstate"));
+  }, path);
 }
 
 async function openSpec(page: Page, issueKey: string): Promise<void> {
@@ -80,7 +78,7 @@ test("a newer bar Comment while a margin send is out leaves the composer on the 
     const refuse = await refusePosts(page, `**/api/v1/issues/${issue.key}/comments`);
     await sendFromBar(page, "quick", "About quick");
 
-    await setSheet(page, false);
+    await setSheet(page, test.info().project.name, false);
     await selectEditorText(page, "fox");
     await barAction(page, "Comment");
     const marks = documentEditor(page).locator('span[data-proof="comment"][data-id]');
@@ -120,14 +118,10 @@ test("a bar Comment on another document while a margin send is out opens its own
     const send = await holdPosts(page, `**/api/v1/issues/${first.key}/comments`);
     await sendFromBar(page, "quick", "Left behind");
 
-    // In-app navigation, as a link does: a reload would drop the send with the page.
-    await page.evaluate((path) => {
-      window.history.pushState(null, "", path);
-      window.dispatchEvent(new PopStateEvent("popstate"));
-    }, `/issues/${second.key}/spec`);
+    await navigateInApp(page, `/issues/${second.key}/spec`);
     await expect(page.getByRole("heading", { level: 1, name: "Opened next" })).toBeVisible();
     await expect(connectedDot(page)).toHaveText("connected");
-    await setSheet(page, false);
+    await setSheet(page, test.info().project.name, false);
     await selectEditorText(page, "brown");
     await barAction(page, "Comment");
     const form = composer(page);
@@ -150,7 +144,7 @@ test("a bar Comment on another document while a margin send is out opens its own
   }
 });
 
-// The Pinned tab used to unmount the Comments tab, and the composer at its top with it.
+// The Pinned tab shows in place of the Comments tab; the composer at the Comments tab's top stays.
 test("the Pinned tab while a margin send is out keeps the composer, its draft and its refusal", async ({
   browser,
 }) => {
@@ -181,7 +175,7 @@ test("the Pinned tab while a margin send is out keeps the composer, its draft an
   }
 });
 
-// Collapsing the desktop margin to its rail used to unmount the whole margin, the composer in it.
+// Collapsing the desktop margin to its rail keeps the margin mounted under it, the composer in it.
 test("collapsing the margin while its send is out keeps the composer, its draft and its refusal", async ({
   browser,
 }, testInfo) => {
@@ -244,8 +238,8 @@ test("a bar Comment while the collapsed margin's send is out shows the margin an
   }
 });
 
-// On a phone a margin thread opens over the margin's own tabs, which used to unmount them and the
-// composer with them; Back finds the composer where it was.
+// On a phone a margin thread opens over the margin's own tabs, which stay mounted under it with
+// the composer; Back finds the composer where it was.
 test("on a phone, a margin thread opened while the margin's send is out keeps the composer and its refusal", async ({
   browser,
 }) => {
@@ -287,9 +281,9 @@ test("on a phone, a margin thread opened while the margin's send is out keeps th
   }
 });
 
-// The issue closing under a margin send used to cancel the composer - unmounting it and removing
-// the very mark the send names. It stays until the send answers, and shows its refusal with the
-// draft, and a way to drop it, as a closed issue's composers do.
+// The issue closing under a margin send leaves the composer and the mark the send names. It stays
+// until the send answers, and shows its refusal with the draft, and a way to drop it, as a closed
+// issue's composers do.
 test("a margin send out when its issue closes keeps the draft and shows the refusal", async ({
   browser,
 }) => {

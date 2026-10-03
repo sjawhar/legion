@@ -1,17 +1,9 @@
 import { expect, type Page, test } from "@playwright/test";
 
-import {
-  agentRow,
-  holdPosts,
-  openAgents,
-  pasteFile,
-  plannerSession,
-  refusePosts,
-  seedAgents,
-  shownAgentRows,
-} from "./agents";
+import { agentRow, openAgents, plannerSession, seedAgents, shownAgentRows } from "./agents";
 import { createMessage } from "./api";
 import { resetDatabase } from "./seed";
+import { holdPosts, pasteFile, refusePosts } from "./sends";
 import { asUser } from "./users";
 
 /** Resolves once every timer queued before it has run: the next task, the soonest a reader's

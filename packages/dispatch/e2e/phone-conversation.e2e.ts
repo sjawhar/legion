@@ -1,6 +1,5 @@
 import { expect, type Locator, type Page, test } from "@playwright/test";
 
-import { holdPosts, refusePosts } from "./agents";
 import {
   createComment,
   createIssue,
@@ -10,6 +9,7 @@ import {
   resolveComment,
 } from "./api";
 import { resetDatabase } from "./seed";
+import { holdPosts, refusePosts } from "./sends";
 import { asUser } from "./users";
 
 // The phone layout on every project: on a phone a comment's thread opens full-screen over the
@@ -328,9 +328,9 @@ test("on a phone, a thread's own reply holds Back and Escape while it is out, an
   }
 });
 
-// Widening past the phone layout used to close the thread view, and its card's reply composer
-// with it - the draft, the send it had out and that send's refusal. While a send from the view is
-// out it stays open, full-screen at any width, until the reader leaves it with Back.
+// A send from the thread view keeps it open past the phone layout: while that send is out the
+// view stays full-screen at any width, with its card's reply composer - the draft, the send and
+// that send's refusal - until the reader leaves it with Back.
 test("on a phone, a thread's own reply out when the viewport widens keeps its thread, draft and refusal", async ({
   browser,
 }) => {
