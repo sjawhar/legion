@@ -32,9 +32,8 @@ export interface ControllerSession {
 export function createControllerSession(deps: {
   readonly daemon: () => LegionDaemonClient;
   readonly persistedTranscript: PersistedTranscript;
-  readonly checkSubagentSession: (context: SessionContext) => Promise<boolean>;
 }): ControllerSession {
-  const { daemon, persistedTranscript, checkSubagentSession } = deps;
+  const { daemon, persistedTranscript } = deps;
   let controllerSessionID: string | undefined;
   let controllerCapability: string | undefined;
   let mintControllerGrant: (() => Promise<GrantResponse>) | undefined;
@@ -69,9 +68,9 @@ export function createControllerSession(deps: {
     const sessionID = context.sessionManager.getSessionId();
     const capability = controllerCapability ?? requiredControllerCapability(process.env);
     controllerCapability = capability;
-    // The controller's own transcript (isSubagentSession's ensureOnDisk already persisted it) is
-    // recorded so the controller's own `task` subagents are recognised even when the transcript
-    // is not a file on disk; a hand-started takeover records nothing.
+    // The controller's own transcript, which persistedTranscript puts on disk, is recorded so the
+    // controller's own `task` subagents are recognised even when the transcript is not a file on
+    // disk; a hand-started takeover records nothing.
     const { sessionFile, agentId } = await persistedTranscript(context);
     const launched = classifySession(process.env).kind === "controller";
     if (launched) recordBootstrappedSession(sessionFile);
@@ -128,9 +127,11 @@ export function createControllerSession(deps: {
     }
   };
 
-  /** `/new`, `/resume`, or `/fork` can replace the controller session and its transcript in place. */
+  /**
+   * `/new`, `/resume`, or `/fork` can replace the controller session and its transcript in place.
+   * The caller never passes a `task` subagent's session (legion.ts `afterSessionChange`).
+   */
   const reclaimAfterSessionChange = async (context: SessionContext): Promise<void> => {
-    if (await checkSubagentSession(context)) return;
     if (classifySession(process.env).kind !== "controller") return;
     if (
       context.sessionManager.getSessionId() === controllerSessionID &&
