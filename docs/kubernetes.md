@@ -111,16 +111,16 @@ only — and (3) by `gh workflow run worker-image.yaml --ref <ref>` once the wor
 files the image builds from are every context source `worker.Dockerfile` copies: the root manifest,
 lockfile, patches and each root workspace's `package.json` (the frozen install); the packages it copies
 whole — the Dockerfile (`packages/daemon/docker/**`), the plugin and what it bundles (`packages/pi-envoy/**`,
-`packages/envoy-client/**`, `packages/contracts/**`), the provisioning code (`packages/workspace/**`) and
-the skills (`skills/**`); the OMP pin (`.omp-pin`); the whole Go module the image compiles `legion` from
-(`packages/daemon/**`) and its build inputs; the
-context's `.dockerignore`; and the workflow itself. What a pod executes is part of the image's behaviour —
-the command a Sandbox pod runs, the launch probes `legion probe-image` runs in the image's final step and in
-the Go daemon's probe Sandbox, and every package they import — so a change to any of it builds the image it
-is proven on, and a change that breaks the image fails on its own pull request rather than merging and
-publishing nothing. The Go build inputs are `go.work`, `go.work.sum`, and `packages/envoy`'s
-`go.mod`/`go.sum`: the image compiles the Go `legion` at `go.work`'s Go version, so a change that moves it
-past the build stage's Go fails on its own pull request rather than in the next image build.
+`packages/envoy-client/**`, `packages/contracts/**`) and the skills (`skills/**`); the OMP pin
+(`.omp-pin`); the whole Go module the image compiles `legion` from (`packages/daemon/**`) and its build
+inputs; the context's `.dockerignore`; and the workflow itself. What a pod executes is part of the image's
+behaviour — the command a Sandbox pod runs, the launch probes `legion probe-image` runs in the image's
+final step and in the Go daemon's probe Sandbox, and every package they import — so a change to any of it
+builds the image it is proven on, and a change that breaks the image fails on its own pull request rather
+than merging and publishing nothing. The Go build inputs are `go.work`, `go.work.sum`, and `packages/envoy`
+(copied whole for the `agent-secrets` binary the image also builds): the image compiles the Go `legion` at
+`go.work`'s Go version, so a change that moves it past the build stage's Go fails on its own pull request
+rather than in the next image build.
 `.github/scripts/check-image-trigger-paths.sh` (the lint job of `pr-and-main.yaml`) parses the Dockerfile
 and fails when trigger (1) or (2) misses a file it reads, so these lists cannot drift from it.
 Trigger (2) is `pull_request`, not `push`: GitHub evaluates `pull_request` path filters against the whole PR

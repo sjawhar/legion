@@ -14,7 +14,6 @@ on:
       - "packages/claude-envoy/package.json"
       - "packages/proof-editor/package.json"
       - "packages/dispatch/package.json"
-      - "packages/workspace/package.json"
       - "packages/envoy/internal/dispatch/pmdoc/gen/package.json"
       - "docs/site/package.json"
       - "packages/daemon/**"
@@ -25,7 +24,6 @@ on:
       - "packages/envoy-client/**"
       - "packages/contracts/**"
       - "packages/pi-envoy/**"
-      - "packages/workspace/**"
       - "skills/**"
       # The worker image's remaining inputs (worker_image below).
       - ".omp-pin"
@@ -73,7 +71,6 @@ jobs:
               - 'packages/pi-envoy/**'
               - 'packages/envoy-client/**'
               - 'packages/contracts/**'
-              - 'packages/workspace/**'
               - 'skills/**'
             # The Go `legion` the worker image compiles and its build inputs (worker.Dockerfile's go
             # stage), plus packages/envoy — copied whole for the agent-secrets binary it also builds
@@ -100,7 +97,6 @@ jobs:
               - 'packages/claude-envoy/package.json'
               - 'packages/proof-editor/package.json'
               - 'packages/dispatch/package.json'
-              - 'packages/workspace/package.json'
               - 'packages/envoy/internal/dispatch/pmdoc/gen/package.json'
               - 'docs/site/package.json'
               - 'packages/daemon/docker/**'
@@ -382,10 +378,10 @@ jobs:
             # an already-published version is never recomputed. Once a release
             # tags successfully, this branch stops running.
             PREV_VERSION=$(npm view @sjawhar/pi-legion-envoy version 2>/dev/null || echo "0.0.0")
-            VERSION=$(.github/scripts/release-bump.sh "$PREV_VERSION" HEAD --patch-path skills/ -- packages/pi-envoy/ packages/envoy-client/ packages/contracts/ packages/workspace/ skills/)
+            VERSION=$(.github/scripts/release-bump.sh "$PREV_VERSION" HEAD --patch-path skills/ -- packages/pi-envoy/ packages/envoy-client/ packages/contracts/ skills/)
           else
             PREV_VERSION="${PREV_TAG#pi-legion-envoy-v}"
-            VERSION=$(.github/scripts/release-bump.sh "$PREV_VERSION" "${PREV_TAG}..HEAD" --patch-path skills/ -- packages/pi-envoy/ packages/envoy-client/ packages/contracts/ packages/workspace/ skills/)
+            VERSION=$(.github/scripts/release-bump.sh "$PREV_VERSION" "${PREV_TAG}..HEAD" --patch-path skills/ -- packages/pi-envoy/ packages/envoy-client/ packages/contracts/ skills/)
           fi
 
           if [ "$VERSION" = "empty" ]; then

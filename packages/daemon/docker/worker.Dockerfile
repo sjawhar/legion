@@ -76,8 +76,8 @@ ARG CODEGRAPH_VERSION
 # cannot start. The platform package's own `bin/codegraph` is a `#!/bin/sh` wrapper that execs a
 # *bundled* Node 24 runtime sitting beside it — fully self-contained, no system node required
 # anywhere — so this copies that platform package alone, as `/opt/codegraph` in the runtime stage.
-# Installed before any application-source COPY: it depends on nothing this checkout builds, so an
-# unrelated daemon/workspace/pi-envoy source change never invalidates this layer.
+# Installed before any application-source COPY: it depends on nothing this checkout builds, so a
+# source change to the plugin this stage packs never invalidates this layer.
 RUN mkdir -p /out \
     && bun add -g "@colbymchenry/codegraph@${CODEGRAPH_VERSION}" \
     && cp -a /root/.bun/install/global/node_modules/@colbymchenry/codegraph-linux-x64 /out/codegraph \
@@ -91,13 +91,11 @@ COPY packages/envoy-plugin/package.json packages/envoy-plugin/package.json
 COPY packages/claude-envoy/package.json packages/claude-envoy/package.json
 COPY packages/proof-editor/package.json packages/proof-editor/package.json
 COPY packages/dispatch/package.json packages/dispatch/package.json
-COPY packages/workspace/package.json packages/workspace/package.json
 COPY packages/envoy/internal/dispatch/pmdoc/gen/package.json packages/envoy/internal/dispatch/pmdoc/gen/package.json
 COPY docs/site/package.json docs/site/package.json
 RUN bun install --frozen-lockfile
 COPY packages/contracts packages/contracts
 COPY packages/envoy-client packages/envoy-client
-COPY packages/workspace packages/workspace
 COPY packages/pi-envoy packages/pi-envoy
 COPY skills skills
 
