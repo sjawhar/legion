@@ -282,10 +282,11 @@ export interface IssueSummary
 /**
  * The longest issue title, in UTF-16 units, counted after the trim `POST /api/v1/issues` and
  * `PATCH /api/v1/issues/{key}` apply; a longer one is `400 CAP_EXCEEDED`. Production's longest
- * title was 326 characters when this was set. It bounds the duplicate-title check, which reads
- * every title in the project on each creation, and the `POSSIBLE_DUPLICATE` message, which quotes
- * a candidate's whole title. Generated into Go as `contracts.IssueTitleMax`, which the server
- * enforces, and the dashboard's title fields take it as their `maxLength`, so the two agree.
+ * title was 326 characters when this was set. It bounds the duplicate-title check, which compares
+ * the new title with every title's lexemes in the project on each creation, and the
+ * `POSSIBLE_DUPLICATE` message, which quotes a candidate's whole title. Generated into Go as
+ * `contracts.IssueTitleMax`, which the server enforces, and the dashboard's title fields take it as
+ * their `maxLength`, so the two agree.
  */
 export const ISSUE_TITLE_MAX = 1000;
 

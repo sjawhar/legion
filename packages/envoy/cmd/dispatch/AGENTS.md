@@ -60,10 +60,11 @@ migrations.
 
 Migration 0010 added stored generated `search` columns. Migrations `0057`–`0061` made them plain
 columns whose `BEFORE INSERT OR UPDATE` triggers maintain `search_text`-normalised vectors, so no
-application code writes or refreshes them. Each trigger, and the duplicate-title check, builds its
-vector with `search_vector` (0068): the whole text where its vector fits Postgres's limit on one
-tsvector, and otherwise the longest of its first half, quarter, eighth, … that fits (`README.md`
-"Search").
+application code writes or refreshes them. Each trigger builds its vector with `search_vector`
+(0068): the whole text where its vector fits Postgres's limit on one tsvector, and otherwise the
+longest of its first half, quarter, eighth, … that fits (`README.md` "Search"). The issues trigger
+also writes `issues.title_lexemes` (0069), the title's own lexemes through `search_vector`, which
+the duplicate-title check reads for every stored title and builds the same way for the new one.
 
 `DISPATCH_REPO_PROJECTS` optionally seeds repository-to-project settings at boot
 with comma-separated `owner/repo=KEY` entries. Stored dashboard mappings are

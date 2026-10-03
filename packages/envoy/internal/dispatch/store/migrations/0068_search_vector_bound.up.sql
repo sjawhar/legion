@@ -32,8 +32,8 @@
 --
 -- The triggers keep search_text (0056) and the ask-block strip, and only their last step changes;
 -- create or replace keeps each trigger bound to its function, so this takes no lock on any table.
--- duplicateQuery (api/duplicates.go) reads titles through search_vector too, so a title stored
--- under the bound never fails the duplicate check of the issues created after it.
+-- The duplicate check (api/duplicates.go) builds title lexemes through search_vector too, so a title
+-- stored under the bound never fails the duplicate check of the issues created after it.
 create function search_vector(head text, body text) returns tsvector
 language plpgsql immutable strict as $$
 declare

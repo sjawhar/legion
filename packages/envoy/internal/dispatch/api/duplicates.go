@@ -8,9 +8,18 @@ import (
 
 const duplicateHeadlineOptions = "StartSel=" + markStart + ", StopSel=" + markEnd + ", HighlightAll=true"
 
-// Every title is read through search_vector (migration 0068), as the issues trigger reads it, so a
-// title whose whole vector would pass Postgres's limit on one tsvector, the new title or a stored
-// one, is compared by the words that open it rather than failing the creation.
+// duplicateQuery finds the issues of project $1, other than the parent $3, whose title
+// near-duplicates the new title $2, comparing their lexemes: the lexemes of the search_vector of a
+// title's search_text, with an empty head. The new title's are built here, and every stored title's
+// are read from issues.title_lexemes, which the issues trigger writes with that expression
+// (migration 0069), so a creation parses one title, not every title in the project. search_vector
+// (0068) bounds a vector to what Postgres holds in one tsvector, so a title past that limit, the new
+// one or a stored one, is compared by the words that open it rather than failing the creation.
+//
+// The parent's lexemes count on neither side. terms holds the new title's lexemes less the
+// parent's, marked new, and the parent's, marked not, each once, so one join of every stored lexeme
+// in the project against it counts both what a title shares with the new one and how many of its
+// own lexemes are the parent's.
 //
 // A candidate's headline marks the words its title shares with the new one, so its query is those
 // words, at most duplicateHeadlineWords of them: the words the candidate's title holds of the new
@@ -18,23 +27,29 @@ const duplicateHeadlineOptions = "StartSel=" + markStart + ", StopSel=" + markEn
 // recursively. A query of 20,000 such words overflows the default 2 MB max_stack_depth (SQLSTATE
 // 54001) where 10,000 does not, on Postgres 16.15, and a title of distinct words shares that many.
 const duplicateQuery = `
-with parent as (select coalesce((select title from issues where key = $3), '') as title),
+with parent as (select coalesce((select title_lexemes from issues where key = $3), '{}') as lexemes),
 new_title as (
   select array(select unnest(tsvector_to_array(search_vector('', search_text($2))))
-               except select unnest(tsvector_to_array(search_vector('', search_text(p.title))))) as lex
+               except select unnest(p.lexemes)) as lexemes
     from parent p),
+terms as (
+  select unnest(n.lexemes) as lexeme, true as new from new_title n
+  union all
+  select unnest(p.lexemes), false from parent p),
 cand as (
   select i.key, i.title, i.status, i.updated_at,
-         array(select unnest(tsvector_to_array(search_vector('', search_text(i.title))))
-               except select unnest(tsvector_to_array(search_vector('', search_text(p.title))))) as lex
-    from issues i, parent p
-   where i.project_key = $1 and i.key <> $3),
+         array_agg(t.lexeme) filter (where t.new) as shared_lex,
+         cardinality(i.title_lexemes) - count(*) filter (where not t.new) as own
+    from issues i
+    cross join unnest(i.title_lexemes) as l(lexeme)
+    join terms t on t.lexeme = l.lexeme
+   where i.project_key = $1 and i.key <> $3
+   group by i.key
+  having bool_or(t.new)),
 scored as (
-  select c.key, c.title, c.status, c.updated_at,
-         array(select unnest(c.lex) intersect select unnest(n.lex)) as shared_lex,
-         least(cardinality(c.lex), cardinality(n.lex)) as shorter
-    from cand c, new_title n
-   where c.lex && n.lex)
+  select c.key, c.title, c.status, c.updated_at, c.shared_lex,
+         least(c.own, cardinality(n.lexemes)) as shorter
+    from cand c, new_title n)
 select key, title, status, cardinality(shared_lex) as shared,
        ts_headline('english', search_text(title),
          to_tsquery('simple', (select string_agg(quote_literal(x), ' | ') from unnest(shared_lex[1:$5]) x)), $4) as headline
