@@ -1,7 +1,7 @@
 // packages/envoy/cmd/agent-secrets/client.go
 //
 // client is agent-secrets's own thin HTTP client for the broker routes it needs, as the shared
-// broker contract (dispatch://AGENTC-393/artifact/plan-overview-md) defines them. Session routes
+// broker contract defines them. Session routes
 // — everything but enrollment issuance/revocation and launcher-credential issuance — are signed
 // per call through a Signer (proofsource.go: an agent box or pod's own key, or a host session's
 // agent-secrets-helper), producing exactly the Proof header internal/broker/proof.Verifier

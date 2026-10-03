@@ -2592,16 +2592,16 @@ begin production-audit
 audit_verdict_ok=
 if production_audit; then audit_verdict_ok=1; fi
 [ -n "$audit_verdict_ok" ] || fail "$(audit_failure)"
-printf '["AGENTC-1"]\n' >"$evidence/controls/audit-outside.json"
+printf '["ACME-1"]\n' >"$evidence/controls/audit-outside.json"
 expect_failure production-audit-outside audit_verdict "$evidence/controls/audit-outside.json" "$evidence/production-interests-outside.json"
 # The interest filter, on the run's own samples with one topic outside the run added for a session
 # of the run, must find that topic.
 control_session=$(jq -r '.[0] // "legion-e2e4b-control"' "$evidence/run-sessions.json")
-{ cat "$evidence/interests.jsonl"; jq -cn --arg s "$control_session" '{at: "control", session_id: $s, topics: ["notifications.dispatch.issue.AGENTC-1"]}'; } >"$evidence/controls/interests-outside.jsonl"
+{ cat "$evidence/interests.jsonl"; jq -cn --arg s "$control_session" '{at: "control", session_id: $s, topics: ["notifications.dispatch.issue.ACME-1"]}'; } >"$evidence/controls/interests-outside.jsonl"
 caught=$(interests_outside "$evidence/controls/interests-outside.jsonl")
-jq -e 'any(.[]; .topic == "notifications.dispatch.issue.AGENTC-1")' <<<"$caught" >/dev/null ||
+jq -e 'any(.[]; .topic == "notifications.dispatch.issue.ACME-1")' <<<"$caught" >/dev/null ||
   fail "the interest filter let an outside topic through: $caught"
-note "the interest filter's control: an added topic outside the run (notifications.dispatch.issue.AGENTC-1) is caught"
+note "the interest filter's control: an added topic outside the run (notifications.dispatch.issue.ACME-1) is caught"
 # The unanswered-sample rule: a blip passes, a listener that stops answering fails, and so does a
 # listener restart past its bound or a 503 of another body; a restart within the bound passes.
 outcomes() { # outcomes START_SECOND OUTCOME…: one control sample per OUTCOME, 5 s apart

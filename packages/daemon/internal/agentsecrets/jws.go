@@ -22,7 +22,7 @@ const (
 	proofTyp   = "agent-secrets-proof+jwt"
 
 	// requestLifetimeSeconds bounds how far past iat a request object's exp sits: exp <= iat+600,
-	// per the shared broker contract (dispatch://AGENTC-393/artifact/plan-overview-md).
+	// per the shared broker contract.
 	requestLifetimeSeconds = 600
 )
 

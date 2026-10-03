@@ -1,6 +1,6 @@
 //go:build e2e
 
-// The Stage 4a harness's agent-secrets checks (AGENTC-393, spec Testing 10(b); red-team condition
+// The Stage 4a harness's agent-secrets checks (the secrets broker spec's Testing 10(b); red-team condition
 // 2): two pods on one ServiceAccount are each enrolled with the production broker as its own session
 // and cannot cross-use grants; a copied projected token alone, an old pod UID, and a self-enrollment
 // from inside a pod all fail; the daemon's revocation ends a pod's access when the pod is gone. The

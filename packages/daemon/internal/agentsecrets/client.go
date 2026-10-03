@@ -1,5 +1,5 @@
 // Package agentsecrets is the daemon's side of the secrets broker's machine-login and enrollment
-// routes (AGENTC-393, broker API v9): it holds a key in process memory, logs the machine in
+// routes (broker API v9): it holds a key in process memory, logs the machine in
 // through the typed-code flow (POST /v1/launcher-credentials, polled until a human approves it),
 // and enrolls a pod's key under the resulting launcher credential — authenticating every call
 // with a launcher proof signed by the key, never a bearer token. Revoke tears the enrollment down
@@ -76,7 +76,7 @@ type LoginState struct {
 // PodEnrollment is one pod generation's identity as the daemon knows it: the pod UID the runtime
 // recorded at spawn, the thumbprint and projected token the shim's hello carried, and the
 // agent's session id — "" before the agent registered, which the broker records as null. Per
-// the shared broker contract (dispatch://AGENTC-393/artifact/plan-overview-md), the broker picks
+// the shared broker contract, the broker picks
 // a request's approver at request time; the enrollment carries no issue.
 type PodEnrollment struct {
 	PodUID, Thumbprint, PodToken, Session string

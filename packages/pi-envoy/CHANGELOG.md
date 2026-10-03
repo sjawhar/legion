@@ -71,7 +71,7 @@
 ### Fixed
 
 - A controller now displays its project token in canonical uppercase
-  (`Legion controller · AGENTC`), rather than the lowercase token the Go daemon carries in
+  (`Legion controller · ACME`), rather than the lowercase token the Go daemon carries in
   `LEGION_PROJECT` (LEGION-480).
 - A `task` subagent whose first transcript publish loses Oh My Pi's session publish lock to
   another writer no longer fails every tool call for the rest of its life (LEGION-491). The
@@ -114,7 +114,7 @@
 - Every Legion pull request body opens with a `## For the reviewer` brief — `Outcome`, `Why`,
   `Change`, `Look at first`, `Proven by`, `Not proven / risk`, `Size` — above the `## Verification`
   ledger, and the merger's READY packet leads with the brief's `Outcome:` and `Not proven / risk:`
-  lines quoted from the published head (AGENTC-1305). The implementer writes the brief when the
+  lines quoted from the published head. The implementer writes the brief when the
   PR opens and keeps it true; the reviewer fills `Look at first` and `Not proven / risk` each
   round; a body with no brief still publishes, with one line saying so.
 
@@ -158,8 +158,7 @@
   or moved authorization boundary must refuse that change's negative control. Both pair agents
   declare their rubric in `autoloadSkills`, so the subagent starts with it rather than being told
   to read it. Each still names it as `skill://<name>`, the form the Go daemon's boot gate
-  resolves, and `src/legion/shipped-agents.test.ts` fails an autoloaded name with no such token
-  (AGENTC-1305).
+  resolves, and `src/legion/shipped-agents.test.ts` fails an autoloaded name with no such token.
 - The planner, tester, reviewer and implementer role texts, and the worker skill's push procedure
   they point to, each say that under the Go daemon the issue branch is pushed with `legion push`,
   which runs that procedure and decides whether the push skips CI: a handoff push that a later push
@@ -279,7 +278,7 @@
   read every App) no thread counts as a bot's, and a bot's left-open line says the session cannot
   identify the review App. The implementer, reviewer and merger role texts say so (LEGION-208).
 - `legion.goDaemonApiVersion` is 10. Contract 9 adds the daemon's own agent-secrets machine login
-  state (`agentSecretsLogin`) to `GET /legion/v1/state` (AGENTC-393). Contract 10 adds
+  state (`agentSecretsLogin`) to `GET /legion/v1/state`. Contract 10 adds
   `POST /legion/v1/roots/close`, the Go `legion` tool's `close_root`: a tree root's own architect
   ends its admitted tree before any phase has started, and the daemon posts the architect's reason
   on the issue before it writes `done` (LEGION-208).

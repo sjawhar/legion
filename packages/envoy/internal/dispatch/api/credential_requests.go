@@ -1,11 +1,10 @@
 // credential_requests.go relays Dispatch's credential-request UI to the secrets broker
-// (the "UI routes" of the shared broker contract,
-// dispatch://AGENTC-393/artifact/plan-overview-md). Every handler does the same five things:
+// (the "UI routes" of the shared broker contract). Every handler does the same five things:
 // require a human caller, require the broker to be configured, resolve or read its input, call
 // the matching agentsecrets.Client method, and forward the broker's exact status and body — the
 // broker decides. The one thing Dispatch supplies is who decides: approve, deny and revoke send the
 // login requireHuman resolved, in Dispatch's canonical lowercase form, as the approver, and never
-// forward the browser's body, so nothing a browser sends can name the approver (AGENTC-393).
+// forward the browser's body, so nothing a browser sends can name the approver.
 package api
 
 import (

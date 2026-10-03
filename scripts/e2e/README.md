@@ -478,7 +478,7 @@ with the providers Secret mounted, as a deployment with `provider_keys` does.
 | `LEGION_E2E_MODEL_GATEWAY_AUDIENCE` | required | the audience the model gateway accepts on a worker's projected ServiceAccount token, put in place of the `${MODEL_TOKEN_AUDIENCE}` placeholder in the run's copy of the operator route's `pod.yml`; checked by [`lib/model-gateway-audience.sh`](#libmodel-gateway-audiencesh) |
 | `STAGE4A_FROM` | unset | a development entry point: any check after `identity` except `stale-incarnation`, which rides `kill-pod`'s relaunch; the harness refuses any other name at `identity`, before it creates anything. `identity` always runs; the checks before the entry point are skipped, and each later check first puts the claims it needs where the full run would have left them, through the same runtime calls. The run ends `stage 4a e2e: every check from <check> passed — a development run, never the proof`, and is never cited as the proof |
 | `STAGE4A_EVIDENCE_DIR` | a fresh `/tmp/legion-e2e4a-evidence.XXXXXXXX` | kept on every outcome and printed at exit: `transcript.log` (the whole run), `runtime.log` (the runtime's and the listener's JSON log lines), and the two namespace snapshots |
-| `LEGION_E2E_AGENT_SECRETS_URL` | unset (the `secrets-*` checks report `SKIPPED-BLOCKED`) | the agent-secrets broker (AGENTC-393) the run enrolls pods with — the **production** broker (Plan D), never a development slot (below) |
+| `LEGION_E2E_AGENT_SECRETS_URL` | unset (the `secrets-*` checks report `SKIPPED-BLOCKED`) | the agent-secrets broker the run enrolls pods with — the **production** broker (Plan D), never a development slot (below) |
 | `LEGION_E2E_AGENT_SECRETS_OPERATOR` | unset | the email of the person this run's machine login is approved by — the harness starts a `legion-daemon` machine login and prints `STAGE4A: approve machine login code XXXX-XXXX on the Dispatch credential page as <operator>`, the stage is devbox-attended so the operator enters the code and clicks Approve, signed in to Dispatch as that person, during the run (polled up to 10 minutes; a timeout, denial, or expiry blocks the `secrets-*` checks with that reason, never fails the stage); distinct from the daemon's own production credential |
 | `LEGION_E2E_AGENT_SECRETS_AUTO_SHA256` | unset | the `sha256sum` of the dummy value Sami seeded into the production broker's secret store for rule `LEGION_E2E_AUTO` (pod, automatic, inject) — the harness never sees the value itself, only its hash |
 | `LEGION_E2E_AGENT_SECRETS_BIN` | `$work/agent-secrets` (built by the script; not read from the environment) | the checkout's `agent-secrets` CLI (`packages/envoy/cmd/agent-secrets`), run directly from the devbox for the `secrets-old-uid-and-revocation` check's before/after-revocation reads |
@@ -492,7 +492,7 @@ launcher credential — nothing, the daemon included, can enroll against it. Ins
 against the **production broker** with a rules file carrying only two throwaway secrets
 (`LEGION_E2E_AUTO`: pod, automatic, inject; `LEGION_E2E_APPROVAL`: pod, approval by
 `login:<name>` naming the same login as `LEGION_E2E_AGENT_SECRETS_OPERATOR`, inject — the shared
-broker contract (dispatch://AGENTC-393/artifact/plan-overview-md) permits only `operator` or
+broker contract permits only `operator` or
 `login:<name>` approvers, never `issue_assignee`; both 3600 s, Sami's
 values seeded after Plan D's apply) —
 "before any real secret moves" is exactly this state, and it is what spec Acceptance 2's "a live
@@ -572,7 +572,7 @@ What the run had to learn about production:
   pod of the tree can ever join it. A CPU request on the root does not fix it: when a child is
   placed first, as the concurrent launch showed, the root must join the child's node, and there a
   2-CPU root beside another tree's root stayed Pending on `Insufficient cpu`. The `legion`
-  NodePool's floor, `karpenter.k8s.aws/instance-cpu` Gt 3 (agent-c #20006), keeps every Legion pod
+  NodePool's floor, `karpenter.k8s.aws/instance-cpu` Gt 3 (set in the deployment repository), keeps every Legion pod
   on a node of at least 4 vCPUs with room for the tree, and no pod requests anything.
 - gVisor on production reports `4.19.0-gvisor` from `uname -r`.
 - The worker image has no `kill` binary; the exec runs the shell's builtin.

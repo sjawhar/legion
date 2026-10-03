@@ -2,7 +2,7 @@
 
 // packages/envoy/cmd/agent-secrets-helper/main.go
 
-// Command agent-secrets-helper is the host side of agent secrets (AGENTC-393): a per-user
+// Command agent-secrets-helper is the host side of agent secrets: a per-user
 // daemon (dotfiles agent-secrets/agent-secrets-helper.service) that pins each registered host
 // agent session by pidfd, keeps its P-256 key in memory, enrolls it with the secrets broker as
 // kind "host" under the operator's launcher credential, signs broker proofs for the session's

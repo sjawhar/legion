@@ -1,4 +1,4 @@
-// Command agent-secrets is the client for the AGENTC-393 secrets broker: an agent box or pod
+// Command agent-secrets is the client for the secrets broker: an agent box or pod
 // signs with the key.pem and enrollment file it keeps under AGENT_SECRETS_KEY_DIR (file mode); a
 // host session has no key of its own and asks agent-secrets-helper, over
 // AGENT_SECRETS_HELPER_SOCK, to sign on its behalf (helper mode). It enrolls a runtime (box
@@ -36,7 +36,7 @@
 // (buildChildEnv). A host session enrolls (kind host) automatically through the helper's own
 // enroll loop, and a pod's own enrollment is its launcher's job — this CLI has no direct
 // enrollment path for either; only a box enrolls through it, and only via --helper (the shared
-// broker contract, dispatch://AGENTC-393/artifact/plan-overview-md, has no launcher bearer token:
+// broker contract has no launcher bearer token:
 // nothing on a devbox can enroll except through a helper or the Legion daemon, the two processes
 // that hold a launcher's proof-signing key).
 package main

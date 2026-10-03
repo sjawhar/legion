@@ -171,7 +171,7 @@ names its count. The full vocabulary, with the reason each call beat its alterna
 
 ## Credential requests
 
-`features/credentials/` renders the whole AGENTC-393 credential-request approval surface —
+`features/credentials/` renders the whole credential-request approval surface —
 directed, signature-verified, immutable-record requests the broker owns and decides; Dispatch
 relays, renders, and names the deciding human. The feature is off — the inbox section and the
 Settings grants section hidden, its routes 404-clean — whenever `DISPATCH_AGENT_SECRETS_URL` is

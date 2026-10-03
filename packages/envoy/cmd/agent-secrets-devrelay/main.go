@@ -1,5 +1,5 @@
 // Command agent-secrets-devrelay is the local dev stack's stand-in for Dispatch's
-// credential-request relay, so the AGENTC-393 credential-request broker
+// credential-request relay, so the credential-request broker
 // (packages/envoy/cmd/broker) can be decided by hand without a Dispatch deployment: it calls the
 // broker's UI routes with the UI bearer token and the approving human's login, the same request
 // Dispatch's server sends when a signed-in human clicks Approve or Deny.

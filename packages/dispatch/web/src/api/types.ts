@@ -126,7 +126,7 @@ export type {
 } from "@legion/contracts";
 
 // Dispatch-UI-only DTOs mirroring the credential broker's JSON verbatim (the "UI routes" section
-// of the AGENTC-393 overview document). These have no reason to live in the shared
+// of the shared broker contract). These have no reason to live in the shared
 // @legion/contracts package, which is for Envoy event contracts.
 export type CredentialRequestKind = "agent_secret" | "launcher_credential";
 export type CredentialRequestState =

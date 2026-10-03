@@ -1,4 +1,4 @@
-// e2e_test.go is the acceptance proof for the secrets broker (AGENTC-393): the whole
+// e2e_test.go is the acceptance proof for the secrets broker: the whole
 // credential-request story driven as real HTTP against the mux built by api.Register, on a real
 // Postgres store and a fake Secrets Manager. Every step below drives HTTP; none calls a service
 // method directly (Machine.ApplyDecision and friends are exercised only through the routes that
@@ -282,8 +282,7 @@ func newSigningKey(t *testing.T) *ecdsa.PrivateKey {
 	return key
 }
 
-// --- wire-shape mirrors of the shared broker contract
-// (dispatch://AGENTC-393/artifact/plan-overview-md), the fields this test actually reads ---
+// --- wire-shape mirrors of the shared broker contract, the fields this test actually reads ---
 
 type wireError struct {
 	Code  string `json:"code"`
