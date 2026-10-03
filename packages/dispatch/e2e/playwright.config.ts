@@ -161,12 +161,13 @@ export default defineConfig({
       testMatch: /(collab-cursor|keyboard-agents-picker)\.e2e\.ts/,
       use: { ...devices["Desktop Safari"] },
     },
-    // The live view's phone layout (its keyboard cap, gutter and scroll locks) also runs in WebKit,
-    // the engine iOS Safari uses; only those rows, since the rest of the spec is engine-agnostic.
+    // The live view's phone layout (its keyboard cap, gutter and scroll locks), and what the
+    // Conversation's floating pills cover on a phone, also run in WebKit, the engine iOS Safari
+    // uses; only those rows, since the rest of each spec is engine-agnostic.
     {
       name: "webkit-iphone",
-      testMatch: /agent-view\.e2e\.ts/,
-      grep: /on a phone the live view|a document-scrolling route/,
+      testMatch: /(agent-view|phone-conversation)\.e2e\.ts/,
+      grep: /on a phone the live view|a document-scrolling route|covers none of/,
       use: { ...devices["iPhone 13"] },
     },
     // Firefox's native editing mishandles text typed over what follows a block's last line break,

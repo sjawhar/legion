@@ -529,3 +529,76 @@ test("on a phone, Jump to latest stays off a thread opened over the Conversation
     await alice.close();
   }
 });
+
+/** Where a tap at the centre of each control above the turns - the issue's header, its tabs and
+ *  the filters - lands, for each one it does not reach as it should: a tab must take its own tap,
+ *  and no control may lose its tap to `Jump to latest`. Controls whose centre is off screen are
+ *  not tapped. */
+async function tapsLostAboveTurns(page: Page): Promise<string[]> {
+  return page.evaluate(() => {
+    const turns = document.querySelector('[aria-label="Conversation turns"]');
+    if (turns === null) throw new Error("expected the Conversation's turns");
+    const pill = document.querySelector('[data-testid="jump-to-latest"]');
+    const turnsTop = turns.getBoundingClientRect().top;
+    const lost: string[] = [];
+    for (const control of document.querySelectorAll<HTMLElement>(
+      '[role="tab"], button, a[href], input'
+    )) {
+      const box = control.getBoundingClientRect();
+      const x = box.left + box.width / 2;
+      const y = box.top + box.height / 2;
+      if (pill?.contains(control) || box.width === 0 || box.bottom > turnsTop) continue;
+      if (x < 0 || x >= window.innerWidth || y < 0 || y >= window.innerHeight) continue;
+      const hit = document.elementFromPoint(x, y);
+      const reached = hit !== null && (control.contains(hit) || hit.contains(control));
+      const lostToPill = hit !== null && pill?.contains(hit) === true;
+      if (reached || (control.getAttribute("role") !== "tab" && !lostToPill)) continue;
+      const name =
+        control.getAttribute("aria-label") ??
+        (control.closest("label") ?? control).textContent?.trim() ??
+        "";
+      lost.push(
+        `${name} at ${Math.round(x)},${Math.round(y)} reached ${hit?.outerHTML.slice(0, 80)}`
+      );
+    }
+    return lost;
+  });
+}
+
+// On a phone the issue's header, its tabs and the filters sit above the turns, the latest turn
+// just under them, so a reader scrolling back up passes a band where they are on screen while
+// `Jump to latest` shows. The pill never rises above where the turns begin, so a tap on a tab, or
+// on any control above the turns, reaches it everywhere in that band.
+test("on a phone, Jump to latest covers none of the issue's tabs or the controls above the turns", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Pill over the tabs" });
+  for (let index = 0; index < 15; index += 1) {
+    await createMessage(issue.key, { body: `Older turn ${index}` }, session);
+  }
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.setViewportSize(phone);
+    await page.goto(`/issues/${issue.key}/conversation`);
+    await expect(page.getByText("Older turn 14")).toBeVisible();
+    const jump = page.getByTestId("jump-to-latest");
+    const turns = page.getByRole("list", { name: "Conversation turns" });
+    // Where the page settled on the latest turn, the one place in the band with no pill.
+    const settled = await page.evaluate(() => window.scrollY);
+    const turnsTop = await turns.evaluate(
+      (list) => list.getBoundingClientRect().top + window.scrollY
+    );
+    const lost: string[] = [];
+    for (let top = 1; top <= turnsTop; top += 4) {
+      await page.evaluate((y) => window.scrollTo(0, y), top);
+      if (Math.abs(top - settled) > 1) await expect(jump).toBeVisible();
+      for (const tap of await tapsLostAboveTurns(page)) lost.push(`scrolled to ${top}: ${tap}`);
+    }
+    expect(lost).toEqual([]);
+  } finally {
+    await alice.close();
+  }
+});
