@@ -68,11 +68,9 @@ jobs:
         run: bunx tsc --noEmit
         working-directory: packages/workspace
 
-      # scripts/dispatch is no workspace, so it borrows the envoy-client package's TypeScript and
-      # Bun types (its tsconfig's typeRoots).
+      # scripts/dispatch is no workspace; the root package pins its TypeScript and Bun types.
       - name: Typecheck the Dispatch census script
-        run: bunx tsc --noEmit -p ../../scripts/dispatch
-        working-directory: packages/envoy-client
+        run: bunx tsc --noEmit -p scripts/dispatch
 
 
   test:
