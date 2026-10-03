@@ -2,9 +2,9 @@ import { expect, type Page, test } from "@playwright/test";
 
 import { createComment, createIssue, createProject, getArtifactText } from "./api";
 import { connectedDot, documentEditor, typeAtEnd } from "./editor";
-import { plainHttpHost } from "./plain-http-origin";
+import { httpsTarget, plainHttpHost, plainHttpSkipReason } from "./plain-http-origin";
 import { resetDatabase } from "./seed";
-import { asUser } from "./users";
+import { asPlainHttpUser } from "./users";
 
 // Runs only in the `chromium-plain-http` project (e2e/playwright.config.ts, e2e/plain-http-origin.ts):
 // the page's origin is a plain-HTTP host name that is not loopback, so it is no secure context and
@@ -15,10 +15,7 @@ const agent = {
 };
 const typed = "Typed on a plain-HTTP origin.";
 
-test.skip(
-  process.env.PLAYWRIGHT_BASE_URL?.startsWith("https:") === true,
-  "a deployed https server has no plain-HTTP origin to map"
-);
+test.skip(httpsTarget, plainHttpSkipReason);
 
 test.beforeEach(async () => {
   await resetDatabase();
@@ -42,7 +39,7 @@ test("a document opens and takes a new paragraph with no page error", async ({ b
     { project: "CORE", spec: "## Plan\n\nShip it.\n", title: "Plain-HTTP document" },
     agent
   );
-  const alice = await asUser(browser, "alice");
+  const alice = await asPlainHttpUser(browser, "alice");
   try {
     const page = await alice.newPage();
     const errors: string[] = [];
@@ -68,7 +65,7 @@ test("a comment body renders formatted rather than as literal Markdown", async (
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Plain-HTTP comment" });
   await createComment(issue.key, { body: "A **formatted** comment." }, agent);
-  const alice = await asUser(browser, "alice");
+  const alice = await asPlainHttpUser(browser, "alice");
   try {
     const page = await alice.newPage();
     await page.goto(`/issues/${issue.key}/conversation`);
