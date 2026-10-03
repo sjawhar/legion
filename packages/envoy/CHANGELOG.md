@@ -191,6 +191,12 @@
   waited for the write to finish first: the request that made it got no answer, every later write
   to the document waited on its writer slot, and the document's later rooms stopped persisting.
   The room's own update observer now releases the write before that append runs (LEGION-469).
+- A write to a document in which a peer had deleted a chain of 200,000 nested blocks, or one whose
+  lower-numbered client had written 100,000 items after one ygo could not yet place, failed
+  with `fork live document: crdt: invalid update`, and so did every read of such a resident room
+  once reads went through a copy. Each copy of a room's state decoded with ygo's default queue of
+  100,000 items parked behind one whose parent it cannot place yet, which such a state overruns;
+  a copy now decodes with a queue as long as one update can carry (LEGION-469).
 - Saving a document, comment, ask, or message with a long run of underscore-joined characters
   no longer takes quadratic time in Postgres search indexing. `pmdoc` also avoids quadratic work
   in Goldmark's email and delimiter scans and in renderer closer scans. A document that exceeds

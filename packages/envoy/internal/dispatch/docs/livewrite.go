@@ -218,7 +218,7 @@ func buildFork(write *liveWrite, incremental bool, gained []byte) (*crdt.Doc, er
 		}
 		return write.fork, nil
 	}
-	fork := crdt.New(crdt.WithClientID(write.clientID))
+	fork := newDocumentCopy(crdt.WithClientID(write.clientID))
 	if err := crdt.ApplyUpdateV1(fork, gained, nil); err != nil {
 		return nil, fmt.Errorf("fork live document: %w", err)
 	}

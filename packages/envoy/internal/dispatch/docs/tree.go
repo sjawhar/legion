@@ -206,11 +206,23 @@ func renderDocument(doc *crdt.Doc) (string, error) {
 // way through a write - which a direct walk of a resident room's live tree can read, since the
 // walk takes no lock (reearth/ygo v1.49.5, crdt/yxml.go:195-211) - and nothing writes the copy.
 func snapshotDocument(doc *crdt.Doc) (*crdt.Doc, error) {
-	snapshot := crdt.New()
+	snapshot := newDocumentCopy()
 	if err := crdt.ApplyUpdateV1(snapshot, crdt.EncodeStateAsUpdateV1(doc, nil), nil); err != nil {
 		return nil, fmt.Errorf("copy live document: %w", err)
 	}
 	return snapshot, nil
+}
+
+// newDocumentCopy is a document to decode into the state this server encoded from a document it
+// holds: a snapshot, a write's fork. ygo's decoder parks each later item of a client behind one
+// whose parent it cannot place yet - a container in a later client's group, or one its garbage
+// collection emptied when a peer deleted it - and refuses the whole update once 100,000 are parked
+// (crdt.WithMaxPendingItems), so a copy of a room whose deleted subtree or one client's writes
+// run past that fails where the room itself serves. That cap guards against a peer's update; this
+// one is the server's own, and no update ygo decodes carries more than maxUpdateItems items, so
+// the queue of a copy is bounded at that.
+func newDocumentCopy(options ...crdt.DocOption) *crdt.Doc {
+	return crdt.New(append(options, crdt.WithMaxPendingItems(maxUpdateItems))...)
 }
 
 // closureChangedMarkdown reports whether a document closure that produced after changed the
