@@ -83,16 +83,19 @@ export function storeAgentState(
 }
 
 /**
- * The write both read hooks make: `input(key)` for `sessionId`, once per `key`, whenever the
- * server counts one of the session's replies unread, with the answer put into the shared
- * agent-state query. A failed write is retried twice with backoff; if it still fails the key is
- * forgotten, so it is sent again when the unread count or the key next changes or the view is
- * reopened, rather than the badge staying up until the session replies once more.
+ * The write both read hooks make: `input(value)` for `sessionId`, once per `dedupeKey(value)`,
+ * whenever the server counts one of the session's replies unread, with the answer put into the
+ * shared agent-state query. The key, not the value, says whether this view has sent a mark already,
+ * so a value rebuilt on every render is sent once. A failed write is retried twice with backoff; if
+ * it still fails the key is forgotten, so it is sent again when the unread count or the key next
+ * changes or the view is reopened, rather than the badge staying up until the session replies once
+ * more.
  */
-function useSendReadMark(
+function useSendReadMark<V>(
   sessionId: string,
-  key: string | undefined,
-  input: (key: string) => UserAgentStateInput
+  value: V | undefined,
+  dedupeKey: (value: V) => string,
+  input: (value: V) => UserAgentStateInput
 ): void {
   const queryClient = useQueryClient();
   const unread = useQuery(userAgentStateQuery()).data?.[sessionId]?.unread_replies ?? 0;
@@ -106,16 +109,21 @@ function useSendReadMark(
     onSuccess: (next) => storeAgentState(queryClient, sessionId, next),
     retry: 2,
   });
+  const key = value === undefined ? undefined : dedupeKey(value);
   useEffect(() => {
-    if (unread === 0 || key === undefined || marked.current === key) return;
+    if (unread === 0 || value === undefined || key === undefined || marked.current === key) return;
     marked.current = key;
-    mutate(input(key));
-  }, [input, key, mutate, unread]);
+    mutate(input(value));
+  }, [input, key, mutate, unread, value]);
 }
+
+const ownString = (value: string): string => value;
 
 const readThrough = (newest: string): UserAgentStateInput => ({ read_through: newest });
 
-const readReplies = (ids: string): UserAgentStateInput => ({ read_replies: ids.split(" ") });
+const joinedIds = (ids: readonly string[]): string => ids.join(" ");
+
+const readReplies = (ids: readonly string[]): UserAgentStateInput => ({ read_replies: ids });
 
 /**
  * Records that the viewer has read a session's conversation, through the newest reply the
@@ -128,7 +136,12 @@ export function useMarkRepliesRead(
   sessionId: string,
   exchanges: readonly MessageRead[] | undefined
 ): void {
-  useSendReadMark(sessionId, newestSessionReply(exchanges ?? [], sessionId), readThrough);
+  useSendReadMark(
+    sessionId,
+    newestSessionReply(exchanges ?? [], sessionId),
+    ownString,
+    readThrough
+  );
 }
 
 /**
@@ -144,7 +157,6 @@ export function useMarkShownRepliesRead(sessionId: string, replies: readonly Mes
   // session, by kind and id. It refuses the whole write over one id that fails it.
   const shown = replies
     .filter((reply) => reply.author.kind === "session" && reply.author.id === sessionId)
-    .map((reply) => reply.id)
-    .join(" ");
-  useSendReadMark(sessionId, shown === "" ? undefined : shown, readReplies);
+    .map((reply) => reply.id);
+  useSendReadMark(sessionId, shown.length === 0 ? undefined : shown, joinedIds, readReplies);
 }
