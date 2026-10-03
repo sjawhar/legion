@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"slices"
 	"time"
 
 	"github.com/google/uuid"
@@ -292,6 +293,10 @@ func (s *server) putUserAgentState(w http.ResponseWriter, r *http.Request) {
 		}
 		readReplies = append(readReplies, parsed.String())
 	}
+	// The insert below locks each new row in the order it is given, so two writes naming the same
+	// new replies in opposite orders would wait on each other until Postgres killed one (40P01).
+	// One order for every write, the ids' own, leaves no cycle to wait in.
+	slices.Sort(readReplies)
 	sessionID := r.PathValue("session_id")
 	// The state is announced on an event the session owns, and only a session id a route can
 	// name can own one, so any other is refused here rather than failing the write.

@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1240,6 +1242,57 @@ func TestAReadMarkDeletesTheRowsOfRepliesItPasses(t *testing.T) {
 	}
 	if got := unreadReplies(t, handler, "alice", "s1"); got.UnreadReplies != 0 {
 		t.Fatalf("after a read mark through both answers: %#v, want nothing unread", got)
+	}
+}
+
+// Two writes naming the same new replies in opposite orders both land: each takes its row locks in
+// the ids' own order, so neither waits on the other in a cycle, which Postgres ends by killing one
+// of them (40P01) and the route answers that valid write 500. Every round reads a fresh batch,
+// since only rows not yet written take the locks two inserters contend for.
+func TestOverlappingRepliesReadByIDInOppositeOrdersBothLand(t *testing.T) {
+	handler, database, root, _, _ := directConversationFrom(t, "alice")
+	const rounds, size = 20, 40
+	var failures []string
+	for round := range rounds {
+		seeded, err := database.Pool.Query(context.Background(), `
+			insert into messages (issue_key, author, body, target, in_reply_to)
+			select null, '{"kind":"session","id":"s1"}'::jsonb, 'Batch answer ' || n, 'session:s1', $1::uuid
+			from generate_series(1, $2::int) as n
+			returning id::text
+		`, root.ID, size)
+		if err != nil {
+			t.Fatalf("seed round %d: %v", round, err)
+		}
+		ids, err := pgx.CollectRows(seeded, pgx.RowTo[string])
+		if err != nil {
+			t.Fatalf("seed round %d: %v", round, err)
+		}
+		reversed := slices.Clone(ids)
+		slices.Reverse(reversed)
+		start := make(chan struct{})
+		answered := make(chan *httptest.ResponseRecorder, 2)
+		var writes sync.WaitGroup
+		for _, batch := range [][]string{ids, reversed} {
+			writes.Add(1)
+			go func() {
+				defer writes.Done()
+				<-start
+				answered <- dispatchRequest(t, handler, http.MethodPut, "/api/v1/me/agents/s1/state", map[string]any{
+					"read_replies": batch,
+				}, "alice")
+			}()
+		}
+		close(start)
+		writes.Wait()
+		close(answered)
+		for response := range answered {
+			if response.Code != http.StatusOK {
+				failures = append(failures, fmt.Sprintf("round %d: %d %s", round, response.Code, response.Body.String()))
+			}
+		}
+	}
+	if len(failures) > 0 {
+		t.Fatalf("%d of %d writes failed, first: %s", len(failures), 2*rounds, failures[0])
 	}
 }
 
