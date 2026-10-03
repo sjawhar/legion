@@ -64,7 +64,7 @@ search() {
   else
     local excludes=()
     for lockfile in "${lockfiles[@]}"; do excludes+=("--exclude=$lockfile"); done
-    grep -r -n -I -E "${excludes[@]}" "$@" -e "$rule" -- "${targets[@]}" > "$matches" || status=$?
+    grep -r -n -H -I -E "${excludes[@]}" "$@" -e "$rule" -- "${targets[@]}" > "$matches" || status=$?
   fi
   if [ "$status" -gt 1 ]; then
     echo "check-private-names: the search for what $label failed (exit $status)" >&2
