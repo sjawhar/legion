@@ -132,7 +132,7 @@ describe("ask census", () => {
     });
     // Each request made again opened a new row before #1671, so every arrival is an ask.opened. A
     // human's thread reply is a turn; a session's is not. One turn each of LEGION-464's and
-    // AGENTC-418's is a human's reply on a decision block in the spec; LEGION-462's block was
+    // ACME-418's is a human's reply on a decision block in the spec; LEGION-462's block was
     // answered before its first request, so it is no turn.
     expect(
       recordedRounds.issues.flatMap((issue) =>
@@ -151,7 +151,7 @@ describe("ask census", () => {
         exceedsHumanTurnBudget: true,
       },
       {
-        issue: "AGENTC-418",
+        issue: "ACME-418",
         artifactId: "4bd9cfed-2e6e-4d79-83a4-ef99173d088d",
         inboxRows: 3,
         arrivals: 3,

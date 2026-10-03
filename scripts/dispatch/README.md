@@ -13,10 +13,11 @@ needs.
 bun scripts/dispatch/ask-census.ts \
   --from 2026-10-01T03:40:00Z \
   --to 2026-10-02T02:10:00Z \
-  --project AGENTC \
-  --project LEGION \
-  --project OPS
+  --project ACME \
+  --project LEGION
 ```
+
+`--project` is required and repeats: name each Dispatch project the census reads.
 
 The script resolves Dispatch as the Envoy client does (`activeDispatchConfig` in
 `packages/envoy-client/src/dispatch-config.ts`): the URL from `DISPATCH_URL`, else

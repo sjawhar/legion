@@ -13,7 +13,6 @@ import {
 } from "../../packages/envoy-client/src/dispatch-config";
 import { DispatchClient } from "../../packages/envoy-client/src/dispatch-http";
 
-const DEFAULT_PROJECTS = ["AGENTC", "LEGION", "OPS"] as const;
 const CODES = ["to-do", "design", "may-I-proceed", "operations"] as const;
 const EVENT_PAGE_SIZE = 200;
 /** Issues read at once: a few requests' latency each, well inside one client's deadline, while
@@ -33,6 +32,12 @@ export type CensusAsk = Pick<
 /** The document an approval ask names, as every `ask.*` event of one records it. */
 type RecordedApproval = Pick<AskApproval, "artifact_id">;
 
+/** An event's or an ask's actor, as loose as the recorded history it reads. */
+interface CensusActor {
+  readonly kind: string;
+  readonly id: string;
+}
+
 /**
  * The fields of a recorded Dispatch event the approval count reads. The history it reads predates
  * parts of today's contract, so each payload field is optional and checked before use.
@@ -40,7 +45,7 @@ type RecordedApproval = Pick<AskApproval, "artifact_id">;
 export interface CensusEvent {
   readonly id: DispatchEvent["id"];
   readonly type: string;
-  readonly actor?: { readonly kind: string; readonly id: string };
+  readonly actor?: CensusActor;
   readonly payload: {
     /** The ask an `ask.*` event carries. */
     readonly id?: Ask["id"];
@@ -125,7 +130,7 @@ function printable(text: string): string {
 }
 
 function fromExcludedSession(
-  actor: { readonly kind: string; readonly id: string } | undefined,
+  actor: CensusActor | undefined,
   excludedSessionIds: ReadonlySet<string>
 ): boolean {
   return actor?.kind === "session" && excludedSessionIds.has(actor.id);
@@ -338,13 +343,14 @@ function parseArguments(argv: readonly string[]): CensusOptions {
   const excludedSessionIds = new Set(values["exclude-session"]);
   if (from === undefined || to === undefined) throw new Error("--from and --to are required");
   if (date(from, "from") >= date(to, "to")) throw new Error("--from must be before --to");
+  if (projects.length === 0) throw new Error("--project is required: name each project to read");
   if (projects.includes("")) throw new Error("--project requires a project key");
   if (excludedSessionIds.has("")) throw new Error("--exclude-session requires a session id");
   if (codesPath === "") throw new Error("--codes requires a file path");
   return {
     from,
     to,
-    projects: projects.length === 0 ? DEFAULT_PROJECTS : projects,
+    projects,
     excludedSessionIds,
     ...(codesPath === undefined ? {} : { codesPath }),
   };
