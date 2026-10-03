@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
+import { DispatchClient } from "../../../packages/envoy-client/src/dispatch-http.ts";
 import {
   applyCodes,
   type CensusEvent,
@@ -23,9 +24,10 @@ import {
   reply,
 } from "./approval-events.ts";
 
-// One request after F1: opened at version 1, moved to version 2 by a new version, reworded and
-// handed back at 2, answered in its thread by the human, handed back at 2 again, and approved.
-const afterF1: ApprovalHistoryEvent[] = [
+// One request since #1671, when an approval request began following its document's versions:
+// opened at version 1, moved to version 2 by a new version, reworded and handed back at 2,
+// answered in its thread by the human, handed back at 2 again, and approved.
+const since1671: ApprovalHistoryEvent[] = [
   opened(1, 1),
   edited(2, 2, 1, { version: 1 }),
   edited(3, 2, 1, { version: 2 }, "Proposes an hourly export."),
@@ -128,7 +130,7 @@ describe("ask census", () => {
       standaloneQuestions: 0,
       approvalRequests: 9,
     });
-    // Each request made again opened a new row before F1, so every arrival is an ask.opened. A
+    // Each request made again opened a new row before #1671, so every arrival is an ask.opened. A
     // human's thread reply is a turn; a session's is not. One turn each of LEGION-464's and
     // AGENTC-418's is a human's reply on a decision block in the spec; LEGION-462's block was
     // answered before its first request, so it is no turn.
@@ -164,10 +166,10 @@ describe("ask census", () => {
     ]);
   });
 
-  test("counts the opening request and each hand-back after F1, but no rewording", () => {
+  test("counts the opening request and each hand-back since #1671, but no rewording", () => {
     // The move and the new summary are ask.edited and never reach the human; the reworded
     // hand-back arrives once, as its ask.handed_back.
-    expect(summarizeApprovalRounds(afterF1)).toEqual([
+    expect(summarizeApprovalRounds(since1671)).toEqual([
       {
         artifactId: ARTIFACT,
         inboxRows: 1,
@@ -178,8 +180,8 @@ describe("ask census", () => {
     ]);
   });
 
-  test("counts the arrivals the stage 4b proof reads as approval requests, before and after F1", () => {
-    const histories = [...recordedRounds.issues.map((issue) => issue.events), afterF1];
+  test("counts the arrivals the stage 4b proof reads as approval requests, before and since #1671", () => {
+    const histories = [...recordedRounds.issues.map((issue) => issue.events), since1671];
     const counted = histories.flatMap((events) =>
       summarizeApprovalRounds(events).map((round) => ({
         census: round.arrivals,
@@ -210,14 +212,13 @@ describe("ask census", () => {
     };
 
     const fetched = await fetchIssueEvents(
-      { url: "https://dispatch.example", token: "token" },
-      "LEGION-470",
-      fetchImpl as typeof fetch
+      new DispatchClient("https://dispatch.example", "token", fetchImpl as typeof fetch),
+      "LEGION-470"
     );
 
     expect(requests).toEqual([
-      "/api/v1/issues/LEGION-470/events?limit=200&after=0",
-      "/api/v1/issues/LEGION-470/events?limit=200&after=200",
+      "/api/v1/issues/LEGION-470/events?after=0&limit=200",
+      "/api/v1/issues/LEGION-470/events?after=200&limit=200",
     ]);
     expect(summarizeApprovalRounds(fetched)).toEqual([
       {
@@ -260,6 +261,30 @@ describe("ask census", () => {
         },
       ],
     });
+  });
+
+  test("flags two Inbox arrivals with no human turn, before and since #1671", () => {
+    // Before #1671 a request made again opened a new row: LEGION-464's request at version 2 was
+    // retracted when the document moved on to version 3, and the agent opened another at version
+    // 3, with no human turn between them.
+    // Since #1671 the same two arrivals are the opening request and one hand-back of the same row.
+    const recorded = recordedRounds.issues.find((issue) => issue.key === "LEGION-464")?.events;
+    expect(recorded?.slice(0, 3).map((event) => event.type)).toEqual([
+      "ask.opened",
+      "ask.resolved",
+      "ask.opened",
+    ]);
+    const before1671 = summarizeApprovalRounds(recorded?.slice(0, 3) ?? []);
+    const following = summarizeApprovalRounds([
+      opened(1, 1),
+      edited(2, 2, 1, { version: 1 }),
+      handedBack(3, 2),
+    ]);
+
+    expect(before1671[0]?.arrivals).toBe(2);
+    expect(before1671[0]?.exceedsHumanTurnBudget).toBe(true);
+    expect(following[0]?.arrivals).toBe(2);
+    expect(following[0]?.exceedsHumanTurnBudget).toBe(true);
   });
 });
 

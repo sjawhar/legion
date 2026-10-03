@@ -12,6 +12,7 @@ import {
   type ActiveDispatchConfig,
   activeDispatchConfig,
 } from "../../packages/envoy-client/src/dispatch-config";
+import { DispatchClient } from "../../packages/envoy-client/src/dispatch-http";
 
 const DEFAULT_PROJECTS = ["AGENTC", "LEGION", "OPS"] as const;
 const CODES = ["to-do", "design", "may-I-proceed", "operations"] as const;
@@ -98,6 +99,8 @@ interface MutableApprovalRound {
 /** What one issue adds to each table. */
 interface IssueCensus {
   readonly windowAsks: readonly CensusAsk[];
+  /** `windowAsks` without the excluded sessions' asks. */
+  readonly asks: readonly CensusAsk[];
   readonly issueRow: (AskSummary & { issue: string }) | undefined;
   readonly approvalRounds: Array<ApprovalRound & { issue: string }>;
   readonly standaloneQuestions: Array<CensusAsk & { issue: string }>;
@@ -179,8 +182,9 @@ function approvalRound(
  * Counts, per document, every time an approval request reached the human's Inbox (`arrivals`):
  * each `ask.opened` and each `ask.handed_back`. An `ask.edited` only rewords a request, by moving
  * it to a new version or giving it a new summary, so it never arrives; a hand-back with a new
- * summary is an `ask.edited` followed by its `ask.handed_back`, and arrives once. Before F1 a
- * request made again opened a new row, a new `ask.opened`, so the same rule counts it.
+ * summary is an `ask.edited` followed by its `ask.handed_back`, and arrives once. Before #1671,
+ * when an approval request began following its document's versions, a request made again opened
+ * a new row, a new `ask.opened`, so the same rule counts it.
  *
  * A human's turn is an answer to the request or a reply in its thread, and, once the round has
  * begun, an answer or a reply on a decision block in the document the request names: a choice a
@@ -350,12 +354,8 @@ function parseArguments(argv: readonly string[]): CensusOptions {
   };
 }
 
-async function get<T>(
-  config: DispatchConfig,
-  path: string,
-  fetchImpl: typeof fetch = fetch
-): Promise<T> {
-  const response = await fetchImpl(`${config.url}${path}`, {
+async function get<T>(config: DispatchConfig, path: string): Promise<T> {
+  const response = await fetch(`${config.url}${path}`, {
     headers: { Authorization: `Bearer ${config.token}` },
   });
   if (!response.ok) throw new Error(`GET ${path}: ${response.status} ${await response.text()}`);
@@ -363,18 +363,19 @@ async function get<T>(
 }
 
 export async function fetchIssueEvents(
-  config: DispatchConfig,
-  issueKey: string,
-  fetchImpl: typeof fetch = fetch
+  client: DispatchClient,
+  issueKey: string
 ): Promise<RecordedEvent[]> {
   const events: RecordedEvent[] = [];
   let after = 0;
   while (true) {
-    const page = await get<RecordedEvent[]>(
-      config,
-      `/api/v1/issues/${encodeURIComponent(issueKey)}/events?limit=${EVENT_PAGE_SIZE}&after=${after}`,
-      fetchImpl
-    );
+    // The client types an event by today's contract, and the history the census reads predates
+    // parts of it, so each event is read as the census's own all-optional shape.
+    const page = (await client.getIssueEvents(
+      issueKey,
+      after,
+      EVENT_PAGE_SIZE
+    )) as readonly RecordedEvent[];
     events.push(...page);
     if (page.length < EVENT_PAGE_SIZE) return events;
     const last = page.at(-1);
@@ -386,23 +387,21 @@ export async function fetchIssueEvents(
 }
 
 async function censusIssue(
-  config: DispatchConfig,
+  client: DispatchClient,
   issue: string,
   options: CensusOptions
 ): Promise<IssueCensus> {
   const fromTime = date(options.from, "from");
   const toTime = date(options.to, "to");
-  const issueAsks = await get<CensusAsk[]>(
-    config,
-    `/api/v1/issues/${encodeURIComponent(issue)}/asks`
-  );
+  const issueAsks = await client.listIssueAsks(issue);
   const windowAsks = filterAsksInWindow(issueAsks, options.from, options.to);
   const asks = excludeSessionAsks(windowAsks, options.excludedSessionIds);
-  // One approval row follows its document from the first request until a human answers it (F1),
-  // so a request opened before the window can be handed back inside it. Approval rounds come from
-  // the in-window events of every issue that carries an approval ask, whenever it was opened.
+  // Since #1671 one approval row follows its document from the first request until a human
+  // answers it, so a request opened before the window can be handed back inside it. Approval
+  // rounds come from the in-window events of every issue that carries an approval ask, whenever
+  // it was opened.
   const events = issueAsks.some((ask) => ask.kind === "approval")
-    ? (await fetchIssueEvents(config, issue)).filter(
+    ? (await fetchIssueEvents(client, issue)).filter(
         (event) =>
           inWindow(event.created_at, fromTime, toTime) &&
           !fromExcludedSession(event.actor, options.excludedSessionIds)
@@ -410,6 +409,7 @@ async function censusIssue(
     : [];
   return {
     windowAsks,
+    asks,
     issueRow: asks.length === 0 ? undefined : { issue, ...summarizeAsks(asks) },
     approvalRounds: summarizeApprovalRounds(events, issueAsks).map((round) => ({
       issue,
@@ -426,6 +426,7 @@ async function run(options: CensusOptions): Promise<void> {
       "Dispatch is not configured: set DISPATCH_URL with DISPATCH_TOKEN or DISPATCH_TOKEN_FILE, or enable dispatch in ~/.config/opencode/envoy.json"
     );
   }
+  const client = new DispatchClient(config.url, config.token);
   const codes =
     options.codesPath === undefined ? {} : parseCodes(await readFile(options.codesPath, "utf8"));
   // Without limit or offset the issues route answers every matching issue in one array, so this
@@ -442,7 +443,7 @@ async function run(options: CensusOptions): Promise<void> {
   // Each issue is read concurrently; the results keep project and issue order, which the approval
   // rounds table prints in.
   const census = await Promise.all(
-    projectIssues.flat().map((issue) => censusIssue(config, issue.key, options))
+    projectIssues.flat().map((issue) => censusIssue(client, issue.key, options))
   );
   const issueRows = census.flatMap((issue) =>
     issue.issueRow === undefined ? [] : [issue.issueRow]
@@ -450,15 +451,7 @@ async function run(options: CensusOptions): Promise<void> {
   const approvalRounds = census.flatMap((issue) => issue.approvalRounds);
   const standaloneQuestions = census.flatMap((issue) => issue.standaloneQuestions);
 
-  const totals = issueRows.reduce(
-    (sum, row) => ({
-      asks: sum.asks + row.asks,
-      decisionBlocks: sum.decisionBlocks + row.decisionBlocks,
-      standaloneQuestions: sum.standaloneQuestions + row.standaloneQuestions,
-      approvalRequests: sum.approvalRequests + row.approvalRequests,
-    }),
-    { asks: 0, decisionBlocks: 0, standaloneQuestions: 0, approvalRequests: 0 }
-  );
+  const totals = summarizeAsks(census.flatMap((issue) => issue.asks));
   const sessions = summarizeSessions(
     census.flatMap((issue) => issue.windowAsks),
     options.excludedSessionIds

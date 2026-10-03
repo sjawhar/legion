@@ -7,7 +7,6 @@
     "noEmit": true,
     "allowImportingTsExtensions": true,
     "resolveJsonModule": true,
-    "typeRoots": ["../../packages/envoy-client/node_modules/@types"],
     "types": ["bun"],
     "skipLibCheck": true
   },

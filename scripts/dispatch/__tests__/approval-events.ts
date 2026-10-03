@@ -8,9 +8,10 @@ import fixtureJson from "../__fixtures__/ask-census.json";
 import type { CensusAsk, CensusEvent } from "../ask-census.ts";
 
 /** The recorded asks and events of the three approval rounds LEGION-470 measured, from before
- * F1, each event reduced to the fields the census reads: the approval asks' events, and the
- * in-window events of the decision blocks in each round's document. They are Dispatch's JSON,
- * whose literal fields a JSON import widens to `string`. */
+ * #1671 (when an approval request began following its document's versions), each event reduced to
+ * the fields the census reads: the approval asks' events, and the in-window events of the decision
+ * blocks in each round's document. They are Dispatch's JSON, whose literal fields a JSON import
+ * widens to `string`. */
 export const recordedRounds = fixtureJson as unknown as {
   readonly issues: ReadonlyArray<{
     readonly key: string;
@@ -56,7 +57,7 @@ function question(version: number, summary: string): string {
   return `Approve spec.md (version ${version})? ${summary}`;
 }
 
-/** The approval ask an `ask.*` event carries after F1: `version` is the document version it
+/** The approval ask an `ask.*` event carries since #1671: `version` is the document version it
  * names, `requestedVersion` the version last handed to the human. */
 export function approvalAsk(version: number, requestedVersion: number, summary = SUMMARY): Ask {
   return {
