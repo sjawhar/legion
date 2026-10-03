@@ -16,10 +16,11 @@ clip or part names a mark its section did not record, a window falls outside its
 starts before its clip, runs past its clip's end or overlaps the next part, or a section's file
 duration is off its wall-clock length (a browser recording outside its actions' and its page's
 lengths by more than 5%, a cast more than 1.5 s shorter than its section or any longer). The clips
-are concatenated into OUT, the video the site publishes, which then fails the build if it holds
-DEAD_AIR seconds or more of silence over a frozen frame.
+are concatenated into build/walkthrough.mp4, which then fails the build if it holds DEAD_AIR
+seconds or more of silence over a frozen frame; only a video that passes is copied to OUT, the
+video the site publishes, so a failed build leaves OUT as it was.
 
-  python3 build.py            # rebuild (renders casts once, into build/)
+  python3 build.py            # rebuild (renders casts once, into build/) and publish to OUT
   python3 build.py --check    # verify the EDL against the footage and narration, write nothing
 """
 
@@ -39,6 +40,7 @@ HERE = Path(__file__).resolve().parent
 RAW = HERE / "raw"
 NARRATION = HERE / "narration"
 BUILD = HERE / "build"
+BUILT = BUILD / "walkthrough.mp4"
 OUT = HERE.parents[2] / "public" / "media" / "broker" / "walkthrough.mp4"
 W, H, FPS = 1280, 720, 30
 BACKGROUND = "0x272822"  # agg's monokai background, so a terminal's padding is invisible
@@ -256,14 +258,17 @@ def main() -> int:
     # The video is copied; the audio is decoded and encoded once more, so no clip's encoder
     # priming accumulates into drift across the joins.
     run("ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", str(listing), "-c:v", "copy",
-        "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2", "-movflags", "+faststart", str(OUT))
-    print(f"build.py: wrote {OUT} ({duration(OUT):.1f}s)")
-    dead = dead_air(OUT)
+        "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2", "-movflags", "+faststart", str(BUILT))
+    print(f"build.py: wrote {BUILT} ({duration(BUILT):.1f}s)")
+    dead = dead_air(BUILT)
     if dead:
-        print(f"build.py: {OUT.name} holds silence over a frozen frame for {DEAD_AIR:.0f}s or more at:",
+        print(f"build.py: {BUILT.name} holds silence over a frozen frame for {DEAD_AIR:.0f}s or more at:",
               *(f"{start:.2f}-{end:.2f}s ({end - start:.2f}s)" for start, end in dead), sep="\n  ", file=sys.stderr)
+        print(f"build.py: {OUT} is unchanged", file=sys.stderr)
         return 1
     print(f"build.py: no silence of {DEAD_AIR:.0f}s or more over a frozen frame")
+    shutil.copyfile(BUILT, OUT)
+    print(f"build.py: published {OUT}")
     return 0
 
 
