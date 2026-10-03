@@ -1,6 +1,6 @@
 ---
 title: Running Dispatch
-description: What the Dispatch server needs, how to run it, its health check, migrations, and where its settings are documented.
+description: What the Dispatch server needs, how to run it, its health check, and its migrations.
 sidebar:
   order: 7
 ---
@@ -24,7 +24,7 @@ sign-in. Its source is `packages/envoy/cmd/dispatch`, and the web app it serves 
 | NATS | `NATS_URLS`, `NATS_NKEY_SEED_FILE` | Where Dispatch publishes its events for agents. The Agents page's live view also needs it. Dispatch refuses a NATS server on another machine unless `ENVOY_ALLOW_REMOTE_NATS=1`. Set `DISPATCH_NATS_DISABLED=1` to run without it. |
 | An address to listen on | `DISPATCH_LISTEN_HOST`, `DISPATCH_PORT` | Port `8766` by default. |
 
-The [configuration reference](/legion/dispatch/reference/configuration/) lists every setting.
+These are the settings most deployments need, not all of them.
 When neither `NATS_URLS` nor `DISPATCH_NATS_DISABLED=1` is set, Dispatch reads the NATS address
 from `~/.config/opencode/envoy.json`, the file agents use, so set one of them explicitly.
 
