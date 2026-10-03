@@ -2,6 +2,7 @@ import { connect } from "node:net";
 import { fileURLToPath } from "node:url";
 import { defineConfig, devices } from "@playwright/test";
 import { baseUrl } from "./api";
+import { usesFakeBroker } from "./harness-broker";
 import { harnessPorts } from "./harness-ports";
 import { plainHttpHost, plainHttpOrigin } from "./plain-http-origin";
 
@@ -21,14 +22,17 @@ const runServer = fileURLToPath(new URL("./run-server.sh", import.meta.url));
 
 // Every listener this config can start, with its port beside that port's variable, both from
 // e2e/harness-ports.ts. A deployed run (PLAYWRIGHT_BASE_URL) starts only those marked `deployed`:
-// its Dispatch server is already up, and the fake GitHub and the fake broker serve only a server
-// this run starts. The port probe and `webServer` both read `startedListeners`, so a listener is
-// probed exactly when it is started.
+// its Dispatch server is already up, and the fake GitHub serves only a server this run starts. The
+// fake broker is started exactly when the harness switch points this run's server at it
+// (e2e/harness-broker.ts), never for a deployed run. The port probe and `webServer` both read
+// `startedListeners`, so a listener is probed exactly when it is started.
 const listeners = [
   { ...harnessPorts.fakeEnvoy, command: `bun ${fakeEnvoy}`, deployed: true },
   { ...harnessPorts.plainHttp, command: `bun ${plainHttpProxy}`, deployed: true },
   { ...harnessPorts.fakeGithub, command: `bun ${fakeGithub}`, deployed: false },
-  { ...harnessPorts.fakeBroker, command: `bun ${fakeBroker}`, deployed: false },
+  ...(usesFakeBroker
+    ? [{ ...harnessPorts.fakeBroker, command: `bun ${fakeBroker}`, deployed: false }]
+    : []),
   { ...harnessPorts.dispatch, command: `bash ${runServer}`, deployed: false },
 ];
 const startedListeners = startsOwnServers

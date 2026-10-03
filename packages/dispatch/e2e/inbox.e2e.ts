@@ -799,6 +799,78 @@ test("a pending credential request alone is listed, counted, and keeps the empty
   }
 });
 
+// With nothing waiting, "Nothing needs you" stays on screen through a window focus, which refetches
+// what has gone stale and reopens the event stream, whose reconnect refreshes every query, and
+// through leaving the Inbox and coming back. Every credential-list call after the page's first is
+// held, so a refetch of that list, had one put it back to loading, would take the empty state off
+// the screen for as long as the hold lasts. A Dispatch with no secrets broker answers the list
+// `null` for the session and is never asked again; with the fake broker the list keeps its empty
+// answer on screen while a refetch runs. Neither page may log a failed request.
+test("Nothing needs you stays on screen through a focus and a return to the Inbox", async ({
+  browser,
+}) => {
+  const alice = await asUser(browser, "alice");
+  const page = await alice.newPage();
+  const held = Promise.withResolvers<void>();
+  try {
+    const failures: string[] = [];
+    page.on("response", (response) => {
+      if (response.status() >= 400) {
+        failures.push(`${response.status()} ${new URL(response.url()).pathname}`);
+      }
+    });
+    let credentialCalls = 0;
+    await page.route("**/api/v1/credential-requests?approver=me", async (route) => {
+      credentialCalls += 1;
+      if (credentialCalls > 1) await held.promise;
+      await route.continue();
+    });
+    const empty = page.getByText("Nothing needs you");
+    await page.goto("/");
+    await expect(empty).toBeVisible();
+    expect(credentialCalls).toBe(1);
+    await page.evaluate(() => {
+      const record = window as Window & { emptyStateGone?: number };
+      record.emptyStateGone = 0;
+      new MutationObserver(() => {
+        if (!document.body.textContent?.includes("Nothing needs you")) {
+          record.emptyStateGone = (record.emptyStateGone ?? 0) + 1;
+        }
+      }).observe(document.body, { characterData: true, childList: true, subtree: true });
+    });
+
+    // The stream's whole-cache refresh refetches the inbox list; once that has answered, every
+    // refetch the focus started is on the wire.
+    const refreshed = page.waitForResponse(
+      (response) => new URL(response.url()).pathname === "/api/v1/inbox"
+    );
+    await page.evaluate(() =>
+      document.dispatchEvent(new Event("visibilitychange", { bubbles: true }))
+    );
+    await refreshed;
+    await page.evaluate(() => {
+      const frames = Promise.withResolvers<void>();
+      requestAnimationFrame(() => requestAnimationFrame(() => frames.resolve()));
+      return frames.promise;
+    });
+    expect(
+      await page.evaluate(() => (window as Window & { emptyStateGone?: number }).emptyStateGone)
+    ).toBe(0);
+
+    await page.keyboard.press("g");
+    await page.keyboard.press("s");
+    await expect(page.getByRole("heading", { level: 1, name: "Settings" })).toBeVisible();
+    await page.keyboard.press("g");
+    await page.keyboard.press("i");
+    await expect(empty).toBeVisible();
+    expect(failures).toEqual([]);
+  } finally {
+    await page.unrouteAll({ behavior: "ignoreErrors" });
+    held.resolve();
+    await alice.close();
+  }
+});
+
 test("an unanchored issue-level comment reaches Conversation, not document review", async ({
   browser,
 }, testInfo) => {

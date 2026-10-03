@@ -74,7 +74,9 @@ and that listener is the only Envoy the server ever talks to; tests seed its
 live sessions with `setLiveSessions` from `e2e/agents.ts`. It starts
 `e2e/fake-broker.ts` on `FAKE_BROKER_PORT` as the secrets broker, so the
 credential-request feature is on, and tests seed its pending requests with
-`setPendingCredentialRequests` from `e2e/fake-broker-helpers.ts`. It also starts
+`setPendingCredentialRequests` from `e2e/fake-broker-helpers.ts`; an empty
+`DISPATCH_E2E_AGENT_SECRETS_URL` runs the suite with no broker instead, as a
+deployment that configures none (`AGENTS.md` has the switch). It also starts
 `e2e/plain-http-proxy.ts` on `PLAIN_HTTP_PORT` for the plain-HTTP project.
 
 Run the local harness with its isolated database available:

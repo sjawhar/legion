@@ -498,8 +498,14 @@ directory. A caller's environment or `~/.config/opencode/envoy.json` /
 test server at a live Envoy, dashboard origin or GitHub App (every Legion pane
 exports `ENVOY_URL`). The harness ports stay inputs because the server script reads them too; on
 the TypeScript side `e2e/harness-ports.ts` is the one place they are resolved. The secrets broker
-the server relays credential requests to is `e2e/fake-broker.ts` on `FAKE_BROKER_PORT` (default
-`9024`), with a throwaway UI bearer, so the credential-request feature is on in every local run.
+the server relays credential requests to is one switch, `DISPATCH_E2E_AGENT_SECRETS_URL`, which
+`run-server.sh` and `e2e/harness-broker.ts` read alike (`${VAR-default}`, so empty and unset
+differ): unset, the default, is `e2e/fake-broker.ts` on `FAKE_BROKER_PORT` (default `9024`) with a
+throwaway UI bearer, so the credential-request feature is on; empty is no broker, the feature off
+as in a deployment that configures none (`DISPATCH_E2E_AGENT_SECRETS_URL= bun run e2e`, which is
+how the no-broker path is run locally); a URL is a broker the caller runs, whose bearer
+`run-server.sh` hands the server by `DISPATCH_E2E_AGENT_SECRETS_TOKEN_FILE`. Playwright starts the
+fake broker only for the default, and the skill-scenarios rig sets the switch empty.
 
 Proof uses collaborative cursor decorations at the desktop `xl` breakpoint and above. Compact
 layouts intentionally omit the remote cursor plugin because its edge widget disrupts mobile
@@ -552,8 +558,11 @@ freshness rows.
 (the requests seeded for that login, in the broker's row shape) and `GET /v1/grants` (always
 empty), and 404 to every other broker route. A row seeds pending requests with
 `setPendingCredentialRequests` (`e2e/fake-broker-helpers.ts`), each naming the login it waits on,
-and `resetDatabase()` clears them with the rest. A deployed target reads its own broker, so
-Playwright starts no fake broker for it, the reset skips it, and a row that seeds one is skipped.
+and `resetDatabase()` clears them with the rest. Only a run whose server reads the fake has one
+(`usesFakeBroker`, `e2e/harness-broker.ts`): a deployed target, or a server the switch points at no
+broker or another, gets no fake broker from Playwright, the reset skips it, and a row that seeds one
+is skipped. A script that calls `resetDatabase()` beside a broker of its own exports the switch to
+itself as well as to `run-server.sh`, since the reset reads it from its own process.
 `e2e/clipboard.ts`'s `recordClipboard(page)` swaps the page's async clipboard for a recorder before
 navigation, so a copy-button test asserts the written value rather than only the `Copied` label.
 `e2e/touch.ts` drives real touch gestures through Chromium's `Input.dispatchTouchEvent`

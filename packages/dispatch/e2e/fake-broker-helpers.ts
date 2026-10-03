@@ -1,9 +1,7 @@
 import { test } from "@playwright/test";
 
+import { usesFakeBroker } from "./harness-broker";
 import { harnessPorts } from "./harness-ports";
-
-/** A deployed server (`PLAYWRIGHT_BASE_URL`) reads its own broker, so this run starts no fake one. */
-const deployed = Boolean(process.env.PLAYWRIGHT_BASE_URL);
 
 async function fixtureRequest(path: string, body: unknown): Promise<void> {
   const response = await fetch(`http://127.0.0.1:${harnessPorts.fakeBroker.port}${path}`, {
@@ -17,7 +15,8 @@ async function fixtureRequest(path: string, body: unknown): Promise<void> {
 }
 
 /** Replaces the fake broker's pending credential requests wholesale; each waits on `approver`.
- *  The test that seeds them is skipped against a deployed server, which talks to no fake. */
+ *  The test that seeds them is skipped where this run's server reads no fake broker: a deployed
+ *  server, or one the harness switch points at no broker or another (e2e/harness-broker.ts). */
 export async function setPendingCredentialRequests(
   requests: readonly {
     approver: string;
@@ -27,12 +26,13 @@ export async function setPendingCredentialRequests(
     requested_at: string;
   }[]
 ): Promise<void> {
-  test.skip(deployed, "the fake broker is unavailable with PLAYWRIGHT_BASE_URL");
+  test.skip(!usesFakeBroker, "this run's server reads no fake broker (e2e/harness-broker.ts)");
   await fixtureRequest("/__fixture/pending", requests);
 }
 
-/** Clears the fake broker between rows, so a request one row seeded never reaches the next. */
+/** Clears the fake broker between rows, so a request one row seeded never reaches the next. A run
+ *  whose server reads no fake broker started none, and has nothing to clear. */
 export async function resetFakeBroker(): Promise<void> {
-  if (deployed) return;
+  if (!usesFakeBroker) return;
   await fixtureRequest("/__fixture/reset", {});
 }

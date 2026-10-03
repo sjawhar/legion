@@ -132,8 +132,11 @@ export async function withHarness<T>(body: (harness: Harness) => Promise<T>): Pr
         "there, or set those variables to free ports."
     );
   }
-  // `e2e/harness-ports.ts` reads these when the seeding modules are first imported.
+  // `e2e/harness-ports.ts` reads these when the seeding modules are first imported. The docs show
+  // the credential feature on, against the fake broker this harness starts, whatever the shell's
+  // broker switch (`packages/dispatch/e2e/harness-broker.ts`) says; unset is that fake.
   Object.assign(process.env, PORTS);
+  delete process.env.DISPATCH_E2E_AGENT_SECRETS_URL;
   const baseURL = `http://127.0.0.1:${PORTS.DISPATCH_E2E_PORT}`;
 
   const processes = [

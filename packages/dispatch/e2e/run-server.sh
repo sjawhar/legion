@@ -23,6 +23,28 @@ fake_envoy_port="${FAKE_ENVOY_PORT:-9021}"
 fake_github_port="${FAKE_GITHUB_PORT:-9022}"
 fake_broker_port="${FAKE_BROKER_PORT:-9024}"
 
+# The secrets broker the server relays credential requests to, read before
+# the sweep below drops every DISPATCH_* variable. DISPATCH_E2E_AGENT_SECRETS_URL
+# is the harness's one switch, which e2e/harness-broker.ts reads the same way
+# (no colon, so empty and unset differ): unset is e2e/fake-broker.ts with a
+# throwaway UI bearer; empty is no broker, the credential feature off, as in a
+# deployment that configures none; a URL is a broker the caller runs, whose
+# bearer stays in DISPATCH_E2E_AGENT_SECRETS_TOKEN_FILE, which the server reads
+# itself, so no argv carries it.
+broker_env=()
+if [ -z "${DISPATCH_E2E_AGENT_SECRETS_URL+set}" ]; then
+  broker_env=(
+    DISPATCH_AGENT_SECRETS_TOKEN=e2e-broker-token
+    DISPATCH_AGENT_SECRETS_URL="http://127.0.0.1:$fake_broker_port"
+  )
+elif [ -n "$DISPATCH_E2E_AGENT_SECRETS_URL" ]; then
+  : "${DISPATCH_E2E_AGENT_SECRETS_TOKEN_FILE:?DISPATCH_E2E_AGENT_SECRETS_TOKEN_FILE must accompany DISPATCH_E2E_AGENT_SECRETS_URL}"
+  broker_env=(
+    DISPATCH_AGENT_SECRETS_TOKEN_FILE="$DISPATCH_E2E_AGENT_SECRETS_TOKEN_FILE"
+    DISPATCH_AGENT_SECRETS_URL="$DISPATCH_E2E_AGENT_SECRETS_URL"
+  )
+fi
+
 mapfile -t inherited < <(compgen -e)
 for name in "${inherited[@]}"; do
   case "$name" in
@@ -41,8 +63,7 @@ done
 # http://127.0.0.1:$e2e_port: it is the origin the CSRF guard compares writes
 # against, the only Host the router serves under the flag, and the Playwright
 # config's baseURL. The flag also refuses a DATABASE_URL whose host is not
-# loopback or a unix socket. The secrets broker is e2e/fake-broker.ts, with a
-# throwaway UI bearer, so the credential-request feature is on in every run.
+# loopback or a unix socket.
 app_pem_b64="$(openssl genrsa 2048 2>/dev/null | base64 -w0)"
 
 cd "$(dirname "$0")/../../envoy"
@@ -55,9 +76,8 @@ cd "$(dirname "$0")/../../envoy"
 # when the source changed, and a running server keeps the inode it started from.
 flock ./.dispatch-e2e.lock go build -o ./dispatch-e2e ./cmd/dispatch
 exec env \
+  "${broker_env[@]}" \
   DATABASE_URL="$database_url" \
-  DISPATCH_AGENT_SECRETS_TOKEN=e2e-broker-token \
-  DISPATCH_AGENT_SECRETS_URL="http://127.0.0.1:$fake_broker_port" \
   DISPATCH_AGENT_TOKEN=e2e-token \
   DISPATCH_ALLOWED_LOGINS=alice,bob \
   DISPATCH_APP_CLIENT_ID=Iv1.e2efake \
