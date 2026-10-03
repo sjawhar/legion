@@ -2,6 +2,8 @@ package classify
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"go/parser"
@@ -54,6 +56,58 @@ func TestFixturesReplayByteExactly(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestFixtureRecordsAreCanonicalAndNamedByTheirInput holds every record to the contract in the
+// fixture directory's README: a record's bytes are its canonical JSON, and its file name is the
+// SHA-256 of its input's canonical JSON. A record edited by hand and left misnamed or reformatted
+// fails here.
+func TestFixtureRecordsAreCanonicalAndNamedByTheirInput(t *testing.T) {
+	for _, path := range fixtureFiles(t) {
+		name := filepath.Join(filepath.Base(filepath.Dir(path)), filepath.Base(path))
+		encoded, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		canonical, err := canonicalRecordJSON(encoded)
+		if err != nil {
+			t.Fatalf("re-encode %s: %v", name, err)
+		}
+		if !bytes.Equal(encoded, canonical) {
+			t.Errorf("%s is not in canonical form; `jq -cjS . %s` prints it", name, name)
+		}
+		var parsed fixture
+		if err := json.Unmarshal(encoded, &parsed); err != nil {
+			t.Fatalf("decode %s: %v", name, err)
+		}
+		input, err := canonicalRecordJSON(parsed.Input)
+		if err != nil {
+			t.Fatalf("re-encode the input of %s: %v", name, err)
+		}
+		sum := sha256.Sum256(input)
+		if want := hex.EncodeToString(sum[:]) + ".json"; filepath.Base(path) != want {
+			t.Errorf("%s is not named for its input, whose SHA-256 names it %s", name, want)
+		}
+	}
+}
+
+// canonicalRecordJSON re-encodes raw the way the records are written: object keys sorted, no
+// whitespace, no trailing newline, numbers as written, and no HTML escaping, the form
+// `jq -cjS .` prints.
+func canonicalRecordJSON(raw []byte) ([]byte, error) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return nil, err
+	}
+	var encoded bytes.Buffer
+	encoder := json.NewEncoder(&encoded)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(value); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(encoded.Bytes(), []byte("\n")), nil
 }
 
 // TestProductionImportsArePure protects the pure decision package from gaining transport, clock,
@@ -313,20 +367,18 @@ func canonicalOutcome(outcome CiOutcome) ([]byte, error) {
 	if outcome.Verdict == "" {
 		verdict = nil
 	}
-	return canonicalJSON(map[string]any{"verdict": verdict, "failing": outcome.Failing, "failingStatuses": outcome.FailingStatuses})
+	return canonicalJSON(map[string]any{"verdict": verdict, "failing": outcome.Failing})
 }
 
 type fixturePullRequest struct {
-	Key                 string          `json:"key"`
-	Repo                string          `json:"repo"`
-	Number              int             `json:"number"`
-	Branch              string          `json:"branch"`
-	HeadSHA             string          `json:"headSha"`
-	HeadUpdatedAt       json.RawMessage `json:"headUpdatedAt"`
-	HeadUpdatedAtSource string          `json:"headUpdatedAtSource"`
-	Verdict             string          `json:"verdict"`
-	Failing             []string        `json:"failing"`
-	FailingStatuses     []string        `json:"failingStatuses"`
+	Key           string          `json:"key"`
+	Repo          string          `json:"repo"`
+	Number        int             `json:"number"`
+	Branch        string          `json:"branch"`
+	HeadSHA       string          `json:"headSha"`
+	HeadUpdatedAt json.RawMessage `json:"headUpdatedAt"`
+	Verdict       string          `json:"verdict"`
+	Failing       []string        `json:"failing"`
 	// ReviewDecision is the shipped state's; the Go record keeps it on the review round instead.
 	ReviewDecision  string                 `json:"reviewDecision"`
 	FixAttempts     int                    `json:"fixAttempts"`
@@ -367,8 +419,7 @@ func (fixture fixturePullRequest) record() record.PullRequest {
 	}
 	// The shipped state's verdict is always its head's: a new head cleared it.
 	return record.PullRequest{Issue: fixture.Key, Repo: fixture.Repo, Number: fixture.Number, Branch: fixture.Branch, HeadSHA: fixture.HeadSHA, CheckedHead: fixture.HeadSHA,
-		HeadUpdatedAt: timestampJSON(fixture.HeadUpdatedAt), HeadUpdatedAtSource: fixture.HeadUpdatedAtSource, Verdict: fixture.Verdict,
-		Failing: append([]string{}, fixture.Failing...), FailingStatuses: append([]string{}, fixture.FailingStatuses...),
+		HeadUpdatedAt: timestampJSON(fixture.HeadUpdatedAt), Verdict: fixture.Verdict, Failing: append([]string{}, fixture.Failing...),
 		FixAttempts: fixture.FixAttempts, BlockedAttempts: blocked, CheckRuns: checkRuns, Generation: generation, Snapshot: snapshot,
 		Pushes: pushes, HeadCounted: headCounted, PlannedRed: fixture.PlannedRed}
 }

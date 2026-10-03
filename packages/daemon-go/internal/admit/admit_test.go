@@ -247,7 +247,7 @@ func TestAMergeWhileTheTreeLingersIsTheChildsProductionCheckOnceTheTreeRunsAgain
 		Phase: phase.AwaitingMerge, Generation: 1, Status: "in_progress", Rank: "B", LastDispatchSeq: 1})
 	inTx(t, pool, func(tx pgx.Tx) {
 		if err := record.NewStore().PutPullRequest(context.Background(), tx, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-209", Repo: "sjawhar/legion", Number: 42,
-			Branch: "legion/LEGION-209", HeadSHA: "head", Failing: []string{}, FailingStatuses: []string{}}); err != nil {
+			Branch: "legion/LEGION-209", HeadSHA: "head", Failing: []string{}}); err != nil {
 			t.Fatalf("seed pull request: %v", err)
 		}
 	})
@@ -524,7 +524,7 @@ func TestReadmissionStartsTheNewGenerationWithoutTheOldGenerationsFacts(t *testi
 		if err := records.PutGate(ctx, tx, record.DesignGate{Issue: key, ArtifactID: artifact, LatestVersion: 1, ApprovedVersion: &approved}); err != nil {
 			t.Fatalf("seed gate: %v", err)
 		}
-		if err := records.PutPullRequest(ctx, tx, record.PullRequest{State: record.PullRequestMerged, Issue: key, Repo: "sjawhar/legion", Number: 86, Branch: "legion/" + key, HeadSHA: "merged", Verdict: "green", Failing: []string{}, FailingStatuses: []string{}}); err != nil {
+		if err := records.PutPullRequest(ctx, tx, record.PullRequest{State: record.PullRequestMerged, Issue: key, Repo: "sjawhar/legion", Number: 86, Branch: "legion/" + key, HeadSHA: "merged", Verdict: "green", Failing: []string{}}); err != nil {
 			t.Fatalf("seed pull request: %v", err)
 		}
 		if err := records.PutPhase(ctx, tx, record.PhaseRow{Issue: key, Role: claim.RoleImplementer, Claim: "implementer", HandoffCommit: "gen1-handoff", LastHandoff: "gen1-handoff", Rounds: 2}); err != nil {
@@ -718,7 +718,7 @@ func TestReadmissionClearsTheGenerationOfEveryIssueOfTheTree(t *testing.T) {
 		// generation's reading of a head nobody has judged since.
 		if err := records.PutPullRequest(context.Background(), tx, record.PullRequest{
 			Issue: "LEGION-CHILD", Repo: "acme/widgets", Number: 9, Branch: "legion/LEGION-CHILD", HeadSHA: "abc",
-			HeadUpdatedAt: fixedNow, HeadUpdatedAtSource: "webhook", Failing: []string{}, FailingStatuses: []string{},
+			HeadUpdatedAt: fixedNow, Failing: []string{},
 			Verdict: "failing", FixAttempts: 2, State: record.PullRequestOpen,
 		}); err != nil {
 			t.Fatalf("seed the child's open pull request: %v", err)

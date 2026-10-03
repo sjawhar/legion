@@ -70,7 +70,6 @@ func SettlementFor(pr record.PullRequest, candidate SettlementCandidate) (record
 	pr.CheckedHead = head
 	pr.Verdict = ""
 	pr.Failing = []string{}
-	pr.FailingStatuses = []string{}
 	pr.CheckRuns = nil
 	pr.Generation = 0
 	pr.Snapshot = ""
@@ -146,9 +145,9 @@ func ApplyPush(pr record.PullRequest, push record.ClassifiedPush) record.PullReq
 	return pr
 }
 
-// ApplySettlement applies a listener CI settlement only when the exported fence classifiers say
-// it is newer, merging its attempt set into the fence. It returns false for stale, duplicate, and
-// conflicting observations.
+// ApplySettlement applies a listener CI settlement only when ClassifySettlement says it is newer,
+// merging its attempt set into the fence. It returns false for stale, duplicate, and conflicting
+// observations.
 func ApplySettlement(pr record.PullRequest, candidate SettlementCandidate) (record.PullRequest, bool) {
 	if ClassifySettlement(pr, candidate) != SettlementNewer {
 		return pr, false
@@ -159,7 +158,6 @@ func ApplySettlement(pr record.PullRequest, candidate SettlementCandidate) (reco
 	pr.Snapshot = candidate.Snapshot
 	pr.Verdict = outcome.Verdict
 	pr.Failing = append([]string(nil), outcome.Failing...)
-	pr.FailingStatuses = append([]string(nil), outcome.FailingStatuses...)
 	return pr, true
 }
 

@@ -180,8 +180,8 @@ func scanPhase(row scanner) (PhaseRow, error) {
 	return phase, nil
 }
 
-const pullRequestColumns = `issue, repo, number, branch, head_sha, head_updated_at, head_updated_at_source,
-	verdict, failing, failing_statuses, fix_attempts, blocked_attempts, check_runs,
+const pullRequestColumns = `issue, repo, number, branch, head_sha, head_updated_at,
+	verdict, failing, fix_attempts, blocked_attempts, check_runs,
 	generation, snapshot, pushes, head_counted, planned_red, review_seen, review_seen_at, state,
 	checked_head`
 
@@ -226,10 +226,6 @@ func (s *Postgres) PutPullRequest(ctx context.Context, tx pgx.Tx, pr PullRequest
 	if err != nil {
 		return fmt.Errorf("put pull request for %s: encode failing checks: %w", pr.Issue, err)
 	}
-	failingStatuses, err := json.Marshal(pr.FailingStatuses)
-	if err != nil {
-		return fmt.Errorf("put pull request for %s: encode failing statuses: %w", pr.Issue, err)
-	}
 	checkRuns, err := json.Marshal(pr.CheckRuns)
 	if err != nil {
 		return fmt.Errorf("put pull request for %s: encode check runs: %w", pr.Issue, err)
@@ -239,22 +235,19 @@ func (s *Postgres) PutPullRequest(ctx context.Context, tx pgx.Tx, pr PullRequest
 		return fmt.Errorf("put pull request for %s: encode pushes: %w", pr.Issue, err)
 	}
 	_, err = tx.Exec(ctx, `insert into pull_requests (issue, repo, number, branch, head_sha, head_updated_at,
-		head_updated_at_source, verdict, failing, failing_statuses, fix_attempts,
-		blocked_attempts, check_runs, generation, snapshot, pushes, head_counted, planned_red,
-		review_seen, review_seen_at, state, checked_head)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
+		verdict, failing, fix_attempts, blocked_attempts, check_runs, generation, snapshot, pushes,
+		head_counted, planned_red, review_seen, review_seen_at, state, checked_head)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
 		on conflict (issue) do update set repo = excluded.repo, number = excluded.number, branch = excluded.branch,
 		head_sha = excluded.head_sha, head_updated_at = excluded.head_updated_at,
-		head_updated_at_source = excluded.head_updated_at_source, verdict = excluded.verdict,
-		failing = excluded.failing, failing_statuses = excluded.failing_statuses,
-		fix_attempts = excluded.fix_attempts,
+		verdict = excluded.verdict, failing = excluded.failing, fix_attempts = excluded.fix_attempts,
 		blocked_attempts = excluded.blocked_attempts, check_runs = excluded.check_runs,
 		generation = excluded.generation, snapshot = excluded.snapshot,
 		pushes = excluded.pushes, head_counted = excluded.head_counted,
 		planned_red = excluded.planned_red, review_seen = excluded.review_seen,
 		review_seen_at = excluded.review_seen_at, state = excluded.state, checked_head = excluded.checked_head`,
-		pr.Issue, pr.Repo, pr.Number, pr.Branch, pr.HeadSHA, pr.HeadUpdatedAt, pr.HeadUpdatedAtSource,
-		pr.Verdict, failing, failingStatuses, pr.FixAttempts, pr.BlockedAttempts, checkRuns,
+		pr.Issue, pr.Repo, pr.Number, pr.Branch, pr.HeadSHA, pr.HeadUpdatedAt,
+		pr.Verdict, failing, pr.FixAttempts, pr.BlockedAttempts, checkRuns,
 		pr.Generation, pr.Snapshot, pushes, pr.HeadCounted, pr.PlannedRed,
 		pr.ReviewSeen.ID, pr.ReviewSeen.SubmittedAt, pr.State, pr.CheckedHead,
 	)
@@ -299,7 +292,7 @@ func clearGeneration(ctx context.Context, tx pgx.Tx, where, issues, key, describ
 		// commits, and so does its newest review, which orders every review it will have.
 		"update pull_requests set fix_attempts = 0, blocked_attempts = 0, head_counted = '', " +
 			"planned_red = false, checked_head = '', verdict = '', failing = '[]'::jsonb, " +
-			"failing_statuses = '[]'::jsonb, check_runs = '[]'::jsonb where " + where,
+			"check_runs = '[]'::jsonb where " + where,
 		"delete from design_gates where " + where,
 		"update phases set handoff_commit = '', rounds = 0, verdict = '', summary = '', decision = null where " + where,
 		// A READY the gate refused waits on the merger's packet, which the statement above clears.
@@ -314,19 +307,15 @@ func clearGeneration(ctx context.Context, tx pgx.Tx, where, issues, key, describ
 
 func scanPullRequest(row scanner) (*PullRequest, error) {
 	var pr PullRequest
-	var failing, failingStatuses, checkRuns, pushes []byte
+	var failing, checkRuns, pushes []byte
 	if err := row.Scan(&pr.Issue, &pr.Repo, &pr.Number, &pr.Branch, &pr.HeadSHA, &pr.HeadUpdatedAt,
-		&pr.HeadUpdatedAtSource, &pr.Verdict, &failing, &failingStatuses,
-		&pr.FixAttempts, &pr.BlockedAttempts, &checkRuns, &pr.Generation, &pr.Snapshot,
+		&pr.Verdict, &failing, &pr.FixAttempts, &pr.BlockedAttempts, &checkRuns, &pr.Generation, &pr.Snapshot,
 		&pushes, &pr.HeadCounted, &pr.PlannedRed, &pr.ReviewSeen.ID, &pr.ReviewSeen.SubmittedAt, &pr.State,
 		&pr.CheckedHead); err != nil {
 		return nil, err
 	}
 	if err := json.Unmarshal(failing, &pr.Failing); err != nil {
 		return nil, fmt.Errorf("decode failing checks: %w", err)
-	}
-	if err := json.Unmarshal(failingStatuses, &pr.FailingStatuses); err != nil {
-		return nil, fmt.Errorf("decode failing statuses: %w", err)
 	}
 	if err := json.Unmarshal(checkRuns, &pr.CheckRuns); err != nil {
 		return nil, fmt.Errorf("decode check runs: %w", err)

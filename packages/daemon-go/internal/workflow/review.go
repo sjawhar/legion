@@ -89,8 +89,8 @@ func (e *Engine) checks(ctx context.Context, tx pgx.Tx, fact intake.PullRequestC
 // when nothing names one) says so plainly rather than ending in an empty list.
 func redAt(pr record.PullRequest) string {
 	reason := "CI is red at " + pr.HeadSHA
-	if failing := append(append([]string(nil), pr.Failing...), pr.FailingStatuses...); len(failing) > 0 {
-		reason += ": " + strings.Join(failing, ", ")
+	if len(pr.Failing) > 0 {
+		reason += ": " + strings.Join(pr.Failing, ", ")
 	}
 	return reason
 }
