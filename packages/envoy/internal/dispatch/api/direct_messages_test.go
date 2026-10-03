@@ -39,11 +39,18 @@ func directConversationFrom(t *testing.T, login string) (http.Handler, *store.St
 	}
 	root := decodeBody[model.Message](t, created)
 	reply := func(body string) *httptest.ResponseRecorder {
-		return bearerRequest(t, handler, http.MethodPost, "/api/v1/messages/"+root.ID+"/reply?follow_up=true", map[string]any{
-			"actor": map[string]any{"kind": "session", "id": "s1"}, "attempt": 1, "body": body,
-		})
+		return replyTo(t, handler, root.ID, body)
 	}
 	return handler, database, root, reply, &sent
+}
+
+// replyTo is s1 answering the first delivery attempt of rootID the way dispatch_message does,
+// asking to follow up once it has answered.
+func replyTo(t *testing.T, handler http.Handler, rootID, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	return bearerRequest(t, handler, http.MethodPost, "/api/v1/messages/"+rootID+"/reply?follow_up=true", map[string]any{
+		"actor": map[string]any{"kind": "session", "id": "s1"}, "attempt": 1, "body": body,
+	})
 }
 
 // A session that answers a human's direct message and then has more to say posts that follow-up
@@ -1040,9 +1047,7 @@ func TestRepliesReadByIDMarkOnlyThoseReplies(t *testing.T) {
 	}, "Alice"))
 	answerShown := func(body string) model.Message {
 		t.Helper()
-		response := bearerRequest(t, handler, http.MethodPost, "/api/v1/messages/"+shownRoot.ID+"/reply?follow_up=true", map[string]any{
-			"actor": map[string]any{"kind": "session", "id": "s1"}, "attempt": 1, "body": body,
-		})
+		response := replyTo(t, handler, shownRoot.ID, body)
 		if response.Code != http.StatusCreated {
 			t.Fatalf("answer %q: status=%d body=%s", body, response.Code, response.Body.String())
 		}
