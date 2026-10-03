@@ -1,16 +1,13 @@
 #!/usr/bin/env bun
 // Writes <content dir>/dispatch/reference/api.md from Dispatch's route table
 // (packages/envoy/internal/dispatch/api/routes_table.go), read through `envoy-dispatch routes`,
-// which prints the body GET /api/v1 serves without a database or a listener. It runs the
-// subcommand with `go run`, so the page follows the checked-out source, never an installed
-// binary; after the build compiles envoy-dispatch, the Go build cache leaves only the link.
-import { join, resolve } from "node:path";
+// which prints the body GET /api/v1 serves without a database or a listener. Contract:
+// scripts/generate.ts, which puts the envoy-dispatch scripts/build-binaries.sh built from this
+// commit first on PATH. To run it alone, build the binaries into a directory and put that first
+// on PATH: `docs/site/scripts/build-binaries.sh <dir> && PATH=<dir>:$PATH bun <this file> <out>`.
 import { inline, writePage } from "./lib/markdown.ts";
 
-const SOURCE = "packages/envoy/internal/dispatch/api/routes_table.go";
-const GENERATOR = "docs/site/generators/dispatch-api.ts";
-const REPO_ROOT = resolve(import.meta.dir, "../../..");
-const COMMAND = ["go", "run", "./cmd/dispatch", "routes"];
+const COMMAND = ["envoy-dispatch", "routes"];
 
 /** Who may call a route, by the table's auth value (`routeAuth` in the source). */
 const CALLERS: Record<string, { label: string; meaning: string }> = {
@@ -37,11 +34,12 @@ interface Route {
 }
 
 function readRoutes(): Route[] {
-  const run = Bun.spawnSync(COMMAND, {
-    cwd: join(REPO_ROOT, "packages/envoy"),
-    stdout: "pipe",
-    stderr: "pipe",
-  });
+  if (Bun.which("envoy-dispatch") === null) {
+    throw new Error(
+      "envoy-dispatch is not on PATH: docs/site/scripts/build-binaries.sh builds it, and scripts/generate.ts puts it there"
+    );
+  }
+  const run = Bun.spawnSync(COMMAND, { stdout: "pipe", stderr: "pipe" });
   if (run.exitCode !== 0) {
     throw new Error(`${COMMAND.join(" ")} exited ${run.exitCode}:\n${run.stderr.toString()}`);
   }
@@ -67,14 +65,6 @@ function render(routes: Route[]): string {
   // an issues route, and /api/v1 itself is the index ("").
   const groups = Map.groupBy(routes, (route) => route.path.split("/")[3] ?? "");
   const lines = [
-    "---",
-    "title: HTTP API",
-    `description: ${JSON.stringify("Every route Dispatch serves under /api/v1: method, path, who may call it, and what it does.")}`,
-    "editUrl: false",
-    "---",
-    "",
-    `> Generated from \`${SOURCE}\` by \`${GENERATOR}\`. Edit the route table, not this page.`,
-    "",
     `Dispatch serves ${routes.length} routes under \`/api/v1\`. A running server lists the same table at \`GET /api/v1\`, which needs no credential.`,
     "",
     "## Who may call a route",
@@ -101,4 +91,11 @@ function render(routes: Route[]): string {
   return lines.join("\n");
 }
 
-writePage(GENERATOR, "dispatch/reference/api.md", () => render(readRoutes()));
+writePage({
+  path: "dispatch/reference/api.md",
+  title: "HTTP API",
+  description:
+    "Every route Dispatch serves under /api/v1: method, path, who may call it, and what it does.",
+  source: "packages/envoy/internal/dispatch/api/routes_table.go",
+  body: () => render(readRoutes()),
+});
