@@ -1396,6 +1396,27 @@ func TestRoleSetHandlerSoftClaim(t *testing.T) {
 			t.Fatalf("holder after refused claim = %q, %v; want ses_fork_child", holder, err)
 		}
 	})
+
+	t.Run("a holder no session can register as is superseded", func(t *testing.T) {
+		// ses:bad is outside nats.go's key alphabet, so no session registers under it, and its
+		// interest can be neither read nor written (nats.ErrInvalidKey). An earlier build's
+		// bare-string claim, or a direct bucket write, can still name it as the holder.
+		roles, err := client.JS().KeyValue(store.RoleBucket)
+		if err != nil {
+			t.Fatalf("open the role bucket: %v", err)
+		}
+		if _, err := roles.Put("legacy", []byte("ses:bad")); err != nil {
+			t.Fatalf("store the bare-string ses:bad claim: %v", err)
+		}
+		rec := post(`{"session_id":"ses_heir","role":"legacy","soft":true}`)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+		}
+		holder, err := registry.RoleHolder("legacy")
+		if err != nil || holder != "ses_heir" {
+			t.Fatalf("holder after soft claim over ses:bad = %q, %v; want ses_heir", holder, err)
+		}
+	})
 }
 
 func TestSubscribeHandlerWarnsWhenGitHubRepositoryIsUnwired(t *testing.T) {
@@ -1875,9 +1896,10 @@ func TestMessageHandlersAnswerAMessageNATSCannotTakeWholeWith413(t *testing.T) {
 
 // A session id or role a caller names becomes a KV key, and a key NATS would refuse (one long enough
 // to take its subject past the server's protocol line, which would close the connection every
-// subscription and watcher of the listener runs on, or one holding an empty token, which no stream
-// matches) is the caller's to fix: every /v1 route that reads or writes one answers 413 or 400, as
-// for a message NATS cannot take, and the connection stays up.
+// subscription and watcher of the listener runs on, one holding an empty token, which no stream
+// matches, or one outside nats.go's key alphabet, which nats.go refuses before sending anything) is
+// the caller's to fix: every /v1 route that reads or writes one answers 413 or 400, as for a message
+// NATS cannot take, and the connection stays up.
 func TestV1RoutesAnswerAKeyNATSWouldRefuseWith4xx(t *testing.T) {
 	client, err := bus.Connect([]string{testnats.URL(t)}, bus.WithReplicas(1))
 	if err != nil {
@@ -1913,6 +1935,13 @@ func TestV1RoutesAnswerAKeyNATSWouldRefuseWith4xx(t *testing.T) {
 		{"read a long role", http.MethodGet, "/v1/roles/" + long, "", http.StatusRequestEntityTooLarge},
 		{"claim a long role", http.MethodPost, "/v1/roles/set", `{"session_id":"ses_live","role":"` + longRole + `"}`, http.StatusRequestEntityTooLarge},
 		{"publish to a long role", http.MethodPost, "/v1/messages/publish", `{"topic":"notifications.role.` + longRole + `","message":"hi"}`, http.StatusRequestEntityTooLarge},
+		{"subscribe a session id outside the key alphabet", http.MethodPost, "/v1/interests/subscribe", `{"session_id":"ses:bad","self_subscribed":true}`, http.StatusBadRequest},
+		{"unsubscribe a session id outside the key alphabet", http.MethodPost, "/v1/interests/unsubscribe", `{"session_id":"ses:bad","topics":["notifications.agent.x"]}`, http.StatusBadRequest},
+		{"read the interests of a session id outside the key alphabet", http.MethodGet, "/v1/interests/ses:bad", "", http.StatusBadRequest},
+		{"remove the interests of a session id outside the key alphabet", http.MethodDelete, "/v1/interests/ses:bad", "", http.StatusBadRequest},
+		{"remove a session id outside the key alphabet", http.MethodDelete, "/v1/sessions/ses:bad", "", http.StatusBadRequest},
+		{"read a role outside the key alphabet", http.MethodGet, "/v1/roles/bad:role", "", http.StatusBadRequest},
+		{"publish to a role outside the key alphabet", http.MethodPost, "/v1/messages/publish", `{"topic":"notifications.role.bad:role","message":"hi"}`, http.StatusBadRequest},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			recorder := httptest.NewRecorder()

@@ -1298,7 +1298,8 @@ Dispatch treats an agent endpoint and bearer token as one trust-bound configurat
 fields are omitted. `urgency` is `low`, `med`, `high`, or `blocking`; `expects_reply` is
 `none`, `optional`, or `required`. A session id or role that becomes a KV key NATS would refuse
 (`bus.EnsureKeyValue`) is a 413 when too long and a 400 when it holds an empty token or
-whitespace, on every route that reads or writes one. Every `/v1` 4xx/5xx response, including
+whitespace, or a character outside nats.go's key alphabet (`ses:bad`, `nats.ErrInvalidKey`), on
+every route that reads or writes one. Every `/v1` 4xx/5xx response, including
 the startup gate's 503, is JSON: `{"error":"<message>","expected":["field"]}`. `expected`
 appears when the caller must provide a field.
 
@@ -1500,9 +1501,14 @@ the synchronous listener call records the sent or failed attempt instead of blin
   create request), so a key written now stays readable, watchable and deletable; any other call only
   to its own subject, so a key an earlier build stored past that bound still lists and deletes. The
   stores skip such a key where they cannot read or rewrite it, with a WARN, rather than fail a
-  start, a sweep or a caller's own request, and the reapers delete it. The webhook is answered 422,
-  which Dispatch's redelivery sweep takes as terminal, and logged `<source> publish refused` (or
-  `github ci record refused`); any other failure stays a 503 logged `<source> publish failed`. A
+  start, a sweep or a caller's own request, and the reapers delete it. nats.go itself refuses a key
+  outside its key alphabet on every read, write and delete (`nats.ErrInvalidKey`: `ses:bad`): no
+  build writes one, but a direct bucket write can store one and an earlier build's bare-string role
+  claim can name one as its holder, so the interest and role stores skip it the same way
+  (`keyRefused`, `internal/store/kv.go`), and the reapers, which cannot delete it either, skip it
+  too. The webhook is answered 422, which Dispatch's redelivery sweep takes as terminal, and logged
+  `<source> publish refused` (or `github ci record refused`); any other failure stays a 503 logged
+  `<source> publish failed`. A
   commit's CI record is bounded at 384 KiB (`maxRecordBytes`, about 1,300 checks) and its settlement
   at 960 KiB (`maxSettlementBytes`; a failing check's `"` costs three times as much there), since
   GitHub allows 50,000 check runs in a suite: a check past either is refused the same way, and the
