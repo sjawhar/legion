@@ -43,7 +43,7 @@ import (
 // transaction never waits for it (awaitRoomRecovery): an operation that meets a failed room
 // fails with ErrServiceUnavailable, and the transaction rolls back. A write whose room fails
 // after it opened fails at its next append, the point from which its advisory lock holds off
-// any eviction until it ends (applyJoined): its slot is on the failed room, which neither the
+// any eviction until it ends (applyLive): its slot is on the failed room, which neither the
 // reloaded room's settlement nor its next writer sees.
 //
 // The write's actor, who made its content changes, is credited to the room once the transaction
@@ -60,7 +60,7 @@ type liveWrite struct {
 	forkedFrom *crdt.Doc
 	updates    [][]byte
 	// tree and markdown are the document as this transaction's latest operation left it,
-	// rendered once by that operation (applyJoined) for the version its transaction may write.
+	// rendered once by that operation (applyLive) for the version its transaction may write.
 	// forkLive drops them whenever the fork they describe moves.
 	tree     *pmdoc.Node
 	markdown string

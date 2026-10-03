@@ -668,7 +668,7 @@ func TestReplaceCarriesAnAskTheBrowserLeftUnreadable(t *testing.T) {
 // taken. The document's render wrote its tables' spans out under one budget, so the asks of one
 // check share one: the upload of the document's own markdown, holding twenty asks each over a table
 // whose body rows each span its twenty-column header, is taken. The document stays under the
-// elements one write may make (pmdoc's maxWriteElements), as an upload must: twenty asks over tables
+// elements one write may make (pmdoc.MaxDocumentElements), as an upload must: twenty asks over tables
 // whose spans took the render's whole budget would make some 400,000, and their upload is refused
 // when it is parsed, before any ask is checked.
 func TestAnUploadOfTheDocumentsOwnMarkdownKeepsAsksOverSpannedTables(t *testing.T) {

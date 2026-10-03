@@ -64,8 +64,8 @@ func TestAWriteMayNotGrowADocumentPastWhatOneUploadMayHold(t *testing.T) {
 				}
 				return
 			}
-			if !errors.Is(err, pmdoc.ErrTooManyElements) || !strings.Contains(err.Error(), want) || !strings.Contains(err.Error(), "shorten the change, or split the document") {
-				t.Fatalf("got %v, want ErrTooManyElements saying %q and what to do", err, want)
+			if !errors.Is(err, ErrDocumentTooLarge) || !strings.Contains(err.Error(), want) || !strings.Contains(err.Error(), "shorten the change, or split the document") {
+				t.Fatalf("got %v, want ErrDocumentTooLarge saying %q and what to do", err, want)
 			}
 		})
 	}

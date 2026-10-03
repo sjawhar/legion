@@ -66,7 +66,7 @@ browser connections, reads, and a committed write's publish. Each refusal logs a
 the room and the cause, because a 503 otherwise leaves the server no trace of a room that stays
 failed.
 
-A joined write adds one more check (`applyJoined`). A room can fail between the write's fork
+A joined write adds one more check (`applyLive`). A room can fail between the write's fork
 and its append, and the eviction can finish in that window, because the write does not hold
 the advisory lock yet. The reloaded room may then lack the write, and nothing holds it off
 between the commit and the publish, because the write's writer slot is on the failed room. So

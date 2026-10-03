@@ -194,16 +194,17 @@
   autolink 2, a piece of inline syntax, a mark or a line of text 1); past that a write is `413
   CAP_EXCEEDED`, refused while goldmark parses, naming the line where the markdown passes the limit
   or, where the parse stopped first, the line it stopped reading at; a quote is matched by its text
-  alone. This repository's own markdown weighs 1.5 to 429 elements a kibibyte, so prose passes to
-  the 1 MiB cap and the densest of its documents, a comparison matrix of 379 a kibibyte, to about
-  173 KiB. A paragraph of link reference definitions, which goldmark took time quadratic in its lines
+  alone. Every markdown file of 4 KiB or more in this repository weighs 1.5 to 379 elements a
+  kibibyte, so prose passes to the 1 MiB cap and the densest of them, a comparison matrix, to about
+  173 KiB; smaller files run denser, up to 1,296 a kibibyte for a 147-byte test fixture. A
+  paragraph of link reference definitions, which goldmark took time quadratic in its lines
   to read (a mebibyte of them took a minute to refuse), is read only as far as its first 1,024 lines.
 - A write may no longer grow a stored document past what one upload may hold, measured as an
   upload is measured. Thirty-two 900 KB inserts of prose, each within both limits, grew one document
   to 29.5 MB, on which a one-word edit then held a gigabyte; a few dozen thousand headings' worth
   left one the server could not load (500 on the next write, 503 on every read); and thirty-two
   edits of an ask's options (`PATCH /api/v1/asks/{id}`) grew one to 28.8 MB, on which a one-word
-  edit was killed at the production task's 1,024 MiB. No write opts in to the bound: every write a
+  edit was killed at the production task's 1,024 MiB. Every write a
   caller makes - an upload, an edit batch, an accepted or rejected suggestion, an ask's edited text,
   its answer (`POST /api/v1/asks/{id}/answer`) or resolution, a comment's anchor mark and its margin
   record - runs in a transaction it must join (an unjoined one is refused), and is weighed by the

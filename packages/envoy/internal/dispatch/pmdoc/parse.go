@@ -89,23 +89,23 @@ func blockParsers() []util.PrioritizedValue {
 // Parse converts markdown into the closed Proof ProseMirror tree. Its tables' short rows are
 // padded only while they add at most maxTablePaddingCells cells, as a caller write's markdown.
 func Parse(markdown string) (*Node, error) {
-	return parseStamped(markdown, NewTablePaddingBudget())
+	return parseStamped(markdown, NewWriteBudget())
 }
 
 // ParseRendering is Parse of markdown the renderer wrote, a read-back, whose short rows are the
-// tree's: its padding spends a budget of its own (readBackPaddingBudget), not a caller write's.
+// tree's: its padding spends a budget of its own (readBackBudget), not a caller write's.
 func ParseRendering(markdown string) (*Node, error) {
-	return parseStamped(markdown, readBackPaddingBudget())
+	return parseStamped(markdown, readBackBudget())
 }
 
-func parseStamped(markdown string, budget *TablePaddingBudget) (*Node, error) {
-	return parseStampedAt(markdown, 1, budget)
+func parseStamped(markdown string, budget *WriteBudget) (*Node, error) {
+	return parseStampedAt(markdown, fromStart, budget)
 }
 
-// parseStampedAt is parseStamped of markdown whose first line is line firstLine of what the caller
-// wrote, so a refusal names the caller's line.
-func parseStampedAt(markdown string, firstLine int, budget *TablePaddingBudget) (*Node, error) {
-	doc, err := parseUnstamped(markdown, firstLine, true, budget)
+// parseStampedAt is parseStamped of markdown that stands at at in what the caller wrote, so a
+// refusal names the caller's line and charges nothing for what the server wrote ahead of it.
+func parseStampedAt(markdown string, at origin, budget *WriteBudget) (*Node, error) {
+	doc, err := parseUnstamped(markdown, at, true, budget)
 	if err != nil {
 		return nil, err
 	}
@@ -121,7 +121,7 @@ func parseStampedAt(markdown string, firstLine int, budget *TablePaddingBudget) 
 // whose rendering, the markdown it is stored as, reads back otherwise is refused
 // (RefuseMisreadDocument).
 func ParseForWrite(markdown string, live *Node) (*Node, error) {
-	doc, err := parseForWrite(markdown, live, true, NewTablePaddingBudget())
+	doc, err := parseForWrite(markdown, live, true, NewWriteBudget())
 	if err != nil {
 		return nil, err
 	}
@@ -136,12 +136,12 @@ func ParseForWrite(markdown string, live *Node) (*Node, error) {
 // after a document's start. Written where the document begins (opensDocument), a closed
 // front-matter block opening the markdown is front matter, as Parse reads it. Its tables' short
 // rows are padded on budget, the caller write's, which its other fragments share.
-func ParseFragment(markdown string, opensDocument bool, budget *TablePaddingBudget) (*Node, error) {
+func ParseFragment(markdown string, opensDocument bool, budget *WriteBudget) (*Node, error) {
 	return parseForWrite(markdown, nil, opensDocument, budget)
 }
 
-func parseForWrite(markdown string, live *Node, readFrontmatter bool, budget *TablePaddingBudget) (*Node, error) {
-	doc, err := parseUnstamped(LineFeeds(markdown), 1, readFrontmatter, budget)
+func parseForWrite(markdown string, live *Node, readFrontmatter bool, budget *WriteBudget) (*Node, error) {
+	doc, err := parseUnstamped(LineFeeds(markdown), fromStart, readFrontmatter, budget)
 	if err != nil {
 		return nil, err
 	}
@@ -201,9 +201,9 @@ func LineFeedAttrs(attrs map[string]any) map[string]any {
 
 // parseUnstamped is Parse before EnsureBlockIDs: blocks keep the ids their markdown names, and a
 // block that names none has none yet. Without readFrontmatter a closed front-matter block is read
-// as the blocks its lines make. firstLine is the number markdown's first line has in what the
-// caller wrote, which a refusal's line number counts from.
-func parseUnstamped(markdown string, firstLine int, readFrontmatter bool, budget *TablePaddingBudget) (doc *Node, err error) {
+// as the blocks its lines make. at is where markdown stands in what the caller wrote, which a
+// refusal's line number counts from.
+func parseUnstamped(markdown string, at origin, readFrontmatter bool, budget *WriteBudget) (doc *Node, err error) {
 	defer recoverPanic(&doc, &err, "reading markdown")
 	source := []byte(markdown)
 	var front *Node
@@ -211,12 +211,13 @@ func parseUnstamped(markdown string, firstLine int, readFrontmatter bool, budget
 	if readFrontmatter {
 		var rest int
 		front, rest, unclosedFrontmatter = parseFrontmatterBlock(source)
-		firstLine += bytes.Count(source[:rest], []byte("\n"))
+		at.line += bytes.Count(source[:rest], []byte("\n"))
+		at.server = max(0, at.server-rest)
 		source = source[rest:]
 	}
-	root, err := blockReader.parse(source, unclosedFrontmatter, budget, firstLine)
+	root, err := blockReader.parse(source, unclosedFrontmatter, budget, at)
 	if nesting := (nestingError{}); errors.As(err, &nesting) {
-		nesting.line += firstLine - 1
+		nesting.line += at.line - 1
 		return nil, nesting
 	}
 	if err != nil {
@@ -225,7 +226,7 @@ func parseUnstamped(markdown string, firstLine int, readFrontmatter bool, budget
 	if err := browserListSpacing(root, source); err != nil {
 		return nil, err
 	}
-	doc, err = convert(root, source, firstLine, footnoteLabels(root))
+	doc, err = convert(root, source, at.line, footnoteLabels(root))
 	if err != nil {
 		return nil, err
 	}
@@ -322,35 +323,30 @@ func referencedLabels(nodes []*Node) []string {
 	return labels
 }
 
-// ParseInline converts one textblock's worth of inline markdown into inline
-// nodes. Markdown that forms more than one paragraph, or holds text after its
-// paragraph's last line, is ErrSchema. It is a caller's write, and the elements it makes are
-// counted on a budget of its own (ParseInlineOn).
-func ParseInline(markdown string) (nodes []*Node, err error) {
-	return ParseInlineOn(markdown, NewTablePaddingBudget())
-}
-
-// ParseInlineOn is ParseInline spending budget, its caller write's, on the elements it makes.
-func ParseInlineOn(markdown string, budget *TablePaddingBudget) (nodes []*Node, err error) {
+// ParseInline converts one textblock's worth of inline markdown into inline nodes, spending
+// budget, its caller write's, on the elements it makes. Markdown that forms more than one
+// paragraph, or holds text after its paragraph's last line, is ErrSchema.
+func ParseInline(markdown string, budget *WriteBudget) (nodes []*Node, err error) {
 	return readInline(markdown, inlineMarkdown.run, budget)
 }
 
 // readInline is ParseInline read with inline, one of an inlineReader's parsers, counting the
 // elements it makes on budget, a caller write's, or none when budget is nil (a read-back).
-func readInline(markdown string, inline parser.Parser, budget *TablePaddingBudget) (nodes []*Node, err error) {
+func readInline(markdown string, inline parser.Parser, budget *WriteBudget) (nodes []*Node, err error) {
 	defer recoverPanic(&nodes, &err, "reading inline markdown")
 	source := []byte(LineFeeds(markdown))
 	context := parser.NewContext()
 	var count *parseCount
 	if budget != nil {
-		context.Set(tablePaddingBudgetKey, budget)
-		count = budget.elements.countParse(context)
+		context.Set(writeBudgetKey, budget)
+		count = budget.elements.countParse(context, 0)
 	}
 	root, err := parseSource(inline, source, context)
 	if err != nil {
 		return nil, err
 	}
-	if refusal := count.refusal(root, source, 1); refusal != nil {
+	count.weigh(root)
+	if refusal := count.refusal(source, 1); refusal != nil {
 		return nil, refusal
 	}
 	if root.ChildCount() > 1 {
@@ -456,7 +452,7 @@ func textOutside(paragraph ast.Node, source []byte) string {
 // itself, and reports false when it is not table rows alone. Whether a row is too wide is decided
 // by the parse, as for a whole document (markWideRows), so one row gets one answer on every write
 // path; here that refusal is ErrTableWidth.
-func parseTableRows(markdown string, width int, budget *TablePaddingBudget) ([]*Node, bool, error) {
+func parseTableRows(markdown string, width int, budget *WriteBudget) ([]*Node, bool, error) {
 	if width == 0 {
 		return nil, false, nil
 	}
@@ -489,11 +485,10 @@ func parseTableRows(markdown string, width int, budget *TablePaddingBudget) ([]*
 	// The parse reads the caller's rows under two header lines the caller never wrote, after the
 	// blank lines skipped above, so it numbers its lines from the caller's: a refusal names the line
 	// in the insert's own markdown. Those two lines are the server's, so they charge the write's
-	// element budget nothing (elementCount.free), and no refusal of its elements names one.
+	// element budget nothing, and no refusal of its elements names one.
 	header := syntheticTableHeader(width)
 	firstLine := 1 + strings.Count(markdown[:start], "\n") - strings.Count(header, "\n")
-	budget.elements.free = len(header)
-	parsed, err := parseStampedAt(header+markdown[start:end]+"\n", firstLine, budget)
+	parsed, err := parseStampedAt(header+markdown[start:end]+"\n", origin{line: firstLine, server: len(header)}, budget)
 	// The parse opens with the header written above, so the table under it is the one document-level
 	// table with nothing before it; any other is the fragment's own and keeps its own refusal.
 	if wide := (wideRow{}); errors.As(err, &wide) && wide.firstBlock {

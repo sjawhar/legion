@@ -88,8 +88,8 @@ const maxTablePaddingCells = 10_000
 var ErrTablePadding = fmt.Errorf("%w: table padding", ErrSchema)
 
 var (
-	tablePaddingErrorKey  = parser.NewContextKey()
-	tablePaddingBudgetKey = parser.NewContextKey()
+	tablePaddingErrorKey = parser.NewContextKey()
+	writeBudgetKey       = parser.NewContextKey()
 )
 
 type tablePadding struct {
@@ -101,12 +101,12 @@ func (p tablePadding) cells() int {
 	return p.implied - p.written
 }
 
-// TablePaddingBudget bounds the empty cells reading or padding tables may add to their short rows,
-// and the elements the markdown makes (elementCount). A caller write takes one
-// (NewTablePaddingBudget) and spends it on every parse of the markdown it sends and every table it
-// pads, so the cells and elements it costs are bounded however many operations carry them. Reading
-// back a rendering spends a budget of its own (readBackPaddingBudget), which counts no elements.
-type TablePaddingBudget struct {
+// WriteBudget is what one caller write's markdown may cost: the elements it makes (elementCount),
+// and the empty cells reading or padding its tables may add to their short rows. A caller write
+// takes one (NewWriteBudget) and spends it on every parse of the markdown it sends and every table
+// it pads, so the elements and cells it costs are bounded however many operations carry them.
+// Reading back a rendering spends a budget of its own (readBackBudget), which counts no elements.
+type WriteBudget struct {
 	cells    int
 	tables   int
 	limit    int
@@ -114,32 +114,32 @@ type TablePaddingBudget struct {
 	elements elementCount
 }
 
-// NewTablePaddingBudget is the budget of one caller write, maxTablePaddingCells cells and
-// maxWriteElements elements.
-func NewTablePaddingBudget() *TablePaddingBudget {
-	return &TablePaddingBudget{limit: maxTablePaddingCells, scope: "this write", elements: newElementCount(maxWriteElements)}
+// NewWriteBudget is the budget of one caller write, MaxDocumentElements elements and
+// maxTablePaddingCells cells.
+func NewWriteBudget() *WriteBudget {
+	return &WriteBudget{limit: maxTablePaddingCells, scope: "this write", elements: newElementCount(MaxDocumentElements)}
 }
 
-// readBackPaddingBudget is the budget of one parse of a rendering. The renderer writes a row short
+// readBackBudget is the budget of one parse of a rendering. The renderer writes a row short
 // where its table's spans are left unwritten (renderSpanless) or past the cells its spans may add
 // (maxSpanCells), or where the tree holds a short row, so the cells its parse pads are the tree's
 // own, not a caller's: a table the browser editor pads whose spans the renderer writes whole pads
 // at most maxSpanCells cells in any read-back. A rendering's elements are its tree's, so they are
 // not counted.
-func readBackPaddingBudget() *TablePaddingBudget {
-	return &TablePaddingBudget{limit: maxSpanCells, scope: "this read-back", elements: newElementCount(0)}
+func readBackBudget() *WriteBudget {
+	return &WriteBudget{limit: maxSpanCells, scope: "this read-back", elements: newElementCount(0)}
 }
 
-// quotePaddingBudget is the budget of a quote read as markdown (renderedMarkdownQuote), which
+// quoteBudget is the budget of a quote read as markdown (renderedMarkdownQuote), which
 // matches by text: the cells a short row is padded with hold none, so a quote pads none. A quote is
 // a caller's markdown as much as a write's is - the `find` of an edit, the quote of a comment or an
-// ask - so it makes at most maxWriteElements elements; past them it is no markdown at all, and the
-// lookup matches it by its text alone.
-func quotePaddingBudget() *TablePaddingBudget {
-	return &TablePaddingBudget{limit: 0, scope: "a quote", elements: newElementCount(maxWriteElements)}
+// ask - so it makes at most MaxDocumentElements elements; past them it is no markdown at all, and
+// the lookup matches it by its text alone.
+func quoteBudget() *WriteBudget {
+	return &WriteBudget{limit: 0, scope: "a quote", elements: newElementCount(MaxDocumentElements)}
 }
 
-func (b *TablePaddingBudget) add(padding tablePadding) error {
+func (b *WriteBudget) add(padding tablePadding) error {
 	b.tables++
 	b.cells += padding.cells()
 	if b.cells <= b.limit {
@@ -152,7 +152,7 @@ func (b *TablePaddingBudget) add(padding tablePadding) error {
 }
 
 func recordTablePadding(pc parser.Context, padding tablePadding) bool {
-	if err := pc.Get(tablePaddingBudgetKey).(*TablePaddingBudget).add(padding); err != nil {
+	if err := pc.Get(writeBudgetKey).(*WriteBudget).add(padding); err != nil {
 		pc.Set(tablePaddingErrorKey, err)
 		return true
 	}

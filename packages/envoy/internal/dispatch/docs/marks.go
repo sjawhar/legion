@@ -332,7 +332,7 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 		// sent.
 		with := pmdoc.LineFeeds(replaceWith)
 		// The replacement's markdown and the tables its splice cuts are this accept's to pad.
-		budget := pmdoc.NewTablePaddingBudget()
+		budget := pmdoc.NewWriteBudget()
 		at, _ := pmdoc.ContainingTextblock(tree, range_.From)
 		code := at.Node.Type == "code_block"
 		var replacement *pmdoc.Node

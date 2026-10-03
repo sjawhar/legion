@@ -2,6 +2,7 @@ package docs
 
 import (
 	"fmt"
+	"sync"
 
 	"github.com/reearth/ygo/crdt"
 
@@ -13,10 +14,9 @@ import (
 // thirty-two inserts of 900 KB of prose, each within both, grew one document to 29.5 MB, on which a
 // one-word edit then held a gigabyte; eighteen inserts of a thousand headings left one whose live
 // state the server could no longer load; and thirty-two edits of an ask's options grew one to
-// 28.8 MB through a route that did not opt in to the bound. So no write opts in: every write a
-// caller makes runs through applyLive, which refuses one outside a transaction (errUnjoined) and
-// weighs every one by what it leaves (refuseGrowth) before it is appended, as SeedText weighs a new
-// document:
+// 28.8 MB. So every write a caller makes runs through applyLive, which refuses one outside a
+// transaction (errUnjoined) and weighs every one by what it leaves (refuseGrowth) before it is
+// appended, as SeedText weighs a new document:
 //
 //   - its rendering, the markdown GET .../text answers and an upload of it would send, measured as
 //     an upload is measured (pmdoc.MeasureDocument): its bytes, and the elements the upload's parse
@@ -26,7 +26,7 @@ import (
 //
 // A write that leaves the document no bigger and no heavier than it was passes, so a document
 // already past the bound - stored before it, or grown by browser edits, which no server write
-// carries - can still be trimmed or split. Each refusal is pmdoc.ErrTooManyElements, served as 413
+// carries - can still be trimmed or split. Each refusal is ErrDocumentTooLarge, served as 413
 // CAP_EXCEEDED. The writes that do not run through applyLive add no caller text: settlement's
 // repairs, the block-id backfill and the sweep of unrecorded marks. What the bound weighs is the
 // document a write leaves, not the history its store keeps: every update stays stored with the
@@ -52,19 +52,12 @@ func refuseGrowth(fork *crdt.Doc, before, after string) error {
 	size := pmdoc.MeasureDocument(after)
 	if size.TooLong() && len(after) > len(before) {
 		return fmt.Errorf("%w: a markdown document is at most 1 MiB (%d bytes), and this change would make the document's markdown %d bytes (it was %d); shorten the change, or split the document",
-			pmdoc.ErrTooManyElements, pmdoc.MaxDocumentBytes, len(after), len(before))
+			ErrDocumentTooLarge, pmdoc.MaxDocumentBytes, len(after), len(before))
 	}
-	var measured *pmdoc.DocumentSize
-	was := func() pmdoc.DocumentSize {
-		if measured == nil {
-			size := pmdoc.MeasureDocument(before)
-			measured = &size
-		}
-		return *measured
-	}
+	was := sync.OnceValue(func() pmdoc.DocumentSize { return pmdoc.MeasureDocument(before) })
 	if size.TooHeavy() && heavier(was(), size) {
 		return fmt.Errorf("%w: this change would make the document's markdown make %s elements, past the %d one document may hold (it made %s); shorten the change, or split the document",
-			pmdoc.ErrTooManyElements, elements(size), pmdoc.MaxDocumentElements, elements(was()))
+			ErrDocumentTooLarge, elements(size), pmdoc.MaxDocumentElements, elements(was()))
 	}
 	if fork == nil {
 		return nil
@@ -139,5 +132,5 @@ func refuseUnloadable(fork *crdt.Doc, grew func() bool) error {
 		return nil
 	}
 	return fmt.Errorf("%w: this change would leave the document too large for the server to load again with room to spare (its live copy would park more than %d of the %d items a load may wait on); shorten the change, or split the document",
-		pmdoc.ErrTooManyElements, loadableItems, maxPendingItems)
+		ErrDocumentTooLarge, loadableItems, maxPendingItems)
 }

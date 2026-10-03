@@ -188,7 +188,7 @@ func blockMarkdownReaders() []callerReader {
 		{name: "document", parse: Parse},
 		{name: "upload", parse: func(markdown string) (*Node, error) { return ParseForWrite(markdown, nil) }},
 		{name: "fragment", parse: func(markdown string) (*Node, error) {
-			return ParseFragment(markdown, true, NewTablePaddingBudget())
+			return ParseFragment(markdown, true, NewWriteBudget())
 		}},
 	}
 }
@@ -284,7 +284,7 @@ func TestOrdinaryNestedInlineMarksReadAndRenderUnchanged(t *testing.T) {
 // readers, and a replacement's inline markdown through ParseInline, which reads no document.
 func inlineMarkReaders() []callerReader {
 	return append(blockMarkdownReaders(), callerReader{name: "inline", parse: func(markdown string) (*Node, error) {
-		_, err := ParseInline(markdown)
+		_, err := ParseInline(markdown, NewWriteBudget())
 		return nil, err
 	}})
 }

@@ -2757,5 +2757,5 @@ func TestReplacementBrokePassesAPanicOnAsAnError(t *testing.T) {
 
 // applyAlone applies op to tree as a write of its own, on a budget of its own.
 func applyAlone(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
-	return applyOperation(tree, op, pmdoc.NewTablePaddingBudget())
+	return applyOperation(tree, op, pmdoc.NewWriteBudget())
 }

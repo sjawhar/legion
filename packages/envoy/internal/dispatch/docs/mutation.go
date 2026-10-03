@@ -1140,7 +1140,7 @@ func (s *Service) writeVersionTx(ctx context.Context, tx pgx.Tx, artifactID, mar
 	for _, event := range moved {
 		collectEvent(ctx, event)
 	}
-	// The transaction's own live operation already refreshed this tree's anchors (applyJoined);
+	// The transaction's own live operation already refreshed this tree's anchors (applyLive);
 	// refreshing the same tree twice reads and re-derives every open anchor for no change.
 	// Neither call goes: this is the only refresh a version written without a live write of its
 	// own gets - settlement and a standalone named version - and the write == nil arm above is

@@ -667,8 +667,7 @@ var _ persistence.VersionedPersistence = (*PgVersioned)(nil)
 // does not export. A document over it is refused by ygo and answered as CAP_EXCEEDED with the count.
 // No write reaches it now: the heaviest document pmdoc's element limit admits encodes to about
 // 131,000 items, and a document that grows by writes meets ygo's pending-item cap first
-// (maxPendingItems, growth.go), which TestRepeatedInsertsCannotGrowADocumentPastWhatItCanStoreAndRead
-// (api) holds.
+// (maxPendingItems, growth.go).
 const maxUpdateItems = 1 << 20
 
 // updateItems is the number of items a V1 update of one client declares in its header: the

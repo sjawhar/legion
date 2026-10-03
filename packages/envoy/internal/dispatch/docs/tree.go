@@ -15,10 +15,12 @@ const marksMapName = "marks"
 var ErrInvalidMarkdown = errors.New("markdown is not a Proof document")
 var ErrDocSchema = errors.New("document is outside the Proof schema")
 
-// ErrDocumentTooLarge is a document whose tree encodes to more items than one document update can
-// store (ygo's cap of 1,048,576, maxUpdateItems): more formatted spans than any real document
-// has, such as 1 MiB of `)_`, which reads as 524,288 italic spans.
-var ErrDocumentTooLarge = errors.New("document holds more formatted spans than can be stored")
+// ErrDocumentTooLarge is the refusal of a write that would leave a document larger than the server
+// stores: past what one upload of it may hold (refuseGrowth), unloadable with room to spare
+// (refuseUnloadable), or holding more items than one document update can store (ygo's cap of
+// 1,048,576, maxUpdateItems). It is served as 413 CAP_EXCEEDED, as markdown making more elements
+// than one write may (pmdoc.ErrTooManyElements) is.
+var ErrDocumentTooLarge = errors.New("document too large to store")
 
 // parseInput parses markdown a caller writes that replaces no live document: a new document's
 // first text, or the empty text a delete splices. Text an insert or an accept writes into a
@@ -32,7 +34,7 @@ func parseInput(markdown string) (*pmdoc.Node, error) {
 // front-matter block is front matter where the text lands at the document's start
 // (pmdoc.ParseFragment). A block id the text repeats is refused, as parseInput refuses it. Its
 // tables' short rows are padded on budget, which the write's other markdown shares.
-func parseFragmentInput(markdown string, opensDocument bool, budget *pmdoc.TablePaddingBudget) (*pmdoc.Node, error) {
+func parseFragmentInput(markdown string, opensDocument bool, budget *pmdoc.WriteBudget) (*pmdoc.Node, error) {
 	return uploadedInput(pmdoc.ParseFragment(markdown, opensDocument, budget))
 }
 

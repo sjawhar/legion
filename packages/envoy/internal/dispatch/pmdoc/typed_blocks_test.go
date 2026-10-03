@@ -561,7 +561,7 @@ func TestTableRowFragmentRefusalNamesTheCallersLine(t *testing.T) {
 		rows:        "line 2,",
 		"\n" + rows: "line 3,",
 	} {
-		_, _, err := parseTableRows(markdown, 1, NewTablePaddingBudget())
+		_, _, err := parseTableRows(markdown, 1, NewWriteBudget())
 		if err == nil || !strings.Contains(err.Error(), want+` ":::callout{`) {
 			t.Errorf("parseTableRows(%q) = %v, want a refusal naming %s", markdown, err, want)
 		}
@@ -587,10 +587,10 @@ func TestTypedBlockOpeningWrittenAsTextOnPurposeIsKept(t *testing.T) {
 			}
 		})
 	}
-	if nodes, err := ParseInline(opening); err != nil || len(nodes) != 1 || nodes[0].Text != opening {
+	if nodes, err := ParseInline(opening, NewWriteBudget()); err != nil || len(nodes) != 1 || nodes[0].Text != opening {
 		t.Fatalf("ParseInline(%q) = %#v, %v, want the opening as its text", opening, nodes, err)
 	}
-	if _, err := ParseInline("Context\n" + opening); err == nil || !strings.Contains(err.Error(), "continues a paragraph") {
+	if _, err := ParseInline("Context\n"+opening, NewWriteBudget()); err == nil || !strings.Contains(err.Error(), "continues a paragraph") {
 		t.Fatalf("ParseInline of an opening on a line after the text = %v, want a refusal naming the line", err)
 	}
 }

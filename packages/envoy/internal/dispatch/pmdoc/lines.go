@@ -29,17 +29,26 @@ func segmentsText(segments *gmtext.Segments, source []byte) string {
 	return text.String()
 }
 
-// parse parses source. unclosedFrontmatter says source opens a document with a front-matter opener
-// no later line closes, after which no container opens at the document's level
-// (frontmatterAttempt). Its tables' short rows are padded, and its elements counted, on budget;
-// firstLine is the number source's first line has in what the caller wrote, which a refusal of
-// those elements names its line from.
-func (reader markdownReader) parse(source []byte, unclosedFrontmatter bool, budget *TablePaddingBudget, firstLine int) (ast.Node, error) {
-	root, count, pc, err := reader.read(source, unclosedFrontmatter, budget)
+// origin is where a parsed source stands in what the caller wrote: line is the number its first
+// line has there, which a refusal names its line from, and server is how many bytes it opens with
+// that the server wrote ahead of the caller's text (parseTableRows's header), which charge the
+// write's elements nothing.
+type origin struct{ line, server int }
+
+// fromStart is the origin of a source that is the caller's from its first byte.
+var fromStart = origin{line: 1}
+
+// parse parses source, which stands at at in what the caller wrote. unclosedFrontmatter says
+// source opens a document with a front-matter opener no later line closes, after which no container
+// opens at the document's level (frontmatterAttempt). Its tables' short rows are padded, and its
+// elements counted, on budget.
+func (reader markdownReader) parse(source []byte, unclosedFrontmatter bool, budget *WriteBudget, at origin) (ast.Node, error) {
+	root, count, pc, err := reader.read(source, unclosedFrontmatter, budget, at.server)
 	if err != nil {
 		return nil, err
 	}
-	if refusal := count.refusal(root, source, firstLine); refusal != nil {
+	count.weigh(root)
+	if refusal := count.refusal(source, at.line); refusal != nil {
 		return nil, refusal
 	}
 	if err, _ := pc.Get(tablePaddingErrorKey).(error); err != nil {
@@ -48,16 +57,17 @@ func (reader markdownReader) parse(source []byte, unclosedFrontmatter bool, budg
 	return root, nil
 }
 
-// read is goldmark's tree of source, its tables padded and its elements counted on budget, with the
-// count and the parser context it kept, or the refusal of markdown nested past either of
-// parseSource's bounds, before anything else refuses it.
-func (reader markdownReader) read(source []byte, unclosedFrontmatter bool, budget *TablePaddingBudget) (ast.Node, *parseCount, parser.Context, error) {
+// read is goldmark's tree of source, its tables padded and its elements counted on budget, the
+// source's first server bytes the server's (origin), with the count and the parser context it
+// kept, or the refusal of markdown nested past either of parseSource's bounds, before anything else
+// refuses it.
+func (reader markdownReader) read(source []byte, unclosedFrontmatter bool, budget *WriteBudget, server int) (ast.Node, *parseCount, parser.Context, error) {
 	pc := parser.NewContext()
 	if unclosedFrontmatter {
 		pc.Set(unclosedFrontmatterKey, true)
 	}
-	pc.Set(tablePaddingBudgetKey, budget)
-	count := budget.elements.countParse(pc)
+	pc.Set(writeBudgetKey, budget)
+	count := budget.elements.countParse(pc, server)
 	root, err := parseSource(reader.md.Parser(), source, pc)
 	return root, count, pc, err
 }

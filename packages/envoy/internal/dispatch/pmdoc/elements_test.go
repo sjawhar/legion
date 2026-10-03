@@ -11,9 +11,9 @@ import (
 // A heading weighs four elements, its block and its text, so a document of 16,384 headings weighs
 // the limit exactly and is read, and one heading more is refused, naming the line that passes it.
 func TestAWriteAtTheElementLimitIsReadAndOneElementMoreIsRefused(t *testing.T) {
-	headings := maxWriteElements / 4
+	headings := MaxDocumentElements / 4
 	if _, err := ParseForWrite(strings.Repeat("# a\n", headings), nil); err != nil {
-		t.Fatalf("%d headings, %d elements: %v, want them read", headings, maxWriteElements, err)
+		t.Fatalf("%d headings, %d elements: %v, want them read", headings, MaxDocumentElements, err)
 	}
 	_, err := ParseForWrite(strings.Repeat("# a\n", headings+1), nil)
 	if !errors.Is(err, ErrTooManyElements) || errors.Is(err, ErrSchema) || !strings.Contains(err.Error(), "more than 65536 elements, passing that at line 16385") {
@@ -26,10 +26,10 @@ func TestAWriteAtTheElementLimitIsReadAndOneElementMoreIsRefused(t *testing.T) {
 // paragraph's three: 16,384 lines weigh the limit exactly and are read, and one line more is
 // refused, naming the line that passes it.
 func TestHardBreaksWeighAsTheirTextAndABlock(t *testing.T) {
-	lines := maxWriteElements / 4
+	lines := MaxDocumentElements / 4
 	for _, line := range []string{"a  \n", "a\\\n"} {
 		if _, err := ParseForWrite(strings.Repeat(line, lines), nil); err != nil {
-			t.Fatalf("%d lines of %q, %d elements: %v, want them read", lines, line, maxWriteElements, err)
+			t.Fatalf("%d lines of %q, %d elements: %v, want them read", lines, line, MaxDocumentElements, err)
 		}
 		_, err := ParseForWrite(strings.Repeat(line, lines+1), nil)
 		if !errors.Is(err, ErrTooManyElements) || !strings.Contains(err.Error(), fmt.Sprintf("passing that at line %d", lines)) {
@@ -71,7 +71,7 @@ func TestMarkdownPastTheElementLimitIsRefusedBeforeItIsBuilt(t *testing.T) {
 		}{
 			{"document", func(markdown string) error { _, err := ParseForWrite(markdown, nil); return err }},
 			{"fragment", func(markdown string) error {
-				_, err := ParseFragment(markdown, false, NewTablePaddingBudget())
+				_, err := ParseFragment(markdown, false, NewWriteBudget())
 				return err
 			}},
 		} {
@@ -89,7 +89,7 @@ func TestMarkdownPastTheElementLimitIsRefusedBeforeItIsBuilt(t *testing.T) {
 			})
 		}
 	}
-	if _, err := ParseInline(fill(")_")); !errors.Is(err, ErrTooManyElements) {
+	if _, err := ParseInline(fill(")_"), NewWriteBudget()); !errors.Is(err, ErrTooManyElements) {
 		t.Fatalf("inline markdown of a mebibyte of )_: %v, want ErrTooManyElements", err)
 	}
 }
@@ -97,12 +97,12 @@ func TestMarkdownPastTheElementLimitIsRefusedBeforeItIsBuilt(t *testing.T) {
 // One write's markdown spends one budget, however many operations carry it: two fragments and an
 // inline replacement that each fit the limit alone are refused together once they pass it.
 func TestAWritesFragmentsShareOneElementBudget(t *testing.T) {
-	half := strings.Repeat("# a\n", maxWriteElements/4/2)
-	budget := NewTablePaddingBudget()
+	half := strings.Repeat("# a\n", MaxDocumentElements/4/2)
+	budget := NewWriteBudget()
 	if _, err := ParseFragment(half, false, budget); err != nil {
 		t.Fatalf("the first half: %v", err)
 	}
-	if _, err := ParseInlineOn(strings.Repeat("a ", 100), budget); err != nil {
+	if _, err := ParseInline(strings.Repeat("a ", 100), budget); err != nil {
 		t.Fatalf("an inline replacement beside it: %v", err)
 	}
 	if _, err := ParseFragment(half, false, budget); !errors.Is(err, ErrTooManyElements) {
@@ -162,8 +162,8 @@ func TestMeasureDocumentCountsWhatAnUploadCounts(t *testing.T) {
 			}
 		})
 	}
-	if size := MeasureDocument("---\ntitle: x\n---\n\n" + strings.Repeat("# a\n", maxWriteElements/4)); !size.Counted || size.Elements != maxWriteElements {
-		t.Fatalf("front matter and %d headings measure %+v, want the %d elements of the headings alone", maxWriteElements/4, size, maxWriteElements)
+	if size := MeasureDocument("---\ntitle: x\n---\n\n" + strings.Repeat("# a\n", MaxDocumentElements/4)); !size.Counted || size.Elements != MaxDocumentElements {
+		t.Fatalf("front matter and %d headings measure %+v, want the %d elements of the headings alone", MaxDocumentElements/4, size, MaxDocumentElements)
 	}
 }
 
@@ -195,15 +195,15 @@ func TestATableRowInsertIsChargedItsRowsAlone(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	budget := NewTablePaddingBudget()
+	budget := NewWriteBudget()
 	if _, inserted, err := InsertTableRows(doc, anchor, "| y |\n", true, budget); err != nil || !inserted {
 		t.Fatalf("insert one row: inserted=%v, %v", inserted, err)
 	}
 	if want := 3 + width*4 + 1; budget.elements.made != want {
 		t.Fatalf("one row of %d cells charged %d elements, want %d: the row, its cells and its one text", width, budget.elements.made, want)
 	}
-	budget = NewTablePaddingBudget()
-	budget.elements.made = maxWriteElements - 10
+	budget = NewWriteBudget()
+	budget.elements.made = MaxDocumentElements - 10
 	_, _, err = InsertTableRows(doc, anchor, "\n| y |\n", true, budget)
 	if !errors.Is(err, ErrTooManyElements) || !strings.Contains(err.Error(), "passing that at line 2;") {
 		t.Fatalf("a row past what the batch has left: %v, want a refusal at line 2, the row's", err)
