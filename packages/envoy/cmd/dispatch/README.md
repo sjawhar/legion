@@ -256,6 +256,10 @@ records the settlement it owes, which the settlement deletes when it commits. A 
 server's minute-by-minute resumption arm the settlement a row names, so one a shutdown cuts short
 still runs. It creates a table and touches no row; its census answers `0`.
 
+Migration `0064_user_agent_reply_read` creates the table of replies a human has read by id, which
+the broadcast page writes for the replies it shows and the unread count leaves out, beside the
+per-session read mark. It creates a table and touches no row; its census answers `0`.
+
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a
 migration record or schema change only when an existing artifact has no owning issue. On success

@@ -710,6 +710,7 @@ func TestTheUnreadCountEqualsWhatTheWindowShowsForEverySession(t *testing.T) {
 // unreadRepliesShownInWindow counts, in the conversation list a viewer reads, the replies the
 // server marked unread: the session's replies, after the viewer's read mark and Clear, in the
 // conversations the response itself flags - what the Agents page and the live view show as new.
+// It knows nothing of replies read by id (read_replies), so a test that writes one cannot use it.
 func unreadRepliesShownInWindow(t *testing.T, handler http.Handler, sessionID string, state userAgentState) int {
 	t.Helper()
 	watermark := time.Time{}
@@ -1023,6 +1024,93 @@ func TestTheUnreadFlagFollowsTheReadMark(t *testing.T) {
 	}
 	if shown := unreadRepliesShownInWindow(t, handler, "s1", states["s1"]); shown != 1 {
 		t.Fatalf("the window shows %d unread replies, want 1: the read reply must not count again", shown)
+	}
+}
+
+// A reply read by its id (read_replies, what the broadcast page writes for the replies it shows)
+// is read, and nothing else moves: the session's older reply to another message, which the read
+// mark would have covered, and a reply that arrives after, both stay unread, in the count and in
+// the window's flags alike. The login is mixed-case so a write and a read keyed on two spellings
+// of it would show up as a mark that marks nothing.
+func TestRepliesReadByIDMarkOnlyThoseReplies(t *testing.T) {
+	handler, _, older, reply, _ := directConversationFrom(t, "Alice")
+	olderAnswer := decodeBody[model.Message](t, reply("The older answer, never shown."))
+	shownRoot := decodeBody[model.Message](t, dispatchRequest(t, handler, http.MethodPost, "/api/v1/agents/s1/messages", map[string]any{
+		"body": "The question the page shows.", "delivery": "aside",
+	}, "Alice"))
+	answerShown := func(body string) model.Message {
+		t.Helper()
+		response := bearerRequest(t, handler, http.MethodPost, "/api/v1/messages/"+shownRoot.ID+"/reply?follow_up=true", map[string]any{
+			"actor": map[string]any{"kind": "session", "id": "s1"}, "attempt": 1, "body": body,
+		})
+		if response.Code != http.StatusCreated {
+			t.Fatalf("answer %q: status=%d body=%s", body, response.Code, response.Body.String())
+		}
+		return decodeBody[model.Message](t, response)
+	}
+	shown := answerShown("The answer the page shows.")
+	if !shown.CreatedAt.After(olderAnswer.CreatedAt) {
+		t.Fatalf("the shown answer %s is not newer than %s, so a read mark through it would not cover the older one", shown.CreatedAt, olderAnswer.CreatedAt)
+	}
+	if got := unreadReplies(t, handler, "alice", "s1"); got.UnreadReplies != 2 {
+		t.Fatalf("before reading: %#v, want both answers unread", got)
+	}
+
+	marked := dispatchRequest(t, handler, http.MethodPut, "/api/v1/me/agents/s1/state", map[string]any{
+		"read_replies": []string{shown.ID},
+	}, "aLiCe")
+	if marked.Code != http.StatusOK {
+		t.Fatalf("read by id: status=%d body=%s", marked.Code, marked.Body.String())
+	}
+	if answered := decodeBody[userAgentState](t, marked); answered.UnreadReplies != 1 || answered.ReadThrough != nil {
+		t.Fatalf("the PUT answered %#v, want the older answer alone unread and no read mark", answered)
+	}
+	if got := unreadReplies(t, handler, "alice", "s1"); got.UnreadReplies != 1 {
+		t.Fatalf("after reading the shown answer: %#v, want the older answer still unread", got)
+	}
+	if entry := windowEntry(t, handler, "alice", "s1", older.ID); !entry.Unread {
+		t.Fatalf("the conversation holding the older answer lost its unread flag")
+	}
+	if entry := windowEntry(t, handler, "alice", "s1", shownRoot.ID); entry.Unread {
+		t.Fatalf("the conversation whose only answer was read by id is still flagged unread")
+	}
+
+	answerShown("A follow-up the page has not shown yet.")
+	if got := unreadReplies(t, handler, "alice", "s1"); got.UnreadReplies != 2 {
+		t.Fatalf("after a newer answer: %#v, want it and the older answer unread", got)
+	}
+	if entry := windowEntry(t, handler, "alice", "s1", shownRoot.ID); !entry.Unread {
+		t.Fatalf("the conversation with a newer answer is not flagged unread")
+	}
+}
+
+// read_replies names the session's own messages; anything else is refused before a row is
+// written, so a mark can never hold an id the unread count does not read as that session's.
+func TestRepliesReadByIDRefuseAnythingButTheSessionsOwnMessages(t *testing.T) {
+	handler, root, reply, _ := directConversation(t)
+	answer := decodeBody[model.Message](t, reply("On it."))
+	for _, refusal := range []struct {
+		name, session string
+		ids           []string
+	}{
+		// The session's answer first, so a write that stored ids up to the first foreign one
+		// would leave the answer read.
+		{"the viewer's own message", "s1", []string{answer.ID, root.ID}},
+		{"an id that is no message", "s1", []string{"00000000-0000-4000-8000-000000000000"}},
+		{"a string that is no uuid", "s1", []string{"not-an-id"}},
+		{"another session's message", "s2", []string{answer.ID}},
+	} {
+		t.Run(refusal.name, func(t *testing.T) {
+			refused := dispatchRequest(t, handler, http.MethodPut, "/api/v1/me/agents/"+refusal.session+"/state", map[string]any{
+				"read_replies": refusal.ids,
+			}, "alice")
+			if refused.Code != http.StatusBadRequest || !strings.Contains(refused.Body.String(), "INVALID_STATE") {
+				t.Fatalf("status=%d body=%s, want 400 INVALID_STATE", refused.Code, refused.Body.String())
+			}
+		})
+	}
+	if got := unreadReplies(t, handler, "alice", "s1"); got.UnreadReplies != 1 {
+		t.Fatalf("after the refusals: %#v, want the answer still unread", got)
 	}
 }
 

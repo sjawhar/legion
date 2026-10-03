@@ -3,8 +3,12 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
@@ -159,7 +163,8 @@ func (s *server) putUserState(w http.ResponseWriter, r *http.Request) {
 // userAgentState is one viewer's state for one agent's conversation. The Agents page hides every
 // exchange whose newest message is at or before cleared_before (the viewer's Clear); read_through
 // is how far the viewer has read; unread_replies counts the session's replies to messages this
-// viewer sent that are newer than both, which is how the dashboard says an agent answered.
+// viewer sent that are newer than both and that the viewer has not read by id (read_replies),
+// which is how the dashboard says an agent answered.
 type userAgentState struct {
 	ClearedBefore *string `json:"cleared_before,omitempty"`
 	ReadThrough   *string `json:"read_through,omitempty"`
@@ -241,24 +246,27 @@ func parseAgentStateCutoff(name string, value *string) (*time.Time, error) {
 	return &parsed, nil
 }
 
-// putUserAgentState records a Clear (cleared_before, which replaces the previous one) and/or a
-// read mark (read_through, which only ever moves forward, so a tab that read less a moment ago
-// cannot make a reply unread again), and answers with the session's whole state.
+// putUserAgentState records a Clear (cleared_before, which replaces the previous one), a read
+// mark (read_through, which only ever moves forward, so a tab that read less a moment ago cannot
+// make a reply unread again), and/or replies read one by one (read_replies, the session's own
+// messages by id, which a view that shows only some of a session's replies writes so it marks
+// nothing it did not show), and answers with the session's whole state.
 func (s *server) putUserAgentState(w http.ResponseWriter, r *http.Request) {
 	actor, ok := s.requireHuman(w, r)
 	if !ok {
 		return
 	}
 	var input struct {
-		ClearedBefore *string `json:"cleared_before"`
-		ReadThrough   *string `json:"read_through"`
+		ClearedBefore *string  `json:"cleared_before"`
+		ReadThrough   *string  `json:"read_through"`
+		ReadReplies   []string `json:"read_replies"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	if input.ClearedBefore == nil && input.ReadThrough == nil {
-		writeError(w, "INVALID_STATE", http.StatusBadRequest, "cleared_before or read_through is required")
+	if input.ClearedBefore == nil && input.ReadThrough == nil && len(input.ReadReplies) == 0 {
+		writeError(w, "INVALID_STATE", http.StatusBadRequest, "cleared_before, read_through or read_replies is required")
 		return
 	}
 	clearedBefore, err := parseAgentStateCutoff("cleared_before", input.ClearedBefore)
@@ -270,6 +278,13 @@ func (s *server) putUserAgentState(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
+	}
+	for _, id := range input.ReadReplies {
+		if _, err := uuid.Parse(id); err != nil {
+			s.writeHandlerError(w, errorf(http.StatusBadRequest, "INVALID_STATE",
+				"read_replies: %q is not a message id", id))
+			return
+		}
 	}
 	sessionID := r.PathValue("session_id")
 	// The state is announced on an event the session owns, and only a session id a route can
@@ -308,6 +323,37 @@ func (s *server) putUserAgentState(w http.ResponseWriter, r *http.Request) {
 			on conflict (login, session_id) do update set
 				read_through = greatest(user_agent_read.read_through, excluded.read_through)
 		`, canonicalLogin(actor.ID), sessionID, *readThrough); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+	}
+	if len(input.ReadReplies) > 0 {
+		// Only the session's own messages are its replies; any other id is refused rather than
+		// stored, so a mark can never name something the unread count would not.
+		var foreign string
+		err := tx.QueryRow(r.Context(), `
+			select wanted.id::text from unnest($1::uuid[]) as wanted(id)
+			where not exists (
+				select 1 from messages
+				where messages.id = wanted.id
+				  and messages.author->>'kind' = 'session' and messages.author->>'id' = $2
+			)
+			limit 1
+		`, input.ReadReplies, sessionID).Scan(&foreign)
+		if err == nil {
+			s.writeHandlerError(w, errorf(http.StatusBadRequest, "INVALID_STATE",
+				"read_replies: %s is not a message session %s wrote", foreign, sessionID))
+			return
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			s.writeHandlerError(w, err)
+			return
+		}
+		if _, err := tx.Exec(r.Context(), `
+			insert into user_agent_reply_read (login, reply_id)
+			select $1, unnest($2::uuid[])
+			on conflict do nothing
+		`, canonicalLogin(actor.ID), input.ReadReplies); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
