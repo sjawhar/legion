@@ -186,6 +186,12 @@ jobs:
               - 'packages/contracts/**'
               - 'packages/envoy/internal/dispatch/**'
               - 'packages/envoy/cmd/dispatch/**'
+              # The modules the Dispatch server the browser tests start is built from, ygo's
+              # document and websocket server among them.
+              - 'packages/envoy/go.mod'
+              - 'packages/envoy/go.sum'
+              - 'go.work'
+              - 'go.work.sum'
               # The editor's source pin and its remaining patches can change document rendering,
               # including the Dark Reader inline-style guard.
               - 'patches/**'
