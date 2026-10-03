@@ -179,6 +179,13 @@ rm "$root/dist/reference/tools.html" "$root/dist/captions.vtt"
 run_check "$root" dist
 check "a named path is all that is scanned" "$(is "$status" 0)"
 
+echo "case: a single named file is reported under its own name"
+root=$(fixture single-file)
+printf 'line one\n%s\n' "$key-7" > "$root/body.md"
+run_check "$root" body.md
+check "fails" "$(is "$status" 1)"
+check "names the file and line" "$(contains "$out" '^::error file=body.md,line=2::body.md:2: names the private deployment repository')"
+
 echo "case: a named path that does not exist"
 root=$(fixture missing)
 run_check "$root" dist
