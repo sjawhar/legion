@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -28,6 +29,10 @@ type githubTokenResponse struct {
 	LegionAppLogins map[string]string `json:"legionAppLogins"`
 }
 
+// errNoGrant is grantFromEnvironment's refusal when neither the pane's grant file pointer nor the
+// manual LEGION_GRANT is set, which a command with a way to run without a grant names.
+var errNoGrant = errors.New("LEGION_GRANT_FILE is missing (and LEGION_GRANT is unset)")
+
 // grantFromEnvironment follows the pane contract exactly: a set grant-file pointer is
 // authoritative, even if unreadable or blank; LEGION_GRANT is only the manual fallback when the
 // pointer is absent.
@@ -38,7 +43,7 @@ func grantFromEnvironment() (string, error) {
 	if grant := strings.TrimSpace(os.Getenv("LEGION_GRANT")); grant != "" {
 		return grant, nil
 	}
-	return "", fmt.Errorf("LEGION_GRANT_FILE is missing (and LEGION_GRANT is unset)")
+	return "", errNoGrant
 }
 
 func daemonURL() string {

@@ -7,7 +7,10 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -297,5 +300,191 @@ func TestThreadsResolveAppliesNoBotRuleWithoutLegionsAppLogins(t *testing.T) {
 		"left open https://github.test/thread/human — newest reply by legion-implementer is not an acceptance\n"
 	if stdout != want || len(resolved()) != 0 {
 		t.Fatalf("stdout = %q, resolved %v; want both left open", stdout, resolved())
+	}
+}
+
+// standinGh is a gh first on PATH that records each call under its directory (its arguments, its
+// GH_REPO and the request on its standard input) and answers as `gh api graphql` does: page for a
+// reviewThreads query, a resolved thread for the mutation. Every call prints ghNotice on stderr, as
+// a gh that picks its credential per call does when the call acts as someone else; once fail()
+// runs, it exits 4 with GitHub's refusal instead. calls reads back what each call received.
+type standinGh struct {
+	t   *testing.T
+	dir string
+}
+
+const ghNotice = "gh: this call acts as the fallback personal token\n"
+
+func newStandinGh(t *testing.T, page string) standinGh {
+	t.Helper()
+	dir := t.TempDir()
+	script := `#!/bin/sh
+dir=$GH_STANDIN_DIR
+n=$(($(cat "$dir/calls") + 1))
+echo "$n" > "$dir/calls"
+cat > "$dir/request-$n"
+printf '%s\n' "$*" > "$dir/argv-$n"
+printf '%s\n' "${GH_REPO-unset}" > "$dir/gh-repo-$n"
+if [ -e "$dir/fail" ]; then
+  echo 'HTTP 401: Bad credentials (https://api.github.com/graphql)' >&2
+  exit 4
+fi
+printf '%s' '` + strings.TrimSuffix(ghNotice, "\n") + `' >&2
+echo >&2
+if grep -q resolveReviewThread "$dir/request-$n"; then
+  echo '{"data":{"resolveReviewThread":{"thread":{"id":"resolved","isResolved":true}}}}'
+else
+  cat "$dir/page"
+fi
+`
+	for name, contents := range map[string]string{"gh": script, "calls": "0\n", "page": page} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(contents), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("GH_STANDIN_DIR", dir)
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return standinGh{t: t, dir: dir}
+}
+
+func (g standinGh) fail() {
+	if err := os.WriteFile(filepath.Join(g.dir, "fail"), nil, 0o600); err != nil {
+		g.t.Fatal(err)
+	}
+}
+
+// ghCall is what one gh call received.
+type ghCall struct {
+	argv, ghRepo string
+	request      struct {
+		Query     string         `json:"query"`
+		Variables map[string]any `json:"variables"`
+	}
+}
+
+func (g standinGh) calls() []ghCall {
+	g.t.Helper()
+	read := func(name string) string {
+		contents, err := os.ReadFile(filepath.Join(g.dir, name))
+		if err != nil {
+			g.t.Fatal(err)
+		}
+		return strings.TrimSpace(string(contents))
+	}
+	var calls []ghCall
+	for n := 1; ; n++ {
+		suffix := "-" + strconv.Itoa(n)
+		if _, err := os.Stat(filepath.Join(g.dir, "argv"+suffix)); os.IsNotExist(err) {
+			return calls
+		}
+		call := ghCall{argv: read("argv" + suffix), ghRepo: read("gh-repo" + suffix)}
+		if err := json.Unmarshal([]byte(read("request"+suffix)), &call.request); err != nil {
+			g.t.Fatalf("gh call %d's request is not JSON: %v", n, err)
+		}
+		calls = append(calls, call)
+	}
+}
+
+// outsideAPane is a session no Legion pane started: no grant of any kind, and a daemon and a GitHub
+// endpoint that fail the test if anything reaches them, run from a directory that is no checkout.
+func outsideAPane(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{"LEGION_GRANT_FILE", "LEGION_GRANT"} {
+		t.Setenv(name, "")
+		os.Unsetenv(name)
+	}
+	untouched := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		t.Errorf("%s %s was requested; --gh redeems no grant and calls GitHub only through gh", r.Method, r.URL)
+	}))
+	t.Cleanup(untouched.Close)
+	t.Setenv("LEGION_DAEMON_URL", untouched.URL)
+	t.Setenv("LEGION_GITHUB_GRAPHQL_URL", untouched.URL)
+	t.Chdir(t.TempDir())
+}
+
+func runThreadsResolveWithGh(t *testing.T) (code int, stdout, stderr string) {
+	t.Helper()
+	var out, errb bytes.Buffer
+	code = run(context.Background(), []string{"legion", "threads", "resolve", "--repo", "owner/repo", "--pr", "7", "--gh"}, &out, &errb)
+	return code, out.String(), errb.String()
+}
+
+// A session outside a Legion pane adds --gh: the same rule runs through its own gh, which gets
+// GH_REPO so it authenticates for the repository from any directory, and whose stderr is shown on
+// success too. With no grant there are no Legion App logins, so no thread counts as a bot's.
+func TestThreadsResolveWithGhResolvesThroughTheSessionsOwnGh(t *testing.T) {
+	gh := newStandinGh(t, threadsPage(
+		threadVector{id: "accepted", openerType: "User", opener: "reviewer", newestType: "User", newest: "reviewer", body: "Accepted: fixed", state: "SUBMITTED"},
+		threadVector{id: "ci-bot", openerType: "Bot", opener: "claude", newestType: "Bot", newest: "legion-reviewer", body: "Accepted: fixed", state: "SUBMITTED"},
+	))
+	outsideAPane(t)
+	code, stdout, stderr := runThreadsResolveWithGh(t)
+	if code != 0 {
+		t.Fatalf("threads resolve --gh = %d: %s", code, stderr)
+	}
+	want := "resolved https://github.test/thread/accepted — its opener's acceptance\n" +
+		"left open https://github.test/thread/ci-bot — newest reply by legion-reviewer is not its opener's acceptance, and this session cannot identify Legion's review App, so a bot's thread closes only on its opener's Accepted:\n"
+	if stdout != want {
+		t.Fatalf("stdout = %q\nwant     %q", stdout, want)
+	}
+	if stderr != ghNotice+ghNotice {
+		t.Fatalf("stderr = %q, want gh's stderr from both calls, %q each", stderr, ghNotice)
+	}
+	calls := gh.calls()
+	if len(calls) != 2 {
+		t.Fatalf("gh ran %d times, want the reviewThreads query and one resolve", len(calls))
+	}
+	for i, call := range calls {
+		if call.argv != "api graphql --input -" || call.ghRepo != "owner/repo" {
+			t.Errorf("gh call %d: argv %q, GH_REPO %q; want `api graphql --input -` with GH_REPO owner/repo", i+1, call.argv, call.ghRepo)
+		}
+	}
+	if !strings.Contains(calls[0].request.Query, "reviewThreads") || calls[0].request.Variables["owner"] != "owner" || calls[0].request.Variables["name"] != "repo" || calls[0].request.Variables["number"] != float64(7) {
+		t.Errorf("gh's first request = %+v, want the reviewThreads query for owner/repo#7", calls[0].request)
+	}
+	if !strings.Contains(calls[1].request.Query, "resolveReviewThread") || calls[1].request.Variables["threadId"] != "accepted" {
+		t.Errorf("gh's second request = %+v, want resolveReviewThread for accepted", calls[1].request)
+	}
+}
+
+// A gh that fails is named with its exit status and its own message, and nothing is resolved.
+func TestThreadsResolveWithGhNamesAFailedGh(t *testing.T) {
+	gh := newStandinGh(t, threadsPage())
+	gh.fail()
+	outsideAPane(t)
+	code, stdout, stderr := runThreadsResolveWithGh(t)
+	want := "legion threads resolve: gh api graphql failed (exit 4): HTTP 401: Bad credentials (https://api.github.com/graphql)\n"
+	if code != 1 || stdout != "" || stderr != want {
+		t.Fatalf("threads resolve --gh = %d, stdout %q, stderr %q; want 1 and %q", code, stdout, stderr, want)
+	}
+	if calls := gh.calls(); len(calls) != 1 {
+		t.Fatalf("gh ran %d times, want only the failed query", len(calls))
+	}
+}
+
+// In a Legion pane, which names its grant file, --gh is refused before anything runs: the pane's
+// gh is `legion gh`, and the pane has its grant.
+func TestThreadsResolveRefusesGhInALegionPane(t *testing.T) {
+	gh := newStandinGh(t, threadsPage())
+	outsideAPane(t)
+	t.Setenv("LEGION_GRANT_FILE", filepath.Join(t.TempDir(), "grant"))
+	code, stdout, stderr := runThreadsResolveWithGh(t)
+	want := "legion threads resolve: --gh is for a session outside a Legion pane; this pane names a grant (LEGION_GRANT_FILE), so run legion threads resolve without --gh\n"
+	if code != 1 || stdout != "" || stderr != want {
+		t.Fatalf("threads resolve --gh in a pane = %d, stdout %q, stderr %q; want 1 and %q", code, stdout, stderr, want)
+	}
+	if calls := gh.calls(); len(calls) != 0 {
+		t.Fatalf("gh ran %d times in a pane, want never", len(calls))
+	}
+}
+
+// A session with no grant that leaves out --gh is told it can add it.
+func TestThreadsResolveWithoutAGrantNamesGh(t *testing.T) {
+	outsideAPane(t)
+	var out, errb bytes.Buffer
+	code := run(context.Background(), []string{"legion", "threads", "resolve", "--repo", "owner/repo", "--pr", "7"}, &out, &errb)
+	want := "legion threads resolve: Unable to redeem LEGION_GRANT: LEGION_GRANT_FILE is missing (and LEGION_GRANT is unset); a session outside a Legion pane has no grant and adds --gh to resolve through its own gh\n"
+	if code != 1 || errb.String() != want {
+		t.Fatalf("threads resolve with no grant = %d, stderr %q; want 1 and %q", code, errb.String(), want)
 	}
 }

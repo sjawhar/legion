@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 
@@ -38,10 +40,18 @@ func runThreads(ctx context.Context, args []string, stdout, stderr io.Writer) in
 	return runSubcommand(ctx, "threads", threadsCommands, args, stdout, stderr)
 }
 
+// runResolveThreads is `legion threads resolve`: as the App of the role running it, or with --gh
+// as whoever the caller's own gh authenticates as, it resolves every unresolved review thread the
+// rule (resolution) closes and names every other one as left open. --gh is for a session outside a
+// Legion pane, which has no grant: it applies the same rule through the session's own gh
+// (ghGraphQL), from any directory, and knows none of Legion's role Apps, so no thread counts as a
+// bot's. Inside a pane --gh is refused before anything runs: the pane's gh is `legion gh`, which
+// refuses a GraphQL body it cannot read, and the pane has its grant.
 func runResolveThreads(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	flags := newFlags("threads resolve", "usage: legion threads resolve --pr <number> --repo <owner>/<repo>", stderr)
+	flags := newFlags("threads resolve", "usage: legion threads resolve --pr <number> --repo <owner>/<repo> [--gh]", stderr)
 	pr := flags.String("pr", "", "pull request number (required)")
 	repo := flags.String("repo", "", "repository owner/name (required)")
+	useGh := flags.Bool("gh", false, "authenticate with your own gh instead of a Legion grant: for a session outside a Legion pane")
 	if code, ok := parseFlags(flags, args); !ok {
 		return code
 	}
@@ -59,23 +69,38 @@ func runResolveThreads(ctx context.Context, args []string, stdout, stderr io.Wri
 		fmt.Fprintln(stderr, "legion threads resolve: --pr must be a positive pull request number")
 		return 2
 	}
-	response, err := redeemGrant(ctx, "/legion/v1/gh-token")
-	if err != nil {
-		fmt.Fprintf(stderr, "legion threads resolve: Unable to redeem LEGION_GRANT: %v\n", err)
-		return 1
+	var call githubGraphQL
+	var apps *legionApps
+	if *useGh {
+		if _, set := os.LookupEnv("LEGION_GRANT_FILE"); set {
+			fmt.Fprintln(stderr, "legion threads resolve: --gh is for a session outside a Legion pane; this pane names a grant (LEGION_GRANT_FILE), so run legion threads resolve without --gh")
+			return 1
+		}
+		call = ghGraphQL(repository, stderr)
+	} else {
+		response, err := redeemGrant(ctx, "/legion/v1/gh-token")
+		if err != nil {
+			hint := ""
+			if errors.Is(err, errNoGrant) {
+				hint = "; a session outside a Legion pane has no grant and adds --gh to resolve through its own gh"
+			}
+			fmt.Fprintf(stderr, "legion threads resolve: Unable to redeem LEGION_GRANT: %v%s\n", err, hint)
+			return 1
+		}
+		defer response.Body.Close()
+		var credential githubTokenResponse
+		if err := json.NewDecoder(response.Body).Decode(&credential); err != nil || credential.Token == "" {
+			fmt.Fprintln(stderr, "legion threads resolve: daemon returned an invalid GitHub credential response")
+			return 1
+		}
+		apps, err = legionAppsFrom(credential.LegionAppLogins)
+		if err != nil {
+			fmt.Fprintf(stderr, "legion threads resolve: daemon returned an invalid GitHub credential response: %v\n", err)
+			return 1
+		}
+		call = tokenGraphQL(credential.Token)
 	}
-	defer response.Body.Close()
-	var credential githubTokenResponse
-	if err := json.NewDecoder(response.Body).Decode(&credential); err != nil || credential.Token == "" {
-		fmt.Fprintln(stderr, "legion threads resolve: daemon returned an invalid GitHub credential response")
-		return 1
-	}
-	apps, err := legionAppsFrom(credential.LegionAppLogins)
-	if err != nil {
-		fmt.Fprintf(stderr, "legion threads resolve: daemon returned an invalid GitHub credential response: %v\n", err)
-		return 1
-	}
-	threads, err := unresolvedReviewThreads(ctx, credential.Token, repository, number)
+	threads, err := unresolvedReviewThreads(ctx, call, repository, number)
 	if err != nil {
 		fmt.Fprintf(stderr, "legion threads resolve: %v\n", err)
 		return 1
@@ -96,7 +121,7 @@ func runResolveThreads(ctx context.Context, args []string, stdout, stderr io.Wri
 			fmt.Fprintf(stdout, "left open %s — newest reply by %s is %s\n", thread.url, by, reason)
 			continue
 		}
-		if err := graphql(ctx, credential.Token, resolveReviewThreadMutation, map[string]any{"threadId": thread.id}, nil); err != nil {
+		if err := call(ctx, resolveReviewThreadMutation, map[string]any{"threadId": thread.id}, nil); err != nil {
 			return threadFailure(stderr, thread.url, err)
 		}
 		fmt.Fprintf(stdout, "resolved %s — %s\n", thread.url, how)
@@ -205,12 +230,12 @@ func resolution(thread reviewThread, apps *legionApps) (how, reason string) {
 	return "", "not its opener's or the Legion reviewer's acceptance"
 }
 
-func unresolvedReviewThreads(ctx context.Context, token string, repository ghrepo.Repository, number int) ([]reviewThread, error) {
+func unresolvedReviewThreads(ctx context.Context, call githubGraphQL, repository ghrepo.Repository, number int) ([]reviewThread, error) {
 	var all []reviewThread
 	var after any
 	for {
 		var page reviewThreadsPage
-		if err := graphql(ctx, token, reviewThreadsQuery, map[string]any{"owner": repository.Owner(), "name": repository.Name(), "number": number, "after": after}, &page); err != nil {
+		if err := call(ctx, reviewThreadsQuery, map[string]any{"owner": repository.Owner(), "name": repository.Name(), "number": number, "after": after}, &page); err != nil {
 			return nil, err
 		}
 		if page.Data.Repository.PullRequest == nil {
@@ -276,33 +301,84 @@ type reviewComment struct {
 	} `json:"author"`
 }
 
-func graphql(ctx context.Context, token, query string, variables map[string]any, into any) error {
-	body, err := json.Marshal(map[string]any{"query": query, "variables": variables})
-	if err != nil {
-		return err
+// githubGraphQL is one GraphQL call against GitHub as the identity its transport carries: the App
+// whose token a grant redeemed (tokenGraphQL), or whoever the caller's own gh authenticates as
+// (ghGraphQL). It fails with GitHub's own message, and decodes the response into into when into is
+// not nil.
+type githubGraphQL func(ctx context.Context, query string, variables map[string]any, into any) error
+
+// tokenGraphQL calls GitHub's GraphQL endpoint with token as the bearer.
+func tokenGraphQL(token string) githubGraphQL {
+	return func(ctx context.Context, query string, variables map[string]any, into any) error {
+		body, err := json.Marshal(map[string]any{"query": query, "variables": variables})
+		if err != nil {
+			return err
+		}
+		endpoint := os.Getenv("LEGION_GITHUB_GRAPHQL_URL")
+		if endpoint == "" {
+			endpoint = "https://api.github.com/graphql"
+		}
+		request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+		if err != nil {
+			return err
+		}
+		request.Header.Set("Authorization", "Bearer "+token)
+		request.Header.Set("Content-Type", "application/json")
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			return err
+		}
+		defer response.Body.Close()
+		encoded, err := io.ReadAll(response.Body)
+		if err != nil {
+			return err
+		}
+		if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+			return fmt.Errorf("GitHub returned %d: %s", response.StatusCode, strings.TrimSpace(string(encoded)))
+		}
+		return graphqlResult(encoded, into)
 	}
-	endpoint := os.Getenv("LEGION_GITHUB_GRAPHQL_URL")
-	if endpoint == "" {
-		endpoint = "https://api.github.com/graphql"
+}
+
+// ghGraphQL calls GitHub through the caller's own gh (`gh api graphql --input -`), for a session
+// outside a Legion pane, which has no grant to redeem. gh gets the caller's environment, which
+// decides whose credential it uses, with GH_REPO set to the repository, so a gh that picks its
+// credential by repository (the devbox shim routes to that owner's App) authenticates for it from
+// any directory. A failed gh fails with gh's own message; a successful one has its stderr copied to
+// stderr verbatim, since that is where such a gh says the call acts as someone else (an inherited
+// GH_TOKEN, a fallback personal token).
+func ghGraphQL(repository ghrepo.Repository, stderr io.Writer) githubGraphQL {
+	return func(ctx context.Context, query string, variables map[string]any, into any) error {
+		body, err := json.Marshal(map[string]any{"query": query, "variables": variables})
+		if err != nil {
+			return err
+		}
+		gh := exec.CommandContext(ctx, "gh", "api", "graphql", "--input", "-")
+		gh.Env = append(os.Environ(), "GH_REPO="+repository.String())
+		gh.Stdin = bytes.NewReader(body)
+		var out, errOut bytes.Buffer
+		gh.Stdout, gh.Stderr = &out, &errOut
+		if err := gh.Run(); err != nil {
+			var exited *exec.ExitError
+			if !errors.As(err, &exited) {
+				return fmt.Errorf("run gh api graphql: %w", err)
+			}
+			message := strings.TrimSpace(errOut.String())
+			if message == "" {
+				message = strings.TrimSpace(out.String())
+			}
+			return fmt.Errorf("gh api graphql failed (exit %d): %s", exited.ExitCode(), message)
+		}
+		if errOut.Len() > 0 {
+			_, _ = stderr.Write(errOut.Bytes())
+		}
+		return graphqlResult(out.Bytes(), into)
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	request.Header.Set("Authorization", "Bearer "+token)
-	request.Header.Set("Content-Type", "application/json")
-	response, err := http.DefaultClient.Do(request)
-	if err != nil {
-		return err
-	}
-	defer response.Body.Close()
-	encoded, err := io.ReadAll(response.Body)
-	if err != nil {
-		return err
-	}
-	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		return fmt.Errorf("GitHub returned %d: %s", response.StatusCode, strings.TrimSpace(string(encoded)))
-	}
+}
+
+// graphqlResult is a GraphQL response body: its first error as GitHub's message, or the response
+// decoded into into when into is not nil.
+func graphqlResult(encoded []byte, into any) error {
 	var envelope struct {
 		Errors []struct {
 			Message string `json:"message"`
