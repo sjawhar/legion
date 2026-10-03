@@ -1,11 +1,12 @@
 import { expect, jest, spyOn, test } from "bun:test";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { type MutationKey, QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { type ReactNode, useState } from "react";
 import { MemoryRouter } from "react-router-dom";
 
 import { ApiError, api } from "../../api/client";
 import type { Agent, Comment, Message } from "../../api/types";
+import { useSending } from "../../hooks/useSending";
 import type { ComposerOwner } from "./composer-model";
 import { MentionComposer, reconcileMentions } from "./MentionComposer";
 import { SEND_DEADLINE_MS } from "./send-request";
@@ -1439,40 +1440,117 @@ test("a refusal belongs to the mark it answered: a newer anchor leaves it behind
   }
 });
 
-// A send's draft and every control a host holds for it are the server's until it answers, so a
-// request the server never answers cannot keep them: past the deadline the send ends as refused,
-// with the draft it sent handed back, and the composer takes the reader's next move.
-test("a send the server never answers is refused at the deadline, with its draft", async () => {
-  const createComment = spyOn(api, "createComment").mockImplementation(
-    () => Promise.withResolvers<Comment>().promise
+const hostKey: MutationKey = ["conversation-composer", "CORE-1"];
+
+/** A host's two holds on the composer's send: a Reply's, which lasts until the server answers,
+ *  and a Back's, which lets go at the send's deadline. */
+function HostHolds(): ReactNode {
+  const reply = useSending(hostKey).sending;
+  const back = useSending(hostKey, { untilDeadline: true }).sending;
+  return (
+    <output data-testid="host-holds">{`Reply ${reply ? "held" : "free"}, Back ${back ? "held" : "free"}`}</output>
   );
+}
+
+function renderHostedComposer() {
+  const queryClient = new QueryClient({
+    defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+  });
+  const invalidated = spyOn(queryClient, "invalidateQueries");
+  const view = render(
+    <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+      <QueryClientProvider client={queryClient}>
+        <HostHolds />
+        <MentionComposer
+          mutationKey={hostKey}
+          onClose={() => {}}
+          onSent={() => {}}
+          owner={{ issueKey: "CORE-1", kind: "issue" }}
+        />
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+  return { invalidated, view };
+}
+
+const stillSending =
+  "Still sending — the server has not answered in 30 seconds. The draft stays here until it does.";
+
+// Past its deadline a send is still the server's: a Retry would post it a second time. The
+// composer keeps the draft and the host keeps its Reply, and only the host's Back lets go, so a
+// request the server never answers cannot keep the reader in front of it.
+test("a send the server answers at 35 s posts once: the deadline offers no Retry, and the answer lands", async () => {
+  const answer = Promise.withResolvers<Comment>();
+  const createComment = spyOn(api, "createComment").mockReturnValueOnce(answer.promise);
   jest.useFakeTimers();
-  const { view } = renderComposer();
+  const { invalidated, view } = renderHostedComposer();
+  const holds = () => screen.getByTestId("host-holds").textContent;
 
   try {
     const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
-    fireEvent.change(field, { target: { value: "Hung send" } });
+    fireEvent.change(field, { target: { value: "Slow but sure" } });
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Send" }));
     });
-    expect(createComment).toHaveBeenCalledTimes(1);
-    expect(holdControls().disabled).toBe(true);
+    expect(holds()).toBe("Reply held, Back held");
 
     await act(async () => {
-      jest.advanceTimersByTime(SEND_DEADLINE_MS - 1);
+      jest.advanceTimersByTime(SEND_DEADLINE_MS);
     });
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    expect(screen.getByText(stillSending)).toBeTruthy();
+    expect(field.value).toBe("Slow but sure");
     expect(holdControls().disabled).toBe(true);
+    expect(holds()).toBe("Reply held, Back free");
+    // Ctrl+Enter is Send's other way in, and the send is still out.
+    fireEvent.keyDown(field, { ctrlKey: true, key: "Enter" });
+
     await act(async () => {
-      jest.advanceTimersByTime(1);
+      jest.advanceTimersByTime(5_000);
+      answer.resolve(createdComment);
     });
-    expect(
-      screen.getByText(
-        "Couldn't send — the server did not answer within 30 seconds. It may still arrive, so look for it before you retry"
-      )
-    ).toBeTruthy();
-    expect(holdControls().disabled).toBe(false);
-    expect(field.value).toBe("Hung send");
+    expect(createComment).toHaveBeenCalledTimes(1);
+    expect(field.value).toBe("");
+    expect(screen.queryByText(stillSending)).toBeNull();
+    expect(holds()).toBe("Reply free, Back free");
+    const refreshed = invalidated.mock.calls.map(([filters]) => JSON.stringify(filters?.queryKey));
+    expect(refreshed).toContain(JSON.stringify(["comments", "CORE-1"]));
+    expect(refreshed).toContain(JSON.stringify(["events", "CORE-1"]));
+  } finally {
+    jest.useRealTimers();
+    view.unmount();
+    createComment.mockRestore();
+  }
+});
+
+// The answer that follows a deadline is the send's outcome whatever it is: a refusal hands the
+// draft back with Retry, as one inside the deadline does.
+test("a refusal after the deadline hands the draft back with Retry", async () => {
+  const answer = Promise.withResolvers<Comment>();
+  const createComment = spyOn(api, "createComment").mockReturnValueOnce(answer.promise);
+  jest.useFakeTimers();
+  const { view } = renderHostedComposer();
+
+  try {
+    const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
+    fireEvent.change(field, { target: { value: "Refused late" } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    });
+    await act(async () => {
+      jest.advanceTimersByTime(SEND_DEADLINE_MS);
+    });
+    expect(screen.getByText(stillSending)).toBeTruthy();
+
+    await act(async () => {
+      answer.reject(new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" }));
+    });
+    expect(screen.getByText("Couldn't send — the server is down")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
+    expect(screen.queryByText(stillSending)).toBeNull();
+    expect(field.value).toBe("Refused late");
+    expect(holdControls().disabled).toBe(false);
+    expect(screen.getByTestId("host-holds").textContent).toBe("Reply free, Back free");
   } finally {
     jest.useRealTimers();
     view.unmount();

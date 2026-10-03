@@ -327,6 +327,46 @@ test("a docked send out when its issue closes keeps the draft and shows the refu
   }
 });
 
+// The client's deadline lets go of the controls that would take the reader away from a send; it
+// is not a refusal. A comment that mentions agents can take the server longer than that, and it
+// is still one comment: the deadline offers no Retry, and the answer that follows lands as any
+// answer does.
+test("a docked send the server answers at 35 s posts once and shows once, with no Retry at the deadline", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Slow server" });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.clock.install();
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const form = page.getByRole("form", { name: "Comment composer" });
+    const field = form.getByLabel("Comment");
+    const send = await holdPosts(page, `**/api/v1/issues/${issue.key}/comments`);
+    await field.fill("Slow but sure");
+    await form.getByRole("button", { exact: true, name: "Send" }).click();
+    await expect(field).toBeDisabled();
+
+    await page.clock.fastForward(30_500);
+    await expect(form.getByText(/^Still sending/)).toBeVisible();
+    await expect(form.getByRole("button", { name: "Retry" })).toHaveCount(0);
+    await expect(field).toHaveValue("Slow but sure");
+    await expect(field).toBeDisabled();
+
+    await page.clock.fastForward(4_500);
+    send.release();
+    const turns = page.getByRole("list", { name: "Conversation turns" });
+    await expect(turns.getByText("Slow but sure", { exact: true })).toHaveCount(1);
+    await expect(field).toHaveValue("");
+    await expect(form.getByText(/^Still sending/)).toHaveCount(0);
+    expect(send.posts()).toBe(1);
+  } finally {
+    await alice.close();
+  }
+});
+
 // Closing and reopening the issue while a send is out leaves the send's own composer where it
 // was: the draft held through it, the refusal shown beside it, and the field taking typing after.
 test("an issue closed and reopened under a docked send leaves that send's composer in place", async ({

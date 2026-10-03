@@ -110,30 +110,30 @@ export function survivingMentions(
   return surviving;
 }
 
-/** How long a send waits for the server's answer before the composer gives it up. A send's draft,
- *  and every control a host holds for it, are the server's until it answers; a request the server
- *  never answers would hold them for good, so past this the send ends as refused, with its draft. */
+/** How long a send holds what takes the reader away from its composer - a host's Back, Escape or
+ *  Collapse thread - before it lets go: a request the server never answers would hold them for
+ *  good. The request goes on past it, and its answer is still the send's outcome. */
 export const SEND_DEADLINE_MS = 30_000;
 
-/** A send the server did not answer within `SEND_DEADLINE_MS`. The request may still land, so the
- *  refusal says to look for it before sending again. */
+/** A send the server did not answer within `SEND_DEADLINE_MS`. It is not a refusal: the request
+ *  goes on, and `answer` is still its outcome. */
 export class SendDeadlineError extends Error {
-  constructor() {
-    super(
-      `the server did not answer within ${SEND_DEADLINE_MS / 1000} seconds. It may still arrive, so look for it before you retry`
-    );
+  readonly answer: Promise<unknown>;
+
+  constructor(answer: Promise<unknown>) {
+    super(`the server has not answered within ${SEND_DEADLINE_MS / 1000} seconds`);
+    this.answer = answer;
     this.name = "SendDeadlineError";
   }
 }
 
-/** `sendRequest`, refused with a `SendDeadlineError` once `SEND_DEADLINE_MS` passes unanswered.
- *  The request itself is left to finish: the client cannot take back one the server may have. */
+/** `sendRequest`, answered by the server, or rejected with a `SendDeadlineError` carrying the
+ *  request's own answer once `SEND_DEADLINE_MS` passes without one. */
 export function sendWithinDeadline(sent: SentRequest): Promise<unknown> {
+  const answer = sendRequest(sent);
   const { promise, reject, resolve } = Promise.withResolvers<unknown>();
-  const deadline = setTimeout(() => reject(new SendDeadlineError()), SEND_DEADLINE_MS);
-  sendRequest(sent)
-    .then(resolve, reject)
-    .finally(() => clearTimeout(deadline));
+  const deadline = setTimeout(() => reject(new SendDeadlineError(answer)), SEND_DEADLINE_MS);
+  answer.then(resolve, reject).finally(() => clearTimeout(deadline));
   return promise;
 }
 

@@ -401,9 +401,10 @@ test("on a phone, a thread resolved while its own reply is out stays open with t
 });
 
 // Back, Escape and the thread's own controls wait for a send from the thread, so a request the
-// server never answers must not keep the reader there: past the client's deadline the send ends
-// as refused, with its draft, and Back takes the reader out.
-test("on a phone, a thread reply the server never answers is refused at the deadline, and Back works", async ({
+// server never answers must not keep the reader there: past the client's deadline they let go,
+// and Back takes the reader out. The send is not refused - the server may still take it - so the
+// thread offers no Retry, and the draft stays held.
+test("on a phone, a thread reply the server never answers lets Back go at the deadline", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -430,13 +431,11 @@ test("on a phone, a thread reply the server never answers is refused at the dead
     await page.clock.fastForward(29_000);
     await expect(back).toBeDisabled();
     await page.clock.fastForward(1_500);
-    await expect(
-      form.getByText(
-        "Couldn't send — the server did not answer within 30 seconds. It may still arrive, so look for it before you retry"
-      )
-    ).toBeVisible();
+    await expect(form.getByText(/^Still sending/)).toBeVisible();
+    await expect(form.getByRole("button", { name: "Retry" })).toHaveCount(0);
     await expect(field).toHaveValue("Reply into the void");
-    await expect(field).toBeEnabled();
+    await expect(field).toBeDisabled();
+    await expect(back).toBeEnabled();
     expect(send.posts()).toBe(1);
     await back.click();
     await expect(threadView(page)).toHaveCount(0);

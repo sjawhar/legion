@@ -610,7 +610,10 @@ function CommentTurn({
     () => threadReplySendKey(sendKey, item.event.payload.id),
     [item.event.payload.id, sendKey]
   );
-  const { sending: replySending, sendingNow: replySendingNow } = useSending(replySendKey);
+  // Collapse thread unmounts the reply composer, so it waits for the reply only until its deadline.
+  const { sending: replySending, sendingNow: replySendingNow } = useSending(replySendKey, {
+    untilDeadline: true,
+  });
   const retryGuard = useSubmitGuard();
   const retry = useMutation({
     mutationFn: (delivery: CommentDeliveryAttempt) =>
@@ -953,12 +956,14 @@ export function ConversationTab({
     () => threadReplySendKey(sendKey, phoneThreadId ?? ""),
     [phoneThreadId, sendKey]
   );
-  const { sending: phoneThreadReplySending, sendingNow: phoneThreadReplySendingNow } =
-    useSending(phoneThreadReplyKey);
+  const { sending: phoneThreadReplySending, sendingNow: phoneThreadReplySendingNow } = useSending(
+    phoneThreadReplyKey,
+    { untilDeadline: true }
+  );
   // The phone thread composer names its send beneath the tab's, so every Reply holds for it as for
   // the docked composer's, and the thread view can tell its send from the docked one's.
   const phoneComposerKey = useMemo<MutationKey>(() => [...sendKey, "phone-thread"], [sendKey]);
-  const { sending: phoneComposerSending } = useSending(phoneComposerKey);
+  const { sending: phoneComposerSending } = useSending(phoneComposerKey, { untilDeadline: true });
   const threadComposerSending = phoneComposerSending && threadReplyTo !== null;
   // Set when the viewport widened past the phone layout while a send from the thread view was
   // out - its card's own reply, or the thread composer's: the view stays open, full-screen at any

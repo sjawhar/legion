@@ -23,6 +23,7 @@ import { QueryError } from "../../components/QueryError";
 import { RefusableButton } from "../../components/RefusableButton";
 import { TruncatedText } from "../../components/TruncatedText";
 import { submitOnModifiedEnter } from "../../hooks/submitOnModifiedEnter";
+import { pastDeadlineKey } from "../../hooks/useSending";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import {
   badgeMed,
@@ -74,6 +75,7 @@ import {
   type DeliveryPlan,
   deliveryPlan,
   mentionText,
+  SEND_DEADLINE_MS,
   SendDeadlineError,
   type SentRequest,
   sendWithinDeadline,
@@ -544,50 +546,81 @@ export function MentionComposer({
     textarea.current?.focus();
   }, [replaceDraft, replyTo]);
 
+  /** A send the server took. The caches refreshed are the ones the send wrote, named by its own
+   *  request. The draft is the composer's own, so it clears to what the channel it addresses now
+   *  seeds. */
+  const landed = ({ anchor: sentAnchor, edit: sentEdit, owner: sentOwner }: SentRequest) => {
+    clearDraft();
+    onSent();
+    if (sentOwner.kind === "session") {
+      void queryClient.invalidateQueries({
+        queryKey: agentMessagesQuery(sentOwner.sessionId).queryKey,
+      });
+    } else {
+      void queryClient.invalidateQueries({
+        queryKey:
+          sentOwner.kind === "issue"
+            ? ["comments", sentOwner.issueKey]
+            : ["artifact", sentOwner.artifactId, "comments"],
+      });
+      void queryClient.invalidateQueries({ queryKey: ["inbox"] });
+      if (sentAnchor !== undefined) {
+        void queryClient.invalidateQueries({
+          queryKey: ["artifact", sentAnchor.artifact, "blocks"],
+        });
+      }
+      if (sentOwner.kind === "issue") {
+        void queryClient.invalidateQueries({ queryKey: ["events", sentOwner.issueKey] });
+        void queryClient.invalidateQueries({ queryKey: ["issue", sentOwner.issueKey] });
+      } else {
+        void queryClient.invalidateQueries({ queryKey: ["artifact", sentOwner.artifactId] });
+        void queryClient.invalidateQueries({
+          queryKey: ["project", sentOwner.project, "artifacts"],
+        });
+      }
+    }
+    if (!inline && sentEdit === undefined) onClose();
+  };
+  // A send past its deadline, waiting for its answer under `pastDeadlineKey`. The composer still
+  // holds its draft, and a host's hold on the send's name - a Reply, an issue pick - still counts
+  // it. Only a hold `untilDeadline` lets go - a host's Back, Escape and Collapse thread - so a
+  // request the server never answers cannot keep the reader in front of it.
+  const late = useMutation({
+    mutationFn: ({ answer }: { answer: Promise<unknown>; sent: SentRequest }) => answer,
+    mutationKey: mutationKey === undefined ? undefined : pastDeadlineKey(mutationKey),
+    onError: (_error, { sent }) => replaceDraft(sent.draft),
+    onSettled: () => submitGuard.release(),
+    onSuccess: (_data, { sent }) => landed(sent),
+  });
   const save = useMutation({
     mutationFn: sendWithinDeadline,
     mutationKey,
-    // A refusal restores the complete draft the request turned down, not a later edit: its body,
-    // accepted mentions, and suggestion replacement stay in step for Retry or further editing.
-    onError: (_error, sent) => replaceDraft(sent.draft),
-    onSettled: () => submitGuard.release(),
-    // The caches refreshed are the ones the send wrote, named by its own request. The draft is
-    // the composer's own, so it clears to what the channel it addresses now seeds.
-    onSuccess: (_data, { anchor: sentAnchor, edit: sentEdit, owner: sentOwner }) => {
-      clearDraft();
-      onSent();
-      if (sentOwner.kind === "session") {
-        void queryClient.invalidateQueries({
-          queryKey: agentMessagesQuery(sentOwner.sessionId).queryKey,
-        });
-      } else {
-        void queryClient.invalidateQueries({
-          queryKey:
-            sentOwner.kind === "issue"
-              ? ["comments", sentOwner.issueKey]
-              : ["artifact", sentOwner.artifactId, "comments"],
-        });
-        void queryClient.invalidateQueries({ queryKey: ["inbox"] });
-        if (sentAnchor !== undefined) {
-          void queryClient.invalidateQueries({
-            queryKey: ["artifact", sentAnchor.artifact, "blocks"],
-          });
-        }
-        if (sentOwner.kind === "issue") {
-          void queryClient.invalidateQueries({ queryKey: ["events", sentOwner.issueKey] });
-          void queryClient.invalidateQueries({ queryKey: ["issue", sentOwner.issueKey] });
-        } else {
-          void queryClient.invalidateQueries({ queryKey: ["artifact", sentOwner.artifactId] });
-          void queryClient.invalidateQueries({
-            queryKey: ["project", sentOwner.project, "artifacts"],
-          });
-        }
+    onError: (error, sent) => {
+      // Past its deadline the request is not refused: it goes on as `late`, whose answer is the
+      // send's outcome.
+      if (error instanceof SendDeadlineError) {
+        late.mutate({ answer: error.answer, sent });
+        return;
       }
-      if (!inline && sentEdit === undefined) onClose();
+      // A refusal restores the complete draft the request turned down, not a later edit: its
+      // body, accepted mentions, and suggestion replacement stay in step for Retry or editing.
+      replaceDraft(sent.draft);
     },
+    onSettled: (_data, error) => {
+      if (!(error instanceof SendDeadlineError)) submitGuard.release();
+    },
+    onSuccess: (_data, sent) => landed(sent),
   });
+  const sending = save.isPending || late.isPending;
+  // What the server refused, for the reader: a deadline is not a refusal, and the answer that
+  // follows one is.
+  const refusal = late.isError
+    ? late.error
+    : save.isError && !(save.error instanceof SendDeadlineError)
+      ? save.error
+      : undefined;
   // Closed, with no send out and no refusal to show: nothing of this composer is on screen.
-  const dormant = closed && !save.isPending && !save.isError;
+  const dormant = closed && !sending && refusal === undefined;
   useEffect(() => {
     const form = formRef.current;
     if (form === null || dormant) return;
@@ -786,7 +819,7 @@ export function MentionComposer({
     ? "This issue is closed. Reopen it to send."
     : draftRefusal(kind, body, replacement, outbound);
   const footId = useId();
-  const canSubmit = canSubmitComposer(submitReason, save.isPending, pendingUploads);
+  const canSubmit = canSubmitComposer(submitReason, sending, pendingUploads);
   /** Sends the draft as it stands, its whole request frozen here (`sentRequest`), so nothing done
    *  after this call can change where it goes. Until the server answers, one fieldset holds every
    *  control that could change or discard the draft; the submit guard covers that hold in this
@@ -796,6 +829,7 @@ export function MentionComposer({
       setConfirmingDiscard(false);
       setAutocomplete(undefined);
       setReferencePickerOpen(false);
+      late.reset();
       save.mutate(sentRequest());
     });
   const stopHeldComposerInput = (event: SyntheticEvent) => {
@@ -809,11 +843,12 @@ export function MentionComposer({
   };
   /** Drops the draft and a refusal with it. Offered only while no send is out - the prompt never
    *  shows then (`send` closes it, and Escape raises none), and a closed composer's Discard sits
-   *  beside a refusal - so the save it resets has its answer: the refusal goes with the draft it
+   *  beside a refusal - so the send it resets has its answer: the refusal goes with the draft it
    *  was about. */
   const discard = () => {
     clearDraft();
     save.reset();
+    late.reset();
     setConfirmingDiscard(false);
     onClose();
   };
@@ -864,7 +899,7 @@ export function MentionComposer({
             ? "min-w-0 border-0 p-0"
             : "min-w-0 space-y-3 border-0 p-0"
       }
-      disabled={save.isPending}
+      disabled={sending}
       onChangeCapture={stopHeldComposerInput}
       onClickCapture={stopHeldComposerInput}
       onInputCapture={stopHeldComposerInput}
@@ -1219,19 +1254,26 @@ export function MentionComposer({
           ) : null}
         </>
       )}
-      {save.isError ? (
+      {/* Past its deadline a send is still the server's: no Retry, which would post it twice. */}
+      {late.isPending ? (
+        <p className={`text-sm ${textMutedOnSurfaceMuted}`} role="status">
+          Still sending — the server has not answered in {SEND_DEADLINE_MS / 1000} seconds. The
+          draft stays here until it does.
+        </p>
+      ) : null}
+      {refusal === undefined ? null : (
         <div className="flex flex-wrap items-center gap-3">
           <QueryError
             message={
-              save.error instanceof ApiError &&
-              save.error.status === 409 &&
-              save.error.code === "ANCHOR_MISSING"
-                ? save.error.message
-                : `Couldn't send — ${save.error instanceof SendDeadlineError ? save.error.message : apiErrorMessage(save.error, "network error")}`
+              refusal instanceof ApiError &&
+              refusal.status === 409 &&
+              refusal.code === "ANCHOR_MISSING"
+                ? refusal.message
+                : `Couldn't send — ${apiErrorMessage(refusal, "network error")}`
             }
             // Retry sends the draft as it stands, so it asks what Send asks of it.
             onRetry={canSubmit ? send : undefined}
-            retrying={save.isPending}
+            retrying={sending}
           />
           {/* A closed owner takes no Retry, so the refusal's own way out is to drop the draft it
               handed back, once the reader has it. */}
@@ -1245,9 +1287,9 @@ export function MentionComposer({
             </button>
           ) : null}
         </div>
-      ) : null}
+      )}
       <RefusableButton
-        busy={save.isPending ? "Sending…" : pendingUploads > 0 ? "Uploading file…" : undefined}
+        busy={sending ? "Sending…" : pendingUploads > 0 ? "Uploading file…" : undefined}
         refusal={submitReason ?? null}
         refusalShownBy={footId}
         type="submit"

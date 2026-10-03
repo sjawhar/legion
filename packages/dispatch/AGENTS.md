@@ -47,12 +47,15 @@ dependency in its body. For the image-pin comparison and `/healthz` deployment e
   it settles, whether or not its composer is still mounted; that decides only what the reader
   sees. A refusal therefore hands back exactly the draft that was sent, over nothing written since,
   and Discard only ever drops a send that has its answer. A send has a client deadline
-  (`SEND_DEADLINE_MS` in `send-request.ts`, 30 s): one the server has not answered by then ends as
-  refused - `the server did not answer within 30 seconds. It may still arrive, so look for it
-  before you retry` - with its draft, so a request that hangs never keeps a reader behind a held
-  Back, Escape or Collapse thread. An upload carries its target as its own mutation variable,
-  taken by the paste or drop that starts it, so a pick in that task moves the next message, never
-  the file.
+  (`SEND_DEADLINE_MS` in `send-request.ts`, 30 s), and it is not a refusal: a comment that
+  mentions agents can take the server longer. Past it the request goes on under
+  `pastDeadlineKey` (`hooks/useSending.ts`), and its answer is still the send's outcome - a
+  success clears the draft and refreshes the comments and events, a refusal hands the draft back
+  with Retry. Until then the composer says `Still sending`, offers no Retry, and holds its draft,
+  and every Reply and issue pick still holds; only a host's Back, Escape and Collapse thread let
+  go (`useSending`'s `untilDeadline`), so a request that hangs never keeps a reader in front of
+  it. An upload carries its target as its own mutation variable, taken by the paste or drop that
+  starts it, so a pick in that task moves the next message, never the file.
   On a phone, a comment's thread opens full-screen over the Conversation. The docked composer stays
   mounted under it, hidden, and a comment's Reply answers in the thread by a composer of its own,
   with its own reply and its own send name beneath the tab's, which the thread view keeps mounted,
@@ -61,15 +64,15 @@ dependency in its body. For the image-pin comparison and `/healthz` deployment e
   where the reader finds them. A thread card's own inline reply lives in its thread, not the tab,
   so it names its send beneath theirs (`threadReplySendKey`): every Reply holds while it is out,
   and so does its thread - Collapse thread, and on a phone Back and Escape - until the server
-  answers. Nothing the reader did not do closes a composer under a send either. A comment whose
-  thread the reader has open - inline, full-screen, or answered by the phone thread composer -
-  stays in the list whoever resolves it, until they close the thread (the tab owns which threads
-  are open). The viewport widening past the phone layout while a send from the thread view is out
-  leaves the view open, full-screen at any width, until Back. And a closed issue keeps its
-  composers mounted (`closed` on `MentionComposer`): one shows itself only for a send of its own
-  still out or that send's refusal, with Send refused and `Discard draft` in place of Retry, and
-  otherwise renders nothing, its draft kept for a reopen, so an issue closed, or closed and
-  reopened, under a send leaves that send's composer where it was.
+  answers or the send's deadline passes. Nothing the reader did not do closes a composer under a
+  send either. A comment whose thread the reader has open - inline, full-screen, or answered by
+  the phone thread composer - stays in the list whoever resolves it, until they close the thread
+  (the tab owns which threads are open). The viewport widening past the phone layout while a send
+  from the thread view is out leaves the view open, full-screen at any width, until Back. And a
+  closed issue keeps its composers mounted (`closed` on `MentionComposer`): one shows itself only
+  for a send of its own still out or that send's refusal, with Send refused and `Discard draft` in
+  place of Retry, and otherwise renders nothing, its draft kept for a reopen, so an issue closed,
+  or closed and reopened, under a send leaves that send's composer where it was.
   `Jump to latest` takes the edge of the screen the docked composer leaves free, so it never covers
   the composer's controls: below `sm`, where the composer sits at the foot of the screen and grows
   upward with a refusal's Retry or Discard draft, the pill floats at the top, where the latest turn
