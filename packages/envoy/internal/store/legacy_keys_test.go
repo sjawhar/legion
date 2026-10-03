@@ -20,47 +20,24 @@ import (
 // cannot, whose holders no build can reach any more. An entry past even a delete's bound, which only
 // another writer could store (testnats.RawOnlyKey), is skipped, and the sweeps go on.
 func TestARegistryOverKeysAnEarlierListenerStoredOpensAndReapsThem(t *testing.T) {
-	conn, cleanup := connectNATS(t)
-	defer cleanup()
-	js, err := conn.JetStream()
-	if err != nil {
-		t.Fatalf("jetstream: %v", err)
-	}
-	rawInterests, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: Bucket, Storage: natsgo.FileStorage})
-	if err != nil {
-		t.Fatalf("create interest bucket: %v", err)
-	}
-	rawRoles, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: RoleBucket, Storage: natsgo.FileStorage})
-	if err != nil {
-		t.Fatalf("create role bucket: %v", err)
-	}
 	readableRole, unreadableRole := testnats.LegacyKeys(RoleBucket, "r")
 	readableSession, unreadableSession := testnats.LegacyKeys(Bucket, "s")
 	rawOnlyRole, rawOnlySession := testnats.RawOnlyKey(RoleBucket, "o"), testnats.RawOnlyKey(Bucket, "o")
 	stale := time.Now().Add(-time.Hour).UnixMilli()
-	for role, holder := range map[string]string{"reviewer": "ses_live", readableRole: readableSession, unreadableRole: unreadableSession, rawOnlyRole: "ses_gone"} {
-		claim, err := json.Marshal(RoleClaim{HolderSessionID: holder, ClaimedAt: stale})
-		if err != nil {
-			t.Fatalf("encode claim: %v", err)
+	registry, rawInterests, rawRoles := openRegistryOver(t, func(_ natsgo.JetStreamContext, rawInterests, rawRoles natsgo.KeyValue) {
+		for role, holder := range map[string]string{"reviewer": "ses_live", readableRole: readableSession, unreadableRole: unreadableSession, rawOnlyRole: "ses_gone"} {
+			claim, err := json.Marshal(RoleClaim{HolderSessionID: holder, ClaimedAt: stale})
+			if err != nil {
+				t.Fatalf("encode claim: %v", err)
+			}
+			if _, err := rawRoles.Put(role, claim); err != nil {
+				t.Fatalf("store the %d-byte role: %v", len(role), err)
+			}
 		}
-		if _, err := rawRoles.Put(role, claim); err != nil {
-			t.Fatalf("store the %d-byte role: %v", len(role), err)
+		for _, sessionID := range []string{"ses_live", readableSession, unreadableSession, rawOnlySession} {
+			putInterest(t, rawInterests, Interest{SessionID: sessionID, MachineID: "earlier", Topics: []string{"notifications.agent." + sessionID[:8]}, UpdatedAt: stale})
 		}
-	}
-	for _, sessionID := range []string{"ses_live", readableSession, unreadableSession, rawOnlySession} {
-		putInterest(t, rawInterests, Interest{SessionID: sessionID, MachineID: "earlier", Topics: []string{"notifications.agent." + sessionID[:8]}, UpdatedAt: stale})
-	}
-
-	registry, err := Open(conn, WithReplicas(1))
-	if err != nil {
-		t.Fatalf("open over the earlier listener's keys: %v", err)
-	}
-	t.Cleanup(registry.StopWatch)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := registry.WaitForCacheReady(ctx); err != nil {
-		t.Fatalf("wait for the cache: %v", err)
-	}
+	})
 	assertRoleHolder(t, registry, "reviewer", "ses_live")
 	assertRoleHolder(t, registry, readableRole, readableSession)
 	for _, sessionID := range []string{"ses_live", readableSession, unreadableSession} {
@@ -99,45 +76,22 @@ func TestARegistryOverKeysAnEarlierListenerStoredOpensAndReapsThem(t *testing.T)
 // check: the caller named nothing too long, and its claim is written. The old holder's interest
 // keeps the topic until the interest reaper removes it.
 func TestAClaimOfARoleAnEarlierListenersSessionHeldSucceeds(t *testing.T) {
-	conn, cleanup := connectNATS(t)
-	defer cleanup()
-	js, err := conn.JetStream()
-	if err != nil {
-		t.Fatalf("jetstream: %v", err)
-	}
-	rawInterests, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: Bucket, Storage: natsgo.FileStorage})
-	if err != nil {
-		t.Fatalf("create interest bucket: %v", err)
-	}
-	rawRoles, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: RoleBucket, Storage: natsgo.FileStorage})
-	if err != nil {
-		t.Fatalf("create role bucket: %v", err)
-	}
 	readable, unreadable := testnats.LegacyKeys(Bucket, "s")
 	roles := map[string]string{"legacy-readable": readable, "legacy-unreadable": unreadable}
-	for role, holder := range roles {
-		claim, err := json.Marshal(RoleClaim{HolderSessionID: holder, ClaimedAt: time.Now().UnixMilli()})
-		if err != nil {
-			t.Fatalf("encode claim: %v", err)
+	registry, _, _ := openRegistryOver(t, func(_ natsgo.JetStreamContext, rawInterests, rawRoles natsgo.KeyValue) {
+		for role, holder := range roles {
+			claim, err := json.Marshal(RoleClaim{HolderSessionID: holder, ClaimedAt: time.Now().UnixMilli()})
+			if err != nil {
+				t.Fatalf("encode claim: %v", err)
+			}
+			if _, err := rawRoles.Put(role, claim); err != nil {
+				t.Fatalf("store the claim of %s: %v", role, err)
+			}
+			// Subscribe gives every interest its session's own agent topic, so the role's topic is
+			// not the last one and removing it rewrites the interest rather than deleting it.
+			putInterest(t, rawInterests, Interest{SessionID: holder, MachineID: "earlier", Topics: []string{"notifications.agent." + holder, "notifications.role." + role}, UpdatedAt: time.Now().UnixMilli()})
 		}
-		if _, err := rawRoles.Put(role, claim); err != nil {
-			t.Fatalf("store the claim of %s: %v", role, err)
-		}
-		// Subscribe gives every interest its session's own agent topic, so the role's topic is not
-		// the last one and removing it rewrites the interest rather than deleting it.
-		putInterest(t, rawInterests, Interest{SessionID: holder, MachineID: "earlier", Topics: []string{"notifications.agent." + holder, "notifications.role." + role}, UpdatedAt: time.Now().UnixMilli()})
-	}
-
-	registry, err := Open(conn, WithReplicas(1))
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	t.Cleanup(registry.StopWatch)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := registry.WaitForCacheReady(ctx); err != nil {
-		t.Fatalf("wait for the cache: %v", err)
-	}
+	})
 	for role, holder := range roles {
 		item, err := registry.SetRole("ses_new", "example-host", role, false)
 		if err != nil {
@@ -166,40 +120,17 @@ func TestARegistryOverKeysOutsideTheNATSKeyAlphabetGoesOn(t *testing.T) {
 	// registry over them.
 	open := func(t *testing.T, entries ...stored) (*Registry, natsgo.KeyValue, natsgo.KeyValue) {
 		t.Helper()
-		conn, cleanup := connectNATS(t)
-		t.Cleanup(cleanup)
-		js, err := conn.JetStream()
-		if err != nil {
-			t.Fatalf("jetstream: %v", err)
-		}
-		rawInterests, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: Bucket, Storage: natsgo.FileStorage})
-		if err != nil {
-			t.Fatalf("create interest bucket: %v", err)
-		}
-		rawRoles, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: RoleBucket, Storage: natsgo.FileStorage})
-		if err != nil {
-			t.Fatalf("create role bucket: %v", err)
-		}
-		for _, entry := range entries {
-			buf, err := json.Marshal(entry.value)
-			if err != nil {
-				t.Fatalf("encode %s in %s: %v", entry.key, entry.bucket, err)
+		return openRegistryOver(t, func(js natsgo.JetStreamContext, _, _ natsgo.KeyValue) {
+			for _, entry := range entries {
+				buf, err := json.Marshal(entry.value)
+				if err != nil {
+					t.Fatalf("encode %s in %s: %v", entry.key, entry.bucket, err)
+				}
+				if _, err := js.Publish("$KV."+entry.bucket+"."+entry.key, buf); err != nil {
+					t.Fatalf("store %s in %s: %v", entry.key, entry.bucket, err)
+				}
 			}
-			if _, err := js.Publish("$KV."+entry.bucket+"."+entry.key, buf); err != nil {
-				t.Fatalf("store %s in %s: %v", entry.key, entry.bucket, err)
-			}
-		}
-		registry, err := Open(conn, WithReplicas(1))
-		if err != nil {
-			t.Fatalf("open over keys outside the key alphabet: %v", err)
-		}
-		t.Cleanup(registry.StopWatch)
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := registry.WaitForCacheReady(ctx); err != nil {
-			t.Fatalf("wait for the cache: %v", err)
-		}
-		return registry, rawInterests, rawRoles
+		})
 	}
 	stale := time.Now().Add(-time.Hour).UnixMilli()
 	interest := func(sessionID string) stored {
@@ -251,4 +182,38 @@ func TestARegistryOverKeysOutsideTheNATSKeyAlphabetGoesOn(t *testing.T) {
 			t.Fatalf("claims after the role reaper = %v, want %v", got, want)
 		}
 	})
+}
+
+// openRegistryOver creates the interest and role buckets, has seed store entries in them directly,
+// as an earlier listener or a direct bucket write left them (js for a raw publish, the two bucket
+// handles for a put), and opens the registry over them. It returns the registry once its cache is
+// warm, with the two bucket handles.
+func openRegistryOver(t *testing.T, seed func(js natsgo.JetStreamContext, rawInterests, rawRoles natsgo.KeyValue)) (*Registry, natsgo.KeyValue, natsgo.KeyValue) {
+	t.Helper()
+	conn, cleanup := connectNATS(t)
+	t.Cleanup(cleanup)
+	js, err := conn.JetStream()
+	if err != nil {
+		t.Fatalf("jetstream: %v", err)
+	}
+	rawInterests, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: Bucket, Storage: natsgo.FileStorage})
+	if err != nil {
+		t.Fatalf("create interest bucket: %v", err)
+	}
+	rawRoles, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: RoleBucket, Storage: natsgo.FileStorage})
+	if err != nil {
+		t.Fatalf("create role bucket: %v", err)
+	}
+	seed(js, rawInterests, rawRoles)
+	registry, err := Open(conn, WithReplicas(1))
+	if err != nil {
+		t.Fatalf("open the registry over the stored keys: %v", err)
+	}
+	t.Cleanup(registry.StopWatch)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := registry.WaitForCacheReady(ctx); err != nil {
+		t.Fatalf("wait for the cache: %v", err)
+	}
+	return registry, rawInterests, rawRoles
 }
