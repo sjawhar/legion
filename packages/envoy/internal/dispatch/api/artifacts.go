@@ -17,7 +17,6 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
-	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -25,6 +24,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
+	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
 const (
@@ -129,10 +129,17 @@ func (s *server) uploadArtifactFor(w http.ResponseWriter, r *http.Request, targe
 	}
 	// A markdown document is stored as text. Its inline content was read as a JSON string, which
 	// holds no byte that is not UTF-8 and was read for U+0000, so only a multipart file reaches here
-	// holding either.
-	if kind == "doc" && (bytes.IndexByte(input.content, 0) >= 0 || !utf8.Valid(input.content)) {
+	// holding either. Any other file is stored as bytes, beside its part's Content-Type as text; the
+	// document path stores no part header.
+	if kind == "doc" && !text.StorableBytes(input.content) {
 		s.writeHandlerError(w, unstorableText("file", string(input.content)))
 		return
+	}
+	if kind != "doc" {
+		if refusal := unstorableText("file Content-Type", input.contentType); refusal != nil {
+			s.writeHandlerError(w, refusal)
+			return
+		}
 	}
 	s.storeArtifact(w, r, input, actor, kind, target)
 }

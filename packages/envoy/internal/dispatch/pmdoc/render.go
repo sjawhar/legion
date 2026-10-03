@@ -844,15 +844,15 @@ func asWritten(doc *Node) *Node {
 	return out
 }
 
-// NulAsReplacement is text with each U+0000 written as U+FFFD, which is what CommonMark reads the
+// nulAsReplacement is text with each U+0000 written as U+FFFD, which is what CommonMark reads the
 // character as (§2.3 Insecure characters), so no markdown carries one back; PostgreSQL's text and
 // jsonb cannot store one either. A browser's edit can still put one in a live document, past every
 // check a route makes, so text Dispatch takes from a document's tree passes through this: its
-// rendering (asWritten), an anchor's quote (FindMark), an ask block's question and options
-// (TextContent), and the text a quote is matched against (buildFlattenedText). A document's
-// settlement and every write that versions it store that text, so one U+0000 left in it as it is
-// would fail all of them, and a quote copied from what a read serves would match nothing.
-func NulAsReplacement(text string) string {
+// rendering (asWritten), an anchor's quote (FindMark), an ask block's question and options and a
+// heading's text (TextContent), and the text a quote is matched against (buildFlattenedText). A
+// document's settlement and every write that versions it store that text, so one U+0000 left in it
+// as it is would fail all of them, and text copied from what a read serves would match nothing.
+func nulAsReplacement(text string) string {
 	if strings.IndexByte(text, 0) < 0 {
 		return text
 	}
@@ -860,15 +860,17 @@ func NulAsReplacement(text string) string {
 }
 
 // writeNulsAsReplacement writes each U+0000 under node that the rendering would write as it is -
-// in a node's text, or in a string attribute a node or mark writes (a link's href, an image's alt,
-// a code block's language) - as U+FFFD (NulAsReplacement). node is the rendering's own copy
-// (StripAnchorMarks clones each node's and mark's attributes). A typed block's attributes are
-// written quoted (renderTypedAttributes), U+0000 as the escape \x00 that its parser unquotes back,
-// so they keep it.
+// in a node's text, in a string attribute a node or mark writes (a link's href, an image's alt, a
+// code block's language), or in a block's id - as U+FFFD (nulAsReplacement). node is the
+// rendering's own copy (StripAnchorMarks clones each node's and mark's attributes). A typed block's
+// other attributes are written quoted (renderTypedAttributes), U+0000 as the escape \x00 that its
+// parser unquotes back, so they keep it; its id is written bare, `#` and the id.
 func writeNulsAsReplacement(node *Node) {
-	node.Text = NulAsReplacement(node.Text)
+	node.Text = nulAsReplacement(node.Text)
 	if !IsTypedBlock(node.Type) {
 		writeNulsInAttrs(node.Attrs)
+	} else if id, ok := node.Attrs[BlockIDAttr].(string); ok && strings.IndexByte(id, 0) >= 0 {
+		node.Attrs[BlockIDAttr] = nulAsReplacement(id)
 	}
 	for _, mark := range node.Marks {
 		writeNulsInAttrs(mark.Attrs)
@@ -881,7 +883,7 @@ func writeNulsAsReplacement(node *Node) {
 func writeNulsInAttrs(attrs Attrs) {
 	for name, value := range attrs {
 		if text, ok := value.(string); ok && strings.IndexByte(text, 0) >= 0 {
-			attrs[name] = NulAsReplacement(text)
+			attrs[name] = nulAsReplacement(text)
 		}
 	}
 }

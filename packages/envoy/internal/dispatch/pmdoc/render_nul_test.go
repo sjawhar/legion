@@ -7,9 +7,9 @@ import (
 
 // A U+0000 a browser edit leaves in a live document is written as U+FFFD, which is what CommonMark
 // reads one as, wherever the rendering writes the character as it is: a node's text, a link's href
-// and title, an image's source, alt and title, a code block's language. The markdown a version
-// stores then holds none, which PostgreSQL's text cannot store. A typed block's attribute is
-// written quoted, U+0000 as the escape \x00, and reads back as U+0000.
+// and title, an image's source, alt and title, a code block's language, a typed block's id. The
+// markdown a version stores then holds none, which PostgreSQL's text cannot store. A typed block's
+// other attributes are written quoted, U+0000 as the escape \x00, and read back as U+0000.
 func TestRenderWritesNoNul(t *testing.T) {
 	text := func(value string, marks ...Mark) *Node { return &Node{Type: "text", Text: value, Marks: marks} }
 	paragraph := func(children ...*Node) *Node { return &Node{Type: "paragraph", Children: children} }
@@ -20,6 +20,7 @@ func TestRenderWritesNoNul(t *testing.T) {
 		"code block":  {Type: "code_block", Attrs: Attrs{"language": "g\x00o"}, Children: []*Node{text("a\x00b")}},
 		"link":        paragraph(text("label", Mark{Type: "link", Attrs: Attrs{"href": "https://example.com/a\x00b", "title": "t\x00t"}})),
 		"image":       paragraph(&Node{Type: "image", Attrs: Attrs{"src": "https://example.com/a\x00b", "alt": "a\x00b", "title": "t\x00t"}}),
+		"typed id":    {Type: "callout", Attrs: Attrs{BlockIDAttr: "c\x00d", "kind": "note", "title": ""}, Children: []*Node{paragraph(text("inside"))}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			markdown := mustRender(t, &Node{Type: "doc", Children: []*Node{block}})

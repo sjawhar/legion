@@ -1,13 +1,14 @@
 package api
 
 import (
+	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"maps"
+	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
-	"slices"
+	"net/textproto"
 	"strconv"
 	"strings"
 	"testing"
@@ -15,7 +16,6 @@ import (
 
 	"github.com/google/uuid"
 	gws "github.com/gorilla/websocket"
-	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
@@ -31,64 +31,40 @@ const nulText = "a\x00b"
 const nulPath = "a%00b"
 
 // nulRequest is one request a refusal row sends: a JSON body, or a multipart upload of form and a
-// markdown file, as a human (alice) or as a bearer session.
+// file, as a human (alice) or as a bearer session.
 type nulRequest struct {
 	method string
 	target string
 	bearer bool
 	// body is the JSON body; nil sends none.
 	body any
-	// form, when set, sends a multipart upload of these fields and a markdown file instead.
-	form map[string]string
-	file []byte
+	// form, when set, sends a multipart upload of these fields and file instead, the file part's
+	// Content-Type fileType, text/markdown when empty.
+	form     map[string]string
+	file     []byte
+	fileType string
 }
 
 func (request nulRequest) send(t *testing.T, handler http.Handler) *httptest.ResponseRecorder {
 	t.Helper()
+	fileType := request.fileType
+	if fileType == "" {
+		fileType = "text/markdown"
+	}
 	switch {
 	case request.form != nil && request.bearer:
 		bearer := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			r.Header.Set("Authorization", "Bearer agent-token")
 			handler.ServeHTTP(w, r)
 		})
-		return multipartRequest(t, bearer, request.target, request.form, "notes.md", "text/markdown", request.file, "")
+		return multipartRequest(t, bearer, request.target, request.form, "notes.md", fileType, request.file, "")
 	case request.form != nil:
-		return multipartRequest(t, handler, request.target, request.form, "notes.md", "text/markdown", request.file, "alice")
+		return multipartRequest(t, handler, request.target, request.form, "notes.md", fileType, request.file, "alice")
 	case request.bearer:
 		return sessionRequest(t, handler, request.method, request.target, request.body)
 	default:
 		return dispatchRequest(t, handler, request.method, request.target, request.body, "alice")
 	}
-}
-
-// databaseFingerprint hashes every row of every table, so a test can tell a request wrote nothing
-// anywhere: no row inserted, updated or deleted.
-func databaseFingerprint(t *testing.T, database *store.Store) map[string]string {
-	t.Helper()
-	ctx := context.Background()
-	rows, err := database.Pool.Query(ctx, `select tablename from pg_tables where schemaname = 'public'`)
-	if err != nil {
-		t.Fatalf("list tables: %v", err)
-	}
-	tables, err := pgx.CollectRows(rows, pgx.RowTo[string])
-	if err != nil {
-		t.Fatalf("read table names: %v", err)
-	}
-	if len(tables) == 0 {
-		t.Fatal("the schema has no tables; a fingerprint of it proves nothing")
-	}
-	fingerprint := make(map[string]string, len(tables))
-	for _, table := range tables {
-		var digest string
-		if err := database.Pool.QueryRow(ctx, fmt.Sprintf(
-			`select count(*) || ':' || coalesce(md5(string_agg(t::text, ',' order by t::text)), '') from %s t`,
-			pgx.Identifier{table}.Sanitize(),
-		)).Scan(&digest); err != nil {
-			t.Fatalf("fingerprint %s: %v", table, err)
-		}
-		fingerprint[table] = digest
-	}
-	return fingerprint
 }
 
 // nulFixture is one of everything a storing route writes to: an issue whose spec holds the quote a
@@ -257,15 +233,11 @@ func TestEveryStoringRouteRefusesANulInItsText(t *testing.T) {
 		{"request approval: summary", nulRequest{method: http.MethodPost, target: spec + "/approval-requests", body: map[string]any{"summary": nulText}}, "summary"},
 	} {
 		t.Run(row.name, func(t *testing.T) {
+			request := row.request.method + " " + row.request.target
 			before := databaseFingerprint(t, database)
 			response := row.request.send(t, handler)
-			assertNulRefusal(t, response, row.request.method+" "+row.request.target, row.field)
-			after := databaseFingerprint(t, database)
-			for _, table := range slices.Sorted(maps.Keys(after)) {
-				if before[table] != after[table] {
-					t.Errorf("%s %s changed table %s", row.request.method, row.request.target, table)
-				}
-			}
+			assertRefusal(t, request, response.Code, response.Body.Bytes(), "NUL_CHARACTER", row.field)
+			assertUnchanged(t, request, before, databaseFingerprint(t, database))
 		})
 	}
 }
@@ -285,7 +257,8 @@ func TestAReadRefusesANulInItsParameters(t *testing.T) {
 		{"/api/v1/search?q=" + nulPath + "cd", "query parameter q"},
 	} {
 		t.Run(row.target, func(t *testing.T) {
-			assertNulRefusal(t, dispatchRequest(t, handler, http.MethodGet, row.target, nil, "alice"), "GET "+row.target, row.field)
+			response := dispatchRequest(t, handler, http.MethodGet, row.target, nil, "alice")
+			assertRefusal(t, "GET "+row.target, response.Code, response.Body.Bytes(), "NUL_CHARACTER", row.field)
 		})
 	}
 }
@@ -293,9 +266,10 @@ func TestAReadRefusesANulInItsParameters(t *testing.T) {
 // Text that is not UTF-8 is refused like a U+0000, and for the same reason: PostgreSQL's text
 // cannot hold it (invalid byte sequence for encoding "UTF8"). JSON cannot carry it, since decoding
 // writes each invalid byte as U+FFFD, so it reaches only the channels the JSON check does not read:
-// a path or query parameter, whose query failed with a 500, and a multipart upload's fields and its
-// markdown file, which failed with a 500 or, for the file, panicked the document writer and dropped
-// the connection.
+// a path or query parameter, whose query failed with a 500, and a multipart upload's fields, its
+// markdown file and a binary file part's Content-Type, which the upload stores as the artifact's
+// type. Each failed with a 500 or, for the markdown file, panicked the document writer and dropped
+// the connection. A markdown file stores no part header, so its Content-Type is not checked.
 func TestCallerTextThatIsNotUTF8IsRefused(t *testing.T) {
 	handler, database, _ := newTestServer(t, testServerOptions{settle: time.Hour})
 	issue := createInteractionIssue(t, handler, "TEST", "Not UTF-8", "before\n")
@@ -309,26 +283,57 @@ func TestCallerTextThatIsNotUTF8IsRefused(t *testing.T) {
 		{"search: query", nulRequest{method: http.MethodGet, target: "/api/v1/search?q=ab%FFcd"}, "query parameter q"},
 		{"upload a file: name", nulRequest{method: http.MethodPost, target: artifacts, form: map[string]string{"name": "notes\xff.md"}, file: []byte("# Notes\n")}, "name"},
 		{"upload a file: markdown", nulRequest{method: http.MethodPost, target: artifacts, form: map[string]string{"name": "notes.md"}, file: []byte("# a\xffb\n")}, "file"},
+		{"upload a file: binary part's Content-Type", nulRequest{method: http.MethodPost, target: artifacts, form: map[string]string{"name": "blob.bin"}, file: []byte{1, 2, 3}, fileType: "application/octet-stream; x=\"a\xffb\""}, "file Content-Type"},
 	} {
 		t.Run(row.name, func(t *testing.T) {
+			request := row.request.method + " " + row.request.target
 			before := databaseFingerprint(t, database)
 			response := row.request.send(t, handler)
-			var refusal struct {
-				Code  string `json:"code"`
-				Error string `json:"error"`
-			}
-			_ = json.Unmarshal(response.Body.Bytes(), &refusal)
-			if response.Code != http.StatusBadRequest || refusal.Code != "INVALID_UTF8" || !strings.HasPrefix(refusal.Error, row.field+" holds a byte that is not UTF-8") {
-				t.Errorf("%s %s = %d %s %q, want 400 INVALID_UTF8 naming %s", row.request.method, row.request.target, response.Code, refusal.Code, refusal.Error, row.field)
-			}
-			after := databaseFingerprint(t, database)
-			for _, table := range slices.Sorted(maps.Keys(after)) {
-				if before[table] != after[table] {
-					t.Errorf("%s %s changed table %s", row.request.method, row.request.target, table)
-				}
-			}
+			assertRefusal(t, request, response.Code, response.Body.Bytes(), "INVALID_UTF8", row.field)
+			assertUnchanged(t, request, before, databaseFingerprint(t, database))
 		})
 	}
+	markdown := multipartRequest(t, handler, artifacts, map[string]string{"name": "typed.md"}, "typed.md", "text/markdown; x=\"a\xffb\"", []byte("# Typed\n"), "alice")
+	if markdown.Code != http.StatusCreated {
+		t.Fatalf("a markdown file whose part Content-Type holds 0xFF: status=%d body=%s, want 201 as on main", markdown.Code, markdown.Body.String())
+	}
+}
+
+// A refusal names the field it refuses without sending the caller's U+0000 back: a multipart field
+// whose own name spells one (RFC 2231's name* form, x%00y) is named with the six characters
+// \u0000, as a JSON member name or a query parameter name holding one is.
+func TestARefusalSendsBackNoNul(t *testing.T) {
+	handler, _, _ := newTestServer(t, testServerOptions{settle: time.Hour})
+	issue := createInteractionIssue(t, handler, "TEST", "Field name NUL", "before\n")
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	if err := writer.WriteField("name", "r.md"); err != nil {
+		t.Fatal(err)
+	}
+	field, err := writer.CreatePart(textproto.MIMEHeader{"Content-Disposition": {"form-data; name*=UTF-8''x%00y"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := field.Write([]byte("v\x00")); err != nil {
+		t.Fatal(err)
+	}
+	file, err := writer.CreatePart(textproto.MIMEHeader{"Content-Disposition": {`form-data; name="file"; filename="r.md"`}, "Content-Type": {"text/markdown"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.Write([]byte("# ok\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/issues/"+issue.Key+"/artifacts", &body)
+	request.Header.Set("Content-Type", writer.FormDataContentType())
+	request.Header.Set("X-Dispatch-User", "alice")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	// The field is named with the six characters \u0000, so the message holds no U+0000.
+	assertRefusal(t, "upload with a field named x\\u0000y", response.Code, response.Body.Bytes(), "NUL_CHARACTER", `x\u0000y`)
 }
 
 // A credential decision's or lookup's typed code is relayed to the secrets broker, which reads it
@@ -345,7 +350,7 @@ func TestTheCredentialRelayRefusesANulBeforeTheBroker(t *testing.T) {
 		t.Run(target, func(t *testing.T) {
 			before := rig.calls
 			response := dispatchRequest(t, handler, http.MethodPost, target, map[string]any{"code": nulText}, "alice")
-			assertNulRefusal(t, response, "POST "+target, "code")
+			assertRefusal(t, "POST "+target, response.Code, response.Body.Bytes(), "NUL_CHARACTER", "code")
 			if rig.calls != before {
 				t.Errorf("POST %s relayed the code to the broker", target)
 			}
@@ -596,25 +601,70 @@ func TestAnAnchorInABlockWhoseLiveIDHoldsANulIsUnpinned(t *testing.T) {
 	}
 }
 
-// Every read serves a U+0000 a browser left in the document as U+FFFD, so a quote is matched against
-// that text too: a quote copied from GET /text anchors a comment and finds a replace's target,
-// where a quote holding the U+0000 itself is refused at the input layer.
+// While a browser's block id holding a U+0000 is live, before settlement mints it again, every read
+// serves it as U+FFFD, as it serves the character in text, and a named version is stored with it
+// so. A typed block writes its id bare, `#` and the id, beside the attributes it writes quoted.
+func TestABlockIDHoldingANulIsServedAndVersionedAsAReplacementCharacter(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		spec  string
+		block int
+	}{
+		{"paragraph", "before\n", 0},
+		{"callout", "before\n\n:::callout{#c1 kind=\"note\"}\ninside\n:::\n", 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			documentService, handler, _ := browserDocumentService(t)
+			issue := createInteractionIssue(t, handler, "TEST", "Unsettled NUL id", test.spec)
+			peer := connectBrowserPeer(t, documentService, issue.PrimaryArtifactID)
+			t.Cleanup(peer.close)
+			peer.edit(t, func(tree *pmdoc.Node) error {
+				tree.Children[test.block].Attrs[pmdoc.BlockIDAttr] = "x" + nulText
+				return nil
+			})
+			peer.barrier(t)
+			artifact := "/api/v1/artifacts/" + issue.PrimaryArtifactID
+			for _, read := range []string{"/text", "/blocks"} {
+				response := dispatchRequest(t, handler, http.MethodGet, artifact+read, nil, "alice")
+				if response.Code != http.StatusOK || bytes.Contains(response.Body.Bytes(), []byte(`\u0000`)) {
+					t.Errorf("GET %s = %d %s, want 200 serving no U+0000", read, response.Code, response.Body.String())
+				}
+			}
+			blocks := dispatchRequest(t, handler, http.MethodGet, artifact+"/blocks", nil, "alice")
+			if !bytes.Contains(blocks.Body.Bytes(), []byte(`"xa`+"\uFFFD"+`b"`)) {
+				t.Errorf("GET /blocks = %s, want the block listed under xa\\uFFFDb", blocks.Body.String())
+			}
+			if named := dispatchRequest(t, handler, http.MethodPost, artifact+"/versions", map[string]any{
+				"summary": "Named.",
+			}, "alice"); named.Code != http.StatusCreated {
+				t.Errorf("named version: status=%d body=%s", named.Code, named.Body.String())
+			}
+		})
+	}
+}
+
+// Every read serves a U+0000 a browser left in the document as U+FFFD, so text is matched against
+// that text too, however a caller names what it read: a quote anchors a comment and finds a
+// replace's target, and a `# Title` quote and a `heading:` anchor find their heading. Text holding
+// the U+0000 itself is refused at the input layer.
 func TestAQuoteMatchesABrowsersNulAsEveryReadServesIt(t *testing.T) {
 	documentService, handler, _ := browserDocumentService(t)
-	issue := createInteractionIssue(t, handler, "TEST", "Quote over a NUL", "before\n")
+	issue := createInteractionIssue(t, handler, "TEST", "Quote over a NUL", "# Plan\n\nbefore\n")
 	peer := connectBrowserPeer(t, documentService, issue.PrimaryArtifactID)
 	peer.edit(t, func(tree *pmdoc.Node) error {
-		tree.Children[0].Children[0].Text = "bef" + nulText + "ore"
+		tree.Children[0].Children[0].Text = "Pl" + nulText + "an"
+		tree.Children[1].Children[0].Text = "bef" + nulText + "ore"
 		return nil
 	})
 	peer.barrier(t)
 	peer.closeAndWait(t)
-	const served = "befa\uFFFDbore"
+	const heading, served = "Pla\uFFFDban", "befa\uFFFDbore"
+	artifact := "/api/v1/artifacts/" + issue.PrimaryArtifactID
 	text := decodeBody[struct {
 		Markdown string `json:"markdown"`
-	}](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/text", nil, "alice"))
-	if text.Markdown != served+"\n" {
-		t.Fatalf("GET /text = %q, want %q", text.Markdown, served+"\n")
+	}](t, dispatchRequest(t, handler, http.MethodGet, artifact+"/text", nil, "alice"))
+	if want := "# " + heading + "\n\n" + served + "\n"; text.Markdown != want {
+		t.Fatalf("GET /text = %q, want %q", text.Markdown, want)
 	}
 
 	comment := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
@@ -626,10 +676,16 @@ func TestAQuoteMatchesABrowsersNulAsEveryReadServesIt(t *testing.T) {
 	if created := decodeBody[model.Comment](t, comment); created.Anchor == nil || created.Anchor.Quote != served {
 		t.Fatalf("comment anchor = %+v, want the quote %q", created.Anchor, served)
 	}
-	if edit := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
-		"ops": []map[string]any{{"op": "replace", "find": served, "with": "after"}},
-	}, "alice"); edit.Code != http.StatusOK {
-		t.Fatalf("replace the served text: status=%d body=%s", edit.Code, edit.Body.String())
+	for _, op := range []map[string]any{
+		{"op": "insert", "after": "heading:" + heading, "markdown": "Under the heading anchor."},
+		{"op": "insert", "after": "# " + heading, "markdown": "Under the heading quote."},
+		{"op": "replace", "find": served, "with": "after"},
+	} {
+		if edit := dispatchRequest(t, handler, http.MethodPost, artifact+"/edits", map[string]any{
+			"ops": []map[string]any{op},
+		}, "alice"); edit.Code != http.StatusOK {
+			t.Errorf("%s at %v: status=%d body=%s", op["op"], op, edit.Code, edit.Body.String())
+		}
 	}
 }
 
@@ -663,30 +719,12 @@ func TestTheDocumentWebsocketRefusesANulInItsBearersActor(t *testing.T) {
 		if response == nil {
 			t.Fatalf("dial with a NUL at %s: %v, want a refused handshake", row.field, err)
 		}
-		var refusal struct {
-			Code  string `json:"code"`
-			Error string `json:"error"`
-		}
-		_ = json.NewDecoder(response.Body).Decode(&refusal)
-		if response.StatusCode != http.StatusBadRequest || refusal.Code != "NUL_CHARACTER" || !strings.HasPrefix(refusal.Error, row.field+" holds a NUL character") {
-			t.Errorf("dial with a NUL at %s = %d %s %q, want 400 NUL_CHARACTER naming it", row.field, response.StatusCode, refusal.Code, refusal.Error)
-		}
+		refused, _ := io.ReadAll(response.Body)
+		assertRefusal(t, "dial with a NUL at "+row.field, response.StatusCode, refused, "NUL_CHARACTER", row.field)
 	}
 	connection, response, err := dial(`{"kind":"session","id":"s1"}`)
 	if err != nil {
 		t.Fatalf("dial with a clean actor: response=%v err=%v", response, err)
 	}
 	_ = connection.Close()
-}
-
-func assertNulRefusal(t *testing.T, response *httptest.ResponseRecorder, request, field string) {
-	t.Helper()
-	var refusal struct {
-		Code  string `json:"code"`
-		Error string `json:"error"`
-	}
-	_ = json.Unmarshal(response.Body.Bytes(), &refusal)
-	if response.Code != http.StatusBadRequest || refusal.Code != "NUL_CHARACTER" || !strings.HasPrefix(refusal.Error, field+" holds a NUL character") {
-		t.Errorf("%s = %d %s %q, want 400 NUL_CHARACTER naming %s", request, response.Code, refusal.Code, refusal.Error, field)
-	}
 }
