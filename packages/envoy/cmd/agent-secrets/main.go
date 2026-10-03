@@ -64,7 +64,7 @@ import (
 // Exit codes beyond 0 (done) and 1 (failed): 75 (EX_TEMPFAIL) and 77 (EX_NOPERM) follow BSD
 // sysexits.h, chosen so a caller of the "request" and NAME... -- <command> forms can tell "still
 // waiting" from "refused" without parsing stderr. Each carries a comment: the broker's generated
-// error reference (scripts/docs/broker/refgen) prints it and refuses a code without one.
+// error reference (cmd/broker-refgen) prints it and refuses a code without one.
 const (
 	exitUsageError = 2  // a usage error: an unknown flag or argument, or a required one or AGENT_SECRETS_URL missing
 	exitPending    = 75 // the request is still waiting for a person to approve it; nothing was run

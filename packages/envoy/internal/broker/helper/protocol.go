@@ -107,7 +107,7 @@ type SessionInfo struct {
 }
 
 // The codes a helper answers a request it refuses with. Every one carries a doc comment: the
-// broker's generated error reference (scripts/docs/broker/refgen) prints it and refuses a code
+// broker's generated error reference (cmd/broker-refgen) prints it and refuses a code
 // without one.
 const (
 	// CodeNotASession answers sign, sign-request or unregister from a process that descends from no

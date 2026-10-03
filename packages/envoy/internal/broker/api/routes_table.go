@@ -71,7 +71,7 @@ type apiRoute struct {
 // routes is the one list of the broker's routes; a new route is a new row here, never a bare
 // mux.HandleFunc. The contract for every row is the shared broker contract
 // (dispatch://AGENTC-393/artifact/plan-overview-md). The comment above each row says what the
-// route does; the broker's generated HTTP reference (scripts/docs/broker/refgen) prints it and
+// route does; the broker's generated HTTP reference (cmd/broker-refgen) prints it and
 // refuses a row without one.
 func routes() []apiRoute {
 	return []apiRoute{

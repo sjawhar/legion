@@ -213,7 +213,7 @@ func writeUnavailable(w http.ResponseWriter, code, op string, err error) {
 }
 
 // writeJSON answers status with v, which is one of this package's named response types: the
-// broker's generated HTTP reference (scripts/docs/broker/refgen) documents each route's answer
+// broker's generated HTTP reference (cmd/broker-refgen) documents each route's answer
 // from that type's fields and refuses a value it cannot name.
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")

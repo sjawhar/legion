@@ -4,7 +4,7 @@
 // variable refuses to start naming the variable.
 //
 // Each Config field's doc comment opens with the variables it reads and a colon; the broker's
-// generated configuration reference (scripts/docs/broker/refgen) is built from those comments
+// generated configuration reference (cmd/broker-refgen) is built from those comments
 // and refuses a variable Load reads that no field documents.
 package config
 

@@ -14,8 +14,8 @@ import (
 	"strings"
 )
 
-// envoyModule is the broker's Go module and envoyDir where it lives in the repository, so an
-// import of one of its packages maps to a directory refgen can parse.
+// envoyModule is the Go module broker-refgen and the broker belong to and envoyDir where it sits in
+// the repository, so an import of one of its packages maps to a directory broker-refgen can parse.
 const (
 	envoyModule = "github.com/sjawhar/envoy"
 	envoyDir    = "packages/envoy"

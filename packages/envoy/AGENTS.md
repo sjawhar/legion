@@ -1718,7 +1718,7 @@ secret values), it requires `BROKER_FAKE_SECRETS_FILE` and refuses to start with
 local-dev-only path. The broker takes no flags, and refuses any flag it is given.
 
 The docs site's broker reference pages are generated at site build from this source by
-`scripts/docs/broker/refgen` (through `docs/site/generators/broker-*.sh`), which fails the build on
+`cmd/broker-refgen` (through `docs/site/generators/broker-reference.sh`), which fails the build on
 an undocumented item: every `routes()` row needs a comment above it saying what the route does,
 every adapter a reader label in refgen's `credentialLabels`, every handler's success answer a named
 response struct of `internal/broker/api` (never a map literal), every JSON field of a request or
