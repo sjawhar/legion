@@ -20,7 +20,8 @@ function withOnLine<T>(onLine: boolean, run: () => Promise<T>): Promise<T> {
 }
 
 /** A stand-in for the Navigation API's `navigate` event: whether it stays in this document, and
- *  the file name a link with `download` asks for (null for every other navigation). */
+ *  the file name a link with `download` asks for, empty when the attribute names none (null for
+ *  every other navigation). */
 function navigateEvent(sameDocument: boolean, downloadRequest: string | null = null): Event {
   return Object.assign(new Event("navigate"), { destination: { sameDocument }, downloadRequest });
 }
@@ -121,15 +122,16 @@ test("a navigation to another document marks the page as left where the browser 
 
 test("a link answered with a download does not mark the page as left", () => {
   window.sessionStorage.clear();
-  // A link with `download` fires `navigate` to another document, its `downloadRequest` naming the
-  // file, and the page stays where it is.
+  // A link with `download` fires `navigate` to another document and the page stays where it is.
+  // Dispatch's Download version links carry an empty `download`, which Chromium reports as an
+  // empty `downloadRequest`: a download all the same.
   const navigation = new EventTarget();
   Object.defineProperty(window, "navigation", { configurable: true, value: navigation });
   const reload = spyOn(window.location, "reload").mockImplementation(() => undefined);
 
   try {
     installChunkFailureRecovery();
-    navigation.dispatchEvent(navigateEvent(false, "spec.md"));
+    navigation.dispatchEvent(navigateEvent(false, ""));
     window.dispatchEvent(new Event("vite:preloadError", { cancelable: true }));
     expect(reload).toHaveBeenCalledTimes(1);
     expect(window.sessionStorage.getItem("dispatch.reloaded-for-chunk")).toBe("true");

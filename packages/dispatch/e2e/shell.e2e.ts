@@ -105,7 +105,7 @@ test("a page chunk that fails again after the session's one reload shows the fai
 test("a chunk that fails after a Download link was followed reloads the page", async ({
   browser,
 }, testInfo) => {
-  test.skip(testInfo.project.name !== "chromium", "one engine shows the navigate event");
+  test.skip(testInfo.project.name !== "chromium", "the guard does not depend on the layout");
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", spec: "Downloadable spec.", title: "Files" });
   const context = await asUser(browser, "alice");
