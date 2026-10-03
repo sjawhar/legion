@@ -1664,6 +1664,14 @@ selects local rules (rather than `BROKER_RULES_S3_URI`, which pairs with AWS Sec
 secret values), it requires `BROKER_FAKE_SECRETS_FILE` and refuses to start without it — a
 local-dev-only path. The broker takes no flags, and refuses any flag it is given.
 
+The docs site's broker reference pages are generated at site build from this source by
+`scripts/docs/broker/refgen` (through `docs/site/generators/broker-*.sh`), which fails the build on
+an undocumented item: every `routes()` row needs a comment above it saying what the route does,
+every `Config` field a doc comment opening with the `BROKER_*` variables it reads and a colon
+(`BROKER_FAKE_SECRETS_FILE`'s is in `cmd/broker/main.go`), and every helper refusal code and
+`agent-secrets` exit code a comment. The CLI reference is the built binaries' own `--help`, so every
+form must answer `-h` with exit 0.
+
 `internal/broker/api/routes_table.go`'s `routes()` is the one list of the broker's 19 HTTP routes —
 a new route is a new row there, never a bare `mux.HandleFunc` — and its own comment says the
 contract for every row is the AGENTC-393 overview document. Each row's handler is
