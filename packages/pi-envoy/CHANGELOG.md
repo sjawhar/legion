@@ -91,6 +91,9 @@
   the check; before, the `write` counted as work, so a `dispatch_ask` or a decision block made
   through a device re-armed the check it had just spent, and every Dispatch call made that way owed
   a new one. A help write (`?`) to a Dispatch device runs nothing and spends nothing (LEGION-470).
+- An architect, reviewer or merger may write to a tool device with the scheme in any case
+  (`XD://dispatch_doc_edit`), as Oh My Pi routes it; the mutation gate refused it as a file write
+  (LEGION-470).
 - A controller now displays its project token in canonical uppercase
   (`Legion controller · AGENTC`), rather than the lowercase token the Go daemon carries in
   `LEGION_PROJECT` (LEGION-480).
