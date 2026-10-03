@@ -22,6 +22,16 @@ type settlementCredit struct {
 	LastActor *model.Actor           `json:"last_actor,omitempty"`
 }
 
+// MarshalJSON writes Pending as an object even when it is nil, so every encoded credit carries
+// an object for the pending-settlement row's merge (upsertSettlementCredit) to concatenate.
+func (credit settlementCredit) MarshalJSON() ([]byte, error) {
+	type wire settlementCredit
+	if credit.Pending == nil {
+		credit.Pending = map[string]model.Actor{}
+	}
+	return json.Marshal(wire(credit))
+}
+
 func settlementCreditFor(pending map[string]model.Actor, lastActor *model.Actor) settlementCredit {
 	credit := settlementCredit{Pending: make(map[string]model.Actor, len(pending))}
 	for _, actor := range pending {
@@ -119,9 +129,13 @@ func pendingSettlementCredit(ctx context.Context, q Queryer, room string) (bool,
 	return true, credit, nil
 }
 
-// upsertSettlementCredit merges credit into room's pending-settlement row. updateMarkedAt is true
-// only for a newly appended document update; recording authors after its transaction committed or
-// while closing an issue must not make an old row wait another resumption age.
+// upsertSettlementCredit merges credit into room's pending-settlement row: its pending authors join
+// the row's, a later credit for an actor replacing the earlier one, and its last actor replaces the
+// row's only when it names one. A stored or encoded pending that is not an object counts as empty,
+// since concatenating an object with anything else yields an array the row cannot decode. Every
+// operand is parenthesized: PostgreSQL gives `->` and `||` the same precedence. updateMarkedAt is
+// true only for a newly appended document update; recording authors after its transaction committed
+// or while closing an issue must not make an old row wait another resumption age.
 func upsertSettlementCredit(ctx context.Context, tx pgx.Tx, room string, credit settlementCredit, updateMarkedAt bool) error {
 	encoded, err := json.Marshal(credit)
 	if err != nil {
@@ -132,11 +146,13 @@ func upsertSettlementCredit(ctx context.Context, tx pgx.Tx, room string, credit 
 		on conflict (artifact_id) do update set
 			settlement_authors = jsonb_strip_nulls(jsonb_build_object(
 				'pending',
-				coalesce(doc_settlements_pending.settlement_authors->'pending', '{}'::jsonb) ||
-					excluded.settlement_authors->'pending',
+				(case when jsonb_typeof(doc_settlements_pending.settlement_authors->'pending') = 'object'
+					then doc_settlements_pending.settlement_authors->'pending' else '{}'::jsonb end) ||
+				(case when jsonb_typeof(excluded.settlement_authors->'pending') = 'object'
+					then excluded.settlement_authors->'pending' else '{}'::jsonb end),
 				'last_actor',
 				coalesce(
-					excluded.settlement_authors->'last_actor',
+					nullif(excluded.settlement_authors->'last_actor', 'null'::jsonb),
 					doc_settlements_pending.settlement_authors->'last_actor'
 				)
 			)),

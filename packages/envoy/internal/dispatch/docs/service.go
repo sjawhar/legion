@@ -1644,7 +1644,8 @@ func waitGroup(ctx context.Context, wg *sync.WaitGroup) {
 // the issue closes. A document with no state has no room to tell: its next load reads the issue.
 // Its caller runs it after its own transaction has committed, and it takes that caller's context
 // so the pool can see it: a caller that ever runs it with a transaction still open is refused, not
-// wedged.
+// wedged. That context is one caller holding at most one connection, so the rooms are recorded and
+// closed one at a time.
 func (s *Service) SetIssueClosed(ctx context.Context, issueKey string, closed bool) {
 	rooms, err := s.documentRooms(ctx, "the issue's document rooms", `
 		select id::text from artifacts where issue_key = $1 and kind = 'doc'
@@ -1657,16 +1658,13 @@ func (s *Service) SetIssueClosed(ctx context.Context, issueKey string, closed bo
 			"issue", issueKey, "error", err)
 		return
 	}
-	type closingRoom struct {
-		room          string
-		credit        settlementCredit
-		creditVersion uint64
-	}
-	closingRooms := make([]closingRoom, 0, len(rooms))
 	for _, room := range rooms {
 		state := s.lockExistingState(room)
 		changed := true
-		var snapshot closingRoom
+		var (
+			credit        settlementCredit
+			creditVersion uint64
+		)
 		if state != nil {
 			changed = state.closed != closed
 			state.closed = closed
@@ -1676,30 +1674,19 @@ func (s *Service) SetIssueClosed(ctx context.Context, issueKey string, closed bo
 				// Snapshot while the state is locked, then write after unlocking: settlement holds
 				// the document's advisory lock before it takes state.mu, so taking that lock here
 				// while holding the state would invert the lock order.
-				snapshot.credit, snapshot.creditVersion = state.settlementCreditLocked(), state.creditVersion
+				credit, creditVersion = state.settlementCreditLocked(), state.creditVersion
 			}
 			s.unlockState(room, state)
 		}
 		if closed && changed {
-			snapshot.room = room
-			closingRooms = append(closingRooms, snapshot)
-		}
-	}
-	finished := make(chan struct{}, len(closingRooms))
-	for _, snapshot := range closingRooms {
-		go func(snapshot closingRoom) {
-			if err := s.persistSettlementCredit(ctx, snapshot.room, snapshot.credit); err != nil {
-				slog.Error("dispatch: record closing document settlement authors", "room", snapshot.room, "error", err)
+			if err := s.persistSettlementCredit(ctx, room, credit); err != nil {
+				slog.Error("dispatch: record closing document settlement authors", "room", room, "error", err)
 			} else {
-				s.settlementCreditPersisted(snapshot.room, snapshot.creditVersion)
+				s.settlementCreditPersisted(room, creditVersion)
 			}
 			// A room still loading has no state yet, and is closed once it has loaded.
-			_ = s.srv.CloseRoom(snapshot.room, true)
-			finished <- struct{}{}
-		}(snapshot)
-	}
-	for range closingRooms {
-		<-finished
+			_ = s.srv.CloseRoom(room, true)
+		}
 	}
 }
 
