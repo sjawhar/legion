@@ -247,6 +247,22 @@ func TestAnEscapeWeighsAnElement(t *testing.T) {
 	}
 }
 
+// A piece of inline HTML weighs two elements: the paragraph weighs three, and each `<b>a</b>` five,
+// its two tags and its text, so 13,106 spans weigh 65,533 and are read, 13,107 weigh 65,538 and are
+// refused, and MeasureDocument counts the same.
+func TestInlineHTMLWeighsTwoElements(t *testing.T) {
+	spans := (MaxDocumentElements - 3) / 5
+	if _, err := ParseForWrite(strings.Repeat("<b>a</b>", spans), nil); err != nil {
+		t.Fatalf("%d spans: %v, want them read", spans, err)
+	}
+	if _, err := ParseForWrite(strings.Repeat("<b>a</b>", spans+1), nil); !errors.Is(err, ErrTooManyElements) {
+		t.Fatalf("%d spans: %v, want ErrTooManyElements", spans+1, err)
+	}
+	if size := MeasureDocument(strings.Repeat("<b>a</b>", spans)); !size.Counted || size.Elements != 3+5*spans {
+		t.Fatalf("%d spans measure %+v, want %d elements", spans, size, 3+5*spans)
+	}
+}
+
 // Markdown an upload's parse refuses for its tables' padding measures past the limit rather than as
 // the paragraph the refused table is left as: a 101-column header over 200 one-cell rows, which
 // would pad 20,000 cells, measured 407 elements, where it weighs 82,111 written whole.

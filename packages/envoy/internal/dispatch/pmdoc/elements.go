@@ -137,6 +137,12 @@ const (
 	// heaviest document of hard breaks the limit admitted held 350 MiB stored, and four cold reads
 	// of it at once 1,190 MiB.
 	hardbreakWeight = 3
+	// rawHTMLWeight is a piece of inline HTML, a tag or a comment: the Proof tree makes it a node
+	// of its own carrying the HTML as an attribute, and the live document an element with that
+	// attribute, splitting its textblock's text. Weighed as one inline node, the heaviest document
+	// of `<b>a</b>` spans the limit admitted held 213 to 257 MiB to store, the most of any shape and
+	// past the 256 MiB a request may hold.
+	rawHTMLWeight = 2
 	// escapeWeight is a backslash escape or a character reference in a text: goldmark keeps it in
 	// its text node, so it makes no node there, but it spells a character - `_`, `~`, `[` - that
 	// the Proof tree holds bare and every rendering writes again, and the renderer reads each run
@@ -191,13 +197,15 @@ func elementWeight(node ast.Node) int {
 		return inlineWeight + hardbreakWeight
 	case node.Kind() == ast.KindAutoLink:
 		return autolinkWeight
+	case node.Kind() == ast.KindRawHTML:
+		return rawHTMLWeight
 	}
 	return inlineWeight
 }
 
 // weights is how a refusal of a write's elements names the weights.
-var weights = fmt.Sprintf("a block weighs %d elements, a table cell %d, a hard line break %d, an autolink %d, and each piece of inline syntax, escape, mark and line of text %d",
-	blockWeight, tableCellWeight, hardbreakWeight, autolinkWeight, inlineWeight)
+var weights = fmt.Sprintf("a block weighs %d elements, a table cell %d, a hard line break %d, a piece of inline HTML %d, an autolink %d, and each piece of inline syntax, escape, mark and line of text %d",
+	blockWeight, tableCellWeight, hardbreakWeight, rawHTMLWeight, autolinkWeight, inlineWeight)
 
 // MaxDocumentBytes is the most bytes of markdown one document may hold: what one upload of a
 // markdown document may send, and what a write may grow a stored document's rendering to.
