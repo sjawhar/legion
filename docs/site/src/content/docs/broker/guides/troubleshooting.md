@@ -34,7 +34,7 @@ generated from the code, lists every code.
 | `no agent secret has this name (UNKNOWN_SECRET)` | No secret the broker serves has the name: none exists under the namespace in that name (`DEEL_API_KEY` is `<namespace>deel-api-key`), or the broker leaves it out because a tag is missing or malformed or it is on the wrong key, which the broker logs by name (`agent secret policy refused`, [Operating the broker](/legion/broker/operate/#health-and-logs)). | Check the spelling; ask the secret's owner, or whoever runs the broker, to fix its tags or key. |
 | `the requested secrets need different approvers; request them separately (MIXED_APPROVERS)` | One command asked for secrets that different people approve. | Request them in separate commands. |
 | `the grant released no value for …; nothing was run` | The broker granted a name but returned no value for it. | Tell whoever runs the broker. |
-| `grant is expired, revoked, or its session ended (GRANT_NOT_LIVE)` | The grant ended between the decision and the read, or the secret's tags changed since it was granted: the secret is now left out or denied, or one granted automatically now needs approval. | Run the command again to ask anew. |
+| `grant is expired, revoked, or its session ended (GRANT_NOT_LIVE)` | The grant ended between the decision and the read, or the secret's tags changed since it was granted: the secret is now left out or denied, one granted automatically now needs approval, or it now belongs to someone who did not approve the grant. | Run the command again to ask anew. |
 | `secret is not in the secrets store (SECRET_NOT_IN_STORE)` | The secret was deleted from the secret store after the broker last read the namespace. | Ask again after the broker's next read, at most five minutes later; the request is then refused `UNKNOWN_SECRET` unless the secret is back. |
 | `request object invalid (REQUEST_INVALID)` | The broker could not verify the signed request: usually a clock far off, or an `AGENT_SECRETS_URL` that is not the broker's public URL. | Check the clock and the URL. |
 
@@ -42,7 +42,7 @@ generated from the code, lists every code.
 
 | Message | Cause | Fix |
 | --- | --- | --- |
-| `only the record's approver may decide it` (`NOT_APPROVER`) | You are not the approver the request names. | The named approver decides it. |
+| `only the record's approver may decide it` (`NOT_APPROVER`) | You are not the approver the request names, or the secret's owner changed while it waited ([what an owner change does](/legion/broker/concepts/#approvals)). | The named approver decides it; after an owner change, the new owner, if the request waited on anyone. |
 | `request is already decided` or `this machine login has already been decided` (`RECORD_TERMINAL`) | It was decided already, or the session that asked has ended. | Nothing to do. |
 | `… expired before its approver acted on it` (`RECORD_TERMINAL`) | It waited past its expiry: [a request's](/legion/broker/concepts/#approvals) or [a machine login's](/legion/broker/concepts/#machine-login). | The agent or the machine asks again. |
 | `no pending machine login has this code` (`NO_SUCH_CODE`) | The code is mistyped, already decided, or expired. | Check the code on the machine's terminal; start a new login if it expired. |

@@ -1671,54 +1671,26 @@ credential; `internal/broker/machine` decides typed-code machine logins and mint
 credentials they approve; and `internal/broker/secrets` reads the granted value from AWS Secrets
 Manager, or, for local development, from `secrets.Local`, an in-memory stand-in for the AWS calls.
 
-`internal/broker/policy` reads the policy from Secrets Manager itself (`policy.Loader`): every
-secret whose name starts with `BROKER_SECRETS_PREFIX` (such as `production/agent-secrets/`), listed
-with `ListSecrets` filtered to that prefix. The filter matches case-insensitively, so each name is
-re-checked against the prefix as written, and a name that only matched in another case is skipped
-without a log line. A secret's name under the prefix is the lowercase, hyphenated form of the name a
-session asks for: `<prefix>deel-api-key` is `DEEL_API_KEY`. Its `owner` tag is `shared`, a person's
-lowercase email (as their sign-in names them; a cased email is refused, so IAM's case-sensitive tag
-conditions and the broker agree on who owns it), or a registered service's name; its `tier` tag is
-`agent` or `human`; and its `KmsKeyId` must name `BROKER_SECRETS_KMS_KEY_ARN`'s key, by its ARN, its
-key id, or an alias, by name or ARN, that points at it now. Secrets Manager reports the key in
-whatever form the secret was created with, so an alias is resolved through `kms:ListAliases`, which
-a load calls only when it meets one. No service is registered yet (`Loader.Services` is empty, and
-nothing sets `Requester.Service`), so an owner tag naming a service is refused as malformed, for
-everyone, until service owners land. `Set.Evaluate` decides from owner and tier alone:
-
-| The secret | Its owner's own session | Another person's session, a pod, any service |
-| --- | --- | --- |
-| A person's, agent tier | granted at once | an approval request to the owner |
-| A person's, human tier | an approval request to the owner | an approval request to the owner |
-| Shared, agent tier | granted at once | granted at once |
-| Shared, human tier | approval by `anyone` | approval by `anyone` |
-| A service's, agent tier | (no person owns it) | granted at once to that service's own sessions; denied to everyone else |
-| A service's, human tier | refused at load (`service-owner-human-tier`) | refused at load |
-
-"Its owner's own session" is a session enrolled under a machine login its owner approved
-(`Requester.Operator`, compared lowercased). A request whose approver is `anyone`
-(`record.AnyoneApprover`) is in every person's `GET /v1/pending` and any signed-in person may decide
-it, never under the login `anyone` itself. A secret the loader refuses - a missing or malformed
-tag, a name that maps to no request name, or a key other than the agent-secrets key, the
-AWS-managed one included - is left out of the policy: a request naming it is `400 UNKNOWN_SECRET`,
-and a live grant of it stops at its next read (`GRANT_NOT_LIVE`). Every load logs one line for each
-such secret through Go's default slog handler at ERROR, `agent secret policy refused name=<its full
-Secrets Manager name> reason=<reason>`, the reason one of `name-malformed`, `owner-tag-missing`,
-`owner-tag-malformed`, `tier-tag-missing`, `tier-tag-malformed`, `service-owner-human-tier` and
-`not-on-agent-secrets-key`. `policy.Current` loads the policy at boot, and a boot whose load fails
-exits; it reloads every five minutes (`policyRefresh`, `cmd/broker/main.go`; no setting), and a
-reload that fails logs `agent secret policy load failed; previous policy kept error="<cause>"` at
-ERROR and keeps the policy it had. The deployment's alarms filter on both lines
-(`policy.RefusedMessage`, `policy.LoadFailedMessage`), so neither changes without the alarm.
-`Set.Version` is the SHA-256 of every served secret's name, owner, tier and ARN, in name order: a
-request records it, and a live grant is re-checked against the policy only once it has moved
-(`stillAllowed`). The record line, the column and the API field that carry it are still named
-`rules_version`, since records are content-addressed and stored bodies must still parse. The
-broker's AWS identity needs `secretsmanager:ListSecrets` (on `*`, which takes no resource),
-`secretsmanager:GetSecretValue` on the namespace with `kms:Decrypt` on the agent-secrets key, and
-`kms:ListAliases` (on `*`); it calls `DescribeSecret` nowhere. `BROKER_FAKE_SECRETS_FILE` stands
-`secrets.Local` in for all three, read from a JSON file of the same facts,
-`{"secrets": [{"name", "kms_key_id", "tags", "value"}]}`.
+`internal/broker/policy` reads the policy from Secrets Manager itself (`policy.Loader`), and
+`Set.Evaluate` decides each requested name from the secret's `owner` and `tier` tags alone. What
+the tags mean, the evaluation table and whose session counts as an owner's own are the docs site's
+concepts page (`docs/site/src/content/docs/broker/concepts.md`, "Owner and tier"); the IAM the
+broker needs, its log lines and every refusal reason are the operate page beside it
+(`operate.md`); the refresh interval and `BROKER_FAKE_SECRETS_FILE`'s format are the generated
+configuration reference (the comments on `config.Config` and in `cmd/broker/main.go`). What the
+code relies on: `Load` lists with `ListSecrets`' `name` filter, a case-sensitive prefix match, on
+`BROKER_SECRETS_PREFIX` and keeps only the names `strings.CutPrefix` finds under it, so a lister
+that answers more serves and logs nothing outside the namespace (`secrets.Local` filters as Secrets
+Manager does); a name under the prefix maps one-to-one to a request name (`slugPattern`); an alias
+on a secret's `KmsKeyId` is resolved through `kms:ListAliases` lazily, at most once per load; and
+an owner tag naming a service is refused as malformed while `Loader.Services` is empty, as
+`cmd/broker` leaves it. The two ERROR lines, `policy.RefusedMessage` with a `Reason*` constant and
+`policy.LoadFailedMessage`, are what the deployment's alarms filter on, so neither changes without
+the alarm, and a failed reload keeps the last set. `Set.Version`, the SHA-256 of every served
+secret's name, owner, tier and ARN, is recorded on every request, and a live grant is re-checked
+only once it has moved (`stillAllowed`); the record line, the column and the API field that carry
+it keep the name `rules_version`, since records are content-addressed and stored bodies must still
+parse.
 
 The client finds its session in `AGENT_SECRETS_KEY_DIR` (a box's or pod's `key.pem` and
 `enrollment`) or `AGENT_SECRETS_HELPER_SOCK` (a host session's helper), beside `AGENT_SECRETS_URL`.
