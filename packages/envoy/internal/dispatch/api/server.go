@@ -71,8 +71,8 @@ type Deps struct {
 	// deployment with no NATS, where the viewer route answers 503 rather than hanging.
 	AgentStream agentstream.Source
 	// AgentSecrets relays the credential-request UI to the secrets broker; nil (the broker URL
-	// is unconfigured) means the feature is off, and every handler that needs it answers
-	// 404 FEATURE_OFF.
+	// is unconfigured) means the feature is off: the pending list answers null, and every other
+	// handler that needs it answers 404 FEATURE_OFF.
 	AgentSecrets *agentsecrets.Client
 	// Lifetime bounds work a handler starts and does not wait for: it is the process's own
 	// context, cancelled when the server is shutting down, so a deploy stops a broadcast's
@@ -252,6 +252,7 @@ func errorf(status int, code, format string, args ...any) *apiError {
 const (
 	codeDocSchema             = "DOC_SCHEMA"
 	codeDocServiceUnavailable = "DOC_SERVICE_UNAVAILABLE"
+	codeDocumentUnloadable    = "DOCUMENT_UNLOADABLE"
 	codeInternal              = "INTERNAL"
 )
 
@@ -263,17 +264,20 @@ const (
 // so both take that code before any branch that reads the error's cause. A failed room carries the
 // error another operation failed it with - settlement's schema refusal, a settlement that failed
 // three times (its warm-up refused because the issue had closed, among others), a writer's commit
-// that failed or its client cancelled, a store write or load that failed - and that error says
-// nothing of this request: the caller retries once the room is evicted, and its retry meets the
-// document itself.
+// that failed or its client cancelled, a store write or load that failed, a history that did not
+// decode - and that error says nothing of this request: the caller retries once the room is
+// evicted, and its retry meets the document itself.
 //
-// A live tree outside the schema is DOC_SCHEMA, which both take only after the branches that name
-// the caller's own input or a block the document does not hold, so a refusal whose reason the
-// renderer gave (an ask block that cannot render) stays that refusal.
+// A stored history this request itself could not decode is DOCUMENT_UNLOADABLE, the state a
+// rebuild repairs. A tree outside the schema is DOC_SCHEMA, which both take only after the
+// branches that name the caller's own input or a block the document does not hold, so a refusal
+// whose reason the renderer gave (an ask block that cannot render) stays that refusal.
 func documentErrorCode(err error) string {
 	switch {
 	case errors.Is(err, docs.ErrServiceUnavailable):
 		return codeDocServiceUnavailable
+	case errors.Is(err, docs.ErrDocumentUnloadable):
+		return codeDocumentUnloadable
 	case errors.Is(err, docs.ErrDocSchema):
 		return codeDocSchema
 	}
@@ -291,8 +295,13 @@ func (s *server) writeHandlerError(w http.ResponseWriter, err error) {
 		return
 	}
 	documentCode := documentErrorCode(err)
-	if documentCode == codeDocServiceUnavailable {
+	switch documentCode {
+	case codeDocServiceUnavailable:
 		writeError(w, documentCode, http.StatusServiceUnavailable, docs.ErrServiceUnavailable.Error())
+		return
+	case codeDocumentUnloadable:
+		writeError(w, documentCode, http.StatusConflict, docs.ErrDocumentUnloadable.Error())
+		slog.Warn("dispatch: API document history cannot load", "error", err)
 		return
 	}
 	// The edit route's own ambiguity error names the operation and the quote; the bare pmdoc one
@@ -397,7 +406,16 @@ func (s *server) writeHandlerError(w http.ResponseWriter, err error) {
 		slog.Warn("dispatch: API refused a document over the update item cap", "error", err)
 		return
 	}
+	// A tree outside the schema that the document holds answers 409 with its one message, the same
+	// on every route whatever the route wrapped it in (docs.OutsideSchemaError). Any other schema
+	// refusal is a tree an operation produced, which is the server's fault.
 	if documentCode == codeDocSchema {
+		var outside *docs.OutsideSchemaError
+		if errors.As(err, &outside) {
+			writeError(w, documentCode, http.StatusConflict, outside.Error())
+			slog.Warn("dispatch: API document outside Proof schema", "error", err)
+			return
+		}
 		writeError(w, documentCode, http.StatusInternalServerError, err.Error())
 		slog.Error("dispatch: API document outside Proof schema", "error", err)
 		return

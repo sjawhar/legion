@@ -3,14 +3,15 @@
  * A stand-in for the Legion daemon that serves exactly the routes a phase worker and the
  * `legion` command-line tool hit while a shell command runs: the worker's claim registration
  * (`claims/register`, `claims/ready`, the daemon's claim routes the plugin boots through), grant
- * minting, and the three grant redemptions (git credential, GitHub token, phase completion).
+ * minting, the two credential redemptions (git credential, GitHub token), and a phase completion
+ * (`GET /legion/v1/state`, which `legion handoff complete` reads the issue's phase from, then
+ * `handoff/complete`).
  *
- * The grant request is the plugin's (`LegionGoGrantRequest` in `@legion/contracts/legion-go-api`,
- * the shape the daemon's grant route takes); the redemption shapes come from `LegionDaemonApi` in
- * `@legion/contracts`, which the rig's `legion` command-line tool speaks. The grant rule mirrors
- * the real daemon's: a grant lives for 60 seconds and redeems any number of times while it lives;
- * an unknown or expired grant id answers 403 `{"error":"Invalid or expired grant"}`. Nothing is
- * single-use.
+ * Every request and response body is the Go daemon's (`@legion/contracts/legion-api`): the
+ * plugin's grant request, the CLI's redemptions and completion, and the state document. The grant
+ * rule mirrors the real daemon's: a grant lives for 60 seconds and redeems any number of times
+ * while it lives; an unknown or expired grant id answers 403 `{"error":"Invalid or expired
+ * grant"}`. Nothing is single-use.
  *
  * Every request appends one JSON line to the log file: `{at, path, status, grantId?, sessionId?,
  * mintedGrantId?}`. The rig driver (`run.ts`) reads that log to count grant mints per shell
@@ -18,13 +19,20 @@
  *
  * Usage: `bun daemon-standin.ts <port> <log file> <boot token file> [<project> <issue> <role>]`
  * The role token defaults to project `l12rig`, issue `RIG-1`, role `implementer`; the skill
- * scenarios (`../skill-scenarios/rig.sh`) name their own.
+ * scenarios (`../skill-scenarios/rig.sh`) name their own. The state document holds that one issue,
+ * in the phase its role works.
  * Prints `listening on http://127.0.0.1:<port>` once the socket is open.
  */
 import { randomUUID } from "node:crypto";
 import { appendFile } from "node:fs/promises";
-import { isLegionRole, LegionDaemonApi, roleToken } from "@legion/contracts";
-import { LegionGoGrantRequest } from "@legion/contracts/legion-go-api";
+import { isLegionRole, roleToken } from "@legion/contracts";
+import {
+  LegionGrantCredentialRequest,
+  LegionGrantRequest,
+  LegionHandoffCompleteRequest,
+  LegionStateResponse,
+} from "@legion/contracts/legion-api";
+import { DAEMON_MODULE, runDaemonPane } from "./daemon-pane";
 
 const GRANT_TTL_MS = 60_000;
 /** Encoded exactly as the daemon encodes it (`legion-<project>-<key>-<role>`, lower-cased),
@@ -38,6 +46,24 @@ if (!isLegionRole(role)) {
 const ROLE_TOKEN = roleToken(project, issue, role);
 const SESSION_SECRET = "rig-secret";
 const GIT_TOKEN = "rig-token";
+
+const startedAt = new Date().toISOString();
+/** `GET /legion/v1/state`: the one issue the worker holds, admitted in the phase its role works
+ * (`workflow.RoleFor`, through daemon-pane.go). */
+const STATE = LegionStateResponse.parse({
+  daemon: { project, schemaVersion: 1, boots: 1, firstBootAt: startedAt, startedAt },
+  admission: { cap: 1, active: [issue], waiting: [] },
+  issues: {
+    [issue]: {
+      key: issue,
+      generation: 1,
+      phase: runDaemonPane(DAEMON_MODULE, ["phase", role]).trim(),
+      status: "in_progress",
+      workers: {},
+    },
+  },
+  pendingStatusWrites: [],
+});
 
 interface LogLine {
   readonly at: string;
@@ -109,7 +135,7 @@ function handle(path: string, body: unknown): { response: Response; mintedGrantI
       return { response: new Response(null, { status: 204 }) };
     }
     case "/legion/v1/grants": {
-      const parsed = LegionGoGrantRequest.safeParse(body);
+      const parsed = LegionGrantRequest.safeParse(body);
       if (!parsed.success) return { response: json(400, { error: parsed.error.message }) };
       if (parsed.data.secret !== SESSION_SECRET) {
         return { response: forbidden("Invalid session secret") };
@@ -122,10 +148,10 @@ function handle(path: string, body: unknown): { response: Response; mintedGrantI
         mintedGrantId: grantId,
       };
     }
-    // The daemon routes both credential redemptions through `LegionDaemonApi.GitHubToken.request`
-    // (a strict `{ grantId }`), so the stand-in refuses the same malformed bodies it would.
+    // The daemon reads both credential redemptions as `api.GrantCredentialRequest` (a strict
+    // `{ grantId }`), so the stand-in refuses the same malformed bodies it would.
     case "/legion/v1/git-credential": {
-      const parsed = LegionDaemonApi.GitHubToken.request.safeParse(body);
+      const parsed = LegionGrantCredentialRequest.safeParse(body);
       if (!parsed.success) return { response: json(400, { error: parsed.error.message }) };
       const refused = resolveGrant(parsed.data.grantId);
       if (refused) return { response: refused };
@@ -136,14 +162,14 @@ function handle(path: string, body: unknown): { response: Response; mintedGrantI
       };
     }
     case "/legion/v1/gh-token": {
-      const parsed = LegionDaemonApi.GitHubToken.request.safeParse(body);
+      const parsed = LegionGrantCredentialRequest.safeParse(body);
       if (!parsed.success) return { response: json(400, { error: parsed.error.message }) };
       const refused = resolveGrant(parsed.data.grantId);
       if (refused) return { response: refused };
       return { response: json(200, { token: GIT_TOKEN, appLogin: "rig[bot]" }) };
     }
-    case "/legion/v1/phase/complete": {
-      const parsed = LegionDaemonApi.PhaseComplete.request.safeParse(body);
+    case "/legion/v1/handoff/complete": {
+      const parsed = LegionHandoffCompleteRequest.safeParse(body);
       if (!parsed.success) return { response: json(400, { error: parsed.error.message }) };
       const refused = resolveGrant(parsed.data.grantId);
       if (refused) return { response: refused };
@@ -170,7 +196,9 @@ const server = Bun.serve({
     const { response, mintedGrantId } =
       request.method === "POST"
         ? handle(path, body)
-        : { response: json(404, { error: `no route for ${request.method} ${path}` }) };
+        : request.method === "GET" && path === "/legion/v1/state"
+          ? { response: json(200, STATE) }
+          : { response: json(404, { error: `no route for ${request.method} ${path}` }) };
     const line: LogLine = {
       at: new Date().toISOString(),
       path,

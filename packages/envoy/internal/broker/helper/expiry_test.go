@@ -91,13 +91,13 @@ func TestTheHelperWarnsBeforeItsLauncherCredentialExpiresAndDropsItThen(t *testi
 		time.Sleep(20 * time.Millisecond)
 	}
 	expiresAt := cred.expiresAt.Format(time.RFC3339)
-	var warned, expired map[string]any
+	// drop clears the credential before it logs the drop, so the ERROR can land just after
+	// HasCredential turns false; the warning came before both.
+	expired := waitForRecord(t, &out, expiredMsg)
+	var warned map[string]any
 	for _, rec := range logRecords(t, &out) {
-		switch rec["msg"] {
-		case expiresSoonMsg:
+		if rec["msg"] == expiresSoonMsg {
 			warned = rec
-		case expiredMsg:
-			expired = rec
 		}
 	}
 	if warned == nil || warned["level"] != "WARN" || warned["credential_id"] != cred.id || warned["expires_at"] != expiresAt {
@@ -107,7 +107,7 @@ func TestTheHelperWarnsBeforeItsLauncherCredentialExpiresAndDropsItThen(t *testi
 	if at := recordTime(t, warned); at.Before(cred.expiresAt.Add(-2*time.Second)) || !at.Before(cred.expiresAt) {
 		t.Fatalf("the warning came at %s; want within 2 s before the expiry %s", at, cred.expiresAt)
 	}
-	if expired == nil || expired["level"] != "ERROR" || expired["credential_id"] != cred.id || expired["expires_at"] != expiresAt {
+	if expired["level"] != "ERROR" || expired["credential_id"] != cred.id || expired["expires_at"] != expiresAt {
 		t.Fatalf("the expiry line: %v; want an ERROR naming %s and %s (log: %s)", expired, cred.id, expiresAt, out.String())
 	}
 	if at := recordTime(t, expired); at.Before(cred.expiresAt) {
@@ -201,16 +201,14 @@ func TestABrokerThatNamesNoExpiryGetsAWarning(t *testing.T) {
 	if resp := srv.loginStatus(); !resp.CredentialHeld || resp.CredentialExpiresAt != "" {
 		t.Fatalf("login-status: %+v; want the credential held and no expiry", resp)
 	}
-	var warned bool
+	// pollLogin logs the warning after it installs the credential expiryLogin waited for.
+	warned := waitForRecord(t, &out, "the broker did not say when the launcher credential expires, so the helper cannot warn before it does")
+	if warned["level"] != "WARN" || warned["credential_id"] != cred.id {
+		t.Fatalf("the line saying the expiry is unknown: %v; want a WARN naming %s (log: %s)", warned, cred.id, out.String())
+	}
 	for _, rec := range logRecords(t, &out) {
-		if rec["msg"] == "the broker did not say when the launcher credential expires, so the helper cannot warn before it does" {
-			warned = rec["level"] == "WARN" && rec["credential_id"] == cred.id
-		}
 		if _, ok := rec["expires_at"]; ok {
 			t.Fatalf("a line names an expiry the broker never gave: %v", rec)
 		}
-	}
-	if !warned {
-		t.Fatalf("no WARN said the expiry is unknown: %s", out.String())
 	}
 }

@@ -1,39 +1,39 @@
 import {
-  LegionGoChildRequest,
-  LegionGoControllerGrantRequest,
-  LegionGoControllerRegisterResponse,
-  type LegionGoControllerRegistration,
-  LegionGoEmptyResponse,
-  LegionGoErrorResponse,
-  LegionGoGateRegisterRequest,
-  LegionGoGitCredentialResponse,
-  LegionGoGitHubTokenResponse,
-  LegionGoGrantCredentialRequest,
-  LegionGoGrantRequest,
-  LegionGoGrantResponse,
-  LegionGoHandoffCompleteRequest,
-  LegionGoIssueStatusRequest,
-  LegionGoPhaseBackwardRequest,
-  LegionGoPhaseRetryRequest,
-  LegionGoRegisterResponse,
-  type LegionGoRegistration,
-  LegionGoRootCloseRequest,
-  LegionGoSignOffRequest,
-  type LegionGoState,
-  LegionGoStateResponse,
-  LegionGoWaveReleaseRequest,
-  LegionGoWaveReleaseResponse,
-} from "@legion/contracts/legion-go-api";
+  LegionChildRequest,
+  LegionControllerGrantRequest,
+  LegionControllerRegisterResponse,
+  type LegionControllerRegistration,
+  LegionEmptyResponse,
+  LegionErrorResponse,
+  LegionGateRegisterRequest,
+  LegionGitCredentialResponse,
+  LegionGitHubTokenResponse,
+  LegionGrantCredentialRequest,
+  LegionGrantRequest,
+  LegionGrantResponse,
+  LegionHandoffCompleteRequest,
+  LegionIssueStatusRequest,
+  LegionPhaseBackwardRequest,
+  LegionPhaseRetryRequest,
+  LegionRegisterResponse,
+  type LegionRegistration,
+  LegionRootCloseRequest,
+  LegionSignOffRequest,
+  type LegionState,
+  LegionStateResponse,
+  LegionWaveReleaseRequest,
+  LegionWaveReleaseResponse,
+} from "@legion/contracts/legion-api";
 import { messageFor } from "@legion/envoy-client/errors";
 import type { z } from "zod";
 
 /**
- * The plugin's client for the daemon (`packages/daemon-go`), the one `extensions/legion.ts` boots
+ * The plugin's client for the daemon (`packages/daemon`), the one `extensions/legion.ts` boots
  * every Legion session through.
  *
- * Every response is read through the strict schemas of `@legion/contracts/legion-go-api`, which the
+ * Every response is read through the strict schemas of `@legion/contracts/legion-api`, which the
  * daemon's golden tests hold to its own types; the requests are the claim wire of
- * `packages/daemon-go/internal/claim/wire.go`, which refuses a member it does not read. There is no
+ * `packages/daemon/internal/claim/wire.go`, which refuses a member it does not read. There is no
  * secret recovery: the daemon persists a registration's capability before it answers, so a
  * restart forgets no secret.
  */
@@ -62,58 +62,58 @@ export interface ExitInput extends ReadyInput {
 }
 
 export interface LegionDaemonClient {
-  readonly state: () => Promise<LegionGoState>;
-  readonly register: (input: RegisterInput) => Promise<LegionGoRegistration>;
+  readonly state: () => Promise<LegionState>;
+  readonly register: (input: RegisterInput) => Promise<LegionRegistration>;
   /** The same route, for the operator-launched controller: `bootToken` is the capability `legion
    * controller start` fetched, and the answer is the controller's registration. */
-  readonly registerController: (input: RegisterInput) => Promise<LegionGoControllerRegistration>;
+  readonly registerController: (input: RegisterInput) => Promise<LegionControllerRegistration>;
   readonly ready: (input: ReadyInput) => Promise<void>;
   readonly exit: (input: ExitInput) => Promise<void>;
   readonly grant: (
-    input: z.input<typeof LegionGoGrantRequest>
-  ) => Promise<z.output<typeof LegionGoGrantResponse>>;
+    input: z.input<typeof LegionGrantRequest>
+  ) => Promise<z.output<typeof LegionGrantResponse>>;
   readonly controllerGrant: (
-    input: z.input<typeof LegionGoControllerGrantRequest>
-  ) => Promise<z.output<typeof LegionGoGrantResponse>>;
+    input: z.input<typeof LegionControllerGrantRequest>
+  ) => Promise<z.output<typeof LegionGrantResponse>>;
   readonly githubToken: (
-    input: z.input<typeof LegionGoGrantCredentialRequest>
-  ) => Promise<z.output<typeof LegionGoGitHubTokenResponse>>;
+    input: z.input<typeof LegionGrantCredentialRequest>
+  ) => Promise<z.output<typeof LegionGitHubTokenResponse>>;
   readonly gitCredential: (
-    input: z.input<typeof LegionGoGrantCredentialRequest>
-  ) => Promise<z.output<typeof LegionGoGitCredentialResponse>>;
+    input: z.input<typeof LegionGrantCredentialRequest>
+  ) => Promise<z.output<typeof LegionGitCredentialResponse>>;
   readonly provisioningCredential: (
-    input: z.input<typeof LegionGoGrantCredentialRequest>
-  ) => Promise<z.output<typeof LegionGoGitHubTokenResponse>>;
+    input: z.input<typeof LegionGrantCredentialRequest>
+  ) => Promise<z.output<typeof LegionGitHubTokenResponse>>;
   readonly handoffComplete: (
-    input: z.input<typeof LegionGoHandoffCompleteRequest>
-  ) => Promise<z.output<typeof LegionGoEmptyResponse>>;
+    input: z.input<typeof LegionHandoffCompleteRequest>
+  ) => Promise<z.output<typeof LegionEmptyResponse>>;
   readonly issueStatus: (
-    input: z.input<typeof LegionGoIssueStatusRequest>
-  ) => Promise<z.output<typeof LegionGoEmptyResponse>>;
+    input: z.input<typeof LegionIssueStatusRequest>
+  ) => Promise<z.output<typeof LegionEmptyResponse>>;
   readonly gateRegister: (
-    input: z.input<typeof LegionGoGateRegisterRequest>
-  ) => Promise<z.output<typeof LegionGoEmptyResponse>>;
+    input: z.input<typeof LegionGateRegisterRequest>
+  ) => Promise<z.output<typeof LegionEmptyResponse>>;
   readonly waveRelease: (
-    input: z.input<typeof LegionGoWaveReleaseRequest>
-  ) => Promise<z.output<typeof LegionGoWaveReleaseResponse>>;
+    input: z.input<typeof LegionWaveReleaseRequest>
+  ) => Promise<z.output<typeof LegionWaveReleaseResponse>>;
   readonly phaseBackward: (
-    input: z.input<typeof LegionGoPhaseBackwardRequest>
-  ) => Promise<z.output<typeof LegionGoEmptyResponse>>;
+    input: z.input<typeof LegionPhaseBackwardRequest>
+  ) => Promise<z.output<typeof LegionEmptyResponse>>;
   readonly phaseRetry: (
-    input: z.input<typeof LegionGoPhaseRetryRequest>
-  ) => Promise<z.output<typeof LegionGoEmptyResponse>>;
+    input: z.input<typeof LegionPhaseRetryRequest>
+  ) => Promise<z.output<typeof LegionEmptyResponse>>;
   readonly signOff: (
-    input: z.input<typeof LegionGoSignOffRequest>
-  ) => Promise<z.output<typeof LegionGoEmptyResponse>>;
+    input: z.input<typeof LegionSignOffRequest>
+  ) => Promise<z.output<typeof LegionEmptyResponse>>;
   readonly rootClose: (
-    input: z.input<typeof LegionGoRootCloseRequest>
-  ) => Promise<z.output<typeof LegionGoEmptyResponse>>;
+    input: z.input<typeof LegionRootCloseRequest>
+  ) => Promise<z.output<typeof LegionEmptyResponse>>;
   readonly childPark: (
-    input: z.input<typeof LegionGoChildRequest>
-  ) => Promise<z.output<typeof LegionGoEmptyResponse>>;
+    input: z.input<typeof LegionChildRequest>
+  ) => Promise<z.output<typeof LegionEmptyResponse>>;
   readonly childRerun: (
-    input: z.input<typeof LegionGoChildRequest>
-  ) => Promise<z.output<typeof LegionGoEmptyResponse>>;
+    input: z.input<typeof LegionChildRequest>
+  ) => Promise<z.output<typeof LegionEmptyResponse>>;
 }
 
 /** The daemon answered with a status that is not success. `detail` is the sentence it put
@@ -193,7 +193,7 @@ export function createLegionDaemonClient(
     );
     const text = await response.text();
     if (response.ok) return { status: response.status, text };
-    const refusal = parseStrictly(LegionGoErrorResponse, text);
+    const refusal = parseStrictly(LegionErrorResponse, text);
     if ("value" in refusal) {
       const code =
         "code" in refusal.value && typeof refusal.value.code === "string"
@@ -246,66 +246,50 @@ export function createLegionDaemonClient(
   };
 
   return {
-    state: () => read("GET", "/legion/v1/state", LegionGoStateResponse),
-    register: (input) =>
-      read("POST", "/legion/v1/claims/register", LegionGoRegisterResponse, input),
+    state: () => read("GET", "/legion/v1/state", LegionStateResponse),
+    register: (input) => read("POST", "/legion/v1/claims/register", LegionRegisterResponse, input),
     registerController: (input) =>
-      read("POST", "/legion/v1/claims/register", LegionGoControllerRegisterResponse, input),
+      read("POST", "/legion/v1/claims/register", LegionControllerRegisterResponse, input),
     ready: (input) => acknowledge("/legion/v1/claims/ready", input),
     exit: (input) => acknowledge("/legion/v1/claims/exit", input),
-    grant: (input) => post("/legion/v1/grants", LegionGoGrantRequest, LegionGoGrantResponse, input),
+    grant: (input) => post("/legion/v1/grants", LegionGrantRequest, LegionGrantResponse, input),
     controllerGrant: (input) =>
-      post("/legion/v1/grants", LegionGoControllerGrantRequest, LegionGoGrantResponse, input),
+      post("/legion/v1/grants", LegionControllerGrantRequest, LegionGrantResponse, input),
     githubToken: (input) =>
-      post(
-        "/legion/v1/gh-token",
-        LegionGoGrantCredentialRequest,
-        LegionGoGitHubTokenResponse,
-        input
-      ),
+      post("/legion/v1/gh-token", LegionGrantCredentialRequest, LegionGitHubTokenResponse, input),
     gitCredential: (input) =>
       post(
         "/legion/v1/git-credential",
-        LegionGoGrantCredentialRequest,
-        LegionGoGitCredentialResponse,
+        LegionGrantCredentialRequest,
+        LegionGitCredentialResponse,
         input
       ),
     provisioningCredential: (input) =>
       post(
         "/legion/v1/provisioning-credential",
-        LegionGoGrantCredentialRequest,
-        LegionGoGitHubTokenResponse,
+        LegionGrantCredentialRequest,
+        LegionGitHubTokenResponse,
         input
       ),
     handoffComplete: (input) =>
-      post(
-        "/legion/v1/handoff/complete",
-        LegionGoHandoffCompleteRequest,
-        LegionGoEmptyResponse,
-        input
-      ),
+      post("/legion/v1/handoff/complete", LegionHandoffCompleteRequest, LegionEmptyResponse, input),
     issueStatus: (input) =>
-      post("/legion/v1/issues/status", LegionGoIssueStatusRequest, LegionGoEmptyResponse, input),
+      post("/legion/v1/issues/status", LegionIssueStatusRequest, LegionEmptyResponse, input),
     gateRegister: (input) =>
-      post("/legion/v1/gates/register", LegionGoGateRegisterRequest, LegionGoEmptyResponse, input),
+      post("/legion/v1/gates/register", LegionGateRegisterRequest, LegionEmptyResponse, input),
     waveRelease: (input) =>
-      post(
-        "/legion/v1/waves/release",
-        LegionGoWaveReleaseRequest,
-        LegionGoWaveReleaseResponse,
-        input
-      ),
+      post("/legion/v1/waves/release", LegionWaveReleaseRequest, LegionWaveReleaseResponse, input),
     phaseBackward: (input) =>
-      post("/legion/v1/phase/backward", LegionGoPhaseBackwardRequest, LegionGoEmptyResponse, input),
+      post("/legion/v1/phase/backward", LegionPhaseBackwardRequest, LegionEmptyResponse, input),
     phaseRetry: (input) =>
-      post("/legion/v1/phase/retry", LegionGoPhaseRetryRequest, LegionGoEmptyResponse, input),
+      post("/legion/v1/phase/retry", LegionPhaseRetryRequest, LegionEmptyResponse, input),
     signOff: (input) =>
-      post("/legion/v1/signoff", LegionGoSignOffRequest, LegionGoEmptyResponse, input),
+      post("/legion/v1/signoff", LegionSignOffRequest, LegionEmptyResponse, input),
     rootClose: (input) =>
-      post("/legion/v1/roots/close", LegionGoRootCloseRequest, LegionGoEmptyResponse, input),
+      post("/legion/v1/roots/close", LegionRootCloseRequest, LegionEmptyResponse, input),
     childPark: (input) =>
-      post("/legion/v1/children/park", LegionGoChildRequest, LegionGoEmptyResponse, input),
+      post("/legion/v1/children/park", LegionChildRequest, LegionEmptyResponse, input),
     childRerun: (input) =>
-      post("/legion/v1/children/rerun", LegionGoChildRequest, LegionGoEmptyResponse, input),
+      post("/legion/v1/children/rerun", LegionChildRequest, LegionEmptyResponse, input),
   };
 }

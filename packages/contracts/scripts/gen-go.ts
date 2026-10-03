@@ -5,6 +5,8 @@ import { AGENT_STREAM_SUBJECT_PREFIX } from "../src/agent-stream";
 import {
   DEFAULT_ISSUE_PAGE_LIMIT,
   DELIVERY_DUPLICATE_WINDOW_MS,
+  DOCUMENT_SCHEMA_CLOSE_CODE,
+  DOCUMENT_SCHEMA_CLOSE_REASON,
   ISSUE_TITLE_MAX,
   MAX_BROADCAST_RECIPIENTS,
   MAX_ISSUE_PAGE_LIMIT,
@@ -122,6 +124,13 @@ const DefaultIssuePageLimit = ${DEFAULT_ISSUE_PAGE_LIMIT}
 // PATCH /api/v1/issues/{key} accept. Generated from ISSUE_TITLE_MAX in packages/contracts so the
 // server's refusal and the dashboard's title fields cannot drift apart.
 const IssueTitleMax = ${ISSUE_TITLE_MAX}
+
+// DocumentSchemaCloseCode and DocumentSchemaCloseReason close a document websocket whose room is
+// outside the Proof schema, before any sync. Generated from DOCUMENT_SCHEMA_CLOSE_CODE and
+// DOCUMENT_SCHEMA_CLOSE_REASON in packages/contracts so the server's close and the dashboard's
+// reading of it cannot drift apart.
+const DocumentSchemaCloseCode = ${DOCUMENT_SCHEMA_CLOSE_CODE}
+const DocumentSchemaCloseReason = ${JSON.stringify(DOCUMENT_SCHEMA_CLOSE_REASON)}
 
 func NowMillis() int64 {
 	return time.Now().UnixMilli()

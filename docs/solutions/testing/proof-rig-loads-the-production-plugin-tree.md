@@ -81,9 +81,10 @@ resolve its *own* `gh` to the shim and hand every child pane a second `worker-bi
 So the rig deliberately taints its launch PATH — this pane's `worker-bin` first, a second
 `/tmp/other-daemon/worker-bin` last — and the worker's `printenv` probe (verdict G) must show the
 rig's `worker-bin` exactly once. The strip that makes this true is one shared function,
-`pathWithoutWorkerBin` in `packages/daemon/src/daemon/worker-bin.ts`, applied at the daemon
-boundary (`resolveDaemonEnvironment`), in `legion gh` before it spawns `gh`, and in the rig's
-`workerEnvironment` — never re-implemented per call site. The general rule for anything a daemon
+`workerbin.FreePath` in `packages/daemon/internal/runtime/workerbin`, applied where the daemon
+resolves the `gh`, `git` and `jj` every pane is told (`resolveTools`, which the rig's
+`daemon-pane.go` calls too), in `legion gh` before it spawns `gh`, and in `legion controller start`
+— never re-implemented per call site. The general rule for anything a daemon
 puts on a pane for life is in
 [config-env-keys-that-panes-also-carry](../daemon/config-env-keys-that-panes-also-carry.md); the
 rig's job is to start from the environment that rule protects against, not from a clean shell.

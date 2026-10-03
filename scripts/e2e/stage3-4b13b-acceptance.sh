@@ -662,7 +662,7 @@ nats_url='^([A-Za-z][A-Za-z0-9+.-]*://)?([^@/?#,[:space:]]+@)?[A-Za-z0-9_-]+(\.[
   head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' >"$work/operator-token" &&
   printf 'ci' >"$work/postgres-password")
 chmod 0600 "$work"/*token "$work/envoy-auth-header" "$work/postgres-password"
-(cd "$root/packages/daemon-go" && go build -ldflags "-X main.revision=$head_commit" -o "$work/legion" ./cmd/legion)
+(cd "$root/packages/daemon" && go build -ldflags "-X main.revision=$head_commit" -o "$work/legion" ./cmd/legion)
 stage_role_prompts "$root" "$work"
 (cd "$root/packages/envoy" && go build -o "$work/envoy-listener" ./cmd/listener && go build -o "$work/envoy-dispatch" ./cmd/dispatch)
 {
@@ -694,7 +694,7 @@ SMOKE_REPO="$repo" SMOKE_RIG_NATS="nats://127.0.0.1:$port_nats" \
 until_true 90 "the GitHub ingress bridge to report ready" grep -q 'BRIDGE READY' "$evidence/logs/bridge.log"
 (cd "$root" && bun install --frozen-lockfile >/dev/null)
 manifest=$(bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --profile "$profile" --home "$omp_home" --dest "$work/plugin")
-pin=$(bun "$root/packages/daemon/src/daemon/omp-pin.ts")
+pin=$(<"$root/.omp-pin")
 mise where "$pin" >/dev/null 2>&1 || mise install "$pin" >&2
 cat >"$work/instructions.md" <<'EOF'
 # Acceptance proof instructions
@@ -725,23 +725,28 @@ pass
 begin prompts-rewritten-on-boot
 pdir="$state/prompts/go"
 parts=()
-for part in "$root/packages/daemon-go/internal/prompts/go/"*.md; do parts+=("$(basename "$part")"); done
+for part in "$root/packages/daemon/internal/prompts/go/"*.md; do parts+=("$(basename "$part")"); done
 for f in "${parts[@]}"; do
-  cmp -s "$pdir/$f" "$root/packages/daemon-go/internal/prompts/go/$f" || fail "$pdir/$f is not the head's embedded $f"
+  cmp -s "$pdir/$f" "$root/packages/daemon/internal/prompts/go/$f" || fail "$pdir/$f is not the head's embedded $f"
 done
-note "all ${#parts[@]} Go prompt parts in $pdir equal the head's packages/daemon-go/internal/prompts/go/* (${parts[*]})"
-jj -R "$root" file show -r "$base_rev" root:packages/daemon-go/internal/prompts/go/merger.md >"$evidence/merger.base.md"
+note "all ${#parts[@]} Go prompt parts in $pdir equal the head's packages/daemon/internal/prompts/go/* (${parts[*]})"
+# The daemon's package directory was renamed after the default base revision, so the base's
+# merger.md is found at whichever package path that revision has, and must be exactly one. jj
+# prints the paths it lists relative to the working directory, hence the listing from the root.
+base_merger=$(cd "$root" && jj file list -r "$base_rev" 'root-glob:"packages/*/internal/prompts/go/merger.md"')
+[ -n "$base_merger" ] && [ "$(wc -l <<<"$base_merger")" = 1 ] || fail "the base revision $base_rev holds '$base_merger' for packages/*/internal/prompts/go/merger.md, want exactly one file"
+jj -R "$root" file show -r "$base_rev" "root:$base_merger" >"$evidence/merger.base.md"
 [ -s "$evidence/merger.base.md" ] || fail "the base revision's merger.md read back empty"
 cmp -s "$evidence/merger.base.md" "$pdir/merger.md" && fail "the base merger.md equals the head's; nothing to prove"
 stat -c '%n %.9Y' "$pdir"/*.md >"$evidence/prompts-mtime-before.txt"
 cp "$evidence/merger.base.md" "$pdir/merger.md"
 # negative control: the stale part is observably different before the restart
-cmp -s "$pdir/merger.md" "$root/packages/daemon-go/internal/prompts/go/merger.md" && fail "the planted stale merger.md equals the embedded one"
+cmp -s "$pdir/merger.md" "$root/packages/daemon/internal/prompts/go/merger.md" && fail "the planted stale merger.md equals the embedded one"
 note "planted the base ($base_rev) merger.md: $(grep -c 'publish READY yourself' "$pdir/merger.md" || true) line(s) telling the merger it publishes nothing and to send ready:true, $(wc -c <"$pdir/merger.md") bytes"
 sleep 1.1
 stop_daemon
 start_daemon keep
-cmp -s "$pdir/merger.md" "$root/packages/daemon-go/internal/prompts/go/merger.md" || fail "the restarted daemon left the stale merger.md in place"
+cmp -s "$pdir/merger.md" "$root/packages/daemon/internal/prompts/go/merger.md" || fail "the restarted daemon left the stale merger.md in place"
 stat -c '%n %.9Y' "$pdir"/*.md >"$evidence/prompts-mtime-after.txt"
 unchanged=$(join <(sort "$evidence/prompts-mtime-before.txt") <(sort "$evidence/prompts-mtime-after.txt") | awk '$2 == $3' | wc -l)
 changed=$(join <(sort "$evidence/prompts-mtime-before.txt") <(sort "$evidence/prompts-mtime-after.txt") | awk '$2 != $3 {print $1}')
