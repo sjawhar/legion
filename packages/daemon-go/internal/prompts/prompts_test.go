@@ -28,8 +28,8 @@ func TestComposeOrdersSharedRolePartsBeforeTheGoDaemonParts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	// Every operation the Go tool gives an architect besides register_gate
-	// (packages/pi-envoy/src/legion/go-tools.ts), which a prompt that never names it leaves unused.
+	// Every operation the legion tool gives an architect besides register_gate
+	// (packages/pi-envoy/src/legion/tools.ts), which a prompt that never names it leaves unused.
 	architectOperations := []string{"`release_children`", "`park_child`", "`rerun_child`", "`request_backward_move`", "`retry_or_escalate`", "`sign_off`", "`read_record`"}
 
 	for _, tc := range []struct {
@@ -92,6 +92,7 @@ func TestComposeOrdersSharedRolePartsBeforeTheGoDaemonParts(t *testing.T) {
 		})
 	}
 }
+
 // A daemon must fail before any worker is launched when the configured role-prompt directory is
 // incomplete; otherwise a production launch reports an opaque shell-level cat failure.
 func TestNewRefusesEveryMissingSharedRolePrompt(t *testing.T) {

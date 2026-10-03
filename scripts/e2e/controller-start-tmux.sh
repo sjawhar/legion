@@ -141,8 +141,8 @@ until_true 60 "the Envoy listener" curl -fsS -H "@$work/envoy-auth-header" "http
 
 (cd "$root" && bun install --frozen-lockfile >/dev/null)
 manifest=$(bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --profile "$profile" --home "$omp_home" --dest "$work/plugin")
-want_contract=$(jq -r .legion.goDaemonApiVersion "$root/packages/pi-envoy/package.json")
-note "plugin $(jq -r '.name + "@" + .version' "$manifest") in OMP profile $profile, goDaemonApiVersion $want_contract"
+want_contract=$(jq -r .legion.daemonApiVersion "$root/packages/pi-envoy/package.json")
+note "plugin $(jq -r '.name + "@" + .version' "$manifest") in OMP profile $profile, daemonApiVersion $want_contract"
 # The boot gate resolves the model of every task agent the prompts dispatch, so the profile names
 # their roles and the default one model, served by a static-key provider that listens nowhere: the
 # controller's one model turn, the start message `legion controller start` opens it with, fails
@@ -226,14 +226,14 @@ pass
 begin gate-refuses-the-previous-contract
 cp -p "$work/plugin/package.json" "$work/manifest.orig"
 previous_contract=$((want_contract - 1))
-jq --argjson c "$previous_contract" '.legion.goDaemonApiVersion = $c' "$work/manifest.orig" >"$work/plugin/package.json"
+jq --argjson c "$previous_contract" '.legion.daemonApiVersion = $c' "$work/manifest.orig" >"$work/plugin/package.json"
 st=0
 operator_env timeout 300 "$work/legion" start --config "$work/legion.yaml" >"$evidence/checks/refusal-contract.log" 2>&1 || st=$?
 cp -p "$work/manifest.orig" "$work/plugin/package.json"
 [ "$st" != 0 ] && [ "$st" != 124 ] || fail "legion start exited $st"
-grep -qF "speaks Go daemon API contract $previous_contract; this daemon requires $want_contract" "$evidence/checks/refusal-contract.log" ||
+grep -qF "speaks daemon API contract $previous_contract; this daemon requires $want_contract" "$evidence/checks/refusal-contract.log" ||
   fail "the refusal does not name both contracts: $(head -3 "$evidence/checks/refusal-contract.log")"
-note "legion start exit $st: $(grep -oF "speaks Go daemon API contract $previous_contract; this daemon requires $want_contract" "$evidence/checks/refusal-contract.log" | head -1)"
+note "legion start exit $st: $(grep -oF "speaks daemon API contract $previous_contract; this daemon requires $want_contract" "$evidence/checks/refusal-contract.log" | head -1)"
 pass
 
 # ---- the daemon ------------------------------------------------------------------------------------
@@ -283,7 +283,7 @@ registered=$(jq -R -c --arg s "$session1" 'fromjson? | select(.msg == "api: cont
 [ -n "$registered" ] || fail "the daemon logged no controller registration for $session1"
 note "daemon: api: controller registered $registered"
 omp1=$(controller_omp "$ctl_state") || fail "no omp process carries LEGION_STATE_DIR=$ctl_state"
-for pair in LEGION_CONTROLLER=1 LEGION_ROLE=controller LEGION_DAEMON_API=go "LEGION_PROJECT=$ptoken" \
+for pair in LEGION_CONTROLLER=1 LEGION_ROLE=controller "LEGION_PROJECT=$ptoken" \
   "LEGION_CONTROLLER_SECRET_FILE=$ctl_state/secrets/$role" "LEGION_GRANT_FILE=$ctl_state/secrets/$role-grant" \
   "ENVOY_TOKEN_FILE=$work/envoy-token" "ENVOY_NATS_URL=$nats_url" "HOME=$omp_home" "OMP_PROFILE=$profile"; do
   [ "$(env_of "$omp1" "${pair%%=*}")" = "${pair#*=}" ] || fail "omp $omp1 has ${pair%%=*}=$(env_of "$omp1" "${pair%%=*}"), want ${pair#*=}"
@@ -293,7 +293,7 @@ env_of "$omp1" PI_SHELL_PREFIX | grep -qF "'$ctl_state/worker-bin:$ctl_state/bin
 tr '\0' '\n' <"/proc/$omp1/cmdline" | grep -qxF -- "--append-system-prompt" || fail "omp has no --append-system-prompt"
 ! tr '\0' '\n' <"/proc/$omp1/cmdline" | grep -qx -- "--mode\|rpc\|--resume.*" || fail "omp runs --mode rpc or --resume"
 [ "$(stat -c %a "$ctl_state/secrets/$role")" = 600 ] || fail "the secret file is not 0600"
-note "omp $omp1: LEGION_CONTROLLER=1 LEGION_DAEMON_API=go PI_SHELL_PREFIX over $ctl_state; secret only as a 0600 file; interactive (no --mode rpc); HOME=$omp_home"
+note "omp $omp1: LEGION_CONTROLLER=1 PI_SHELL_PREFIX over $ctl_state; secret only as a 0600 file; interactive (no --mode rpc); HOME=$omp_home"
 # The profile Oh My Pi runs on is the run's own, inside its work directory (its plugin link and the
 # log each Oh My Pi start writes are there), and the operator's profile root holds none of it.
 ls "$omp_home/.omp/profiles/$profile/logs"/omp.*.log >/dev/null 2>&1 ||

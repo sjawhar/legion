@@ -69,7 +69,7 @@ const podUser = 1000
 // shared validator refuses in a spec's Env and as a secret's pointer, and CheckPod in the
 // operator's pod. The image probe's container sets none of its own.
 var runtimeOwned = map[string]bool{
-	"LEGION_DAEMON_API": true, "LEGION_TREE": true, "LEGION_ISSUE": true, "LEGION_ROLE": true,
+	"LEGION_TREE": true, "LEGION_ISSUE": true, "LEGION_ROLE": true,
 	"LEGION_GENERATION": true, "LEGION_PROJECT": true, "LEGION_DAEMON_URL": true,
 	"LEGION_STATE_DIR": true, "LEGION_WORKSPACE": true, "ENVOY_NATS_URL": true, "ENVOY_URL": true,
 	"DISPATCH_URL": true, "LEGION_GH_PATH": true,
@@ -617,7 +617,6 @@ func (r *Runtime) mainEnvironment(l launch, credentialHelper string) []corev1.En
 	spec := l.spec
 	var env []corev1.EnvVar
 	add := func(name, value string) { env = append(env, corev1.EnvVar{Name: name, Value: value}) }
-	add("LEGION_DAEMON_API", "go")
 	add("LEGION_TREE", spec.Tree)
 	add("LEGION_ISSUE", spec.Issue)
 	add("LEGION_ROLE", string(spec.Role))
