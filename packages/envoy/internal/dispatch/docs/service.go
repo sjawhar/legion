@@ -164,9 +164,9 @@ type Service struct {
 // operation on the document holds it, and no longer: releaseIfUnusedLocked forgets it once the
 // room has gone and nothing it holds outlasts the room. A released state is no longer the
 // document's, so every lookup that may write one takes it through lockState, which never hands
-// out a released state. What a release drops - the authors of content no settlement versioned
-// yet, the unrecorded marks' first sightings, the closed flag and rendered markdown a load
-// re-reads - is what a restart drops too.
+// out a released state. What a release drops - the unrecorded marks' first sightings, the closed
+// flag and rendered markdown a load re-reads - is what a restart drops too; the authors of a
+// change no settlement has read yet hold the state until one does (unsettled).
 type roomState struct {
 	mu        sync.Mutex
 	connected map[uint64]model.Actor
@@ -175,7 +175,11 @@ type roomState struct {
 	// connected peer of a browser edit. Version writes clear `pending`, so a settlement that
 	// runs after an edit's own version was committed would otherwise attribute the block asks
 	// it indexes to nobody.
-	lastActor       *model.Actor
+	lastActor *model.Actor
+	// unsettled marks authors recorded in pending or lastActor that no settlement has read since:
+	// the settlement they were recorded for credits them, so the state holds them until one
+	// commits (settleRoomWithin). A closed issue's documents settle only once it reopens.
+	unsettled       bool
 	pendingVersions map[int]versionPending
 	// contentMarkdown is the live document's rendered markdown when the room's update observer
 	// last saw it change, nil until the room loads.
@@ -1455,6 +1459,8 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		for key := range pending {
 			delete(state.pending, key)
 		}
+		// An author credited after this settlement read the room's still waits for the next.
+		state.unsettled = len(state.pending) > 0
 	}
 	state.mu.Unlock()
 	for _, event := range published {
@@ -1977,9 +1983,10 @@ func (s *Service) releaseUnloadedRoom(_ context.Context, room string) {
 
 // releaseIfUnusedLocked forgets state, room's, once ygo holds no room for it - none loaded or
 // loading - and it holds nothing that outlasts the room: no open writer, settlement, armed
-// settlement timer, connected browser, update the room's persistence has not taken, version whose
-// authors wait on its commit, or failure being recovered from (a failed room's eviction removes
-// its state itself, evictRoom). Its caller holds state.mu.
+// settlement timer, authors waiting for a settlement (unsettled), connected browser, update the
+// room's persistence has not taken, version whose authors wait on its commit, or failure being
+// recovered from (a failed room's eviction removes its state itself, evictRoom). Its caller holds
+// state.mu.
 //
 // A room's load attaches to the state it finds (onLoadDocument takes it through lockState), and
 // ygo publishes the loading room before it calls that hook, so a state a load attached to is never
@@ -1994,7 +2001,7 @@ func (s *Service) releaseIfUnusedLocked(room string, state *roomState) {
 
 // unusedLocked is whether state holds nothing that outlasts its room. Its caller holds state.mu.
 func (s *Service) unusedLocked(state *roomState) bool {
-	return state.liveWriter == nil && state.settling == 0 && state.failed == nil &&
+	return state.liveWriter == nil && state.settling == 0 && !state.unsettled && state.failed == nil &&
 		len(state.connected) == 0 && state.pendingUpdates == 0 && state.durableAppends.Load() == 0 &&
 		len(state.pendingVersions) == 0 && !s.isSettleTimerArmed(state.settle)
 }

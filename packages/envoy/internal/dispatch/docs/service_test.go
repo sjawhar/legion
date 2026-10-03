@@ -2586,17 +2586,6 @@ func deleteRun(text string) func(*pmdoc.Node) *pmdoc.Node {
 		return tree
 	}
 }
-func waitForRoomClosed(t *testing.T, service *Service, artifactID string) {
-	t.Helper()
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		if service.roomClosed(artifactID) {
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	t.Fatal("document room did not close after issue event")
-}
 
 // waitForRoomFailure returns once the room has failed. failRoom evicts the failed room from a
 // goroutine that also removes its state, so a poll that first runs after that eviction sees no

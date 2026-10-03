@@ -241,10 +241,10 @@ func (s *Service) SeedText(ctx context.Context, artifactID, markdown string, act
 	}
 	// The seeding actor is the caller's own first version author (written directly by the
 	// caller, never through writeVersionTx), so it must not join `pending` - only the
-	// settlement that indexes the seeded ask blocks needs to know who wrote them. Recording it
-	// makes the document's room, so it waits for the seed to be written: a room leaves only when
-	// it is evicted, and a refused seed would hold one of the live-room slots for good.
-	s.recordLastActor(artifactID, actor)
+	// settlement that indexes the seeded ask blocks needs to know who wrote them. The ledger
+	// records it once the transaction commits (Ledger.credit), so a seed that never commits
+	// leaves the document no state.
+	ledgerFrom(ctx).seeded(artifactID, actor)
 	return canonical, nil
 }
 
@@ -1069,12 +1069,6 @@ func (s *Service) serviceTransact(transact func(func(*crdt.Transaction)), actor 
 		}
 	}
 	return wrapped, release
-}
-
-func (s *Service) recordLastActor(room string, actor model.Actor) {
-	state := s.lockState(room)
-	state.lastActor = new(actor)
-	s.unlockState(room, state)
 }
 
 // captureLiveTextAndAuthors is the tree a version records and whom it credits. joinRead brings

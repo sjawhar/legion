@@ -34,6 +34,9 @@ type Ledger struct {
 	live     map[string]*liveWrite
 	order    []string
 	versions []ledgerVersion
+	// seeds holds, per document this transaction seeded (SeedText), the actor that wrote its first
+	// text, which credit records once the transaction has committed.
+	seeds map[string]model.Actor
 	// rebuilds are the documents this transaction rebuilds (RebuildDocument), whose rooms refuse
 	// loads until it ends, committed or not.
 	rebuilds []string
@@ -190,9 +193,16 @@ func (l *Ledger) addLiveWrite(write *liveWrite) {
 }
 
 // credit credits each content change of a committed transaction to its room, for the room's
-// next version. It runs before the transaction's own versions are released, which clears the
-// authors those versions already name.
+// next version, and each seed to its room's settlement. It runs before the transaction's own
+// versions are released, which clears the authors those versions already name. A room's state
+// holds what credit records until a settlement reads it (unsettled).
 func (l *Ledger) credit() {
+	for artifactID, actor := range l.seeds {
+		state := l.service.lockState(artifactID)
+		state.lastActor = new(actor)
+		state.unsettled = true
+		l.service.unlockState(artifactID, state)
+	}
 	for _, artifactID := range l.order {
 		write := l.live[artifactID]
 		if len(write.credits) == 0 {
@@ -203,8 +213,17 @@ func (l *Ledger) credit() {
 			state.pending[key] = actor
 		}
 		state.lastActor = write.actor
+		state.unsettled = true
 		l.service.unlockState(artifactID, state)
 	}
+}
+
+// seeded records that this transaction seeded artifactID's first text as actor (SeedText).
+func (l *Ledger) seeded(artifactID string, actor model.Actor) {
+	if l.seeds == nil {
+		l.seeds = make(map[string]model.Actor)
+	}
+	l.seeds[artifactID] = actor
 }
 
 // publish applies the committed transaction's live writes to their rooms and broadcasts them.
