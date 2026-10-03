@@ -41,6 +41,11 @@
 - A controller now displays its project token in canonical uppercase
   (`Legion controller · AGENTC`), rather than the lowercase token the Go daemon carries in
   `LEGION_PROJECT` (LEGION-480).
+- A `task` subagent whose first transcript publish loses Oh My Pi's session publish lock to
+  another writer no longer fails every tool call for the rest of its life (LEGION-491). The
+  subagent check asks the host's agent roster first, which needs no publish; where the roster
+  gives no opinion and the publish fails, it answers from the transcript on disk, logs a warning,
+  and asks again at the next hook instead of keeping the failure.
 
 ### Added
 

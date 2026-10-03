@@ -92,11 +92,7 @@ import type {
   ToolResult,
 } from "../src/pi-types";
 import { sideTurn } from "../src/side-turn";
-import {
-  isRegisteredSubagent,
-  type SessionIdentityContext,
-  subagentSessionCheck,
-} from "../src/subagent-session";
+import { type SessionIdentityContext, subagentSessionCheck } from "../src/subagent-session";
 import { toolFailure, toolSuccess } from "../src/tool-result";
 import { registerEnvoyMessageRenderer } from "./envoy-message-renderer";
 import { registerEnvoyWhoamiCommand } from "./envoy-whoami-command";
@@ -1361,12 +1357,10 @@ export default function envoyExtension(pi: PiApi): void {
 
   // A `task` subagent loads its own instance of this module in the parent's process and fires
   // its own session_start. It shares the parent's Envoy identity: registering it would list an
-  // untitled session per subagent, heartbeated for as long as the parent process lives. Two
-  // tests, either enough: the transcript layout (file storage), and the host's own roster
-  // (any storage, any transcript or none).
-  const isSubagentTranscript = subagentSessionCheck();
-  const isSubagent = async (context: SessionIdentityContext): Promise<boolean> =>
-    (await isSubagentTranscript(context)) || isRegisteredSubagent(context);
+  // untitled session per subagent, heartbeated for as long as the parent process lives. The
+  // host's own roster decides (any storage, any transcript or none), and the transcript layout
+  // only where the roster gives no opinion.
+  const isSubagent = subagentSessionCheck();
 
   /**
    * The Envoy address a reply to this instance reaches, and the source session its sends carry.
@@ -1601,7 +1595,7 @@ export default function envoyExtension(pi: PiApi): void {
     ) {
       return undefined;
     }
-    // Memoized per instance: one transcript stat for the life of the session.
+    // Memoized per instance once settled: one answer for the life of the session.
     if (await isSubagent(context)) return undefined;
     // The user typed, so a check still in flight is about to answer for a run they have moved
     // past. This runs before the arming query rather than in `armAskAwareness`: a slow Dispatch

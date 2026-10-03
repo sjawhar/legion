@@ -31,6 +31,7 @@ import {
   type LegionRole,
   roleToken,
 } from "@legion/contracts";
+import { logger } from "@oh-my-pi/pi-utils";
 import { z } from "zod";
 import pkg from "../package.json";
 import { noteInjectedUserTurn, resetInjectedUserTurnsForTests } from "../src/dispatch-user-turn";
@@ -123,7 +124,7 @@ mock.module("nats", () => ({
   }),
 }));
 
-import { hostAgentRegistryMock } from "./test-host-registry";
+import { hostAgentRegistryMock, testAgentRoster } from "./test-host-registry";
 
 mock.module("@oh-my-pi/pi-coding-agent", () => ({
   copyToClipboard: async () => undefined,
@@ -244,6 +245,7 @@ afterEach(async () => {
   natsConnectGates.clear();
   setLegionBootstrapExitForTests((code) => process.exit(code) as never);
   resetLegionBootstrappedSessionForTests();
+  testAgentRoster().splice(0);
   resetInjectedUserTurnsForTests();
   for (const key of environmentKeys) {
     const value = baselineEnvironment[key];
@@ -1920,6 +1922,166 @@ describe("Legion OMP extension", () => {
       )
     ).resolves.toBeUndefined();
     expect(requests.some((request) => request.path.startsWith("/legion/"))).toBe(false);
+  });
+  // Oh My Pi's `ensureOnDisk` publishes the transcript and throws its SessionLockError when another
+  // writer holds that file's publish lock; the rewrite is discarded and a later publish may succeed.
+  const sessionLockError = (sessionFile: string): Error => {
+    const error = new Error(
+      `Session publish lock unavailable for ${sessionFile}: another writer holds the publish lock. The staged rewrite was discarded without publishing.`
+    );
+    error.name = "SessionLockError";
+    return error;
+  };
+  /** A hook's outcome: a rejected hook is a failed tool call (or session start). */
+  type HookOutcome = { readonly value: unknown } | { readonly error: string };
+  /** Each hook's outcome, run one after another in order. */
+  const hookOutcomes = async (hooks: readonly (() => unknown)[]): Promise<HookOutcome[]> => {
+    const outcomes: HookOutcome[] = [];
+    for (const hook of hooks) {
+      outcomes.push(
+        await Promise.resolve()
+          .then(hook)
+          .then(
+            (value) => ({ value }),
+            (error: unknown) => ({ error: error instanceof Error ? error.message : String(error) })
+          )
+      );
+    }
+    return outcomes;
+  };
+  test("a subagent whose first transcript publish loses the session lock is still recognised at the next hook, and no tool call fails", async () => {
+    const requests: { readonly path: string }[] = [];
+    const exits: number[] = [];
+    setLegionBootstrapExitForTests((code) => {
+      exits.push(code);
+      throw new Error(`exitProcess(${code})`);
+    });
+    const { childFile } = await createSubagentTranscriptPaths();
+    process.env.ENVOY_URL = "http://envoy.test";
+    process.env.LEGION_DAEMON_URL = "http://daemon.test";
+    process.env.LEGION_GENERATION = "1";
+    process.env.LEGION_BOOT_TOKEN = "boot-subagent-lock";
+    process.env.LEGION_TREE = "REPO-42";
+    process.env.LEGION_ROLE = "implementer";
+    process.env.LEGION_ISSUE = "REPO-43";
+    process.env.LEGION_WORKSPACE = "/tmp/legion-workspace";
+    globalThis.fetch = (async (input) => {
+      requests.push({ path: new URL(input.toString()).pathname });
+      return Response.json({
+        session_id: "ses_sub_lock",
+        machine_id: "m",
+        dir: "/tmp",
+        topics: [],
+      });
+    }) as typeof fetch;
+    // legion.ts alone, so the publish that loses the lock is this instance's own first check (each
+    // extension instance keeps its own answer; envoy.ts asks through the same check).
+    const fixture = createPi({ bindEnvoy: false });
+    legionExtension(fixture.pi);
+    const sessionStart = fixture.handlers.get("session_start");
+    const toolCall = fixture.handlers.get("tool_call");
+    if (sessionStart === undefined || toolCall === undefined) {
+      throw new Error("session_start or tool_call handler was not registered");
+    }
+    // The host's roster does not list this session, so the transcript decides; its first publish
+    // loses the lock to another writer and every later one succeeds.
+    const lockError = sessionLockError(childFile);
+    let publishes = 0;
+    const context = sessionContext("ses_sub_lock", childFile, async () => {
+      publishes++;
+      if (publishes === 1) throw lockError;
+    });
+    const bash = (id: string) =>
+      toolCall({ toolName: "bash", toolCallId: id, input: { command: "ls" } }, context);
+    const warnings: string[] = [];
+    const stopSink = logger.registerLogSink((entry) => {
+      if (entry.level === "warn") warnings.push(JSON.stringify(entry));
+    });
+    let outcomes: HookOutcome[];
+    try {
+      outcomes = await hookOutcomes([
+        () => sessionStart({}, context),
+        () => bash("call-sub-lock-first"),
+        () => bash("call-sub-lock-second"),
+      ]);
+    } finally {
+      stopSink();
+    }
+
+    // Every hook answers as a subagent's: no bootstrap, and a bash call an unregistered phase
+    // worker would have had blocked passes through ungated.
+    expect(outcomes).toEqual([{ value: undefined }, { value: undefined }, { value: undefined }]);
+    expect(requests.some((request) => request.path.startsWith("/legion/"))).toBe(false);
+    expect(exits).toEqual([]);
+    expect(fixture.tools.find((tool) => tool.name === "legion")).toBeUndefined();
+    // The failed publish was asked again once, at the next hook, and the settled answer is kept.
+    expect(publishes).toBe(2);
+    expect(warnings.filter((warning) => warning.includes(lockError.message))).toHaveLength(1);
+  });
+  test("a subagent the host's roster names is recognised without publishing its transcript", async () => {
+    const requests: { readonly path: string }[] = [];
+    const exits: number[] = [];
+    setLegionBootstrapExitForTests((code) => {
+      exits.push(code);
+      throw new Error(`exitProcess(${code})`);
+    });
+    process.env.ENVOY_URL = "http://envoy.test";
+    process.env.LEGION_DAEMON_URL = "http://daemon.test";
+    process.env.LEGION_GENERATION = "3";
+    process.env.LEGION_BOOT_TOKEN = "boot-roster-subagent";
+    process.env.LEGION_TREE = "REPO-42";
+    process.env.LEGION_ROLE = "architect";
+    process.env.LEGION_ISSUE = "REPO-42";
+    globalThis.fetch = (async (input) => {
+      requests.push({ path: new URL(input.toString()).pathname });
+      return Response.json({ session_id: "ses_roster", machine_id: "m", dir: "/tmp", topics: [] });
+    }) as typeof fetch;
+    // No parent transcript sits beside this path (a `--no-session` parent's subagents land in a
+    // temporary omp-task-* directory), and every publish loses the lock: only the roster can say.
+    const baseDirectory = await mkdtemp(path.join(os.tmpdir(), "legion-roster-subagent-"));
+    temporaryPaths.push(baseDirectory);
+    const childFile = path.join(baseDirectory, "omp-task-scout", "Scout.jsonl");
+    testAgentRoster().push(
+      {
+        id: "Main",
+        kind: "main",
+        session: { sessionManager: { getSessionId: () => "ses_roster_parent" } },
+        sessionFile: null,
+      },
+      {
+        id: "Scout",
+        kind: "sub",
+        session: { sessionManager: { getSessionId: () => "ses_roster_sub" } },
+        sessionFile: childFile,
+      }
+    );
+    let publishes = 0;
+    const context = sessionContext("ses_roster_sub", childFile, async () => {
+      publishes++;
+      throw sessionLockError(childFile);
+    });
+    const fixture = createPi();
+    legionExtension(fixture.pi);
+    const sessionStart = fixture.handlers.get("session_start");
+    const toolCall = fixture.handlers.get("tool_call");
+    if (sessionStart === undefined || toolCall === undefined) {
+      throw new Error("session_start or tool_call handler was not registered");
+    }
+
+    const outcomes = await hookOutcomes([
+      () => sessionStart({}, context),
+      () =>
+        toolCall(
+          { toolName: "bash", toolCallId: "call-roster-sub-bash", input: { command: "ls" } },
+          context
+        ),
+    ]);
+
+    expect(outcomes).toEqual([{ value: undefined }, { value: undefined }]);
+    expect(requests.some((request) => request.path.startsWith("/legion/"))).toBe(false);
+    expect(exits).toEqual([]);
+    expect(fixture.tools.find((tool) => tool.name === "legion")).toBeUndefined();
+    expect(publishes).toBe(0);
   });
   test("throws naming the missing variable when a phase worker boots without LEGION_BOOT_TOKEN", async () => {
     process.env.ENVOY_URL = "http://envoy.test";

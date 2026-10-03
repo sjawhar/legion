@@ -501,8 +501,8 @@ export default function legionExtension(pi: PiApi): void {
   let capability: SessionCapability | undefined;
   let bootstrap: Promise<void> | undefined;
 
-  // Gates both session_start and tool_call below; memoised so it runs once per session, not
-  // once per tool call.
+  // Gates session_start, tool_call and the controller's re-claim below; its settled answer is
+  // kept, so it runs once per session, not once per tool call.
   const checkSubagentSession = subagentSessionCheck();
   // The pane rules this pane is held to (PANE_RULES), judged from the environment on the first
   // tool_call. A subagent's own instance inherits the pane's environment, so the rules bind it
@@ -619,9 +619,9 @@ export default function legionExtension(pi: PiApi): void {
   const controllerSession = createControllerSession(
     async (context) => {
       const persisted = await persistedTranscript(context);
-      // The daemon pane's own transcript (isSubagentSession's ensureOnDisk already persisted it):
-      // record it so the controller's own `task` subagents are recognised even when the
-      // transcript is not a file on disk. A hand-started takeover never reaches here.
+      // The daemon pane's own transcript, which persistedTranscript has just put on disk: record it
+      // so the controller's own `task` subagents are recognised even when the transcript is not a
+      // file on disk. A hand-started takeover never reaches here.
       recordBootstrappedSession(persisted.sessionFile);
       return persisted;
     },
