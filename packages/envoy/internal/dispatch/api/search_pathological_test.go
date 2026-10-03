@@ -68,7 +68,7 @@ func TestSavingAPathologicalBodyIsBounded(t *testing.T) {
 		})
 	}
 	// Creating an issue reads titles through the parser three ways: the duplicate check's
-	// to_tsvector over the new title and every title in the project, its ts_headline over each
+	// search_vector over the new title and every title in the project, its ts_headline over each
 	// near-duplicate's title, and the issues trigger. Every title gets a project of its own, so
 	// no save reads the titles the ones before it stored; the duplicate check reads one stored
 	// title, whose word `q` makes it the near-duplicate its headline is drawn from.
