@@ -160,7 +160,7 @@ is refused, with nothing sent, while that version holds a decision block open, a
 names each block and its ask. An answer or a `dispatch_resolve_ask` closes the ask at once but
 reaches a version only when the document settles, about two seconds later, or with your next
 `dispatch_doc_edit`: fold the answer into the text (or, for a waiver, write the human's decision
-in) and then request. A block written in the last few seconds counts as open before Dispatch has
+in) before you request. A block written in the last few seconds counts as open before Dispatch has
 opened its ask. A repeat at the same version returns the open request unchanged. A new version
 retracts an open request for an older one, and its `ask.resolved` reaches you: request again for
 the new version when "Approval of a spec" in `skill://dispatch` allows. The answer reaches you as

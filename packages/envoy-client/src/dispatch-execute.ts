@@ -1713,7 +1713,7 @@ async function refuseOpenDecisionBlocks(
     [
       `${tool} was not called: ${artifact.name} (version ${latest}) has ${count}. Answering one writes a new version, which would retract this request.`,
       ...open.map((line) => `- ${line}`),
-      "Do not request approval over an open block, even when a human asked for it. Tell the human which block is open and ask them to answer it or to waive it. Once it is answered, fold the answer into the text with dispatch_doc_edit and request approval again. If they waive it, close the block with dispatch_resolve_ask (kind resolved, their words as the reason), write their decision into the text with dispatch_doc_edit, and request approval again.",
+      "Do not request approval over an open block, even when a human asked for it. Tell the human which block is open and ask them to answer it or to waive it. Once it is answered, fold the answer into the text with dispatch_doc_edit and request approval again once the human has agreed to every point in it. If they waive it, close the block with dispatch_resolve_ask (kind resolved, their words as the reason), write their decision into the text with dispatch_doc_edit, and request approval again once the human has agreed to every point in it.",
     ].join("\n")
   );
 }

@@ -41,10 +41,10 @@ facts and every ready question, each a decision block at the end of the section 
 question waits only when it depends on an answer still open. Each next version replies in each
 human comment's thread (`dispatch_comment` with `reply_to`), folds the answers into the surrounding
 text while their decision blocks stay, in the human's words (or the option they chose) with the
-date, and adds the questions they open. Approval is requested once, when nothing in the spec is new
-to the human. Before you write a spec's first version, and again before each next turn, read
-[Brainstorming in the spec](skill://dispatch/references/brainstorming.md): each step, and a worked
-example.
+date, and adds the questions they open. Approval is requested at the end, not after each section,
+when nothing in the spec is new to the human. Before you write a spec's first version, and again
+before each next turn, read [Brainstorming in the spec](skill://dispatch/references/brainstorming.md):
+each step, and a worked example.
 
 ## Writing for the human
 
@@ -86,9 +86,9 @@ a new version that keeps the human's own text, never a second "spec" artifact be
   says. Because it is an ask, it reaches the human's Inbox, and the answer lands next to its context.
 - **A settled point records the human's own words and the date**, quoted, so no reader mistakes
   it for your inference; an answer that is only a chosen option is recorded in the form
-  `Sami chose "Commit author" on the question below`. A point you inferred says so, with the
-  reasoning. One carried in from another document keeps its provenance: an agent's inference there
-  is marked one here, or stays out until the human raises it.
+  `Sami chose "Commit author" on the question below (2026-10-02)`. A point you inferred says so,
+  with the reasoning. One carried in from another document keeps its provenance: an agent's
+  inference there is marked one here, or stays out until the human raises it.
 - **Sections follow the topic.** No heading is required and none has a fixed place; name each
   section for what it discusses.
 - **A changed point is rewritten, not appended to.** When an answer or a new fact changes the
@@ -114,12 +114,11 @@ after the section on models.
 ## Decision blocks
 
 A decision a human must make is an `:::ask` block at the end of the section that discusses it,
-shaped as [Writing for the human](#writing-for-the-human) says for a question: the problem the
-reader recognises and why it matters now, what constrains the answer (measured, known and
-unknown), the recommendation with its reason, and options that carry the genuinely different
-approaches with what each costs. It asks how to solve the problem, never whether to apply a change
-already chosen. Never gather decisions into a list, at the top, at the bottom or in an "open
-questions" section, and never ask one as a standalone `dispatch_ask` that points at the spec.
+shaped as [Writing for the human](#writing-for-the-human) says for a question, with what
+constrains the answer split into measured, known and unknown. It asks how to solve the problem,
+never whether to apply a change already chosen. Never gather decisions into a list, at the top,
+at the bottom or in an "open questions" section, and never ask one as a standalone `dispatch_ask`
+that points at the spec.
 
 The block is what reaches the human's Inbox. A question phrased as prose in the spec reaches
 nobody. A spec with no ask blocks is fine only when the issue genuinely needs no human decision.
@@ -396,10 +395,11 @@ it. For a waiver, close the block with `dispatch_resolve_ask` (`kind: "resolved"
 An approval request carries nothing new: a point the human has not agreed to gets its own decision
 block first, with your recommendation, or, when it is a choice you can make yourself
 ([Before you ask](#before-you-ask), gate 1) and the human will not want a say in it, comes out of
-the spec and is made where the work happens. `summary` says in one to three sentences what the
-human is approving and nothing else: no commentary on itself or on the conversation, and no open
-question. The Inbox shows it after "Approve spec.md (version N)?". Never write "Approve" options
-into an ordinary `dispatch_ask`; only humans approve. The call, its result and its answer:
+the spec and is made where the work happens; an inference you cannot defend in a decision block
+comes out of the spec. `summary` says in one to three sentences what the human is approving and
+nothing else: no commentary on itself or on the conversation, and no open question. The Inbox
+shows it after "Approve spec.md (version N)?". Never write "Approve" options into an ordinary
+`dispatch_ask`; only humans approve. The call, its result and its answer:
 [Approval requests](skill://dispatch/references/documents.md#approval-requests).
 
 ## The Spec

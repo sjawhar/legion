@@ -4,8 +4,11 @@
 
 ### Changed
 
-- A stale approval's line in a document read says to request approval again only once the human
-  has agreed to every point in the new version (LEGION-475).
+- Every text that says to request approval again says to do so only once the human has agreed to
+  every point in the new version (LEGION-475): a stale approval's line in a document read;
+  `dispatch_request_approval`'s refusal while a decision block is open, both after an answer is
+  folded in and after a waived block's decision is written in; and its two result texts, for the
+  request it opened and for a version already approved.
 - `DispatchClient.requestApproval` takes `{ actor, summary }`, and `dispatch_request_approval`
   sends `summary` and quotes the question the server returned in its result (LEGION-387).
 - `dispatch_request_approval` is refused, with no request sent, while the version it would name

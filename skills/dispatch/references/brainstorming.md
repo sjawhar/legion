@@ -16,17 +16,20 @@ goes out at once, whatever its stage.
 2. **The human answers or comments.** Reply to each human comment in its thread
    (`dispatch_comment` with `reply_to`), then rewrite the passage the answer or the comment changes.
 3. **Each next version folds the answers in and adds what they open.** Keep each answered
-   decision block where it is, fold its answer into the surrounding text in the human's words (or
-   the option they chose), with the date, then add the next sections, each with its question.
-   Every question that is ready goes out at once, each as a decision block at the end of the
-   section that sets it up; a question waits only when it depends on an answer still open.
+   decision block where it is, fold its answer into the surrounding text in the human's words with
+   the date (an answer that is only a chosen option as
+   `Sami chose "Commit author" on the question below (2026-10-02)`), then add the next sections,
+   each with its question. Every question that is ready goes out at once, each as a decision block
+   at the end of the section that sets it up; a question waits only when it depends on an answer
+   still open.
 4. **A comment that answers a question settles it** as surely as the block does. Fold it into the
    text at once, and close the block with `dispatch_resolve_ask` if the human has not.
-5. **Request approval once, when nothing in the spec is new to the human:** every block settled,
-   every comment answered, and every point they have not agreed to, however small, either put to
-   them first as its own decision block or, when it is yours to decide, taken out of the spec and
-   made where the work happens. An inference you cannot defend in a decision block comes out of the
-   spec. The request carries nothing new ("Approval of a spec" in `skill://dispatch`).
+5. **Request approval at the end, not after each section, when nothing in the spec is new to the
+   human:** every block settled, every comment answered, and every point they have not agreed to,
+   however small, either put to them first as its own decision block or, when it is yours to
+   decide, taken out of the spec and made where the work happens. An inference you cannot defend in
+   a decision block comes out of the spec. The request carries nothing new ("Approval of a spec" in
+   `skill://dispatch`).
 
 ## Coming to terms
 
