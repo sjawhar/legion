@@ -1,27 +1,20 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
+	"errors"
 	"io"
-	"net"
 	"net/http"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
-	"syscall"
 	"testing"
 	"time"
 
-	gws "github.com/gorilla/websocket"
-	"github.com/jackc/pgx/v5"
 	"github.com/reearth/ygo/crdt"
-	ygsync "github.com/reearth/ygo/sync"
 
+	"github.com/sjawhar/envoy/internal/cmdtest"
 	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -45,7 +38,7 @@ const streamedSessionID = "01a0e090-4848-7473-acc5-fc96e6a646d3"
 // document service with that settlement still owed, and Shutdown is the one that runs it.
 func TestSIGTERMWithOpenStreamsExitsPromptlyAndSettlesTheOwedDocument(t *testing.T) {
 	database := storetest.Open(t)
-	process := startDispatchProcess(t, buildDispatch(t), database.Pool.Config().ConnString())
+	process := startDispatchProcess(t, database.Pool.Config().ConnString())
 	process.waitHealthy(t)
 	_, artifactID := process.createIssue(t)
 
@@ -55,13 +48,8 @@ func TestSIGTERMWithOpenStreamsExitsPromptlyAndSettlesTheOwedDocument(t *testing
 	}
 	process.editOwingSettlement(t, database, artifactID)
 
-	signalled := time.Now()
-	if err := process.cmd.Process.Signal(syscall.SIGTERM); err != nil {
-		t.Fatalf("SIGTERM: %v", err)
-	}
-	process.waitExit(t, "SIGTERM")
-	exited := time.Since(signalled)
-	t.Logf("exited %v after SIGTERM", exited)
+	signalled := process.Terminate(t)
+	process.waitPromptExit(t, signalled)
 	for name, streamEnded := range streams {
 		ended := <-streamEnded
 		t.Logf("the %s ended %v after SIGTERM (%v)", name, ended.at.Sub(signalled), ended.err)
@@ -72,10 +60,7 @@ func TestSIGTERMWithOpenStreamsExitsPromptlyAndSettlesTheOwedDocument(t *testing
 			t.Errorf("the %s ended with %v, want the server to end it (EOF)", name, ended.err)
 		}
 	}
-	if exited >= promptShutdown {
-		t.Errorf("Dispatch exited %v after SIGTERM, want under %v", exited, promptShutdown)
-	}
-	if strings.Contains(process.output.String(), `msg="dispatch: shutdown"`) {
+	if strings.Contains(process.Output.String(), `msg="dispatch: shutdown"`) {
 		t.Errorf("HTTP shutdown did not finish inside its budget")
 	}
 	process.checkSettledAtShutdown(t, database, artifactID)
@@ -90,7 +75,7 @@ func TestSIGTERMWithOpenStreamsExitsPromptlyAndSettlesTheOwedDocument(t *testing
 // is owed; a release before that read could let the timer's settlement commit first.
 func TestSIGTERMWhileARequestHoldsHTTPShutdownStillSettlesTheOwedDocument(t *testing.T) {
 	database := storetest.Open(t)
-	process := startDispatchProcess(t, buildDispatch(t), database.Pool.Config().ConnString())
+	process := startDispatchProcess(t, database.Pool.Config().ConnString())
 	process.waitHealthy(t)
 	key, artifactID := process.createIssue(t)
 	process.editOwingSettlement(t, database, artifactID)
@@ -116,21 +101,18 @@ func TestSIGTERMWhileARequestHoldsHTTPShutdownStillSettlesTheOwedDocument(t *tes
 			_ = response.Body.Close()
 		}
 	}()
-	if waiting := waitForLockWaiters(t, holder, 1, 10*time.Second); waiting < 1 {
-		t.Fatalf("the title change never queued behind the issue lock:\n%s", process.output.String())
+	if waiting := storetest.WaitForLockWaiters(t, holder, 1, 10*time.Second); waiting < 1 {
+		t.Fatalf("the title change never queued behind the issue lock:\n%s", process.Output.String())
 	}
 
-	signalled := time.Now()
-	if err := process.cmd.Process.Signal(syscall.SIGTERM); err != nil {
-		t.Fatalf("SIGTERM: %v", err)
-	}
-	process.waitForOutput(t, `msg="dispatch: shutdown"`)
+	signalled := process.Terminate(t)
+	process.WaitForOutput(t, `msg="dispatch: shutdown"`)
 	t.Logf("HTTP shutdown gave up %v after SIGTERM", time.Since(signalled))
-	waiting := waitForLockWaiters(t, holder, 3, 2*time.Second)
+	waiting := storetest.WaitForLockWaiters(t, holder, 3, 2*time.Second)
 	if err := holder.Rollback(ctx); err != nil {
 		t.Fatalf("release the issue lock: %v", err)
 	}
-	process.waitExit(t, "SIGTERM")
+	process.WaitExit(t, "SIGTERM")
 	t.Logf("released the issue lock with %d waiting on it; exited %v after SIGTERM", waiting, time.Since(signalled))
 	process.checkSettledAtShutdown(t, database, artifactID)
 }
@@ -142,31 +124,23 @@ func TestSIGTERMWhileARequestHoldsHTTPShutdownStillSettlesTheOwedDocument(t *tes
 // credited to the editor, before the process exits rather than when someone next opens the spec.
 func TestSIGTERMWithAnEditorConnectedSettlesItsDocumentBeforeExit(t *testing.T) {
 	database := storetest.Open(t)
-	process := startDispatchProcess(t, buildDispatch(t), database.Pool.Config().ConnString())
+	process := startDispatchProcess(t, database.Pool.Config().ConnString())
 	process.waitHealthy(t)
 	_, artifactID := process.createIssue(t)
 	editor := process.openEditor(t, artifactID, "before\n")
 	// The spec the issue was created with is owed a settlement of its own; once that has run, the
 	// pending-settlement row the editor's keystrokes write is theirs alone.
 	waitForSettlementOwed(t, database, artifactID, false)
-	editor.replaceText(t, "before", "after")
+	replaceText(t, editor, "before", "after")
 	waitForSettlementOwed(t, database, artifactID, true)
 
-	signalled := time.Now()
-	if err := process.cmd.Process.Signal(syscall.SIGTERM); err != nil {
-		t.Fatalf("SIGTERM: %v", err)
-	}
-	process.waitExit(t, "SIGTERM")
-	exited := time.Since(signalled)
-	t.Logf("exited %v after SIGTERM", exited)
+	signalled := process.Terminate(t)
+	process.waitPromptExit(t, signalled)
 	select {
-	case closed := <-editor.ended:
-		t.Logf("the editor's connection ended %v after SIGTERM", closed.Sub(signalled))
+	case <-editor.Ended:
+		t.Logf("the editor's connection ended %v after SIGTERM", editor.EndedAt().Sub(signalled))
 	case <-time.After(5 * time.Second):
 		t.Errorf("the editor's connection was still open 5s after Dispatch exited")
-	}
-	if exited >= promptShutdown {
-		t.Errorf("Dispatch exited %v after SIGTERM, want under %v", exited, promptShutdown)
 	}
 	process.checkSettledAtShutdown(t, database, artifactID)
 	number, markdown, authors := latestVersion(t, database, artifactID)
@@ -174,7 +148,7 @@ func TestSIGTERMWithAnEditorConnectedSettlesItsDocumentBeforeExit(t *testing.T) 
 		t.Errorf("the document's latest version is %d holding %q by %s, want version 2 holding the editor's edit, %q, credited to %s",
 			number, markdown, authors, "after\n", dispatchTestLogin)
 	}
-	for _, line := range strings.Split(process.output.String(), "\n") {
+	for _, line := range strings.Split(process.Output.String(), "\n") {
 		if strings.Contains(line, "room="+artifactID) {
 			t.Logf("Dispatch logged: %s", line)
 		}
@@ -185,8 +159,8 @@ func TestSIGTERMWithAnEditorConnectedSettlesItsDocumentBeforeExit(t *testing.T) 
 // owed settlement run and confirmed.
 func (p *dispatchProcess) checkSettledAtShutdown(t *testing.T, database *store.Store, artifactID string) {
 	t.Helper()
-	output := p.output.String()
-	if code := p.cmd.ProcessState.ExitCode(); code != 0 {
+	output := p.Output.String()
+	if code := p.Cmd.ProcessState.ExitCode(); code != 0 {
 		t.Errorf("Dispatch exited %d after SIGTERM, want 0", code)
 	}
 	if strings.Contains(output, "settlement unconfirmed") {
@@ -206,34 +180,23 @@ func (p *dispatchProcess) checkSettledAtShutdown(t *testing.T, database *store.S
 // dispatchTestLogin is the allowlisted login the test calls the server as, through header identity.
 const dispatchTestLogin = "alice"
 
-// dispatchProcess is a Dispatch binary a test started, with its combined output.
+// dispatchProcess is a Dispatch binary a test started, serving on port.
 type dispatchProcess struct {
-	cmd    *exec.Cmd
-	port   int
-	output *lockedBuffer
-	exited chan struct{}
+	*cmdtest.Process
+	port int
 }
 
-func buildDispatch(t *testing.T) string {
-	t.Helper()
-	binary := filepath.Join(t.TempDir(), "envoy-dispatch")
-	if out, err := exec.Command("go", "build", "-o", binary, ".").CombinedOutput(); err != nil {
-		t.Fatalf("build Dispatch: %v\n%s", err, out)
-	}
-	return binary
-}
-
-// startDispatchProcess starts binary on a free loopback port against databaseURL, with no NATS and
-// nothing from the caller's environment or home, and kills it when the test ends if it still runs.
-// DISPATCH_TEST_HOOKS serves the agent conversation relay in-process, as the browser harness does,
-// since there is no NATS to relay it from.
-func startDispatchProcess(t *testing.T, binary, databaseURL string) *dispatchProcess {
+// startDispatchProcess builds Dispatch and starts it on a free loopback port against databaseURL,
+// with no NATS and nothing from the caller's environment or home, and kills it when the test ends if
+// it still runs. DISPATCH_TEST_HOOKS serves the agent conversation relay in-process, as the browser
+// harness does, since there is no NATS to relay it from.
+func startDispatchProcess(t *testing.T, databaseURL string) *dispatchProcess {
 	t.Helper()
 	home := t.TempDir()
-	process := &dispatchProcess{port: freeTCPPort(t), output: &lockedBuffer{}, exited: make(chan struct{})}
-	process.cmd = exec.Command(binary)
-	process.cmd.Dir = home
-	process.cmd.Env = []string{
+	port := cmdtest.FreeTCPPort(t)
+	cmd := exec.Command(cmdtest.Build(t, "envoy-dispatch"))
+	cmd.Dir = home
+	cmd.Env = []string{
 		"HOME=" + home,
 		"XDG_CONFIG_HOME=" + home,
 		"XDG_DATA_HOME=" + home,
@@ -243,23 +206,11 @@ func startDispatchProcess(t *testing.T, binary, databaseURL string) *dispatchPro
 		"DISPATCH_ALLOWED_LOGINS=" + dispatchTestLogin,
 		"DISPATCH_NATS_DISABLED=1",
 		"DISPATCH_LISTEN_HOST=127.0.0.1",
-		"DISPATCH_PORT=" + strconv.Itoa(process.port),
+		"DISPATCH_PORT=" + strconv.Itoa(port),
 		"DISPATCH_WEB_DIST=" + home,
 		"DISPATCH_TEST_HOOKS=1",
 	}
-	process.cmd.Stdout, process.cmd.Stderr = process.output, process.output
-	if err := process.cmd.Start(); err != nil {
-		t.Fatalf("start Dispatch: %v", err)
-	}
-	go func() {
-		_ = process.cmd.Wait()
-		close(process.exited)
-	}()
-	t.Cleanup(func() {
-		_ = process.cmd.Process.Kill()
-		<-process.exited
-	})
-	return process
+	return &dispatchProcess{Process: cmdtest.Start(t, "Dispatch", cmd), port: port}
 }
 
 func (p *dispatchProcess) url(path string) string {
@@ -280,12 +231,24 @@ func (p *dispatchProcess) waitHealthy(t *testing.T) {
 			}
 		}
 		select {
-		case <-p.exited:
-			t.Fatalf("Dispatch exited before it became healthy:\n%s", p.output.String())
+		case <-p.Exited:
+			t.Fatalf("Dispatch exited before it became healthy:\n%s", p.Output.String())
 		case <-time.After(200 * time.Millisecond):
 		}
 	}
-	t.Fatalf("Dispatch never became healthy:\n%s", p.output.String())
+	t.Fatalf("Dispatch never became healthy:\n%s", p.Output.String())
+}
+
+// waitPromptExit waits for Dispatch to exit after the SIGTERM sent at signalled, and requires it to
+// have exited within promptShutdown.
+func (p *dispatchProcess) waitPromptExit(t *testing.T, signalled time.Time) {
+	t.Helper()
+	p.WaitExit(t, "SIGTERM")
+	exited := time.Since(signalled)
+	t.Logf("exited %v after SIGTERM", exited)
+	if exited >= promptShutdown {
+		t.Errorf("Dispatch exited %v after SIGTERM, want under %v", exited, promptShutdown)
+	}
 }
 
 // call sends body as the test's login and requires status, returning the response body.
@@ -331,7 +294,7 @@ func (p *dispatchProcess) editOwingSettlement(t *testing.T, database *store.Stor
 	p.call(t, http.MethodPost, "/api/v1/artifacts/"+artifactID+"/edits",
 		`{"ops":[{"op":"replace","find":"before","with":"after"}]}`, http.StatusOK)
 	if !settlementOwed(t, database, artifactID) {
-		t.Fatalf("the edit left no pending-settlement row, so the signal would find nothing owed:\n%s", p.output.String())
+		t.Fatalf("the edit left no pending-settlement row, so the signal would find nothing owed:\n%s", p.Output.String())
 	}
 }
 
@@ -373,68 +336,34 @@ func (p *dispatchProcess) openStream(t *testing.T, path string) <-chan streamEnd
 	return ended
 }
 
-// editor is a signed-in spec tab: a writable connection to a document's room that applies every
-// update the room sends, as the dashboard's provider does.
-type editor struct {
-	artifactID string
-	doc        *crdt.Doc
-	writes     sync.Mutex
-	connection *gws.Conn
-	// answers carries the content of each sync step 2 the room sends, once it is applied.
-	answers chan []byte
-	// ended receives when the connection ended.
-	ended chan time.Time
-}
-
-// openEditor connects an editor to the document at the schema version the dashboard presents, so
-// the room takes its edits, and returns once the editor's copy of the document renders want.
-func (p *dispatchProcess) openEditor(t *testing.T, artifactID, want string) *editor {
+// openEditor connects a signed-in spec tab to the document at the schema version the dashboard
+// presents, so the room takes its edits, and returns once the editor's copy renders want.
+func (p *dispatchProcess) openEditor(t *testing.T, artifactID, want string) *docstest.Peer {
 	t.Helper()
 	url := "ws://127.0.0.1:" + strconv.Itoa(p.port) + "/ws/doc/" + artifactID + "?schema_version=" + strconv.Itoa(pmdoc.SchemaVersion())
-	connection, response, err := gws.DefaultDialer.Dial(url, http.Header{"X-Dispatch-User": []string{dispatchTestLogin}})
-	if err != nil {
-		t.Fatalf("connect an editor to the document: response=%#v err=%v", response, err)
-	}
-	t.Cleanup(func() { _ = connection.Close() })
-	e := &editor{
-		artifactID: artifactID, doc: crdt.New(), connection: connection,
-		answers: make(chan []byte, 16), ended: make(chan time.Time, 1),
-	}
-	go func() {
-		docstest.Drain(connection, e.doc, e.write, func(content []byte) {
-			select {
-			case e.answers <- content:
-			default:
-			}
-		})
-		e.ended <- time.Now()
-	}()
+	editor := docstest.Dial(t, url, http.Header{"X-Dispatch-User": []string{dispatchTestLogin}}, artifactID, crdt.New())
 	deadline := time.After(10 * time.Second)
-	for e.markdown() != want {
-		if err := e.write(ygsync.EncodeSyncStep1(crdt.New())); err != nil {
+	for markdown(editor) != want {
+		if err := editor.AskForDocument(); err != nil {
 			t.Fatalf("ask the room for the document: %v", err)
 		}
 		select {
-		case <-e.answers:
-		case <-e.ended:
-			t.Fatalf("the editor's connection closed before the room sent the document:\n%s", p.output.String())
+		case <-editor.Answers:
+		case <-editor.Ended:
+			t.Fatalf("the editor's connection closed before the room sent the document:\n%s", p.Output.String())
 		case <-deadline:
-			t.Fatalf("the room never sent the editor the document:\n%s", p.output.String())
+			t.Fatalf("the room never sent the editor the document:\n%s", p.Output.String())
 		}
 	}
-	return e
-}
-
-func (e *editor) write(syncMessage []byte) error {
-	return docstest.WriteFrame(&e.writes, e.connection, e.artifactID, syncMessage)
+	return editor
 }
 
 // markdown renders the editor's copy of the document, read under its lock while the room's updates
 // apply, or "" while the copy holds no document it can render.
-func (e *editor) markdown() string {
-	fragment := e.doc.GetXmlFragment("prosemirror")
+func markdown(editor *docstest.Peer) string {
+	fragment := editor.Doc.GetXmlFragment("prosemirror")
 	var rendered string
-	e.doc.Transact(func(txn *crdt.Transaction) {
+	editor.Doc.Transact(func(txn *crdt.Transaction) {
 		tree, err := pmdoc.ReadInTransaction(txn, fragment)
 		if err != nil {
 			return
@@ -446,84 +375,24 @@ func (e *editor) markdown() string {
 
 // replaceText types replacement over the first paragraph's text, old, in one keystroke's
 // transaction, and sends the room the update it made.
-func (e *editor) replaceText(t *testing.T, old, replacement string) {
+func replaceText(t *testing.T, editor *docstest.Peer, old, replacement string) {
 	t.Helper()
-	fragment := e.doc.GetXmlFragment("prosemirror")
+	fragment := editor.Doc.GetXmlFragment("prosemirror")
 	var changeErr error
-	update := docstest.Transact(e.doc, func(txn *crdt.Transaction) {
+	if _, err := editor.Send(func(txn *crdt.Transaction) {
 		tree, err := pmdoc.ReadInTransaction(txn, fragment)
 		if err != nil {
 			changeErr = err
 			return
 		}
 		if len(tree.Children) == 0 || len(tree.Children[0].Children) != 1 || tree.Children[0].Children[0].Text != old {
-			changeErr = fmt.Errorf("the document's first paragraph does not hold only %q", old)
+			changeErr = errors.New("the document's first paragraph does not hold only " + old)
 			return
 		}
 		tree.Children[0].Children[0].Text = replacement
 		changeErr = pmdoc.Update(txn, fragment, tree)
-	})
-	if changeErr != nil || update == nil {
-		t.Fatalf("the editor's edit: update=%d bytes err=%v", len(update), changeErr)
-	}
-	if err := e.write(ygsync.EncodeUpdate(update)); err != nil {
-		t.Fatalf("send the editor's edit: %v", err)
-	}
-}
-
-// waitExit waits up to 30 s for Dispatch to exit, and fails the test with its output when it is
-// still running; after names what it was waiting on.
-func (p *dispatchProcess) waitExit(t *testing.T, after string) {
-	t.Helper()
-	select {
-	case <-p.exited:
-	case <-time.After(30 * time.Second):
-		t.Fatalf("Dispatch was still running 30s after %s:\n%s", after, p.output.String())
-	}
-}
-
-// waitForOutput waits up to 30 s for line to appear in Dispatch's output, and fails the test when
-// Dispatch exits first or the line never appears.
-func (p *dispatchProcess) waitForOutput(t *testing.T, line string) {
-	t.Helper()
-	deadline := time.Now().Add(30 * time.Second)
-	for !strings.Contains(p.output.String(), line) {
-		select {
-		case <-p.exited:
-			t.Fatalf("Dispatch exited before it logged %q:\n%s", line, p.output.String())
-		default:
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("Dispatch never logged %q:\n%s", line, p.output.String())
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-}
-
-// waitForLockWaiters waits up to within for want backends to queue behind a lock holder's
-// transaction owns, directly or behind an earlier waiter, and returns how many it last saw. It polls
-// through holder's own connection and reads pg_locks, as api's waitForDatabaseLocks does.
-func waitForLockWaiters(t *testing.T, holder pgx.Tx, want int, within time.Duration) int {
-	t.Helper()
-	deadline := time.Now().Add(within)
-	for {
-		var count int
-		if err := holder.QueryRow(context.Background(), `
-			with recursive waiting(pid) as (
-				select pid from pg_locks
-				where not granted and pg_backend_pid() = any(pg_blocking_pids(pid))
-				union
-				select blocked.pid from pg_locks blocked, waiting
-				where not blocked.granted and waiting.pid = any(pg_blocking_pids(blocked.pid))
-			)
-			select count(*) from waiting
-		`).Scan(&count); err != nil {
-			t.Fatalf("inspect database locks: %v", err)
-		}
-		if count >= want || time.Now().After(deadline) {
-			return count
-		}
-		time.Sleep(20 * time.Millisecond)
+	}); err != nil || changeErr != nil {
+		t.Fatalf("the editor's edit: %v %v", err, changeErr)
 	}
 }
 
@@ -564,31 +433,4 @@ func latestVersion(t *testing.T, database *store.Store, artifactID string) (int,
 		t.Fatalf("read the document's latest version: %v", err)
 	}
 	return number, markdown, authors
-}
-
-func freeTCPPort(t *testing.T) int {
-	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("pick a port: %v", err)
-	}
-	defer listener.Close()
-	return listener.Addr().(*net.TCPAddr).Port
-}
-
-type lockedBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
-
-func (b *lockedBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.Write(p)
-}
-
-func (b *lockedBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.String()
 }

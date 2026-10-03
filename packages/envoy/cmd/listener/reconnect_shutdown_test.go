@@ -10,11 +10,11 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"testing"
 	"time"
 
 	"github.com/sjawhar/envoy/internal/bus"
+	"github.com/sjawhar/envoy/internal/cmdtest"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
@@ -156,8 +156,8 @@ func TestListenerReconnectWithBindInFlightShutsDownAfterForwardingRoles(t *testi
 	uri := testnats.URL(t)
 	relay := startListenerRelay(t, uri)
 	_, durable := durableHeldElsewhere(t, uri, "listener-"+machineID)
-	listener := startListenerProcess(t, buildListener(t), relay.relayed, machineID)
-	listener.waitForOutput(t, "subscribe failed, retrying")
+	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), relay.relayed, machineID)
+	listener.WaitForOutput(t, "subscribe failed, retrying")
 
 	holder, err := bus.ConnectOwningStream([]string{uri}, bus.WithReplicas(1))
 	if err != nil {
@@ -176,14 +176,14 @@ func TestListenerReconnectWithBindInFlightShutsDownAfterForwardingRoles(t *testi
 	}
 	relay.drop()
 	waitFor(t, 10*time.Second, "the listener to reconnect", func() bool {
-		return strings.Contains(listener.output.String(), "envoy nats reconnected")
+		return strings.Contains(listener.Output.String(), "envoy nats reconnected")
 	})
 	waitFor(t, 10*time.Second, "the restore to report the bind in flight", func() bool {
-		output := listener.output.String()
+		output := listener.Output.String()
 		return strings.Contains(output, "envoy nats resubscribe left to the bind in flight") ||
 			strings.Contains(output, "envoy nats resubscribe failed")
 	})
-	output := listener.output.String()
+	output := listener.Output.String()
 	if !strings.Contains(output, "envoy nats resubscribe left to the bind in flight") {
 		t.Fatalf("the restore did not report the bind in flight at INFO:\n%s", output)
 	}
@@ -226,15 +226,13 @@ func TestListenerReconnectWithBindInFlightShutsDownAfterForwardingRoles(t *testi
 				t.Fatalf("role message %d forwarded with dedupe key %q, want %s prefix", received, frame.DedupeKey, roleForwardDedupePrefix)
 			}
 		case <-time.After(10 * time.Second):
-			t.Fatalf("the listener forwarded %d of %d routed role messages during the reconnect:\n%s", received, messages, listener.output.String())
+			t.Fatalf("the listener forwarded %d of %d routed role messages during the reconnect:\n%s", received, messages, listener.Output.String())
 		}
 	}
 
-	if err := listener.cmd.Process.Signal(syscall.SIGTERM); err != nil {
-		t.Fatalf("SIGTERM listener: %v", err)
-	}
-	listener.waitExit(t, "SIGTERM during the bind in flight")
-	output = listener.output.String()
+	listener.Terminate(t)
+	listener.WaitExit(t, "SIGTERM during the bind in flight")
+	output = listener.Output.String()
 	for _, line := range []string{"received signal, shutting down", "envoy-listener shutdown complete"} {
 		if !strings.Contains(output, line) {
 			t.Fatalf("the listener did not log %q:\n%s", line, output)

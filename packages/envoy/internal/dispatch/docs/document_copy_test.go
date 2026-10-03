@@ -215,7 +215,7 @@ func TestTheStoreTakesOneBrowserUpdateItsRoomTook(t *testing.T) {
 	t.Run("a room stores it and keeps it", func(t *testing.T) {
 		httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
 		t.Cleanup(httpServer.Close)
-		peer := newDeepPeer(t, httpServer.URL, artifactID)
+		peer := connectPeer(t, httpServer.URL, artifactID)
 		waitFor(t, 10*time.Second, "the peer's room to open", func() bool {
 			return service.srv.GetDoc(artifactID) != nil
 		})
@@ -224,7 +224,9 @@ func TestTheStoreTakesOneBrowserUpdateItsRoomTook(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read the document's head: %v", err)
 		}
-		peer.write(t, ygsync.EncodeUpdate(update))
+		if err := peer.Write(ygsync.EncodeUpdate(update)); err != nil {
+			t.Fatalf("send the browser's update: %v", err)
+		}
 		// The store holds the update once a version past head declares its items: the peer's
 		// answer to the room's sync step 1, an empty update, can move the head first.
 		stored := func() bool {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -13,12 +14,22 @@ import (
 	gws "github.com/gorilla/websocket"
 	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/encoding"
+	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
+
+// connectPeer connects alice's browser to artifactID's room through the document server at
+// serverURL, at the schema version the dashboard presents, so the room takes its edits.
+func connectPeer(t *testing.T, serverURL, artifactID string) *docstest.Peer {
+	t.Helper()
+	url := "ws" + strings.TrimPrefix(serverURL, "http") + "/ws/doc/" + artifactID +
+		"?schema_version=" + strconv.Itoa(pmdoc.SchemaVersion())
+	return docstest.Dial(t, url, http.Header{"X-Dispatch-User": []string{"alice"}}, artifactID, crdt.New())
+}
 
 func TestIssueCloseClosesOpenDocumentConnection(t *testing.T) {
 	service, artifactID := newTestService(t)
@@ -356,7 +367,9 @@ func TestShutdownClosesDocumentPeers(t *testing.T) {
 	}
 }
 
-func TestShutdownBoundsPeerCloseDuringLockedAppend(t *testing.T) {
+// Shutdown returns at its caller's deadline while an editor is connected and a durable append waits
+// on a lock, and the append still reaches the store once the lock is released.
+func TestShutdownReturnsAtItsDeadlineWithAnEditorConnectedAndAnAppendLocked(t *testing.T) {
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "before")
 	service := New(Deps{
@@ -393,7 +406,7 @@ func TestShutdownBoundsPeerCloseDuringLockedAppend(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
 	defer cancel()
 	if err := service.Shutdown(ctx); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("shutdown with peer and append lock = %v, want deadline exceeded", err)
+		t.Fatalf("shutdown with an editor connected and an append locked = %v, want deadline exceeded", err)
 	}
 	if err := locker.Commit(context.Background()); err != nil {
 		t.Fatalf("release append lock: %v", err)
@@ -402,7 +415,7 @@ func TestShutdownBoundsPeerCloseDuringLockedAppend(t *testing.T) {
 	reloaded := New(Deps{Store: database, Events: events.NewBroker(), Settle: time.Hour})
 	defer reloaded.Shutdown(context.Background())
 	if got, err := reloaded.Text(context.Background(), artifactID); err != nil || got != "after\n" {
-		t.Fatalf("text after peer-bounded shutdown = %q (%v), want after", got, err)
+		t.Fatalf("text after the shutdown the locked append outlasted = %q (%v), want after", got, err)
 	}
 }
 
