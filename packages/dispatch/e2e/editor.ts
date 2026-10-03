@@ -3,6 +3,7 @@ import {
   expect,
   type Locator,
   type Page,
+  type Route,
   type WebSocketRoute,
 } from "@playwright/test";
 
@@ -300,6 +301,30 @@ export async function documentTransport(
       }
     },
   };
+}
+
+/**
+ * Holds the first request `page` makes for a URL matching `url` and lets every later one through,
+ * so a test decides when that one download ends: `held` resolves with its route once the page has
+ * made it, for the test to abort or continue. Install it before the navigation that makes the
+ * request. The route stays installed for the page's life on purpose. A `{ times: 1 }` route does
+ * not stay: Playwright removes an expiring route from the page before its handler runs, and a page
+ * left with no route stops intercepting while that request is still held (playwright-core 1.63,
+ * `Page._onRoute`). In Chromium the reload a failed chunk starts then got no response in 12 of 40
+ * runs.
+ */
+export async function holdFirstRequest(page: Page, url: RegExp): Promise<{ held: Promise<Route> }> {
+  const first = Promise.withResolvers<Route>();
+  let holding = false;
+  await page.route(url, async (route) => {
+    if (!holding) {
+      holding = true;
+      first.resolve(route);
+      return;
+    }
+    await route.continue();
+  });
+  return { held: first.promise };
 }
 
 export interface Clipboard {

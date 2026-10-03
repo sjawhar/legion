@@ -1,4 +1,4 @@
-import { expect, type Locator, type Page, type Route, test } from "@playwright/test";
+import { expect, type Locator, type Page, test } from "@playwright/test";
 
 import {
   createArtifactComment,
@@ -11,7 +11,13 @@ import {
   createProjectDocument,
   editArtifact,
 } from "./api";
-import { barAction, documentTransport, markSpan, selectEditorText } from "./editor";
+import {
+  barAction,
+  documentTransport,
+  holdFirstRequest,
+  markSpan,
+  selectEditorText,
+} from "./editor";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -321,28 +327,19 @@ test("a document link followed while the page before it is still downloading its
   try {
     const page = await context.newPage();
     // The first page's document transport is still downloading when the reader follows the next
-    // link. WebKit cancels that download as the navigation starts (Firefox cancels a real one too,
-    // though not one Playwright holds), and the page must not answer the failed chunk by
-    // reloading itself over the navigation. The route holds the first page's download alone and
-    // stays in place until the navigation: removing a route continues the requests it holds, so
-    // an unrouted download could finish, or not, before the link is followed.
-    const held: Route[] = [];
-    await page.route(
-      /\/assets\/yjs-[^/]+\.js$/u,
-      (route) => {
-        held.push(route);
-      },
-      { times: 1 }
-    );
+    // link. WebKit and Firefox cancel that download as the navigation starts, and the page must
+    // not answer the failed chunk by reloading itself over the navigation. The first page's
+    // download stays held until the link is followed, and the next page downloads its own.
+    const transportCode = await holdFirstRequest(page, /\/assets\/yjs-[^/]+\.js$/u);
     await page.goto(`/issues/${issue.key}/spec?comment=${comments[0].id}`);
-    await expect.poll(() => held.length).toBe(1);
+    const held = await transportCode.held;
 
     const link = `/issues/${issue.key}/artifacts/${secondarySlug}?comment=${comments[1].id}`;
     await page.goto(link);
     await expectSelectedMarginItem(page, comments[1].id, testInfo.project.name === "iphone", true);
     const opened = new URL(page.url());
     expect(`${opened.pathname}${opened.search}`).toBe(link);
-    await Promise.all(held.map((route) => route.abort().catch(() => undefined)));
+    await held.abort().catch(() => undefined);
   } finally {
     await context.close();
   }

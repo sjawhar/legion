@@ -653,7 +653,7 @@ The `webkit` and `firefox` projects run the whole of `e2e/deep-links.e2e.ts` for
 reasons. Both engines cancel the chunk downloads in flight when a navigation starts: a deep link followed while the page
 before it is still loading its document has to open the link rather than reload that page
 (`installChunkFailureRecovery`); the row that holds the first page's `yjs` chunk makes that case deterministic in
-WebKit, and Firefox reaches it only through "emitted document item hrefs select and scroll their anchored thread". And
+WebKit and Firefox alike. And
 the margin's hold on a linked card (`features/margin/useCardHold.ts`) meets each engine's own order of frames, scroll
 events and Suspense reveals. It reads a press in the document as the reader only once the document whose cards the
 margin shows has reported a visible layout: the previous route's editor stays mounted, hidden behind the next page's
