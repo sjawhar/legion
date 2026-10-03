@@ -316,7 +316,7 @@ jobs:
         run: |
           test -n "$REF"
           gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json body -q .body > body.md
-          if grep -q "$REF" body.md; then
+          if grep -qF "$REF" body.md; then
             echo "Release $RELEASE_TAG already lists $REF"
             exit 0
           fi

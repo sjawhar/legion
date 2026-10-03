@@ -148,11 +148,12 @@ jobs:
           TAGS: ${{ steps.meta.outputs.tags }}
         run: |
           test -n "$DIGEST"
-          echo "ref=${IMAGE}@${DIGEST}" >> "$GITHUB_OUTPUT"
+          REF="${IMAGE}@${DIGEST}"
+          echo "ref=$REF" >> "$GITHUB_OUTPUT"
           {
             echo "### Worker image"
             echo
-            echo "\`${IMAGE}@${DIGEST}\`"
+            echo "\`$REF\`"
             echo
             echo "Tags:"
             # shellcheck disable=SC2016 # literal backticks and a sed `$` anchor, no expansion wanted

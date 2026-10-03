@@ -1,17 +1,23 @@
 version: 2
 updates:
-  # Every pin this repository carries is a commit SHA with a `# vX.Y.Z` comment
-  # (.github/scripts/check-action-pins.sh enforces the form); Dependabot rewrites both the SHA and
-  # the comment when it bumps an action, so the pins stay current instead of freezing at the
-  # commit this PR pinned them to. `/.github/actions/*` reaches every composite action's own
-  # `uses:` (oven-sh/setup-bun in .github/actions/setup-bun/action.yml included); `/` reaches every
-  # workflow under .github/workflows.
+  # Every pin this repository carries is a commit SHA (.github/scripts/check-action-pins.sh
+  # enforces the SHA; review is what keeps the `# vX.Y.Z` comment next to it accurate, since the
+  # check reads YAML, which drops comments, and so cannot see one). Dependabot rewrites both the
+  # SHA and an existing comment when it bumps an action, so the pins stay current.
+  # `/.github/actions/*` reaches every composite action's own `uses:` (oven-sh/setup-bun in
+  # .github/actions/setup-bun/action.yml included); `/` reaches every workflow under
+  # .github/workflows.
   - package-ecosystem: "github-actions"
     directories:
       - "/"
       - "/.github/actions/*"
     schedule:
       interval: "weekly"
+    # A compromised upstream release sits for 7 days before Dependabot opens a pull request for
+    # it, so the pull request that runs it with worker-image.yaml's packages: write (the
+    # pull_request trigger covers this file) is never the first run of a brand-new tag.
+    cooldown:
+      default-days: 7
     commit-message:
       # pr-title.yaml requires a conventional-commit title; "ci" is this repository's prefix for
       # CI-only changes.

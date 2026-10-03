@@ -26,10 +26,10 @@ on:
       - ".github/workflows/release-envoy-listener.yaml"
   workflow_dispatch:
 
-permissions:
-  contents: write
-  packages: write
-  id-token: write
+# Every job declares its own permissions (build, docker, release below); nothing runs under this
+# workflow-level default, so it stays empty rather than becoming an unreviewed grant to a job
+# added later with no block of its own.
+permissions: {}
 
 
 jobs:
@@ -151,8 +151,9 @@ jobs:
       group: release-envoy-listener
       cancel-in-progress: false
     runs-on: ubuntu-24.04
-    # The workflow's own grants, plus the attestations API for the agent-secrets provenance below
-    # (id-token is already one of them: it is the Sigstore signing certificate's OIDC token).
+    # contents: write and packages: write publish the tag and release; attestations: write and
+    # id-token: write are for the agent-secrets provenance below (id-token is the Sigstore signing
+    # certificate's OIDC token).
     permissions:
       contents: write
       packages: write

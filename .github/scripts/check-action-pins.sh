@@ -2,10 +2,7 @@
 # Every remote action this repository calls is pinned to the commit a tag resolves to, not to the
 # tag itself (a `v5` can move to a commit nobody reviewed; a 40-hex SHA cannot). This check is the
 # enforcement half of that convention: nothing else in CI refuses a `uses:` that names a floating
-# tag, so a merge that reintroduces one (a conflict resolution, a new workflow copied from an
-# example, a new composite action) would otherwise go unnoticed until the next security review.
-# docs.yaml landed on main with five `@v5`/`@v4` tags this way once already, caught only by a
-# human reading the forward merge.
+# tag.
 #
 # A `uses:` is in scope when it names a remote action (`owner/repo[/path]@ref`); a local path
 # (`./...`) or a Docker reference (`docker://...`) is not pinned by a commit and is out of scope.
