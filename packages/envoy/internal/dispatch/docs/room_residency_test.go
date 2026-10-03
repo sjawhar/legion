@@ -508,6 +508,71 @@ func TestAnEvictedRoomsReplicaGoesWithIt(t *testing.T) {
 	})
 }
 
+// A tree a read of a resident room returns is its reader's to change. The read walks the room's
+// replica (readLive), which every later read walks too, so a tree that held the replica's own mark
+// attributes or attribute values would carry its reader's edit into the next read: a link reading
+// back with the target the reader wrote, an answered ask with the choice it wrote.
+func TestEditingALiveReadsTreeChangesNoLaterRead(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, `:::ask{#ask-1}
+Which transport should we expose?
+
+* REST: Matches the existing platform
+:::
+
+see [link](https://a.example/) here
+`)
+	ctx := context.Background()
+	// The ask is answered as settlement answers it, in a write the room's update observer sees,
+	// which makes the replica the reads walk.
+	if err := service.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+		ask := doc.GetXmlFragment(fragmentName).Children()[0].(*crdt.YXmlElement)
+		transact(func(txn *crdt.Transaction) {
+			ask.SetAttributeValue(txn, "state", "answered")
+			ask.SetAttributeValue(txn, "selected", []any{"REST"})
+		})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := service.Text(ctx, artifactID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tree, err := service.liveTree(artifactID, service.srv.GetDoc(artifactID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	edited := 0
+	var edit func(*pmdoc.Node)
+	edit = func(node *pmdoc.Node) {
+		if selected, ok := node.Attrs["selected"].([]any); ok && len(selected) > 0 {
+			selected[0] = "GraphQL"
+			edited++
+		}
+		for _, mark := range node.Marks {
+			if mark.Type == "link" {
+				mark.Attrs["href"] = "https://mutated.example/"
+				edited++
+			}
+		}
+		for _, child := range node.Children {
+			edit(child)
+		}
+	}
+	edit(tree)
+	if edited != 2 {
+		t.Fatalf("edited %d values of the read's tree, want the ask's choice and the link's target", edited)
+	}
+	after, err := service.Text(ctx, artifactID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after != before {
+		t.Fatalf("once a read's tree was edited the room reads\n%s\nwant\n%s", after, before)
+	}
+}
+
 // lockedLog collects what every goroutine logs.
 type lockedLog struct {
 	mu      sync.Mutex

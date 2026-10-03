@@ -6,7 +6,8 @@ import (
 	"github.com/reearth/ygo/crdt"
 )
 
-// Read converts the live Yjs tree the browser editor writes into a Node tree.
+// Read converts the live Yjs tree the browser editor writes into a Node tree. The tree is the
+// caller's own: it shares no map or slice with the document it was read from (ownedValue).
 func Read(frag *crdt.YXmlFragment) (*Node, error) {
 	return readDocument(frag, func(text *crdt.YXmlText) ([]crdt.Delta, error) {
 		return text.ToDelta(), nil
@@ -65,6 +66,10 @@ func readElement(e *crdt.YXmlElement, readDelta textDeltaReader, depth int) (*No
 	}
 	n := &Node{Type: e.NodeName}
 	if attrs := e.GetAttributeValues(); len(attrs) > 0 {
+		// The map is GetAttributeValues' own; its values are the document's.
+		for name, value := range attrs {
+			attrs[name] = ownedValue(value)
+		}
 		n.Attrs = treeAttrs(e.NodeName, attrs)
 	}
 	children, err := readChildren(&e.YXmlFragment, readDelta, depth+1)
@@ -97,7 +102,7 @@ func readText(t *crdt.YXmlText, readDelta textDeltaReader) ([]*Node, error) {
 			if err != nil {
 				return nil, fmt.Errorf("%w: mark %q attributes: %v", ErrSchema, name, err)
 			}
-			n.Marks = append(n.Marks, Mark{Type: yattrToMarkName(name), Attrs: attrs})
+			n.Marks = append(n.Marks, Mark{Type: yattrToMarkName(name), Attrs: ownedAttrs(attrs)})
 		}
 		sortMarks(n.Marks)
 		out = append(out, n)
@@ -126,5 +131,47 @@ func attrsFromY(raw any) (Attrs, error) {
 		return Attrs(attrs), nil
 	default:
 		return nil, fmt.Errorf("want object, got %T", raw)
+	}
+}
+
+// ownedAttrs is a copy of attrs, a mark's attributes as the Yjs document holds them, sharing no
+// map or slice with it (ownedValue).
+func ownedAttrs(attrs Attrs) Attrs {
+	if attrs == nil {
+		return nil
+	}
+	owned := make(Attrs, len(attrs))
+	for name, value := range attrs {
+		owned[name] = ownedValue(value)
+	}
+	return owned
+}
+
+// ownedValue is value, an attribute value a Yjs document holds, with every map and slice in it
+// copied. ygo hands a reader the document's own values - a mark's attribute map, an element's
+// list - and a tree read from a document others read after it, such as a room's replica, would
+// otherwise carry its holder's edits to them into every later read.
+func ownedValue(value any) any {
+	switch value := value.(type) {
+	case map[string]any:
+		owned := make(map[string]any, len(value))
+		for name, item := range value {
+			owned[name] = ownedValue(item)
+		}
+		return owned
+	case crdt.Attributes:
+		owned := make(crdt.Attributes, len(value))
+		for name, item := range value {
+			owned[name] = ownedValue(item)
+		}
+		return owned
+	case []any:
+		owned := make([]any, len(value))
+		for index, item := range value {
+			owned[index] = ownedValue(item)
+		}
+		return owned
+	default:
+		return value
 	}
 }
