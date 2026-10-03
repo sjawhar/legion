@@ -80,17 +80,6 @@ func TestReadsOfALiveDocumentRunBesideItsPeers(t *testing.T) {
 			}
 			return nil
 		}},
-		{"version capture", func(ctx context.Context, service *Service, artifactID, _ string) error {
-			tx, err := service.store.Pool.Begin(ctx)
-			if err != nil {
-				return err
-			}
-			defer tx.Rollback(ctx)
-			joined, ledger := service.Join(ctx, tx)
-			defer ledger.Discard()
-			_, err = service.SnapshotVersion(joined, artifactID, alice)
-			return err
-		}},
 		{"block id backfill", func(ctx context.Context, service *Service, artifactID, _ string) error {
 			return service.backfillBlockIDs(ctx, artifactID).Err
 		}},
@@ -111,6 +100,42 @@ func TestReadsOfALiveDocumentRunBesideItsPeers(t *testing.T) {
 			})
 		})
 	}
+
+	// A version's capture reads the room inside the Apply that holds it, between a transaction's
+	// database work and the version's, so a run counts as overlapping only when the first peer's
+	// update reached the room after the capture held the room (afterReadWarm), and its document
+	// leads with a longer run of rules, as settlement's does. The capture holds the room's state
+	// lock across its read, which the update observer of a peer's update takes next, so each peer
+	// lands at most one update in a capture's walk: a second peer types beside the first.
+	t.Run("version capture", func(t *testing.T) {
+		service, artifactID, serverURL := newPeeredService(t, rules(2_000)+seeded)
+		// The hook is set before the peers type, as settlement's are.
+		var peer atomic.Value
+		var held atomic.Uint64
+		applied := func() uint64 {
+			client, _ := peer.Load().(crdt.ClientID)
+			return peerApplied(service, artifactID, client)
+		}
+		service.afterReadWarm = func(string) { held.Store(applied() + 1) }
+		peer.Store(typeIntoDocument(t, service, serverURL, artifactID, 2*time.Millisecond))
+		typeIntoDocument(t, service, serverURL, artifactID, 2*time.Millisecond)
+		ctx := context.Background()
+		overlapping(t, func() bool {
+			held.Store(0)
+			tx, err := service.store.Pool.Begin(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer tx.Rollback(ctx)
+			joined, ledger := service.Join(ctx, tx)
+			defer ledger.Discard()
+			if _, err := service.SnapshotVersion(joined, artifactID, alice); err != nil {
+				t.Fatalf("capture a version of the live document: %v", err)
+			}
+			at := held.Load()
+			return at > 0 && applied()+1 > at
+		})
+	})
 
 	// The unrecorded-mark sweep reads inside the transaction that unmarks, which holds the
 	// document's lock, so none of the peer's updates lands while it reads: it runs for a fixed time
