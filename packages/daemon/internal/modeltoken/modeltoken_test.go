@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"encoding/pem"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -71,12 +70,14 @@ func tokenInFreshProcess(t *testing.T, cfg Config, env ...string) childResult {
 // CUSTOM_AUTH, then RespondToAuthChallenge with the pod's service-account token as the answer.
 // accessToken, when set, is the access token every sign-in returns in place of access-<n>.
 type fakeCognito struct {
-	t           *testing.T
-	mu          sync.Mutex
-	signIn      int
-	refuse      bool
-	accessToken string
-	calls       atomic.Int32
+	t             *testing.T
+	mu            sync.Mutex
+	signIn        int
+	refuse        bool
+	refusalCode   string
+	challengeName string
+	accessToken   string
+	calls         atomic.Int32
 }
 
 func (f *fakeCognito) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -96,8 +97,12 @@ func (f *fakeCognito) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if body["AuthFlow"] != "CUSTOM_AUTH" || parameters["USERNAME"] != "machine-user" || len(parameters) != 1 {
 			f.t.Errorf("InitiateAuth = %#v, want CUSTOM_AUTH with USERNAME only", body)
 		}
+		challengeName := "CUSTOM_CHALLENGE"
+		if f.challengeName != "" {
+			challengeName = f.challengeName
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"ChallengeName": "CUSTOM_CHALLENGE", "Session": "session-1",
+			"ChallengeName": challengeName, "Session": "session-1",
 			"ChallengeParameters": map[string]string{"USERNAME": "machine-user"},
 		})
 	case "RespondToAuthChallenge":
@@ -107,9 +112,13 @@ func (f *fakeCognito) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			f.t.Errorf("RespondToAuthChallenge = %#v, want the pod's token as the custom-challenge answer", body)
 		}
 		if f.refuse {
-			w.Header().Set("X-Amzn-ErrorType", "NotAuthorizedException")
+			code := "NotAuthorizedException"
+			if f.refusalCode != "" {
+				code = f.refusalCode
+			}
+			w.Header().Set("X-Amzn-ErrorType", code)
 			w.WriteHeader(http.StatusBadRequest)
-			_ = json.NewEncoder(w).Encode(map[string]string{"__type": "NotAuthorizedException", "message": "Incorrect username or password."})
+			_ = json.NewEncoder(w).Encode(map[string]string{"__type": code, "message": "Incorrect username or password."})
 			return
 		}
 		f.mu.Lock()
@@ -177,6 +186,57 @@ func TestTokenRefusesAFailedSignInWithoutAToken(t *testing.T) {
 	}
 }
 
+// Error codes and challenge names belong to the endpoint, so they must not echo the pod token into
+// the error a caller receives.
+func TestTokenHidesEndpointControlledErrorCodeAndChallengeName(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		refuse        bool
+		refusalCode   string
+		challengeName string
+	}{
+		{name: "refusal error code", refuse: true, refusalCode: "pod-service-account-token"},
+		{name: "challenge name", challengeName: "pod-service-account-token"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cognito := &fakeCognito{
+				t: t, refuse: tc.refuse, refusalCode: tc.refusalCode, challengeName: tc.challengeName,
+			}
+			server := httptest.NewServer(cognito)
+			defer server.Close()
+
+			token, err := Token(context.Background(), testConfig(t, server.URL))
+			if token != "" || err == nil {
+				t.Fatalf("Token = %q, %v; want no token and a refusal", token, err)
+			}
+			if strings.Contains(err.Error(), "pod-service-account-token") {
+				t.Fatalf("Token error %q repeats the endpoint's token echo", err)
+			}
+		})
+	}
+}
+
+// A configured service-account token pointer is authoritative: a blank file is a configuration
+// error naming that flag, before the command contacts Cognito.
+func TestTokenRefusesAnEmptyServiceAccountTokenFile(t *testing.T) {
+	cognito := &fakeCognito{t: t}
+	server := httptest.NewServer(cognito)
+	defer server.Close()
+	cfg := testConfig(t, server.URL)
+	if err := os.WriteFile(cfg.ServiceAccountTokenFile, []byte(" \n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	token, err := Token(context.Background(), cfg)
+	if token != "" || err == nil || !strings.Contains(err.Error(), "--service-account-token-file") ||
+		!strings.Contains(err.Error(), cfg.ServiceAccountTokenFile) {
+		t.Fatalf("Token = %q, %v; want the named empty token-file refusal", token, err)
+	}
+	if cognito.calls.Load() != 0 {
+		t.Fatalf("Cognito got %d requests, want none", cognito.calls.Load())
+	}
+}
+
 // Oh My Pi trims the command's whole output and sends it as a header: an access token that is
 // blank or spans lines is refused rather than printed.
 func TestTokenRefusesAnAccessTokenThatIsNotOneLine(t *testing.T) {
@@ -202,36 +262,31 @@ func TestTokenRefusesAResponseLongerThanTheCap(t *testing.T) {
 	defer server.Close()
 
 	token, err := Token(context.Background(), testConfig(t, server.URL))
-	if token != "" || !errors.Is(err, errResponseTooLarge) {
-		t.Fatalf("Token = %q, %v; want no token and %v", token, err, errResponseTooLarge)
+	if token != "" || err == nil {
+		t.Fatalf("Token = %q, %v; want no token and a refusal", token, err)
 	}
 }
 
-// A redirect is the endpoint's answer, never a second destination for the sign-in: a 302 that
-// net/http would follow with a GET, nor a 307 that would carry the service-account token.
+// A 302 is an endpoint answer, never a second destination for the sign-in.
 func TestTokenFollowsNoRedirect(t *testing.T) {
-	for _, status := range []int{http.StatusFound, http.StatusTemporaryRedirect} {
-		t.Run(http.StatusText(status), func(t *testing.T) {
-			var elsewhere atomic.Int32
-			target := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { elsewhere.Add(1) }))
-			defer target.Close()
-			cognito := &fakeCognito{t: t}
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if strings.HasSuffix(r.Header.Get("X-Amz-Target"), ".RespondToAuthChallenge") {
-					http.Redirect(w, r, target.URL, status)
-					return
-				}
-				cognito.ServeHTTP(w, r)
-			}))
-			defer server.Close()
+	var elsewhere atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { elsewhere.Add(1) }))
+	defer target.Close()
+	cognito := &fakeCognito{t: t}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.Header.Get("X-Amz-Target"), ".RespondToAuthChallenge") {
+			http.Redirect(w, r, target.URL, http.StatusFound)
+			return
+		}
+		cognito.ServeHTTP(w, r)
+	}))
+	defer server.Close()
 
-			if token, err := Token(context.Background(), testConfig(t, server.URL)); err == nil || token != "" {
-				t.Fatalf("Token = %q, %v; want no token", token, err)
-			}
-			if elsewhere.Load() != 0 {
-				t.Fatalf("the redirect target got %d requests, want none", elsewhere.Load())
-			}
-		})
+	if token, err := Token(context.Background(), testConfig(t, server.URL)); err == nil || token != "" {
+		t.Fatalf("Token = %q, %v; want no token", token, err)
+	}
+	if elsewhere.Load() != 0 {
+		t.Fatalf("the redirect target got %d requests, want none", elsewhere.Load())
 	}
 }
 

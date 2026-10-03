@@ -15,10 +15,10 @@ package modeltoken
 import (
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"slices"
@@ -29,13 +29,12 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/cognitoidentityprovider/types"
 	"github.com/aws/smithy-go"
 	smithyhttp "github.com/aws/smithy-go/transport/http"
+	"github.com/sjawhar/legion/daemon/internal/config"
 )
 
 // maxResponseBytes caps one Cognito response: both answers fit in a few KiB, so a longer one is a
 // broken or hostile endpoint, refused before it fills the pod's memory.
 const maxResponseBytes = 64 << 10
-
-var errResponseTooLarge = fmt.Errorf("the response is longer than %d KiB", maxResponseBytes>>10)
 
 // Config is one sign-in's settings, each a flag of the operator's apiKey command, so this public
 // repository names no pool, client or user.
@@ -49,37 +48,33 @@ type Config struct {
 	Endpoint string
 }
 
-// Token signs in and returns the access token, or the reason it could not and no token.
+// Token signs in and returns the access token, or the reason it could not and no token. The command
+// calls it once in a fresh process, so it clears SSL_CERT_FILE and SSL_CERT_DIR before that process
+// first loads the system TLS roots.
 func Token(ctx context.Context, cfg Config) (string, error) {
-	answer, err := os.ReadFile(cfg.ServiceAccountTokenFile)
+	answer, err := config.ReadSecretPointer("--service-account-token-file", cfg.ServiceAccountTokenFile)
 	if err != nil {
-		return "", fmt.Errorf("read the service-account token: %w", err)
+		return "", err
 	}
 	client, err := httpClient()
 	if err != nil {
 		return "", err
 	}
-	return signIn(ctx, cfg, client, strings.TrimSpace(string(answer)))
+	return signIn(ctx, cfg, client, answer)
 }
 
-// httpClient is the sign-in's only route to Cognito: dialled directly, trusting the system's
-// certificate store alone, following no redirect, and failing a response body longer than
-// maxResponseBytes. crypto/x509 reads SSL_CERT_FILE and SSL_CERT_DIR when it first loads the system
-// store, once per process, so both are cleared before that.
+// httpClient is the sign-in's only route to Cognito: dialled directly, following no redirect, and
+// reading no more than maxResponseBytes. SSL_CERT_FILE and SSL_CERT_DIR are cleared before the
+// default transport first loads the system certificate store.
 func httpClient() (*http.Client, error) {
 	for _, variable := range []string{"SSL_CERT_FILE", "SSL_CERT_DIR"} {
 		if err := os.Unsetenv(variable); err != nil {
 			return nil, err
 		}
 	}
-	roots, err := x509.SystemCertPool()
-	if err != nil {
-		return nil, fmt.Errorf("load the system's TLS roots: %w", err)
-	}
 	return &http.Client{
 		Transport: cappedTransport{&http.Transport{
-			Proxy:           nil, // never HTTPS_PROXY or HTTP_PROXY
-			TLSClientConfig: &tls.Config{RootCAs: roots},
+			Proxy: nil, // never HTTPS_PROXY or HTTP_PROXY
 		}},
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}, nil
@@ -91,27 +86,15 @@ type cappedTransport struct{ http.RoundTripper }
 func (c cappedTransport) RoundTrip(request *http.Request) (*http.Response, error) {
 	response, err := c.RoundTripper.RoundTrip(request)
 	if err == nil {
-		response.Body = &cappedBody{ReadCloser: response.Body, left: maxResponseBytes}
+		response.Body = struct {
+			io.Reader
+			io.Closer
+		}{
+			Reader: io.LimitReader(response.Body, maxResponseBytes),
+			Closer: response.Body,
+		}
 	}
 	return response, err
-}
-
-// cappedBody fails with errResponseTooLarge once more than maxResponseBytes have been read.
-type cappedBody struct {
-	io.ReadCloser
-	left int64
-}
-
-func (b *cappedBody) Read(p []byte) (int, error) {
-	if int64(len(p)) > b.left+1 {
-		p = p[:b.left+1]
-	}
-	n, err := b.ReadCloser.Read(p)
-	b.left -= int64(n)
-	if b.left < 0 {
-		return 0, errResponseTooLarge
-	}
-	return n, err
 }
 
 // signIn is Cognito's custom authentication: InitiateAuth names the user, and the custom challenge is
@@ -165,17 +148,16 @@ func challenge(name types.ChallengeNameType) string {
 }
 
 // cognitoError reports a failed Cognito call in words this package chooses: the error code of a
-// refusal when it has the shape of one, the HTTP status of an answer that is not Cognito's, or, when
-// nothing answered, the connection's own failure. The endpoint's message, request id, body and
+// refusal when it has the shape of one, the HTTP status of an answer that is not Cognito's, or a
+// dial failure to the operator's configured endpoint. The endpoint's message, request id, body and
 // certificate never appear, since a hostile endpoint could echo the service-account token into any
 // of them.
 func cognitoError(operation string, err error) error {
 	var refusal smithy.APIError
 	var certificate *tls.CertificateVerificationError
 	var response *smithyhttp.ResponseError
+	var dial *net.OpError
 	switch {
-	case errors.Is(err, errResponseTooLarge):
-		return fmt.Errorf("Cognito %s: %w", operation, errResponseTooLarge)
 	case errors.As(err, &refusal):
 		if code := refusal.ErrorCode(); isErrorCode(code) {
 			return fmt.Errorf("Cognito %s refused: %s", operation, code)
@@ -185,9 +167,15 @@ func cognitoError(operation string, err error) error {
 		return fmt.Errorf("Cognito %s: the endpoint's TLS certificate is not trusted", operation)
 	case errors.As(err, &response) && response.Response != nil && response.Response.Response != nil && response.HTTPStatusCode() != 0:
 		return fmt.Errorf("Cognito %s answered HTTP %d, which is not a Cognito answer", operation, response.HTTPStatusCode())
+	case errors.Is(err, context.DeadlineExceeded):
+		return fmt.Errorf("Cognito %s: no answer before the deadline", operation)
+	case errors.Is(err, context.Canceled):
+		return fmt.Errorf("Cognito %s: sign-in was canceled", operation)
+	case errors.As(err, &dial) && dial.Op == "dial":
+		return fmt.Errorf("Cognito %s: %w", operation, dial)
 	default:
-		// Nothing answered (the SDK reports that as status 0): a refused or timed-out connection.
-		return fmt.Errorf("Cognito %s: %w", operation, err)
+		// The endpoint may have answered with bytes net/http could not parse, so use fixed wording.
+		return fmt.Errorf("Cognito %s: the endpoint's answer is not an HTTP response", operation)
 	}
 }
 
