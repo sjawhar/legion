@@ -105,11 +105,12 @@ require (
 )
 
 // The sjawhar/ygo fork carries ygo fixes Dispatch depends on while each waits in its own upstream
-// pull request (reearth/ygo #257, #260, #262, #263, #266, #267): an iterative delete cascade and
-// nested reads, so the stack a delete or read needs does not grow with a tree a peer nested; the
-// transactional GC range search; a merged update's skip parks the items after it rather than
-// dropping the update that fills the gap; a whole document state resolves its own dependencies
-// before the pending cap; items merge only when their right origins match, so a re-encoded
-// document keeps its text order; and BroadcastUpdate validates under the server's
-// MaxPendingItems.
-replace github.com/reearth/ygo => github.com/sjawhar/ygo v1.50.1-sami.1
+// pull request (reearth/ygo #257, #260, #262, #263, #266, #267, #268, #269): an iterative delete
+// cascade and nested reads, so the stack a delete or read needs does not grow with a tree a peer
+// nested; the transactional GC range search; a merged update's skip parks the items after it
+// rather than dropping the update that fills the gap; a whole document state resolves its own
+// dependencies before the pending cap; items merge only when their right origins match, so a
+// re-encoded document keeps its text order; BroadcastUpdate validates under the server's
+// MaxPendingItems; the bundled stores keep a large incremental update; and Apply stamps a room
+// with no peer idle when it returns, so the idle sweep evicts a room only the API touched.
+replace github.com/reearth/ygo => github.com/sjawhar/ygo v1.50.1-sami.2
