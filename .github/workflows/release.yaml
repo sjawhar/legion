@@ -139,7 +139,12 @@ jobs:
           else
             PREV_VERSION="${PREV_TAG#legion-v}"
           fi
-          VERSION=$(.github/scripts/release-bump.sh "$PREV_VERSION" "${PREV_TAG}..HEAD" -- packages/daemon/ packages/pi-envoy/roles/)
+          # The role prompts ship as runtime: packages/pi-envoy/roles is each archive's role-prompts/,
+          # and the binary embeds internal/prompts/go, so a docs: commit to either still releases.
+          # release-bump.sh reads a --patch-path only when it is also one of the paths after --.
+          VERSION=$(.github/scripts/release-bump.sh "$PREV_VERSION" "${PREV_TAG}..HEAD" \
+            --patch-path packages/pi-envoy/roles/ --patch-path packages/daemon/internal/prompts/go/ \
+            -- packages/daemon/ packages/pi-envoy/roles/ packages/daemon/internal/prompts/go/)
 
           if [ "$VERSION" = "empty" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
