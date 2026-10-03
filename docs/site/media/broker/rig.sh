@@ -44,9 +44,10 @@ unset PGHOSTADDR PGHOST PGSERVICE PLAYWRIGHT_BASE_URL PLAYWRIGHT_DATABASE_URL E2
 # socket directory, localhost, 127.0.0.0/8 or ::1, the hosts Dispatch's dev sign-in accepts
 # (packages/envoy/cmd/dispatch/main.go, loopbackDatabase). The hosts are the authority's, or the
 # host query parameter's, which overrides them for libpq and pgx alike; none at all is the default
-# socket. Another form, and a hostaddr or service parameter, are refused.
+# socket. Another form, and a hostaddr or service parameter, are refused. libpq percent-decodes a
+# query parameter's key as well as its value, so each is decoded before it is matched.
 local_database() {
-  local url=$1 rest hosts param host
+  local url=$1 rest hosts param key host
   local -a params=() list=()
   case "$url" in postgres://* | postgresql://*) ;; *) return 1 ;; esac
   rest=${url#*://}
@@ -55,9 +56,11 @@ local_database() {
   if [[ $url == *\?* ]]; then
     IFS='&' read -ra params <<<"${url#*\?}"
     for param in "${params[@]}"; do
-      case "$param" in
-        host=*) hosts=${param#host=} ;;
-        hostaddr=* | service=*) return 1 ;;
+      key=${param%%=*}
+      key=$(printf '%b' "${key//%/\\x}")
+      case "$key" in
+        host) hosts=${param#*=} ;;
+        hostaddr | service) return 1 ;;
       esac
     done
   fi
