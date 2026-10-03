@@ -79,9 +79,9 @@ type Config struct {
 	TrustedProxyHeader string
 }
 
-// noDispatchCredential is why AGENTC-393 v9 removed the broker's Dispatch variables: it asks and
-// issues nothing in Dispatch.
-const noDispatchCredential = "the broker holds no Dispatch credential (AGENTC-393 v9)"
+// noDispatchCredential is why the broker's Dispatch variables are gone: it asks and issues nothing
+// in Dispatch.
+const noDispatchCredential = "the broker holds no Dispatch credential"
 
 // removedVars are environment variables the broker no longer reads. A stale deployment still
 // setting one must fail loudly rather than silently running on configuration that means nothing
@@ -92,7 +92,7 @@ var removedVars = []struct{ name, reason string }{
 	{"BROKER_DISPATCH_TOKEN_FILE", noDispatchCredential},
 	{"BROKER_DISPATCH_PROJECT", noDispatchCredential},
 	{"BROKER_ASK_POLL_SECONDS", noDispatchCredential},
-	{"BROKER_UI_ORIGIN", "approval is by Dispatch login, so the broker checks no WebAuthn origin (AGENTC-393)"},
+	{"BROKER_UI_ORIGIN", "approval is by Dispatch login, so the broker checks no WebAuthn origin"},
 }
 
 // databasePasswordPlaceholder is substituted in BROKER_DATABASE_URL with the URL-escaped value of

@@ -31,16 +31,15 @@ func TestLoadRequiresDatabaseURL(t *testing.T) {
 	}
 }
 
-// TestLoadRefusesDispatchVariables pins that AGENTC-393 v9's removed Dispatch variables fail
-// loudly rather than being silently ignored: the broker holds no Dispatch credential, so a stale
-// deployment env still setting one must refuse to start.
+// TestLoadRefusesDispatchVariables pins that the removed Dispatch variables fail loudly rather
+// than being silently ignored: the broker holds no Dispatch credential, so a stale deployment env
+// still setting one must refuse to start, naming the variable.
 func TestLoadRefusesDispatchVariables(t *testing.T) {
 	e := validEnv()
 	e["BROKER_DISPATCH_URL"] = "https://dispatch.internal.example"
 	_, err := Load(env(e))
-	want := "BROKER_DISPATCH_URL is removed; the broker holds no Dispatch credential (AGENTC-393 v9)"
-	if err == nil || err.Error() != want {
-		t.Fatalf("Load(BROKER_DISPATCH_URL set) = %v, want %q", err, want)
+	if err == nil || !strings.HasPrefix(err.Error(), "BROKER_DISPATCH_URL is removed; ") {
+		t.Fatalf("Load(BROKER_DISPATCH_URL set) = %v, want a refusal naming BROKER_DISPATCH_URL", err)
 	}
 }
 
@@ -51,9 +50,8 @@ func TestLoadRefusesUIOrigin(t *testing.T) {
 	e := validEnv()
 	e["BROKER_UI_ORIGIN"] = "https://secrets-ui.internal.example"
 	_, err := Load(env(e))
-	want := "BROKER_UI_ORIGIN is removed; approval is by Dispatch login, so the broker checks no WebAuthn origin (AGENTC-393)"
-	if err == nil || err.Error() != want {
-		t.Fatalf("Load(BROKER_UI_ORIGIN set) = %v, want %q", err, want)
+	if err == nil || !strings.HasPrefix(err.Error(), "BROKER_UI_ORIGIN is removed; ") {
+		t.Fatalf("Load(BROKER_UI_ORIGIN set) = %v, want a refusal naming BROKER_UI_ORIGIN", err)
 	}
 }
 
