@@ -490,12 +490,7 @@ func TestASettlementWhoseRoomRetiresUnderItsStampReturns(t *testing.T) {
 	if err := service.awaitRoomRecovery(ctx, artifactID); err != nil {
 		t.Fatalf("wait for the room to recover: %v", err)
 	}
-	settleCurrentGeneration(t, service, artifactID)
-	requireNoSuppressedSlots(t, service, artifactID, "after the next settlement")
-	waitForPersistedProofText(t, service.store, artifactID, "before\n\nadded\n")
-	if repairs := pmdoc.BlockIDRepairCount(persistedProofTree(t, service.store, artifactID)); repairs != 0 {
-		t.Fatalf("the next settlement left %d unstamped blocks", repairs)
-	}
+	requireNextSettlementStamps(t, service, artifactID, "before\n\nadded\n")
 }
 
 // The same retirement under the block-id backfill's stamp.
@@ -563,12 +558,7 @@ func TestARoomThatFailsWhileASettlementCommitsIntoItRecovers(t *testing.T) {
 	}
 	awaitRecovered(t, service, artifactID)
 
-	settleCurrentGeneration(t, service, artifactID)
-	requireNoSuppressedSlots(t, service, artifactID, "after the next settlement")
-	waitForPersistedProofText(t, service.store, artifactID, "before\n\nadded\n")
-	if repairs := pmdoc.BlockIDRepairCount(persistedProofTree(t, service.store, artifactID)); repairs != 0 {
-		t.Fatalf("the next settlement left %d unstamped blocks", repairs)
-	}
+	requireNextSettlementStamps(t, service, artifactID, "before\n\nadded\n")
 }
 
 // A room the service closes while a settlement's repair commits into it keeps that repair and a
@@ -641,12 +631,7 @@ func TestASecondWriterIntoARoomClosingUnderASettlementsRepairReturns(t *testing.
 		t.Fatalf("close = %v, second writer = %v", evictErr, writeErr)
 	}
 
-	settleCurrentGeneration(t, service, artifactID)
-	requireNoSuppressedSlots(t, service, artifactID, "after the next settlement")
-	waitForPersistedProofText(t, service.store, artifactID, "before, edited\n\nadded\n")
-	if repairs := pmdoc.BlockIDRepairCount(persistedProofTree(t, service.store, artifactID)); repairs != 0 {
-		t.Fatalf("the next settlement left %d unstamped blocks", repairs)
-	}
+	requireNextSettlementStamps(t, service, artifactID, "before, edited\n\nadded\n")
 }
 
 // owedStamp seeds the document, settles it, appends a block without an id through the room, and
@@ -668,6 +653,18 @@ func owedStamp(t *testing.T, service *Service, artifactID string) uint64 {
 	state.mu.Lock()
 	defer state.mu.Unlock()
 	return state.gen
+}
+
+// requireNextSettlementStamps runs the room's next settlement and requires it to leave no
+// suppression slot queued and to store want with every block stamped.
+func requireNextSettlementStamps(t *testing.T, service *Service, artifactID, want string) {
+	t.Helper()
+	settleCurrentGeneration(t, service, artifactID)
+	requireNoSuppressedSlots(t, service, artifactID, "after the next settlement")
+	waitForPersistedProofText(t, service.store, artifactID, want)
+	if repairs := pmdoc.BlockIDRepairCount(persistedProofTree(t, service.store, artifactID)); repairs != 0 {
+		t.Fatalf("the next settlement left %d unstamped blocks", repairs)
+	}
 }
 
 // settleUnderPause runs the room's settlement at generation and returns, with the channel the

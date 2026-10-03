@@ -343,7 +343,7 @@ func (s *Service) applySuppressed(ctx context.Context, room string, want *crdt.D
 		if !open {
 			return errRoomReplaced
 		}
-		defer s.srv.releaseOpen(gate)
+		defer s.srv.releaseOpen(room, gate)
 		if s.srv.GetDoc(room) != doc {
 			return errRoomReplaced
 		}
@@ -584,7 +584,7 @@ func New(deps Deps) *Service {
 	// (onLoadDocument), so that persistence never waits on the publish it is running in.
 	srv.RoomIdleTimeout = roomIdleTimeout
 
-	service.srv = &roomServer{Server: srv}
+	service.srv = newRoomServer(srv)
 	srv.Authorize = service.authorize
 	srv.OnTokenAuth = service.authorizeSchemaVersion
 	srv.OnInject = service.allowInject

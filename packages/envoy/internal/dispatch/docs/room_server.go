@@ -23,15 +23,31 @@ import (
 // close, so no cycle runs through the gate.
 type roomServer struct {
 	*websocket.Server
-	// gates holds, per room, the gate between a repair's commit into the room (holdOpen) and a
-	// close of it (CloseRoom).
-	gates sync.Map
+	// gatesMu guards gates and every gate's holders.
+	gatesMu sync.Mutex
+	// gates holds a room's closeGate only while a close or a repair holds it or waits for it: the
+	// last of them to let go removes it (releaseGate), so no gate outlives the work on its room.
+	gates map[string]*closeGate
+}
+
+// closeGate is a room's gate between the repairs committing into the room, which hold it shared,
+// and a close of the room, which holds it exclusively. holders counts the closes and repairs that
+// hold it or wait for it; each finds the gate already in gates when there is one, so any two of
+// them that overlap share it.
+type closeGate struct {
+	sync.RWMutex
+	holders int
+}
+
+func newRoomServer(server *websocket.Server) *roomServer {
+	return &roomServer{Server: server, gates: make(map[string]*closeGate)}
 }
 
 // CloseRoom closes room through ygo's CloseRoom once no repair is committing into it, holding
 // off every repair while it closes.
 func (r *roomServer) CloseRoom(room string, force bool) error {
-	gate := r.gate(room)
+	gate := r.acquireGate(room)
+	defer r.releaseGate(room, gate)
 	gate.Lock()
 	defer gate.Unlock()
 	return r.Server.CloseRoom(room, force)
@@ -39,22 +55,37 @@ func (r *roomServer) CloseRoom(room string, force bool) error {
 
 // holdOpen holds off every close of room while a repair commits into it, until releaseOpen. It
 // refuses, holding nothing, while a close is under way or waiting: a repair never waits for one.
-func (r *roomServer) holdOpen(room string) (*sync.RWMutex, bool) {
-	gate := r.gate(room)
+func (r *roomServer) holdOpen(room string) (*closeGate, bool) {
+	gate := r.acquireGate(room)
 	if !gate.TryRLock() {
+		r.releaseGate(room, gate)
 		return nil, false
 	}
 	return gate, true
 }
 
-func (r *roomServer) releaseOpen(gate *sync.RWMutex) {
+func (r *roomServer) releaseOpen(room string, gate *closeGate) {
 	gate.RUnlock()
+	r.releaseGate(room, gate)
 }
 
-func (r *roomServer) gate(room string) *sync.RWMutex {
-	if gate, ok := r.gates.Load(room); ok {
-		return gate.(*sync.RWMutex)
+func (r *roomServer) acquireGate(room string) *closeGate {
+	r.gatesMu.Lock()
+	defer r.gatesMu.Unlock()
+	gate := r.gates[room]
+	if gate == nil {
+		gate = &closeGate{}
+		r.gates[room] = gate
 	}
-	gate, _ := r.gates.LoadOrStore(room, &sync.RWMutex{})
-	return gate.(*sync.RWMutex)
+	gate.holders++
+	return gate
+}
+
+func (r *roomServer) releaseGate(room string, gate *closeGate) {
+	r.gatesMu.Lock()
+	defer r.gatesMu.Unlock()
+	gate.holders--
+	if gate.holders == 0 {
+		delete(r.gates, room)
+	}
 }
