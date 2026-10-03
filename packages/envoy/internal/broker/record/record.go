@@ -48,8 +48,9 @@ func ValidSlot(slot string) bool {
 	return slotPattern.MatchString(slot)
 }
 
-// CanonicalLogin lowercases and trims a GitHub login. Every login comparison in the module goes
-// through this form on both sides.
+// CanonicalLogin lowercases and trims the name Dispatch signs a person in with, their email (a
+// record created before people were named by email keeps the GitHub login it was decided under).
+// Every login comparison in the module goes through this form on both sides.
 func CanonicalLogin(login string) string {
 	return strings.ToLower(strings.TrimSpace(login))
 }

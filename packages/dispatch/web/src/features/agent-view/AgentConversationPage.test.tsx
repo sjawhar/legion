@@ -203,6 +203,33 @@ test("the live view attributes other people's messages to the session to their a
   ]);
 });
 
+// Stored times carry microseconds, so two messages written within one millisecond still have an
+// order, and the view keeps it whatever order the exchanges arrive in.
+test("the live view orders two stored messages in one millisecond by their microseconds", async () => {
+  renderLiveView({
+    agentState: {},
+    messages: [
+      {
+        message: message("m2", "Written second", { created_at: "2026-09-27T21:16:15.1208Z" }),
+        replies: [],
+      },
+      {
+        message: message("m1", "Written first", { created_at: "2026-09-27T21:16:15.1201Z" }),
+        replies: [],
+      },
+    ],
+    putAgentState: spyOn(api, "putAgentState").mockResolvedValue({ unread_replies: 0 }),
+  });
+
+  const thread = await screen.findByTestId("agent-thread");
+  await within(thread).findByText("Written second");
+  expect(
+    within(thread)
+      .getAllByTestId("agent-message-user")
+      .map((node) => node.textContent)
+  ).toEqual(["Written first", "Written second"]);
+});
+
 /** A user message the session streamed: the turn a person's Dispatch message became when
  *  `dispatchMessageId` names it, else one typed at the session's own terminal. */
 function userFrame(seq: number, at: number, text: string, dispatchMessageId?: string) {

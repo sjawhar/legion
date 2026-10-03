@@ -2,6 +2,7 @@ import { expect, test } from "@playwright/test";
 
 import {
   createAsk,
+  createComment,
   createIssue,
   createMessage,
   createProject,
@@ -20,6 +21,7 @@ import { asUser } from "./users";
 // the counterparty ("bob") is an autonomous session acting through the bearer API —
 // only alice's browser needs to be real, since that is what proves the live update.
 const bob = { actor: { kind: "session" as const, id: "bob" }, as: "agent" as const };
+const eventStreamUrl = /\/api\/v1\/events(\?|$)/;
 
 test.beforeEach(async () => {
   await resetDatabase();
@@ -345,7 +347,7 @@ test("live: a forced server disconnect reconnects from the last event id, not fr
   const page = await alice.newPage();
   const streamRequestUrls: string[] = [];
   page.on("request", (request) => {
-    if (/\/api\/v1\/events(\?|$)/.test(request.url())) {
+    if (eventStreamUrl.test(request.url())) {
       streamRequestUrls.push(request.url());
     }
   });
@@ -380,6 +382,64 @@ test("live: a forced server disconnect reconnects from the last event id, not fr
   await alice.close();
 });
 
+test("live: an event committed while the stream's first attempt fails shows once the retry opens", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "First attempt fails" });
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    const { promise: released, resolve: release } = Promise.withResolvers<void>();
+    // Until the document's Conversation read lands, every stream attempt it makes fails the way a
+    // network change aborts one, so its first attempt never opens; later attempts are held until
+    // the comment below is committed, so the retry's cold connect starts at a head past it. The
+    // state is per document, since a chunk download a network change aborts reloads the page.
+    let attemptFailed = false;
+    let readLanded = false;
+    page.on("request", (request) => {
+      if (request.isNavigationRequest() && request.frame() === page.mainFrame()) {
+        attemptFailed = false;
+        readLanded = false;
+      }
+    });
+    page.on("response", (response) => {
+      if (new URL(response.url()).pathname === `/api/v1/issues/${issue.key}/events`) {
+        readLanded = true;
+      }
+    });
+    await page.route(eventStreamUrl, async (route) => {
+      if (!readLanded) {
+        attemptFailed = true;
+        await route.abort("failed");
+        return;
+      }
+      await released;
+      await route.continue();
+    });
+
+    await page.goto(`/issues/${issue.key}/conversation`);
+    await expect.poll(() => attemptFailed && readLanded).toBe(true);
+    // Committed after the Conversation's read and before any stream is open: nothing the page has
+    // read or will be sent includes it.
+    const comment = await createComment(
+      issue.key,
+      { body: "Committed before the retry opened" },
+      bob
+    );
+    const opened = page.waitForResponse((response) => eventStreamUrl.test(response.url()));
+    release();
+    await opened;
+
+    await expect(page.locator(`[data-turn="comment:${comment.id}"]`)).toContainText(
+      "Committed before the retry opened"
+    );
+  } finally {
+    await alice.close();
+  }
+});
+
 test("live: a fresh page load opens the stream at the current head and stays within a bounded request budget", async ({
   browser,
 }, testInfo) => {
@@ -402,7 +462,7 @@ test("live: a fresh page load opens the stream at the current head and stays wit
   await page.goto(`/issues/${issue.key}/conversation`);
   await expect(page.getByText("Backlog message 4")).toBeVisible();
 
-  const streamRequest = apiRequestUrls.find((url) => /\/api\/v1\/events(\?|$)/.test(url));
+  const streamRequest = apiRequestUrls.find((url) => eventStreamUrl.test(url));
   expect(streamRequest).toBeDefined();
 
   // The very first connection ever omits since entirely — the server resolves
@@ -493,7 +553,7 @@ test("live: an event during a project list's first load beats the response that 
     const { promise: inFlight, resolve: reachedServer } = Promise.withResolvers<void>();
     const { promise: streaming, resolve: streamOpened } = Promise.withResolvers<void>();
     page.on("request", (request) => {
-      if (/\/api\/v1\/events(\?|$)/.test(request.url())) {
+      if (eventStreamUrl.test(request.url())) {
         streamOpened();
       }
     });
