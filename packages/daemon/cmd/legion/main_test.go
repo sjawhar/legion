@@ -377,6 +377,26 @@ func TestVersionNamesTheLinkedRevision(t *testing.T) {
 	}
 }
 
+// The legion release links its version and commit as release.yaml does
+// (`-ldflags "-X main.revision=<commit> -X main.release=v<version>"`), and the built binary's
+// `legion version` prints both: a variable renamed without the workflow would leave every
+// release binary printing the module version instead.
+func TestVersionPrintsTheReleaseTheLinkerSets(t *testing.T) {
+	const commit = "0123456789abcdef0123456789abcdef01234567"
+	binary := filepath.Join(t.TempDir(), "legion")
+	build := exec.Command("go", "build", "-ldflags", "-X main.revision="+commit+" -X main.release=v9.9.9", "-o", binary, ".")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("go build: %v\n%s", err, out)
+	}
+	out, err := exec.Command(binary, "version").Output()
+	if err != nil {
+		t.Fatalf("%s version: %v", binary, err)
+	}
+	if got, want := string(out), "legion v9.9.9 commit "+commit+"\n"; got != want {
+		t.Fatalf("legion version = %q, want %q", got, want)
+	}
+}
+
 // Both commands that read a configured bind dial it the same way: `legion state --config` on a
 // daemon bound to every interface reads loopback, as `legion status` does.
 func TestStateAddressDialsLoopbackForAWildcardBind(t *testing.T) {

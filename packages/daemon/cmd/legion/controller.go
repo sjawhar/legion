@@ -305,8 +305,10 @@ func removeDirs(created []string) {
 // fetchControllerSecret is `POST /legion/v1/controller/secret` with the operator token as a
 // bearer and the plugin's daemon API contract in the body, answering the capability and the
 // daemon's design gate policy. A failed request names the daemon URL and never tries another
-// address; a refusal quotes the daemon's `error`. An answer without a known policy is a daemon
-// from before the controller was told it, refused rather than guessed at.
+// address; a refusal quotes the daemon's `error`, except a daemon from before contract 12, which
+// refuses the contract field itself as unknown, so the refusal names the side to upgrade instead.
+// An answer without a known policy is a daemon from before the controller was told it, refused
+// rather than guessed at.
 func fetchControllerSecret(ctx context.Context, daemonURL, operatorToken string, contract int) (string, config.DesignGate, error) {
 	const route = "/legion/v1/controller/secret"
 	status, body, err := operator{base: daemonURL, bearer: operatorToken}.do(ctx, http.MethodPost, route, api.ControllerSecretRequest{PluginContract: contract})
@@ -314,6 +316,11 @@ func fetchControllerSecret(ctx context.Context, daemonURL, operatorToken string,
 		return "", "", fmt.Errorf("could not reach the Legion daemon at %s: %v; is the port-forward running? (never falls back to another address)", daemonURL, err)
 	}
 	if status/100 != 2 {
+		var refused legionclaim.Refusal
+		if status == http.StatusBadRequest && json.Unmarshal(body, &refused) == nil &&
+			strings.Contains(refused.Message, `unknown field "pluginContract"`) {
+			return "", "", fmt.Errorf("%s%s: the daemon speaks a daemon API contract older than 12, and this legion speaks %d; upgrade the daemon to this legion's release, or start the controller with the legion built with that daemon", daemonURL, route, contract)
+		}
 		hint := ""
 		if status == http.StatusForbidden {
 			hint = " — the operator token does not match the daemon's operator_token_file"

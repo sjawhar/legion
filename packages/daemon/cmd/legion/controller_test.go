@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -633,6 +634,37 @@ func TestControllerStartRefusedByTheDaemonWritesNothing(t *testing.T) {
 	c := newControllerStart(t, d, controllerOptions{tokenContents: "not-the-operator-token\n"})
 	code, _, errb := c.run()
 	want := d.url + "/legion/v1/controller/secret: the daemon answered 403 Forbidden: Invalid operator token — the operator token does not match the daemon's operator_token_file\n"
+	if code != 1 || !strings.HasSuffix(errb, want) {
+		t.Fatalf("legion controller start = %d, stderr %q; want 1 and a refusal ending %q", code, errb, want)
+	}
+	c.wantNothingLaunchedOrWritten(c.defaultDir)
+}
+
+// A daemon from before contract 12 decodes the secret request strictly into an empty body, so it
+// refuses the contract field with a 400 naming it as unknown. That refusal says which side to
+// upgrade instead of quoting the daemon, and nothing is launched or written.
+func TestControllerStartAgainstADaemonBeforeContract12NamesTheSideToUpgrade(t *testing.T) {
+	old := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The contract-11 daemon's controllerSecret: readBody into struct{}, unknown fields refused.
+		decoder := json.NewDecoder(r.Body)
+		decoder.DisallowUnknownFields()
+		var empty struct{}
+		if err := decoder.Decode(&empty); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "invalid request body: " + err.Error()})
+			return
+		}
+		t.Errorf("the contract-11 stand-in accepted %s %s", r.Method, r.URL.Path)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(old.Close)
+	c := newControllerStart(t, newControllerDaemon(t), controllerOptions{lines: []string{
+		"project: demo", "daemon_url: " + old.URL, "operator_token_file: ./operator-token",
+		"envoy_url: http://envoy.test:9020", "nats_urls: [nats://a:4222]",
+	}})
+	code, _, errb := c.run()
+	want := fmt.Sprintf("%s/legion/v1/controller/secret: the daemon speaks a daemon API contract older than 12, and this legion speaks %d; upgrade the daemon to this legion's release, or start the controller with the legion built with that daemon\n", old.URL, api.DaemonAPIVersion)
 	if code != 1 || !strings.HasSuffix(errb, want) {
 		t.Fatalf("legion controller start = %d, stderr %q; want 1 and a refusal ending %q", code, errb, want)
 	}
