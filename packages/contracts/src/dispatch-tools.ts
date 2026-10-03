@@ -903,7 +903,7 @@ export const dispatchToolSpecs = [
     description:
       "Attach a local file or inline text as an issue artifact or project document. Do not use it to edit a live document; use " +
       "dispatch_doc_edit instead. Exactly one of path or content is required; a markdown document is at most 1 MiB and any other file at most 25 MiB. " +
-      "Markdown is also refused with 413 CAP_EXCEEDED when it makes more than 65,536 elements (a block weighs 3, a table cell 4, a hard line break 3, inline syntax, marks and lines of text 1 each), or when a new version would leave the document heavier than that and heavier than before; shorten it or split it across documents. " +
+      "Markdown is also refused with 413 CAP_EXCEEDED when it makes more than 65,536 elements (a block weighs 3, a table cell 4, a hard line break 3, an autolink 2, inline syntax, marks and lines of text 1 each), or when a new version would leave the document's stored markdown (what its text reads back as) longer than 1 MiB or making more than 65,536 elements, and longer or heavier than before; shorten it or split it across documents. " +
       "Markdown holding an ask block whose body breaks its content rule (one or more question paragraphs, then at most one bullet list of options, last) is refused with 400 INVALID_ASK_BLOCK; a new version of a document is held to it only for the asks it writes or changes. " +
       `${OWNER_REFERENCE}`,
     arguments: (z) => ({

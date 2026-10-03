@@ -157,19 +157,24 @@
   an edit batch's inserts and replaces, the `find` of an edit and the quote of a comment or ask -
   may now make at most 65,536 elements (a block weighs 3, a table cell 4, a hard line break 3, an
   autolink 2, a piece of inline syntax, a mark or a line of text 1); past that a write is `413
-  CAP_EXCEEDED` naming the line, refused while goldmark parses, and a quote is matched by its text
+  CAP_EXCEEDED`, refused while goldmark parses, naming the line where the markdown passes the limit
+  or, where the parse stopped first, the line it stopped reading at; a quote is matched by its text
   alone. This repository's own markdown weighs 44 to 100 elements a kibibyte, so prose passes to
   the 1 MiB cap and a table-dense document to about 650 KiB.
-- A write may no longer grow a stored document past what one upload may hold, extending the 1 MiB
-  upload cap of #1670 to stored documents. Repeated inserts each within the limit grew one document
-  to 29.5 MB, and a few dozen thousand headings' worth left one the server could not load (500 on
-  the next write, 503 on every read). An upload, an edit batch or an accepted suggestion that leaves
-  the document weighing more than 65,536 elements and more than it did is `413 CAP_EXCEEDED`; one
-  that leaves it no heavier passes, so an over-limit document can still be trimmed or split. A
-  write is also refused when the live document it leaves would park more than 90,000 of the
-  100,000 items ygo waits on while it loads a document (any write that would leave it unloadable
-  at all is refused). Browser edits over the websocket are applied before any check and are not
-  bounded by this.
+- A write may no longer grow a stored document past what one upload may hold, measured as an
+  upload is measured. Thirty-two 900 KB inserts of prose, each within both limits, grew one document
+  to 29.5 MB, on which a one-word edit then held a gigabyte; and a few dozen thousand headings'
+  worth left one the server could not load (500 on the next write, 503 on every read). An upload,
+  an edit batch or an accepted suggestion is now weighed by the markdown it leaves the document
+  storing (what `GET .../text` answers), with an upload's own measures: it is `413 CAP_EXCEEDED`
+  when that is longer than 1 MiB and longer than the document's was, or makes more than 65,536
+  elements and more than the document's did, counted as an upload's parse counts them (front matter
+  apart). One that keeps or lowers both passes, so an over-limit document can still be trimmed or
+  split, and any document a write leaves can be uploaded again from its own text. A spec or new
+  document whose stored markdown is past either limit is refused the same way, as is a write that
+  would leave a live document parking more than 90,000 of the 100,000 items ygo waits on while it
+  loads one (any write that would leave it unloadable at all is refused). Browser edits over the
+  websocket are applied before any check and are not bounded by this (LEGION-487).
 
 - Saving a document, comment, ask, or message with a long run of underscore-joined characters
   no longer takes quadratic time in Postgres search indexing. `pmdoc` also avoids quadratic work
