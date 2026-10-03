@@ -32,7 +32,11 @@ var (
 	ErrServiceUnavailable = errors.New("document service unavailable")
 )
 
-const maxSettleFailures = 3
+const (
+	// DefaultSettleDelay is how long Dispatch waits after a live document change before settling it.
+	DefaultSettleDelay = 2 * time.Second
+	maxSettleFailures  = 3
+)
 
 const (
 	maxLiveRooms       = 1_000
@@ -508,7 +512,7 @@ func (s *Service) purgeSuppressedPersistence(room string) {
 func New(deps Deps) *Service {
 	settle := deps.Settle
 	if settle <= 0 {
-		settle = 2 * time.Second
+		settle = DefaultSettleDelay
 	}
 	markWait := deps.MarkWait
 	if markWait <= 0 {
