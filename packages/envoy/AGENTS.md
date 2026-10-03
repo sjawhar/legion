@@ -920,6 +920,12 @@ descendant through `blocked_by`. Artifact targets are addressed by
 `GET /api/v1/references?to=|from=` reads the view; `envoy-dispatch rebuild-refs` reparses every
 source and reconciles the index (the text is the truth), deleting edges whose source no longer
 exists, and refuses to run without `dispatch.server_url`.
+Dependency writes take the source, blocker targets, and current and proposed parents in one
+key-ordered lock set before traversal or mutation. Additional rows found by the bounded walk
+use non-waiting locks; contention, or a parent changed while acquiring the initial locks, is
+`409 DEPENDENCY_CONFLICT`, and the caller may retry. `blocked_by` inputs are limited to
+`contracts.MaxIssueBlockers` entries before deduplication on both create and PATCH; excess
+entries are `400 BLOCKED_BY_INPUT` naming the limit before any row lock is acquired.
 A mention's source is the node whose text holds it, never the issue that text belongs to: a
 citation in an issue's spec is an edge out of the spec document, so
 `GET /api/v1/references?from=dispatch://KEY/spec` lists it, `?from=dispatch://KEY` lists only the

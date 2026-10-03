@@ -163,6 +163,10 @@ const SearchQueryMax = 1000
 // from SEARCH_QUERY_HINT in packages/contracts so the server and the tool word it once.
 const SearchQueryHint = "search with a short phrase of a few words, not a passage"
 
+// MaxIssueBlockers bounds blocked_by input before deduplication. Generated from
+// MAX_ISSUE_BLOCKERS in packages/contracts so the server and tool schemas share the limit.
+const MaxIssueBlockers = 20
+
 // MaxIssuePageLimit is the most issues one page of GET /api/v1/issues holds, and
 // DefaultIssuePageLimit the page size when a caller pages with offset alone. Generated from
 // MAX_ISSUE_PAGE_LIMIT and DEFAULT_ISSUE_PAGE_LIMIT in packages/contracts so the server's bounds

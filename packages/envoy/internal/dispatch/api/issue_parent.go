@@ -10,6 +10,8 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/sjawhar/envoy/internal/contracts"
 )
 
 // parseIssueParent decodes the tri-state `parent` field of an issue PATCH. Absent →
@@ -42,33 +44,74 @@ const parentDepthCap = 32
 
 var parentDepthCapSQL = strconv.Itoa(parentDepthCap)
 
-// lockIssueAndParent locks the issue and its proposed parent `for no key update` in key order —
-// serializing the pairwise A→B / B→A reparent race (deadlock detection breaks a crossed
-// order) — then validates the reparent: the parent must exist (400 PARENT_INPUT), differ
-// from the issue, share its project (400 PARENT_INPUT), and not be a descendant of the
-// issue (409 PARENT_INPUT naming the cycle path). A concurrent reparent of an unlocked
-// ancestor can still race the walk; the depth-capped reads keep terminating regardless.
-func lockIssueAndParent(ctx context.Context, tx pgx.Tx, key, parent string) error {
+func normalizeIssueBlockers(targets []string) ([]string, error) {
+	if len(targets) > contracts.MaxIssueBlockers {
+		return nil, countExceededError("BLOCKED_BY_INPUT", "blocked_by", len(targets), contracts.MaxIssueBlockers)
+	}
+	slices.Sort(targets)
+	return slices.Compact(targets), nil
+}
+
+// lockIssueLinkRows takes the source, all targets, and both parents in one key order before
+// any mutation or traversal. A create's source is not visible yet, so it locks the existing
+// targets before inserting that private row. The current parent is also an event owner.
+func lockIssueLinkRows(ctx context.Context, tx pgx.Tx, key, parent string, targets []string) error {
+	keys := make([]string, 0, len(targets)+2)
+	keys = append(keys, key)
+	keys = append(keys, targets...)
+	if parent != "" {
+		keys = append(keys, parent)
+	}
+	rows, err := tx.Query(ctx, `
+		select key, case when key = $1 then parent_key end
+		from issues
+		where key = any($2::text[])
+		   or key = (select parent_key from issues where key = $1)
+		order by key for no key update
+	`, key, keys)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	locked := make([]string, 0, len(keys)+1)
+	var currentParent *string
+	for rows.Next() {
+		var lockedKey string
+		var rowParent *string
+		if err := rows.Scan(&lockedKey, &rowParent); err != nil {
+			return err
+		}
+		locked = append(locked, lockedKey)
+		if lockedKey == key {
+			currentParent = rowParent
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	// A source changed while this statement waited for its lock: the old snapshot may not
+	// have selected the parent its updated row names. Retry rather than lock it out of order.
+	if currentParent != nil && !slices.Contains(locked, *currentParent) {
+		return errorf(http.StatusConflict, "DEPENDENCY_CONFLICT", "issue parent changed concurrently; retry the request")
+	}
+	return nil
+}
+
+// validateIssueParent checks the proposed parent after lockIssueLinkRows has locked both rows.
+// A concurrent change to a more distant ancestor can still race the bounded ancestor walk.
+func validateIssueParent(ctx context.Context, tx pgx.Tx, key, project, parent string) error {
 	if parent == key {
 		return errorf(http.StatusBadRequest, "PARENT_INPUT", "an issue cannot be its own parent")
 	}
-	first, second := key, parent
-	if parent < key {
-		first, second = parent, key
+	var parentProject string
+	err := tx.QueryRow(ctx, `select project_key from issues where key = $1`, parent).Scan(&parentProject)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return errorf(http.StatusBadRequest, "PARENT_INPUT", "parent issue %s not found", parent)
 	}
-	projects := map[string]string{}
-	for _, lockKey := range []string{first, second} {
-		var project string
-		err := tx.QueryRow(ctx, `select project_key from issues where key = $1 for no key update`, lockKey).Scan(&project)
-		if errors.Is(err, pgx.ErrNoRows) && lockKey == parent {
-			return errorf(http.StatusBadRequest, "PARENT_INPUT", "parent issue %s not found", parent)
-		}
-		if err != nil {
-			return err
-		}
-		projects[lockKey] = project
+	if err != nil {
+		return err
 	}
-	if projects[parent] != projects[key] {
+	if parentProject != project {
 		return errorf(http.StatusBadRequest, "PARENT_INPUT", "parent must be in the same project")
 	}
 	rows, err := tx.Query(ctx, `
@@ -119,15 +162,12 @@ func assertParentLeavesNoDependencyCycle(ctx context.Context, tx pgx.Tx, child, 
 	return assertNoWaitPath(ctx, tx, []waitNode{{key: parent}}, waitNode{key: child})
 }
 
-// writeBlockedBy replaces issue's dependency targets after locking each target in key order.
-// Every target must stay in the issue's project; the dependency walk rejects a target through
-// which issue would wait on itself before the replacement reaches the graph.
+// writeBlockedBy replaces the normalized targets whose rows lockIssueLinkRows already locked.
+// Every target must be in the issue's project, and no target may make the issue wait on itself.
 func writeBlockedBy(ctx context.Context, tx pgx.Tx, issue, project string, targets []string) error {
-	slices.Sort(targets)
-	targets = slices.Compact(targets)
 	for _, target := range targets {
 		var targetProject string
-		err := tx.QueryRow(ctx, `select project_key from issues where key = $1 for no key update`, target).Scan(&targetProject)
+		err := tx.QueryRow(ctx, `select project_key from issues where key = $1`, target).Scan(&targetProject)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return errorf(http.StatusBadRequest, "BLOCKED_BY_INPUT", "blocked_by issue %s not found", target)
 		}
@@ -158,9 +198,9 @@ func writeBlockedBy(ctx context.Context, tx pgx.Tx, issue, project string, targe
 	return err
 }
 
-// assertNoWaitPath refuses a new wait whose head reaches its tail. It locks each frontier's issue
-// rows for no key update in key order before reading their links, as lockIssueAndParent does, and
-// stops at parentDepthCap without taking a project-wide lock.
+// assertNoWaitPath refuses a new wait whose head reaches its tail, stopping at parentDepthCap.
+// Rows beyond the initial lock set are locked without waiting: a competing graph write may own
+// an earlier key, so contention must ask for a retry rather than invert the initial lock order.
 func assertNoWaitPath(ctx context.Context, tx pgx.Tx, from []waitNode, goal waitNode) error {
 	seen := map[waitNode]bool{}
 	frontier := from
@@ -192,7 +232,11 @@ func assertNoWaitPath(ctx context.Context, tx pgx.Tx, from []waitNode, goal wait
 		}
 		slices.Sort(keys)
 		keys = slices.Compact(keys)
-		if _, err := tx.Exec(ctx, `select key from issues where key = any($1) order by key for no key update`, keys); err != nil {
+		if _, err := tx.Exec(ctx, `select key from issues where key = any($1) order by key for no key update nowait`, keys); err != nil {
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && pgErr.Code == "55P03" {
+				return errorf(http.StatusConflict, "DEPENDENCY_CONFLICT", "dependency graph is being updated concurrently; retry the request")
+			}
 			return err
 		}
 		rows, err := tx.Query(ctx, `

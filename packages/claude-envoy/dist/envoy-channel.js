@@ -36238,6 +36238,7 @@ function serviceSubjectLabel(subject) {
   }
   return subject;
 }
+var MAX_ISSUE_BLOCKERS = 20;
 var MAX_ISSUE_PAGE_LIMIT = 250;
 var DEFAULT_ISSUE_PAGE_LIMIT = 50;
 var ASK_TURNS = ["human", "agent"];
@@ -36671,7 +36672,7 @@ var dispatchToolSpecs = [
       project: z2.string().describe("Project key for the new issue."),
       title: z2.string().describe("Concise issue title."),
       parent: z2.string().describe("Optional parent issue.").optional(),
-      blocked_by: z2.array(z2.string({ min: 1 }), { max: 20 }).describe("Issue keys in the same project this issue waits on. Dispatch refuses a dependency cycle.").optional(),
+      blocked_by: z2.array(z2.string({ min: 1 }), { max: MAX_ISSUE_BLOCKERS }).describe("Issue keys in the same project this issue waits on. Dispatch refuses a dependency cycle.").optional(),
       external: z2.string().describe("Optional external issue reference.").optional(),
       force: z2.boolean().describe("Create even though POSSIBLE_DUPLICATE listed similar issues; pass it only after reading them.").optional(),
       spec: z2.string().describe(`Optional initial primary-document markdown. ${SPEC_WRITING_POINTER}`).optional(),
@@ -36699,7 +36700,7 @@ var dispatchToolSpecs = [
       external_links: z2.array(z2.string({ min: 1 })).describe("URLs to link; merged into the issue's existing external links by URL.").optional(),
       route: z2.string().describe("Route the issue to role:<name> or session:<id>; an empty string clears it.").optional(),
       parent: z2.string().describe("Parent issue key in the same project; an empty string clears the parent.").optional(),
-      blocked_by: z2.array(z2.string({ min: 1 }), { max: 20 }).describe("Replacement list of issue keys in the same project this issue waits on; [] clears it. Dispatch refuses a dependency cycle.").optional(),
+      blocked_by: z2.array(z2.string({ min: 1 }), { max: MAX_ISSUE_BLOCKERS }).describe("Replacement list of issue keys in the same project this issue waits on; [] clears it. Dispatch refuses a dependency cycle.").optional(),
       components: componentsArgument(z2).optional()
     }),
     validation: {

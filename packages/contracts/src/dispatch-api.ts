@@ -283,6 +283,9 @@ export interface IssueSummary
   readonly open_asks: number;
 }
 
+/** Maximum entries in an issue's blocked_by input, before duplicate keys are removed. */
+export const MAX_ISSUE_BLOCKERS = 20;
+
 /**
  * The most issues one page of `GET /api/v1/issues` holds: `limit` is 1 to this. Generated into Go
  * as `contracts.MaxIssuePageLimit`, which the server enforces, and the `dispatch_issues` tool's

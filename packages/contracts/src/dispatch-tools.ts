@@ -1,4 +1,8 @@
-import { DEFAULT_ISSUE_PAGE_LIMIT, MAX_ISSUE_PAGE_LIMIT } from "./dispatch-api";
+import {
+  DEFAULT_ISSUE_PAGE_LIMIT,
+  MAX_ISSUE_BLOCKERS,
+  MAX_ISSUE_PAGE_LIMIT,
+} from "./dispatch-api";
 import type { SchemaApi, SchemaNode, ToolArgumentsShape } from "./tool-schema";
 
 export interface DispatchToolSpec {
@@ -240,7 +244,7 @@ export const dispatchToolSpecs = [
       title: z.string().describe("Concise issue title."),
       parent: z.string().describe("Optional parent issue.").optional(),
       blocked_by: z
-        .array(z.string({ min: 1 }), { max: 20 })
+        .array(z.string({ min: 1 }), { max: MAX_ISSUE_BLOCKERS })
         .describe(
           "Issue keys in the same project this issue waits on. Dispatch refuses a dependency cycle."
         )
@@ -335,7 +339,7 @@ export const dispatchToolSpecs = [
         .describe("Parent issue key in the same project; an empty string clears the parent.")
         .optional(),
       blocked_by: z
-        .array(z.string({ min: 1 }), { max: 20 })
+        .array(z.string({ min: 1 }), { max: MAX_ISSUE_BLOCKERS })
         .describe(
           "Replacement list of issue keys in the same project this issue waits on; [] clears it. Dispatch refuses a dependency cycle."
         )

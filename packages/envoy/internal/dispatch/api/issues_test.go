@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -1175,7 +1176,7 @@ func TestIssueBlockedByRoundTrip(t *testing.T) {
 // or any issue wait on itself. One sibling may wait on another, and blockers never cross a
 // Dispatch project boundary.
 func TestIssueBlockedByRefusesDependencyCycles(t *testing.T) {
-	handler := newTestHandler(t)
+	handler, _, _ := newTestServer(t, testServerOptions{settle: time.Hour})
 	for _, project := range []string{"CORE", "SIDE"} {
 		if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
 			"key": project, "name": project,
@@ -1228,4 +1229,194 @@ func TestIssueBlockedByRefusesDependencyCycles(t *testing.T) {
 	expectRefusal("foreign-project blocker", dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]any{
 		"project": "CORE", "title": "Cross-project dependency", "blocked_by": []string{foreign.Key},
 	}, "alice"), http.StatusBadRequest, "BLOCKED_BY_OUTSIDE_PROJECT")
+}
+
+func TestIssueBlockedByConcurrentWritesDoNotDeadlock(t *testing.T) {
+	for _, scenario := range []string{"reciprocal blockers", "blocker and reparent", "old parent and reparent"} {
+		t.Run(scenario, func(t *testing.T) {
+			handler, database, _ := newTestServer(t, testServerOptions{settle: time.Hour})
+			if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
+				"key": "CORE", "name": "Core",
+			}, "alice"); response.Code != http.StatusCreated {
+				t.Fatalf("create project: %d %s", response.Code, response.Body.String())
+			}
+			create := func(title string, parent *string) string {
+				t.Helper()
+				response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]any{
+					"project": "CORE", "title": title, "force": true, "parent": parent,
+				}, "alice")
+				if response.Code != http.StatusCreated {
+					t.Fatalf("create issue: %d %s", response.Code, response.Body.String())
+				}
+				return decodeBody[model.Issue](t, response).Key
+			}
+			for round := range 8 {
+				first := create(fmt.Sprintf("First %d", round), nil)
+				second := create(fmt.Sprintf("Second %d", round), nil)
+				gateKey := first
+				firstKey, secondKey := first, second
+				firstBody := map[string]any{"blocked_by": []string{second}}
+				secondBody := map[string]any{"blocked_by": []string{first}}
+				wantConflicts := 1
+				switch scenario {
+				case "blocker and reparent":
+					firstBody = map[string]any{"parent": second}
+				case "old parent and reparent":
+					child := create(fmt.Sprintf("Child %d", round), &first)
+					gateKey, firstKey, secondKey = child, child, first
+					firstBody = map[string]any{"parent": second}
+					secondBody = map[string]any{"blocked_by": []string{child}}
+					wantConflicts = 0
+				}
+				gate, err := database.Pool.Begin(context.Background())
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = gate.Rollback(context.Background()) })
+				if _, err := gate.Exec(context.Background(), `select key from issues where key = $1 for no key update`, gateKey); err != nil {
+					t.Fatal(err)
+				}
+				responses := make(chan *httptest.ResponseRecorder, 2)
+				go func() {
+					responses <- dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+firstKey, firstBody, "alice")
+				}()
+				waitForDatabaseLocks(t, gate, 1)
+				go func() {
+					responses <- dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+secondKey, secondBody, "alice")
+				}()
+				waitForDatabaseLocks(t, gate, 2)
+				if err := gate.Commit(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+				successes, conflicts := 0, 0
+				for range 2 {
+					response := awaitResponse(t, responses)
+					switch response.Code {
+					case http.StatusOK:
+						successes++
+					case http.StatusConflict:
+						refusal := decodeBody[struct {
+							Code string `json:"code"`
+						}](t, response)
+						if refusal.Code != "DEPENDENCY_CYCLE" {
+							t.Fatalf("round %d: refusal = %s, want DEPENDENCY_CYCLE", round, response.Body.String())
+						}
+						conflicts++
+					default:
+						t.Errorf("round %d: %d %s", round, response.Code, response.Body.String())
+					}
+				}
+				if successes != 2-wantConflicts || conflicts != wantConflicts {
+					t.Fatalf("round %d: successes=%d conflicts=%d, want %d and %d",
+						round, successes, conflicts, 2-wantConflicts, wantConflicts)
+				}
+			}
+		})
+	}
+}
+
+func TestIssueBlockedByCountLimitOnCreateAndPatch(t *testing.T) {
+	handler := newTestHandler(t)
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
+		"key": "CORE", "name": "Core",
+	}, "alice"); response.Code != http.StatusCreated {
+		t.Fatalf("create project: %d %s", response.Code, response.Body.String())
+	}
+	var blockers []string
+	for index := range 21 {
+		response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]any{
+			"project": "CORE", "title": fmt.Sprintf("Blocker %d", index), "force": true,
+		}, "alice")
+		if response.Code != http.StatusCreated {
+			t.Fatalf("create blocker: %d %s", response.Code, response.Body.String())
+		}
+		blockers = append(blockers, decodeBody[model.Issue](t, response).Key)
+	}
+	atCap := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]any{
+		"project": "CORE", "title": "Dependent at cap", "blocked_by": blockers[:20],
+	}, "alice")
+	if atCap.Code != http.StatusCreated {
+		t.Fatalf("create at cap: %d %s", atCap.Code, atCap.Body.String())
+	}
+	dependent := decodeBody[model.Issue](t, atCap)
+	for _, method := range []string{http.MethodPost, http.MethodPatch} {
+		t.Run(method, func(t *testing.T) {
+			path := "/api/v1/issues"
+			body := map[string]any{"project": "CORE", "title": "Too many blockers", "blocked_by": blockers, "force": true}
+			if method == http.MethodPatch {
+				path += "/" + dependent.Key
+				body = map[string]any{"blocked_by": blockers}
+			}
+			response := dispatchRequest(t, handler, method, path, body, "alice")
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("over cap: %d %s, want 400", response.Code, response.Body.String())
+			}
+			refusal := decodeBody[struct {
+				Code  string `json:"code"`
+				Error string `json:"error"`
+			}](t, response)
+			if refusal.Code != "BLOCKED_BY_INPUT" || !strings.Contains(refusal.Error, "20") || !strings.Contains(refusal.Error, "blocked_by") {
+				t.Fatalf("over-cap refusal must name blocked_by and its limit: %+v", refusal)
+			}
+		})
+	}
+	read := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+dependent.Key, nil, "alice")
+	if read.Code != http.StatusOK {
+		t.Fatalf("read after refusal: %d %s", read.Code, read.Body.String())
+	}
+	if got := decodeBody[model.Issue](t, read).BlockedBy; !slices.Equal(got, dependent.BlockedBy) {
+		t.Fatalf("refused replacement changed blockers: %v, want %v", got, dependent.BlockedBy)
+	}
+}
+
+func TestIssueBlockedByIndirectLockConflictIsRetryable(t *testing.T) {
+	handler, database, _ := newTestServer(t, testServerOptions{settle: time.Hour})
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
+		"key": "CORE", "name": "Core",
+	}, "alice"); response.Code != http.StatusCreated {
+		t.Fatalf("create project: %d %s", response.Code, response.Body.String())
+	}
+	var keys []string
+	for index := range 3 {
+		response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]any{
+			"project": "CORE", "title": fmt.Sprintf("Node %d", index), "force": true,
+		}, "alice")
+		if response.Code != http.StatusCreated {
+			t.Fatalf("create node: %d %s", response.Code, response.Body.String())
+		}
+		keys = append(keys, decodeBody[model.Issue](t, response).Key)
+	}
+	if response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+keys[1], map[string]any{
+		"blocked_by": []string{keys[2]},
+	}, "alice"); response.Code != http.StatusOK {
+		t.Fatalf("seed dependency: %d %s", response.Code, response.Body.String())
+	}
+	gate, err := database.Pool.Begin(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer gate.Rollback(context.Background())
+	if _, err := gate.Exec(context.Background(), `select key from issues where key = $1 for no key update`, keys[2]); err != nil {
+		t.Fatal(err)
+	}
+	responses := make(chan *httptest.ResponseRecorder, 1)
+	body := map[string]any{"blocked_by": []string{keys[1]}}
+	go func() {
+		responses <- dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+keys[0], body, "alice")
+	}()
+	response := awaitResponse(t, responses)
+	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), `"code":"DEPENDENCY_CONFLICT"`) {
+		t.Fatalf("busy indirect target: %d %s, want retryable 409", response.Code, response.Body.String())
+	}
+	if err := gate.Rollback(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	read := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+keys[0], nil, "alice")
+	if read.Code != http.StatusOK || len(decodeBody[model.Issue](t, read).BlockedBy) != 0 {
+		t.Fatalf("refused write must roll back: %d %s", read.Code, read.Body.String())
+	}
+	retried := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+keys[0], body, "alice")
+	if retried.Code != http.StatusOK || !slices.Equal(decodeBody[model.Issue](t, retried).BlockedBy, []string{keys[1]}) {
+		t.Fatalf("retry after lock release: %d %s", retried.Code, retried.Body.String())
+	}
 }

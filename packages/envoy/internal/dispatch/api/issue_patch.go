@@ -36,6 +36,15 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	var blockers []string
+	if input.BlockedBy != nil {
+		var err error
+		blockers, err = normalizeIssueBlockers(*input.BlockedBy)
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+	}
 	if input.Title != nil && strings.TrimSpace(*input.Title) == "" {
 		writeError(w, "INVALID_ISSUE", http.StatusBadRequest, "title must not be blank")
 		return
@@ -108,12 +117,11 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if parentProvided && parent != nil {
-		if err := lockIssueAndParent(r.Context(), tx, key, *parent); err != nil {
-			s.writeHandlerError(w, err)
-			return
-		}
-	} else if err := tx.QueryRow(r.Context(), `select key from issues where key = $1 for no key update`, key).Scan(new(string)); err != nil {
+	parentKey := ""
+	if parent != nil {
+		parentKey = *parent
+	}
+	if err := lockIssueLinkRows(r.Context(), tx, key, parentKey, blockers); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -121,6 +129,12 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
+	}
+	if parentProvided && parent != nil {
+		if err := validateIssueParent(r.Context(), tx, key, before.Project, *parent); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
 	}
 	if before.ClosedAt != nil {
 		// A closed issue takes only its rank (board order) and its component attachment
@@ -212,7 +226,7 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if input.BlockedBy != nil {
-		if err := writeBlockedBy(r.Context(), tx, key, before.Project, *input.BlockedBy); err != nil {
+		if err := writeBlockedBy(r.Context(), tx, key, before.Project, blockers); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
