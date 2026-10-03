@@ -250,9 +250,9 @@
   which it does only after the store returns, and the worker's exit compaction waited for the
   room's lock, which the settlement held. Until the server restarted the document did not settle
   and none of its later updates were stored, since every update a document stores takes that lock.
-  The store now discards the repair's own update without waiting once its room has left the
-  server, and the settlement fails the room so it reloads; the room worker's compaction skips a
-  room whose lock is held, except when it evicts a failed room. The same slot wait held
+  Every close of the room the server makes now waits for the repair to reach the room's
+  persistence (LEGION-498, below), and the room worker's compaction skips a room whose lock is
+  held, except when it evicts a failed room. The same slot wait held
   `envoy-dispatch backfill-block-ids` for good at a document whose room closed under its stamp.
 - A document whose room failed while a settlement wrote a repair into it (a block id it stamps, an
   ask block's attributes it restores) no longer stays failed until the server restarts, with every
@@ -263,7 +263,10 @@
   published edit, hung the same way, each write's store waiting on the other's. The server's own
   closes of a room (a failed room's eviction, an issue's close, a shutdown's close of a room with
   an editor) now wait until a repair being written into the room has reached its persistence, and
-  a repair that meets a close under way writes nothing, as one whose room was replaced does.
+  a repair that meets a close under way writes nothing, as one whose room was replaced does. An
+  edit that reached the room's persistence just ahead of a settlement's repair is no longer dropped
+  in the repair's place when the settlement discards the repair because the issue closed or the
+  server began stopping.
 - Saving a document, comment, ask, or message with a long run of underscore-joined characters
   no longer takes quadratic time in Postgres search indexing. `pmdoc` also avoids quadratic work
   in Goldmark's email and delimiter scans and in renderer closer scans. A document that exceeds

@@ -238,11 +238,9 @@ type suppressSlot struct {
 	canceled  bool
 	discarded bool
 	consumed  bool
-	// committedTo and committed are the document a repair's transaction committed into and the
-	// update it committed (recordSuppressedCommit), set before ygo hands that update to the room's
-	// persistence.
-	committedTo *crdt.Doc
-	committed   []byte
+	// committed is the update a repair's transaction committed (recordSuppressedCommit), set before
+	// ygo hands that update to the room's persistence.
+	committed []byte
 }
 
 // identityClosureOrigin identifies a server-owned repair transaction - settlement's, or the
@@ -251,14 +249,13 @@ type suppressSlot struct {
 // by interface equality.
 type identityClosureOrigin struct{ slot *suppressSlot }
 
-// recordSuppressedCommit records on slot the update its repair transaction committed and the
-// document it committed it into. The room's update observer runs it (onLoadDocument) on the
-// committing goroutine before ygo's own persistence observer, which the room registers after
-// OnLoadDocument, so the slot holds both before either path to the store is handed the update.
-func (s *Service) recordSuppressedCommit(slot *suppressSlot, doc *crdt.Doc, update []byte) {
+// recordSuppressedCommit records on slot the update its repair transaction committed. The room's
+// update observer runs it (onLoadDocument) on the committing goroutine before ygo's own
+// persistence observer, which the room registers after OnLoadDocument, so the slot holds the
+// update before the room's persistence is handed it.
+func (s *Service) recordSuppressedCommit(slot *suppressSlot, update []byte) {
 	s.suppressMu.Lock()
 	defer s.suppressMu.Unlock()
-	slot.committedTo = doc
 	slot.committed = append([]byte(nil), update...)
 }
 
@@ -301,8 +298,7 @@ func (s *Service) applyCaptured(ctx context.Context, room string, origin any, mu
 // errRoomReplaced is a repair refused because the room no longer holds the document its caller
 // read - the room was evicted, its last browser having left or a CloseRoom having closed it, and
 // the write would load a replacement from the store - or because a close of the room is under way
-// (roomServer), or given up because the room left the server while the repair's transaction
-// committed into it.
+// (roomServer).
 var errRoomReplaced = errors.New("document room was replaced")
 
 // applySuppressed writes one repair - settlement's, or the block-id backfill's - into room's live
@@ -323,15 +319,10 @@ var errRoomReplaced = errors.New("document room was replaced")
 // written into a replacement the room loaded since would be versioned from want, which never got
 // it. It is written only into the document the room holds while no close of the room is under
 // way, and it holds off those closes until its transaction's update is in the room's persistence
-// (roomServer). A refused repair writes nothing and returns errRoomReplaced. A close made around
-// the gated CloseRoom can still retire the room under the repair's transaction: the commit's
-// update then reaches the store's adapter on this goroutine, which consumeSuppressedPersistence
-// answers by discarding it, so a repair whose room is gone once it has written returns its slot
-// with errRoomReplaced, and its caller fails the room as for any write it gives up.
+// (roomServer). A refused repair writes nothing and returns errRoomReplaced.
 func (s *Service) applySuppressed(ctx context.Context, room string, want *crdt.Doc, mutate func(doc *crdt.Doc, origin any) (bool, error)) (*suppressSlot, []byte, error) {
 	slot := s.prepareSuppressedPersistence(room)
 	origin := &identityClosureOrigin{slot: slot}
-	var written *crdt.Doc
 	wrote := false
 	updates, err := s.applyCaptured(ctx, room, origin, func(doc *crdt.Doc) error {
 		if want != nil && doc != want {
@@ -347,7 +338,6 @@ func (s *Service) applySuppressed(ctx context.Context, room string, want *crdt.D
 		if s.srv.GetDoc(room) != doc {
 			return errRoomReplaced
 		}
-		written = doc
 		var mutateErr error
 		wrote, mutateErr = mutate(doc, origin)
 		return mutateErr
@@ -362,9 +352,6 @@ func (s *Service) applySuppressed(ctx context.Context, room string, want *crdt.D
 	if err == nil && !wrote {
 		s.finishSuppressedPersistence(slot, updates[0])
 		return nil, nil, nil
-	}
-	if err == nil && s.srv.GetDoc(room) != written {
-		err = errRoomReplaced
 	}
 	return slot, updates[0], err
 }
@@ -414,31 +401,7 @@ func (s *Service) consumeSuppressedPersistence(room string, update []byte) bool 
 		}
 		slot := slots[0]
 		ready := slot.ready
-		committedTo := slot.committedTo
-		own := committedTo != nil && bytes.Equal(slot.committed, update)
 		s.suppressMu.Unlock()
-
-		// A repair's update committed into a room whose persistence worker has retired reaches
-		// this adapter on the repair's own goroutine, inside its commit (ygo's persistStranded),
-		// and a room retires only once it has left the server. The service's closes wait for the
-		// commit (roomServer); a close made around them does not. Waiting there for the slot,
-		// which that goroutine finishes or discards once its commit returns, would never end. The
-		// repair finds its room gone and gives the write up (applySuppressed), so its update is
-		// discarded here instead.
-		if own && s.srv.GetDoc(room) != committedTo {
-			s.suppressMu.Lock()
-			if current := s.suppressed[room]; len(current) > 0 && current[0] == slot && !slot.consumed {
-				if !slot.canceled && slot.update == nil {
-					slot.canceled = true
-					close(slot.ready)
-				}
-				s.consumeHeadSlotLocked(room)
-				s.suppressMu.Unlock()
-				return true
-			}
-			s.suppressMu.Unlock()
-			continue
-		}
 
 		<-ready
 

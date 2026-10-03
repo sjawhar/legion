@@ -470,64 +470,6 @@ func TestSettlementThatStampsAndRepairsReleasesItsSlots(t *testing.T) {
 	}
 }
 
-// A repair whose room retires under its transaction - ygo's own CloseRoom, which retires the room
-// whether or not a Server.Apply holds it, where the service's CloseRoom waits for the repair
-// (roomServer) - commits into a room whose persistence worker is gone. ygo then
-// hands the commit's update to the store on the repair's own goroutine, inside the commit
-// (persistStranded), where nothing but that goroutine could release the repair's suppression slot.
-// The update is discarded there instead, and the repair, finding its room gone, gives the write
-// up and fails the room, so the next settlement or backfill stamps the document (LEGION-479).
-func TestASettlementWhoseRoomRetiresUnderItsStampReturns(t *testing.T) {
-	service, artifactID := newTestService(t)
-	service.settle = time.Hour
-	pause := pauseRepairCommits(service)
-	generation := owedStamp(t, service, artifactID)
-
-	retireRoomUnderRepair(t, service, pause, artifactID, func() { service.settleRoom(artifactID, generation) })
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if err := service.awaitRoomRecovery(ctx, artifactID); err != nil {
-		t.Fatalf("wait for the room to recover: %v", err)
-	}
-	requireNextSettlementStamps(t, service, artifactID, "before\n\nadded\n")
-}
-
-// The same retirement under the block-id backfill's stamp.
-func TestABackfillWhoseRoomRetiresUnderItsStampReturns(t *testing.T) {
-	database := storetest.Open(t)
-	artifactID := createDocument(t, database, "before")
-	seedUnidentifiedProofDocument(t, database, artifactID, "before")
-	service := New(Deps{Store: database, Events: events.NewBroker(), Settle: time.Hour})
-	t.Cleanup(func() {
-		if err := service.Shutdown(context.Background()); err != nil {
-			t.Errorf("shutdown document service: %v", err)
-		}
-	})
-	pause := pauseRepairCommits(service)
-
-	var reports []BlockIDBackfill
-	var backfillErr error
-	retireRoomUnderRepair(t, service, pause, artifactID, func() {
-		reports, backfillErr = service.BackfillBlockIDs(context.Background())
-	})
-	if backfillErr != nil {
-		t.Fatalf("backfill documents: %v", backfillErr)
-	}
-	if len(reports) != 1 || !errors.Is(reports[0].Err, errRoomReplaced) {
-		t.Fatalf("backfill reports = %#v, want the one document's stamp given up with its room", reports)
-	}
-
-	reports, backfillErr = service.BackfillBlockIDs(context.Background())
-	if backfillErr != nil || len(reports) != 1 || reports[0].Err != nil || reports[0].Stamped != 1 {
-		t.Fatalf("second backfill = %#v, %v, want the document stamped", reports, backfillErr)
-	}
-	requireNoSuppressedSlots(t, service, artifactID, "after the second backfill")
-	if repairs := pmdoc.BlockIDRepairCount(persistedProofTree(t, database, artifactID)); repairs != 0 {
-		t.Fatalf("the second backfill persisted %d unstamped blocks", repairs)
-	}
-}
-
 // A room that fails while a settlement's repair commits into it - an append of the room fails, or
 // another write gives up - recovers, and its readers' wait for that recovery ends. A failed room's
 // eviction compacts under the document's advisory lock, which the settlement holds until it
@@ -772,46 +714,6 @@ func pauseRepairCommits(service *Service) *repairCommitPause {
 
 func (pause *repairCommitPause) let() {
 	pause.release.Do(func() { close(pause.proceed) })
-}
-
-// retireRoomUnderRepair runs repair, closes the room while repair's first commit into it is held,
-// lets the commit go on, and requires repair to return.
-func retireRoomUnderRepair(t *testing.T, service *Service, pause *repairCommitPause, artifactID string, repair func()) {
-	t.Helper()
-	t.Cleanup(pause.let)
-	pause.armed.Store(true)
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		repair()
-	}()
-	select {
-	case <-pause.held:
-	case <-done:
-		t.Fatal("the repair returned without committing into the room")
-	case <-time.After(10 * time.Second):
-		t.Fatal("the repair never committed into the room")
-	}
-	// ygo's own CloseRoom, made around the service's, which does not wait for the repair. The
-	// close returns once the room's persistence worker has exited, which includes its compaction.
-	closed := make(chan error, 1)
-	go func() { closed <- service.srv.Server.CloseRoom(artifactID, true) }()
-	select {
-	case err := <-closed:
-		if err != nil {
-			t.Fatalf("close the room: %v", err)
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("deadlock: the room's persistence worker never exited while the repair held the room's lock")
-	}
-	pause.let()
-	select {
-	case <-done:
-	case <-time.After(10 * time.Second):
-		// Release the repair so the test's shutdown can finish.
-		service.purgeSuppressedPersistence(artifactID)
-		t.Fatal("deadlock: the repair never returned once its room's persistence worker retired under its commit")
-	}
 }
 
 // answerBlockAsk answers the document's one indexed ask in its row alone, so the block disagrees

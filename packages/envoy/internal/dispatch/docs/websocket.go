@@ -450,7 +450,7 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 			s.finishSuppressedPersistence(published.slot, update)
 		}
 		if repair, identityRepair := origin.(*identityClosureOrigin); identityRepair {
-			s.recordSuppressedCommit(repair.slot, doc, update)
+			s.recordSuppressedCommit(repair.slot, update)
 			return
 		}
 		replica.mu.Lock()
