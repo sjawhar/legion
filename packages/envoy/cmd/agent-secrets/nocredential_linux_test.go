@@ -66,7 +66,7 @@ func TestRegisterWaitReturnsAtOnceWithoutALauncherCredential(t *testing.T) {
 	if err != nil || strings.TrimSpace(string(out)) != "ran" {
 		t.Fatalf("the command must still run: %q %v (stderr %q)", out, err, stderr.String())
 	}
-	const warning = "agent-secrets register: this machine is not logged in to the secrets broker; launching anyway, and until it is (run: agent-secrets launcher login) this session's agent-secrets calls fail and secret-run uses secretsd\n"
+	const warning = "agent-secrets register: this machine is not logged in to the secrets broker; launching anyway, and until it is (run: agent-secrets launcher login) this session's agent-secrets calls fail\n"
 	if stderr.String() != warning {
 		t.Fatalf("stderr %q, want the no-credential warning %q", stderr.String(), warning)
 	}
