@@ -123,20 +123,22 @@ the person's own included, still get the secrets at once.
 
 The broker reads the namespace when it starts, and refuses to start when it cannot, then again every
 five minutes, a fixed time rather than a setting (`policyRefresh` in
-`packages/envoy/cmd/broker/main.go`). A write is served at once: the CLI asks the broker to reread
-each secret it writes (`POST /v1/secrets/{name}/reread`), and a request naming a secret the broker
-does not serve yet makes it reread that one name before refusing it (up to ten such rereads at once
-per session, refilled one every ten seconds: `DefaultMissRereads` in
-`packages/envoy/internal/broker/requests/machine_state.go`), so a secret created a moment ago is
-served on its first request. A reread reads the one secret from Secrets Manager
-(`DescribeSecret`, which shows a write at once) and serves it, or stops serving it, as it finds it;
-a read of the whole namespace in the five minutes after reads that secret again alone, so a listing
-that has not caught up never undoes it (`Current.Refresh` in
-`packages/envoy/internal/broker/policy/current.go`). A change nothing rereads, such as a tag edited
-in the AWS console, takes effect within about ten minutes: at the next read of the namespace, or
-the one after, since Secrets Manager's listing can lag a change by up to five minutes. A read that
-fails (Secrets Manager or KMS out of reach) is logged, and the policy from the last good read stays
-in force. The broker leaves out a secret it cannot serve, and logs it by name on every read
+`packages/envoy/cmd/broker/main.go`). A change is served at once when something asks the broker to
+reread it: `POST /v1/secrets/{name}/reread`, which any caller may send right after writing a
+secret, and a request naming a secret the broker does not serve yet, which makes it reread that one
+name before refusing it (up to ten such rereads at once per session, refilled one every ten
+seconds: `DefaultMissRereads` in `packages/envoy/internal/broker/requests/machine_state.go`), so a
+secret created a moment ago is served on its first request. A reread reads the one secret from
+Secrets Manager (`DescribeSecret`, which shows a write at once) and serves it, or stops serving it,
+as it finds it; a read of the whole namespace in the five minutes after reads that secret again
+alone, so a listing that has not caught up never undoes it (`Current.Refresh` in
+`packages/envoy/internal/broker/policy/current.go`). A reread that finds no secret under a name
+the broker was not serving changed nothing, and is not read again. A change nothing rereads, such
+as a tag edited in the AWS console, takes effect within about ten minutes: at the next read of the
+namespace, or the one after, since Secrets Manager's listing can lag a change by up to five
+minutes. A read that fails (Secrets Manager or KMS out of reach) is logged, and the policy from the
+last good read stays in force. The broker leaves out a secret it cannot serve, and logs it by name
+on every read
 ([Operating the broker](/legion/broker/operate/#health-and-logs)): a missing or malformed `owner`
 or `tier` tag (an email with a capital letter is malformed), a name that is not in the form above,
 a secret encrypted with any key but the agent-secrets key, the AWS-managed key included, or a

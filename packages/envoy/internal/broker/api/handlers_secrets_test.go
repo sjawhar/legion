@@ -113,3 +113,26 @@ func TestRereadIsRateLimitedAcrossEveryAddress(t *testing.T) {
 		t.Fatalf("third address: %d Retry-After=%q %s, want 429 RATE_LIMITED with Retry-After 3600 past the broker-wide burst", status, headers.Get("Retry-After"), body)
 	}
 }
+
+// TestOneAddressFloodingItsLimitLeavesOthersTheirRereads pins the order the two buckets are taken
+// in: a reread its own address's bucket refuses spends nothing of the broker-wide one, so one
+// address flooding past its own limit does not refuse another address's first reread.
+func TestOneAddressFloodingItsLimitLeavesOthersTheirRereads(t *testing.T) {
+	ts := newTestServerWith(t, func(d *api.Deps) {
+		d.RereadLimit = &ratelimit.Limit{Every: time.Hour, Burst: 1}
+		d.RereadOverallLimit = &ratelimit.Limit{Every: time.Hour, Burst: 2}
+		d.TrustedProxyHeader = "X-Forwarded-For"
+	})
+	flooder := map[string]string{"X-Forwarded-For": "198.51.100.1"}
+	if status, _, body := postReread(t, ts, "WORKER_TOKEN", flooder); status != http.StatusOK {
+		t.Fatalf("flooder's first reread: %d %s", status, body)
+	}
+	for i := range 5 {
+		if status, headers, body := postReread(t, ts, "WORKER_TOKEN", flooder); status != http.StatusTooManyRequests || headers.Get("Retry-After") != "3600" {
+			t.Fatalf("flooder's reread %d: %d Retry-After=%q %s, want 429 from its own bucket", i+2, status, headers.Get("Retry-After"), body)
+		}
+	}
+	if status, _, body := postReread(t, ts, "WORKER_TOKEN", map[string]string{"X-Forwarded-For": "198.51.100.2"}); status != http.StatusOK {
+		t.Fatalf("another address's first reread after the flood: %d %s, want 200", status, body)
+	}
+}

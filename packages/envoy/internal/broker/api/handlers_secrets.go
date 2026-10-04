@@ -45,8 +45,8 @@ type rereadResponse struct {
 	Reason string `json:"reason,omitempty"`
 }
 
-// rereadSecret is POST /v1/secrets/{name}/reread: public and rate-limited per source address
-// (refuseReread) before any work, it reads the one secret from Secrets Manager now
+// rereadSecret is POST /v1/secrets/{name}/reread: public and rate-limited per source address and
+// broker-wide (refuseReread) before any work, it reads the one secret from Secrets Manager now
 // (policy.Current.RefreshOne) and answers whether the broker serves it.
 func (s *server) rereadSecret(w http.ResponseWriter, r *http.Request) {
 	if s.refuseReread(w, r) {

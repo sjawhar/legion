@@ -1887,10 +1887,12 @@ reads one name with `DescribeSecret` under the same rules and the same refusal l
 their read to their store, and each full reload that begins (its clock read before its listing is
 fetched) within five minutes of a name's reread (`listLag`, how far AWS documents `ListSecrets` may
 lag) reads that name again alone, so a lagging listing neither drops a secret the reread served nor
-brings back one it found gone. The public `POST /v1/secrets/{name}/reread` (`rereadSecret`, which
-the CLI calls after every write) is `RefreshOne` over HTTP, answering `{name, served, reason}`, and
-the public `GET /v1/settings` answers the prefix, the key ARN and its region and account
-(`policy.KeyARNParts`).
+brings back one it found gone. `RefreshOne` keeps no record of an absent answer for a name the live
+set did not serve: that changed nothing, and anyone can ask for a reread, so invented names would
+otherwise each cost every reload a `DescribeSecret` under the lock. The public
+`POST /v1/secrets/{name}/reread` (`rereadSecret`, which any caller may send right after a write) is
+`RefreshOne` over HTTP, answering `{name, served, reason}`, and the public `GET /v1/settings`
+answers the prefix, the key ARN and its region and account (`policy.KeyARNParts`).
 
 The client finds its session in `AGENT_SECRETS_KEY_DIR` (a box's or pod's `key.pem` and
 `enrollment`) or `AGENT_SECRETS_HELPER_SOCK` (a host session's helper), beside `AGENT_SECRETS_URL`.
@@ -2059,10 +2061,10 @@ answer while authenticating is a 503 naming it. Every 500 is logged with its cau
 non-UUID path ids are 400 naming the kind (`pathUUID`), a content-addressed record id is checked
 against its own lowercase-hex-sha256 shape rather than a UUID's (`pathRecordID`), the
 unauthenticated `POST /v1/secrets/{name}/reread` is rate limited both per source address and over
-every caller at once (`DefaultRereadLimit` and `DefaultRereadOverallLimit`, the broker-wide bucket
-taken first since each reread holds the policy's writer lock for one `DescribeSecret`, so a flood
-spread over addresses cannot hold up a reload; `429 RATE_LIMITED` with the refusing limit's
-`Retry-After`), and the
+every caller at once (`DefaultRereadLimit` and `DefaultRereadOverallLimit`, since each reread holds
+the policy's writer lock for one `DescribeSecret`, so a flood spread over addresses cannot hold up a
+reload; the per-address bucket is taken first, so one address flooding past its own limit spends
+none of the shared one; `429 RATE_LIMITED` with the refusing limit's `Retry-After`), and the
 unauthenticated `POST /v1/launcher-credentials` is rate limited per source address (see
 `BROKER_TRUSTED_PROXY_HEADER` above) and per named operator — the per-operator bucket keys on the
 request body's own `operator` field, so an attacker naming a specific victim operator repeatedly

@@ -66,11 +66,12 @@ and also while a variable it no longer reads is still set.
   Dispatch's server and nothing else, and never to an agent.
 - Behind a reverse proxy, set `BROKER_TRUSTED_PROXY_HEADER` so the machine-login and secret-reread
   rate limiters see each caller's address rather than the proxy's.
-- Two routes take no credential. `GET /v1/settings` answers the namespace prefix, the agent-secrets
-  key's ARN, and that key's AWS account and region. `POST /v1/secrets/{name}/reread` makes the
-  broker read one secret from Secrets Manager at once, and answers whether it now serves it and, if
-  not, why. Neither releases a value: a reread tells its caller what an enrolled session already
-  learns from `UNKNOWN_SECRET`, and what anyone allowed to list the namespace reads from its tags.
+- The settings and reread routes take no credential. `GET /v1/settings` answers the namespace
+  prefix, the agent-secrets key's ARN, and that key's AWS account and region.
+  `POST /v1/secrets/{name}/reread` makes the broker read one secret from Secrets Manager at once,
+  and answers whether it now serves it and, if not, why. Neither releases a value: a reread tells
+  its caller what an enrolled session already learns from `UNKNOWN_SECRET`, and what anyone allowed
+  to list the namespace reads from its tags.
   Rereads are limited twice, by fixed limits rather than settings (`DefaultRereadLimit` and
   `DefaultRereadOverallLimit` in `packages/envoy/internal/broker/api/limits.go`): each source
   address gets a burst of 30, refilled one every 2 seconds, and the broker as a whole takes 4 a
