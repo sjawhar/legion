@@ -120,6 +120,21 @@ the bucket" has its rules and the task role's grant. `/healthz` reports the buck
 and never fails on it. The bucket and its policies live in the deployment repository
 (LEGION-520).
 
+An artifact has one of three owners (migration `0070`, `artifacts_one_owner`): an issue, a
+project, or an agent's conversation (`session_id` alone, `ref_key` `agent/<session id>/<slug>`,
+addressed `dispatch://agent/<session id>/artifact/<slug>[@vN]`; `text.IsSessionID` is the one
+rule a session id is held to, by the grammar and by `api/agent_artifacts.go`'s routes, which
+answer anything else `400 INVALID_SESSION_ID`). `ref_key` is filled by the `artifacts_ref_key`
+trigger, never by application code, and a lookup by owner compares `artifactOwnerKey`, the
+trigger's own owner expression. An agent's conversation holds files and images only: a markdown
+document uploaded to it is `400 ARTIFACT_INPUT`, since a live document needs an event owner and
+every event belongs to an issue, a document or a project. For the same reason its upload appends
+no event and its uploads serialise on a transaction advisory lock keyed by the session rather
+than an owner row, and `documentOwnerFromRequest` answers its file `400 ARTIFACT_AGENT_OWNED`, so
+no comment, ask, event read or subscriber reaches one through `/api/v1/artifacts/{id}/...`.
+`serveFileVersion` serves every file and image version, whoever owns it, with
+`Cache-Control: private, max-age=31536000, immutable`; a document version carries none.
+
 Each document room has two shared Yjs types: the authoritative
 `Y.XmlFragment("prosemirror")` tree and `Y.Map("marks")`, the server-maintained
 projection of Postgres comment, ask, and suggestion records. Go renders canonical
@@ -368,7 +383,7 @@ the table says human only.
 | `/api/v1/artifacts/{id}/text` | GET | user or bearer | Read a live document's markdown. `{id}` must be a UUID. A stored tree outside the Proof schema is `409 DOC_SCHEMA`, which `/blocks`, `POST /edits` and `POST /versions` answer alike with one message; a stored history that cannot load is `409 DOCUMENT_UNLOADABLE`, which `POST /api/v1/artifacts/{id}/rebuild` repairs. |
 | `/api/v1/artifacts/{id}/blocks` | GET | user or bearer | A document's blocks with markdown ranges, tokens, and reference counts; a table counts its cells' anchors. |
 | `/api/v1/artifacts/{id}/blocks/{block_id}` | GET | user or bearer | Where one block stands in a document: its path from the top-level block down (type, id, child index), and for a table block, row or cell the table's id, the row index (0 is the header), the cell's column index, the text of the header cell drawn above it (colspans and rowspans placed) and the row's cells; `404 TARGET_NOT_FOUND` for an id the live document does not hold. |
-| `/api/v1/artifacts/{id}/versions/{n}` | GET | user or bearer | Read a document version or download a blob. `{id}` must be a UUID. A file whose bytes are in the bucket is `502 FILE_STORE_UNAVAILABLE` when the bucket does not answer, `503` on a server with no bucket configured. |
+| `/api/v1/artifacts/{id}/versions/{n}` | GET | user or bearer | Read a document version or download a blob. `{id}` must be a UUID. A file whose bytes are in the bucket is `502 FILE_STORE_UNAVAILABLE` when the bucket does not answer, `503` on a server with no bucket configured. A file or image version carries `Cache-Control: private, max-age=31536000, immutable`; a document version, and every error, carries none. |
 | `/api/v1/artifacts/{id}/versions` | POST | user or bearer | Create a named live-document version. `{id}` must be a UUID. |
 | `/api/v1/artifacts/{id}/edits` | POST | user or bearer | Apply document edit operations. `{id}` must be a UUID. An edit is `400 INVALID_ASK_BLOCK` when an ask it writes or changes breaks its content rule (`paragraph+ bullet_list?`) or holds what settlement cannot read; an ask it carries through unchanged is not its to refuse. A batch whose markdown makes more than 65,536 elements, or that would leave the document's markdown (what `.../text` answers) longer than 1 MiB and longer than it was, or making more than 65,536 elements and more than it did, or a live state ygo could not decode as one update, is `413 CAP_EXCEEDED` with the refusal itself as the error, and writes nothing. A change a concurrent browser deletion removes before the version is rendered is `409 EDIT_LOST_TO_CONCURRENT_CHANGE` and writes nothing; one removed after it answers `200` with `lost_ops`. |
 | `/api/v1/artifacts/{id}/approval-requests` | POST | user or bearer | Ask a human to approve a document's latest settled version. The question is `Approve <name> (version <N>)?` followed by the optional `summary` (blank is `400 SUMMARY_INPUT`; past the ask cap at the longest version a request can reach, ten digits, is `400 CAP_EXCEEDED` naming `summary`). One open approval row follows every document version in place, rewording its question and emitting `ask.edited`; while its `requested_version` is below the new version it waits on the agent. Only the first move since the request was opened or handed back notifies, even when a thread reply had already left it waiting on the agent; a later move, while `requested_version` is already below the version it named, is `quiet: true`, `notify: false`, and reaches no follower. Calling this route again while the row waits on the agent - moved, or a thread reply newer than its last hand-back holds the turn - hands it back to the human: a summary that changes its question rewords it first (`ask.edited`; an omitted summary keeps its prior one), then `requested_version` becomes the latest version and `ask.handed_back` is emitted, leaving `edited_at` as it was. While the row waits on the human, the same summary or none is a repeat that answers `200` with no event, and a different one is `409 APPROVAL_WAITS_ON_HUMAN` and changes nothing, since it would rewrite the card the human is reading. It answers `201` when it wrote anything, with the document's `approval` as the call left it (`waiting_on` while awaiting). |
@@ -386,6 +401,9 @@ the table says human only.
 | `/api/v1/projects/{key}/artifacts/{slug}/versions/{n}` | GET | user or bearer | Read an unlinked project document version or download its blob, as `/api/v1/artifacts/{id}/versions/{n}` does. |
 | `/api/v1/projects/{key}/artifacts/{slug}/versions` | POST | user or bearer | Create a named project-document version. |
 | `/api/v1/projects/{key}/artifacts/{slug}/edits` | POST | user or bearer | Apply project-document edit operations. A change a concurrent browser deletion removes before the version is rendered is `409 EDIT_LOST_TO_CONCURRENT_CHANGE` and writes nothing; one removed after it answers `200` with `lost_ops`. |
+| `/api/v1/agents/{session_id}/artifacts` | GET, POST | user or bearer | List the files and images an agent's conversation owns, newest first, or upload one (multipart, an issue upload's caps, errors and file-store write; no event). A markdown document is `400 ARTIFACT_INPUT`: an agent's conversation holds files and images, and a document belongs to an issue or a project. Such a file's comments, asks, events and subscribers under `/api/v1/artifacts/{id}/...` are `400 ARTIFACT_AGENT_OWNED`. A `session_id` `text.IsSessionID` refuses is `400 INVALID_SESSION_ID` on every agent artifact route. |
+| `/api/v1/agents/{session_id}/artifacts/{slug}` | GET | user or bearer | Read an agent's conversation's file or image and its versions by slug. |
+| `/api/v1/agents/{session_id}/artifacts/{slug}/versions/{n}` | GET | user or bearer | Download one version of it, as `/api/v1/artifacts/{id}/versions/{n}` does. |
 | `/api/v1/me/state` | GET | identity | Read the user's issue UI state. |
 | `/api/v1/me/issues/{key}/state` | PUT | identity | Update the user's issue UI state. |
 | `/api/v1/me/agents/state` | GET | identity | Read the user's per-agent conversation state: `{[session_id]: {cleared_before?, read_through?, unread_replies}}`, where `unread_replies` counts the session's replies to the user's direct messages newer than both the Clear and the read mark and not read by id. |

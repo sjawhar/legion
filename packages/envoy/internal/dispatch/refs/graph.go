@@ -270,7 +270,7 @@ func loadArtifactNodes(ctx context.Context, q Queryer, byRefKey bool, ids []stri
 		predicate = `ref_key = any($1)`
 	}
 	rows, err := q.Query(ctx, `
-		select id::text, ref_key, issue_key, project_key, slug, name, kind, is_primary
+		select id::text, ref_key, issue_key, coalesce(project_key, ''), session_id, slug, name, kind, is_primary
 		from artifacts where `+predicate, ids)
 	if err != nil {
 		return fmt.Errorf("load artifact nodes: %w", err)
@@ -278,9 +278,9 @@ func loadArtifactNodes(ctx context.Context, q Queryer, byRefKey bool, ids []stri
 	defer rows.Close()
 	for rows.Next() {
 		var id, refKey, project, slug, name, kind string
-		var issueKey *string
+		var issueKey, session *string
 		var primary bool
-		if err := rows.Scan(&id, &refKey, &issueKey, &project, &slug, &name, &kind, &primary); err != nil {
+		if err := rows.Scan(&id, &refKey, &issueKey, &project, &session, &slug, &name, &kind, &primary); err != nil {
 			return fmt.Errorf("scan artifact node: %w", err)
 		}
 		lookup := id
@@ -288,7 +288,7 @@ func loadArtifactNodes(ctx context.Context, q Queryer, byRefKey bool, ids []stri
 			lookup = refKey
 		}
 		nodes[[2]string{"artifact", lookup}] = resolvedNode{
-			GraphNode: model.GraphNode{Kind: "artifact", ID: id, IssueKey: issueKey, Project: project, Ref: artifactRef(issueKey, project, slug, kind, primary)},
+			GraphNode: model.GraphNode{Kind: "artifact", ID: id, IssueKey: issueKey, Project: project, Ref: artifactRef(issueKey, project, session, slug, kind, primary)},
 			text:      name,
 			refKey:    refKey,
 		}
@@ -375,9 +375,12 @@ func loadComponentNodes(ctx context.Context, q Queryer, ids []string, nodes map[
 }
 
 // artifactRef is the address the dashboard copies for a document: an issue's primary document
-// is its spec, another issue artifact sits under artifact/<slug>, and a project document under
-// its project.
-func artifactRef(issueKey *string, project, slug, kind string, primary bool) string {
+// is its spec, another issue artifact sits under artifact/<slug>, a project document under
+// its project, and an agent's conversation's file under agent/<session id>.
+func artifactRef(issueKey *string, project string, session *string, slug, kind string, primary bool) string {
+	if session != nil {
+		return "dispatch://agent/" + *session + "/artifact/" + slug
+	}
 	if issueKey == nil {
 		return "dispatch://" + project + "/artifact/" + slug
 	}

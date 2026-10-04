@@ -415,11 +415,14 @@ type ArchitectureTreeRetired struct {
 	IDs    []string `json:"ids"`
 }
 
-// Artifact is an issue-attached document or binary blob, or an unlinked project document.
+// Artifact is an issue-attached document or binary blob, an unlinked project document, or a
+// file an agent's conversation owns (SessionID set; IssueKey nil and Project empty, its RefKey
+// `agent/<session id>/<slug>`).
 type Artifact struct {
 	ID        string    `json:"id"`
 	IssueKey  *string   `json:"issue_key"`
 	Project   string    `json:"project"`
+	SessionID *string   `json:"session_id"`
 	RefKey    string    `json:"ref_key"`
 	Slug      string    `json:"slug"`
 	Name      string    `json:"name"`

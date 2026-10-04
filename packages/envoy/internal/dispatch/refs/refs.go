@@ -302,7 +302,7 @@ func ReferencedBy(ctx context.Context, q Queryer, refKey string) ([]model.Refere
 func Outgoing(ctx context.Context, q Queryer, artifactID string) ([]model.OutgoingReference, error) {
 	rows, err := q.Query(ctx, `
 		select e.to_kind, e.to_id,
-		       a.id::text, a.issue_key, coalesce(a.project_key, ''), coalesce(a.ref_key, ''), coalesce(a.slug, ''), coalesce(a.name, ''), coalesce(a.kind, ''), coalesce(a.is_primary, false),
+		       a.id::text, a.issue_key, coalesce(a.project_key, ''), a.session_id, coalesce(a.ref_key, ''), coalesce(a.slug, ''), coalesce(a.name, ''), coalesce(a.kind, ''), coalesce(a.is_primary, false),
 		       coalesce(a.created_by, '{}'::jsonb), coalesce(a.created_at, timestamptz 'epoch'),
 		       coalesce(v.number, 0), coalesce(v.named, false), v.summary, coalesce(v.authors, '[]'::jsonb), coalesce(v.created_at, timestamptz 'epoch'), v.size, v.mime, v.sha256
 		from graph_edges e
@@ -330,6 +330,7 @@ func Outgoing(ctx context.Context, q Queryer, artifactID string) ([]model.Outgoi
 			&artifactIDValue,
 			&artifact.IssueKey,
 			&artifact.Project,
+			&artifact.SessionID,
 			&artifact.RefKey,
 			&artifact.Slug,
 			&artifact.Name,
