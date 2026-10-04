@@ -84,6 +84,7 @@ import {
   legionRoleClaimBridge,
   type RoleRegainReason,
 } from "../src/legion/role-claim-bridge";
+import { deviceTool, opensAsk } from "../src/opens-ask";
 import type {
   PiApi,
   SessionContext,
@@ -238,10 +239,9 @@ const ASK_SELF_CHECK_TIMEOUT_MS = 60_000;
 const ASK_CHECKS_PER_PERIOD = 5;
 
 const UNASKED_WAIT_REMINDER =
-  "You just said you are waiting on a human for something no open ask in Dispatch covers. Open an ask for it now with dispatch_ask, naming exactly what you need and from whom.";
-
-/** Tools whose success means the agent opened the ask itself, so the nudge has nothing to say. */
-const ASK_OPENING_TOOLS: readonly string[] = ["dispatch_ask", "dispatch_request_approval"];
+  "You just said you are waiting on a human for something no open ask in Dispatch covers. " +
+  "Open it now: a decision block in the document it concerns (dispatch_doc_edit with an ask block), or " +
+  "dispatch_ask for a to-do only a human can do, naming exactly what you need and from whom.";
 
 /** Name prefix of every native Dispatch tool: talking to the humans, not the work itself. */
 const DISPATCH_TOOL_PREFIX = "dispatch_";
@@ -1866,14 +1866,19 @@ export default function envoyExtension(pi: PiApi): void {
       askAwareness.session_id === context.sessionManager.getSessionId() &&
       askAwareness.period > 0
     ) {
-      if (ASK_OPENING_TOOLS.includes(event.toolName)) {
+      // A tool-device `write` (to `xd://<tool>`) opens no ask and counts as work by the tool it
+      // names. A device backed by a registered tool reports that tool first, under its own name,
+      // input and details, which is the report that opens an ask; Oh My Pi's own devices
+      // (`resolve`, `report_issue`, …) report only the `write`, and a help write runs nothing.
+      const tool = deviceTool(event) ?? event.toolName;
+      if (opensAsk(event)) {
         // The agent asked the humans itself, so this stop has nothing left for the nudge to
         // say: it spends the check the period owed rather than ending the period, and aborts a
         // check in flight before its verdict can be used. Later real work can re-arm a fresh
         // check, whose prompt names the ask.
         askAwareness = { ...askAwareness, check_due: false };
         abortSelfCheck("the agent opened the ask itself");
-      } else if (!event.toolName.startsWith(DISPATCH_TOOL_PREFIX)) {
+      } else if (!tool.startsWith(DISPATCH_TOOL_PREFIX)) {
         // Real work: it owes the period another check, the way finishing a step re-arms the
         // host's todo reminder. A Dispatch write is the agent talking to the humans this nudge
         // is about, not work, so it owes nothing — and a turn that only replies calls no tool

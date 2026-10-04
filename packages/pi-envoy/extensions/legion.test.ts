@@ -1236,18 +1236,16 @@ describe("Legion OMP extension", () => {
     for (const role of ["architect", "reviewer", "merger"] as const) {
       const { toolCall, context } = await bootPane({ role, sessionId: `ses_${role}_xd` });
 
-      // A tool-device invocation (write to an `xd://` path) is a tool call, not a file
-      // mutation, and must pass for every gated role.
-      await expect(
-        toolCall(
-          {
-            toolName: "write",
-            toolCallId: `call-${role}-xd-ok`,
-            input: { path: "xd://dispatch_ask", content: "{}" },
-          },
-          context
-        )
-      ).resolves.toBeUndefined();
+      // A tool-device invocation (write to an `xd://` path, the scheme in any case, as Oh My Pi
+      // routes it) is a tool call, not a file mutation, and must pass for every gated role.
+      for (const path of ["xd://dispatch_ask", "XD://dispatch_doc_edit"]) {
+        await expect(
+          toolCall(
+            { toolName: "write", toolCallId: `call-${role}-xd-ok`, input: { path, content: "{}" } },
+            context
+          )
+        ).resolves.toBeUndefined();
+      }
 
       // A real filesystem write is still blocked.
       await expect(
@@ -3598,20 +3596,20 @@ describe("a Legion session's title", () => {
   });
 
   test("a controller titles its lowercased project token with the canonical project spelling", async () => {
-    // `legion controller start` gives the plugin LEGION_PROJECT=agentc from controller.yaml's
-    // project: AGENTC; Dispatch and Envoy must show the project as AGENTC.
+    // `legion controller start` gives the plugin LEGION_PROJECT=acme from controller.yaml's
+    // project: ACME; Dispatch and Envoy must show the project as ACME.
     const controller = await launchedController({
-      sessionId: "ses_agentc_controller_title",
-      project: "agentc",
+      sessionId: "ses_acme_controller_title",
+      project: "acme",
     });
     await controller.handlers.get("session_start")?.(
       {},
-      controller.context("ses_agentc_controller_title")
+      controller.context("ses_acme_controller_title")
     );
 
-    expect(controller.title.set).toEqual(["Legion controller · AGENTC"]);
+    expect(controller.title.set).toEqual(["Legion controller · ACME"]);
     expect(registrationBeforeClaim(controller.requests, controller.token)).toMatchObject({
-      title: "Legion controller · AGENTC",
+      title: "Legion controller · ACME",
     });
   });
 

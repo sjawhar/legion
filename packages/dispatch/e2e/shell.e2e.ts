@@ -27,7 +27,7 @@ test("a transient whoami failure shows a retry banner and keeps the app, not the
 
   await expect(page.getByText("Couldn't reach Dispatch.")).toBeVisible();
   await expect(page.getByRole("button", { name: "Retry" })).toBeVisible();
-  await expect(page.getByRole("link", { name: "Sign in with GitHub" })).toHaveCount(0);
+  await expect(page.getByRole("link", { name: "Sign in with Google" })).toHaveCount(0);
 
   await page.unroute("**/auth/whoami");
   await page.getByRole("button", { name: "Retry" }).click();
@@ -62,7 +62,7 @@ test("signing out revokes the session on the server and returns to the sign-in p
   expect((await whoami()).status).toBe(200);
 
   await page.getByRole("button", { name: "Sign out" }).click();
-  await expect(page.getByRole("link", { name: "Sign in with GitHub" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Sign in with Google" })).toBeVisible();
 
   // /auth/logout clears the browser's cookie, which alone would make the next whoami 401. The
   // check that cannot pass for that reason: a copy of the cookie the browser held, replayed after

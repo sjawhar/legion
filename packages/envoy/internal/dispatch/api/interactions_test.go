@@ -15,7 +15,6 @@ import (
 
 	"github.com/reearth/ygo/crdt"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
-	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
@@ -28,14 +27,13 @@ func newInteractionHandler(t *testing.T, makeDocs func(*store.Store) docs.API) (
 	if makeDocs != nil {
 		docsAPI = makeDocs(database)
 	}
-	allowed := map[string]struct{}{"alice": {}, "bob": {}}
+	seedPeople(t, database, "alice", "bob")
 	deps, err := NewDeps(DepsInput{
-		Store:         database,
-		Identity:      identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: allowed},
-		AllowedLogins: allowed,
-		AgentToken:    "agent-token",
-		Docs:          docsAPI,
-		ServerURL:     "https://dispatch.example",
+		Store:       database,
+		Identity:    headerIdentity(database),
+		AgentTokens: sharedAgentTokens(t, "agent-token"),
+		Docs:        docsAPI,
+		ServerURL:   "https://dispatch.example",
 	})
 	if err != nil {
 		t.Fatalf("new API dependencies: %v", err)
@@ -43,6 +41,25 @@ func newInteractionHandler(t *testing.T, makeDocs func(*store.Store) docs.API) (
 	mux := http.NewServeMux()
 	Register(mux, deps)
 	return mux, database
+}
+
+// replaceDocumentText replaces a document's text as an upload of a new version does: inside a
+// transaction joined with Docs.Join, the only way a document write runs, committed when the
+// replacement succeeds. It returns ReplaceText's own error, which tests assert on.
+func replaceDocumentText(database *store.Store, documentService docs.API, artifactID, markdown string, actor model.Actor) (string, error) {
+	ctx := context.Background()
+	tx, err := database.Pool.Begin(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback(ctx)
+	joined, ledger := documentService.Join(ctx, tx)
+	defer ledger.Discard()
+	canonical, err := documentService.ReplaceText(joined, artifactID, markdown, actor)
+	if err != nil {
+		return "", err
+	}
+	return canonical, ledger.Commit(ctx)
 }
 
 func sessionRequest(t *testing.T, handler http.Handler, method, target string, body any) *httptest.ResponseRecorder {
@@ -591,7 +608,7 @@ func TestAskAnswerAcceptsFreeTextAloneOrWithSelection(t *testing.T) {
 
 func TestAnchorsCaptureAnUnnamedVersionWhenLiveTextChanged(t *testing.T) {
 	var documentService *docs.Service
-	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
+	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})
 		t.Cleanup(func() {
 			if err := documentService.Shutdown(context.Background()); err != nil {
@@ -601,7 +618,7 @@ func TestAnchorsCaptureAnUnnamedVersionWhenLiveTextChanged(t *testing.T) {
 		return documentService
 	})
 	issue := createInteractionIssue(t, handler, "TEST", "Dirty document", "The quick brown fox")
-	if _, err := documentService.ReplaceText(context.Background(), issue.PrimaryArtifactID, "The clever brown fox", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+	if _, err := replaceDocumentText(database, documentService, issue.PrimaryArtifactID, "The clever brown fox", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("change live document: %v", err)
 	}
 	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
@@ -1130,7 +1147,7 @@ func TestSuggestionAcceptRefreshesLegacyAskAnchorWithoutOpenedEvent(t *testing.T
 
 func TestAcceptOrphanedSuggestionIs409(t *testing.T) {
 	var documentService *docs.Service
-	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
+	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService = docs.New(docs.Deps{Store: database, Settle: 20 * time.Millisecond})
 		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
 		return documentService
@@ -1143,7 +1160,7 @@ func TestAcceptOrphanedSuggestionIs409(t *testing.T) {
 		t.Fatalf("create suggestion: status=%d body=%s", created.Code, created.Body.String())
 	}
 	comment := decodeBody[model.Comment](t, created)
-	if _, err := documentService.ReplaceText(context.Background(), issue.PrimaryArtifactID, "The quick fox", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+	if _, err := replaceDocumentText(database, documentService, issue.PrimaryArtifactID, "The quick fox", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("delete suggestion mark text: %v", err)
 	}
 	waitForArtifactVersion(t, handler, issue.PrimaryArtifactID, 2)
@@ -1169,7 +1186,7 @@ func TestAcceptOrphanedSuggestionIs409(t *testing.T) {
 // accept and reject already do.
 func TestResolveOrphanedSuggestionSucceeds(t *testing.T) {
 	var documentService *docs.Service
-	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
+	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService = docs.New(docs.Deps{Store: database, Settle: 20 * time.Millisecond})
 		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
 		return documentService
@@ -1182,7 +1199,7 @@ func TestResolveOrphanedSuggestionSucceeds(t *testing.T) {
 		t.Fatalf("create suggestion: status=%d body=%s", created.Code, created.Body.String())
 	}
 	comment := decodeBody[model.Comment](t, created)
-	if _, err := documentService.ReplaceText(context.Background(), issue.PrimaryArtifactID, "The quick fox", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+	if _, err := replaceDocumentText(database, documentService, issue.PrimaryArtifactID, "The quick fox", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("delete suggestion mark text: %v", err)
 	}
 	waitForArtifactVersion(t, handler, issue.PrimaryArtifactID, 2)
@@ -1213,7 +1230,7 @@ func TestResolveOrphanedSuggestionSucceeds(t *testing.T) {
 // A resolved orphaned suggestion reopens like any resolved thread; the missing mark is not fatal.
 func TestReopenOrphanedSuggestionSucceeds(t *testing.T) {
 	var documentService *docs.Service
-	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
+	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService = docs.New(docs.Deps{Store: database, Settle: 20 * time.Millisecond})
 		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
 		return documentService
@@ -1226,7 +1243,7 @@ func TestReopenOrphanedSuggestionSucceeds(t *testing.T) {
 		t.Fatalf("create suggestion: status=%d body=%s", created.Code, created.Body.String())
 	}
 	comment := decodeBody[model.Comment](t, created)
-	if _, err := documentService.ReplaceText(context.Background(), issue.PrimaryArtifactID, "The quick fox", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+	if _, err := replaceDocumentText(database, documentService, issue.PrimaryArtifactID, "The quick fox", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("delete suggestion mark text: %v", err)
 	}
 	waitForArtifactVersion(t, handler, issue.PrimaryArtifactID, 2)

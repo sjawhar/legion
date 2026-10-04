@@ -136,14 +136,14 @@ func (a *servicePersistenceAdapter) StoreUpdateContext(ctx context.Context, room
 }
 
 func (a *servicePersistenceAdapter) Compact(ctx context.Context, room string) error {
-	// ygo's persistence worker calls this, at its exit among other times. A failed room's eviction
-	// compacts under the room's lock, which every transaction meeting the failed room fails fast
-	// instead of waiting for; any other compaction leaves a room whose lock another holder has,
-	// which can be a settlement waiting for the worker's exit (compactIfIdle).
+	// ygo's persistence worker calls this, at its exit among other times. roomServer guards a
+	// repair but not a published live write (it is already durable), so a worker can still exit
+	// under that Apply. Any nonfailed compaction leaves a busy document lock to the next pass;
+	// a failed room's eviction compacts under the lock so recovery remains fail-fast (compactIfIdle).
 	if !a.service.roomFailed(room) {
 		ctx = compactIfIdle(ctx)
 	}
-	_, err := a.store.Compact(ctx, room, 500)
+	_, err := a.store.Compact(ctx, room, compactKeep)
 	return err
 }
 
@@ -314,13 +314,17 @@ func (s *Service) authorizeSchemaVersion(room, clientSchemaVersion string) (webs
 	return websocket.ConnectionConfig{ReadOnly: schemaReadOnly(open, clientSchemaVersion)}, nil
 }
 
+// ActorHeader is the header a document websocket's bearer names its session in, as the JSON of a
+// session actor.
+const ActorHeader = "X-Dispatch-Actor"
+
 func (s *Service) requestActor(r *http.Request) (model.Actor, error) {
 	if token, present := auth.BearerToken(r); present {
-		if !auth.MatchesSharedAgentToken(token, s.agentToken) {
+		if !auth.MatchesSharedAgentToken(r, token, s.agentTokens) {
 			return model.Actor{}, errors.New("invalid document bearer token")
 		}
 		var supplied model.Actor
-		if err := json.Unmarshal([]byte(r.Header.Get("X-Dispatch-Actor")), &supplied); err != nil {
+		if err := json.Unmarshal([]byte(r.Header.Get(ActorHeader)), &supplied); err != nil {
 			return model.Actor{}, fmt.Errorf("decode document bearer actor: %w", err)
 		}
 		if supplied.Kind != "session" || strings.TrimSpace(supplied.ID) == "" {
@@ -450,7 +454,7 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 			s.finishSuppressedPersistence(published.slot, update)
 		}
 		if repair, identityRepair := origin.(*identityClosureOrigin); identityRepair {
-			s.recordSuppressedCommit(repair.slot, doc, update)
+			s.recordSuppressedCommit(repair.slot, update)
 			return
 		}
 		replica.mu.Lock()
@@ -533,30 +537,24 @@ func (s *Service) updateChangesMarkdown(room string, replica *crdt.Doc) bool {
 	return true
 }
 
-// creditContentChange credits an observed content change to its authors. A service mutation
-// (origin registered by serviceTransact) is its actor's alone, who joins `pending` and
-// becomes `lastActor`; a browser that was only connected while it happened is not credited. A
-// committed transaction's live write, which Ledger.Commit applies, was credited when the
-// transaction committed and is not credited again. Any other update is a browser edit by one of
-// the peers, which ygo applies while that peer's connection is registered. ygo does not say which
-// connection sent it, so every connected peer joins `pending`: when exactly one is connected it is
-// the latest edit source and replaces `lastActor`, and otherwise the edit cannot be pinned on a
-// single peer and no older actor may stand in for it.
+// creditContentChange credits an observed content change to its authors. A service repair (origin
+// registered by serviceTransact) is credited to no one; a browser that was only connected while it
+// happened is not credited either. A committed transaction's live write, which Ledger.Commit
+// applies, was credited when the transaction committed and is not credited again. Any other update
+// is a browser edit by one of the peers, which ygo applies while that peer's connection is
+// registered. ygo does not say which connection sent it, so every connected peer joins `pending`:
+// when exactly one is connected it is the latest edit source and replaces `lastActor`, and
+// otherwise the edit cannot be pinned on a single peer and no older actor may stand in for it.
 func (s *Service) creditContentChange(room string, origin any) {
 	if _, published := origin.(*liveWriteOrigin); published {
 		return
 	}
-	value, service := s.serviceOrigins.Load(origin)
+	if _, service := s.serviceOrigins.Load(origin); service {
+		return
+	}
 	state := s.room(room)
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	if service {
-		if actor, credited := value.(*model.Actor); credited && actor != nil {
-			state.pending[actorKey(*actor)] = *actor
-			state.lastActor = new(*actor)
-		}
-		return
-	}
 	var sole *model.Actor
 	ambiguous := false
 	for _, actor := range state.connected {

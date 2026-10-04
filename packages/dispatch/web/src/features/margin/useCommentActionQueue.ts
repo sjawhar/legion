@@ -20,7 +20,12 @@ export interface CommentActionFailure {
 }
 
 /** Refusals of the document an accept would write: the suggestion itself has to change. */
-const permanentRefusals = new Set(["INVALID_ASK_BLOCK", "INVALID_MARKDOWN", "INVALID_OP"]);
+const permanentRefusals = new Set([
+  "CAP_EXCEEDED",
+  "INVALID_ASK_BLOCK",
+  "INVALID_MARKDOWN",
+  "INVALID_OP",
+]);
 
 function actionFailure(id: string, error: Error): CommentActionFailure {
   const refused =
@@ -35,7 +40,8 @@ function actionFailure(id: string, error: Error): CommentActionFailure {
 interface CommentActionQueueOptions<TContext> {
   onError?(error: Error, input: CommentActionInput, context: TContext | undefined): void;
   onMutate?(input: CommentActionInput): TContext | Promise<TContext>;
-  onSuccess?(): void;
+  /** The server took `input`; the next queued action starts after this. */
+  onSuccess?(input: CommentActionInput): void;
 }
 
 function submitCommentAction({ id, kind }: CommentActionInput) {
@@ -64,7 +70,7 @@ export function useCommentActionQueue<TContext = undefined>({
     mutationFn: submitCommentAction,
     onError,
     onMutate,
-    onSettled: (_data, error) => {
+    onSettled: (_data, error, input) => {
       actionGuard.release();
       inFlight.current = undefined;
       if (error !== null) {
@@ -72,7 +78,7 @@ export function useCommentActionQueue<TContext = undefined>({
         syncQueuedIds();
         return;
       }
-      onSuccess?.();
+      onSuccess?.(input);
       const next = queued.current.entries().next();
       if (next.done) return;
       const [id, kind] = next.value;

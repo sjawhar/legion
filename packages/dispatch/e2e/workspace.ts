@@ -76,8 +76,8 @@ export const workspaceSessionIds = workspaceSessions.map((session) => session.se
 const workflowSpec =
   "# Local testing workflow\n\nOne command, a seeded corpus, a signed-in browser.\n\n" +
   ':::ask{urgency="high" multiple="false"}\nWhich sign-in path?\n\n' +
-  "- Cookie: the production identity, minted by a dev route\n" +
-  "- Header: a trusted proxy header\n:::\n";
+  "- Cookie: the production identity, issued by the sign-in pool\n" +
+  "- Header: a test/local harness identity\n:::\n";
 
 export interface SeededWorkspace {
   readonly issues: Record<

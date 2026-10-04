@@ -25,7 +25,7 @@ const tables = [
   "issue_external_links",
   "issues",
   "projects",
-  "users",
+  "people",
   "user_sessions",
 ];
 
@@ -100,7 +100,9 @@ async function resetDatabaseOnce(): Promise<void> {
         END IF;
       END
     $$`,
-    `TRUNCATE TABLE ${tables.join(", ")} RESTART IDENTITY CASCADE`
+    `TRUNCATE TABLE ${tables.join(", ")} RESTART IDENTITY CASCADE`,
+    // The people the scenarios act as, as if each had signed in: the only assignable names.
+    "INSERT INTO people (email) VALUES ('alice'), ('bob')"
   );
 }
 

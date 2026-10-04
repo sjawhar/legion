@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { lazy, type ReactNode, type RefObject, Suspense, useEffect, useRef, useState } from "react";
 import { Link, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 
-import { api, isForbidden, isUnauthorized } from "./api/client";
+import { api, isUnauthorized } from "./api/client";
 import { useConnectionState } from "./api/live";
 import { userAgentStateQuery, whoAmIQuery } from "./api/queries";
 import { useEventStream } from "./api/sse";
@@ -190,18 +190,8 @@ function SignInPage(): ReactNode {
         className={`mt-8 inline-flex rounded-lg px-4 py-2 font-semibold ${primaryButtonBg} ${primaryButtonHoverBg}`}
         href="/auth/start"
       >
-        Sign in with GitHub
+        Sign in with Google
       </a>
-    </ShellMessagePage>
-  );
-}
-
-function ForbiddenPage(): ReactNode {
-  return (
-    <ShellMessagePage title="This GitHub account isn't allowed here.">
-      <p className={`mt-3 ${textSecondaryOnSurface}`}>
-        Ask a Dispatch admin to add your account, then sign in again.
-      </p>
     </ShellMessagePage>
   );
 }
@@ -508,10 +498,13 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
         >
           Skip to content
         </a>
+        {/* Above the highest composer fixed at the foot of the screen (`--foot-composer-inset`,
+            `useFootInset`), so the pill never sits over its controls; otherwise just above the
+            phone's bottom bar. */}
         {connection === "reconnecting" ? (
           <p
             aria-live="polite"
-            className={`fixed right-4 bottom-20 z-40 rounded-full border px-3 py-1 text-xs font-medium shadow-lg xl:bottom-4 ${calloutWarningBorder} ${statusConnecting.bg} ${statusConnecting.text}`}
+            className={`fixed right-4 bottom-[max(5rem,calc(var(--foot-composer-inset,0px)_+_1rem))] z-40 rounded-full border px-3 py-1 text-xs font-medium shadow-lg xl:bottom-[calc(var(--foot-composer-inset,0px)_+_1rem)] ${calloutWarningBorder} ${statusConnecting.bg} ${statusConnecting.text}`}
             data-testid="connection-pill"
           >
             Reconnecting…
@@ -519,7 +512,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
         ) : connection === "unavailable" ? (
           <p
             aria-live="polite"
-            className={`fixed right-4 bottom-20 z-40 flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-medium shadow-lg xl:bottom-4 ${calloutDangerBorder} ${calloutDangerBg} ${badgeBlocking.text}`}
+            className={`fixed right-4 bottom-[max(5rem,calc(var(--foot-composer-inset,0px)_+_1rem))] z-40 flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-medium shadow-lg xl:bottom-[calc(var(--foot-composer-inset,0px)_+_1rem)] ${calloutDangerBorder} ${calloutDangerBg} ${badgeBlocking.text}`}
             data-testid="connection-pill"
           >
             Live updates unavailable
@@ -679,9 +672,6 @@ export function AuthGate(): ReactNode {
   // session expired or was revoked — otherwise a revoked user keeps the authenticated shell.
   if (whoAmI.isError && isUnauthorized(whoAmI.error)) {
     return <SignInPage />;
-  }
-  if (whoAmI.isError && isForbidden(whoAmI.error)) {
-    return <ForbiddenPage />;
   }
   if (whoAmI.data !== undefined) {
     return <AuthenticatedApp user={whoAmI.data} />;

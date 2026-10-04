@@ -1,11 +1,15 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"net/http"
+	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -249,6 +253,45 @@ func TestUploadRefusesAMarkdownDocumentOverOneMiB(t *testing.T) {
 	}
 }
 
+// A multipart body the parser cannot read, such as one whose part header holds a control
+// character, is the caller's malformed input: 400 with the parser's reason. Only a body past the
+// upload's size limit is 413.
+func TestUploadRefusesAMalformedMultipartBodyAsBadInput(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createArtifactIssue(t, handler)
+	send := func(contentType string, body []byte) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodPost, "/api/v1/issues/"+issue.Key+"/artifacts", bytes.NewReader(body))
+		request.Header.Set("Content-Type", contentType)
+		request.Header.Set("X-Dispatch-User", "alice")
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		return response
+	}
+	malformed := send("multipart/form-data; boundary=b", []byte("--b\r\n"+
+		"Content-Disposition: form-data; name=\"file\"; filename=\"notes.md\"\r\n"+
+		"Content-Type: text/markdown; x=\"a\x00b\"\r\n\r\n# Notes\r\n--b--\r\n"))
+	if malformed.Code != http.StatusBadRequest || !strings.Contains(malformed.Body.String(), `"code":"ARTIFACT_INPUT"`) || !strings.Contains(malformed.Body.String(), `"error":"invalid multipart body: `) {
+		t.Fatalf("part header holding a control character: status=%d body=%s, want 400 ARTIFACT_INPUT with the parser's reason", malformed.Code, malformed.Body.String())
+	}
+	over := multipartRequest(t, handler, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{"name": "big.bin"}, "big.bin", "application/octet-stream", make([]byte, maxArtifactBlobSize+(1<<20)+1), "alice")
+	if over.Code != http.StatusRequestEntityTooLarge || !strings.Contains(over.Body.String(), `"code":"CAP_EXCEEDED"`) {
+		t.Fatalf("body past the upload limit: status=%d body=%s, want 413 CAP_EXCEEDED", over.Code, over.Body.String())
+	}
+}
+
+// The parser spools a file part past a megabyte to a temporary file. When the server cannot write
+// that file, the failure is the server's, not the caller's: 500, logged, never a 400 that tells the
+// caller its upload was malformed.
+func TestAnUploadTheServerCannotSpoolIsItsOwnFailure(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createArtifactIssue(t, handler)
+	t.Setenv("TMPDIR", filepath.Join(t.TempDir(), "missing"))
+	response := multipartRequest(t, handler, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{"name": "big.bin"}, "big.bin", "application/octet-stream", make([]byte, 2<<20), "alice")
+	if response.Code != http.StatusInternalServerError || !strings.Contains(response.Body.String(), `"code":"INTERNAL"`) {
+		t.Fatalf("a part the server cannot spool: status=%d body=%s, want 500 INTERNAL", response.Code, response.Body.String())
+	}
+}
+
 func TestArtifactRoutesResolveUUIDsAndIssueScopedSlugs(t *testing.T) {
 	handler := newTestHandler(t)
 	issue := createArtifactIssue(t, handler)
@@ -423,14 +466,16 @@ func TestDocumentRoutesRejectAmbiguousFilenameWithSlugChoices(t *testing.T) {
 	}
 }
 
+// unrecordedPeople is a people store for a test with no database: it records nobody.
+type unrecordedPeople struct{ auth.PeopleStore }
+
+func (unrecordedPeople) Record(context.Context, string) error { return nil }
+
 func TestArtifactIDRoutesValidateBeforeDatabaseUse(t *testing.T) {
 	mux := http.NewServeMux()
 	Register(mux, Deps{
-		Store: &store.Store{},
-		Identity: identity.HeaderIdentity{
-			Header:        "X-Dispatch-User",
-			AllowedLogins: map[string]struct{}{"alice": {}},
-		},
+		Store:    &store.Store{},
+		Identity: identity.HeaderIdentity{Header: "X-Dispatch-User", People: unrecordedPeople{}},
 	})
 
 	for _, route := range []struct {

@@ -34,7 +34,7 @@ const verifiedProof = `{"verdict":"verified","how":"re-ran its command at its he
 var writableHandoffs = map[string]string{
 	"architect": `{"scope":"small","subIssues":[]}`,
 	"plan": `{"requiredSkills":{"implement":["legion-worker"],"test":["legion-worker"],"review":["none: no skill covers a one-line change"]},` +
-		`"gapAnalysis":{"findings":[]},"planReview":{"verdict":"approved","rounds":1}}`,
+		`"gapAnalysis":{"findings":[]},"planReview":{"verdict":"approved","rounds":1},"specDepartures":[]}`,
 	"implement": `{"filesChanged":["x.go"],"proof":[` + handoffProof + `]}`,
 	"test":      `{"passed":3,"failed":0,"implementerProof":` + verifiedProof + `,"proof":[` + handoffProof + `]}`,
 	"review":    `{"verdict":"approved","critical":0}`,
@@ -118,8 +118,8 @@ func TestHandoffWriteRefusesTheFieldsItWritesNamingEach(t *testing.T) {
 
 // The write refuses a handoff its phase's rules refuse, naming every field at fault so the next
 // write can fix it, and writes nothing. The implementer's proof, the tester's verdict on it and its
-// own proof, and the plan's skills and two checks are the records the next role reads; a declared
-// field of the wrong type would have that role read a value that is not there.
+// own proof, and the plan's skills, two checks and departures are the records the next role reads;
+// a declared field of the wrong type would have that role read a value that is not there.
 func TestHandoffWriteRefusesWhatItsPhasesRulesRefuseNamingEachField(t *testing.T) {
 	blankProof := strings.Replace(strings.Replace(handoffProof, `"exit 1 naming proof"`, `"  "`, 1), `,"negativeControl":"the same payload with its proof: exit 0"`, "", 1)
 	plan := func(field, value string) string {
@@ -134,6 +134,22 @@ func TestHandoffWriteRefusesWhatItsPhasesRulesRefuseNamingEachField(t *testing.T
 		}
 		return string(encoded)
 	}
+	planWithout := func(field string) string {
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(writableHandoffs["plan"]), &fields); err != nil {
+			t.Fatal(err)
+		}
+		delete(fields, field)
+		encoded, err := json.Marshal(fields)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(encoded)
+	}
+	departure := `{"spec":"the plan polls the uploader","plan":"the plan reads its event channel","evidence":"the measurement covers every required event","outcome":{"kind":"unchanged"}}`
+	tooManyDepartures := `[` + strings.TrimSuffix(strings.Repeat(departure+",", maxSpecDepartures+1), ",") + `]`
+	tooLongDeparture := `{"spec":"` + strings.Repeat("x", maxSpecDepartureTextBytes+1) + `","plan":"the plan reads its event channel","evidence":"the measurement covers every required event","outcome":{"kind":"unchanged"}}`
+	tooLongUnknown := strings.Repeat("x", 5000)
 	for _, tc := range []struct {
 		name, phase, data string
 		// fields are the fields the refusal names, in its order.
@@ -148,7 +164,7 @@ func TestHandoffWriteRefusesWhatItsPhasesRulesRefuseNamingEachField(t *testing.T
 		{"a passing test handoff without a proof of the tester's own", "test", `{"passed":3,"implementerProof":` + verifiedProof + `}`, []string{"proof"}},
 		{"failed > 0 without a recorded failure", "test", `{"failed":1,"implementerProof":` + verifiedProof + `,"proof":[` + handoffProof + `]}`, []string{"failures"}},
 		{"a rejected implementer proof without a recorded failure", "test", `{"implementerProof":{"verdict":"rejected","how":"its command exits 2"},"proof":[` + handoffProof + `]}`, []string{"failures"}},
-		{"a plan with none of its three records", "plan", `{"taskCount":3}`, []string{"requiredSkills", "gapAnalysis", "planReview"}},
+		{"a plan with none of its four records", "plan", `{"taskCount":3}`, []string{"requiredSkills", "gapAnalysis", "planReview", "specDepartures"}},
 		{"a role's empty skill list and another's blank entry", "plan", plan("requiredSkills", `{"implement":[],"test":[" "],"review":["legion-worker"]}`), []string{"requiredSkills.implement", "requiredSkills.test.0"}},
 		{"a skill list left out", "plan", plan("requiredSkills", `{"implement":["legion-worker"]}`), []string{"requiredSkills.test", "requiredSkills.review"}},
 		{"a gap analysis with both findings and an error", "plan", plan("gapAnalysis", `{"findings":[],"error":"timed out"}`), []string{"gapAnalysis"}},
@@ -160,6 +176,15 @@ func TestHandoffWriteRefusesWhatItsPhasesRulesRefuseNamingEachField(t *testing.T
 		{"an approval carrying an error", "plan", plan("planReview", `{"verdict":"approved","rounds":1,"error":"timed out"}`), []string{"planReview.error"}},
 		{"more rounds than a planner runs", "plan", plan("planReview", `{"verdict":"approved","rounds":4}`), []string{"planReview.rounds"}},
 		{"a fractional round count", "plan", plan("planReview", `{"verdict":"rejected","rounds":2.5,"remainingIssues":[{"issue":"i","evidence":"e"}]}`), []string{"planReview.rounds"}},
+		{"a plan without its departures from the spec", "plan", planWithout("specDepartures"), []string{"specDepartures"}},
+		{"a plan whose departures are a scalar", "plan", plan("specDepartures", `"none"`), []string{"specDepartures"}},
+		{"a plan whose departures are an object", "plan", plan("specDepartures", `{"spec":"the plan polls"}`), []string{"specDepartures"}},
+		{"a plan with a malformed departure", "plan", plan("specDepartures", `[{"spec":"","plan":"the plan reads its event channel","evidence":"the measurement covers every required event","outcome":{"kind":"changed"}}]`), []string{"specDepartures.0.spec", "specDepartures.0.outcome"}},
+		{"a plan that marks a changed scope unchanged", "plan", plan("specDepartures", `[{"spec":"the plan changes a child boundary","plan":"the plan moves work to a new child","evidence":"the measured boundary excludes the work","outcome":{"kind":"unchanged","scope":"the child now owns the work"}}]`), []string{"specDepartures.0.outcome.scope"}},
+		{"a plan with an unknown oversized departure field", "plan", plan("specDepartures", `[{"spec":"the plan polls the uploader","plan":"the plan reads its event channel","evidence":"the measurement covers every required event","outcome":{"kind":"unchanged"},"extra":"`+tooLongUnknown+`"}]`), []string{"specDepartures.0.extra"}},
+		{"a plan with an unknown oversized outcome field", "plan", plan("specDepartures", `[{"spec":"the plan polls the uploader","plan":"the plan reads its event channel","evidence":"the measurement covers every required event","outcome":{"kind":"unchanged","extra":"`+tooLongUnknown+`"}}]`), []string{"specDepartures.0.outcome.extra"}},
+		{"a plan with too many departures", "plan", plan("specDepartures", tooManyDepartures), []string{"specDepartures"}},
+		{"a plan with a departure that is too long", "plan", plan("specDepartures", `[`+tooLongDeparture+`]`), []string{"specDepartures.0.spec"}},
 		{"a plan's declared field of the wrong type, before its three rules", "plan", `{"taskCount":"3"}`, []string{"taskCount"}},
 		{"a review's declared fields of the wrong type", "review", `{"critical":"1","verdict":"lgtm","keyFindings":[{"severity":"minor"}]}`, []string{"critical", "verdict", "keyFindings.0.file", "keyFindings.0.description"}},
 		{"an architect's scope and routing hints outside their options", "architect", `{"scope":"huge","routingHints":{"skipArchitect":"no"}}`, []string{"scope", "routingHints.skipArchitect"}},
@@ -201,9 +226,11 @@ func TestHandoffWriteWritesWhatItsPhasesRulesAllow(t *testing.T) {
 	cases["a test reporting a failure"] = [2]string{"test", `{"failed":1,` + failure + `,"implementerProof":` + verifiedProof + `}`}
 	cases["a test rejecting the implementer's proof"] = [2]string{"test", `{` + failure + `,"implementerProof":{"verdict":"rejected","how":"its command exits 2"}}`}
 	cases["a plan whose checks failed"] = [2]string{"plan", `{"requiredSkills":{"implement":["none: x"],"test":["none: x"],"review":["none: x"]},` +
-		`"gapAnalysis":{"error":"the analyst timed out"},"planReview":{"verdict":"failed","rounds":2,"error":"the review timed out"}}`}
+		`"gapAnalysis":{"error":"the analyst timed out"},"planReview":{"verdict":"failed","rounds":2,"error":"the review timed out"},"specDepartures":[]}`}
 	cases["a plan rejected after the last round"] = [2]string{"plan", `{"requiredSkills":{"implement":["a"],"test":["b"],"review":["c"]},` +
-		`"gapAnalysis":{"findings":[{"finding":"no error path","answer":"task 3"}]},"planReview":{"verdict":"rejected","rounds":3,"remainingIssues":[{"issue":"i","evidence":"e"}]}}`}
+		`"gapAnalysis":{"findings":[{"finding":"no error path","answer":"task 3"}]},"planReview":{"verdict":"rejected","rounds":3,"remainingIssues":[{"issue":"i","evidence":"e"}]},"specDepartures":[]}`}
+	cases["a plan with a changed scope"] = [2]string{"plan", `{"requiredSkills":{"implement":["a"],"test":["b"],"review":["c"]},` +
+		`"gapAnalysis":{"findings":[]},"planReview":{"verdict":"approved","rounds":1},"specDepartures":[{"spec":"the plan keeps one child","plan":"the plan adds a child","evidence":"the measured boundary needs a separate surface","outcome":{"kind":"changed","scope":"the new child owns the separate surface"}}]}`}
 	cases["an implement handoff with fields it does not declare"] = [2]string{"implement", `{"proof":[` + handoffProof + `],"rebase2":{"onto":"main"},"summary":"done"}`}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -235,10 +262,10 @@ func TestHandoffWriteWritesWhatItsPhasesRulesAllow(t *testing.T) {
 	}
 }
 
-// The planner's role prompt shows each shape of its two plan checks as JSON
-// (internal/prompts/roles/planner.md, "Plan handoff"); a planner that records them as shown is
-// not refused.
-func TestHandoffWriteAcceptsEveryPlanCheckShapeThePlannerPromptShows(t *testing.T) {
+// The planner's role prompt shows each shape of its two plan checks and of its departures from the
+// spec as JSON (internal/prompts/roles/planner.md, "Plan handoff"); a planner that records them as
+// shown is not refused.
+func TestHandoffWriteAcceptsEveryPlanHandoffShapeThePlannerPromptShows(t *testing.T) {
 	prompt, err := os.ReadFile(filepath.Join("..", "..", "internal", "prompts", "roles", "planner.md"))
 	if err != nil {
 		t.Fatal(err)
@@ -271,13 +298,25 @@ func TestHandoffWriteAcceptsEveryPlanCheckShapeThePlannerPromptShows(t *testing.
 			t.Fatalf("planner.md records a rejection at round %v, want the last, %d", shown.Rounds, planReviewMaxRounds)
 		}
 	}
-	if len(gapAnalyses) != 2 || !slices.Equal(verdicts, []string{"approved", "rejected", "failed"}) {
-		t.Fatalf("planner.md shows gapAnalysis %v and planReview verdicts %v, want two shapes and approved, rejected, failed", gapAnalyses, verdicts)
+	rawSpecDepartures := shapes("specDepartures")
+	var specDepartures []string
+	for _, departure := range rawSpecDepartures {
+		var shown map[string]any
+		if err := json.Unmarshal([]byte(departure), &shown); err != nil {
+			t.Fatalf("planner.md's specDepartures %s: %v", departure, err)
+		}
+		if _, isDeparture := shown["spec"]; isDeparture {
+			specDepartures = append(specDepartures, departure)
+		}
+	}
+	if len(gapAnalyses) != 2 || !slices.Equal(verdicts, []string{"approved", "rejected", "failed"}) || len(specDepartures) != 1 {
+		t.Fatalf("planner.md shows gapAnalysis %v, planReview verdicts %v and specDepartures %v, want two shapes, approved, rejected, failed, and one departure", gapAnalyses, verdicts, specDepartures)
 	}
 	skills := `{"implement":["none: x"],"test":["none: x"],"review":["none: x"]}`
+	departures := `[` + strings.Join(specDepartures, ",") + `]`
 	for _, gapAnalysis := range gapAnalyses {
 		for _, planReview := range planReviews {
-			data := `{"requiredSkills":` + skills + `,"gapAnalysis":` + gapAnalysis + `,"planReview":` + planReview + `}`
+			data := `{"requiredSkills":` + skills + `,"gapAnalysis":` + gapAnalysis + `,"planReview":` + planReview + `,"specDepartures":` + departures + `}`
 			var out, errb bytes.Buffer
 			if code := run(context.Background(), []string{"legion", "handoff", "write", "--workspace", t.TempDir(), "--phase", "plan", "--data", data}, &out, &errb); code != 0 {
 				t.Fatalf("handoff write --phase plan %s = %d: %s", data, code, errb.String())
@@ -844,130 +883,6 @@ func TestHandoffCompleteRefusesAHandoffCommitAnotherAppAuthored(t *testing.T) {
 			}
 			if code != 1 || len(*bodies) != 0 || !strings.Contains(errb.String(), "legion-implementer[bot]") || !strings.Contains(errb.String(), "jj new") {
 				t.Fatalf("handoff complete on the implementer's commit = %d, daemon read %v, stderr %q; want a refusal naming the author and jj new, before any request", code, *bodies, errb.String())
-			}
-		})
-	}
-}
-
-// A merger's READY names a head a human merges, which GitHub merges only once every check the base
-// branch requires has succeeded there. A head whose push skipped CI when it should not have reports
-// none of them, so the completion refuses READY naming the head and the check, and nothing reaches
-// the daemon; a required check still running, or one that failed, is refused the same way.
-//
-// A pull request that conflicts with its base (mergeable_state "dirty") gets no pull_request run,
-// so a required check with no result on its head is refused naming the conflict rather than a
-// skipped push. The conflict changes only that text, never which heads are refused: every row is
-// posted or refused by its checks alone, whatever its mergeable_state, and a conflicting head
-// whose required checks all succeeded is posted.
-func TestHandoffCompleteReadyRefusesAHeadWithoutItsRequiredChecksGreen(t *testing.T) {
-	const (
-		ciGreen      = `{"id":1,"name":"ci","status":"completed","conclusion":"success"}`
-		ciSkipped    = `{"id":1,"name":"ci","status":"completed","conclusion":"skipped"}`
-		ciRunning    = `{"id":1,"name":"ci","status":"in_progress","conclusion":null}`
-		legacyGreen  = `{"context":"legacy","state":"success"}`
-		legacyFailed = `{"context":"legacy","state":"failure"}`
-		skippedPush  = `: its push may have skipped CI`
-		conflict     = `: the pull request conflicts with main, and GitHub starts no pull_request CI`
-	)
-	for _, tc := range []struct {
-		name, checkRun, status, mergeableState, refusal string
-	}{
-		{"every required check green", ciGreen, legacyGreen, "clean", ""},
-		{"a required check that ended skipped counts", ciSkipped, legacyGreen, "clean", ""},
-		{"every required check green on a conflicting pull request", ciGreen, legacyGreen, "dirty", ""},
-		{"a head whose push skipped CI", "", "", "blocked", `head c0de00000000 of pull request #42 has no result for the required check "ci"` + skippedPush},
-		{"a head whose mergeability GitHub has not computed", "", "", "unknown", `head c0de00000000 of pull request #42 has no result for the required check "ci"` + skippedPush},
-		{"a head of a conflicting pull request", "", "", "dirty", `head c0de00000000 of pull request #42 has no result for the required check "ci"` + conflict},
-		{"a conflicting pull request missing one required check", ciGreen, "", "dirty", `head c0de00000000 of pull request #42 has no result for the required check "legacy"` + conflict},
-		{"a required check still running", ciRunning, legacyGreen, "blocked", `the required check "ci" is still running on head c0de00000000`},
-		{"a required check still running on a conflicting pull request", ciRunning, legacyGreen, "dirty", `the required check "ci" is still running on head c0de00000000`},
-		{"a required status that failed", ciGreen, legacyFailed, "blocked", `the required check "legacy" ended failure on head c0de00000000`},
-		{"a required status that failed on a conflicting pull request", ciGreen, legacyFailed, "dirty", `the required check "legacy" ended failure on head c0de00000000`},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			workspace := t.TempDir()
-			t.Setenv("LEGION_ROLE", "merger")
-			t.Setenv("LEGION_JJ_PATH", fakeHandoffJJ(t, "beef"))
-			bodies := handoffDaemon(t, phase.Merging)
-			readyGitHub(t, tc.checkRun, tc.status, tc.mergeableState)
-			var out, errb bytes.Buffer
-			code := run(context.Background(), []string{"legion", "handoff", "complete", "--workspace", workspace, "--summary", "gate facts hold", "--ready"}, &out, &errb)
-			if tc.refusal == "" {
-				if code != 0 || len(*bodies) != 1 {
-					t.Fatalf("READY = %d, daemon read %v, stderr %q; want it posted", code, *bodies, errb.String())
-				}
-				return
-			}
-			if code != 1 || len(*bodies) != 0 {
-				t.Fatalf("READY = %d, daemon read %v, stderr %q; want it refused and nothing posted", code, *bodies, errb.String())
-			}
-			if !strings.Contains(errb.String(), "READY refused: "+tc.refusal) {
-				t.Fatalf("READY refused with stderr %q; want the refusal to name %q", errb.String(), tc.refusal)
-			}
-		})
-	}
-}
-
-// A private repository whose plan has no rulesets answers the rulesets read 403, "make this
-// repository public to enable this feature" (docs/solutions/legion/controller-gate-2-required-checks-live-reads.md).
-// It can define no ruleset, so none requires a check there, and READY rests on the branch's
-// protection alone: posted when that requires nothing, refused when it requires a check the head
-// lacks. Only that answer means no rulesets: a rulesets read that fails otherwise (another 403,
-// such as a token that lost access, or a server error) leaves the required checks unknown, and
-// READY is refused naming the read.
-func TestHandoffCompleteReadyOnARepositoryWhosePlanHasNoRulesets(t *testing.T) {
-	const planAnswer = `{"message":"Upgrade to GitHub Pro or make this repository public to enable this feature.","status":"403"}`
-	unprotected := `{"name":"main","protected":false}`
-	for _, tc := range []struct {
-		name, branch string
-		rulesStatus  int
-		rulesBody    string
-		posted       bool
-		refusal      string
-	}{
-		{"and no branch protection", unprotected, http.StatusForbidden, planAnswer, true, ""},
-		{"and branch protection requiring a check the head lacks", `{"name":"main","protected":true,"protection":{"required_status_checks":{"contexts":["legacy"]}}}`, http.StatusForbidden, planAnswer, false, `has no result for the required check "legacy"`},
-		{"but the read is refused for another reason", unprotected, http.StatusForbidden, `{"message":"Resource not accessible by integration","status":"403"}`, false, "GET /rules/branches/main with 403"},
-		{"but the read fails", unprotected, http.StatusInternalServerError, `{"message":"Server Error"}`, false, "GET /rules/branches/main with 500"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			repo := "/repos/acme/widgets"
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.Header().Set("Content-Type", "application/json")
-				switch r.URL.Path {
-				case repo + "/pulls/42":
-					_, _ = w.Write([]byte(`{"head":{"sha":"c0de0000000000000000000000000000000000ff"},"base":{"ref":"main"}}`))
-				case repo + "/rules/branches/main":
-					w.WriteHeader(tc.rulesStatus)
-					_, _ = w.Write([]byte(tc.rulesBody))
-				case repo + "/branches/main":
-					_, _ = w.Write([]byte(tc.branch))
-				case repo + "/commits/c0de0000000000000000000000000000000000ff/check-runs":
-					_, _ = w.Write([]byte(`{"total_count":0,"check_runs":[]}`))
-				case repo + "/commits/c0de0000000000000000000000000000000000ff/status":
-					_, _ = w.Write([]byte(`{"statuses":[]}`))
-				default:
-					http.NotFound(w, r)
-				}
-			}))
-			t.Cleanup(server.Close)
-			workspace := t.TempDir()
-			t.Setenv("LEGION_ROLE", "merger")
-			t.Setenv("LEGION_JJ_PATH", fakeHandoffJJ(t, "beef"))
-			bodies := handoffDaemon(t, phase.Merging)
-			t.Setenv("LEGION_GITHUB_API_URL", server.URL)
-			var out, errb bytes.Buffer
-			code := run(context.Background(), []string{"legion", "handoff", "complete", "--workspace", workspace, "--summary", "gate facts hold", "--ready"}, &out, &errb)
-			if tc.posted {
-				// A base branch requiring no check has nothing to refuse, and READY says so rather
-				// than reading like a head whose every required check was read and passed.
-				if code != 0 || len(*bodies) != 1 || !strings.Contains(out.String(), `no check is required on "main" of acme/widgets`) {
-					t.Fatalf("READY = %d, daemon read %v, stdout %q, stderr %q; want it posted, saying it read no checks", code, *bodies, out.String(), errb.String())
-				}
-				return
-			}
-			if code != 1 || len(*bodies) != 0 || !strings.Contains(errb.String(), tc.refusal) {
-				t.Fatalf("READY = %d, daemon read %v, stderr %q; want a refusal naming %q", code, *bodies, errb.String(), tc.refusal)
 			}
 		})
 	}

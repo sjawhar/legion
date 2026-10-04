@@ -1,12 +1,12 @@
-# Before and after: an ask, a reply, a message, and a draft
+# Before and after: a decision block, a reply, a message, and a draft
 
-`skill://dispatch` sends you here for worked examples: a decision written as clickable options, a
-reply that names its mechanism, a message that should not be sent, and a draft placed where the
-human reads it.
+`skill://dispatch` sends you here for worked examples: a design decision in its document, a reply
+that names its mechanism, a message that should not be sent, and a draft placed where the human
+reads it.
 
 ## Before / after
 
-Before — a wall of text hides the decision and makes the choices unclickable:
+Before — a wall of text hides the decision and the human never receives it:
 
 ```text
 The deploy branch has the migration and dashboard changes. Staging is fine, but release notes are
@@ -14,19 +14,23 @@ not reviewed before tomorrow's customer demo. Review the notes, ship without the
 dashboard from the release. Waiting is safest, but the list above may be stale.
 ```
 
-After — state the problem and make each genuinely different option a button:
+After — write the decision into the document section it concerns: state the problem, and make each
+genuinely different option a button, so the answer stays with the release design:
 
 ```ts
-dispatch_ask({
+dispatch_doc_edit({
   issue: "LEGION-815",
-  question:
-    "Release notes are unreviewed, and tomorrow's customer demo means the release cannot wait for a later review. How should we proceed? Recommendation: review the notes, then ship, to keep the release complete and reviewed.",
-  options: [
-    { label: "Review notes, then ship", description: "Delays release for review but keeps the release complete and reviewed." },
-    { label: "Ship now", description: "Meets the demo deadline but leaves the release notes unreviewed." },
-  ],
-  urgency: "high",
-  anchor: { artifact: "spec", quote: "Release requires reviewed operator instructions before deployment." },
+  artifact: "spec",
+  ops: [{
+    op: "insert",
+    after: "Release requires reviewed operator instructions before deployment.",
+    markdown: `:::ask{#release-gate urgency="high"}
+Release notes are unreviewed, and tomorrow's customer demo means the release cannot wait for a later review. How should we proceed? Recommendation: review the notes, then ship, to keep the release complete and reviewed.
+
+- Review notes, then ship: Delays release for review but keeps the release complete and reviewed.
+- Ship now: Meets the demo deadline but leaves the release notes unreviewed.
+:::`,
+  }],
 })
 ```
 
@@ -65,8 +69,9 @@ dispatch_ask({
 })
 ```
 
-After — the draft is a section of the spec, and the ask anchors there. If it really must be a
-file, the spec and the ask both link the slug from the upload result:
+After — the draft is a section of the spec, and the ask anchors there. Sending it is a to-do only a
+human can complete, so it stays a standalone ask. If it really must be a file, the spec and the ask
+both link the slug from the upload result:
 
 ```ts
 dispatch_doc_edit({ issue: "OPS-52", artifact: "spec", ops: [
@@ -94,6 +99,7 @@ dispatch_ask({
     { label: "Send the reviewed update", description: "Delivers the linked update today but makes its text external." },
     { label: "Hold the update", description: "Avoids sending now but leaves customers without the update." },
   ],
+  ref: "dispatch://OPS-52/artifact/cu-update-2026-09-15-md",
 })
 ```
 

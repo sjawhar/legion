@@ -1809,14 +1809,14 @@ describe("executeDispatchTool", () => {
     const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
       const target = new URL(String(url));
       requests.push(target);
-      // A session holds AGENTC-1, so the rows are labelled from the live registry.
+      // A session holds ACME-1, so the rows are labelled from the live registry.
       if (target.pathname === "/api/v1/agents") {
         return response([{ session_id: "s1", title: "Live registry title" }]);
       }
       return response({
         issues: [
           {
-            key: "AGENTC-1",
+            key: "ACME-1",
             title: "First",
             status: "todo",
             priority: 1,
@@ -1845,9 +1845,9 @@ describe("executeDispatchTool", () => {
     const result = await executeDispatchTool({
       tool: "dispatch_issues",
       args: {
-        project: "AGENTC",
+        project: "ACME",
         status: "todo",
-        parent: "AGENTC-9",
+        parent: "ACME-9",
         label: "bug",
         priority: [0, 1, null],
         updated_since: "2026-09-01T00:00:00Z",
@@ -1867,9 +1867,9 @@ describe("executeDispatchTool", () => {
     ]);
     // Each priority repeats as its own parameter, and null asks for issues with no priority.
     expect([...(requests[0]?.searchParams ?? [])]).toEqual([
-      ["project", "AGENTC"],
+      ["project", "ACME"],
       ["status", "todo"],
-      ["parent", "AGENTC-9"],
+      ["parent", "ACME-9"],
       ["label", "bug"],
       ["priority", "0"],
       ["priority", "1"],
@@ -1880,12 +1880,12 @@ describe("executeDispatchTool", () => {
       ["offset", "0"],
     ]);
     // A route that reaches nobody is what the owner audit reads, so the row says so.
-    expect(result.text).toContain("AGENTC-1 [todo] P1 First · 2 open asks · claimed by ");
+    expect(result.text).toContain("ACME-1 [todo] P1 First · 2 open asks · claimed by ");
     expect(result.text).toContain(" · route role:sre (nobody holds it right now)");
     expect(result.details).toEqual({
       issues: [
         {
-          key: "AGENTC-1",
+          key: "ACME-1",
           title: "First",
           status: "todo",
           priority: 1,
@@ -1988,7 +1988,7 @@ describe("executeDispatchTool", () => {
   test("dispatch_issues refuses Dispatch's unpaged array and names the change it lacks", async () => {
     const requests: URL[] = [];
     const issues = Array.from({ length: 5 }, (_, index) => ({
-      key: `AGENTC-${index}`,
+      key: `ACME-${index}`,
       title: `Issue ${index}`,
       status: "todo",
       priority: null,
@@ -2008,7 +2008,7 @@ describe("executeDispatchTool", () => {
     await expect(
       executeDispatchTool({
         tool: "dispatch_issues",
-        args: { project: "AGENTC", limit: 2 },
+        args: { project: "ACME", limit: 2 },
         cwd: "/workspace",
         host: "omp",
         config,
@@ -2019,7 +2019,7 @@ describe("executeDispatchTool", () => {
     ).rejects.toThrow("sjawhar/legion#1612");
     expect(requests).toHaveLength(1);
     expect(Object.fromEntries(requests[0]?.searchParams ?? [])).toEqual({
-      project: "AGENTC",
+      project: "ACME",
       limit: "2",
       offset: "0",
     });
@@ -2027,7 +2027,7 @@ describe("executeDispatchTool", () => {
 
   test("dispatch_issues returns the last 50 after offset 250 and renders the total", async () => {
     const issues = Array.from({ length: 300 }, (_, index) => ({
-      key: `AGENTC-${index}`,
+      key: `ACME-${index}`,
       title: `Issue ${index}`,
       status: "todo",
       priority: null,
@@ -2055,7 +2055,7 @@ describe("executeDispatchTool", () => {
 
     const defaultPage = await executeDispatchTool({
       tool: "dispatch_issues",
-      args: { project: "AGENTC" },
+      args: { project: "ACME" },
       cwd: "/workspace",
       host: "omp",
       config,
@@ -2064,12 +2064,12 @@ describe("executeDispatchTool", () => {
       fetchImpl: fetchImpl as typeof fetch,
     });
 
-    expect(defaultPage.text).toContain("50 issues in AGENTC (showing 1-50 of 300)");
+    expect(defaultPage.text).toContain("50 issues in ACME (showing 1-50 of 300)");
     expect(defaultPage.details).toMatchObject({ total: 300, offset: 0, limit: 50 });
 
     const result = await executeDispatchTool({
       tool: "dispatch_issues",
-      args: { project: "AGENTC", offset: 250 },
+      args: { project: "ACME", offset: 250 },
       cwd: "/workspace",
       host: "omp",
       config,
@@ -2078,9 +2078,9 @@ describe("executeDispatchTool", () => {
       fetchImpl: fetchImpl as typeof fetch,
     });
 
-    expect(result.text).toContain("50 issues in AGENTC (showing 251-300 of 300)");
-    expect(result.text).toContain("AGENTC-250 [todo] Issue 250");
-    expect(result.text).toContain("AGENTC-299 [todo] Issue 299");
+    expect(result.text).toContain("50 issues in ACME (showing 251-300 of 300)");
+    expect(result.text).toContain("ACME-250 [todo] Issue 250");
+    expect(result.text).toContain("ACME-299 [todo] Issue 299");
     expect(result.details).toMatchObject({ total: 300, offset: 250, limit: 50 });
     expect(result.details.issues).toHaveLength(50);
     // The page size and start reach Dispatch as the tool was given them, 50 when it names none.
@@ -2096,7 +2096,7 @@ describe("executeDispatchTool", () => {
 
     const result = await executeDispatchTool({
       tool: "dispatch_issues",
-      args: { project: "AGENTC", offset: 1 },
+      args: { project: "ACME", offset: 1 },
       cwd: "/workspace",
       host: "omp",
       config,
@@ -2105,7 +2105,7 @@ describe("executeDispatchTool", () => {
       fetchImpl: fetchImpl as typeof fetch,
     });
 
-    expect(result.text).toBe("No issues in AGENTC. (showing 0-0 of 1)");
+    expect(result.text).toBe("No issues in ACME. (showing 0-0 of 1)");
     expect(result.details).toMatchObject({ total: 1, offset: 1, limit: 50 });
     expect(result.details.issues).toEqual([]);
   });
@@ -2535,12 +2535,12 @@ describe("executeDispatchTool", () => {
         pathname,
         ...(init?.body === undefined ? {} : { body: JSON.parse(String(init.body)) }),
       });
-      if (pathname !== "/api/v1/issues/AGENTC-175") {
+      if (pathname !== "/api/v1/issues/ACME-175") {
         throw new Error(`unexpected request: ${method} ${pathname}`);
       }
       if (method === "GET") {
         return response({
-          key: "AGENTC-175",
+          key: "ACME-175",
           title: "Issue update tool",
           status: "in_progress",
           labels: [],
@@ -2549,7 +2549,7 @@ describe("executeDispatchTool", () => {
         });
       }
       return response({
-        key: "AGENTC-175",
+        key: "ACME-175",
         title: "Issue update tool",
         status: "testing",
         labels: [],
@@ -2561,7 +2561,7 @@ describe("executeDispatchTool", () => {
     const result = await executeDispatchTool({
       tool: "dispatch_issue_update",
       args: {
-        issue: "AGENTC-175",
+        issue: "ACME-175",
         status: "testing",
         external_links: [pullRequest, existingLink.url, pullRequest],
       },
@@ -2576,20 +2576,20 @@ describe("executeDispatchTool", () => {
 
     expect(result).toEqual({
       text:
-        `AGENTC-175: status in_progress -> testing; linked ${pullRequest} (2 links) ` +
-        "(not subscribed to AGENTC-175; envoy_subscribe notifications.dispatch.issue.AGENTC-175.> for every event on it)",
+        `ACME-175: status in_progress -> testing; linked ${pullRequest} (2 links) ` +
+        "(not subscribed to ACME-175; envoy_subscribe notifications.dispatch.issue.ACME-175.> for every event on it)",
       details: {
-        issue: "AGENTC-175",
+        issue: "ACME-175",
         status: "testing",
         external_links: [existingLink.url, pullRequest],
       },
     });
     expect(dispatchFollowNotice(result.details)).toBeNull();
     expect(requests).toEqual([
-      { method: "GET", pathname: "/api/v1/issues/AGENTC-175" },
+      { method: "GET", pathname: "/api/v1/issues/ACME-175" },
       {
         method: "PATCH",
-        pathname: "/api/v1/issues/AGENTC-175",
+        pathname: "/api/v1/issues/ACME-175",
         body: {
           status: "testing",
           external_links: [existingLink, { url: pullRequest }],
@@ -2607,7 +2607,7 @@ describe("executeDispatchTool", () => {
     const fetchImpl = async (_url: RequestInfo | URL, init?: RequestInit): Promise<Response> =>
       (init?.method ?? "GET") === "GET"
         ? response({
-            key: "AGENTC-175",
+            key: "ACME-175",
             title: "x",
             status: "todo",
             labels: [],
@@ -2624,7 +2624,7 @@ describe("executeDispatchTool", () => {
     await expect(
       executeDispatchTool({
         tool: "dispatch_issue_update",
-        args: { issue: "AGENTC-175", status: "testing" },
+        args: { issue: "ACME-175", status: "testing" },
         cwd: "/workspace",
         host: "omp",
         config,
@@ -2640,7 +2640,7 @@ describe("executeDispatchTool", () => {
     const fetchImpl = async (_url: RequestInfo | URL, init?: RequestInit): Promise<Response> =>
       (init?.method ?? "GET") === "GET"
         ? response({
-            key: "AGENTC-175",
+            key: "ACME-175",
             title: "x",
             status: "todo",
             labels: [],
@@ -2654,7 +2654,7 @@ describe("executeDispatchTool", () => {
     await expect(
       executeDispatchTool({
         tool: "dispatch_issue_update",
-        args: { issue: "AGENTC-175", external_links: [pullRequest] },
+        args: { issue: "ACME-175", external_links: [pullRequest] },
         cwd: "/workspace",
         host: "omp",
         config,
@@ -2676,7 +2676,7 @@ describe("executeDispatchTool", () => {
     const fetchImpl = async (_url: RequestInfo | URL, init?: RequestInit): Promise<Response> =>
       (init?.method ?? "GET") === "GET"
         ? response({
-            key: "AGENTC-175",
+            key: "ACME-175",
             title: "x",
             status: "todo",
             labels: [],
@@ -2690,7 +2690,7 @@ describe("executeDispatchTool", () => {
 
     const failure = await executeDispatchTool({
       tool: "dispatch_issue_update",
-      args: { issue: "AGENTC-175", external_links: [pullRequest] },
+      args: { issue: "ACME-175", external_links: [pullRequest] },
       cwd: "/workspace",
       host: "omp",
       config,
@@ -2703,7 +2703,7 @@ describe("executeDispatchTool", () => {
     );
 
     expect(failure).toBe(
-      "HTTP_500: PATCH http://dispatch.test/api/v1/issues/AGENTC-175 answered 500 Internal Server " +
+      "HTTP_500: PATCH http://dispatch.test/api/v1/issues/ACME-175 answered 500 Internal Server " +
         'Error with a body that is not Dispatch\'s error JSON ("500 Internal Server Error"), which ' +
         "looks like a proxy or gateway page rather than Dispatch's own answer, so the write may or " +
         "may not have reached Dispatch: check whether it took effect before retrying it."
@@ -2718,7 +2718,7 @@ describe("executeDispatchTool", () => {
     await expect(
       executeDispatchTool({
         tool: "dispatch_issue_update",
-        args: { issue: "AGENTC-175" },
+        args: { issue: "ACME-175" },
         cwd: "/workspace",
         host: "omp",
         config,
@@ -2735,8 +2735,8 @@ describe("executeDispatchTool", () => {
     }) as unknown as typeof fetch;
 
     for (const args of [
-      { issue: "AGENTC-175", status: "done" },
-      { issue: "AGENTC-175", status: "done", reason: " " },
+      { issue: "ACME-175", status: "done" },
+      { issue: "ACME-175", status: "done", reason: " " },
     ]) {
       await expect(
         executeDispatchTool({
@@ -2766,13 +2766,13 @@ describe("executeDispatchTool", () => {
         pathname,
         ...(init?.body === undefined ? {} : { body: JSON.parse(String(init.body)) }),
       });
-      if (pathname === "/api/v1/issues/AGENTC-175/messages") return answers.message();
-      if (pathname !== "/api/v1/issues/AGENTC-175") {
+      if (pathname === "/api/v1/issues/ACME-175/messages") return answers.message();
+      if (pathname !== "/api/v1/issues/ACME-175") {
         throw new Error(`unexpected request: ${method} ${pathname}`);
       }
       if (method === "GET") {
         return response({
-          key: "AGENTC-175",
+          key: "ACME-175",
           title: "x",
           status: "retro",
           labels: [],
@@ -2794,7 +2794,7 @@ describe("executeDispatchTool", () => {
   const closeCall = (fetchImpl: typeof fetch) =>
     executeDispatchTool({
       tool: "dispatch_issue_update",
-      args: { issue: "AGENTC-175", status: "done", reason: "Shipped in owner/repo#7." },
+      args: { issue: "ACME-175", status: "done", reason: "Shipped in owner/repo#7." },
       cwd: "/workspace",
       host: "omp",
       sessionId: "session-42",
@@ -2806,10 +2806,10 @@ describe("executeDispatchTool", () => {
 
   test("dispatch_issue_update posts the reason as a message, then closes the issue", async () => {
     const server = closingServer({
-      message: () => response({ id: "message-7", issue_key: "AGENTC-175" }),
+      message: () => response({ id: "message-7", issue_key: "ACME-175" }),
       patch: () =>
         response({
-          key: "AGENTC-175",
+          key: "ACME-175",
           title: "x",
           status: "done",
           labels: [],
@@ -2821,9 +2821,9 @@ describe("executeDispatchTool", () => {
     const result = await closeCall(server.fetchImpl);
 
     expect(server.requests.map(({ method, pathname }) => `${method} ${pathname}`)).toEqual([
-      "GET /api/v1/issues/AGENTC-175",
-      "POST /api/v1/issues/AGENTC-175/messages",
-      "PATCH /api/v1/issues/AGENTC-175",
+      "GET /api/v1/issues/ACME-175",
+      "POST /api/v1/issues/ACME-175/messages",
+      "PATCH /api/v1/issues/ACME-175",
     ]);
     expect(server.requests[1]?.body).toMatchObject({
       body: "Shipped in owner/repo#7.",
@@ -2832,10 +2832,10 @@ describe("executeDispatchTool", () => {
     expect(server.requests[2]?.body).toMatchObject({ status: "done" });
     expect(server.requests[2]?.body).not.toHaveProperty("reason");
     expect(result.text).toStartWith(
-      "AGENTC-175: reason posted as message message-7 (dispatch://AGENTC-175/message/message-7); status retro -> done"
+      "ACME-175: reason posted as message message-7 (dispatch://ACME-175/message/message-7); status retro -> done"
     );
     expect(result.details).toMatchObject({
-      issue: "AGENTC-175",
+      issue: "ACME-175",
       status: "done",
       message: "message-7",
     });
@@ -2890,7 +2890,7 @@ describe("executeDispatchTool", () => {
   // error's own message it joins a clause, or starts a sentence where the message ended one.
   test("dispatch_issue_update says whether a failed post of the reason leaves it posted", async () => {
     const answered = (status: string, page: string) =>
-      `HTTP_${status.slice(0, 3)}: POST http://dispatch.test/api/v1/issues/AGENTC-175/messages ` +
+      `HTTP_${status.slice(0, 3)}: POST http://dispatch.test/api/v1/issues/ACME-175/messages ` +
       `answered ${status} with a body that is not Dispatch's error JSON ("${page}"), which looks ` +
       "like a proxy or gateway page rather than Dispatch's own answer";
     const unknown =
@@ -2961,28 +2961,28 @@ describe("executeDispatchTool", () => {
 
   test("dispatch_issue_update names the posted reason when the close fails after it", async () => {
     const server = closingServer({
-      message: () => response({ id: "message-7", issue_key: "AGENTC-175" }),
+      message: () => response({ id: "message-7", issue_key: "ACME-175" }),
       patch: () => refusal(409, "ISSUE_CLAIMED", "claimed by session other"),
     });
 
     await expect(closeCall(server.fetchImpl)).rejects.toThrow(
       "ISSUE_CLAIMED: claimed by session other; the reason already landed as message message-7 " +
-        "(dispatch://AGENTC-175/message/message-7) but the issue did not close. Retrying this call " +
+        "(dispatch://ACME-175/message/message-7) but the issue did not close. Retrying this call " +
         "posts its reason again, so fix what refused the close, then retry with a reason that " +
         "points at message message-7"
     );
     expect(server.requests.map(({ method }) => method)).toEqual(["GET", "POST", "PATCH"]);
 
     const gateway = closingServer({
-      message: () => response({ id: "message-7", issue_key: "AGENTC-175" }),
+      message: () => response({ id: "message-7", issue_key: "ACME-175" }),
       patch: () => gatewayPage(404, "Not Found"),
     });
     await expect(closeCall(gateway.fetchImpl)).rejects.toThrow(
-      "HTTP_404: PATCH http://dispatch.test/api/v1/issues/AGENTC-175 answered 404 Not Found with a " +
+      "HTTP_404: PATCH http://dispatch.test/api/v1/issues/ACME-175 answered 404 Not Found with a " +
         'body that is not Dispatch\'s error JSON ("404 Not Found"), which looks like a proxy or ' +
         "gateway page rather than Dispatch's own answer, so a retry gets the same answer until the " +
         "Dispatch URL, or whatever answers in its place, is fixed; the reason already landed as " +
-        "message message-7 (dispatch://AGENTC-175/message/message-7) but the issue did not close. " +
+        "message message-7 (dispatch://ACME-175/message/message-7) but the issue did not close. " +
         "Retrying this call posts its reason again, so fix what refused the close, then retry with " +
         "a reason that points at message message-7"
     );
@@ -2998,7 +2998,7 @@ describe("executeDispatchTool", () => {
       [429, "Too Many Requests"],
     ] as const) {
       const server = closingServer({
-        message: () => response({ id: "message-7", issue_key: "AGENTC-175" }),
+        message: () => response({ id: "message-7", issue_key: "ACME-175" }),
         patch: () => gatewayPage(status, statusText),
       });
 
@@ -3008,11 +3008,11 @@ describe("executeDispatchTool", () => {
       );
 
       expect(failure).toBe(
-        `HTTP_${status}: PATCH http://dispatch.test/api/v1/issues/AGENTC-175 answered ${status} ` +
+        `HTTP_${status}: PATCH http://dispatch.test/api/v1/issues/ACME-175 answered ${status} ` +
           `${statusText} with a body that is not Dispatch's error JSON ("${status} ${statusText}"), ` +
           "which looks like a proxy or gateway page rather than Dispatch's own answer, so the write " +
           "did not reach Dispatch, and a retry may succeed; the reason already landed as message " +
-          "message-7 (dispatch://AGENTC-175/message/message-7) but the issue did not close. " +
+          "message-7 (dispatch://ACME-175/message/message-7) but the issue did not close. " +
           "Retrying this call posts its reason again, so retry with a reason that points at " +
           "message message-7"
       );
@@ -3027,12 +3027,12 @@ describe("executeDispatchTool", () => {
   // retrying posts the reason again.
   test("dispatch_issue_update says the close is unknown when the PATCH times out or 5xxes after the post", async () => {
     const unknown =
-      "; the reason already landed as message message-7 (dispatch://AGENTC-175/message/message-7), " +
+      "; the reason already landed as message message-7 (dispatch://ACME-175/message/message-7), " +
       "and the close may or may not have taken effect. Read the issue's status before retrying: " +
       "done means it closed; otherwise retry with a reason that points at message message-7, " +
       "since retrying this call posts its reason again";
     const unknownSentence =
-      " The reason already landed as message message-7 (dispatch://AGENTC-175/message/message-7), " +
+      " The reason already landed as message message-7 (dispatch://ACME-175/message/message-7), " +
       "and the close may or may not have taken effect. Read the issue's status before retrying: " +
       "done means it closed; otherwise retry with a reason that points at message message-7, " +
       "since retrying this call posts its reason again";
@@ -3041,13 +3041,13 @@ describe("executeDispatchTool", () => {
       [() => refusal(502, "HTTP_502", "Bad Gateway"), `HTTP_502: Bad Gateway${unknown}`],
       [
         () => gatewayPage(502, "Bad Gateway"),
-        "HTTP_502: PATCH http://dispatch.test/api/v1/issues/AGENTC-175 answered 502 Bad Gateway " +
+        "HTTP_502: PATCH http://dispatch.test/api/v1/issues/ACME-175 answered 502 Bad Gateway " +
           'with a body that is not Dispatch\'s error JSON ("502 Bad Gateway"), which looks like a ' +
           `proxy or gateway page rather than Dispatch's own answer${unknown}`,
       ],
     ] as const) {
       const server = closingServer({
-        message: () => response({ id: "message-7", issue_key: "AGENTC-175" }),
+        message: () => response({ id: "message-7", issue_key: "ACME-175" }),
         patch,
       });
 
@@ -3067,7 +3067,7 @@ describe("executeDispatchTool", () => {
       const method = init?.method ?? "GET";
       if (method === "GET") {
         return response({
-          key: "AGENTC-175",
+          key: "ACME-175",
           title: "Issue update tool",
           status: "in_progress",
           labels: [],
@@ -3078,19 +3078,19 @@ describe("executeDispatchTool", () => {
       }
       patches.push(JSON.parse(String(init?.body)));
       return response({
-        key: "AGENTC-175",
+        key: "ACME-175",
         title: "Issue update tool",
         status: "in_progress",
         labels: [],
         route: null,
-        parent: "AGENTC-9",
+        parent: "ACME-9",
         external_links: [],
       });
     };
 
     const result = await executeDispatchTool({
       tool: "dispatch_issue_update",
-      args: { issue: "AGENTC-175", parent: "AGENTC-9" },
+      args: { issue: "ACME-175", parent: "ACME-9" },
       cwd: "/workspace",
       host: "omp",
       sessionId: "session-42",
@@ -3100,14 +3100,14 @@ describe("executeDispatchTool", () => {
       fetchImpl: fetchImpl as typeof fetch,
     });
 
-    expect(result.text).toContain("parent -> AGENTC-9");
-    expect(patches).toEqual([expect.objectContaining({ parent: "AGENTC-9" })]);
+    expect(result.text).toContain("parent -> ACME-9");
+    expect(patches).toEqual([expect.objectContaining({ parent: "ACME-9" })]);
   });
 
   test("dispatch_issue_update passes components through and reports the attachment", async () => {
     const patches: unknown[] = [];
     const issue = {
-      key: "AGENTC-175",
+      key: "ACME-175",
       title: "Issue update tool",
       status: "done",
       labels: [],
@@ -3128,7 +3128,7 @@ describe("executeDispatchTool", () => {
     const run = (components: unknown) =>
       executeDispatchTool({
         tool: "dispatch_issue_update",
-        args: { issue: "AGENTC-175", components },
+        args: { issue: "ACME-175", components },
         cwd: "/workspace",
         host: "omp",
         sessionId: "session-42",
@@ -3156,18 +3156,18 @@ describe("executeDispatchTool", () => {
       const method = init?.method ?? "GET";
       if (method === "GET") {
         return response({
-          key: "AGENTC-175",
+          key: "ACME-175",
           title: "Issue update tool",
           status: "in_progress",
           labels: [],
           route: null,
-          parent: "AGENTC-9",
+          parent: "ACME-9",
           external_links: [],
         });
       }
       patches.push(JSON.parse(String(init?.body)));
       return response({
-        key: "AGENTC-175",
+        key: "ACME-175",
         title: "Issue update tool",
         status: "in_progress",
         labels: [],
@@ -3179,7 +3179,7 @@ describe("executeDispatchTool", () => {
 
     const result = await executeDispatchTool({
       tool: "dispatch_issue_update",
-      args: { issue: "AGENTC-175", parent: "" },
+      args: { issue: "ACME-175", parent: "" },
       cwd: "/workspace",
       host: "omp",
       sessionId: "session-42",
@@ -3196,7 +3196,7 @@ describe("executeDispatchTool", () => {
   test("dispatch_issue_update sends the priority in the patch and reports what it became", async () => {
     const patches: unknown[] = [];
     const issue = {
-      key: "AGENTC-175",
+      key: "ACME-175",
       title: "Issue update tool",
       status: "in_progress",
       priority: null,
@@ -3214,7 +3214,7 @@ describe("executeDispatchTool", () => {
     const run = (priority: unknown) =>
       executeDispatchTool({
         tool: "dispatch_issue_update",
-        args: { issue: "AGENTC-175", priority },
+        args: { issue: "ACME-175", priority },
         cwd: "/workspace",
         host: "omp",
         sessionId: "session-42",
@@ -3338,6 +3338,125 @@ describe("executeDispatchTool", () => {
       "/api/v1/artifacts/artifact-42/versions/3",
       "/api/v1/issues/DSP-42/comments?artifact=artifact-42",
     ]);
+  });
+
+  // Dispatch serves a file's content only as the bytes of one of its versions; its /text route
+  // refuses a file with 400 NOT_DOCUMENT, which every dispatch_doc_read of an uploaded .json, .yaml
+  // or .py file used to end in.
+  const fileIssue = {
+    key: "DSP-42",
+    primary_artifact_id: "artifact-42",
+    artifacts: [
+      {
+        id: "artifact-42",
+        slug: "spec",
+        name: "spec.md",
+        kind: "doc",
+        primary: true,
+        versions: [],
+      },
+      {
+        id: "file-7",
+        slug: "sweep-json",
+        name: "sweep.json",
+        kind: "file",
+        primary: false,
+        versions: [
+          { number: 1, mime: "application/json", size: 10 },
+          { number: 2, mime: "application/json", size: 17 },
+        ],
+      },
+      {
+        id: "image-8",
+        slug: "chart-png",
+        name: "chart.png",
+        kind: "image",
+        primary: false,
+        versions: [{ number: 1, mime: "image/png", size: 6 }],
+      },
+    ],
+    open_asks: [],
+  };
+  function fileServer(requests: string[]) {
+    return (async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      requests.push(target.pathname + target.search);
+      if (target.pathname === "/api/v1/issues/DSP-42") return response(fileIssue);
+      if (/^\/api\/v1\/artifacts\/(file-7|image-8)\/text$/.test(target.pathname)) {
+        return response({ code: "NOT_DOCUMENT", error: "artifact is not a document" }, 400);
+      }
+      const served: Record<string, [string, Uint8Array<ArrayBuffer>]> = {
+        "/api/v1/artifacts/file-7/versions/1": [
+          "application/json",
+          new TextEncoder().encode('{"rows":1}'),
+        ],
+        "/api/v1/artifacts/file-7/versions/2": [
+          "application/json",
+          new TextEncoder().encode('{"rows": [1, 2]}\n'),
+        ],
+        "/api/v1/artifacts/image-8/versions/1": [
+          "image/png",
+          new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a]),
+        ],
+      };
+      const file = served[target.pathname];
+      if (file !== undefined) {
+        return new Response(file[1], { status: 200, headers: { "Content-Type": file[0] } });
+      }
+      throw new Error(`unexpected request: ${target.pathname}`);
+    }) as typeof fetch;
+  }
+
+  test("dispatch_doc_read returns an uploaded file's text from its latest version or the one named", async () => {
+    const requests: string[] = [];
+    const read = (args: Record<string, unknown>) =>
+      executeDispatchTool({
+        tool: "dispatch_doc_read",
+        args,
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fileServer(requests),
+      });
+
+    expect(await read({ issue: "DSP-42", artifact: "sweep-json" })).toEqual({
+      text: 'File sweep.json: application/json, version 2, 17 bytes.\n\n{"rows": [1, 2]}\n',
+      details: { issue: "DSP-42" },
+    });
+    expect(await read({ ref: "dispatch://DSP-42/artifact/sweep-json@v1" })).toEqual({
+      text: 'File sweep.json: application/json, version 1 of 2, 10 bytes.\n\n{"rows":1}',
+      details: { issue: "DSP-42" },
+    });
+    expect(requests).toEqual([
+      "/api/v1/issues/DSP-42",
+      "/api/v1/artifacts/file-7/versions/2",
+      "/api/v1/issues/DSP-42",
+      "/api/v1/artifacts/file-7/versions/1",
+    ]);
+  });
+
+  test("dispatch_doc_read describes a binary upload instead of returning its bytes as text", async () => {
+    const requests: string[] = [];
+    const result = await executeDispatchTool({
+      tool: "dispatch_doc_read",
+      args: { issue: "DSP-42", artifact: "chart.png" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fileServer(requests),
+    });
+
+    expect(result).toEqual({
+      text:
+        "chart.png is an uploaded image/png file (version 1, 6 bytes) that is not UTF-8 text, so " +
+        "dispatch_doc_read cannot show it. GET /api/v1/artifacts/image-8/versions/1 serves its bytes.",
+      details: { issue: "DSP-42" },
+    });
+    expect(requests).toEqual(["/api/v1/issues/DSP-42", "/api/v1/artifacts/image-8/versions/1"]);
   });
 
   test("dispatch_doc_read starts project document and mark reads before any response resolves", async () => {
@@ -5467,9 +5586,9 @@ describe("executeDispatchTool", () => {
               node: {
                 kind: "message",
                 id: "message-7",
-                issue_key: "AGENTC-3",
-                project: "AGENTC",
-                ref: "dispatch://AGENTC-3/message/message-7",
+                issue_key: "ACME-3",
+                project: "ACME",
+                ref: "dispatch://ACME-3/message/message-7",
               },
               excerpt: {
                 text: "Decided in dispatch://DSP-42/ask/aaaaaaaa-0000-4000-8000-000000000042.\nShipping.",
@@ -5523,7 +5642,7 @@ describe("executeDispatchTool", () => {
         "comment-1 · user sami",
         "Body: JSON, please.",
         "Referenced by:",
-        "- mentions message dispatch://AGENTC-3/message/message-7 (Decided in dispatch://DSP-42/ask/aaaaaaaa-0000-4000-8000-000000000042. Shipping. · 2026-09-10T08:00:00Z)",
+        "- mentions message dispatch://ACME-3/message/message-7 (Decided in dispatch://DSP-42/ask/aaaaaaaa-0000-4000-8000-000000000042. Shipping. · 2026-09-10T08:00:00Z)",
         "Links:",
         "- followed_by session author-1 (2026-09-09T00:00:00Z)",
       ].join("\n"),

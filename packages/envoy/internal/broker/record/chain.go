@@ -49,6 +49,10 @@ func TerminalEventNames() []string {
 // chain check each use, by record kind, through these narrow func fields, so this package needs no
 // store access of its own.
 type ChainVerifier struct {
+	// Kind is the kind of record FetchRecord serves (KindAgentSecret or KindLauncherCredential),
+	// which decides who may have approved it (MayDecide).
+	Kind string
+
 	// Audience and Skew re-verify the embedded request object exactly as VerifyRequestObject
 	// enforced them when the record was first created.
 	Audience string
@@ -96,7 +100,7 @@ func (c *ChainVerifier) Verify(ctx context.Context, recordID string) (Body, erro
 		return Body{}, fmt.Errorf("%w: %d terminal decision events, want exactly one", ErrChainBroken, len(decisions))
 	case decisions[0].Event != "approved":
 		return Body{}, fmt.Errorf("%w: no approved event (decided %s)", ErrChainBroken, decisions[0].Event)
-	case !body.isApprover(decisions[0].Login):
+	case !MayDecide(c.Kind, body.Approver, decisions[0].Login):
 		return Body{}, fmt.Errorf("%w: approved by %q, not the record's approver %q", ErrChainBroken, decisions[0].Login, body.Approver)
 	}
 	return body, nil

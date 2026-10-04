@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
-	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -203,7 +202,7 @@ func browserDocumentService(t *testing.T) (*docs.Service, http.Handler, *store.S
 	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService = docs.New(docs.Deps{
 			Store: database, Settle: time.Hour, MarkWait: 50 * time.Millisecond,
-			Identity: identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: map[string]struct{}{"alice": {}}},
+			Identity: headerIdentity(database),
 		})
 		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
 		return documentService

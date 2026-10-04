@@ -1,7 +1,7 @@
 //go:build e2e
 
-// The Stage 4a harness's agent-secrets checks (AGENTC-393, spec Testing 10(b); red-team condition
-// 2): two pods on one ServiceAccount are each enrolled with the production broker as its own session
+// The Stage 4a harness's agent-secrets checks: two pods on one ServiceAccount are each enrolled
+// with the production broker as its own session
 // and cannot cross-use grants; a copied projected token alone, an old pod UID, and a self-enrollment
 // from inside a pod all fail; the daemon's revocation ends a pod's access when the pod is gone. The
 // harness plays the daemon's part exactly as supervise.Machine does: enroll on the hello's identity
@@ -56,10 +56,10 @@ func (r *liveRig) ensureEnrolled(c *liveClaim) (string, error) {
 
 // enroll is the daemon's enrollment of c's running pod: the identity its hello carried, the pod
 // UID the runtime returned as the incarnation, and a session id the harness mints (the stub agent
-// registers none). It carries no issue: the broker's rules pick a request's approver at request
-// time, never at enrollment. The id goes to the shim over the claim's connection. An enrollment
-// the harness holds for an earlier incarnation of the claim is revoked first, as letGo would have
-// when that pod went.
+// registers none). It carries no issue: each secret's owner and tier tags pick a request's
+// approver at request time, never at enrollment. The id goes to the shim over the claim's
+// connection. An enrollment the harness holds for an earlier incarnation of the claim is revoked
+// first, as letGo would have when that pod went.
 func (r *liveRig) enroll(c *liveClaim, reg registration) (string, error) {
 	if reg.identity == nil {
 		return "", fmt.Errorf("the hello of %s at generation %d carried no agent-secrets identity", c.token, reg.gen)
@@ -298,10 +298,10 @@ func (r *liveRig) checkSecretsSelfEnrollNegative() error {
 }
 
 // secrets-approval-ask: a request for the approval-gated secret comes back pending with a
-// credential-request record id (ruling 16: the broker's rules pick the approver at request time,
-// naming no issue); the harness prints it for the operator to approve on the Dispatch credential
-// page and polls, exactly as newLiveRig's attended machine login does, until it settles granted
-// (success), denied, or expired (both failures).
+// credential-request record id (ruling 16: the secret's owner and tier pick the approver at
+// request time, naming no issue); the harness prints it for the operator to approve on the
+// Dispatch credential page and polls, exactly as newLiveRig's attended machine login does, until it
+// settles granted (success), denied, or expired (both failures).
 func (r *liveRig) checkSecretsApprovalAsk() error {
 	worker := r.claim("worker")
 	if err := r.ensureRunning(worker); err != nil {

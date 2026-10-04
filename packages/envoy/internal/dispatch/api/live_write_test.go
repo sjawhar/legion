@@ -17,7 +17,6 @@ import (
 	"github.com/reearth/ygo/persistence"
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
-	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -35,8 +34,15 @@ func TestEditArtifactRollbackNeverReachesTheRoom(t *testing.T) {
 	f.connectPlainSocket(t)
 	responses := f.startFailingEdit(t)
 	waitForBeforeApply(t, f.failure)
-	if _, err := f.docs.ApplyOps(context.Background(), f.issue.PrimaryArtifactID, []model.EditOp{{Op: "replace", Find: "before", With: "before"}}, model.Actor{Kind: "user", ID: "alice"}, nil); err != nil {
-		t.Fatalf("apply live update before transactional edit: %v", err)
+	// A browser's typing reaches the room while the edit's transaction is held - every server
+	// write would wait for that transaction - here a character typed and taken back, which leaves
+	// the text as it was.
+	peer := f.connectPeer(t)
+	for _, text := range []string{"before!", "before"} {
+		peer.edit(t, func(tree *pmdoc.Node) error {
+			tree.Children[0].Children[0].Text = text
+			return nil
+		})
 	}
 	waitForDocumentUpdate(t, f.persistence)
 	f.waitForLockWaiter(t)
@@ -282,10 +288,8 @@ func newHeldWriteFixture(t *testing.T, settle time.Duration, configure ...func(*
 		f.docs = docs.New(docs.Deps{
 			Store:       database,
 			Persistence: f.persistence,
-			Identity: identity.HeaderIdentity{
-				Header: "X-Dispatch-User", AllowedLogins: map[string]struct{}{"alice": {}},
-			},
-			Settle: settle,
+			Identity:    headerIdentity(database),
+			Settle:      settle,
 		})
 		t.Cleanup(func() { _ = f.docs.Shutdown(context.Background()) })
 		f.failure = &postApplyFailureDocs{

@@ -48,6 +48,7 @@ import type {
   IssueReferences,
   IssueSummary,
   ListUsersResponse,
+  MachineLoginsResponse,
   Message,
   MessageDelivery,
   MessageRead,
@@ -115,13 +116,6 @@ export function isUnauthorized(error: unknown): boolean {
   return error instanceof ApiError && error.status === 401;
 }
 
-// A 403 with this code means the signed-in GitHub account is not on the allowlist — a
-// distinct outcome from "not signed in" (401) or a transient failure, and one no amount
-// of retrying resolves.
-export function isForbidden(error: unknown): boolean {
-  return error instanceof ApiError && error.status === 403 && error.code === "LOGIN_NOT_ALLOWED";
-}
-
 // The architecture TREE read answers this 404 for a project with no source — definitive like an
 // auth outcome, since retrying changes nothing. The source read itself answers `null` instead:
 // the question it asks has "no source" as an ordinary answer, and a 404 made every reader of an
@@ -150,15 +144,14 @@ export function isDocumentUnloadable(error: unknown): boolean {
   return error instanceof ApiError && error.status === 409 && error.code === "DOCUMENT_UNLOADABLE";
 }
 
-// The retry policy every query in the app shares: an auth outcome (401/403), a missing
-// architecture source, an unconfigured credential broker, a stored document outside Proof's
-// schema, or a stored history that cannot load is definitive and retrying it changes nothing; any
-// other failure (dropped connection, 5xx) is worth a couple of automatic attempts before surfacing
-// a Retry affordance to the user.
+// The retry policy every query in the app shares: an auth outcome (401), a missing architecture
+// source, an unconfigured credential broker, a stored document outside Proof's schema, or a
+// stored history that cannot load is definitive and retrying it changes nothing; any other failure
+// (dropped connection, 5xx) is worth a couple of automatic attempts before surfacing a Retry
+// affordance to the user.
 export function isRetryableQueryError(error: unknown): boolean {
   return (
     !isUnauthorized(error) &&
-    !isForbidden(error) &&
     !isSourceNotFound(error) &&
     !isCredentialFeatureOff(error) &&
     !isDocumentSchemaError(error) &&
@@ -348,7 +341,7 @@ export class DispatchApiClient {
     );
   }
 
-  /** The sign-in allowlist, sorted: the assignee picker's options. */
+  /** Everyone who has signed in, sorted by email: the assignee picker's options. */
   async listUsers(): Promise<DispatchUser[]> {
     return (await this.json<ListUsersResponse>("/api/v1/users")).users;
   }
@@ -685,13 +678,9 @@ export class DispatchApiClient {
     return this.response(`/api/github/rest/${path.replace(/^\/+/, "")}`, init);
   }
 
-  githubGraphql<T>(query: string, variables?: Record<string, unknown>): Promise<T> {
-    return this.post<T>("/api/github/graphql", { query, variables });
-  }
-
-  /** `GET /api/v1/credential-requests?approver=me`: every request waiting on the viewer, as
-   *  the Inbox's credential-requests section lists them, or `null` when this Dispatch has no
-   *  secrets broker. */
+  /** `GET /api/v1/credential-requests?approver=me`: every request the viewer may decide - the
+   *  ones naming the viewer, and the ones any signed-in person may decide - as the Inbox's
+   *  credential-requests section lists them, or `null` when this Dispatch has no secrets broker. */
   getCredentialPending(): Promise<CredentialPendingResponse | null> {
     return this.json<CredentialPendingResponse | null>(
       pathWithQuery("/api/v1/credential-requests", { approver: "me" })
@@ -733,16 +722,35 @@ export class DispatchApiClient {
     return this.post<CredentialRecord>("/api/v1/credential-requests/machine-lookup", { code });
   }
 
-  /** `GET /api/v1/credential-grants?approver=me`: every grant the viewer approved or operates. */
+  /** `GET /api/v1/credential-grants?approver=me`: every live grant of the viewer's sessions,
+   *  automatic or approved, and every grant the viewer approved. */
   getCredentialGrants(): Promise<CredentialGrantsResponse> {
     return this.json<CredentialGrantsResponse>(
       pathWithQuery("/api/v1/credential-grants", { approver: "me" })
     );
   }
 
-  /** Revoke a grant as the signed-in viewer, its approver or its enrollment's operator. */
+  /** Revoke a grant as the signed-in viewer, its approver or its enrollment's operator. The
+   *  operator's revoke of an automatic grant also ends that session's other automatic grants of
+   *  those secrets and makes it ask before it gets them again. */
   async revokeCredentialGrant(grantId: string): Promise<void> {
     await this.response(`/api/v1/credential-grants/${pathSegment(grantId)}/revoke`, {
+      body: JSON.stringify({}),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    });
+  }
+
+  /** `GET /api/v1/machine-logins`: the machine logins the viewer approved, their own machines'
+   *  and any service's, that are unexpired or expired with a session still running. */
+  getMachineLogins(): Promise<MachineLoginsResponse> {
+    return this.json<MachineLoginsResponse>("/api/v1/machine-logins");
+  }
+
+  /** Revoke a machine login the viewer approved, expired or not: Dispatch names the viewer as the
+   *  person revoking, and every session the login enrolled ends with it. */
+  async revokeMachineLogin(credentialId: string): Promise<void> {
+    await this.response(`/api/v1/machine-logins/${pathSegment(credentialId)}/revoke`, {
       body: JSON.stringify({}),
       headers: { "Content-Type": "application/json" },
       method: "POST",

@@ -19,7 +19,6 @@ import (
 	"github.com/reearth/ygo/crdt"
 	ygws "github.com/reearth/ygo/provider/websocket"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
-	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -99,7 +98,7 @@ func TestAHealthyRoomUnderWritesIsNeverRefused(t *testing.T) {
 				return
 			default:
 			}
-			canonical, err := service.ReplaceText(context.Background(), artifactID, bodies[round%len(bodies)], alice)
+			canonical, err := joinedReplaceText(service, artifactID, bodies[round%len(bodies)], alice)
 			if err != nil {
 				result.err = fmt.Errorf("write round %d: %w", round, err)
 				written <- result
@@ -327,7 +326,7 @@ func TestARoomOnlyTheAPITouchesLeavesWithinTheIdleTimeout(t *testing.T) {
 		})
 	}
 
-	written, err := service.ReplaceText(ctx, artifactID, "Edited by an agent.\n", agent)
+	written, err := joinedReplaceText(service, artifactID, "Edited by an agent.\n", agent)
 	if err != nil {
 		t.Fatalf("agent edit: %v", err)
 	}
@@ -466,7 +465,7 @@ func TestTheUpdateObserverNeverRendersAWriteHalfWay(t *testing.T) {
 	go func() {
 		defer writers.Done()
 		for round := 0; time.Now().Before(deadline); round++ {
-			if err := service.ProjectMark(ctx, artifactID, fmt.Sprintf("projection-%d", round), MarkRecord{
+			if err := joinedProjectMark(service, artifactID, fmt.Sprintf("projection-%d", round), MarkRecord{
 				Kind: "comment", By: "user:bob", CreatedAt: time.Now().UTC().Format(time.RFC3339Nano), Text: "note",
 			}, bob); err != nil {
 				failures <- fmt.Errorf("projection %d: %w", round, err)
@@ -534,7 +533,7 @@ func newRetiringRoomService(t *testing.T) (*Service, *store.Store) {
 	service := New(Deps{
 		Store:     database,
 		Events:    events.NewBroker(),
-		Identity:  identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: map[string]struct{}{"alice": {}}},
+		Identity:  headerIdentity(database),
 		ServerURL: "https://dispatch.example",
 		Settle:    time.Hour,
 	})
@@ -565,8 +564,8 @@ func TestAPublishSurvivesItsRoomsWorkerRetiringUnderIt(t *testing.T) {
 		retire func(service *Service, artifactID string) error
 	}{
 		{"control: nothing closes the room", false, func(*Service, string) error { return nil }},
-		{"CloseRoom closes the room", false, func(service *Service, artifactID string) error {
-			return service.srv.CloseRoom(artifactID, true)
+		{"ygo's CloseRoom closes the room", false, func(service *Service, artifactID string) error {
+			return service.srv.Server.CloseRoom(artifactID, true)
 		}},
 		{"SetIssueClosed closes the room", false, func(service *Service, _ string) error {
 			service.SetIssueClosed(context.Background(), "DOC-1", true)

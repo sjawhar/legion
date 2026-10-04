@@ -13,6 +13,7 @@ import {
   patchIssue,
 } from "./api";
 import { recordClipboard } from "./clipboard";
+import { needsYouCards } from "./editor";
 import { clearIssueCreator, resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -338,7 +339,7 @@ test("issue pages show subscribers, external-link fallbacks, and children", asyn
     // Without GitHub App credentials the link still reads as the reference, never the raw address.
     await expect(page.getByRole("link", { name: "#815 sjawhar/legion" })).toHaveAttribute(
       "title",
-      "GitHub details are unavailable for this sign-in."
+      "GitHub details are unavailable for this repository."
     );
     await expect(
       page.getByRole("link", { name: "https://github.com/sjawhar/legion/issues/815" })
@@ -463,7 +464,7 @@ test("a quote-anchored ask identifies its document in the margin and Conversatio
     if (testInfo.project.name === "iphone") {
       await page.getByRole("button", { name: "Open review panel (1 open ask)" }).click();
     }
-    const marginCard = page.getByRole("region", { name: "Needs you" }).getByTestId(`ask-${ask.id}`);
+    const marginCard = needsYouCards(page).getByTestId(`ask-${ask.id}`);
     await expect(marginCard.getByRole("link", { name: "spec.md" })).toHaveAttribute(
       "href",
       documentHref
@@ -963,11 +964,11 @@ test("issue header reassigns through the Assignee picker; a personal token's iss
     await page.goto(`/issues/${issue.key}`);
     const control = page.getByLabel(`Assignee of ${issue.key}`);
     await expect(control).toHaveValue("bob");
-    // The allowlist is read only once the reader reaches for the control.
+    // Who has signed in is read only once the reader reaches for the control.
     await control.focus();
     await expect(control.locator("option")).toHaveText(["Unassigned", "alice", "bob"]);
 
-    // Anyone on the allowlist may reassign: Alice takes it, and the header shows her at once.
+    // Anyone signed in may reassign: Alice takes it, and the header shows her at once.
     const patch = page.waitForRequest(
       (request) =>
         request.method() === "PATCH" &&

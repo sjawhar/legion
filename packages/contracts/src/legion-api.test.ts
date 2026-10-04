@@ -9,6 +9,7 @@ import {
   LegionControllerSecretResponse,
   LegionEmptyResponse,
   LegionErrorResponse,
+  LegionEscalateRequest,
   LegionGateRegisterRequest,
   LegionGitCredentialResponse,
   LegionGitHubTokenResponse,
@@ -79,7 +80,53 @@ test("every Go-written fixture parses through the strict schema", () => {
   }
 });
 
-test("every Stage 3 workflow request has a strict schema", () => {
+test("state accepts optional fields emitted by later workflow slices", () => {
+  const current = fixture("state.json");
+  expect(LegionStateResponse.safeParse(current).success).toBeTrue();
+
+  const later = fixture("state.json") as {
+    admission: Record<string, unknown>;
+    issues: Record<string, { phase: string; slot?: Record<string, unknown> }>;
+  };
+  later.admission.free = 1;
+  later.issues["LEGION-208"]!.phase = "integrating";
+  later.issues["LEGION-208"]!.slot!.lentTo = "LEGION-209";
+
+  expect(LegionStateResponse.safeParse(later).success).toBeTrue();
+});
+
+test("state rejects malformed optional workflow fields", () => {
+  const negativeFree = fixture("state.json") as { admission: Record<string, unknown> };
+  negativeFree.admission.free = -1;
+  expect(LegionStateResponse.safeParse(negativeFree).success).toBeFalse();
+
+  const malformedLender = fixture("state.json") as {
+    issues: Record<string, { slot?: Record<string, unknown> }>;
+  };
+  malformedLender.issues["LEGION-208"]!.slot!.lentTo = "not an issue key";
+  expect(LegionStateResponse.safeParse(malformedLender).success).toBeFalse();
+});
+
+test("state accepts the existing done phase", () => {
+  const completed = fixture("state.json") as {
+    issues: Record<string, { phase: string }>;
+  };
+  completed.issues["LEGION-208"]!.phase = "done";
+
+  expect(LegionStateResponse.safeParse(completed).success).toBeTrue();
+});
+
+test("a backward move rejects future read-only phases", () => {
+  expect(
+    LegionPhaseBackwardRequest.safeParse({
+      grantId: "grant-208",
+      to: "integrating",
+      reason: "test failed",
+    }).success
+  ).toBeFalse();
+});
+
+test("every workflow request has a strict schema", () => {
   const requests: ReadonlyArray<readonly [string, z.ZodType, Record<string, unknown>]> = [
     [
       "grant",
@@ -123,6 +170,11 @@ test("every Stage 3 workflow request has a strict schema", () => {
       LegionPhaseRetryRequest,
       { grantId: "grant-208", issue: "LEGION-208", decision: "retry" },
     ],
+    [
+      "escalate",
+      LegionEscalateRequest,
+      { grantId: "grant-208", issue: "LEGION-208", reason: "needs controller triage" },
+    ],
     ["signoff", LegionSignOffRequest, { grantId: "grant-208", issue: "LEGION-208" }],
     [
       "root close",
@@ -145,6 +197,13 @@ test("every Stage 3 workflow request has a strict schema", () => {
       schema.safeParse(missing).success,
       `${name} refuses a missing required field`
     ).toBeFalse();
+  }
+});
+
+test("an escalation rejects empty required fields", () => {
+  const request = { grantId: "grant-208", issue: "LEGION-208", reason: "needs controller triage" };
+  for (const field of ["grantId", "issue", "reason"] as const) {
+    expect(LegionEscalateRequest.safeParse({ ...request, [field]: "" }).success).toBeFalse();
   }
 });
 

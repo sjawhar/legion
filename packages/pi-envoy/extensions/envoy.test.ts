@@ -737,7 +737,7 @@ function responseWithRegistration(
 const dispatchToolNames = dispatchToolSpecs.map((spec) => spec.name);
 
 const UNASKED_WAIT_NUDGE =
-  "You just said you are waiting on a human for something no open ask in Dispatch covers. Open an ask for it now with dispatch_ask, naming exactly what you need and from whom.";
+  "You just said you are waiting on a human for something no open ask in Dispatch covers. Open it now: a decision block in the document it concerns (dispatch_doc_edit with an ask block), or dispatch_ask for a to-do only a human can do, naming exactly what you need and from whom.";
 
 /** Custom-message type of the nudge itself, which a session hears amid other deliveries. */
 const ASK_REMINDER_TYPE = "dispatch-ask-reminder";
@@ -2106,6 +2106,202 @@ describe("envoy OMP extension", () => {
     await session.stop();
     expect(session.fixture.deliveries).toEqual([]);
     expect(session.asked).toEqual([]);
+  });
+
+  // Whether a document edit opened an ask is the server's reading of the document it wrote
+  // (`advice.decision_blocks_added`), never a reading of the operations' markdown here: whether an
+  // opener is a block depends on where it lands, as code or inside a blockquote or a list item.
+  test("a dispatch_doc_edit spends the check exactly when the server reports a decision block it added", async () => {
+    // The query creates a fresh extension module with isolated module-level awareness state.
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-document-block");
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_document_block", () => ({}));
+    const editThenStop = async (
+      markdown: string,
+      advice: Record<string, unknown> | undefined
+    ): Promise<void> => {
+      await session.userTurn();
+      await session.toolResult({
+        toolName: "dispatch_doc_edit",
+        toolCallId: `call-${markdown.length}`,
+        input: { issue: "DSP-1", ops: [{ op: "insert", markdown, after: "end" }] },
+        details: advice === undefined ? { issue: "DSP-1" } : { issue: "DSP-1", advice },
+        isError: false,
+      });
+      await session.stop();
+    };
+
+    // A block in a blockquote, which the server reads as one: the agent asked, so no check runs.
+    await editThenStop("> :::ask{#window}\n> Which deployment window?\n> :::", {
+      issue_status: "in_progress",
+      decision_blocks_added: 1,
+    });
+    expect(session.asked).toEqual([]);
+    expect(session.fixture.deliveries).toEqual([]);
+
+    // An example fenced four columns into a nested list item, which the server holds as code: the
+    // stop checks, and the agent waiting with nothing asked gets the reminder.
+    await editThenStop(
+      "- Format notes:\n  - Example:\n\n    ```md\n    :::ask{#example}\n    Which?\n    :::\n    ```",
+      { issue_status: "in_progress", decision_blocks_added: 0 }
+    );
+    expect(session.asked).toHaveLength(1);
+    expect(session.fixture.deliveries).toEqual([
+      expect.objectContaining({ content: UNASKED_WAIT_NUDGE }),
+    ]);
+
+    // A Dispatch server predating the count reports none, so the stop still checks.
+    await editThenStop(":::ask{#region}\nWhich region?\n:::", undefined);
+    expect(session.asked).toHaveLength(2);
+    expect(session.fixture.deliveries).toHaveLength(2);
+  });
+
+  test("a tool-device write to a Dispatch device owes no check after the call it ran", async () => {
+    // Oh My Pi reports a tool-device call (a `write` to `xd://<tool>` carrying the tool's JSON
+    // arguments) twice: as the tool, then as the `write` (measured on 18.4.9).
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-tool-device");
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_tool_device", () => ({}));
+    const report = (tool: string, input: Record<string, unknown>, details = {}) =>
+      session.toolResult({ toolName: tool, toolCallId: tool, input, details, isError: false });
+    const deviceWrite = (tool: string, input: Record<string, unknown>) =>
+      session.toolResult({
+        toolName: "write",
+        toolCallId: tool,
+        input: { path: `xd://${tool}`, content: JSON.stringify(input) },
+        details: { xdev: { tool, mode: "execute" } },
+        isError: false,
+      });
+    const device = async (
+      tool: string,
+      input: Record<string, unknown>,
+      details: Record<string, unknown> = {}
+    ): Promise<void> => {
+      await report(tool, input, details);
+      await deviceWrite(tool, input);
+    };
+    const ask = { issue: "DSP-1", question: "Rotate the token?" };
+
+    await session.userTurn();
+    await device(
+      "dispatch_doc_edit",
+      {
+        issue: "DSP-1",
+        artifact: "spec",
+        ops: [{ op: "insert", markdown: ":::ask{#window}\nWhich deployment window?\n:::" }],
+      },
+      { issue: "DSP-1", advice: { decision_blocks_added: 1 } }
+    );
+    await session.stop();
+    await session.userTurn();
+    await device("dispatch_ask", ask);
+    await device("dispatch_comment", { issue: "DSP-1", body: "Asked above." });
+    await session.stop();
+    expect(session.asked).toEqual([]);
+
+    // A parallel call's result can land between the two reports. Its work owes a check, which the
+    // `write` does not spend by counting the same ask a second time.
+    await session.userTurn("next");
+    await report("dispatch_ask", ask);
+    await session.toolResult({
+      toolName: "bash",
+      toolCallId: "call-work",
+      input: { command: "ls" },
+      details: {},
+      isError: false,
+    });
+    await deviceWrite("dispatch_ask", ask);
+    await session.stop();
+    expect(session.asked).toHaveLength(1);
+  });
+
+  test("a tool-device write to a non-Dispatch device still counts as work", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-device-work");
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_device_work", () => ({}));
+    await session.userTurn();
+    await session.toolResult({
+      toolName: "dispatch_ask",
+      toolCallId: "call-ask",
+      input: { issue: "DSP-1", question: "Rotate the token?" },
+      details: { ask: "ask-1" },
+      isError: false,
+    });
+    // Oh My Pi's own devices (`resolve` applies a staged edit) report only the write.
+    await session.toolResult({
+      toolName: "write",
+      toolCallId: "call-resolve",
+      input: { path: "xd://resolve", content: "apply" },
+      details: { xdev: { tool: "resolve", mode: "execute" } },
+      isError: false,
+    });
+    await session.stop();
+    expect(session.asked).toHaveLength(1);
+  });
+
+  // Oh My Pi answers empty, `?` or `help` content written to `xd://<tool>` with the tool's docs
+  // (`details.xdev.mode` "help"): the tool never runs, so only the write is reported. That write
+  // opens no ask, so it must not spend the check the turn owes.
+  test("a tool-device help write to dispatch_ask or dispatch_request_approval spends no check", async () => {
+    for (const tool of ["dispatch_ask", "dispatch_request_approval"]) {
+      const { default: envoyExtension } = await import(`./envoy.ts?ask-nudge-device-help-${tool}`);
+      const session = await bootAskNudge(
+        envoyExtension,
+        `ses_nudge_device_help_${tool}`,
+        () => ({})
+      );
+      await session.userTurn();
+      await session.toolResult({
+        toolName: "write",
+        toolCallId: `call-help-${tool}`,
+        input: { path: `xd://${tool}`, content: "?" },
+        details: { xdev: { tool, mode: "help" } },
+        isError: false,
+      });
+      await session.stop();
+      expect(session.fixture.deliveries).toEqual([
+        expect.objectContaining({ content: UNASKED_WAIT_NUDGE }),
+      ]);
+    }
+  });
+
+  test("a document written through dispatch_issue or dispatch_artifact spends the check only when it holds a decision block", async () => {
+    // The query creates a fresh extension module with isolated module-level awareness state.
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-document-upload");
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_document_upload", () => ({}));
+
+    // The server's count, which a `path` upload carries too, not the input's text.
+    await session.userTurn();
+    await session.toolResult({
+      toolName: "dispatch_issue",
+      toolCallId: "call-issue",
+      input: { project: "DSP", title: "Saved carts" },
+      details: { issue: "DSP-1", advice: { decision_blocks: 1 } },
+      isError: false,
+    });
+    await session.stop();
+    expect(session.fixture.deliveries).toEqual([]);
+
+    await session.userTurn();
+    await session.toolResult({
+      toolName: "dispatch_artifact",
+      toolCallId: "call-artifact",
+      input: { issue: "DSP-1", name: "spec.md", path: "/tmp/spec.md" },
+      details: { issue: "DSP-1", advice: { decision_blocks: 2 } },
+      isError: false,
+    });
+    await session.stop();
+    expect(session.fixture.deliveries).toEqual([]);
+
+    await session.userTurn();
+    await session.toolResult({
+      toolName: "dispatch_artifact",
+      toolCallId: "call-artifact-plain",
+      input: { issue: "DSP-1", name: "notes.md", content: "Notes." },
+      details: { issue: "DSP-1", advice: { decision_blocks: 0 } },
+      isError: false,
+    });
+    await session.stop();
+    expect(session.fixture.deliveries).toEqual([
+      expect.objectContaining({ content: UNASKED_WAIT_NUDGE }),
+    ]);
   });
 
   test("the five-check period budget applies while the session holds open asks", async () => {

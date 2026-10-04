@@ -30,7 +30,7 @@ import (
 // reads issued and exits 0, since the helper still holds the first login's credential, and says on
 // stderr that the most recent login was denied. While the credential is held, login-status ends
 // with the expiry the broker minted it with, a week out, and a box the helper enrolls with it
-// reads its grants through `agent-secrets self` and a proxy-delivery name through the client's
+// reads its grants through `agent-secrets self` and an agent-tier secret's value through the client's
 // grant values. Once the broker refuses that credential, login-status exits 1 saying so, and a
 // re-login denied while the helper holds no credential reads denied and exits 1.
 func TestLoginStatusFollowsTheCredentialTheHelperHolds(t *testing.T) {
@@ -61,7 +61,7 @@ func TestLoginStatusFollowsTheCredentialTheHelperHolds(t *testing.T) {
 		t.Fatalf("login-status after the approved login: exit %d, stdout %q, stderr %q; want 0, %q, %q…%q", exit, stdout, stderr, "issued\n", expiry, expiryEnd)
 	}
 
-	// --- a box the helper enrolls: self lists its grant, and a proxy secret comes back unreleased ---
+	// --- a box the helper enrolls: self lists its grant, and its agent-tier secret comes back ---
 	boxKey, err := proof.NewKey()
 	if err != nil {
 		t.Fatal(err)
@@ -75,18 +75,18 @@ func TestLoginStatusFollowsTheCredentialTheHelperHolds(t *testing.T) {
 		t.Fatalf("enroll-box with the approved login's credential: %+v %v", enrolled, err)
 	}
 	keyDir := writeKeyDir(t, boxKey, enrolled.EnrollmentID)
-	stdout, stderr, exit := runAgentSecrets(t, binary, rig.URL, keyDir, nil, "request", "TEST_PROXY_SECRET", "--json")
+	stdout, stderr, exit := runAgentSecrets(t, binary, rig.URL, keyDir, nil, "request", "TEST_AUTO_SECRET", "--json")
 	var granted RequestResult
 	if err := json.Unmarshal([]byte(stdout), &granted); exit != 0 || err != nil || granted.State != "granted" || granted.GrantID == nil {
-		t.Fatalf("request TEST_PROXY_SECRET from the box: exit %d, stdout %q, stderr %q; want it granted at once", exit, stdout, stderr)
+		t.Fatalf("request TEST_AUTO_SECRET from the box: exit %d, stdout %q, stderr %q; want it granted at once", exit, stdout, stderr)
 	}
 	wantGrant := "grant: " + *granted.GrantID + " (request " + granted.RequestID + ", expires "
 	if stdout, stderr, exit := runAgentSecrets(t, binary, rig.URL, keyDir, nil, "self"); exit != 0 || !strings.Contains(stdout, wantGrant) {
 		t.Fatalf("self after the grant: exit %d, stdout %q, stderr %q; want a line starting %q", exit, stdout, stderr, wantGrant)
 	}
 	values, err := newClient(rig.URL).GrantValues(context.Background(), &fileSigner{key: boxKey, enrollmentID: enrolled.EnrollmentID}, *granted.GrantID)
-	if err != nil || len(values.Values) != 0 || len(values.ProxyOnly) != 1 || values.ProxyOnly[0] != "TEST_PROXY_SECRET" {
-		t.Fatalf("grant values of the proxy secret: %+v %v; want no value and proxy_only [TEST_PROXY_SECRET]", values, err)
+	if err != nil || values.Values["TEST_AUTO_SECRET"] != "test-auto-secret-v1" {
+		t.Fatalf("grant values of the agent-tier secret: %+v %v; want TEST_AUTO_SECRET released", values, err)
 	}
 
 	// --- a re-login the operator denies: the first credential is still held ---

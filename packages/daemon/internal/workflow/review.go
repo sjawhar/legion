@@ -3,6 +3,7 @@ package workflow
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -16,14 +17,8 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
-// checks applies a CI settlement to the pull request and then decides, with the issue's phase in
-// hand, what it moves. An exhausted fix-attempt count is posted and told to the architect. In
-// reviewing, the round decides what the settlement comes to (reviewRound, settleRound): it can be
-// what an approval waits for, a red at a code head sends the work back, and a round the settlement
-// leaves stuck another way than before is told. In testing, a red at a code head
-// (classify.RedSendsBack) sends the work back. The implementer's task and the architect's
-// checks-red notice name the failing checks, and the implementer's next push is a counted fix
-// attempt, as any new head on a red verdict is (classify.AdvancePullRequestHead).
+// checks applies a CI settlement to the pull request and then decides what it moves
+// (decideChecks).
 func (e *Engine) checks(ctx context.Context, tx pgx.Tx, fact intake.PullRequestChecks) (intake.Result, error) {
 	pr, err := e.pullRequest(ctx, tx, fact.Repo, fact.Number)
 	if err != nil || pr == nil {
@@ -33,7 +28,7 @@ func (e *Engine) checks(ctx context.Context, tx pgx.Tx, fact intake.PullRequestC
 	// A handoff push can start no CI of its own (GitHub's skip-checks trailer), so the settlement
 	// that stands for the head can be of the code head it replaced, arriving after it. A
 	// settlement is for the commit it names, never the head by default.
-	candidate := classify.SettlementCandidate{Head: fact.HeadSHA, CheckRuns: fact.CheckRuns, Generation: fact.Generation, Snapshot: fact.Snapshot, Verdict: fact.Verdict, Failing: fact.Failing}
+	candidate := classify.SettlementCandidate{Head: fact.HeadSHA, CheckRuns: fact.CheckRuns, Generation: fact.Generation, Snapshot: fact.Snapshot, Failing: fact.Failing, Cancelled: fact.Cancelled}
 	var stands bool
 	if *pr, stands = classify.SettlementFor(*pr, candidate); !stands {
 		return intake.Result{}, nil
@@ -43,14 +38,48 @@ func (e *Engine) checks(ctx context.Context, tx pgx.Tx, fact intake.PullRequestC
 	if !applied {
 		return intake.Result{}, nil
 	}
+	return intake.Result{}, e.decideChecks(ctx, tx, pr, prior, byChecks)
+}
+
+// requiredChecks records what the pull request's base branch requires, as the daemon read it
+// (intake.RequiredChecks): its required checks, and its required workflows with their runs'
+// results at the head read. It then decides what the head's verdict now comes to (decideChecks):
+// only a required check or workflow makes a head red (classify.HeadVerdict), so a new read can end
+// a round that waited on a red the base branch never required or on a required workflow's run, send
+// work back for a newly required check or a required workflow that failed, and give a head its
+// first verdict when its set was never read. A read that says what is recorded changes nothing.
+func (e *Engine) requiredChecks(ctx context.Context, tx pgx.Tx, fact intake.RequiredChecks) (intake.Result, error) {
+	pr, err := e.pullRequest(ctx, tx, fact.Repo, fact.Number)
+	if err != nil || pr == nil || pr.RequiredReadUnchanged(fact.Names, fact.Workflows, fact.WorkflowsHead) {
+		return intake.Result{}, err
+	}
+	prior := *pr
+	pr.Required = append([]string{}, fact.Names...)
+	pr.Workflows = append([]record.RequiredWorkflow{}, fact.Workflows...)
+	pr.WorkflowsHead = fact.WorkflowsHead
+	return intake.Result{}, e.decideChecks(ctx, tx, pr, prior, byRequired)
+}
+
+// decideChecks records pr, its checks verdict changed from prior's by a CI settlement or a new
+// read of what the base branch requires (the fact by names), and decides, with the issue's phase
+// in hand, what it moves. An exhausted fix-attempt count is posted and told to the architect. In
+// reviewing, the round decides what the verdict comes to (reviewRound, settleRound): it can be what
+// an approval waits for, a red at a code head sends the work back, and a round the verdict leaves
+// stuck another way than before is told. In awaiting_merge, the head's own red withdraws the READY
+// (classify.RedWithdrawsReady), and the transition tells the merge queue role so (withdrawReady).
+// In testing, a red at a code head (classify.RedSendsBack) sends the work back. The implementer's
+// task and the architect's checks-red notice name the red required checks and workflows, and the
+// implementer's next push is a counted fix attempt, as any new head on a red verdict is
+// (classify.AdvancePullRequestHead).
+func (e *Engine) decideChecks(ctx context.Context, tx pgx.Tx, pr *record.PullRequest, prior record.PullRequest, by string) error {
 	var blocked bool
 	*pr, blocked = classify.BlockFixAttempt(*pr, e.cfg.MaxFixAttempts)
 	if err := e.store.PutPullRequest(ctx, tx, *pr); err != nil {
-		return intake.Result{}, err
+		return err
 	}
 	issue, err := e.store.Issue(ctx, tx, pr.Issue)
 	if err != nil {
-		return intake.Result{}, err
+		return err
 	}
 	if blocked {
 		// Linger holds a member of a closed tree where it stood (record.TreeLingers): the exhausted
@@ -58,41 +87,49 @@ func (e *Engine) checks(ctx context.Context, tx pgx.Tx, fact intake.PullRequestC
 		// architect.
 		if issue != nil {
 			if lingers, err := record.TreeLingers(ctx, e.store, tx, issue.Tree); err != nil || lingers {
-				return intake.Result{}, err
+				return err
 			}
 		}
 		message := fmt.Sprintf("Pull request #%d reached max_fix_attempts=%d.", pr.Number, e.cfg.MaxFixAttempts)
 		if err := e.enqueue(ctx, tx, pr.Issue, record.MessagePost{Body: message}); err != nil {
-			return intake.Result{}, err
+			return err
 		}
-		return intake.Result{}, e.notice(ctx, tx, pr.Issue, record.Notice{Kind: "pr-blocked", Role: claim.RoleArchitect, Reason: message})
+		return e.notice(ctx, tx, pr.Issue, record.Notice{Kind: "pr-blocked", Role: claim.RoleArchitect, Reason: message})
 	}
 	if issue == nil {
-		return intake.Result{}, nil
+		return nil
 	}
-	if issue.Phase == phase.Reviewing {
+	switch issue.Phase {
+	case phase.Reviewing:
 		reviewer, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleReviewer)
 		if err != nil {
-			return intake.Result{}, err
+			return err
 		}
-		_, err = e.settleRound(ctx, tx, *issue, reviewer, pr, reviewRound(*issue, reviewer, &prior), byChecks)
-		return intake.Result{}, err
+		_, err = e.settleRound(ctx, tx, *issue, reviewer, pr, reviewRound(*issue, reviewer, &prior), by)
+		return err
+	case phase.AwaitingMerge:
+		if !classify.RedWithdrawsReady(*pr) {
+			return nil
+		}
+	default:
+		if !classify.RedSendsBack(*pr) {
+			return nil
+		}
 	}
-	if !classify.RedSendsBack(*pr) {
-		return intake.Result{}, nil
-	}
-	return intake.Result{}, e.transition(ctx, tx, *issue, TriggerChecksRed, "", record.PhaseRow{}, pr, redAt(*pr))
+	return e.transition(ctx, tx, *issue, TriggerChecksRed, "", record.PhaseRow{}, pr, redAt(*pr))
 }
 
-// redAt is what the red verdict standing for the pull request's head says: the head, and the checks
-// failing there. A red that names no failing check (classify.EffectiveOutcome keeps the verdict
-// when nothing names one) says so plainly rather than ending in an empty list.
+// redAt is what the red verdict standing for the pull request's head says: the head, and each check
+// and workflow the base branch requires that failed there (classify.HeadChecks).
 func redAt(pr record.PullRequest) string {
-	reason := "CI is red at " + pr.HeadSHA
-	if len(pr.Failing) > 0 {
-		reason += ": " + strings.Join(pr.Failing, ", ")
+	checks, _ := classify.HeadChecks(pr)
+	var red []string
+	for _, check := range checks {
+		if check.Red() {
+			red = append(red, check.Name)
+		}
 	}
-	return reason
+	return "CI is red at " + pr.HeadSHA + ": " + strings.Join(red, ", ")
 }
 
 // answerSkew bounds how far GitHub's clock, which stamps a review's submission, and the daemon's,
@@ -189,6 +226,7 @@ const (
 	byAnswer      = "the reviewer's review"
 	byOtherReview = "a review that is not the reviewer's answer"
 	byChecks      = "a CI result"
+	byRequired    = "a read of the checks the base branch requires"
 	byPush        = "a push"
 )
 
@@ -224,6 +262,9 @@ const (
 	stuckApprovedRed
 	// stuckApprovedOtherCode: its approval is of a head whose code the current head may not carry.
 	stuckApprovedOtherCode
+	// stuckApprovedPending: its approval waits on a required check the reviewer's own head settled
+	// without a result for (cancelled, or not reported), which no later settlement may bring.
+	stuckApprovedPending
 )
 
 // round is reviewRound's account of a review round. A stuck round names its cause, the head it is
@@ -251,7 +292,12 @@ func (r round) stuckAs(other round) bool {
 // reviewer's pane gets one follow-up turn when a turn ends with its phase open (pi-envoy's
 // phase-stall check), and past that the issue stays in reviewing, as a tester's that never completes
 // stays in testing. A completed round that nothing on its way would end is stuck, its reason naming
-// the head, since the decision it needs is of the head.
+// the head, since the decision it needs is of the head. An approved round whose head's own
+// settlement left a required check pending or without a result, or whose head has no run of a
+// required workflow, is stuck too: the check may never report (a run nobody reruns, a check only a
+// commit status reports), nor the workflow run, and a later settlement or run that passes it still
+// ends the round. A required workflow still running, or not read at the head yet, keeps the round
+// open until the daemon's next read of it.
 func reviewRound(issue record.Issue, row record.PhaseRow, pr *record.PullRequest) round {
 	if issue.Phase != phase.Reviewing {
 		return round{}
@@ -268,6 +314,12 @@ func reviewRound(issue record.Issue, row record.PhaseRow, pr *record.PullRequest
 		return round{}
 	}
 	verdict := classify.HeadVerdict(*pr)
+	// pending names the required checks and workflows the head's own CI left without a result, when
+	// they are all that keeps it from a verdict.
+	var pending []string
+	if verdict == "" && pr.CheckedHead == pr.HeadSHA {
+		pending = pendingAt(*pr)
+	}
 	switch {
 	case completed && decided == "approved" && verdict == "green" && classify.ApprovalStands(*pr, row.Decision.Head):
 		return round{outcome: roundApproved}
@@ -283,12 +335,35 @@ func reviewRound(issue record.Issue, row record.PhaseRow, pr *record.PullRequest
 		return round{outcome: roundStuck, cause: stuckApprovedRed, head: pr.HeadSHA,
 			reason: fmt.Sprintf("the reviewer approved %s on pull request #%d, but %s; a red at the reviewer's own head is its round's to decide, with a REQUEST_CHANGES naming the failing checks",
 				row.Decision.Head, pr.Number, redAt(*pr))}
-	case verdict == "green" && !classify.CodeOnItsWay(*pr):
+	case (verdict == "green" || len(pending) > 0) && !classify.ApprovalStands(*pr, row.Decision.Head) && !classify.CodeOnItsWay(*pr):
 		return round{outcome: roundStuck, cause: stuckApprovedOtherCode, head: pr.HeadSHA,
 			reason: fmt.Sprintf("the reviewer approved %s on pull request #%d, which does not approve head %s: a push since may have changed code, so only an APPROVE of %s or a REQUEST_CHANGES ends the round",
 				row.Decision.Head, pr.Number, pr.HeadSHA, pr.HeadSHA)}
+	case len(pending) > 0 && classify.ApprovalStands(*pr, row.Decision.Head):
+		return round{outcome: roundStuck, cause: stuckApprovedPending, head: pr.HeadSHA,
+			reason: fmt.Sprintf("the reviewer approved %s on pull request #%d, but CI at %s settled with no passing result for %s; the approval stands, and the round ends when a later settlement or run on the head passes them",
+				row.Decision.Head, pr.Number, pr.HeadSHA, strings.Join(pending, ", "))}
 	}
 	return round{}
+}
+
+// pendingAt names each required check and workflow the head's own CI left without a verdict
+// (classify.HeadChecks), since none is a failure to open: one with no result at all - a check the
+// settlement does not report, a workflow the head has no run of - and a check the settlement names
+// as cancelled. A required workflow pending because it still runs, or is not read at the head yet,
+// is not named: the daemon's next read decides it.
+func pendingAt(pr record.PullRequest) []string {
+	checks, _ := classify.HeadChecks(pr)
+	var pending []string
+	for _, check := range checks {
+		switch {
+		case check.Result == classify.Missing:
+			pending = append(pending, check.Name+" (no result)")
+		case check.Result == classify.Pending && slices.Contains(pr.Cancelled, check.Name):
+			pending = append(pending, check.Name+" (cancelled)")
+		}
+	}
+	return pending
 }
 
 // settleRound acts on what issue's review round comes to (reviewRound, with row its reviewer's and

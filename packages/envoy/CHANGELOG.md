@@ -4,10 +4,12 @@
 
 ### Added
 
+- `DISPATCH_ASSET_STORE_BUCKET` lets Dispatch serve a missing, content-hashed `/assets/*` file from the same key (`assets/<file>`) in a retained-assets bucket, so a tab left open across a deploy keeps loading its build's chunks. Dispatch reads the whole object, at most 8 MiB, within three seconds before it answers, keeps the immutable cache contract on a hit, and never serves a page or non-asset path from the bucket. An absent object is still a 404; any other store failure, a short body or an object over the limit included, is a 502 with no cache header, logged at ERROR with its key. At most 64 MiB of retained objects are held at once, since a client that stops reading keeps its object in memory: a request waits within its three seconds for room, so a stale tab's burst of chunks is served in turn, and one that cannot get room in time, or whose admitted fetch then runs out of that same bound before the bucket answers, is a 503 with `Cache-Control: no-store` and `Retry-After: 1`, logged at WARN with its key — the shared bound expiring is never presented as a store failure, since the store was only asked too late to answer in time — and a room refusal asks the bucket nothing. A client that disconnects while still queued for room logs no more than a debug line and gets no response. The task role needs `s3:GetObject` on `assets/*` and `s3:ListBucket` on the bucket, without which S3 answers a missing key with 403 and Dispatch with 502. Leaving the setting unset preserves local-only static serving.
+- `DISPATCH_AGENT_TOKEN` takes several values separated by whitespace, the first the current one, so the shared agent token can rotate with an overlap: the HTTP API and the document websocket accept every value, comparing a bearer with each in constant time. Startup refuses an empty entry (two whitespace characters in a row) or a repeated one, naming its position and never its value; one value behaves as before. A request that authenticates with a value after the first logs `dispatch: request authenticated with a previous shared agent token` at WARN, with the value's position, the rightmost `X-Forwarded-For` address (the connection's own without one), the User-Agent and the path, at most once per address and User-Agent every 10 minutes (LEGION-538).
 - `envoy-dispatch settings` prints every Dispatch setting the server and its subcommands read, one row each with its `_FILE` form, default, whether it is required and a one-line description, from one table (`cmd/dispatch/settings.go`) that is now the only place Dispatch's own code reads its environment; the docs site's Dispatch configuration reference is generated from it. The libraries Dispatch links still read their own variables (`HOME`, libpq's `PG*`, Go's proxy, certificate and runtime variables), which the table does not list. Every setting resolves as before, the `envoy.json` overrides and `_FILE` forms included; the readers that used to call `os.Getenv` themselves (the dashboard directory, the GitHub App credentials, the signing key and insecure-cookie flag, the `envoy.json` overrides, the Envoy listener token, and NATS's reach and nkey) are handed their value from the table.
 - `envoy-dispatch routes` prints the route table `GET /api/v1` serves, read without a database or a listener; the docs site's Dispatch HTTP API reference is generated from it.
 - `envoy-dispatch census`: the pre-deploy census of the migrations a database has not recorded (the runner's own rule), for a deployment to run before it rolls the service. It prints, for each pending migration, the tables it locks above ACCESS SHARE with size, row count and the sessions holding locks on them (pid, role, application, state and transaction age, "not visible" where Postgres hides one, or "autovacuum worker"; never query text), the transactions open longer than a minute or of an age it cannot see, and the count the migration's own `<version>_<name>.census.sql` answers. Those tables are the ones its statements name (an aliased `update` and a foreign key's referenced table among them; none in a comment, a string literal or the body of a function the migration defines), the table behind an index it drops or alters, and every table a foreign key reaches from rows it writes (a cascade, or a check that a row is still referenced), read from `pg_constraint` and from the keys earlier pending migrations add, inside a `DO` block too, and checked for holders and readability but not counted. It refuses (exit 1) a census that counts rows; a table a migration names above 1 GiB, which it does not count; a lock on a touched table held by a transaction older than a minute, or by one whose age Postgres hides from the census's role (granting that role `pg_read_all_stats` lets it read the age) or does not record (`track_activities` off), but not by an autovacuum, which Postgres cancels for the migration, unless it is anti-wraparound, or may be (its activity hidden or untracked, its table past its freeze age), or `deadlock_timeout` is not shorter than the lock timeout; a touched table it cannot read within the five-second lock timeout or the statement timeout; a census that fails, a name the database lacks included, even behind an earlier pending migration that may create it; and a database that records no version yet holds tables. A fresh database, one recording no version and holding no table, passes with `census: fresh database, nothing to check`. A failure names the file and the SQLSTATE, and Postgres's message only when it points into the census's own text, so no row value reaches a log. The census exits 2 when it cannot be taken (a connection whose `search_path` names no schema that exists among the causes), and writes nothing: one read-only transaction, the census statement sent through the extended protocol whatever the connection string asks. `pgmigrate.Load` refuses a census that is not one select, that holds a Unicode escape (`U&'…'`, `U&"…"`), or that names `pg_terminate_backend`, `pg_cancel_backend`, `pg_sleep`, an advisory-lock function (`pg_try_advisory_*` included) or a function that runs a query given as text (`query_to_xml` and its kin, `ts_stat`, `ts_rewrite`), bare or quoted and in any case, anywhere outside its comments and string literals, which it finds as Postgres 16's lexer does; the census runs with `standard_conforming_strings` on, so Postgres reads its literals the same way. Every migration from `censusRequiredFrom` (56, `internal/dispatch/store/store_test.go`) declares a census; 0053, 0054 and 0055 carry worked examples. Each store's tests hold the census's reading of every migration to the locks it really takes, run every shipped census at the schema just before its migration, and require a census that reads what a migration from `censusRequiredFrom` on creates, renames or gives a new type to name that migration, since a release carrying both refuses every deploy. An unknown `envoy-dispatch` subcommand now exits 2 instead of serving, which migrated the database (LEGION-459).
-- `DISPATCH_DEV_SIGNIN=1` mounts `GET /auth/_dev/signin?login=<login>&next=<path>` on Dispatch, which signs an allowlisted login in with the same session cookie a GitHub sign-in issues, with no GitHub step, so a local instance can be driven signed-in. Boot refuses the flag unless identity is cookie, the listen address is a loopback IP literal, the dashboard origin names `127.0.0.1`, `[::1]` or `localhost`, every `DATABASE_URL` host is loopback or a unix socket, `DISPATCH_SIGNING_KEY` is unset, `ENVOY_ALLOW_REMOTE_NATS=1` is not set while NATS is on, a set `DISPATCH_AGENT_SECRETS_URL` names a loopback host, `ENVOY_URL` names a loopback host, and a loaded GitHub App private key comes from `DISPATCH_APP_PEM_B64` with `DISPATCH_GITHUB_API_BASE` naming a loopback host, since a signed-in session can have the App probe and import any repository it is installed on. A key in `app.json`, where a developer keeps the real App's key, is refused whatever the base, naming the file; the environment's key must be a throwaway, as `packages/dispatch/e2e/run-server.sh` generates one, because every App call hands a signed App JWT to whatever listens at that base. These refusals come before NATS or Postgres is dialled. The signing key is then generated per process, so a minted cookie is worthless on any other server and dies with the process. What a signed-in session writes to the database (a `dsp_` token it mints, the session and token rows its sign-out changes) is honoured by every server on that database, so a dev-sign-in server needs a database of its own. While the flag is on, every request must carry the dashboard origin as its `Host` (`421 HOST_MISMATCH`), the route serves only a loopback peer with no forwarding header (`403 DEV_SIGNIN_FORBIDDEN`) and logs every mint at WARN, and the GitHub proxy answers `503 GITHUB_TOKEN_UNAVAILABLE` without reading a stored token pair. `DISPATCH_LISTEN_HOST` may now be an IPv6 literal with or without brackets: `::1` listened on `::1:8766` and failed with "too many colons", and now listens on `[::1]:8766`. A bad `DISPATCH_PORT` now refuses the boot before NATS and Postgres connect.
+- `DISPATCH_DEV_SIGNIN=1` mounts `GET /auth/_dev/signin?login=<email>&next=<path>` on Dispatch, which signs the person it names in, lowercased, with the same session cookie a sign-in-pool sign-in issues, with no pool step, so a local instance can be driven signed-in. Boot refuses the flag unless identity is cookie, no `DISPATCH_SIGNIN_*` setting is set, the listen address is a loopback IP literal, the dashboard origin names `127.0.0.1`, `[::1]` or `localhost`, every `DATABASE_URL` host is loopback or a unix socket, `DISPATCH_SIGNING_KEY` is unset, `ENVOY_ALLOW_REMOTE_NATS=1` is not set while NATS is on, a set `DISPATCH_AGENT_SECRETS_URL` names a loopback host, `ENVOY_URL` names a loopback host, and a loaded GitHub App private key comes from `DISPATCH_APP_PEM_B64` with `DISPATCH_GITHUB_API_BASE` naming a loopback host, since a signed-in session can have the App probe and import any repository it is installed on. A key in `app.json`, where a developer keeps the real App's key, is refused whatever the base, naming the file; the environment's key must be a throwaway, as `packages/dispatch/e2e/run-server.sh` generates one, because every App call hands a signed App JWT to whatever listens at that base. These refusals come before NATS or Postgres is dialled. The signing key is then generated per process, so a minted cookie is worthless on any other server and dies with the process. What a signed-in session writes to the database (a `dsp_` token it mints, the session rows its sign-out changes) is honoured by every server on that database, so a dev-sign-in server needs a database of its own. While the flag is on, every request must carry the dashboard origin as its `Host` (`421 HOST_MISMATCH`), and the route serves only a loopback peer with no forwarding header (`403 DEV_SIGNIN_FORBIDDEN`) and logs every mint at WARN. `DISPATCH_LISTEN_HOST` may now be an IPv6 literal with or without brackets: `::1` listened on `::1:8766` and failed with "too many colons", and now listens on `[::1]:8766`. A bad `DISPATCH_PORT` now refuses the boot before NATS and Postgres connect.
 - Every cache warm-up logs one line when its initial scan ends, `<cache> cache warm-up`, with the bucket, `elapsed_ms`, `entries`, `delete_markers` and `outcome` (`completed`, or `timed out` at WARN when nats.go's idle timer gave up on the scan). The counts are disjoint, like the role restore line's: `entries` is the live keys the scan delivered, `delete_markers` what it streamed past to find them. The line goes through the logger the listener passes each cache (`store.WithLogger`, `session.WithSessionLogger`, the CI store's own), so it is a JSON record with `machine_id`, and so are the cache watchers' other lines (a failed first start, a recreated bucket, a watcher that stopped). A restart now names its own cost — measured on a listener with a seeded bucket: `{"msg":"interest registry cache warm-up","machine_id":"smoke374r2","bucket":"envoy_interests","elapsed_ms":5,"entries":3,"delete_markers":500,"outcome":"completed"}`. A timed-out scan is logged and never recorded as the watcher's terminal error, so a live watcher whose warm-up merely timed out is not a 503 or a rebuild.
 - A listener start logs one INFO line for the role-claim snapshot it restores, `restored role claims`, with two disjoint fields: `restored`, the claims whose revision the scan read and which therefore keep their holder's restart grace, and `delete_markers`, the tombstones the scan streamed past to find them (production on 2026-09-28: `restored=9 delete_markers=757`). They are separate on purpose — one total of both reads as claims the restart failed to restore. `internal/store`'s lines, this one and both reaper cycles, now go through the logger the listener passes it (`store.WithLogger`), so they are JSON records carrying `machine_id` like the rest of the listener's output. `internal/bus`'s lines and the stdlib `log` package's stay in Go's text format, which the deployed CloudWatch metric filters for publish failures, webhook refusals and dropped stream subjects match on.
 - A CI record write that runs out of its two-second retry budget logs one JSON line, `ci record exceeded its retry budget`, naming the head (`owner`, `repo`, `number`, `sha`), the record's `checks`, the write's `attempts`, the `observations` it answered 503 and the last attempt's `error`, so an alarm can count the listener's 503s by that cause.
@@ -74,9 +76,67 @@
   passed is neither, though the count leaves it out: a Clear can move back, so the first request
   naming that reply writes its row and appends the event. A `read_through` deletes the viewer's
   rows for that session whose replies it reaches (LEGION-485).
+- A Dispatch document edit's response reports `advice.decision_blocks_added`: how many ask blocks
+  the edited document holds whose block id no ask block in the document before it carried, read
+  from the parsed trees the edit was applied to. A block inserted in a blockquote, on a list item's
+  line or behind four or more colons counts, as does a block retyped into an ask; an opener inside
+  a fence or indented code counts nothing, nor does a block the edit moved or reworded. An issue
+  document's edit carries it beside the issue advice; a project document's edit, which before
+  carried no advice, now carries `advice` holding the count alone (LEGION-470).
 
 ### Changed
 
+- Event-log payloads served by `GET /api/v1/issues/{key}/events`, `GET /api/v1/artifacts/{id}/events`
+  and the replay from `GET /api/v1/events` keep their stored numbers and PostgreSQL `jsonb` object
+  order: `9007199254740993` stays that integer, `1.00` keeps its trailing zeros, and object keys come
+  shorter first and, for keys of one length, in byte order. The JSON is compact, and Go's encoder
+  still writes `<`, `>`, `&`, U+2028 and U+2029 inside strings as `\u` escapes, as it did before.
+  Six ask payloads are decoded to add read-time fields and come back in Go's sorted-key, `float64`
+  form: `ask.opened`, `ask.anchor_refreshed`, `ask.answered`, `ask.resolved`, `ask.edited` and
+  `ask.handed_back`; `ask.follower_added` and `ask.follower_removed` keep the stored order. A live
+  event on `GET /api/v1/events` keeps its producer's field order. The dashboard, the agent Dispatch
+  tools and the Legion daemon read named fields from these payloads, and none compares payload bytes
+  or relies on Go's map ordering or `float64` rounding.
+- People sign in to Dispatch with Google Workspace through the shared sign-in pool (OpenID
+  Connect authorization code against `DISPATCH_SIGNIN_ISSUER`, with `DISPATCH_SIGNIN_CLIENT_ID`,
+  `DISPATCH_SIGNIN_CLIENT_SECRET` and `DISPATCH_SIGNIN_GROUP`, all four required by cookie
+  identity) and are named by lowercase email everywhere: the email in their pool username, never
+  the `email` claim. Only a member of `DISPATCH_SIGNIN_GROUP` signs in, and Dispatch confirms the
+  membership with the pool's refresh token at least hourly, ending every session of a person the
+  pool refuses or drops from the group; the event streams and the document websocket re-check the
+  caller on every heartbeat. The session cookie's payload encodes the email so any address
+  round-trips; a cookie of the earlier shape no longer verifies. Header identity is only for tests
+  and local harnesses, requires `DISPATCH_IDENTITY_HEADER_TRUSTED=1`, and never shares a
+  deployment with the sign-in pool. Everyone who has signed in is recorded in `people` (migration
+  `0068`), which is the assignee picker's list and the only names an issue may be assigned to. The
+  GitHub reads (`/api/github/rest/...`) go to GitHub as the GitHub App installation, GET only and
+  only a pull request, an issue or a commit's check runs. `DISPATCH_ALLOWED_LOGINS` and
+  `DISPATCH_APP_CLIENT_SECRET` are removed and refused at boot; GitHub OAuth sign-in, the per-user
+  GitHub token table (`users`, dropped by `0068`) and the GraphQL proxy are gone.
+- Dispatch stores each person's sign-in pool refresh token sealed under a key derived from
+  `DISPATCH_SIGNING_KEY` (`people.refresh_token`, a `v1:` format; `cmd/dispatch/README.md`,
+  Identity). A stored value that does not open counts as no refresh token: each read logs
+  `dispatch: a stored refresh token did not open; the person signs in again` at WARN without the
+  value, and the person signs in again. Every boot retires each refresh token stored in plain
+  text, by `0068`'s release or by one of its tasks during a roll or after a rollback: it revokes
+  the token at the pool's discovered `revocation_endpoint`, then clears it; a sign-in that replaces
+  one retires it first. A token the boot cannot revoke stays for the next boot and is logged at
+  ERROR with the email and the error, never the token; a sign-in that cannot revoke the token it
+  replaces goes on and logs its own ERROR line, `dispatch: a sign-in replaced a refresh token the
+  pool did not revoke; sign this person out at the pool`. A redirect from the revocation endpoint
+  is a failure, never followed. The boot logs how many it retired and how many failed, and stops
+  after 30 seconds without holding up the start. A database backup holds no refresh token the
+  pool would accept only once a boot of this release has retired every plain-text token, and then
+  only for the tokens still in `people` when it ran: one `0068`'s release removed without revoking
+  (a sign-in that replaced it, or a logout) stays valid at the pool in any backup that holds it,
+  so delete every backup taken between `0068`'s deploy and the post-roll restart, or sign out at
+  the pool everyone whose `people.signed_in_at` is after `0068`'s deploy. After the last
+  earlier-release task is gone, restart Dispatch once, then check that boot logged `failed=0`, no
+  sign-in-replaced line appeared, and
+  `select count(*) from people where refresh_token is not null and refresh_token not like 'v1:%'`
+  answers `0` (`cmd/dispatch/README.md`). Rotating `DISPATCH_SIGNING_KEY` leaves Dispatch unable
+  to open any stored refresh token, so everyone signs in again, but revokes none at the pool:
+  after a key leak, sign people out at the pool.
 - A blank approval-request `summary` is refused (`400 SUMMARY_INPUT`) with text that asks for what
   the human is approving, rather than for what the version proposes that the human has not agreed
   to, and the advice in `409 APPROVAL_WAITS_ON_HUMAN` and in an approval ask's `409 ASK_KIND_FIXED`
@@ -85,19 +145,20 @@
 - A Dispatch approval request follows its document's versions instead of being retracted and
   reopened on every edit (LEGION-470). A version write moves the open request to the new version
   (`ask.edited`), keeping its thread and summary, and leaves it Waiting on agents until its agent
-  calls `POST /api/v1/artifacts/{id}/approval-requests` again. Only the move that takes the request
-  from the human wakes its asker and followers; each later move while it already waits on its agent
-  is recorded quiet (`quiet: true` on its `ask.edited`, `notify: false`, no follower route), as a
-  human's unnamed version is, so a person typing in a document with a request open sends one
-  delivery, not one per settled version. While the request waits on its agent
-  (moved, or answered in its thread), that call hands it back to the human with the new event
-  `ask.handed_back`, rewording it first when the summary is new (`ask.edited`); a hand-back that
-  rewords nothing leaves the question and `edited_at` alone, so an answer the human had started is
-  still saved. While the request already waits on the human, the same summary is a repeat that
-  writes nothing and a different one is refused `409 APPROVAL_WAITS_ON_HUMAN`, since an approval
-  request carries nothing new. The route answers 201 when it wrote anything and 200 when the
-  request already stood as asked. A summary's limit is counted against a ten-digit version, so no
-  version move takes the question past the ask cap. `ask.approval` gains `requested_version`, the
+  calls `POST /api/v1/artifacts/{id}/approval-requests` again. Only the first move since the
+  request was opened or handed back wakes its asker and followers, even when a reply in its thread
+  had already left it waiting on its agent; each later move, while `requested_version` is already
+  below the version it named, is recorded quiet (`quiet: true` on its `ask.edited`,
+  `notify: false`, no follower route), as a human's unnamed version is, so a person typing in a
+  document with a request open sends one delivery, not one per settled version. While the request
+  waits on its agent (moved, or answered in its thread), that call hands it back to the human with
+  the new event `ask.handed_back`, rewording it first when the summary is new (`ask.edited`); a
+  hand-back that rewords nothing leaves the question and `edited_at` alone, so an answer the human
+  had started is still saved. While the request already waits on the human, the same summary is a
+  repeat that writes nothing and a different one is refused `409 APPROVAL_WAITS_ON_HUMAN`, since an
+  approval request carries nothing new. The route answers 201 when it wrote anything and 200 when
+  the request already stood as asked. A summary's limit is counted against a ten-digit version, so
+  no version move takes the question past the ask cap. `ask.approval` gains `requested_version`, the
   version last handed to the human, and a document's `approval` gains `waiting_on` while it is
   `awaiting`. Every route that writes a comment (both comment routes and the delivery callback
   `POST /api/v1/comments/{id}/reply`) answers `ask_waiting_on`, the value the comment's event
@@ -197,6 +258,16 @@
 - A Markdown document now nests at most 100 blocks, and a document tree with a node more than 1,000 levels below the document, or an attribute value nesting more than 100 arrays and objects, is outside the Proof schema (LEGION-465). The bounds sit where every read serves the tree: past about 5,000 levels the document token is JSON that `encoding/json` will not write from Go 1.27 or read in any version, and `GET /blocks`, which hashes each block's subtree apart, does work growing with the square of the depth. A live tree past either tree bound is treated as any other tree outside the schema: settlement writes no version, its reads and edits answer `409 DOC_SCHEMA` naming the repair, the document websocket refuses it, and an upload of replacement markdown repairs it (LEGION-469). A textblock's inline markdown nests at most 100 marks inside one another - emphasis, strong, strikethrough, links, images and code - and deeper content is refused naming the line. An accepted suggestion whose own markdown nests within 100 blocks but lands deep enough that the document would nest past them is refused as `400 INVALID_OP` on `replace_with`, naming how many blocks the result nests (LEGION-465).
 
 ### Fixed
+- A document's stored update log kept every byte any write had inserted, and every cold load of it built all of it: Dispatch merged the stored updates whole, and a merge keeps the content of deleted items. Five hundred 2,000-character replies to one anchored comment, each projecting the thread's margin record again, left 257 MB stored under a 3 KB document, and a cold one-word edit of it then took 1,842 MiB, past the 1,024 MiB task. A load now applies the stored updates one at a time to a document that collects garbage and returns what it holds, so it costs the live document and one update; and compaction, which runs as a room closes, as the server shuts down and daily, folds the whole log into that state rather than keeping the newest 500 updates beside a merge of the rest. An update a load's document parks for a dependency the log lacks is merged back into that state. A log the fold cannot apply, or a state that does not read back as the document that made it, is not used: the load merges the stored updates whole as before, and compaction leaves them as stored. After compaction, `doc_updates` and any backup of it hold no text a write deleted, so text deleted before a version captured it is gone (Sami's decision, LEGION-496). `doc_updates` is snapshotted once, and the snapshot kept 90 days, right before the first deploy that carries this.
+- A document edit that repairs an ask a browser left unreadable now reports it in
+  `decision_blocks_added`, matching the open ask its next settlement creates. An edit keeps that
+  count as count-only advice when the bounded issue-advice query fails (LEGION-470).
+- A NUL character (U+0000) in caller text no longer answers `500 INTERNAL`: PostgreSQL's text and jsonb cannot hold one, so every Dispatch route that stored such text (issue titles, specs and labels, comments, messages, broadcasts, asks and their answers, document uploads, edits and versions, a bearer's `actor`, a session id in a path) failed at the database. The API's input layer refuses it once instead, before anything is written: `400 NUL_CHARACTER` naming where it stands and its position, as in `options[1].label holds a NUL character (U+0000) at character 2, which Dispatch cannot store`; a NUL in a name the caller wrote is shown as `\u0000`, so no refusal sends one back. It reads every string and member name of a JSON body, a multipart upload's fields and markdown file, the body a credential decision or machine-login lookup relays to the secrets broker, and every route's path and query parameters, so a read such as `GET /api/v1/issues?label=` refuses one too. The document websocket refuses, before the upgrade, a bearer whose `X-Dispatch-Actor` JSON spells one in its session id or origin: that actor became the author of the versions the connection's edits made, so every settlement of the document failed and the third failure in a row failed its room. The check covers every parameter, field and member a request carries, so these requests main accepted are now refused: a retype whose typed attribute holds a NUL, an insert whose markdown holds a raw NUL inside a typed block's quoted attribute (written as the escape `\x00`, the same value is still taken), a query parameter or multipart field no route reads holding a NUL or a byte that is not UTF-8, and a websocket `X-Dispatch-Actor` whose unread member spells a NUL (LEGION-507).
+- A byte that is not UTF-8 in a path or query parameter (`%FF`), in a multipart upload's field or in a binary file part's `Content-Type`, which the upload stores as the artifact's type, no longer answers `500 INTERNAL`, and one in an uploaded markdown file no longer panics the server, which dropped the connection: PostgreSQL's text cannot hold such a byte, and the document writer refuses one by panicking. The input layer refuses it where it refuses a NUL, `400 INVALID_UTF8` naming the field, the byte and its position. A JSON body cannot carry one, since decoding writes each such byte as U+FFFD (LEGION-507).
+- A NUL character a browser edit puts in a document no longer stops the document from settling. The Yjs update reaches the live document past every route's check, and the version settlement rendered from it, an ask block's question and an anchored comment's or ask's quote each failed at PostgreSQL, so settlement failed every time it ran; with the character in the document's text or under an anchor, every agent edit and named version of the document answered `500` too, until someone deleted it in the editor. Dispatch now writes the character as U+FFFD, which is what CommonMark reads it as, in the markdown it renders and serves and in the ask and anchor text it takes from the document, and matches a quote, a `# Title` quote and a `heading:` anchor against that text, so one copied from `GET /text` finds its target; a typed block's other attributes keep it, written quoted as the escape `\x00` that reads back as U+0000 (LEGION-507).
+- A block id holding a NUL, which a hand-built client can set on a document block, no longer stops the document from settling. An ask row or anchor could not store it, so settlement failed every time it ran, a comment or ask anchored inside that block before settlement answered `500`, and while it was a typed block's id `GET /text` and `GET /blocks` served it and naming a version answered `500`. Settlement now mints a fresh id for it, as it mints one for a missing id; until then an anchor taken in the block is pinned to no block, and every read and named version writes the id with U+FFFD in place of the NUL. Every other id stays as the browser set it, such as `q:1` from a pasted `:::ask{#q:1}`, which the browser editor keeps and an ask row stores (LEGION-507).
+- An artifact upload whose multipart body the parser cannot read, such as one whose part header holds a control character, is `400 ARTIFACT_INPUT` with the parser's reason. It used to be answered `413 CAP_EXCEEDED "artifact blob exceeds 25 MB"`, as was every multipart parse failure; only a body past the upload's size limit, or form fields too large to read, is still 413, and a file part the server cannot spool to its temporary directory is `500 INTERNAL`, logged, since the failure is the server's (LEGION-507).
+- The architecture sync no longer answers `500` and records nothing when a component's front matter spells a NUL through a YAML escape, in a value (`title: "Ser\0ver"`) or an unknown key (`"\0": value`): the parser checked the file's bytes, which are ASCII there, and the projection or the failure-recording update then failed at PostgreSQL with no `last_error` and no `architecture.sync_failed` event. The parser checks each decoded front-matter value and names its field; before `last_error` and the event payload are stored, every failure message passes through `text.StorableReplacement`, which writes a NUL or a byte that is not UTF-8 as U+FFFD. Any projection PostgreSQL refuses is recorded on the row like a model problem, so `POST /api/v1/projects/{key}/architecture-source/sync` answers 200 with `last_error` and the previous projection stays (LEGION-527).
 - A Dispatch page whose HTML and assets came from different builds stayed blank: during a rolling deploy the load balancer sent a browser's HTML to one task and its hashed entry chunk to the other, which never had it and answered 404, and nothing reloaded the page, since the lazy-chunk recovery runs only once the entry has. The page now reloads itself once when one of its own build's scripts (same origin, under `/assets/`) fails to load, from the same once-per-session budget as the lazy-chunk recovery, never while offline or while the page is being left (from `beforeunload` or `pagehide` until `pageshow`); another origin's script, such as an extension's, never triggers it. Every page the server serves (`index.html` and the shell for a browser route) now carries `Cache-Control: no-cache` and an `ETag` of its bytes in place of `Last-Modified`: a browser could run a heuristically fresh page from an older build after any deploy, and a revalidation by file time could keep another build's page, since a task holding an older file (a rollback, or the other side of the overlap) answered it 304. Every file under `/assets` carries `public, max-age=31536000, immutable`, and `GET /index.html` answers the page rather than redirecting to `/` (LEGION-521).
 - A listener whose session cache had not yet seen a role holder another listener registered a moment ago released the holder's fresh claim as lapsed: a lookup (`GET /v1/roles/<role>`, a role publish) or a role delivery read the claim from the role bucket and the holder from a cache that trails the session bucket, so during a rolling deploy the old task could delete the claim the replacement had just accepted, and the role reached nobody until its holder claimed it again. A soft claim could take such a holder's role, and the role reaper end its claim, the same way. Each now reads the holder from the session bucket itself before it takes anything from it (LEGION-456).
 - One MiB of `>` formed 1,048,576 nested quotes inside the document cap and eventually ended the process in a stack overflow while its tree was validated. Dispatch now refuses the document before building that tree (LEGION-465).
@@ -244,6 +315,90 @@
   default, so a browser update of more than 100,000 items written against blocks the document
   already held failed the room and lost the edit; that check now takes the same queue
   (LEGION-469).
+- A markdown write of any shape at the 1 MiB cap no longer takes Dispatch down. One 1 MiB upload of
+  `)_` held about a gigabyte while it was saved, which killed the 1,024 MiB production task
+  (LEGION-481): every element the markdown makes costs memory in the parse, the read-back, the
+  render and the live document. A caller's markdown - a spec, an uploaded document or version,
+  an edit batch's inserts and replaces, the `find` of an edit and the quote of a comment or ask -
+  may now make at most 65,536 elements, weighed as `cmd/dispatch/README.md`'s Element weights
+  lists; past that a write is `413 CAP_EXCEEDED`, refused while goldmark parses, naming the line
+  where the markdown passes the limit or, where the parse stopped first, the line it stopped reading
+  at, and listing the weights; a quote is matched by its text alone. Every
+  node the document holds other than a text is an element carrying attributes and costs about what
+  two inline nodes do, so each weighs at least two: weighed as one, the heaviest document of
+  `<b>a</b>` spans the limit admitted held 213 to 261 MiB to store, of `![](u)` images 327 to 383 MiB
+  (and up to 1,044 MiB for four cold reads at once), and of `[^a]` footnote references 262 to
+  316 MiB, past the 256 MiB a request may hold; the empty paragraph an empty list item, quote,
+  footnote definition or typed block is read as holding weighed nothing, and the heaviest document
+  of them held 220 to 236 MiB. An escape - a backslash before punctuation, or a character
+  reference, in text outside a code span - makes no node in goldmark's tree, but the document holds
+  the character it spells bare, every rendering spells it again, and the renderer reads it back as
+  the delimiter or link opener it would be unescaped: a mebibyte of `\~a`, `)\_`, `\)\_` or `\[a`
+  weighed four elements and allocated 330 to 720 MiB to parse and 260 to 620 MiB to render, and the
+  stored `\)\_` held 256 MiB to read cold and 973 MiB for four reads at once. Every markdown file of
+  4 KiB or more among this repository's 618 weighs 1.5 to 379 elements a kibibyte, so prose passes
+  to the 1 MiB cap and the densest of them, a comparison matrix, to about 173 KiB; smaller files run
+  denser, up to 1,421 a kibibyte for a 147-byte test fixture of empty list items. A paragraph of
+  link reference definitions, which goldmark took time quadratic in its lines to read (a mebibyte of
+  them took a minute to refuse), is read only as far as its first 1,024 lines.
+- A write may no longer grow a stored document past what one upload may hold, measured as an
+  upload is measured. Thirty-two 900 KB inserts of prose, each within both limits, grew one document
+  to 29.5 MB, on which a one-word edit then held a gigabyte; a few dozen thousand headings' worth
+  left one the server could not load (500 on the next write, 503 on every read); and thirty-two
+  edits of an ask's options (`PATCH /api/v1/asks/{id}`) grew one to 28.8 MB, on which a one-word
+  edit was killed at the production task's 1,024 MiB. Every write a
+  caller makes - an upload, an edit batch, an accepted or rejected suggestion, an ask's edited text,
+  its answer (`POST /api/v1/asks/{id}/answer`) or resolution, a comment's anchor mark and its margin
+  record - runs in a transaction it must join (an unjoined one is refused), and is weighed by the
+  markdown it leaves the document storing (what `GET .../text` answers), with an upload's own
+  measures: it is `413 CAP_EXCEEDED` when that is longer than 1 MiB and longer than the document's
+  was, or makes more than 65,536 elements and more than the document's did, counted as an upload's
+  parse counts them (front matter apart, and a table whose short rows would take more padding than
+  one write may add counted as past the limit: a 101-column header over 200 one-cell rows measured
+  407 elements, the paragraph the parse leaves of it, where written whole it weighs 82,111). One
+  that keeps or lowers both passes, so an over-limit document can still be trimmed or split, and any
+  document a write leaves can be uploaded again from its own text. An ask's state and who answered
+  it and when are the server's, not text a caller writes, so the asks of an over-limit document can
+  still be answered and resolved. An answer's words and the options it chooses, whose labels are the
+  asker's text, are weighed: where the document has no room for them, the ask takes the whole answer
+  and its block is written without it, saying who answered and when, where one choice of a
+  1,000,000-character option took a 1 MB document to 8 MB. An ask's
+  edited question and options are weighed before they are made into markdown - an element for each
+  backslash, `*`, `_`, `~`, backtick, `[`, `]` and `<`, which the markdown escapes or reads as
+  syntax, and two for each line feed - and that markdown is parsed on the edit's element budget, so
+  text past the 65,536 elements one write may make is `413 CAP_EXCEEDED` before it is rendered,
+  where an option description of 400 KB of `)_` used to be taken. Each refusal's message is the
+  bound's own, opening `document too large to store`, on every route. A spec, a new document or the
+  markdown a rebuild is given (`POST /api/v1/artifacts/{id}/rebuild`) whose stored markdown (its
+  rendering, which can run longer than what was sent) is past either limit is refused the same way,
+  where a rebuild from the latest version restores it whatever it weighs. A write is also refused
+  when the live state it leaves would be past the 1,048,576 structs ygo decodes in one update:
+  fourteen alternating versions of 16,000 paragraphs and 16,000 headings, each within both upload
+  limits, otherwise left a document every read answered 500. A document's margin - the record of
+  every comment and suggestion it has had, which every load
+  builds though no rendering carries it - is weighed too: one record (a comment's body and replies,
+  a suggestion's replacement) holds at most 256 KiB of text and the margin 1 MiB, and a comment,
+  suggestion, reply or edit that would leave either past its bound and bigger is `413
+  CAP_EXCEEDED`, naming the bound and both sizes; a status change (accept, reject, resolve) is not
+  text a caller writes and passes. Thirty-two open suggestions of 900 KB took one cold websocket
+  load to 296 MiB, and sixty-four four cold reads at once to 1,223 MiB. The marks a document's
+  comments, suggestions and asks hold on its text carry at most 1 MiB of ids and authors, which no
+  rendering carries either: an anchored comment, suggestion or ask that would leave them past it and
+  carrying more is `413 CAP_EXCEEDED`, where thirty asks anchored by a session whose id was 200 KB
+  left a 210-byte rendering over six megabytes of live document. An answer is stored on its ask as
+  well as in its block, and settlement writes it back into a block that returns to the document:
+  that is weighed the same way, each returning answer on its own in document order, and an answer
+  that would leave the document past either limit and bigger stays on its ask alone, its block
+  restored to its state and who answered, until the document has room for it. Twenty-four answers
+  of 900 KB returned by one 1,540-byte edit had left a 21.6 MB document whose cold text read held
+  368 MiB.
+  Browser edits over the websocket are applied before any check and are not bounded by
+  this (LEGION-487). A document's stored history is bounded too: compaction runs as a room
+  closes, as the server shuts down, and daily, folding every update into the document's state
+  (LEGION-496), so repeated uploads of a version or replies to one comment, whose margin record
+  each reply rewrites whole, cost a load only for as long as a room stays open between those -
+  the same scenario that left 257 MB stored under 500 replies of 2,000 characters, with a
+  one-word edit holding 1,842 MiB, before LEGION-496 now compacts to the document's own state.
 - Document settlement no longer undoes an edit a browser or an agent makes while it settles
   (LEGION-479). Settlement wrote its repairs (the block ids it stamps, an ask block's server-owned
   attributes it restores) as the tree it had read before its database work, so an edit made in
@@ -272,13 +427,25 @@
   which it does only after the store returns, and the worker's exit compaction waited for the
   room's lock, which the settlement held. Until the server restarted the document did not settle
   and none of its later updates were stored, since every update a document stores takes that lock.
-  The store now discards the repair's own update without waiting once its room has left the
-  server, and the settlement fails the room so it reloads; the room worker's compaction skips a
-  room whose lock is held, except when it evicts a failed room. The same slot wait held
+  Every close of the room the server makes now waits for the repair to reach the room's
+  persistence (LEGION-498, below), and the room worker's compaction skips a room whose lock is
+  held, except when it evicts a failed room. The same slot wait held
   `envoy-dispatch backfill-block-ids` for good at a document whose room closed under its stamp.
-  Two cases still hang until the server restarts, tracked as LEGION-498: a room that fails while
-  the settlement commits into it, whose eviction waits for the room's lock on purpose, and a
-  second writer committing into the room while it retires under the repair's commit.
+- A document whose room failed while a settlement wrote a repair into it (a block id it stamps, an
+  ask block's attributes it restores) no longer stays failed until the server restarts, with every
+  read and write that waited for its recovery hung and none of its updates stored (LEGION-498). The
+  failed room's eviction waited for the document's lock, which the settlement held, while the
+  settlement waited for the room's persistence worker that the eviction had retired. A room the
+  server closed under a settlement's repair while a second write committed into it, such as a
+  published edit, hung the same way, each write's store waiting on the other's. The server's own
+  closes of a room (a failed room's eviction, an issue's close, a shutdown's close of a room with
+  an editor) now wait until a repair being written into the room has reached its persistence, and
+  a repair that meets a close under way writes nothing, as one whose room was replaced does. An
+  edit that reached the room's persistence just ahead of a settlement's repair is no longer dropped
+  in the repair's place when the settlement discards the repair because the issue closed or the
+  server began stopping.
+- A GitHub App response over 1 MiB now fails whole instead of returning a truncated body. The
+  dashboard proxy answers `502 GITHUB_UPSTREAM` and names the 1 MiB limit.
 - Saving a document, comment, ask, or message with a long run of underscore-joined characters
   no longer takes quadratic time in Postgres search indexing. `pmdoc` also avoids quadratic work
   in Goldmark's email and delimiter scans and in renderer closer scans. A document that exceeds

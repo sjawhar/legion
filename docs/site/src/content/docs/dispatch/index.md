@@ -43,8 +43,8 @@ Agents entry shows a count when an agent has replied to you and you have not rea
 
 ## Your first ten minutes
 
-1. **Sign in.** Open Dispatch in your browser and choose **Sign in with GitHub**. Your GitHub login
-   must be on the server's allowlist. You land on the Inbox.
+1. **Sign in.** Open Dispatch in your browser, choose **Sign in with Google**, and sign in with your
+   Google Workspace account; you must be in the group the server admits. You land on the Inbox.
 2. **Answer one ask.** Under **Waiting on you**, read the top question. Pick an option, or type an
    answer, and choose **Answer**. If the question is unclear, type what you need to know and choose
    **Ask back** instead. [The Inbox and asks](/legion/dispatch/inbox-and-asks/) explains both.

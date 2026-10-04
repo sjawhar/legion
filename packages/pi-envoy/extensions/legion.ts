@@ -352,15 +352,19 @@ const CODE_MUTATION_TOOLS = ["edit", "write", "apply_patch"];
 /** The merger verifies and reports only: no code mutation, and no further Legion spawns. */
 const MERGER_BLOCKED_TOOLS = [...CODE_MUTATION_TOOLS, "task"];
 
-/** OMP's "tool device" convention invokes extension-registered tools (e.g. the nine Dispatch
- * tools) as a `write` whose `path` is an `xd://<tool>` URI carrying the tool's JSON args as
+/** An `xd://` URL, its scheme in any case. */
+const TOOL_DEVICE_URL = /^xd:\/\//iu;
+
+/** OMP's "tool device" convention invokes extension-registered tools (e.g. the Dispatch tools) as
+ * a `write` whose `path` is an `xd://<tool>` URI carrying the tool's JSON args as
  * `content`. That `write` is a tool invocation, not a file mutation -- it must never trip the
- * `CODE_MUTATION_TOOLS` gate below for any role. */
+ * `CODE_MUTATION_TOOLS` gate below for any role. Oh My Pi routes the scheme in any case
+ * (`XD://dispatch_doc_edit` runs the device), so the check does too. */
 function isToolDeviceInvocation(toolCall: ToolCallEvent): boolean {
   return (
     toolCall.toolName === "write" &&
     typeof toolCall.input.path === "string" &&
-    toolCall.input.path.startsWith("xd://")
+    TOOL_DEVICE_URL.test(toolCall.input.path)
   );
 }
 
@@ -487,7 +491,7 @@ export default function legionExtension(pi: PiApi): void {
     const sessionID = context.sessionManager.getSessionId();
     const active = claimSession.capability(sessionID);
     // A `write` to an `xd://<tool>` path is OMP's tool-device invocation convention (e.g. the
-    // nine Dispatch tools), not a file mutation. Short-circuit it out of every mutation gate
+    // Dispatch tools), not a file mutation. Short-circuit it out of every mutation gate
     // below so the architect/reviewer/merger role checks apply only to real file writes.
     const isToolDevice = isToolDeviceInvocation(toolCall);
     // `role === "architect"` covers a root architect and a sub-architect alike: both delegate all

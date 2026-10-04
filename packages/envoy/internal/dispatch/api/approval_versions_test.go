@@ -17,7 +17,6 @@ import (
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
-	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/outbox"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -29,7 +28,7 @@ import (
 // next actor again.
 func TestApprovalRequestFollowsDocumentVersions(t *testing.T) {
 	var documentService *docs.Service
-	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
+	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})
 		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
 		return documentService
@@ -76,7 +75,7 @@ func TestApprovalRequestFollowsDocumentVersions(t *testing.T) {
 		t.Fatalf("opened approval = %#v, want requested version 1", opened)
 	}
 
-	if _, err := documentService.ReplaceText(context.Background(), issue.PrimaryArtifactID, "A revised spec", model.Actor{Kind: "session", ID: "session-0123456789abcdef"}); err != nil {
+	if _, err := replaceDocumentText(database, documentService, issue.PrimaryArtifactID, "A revised spec", model.Actor{Kind: "session", ID: "session-0123456789abcdef"}); err != nil {
 		t.Fatalf("revise document: %v", err)
 	}
 	if named := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/versions", map[string]string{"summary": "revised"}, "alice"); named.Code != http.StatusCreated {
@@ -158,7 +157,7 @@ func TestApprovalHandBackWaitsOnTheHuman(t *testing.T) {
 	} {
 		t.Run(flow.name, func(t *testing.T) {
 			var documentService *docs.Service
-			handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
+			handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
 				documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})
 				t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
 				return documentService
@@ -198,10 +197,9 @@ func TestApprovalHandBackWaitsOnTheHuman(t *testing.T) {
 				}
 			}
 			if flow.move {
-				if _, err := documentService.ReplaceText(
-					context.Background(), issue.PrimaryArtifactID, "A revised spec",
-					model.Actor{Kind: "session", ID: sessionActor()["id"].(string)},
-				); err != nil {
+				if _, err := replaceDocumentText(database, documentService,
+					issue.PrimaryArtifactID, "A revised spec",
+					model.Actor{Kind: "session", ID: sessionActor()["id"].(string)}); err != nil {
 					t.Fatalf("revise document: %v", err)
 				}
 				if named := dispatchRequest(t, handler, http.MethodPost,
@@ -324,7 +322,7 @@ func TestARewordlessHandBackKeepsTheQuestionsRevision(t *testing.T) {
 	} {
 		t.Run(flow.name, func(t *testing.T) {
 			var documentService *docs.Service
-			handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
+			handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
 				documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})
 				t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
 				return documentService
@@ -352,10 +350,9 @@ func TestARewordlessHandBackKeepsTheQuestionsRevision(t *testing.T) {
 				t.Fatalf("human comment: status=%d body=%s", human.Code, human.Body.String())
 			}
 			if flow.move {
-				if _, err := documentService.ReplaceText(
-					context.Background(), issue.PrimaryArtifactID, "A revised spec",
-					model.Actor{Kind: "session", ID: sessionActor()["id"].(string)},
-				); err != nil {
+				if _, err := replaceDocumentText(database, documentService,
+					issue.PrimaryArtifactID, "A revised spec",
+					model.Actor{Kind: "session", ID: sessionActor()["id"].(string)}); err != nil {
 					t.Fatalf("revise document: %v", err)
 				}
 				if named := dispatchRequest(t, handler, http.MethodPost,
@@ -507,7 +504,7 @@ func TestHeaderReviewAnswersMovedApprovalAskBeforeTheAgentHandsItBack(t *testing
 	} {
 		t.Run(review.name, func(t *testing.T) {
 			var documentService *docs.Service
-			handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
+			handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
 				documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})
 				t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
 				return documentService
@@ -524,7 +521,7 @@ func TestHeaderReviewAnswersMovedApprovalAskBeforeTheAgentHandsItBack(t *testing
 					ID string `json:"id"`
 				} `json:"ask"`
 			}](t, requested).Ask.ID
-			if _, err := documentService.ReplaceText(context.Background(), issue.PrimaryArtifactID, "A revised spec", model.Actor{Kind: "session", ID: "session-0123456789abcdef"}); err != nil {
+			if _, err := replaceDocumentText(database, documentService, issue.PrimaryArtifactID, "A revised spec", model.Actor{Kind: "session", ID: "session-0123456789abcdef"}); err != nil {
 				t.Fatalf("revise document: %v", err)
 			}
 			if named := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/versions", map[string]string{"summary": "revised"}, "alice"); named.Code != http.StatusCreated {
@@ -594,8 +591,8 @@ func TestANewVersionMovesTheOpenApprovalAsk(t *testing.T) {
 		doc := &document{broker: events.NewBroker()}
 		doc.handler, doc.database = newInteractionHandler(t, func(database *store.Store) docs.API {
 			doc.documentService = docs.New(docs.Deps{
-				Store: database, Events: doc.broker, Settle: settle, AgentToken: "agent-token",
-				Identity: identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: map[string]struct{}{"bob": {}}},
+				Store: database, Events: doc.broker, Settle: settle, AgentTokens: sharedAgentTokens(t, "agent-token"),
+				Identity: headerIdentity(database),
 			})
 			t.Cleanup(func() { _ = doc.documentService.Shutdown(context.Background()) })
 			return doc.documentService
@@ -660,12 +657,12 @@ func TestANewVersionMovesTheOpenApprovalAsk(t *testing.T) {
 		{"an edit with no summary", time.Hour, func(t *testing.T, doc *document) {
 			edit(t, doc.handler, doc.artifactID, map[string]any{})
 		}, 1, asker, false},
-		{"a live write settlement versions", 20 * time.Millisecond, func(t *testing.T, doc *document) {
-			// A live write that joins no transaction is versioned by settlement alone, so this
-			// movement is settlement's and reaches followers once settlement commits.
+		{"a write only settlement versions", 20 * time.Millisecond, func(t *testing.T, doc *document) {
+			// A write whose transaction writes no version is versioned by settlement alone, so
+			// this movement is settlement's and reaches followers once settlement commits.
 			published, stop := doc.broker.Subscribe()
 			defer stop()
-			if _, err := doc.documentService.ReplaceText(context.Background(), doc.artifactID, "A revised spec", alice); err != nil {
+			if _, err := replaceDocumentText(doc.database, doc.documentService, doc.artifactID, "A revised spec", alice); err != nil {
 				t.Fatalf("revise document: %v", err)
 			}
 			waitForArtifactVersion(t, doc.handler, doc.artifactID, 2)
@@ -685,7 +682,7 @@ func TestANewVersionMovesTheOpenApprovalAsk(t *testing.T) {
 			}
 		}, 1, alice, true},
 		{"a named version", time.Hour, func(t *testing.T, doc *document) {
-			if _, err := doc.documentService.ReplaceText(context.Background(), doc.artifactID, "A revised spec", alice); err != nil {
+			if _, err := replaceDocumentText(doc.database, doc.documentService, doc.artifactID, "A revised spec", alice); err != nil {
 				t.Fatalf("revise document: %v", err)
 			}
 			if named := dispatchRequest(t, doc.handler, http.MethodPost, "/api/v1/artifacts/"+doc.artifactID+"/versions", map[string]string{"summary": "revised"}, "alice"); named.Code != http.StatusCreated {
@@ -838,10 +835,10 @@ func TestANewVersionMovesTheOpenApprovalAsk(t *testing.T) {
 		}
 	})
 
-	// A further version of a request already waiting on its agent changes only the version it
+	// A further version of a request an earlier version already moved changes only the version it
 	// names, so it is recorded as a human's unnamed version is: on the issue's own topic with notify
-	// off, and on no follower's. Only the move that takes the request from the human wakes anyone,
-	// and once the agent hands it back the next version's move wakes again.
+	// off, and on no follower's. Only the first move since the request was opened or handed back
+	// wakes anyone, so once the agent hands it back the next version's move wakes again.
 	t.Run("a human typing settled versions one after another", func(t *testing.T) {
 		doc := open(t, 50*time.Millisecond)
 		typist := connect(t, doc, humanPeer)

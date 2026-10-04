@@ -1,10 +1,10 @@
 package routes
 
-// Dev sign-in: GET /auth/_dev/signin issues an allowlisted login the session cookie a GitHub sign-in
-// issues, with no GitHub exchange, so a local instance can be driven signed-in through the
-// production cookie identity. cmd/dispatch turns it on with DISPATCH_DEV_SIGNIN=1 behind its boot
-// fence, and BuildAppContext mounts it only for a loopback origin. Everything that can mint a
-// cookie without GitHub is in this file.
+// Dev sign-in: GET /auth/_dev/signin issues the session cookie a sign-in-pool sign-in issues to the
+// person `login` names, with no pool exchange, so a local instance can be driven signed-in through
+// the production cookie identity. cmd/dispatch turns it on with DISPATCH_DEV_SIGNIN=1 behind its
+// boot fence, and BuildAppContext mounts it only for a loopback origin. Everything that can mint a
+// cookie without the sign-in pool is in this file.
 
 import (
 	"fmt"
@@ -14,8 +14,6 @@ import (
 	"net/netip"
 	"net/url"
 	"strings"
-
-	"github.com/sjawhar/envoy/internal/dispatch/identity"
 )
 
 // DevSignInOrigin returns the host:port of serverURL, the dashboard origin, when it names this
@@ -70,10 +68,10 @@ func LoopbackHostPort(address string) bool {
 // not the browser.
 var forwardingHeaders = []string{"Forwarded", "X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto", "X-Real-IP", "Via"}
 
-// authDevSignIn is the local workflow's sign-in: authCallback's allowlist check and issueSession,
-// with GitHub's code exchange left out. The allowlist is checked as the callback checks it and the
-// spelling requested is minted, so a test can sign in as GitHub spells a login. Only a loopback
-// peer that no proxy forwarded is served, and every mint is logged at WARN.
+// authDevSignIn is the local workflow's sign-in: authCallback's recording of the person and
+// issueSession, with the pool's exchange and group check left out. The person is named as the
+// production identities name them, trimmed and lowercased. Only a loopback peer that no proxy
+// forwarded is served, and every mint is logged at WARN.
 func (r *router) authDevSignIn(w http.ResponseWriter, req *http.Request) {
 	if !LoopbackHostPort(req.RemoteAddr) {
 		writeCodeError(w, http.StatusForbidden, fmt.Sprintf("dev sign-in serves loopback peers only, not %s", req.RemoteAddr), "DEV_SIGNIN_FORBIDDEN")
@@ -85,19 +83,20 @@ func (r *router) authDevSignIn(w http.ResponseWriter, req *http.Request) {
 			return
 		}
 	}
-	login := strings.TrimSpace(req.URL.Query().Get("login"))
-	if login == "" {
+	email := strings.ToLower(strings.TrimSpace(req.URL.Query().Get("login")))
+	if email == "" {
 		writeCodeError(w, http.StatusBadRequest, "login query parameter required", "DEV_SIGNIN_INPUT")
 		return
 	}
-	if _, allowed := r.ctx.AllowedLogins[strings.ToLower(login)]; !allowed {
-		identity.WriteError(w, identity.ErrLoginNotAllowed)
+	if err := r.ctx.People.Record(req.Context(), email); err != nil {
+		slog.Error("dispatch: dev sign-in could not record the person", "email", email, "error", err)
+		writeError(w, http.StatusInternalServerError, "record person")
 		return
 	}
-	if !r.issueSession(w, req, login) {
+	if !r.issueSession(w, req, email) {
 		return
 	}
-	slog.Warn("dispatch: dev sign-in minted a session cookie", "login", login, "remote_addr", req.RemoteAddr)
+	slog.Warn("dispatch: dev sign-in minted a session cookie", "email", email, "remote_addr", req.RemoteAddr)
 	w.Header().Set("Cache-Control", "no-store")
 	http.Redirect(w, req, sanitizeNext(req.URL.Query().Get("next")), http.StatusFound)
 }

@@ -178,8 +178,8 @@ func TestBroadcastKeyReusedForADifferentRequestIsRefused(t *testing.T) {
 }
 
 // A key belongs to the human who sent it. Another person's identical send under the same key is
-// another send, since a broadcast carries one author; the same person under GitHub's display
-// casing is the same human.
+// another send, since a broadcast carries one author; the same person under another casing of
+// the identity header is the same human, since every identity names a person by lowercase email.
 func TestBroadcastKeysAreScopedToTheSender(t *testing.T) {
 	listener, _ := newBroadcastListener(t, broadcastSessions)
 	handler, _ := newTargetedMessageHandler(t, listener.URL)

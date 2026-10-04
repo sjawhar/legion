@@ -309,16 +309,11 @@ test("isUnauthorized distinguishes a 401 from a transient 5xx failure", async ()
 });
 
 test(
-  "isRetryableQueryError exempts auth outcomes (401, 403), a credential-feature-off 404 and a " +
+  "isRetryableQueryError exempts an auth outcome (401), a credential-feature-off 404 and a " +
     "document outside the schema, but retries a transient 5xx",
   async () => {
     const unauthorized = createApiClient(
       stubFetch(() => new Response(null, { status: 401 })).fetch
-    );
-    const forbidden = createApiClient(
-      stubFetch(() =>
-        Response.json({ error: "login not allowed", code: "LOGIN_NOT_ALLOWED" }, { status: 403 })
-      ).fetch
     );
     const featureOff = createApiClient(
       stubFetch(() =>
@@ -339,22 +334,15 @@ test(
     );
     const serverError = createApiClient(stubFetch(() => new Response(null, { status: 503 })).fetch);
 
-    const [
-      unauthorizedError,
-      forbiddenError,
-      featureOffError,
-      documentSchemaError,
-      serverErrorResult,
-    ] = await Promise.all([
-      unauthorized.whoAmI().catch((error: unknown) => error),
-      forbidden.whoAmI().catch((error: unknown) => error),
-      featureOff.getCredentialRecord("record-1").catch((error: unknown) => error),
-      documentSchema.getArtifactText("artifact-1").catch((error: unknown) => error),
-      serverError.whoAmI().catch((error: unknown) => error),
-    ]);
+    const [unauthorizedError, featureOffError, documentSchemaError, serverErrorResult] =
+      await Promise.all([
+        unauthorized.whoAmI().catch((error: unknown) => error),
+        featureOff.getCredentialRecord("record-1").catch((error: unknown) => error),
+        documentSchema.getArtifactText("artifact-1").catch((error: unknown) => error),
+        serverError.whoAmI().catch((error: unknown) => error),
+      ]);
 
     expect(isRetryableQueryError(unauthorizedError)).toBe(false);
-    expect(isRetryableQueryError(forbiddenError)).toBe(false);
     expect(isCredentialFeatureOff(featureOffError)).toBe(true);
     expect(isRetryableQueryError(featureOffError)).toBe(false);
     expect(isRetryableQueryError(documentSchemaError)).toBe(false);
@@ -470,7 +458,6 @@ test("API client reaches every remaining documented endpoint", async () => {
   await api.whoAmI();
   await api.logout();
   await api.githubRest("repos/acme/dispatch");
-  await api.githubGraphql("{ viewer { login } }");
 
   expect(stub.requests.map(({ init, path }) => [init?.method ?? "GET", path])).toEqual([
     ["GET", "/api/v1/projects"],
@@ -506,7 +493,6 @@ test("API client reaches every remaining documented endpoint", async () => {
     ["GET", "/auth/whoami"],
     ["POST", "/auth/logout"],
     ["GET", "/api/github/rest/repos/acme/dispatch"],
-    ["POST", "/api/github/graphql"],
   ]);
 });
 

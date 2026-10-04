@@ -8,7 +8,7 @@ suggestions, artifacts, and durable event history. The Go server in
 ## Application shape
 
 `AuthGate` requests `GET /auth/whoami` and sends unauthenticated visitors to the
-GitHub sign-in flow. All application requests are same-origin. React Router serves
+Google sign-in flow. All application requests are same-origin. React Router serves
 the Inbox at `/`, an issue workspace at `/issues/:key/*`, and the human-only
 repository-to-project settings page at `/settings`; TanStack Query and SSE keep
 the issue, Inbox, documents, and sidebar current.
@@ -137,8 +137,9 @@ runs `e2e/collab-cursor.e2e.ts`, since where a caret lands beside a collaborator
 engine, and `firefox` runs `e2e/code-line-replace.e2e.ts`, since Firefox's own editing
 mishandles text typed over what follows a block's last line break; both also run
 `e2e/keyboard-agents-picker.e2e.ts`, whose keyboard rule rests on each engine's select dispatch.
-`webkit-iphone` runs the live view's two phone-layout rows of `e2e/agent-view.e2e.ts` in WebKit
-with the iPhone 13 profile, since iOS Safari is the engine its keyboard cap exists for.
+`webkit-iphone` runs the live view's two phone-layout rows of `e2e/agent-view.e2e.ts`, and the
+rows of `e2e/phone-conversation.e2e.ts` that check what the Conversation's floating pills cover, in
+WebKit with the iPhone 13 profile, since iOS Safari is the engine those layouts exist for.
 `chromium-plain-http` runs `e2e/plain-http-origin.e2e.ts` and `e2e/plain-http-proxy.e2e.ts`, with
 the page opened at `http://dispatch-e2e.test:<PLAIN_HTTP_PORT>` (Chromium maps that name to the
 local proxy), a plain-HTTP origin that is not loopback and so not a secure context. The proxy

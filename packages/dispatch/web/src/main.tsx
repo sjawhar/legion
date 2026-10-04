@@ -15,7 +15,7 @@ import "./styles.css";
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
-      // An auth outcome (401/403) is definitive — everything else (a dropped connection,
+      // An auth outcome (401) is definitive — everything else (a dropped connection,
       // a 5xx) is worth a couple of quick retries before we show an error.
       retry: (failureCount, error) => failureCount < 2 && isRetryableQueryError(error),
       retryDelay: 500,

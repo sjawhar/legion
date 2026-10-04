@@ -16,6 +16,7 @@ import {
   replyToCommentDelivery,
 } from "./api";
 import { recordClipboard } from "./clipboard";
+import { needsYouCards } from "./editor";
 import { setPendingCredentialRequests } from "./fake-broker-helpers";
 import { resetDatabase, setCreatedAt } from "./seed";
 import { asUser } from "./users";
@@ -440,7 +441,7 @@ test("inbox shows current asks and answers issue asks in the margin", async ({
   if (testInfo.project.name === "iphone") {
     await alicePage.getByRole("button", { name: "Open review panel (2 open asks)" }).click();
   }
-  const needsYou = alicePage.getByRole("region", { name: "Needs you" });
+  const needsYou = needsYouCards(alicePage);
   const newestAskCard = needsYou.getByTestId(`ask-${newestAsk.id}`);
   const shipOption = newestAskCard.getByRole("radio", { name: "Ship" });
   await shipOption.check();
@@ -996,7 +997,7 @@ test("the inbox defaults to Mine with an Unassigned band, Assign to me takes a r
     session
   );
 
-  // GitHub's spelling of a login is what `/auth/whoami` echoes; issues carry the lowercase login.
+  // Whatever casing reaches the identity header, Dispatch names the person by its lowercase form.
   const alice = await asUser(browser, "Alice");
   const bob = await asUser(browser, "bob");
   const alicePage = await alice.newPage();
