@@ -1,12 +1,13 @@
 // Package oidctest is a local OIDC issuer for tests of the code that verifies
 // OIDC tokens: an httptest server answering discovery and JWKS for keys the
 // test controls, the minting side a Kubernetes pod's projected service-account
-// token would come from, and, once EnableCodeFlow arms it, the authorization
-// and token endpoints a person's sign-in goes through (authorization code,
-// refresh token). It is an ordinary package rather than a _test.go file so the
-// packages that need it — internal/oidc, internal/dispatch/api,
-// internal/dispatch/routes and cmd/listener — can all import it; Go cannot
-// share test-only code across packages.
+// token would come from, and, once EnableCodeFlow arms it, the authorization,
+// token and revocation endpoints a person's sign-in goes through
+// (authorization code, refresh token, RFC 7009 revocation). It is an ordinary
+// package rather than a _test.go file so the packages that need it —
+// internal/oidc, internal/dispatch/api, internal/dispatch/routes,
+// internal/dispatch/store, cmd/dispatch and cmd/listener — can all import it;
+// Go cannot share test-only code across packages.
 package oidctest
 
 import (
@@ -66,6 +67,7 @@ type Issuer struct {
 	jwksRequests    int
 	keysDelay       time.Duration
 	omitCodeFlow    bool
+	omitRevocation  bool
 	codeFlow        *codeFlow
 }
 
@@ -80,6 +82,20 @@ type codeFlow struct {
 	codes        map[string]codeGrant
 	grants       map[string]*refreshGrant
 	refreshes    int
+	revocation   revocation
+}
+
+// revocation is the state of the revocation endpoint: every token the client
+// sent it, in order, whatever it answered; the status and OAuth error code it
+// answers instead of revoking, when FailRevocation set one; where it redirects
+// instead, when RedirectRevocation set it; and how long it waits before
+// answering.
+type revocation struct {
+	requests []string
+	status   int
+	code     string
+	redirect string
+	delay    time.Duration
 }
 
 type codeGrant struct {
@@ -105,6 +121,7 @@ func New(t TB) *Issuer {
 	mux.HandleFunc("/keys", issuer.handleKeys)
 	mux.HandleFunc("GET /authorize", issuer.handleAuthorize)
 	mux.HandleFunc("POST /token", issuer.handleToken)
+	mux.HandleFunc("POST /revoke", issuer.handleRevoke)
 	issuer.server = httptest.NewServer(mux)
 	t.Cleanup(issuer.server.Close)
 	issuer.issuerClaim = issuer.server.URL
@@ -191,6 +208,49 @@ func (i *Issuer) OmitCodeFlowEndpoints() {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	i.omitCodeFlow = true
+}
+
+// OmitRevocationEndpoint makes the discovery document name no revocation
+// endpoint, the shape of an issuer that offers no token revocation.
+func (i *Issuer) OmitRevocationEndpoint() {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.omitRevocation = true
+}
+
+// FailRevocation makes the revocation endpoint answer status, with code as the
+// body's OAuth error when code is not empty, instead of revoking; a status of 0
+// makes it revoke again. Cognito answers 400 invalid_request to a client with
+// revocation turned off.
+func (i *Issuer) FailRevocation(status int, code string) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.codeFlow.revocation.status, i.codeFlow.revocation.code = status, code
+}
+
+// DelayRevocation makes the revocation endpoint wait d before answering, or
+// until the client hangs up: a pool that accepts the connection and does not
+// answer.
+func (i *Issuer) DelayRevocation(d time.Duration) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.codeFlow.revocation.delay = d
+}
+
+// RedirectRevocation makes the revocation endpoint answer 307 to target
+// instead of revoking: a client that follows it re-sends the token there.
+func (i *Issuer) RedirectRevocation(target string) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.codeFlow.revocation.redirect = target
+}
+
+// RevocationRequests is every token the client has sent the revocation
+// endpoint, in order, whatever it answered.
+func (i *Issuer) RevocationRequests() []string {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	return append([]string(nil), i.codeFlow.revocation.requests...)
 }
 
 // SignInAs queues the claims the next authorization request signs in with: the
@@ -295,7 +355,7 @@ func sign(key *Key, claims map[string]any) (string, error) {
 
 func (i *Issuer) handleDiscovery(w http.ResponseWriter, _ *http.Request) {
 	i.mu.Lock()
-	status, issuer, omitCodeFlow := i.discoveryStatus, i.issuerClaim, i.omitCodeFlow
+	status, issuer, omitCodeFlow, omitRevocation := i.discoveryStatus, i.issuerClaim, i.omitCodeFlow, i.omitRevocation
 	i.mu.Unlock()
 	if status != 0 {
 		http.Error(w, "discovery unavailable", status)
@@ -309,6 +369,9 @@ func (i *Issuer) handleDiscovery(w http.ResponseWriter, _ *http.Request) {
 	if !omitCodeFlow {
 		document["authorization_endpoint"] = i.server.URL + "/authorize"
 		document["token_endpoint"] = i.server.URL + "/token"
+	}
+	if !omitRevocation {
+		document["revocation_endpoint"] = i.server.URL + "/revoke"
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(document)
@@ -421,6 +484,65 @@ func (i *Issuer) handleToken(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(body)
+}
+
+// handleRevoke answers a revocation as Cognito's /oauth2/revoke does for a
+// client with a secret: the client authenticates with HTTP Basic, the body
+// carries the token, and a token the pool does not know, or has revoked
+// already, is answered 200 like one it revokes now. A revoked refresh token's
+// next refresh answers invalid_grant.
+func (i *Issuer) handleRevoke(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		tokenError(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	i.mu.Lock()
+	flow := i.codeFlow
+	if flow == nil {
+		i.mu.Unlock()
+		http.Error(w, "code flow not enabled", http.StatusNotFound)
+		return
+	}
+	clientID, clientSecret, basic := r.BasicAuth()
+	if !basic || clientID != flow.clientID || clientSecret != flow.clientSecret {
+		i.mu.Unlock()
+		tokenError(w, http.StatusUnauthorized, "invalid_client")
+		return
+	}
+	token := r.PostForm.Get("token")
+	if token == "" {
+		i.mu.Unlock()
+		tokenError(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	flow.revocation.requests = append(flow.revocation.requests, token)
+	status, code, redirect, delay := flow.revocation.status, flow.revocation.code, flow.revocation.redirect, flow.revocation.delay
+	i.mu.Unlock()
+	if delay > 0 {
+		select {
+		case <-time.After(delay):
+		case <-r.Context().Done():
+			return
+		}
+	}
+	if redirect != "" {
+		http.Redirect(w, r, redirect, http.StatusTemporaryRedirect)
+		return
+	}
+	if status != 0 {
+		if code == "" {
+			http.Error(w, http.StatusText(status), status)
+		} else {
+			tokenError(w, status, code)
+		}
+		return
+	}
+	i.mu.Lock()
+	if grant, ok := flow.grants[token]; ok {
+		grant.revoked = true
+	}
+	i.mu.Unlock()
+	w.WriteHeader(http.StatusOK)
 }
 
 func tokenError(w http.ResponseWriter, status int, code string) {
