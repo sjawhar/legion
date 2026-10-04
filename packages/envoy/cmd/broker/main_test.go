@@ -60,7 +60,7 @@ func TestNonZeroPortPublicURLIsFineEvenWithRulesS3URI(t *testing.T) {
 func TestMainRefusesPortZeroPublicURLWithRulesS3URI(t *testing.T) {
 	binPath := filepath.Join(t.TempDir(), "broker")
 	build := exec.Command("go", "build", "-o", binPath, ".")
-	build.Env = append(os.Environ(), "GOTOOLCHAIN=go1.26.1")
+	build.Env = append(os.Environ(), "GOTOOLCHAIN=go1.26.8")
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("go build ./cmd/broker: %v\n%s", err, out)
 	}
@@ -139,7 +139,7 @@ func TestMainLogsRealBoundAddress(t *testing.T) {
 
 	binPath := filepath.Join(t.TempDir(), "broker")
 	build := exec.Command("go", "build", "-o", binPath, ".")
-	build.Env = append(os.Environ(), "GOTOOLCHAIN=go1.26.1")
+	build.Env = append(os.Environ(), "GOTOOLCHAIN=go1.26.8")
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("go build ./cmd/broker: %v\n%s", err, out)
 	}
