@@ -18,16 +18,72 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
-// A snapshot or a seed outside Join would write a version or an update that no ledger records,
-// whose authors would never be credited or released, so both refuse to run.
-func TestTransactionalDocumentOperationsRefuseAnUnjoinedContext(t *testing.T) {
+// A write outside Join would reach no transaction to weigh it in and no ledger to record it, so
+// every document write refuses to run, whichever entry point it comes through, and writes nothing:
+// the document keeps its tree and its updates.
+func TestEveryDocumentWriteRefusesAnUnjoinedContext(t *testing.T) {
 	service, artifactID := newTestService(t)
-	alice := model.Actor{Kind: "user", ID: "alice"}
-	if _, err := service.SnapshotVersion(context.Background(), artifactID, alice); !errors.Is(err, errUnjoined) {
-		t.Fatalf("unjoined snapshot error = %v, want errUnjoined", err)
+	seedServiceText(t, service, artifactID, "The quick brown fox\n\n:::ask{#ask-1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nShip it?\n:::\n")
+	if _, err := joinedMarkQuote(service, artifactID, MarkSpec{
+		Kind: MarkSuggestion, ID: "s1", By: model.Actor{Kind: "session", ID: "s1"},
+	}, "brown", nil); err != nil {
+		t.Fatalf("mark a suggestion: %v", err)
 	}
-	if _, err := service.SeedText(context.Background(), artifactID, "seeded", alice); !errors.Is(err, errUnjoined) {
-		t.Fatalf("unjoined seed error = %v, want errUnjoined", err)
+	before := liveTree(t, service, artifactID)
+	countUpdates := func() int {
+		var updates int
+		if err := service.store.Pool.QueryRow(context.Background(), `select count(*) from doc_updates where artifact_id = $1`, artifactID).Scan(&updates); err != nil {
+			t.Fatalf("count updates: %v", err)
+		}
+		return updates
+	}
+	updates := countUpdates()
+	alice := model.Actor{Kind: "user", ID: "alice"}
+	unjoined := context.Background()
+	token, err := service.currentToken(unjoined, artifactID)
+	if err != nil {
+		t.Fatalf("read the document's token: %v", err)
+	}
+	insert := []model.EditOp{{Op: "insert", After: "end", Markdown: "more"}}
+	for _, write := range []struct {
+		name string
+		run  func() error
+	}{
+		{"SeedText", func() error { _, err := service.SeedText(unjoined, artifactID, "seeded", alice); return err }},
+		{"SnapshotVersion", func() error { _, err := service.SnapshotVersion(unjoined, artifactID, alice); return err }},
+		{"NamedVersion", func() error { _, err := service.NamedVersion(unjoined, artifactID, "named", alice); return err }},
+		{"ReplaceText", func() error { _, err := service.ReplaceText(unjoined, artifactID, "replaced", alice); return err }},
+		{"ApplyOps", func() error { _, err := service.ApplyOps(unjoined, artifactID, insert, alice, nil); return err }},
+		{"ApplyOps with a precondition", func() error {
+			_, err := service.ApplyOps(unjoined, artifactID, insert, alice, &model.EditPrecondition{Document: token})
+			return err
+		}},
+		{"MarkQuote", func() error {
+			_, err := service.MarkQuote(unjoined, artifactID, MarkSpec{Kind: MarkComment, ID: "c1", By: alice}, "quick", nil)
+			return err
+		}},
+		{"ProjectMark", func() error {
+			return service.ProjectMark(unjoined, artifactID, "c1", MarkRecord{Kind: "comment", By: "user:alice", Text: "note"}, alice)
+		}},
+		{"AcceptSuggestion", func() error { return service.AcceptSuggestion(unjoined, artifactID, "s1", "red", alice) }},
+		{"RejectSuggestion", func() error { return service.RejectSuggestion(unjoined, artifactID, "s1", alice) }},
+		{"SetBlockAttributes", func() error {
+			return service.SetBlockAttributes(unjoined, artifactID, "ask-1", map[string]any{"state": "answered", "answer": "Yes."}, alice)
+		}},
+		{"SetAskBlockText", func() error {
+			_, err := service.SetAskBlockText(unjoined, artifactID, "ask-1", AskBlockEdit{Question: new("Ship it now?")}, alice)
+			return err
+		}},
+	} {
+		if err := write.run(); !errors.Is(err, errUnjoined) {
+			t.Errorf("unjoined %s = %v, want errUnjoined", write.name, err)
+		}
+	}
+	if after := liveTree(t, service, artifactID); !after.EqualWithBlockIDs(before) {
+		t.Errorf("the document changed under unjoined writes")
+	}
+	if after := countUpdates(); after != updates {
+		t.Errorf("doc_updates rows = %d after the unjoined writes, want the %d before them", after, updates)
 	}
 }
 
@@ -104,7 +160,7 @@ func TestReplaceTextUpdatesLiveDocumentAndSettlesVersion(t *testing.T) {
 	service, artifactID := newTestService(t)
 	seedServiceText(t, service, artifactID, "# First")
 	actor := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
-	if _, err := service.ReplaceText(context.Background(), artifactID, "# Replaced", actor); err != nil {
+	if _, err := joinedReplaceText(service, artifactID, "# Replaced", actor); err != nil {
 		t.Fatalf("replace text: %v", err)
 	}
 	waitForDocumentText(t, service, artifactID, "# Replaced\n")
@@ -190,7 +246,7 @@ func TestTransactionalApplyRefreshesAnchoredComment(t *testing.T) {
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "target")
 	const commentID = "00000000-0000-4000-8000-000000000003"
-	if _, err := service.MarkQuote(context.Background(), artifactID, MarkSpec{
+	if _, err := joinedMarkQuote(service, artifactID, MarkSpec{
 		Kind: MarkComment,
 		ID:   commentID,
 		By:   model.Actor{Kind: "user", ID: "alice"},
@@ -255,7 +311,7 @@ func TestClosedIssueRejectsLiveEditsAndNamedVersions(t *testing.T) {
 		t.Fatalf("close document issue: %v", err)
 	}
 	actor := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
-	_, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{{Op: "replace", Find: "before", With: "after"}}, actor, nil)
+	_, err := joinedApplyOps(service, artifactID, []model.EditOp{{Op: "replace", Find: "before", With: "after"}}, actor, nil)
 	if !errors.Is(err, ErrIssueClosed) {
 		t.Fatalf("edit closed document error = %v, want ErrIssueClosed", err)
 	}
@@ -314,7 +370,7 @@ func TestSnapshotVersionDoesNotAttributeUnchangedDocument(t *testing.T) {
 		t.Fatalf("commit snapshot transaction: %v", err)
 	}
 
-	if _, err := service.ReplaceText(context.Background(), artifactID, "after", editor); err != nil {
+	if _, err := joinedReplaceText(service, artifactID, "after", editor); err != nil {
 		t.Fatalf("replace document: %v", err)
 	}
 	version = waitForDocumentVersion(t, service.store, artifactID, 2)
@@ -328,7 +384,7 @@ func TestCommittedSnapshotAndNamedVersionsClearPendingAuthors(t *testing.T) {
 	seedServiceText(t, service, artifactID, "before")
 	editor := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
 	snapshotter := model.Actor{Kind: "user", ID: "alice"}
-	if _, err := service.ReplaceText(context.Background(), artifactID, "after", editor); err != nil {
+	if _, err := joinedReplaceText(service, artifactID, "after", editor); err != nil {
 		t.Fatalf("edit before snapshot: %v", err)
 	}
 
@@ -382,7 +438,7 @@ func TestVersionCaptureDoesNotClearAuthorsFromLaterEdits(t *testing.T) {
 	seedServiceText(t, service, artifactID, "before")
 	first := model.Actor{Kind: "user", ID: "alice"}
 	second := model.Actor{Kind: "user", ID: "bob"}
-	if _, err := service.ReplaceText(context.Background(), artifactID, "first", first); err != nil {
+	if _, err := joinedReplaceText(service, artifactID, "first", first); err != nil {
 		t.Fatalf("first edit: %v", err)
 	}
 	tx, err := service.store.Pool.Begin(context.Background())
@@ -396,9 +452,9 @@ func TestVersionCaptureDoesNotClearAuthorsFromLaterEdits(t *testing.T) {
 	if err != nil || !wrote {
 		t.Fatalf("snapshot dirty document = %#v, wrote=%t, err=%v", version, wrote, err)
 	}
-	if _, err := service.ReplaceText(context.Background(), artifactID, "second", second); err != nil {
-		t.Fatalf("later edit: %v", err)
-	}
+	// A browser's edit is the one write that lands while the version's transaction holds the
+	// document; a server write would wait for it.
+	browserReplaceText(t, service, artifactID, "second", second)
 	if err := ledger.Commit(context.Background()); err != nil {
 		t.Fatalf("commit snapshot transaction: %v", err)
 	}
@@ -419,9 +475,7 @@ func TestVersionCaptureDoesNotClearAuthorsFromLaterEdits(t *testing.T) {
 	if _, err := service.NamedVersion(namedCtx, artifactID, "checkpoint", first); err != nil {
 		t.Fatalf("name document version: %v", err)
 	}
-	if _, err := service.ReplaceText(context.Background(), artifactID, "third", second); err != nil {
-		t.Fatalf("later named-version edit: %v", err)
-	}
+	browserReplaceText(t, service, artifactID, "third", second)
 	if err := namedLedger.Commit(context.Background()); err != nil {
 		t.Fatalf("commit named transaction: %v", err)
 	}
@@ -447,7 +501,7 @@ func TestColdSnapshotCapturesFirstEditAfterWarm(t *testing.T) {
 	editDone := make(chan error, 1)
 	go func() {
 		editDone <- func() error {
-			_, err := service.ReplaceText(context.Background(), artifactID, "after", editor)
+			_, err := joinedReplaceText(service, artifactID, "after", editor)
 			return err
 		}()
 	}()
@@ -485,7 +539,7 @@ func TestColdSnapshotCapturesFirstEditAfterWarm(t *testing.T) {
 func TestReplaceTextAcceptsUnchangedEmptyDocument(t *testing.T) {
 	service, artifactID := newTestService(t)
 	seedServiceText(t, service, artifactID, "")
-	if _, err := service.ReplaceText(context.Background(), artifactID, "", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+	if _, err := joinedReplaceText(service, artifactID, "", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("replace unchanged empty document: %v", err)
 	}
 }
@@ -494,7 +548,7 @@ func TestRefreshAnchorsClosesRowsBeforeUpdating(t *testing.T) {
 	service, artifactID := newTestService(t)
 	seedServiceText(t, service, artifactID, "before after")
 	const askID = "00000000-0000-4000-8000-000000000004"
-	if _, err := service.MarkQuote(context.Background(), artifactID, MarkSpec{
+	if _, err := joinedMarkQuote(service, artifactID, MarkSpec{
 		Kind: MarkAsk,
 		ID:   askID,
 		By:   model.Actor{Kind: "user", ID: "alice"},
@@ -567,7 +621,7 @@ func TestNamedVersionIndexesDocumentReferences(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "before")
-	if _, err := service.ReplaceText(context.Background(), artifactID, "See dispatch://DOC-1/artifact/spec.", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+	if _, err := joinedReplaceText(service, artifactID, "See dispatch://DOC-1/artifact/spec.", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("replace document text: %v", err)
 	}
 	if _, err := namedVersion(t, service, artifactID, "reference", model.Actor{Kind: "user", ID: "alice"}); err != nil {
@@ -589,7 +643,7 @@ func TestNamedVersionIndexesServerURLDocumentReferences(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "before")
-	if _, err := service.ReplaceText(context.Background(), artifactID, "See https://dispatch.example/issues/DOC-1/spec.", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+	if _, err := joinedReplaceText(service, artifactID, "See https://dispatch.example/issues/DOC-1/spec.", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("replace document text: %v", err)
 	}
 	if _, err := namedVersion(t, service, artifactID, "reference", model.Actor{Kind: "user", ID: "alice"}); err != nil {
@@ -621,9 +675,8 @@ func TestSettledVersionNamesChangedReferenceTargets(t *testing.T) {
 	}
 	seedServiceText(t, service, artifactID, "# First")
 	actor := model.Actor{Kind: "user", ID: "alice"}
-	if _, err := service.ReplaceText(
-		context.Background(), artifactID, "# First\n\nWaiting on dispatch://DOC-1/ask/"+askID+".", actor,
-	); err != nil {
+	if _, err := joinedReplaceText(service,
+		artifactID, "# First\n\nWaiting on dispatch://DOC-1/ask/"+askID+".", actor); err != nil {
 		t.Fatalf("replace text: %v", err)
 	}
 	waitForDocumentVersion(t, service.store, artifactID, 2)
@@ -673,7 +726,7 @@ func TestVersionWritersReportChangedReferenceTargets(t *testing.T) {
 		askIDs = append(askIDs, id)
 	}
 
-	if _, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{
+	if _, err := joinedApplyOps(service, artifactID, []model.EditOp{
 		{Op: "replace", Find: "Pending.", With: "Waiting on dispatch://DOC-1/ask/" + askIDs[0] + "."},
 	}, actor, nil); err != nil {
 		t.Fatalf("apply the citing edit: %v", err)
@@ -697,7 +750,7 @@ func TestVersionWritersReportChangedReferenceTargets(t *testing.T) {
 		t.Fatalf("snapshot changes = %#v (wrote=%t), want %#v", snapshot.Changes.Targets, snapshot.Wrote, want)
 	}
 
-	if _, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{
+	if _, err := joinedApplyOps(service, artifactID, []model.EditOp{
 		{Op: "replace", Find: "Waiting on", With: "Also dispatch://DOC-1/ask/" + askIDs[1] + ", waiting on"},
 	}, actor, nil); err != nil {
 		t.Fatalf("apply the second citing edit: %v", err)
