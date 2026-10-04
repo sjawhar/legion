@@ -16,6 +16,13 @@
 
 ### Changed
 
+- The `dispatch`, `legion-architect`, `legion-controller` and `legion-retro` skills, and the
+  dispatch issues reference, name no one by first name: every literal `Sami` reference becomes
+  `the human` or `the operator`, matching each file's own existing convention for the person an
+  agent asks for a decision or finds at the controller's tmux pane, and the two provenance-quoted
+  rulings keep their rule stated plainly, with the quote and attribution dropped. The shipped
+  skill reaches every installed user of this package, not only its author.
+
 - The architect and worker skills and the daemon's role prompts say what the daemon does: it
   starts and orders every phase from its fixed workflow table (LEGION-223). Nothing tells an agent
   to call `spawn_worker`, `release_wave` or `set_status`, which the `legion` tool no longer has.
