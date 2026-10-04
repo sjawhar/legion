@@ -335,15 +335,16 @@ the room (`settleRoomWithin`'s first read and its version's, and the block-id ba
 through `liveTree`) read it so, so a torn read is never versioned as the document; a repair reads
 the tree inside the transaction that writes it (`rewriteLive`), and the unrecorded-mark sweep
 (`sweepUnrecordedMarks`) inside the transaction that unmarks it. A room's load reads the live tree
-before ygo hands the room to anyone (`onLoadDocument`). A write reads its transaction's fork, except
-on a branch production never takes: a document operation called outside any transaction
-(`applyLive`'s unjoined branch, which `ReplaceText`, `MarkQuote`, `SetBlockAttributes` and the other
-operations take when nothing joined one) walks the room's own document inside `Server.Apply`, which
-holds no lock across its callback. Every API handler joins its transaction first (`Docs.Join`), so
-only tests call an operation unjoined. A walk of the live tree takes no lock (sjawhar/ygo
-v1.50.1-sami.2, `crdt/yxml.go`) while every peer update and service write holds that lock as it
-applies, so the walk can read a write halfway through as a tree outside the schema and answer a
-healthy document 409 with the repair. A tree a read returns shares no map or slice with the
+before ygo hands the room to anyone (`onLoadDocument`). A write reads its transaction's fork, with
+no exception: every operation that changes the document - `ReplaceText`, `MarkQuote`,
+`SetBlockAttributes` and the rest of `applyLive`'s callers - takes it from a transaction its caller
+joined first (`Docs.Join`), and refuses one that didn't (`errUnjoined`). Main's own
+`applyLive`/`applyJoined` fold (#1693) removed the unjoined branch this used to carve out as a
+tests-only exception, which walked the room's own live document directly inside `Server.Apply`,
+holding no lock across its callback, and so could read a peer's write halfway through as a tree
+outside the schema; every write now reads through its own transaction's fork instead, which is
+always a consistent copy no peer's concurrent write can tear. A tree a read returns shares no map
+or slice with the
 document it was read from
 (`pmdoc.Read` copies each mark's attributes and every list or object an attribute holds), so a
 reader that edits its tree changes nothing a later read of the replica meets
