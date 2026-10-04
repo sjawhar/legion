@@ -25,6 +25,9 @@ concurrency:
   group: docs-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+# Read-only: no job here writes to the repository, a registry or the API. The token clones,
+# downloads pinned tools, and, where a job calls dorny/paths-filter, reads the pull request's
+# file list, which this public repository serves without `pull-requests: read`.
 permissions:
   contents: read
 
@@ -45,15 +48,17 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
       - uses: ./.github/actions/setup-bun
       # Astro runs on Node.js (22.12 or newer).
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "24"
       # docs/site/scripts/build-binaries.sh builds the Go binaries the reference generators run, and
       # the screenshots step builds the Dispatch server; both modules name the same Go.
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: packages/daemon/go.mod
           cache-dependency-path: |
@@ -88,7 +93,7 @@ jobs:
       # What each failed shot's page showed, and the harness's process logs: a hang leaves the
       # Dispatch server's goroutines at the end of dispatch.log.
       - if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: docs-failed-shots-${{ github.run_attempt }}
           path: |
@@ -103,7 +108,7 @@ jobs:
           bun run docs:build
           ls -l docs/site/dist/THIRD_PARTY_NOTICES.txt
       - if: github.event_name == 'push'
-        uses: actions/upload-pages-artifact@v5
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: docs/site/dist
 
@@ -115,6 +120,8 @@ jobs:
     concurrency:
       group: pages
       cancel-in-progress: false
+    # Publishes the built site to GitHub Pages: pages: write performs the deployment, id-token:
+    # write is the OIDC token actions/deploy-pages exchanges for it.
     permissions:
       pages: write
       id-token: write
@@ -122,6 +129,6 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - uses: actions/configure-pages@v6
+      - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
       - id: deployment
-        uses: actions/deploy-pages@v5
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

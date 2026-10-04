@@ -26,6 +26,11 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
+// headerIdentity is the test header identity that records each named person in the database.
+func headerIdentity(database *store.Store) identity.HeaderIdentity {
+	return identity.HeaderIdentity{Header: "X-Dispatch-User", People: store.NewPgPeopleStore(database.Pool, "signing-key", nil)}
+}
+
 func newTestService(t *testing.T) (*Service, string) {
 	t.Helper()
 	database := storetest.Open(t)
@@ -33,7 +38,7 @@ func newTestService(t *testing.T) (*Service, string) {
 	service := New(Deps{
 		Store:     database,
 		Events:    events.NewBroker(),
-		Identity:  identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: map[string]struct{}{"alice": {}}},
+		Identity:  headerIdentity(database),
 		ServerURL: "https://dispatch.example",
 		Settle:    20 * time.Millisecond,
 	})

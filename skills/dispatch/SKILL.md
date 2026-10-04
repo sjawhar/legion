@@ -156,7 +156,7 @@ Create an issue for newly tracked work with:
 ```ts
 dispatch_issue({ project, title, parent?, external?, spec?, force?, labels?: string[], priority?: 0 | 1 | 2 | 3, assignee?: string })
 ```
-`labels` are optional initial labels: Dispatch trims them, preserves their case, and removes case-insensitive duplicates. `priority` is yours on creation too — see [Priority is yours to set](skill://dispatch/references/issues.md). Set `assignee` (a GitHub login on the sign-in allowlist) only when the human said who owns the work; otherwise the default above applies, so a child inherits its parent's assignee. It returns
+`labels` are optional initial labels: Dispatch trims them, preserves their case, and removes case-insensitive duplicates. `priority` is yours on creation too — see [Priority is yours to set](skill://dispatch/references/issues.md). Set `assignee` (the email of a person who has signed in to Dispatch) only when the human said who owns the work; otherwise the default above applies, so a child inherits its parent's assignee. It returns
 `details` `{ issue }`; creating an issue does not subscribe you to it (see [Following](#following)). Use `dispatch_issue` only to create an issue; never use it to park a question. When `spec` is supplied,
 follow [Writing a spec](#writing-a-spec).
 
@@ -418,10 +418,10 @@ Read the current document before changing it:
 ```ts
 dispatch_doc_read({ issue?, project?, artifact?, version?, ref? })
 ```
-It returns live or versioned markdown with open marks. A live read ends with a document token; `issue` with an
-omitted `artifact` reads the issue specification; a project needs `artifact`; and a
-`dispatch://PROJECT/artifact/<document-ref>` ref supplies both, where `document-ref` is the slug (an id or a
-filename resolves when no document has that slug).
+It returns live or versioned markdown with open marks. A live read ends with a document token; `issue` with an omitted
+`artifact` reads the issue specification; a project needs `artifact`; and a `dispatch://PROJECT/artifact/<document-ref>`
+ref supplies both, where `document-ref` is the slug (an id or a filename resolves when no document has that slug). A file
+`dispatch_artifact` uploaded reads its text at the latest or named version, or a description when it is not UTF-8 text.
 
 Editing one is [Editing a document](skill://dispatch/references/document-edits.md): the shape of `dispatch_doc_edit`,
 how to quote the text you mean, one `replace` per paragraph, preconditions against a stale edit, and

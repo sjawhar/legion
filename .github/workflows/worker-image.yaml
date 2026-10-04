@@ -8,21 +8,15 @@ on:
         type: string
         required: false
         default: ""
-      release_tag:
-        description: The legion-v* release to append the image digest to (empty when legion_version is empty)
-        type: string
-        required: false
-        default: ""
+    outputs:
+      ref:
+        description: The pushed image, pinned by digest (ghcr.io/sjawhar/legion-worker@sha256:…)
+        value: ${{ jobs.build.outputs.ref }}
   # Post-merge only: GitHub dispatches a workflow only once it exists on the default branch.
   workflow_dispatch:
     inputs:
       legion_version:
         description: Optional legion version to also tag the image with (main only)
-        type: string
-        required: false
-        default: ""
-      release_tag:
-        description: Optional legion-v* release to append the digest to (main only)
         type: string
         required: false
         default: ""
@@ -69,10 +63,12 @@ on:
       - scripts/go-third-party-notices.sh
       - scripts/assemble-third-party-notices.sh
 
-# Same-repo `pull_request` runs get these too (a fork PR would get a read-only token, and this repo
-# takes no fork PRs).
+# Same-repo `pull_request` runs get this token too (a fork PR would get a read-only token, and this
+# repo takes no fork PRs), so it carries only what the pull request path needs: a PR that edits this
+# workflow must add a write scope to get one, and that line shows in its diff. The release note that
+# needs `contents: write` runs in release.yaml's own `worker_image_release_note` job.
 permissions:
-  contents: write # gh release edit
+  contents: read
   packages: write # ghcr.io push
 
 jobs:
@@ -89,39 +85,39 @@ jobs:
       # The commit that is built and that the sha- tag names: the PR head on `pull_request` (github.sha
       # would be the ephemeral merge commit there); the triggering commit for workflow_call/dispatch.
       BUILT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    outputs:
+      ref: ${{ steps.record.outputs.ref }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: ${{ env.BUILT_SHA }}
+          # This job never pushes with git.
+          persist-credentials: false
 
       - name: Compute tags
         id: meta
         env:
           LEGION_VERSION: ${{ inputs.legion_version }}
-          RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
           short="${BUILT_SHA::12}"
           tags="${IMAGE}:sha-${short}"
-          tag_release="false"
           version_label="sha-$short"
           if [ "$GITHUB_REF" = "refs/heads/main" ] && [ -n "$LEGION_VERSION" ]; then
             tags="${tags}"$'\n'"${IMAGE}:${LEGION_VERSION}"
             version_label="$LEGION_VERSION"
-            [ -n "$RELEASE_TAG" ] && tag_release="true"
           fi
           {
             echo "built_sha=$BUILT_SHA"
             echo "short=$short"
-            echo "tag_release=$tag_release"
             echo "version_label=$version_label"
             echo "tags<<EOF"
             echo "$tags"
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -129,7 +125,7 @@ jobs:
 
       - name: Build and push
         id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           file: packages/daemon/docker/worker.Dockerfile
@@ -150,15 +146,18 @@ jobs:
             github_token=${{ secrets.GITHUB_TOKEN }}
 
       - name: Record digest
+        id: record
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
           TAGS: ${{ steps.meta.outputs.tags }}
         run: |
           test -n "$DIGEST"
+          REF="${IMAGE}@${DIGEST}"
+          echo "ref=$REF" >> "$GITHUB_OUTPUT"
           {
             echo "### Worker image"
             echo
-            echo "\`${IMAGE}@${DIGEST}\`"
+            echo "\`$REF\`"
             echo
             echo "Tags:"
             # shellcheck disable=SC2016 # literal backticks and a sed `$` anchor, no expansion wanted
@@ -166,19 +165,3 @@ jobs:
             echo
             echo "Pin \`runtime.kubernetes.image\` to the digest reference above; the daemon refuses a tag."
           } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Append digest to the legion release
-        if: steps.meta.outputs.tag_release == 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          DIGEST: ${{ steps.build.outputs.digest }}
-          RELEASE_TAG: ${{ inputs.release_tag }}
-        run: |
-          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json body -q .body > body.md
-          if grep -q "$DIGEST" body.md; then
-            echo "Release $RELEASE_TAG already lists $DIGEST"
-            exit 0
-          fi
-          # shellcheck disable=SC2016 # literal Markdown backticks, no expansion wanted
-          printf '\n\n## Worker image\n\n`%s@%s`\n' "$IMAGE" "$DIGEST" >> body.md
-          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --notes-file body.md

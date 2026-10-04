@@ -31,10 +31,10 @@ on:
       - ".github/go-release-targets.json"
   workflow_dispatch:
 
-permissions:
-  contents: write
-  packages: write
-  id-token: write
+# Every job declares its own permissions (build, docker, release below); nothing runs under this
+# workflow-level default, so it stays empty rather than becoming an unreviewed grant to a job
+# added later with no block of its own.
+permissions: {}
 
 
 jobs:
@@ -63,10 +63,12 @@ jobs:
       matrix:
         arch: ${{ fromJSON(needs.targets.outputs.envoy) }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
       - uses: ./.github/actions/setup-bun
       - run: bun install --frozen-lockfile
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: packages/envoy/go.mod
       - name: Generate Go contracts
@@ -82,7 +84,7 @@ jobs:
           GOOS=linux GOARCH=${{ matrix.arch }} ../../scripts/go-third-party-notices.sh out/THIRD_PARTY_NOTICES ./cmd/listener
           tar czf legion-envoy-${{ matrix.arch }}.tar.gz -C out envoy-listener THIRD_PARTY_NOTICES
         working-directory: packages/envoy
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: legion-envoy-${{ matrix.arch }}
           path: packages/envoy/legion-envoy-${{ matrix.arch }}.tar.gz
@@ -90,16 +92,22 @@ jobs:
   docker:
     needs: build
     runs-on: ubuntu-24.04
+    # Builds and pushes images to ghcr.io; nothing here writes to the repository.
+    permissions:
+      contents: read
+      packages: write
     env:
       # The listener image the smoke test runs against, built by the step below.
       ENVOY_SMOKE_IMAGE: legion-envoy-smoke:${{ github.sha }}
     outputs:
       digest: ${{ steps.build.outputs.digest }}
     steps:
-      - uses: actions/checkout@v5
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: packages/envoy/go.mod
       - uses: ./.github/actions/setup-bun
@@ -118,7 +126,7 @@ jobs:
       # and LEGION_COMMIT as the publish step below; the smoke covers amd64 only, where the
       # publish is amd64 and arm64.
       - name: Build the listener image the smoke test runs against
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           file: packages/envoy/docker/Dockerfile
@@ -135,13 +143,13 @@ jobs:
       - name: Container smoke test (testcontainers)
         run: go test -tags smoke -v -timeout 5m ./internal/smoke/
         working-directory: packages/envoy
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           file: packages/envoy/docker/Dockerfile
@@ -166,21 +174,23 @@ jobs:
       group: release-envoy-listener
       cancel-in-progress: false
     runs-on: ubuntu-24.04
-    # The workflow's own grants, plus the attestations API for the agent-secrets provenance below
-    # (id-token is already one of them: it is the Sigstore signing certificate's OIDC token).
+    # packages: write moves the `latest` tag to the newest already-published image (`docker
+    # buildx imagetools create`, below); contents: write creates and uploads the GitHub release
+    # (`gh release create`/`upload`); id-token and attestations: write are for the agent-secrets
+    # provenance attestation. The git tag push uses the deploy key, not any of these scopes.
     permissions:
       contents: write
       packages: write
       id-token: write
       attestations: write
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: ${{ github.sha }}
           ssh-key: ${{ secrets.DEPLOY_KEY }}
           fetch-depth: 0
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
       - name: Determine publication
         id: publish
@@ -342,7 +352,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           echo "Bumping $CURRENT → $VERSION"
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         if: steps.publish.outputs.should_tag_latest == 'true'
         with:
           registry: ghcr.io
@@ -376,7 +386,7 @@ jobs:
           git tag "$TAG"
           git push origin "$TAG"
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         if: steps.publish.outputs.should_release == 'true'
         with:
           # Skip the *.dockerbuild attestation artifact uploaded automatically
@@ -385,7 +395,7 @@ jobs:
           # releases). The release only needs the envoy-listener artifacts; the
           # agent-secrets binaries are built below.
           pattern: legion-envoy-*
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         if: steps.publish.outputs.should_release == 'true'
         with:
           go-version-file: packages/envoy/go.mod
@@ -433,7 +443,7 @@ jobs:
       # Build provenance for the host binaries a mise pin installs, so `gh attestation verify
       # agent-secrets-<arch>.tar.gz --repo sjawhar/legion` can check a downloaded asset against
       # this workflow run. The release below uploads these exact files.
-      - uses: actions/attest-build-provenance@v4
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         if: steps.publish.outputs.should_release == 'true'
         with:
           subject-path: agent-secrets-assets/agent-secrets-*.tar.gz
