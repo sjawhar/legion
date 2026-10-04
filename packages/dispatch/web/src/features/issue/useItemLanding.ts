@@ -2,8 +2,8 @@ import { useQuery } from "@tanstack/react-query";
 
 import { ApiError } from "../../api/client";
 import type { IssueDetails } from "../../api/types";
+import { askQuery, commentQuery, messageQuery } from "../refs/reference-target";
 import { buildIssuePath, documentItemPath, type IssueRoute } from "../refs/routes";
-import { askQuery, commentQuery, messageQuery } from "../refs/Unfurl";
 
 /** The item routes: `/issues/KEY/asks|comments|messages/<id>`. */
 export type ItemRoute = Extract<IssueRoute, { id: string }>;

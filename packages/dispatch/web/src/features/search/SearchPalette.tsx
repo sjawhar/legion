@@ -36,6 +36,7 @@ import {
   textSecondaryOnSurfaceMuted,
 } from "../../theme/classes";
 import { statusText } from "../project/board-model";
+import { MarkdownPreview } from "../refs/MarkdownPreview";
 import { referenceTriggerProps } from "../refs/RefPreview";
 import {
   buildProjectPath,
@@ -192,8 +193,12 @@ function ResultOption({
   onSelect: () => void;
   result: SearchResult;
 }): ReactNode {
+  // The server marks the matched words in the snippet's source text. The snippet renders as
+  // Markdown (the text someone wrote, with its bold and code and references), which cannot
+  // carry those marks through the parse, so the preview puts them back on the rendered text.
   const segments = snippetSegments(result.snippet);
-  let segmentStart = 0;
+  const snippet = segments.map((segment) => segment.text).join("");
+  const hits = segments.flatMap((segment) => (segment.mark ? [segment.text] : []));
 
   return (
     <PaletteOption
@@ -215,23 +220,13 @@ function ResultOption({
           <span className="truncate">{result.artifact.name}</span>
         )}
       </div>
-      <p
-        className={`mt-1 line-clamp-2 text-sm ${
-          muted ? textMutedOnSelectedCard : textPrimaryOnSurface
-        }`}
-      >
-        {segments.map((segment) => {
-          const key = `${segmentStart}-${segment.mark}`;
-          segmentStart += segment.text.length;
-          return segment.mark ? (
-            <mark className={`rounded px-0.5 ${searchHitBg} ${searchHitText}`} key={key}>
-              {segment.text}
-            </mark>
-          ) : (
-            <Fragment key={key}>{segment.text}</Fragment>
-          );
-        })}
-      </p>
+      <MarkdownPreview
+        className={`mt-1 text-sm ${muted ? textMutedOnSelectedCard : textPrimaryOnSurface}`}
+        highlight={hits}
+        highlightClassName={`rounded px-0.5 ${searchHitBg} ${searchHitText}`}
+        lines={2}
+        markdown={snippet}
+      />
     </PaletteOption>
   );
 }

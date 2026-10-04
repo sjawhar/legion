@@ -7,7 +7,6 @@ import { api } from "../../api/client";
 import { agentMessagesQuery } from "../../api/queries";
 import type { BroadcastCreated, CreateBroadcastInput } from "../../api/types";
 import { RefusableButton } from "../../components/RefusableButton";
-import { TruncatedText } from "../../components/TruncatedText";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import {
   borderDefault,
@@ -19,7 +18,7 @@ import {
   textMutedOnSurface,
   textSecondaryOnSurface,
 } from "../../theme/classes";
-import { firstLine } from "../conversation/ReplyQuote";
+import { MarkdownPreview } from "../refs/MarkdownPreview";
 
 /** Every broadcast send carries this key, so the strip lists each one, not only the newest. */
 const BROADCAST_SEND = ["broadcast-send"];
@@ -271,12 +270,11 @@ export function BroadcastSends({
                   </>
                 )}
               </span>
-              <TruncatedText
+              <MarkdownPreview
                 className={`min-w-0 flex-1 ${textMutedOnSurface}`}
-                title={row.send.input.body}
-              >
-                {firstLine(row.send.input.body)}
-              </TruncatedText>
+                lines={1}
+                markdown={row.send.input.body}
+              />
               {row.status === "failed" ? (
                 <>
                   <button

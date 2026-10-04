@@ -230,7 +230,7 @@ test("Unfurl unfurls a dispatch ask reference with the question, not the issue t
   }
 });
 
-test("Unfurl unfurls a dispatch comment reference with its first line, not the issue title", async () => {
+test("Unfurl unfurls a dispatch comment reference with its own words, not the issue title", async () => {
   const issue: IssueDetails = {
     route_status: null,
     route_holder: null,
@@ -264,7 +264,7 @@ test("Unfurl unfurls a dispatch comment reference with its first line, not the i
       id: "comment-1",
       issue_key: "CORE-1",
       author: { id: "alice", kind: "user" },
-      body: "Looks good overall.\nOne nit below.",
+      body: "**Looks** good overall.\nOne nit below.",
       anchor: null,
       reply_to: null,
       ask_id: null,
@@ -290,7 +290,9 @@ test("Unfurl unfurls a dispatch comment reference with its first line, not the i
   );
 
   try {
-    await within(view.container).findByText("Looks good overall.");
+    // The title is the comment projected to plain words: the soft-wrapped line is one
+    // paragraph (as the editor reads it), and the bold is dropped, not shown as `**`.
+    await within(view.container).findByText("Looks good overall. One nit below.");
     expect(within(view.container).queryByText("Design decision")).toBeNull();
     expect(getComment).toHaveBeenCalledWith("comment-1");
   } finally {

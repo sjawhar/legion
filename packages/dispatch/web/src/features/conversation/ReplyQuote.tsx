@@ -1,37 +1,39 @@
 import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
-import { TruncatedText } from "../../components/TruncatedText";
 import { linkHoverText, secondaryButtonBorder, textMutedOnCanvas } from "../../theme/classes";
+import { MarkdownPreview } from "../refs/MarkdownPreview";
 
 // The phone stylesheet makes every link an inline-flex 44 px tap target, which does not truncate
-// its own text; the quote therefore truncates in an inner span, whatever the link is.
+// its own text; the quote therefore truncates in an inner element, whatever the link is.
 const quoteClasses = `flex min-w-0 max-w-full items-center border-l-2 pl-2 text-xs ${secondaryButtonBorder} ${textMutedOnCanvas}`;
 
-/** The one wording of a reply quote - "Replying to <author> — <first line>" - so a turn's
- *  quoted parent and the composer's chip read the same. Without a loaded parent the author is
- *  unknown and the quote says so. */
-export function replyQuoteText(author: string | undefined, excerpt: string): string {
-  const prefix = `Replying to ${author ?? "a message"}`;
-  return excerpt === "" ? prefix : `${prefix} — ${excerpt}`;
-}
-
-/** The first line of a message body, what a quote shows of it. */
-export function firstLine(body: string): string {
-  return body.trim().split("\n")[0] ?? "";
-}
-
 /** The one rendering of "this message answers that one": the quoted parent under a reply turn
- *  and the Replying-to chip in the composer. With `to` it links to the parent's turn. */
+ *  and the Replying-to chip in the composer, worded `Replying to <author> — <body>` so both
+ *  read the same. The prefix is the app's own words and stays plain; the parent's body is
+ *  Markdown and renders as such, bold and code and references formatted, cut to the quote's
+ *  one line after rendering. Without a loaded parent the author is unknown and the quote says
+ *  so. With `to` it links to the parent's turn. */
+
 export function ReplyQuote({
-  children,
+  author,
   className = "",
+  excerpt,
   to,
 }: {
-  children: ReactNode;
+  author: string | undefined;
   className?: string;
+  /** The quoted parent's body as its author wrote it (Markdown); `""` when none is known. */
+  excerpt: string;
   to?: string;
 }): ReactNode {
-  const text = <TruncatedText className="min-w-0">{children}</TruncatedText>;
+  const text = (
+    <MarkdownPreview
+      className="min-w-0"
+      lead={`Replying to ${author ?? "a message"}${excerpt === "" ? "" : " — "}`}
+      lines={1}
+      markdown={excerpt}
+    />
+  );
   return to === undefined ? (
     <span className={`${quoteClasses} ${className}`}>{text}</span>
   ) : (

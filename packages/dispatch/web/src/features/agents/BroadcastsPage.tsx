@@ -6,7 +6,6 @@ import { api } from "../../api/client";
 import { EmptyState } from "../../components/EmptyState";
 import { LoadingSkeleton } from "../../components/LoadingSkeleton";
 import { LabelPill } from "../../components/Pill";
-import { TruncatedText } from "../../components/TruncatedText";
 import {
   borderDefault,
   card,
@@ -18,8 +17,8 @@ import {
 } from "../../theme/classes";
 import { resolveAuthor } from "../conversation/authors";
 import { MODE_LABELS } from "../conversation/delivery";
-import { firstLine } from "../conversation/ReplyQuote";
 import { useAgents } from "../conversation/useAgents";
+import { MarkdownPreview } from "../refs/MarkdownPreview";
 import { Timestamp } from "../refs/Timestamp";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 
@@ -79,12 +78,11 @@ export function BroadcastsPage(): ReactNode {
                     {sent.replies} of {sent.recipients} answered
                   </span>
                 </p>
-                <TruncatedText
+                <MarkdownPreview
                   className={`mt-1 self-stretch text-sm ${textPrimaryOnCanvas}`}
-                  title={firstLine(sent.body)}
-                >
-                  {firstLine(sent.body)}
-                </TruncatedText>
+                  lines={1}
+                  markdown={sent.body}
+                />
               </Link>
             </li>
           ))}

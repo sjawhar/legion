@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-
+import { useReferenceTarget } from "./reference-target";
 import {
   buildDispatchReference,
   buildReferencePath,
@@ -9,7 +9,6 @@ import {
   referenceRouteFromHref,
   referenceSpans,
 } from "./routes";
-import { useReferenceTarget } from "./Unfurl";
 
 export interface ReferenceAnchor {
   readonly anchor: HTMLAnchorElement;

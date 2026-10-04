@@ -1,10 +1,14 @@
 import type { HeadlessProofEditor } from "@legion/proof-editor/headless";
-import { DOMSerializer, type Node as ProseMirrorNode } from "prosemirror-model";
+import { DOMSerializer } from "prosemirror-model";
 import { type ReactNode, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
-import type { BlockSchema } from "../../api/types";
-import { loadBlockSchema } from "../doc/schema";
+import {
+  flattenInline,
+  markdownClassName,
+  parseMarkdownOrUndefined,
+  renderWithHeadlessProof,
+} from "./markdown-engine";
 import {
   collectReferenceAnchors,
   linkifyDispatchRefs,
@@ -12,91 +16,9 @@ import {
   RefLink,
 } from "./RefLink";
 
-const headlessProofs = new Map<number, Promise<HeadlessProofEditor>>();
-/** The engine the newest resolved load produced: what a body renders with synchronously. */
-let readyHeadlessProof: HeadlessProofEditor | undefined;
-
-function loadHeadlessProof(blockSchema: BlockSchema): Promise<HeadlessProofEditor> {
-  const cached = headlessProofs.get(blockSchema.version);
-  if (cached !== undefined) {
-    return cached;
-  }
-  const created = import("@legion/proof-editor/headless")
-    .then(({ createHeadlessProof }) => createHeadlessProof({ blockSchema }))
-    .then((proof) => {
-      readyHeadlessProof = proof;
-      return proof;
-    });
-  headlessProofs.set(blockSchema.version, created);
-  return created;
-}
-
-/** Loads the schema and headless Proof chunk before Markdown-bearing UI needs to render. */
-export async function warmMarkdownRenderer(): Promise<void> {
-  await loadHeadlessProof(await loadBlockSchema());
-}
-
-/** Proof's schema has no node for CommonMark's raw-HTML block/inline spans (a bare tag-shaped
- * substring outside a code span or fence, e.g. `<img src=x>`), so `parseMarkdown` throws for
- * it below. HTML-like text already inside a code span or fence parses safely as literal text
- * (the parser never treats code content as raw HTML), so nothing needs escaping there -
- * pre-escaping the whole source regardless of context, as an earlier version of this component
- * did, printed literal backslashes around any code span or fence containing something
- * tag-shaped. Falling back to the raw string as one plain-text node on a parse failure keeps
- * that one edge case inert without corrupting the (far more common) case of tag-shaped text
- * quoted in code. */
-
-/** The first textblock's own inline content (marks intact), plus the flattened plain text of
- * every textblock after it, joined with a single space - see `MarkdownBody`'s `inline` variant. */
-interface InlineContent {
-  head: ProseMirrorNode;
-  extra: string;
-}
-
-/** A textblock's own text, skipping any code span or code block content — used only for the
- * "extra" (non-first) textblocks in the `inline` variant below, which flatten to plain text and
- * so would otherwise re-expose a code span's `dispatch://` ref as linkifiable bare text once its
- * `code` mark is gone. The first textblock keeps its marks (serialized, not flattened), so its
- * own code spans stay real `<code>` elements and need no such filtering. */
-function plainTextExcludingCode(node: ProseMirrorNode): string {
-  const parts: string[] = [];
-  node.descendants((child) => {
-    if (child.type.name === "code_block") {
-      return false;
-    }
-    if (child.isText) {
-      const hasCode = child.marks.some((mark) => mark.type.name === "inlineCode");
-      if (!hasCode) {
-        parts.push(child.text ?? "");
-      }
-    }
-    return true;
-  });
-  return parts.join("");
-}
-
-function flattenInline(root: ProseMirrorNode): InlineContent | undefined {
-  let head: ProseMirrorNode | undefined;
-  const extra: string[] = [];
-  root.descendants((node) => {
-    if (!node.isTextblock) {
-      return true;
-    }
-    if (head === undefined) {
-      head = node;
-    } else {
-      const text = plainTextExcludingCode(node).trim();
-      if (text !== "") {
-        extra.push(text);
-      }
-    }
-    return false;
-  });
-  return head === undefined ? undefined : { extra: extra.join(" "), head };
-}
-
-const markdownClassName =
-  "dispatch-markdown prose prose-sm prose-slate break-words dark:prose-invert";
+/** Loads the schema and headless Proof chunk before Markdown-bearing UI needs to render -
+ *  re-exported here because `DeploymentResilience` warms the renderer by this module's name. */
+export { warmMarkdownRenderer } from "./markdown-engine";
 
 /** The anchor list of a body with no references: one shared value, so re-rendering such a body
  *  leaves the state untouched instead of committing a fresh empty array each time. */
@@ -117,12 +39,10 @@ const NO_ANCHORS: readonly ReferenceAnchor[] = [];
  * page-size h1, and a resolution reason inline in a `text-xs` line stays that size.
  *
  * Once the schema and Proof's headless engine are loaded (the first body on the page loads
- * them), a body renders synchronously in the layout phase of the commit that mounts it, so a
- * list that inserts a turn sees the turn's full height in that same commit — `ViewportAnchor`
- * compensates for it in one measurement and nothing is left for the browser's own scroll
- * anchoring, which does not adjust for growth that lands in the frame after a programmatic
- * scroll. Only the very first render on a page, or a schema that failed to load, takes the
- * asynchronous path.
+ * them), a body renders synchronously in the layout phase of the commit that mounts it
+ * (`renderWithHeadlessProof`); only the very first render on a page, or a schema that failed to
+ * load, takes the asynchronous path. A preview that must clamp its rendered line is
+ * `MarkdownPreview`, which parses with the same engine.
  */
 export function MarkdownBody({
   markdown,
@@ -141,20 +61,12 @@ export function MarkdownBody({
   const [isFallback, setIsFallback] = useState(false);
 
   useLayoutEffect(() => {
-    let mounted = true;
     const root = variant === "inline" ? inlineRoot.current : blockRoot.current;
     const render = (proof: HeadlessProofEditor | undefined) => {
       if (root === null) {
         throw new Error("MarkdownBody's root is unavailable.");
       }
-      let parsed: ProseMirrorNode | undefined;
-      if (proof !== undefined) {
-        try {
-          parsed = proof.parseMarkdown(markdown);
-        } catch {
-          parsed = undefined;
-        }
-      }
+      const parsed = proof === undefined ? undefined : parseMarkdownOrUndefined(proof, markdown);
       if (proof === undefined || parsed === undefined) {
         setIsFallback(true);
         root.replaceChildren(document.createTextNode(markdown));
@@ -190,32 +102,7 @@ export function MarkdownBody({
       onRenderedRef.current?.();
     };
     setIsFallback(false);
-    if (readyHeadlessProof !== undefined) {
-      render(readyHeadlessProof);
-      return;
-    }
-    const renderWhenLoaded = async () => {
-      // Without the server schema (or Proof's headless engine) the text still renders, as
-      // literal Markdown: readable, never lost. The cause is reported and the schema cache
-      // does not retain the failure, so the next render tries the fetch again.
-      let proof: HeadlessProofEditor | undefined;
-      try {
-        proof = await loadHeadlessProof(await loadBlockSchema());
-      } catch (error) {
-        console.error(
-          "MarkdownBody: rendering literal Markdown, the block schema is unavailable",
-          error
-        );
-        proof = undefined;
-      }
-      if (mounted) {
-        render(proof);
-      }
-    };
-    void renderWhenLoaded();
-    return () => {
-      mounted = false;
-    };
+    return renderWithHeadlessProof(render);
   }, [markdown, variant]);
 
   const portals = referenceAnchors.map(({ anchor, key, route }) =>

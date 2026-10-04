@@ -65,7 +65,7 @@ import { ASK_URGENCIES_ASCENDING, URGENCY_LABELS } from "../inbox/ask-urgency";
 import { ReferencePicker } from "../refs/ReferencePicker";
 import { buildDispatchReference, composerReferences } from "../refs/routes";
 import { MODE_LABELS } from "./delivery";
-import { ReplyQuote, replyQuoteText } from "./ReplyQuote";
+import { ReplyQuote } from "./ReplyQuote";
 import { useAgents } from "./useAgents";
 
 export type ComposerOwner =
@@ -929,9 +929,12 @@ export function MentionComposer({
       )}
       {replyTo === null ? null : (
         <div className="flex items-center gap-1">
-          <ReplyQuote className="min-w-0 flex-1" to={replyTo.to}>
-            {replyQuoteText(replyTo.author, replyTo.excerpt)}
-          </ReplyQuote>
+          <ReplyQuote
+            author={replyTo.author}
+            className="min-w-0 flex-1"
+            excerpt={replyTo.excerpt}
+            to={replyTo.to}
+          />
           <button
             aria-label="Cancel reply"
             className={`inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-lg text-lg leading-none md:min-h-8 md:min-w-8 ${textMutedOnSurfaceMuted}`}

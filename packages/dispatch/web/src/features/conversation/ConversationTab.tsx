@@ -83,7 +83,7 @@ import {
 } from "./delivery";
 import { MentionComposer, type ReplyTarget } from "./MentionComposer";
 import { ReplyButton } from "./ReplyButton";
-import { firstLine, ReplyQuote, replyQuoteText } from "./ReplyQuote";
+import { ReplyQuote } from "./ReplyQuote";
 import { ReplyTurn, ThreadReplies, TurnActions } from "./ReplyTurn";
 import {
   capabilitiesForTarget,
@@ -170,7 +170,7 @@ function replyTargetFor(
   const thread = threadDelivery(root, agents);
   return {
     author: author.label,
-    excerpt: firstLine(node.event.payload.body),
+    excerpt: node.event.payload.body,
     id: node.event.payload.id,
     parentKind: "message",
     to: buildIssuePath({ id: node.event.payload.id, key: issueKey, kind: "message" }),
@@ -257,12 +257,9 @@ function ConversationReply({
         isClosed ? undefined : () => onReply(replyTargetFor(reply, author, root, issueKey, agents))
       }
       quote={{
-        text: replyQuoteText(
-          parent === undefined ? undefined : resolveAuthor(parent.author, titles).label,
-          parent === undefined
-            ? (reply.event.payload.reply_body ?? "")
-            : firstLine(parent.event.payload.body)
-        ),
+        author: parent === undefined ? undefined : resolveAuthor(parent.author, titles).label,
+        excerpt:
+          parent === undefined ? (reply.event.payload.reply_body ?? "") : parent.event.payload.body,
         to:
           parentId === null || parentId === undefined
             ? undefined
@@ -380,14 +377,11 @@ function MessageTurn({
           )}
           {replyTo === null || replyTo === undefined ? null : (
             <ReplyQuote
+              author={undefined}
               className="mb-1"
+              excerpt={item.kind === "message" ? (item.event.payload.reply_body ?? "") : ""}
               to={buildIssuePath({ id: replyTo, key: issueKey, kind: "message" })}
-            >
-              {replyQuoteText(
-                undefined,
-                item.kind === "message" ? (item.event.payload.reply_body ?? "") : ""
-              )}
-            </ReplyQuote>
+            />
           )}
           <EventBody event={item.event} />
         </div>
@@ -435,7 +429,7 @@ function commentReplyTarget(
   return {
     author: resolveAuthor(author, new Map(agents.map((agent) => [agent.session_id, agent.title])))
       .label,
-    excerpt: firstLine(event.payload.body),
+    excerpt: event.payload.body,
     id: event.payload.id,
     mentions,
     parentKind: "comment",

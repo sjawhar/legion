@@ -2,6 +2,7 @@ import {
   ComposerPrimitive,
   MessagePrimitive,
   type ReasoningMessagePartComponent,
+  type TextMessagePartComponent,
   ThreadPrimitive,
   type ToolCallMessagePartComponent,
   useAuiState,
@@ -25,6 +26,7 @@ import {
   textPrimaryOnCanvas,
   textSecondaryOnCanvas,
 } from "../../theme/classes";
+import { MarkdownBody } from "../refs/MarkdownBody";
 import { ErrorBoundary } from "../shell/ErrorBoundary";
 import { readDispatchMarks } from "./dispatch-marks";
 
@@ -78,10 +80,16 @@ const ToolCall: ToolCallMessagePartComponent = ({ toolName, argsText, result, is
   );
 };
 
+/** A text part of a turn the session wrote, rendered as Markdown - re-parsed as each streamed
+ *  delta lands, so a heading or a list formats the moment its syntax closes; until then the
+ *  partial syntax reads as the literal characters, at the surrounding text's size. A module
+ *  constant, as `Reasoning` is: a component minted per render would remount every part. */
+const MarkdownText: TextMessagePartComponent = ({ text }) => <MarkdownBody markdown={text} />;
+
 const Reasoning: ReasoningMessagePartComponent = ({ text }) => (
-  <p className={`my-1 text-xs italic ${textMutedOnCanvas}`} data-testid="agent-reasoning">
-    {text}
-  </p>
+  <div className={`my-1 text-xs italic ${textMutedOnCanvas}`} data-testid="agent-reasoning">
+    <MarkdownBody markdown={text} />
+  </div>
 );
 
 function UserMessage(): ReactNode {
@@ -119,20 +127,19 @@ function AssistantMessage(): ReactNode {
   if (fromDispatch) {
     return (
       <div
-        className={`mt-4 rounded-xl border px-3 py-2 text-sm whitespace-pre-wrap ${card} ${borderDefault} ${textPrimaryOnCanvas}`}
+        className={`mt-4 rounded-xl border px-3 py-2 text-sm ${card} ${borderDefault} ${textPrimaryOnCanvas}`}
         data-testid="agent-dispatch-reply"
       >
         <p className={`mb-1 text-xs font-semibold ${textSecondaryOnCanvas}`}>Reply via Dispatch</p>
-        <MessagePrimitive.Parts />
+        <MessagePrimitive.Parts components={{ Text: MarkdownText }} />
       </div>
     );
   }
   return (
-    <div
-      className={`mt-4 text-sm whitespace-pre-wrap ${textPrimaryOnCanvas}`}
-      data-testid="agent-message-assistant"
-    >
-      <MessagePrimitive.Parts components={{ Reasoning, tools: { Fallback: ToolCall } }} />
+    <div className={`mt-4 text-sm ${textPrimaryOnCanvas}`} data-testid="agent-message-assistant">
+      <MessagePrimitive.Parts
+        components={{ Reasoning, Text: MarkdownText, tools: { Fallback: ToolCall } }}
+      />
     </div>
   );
 }

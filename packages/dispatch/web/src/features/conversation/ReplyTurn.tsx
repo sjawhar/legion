@@ -72,7 +72,7 @@ export function ReplyTurn({
   current?: boolean;
   delivery?: ReplyDelivery;
   onReply?: () => void;
-  quote?: { readonly text: string; readonly to?: string };
+  quote?: { readonly author: string | undefined; readonly excerpt: string; readonly to?: string };
   turnID: string;
 }): ReactNode {
   // The retry row a delivered reply keeps until the session answers it or took it as its turn.
@@ -96,9 +96,12 @@ export function ReplyTurn({
           <Timestamp at={at} />
         </p>
         {quote === undefined ? null : (
-          <ReplyQuote className="mb-1" to={quote.to}>
-            {quote.text}
-          </ReplyQuote>
+          <ReplyQuote
+            author={quote.author}
+            className="mb-1"
+            excerpt={quote.excerpt}
+            to={quote.to}
+          />
         )}
         {body}
         {delivery === undefined ? null : (
