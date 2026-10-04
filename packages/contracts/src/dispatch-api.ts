@@ -1195,6 +1195,14 @@ export interface SearchResultsPage {
   readonly offset: number;
 }
 
+/** `SearchResultsPage` with every field retyped to `V`, always optional: the shape of "none of
+ * these fields" for a sentinel `V` (`undefined` for the wire type below, `never` for
+ * `fake-search-response.ts`'s stricter test-only override, which forbids supplying a concrete
+ * value without forbidding an explicit `undefined` — TypeScript widens every optional property to
+ * admit one regardless of its declared type unless the whole project turns on
+ * `exactOptionalPropertyTypes`). */
+export type SearchResultsPageAbsentAs<V> = { readonly [K in keyof SearchResultsPage]?: V };
+
 /** One page of `GET /api/v1/search`'s fused order, cut at `offset` and `limit`. `total`,
  * `reachable`, `limit`, and `offset` answer together or not at all: a Dispatch that predates
  * search paging omits all four and always answers its first page regardless of any offset
@@ -1202,7 +1210,7 @@ export interface SearchResultsPage {
 export type SearchResponse = {
   readonly results: SearchResult[];
   readonly took_ms: number;
-} & (SearchResultsPage | { readonly [K in keyof SearchResultsPage]?: undefined });
+} & (SearchResultsPage | SearchResultsPageAbsentAs<undefined>);
 
 export interface DuplicateCandidate {
   readonly key: string;
