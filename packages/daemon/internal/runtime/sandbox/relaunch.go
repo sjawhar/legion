@@ -229,6 +229,12 @@ func (r *Runtime) ensureSandbox(ctx context.Context, l launch) (*sandbox, error)
 				return nil, fmt.Errorf("sandbox %s, made for tree %s, does not fit this launch of tree %s and still runs roles; it is replaced once they stop",
 					l.name, s.Labels[labelTree], labelValue(l.spec.Tree))
 			}
+			// A Sandbox with a volume template owns a tree's volume, which only that tree's cleanup
+			// (CleanupTree) deletes, after every claim of the tree retired.
+			if len(s.Spec.VolumeClaimTemplates) > 0 {
+				return nil, fmt.Errorf("sandbox %s owns tree %s's volume and does not fit this launch of tree %s; only that tree's cleanup deletes it",
+					l.name, s.Labels[labelTree], labelValue(l.spec.Tree))
+			}
 			r.log.Info("sandbox runtime: replacing a sandbox made for another tree or without its tree volume", "sandbox", l.name, "uid", s.UID,
 				"tree", s.Labels[labelTree], "for", labelValue(l.spec.Tree))
 			if err := r.deleteSandbox(ctx, u, false); err != nil && !apierrors.IsConflict(err) {

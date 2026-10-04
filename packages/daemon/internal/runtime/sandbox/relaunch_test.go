@@ -201,6 +201,20 @@ func TestAnOrphanRootReplacesTheSandboxItsOldTreeLeft(t *testing.T) {
 			t.Fatalf("the old tree's running Sandbox = %+v, want it left as it was", s)
 		}
 	})
+	t.Run("owning its old tree's volume", func(t *testing.T) {
+		owner := sandboxObject(t, name, "uid-sandbox-old-root", modeSuspended, oldTree)
+		if err := unstructured.SetNestedSlice(owner.Object, []any{map[string]any{"metadata": map[string]any{"name": treeVolume}}}, "spec", "volumeClaimTemplates"); err != nil {
+			t.Fatal(err)
+		}
+		g := newRig(t, []k8sruntime.Object{owner})
+		g.launcher(orphan)
+		if _, err := g.r.Spawn(g.ctx, orphanSpec(t)); err == nil || !strings.Contains(err.Error(), "only that tree's cleanup deletes it") {
+			t.Fatalf("a launch over a Sandbox owning another tree's volume = %v, want the refusal", err)
+		}
+		if s := g.sandbox(name); s == nil || s.UID != "uid-sandbox-old-root" {
+			t.Fatalf("the Sandbox owning the old tree's volume = %+v, want it left as it was", s)
+		}
+	})
 }
 
 // The death path's Resume over a Failed issue pod, which the controller keeps under Running:

@@ -825,6 +825,9 @@ func (e *Engine) takenOver(ctx context.Context, tx pgx.Tx, issue string, trigger
 		return "", nil
 	}
 	leaving := RoleFor(from)
+	if leaving == "" {
+		return "", nil
+	}
 	row, err := e.phaseRow(ctx, tx, issue, leaving)
 	if err != nil || row.HandoffCommit != "" {
 		return "", err
