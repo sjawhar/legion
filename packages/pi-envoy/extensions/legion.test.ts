@@ -2948,7 +2948,7 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
         }
       );
 
-      // Sami types /new into the pane.
+      // The operator types /new into the pane.
       pane.switchTo("ses_pane_second", "/tmp/second.jsonl");
       await controller.handlers.get("session_switch")?.({ reason: "new" }, pane.context);
       expect(controller.holder()).toBe("ses_pane_second");
