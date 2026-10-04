@@ -81,6 +81,46 @@ func TestS3AnswersNotFoundForAHashItDoesNotHold(t *testing.T) {
 	}
 }
 
+// A caller whose grant lacks s3:ListBucket gets AccessDenied for a missing key, and a caller
+// with no grant for any key: a store failure, which the version route answers 502, never an
+// absent object, which it answers 500 FILE_MISSING and a backfill would read as a lost file.
+func TestS3ReadsAccessDeniedAsAFailureNotAnAbsence(t *testing.T) {
+	store, fake := s3Store(t, testBucket)
+	fake.Deny()
+	ctx := context.Background()
+	sha := strings.Repeat("ab", 32)
+	_, err := store.Get(ctx, sha)
+	if err == nil || errors.Is(err, files.ErrNotFound) {
+		t.Fatalf("Get under AccessDenied: %v, want a failure that is not ErrNotFound", err)
+	}
+	if !strings.Contains(err.Error(), "AccessDenied") {
+		t.Fatalf("Get under AccessDenied: %v, want the refusal named", err)
+	}
+	// Put checks with HeadObject first, and a HEAD's refusal has no body for the SDK to read the
+	// code from, so it names the status instead.
+	if err := store.Put(ctx, files.SHA256([]byte("x")), "text/plain", []byte("x")); err == nil || !strings.Contains(err.Error(), "Forbidden") {
+		t.Fatalf("Put under AccessDenied: %v, want the refusal named, not a write past it", err)
+	}
+}
+
+// A body that answers (0, nil) without ending would keep the reader's loop, and the response
+// copying from it, spinning; after bufio's hundred empty reads it fails with io.ErrNoProgress.
+func TestVerifyingReaderFailsABodyThatMakesNoProgress(t *testing.T) {
+	reader := files.NewVerifyingReader(io.NopCloser(stuck{}), files.SHA256([]byte("never")), 5)
+	n, err := reader.Read(make([]byte, 8))
+	if n != 0 || !errors.Is(err, io.ErrNoProgress) {
+		t.Fatalf("Read of a stuck body = %d, %v; want 0, io.ErrNoProgress", n, err)
+	}
+	if _, again := reader.Read(make([]byte, 8)); !errors.Is(again, io.ErrNoProgress) {
+		t.Fatalf("a second Read after the failure = %v; want the same failure kept", again)
+	}
+}
+
+// stuck is an io.Reader that reads nothing and never ends.
+type stuck struct{}
+
+func (stuck) Read([]byte) (int, error) { return 0, nil }
+
 func TestS3SendsTheHashAsTheObjectsChecksum(t *testing.T) {
 	store, fake := s3Store(t, testBucket)
 	body := []byte("the bytes")

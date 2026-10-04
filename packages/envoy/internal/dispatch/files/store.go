@@ -97,15 +97,22 @@ func NewVerifyingReader(body io.ReadCloser, sha string, size int64) *VerifyingRe
 	return &VerifyingReader{body: body, sha: sha, size: size, hash: sha256.New(), buffer: make([]byte, 32<<10)}
 }
 
+// maxConsecutiveEmptyReads is how many (0, nil) reads of the body in a row the reader takes
+// before it fails with io.ErrNoProgress, bufio's bound: a body that answers nothing and never
+// ends would otherwise keep this loop, and the response, spinning.
+const maxConsecutiveEmptyReads = 100
+
 func (r *VerifyingReader) Read(p []byte) (int, error) {
 	if r.err != nil {
 		return 0, r.err
 	}
 	// Read until more is held than the caller takes, so at least a byte stays back, or the
 	// body's end is known and the whole of it checked.
+	empties := 0
 	for !r.eof && len(r.held) <= len(p) {
 		n, err := r.body.Read(r.buffer)
 		if n > 0 {
+			empties = 0
 			r.read += int64(n)
 			if r.read > r.size {
 				r.err = fmt.Errorf("object %s: body is longer than the %d bytes declared", r.sha, r.size)
@@ -127,6 +134,12 @@ func (r *VerifyingReader) Read(p []byte) (int, error) {
 		} else if err != nil {
 			r.err = err
 			return 0, err
+		} else if n == 0 {
+			empties++
+			if empties >= maxConsecutiveEmptyReads {
+				r.err = fmt.Errorf("object %s: %w", r.sha, io.ErrNoProgress)
+				return 0, r.err
+			}
 		}
 	}
 	n := copy(p, r.held)

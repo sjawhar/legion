@@ -24,6 +24,7 @@ type S3 struct {
 	bucket   string
 	objects  map[string]memoryObject
 	requests []string
+	denied   bool
 }
 
 // ServeS3 starts an S3 holding the empty bucket and, for the rest of t, points this process's AWS
@@ -100,6 +101,15 @@ func (f *S3) Requests() []string {
 	return append([]string(nil), f.requests...)
 }
 
+// Deny makes every object call (HEAD, GET, PUT) answer 403 AccessDenied, what S3 sends a caller
+// whose grant lacks s3:ListBucket for a missing key, or any key with no grant at all; HeadBucket
+// still answers. A store must read that as a failure, never as an absent object.
+func (f *S3) Deny() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.denied = true
+}
+
 func (f *S3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -113,6 +123,10 @@ func (f *S3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if key == "" {
 		// HeadBucket.
 		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if f.denied {
+		writeS3Error(w, http.StatusForbidden, "AccessDenied", "Access Denied")
 		return
 	}
 	switch r.Method {
