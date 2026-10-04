@@ -11,7 +11,17 @@ import (
 func Read(frag *crdt.YXmlFragment) (*Node, error) {
 	return readDocument(frag, func(text *crdt.YXmlText) ([]crdt.Delta, error) {
 		return text.ToDelta(), nil
-	})
+	}, true)
+}
+
+// ReadForRendering is Read without ownedValue's copy: for a caller that renders the tree and
+// discards it before releasing whatever lock makes the document's values safe to read, so
+// nothing retains the tree afterward to alias a later reader or a write that lands once the lock
+// is released.
+func ReadForRendering(frag *crdt.YXmlFragment) (*Node, error) {
+	return readDocument(frag, func(text *crdt.YXmlText) ([]crdt.Delta, error) {
+		return text.ToDelta(), nil
+	}, false)
 }
 
 // ReadInTransaction reads a live tree while the caller's Yjs transaction holds
@@ -20,13 +30,13 @@ func ReadInTransaction(txn *crdt.Transaction, frag *crdt.YXmlFragment) (*Node, e
 	if txn == nil {
 		return nil, fmt.Errorf("%w: ReadInTransaction requires transaction", ErrSchema)
 	}
-	return readDocument(frag, yTextDeltaInTransaction)
+	return readDocument(frag, yTextDeltaInTransaction, true)
 }
 
 type textDeltaReader func(*crdt.YXmlText) ([]crdt.Delta, error)
 
-func readDocument(frag *crdt.YXmlFragment, readDelta textDeltaReader) (*Node, error) {
-	children, err := readChildren(frag, readDelta, 1)
+func readDocument(frag *crdt.YXmlFragment, readDelta textDeltaReader, copyAttrs bool) (*Node, error) {
+	children, err := readChildren(frag, readDelta, 1, copyAttrs)
 	if err != nil {
 		return nil, err
 	}
@@ -37,18 +47,18 @@ func readDocument(frag *crdt.YXmlFragment, readDelta textDeltaReader) (*Node, er
 	return doc, nil
 }
 
-func readChildren(frag *crdt.YXmlFragment, readDelta textDeltaReader, depth int) ([]*Node, error) {
+func readChildren(frag *crdt.YXmlFragment, readDelta textDeltaReader, depth int, copyAttrs bool) ([]*Node, error) {
 	var out []*Node
 	for _, child := range frag.Children() {
 		switch c := child.(type) {
 		case *crdt.YXmlElement:
-			n, err := readElement(c, readDelta, depth)
+			n, err := readElement(c, readDelta, depth, copyAttrs)
 			if err != nil {
 				return nil, err
 			}
 			out = append(out, n)
 		case *crdt.YXmlText:
-			nodes, err := readText(c, readDelta)
+			nodes, err := readText(c, readDelta, copyAttrs)
 			if err != nil {
 				return nil, err
 			}
@@ -60,19 +70,21 @@ func readChildren(frag *crdt.YXmlFragment, readDelta textDeltaReader, depth int)
 	return out, nil
 }
 
-func readElement(e *crdt.YXmlElement, readDelta textDeltaReader, depth int) (*Node, error) {
+func readElement(e *crdt.YXmlElement, readDelta textDeltaReader, depth int, copyAttrs bool) (*Node, error) {
 	if err := treeDepthError(depth); err != nil {
 		return nil, err
 	}
 	n := &Node{Type: e.NodeName}
 	if attrs := e.GetAttributeValues(); len(attrs) > 0 {
 		// The map is GetAttributeValues' own; its values are the document's.
-		for name, value := range attrs {
-			attrs[name] = ownedValue(value)
+		if copyAttrs {
+			for name, value := range attrs {
+				attrs[name] = ownedValue(value)
+			}
 		}
 		n.Attrs = treeAttrs(e.NodeName, attrs)
 	}
-	children, err := readChildren(&e.YXmlFragment, readDelta, depth+1)
+	children, err := readChildren(&e.YXmlFragment, readDelta, depth+1, copyAttrs)
 	if err != nil {
 		return nil, err
 	}
@@ -82,7 +94,7 @@ func readElement(e *crdt.YXmlElement, readDelta textDeltaReader, depth int) (*No
 
 // readText expands one Y.XmlText into ProseMirror text nodes: one per run of
 // identical marks, exactly as y-prosemirror's createTypeFromTextNodes stores them.
-func readText(t *crdt.YXmlText, readDelta textDeltaReader) ([]*Node, error) {
+func readText(t *crdt.YXmlText, readDelta textDeltaReader, copyAttrs bool) ([]*Node, error) {
 	delta, err := readDelta(t)
 	if err != nil {
 		return nil, err
@@ -98,11 +110,14 @@ func readText(t *crdt.YXmlText, readDelta textDeltaReader) ([]*Node, error) {
 		}
 		n := &Node{Type: "text", Text: s}
 		for name, raw := range d.Attributes {
+			if copyAttrs {
+				raw = ownedValue(raw)
+			}
 			attrs, err := attrsFromY(raw)
 			if err != nil {
 				return nil, fmt.Errorf("%w: mark %q attributes: %v", ErrSchema, name, err)
 			}
-			n.Marks = append(n.Marks, Mark{Type: yattrToMarkName(name), Attrs: ownedAttrs(attrs)})
+			n.Marks = append(n.Marks, Mark{Type: yattrToMarkName(name), Attrs: attrs})
 		}
 		sortMarks(n.Marks)
 		out = append(out, n)
@@ -132,19 +147,6 @@ func attrsFromY(raw any) (Attrs, error) {
 	default:
 		return nil, fmt.Errorf("want object, got %T", raw)
 	}
-}
-
-// ownedAttrs is a copy of attrs, a mark's attributes as the Yjs document holds them, sharing no
-// map or slice with it (ownedValue).
-func ownedAttrs(attrs Attrs) Attrs {
-	if attrs == nil {
-		return nil
-	}
-	owned := make(Attrs, len(attrs))
-	for name, value := range attrs {
-		owned[name] = ownedValue(value)
-	}
-	return owned
 }
 
 // ownedValue is value, an attribute value a Yjs document holds, with every map and slice in it

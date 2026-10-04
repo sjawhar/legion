@@ -224,6 +224,21 @@ func renderDocument(doc *crdt.Doc) (string, error) {
 	return documentMarkdown(tree)
 }
 
+// renderDocumentForUpdate is renderDocument without pmdoc.Read's deep copy
+// (pmdoc.ReadForRendering): for the update observer's render, which runs the render and discards
+// the tree before releasing the replica's lock (renderedReplica.updateChangesMarkdown), so
+// nothing retains the tree past this call to alias a later reader.
+func renderDocumentForUpdate(doc *crdt.Doc) (string, error) {
+	if doc == nil {
+		return "", errDocUnloaded
+	}
+	tree, err := pmdoc.ReadForRendering(doc.GetXmlFragment(fragmentName))
+	if err != nil {
+		return "", documentSchemaError(err)
+	}
+	return documentMarkdown(tree)
+}
+
 // snapshotDocument copies doc's state as of one moment. Encoding it takes the document's lock, which
 // every peer update and service write holds while it applies, so the copy is never a tree half
 // way through a write - which a direct walk of a resident room's live tree can read, since the
@@ -399,11 +414,12 @@ func (r *renderedReplica) catchUp(room string, live *crdt.Doc) {
 
 // updateChangesMarkdown reports whether the room's latest update changed its rendered markdown,
 // the only document content a version stores, and keeps the new rendering. It renders the
-// replica, the room's document as of that update, so its caller holds mu. An update that changes
-// only what no rendering carries - an anchor mark, or a heading id or list item label the browser
-// editor derives - is no content change.
+// replica, the room's document as of that update, so its caller holds mu, through
+// renderDocumentForUpdate: the tree it reads never outlives this call, so it carries none of
+// pmdoc.Read's copy. An update that changes only what no rendering carries - an anchor mark, or a
+// heading id or list item label the browser editor derives - is no content change.
 func (r *renderedReplica) updateChangesMarkdown(room string) bool {
-	markdown, err := renderDocument(r.doc)
+	markdown, err := renderDocumentForUpdate(r.doc)
 	if err != nil {
 		r.markdown = nil
 		if errors.Is(err, ErrDocOutsideSchema) {
