@@ -139,15 +139,12 @@ func (k Known) Validate() error {
 // names the transcript the same agent continues from. WorkspaceRecoveredFrom names the ref a
 // workspace recreated after its volume was lost is recovered from; "" for every other launch.
 type SpawnSpec struct {
-	Claim      claim.Token
-	Project    string
-	Tree       string
-	Issue      string
-	Role       claim.Role
-	Generation uint64
-	// TreeEpoch is the durable admission epoch the claim bound before its first persistence.
-	// Sandbox resource admission rechecks it before any pod or Secret operation.
-	TreeEpoch              uint64
+	Claim                  claim.Token
+	Project                string
+	Tree                   string
+	Issue                  string
+	Role                   claim.Role
+	Generation             uint64
 	BootToken              string
 	Env                    map[string]string
 	Secrets                map[string]string

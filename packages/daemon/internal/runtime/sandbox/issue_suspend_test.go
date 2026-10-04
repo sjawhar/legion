@@ -88,7 +88,6 @@ func TestIssueSuspensionReadmissionResumesTheRetainedSession(t *testing.T) {
 	}
 	g.issueLaunchers(rootToken)
 	spec := rootSpec(t)
-	spec.TreeEpoch = 1
 	old := g.spawn(spec)
 	name := SandboxName(rootToken)
 	uid := g.sandbox(name).UID
@@ -162,13 +161,9 @@ func TestChildIssueSuspensionKeepsItsParentRunning(t *testing.T) {
 			($2, $1, 'LEGION', 'child', 'done', 2, 'done', 'B', 1)`, testTree, childIssue); err != nil {
 		t.Fatal(err)
 	}
-	parentSpec := rootSpec(t)
-	parentSpec.TreeEpoch = 1
-	parent := g.spawn(parentSpec)
+	parent := g.spawn(rootSpec(t))
 	g.issueLaunchers(childToken)
-	spec := childSpec(t)
-	spec.TreeEpoch = 1
-	child := g.spawn(spec)
+	child := g.spawn(childSpec(t))
 	if err := g.r.Suspend(g.ctx, child); err != nil {
 		t.Fatal(err)
 	}
