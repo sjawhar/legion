@@ -202,7 +202,11 @@ function inertLinks(root: HTMLElement): Map<HTMLElement, HTMLElement> {
  * before the parse, which would do exactly that.
  *
  * Every surface a preview sits in is one control already, so its links and references read as
- * links but are not ones (`inertLinks`): the host is what a click follows.
+ * links but are not ones (`inertLinks`): the host is what a click follows. A host whose own
+ * control is a toggle rather than a navigation (the margin's collapsed card, which opens the
+ * thread) passes `links="live"` and keeps them real: there a click on a reference is the one
+ * way out of the card to its target, as it was before the preview, and its handler skips a
+ * click under an `a`.
  *
  * `lines` is the clamp (`1` is `truncate`-like but keeps the inline markup; `2` and `3` wrap
  * then clamp). `className` styles the element, whose `display` is the clamp's own, so a parent
@@ -220,6 +224,7 @@ export function MarkdownPreview({
   highlightClassName = "",
   lead,
   lines,
+  links = "inert",
   markdown,
 }: {
   className?: string;
@@ -232,6 +237,9 @@ export function MarkdownPreview({
    *  `Replying to Planner — `. Clamped with the text as one line. */
   lead?: string;
   lines: 1 | 2 | 3;
+  /** `inert` (the default) renders every link as link-styled text; `live` keeps them links, for
+   *  a host whose own control is a toggle. */
+  links?: "inert" | "live";
   markdown: string;
 }): ReactNode {
   const root = useRef<HTMLSpanElement>(null);
@@ -240,14 +248,14 @@ export function MarkdownPreview({
   const highlightKey = highlight?.join("\u0000");
   const decorate = useCallback<DecorateMarkdown>(
     (element, anchors) => {
-      const replaced = inertLinks(element);
+      const replaced = links === "inert" ? inertLinks(element) : undefined;
       const phrases = highlightKey === undefined ? [] : phrasesOf(highlightKey.split("\u0000"));
       if (phrases.length > 0) {
         markPhrases(element, phrases, highlightClassName);
       }
-      const inert = anchors.map((reference) => {
-        const span = replaced.get(reference.anchor);
-        if (span === undefined) {
+      const decorated = anchors.map((reference) => {
+        const host = replaced === undefined ? reference.anchor : replaced.get(reference.anchor);
+        if (host === undefined) {
           throw new Error("A reference anchor is not a link of the preview it was found in.");
         }
         // The reference's words (`dispatch://CORE-1`, or a link's own text) are gone by now,
@@ -255,17 +263,17 @@ export function MarkdownPreview({
         // whole reference.
         if (phrases.length > 0 && nextPhrase(reference.text, phrases, 0) !== undefined) {
           const mark = markElement(highlightClassName);
-          span.replaceWith(mark);
-          mark.appendChild(span);
+          host.replaceWith(mark);
+          mark.appendChild(host);
         }
-        return { ...reference, anchor: span };
+        return { ...reference, anchor: host };
       });
       if (lead !== undefined && lead !== "") {
         element.prepend(document.createTextNode(lead));
       }
-      return inert;
+      return decorated;
     },
-    [highlightClassName, highlightKey, lead]
+    [highlightClassName, highlightKey, lead, links]
   );
   const { isFallback, portals } = useRenderedMarkdown(
     root,

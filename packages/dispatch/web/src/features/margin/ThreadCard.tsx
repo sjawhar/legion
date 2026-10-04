@@ -464,6 +464,7 @@ export function ThreadCard({
                     <MarkdownPreview
                       className={`mt-2 text-xs ${textSecondaryOnSurface}`}
                       lines={1}
+                      links="live"
                       markdown={root.body}
                     />
                   )}
@@ -477,7 +478,7 @@ export function ThreadCard({
                       {root.anchor.quote}
                     </blockquote>
                   )}
-                  <MarkdownPreview lines={2} markdown={root.body} />
+                  <MarkdownPreview lines={2} links="live" markdown={root.body} />
                   {isBareReferenceBody(root.body) ? <Unfurl body={root.body} /> : null}
                 </>
               )}

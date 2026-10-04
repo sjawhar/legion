@@ -157,6 +157,24 @@ function expectFormatted(element: HTMLElement): void {
   ]);
 }
 
+/** A one-line preview whose host is a toggle, not a navigation (the margin's collapsed card):
+ *  the words and formatting of `expectFormatted`, with its links kept real, so a click on a
+ *  reference is the way out of the card to its target. */
+function expectFormattedWithLiveLinks(element: HTMLElement): void {
+  expectNoSyntax(element);
+  expect(element.textContent ?? "").toMatch(RENDERED);
+  expect(element.querySelector("[data-markdown-link]")).toBeNull();
+  const links = Array.from(element.querySelectorAll("a"), (link) => ({
+    href: link.getAttribute("href"),
+    reference: link.getAttribute("data-dispatch-ref"),
+    text: link.textContent,
+  }));
+  expect(links).toEqual([
+    { href: "https://example.com/docs", reference: null, text: "link" },
+    { href: "/issues/CORE-1", reference: "dispatch://CORE-1", text: "Design decision" },
+  ]);
+}
+
 /** A clamped preview never nests a block inside its one line. */
 function expectOneLine(element: HTMLElement): void {
   expect(element.querySelector("ul, ol, h1, h2, h3, p")).toBeNull();
@@ -412,7 +430,7 @@ test("the margin's collapsed thread preview renders the root formatted on one li
     await waitFor(() => expect(card.textContent).toContain("Design decision"));
     const body = card.querySelector<HTMLElement>("[data-markdown-preview]");
     if (body === null) throw new Error("the collapsed preview is not a MarkdownPreview");
-    expectFormatted(body);
+    expectFormattedWithLiveLinks(body);
     expectOneLine(body);
   } finally {
     view.unmount();
