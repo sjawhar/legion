@@ -139,6 +139,35 @@ any other error, a panic (`pmdoc.ErrPanic`) among them, is `pmdoc`'s own and ans
 a browser edit makes is not checked, so its rendering can still fail to read back when it is
 uploaded again.
 
+A document's `doc_updates` rows are its Yjs updates in the order they were stored, and nothing
+reads one back alone: `PgVersioned.Load` and `MaterializeAt` apply them one at a time, oldest
+first, to one document that collects garbage and return that document's encoding (`stateThrough`),
+so a deleted item keeps its id and length and none of its content, and a load holds the live
+document and the one update it is applying, however much the stored updates inserted and later
+deleted (LEGION-496). Nothing reads deleted content back from the store: every document built from
+it is a `crdt.New`, which drops an item's content in the transaction that deletes it, the one that
+applies a load included; a version stores its own markdown in `artifact_versions`; and no route
+reads an update or a state before the head. What a load's document parks - an update whose
+dependency no stored update supplies, a delete of an item none holds - is merged back into the
+state, so the room that loads it parks it again until a peer sends what it waits on. A state is
+kept only when it reads back as the document that made it: decoded into a fresh document, it must
+make the same state vector. That catches a re-encoding that renumbers or drops a client's clocks,
+as at ygo `v1.49.6-sami.3`, whose decoder integrated the items after a skipped clock range;
+`v1.50.1-sami.2`'s decoder parks them instead. It does not catch a re-encoding that keeps every
+clock and moves text, such as a lost right origin, which
+`TestACompactedDocumentKeepsItsOrderThroughLaterUpdates` guards on each ygo bump. A state that
+reads back otherwise, or a log the fold's document cannot apply (one parking more than the pending
+queue below holds), is logged (`dispatch: a document's stored updates do not fold into a state that
+reads back as them`): the load serves the stored updates merged whole, which for a log the fold
+cannot apply is what `loadDocument` decodes and refuses as `ErrDocumentUnloadable`, offering the
+rebuild, and compaction leaves them as stored without building that merge.
+Compaction (`Compact`, which ygo runs as a room closes and as the server shuts down, and the outbox
+runs over every document every 24 hours, `CompactAll`) folds the whole log into one row holding
+that state (`compactKeep`), whose `content_changed` says whether any row it folded past the latest
+version's cursor changed content. A compacted `doc_updates`, and any backup of it taken later,
+therefore holds no text a write deleted: text deleted before a version captured it is gone (Sami's
+decision, LEGION-496).
+
 Each `doc_updates` row records `content_changed` - whether the update changed the document's
 rendered markdown, the only document content a version stores (`pmdoc.Render` of the tree before and
 after; the one measure the room's update observer, `updateChangesMarkdown`, a transactional live
@@ -301,12 +330,13 @@ evicted in between.
 
 Every decode of document bytes takes the pending queue `maxUpdateItems`, whose comment
 (`internal/dispatch/docs/persistence.go`) states the rule and its reason: whether the service builds
-the decoder (`newDocumentCopy`: the copy, a write's fork, every decode of the stored history, and
-the store's check of each update it appends) or ygo builds it for the service
-(`Server.MaxPendingItems`, set in `New`: the rooms, and ygo's check of each update the service
-broadcasts). In a room, which keeps what it parks across updates, the queue is also the most the
-room's peers can park, about ten times ygo's default. `TestTheStoreTakesOneBrowserUpdateItsRoomTook`
-and `TestASettlementStampsMoreBlocksThanYgosDefaultQueue` are updates ygo's default queue refuses,
+the decoder (`newDocumentCopy`: the copy, a write's fork, every decode of the stored history,
+including `stateThrough`'s fold and read-back, and the store's check of each update it appends) or
+ygo builds it for the service (`Server.MaxPendingItems`, set in `New`: the rooms, and ygo's check
+of each update the service broadcasts). In a room, which keeps what it parks across updates, the
+queue is also the most the room's peers can park, about ten times ygo's default.
+`TestTheStoreTakesOneBrowserUpdateItsRoomTook` and
+`TestASettlementStampsMoreBlocksThanYgosDefaultQueue` are updates ygo's default queue refuses,
 which fail the room; `TestDeletingADeeplyNestedLiveTreeNeedsNoStackPerLevel`,
 `TestACopyHoldsEveryItemOneClientWroteAheadOfItsParent` and
 `TestAStoredHistoryLoadsEveryItemOneClientWroteAheadOfItsParent` check that a document whose peer
