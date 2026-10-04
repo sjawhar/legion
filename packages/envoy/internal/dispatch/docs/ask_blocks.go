@@ -512,6 +512,21 @@ func (state *roomState) recordStampedAskBlocks(stamped []stampedAsk) {
 	}
 }
 
+// registerPendingAskAuthor credits actor as the author of id in state.pendingAskAuthors, unless
+// an id already registered there has one: first-registration-wins, since a more specific
+// registration (a stamp's own carry-forward, registerCarriedAskAuthors) must not be overwritten
+// by a less specific one (registerAskAuthors) registered after it within the same write. The
+// caller holds state.mu.
+func (state *roomState) registerPendingAskAuthor(id string, actor model.Actor) {
+	if _, registered := state.pendingAskAuthors[id]; registered {
+		return
+	}
+	if state.pendingAskAuthors == nil {
+		state.pendingAskAuthors = make(map[string]model.Actor)
+	}
+	state.pendingAskAuthors[id] = actor
+}
+
 // registerAskAuthors credits actor as the author of every id in ids a committed transaction's
 // write or a service mutation introduces, computed from its own before/after trees at the write
 // site rather than guessed from whichever update's observer later renders a catch-up that happens
@@ -522,13 +537,7 @@ func (state *roomState) recordStampedAskBlocks(stamped []stampedAsk) {
 // which the caller registers first within the same write. The caller holds state.mu.
 func (state *roomState) registerAskAuthors(ids map[string]struct{}, actor model.Actor) {
 	for id := range ids {
-		if _, registered := state.pendingAskAuthors[id]; registered {
-			continue
-		}
-		if state.pendingAskAuthors == nil {
-			state.pendingAskAuthors = make(map[string]model.Actor, len(ids))
-		}
-		state.pendingAskAuthors[id] = actor
+		state.registerPendingAskAuthor(id, actor)
 	}
 }
 
@@ -563,13 +572,7 @@ func (state *roomState) carriedAskAuthors(stamped []stampedAsk) map[string]model
 // before/after diff introduces. The caller holds state.mu.
 func (state *roomState) registerCarriedAskAuthors(authors map[string]model.Actor) {
 	for id, author := range authors {
-		if _, registered := state.pendingAskAuthors[id]; registered {
-			continue
-		}
-		if state.pendingAskAuthors == nil {
-			state.pendingAskAuthors = make(map[string]model.Actor, len(authors))
-		}
-		state.pendingAskAuthors[id] = author
+		state.registerPendingAskAuthor(id, author)
 	}
 }
 

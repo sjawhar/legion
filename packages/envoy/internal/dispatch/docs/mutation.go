@@ -30,6 +30,18 @@ type versionWrite struct {
 	docUpdateVersion *int64
 }
 
+// mergeInto copies src into *dst, allocating *dst if it is nil and src holds anything; a nil or
+// empty src leaves *dst exactly as it was, nil included.
+func mergeInto[K comparable, V any](dst *map[K]V, src map[K]V) {
+	if len(src) == 0 {
+		return
+	}
+	if *dst == nil {
+		*dst = make(map[K]V, len(src))
+	}
+	maps.Copy(*dst, src)
+}
+
 // recoverMutation, deferred around a document mutation, turns its panic into *err and logs it.
 func recoverMutation(room string, err *error) {
 	if recovered := recover(); recovered != nil {
@@ -188,12 +200,7 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 			_, excluded := write.renamedAskBlockIDs[id]
 			return excluded
 		})
-		if len(added) > 0 {
-			if write.addedAskBlockIDs == nil {
-				write.addedAskBlockIDs = make(map[string]struct{}, len(added))
-			}
-			maps.Copy(write.addedAskBlockIDs, added)
-		}
+		mergeInto(&write.addedAskBlockIDs, added)
 	}
 	return nil
 }
@@ -1154,22 +1161,13 @@ func (s *Service) registerStampedAskBlocks(ctx context.Context, room string, sta
 	for _, ask := range stamped {
 		renamed[ask.minted] = struct{}{}
 	}
-	if write.renamedAskBlockIDs == nil {
-		write.renamedAskBlockIDs = make(map[string]struct{}, len(renamed))
-	}
-	maps.Copy(write.renamedAskBlockIDs, renamed)
+	mergeInto(&write.renamedAskBlockIDs, renamed)
 
 	state := s.room(room)
 	state.mu.Lock()
 	carried := state.carriedAskAuthors(stamped)
 	state.mu.Unlock()
-	if len(carried) == 0 {
-		return
-	}
-	if write.carriedAskAuthors == nil {
-		write.carriedAskAuthors = make(map[string]model.Actor, len(carried))
-	}
-	maps.Copy(write.carriedAskAuthors, carried)
+	mergeInto(&write.carriedAskAuthors, carried)
 }
 
 // captureLiveTextAndAuthors is the tree a version records and whom it credits, taken no later than
