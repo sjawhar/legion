@@ -11,58 +11,39 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"crypto/ecdsa"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"testing"
 	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/api"
 	"github.com/sjawhar/envoy/internal/broker/enroll"
 	"github.com/sjawhar/envoy/internal/broker/machine"
+	"github.com/sjawhar/envoy/internal/broker/policy"
+	"github.com/sjawhar/envoy/internal/broker/policy/policytest"
 	"github.com/sjawhar/envoy/internal/broker/proof"
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/requests"
-	"github.com/sjawhar/envoy/internal/broker/rules"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
 	"github.com/sjawhar/envoy/internal/broker/store/storetest"
 )
 
 const (
 	testUIToken  = "test-ui-token-0123456789abcdef"
-	testApprover = "sjawhar"
-	testSource   = "example/agent-secrets/AGENT_SECRETS_PROOF_APPROVAL"
+	testApprover = "sami@example.com"
 	testValue    = "dev-secret-value"
 )
 
-// newDevrelayTestServer is a live broker HTTP server (real handlers, real Postgres) on the rules
-// scripts/dev-broker.sh writes: one approval-required secret, approved by the box's operator.
+// newDevrelayTestServer is a live broker HTTP server (real handlers, real Postgres) holding one
+// human-tier secret the box's operator owns and so approves, as scripts/dev-broker.sh does.
 func newDevrelayTestServer(t *testing.T) string {
 	t.Helper()
 	st := storetest.Open(t)
-
-	rulesYAML := `version: 1
-secrets:
-  AGENT_SECRETS_PROOF_APPROVAL:
-    source: ` + testSource + `
-    owner: sjawhar
-    delivery: inject
-    max_lifetime_seconds: 3600
-    requesters:
-      - {kind: box, operator: sjawhar, decision: approval, approver: operator}
-`
-	rulesPath := t.TempDir() + "/rules.yaml"
-	if err := os.WriteFile(rulesPath, []byte(rulesYAML), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	cur, err := rules.NewCurrent(context.Background(), rules.FileLoader{Path: rulesPath}, time.Hour, func(error) {})
-	if err != nil {
-		t.Fatalf("rules.NewCurrent: %v", err)
-	}
+	local := secrets.NewLocal(policytest.Secret("AGENT_SECRETS_PROOF_APPROVAL", testApprover, policy.TierHuman, testValue))
+	cur := policytest.Current(t, local)
 
 	mux := http.NewServeMux()
 	srv := httptest.NewServer(mux)
@@ -71,13 +52,13 @@ secrets:
 	enr := &enroll.Service{Store: st, Lease: time.Hour}
 	enr.Chain = enroll.NewChainVerifier(st, srv.URL, time.Minute)
 	reqMachine := &requests.Machine{
-		Store: st, Rules: cur, Secrets: secrets.Fake{testSource: testValue},
+		Store: st, Policy: cur, Secrets: secrets.AWS{Client: local},
 		MaxGrant: time.Hour, PendingTTL: 12 * time.Hour,
 		Audience: srv.URL, Skew: time.Minute, Replay: enr.Replay,
 	}
 	reqMachine.Chain = requests.NewChainVerifier(st, srv.URL, time.Minute)
 	mach := &machine.Service{
-		Store: st, Enroll: enr, Rules: cur,
+		Store: st, Enroll: enr, Policy: cur,
 		Audience: srv.URL, Skew: time.Minute, PendingTTL: 15 * time.Minute, CredentialLifetime: 7 * 24 * time.Hour,
 		Replay: enr.Replay,
 	}

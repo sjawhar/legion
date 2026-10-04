@@ -8,13 +8,13 @@ sidebar:
 
 The Secrets Broker hands agent sessions the secret values they need, one request at a time, so an
 agent never holds a long-lived API key. An agent asks for a secret by name; the broker decides from
-its rules whether to grant it at once, refuse it, or ask a person; and the person approves or denies
-it in Dispatch. A granted value reaches only the session that asked, in the environment of the
-command it runs, and every request, decision and use is recorded. That command is the agent's
-choice and can read the value, so approve a secret only for a session you would trust with the value
-itself. The command keeps the value in its environment for as long as it runs; the grant's expiry or
-revocation stops the session from reading the value again, not a command that already has it, and a
-secret the rules grant automatically is granted again at the session's next request.
+the secret's owner and tier whether to grant it at once, refuse it, or ask a person; and the person
+approves or denies it in Dispatch. A granted value reaches only the session that asked, in the
+environment of the command it runs, and every request, decision and use is recorded. That command
+is the agent's choice and can read the value, so approve a secret only for a session you would
+trust with the value itself. The command keeps the value in its environment for as long as it runs;
+the grant's expiry or revocation stops the session from reading the value again, not a command that
+already has it, and a secret granted automatically is granted again at the session's next request.
 
 ```sh
 agent-secrets DEMO_API_KEY --reason "Deploy the example service" -- ./deploy.sh
@@ -28,9 +28,9 @@ it.
 - **No long-lived keys in agents.** An agent's environment, transcript and tools are the easiest
   place for a key to leak. With the broker, an agent session holds only a signing key of its own
   that dies with the session, and fetches a value for exactly the command that needs it.
-- **A person approves what needs approval.** The rules say which secrets an agent gets
-  automatically and which need a person's yes. Approving is one click in Dispatch, where that
-  person already works.
+- **A person approves what needs approval.** Each secret's owner and tier, two tags on the secret
+  itself, say who gets it automatically and who needs a person's yes. Approving is one click in
+  Dispatch, where that person already works.
 - **Every grant is recorded.** Each approval rests on a signed, content-addressed record of who
   asked, for what, why, and who decided, which the broker re-verifies every time it releases a
   value.
@@ -49,10 +49,10 @@ sequenceDiagram
     CLI->>Helper: sign this request as my session
     Helper-->>CLI: signed request and proof
     CLI->>Broker: POST /v1/requests
-    Broker->>Broker: evaluate the rules
-    alt the rules grant it automatically
+    Broker->>Broker: read the secret's owner and tier
+    alt granted at once
         Broker-->>CLI: granted
-    else the rules ask a person
+    else a person must approve
         Broker-->>CLI: pending
         Dispatch->>Broker: pending requests for the person signed in
         Person->>Dispatch: Approve
@@ -73,7 +73,7 @@ container](/legion/broker/guides/run-an-agent-in-a-container/) shows a box's set
 
 | Piece | What it does | Where it runs |
 | --- | --- | --- |
-| Secrets Broker (`envoy-broker`) | Enrolls sessions, evaluates the rules, records requests and decisions, and releases granted values. | A server, beside Postgres and the secret store. |
+| Secrets Broker (`envoy-broker`) | Enrolls sessions, decides each request from the secret's owner and tier, records requests and decisions, and releases granted values. | A server, beside Postgres and the secret store. |
 | `agent-secrets` | The command an agent runs to use a secret, and the tool people and launchers use to log machines in and inspect sessions. | Wherever agents run. |
 | `agent-secrets-helper` | A per-user daemon that holds each host agent session's key, enrolls it, and signs for it. | Each machine that runs agents directly. |
 | Dispatch | Shows people the requests they must decide and the grants they can revoke, and passes their decisions to the broker. | Dispatch's server and web app. |
@@ -97,8 +97,8 @@ every worker pod it starts, so each pod's agent gets only the grants of that pod
   approver sees.
 - [Walkthrough](/legion/broker/walkthrough/): a narrated video of one secret request, from the
   agent's ask through the approval in Dispatch to the command that runs with it.
-- [Concepts](/legion/broker/concepts/): sessions, machine logins, rules, grants, approvals and the
-  audit record.
+- [Concepts](/legion/broker/concepts/): sessions, machine logins, owner and tier, grants, approvals
+  and the audit record.
 - Guides: [approve a request](/legion/broker/guides/approve-a-request/),
   [log a machine in](/legion/broker/guides/log-a-machine-in/),
   [run an agent in a container](/legion/broker/guides/run-an-agent-in-a-container/),

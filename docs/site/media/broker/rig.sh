@@ -4,14 +4,15 @@
 # The secrets broker's demo rig: every surface the broker's screenshots and walkthrough show,
 # running on one machine on example data. It starts
 #
-#   - the broker (packages/envoy/cmd/broker) on a local rules file and its fake secrets file
-#     (internal/broker/secrets' development store), holding one secret, DEMO_API_KEY, whose value
-#     is made up, in a database of its own beside DATABASE_URL's, created and dropped by this run;
+#   - the broker (packages/envoy/cmd/broker) on its fake secrets file (internal/broker/secrets'
+#     development stand-in for Secrets Manager), holding one secret, DEMO_API_KEY, owned by
+#     alice@example.com at the human tier, whose value is made up, in a database of its own beside
+#     DATABASE_URL's, created and dropped by this run;
 #   - the Dispatch e2e harness (packages/dispatch/e2e: fake Envoy, fake GitHub, run-server.sh) on
-#     DATABASE_URL, emptied, pointed at that broker; its signed-in human is `alice`;
+#     DATABASE_URL, emptied, pointed at that broker; its signed-in human is `alice@example.com`;
 #   - an agent machine whose hostname is example-host-build: agent-secrets-helper (the host side of
-#     the broker) for the operator `alice`, alone in a UTS namespace of its own, with the agent's
-#     shells on this machine.
+#     the broker) for the operator `alice@example.com`, alone in a UTS namespace of its own, with
+#     the agent's shells on this machine.
 #
 # It prints how to drive it and stays in the foreground; Ctrl-C (or the exit of the command given
 # after --) stops all of it.
@@ -76,7 +77,7 @@ local_database() {
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
-OPERATOR="alice"
+OPERATOR="alice@example.com"
 AGENT_HOST="example-host-build"
 
 if [ "${1:-}" = "--" ]; then
@@ -151,20 +152,15 @@ PGOPTIONS="-c client_min_messages=warning" psql "$admin_url" -v ON_ERROR_STOP=1 
   -c "create database ${run_database}"
 broker_database=$run_database
 
-# --- The broker, on example rules and a made-up secret. -------------------------------------------
-cat >"$work/agent-secret-rules.yaml" <<EOF
-version: 1
-secrets:
-  DEMO_API_KEY:
-    source: example/agent-secrets/DEMO_API_KEY
-    owner: ${OPERATOR}
-    delivery: inject
-    max_lifetime_seconds: 3600
-    requesters:
-      - {kind: host, operator: ${OPERATOR}, decision: approval, approver: operator}
+# --- The broker, on a made-up secret of the operator's at the human tier, so the operator approves
+# every request for it, and a grant lives an hour. -----------------------------------------------
+secrets_prefix="example/agent-secrets/"
+secrets_key="arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab"
+cat >"$work/fake-secrets.json" <<EOF
+{"secrets": [{"name": "${secrets_prefix}demo-api-key", "kms_key_id": "${secrets_key}",
+  "tags": {"owner": "${OPERATOR}", "tier": "human"}, "value": "demo-key-not-a-real-secret-7f3a"}]}
 EOF
-printf '%s\n' "example/agent-secrets/DEMO_API_KEY=demo-key-not-a-real-secret-7f3a" >"$work/fake-secrets.env"
-chmod 600 "$work/fake-secrets.env"
+chmod 600 "$work/fake-secrets.json"
 # The broker's UI bearer, which Dispatch sends it, reaches both through a file, never an argv.
 (umask 077 && openssl rand -hex 32 >"$work/broker-ui-token")
 
@@ -174,8 +170,10 @@ start_process broker setsid env -i PATH="$PATH" \
   BROKER_LISTEN_ADDR=127.0.0.1:0 \
   BROKER_PUBLIC_URL=http://127.0.0.1:0 \
   BROKER_UI_TOKEN_FILE="$work/broker-ui-token" \
-  BROKER_RULES_FILE="$work/agent-secret-rules.yaml" \
-  BROKER_FAKE_SECRETS_FILE="$work/fake-secrets.env" \
+  BROKER_SECRETS_PREFIX="$secrets_prefix" \
+  BROKER_SECRETS_KMS_KEY_ARN="$secrets_key" \
+  BROKER_MAX_GRANT_SECONDS=3600 \
+  BROKER_FAKE_SECRETS_FILE="$work/fake-secrets.json" \
   "$work/bin/broker"
 await_start broker "$broker_pid" 0 60 "the broker to report its address" \
   grep -q 'broker listening addr=' "$work/logs/broker.log"
