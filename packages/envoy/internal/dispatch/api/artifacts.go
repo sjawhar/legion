@@ -483,7 +483,7 @@ func (s *server) storeArtifact(
 	if target.IssueKey != nil {
 		WriteJSON(w, http.StatusCreated, withAdvice(responsePayload, advice))
 	} else if blocks != nil {
-		WriteJSON(w, http.StatusCreated, withDocumentBlockAdvice(responsePayload, blocks))
+		WriteJSON(w, http.StatusCreated, withRawAdvice(responsePayload, blocks))
 	} else {
 		WriteJSON(w, http.StatusCreated, responsePayload)
 	}
@@ -906,7 +906,7 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 	// code and containers, which a caller's own reading of that markdown would only approximate.
 	blocks := &editBlocks{DecisionBlocksAdded: edit.AskBlocksAdded}
 	if artifact.IssueKey == nil || advice == nil {
-		WriteJSON(w, http.StatusOK, withDocumentBlockAdvice(responsePayload, blocks))
+		WriteJSON(w, http.StatusOK, withRawAdvice(responsePayload, blocks))
 		return
 	}
 	advice.editBlocks = blocks

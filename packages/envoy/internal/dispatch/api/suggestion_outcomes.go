@@ -92,11 +92,14 @@ update write_suggestions ws
 `
 
 // suggestionOverridden marks 'overridden' every suggestion still pending after both acted_on
-// passes above, where the source issue (the one the suggestion was offered on) got further
-// activity from the suggestion's own actor: a sign the agent saw the suggestion and kept working
-// on what it had filed rather than acting on it. The issue's own creation event is always older
-// than the suggestion (suggestions are persisted after that write commits), so it never
-// satisfies "created_at > ws.created_at" on its own.
+// passes above, where the source (the issue, or for a project-document ask the document) got
+// further activity from the suggestion's own actor: a sign the agent saw the suggestion and kept
+// working on what it had filed rather than acting on it. The issue's own creation event is
+// always older than the suggestion (suggestions are persisted after that write commits), so it
+// never satisfies "created_at > ws.created_at" on its own. A lateral with LIMIT, the same shape
+// suggestionActedOnByDirectUpdate above needed: the two legs (issue-sourced, artifact-sourced)
+// stay separate queries, each keeping its own column's index condition, so neither leg's plan
+// risks being flattened the way a single bare EXISTS was measured to be.
 const suggestionOverridden = `
 with pending as (
   select id, source_issue_key, source_artifact_id, actor_kind, actor_id, created_at
@@ -107,20 +110,23 @@ update write_suggestions ws
    set outcome = 'overridden', outcome_at = now(),
        outcome_detail = 'further activity on the source did not address the suggestion'
   from pending p
- where ws.id = p.id
-   and (exists (
-     select 1 from events e
+  join lateral (
+    (select 1 from events e
       where e.issue_key = p.source_issue_key
         and e.created_at > p.created_at
         and e.actor ->> 'kind' = p.actor_kind
         and e.actor ->> 'id' = p.actor_id
-   ) or exists (
-     select 1 from events e
+      limit 1)
+    union all
+    (select 1 from events e
       where e.artifact_id = p.source_artifact_id
         and e.created_at > p.created_at
         and e.actor ->> 'kind' = p.actor_kind
         and e.actor ->> 'id' = p.actor_id
-   ))
+      limit 1)
+    limit 1
+  ) touched on true
+ where ws.id = p.id
 `
 
 // sweepSuggestionOutcomes runs one pass of all three resolution rules, in the order that lets

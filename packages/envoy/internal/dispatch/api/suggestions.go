@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
@@ -92,30 +94,46 @@ func closedOwner(result model.SearchResult) bool {
 	return result.Owner.Kind == "issue" && result.Owner.Status == "done"
 }
 
-// computeSuggestions runs LEGION-550's write-time feedback over project: the fused search
-// (sjawhar/legion#1764) for text, read within writeSuggestionTimeout. It never returns an error:
-// a slow or failed search is reported as Suggestions.Missing instead, since nothing here may
-// hold or fail a write that already committed. A blank text (an issue filed with no title, which
-// the create route already refuses, or an ask with a blank question) returns nil rather than
-// searching for nothing.
-//
-// Everything source owns is left out (suggestionSource.owns). Related takes the best
-// suggestionRelatedCount of the rest with every hit on an open owner ahead of every hit on a done
-// issue, keeping the search's order within each; Decision is the first answered ask in that same
-// order.
-func (s *server) computeSuggestions(
+// computeAndPersistSuggestions runs LEGION-550's write-time feedback — the fused search
+// (sjawhar/legion#1764), the decision lookup, and persisting every row the sweep later reads —
+// all under one writeSuggestionTimeout deadline derived once here, so nothing downstream of the
+// write's own commit can hold the response past that single bound. Earlier rounds bounded only
+// the search call and left the decision lookup and the persistence inserts on the request's
+// unbounded context; a reviewer measured the decision lookup alone blocking ~1.2s behind a table
+// lock. It never returns an error: a slow or failed search is reported as Suggestions.Missing
+// instead, since nothing here may hold or fail a write that already committed. A blank text (an
+// issue filed with no title, which the create route already refuses, or an ask with a blank
+// question) returns nil rather than searching for nothing.
+func (s *server) computeAndPersistSuggestions(
 	ctx context.Context, project, text string, source suggestionSource,
 ) *model.Suggestions {
 	searchText := suggestionQuery(text)
 	if searchText == "" {
 		return nil
 	}
-	searchCtx, cancel := context.WithTimeout(ctx, writeSuggestionTimeout)
+	bounded, cancel := context.WithTimeout(ctx, writeSuggestionTimeout)
 	defer cancel()
-	response, err := s.runFusedSearch(searchCtx, searchText, project, suggestionSearchDepth, 0)
+	suggestions := s.computeSuggestions(bounded, project, searchText, source)
+	s.persistSuggestions(bounded, source, suggestions)
+	return suggestions
+}
+
+// computeSuggestions runs the fused search and the decision lookup under ctx, which the caller
+// has already bounded. Everything source owns is left out (suggestionSource.owns). Related takes
+// the best suggestionRelatedCount of the rest with every hit on an open owner ahead of every hit
+// on a done issue, keeping the search's order within each; Decision is the first answered ask in
+// the search's own order, deliberately not reordered by owner status — an answered question
+// stays the best match for the question asked whether or not its issue has since closed, so
+// exempting it from the open-before-done rule (unlike reviewed Round 2's claim that Decision was
+// simply "unaffected" by construction, which was true only because no test had two decision
+// candidates split across open and done owners).
+func (s *server) computeSuggestions(
+	ctx context.Context, project, searchText string, source suggestionSource,
+) *model.Suggestions {
+	response, err := s.runFusedSearch(ctx, searchText, project, suggestionSearchDepth, 0)
 	if err != nil {
 		reason := "the search behind it failed"
-		if searchCtx.Err() != nil {
+		if ctx.Err() != nil {
 			reason = "the search behind it did not answer within " + writeSuggestionTimeout.String()
 		}
 		slog.Warn("dispatch: write suggestions omitted", "error", err)
@@ -133,14 +151,18 @@ func (s *server) computeSuggestions(
 			askIDs = append(askIDs, result.ID)
 		}
 	}
-	slices.SortStableFunc(candidates, func(a, b model.SearchResult) int {
+
+	related := append([]model.SearchResult(nil), candidates...)
+	slices.SortStableFunc(related, func(a, b model.SearchResult) int {
 		return cmp.Compare(boolRank(closedOwner(a)), boolRank(closedOwner(b)))
 	})
 	suggestions := &model.Suggestions{Related: []model.WriteSuggestion{}}
-	for _, result := range candidates[:min(len(candidates), suggestionRelatedCount)] {
+	for _, result := range related[:min(len(related), suggestionRelatedCount)] {
 		suggestions.Related = append(suggestions.Related, suggestionFromResult(result))
 	}
 	if len(askIDs) > 0 {
+		// candidates, not related: the decision is the best-ranked answered ask in the search's
+		// own order, never reordered by whether its issue is open or done.
 		decision, err := s.firstAnsweredAsk(ctx, askIDs, candidates)
 		if err != nil {
 			slog.Warn("dispatch: decision suggestion omitted", "error", err)
@@ -231,8 +253,11 @@ func suggestedIssueKey(item model.WriteSuggestion) *string {
 }
 
 // persistSuggestions records every item a set of suggestions offered, so the outcome sweep has
-// something to resolve and a later count has something to count. A write that already succeeded
-// is never failed by this: a row that cannot be inserted is only logged.
+// something to resolve and a later count has something to count. Runs on ctx, the same bounded
+// deadline computeAndPersistSuggestions derived for the search and decision lookup: a write that
+// already succeeded is never failed by this, so a row that cannot be inserted — deadline
+// exceeded included — is only logged. One round trip (store.Pool.SendBatch), not one per row:
+// up to four rows (three related plus one decision) previously cost up to four.
 func (s *server) persistSuggestions(ctx context.Context, source suggestionSource, suggestions *model.Suggestions) {
 	if suggestions == nil {
 		return
@@ -249,14 +274,18 @@ func (s *server) persistSuggestions(ctx context.Context, source suggestionSource
 	if suggestions.Decision != nil {
 		rows = append(rows, row{role: "decision", rank: 0, item: *suggestions.Decision})
 	}
+	if len(rows) == 0 {
+		return
+	}
 	nullable := func(value string) any {
 		if value == "" {
 			return nil
 		}
 		return value
 	}
+	batch := &pgx.Batch{}
 	for _, r := range rows {
-		if _, err := s.deps.Store.Pool.Exec(ctx, `
+		batch.Queue(`
 			insert into write_suggestions
 				(source_kind, source_issue_key, source_artifact_id, source_ask_id, actor_kind, actor_id,
 				 role, rank, suggested_kind, suggested_id, suggested_issue_key)
@@ -264,8 +293,14 @@ func (s *server) persistSuggestions(ctx context.Context, source suggestionSource
 		`,
 			source.kind, nullable(source.issueKey), nullable(source.artifactID), nullable(source.askID),
 			source.actor.Kind, source.actor.ID, r.role, r.rank, r.item.Kind, r.item.ID, suggestedIssueKey(r.item),
-		); err != nil {
+		)
+	}
+	results := s.deps.Store.Pool.SendBatch(ctx, batch)
+	for range rows {
+		if _, err := results.Exec(); err != nil {
 			slog.Warn("dispatch: write suggestion not recorded", "error", err)
+			break
 		}
 	}
+	_ = results.Close()
 }

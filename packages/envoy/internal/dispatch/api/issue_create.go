@@ -356,9 +356,7 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 	// PR's hardening ledger).
 	if advice != nil {
 		source := suggestionSource{kind: "issue", issueKey: key, actor: actor}
-		suggestions := s.computeSuggestions(r.Context(), input.Project, input.Title+"\n"+markdown, source)
-		advice.Suggestions = suggestions
-		s.persistSuggestions(r.Context(), source, suggestions)
+		advice.Suggestions = s.computeAndPersistSuggestions(r.Context(), input.Project, input.Title+"\n"+markdown, source)
 	}
 	WriteJSON(w, http.StatusCreated, withAdvice(issue, advice))
 }

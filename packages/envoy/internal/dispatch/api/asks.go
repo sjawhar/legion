@@ -274,9 +274,13 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 		return
 	}
 	s.publish(events...)
-	// LEGION-550. An ask on an issue searches that issue's project; one on an unlinked project
-	// document searches the document's. The document case has no issue state to report, so its
-	// advice carries the suggestions alone (writeAdvice above is issue-only).
+	// LEGION-550. An ask on an issue searches that issue's project and its suggestions ride the
+	// issue's own advice; one on an unlinked project document searches the document's and has no
+	// issue state to report, so its advice carries the suggestions alone. The branch is
+	// owner.IssueKey != nil, not advice != nil: advice is nil both for a document owner and for
+	// an issue owner whose write-advice query itself failed (writeAdvice swallows that), and
+	// conflating the two would silently drop an issue-owned ask's suggestions whenever advice
+	// happened to fail for an unrelated reason.
 	source := suggestionSource{kind: "ask", askID: ask.ID, actor: actor}
 	var project string
 	var projectErr error
@@ -289,19 +293,25 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 		projectErr = s.deps.Store.Pool.QueryRow(r.Context(),
 			`select project_key from artifacts where id = $1`, *owner.ArtifactID).Scan(&project)
 	}
+	var suggestions *model.Suggestions
 	if projectErr != nil {
 		slog.Warn("dispatch: write suggestions omitted", "route", "POST ask", "error", projectErr)
+		suggestions = &model.Suggestions{Missing: "the project behind it could not be resolved"}
 	} else if project != "" {
-		suggestions := s.computeSuggestions(r.Context(), project, ask.Question, source)
-		s.persistSuggestions(r.Context(), source, suggestions)
+		suggestions = s.computeAndPersistSuggestions(r.Context(), project, ask.Question, source)
+	}
+	if owner.IssueKey != nil {
 		if advice != nil {
 			advice.Suggestions = suggestions
-		} else if suggestions != nil {
-			WriteJSON(w, http.StatusCreated, withDocumentBlockAdvice(ask, suggestionsOnlyAdvice{Suggestions: suggestions}))
-			return
 		}
+		WriteJSON(w, http.StatusCreated, withAdvice(ask, advice))
+		return
 	}
-	WriteJSON(w, http.StatusCreated, withAdvice(ask, advice))
+	if suggestions != nil {
+		WriteJSON(w, http.StatusCreated, withRawAdvice(ask, suggestionsOnlyAdvice{Suggestions: suggestions}))
+		return
+	}
+	WriteJSON(w, http.StatusCreated, ask)
 }
 
 func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {

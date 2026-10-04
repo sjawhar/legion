@@ -10,6 +10,15 @@
 -- directly to the suggested issue, by the same actor; to 'overridden' when the source instead
 -- gets further activity from that actor with neither signal. A row that never sees either stays
 -- 'ignored', which also carries "nobody has reacted yet" for a suggestion too recent to judge.
+--
+-- Both signals are actor-and-timing heuristics, not a check that the later activity is actually
+-- about the suggestion: 'overridden' fires on any later write to the source by that actor, so a
+-- correct suggestion the agent simply never read scores the same as one it read and rejected
+-- (undercounts true positives); 'acted_on' by direct update fires on any later write to the
+-- suggested issue by that actor, with no topical check, so unrelated same-actor activity there
+-- can inflate it (overcounts true positives). This table is not yet the input to LEGION-386's
+-- 90%-right threshold on its own; whoever computes that threshold should read outcome_detail and
+-- weigh these two known error directions, not treat the ratio as exact.
 create table write_suggestions (
   id uuid primary key default gen_random_uuid(),
   created_at timestamptz not null default now(),

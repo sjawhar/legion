@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"testing"
 	"time"
+
+	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
 type testSuggestionOwner struct {
@@ -95,7 +97,7 @@ func TestCreateIssueSuggestsSimilarOpenIssue(t *testing.T) {
 				t.Fatalf("suggested item = %+v, want status, key and href for %s", item, existingIssue.Key)
 			}
 		}
-		if item.Kind == created.Key || item.ID == created.Key {
+		if item.ID == created.Key {
 			t.Fatalf("suggestions include the issue that was just filed: %+v", suggestions.Related)
 		}
 	}
@@ -180,6 +182,102 @@ func TestComputeSuggestionsReportsMissingWhenSearchTimesOut(t *testing.T) {
 	}
 	if len(suggestions.Related) != 0 || suggestions.Decision != nil {
 		t.Fatalf("suggestions = %+v, want nothing related or decided when search could not run", suggestions)
+	}
+}
+
+// TestSuggestionsDecisionIsNotReorderedByOwnerStatus: Decision picks the best-ranked answered ask
+// in the search's own order, even when a worse-matching answered ask whose issue is still open
+// would sort ahead of it in Related (closedOwner's open-before-done rule applies only there).
+func TestSuggestionsDecisionIsNotReorderedByOwnerStatus(t *testing.T) {
+	handler := newTestHandler(t)
+	createSuggestionProject(t, handler, "DECORD")
+
+	weakOpen := createSuggestionIssue(t, handler, map[string]any{
+		"project": "DECORD", "title": "Choose a transport for the notifications service",
+	})
+	weakAsk := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+weakOpen+"/asks", map[string]any{
+		"question": "Should the notifications service use REST for its API?",
+	}, "alice")
+	weakAskID := decodeBody[testAskWithSuggestions](t, weakAsk).ID
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+weakAskID+"/answer", map[string]any{
+		"text": "REST.",
+	}, "alice"); response.Code != http.StatusOK {
+		t.Fatalf("answer weak ask: status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	strongDone := createSuggestionIssue(t, handler, map[string]any{
+		"project": "DECORD", "title": "Billing service transport",
+	})
+	strongAsk := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+strongDone+"/asks", map[string]any{
+		"question": "Should the billing service public API use REST or GraphQL?",
+	}, "alice")
+	strongAskID := decodeBody[testAskWithSuggestions](t, strongAsk).ID
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+strongAskID+"/answer", map[string]any{
+		"text": "REST.",
+	}, "alice"); response.Code != http.StatusOK {
+		t.Fatalf("answer strong ask: status=%d body=%s", response.Code, response.Body.String())
+	}
+	if response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+strongDone, map[string]any{"status": "done"}, "alice"); response.Code != http.StatusOK {
+		t.Fatalf("close strong issue: status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	target := createSuggestionIssue(t, handler, map[string]any{
+		"project": "DECORD", "title": "Pick an API transport for the checkout service",
+	})
+	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+target+"/asks", map[string]any{
+		"question": "Should the billing service public API use REST or GraphQL?",
+	}, "alice")
+	created := decodeBody[testAskWithSuggestions](t, response)
+	if created.Advice == nil || created.Advice.Suggestions == nil || created.Advice.Suggestions.Decision == nil {
+		t.Fatalf("advice.suggestions.decision missing: %s", response.Body.String())
+	}
+	if decision := created.Advice.Suggestions.Decision; decision.ID != strongAskID {
+		t.Fatalf("decision = %+v, want the better-matching ask %s even though its issue %s is done", decision, strongAskID, strongDone)
+	}
+}
+
+// TestComputeAndPersistSuggestionsRespectsDeadlineUnderLock: a reviewer measured the decision
+// lookup alone blocking ~1.2s behind a table lock when it ran on the request's unbounded
+// context. computeAndPersistSuggestions now derives one deadline that covers the search, the
+// decision lookup, and persistence together, so the whole call returns at or near
+// writeSuggestionTimeout even while `asks` is locked, never near the lock's own hold time.
+func TestComputeAndPersistSuggestionsRespectsDeadlineUnderLock(t *testing.T) {
+	handler, _, deps := newTestServer(t, testServerOptions{})
+	srv := directServer(deps)
+	createSuggestionProject(t, handler, "DEADLINE")
+	issue := createSuggestionIssue(t, handler, map[string]any{
+		"project": "DEADLINE", "title": "Should the service use REST or GraphQL?",
+	})
+	asked := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue+"/asks", map[string]any{
+		"question": "Should the service use REST or GraphQL for its public API?",
+	}, "alice")
+	askID := decodeBody[testAskWithSuggestions](t, asked).ID
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+askID+"/answer", map[string]any{
+		"text": "REST.",
+	}, "alice"); response.Code != http.StatusOK {
+		t.Fatalf("answer ask: status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	lockTx, err := srv.deps.Store.Pool.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("begin lock tx: %v", err)
+	}
+	defer func() { _ = lockTx.Rollback(context.Background()) }()
+	if _, err := lockTx.Exec(context.Background(), "lock table asks in access exclusive mode"); err != nil {
+		t.Fatalf("lock asks: %v", err)
+	}
+
+	source := suggestionSource{kind: "ask", issueKey: issue, askID: "locked-probe", actor: model.Actor{Kind: "user", ID: "alice"}}
+	started := time.Now()
+	suggestions := srv.computeAndPersistSuggestions(context.Background(), "DEADLINE", "Should the service use REST or GraphQL for its public API?", source)
+	elapsed := time.Since(started)
+
+	const bound = writeSuggestionTimeout + 500*time.Millisecond // headroom for the search leg before the lock is hit
+	if elapsed > bound {
+		t.Fatalf("computeAndPersistSuggestions took %s with asks locked, want at or near %s, well under the lock's own hold time", elapsed, writeSuggestionTimeout)
+	}
+	if suggestions == nil {
+		t.Fatalf("suggestions = nil, want a result (Missing or otherwise) even when the decision lookup is blocked")
 	}
 }
 
