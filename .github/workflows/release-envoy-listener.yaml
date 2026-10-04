@@ -48,7 +48,7 @@ jobs:
     outputs:
       envoy: ${{ steps.read.outputs.envoy }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - id: read
         run: echo "envoy=$(jq -c .envoy .github/go-release-targets.json)" >> "$GITHUB_OUTPUT"
 

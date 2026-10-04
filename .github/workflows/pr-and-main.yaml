@@ -64,7 +64,7 @@ jobs:
 
       # The notices step below builds go-licenses and loads every release binary's modules. It
       # keeps them under a key of its own, apart from the one setup-go above leaves unsaved.
-      - uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             ~/go/pkg/mod
