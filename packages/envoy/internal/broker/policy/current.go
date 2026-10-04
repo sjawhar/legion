@@ -70,6 +70,7 @@ func (c *Current) Refresh(ctx context.Context) error {
 		c.set.Store(set)
 		return nil
 	}
+	live := c.set.Load().Secrets
 	for name, at := range c.recent {
 		if now.Sub(at) > listLag {
 			delete(c.recent, name)
@@ -80,6 +81,12 @@ func (c *Current) Refresh(ctx context.Context) error {
 			return err
 		}
 		merge(set.Secrets, name, lk)
+		// A change this read catches that no reread did - a console delete, a tag that now refuses
+		// the secret - is as new to the listing as a reread's answer, so it is kept for listLag from
+		// now; the live set, not this listing, is what it changed.
+		if was, served := live[name]; served != lk.Served || was != lk.Secret {
+			c.recent[name] = c.now()
+		}
 	}
 	c.set.Store(NewSet(set.Secrets))
 	return nil

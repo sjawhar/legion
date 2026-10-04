@@ -153,6 +153,52 @@ func TestARefreshStraddlingListLagStillRereadsTheName(t *testing.T) {
 	}
 }
 
+// TestAReloadThatCatchesAChangeKeepsItForListLag pins that a reload which, rereading a recent
+// name, finds an answer the live policy did not hold re-anchors that name: a secret deleted after
+// a reread served it, with no reread of its own, is dropped by the next reload's re-describe, and a
+// reload listLag after the reread, from a listing that still predates the delete, keeps it out
+// rather than serving it again.
+func TestAReloadThatCatchesAChangeKeepsItForListLag(t *testing.T) {
+	store := secrets.NewLocal(policytest.Secret("OLD_KEY", "ada@example.com", policy.TierAgent, "v1"))
+	stale, err := store.ListSecrets(context.Background(), &secretsmanager.ListSecretsInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lister := &slowLister{page: stale} // lists OLD_KEY throughout
+	loader := policytest.Loader(store)
+	loader.Secrets = lister
+	cur, err := policy.NewCurrent(t.Context(), loader, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reread := time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC)
+	now := reread
+	policy.SetNow(cur, func() time.Time { return now })
+	if lk, _ := cur.RefreshOne(context.Background(), "OLD_KEY"); !lk.Served {
+		t.Fatal("reread must serve OLD_KEY")
+	}
+
+	// Deleted (from the console, say) while the next reload lists: its listing still shows OLD_KEY,
+	// and its own re-describe finds it gone.
+	now = reread.Add(policy.ListLag / 2)
+	lister.fetched = func() { store.Delete(policytest.ID("OLD_KEY")) }
+	if err := cur.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := cur.Get().Secrets["OLD_KEY"]; ok {
+		t.Fatal("the reload whose own re-describe found OLD_KEY deleted still served it")
+	}
+
+	lister.fetched = nil
+	now = reread.Add(policy.ListLag + time.Second)
+	if err := cur.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := cur.Get().Secrets["OLD_KEY"]; ok {
+		t.Fatal("a reload listLag after the reread, but not after the reload that found OLD_KEY deleted, served it again from a lagging listing")
+	}
+}
+
 // TestARereadOfANameThatExistsNowhereCostsNoReload pins that a reread finding absent a name the
 // live policy did not serve is not kept for the next reload: anyone may ask for a reread, so
 // otherwise every name a caller invents would cost each reload in the next listLag one more
