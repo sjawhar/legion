@@ -194,6 +194,16 @@ The audit finds four shapes:
 Run the audit as a step of a coordinator's loop, at each checkpoint, not as a habit: these shapes
 are found by running the check, not by noticing them.
 
+## Search paging
+
+`skill://dispatch` sends you here when a `dispatch_search` page is not enough: more hits remain,
+or a kind runs out before the page does.
+
+A page holds `limit` hits (20 by default, 50 at most); the first line names how many match
+(`showing 1-20 of 312`), and, while more can be reached, the last line names the next `offset`.
+Each kind lists at most its best 100, so when the result says the rest cannot be paged to, narrow
+the query or name a `project`.
+
 ## Syncing a project's architecture model
 
 Import a project's architecture model from its configured source repository now (a human configures the source in Settings):
