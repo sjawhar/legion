@@ -4,7 +4,7 @@ Compose definitions run the on-prem Envoy listener, Dispatch server, its
 Postgres database, and the daily Postgres backup worker. All services use host
 networking. The listener serves `127.0.0.1:9020` for local OpenCode session
 registration and webhook ingress; Dispatch serves `127.0.0.1:8766` by default
-for the SPA, GitHub OAuth, and the native Dispatch API.
+for the SPA, Google sign-in through the shared sign-in pool, and the native Dispatch API.
 
 ## Host configuration lives in `compose/.env`
 
@@ -26,18 +26,18 @@ already encrypted; nothing else on the host can reach that address:
 
 ```
 DISPATCH_LISTEN_HOST=100.x.y.z        # tailscale ip -4
-DISPATCH_SERVER_URL=http://example-host-devbox:8766 # the exact browser URL and OAuth callback origin
+DISPATCH_SERVER_URL=http://example-host-devbox:8766 # the exact browser URL and sign-in callback origin
 DISPATCH_INSECURE_COOKIE=1            # cookies over the http:// tailnet URL
 ```
 
-The origin humans open in the browser is the OAuth callback origin: the server builds
+The origin humans open in the browser is the sign-in callback origin: the server builds
 `<dispatch.serverUrl>/auth/callback` from `dispatch.serverUrl` in the mounted `envoy.json`, and
-the GitHub App must list exactly that URL. On Sami's devbox that is `http://example-host-devbox:8766`
+the sign-in pool's app client must list exactly that URL. On Sami's devbox that is `http://example-host-devbox:8766`
 (recorded as `DISPATCH_PUBLIC_ORIGIN` in `compose/.env`); a deploy whose `/auth/start` redirect
 stops matching it breaks sign-in for everyone, so the auto-deployer checks the redirect after
 every deploy and rolls back on a mismatch.
 
-Never bind `0.0.0.0`: that exposes the OAuth endpoints and session cookies on
+Never bind `0.0.0.0`: that exposes the sign-in endpoints and session cookies on
 every interface.
 
 ## Layout
@@ -139,17 +139,17 @@ The Dispatch service reads its public browser origin and NATS URLs from
 | Var | Required | Notes |
 | --- | --- | --- |
 | `DATABASE_URL` | yes | The external Dispatch Postgres URL (production: the Aurora `dispatch` database). The compose runs no Postgres of its own. |
-| `DISPATCH_SERVER_URL` | yes | Public browser origin and GitHub OAuth callback origin. It must be the URL humans type into their browser; the GitHub App must list `<DISPATCH_SERVER_URL>/auth/callback`. |
+| `DISPATCH_SERVER_URL` | yes | Public browser origin and sign-in callback origin. It must be the URL humans type into their browser; the sign-in pool's app client for Dispatch must list `<DISPATCH_SERVER_URL>/auth/callback`. |
 | `NATS_URLS` | yes | Comma-separated NATS URLs for Dispatch. |
 | `ENVOY_ALLOW_REMOTE_NATS` | yes, for a shared NATS | Set to `1` to reach a NATS that is not this host's own. The server owns the `ENVOY_NOTIFICATIONS` stream, so every start reconciles it; without this the start refuses a non-loopback NATS, naming the URL. `compose/dispatch.compose.yml` sets it. |
 | `NATS_NKEY_SEED_FILE` | no | A file holding the NATS nkey user seed this process connects as (trimmed); wins over `NATS_NKEY_SEED`. A set but empty, missing, unreadable, blank or non-user-seed value refuses startup naming the variable and path. Neither set connects without a credential. |
 | `NATS_NKEY_SEED` | no | The NATS nkey user seed itself, when `NATS_NKEY_SEED_FILE` is unset. |
 | `DISPATCH_AGENT_TOKEN` | yes | Shared devbox fallback bearer token; per-person tokens minted in Dispatch Settings are preferred for individual agents. |
-| `DISPATCH_ALLOWED_LOGINS` | human identity | Cookie identity requires it at startup; header identity accepts only included logins. |
+| `DISPATCH_SIGNIN_ISSUER` / `DISPATCH_SIGNIN_CLIENT_ID` / `DISPATCH_SIGNIN_CLIENT_SECRET` / `DISPATCH_SIGNIN_GROUP` | cookie identity | The sign-in pool's issuer, Dispatch's app client and its secret, and the group a person must be in. Cookie identity requires all four at startup, and some without the others refuse to boot. Header identity is for tests and local harnesses only, and refuses every one of these settings. `DISPATCH_ALLOWED_LOGINS` is removed and refused at startup. |
 | `DISPATCH_LISTEN_HOST` | no | Defaults to `127.0.0.1`; for direct tailnet access, set it to `$(tailscale ip -4)`, never `0.0.0.0`. |
 | `DISPATCH_PORT` | no | Defaults to `8766`; the healthcheck follows it. |
-| `DISPATCH_IDENTITY` | no | `cookie` (default) or `header:<name>` for a trusted proxy or tests. |
-| `DISPATCH_IDENTITY_HEADER_TRUSTED` | conditional | Set to `1` when header identity and GitHub OAuth credentials share a deployment. |
+| `DISPATCH_IDENTITY` | no | `cookie` (default) is Dispatch's production identity. `header:<name>` is only for tests and local harnesses. |
+| `DISPATCH_IDENTITY_HEADER_TRUSTED` | test/local header identity | Set to `1` for every header-identity test or local harness. A missing flag refuses boot. |
 | `DISPATCH_REPO_PROJECTS` | no | Optional boot seed for repository-to-project settings (`owner/repo=KEY,...`). Existing dashboard settings are not overwritten. |
 | `DISPATCH_DEFAULT_PROJECT` | no | Native Dispatch project for external repositories without a stored mapping. |
 | `DISPATCH_NATS_DISABLED` | no | Set to `1` to run database and SSE paths without NATS. |
@@ -159,7 +159,7 @@ The Dispatch service reads its public browser origin and NATS URLs from
 | `DISPATCH_OIDC_AUDIENCE` | conditional | Audience those tokens must carry (`dispatch`). Set with `DISPATCH_OIDC_ISSUER` or not at all. |
 | `DISPATCH_URL` | no | Host-adapter override for the Dispatch base URL; use with `DISPATCH_TOKEN`. |
 | `DISPATCH_TOKEN` | host adapters | Bearer token paired with `DISPATCH_URL`. |
-| `DISPATCH_APP_CLIENT_ID` / `DISPATCH_APP_CLIENT_SECRET` | OAuth | GitHub OAuth credentials. The GitHub proxy needs a stored user token. |
+| `DISPATCH_APP_CLIENT_ID` | GitHub App | The GitHub App's client ID; with its private key (the `pem` in the data volume's `app.json`) Dispatch handles webhooks and architecture sources and reads GitHub for the web app. `DISPATCH_APP_CLIENT_SECRET` is removed and refused at startup. |
 | `DISPATCH_INSECURE_COOKIE` | HTTP | Set to `1` whenever browsers reach Dispatch over `http://` (the tailnet deployment); leave unset behind an HTTPS terminator. |
 
 The Dispatch signing material is a named volume; the database is external.
