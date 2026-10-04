@@ -30,12 +30,12 @@ export function waitingOnYou<
 }
 
 /** Everything the Inbox lists that waits for the viewer - its asks whose turn is theirs, and every
- *  pending credential request, each of which names the viewer as its approver - counted, with when
- *  the oldest of them began waiting (undefined when nothing does). The badges and the banner read
- *  this one rule, so another kind of waiting item is added here once. A time `compareTimestamps`
- *  refuses still counts but is never the oldest: the broker's `requested_at` reaches here
- *  verbatim, and the badges render in the app shell, outside every page's error boundary, so a
- *  throw here would take down every page. */
+ *  pending credential request the viewer may decide, as its approver or as anyone signed in -
+ *  counted, with when the oldest of them began waiting (undefined when nothing does). The badges
+ *  and the banner read this one rule, so another kind of waiting item is added here once. A time
+ *  `compareTimestamps` refuses still counts but is never the oldest: the broker's `requested_at`
+ *  reaches here verbatim, and the badges render in the app shell, outside every page's error
+ *  boundary, so a throw here would take down every page. */
 function needsYou(
   asks: readonly InboxRow[],
   credentialRequests: readonly CredentialPendingRow[]

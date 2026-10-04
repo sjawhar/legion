@@ -127,13 +127,16 @@ bun run docs:dev
 
 ## Development
 
-You need Bun at the version `.bun-version` pins and Go at the version `go.work` names. `go.work`
-binds the two Go modules, `packages/daemon` and `packages/envoy`; the TypeScript packages and the
-documentation site are Bun workspaces of the root `package.json`.
+You need Bun at the version `.bun-version` pins and Go at the minimum version `go.work`
+names. The default `GOTOOLCHAIN=auto` downloads that toolchain when the installed Go is older;
+`GOTOOLCHAIN=local` refuses instead. `go.work` binds the two Go modules, `packages/daemon` and
+`packages/envoy`; the TypeScript packages and the documentation site are Bun workspaces of the
+root `package.json`.
 
 ```sh
 bun install                                          # every workspace
-cd packages/<package> && bun run lint && bun run typecheck && bun run test
+bunx biome check .                                   # what CI's required lint job runs; `<package>/` for one package
+cd packages/<package> && bun run typecheck && bun run test
 go -C packages/daemon test ./...                     # the Legion daemon
 go -C packages/envoy test ./...                      # Envoy, Dispatch's server and the Secrets Broker
 ```

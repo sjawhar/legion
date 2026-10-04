@@ -143,7 +143,7 @@ func (a *servicePersistenceAdapter) Compact(ctx context.Context, room string) er
 	if !a.service.roomFailed(room) {
 		ctx = compactIfIdle(ctx)
 	}
-	_, err := a.store.Compact(ctx, room, 500)
+	_, err := a.store.Compact(ctx, room, compactKeep)
 	return err
 }
 
@@ -320,7 +320,7 @@ const ActorHeader = "X-Dispatch-Actor"
 
 func (s *Service) requestActor(r *http.Request) (model.Actor, error) {
 	if token, present := auth.BearerToken(r); present {
-		if !auth.MatchesSharedAgentToken(token, s.agentToken) {
+		if !auth.MatchesSharedAgentToken(r, token, s.agentTokens) {
 			return model.Actor{}, errors.New("invalid document bearer token")
 		}
 		var supplied model.Actor

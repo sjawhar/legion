@@ -189,17 +189,50 @@ export interface CredentialDenial {
  *  the launcher credential it made, and a denial is `{state: "denied"}` alone. */
 export type CredentialDecisionResponse = CredentialApproval | CredentialDenial;
 
-/** A live grant on `GET /api/v1/credential-grants?approver=me`: one the viewer approved, or one on
- *  an enrollment the viewer operates, which `approver` may name as another login. */
-export interface CredentialGrant {
+interface CredentialGrantFields {
   grant_id: string;
-  record_id: string;
   enrollment: CredentialEnrollment;
   names: string[];
-  approver: string;
   expires_at: string;
   created_at: string;
 }
+/** A grant the policy gave a session the viewer operates without asking: no one approved it, so it
+ *  has no approver and rests on no record. */
+export interface AutomaticCredentialGrant extends CredentialGrantFields {
+  granted: "automatic";
+  approver: null;
+  record_id: null;
+}
+/** A grant someone approved: `approver` names the login that did (another person's, on a session
+ *  the viewer operates), and `record_id` the record the approval rests on. */
+export interface ApprovedCredentialGrant extends CredentialGrantFields {
+  granted: "approval";
+  approver: string;
+  record_id: string;
+}
+/** A live grant on `GET /api/v1/credential-grants?approver=me`: one on a session the viewer
+ *  operates, given automatically or approved by anyone, or one the viewer approved on anyone's
+ *  session. */
+export type CredentialGrant = AutomaticCredentialGrant | ApprovedCredentialGrant;
 export interface CredentialGrantsResponse {
   grants: CredentialGrant[];
+}
+
+/** One of the machine logins the viewer approved on `GET /api/v1/machine-logins`: the launcher
+ *  credential it minted, for one of the viewer's machines or for a service, not revoked, and
+ *  either unexpired or expired with a session it started still running. */
+export interface MachineLogin {
+  credential_id: string;
+  host: string;
+  /** The service a service's login is for (`legion-daemon`), whose sessions are its worker pods;
+   *  null for the viewer's own machine. */
+  service: string | null;
+  issued_at: string;
+  expires_at: string;
+  /** True once `expires_at` has passed: the login starts no more sessions, but sessions it
+   *  started renew with their own keys and still run until they end or it is revoked. */
+  expired: boolean;
+}
+export interface MachineLoginsResponse {
+  credentials: MachineLogin[];
 }
