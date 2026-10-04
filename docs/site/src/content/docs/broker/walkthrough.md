@@ -18,25 +18,28 @@ the commands below print the Dispatch page to open.
 </video>
 
 A narrated tour of one secret request, recorded on example data: the Dispatch workspace's person is
-`alice`, the agent's machine is `example-host-build`, and the secret, `DEMO_API_KEY`, holds a
-made-up value. The steps below are the ones the video shows, with stills of each Dispatch page.
+`alice@example.com`, the agent's machine is `example-host-build`, and the secret, `DEMO_API_KEY`,
+holds a made-up value. The steps below are the ones the video shows, with stills of each Dispatch
+page.
 
 ## 1. Log the machine in, once
 
 On the agent's machine, `agent-secrets launcher login` prints a code and the address of Dispatch's
 machine-login page, `/credentials/machine`. Alice opens that page, types the code, and checks the
 record it finds: a machine login for `example-host-build`, with her as its approver. She approves
-it, and the login on the machine returns. `agent-secrets launcher login-status` checks the machine
+it, the page lists it under **Your machine logins**, where **Revoke** would end it and every session
+it started ([end a machine's login](/legion/broker/guides/revoke-a-session/#end-a-machines-login)),
+and the login on the machine returns. `agent-secrets launcher login-status` checks the machine
 login at any time: it prints `issued` while the machine holds one, and says when that login
 expires. The broker does not renew it, so before then a person must approve a new machine login.
 
-![The machine login page with a code looked up: a machine login for example-host-build, approver alice@example.com, with Approve and Deny buttons](/legion/media/broker/machine-login.png)
+![The machine login page with a code looked up: a machine login for example-host-build, approver alice@example.com, with Approve and Deny buttons, and below them Your machine logins, empty until she approves](/legion/media/broker/machine-login.png)
 
 ## 2. Start a session
 
 `agent-secrets register --wait 10 --exec -- bash` registers a session with the machine's helper,
 as an agent's session is registered when it starts, and runs a shell in it. `agent-secrets self`
-shows the session's enrollment and its operator, `alice`.
+shows the session's enrollment and its operator, `alice@example.com`.
 
 ## 3. Ask for the secret
 
@@ -46,8 +49,9 @@ The session asks for the secret to run one command, and says why:
 agent-secrets DEMO_API_KEY --reason "Publish the docs preview for PR 42 with the demo API" -- ./check-demo-key.sh
 ```
 
-The demo's rules send a request for `DEMO_API_KEY` to the machine's operator for approval, so the
-command waits, and prints the Dispatch page where the request is decided.
+`DEMO_API_KEY` is alice's own secret at the human tier (its tags are `owner=alice@example.com` and
+`tier=human`), so a request for it waits for her approval, even from her own machine: the command
+waits, and prints the Dispatch page where the request is decided.
 
 ## 4. Approve it
 
@@ -69,7 +73,7 @@ She approves it, and the page records the decision.
 
 The waiting command checks the broker every few seconds, so it carries on within a few seconds of
 the approval (10 at most): it receives `DEMO_API_KEY` in its environment and runs. The video
-shortens that wait, which took 8 seconds in the recording. The demo command prints the key's length
+shortens that wait, which took 6 seconds in the recording. The demo command prints the key's length
 and last four characters to show it arrived. `agent-secrets status <request>` names who decided the
 request.
 
