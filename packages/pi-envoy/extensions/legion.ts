@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import path from "node:path";
+import type { LegionRole } from "@legion/contracts";
 import type { LegionGrant } from "@legion/contracts/legion-api";
 import { activeDispatchConfig } from "@legion/envoy-client/dispatch-config";
 import { resolveIssueDocumentId } from "@legion/envoy-client/dispatch-execute";
@@ -279,12 +280,16 @@ const LEGION_HANDOFF_COMPLETE: PaneRule = {
     "reads as the command: pass it in a file.",
 };
 
-/** The rules each kind of Legion pane is held to, ahead of every role gate. Every issue workspace
- * shares one jj operation log, so the operation-log rule binds every phase-worker pane (a
- * sub-architect's included); the root architect's bash is already one `legion` command. */
+/** The rules a pane in an issue workspace is held to, ahead of every role gate, so that they bind
+ * a `task` subagent too: it runs in that pane, against that workspace. Every issue workspace is a
+ * jj workspace of one clone, sharing its operation log, and every tree pane -- a phase worker's, a
+ * sub-architect's, a root architect's -- has one. */
+const TREE_PANE_RULES: readonly PaneRule[] = [JJ_LOG_REWRITE, LEGION_HANDOFF_COMPLETE];
+
+/** The rules each kind of Legion pane is held to. The controller has no issue workspace. */
 const PANE_RULES: Readonly<Partial<Record<LegionSessionKind["kind"], readonly PaneRule[]>>> = {
-  "phase-worker": [JJ_LOG_REWRITE, LEGION_HANDOFF_COMPLETE],
-  "root-architect": [LEGION_HANDOFF_COMPLETE],
+  "phase-worker": TREE_PANE_RULES,
+  "root-architect": TREE_PANE_RULES,
 };
 
 /** The first thing in a `bash` command that `rule` refuses, named for the refusal, or undefined.
@@ -344,12 +349,19 @@ function paneRuleRefusal(toolCall: ToolCallEvent, rules: readonly PaneRule[]): s
 // OMP's own plugin registry.
 const LEGION_LOADED_MARKER = Symbol.for("legion.pi-envoy.legion-loaded");
 
-/** Code-mutation tools blocked for an architect session (root or sub-architect), a reviewer
- * (whose only sanctioned mutation is the final `.legion/` cleanup commit, made via `bash`), and the
- * merger (which only verifies and reports). `write` here means a real filesystem write; see
- * `isToolDeviceInvocation` for the `xd://` tool-device carve-out. `task` is deliberately absent:
- * every Legion role may launch `task` subagents. */
+/** Code-mutation tools, blocked for each role `CODE_TOOL_REFUSAL` names. `write` here means a real
+ * filesystem write; see `isToolDeviceInvocation` for the `xd://` tool-device carve-out. `task` is
+ * deliberately absent: every Legion role may launch `task` subagents. */
 const CODE_MUTATION_TOOLS = ["edit", "write", "apply_patch"];
+
+/** Why each gated role is refused a code-mutation tool. A role absent here mutates code freely;
+ * `architect` covers a root architect and a sub-architect alike, and is the one role whose `bash`
+ * is held to the same refusal (every command but a single `legion` one). */
+export const CODE_TOOL_REFUSAL: Readonly<Partial<Record<LegionRole, string>>> = {
+  architect: "the architect delegates all code work to phase workers",
+  reviewer: "the reviewer edits nothing except the final .legion/ cleanup commit via bash",
+  merger: "the merger only verifies and reports",
+};
 
 /** An `xd://` URL, its scheme in any case. */
 const TOOL_DEVICE_URL = /^xd:\/\//iu;
@@ -490,35 +502,16 @@ export default function legionExtension(pi: PiApi): void {
     const sessionID = context.sessionManager.getSessionId();
     const active = claimSession.capability(sessionID);
     // A `write` to an `xd://<tool>` path is OMP's tool-device invocation convention (e.g. the
-    // Dispatch tools), not a file mutation. Short-circuit it out of every mutation gate
-    // below so the architect/reviewer/merger role checks apply only to real file writes.
-    const isToolDevice = isToolDeviceInvocation(toolCall);
-    // `role === "architect"` covers a root architect and a sub-architect alike: both delegate all
-    // code work to phase workers.
-    if (
-      active?.role === "architect" &&
-      !isToolDevice &&
-      (CODE_MUTATION_TOOLS.includes(toolCall.toolName) ||
-        (toolCall.toolName === "bash" && !isSingleLegionCommand(toolCall.input.command)))
-    ) {
-      return { block: true, reason: "the architect delegates all code work to phase workers" };
-    }
-    if (
-      active?.role === "reviewer" &&
-      !isToolDevice &&
-      CODE_MUTATION_TOOLS.includes(toolCall.toolName)
-    ) {
-      return {
-        block: true,
-        reason: "the reviewer edits nothing except the final .legion/ cleanup commit via bash",
-      };
-    }
-    if (
-      active?.role === "merger" &&
-      !isToolDevice &&
-      CODE_MUTATION_TOOLS.includes(toolCall.toolName)
-    ) {
-      return { block: true, reason: "the merger only verifies and reports" };
+    // Dispatch tools), not a file mutation. Short-circuit it out of the mutation gate below so the
+    // architect/reviewer/merger role checks apply only to real file writes.
+    const codeToolRefusal = active === undefined ? undefined : CODE_TOOL_REFUSAL[active.role];
+    const mutatesCode =
+      CODE_MUTATION_TOOLS.includes(toolCall.toolName) ||
+      (active?.role === "architect" &&
+        toolCall.toolName === "bash" &&
+        !isSingleLegionCommand(toolCall.input.command));
+    if (codeToolRefusal !== undefined && mutatesCode && !isToolDeviceInvocation(toolCall)) {
+      return { block: true, reason: codeToolRefusal };
     }
     if (!needsGrant(toolCall)) return undefined;
     // The shared wrapper mints through the caller's client, then writes the grant to the pane's

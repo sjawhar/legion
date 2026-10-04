@@ -147,7 +147,11 @@
   `write` and `apply_patch` refusals. Both architect role prompts say an architect may dispatch
   subagents, for example to measure or investigate before the design gate opens, and the
   interactive mechanics fragment no longer tells a coordinator's subagent to dispatch none of its
-  own.
+  own. A root architect's pane now carries the operation-log rule its subagent's `bash` was
+  missing: every issue workspace, a root architect's included, is a jj workspace of one shared
+  clone, so `jj undo`/`jj op restore`/`jj abandon` there would rewrite other trees' commits too.
+  The same rule now also refuses the root architect's own `eval` and `hub` calls that spell out a
+  rewrite, which were never gated by the architect's `bash`-only rule.
 
 ### Added
 
