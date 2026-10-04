@@ -1,6 +1,6 @@
 ---
 name: dispatch
-description: "Use before posting a message, a status update, or a periodic status update; before asking a question that references another message, artifact, or eval; before asking a design question or brainstorming a change; and when asking Sami a question, updating the spec, commenting on a document, attaching an artifact, or calling a dispatch_* tool."
+description: "Use before posting a message, a status update, or a periodic status update; before asking a question that references another message, artifact, or eval; before asking a design question or brainstorming a change; and when asking the human a question, updating the spec, commenting on a document, attaching an artifact, or calling a dispatch_* tool."
 ---
 
 # Dispatch
@@ -66,7 +66,7 @@ not share this session's vocabulary, and is often on a phone. Write for that per
   has a human subject, even on a sentence you already simplified; a lead naming what a change does
   inside a system leaves the reader nothing to act on. Where the judgment rule below applies, the
   judgment leads and this rule shapes the sentence under it.
-- Before posting, test it: could Sami, reading only this text on his phone, know what he is being
+- Before posting, test it: could the human, reading only this text on their phone, know what they are being
   told or asked? If not, rewrite it. Length is not the problem; density is.
 - When an ask or message communicates a judgment, lead with that judgment in one sentence and put the mechanism underneath it. Do not make the reader ask a second time whether the result is a win. This shapes communication only when a judgment exists; it does not pre-decide an open question or remove its genuine options.
 - When a Dispatch message states a root cause, include the reproducing command or test in that same message. Without it, label the diagnosis a hypothesis; a diagnosis still in progress may say so plainly. This boundary applies to causal claims, not to reporting that an investigation has started.
@@ -229,7 +229,7 @@ Every `dispatch_ask` passes four gates first:
    internals are your lane's to decide where the work happens, in the plan or the code, not in the
    spec. A contract between two lanes is settled by those two lanes over Envoy, and you open no ask
    for it. A halt condition (a change to IAM, deletion or exposure of production data, anything
-   that reaches a customer) passes this gate: it is your own `dispatch_ask` to Sami on your own
+   that reaches a customer) passes this gate: it is your own `dispatch_ask` to the human on your own
    issue.
 2. **Is there genuine uncertainty, and have you measured what you can?** If there is none, it is
    a plan you execute. The one legitimate ask without uncertainty is permission for an action
@@ -324,7 +324,7 @@ they must read to decide belongs in the spec in the first place — see [Artifac
 
 Before saying you are waiting for human input, call `dispatch_open_asks`. With no arguments it lists this session's active asks across open issues and project documents, including whether the human or agent owes the next reply. With `dispatch_open_asks({ project })` it lists every open ask in that project — on its issues and on its documents, whoever authored them — which is how you see what a whole project is waiting on rather than just your own asks.
 
-**Unsettled product shape needs a decision before implementation.** When a page, navigation entry, table key, customer-scoping rule, or persisted sidecar would set product shape that Sami has not already settled, write a decision block in the document that records the work before the first implementation commit; in a Legion tree the architect writes it, and a phase worker sends the decision to its architect. A lane's schema decision or a contract two lanes agree does not settle product shape. This does not turn a user-specified decision or routine implementation into an approval request. A control or behaviour the human asked for in words is settled by those words, together with every choice inside it that his words do not make (where it sits, its defaults, its options): build it without a block, as gate 4 of [Before you ask](#before-you-ask) says. This rule covers only product shape outside what he asked for, and its block comes before the commit that sets that shape.
+**Unsettled product shape needs a decision before implementation.** When a page, navigation entry, table key, customer-scoping rule, or persisted sidecar would set product shape that the human has not already settled, write a decision block in the document that records the work before the first implementation commit; in a Legion tree the architect writes it, and a phase worker sends the decision to its architect. A lane's schema decision or a contract two lanes agree does not settle product shape. This does not turn a user-specified decision or routine implementation into an approval request. A control or behaviour the human asked for in words is settled by those words, together with every choice inside it that his words do not make (where it sits, its defaults, …
 
 **Anything you are blocked on a human for is visible in Dispatch.** An agent waits on a human only
 through an open ask. A to-do, permission, credential or grant renewal, setting only they can
@@ -360,7 +360,7 @@ Use `mode: "none"` with a concrete reason only when the work is genuinely non-ar
 ## Close what you opened
 
 An ask you opened is yours until it is answered or you resolve it. When the answer arrives some
-other way — Sami said it live, a later comment settled it, or the question became moot because the
+other way — the human said it live, a later comment settled it, or the question became moot because the
 design moved — resolve it yourself with `dispatch_resolve_ask` in the same turn you learn that.
 Never leave it for the human to clear.
 

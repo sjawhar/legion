@@ -66,8 +66,10 @@
 - `LegionThreadsResolveRequest` and `LegionThreadsResolveResponse`, the body and the answer of the
   Legion daemon's `POST /legion/v1/threads/resolve`, which the reviewer pane's `legion threads
   resolve` calls: the grant and the pull request it names, then each unresolved review thread's
-  outcome, exactly one of `resolved` (on whose acceptance) or `leftOpen` (why), and `refused`, the
-  thread GitHub refused to resolve and its message, when one stopped the run (LEGION-544).
+  outcome, exactly one of `resolved` (on whose acceptance) or `leftOpen` (why), `withheld`, the
+  count of threads whose newest comment is a draft in the implement App's pending review, which the
+  answer never names, and `refused`, the thread GitHub refused to resolve and its message, when one
+  stopped the run (LEGION-544).
 - `ArtifactRebuildReport`, the answer of `POST /api/v1/artifacts/{id}/rebuild`: what the rebuild
   removed, the head it wrote, the validation error the history failed with, and `source_version`,
   the version the rebuilt document holds (its latest saved version, or the version supplied

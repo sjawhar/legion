@@ -433,13 +433,6 @@ func replyThreadTarget(ctx context.Context, tx pgx.Tx, parent messageReplyParent
 	return messageTarget(rootTarget), nil
 }
 
-func urgencyValue(value *string) string {
-	if value == nil {
-		return ""
-	}
-	return *value
-}
-
 func messageIssueKey(message model.Message) string {
 	if message.IssueKey == nil {
 		return ""

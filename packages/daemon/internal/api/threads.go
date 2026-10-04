@@ -24,12 +24,15 @@ type ThreadsResolveRequest struct {
 	Number  int    `json:"number"`
 }
 
-// ThreadsResolveResponse is each unresolved review thread's outcome, in GitHub's order. When GitHub
-// refused to resolve a thread the rule closes, Refused names it and why, and Threads holds the
-// outcomes before it, the threads already resolved among them: the run stopped there.
+// ThreadsResolveResponse is each unresolved review thread's outcome, in GitHub's order, but for the
+// threads whose newest comment is a draft in the implement App's pending review, which Withheld
+// counts without naming. When GitHub refused to resolve a thread the rule closes, Refused names it
+// and why, and Threads and Withheld hold the threads before it, the ones already resolved among
+// them: the run stopped there.
 type ThreadsResolveResponse struct {
-	Threads []reviewthreads.Outcome `json:"threads"`
-	Refused *ThreadRefusal          `json:"refused,omitempty"`
+	Threads  []reviewthreads.Outcome `json:"threads"`
+	Withheld int                     `json:"withheld"`
+	Refused  *ThreadRefusal          `json:"refused,omitempty"`
 }
 
 // ThreadRefusal is the thread GitHub refused to resolve, and GitHub's message.
@@ -47,11 +50,13 @@ type ThreadRefusal struct {
 // stand passes on a re-run only once they are resolved. Every other thread is left open, its
 // outcome saying why: the daemon resolves nothing a Legion App opened (the implementer's and the
 // merger's own `legion threads resolve` close those on their opener's Accepted:), and nothing whose
-// newest comment is anything but that acceptance. Only the reviewer's grant may call it, for its
-// issue's pull request alone, and the implement App's token never leaves the daemon. Each
-// resolution is logged with the thread and whose acceptance closed it. A thread GitHub refuses to
-// resolve stops the run, and the answer names it beside the outcomes before it, so the reviewer
-// sees the threads already resolved; a read that fails before any write answers 502.
+// newest comment is anything but that acceptance. A thread whose newest comment is a draft in the
+// implement App's pending review is left open and only counted, never named: GitHub shows that
+// draft to its author alone. Only the reviewer's grant may call it, for its issue's pull request
+// alone, and the implement App's token never leaves the daemon. Each resolution is logged with the
+// thread and whose acceptance closed it. A thread GitHub refuses to resolve stops the run, and the
+// answer names it beside the outcomes and the count before it, so the reviewer sees the threads
+// already resolved; a read that fails before any write answers 502.
 func (s *server) resolveThreads(w http.ResponseWriter, r *http.Request) {
 	var req ThreadsResolveRequest
 	if !readBody(w, r, &req) || !requireFailureFields(w, field{"grantId", req.GrantID}, field{"repo", req.Repo}) {
@@ -102,29 +107,27 @@ func (s *server) resolveThreads(w http.ResponseWriter, r *http.Request) {
 			return "", string(acceptance) + ", which the implementer's or the merger's legion threads resolve closes: the daemon resolves only a bot's thread the Legion reviewer accepted"
 		})
 	// The daemon reads as the implement App, which GitHub shows the implementer's own drafts in a
-	// pending review; the reviewer is told nothing of a thread whose newest comment is one.
-	shown := outcomes[:0]
+	// pending review; the reviewer is told only how many threads hold one, never which or whose.
+	answer := ThreadsResolveResponse{Threads: outcomes[:0]}
 	for _, outcome := range outcomes {
 		if outcome.LeftOpen == reviewthreads.PendingDraft {
+			answer.Withheld++
 			continue
 		}
 		if outcome.Resolved != "" {
 			s.log.Info("api: resolved a review thread for the reviewer", "issue", grant.Issue, "pull_request", fmt.Sprintf("%s#%d", repository, req.Number),
 				"thread", outcome.URL, "by", string(outcome.Resolved))
 		}
-		shown = append(shown, outcome)
+		answer.Threads = append(answer.Threads, outcome)
 	}
-	outcomes = shown
 	var refused *reviewthreads.Refused
 	if errors.As(err, &refused) {
-		writeJSON(w, http.StatusOK, ThreadsResolveResponse{Threads: outcomes, Refused: &ThreadRefusal{URL: refused.URL, Error: refused.Err.Error()}})
-		return
-	}
-	if err != nil {
+		answer.Refused = &ThreadRefusal{URL: refused.URL, Error: refused.Err.Error()}
+	} else if err != nil {
 		writeFailure(w, http.StatusBadGateway, "THREADS_READ_FAILED", err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, ThreadsResolveResponse{Threads: outcomes})
+	writeJSON(w, http.StatusOK, answer)
 }
 
 // issuePullRequest is the pull request recorded for issue, nil when it has none.

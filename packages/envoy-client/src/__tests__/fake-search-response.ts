@@ -18,7 +18,16 @@ type SearchResponseOverrides = { readonly took_ms?: number } & (
   | SearchResultsPage
 );
 
-const PAGING_FIELDS = ["total", "reachable", "limit", "offset"] as const;
+// Every key of SearchResultsPage, named once: a field added to or renamed on SearchResultsPage
+// leaves this object literal missing (or holding an unknown) key and fails to compile until it's
+// listed here too, same as SearchResultsPageAbsentAs<V> and SearchResponseOverrides above.
+const PAGING_FIELD_MARKERS: Record<keyof SearchResultsPage, true> = {
+  total: true,
+  reachable: true,
+  limit: true,
+  offset: true,
+};
+const PAGING_FIELDS = Object.keys(PAGING_FIELD_MARKERS) as (keyof SearchResultsPage)[];
 
 /** A `dispatch_search` response body for one page of `hits`: paging fields default to a single
  * complete page (`total`/`reachable` equal to the hit count, `limit` 20, `offset` 0), overridable
