@@ -30,7 +30,6 @@ import type {
   MessageRead,
   OpenAsk,
   OpenAsksResponse,
-  SearchResult,
   WriteAdvice,
 } from "@legion/contracts";
 import {
@@ -44,9 +43,7 @@ import {
   itemFromSearch,
   overCapMessage,
   PROJECT_KEY_PATTERN,
-  SEARCH_KIND_DEPTH,
   serviceSubjectLabel,
-  snippetText,
   zodSchemaApi,
 } from "@legion/contracts";
 import { canonicalRepo } from "@legion/contracts/repo";
@@ -77,6 +74,7 @@ import {
   type OwnerTopic,
 } from "./dispatch-owner";
 import { messageFor } from "./errors";
+import { pageSummaryText, searchAnswer } from "./search-answer";
 import { formatZodIssues, ToolInputError } from "./tool-input-errors";
 
 /**
@@ -470,18 +468,6 @@ function isDuplicateCandidate(value: unknown): value is DuplicateCandidate {
 function duplicateCandidates(error: DispatchServiceError): DuplicateCandidate[] {
   if (error.candidates === undefined || !error.candidates.every(isDuplicateCandidate)) throw error;
   return error.candidates;
-}
-
-function searchResultLine(result: SearchResult, baseUrl: string): string {
-  const href = new URL(result.href, baseUrl).toString();
-  const { owner } = result;
-  if (owner.kind === "document") {
-    const reference = dispatchDocumentRef(owner.project, owner.slug);
-    return `${reference} [document] ${owner.name} - ${result.kind}: ${snippetText(result.snippet)} -> ${href}`;
-  }
-  const artifactName = result.artifact ? ` ${result.artifact.name}` : "";
-  const label = `${owner.key} [${owner.status}] ${owner.title} - ${result.kind}${artifactName}`;
-  return `${label}: ${snippetText(result.snippet)} -> ${href}`;
 }
 
 function askUrgency(args: ToolArguments): AskUrgency | undefined {
@@ -2265,65 +2251,7 @@ export async function executeDispatchTool(
         ...(limit === undefined ? {} : { limit }),
         ...(offset === undefined ? {} : { offset }),
       });
-      const results = search.results;
-      const count = results.length;
-      const lines = results.map((result) => searchResultLine(result, configUrl));
-      const noun = count === 1 ? "result" : "results";
-      // A Dispatch from before search paging answers no total and serves its first page whatever
-      // the offset, so a later page from it would silently repeat the first.
-      if (typeof search.total !== "number") {
-        if (offset !== undefined && offset > 0) {
-          throw new Error(
-            `Dispatch answered without a total: it predates search paging and ignored offset ${offset}, so this would be its first page again.`
-          );
-        }
-        return {
-          text:
-            count === 0
-              ? `No results for "${query}".`
-              : [`${count} ${noun} for "${query}" (${search.took_ms} ms)`, ...lines].join("\n"),
-          details: { query, results },
-        };
-      }
-      const { total, reachable } = search;
-      const end = search.offset + count;
-      const cut =
-        reachable < total
-          ? `Each kind lists only its best ${SEARCH_KIND_DEPTH} matches, so ${reachable} of the ${total} can be paged to; narrow the query or name a project to reach the rest.`
-          : undefined;
-      const details = {
-        query,
-        results,
-        total,
-        reachable,
-        offset: search.offset,
-        limit: search.limit,
-      };
-      if (count === 0) {
-        return {
-          text:
-            total === 0
-              ? `No results for "${query}".`
-              : [
-                  `No results for "${query}" at offset ${search.offset}: it matches ${total}, and the pages reach the first ${reachable}.`,
-                  ...(cut === undefined ? [] : [cut]),
-                ].join("\n"),
-          details,
-        };
-      }
-      const showing =
-        search.offset === 0 && count === total
-          ? ""
-          : `showing ${search.offset + 1}-${end} of ${total}, `;
-      return {
-        text: [
-          `${count} ${noun} for "${query}" (${showing}${search.took_ms} ms)`,
-          ...(cut === undefined ? [] : [cut]),
-          ...lines,
-          ...(end < reachable ? [`Next page: offset ${end}.`] : []),
-        ].join("\n"),
-        details,
-      };
+      return searchAnswer(search, query, offset, configUrl);
     }
     case "dispatch_issues": {
       const project = stringArg(args, "project");
@@ -2375,7 +2303,7 @@ export async function executeDispatchTool(
         ? ""
         : rows.length === 0
           ? `showing 0-0 of ${total}`
-          : `showing ${offset + 1}-${offset + rows.length} of ${total}`;
+          : pageSummaryText(offset, rows.length, total);
       return {
         text:
           rows.length === 0

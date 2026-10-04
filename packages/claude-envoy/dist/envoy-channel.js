@@ -36977,7 +36977,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_search",
     example: { query: "astrolabe" },
-    description: "Search every issue, document, comment, ask, and message for a keyword or phrase and get deep links. " + "Use it before creating an issue or a design document, and to find where a word was written. " + 'Websearch syntax: "quoted phrase", -excluded, OR. ' + "Each kind of content is ranked on its own and the lists are merged, so the top holds the best " + "issue, document, ask, comment and message; an issue key searched alone lists that issue first. " + `The answer names how many results match; offset pages through them, and each kind lists at most its best ${SEARCH_KIND_DEPTH}, ` + "so narrow the query or name a project to reach the rest.",
+    description: "Search every issue, document, comment, ask, and message for a keyword or phrase and get deep links. " + "Use it before creating an issue or a design document, and to find where a word was written. " + 'Websearch syntax: "quoted phrase", -excluded, OR. ' + "Each kind of content is ranked on its own and the lists are merged, so the top holds the best " + "issue, document, ask, comment and message; an issue key searched alone lists that issue first. " + `The answer names how many results match; offset pages through them, and each kind lists at most its best ${SEARCH_KIND_DEPTH}, ` + "so narrow the query or name a project to reach the rest. Paging is exact only while the " + "corpus holds still: content added, changed, or removed between two offsets can shift rows " + "across a page boundary, so one hit can come back twice and another never.",
     arguments: (z2) => ({
       query: z2.string({
         min: 2,
@@ -39035,6 +39035,74 @@ class DispatchClient {
   }
 }
 
+// ../envoy-client/src/search-answer.ts
+function pageSummaryText(offset, count, total) {
+  return `showing ${offset + 1}-${offset + count} of ${total}`;
+}
+function searchResultLine(result, baseUrl) {
+  const href = new URL(result.href, baseUrl).toString();
+  const { owner } = result;
+  if (owner.kind === "document") {
+    const reference = dispatchDocumentRef(owner.project, owner.slug);
+    return `${reference} [document] ${owner.name} - ${result.kind}: ${snippetText(result.snippet)} -> ${href}`;
+  }
+  const artifactName = result.artifact ? ` ${result.artifact.name}` : "";
+  const label = `${owner.key} [${owner.status}] ${owner.title} - ${result.kind}${artifactName}`;
+  return `${label}: ${snippetText(result.snippet)} -> ${href}`;
+}
+function searchAnswer(search, query, offset, configUrl) {
+  const results = search.results;
+  const count = results.length;
+  const lines = results.map((result) => searchResultLine(result, configUrl));
+  const noun = count === 1 ? "result" : "results";
+  const noResults = `No results for "${query}".`;
+  if (typeof search.total !== "number") {
+    if (offset !== undefined && offset > 0) {
+      throw new Error(`Dispatch answered without a total: it predates search paging and ignored offset ${offset}, so this would be its first page again.`);
+    }
+    return {
+      text: count === 0 ? noResults : [`${count} ${noun} for "${query}" (${search.took_ms} ms)`, ...lines].join(`
+`),
+      details: { query, results }
+    };
+  }
+  const { total, reachable, offset: pageOffset } = search;
+  if (reachable === undefined || pageOffset === undefined) {
+    throw new Error("Dispatch answered a total without reachable or offset.");
+  }
+  const end = pageOffset + count;
+  const cut = reachable < total ? `Each kind lists only its best ${SEARCH_KIND_DEPTH} matches, so ${reachable} of the ${total} can be paged to; narrow the query or name a project to reach the rest.` : undefined;
+  const details = {
+    query,
+    results,
+    total,
+    reachable,
+    offset: pageOffset,
+    limit: search.limit
+  };
+  if (count === 0) {
+    return {
+      text: total === 0 ? noResults : [
+        `No results for "${query}" at offset ${pageOffset}: it matches ${total}, and the pages reach the first ${reachable}.`,
+        ...cut === undefined ? [] : [cut]
+      ].join(`
+`),
+      details
+    };
+  }
+  const showing = pageOffset === 0 && count === total ? "" : `${pageSummaryText(pageOffset, count, total)}, `;
+  return {
+    text: [
+      `${count} ${noun} for "${query}" (${showing}${search.took_ms} ms)`,
+      ...cut === undefined ? [] : [cut],
+      ...lines,
+      ...end < reachable ? [`Next page: offset ${end}.`] : []
+    ].join(`
+`),
+    details
+  };
+}
+
 // ../envoy-client/src/tool-input-errors.ts
 class ToolInputError extends Error {
   tool;
@@ -39343,17 +39411,6 @@ function duplicateCandidates(error48) {
   if (error48.candidates === undefined || !error48.candidates.every(isDuplicateCandidate))
     throw error48;
   return error48.candidates;
-}
-function searchResultLine(result, baseUrl) {
-  const href = new URL(result.href, baseUrl).toString();
-  const { owner } = result;
-  if (owner.kind === "document") {
-    const reference = dispatchDocumentRef(owner.project, owner.slug);
-    return `${reference} [document] ${owner.name} - ${result.kind}: ${snippetText(result.snippet)} -> ${href}`;
-  }
-  const artifactName = result.artifact ? ` ${result.artifact.name}` : "";
-  const label = `${owner.key} [${owner.status}] ${owner.title} - ${result.kind}${artifactName}`;
-  return `${label}: ${snippetText(result.snippet)} -> ${href}`;
 }
 function askUrgency(args) {
   const value = args.urgency;
@@ -40544,52 +40601,7 @@ async function executeDispatchTool(input) {
         ...limit === undefined ? {} : { limit },
         ...offset === undefined ? {} : { offset }
       });
-      const results = search.results;
-      const count = results.length;
-      const lines = results.map((result) => searchResultLine(result, configUrl));
-      const noun = count === 1 ? "result" : "results";
-      if (typeof search.total !== "number") {
-        if (offset !== undefined && offset > 0) {
-          throw new Error(`Dispatch answered without a total: it predates search paging and ignored offset ${offset}, so this would be its first page again.`);
-        }
-        return {
-          text: count === 0 ? `No results for "${query}".` : [`${count} ${noun} for "${query}" (${search.took_ms} ms)`, ...lines].join(`
-`),
-          details: { query, results }
-        };
-      }
-      const { total, reachable } = search;
-      const end = search.offset + count;
-      const cut = reachable < total ? `Each kind lists only its best ${SEARCH_KIND_DEPTH} matches, so ${reachable} of the ${total} can be paged to; narrow the query or name a project to reach the rest.` : undefined;
-      const details = {
-        query,
-        results,
-        total,
-        reachable,
-        offset: search.offset,
-        limit: search.limit
-      };
-      if (count === 0) {
-        return {
-          text: total === 0 ? `No results for "${query}".` : [
-            `No results for "${query}" at offset ${search.offset}: it matches ${total}, and the pages reach the first ${reachable}.`,
-            ...cut === undefined ? [] : [cut]
-          ].join(`
-`),
-          details
-        };
-      }
-      const showing = search.offset === 0 && count === total ? "" : `showing ${search.offset + 1}-${end} of ${total}, `;
-      return {
-        text: [
-          `${count} ${noun} for "${query}" (${showing}${search.took_ms} ms)`,
-          ...cut === undefined ? [] : [cut],
-          ...lines,
-          ...end < reachable ? [`Next page: offset ${end}.`] : []
-        ].join(`
-`),
-        details
-      };
+      return searchAnswer(search, query, offset, configUrl);
     }
     case "dispatch_issues": {
       const project = stringArg(args, "project");
@@ -40628,7 +40640,7 @@ async function executeDispatchTool(input) {
       }));
       const titles = await liveSessionTitles(client, rows.some((row) => holdsSession(row.claim)));
       const isPartial = offset !== 0 || rows.length !== total;
-      const showing = !isPartial ? "" : rows.length === 0 ? `showing 0-0 of ${total}` : `showing ${offset + 1}-${offset + rows.length} of ${total}`;
+      const showing = !isPartial ? "" : rows.length === 0 ? `showing 0-0 of ${total}` : pageSummaryText(offset, rows.length, total);
       return {
         text: rows.length === 0 ? `No issues in ${project}.${isPartial ? ` (${showing})` : ""}` : [
           `${rows.length} ${rows.length === 1 ? "issue" : "issues"} in ${project}` + (isPartial ? ` (${showing})` : ""),
