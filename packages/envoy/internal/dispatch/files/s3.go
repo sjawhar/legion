@@ -23,19 +23,13 @@ import (
 // that answers late is as bad as one that never answers.
 const healthTimeout = 2 * time.Second
 
-// s3API is the slice of the S3 client the store uses, so a test can stand the client in.
-type s3API interface {
-	HeadBucket(ctx context.Context, in *s3.HeadBucketInput, opts ...func(*s3.Options)) (*s3.HeadBucketOutput, error)
-	HeadObject(ctx context.Context, in *s3.HeadObjectInput, opts ...func(*s3.Options)) (*s3.HeadObjectOutput, error)
-	PutObject(ctx context.Context, in *s3.PutObjectInput, opts ...func(*s3.Options)) (*s3.PutObjectOutput, error)
-	GetObject(ctx context.Context, in *s3.GetObjectInput, opts ...func(*s3.Options)) (*s3.GetObjectOutput, error)
-}
-
 // S3 is a Store over one bucket.
 type S3 struct {
-	client s3API
+	client *s3.Client
 	bucket string
 }
+
+var _ Store = (*S3)(nil)
 
 // NewS3 stores files in bucket with the AWS SDK's default credential chain. Loading the
 // configuration reads only the environment and the shared config files; credentials are fetched
@@ -46,12 +40,6 @@ func NewS3(ctx context.Context, bucket string) (*S3, error) {
 		return nil, fmt.Errorf("load AWS configuration for the file store: %w", err)
 	}
 	return &S3{client: s3.NewFromConfig(cfg), bucket: bucket}, nil
-}
-
-// NewS3WithClient is NewS3 over a client the caller built: a test's stand-in, or a client pointed
-// at an S3-compatible server.
-func NewS3WithClient(client *s3.Client, bucket string) *S3 {
-	return &S3{client: client, bucket: bucket}
 }
 
 // logSDK hands the AWS SDK's log lines to slog, so they are structured like Dispatch's own and its
@@ -103,7 +91,7 @@ func (s *S3) Get(ctx context.Context, sha string) ([]byte, error) {
 	object, err := s.client.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(s.bucket), Key: aws.String(Key(sha))})
 	if err != nil {
 		if isNotFound(err) {
-			return nil, ErrNotFound
+			return nil, fmt.Errorf("get file %s: %w", sha, ErrNotFound)
 		}
 		return nil, fmt.Errorf("get file %s: %w", sha, err)
 	}

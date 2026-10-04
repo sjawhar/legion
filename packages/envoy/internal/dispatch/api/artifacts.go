@@ -23,6 +23,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/files"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
@@ -30,7 +31,9 @@ import (
 )
 
 const (
-	maxArtifactBlobSize      = 25 << 20
+	// maxArtifactBlobSize is the file store's own bound, so an upload this route takes is one
+	// the store accepts and serves back.
+	maxArtifactBlobSize      = files.MaxObjectSize
 	maxDocumentMarkdownBytes = pmdoc.MaxDocumentBytes // A Markdown document, and what a write may grow one to (docs' refuseGrowth); maxJSONRequestBytes bounds an issue's spec and every edit the same way (LEGION-465).
 )
 
@@ -272,6 +275,22 @@ func (s *server) storeArtifact(
 	kind string,
 	target artifactTarget,
 ) {
+	checksum := sha256.Sum256(input.content)
+	sha := hex.EncodeToString(checksum[:])
+	// With a store, a file's object is written before the transaction opens: the bytes (up to
+	// maxArtifactBlobSize) cross the network to a store whose wait nothing here bounds, and the
+	// transaction below takes a pooled connection and the owner's row lock, which every other
+	// writer of that issue queues behind. A store that refuses leaves no row behind; anything that
+	// refuses after it (a closed issue, a kind mismatch, a failed insert) leaves an object no row
+	// names, which a later upload of the same bytes reuses. The row records the hash the object is
+	// keyed by and no bytes.
+	if kind != "doc" && s.deps.Files != nil {
+		if err := s.deps.Files.Put(r.Context(), sha, input.contentType, input.content); err != nil {
+			slog.Error("dispatch: store an uploaded file", "sha256", sha, "size", len(input.content), "error", err)
+			writeError(w, "FILE_STORE_UNAVAILABLE", http.StatusBadGateway, "the file store did not accept the upload")
+			return
+		}
+	}
 	tx, err := s.begin(r.Context())
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -360,8 +379,6 @@ func (s *server) storeArtifact(
 	}
 	var version model.Version
 	var versionAuthors []byte
-	checksum := sha256.Sum256(input.content)
-	sha := hex.EncodeToString(checksum[:])
 	var summaryValue any
 	if input.summary != "" {
 		summaryValue = input.summary
@@ -398,16 +415,8 @@ func (s *server) storeArtifact(
 		}
 	} else {
 		size := len(input.content)
-		// With a store, the object goes first: a store that refuses leaves no row behind, and a
-		// row insert that then fails leaves an object no row names, which a later upload of the
-		// same bytes reuses. The row records the hash the object is keyed by and no bytes.
 		content := input.content
 		if s.deps.Files != nil {
-			if err := s.deps.Files.Put(r.Context(), sha, input.contentType, input.content); err != nil {
-				slog.Error("dispatch: store an uploaded file", "sha256", sha, "size", size, "error", err)
-				writeError(w, "FILE_STORE_UNAVAILABLE", http.StatusBadGateway, "the file store did not accept the upload")
-				return
-			}
 			content = nil
 		}
 		if err := tx.QueryRow(r.Context(), `

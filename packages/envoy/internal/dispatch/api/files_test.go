@@ -4,10 +4,15 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"mime/multipart"
 	"net/http"
+	"net/http/httptest"
+	"net/textproto"
+	"sync"
 	"testing"
 
 	"github.com/sjawhar/envoy/internal/dispatch/files"
+	"github.com/sjawhar/envoy/internal/dispatch/files/filestest"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
@@ -52,7 +57,7 @@ func versionRow(t *testing.T, database *store.Store, artifactID string, number i
 }
 
 func TestUploadsGoToTheFileStoreAndAreServedFromIt(t *testing.T) {
-	memory := files.NewMemory()
+	memory := filestest.NewMemory()
 	handler, database, _ := newTestServer(t, testServerOptions{files: memory})
 	issue := fileIssue(t, handler)
 	image := bytes.Repeat([]byte{0x89, 'P', 'N', 'G'}, 4096)
@@ -78,8 +83,12 @@ func TestUploadsGoToTheFileStoreAndAreServedFromIt(t *testing.T) {
 	if second.Code != http.StatusCreated {
 		t.Fatalf("second upload: status=%d body=%s", second.Code, second.Body.String())
 	}
-	if memory.Len() != 1 || memory.Puts() != 1 {
-		t.Fatalf("after a duplicate upload the store holds %d objects from %d writes, want 1 and 1", memory.Len(), memory.Puts())
+	duplicate := decodeBody[uploaded](t, second)
+	if duplicate.Version.Number != 2 || duplicate.Version.SHA256 != sha {
+		t.Fatalf("second version = %+v, want version 2 under sha %s", duplicate.Version, sha)
+	}
+	if row := versionRow(t, database, version.Artifact.ID, 2); row != nil {
+		t.Fatalf("the second row holds %d bytes; with a store it should hold none", len(row))
 	}
 
 	// The version route answers from the store with the headers it always sent.
@@ -98,8 +107,8 @@ func TestUploadsGoToTheFileStoreAndAreServedFromIt(t *testing.T) {
 }
 
 func TestAnUploadTheStoreRefusesLeavesNoVersionBehind(t *testing.T) {
-	memory := files.NewMemory()
-	memory.Fail = errors.New("bucket unreachable")
+	memory := filestest.NewMemory()
+	memory.SetFailure(errors.New("bucket unreachable"))
 	handler, database, _ := newTestServer(t, testServerOptions{files: memory})
 	issue := fileIssue(t, handler)
 
@@ -107,9 +116,7 @@ func TestAnUploadTheStoreRefusesLeavesNoVersionBehind(t *testing.T) {
 	if response.Code != http.StatusBadGateway {
 		t.Fatalf("upload against a failing store: status=%d body=%s", response.Code, response.Body.String())
 	}
-	if code := decodeBody[struct {
-		Code string `json:"code"`
-	}](t, response).Code; code != "FILE_STORE_UNAVAILABLE" {
+	if code := responseCode(t, response); code != "FILE_STORE_UNAVAILABLE" {
 		t.Fatalf("error code = %q, want FILE_STORE_UNAVAILABLE", code)
 	}
 	var artifacts int
@@ -135,7 +142,7 @@ func TestARowStillHoldingItsBytesIsServedFromTheRow(t *testing.T) {
 		t.Fatal("an upload with no store left no bytes in the row")
 	}
 
-	memory := files.NewMemory()
+	memory := filestest.NewMemory()
 	deps, err := NewDeps(DepsInput{
 		Store: database, Identity: headerIdentity(database), AgentTokens: sharedAgentTokens(t, "agent-token"),
 		ServerURL: "https://dispatch.example", Files: memory,
@@ -155,7 +162,7 @@ func TestARowStillHoldingItsBytesIsServedFromTheRow(t *testing.T) {
 }
 
 func TestAClearedRowWhoseObjectIsMissingAnswers502(t *testing.T) {
-	memory := files.NewMemory()
+	memory := filestest.NewMemory()
 	handler, database, _ := newTestServer(t, testServerOptions{files: memory})
 	issue := fileIssue(t, handler)
 	response := multipartRequest(t, handler, "/api/v1/issues/"+issue+"/artifacts", map[string]string{"name": "gone.bin"}, "gone.bin", "application/octet-stream", []byte("gone bytes"), "alice")
@@ -166,8 +173,8 @@ func TestAClearedRowWhoseObjectIsMissingAnswers502(t *testing.T) {
 	memory.Delete(version.Version.SHA256)
 
 	served := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+version.Artifact.ID+"/versions/1", nil, "alice")
-	if served.Code != http.StatusBadGateway {
-		t.Fatalf("serve a version whose object is gone: status=%d body=%s", served.Code, served.Body.String())
+	if served.Code != http.StatusBadGateway || responseCode(t, served) != "FILE_STORE_UNAVAILABLE" {
+		t.Fatalf("serve a version whose object is gone: status=%d body=%s, want 502 FILE_STORE_UNAVAILABLE", served.Code, served.Body.String())
 	}
 	if served.Header().Get("Content-Disposition") != "" || served.Header().Get("ETag") != "" {
 		t.Fatalf("a failed read sent the success headers: %v", served.Header())
@@ -184,7 +191,82 @@ func TestAClearedRowWhoseObjectIsMissingAnswers502(t *testing.T) {
 	withoutStore := http.NewServeMux()
 	Register(withoutStore, noStore)
 	unconfigured := dispatchRequest(t, withoutStore, http.MethodGet, "/api/v1/artifacts/"+version.Artifact.ID+"/versions/1", nil, "alice")
-	if unconfigured.Code != http.StatusServiceUnavailable {
-		t.Fatalf("serve a cleared row with no store: status=%d body=%s", unconfigured.Code, unconfigured.Body.String())
+	if unconfigured.Code != http.StatusServiceUnavailable || responseCode(t, unconfigured) != "FILE_STORE_UNAVAILABLE" {
+		t.Fatalf("serve a cleared row with no store: status=%d body=%s, want 503 FILE_STORE_UNAVAILABLE", unconfigured.Code, unconfigured.Body.String())
+	}
+}
+
+// heldPut is a store whose Put waits until the test releases it, so a test can look at the
+// database while an upload's bytes are on their way to the store.
+type heldPut struct {
+	*filestest.Memory
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (h heldPut) Put(ctx context.Context, sha, mime string, body []byte) error {
+	close(h.entered)
+	<-h.release
+	return h.Memory.Put(ctx, sha, mime, body)
+}
+
+// An upload writes its object before its transaction opens, so while the store takes the bytes
+// the issue's row is free: the transaction locks it for no key update, and every other writer
+// of the issue (a comment, an ask, a status change) would queue behind a store write nothing
+// bounds.
+func TestAnUploadHoldsNoIssueLockWhileTheStoreWrites(t *testing.T) {
+	held := heldPut{Memory: filestest.NewMemory(), entered: make(chan struct{}), release: make(chan struct{})}
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(held.release) }) }
+	handler, database, _ := newTestServer(t, testServerOptions{files: held})
+	issue := fileIssue(t, handler)
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	if err := writer.WriteField("name", "held.bin"); err != nil {
+		t.Fatalf("write name field: %v", err)
+	}
+	part, err := writer.CreatePart(textproto.MIMEHeader{
+		"Content-Disposition": {`form-data; name="file"; filename="held.bin"`},
+		"Content-Type":        {"application/octet-stream"},
+	})
+	if err != nil {
+		t.Fatalf("create file part: %v", err)
+	}
+	if _, err := part.Write([]byte("held bytes")); err != nil {
+		t.Fatalf("write file part: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("finish multipart body: %v", err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/issues/"+issue+"/artifacts", &body)
+	request.Header.Set("Content-Type", writer.FormDataContentType())
+	request.Header.Set("X-Dispatch-User", "alice")
+	uploaded := make(chan *httptest.ResponseRecorder, 1)
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		uploaded <- response
+	}()
+	// Registered after the server's own cleanups, so it runs before them: a failure below must
+	// not leave the upload parked in Put while the server's shutdown waits for it.
+	t.Cleanup(func() {
+		release()
+		<-finished
+	})
+
+	select {
+	case <-held.entered:
+	case response := <-uploaded:
+		t.Fatalf("the upload answered without writing to the store: status=%d body=%s", response.Code, response.Body.String())
+	}
+	if _, err := database.Pool.Exec(context.Background(), `select key from issues where key = $1 for no key update nowait`, issue); err != nil {
+		t.Fatalf("lock the issue while its upload's bytes are in flight: %v", err)
+	}
+	release()
+	if response := <-uploaded; response.Code != http.StatusCreated {
+		t.Fatalf("upload: status=%d body=%s", response.Code, response.Body.String())
 	}
 }

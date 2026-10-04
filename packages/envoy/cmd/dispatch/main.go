@@ -737,12 +737,16 @@ func parsePositiveInt(raw string) (int, error) {
 
 // openFileStore is the uploaded-file store boot names, or nil when DISPATCH_FILE_STORE_BUCKET is
 // unset, which keeps every file in Postgres. A nil interface, never a typed nil, so every caller's
-// nil check reads the setting.
+// nil check reads the setting: NewS3's (*S3)(nil) on failure is not passed through as a Store.
 func openFileStore(ctx context.Context, boot bootConfig) (files.Store, error) {
 	if boot.FileStoreBucket == "" {
 		return nil, nil
 	}
-	return files.NewS3(ctx, boot.FileStoreBucket)
+	bucketStore, err := files.NewS3(ctx, boot.FileStoreBucket)
+	if err != nil {
+		return nil, err
+	}
+	return bucketStore, nil
 }
 
 // dispatchHandler mounts the one /healthz the process serves above every dashboard and API
@@ -759,7 +763,9 @@ func dispatchHandler(handler http.Handler, database *store.Store, natsClient *bu
 // health pool's own connection, NATS is connected where it is configured, and the file store's
 // bucket answers where one is configured. Nothing here waits on the shared pool, and each probe
 // bounds its own wait (store.healthProbeTimeout, files.healthTimeout), which records why a probe
-// that answers late is as bad as one that never answers.
+// that answers late is as bad as one that never answers. The database and file-store probes run
+// side by side: each takes up to two seconds, and one after the other they would take four, past
+// the three-second prober (the compose healthcheck and the deploy script).
 //
 // Beside those it reports what is deployed: `commit`, the legion commit the binary was built
 // from (null when the build did not stamp one), and `schema_version`, the highest migration
@@ -772,6 +778,21 @@ func healthzHandler(database *store.Store, natsClient *bus.Client, fileStore fil
 		reportedCommit = &commit
 	}
 	return func(w http.ResponseWriter, req *http.Request) {
+		var filesOK *bool
+		filesProbed := make(chan struct{})
+		if fileStore != nil {
+			go func() {
+				defer close(filesProbed)
+				reachable := true
+				if err := fileStore.Healthy(req.Context()); err != nil {
+					slog.Warn("dispatch: file store probe failed", "error", err)
+					reachable = false
+				}
+				filesOK = &reachable
+			}()
+		} else {
+			close(filesProbed)
+		}
 		databaseOK := database != nil && database.Pool != nil
 		var schemaVersion *int
 		if databaseOK {
@@ -792,15 +813,7 @@ func healthzHandler(database *store.Store, natsClient *bus.Client, fileStore fil
 			connected := natsClient.Connected()
 			natsOK = &connected
 		}
-		var filesOK *bool
-		if fileStore != nil {
-			reachable := true
-			if err := fileStore.Healthy(req.Context()); err != nil {
-				slog.Warn("dispatch: file store probe failed", "error", err)
-				reachable = false
-			}
-			filesOK = &reachable
-		}
+		<-filesProbed
 		ok := databaseOK && (natsOK == nil || *natsOK) && (filesOK == nil || *filesOK)
 		status := http.StatusOK
 		if !ok {

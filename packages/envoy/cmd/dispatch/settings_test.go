@@ -1051,12 +1051,18 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			}
 		},
 		"DISPATCH_FILE_STORE_BUCKET": func(t *testing.T) {
-			if boot := resolveWith(t, map[string]string{"DISPATCH_FILE_STORE_BUCKET": " dispatch-files "}); boot.FileStoreBucket != "dispatch-files" {
+			if boot := resolveWith(t, map[string]string{"DISPATCH_FILE_STORE_BUCKET": " example-files-bucket "}); boot.FileStoreBucket != "example-files-bucket" {
 				t.Errorf("FileStoreBucket = %q, want the trimmed bucket name", boot.FileStoreBucket)
 			}
 			// Unset, the store is a nil interface: every upload keeps its bytes in Postgres.
 			if store, err := openFileStore(context.Background(), resolveWith(t, map[string]string{"DISPATCH_FILE_STORE_BUCKET": ""})); err != nil || store != nil {
 				t.Errorf("openFileStore with no bucket = %v, %v, want nil, nil", store, err)
+			}
+			// backfill-files reads it too, trimmed, and refuses to run without it before it opens the
+			// database.
+			var stdout, stderr bytes.Buffer
+			if code := runSubcommand(context.Background(), []string{"backfill-files"}, envGetter(map[string]string{"DISPATCH_FILE_STORE_BUCKET": " "}), &stdout, &stderr); code != 1 || !strings.Contains(stdout.String()+stderr.String(), "DISPATCH_FILE_STORE_BUCKET") {
+				t.Errorf("backfill-files with no bucket: exit %d, output %q, want a refusal naming DISPATCH_FILE_STORE_BUCKET", code, stdout.String()+stderr.String())
 			}
 		},
 		"DISPATCH_DEV_SIGNIN": func(t *testing.T) {

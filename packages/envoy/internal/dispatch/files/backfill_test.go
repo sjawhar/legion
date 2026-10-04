@@ -1,4 +1,4 @@
-package files
+package files_test
 
 import (
 	"bytes"
@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sjawhar/envoy/internal/dispatch/files"
+	"github.com/sjawhar/envoy/internal/dispatch/files/filestest"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
@@ -41,7 +43,7 @@ func seedFileVersion(t *testing.T, database *store.Store, slug string, body []by
 		insert into artifact_versions (artifact_id, number, content, mime, size, sha256)
 		values ($1, 1, $2, 'application/octet-stream', $3, $4)
 		returning id::text
-	`, artifactID, body, len(body), SHA256(body)).Scan(&id); err != nil {
+	`, artifactID, body, len(body), files.SHA256(body)).Scan(&id); err != nil {
 		t.Fatalf("seed version: %v", err)
 	}
 	return id
@@ -57,65 +59,83 @@ func rowBytes(t *testing.T, database *store.Store, id string) []byte {
 	return content
 }
 
-func TestBackfillMovesEachRowOnceAndLeavesTheRestUntouchedWhenTheStoreFails(t *testing.T) {
+// refusing is a store that refuses to write one hash and passes every other call on: a bucket
+// that fails partway through a run.
+type refusing struct {
+	files.Store
+	sha string
+}
+
+func (r refusing) Put(ctx context.Context, sha, mime string, body []byte) error {
+	if sha == r.sha {
+		return errors.New("bucket refused the write")
+	}
+	return r.Store.Put(ctx, sha, mime, body)
+}
+
+func TestBackfillMovesEachRowOnceAndResumesWhereAFailedRunStopped(t *testing.T) {
 	database := storetest.Open(t)
 	ctx := context.Background()
-	first := seedFileVersion(t, database, "first", bytes.Repeat([]byte("a"), 1000))
-	second := seedFileVersion(t, database, "second", bytes.Repeat([]byte("b"), 2000))
+	firstBody, secondBody := bytes.Repeat([]byte("a"), 1000), bytes.Repeat([]byte("b"), 2000)
+	first := seedFileVersion(t, database, "first", firstBody)
+	second := seedFileVersion(t, database, "second", secondBody)
+	// Oldest first: the first row is the one a run moves before it reaches the second.
+	if _, err := database.Pool.Exec(ctx, `update artifact_versions set created_at = created_at - interval '1 hour' where id = $1`, first); err != nil {
+		t.Fatalf("age the first row: %v", err)
+	}
 	// A document version holds markdown and no bytes; it is never a candidate.
 	if _, err := database.Pool.Exec(ctx, `
-		insert into artifacts (issue_key, project_key, slug, name, kind, created_by)
-		values ('FILES-1', 'FILES', 'notes', 'notes.md', 'doc', '{"kind":"user","id":"alice"}')
+		with doc as (
+			insert into artifacts (issue_key, project_key, slug, name, kind, created_by)
+			values ('FILES-1', 'FILES', 'notes', 'notes.md', 'doc', '{"kind":"user","id":"alice"}')
+			returning id
+		)
+		insert into artifact_versions (artifact_id, number, markdown) select id, 1, '# Notes' from doc
 	`); err != nil {
 		t.Fatalf("seed document: %v", err)
 	}
-	memory := NewMemory()
+	memory := filestest.NewMemory()
 
-	// The store refuses before anything moves: both rows keep their bytes.
-	memory.Fail = errors.New("bucket unreachable")
+	// The bucket refuses the second row: the run stops there with the first row moved and the
+	// second still holding its bytes, which the server keeps serving.
 	var out strings.Builder
-	report, err := BackfillRows(ctx, database.Pool, memory, &out)
-	if err == nil || !strings.Contains(err.Error(), "bucket unreachable") {
-		t.Fatalf("BackfillRows against a failing store: report %+v, err %v", report, err)
+	report, err := files.BackfillRows(ctx, database.Pool, refusing{Store: memory, sha: files.SHA256(secondBody)}, &out)
+	if err == nil || !strings.Contains(err.Error(), second) {
+		t.Fatalf("BackfillRows against a bucket refusing the second row: report %+v, err %v, want an error naming %s", report, err, second)
 	}
-	if report.Moved != 0 || rowBytes(t, database, first) == nil || rowBytes(t, database, second) == nil {
-		t.Fatalf("a failing store moved rows: report %+v", report)
+	if report.Moved != 1 || rowBytes(t, database, first) != nil || rowBytes(t, database, second) == nil {
+		t.Fatalf("a run stopped at the second row: report %+v, want the first row moved and the second untouched", report)
 	}
 
-	memory.Fail = nil
-	report, err = BackfillRows(ctx, database.Pool, memory, &out)
+	// The next run picks up at the second row and moves only it.
+	report, err = files.BackfillRows(ctx, database.Pool, memory, &out)
 	if err != nil {
 		t.Fatalf("BackfillRows: %v", err)
 	}
-	if report.Moved != 2 || report.Bytes != 3000 {
-		t.Fatalf("report = %+v, want 2 rows and 3000 bytes", report)
+	if report.Moved != 1 || report.Bytes != int64(len(secondBody)) {
+		t.Fatalf("resumed run: report %+v, want the second row's %d bytes alone", report, len(secondBody))
 	}
-	if rowBytes(t, database, first) != nil || rowBytes(t, database, second) != nil {
-		t.Fatal("moved rows still hold their bytes")
+	if rowBytes(t, database, second) != nil {
+		t.Fatal("the resumed run left the second row's bytes")
 	}
-	if memory.Len() != 2 {
-		t.Fatalf("store holds %d objects, want 2", memory.Len())
+	for _, body := range [][]byte{firstBody, secondBody} {
+		if got, err := memory.Get(ctx, files.SHA256(body)); err != nil || !bytes.Equal(got, body) {
+			t.Fatalf("the store holds %d bytes for a moved file (%v), want its %d bytes", len(got), err, len(body))
+		}
 	}
-	got, err := memory.Get(ctx, SHA256(bytes.Repeat([]byte("a"), 1000)))
-	if err != nil || len(got) != 1000 {
-		t.Fatalf("the first file in the store: %d bytes, %v", len(got), err)
-	}
-	if !strings.Contains(out.String(), "moved version "+first) {
-		t.Errorf("progress output names no moved version:\n%s", out.String())
+	if !strings.Contains(out.String(), "moved version "+first) || !strings.Contains(out.String(), "moved version "+second) {
+		t.Errorf("progress output does not name both moved versions:\n%s", out.String())
 	}
 
-	// A second pass finds nothing to move and changes nothing.
-	report, err = BackfillRows(ctx, database.Pool, memory, &out)
+	// A third run finds nothing to move.
+	report, err = files.BackfillRows(ctx, database.Pool, memory, &out)
 	if err != nil || report.Moved != 0 {
-		t.Fatalf("second pass: report %+v, err %v", report, err)
-	}
-	if memory.Puts() != 2 {
-		t.Errorf("the store saw %d writes, want 2", memory.Puts())
+		t.Fatalf("third run: report %+v, err %v", report, err)
 	}
 
-	verified, err := VerifyRows(ctx, database.Pool, memory, &out)
+	verified, err := files.VerifyRows(ctx, database.Pool, memory, &out)
 	if err != nil || verified.Checked != 2 || len(verified.Failed) != 0 {
-		t.Fatalf("VerifyRows: %+v, %v", verified, err)
+		t.Fatalf("VerifyRows: %+v, %v, want the two files checked and the document skipped", verified, err)
 	}
 }
 
@@ -126,8 +146,8 @@ func TestBackfillStopsAtARowWhoseBytesDoNotMatchTheirHash(t *testing.T) {
 	if _, err := database.Pool.Exec(ctx, `update artifact_versions set content = $2 where id = $1`, id, []byte("other bytes")); err != nil {
 		t.Fatalf("corrupt the row: %v", err)
 	}
-	memory := NewMemory()
-	report, err := BackfillRows(ctx, database.Pool, memory, &strings.Builder{})
+	memory := filestest.NewMemory()
+	report, err := files.BackfillRows(ctx, database.Pool, memory, &strings.Builder{})
 	if err == nil || !strings.Contains(err.Error(), "hash to") {
 		t.Fatalf("BackfillRows over a corrupt row: report %+v, err %v", report, err)
 	}
@@ -139,23 +159,89 @@ func TestBackfillStopsAtARowWhoseBytesDoNotMatchTheirHash(t *testing.T) {
 func TestVerifyNamesARowWhoseObjectIsMissingOrWrong(t *testing.T) {
 	database := storetest.Open(t)
 	ctx := context.Background()
-	kept := seedFileVersion(t, database, "kept", []byte("kept bytes"))
+	seedFileVersion(t, database, "kept", []byte("kept bytes"))
 	lost := seedFileVersion(t, database, "lost", []byte("lost bytes"))
-	memory := NewMemory()
-	if _, err := BackfillRows(ctx, database.Pool, memory, &strings.Builder{}); err != nil {
+	altered := seedFileVersion(t, database, "altered", []byte("altered bytes"))
+	memory := filestest.NewMemory()
+	if _, err := files.BackfillRows(ctx, database.Pool, memory, &strings.Builder{}); err != nil {
 		t.Fatalf("BackfillRows: %v", err)
 	}
-	memory.Delete(SHA256([]byte("lost bytes")))
+	memory.Delete(files.SHA256([]byte("lost bytes")))
 
 	var out strings.Builder
-	report, err := VerifyRows(ctx, database.Pool, memory, &out)
+	report, err := files.VerifyRows(ctx, database.Pool, altering{Store: memory, sha: files.SHA256([]byte("altered bytes"))}, &out)
 	if err != nil {
 		t.Fatalf("VerifyRows: %v", err)
 	}
-	if report.Checked != 1 || len(report.Failed) != 1 || !strings.Contains(report.Failed[0], lost) {
-		t.Fatalf("report = %+v, want %s checked and %s failed", report, kept, lost)
+	failed := strings.Join(report.Failed, "\n")
+	if report.Checked != 1 || len(report.Failed) != 2 || !strings.Contains(failed, lost) || !strings.Contains(failed, altered) {
+		t.Fatalf("report = %+v, want one row checked and %s and %s failed", report, lost, altered)
 	}
-	if !strings.Contains(out.String(), "FAILED version "+lost) {
-		t.Errorf("output names no failed version:\n%s", out.String())
+	for _, id := range []string{lost, altered} {
+		if !strings.Contains(out.String(), "FAILED version "+id) {
+			t.Errorf("output does not name failed version %s:\n%s", id, out.String())
+		}
+	}
+}
+
+// The schema lets a version's sha256 and mime be null. A row with no type is moved under the
+// upload route's default; a row with no hash stops the pass naming that row, rather than with a
+// scan error that names none, and keeps its bytes.
+func TestBackfillNamesARowWithNoHashAndMovesARowWithNoType(t *testing.T) {
+	database := storetest.Open(t)
+	ctx := context.Background()
+	untyped := seedFileVersion(t, database, "untyped", []byte("untyped bytes"))
+	unhashed := seedFileVersion(t, database, "unhashed", []byte("unhashed bytes"))
+	if _, err := database.Pool.Exec(ctx, `update artifact_versions set mime = null where id = $1`, untyped); err != nil {
+		t.Fatalf("clear the type: %v", err)
+	}
+	if _, err := database.Pool.Exec(ctx, `update artifact_versions set sha256 = null where id = $1`, unhashed); err != nil {
+		t.Fatalf("clear the hash: %v", err)
+	}
+	memory := filestest.NewMemory()
+	report, err := files.BackfillRows(ctx, database.Pool, memory, &strings.Builder{})
+	if err == nil || !strings.Contains(err.Error(), unhashed) {
+		t.Fatalf("BackfillRows over a row with no hash: report %+v, err %v, want an error naming %s", report, err, unhashed)
+	}
+	if report.Moved != 1 || rowBytes(t, database, untyped) != nil {
+		t.Fatalf("the row with no type was not moved: report %+v", report)
+	}
+	if mime := memory.MIME(files.SHA256([]byte("untyped bytes"))); mime != "application/octet-stream" {
+		t.Fatalf("the row with no type was stored as %q, want application/octet-stream", mime)
+	}
+	if rowBytes(t, database, unhashed) == nil {
+		t.Fatal("the row with no hash lost its bytes")
+	}
+}
+
+// altering is a store that reads back other bytes than it was given under one hash and passes
+// every other call on: an object another writer replaced, or a bucket that answered for a write
+// it did not keep.
+type altering struct {
+	files.Store
+	sha string
+}
+
+func (a altering) Get(ctx context.Context, sha string) ([]byte, error) {
+	body, err := a.Store.Get(ctx, sha)
+	if err != nil || sha != a.sha {
+		return body, err
+	}
+	return append(body, '!'), nil
+}
+
+// A row's bytes are its only copy until the store reads them back under their hash, so a store that
+// acknowledged a write it did not keep must leave the row as it was.
+func TestBackfillKeepsARowsBytesUntilTheStoreReadsThemBack(t *testing.T) {
+	database := storetest.Open(t)
+	ctx := context.Background()
+	id := seedFileVersion(t, database, "kept", []byte("the only copy"))
+	store := altering{Store: filestest.NewMemory(), sha: files.SHA256([]byte("the only copy"))}
+	report, err := files.BackfillRows(ctx, database.Pool, store, &strings.Builder{})
+	if err == nil || !strings.Contains(err.Error(), id) {
+		t.Fatalf("BackfillRows against a store that keeps other bytes: report %+v, err %v, want an error naming %s", report, err, id)
+	}
+	if report.Moved != 0 || !bytes.Equal(rowBytes(t, database, id), []byte("the only copy")) {
+		t.Fatalf("a write the store did not keep cleared the row: report %+v", report)
 	}
 }

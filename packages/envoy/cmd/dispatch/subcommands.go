@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"io"
 	"log/slog"
@@ -154,13 +155,15 @@ func backfillAnchorBlocks(ctx context.Context, databaseURL string, out io.Writer
 // already moved and checks it against its row's hash, moving nothing (files.VerifyRows). Either
 // pass can be run again at any time; the server keeps serving a row until its bytes are cleared.
 func backfillFiles(ctx context.Context, args []string, databaseURL, bucket string, out io.Writer) int {
-	verifyOnly := false
-	for _, arg := range args {
-		if arg != "--verify-only" {
-			fmt.Fprintf(out, "backfill-files: unknown argument %q; the one argument is --verify-only\n", arg)
-			return 2
-		}
-		verifyOnly = true
+	flags := flag.NewFlagSet("backfill-files", flag.ContinueOnError)
+	flags.SetOutput(out)
+	verifyOnly := flags.Bool("verify-only", false, "read back every file already moved and check it against its row's hash, moving nothing")
+	if err := flags.Parse(args); err != nil {
+		return 2
+	}
+	if flags.NArg() > 0 {
+		fmt.Fprintf(out, "backfill-files: unexpected argument %q; the one flag is --verify-only\n", flags.Arg(0))
+		return 2
 	}
 	if bucket == "" {
 		fmt.Fprintln(out, "backfill-files: DISPATCH_FILE_STORE_BUCKET is required")
@@ -171,17 +174,17 @@ func backfillFiles(ctx context.Context, args []string, databaseURL, bucket strin
 		return 1
 	}
 	defer database.Pool.Close()
-	store, err := files.NewS3(ctx, bucket)
+	fileStore, err := files.NewS3(ctx, bucket)
 	if err != nil {
 		fmt.Fprintf(out, "backfill-files: %v\n", err)
 		return 1
 	}
-	if err := store.Healthy(ctx); err != nil {
+	if err := fileStore.Healthy(ctx); err != nil {
 		fmt.Fprintf(out, "backfill-files: the bucket is not reachable: %v\n", err)
 		return 1
 	}
-	if verifyOnly {
-		report, err := files.VerifyRows(ctx, database.Pool, store, out)
+	if *verifyOnly {
+		report, err := files.VerifyRows(ctx, database.Pool, fileStore, out)
 		if err != nil {
 			fmt.Fprintf(out, "backfill-files: verify: %v\n", err)
 			return 1
@@ -192,7 +195,7 @@ func backfillFiles(ctx context.Context, args []string, databaseURL, bucket strin
 		}
 		return 0
 	}
-	report, err := files.BackfillRows(ctx, database.Pool, store, out)
+	report, err := files.BackfillRows(ctx, database.Pool, fileStore, out)
 	fmt.Fprintf(out, "backfill-files: moved=%d bytes=%d\n", report.Moved, report.Bytes)
 	if err != nil {
 		fmt.Fprintf(out, "backfill-files: stopped: %v\n", err)
