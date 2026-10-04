@@ -275,6 +275,7 @@
   still in flight (`Ledger.commit` now holds each credited artifact's room state locked across the
   commit and its in-memory release), can no longer bundle an already-credited author back into a
   later, unrelated credit (LEGION-513).
+- A published edit's check of whether a browser's concurrent change removed its text (`lost_ops`, and an accepted suggestion's `lost`) walked the room's live tree without its lock while the room's browsers wrote it, so it could read a keystroke halfway. Every read of a resident room outside a write now reads the room as of one moment under its lock: the replica the room's update observer keeps, brought up to date, or, while the observer or another read holds that replica, a copy as before. A read only tries the replica, so reads never queue behind each other or ahead of a keystroke's observer, but a keystroke can still wait for one read already walking it (about 100 ms on a 524 KiB document). A read through the replica takes about a third of a copy's time (86 ms rather than 283 ms for a 524 KiB document's tree). A tree a read returns shares nothing with the document it was read from, so editing it changes no later read (LEGION-499).
 - A deploy with someone on the Dispatch dashboard no longer spends the whole shutdown waiting and
   then leaves the documents it owed unsettled (LEGION-501). An open event stream or agent
   conversation stream never went idle, so `http.Server.Shutdown` held for its full 5 s, and the

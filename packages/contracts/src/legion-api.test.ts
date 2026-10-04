@@ -95,8 +95,15 @@ test("a thread's outcome is resolved or left open, never both or neither", () =>
       leftOpen: "not an acceptance",
     },
   ]) {
-    expect(LegionThreadsResolveResponse.safeParse({ threads: [outcome] }).success).toBe(false);
+    expect(
+      LegionThreadsResolveResponse.safeParse({ threads: [outcome], withheld: 0 }).success
+    ).toBe(false);
   }
+});
+
+test("a resolve answer always carries its withheld count", () => {
+  expect(LegionThreadsResolveResponse.safeParse({ threads: [], withheld: 0 }).success).toBe(true);
+  expect(LegionThreadsResolveResponse.safeParse({ threads: [] }).success).toBe(false);
 });
 
 test("state accepts optional fields emitted by later workflow slices", () => {

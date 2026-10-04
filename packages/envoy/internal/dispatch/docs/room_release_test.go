@@ -81,7 +81,7 @@ func TestRoomsTheAPIOpenedReleaseTheCapOnceIdle(t *testing.T) {
 			appendThroughAPI(t, service, id)
 			continue
 		}
-		if err := service.docView(context.Background(), id, func(*crdt.Doc) {}); err != nil {
+		if _, err := service.docTree(context.Background(), id); err != nil {
 			t.Fatalf("warm read of document %s: %v", id, err)
 		}
 	}
