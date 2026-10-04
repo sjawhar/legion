@@ -67,18 +67,22 @@ export interface DropTarget {
 }
 
 /**
- * Translates a dnd-kit drop - `overId` is another card's key or a column's `status:<s>` id -
- * into the column and position `moveCard` takes. Within a column the card lands at the over
- * card's current position (dnd-kit's `arrayMove`: one step down lands below the card it
- * passed, one step up lands above it); a drop onto another column's card lands above that
- * card; a drop onto a column itself - its header, an empty column, or a collapsed rail -
+ * Resolves a dnd-kit drop against a board's cells, shared by `dropTarget` (cells are lifecycle
+ * statuses) and `laneDropTarget` (cells are lane+status pairs). `cellOf` names the cell an issue
+ * currently occupies, `cellId` turns a cell into the string two cells compare equal by, and
+ * `parseCellId` recovers a cell from a dropped-on column or rail's own id. A drop onto a card
+ * lands at that card's position in its own cell (dnd-kit's `arrayMove`: one step down lands
+ * below the card it passed, one step up lands above it); a drop onto a cell's column or rail
  * appends. Undefined when the drop is not a move.
  */
-export function dropTarget(
+function resolveDropTarget<Cell>(
   issues: readonly IssueSummary[],
   activeKey: string,
-  overId: string
-): DropTarget | undefined {
+  overId: string,
+  cellOf: (issue: IssueSummary) => Cell,
+  cellId: (cell: Cell) => string,
+  parseCellId: (id: string) => Cell | undefined
+): { cell: Cell; insertionIndex: number } | undefined {
   if (activeKey === overId) {
     return undefined;
   }
@@ -87,21 +91,93 @@ export function dropTarget(
   }
   const overIssue = issues.find((issue) => issue.key === overId);
   if (overIssue !== undefined) {
-    // The active card is in this column only when the move stays inside it, which is exactly
-    // when its own position must count (dnd-kit's arrayMove).
-    const status = overIssue.status as IssueStatus;
-    const column = issues.filter((issue) => issue.status === status);
-    return { status, insertionIndex: column.findIndex((issue) => issue.key === overId) };
+    const cell = cellOf(overIssue);
+    const id = cellId(cell);
+    const cellIssues = issues.filter((issue) => cellId(cellOf(issue)) === id);
+    return { cell, insertionIndex: cellIssues.findIndex((issue) => issue.key === overId) };
   }
-  const status = overId.replace(/^status:/, "");
-  if (!isIssueStatus(status)) {
+  const cell = parseCellId(overId);
+  if (cell === undefined) {
     return undefined;
   }
+  const id = cellId(cell);
   return {
-    status,
-    insertionIndex: issues.filter((issue) => issue.status === status && issue.key !== activeKey)
-      .length,
+    cell,
+    insertionIndex: issues.filter(
+      (issue) => cellId(cellOf(issue)) === id && issue.key !== activeKey
+    ).length,
   };
+}
+
+/**
+ * Translates a dnd-kit drop - `overId` is another card's key or a column's `status:<s>` id -
+ * into the column and position `moveCard` takes.
+ */
+export function dropTarget(
+  issues: readonly IssueSummary[],
+  activeKey: string,
+  overId: string
+): DropTarget | undefined {
+  const resolved = resolveDropTarget<IssueStatus>(
+    issues,
+    activeKey,
+    overId,
+    (issue) => issue.status as IssueStatus,
+    (status) => status,
+    (id) => {
+      const status = id.replace(/^status:/, "");
+      return isIssueStatus(status) ? status : undefined;
+    }
+  );
+  return resolved === undefined
+    ? undefined
+    : { status: resolved.cell, insertionIndex: resolved.insertionIndex };
+}
+
+/**
+ * Shared splice-and-rank logic for `moveIssue` and `moveIssueToLane`: groups `issues` by status,
+ * places `key` at `insertionIndex` of the cell `cellPredicate` admits within the `targetStatus`
+ * column, and returns the optimistic list plus the neighbours for `rank`. `isNoOp` is the
+ * caller's own answer to "would the active card stay exactly where it already is" - `moveIssue`
+ * asks about status alone, `moveIssueToLane` about status and priority together - and this
+ * returns `undefined` instead of a result when it is.
+ */
+function placeInColumn(
+  issues: readonly IssueSummary[],
+  key: string,
+  targetStatus: IssueStatus,
+  insertionIndex: number,
+  cellPredicate: (issue: IssueSummary) => boolean,
+  applyTarget: (issue: IssueSummary) => IssueSummary,
+  isNoOp: (active: IssueSummary) => boolean,
+  isVisible: (issue: IssueSummary) => boolean
+): { issues: IssueSummary[]; rank: { before?: string; after?: string } } | undefined {
+  const active = issues.find((issue) => issue.key === key);
+  if (active === undefined) {
+    return undefined;
+  }
+  const columns = groupIssuesByStatus(issues.filter((issue) => issue.key !== key));
+  const target = columns.find((column) => column.status === targetStatus);
+  if (target === undefined) {
+    return undefined;
+  }
+  const cell = target.issues.filter((issue) => cellPredicate(issue) && isVisible(issue));
+  const index = Math.min(Math.max(insertionIndex, 0), cell.length);
+  const rank = rankInputForInsertion(cell, index);
+  const below = cell[index];
+  const above = cell[index - 1];
+  const spliceAt =
+    below !== undefined
+      ? target.issues.findIndex((issue) => issue.key === below.key)
+      : above !== undefined
+        ? target.issues.findIndex((issue) => issue.key === above.key) + 1
+        : target.issues.length;
+  target.issues.splice(spliceAt, 0, applyTarget(active));
+  const moved = columns.flatMap((column) => column.issues);
+  if (isNoOp(active) && moved.every((issue, position) => issue.key === issues[position]?.key)) {
+    return undefined;
+  }
+  return { issues: moved, rank };
 }
 
 /**
@@ -126,40 +202,32 @@ export function moveIssue(
   if (active === undefined) {
     return undefined;
   }
-  const columns = groupIssuesByStatus(issues.filter((issue) => issue.key !== key));
-  const target = columns.find((column) => column.status === targetStatus);
-  if (target === undefined) {
-    return undefined;
-  }
-  const visible = target.issues.filter(isVisible);
-  const index = Math.min(Math.max(insertionIndex, 0), visible.length);
-  const rank = rankInputForInsertion(visible, index);
-  const below = visible[index];
-  const above = visible[index - 1];
-  const spliceAt =
-    below !== undefined
-      ? target.issues.findIndex((issue) => issue.key === below.key)
-      : above !== undefined
-        ? target.issues.findIndex((issue) => issue.key === above.key) + 1
-        : target.issues.length;
-  target.issues.splice(spliceAt, 0, { ...active, status: targetStatus });
-  const moved = columns.flatMap((column) => column.issues);
-  if (
-    active.status === targetStatus &&
-    moved.every((issue, position) => issue.key === issues[position]?.key)
-  ) {
+  const placed = placeInColumn(
+    issues,
+    key,
+    targetStatus,
+    insertionIndex,
+    () => true,
+    (issue) => ({ ...issue, status: targetStatus }),
+    (candidate) => candidate.status === targetStatus,
+    isVisible
+  );
+  if (placed === undefined) {
     return undefined;
   }
   return {
-    issues: moved,
-    input: { ...(active.status === targetStatus ? {} : { status: targetStatus }), rank },
+    issues: placed.issues,
+    input: {
+      ...(active.status === targetStatus ? {} : { status: targetStatus }),
+      rank: placed.rank,
+    },
   };
 }
 
 /** A swimlane: one of the four priorities, or `null` for an issue with none set. */
 export type PriorityLane = IssuePriority | null;
 
-/** Lane order: P0 through P3, then issues with no priority - the five bands Sami asked for. */
+/** Lane order: P0 through P3, then issues with no priority. */
 export const priorityLanes: readonly PriorityLane[] = [0, 1, 2, 3, null];
 
 export function laneLabel(lane: PriorityLane): string {
@@ -171,15 +239,13 @@ export function laneKey(lane: PriorityLane): string {
   return lane === null ? "none" : String(lane);
 }
 
-/** The inverse of `laneKey`; `undefined` for anything else. */
+/** The inverse of `laneKey`; `undefined` for anything else, including an empty string (`Number`
+ *  reads `""` as `0`, which would otherwise be mistaken for P0). */
 export function laneFromKey(value: string): PriorityLane | undefined {
   if (value === "none") {
     return null;
   }
-  const parsed = Number(value);
-  return (priorityLanes as readonly (IssuePriority | null)[]).includes(parsed as IssuePriority)
-    ? (parsed as IssuePriority)
-    : undefined;
+  return /^[0-3]$/.test(value) ? (Number(value) as IssuePriority) : undefined;
 }
 
 export interface BoardLane {
@@ -190,13 +256,27 @@ export interface BoardLane {
 /**
  * Splits the project list into swimlanes by priority - rows across the nine status columns, one
  * band per priority (P0-P3, then no priority) - each lane itself split into the nine lifecycle
- * columns exactly as `groupIssuesByStatus` does. Rank still orders cards within a lane+column
- * cell, as it orders them within a plain column.
+ * columns. Rank still orders cards within a lane+column cell, as it orders them within a plain
+ * column. One pass over `issues` buckets every lane+status pair at once, rather than filtering
+ * the whole list once per lane.
  */
 export function groupIssuesByLane(issues: readonly IssueSummary[]): BoardLane[] {
+  const cells: Record<string, IssueSummary[]> = {};
+  for (const issue of issues) {
+    const key = `${laneKey(issue.priority)}|${issue.status}`;
+    const bucket = cells[key];
+    if (bucket === undefined) {
+      cells[key] = [issue];
+    } else {
+      bucket.push(issue);
+    }
+  }
   return priorityLanes.map((lane) => ({
     lane,
-    columns: groupIssuesByStatus(issues.filter((issue) => issue.priority === lane)),
+    columns: issueStatuses.map((status) => ({
+      status,
+      issues: cells[`${laneKey(lane)}|${status}`] ?? [],
+    })),
   }));
 }
 
@@ -237,30 +317,21 @@ export function laneDropTarget(
   activeKey: string,
   overId: string
 ): LaneDropTarget | undefined {
-  if (activeKey === overId) {
-    return undefined;
-  }
-  if (!issues.some((issue) => issue.key === activeKey)) {
-    return undefined;
-  }
-  const overIssue = issues.find((issue) => issue.key === overId);
-  if (overIssue !== undefined) {
-    const status = overIssue.status as IssueStatus;
-    const lane = overIssue.priority;
-    const cell = issues.filter((issue) => issue.status === status && issue.priority === lane);
-    return { status, lane, insertionIndex: cell.findIndex((issue) => issue.key === overId) };
-  }
-  const parsed = parseLaneColumnId(overId);
-  if (parsed === undefined) {
-    return undefined;
-  }
-  return {
-    ...parsed,
-    insertionIndex: issues.filter(
-      (issue) =>
-        issue.status === parsed.status && issue.priority === parsed.lane && issue.key !== activeKey
-    ).length,
-  };
+  const resolved = resolveDropTarget<{ status: IssueStatus; lane: PriorityLane }>(
+    issues,
+    activeKey,
+    overId,
+    (issue) => ({ status: issue.status as IssueStatus, lane: issue.priority }),
+    (cell) => laneColumnId(cell.status, cell.lane),
+    parseLaneColumnId
+  );
+  return resolved === undefined
+    ? undefined
+    : {
+        status: resolved.cell.status,
+        lane: resolved.cell.lane,
+        insertionIndex: resolved.insertionIndex,
+      };
 }
 
 /**
@@ -280,37 +351,25 @@ export function moveIssueToLane(
   if (active === undefined) {
     return undefined;
   }
-  const columns = groupIssuesByStatus(issues.filter((issue) => issue.key !== key));
-  const target = columns.find((column) => column.status === targetStatus);
-  if (target === undefined) {
-    return undefined;
-  }
-  const cell = target.issues.filter((issue) => issue.priority === targetLane && isVisible(issue));
-  const index = Math.min(Math.max(insertionIndex, 0), cell.length);
-  const rank = rankInputForInsertion(cell, index);
-  const below = cell[index];
-  const above = cell[index - 1];
-  const spliceAt =
-    below !== undefined
-      ? target.issues.findIndex((issue) => issue.key === below.key)
-      : above !== undefined
-        ? target.issues.findIndex((issue) => issue.key === above.key) + 1
-        : target.issues.length;
-  target.issues.splice(spliceAt, 0, { ...active, status: targetStatus, priority: targetLane });
-  const moved = columns.flatMap((column) => column.issues);
-  if (
-    active.status === targetStatus &&
-    active.priority === targetLane &&
-    moved.every((issue, position) => issue.key === issues[position]?.key)
-  ) {
+  const placed = placeInColumn(
+    issues,
+    key,
+    targetStatus,
+    insertionIndex,
+    (issue) => issue.priority === targetLane,
+    (issue) => ({ ...issue, status: targetStatus, priority: targetLane }),
+    (candidate) => candidate.status === targetStatus && candidate.priority === targetLane,
+    isVisible
+  );
+  if (placed === undefined) {
     return undefined;
   }
   return {
-    issues: moved,
+    issues: placed.issues,
     input: {
       ...(active.status === targetStatus ? {} : { status: targetStatus }),
       ...(active.priority === targetLane ? {} : { priority: targetLane }),
-      rank,
+      rank: placed.rank,
     },
   };
 }

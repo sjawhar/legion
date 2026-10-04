@@ -485,6 +485,24 @@ test("within a lane, Shift+L moves a card to the next status in the same lane wi
   }
 });
 
+test("with lanes on, the first roving key before anything is focused lands in the first lane's first cell, not flat cross-lane order", async () => {
+  // CORE-1 (P3) sorts first by rank in the merged Todo column a flat board would use; the fix
+  // lands in the first swimlane (P0) instead, on CORE-2.
+  const firstLaneIssues: IssueSummary[] = [
+    issue({ key: "CORE-1", priority: 3, rank: "a", status: "todo", title: "P3 card" }),
+    issue({ key: "CORE-2", priority: 0, rank: "b", status: "todo", title: "P0 card" }),
+  ];
+  const { cleanup } = renderBoard({}, undefined, firstLaneIssues, "/projects/CORE", true);
+  try {
+    const p0Lane = await screen.findByRole("region", { name: "P0 lane" });
+    const p0Card = within(p0Lane).getByRole("article", { name: "CORE-2 P0 card" });
+    fireEvent.keyDown(document.body, { key: "j" });
+    expect(document.activeElement).toBe(p0Card);
+  } finally {
+    cleanup();
+  }
+});
+
 function articleLabels(region: HTMLElement): (string | null)[] {
   return within(region)
     .queryAllByRole("article")

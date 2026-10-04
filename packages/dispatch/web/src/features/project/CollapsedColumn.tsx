@@ -9,7 +9,13 @@ import {
   surfaceMutedBg,
   textPrimaryOnSurface,
 } from "../../theme/classes";
-import { type BoardColumn, statusLabel } from "./board-model";
+import {
+  type BoardColumn,
+  laneColumnId,
+  laneKey,
+  type PriorityLane,
+  statusLabel,
+} from "./board-model";
 
 /**
  * Icebox and Done while the board's edges are hidden: a narrow rail with the status name and
@@ -22,16 +28,15 @@ import { type BoardColumn, statusLabel } from "./board-model";
  */
 export function CollapsedColumn({
   column,
-  dropId,
   lane,
 }: {
   column: BoardColumn;
-  /** The droppable id; defaults to the flat `status:<s>` form. */
-  dropId?: string;
-  /** The enclosing swimlane's key (`laneKey`), when this rail sits inside one. */
-  lane?: string;
+  /** The swimlane this rail sits inside, when it does; the flat board omits it. */
+  lane?: PriorityLane;
 }): ReactNode {
-  const { isOver, setNodeRef } = useDroppable({ id: dropId ?? `status:${column.status}` });
+  const { isOver, setNodeRef } = useDroppable({
+    id: lane === undefined ? `status:${column.status}` : laneColumnId(column.status, lane),
+  });
   const label = statusLabel(column.status);
 
   return (
@@ -39,7 +44,7 @@ export function CollapsedColumn({
       aria-label={`${label} (collapsed)`}
       className={`w-10 shrink-0 snap-start outline-none focus-visible:ring-2 ${focusVisibleRing}`}
       data-board-column={column.status}
-      data-board-lane={lane}
+      data-board-lane={lane === undefined ? undefined : laneKey(lane)}
       ref={setNodeRef}
       tabIndex={-1}
     >

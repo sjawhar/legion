@@ -182,19 +182,16 @@ function IssueCard({ issue, unread }: { issue: IssueSummary; unread: boolean }):
  */
 const BoardColumnView = memo(function BoardColumnView({
   column,
-  dropId,
   lane,
   userState,
 }: {
   column: BoardColumn;
-  /** The droppable id; defaults to the flat `status:<s>` form. */
-  dropId?: string;
-  /** The enclosing swimlane's key (`laneKey`), when this column sits inside one. */
-  lane?: string;
+  /** The swimlane this column sits inside, when it does; the flat board omits it. */
+  lane?: PriorityLane;
   userState: UserState | undefined;
 }): ReactNode {
   const { isOver, setNodeRef } = useDroppable({
-    id: dropId ?? `status:${column.status}`,
+    id: lane === undefined ? `status:${column.status}` : laneColumnId(column.status, lane),
   });
 
   return (
@@ -202,7 +199,7 @@ const BoardColumnView = memo(function BoardColumnView({
       aria-label={statusLabel(column.status)}
       className={`w-72 shrink-0 snap-start ${boardFocusRing}`}
       data-board-column={column.status}
-      data-board-lane={lane}
+      data-board-lane={lane === undefined ? undefined : laneKey(lane)}
       ref={setNodeRef}
       tabIndex={-1}
     >
@@ -268,7 +265,6 @@ const BoardLaneRow = memo(function BoardLaneRow({
   userState: UserState | undefined;
 }): ReactNode {
   const count = boardLane.columns.reduce((total, column) => total + column.issues.length, 0);
-  const lane = laneKey(boardLane.lane);
   return (
     <section aria-label={`${laneLabel(boardLane.lane)} lane`}>
       <h2
@@ -284,18 +280,12 @@ const BoardLaneRow = memo(function BoardLaneRow({
         <div className="flex w-max items-stretch gap-4">
           {boardLane.columns.map((column) =>
             isCollapsed(column.status) ? (
-              <CollapsedColumn
-                column={column}
-                dropId={laneColumnId(column.status, boardLane.lane)}
-                key={column.status}
-                lane={lane}
-              />
+              <CollapsedColumn column={column} key={column.status} lane={boardLane.lane} />
             ) : (
               <BoardColumnView
                 column={column}
-                dropId={laneColumnId(column.status, boardLane.lane)}
                 key={column.status}
-                lane={lane}
+                lane={boardLane.lane}
                 userState={userState}
               />
             )
@@ -383,8 +373,9 @@ export function IssueBoard({
     [issues.data, isVisible]
   );
   const boardLanes = useMemo(
-    () => (issues.data === undefined ? [] : groupIssuesByLane(issues.data.filter(isVisible))),
-    [issues.data, isVisible]
+    () =>
+      !lanes || issues.data === undefined ? [] : groupIssuesByLane(issues.data.filter(isVisible)),
+    [lanes, issues.data, isVisible]
   );
   const onDragEnd = ({ active, over }: DragEndEvent) => {
     landCard();
@@ -407,9 +398,12 @@ export function IssueBoard({
     }
   };
   /** Icebox and Done are rails - no cards to focus, still a move target - while the edges are
-   *  hidden. The render below and the roving keys read the same rule. */
-  const isCollapsed = (status: IssueStatus) =>
-    !showEdges && (status === "icebox" || status === "done");
+   *  hidden. The render below and the roving keys read the same rule. Memoised so a toggle
+   *  that does not change `showEdges` leaves `BoardLaneRow`'s memo intact. */
+  const isCollapsed = useCallback(
+    (status: IssueStatus) => !showEdges && (status === "icebox" || status === "done"),
+    [showEdges]
+  );
 
   // One `aria-live` sentence per keyboard move; `focusAfterMove` names the card focus follows
   // once the optimistic list has rendered (a status move remounts the article under its new
@@ -449,10 +443,16 @@ export function IssueBoard({
     lanes && laneId !== null
       ? (boardLanes.find((entry) => laneKey(entry.lane) === laneId)?.columns ?? [])
       : columns;
-  /** The focused card or column's lane key, or `null` outside lane mode or with nothing
-   *  focused there. */
-  const currentLaneId = (): string | null =>
-    columnAround(document.activeElement)?.dataset.boardLane ?? null;
+  /** The focused card or column's lane key; outside lane mode, or with nothing focused yet,
+   *  `null`. With lanes on and nothing focused, the first roving key lands in the first band
+   *  (P0) rather than the flat board's cross-lane order. */
+  const currentLaneId = (): string | null => {
+    const explicit = columnAround(document.activeElement)?.dataset.boardLane;
+    if (explicit !== undefined) {
+      return explicit;
+    }
+    return lanes ? laneKey(boardLanes[0]?.lane ?? null) : null;
+  };
   /** Where keyboard focus sits on the board right now, or `null` when it is elsewhere. */
   const currentFocus = (): BoardFocus | null => {
     const active = document.activeElement;
