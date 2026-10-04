@@ -68,10 +68,12 @@ function RailRow({
 export function Sidebar({
   onHide,
   onNavigate,
+  onOpenInboxDrawer,
   user,
 }: {
   onHide?: () => void;
   onNavigate?: () => void;
+  onOpenInboxDrawer?: () => void;
   user: AuthenticatedUser;
 }): ReactNode {
   const location = useLocation();
@@ -119,9 +121,9 @@ export function Sidebar({
     <>
       {hideControl}
       <nav aria-label="Navigation" className="mt-8 space-y-5">
-        <section>
+        <section className="flex items-center gap-1">
           <Link
-            className={`mt-1 flex items-baseline gap-2 rounded px-2 py-1.5 text-sm font-medium ${railSecondaryText} ${railHoverBg} ${railHoverText}`}
+            className={`mt-1 flex flex-1 items-baseline gap-2 rounded px-2 py-1.5 text-sm font-medium ${railSecondaryText} ${railHoverBg} ${railHoverText}`}
             onClick={onNavigate}
             to="/"
           >
@@ -134,6 +136,17 @@ export function Sidebar({
               </span>
             )}
           </Link>
+          {/* The Inbox page is the Inbox already, so there is nothing to peek at from it. */}
+          {onOpenInboxDrawer === undefined || location.pathname === "/" ? null : (
+            <button
+              aria-label="Peek at the inbox without leaving this page"
+              className={`mt-1 shrink-0 rounded px-2 py-1.5 text-sm font-medium ${railSecondaryText} ${railHoverBg} ${railHoverText}`}
+              onClick={onOpenInboxDrawer}
+              type="button"
+            >
+              Peek
+            </button>
+          )}
         </section>
         <section>
           <Link

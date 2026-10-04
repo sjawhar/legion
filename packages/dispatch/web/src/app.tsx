@@ -10,6 +10,7 @@ import type { AuthenticatedUser } from "./api/types";
 import { totalUnreadReplies, unreadRepliesLabel } from "./features/agents/unread";
 import { useNeedsYouCount } from "./features/inbox/BlockedOnYou";
 import { Inbox } from "./features/inbox/Inbox";
+import { InboxDrawer } from "./features/inbox/InboxDrawer";
 import { CreateIssueDialog } from "./features/issue/CreateIssueDialog";
 import { DEFAULT_MARGIN_WIDTH, Margin } from "./features/margin/Margin";
 import { MarginProvider } from "./features/margin/margin-context";
@@ -246,6 +247,7 @@ function NavigationContents({
   compact,
   onClose,
   onHideSidebar,
+  onOpenInboxDrawer,
   onSearch,
   onSignOut,
   signOutError,
@@ -256,6 +258,7 @@ function NavigationContents({
   compact: boolean;
   onClose: () => void;
   onHideSidebar: () => void;
+  onOpenInboxDrawer: () => void;
   onSearch: () => void;
   onSignOut: () => void;
   signOutError: boolean;
@@ -286,7 +289,12 @@ function NavigationContents({
           onSearch();
         }}
       />
-      <Sidebar onHide={compact ? undefined : onHideSidebar} onNavigate={onClose} user={user} />
+      <Sidebar
+        onHide={compact ? undefined : onHideSidebar}
+        onNavigate={onClose}
+        onOpenInboxDrawer={onOpenInboxDrawer}
+        user={user}
+      />
       {/* Identity is chrome: who you are and how to leave are read once, while the navigation
           above is read on every visit, so the footer sits under it rather than over it. */}
       <div className={`mt-auto border-t pt-4 ${railBorder}`}>
@@ -315,6 +323,7 @@ function NavigationContents({
 function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
   const queryClient = useQueryClient();
   const [navigationOpen, setNavigationOpen] = useState(false);
+  const [inboxDrawerOpen, setInboxDrawerOpen] = useState(false);
   // Which palette is open, and `null` for none: `$mod+k` and the rail's Search control list this
   // page's actions and the hits, `/` searches only, and `g p` lists projects.
   const [paletteMode, setPaletteMode] = useState<PaletteMode | null>(null);
@@ -429,6 +438,15 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
       run: () => setPaletteMode("projects"),
     },
     {
+      id: "inbox-drawer",
+      keys: "i",
+      label: "Open the inbox",
+      run: () => setInboxDrawerOpen((open) => !open),
+      // The Inbox page already shows everything the drawer would, so a peek over itself is
+      // never offered; `g i` still gets the reader there from anywhere else.
+      when: () => location.pathname !== "/",
+    },
+    {
       id: "toggle-sidebar",
       keys: "Shift+S",
       label: "Toggle sidebar",
@@ -478,6 +496,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
       compact={isCompactViewport}
       onClose={() => setNavigationOpen(false)}
       onHideSidebar={() => setSidebarHidden(true)}
+      onOpenInboxDrawer={() => setInboxDrawerOpen(true)}
       onSearch={() => setPaletteMode("all")}
       onSignOut={() => signOut.mutate()}
       signOutError={signOut.isError}
@@ -529,12 +548,31 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
               <Link className="text-lg font-semibold" to="/">
                 Dispatch
               </Link>
-              {needsYouCount === 0 ? null : (
-                <span
-                  className={`rounded-full px-2 py-1 text-xs font-semibold ${railNeedsYouBadgeBg} ${railNeedsYouBadgeText}`}
+              {/* On the Inbox page the count stays the plain badge: the page is the Inbox, so
+                  there is nothing to open. Everywhere else it opens the Inbox drawer. */}
+              {location.pathname === "/" ? (
+                needsYouCount === 0 ? null : (
+                  <span
+                    className={`rounded-full px-2 py-1 text-xs font-semibold ${railNeedsYouBadgeBg} ${railNeedsYouBadgeText}`}
+                  >
+                    Needs you {needsYouCount}
+                  </span>
+                )
+              ) : (
+                <button
+                  aria-label={
+                    needsYouCount === 0 ? "Open inbox" : `Open inbox, needs you ${needsYouCount}`
+                  }
+                  className={`rounded-full px-2 py-1 text-xs font-semibold ${
+                    needsYouCount === 0
+                      ? railHoverBg
+                      : `${railNeedsYouBadgeBg} ${railNeedsYouBadgeText}`
+                  }`}
+                  onClick={() => setInboxDrawerOpen(true)}
+                  type="button"
                 >
-                  Needs you {needsYouCount}
-                </span>
+                  {needsYouCount === 0 ? "Inbox" : `Needs you ${needsYouCount}`}
+                </button>
               )}
               {unreadReplies === 0 ? null : (
                 <Link
@@ -645,6 +683,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
           />
         </ErrorBoundary>
         <SearchPalette mode={paletteMode} onClose={() => setPaletteMode(null)} />
+        <InboxDrawer onClose={() => setInboxDrawerOpen(false)} open={inboxDrawerOpen} />
         <ShortcutHelp onClose={() => setHelpSnapshot(null)} snapshot={helpSnapshot} />
         {createOpen ? <CreateIssueDialog onClose={() => setCreateOpen(false)} /> : null}
         <RefPreviewHost />

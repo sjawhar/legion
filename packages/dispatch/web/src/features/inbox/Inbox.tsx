@@ -38,10 +38,11 @@ import {
   buildInboxPath,
   buildIssuePath,
   buildProjectPath,
+  type InboxRoute,
   type InboxView,
   parseInboxSearch,
 } from "../refs/routes";
-import { useKeymap, useKeymapScope } from "../shell/keymap";
+import { type KeymapScope, useKeymap, useKeymapScope } from "../shell/keymap";
 import { closestMatching, focusedMatching, roveFocus } from "../shell/roving";
 import { useUserPreference } from "../shell/userPreference";
 import { ViewportAnchor } from "../shell/ViewportAnchor";
@@ -364,10 +365,26 @@ function emptyStateMessage({
   return view === "mine" ? "Nothing needs you" : "Nothing needs anyone";
 }
 
-export function Inbox(): ReactNode {
+/**
+ * `filter`/`onViewChange`/`keymapScope` exist for `InboxDrawer` (LEGION-547): a peek embedded on
+ * another route must not read or write the real URL for its Mine/Everyone choice (that would
+ * navigate the page it sits over), and its Escape/j/k/etc. must resolve under the drawer's own
+ * `dialog` scope - the modal scope a dialog anywhere on the stack exclusively consults - rather
+ * than the standalone page's `inbox` scope, which a dialog's keydown handling never reaches.
+ * `InboxPage`'s unmodified `<Inbox/>` call keeps today's URL-backed behaviour untouched.
+ */
+export function Inbox({
+  filter: filterOverride,
+  keymapScope = "inbox",
+  onViewChange,
+}: {
+  filter?: InboxRoute;
+  keymapScope?: KeymapScope;
+  onViewChange?: (view: InboxView) => void;
+} = {}): ReactNode {
   const { search } = useLocation();
   const navigate = useNavigate();
-  const filter = parseInboxSearch(search);
+  const filter = filterOverride ?? parseInboxSearch(search);
   // One inbox query, shared with the nav badge, the sidebar, the agents page and the margin; the
   // views below are client-side partitions of it, so an answered row leaves every surface at once.
   const inbox = useQuery(inboxQuery());
@@ -386,7 +403,11 @@ export function Inbox(): ReactNode {
   const view = filter.view ?? rememberedView;
   const selectView = (next: InboxView) => {
     setRememberedView(next);
-    navigate(buildInboxPath({ ...filter, view: next }));
+    if (onViewChange) {
+      onViewChange(next);
+    } else {
+      navigate(buildInboxPath({ ...filter, view: next }));
+    }
   };
   const { titles } = useAgents(filter.agent !== undefined);
   // Rows (by ask id) whose "Assign to me" write is in flight or failed: their control stays
@@ -542,8 +563,8 @@ export function Inbox(): ReactNode {
   // Which row `h` was pressed on, so Escape from the bulk picker - which sits above the bands and
   // has no row to fall back through - is one level out rather than a dead end.
   const pickerOrigin = useRef<string | null>(null);
-  useKeymapScope("inbox");
-  useKeymap("inbox", [
+  useKeymapScope(keymapScope);
+  useKeymap(keymapScope, [
     // Movement is what the arrow keys are for; a palette row that moves the cursor helps nobody.
     {
       id: "next",
