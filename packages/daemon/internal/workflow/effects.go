@@ -185,13 +185,38 @@ func (e *Engine) suspend(ctx context.Context, tx pgx.Tx, issue record.Issue, rol
 		Reason: fmt.Sprintf("%s left %s", issue.Key, leaves)})
 }
 
-// start starts the phase worker of the issue's current phase, a start stamped with that phase.
+// start starts the phase worker of the issue's current phase, a start stamped with that phase. A
+// merger is told the head the review round approved (approvedHead), the one head its READY may
+// name, so it never chooses among the pull request's reviews itself.
 func (e *Engine) start(ctx context.Context, tx pgx.Tx, issue record.Issue, role claim.Role, task string) error {
 	if role == "" {
 		return nil
 	}
+	if role == claim.RoleMerger {
+		head, err := e.approvedHead(ctx, tx, issue.Key)
+		if err != nil {
+			return err
+		}
+		if head != "" {
+			task += " Approved head: " + head + "."
+		}
+	}
 	return e.enqueue(ctx, tx, issue.Key, record.SuperviseRequest{Op: "start", Tree: issue.Tree, Role: role, Task: task,
 		Generation: issue.Generation, Phase: issue.Phase})
+}
+
+// approvedHead is the head the issue's review round approved: the reviewer row's recorded decision
+// (the review that ended the round, review.go), "" when the round recorded no approval. The
+// reviewer's row keeps that decision until the reviewer starts again (clearHandoff).
+func (e *Engine) approvedHead(ctx context.Context, tx pgx.Tx, issue string) (string, error) {
+	reviewer, err := e.phaseRow(ctx, tx, issue, claim.RoleReviewer)
+	if err != nil {
+		return "", err
+	}
+	if reviewer.Decision == nil || reviewer.Decision.State != "approved" {
+		return "", nil
+	}
+	return reviewer.Decision.Head, nil
 }
 
 // task is what a started worker is told. It names the phase the worker starts, which the issue

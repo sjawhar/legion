@@ -388,6 +388,39 @@ func TestProductionCheckCompletionTellsTheArchitectAndAwaitsSignOff(t *testing.T
 	assertOutboxKinds(t, pool, []string{"notice"})
 }
 
+// The merger is started with the head the review round approved, from the round's recorded
+// decision, so it never chooses among the pull request's reviews itself. A round with no recorded
+// approval names no head, and the merger refuses for want of it.
+func TestTheMergerIsStartedWithTheRoundsApprovedHead(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		decision *record.ReviewDecision
+		want     string
+	}{
+		{"an approved round", &record.ReviewDecision{State: "approved", Head: "approved-head"}, " Approved head: approved-head."},
+		{"no recorded approval", nil, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Retro, Generation: 1, Status: "retro", Rank: "U"})
+			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
+			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", HandoffCommit: "approved-head", Decision: tc.decision})
+			if _, err := intake.ApplyFact(context.Background(), pool, "api", "retro", intake.HandoffComplete{Generation: 1,
+				Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Summary: "learnings recorded", Commit: "retro-docs",
+			}, testEngine(config.DesignGateRootIssues, nil), admissionStub{}); err != nil {
+				t.Fatalf("ApplyFact retro: %v", err)
+			}
+			task := startTask(t, pool, claim.RoleMerger)
+			if !strings.Contains(task, "Phase: merging.") {
+				t.Fatalf("merger task %q, want a merger started on merging", task)
+			}
+			if got := strings.Contains(task, "Approved head:"); got != (tc.want != "") || !strings.HasSuffix(task, tc.want) {
+				t.Fatalf("merger task %q, want it to end with %q", task, tc.want)
+			}
+		})
+	}
+}
+
 // The architect learns what a phase produced from its phase-finished notice: the worker's own
 // summary, and beside it the verdict the tester gave. Neither stands in for the other; a notice
 // that carried the verdict in its summary told the architect "pass" and nothing the tester wrote.
