@@ -126,15 +126,24 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// A reparent locks the issue and its proposed parent in key order before it reads either, so a
-	// status write on the new parent, or a board move naming both as rank neighbours, queues behind
-	// it or ahead of it. The old parent is left to LockOwners, since holding it here would cross a
-	// status write on a sibling. Validation and the dependency walk below stay plain reads.
-	rowLocks := []string{key}
+	// A PATCH locks every issue row it names in one key order before it reads any of them: the
+	// issue, its current parent when a status change or a reparent appends to it, the proposed
+	// parent and the rank neighbours (lockPatchRows). It never holds one of those rows while
+	// waiting for another that a second write holds. Validation, the dependency walk and the rank
+	// reads below are plain reads or re-lock rows already held.
+	named := make([]string, 0, 3)
 	if parent != nil {
-		rowLocks = append(rowLocks, *parent)
+		named = append(named, *parent)
 	}
-	if err := lockIssueRows(r.Context(), tx, rowLocks...); err != nil {
+	if input.Rank != nil {
+		if input.Rank.After != nil {
+			named = append(named, strings.TrimSpace(*input.Rank.After))
+		}
+		if input.Rank.Before != nil {
+			named = append(named, strings.TrimSpace(*input.Rank.Before))
+		}
+	}
+	if err := lockPatchRows(r.Context(), tx, key, input.Status != nil || parentProvided, named...); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -314,6 +323,7 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 	}
 	// Every owner this transaction appends to must be in one LockOwners call before the
 	// first append: the issue itself, the status-change parent, and both ends of a reparent.
+	// lockPatchRows already holds each of those rows, so LockOwners re-locks them in that order.
 	owners := []model.Event{issueOwner(key).event("", actor, nil)}
 	ownerKeys := map[string]bool{key: true}
 	addOwner := func(parentKey *string) {
