@@ -1,4 +1,4 @@
-// Package rules parses agent-secret-rules.yaml (see the shared broker contract) and answers
+// Package rules parses agent-secret-rules.yaml (packages/envoy/AGENTS.md describes it) and answers
 // "what happens when this requester asks for this secret". Unknown keys, incomplete rules,
 // entries no requester could ever satisfy, and two requester entries that match the same caller
 // are refused at parse time, so a second entry can never silently remove an approval requirement

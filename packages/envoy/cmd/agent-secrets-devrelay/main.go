@@ -212,7 +212,7 @@ func cmdDecide(approve bool, args []string, stdout, stderr io.Writer) int {
 
 // cmdMachineApprove resolves a pending machine login by its typed code, as Dispatch's
 // machine-login page does, then decides that record with the same code: the code is the only
-// thing that selects a machine login (ruling 13).
+// thing that selects a machine login.
 func cmdMachineApprove(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("agent-secrets-devrelay machine-approve", flag.ContinueOnError)
 	fs.SetOutput(stderr)

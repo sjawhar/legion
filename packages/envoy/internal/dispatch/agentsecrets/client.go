@@ -1,5 +1,5 @@
 // Package agentsecrets relays Dispatch's credential-request UI to the secrets broker's
-// UI-bearer API (the shared broker contract, Authentication item 3). Reads and the machine-login
+// UI-bearer API (its UI routes: https://sjawhar.github.io/legion/broker/reference/api/). Reads and the machine-login
 // lookup carry and return
 // json.RawMessage, so a broker read-shape change never requires a Dispatch code change. Every
 // decision (approve, deny, revoke) instead carries a Decision Dispatch builds itself: its

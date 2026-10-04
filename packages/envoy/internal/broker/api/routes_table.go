@@ -69,10 +69,9 @@ type apiRoute struct {
 }
 
 // routes is the one list of the broker's routes; a new route is a new row here, never a bare
-// mux.HandleFunc. The contract for every row is the shared broker contract. The comment above
-// each row says what the
-// route does; the broker's generated HTTP reference (cmd/broker-refgen) prints it and
-// refuses a row without one.
+// mux.HandleFunc. The comment above each row says what the route does; the broker's generated
+// HTTP reference (cmd/broker-refgen, published at
+// https://sjawhar.github.io/legion/broker/reference/api/) prints it and refuses a row without one.
 func routes() []apiRoute {
 	return []apiRoute{
 		// Enroll a box's, host session's or pod's signing key under the caller's machine credential.

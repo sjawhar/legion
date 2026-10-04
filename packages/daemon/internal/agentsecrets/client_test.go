@@ -15,8 +15,8 @@ import (
 	"time"
 )
 
-// fakeBroker is the launcher-credential and enrollment routes of the shared broker contract
-// as a fake: it captures every login request
+// fakeBroker is the broker's launcher-credential and enrollment routes (its HTTP API reference:
+// https://sjawhar.github.io/legion/broker/reference/api/) as a fake: it captures every login request
 // object's claims and every enrollment-route request's headers and body, and answers exactly
 // what the test configures. It never honors an Authorization header — the whole point of this
 // task is that one is never sent any more.

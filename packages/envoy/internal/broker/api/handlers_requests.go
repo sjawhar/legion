@@ -12,7 +12,7 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/rules"
 )
 
-// createRequestBody is POST /v1/requests's exact shape in the shared broker contract: a signed
+// createRequestBody is POST /v1/requests's exact shape: a signed
 // request object plus an optional,
 // unsigned session_id (wake-only). The v8 "secrets"/"reason"/"issue" top-level fields are gone —
 // they now live inside the signed request object itself.

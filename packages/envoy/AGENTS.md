@@ -1674,7 +1674,7 @@ ALREADY_ENROLLED`, and the rules never see the slot: every slot of a pod matches
 service account alone. Migration 0007 is forward-only: an older broker binary's conflict lookup
 reads one live row per runtime id, unsafe once a pod holds two slots, so the binary is never rolled
 back past it once a slotted enrollment exists. `internal/broker/rules` evaluates
-`agent-secret-rules.yaml` policy per request (the broker's design overview is its contract; a
+`agent-secret-rules.yaml` policy per request (a
 file that still has an `approvers:` section is refused, naming the removal); `internal/broker/proof`
 authenticates a session's or a launcher's signed request against its live enrollment or
 credential; `internal/broker/machine` decides typed-code machine logins and mints the launcher
@@ -1830,8 +1830,8 @@ a documented `exit*` constant or another such function's result. The CLI referen
 binaries' own `--help`, so every form must answer `-h` with exit 0.
 
 `internal/broker/api/routes_table.go`'s `routes()` is the one list of the broker's 19 HTTP routes —
-a new route is a new row there, never a bare `mux.HandleFunc` — and its own comment says the
-contract for every row is the broker's design overview. Each row's handler is
+a new route is a new row there, never a bare `mux.HandleFunc` — and the comment above each row is
+what the generated HTTP reference (`/legion/broker/reference/api/` on the docs site) prints. Each row's handler is
 wrapped by the adapter for its authentication (`public`, `launcherAuth`, `sessionAuth`, `uiAuth`),
 which fixes both the credential `server.authenticate` checks and the caller the handler receives (a
 launcher `enroll.Credential`, an enrollment id, or nothing at all for a UI route — the UI bearer
@@ -1893,8 +1893,8 @@ still-live grant covering the exact same name set (`reuseLiveGrant`: no new requ
 as long as the current rules still allow it and the grant's whole chain still verifies), then
 evaluates the rules per name: any `deny` denies the whole request with no record written at all; a
 name no rule mentions at all aborts the whole call with `rules.ErrUnknownSecret` (`400
-UNKNOWN_SECRET`, per the broker's design overview) instead of being folded into an ordinary
-`deny` decision — no request row is written either, matching the "at record time" wording; a name
+UNKNOWN_SECRET`) instead of being folded into an ordinary
+`deny` decision — no request row is written either, so the name is refused at record time; a name
 needing approval that names a *different* approver than an already-approval-needing name in the
 same request is refused `400 MIXED_APPROVERS`; when every name is decided (`granted`/`denied`) with
 nothing pending, the request and, if granted, its grant are written with no record; a request
@@ -1945,7 +1945,7 @@ eight-symbol confirmation code (`XXXX-XXXX`) and a separate opaque
 (keyed by the pending id's own SHA-256 hash, never the raw capability). The operator's UI resolves a
 pending login by that human-readable code alone (`LookupByCode` / `POST /v1/machine-logins/lookup`)
 — never the machine's opaque pending id — and this is the *only* route that selects a machine
-record (ruling 13: a direct link can never approve a machine login, only the typed code selects
+record (a direct link can never approve a machine login, only the typed code selects
 it), so `code` is required and checked again on the decision itself, before the approver
 (`400 CODE_REQUIRED` / `403 CODE_MISMATCH`). `ApplyDecision` locks the record's row (`for no key
 update`, which an event insert's foreign-key check does not wait on), refuses any login but the

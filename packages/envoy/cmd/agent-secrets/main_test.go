@@ -73,7 +73,7 @@ func (c *brokerCounters) holdPendingPolls(gate chan struct{}) {
 	c.pendingPoll = gate
 }
 
-// fakeBroker serves just enough of the shared broker contract for the exec-form and --json
+// fakeBroker serves just enough of the broker's HTTP API for the exec-form and --json
 // tests: POST /v1/requests decodes the signed request object CreateRequest posts (verifying it
 // with record.VerifyRequestObject against the fake's own URL as audience — a real, non-stubbed
 // check, since the wire shape under test IS that signed object) and routes on its first
@@ -810,7 +810,7 @@ func TestSelfJSONPrintsExactlyOneContractObjectNamingTheIssuedEnrollment(t *test
 	}
 }
 
-// TestRequestSignsARequestObject pins the shared broker contract's request shape: POST /v1/requests
+// TestRequestSignsARequestObject pins the broker's request shape: POST /v1/requests
 // posts a signed request object (record.Sign, via Signer.SignRequestObject) instead of plain
 // top-level "secrets"/"reason"/"issue" fields. The fake broker asserts the body is exactly
 // {"request": <jws>, "session_id": null}, verifies the JWS with record.VerifyRequestObject

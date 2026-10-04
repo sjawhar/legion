@@ -1,5 +1,5 @@
-// contract_test.go is Task 2's contract layer (the shared broker contract's own lesson: "every
-// fake had been built from the client's assumption"): it mounts the real broker handlers
+// contract_test.go is the contract layer (built because every fake had been built from the
+// client's assumption): it mounts the real broker handlers
 // (brokerapi.Register with real services on
 // BROKER_TEST_DATABASE_URL, exactly as the broker/api tests do)
 // behind an httptest.Server, wires Dispatch's own routes to relay to it, and drives every UI
