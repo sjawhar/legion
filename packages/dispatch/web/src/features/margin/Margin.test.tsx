@@ -5,7 +5,7 @@ import { type ReactNode, useEffect, useState } from "react";
 import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
 
 import { commentDeliveryFields } from "../../__tests__/comment-fixture";
-import { api } from "../../api/client";
+import { ApiError, api } from "../../api/client";
 import type { Ask, Comment, IssueDetails } from "../../api/types";
 import type { RetypeOutcome } from "../doc/editor";
 import { buildIssuePath, buildProjectPath } from "../refs/routes";
@@ -51,6 +51,18 @@ const unanchoredAsk: Ask = {
 };
 
 const markComposerAnchor = { artifact: "artifact-1", mark_id: "m-1", quote: "selected" };
+
+/** A margin ask card by its ask, in the group it is listed under: open and waiting on the reader,
+ *  or decided. Both groups are one keyed list, so the group is the card's own attribute. */
+function marginAskCard(id: string, section: "needs-you" | "decided"): Promise<HTMLElement> {
+  return waitFor(() => {
+    const card = document.querySelector<HTMLElement>(
+      `[data-margin-item="${id}"][data-margin-section="${section}"]`
+    );
+    if (card === null) throw new Error(`no ${section} card for ${id}`);
+    return card;
+  });
+}
 
 function MarkComposerProbe(): ReactNode {
   const { composeForMark } = useMargin();
@@ -376,7 +388,8 @@ test("Margin puts an unanchored open ask under Needs you and sends its answer", 
   );
 
   try {
-    const needsYou = await screen.findByRole("region", { name: "Needs you" });
+    expect(await screen.findByRole("heading", { name: "Needs you" })).toBeTruthy();
+    const needsYou = await marginAskCard(unanchoredAsk.id, "needs-you");
     expect(await within(needsYou).findByText(unanchoredAsk.question)).toBeTruthy();
     expect(within(needsYou).getAllByRole("time")).toHaveLength(1);
     expect(within(needsYou).queryByLabelText("Your answer")).toBeNull();
@@ -399,7 +412,10 @@ test("Margin puts an unanchored open ask under Needs you and sends its answer", 
   }
 });
 
-test("Margin clears an answered anchored ask from Needs you without an event stream", async () => {
+// The answered card moves from Needs you to the decided asks in place - one keyed list - so its
+// card is the one the reader was in, with whatever they had started in it (`threads.e2e.ts` types
+// a reply there), rather than a fresh mount of it.
+test("Margin moves an answered anchored ask out of Needs you in place, without an event stream", async () => {
   const queryClient = new QueryClient({
     defaultOptions: {
       mutations: { retry: false },
@@ -422,7 +438,8 @@ test("Margin clears an answered anchored ask from Needs you without an event str
   queryClient.setQueryData(["user-state"], {});
   queryClient.setQueryData(["comments", issue.key], []);
   const answerAsk = spyOn(api, "answerAsk").mockResolvedValue(answeredAsk);
-  const listIssueAsks = spyOn(api, "listIssueAsks").mockResolvedValue([answeredAsk]);
+  const refetched = Promise.withResolvers<Ask[]>();
+  const listIssueAsks = spyOn(api, "listIssueAsks").mockImplementation(() => refetched.promise);
   const view = render(
     <MemoryRouter initialEntries={[buildIssuePath({ key: issue.key, kind: "issue" })]}>
       <QueryClientProvider client={queryClient}>
@@ -434,7 +451,7 @@ test("Margin clears an answered anchored ask from Needs you without an event str
   );
 
   try {
-    const needsYou = await screen.findByRole("region", { name: "Needs you" });
+    const needsYou = await marginAskCard(anchoredAsk.id, "needs-you");
     fireEvent.click(await within(needsYou).findByRole("radio", { name: "Ship" }));
     fireEvent.click(within(needsYou).getByRole("button", { name: "Answer" }));
     await waitFor(() =>
@@ -443,12 +460,15 @@ test("Margin clears an answered anchored ask from Needs you without an event str
         expected_edited_at: null,
       })
     );
-    await waitFor(() => expect(screen.queryByRole("region", { name: "Needs you" })).toBeNull());
+    await waitFor(() => expect(listIssueAsks).toHaveBeenCalled());
+    const answered = await within(needsYou).findByTestId(`ask-${anchoredAsk.id}`);
+
+    await act(async () => refetched.resolve([answeredAsk]));
+    await waitFor(() => expect(screen.queryByRole("heading", { name: "Needs you" })).toBeNull());
     expect(screen.getByRole("button", { name: "Open review panel (0 open asks)" })).toBeTruthy();
-    expect(answerAsk).toHaveBeenCalledWith(anchoredAsk.id, {
-      selected: ["Ship"],
-      expected_edited_at: null,
-    });
+    const decided = await marginAskCard(anchoredAsk.id, "decided");
+    expect(decided).toBe(needsYou);
+    expect(within(decided).getByTestId(`ask-${anchoredAsk.id}`)).toBe(answered);
   } finally {
     view.unmount();
     answerAsk.mockRestore();
@@ -882,6 +902,346 @@ test("the margin removes the composer's mark when the composer is cancelled or r
     expect(fake.removed).toEqual(["m-1-ask"]);
   } finally {
     view.unmount();
+  }
+});
+
+// A selection-bar action while the open compose's own send is out cannot take the margin, and
+// the reader sees why: the open compose comes back on screen - here from under the Pinned tab -
+// saying its send is still out, until that send lands.
+test("a newer compose while the open compose's send is out brings that compose back, saying why", async () => {
+  const fake = fakeBridge((markId, kind) => ({ markId: `${markId}-${kind}`, quote: "selected" }));
+  const sent = Promise.withResolvers<Comment>();
+  const createComment = spyOn(api, "createComment").mockImplementation(() => sent.promise);
+  const view = renderMarginWithBridge(fake.bridge);
+
+  try {
+    fireEvent.click(screen.getByRole("button", { name: "Compose first" }));
+    const composer = await screen.findByRole("form", { name: "Comment composer" });
+    fireEvent.change(within(composer).getByLabelText("Comment"), { target: { value: "why?" } });
+    fireEvent.click(within(composer).getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(createComment).toHaveBeenCalledTimes(1));
+    const pinned = screen.getByRole("tab", { name: "Pinned" });
+    fireEvent.click(pinned);
+    await waitFor(() => expect(pinned.getAttribute("aria-selected")).toBe("true"));
+
+    fireEvent.click(screen.getByRole("button", { name: "Compose second" }));
+    await waitFor(() =>
+      expect(screen.getByLabelText("Second composer outcome").textContent).toBe(
+        "the open composer's send is out"
+      )
+    );
+    expect(fake.removed).toEqual(["m-2"]);
+    await waitFor(() =>
+      expect(screen.getByRole("tab", { name: "Comments" }).getAttribute("aria-selected")).toBe(
+        "true"
+      )
+    );
+    const shown = screen.getByRole("form", { name: "Comment composer" });
+    expect(within(shown).getByText("selected")).toBeTruthy();
+    expect(within(shown).getByLabelText<HTMLTextAreaElement>("Comment").value).toBe("why?");
+    expect(
+      screen.getByText("Still sending this one. Select the text again once it's sent.")
+    ).toBeTruthy();
+
+    await act(async () => {
+      sent.resolve({ ...comment, body: "why?" });
+      await sent.promise;
+    });
+    await waitFor(() => {
+      expect(screen.getByLabelText("First composer outcome").textContent).toBe("saved");
+      expect(screen.queryByRole("form", { name: "Comment composer" })).toBeNull();
+    });
+  } finally {
+    view.unmount();
+    createComment.mockRestore();
+  }
+});
+
+function SecondDocumentCompose(): ReactNode {
+  const { composeForMark } = useMargin();
+  const [outcome, setOutcome] = useState("idle");
+  return (
+    <>
+      <button
+        onClick={() => {
+          void composeForMark({
+            anchor: { artifact: "artifact-2", mark_id: "m-3", quote: "elsewhere" },
+            kind: "comment",
+          }).then(
+            () => setOutcome("saved"),
+            (error: unknown) => setOutcome(error instanceof Error ? error.message : String(error))
+          );
+        }}
+        type="button"
+      >
+        Compose on the second document
+      </button>
+      <output aria-label="Second document composer outcome">{outcome}</output>
+    </>
+  );
+}
+
+// Each compose names its own send, so a send the reader left behind with its document holds no
+// compose on the next one, and when it lands it closes and settles nothing there. Leaving with the
+// send out hands the mark to the margin, which keeps it for the send: the editor's promise
+// resolves rather than rejecting, which would take the mark back.
+test("a compose after leaving a document mid-send opens, and that send's landing leaves it open", async () => {
+  const queryClient = new QueryClient({
+    defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+  });
+  queryClient.setQueryData(["issue", issue.key], issue);
+  queryClient.setQueryData(["issue", secondIssue.key], secondIssue);
+  const getIssue = spyOn(api, "getIssue").mockImplementation(async (key) =>
+    key === "CORE-2" ? secondIssue : issue
+  );
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
+  const listIssueAsks = spyOn(api, "listIssueAsks").mockResolvedValue([]);
+  const getMyState = spyOn(api, "getMyState").mockResolvedValue({});
+  const listComments = spyOn(api, "listComments").mockResolvedValue([]);
+  const sent = Promise.withResolvers<Comment>();
+  const createComment = spyOn(api, "createComment").mockImplementation(() => sent.promise);
+
+  const view = render(
+    <MemoryRouter initialEntries={[buildIssuePath({ key: "CORE-1", kind: "issue" })]}>
+      <QueryClientProvider client={queryClient}>
+        <MarginProvider>
+          <MarkComposerProbe />
+          <SecondDocumentCompose />
+          <NavigateToSecondIssue />
+          <Margin />
+        </MarginProvider>
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+
+  try {
+    fireEvent.click(screen.getByRole("button", { name: "Compose first" }));
+    const first = await screen.findByRole("form", { name: "Comment composer" });
+    fireEvent.change(within(first).getByLabelText("Comment"), { target: { value: "why?" } });
+    fireEvent.click(within(first).getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(createComment).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole("button", { name: "Open second issue" }));
+    await waitFor(() =>
+      expect(screen.getByLabelText("First composer outcome").textContent).toBe("saved")
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Compose on the second document" }));
+    const second = await screen.findByRole("form", { name: "Comment composer" });
+    expect(within(second).getByText("elsewhere")).toBeTruthy();
+    fireEvent.change(within(second).getByLabelText("Comment"), {
+      target: { value: "Second draft" },
+    });
+
+    await act(async () => {
+      sent.resolve({ ...comment, body: "why?" });
+      await sent.promise;
+    });
+    await waitFor(() => expect(queryClient.isMutating()).toBe(0));
+    const still = screen.getByRole("form", { name: "Comment composer" });
+    expect(within(still).getByText("elsewhere")).toBeTruthy();
+    expect(within(still).getByLabelText<HTMLTextAreaElement>("Comment").value).toBe("Second draft");
+    expect(screen.getByLabelText("Second document composer outcome").textContent).toBe("idle");
+  } finally {
+    view.unmount();
+    getIssue.mockRestore();
+    getInbox.mockRestore();
+    listIssueAsks.mockRestore();
+    getMyState.mockRestore();
+    listComments.mockRestore();
+    createComment.mockRestore();
+  }
+});
+
+function NavigateToFirstIssue(): ReactNode {
+  const navigate = useNavigate();
+  return (
+    <button
+      onClick={() => navigate(buildIssuePath({ key: "CORE-1", kind: "issue" }))}
+      type="button"
+    >
+      Back to the first issue
+    </button>
+  );
+}
+
+// A compose whose document the reader leaves while its send is out is held: its composer stays,
+// hidden, and so does the mark the send names. A refusal while the reader is away hands the draft
+// back to it, and coming back finds both, the open compose again.
+test("a compose left mid-send keeps its draft, its refusal and its mark for the reader's return", async () => {
+  const fake = fakeBridge((markId, kind) => ({ markId: `${markId}-${kind}`, quote: "selected" }));
+  const queryClient = new QueryClient({
+    defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+  });
+  queryClient.setQueryData(["issue", issue.key], issue);
+  queryClient.setQueryData(["issue", secondIssue.key], secondIssue);
+  const getIssue = spyOn(api, "getIssue").mockImplementation(async (key) =>
+    key === "CORE-2" ? secondIssue : issue
+  );
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
+  const listIssueAsks = spyOn(api, "listIssueAsks").mockResolvedValue([]);
+  const getMyState = spyOn(api, "getMyState").mockResolvedValue({});
+  const listComments = spyOn(api, "listComments").mockResolvedValue([]);
+  const sent = Promise.withResolvers<Comment>();
+  const createComment = spyOn(api, "createComment").mockImplementation(() => sent.promise);
+
+  const view = render(
+    <MemoryRouter initialEntries={[buildIssuePath({ key: "CORE-1", kind: "issue" })]}>
+      <QueryClientProvider client={queryClient}>
+        <MarginProvider>
+          <RegisterBridge bridge={fake.bridge} />
+          <MarkComposerProbe />
+          <NavigateToSecondIssue />
+          <NavigateToFirstIssue />
+          <Margin />
+        </MarginProvider>
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+
+  try {
+    fireEvent.click(screen.getByRole("button", { name: "Compose first" }));
+    const first = await screen.findByRole("form", { name: "Comment composer" });
+    fireEvent.change(within(first).getByLabelText("Comment"), { target: { value: "why?" } });
+    fireEvent.click(within(first).getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(createComment).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(screen.getByRole("button", { name: "Open second issue" }));
+    await waitFor(() =>
+      expect(screen.queryByRole("form", { name: "Comment composer" })).toBeNull()
+    );
+    await act(async () => {
+      sent.reject(new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" }));
+      await sent.promise.catch(() => {});
+    });
+    await waitFor(() => expect(queryClient.isMutating()).toBe(0));
+
+    fireEvent.click(screen.getByRole("button", { name: "Back to the first issue" }));
+    const back = await screen.findByRole("form", { name: "Comment composer" });
+    expect(within(back).getByText("selected")).toBeTruthy();
+    expect(within(back).getByLabelText<HTMLTextAreaElement>("Comment").value).toBe("why?");
+    expect(within(back).getByText("Couldn't send — the server is down")).toBeTruthy();
+    // The mark stayed for the send. The editor's promise resolved when the reader left: a
+    // rejection would take the mark back.
+    expect(fake.removed).toEqual([]);
+    expect(screen.getByLabelText("First composer outcome").textContent).toBe("saved");
+  } finally {
+    view.unmount();
+    getIssue.mockRestore();
+    getInbox.mockRestore();
+    listIssueAsks.mockRestore();
+    getMyState.mockRestore();
+    listComments.mockRestore();
+    createComment.mockRestore();
+  }
+});
+
+// Two composes, each on its own document, each with its send out: the reader goes back and forth
+// between the documents. Whichever document is shown, a newer selection-bar action there waits on
+// that document's own send - never another document's, and never none - so its send's outcome
+// lands on the compose and the mark it was sent from.
+test("a newer compose on a document whose send is out waits on it, after visits to another document with a send out", async () => {
+  const fake = fakeBridge((markId, kind) => ({ markId: `${markId}-${kind}`, quote: "selected" }));
+  const queryClient = new QueryClient({
+    defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+  });
+  queryClient.setQueryData(["issue", issue.key], issue);
+  queryClient.setQueryData(["issue", secondIssue.key], secondIssue);
+  const getIssue = spyOn(api, "getIssue").mockImplementation(async (key) =>
+    key === "CORE-2" ? secondIssue : issue
+  );
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
+  const listIssueAsks = spyOn(api, "listIssueAsks").mockResolvedValue([]);
+  const getMyState = spyOn(api, "getMyState").mockResolvedValue({});
+  const listComments = spyOn(api, "listComments").mockResolvedValue([]);
+  const firstSend = Promise.withResolvers<Comment>();
+  const secondSend = Promise.withResolvers<Comment>();
+  const sends = [firstSend.promise, secondSend.promise];
+  const createComment = spyOn(api, "createComment").mockImplementation(() => {
+    const next = sends.shift();
+    if (next === undefined) throw new Error("no send left to answer");
+    return next;
+  });
+
+  const view = render(
+    <MemoryRouter initialEntries={[buildIssuePath({ key: "CORE-1", kind: "issue" })]}>
+      <QueryClientProvider client={queryClient}>
+        <MarginProvider>
+          <RegisterBridge bridge={fake.bridge} />
+          <MarkComposerProbe />
+          <SecondDocumentCompose />
+          <NavigateToSecondIssue />
+          <NavigateToFirstIssue />
+          <Margin />
+        </MarginProvider>
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+  const goTo = async (document: "first" | "second", quote: string) => {
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: document === "first" ? "Back to the first issue" : "Open second issue",
+      })
+    );
+    const shown = await screen.findByRole("form", { name: "Comment composer" });
+    await waitFor(() => expect(within(shown).getByText(quote)).toBeTruthy());
+  };
+
+  try {
+    fireEvent.click(screen.getByRole("button", { name: "Compose first" }));
+    const first = await screen.findByRole("form", { name: "Comment composer" });
+    fireEvent.change(within(first).getByLabelText("Comment"), {
+      target: { value: "On the first" },
+    });
+    fireEvent.click(within(first).getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(createComment).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(screen.getByRole("button", { name: "Open second issue" }));
+    await waitFor(() =>
+      expect(screen.queryByRole("form", { name: "Comment composer" })).toBeNull()
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Compose on the second document" }));
+    const second = await screen.findByRole("form", { name: "Comment composer" });
+    fireEvent.change(within(second).getByLabelText("Comment"), {
+      target: { value: "On the second" },
+    });
+    fireEvent.click(within(second).getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(createComment).toHaveBeenCalledTimes(2));
+
+    await goTo("first", "selected");
+    await goTo("second", "elsewhere");
+    await goTo("first", "selected");
+
+    fireEvent.click(screen.getByRole("button", { name: "Compose second" }));
+    await waitFor(() =>
+      expect(screen.getByLabelText("Second composer outcome").textContent).toBe(
+        "the open composer's send is out"
+      )
+    );
+    expect(fake.removed).toEqual(["m-2"]);
+    const shown = screen.getByRole("form", { name: "Comment composer" });
+    expect(within(shown).getByText("selected")).toBeTruthy();
+    expect(within(shown).getByLabelText<HTMLTextAreaElement>("Comment").value).toBe("On the first");
+    expect(
+      screen.getByText("Still sending this one. Select the text again once it's sent.")
+    ).toBeTruthy();
+
+    await act(async () => {
+      firstSend.reject(new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" }));
+      await firstSend.promise.catch(() => {});
+    });
+    const refused = await screen.findByText("Couldn't send — the server is down");
+    const back = screen.getByRole("form", { name: "Comment composer" });
+    expect(back.contains(refused)).toBe(true);
+    expect(within(back).getByText("selected")).toBeTruthy();
+    expect(within(back).getByLabelText<HTMLTextAreaElement>("Comment").value).toBe("On the first");
+  } finally {
+    view.unmount();
+    getIssue.mockRestore();
+    getInbox.mockRestore();
+    listIssueAsks.mockRestore();
+    getMyState.mockRestore();
+    listComments.mockRestore();
+    createComment.mockRestore();
   }
 });
 

@@ -11,6 +11,8 @@ import {
 } from "../../__tests__/proof-document";
 import { api } from "../../api/client";
 import type { IssueDetails } from "../../api/types";
+import { heldSends } from "../conversation/held-sends";
+import { marginComposeSendKey } from "../margin/margin-context";
 import { colorForLogin } from "./connection";
 
 answerTextReadsWithTheSeededText();
@@ -391,7 +393,28 @@ test("ProofDocument links to the current version when a historic version is unav
 });
 
 test("a selection-bar action opens the margin composer for the mark and settles the library promise", async () => {
-  const { editors, margin, sync, view } = renderProofDocument();
+  const queryClient = createQueryClient();
+  const { editors, margin, sync, view } = renderProofDocument({ queryClient });
+  const createComment = spyOn(api, "createComment").mockResolvedValue(undefined as never);
+  const openCompose = () => {
+    const open = margin.current?.pendingCompose;
+    if (open === undefined) throw new Error("expected an open compose");
+    return open;
+  };
+  /** Sends the compose the margin has open, as its composer's Send does: from then on the
+   *  compose is its send's, and the library's promise resolves. */
+  const sendOpenCompose = () => {
+    const { anchor, kind } = openCompose();
+    heldSends(queryClient).send(marginComposeSendKey(anchor.artifact), {
+      anchor,
+      ask: { multiple: false, options: [], urgency: "med" },
+      draft: { body: "Why?", mentions: [], replacement: "" },
+      edit: undefined,
+      kind,
+      owner: { issueKey: "CORE-1", kind: "issue" },
+      replyTo: null,
+    });
+  };
 
   try {
     await sync();
@@ -415,8 +438,10 @@ test("a selection-bar action opens the margin composer for the mark and settles 
       anchor: { artifact: artifact.id, mark_id: "m-9", quote: "brown" },
       kind: "comment",
     });
-    act(() => margin.current?.settleCompose("saved"));
+    act(() => sendOpenCompose());
     await expect(comment).resolves.toBeUndefined();
+    // The send lands before the next selection-bar action, which would otherwise wait on it.
+    await waitFor(() => expect(queryClient.isMutating()).toBe(0));
 
     let suggest: Promise<void> | undefined;
     act(() => {
@@ -429,8 +454,9 @@ test("a selection-bar action opens the margin composer for the mark and settles 
       throw new Error("The suggestion action did not return a promise.");
     }
     expect(margin.current?.pendingCompose?.kind).toBe("suggestion");
-    act(() => margin.current?.settleCompose("saved"));
+    act(() => sendOpenCompose());
     await expect(suggest).resolves.toBeUndefined();
+    await waitFor(() => expect(queryClient.isMutating()).toBe(0));
 
     let ask: Promise<void> | undefined;
     act(() => {
@@ -443,7 +469,7 @@ test("a selection-bar action opens the margin composer for the mark and settles 
       throw new Error("The ask action did not return a promise.");
     }
     expect(margin.current?.pendingCompose?.kind).toBe("ask");
-    act(() => margin.current?.settleCompose("cancelled"));
+    act(() => margin.current?.cancelCompose(openCompose().seq));
     await expect(ask).rejects.toThrow("composer closed");
 
     let unsupported: unknown;
@@ -460,6 +486,7 @@ test("a selection-bar action opens the margin composer for the mark and settles 
     );
   } finally {
     view.unmount();
+    createComment.mockRestore();
   }
 });
 

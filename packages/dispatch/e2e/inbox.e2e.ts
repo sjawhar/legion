@@ -16,6 +16,7 @@ import {
   replyToCommentDelivery,
 } from "./api";
 import { recordClipboard } from "./clipboard";
+import { needsYouCards } from "./editor";
 import { setPendingCredentialRequests } from "./fake-broker-helpers";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
@@ -374,7 +375,7 @@ test("inbox shows current asks and answers issue asks in the margin", async ({
   if (testInfo.project.name === "iphone") {
     await alicePage.getByRole("button", { name: "Open review panel (2 open asks)" }).click();
   }
-  const needsYou = alicePage.getByRole("region", { name: "Needs you" });
+  const needsYou = needsYouCards(alicePage);
   const newestAskCard = needsYou.getByTestId(`ask-${newestAsk.id}`);
   const shipOption = newestAskCard.getByRole("radio", { name: "Ship" });
   await shipOption.check();
