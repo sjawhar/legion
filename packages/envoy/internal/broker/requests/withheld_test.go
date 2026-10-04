@@ -567,49 +567,109 @@ func TestTheOperatorWhoApprovedAGrantWithholdsWhenRevokingIt(t *testing.T) {
 	}
 }
 
-// TestAnApprovalOfAWithheldSecretOutOfThePolicyIsRefused pins that no one approves a withheld name
-// while the policy does not serve it: {AUTO_TOKEN (automatic), SHARED_KEY (shared, human tier)}
-// waits on anyone, the operator withholds AUTO_TOKEN, and AUTO_TOKEN leaves the namespace. carol's
-// approval is refused NOT_APPROVER, so when AUTO_TOKEN returns with the tags it had, which brings
-// back the policy version the request was made under, nothing she approved can release it; she is
-// still refused, the request still waits, and the operator, AUTO_TOKEN's owner, approves it.
-func TestAnApprovalOfAWithheldSecretOutOfThePolicyIsRefused(t *testing.T) {
-	m, enr, key, operator := newFixture(t)
-	ctx := context.Background()
-	mixed, err := m.Create(ctx, enr, signRequest(t, m, key, "mixed", "AUTO_TOKEN", "SHARED_KEY"), "")
-	if err != nil || mixed.State != "pending" || mixed.RecordID == nil {
-		t.Fatalf("Create(AUTO_TOKEN, SHARED_KEY) = %+v, %v; want pending", mixed, err)
-	}
-	single, err := m.Create(ctx, enr, signRequest(t, m, key, "one", "AUTO_TOKEN"), "")
-	if err != nil || single.GrantID == nil {
-		t.Fatalf("Create(AUTO_TOKEN) = %+v, %v; want granted", single, err)
-	}
-	if err := m.RevokeByApprover(ctx, *single.GrantID, operator); err != nil {
-		t.Fatalf("RevokeByApprover: %v", err)
-	}
-	madeUnder := m.Policy.Get().Version
+// unserved is each way the broker stops serving one of the fixture's secrets to its session: the
+// secret leaves the namespace, or it becomes the registered service's, which the policy denies to
+// every other session.
+var unserved = []struct {
+	name string
+	stop func(t *testing.T, m *Machine, secret string)
+}{
+	{"out of the policy", func(t *testing.T, m *Machine, secret string) {
+		t.Helper()
+		fixtureStore(m).Delete(policytest.ID(secret))
+		retag(t, m)
+	}},
+	{"a service's", func(t *testing.T, m *Machine, secret string) {
+		t.Helper()
+		retag(t, m, policytest.Secret(secret, fixtureService, policy.TierAgent, "service-v1"))
+	}},
+}
 
-	fixtureStore(m).Delete(policytest.ID("AUTO_TOKEN"))
-	retag(t, m)
-	if dec, err := m.ApplyDecision(ctx, *mixed.RecordID, true, carol); !errors.Is(err, record.ErrNotApprover) {
-		t.Fatalf("ApplyDecision(%s) while the withheld AUTO_TOKEN is out of the policy = %+v, %v; want NOT_APPROVER", carol, dec, err)
+// TestAnApprovalOfAWithheldSecretTheBrokerDoesNotServeIsRefused pins that no one approves a
+// withheld name while the broker does not serve it to the session: {AUTO_TOKEN (automatic),
+// SHARED_KEY (shared, human tier)} waits on anyone, the operator withholds AUTO_TOKEN, and
+// AUTO_TOKEN then leaves the namespace or becomes the registered service's. carol's approval and
+// the operator's are refused NOT_APPROVER, so when AUTO_TOKEN returns with the tags it had, which
+// brings back the policy version the request was made under, nothing approved meanwhile can
+// release it; carol is still refused, the request still waits, and the operator, AUTO_TOKEN's
+// owner, approves it.
+func TestAnApprovalOfAWithheldSecretTheBrokerDoesNotServeIsRefused(t *testing.T) {
+	for _, c := range unserved {
+		t.Run(c.name, func(t *testing.T) {
+			m, enr, key, operator := newFixture(t)
+			ctx := context.Background()
+			mixed, err := m.Create(ctx, enr, signRequest(t, m, key, "mixed", "AUTO_TOKEN", "SHARED_KEY"), "")
+			if err != nil || mixed.State != "pending" || mixed.RecordID == nil {
+				t.Fatalf("Create(AUTO_TOKEN, SHARED_KEY) = %+v, %v; want pending", mixed, err)
+			}
+			single, err := m.Create(ctx, enr, signRequest(t, m, key, "one", "AUTO_TOKEN"), "")
+			if err != nil || single.GrantID == nil {
+				t.Fatalf("Create(AUTO_TOKEN) = %+v, %v; want granted", single, err)
+			}
+			if err := m.RevokeByApprover(ctx, *single.GrantID, operator); err != nil {
+				t.Fatalf("RevokeByApprover: %v", err)
+			}
+			madeUnder := m.Policy.Get().Version
+
+			c.stop(t, m, "AUTO_TOKEN")
+			for _, login := range []string{carol, operator} {
+				if dec, err := m.ApplyDecision(ctx, *mixed.RecordID, true, login); !errors.Is(err, record.ErrNotApprover) {
+					t.Fatalf("ApplyDecision(%s) while the withheld AUTO_TOKEN is %s = %+v, %v; want NOT_APPROVER", login, c.name, dec, err)
+				}
+			}
+			retag(t, m, policytest.Secret("AUTO_TOKEN", operator, policy.TierAgent, "auto-v1"))
+			if got := m.Policy.Get().Version; got != madeUnder {
+				t.Fatalf("policy version once AUTO_TOKEN is back = %s, want %s, the one the request was made under", got, madeUnder)
+			}
+			if dec, err := m.ApplyDecision(ctx, *mixed.RecordID, true, carol); !errors.Is(err, record.ErrNotApprover) {
+				t.Fatalf("ApplyDecision(%s) once AUTO_TOKEN is back = %+v, %v; want NOT_APPROVER", carol, dec, err)
+			}
+			if got, err := m.Get(ctx, mixed.ID); err != nil || got.State != "pending" {
+				t.Fatalf("Get(mixed) = %+v, %v; want still pending", got, err)
+			}
+			dec, err := m.ApplyDecision(ctx, *mixed.RecordID, true, operator)
+			if err != nil || dec.GrantID == "" {
+				t.Fatalf("ApplyDecision(%s) = %+v, %v; want granted", operator, dec, err)
+			}
+			if values, _, err := m.Values(ctx, dec.GrantID, enr); err != nil || values["AUTO_TOKEN"] != "auto-v1" {
+				t.Fatalf("Values of the owner's approval = %v, %v; want AUTO_TOKEN released", values, err)
+			}
+		})
 	}
-	retag(t, m, policytest.Secret("AUTO_TOKEN", operator, policy.TierAgent, "auto-v1"))
-	if got := m.Policy.Get().Version; got != madeUnder {
-		t.Fatalf("policy version once AUTO_TOKEN is back = %s, want %s, the one the request was made under", got, madeUnder)
-	}
-	if dec, err := m.ApplyDecision(ctx, *mixed.RecordID, true, carol); !errors.Is(err, record.ErrNotApprover) {
-		t.Fatalf("ApplyDecision(%s) once AUTO_TOKEN is back = %+v, %v; want NOT_APPROVER", carol, dec, err)
-	}
-	if got, err := m.Get(ctx, mixed.ID); err != nil || got.State != "pending" {
-		t.Fatalf("Get(mixed) = %+v, %v; want still pending", got, err)
-	}
-	dec, err := m.ApplyDecision(ctx, *mixed.RecordID, true, operator)
-	if err != nil || dec.GrantID == "" {
-		t.Fatalf("ApplyDecision(%s) = %+v, %v; want granted", operator, dec, err)
-	}
-	if values, _, err := m.Values(ctx, dec.GrantID, enr); err != nil || values["AUTO_TOKEN"] != "auto-v1" {
-		t.Fatalf("Values of the owner's approval = %v, %v; want AUTO_TOKEN released", values, err)
+}
+
+// TestAnUnservedNameTheSessionDoesNotWithholdIsLeftToTheRecordsApprover pins that the refusal
+// above is the withheld name's alone: with AUTO_TOKEN withheld from the session, its request for
+// DEEL_API_KEY, which is not withheld, waits on the operator, and once the broker stops serving
+// DEEL_API_KEY to the session the operator's approval still goes through, left to the record's
+// approver as for any name the policy names no approver for. The grant releases nothing: Values
+// refuses it at its first read.
+func TestAnUnservedNameTheSessionDoesNotWithholdIsLeftToTheRecordsApprover(t *testing.T) {
+	for _, c := range unserved {
+		t.Run(c.name, func(t *testing.T) {
+			m, enr, key, operator := newFixture(t)
+			ctx := context.Background()
+			auto, err := m.Create(ctx, enr, signRequest(t, m, key, "one", "AUTO_TOKEN"), "")
+			if err != nil || auto.GrantID == nil {
+				t.Fatalf("Create(AUTO_TOKEN) = %+v, %v; want granted", auto, err)
+			}
+			if err := m.RevokeByApprover(ctx, *auto.GrantID, operator); err != nil {
+				t.Fatalf("RevokeByApprover: %v", err)
+			}
+			deel, err := m.Create(ctx, enr, signRequest(t, m, key, "deel", "DEEL_API_KEY"), "")
+			if err != nil || deel.State != "pending" || deel.RecordID == nil || recordApprover(t, m, deel) != operator {
+				t.Fatalf("Create(DEEL_API_KEY) = %+v, %v; want a request waiting on %s", deel, err, operator)
+			}
+
+			c.stop(t, m, "DEEL_API_KEY")
+			dec, err := m.ApplyDecision(ctx, *deel.RecordID, true, operator)
+			if err != nil || dec.GrantID == "" {
+				t.Fatalf("ApplyDecision(%s) while DEEL_API_KEY is %s and AUTO_TOKEN is withheld = %+v, %v; want granted: only AUTO_TOKEN is withheld", operator, c.name, dec, err)
+			}
+			if values, _, err := m.Values(ctx, dec.GrantID, enr); !errors.Is(err, ErrGrantNotLive) {
+				t.Fatalf("Values of the approval while DEEL_API_KEY is %s = %v, %v; want ErrGrantNotLive", c.name, values, err)
+			}
+		})
 	}
 }
 
