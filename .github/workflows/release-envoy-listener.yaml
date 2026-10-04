@@ -193,6 +193,9 @@ jobs:
     needs: [build, docker]
     if: github.ref == 'refs/heads/main'
     concurrency:
+      # Only one run at a time by design, and a pending run GitHub drops in favor of a newer one
+      # loses nothing: "Determine publication" below walks forward through already-published
+      # commits for `latest` and bumps the version from the last tag to HEAD, not this commit alone.
       group: release-envoy-listener
       cancel-in-progress: false
     runs-on: ubuntu-24.04
