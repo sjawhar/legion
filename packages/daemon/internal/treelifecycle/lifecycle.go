@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/sjawhar/legion/daemon/internal/wait"
 )
 
 // Authority names the only producers that may open runnable work for a tree. A workflow root is
@@ -32,7 +34,9 @@ type Lifecycle struct {
 }
 
 var (
-	ErrCleanupReserved = errors.New("tree cleanup is reserved")
+	// ErrCleanupReserved is a wait: whatever it refuses runs once the cleanup confirmed and a fresh
+	// admission opened the tree's next epoch.
+	ErrCleanupReserved = wait.New("tree cleanup is reserved")
 	ErrLifecycleAbsent = errors.New("tree lifecycle is absent")
 	ErrLifecycleClosed = errors.New("tree cleanup is confirmed")
 )

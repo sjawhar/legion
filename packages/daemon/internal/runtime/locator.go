@@ -3,7 +3,6 @@ package runtime
 import (
 	"fmt"
 	"strconv"
-	"strings"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 )
@@ -108,7 +107,7 @@ func (l Locator) Validate() error {
 		if want := SandboxIncarnation(l.Sandbox.PodUID, l.Sandbox.Generation); l.Incarnation != want {
 			return fmt.Errorf("locator %s: sandbox incarnation %q, want %q from pod UID and generation", l.Claim, l.Incarnation, want)
 		}
-		role, ok := roleOf(l.Claim)
+		_, role, ok := l.Claim.Cut()
 		if !ok || l.Sandbox.Container != string(role) {
 			return fmt.Errorf("locator %s: sandbox container %q does not match claim role", l.Claim, l.Sandbox.Container)
 		}
@@ -121,13 +120,4 @@ func (l Locator) Validate() error {
 // SandboxIncarnation is the persisted process address for one role generation inside a pod.
 func SandboxIncarnation(podUID string, generation uint64) string {
 	return podUID + "/" + strconv.FormatUint(generation, 10)
-}
-
-func roleOf(token claim.Token) (claim.Role, bool) {
-	for _, role := range claim.Roles {
-		if strings.HasSuffix(string(token), "-"+string(role)) {
-			return role, true
-		}
-	}
-	return "", false
 }

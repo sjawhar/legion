@@ -35,6 +35,8 @@ type Call struct {
 	Known    []runtime.Known
 	Grace    time.Duration
 	Identity runtime.GitIdentity
+	// Tree is CleanupTree's tree.
+	Tree string
 }
 
 // SpawnResult is one scripted answer to Spawn or Resume.
@@ -135,6 +137,9 @@ func (r *Runtime) FailReconcileOrphans(err error) { r.fail("ReconcileOrphans", e
 
 // FailAdoptWorkingCopy makes every later AdoptWorkingCopy return err.
 func (r *Runtime) FailAdoptWorkingCopy(err error) { r.fail("AdoptWorkingCopy", err) }
+
+// FailCleanupTree makes every later CleanupTree return err; nil clears it.
+func (r *Runtime) FailCleanupTree(err error) { r.fail("CleanupTree", err) }
 
 func (r *Runtime) fail(method string, err error) {
 	r.mu.Lock()
@@ -329,6 +334,14 @@ func (r *Runtime) ProvisionsWorkspaces() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.InPod
+}
+
+// CleanupTree records its call and answers what FailCleanupTree set, nil by default.
+func (r *Runtime) CleanupTree(_ context.Context, tree string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls = append(r.calls, Call{Method: "CleanupTree", Tree: tree})
+	return r.failures["CleanupTree"]
 }
 
 // mint is the locator an unscripted spawn or resume hands back: tmux-shaped, because that is a

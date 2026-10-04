@@ -62,6 +62,18 @@ func NewToken(project, issue string, role Role) (Token, error) {
 	return Token(fmt.Sprintf("legion-%s-%s-%s-%s", project, strings.ToLower(match[1]), match[2], role)), nil
 }
 
+// Cut splits a role claim's token into the issue's part, `legion-<project>-<issue>`, which every
+// role claim of the issue shares, and the role the token ends in; ok is false for a token that
+// ends in no role, such as the controller's.
+func (t Token) Cut() (issue string, role Role, ok bool) {
+	for _, role := range Roles {
+		if prefix, found := strings.CutSuffix(string(t), "-"+string(role)); found {
+			return prefix, role, true
+		}
+	}
+	return string(t), "", false
+}
+
 // ControllerToken is the project controller's role token, `legion-<project>-controller`
 // (legion-roles.ts:66-69). project is already a ProjectToken.
 func ControllerToken(project string) Token { return Token("legion-" + project + "-controller") }

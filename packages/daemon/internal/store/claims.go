@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/phase"
@@ -27,9 +28,9 @@ const claimSelect = `select c.token, c.project, c.tree, c.issue, c.role, c.gener
 	d.delivery_id, d.task, d.phase, d.generation, d.queued_at, d.delivered_at, d.marked_by, d.confirmed_at, d.interrupted
 	from claims c left join pending_task_deliveries d on d.claim_token = c.token`
 
-// PutClaim persists an already-admitted claim's ordinary state. Production new/reactivated claims
-// use AdmitClaim through supervisor.Create; this low-level method remains for migrations and test
-// fixtures that deliberately write historical state without creating runnable work.
+// PutClaim persists an admitted claim's state: every write a claim's machine makes. A claim enters
+// the store through AdmitClaim, which binds it to its tree's open lifecycle first; PutClaim alone
+// writes historical state in migrations and test fixtures.
 func (s *Store) PutClaim(ctx context.Context, c supervise.Claim) error {
 	return putClaim(ctx, s.pool, c)
 }
@@ -118,6 +119,46 @@ func (s *Store) TreeHasSessions(ctx context.Context, project, tree string) (bool
 		return false, fmt.Errorf("read retained sessions of tree %s: %w", tree, err)
 	}
 	return exists, nil
+}
+
+// claimMayRun is the stored claim that may still hold a process: one in a state that runs, or one
+// that still records a locator.
+const claimMayRun = `(state not in ('suspended', 'failed', 'retired') or locator is not null)`
+
+// StoredClaimMayRun is whether the stored claim of token may still hold a process and was last
+// started no later than row. A stop row that finds no machine for such a claim is a wait: the
+// supervisor persists a claim before it publishes its machine, and the stop is for that machine.
+func (s *Store) StoredClaimMayRun(ctx context.Context, token claim.Token, row int64) (bool, error) {
+	var may bool
+	err := s.pool.QueryRow(ctx, `select exists (select 1 from claims where token = $1 and last_start_row <= $2 and `+claimMayRun+`)`,
+		string(token), row).Scan(&may)
+	if err != nil {
+		return false, fmt.Errorf("read stored claim %s: %w", token, err)
+	}
+	return may, nil
+}
+
+// HasLegacySandboxClaims is a raw JSON census used before Claims unmarshals locators. A legacy
+// per-claim Sandbox locator lacks podUid/container/generation, so the normal strict locator
+// decoder would refuse first without naming the layout migration that is needed.
+func (s *Store) HasLegacySandboxClaims(ctx context.Context, project string) (bool, error) {
+	var legacy bool
+	err := s.pool.QueryRow(ctx, `select exists (
+		select 1 from claims where project = $1 and locator->>'runtime' = 'sandbox'
+		and (locator->'sandbox'->>'podUid' is null or locator->'sandbox'->>'container' is null
+			or locator->'sandbox'->>'generation' is null)
+	)`, project).Scan(&legacy)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "42P01" {
+			// A brand-new database has no claims table until the first migration, and therefore
+			// cannot contain a legacy locator. This preserves the no-schema-write-before-census
+			// ordering for existing databases.
+			return false, nil
+		}
+		return false, fmt.Errorf("census legacy Sandbox claims for %s: %w", project, err)
+	}
+	return legacy, nil
 }
 
 // ClaimByBootTokenHash finds the claim whose current launch minted the boot token with this hash

@@ -2,14 +2,15 @@ package supervise
 
 import (
 	"context"
-	"errors"
 	"fmt"
+
+	"github.com/sjawhar/legion/daemon/internal/wait"
 )
 
 // ErrQuiesceHeld answers a start that takes over the issue's phase while the claim whose phase it
 // was may still be in a turn (Quiesce). It is a wait, not a refusal: the caller keeps the start and
 // asks again, and the claim answers nil once that turn is over.
-var ErrQuiesceHeld = errors.New("the start waits for the outgoing worker's interrupted turn to end")
+var ErrQuiesceHeld = wait.New("the start waits for the outgoing worker's interrupted turn to end")
 
 // interrupt is the turn Quiesce interrupts: the newest start that asked, the launch generation it
 // asked of, and whether the agent has taken the abort.

@@ -2,14 +2,15 @@ package supervise
 
 import (
 	"context"
-	"errors"
 	"fmt"
+
+	"github.com/sjawhar/legion/daemon/internal/wait"
 )
 
 // ErrSuspendHeld answers a suspension that arrived while the claim's agent is in a turn: the
 // machine holds it and suspends the claim itself (holdSuspension). It is not a refusal. A caller
 // that keeps the request durably asks again, and the claim answers nil once it is suspended.
-var ErrSuspendHeld = errors.New("the suspension is held for the agent's turn to end")
+var ErrSuspendHeld = wait.New("the suspension is held for the agent's turn to end")
 
 // suspend stops the process and keeps the session. A suspension ends the claim's phase (the
 // workflow suspends a worker only when its issue closes or its run is over), so a task

@@ -23,6 +23,8 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/natsauth"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/sandbox"
+	"github.com/sjawhar/legion/daemon/internal/store"
+	"github.com/sjawhar/legion/daemon/internal/stream"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
@@ -305,15 +307,21 @@ func quantities(q config.Quantities, key string) (corev1.ResourceList, error) {
 
 // sandboxRuntime builds the Agent Sandbox runtime, whose informers run for ctx (supervision's
 // lifetime), over the worker stream and with the workflow's implement App as every pod's
-// provisioning token source. Boot has already run the cluster check (plan.clusterCheck): Agent
-// Sandbox is installed and no per-claim Sandbox of the layout before issue pods remains.
+// provisioning token source, and registers its launcher acceptor on the stream listener. Boot has
+// already run the cluster check (plan.clusterCheck): Agent Sandbox is installed and no per-claim
+// Sandbox of the layout before issue pods remains.
 func sandboxRuntime(rc *rest.Config, opts sandbox.Options) runtimeFactory {
-	return func(ctx context.Context, conns runtime.Conns, stream string, apps appauth.Tokens) (runtime.Runtime, error) {
-		opts.Conns, opts.StreamURL = conns, stream
+	return func(ctx context.Context, listener *stream.Listener, address string, apps appauth.Tokens, st *store.Store) (runtime.Runtime, error) {
+		opts.Conns, opts.StreamURL, opts.Store = listener, address, st
 		if apps != nil {
 			opts.Tokens = implementTokens{apps}
 		}
-		return sandbox.New(ctx, rc, opts)
+		rt, err := sandbox.New(ctx, rc, opts)
+		if err != nil {
+			return nil, err
+		}
+		listener.SetLauncherResolver(rt.LauncherResolver())
+		return rt, nil
 	}
 }
 

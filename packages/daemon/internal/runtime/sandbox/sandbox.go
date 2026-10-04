@@ -42,9 +42,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
-	"github.com/sjawhar/legion/daemon/internal/store"
-	"github.com/sjawhar/legion/daemon/internal/stream"
-	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
 )
 
 var _ runtime.Runtime = (*Runtime)(nil)
@@ -79,6 +76,7 @@ type Runtime struct {
 	probeInterval                           time.Duration
 	adoptTimeout                            time.Duration
 	tokens                                  ProvisionTokens
+	store                                   Store
 	conns                                   runtime.Conns
 	launchers                               *launchers
 	launcherAuth                            launcherCredentials
@@ -101,20 +99,12 @@ type Runtime struct {
 	watch map[claim.Token]runtime.Locator
 	// observer is the running Observe, nil when none runs.
 	observer *observer
-	// issues serializes first creation and replacement of one issue pod. Tree initialization stays
-	// separately serialized because child issue pods share the root's clone and PVC.
+	// issues serializes first creation, replacement and orphan deletion of one issue pod. Tree
+	// initialization stays separately serialized because child issue pods share the root's clone
+	// and PVC.
 	issues map[string]chan struct{}
 	// trees serializes the launches of one tree's pods (relaunch.go, awaitTreeInitialized).
 	trees map[string]chan struct{}
-	// launchedMu guards launched: the Sandbox names of the claims this runtime has launched and not
-	// released, which the orphan sweep keeps whether or not its known set names them. The sweep
-	// holds launchedMu from its check through its delete (deleteOrphan).
-	launchedMu sync.Mutex
-	launched   map[string]bool
-	// resourceStore is injected by daemon boot before any claim launches. Unit rigs explicitly
-	// launch without the durable resource capability through a test-only option.
-	resourceStore            *store.Store
-	withoutResourceStoreTest bool
 }
 
 // New builds the runtime from opts, starts its Sandbox and pod informers for ctx's lifetime, and
@@ -136,20 +126,7 @@ func New(ctx context.Context, rc *rest.Config, opts Options) (*Runtime, error) {
 	if err := r.start(ctx, dyn, kube); err != nil {
 		return nil, err
 	}
-
-	if listener, ok := opts.Conns.(*stream.Listener); ok {
-		listener.SetLauncherResolver(r.LauncherResolver())
-	}
 	return r, nil
-}
-
-// SetIssueResourceStore injects the daemon's durable capability before supervision launches any
-// role. It is deliberately not an Option: production boot owns the store; unit rigs use the
-// explicit test-only skip.
-func (r *Runtime) SetIssueResourceStore(resources *store.Store) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.resourceStore = resources
 }
 
 // CensusLegacyIssueSandboxes is the Kubernetes half of the issue-pod layout fence. Daemon boot
@@ -221,6 +198,8 @@ func configure(opts Options) (*Runtime, error) {
 		return refuse("the registration deadline must be a positive number of boot intervals")
 	case opts.Tokens == nil:
 		return refuse("no provisioning token source")
+	case opts.Store == nil:
+		return refuse("no store")
 	case opts.Conns == nil:
 		return refuse("no connection directory")
 	case (opts.DispatchURL == "") != (opts.DispatchToken == ""):
@@ -271,10 +250,9 @@ func configure(opts Options) (*Runtime, error) {
 		pod: opts.Pod, providerKeys: opts.ProviderKeys, providersSecrets: slices.Sorted(slices.Values(opts.ProvidersSecrets)), natsUser: opts.NATSUser,
 		bootTimeout: opts.BootTimeout, bootIntervals: opts.BootIntervals, terminationGrace: opts.TerminationGrace,
 		probeInterval: opts.ProbeInterval, adoptTimeout: opts.AdoptTimeout, agent: opts.Agent,
-		tokens: opts.Tokens, conns: opts.Conns, now: opts.Now, log: opts.Log,
+		tokens: opts.Tokens, store: opts.Store, conns: opts.Conns, now: opts.Now, log: opts.Log,
 		changed: make(chan struct{}), watch: map[claim.Token]runtime.Locator{}, issues: map[string]chan struct{}{},
-		trees: map[string]chan struct{}{}, launched: map[string]bool{}, launchers: newLaunchers(),
-		withoutResourceStoreTest: opts.SkipIssueResourceStoreForTest,
+		trees: map[string]chan struct{}{}, launchers: newLaunchers(),
 	}
 	if len(r.agent) == 0 {
 		r.agent = []string{defaultAgent}
@@ -517,30 +495,17 @@ func (r *Runtime) sandboxClient() dynamic.ResourceInterface {
 	return r.dyn.Resource(sandboxGVR).Namespace(r.namespace)
 }
 
-// locatorFor is one role process's address in an issue pod.
-func (r *Runtime) locatorFor(token claim.Token, uid types.UID, generation uint64) runtime.Locator {
-	container, ok := roleContainer(token)
-	if !ok {
-		panic(fmt.Sprintf("sandbox runtime: claim %s has no role container", token))
-	}
+// locatorFor is one role process's address in an issue pod: role's container.
+func (r *Runtime) locatorFor(token claim.Token, role claim.Role, uid types.UID, generation uint64) runtime.Locator {
 	podUID := string(uid)
 	return runtime.Locator{
 		Runtime:     runtime.RuntimeSandbox,
 		Claim:       token,
 		Incarnation: runtime.SandboxIncarnation(podUID, generation),
 		Sandbox: &runtime.SandboxLocator{
-			Namespace: r.namespace, Name: SandboxName(token), PodUID: podUID, Container: container, Generation: generation,
+			Namespace: r.namespace, Name: SandboxName(token), PodUID: podUID, Container: string(role), Generation: generation,
 		},
 	}
-}
-
-func roleContainer(token claim.Token) (string, bool) {
-	for _, role := range claim.Roles {
-		if strings.HasSuffix(string(token), "-"+string(role)) {
-			return string(role), true
-		}
-	}
-	return "", false
 }
 
 // checkLocator refuses a locator this runtime did not mint.
@@ -589,17 +554,22 @@ func (r *Runtime) Suspend(ctx context.Context, loc runtime.Locator) error {
 		r.forgetIf(loc)
 		return nil
 	}
-	stop := shimwire.LauncherStop{
-		ID: "stop-" + strconv.FormatUint(loc.Sandbox.Generation, 10), Generation: loc.Sandbox.Generation,
-		GraceMs: int(math.Ceil(r.terminationGrace.Seconds() * 1000)),
-	}
 	stopping, cancel := context.WithTimeout(ctx, r.bootTimeout+r.terminationGrace)
 	defer cancel()
-	if err := r.launchers.stop(stopping, loc.Claim, loc.Sandbox.PodUID, stop); err != nil {
+	if err := r.launchers.stop(stopping, loc.Claim, loc.Sandbox.PodUID, r.stopFrame(loc.Sandbox.Generation)); err != nil {
 		return fmt.Errorf("suspend %s: %w", loc.Claim, err)
 	}
 	r.forgetIf(loc)
 	return nil
+}
+
+// stopFrame stops generation's child within the runtime's stop grace. Its id is the generation's,
+// so a stop the launcher already answered is answered again rather than run twice.
+func (r *Runtime) stopFrame(generation uint64) shimwire.LauncherStop {
+	return shimwire.LauncherStop{
+		ID: "stop-" + strconv.FormatUint(generation, 10), Generation: generation,
+		GraceMs: int(math.Ceil(r.terminationGrace.Seconds() * 1000)),
+	}
 }
 
 // setMode sets the Sandbox's operating mode, fenced to the Sandbox read (a JSON patch whose first
@@ -610,10 +580,9 @@ func (r *Runtime) setMode(ctx context.Context, s *sandbox, mode string) error {
 }
 
 // Release is a claim-scoped operation: it ends at most the recorded role process and forgets the
-// claim from this runtime. It NEVER suspends or deletes the issue Sandbox, even if this runtime
-// currently sees no sibling role. The durable issue-resource lifecycle, fenced against complete
-// stored sibling claims and the issue's close/start generation, is the only owner of issue-pod,
-// Secret and root-PVC deletion.
+// claim from this runtime. It never suspends or deletes the issue Sandbox, even when this runtime
+// sees no sibling role: the issue's Sandbox, its Secrets and, for a root, the tree volume are the
+// tree cleanup's alone (CleanupTree), which runs once every stored claim of the tree has retired.
 func (r *Runtime) Release(ctx context.Context, k runtime.Known) error {
 	if err := k.Validate(); err != nil {
 		return fmt.Errorf("sandbox runtime: release: %w", err)
@@ -624,198 +593,7 @@ func (r *Runtime) Release(ctx context.Context, k runtime.Known) error {
 		}
 	}
 	r.forget(k.Claim)
-	r.disown(k.Claim)
 	return nil
-}
-
-// CleanupIssue deletes one issue only under a prior tree lifecycle reservation. Workflow and
-// authenticated operator entry points reserve that epoch before claim/resource snapshots; a child
-// is confirmed first, while the root's foreground Sandbox deletion confirms its controller-owned
-// blocking PVC dependent under the restricted grant.
-func (r *Runtime) CleanupIssue(ctx context.Context, project, issue, tree string, treeEpoch uint64) error {
-	if project != r.project {
-		return fmt.Errorf("cleanup issue %s: project %s is not runtime project %s", issue, project, r.project)
-	}
-	r.mu.Lock()
-	resources := r.resourceStore
-	r.mu.Unlock()
-	if resources == nil {
-		return errors.New("cleanup issue resources: no durable issue resource store")
-	}
-	resource, began, err := resources.BeginIssueCleanup(ctx, project, issue, tree, treeEpoch)
-	if err != nil {
-		return fmt.Errorf("cleanup issue %s: %w", issue, err)
-	}
-	if !began {
-		return nil
-	}
-	root := resource.Tree == resource.Issue
-	if root {
-		if err := r.refuseTreeChildSandboxes(ctx, resource); err != nil {
-			return err
-		}
-	}
-	reading, cancel := call(ctx)
-	sandbox, err := r.sandboxClient().Get(reading, resource.Sandbox, metav1.GetOptions{})
-	cancel()
-	switch {
-	case apierrors.IsNotFound(err):
-	case err != nil:
-		return fmt.Errorf("cleanup issue %s: read Sandbox %s: %w", issue, resource.Sandbox, err)
-	default:
-		uid, resourceVersion := sandbox.GetUID(), sandbox.GetResourceVersion()
-		options := metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid, ResourceVersion: &resourceVersion}}
-		if root {
-			foreground := metav1.DeletePropagationForeground
-			options.PropagationPolicy = &foreground
-		}
-		deleting, cancel := call(ctx)
-		err = r.sandboxClient().Delete(deleting, resource.Sandbox, options)
-		cancel()
-		if err != nil && !apierrors.IsNotFound(err) {
-			return fmt.Errorf("cleanup issue %s: delete Sandbox %s: %w", issue, resource.Sandbox, err)
-		}
-	}
-	// A root's tree PVC is a blocking controller-owned Sandbox dependent: foreground deletion keeps
-	// the root Sandbox visible until Kubernetes garbage collection deleted that PVC. The restricted
-	// daemon identity has no PVC verb, so Sandbox NotFound is the API confirmation this durable
-	// cleanup requires; no PVC read or delete may weaken the grant.
-	if err := r.awaitSandboxDeleted(ctx, resource.Sandbox); err != nil {
-		return err
-	}
-	r.forgetLauncherCredentials(resource.Sandbox)
-	if root {
-		return resources.ConfirmRootCleanup(ctx, project, issue, tree, resource.CleanupGeneration, treeEpoch)
-	}
-	return resources.ConfirmIssueCleanup(ctx, project, issue, resource.CleanupGeneration)
-}
-
-// CleanupTree runs only under its caller's current reservation of treeEpoch. It first censuses every
-// stored claim of the tree, which after the reservation is the complete population, and is a named
-// wait while any has not retired; then it cleans children before the root. A tree with no root
-// resource record of this epoch confirms its reservation too, so a close before the first root
-// resource cannot leave a barrier that blocks the next explicit admission.
-func (r *Runtime) CleanupTree(ctx context.Context, project, tree string, treeEpoch uint64) error {
-	if project != r.project {
-		return fmt.Errorf("cleanup tree %s: project %s is not runtime project %s", tree, project, r.project)
-	}
-	r.mu.Lock()
-	resources := r.resourceStore
-	r.mu.Unlock()
-	if resources == nil {
-		return errors.New("cleanup tree resources: no durable issue resource store")
-	}
-	if err := resources.CheckTreeCleanupReservation(ctx, project, tree, treeEpoch); err != nil {
-		return fmt.Errorf("cleanup tree %s: %w", tree, err)
-	}
-	// The census reads the whole stored population after the reservation committed, so it
-	// includes a claim that persisted before the reservation but has not admitted resources yet;
-	// such a claim must stop before anything of its tree is deleted.
-	pending, err := resources.PendingTreeClaims(ctx, project, tree)
-	if err != nil {
-		return err
-	}
-	if len(pending) > 0 {
-		return fmt.Errorf("cleanup tree %s: %w: its claims %s have not retired", tree, store.ErrIssueCleanupInProgress, strings.Join(pending, ", "))
-	}
-	issues, err := resources.TreeIssueResources(ctx, project, tree)
-	if err != nil {
-		return err
-	}
-	rootCleaning := false
-	for _, issue := range issues {
-		// A root record whose cleanup an earlier epoch confirmed was not admitted again in this
-		// one: re-admission resets it. Only a root record of this epoch confirms the reservation.
-		if issue.Issue == tree && issue.CleanupConfirmedAt.IsZero() {
-			rootCleaning = true
-		}
-		if err := r.CleanupIssue(ctx, project, issue.Issue, tree, treeEpoch); err != nil {
-			return err
-		}
-	}
-	if !rootCleaning {
-		return resources.ConfirmTreeCleanup(ctx, project, tree, treeEpoch)
-	}
-	return nil
-}
-
-// OpenOperatorTree is the authenticated operator root-start authority. It opens the next durable
-// epoch only after a confirmed cleanup; child operator starts bind the existing epoch instead.
-func (r *Runtime) OpenOperatorTree(ctx context.Context, project, tree string) (uint64, error) {
-	if project != r.project {
-		return 0, fmt.Errorf("open operator tree %s: project %s is not runtime project %s", tree, project, r.project)
-	}
-	r.mu.Lock()
-	resources := r.resourceStore
-	r.mu.Unlock()
-	if resources == nil {
-		return 0, errors.New("open operator tree: no durable issue resource store")
-	}
-	lifecycle, err := resources.OpenTreeLifecycle(ctx, project, tree, treelifecycle.AuthorityOperator)
-	return lifecycle.Epoch, err
-}
-
-// ReserveWorkflowTreeCleanup validates a lingering workflow close before durable cleanup begins.
-func (r *Runtime) ReserveWorkflowTreeCleanup(ctx context.Context, project, tree string, generation uint64) (uint64, bool, error) {
-	resources := r.resourceStore
-	if resources == nil {
-		return 0, false, errors.New("reserve workflow tree cleanup: no durable issue resource store")
-	}
-	lifecycle, reserved, err := resources.ReserveWorkflowTreeCleanup(ctx, project, tree, generation)
-	return lifecycle.Epoch, reserved, err
-}
-
-// ReserveOperatorTreeCleanup is explicit authenticated operator authority, never an overloaded
-// workflow generation value. It reports false, reserving nothing, once that cleanup confirmed.
-func (r *Runtime) ReserveOperatorTreeCleanup(ctx context.Context, project, tree string) (uint64, bool, error) {
-	resources := r.resourceStore
-	if resources == nil {
-		return 0, false, errors.New("reserve operator tree cleanup: no durable issue resource store")
-	}
-	lifecycle, reserved, err := resources.ReserveOperatorTreeCleanup(ctx, project, tree)
-	return lifecycle.Epoch, reserved, err
-}
-
-// refuseTreeChildSandboxes is the API half of the root-last fence: the root's cleanup has begun,
-// so no new child can be admitted, and the API must list no Sandbox of another issue of its tree.
-func (r *Runtime) refuseTreeChildSandboxes(ctx context.Context, root store.IssueResources) error {
-	reading, cancel := call(ctx)
-	defer cancel()
-	list, err := r.sandboxClient().List(reading, metav1.ListOptions{
-		LabelSelector: labelProject + "=" + r.project + "," + labelTree + "=" + labelValue(root.Tree),
-	})
-	if err != nil {
-		return fmt.Errorf("cleanup root issue %s: list its tree's Sandboxes: %w", root.Issue, err)
-	}
-	for _, object := range list.Items {
-		if object.GetName() != root.Sandbox {
-			return fmt.Errorf("cleanup root issue %s: Sandbox %s of its tree still exists; the root Sandbox owns the tree PVC and is deleted last", root.Issue, object.GetName())
-		}
-	}
-	return nil
-}
-
-func (r *Runtime) awaitSandboxDeleted(ctx context.Context, name string) error {
-	deadline := time.NewTimer(r.bootTimeout)
-	defer deadline.Stop()
-	for {
-		reading, cancel := call(ctx)
-		_, err := r.sandboxClient().Get(reading, name, metav1.GetOptions{})
-		cancel()
-		if apierrors.IsNotFound(err) {
-			return nil
-		}
-		if err != nil {
-			return fmt.Errorf("confirm Sandbox %s deletion: %w", name, err)
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-deadline.C:
-			return fmt.Errorf("confirm Sandbox %s deletion: timed out after %s", name, r.bootTimeout)
-		case <-time.After(recheckInterval):
-		}
-	}
 }
 
 // AdoptWorkingCopy has the agent's shim set its working copy's author (the shared `jj metaedit
@@ -842,22 +620,20 @@ func (r *Runtime) AdoptWorkingCopy(ctx context.Context, loc runtime.Locator, id 
 	return nil
 }
 
-// ReconcileOrphans deletes the project's Sandboxes that belong to no known claim, once older than
-// grace — what a crash between creating a Sandbox and persisting its claim leaves behind, or what
-// a claim retired without its release leaves. known is every claim the daemon has not retired, a
-// suspended one included, since its Sandbox holds its session and, for a root, the tree volume.
-// The daemon reads known before it calls this, and a retry after boot sweeps at a grace of 0
-// while claims launch, so a Sandbox this runtime launched and has not released is never an
-// orphan either, known or not: a claim launched after that read is missing from known. The image
+// ReconcileOrphans deletes the project's issue Sandboxes no tree lifecycle owns, once older than
+// grace: a Sandbox whose tree's cleanup confirmed or that has no lifecycle, which a launch whose
+// create reached the API after its tree's cleanup listed it can leave. A Sandbox of a tree whose
+// lifecycle is open or releasing is its cleanup's alone (CleanupTree), whatever claims are known:
+// a launch passes its claim's lifecycle check before it creates a Sandbox, so what this runtime
+// launches is never swept. The decision and the delete run under the issue's launch lock, so a
+// launch that begins meanwhile waits for the delete and then creates the Sandbox afresh. The image
 // probe's Sandbox (labelled legion.dev/probe) is no claim's and never an orphan: the probe deletes
-// it, and its shutdown time has the controller delete it otherwise (probe.go). The located ones
-// join the watch, unless it already holds a newer incarnation of the claim, and are evaluated at
-// once. Nothing here lists Secrets: each goes with its Sandbox.
+// it, and its shutdown time has the controller delete it otherwise (probe.go). known's located
+// claims join the watch, unless it already holds a newer incarnation of the claim, and are
+// evaluated at once. Nothing here lists Secrets: each goes with its Sandbox.
 func (r *Runtime) ReconcileOrphans(ctx context.Context, known []runtime.Known, grace time.Duration) error {
 	var errs []error
-	names := map[string]bool{}
 	for _, k := range known {
-		names[SandboxName(k.Claim)] = true
 		if err := k.Validate(); err != nil {
 			errs = append(errs, fmt.Errorf("reconcile orphans: %w", err))
 			continue
@@ -873,51 +649,48 @@ func (r *Runtime) ReconcileOrphans(ctx context.Context, known []runtime.Known, g
 	}
 	for _, obj := range r.sandboxes.GetStore().List() {
 		u := obj.(*unstructured.Unstructured)
-		if names[u.GetName()] || u.GetLabels()[labelProbe] != "" || u.GetDeletionTimestamp() != nil {
+		if u.GetLabels()[labelProbe] != "" || u.GetDeletionTimestamp() != nil {
 			continue
 		}
 		if age := r.now().Sub(u.GetCreationTimestamp().Time); age < grace {
 			continue
 		}
-		if err := r.deleteOrphan(ctx, u); err != nil {
+		if err := r.sweep(ctx, u); err != nil {
 			errs = append(errs, err)
 		}
 	}
 	return errors.Join(errs...)
 }
 
-// own records that this runtime is launching the claim's Sandbox, before the Sandbox can exist,
-// so the orphan sweep keeps it until the claim is released.
-func (r *Runtime) own(token claim.Token) {
-	r.launchedMu.Lock()
-	defer r.launchedMu.Unlock()
-	r.launched[SandboxName(token)] = true
-}
-
-// disown hands the claim's Sandbox back to the orphan sweep's known-claims rule.
-func (r *Runtime) disown(token claim.Token) {
-	r.launchedMu.Lock()
-	defer r.launchedMu.Unlock()
-	delete(r.launched, SandboxName(token))
-}
-
-// deleteOrphan deletes u, the Sandbox as the store held it, unless this runtime launched its
-// claim and has not released it. launchedMu is held from the check through the delete, so a
-// launch that begins meanwhile waits for the delete and then finds the Sandbox deleted, never
-// losing the one it took up.
-func (r *Runtime) deleteOrphan(ctx context.Context, u *unstructured.Unstructured) error {
-	r.launchedMu.Lock()
-	defer r.launchedMu.Unlock()
-	if r.launched[u.GetName()] {
+// sweep deletes u, the Sandbox as the informer held it, unless its tree's lifecycle owns it. The
+// issue's launch lock is held from the lifecycle read through the delete (lockIssue). A Sandbox
+// whose labels name no issue and tree keys is kept and reported: what cannot be told apart from a
+// live tree's is never deleted.
+func (r *Runtime) sweep(ctx context.Context, u *unstructured.Unstructured) error {
+	issue, tree := u.GetLabels()[labelIssue], u.GetLabels()[labelTree]
+	if !claim.IsIssueKey(issue) || !claim.IsIssueKey(tree) {
+		return fmt.Errorf("reconcile orphans: Sandbox %s names no issue and tree (labels %s=%q, %s=%q); kept", u.GetName(), labelIssue, issue, labelTree, tree)
+	}
+	release, err := r.lockIssue(ctx, issue)
+	if err != nil {
+		return err
+	}
+	defer release()
+	live, err := r.store.TreeLive(ctx, r.project, tree)
+	if err != nil {
+		return fmt.Errorf("reconcile orphans: %w", err)
+	}
+	if live {
 		return nil
 	}
 	deleting, cancel := call(ctx)
 	defer cancel()
 	uid := u.GetUID()
-	err := r.sandboxClient().Delete(deleting, u.GetName(), metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}})
+	err = r.sandboxClient().Delete(deleting, u.GetName(), metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}})
 	switch {
 	case err == nil:
-		r.log.Info("sandbox runtime: deleted an orphaned sandbox", "sandbox", u.GetName(), "uid", uid)
+		r.forgetLauncherCredentials(u.GetName())
+		r.log.Info("sandbox runtime: deleted an orphaned sandbox", "sandbox", u.GetName(), "uid", uid, "tree", tree)
 	case apierrors.IsNotFound(err) || apierrors.IsConflict(err):
 	default:
 		return fmt.Errorf("reconcile orphans: delete sandbox %s: %w", u.GetName(), err)
