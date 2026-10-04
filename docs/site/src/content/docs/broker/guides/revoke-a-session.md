@@ -11,9 +11,9 @@ pending. Ending a grant stops the session reading its values again; a command al
 a value keeps it.
 
 Revoking a grant ends a session's access only to a secret someone must approve: the session's next
-request for it waits for that approval again. A grant the rules gave automatically comes straight
-back: the same session's next request for that secret is granted at once, under a new grant. To end
-access to an automatic secret, [change its rule](#end-access-to-an-automatic-secret).
+request for it waits for that approval again. A grant given automatically comes straight back: the
+same session's next request for that secret is granted at once, under a new grant. To end access to
+an automatic secret, [change its tags](#end-access-to-an-automatic-secret).
 
 ## Revoke a grant in Dispatch
 
@@ -21,7 +21,7 @@ Dispatch's **Settings** page lists your **Live grants**: the live grants you app
 sessions you operate, each with its enrollment, names, approver, and when it was created and
 expires. Click **Revoke** to end one at once; the session's next read of it is refused
 `GRANT_NOT_LIVE`. The broker allows it when you are the grant's approver or its session's operator,
-and refuses anyone else `NOT_APPROVER`. A grant the rules gave automatically has no approver and is
+and refuses anyone else `NOT_APPROVER`. A grant given automatically has no approver and is
 not in that list. Its operator can revoke it through the same broker route, with the grant id the
 session's `agent-secrets self` prints, but that does not end access: the session's next request for
 the secret is granted again at once.
@@ -51,12 +51,13 @@ lease_expires_at: 2026-10-03T03:36:40Z
 
 ## End access to an automatic secret
 
-Change the secret's requester entry in the rules from `decision: automatic` to `decision: approval`
-or `decision: deny`. Once the broker rereads its rules, every `BROKER_RULES_RELOAD_SECONDS` (see the
-[configuration reference](/legion/broker/reference/config/)), it refuses each read of a grant the
-old rule gave automatically with `GRANT_NOT_LIVE`, and the session's next request for the secret
-waits for a person's approval or is denied. The change applies to every session that entry
-matches, not to one session.
+Retag the secret in Secrets Manager so its sessions no longer get it automatically: set its `tier`
+to `human`, so every request for it needs a person's approval, or give it another `owner`, so the
+sessions that had it are no longer the owner's own. Deleting the secret, or moving it out of
+`BROKER_SECRETS_PREFIX`, ends access altogether. Once the broker rereads the namespace, at most five
+minutes later, it refuses each read of a grant given automatically under the old tags with
+`GRANT_NOT_LIVE`, and the session's next request for the secret waits for a person's approval. The
+change applies to every session that got the secret automatically, not to one session.
 
 ## Cancel a pending request
 
