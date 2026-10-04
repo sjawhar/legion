@@ -105,11 +105,12 @@ func splitAtEachSpace(s string) []string {
 }
 
 // MatchesSharedAgentToken reports whether a request's bearer token is one of the deployment's
-// shared agent token values (DISPATCH_AGENT_TOKEN). It compares the bearer with every value, each
-// in time that depends on the two lengths and not on their bytes, and stops at none, so a caller
-// can time neither how much of a guess matched nor which value it matched. A nil list matches
-// nothing, and the empty bearer matches no value, since none is empty. The HTTP API and the
-// document websocket both authenticate the shared token through it.
+// shared agent token values (DISPATCH_AGENT_TOKEN). It compares the bearer with every value with
+// subtle.ConstantTimeCompare and never stops early, so its timing gives away no byte of any
+// value. As with a single value, a compare returns at once on a length mismatch, so the values'
+// lengths are not hidden, and a match on a later value does the logging work below. A nil list
+// matches nothing, and the empty bearer matches no value, since none is empty. The HTTP API and
+// the document websocket both authenticate the shared token through it.
 //
 // A bearer matching a value after the first is logged with the request's rightmost
 // X-Forwarded-For address (the hop the load balancer appended; the connection's own address when
@@ -121,15 +122,15 @@ func MatchesSharedAgentToken(r *http.Request, token string, tokens *SharedAgentT
 		return false
 	}
 	bearer := []byte(token)
-	// matched is one more than the index of the value the bearer matched, and 0 for none.
-	matched := 0
+	// entry is the 1-based position of the value the bearer matched, and 0 for none.
+	entry := 0
 	for index, value := range tokens.values {
-		matched = subtle.ConstantTimeSelect(subtle.ConstantTimeCompare(bearer, value), index+1, matched)
+		entry = subtle.ConstantTimeSelect(subtle.ConstantTimeCompare(bearer, value), index+1, entry)
 	}
-	if matched > 1 {
-		tokens.notePreviousToken(r, matched)
+	if entry > 1 {
+		tokens.notePreviousToken(r, entry)
 	}
-	return matched != 0
+	return entry != 0
 }
 
 // notePreviousToken logs a request that authenticated with entry, a value after the first, unless
@@ -155,8 +156,14 @@ func (t *SharedAgentTokens) notePreviousToken(r *http.Request, entry int) {
 		}
 		t.swept = now
 	}
-	if len(t.logged) < previousTokenCallers {
-		t.logged[caller] = now
+	// A stored key is a copy: the caller's fields are slices of its request's headers, which a key
+	// holding them would keep whole. A caller already remembered is refreshed even when the map
+	// is full, so it is not logged on every request until the next sweep.
+	if _, remembered := t.logged[caller]; remembered || len(t.logged) < previousTokenCallers {
+		t.logged[previousTokenCaller{
+			address:   strings.Clone(caller.address),
+			userAgent: strings.Clone(caller.userAgent),
+		}] = now
 	}
 	t.mu.Unlock()
 	slog.Warn("dispatch: request authenticated with a previous shared agent token",

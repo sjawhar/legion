@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"testing"
 	"testing/synctest"
@@ -257,4 +258,71 @@ func TestThePreviousTokenLogIsBounded(t *testing.T) {
 	if remembered, lines := len(tokens.logged), len(logged())-before; remembered != previousTokenCallers || lines != 2 {
 		t.Errorf("past the bound: %d callers remembered and %d lines for two requests of one caller, want %d and 2", remembered, lines, previousTokenCallers)
 	}
+}
+
+// Whoever holds a value on its way out writes the User-Agent and the X-Forwarded-For header, and
+// the previous-token log remembers up to previousTokenCallers of them for ten minutes, so a
+// remembered caller may cost it no more than the first previousTokenCallerBytes of each field,
+// however long the header it sent.
+func TestARememberedCallerHoldsOnlyItsClippedFields(t *testing.T) {
+	_ = warnings(t)
+	tokens := sharedTokens(t, "new-token old-token")
+	const callers = 64
+	const headerBytes = 1 << 20
+	heap := func() int64 {
+		runtime.GC()
+		var stats runtime.MemStats
+		runtime.ReadMemStats(&stats)
+		return int64(stats.HeapAlloc)
+	}
+	before := heap()
+	for caller := range callers {
+		request := httptest.NewRequest(http.MethodGet, "/api/v1/whoami", nil)
+		request.Header.Set("User-Agent", fmt.Sprintf("agent/%d ", caller)+strings.Repeat("u", headerBytes))
+		request.Header.Set("X-Forwarded-For", strings.Repeat("9", headerBytes)+fmt.Sprintf(", 203.0.113.%d", caller))
+		if !MatchesSharedAgentToken(request, "old-token", tokens) {
+			t.Fatal("old-token was refused")
+		}
+	}
+	grown := heap() - before
+	runtime.KeepAlive(tokens)
+	if limit := int64(callers*2*previousTokenCallerBytes + 1<<20); grown > limit {
+		t.Errorf("remembering %d callers, each sending a %d-byte User-Agent and X-Forwarded-For, grew the heap by %d bytes, want at most %d: a remembered caller keeps the whole header it sent, not its first %d bytes",
+			callers, headerBytes, grown, limit, previousTokenCallerBytes)
+	}
+}
+
+// A caller the log already remembers is refreshed when its window passes even while the log is
+// full, so it is logged once a window rather than on every request until the next sweep.
+func TestARememberedCallerIsRefreshedWhileTheLogIsFull(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		logged := warnings(t)
+		tokens := sharedTokens(t, "new-token old-token")
+		authenticate := func(userAgent string) {
+			t.Helper()
+			request := httptest.NewRequest(http.MethodGet, "/api/v1/whoami", nil)
+			request.Header.Set("X-Forwarded-For", "203.0.113.7")
+			request.Header.Set("User-Agent", userAgent)
+			if !MatchesSharedAgentToken(request, "old-token", tokens) {
+				t.Fatalf("old-token was refused")
+			}
+		}
+
+		authenticate("first") // the first sweep's mark
+		time.Sleep(previousTokenLogWindow / 2)
+		authenticate("remembered")
+		time.Sleep(previousTokenLogWindow / 2)
+		authenticate("sweeper") // sweeps "first" away; "remembered" is half a window old
+		for caller := len(tokens.logged); caller < previousTokenCallers; caller++ {
+			authenticate(fmt.Sprintf("agent/%d", caller))
+		}
+		time.Sleep(previousTokenLogWindow / 2) // "remembered" lapses; the next sweep is not due
+		before := len(logged())
+		for range 5 {
+			authenticate("remembered")
+		}
+		if lines := len(logged()) - before; lines != 1 {
+			t.Errorf("a remembered caller whose window passed while the log was full logged %d lines for 5 requests, want 1", lines)
+		}
+	})
 }
