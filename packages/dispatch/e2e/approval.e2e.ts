@@ -14,7 +14,7 @@ import {
   rejectSuggestion,
   requestApproval,
 } from "./api";
-import { documentEditor, openSpecAndAwaitHeadingIds } from "./editor";
+import { documentEditor, needsYouCards, openSpecAndAwaitHeadingIds } from "./editor";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -628,7 +628,7 @@ test("an approval request for an unassigned issue's non-primary document remains
     if (testInfo.project.name === "iphone") {
       await page.getByRole("button", { name: "Open review panel (1 open ask)" }).click();
     }
-    const margin = page.getByRole("region", { name: "Needs you" });
+    const margin = needsYouCards(page);
     const nonPrimaryMarginCard = margin.getByTestId(`ask-${nonPrimary.ask.id}`);
     await expect(nonPrimaryMarginCard).toBeVisible();
     await expect(nonPrimaryMarginCard).toContainText("supporting-design.md");
