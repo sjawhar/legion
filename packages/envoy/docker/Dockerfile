@@ -35,7 +35,7 @@ RUN cd packages/contracts && bun run gen:go
 RUN cd packages/dispatch && bun run build:web
 
 # Go version must match go.mod.
-FROM golang:1.26-alpine AS build
+FROM golang:1.26.8-alpine AS build
 
 WORKDIR /src
 

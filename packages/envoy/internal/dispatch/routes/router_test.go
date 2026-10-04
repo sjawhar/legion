@@ -23,6 +23,16 @@ import (
 	"github.com/sjawhar/envoy/internal/oidc/oidctest"
 )
 
+// sharedAgentTokens is a DISPATCH_AGENT_TOKEN setting parsed as the server parses it at boot.
+func sharedAgentTokens(t *testing.T, setting string) *auth.SharedAgentTokens {
+	t.Helper()
+	tokens, err := auth.ParseSharedAgentTokens(setting)
+	if err != nil {
+		t.Fatalf("ParseSharedAgentTokens(%q): %v", setting, err)
+	}
+	return tokens
+}
+
 type memorySessionStore struct {
 	mu          sync.Mutex
 	generations map[string]int64
@@ -974,12 +984,12 @@ func cookieRouter(t *testing.T, serverURL string) (http.Handler, *http.Cookie, *
 	}
 	sessions := &memorySessionStore{generations: map[string]int64{"sami@d.example": 0}}
 	ctx, err := BuildAppContext(AppContextOptions{
-		SigningKey: "signing-key",
-		People:     people,
-		Sessions:   sessions,
-		Identity:   identity.CookieIdentity{SigningKey: "signing-key", Sessions: sessions},
-		AgentToken: "agent-token",
-		ServerURL:  serverURL,
+		SigningKey:  "signing-key",
+		People:      people,
+		Sessions:    sessions,
+		Identity:    identity.CookieIdentity{SigningKey: "signing-key", Sessions: sessions},
+		AgentTokens: sharedAgentTokens(t, "agent-token"),
+		ServerURL:   serverURL,
 	})
 	if err != nil {
 		t.Fatalf("build context: %v", err)

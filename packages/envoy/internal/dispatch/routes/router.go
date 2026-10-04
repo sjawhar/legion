@@ -49,7 +49,6 @@ type AppContext struct {
 	People         auth.PeopleStore
 	Identity       identity.Identity
 	Store          *store.Store
-	AgentToken     string
 	DefaultProject string
 	ServerURL      string
 	// SignIn is the sign-in pool's authorization code flow and SignInGroup the group a person
@@ -79,7 +78,7 @@ type AppContextOptions struct {
 	SignIn         *oidc.CodeFlow
 	SignInGroup    string
 	Store          *store.Store
-	AgentToken     string
+	AgentTokens    *auth.SharedAgentTokens
 	DefaultProject string
 	ServerURL      string
 	InsecureCookie bool
@@ -134,7 +133,7 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 	apiDeps, err := api.NewDeps(api.DepsInput{
 		Store:             opts.Store,
 		Identity:          opts.Identity,
-		AgentToken:        opts.AgentToken,
+		AgentTokens:       opts.AgentTokens,
 		DefaultProject:    opts.DefaultProject,
 		ServerURL:         opts.ServerURL,
 		EnvoyURL:          opts.EnvoyURL,
@@ -160,7 +159,6 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 		People:         opts.People,
 		Identity:       opts.Identity,
 		Store:          opts.Store,
-		AgentToken:     opts.AgentToken,
 		DefaultProject: opts.DefaultProject,
 		ServerURL:      strings.TrimSuffix(opts.ServerURL, "/"),
 		SignIn:         opts.SignIn,

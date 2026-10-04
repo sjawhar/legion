@@ -52,8 +52,10 @@ const (
 var buildCommit string
 
 type bootConfig struct {
-	DatabaseURL    string
-	AgentToken     string
+	DatabaseURL string
+	// AgentTokens is DISPATCH_AGENT_TOKEN parsed: every value the API and the document websocket
+	// accept as the shared agent token, the first the current one.
+	AgentTokens    *auth.SharedAgentTokens
 	RepoProjects   string
 	DefaultProject string
 	EnvoyURL       string
@@ -226,12 +228,11 @@ func main() {
 	requestIdentity := requestIdentityFor(boot, signingKey, people, sessions, signIn)
 
 	broker := events.NewBroker()
-	documentService := docs.New(docs.Deps{
-		Store:      database,
-		Events:     broker,
-		Identity:   requestIdentity,
-		AgentToken: boot.AgentToken,
-		ServerURL:  serverURL,
+	documentService := newDocumentService(boot, docs.Deps{
+		Store:     database,
+		Events:    broker,
+		Identity:  requestIdentity,
+		ServerURL: serverURL,
 	})
 
 	serviceTokens, err := oidc.Discover(ctx, boot.OIDCIssuer, boot.OIDCAudience, oidc.DiscoveryTimeout)
@@ -429,7 +430,6 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 	}
 	boot := bootConfig{
 		DatabaseURL:        strings.TrimSpace(env.get("DATABASE_URL")),
-		AgentToken:         strings.TrimSpace(env.get("DISPATCH_AGENT_TOKEN")),
 		RepoProjects:       strings.TrimSpace(env.get("DISPATCH_REPO_PROJECTS")),
 		DefaultProject:     strings.TrimSpace(env.get("DISPATCH_DEFAULT_PROJECT")),
 		GitHubAPIBase:      strings.TrimSpace(env.get("DISPATCH_GITHUB_API_BASE")),
@@ -447,9 +447,15 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 	if boot.DatabaseURL == "" {
 		return bootConfig{}, errors.New("DATABASE_URL required")
 	}
-	if boot.AgentToken == "" {
+	agentTokens := env.get("DISPATCH_AGENT_TOKEN")
+	if strings.TrimSpace(agentTokens) == "" {
 		return bootConfig{}, errors.New("DISPATCH_AGENT_TOKEN required")
 	}
+	tokens, err := auth.ParseSharedAgentTokens(agentTokens)
+	if err != nil {
+		return bootConfig{}, fmt.Errorf("DISPATCH_AGENT_TOKEN %w", err)
+	}
+	boot.AgentTokens = tokens
 	listenAddr, err := listenAddress(env)
 	if err != nil {
 		return bootConfig{}, err
@@ -628,12 +634,21 @@ func sessionSigningKey(boot bootConfig, dataDir string) (string, error) {
 	return auth.LoadOrCreateSigningKey(filepath.Join(dataDir, "signing-key"))
 }
 
+// newDocumentService is the document service main serves the document websocket and the API's
+// documents from: built, what main made from the rest of the configuration, with every setting the
+// service takes from boot filled in. The settings tests build it through here, as they build the
+// router through appContextOptions, so dropping a hand-off here fails a case.
+func newDocumentService(boot bootConfig, built docs.Deps) *docs.Service {
+	built.AgentTokens = boot.AgentTokens
+	return docs.New(built)
+}
+
 // appContextOptions is what main hands routes.BuildAppContext: built, what main made from the
 // configuration, with every setting the router takes from boot filled in. The settings tests build
 // the router through it, so dropping any hand-off here fails a case.
 func appContextOptions(boot bootConfig, built routes.AppContextOptions) routes.AppContextOptions {
 	built.SignInGroup = boot.SignInGroup
-	built.AgentToken = boot.AgentToken
+	built.AgentTokens = boot.AgentTokens
 	built.DefaultProject = boot.DefaultProject
 	built.InsecureCookie = boot.InsecureCookie
 	built.EnvoyURL = boot.EnvoyURL
