@@ -487,9 +487,21 @@ func TestTheUpdateObserverNeverRendersAWriteHalfWay(t *testing.T) {
 	if logged := logs.String(); logged != "" {
 		t.Errorf("a healthy room under concurrent writes logged:\n%s", logged)
 	}
+	// Persistence can reach the room in a different order than the writes that made it
+	// (consumeUpdateClass), so a peer write applied before this one could still be assigned a
+	// later version if it is still draining. Waiting for every earlier write to settle first
+	// guarantees this one's version, once assigned, is the newest.
+	drained, cancelDrain := context.WithTimeout(ctx, 30*time.Second)
+	defer cancelDrain()
+	if err := service.waitForPendingUpdates(drained, artifactID); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.waitForDurableAppends(drained, artifactID); err != nil {
+		t.Fatal(err)
+	}
 	// The observer's last rendering is the room's: an update that changes nothing a rendering
 	// carries, made once the writers have stopped, is recorded as no content change.
-	if err := service.ProjectMark(ctx, artifactID, "after-the-writers", MarkRecord{
+	if err := joinedProjectMark(service, artifactID, "after-the-writers", MarkRecord{
 		Kind: "comment", By: "user:bob", CreatedAt: time.Now().UTC().Format(time.RFC3339Nano), Text: "note",
 	}, bob); err != nil {
 		t.Fatal(err)
@@ -524,7 +536,7 @@ func TestAnEvictedRoomsReplicaGoesWithIt(t *testing.T) {
 	seedServiceText(t, service, artifactID, "before")
 	ctx := context.Background()
 	// A write the room's update observer sees, which makes its replica.
-	if err := service.ProjectMark(ctx, artifactID, "projection", MarkRecord{
+	if err := joinedProjectMark(service, artifactID, "projection", MarkRecord{
 		Kind: "comment", By: "user:bob", CreatedAt: time.Now().UTC().Format(time.RFC3339Nano), Text: "note",
 	}, model.Actor{Kind: "user", ID: "bob"}); err != nil {
 		t.Fatal(err)
