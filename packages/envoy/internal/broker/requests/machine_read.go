@@ -20,15 +20,15 @@ import (
 // Values releases the values of a live grant to its own enrollment. Every call re-checks the
 // enrollment and the grant, re-verifies the grant's whole approval chain (VerifyChain), and —
 // when the policy has changed since the grant's request was decided — that the current policy
-// still allows this requester every granted name under the login that decided it
-// (stillAllowed). Each value is read from the secret the request froze. It holds no pooled
-// connection across a Secrets Manager read: the grant's names are read into memory before the
-// first value is fetched.
+// still allows the session, with the names its operator withheld from it, every granted name under
+// the login that decided it (stillAllowed). Each value is read from the secret the request froze.
+// It holds no pooled connection across a Secrets Manager read: the grant's names are read into
+// memory before the first value is fetched.
 func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string) (map[string]string, time.Time, error) {
 	var owner, requestID, policyVersion, decidedBy string
 	var expires time.Time
 	var live bool
-	var enr enrollmentRow
+	enr := enrollmentRow{ID: enrollmentID}
 	err := m.Store.Pool.QueryRow(ctx, `select g.enrollment_id, g.expires_at, g.revoked_at is null and g.expires_at > now() and e.revoked_at is null and e.lease_expires_at > now(),
 		g.request_id, r.rules_version, coalesce(r.decided_by, ''), e.operator
 		from grants g join enrollments e on e.id=g.enrollment_id join requests r on r.id=g.request_id where g.id=$1`, grantID).
@@ -53,8 +53,12 @@ func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string) (map
 		return nil, time.Time{}, err
 	}
 	if set := m.Policy.Get(); policyVersion != set.Version {
+		requester, err := enr.requester(ctx, m.Store.Pool)
+		if err != nil {
+			return nil, time.Time{}, err
+		}
 		for _, g := range granted {
-			if err := stillAllowed(set, g.name, g.decision, decidedBy, enr.requester()); err != nil {
+			if err := stillAllowed(set, g.name, g.decision, decidedBy, requester); err != nil {
 				return nil, time.Time{}, err
 			}
 		}
@@ -379,11 +383,13 @@ func (m *Machine) ReadRecord(ctx context.Context, recordID string) (RecordDetail
 }
 
 // ApproverGrant is one live grant a person may revoke, for GET /v1/grants?approver=<login>.
-// Approver is the login that approved it, which for an operator's own list can be another login,
-// and "" for a grant the policy gave the session without asking (an automatic grant, which has no
-// RecordID either).
+// Granted is policy.Automatic for a grant the policy gave the session without asking, which has no
+// RecordID and an empty Approver, and policy.Approval for one a person approved, whose RecordID is
+// the record the approval rests on and whose Approver is that person's login, which for an
+// operator's own list can be another login.
 type ApproverGrant struct {
 	GrantID    string
+	Granted    string
 	RecordID   *string
 	Enrollment record.Enrollment
 	Names      []string
@@ -414,6 +420,10 @@ func (m *Machine) GrantsForApprover(ctx context.Context, approver string) ([]App
 		var g ApproverGrant
 		if err := rows.Scan(&g.GrantID, &g.RecordID, &g.Enrollment.Kind, &g.Enrollment.RuntimeID, &g.Enrollment.Operator, &g.Enrollment.Slot, &g.Approver, &g.ExpiresAt, &g.CreatedAt, &g.Names); err != nil {
 			return nil, err
+		}
+		g.Granted = policy.Approval
+		if g.RecordID == nil {
+			g.Granted = policy.Automatic
 		}
 		out = append(out, g)
 	}

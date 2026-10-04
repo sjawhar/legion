@@ -89,11 +89,11 @@ func TestEvaluateFollowsOwnerAndTierAlone(t *testing.T) {
 	}
 }
 
-// TestEvaluateWithheldAsksBeforeItGrants is the rule for a session a person withheld a secret from
-// by revoking an automatic grant of it: what Evaluate grants at once becomes an approval request to
-// the secret's owner, or to anyone for a shared secret, and a service's own secret, which no person
-// approves, is denied. Every answer that was not automatic is Evaluate's own.
-func TestEvaluateWithheldAsksBeforeItGrants(t *testing.T) {
+// TestEvaluateTreatsAWithheldNameAsHumanTier is the rule for a session whose operator withheld a
+// secret from it by revoking a grant of it the session got without asking: the secret is human tier
+// to that session, so it asks the owner, or anyone for a shared secret, and a service's own secret,
+// which no person approves, is denied. Withholding one name changes no other name's answer.
+func TestEvaluateTreatsAWithheldNameAsHumanTier(t *testing.T) {
 	store := secrets.NewLocal(
 		policytest.Secret("PERSON_AGENT", owner, policy.TierAgent, "v"),
 		policytest.Secret("PERSON_HUMAN", owner, policy.TierHuman, "v"),
@@ -108,27 +108,35 @@ func TestEvaluateWithheldAsksBeforeItGrants(t *testing.T) {
 	approval := func(approver string) policy.Decision {
 		return policy.Decision{Outcome: policy.Approval, Approver: approver}
 	}
+	withheld := func(r policy.Requester, name string) policy.Requester {
+		r.Withheld = []string{name}
+		return r
+	}
 	for _, c := range []struct {
 		name      string
 		requester policy.Requester
 		want      policy.Decision
 	}{
-		{"PERSON_AGENT", policy.Requester{Operator: owner}, approval(owner)},
-		{"PERSON_AGENT", policy.Requester{Operator: other}, approval(owner)},
-		{"PERSON_HUMAN", policy.Requester{Operator: owner}, approval(owner)},
-		{"SHARED_AGENT", policy.Requester{Operator: owner}, approval(record.AnyoneApprover)},
-		{"SHARED_AGENT", policy.Requester{}, approval(record.AnyoneApprover)},
-		{"SHARED_HUMAN", policy.Requester{Operator: other}, approval(record.AnyoneApprover)},
-		{"SERVICE_AGENT", policy.Requester{Service: legion}, policy.Decision{Outcome: policy.Deny}},
-		{"SERVICE_AGENT", policy.Requester{Operator: owner}, policy.Decision{Outcome: policy.Deny}},
+		{"PERSON_AGENT", withheld(policy.Requester{Operator: owner}, "PERSON_AGENT"), approval(owner)},
+		{"PERSON_AGENT", withheld(policy.Requester{Operator: other}, "PERSON_AGENT"), approval(owner)},
+		{"PERSON_HUMAN", withheld(policy.Requester{Operator: owner}, "PERSON_HUMAN"), approval(owner)},
+		{"SHARED_AGENT", withheld(policy.Requester{Operator: owner}, "SHARED_AGENT"), approval(record.AnyoneApprover)},
+		{"SHARED_AGENT", withheld(policy.Requester{}, "SHARED_AGENT"), approval(record.AnyoneApprover)},
+		{"SHARED_HUMAN", withheld(policy.Requester{Operator: other}, "SHARED_HUMAN"), approval(record.AnyoneApprover)},
+		{"SERVICE_AGENT", withheld(policy.Requester{Service: legion}, "SERVICE_AGENT"), policy.Decision{Outcome: policy.Deny}},
+		{"SERVICE_AGENT", withheld(policy.Requester{Operator: owner}, "SERVICE_AGENT"), policy.Decision{Outcome: policy.Deny}},
+		// Another name withheld leaves this one as the tags decide it.
+		{"PERSON_AGENT", withheld(policy.Requester{Operator: owner}, "SHARED_AGENT"), policy.Decision{Outcome: policy.Automatic}},
+		{"SHARED_AGENT", withheld(policy.Requester{}, "PERSON_AGENT"), policy.Decision{Outcome: policy.Automatic}},
+		{"SERVICE_AGENT", withheld(policy.Requester{Service: legion}, "PERSON_AGENT"), policy.Decision{Outcome: policy.Automatic}},
 	} {
-		got, err := set.EvaluateWithheld(c.name, c.requester)
+		got, err := set.Evaluate(c.name, c.requester)
 		c.want.Source = secrets.LocalARN(policytest.ID(c.name))
 		if err != nil || got != c.want {
-			t.Errorf("EvaluateWithheld(%s, %+v) = %+v, %v; want %+v", c.name, c.requester, got, err, c.want)
+			t.Errorf("Evaluate(%s, %+v) = %+v, %v; want %+v", c.name, c.requester, got, err, c.want)
 		}
 	}
-	if _, err := set.EvaluateWithheld("NOT_A_SECRET", policy.Requester{Operator: owner}); !errors.Is(err, policy.ErrUnknownSecret) {
-		t.Errorf("EvaluateWithheld(NOT_A_SECRET) = %v, want ErrUnknownSecret", err)
+	if _, err := set.Evaluate("NOT_A_SECRET", withheld(policy.Requester{Operator: owner}, "NOT_A_SECRET")); !errors.Is(err, policy.ErrUnknownSecret) {
+		t.Errorf("Evaluate(NOT_A_SECRET) = %v, want ErrUnknownSecret", err)
 	}
 }

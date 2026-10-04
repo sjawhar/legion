@@ -110,8 +110,9 @@ func routes() []apiRoute {
 		// List the live grants of the named person's sessions, automatic or approved, and those the
 		// person approved.
 		{http.MethodGet, "/v1/grants", uiAuth((*server).listGrantsForApprover)},
-		// End a grant as its approver or as its enrollment's operator; ending an automatic grant
-		// also makes that session ask before it gets the grant's secrets again.
+		// End a grant as its approver or as its enrollment's operator. The operator's revoke also
+		// withholds the secrets the grant's request got automatically from that session: its other
+		// grants that got them automatically end too, and it asks before it gets them again.
 		{http.MethodPost, "/v1/grants/{id}/revoke-by-approver", uiAuth((*server).revokeByApprover)},
 		// Report whether the broker can reach its database.
 		{http.MethodGet, "/healthz", public((*server).healthz)},
