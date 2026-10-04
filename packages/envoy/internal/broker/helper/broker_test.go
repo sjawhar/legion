@@ -37,7 +37,7 @@ const failAlways = 1 << 30
 // the SAME stored (possibly already-expired) lease rather than a freshly computed one — the real
 // bug C2's fix works around. runtimeIDToID additionally models the real broker's OTHER
 // idempotent-enroll conflict key, (launcher_credential_id, runtime_id) rather than thumbprint
-// (AGENTC-834 thermonuclear finding on Recover's ordering): an Enroll whose runtime_id already
+// (a review finding on Recover's ordering): an Enroll whose runtime_id already
 // has a different, still-live enrollment id refuses with 409 ALREADY_ENROLLED, whatever
 // thumbprint it carries — exactly the conflict a fresh Recover enroll racing ahead of the old
 // row's revoke can hit for real, which byTP alone (keyed on the NEW session's fresh thumbprint)
@@ -57,7 +57,7 @@ const failAlways = 1 << 30
 // credential.
 //
 // The launcher half (Enroll, Revoke) now authenticates with a Proof header carrying an "lid"
-// claim instead of a bearer token (AGENTC-834 Task 1): enrollUnauthorizedNext simulates an
+// claim instead of a bearer token: enrollUnauthorizedNext simulates an
 // expired or revoked credential (401 LAUNCHER_INVALID) independent of failFirst's unrelated 503.
 // The fake also serves the machine-login routes a Broker.Login talks to: POST
 // /v1/launcher-credentials verifies the posted request object with record.VerifyRequestObject and

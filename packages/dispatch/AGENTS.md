@@ -204,7 +204,7 @@ roving-focus/`ViewportAnchor` mechanism (it is not an ask row): each pending row
 badge ("Secret request" for `agent_secret`, "Machine login" for `launcher_credential`), the
 requested identifiers, and a
 relative `Timestamp`, linking to `/credentials/:recordId` — except a machine-kind row, which links
-to `/credentials/machine` instead, since only the typed code selects a machine login (ruling 13: a
+to `/credentials/machine` instead, since only the typed code selects a machine login (a
 direct record link can never approve a machine login). `pending.ts`'s `useCredentialRequests` is
 the one reading of that list - `listed` (empty under `null`), `loading` or `failed` - and
 the section, the Inbox's empty state, its `Blocked on you` banner and both `Needs you N` badges

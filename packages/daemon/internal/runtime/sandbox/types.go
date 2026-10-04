@@ -131,7 +131,7 @@ type Options struct {
 	Log *slog.Logger
 }
 
-// AgentSecrets is the secrets broker the runtime enrolls every pod with (AGENTC-393): the URL the
+// AgentSecrets is the secrets broker the runtime enrolls every pod with: the URL the
 // pod's `agent-secrets` client calls, and the audience and lifetime of the projected token each
 // pod carries for it. Nil enrolls none, and no pod carries the token, the key volume, the
 // variables, or the shim flags.
