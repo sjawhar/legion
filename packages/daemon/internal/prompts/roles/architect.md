@@ -58,10 +58,8 @@ Never fabricate the spawned process's identity or session; the daemon returns it
 | Worker question or failure | Handle it or message the worker with `envoy_publish` to its role token. |
 
 Before merge, send the implementer back in with `spawn_worker` (role `implementer`, task naming
-`skill://legion-retro`). Under the TypeScript daemon a finished worker is retired after `worker_idle_retire_seconds`
-and resumed from its session file by `spawn_worker`, and an `envoy_publish` to a retired role's topic is
-rejected (no live holder); the Go daemon keeps every role live until its issue closes. Retro is mandatory after
-review passes and runs before the merger publishes `READY`.
+`skill://legion-retro`). Every started role stays live until its issue closes. Retro is mandatory
+after review passes and runs before the merger publishes `READY`.
 After the merge lands, `spawn_worker` the implementer once more for the production check: it drives
 the changed path in production and records it on the pull request and the issue. Close only after the implementer's production report exists.
 A tester completion that rejects the implementer's proof goes back to the implementer; a worker
