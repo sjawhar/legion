@@ -57,9 +57,13 @@ As the operator the login names, open Dispatch's **Enter machine login code** pa
 "Approving lets `<host>` start agent sessions as you." Approve only if the code is the one your
 terminal shows. A machine login can only be selected by its code: no link approves one. Once you
 approve it, the machine is listed under **Your machine logins** on the same page, where you can
-[revoke its login](/legion/broker/guides/revoke-a-session/#end-a-machines-login) before it expires.
-A Legion daemon's login you approve is listed there too, as `legion-daemon on <host>`, and
-revoking it ends every pod it enrolled.
+[revoke its login](/legion/broker/guides/revoke-a-session/#end-a-machines-login).
+
+A Legion daemon's login names its service, so the sentence reads "Approving lets
+`legion-daemon on <host>` start worker pods as `legion-daemon`, not as you: no secret of yours
+reaches its pods unless you approve the request for it." A pod has no operator, so its requests for
+your secrets come to you for approval. The login you approve is listed under **Your machine
+logins** as `legion-daemon on <host>`, and revoking it ends every pod it enrolled.
 
 Back on the machine, `agent-secrets launcher login` exits 0 and the helper logs
 `machine login issued; the helper holds a launcher credential`: the machine credential the approval

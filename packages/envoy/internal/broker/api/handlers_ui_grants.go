@@ -69,10 +69,12 @@ func (s *server) listGrantsForApprover(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, approverGrantsResponse{Grants: out})
 }
 
-// revokeByApproverBody is {"approver"}: the revoking human's Dispatch login, which Dispatch's
-// server sets from its own session.
+// revokeByApproverBody is {"approver"}, the body of both revoke-by-approver routes (a grant's and a
+// launcher credential's): the revoking human's Dispatch login, which Dispatch's server sets from
+// its own session.
 type revokeByApproverBody struct {
-	// The Dispatch login of the person revoking: the grant's approver or its session's operator.
+	// The Dispatch login of the person revoking: for a grant, its approver or its session's
+	// operator; for a machine login, the person who approved it.
 	Approver string `json:"approver"`
 }
 

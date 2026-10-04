@@ -44,7 +44,8 @@ type Credential struct {
 }
 
 // LiveCredential is one of the machine logins a person approved, as their machine-login page lists
-// it: a launcher credential minted by their approval, neither revoked nor expired.
+// it: a launcher credential minted by their approval and not revoked, either unexpired or still
+// holding a session it enrolled that has not ended.
 type LiveCredential struct {
 	ID   uuid.UUID
 	Host string
@@ -53,6 +54,10 @@ type LiveCredential struct {
 	Service   *string
 	IssuedAt  time.Time
 	ExpiresAt time.Time
+	// Expired is true once ExpiresAt has passed: the login enrolls no more sessions, but the ones
+	// it enrolled renew with their own keys and still run, so it stays listed until they end or
+	// it is revoked.
+	Expired bool
 }
 
 type Enrollment struct {
@@ -253,9 +258,8 @@ func (s *Service) createAttempt(ctx context.Context, cred Credential, in Enrollm
 		return Enrollment{}, false, err
 	}
 	defer tx.Rollback(ctx)
-	var revoked bool
-	err = tx.QueryRow(ctx, `select revoked_at is not null from launcher_credentials where id=$1 for share`, cred.ID).Scan(&revoked)
-	if errors.Is(err, pgx.ErrNoRows) || err == nil && revoked {
+	err = tx.QueryRow(ctx, `select 1 from launcher_credentials where id=$1 and revoked_at is null for share`, cred.ID).Scan(nil)
+	if errors.Is(err, pgx.ErrNoRows) {
 		return Enrollment{}, false, ErrUnauthenticated
 	}
 	if err != nil {
@@ -493,49 +497,52 @@ func (s *Service) Revoke(ctx context.Context, cred Credential, id, by string) er
 	return tx.Commit(ctx)
 }
 
-// LiveCredentials lists the live machine logins approver approved, newest first: every launcher
-// credential minted from a launcher_credential record whose approver is that person, neither
-// revoked nor expired. That covers a person's own machines (whose operator is their approver,
-// machine.Service.ApplyDecision) and a service's login, such as the Legion daemon's, which has no
-// operator and is listed for the person who approved it, with its Service set.
+// LiveCredentials lists the machine logins approver approved that can still reach a secret, newest
+// first: every unrevoked launcher credential minted from a launcher_credential record whose
+// approver is that person, while it is unexpired or a session it enrolled has not ended. A login's
+// sessions outlive its expiry, since each renews with its own key (Renew never reads the
+// credential), so an expired login stays listed, Expired set, until its last session ends: revoking
+// every listed login ends every session the person's machines started. That covers a person's own
+// machines (whose operator is their approver, machine.Service.ApplyDecision) and a service's login,
+// such as the Legion daemon's, which has no operator and is listed for the person who approved it,
+// with its Service set.
 func (s *Service) LiveCredentials(ctx context.Context, approver string) ([]LiveCredential, error) {
-	rows, err := s.Store.Pool.Query(ctx, `select c.id, c.host, c.service, c.created_at, c.expires_at from launcher_credentials c
+	rows, err := s.Store.Pool.Query(ctx, `select c.id, c.host, c.service, c.created_at, c.expires_at, c.expires_at <= now() from launcher_credentials c
 		join credential_requests r on r.id = c.record_id and r.kind = 'launcher_credential'
-		where r.approver = $1 and c.revoked_at is null and c.expires_at > now()
+		where r.approver = $1 and c.revoked_at is null
+			and (c.expires_at > now() or exists (select 1 from enrollments e where e.launcher_credential_id = c.id and e.revoked_at is null))
 		order by c.created_at desc, c.id`, record.CanonicalLogin(approver))
 	if err != nil {
 		return nil, err
 	}
-	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (LiveCredential, error) {
-		var c LiveCredential
-		err := row.Scan(&c.ID, &c.Host, &c.Service, &c.IssuedAt, &c.ExpiresAt)
-		return c, err
-	})
+	return pgx.CollectRows(rows, pgx.RowToStructByPos[LiveCredential])
 }
 
-// RevokeCredential ends launcher credential id on the word of the person who approved it, before
-// it expires: from then on no launcher proof signed with it authenticates (AuthenticateLauncher),
-// and every enrollment it made that has not ended — a person's host sessions and boxes, or every
-// pod a service's login enrolled — is ended as Revoke ends one (endEnrollment, actor
-// "human:<approver>", an enrollment.revoked audit row), revoking each one's grants and cancelling
-// its pending requests, all in one transaction with one launcher_credential.revoked audit row.
-// approver must be the approver of the launcher_credential record the credential was minted from
-// (ErrNotApprover, as is a credential with no such record); an unknown id is ErrNoCredential.
+// RevokeCredential ends launcher credential id on the word of the person who approved it, expired
+// or not: from then on no launcher proof signed with it authenticates (AuthenticateLauncher), and
+// every enrollment it made that has not ended — a person's host sessions and boxes, or every pod a
+// service's login enrolled, which outlive the credential's expiry — is ended as Revoke ends one
+// (endEnrollment, actor "human:<approver>", an enrollment.revoked audit row), revoking each one's
+// grants and cancelling its pending requests, all in one transaction with one
+// launcher_credential.revoked audit row. approver must be the approver of the launcher_credential
+// record the credential was minted from (ErrNotApprover); an unknown id, like a credential minted
+// from no such record (which only ApplyDecision mints, always from one), is ErrNoCredential.
 // Revoking a credential already revoked succeeds and changes nothing. It takes the credential's
 // row before its enrollments' rows, so an enrollment Create is inserting under the credential
 // (which holds the row for share) commits first and is ended here, or waits and finds the
-// credential revoked.
+// credential revoked; and it takes those enrollments' rows, so a launcher's own Revoke of one
+// either commits first, leaving it out of the list here, or waits and finds it ended.
 func (s *Service) RevokeCredential(ctx context.Context, id, approver string) error {
 	tx, err := s.Store.Pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
-	var approvedBy, service *string
-	var host string
+	var approvedBy, host string
+	var service *string
 	var revokedAt *time.Time
 	err = tx.QueryRow(ctx, `select r.approver, c.service, c.host, c.revoked_at from launcher_credentials c
-		left join credential_requests r on r.id = c.record_id and r.kind = 'launcher_credential'
+		join credential_requests r on r.id = c.record_id and r.kind = 'launcher_credential'
 		where c.id = $1 for no key update of c`, id).Scan(&approvedBy, &service, &host, &revokedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrNoCredential
@@ -544,7 +551,7 @@ func (s *Service) RevokeCredential(ctx context.Context, id, approver string) err
 		return err
 	}
 	person := record.CanonicalLogin(approver)
-	if approvedBy == nil || person == "" || *approvedBy != person {
+	if approvedBy != person {
 		return ErrNotApprover
 	}
 	if revokedAt != nil {

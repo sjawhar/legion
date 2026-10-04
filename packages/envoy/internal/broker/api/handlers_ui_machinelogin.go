@@ -1,8 +1,8 @@
 // handlers_ui_machinelogin.go: POST /v1/machine-logins/lookup — resolves a pending machine login
 // by its human-readable confirmation code, for the operator's own UI (ruling 13: a direct link
 // can never approve a machine login, only the typed code selects it) — and GET
-// /v1/launcher-credentials and POST /v1/launcher-credentials/{id}/revoke-by-approver, the live
-// machine logins a person approved and the route that ends one before it expires.
+// /v1/launcher-credentials and POST /v1/launcher-credentials/{id}/revoke-by-approver, the machine
+// logins a person approved that can still reach a secret, and the route that ends one.
 package api
 
 import (
@@ -62,16 +62,21 @@ type launcherCredentialResp struct {
 	IssuedAt time.Time `json:"issued_at"`
 	// When the credential expires; the broker has no renewal.
 	ExpiresAt time.Time `json:"expires_at"`
+	// True once expires_at has passed: the login enrolls nothing more, but sessions it enrolled
+	// still run (each renews with its own key), and revoking it ends them.
+	Expired bool `json:"expired"`
 }
 
 // launcherCredentialsResponse is GET /v1/launcher-credentials's answer.
 type launcherCredentialsResponse struct {
-	// The live machine logins the named person approved, newest first.
+	// The machine logins the named person approved that are not revoked and are either unexpired
+	// or expired with a session still running, newest first.
 	Credentials []launcherCredentialResp `json:"credentials"`
 }
 
-// listLauncherCredentials lists the live machine logins the person ?approver= names approved:
-// their own machines' and any service's login they approved, neither revoked nor expired.
+// listLauncherCredentials lists the machine logins the person ?approver= names approved, their own
+// machines' and any service's, that can still reach a secret: not revoked, and either unexpired or
+// expired with a session it enrolled still running (enroll.Service.LiveCredentials).
 func (s *server) listLauncherCredentials(w http.ResponseWriter, r *http.Request) {
 	approver := r.URL.Query().Get("approver")
 	if !requireApprover(w, approver) {
@@ -84,19 +89,12 @@ func (s *server) listLauncherCredentials(w http.ResponseWriter, r *http.Request)
 	}
 	out := make([]launcherCredentialResp, len(rows))
 	for i, c := range rows {
-		out[i] = launcherCredentialResp{CredentialID: c.ID.String(), Host: c.Host, Service: c.Service, IssuedAt: c.IssuedAt, ExpiresAt: c.ExpiresAt}
+		out[i] = launcherCredentialResp{CredentialID: c.ID.String(), Host: c.Host, Service: c.Service, IssuedAt: c.IssuedAt, ExpiresAt: c.ExpiresAt, Expired: c.Expired}
 	}
 	writeJSON(w, http.StatusOK, launcherCredentialsResponse{Credentials: out})
 }
 
-// revokeLauncherCredentialBody is {"approver"}: the revoking person's Dispatch email, which
-// Dispatch's server sets from its own session.
-type revokeLauncherCredentialBody struct {
-	// The email of the person revoking, who must be the person who approved the machine login.
-	Approver string `json:"approver"`
-}
-
-// revokeLauncherCredential ends a machine login before it expires, on the word of the person who
+// revokeLauncherCredential ends a machine login, expired or not, on the word of the person who
 // approved it (enroll.Service.RevokeCredential): no launcher proof signed with it authenticates
 // again, and every session it enrolled ends — a service's login's pods among them — with their
 // grants and pending requests. Revoking one already revoked answers the same.
@@ -105,7 +103,7 @@ func (s *server) revokeLauncherCredential(w http.ResponseWriter, r *http.Request
 	if !ok {
 		return
 	}
-	var body revokeLauncherCredentialBody
+	var body revokeByApproverBody
 	if !readJSON(w, r, &body, "INVALID_REVOKE") {
 		return
 	}

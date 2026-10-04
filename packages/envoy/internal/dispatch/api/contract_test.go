@@ -353,55 +353,12 @@ func TestPendingListShowsCreatedRecordThroughDispatch(t *testing.T) {
 	}
 }
 
-// TestMachineLoginLookupAndApproveThroughDispatch drives the typed-code machine flow: a machine's
-// signed login request produces a code; Dispatch's lookup route resolves it to the record (ruling
-// 13's one selector); approving through Dispatch with the same code mints a launcher credential,
-// and without the code the broker refuses CODE_REQUIRED.
+// TestMachineLoginLookupAndApproveThroughDispatch drives the typed-code machine flow
+// (approveMachineLogin): a machine's signed login request produces a code; Dispatch's lookup route
+// resolves it to the record (ruling 13's one selector); approving through Dispatch with the same
+// code mints a launcher credential, and without the code the broker refuses CODE_REQUIRED.
 func TestMachineLoginLookupAndApproveThroughDispatch(t *testing.T) {
-	rig := newContractRig(t)
-	machineKey := contractSigningKey(t)
-	compact, err := record.Sign(machineKey, rig.BrokerURL,
-		[]record.AuthorizationDetail{{Type: "launcher_credential", Identifier: "contract-test-host"}}, "", contractApprover, time.Now())
-	if err != nil {
-		t.Fatalf("record.Sign: %v", err)
-	}
-	status, body := rig.brokerReq(t, http.MethodPost, "/v1/launcher-credentials", nil, map[string]any{"request": compact})
-	if status != http.StatusAccepted && status != http.StatusOK {
-		t.Fatalf("POST /v1/launcher-credentials = %d: %s", status, body)
-	}
-	created := struct {
-		Code string `json:"code"`
-	}{}
-	if err := json.Unmarshal(body, &created); err != nil || created.Code == "" {
-		t.Fatalf("decode machine login response: %v (body: %s)", err, body)
-	}
-
-	lookupResp := dispatchRequest(t, rig.Dispatch, http.MethodPost, "/api/v1/credential-requests/machine-lookup",
-		map[string]any{"code": created.Code}, contractApprover)
-	if lookupResp.Code != http.StatusOK {
-		t.Fatalf("machine-lookup = %d: %s", lookupResp.Code, lookupResp.Body.String())
-	}
-	looked := decodeBody[contractRecord](t, lookupResp)
-	if looked.Kind != "launcher_credential" || looked.State != "pending" {
-		t.Fatalf("machine-lookup = %+v, want a pending launcher_credential record", looked)
-	}
-
-	approvePath := "/api/v1/credential-requests/" + looked.RecordID + "/approve"
-	noCode := dispatchRequest(t, rig.Dispatch, http.MethodPost, approvePath, map[string]any{}, contractApprover)
-	if noCode.Code != http.StatusBadRequest || decodeBody[contractError](t, noCode).Code != "CODE_REQUIRED" {
-		t.Fatalf("machine approve without its code = %d %s, want 400 CODE_REQUIRED", noCode.Code, noCode.Body.String())
-	}
-	approveResp := dispatchRequest(t, rig.Dispatch, http.MethodPost, approvePath, map[string]any{"code": created.Code}, contractApprover)
-	if approveResp.Code != http.StatusOK {
-		t.Fatalf("machine approve = %d: %s", approveResp.Code, approveResp.Body.String())
-	}
-	approved := decodeBody[struct {
-		State        string  `json:"state"`
-		CredentialID *string `json:"credential_id"`
-	}](t, approveResp)
-	if approved.State != "approved" || approved.CredentialID == nil || *approved.CredentialID == "" {
-		t.Fatalf("machine approve response = %+v, want state=approved with a credential_id", approved)
-	}
+	newContractRig(t).approveMachineLogin(t, contractApprover, "", "contract-test-host")
 }
 
 // TestGrantsListAndRevokeByApproverThroughDispatch approves a request to mint a grant, lists it
@@ -617,8 +574,10 @@ func TestAnAutomaticGrantIsListedRevokedAndThenAsksItsOwner(t *testing.T) {
 }
 
 // approveMachineLogin logs a machine in as a person does: the machine posts its signed login,
-// naming approver to approve it, straight to the broker, and approver looks its code up and
-// approves it through Dispatch. service names the service a service's login is for (the Legion
+// naming approver to approve it, straight to the broker; approver looks its code up through
+// Dispatch (ruling 13's one selector), which answers the pending launcher_credential record; an
+// approval without the code is refused CODE_REQUIRED; and approver's approval with the same code
+// mints a launcher credential. service names the service a service's login is for (the Legion
 // daemon's is legion-daemon), "" for approver's own machine. It returns the launcher credential the
 // approval minted and the machine's key.
 func (rig *contractRig) approveMachineLogin(t *testing.T, approver, service, host string) (string, *ecdsa.PrivateKey) {
@@ -636,15 +595,27 @@ func (rig *contractRig) approveMachineLogin(t *testing.T, approver, service, hos
 	if err := json.Unmarshal(body, &created); status != http.StatusAccepted || err != nil || created.Code == "" {
 		t.Fatalf("POST /v1/launcher-credentials = %d %s (%v), want a code", status, body, err)
 	}
-	looked := decodeBody[contractRecord](t, dispatchRequest(t, rig.Dispatch, http.MethodPost, "/api/v1/credential-requests/machine-lookup",
-		map[string]any{"code": created.Code}, approver))
-	approveResp := dispatchRequest(t, rig.Dispatch, http.MethodPost, "/api/v1/credential-requests/"+looked.RecordID+"/approve",
+	lookupResp := dispatchRequest(t, rig.Dispatch, http.MethodPost, "/api/v1/credential-requests/machine-lookup",
 		map[string]any{"code": created.Code}, approver)
+	if lookupResp.Code != http.StatusOK {
+		t.Fatalf("machine-lookup = %d: %s", lookupResp.Code, lookupResp.Body.String())
+	}
+	looked := decodeBody[contractRecord](t, lookupResp)
+	if looked.Kind != "launcher_credential" || looked.State != "pending" {
+		t.Fatalf("machine-lookup = %+v, want a pending launcher_credential record", looked)
+	}
+	approvePath := "/api/v1/credential-requests/" + looked.RecordID + "/approve"
+	noCode := dispatchRequest(t, rig.Dispatch, http.MethodPost, approvePath, map[string]any{}, approver)
+	if noCode.Code != http.StatusBadRequest || decodeBody[contractError](t, noCode).Code != "CODE_REQUIRED" {
+		t.Fatalf("machine approve without its code = %d %s, want 400 CODE_REQUIRED", noCode.Code, noCode.Body.String())
+	}
+	approveResp := dispatchRequest(t, rig.Dispatch, http.MethodPost, approvePath, map[string]any{"code": created.Code}, approver)
 	approved := decodeBody[struct {
+		State        string  `json:"state"`
 		CredentialID *string `json:"credential_id"`
 	}](t, approveResp)
-	if approveResp.Code != http.StatusOK || approved.CredentialID == nil {
-		t.Fatalf("approve the machine login = %d %s, want a credential_id", approveResp.Code, approveResp.Body.String())
+	if approveResp.Code != http.StatusOK || approved.State != "approved" || approved.CredentialID == nil || *approved.CredentialID == "" {
+		t.Fatalf("approve the machine login = %d %s, want state=approved with a credential_id", approveResp.Code, approveResp.Body.String())
 	}
 	return *approved.CredentialID, machineKey
 }

@@ -36,11 +36,13 @@ has one of three kinds:
 An enrollment is leased for `BROKER_LEASE_SECONDS` and renewed while its session runs: the helper
 renews host sessions, `agent-secrets renew` renews a box, and Legion's pod shim renews a pod. An
 enrollment has **ended** once its launcher revokes it (the helper does as soon as a host session's
-process exits) or its lease lapses. From the moment the lease lapses, the session's calls are
-refused `PROOF_INVALID`; the broker's sweep, which runs every `BROKER_SWEEP_SECONDS`, then ends the
-enrollment on its first run after the lapse. Ending an enrollment either way revokes every grant it
-held and cancels every request it still had pending, so those leave the approver's Inbox and an
-approval can never land on a session that is gone
+process exits), the person who approved its machine login revokes that login
+([end a machine's login](/legion/broker/guides/revoke-a-session/#end-a-machines-login)), or its
+lease lapses. From the moment the lease lapses, the session's calls are refused `PROOF_INVALID`; the
+broker's sweep, which runs every `BROKER_SWEEP_SECONDS`, then ends the enrollment on its first run
+after the lapse. Ending an enrollment any of these ways revokes every grant it held and cancels
+every request it still had pending, so those leave the approver's Inbox and an approval can never
+land on a session that is gone
 (`packages/envoy/internal/broker/enroll/enroll.go`, `endEnrollment`).
 
 Every `host` and `box` enrollment records an **operator**: the person whose machine it runs on. The
@@ -62,13 +64,17 @@ approved a **machine login** for it. The login works like a device code:
 4. On approval the broker mints a **launcher credential** bound to the machine's key. It is never a
    token: the machine uses it by signing with that key.
 
-A launcher credential lasts `BROKER_LAUNCHER_CREDENTIAL_SECONDS`, unless the person who approved it
-revokes it sooner from Dispatch's machine-login page, which also ends every session it enrolled
-([end a machine's login](/legion/broker/guides/revoke-a-session/#end-a-machines-login)). No one
-else may revoke it. On a person's own machine, whoever approved its login is its operator. The
-Legion daemon's login has no operator, since it enrolls pods, so it is listed for whoever approved
-it, and their revoke ends every pod it enrolled. The helper keeps its key in memory only, so a
-helper restart, like an expired or revoked credential, means logging the machine in again. A
+A launcher credential lasts `BROKER_LAUNCHER_CREDENTIAL_SECONDS`. The person who approved it may
+revoke it from Dispatch's machine-login page, before or after it expires, which also ends every
+session it enrolled
+([end a machine's login](/legion/broker/guides/revoke-a-session/#end-a-machines-login)); no one
+else may. Its sessions outlive its expiry: a session renews its lease with its own key, never with
+the machine's credential, so a box keeps working after the machine's credential expires, and the
+page lists an expired login, marked as expired with sessions still running, until its last session
+ends. On a person's own machine, whoever approved its login is its operator. The Legion daemon's
+login has no operator, since it enrolls pods, so it is listed for whoever approved it, and their
+revoke ends every pod it enrolled. The helper keeps its key in memory only, so a helper restart,
+like an expired or revoked credential, means logging the machine in again. A
 machine login nobody decides expires after 15 minutes, a fixed time rather than a setting
 (`machineLoginPendingTTL` in `packages/envoy/cmd/broker/main.go`).
 
@@ -220,8 +226,10 @@ approved record behind it releases nothing.
 Beside the records, the broker keeps an append-only `audit` table with one row per event:
 `enrollment.created`, `enrollment.revoked`, `enrollment.expired`, `request.created`,
 `request.granted`, `request.denied`, `request.cancelled`, `request.expired`, `grant.used` (each time
-a session reads a grant, naming the secrets released) and `grant.revoked` (naming, under
-`withheld`, the secrets a person's revoke withheld from the session). Each row names its actor:
-`human:<email>`, `session:<enrollment id>`, `launcher:<credential id>` or `broker`. No record, event
-or audit row ever holds a secret value. [Operating the broker](/legion/broker/operate/#the-audit-record)
-shows how to read them.
+a session reads a grant, naming the secrets released), `grant.revoked` (naming, under
+`withheld`, the secrets a person's revoke withheld from the session) and
+`launcher_credential.revoked` (naming the machine login's `credential_id`, its `host`, its `service`
+for a service's login, and under `enrollments` the sessions the revoke ended). Each row names its
+actor: `human:<email>`, `session:<enrollment id>`, `launcher:<credential id>` or `broker`. No
+record, event or audit row ever holds a secret value.
+[Operating the broker](/legion/broker/operate/#the-audit-record) shows how to read them.

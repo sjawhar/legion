@@ -324,16 +324,7 @@ func TestRevokeRevokesLiveGrantsUnderEnrollment(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	requestID := uuid.New()
-	if _, err := svc.Store.Pool.Exec(ctx, `insert into requests (id, enrollment_id, reason, state, rules_version, lifetime_seconds)
-		values ($1,$2,'test fixture','granted','v1',3600)`, requestID, enr.ID); err != nil {
-		t.Fatalf("insert request fixture: %v", err)
-	}
-	grantID := uuid.New()
-	if _, err := svc.Store.Pool.Exec(ctx, `insert into grants (id, request_id, enrollment_id, expires_at) values ($1,$2,$3, now() + interval '1 hour')`,
-		grantID, requestID, enr.ID); err != nil {
-		t.Fatalf("insert grant fixture: %v", err)
-	}
+	grantID := insertLiveGrant(t, svc, enr.ID)
 
 	if err := svc.Revoke(ctx, cred, enr.ID.String(), "ada@example.com"); err != nil {
 		t.Fatalf("Revoke: %v", err)

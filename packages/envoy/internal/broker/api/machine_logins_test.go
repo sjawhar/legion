@@ -11,6 +11,8 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -26,6 +28,7 @@ type wireLauncherCredential struct {
 	Service      *string   `json:"service"`
 	IssuedAt     time.Time `json:"issued_at"`
 	ExpiresAt    time.Time `json:"expires_at"`
+	Expired      bool      `json:"expired"`
 }
 
 // machineLogins reads GET /v1/launcher-credentials?approver=<approver>, as Dispatch's server does
@@ -42,35 +45,38 @@ func (ts *testServer) machineLogins(t *testing.T, approver string) []wireLaunche
 }
 
 // enrollBox enrolls a box under launcher credential credentialID, signing the launcher proof with
-// machineKey, and returns the box's enrollment id and its own key.
-func (ts *testServer) enrollBox(t *testing.T, machineKey *ecdsa.PrivateKey, credentialID, runtimeID string) (string, *ecdsa.PrivateKey) {
+// machineKey, and returns the broker's status and body, the box's enrollment id (when enrolled)
+// and its own key.
+func (ts *testServer) enrollBox(t *testing.T, machineKey *ecdsa.PrivateKey, credentialID, runtimeID string) (int, []byte, string, *ecdsa.PrivateKey) {
 	t.Helper()
 	key := newSigningKey(t)
-	thumbprint, err := proof.Thumbprint(&key.PublicKey)
-	if err != nil {
-		t.Fatalf("thumbprint: %v", err)
-	}
 	status, body := ts.launcher(t, machineKey, credentialID, http.MethodPost, "/v1/enrollments", map[string]any{
-		"kind": "box", "runtime_id": runtimeID, "thumbprint": thumbprint,
+		"kind": "box", "runtime_id": runtimeID, "thumbprint": thumbprintOf(t, key),
 	})
+	return status, body, decode[wireEnrolled](t, body).EnrollmentID, key
+}
+
+// enrolledBox is enrollBox for a box that must enroll: it fails t on anything but 201.
+func (ts *testServer) enrolledBox(t *testing.T, machineKey *ecdsa.PrivateKey, credentialID, runtimeID string) (string, *ecdsa.PrivateKey) {
+	t.Helper()
+	status, body, enrollmentID, key := ts.enrollBox(t, machineKey, credentialID, runtimeID)
 	if status != http.StatusCreated {
 		t.Fatalf("POST /v1/enrollments = %d, want 201: %s", status, body)
 	}
-	return decode[struct {
-		EnrollmentID string `json:"enrollment_id"`
-	}](t, body).EnrollmentID, key
+	return enrollmentID, key
 }
 
 // TestAPersonRevokesTheirOwnMachineLogin drives the machine-login routes Dispatch's page relays to:
-// the person's live machine login is listed with its machine and lifetime and no service; another
-// person, an unknown id, a malformed id and a missing name are refused; and the revoke by the
-// person who approved it ends it at once — its session's proofs, its launcher proofs, its grant and
-// its pending request all go, and another person's machine login stays.
+// the person's live machine login is listed with its machine and lifetime and no service, under
+// their email in any case and padding, as Dispatch may send it; another person, an unknown id, a
+// malformed id and a missing name are refused; and the revoke by the person who approved it ends
+// it at once — its session's proofs, its launcher proofs, its grant and its pending request all
+// go, and another person's machine login stays.
 func TestAPersonRevokesTheirOwnMachineLogin(t *testing.T) {
 	ts := newTestServer(t)
 	credentialID, machineKey := ts.mintLauncherCredential(t, testApprover, "example-host-devbox")
 	otherID, _ := ts.mintLauncherCredential(t, "bob@example.com", "example-host-laptop")
-	enrollmentID, sessionKey := ts.enrollBox(t, machineKey, credentialID, "box-"+t.Name())
+	enrollmentID, sessionKey := ts.enrolledBox(t, machineKey, credentialID, "box-"+t.Name())
 	request := func(name string) wireCreateRequestResponse {
 		t.Helper()
 		status, body := ts.session(t, sessionKey, enrollmentID, http.MethodPost, "/v1/requests",
@@ -90,8 +96,11 @@ func TestAPersonRevokesTheirOwnMachineLogin(t *testing.T) {
 
 	logins := ts.machineLogins(t, testApprover)
 	if len(logins) != 1 || logins[0].CredentialID != credentialID || logins[0].Host != "example-host-devbox" || logins[0].Service != nil ||
-		logins[0].ExpiresAt.Sub(logins[0].IssuedAt).Round(time.Minute) != 7*24*time.Hour {
-		t.Fatalf("machine logins of %s = %+v, want the devbox's, issued for a week", testApprover, logins)
+		logins[0].Expired || logins[0].ExpiresAt.Sub(logins[0].IssuedAt).Round(time.Minute) != 7*24*time.Hour {
+		t.Fatalf("machine logins of %s = %+v, want the devbox's, unexpired, issued for a week", testApprover, logins)
+	}
+	if again := ts.machineLogins(t, " \t"+strings.ToUpper(testApprover)+" "); !slices.Equal(again, logins) {
+		t.Fatalf("machine logins of %s in capitals and padding = %+v, want the same as %+v", testApprover, again, logins)
 	}
 
 	revokePath := "/v1/launcher-credentials/" + credentialID + "/revoke-by-approver"
@@ -129,14 +138,7 @@ func TestAPersonRevokesTheirOwnMachineLogin(t *testing.T) {
 	if status, body := ts.session(t, sessionKey, enrollmentID, http.MethodGet, "/v1/enrollments/self", nil); status != http.StatusUnauthorized || decode[wireError](t, body).Code != "PROOF_INVALID" {
 		t.Fatalf("GET /v1/enrollments/self after the revoke = %d %s, want 401 PROOF_INVALID", status, body)
 	}
-	sessionKey2 := newSigningKey(t)
-	thumbprint2, err := proof.Thumbprint(&sessionKey2.PublicKey)
-	if err != nil {
-		t.Fatalf("thumbprint: %v", err)
-	}
-	if status, body := ts.launcher(t, machineKey, credentialID, http.MethodPost, "/v1/enrollments", map[string]any{
-		"kind": "box", "runtime_id": "box-after-" + t.Name(), "thumbprint": thumbprint2,
-	}); status != http.StatusUnauthorized || decode[wireError](t, body).Code != "LAUNCHER_INVALID" {
+	if status, body, _, _ := ts.enrollBox(t, machineKey, credentialID, "box-after-"+t.Name()); status != http.StatusUnauthorized || decode[wireError](t, body).Code != "LAUNCHER_INVALID" {
 		t.Fatalf("POST /v1/enrollments after the revoke = %d %s, want 401 LAUNCHER_INVALID", status, body)
 	}
 	_, body = ts.ui(t, http.MethodGet, "/v1/pending?approver="+testApprover, nil)
@@ -344,5 +346,53 @@ func TestAnEnrollmentRacingItsMachineLoginsRevokeIsLauncherInvalid(t *testing.T)
 	var n int
 	if err := ts.Store.Pool.QueryRow(ctx, `select count(*) from enrollments where launcher_credential_id=$1`, credentialID).Scan(&n); err != nil || n != 0 {
 		t.Fatalf("enrollments under the revoked credential = %d (%v), want none", n, err)
+	}
+}
+
+// TestRevokingEveryListedLoginEndsEverySessionTheMachineStarted: a machine login that reaches its
+// expiry does not end the sessions it enrolled — a box renews itself with its own key and keeps
+// reading its grant — and the machine then logs in again (weekly). The person who approved both
+// logins opens the page for a lost or compromised machine and revokes every login it lists. Every
+// session the machine started must end, the box enrolled under the expired login included: so the
+// list shows that login, marked expired, while one of its sessions is live.
+func TestRevokingEveryListedLoginEndsEverySessionTheMachineStarted(t *testing.T) {
+	ts := newTestServer(t)
+	oldLogin, oldMachineKey := ts.mintLauncherCredential(t, testApprover, "example-host-devbox")
+	oldBox, oldBoxKey := ts.enrolledBox(t, oldMachineKey, oldLogin, "box-old-"+t.Name())
+	status, body := ts.session(t, oldBoxKey, oldBox, http.MethodPost, "/v1/requests",
+		map[string]any{"request": signAgentSecretRequest(t, oldBoxKey, ts.URL, "need it", "WORKER_TOKEN"), "session_id": nil})
+	granted := decode[wireCreateRequestResponse](t, body)
+	if status != http.StatusOK || granted.GrantID == nil {
+		t.Fatalf("request = %d %s, want an automatic grant", status, body)
+	}
+	if _, err := ts.Store.Pool.Exec(context.Background(), `update launcher_credentials set expires_at = now() - interval '1 minute' where id=$1`, oldLogin); err != nil {
+		t.Fatal(err)
+	}
+	if status, body := ts.session(t, oldBoxKey, oldBox, http.MethodPost, "/v1/enrollments/"+oldBox+"/renew", nil); status != http.StatusOK {
+		t.Fatalf("the old box's renew after its login expired = %d %s; this test assumes it still renews", status, body)
+	}
+	newLogin, newMachineKey := ts.mintLauncherCredential(t, testApprover, "example-host-devbox")
+	newBox, newBoxKey := ts.enrolledBox(t, newMachineKey, newLogin, "box-new-"+t.Name())
+
+	logins := ts.machineLogins(t, testApprover)
+	if len(logins) != 2 || logins[0].CredentialID != newLogin || logins[0].Expired || logins[1].CredentialID != oldLogin || !logins[1].Expired {
+		t.Fatalf("machine logins of %s = %+v, want the new login, then the old one marked expired (old %s, new %s)", testApprover, logins, oldLogin, newLogin)
+	}
+	for _, l := range logins {
+		if status, body := ts.ui(t, http.MethodPost, "/v1/launcher-credentials/"+l.CredentialID+"/revoke-by-approver", map[string]any{"approver": testApprover}); status != http.StatusOK {
+			t.Fatalf("revoke listed login %s = %d %s", l.CredentialID, status, body)
+		}
+	}
+	if status, _ := ts.session(t, newBoxKey, newBox, http.MethodPost, "/v1/enrollments/"+newBox+"/renew", nil); status != http.StatusUnauthorized {
+		t.Fatalf("the new box's renew after revoking every listed login = %d, want 401", status)
+	}
+	if status, body := ts.session(t, oldBoxKey, oldBox, http.MethodPost, "/v1/enrollments/"+oldBox+"/renew", nil); status != http.StatusUnauthorized {
+		t.Fatalf("the old box's renew after revoking every listed login = %d %s, want 401: the machine's session under its expired login is still live", status, body)
+	}
+	if status, body := ts.session(t, oldBoxKey, oldBox, http.MethodPost, "/v1/grants/"+*granted.GrantID+"/values", nil); status != http.StatusUnauthorized {
+		t.Fatalf("the old box's grant values after revoking every listed login = %d %s, want 401", status, body)
+	}
+	if logins := ts.machineLogins(t, testApprover); len(logins) != 0 {
+		t.Fatalf("machine logins of %s after revoking every listed one = %+v, want none", testApprover, logins)
 	}
 }

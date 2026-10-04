@@ -2011,9 +2011,13 @@ the minted credential's id and `expires_at` — no token is ever returned; the c
 only with proofs signed by the key the request object embedded. The broker has no renewal route:
 past `expires_at` the machine logs in again, with a new key, a new code and a new human approval.
 
-`GET /v1/launcher-credentials?approver=<email>` lists the live machine logins a person approved
-(id, host, service, issued, expires; neither revoked nor expired), and
-`POST /v1/launcher-credentials/{id}/revoke-by-approver` `{approver}` ends one before its expiry
+`GET /v1/launcher-credentials?approver=<email>` lists the machine logins a person approved that
+can still reach a secret (id, host, service, issued, expires, `expired`): every unrevoked one that
+is unexpired or still has an enrollment that has not ended. A login's enrollments outlive its
+expiry, since `Renew` and `Lookup` never read the credential (each session renews with its own
+key), so an expired login stays listed, `expired: true`, until its last enrollment ends, and
+revoking every listed login ends every session the person's machines started.
+`POST /v1/launcher-credentials/{id}/revoke-by-approver` `{approver}` ends one, expired or not
 (`enroll.Service.RevokeCredential`). Both key on the approver of the `launcher_credential` record
 the credential was minted from (`credential_requests.approver`, joined through
 `launcher_credentials.record_id` and required to be of kind `launcher_credential`), never on the
@@ -2021,7 +2025,8 @@ credential's `operator`: a service's credential (the Legion daemon's, `service` 
 (`authorized` needs it null to enroll pods), and the person who approved it is the one accountable
 for it. For a person's own machine the two are the same person (`machine.Service.ApplyDecision`
 mints the operator from the approving login), so one rule covers both. Anyone but that approver is
-`403 NOT_APPROVER`, as is a credential with no such record, and an unknown id is `404 NOT_FOUND`.
+`403 NOT_APPROVER`; an unknown id, like a credential minted from no `launcher_credential` record
+(only `ApplyDecision` mints one, always from its record), is `404 NOT_FOUND`.
 In one transaction it sets the credential's `revoked_at`, so its launcher proofs stop
 authenticating, ends every enrollment the credential made through `endEnrollment` (a person's host
 sessions and boxes, or every pod a service's login enrolled: grants revoked, pending requests
@@ -2030,10 +2035,13 @@ cancelled, actor `human:<email>`, an `enrollment.revoked` row each) and writes o
 changes nothing. It locks the credential's row before the enrollments', and `Create` holds that row
 `for share` while it inserts, so an enrollment whose launcher proof was verified just before a revoke
 either commits first and is ended by it, or finds the credential revoked and is
-`401 LAUNCHER_INVALID`. Nothing tells the machine: its helper's next renewal of a session is refused
-`PROOF_INVALID`, revoking that lapsed enrollment is refused `LAUNCHER_INVALID`, and the helper drops
-the credential as for any refusal; a helper with no live session learns it at its next enrollment,
-and the Legion daemon at its next pod enrollment or unenrollment, after which it starts a new
+`401 LAUNCHER_INVALID`; the credential lock also makes two concurrent revokes write one
+`launcher_credential.revoked` row, and the enrollments' `for update` makes a revoke racing a
+launcher's own `Revoke` of one enrollment end it once. Nothing tells the machine: its helper's next
+renewal of a session is refused `PROOF_INVALID`, revoking that lapsed enrollment is refused
+`LAUNCHER_INVALID`, and the helper drops the credential as for any refusal; a helper with no live
+session learns it at its next enrollment, and the Legion daemon at its next pod enrollment or
+unenrollment, after which it starts a new
 machine login. Dispatch's machine-login page lists and revokes the signed-in person's through these
 two routes.
 

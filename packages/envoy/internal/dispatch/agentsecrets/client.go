@@ -177,8 +177,8 @@ func (c *Client) RevokeByApprover(ctx context.Context, grantID, approver string)
 	return c.do(ctx, http.MethodPost, "/v1/grants/"+url.PathEscape(grantID)+"/revoke-by-approver", body)
 }
 
-// MachineLogins lists the live machine logins the named person approved: their own machines' and
-// any service's login they approved.
+// MachineLogins lists the machine logins the named person approved that can still reach a secret:
+// their own machines' and any service's, unexpired or expired with a session still running.
 func (c *Client) MachineLogins(ctx context.Context, approver string) (json.RawMessage, error) {
 	query := url.Values{"approver": {approver}}
 	return c.do(ctx, http.MethodGet, "/v1/launcher-credentials?"+query.Encode(), nil)
