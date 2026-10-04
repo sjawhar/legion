@@ -183,7 +183,7 @@ func scanPhase(row scanner) (PhaseRow, error) {
 const pullRequestColumns = `issue, repo, number, branch, head_sha, head_updated_at,
 	failing, cancelled, fix_attempts, blocked_attempts, check_runs,
 	generation, snapshot, pushes, head_counted, planned_red, review_seen, review_seen_at, state,
-	checked_head, required`
+	checked_head, required, required_workflows, required_workflows_head`
 
 func (s *Postgres) PullRequest(ctx context.Context, tx pgx.Tx, issue string) (*PullRequest, error) {
 	pr, err := scanPullRequest(tx.QueryRow(ctx, "select "+pullRequestColumns+" from pull_requests where issue = $1", issue))
@@ -267,10 +267,15 @@ func (s *Postgres) PutPullRequest(ctx context.Context, tx pgx.Tx, pr PullRequest
 			return fmt.Errorf("put pull request for %s: encode required checks: %w", pr.Issue, err)
 		}
 	}
+	workflows, err := json.Marshal(append([]RequiredWorkflow{}, pr.Workflows...))
+	if err != nil {
+		return fmt.Errorf("put pull request for %s: encode required workflows: %w", pr.Issue, err)
+	}
 	_, err = tx.Exec(ctx, `insert into pull_requests (issue, repo, number, branch, head_sha, head_updated_at,
 		failing, cancelled, fix_attempts, blocked_attempts, check_runs, generation, snapshot, pushes,
-		head_counted, planned_red, review_seen, review_seen_at, state, checked_head, required)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
+		head_counted, planned_red, review_seen, review_seen_at, state, checked_head, required,
+		required_workflows, required_workflows_head)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
 		on conflict (issue) do update set repo = excluded.repo, number = excluded.number, branch = excluded.branch,
 		head_sha = excluded.head_sha, head_updated_at = excluded.head_updated_at,
 		failing = excluded.failing, cancelled = excluded.cancelled, fix_attempts = excluded.fix_attempts,
@@ -279,11 +284,13 @@ func (s *Postgres) PutPullRequest(ctx context.Context, tx pgx.Tx, pr PullRequest
 		pushes = excluded.pushes, head_counted = excluded.head_counted,
 		planned_red = excluded.planned_red, review_seen = excluded.review_seen,
 		review_seen_at = excluded.review_seen_at, state = excluded.state, checked_head = excluded.checked_head,
-		required = excluded.required`,
+		required = excluded.required, required_workflows = excluded.required_workflows,
+		required_workflows_head = excluded.required_workflows_head`,
 		pr.Issue, pr.Repo, pr.Number, pr.Branch, pr.HeadSHA, pr.HeadUpdatedAt,
 		failing, cancelled, pr.FixAttempts, pr.BlockedAttempts, checkRuns,
 		pr.Generation, pr.Snapshot, pushes, pr.HeadCounted, pr.PlannedRed,
 		pr.ReviewSeen.ID, pr.ReviewSeen.SubmittedAt, pr.State, pr.CheckedHead, required,
+		workflows, pr.WorkflowsHead,
 	)
 	if err != nil {
 		return fmt.Errorf("put pull request for %s: %w", pr.Issue, err)
@@ -342,11 +349,11 @@ func clearGeneration(ctx context.Context, tx pgx.Tx, where, issues, key, describ
 
 func scanPullRequest(row scanner) (*PullRequest, error) {
 	var pr PullRequest
-	var failing, cancelled, checkRuns, pushes, required []byte
+	var failing, cancelled, checkRuns, pushes, required, workflows []byte
 	if err := row.Scan(&pr.Issue, &pr.Repo, &pr.Number, &pr.Branch, &pr.HeadSHA, &pr.HeadUpdatedAt,
 		&failing, &cancelled, &pr.FixAttempts, &pr.BlockedAttempts, &checkRuns, &pr.Generation, &pr.Snapshot,
 		&pushes, &pr.HeadCounted, &pr.PlannedRed, &pr.ReviewSeen.ID, &pr.ReviewSeen.SubmittedAt, &pr.State,
-		&pr.CheckedHead, &required); err != nil {
+		&pr.CheckedHead, &required, &workflows, &pr.WorkflowsHead); err != nil {
 		return nil, err
 	}
 	if err := json.Unmarshal(failing, &pr.Failing); err != nil {
@@ -365,6 +372,9 @@ func scanPullRequest(row scanner) (*PullRequest, error) {
 		if err := json.Unmarshal(required, &pr.Required); err != nil {
 			return nil, fmt.Errorf("decode required checks: %w", err)
 		}
+	}
+	if err := json.Unmarshal(workflows, &pr.Workflows); err != nil {
+		return nil, fmt.Errorf("decode required workflows: %w", err)
 	}
 	return &pr, nil
 }

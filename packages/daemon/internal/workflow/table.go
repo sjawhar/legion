@@ -65,6 +65,7 @@ var Table = append([]Row{
 	{From: phase.Reviewing, Trigger: TriggerChecksRed, Guard: allow, To: phase.Implementing, Status: "in_progress", Effects: []EffectKind{EffectStatus, EffectSuspend, EffectStart, EffectNotice}},
 	{From: phase.Retro, Trigger: TriggerRetroCompleted, Guard: allow, To: phase.Merging, Effects: []EffectKind{EffectSuspend, EffectStart, EffectNotice}},
 	{From: phase.Merging, Trigger: TriggerReady, Guard: allow, To: phase.AwaitingMerge, Effects: []EffectKind{EffectSuspend, EffectNotice}},
+	{From: phase.AwaitingMerge, Trigger: TriggerChecksRed, Guard: allow, To: phase.Implementing, Status: "in_progress", Effects: []EffectKind{EffectStatus, EffectStart, EffectNotice}},
 	{From: phase.AwaitingMerge, Trigger: TriggerPullRequestMerged, Guard: allow, To: phase.ProductionCheck, Effects: []EffectKind{EffectStart, EffectNotice}},
 	{From: phase.ProductionCheck, Trigger: TriggerSignOff, Guard: allow, To: phase.Done, Status: "done", Effects: []EffectKind{EffectStatus, EffectSuspend, EffectNotice, EffectLinger}},
 }, backwardRows()...)

@@ -947,6 +947,79 @@ func TestHandoffCompleteReadyRefusesAHeadWithoutItsRequiredChecksGreen(t *testin
 	}
 }
 
+// A ruleset can also require a workflow to succeed (rule type workflows), which GitHub judges by
+// that workflow's run for the pull request's head. The rule shapes are a live repository's: a
+// workflows rule for its review workflow, a required_status_checks rule for one aggregator check,
+// a pull_request rule requiring no approval, and a branch protection requiring nothing. With the
+// required check green, READY waits on the review workflow's latest pull_request run on the head:
+// refused while it failed, still runs, or never ran, and posted once it succeeded.
+func TestHandoffCompleteReadyJudgesARequiredWorkflowByItsRunOnTheHead(t *testing.T) {
+	const (
+		head   = "c0de0000000000000000000000000000000000ff"
+		review = `{"id":%d,"name":"Review PR #42","path":".github/workflows/claude-pr-review.yml","event":"pull_request","status":"%s","conclusion":%s,"repository":{"id":4242}}`
+		rules  = `[{"type":"workflows","parameters":{"do_not_enforce_on_create":true,"workflows":[{"repository_id":4242,"path":".github/workflows/claude-pr-review.yml","ref":"refs/heads/main"}]}},` +
+			`{"type":"deletion","parameters":null},` +
+			`{"type":"pull_request","parameters":{"required_approving_review_count":0,"dismiss_stale_reviews_on_push":true,"require_code_owner_review":false}},` +
+			`{"type":"required_status_checks","parameters":{"strict_required_status_checks_policy":false,"required_status_checks":[{"context":"pr-checks-result","integration_id":15368}]}}]`
+	)
+	reviewRun := func(id int, status, conclusion string) string { return fmt.Sprintf(review, id, status, conclusion) }
+	for _, tc := range []struct {
+		name    string
+		runs    []string
+		refusal string
+	}{
+		{"while the required workflow failed", []string{reviewRun(7, "completed", `"failure"`)}, `the required workflow ".github/workflows/claude-pr-review.yml" ended failure on head c0de00000000`},
+		{"while the required workflow still runs", []string{reviewRun(7, "in_progress", "null")}, `the required workflow ".github/workflows/claude-pr-review.yml" is still running on head c0de00000000`},
+		{"while the head has no run of the required workflow", nil, `head c0de00000000 of pull request #42 has no run of the required workflow ".github/workflows/claude-pr-review.yml"`},
+		{"once the required workflow succeeded", []string{reviewRun(7, "completed", `"success"`)}, ""},
+		{"once a later run of the required workflow succeeded", []string{reviewRun(7, "completed", `"failure"`), reviewRun(9, "completed", `"success"`)}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := "/repos/acme/widgets"
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch r.URL.Path {
+				case repo + "/pulls/42":
+					_, _ = w.Write([]byte(`{"head":{"sha":"` + head + `"},"base":{"ref":"main"},"mergeable_state":"blocked"}`))
+				case repo + "/rules/branches/main":
+					_, _ = w.Write([]byte(rules))
+				case repo + "/branches/main":
+					_, _ = w.Write([]byte(`{"name":"main","protected":false}`))
+				case repo + "/commits/" + head + "/check-runs":
+					_, _ = w.Write([]byte(`{"total_count":1,"check_runs":[{"id":1,"name":"pr-checks-result","status":"completed","conclusion":"success"}]}`))
+				case repo + "/commits/" + head + "/status":
+					_, _ = w.Write([]byte(`{"statuses":[]}`))
+				case repo + "/actions/runs":
+					if r.URL.Query().Get("head_sha") != head {
+						http.NotFound(w, r)
+						return
+					}
+					_, _ = fmt.Fprintf(w, `{"total_count":%d,"workflow_runs":[%s]}`, len(tc.runs), strings.Join(tc.runs, ","))
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			t.Cleanup(server.Close)
+			workspace := t.TempDir()
+			t.Setenv("LEGION_ROLE", "merger")
+			t.Setenv("LEGION_JJ_PATH", fakeHandoffJJ(t, "beef"))
+			bodies := handoffDaemon(t, phase.Merging)
+			t.Setenv("LEGION_GITHUB_API_URL", server.URL)
+			var out, errb bytes.Buffer
+			code := run(context.Background(), []string{"legion", "handoff", "complete", "--workspace", workspace, "--summary", "gate facts hold", "--ready"}, &out, &errb)
+			if tc.refusal == "" {
+				if code != 0 || len(*bodies) != 1 {
+					t.Fatalf("READY = %d, daemon read %v, stderr %q; want it posted", code, *bodies, errb.String())
+				}
+				return
+			}
+			if code != 1 || len(*bodies) != 0 || !strings.Contains(errb.String(), "READY refused: "+tc.refusal) {
+				t.Fatalf("READY = %d, daemon read %v, stderr %q; want it refused naming %q and nothing posted", code, *bodies, errb.String(), tc.refusal)
+			}
+		})
+	}
+}
+
 // A private repository whose plan has no rulesets answers the rulesets read 403, "make this
 // repository public to enable this feature" (docs/solutions/legion/controller-gate-2-required-checks-live-reads.md).
 // It can define no ruleset, so none requires a check there, and READY rests on the branch's

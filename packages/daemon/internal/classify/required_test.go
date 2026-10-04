@@ -30,6 +30,16 @@ func TestHeadVerdictJudgesOnlyTheChecksTheBaseBranchRequires(t *testing.T) {
 			return pr
 		}
 	}
+	// requiringReview requires the check pr-checks-result and the workflow review.yml, whose run the
+	// daemon read at head with result.
+	requiringReview := func(result, head string) func(record.PullRequest) record.PullRequest {
+		return func(pr record.PullRequest) record.PullRequest {
+			pr = requiring("pr-checks-result")(pr)
+			pr.Workflows = []record.RequiredWorkflow{{Path: "review.yml", Result: result}}
+			pr.WorkflowsHead = head
+			return pr
+		}
+	}
 	for _, tc := range []struct {
 		name     string
 		pr       func(record.PullRequest) record.PullRequest
@@ -60,6 +70,15 @@ func TestHeadVerdictJudgesOnlyTheChecksTheBaseBranchRequires(t *testing.T) {
 			pr.HeadSHA = "fix"
 			return pr
 		}, "", nil},
+		{"a required workflow whose run failed", requiringReview("failure", "code"), "red", []Standing{{"pr-checks-result", Success}, {"review.yml", "failure"}}},
+		{"a required workflow whose run was cancelled", requiringReview("cancelled", "code"), "red", []Standing{{"pr-checks-result", Success}, {"review.yml", "cancelled"}}},
+		{"a required workflow whose run succeeded", requiringReview(Success, "code"), "green", []Standing{{"pr-checks-result", Success}, {"review.yml", Success}}},
+		{"a required workflow still running", requiringReview(Pending, "code"), "", []Standing{{"pr-checks-result", Success}, {"review.yml", Pending}}},
+		{"a required workflow the head has no run of", requiringReview(Missing, "code"), "", []Standing{{"pr-checks-result", Success}, {"review.yml", Pending}}},
+		{"a required workflow's success read at an earlier head", requiringReview(Success, "earlier"), "", []Standing{{"pr-checks-result", Success}, {"review.yml", Pending}}},
+		{"a required workflow's failure read at the code head, carried to the handoff head", func(pr record.PullRequest) record.PullRequest {
+			return carried(requiringReview("failure", "code")(pr))
+		}, "red", []Standing{{"pr-checks-result", Success}, {"review.yml", "failure"}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pr := tc.pr(settled)

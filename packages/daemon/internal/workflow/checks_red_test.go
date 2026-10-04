@@ -129,3 +129,69 @@ func TestARedVerdictInTestingOrReviewingSendsTheTreeBackToImplementing(t *testin
 		})
 	}
 }
+
+// An issue in awaiting_merge has every worker suspended and a READY a human was told to merge. A
+// red that then stands for its head - a required check failing on a rerun, or a newly required
+// one - keeps GitHub from merging it, and no worker would hear of it: the issue goes back to
+// implementing exactly as a red in testing does, the implementer's task and the architect's
+// checks-red notice naming the red checks, and the round returns through testing, review and
+// READY. The READY head is usually reached by a push that changed only .legion/ (the retro's and
+// the merger's handoffs), and a red there sends the work back too, unlike in testing or reviewing,
+// where such a head's red is a round's to decide: no round is open in awaiting_merge. A red only on
+// a check the base branch does not require moves nothing.
+func TestARedVerdictInAwaitingMergeSendsTheTreeBackToImplementing(t *testing.T) {
+	const required = "pr-checks-result"
+	for _, tc := range []struct {
+		name        string
+		handoffHead bool
+		// settles is the commit the red settlement names: the head, or the code head a handoff-only
+		// push replaced.
+		settles string
+		failing string
+		want    phase.Phase
+	}{
+		{"on the READY head", false, "head", required, phase.Implementing},
+		{"on a READY head a handoff-only push reached", true, "head", required, phase.Implementing},
+		{"on the code head, carried to the READY head", true, "code", required, phase.Implementing},
+		{"only on a check the base branch does not require", false, "head", "review", phase.AwaitingMerge},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root",
+				Phase: phase.AwaitingMerge, Generation: 1, Status: "retro", Rank: "U"})
+			pr := record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
+				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", Required: []string{required}}
+			if tc.handoffHead {
+				pr.Pushes = []record.ClassifiedPush{{SHA: "head", Before: "code", HandoffOnly: true}}
+			}
+			seedPR(t, pool, pr)
+			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
+			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merge-claim", HandoffCommit: "head", Summary: "READY #42 at head"})
+			applyRefusingNothing(t, pool, testEngine(config.DesignGateRootIssues, nil), intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42,
+				HeadSHA: tc.settles, CheckRuns: []record.AttemptRun{{Name: required, ID: 1}, {Name: "review", ID: 2}}, Generation: 1, Snapshot: "red",
+				Failing: []string{tc.failing}})
+			if got := issuePhase(t, pool); got != tc.want {
+				t.Fatalf("after the red verdict the issue is in %s, want %s", got, tc.want)
+			}
+			if tc.want == phase.AwaitingMerge {
+				if got := noticeKinds(t, pool, "LEGION-208"); len(got) != 0 {
+					t.Fatalf("notices %v, want none", got)
+				}
+				assertOutboxCount(t, pool, "supervise", 0)
+				assertOutboxCount(t, pool, "dispatch_status", 0)
+				return
+			}
+			want := "CI is red at head: " + required
+			var reason, from, status string
+			if err := pool.QueryRow(context.Background(), "select payload->>'reason', payload->>'phase' from outbox where kind = 'notice' and payload->>'kind' = 'checks-red'").Scan(&reason, &from); err != nil {
+				t.Fatalf("read the architect's checks-red notice: %v", err)
+			}
+			if err := pool.QueryRow(context.Background(), "select payload->>'status' from outbox where kind = 'dispatch_status'").Scan(&status); err != nil {
+				t.Fatalf("read the status write: %v", err)
+			}
+			if task := implementerTask(t, pool); !strings.Contains(task, want) || !strings.Contains(reason, want) || from != string(phase.AwaitingMerge) || status != "in_progress" {
+				t.Fatalf("task %q, notice %q from %q, status %q; want both to say %q, from awaiting_merge, and the issue in_progress", task, reason, from, status, want)
+			}
+		})
+	}
+}

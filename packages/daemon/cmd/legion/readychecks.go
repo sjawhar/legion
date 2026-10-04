@@ -19,15 +19,16 @@ import (
 var githubRemote = regexp.MustCompile(`^(?:https://github\.com/|git@github\.com:)([^/\s]+/[^/\s]+?)(?:\.git)?/?$`)
 
 // readyChecks refuses a READY whose head GitHub will not merge for its checks: every check the
-// base branch requires - its rulesets' required status checks and its branch protection's
-// (requiredchecks.Required) - must have succeeded on the pull request's head, judged by the rule
-// the workflow's checks verdict judges by too (classify.Judge). A head reports none of them when
-// its push skipped CI when it should not have (legion push's rule), or when the pull request
-// conflicts with its base, since GitHub starts no pull_request run for a pull request it cannot
-// merge; it is refused here, naming the head, the check and which of the two GitHub shows, rather
-// than left for GitHub to block the human merge.
+// base branch requires - its rulesets' required status checks and its branch protection's - must
+// have succeeded on the pull request's head, and every workflow its rulesets require must have a
+// run for the head that succeeded (requiredchecks.Required, requiredchecks.Workflows), judged by
+// the rule the workflow's checks verdict judges by too (classify.Judge). A head reports none of
+// them when its push skipped CI when it should not have (legion push's rule), or when the pull
+// request conflicts with its base, since GitHub starts no pull_request run for a pull request it
+// cannot merge; it is refused here, naming the head, the check or workflow and which of the two
+// GitHub shows, rather than left for GitHub to block the human merge.
 //
-// A base branch that requires no check has nothing to refuse, and READY is published. It says so
+// A base branch that requires nothing has nothing to refuse, and READY is published. It says so
 // on stdout rather than reading like a head whose every required check was read and passed: a
 // private repository on the free plan can define no ruleset, so this is the ordinary state of the
 // smoke sandbox, and a merger there has no check-based gate on the head at all.
@@ -66,11 +67,17 @@ func readyChecks(ctx context.Context, workspace string, issue paneIssue, stdout 
 	if err != nil {
 		return err
 	}
-	if len(required) == 0 {
+	if len(required.Checks) == 0 && len(required.Workflows) == 0 {
 		fmt.Fprintf(stdout, "[handoff] no check is required on %q of %s, so READY was published without reading the head's checks\n", pull.Base.Ref, repository)
 		return nil
 	}
-	results, err := headCheckResults(ctx, github, pull.Head.SHA)
+	var results map[string]string
+	if len(required.Checks) > 0 {
+		if results, err = headCheckResults(ctx, github, pull.Head.SHA); err != nil {
+			return err
+		}
+	}
+	workflows, err := requiredchecks.Workflows(ctx, github, pull.Head.SHA, required.Workflows)
 	if err != nil {
 		return err
 	}
@@ -78,16 +85,24 @@ func readyChecks(ctx context.Context, workspace string, issue paneIssue, stdout 
 	if len(head) > 12 {
 		head = head[:12]
 	}
-	for _, check := range classify.Judge(required, results) {
-		switch name := check.Name; {
-		case check.Result == classify.Missing && pull.MergeableState == "dirty":
-			return fmt.Errorf("head %s of pull request #%d has no result for the required check %q: the pull request conflicts with %s, and GitHub starts no pull_request CI for a pull request it cannot merge; tell the architect", head, issue.PullRequest.Number, name, pull.Base.Ref)
-		case check.Result == classify.Missing:
-			return fmt.Errorf("head %s of pull request #%d has no result for the required check %q: its push may have skipped CI when it should not have; tell the architect", head, issue.PullRequest.Number, name)
-		case check.Result == classify.Pending:
-			return fmt.Errorf("the required check %q is still running on head %s of pull request #%d: wait for it to finish", name, head, issue.PullRequest.Number)
-		case check.Red():
-			return fmt.Errorf("the required check %q ended %s on head %s of pull request #%d", name, check.Result, head, issue.PullRequest.Number)
+	for _, judged := range []struct {
+		standings     []classify.Standing
+		what, missing string
+	}{
+		{classify.Judge(required.Checks, results), "required check", "no result for"},
+		{workflows, "required workflow", "no run of"},
+	} {
+		for _, check := range judged.standings {
+			switch name := check.Name; {
+			case check.Result == classify.Missing && pull.MergeableState == "dirty":
+				return fmt.Errorf("head %s of pull request #%d has %s the %s %q: the pull request conflicts with %s, and GitHub starts no pull_request CI for a pull request it cannot merge; tell the architect", head, issue.PullRequest.Number, judged.missing, judged.what, name, pull.Base.Ref)
+			case check.Result == classify.Missing:
+				return fmt.Errorf("head %s of pull request #%d has %s the %s %q: its push may have skipped CI when it should not have; tell the architect", head, issue.PullRequest.Number, judged.missing, judged.what, name)
+			case check.Result == classify.Pending:
+				return fmt.Errorf("the %s %q is still running on head %s of pull request #%d: wait for it to finish", judged.what, name, head, issue.PullRequest.Number)
+			case check.Red():
+				return fmt.Errorf("the %s %q ended %s on head %s of pull request #%d", judged.what, name, check.Result, head, issue.PullRequest.Number)
+			}
 		}
 	}
 	return nil
