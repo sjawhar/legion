@@ -15,9 +15,11 @@ approver at the session's next request. When you revoke a grant your own session
 asking, you **withhold** its secrets from that session: the session's other grants that got them
 without asking end with it, and its next request for them is sent to their owner for approval (to
 anyone signed in, for a shared secret) instead of being granted at once, so the session asks before
-it gets them again; your other sessions still get them at once. Only the session's own person
-withholds: a person who revokes a grant they approved on someone else's session ends that grant
-alone. To end every session's access to a secret,
+it gets them again; your other sessions still get them at once. The withhold is the session's, not
+the grant's, so it holds even when the grant had already ended by the time you clicked **Revoke**
+(the session revoked it itself, or it expired, after the page loaded). Only the session's own
+person withholds: a person who revokes a grant they approved on someone else's session ends that
+grant alone. To end every session's access to a secret,
 [change its tags](#end-every-sessions-access-to-a-secret). To end every session a machine started,
 and stop it starting more, [revoke its machine login](#end-a-machines-login).
 

@@ -112,7 +112,8 @@ whose owner tag names one.
 
 One thing besides the tags changes what a session gets at once: a session's own person, its
 operator, who revokes a grant the session got without asking **withholds** its secrets from that
-session (`packages/envoy/internal/broker/requests/machine_state.go`, `RevokeByApprover`). Each
+session, even when the grant had already ended by then
+(`packages/envoy/internal/broker/requests/machine_state.go`, `RevokeByApprover`). Each
 withheld secret is human tier to that session for as long as the session lives: every other grant
 the session got it on without asking ends with the revoked one, and the session's requests for it
 are sent to the owner for approval, or to anyone signed in to Dispatch for a shared secret, so the
@@ -169,9 +170,9 @@ A grant ends when it expires, when its session revokes it (`agent-secrets revoke
 approver or its enrollment's operator revokes it in Dispatch, or when its enrollment ends. A grant
 the session got without asking is revoked like any other, and when its operator revokes it the
 session asks for approval before it gets the same secrets again (the operator
-[withholds](#owner-and-tier-who-may-have-which-secret) them); a session revoking its own grant, and
-anyone but the operator revoking one, withholds nothing. To end every session's automatic access to
-a secret, change its tags
+[withholds](#owner-and-tier-who-may-have-which-secret) them, even when the grant had already
+ended); a session revoking its own grant, and anyone but the operator revoking one, withholds
+nothing. To end every session's automatic access to a secret, change its tags
 ([revoke a session or a grant](/legion/broker/guides/revoke-a-session/#end-every-sessions-access-to-a-secret)).
 
 ## Approvals
@@ -187,7 +188,10 @@ or for a shared agent-tier secret its session's operator withheld from it, names
 broker records the email of whoever did. A withheld secret is its owner's to approve for that
 session even in a request that was already waiting when the operator withheld it: a request that
 waited on anyone for a shared human-tier secret and the operator's own withheld secret is then the
-operator's alone to approve, and anyone else's approval is refused `NOT_APPROVER`.
+operator's alone to approve, and anyone else's approval is refused `NOT_APPROVER`. The approval it
+gets lasts as any approval does (below): a change to another secret's tags does not end it, nor
+does the operator's later revoke of another grant, unless that revoke withholds another secret the
+request got without asking.
 
 An approval belongs to the person who gave it, so a change to a secret's tags reaches what was
 approved before it wherever the new tags want the secret approved for that session:
@@ -236,9 +240,10 @@ Beside the records, the broker keeps an append-only `audit` table with one row p
 `request.granted`, `request.denied`, `request.cancelled`, `request.expired`, `grant.used` (each time
 a session reads a grant, naming the secrets released), `grant.revoked` (naming, under `withheld`,
 the secrets an operator's revoke withheld from the session, and, on each other grant of the session
-that revoke ended, the withheld secrets that grant held) and `launcher_credential.revoked` (naming
-the machine login's `credential_id`, its `host`, its `service` for a service's login, and under
-`enrollments` the sessions the revoke ended). Each row names its actor: `human:<email>`,
-`session:<enrollment id>`, `launcher:<credential id>` or `broker`. No record, event or audit row
-ever holds a secret value. [Operating the broker](/legion/broker/operate/#the-audit-record) shows
-how to read them.
+that revoke ended, the withheld secrets that grant held), `grant.withheld` (an operator's revoke of
+a grant already revoked, naming under `withheld` the secrets it withheld from the session) and
+`launcher_credential.revoked` (naming the machine login's `credential_id`, its `host`, its
+`service` for a service's login, and under `enrollments` the sessions the revoke ended). Each row
+names its actor: `human:<email>`, `session:<enrollment id>`, `launcher:<credential id>` or
+`broker`. No record, event or audit row ever holds a secret value.
+[Operating the broker](/legion/broker/operate/#the-audit-record) shows how to read them.

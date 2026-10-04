@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -114,7 +115,11 @@ func requestedSecrets(ctx context.Context, q querier, requestID string) ([]reque
 // someone decidedBy, the login that decided the request, is not (record.MayDecide). So an
 // approval keeps its grant while the secret stays the approver's, or becomes shared, whose
 // approver is anyone, or once the policy gives this requester the secret without asking; and a
-// secret handed to a person stops every grant of it that person must approve and did not.
+// secret handed to a person stops every grant of it that person must approve and did not. A name
+// withheld from the session that its request got automatically is judged as an approval by
+// decidedBy too: the withhold ended every grant that got the name without asking (withhold), so a
+// live one was approved after it, by someone the withheld name let approve it
+// (currentPolicyAdmits), and an automatic grant, which no one decided, never passes.
 func stillAllowed(set *policy.Set, name, frozenDecision, decidedBy string, requester policy.Requester) error {
 	d, err := set.Evaluate(name, requester)
 	if errors.Is(err, policy.ErrUnknownSecret) {
@@ -128,7 +133,7 @@ func stillAllowed(set *policy.Set, name, frozenDecision, decidedBy string, reque
 		return fmt.Errorf("%w: the current policy no longer allows %s", ErrGrantNotLive, name)
 	case d.Outcome != policy.Approval:
 		return nil
-	case frozenDecision == policy.Automatic:
+	case frozenDecision == policy.Automatic && !slices.Contains(requester.Withheld, name):
 		return fmt.Errorf("%w: the current policy requires approval for %s", ErrGrantNotLive, name)
 	case !record.MayDecide(record.KindAgentSecret, d.Approver, decidedBy):
 		return fmt.Errorf("%w: %s now needs its owner's approval, which this grant does not have", ErrGrantNotLive, name)
