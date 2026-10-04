@@ -18,9 +18,11 @@ import (
 const stopGrace = 30 * time.Second
 
 // documentShutdownTimeout is the document service's own budget: docs.Service.Shutdown spends up to
-// its drain budget settling the documents owed, and needs the rest to finish what that budget cut
-// short and read back which settlements committed.
-const documentShutdownTimeout = 2 * docs.ShutdownDrainBudget
+// its drain budget settling the documents owed - sized within a second of this whole budget so a
+// burst of writes still landing when shutdown begins has room to finish, not only the ones queued
+// before it began - and needs only what is left to finish what that budget cut short and read back
+// which settlements committed.
+const documentShutdownTimeout = docs.ShutdownDrainBudget + 1*time.Second
 
 // httpDrainBeforeDocuments is how long the document service waits for the requests in flight to
 // finish before it settles the documents owed with requests still running, so that its budget ends
@@ -36,7 +38,8 @@ const httpDrainBeforeDocuments = stopGrace - 5*time.Second - documentShutdownTim
 const silentProbes = 3
 
 // drainPollInterval is how often the last phase asks whether the requests in flight and the
-// connections in use are done.
+// connections in use are done, and how often it retries the health probe that asks whether the
+// database still answers.
 const drainPollInterval = 250 * time.Millisecond
 
 // serveUntilStopped serves on listener until ctx ends, then stops Dispatch (shutdown). It returns

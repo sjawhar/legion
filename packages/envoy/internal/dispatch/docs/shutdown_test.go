@@ -185,6 +185,72 @@ func TestShutdownSettlesEveryOtherRoomWhileOneRoomsQueuedAppendIsHeld(t *testing
 	}
 }
 
+// A room that keeps taking writes while Shutdown drains it - not only the one already queued when
+// Shutdown scanned the room, but a second recorded only after that scan started - still settles
+// within the per-room budget rather than running it out. The live durableAppends counter Shutdown
+// waits on has to see every append through, whenever it was recorded; round 3's frozen
+// durableQueued snapshot only ever waited for the ones already counted at the scan, so it never
+// faced this (LEGION-501).
+func TestShutdownSettlesABurstOfAppendsIncludingOneRecordedAfterItsScan(t *testing.T) {
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "before")
+	first := &appendGate{entered: make(chan struct{}), release: make(chan struct{})}
+	second := &appendGate{entered: make(chan struct{}), release: make(chan struct{})}
+	appends := &burstStore{VersionedStore: NewPgVersioned(database), room: artifactID, gates: []*appendGate{first, second}}
+	t.Cleanup(func() {
+		first.let()
+		second.let()
+	})
+	service := newShutdownTestService(t, database, appends)
+	seedServiceText(t, service, artifactID, "before")
+	settleCurrentGeneration(t, service, artifactID)
+
+	appends.armed.Store(true)
+	editLiveTree(t, service, artifactID, replaceRun("before", "first"))
+	select {
+	case <-first.entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the first append never reached the store")
+	}
+
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancelShutdown()
+	shutdown := make(chan error, 1)
+	go func() { shutdown <- service.Shutdown(shutdownCtx) }()
+
+	// This write lands on the room after Shutdown has already scanned it and is already waiting
+	// on the first append - a genuine burst still arriving at shutdown, not one its scan ever saw.
+	// The room's persistence worker processes appends in order, so this one queues behind the
+	// first rather than reaching the store yet; durableAppends counts it outstanding regardless.
+	editLiveTree(t, service, artifactID, replaceRun("first", "second"))
+	waitFor(t, 10*time.Second, "both appends to be recorded as outstanding", func() bool {
+		return service.room(artifactID).durableAppends.Load() == 2
+	})
+	// Both appends stay queued past the pre-fix 5 s drain budget, and land with time to spare
+	// inside the document service's own 10 s - the burst that budget could not survive.
+	time.Sleep(7 * time.Second)
+	first.let()
+	select {
+	case <-second.entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the second append never reached the store once the first let go")
+	}
+	second.let()
+
+	var shutdownErr error
+	select {
+	case shutdownErr = <-shutdown:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Shutdown did not return once both appends landed")
+	}
+	if shutdownErr != nil {
+		t.Errorf("Shutdown returned %v, want nil: the burst should settle within the per-room drain budget", shutdownErr)
+	}
+	if number, markdown, _ := latestDocumentVersion(t, database, artifactID); number != 2 || markdown != "second\n" {
+		t.Errorf("the document's latest version is %d holding %q, want version 2 holding %q", number, markdown, "second\n")
+	}
+}
+
 // A settlement that has to write into its room - stamping a block id here - is refused that write
 // once Shutdown begins closing the room. Shutdown leaves the document to resume from its
 // pending-settlement row, says so at WARN, and counts no settlement failure, which three of would
@@ -348,6 +414,46 @@ func (s *heldStore) AppendUpdateWithClass(ctx context.Context, room string, upda
 	if room == s.room && s.armed.CompareAndSwap(true, false) {
 		close(s.entered)
 		<-s.release
+	}
+	return s.VersionedStore.(classifiedUpdateStore).AppendUpdateWithClass(ctx, room, update, contentChanged)
+}
+
+// appendGate pairs the channel a burstStore closes once an append reaches it with the channel a
+// test closes, at most once, to let that append complete.
+type appendGate struct {
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (g *appendGate) let() { g.once.Do(func() { close(g.release) }) }
+
+// burstStore holds a room's durable appends one at a time, in the order they reach the store,
+// against the gates a test supplies - standing in for a burst of writes that keeps landing while
+// Shutdown drains the room, including ones recorded only after its room scan. Once armed, each
+// call consumes the next gate in order; a call past the gates a test supplied is not held.
+type burstStore struct {
+	VersionedStore
+	room  string
+	armed atomic.Bool
+	mu    sync.Mutex
+	gates []*appendGate
+	next  int
+}
+
+func (s *burstStore) AppendUpdateWithClass(ctx context.Context, room string, update []byte, contentChanged bool) (persistence.Version, error) {
+	if room == s.room && s.armed.Load() {
+		s.mu.Lock()
+		var gate *appendGate
+		if s.next < len(s.gates) {
+			gate = s.gates[s.next]
+			s.next++
+		}
+		s.mu.Unlock()
+		if gate != nil {
+			close(gate.entered)
+			<-gate.release
+		}
 	}
 	return s.VersionedStore.(classifiedUpdateStore).AppendUpdateWithClass(ctx, room, update, contentChanged)
 }

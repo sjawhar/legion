@@ -91,7 +91,7 @@ arms the settlement of each document whose row is a minute old and whose issue i
 (`resumeOwedSettlements`), so a document nobody opens settles too. It runs on an interval because a
 rolling deploy stops the old task after the new one has started. A closed issue's rooms arm none
 until it reopens. `docs.Service.Shutdown` runs the settlement of each loaded room whose document has
-that row, and no other, inside its 5 s drain budget (`docs.ShutdownDrainBudget`, within the
+that row, and no other, inside its 9 s drain budget (`docs.ShutdownDrainBudget`, within the
 caller's deadline); a settled document's repeat would spend the budget for nothing. Each loaded
 room has a worker of its own that waits for the room's durable appends to land, then reads whether
 the room's document owes a settlement, settles it if so, and closes its editors: a room whose
@@ -112,7 +112,8 @@ resume (`dispatch: document settled before shutdown`, `dispatch: document settle
 after shutdown` with `shutdown_budget_ended`). A settlement cut short is not an error; a caller's
 deadline that passes before Shutdown can read that back is, and its error names the documents that
 owed one. A 1 MiB `a_b*` document's settlement took 4.5-6.8 s at load 90-170 on the development
-machine, past that budget.
+machine - within this round's wider budget, though a slower load or a bigger burst could still
+leave it to resume.
 
 `cmd/dispatch/shutdown.go` orders the process's shutdown inside `stopGrace` (30 s: ECS's default
 stop timeout, which Dispatch's task definition leaves unset, and `stop_grace_period` in
@@ -120,9 +121,10 @@ stop timeout, which Dispatch's task definition leaves unset, and `stop_grace_per
 `api.Deps.Lifetime`, so HTTP shutdown waits only for the requests in flight, and it waits for them
 first, with no deadline of its own. The document service starts when they are done, or 15 s after
 the signal with some still running (`httpDrainBeforeDocuments`, `dispatch: settle documents with
-requests still in flight`), and gets `documentShutdownTimeout`, twice its drain budget (10 s), so
-it is done 5 s before the runtime's kill. The database pool closes once every request has answered
-and no connection of the shared or document-rooms pool is in use. While the database answers,
+requests still in flight`), and gets `documentShutdownTimeout`, 1 s more than its drain budget
+(10 s total), so it is done 5 s before the runtime's kill. The database pool closes once every
+request has answered and no connection of the shared or document-rooms pool is in use. While the
+database answers,
 nothing but the runtime's kill bounds that wait, as with the deferred close of the pool this
 replaced: a write still waiting on a lock commits and is answered if it finishes before the kill.
 The database has stopped answering once three health probes in a row (`silentProbes`, each
