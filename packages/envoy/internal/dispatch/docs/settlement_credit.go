@@ -131,11 +131,11 @@ func pendingSettlementCredit(ctx context.Context, q Queryer, room string) (bool,
 
 // upsertSettlementCredit merges credit into room's pending-settlement row: its pending authors join
 // the row's, a later credit for an actor replacing the earlier one, and its last actor replaces the
-// row's only when it names one. A stored or encoded pending that is not an object counts as empty,
-// since concatenating an object with anything else yields an array the row cannot decode. Every
-// operand is parenthesized: PostgreSQL gives `->` and `||` the same precedence. updateMarkedAt is
-// true only for a newly appended document update; recording authors after its transaction committed
-// or while closing an issue must not make an old row wait another resumption age.
+// row's only when it names one. Every operand is parenthesized: PostgreSQL gives `->` and `||` the
+// same precedence. Both sides' pending is an object: every row this service writes holds one, and
+// settlementCredit.MarshalJSON writes one for a nil map. updateMarkedAt is true only for a newly
+// appended document update; recording authors after its transaction committed or while closing an
+// issue must not make an old row wait another resumption age.
 func upsertSettlementCredit(ctx context.Context, tx pgx.Tx, room string, credit settlementCredit, updateMarkedAt bool) error {
 	encoded, err := json.Marshal(credit)
 	if err != nil {
@@ -146,19 +146,34 @@ func upsertSettlementCredit(ctx context.Context, tx pgx.Tx, room string, credit 
 		on conflict (artifact_id) do update set
 			settlement_authors = jsonb_strip_nulls(jsonb_build_object(
 				'pending',
-				(case when jsonb_typeof(doc_settlements_pending.settlement_authors->'pending') = 'object'
-					then doc_settlements_pending.settlement_authors->'pending' else '{}'::jsonb end) ||
-				(case when jsonb_typeof(excluded.settlement_authors->'pending') = 'object'
-					then excluded.settlement_authors->'pending' else '{}'::jsonb end),
+				(doc_settlements_pending.settlement_authors->'pending') || (excluded.settlement_authors->'pending'),
 				'last_actor',
-				coalesce(
-					nullif(excluded.settlement_authors->'last_actor', 'null'::jsonb),
-					doc_settlements_pending.settlement_authors->'last_actor'
-				)
+				coalesce(excluded.settlement_authors->'last_actor', doc_settlements_pending.settlement_authors->'last_actor')
 			)),
 			marked_at = case when $3 then now() else doc_settlements_pending.marked_at end
 	`, room, string(encoded), updateMarkedAt); err != nil {
 		return fmt.Errorf("record the document's pending settlement: %w", err)
+	}
+	return nil
+}
+
+// releaseSettlementCredit takes the authors a version credited out of room's pending-settlement
+// row, in the transaction that wrote the version. The row's last actor stays: ask reconciliation
+// reads it once no pending author remains.
+func releaseSettlementCredit(ctx context.Context, tx pgx.Tx, room string, authors []model.Actor) error {
+	if len(authors) == 0 {
+		return nil
+	}
+	keys := make([]string, len(authors))
+	for index, actor := range authors {
+		keys[index] = settlementCreditKey(actor)
+	}
+	if _, err := tx.Exec(ctx, `
+		update doc_settlements_pending
+		set settlement_authors = jsonb_set(settlement_authors, '{pending}', (settlement_authors->'pending') - $2::text[])
+		where artifact_id = $1
+	`, room, keys); err != nil {
+		return fmt.Errorf("release the version's authors from the document's pending settlement: %w", err)
 	}
 	return nil
 }

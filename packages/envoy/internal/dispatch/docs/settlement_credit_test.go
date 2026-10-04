@@ -130,8 +130,8 @@ func TestTwoCreditedWritersBothSurviveACrashRestart(t *testing.T) {
 	seedServiceText(t, service, artifactID, "# Decision\n\nContext.\n")
 	first := model.Actor{Kind: "session", ID: "first-writer-session"}
 	second := model.Actor{Kind: "session", ID: "second-writer-session"}
-	writeThroughLedger(t, service, artifactID, first, "First writer's paragraph.\n")
-	writeThroughLedger(t, service, artifactID, second, "Second writer's paragraph.\n")
+	writeThroughLedger(t, service, artifactID, first, "First writer's paragraph.\n", withoutVersion)
+	writeThroughLedger(t, service, artifactID, second, "Second writer's paragraph.\n", withoutVersion)
 
 	restarted := New(Deps{Store: service.store, Events: events.NewBroker(), Settle: 20 * time.Millisecond})
 	t.Cleanup(func() {
@@ -146,44 +146,8 @@ func TestTwoCreditedWritersBothSurviveACrashRestart(t *testing.T) {
 		owed, _, err := pendingSettlementCredit(ctx, service.store.Pool, artifactID)
 		return err == nil && !owed
 	})
-	var authors []model.Actor
-	if err := service.store.Pool.QueryRow(ctx, `
-		select authors from artifact_versions where artifact_id = $1 order by number desc limit 1
-	`, artifactID).Scan(&authors); err != nil {
-		t.Fatalf("read the resumed settlement's version: %v", err)
-	}
-	if !reflect.DeepEqual(authors, []model.Actor{first, second}) {
+	if authors := latestVersionAuthors(t, service, artifactID); !reflect.DeepEqual(authors, []model.Actor{first, second}) {
 		t.Fatalf("resumed settlement version authors = %+v, want %+v and %+v", authors, first, second)
-	}
-}
-
-// A pending-settlement row whose pending authors are JSON null, as an append that carried no credit
-// could store, still lets its document load and settle, crediting the row's last actor.
-func TestADocumentLoadsAPendingSettlementRowWithNullPendingAuthors(t *testing.T) {
-	service, artifactID := newTestService(t)
-	service.settle = time.Hour // the seed's own settlement never runs
-	ctx := context.Background()
-	seedServiceText(t, service, artifactID, ":::ask{#null-pending-ask urgency=\"med\" multiple=\"false\"}\nWho asked?\n:::\n")
-	writer := model.Actor{Kind: "session", ID: "null-pending-writer"}
-	if _, err := service.store.Pool.Exec(ctx, `
-		update doc_settlements_pending
-		set settlement_authors = jsonb_build_object('pending', null, 'last_actor', $2::jsonb)
-		where artifact_id = $1
-	`, artifactID, writer); err != nil {
-		t.Fatalf("store the pending-settlement row: %v", err)
-	}
-	service.settle = 20 * time.Millisecond
-	if err := service.warmLiveDocument(ctx, artifactID); err != nil {
-		t.Fatalf("load the document: %v", err)
-	}
-	var author model.Actor
-	waitFor(t, 30*time.Second, "the loaded document's settlement to index its ask", func() bool {
-		return service.store.Pool.QueryRow(ctx, `
-			select author from asks where block_artifact_id = $1 and block_id = 'null-pending-ask'
-		`, artifactID).Scan(&author) == nil
-	})
-	if author != writer {
-		t.Fatalf("the ask settled from a row with null pending authors is %+v's, want %+v's", author, writer)
 	}
 }
 
@@ -228,7 +192,20 @@ func TestClosingAnIssueOnATrackedContextPersistsEveryDocumentsCredit(t *testing.
 	}
 }
 
-func writeThroughLedger(t *testing.T, service *Service, artifactID string, actor model.Actor, markdown string) {
+// ledgerWriteVersion is the version, if any, a test's ledger write commits with its edit.
+type ledgerWriteVersion int
+
+const (
+	withoutVersion ledgerWriteVersion = iota
+	// withSnapshotVersion is the version POST /edits writes for an edit without a summary.
+	withSnapshotVersion
+	// withNamedVersion is the version POST /edits writes for an edit with a summary.
+	withNamedVersion
+)
+
+// writeThroughLedger writes markdown at the document's end as actor in one transaction, as POST
+// /edits does, with the version the same transaction writes, if any.
+func writeThroughLedger(t *testing.T, service *Service, artifactID string, actor model.Actor, markdown string, version ledgerWriteVersion) {
 	t.Helper()
 	ctx := context.Background()
 	tx, err := service.store.Pool.Begin(ctx)
@@ -241,9 +218,88 @@ func writeThroughLedger(t *testing.T, service *Service, artifactID string, actor
 	if _, err := service.ApplyOps(joined, artifactID, []model.EditOp{{Op: "insert", After: "end", Markdown: markdown}}, actor, nil); err != nil {
 		t.Fatalf("apply %s's write: %v", actor.ID, err)
 	}
+	switch version {
+	case withSnapshotVersion:
+		_, err = service.SnapshotVersion(joined, artifactID, actor)
+	case withNamedVersion:
+		_, err = service.NamedVersion(joined, artifactID, actor.ID+"'s version", actor)
+	}
+	if err != nil {
+		t.Fatalf("write %s's version: %v", actor.ID, err)
+	}
 	if err := ledger.Commit(ctx); err != nil {
 		t.Fatalf("commit %s's write: %v", actor.ID, err)
 	}
+}
+
+// An author whose edit wrote its own version is not owed that credit again: the next version after
+// the document's issue closes and reopens credits only the author who wrote it.
+func TestAReopenedDocumentsNextVersionCreditsOnlyItsOwnAuthor(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour // no settlement runs between the edits
+	seedServiceText(t, service, artifactID, "# Decision\n\nContext.\n")
+	alpha := model.Actor{Kind: "session", ID: "alpha-session"}
+	delta := model.Actor{Kind: "session", ID: "delta-session"}
+
+	writeThroughLedger(t, service, artifactID, alpha, "Alpha's paragraph.\n", withSnapshotVersion)
+	closeTestIssue(t, service)
+	reopenTestIssue(t, service)
+	writeThroughLedger(t, service, artifactID, delta, "Delta's paragraph.\n", withSnapshotVersion)
+
+	if authors := latestVersionAuthors(t, service, artifactID); !reflect.DeepEqual(authors, []model.Actor{delta}) {
+		t.Fatalf("the reopened document's next version credits %+v, want %+v alone", authors, delta)
+	}
+}
+
+// A session that named a version for its edit is not credited again once the issue closes and
+// reopens: the settlement credits the later writer's ask and version to that writer alone.
+func TestAVersionedAuthorIsNotCreditedAgainAfterAReopen(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour // the issue closes before any settlement runs
+	seedServiceText(t, service, artifactID, "# Decision\n\nContext.\n")
+	versioned := model.Actor{Kind: "session", ID: "versioned-session"}
+	asking := model.Actor{Kind: "session", ID: "asking-session"}
+
+	writeThroughLedger(t, service, artifactID, versioned, "The versioned session's paragraph.\n", withNamedVersion)
+	writeAskBeforeClose(t, service, artifactID, asking)
+	closeTestIssue(t, service)
+	reopenTestIssue(t, service)
+	service.settle = 20 * time.Millisecond
+	service.ScheduleSettlement(artifactID)
+
+	waitForAskAuthor(t, service, artifactID, asking)
+	waitFor(t, 30*time.Second, "the reopened document's settlement to commit", func() bool {
+		owed, _, err := pendingSettlementCredit(context.Background(), service.store.Pool, artifactID)
+		return err == nil && !owed
+	})
+	if authors := latestVersionAuthors(t, service, artifactID); !reflect.DeepEqual(authors, []model.Actor{asking}) {
+		t.Fatalf("the reopened settlement's version credits %+v, want %+v alone", authors, asking)
+	}
+}
+
+// The same holds when the process that took both writes ends without settling them: the next
+// process's settlement credits the ask to the session that wrote it, not to one already versioned.
+func TestAVersionedAuthorIsNotCreditedAgainAfterACrashRestart(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour // the writing process never settles them
+	ctx := context.Background()
+	seedServiceText(t, service, artifactID, "# Decision\n\nContext.\n")
+	versioned := model.Actor{Kind: "session", ID: "versioned-session"}
+	asking := model.Actor{Kind: "user", ID: "asking-user"}
+
+	writeThroughLedger(t, service, artifactID, versioned, "The versioned session's paragraph.\n", withNamedVersion)
+	writeAskBeforeClose(t, service, artifactID, asking)
+
+	restarted := New(Deps{Store: service.store, Events: events.NewBroker(), Settle: 20 * time.Millisecond})
+	t.Cleanup(func() {
+		if err := restarted.Shutdown(context.Background()); err != nil {
+			t.Errorf("shutdown restarted document service: %v", err)
+		}
+	})
+	if err := restarted.resumeOwedSettlements(ctx, 0); err != nil {
+		t.Fatalf("resume the document's settlement: %v", err)
+	}
+	waitForAskAuthor(t, restarted, artifactID, asking)
 }
 
 // A document update that carries no credit, such as a browser change that renders nothing new,
@@ -273,11 +329,8 @@ func TestSettlementCreditMergesPendingAuthors(t *testing.T) {
 	cases := []struct {
 		name     string
 		existing settlementCredit
-		// storedAuthors, when set, replaces what the existing append stored, as a row written by
-		// another build could hold.
-		storedAuthors string
-		next          settlementCredit
-		want          settlementCredit
+		next     settlementCredit
+		want     settlementCredit
 	}{
 		{name: "empty then empty", want: creditOf(nil)},
 		{name: "existing then none", existing: creditOf(&alice, alice, bob), want: creditOf(&alice, alice, bob)},
@@ -288,12 +341,6 @@ func TestSettlementCreditMergesPendingAuthors(t *testing.T) {
 			next:     creditOf(&carol, bobFromLaptop, carol),
 			want:     creditOf(&carol, alice, bobFromLaptop, carol),
 		},
-		{
-			name:          "a stored null pending then new",
-			storedAuthors: `{"pending": null, "last_actor": {"kind": "session", "id": "alice"}}`,
-			next:          creditOf(&carol, carol),
-			want:          creditOf(&carol, carol),
-		},
 	}
 	database := storetest.Open(t)
 	artifactIDs := createDocuments(t, database, len(cases))
@@ -301,13 +348,6 @@ func TestSettlementCreditMergesPendingAuthors(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			artifactID := artifactIDs[index]
 			appendSettlementCredit(t, database, artifactID, test.existing)
-			if test.storedAuthors != "" {
-				if _, err := database.Pool.Exec(context.Background(), `
-					update doc_settlements_pending set settlement_authors = $2::jsonb where artifact_id = $1
-				`, artifactID, test.storedAuthors); err != nil {
-					t.Fatalf("store the existing settlement authors: %v", err)
-				}
-			}
 			appendSettlementCredit(t, database, artifactID, test.next)
 
 			got := readSettlementCredit(t, database, artifactID)
@@ -372,21 +412,7 @@ func (tx cancelAfterCommitTx) Commit(ctx context.Context) error {
 
 func writeAskBeforeClose(t *testing.T, service *Service, artifactID string, actor model.Actor) {
 	t.Helper()
-	ctx := context.Background()
-	tx, err := service.store.Pool.Begin(ctx)
-	if err != nil {
-		t.Fatalf("begin edit: %v", err)
-	}
-	defer tx.Rollback(ctx)
-	joined, ledger := service.Join(ctx, tx)
-	defer ledger.Discard()
-	ops := []model.EditOp{{Op: "insert", After: "end", Markdown: ":::ask{#closing-ask urgency=\"med\" multiple=\"false\"}\nWho is asking?\n:::\n"}}
-	if _, err := service.ApplyOps(joined, artifactID, ops, actor, nil); err != nil {
-		t.Fatalf("write the ask block: %v", err)
-	}
-	if err := ledger.Commit(ctx); err != nil {
-		t.Fatalf("commit the ask block: %v", err)
-	}
+	writeThroughLedger(t, service, artifactID, actor, ":::ask{#closing-ask urgency=\"med\" multiple=\"false\"}\nWho is asking?\n:::\n", withoutVersion)
 	service.ScheduleSettlement(artifactID)
 }
 

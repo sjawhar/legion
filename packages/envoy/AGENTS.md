@@ -191,8 +191,9 @@ transaction's ledger (`docs/ledger.go`), the only way to give a document operati
 joined. A joined operation never writes the room: it runs on the transaction's fork of the room's
 document (`docs/livewrite.go`), appends its update inside the transaction, and reads through the
 same fork. The handler ends the transaction with `ledger.Commit`, which records each settlement
-credit with the document content, commits, credits the writes' actor to their rooms, releases the
-authors a version the transaction wrote named, then applies and broadcasts the updates, and last
+credit with the document content and takes each version's authors back out of that record,
+commits, credits the writes' actor to their rooms, releases the authors a version the transaction
+wrote named, then applies and broadcasts the updates, and last
 publishes the events its document operations appended, ahead of the handler's own; it defers
 `ledger.Discard`, so a transaction that does not commit leaves the room, every connected browser,
 every version and the durable document as they were.
@@ -349,7 +350,8 @@ forgets a state that holds nothing once its room has gone, so whatever ends last
 `OnUnloadDocument` when the room goes, or a holder's own end - releases it. The durable row that
 says a document's settlement is owed (`doc_settlements_pending`, migration 0063) also carries the
 authors that settlement needs (0068): a browser update records them in the update's own transaction,
-and a joined write records them in the transaction that commits its content. Closing an issue writes
+and a joined write records them in the transaction that commits its content, which also takes out
+the authors any version it wrote credited, as the room does once it commits. Closing an issue writes
 every unsettled state into that row before it releases the state, so the reopened document's
 settlement credits the same version, ask and event authors even after a room release or restart. The
 document socket's cap of 1,000 rooms (`maxLiveRooms`, `canOpenRoom`) counts ygo's live rooms, never
