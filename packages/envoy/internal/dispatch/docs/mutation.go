@@ -1253,6 +1253,11 @@ func (s *Service) writeVersionTx(ctx context.Context, tx pgx.Tx, artifactID, mar
 	); err != nil {
 		return versionWriteResult{}, fmt.Errorf("write document version: %w", err)
 	}
+	// The version's tree is the one the issue's task counts are read from, so they are written
+	// with it (LEGION-542).
+	if err := RecordTaskProgress(ctx, tx, artifactID, tree); err != nil {
+		return versionWriteResult{}, err
+	}
 	if err := json.Unmarshal(authorsRaw, &version.Authors); err != nil {
 		return versionWriteResult{}, fmt.Errorf("decode document version authors: %w", err)
 	}
