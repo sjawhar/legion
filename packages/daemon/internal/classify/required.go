@@ -107,13 +107,22 @@ func headStandings(pr record.PullRequest) (checks, workflows []Standing, ok bool
 	}
 	workflows = make([]Standing, 0, len(pr.Workflows))
 	for _, workflow := range pr.Workflows {
-		result := workflow.Result
-		if pr.WorkflowsHead != pr.CheckedHead || (result == Cancelled && pr.WorkflowsHead != pr.HeadSHA) {
-			result = Pending
-		}
-		workflows = append(workflows, Standing{Name: workflow.Path, Result: result})
+		workflows = append(workflows, WorkflowStanding(pr, workflow))
 	}
 	return Judge(pr.Required, results), workflows, true
+}
+
+// WorkflowStanding is how one required workflow of the pull request stands at its head
+// (HeadChecks): its latest run's result as the daemon read it, except Pending when the runs were
+// read at another head than the settlement's, or when the run was cancelled at a head a
+// .legion/-only push replaced. It is the one judgment of a required workflow, so whatever names a
+// workflow red names exactly the ones HeadVerdict counts.
+func WorkflowStanding(pr record.PullRequest, workflow record.RequiredWorkflow) Standing {
+	result := workflow.Result
+	if pr.WorkflowsHead != pr.CheckedHead || (result == Cancelled && pr.WorkflowsHead != pr.HeadSHA) {
+		result = Pending
+	}
+	return Standing{Name: workflow.Path, Result: result}
 }
 
 // WorkflowHead is the head whose workflow runs stand for the pull request's head: the head the

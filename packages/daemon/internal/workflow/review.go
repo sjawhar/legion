@@ -388,13 +388,14 @@ func (e *Engine) reviewRound(issue record.Issue, row record.PhaseRow, pr *record
 	return round{}
 }
 
-// redRuns names the run and attempt of each required workflow whose run is red on the pull
-// request's head as the daemon last read it: a re-run keeps its run's id and raises its attempt,
-// so a re-run that ends red again is a round stuck anew (stuckAs).
+// redRuns names the run and attempt of each required workflow red at the pull request's head, as
+// classify judges it (classify.WorkflowStanding, the judgment HeadVerdict counts): a re-run keeps
+// its run's id and raises its attempt, so a re-run that ends red again is a round stuck anew
+// (stuckAs), while a run classify does not count as red changes nothing.
 func redRuns(pr record.PullRequest) string {
 	var runs []string
 	for _, workflow := range pr.Workflows {
-		if (classify.Standing{Result: workflow.Result}).Red() {
+		if classify.WorkflowStanding(pr, workflow).Red() {
 			runs = append(runs, fmt.Sprintf("%s#%d.%d", workflow.Path, workflow.Run, workflow.Attempt))
 		}
 	}

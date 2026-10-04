@@ -41,11 +41,13 @@ type reviewThread struct {
 
 // threadsGitHub is GitHub's GraphQL holding threads on whichever pull request it is asked for. It
 // records the bearer of every call, each pull request a threads query names, and the id of each
-// thread a resolveReviewThread resolved; it refuses to resolve each thread refuse names.
+// thread a resolveReviewThread resolved; it refuses to resolve each thread refuse names, and serves
+// the newest comment of each thread pending names as a draft in a pending review.
 type threadsGitHub struct {
 	url      string
 	mu       sync.Mutex
 	refuse   map[string]bool
+	pending  map[string]bool
 	bearers  []string
 	queried  []string
 	resolved []string
@@ -79,10 +81,14 @@ func newThreadsGitHub(t *testing.T, threads ...reviewThread) *threadsGitHub {
 		g.queried = append(g.queried, fmt.Sprintf("%s/%s#%v", request.Variables["owner"], request.Variables["name"], request.Variables["number"]))
 		nodes := []map[string]any{}
 		for _, thread := range threads {
+			state := "SUBMITTED"
+			if g.pending[thread.id] {
+				state = "PENDING"
+			}
 			nodes = append(nodes, map[string]any{"id": thread.id, "isResolved": false,
 				"opener": map[string]any{"nodes": []map[string]any{{"url": "https://github.com/acme/widgets/pull/42#" + thread.id,
 					"author": map[string]any{"__typename": thread.openerType, "login": thread.opener}}}},
-				"newest": map[string]any{"nodes": []map[string]any{{"url": "https://github.com/acme/widgets/pull/42#" + thread.id + "-newest", "body": thread.body, "state": "SUBMITTED",
+				"newest": map[string]any{"nodes": []map[string]any{{"url": "https://github.com/acme/widgets/pull/42#" + thread.id + "-newest", "body": thread.body, "state": state,
 					"author": map[string]any{"__typename": thread.newestType, "login": thread.newest}}}}})
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"repository": map[string]any{"pullRequest": map[string]any{
@@ -204,6 +210,30 @@ func TestADaemonResolveGitHubRefusesKeepsTheThreadsAlreadyResolved(t *testing.T)
 	}
 	if !slices.Equal(github.resolved, []string{"first"}) {
 		t.Fatalf("GitHub resolved %v, want the first thread alone", github.resolved)
+	}
+}
+
+// GitHub shows a draft in a pending review only to its author, and the daemon reads the threads as
+// the implement App, so it sees the implementer's own drafts. The reviewer's answer never names a
+// thread whose newest comment is such a draft: not its URL, and not its author.
+func TestADaemonResolveNamesNoThreadHoldingTheImplementersDraft(t *testing.T) {
+	github := newThreadsGitHub(t,
+		reviewThread{"bot-accepted", "Bot", "claude", "Bot", "legion-reviewer", "Accepted: not a defect"},
+		reviewThread{"implementer-draft", "Bot", "claude", "Bot", "legion-implementer", "Fixed in abc123: the guard moved"},
+	)
+	github.pending = map[string]bool{"implementer-draft": true}
+	var log bytes.Buffer
+	h := newThreadsHarness(t, github, &log)
+	reviewer := newLiveClaim(t, h, "LEGION-208", claim.RoleReviewer)
+	recorder := h.request(http.MethodPost, "/legion/v1/threads/resolve", ThreadsResolveRequest{GrantID: reviewer.grant(t), Repo: "acme/widgets", Number: 42}, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("threads resolve = %d: %s", recorder.Code, recorder.Body)
+	}
+	body := recorder.Body.String()
+	var answer ThreadsResolveResponse
+	decodeInto(t, recorder, &answer)
+	if len(answer.Threads) != 1 || answer.Threads[0].URL != "https://github.com/acme/widgets/pull/42#bot-accepted" || strings.Contains(body, "implementer-draft") {
+		t.Fatalf("answer %s, want the accepted bot thread alone and nothing of the draft's thread", body)
 	}
 }
 

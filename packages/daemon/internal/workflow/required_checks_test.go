@@ -547,3 +547,35 @@ func TestAnApprovalOfOtherCodeUnderAReviewWorkflowsRedIsStuckOnTheApproval(t *te
 		t.Fatalf("the issue is in %s, want reviewing", got)
 	}
 }
+
+// A round stuck on a declared review workflow's red is told again only when what is red changes.
+// An undeclared workflow cancelled at the code head the reviewer's handoff push replaced is no red
+// for the handoff head (classify.HeadChecks), so re-running it changes nothing the round is stuck
+// on, and tells nothing.
+func TestARerunOfADiscountedWorkflowTellsAStuckRoundNothing(t *testing.T) {
+	const review, tests = ".github/workflows/claude-pr-review.yml", ".github/workflows/tests.yml"
+	pool := migratedPool(t)
+	engine := testEngine(config.DesignGateRootIssues, nil)
+	engine.cfg.ReviewWorkflows = []string{review}
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root",
+		Phase: phase.Reviewing, Generation: 1, Status: "needs_review", Rank: "U"})
+	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
+		Number: 42, Branch: "legion/LEGION-208", HeadSHA: "approval", CheckedHead: "head", Failing: []string{},
+		CheckRuns: []record.AttemptRun{{Name: requiredGate, ID: 1}}, Generation: 1, Snapshot: "settled", Required: []string{requiredGate},
+		Pushes: []record.ClassifiedPush{{SHA: "approval", Before: "head", HandoffOnly: true}}})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", HandoffCommit: "approval", Summary: "approved",
+		Decision: &record.ReviewDecision{State: "approved", Body: "looks right", Head: "approval"}})
+	read := func(testsResult string, testsAttempt int) intake.RequiredChecks {
+		return intake.RequiredChecks{Repo: "sjawhar/legion", Number: 42, Names: []string{requiredGate}, WorkflowsHead: "head",
+			Workflows: []record.RequiredWorkflow{{Path: review, Result: "failure", Run: 1, Attempt: 1}, {Path: tests, Result: testsResult, Run: 2, Attempt: testsAttempt}}}
+	}
+	applyRefusingNothing(t, pool, engine, read("cancelled", 1))
+	if stuck := reviewStuckNotices(t, pool); len(stuck) != 1 || !strings.Contains(stuck[0].Reason, "CI is red at approval: "+review+"; only declared review workflows are red") {
+		t.Fatalf("review-stuck notices %+v, want one naming the review workflow alone", stuck)
+	}
+	applyRefusingNothing(t, pool, engine, read(classify.Pending, 2))
+	if stuck := reviewStuckNotices(t, pool); len(stuck) != 1 {
+		t.Fatalf("after the discounted workflow's re-run, review-stuck notices %+v, want still one", stuck)
+	}
+}

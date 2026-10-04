@@ -144,7 +144,7 @@ func Workflows(ctx context.Context, github githubrest.Client, sha string, workfl
 	if err != nil {
 		return nil, err
 	}
-	standings := make([]WorkflowRun, 0, len(workflows))
+	out := make([]WorkflowRun, 0, len(workflows))
 	for _, workflow := range workflows {
 		var latest *run
 		for i, candidate := range runs {
@@ -153,13 +153,13 @@ func Workflows(ctx context.Context, github githubrest.Client, sha string, workfl
 				latest = &runs[i]
 			}
 		}
-		standing := WorkflowRun{Workflow: workflow, Result: classify.Missing}
+		run := WorkflowRun{Workflow: workflow, Result: classify.Missing}
 		if latest != nil {
-			standing.Result, standing.Run, standing.Attempt = classify.RunResult(latest.Status, latest.Conclusion), latest.ID, latest.Attempt
+			run.Result, run.Run, run.Attempt = classify.RunResult(latest.Status, latest.Conclusion), latest.ID, latest.Attempt
 		}
-		standings = append(standings, standing)
+		out = append(out, run)
 	}
-	return standings, nil
+	return out, nil
 }
 
 // rulesetsUnavailable is GitHub's answer to the rulesets read of a private repository whose plan

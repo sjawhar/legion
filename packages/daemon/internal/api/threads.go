@@ -101,12 +101,20 @@ func (s *server) resolveThreads(w http.ResponseWriter, r *http.Request) {
 			}
 			return "", string(acceptance) + ", which the implementer's or the merger's legion threads resolve closes: the daemon resolves only a bot's thread the Legion reviewer accepted"
 		})
+	// The daemon reads as the implement App, which GitHub shows the implementer's own drafts in a
+	// pending review; the reviewer is told nothing of a thread whose newest comment is one.
+	shown := outcomes[:0]
 	for _, outcome := range outcomes {
+		if outcome.LeftOpen == reviewthreads.PendingDraft {
+			continue
+		}
 		if outcome.Resolved != "" {
 			s.log.Info("api: resolved a review thread for the reviewer", "issue", grant.Issue, "pull_request", fmt.Sprintf("%s#%d", repository, req.Number),
 				"thread", outcome.URL, "by", string(outcome.Resolved))
 		}
+		shown = append(shown, outcome)
 	}
+	outcomes = shown
 	var refused *reviewthreads.Refused
 	if errors.As(err, &refused) {
 		writeJSON(w, http.StatusOK, ThreadsResolveResponse{Threads: outcomes, Refused: &ThreadRefusal{URL: refused.URL, Error: refused.Err.Error()}})

@@ -91,6 +91,10 @@ func isAcceptance(body string) bool {
 // Acceptance is whose acceptance closes a thread, as the resolved line says it.
 type Acceptance string
 
+// PendingDraft is why Resolution leaves open a thread whose newest comment is a draft in a pending,
+// unsubmitted review, which GitHub shows only to its author.
+const PendingDraft = "an unsubmitted draft in a pending review"
+
 const (
 	// OpenersAcceptance closes a thread whose newest submitted comment is its opener's Accepted:.
 	OpenersAcceptance Acceptance = "its opener's acceptance"
@@ -116,7 +120,7 @@ const (
 // GitHub shows it only to its author.
 func Resolution(thread Thread, apps *Apps) (Acceptance, string) {
 	if thread.NewestPending {
-		return "", "an unsubmitted draft in a pending review"
+		return "", PendingDraft
 	}
 	acceptance := isAcceptance(thread.NewestBody)
 	if acceptance && thread.OpenerLogin != "" && thread.NewestLogin != "" && thread.OpenerTypename == thread.NewestTypename &&
