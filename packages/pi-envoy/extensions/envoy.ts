@@ -1779,29 +1779,19 @@ export default function envoyExtension(pi: PiApi): void {
     // never surface as an unhandled one.
     const abort = new AbortController();
     askCheckAbort = abort;
-    let answered: Promise<string | undefined>;
-    try {
-      answered = ask({
-        prompt: ASK_SELF_CHECK_PROMPT(open.snapshot.asks),
-        signal: abort.signal,
-      }).then(
-        (reply): string | undefined => reply.replyText,
-        (error: unknown): string | undefined => {
-          // An abort this extension made — a superseded check, or its own timeout, which logs
-          // itself — is not a failure. Logging it would spend the once-per-session warning on
-          // an ordinary event, such as the user typing, and silence the real failure after it.
-          if (!abort.signal.aborted) logSelfCheckFailure(id, error);
-          return undefined;
-        }
-      );
-    } catch (error) {
-      // A host initialised without the capability installs a stub that throws synchronously
-      // rather than rejecting, so `.then(onRejected)` never sees it. Left to escape, the
-      // throw would leave the check unspent and every later settle would pay another Dispatch
-      // round trip and throw again, with the cap never engaging.
-      logSelfCheckFailure(id, error);
-      answered = Promise.resolve(undefined);
-    }
+    const answered = ask({
+      prompt: ASK_SELF_CHECK_PROMPT(open.snapshot.asks),
+      signal: abort.signal,
+    }).then(
+      (reply): string | undefined => reply.replyText,
+      (error: unknown): string | undefined => {
+        // An abort this extension made — a superseded check, or its own timeout, which logs
+        // itself — is not a failure. Logging it would spend the once-per-session warning on
+        // an ordinary event, such as the user typing, and silence the real failure after it.
+        if (!abort.signal.aborted) logSelfCheckFailure(id, error);
+        return undefined;
+      }
+    );
     const expiry = Promise.withResolvers<undefined>();
     const expire = setTimeout(() => {
       const timedOut = new Error(`self-check timed out after ${selfCheckTimeoutMs} ms`);

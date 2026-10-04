@@ -313,10 +313,33 @@ function refusedCommand(
   return undefined;
 }
 
-/** A `proc://` URL, its scheme in any case, as Oh My Pi routes it: a `write` there sends its
- * `content` to a supervised service's stdin (`proc://<id>`), stops a job (`/kill`), or sets its
- * lifetime (`/mode`). */
-const PROC_URL = /^proc:\/\//iu;
+/** The `write` targets that are not files, each scheme in any case, as Oh My Pi routes it: a tool
+ * device (`xd://<tool>` carrying the tool's JSON args as `content`, e.g. the Dispatch tools), a
+ * message to an agent of this process (`agent://<id>`), or job and service control (`proc://<id>`:
+ * `content` goes to a supervised service's stdin; `/kill` stops a job, `/mode` sets its lifetime). */
+const NON_FILE_WRITE_URL = /^(xd|agent|proc):\/\//iu;
+
+/** The 4-hex tag that may end a `read` header, `#XXXX`. */
+const READ_HEADER_TAG = /#[0-9A-Fa-f]{4}$/u;
+
+/** The target a `write` path names, as Oh My Pi's `write` tool reads it before it routes
+ * (`unwrapHashlineHeaderPath`): a pasted `read` header, `[path]` or `[path#XXXX]`, names `path`
+ * (a valid tag lets `path` hold a `#` of its own); any other shape is left as written. */
+function writeTarget(path: string): string {
+  const trimmed = path.trimEnd();
+  if (trimmed.length < 2 || !trimmed.startsWith("[") || !trimmed.endsWith("]")) return path;
+  const inner = trimmed.slice(1, -1);
+  const tag = READ_HEADER_TAG.exec(inner);
+  const target = tag === null ? inner : inner.slice(0, tag.index);
+  if (target.length === 0 || (tag === null && target.includes("#"))) return path;
+  return target;
+}
+
+/** The scheme, lowercased, of a `write` into Oh My Pi rather than to a file, or undefined. */
+function nonFileWriteScheme(toolCall: ToolCallEvent): string | undefined {
+  if (toolCall.toolName !== "write" || typeof toolCall.input.path !== "string") return undefined;
+  return NON_FILE_WRITE_URL.exec(writeTarget(toolCall.input.path))?.[1]?.toLowerCase();
+}
 
 /** The refusal for the first of `rules` a tool call breaks, or undefined. A `bash` command is
  * tokenised, a supervised service's start included (a `bash` call with a `name`); `eval` code and
@@ -336,12 +359,7 @@ function paneRuleRefusal(toolCall: ToolCallEvent, rules: readonly PaneRule[]): s
   }
   let text: string;
   if (toolName === "eval" && typeof input.code === "string") text = input.code;
-  else if (
-    toolName === "write" &&
-    typeof input.path === "string" &&
-    PROC_URL.test(input.path) &&
-    typeof input.content === "string"
-  ) {
+  else if (nonFileWriteScheme(toolCall) === "proc" && typeof input.content === "string") {
     text = input.content;
   } else return undefined;
   for (const rule of rules) {
@@ -358,7 +376,8 @@ function paneRuleRefusal(toolCall: ToolCallEvent, rules: readonly PaneRule[]): s
 const LEGION_LOADED_MARKER = Symbol.for("legion.pi-envoy.legion-loaded");
 
 /** Code-mutation tools, blocked for each role `CODE_TOOL_REFUSAL` names. `write` here means a real
- * filesystem write; see `isNonFileWrite` for the `write` targets that are not files. `task` is
+ * filesystem write: a `write` into Oh My Pi (`nonFileWriteScheme`) passes the gate for every role,
+ * since a gated role messages and cancels the subagents it launches this way. `task` is
  * deliberately absent: every Legion role may launch `task` subagents. */
 const CODE_MUTATION_TOOLS = ["edit", "write", "apply_patch"];
 
@@ -370,22 +389,6 @@ export const CODE_TOOL_REFUSAL: Readonly<Partial<Record<LegionRole, string>>> = 
   reviewer: "the reviewer edits nothing except the final .legion/ cleanup commit via bash",
   merger: "the merger only verifies and reports",
 };
-
-/** The `write` targets that are not files, each scheme in any case, as Oh My Pi routes it. */
-const NON_FILE_WRITE_URL = /^(?:xd|agent|proc):\/\//iu;
-
-/** Whether a `write` is a call into Oh My Pi rather than a file write: a tool device (`xd://<tool>`
- * carrying the tool's JSON args as `content`, e.g. the Dispatch tools), a message to an agent of
- * this process (`agent://<id>`), or job and service control (`proc://<id>`: a supervised service's
- * stdin, `/kill`, `/mode`). Each must pass the `CODE_MUTATION_TOOLS` gate below for every role,
- * since a gated role messages and cancels the subagents it launches this way. */
-function isNonFileWrite(toolCall: ToolCallEvent): boolean {
-  return (
-    toolCall.toolName === "write" &&
-    typeof toolCall.input.path === "string" &&
-    NON_FILE_WRITE_URL.test(toolCall.input.path)
-  );
-}
 
 export default function legionExtension(pi: PiApi): void {
   // One instance per session (a `task` subagent gets its own). The id ties every hook log line
@@ -518,7 +521,11 @@ export default function legionExtension(pi: PiApi): void {
     // A `write` into Oh My Pi (a tool device, an agent message, job control) is not a file
     // mutation. Short-circuit it out of the mutation gate so the architect/reviewer/merger role
     // checks apply only to real file writes.
-    if (codeToolRefusal !== undefined && mutatesCode && !isNonFileWrite(toolCall)) {
+    if (
+      codeToolRefusal !== undefined &&
+      mutatesCode &&
+      nonFileWriteScheme(toolCall) === undefined
+    ) {
       return { block: true, reason: codeToolRefusal };
     }
     if (!needsGrant(toolCall)) return undefined;

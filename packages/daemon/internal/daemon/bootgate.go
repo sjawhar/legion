@@ -608,14 +608,16 @@ func (g pluginGate) verifyAgentsCapability(ctx context.Context) error {
 // verifySessionStorage is the session-storage probe (verifySessionStorageSetting, boot-probes.ts),
 // which only the image runs: it proves the Oh My Pi build carries the `session.storage`
 // setting, so a deployment that sets OMP_SESSION_STORAGE=sql gets its sessions in its database
-// rather than a build that ignores the variable and silently keeps them on files. Oh My Pi starts
-// in RPC mode with stdin on /dev/null, where it resolves the setting before it reads a command and
-// then exits 0 on the closed stdin without calling a model (an interactive start without a
-// terminal on stdin is refused, exit 2, before the resolver runs), and every `--no-*` flag keeps
-// the profile's plugins, sessions, and tools out of a run that only needs the setting's resolver:
-// a carrying build dies on the nonsense value first, naming the variable (a pass); a clean exit is
-// a build that accepted it, so predates the setting (refused); any other failure is the launch
-// dying before the resolver ran (transient).
+// rather than a build that ignores the variable and silently keeps them on files.
+//
+// It starts Oh My Pi in RPC mode with stdin on /dev/null, where the setting resolves before the
+// first command is read and the closed stdin then ends the run with exit 0, calling no model; an
+// interactive start without a terminal is refused (exit 2) before the resolver runs. Every
+// `--no-*` flag keeps the profile's plugins, sessions and tools out of the run.
+//
+// A carrying build dies on the nonsense value, naming the variable (a pass). A clean exit is a
+// build that accepted the value, so predates the setting (refused). Any other failure is the
+// launch dying before the resolver ran (transient).
 func (g pluginGate) verifySessionStorage(ctx context.Context) error {
 	launch := omplaunch.WithPrefix(g.prefix, g.invocation)
 	script := "export " + sessionStorageVariable + "=" + sessionStorageProbeValue + "; exec " + launch +

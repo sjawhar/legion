@@ -1212,11 +1212,13 @@ describe("Legion OMP extension", () => {
 
       // A write into Oh My Pi -- a tool device (`xd://`), a message to an agent of the process
       // (`agent://`), job and service control (`proc://`) -- is a tool call, not a file mutation,
-      // and must pass for every gated role, the scheme in any case, as Oh My Pi routes it.
+      // and must pass for every gated role, the scheme in any case, as Oh My Pi routes it, a
+      // pasted `read` header wrapper (`[path]`, `[path#XXXX]`) included.
       for (const path of [
         "xd://dispatch_ask",
         "XD://dispatch_doc_edit",
         "agent://ReviewLens",
+        "[agent://ReviewLens]",
         "proc://task-3/kill",
         "Proc://web",
       ]) {
@@ -1232,17 +1234,19 @@ describe("Legion OMP extension", () => {
         ).resolves.toBeUndefined();
       }
 
-      // A real filesystem write is still blocked.
-      await expect(
-        toolCall(
-          {
-            toolName: "write",
-            toolCallId: `call-${role}-fs`,
-            input: { path: "/tmp/whatever.ts", content: "x" },
-          },
-          context
-        )
-      ).resolves.toEqual({ block: true, reason: blockedReason(role) });
+      // A real filesystem write is still blocked, in the `read` header wrapper too.
+      for (const path of ["/tmp/whatever.ts", "[/tmp/whatever.ts#ABCD]"]) {
+        await expect(
+          toolCall(
+            {
+              toolName: "write",
+              toolCallId: `call-${role}-fs`,
+              input: { path, content: "x" },
+            },
+            context
+          )
+        ).resolves.toEqual({ block: true, reason: blockedReason(role) });
+      }
 
       // A malformed/missing `path` never qualifies as a tool-device invocation: it is still
       // treated as a mutation and blocked.
@@ -1438,9 +1442,12 @@ describe("Legion OMP extension", () => {
       { toolName: "eval", input: { language: "py", code: 'run(["jj", "op", "restore", op_id])' } },
       // A supervised service starts as a `bash` command, tokenised like any other.
       { toolName: "bash", input: { command: "bash -c 'jj op restore 1'", name: "x" } },
-      // Its stdin is a `write` to `proc://<id>`, the scheme in any case.
+      // Its stdin is a `write` to `proc://<id>`, the scheme in any case, and in the `[path]` or
+      // `[path#XXXX]` wrapper Oh My Pi strips before it routes.
       { toolName: "write", input: { path: "proc://shell", content: "jj undo" } },
       { toolName: "write", input: { path: "PROC://shell", content: "jj -R /ws op restore 1" } },
+      { toolName: "write", input: { path: "[proc://shell]", content: "jj undo" } },
+      { toolName: "write", input: { path: "[proc://shell#ABCD]", content: "jj undo" } },
     ];
     const allowed: { readonly toolName: string; readonly input: Record<string, unknown> }[] = [
       {

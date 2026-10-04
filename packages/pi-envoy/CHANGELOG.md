@@ -158,7 +158,9 @@
   or a jj operation-log rewrite typed into a service's shell is refused as it was through a `hub`
   send; a service starts as a `bash` command and is tokenised like any other. An architect,
   reviewer or merger may `write` to `agent://` (a message to an agent of its own process) and to
-  `proc://` (job and service control), which the mutation gate refused as file writes.
+  `proc://` (job and service control), which the mutation gate refused as file writes. Both
+  checks read the target as Oh My Pi's `write` routes it, so a path pasted as a `read` header
+  (`[proc://shell]`, `[proc://shell#ABCD]`) is the same target.
 - The Envoy tool results for a `task` subagent and the `envoy`, `legion-worker` and `dispatch`
   skills name a `write` to `agent://` where they named `hub`, which Oh My Pi 18.3 removed.
 

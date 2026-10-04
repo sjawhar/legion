@@ -30,7 +30,9 @@ second run rewrote nine of LEGION-30's commits (see
 `shared-main-repo-hazards-for-concurrent-issue-workspaces.md`, Hazard 2). LEGION-45 (#1020) made
 the Legion extension's `tool_call` hook refuse `jj undo`, `jj abandon`, and
 `jj op restore|revert|abandon|undo` in every phase-worker pane, for `bash` commands (tokenised),
-and for `eval` code and `hub` process starts (a plain-text rule).
+and for `eval` code and `hub` process starts (a plain-text rule). Oh My Pi 18.3 removed `hub`: a
+supervised service now starts as a `bash` command, tokenised like any other, and the plain-text
+rule reads the stdin a `write` sends to it (`proc://<id>`) where it read a `hub` start.
 
 The guard took three review rounds. Each round the reviewer found a form of the same command
 that bash hands to `jj` as the identical argv but the matcher tokenised differently, and each

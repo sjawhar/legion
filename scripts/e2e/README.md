@@ -1303,9 +1303,9 @@ have failed the check for want of a key: when it last got none, from where, and 
   came, marked when it came before the check began: it had no key when the check asked it.
 - **An agent served again after its last starve recovered.** It is listed, with when it was first
   served again, when that starve came at or after `<since>` less 30 s. The 30 s is the wait Oh My
-  Pi 18.2.9 keeps before it runs a failed key command again: a request inside it fails with no key
-  and runs no command, so it leaves no line, and a check's first calls can fail on a starve from
-  just before the check began.
+  Pi keeps before it runs a failed key command again (`COMMAND_FAILURE_RETRY_MS`, 30 s at 18.2.9
+  and at the pinned 18.6.0): a request inside it fails with no key and runs no command, so it leaves
+  no line, and a check's first calls can fail on a starve from just before the check began.
 - **An agent served again before that window** held a key through the whole check, and is left out.
 
 A person then sees whether starvation could explain the failure. A run-wide "not scored" would not

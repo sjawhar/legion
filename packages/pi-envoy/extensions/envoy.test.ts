@@ -764,11 +764,7 @@ async function bootAskNudge(
     readonly hasUI?: boolean;
     /** Awaited before the stop-time query answers, to hold its round trip open. */
     readonly holdStopQuery?: () => Promise<void>;
-    /**
-     * How the host answers the hidden self-check. A host initialised without the capability
-     * installs a stub that throws synchronously instead of rejecting, so this may throw rather
-     * than return a promise.
-     */
+    /** How the host answers the hidden self-check. */
     readonly selfCheck?: (input: {
       readonly prompt: string;
       readonly signal?: AbortSignal;
@@ -863,8 +859,6 @@ async function bootAskNudge(
   const selfCheck = options.selfCheck;
   if (options.selfCheckTimeoutMs === undefined) delete process.env.ENVOY_SELF_CHECK_TIMEOUT_MS;
   else process.env.ENVOY_SELF_CHECK_TIMEOUT_MS = String(options.selfCheckTimeoutMs);
-  // Deliberately not an `async` wrapper: a host stub that throws synchronously must reach the
-  // extension as a synchronous throw, which is the whole of that case.
   const answer = (input: { readonly prompt: string; readonly signal?: AbortSignal }) => {
     asked.push(input);
     return selfCheck === undefined ? Promise.resolve({ replyText: "WAITING" }) : selfCheck(input);
@@ -1609,46 +1603,6 @@ describe("envoy OMP extension", () => {
           },
         },
       ]);
-    } finally {
-      stopSink();
-    }
-  });
-
-  test("survives a host whose ephemeral call throws instead of rejecting", async () => {
-    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-selfcheck-throws");
-    const warnings: string[] = [];
-    const stopSink = logger.registerLogSink((entry) => {
-      if (entry.level === "warn") warnings.push(entry.message);
-    });
-    try {
-      // An extension host initialised without the capability installs a stub that throws
-      // synchronously, so `.then(onRejected)` never sees it: the throw would leave the handler
-      // before the check was spent, and every later settle would pay another Dispatch round
-      // trip and throw again, with the cap never engaging.
-      const session = await bootAskNudge(envoyExtension, "ses_nudge_throws", () => ({}), {
-        selfCheck: () => {
-          throw new Error("This extension host does not support ephemeral questions");
-        },
-      });
-
-      await session.userTurn();
-      for (let step = 0; step < 9; step += 1) {
-        await session.stop();
-        await session.toolResult({
-          toolName: "bash",
-          toolCallId: `call-${step}`,
-          input: {},
-          details: {},
-          isError: false,
-        });
-      }
-
-      // Each throw spent the check it ran for, so the period's five bound the damage: one
-      // arming query and five checked stops, then nothing.
-      expect(session.asked).toHaveLength(5);
-      expect(session.queries).toHaveLength(6);
-      expect(session.fixture.deliveries).toEqual([]);
-      expect(warnings).toEqual([expect.stringContaining("self-check failed")]);
     } finally {
       stopSink();
     }
