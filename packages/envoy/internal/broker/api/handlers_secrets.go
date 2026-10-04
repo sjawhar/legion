@@ -47,7 +47,10 @@ type rereadResponse struct {
 
 // rereadSecret is POST /v1/secrets/{name}/reread: public and rate-limited per source address and
 // broker-wide (refuseReread) before any work, it reads the one secret from Secrets Manager now
-// (policy.Current.RefreshOne) and answers whether the broker serves it.
+// (policy.Current.RefreshOne) and answers whether the broker serves it. A reread whose request
+// ended first - its caller went away, or its deadline passed - is the request's failure, not the
+// broker's, so it logs nothing, as the miss path logs nothing for one: anyone can end a request,
+// and the "broker: reread secret failed" line is the one an operator's alert counts.
 func (s *server) rereadSecret(w http.ResponseWriter, r *http.Request) {
 	if s.refuseReread(w, r) {
 		return
@@ -57,6 +60,9 @@ func (s *server) rereadSecret(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case errors.Is(err, policy.ErrNameInvalid):
 		writeError(w, http.StatusBadRequest, "SECRET_NAME_INVALID", err.Error())
+		return
+	case err != nil && r.Context().Err() != nil:
+		writeError(w, http.StatusServiceUnavailable, "REQUEST_ENDED", "the request ended before the reread finished; send it again")
 		return
 	case err != nil:
 		writeInternal(w, "reread secret", err)

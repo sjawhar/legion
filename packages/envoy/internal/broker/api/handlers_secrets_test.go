@@ -1,16 +1,23 @@
 package api_test
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 
 	"github.com/sjawhar/envoy/internal/broker/api"
 	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/policy/policytest"
 	"github.com/sjawhar/envoy/internal/broker/ratelimit"
+	"github.com/sjawhar/envoy/internal/broker/secrets"
 )
 
 // wireSettings is GET /v1/settings's answer as the CLI reads it.
@@ -64,6 +71,49 @@ func TestRereadServesANewSecretAndDropsADeletedOne(t *testing.T) {
 	if status, body = ts.req(t, http.MethodPost, "/v1/secrets/"+tooLong+"/reread", nil, nil); status != http.StatusBadRequest || decode[wireError](t, body).Code != "SECRET_NAME_INVALID" {
 		t.Fatalf("over-long name: %d %s, want 400 SECRET_NAME_INVALID", status, body)
 	}
+}
+
+// TestARereadWhoseRequestEndedLogsNoError pins that a reread whose request ended before it
+// finished - its caller went away, or its deadline passed - is answered without the ERROR line
+// "broker: reread secret failed" that an operator's alert counts, as the miss path logs nothing for
+// one, while a reread Secrets Manager itself fails for a caller still waiting is still that 500 and
+// that line.
+func TestARereadWhoseRequestEndedLogsNoError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	loader := policytest.Loader(secrets.NewLocal())
+	loader.Describer = abandoningDescriber{cancel: cancel}
+	cur, err := policy.NewCurrent(t.Context(), loader, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	api.Register(mux, api.Deps{Policy: cur, SecretsPrefix: policytest.Prefix, SecretsKMSKeyARN: policytest.KeyARN})
+	logged := policytest.CaptureLog(t)
+
+	mux.ServeHTTP(httptest.NewRecorder(), httptest.NewRequestWithContext(ctx, http.MethodPost, "/v1/secrets/NEW_KEY/reread", nil))
+	if strings.Contains(logged.String(), "reread secret failed") {
+		t.Fatalf("a reread whose caller went away logged:\n%s", logged.String())
+	}
+
+	failed := httptest.NewRecorder()
+	mux.ServeHTTP(failed, httptest.NewRequest(http.MethodPost, "/v1/secrets/NEW_KEY/reread", nil))
+	if failed.Code != http.StatusInternalServerError || !strings.Contains(logged.String(), "ERROR broker: reread secret failed") {
+		t.Fatalf("a reread Secrets Manager failed for a live caller: %d, logged %q; want 500 and the ERROR line", failed.Code, logged.String())
+	}
+}
+
+// abandoningDescriber is a caller that goes away while the reread's DescribeSecret is in flight:
+// it ends that caller's context and fails as the AWS SDK does once a context has ended. For a
+// caller whose context it does not hold, it fails as a throttled Secrets Manager does.
+type abandoningDescriber struct{ cancel context.CancelFunc }
+
+func (d abandoningDescriber) DescribeSecret(ctx context.Context, _ *secretsmanager.DescribeSecretInput, _ ...func(*secretsmanager.Options)) (*secretsmanager.DescribeSecretOutput, error) {
+	d.cancel()
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("operation error Secrets Manager: DescribeSecret, %w", err)
+	}
+	return nil, errors.New("operation error Secrets Manager: DescribeSecret, ThrottlingException")
 }
 
 // postReread sends one reread of name with headers, answering the status, headers and body: the
