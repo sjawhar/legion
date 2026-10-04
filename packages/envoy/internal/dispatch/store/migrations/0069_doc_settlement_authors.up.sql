@@ -1,4 +1,4 @@
--- 0068_doc_settlement_authors.up.sql
+-- 0069_doc_settlement_authors.up.sql
 -- LEGION-513: a settlement's authors must outlive a room and a process.
 --
 -- A document update already leaves doc_settlements_pending as the durable record that its

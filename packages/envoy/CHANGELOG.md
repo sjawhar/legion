@@ -226,7 +226,7 @@
   nothing still holds it. Before, every document opened since a restart kept its state and counted
   against the cap, so editors were refused with 503 after about 1,000 (LEGION-513).
 - A document's pending settlement keeps the authors it will credit (`doc_settlements_pending.settlement_authors`,
-  migration `0068`): an API edit writes them in the transaction that writes its content and takes
+  migration `0069`): an API edit writes them in the transaction that writes its content and takes
   out the authors any version it wrote credited, so closing the issue, releasing the room or
   restarting the service no longer drops who wrote the version, ask or event the settlement
   produces, nor credits an author again whose own edit's version already did (LEGION-513).
