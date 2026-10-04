@@ -831,7 +831,7 @@ is written there.
 
 LEGION-394's acceptance: a person's direct Send or Aside from Dispatch's conversation page is the
 session's own user turn, and everything else keeps its Envoy card. One real session — the pinned
-Oh My Pi (the `github:sjawhar/oh-my-pi` mise tool) with this checkout's plugin in an isolated
+Oh My Pi (`.omp-pin`, run as a mise tool spec) with this checkout's plugin in an isolated
 profile, launched with `controller-start-tmux.sh`'s `operator_env` line, its cwd under `/tmp` —
 registers with a real Envoy listener and NATS. Dispatch, built from the checkout with NATS on and
 its trusted identity header, serves the SPA this checkout builds, and Playwright drives the
@@ -845,7 +845,7 @@ LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic bash scripts/e2e/dispatch-user-
 | input | default | meaning |
 | :--- | :--- | :--- |
 | `LEGION_E2E_MODEL_GATEWAY_URL` | required | the model gateway's Anthropic endpoint; checked by [`lib/model-gateway-url.sh`](#libmodel-gateway-urlsh) |
-| `DISPATCH_USER_TURNS_OMP` | the pinned build, `github:sjawhar/oh-my-pi@$(mise current github:sjawhar/oh-my-pi)` | another Oh My Pi, as a mise tool spec |
+| `DISPATCH_USER_TURNS_OMP` | the pinned build, `.omp-pin`'s mise tool spec (`github:sjawhar/oh-my-pi@<version>`) | another Oh My Pi, as a mise tool spec |
 | `DISPATCH_USER_TURNS_EVIDENCE_DIR` | a fresh `/tmp/legion-e2e-user-turns-evidence.XXXXXXXX` | kept on every outcome and printed at exit: `logs/` (the listener, Dispatch and the SPA build), `checks/` (the page's screenshots and the session's pane at exit) and `session.jsonl`, the session's transcript |
 
 Each check prints `== <name>`, what it observed, and `ok <name>`. The first check that fails ends the
