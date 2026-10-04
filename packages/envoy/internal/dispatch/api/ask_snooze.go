@@ -14,12 +14,10 @@ import (
 // the reader decides from it, so the moment a snooze passes the row is an ordinary row again
 // on the next read.
 //
-// The row is keyed on the canonical login, not on the actor id: a human's actor id is the
-// login as their identity source spells it (`identity.CookieIdentity` returns GitHub's
-// display casing, `HeaderIdentity` the header verbatim; both lowercase only to check the
-// allowlist), so keying on it raw would give one person two snooze sets across identity
-// sources and orphan their rows when GitHub's casing changes. canonicalLogin is the form
-// issues store assignees in and the form inboxAssigneeFilter compares against.
+// The row is keyed on the canonical login, not on the actor id: rows written before every
+// identity lowercased the person it names can carry another casing of the same email, so keying
+// on the actor id raw could give one person two snooze sets. canonicalLogin is the form issues
+// store assignees in and the form inboxAssigneeFilter compares against.
 
 // userAskSnooze is one row's snooze for the calling human: when the Inbox stops folding it
 // away. The Inbox's "Until I clear it" is this timestamp set far enough out that only the

@@ -97,8 +97,6 @@ fail() { printf 'FAIL %s: %s\n' "$check" "$*" >&2; exit 1; }
 . "$root/scripts/e2e/lib/workflow.sh"
 # shellcheck source-path=SCRIPTDIR source=lib/leftovers.sh
 . "$root/scripts/e2e/lib/leftovers.sh"
-# shellcheck source-path=SCRIPTDIR source=lib/stage-role-prompts.sh
-. "$root/scripts/e2e/lib/stage-role-prompts.sh"
 
 # collect_transcripts copies every OMP session the rig's profile wrote into the evidence directory
 # before the isolated profile is removed.
@@ -184,7 +182,7 @@ start_dispatch() {
     offset=$(log_size dispatch)
     DATABASE_URL="postgres://legion:$pg_password@127.0.0.1:$port_pg/dispatch?sslmode=disable" \
       DISPATCH_AGENT_TOKEN="$dispatch_token" ENVOY_TOKEN="$envoy_token" HOME="$work/dispatch-home" \
-      DISPATCH_IDENTITY=header:X-Dispatch-User DISPATCH_ALLOWED_LOGINS=smoke \
+      DISPATCH_IDENTITY=header:X-Dispatch-User DISPATCH_IDENTITY_HEADER_TRUSTED=1 \
       DISPATCH_LISTEN_HOST=127.0.0.1 DISPATCH_PORT="$port_dispatch" \
       DISPATCH_SERVER_URL="http://127.0.0.1:$port_dispatch" NATS_URLS="nats://127.0.0.1:$port_nats" \
       ENVOY_URL="http://127.0.0.1:$port_listener" \
@@ -635,7 +633,6 @@ begin rig
   head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' >"$work/postgres-password")
 chmod 0600 "$work"/*token "$work"/*-header "$work/postgres-password"
 (cd "$root/packages/daemon" && go build -o "$work/legion" ./cmd/legion)
-stage_role_prompts "$root" "$work"
 (cd "$root/packages/envoy" && go build -o "$work/envoy-listener" ./cmd/listener && go build -o "$work/envoy-dispatch" ./cmd/dispatch)
 built=$(bash "$root/scripts/e2e/lib/built-from.sh" "$root" "$work/legion" "$work/envoy-listener" "$work/envoy-dispatch") || fail "lib/built-from.sh could not say what the run built"
 while IFS= read -r line; do note "$line"; done <<<"$built"

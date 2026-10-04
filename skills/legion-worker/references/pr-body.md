@@ -29,7 +29,7 @@ later phase keeps it current rather than replacing it:
 **Threads:** <n> resolved, 0 unresolved. Each disposed individually, never in bulk:
 - Thread <id>: fixed in <commit-sha> — <one line>.
 - Thread <id>: not a defect — <reason>.
-`legion threads resolve --pr <n> --repo <owner>/<repo>` at <head-sha>:
+`legion threads resolve --pr <n> --repo <owner>/<repo>`, run after the push that made <head-sha>:
 resolved <thread URL> — its opener's acceptance
 resolved <thread URL> — the Legion reviewer's acceptance of a bot's thread
 left open <thread URL> — newest reply by <login> is not an acceptance

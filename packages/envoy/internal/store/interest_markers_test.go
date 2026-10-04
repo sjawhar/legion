@@ -309,7 +309,7 @@ func TestAPassWhoseScanReadAReplacedStreamPurgesNothing(t *testing.T) {
 		if err := js.DeleteKeyValue(Bucket); err != nil {
 			t.Fatalf("delete the interest bucket: %v", err)
 		}
-		recreated := recreateBucket(t, js, Bucket)
+		recreated := testnats.RecreateKeyValue(t, js, &natsgo.KeyValueConfig{Bucket: Bucket, Replicas: 1, Storage: natsgo.FileStorage})
 		seedLive(t, recreated, 2)
 	})
 	if err != nil {
@@ -422,7 +422,7 @@ func TestAPassWhoseStreamWasReplacedFromTheSameFirstSequencePurgesNothing(t *tes
 		if err := js.DeleteKeyValue(Bucket); err != nil {
 			t.Fatalf("delete the interest bucket: %v", err)
 		}
-		replacement = seedLive(t, recreateBucket(t, js, Bucket), 3)
+		replacement = seedLive(t, testnats.RecreateKeyValue(t, js, &natsgo.KeyValueConfig{Bucket: Bucket, Replicas: 1, Storage: natsgo.FileStorage}), 3)
 	})
 	if err != nil {
 		t.Fatalf("pass: %v", err)
@@ -856,21 +856,4 @@ func tracedPurges(trace []string) []string {
 		}
 	}
 	return purges
-}
-
-// recreateBucket creates bucket again after a delete, retrying while the server is still removing
-// the old stream's directories from its background goroutines ("error creating store for stream").
-func recreateBucket(t *testing.T, js natsgo.JetStreamContext, bucket string) natsgo.KeyValue {
-	t.Helper()
-	deadline := time.Now().Add(30 * time.Second)
-	for {
-		kv, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: bucket, Replicas: 1, Storage: natsgo.FileStorage})
-		if err == nil {
-			return kv
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("recreate %s: %v", bucket, err)
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
 }

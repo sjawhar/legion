@@ -60,8 +60,6 @@ TZ=UTC printf -v check_started '%(%FT%TZ)T' -1 # when the current check began (l
 timeout_hook=
 # shellcheck source-path=SCRIPTDIR source=lib/omp-home.sh
 . "$root/scripts/e2e/lib/omp-home.sh"
-# shellcheck source-path=SCRIPTDIR source=lib/stage-role-prompts.sh
-. "$root/scripts/e2e/lib/stage-role-prompts.sh"
 
 # ---- reporting and waiting ------------------------------------------------------------------------
 
@@ -272,7 +270,6 @@ port=$(bash "$root/scripts/e2e/lib/free-port.sh") || fail "no free port for the 
 deadline_port=$(bash "$root/scripts/e2e/lib/free-port.sh" "$port") || fail "no free port for the second daemon"
 envoy_port=$(bash "$root/scripts/e2e/lib/free-port.sh" "$port" "$deadline_port") || fail "no free port for the Envoy listener"
 (cd "$root/packages/daemon" && go build -o "$work/legion" ./cmd/legion)
-stage_role_prompts "$root" "$work"
 (cd "$root/packages/envoy" && go build -o "$work/envoy-listener" ./cmd/listener)
 # The binary under proof, checkable after the run: the source it was built from, what a changed
 # working copy held (a negative control's), and its hash (lib/built-from.sh).
@@ -372,10 +369,10 @@ mv "$work/rubric.aside" "$work/plugin/dist/skills/thermonuclear-deep-review"
 [ -f "$work/plugin/dist/skills/thermonuclear-deep-review/SKILL.md" ] || fail "the rubric was not restored"
 pass
 
-begin gate-refuses-a-skill-only-the-role-prompts-load
+begin gate-refuses-a-skill-only-a-role-prompt-loads
 # The gate also resolves the skills the daemon's role prompts load, beside the plugin's own:
 # legion-controller is loaded by roles/controller-root.md alone, so only a gate that reads the
-# daemon's roles directory can refuse the plugin without it.
+# daemon's own role prompts can refuse the plugin without it.
 mv "$work/plugin/dist/skills/legion-controller" "$work/controller-skill.aside"
 expect_refusal prompt-only-skill "finds no skill legion-controller (loaded by roles/controller-root.md)"
 mv "$work/controller-skill.aside" "$work/plugin/dist/skills/legion-controller"

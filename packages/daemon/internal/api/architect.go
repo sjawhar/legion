@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -633,13 +634,7 @@ func (s *server) setDispatchStatus(w http.ResponseWriter, r *http.Request, issue
 }
 
 func validPhase(value phase.Phase) bool {
-	switch value {
-	case phase.Admitted, phase.Planning, phase.Implementing, phase.Testing, phase.Reviewing,
-		phase.Retro, phase.Merging, phase.AwaitingMerge, phase.ProductionCheck, phase.Done, phase.Held:
-		return true
-	default:
-		return false
-	}
+	return slices.Contains(phase.All, value)
 }
 
 func validUUID(value string) bool {

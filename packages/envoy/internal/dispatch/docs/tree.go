@@ -69,10 +69,29 @@ func producedSchemaError(err error) error {
 	return err
 }
 
-// ErrDocumentTooLarge is a document whose tree encodes to more items than one document update can
-// store (ygo's cap of 1,048,576, maxUpdateItems): more formatted spans than any real document
-// has, such as 1 MiB of `)_`, which reads as 524,288 italic spans.
-var ErrDocumentTooLarge = errors.New("document holds more formatted spans than can be stored")
+// ErrDocumentTooLarge is the refusal of a write that would leave a document larger than the server
+// stores: past what one upload of it may hold (refuseGrowth), with a live state ygo could not decode
+// (refuseUndecodable), or holding more items than one document update can store (ygo's cap of
+// 1,048,576, maxUpdateItems). It is served as 413 CAP_EXCEEDED, as markdown making more elements
+// than one write may (pmdoc.ErrTooManyElements) is.
+var ErrDocumentTooLarge = errors.New("document too large to store")
+
+// IsTooLarge reports a refusal of a write too large to store: markdown making more elements than
+// one write may (pmdoc.ErrTooManyElements), or a document larger than the server stores
+// (ErrDocumentTooLarge). Every route serves it as 413 CAP_EXCEEDED in its own words, which say
+// what to shorten.
+func IsTooLarge(err error) bool {
+	return errors.Is(err, ErrDocumentTooLarge) || errors.Is(err, pmdoc.ErrTooManyElements)
+}
+
+// wrapUnlessTooLarge is err behind context, which names the write that failed, unless err refuses a
+// write too large to store (IsTooLarge), which reaches its route in the bound's own words.
+func wrapUnlessTooLarge(err error, context string) error {
+	if IsTooLarge(err) {
+		return err
+	}
+	return fmt.Errorf("%s: %w", context, err)
+}
 
 // parseInput parses markdown a caller writes that replaces no live document: a new document's
 // first text, or the empty text a delete splices. Text an insert or an accept writes into a
@@ -86,7 +105,7 @@ func parseInput(markdown string) (*pmdoc.Node, error) {
 // front-matter block is front matter where the text lands at the document's start
 // (pmdoc.ParseFragment). A block id the text repeats is refused, as parseInput refuses it. Its
 // tables' short rows are padded on budget, which the write's other markdown shares.
-func parseFragmentInput(markdown string, opensDocument bool, budget *pmdoc.TablePaddingBudget) (*pmdoc.Node, error) {
+func parseFragmentInput(markdown string, opensDocument bool, budget *pmdoc.WriteBudget) (*pmdoc.Node, error) {
 	return uploadedInput(pmdoc.ParseFragment(markdown, opensDocument, budget))
 }
 
@@ -247,16 +266,10 @@ func snapshotDocument(doc *crdt.Doc) (*crdt.Doc, error) {
 }
 
 // newDocumentCopy is a document to decode a document's state into: a snapshot or a write's fork of
-// a room this server holds, the document's stored history (loadDocument, validateUpdate), which
-// the room itself decodes with the same queue (New sets Server.MaxPendingItems), or one update the
-// store appends (appendUpdate, AppendUpdateTx), decoded alone, so that every item of it leaning on
-// one outside it parks. ygo's decoder parks each later item of a client behind one whose parent it
-// cannot place yet - a container in a later client's group, one outside the update it decodes, or
-// one its garbage collection emptied when a peer deleted it - and refuses the whole update once
-// 100,000 are parked, its default (crdt.WithMaxPendingItems; LEGION-502), so a copy, a load or an
-// append of a document whose deleted subtree or one client's writes run past that fails where the
-// room that holds it serves. No update ygo decodes carries more than maxUpdateItems items, so a
-// queue that long holds every item one update can park.
+// a room this server holds, the document's stored history (loadDocument, validateUpdate, and the
+// fold of its stored updates and its read-back, stateThrough), or one update the store appends
+// (appendUpdate, AppendUpdateTx), decoded alone. Its pending queue is maxUpdateItems, the queue
+// every decode of document bytes takes (see maxUpdateItems).
 func newDocumentCopy(options ...crdt.DocOption) *crdt.Doc {
 	return crdt.New(append(options, crdt.WithMaxPendingItems(maxUpdateItems))...)
 }

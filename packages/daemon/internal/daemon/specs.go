@@ -85,7 +85,7 @@ func (s specs) SpawnSpec(ctx context.Context, c supervise.Claim) (runtime.SpawnS
 }
 
 // rolePromptPaths keeps an explicit operator prompt as a narrow test override. Every ordinary
-// claim uses the prompt bundle daemon boot already validated and materialized.
+// claim uses the role prompts daemon boot snapshotted below its state directory (prompts.New).
 func (s specs) rolePromptPaths(c supervise.Claim) ([]string, error) {
 	override := rolePromptPath(s.stateDir, c.Token)
 	if _, err := os.Stat(override); err == nil {

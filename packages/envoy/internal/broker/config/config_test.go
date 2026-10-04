@@ -15,10 +15,11 @@ func env(m map[string]string) func(string) string {
 // overrides or deletes just the variable(s) under test.
 func validEnv() map[string]string {
 	return map[string]string{
-		"BROKER_DATABASE_URL": "postgres://x",
-		"BROKER_PUBLIC_URL":   "https://secrets.internal.example",
-		"BROKER_UI_TOKEN":     "ui-token",
-		"BROKER_RULES_FILE":   "/r.yaml",
+		"BROKER_DATABASE_URL":        "postgres://x",
+		"BROKER_PUBLIC_URL":          "https://secrets.internal.example",
+		"BROKER_UI_TOKEN":            "ui-token",
+		"BROKER_SECRETS_PREFIX":      "example/agent-secrets/",
+		"BROKER_SECRETS_KMS_KEY_ARN": "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab",
 	}
 }
 
@@ -72,7 +73,6 @@ func TestLoadReadsUITokenFileAheadOfValue(t *testing.T) {
 	e := validEnv()
 	e["BROKER_UI_TOKEN_FILE"] = path
 	e["BROKER_UI_TOKEN"] = "ignored"
-	e["BROKER_RULES_FILE"] = dir + "/rules.yaml"
 	cfg, err := Load(env(e))
 	if err != nil {
 		t.Fatal(err)
@@ -111,12 +111,55 @@ func TestLoadReadsTrustedProxyHeaderOptionally(t *testing.T) {
 	}
 }
 
-func TestLoadRefusesBothRulesSources(t *testing.T) {
-	e := validEnv()
-	e["BROKER_RULES_S3_URI"] = "s3://bucket/agent-secret-rules.yaml"
-	_, err := Load(env(e))
-	if err == nil || !strings.Contains(err.Error(), "exactly one of") {
-		t.Fatalf("expected exactly-one refusal, got %v", err)
+// TestLoadRefusesTheRulesFileVariables pins that a deployment still configured for the rules file
+// refuses to start naming the variable, rather than running with its rules silently ignored.
+func TestLoadRefusesTheRulesFileVariables(t *testing.T) {
+	for name, value := range map[string]string{
+		"BROKER_RULES_FILE":           "/r.yaml",
+		"BROKER_RULES_S3_URI":         "s3://bucket/agent-secret-rules.yaml",
+		"BROKER_RULES_RELOAD_SECONDS": "300",
+	} {
+		e := validEnv()
+		e[name] = value
+		_, err := Load(env(e))
+		if err == nil || !strings.HasPrefix(err.Error(), name+" is removed; ") || !strings.Contains(err.Error(), "tags") {
+			t.Fatalf("Load(%s set) = %v, want a refusal naming it and the tags that replace it", name, err)
+		}
+	}
+}
+
+// TestLoadRequiresTheNamespaceAndItsKey pins that the broker refuses to start without the
+// namespace it serves and the key every secret in it must be on, or with either in a form the
+// loader cannot use: a prefix that is not a name prefix ending in "/", or a key named any way but
+// by its ARN (an alias can be repointed, and a bare key id names no account).
+func TestLoadRequiresTheNamespaceAndItsKey(t *testing.T) {
+	for name, value := range map[string]string{
+		"BROKER_SECRETS_PREFIX":      "",
+		"BROKER_SECRETS_KMS_KEY_ARN": "",
+	} {
+		e := validEnv()
+		e[name] = value
+		if _, err := Load(env(e)); err == nil || err.Error() != name+" is required" {
+			t.Fatalf("Load(%s unset) = %v, want %q", name, err, name+" is required")
+		}
+	}
+	for _, prefix := range []string{"example/agent-secrets", "/example/agent-secrets/", "example/agent secrets/"} {
+		e := validEnv()
+		e["BROKER_SECRETS_PREFIX"] = prefix
+		if _, err := Load(env(e)); err == nil || !strings.HasPrefix(err.Error(), "BROKER_SECRETS_PREFIX must be") {
+			t.Fatalf("Load(BROKER_SECRETS_PREFIX=%q) = %v, want a refusal naming it", prefix, err)
+		}
+	}
+	for _, key := range []string{"alias/agent-secrets", "1234abcd-12ab-34cd-56ef-1234567890ab", "arn:aws:kms:us-east-1:111122223333:alias/agent-secrets"} {
+		e := validEnv()
+		e["BROKER_SECRETS_KMS_KEY_ARN"] = key
+		if _, err := Load(env(e)); err == nil || !strings.HasPrefix(err.Error(), "BROKER_SECRETS_KMS_KEY_ARN must be") {
+			t.Fatalf("Load(BROKER_SECRETS_KMS_KEY_ARN=%q) = %v, want a refusal naming it", key, err)
+		}
+	}
+	cfg, err := Load(env(validEnv()))
+	if err != nil || cfg.SecretsPrefix != "example/agent-secrets/" || cfg.SecretsKMSKeyARN != validEnv()["BROKER_SECRETS_KMS_KEY_ARN"] {
+		t.Fatalf("Load(valid) = %+v, %v", cfg, err)
 	}
 }
 

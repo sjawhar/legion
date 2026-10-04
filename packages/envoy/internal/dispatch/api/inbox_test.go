@@ -181,7 +181,8 @@ func TestInboxCarriesAnchorDocumentForIssueAsk(t *testing.T) {
 
 // The inbox partitions by the owning issue's assignee: ?assignee=me is the caller's own issues,
 // ?assignee=unassigned is issues nobody owns plus every document ask (a document has no
-// assignee), and no filter is everything. A login is canonicalised before the allowlist check.
+// assignee), and no filter is everything. A named person is lowercased before it is checked
+// against the people who have signed in.
 func TestInboxFiltersByAssignee(t *testing.T) {
 	handler := newTestHandler(t)
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{

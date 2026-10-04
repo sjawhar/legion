@@ -28,7 +28,6 @@ legion start --config legion.yaml --check-config
 | `postgres_dsn is required (or set LEGION_POSTGRES_DSN)` | Give the daemon its database. |
 | `unknown key <key>` | A typo, or a setting Legion no longer has; the message says which when it knows. |
 | `omp_invocation is not used when runtime is kubernetes: …` | Remove it: every pod runs the worker image's Oh My Pi. |
-| `resolve role prompts: Role prompts directory <dir>/role-prompts is missing …` | The binary needs Legion's role prompts beside it in `role-prompts/`, or `LEGION_ROLE_PROMPTS_DIR` naming them; take both from the same image ([Check and start the daemon](/legion/legion/running-legion/#check-and-start-the-daemon)). |
 | `<PROJECT> is already running (pid <n>)` (from `legion start` itself) | A daemon for this project is already registered on the machine: `legion status <PROJECT>`, `legion legions`. |
 
 **At boot, after the check passes**, the daemon checks the cluster and the image:
@@ -182,7 +181,8 @@ These arrive as messages on the Dispatch issue, and the architect is told:
 
 - **`Issue reached review_round_cap=3.`** Three review rounds sent the change back. The architect
   decides what happens next, often with a question to you.
-- **`Pull request #<n> reached max_fix_attempts=3.`** CI stayed red through three fix attempts.
+- **`Pull request #<n> reached max_fix_attempts=3.`** A check the base branch requires stayed red
+  through three fix attempts.
 - **A review round that no review decides.** Legion's reviewer must approve the head or request
   changes; a plain comment leaves the issue in `needs_review`, and the architect asks the reviewer
   for the decision.
@@ -190,11 +190,17 @@ These arrive as messages on the Dispatch issue, and the architect is told:
   has succeeded on the pull request's head, and while the design gate is closed. The refusal names
   the head and the check, or the spec version that needs approval.
 
-The pull request's state as the daemon sees it:
+The pull request's state as the daemon sees it, its `checksVerdict` judged only by the checks the
+base branch requires:
 
 ```sh
 legion state --config legion.yaml --json | jq '.issues["<KEY>"].pullRequest'
 ```
+
+No `checksVerdict` on a pull request whose checks have settled means the daemon has not read the
+base branch's required checks yet. Its log names each read GitHub refused, with the repository,
+the pull request and the HTTP status (`read the checks a pull request's base branch requires`);
+the daemon reads again every two minutes.
 
 ## A status change did not stick
 

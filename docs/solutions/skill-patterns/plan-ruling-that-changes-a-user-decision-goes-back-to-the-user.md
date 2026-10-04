@@ -64,8 +64,8 @@ Every gate the PR passed had measured the plan's substituted requirement, not th
   The only check that catches it is showing the user the real surface before the gates run.
 - **Record rulings where the user will read them.** R1–R30 lived in a `rulings.md` beside the
   plan, never surfaced in the spec's "Decisions" table or the PR body's summary. A ruling that
-  alters a spec decision must be written into the spec as an amendment with a question mark,
-  not filed beside it.
+  alters a requirement the user approved must be written into the spec as an amendment with a
+  question mark, not filed beside it.
 
 ## Why This Matters
 

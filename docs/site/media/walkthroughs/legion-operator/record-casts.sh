@@ -47,8 +47,6 @@ model_port=
 . "$root/scripts/e2e/lib/rig.sh"
 # shellcheck source-path=SCRIPTDIR source=../../../../../scripts/e2e/lib/omp-home.sh
 . "$root/scripts/e2e/lib/omp-home.sh"
-# shellcheck source-path=SCRIPTDIR source=../../../../../scripts/e2e/lib/stage-role-prompts.sh
-. "$root/scripts/e2e/lib/stage-role-prompts.sh"
 
 # Unconditional: every run removes what it made, whatever it ended on, and keeps its evidence.
 cleanup() {
@@ -83,7 +81,6 @@ mise where "$pin" >/dev/null 2>&1 || mise install "$pin" >&2
 printf '#!/bin/sh\nexec %q "$@"\n' "$(mise where "$pin")/bin/omp" >"$work/bin/omp"
 chmod +x "$work/bin/omp"
 (cd "$root/packages/daemon" && nice -n 19 go build -o "$work/bin/legion" ./cmd/legion)
-stage_role_prompts "$root" "$work/bin"
 (cd "$root/packages/envoy" && nice -n 19 go build -o "$work/envoy-listener" ./cmd/listener)
 pick_port daemon_port
 pick_port envoy_port

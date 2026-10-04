@@ -251,7 +251,7 @@ func TestParseRefusesARowHoldingMoreCellsThanItsTable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := textContent(doc.Children[0].Children[1].Children[1]); got != "Hold x: Promise<void> | undefined; every caller waits." {
+	if got := TextContent(doc.Children[0].Children[1].Children[1]); got != "Hold x: Promise<void> | undefined; every caller waits." {
 		t.Errorf("the row written with \\| holds %q in its second cell, want the whole text", got)
 	}
 }
@@ -272,7 +272,7 @@ func TestParseKeepsAnEscapedClosingPipeInTheLastCell(t *testing.T) {
 			continue
 		}
 		table := doc.Children[0]
-		if got := [2]string{textContent(table.Children[0].Children[1]), textContent(table.Children[1].Children[1])}; got != want {
+		if got := [2]string{TextContent(table.Children[0].Children[1]), TextContent(table.Children[1].Children[1])}; got != want {
 			t.Errorf("Parse(%q) second cells = %q, want %q", markdown, got, want)
 		}
 	}
@@ -286,7 +286,7 @@ func TestUnescapeTablePipesLeavesTheTreeGoldmarksTransformerDoes(t *testing.T) {
 	read := func(source []byte) (ast.Node, gmtext.Reader, parser.Context) {
 		reader := gmtext.NewReader(source)
 		pc := parser.NewContext()
-		pc.Set(tablePaddingBudgetKey, NewTablePaddingBudget())
+		pc.Set(writeBudgetKey, NewWriteBudget())
 		return blockReader.md.Parser().Parse(reader, parser.WithContext(pc)), reader, pc
 	}
 	tables, unescaped := 0, 0

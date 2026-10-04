@@ -1,8 +1,8 @@
 // Package promptrefs reads what Legion's prompts name that Oh My Pi resolves only when a worker
 // uses it: the task agents they dispatch and the skills they load, each with the prompt files that
 // name it. The boot gate and the image probe hand these names to the load probe (probe.mjs), and the
-// daemon hands its own role prompts' references (Roles) to a Sandbox pod's probe as `legion
-// probe-image --role-references` (Encode, Decode).
+// daemon hands its own role prompts' references to a Sandbox pod's probe as `legion probe-image
+// --role-references` (Encode, Decode).
 package promptrefs
 
 import (
@@ -77,34 +77,19 @@ func (names Names) add(kind Kind, name, file string) {
 	}
 }
 
-// File adds references in one Markdown file. The file is named by its path relative to base under
-// prefix, as Collect names files it walks.
-func (names Names) File(base, path, prefix string) error {
-	return names.collectFile(base, path, prefix)
-}
-
-func (names Names) collectFile(base, path, prefix string) error {
-	body, err := os.ReadFile(path)
-	if err != nil {
-		return err
-	}
-	rel, err := filepath.Rel(base, path)
-	if err != nil {
-		return err
-	}
-	file := filepath.Join(prefix, rel)
+// Text adds the references in body, a prompt named file.
+func (names Names) Text(file string, body []byte) {
 	for _, kind := range Kinds {
 		for _, match := range reference[kind].FindAllSubmatch(body, -1) {
 			names.add(kind, string(match[1]), file)
 		}
 	}
-	return nil
 }
 
 // Collect adds every reference in a Markdown file under dir, each file named by its path relative
-// to base under prefix. dir may be a link to a directory (LEGION_ROLE_PROMPTS_DIR can name one),
-// which the walk follows; filepath.WalkDir alone would report the link and read nothing under it.
-func (names Names) Collect(base, dir, prefix string) error {
+// to base. dir may be a link to a directory, which the walk follows; filepath.WalkDir alone would
+// report the link and read nothing under it.
+func (names Names) Collect(base, dir string) error {
 	under, err := filepath.Rel(base, dir)
 	if err != nil {
 		return err
@@ -117,19 +102,17 @@ func (names Names) Collect(base, dir, prefix string) error {
 		if err != nil || entry.IsDir() || filepath.Ext(path) != ".md" {
 			return err
 		}
-		return names.collectFile(resolved, path, filepath.Join(prefix, under))
+		body, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(resolved, path)
+		if err != nil {
+			return err
+		}
+		names.Text(filepath.Join(under, rel), body)
+		return nil
 	})
-}
-
-// Roles are the references of the role prompts under rolesDir, each named `roles/<file>`: the
-// daemon hands its own role prompts to every worker, so a probe resolves what those name, not the
-// probed image's copy.
-func Roles(rolesDir string) (Names, error) {
-	names := New()
-	if err := names.Collect(rolesDir, rolesDir, "roles"); err != nil {
-		return Names{}, fmt.Errorf("the role prompts directory %s cannot be read: %w", rolesDir, err)
-	}
-	return names, nil
 }
 
 // Merge adds every name other holds, with the files that name it.

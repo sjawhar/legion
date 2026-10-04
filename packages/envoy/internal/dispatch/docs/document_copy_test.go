@@ -16,13 +16,12 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
 
-// A browser whose client id is lower than the server's writes many blocks into a paragraph the
-// server created. A room's whole state lists its clients in ascending order, so ygo's decoder
-// meets the browser's first block before the paragraph it lands in, defers it, and parks every
-// later one of the browser's items behind it; at its default it refuses the update once 100,000
-// are parked. The room holds and serves that document, so every copy the service takes of it -
-// the snapshot a read renders, and the fork a write starts from - holds it too, item for item.
-func TestACopyHoldsEveryItemItsRoomParksForOneClient(t *testing.T) {
+// A browser whose client id is lower than the server's writes 150,000 blocks into a paragraph the
+// server created. A room's whole state lists its clients in ascending order, so the decoder meets
+// every one of the browser's blocks before the paragraph it lands in. The room holds and serves
+// that document, so every copy the service takes of it - the snapshot a read renders, and the fork
+// a write starts from - holds it too, item for item.
+func TestACopyHoldsEveryItemOneClientWroteAheadOfItsParent(t *testing.T) {
 	const blocks = 150_000
 	live := crdt.New(crdt.WithClientID(1_000_000))
 	fragment := live.GetXmlFragment(fragmentName)
@@ -43,9 +42,6 @@ func TestACopyHoldsEveryItemItsRoomParksForOneClient(t *testing.T) {
 		t.Fatalf("apply the browser's blocks to the room: %v", err)
 	}
 	state := crdt.EncodeStateAsUpdateV1(live, nil)
-	if err := crdt.ApplyUpdateV1(crdt.New(), state, nil); err == nil {
-		t.Fatal("ygo's default pending queue took the room's whole state; this test no longer reaches the queue")
-	}
 
 	snapshot, err := snapshotDocument(live)
 	if err != nil {
@@ -64,18 +60,17 @@ func TestACopyHoldsEveryItemItsRoomParksForOneClient(t *testing.T) {
 }
 
 // storedHistoryBlocks is how many paragraphs the browser of
-// TestAStoredHistoryLoadsWhatItsRoomParksForOneClient writes, past ygo's default pending queue of
-// 100,000, in two updates each under it.
+// TestAStoredHistoryLoadsEveryItemOneClientWroteAheadOfItsParent writes, in two updates.
 const storedHistoryBlocks = 150_000
 
-// The same parking, in a document's stored history rather than a copy of its room. A server client
-// writes a paragraph; a browser numbered lower writes storedHistoryBlocks paragraphs ahead of it in
-// two updates, each of which the store takes on its own, as a room persists them. The merged history
-// meets the browser's paragraphs before the one they lean on, so ygo's default queue refuses it,
-// while the room that wrote it served it. That document is whole: a read with no room resident
-// serves it, a room opens on it, and a rebuild, which would replace its history with its latest
-// saved version, refuses it as a document that loads and leaves its history as it was.
-func TestAStoredHistoryLoadsWhatItsRoomParksForOneClient(t *testing.T) {
+// The same shape of document, in a document's stored history rather than a copy of its room. A
+// server client writes a paragraph; a browser numbered lower writes storedHistoryBlocks paragraphs
+// ahead of it in two updates, each of which the store takes on its own, as a room persists them.
+// The merged history meets the browser's paragraphs before the one they lean on, and the room that
+// wrote it served it. That document is whole: a read with no room resident serves it, a room opens
+// on it, and a rebuild, which would replace its history with its latest saved version, refuses it
+// as a document that loads and leaves its history as it was.
+func TestAStoredHistoryLoadsEveryItemOneClientWroteAheadOfItsParent(t *testing.T) {
 	service, artifactID := newTestService(t)
 	// Settlement is not under test, and its stamp of every paragraph's block id would race the
 	// subtests' reads of the history.
@@ -107,13 +102,6 @@ func TestAStoredHistoryLoadsWhatItsRoomParksForOneClient(t *testing.T) {
 		if _, err := persist.AppendUpdate(ctx, artifactID, crdt.EncodeStateAsUpdateV1(browser, before)); err != nil {
 			t.Fatalf("store the browser's paragraphs: %v", err)
 		}
-	}
-	stored, err := persist.Load(ctx, artifactID)
-	if err != nil {
-		t.Fatalf("load the stored history: %v", err)
-	}
-	if err := crdt.ApplyUpdateV1(crdt.New(), stored.Update, nil); err == nil {
-		t.Fatal("ygo's default pending queue took the stored history; this test no longer reaches the queue")
 	}
 	want, err := renderDocument(browser)
 	if err != nil {
@@ -269,4 +257,63 @@ func TestTheStoreTakesOneBrowserUpdateItsRoomTook(t *testing.T) {
 			t.Fatalf("append the browser's update in a transaction: %v", err)
 		}
 	})
+}
+
+// A settlement stamps a block id on every block that lacks one, in one update the room broadcasts
+// to its peers. ygo checks each update the service broadcasts by decoding it alone under the
+// server's pending queue (Server.MaxPendingItems), and the stamp of a block the document already
+// holds leans on that block, so a settlement stamping more blocks than ygo's default queue of
+// 100,000 broadcasts only under the server's maxUpdateItems. Refused, the broadcast fails the room
+// on every reload, and the document is never stamped.
+func TestASettlementStampsMoreBlocksThanYgosDefaultQueue(t *testing.T) {
+	service, artifactID := newTestService(t)
+	// The settlement runs below, once, on the test's own goroutine.
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "before")
+	ctx := context.Background()
+	const blocks = 150_000
+	if err := service.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+		fragment := doc.GetXmlFragment(fragmentName)
+		transact(func(txn *crdt.Transaction) {
+			for range blocks {
+				fragment.InsertElement(txn, 0, crdt.NewYXmlElement("paragraph"))
+			}
+		})
+	}); err != nil {
+		t.Fatalf("write %d paragraphs without block ids: %v", blocks, err)
+	}
+	versions := func() (count int) {
+		t.Helper()
+		if err := service.store.Pool.QueryRow(ctx, `select count(*) from artifact_versions where artifact_id = $1`, artifactID).Scan(&count); err != nil {
+			t.Fatalf("count document versions: %v", err)
+		}
+		return count
+	}
+	before := versions()
+
+	settleCurrentGeneration(t, service, artifactID)
+	if err := service.roomFailure(artifactID); err != nil {
+		t.Fatalf("the settlement failed the room: %v", err)
+	}
+	if after := versions(); after != before+1 {
+		t.Fatalf("the settlement wrote %d versions, want 1", after-before)
+	}
+	if stamped, err := service.Blocks(ctx, artifactID); err != nil || len(stamped) != blocks+1 {
+		t.Fatalf("the settled document has %d blocks with ids (%v), want %d", len(stamped), err, blocks+1)
+	}
+	stored, err := NewPgVersioned(service.store).Load(ctx, artifactID)
+	if err != nil {
+		t.Fatalf("load the stored history: %v", err)
+	}
+	durable := newDocumentCopy()
+	if err := crdt.ApplyUpdateV1(durable, stored.Update, nil); err != nil {
+		t.Fatalf("decode the stored history: %v", err)
+	}
+	tree, err := treeOf(durable)
+	if err != nil {
+		t.Fatalf("read the stored document: %v", err)
+	}
+	if repairs := pmdoc.BlockIDRepairCount(tree); repairs != 0 {
+		t.Fatalf("the stored document still needs %d block-id repairs", repairs)
+	}
 }

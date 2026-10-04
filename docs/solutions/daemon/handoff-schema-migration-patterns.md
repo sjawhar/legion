@@ -195,6 +195,6 @@ Two more rules for the daemon's persisted-state migrations (`legion-state.ts`), 
 
 When a handoff field change affects the role prompts' examples:
 
-- Search for `handoff_write` across the role prompts (`packages/pi-envoy/roles/*.md`) and `skills/legion-worker/SKILL.md` to find every handoff write
+- Search for `handoff_write` across the role prompts (`packages/daemon/internal/prompts/roles/*.md`) and `skills/legion-worker/SKILL.md` to find every handoff write
 - **`implementer.md` and `tester.md` each name `handoff_write` twice** (the call, and the refusal the schema enforces) — both need updating
 - Check every role prompt for cross-references to the old field name (e.g., `review.md` referenced `plan.learningsUsed` in a different section than its own handoff write)

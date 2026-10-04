@@ -476,3 +476,53 @@ func waitForJetStream(t testing.TB, check func() error) {
 	}
 	t.Fatalf("JetStream was not ready within %s: %v", connectTimeout, err)
 }
+
+// nats-server answers a stream create it could not make a file store for with streamStoreFailed,
+// under the stream-create error code; RecreateKeyValue retries that answer for up to
+// recreateTimeout.
+const (
+	streamStoreFailed     = "error creating store for stream"
+	streamCreateErrorCode = natsgo.ErrorCode(10049)
+	recreateTimeout       = 10 * time.Second
+)
+
+// RecreateKeyValue creates the KV bucket config names in place of one the test has just deleted,
+// and returns it.
+//
+// nats-server answers a stream delete before it is done with the account's directories: a
+// goroutine of its own then removes the account's streams directory, which it can only do once
+// that directory is empty, so only when the deleted stream was the account's last (stream.go,
+// stop, v2.10 through v2.15). A create that arrives before that goroutine has run can lose the
+// directory between making it and making its stream's own inside it: the server logs "could not
+// create storage directory - mkdir .../streams/<stream>: no such file or directory" and answers
+// the create "error creating store for stream". No API says when the goroutine has run, so the
+// create is retried on exactly that answer, every retryInterval; any other error fails the test
+// at once.
+func RecreateKeyValue(t testing.TB, js natsgo.JetStreamContext, config *natsgo.KeyValueConfig) natsgo.KeyValue {
+	t.Helper()
+	var kv natsgo.KeyValue
+	err := retryStreamStoreFailure(func() error {
+		var err error
+		kv, err = js.CreateKeyValue(config)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("recreate KV bucket %s: %v", config.Bucket, err)
+	}
+	return kv
+}
+
+// retryStreamStoreFailure runs create again while it fails with the server's stream store
+// failure, for up to recreateTimeout, and returns its last error.
+func retryStreamStoreFailure(create func() error) error {
+	deadline := time.Now().Add(recreateTimeout)
+	for {
+		err := create()
+		var apiErr *natsgo.APIError
+		storeFailed := errors.As(err, &apiErr) && apiErr.ErrorCode == streamCreateErrorCode && apiErr.Description == streamStoreFailed
+		if !storeFailed || time.Now().After(deadline) {
+			return err
+		}
+		time.Sleep(retryInterval)
+	}
+}

@@ -269,10 +269,7 @@ func (r *liveRig) checkImageProbe() error {
 	if err := r.recordSandbox(name); err != nil {
 		return err
 	}
-	p, err := r.imageProbe()
-	if err != nil {
-		return err
-	}
+	p := r.imageProbe()
 	if err := r.rt.ProbeImage(r.ctx, p); err != nil {
 		return err
 	}
@@ -331,10 +328,7 @@ func (r *liveRig) checkImageProbeRefusal() error {
 		return err
 	}
 	note("operator", "ConfigMap %s: modelRoles.oracle removed from overlay.yml", name)
-	p, err := r.imageProbe()
-	if err != nil {
-		return err
-	}
+	p := r.imageProbe()
 	refusal := r.rt.ProbeImage(r.ctx, p)
 	if err := patch(overlay); err != nil {
 		return fmt.Errorf("restore ConfigMap %s: %w", name, err)
@@ -362,25 +356,16 @@ func (r *liveRig) checkImageProbeRefusal() error {
 }
 
 // imageProbe is the probe as the daemon asks for it: its contract, and the references of the role
-// prompts it hands every pod. It resolves the deployment's configured bundle before reading it, as
-// daemon boot does. The probe command it sends, with --role-references and, the run having a
-// provider key, --provider-env-dir, is noted.
-func (r *liveRig) imageProbe() (ImageProbe, error) {
-	rolesDir, err := prompts.ResolveRolePromptsDir(nil)
-	if err != nil {
-		return ImageProbe{}, err
-	}
-	references, err := prompts.RoleReferences(rolesDir)
-	if err != nil {
-		return ImageProbe{}, err
-	}
+// prompts it hands every pod (prompts.RoleReferences). The probe command it sends, with
+// --role-references and, the run having a provider key, --provider-env-dir, is noted.
+func (r *liveRig) imageProbe() ImageProbe {
 	p := ImageProbe{
-		Contract: api.DaemonAPIVersion, Budget: 10 * time.Minute, RoleReferences: references,
+		Contract: api.DaemonAPIVersion, Budget: 10 * time.Minute, RoleReferences: prompts.RoleReferences(),
 		Retry: bootprobe.Retry{Initial: 15 * time.Second, Max: time.Minute, Attempts: 3},
 	}
 	command := r.rt.probeManifest("probe", p, time.Now()).Spec.PodTemplate.Spec.Containers[0].Command
 	note("runtime", "the probe command: %s", strings.Join(command, " "))
-	return p, nil
+	return p
 }
 
 func lastLine(text, prefix string) string {

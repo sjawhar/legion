@@ -16,7 +16,6 @@ import (
 // offers.
 func TestShippedLegionYAMLExamplePassesCheckConfig(t *testing.T) {
 	legionState(t)
-	t.Setenv("LEGION_ROLE_PROMPTS_DIR", testRolePromptsDir(t))
 	t.Setenv("LEGION_POSTGRES_DSN", "postgres://legion:legion@127.0.0.1:1/legion")
 	_, source, _, ok := runtime.Caller(0)
 	if !ok {

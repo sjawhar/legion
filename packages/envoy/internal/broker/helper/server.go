@@ -283,7 +283,7 @@ func (s *Server) signRequest(peer *Peer, pid int, names []string, reason string)
 	}
 	details := make([]record.AuthorizationDetail, len(names))
 	for i, name := range names {
-		details[i] = record.AuthorizationDetail{Type: "agent_secret", Identifier: name, Actions: []string{"inject"}}
+		details[i] = record.AuthorizationDetail{Type: record.KindAgentSecret, Identifier: name, Actions: []string{"inject"}}
 	}
 	compact, err := record.Sign(sess.Key, s.Broker.URL, details, reason, "", time.Now())
 	if err != nil {

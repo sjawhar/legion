@@ -1,10 +1,12 @@
-// Package prompts composes the role instructions the Go daemon gives an OMP pane.
+// Package prompts composes the role instructions the daemon gives an OMP pane, from the role
+// prompts it embeds.
 package prompts
 
 import (
 	"bytes"
 	"embed"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -14,27 +16,11 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/promptrefs"
 )
 
-// sharedPromptFiles is the complete role-prompt directory the daemon validates at boot. The
-// non-spawned files stay in this list so a broken role bundle fails at boot rather than later when
-// another daemon path needs it.
-var sharedPromptFiles = []string{
-	"architect-root.md",
-	"controller-root.md",
-	"architect.md",
-	"planner.md",
-	"implementer.md",
-	"tester.md",
-	"reviewer.md",
-	"merger.md",
-	"core/common.md",
-	"core/planner.md",
-	"core/implementer.md",
-	"core/tester.md",
-	"core/reviewer.md",
-	"core/oracle.md",
-	"mechanics/headless.md",
-	"mechanics/interactive.md",
-}
+// roleParts are the shared role prompts: each role's own part, the phase workers' cores and the
+// mechanics fragments (Compose), and the controller's prompt (ControllerPromptPath).
+//
+//go:embed roles
+var roleParts embed.FS
 
 //go:embed go/*.md
 var goParts embed.FS
@@ -46,107 +32,59 @@ type Parts struct {
 	RolePromptPaths []string
 }
 
-// Composer keeps state-local copies of the shared role prompts and the Go daemon additions.
+// Composer keeps state-local copies of the shared role prompts and the daemon's additions.
 type Composer struct {
 	sharedDir string
 	goDir     string
 }
 
-// ResolveRolePromptsDir chooses the explicit absolute override when present, otherwise the
-// role-prompts directory beside the running legion executable. It refuses one missing any file of
-// the shared bundle (CheckRolePrompts), naming LEGION_ROLE_PROMPTS_DIR, before any caller reads
-// it. A deployed binary never reads its build checkout.
-func ResolveRolePromptsDir(lookupEnv func(string) (string, bool)) (string, error) {
-	if lookupEnv == nil {
-		lookupEnv = os.LookupEnv
-	}
-	executable, err := os.Executable()
-	if err != nil {
-		return "", fmt.Errorf("find the legion executable for role prompts: %w", err)
-	}
-	dir := filepath.Join(filepath.Dir(executable), "role-prompts")
-	if configured, set := lookupEnv("LEGION_ROLE_PROMPTS_DIR"); set {
-		if !filepath.IsAbs(configured) {
-			return "", fmt.Errorf("LEGION_ROLE_PROMPTS_DIR must be an absolute path (got %s)", configured)
+// eachPart calls visit with every file of an embedded prompt directory, by its path below that
+// directory, in lexical order.
+func eachPart(parts embed.FS, dir string, visit func(name string, body []byte) error) error {
+	return fs.WalkDir(parts, dir, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil || entry.IsDir() {
+			return err
 		}
-		dir = configured
-	}
-	if err := CheckRolePrompts(dir); err != nil {
-		return "", err
-	}
-	return dir, nil
+		body, err := parts.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		return visit(strings.TrimPrefix(path, dir+"/"), body)
+	})
 }
 
-// CheckRolePrompts refuses a role-prompt directory missing any file of the shared bundle, naming
-// the directory and every missing file. It reads and writes nothing else, so `legion controller
-// start`, whose prompt is `controller-root.md`, checks the same bundle a daemon boot does before
-// its one daemon call.
-func CheckRolePrompts(rolesDir string) error {
-	missing := make([]string, 0)
-	for _, name := range sharedPromptFiles {
-		info, err := os.Stat(filepath.Join(rolesDir, name))
-		if err != nil || !info.Mode().IsRegular() {
-			missing = append(missing, name)
-		}
-	}
-	if len(missing) > 0 {
-		return fmt.Errorf("Role prompts directory %s is missing %s (set LEGION_ROLE_PROMPTS_DIR to the directory holding pi-envoy's roles/*.md)", rolesDir, strings.Join(missing, ", "))
-	}
-	return nil
-}
-
-// RoleReferences reads only the prompt files boot snapshots and panes consume. CheckStart uses
-// it against the resolved deployment bundle without writing; normal boot uses it against the
-// snapshot.
-func RoleReferences(rolesDir string) (promptrefs.Names, error) {
+// RoleReferences are the task agents and skills the shared role prompts name, each file named
+// `roles/<file>`: the daemon hands these prompts to every worker, so a gate or an image probe
+// resolves what they name beside the plugin's own.
+func RoleReferences() promptrefs.Names {
 	names := promptrefs.New()
-	for _, name := range sharedPromptFiles {
-		path := filepath.Join(rolesDir, name)
-		if err := names.File(rolesDir, path, "roles"); err != nil {
-			return promptrefs.Names{}, fmt.Errorf("read shared role prompt %s: %w", path, err)
-		}
+	if err := eachPart(roleParts, "roles", func(name string, body []byte) error {
+		names.Text("roles/"+name, body)
+		return nil
+	}); err != nil {
+		panic(fmt.Sprintf("prompts: read the embedded role prompts: %v", err))
 	}
-	return names, nil
+	return names
 }
 
-// New validates the complete shared role bundle (CheckRolePrompts), then snapshots it and each
-// embedded Go-specific prompt below stateDir wherever the file there does not already hold it. The
-// caller constructs it during daemon boot. The files stay across restarts, since a resumed pane
-// reads the running daemon's prompt snapshot rather than a deployment directory that can change
-// after boot. The daemon owns these files; an operator's own text is the deployment
-// `instructions`. A file already holding the current content is left as it is, so an ordinary
-// restart changes nothing.
-func New(rolesDir, stateDir string) (*Composer, error) {
-	if err := CheckRolePrompts(rolesDir); err != nil {
+// New snapshots the embedded role prompts and the daemon's own parts below stateDir wherever the
+// file there does not already hold them. The caller constructs it during daemon boot, and `legion
+// controller start` for the controller's prompt. The files stay across restarts, since a resumed
+// pane reads its prompt from the snapshot by path. The daemon owns these files; an operator's own
+// text is the deployment `instructions`. A file already holding the current content is left as it
+// is, so an ordinary restart changes nothing, and one an older daemon wrote is rewritten.
+func New(stateDir string) (*Composer, error) {
+	sharedDir := filepath.Join(stateDir, "prompts", "shared")
+	if err := eachPart(roleParts, "roles", func(name string, body []byte) error {
+		return syncPrompt(filepath.Join(sharedDir, name), body, "shared role prompt")
+	}); err != nil {
 		return nil, err
 	}
-
-	sharedDir := filepath.Join(stateDir, "prompts", "shared")
-	for _, name := range sharedPromptFiles {
-		source := filepath.Join(rolesDir, name)
-		body, err := os.ReadFile(source)
-		if err != nil {
-			return nil, fmt.Errorf("read shared role prompt %s: %w", source, err)
-		}
-		if err := syncPrompt(filepath.Join(sharedDir, name), body, "shared role prompt"); err != nil {
-			return nil, err
-		}
-	}
-
 	goDir := filepath.Join(stateDir, "prompts", "go")
-	entries, err := goParts.ReadDir("go")
-	if err != nil {
-		return nil, fmt.Errorf("list embedded Go daemon prompts: %w", err)
-	}
-	for _, entry := range entries {
-		name := entry.Name()
-		body, err := goParts.ReadFile(filepath.Join("go", name))
-		if err != nil {
-			return nil, fmt.Errorf("read embedded Go daemon prompt %s: %w", name, err)
-		}
-		if err := syncPrompt(filepath.Join(goDir, name), body, "Go daemon prompt"); err != nil {
-			return nil, err
-		}
+	if err := eachPart(goParts, "go", func(name string, body []byte) error {
+		return syncPrompt(filepath.Join(goDir, name), body, "Go daemon prompt")
+	}); err != nil {
+		return nil, err
 	}
 	return &Composer{sharedDir: sharedDir, goDir: goDir}, nil
 }
@@ -168,14 +106,6 @@ func syncPrompt(path string, body []byte, kind string) error {
 	return nil
 }
 
-// SharedRolePromptsDir is the state-local shared bundle that panes and boot probes both consume.
-func (c *Composer) SharedRolePromptsDir() (string, error) {
-	if c == nil {
-		return "", fmt.Errorf("shared role prompts: nil composer")
-	}
-	return c.sharedDir, nil
-}
-
 // ControllerPromptPath is the state-local controller prompt the launcher can pass to Oh My Pi.
 func (c *Composer) ControllerPromptPath() (string, error) {
 	if c == nil {
@@ -184,10 +114,9 @@ func (c *Composer) ControllerPromptPath() (string, error) {
 	return filepath.Join(c.sharedDir, "controller-root.md"), nil
 }
 
-// Compose returns the shipped daemon's shared role parts followed by this daemon's parts: the
-// role's own, then the text every architect (architect-common.md) or every phase worker
-// (worker-common.md) shares. The runtime appends addressing and deployment instructions after
-// these paths.
+// Compose returns the shared role parts followed by this daemon's parts: the role's own, then the
+// text every architect (architect-common.md) or every phase worker (worker-common.md) shares. The
+// runtime appends addressing and deployment instructions after these paths.
 func (c *Composer) Compose(role claim.Role, isRoot bool) (Parts, error) {
 	if c == nil {
 		return Parts{}, fmt.Errorf("compose role prompt: nil composer")

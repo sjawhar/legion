@@ -78,6 +78,7 @@ func Main(m *testing.M) int {
 // streams, consumers or messages, and holds it for t until t ends. The reset waits for the server
 // to report no client connection first: a previous test that published without waiting for acks
 // leaves messages the server still routes after the test ends, into a stream this test recreates.
+// The reset deletes every stream, so a test creates its own there with CreateStream.
 func URL(t testing.TB) string {
 	t.Helper()
 	if !mainRuns {
@@ -218,6 +219,56 @@ func JetStream(t testing.TB) jetstream.JetStream {
 	conn, js := connect(t)
 	t.Cleanup(conn.Close)
 	return js
+}
+
+// nats-server answers a stream create it could not make a file store for with streamStoreFailed,
+// under the stream-create error code; CreateStream retries that answer for up to createTimeout.
+const (
+	streamStoreFailed     = "error creating store for stream"
+	streamCreateErrorCode = jetstream.ErrorCode(10049)
+	createTimeout         = 10 * time.Second
+)
+
+// CreateStream creates the stream config describes on js, a client of the server URL has emptied
+// for t, and returns it.
+//
+// nats-server answers a stream delete before it is done with the account's directories: a
+// goroutine of its own then removes the account's streams directory, which it can only do once
+// that directory is empty, so only when the deleted stream was the account's last (stream.go,
+// stop, v2.10 through v2.15). URL's reset deletes every stream, so its last delete always empties
+// the account, and the test's first create can arrive before that goroutine has run. Such a create
+// can lose the directory between making it and making its stream's own inside it: the server logs
+// "could not create storage directory - mkdir .../streams/<stream>: no such file or directory" and
+// answers the create "error creating store for stream". No API says when the goroutine has run, so
+// the create is retried on exactly that answer, every 50 ms; any other error fails the test at
+// once.
+func CreateStream(t testing.TB, js jetstream.JetStream, config jetstream.StreamConfig) jetstream.Stream {
+	t.Helper()
+	var stream jetstream.Stream
+	err := retryStreamStoreFailure(func() error {
+		var err error
+		stream, err = js.CreateStream(t.Context(), config)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("create stream %s: %v", config.Name, err)
+	}
+	return stream
+}
+
+// retryStreamStoreFailure runs create again while it fails with the server's stream store
+// failure, for up to createTimeout, and returns its last error.
+func retryStreamStoreFailure(create func() error) error {
+	deadline := time.Now().Add(createTimeout)
+	for {
+		err := create()
+		var apiErr *jetstream.APIError
+		storeFailed := errors.As(err, &apiErr) && apiErr.ErrorCode == streamCreateErrorCode && apiErr.Description == streamStoreFailed
+		if !storeFailed || time.Now().After(deadline) {
+			return err
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 // start runs a NATS container, with its monitoring endpoint on 8222. A container Docker created and never saw ready (a readiness wait

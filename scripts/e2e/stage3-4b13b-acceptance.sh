@@ -112,8 +112,6 @@ soft() {
 . "$root/scripts/e2e/lib/omp-home.sh"
 # shellcheck source=/dev/null
 . "$root/scripts/e2e/lib/workflow.sh"
-# shellcheck source=/dev/null
-. "$root/scripts/e2e/lib/stage-role-prompts.sh"
 # The daemon's database is this run's own in the shared Postgres container, read with the host psql.
 db_value() { PGPASSWORD=$(cat "$work/postgres-password") psql -h 127.0.0.1 -p "$port_pg" -U "$pg_user" -d "$legion_db" -tAc "$1"; }
 
@@ -224,7 +222,7 @@ start_dispatch() {
     offset=$(log_size dispatch)
     DATABASE_URL="postgres://$pg_user:$pg_password@127.0.0.1:$port_pg/$dispatch_db?sslmode=disable" \
       DISPATCH_AGENT_TOKEN="$dispatch_token" ENVOY_TOKEN="$envoy_token" HOME="$work/dispatch-home" \
-      DISPATCH_IDENTITY=header:X-Dispatch-User DISPATCH_ALLOWED_LOGINS=smoke \
+      DISPATCH_IDENTITY=header:X-Dispatch-User DISPATCH_IDENTITY_HEADER_TRUSTED=1 \
       DISPATCH_LISTEN_HOST=127.0.0.1 DISPATCH_PORT="$port_dispatch" \
       DISPATCH_SERVER_URL="http://127.0.0.1:$port_dispatch" NATS_URLS="nats://127.0.0.1:$port_nats" \
       ENVOY_URL="http://127.0.0.1:$port_listener" \
@@ -663,7 +661,6 @@ nats_url='^([A-Za-z][A-Za-z0-9+.-]*://)?([^@/?#,[:space:]]+@)?[A-Za-z0-9_-]+(\.[
   printf 'ci' >"$work/postgres-password")
 chmod 0600 "$work"/*token "$work/envoy-auth-header" "$work/postgres-password"
 (cd "$root/packages/daemon" && go build -ldflags "-X main.revision=$head_commit" -o "$work/legion" ./cmd/legion)
-stage_role_prompts "$root" "$work"
 (cd "$root/packages/envoy" && go build -o "$work/envoy-listener" ./cmd/listener && go build -o "$work/envoy-dispatch" ./cmd/dispatch)
 {
   printf 'head under test %s\n' "$head_commit"

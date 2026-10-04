@@ -3,7 +3,7 @@ import type { Browser, BrowserContext, BrowserContextOptions } from "@playwright
 import { devSignInError, devSignInPath } from "./api";
 
 /** Signs `context` in as `login` at the harness server's dev sign-in route. The cookie it sets is
- *  the one a GitHub sign-in issues; the context's request client shares the context's cookie jar,
+ *  the one a sign-in-pool sign-in issues; the context's request client shares the context's cookie jar,
  *  and a relative URL resolves against the config's baseURL. The route answers a sign-in with a
  *  302, which is not followed: the redirect is the dashboard, which this does not need. The cookie
  *  names a generation in `user_sessions`, which `resetDatabase` truncates, so sign a context in

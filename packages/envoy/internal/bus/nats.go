@@ -660,8 +660,8 @@ func usesCoreTransport(topic string) bool {
 }
 
 // ErrRefused is returned for an envelope that is refused the same way however often it is
-// published, so a caller answers it as a refusal rather than a failure to retry. It is ErrTooLarge
-// or ErrInvalidSubject.
+// published, or a KV key refused however often a call names it, so a caller answers it as a
+// refusal rather than a failure to retry. It is ErrTooLarge, ErrInvalidSubject or ErrInvalidKey.
 var ErrRefused = errors.New("refused")
 
 // refusal is a kind of ErrRefused. Its text names only the kind, since every line and answer that
@@ -684,6 +684,12 @@ var ErrTooLarge error = refusal("too large to publish whole")
 // answer that never comes and a core publish is dropped. Its error names the subject, or the KV key
 // that would have made it.
 var ErrInvalidSubject error = refusal("not a subject NATS accepts")
+
+// ErrInvalidKey is the ErrRefused of a KV key outside nats.go's key alphabet (`ses:bad`), which
+// nats.go refuses on every read, write, delete and watch before sending anything, wherever the key
+// came from: no build writes one, but a direct bucket write can store one, and a stored claim can
+// name one as its holder. Its error names the key, and still matches nats.ErrInvalidKey.
+var ErrInvalidKey error = refusal("not a key nats.go accepts")
 
 // maxSubjectBytes bounds a subject the bus publishes on, or a KV call builds from a key. The server
 // closes a connection whose protocol line runs past its max control line (4 KiB by default) and

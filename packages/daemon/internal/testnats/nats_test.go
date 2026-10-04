@@ -49,15 +49,43 @@ func TestAFailedStartLeavesNoContainer(t *testing.T) {
 
 func TestMain(m *testing.M) { os.Exit(Main(m)) }
 
+// A test's first create after URL's reset can meet nats-server still removing the account's
+// streams directory, and is answered with the store failure; CreateStream tries it again. Every
+// other answer is the test's own failure and must not be retried into a slower one or a pass.
+func TestRetryStreamStoreFailureRetriesOnlyTheStoreFailure(t *testing.T) {
+	storeFailure := &jetstream.APIError{Code: 500, ErrorCode: streamCreateErrorCode, Description: streamStoreFailed}
+	t.Run("store failure", func(t *testing.T) {
+		attempts := 0
+		err := retryStreamStoreFailure(func() error {
+			attempts++
+			if attempts < 3 {
+				return storeFailure
+			}
+			return nil
+		})
+		if err != nil || attempts != 3 {
+			t.Fatalf("err = %v after %d attempts, want nil after 3", err, attempts)
+		}
+	})
+	t.Run("any other error", func(t *testing.T) {
+		other := &jetstream.APIError{Code: 500, ErrorCode: streamCreateErrorCode, Description: "insufficient storage resources available"}
+		attempts := 0
+		err := retryStreamStoreFailure(func() error {
+			attempts++
+			return other
+		})
+		if err != other || attempts != 1 {
+			t.Fatalf("err = %v after %d attempts, want %v after 1", err, attempts, other)
+		}
+	})
+}
+
 // The package's tests share one server, and each gets it as a fresh container was: a stream, its
 // consumer and its messages left by one test are gone when the next asks for the server.
 func TestEachTestGetsTheServerEmpty(t *testing.T) {
 	t.Run("leaves a stream, a consumer and a message", func(t *testing.T) {
 		js := JetStream(t)
-		stream, err := js.CreateStream(t.Context(), jetstream.StreamConfig{Name: "LEFT_BEHIND", Subjects: []string{"left.>"}})
-		if err != nil {
-			t.Fatalf("create stream: %v", err)
-		}
+		stream := CreateStream(t, js, jetstream.StreamConfig{Name: "LEFT_BEHIND", Subjects: []string{"left.>"}})
 		if _, err := stream.CreateConsumer(t.Context(), jetstream.ConsumerConfig{Durable: "left-behind"}); err != nil {
 			t.Fatalf("create consumer: %v", err)
 		}
@@ -85,9 +113,7 @@ func TestABurstLeftInFlightDoesNotReachTheNextTest(t *testing.T) {
 	config := jetstream.StreamConfig{Name: "BURST", Subjects: []string{"burst.>"}}
 	t.Run("publishes a burst and ends", func(t *testing.T) {
 		js := JetStream(t)
-		if _, err := js.CreateStream(t.Context(), config); err != nil {
-			t.Fatalf("create stream: %v", err)
-		}
+		CreateStream(t, js, config)
 		payload := []byte(strings.Repeat("x", 64))
 		for i := range burst {
 			if err := js.Conn().Publish(fmt.Sprintf("burst.%d", i%16), payload); err != nil {
@@ -97,10 +123,7 @@ func TestABurstLeftInFlightDoesNotReachTheNextTest(t *testing.T) {
 	})
 	t.Run("recreates the stream and finds none of it", func(t *testing.T) {
 		js := JetStream(t)
-		stream, err := js.CreateStream(t.Context(), config)
-		if err != nil {
-			t.Fatalf("create stream: %v", err)
-		}
+		stream := CreateStream(t, js, config)
 		time.Sleep(time.Second)
 		info, err := stream.Info(t.Context())
 		if err != nil {

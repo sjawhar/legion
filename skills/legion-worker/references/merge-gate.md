@@ -39,19 +39,23 @@ confirmation or a new round, as the fingerprint decides (*The reviewer*, below, 
   nothing restarts. Different: a new round — thermo again, one review.
 - Answer every thread you opened, and every thread a bot opened that is none of Legion's role
   Apps, as `skill://legion-worker/references/review-threads.md` says; the same reference says
-  when every thread is settled enough to approve.
+  when every thread is settled enough to approve, and resolving one never gates your approval.
 
 A reviewer's phase ends with its completion, not with its review. A round that writes a handoff
 takes this order: write, commit and push the handoff; submit the review of the head that push
 made, by its SHA; then complete. An approval waits for the CI verdict to settle green at that head
 before you submit it, since an approval stands only on green checks and GitHub can dismiss one
 once the head moves, and a verdict that settles red there makes the round's decision a request for
-changes naming the failing checks; a request for changes does not wait, since it stands whatever CI says and the
-issue leaves reviewing with it. A review of a head the handoff push then replaces names a head
-the pull request no longer has. A round that writes none (the final approval of the `.legion/`
-deletion head) reviews the head as it is. The daemon moves the issue once both are in —
-the decision GitHub reports and your completion, in either order — so a review posted without a
-completion leaves the issue in reviewing until you finish.
+changes naming the failing checks; a request for changes does not wait, since it stands whatever
+CI says and the issue leaves reviewing with it. The verdict is of the checks the base branch
+requires, the set READY checks: red when one of them failed, and never red for a check the base
+branch does not require. A required check that was cancelled, or that the head's checks settled
+without, leaves no verdict until a later settlement decides it, since a run can be cancelled or
+not yet queued when the head settles. A review of a head the handoff push
+then replaces names a head the pull request no longer has. A round that writes none (the final
+approval of the `.legion/` deletion head) reviews the head as it is. The daemon moves the issue
+once both are in — the decision GitHub reports and your completion, in either order — so a
+review posted without a completion leaves the issue in reviewing until you finish.
 
 ## Retro
 
@@ -73,12 +77,12 @@ completion leaves the issue in reviewing until you finish.
   in READY (an empty output is quoted as `no file changes above the approved head`); then the same
   with `'~docs/solutions'` appended, which must print nothing. *The READY packet*: the merger
   always posts `READY #<n> at <current sha> (approved at <approved sha>) for <KEY> (<pr url>)`
-  (the shape `packages/pi-envoy/roles/merger.md` defines), then the PR body's `Outcome:` line and
-  its `Not proven / risk:` value — every bullet under that label joined with `; ` on the one
-  READY line, or `none` — quoted from the `## For the reviewer` block at that same head (or one
-  line saying the body carries no brief — the packet still publishes), then the `--summary`
-  output and the PR body's gate facts, as a `dispatch_message` on the issue. When the `Legion
-  addressing` line names a merge queue, it also publishes the same packet there with
+  (the shape `packages/daemon/internal/prompts/roles/merger.md` defines), then the PR body's
+  `Outcome:` line and its `Not proven / risk:` value — every bullet under that label joined with
+  `; ` on the one READY line, or `none` — quoted from the `## For the reviewer` block at that same
+  head (or one line saying the body carries no brief — the packet still publishes), then the
+  `--summary` output and the PR body's gate facts, as a `dispatch_message` on the issue. When the
+  `Legion addressing` line names a merge queue, it also publishes the same packet there with
   `envoy_publish`; a 404 means the Dispatch message remains the durable notice and the merger
   stays idle. The READY packet names both the implementer's and tester's `E2E` lines; a missing
   one is reported to the architect instead of published. Legion never merges.
@@ -86,7 +90,7 @@ completion leaves the issue in reviewing until you finish.
 ## After the human merge
 
 - **After a human merges, the implementer verifies in production.**
-  The architect sends the implementer back once the merge lands; the implementer watches the
+  The daemon starts the implementer again once the merge lands; the implementer watches the
   deploy slot that carries the merge to `production-apply` (or the equivalent publish step),
   drives the changed path in production through the user's own access path, and records the
   observation on the PR and the issue before the architect signs off. A staging pass is not

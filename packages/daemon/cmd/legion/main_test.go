@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -31,16 +30,26 @@ func TestMain(m *testing.M) {
 	if os.Getenv(testMainEnv) == "1" {
 		main()
 	}
-	os.Exit(m.Run())
-}
-
-func testRolePromptsDir(t *testing.T) string {
-	t.Helper()
-	_, source, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("locate command test source")
+	// Every test below starts isolated from the operator's own jj configuration — in particular
+	// fsmonitor.backend = "watchman" on this devbox: JJ_CONFIG names a file that does not exist,
+	// so jj falls back to its built-in defaults instead of reading ~/.jjconfig.toml, and no
+	// test-created repository ever registers a root with the operator's long-running watchman.
+	// watchman drops a root once its directory is deleted, so without this, the roots that pile
+	// up are the ones from a run this devbox's load killed before t.TempDir's cleanup ran. A test
+	// that sets its own JJ_CONFIG afterward (push_test.go's commit-trailer overlay, treeVolume's
+	// isolated one) still wins: os.Environ() is read fresh by every exec.Command.
+	configDir, err := os.MkdirTemp("", "legion-test-jj-config")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "TestMain:", err)
+		os.Exit(1)
 	}
-	return filepath.Clean(filepath.Join(filepath.Dir(source), "../../../pi-envoy/roles"))
+	if err := os.Setenv("JJ_CONFIG", filepath.Join(configDir, "no-user-config.toml")); err != nil {
+		fmt.Fprintln(os.Stderr, "TestMain:", err)
+		os.Exit(1)
+	}
+	code := m.Run()
+	os.RemoveAll(configDir)
+	os.Exit(code)
 }
 
 // legionState points the registry at a directory of this test's own, so nothing here reads or
@@ -56,7 +65,6 @@ func legionState(t *testing.T) string {
 // here is about the claim on the team, which `start` settles before it opens a store.
 func legionConfig(t *testing.T, project string, port int) string {
 	t.Helper()
-	t.Setenv("LEGION_ROLE_PROMPTS_DIR", testRolePromptsDir(t))
 	dir := t.TempDir()
 	path := filepath.Join(dir, "legion.yaml")
 	body := fmt.Sprintf("project: %s\nport: %d\npostgres_dsn: postgres://legion:legion@127.0.0.1:1/legion\nstate_dir: %s\n",
@@ -453,7 +461,6 @@ func TestStateInAPaneReadsTheDaemonItNamesAndPrintsTheIssueRecord(t *testing.T) 
 // LEGION_OMP_PATH names an executable, so the OMP invocation resolves without mise.
 func workflowConfig(t *testing.T, port int, extra string) (path, marker string) {
 	t.Helper()
-	t.Setenv("LEGION_ROLE_PROMPTS_DIR", testRolePromptsDir(t))
 	omp, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -829,7 +836,6 @@ func TestStartCheckConfigRefusesWhatTheSandboxRuntimeRefuses(t *testing.T) {
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("LEGION_ROLE_PROMPTS_DIR", testRolePromptsDir(t))
 			dir := t.TempDir()
 			marker := filepath.Join(dir, "private-key-command-ran")
 			command := "touch " + marker + "; exit 1"

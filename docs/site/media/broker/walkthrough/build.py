@@ -16,8 +16,9 @@ already); each clip is cut hard to its window, with no speed change and no held 
 is silence the clip's length with its narration parts laid at their marks. Each part's caption is
 its text, shown from where the part starts until the next part in its clip starts or the clip
 ends. The build fails when a clip or part names a mark its section did not record, a window falls
-outside its file, a part starts before its clip, runs past its clip's end or overlaps the next
-part, a part's text in narration.json is missing or blank, or a section's file duration is
+outside its file or ends within FAREWELL_GUARD of a cast's farewell, a part starts before its
+clip, runs past its clip's end or overlaps the next part, a part's text in narration.json is
+missing or blank, or a section's file duration is
 off its wall-clock length (a browser recording outside its actions' and its page's lengths by
 more than 5%, a cast more than 1.5 s shorter than its section or any longer). The clips are
 concatenated into build/walkthrough.mp4, the video copied and the narration normalized to -16 LUFS
@@ -25,6 +26,10 @@ in loudnorm's two passes. The build then fails if that video holds DEAD_AIR seco
 silence over a frozen frame, or its narration is more than LOUDNESS_SLACK LU off -16 LUFS or peaks
 over -1.5 dBTP; only a video that passes is copied to OUT, the video the site publishes, with its
 captions and its poster (the video's first frame), so a failed build leaves all three as they were.
+
+A cast's last event is the detached client's farewell, which clears the screen to `[detached
+(from session agent)]`; agg's frames can show it a frame or two before its time, so a cast's
+`end` mark is FAREWELL_GUARD before it, and none of the cast's clips may end later.
 
   python3 build.py            # rebuild (renders casts once, into build/) and publish to OUT
   python3 build.py --check    # verify the EDL against the footage and narration, write nothing
@@ -58,6 +63,9 @@ BACKGROUND = "0x272822"  # agg's monokai background, so a terminal's padding is 
 AGG = ["agg", "--font-size", "30", "--theme", "monokai", "--idle-time-limit", "3600", "--last-frame-duration", "0"]
 CAPTURE_TOLERANCE = 0.05  # how far a browser recording may fall outside its wall-clock bounds
 CAST_SLACK = 1.5  # how much shorter a cast may be than its section: the recorder's start and exit
+# How far before a cast's farewell its `end` mark falls: a clip that ends at the farewell can show
+# its cleared screen on its last frame or two (0.067 s).
+FAREWELL_GUARD = 0.2
 DEAD_AIR = 2.0  # seconds of silence over a frozen frame the video may not hold
 # Silence is below SILENCE_DB; a sound shorter than BLIP (a breath, a click) does not end a silence.
 SILENCE_DB, BLIP = -45, 0.3
@@ -106,8 +114,11 @@ def sections() -> dict[str, dict]:
 
 def seconds(source: str, at: At) -> float:
     """Where `at` falls in `source`, in its own seconds. Besides the section's own marks, `start`
-    is the file's first instant and `end` its last."""
-    marks = {"start": 0.0, "end": source_duration(RAW / source), **sections()[source]["marks"]}
+    is the file's first instant and `end` its last, or for a cast FAREWELL_GUARD before its last
+    event, the farewell."""
+    length = source_duration(RAW / source)
+    end = length - FAREWELL_GUARD if source.endswith(".cast") else length
+    marks = {"start": 0.0, "end": end, **sections()[source]["marks"]}
     if at.mark not in marks:
         raise KeyError(f"{source} recorded no mark {at.mark!r} (it has {', '.join(marks)})")
     return marks[at.mark] + at.offset
@@ -186,6 +197,9 @@ def check(clips: list[Clip]) -> tuple[list[Resolved], list[str]]:
         length = source_duration(src)
         if not 0 <= r.start < r.end <= length + 0.01:
             problems.append(f"{clip.id}: window {r.start:.2f}-{r.end:.2f}s is outside {clip.source} (0-{length:.2f}s)")
+        elif src.suffix == ".cast" and r.end > length - FAREWELL_GUARD:
+            problems.append(f"{clip.id}: ends at {r.end:.2f}s, within {FAREWELL_GUARD}s of {clip.source}'s detach farewell"
+                            f" at {length:.2f}s, which its last frames can show; end it at At('end') or earlier")
         cursor = 0.0
         for part, offset in r.narration:
             mp3 = NARRATION / f"{part}.mp3"

@@ -289,11 +289,11 @@ func (r *SessionRegistry) Get(sessionID string) (SessionEntry, error) {
 // the bucket and not yet here. Get is the read for a caller that refuses or retries when a session
 // is missing; a caller about to take something away from a session because it looks gone asks here
 // first. A key no read may name is nats.ErrKeyNotFound, since no session can register under it:
-// one bus.KeyValue refuses (bus.ErrRefused), or one outside nats.go's key alphabet
-// (nats.ErrInvalidKey, such as `ses:bad`, which an earlier build or a direct bucket write could
-// leave as a role holder). Any other error is a read that did not answer, ctx's end among them:
-// nats.go's KV read takes no context and waits out the JetStream MaxWait (10 s), so Refresh stops
-// waiting when ctx ends and lets that read finish on its own.
+// one bus.KeyValue refuses (bus.ErrRefused), `ses:bad` among them, which is outside nats.go's key
+// alphabet and which an earlier build or a direct bucket write could leave as a role holder. Any
+// other error is a read that did not answer, ctx's end among them: nats.go's KV read takes no
+// context and waits out the JetStream MaxWait (10 s), so Refresh stops waiting when ctx ends and
+// lets that read finish on its own.
 func (r *SessionRegistry) Refresh(ctx context.Context, sessionID string) (SessionEntry, error) {
 	type read struct {
 		entry nats.KeyValueEntry
@@ -311,7 +311,7 @@ func (r *SessionRegistry) Refresh(ctx context.Context, sessionID string) (Sessio
 	case <-ctx.Done():
 		return SessionEntry{}, fmt.Errorf("read session %s from the bucket: %w", sessionID, ctx.Err())
 	}
-	if errors.Is(got.err, bus.ErrRefused) || errors.Is(got.err, nats.ErrInvalidKey) {
+	if errors.Is(got.err, bus.ErrRefused) {
 		return SessionEntry{}, fmt.Errorf("%w: %w", nats.ErrKeyNotFound, got.err)
 	}
 	if got.err != nil {

@@ -201,7 +201,8 @@ export async function specVersions(issue: Tracked): Promise<number> {
 }
 
 /** Waits until the spec has more versions than `before`: an answer is written into its decision
- *  block as a new version, and an approval asked for before that version lands goes stale with it. */
+ *  block as a new version, and an approval asked for before that version lands would move to it
+ *  and wait on the architect to hand it back. */
 export async function specVersionAfter(issue: Tracked, before: number): Promise<void> {
   const api = await dispatchApi();
   await expect

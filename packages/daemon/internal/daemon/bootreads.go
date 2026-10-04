@@ -10,27 +10,26 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/natsauth"
 	"github.com/sjawhar/legion/daemon/internal/omplaunch"
-	"github.com/sjawhar/legion/daemon/internal/prompts"
 )
 
 // bootReads is what boot reads from the configuration, the daemon's environment and the files they
 // name before it writes anything (readBoot).
 type bootReads struct {
-	project, operatorToken, dispatchToken, rolesDir string
-	secrets                                         map[string]string
-	paneNatsUser                                    string         // the pane seed's user's public key, "" with no pane seed
-	nats                                            natsConnection // the user the daemon's own NATS connection authenticates as
-	instructions                                    []byte         // nil when the configuration names none
-	tmux                                            tmuxReads      // runtime: tmux
-	sandbox                                         sandboxReads   // runtime: kubernetes
+	project, operatorToken, dispatchToken string
+	secrets                               map[string]string
+	paneNatsUser                          string         // the pane seed's user's public key, "" with no pane seed
+	nats                                  natsConnection // the user the daemon's own NATS connection authenticates as
+	instructions                          []byte         // nil when the configuration names none
+	tmux                                  tmuxReads      // runtime: tmux
+	sandbox                               sandboxReads   // runtime: kubernetes
 }
 
 // readBoot is every refusal boot makes from the configuration, the daemon's environment (lookup,
 // and getenv for the OMP invocation) and the files they name, writing nothing: the project token,
 // the operator bearer's file, operator configuration colliding with Legion's own
 // (checkOperatorConfig), the launch secrets (readLaunchSecrets), the daemon's own NATS nkey seed
-// (natsauth.DaemonSeed), the instructions file, the Dispatch bearer's file, the role prompts, and
-// the runtime's own reads (readTmux, readSandbox).
+// (natsauth.DaemonSeed), the instructions file, the Dispatch bearer's file, and the runtime's own
+// reads (readTmux, readSandbox).
 // hostOMP is whether boot runs the host's Oh My Pi, false only for a test that replaced the
 // runtime. prepare runs it first; CheckStart is it for `legion start --check-config`, so the check
 // refuses whatever boot refuses before its first write. What boot does after it is not a check's to
@@ -76,9 +75,6 @@ func readBoot(cfg config.Config, lookup func(string) (string, bool), getenv func
 		if r.dispatchToken, err = config.ReadSecretPointer("dispatch_token_file", cfg.DispatchTokenFile); err != nil {
 			return bootReads{}, err
 		}
-	}
-	if r.rolesDir, err = prompts.ResolveRolePromptsDir(os.LookupEnv); err != nil {
-		return bootReads{}, fmt.Errorf("resolve role prompts: %w", err)
 	}
 	switch cfg.Runtime.Name {
 	case "tmux":
@@ -169,9 +165,6 @@ func readTmux(cfg config.Config, lookup func(string) (string, bool), getenv func
 func CheckStart(cfg config.Config, lookup func(string) (string, bool)) (paneNatsUser, daemonNatsUser string, err error) {
 	r, err := readBoot(cfg, lookup, os.Getenv, true, slog.New(slog.DiscardHandler))
 	if err != nil {
-		return "", "", err
-	}
-	if _, err := prompts.RoleReferences(r.rolesDir); err != nil {
 		return "", "", err
 	}
 	if r.nats.source == natsSeedDaemon {

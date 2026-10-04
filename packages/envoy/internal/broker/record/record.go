@@ -55,6 +55,17 @@ func CanonicalLogin(login string) string {
 	return strings.ToLower(strings.TrimSpace(login))
 }
 
+// AnyoneApprover is the approver of a record anyone signed in to Dispatch may decide: a request
+// for a shared human-tier secret. It is never a person's login, and no login is it.
+const AnyoneApprover = "anyone"
+
+// The two kinds of credential-request record: a session's request for agent secrets, and a
+// machine login, which mints a launcher credential.
+const (
+	KindAgentSecret        = "agent_secret"
+	KindLauncherCredential = "launcher_credential"
+)
+
 // AuthorizationDetail is one entry of a request object's RFC 9396 authorization_details.
 type AuthorizationDetail struct {
 	Type       string   `json:"type"` // "agent_secret" | "launcher_credential"
@@ -163,7 +174,7 @@ func validateDetails(details []AuthorizationDetail) error {
 	}
 	allSecret := true
 	for _, d := range details {
-		if d.Type != "agent_secret" {
+		if d.Type != KindAgentSecret {
 			allSecret = false
 			break
 		}
@@ -176,7 +187,7 @@ func validateDetails(details []AuthorizationDetail) error {
 		}
 		return nil
 	}
-	if len(details) != 1 || details[0].Type != "launcher_credential" {
+	if len(details) != 1 || details[0].Type != KindLauncherCredential {
 		return errors.New("authorization_details mixes types")
 	}
 	d := details[0]
@@ -212,7 +223,7 @@ type Enrollment struct{ Kind, RuntimeID, Operator, Slot string }
 // signed request object. It is never updated after creation.
 type Body struct {
 	Request         string // compact JWS
-	Approver        string // canonical login
+	Approver        string // canonical login, or AnyoneApprover
 	Enrollment      Enrollment
 	LifetimeSeconds int
 	RulesVersion    string
@@ -358,21 +369,30 @@ func ParseBody(canonical string) (Body, error) {
 	return b, nil
 }
 
-// ApproverLogin canonicalizes login and returns it when it is the approver this record names, and
-// ErrNotApprover otherwise. A record's approver is resolved when it is created — an approval
-// rule's login:<name>, the requesting enrollment's operator for approver: operator, or a machine
-// login's login_hint — so this one comparison is every decision's and every chain re-check's
-// approver rule, and the login it returns is the one a decision records.
-func (b Body) ApproverLogin(login string) (string, error) {
+// ApproverLogin canonicalizes login and returns it when it may decide this record, a record of
+// kind, and ErrNotApprover otherwise (MayDecide). A record's approver is resolved when it is
+// created — a secret's owner, AnyoneApprover for a shared human-tier secret, or a machine login's
+// login_hint — so this one comparison is every decision's and every chain re-check's approver
+// rule, and the login it returns is the one a decision records.
+func (b Body) ApproverLogin(kind, login string) (string, error) {
 	login = CanonicalLogin(login)
-	if login == "" || login != CanonicalLogin(b.Approver) {
+	if !MayDecide(kind, b.Approver, login) {
 		return "", ErrNotApprover
 	}
 	return login, nil
 }
 
-// isApprover reports whether login is the approver this record names, by ApproverLogin's rule.
-func (b Body) isApprover(login string) bool {
-	_, err := b.ApproverLogin(login)
-	return err == nil
+// MayDecide reports whether login may decide a record of kind whose approver is approver: the
+// person the approver names, or, for an agent_secret record whose approver is AnyoneApprover, any
+// login at all. No login is AnyoneApprover itself. A machine login's approver is the person whose
+// machine it becomes, so AnyoneApprover there admits no one, whatever binary opened the record.
+func MayDecide(kind, approver, login string) bool {
+	login, approver = CanonicalLogin(login), CanonicalLogin(approver)
+	if login == "" || login == AnyoneApprover {
+		return false
+	}
+	if approver == AnyoneApprover && kind == KindAgentSecret {
+		return true
+	}
+	return login == approver
 }

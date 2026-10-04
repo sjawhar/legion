@@ -379,9 +379,10 @@ PROCEEDING. An open ask or `opened_since` never suppresses this check.
 Only a reply whose first word is WAITING, and which does not also name PROCEEDING (a model echoing
 the choice rather than making it), produces the one hidden `dispatch-ask-reminder` steer with
 `triggerTurn`: it says the agent is waiting on a human for something no open ask covers, and tells
-it to open an ask with `dispatch_ask`, naming exactly what it needs and from whom. It never offers
-`dispatch_request_approval`: an approval request is for a settled spec, not a way to wait on a
-human. The parse is case-sensitive and first-word-only because a false
+it to open one now: a decision block in the document the wait concerns (`dispatch_doc_edit` with an
+ask block), or `dispatch_ask` for a to-do only a human can do, naming exactly what it needs and from
+whom. It never offers `dispatch_request_approval`: an approval request is for a settled spec, not a
+way to wait on a human. The parse is case-sensitive and first-word-only because a false
 WAITING is the expensive error — its steer tells an agent to page a human with a question it does
 not need — while a false PROCEEDING is only silence. PROCEEDING, an unparsable reply, a side-turn
 failure, the timeout, and a host with no side turn at all are silent; the last also arms no period.
@@ -400,11 +401,27 @@ and a post-race staleness re-check abort the in-flight call; an ask opened mid-c
 its verdict. A failure is logged once per session (`logger.warn`), never notified.
 
 The check is owed and spent like the host's todo reminder rather than once per period: the arming
-turn owes one, running it spends it whatever came back, the agent opening the ask itself
-(`dispatch_ask`, `dispatch_request_approval`) spends it too, and the agent's next real work — a
-successful `tool_result` whose tool is not a `dispatch_*` one — owes another. A settled turn that
-only replies calls no tool, so the nudge's continuation cannot re-arm itself; work is bounded by
-`ASK_CHECKS_PER_PERIOD` (5).
+turn owes one, running it spends it whatever came back, the agent opening the ask itself spends it
+too (`dispatch_ask`, `dispatch_request_approval`, a `dispatch_issue` or `dispatch_artifact` whose
+result counts a decision block in the stored document (`advice.decision_blocks`), or a
+`dispatch_doc_edit` whose result counts a decision block the edit added
+(`advice.decision_blocks_added`): `opensAsk` in `src/opens-ask.ts`), and the agent's next real
+work — a successful `tool_result` whose tool is not a `dispatch_*` one — owes another. Both counts
+are the Dispatch server's reading of the document, so the extension parses no markdown: an opener
+quoted in code counts nothing and one in a blockquote or a list item counts, as the server stores
+them, and an edit result from a server that reports no count spends nothing. The server counts
+answered blocks in a stored document too, so re-uploading a document whose blocks are all answered
+spends the check with nothing new in the Inbox: that stop goes without a reminder. An edit that
+writes an answered or person-retracted block's id back reports it added, though settlement leaves
+that row closed, so it has the same gap. A tool-device
+call (a `write` to `xd://<tool>`, named by its result's `details.xdev.tool`: `deviceTool`) never
+opens an ask by its `write`, and counts as work by the tool it names: a write to a `dispatch_*`
+device is no work, and a write to any other device is work, as before. A device backed by a
+registered tool is reported twice, the tool Oh My Pi ran under its own name, input and details and
+then the `write`, so the tool's own report is what opens an ask; Oh My Pi's own devices (`resolve`,
+`reject`, `propose`, `report_issue`) report only the `write`. A help write (`?`, `help` or empty
+content) runs nothing and has only the `write`. A settled turn that only replies calls no tool, so
+the nudge's continuation cannot re-arm itself; work is bounded by `ASK_CHECKS_PER_PERIOD` (5).
 
 Each completed check carries `baseline_as_of` to its snapshot's `as_of`, keeping the next open-asks
 read current. One stop-time check runs at a time: `agent_end` handlers are not awaited by the host,
@@ -441,7 +458,6 @@ state never nudges.
 | Shared HTTP/tool behavior | `../envoy-client/src/` | Do not duplicate it here |
 | Event subjects | `../contracts/src/subject.ts` | Canonical subject construction |
 | Dispatch tools | `extensions/envoy.ts` (the `registerTool` block), `@legion/contracts` (`dispatchToolSpecs`, `dispatchToolSchema`, `zodSchemaApi`), `@legion/envoy-client/dispatch-execute` (`executeDispatchTool`) | Registers the twenty-one native tools only when `resolveDispatchConfig` resolves URL and token. Build each tool schema with `dispatchToolSchema(spec, zodSchemaApi(pi.zod))` — deliberately NOT strict: on installed OMP hosts a strict host schema makes the coercion pass delete an unknown key beside valid required fields and hand the executor silently narrowed args, while non-strict preserves unknown root fields so `executeDispatchTool`'s own always-strict parse names the invented field (the xd:// half is can1357/oh-my-pi#12871) — register it (and every Envoy tool) with `lenientArgValidation: true` so the host hands raw arguments through and `executeDispatchTool` / `parseEnvoyToolArguments` is the one refusal (a `ToolInputError` naming every problem), pass the live session id/title and host AbortSignal to `executeDispatchTool`, and never subscribe from a tool result: the `tool_result` hook only announces `details.follows` once per ask. |
-| Role session prompts | `roles/` | Phase workers compose `core/<role>.md`, `mechanics/headless.md`, and the per-role residue; merger composes headless plus its residue. Root architect, controller, and sub-architect prompts remain single-file. The daemon concatenates the parts into the first portion of its one `--append-system-prompt` value (OMP's flag is last-wins), followed by the addressing fragment (roots and phase workers) and, when the deployment's `legion.yaml` sets `instructions`, `<state_dir>/deployment-instructions.md` as the last part |
 | Real end-to-end delivery smoke | `smoke-delivery.sh`, `smoke-btw.sh`, `scripts/README.md` | Manual installed-plugin smokes against live Envoy; `smoke-btw.sh` creates a targeted Dispatch BTW or Steer attempt and verifies its correlated reply |
 
 ## Critical conventions

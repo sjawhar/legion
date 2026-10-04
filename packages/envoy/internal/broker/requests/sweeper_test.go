@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"errors"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/broker/enroll"
 	"github.com/sjawhar/envoy/internal/broker/machine"
+	"github.com/sjawhar/envoy/internal/broker/store/storetest"
 )
 
 type wakeCall struct {
@@ -36,7 +38,7 @@ func TestSweeperTickExpiresPendingRequestsAndMachineLogins(t *testing.T) {
 
 	// A second enrollment's own overdue pending request, to pin that Wake fires once PER request
 	// leaving pending, not once per tick.
-	enr2, key2 := newEnrollment(t, m.Store, "box", "box-b-"+t.Name(), new("sjawhar"), nil)
+	enr2, key2 := newEnrollment(t, m.Store, "box", "box-b-"+t.Name(), new(fixtureOperator), nil)
 	overdue2, err := m.Create(ctx, enr2, signRequest(t, m, key2, "need it too", "DEEL_API_KEY"), "")
 	if err != nil || overdue2.State != "pending" {
 		t.Fatalf("Create(overdue2) = %+v, %v, want state pending", overdue2, err)
@@ -44,7 +46,7 @@ func TestSweeperTickExpiresPendingRequestsAndMachineLogins(t *testing.T) {
 
 	// A request still inside its deadline: must be left alone and never woken. A third,
 	// distinct enrollment avoids coalescing onto overdue's own pending row for the same secret.
-	enr3, key3 := newEnrollment(t, m.Store, "box", "box-c-"+t.Name(), new("sjawhar"), nil)
+	enr3, key3 := newEnrollment(t, m.Store, "box", "box-c-"+t.Name(), new(fixtureOperator), nil)
 	m.PendingTTL = time.Hour
 	fresh, err := m.Create(ctx, enr3, signRequest(t, m, key3, "not yet", "DEEL_API_KEY"), "")
 	if err != nil || fresh.State != "pending" {
@@ -54,8 +56,8 @@ func TestSweeperTickExpiresPendingRequestsAndMachineLogins(t *testing.T) {
 	// An overdue pending machine login, inserted directly (machine.Service's own Login flow is
 	// exercised by the machine package's own tests; this only needs a row ExpirePending sweeps).
 	loginRecordID := "login-" + t.Name()
-	if _, err := m.Store.Pool.Exec(ctx, `insert into credential_requests (id, body, kind, approver, expires_at) values ($1,'body','launcher_credential','sjawhar',$2)`,
-		loginRecordID, time.Now().Add(-time.Hour)); err != nil {
+	if _, err := m.Store.Pool.Exec(ctx, `insert into credential_requests (id, body, kind, approver, expires_at) values ($1,'body','launcher_credential',$2,$3)`,
+		loginRecordID, fixtureOperator, time.Now().Add(-time.Hour)); err != nil {
 		t.Fatalf("insert overdue machine login: %v", err)
 	}
 
@@ -128,7 +130,7 @@ func TestSweeperTickExpiresPendingRequestsAndMachineLogins(t *testing.T) {
 func TestSweeperEndsLapsedEnrollments(t *testing.T) {
 	m, gone, goneKey, approver := newFixture(t)
 	ctx := context.Background()
-	live, liveKey := newEnrollment(t, m.Store, "box", "box-live-"+t.Name(), new("sjawhar"), nil)
+	live, liveKey := newEnrollment(t, m.Store, "box", "box-live-"+t.Name(), new(fixtureOperator), nil)
 
 	type session struct{ grantID, pendingID, recordID string }
 	open := func(enr string, key *ecdsa.PrivateKey) session {
@@ -281,30 +283,8 @@ func TestCreateWaitsOutTheSweepItRaces(t *testing.T) {
 		return conn
 	}
 	watch := connect()
-	// waitBlockedBy waits until a backend waits on a lock holder holds and returns its pid; what
-	// finishing (done) before it ever waits fails the test.
-	waitBlockedBy := func(holder int32, done <-chan struct{}, what string) int32 {
-		t.Helper()
-		for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); {
-			var waiter int32
-			err := watch.QueryRow(ctx, `select pid from pg_stat_activity where $1 = any(pg_blocking_pids(pid))`, holder).Scan(&waiter)
-			if err == nil {
-				return waiter
-			}
-			if !errors.Is(err, pgx.ErrNoRows) {
-				t.Fatalf("watch the locks: %v", err)
-			}
-			select {
-			case <-done:
-				t.Fatalf("%s finished without waiting on the lock", what)
-			case <-time.After(5 * time.Millisecond):
-			}
-		}
-		t.Fatalf("%s never waited on the lock", what)
-		return 0
-	}
 
-	// Create's write transaction begins and waits on the advisory lock createPending takes first.
+	// Create's write transaction begins and waits on the advisory lock it takes first.
 	advisory := connect()
 	holdAdvisory, err := advisory.Begin(ctx)
 	if err != nil {
@@ -326,7 +306,7 @@ func TestCreateWaitsOutTheSweepItRaces(t *testing.T) {
 		defer close(createDone)
 		created, createErr = m.Create(ctx, enr, signed, "")
 	}()
-	createPID := waitBlockedBy(int32(advisory.PgConn().PID()), createDone, "Create")
+	createPID := storetest.AwaitLockWaiters(t, watch, holdAdvisory, 1)[0]
 
 	// The lease lapses; the sweep locks the enrollment, marks it ended, and waits on the grant row
 	// held here.
@@ -350,14 +330,14 @@ func TestCreateWaitsOutTheSweepItRaces(t *testing.T) {
 		defer close(sweepDone)
 		ended, sweepErr = (&enroll.Service{Store: m.Store}).EndLapsed(ctx)
 	}()
-	sweepPID := waitBlockedBy(int32(grantHolder.PgConn().PID()), sweepDone, "the sweep")
+	sweepPID := storetest.AwaitLockWaiters(t, watch, holdGrant, 1)[0]
 
 	// Create's write goes on and reaches the enrollment the sweep holds; then the sweep commits.
 	if err := holdAdvisory.Rollback(ctx); err != nil {
 		t.Fatalf("release the advisory lock: %v", err)
 	}
-	if waiter := waitBlockedBy(sweepPID, createDone, "Create's write"); waiter != createPID {
-		t.Fatalf("backend %d waits on the sweep; want Create's, %d", waiter, createPID)
+	if waiting := storetest.AwaitLockWaiters(t, watch, holdGrant, 2); len(waiting) != 2 || !slices.Contains(waiting, sweepPID) || !slices.Contains(waiting, createPID) {
+		t.Fatalf("backends %v wait behind the grant row; want the sweep's %d and, behind it, Create's %d", waiting, sweepPID, createPID)
 	}
 	if err := holdGrant.Rollback(ctx); err != nil {
 		t.Fatalf("release the grant row: %v", err)

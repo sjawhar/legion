@@ -72,10 +72,10 @@ func runControllerStart(ctx context.Context, args []string, stdout, stderr io.Wr
 // cannot launch itself (LEGION-206 Requirement 11). In order, and nothing is kept, and nothing
 // but the probe is launched, until the daemon has answered: read the strict operator-side file;
 // refuse an operator token file others can read, a blank or unreadable Envoy or Dispatch token
-// file, a NATS nkey seed file that is blank, unreadable, or holds no nkey user seed, a role-prompt
-// bundle missing a file, an instructions file that is missing or blank, and an
-// Oh My Pi invocation that does not resolve; then probe that Oh My Pi as the controller will run it
-// — the launch prefix, the invocation, the controller's whole environment, in
+// file, a NATS nkey seed file that is blank, unreadable, or holds no nkey user seed, an
+// instructions file that is missing or blank, and an Oh My Pi invocation that does not resolve;
+// then probe that Oh My Pi as the controller will run it — the launch prefix, the invocation, the
+// controller's whole environment, in
 // `<state_dir>/controller`, created for it, at the operator's terminal — and refuse a
 // pi-legion-envoy it does not load, or loads speaking another daemon API contract than this
 // binary's, which would refuse the controller at session start (daemon.ProbeController). The probe
@@ -125,10 +125,6 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 			return 0, err
 		}
 	}
-	rolesDir, err := prompts.ResolveRolePromptsDir(os.LookupEnv)
-	if err != nil {
-		return 0, err
-	}
 	if cfg.InstructionsPath != "" {
 		if _, err := config.ReadDeploymentInstructions(cfg.InstructionsPath); err != nil {
 			return 0, err
@@ -176,7 +172,7 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 	if _, err := runtime.WriteSecretFile(stateDir, token, controllerSecretVariable, secret); err != nil {
 		return 0, fmt.Errorf("write the controller secret: %w", err)
 	}
-	composer, err := prompts.New(rolesDir, stateDir)
+	composer, err := prompts.New(stateDir)
 	if err != nil {
 		return 0, fmt.Errorf("snapshot controller role prompts: %w", err)
 	}

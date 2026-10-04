@@ -369,13 +369,7 @@ func decodeChecks(subject string, repository ghrepo.Repository, raw map[string]j
 	if !ok {
 		return nil, nil
 	}
-	verdict := ""
-	if len(failed) > 0 {
-		verdict = "red"
-	} else if len(cancelled) == 0 {
-		verdict = "green"
-	}
-	return PullRequestChecks{Repo: repository.String(), Number: number, HeadSHA: headSHA, CheckRuns: runs, Generation: generation, Snapshot: snapshot, Verdict: verdict, Failing: failed}, nil
+	return PullRequestChecks{Repo: repository.String(), Number: number, HeadSHA: headSHA, CheckRuns: runs, Generation: generation, Snapshot: snapshot, Failing: failed, Cancelled: cancelled}, nil
 }
 
 func githubIdentity(raw map[string]json.RawMessage) (int, string, bool) {

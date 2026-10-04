@@ -160,7 +160,7 @@ func newGitHubClient(t *testing.T, handler http.Handler) *githubapp.Client {
 	pemText := string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)}))
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
-	client, err := githubapp.New(&auth.AppConfig{ClientID: "Iv1.test", ClientSecret: "secret", PEM: pemText}, server.URL)
+	client, err := githubapp.New(&auth.AppConfig{ClientID: "Iv1.test", PEM: pemText}, server.URL)
 	if err != nil {
 		t.Fatalf("new github client: %v", err)
 	}
@@ -654,6 +654,82 @@ func TestSyncRejectsBinaryFilesOnTheRow(t *testing.T) {
 				t.Fatalf("events = %#v", got)
 			}
 		})
+	}
+}
+
+// YAML spells U+0000 in plain ASCII ("\0", "\x00", "\u0000"), so a file the byte check passes can
+// still decode to front matter PostgreSQL cannot store. Each decoded string is checked as well, and
+// the problem is named on the row as a binary file's is, not an internal error escaping the
+// projection. An unknown key reaches KnownFields before that check, so recordFailure writes its
+// error through text.StorableReplacement before it reaches last_error or the sync_failed event.
+func TestSyncRejectsAFrontMatterNulOnTheRow(t *testing.T) {
+	ctx := context.Background()
+	for _, test := range []struct {
+		field, matter, want string
+		replacement         bool
+	}{
+		{"title", `title: "Ser\0ver"`, "server.md: front matter title must be valid UTF-8 text without NUL characters", false},
+		{"parent", `parent: "a\x00pi"`, "server.md: front matter parent must be valid UTF-8 text without NUL characters", false},
+		{"depends_on", `depends_on: ["st\u0000ore"]`, "server.md: front matter depends_on must be valid UTF-8 text without NUL characters", false},
+		{"paths", `paths: ["src/\0x"]`, "server.md: front matter paths must be valid UTF-8 text without NUL characters", false},
+		{"key", `"\0": value`, "server.md: front matter", true},
+	} {
+		t.Run(test.field, func(t *testing.T) {
+			files := validFiles()
+			files["server.md"] = "---\n" + test.matter + "\n---\nThe server.\n"
+			importer, database := newImporterFixture(t, &fakeSource{t: t, files: files})
+			source, err := importer.Sync(ctx, "CORE")
+			if err == nil {
+				t.Fatal("front matter holding a NUL was accepted")
+			}
+			if source.Project == "" || source.LastError == nil || !strings.Contains(*source.LastError, test.want) {
+				t.Fatalf("row after sync: %+v err=%v, want last_error naming %q", source, err, test.want)
+			}
+			if strings.IndexByte(*source.LastError, 0) >= 0 {
+				t.Fatalf("last_error %q holds a raw U+0000", *source.LastError)
+			}
+			if test.replacement && !strings.Contains(*source.LastError, "\uFFFD") {
+				t.Fatalf("last_error %q does not write the front-matter key's U+0000 as U+FFFD", *source.LastError)
+			}
+			if got := componentRows(t, database); len(got) != 0 {
+				t.Fatalf("a rejected set was projected: %#v", got)
+			}
+			if got := projectEvents(t, database); len(got) != 1 || !strings.HasPrefix(got[0], "architecture.sync_failed ") || strings.IndexByte(got[0], 0) >= 0 || test.replacement && !strings.Contains(got[0], "\uFFFD") {
+				t.Fatalf("events = %#v", got)
+			}
+		})
+	}
+}
+
+// A projection PostgreSQL refuses for any reason is a failure on the row as a model problem is: the
+// source says why the import stopped, one sync_failed event says so, and the previous projection
+// stays, rather than an error that records nothing.
+func TestAProjectionFailureIsRecordedOnTheRow(t *testing.T) {
+	ctx := context.Background()
+	fake := &fakeSource{t: t, files: validFiles()}
+	importer, database := newImporterFixture(t, fake)
+	if _, err := importer.Sync(ctx, "CORE"); err != nil {
+		t.Fatalf("first sync: %v", err)
+	}
+	before := componentRows(t, database)
+	if _, err := database.Pool.Exec(ctx, `alter table components add constraint test_refuses_boom check (title <> 'Boom')`); err != nil {
+		t.Fatalf("add the refusing constraint: %v", err)
+	}
+	fake.commit = "commit-two"
+	fake.files = validFiles()
+	fake.files["server.md"] = "---\ntitle: Boom\n---\nThe server.\n"
+	source, err := importer.Sync(ctx, "CORE")
+	if err == nil {
+		t.Fatal("a projection the database refused reported success")
+	}
+	if source.Project == "" || source.LastError == nil || !strings.Contains(*source.LastError, "project component server") {
+		t.Fatalf("row after sync: %+v err=%v, want last_error naming the refused component", source, err)
+	}
+	if got := componentRows(t, database); !reflect.DeepEqual(got, before) {
+		t.Fatalf("components after the refused projection = %#v, want the previous %#v", got, before)
+	}
+	if got := projectEvents(t, database); len(got) != 2 || !strings.HasPrefix(got[1], "architecture.sync_failed ") {
+		t.Fatalf("events = %#v", got)
 	}
 }
 

@@ -63,7 +63,7 @@ test("signing out shows the sign-in page without a reload and tears down the eve
     fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
 
     await waitFor(() => expect(logout).toHaveBeenCalled());
-    await screen.findByRole("link", { name: "Sign in with GitHub" });
+    await screen.findByRole("link", { name: "Sign in with Google" });
 
     expect(fetchSignals.some((signal) => signal.aborted)).toBe(true);
   } finally {

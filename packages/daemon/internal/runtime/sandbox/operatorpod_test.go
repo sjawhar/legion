@@ -76,7 +76,6 @@ func TestCheckPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 		{name: "the image's HOME", pod: env("HOME", "/tmp/elsewhere"), want: envSets("HOME", byImage)},
 		{name: "the image's profile", pod: env("OMP_PROFILE", "other"), want: envSets("OMP_PROFILE", byImage)},
 		{name: "the Oh My Pi the probe proves", pod: env("LEGION_OMP_PATH", "/usr/bin/true"), want: envSets("LEGION_OMP_PATH", byImage)},
-		{name: "the role prompts the probe reads", pod: env("LEGION_ROLE_PROMPTS_DIR", "/tmp/roles"), want: envSets("LEGION_ROLE_PROMPTS_DIR", byImage)},
 		{name: "Oh My Pi's config root", pod: env("PI_CONFIG_DIR", ".elsewhere"), want: envSets("PI_CONFIG_DIR", bySessions)},
 		{name: "Oh My Pi's session store", pod: env("OMP_SESSION_STORAGE", "sql"), want: envSets("OMP_SESSION_STORAGE", bySessions)},
 		{name: "a variable of the App's git identity", pod: env("JJ_USER", "operator"), want: envSets("JJ_USER", byIdentity)},

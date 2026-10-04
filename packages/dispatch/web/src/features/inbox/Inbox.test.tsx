@@ -19,7 +19,7 @@ let getReferences: Mock<typeof api.getReferences>;
 let getCredentialPending: Mock<typeof api.getCredentialPending>;
 beforeEach(() => {
   window.localStorage.clear();
-  whoAmI = spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "Alice" });
+  whoAmI = spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "alice" });
   getCredentialPending = spyOn(api, "getCredentialPending").mockResolvedValue({ pending: [] });
   getIssueSubscribers = spyOn(api, "getIssueSubscribers").mockResolvedValue([]);
   getArtifactSubscribers = spyOn(api, "getArtifactSubscribers").mockResolvedValue([]);
@@ -1251,7 +1251,7 @@ test("Everyone shows every open ask and is remembered for the login; ?view= wins
       "true"
     );
     expect(headings()).toEqual(["Waiting on you"]);
-    expect(window.localStorage.getItem(userPreferenceStorageKey("Alice", "inbox.view"))).toBe(
+    expect(window.localStorage.getItem(userPreferenceStorageKey("alice", "inbox.view"))).toBe(
       "everyone"
     );
   } finally {

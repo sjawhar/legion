@@ -59,6 +59,15 @@ When a human answers a decision written as an ask block, the answer lives on tha
 human's answer; never rewrite the question into its answer or blank its options. An edit that leaves
 an ask block without a question or with a blank option is rejected with `INVALID_ASK_BLOCK`.
 
+When `dispatch_issue` or `dispatch_artifact` answers `This spec holds no ask blocks …`, read it as a
+question: either no decision is needed and you say nothing, or you forgot to make it a block. When
+it answers `… typed-block openings in this document are text, not blocks`, the quoted openings are
+blocks stored as prose (inside a line, or a paste with something before every line): fix the markdown
+and upload again; a mention on purpose belongs in code. Neither answer sees a spec wrapped whole in a
+code fence (take the fence off), a malformed opening inside a line (`::ask{`, `:::ask {`: an ask opens
+only as `:::ask{…}` on a line of its own), or any `dispatch_doc_edit`: after an edit that writes an
+ask, `dispatch_doc_read` the section and check it renders as `:::ask{#<id> …}` on its own line.
+
 ## Comments and suggestions
 
 Add feedback with:

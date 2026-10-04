@@ -1,12 +1,25 @@
 package pmdoc
 
-// Walk visits every node in document order. Returning false stops the whole traversal, not just
-// the node's subtree: a visitor that only means to pass over a node's children returns true and
-// ignores them as they are visited.
+// Walk visits every node in document order without calculating positions. Returning false stops the
+// whole traversal, not just the node's subtree: a visitor that only means to pass over a node's
+// children returns true and ignores them as they are visited.
 func Walk(doc *Node, visit func(*Node) bool) {
-	walk(doc, func(node *Node, _ []int, _, _ int) bool {
-		return visit(node)
-	})
+	if doc == nil || visit == nil {
+		return
+	}
+	walkNodes(doc, visit)
+}
+
+func walkNodes(node *Node, visit func(*Node) bool) bool {
+	if !visit(node) {
+		return false
+	}
+	for _, child := range node.Children {
+		if !walkNodes(child, visit) {
+			return false
+		}
+	}
+	return true
 }
 
 // walk visits every node in document order. pos and end are the node's

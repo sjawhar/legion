@@ -1,6 +1,7 @@
-// Package oidc verifies OIDC bearer tokens — a Kubernetes pod's projected
-// service-account token — against one issuer and one audience, for the Dispatch
-// server and the Envoy listener.
+// Package oidc verifies OIDC tokens against one issuer and one audience — a
+// Kubernetes pod's projected service-account token, for the Dispatch server and
+// the Envoy listener — and signs a person in to Dispatch with the authorization
+// code flow against its sign-in issuer (CodeFlow).
 package oidc
 
 import (
@@ -58,13 +59,31 @@ func Reason(err error) string {
 	}
 }
 
-// Claims are the verified claims of a service-account token. Subject is the
-// Kubernetes subject, "system:serviceaccount:<namespace>:<name>".
+// Claims are the verified claims of a token. For a projected service-account
+// token Subject is the Kubernetes subject, "system:serviceaccount:<namespace>:<name>".
+// For a Cognito ID token, Username is `cognito:username` (for a person federated
+// from an identity provider, `<provider>_<id>`), Groups is `cognito:groups`,
+// Providers names the providers of its `identities`, and Nonce is the sign-in's
+// nonce; a token that carries none of them leaves them empty.
 type Claims struct {
-	Subject  string
-	Issuer   string
-	Audience []string
-	Expiry   time.Time
+	Subject   string
+	Issuer    string
+	Audience  []string
+	Expiry    time.Time
+	Username  string
+	Groups    []string
+	Providers []string
+	Nonce     string
+}
+
+// cognitoClaims are the claims beyond the standard ones that Claims carries.
+type cognitoClaims struct {
+	Username   string   `json:"cognito:username"`
+	Groups     []string `json:"cognito:groups"`
+	Nonce      string   `json:"nonce"`
+	Identities []struct {
+		ProviderName string `json:"providerName"`
+	} `json:"identities"`
 }
 
 // Verifier verifies bearer tokens issued by one issuer to one audience.
@@ -83,11 +102,15 @@ func New(ctx context.Context, issuer, audience string) (*Verifier, error) {
 	if err != nil {
 		return nil, fmt.Errorf("oidc: discovering issuer %s: %w", issuer, err)
 	}
+	return newVerifier(provider, issuer, audience), nil
+}
+
+func newVerifier(provider *gooidc.Provider, issuer, audience string) *Verifier {
 	return &Verifier{
 		verifier: provider.Verifier(&gooidc.Config{ClientID: audience}),
 		issuer:   issuer,
 		audience: audience,
-	}, nil
+	}
 }
 
 // Verify checks raw against the issuer's published keys, the configured
@@ -99,11 +122,23 @@ func (v *Verifier) Verify(ctx context.Context, raw string) (Claims, error) {
 	if err != nil {
 		return Claims{}, v.classify(ctx, raw, err)
 	}
+	var person cognitoClaims
+	if err := token.Claims(&person); err != nil {
+		return Claims{}, fmt.Errorf("%w: %v", ErrMalformed, err)
+	}
+	var providers []string
+	for _, identity := range person.Identities {
+		providers = append(providers, identity.ProviderName)
+	}
 	return Claims{
-		Subject:  token.Subject,
-		Issuer:   token.Issuer,
-		Audience: token.Audience,
-		Expiry:   token.Expiry,
+		Subject:   token.Subject,
+		Issuer:    token.Issuer,
+		Audience:  token.Audience,
+		Expiry:    token.Expiry,
+		Username:  person.Username,
+		Groups:    person.Groups,
+		Providers: providers,
+		Nonce:     person.Nonce,
 	}, nil
 }
 

@@ -1,8 +1,6 @@
 package promptrefs
 
 import (
-	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -12,14 +10,8 @@ import (
 // refused naming what is wrong, so a daemon and an image that disagree on the encoding refuse the
 // probe instead of resolving no role prompt at all.
 func TestDecodeReadsEncodeAndRefusesAnyOther(t *testing.T) {
-	roles := t.TempDir()
-	if err := os.WriteFile(filepath.Join(roles, "architect.md"), []byte("Load skill://dispatch first."), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	names, err := Roles(roles)
-	if err != nil {
-		t.Fatal(err)
-	}
+	names := New()
+	names.Text("roles/architect.md", []byte("Load skill://dispatch first."))
 	encoded := names.Encode()
 	decoded, err := Decode(encoded)
 	if err != nil {

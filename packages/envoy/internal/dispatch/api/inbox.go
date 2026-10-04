@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"strings"
 	"time"
@@ -39,10 +40,11 @@ type inboxAsk struct {
 	Thread       inboxAskThread `json:"thread"`
 }
 
-// inboxAssigneeFilter turns ?assignee= into the SQL mode and login the inbox query binds:
-// "" (no filter), "unassigned", or "login" with the canonical allowlisted login. `me` is the
-// caller; a named login is canonicalised first so a shared `?assignee=Alice` link never 400s.
-func (s *server) inboxAssigneeFilter(raw string, caller model.Actor) (mode, login string, err error) {
+// inboxAssigneeFilter turns ?assignee= into the SQL mode and email the inbox query binds:
+// "" (no filter), "unassigned", or "login" with the canonical email of a person who has signed
+// in. `me` is the caller; a named person is canonicalised first so a shared `?assignee=Alice@…`
+// link never 400s.
+func (s *server) inboxAssigneeFilter(ctx context.Context, raw string, caller model.Actor) (mode, login string, err error) {
 	switch value := strings.TrimSpace(raw); value {
 	case "":
 		return "", "", nil
@@ -51,7 +53,7 @@ func (s *server) inboxAssigneeFilter(raw string, caller model.Actor) (mode, logi
 	case "me":
 		return "login", canonicalLogin(caller.ID), nil
 	default:
-		login, err := s.allowedLogin(value)
+		login, err := s.allowedLogin(ctx, value)
 		if err != nil {
 			return "", "", err
 		}
@@ -65,7 +67,7 @@ func (s *server) listInbox(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	project := strings.TrimSpace(r.URL.Query().Get("project"))
-	assigneeMode, assigneeLogin, err := s.inboxAssigneeFilter(r.URL.Query().Get("assignee"), caller)
+	assigneeMode, assigneeLogin, err := s.inboxAssigneeFilter(r.Context(), r.URL.Query().Get("assignee"), caller)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return

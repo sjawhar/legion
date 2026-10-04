@@ -205,11 +205,11 @@ export interface WorkerClaim {
 /** The grant rig's own worker, whose role token collides with no live issue's. */
 const RIG_CLAIM: WorkerClaim = { project: "l12rig", issue: "RIG-1", role: "implementer" };
 
-/** Where a pane's daemon is read from: a checkout's daemon module (`daemon-pane.ts`), and the
- * role-prompt bundle its system prompt is composed from, for a pane given one. */
+/** Where a pane's daemon is read from: a checkout's daemon module (`daemon-pane.ts`), whose
+ * embedded role prompts compose the pane's system prompt when `systemPrompt` is set. */
 export interface PaneSource {
   readonly daemonModule: string;
-  readonly rolesDir?: string;
+  readonly systemPrompt?: boolean;
 }
 
 /** The pane the Legion daemon's tmux runtime gives a phase worker for `claim`, pointed at the
@@ -220,7 +220,7 @@ export interface PaneSource {
  * `envoyDefaultsFromEnvironment`), the gh, git and jj the daemon resolves on the caller's PATH,
  * `PI_SHELL_PREFIX`, `LEGION_GRANT_FILE`, the four XDG base directories, the
  * boot token pointer (`<state>/secrets/boot`, the file the stand-in checks), and PATH with
- * worker-bin then bin first; and, with a role bundle, the system prompt argument. An inherited
+ * worker-bin then bin first; and, with `systemPrompt`, the system prompt argument. An inherited
  * `ANTHROPIC_API_KEY`, every `LEGION_*` and `DISPATCH_*` value and the GitHub variables no Legion
  * pane carries are dropped first. The profile's agent directory is under the inherited `HOME`. The
  * skill scenario rig (`../skill-scenarios/worker-pane.ts`) builds its tester pane with it too.
@@ -252,7 +252,7 @@ export function workerPane(
     natsUrls: envoy.natsUrls,
     bootTokenFile: path.join(stateDir, "secrets", "boot"),
     path: env.PATH ?? "",
-    rolesDir: source.rolesDir,
+    systemPrompt: source.systemPrompt,
   });
   return {
     ...pane,

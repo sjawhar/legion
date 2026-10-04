@@ -21,7 +21,7 @@ func newDeliveriesClient(t *testing.T) (*githubapp.Client, *githubapptest.Webhoo
 	t.Helper()
 	key, pemText := githubapptest.Key(t)
 	webhook := githubapptest.NewWebhook(t, &key.PublicKey, deliveriesClientID, nil)
-	client, err := githubapp.New(&auth.AppConfig{ClientID: deliveriesClientID, ClientSecret: "secret", PEM: pemText}, webhook.URL())
+	client, err := githubapp.New(&auth.AppConfig{ClientID: deliveriesClientID, PEM: pemText}, webhook.URL())
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}

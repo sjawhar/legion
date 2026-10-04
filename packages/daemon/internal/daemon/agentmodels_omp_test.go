@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/sjawhar/legion/daemon/internal/promptrefs"
+	"github.com/sjawhar/legion/daemon/internal/prompts"
 )
 
 // agentModelPlugin lays out a pi-legion-envoy under dir whose one skill dispatches three task agents
@@ -108,12 +109,7 @@ func TestTheAgentModelCheckOnTheRealOhMyPi(t *testing.T) {
 			}
 			root, references := "", promptrefs.New()
 			if testCase.shipped {
-				root = shippedPromptPlugin(t, dir)
-				roles, err := promptrefs.Roles(daemonTestRolePromptsDir(t))
-				if err != nil {
-					t.Fatal(err)
-				}
-				references = roles
+				root, references = shippedPromptPlugin(t, dir), prompts.RoleReferences()
 			} else {
 				root = agentModelPlugin(t, dir)
 			}
@@ -163,17 +159,18 @@ func TestTheAgentModelCheckOnTheRealOhMyPi(t *testing.T) {
 // prepack copies them, under testPlugin's manifest and load marker.
 func shippedPromptPlugin(t *testing.T, dir string) string {
 	t.Helper()
-	pluginSource := filepath.Dir(daemonTestRolePromptsDir(t))
+	pluginSource := filepath.Join("..", "..", "..", "pi-envoy")
 	root := testPlugin(t, dir, nil)
-	copyPromptBundle(t, filepath.Join(pluginSource, "agents"), filepath.Join(root, "agents"))
-	copyPromptBundle(t, filepath.Join(pluginSource, "..", "..", "skills"), filepath.Join(root, "dist", "skills"))
+	copyDir(t, filepath.Join(pluginSource, "agents"), filepath.Join(root, "agents"))
+	copyDir(t, filepath.Join(pluginSource, "..", "..", "skills"), filepath.Join(root, "dist", "skills"))
 	return root
 }
 
-// A Sandbox pod runs on the role prompts the daemon inlines from its own directory, not the image's
-// copy, so the image's probe resolves what the daemon's prompts name (promptrefs.Roles): an
-// agent only the daemon's copy dispatches, which the image's plugin lacks, is refused naming the
-// daemon's prompt file, though the image's own roles never name it.
+// A Sandbox pod runs on the role prompts the daemon inlines from its own snapshot, not those the
+// image's `legion` embeds, so the image's probe resolves what the daemon's prompts name
+// (ImageProbe.RoleReferences, `legion probe-image --role-references`): an agent only the daemon's
+// prompts dispatch, which the image's plugin lacks, is refused naming the daemon's prompt file,
+// though the image's own prompts never name it.
 func TestTheImageProbeResolvesTheAgentsTheDaemonsPromptsName(t *testing.T) {
 	omp := testbin.OMP(t)
 	dir := t.TempDir()
@@ -191,24 +188,13 @@ func TestTheImageProbeResolvesTheAgentsTheDaemonsPromptsName(t *testing.T) {
 		}
 	}
 	root := agentModelPlugin(t, dir)
-	roles := func(name, prompt string) string {
-		rolesDir := filepath.Join(dir, name)
-		mkdir(t, filepath.Join(rolesDir, "core"))
-		if err := os.WriteFile(filepath.Join(rolesDir, "core", "planner.md"), []byte(prompt), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		return rolesDir
+	references := func(prompt string) promptrefs.Names {
+		names := promptrefs.New()
+		names.Text("roles/core/planner.md", []byte(prompt))
+		return names
 	}
-	image := roles("image-roles", "Consult `task(agent=\"oracle\")`.\n")
-	daemonCopy := roles("daemon-roles", "Consult `task(agent=\"oracle\")`, then `task(agent=\"daemon-only\")`.\n")
-	imageReferences, err := promptrefs.Roles(image)
-	if err != nil {
-		t.Fatal(err)
-	}
-	references, err := promptrefs.Roles(daemonCopy)
-	if err != nil {
-		t.Fatal(err)
-	}
+	imageReferences := references("Consult `task(agent=\"oracle\")`.\n")
+	daemonReferences := references("Consult `task(agent=\"oracle\")`, then `task(agent=\"daemon-only\")`.\n")
 	env := map[string]string{"HOME": home, "OMP_PROFILE": "legion", "PATH": "/usr/local/bin:/usr/bin:/bin", "AWS_EC2_METADATA_DISABLED": "true"}
 	probe := func(references promptrefs.Names) error {
 		return ProbeImage(context.Background(), ImageProbe{Omp: omp, Contract: 3, Env: env, WorkDir: dir, PluginRoot: root,
@@ -217,7 +203,7 @@ func TestTheImageProbeResolvesTheAgentsTheDaemonsPromptsName(t *testing.T) {
 	if err := probe(imageReferences); err != nil {
 		t.Fatalf("ProbeImage on the image's own roles = %v, want a pass: they name only agents the plugin ships", err)
 	}
-	err = probe(references)
+	err := probe(daemonReferences)
 	if err == nil || !strings.Contains(err.Error(), "task agent daemon-only (dispatched by roles/core/planner.md)") {
 		t.Fatalf("ProbeImage on the daemon's references = %v, want the refusal naming daemon-only and the daemon's prompt", err)
 	}

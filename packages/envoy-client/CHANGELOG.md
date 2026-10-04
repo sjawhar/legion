@@ -30,13 +30,13 @@
   sends `summary` and quotes the question the server returned in its result (LEGION-387).
 - `dispatch_request_approval` is refused, with no request sent, while the version it would name
   (the document's latest) holds a decision block open (LEGION-387): answering the block would
-  write a new version and retract the request. A block is judged by its state in that version, so
-  an answer not yet folded into a version still counts, and so does a block with no ask yet; every
-  line that opens the block counts, so one quoting its opener (in code, say) can add an open block
-  but never hide one. The refusal names each block and its ask, and tells the agent to ask the
-  human to answer or waive it. It reads `GET /artifacts/{id}/blocks` first, then, only when an
-  `ask` block is present, the owner's asks and that version's markdown; an approved document skips
-  the reads.
+  write a newer version than the one the request names. A block is judged by its state in that
+  version, so an answer not yet folded into a version still counts, and so does a block with no
+  ask yet; every line that opens the block counts, so one quoting its opener (in code, say) can add
+  an open block but never hide one. The refusal names each block and its ask, and tells the agent
+  to ask the human to answer or waive it. It reads `GET /artifacts/{id}/blocks` first, then, only
+  when an `ask` block is present, the owner's asks and that version's markdown; an approved
+  document skips the reads.
 - `dispatch_doc_edit` is refused, with nothing sent, when a `delete` or `retype` by block id would
   take a decision block out of the document while its ask is open, even in a batch that inserts
   markdown carrying its id (LEGION-387). The edit would write its version at once and settlement
@@ -48,6 +48,9 @@
   `GET /artifacts/{id}/blocks`, and the owner's asks only when it reaches an `ask` block.
 
 ### Added
+
+- `dispatch-execute` exports `asObject`, which reads an unknown value as a JSON object or null; the
+  Oh My Pi extension's run-end nudge reads a tool result's details with it (LEGION-470).
 
 - `dispatch_read` of an anchored comment or ask prints `Position:` after the quote, where the
   quote's block stands: `table[3] › row 5 (Red-teamer loop), column Due` for a table cell (the
@@ -94,6 +97,11 @@
 
 ### Fixed
 
+- `dispatch_doc_read` of an uploaded file or image returns the file's text at its latest or named
+  version, after a line naming its type, version and size, where it failed with Dispatch's
+  `artifact is not a document`: it asked `/text`, which answers a file 400 `NOT_DOCUMENT`. A file
+  that is not UTF-8 text is described, with the `GET /api/v1/artifacts/{id}/versions/{n}` route that
+  serves its bytes. `DispatchClient.fileVersion` reads one version's bytes and MIME type.
 - `dispatch_doc_edit` given `lost_ops: null` says the live document is being reloaded or holds a
   tree too deep to read, where it said only that it was being reloaded: a document past the
   schema's depth bound reaches no verdict either, and a re-read answers it `DOC_SCHEMA`

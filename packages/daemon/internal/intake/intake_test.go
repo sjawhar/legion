@@ -222,7 +222,7 @@ func TestDecodeCapturedProducerEnvelopes(t *testing.T) {
 			name:    "checks settlement",
 			subject: "notifications.github.sjawhar.legion.pr.42.checks",
 			file:    "github/checks.json",
-			want:    PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: "abcdef1234567890abcdef1234567890abcdef12", CheckRuns: []CheckRun{{Name: "unit", ID: 73}}, Snapshot: "ed3e3bafc46f498bca65fe879fcd1765a90fecbb1fcd62579e46a94707c0bacd", Verdict: "red", Failing: []string{"unit"}},
+			want:    PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: "abcdef1234567890abcdef1234567890abcdef12", CheckRuns: []CheckRun{{Name: "unit", ID: 73}}, Snapshot: "ed3e3bafc46f498bca65fe879fcd1765a90fecbb1fcd62579e46a94707c0bacd", Failing: []string{"unit"}, Cancelled: []string{}},
 		},
 		{
 			name:    "branch push",
@@ -661,13 +661,8 @@ func runConsumers(t *testing.T, consumers *Consumers, pool *pgxpool.Pool, handle
 
 func testJetStream(t *testing.T) (jetstream.JetStream, jetstream.Stream) {
 	t.Helper()
-	ctx := context.Background()
 	js := testnats.JetStream(t)
-	stream, err := js.CreateStream(ctx, jetstream.StreamConfig{Name: "ENVOY_NOTIFICATIONS", Subjects: []string{"notifications.>"}})
-	if err != nil {
-		t.Fatalf("create notification stream: %v", err)
-	}
-	return js, stream
+	return js, testnats.CreateStream(t, js, jetstream.StreamConfig{Name: "ENVOY_NOTIFICATIONS", Subjects: []string{"notifications.>"}})
 }
 
 func publish(t *testing.T, js jetstream.JetStream, subject string, data []byte) {

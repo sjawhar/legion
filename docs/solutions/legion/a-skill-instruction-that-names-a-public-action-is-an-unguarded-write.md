@@ -109,9 +109,9 @@ were extended in the same PR. The spec's acceptance check for the text is three 
 print nothing:
 
 ```bash
-grep -rn 'gh -- issue\|gh issue\|issue comment <' skills/ packages/pi-envoy/roles/
-grep -rn 'issue comment' skills/legion-*/ packages/pi-envoy/roles/
-grep -rn 'gh issue' skills/ packages/pi-envoy/roles/
+grep -rn 'gh -- issue\|gh issue\|issue comment <' skills/ packages/daemon/internal/prompts/roles/
+grep -rn 'issue comment' skills/legion-*/ packages/daemon/internal/prompts/roles/
+grep -rn 'gh issue' skills/ packages/daemon/internal/prompts/roles/
 ```
 
 That constrained the new prose: the refusal sentence names the verbs as "the `issue` subcommand's

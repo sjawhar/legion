@@ -60,8 +60,6 @@ fail() { echo "FAIL $check: $*" >&2; exit 1; }
 . "$root/scripts/e2e/lib/leftovers.sh"
 # shellcheck source-path=SCRIPTDIR source=lib/omp-home.sh
 . "$root/scripts/e2e/lib/omp-home.sh"
-# shellcheck source-path=SCRIPTDIR source=lib/stage-role-prompts.sh
-. "$root/scripts/e2e/lib/stage-role-prompts.sh"
 
 # Unconditional: every run removes what it made, whatever it ended on.
 cleanup() {
@@ -115,7 +113,6 @@ mise where "$pin" >/dev/null 2>&1 || mise install "$pin" >&2
 pick_port daemon_port
 pick_port envoy_port
 (cd "$root/packages/daemon" && go build -o "$work/legion" ./cmd/legion)
-stage_role_prompts "$root" "$work"
 (cd "$root/packages/envoy" && go build -o "$work/envoy-listener" ./cmd/listener)
 note "legion $("$work/legion" version); OMP pin $pin; daemon port $daemon_port; listener port $envoy_port"
 

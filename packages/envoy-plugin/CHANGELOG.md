@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Added
+
+- The packaged skills gain `dispatch-brainstorming` (LEGION-475), which OpenCode finds on the
+  skills path the config hook adds: in a session with Dispatch, a design conversation runs in the
+  issue's spec and the plan is the issue's `plan.md` document. The `dispatch-first` instruction
+  file sends each design conversation and plan to it.
+
 ### Changed
 
 - `dispatch_request_approval`'s `summary` says only what the human is approving, with no commentary

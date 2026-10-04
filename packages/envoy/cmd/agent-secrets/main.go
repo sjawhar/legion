@@ -931,7 +931,7 @@ func cmdExec(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 	if len(missing) > 0 {
-		fmt.Fprintf(stderr, "agent-secrets: %s not released (proxy-delivery or otherwise unavailable)\n", strings.Join(missing, ", "))
+		fmt.Fprintf(stderr, "agent-secrets: the grant released no value for %s; nothing was run\n", strings.Join(missing, ", "))
 		return 1
 	}
 
