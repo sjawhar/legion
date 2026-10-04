@@ -4,7 +4,6 @@
 package launcher
 
 import (
-	"bufio"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -15,6 +14,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -32,6 +32,8 @@ import (
 type Config struct {
 	Connect, Token, Sandbox, Role, PodUID, PrivateDir string
 	Stdout, Stderr                                    io.Writer
+	// StopGrace is the container shutdown and natural-exit descendant cleanup budget.
+	StopGrace time.Duration
 }
 
 // reconnectDelay is the pause between daemon connections. A lost connection never stops the
@@ -42,6 +44,12 @@ const reconnectDelay = time.Second
 // the launcher: the daemon owns generations and decides whether a new generation should start.
 // Only ctx's end (the container's SIGTERM) stops the child the launcher owns.
 func Run(ctx context.Context, cfg Config) error {
+	if cfg.StopGrace == 0 {
+		cfg.StopGrace = 30 * time.Second
+	}
+	if cfg.StopGrace < 0 {
+		return errors.New("launcher: stop grace must be positive")
+	}
 	if err := cfg.validate(); err != nil {
 		return err
 	}
@@ -50,6 +58,12 @@ func Run(ctx context.Context, cfg Config) error {
 		return err
 	}
 	m := &manager{cfg: cfg, requests: map[string]request{}}
+	if os.Getpid() == 1 {
+		exits := make(chan os.Signal, 1)
+		signal.Notify(exits, syscall.SIGCHLD)
+		defer signal.Stop(exits)
+		go m.reapOrphans(ctx, exits)
+	}
 	launcherID := randomID()
 	for {
 		err := m.serve(ctx, address, launcherID)
@@ -85,7 +99,7 @@ func (m *manager) serve(ctx context.Context, address, launcherID string) error {
 	}); err != nil {
 		return fmt.Errorf("hello: %w", err)
 	}
-	reader := bufio.NewReaderSize(conn, shimwire.MaxHelloBytes+1)
+	reader := shimwire.NewReader(conn)
 	frame, err := readFrame(reader)
 	if err != nil {
 		return fmt.Errorf("hello acknowledgement: %w", err)
@@ -155,8 +169,8 @@ func tcpAddress(addr string) (string, error) {
 	return address, nil
 }
 
-func readFrame(reader *bufio.Reader) (shimwire.Frame, error) {
-	line, err := reader.ReadBytes('\n')
+func readFrame(reader *shimwire.Reader) (shimwire.Frame, error) {
+	line, err := reader.ReadLine()
 	if err != nil {
 		return nil, err
 	}
@@ -249,14 +263,16 @@ func (m *manager) start(command shimwire.LauncherStart) shimwire.LauncherStartRe
 	cmd.Env = mergeEnv(os.Environ(), command.Env)
 	cmd.Stdout, cmd.Stderr = m.cfg.Stdout, m.cfg.Stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// The orphan reaper must see this PID as the direct child before it can observe its exit.
+	m.mu.Lock()
 	if err := cmd.Start(); err != nil {
+		m.mu.Unlock()
 		_ = os.RemoveAll(dir)
 		result := shimwire.LauncherStartResult{ID: command.ID, Error: fmt.Sprintf("start child: %v", err)}
 		m.remember(command.ID, body, result)
 		return result
 	}
 	active := &child{generation: command.Generation, pid: cmd.Process.Pid, dir: dir, done: make(chan struct{})}
-	m.mu.Lock()
 	m.child = active
 	result := shimwire.LauncherStartResult{ID: command.ID, OK: true, RunningGeneration: command.Generation}
 	m.requests[command.ID] = request{body: body, result: result}
@@ -266,7 +282,7 @@ func (m *manager) start(command shimwire.LauncherStart) shimwire.LauncherStartRe
 	return result
 }
 
-func (m *manager) remember(id string, body []byte, result shimwire.LauncherStartResult) {
+func (m *manager) remember(id string, body []byte, result shimwire.Frame) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.requests[id] = request{body: body, result: result}
@@ -274,6 +290,7 @@ func (m *manager) remember(id string, body []byte, result shimwire.LauncherStart
 
 func (m *manager) wait(cmd *exec.Cmd, active *child) {
 	err := cmd.Wait()
+	m.cleanExitedGeneration()
 	exit := exitOf(err, active.generation)
 	m.mu.Lock()
 	if m.child == active {
@@ -305,38 +322,22 @@ func (m *manager) stop(command shimwire.LauncherStop) shimwire.LauncherStopResul
 	m.mu.Unlock()
 	if active == nil {
 		result := shimwire.LauncherStopResult{ID: command.ID, OK: true}
-		m.rememberStop(command.ID, body, result)
+		m.remember(command.ID, body, result)
 		return result
 	}
 	if active.generation != command.Generation {
 		result := shimwire.LauncherStopResult{ID: command.ID, Error: fmt.Sprintf("generation %d is running, not %d", active.generation, command.Generation)}
-		m.rememberStop(command.ID, body, result)
+		m.remember(command.ID, body, result)
 		return result
 	}
-	if err := syscall.Kill(-active.pid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
-		result := shimwire.LauncherStopResult{ID: command.ID, Error: fmt.Sprintf("signal child process group: %v", err)}
-		m.rememberStop(command.ID, body, result)
+	if err := m.endGeneration(active, time.Duration(command.GraceMs)*time.Millisecond); err != nil {
+		result := shimwire.LauncherStopResult{ID: command.ID, Error: err.Error()}
+		m.remember(command.ID, body, result)
 		return result
-	}
-	select {
-	case <-active.done:
-	case <-time.After(time.Duration(command.GraceMs) * time.Millisecond):
-		if err := syscall.Kill(-active.pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
-			result := shimwire.LauncherStopResult{ID: command.ID, Error: fmt.Sprintf("kill child process group: %v", err)}
-			m.rememberStop(command.ID, body, result)
-			return result
-		}
-		<-active.done
 	}
 	result := shimwire.LauncherStopResult{ID: command.ID, OK: true}
-	m.rememberStop(command.ID, body, result)
+	m.remember(command.ID, body, result)
 	return result
-}
-
-func (m *manager) rememberStop(id string, body []byte, result shimwire.LauncherStopResult) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.requests[id] = request{body: body, result: result}
 }
 
 func (m *manager) stopActive() {
@@ -346,12 +347,8 @@ func (m *manager) stopActive() {
 	if active == nil {
 		return
 	}
-	_ = syscall.Kill(-active.pid, syscall.SIGTERM)
-	select {
-	case <-active.done:
-	case <-time.After(time.Second):
-		_ = syscall.Kill(-active.pid, syscall.SIGKILL)
-		<-active.done
+	if err := m.endGeneration(active, m.cfg.StopGrace); err != nil {
+		panic(err)
 	}
 }
 
