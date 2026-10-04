@@ -2,7 +2,8 @@ name: Docs
 
 # Builds the documentation site (docs/site) on every pull request that could change it, and
 # publishes it to GitHub Pages (https://sjawhar.github.io/legion/) on every push to main. The site's
-# reference pages are generated from packages/ and skills/ at build time, so those paths rebuild it.
+# reference pages are generated from packages/ and skills/ at build time, so those paths rebuild it,
+# and so does a change to the private-name guard the built site is checked with.
 on:
   push:
     branches: [main]
@@ -11,12 +12,16 @@ on:
       - "packages/**"
       - "skills/**"
       - ".github/workflows/docs.yaml"
+      - ".github/scripts/check-private-names.sh"
+      - ".github/scripts/check-private-names.test.sh"
   pull_request:
     paths:
       - "docs/site/**"
       - "packages/**"
       - "skills/**"
       - ".github/workflows/docs.yaml"
+      - ".github/scripts/check-private-names.sh"
+      - ".github/scripts/check-private-names.test.sh"
 
 concurrency:
   group: docs-${{ github.ref }}
