@@ -233,11 +233,16 @@ func TestReadsOfALiveDocumentRunBesideItsPeers(t *testing.T) {
 // it. The loop ends with the test's failure once the test has failed, which is how a typing peer
 // whose send failed reports it (typeIntoDocument), and once the test binary's deadline is within
 // overlapMargin, so a room that stopped taking the peer's updates fails the subtest by name rather
-// than in the binary's timeout panic.
+// than in the binary's timeout panic. A deadline that leaves no more than overlapMargin to begin
+// with - a local `-timeout` shorter than the margin - fails once, by name, before the loop: that
+// reads like a misconfigured run, not a peer that stopped overlapping.
 func overlapping(t *testing.T, read func() bool) {
 	t.Helper()
-	deadline, bounded := t.Deadline()
-	deadline = deadline.Add(-overlapMargin)
+	rawDeadline, bounded := t.Deadline()
+	if bounded && time.Until(rawDeadline) <= overlapMargin {
+		t.Fatalf("the test binary's deadline leaves %s, not more than overlapMargin (%s): raise -timeout or lower overlapMargin for a local run", time.Until(rawDeadline).Round(time.Millisecond), overlapMargin)
+	}
+	deadline := rawDeadline.Add(-overlapMargin)
 	runs := 0
 	for overlapped := 0; overlapped < overlapsWanted; runs++ {
 		if t.Failed() {
