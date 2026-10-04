@@ -21,6 +21,7 @@ import (
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/files"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
@@ -348,7 +349,7 @@ func TestResolveBootConfigRequiresBothOIDCVariables(t *testing.T) {
 }
 
 func TestDispatchHandlerReportsDisabledNATS(t *testing.T) {
-	handler := dispatchHandler(http.NewServeMux(), nil, nil, "")
+	handler := dispatchHandler(http.NewServeMux(), nil, nil, nil, "")
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 
@@ -362,7 +363,7 @@ func TestDispatchHandlerReportsDisabledNATS(t *testing.T) {
 }
 
 func TestDispatchHandlerReportsDisconnectedNATS(t *testing.T) {
-	handler := dispatchHandler(http.NewServeMux(), nil, &bus.Client{}, "")
+	handler := dispatchHandler(http.NewServeMux(), nil, &bus.Client{}, nil, "")
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 
@@ -375,6 +376,35 @@ func TestDispatchHandlerReportsDisconnectedNATS(t *testing.T) {
 	}
 }
 
+// /healthz reports the file store beside the database and NATS: null where no bucket is
+// configured, true where the bucket answers, and false (with the whole probe 503) where it
+// does not, so a wrong grant shows on the health page and not only as failed uploads.
+func TestDispatchHandlerReportsTheFileStore(t *testing.T) {
+	probe := func(store files.Store) (int, map[string]any) {
+		t.Helper()
+		response := httptest.NewRecorder()
+		dispatchHandler(http.NewServeMux(), nil, nil, store, "").ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+		var health map[string]any
+		if err := json.NewDecoder(response.Body).Decode(&health); err != nil {
+			t.Fatalf("decode health response: %v", err)
+		}
+		return response.Code, health
+	}
+	if _, health := probe(nil); health["files"] != nil {
+		t.Fatalf("healthz files with no store = %#v, want null", health["files"])
+	}
+	reachable := files.NewMemory()
+	if _, health := probe(reachable); health["files"] != true {
+		t.Fatalf("healthz files with a reachable store = %#v, want true", health["files"])
+	}
+	unreachable := files.NewMemory()
+	unreachable.Fail = errors.New("bucket unreachable")
+	status, health := probe(unreachable)
+	if health["files"] != false || status != http.StatusServiceUnavailable {
+		t.Fatalf("healthz with an unreachable store: status %d, files %#v, want 503 and false", status, health["files"])
+	}
+}
+
 // /healthz names what is deployed, for a deploy check to compare with what was meant to be:
 // the commit the image build stamped, and the highest migration the database has applied. The
 // schema version is the database's, read per probe, never the binary's own list: a row a later
@@ -383,7 +413,7 @@ func TestDispatchHandlerReportsDisconnectedNATS(t *testing.T) {
 func TestHealthzReportsTheBuildCommitAndTheAppliedSchemaVersion(t *testing.T) {
 	database := storetest.Open(t)
 	const commit = "0123456789abcdef0123456789abcdef01234567"
-	handler := dispatchHandler(http.NewServeMux(), database, nil, commit)
+	handler := dispatchHandler(http.NewServeMux(), database, nil, nil, commit)
 	probe := func() map[string]any {
 		t.Helper()
 		response := httptest.NewRecorder()
@@ -418,7 +448,7 @@ func TestHealthzReportsTheBuildCommitAndTheAppliedSchemaVersion(t *testing.T) {
 // A binary the image build did not stamp says so: null, never an empty string or a guess.
 func TestHealthzReportsAnUnstampedCommitAsNull(t *testing.T) {
 	response := httptest.NewRecorder()
-	dispatchHandler(http.NewServeMux(), nil, nil, "").ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	dispatchHandler(http.NewServeMux(), nil, nil, nil, "").ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 	var health map[string]any
 	if err := json.NewDecoder(response.Body).Decode(&health); err != nil {
 		t.Fatalf("decode health response: %v", err)
@@ -467,7 +497,7 @@ func TestHealthzAnswersWhileEveryPooledConnectionIsHeld(t *testing.T) {
 		defer connection.Release()
 	}
 
-	server := httptest.NewServer(dispatchHandler(http.NewServeMux(), database, nil, ""))
+	server := httptest.NewServer(dispatchHandler(http.NewServeMux(), database, nil, nil, ""))
 	defer server.Close()
 	client := &http.Client{Timeout: 3 * time.Second}
 	started := time.Now()
@@ -518,7 +548,7 @@ func TestHealthzAnswersWhilePostgresStopsAnswering(t *testing.T) {
 		database.Pool.Close()
 	})
 
-	server := httptest.NewServer(dispatchHandler(http.NewServeMux(), database, nil, ""))
+	server := httptest.NewServer(dispatchHandler(http.NewServeMux(), database, nil, nil, ""))
 	defer server.Close()
 	// The shared pool's own round trip is the control: the link works right up to the outage.
 	if _, err := database.Pool.Exec(context.Background(), "select 1"); err != nil {

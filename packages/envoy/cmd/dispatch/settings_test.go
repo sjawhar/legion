@@ -1050,6 +1050,15 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 				t.Errorf("web dist = %q, %v", dir, err)
 			}
 		},
+		"DISPATCH_FILE_STORE_BUCKET": func(t *testing.T) {
+			if boot := resolveWith(t, map[string]string{"DISPATCH_FILE_STORE_BUCKET": " dispatch-files "}); boot.FileStoreBucket != "dispatch-files" {
+				t.Errorf("FileStoreBucket = %q, want the trimmed bucket name", boot.FileStoreBucket)
+			}
+			// Unset, the store is a nil interface: every upload keeps its bytes in Postgres.
+			if store, err := openFileStore(context.Background(), resolveWith(t, map[string]string{"DISPATCH_FILE_STORE_BUCKET": ""})); err != nil || store != nil {
+				t.Errorf("openFileStore with no bucket = %v, %v, want nil, nil", store, err)
+			}
+		},
 		"DISPATCH_DEV_SIGNIN": func(t *testing.T) {
 			if boot, err := resolveBootConfig(devSignInEnvironment(nil)); err != nil || !boot.DevSignIn {
 				t.Errorf("DISPATCH_DEV_SIGNIN=1: DevSignIn %t, %v", boot.DevSignIn, err)
