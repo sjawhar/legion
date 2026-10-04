@@ -42,7 +42,7 @@ import {
   type InboxView,
   parseInboxSearch,
 } from "../refs/routes";
-import { DIALOG_SCOPE, type KeymapScope, useKeymap, useKeymapScope } from "../shell/keymap";
+import { type KeymapScope, useKeymap, useKeymapScope } from "../shell/keymap";
 import { closestMatching, focusedMatching, roveFocus } from "../shell/roving";
 import { useUserPreference } from "../shell/userPreference";
 import { ViewportAnchor } from "../shell/ViewportAnchor";
@@ -563,9 +563,7 @@ export function Inbox({
   // Which row `h` was pressed on, so Escape from the bulk picker - which sits above the bands and
   // has no row to fall back through - is one level out rather than a dead end.
   const pickerOrigin = useRef<string | null>(null);
-  // `InboxDrawer` already pushed `DIALOG_SCOPE` via `useDialog`; pushing it again here would be
-  // inert (the stack only ever consults the scope once it's on it) but redundant, so skip it.
-  useKeymapScope(keymapScope === DIALOG_SCOPE ? null : keymapScope);
+  useKeymapScope(keymapScope);
   useKeymap(keymapScope, [
     // Movement is what the arrow keys are for; a palette row that moves the cursor helps nobody.
     {

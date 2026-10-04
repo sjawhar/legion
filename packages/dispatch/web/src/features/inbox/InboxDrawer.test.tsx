@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, type Mock, spyOn, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { useState } from "react";
@@ -9,65 +9,9 @@ import type { InboxRow } from "../../api/types";
 import { KeymapProvider } from "../shell/KeymapProvider";
 import { userPreferenceStorageKey } from "../shell/userPreference";
 import { InboxDrawer } from "./InboxDrawer";
+import { installInboxApiMocks, issueAsk, mockAskReads } from "./inbox-fixture";
 
-// Every Inbox read InboxDrawer embeds reads the signed-in login and the credential requests
-// waiting on it, exactly as Inbox.test.tsx's fixtures do.
-let whoAmI: Mock<typeof api.whoAmI>;
-let getIssueSubscribers: Mock<typeof api.getIssueSubscribers>;
-let getArtifactSubscribers: Mock<typeof api.getArtifactSubscribers>;
-let getReferences: Mock<typeof api.getReferences>;
-let getCredentialPending: Mock<typeof api.getCredentialPending>;
-beforeEach(() => {
-  window.localStorage.clear();
-  whoAmI = spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "alice" });
-  getCredentialPending = spyOn(api, "getCredentialPending").mockResolvedValue({ pending: [] });
-  getIssueSubscribers = spyOn(api, "getIssueSubscribers").mockResolvedValue([]);
-  getArtifactSubscribers = spyOn(api, "getArtifactSubscribers").mockResolvedValue([]);
-  getReferences = spyOn(api, "getReferences").mockResolvedValue({
-    edges: [],
-    node: { id: "", kind: "ask" },
-  });
-});
-afterEach(() => {
-  whoAmI.mockRestore();
-  getCredentialPending.mockRestore();
-  getIssueSubscribers.mockRestore();
-  getArtifactSubscribers.mockRestore();
-  getReferences.mockRestore();
-});
-
-function askRow(overrides: Partial<InboxRow> = {}): InboxRow {
-  return {
-    anchor: null,
-    answer: null,
-    author: { id: "session-1", kind: "session" },
-    created_at: "2026-09-11T00:00:00Z",
-    edited_at: null,
-    id: "ask-a",
-    issue: { assignee: "alice", key: "CORE-1", title: "Fix the thing" },
-    issue_key: "CORE-1",
-    kind: "question",
-    multiple: false,
-    opened_event_id: 1,
-    options: [],
-    thread: { edits: [], followers: [], replies: [] },
-    question: "Which approach?",
-    state: "open",
-    waiting_on: "human",
-    priority: null,
-    snoozed_until: null,
-    urgency: "med",
-    ...overrides,
-  };
-}
-
-function mockAskReads(rows: readonly InboxRow[]) {
-  return spyOn(api, "getAsk").mockImplementation(async (id: string) => {
-    const ask = rows.find((row) => row.id === id);
-    if (ask === undefined) throw new Error(`no fixture for ${id}`);
-    return { ask, edits: [], followers: [], replies: [] };
-  });
-}
+installInboxApiMocks();
 
 /** A harness matching how `app.tsx` mounts the drawer: a trigger the reader's focus starts on,
  *  the drawer itself as a sibling, state living above both. */
@@ -99,8 +43,8 @@ function renderDrawer() {
 }
 
 test("opens over the triggering control, moves initial focus to Close, and returns it on close", async () => {
-  const getInbox = spyOn(api, "getInbox").mockResolvedValue([askRow()]);
-  const getAsk = mockAskReads([askRow()]);
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue([issueAsk()]);
+  const getAsk = mockAskReads([issueAsk()]);
   const view = renderDrawer();
   try {
     const opener = screen.getByRole("button", { name: "Open inbox" });
@@ -122,8 +66,8 @@ test("opens over the triggering control, moves initial focus to Close, and retur
 });
 
 test("toggling Mine/Everyone inside the drawer never writes the Inbox page's remembered view", async () => {
-  const mine = askRow();
-  const bobs = askRow({
+  const mine = issueAsk();
+  const bobs = issueAsk({
     id: "ask-bob",
     issue: { assignee: "bob", key: "CORE-2", title: "Bob's issue" },
     issue_key: "CORE-2",
@@ -150,13 +94,13 @@ test("toggling Mine/Everyone inside the drawer never writes the Inbox page's rem
 });
 
 test("Snooze inside the drawer folds the row into Later, same as the Inbox page", async () => {
-  let served: InboxRow[] = [askRow()];
+  let served: InboxRow[] = [issueAsk()];
   const getInbox = spyOn(api, "getInbox").mockImplementation(async () => served);
   const snoozeAsk = spyOn(api, "snoozeAsk").mockImplementation(async (id, until) => {
     served = served.map((row) => (row.id === id ? { ...row, snoozed_until: until } : row));
     return { snoozed_until: until };
   });
-  const getAsk = mockAskReads([askRow()]);
+  const getAsk = mockAskReads([issueAsk()]);
   const view = renderDrawer();
   try {
     fireEvent.click(screen.getByRole("button", { name: "Open inbox" }));
@@ -180,7 +124,7 @@ test("Snooze inside the drawer folds the row into Later, same as the Inbox page"
 });
 
 test("Answering an ask inside the drawer submits and removes it from the list, same as the Inbox page", async () => {
-  const withOptions = askRow({ options: [{ label: "Ship" }, { label: "Hold" }] });
+  const withOptions = issueAsk({ options: [{ label: "Ship" }, { label: "Hold" }] });
   let served = [withOptions];
   const getInbox = spyOn(api, "getInbox").mockImplementation(async () => served);
   const getAsk = mockAskReads([withOptions]);
@@ -211,8 +155,8 @@ test("Answering an ask inside the drawer submits and removes it from the list, s
 });
 
 test("Escape with a row focused backs out of the row first; only a second Escape closes the drawer", async () => {
-  const getInbox = spyOn(api, "getInbox").mockResolvedValue([askRow()]);
-  const getAsk = mockAskReads([askRow()]);
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue([issueAsk()]);
+  const getAsk = mockAskReads([issueAsk()]);
   const view = renderDrawer();
   try {
     fireEvent.click(screen.getByRole("button", { name: "Open inbox" }));

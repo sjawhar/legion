@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, type Mock, spyOn, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
@@ -7,35 +7,12 @@ import { commentDeliveryFields } from "../../__tests__/comment-fixture";
 import { ApiError, api } from "../../api/client";
 import type { Comment, CredentialPendingRow, InboxRow, Issue } from "../../api/types";
 import type { InboxView } from "../refs/routes";
+import { DIALOG_SCOPE } from "../shell/keymap";
 import { userPreferenceStorageKey } from "../shell/userPreference";
 import { Inbox } from "./Inbox";
+import { installInboxApiMocks, issueAsk, mockAskReads } from "./inbox-fixture";
 
-// Every Inbox reads the signed-in login and the credential requests waiting on it. Each open ask
-// card also reads its owner's subscribers and its backlinks; the shared fixtures keep unrelated
-// failure assertions focused on the action each test drives.
-let whoAmI: Mock<typeof api.whoAmI>;
-let getIssueSubscribers: Mock<typeof api.getIssueSubscribers>;
-let getArtifactSubscribers: Mock<typeof api.getArtifactSubscribers>;
-let getReferences: Mock<typeof api.getReferences>;
-let getCredentialPending: Mock<typeof api.getCredentialPending>;
-beforeEach(() => {
-  window.localStorage.clear();
-  whoAmI = spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "alice" });
-  getCredentialPending = spyOn(api, "getCredentialPending").mockResolvedValue({ pending: [] });
-  getIssueSubscribers = spyOn(api, "getIssueSubscribers").mockResolvedValue([]);
-  getArtifactSubscribers = spyOn(api, "getArtifactSubscribers").mockResolvedValue([]);
-  getReferences = spyOn(api, "getReferences").mockResolvedValue({
-    edges: [],
-    node: { id: "", kind: "ask" },
-  });
-});
-afterEach(() => {
-  whoAmI.mockRestore();
-  getCredentialPending.mockRestore();
-  getIssueSubscribers.mockRestore();
-  getArtifactSubscribers.mockRestore();
-  getReferences.mockRestore();
-});
+const mocks = installInboxApiMocks();
 
 function artifactAsk(): InboxRow {
   return {
@@ -59,31 +36,6 @@ function artifactAsk(): InboxRow {
     state: "open",
     waiting_on: "human",
     urgency: "med",
-  };
-}
-
-function issueAsk(overrides: Partial<InboxRow> = {}): InboxRow {
-  return {
-    anchor: null,
-    answer: null,
-    author: { id: "session-1", kind: "session" },
-    created_at: "2026-09-11T00:00:00Z",
-    edited_at: null,
-    id: "ask-a",
-    issue: { assignee: "alice", key: "CORE-1", title: "Fix the thing" },
-    issue_key: "CORE-1",
-    kind: "question",
-    multiple: false,
-    opened_event_id: 1,
-    options: [],
-    thread: { edits: [], followers: [], replies: [] },
-    question: "Which approach?",
-    state: "open",
-    waiting_on: "human",
-    priority: null,
-    snoozed_until: null,
-    urgency: "med",
-    ...overrides,
   };
 }
 
@@ -163,7 +115,7 @@ test("a cold Inbox hydrates every ask thread from its one list response", async 
     await screen.findByText("Reply 20");
     expect(getInbox).toHaveBeenCalledTimes(1);
     await waitFor(() => expect(getAsk).toHaveBeenCalledTimes(0));
-    await waitFor(() => expect(getReferences).toHaveBeenCalledTimes(0));
+    await waitFor(() => expect(mocks.getReferences).toHaveBeenCalledTimes(0));
   } finally {
     view.unmount();
     getAsk.mockRestore();
@@ -501,7 +453,7 @@ function secretRequest(overrides: Partial<CredentialPendingRow> = {}): Credentia
 
 test("a credential request alone is listed and on the banner, and nothing says nothing needs you", async () => {
   const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
-  getCredentialPending.mockResolvedValue({ pending: [secretRequest()] });
+  mocks.getCredentialPending.mockResolvedValue({ pending: [secretRequest()] });
   const { unmount } = renderInbox();
   try {
     const request = await screen.findByRole("link", { name: /Secret request.*DEMO_API_KEY/s });
@@ -519,7 +471,7 @@ test("the banner counts credential requests beside the asks waiting on you, olde
   const getInbox = spyOn(api, "getInbox").mockResolvedValue([
     issueAsk({ created_at: new Date().toISOString() }),
   ]);
-  getCredentialPending.mockResolvedValue({
+  mocks.getCredentialPending.mockResolvedValue({
     pending: [
       secretRequest({ requested_at: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString() }),
     ],
@@ -536,7 +488,9 @@ test("the banner counts credential requests beside the asks waiting on you, olde
 
 test("a credential list that fails to load keeps the Inbox from saying nothing needs you", async () => {
   const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
-  getCredentialPending.mockRejectedValue(new ApiError(503, { code: "AGENT_SECRETS_UNAVAILABLE" }));
+  mocks.getCredentialPending.mockRejectedValue(
+    new ApiError(503, { code: "AGENT_SECRETS_UNAVAILABLE" })
+  );
   const { unmount } = renderInbox();
   try {
     expect(await screen.findByText("Couldn't load credential requests.")).toBeTruthy();
@@ -1088,10 +1042,10 @@ test("an ask card offers backlinks only when the batched count says it has some"
     expect(within(citedCard).getByRole("button", { name: "Referenced by (2)" })).toBeTruthy();
     expect(within(uncitedCard).queryByText(/Referenced by/)).toBeNull();
     // The count came with the list: no card fetches the graph until the reader opens one.
-    await waitFor(() => expect(getReferences).toHaveBeenCalledTimes(0));
+    await waitFor(() => expect(mocks.getReferences).toHaveBeenCalledTimes(0));
 
     fireEvent.click(within(citedCard).getByRole("button", { name: "Referenced by (2)" }));
-    await waitFor(() => expect(getReferences).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(mocks.getReferences).toHaveBeenCalledTimes(1));
   } finally {
     unmount();
     getAsk.mockRestore();
@@ -1103,7 +1057,7 @@ test("an unavailable backlink list stays quiet beside an ask card", async () => 
   const row = issueAsk({ id: "ask-backlink", referenced_by_count: 1 });
   const getInbox = spyOn(api, "getInbox").mockResolvedValue([row]);
   const getAsk = mockAskReads([row]);
-  getReferences.mockRejectedValue(new Error("offline"));
+  mocks.getReferences.mockRejectedValue(new Error("offline"));
   const { unmount } = renderInbox();
 
   try {
@@ -1131,14 +1085,6 @@ function renderInbox(route = "/") {
     </MemoryRouter>
   );
   return { queryClient, unmount: view.unmount };
-}
-
-function mockAskReads(rows: readonly InboxRow[]) {
-  return spyOn(api, "getAsk").mockImplementation(async (id: string) => {
-    const ask = rows.find((row) => row.id === id);
-    if (ask === undefined) throw new Error(`no fixture for ${id}`);
-    return { ask, edits: [], followers: [], replies: [] };
-  });
 }
 
 function headings(): string[] {
@@ -1299,7 +1245,7 @@ test("a caller supplying onViewChange (the Inbox drawer) keeps the toggle local:
       <QueryClientProvider client={queryClient}>
         <Inbox
           filter={{ view: "mine" }}
-          keymapScope="dialog"
+          keymapScope={DIALOG_SCOPE}
           onViewChange={(next) => changes.push(next)}
         />
       </QueryClientProvider>
