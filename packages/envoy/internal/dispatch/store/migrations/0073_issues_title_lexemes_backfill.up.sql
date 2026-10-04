@@ -1,5 +1,5 @@
--- 0071_issues_title_lexemes_backfill.up.sql
--- Fills issues.title_lexemes (0070) on every issue stored before it, with title_lexemes(title), as
+-- 0073_issues_title_lexemes_backfill.up.sql
+-- Fills issues.title_lexemes (0072) on every issue stored before it, with title_lexemes(title), as
 -- the issues trigger does for every row after it. Setting only that column does not fire the
 -- trigger, which reads an update of the key or the title, so search keeps the vector it has.
 --
@@ -19,10 +19,10 @@
 --
 -- EXCLUSIVE blocks no read. It holds every write of an issue row, and every write of a row whose
 -- key names one (its foreign-key check takes the row's key share), until this commits: on 2,905
--- issues holding production's titles the update took 0.58 s at load 85, 0070 3 ms. Such writes
+-- issues holding production's titles the update took 0.58 s at load 85, 0072 3 ms. Such writes
 -- already wait for it, since the event each appends locks and updates its issue's row. It waits for
 -- the lock at most the runner's lock_timeout (pgmigrate.LockTimeout, 5 s) and fails the boot past
--- that, as 0070 does. Its own migration, so the ACCESS EXCLUSIVE lock 0070 takes is not held while it
+-- that, as 0072 does. Its own migration, so the ACCESS EXCLUSIVE lock 0072 takes is not held while it
 -- runs.
 lock table issues in exclusive mode;
 

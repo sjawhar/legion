@@ -233,7 +233,7 @@ func TestCreateIssueOrdersDuplicateCandidates(t *testing.T) {
 }
 
 // duplicateQueryFromTitles parses every stored title and parent from their title text, rather than
-// the stored lexemes 0070 introduced.
+// the stored lexemes 0072 introduced.
 const duplicateQueryFromTitles = `
 with parent as (select coalesce((select title from issues where key = $3), '') as title),
 new_title as (

@@ -1,4 +1,4 @@
--- 0069_search_vector_bound.up.sql
+-- 0071_search_vector_bound.up.sql
 -- No write fails because its search vector would pass Postgres's limit on one tsvector (LEGION-505).
 --
 -- Postgres refuses a tsvector whose lexemes and positions take more than 1,048,575 bytes
@@ -33,7 +33,7 @@
 --
 -- The four triggers below keep search_text (0056) and the ask-block strip, and only their last step
 -- changes; create or replace keeps each trigger bound to its function, so this takes no lock on any
--- table. The issues trigger takes search_vector in 0070, beside the title lexemes it starts to write.
+-- table. The issues trigger takes search_vector in 0072, beside the title lexemes it starts to write.
 create function search_vector(head text, body text) returns tsvector
 language plpgsql immutable strict as $$
 declare

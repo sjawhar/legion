@@ -11,7 +11,7 @@ import (
 // A browser edit that grows a document past Postgres's limit on one search vector settles into a
 // version, and the version is found by the words that open it (LEGION-505). 100,000 distinct words
 // a hundred to a paragraph (searchtest.DistinctWords) are 1,000 paragraphs, inside every bound a
-// document has, and pass that limit. Before 0069 the settlement's version write failed with
+// document has, and pass that limit. Before 0071 the settlement's version write failed with
 // `string is too long for tsvector`, and so did every settlement of the document.
 func TestSettlementVersionsADocumentPastTheSearchVectorLimit(t *testing.T) {
 	service, artifactID := newTestService(t)

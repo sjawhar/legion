@@ -7,7 +7,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store/searchtest"
 )
 
-// 0070-0071 on a database that already holds issues: every stored title gets the lexemes the
+// 0072-0073 on a database that already holds issues: every stored title gets the lexemes the
 // duplicate check reads (api/duplicates.go), the title's own and never its key's. The backfill
 // leaves search as it was, and the trigger keeps the column for every issue created or retitled
 // after it, a title whose whole vector passes Postgres's limit on one tsvector included, whose
@@ -15,7 +15,7 @@ import (
 func TestTitleLexemesFillEveryStoredTitleAndFollowEveryRetitle(t *testing.T) {
 	ctx := context.Background()
 	store := openEmptyTestStore(t)
-	migrateThrough(t, store, 69)
+	migrateThrough(t, store, 71)
 	if _, err := store.Pool.Exec(ctx, `insert into projects (key, name) values ('CORE', 'Core')`); err != nil {
 		t.Fatalf("seed project: %v", err)
 	}
@@ -34,7 +34,7 @@ func TestTitleLexemesFillEveryStoredTitleAndFollowEveryRetitle(t *testing.T) {
 	searchBefore := issueSearchVectors(t, ctx, store)
 
 	if err := store.Migrate(ctx); err != nil {
-		t.Fatalf("apply 0070-0071: %v", err)
+		t.Fatalf("apply 0072-0073: %v", err)
 	}
 
 	if searchAfter := issueSearchVectors(t, ctx, store); len(searchAfter) != len(searchBefore) {
@@ -100,18 +100,18 @@ func TestTitleLexemesFillEveryStoredTitleAndFollowEveryRetitle(t *testing.T) {
 	}
 }
 
-// 0071 holds no issue's row while it waits for a write that holds one. Its update locks every
+// 0073 holds no issue's row while it waits for a write that holds one. Its update locks every
 // issue's row in the order the rows lie on disk, and a reparent locks the issue and its new parent
 // in key order (lockIssueAndParent, api/issue_parent.go:54-61), which is text order: reparenting
 // CORE-9 under CORE-10 locks CORE-10, the later row on disk, first. A reparent that held CORE-10
 // while the update, already holding CORE-9, waited for it, and then asked for CORE-9, closed a
 // cycle, and Postgres's deadlock check killed one side with 40P01: the boot, or the reparent with
-// a 500. 0071 takes issues EXCLUSIVE before it writes, so it waits for the reparent's table lock
-// holding nothing, the reparent's second row lock is granted, it commits, and 0071 then runs.
-func TestMigrate0071WaitsForAReparentWithoutDeadlockingIt(t *testing.T) {
+// a 500. 0073 takes issues EXCLUSIVE before it writes, so it waits for the reparent's table lock
+// holding nothing, the reparent's second row lock is granted, it commits, and 0073 then runs.
+func TestMigrate0073WaitsForAReparentWithoutDeadlockingIt(t *testing.T) {
 	ctx := context.Background()
 	store := openEmptyTestStore(t)
-	migrateThrough(t, store, 70)
+	migrateThrough(t, store, 72)
 	if _, err := store.Pool.Exec(ctx, `
 		insert into projects (key, name) values ('CORE', 'Core');
 		insert into issues (key, project_key, number, title, created_by, rank)
@@ -136,7 +136,7 @@ func TestMigrate0071WaitsForAReparentWithoutDeadlockingIt(t *testing.T) {
 	go func() { migrated <- store.Migrate(ctx) }()
 	waitForQueuedLock(t, store, "issues", "ExclusiveLock")
 	if err := lock("CORE-9"); err != nil {
-		t.Fatalf("lock CORE-9 while 0071 waited for the reparent: %v", err)
+		t.Fatalf("lock CORE-9 while 0073 waited for the reparent: %v", err)
 	}
 	if _, err := reparent.Exec(ctx, `update issues set parent_key = 'CORE-10' where key = 'CORE-9'`); err != nil {
 		t.Fatalf("reparent CORE-9: %v", err)
@@ -145,7 +145,7 @@ func TestMigrate0071WaitsForAReparentWithoutDeadlockingIt(t *testing.T) {
 		t.Fatalf("commit the reparent: %v", err)
 	}
 	if err := <-migrated; err != nil {
-		t.Fatalf("0071 failed while a reparent held an issue's row: %v", err)
+		t.Fatalf("0073 failed while a reparent held an issue's row: %v", err)
 	}
 }
 

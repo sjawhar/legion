@@ -11,11 +11,11 @@ import (
 const duplicateHeadlineOptions = "StartSel=" + markStart + ", StopSel=" + markEnd + ", HighlightAll=true"
 
 // duplicateQuery finds the issues of project $1, other than the parent $3, whose title
-// near-duplicates the new title $2, comparing their title_lexemes (migration 0070): the new title's
+// near-duplicates the new title $2, comparing their title_lexemes (migration 0072): the new title's
 // are built here, and every stored title's are read from issues.title_lexemes, which the issues
 // trigger writes with the same function, so a creation parses one title, not every title in the
 // project. A stored title past Postgres's limit on one tsvector is compared by the words that open
-// it (search_vector, 0069); a new one cannot pass it, being capped at contracts.IssueTitleMax.
+// it (search_vector, 0071); a new one cannot pass it, being capped at contracts.IssueTitleMax.
 //
 // The parent's lexemes count on neither side. terms holds the new title's lexemes less the
 // parent's, marked new, and the parent's, marked not, each once, so one join of every stored lexeme
