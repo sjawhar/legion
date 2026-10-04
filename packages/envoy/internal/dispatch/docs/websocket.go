@@ -143,7 +143,7 @@ func (a *servicePersistenceAdapter) Compact(ctx context.Context, room string) er
 	if !a.service.roomFailed(room) {
 		ctx = compactIfIdle(ctx)
 	}
-	_, err := a.store.Compact(ctx, room, 500)
+	_, err := a.store.Compact(ctx, room, compactKeep)
 	return err
 }
 
