@@ -33,9 +33,13 @@ export function ProgressChips({
   progress,
   bar = false,
 }: {
-  progress: IssueProgress;
+  /** Absent from an answer an older server gives during a deploy's overlap, which shows nothing. */
+  progress?: IssueProgress;
   bar?: boolean;
 }): ReactNode {
+  if (progress === undefined) {
+    return null;
+  }
   const counts: { noun: "tasks" | "children"; count: ProgressCount }[] = [];
   if (progress.tasks !== null) counts.push({ noun: "tasks", count: progress.tasks });
   if (progress.children !== null) counts.push({ noun: "children", count: progress.children });

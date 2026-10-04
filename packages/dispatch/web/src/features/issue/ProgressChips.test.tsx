@@ -59,3 +59,12 @@ test("a count of one is written in the singular, label and title alike", () => {
     view.unmount();
   }
 });
+
+test("an answer with no progress at all, from an older server, renders nothing", () => {
+  const view = render(<ProgressChips progress={undefined} />);
+  try {
+    expect(view.container.childElementCount).toBe(0);
+  } finally {
+    view.unmount();
+  }
+});

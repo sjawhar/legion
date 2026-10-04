@@ -2351,22 +2351,22 @@ export async function executeDispatchTool(
             : [
                 `${rows.length} ${rows.length === 1 ? "issue" : "issues"} in ${project}` +
                   (isPartial ? ` (${showing})` : ""),
-                ...rows.map(
-                  (row) =>
+                ...rows.map((row) => {
+                  const progress = progressText(row.progress, " · ");
+                  return (
                     `${row.key} [${row.status}]${row.priority === null ? "" : ` P${row.priority}`} ${row.title}` +
                     (row.open_asks === 0
                       ? ""
                       : ` · ${row.open_asks} open ${row.open_asks === 1 ? "ask" : "asks"}`) +
                     (row.claim === null ? "" : ` · claimed by ${claimText(row.claim, titles)}`) +
-                    (progressText(row.progress, " · ") === ""
-                      ? ""
-                      : ` · ${progressText(row.progress, " · ")}`) +
+                    (progress === "" ? "" : ` · ${progress}`) +
                     // A route that reaches a live session changes nothing about the row; one
                     // that reaches nobody, or cannot be judged, is what the owner audit reads.
                     (row.route === null || row.route_status === "live" || row.route_status === null
                       ? ""
                       : ` · route ${routeText(row)}`)
-                ),
+                  );
+                }),
               ].join("\n"),
         details: { issues: rows, total, offset, limit },
       };

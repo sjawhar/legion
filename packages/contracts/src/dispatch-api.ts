@@ -231,11 +231,15 @@ export interface ProgressCount {
  * An issue's progress, counted as GitHub counts an issue's. `tasks` is the task-list items
  * (`- [ ]` / `- [x]`, nested lists and callouts included) of the issue's primary document as its
  * latest version renders, stored on the issue whenever a version of that document is written and
- * `null` when it holds none. `children` is the issue's direct children, every status (icebox
- * included), `done` being those whose status is `done`, computed from the children's statuses on
- * each read and `null` when it has none. It is on every issue of the read, the list and the pinned
- * list, never on an event payload. The check-in collector reads `tasks` and `children` here, so the
- * shape is a contract.
+ * `null` when it holds none. It is also `null` for a spec the server has not counted yet, which
+ * the reconciliation the server runs at start and every five minutes closes, so an uncounted
+ * window lasts at most that long after a deploy. Counts follow the document's versions: a browser
+ * edit shows once it settles, within seconds. `children` is the issue's direct children, every
+ * status (icebox included), `done` being those whose status is `done`, computed from the
+ * children's statuses on each read and `null` when it has none; it is a count, where
+ * `IssueDetails.children` beside it on the same object is the list of child issues. It is on
+ * every issue of the read, the list and the pinned list, never on an event payload. The check-in
+ * collector reads `tasks` and `children` here, so the shape is a contract.
  */
 export interface IssueProgress {
   readonly tasks: ProgressCount | null;

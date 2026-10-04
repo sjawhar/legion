@@ -49,12 +49,18 @@ var listPinnedIssuesQuery = issueSummaryHead + `
 const issueClaimColumns = `i.claimed_by, i.claimed_at`
 
 // issueProgressColumns are an issue's progress in one order (progressScan): the task counts a
-// version write stored on the row, and its direct children counted on this read, every status,
-// done being `status = 'done'`. The children subquery pairs with the partial issues_parent_key
-// index, so a listing pays one index probe per issue and never scans the table for them.
-const issueProgressColumns = `i.tasks_done, i.tasks_total,
-	       (select count(*) filter (where c.status = 'done') from issues c where c.parent_key = i.key),
-	       (select count(*) from issues c where c.parent_key = i.key)`
+// version write stored on the row, and its direct children counted on this read by
+// issueProgressLateral, every status, done being `status = 'done'`.
+const issueProgressColumns = `i.tasks_done, i.tasks_total, progress.children_done, progress.children_total`
+
+// issueProgressLateral counts an issue's direct children in one pass over the partial
+// issues_parent_key index, so a listing pays one index probe per issue for both counts and never
+// scans the table for them. It always yields one row, so grouping by its columns adds none.
+const issueProgressLateral = `
+	left join lateral (
+		select count(*) filter (where c.status = 'done') as children_done, count(*) as children_total
+		from issues c where c.parent_key = i.key
+	) progress on true`
 
 const issueSummaryHead = `
 	select i.key, i.title, i.status, i.priority, i.rank, i.labels, i.parent_key, i.assignee, i.route, i.updated_at, i.last_seq,
@@ -66,6 +72,7 @@ const issueSummaryHead = `
 
 var issueSummaryTail = `
 	left join asks a on a.issue_key = i.key and a.state = 'open'
+	` + issueProgressLateral + `
 	` + issueComponentsLateral + `
 	where ($1 = '' or i.project_key = $1)
 	  and ($2 = '' or i.status = $2)
@@ -76,7 +83,7 @@ var issueSummaryTail = `
 	  and ((cardinality($7::smallint[]) = 0 and not $8::boolean)
 	       or i.priority = any($7::smallint[])
 	       or ($8::boolean and i.priority is null))
-	group by i.key, ` + issueComponentsColumns + `
+	group by i.key, progress.children_done, progress.children_total, ` + issueComponentsColumns + `
 	order by ` + issueStatusCase + `, i.rank asc, i.created_at asc, i.key asc
 `
 
@@ -402,6 +409,7 @@ func (s *server) loadIssueWithProgress(ctx context.Context, q queryer, key strin
 		       `+issueProgressColumns+`,
 		       `+issueComponentsColumns+`
 		from issues i
+		`+issueProgressLateral+`
 		`+issueComponentsLateral+`
 		where i.key = $1
 	`, key).Scan(append(targets, components.targets()...)...); err != nil {

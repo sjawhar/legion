@@ -16805,7 +16805,10 @@ async function executeDispatchTool(input) {
       return {
         text: rows.length === 0 ? `No issues in ${project}.${isPartial ? ` (${showing})` : ""}` : [
           `${rows.length} ${rows.length === 1 ? "issue" : "issues"} in ${project}` + (isPartial ? ` (${showing})` : ""),
-          ...rows.map((row) => `${row.key} [${row.status}]${row.priority === null ? "" : ` P${row.priority}`} ${row.title}` + (row.open_asks === 0 ? "" : ` \xB7 ${row.open_asks} open ${row.open_asks === 1 ? "ask" : "asks"}`) + (row.claim === null ? "" : ` \xB7 claimed by ${claimText(row.claim, titles)}`) + (progressText(row.progress, " \xB7 ") === "" ? "" : ` \xB7 ${progressText(row.progress, " \xB7 ")}`) + (row.route === null || row.route_status === "live" || row.route_status === null ? "" : ` \xB7 route ${routeText(row)}`))
+          ...rows.map((row) => {
+            const progress = progressText(row.progress, " \xB7 ");
+            return `${row.key} [${row.status}]${row.priority === null ? "" : ` P${row.priority}`} ${row.title}` + (row.open_asks === 0 ? "" : ` \xB7 ${row.open_asks} open ${row.open_asks === 1 ? "ask" : "asks"}`) + (row.claim === null ? "" : ` \xB7 claimed by ${claimText(row.claim, titles)}`) + (progress === "" ? "" : ` \xB7 ${progress}`) + (row.route === null || row.route_status === "live" || row.route_status === null ? "" : ` \xB7 route ${routeText(row)}`);
+          })
         ].join(`
 `),
         details: { issues: rows, total, offset, limit }
