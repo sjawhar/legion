@@ -183,15 +183,18 @@ func TestTheDaemonResolvesForTheReviewerOnlyTheBotThreadsItAccepted(t *testing.T
 }
 
 // GitHub refusing to resolve a thread stops the run, and the answer names the refused thread beside
-// the outcomes before it, the thread already resolved among them, so the reviewer sees what the
-// daemon did; the threads after it are neither resolved nor named.
+// the outcomes before it, the thread already resolved among them, and the count of the threads
+// before it that hold the implementer's draft, so the reviewer sees what the daemon did; the
+// threads after it are neither resolved nor named.
 func TestADaemonResolveGitHubRefusesKeepsTheThreadsAlreadyResolved(t *testing.T) {
 	github := newThreadsGitHub(t,
 		reviewThread{"first", "Bot", "claude", "Bot", "legion-reviewer", "Accepted: not a defect"},
+		reviewThread{"draft", "Bot", "claude", "Bot", "legion-implementer", "Fixed in abc123: the guard moved"},
 		reviewThread{"second", "Bot", "claude", "Bot", "legion-reviewer", "Accepted: fixed in abc123"},
 		reviewThread{"third", "Bot", "claude", "Bot", "legion-reviewer", "Accepted: fine"},
 	)
 	github.refuse = map[string]bool{"second": true}
+	github.pending = map[string]bool{"draft": true}
 	var log bytes.Buffer
 	h := newThreadsHarness(t, github, &log)
 	reviewer := newLiveClaim(t, h, "LEGION-208", claim.RoleReviewer)
@@ -202,10 +205,11 @@ func TestADaemonResolveGitHubRefusesKeepsTheThreadsAlreadyResolved(t *testing.T)
 	var answer ThreadsResolveResponse
 	decodeInto(t, recorder, &answer)
 	want := ThreadsResolveResponse{
-		Threads: []reviewthreads.Outcome{{URL: "https://github.com/acme/widgets/pull/42#first", Resolved: reviewthreads.ReviewersAcceptanceOfABot, NewestBy: "legion-reviewer"}},
-		Refused: &ThreadRefusal{URL: "https://github.com/acme/widgets/pull/42#second", Error: "GitHub: Resource not accessible by integration"},
+		Threads:  []reviewthreads.Outcome{{URL: "https://github.com/acme/widgets/pull/42#first", Resolved: reviewthreads.ReviewersAcceptanceOfABot, NewestBy: "legion-reviewer"}},
+		Withheld: 1,
+		Refused:  &ThreadRefusal{URL: "https://github.com/acme/widgets/pull/42#second", Error: "GitHub: Resource not accessible by integration"},
 	}
-	if !slices.Equal(answer.Threads, want.Threads) || answer.Refused == nil || *answer.Refused != *want.Refused {
+	if !slices.Equal(answer.Threads, want.Threads) || answer.Withheld != want.Withheld || answer.Refused == nil || *answer.Refused != *want.Refused {
 		t.Fatalf("answer %+v (refused %+v), want %+v (refused %+v)", answer, answer.Refused, want, want.Refused)
 	}
 	if !slices.Equal(github.resolved, []string{"first"}) {
@@ -215,25 +219,44 @@ func TestADaemonResolveGitHubRefusesKeepsTheThreadsAlreadyResolved(t *testing.T)
 
 // GitHub shows a draft in a pending review only to its author, and the daemon reads the threads as
 // the implement App, so it sees the implementer's own drafts. The reviewer's answer never names a
-// thread whose newest comment is such a draft: not its URL, and not its author.
-func TestADaemonResolveNamesNoThreadHoldingTheImplementersDraft(t *testing.T) {
-	github := newThreadsGitHub(t,
-		reviewThread{"bot-accepted", "Bot", "claude", "Bot", "legion-reviewer", "Accepted: not a defect"},
-		reviewThread{"implementer-draft", "Bot", "claude", "Bot", "legion-implementer", "Fixed in abc123: the guard moved"},
-	)
-	github.pending = map[string]bool{"implementer-draft": true}
-	var log bytes.Buffer
-	h := newThreadsHarness(t, github, &log)
-	reviewer := newLiveClaim(t, h, "LEGION-208", claim.RoleReviewer)
-	recorder := h.request(http.MethodPost, "/legion/v1/threads/resolve", ThreadsResolveRequest{GrantID: reviewer.grant(t), Repo: "acme/widgets", Number: 42}, nil)
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("threads resolve = %d: %s", recorder.Code, recorder.Body)
+// thread whose newest comment is such a draft, neither its URL nor its author, and counts it as
+// withheld instead, so an answer that names no thread does not read as no thread being unresolved.
+func TestADaemonResolveWithholdsTheThreadsHoldingTheImplementersDraft(t *testing.T) {
+	accepted := reviewThread{"bot-accepted", "Bot", "claude", "Bot", "legion-reviewer", "Accepted: not a defect"}
+	drafts := []reviewThread{
+		{"implementer-draft", "Bot", "claude", "Bot", "legion-implementer", "Fixed in abc123: the guard moved"},
+		{"implementer-draft-too", "Bot", "legion-reviewer", "Bot", "legion-implementer", "Declined: out of scope"},
 	}
-	body := recorder.Body.String()
-	var answer ThreadsResolveResponse
-	decodeInto(t, recorder, &answer)
-	if len(answer.Threads) != 1 || answer.Threads[0].URL != "https://github.com/acme/widgets/pull/42#bot-accepted" || strings.Contains(body, "implementer-draft") {
-		t.Fatalf("answer %s, want the accepted bot thread alone and nothing of the draft's thread", body)
+	for _, tc := range []struct {
+		name     string
+		threads  []reviewThread
+		named    []string
+		withheld int
+	}{
+		{"beside a thread it resolves", []reviewThread{accepted, drafts[0]}, []string{"https://github.com/acme/widgets/pull/42#bot-accepted"}, 1},
+		{"when they are every unresolved thread", drafts, nil, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			github := newThreadsGitHub(t, tc.threads...)
+			github.pending = map[string]bool{"implementer-draft": true, "implementer-draft-too": true}
+			var log bytes.Buffer
+			h := newThreadsHarness(t, github, &log)
+			reviewer := newLiveClaim(t, h, "LEGION-208", claim.RoleReviewer)
+			recorder := h.request(http.MethodPost, "/legion/v1/threads/resolve", ThreadsResolveRequest{GrantID: reviewer.grant(t), Repo: "acme/widgets", Number: 42}, nil)
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("threads resolve = %d: %s", recorder.Code, recorder.Body)
+			}
+			body := recorder.Body.String()
+			var answer ThreadsResolveResponse
+			decodeInto(t, recorder, &answer)
+			var named []string
+			for _, outcome := range answer.Threads {
+				named = append(named, outcome.URL)
+			}
+			if !slices.Equal(named, tc.named) || answer.Withheld != tc.withheld || strings.Contains(body, "implementer-draft") || strings.Contains(body, "legion-implementer") {
+				t.Fatalf("answer %s, want the threads %v named, %d withheld, and nothing of a draft's thread", body, tc.named, tc.withheld)
+			}
+		})
 	}
 }
 

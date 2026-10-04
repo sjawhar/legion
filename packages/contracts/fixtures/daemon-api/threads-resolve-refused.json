@@ -6,6 +6,7 @@
       "newestBy": "legion-reviewer"
     }
   ],
+  "withheld": 0,
   "refused": {
     "url": "https://github.com/acme/widgets/pull/42#discussion_r3",
     "error": "GitHub: Resource not accessible by integration"
