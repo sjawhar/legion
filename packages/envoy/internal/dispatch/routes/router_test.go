@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -14,47 +13,31 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
+	"github.com/sjawhar/envoy/internal/oidc"
+	"github.com/sjawhar/envoy/internal/oidc/oidctest"
 )
 
-type memoryUserStore struct {
-	users map[string]*auth.User
-}
-
-func (s *memoryUserStore) Read(_ context.Context, login string) (*auth.User, error) {
-	user := s.users[login]
-	if user == nil {
-		return nil, nil
-	}
-	copy := *user
-	return &copy, nil
-}
-
-func (s *memoryUserStore) Write(_ context.Context, user *auth.User) error {
-	copy := *user
-	s.users[user.Login] = &copy
-	return nil
-}
-
-func (s *memoryUserStore) Remove(_ context.Context, login string) error {
-	delete(s.users, login)
-	return nil
-}
-
 type memorySessionStore struct {
+	mu          sync.Mutex
 	generations map[string]int64
 }
 
 func (s *memorySessionStore) CurrentSessionGeneration(_ context.Context, login string) (int64, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	generation, found := s.generations[login]
 	return generation, found, nil
 }
 
 func (s *memorySessionStore) EnsureSession(_ context.Context, login string) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	generation, found := s.generations[login]
 	if !found {
 		s.generations[login] = 0
@@ -63,74 +46,288 @@ func (s *memorySessionStore) EnsureSession(_ context.Context, login string) (int
 }
 
 func (s *memorySessionStore) RevokeSessions(_ context.Context, login string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.generations[login]++
 	return nil
 }
 
-type callbackHTTPClient struct {
-	login string
+// memoryPeopleStore is auth.PeopleStore in memory.
+type memoryPeopleStore struct {
+	mu     sync.Mutex
+	people map[string]auth.PersonMembership
 }
 
-func (c callbackHTTPClient) Do(req *http.Request) (*http.Response, error) {
-	body := ""
-	switch req.URL.Path {
-	case "/login/oauth/access_token":
-		body = `{"access_token":"access","refresh_token":"refresh","expires_in":28800,"refresh_token_expires_in":15552000}`
-	case "/user":
-		body = `{"login":"` + c.login + `"}`
-	default:
-		body = `{}`
+func newMemoryPeople() *memoryPeopleStore {
+	return &memoryPeopleStore{people: map[string]auth.PersonMembership{}}
+}
+
+func (s *memoryPeopleStore) Record(_ context.Context, email string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, found := s.people[email]; !found {
+		s.people[email] = auth.PersonMembership{}
 	}
-	return &http.Response{
-		StatusCode: http.StatusOK,
-		Header:     make(http.Header),
-		Body:       io.NopCloser(strings.NewReader(body)),
-	}, nil
+	return nil
 }
 
-func newTestRouter(t *testing.T, users auth.UserStore, allowed map[string]struct{}) (http.Handler, *AppContext) {
+func (s *memoryPeopleStore) SignIn(_ context.Context, email, refreshToken string, confirmedAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.people[email] = auth.PersonMembership{RefreshToken: refreshToken, ConfirmedAt: confirmedAt}
+	return nil
+}
+
+func (s *memoryPeopleStore) Membership(_ context.Context, email string) (auth.PersonMembership, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	membership, found := s.people[email]
+	return membership, found, nil
+}
+
+func (s *memoryPeopleStore) Confirm(_ context.Context, email, refreshToken string, confirmedAt time.Time) error {
+	return s.SignIn(context.Background(), email, refreshToken, confirmedAt)
+}
+
+func (s *memoryPeopleStore) End(_ context.Context, email string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, found := s.people[email]; found {
+		s.people[email] = auth.PersonMembership{}
+	}
+	return nil
+}
+
+func (s *memoryPeopleStore) get(email string) (auth.PersonMembership, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	membership, found := s.people[email]
+	return membership, found
+}
+
+const (
+	rigClientID = "dispatch-client"
+	rigGroup    = "dispatch-members"
+	rigEmail    = "a.b+c@d.example"
+)
+
+// signInRig is a Dispatch router signing people in through a fake sign-in pool, with the
+// cookie identity production runs and a clock the membership refresh reads.
+type signInRig struct {
+	handler  http.Handler
+	ctx      *AppContext
+	issuer   *oidctest.Issuer
+	people   *memoryPeopleStore
+	sessions *memorySessionStore
+	mu       sync.Mutex
+	now      time.Time
+}
+
+func newSignInRig(t *testing.T, serverURL string) *signInRig {
 	t.Helper()
-	ctx, err := BuildAppContext(AppContextOptions{
-		SigningKey: "signing-key",
-		Users:      users,
-		Identity: identity.HeaderIdentity{
-			Header:        "X-Dispatch-User",
-			AllowedLogins: allowed,
-		},
-		AllowedLogins: allowed,
-		App:           &auth.AppConfig{ClientID: "client-id", ClientSecret: "client-secret"},
+	issuer := oidctest.New(t)
+	issuer.EnableCodeFlow(issuer.PublishKey(t, "signing-key"), rigClientID, "dispatch-secret")
+	flow, err := oidc.NewCodeFlow(context.Background(), issuer.URL(), rigClientID, "dispatch-secret")
+	if err != nil {
+		t.Fatalf("NewCodeFlow: %v", err)
+	}
+	rig := &signInRig{issuer: issuer, people: newMemoryPeople(), sessions: &memorySessionStore{generations: map[string]int64{}}, now: time.Now()}
+	membership := &identity.Membership{People: rig.people, Sessions: rig.sessions, SignIn: flow, Group: rigGroup, Now: rig.clock}
+	rig.ctx, err = BuildAppContext(AppContextOptions{
+		SigningKey:  "signing-key",
+		People:      rig.people,
+		Sessions:    rig.sessions,
+		Identity:    identity.CookieIdentity{SigningKey: "signing-key", Sessions: rig.sessions, Membership: membership},
+		SignIn:      flow,
+		SignInGroup: rigGroup,
+		ServerURL:   serverURL,
 	})
 	if err != nil {
 		t.Fatalf("build context: %v", err)
 	}
-	return New(ctx), ctx
+	rig.handler = New(rig.ctx)
+	return rig
 }
 
-func oauthStart(t *testing.T, handler http.Handler) (string, *http.Cookie) {
-	t.Helper()
-	start := httptest.NewRequest(http.MethodGet, "http://dispatch.test/auth/start", nil)
-	startResponse := httptest.NewRecorder()
-	handler.ServeHTTP(startResponse, start)
-	if startResponse.Code != http.StatusFound {
-		t.Fatalf("start status: got %d, want %d", startResponse.Code, http.StatusFound)
+func (r *signInRig) clock() time.Time {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.now
+}
+
+func (r *signInRig) advance(d time.Duration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.now = r.now.Add(d)
+}
+
+// personClaims is a sign-in pool ID token's claims for a person the Google provider federated:
+// its email claim names someone else, as a person can make it do.
+func personClaims(groups ...string) map[string]any {
+	return map[string]any{
+		"sub":              "person-subject",
+		"cognito:username": "ExampleIdP_A.B+C@D.example",
+		"cognito:groups":   groups,
+		"email":            "someone-else@d.example",
+		"identities":       []map[string]any{{"providerName": "ExampleIdP"}},
 	}
-	location, err := url.Parse(startResponse.Header().Get("Location"))
+}
+
+// start opens a sign-in and returns the pool's authorization URL and the browser's state cookie.
+func (r *signInRig) start(t *testing.T, target string) (*url.URL, *http.Cookie) {
+	t.Helper()
+	response := httptest.NewRecorder()
+	r.handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, target, nil))
+	if response.Code != http.StatusFound {
+		t.Fatalf("start status: got %d body=%s, want %d", response.Code, response.Body.String(), http.StatusFound)
+	}
+	location, err := url.Parse(response.Header().Get("Location"))
 	if err != nil {
 		t.Fatalf("parse start location: %v", err)
 	}
-	state := location.Query().Get("state")
-	if state == "" {
-		t.Fatal("start response missing state")
-	}
-	cookies := startResponse.Result().Cookies()
+	cookies := response.Result().Cookies()
 	if len(cookies) != 1 {
-		t.Fatalf("OAuth start cookies = %#v, want one state cookie", cookies)
+		t.Fatalf("sign-in start cookies = %#v, want one state cookie", cookies)
 	}
 	cookie := cookies[0]
 	if cookie.Name != oauthStateCookie || !cookie.HttpOnly || cookie.SameSite != http.SameSiteLaxMode || cookie.MaxAge != oauthStateMaxAge {
-		t.Fatalf("OAuth state cookie = %#v, want HttpOnly SameSite=Lax short-lived nonce", cookie)
+		t.Fatalf("sign-in state cookie = %#v, want HttpOnly SameSite=Lax short-lived nonce", cookie)
 	}
-	return state, cookie
+	return location, cookie
+}
+
+// signIn runs a whole sign-in as the person claims names: start, the pool's sign-in, callback.
+func (r *signInRig) signIn(t *testing.T, claims map[string]any) *httptest.ResponseRecorder {
+	t.Helper()
+	r.issuer.SignInAs(claims)
+	authURL, stateCookie := r.start(t, "http://dispatch.test/auth/start?next=/issues/CORE-1")
+	code, state := r.issuer.Authorize(t, authURL.String())
+	callback := httptest.NewRequest(http.MethodGet, "http://dispatch.test/auth/callback?code="+url.QueryEscape(code)+"&state="+url.QueryEscape(state), nil)
+	callback.AddCookie(stateCookie)
+	response := httptest.NewRecorder()
+	r.handler.ServeHTTP(response, callback)
+	return response
+}
+
+func sessionCookie(response *httptest.ResponseRecorder) *http.Cookie {
+	for _, cookie := range response.Result().Cookies() {
+		if cookie.Name == "dsession" && cookie.Value != "" {
+			return cookie
+		}
+	}
+	return nil
+}
+
+func (r *signInRig) whoami(cookie *http.Cookie) *httptest.ResponseRecorder {
+	request := httptest.NewRequest(http.MethodGet, "http://dispatch.test/auth/whoami", nil)
+	request.AddCookie(cookie)
+	response := httptest.NewRecorder()
+	r.handler.ServeHTTP(response, request)
+	return response
+}
+
+// The person is named by the email their provider username carries, lowercased, never by the
+// email claim; a member of the group gets a session and lands on the page they asked for.
+func TestSignInNamesThePersonByTheirUsernameNotTheEmailClaim(t *testing.T) {
+	rig := newSignInRig(t, "")
+	response := rig.signIn(t, personClaims("other-group", rigGroup))
+	if response.Code != http.StatusFound || response.Header().Get("Location") != "/issues/CORE-1" {
+		t.Fatalf("callback: status %d Location %q body=%s, want 302 to /issues/CORE-1", response.Code, response.Header().Get("Location"), response.Body.String())
+	}
+	cookie := sessionCookie(response)
+	if cookie == nil {
+		t.Fatal("a member did not receive a session cookie")
+	}
+	whoami := rig.whoami(cookie)
+	if whoami.Code != http.StatusOK || !strings.Contains(whoami.Body.String(), `"login":"`+rigEmail+`"`) {
+		t.Fatalf("whoami: status %d body %s, want %s", whoami.Code, whoami.Body.String(), rigEmail)
+	}
+	membership, found := rig.people.get(rigEmail)
+	if !found || membership.RefreshToken == "" {
+		t.Fatalf("the sign-in kept no refresh token: %#v found=%t", membership, found)
+	}
+	if _, found := rig.people.get("someone-else@d.example"); found {
+		t.Fatal("the email claim's address was recorded as a person")
+	}
+}
+
+// Someone the pool vouches for but who is not in the group is told so in the browser and named in
+// the log; they get neither a session nor a recorded sign-in.
+func TestSignInRefusesSomeoneOutsideTheGroupWithPageAndLog(t *testing.T) {
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	rig := newSignInRig(t, "")
+	response := rig.signIn(t, personClaims("other-group"))
+	if response.Code != http.StatusForbidden || !strings.HasPrefix(response.Header().Get("Content-Type"), "text/html") {
+		t.Fatalf("callback: status %d Content-Type %q, want 403 text/html", response.Code, response.Header().Get("Content-Type"))
+	}
+	body := response.Body.String()
+	if !strings.Contains(body, rigEmail+" is not in the group that may use Dispatch") || !strings.Contains(body, `href="/auth/start"`) {
+		t.Errorf("refusal page does not name the person and offer another sign-in: %s", body)
+	}
+	if sessionCookie(response) != nil {
+		t.Error("someone outside the group received a session cookie")
+	}
+	if _, found := rig.people.get(rigEmail); found {
+		t.Error("someone outside the group was recorded as signed in")
+	}
+	if logged := logs.String(); !strings.Contains(logged, "sign-in refused") || !strings.Contains(logged, rigEmail) {
+		t.Errorf("refusal was not logged with the person: %q", logged)
+	}
+}
+
+func TestSignInRefusesAUsernameNoProviderIssued(t *testing.T) {
+	rig := newSignInRig(t, "")
+	claims := personClaims(rigGroup)
+	claims["cognito:username"] = "sami@d.example"
+	delete(claims, "identities")
+	response := rig.signIn(t, claims)
+	if response.Code != http.StatusForbidden || sessionCookie(response) != nil {
+		t.Fatalf("callback for a pool account: status %d cookie %v, want 403 and no session", response.Code, sessionCookie(response))
+	}
+}
+
+// While the person stays a member, the session renews its membership at least hourly.
+func TestSessionRenewsItsMembershipHourly(t *testing.T) {
+	rig := newSignInRig(t, "")
+	cookie := sessionCookie(rig.signIn(t, personClaims(rigGroup)))
+	rig.advance(59 * time.Minute)
+	if response := rig.whoami(cookie); response.Code != http.StatusOK || rig.issuer.Refreshes() != 0 {
+		t.Fatalf("within the hour: status %d refreshes %d, want 200 and none", response.Code, rig.issuer.Refreshes())
+	}
+	rig.advance(2 * time.Minute)
+	if response := rig.whoami(cookie); response.Code != http.StatusOK || rig.issuer.Refreshes() != 1 {
+		t.Fatalf("after the hour: status %d refreshes %d, want 200 and one refresh", response.Code, rig.issuer.Refreshes())
+	}
+}
+
+func TestSessionEndsWhenTheRefreshFails(t *testing.T) {
+	rig := newSignInRig(t, "")
+	cookie := sessionCookie(rig.signIn(t, personClaims(rigGroup)))
+	rig.issuer.RevokeGrants()
+	rig.advance(2 * time.Hour)
+	if response := rig.whoami(cookie); response.Code != http.StatusUnauthorized {
+		t.Fatalf("whoami after the pool refused the refresh: status %d body %s, want 401", response.Code, response.Body.String())
+	}
+	if generation, _, _ := rig.sessions.CurrentSessionGeneration(context.Background(), rigEmail); generation != 1 {
+		t.Fatalf("session generation = %d, want 1: every cookie of the person revoked", generation)
+	}
+}
+
+func TestSessionEndsWhenThePersonLeavesTheGroup(t *testing.T) {
+	rig := newSignInRig(t, "")
+	cookie := sessionCookie(rig.signIn(t, personClaims(rigGroup)))
+	rig.issuer.UpdateGrants(func(claims map[string]any) { claims["cognito:groups"] = []string{"other-group"} })
+	rig.advance(2 * time.Hour)
+	if response := rig.whoami(cookie); response.Code != http.StatusUnauthorized {
+		t.Fatalf("whoami after leaving the group: status %d body %s, want 401", response.Code, response.Body.String())
+	}
+	if again := rig.signIn(t, personClaims("other-group")); again.Code != http.StatusForbidden {
+		t.Fatalf("signing in again outside the group: status %d, want 403", again.Code)
+	}
 }
 
 func TestOAuthStateCookieMatchesCookieMode(t *testing.T) {
@@ -143,22 +340,12 @@ func TestOAuthStateCookieMatchesCookieMode(t *testing.T) {
 		{name: "HTTP development mode", insecure: true, secure: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			users := &memoryUserStore{users: map[string]*auth.User{}}
-			handler, ctx := newTestRouter(t, users, map[string]struct{}{"sjawhar": {}})
-			ctx.HTTPClient = callbackHTTPClient{login: "sjawhar"}
-			ctx.InsecureCookie = tc.insecure
-
-			state, nonce := oauthStart(t, handler)
+			rig := newSignInRig(t, "")
+			rig.ctx.InsecureCookie = tc.insecure
+			_, nonce := rig.start(t, "http://dispatch.test/auth/start")
+			response := rig.signIn(t, personClaims(rigGroup))
 			if nonce.Secure != tc.secure {
-				t.Fatalf("OAuth nonce Secure = %t, want %t", nonce.Secure, tc.secure)
-			}
-
-			callback := httptest.NewRequest(http.MethodGet, "http://dispatch.test/auth/callback?code=code&state="+url.QueryEscape(state), nil)
-			callback.AddCookie(nonce)
-			response := httptest.NewRecorder()
-			handler.ServeHTTP(response, callback)
-			if response.Code != http.StatusFound {
-				t.Fatalf("OAuth callback status = %d body=%s, want %d", response.Code, response.Body.String(), http.StatusFound)
+				t.Fatalf("sign-in nonce Secure = %t, want %t", nonce.Secure, tc.secure)
 			}
 			issued := false
 			for _, cookie := range response.Result().Cookies() {
@@ -174,84 +361,44 @@ func TestOAuthStateCookieMatchesCookieMode(t *testing.T) {
 	}
 }
 
-func oauthState(t *testing.T, handler http.Handler) string {
-	state, _ := oauthStart(t, handler)
-	return state
-}
-
-// A login GitHub vouches for but the allowlist does not is told so in the
-// browser and named in the log, so the operator can find who to add; it gets
-// neither a stored token pair nor a session cookie.
-func TestOAuthCallbackRefusesUnlistedLoginWithPageAndLog(t *testing.T) {
-	var logs bytes.Buffer
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
-
-	users := &memoryUserStore{users: map[string]*auth.User{}}
-	handler, ctx := newTestRouter(t, users, map[string]struct{}{"sjawhar": {}})
-
-	state, cookie := oauthStart(t, handler)
-	callback := httptest.NewRequest(http.MethodGet, "http://dispatch.test/auth/callback?code=code&state="+url.QueryEscape(state), nil)
-	callback.AddCookie(cookie)
-	callbackResponse := httptest.NewRecorder()
-	ctx.HTTPClient = callbackHTTPClient{login: "mallory"}
-	handler.ServeHTTP(callbackResponse, callback)
-
-	if callbackResponse.Code != http.StatusForbidden {
-		t.Errorf("status: got %d, want %d", callbackResponse.Code, http.StatusForbidden)
-	}
-	if contentType := callbackResponse.Header().Get("Content-Type"); !strings.HasPrefix(contentType, "text/html") {
-		t.Errorf("Content-Type: got %q, want text/html (the callback is a browser navigation)", contentType)
-	}
-	body := callbackResponse.Body.String()
-	if !strings.Contains(body, "mallory is not on the Dispatch allowlist") {
-		t.Errorf("refusal page does not name the login: %s", body)
-	}
-	if !strings.Contains(body, `href="/auth/start"`) {
-		t.Errorf("refusal page has no way to sign in with a different account: %s", body)
-	}
-	for _, cookie := range callbackResponse.Result().Cookies() {
-		if cookie.Name == "dsession" {
-			t.Errorf("unlisted login received a session cookie: %q", cookie)
+func TestAuthStartWithoutSignInIsUnavailable(t *testing.T) {
+	handler, _ := newTestRouter(t)
+	for _, target := range []string{"/auth/start", "/auth/callback?code=c&state=s"} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "http://dispatch.test"+target, nil))
+		if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), `"code":"SIGNIN_UNCONFIGURED"`) {
+			t.Errorf("%s with no sign-in: status %d body %s, want 503 SIGNIN_UNCONFIGURED", target, response.Code, response.Body.String())
 		}
 	}
-	if user, _ := users.Read(context.Background(), "mallory"); user != nil {
-		t.Errorf("unlisted user persisted: %+v", user)
-	}
-	if logged := logs.String(); !strings.Contains(logged, "login not allowed") || !strings.Contains(logged, "login=mallory") {
-		t.Errorf("refusal was not logged with the login: %q", logged)
-	}
 }
 
-func TestOAuthCallbackIssuesCookieForAllowedLogin(t *testing.T) {
-	users := &memoryUserStore{users: map[string]*auth.User{}}
-	handler, ctx := newTestRouter(t, users, map[string]struct{}{"sjawhar": {}})
-
-	state, cookie := oauthStart(t, handler)
-	callback := httptest.NewRequest(http.MethodGet, "http://dispatch.test/auth/callback?code=code&state="+url.QueryEscape(state), nil)
-	callback.AddCookie(cookie)
-	callbackResponse := httptest.NewRecorder()
-	ctx.HTTPClient = callbackHTTPClient{login: "sjawhar"}
-	handler.ServeHTTP(callbackResponse, callback)
-	if callbackResponse.Code != http.StatusFound {
-		t.Errorf("status: got %d, want %d", callbackResponse.Code, http.StatusFound)
+// newTestRouter injects header identity without configuring sign-in.
+func newTestRouter(t *testing.T) (http.Handler, *AppContext) {
+	t.Helper()
+	people := newMemoryPeople()
+	ctx, err := BuildAppContext(AppContextOptions{
+		SigningKey: "signing-key",
+		People:     people,
+		Identity:   identity.HeaderIdentity{Header: "X-Dispatch-User", People: people},
+	})
+	if err != nil {
+		t.Fatalf("build context: %v", err)
 	}
-	if callbackResponse.Header().Get("Set-Cookie") == "" {
-		t.Error("allowed login did not receive a session cookie")
-	}
+	return New(ctx), ctx
 }
 
 func TestWhoamiUsesHeaderIdentity(t *testing.T) {
-	handler, _ := newTestRouter(t, &memoryUserStore{users: map[string]*auth.User{}}, map[string]struct{}{"sjawhar": {}})
-
+	handler, ctx := newTestRouter(t)
 	request := httptest.NewRequest(http.MethodGet, "http://dispatch.test/auth/whoami", nil)
-	request.Header.Set("X-Dispatch-User", "sjawhar")
+	request.Header.Set("X-Dispatch-User", "Sami@D.example")
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"login":"sjawhar"`) ||
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"login":"sami@d.example"`) ||
 		!strings.Contains(response.Body.String(), `"kind":"user"`) {
-		t.Errorf("allowed header response: status=%d body=%s", response.Code, response.Body.String())
+		t.Errorf("header response: status=%d body=%s", response.Code, response.Body.String())
+	}
+	if _, found := ctx.People.(*memoryPeopleStore).get("sami@d.example"); !found {
+		t.Error("the header's person was not recorded")
 	}
 
 	response = httptest.NewRecorder()
@@ -261,83 +408,52 @@ func TestWhoamiUsesHeaderIdentity(t *testing.T) {
 	}
 }
 
-func TestGitHubProxyUsesHeaderIdentity(t *testing.T) {
-	users := &memoryUserStore{users: map[string]*auth.User{
-		"sjawhar": {
-			Login: "sjawhar",
-			Tokens: auth.Tokens{
-				AccessToken:     "access",
-				AccessExpiresAt: time.Now().Add(time.Hour).UnixMilli(),
-			},
-		},
-	}}
-	handler, ctx := newTestRouter(t, users, map[string]struct{}{"sjawhar": {}})
-	ctx.HTTPClient = callbackHTTPClient{}
-	request := httptest.NewRequest(http.MethodGet, "http://dispatch.test/api/github/rest/user", nil)
-	request.Header.Set("X-Dispatch-User", "sjawhar")
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusOK {
-		t.Errorf("proxy status: got %d, want %d", response.Code, http.StatusOK)
+// The GitHub proxy serves people only, reads only, and the GraphQL proxy no longer exists.
+func TestGitHubProxyServesPeopleOnlyAndOnlyReads(t *testing.T) {
+	handler, _ := newTestRouter(t)
+	serve := func(method, target, person string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(method, "http://dispatch.test"+target, nil)
+		if person != "" {
+			request.Header.Set("X-Dispatch-User", person)
+		}
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		return response
 	}
-}
-
-func TestCookieIdentityRechecksAllowedLogins(t *testing.T) {
-	allowed := map[string]struct{}{"sjawhar": {}}
-	sessions := &memorySessionStore{generations: map[string]int64{"sjawhar": 0}}
-	ctx, err := BuildAppContext(AppContextOptions{
-		SigningKey: "signing-key",
-		Users:      &memoryUserStore{users: map[string]*auth.User{}},
-		Sessions:   sessions,
-		Identity: identity.CookieIdentity{
-			SigningKey: "signing-key", AllowedLogins: allowed, Sessions: sessions,
-		},
-		AllowedLogins: allowed,
-	})
-	if err != nil {
-		t.Fatalf("build context: %v", err)
+	if response := serve(http.MethodGet, "/api/github/rest/repos/acme/web/pulls/1", ""); response.Code != http.StatusUnauthorized {
+		t.Errorf("anonymous GitHub read: status %d, want 401", response.Code)
 	}
-	handler := New(ctx)
-	request := httptest.NewRequest(http.MethodGet, "http://dispatch.test/auth/whoami", nil)
-	cookie, err := http.ParseSetCookie(auth.IssueSessionCookie("sjawhar", 0, "signing-key", true))
-	if err != nil {
-		t.Fatalf("parse session cookie: %v", err)
+	if response := serve(http.MethodPost, "/api/github/rest/repos/acme/web/pulls/1", "sami@d.example"); response.Code != http.StatusMethodNotAllowed {
+		t.Errorf("POST through the GitHub proxy: status %d, want 405", response.Code)
 	}
-	request.AddCookie(cookie)
-	allowedResponse := httptest.NewRecorder()
-	handler.ServeHTTP(allowedResponse, request)
-	if allowedResponse.Code != http.StatusOK {
-		t.Fatalf("allowed cookie status: got %d, want %d", allowedResponse.Code, http.StatusOK)
+	if response := serve(http.MethodGet, "/api/github/rest/repos/acme/web/pulls/1", "sami@d.example"); response.Code != http.StatusServiceUnavailable {
+		t.Errorf("GitHub read with no App: status %d body %s, want 503", response.Code, response.Body.String())
 	}
-
-	delete(allowed, "sjawhar")
-	revokedResponse := httptest.NewRecorder()
-	handler.ServeHTTP(revokedResponse, request)
-	if revokedResponse.Code != http.StatusForbidden || !strings.Contains(revokedResponse.Body.String(), `"code":"LOGIN_NOT_ALLOWED"`) {
-		t.Fatalf("revoked cookie status: got %d body=%s, want LOGIN_NOT_ALLOWED", revokedResponse.Code, revokedResponse.Body.String())
+	if response := serve(http.MethodPost, "/api/github/graphql", "sami@d.example"); response.Code != http.StatusNotFound {
+		t.Errorf("POST /api/github/graphql: status %d, want 404 (the GraphQL proxy is gone)", response.Code)
 	}
 }
 
 func TestAuthStartCapsPendingStates(t *testing.T) {
-	handler, _ := newTestRouter(t, &memoryUserStore{users: map[string]*auth.User{}}, nil)
+	rig := newSignInRig(t, "")
 	for requestNumber := range 1000 {
 		response := httptest.NewRecorder()
-		handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "http://dispatch.test/auth/start", nil))
+		rig.handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "http://dispatch.test/auth/start", nil))
 		if response.Code != http.StatusFound {
 			t.Fatalf("start %d status: got %d, want %d", requestNumber, response.Code, http.StatusFound)
 		}
 	}
 	overflow := httptest.NewRecorder()
-	handler.ServeHTTP(overflow, httptest.NewRequest(http.MethodGet, "http://dispatch.test/auth/start", nil))
+	rig.handler.ServeHTTP(overflow, httptest.NewRequest(http.MethodGet, "http://dispatch.test/auth/start", nil))
 	if overflow.Code != http.StatusTooManyRequests {
 		t.Fatalf("overflow status: got %d body=%s, want %d", overflow.Code, overflow.Body.String(), http.StatusTooManyRequests)
 	}
 }
 
 func TestOAuthCallbackRejectsExpiredPendingState(t *testing.T) {
-	_, ctx := newTestRouter(t, &memoryUserStore{users: map[string]*auth.User{}}, map[string]struct{}{"sjawhar": {}})
+	rig := newSignInRig(t, "")
 	router := &router{
-		ctx: ctx,
+		ctx: rig.ctx,
 		pendingStates: map[string]pendingState{
 			"expired": {next: "/", expiresAt: time.Now().Add(-time.Second)},
 		},
@@ -353,12 +469,12 @@ func TestOAuthCallbackRejectsExpiredPendingState(t *testing.T) {
 			return
 		}
 	}
-	t.Fatalf("expired callback did not clear OAuth state cookie: %#v", response.Result().Cookies())
+	t.Fatalf("expired callback did not clear the sign-in state cookie: %#v", response.Result().Cookies())
 }
 
 func TestAuthStartEvictsExpiredPendingStates(t *testing.T) {
-	_, ctx := newTestRouter(t, &memoryUserStore{users: map[string]*auth.User{}}, nil)
-	router := &router{ctx: ctx, pendingStates: make(map[string]pendingState, maxPendingStates)}
+	rig := newSignInRig(t, "")
+	router := &router{ctx: rig.ctx, pendingStates: make(map[string]pendingState, maxPendingStates)}
 	for token := range maxPendingStates {
 		router.pendingStates[fmt.Sprintf("expired-%d", token)] = pendingState{expiresAt: time.Now().Add(-time.Second)}
 	}
@@ -374,7 +490,7 @@ func TestStaticHandlerServesSpaShellForUnknownRoute(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(webDist, "index.html"), []byte("<!doctype html>"), 0o600); err != nil {
 		t.Fatalf("write dashboard index: %v", err)
 	}
-	handler, context := newTestRouter(t, &memoryUserStore{users: map[string]*auth.User{}}, nil)
+	handler, context := newTestRouter(t)
 	context.WebDistDir = webDist
 
 	response := httptest.NewRecorder()
@@ -396,7 +512,7 @@ func TestStaticHandlerServesIndexAtRoot(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(webDist, "index.html"), []byte("<!doctype html>"), 0o600); err != nil {
 		t.Fatalf("write dashboard index: %v", err)
 	}
-	handler, context := newTestRouter(t, &memoryUserStore{users: map[string]*auth.User{}}, nil)
+	handler, context := newTestRouter(t)
 	context.WebDistDir = webDist
 
 	response := httptest.NewRecorder()
@@ -421,7 +537,7 @@ func TestStaticHandlerServesDistDirectorySpelledThroughDotDot(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(webDist, "index.html"), []byte("<!doctype html>"), 0o600); err != nil {
 		t.Fatalf("write dashboard index: %v", err)
 	}
-	handler, context := newTestRouter(t, &memoryUserStore{users: map[string]*auth.User{}}, nil)
+	handler, context := newTestRouter(t)
 	// The directory as an operator can spell it from a sibling package, never cleaned:
 	// DISPATCH_WEB_DIST="$PWD/../dispatch/web/dist" run from packages/envoy.
 	sep := string(filepath.Separator)
@@ -451,7 +567,7 @@ func TestStaticHandlerKeepsRequestsInsideTheDistDirectory(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(parent, "secret.txt"), []byte("secret"), 0o600); err != nil {
 		t.Fatalf("write secret: %v", err)
 	}
-	_, context := newTestRouter(t, &memoryUserStore{users: map[string]*auth.User{}}, nil)
+	_, context := newTestRouter(t)
 	context.WebDistDir = webDist
 	static := &router{ctx: context}
 	serve := func(path string) *httptest.ResponseRecorder {
@@ -479,7 +595,7 @@ func TestStaticHandlerServesSpaShellForBrowserDeepLink(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(webDist, "index.html"), []byte("<!doctype html>"), 0o600); err != nil {
 		t.Fatalf("write dashboard index: %v", err)
 	}
-	handler, context := newTestRouter(t, &memoryUserStore{users: map[string]*auth.User{}}, nil)
+	handler, context := newTestRouter(t)
 	context.WebDistDir = webDist
 
 	for _, path := range []string{
@@ -508,7 +624,7 @@ func TestStaticHandlerRoutingRules(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(webDist, "index.html"), []byte("<!doctype html>"), 0o600); err != nil {
 		t.Fatalf("write dashboard index: %v", err)
 	}
-	handler, context := newTestRouter(t, &memoryUserStore{users: map[string]*auth.User{}}, nil)
+	handler, context := newTestRouter(t)
 	context.WebDistDir = webDist
 
 	for _, tc := range []struct {
@@ -576,7 +692,7 @@ func TestStaticHandlerServesBuiltAssets(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(webDist, "assets", "index-abc123.js"), []byte("console.log(1)"), 0o600); err != nil {
 		t.Fatalf("write asset: %v", err)
 	}
-	handler, context := newTestRouter(t, &memoryUserStore{users: map[string]*auth.User{}}, nil)
+	handler, context := newTestRouter(t)
 	context.WebDistDir = webDist
 
 	response := httptest.NewRecorder()
@@ -613,7 +729,7 @@ func TestStaticHandlerCacheControl(t *testing.T) {
 			t.Fatalf("write %s: %v", name, err)
 		}
 	}
-	handler, context := newTestRouter(t, &memoryUserStore{users: map[string]*auth.User{}}, nil)
+	handler, context := newTestRouter(t)
 	context.WebDistDir = webDist
 
 	for _, tc := range []struct {
@@ -653,7 +769,7 @@ func TestStaticHandlerRevalidatesPagesByContent(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(webDist, "index.html"), []byte("<!doctype html>"), 0o600); err != nil {
 		t.Fatalf("write dashboard index: %v", err)
 	}
-	handler, context := newTestRouter(t, &memoryUserStore{users: map[string]*auth.User{}}, nil)
+	handler, context := newTestRouter(t)
 	context.WebDistDir = webDist
 	get := func(path string, header http.Header) *httptest.ResponseRecorder {
 		request := httptest.NewRequest(http.MethodGet, path, nil)
@@ -704,7 +820,7 @@ func TestUnknownReservedPathIsJSONNotFoundWithHint(t *testing.T) {
 					t.Fatalf("write dashboard index: %v", err)
 				}
 			}
-			handler, context := newTestRouter(t, &memoryUserStore{users: map[string]*auth.User{}}, nil)
+			handler, context := newTestRouter(t)
 			context.WebDistDir = webDist
 
 			for _, path := range []string{"/api/v1/does-not-exist", "/v1/issues"} {
@@ -750,7 +866,7 @@ func TestStaticHandlerServesFaviconIcoAsSvg(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(webDist, "favicon.svg"), []byte("<svg></svg>"), 0o600); err != nil {
 		t.Fatalf("write favicon: %v", err)
 	}
-	handler, context := newTestRouter(t, &memoryUserStore{users: map[string]*auth.User{}}, nil)
+	handler, context := newTestRouter(t)
 	context.WebDistDir = webDist
 
 	response := httptest.NewRecorder()
@@ -772,7 +888,7 @@ func TestStaticHandlerFaviconIcoFallsBackToNoContent(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(webDist, "index.html"), []byte("<!doctype html>"), 0o600); err != nil {
 		t.Fatalf("write dashboard index: %v", err)
 	}
-	handler, context := newTestRouter(t, &memoryUserStore{users: map[string]*auth.User{}}, nil)
+	handler, context := newTestRouter(t)
 	context.WebDistDir = webDist
 
 	response := httptest.NewRecorder()
@@ -783,59 +899,20 @@ func TestStaticHandlerFaviconIcoFallsBackToNoContent(t *testing.T) {
 	}
 }
 
+// A callback carrying a state another browser started is refused before any exchange.
 func TestOAuthCallbackRejectsStateFromAnotherBrowser(t *testing.T) {
-	users := &memoryUserStore{users: map[string]*auth.User{}}
-	handler, ctx := newTestRouter(t, users, map[string]struct{}{"sjawhar": {}})
-	ctx.HTTPClient = callbackHTTPClient{login: "sjawhar"}
-
-	state := oauthState(t, handler)
-	callback := httptest.NewRequest(http.MethodGet, "http://dispatch.test/auth/callback?code=code&state="+url.QueryEscape(state), nil)
+	rig := newSignInRig(t, "")
+	rig.issuer.SignInAs(personClaims(rigGroup))
+	authURL, _ := rig.start(t, "http://dispatch.test/auth/start")
+	code, state := rig.issuer.Authorize(t, authURL.String())
+	callback := httptest.NewRequest(http.MethodGet, "http://dispatch.test/auth/callback?code="+url.QueryEscape(code)+"&state="+url.QueryEscape(state), nil)
 	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, callback)
-
-	if response.Code != http.StatusBadRequest {
-		t.Fatalf("cross-browser callback status = %d body=%s, want %d", response.Code, response.Body.String(), http.StatusBadRequest)
+	rig.handler.ServeHTTP(response, callback)
+	if response.Code != http.StatusBadRequest || sessionCookie(response) != nil {
+		t.Fatalf("cross-browser callback status = %d body=%s, want 400 and no session", response.Code, response.Body.String())
 	}
-	if user, _ := users.Read(context.Background(), "sjawhar"); user != nil {
-		t.Fatalf("cross-browser callback persisted user %#v", user)
-	}
-}
-
-func TestOAuthCallbackAcceptsStateFromOriginatingBrowser(t *testing.T) {
-	users := &memoryUserStore{users: map[string]*auth.User{}}
-	handler, ctx := newTestRouter(t, users, map[string]struct{}{"sjawhar": {}})
-	ctx.HTTPClient = callbackHTTPClient{login: "sjawhar"}
-
-	start := httptest.NewRecorder()
-	handler.ServeHTTP(start, httptest.NewRequest(http.MethodGet, "http://dispatch.test/auth/start", nil))
-	state, err := url.Parse(start.Header().Get("Location"))
-	if err != nil {
-		t.Fatalf("parse OAuth start location: %v", err)
-	}
-	cookies := start.Result().Cookies()
-	if len(cookies) != 1 {
-		t.Fatalf("OAuth start cookies = %#v, want one state cookie", cookies)
-	}
-	callback := httptest.NewRequest(http.MethodGet, "http://dispatch.test/auth/callback?code=code&state="+url.QueryEscape(state.Query().Get("state")), nil)
-	callback.AddCookie(cookies[0])
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, callback)
-
-	if response.Code != http.StatusFound {
-		t.Fatalf("originating-browser callback status = %d body=%s, want %d", response.Code, response.Body.String(), http.StatusFound)
-	}
-	stateCleared := false
-	sessionIssued := false
-	for _, cookie := range response.Result().Cookies() {
-		if cookie.Name == oauthStateCookie && cookie.MaxAge < 0 {
-			stateCleared = true
-		}
-		if cookie.Name == "dsession" {
-			sessionIssued = true
-		}
-	}
-	if !stateCleared || !sessionIssued {
-		t.Fatalf("callback cookies do not clear state and issue a session: %#v", response.Result().Cookies())
+	if _, found := rig.people.get(rigEmail); found {
+		t.Fatal("cross-browser callback recorded a sign-in")
 	}
 }
 
@@ -860,55 +937,52 @@ func TestSanitizeNextRejectsBrowserNormalizedExternalPaths(t *testing.T) {
 }
 
 func TestAuthStartUsesConfiguredCanonicalOriginForCallback(t *testing.T) {
-	ctx, err := BuildAppContext(AppContextOptions{
-		SigningKey: "signing-key",
-		Users:      &memoryUserStore{users: map[string]*auth.User{}},
-		Identity:   identity.HeaderIdentity{Header: "X-Dispatch-User"},
-		App:        &auth.AppConfig{ClientID: "client-id", ClientSecret: "client-secret"},
-		ServerURL:  "https://dispatch.example/",
-	})
-	if err != nil {
-		t.Fatalf("build context: %v", err)
-	}
-	handler := New(ctx)
+	rig := newSignInRig(t, "https://dispatch.example/")
 	request := httptest.NewRequest(http.MethodGet, "http://backend.internal/auth/start", nil)
 	request.Header.Set("X-Forwarded-Proto", "https")
 	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
-
+	rig.handler.ServeHTTP(response, request)
 	location, err := url.Parse(response.Header().Get("Location"))
 	if err != nil {
-		t.Fatalf("parse OAuth redirect: %v", err)
+		t.Fatalf("parse sign-in redirect: %v", err)
 	}
 	if callback := location.Query().Get("redirect_uri"); callback != "https://dispatch.example/auth/callback" {
-		t.Fatalf("OAuth callback URL = %q, want configured origin", callback)
+		t.Fatalf("sign-in callback URL = %q, want configured origin", callback)
+	}
+	if client := location.Query().Get("client_id"); client != rigClientID {
+		t.Fatalf("sign-in client = %q, want %q", client, rigClientID)
 	}
 }
 
-func TestLogoutRevokesCopiedSessionCookie(t *testing.T) {
-	allowed := map[string]struct{}{"sjawhar": {}}
-	users := &memoryUserStore{users: map[string]*auth.User{}}
-	sessions := &memorySessionStore{generations: map[string]int64{"sjawhar": 0}}
+// cookieRouter is a router on a cookie identity with no membership to confirm, and a session
+// cookie of sami@d.example's current generation.
+func cookieRouter(t *testing.T, serverURL string) (http.Handler, *http.Cookie, *memoryPeopleStore) {
+	t.Helper()
+	people := newMemoryPeople()
+	if err := people.SignIn(context.Background(), "sami@d.example", "refresh-token", time.Now()); err != nil {
+		t.Fatalf("record sign-in: %v", err)
+	}
+	sessions := &memorySessionStore{generations: map[string]int64{"sami@d.example": 0}}
 	ctx, err := BuildAppContext(AppContextOptions{
 		SigningKey: "signing-key",
-		Users:      users,
+		People:     people,
 		Sessions:   sessions,
-		Identity: identity.CookieIdentity{
-			SigningKey:    "signing-key",
-			AllowedLogins: allowed,
-			Sessions:      sessions,
-		},
-		AllowedLogins: allowed,
+		Identity:   identity.CookieIdentity{SigningKey: "signing-key", Sessions: sessions},
+		AgentToken: "agent-token",
+		ServerURL:  serverURL,
 	})
 	if err != nil {
 		t.Fatalf("build context: %v", err)
 	}
-	handler := New(ctx)
-	cookie, err := http.ParseSetCookie(auth.IssueSessionCookie("sjawhar", 0, "signing-key", true))
+	cookie, err := http.ParseSetCookie(auth.IssueSessionCookie("sami@d.example", 0, "signing-key", true))
 	if err != nil {
 		t.Fatalf("parse session cookie: %v", err)
 	}
+	return New(ctx), cookie, people
+}
 
+func TestLogoutRevokesCopiedSessionCookieAndForgetsTheRefreshToken(t *testing.T) {
+	handler, cookie, people := cookieRouter(t, "")
 	logout := httptest.NewRequest(http.MethodPost, "http://dispatch.test/auth/logout", nil)
 	logout.Header.Set("Origin", "http://dispatch.test")
 	logout.AddCookie(cookie)
@@ -917,7 +991,9 @@ func TestLogoutRevokesCopiedSessionCookie(t *testing.T) {
 	if logoutResponse.Code != http.StatusOK {
 		t.Fatalf("logout status = %d body=%s, want %d", logoutResponse.Code, logoutResponse.Body.String(), http.StatusOK)
 	}
-
+	if membership, _ := people.get("sami@d.example"); membership.RefreshToken != "" {
+		t.Fatalf("logout kept the refresh token: %#v", membership)
+	}
 	replay := httptest.NewRequest(http.MethodGet, "http://dispatch.test/auth/whoami", nil)
 	replay.AddCookie(cookie)
 	replayResponse := httptest.NewRecorder()
@@ -928,35 +1004,9 @@ func TestLogoutRevokesCopiedSessionCookie(t *testing.T) {
 }
 
 func TestCookieAuthenticatedUnsafeRequestsRequireSameOrigin(t *testing.T) {
-	newHandler := func(t *testing.T) (http.Handler, *http.Cookie) {
-		t.Helper()
-		allowed := map[string]struct{}{"sjawhar": {}}
-		sessions := &memorySessionStore{generations: map[string]int64{"sjawhar": 0}}
-		ctx, err := BuildAppContext(AppContextOptions{
-			SigningKey: "signing-key",
-			Users:      &memoryUserStore{users: map[string]*auth.User{}},
-			Sessions:   sessions,
-			Identity: identity.CookieIdentity{
-				SigningKey:    "signing-key",
-				AllowedLogins: allowed,
-				Sessions:      sessions,
-			},
-			AllowedLogins: allowed,
-			AgentToken:    "agent-token",
-			ServerURL:     "https://dispatch.example",
-		})
-		if err != nil {
-			t.Fatalf("build context: %v", err)
-		}
-		cookie, err := http.ParseSetCookie(auth.IssueSessionCookie("sjawhar", 0, "signing-key", true))
-		if err != nil {
-			t.Fatalf("parse session cookie: %v", err)
-		}
-		return New(ctx), cookie
-	}
 
 	t.Run("foreign origin is forbidden", func(t *testing.T) {
-		handler, cookie := newHandler(t)
+		handler, cookie, _ := cookieRouter(t, "https://dispatch.example")
 		request := httptest.NewRequest(http.MethodPost, "https://dispatch.example/auth/logout", nil)
 		request.AddCookie(cookie)
 		request.Header.Set("Origin", "https://other.dispatch.example")
@@ -968,7 +1018,7 @@ func TestCookieAuthenticatedUnsafeRequestsRequireSameOrigin(t *testing.T) {
 	})
 
 	t.Run("same origin is permitted", func(t *testing.T) {
-		handler, cookie := newHandler(t)
+		handler, cookie, _ := cookieRouter(t, "https://dispatch.example")
 		request := httptest.NewRequest(http.MethodPost, "https://dispatch.example/auth/logout", nil)
 		request.AddCookie(cookie)
 		request.Header.Set("Origin", "https://dispatch.example")
@@ -980,7 +1030,7 @@ func TestCookieAuthenticatedUnsafeRequestsRequireSameOrigin(t *testing.T) {
 	})
 
 	t.Run("bearer caller without origin reaches its handler", func(t *testing.T) {
-		handler, _ := newHandler(t)
+		handler, _, _ := cookieRouter(t, "https://dispatch.example")
 		request := httptest.NewRequest(http.MethodPost, "https://dispatch.example/api/v1/issues", strings.NewReader(`{"actor":{"kind":"session","id":"worker"}}`))
 		request.Header.Set("Authorization", "Bearer agent-token")
 		request.Header.Set("Content-Type", "application/json")
