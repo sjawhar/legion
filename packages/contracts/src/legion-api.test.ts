@@ -86,11 +86,12 @@ test("state accepts optional fields emitted by later workflow slices", () => {
 
   const later = fixture("state.json") as {
     admission: Record<string, unknown>;
-    issues: { "LEGION-208": { phase: string; slot: Record<string, unknown> } };
+    issues: Record<string, { phase: string; slot?: Record<string, unknown> }>;
   };
   later.admission.free = 1;
-  later.issues["LEGION-208"].phase = "integrating";
-  later.issues["LEGION-208"].slot.lentTo = "LEGION-209";
+  later.issues["LEGION-208"]!.phase = "integrating";
+  later.issues["LEGION-208"]!.slot!.lentTo = "LEGION-209";
+
   expect(LegionStateResponse.safeParse(later).success).toBeTrue();
 });
 
@@ -100,17 +101,17 @@ test("state rejects malformed optional workflow fields", () => {
   expect(LegionStateResponse.safeParse(negativeFree).success).toBeFalse();
 
   const malformedLender = fixture("state.json") as {
-    issues: { "LEGION-208": { slot: Record<string, unknown> } };
+    issues: Record<string, { slot?: Record<string, unknown> }>;
   };
-  malformedLender.issues["LEGION-208"].slot.lentTo = "not an issue key";
+  malformedLender.issues["LEGION-208"]!.slot!.lentTo = "not an issue key";
   expect(LegionStateResponse.safeParse(malformedLender).success).toBeFalse();
 });
 
 test("state accepts the existing done phase", () => {
   const completed = fixture("state.json") as {
-    issues: { "LEGION-208": { phase: string } };
+    issues: Record<string, { phase: string }>;
   };
-  completed.issues["LEGION-208"].phase = "done";
+  completed.issues["LEGION-208"]!.phase = "done";
 
   expect(LegionStateResponse.safeParse(completed).success).toBeTrue();
 });
