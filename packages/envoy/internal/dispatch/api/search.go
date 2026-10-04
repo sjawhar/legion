@@ -16,68 +16,124 @@ import (
 const (
 	searchDefaultLimit = 20
 	searchMaxLimit     = 50
-	markStart          = "\uE000" // private-use sentinels: ts_headline writes them, markSnippet turns them into <mark>
-	markEnd            = "\uE001"
-	headlineOptions    = "StartSel=" + markStart + ", StopSel=" + markEnd + ", MaxWords=24, MinWords=12, MaxFragments=1"
+	// searchFusionK is reciprocal rank fusion's constant: a row at position p of its kind's list
+	// scores 1/(searchFusionK+p). 60 is the value of the paper that introduced the method (Cormack,
+	// Clarke and Buettcher, 2009) and Elasticsearch's and OpenSearch's default; nothing tunes it.
+	searchFusionK   = 60
+	markStart       = "\uE000" // private-use sentinels: ts_headline writes them, markSnippet turns them into <mark>
+	markEnd         = "\uE001"
+	headlineOptions = "StartSel=" + markStart + ", StopSel=" + markEnd + ", MaxWords=24, MinWords=12, MaxFragments=1"
 )
 
+// searchQuery ranks each kind of content on its own list, then merges the lists by reciprocal
+// rank fusion, so a page takes each kind's best in turn: its top holds the best issue, document,
+// ask, comment and message. Each list orders its matches by
+// ts_rank_cd, then recency, then id, and keeps its best $7 (contracts.SearchKindDepth): the
+// count(*) over () beside it is every match, taken before that cut, and the deeper matches are
+// never returned at any offset. An issue whose key is the whole query heads the issue list, since
+// ts_rank_cd scores its own key no higher than another issue's title citing it. Rows that score
+// alike (every kind's first row scores 1/61) are ordered issue, document, ask, comment, message
+// (the thing before what is inside it), then recency, then id, which makes the order total, so
+// consecutive offsets cover the reachable rows once while the corpus holds still. The page is cut
+// before ts_headline runs, so only the rows it returns pay for a snippet, and totals is joined
+// outside the page, so a page past the end still answers how many rows the query matches.
+//
+// Parameters: $1 q, $2 project (empty for every project), $3 limit, $4 firstTerm,
+// $5 headlineOptions, $6 offset, $7 contracts.SearchKindDepth, $8 searchFusionK.
 const searchQuery = `
-with q as (select websearch_to_tsquery('english', $1) as tsq, $4::text as term),
-hits as (
-  select 'issue' as kind, i.key as issue_key, null::uuid as owner_artifact_id, null::uuid as artifact_id, i.key as id, null::text as block_id,
-         ts_rank_cd(i.search, q.tsq) as rank, i.title as text, i.title as issue_title, i.status as issue_status,
-         null::text as owner_project, null::text as owner_slug, null::text as owner_name, i.updated_at
-    from issues i, q where i.search @@ q.tsq and ($2 = '' or i.project_key = $2)
-  union all
-  select 'document', a.issue_key, case when a.issue_key is null then a.id else null::uuid end, a.id, a.id::text, null::text,
-         ts_rank_cd(v.search, q.tsq), v.markdown, i.title, i.status, p.key, a.slug, a.name,
-         coalesce(i.updated_at, v.created_at)
-    from artifacts a
-    left join issues i on i.key = a.issue_key
-    join projects p on p.key = a.project_key
-    join lateral (select v.search, v.markdown, v.created_at from artifact_versions v
-                  where v.artifact_id = a.id order by v.number desc limit 1) v on true, q
-   where a.kind = 'doc' and v.search @@ q.tsq and ($2 = '' or p.key = $2)
-  union all
-  select 'comment', c.issue_key, c.artifact_id, coalesce(c.artifact_id, (c.anchor->>'artifact_id')::uuid), c.id::text, null::text,
-         ts_rank_cd(c.search, q.tsq), c.body, i.title, i.status, p.key, a.slug, a.name,
-         coalesce(i.updated_at, c.created_at)
-    from comments c
-    left join issues i on i.key = c.issue_key
-    left join artifacts a on a.id = c.artifact_id
-    left join projects p on p.key = a.project_key, q
-   where c.search @@ q.tsq and ($2 = '' or coalesce(i.project_key, p.key) = $2)
-  union all
-  select 'ask', k.issue_key, case when k.issue_key is null then coalesce(k.artifact_id, k.block_artifact_id) else null::uuid end, coalesce(k.artifact_id, k.block_artifact_id, (k.anchor->>'artifact_id')::uuid), k.id::text, k.block_id,
-         ts_rank_cd(k.search, q.tsq), k.question || ' ' || coalesce(k.options::text, '') || ' ' || coalesce(k.answer->>'text', ''), i.title, i.status,
-         p.key, a.slug, a.name, coalesce(i.updated_at, k.created_at)
-    from asks k
-    left join issues i on i.key = k.issue_key
-    left join artifacts a on a.id = coalesce(k.artifact_id, k.block_artifact_id)
-    left join projects p on p.key = a.project_key, q
-   where k.search @@ q.tsq and ($2 = '' or coalesce(i.project_key, p.key) = $2)
-  union all
-  select 'message', m.issue_key, null::uuid, null::uuid, m.id::text, null::text, ts_rank_cd(m.search, q.tsq), m.body,
-         i.title, i.status, null::text, null::text, null::text, i.updated_at
-    from messages m join issues i on i.key = m.issue_key, q
-   where m.search @@ q.tsq and ($2 = '' or i.project_key = $2)
+with q as (select websearch_to_tsquery('english', $1) as tsq, $4::text as term, upper(btrim($1)) as own_key),
+issue_leg as (
+  select leg.*, row_number() over (order by own desc, r desc, updated_at desc, id) as pos from (
+    select 'issue' as kind, i.key as issue_key, null::uuid as owner_artifact_id, null::uuid as artifact_id, i.key as id, null::text as block_id,
+           i.title as text, i.title as issue_title, i.status as issue_status,
+           null::text as owner_project, null::text as owner_slug, null::text as owner_name, i.updated_at,
+           i.key = q.own_key as own, ts_rank_cd(i.search, q.tsq) as r, count(*) over () as matches
+      from issues i, q where i.search @@ q.tsq and ($2 = '' or i.project_key = $2)
+     order by own desc, r desc, updated_at desc, id
+     limit $7) leg
 ),
-ranked as (
-  select * from hits
-   order by rank desc, updated_at desc, kind, id
-   limit $3
+document_leg as (
+  select leg.*, row_number() over (order by own desc, r desc, updated_at desc, id) as pos from (
+    select 'document' as kind, a.issue_key, case when a.issue_key is null then a.id else null::uuid end as owner_artifact_id, a.id as artifact_id, a.id::text as id, null::text as block_id,
+           v.markdown as text, i.title as issue_title, i.status as issue_status, p.key as owner_project, a.slug as owner_slug, a.name as owner_name,
+           coalesce(i.updated_at, v.created_at) as updated_at,
+           false as own, ts_rank_cd(v.search, q.tsq) as r, count(*) over () as matches
+      from artifacts a
+      left join issues i on i.key = a.issue_key
+      join projects p on p.key = a.project_key
+      join lateral (select v.search, v.markdown, v.created_at from artifact_versions v
+                    where v.artifact_id = a.id order by v.number desc limit 1) v on true, q
+     where a.kind = 'doc' and v.search @@ q.tsq and ($2 = '' or p.key = $2)
+     order by own desc, r desc, updated_at desc, id
+     limit $7) leg
+),
+comment_leg as (
+  select leg.*, row_number() over (order by own desc, r desc, updated_at desc, id) as pos from (
+    select 'comment' as kind, c.issue_key, c.artifact_id as owner_artifact_id, coalesce(c.artifact_id, (c.anchor->>'artifact_id')::uuid) as artifact_id, c.id::text as id, null::text as block_id,
+           c.body as text, i.title as issue_title, i.status as issue_status, p.key as owner_project, a.slug as owner_slug, a.name as owner_name,
+           coalesce(i.updated_at, c.created_at) as updated_at,
+           false as own, ts_rank_cd(c.search, q.tsq) as r, count(*) over () as matches
+      from comments c
+      left join issues i on i.key = c.issue_key
+      left join artifacts a on a.id = c.artifact_id
+      left join projects p on p.key = a.project_key, q
+     where c.search @@ q.tsq and ($2 = '' or coalesce(i.project_key, p.key) = $2)
+     order by own desc, r desc, updated_at desc, id
+     limit $7) leg
+),
+ask_leg as (
+  select leg.*, row_number() over (order by own desc, r desc, updated_at desc, id) as pos from (
+    select 'ask' as kind, k.issue_key, case when k.issue_key is null then coalesce(k.artifact_id, k.block_artifact_id) else null::uuid end as owner_artifact_id,
+           coalesce(k.artifact_id, k.block_artifact_id, (k.anchor->>'artifact_id')::uuid) as artifact_id, k.id::text as id, k.block_id,
+           k.question || ' ' || coalesce(k.options::text, '') || ' ' || coalesce(k.answer->>'text', '') as text, i.title as issue_title, i.status as issue_status,
+           p.key as owner_project, a.slug as owner_slug, a.name as owner_name, coalesce(i.updated_at, k.created_at) as updated_at,
+           false as own, ts_rank_cd(k.search, q.tsq) as r, count(*) over () as matches
+      from asks k
+      left join issues i on i.key = k.issue_key
+      left join artifacts a on a.id = coalesce(k.artifact_id, k.block_artifact_id)
+      left join projects p on p.key = a.project_key, q
+     where k.search @@ q.tsq and ($2 = '' or coalesce(i.project_key, p.key) = $2)
+     order by own desc, r desc, updated_at desc, id
+     limit $7) leg
+),
+message_leg as (
+  select leg.*, row_number() over (order by own desc, r desc, updated_at desc, id) as pos from (
+    select 'message' as kind, m.issue_key, null::uuid as owner_artifact_id, null::uuid as artifact_id, m.id::text as id, null::text as block_id,
+           m.body as text, i.title as issue_title, i.status as issue_status,
+           null::text as owner_project, null::text as owner_slug, null::text as owner_name, i.updated_at,
+           false as own, ts_rank_cd(m.search, q.tsq) as r, count(*) over () as matches
+      from messages m join issues i on i.key = m.issue_key, q
+     where m.search @@ q.tsq and ($2 = '' or i.project_key = $2)
+     order by own desc, r desc, updated_at desc, id
+     limit $7) leg
+),
+legs as (
+  select * from issue_leg union all select * from document_leg union all select * from comment_leg
+  union all select * from ask_leg union all select * from message_leg
+),
+fused as (select kind, id, sum(1.0 / ($8 + pos)) as score from legs group by kind, id),
+totals as (
+  select (select coalesce(sum(matches), 0) from (select max(matches) as matches from legs group by kind) each_kind) as total,
+         (select count(*) from fused) as reachable
+),
+page as (
+  select l.*, f.score, array_position(array['issue', 'document', 'ask', 'comment', 'message'], l.kind) as kind_order
+    from legs l join fused f using (kind, id)
+   order by f.score desc, kind_order, l.updated_at desc, l.id
+   limit $3 offset $6
 )
-select r.kind, case when r.owner_artifact_id is null then 'issue' else 'document' end,
+select t.total, t.reachable, r.kind, case when r.owner_artifact_id is null then 'issue' else 'document' end,
        r.issue_key, r.issue_title, r.issue_status,
        r.owner_project, r.owner_slug, r.owner_artifact_id::text, r.owner_name,
-       ar.slug, ar.name, coalesce(ar.is_primary, false), r.id, r.block_id, r.rank,
+       ar.slug, ar.name, coalesce(ar.is_primary, false), r.id, r.block_id, r.score::float8,
        ts_headline('english',
          search_text(case when q.term <> '' and strpos(lower(r.text), lower(q.term)) > 0
               then substr(r.text, greatest(1, strpos(lower(r.text), lower(q.term)) - 1500), 4000)
               else left(r.text, 4000) end),
          q.tsq, $5) as headline
-  from ranked r left join artifacts ar on ar.id = r.artifact_id, q
- order by r.rank desc, r.updated_at desc, r.kind, r.id
+  from totals t cross join q
+  left join (page r left join artifacts ar on ar.id = r.artifact_id) on true
+ order by r.score desc, r.kind_order, r.updated_at desc, r.id
 `
 
 func (s *server) search(w http.ResponseWriter, r *http.Request) {
@@ -114,6 +170,15 @@ func (s *server) search(w http.ResponseWriter, r *http.Request) {
 		}
 		limit = parsed
 	}
+	offset := 0
+	if query.Has("offset") {
+		parsed, err := strconv.Atoi(query.Get("offset"))
+		if err != nil || parsed < 0 {
+			writeError(w, "INVALID_OFFSET", http.StatusBadRequest, "offset must be a non-negative integer")
+			return
+		}
+		offset = parsed
+	}
 
 	var nodes int
 	if err := s.deps.Store.Pool.QueryRow(r.Context(), "select numnode(websearch_to_tsquery('english', $1))", searchText).Scan(&nodes); err != nil {
@@ -121,28 +186,31 @@ func (s *server) search(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if nodes == 0 {
-		WriteJSON(w, http.StatusOK, model.SearchResponse{Results: []model.SearchResult{}})
+		WriteJSON(w, http.StatusOK, model.SearchResponse{Results: []model.SearchResult{}, Limit: limit, Offset: offset})
 		return
 	}
 
 	started := time.Now()
-	rows, err := s.deps.Store.Pool.Query(r.Context(), searchQuery, searchText, project, limit, firstTerm(searchText), headlineOptions)
+	rows, err := s.deps.Store.Pool.Query(r.Context(), searchQuery, searchText, project, limit, firstTerm(searchText), headlineOptions,
+		offset, contracts.SearchKindDepth, searchFusionK)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
 	defer rows.Close()
 
-	results := []model.SearchResult{}
+	response := model.SearchResponse{Results: []model.SearchResult{}, Limit: limit, Offset: offset}
 	for rows.Next() {
 		var result model.SearchResult
-		var ownerKind string
+		var kind, ownerKind, id, headline *string
 		var ownerKey, ownerTitle, ownerStatus, ownerProject, ownerSlug, ownerArtifactID, ownerName, slug, name *string
 		var primary bool
-		var headline string
 		var blockID *string
+		var rank *float64
 		if err := rows.Scan(
-			&result.Kind,
+			&response.Total,
+			&response.Reachable,
+			&kind,
 			&ownerKind,
 			&ownerKey,
 			&ownerTitle,
@@ -154,20 +222,25 @@ func (s *server) search(w http.ResponseWriter, r *http.Request) {
 			&slug,
 			&name,
 			&primary,
-			&result.ID,
+			&id,
 			&blockID,
-			&result.Rank,
+			&rank,
 			&headline,
 		); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
-		if ownerKind == "issue" {
-			result.Owner = model.SearchOwner{Kind: ownerKind, Key: *ownerKey, Title: *ownerTitle, Status: *ownerStatus}
+		// A page past the last reachable row is one row of totals and no hit.
+		if kind == nil {
+			continue
+		}
+		result.Kind, result.ID, result.Rank = *kind, *id, *rank
+		if *ownerKind == "issue" {
+			result.Owner = model.SearchOwner{Kind: *ownerKind, Key: *ownerKey, Title: *ownerTitle, Status: *ownerStatus}
 			result.Issue = &model.SearchIssue{Key: *ownerKey, Title: *ownerTitle, Status: *ownerStatus}
 		} else {
 			result.Owner = model.SearchOwner{
-				Kind:       ownerKind,
+				Kind:       *ownerKind,
 				Project:    *ownerProject,
 				Slug:       *ownerSlug,
 				ArtifactID: *ownerArtifactID,
@@ -177,16 +250,17 @@ func (s *server) search(w http.ResponseWriter, r *http.Request) {
 		if slug != nil {
 			result.Artifact = &model.SearchArtifact{Slug: *slug, Name: *name}
 		}
-		result.Snippet = markSnippet(headline)
+		result.Snippet = markSnippet(*headline)
 		result.Href = searchHref(result.Kind, result.Owner, result.Artifact, primary, result.ID, blockID, searchText)
-		results = append(results, result)
+		response.Results = append(response.Results, result)
 	}
 	if err := rows.Err(); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
 
-	WriteJSON(w, http.StatusOK, model.SearchResponse{Results: results, TookMS: time.Since(started).Milliseconds()})
+	response.TookMS = time.Since(started).Milliseconds()
+	WriteJSON(w, http.StatusOK, response)
 }
 
 func firstTerm(query string) string {

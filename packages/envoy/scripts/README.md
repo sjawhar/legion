@@ -179,3 +179,45 @@ listener that opens `/v1` once its caches are warm passes.
 `listener-deploy-probe.test.sh` proves the verdict over two fake tasks, Python
 `http.server`s on `127.0.0.1` and `127.0.0.2` behind a fake `getent`; CI runs it
 in the `envoy-go` job of `.github/workflows/envoy-and-contracts.yaml`.
+
+## Measuring search on a copy of the corpus
+
+Three scripts measure a change to Dispatch search against the real corpus rather than a seeded
+one. The copy is production data: it stays on the machine that restored it.
+
+`corpus-copy.sh` restores the newest nightly dump into a Postgres container of its own and prints
+its `DATABASE_URL`. The bucket the dumps land in is the deployment's, so it is a required input:
+
+```bash
+DISPATCH_BACKUP_BUCKET=<bucket> packages/envoy/scripts/corpus-copy.sh
+```
+
+It downloads the dump under `DISPATCH_CORPUS_DIR` (default `$TMPDIR` or `/tmp`) and deletes it once
+it is restored, whether or not the restore succeeded. `DISPATCH_CORPUS_CONTAINER` (default
+`dispatch-corpus-pg`), `DISPATCH_CORPUS_PORT` (default `55433`, on `127.0.0.1`) and
+`DISPATCH_CORPUS_DATABASE` (default `dispatch_corpus`) name the copy. Run again while the container
+holds the database, it prints the URL and restores nothing; `docker rm -f <container>` deletes the
+copy.
+
+`search-smoke.sh` prints what a searcher sees for each query in a file
+(`search-smoke-queries.txt` is one): it starts `envoy-dispatch` against the copy, built from this
+checkout or named with `--binary`, and prints each answer as one line of totals, a `took_ms` line,
+and one `pos kind owner id snippet` line per hit. Two builds' runs diff, which is the before and
+after of a ranking change. The server runs with a throwaway `HOME`, a made-up agent token and a
+trusted identity header, so it reads no operator configuration and holds no credential, and with
+NATS off. It migrates the database it is given, as every start does, so point it only at a copy.
+
+```bash
+DATABASE_URL=<copy> packages/envoy/scripts/search-smoke.sh \
+  --queries packages/envoy/scripts/search-smoke-queries.txt [--binary <envoy-dispatch>] [--limit 20] [--offset 0]
+```
+
+`search-latency-compare.sh` compares a base checkout (usually `main`) with this one on the same
+copy: it runs `TestSearchLatencyOnCorpus` from each, alternately, for five rounds by default, prints
+every run's p50 and p95, and exits 1 when this checkout's median p95 is more than 10% above the
+base's. A copy answers in whatever time the machine and its load allow, so the bound is relative,
+never a fixed number of milliseconds.
+
+```bash
+DISPATCH_BENCH_DATABASE_URL=<copy> packages/envoy/scripts/search-latency-compare.sh <base-checkout> [rounds]
+```

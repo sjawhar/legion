@@ -44,6 +44,7 @@ import {
   itemFromSearch,
   overCapMessage,
   PROJECT_KEY_PATTERN,
+  SEARCH_KIND_DEPTH,
   serviceSubjectLabel,
   snippetText,
   zodSchemaApi,
@@ -2258,21 +2259,70 @@ export async function executeDispatchTool(
       const query = stringArg(args, "query");
       const project = optionalString(args, "project");
       const limit = optionalNumber(args, "limit");
+      const offset = optionalNumber(args, "offset");
       const search = await client.search(query, {
         ...(project === undefined ? {} : { project }),
         ...(limit === undefined ? {} : { limit }),
+        ...(offset === undefined ? {} : { offset }),
       });
       const results = search.results;
       const count = results.length;
+      const lines = results.map((result) => searchResultLine(result, configUrl));
+      const noun = count === 1 ? "result" : "results";
+      // A Dispatch from before search paging answers no total and serves its first page whatever
+      // the offset, so a later page from it would silently repeat the first.
+      if (typeof search.total !== "number") {
+        if (offset !== undefined && offset > 0) {
+          throw new Error(
+            `Dispatch answered without a total: it predates search paging and ignored offset ${offset}, so this would be its first page again.`
+          );
+        }
+        return {
+          text:
+            count === 0
+              ? `No results for "${query}".`
+              : [`${count} ${noun} for "${query}" (${search.took_ms} ms)`, ...lines].join("\n"),
+          details: { query, results },
+        };
+      }
+      const { total, reachable } = search;
+      const end = search.offset + count;
+      const cut =
+        reachable < total
+          ? `Each kind lists only its best ${SEARCH_KIND_DEPTH} matches, so ${reachable} of the ${total} can be paged to; narrow the query or name a project to reach the rest.`
+          : undefined;
+      const details = {
+        query,
+        results,
+        total,
+        reachable,
+        offset: search.offset,
+        limit: search.limit,
+      };
+      if (count === 0) {
+        return {
+          text:
+            total === 0
+              ? `No results for "${query}".`
+              : [
+                  `No results for "${query}" at offset ${search.offset}: it matches ${total}, and the pages reach the first ${reachable}.`,
+                  ...(cut === undefined ? [] : [cut]),
+                ].join("\n"),
+          details,
+        };
+      }
+      const showing =
+        search.offset === 0 && count === total
+          ? ""
+          : `showing ${search.offset + 1}-${end} of ${total}, `;
       return {
-        text:
-          count === 0
-            ? `No results for "${query}".`
-            : [
-                `${count} ${count === 1 ? "result" : "results"} for "${query}" (${search.took_ms} ms)`,
-                ...results.map((result) => searchResultLine(result, configUrl)),
-              ].join("\n"),
-        details: { query, results },
+        text: [
+          `${count} ${noun} for "${query}" (${showing}${search.took_ms} ms)`,
+          ...(cut === undefined ? [] : [cut]),
+          ...lines,
+          ...(end < reachable ? [`Next page: offset ${end}.`] : []),
+        ].join("\n"),
+        details,
       };
     }
     case "dispatch_issues": {

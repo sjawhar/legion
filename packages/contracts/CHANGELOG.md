@@ -4,6 +4,12 @@
 
 ### Changed
 
+- `SearchResponse` carries `total`, `reachable`, `limit` and `offset`, and `dispatch_search` takes
+  `offset`; its description says each kind of content is ranked on its own and the lists merged,
+  that an issue key searched alone lists that issue first, and that each kind lists at most its
+  best `SEARCH_KIND_DEPTH` (LEGION-386, LEGION-382).
+- Added `SEARCH_KIND_DEPTH` (100), how many of its best matches each kind lists before
+  `GET /api/v1/search` merges the kinds, generated into Go as `contracts.SearchKindDepth`.
 - The `dispatch_doc_read` description says it reads an uploaded file's text at its latest or named
   version, and describes a file that is not UTF-8 text.
 - `dispatch_request_approval`'s `summary` says only what the human is approving, with no commentary

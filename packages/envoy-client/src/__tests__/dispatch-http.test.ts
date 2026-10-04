@@ -142,7 +142,7 @@ describe("DispatchClient", () => {
     }
   });
 
-  test("search encodes q, project, and limit and returns the response body", async () => {
+  test("search encodes q, project, limit, and offset and returns the response body", async () => {
     const body = {
       results: [
         {
@@ -155,18 +155,22 @@ describe("DispatchClient", () => {
           href: "/issues/LEGION-2/spec?q=astrolabe",
         },
       ],
+      total: 1,
+      reachable: 1,
+      limit: 5,
+      offset: 10,
       took_ms: 12,
     };
     const { fetchImpl, requests } = fakeFetch([jsonResponse(body)]);
     const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
 
     await expect(
-      client.search("astrolabe sextant", { project: "LEGION", limit: 5 })
+      client.search("astrolabe sextant", { project: "LEGION", limit: 5, offset: 10 })
     ).resolves.toEqual(body);
 
     expect(requests).toHaveLength(1);
     expect(new URL(requests[0]?.url).pathname + new URL(requests[0]?.url).search).toBe(
-      "/api/v1/search?q=astrolabe+sextant&project=LEGION&limit=5"
+      "/api/v1/search?q=astrolabe+sextant&project=LEGION&limit=5&offset=10"
     );
     expect(requests[0]?.init).toMatchObject({
       method: "GET",
