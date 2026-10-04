@@ -118,6 +118,14 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+        with:
+          # provenance-add-gha (true by default on the docker-container driver) stages
+          # $GITHUB_EVENT_PATH's full JSON into any provenance predicate a build below computes —
+          # the mechanism behind the job-log leak the env block below already guards against.
+          # provenance: false keeps this build's own attestation empty, but not that; false here
+          # too is what actually stops the event payload reaching a predicate at all.
+          driver-opts: |
+            provenance-add-gha=false
 
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
