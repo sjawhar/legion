@@ -78,11 +78,11 @@ func (c *brokerCounters) holdPendingPolls(gate chan struct{}) {
 // tests: POST /v1/requests decodes the signed request object CreateRequest posts (verifying it
 // with record.VerifyRequestObject against the fake's own URL as audience — a real, non-stubbed
 // check, since the wire shape under test IS that signed object) and routes on its first
-// authorization_detail's identifier to a canned granted/pending/denied/proxy-only/no-trailing-
+// authorization_detail's identifier to a canned granted/pending/denied/unreleased/no-trailing-
 // newline response, GET /v1/requests/{id} answers the pending case's own request id with the
 // same never-resolving pending state (and 404s any other id, since a granted-or-denied-
 // immediately response must never be polled), POST /v1/grants/{id}/values releases one canned
-// value (or, for the proxy-only case, none at all), and GET /v1/enrollments/self echoes
+// value (or, for the unreleased case, none at all), and GET /v1/enrollments/self echoes
 // testEnrollmentID. It does not verify the outer Proof header at all — proof.Verifier's own
 // behavior is covered by internal/broker/proof and internal/broker/api's test suites, not this
 // package's.
@@ -115,33 +115,33 @@ func fakeBroker(t *testing.T) (*httptest.Server, *brokerCounters) {
 		case "GRANT_ME":
 			writeJSON(w, map[string]any{
 				"request_id": "req-granted", "state": "granted",
-				"secrets":  []map[string]string{{"name": name, "decision": "automatic", "delivery": "inject"}},
+				"secrets":  []map[string]string{{"name": name, "decision": "automatic"}},
 				"grant_id": "grant-granted", "record_id": nil,
 			})
 		case "PENDING_ME":
 			writeJSON(w, map[string]any{
 				"request_id": "req-pending", "state": "pending",
-				"secrets":  []map[string]string{{"name": name, "decision": "approval", "delivery": "inject"}},
+				"secrets":  []map[string]string{{"name": name, "decision": "approval"}},
 				"grant_id": nil, "record_id": "rec-pending-1",
 			})
 		case "DENY_ME":
 			writeJSON(w, map[string]any{
 				"request_id": "req-denied", "state": "denied",
-				"secrets":  []map[string]string{{"name": name, "decision": "deny", "delivery": "inject"}},
+				"secrets":  []map[string]string{{"name": name, "decision": "deny"}},
 				"grant_id": nil, "record_id": nil,
 			})
-		case "PROXY_ME":
+		case "UNRELEASED_ME":
 			writeJSON(w, map[string]any{
-				"request_id": "req-proxy", "state": "granted",
-				"secrets":  []map[string]string{{"name": name, "decision": "automatic", "delivery": "proxy"}},
-				"grant_id": "grant-proxy", "record_id": nil,
+				"request_id": "req-unreleased", "state": "granted",
+				"secrets":  []map[string]string{{"name": name, "decision": "automatic"}},
+				"grant_id": "grant-unreleased", "record_id": nil,
 			})
 		case "NONEWLINE_ME":
 			// Written with http.ResponseWriter.Write directly, with NO trailing newline, unlike
 			// every other case (which goes through writeJSON's json.Encoder, always "\n"
 			// terminated) — this is the fixture for the writeVerbatim byte-exact test.
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"request_id":"req-nonewline","state":"granted","secrets":[{"name":"NONEWLINE_ME","decision":"automatic","delivery":"inject"}],"grant_id":"grant-nonewline","record_id":null}`))
+			_, _ = w.Write([]byte(`{"request_id":"req-nonewline","state":"granted","secrets":[{"name":"NONEWLINE_ME","decision":"automatic"}],"grant_id":"grant-nonewline","record_id":null}`))
 		default:
 			w.WriteHeader(http.StatusBadRequest)
 		}
@@ -171,21 +171,18 @@ func fakeBroker(t *testing.T) (*httptest.Server, *brokerCounters) {
 		writeJSON(w, map[string]any{
 			"values":     map[string]string{"GRANT_ME": "topsecretvalue123"},
 			"expires_at": time.Now().Add(time.Hour),
-			"proxy_only": []string{},
 		})
 	})
-	mux.HandleFunc("POST /v1/grants/grant-proxy/values", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /v1/grants/grant-unreleased/values", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{
 			"values":     map[string]string{},
 			"expires_at": time.Now().Add(time.Hour),
-			"proxy_only": []string{"PROXY_ME"},
 		})
 	})
 	mux.HandleFunc("POST /v1/grants/grant-nonewline/values", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{
 			"values":     map[string]string{"NONEWLINE_ME": "irrelevant"},
 			"expires_at": time.Now().Add(time.Hour),
-			"proxy_only": []string{},
 		})
 	})
 	mux.HandleFunc("GET /v1/enrollments/self", func(w http.ResponseWriter, r *http.Request) {
@@ -482,30 +479,28 @@ func TestEveryFormAnswersHelp(t *testing.T) {
 	}
 }
 
-// TestExecFormRefusesToRunWhenAGrantedNameIsProxyOnly is the regression for the review's
-// Important finding 3: a granted request whose delivery is "proxy" (or otherwise missing from
-// the grant's values) must never exec — a proxy-only secret has no value for the CLI to release
-// into the child's environment at all, and silently execing without it would be a silent partial
-// grant.
-func TestExecFormRefusesToRunWhenAGrantedNameIsProxyOnly(t *testing.T) {
+// TestExecFormRefusesToRunWhenAGrantedNameHasNoValue is the regression for the review's Important
+// finding 3: a granted request whose values come back without one of its names must never exec,
+// since silently execing without it would be a silent partial grant.
+func TestExecFormRefusesToRunWhenAGrantedNameHasNoValue(t *testing.T) {
 	binary := buildAgentSecrets(t)
 	broker, _ := fakeBroker(t)
 	defer broker.Close()
 	keyDir := newKeyDir(t)
 
 	stdout, stderr, exit := runAgentSecrets(t, binary, broker.URL, keyDir, nil,
-		"PROXY_ME", "--", "sh", "-c", "echo ran-the-child")
+		"UNRELEASED_ME", "--", "sh", "-c", "echo ran-the-child")
 	if exit == 0 {
-		t.Fatalf("exit = 0, want a nonzero refusal for a proxy-only grant: stdout=%q stderr=%q", stdout, stderr)
+		t.Fatalf("exit = 0, want a nonzero refusal for a grant with no value: stdout=%q stderr=%q", stdout, stderr)
 	}
 	if exit == exitPending || exit == exitDenied {
 		t.Fatalf("exit = %d, want a plain operational refusal (not 75/76/77): stdout=%q stderr=%q", exit, stdout, stderr)
 	}
 	if strings.Contains(stdout, "ran-the-child") {
-		t.Fatalf("child ran despite a proxy-only (unreleased) secret: stdout=%q", stdout)
+		t.Fatalf("child ran despite an unreleased secret: stdout=%q", stdout)
 	}
-	if !strings.Contains(stderr, "PROXY_ME") {
-		t.Fatalf("stderr should name the missing secret PROXY_ME: %q", stderr)
+	if !strings.Contains(stderr, "UNRELEASED_ME") {
+		t.Fatalf("stderr should name the missing secret UNRELEASED_ME: %q", stderr)
 	}
 }
 
@@ -781,7 +776,7 @@ func TestRequestJSONIsByteIdenticalToTheBrokerResponse(t *testing.T) {
 	defer broker.Close()
 	keyDir := newKeyDir(t)
 
-	const wantExact = `{"request_id":"req-nonewline","state":"granted","secrets":[{"name":"NONEWLINE_ME","decision":"automatic","delivery":"inject"}],"grant_id":"grant-nonewline","record_id":null}`
+	const wantExact = `{"request_id":"req-nonewline","state":"granted","secrets":[{"name":"NONEWLINE_ME","decision":"automatic"}],"grant_id":"grant-nonewline","record_id":null}`
 	stdout, stderr, exit := runAgentSecrets(t, binary, broker.URL, keyDir, nil, "request", "NONEWLINE_ME", "--json")
 	if exit != 0 {
 		t.Fatalf("exit = %d, want 0: stdout=%q stderr=%q", exit, stdout, stderr)
@@ -845,7 +840,7 @@ func TestRequestSignsARequestObject(t *testing.T) {
 		mu.Unlock()
 		writeJSON(w, map[string]any{
 			"request_id": "req-signed", "state": "granted",
-			"secrets":  []map[string]string{{"name": "GRANT_ME", "decision": "automatic", "delivery": "inject"}},
+			"secrets":  []map[string]string{{"name": "GRANT_ME", "decision": "automatic"}},
 			"grant_id": "grant-signed", "record_id": nil,
 		})
 	})

@@ -5,10 +5,11 @@ sidebar:
   order: 10
 ---
 
-When an agent asks for a secret the rules say a person must approve, that person decides it in
-Dispatch. Only the approver the request names can decide it: the operator of the machine the agent
-runs on (rules with `approver: operator`), or the login the rules name (`approver: login:<name>`);
-[Concepts](/legion/broker/concepts/#rules-who-may-have-which-secret) explains the rules.
+When an agent asks for a secret a person must approve, that person decides it in Dispatch. Only the
+approver the request names can decide it: the secret's owner, for a person's secret, or anyone
+signed in to Dispatch, for a shared human-tier secret, whose requests show the approver `anyone`
+and wait in every person's Inbox. [Concepts](/legion/broker/concepts/#owner-and-tier-who-may-have-which-secret)
+explains which requests need whom.
 
 ## Find it
 
@@ -28,8 +29,8 @@ Opening a **Secret request** shows the broker's record of it:
 - **Lifetime**: how long the grant would last from the moment you approve.
 - **Requested** and **Expires**: when it was made, and when it
   [expires](/legion/broker/concepts/#approvals) if nobody decides it.
-- **Rules version**: the rules that sent it to you.
-- **Approver**: who may decide it.
+- **Rules version**: the version of the secret policy the request was decided under.
+- **Approver**: who may decide it: an email, or `anyone`.
 - **The agent's stated reason**: the `--reason` the agent gave, shown as plain text.
 
 Approve only what the reason and the session justify. The agent's command is waiting; a denial runs
@@ -45,7 +46,7 @@ The broker refuses a decision that cannot stand, and Dispatch shows its message 
 
 | Message | Why |
 | --- | --- |
-| `only the record's approver may decide it` (`NOT_APPROVER`) | You are not the approver this request names. |
+| `only the record's approver may decide it` (`NOT_APPROVER`) | You are not the approver this request names, or you approved it after the secret's tags named someone else to approve it ([what an owner change does](/legion/broker/concepts/#approvals)); you can still deny a request that names you. A request whose approver is `anyone` is refused to the login `anyone`. |
 | `request is already decided` (`RECORD_TERMINAL`) | Someone, or another tab, decided it first, or the agent's session ended and withdrew it. |
 | `request expired before its approver acted on it` (`RECORD_TERMINAL`) | It waited past its expiry. The agent asks again if it still needs the secret. |
 | `this grant's approval chain no longer verifies` (`GRANT_CHAIN_INVALID`) | The stored request no longer matches its own signature; nothing was granted. Tell whoever runs the broker. |

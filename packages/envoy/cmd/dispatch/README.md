@@ -146,6 +146,50 @@ lowercase email:
   the person's membership with it at least hourly: a refresh the pool refuses,
   or one whose ID token no longer puts them in the group, ends every session
   they hold. Logout ends Dispatch's session only, not the pool's.
+
+  The refresh token is stored sealed (`people.refresh_token`): AES-256-GCM
+  under a key derived from `DISPATCH_SIGNING_KEY` with HKDF and a fixed purpose
+  label, bound to the person's email, in a format whose `v1:` prefix names its
+  version. A stored value that does not open (sealed under another signing key,
+  moved from another person's row, or in plain text) counts as no refresh token:
+  each read of it logs
+  `msg="dispatch: a stored refresh token did not open; the person signs in again"`
+  at WARN with the email and never the value, and writes nothing; the person's
+  request answers `401 NO_IDENTITY`, and their next sign-in replaces the value.
+
+  A refresh token stored in plain text (by the release before sealing, or by a
+  task of it still serving during a roll or after a rollback) can be redeemed by
+  anyone holding a copy of the row and the app client's secret until it expires,
+  and forgetting it does not end it, so Dispatch retires it: at every boot, after
+  migrations, it revokes each plain-text token at the pool's revocation endpoint
+  (the `revocation_endpoint` the issuer's discovery document names) as the app
+  client, then clears it and its confirmation while the row still holds that
+  value. A sign-in that replaces a plain-text token retires it the same way
+  first. A sealed value is never sent to the pool, and a redirect from the
+  revocation endpoint is a failure, never followed. A token the boot cannot
+  revoke stays in its row for the next boot and logs
+  `msg="dispatch: the sign-in pool did not revoke a refresh token stored in plain text"`
+  at ERROR with the email and the error (the pool's HTTP status, when it
+  answered), never the token. A sign-in that cannot revoke the token it
+  replaces goes on, since the person just signed in at the pool, and logs
+  `msg="dispatch: a sign-in replaced a refresh token the pool did not revoke; sign this person out at the pool"`
+  at ERROR with the email and the error: no later boot will see that token, so
+  signing the person out at the pool is the only way to end it. The boot's
+  retirement stops after 30 seconds, failing each token it has not revoked, and
+  the start goes on; it logs
+  `msg="dispatch: retired the refresh tokens stored in plain text" retired=<n> failed=<n>`.
+
+  A database backup therefore holds no refresh token the pool would accept only
+  once a boot of this release has retired every plain-text token, and then only
+  for the tokens still in `people` when it ran: those stop working when the
+  pool revokes them. A plain-text token `0068`'s release removed without
+  revoking (a sign-in that replaced it, or a logout that cleared it) stays
+  valid at the pool until it expires, in any backup that holds it (Database
+  migrations, below). Rotating `DISPATCH_SIGNING_KEY` leaves Dispatch unable
+  to open any stored refresh token, so each person signs in again, but it
+  revokes none at the pool: whoever holds a backup and the old key can still
+  redeem them until they expire, so after a key leak, sign each person out at
+  the pool.
 - `header:<Header-Name>` is for tests and local harnesses only, never for a
   production Dispatch deployment. It accepts a header value, lowercases it and
   records the person. The harness must set `DISPATCH_IDENTITY_HEADER_TRUSTED=1`;
@@ -304,6 +348,25 @@ expected for this release: no code reads those rows once it ships. The deployer 
 is `select count(*) from users` and that the report ends `census: REFUSED (1 reason)`, so 0068's
 count is its only refusal, and then rolls the release. Any other reason (a lock holder, a long
 transaction, a table over the limit) still stops the deploy.
+
+No migration retires the refresh tokens that `0068`'s release stored in plain text: every boot does
+(Identity, above), since a task of that release can write one during the roll, or after a
+rollback, once every migration has run, and a token written after a boot waits for the next one.
+So once the last task of the earlier release is gone, the deployer restarts Dispatch once and then
+checks three things: that boot logged `failed=0`; no
+`a sign-in replaced a refresh token the pool did not revoke` line has appeared since the roll began
+(each one names a person to sign out at the pool); and
+`select count(*) from people where refresh_token is not null and refresh_token not like 'v1:%'`
+answers `0`. A boot line with `failed=<n>` above zero names each token it could not revoke in an
+ERROR line; the next boot tries again, and signing that person out at the pool ends it at once. A
+non-zero count with no such line is a token a task of the earlier release wrote after the last
+boot, which another restart retires.
+
+The boot revokes only the plain-text tokens still in `people`. Under `0068`'s release a sign-in
+that replaced a person's token, or a logout that cleared it, removed it without revoking it, and
+it stays valid at the pool until it expires in any backup that holds it. So if any database backup
+was taken between `0068`'s deploy and the post-roll restart, either delete those backups or sign
+out at the pool everyone whose `people.signed_in_at` is after `0068`'s deploy.
 
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a
