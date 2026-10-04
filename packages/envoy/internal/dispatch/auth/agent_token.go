@@ -142,13 +142,15 @@ func (t *SharedAgentTokens) notePreviousToken(r *http.Request, entry int) {
 	}
 	now := time.Now()
 	t.mu.Lock()
-	if last, seen := t.logged[caller]; seen && now.Sub(last) < previousTokenLogWindow {
+	last, seen := t.logged[caller]
+	if seen && now.Sub(last) < previousTokenLogWindow {
 		t.mu.Unlock()
 		return
 	}
 	// Callers whose window has passed are cleared once a window, so the map holds only the
 	// callers of the last two windows however many come and go.
-	if now.Sub(t.swept) >= previousTokenLogWindow {
+	swept := now.Sub(t.swept) >= previousTokenLogWindow
+	if swept {
 		for logged, at := range t.logged {
 			if now.Sub(at) >= previousTokenLogWindow {
 				delete(t.logged, logged)
@@ -158,8 +160,12 @@ func (t *SharedAgentTokens) notePreviousToken(r *http.Request, entry int) {
 	}
 	// A stored key is a copy: the caller's fields are slices of its request's headers, which a key
 	// holding them would keep whole. A caller already remembered is refreshed even when the map
-	// is full, so it is not logged on every request until the next sweep.
-	if _, remembered := t.logged[caller]; remembered || len(t.logged) < previousTokenCallers {
+	// is full, so it is not logged on every request until the next sweep. remembered does not need
+	// a second lookup: reaching here with seen true means now.Sub(last) >= previousTokenLogWindow
+	// (the early return above didn't fire), which is exactly the sweep's own deletion test above, so
+	// a sweep this call (swept) always deletes caller's own stale entry; one that didn't run leaves
+	// it exactly as seen found it.
+	if remembered := seen && !swept; remembered || len(t.logged) < previousTokenCallers {
 		t.logged[previousTokenCaller{
 			address:   strings.Clone(caller.address),
 			userAgent: strings.Clone(caller.userAgent),

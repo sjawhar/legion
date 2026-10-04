@@ -286,7 +286,10 @@ func TestARememberedCallerHoldsOnlyItsClippedFields(t *testing.T) {
 	}
 	grown := heap() - before
 	runtime.KeepAlive(tokens)
-	if limit := int64(callers*2*previousTokenCallerBytes + 1<<20); grown > limit {
+	// 2x the worst-case clipped bytes covers the previousTokenCaller struct (two string headers)
+	// and the map's own bucket overhead; the fixed 32 KiB covers GC scheduling noise in the
+	// measurement (observed growth across 70 runs: 12 KB to 69 KB, most 25-35 KB).
+	if limit := int64(callers*2*previousTokenCallerBytes*2) + 32*1024; grown > limit {
 		t.Errorf("remembering %d callers, each sending a %d-byte User-Agent and X-Forwarded-For, grew the heap by %d bytes, want at most %d: a remembered caller keeps the whole header it sent, not its first %d bytes",
 			callers, headerBytes, grown, limit, previousTokenCallerBytes)
 	}
