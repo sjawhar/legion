@@ -168,25 +168,6 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 		st.Close()
 		return err
 	}
-	if cfg.Runtime.Name == "kubernetes" {
-		// The issue-pod cutover ships no outbox row that fails on every attempt: a tree close that
-		// could never run (one the outbox cannot decode, or naming a root generation beyond the
-		// store's) is named before the layout marker is installed or any row runs. Migration 0016
-		// repaired the older shape, and no daemon writes one since.
-		var unrunnable []int64
-		if err := pgx.BeginFunc(boot, st.Pool(), func(tx pgx.Tx) error {
-			var err error
-			unrunnable, err = record.NewStore().UnrunnableTreeCloses(boot, tx, cfg.Project)
-			return err
-		}); err != nil {
-			st.Close()
-			return err
-		}
-		if len(unrunnable) > 0 {
-			st.Close()
-			return fmt.Errorf("refuse the Kubernetes runtime's issue-pod layout: outbox tree close rows %v can never run (the outbox cannot decode them, or their linger is beyond the store's generations), so each would fail on every attempt; delete them before the cutover", unrunnable)
-		}
-	}
 	if cfg.DispatchURL != "" {
 		log.Info("legion workflow boot stage", "stage", "store")
 	}
@@ -389,9 +370,9 @@ type plan struct {
 }
 
 // runtimeFactory builds the runtime over the worker stream (C3): ctx is supervision's lifetime,
-// conns the stream listener, stream the address every agent's shim dials, and tokens the
-// workflow's App tokens, nil without a workflow.
-type runtimeFactory func(ctx context.Context, conns runtime.Conns, stream string, tokens appauth.Tokens) (runtime.Runtime, error)
+// listener the stream listener, address the one every agent's shim dials, tokens the workflow's
+// App tokens (nil without a workflow), and st the store the runtime reads.
+type runtimeFactory func(ctx context.Context, listener *stream.Listener, address string, tokens appauth.Tokens, st *store.Store) (runtime.Runtime, error)
 
 // prepare is every refusal that needs nothing but the configuration and the machine (readBoot's,
 // then what writes or runs something: the state directory, the instructions copy, and what the
@@ -497,9 +478,9 @@ func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken
 // providerEnvDir, when set, is the `--provider-env-dir` beside it. The private server's
 // environment is scrubbed before anything is launched on it.
 func tmuxRuntime(cfg config.Config, project, invocation, providerEnvDir, dispatchTokenFile string, tools map[string]string, log *slog.Logger) runtimeFactory {
-	return func(ctx context.Context, conns runtime.Conns, streamAddress string, _ appauth.Tokens) (runtime.Runtime, error) {
+	return func(ctx context.Context, listener *stream.Listener, streamAddress string, _ appauth.Tokens, _ *store.Store) (runtime.Runtime, error) {
 		opts := tmuxOptions(cfg, project, invocation, providerEnvDir, dispatchTokenFile, tools, log)
-		opts.StreamAddress, opts.Conns = streamAddress, conns
+		opts.StreamAddress, opts.Conns = streamAddress, listener
 		rt, err := tmux.New(opts)
 		if err != nil {
 			return nil, err
@@ -577,18 +558,11 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 		cancelStream()
 		return nil, err
 	}
-	rt, err := p.newRuntime(supervising, listener, listener.Addr(), apps)
+	rt, err := p.newRuntime(supervising, listener, listener.Addr(), apps, st)
 	if err != nil {
 		cancel()
 		cancelStream()
 		return nil, fmt.Errorf("build the %s runtime: %w", cfg.Runtime.Name, err)
-	}
-	if cfg.Runtime.Name == "kubernetes" {
-		if err := st.EnsureIssuePodLayout(boot, p.project); err != nil {
-			cancel()
-			cancelStream()
-			return nil, fmt.Errorf("record the issue-pod runtime layout: %w", err)
-		}
 	}
 	repo := cfg.Projects[cfg.Project].Repo
 
@@ -619,9 +593,6 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 			Probe:                 cfg.ProbeInterval,
 			Stop:                  cfg.WorkerStopTimeout,
 		},
-	}
-	if setter, ok := rt.(interface{ SetIssueResourceStore(*store.Store) }); ok {
-		setter.SetIssueResourceStore(st)
 	}
 	return &supervision{
 		cfg: cfg, log: log, plan: p, stream: listener, runtime: rt, supervisor: sup, tokens: tokens, claims: claims,
@@ -815,7 +786,6 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		records, handlers, client, tokens, grants = workflow.records, workflow.handlers, workflow.dispatch, workflow.tokens, workflow.grants
 		claimReady = workflow.claimReady
 	}
-	treeCleaner, _ := s.supervisor.deps.Runtime.(api.TreeResourceCleaner)
 	server := api.NewServer(cfg.Bind, cfg.Port, api.Options{
 		State: &source{
 			store:        st,
@@ -843,7 +813,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		Tokens:            tokens,
 		GitHubOwner:       githubOwner(cfg),
 		Grants:            grants,
-		TreeCleaner:       treeCleaner,
+		Releaser:          s.supervisor.deps.Runtime,
 		ClaimReady:        claimReady,
 	})
 

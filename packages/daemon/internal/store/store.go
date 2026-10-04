@@ -29,6 +29,12 @@ type Store struct {
 	pool *pgxpool.Pool
 }
 
+// FromPool uses an existing transaction source without opening another connection pool. The
+// caller keeps ownership of that pool; component-local Store values carry no other state.
+func FromPool(pool *pgxpool.Pool) Store {
+	return Store{pool: pool}
+}
+
 // Open connects to dsn and waits for the server to answer, so a daemon that
 // gets a Store has a database and one that does not is told where it failed.
 func Open(ctx context.Context, dsn string) (*Store, error) {

@@ -30,6 +30,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
+	"github.com/sjawhar/legion/daemon/internal/wait"
 )
 
 // ClaimState is where a claim is in its life.
@@ -277,7 +278,7 @@ func (e *RefusedError) Unwrap() error { return e.Err }
 // ErrDeliveryPending is a delivery refused because the claim already holds one: a wait, not a
 // fault — the claim takes the next task once its pending delivery's turn is over, so the caller
 // asks again later.
-var ErrDeliveryPending = errors.New("a delivery is already pending")
+var ErrDeliveryPending = wait.New("a delivery is already pending")
 
 // ErrRootStop is a stop of the tree's root claim that is not its tree's close, refused in every
 // state: the root ends only with its tree. The refusal adds what stops the root's process instead,

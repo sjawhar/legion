@@ -25,6 +25,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/runtime/workerbin"
 	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/wait"
 	"github.com/sjawhar/legion/daemon/internal/workflow"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
@@ -41,10 +42,10 @@ const (
 	// second rather than ten times.
 	outboxFailedTickWait = time.Second
 	messageReadSkew      = 5 * time.Second
-	// pendingWaitWarnAttempts is when a row waiting on its claim's pending delivery is logged as a
-	// warning: past the backoff's climb to its cap, a wait of about two minutes, the turn it waits
-	// on is not ending on its own, and an operator should look.
-	pendingWaitWarnAttempts = 7
+	// waitWarnAttempts is when a waiting row is logged as a warning: past the backoff's climb to
+	// its cap, a wait of about two minutes, what it waits on is not ending on its own, and an
+	// operator should look.
+	waitWarnAttempts = 7
 )
 
 // outbox runs each effect that the workflow transaction committed. Claiming and finishing have
@@ -136,38 +137,19 @@ func (r *outbox) RunOnce(ctx context.Context) error {
 	}
 	for _, row := range rows {
 		if err := r.execute(ctx, row); err != nil {
-			if errors.Is(err, errNoticeWaits) {
-				// A held notice is a wait for its architect, logged once for the row rather than on
-				// every attempt of its backoff.
-				if row.Attempts == 0 {
-					r.log.Info("outbox notice waits for its architect", "row", row.ID, "issue", row.Issue, "error", err)
-				}
-			} else if errors.Is(err, supervise.ErrSuspendHeld) {
-				// A suspension held for its agent's turn (supervise's holdSuspension) is a wait: the
-				// row is asked again on its backoff and finishes once the claim is suspended.
-				if row.Attempts == 0 {
-					r.log.Info("outbox suspend is held for its agent's turn to end", "row", row.ID, "issue", row.Issue, "error", err)
-				}
-			} else if errors.Is(err, supervise.ErrQuiesceHeld) {
-				// A start held for the turn of the role it takes the phase from (supervise's Quiesce)
-				// is a wait: the row is asked again on its backoff and goes on once that turn is over.
-				if row.Attempts == 0 {
-					r.log.Info("outbox start is held for the turn of the role it takes the phase from", "row", row.ID, "issue", row.Issue, "error", err)
-				}
-			} else if errors.Is(err, store.ErrIssueCleanupInProgress) {
-				// A start or cleanup meeting its tree's durable cleanup reservation is a wait: the
-				// row keeps its work and runs again on its backoff, charging no launch failure.
-				if row.Attempts == 0 {
-					r.log.Info("outbox row waits for its tree's durable cleanup", "row", row.ID, "kind", row.Kind, "issue", row.Issue, "error", err)
-				}
-			} else if errors.Is(err, supervise.ErrDeliveryPending) {
-				// A task meeting the claim's own pending delivery is a wait, not a failure: the row
-				// runs again on the same backoff once that delivery's turn is over.
+			if errors.Is(err, wait.ErrWaiting) {
+				// A wait is not a failure (wait.ErrWaiting): a held notice, a suspension or start held
+				// for a turn, a task behind the claim's pending delivery, a tree's cleanup reservation,
+				// or a close waiting for its stops. The row runs again on its backoff, logged when it
+				// first waits and as a warning once it has waited long.
 				level := slog.LevelDebug
-				if row.Attempts >= pendingWaitWarnAttempts {
+				switch {
+				case row.Attempts == 0:
+					level = slog.LevelInfo
+				case row.Attempts >= waitWarnAttempts:
 					level = slog.LevelWarn
 				}
-				r.log.Log(ctx, level, "outbox row waits for the claim's pending delivery", "row", row.ID, "kind", row.Kind, "issue", row.Issue,
+				r.log.Log(ctx, level, "outbox row waits", "row", row.ID, "kind", row.Kind, "issue", row.Issue,
 					"attempts", row.Attempts, "error", err)
 			} else {
 				r.log.Error("outbox row failed", "row", row.ID, "kind", row.Kind, "error", err)
@@ -258,13 +240,16 @@ func (r *outbox) execute(ctx context.Context, row record.OutboxRow) error {
 		if r.supervisor == nil {
 			return errors.New("issue suspension executor has no claim supervisor")
 		}
-		if suspender, ok := r.supervisor.deps.Runtime.(runtime.IssueSuspender); ok {
-			return suspender.SuspendIssue(ctx, runtime.IssueResourceKey{
-				Issue: row.Issue, Tree: value.Tree, IssueGeneration: value.Generation,
-				TreeGeneration: value.TreeGeneration, StopRow: row.ID,
-			})
+		suspender, ok := r.supervisor.deps.Runtime.(runtime.IssueSuspender)
+		if !ok {
+			return nil
 		}
-		return nil
+		closing := store.IssueClose{Issue: row.Issue, Tree: value.Tree, IssueGeneration: value.Generation,
+			TreeGeneration: value.TreeGeneration, Row: row.ID}
+		return suspender.SuspendIssue(ctx, row.Issue, value.Tree, func(ctx context.Context) (bool, error) {
+			st := store.FromPool(r.pool)
+			return st.IssueSuspension(ctx, r.project, closing, record.OutOfWorkflow)
+		})
 	case record.WorkspaceRemove:
 		return r.removeWorkspace(ctx, row, value)
 	case record.MergeQueuePublish:
@@ -577,15 +562,13 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 		if !found {
 			// Creation persists before publishing the machine in memory. Do not consume a close
 			// in that interval: the later machine still needs this durable stop.
-			var pending bool
-			if err := r.pool.QueryRow(ctx, `select exists (select 1 from claims where token = $1
-				and ($2 <= 0 or last_start_row <= $2)
-				and (state not in ('suspended', 'failed', 'retired') or locator is not null))`,
-				string(token), row.ID).Scan(&pending); err != nil {
-				return fmt.Errorf("read stored claim for suspension %s: %w", token, err)
+			st := store.FromPool(r.pool)
+			pending, err := st.StoredClaimMayRun(ctx, token, row.ID)
+			if err != nil {
+				return err
 			}
 			if pending {
-				return fmt.Errorf("suspend claim %s: waiting for its stored claim's supervising machine", token)
+				return wait.Errorf("suspend claim %s: waiting for its stored claim's supervising machine", token)
 			}
 			return nil
 		}
@@ -621,8 +604,8 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 				"tree", issue.Tree, "role", payload.Role, "linger", payload.Linger)
 			return nil
 		}
-		// A runtime with shared tree resources ran this close through reservedTreeClose already
-		// when it reserved, or resumed, the tree's cleanup; reaching here, it holds none to drive.
+		// A close that reserved, or found reserved, its tree's cleanup ran through reservedTreeClose
+		// already; one reaching here closes its claim alone.
 		if err := machine.Handle(ctx, supervise.RequestTreeClose{Claim: token}); err != nil {
 			return fmt.Errorf("close the tree of claim %s: %w", token, err)
 		}
@@ -638,15 +621,13 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 // epoch until the cleanup confirms, so every close row of the tree, however stale its own or its
 // root's generation has become, still retires its claim and drives the cleanup; were the fences to
 // finish those rows without acting, the reservation would never confirm and the re-admitted tree
-// would wait forever. It reports false, acting on nothing, when the runtime has no shared tree
-// resources, or when the tree holds no unconfirmed reservation and this close could not take one;
-// the ordinary fences then decide.
+// would wait forever. The cleanup (store.CleanupReservedTree) waits until every stored claim of the
+// tree has retired, then has the runtime release what it holds for the tree and confirms the
+// reservation. It reports false, acting on nothing, when the tree holds no unconfirmed
+// reservation and this close could not take one; the ordinary fences then decide.
 func (r *outbox) reservedTreeClose(ctx context.Context, row record.OutboxRow, payload record.SuperviseRequest) (bool, error) {
-	cleaner, ok := r.supervisor.deps.Runtime.(runtime.TreeLifecycleCleaner)
-	if !ok {
-		return false, nil
-	}
-	treeEpoch, reserved, err := cleaner.ReserveWorkflowTreeCleanup(ctx, r.project, payload.Tree, payload.Linger)
+	st := store.FromPool(r.pool)
+	lifecycle, reserved, err := st.ReserveWorkflowTreeCleanup(ctx, r.project, payload.Tree, payload.Linger)
 	if err != nil {
 		return true, fmt.Errorf("reserve cleanup of workflow tree %s: %w", payload.Tree, err)
 	}
@@ -662,23 +643,7 @@ func (r *outbox) reservedTreeClose(ctx context.Context, row record.OutboxRow, pa
 			return true, fmt.Errorf("close the tree of claim %s: %w", token, err)
 		}
 	}
-	return true, r.cleanupTreeResources(ctx, payload.Tree, treeEpoch)
-}
-
-// cleanupTreeResources runs only after a durable tree reservation. The runtime's cleanup censuses
-// the complete stored claim population, not the runtime watch: a launching child whose resource
-// admission has not yet run is a named wait, so this row retries until every claim of the tree
-// retired before anything is deleted. The reservation gates later claim persistence without
-// consuming their launch budgets.
-func (r *outbox) cleanupTreeResources(ctx context.Context, tree string, treeEpoch uint64) error {
-	cleaner, ok := r.supervisor.deps.Runtime.(runtime.TreeLifecycleCleaner)
-	if !ok {
-		return nil
-	}
-	if err := cleaner.CleanupTree(ctx, r.project, tree, treeEpoch); err != nil {
-		return fmt.Errorf("cleanup resources of closed tree %s: %w", tree, err)
-	}
-	return nil
+	return true, st.CleanupReservedTree(ctx, r.project, payload.Tree, lifecycle.Epoch, r.supervisor.deps.Runtime)
 }
 
 // root is issue's tree root as recorded, nil when it is not, read in a transaction of its own
@@ -813,7 +778,7 @@ func (r *outbox) removeWorkspace(ctx context.Context, row record.OutboxRow, payl
 			return fmt.Errorf("derive claim for outbox row %d: %w", row.ID, err)
 		}
 		if machine, found := r.supervisor.Machine(token); found && machine.Claim().State != supervise.StateRetired {
-			return fmt.Errorf("workspace removal of %s waits for the tree's close to retire claim %s (%s)", row.Issue, token, machine.Claim().State)
+			return wait.Errorf("workspace removal of %s waits for the tree's close to retire claim %s (%s)", row.Issue, token, machine.Claim().State)
 		}
 	}
 	working, err := workspace.Location(r.stateDir, r.repo, row.Issue)

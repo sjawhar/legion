@@ -271,6 +271,10 @@ func (r *Runtime) Socket() string { return r.socket }
 // state directory before the launch.
 func (r *Runtime) ProvisionsWorkspaces() bool { return false }
 
+// CleanupTree holds nothing per tree: each pane is one claim's process, ended by its Release, and
+// each workspace is the outbox's to remove (workspace_remove).
+func (r *Runtime) CleanupTree(context.Context, string) error { return nil }
+
 // result is one tmux invocation's outcome. timedOut is the budget the client was killed at, zero
 // when it returned on its own.
 type result struct {

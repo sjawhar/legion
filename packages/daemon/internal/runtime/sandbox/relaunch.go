@@ -7,8 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math"
-	"strconv"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -18,7 +16,6 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
-	"github.com/sjawhar/legion/daemon/internal/shimwire"
 )
 
 // Spawn starts a fresh agent for spec's claim, over whatever the claim's Sandbox already holds
@@ -49,7 +46,9 @@ func (r *Runtime) Resume(ctx context.Context, prev *runtime.Locator, spec runtim
 
 // relaunch ensures the issue pod once, then starts only this role's worker-shim through its
 // authenticated launcher. An existing healthy issue pod is never suspended or reinitialized when
-// another role starts or one role recovers.
+// another role starts or one role recovers. The claim passed its tree's lifecycle check before the
+// call (supervise's checkLaunch), so the tree's cleanup, which waits for every claim of the tree to
+// retire, lists whatever Sandbox this creates.
 func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runtime.SpawnSpec) (runtime.Locator, error) {
 	l, err := r.prepare(spec)
 	if err != nil {
@@ -59,19 +58,6 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 		return runtime.Locator{}, fmt.Errorf("launch %s: %s: %w", spec.Claim, step, err)
 	}
 	r.forget(spec.Claim)
-	r.own(spec.Claim)
-	r.mu.Lock()
-	resources, testOnly := r.resourceStore, r.withoutResourceStoreTest
-	r.mu.Unlock()
-	if resources == nil {
-		if !testOnly {
-			return fail("load the durable issue resources capability", errors.New("no issue resource store"))
-		}
-	} else if err := resources.EnsureIssueResources(ctx, r.project, spec.Issue, spec.Tree, l.name, spec.TreeEpoch); err != nil {
-		// A reservation of the tree's cleanup refuses at once: no cleanup can finish while this
-		// claim is unretired, so waiting would only hold the machine its close needs to stop.
-		return fail("record its durable issue resources", err)
-	}
 	release, err := r.lockIssue(ctx, spec.Issue)
 	if err != nil {
 		return fail("take its issue pod launch turn", err)
@@ -101,8 +87,8 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 		if err := r.awaitTreeInitialized(ctx, l); err != nil {
 			return fail("wait for its tree's other pods to finish initializing", err)
 		}
-		if !l.expectTreeVolume && spec.WorkspaceRecoveredFrom == "" && resources != nil {
-			l.expectTreeVolume, err = resources.TreeHasSessions(ctx, r.project, spec.Tree)
+		if !l.expectTreeVolume && spec.WorkspaceRecoveredFrom == "" {
+			l.expectTreeVolume, err = r.store.TreeHasSessions(ctx, r.project, spec.Tree)
 			if err != nil {
 				return fail("read its tree's retained sessions", err)
 			}
@@ -135,7 +121,7 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 			return fail("bind its role launchers to the new pod", err)
 		}
 	}
-	loc := r.locatorFor(spec.Claim, pod.UID, spec.Generation)
+	loc := r.locatorFor(spec.Claim, spec.Role, pod.UID, spec.Generation)
 	starting, cancel := context.WithTimeout(ctx, r.bootTimeout+r.terminationGrace)
 	defer cancel()
 	ended, err := r.awaitRoleLauncher(starting, loc)
@@ -153,9 +139,7 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 	// role never run side by side.
 	if state, connected := r.launchers.state(spec.Claim, string(pod.UID)); connected && state.Child != nil && state.Child.Generation < spec.Generation {
 		stale := state.Child.Generation
-		if err := r.launchers.stop(starting, spec.Claim, string(pod.UID), shimwire.LauncherStop{
-			ID: "stop-" + strconv.FormatUint(stale, 10), Generation: stale, GraceMs: int(math.Ceil(r.terminationGrace.Seconds() * 1000)),
-		}); err != nil {
+		if err := r.launchers.stop(starting, spec.Claim, string(pod.UID), r.stopFrame(stale)); err != nil {
 			return fail(fmt.Sprintf("stop its earlier generation %d", stale), err)
 		}
 	}
@@ -447,29 +431,24 @@ func (r *Runtime) treePodScheduled(l launch) bool {
 // the check that no other pod of the tree is initializing until its own new pod is in the store,
 // where the next relaunch's check sees it.
 func (r *Runtime) lockTree(ctx context.Context, tree string) (func(), error) {
-	r.mu.Lock()
-	turn, ok := r.trees[tree]
-	if !ok {
-		turn = make(chan struct{}, 1)
-		r.trees[tree] = turn
-	}
-	r.mu.Unlock()
-	select {
-	case turn <- struct{}{}:
-		return func() { <-turn }, nil
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
+	return r.takeTurn(ctx, r.trees, tree)
 }
 
-// lockIssue serializes first creation and replacement of one issue pod. Role starts in a healthy
-// pod share this lock only while they select a launcher command; child issue pods remain distinct.
+// lockIssue serializes first creation, replacement, suspension and orphan deletion of one issue
+// pod. Role starts in a healthy pod share this lock only while they select a launcher command;
+// child issue pods remain distinct.
 func (r *Runtime) lockIssue(ctx context.Context, issue string) (func(), error) {
+	return r.takeTurn(ctx, r.issues, issue)
+}
+
+// takeTurn waits for key's turn in turns, a map r.mu guards, until ctx ends; the returned func
+// gives the turn back.
+func (r *Runtime) takeTurn(ctx context.Context, turns map[string]chan struct{}, key string) (func(), error) {
 	r.mu.Lock()
-	turn, ok := r.issues[issue]
+	turn, ok := turns[key]
 	if !ok {
 		turn = make(chan struct{}, 1)
-		r.issues[issue] = turn
+		turns[key] = turn
 	}
 	r.mu.Unlock()
 	select {

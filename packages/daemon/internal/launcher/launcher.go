@@ -16,7 +16,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -354,7 +353,7 @@ func (m *manager) stopActive() {
 
 // generationDir is where generation's credentials live under the private directory.
 func generationDir(private string, generation uint64) string {
-	return filepath.Join(private, "g"+strconv.FormatUint(generation, 10))
+	return filepath.Join(private, shimwire.GenerationDir(generation))
 }
 
 // writeFiles materializes command's credentials in a fresh directory for its generation. No child

@@ -5,11 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
+	"github.com/sjawhar/legion/daemon/internal/wait"
 )
 
 // OpenTreeLifecycle is the explicit authority entry point. Workflow admission calls it inside its
@@ -43,9 +45,6 @@ func (s *Store) AdmitClaim(ctx context.Context, c supervise.Claim) (supervise.Cl
 		return putClaim(ctx, tx, c)
 	})
 	if err != nil {
-		if errors.Is(err, treelifecycle.ErrCleanupReserved) {
-			return supervise.Claim{}, fmt.Errorf("admit claim %s: %w", c.Token, errors.Join(ErrIssueCleanupInProgress, err))
-		}
 		return supervise.Claim{}, fmt.Errorf("admit claim %s: %w", c.Token, err)
 	}
 	return c, nil
@@ -55,26 +54,20 @@ func (s *Store) AdmitClaim(ctx context.Context, c supervise.Claim) (supervise.Cl
 // the tree lifecycle reserved cleanup. The machine returns this named error directly, so outbox
 // retry preserves its claim and launch budget.
 func (s *Store) CheckLaunch(ctx context.Context, c supervise.Claim) error {
-	err := s.Tx(ctx, func(tx pgx.Tx) error {
+	return s.Tx(ctx, func(tx pgx.Tx) error {
 		if err := treelifecycle.CheckWork(ctx, tx, c.Project, c.Tree, c.TreeEpoch); err != nil {
 			return fmt.Errorf("launch claim %s: %w", c.Token, err)
 		}
 		return nil
 	})
-	if errors.Is(err, treelifecycle.ErrCleanupReserved) {
-		return errors.Join(ErrIssueCleanupInProgress, err)
-	}
-	return err
 }
 
 // ReserveWorkflowTreeCleanup records the workflow close before any resource snapshot. A retry of an
 // unconfirmed reservation resumes regardless of a subsequent re-admission; a retry after the
 // cleanup confirmed reserves nothing; a fresh reservation first proves the root is still lingering
-// at the close's generation.
+// at the close's generation, so a close naming a generation the root never had, or no generation,
+// reserves nothing either, and the outbox's ordinary fences finish it.
 func (s *Store) ReserveWorkflowTreeCleanup(ctx context.Context, project, tree string, rootGeneration uint64) (treelifecycle.Lifecycle, bool, error) {
-	if rootGeneration == 0 || rootGeneration > math.MaxInt64 {
-		return treelifecycle.Lifecycle{}, false, fmt.Errorf("reserve workflow cleanup %s: invalid root generation %d", tree, rootGeneration)
-	}
 	var lifecycle treelifecycle.Lifecycle
 	var reserved bool
 	err := s.Tx(ctx, func(tx pgx.Tx) error {
@@ -93,6 +86,9 @@ func (s *Store) ReserveWorkflowTreeCleanup(ctx context.Context, project, tree st
 			return err
 		}
 		if err == nil && started && confirmed {
+			return nil
+		}
+		if rootGeneration == 0 || rootGeneration > math.MaxInt64 {
 			return nil
 		}
 		var generation int64
@@ -141,7 +137,7 @@ func (s *Store) ReserveOperatorTreeCleanup(ctx context.Context, project, tree st
 // PendingTreeClaims names every stored claim of the tree that has not retired, as token:state.
 // Read after the tree's cleanup reservation committed, it is the tree's complete runnable
 // population: no later claim can bind to the reserved epoch, and a claim that won before the
-// reservation is already stored, whether or not its resources were admitted yet.
+// reservation is already stored, whether or not its process launched yet.
 func (s *Store) PendingTreeClaims(ctx context.Context, project, tree string) ([]string, error) {
 	rows, err := s.pool.Query(ctx, `select token, state from claims where project = $1 and tree = $2 and state <> 'retired'
 		order by token`, project, tree)
@@ -163,18 +159,43 @@ func (s *Store) PendingTreeClaims(ctx context.Context, project, tree string) ([]
 	return pending, nil
 }
 
-// CheckTreeCleanupReservation proves the physical caller owns the current explicitly reserved
-// epoch, taking the shared serializer before the lifecycle row (treelifecycle.CheckReservation).
-func (s *Store) CheckTreeCleanupReservation(ctx context.Context, project, tree string, epoch uint64) error {
-	return s.Tx(ctx, func(tx pgx.Tx) error {
-		return treelifecycle.CheckReservation(ctx, tx, project, tree, epoch)
-	})
+// TreeReleaser is what a runtime holds for a whole tree beyond its claims' processes: the Sandbox
+// runtime's issue Sandboxes, their Secrets and the tree volume. A runtime that holds nothing of
+// the kind releases nothing.
+type TreeReleaser interface {
+	CleanupTree(ctx context.Context, tree string) error
 }
 
-// ConfirmTreeCleanup records complete API-confirmed release. The next explicit root admission, not
-// a delayed claim or old outbox row, opens the following epoch.
-func (s *Store) ConfirmTreeCleanup(ctx context.Context, project, tree string, epoch uint64) error {
+// CleanupReservedTree finishes the cleanup of tree that its caller reserved at epoch, for the
+// workflow (ReserveWorkflowTreeCleanup) or the operator (ReserveOperatorTreeCleanup). It is a wait
+// while any stored claim of the tree has not retired (PendingTreeClaims); then the runtime
+// releases the tree's resources and the reservation is confirmed, after which only a fresh root
+// admission opens the tree's next epoch. A retry after a failed release runs it again: releasing
+// what is already gone succeeds.
+func (s *Store) CleanupReservedTree(ctx context.Context, project, tree string, epoch uint64, releaser TreeReleaser) error {
+	pending, err := s.PendingTreeClaims(ctx, project, tree)
+	if err != nil {
+		return err
+	}
+	if len(pending) > 0 {
+		return wait.Errorf("cleanup of tree %s waits for its claims %s to retire", tree, strings.Join(pending, ", "))
+	}
+	if err := releaser.CleanupTree(ctx, tree); err != nil {
+		return fmt.Errorf("release the resources of tree %s: %w", tree, err)
+	}
 	return s.Tx(ctx, func(tx pgx.Tx) error {
 		return treelifecycle.ConfirmCleanup(ctx, tx, project, tree, epoch)
 	})
+}
+
+// TreeLive is whether tree has a lifecycle whose cleanup is not confirmed: open, or reserved and
+// releasing. Such a tree's resources are its cleanup's to delete, and no orphan sweep's.
+func (s *Store) TreeLive(ctx context.Context, project, tree string) (bool, error) {
+	var live bool
+	err := s.pool.QueryRow(ctx, `select exists (select 1 from tree_lifecycles
+		where project = $1 and tree = $2 and cleanup_confirmed_at is null)`, project, tree).Scan(&live)
+	if err != nil {
+		return false, fmt.Errorf("read the lifecycle of tree %s: %w", tree, err)
+	}
+	return live, nil
 }

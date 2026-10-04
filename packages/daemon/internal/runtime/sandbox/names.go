@@ -4,10 +4,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"regexp"
-	"strconv"
 	"strings"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/shimwire"
 )
 
 // The pod's own paths. The tree volume is mounted whole at TreeRoot in workspace-init and each
@@ -99,17 +99,20 @@ const maxNameLength = 63
 
 // SandboxName is the Sandbox and pod name for an issue. The six role claims of that issue share
 // it; their container and generation live in each process locator instead. A claim token always
-// ends in one fixed role word, so stripping it preserves the project and issue token even where an
-// issue name has hyphens.
+// ends in one fixed role word, so cutting it (claim.Token.Cut) preserves the project and issue
+// token even where an issue name has hyphens.
 func SandboxName(t claim.Token) string {
-	name := string(t)
-	for _, role := range claim.Roles {
-		if strings.HasSuffix(name, "-"+string(role)) {
-			name = strings.TrimSuffix(name, "-"+string(role))
-			break
-		}
+	issue, _, _ := t.Cut()
+	return dnsName(issue, maxNameLength)
+}
+
+// issueSandboxName is SandboxName of issue's role claims, from the issue key.
+func issueSandboxName(project, issue string) (string, error) {
+	token, err := claim.NewToken(project, issue, claim.RoleArchitect)
+	if err != nil {
+		return "", err
 	}
-	return dnsName(name, maxNameLength)
+	return SandboxName(token), nil
 }
 
 // TreeClaimName is the tree volume's claim: the root Sandbox's `tree` template, as the controller
@@ -162,7 +165,7 @@ func labelValue(key string) string {
 
 // generationDir is where a role's launcher writes one generation's credentials: a fresh
 // owner-only directory under its private directory, gone when the generation ends
-// (internal/launcher). The launcher and this runtime agree on `g<generation>`.
+// (internal/launcher, shimwire.GenerationDir).
 func generationDir(generation uint64) string {
-	return LauncherPrivateDir + "/g" + strconv.FormatUint(generation, 10)
+	return LauncherPrivateDir + "/" + shimwire.GenerationDir(generation)
 }

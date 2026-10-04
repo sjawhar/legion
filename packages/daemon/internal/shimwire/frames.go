@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -164,6 +165,11 @@ type LauncherStart struct {
 	Files      map[string]string `json:"files,omitempty"`
 	ResumeFile string            `json:"resumeFile,omitempty"`
 }
+
+// GenerationDir is the directory under a launcher's private directory that holds one generation's
+// Files. Both ends name it: the daemon in the Argv and Env that point at a file, the launcher when
+// it writes them.
+func GenerationDir(generation uint64) string { return "g" + strconv.FormatUint(generation, 10) }
 
 // LauncherStartResult is the launcher's answer to LauncherStart.
 type LauncherStartResult struct {
