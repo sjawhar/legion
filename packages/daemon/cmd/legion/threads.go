@@ -147,12 +147,13 @@ func printOutcomes(outcomes []reviewthreads.Outcome, withheld int, err error, st
 		fmt.Fprintf(stderr, "legion threads resolve: %v\n", err)
 		return 1
 	}
-	if len(outcomes) == 0 {
-		if withheld > 0 {
-			return 1
-		}
-		fmt.Fprintln(stdout, "no unresolved threads")
+	if len(outcomes) > 0 {
+		return 0
 	}
+	if withheld > 0 {
+		return 1
+	}
+	fmt.Fprintln(stdout, "no unresolved threads")
 	return 0
 }
 
