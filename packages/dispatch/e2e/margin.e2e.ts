@@ -21,6 +21,7 @@ import {
   expectMark,
   marginCard,
   markSpan,
+  needsYouCards,
   openedThreadCard,
   selectEditorText,
   setSheet,
@@ -146,10 +147,7 @@ test("the selection bar comments, suggests, and asks on marks that both users se
     const askComposer = alicePage.getByRole("form", { name: "Comment composer" });
     await askComposer.getByLabel("Question").fill("Why fox?");
     await askComposer.locator('button[type="submit"]').click();
-    const askCard = alicePage
-      .getByRole("region", { name: "Needs you" })
-      .locator("[data-margin-item]")
-      .filter({ hasText: "Why fox?" });
+    const askCard = needsYouCards(alicePage).filter({ hasText: "Why fox?" });
     await expect(askCard).toBeVisible();
     const askId = await askCard.getAttribute("data-margin-item");
     if (askId === null) {
@@ -166,6 +164,45 @@ test("the selection bar comments, suggests, and asks on marks that both users se
     ]);
   } finally {
     await bob.close();
+    await alice.close();
+  }
+});
+
+// A bar Comment mounts its composer before the margin has come back from its rail or its Pinned
+// tab, out of sight, where a field takes no focus; the composer takes focus once it is on screen.
+// On a phone the sheet opens for it, which `phone.e2e.ts` checks.
+test("a bar Comment focuses its composer from the margin's rail and from its Pinned tab", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name === "iphone", "below xl the margin is a sheet, with no rail");
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", spec: initialMarkdown, title: "Focus" });
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/spec`);
+    await expect(documentEditor(page)).toContainText(initialMarkdown);
+    await expect(connectedDot(page)).toHaveText("connected");
+    const form = page.getByRole("form", { name: "Comment composer" });
+
+    await page.getByRole("button", { name: "Hide margin" }).click();
+    await expect(page.getByTestId("margin-rail")).toBeVisible();
+    await selectEditorText(page, "brown");
+    await barAction(page, "Comment");
+    await expect(page.getByTestId("margin-rail")).toHaveCount(0);
+    await expect(form.getByLabel("Comment")).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(form).toHaveCount(0);
+
+    await page.getByRole("tab", { name: "Pinned" }).click();
+    await selectEditorText(page, "fox");
+    await barAction(page, "Comment");
+    await expect(page.getByRole("tab", { name: "Comments" })).toHaveAttribute(
+      "aria-selected",
+      "true"
+    );
+    await expect(form.getByLabel("Comment")).toBeFocused();
+  } finally {
     await alice.close();
   }
 });
@@ -620,10 +657,9 @@ test("margin ask composer sends option choices that the inbox records as a selec
     });
     await composer.getByRole("button", { exact: true, name: "Ask" }).last().click();
 
-    const createdCard = page
-      .getByRole("region", { name: "Needs you" })
-      .locator("[data-margin-item]")
-      .filter({ hasText: "Which direction should we take?" });
+    const createdCard = needsYouCards(page).filter({
+      hasText: "Which direction should we take?",
+    });
     const askId = await createdCard.getAttribute("data-margin-item");
     if (askId === null) {
       throw new Error("The created ask has no margin id.");
@@ -756,7 +792,7 @@ test("long option labels and descriptions wrap inside the margin ask card", asyn
     const page = await alice.newPage();
     await page.goto(`/issues/${issue.key}`);
     await setSheet(page, testInfo.project.name, true);
-    const card = page.getByRole("region", { name: "Needs you" }).getByTestId(`ask-${ask.id}`);
+    const card = needsYouCards(page).getByTestId(`ask-${ask.id}`);
     await expect(card).toContainText("severity table shape");
     await expect(
       card.getByRole("button", { name: "Add a note or answer in your own words" })
