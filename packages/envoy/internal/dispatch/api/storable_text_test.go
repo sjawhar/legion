@@ -696,7 +696,7 @@ func TestAQuoteMatchesABrowsersNulAsEveryReadServesIt(t *testing.T) {
 func TestTheDocumentWebsocketRefusesANulInItsBearersActor(t *testing.T) {
 	var documentService *docs.Service
 	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
-		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour, AgentToken: "agent-token"})
+		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour, AgentTokens: sharedAgentTokens(t, "agent-token")})
 		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
 		return documentService
 	})

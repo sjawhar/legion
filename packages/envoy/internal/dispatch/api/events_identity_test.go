@@ -47,7 +47,7 @@ func TestEventStreamClosesOnceItsPersonNoLongerResolves(t *testing.T) {
 	t.Cleanup(func() { _ = documents.Shutdown(context.Background()) })
 	person := &endableIdentity{}
 	deps, err := NewDeps(DepsInput{
-		Store: database, Identity: person, AgentToken: "agent-token", Docs: documents, Events: broker,
+		Store: database, Identity: person, AgentTokens: sharedAgentTokens(t, "agent-token"), Docs: documents, Events: broker,
 		StreamHeartbeat: 20 * time.Millisecond,
 	})
 	if err != nil {
@@ -96,7 +96,7 @@ func TestAgentStreamClosesOnceItsViewerNoLongerResolves(t *testing.T) {
 	t.Cleanup(func() { _ = documents.Shutdown(context.Background()) })
 	person := &endableIdentity{}
 	deps, err := NewDeps(DepsInput{
-		Store: database, Identity: person, AgentToken: "agent-token", Docs: documents, Events: broker,
+		Store: database, Identity: person, AgentTokens: sharedAgentTokens(t, "agent-token"), Docs: documents, Events: broker,
 		AgentStream: agentstream.NewMemory(), StreamHeartbeat: 20 * time.Millisecond,
 	})
 	if err != nil {
@@ -272,7 +272,7 @@ func newDocumentSocketRig(t *testing.T, heartbeat time.Duration) *documentSocket
 	rig.documents = docs.New(docs.Deps{Store: database, Events: broker, Identity: person, Settle: time.Hour})
 	t.Cleanup(func() { _ = rig.documents.Shutdown(context.Background()) })
 	deps, err := NewDeps(DepsInput{
-		Store: database, Identity: person, AgentToken: "agent-token", Docs: rig.documents, Events: broker,
+		Store: database, Identity: person, AgentTokens: sharedAgentTokens(t, "agent-token"), Docs: rig.documents, Events: broker,
 		StreamHeartbeat: heartbeat,
 	})
 	if err != nil {
