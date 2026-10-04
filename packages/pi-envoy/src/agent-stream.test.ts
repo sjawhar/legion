@@ -366,7 +366,13 @@ describe("the model that produced an assistant turn", () => {
     publisher.noteViewer();
     publisher.record(
       SUBJECT,
-      { content: "ship it", model: "claude-opus-5", provider: "anthropic", role: "user", timestamp: 10 },
+      {
+        content: "ship it",
+        model: "claude-opus-5",
+        provider: "anthropic",
+        role: "user",
+        timestamp: 10,
+      },
       false
     );
     const frame = published[0];
