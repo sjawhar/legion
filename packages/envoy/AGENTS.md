@@ -412,10 +412,11 @@ of a block the server wrote, is copied, read, opened and kept from a rebuild who
 A room whose last peer leaves, or that only the service's `Server.Apply` touches - an agent's
 edit, a read outside any transaction - stays resident until it has been idle for a minute
 (`roomIdleTimeout`), when ygo's idle sweeper evicts it. ygo's default, eager eviction, evicts a room
-the moment its last peer leaves even while a `Server.Apply` is inside its callback on it (reearth/ygo
-v1.49.5, `provider/websocket/peer.go` checks only the peers): the callback's write then lands on the
-evicted room and reaches the store only through its retiring persistence worker, while the next
-access has already loaded the store without it and serves, and takes, the next write on a document
+the moment its last peer leaves even while a `Server.Apply` is inside its callback on it
+(sjawhar/ygo v1.50.1-sami.2, `provider/websocket/peer.go` checks only the peers): the callback's
+write then lands on the evicted room and reaches the store only through its retiring persistence
+worker, while the next access has already loaded the store without it and serves, and takes, the
+next write on a document
 missing the first. Two such writes, each a diff of the same document, merge into a document neither
 wrote, and into one holding no block at all once each kept a block the other replaced: the
 healthy-room probe met it as a socket closed with `DOC_SCHEMA`. The idle sweeper evicts a room only
