@@ -194,7 +194,7 @@ func TestDocumentSocketClosesOnceItsPersonNoLongerResolves(t *testing.T) {
 
 			// The document goes on without them: an edit after the close reaches the room and not
 			// their editor, and their editor cannot reconnect.
-			if _, err := rig.documents.ReplaceText(context.Background(), rig.artifactID, "written after the session ended", model.Actor{Kind: "user", ID: "bob@d.example"}); err != nil {
+			if _, err := replaceDocumentText(rig.database, rig.documents, rig.artifactID, "written after the session ended", model.Actor{Kind: "user", ID: "bob@d.example"}); err != nil {
 				t.Fatalf("edit the document after the close: %v", err)
 			}
 			if text, err := rig.documents.Text(context.Background(), rig.artifactID); err != nil || !strings.Contains(text, "written after the session ended") {
@@ -215,6 +215,7 @@ func TestDocumentSocketClosesOnceItsPersonNoLongerResolves(t *testing.T) {
 // documentSocketRig is the server main serves a person signed in through a sign-in pool: cookie
 // identity confirming membership with the pool, and the API and document socket Register mounts.
 type documentSocketRig struct {
+	database   *store.Store
 	pool       *oidctest.Issuer
 	people     *store.PgPeopleStore
 	sessions   *store.PgSessionStore
@@ -252,6 +253,7 @@ func newDocumentSocketRig(t *testing.T, heartbeat time.Duration) *documentSocket
 	}
 
 	database := storetest.Open(t)
+	rig.database = database
 	rig.people = store.NewPgPeopleStore(database.Pool)
 	rig.sessions = store.NewPgSessionStore(database.Pool)
 	if err := rig.people.SignIn(ctx, rig.email, signIn.RefreshToken, time.Now()); err != nil {
