@@ -82,7 +82,8 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 		return fail("ensure its sandbox", err)
 	}
 	pod := r.storedPod(s.Name)
-	if s.mode() == modeSuspended || !ownedBy(pod, s.UID) || terminal(pod) || !r.launcherBound(ctx, s, pod) {
+	_, initExit := failedInit(pod)
+	if s.mode() == modeSuspended || !ownedBy(pod, s.UID) || terminal(pod) || initExit != nil || !r.launcherBound(ctx, s, pod) {
 		if s.mode() != modeSuspended {
 			if err := r.setMode(ctx, s, modeSuspended); err != nil {
 				return fail("suspend its sandbox", err)
@@ -99,6 +100,12 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 		defer treeRelease()
 		if err := r.awaitTreeInitialized(ctx, l); err != nil {
 			return fail("wait for its tree's other pods to finish initializing", err)
+		}
+		if !l.expectTreeVolume && spec.WorkspaceRecoveredFrom == "" && resources != nil {
+			l.expectTreeVolume, err = resources.TreeHasSessions(ctx, r.project, spec.Tree)
+			if err != nil {
+				return fail("read its tree's retained sessions", err)
+			}
 		}
 		minting, cancel := call(ctx)
 		provisionToken, err := r.tokens.Token(minting, l.spec.Repository.Owner())
@@ -131,22 +138,50 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 	loc := r.locatorFor(spec.Claim, pod.UID, spec.Generation)
 	starting, cancel := context.WithTimeout(ctx, r.bootTimeout+r.terminationGrace)
 	defer cancel()
+	ended, err := r.awaitRoleLauncher(starting, loc)
+	if err != nil {
+		return fail("wait for its role launcher", err)
+	}
+	if ended {
+		// A real failed init proves no role could start. Return its recorded pod so supervision
+		// observes Gone (and WorkspaceLost), rather than charging an unrelated launcher timeout.
+		r.join(loc)
+		return loc, nil
+	}
 	// A launcher still running an earlier generation of this role runs a process the supervisor has
 	// already given up on: it is stopped before the new generation starts, so two generations of a
 	// role never run side by side.
-	if state, connected := r.launchers.state(spec.Claim); connected && state.Child != nil && state.Child.Generation < spec.Generation {
+	if state, connected := r.launchers.state(spec.Claim, string(pod.UID)); connected && state.Child != nil && state.Child.Generation < spec.Generation {
 		stale := state.Child.Generation
-		if err := r.launchers.stop(starting, spec.Claim, shimwire.LauncherStop{
+		if err := r.launchers.stop(starting, spec.Claim, string(pod.UID), shimwire.LauncherStop{
 			ID: "stop-" + strconv.FormatUint(stale, 10), Generation: stale, GraceMs: int(math.Ceil(r.terminationGrace.Seconds() * 1000)),
 		}); err != nil {
 			return fail(fmt.Sprintf("stop its earlier generation %d", stale), err)
 		}
 	}
-	if err := r.launchers.start(starting, spec.Claim, launcherCommand(l, r)); err != nil {
+	if err := r.launchers.start(starting, spec.Claim, string(pod.UID), launcherCommand(l, r)); err != nil {
 		return fail("start through its authenticated launcher", err)
 	}
 	r.join(loc)
 	return loc, nil
+}
+
+func (r *Runtime) awaitRoleLauncher(ctx context.Context, loc runtime.Locator) (bool, error) {
+	ended := false
+	err := r.await(ctx, r.bootTimeout, "role launcher "+string(loc.Claim), func() (bool, error) {
+		view, err := r.view(loc.Sandbox.Name)
+		if err != nil {
+			return false, err
+		}
+		_, initExit := failedInit(view.pod)
+		if view.pod == nil || string(view.pod.UID) != loc.Sandbox.PodUID || terminal(view.pod) || initExit != nil {
+			ended = true
+			return true, nil
+		}
+		_, ready := r.launchers.state(loc.Claim, loc.Sandbox.PodUID)
+		return ready, nil
+	})
+	return ended, err
 }
 
 // suspendFailedLaunch sets the Sandbox of a launch that failed once its Running patch was sent
@@ -462,10 +497,11 @@ func (r *Runtime) awaitTreeInitialized(ctx context.Context, l launch) error {
 	})
 }
 
-// initializing is whether pod's workspace-init has yet to finish: the pod is not done, and its
-// workspace-init container has not terminated.
+// initializing excludes failed attempts that Always restarts: the owning claim's recovery
+// replaces those pods, and a failed sibling must not hold the tree's provisioning lock forever.
 func initializing(pod *corev1.Pod) bool {
-	if terminal(pod) {
+	_, initExit := failedInit(pod)
+	if terminal(pod) || initExit != nil {
 		return false
 	}
 	for _, status := range pod.Status.InitContainerStatuses {

@@ -166,7 +166,7 @@ func (v *treeVolume) args(issue string) []string {
 
 // runtimeOptionalEnv are the variables a runtime sets on an init container only for some
 // launches; no run in these tests inherits them from whoever runs the tests.
-var runtimeOptionalEnv = []string{"LEGION_PROVISION_TOKEN_FILE", "LEGION_RESUME_SESSION_FILE", "LEGION_WORKSPACE_RECOVERED_FROM", "LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS"}
+var runtimeOptionalEnv = []string{"LEGION_PROVISION_TOKEN_FILE", "LEGION_EXPECT_TREE_VOLUME", "LEGION_WORKSPACE_RECOVERED_FROM", "LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS"}
 
 // setenv is the volume's environment for an in-process run of `provision`.
 func (v *treeVolume) setenv(t *testing.T) {
@@ -508,53 +508,46 @@ func TestWorkspaceInitProvisionsTheIssueWorkspace(t *testing.T) {
 	holdsNoToken(t, v.root, "after provisioning")
 }
 
-// The same-agent invariant, checked before the repository lock (cmdWorkspaceInit's
-// LEGION_RESUME_SESSION_FILE check, workspace-init.ts): a recorded OMP session missing from the
-// volume is a launch failure, never a fresh agent. With the clone gone too the volume itself was
-// lost, which the runtime reads from exit code 3; with the clone present only the session is gone,
-// exit 1. Neither provisions or takes the lock, and a session that is present lets the same
-// invocation through.
-func TestWorkspaceInitRefusesAResumeWhoseSessionIsGone(t *testing.T) {
-	v := newTreeVolume(t).withRemote(t)
-	v.fetch(t)
-	session := filepath.Join(v.root, "sessions", "legion-42-planner.jsonl")
-	t.Setenv("LEGION_RESUME_SESSION_FILE", session)
-	untouched := func(t *testing.T) {
-		t.Helper()
-		if _, err := os.Stat(v.lock()); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("the repository lock exists (%v), want the refusal before it", err)
-		}
-		if _, err := os.Stat(filepath.Join(v.root, "workspaces")); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("a workspace was provisioned (%v)", err)
-		}
-		if calls := v.jjCalls(t); calls != nil {
-			t.Fatalf("jj ran %q", calls)
-		}
-	}
-
-	code, stdout, stderr := runWorkspaceInitHere(v.args("LEGION-42"))
-	want := "Tree volume for LEGION-42 holds neither the clone (" + v.clone() + ") nor the recorded OMP session file (" + session + "): the volume was lost"
-	if code != 3 || !strings.Contains(stderr, want) || stdout != "" {
-		t.Fatalf("lost volume: exit %d, stdout %q, stderr %q; want 3 naming %q", code, stdout, stderr, want)
-	}
-	untouched(t)
-
-	if err := os.MkdirAll(v.clone(), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	code, stdout, stderr = runWorkspaceInitHere(v.args("LEGION-42"))
-	want = "Refusing to start LEGION-42 fresh: recorded OMP session file is missing from the tree volume: " + session
-	if code != 1 || !strings.Contains(stderr, want) || stdout != "" {
-		t.Fatalf("lost session: exit %d, stdout %q, stderr %q; want 1 naming %q", code, stdout, stderr, want)
-	}
-	untouched(t)
-
-	if err := os.WriteFile(session, []byte("{}\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	code, stdout, stderr = runWorkspaceInitHere(v.args("LEGION-42"))
-	if want := "workspace-init: " + v.workspace("LEGION-42") + " on legion/LEGION-42\n"; code != 0 || stdout != want {
-		t.Fatalf("present session: exit %d, stdout %q, stderr %q; want 0 and %q", code, stdout, stderr, want)
+// Shared init distinguishes loss of the tree's storage from one role's missing transcript.
+// A clone or a retained session proves the volume still holds data; only the role launcher
+// decides whether its own session exists.
+func TestWorkspaceInitDetectsLostTreeWithoutRoleSessionDependency(t *testing.T) {
+	for _, content := range []string{"empty", "clone", "session"} {
+		t.Run(content, func(t *testing.T) {
+			v := newTreeVolume(t).withRemote(t)
+			v.fetch(t)
+			t.Setenv("LEGION_EXPECT_TREE_VOLUME", "true")
+			switch content {
+			case "clone":
+				if err := os.MkdirAll(v.clone(), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			case "session":
+				dir := filepath.Join(v.root, "sessions")
+				if err := os.MkdirAll(dir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, "retained.jsonl"), []byte("{}\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			code, _, stderr := runWorkspaceInitHere(v.args("LEGION-42"))
+			if content == "empty" {
+				if code != 3 {
+					t.Fatalf("expected missing tree storage to exit 3, got %d: %s", code, stderr)
+				}
+				if _, err := os.Stat(v.lock()); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("lost storage acquired the repository lock: %v", err)
+				}
+				return
+			}
+			if code != 0 {
+				t.Fatalf("shared init blocked a role-independent %s: exit %d: %s", content, code, stderr)
+			}
+			if _, err := os.Stat(v.workspace("LEGION-42")); err != nil {
+				t.Fatalf("intact volume did not provision the issue workspace: %v", err)
+			}
+		})
 	}
 }
 
