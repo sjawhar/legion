@@ -384,3 +384,25 @@ func TestVersionNamesThePolicyNotItsListingOrder(t *testing.T) {
 		}
 	}
 }
+
+// goldenFixture is a fixed namespace whose Version a full Load produced at legion main 7544b767,
+// before NewSet existed. A change to the digest's bytes or order fails TestGoldenDigest, and the
+// production digests (requests.rules_version rows) would shift with it.
+func goldenFixture() *secrets.Local {
+	return secrets.NewLocal(
+		policytest.Secret("A0", "ada@example.com", policy.TierAgent, "v1"),
+		policytest.Secret("A_B", "ada@example.com", policy.TierHuman, "v1"),
+		policytest.Secret("DEEL_API_KEY", policy.OwnerShared, policy.TierHuman, "v1"),
+	)
+}
+
+func TestGoldenDigest(t *testing.T) {
+	const want = "252a3be479774f1163b99a7fbeeec17d523eb5e7048d54f90b8cb5e702fc16ca"
+	set, err := policytest.Loader(goldenFixture()).Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if set.Version != want {
+		t.Fatalf("Version = %s, want the pre-change golden %s: the digest bytes or order changed", set.Version, want)
+	}
+}
