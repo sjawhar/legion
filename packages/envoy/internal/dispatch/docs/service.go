@@ -1662,7 +1662,7 @@ func (s *Service) SetIssueClosed(ctx context.Context, issueKey string, closed bo
 			s.unlockState(room, state)
 		}
 		if closed && changed {
-			if err := s.persistSettlementCredit(ctx, room, credit); err != nil {
+			if err := s.persistSettlementCredit(ctx, room, credit, creditVersion); err != nil {
 				slog.Error("dispatch: record closing document settlement authors", "room", room, "error", err)
 			} else {
 				s.settlementCreditPersisted(room, creditVersion)

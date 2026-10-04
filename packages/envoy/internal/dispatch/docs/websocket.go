@@ -69,7 +69,7 @@ type classifiedUpdateStore interface {
 // row that leaves its settlement owed. The wire value keeps test-only stores in other packages
 // able to wrap the method without exposing roomState's private credit representation.
 type creditedUpdateStore interface {
-	AppendUpdateWithSettlementCredit(context.Context, string, []byte, bool, []byte) (persistence.Version, error)
+	AppendUpdateWithSettlementCredit(context.Context, string, []byte, bool, []byte, uint64) (persistence.Version, error)
 }
 
 func (a *servicePersistenceAdapter) LoadDoc(room string) ([]byte, error) {
@@ -105,7 +105,7 @@ func (a *servicePersistenceAdapter) StoreUpdate(room string, update []byte) erro
 		if encodeErr != nil {
 			return fmt.Errorf("encode document settlement authors: %w", encodeErr)
 		}
-		_, err = store.AppendUpdateWithSettlementCredit(context.Background(), room, update, class.contentChanged, encodedCredit)
+		_, err = store.AppendUpdateWithSettlementCredit(context.Background(), room, update, class.contentChanged, encodedCredit, class.creditVersion)
 		creditStored = true
 	} else if store, ok := a.store.(classifiedUpdateStore); ok {
 		_, err = store.AppendUpdateWithClass(context.Background(), room, update, class.contentChanged)
@@ -143,7 +143,7 @@ func (a *servicePersistenceAdapter) StoreUpdateContext(ctx context.Context, room
 		if encodeErr != nil {
 			return fmt.Errorf("encode document settlement authors: %w", encodeErr)
 		}
-		_, err = store.AppendUpdateWithSettlementCredit(ctx, room, update, class.contentChanged, encodedCredit)
+		_, err = store.AppendUpdateWithSettlementCredit(ctx, room, update, class.contentChanged, encodedCredit, class.creditVersion)
 		creditStored = true
 	} else if store, ok := a.store.(classifiedUpdateStore); ok {
 		_, err = store.AppendUpdateWithClass(ctx, room, update, class.contentChanged)
