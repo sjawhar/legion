@@ -980,16 +980,22 @@ func ArtifactVersionEventPayload(
 }
 
 // stampBlockIDs stamps the block ids doc's tree lacks or repeats on the tree as it stands
-// (rewriteLive), and returns the stamped tree with how many ids it minted. Its caller decides
-// from a read of its own whether any id needs repair, so a document that needs none opens no
-// transaction.
-func stampBlockIDs(doc *crdt.Doc, origin any) (*pmdoc.Node, int, error) {
+// (rewriteLive), and returns the stamped tree, how many ids it minted, and each ask block whose
+// id it changed. Its caller decides from a read of its own whether any id needs repair, so a
+// document that needs none opens no transaction, and records the stamped asks
+// (recordStampedAskBlocks) once it holds the room's state lock, which no Yjs transaction takes.
+func stampBlockIDs(doc *crdt.Doc, origin any) (*pmdoc.Node, int, []stampedAsk, error) {
 	minted := 0
-	stamped, _, err := rewriteLive(doc, origin, func(live *pmdoc.Node) bool {
+	var stamped []stampedAsk
+	tree, _, err := rewriteLive(doc, origin, func(live *pmdoc.Node) bool {
+		before := askBlockOrder(live)
 		minted = pmdoc.EnsureBlockIDsCount(live)
+		if minted > 0 && len(before) > 0 {
+			stamped = stampedAskBlocks(before, askBlockOrder(live))
+		}
 		return minted > 0
 	})
-	return stamped, minted, err
+	return tree, minted, stamped, err
 }
 
 // settlementCredit is whom a settlement's version credits, taken before the tree it records:
@@ -1240,11 +1246,12 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		retry(err)
 	}
 	reconciled := read
+	var renamed []stampedAsk
 	if pmdoc.BlockIDRepairCount(read) > 0 {
 		slot, update, err := s.applySuppressed(ctx, room, doc, func(doc *crdt.Doc, origin any) (bool, error) {
 			var minted int
 			var stampErr error
-			reconciled, minted, stampErr = stampBlockIDs(doc, origin)
+			reconciled, minted, renamed, stampErr = stampBlockIDs(doc, origin)
 			return minted > 0, stampErr
 		})
 		keep(slot, update)
@@ -1259,6 +1266,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	}
 
 	state.mu.Lock()
+	state.recordStampedAskBlocks(renamed)
 	if s.stopping.Load() || state.closed || state.failed != nil {
 		state.mu.Unlock()
 		s.discardSuppressedPersistence(room, slots...)
@@ -1609,6 +1617,7 @@ func (s *Service) backfillBlockIDs(ctx context.Context, artifactID string) Block
 	// way: stamping a block a rendering never names changes no text, while re-minting a typed
 	// block's repeated id changes the `#id` its directive carries.
 	var stampedChanged bool
+	var renamed []stampedAsk
 	slot, update, err := s.applySuppressed(backfillCtx, artifactID, nil, func(doc *crdt.Doc, origin any) (bool, error) {
 		read, err := lockedTreeOf(doc)
 		if err != nil {
@@ -1621,8 +1630,9 @@ func (s *Service) backfillBlockIDs(ctx context.Context, artifactID string) Block
 			s.afterBackfillRead(artifactID)
 		}
 		before, beforeErr := renderTree(read)
-		stamped, minted, err := stampBlockIDs(doc, origin)
+		stamped, minted, stampRenamed, err := stampBlockIDs(doc, origin)
 		report.Stamped = minted
+		renamed = stampRenamed
 		if err != nil {
 			return false, err
 		}
@@ -1635,6 +1645,10 @@ func (s *Service) backfillBlockIDs(ctx context.Context, artifactID string) Block
 		}
 		return report
 	}
+	// The stamp is in the room, whatever happens to its store write below.
+	state.mu.Lock()
+	state.recordStampedAskBlocks(renamed)
+	state.mu.Unlock()
 	// abandon gives up a stamp that is in the room but will not reach the store through the
 	// backfill: its slot is discarded and the room fails, which reloads the document from the store.
 	abandon := func(err error) BlockIDBackfill {
