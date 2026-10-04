@@ -139,10 +139,13 @@ type PullRequestReview struct {
 	CommitID    string
 	HeadSHA     string
 	Author      string
-	// AuthorAssociation is GitHub's author_association for Author on the repository (OWNER,
-	// MEMBER, COLLABORATOR, CONTRIBUTOR, NONE, ...), empty when the listener did not carry it.
-	AuthorAssociation string
-	Body              string
+	// AuthorCanWrite is whether Author has write access or higher to the repository, as GitHub's
+	// collaborator permission answers it (ConsumerSpec.ReviewPermission reads it before the fact is
+	// applied, since the workflow decides inside a transaction and performs no I/O). False for every
+	// review whose state decides nothing, which is never looked up, and for an author GitHub does
+	// not give write access.
+	AuthorCanWrite bool
+	Body           string
 }
 
 func (PullRequestReview) isFact() {}

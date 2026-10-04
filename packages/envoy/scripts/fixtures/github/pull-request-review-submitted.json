@@ -9,8 +9,7 @@
     "commit_id": "992c2a2249d47a1a2a6b2f3e4c5d6e7f8091a2b3",
     "html_url": "https://example.invalid/example-org/example-repo/pull/42#pullrequestreview-555000111",
     "state": "approved",
-    "submitted_at": "2026-09-10T00:12:00Z",
-    "author_association": "MEMBER"
+    "submitted_at": "2026-09-10T00:12:00Z"
   },
   "pull_request": {
     "number": 42,

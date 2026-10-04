@@ -216,7 +216,7 @@ func TestDecodeCapturedProducerEnvelopes(t *testing.T) {
 			name:    "pull request review",
 			subject: "notifications.github.sjawhar.legion.pr.42.review",
 			file:    "github/review.json",
-			want:    PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "approved", CommitID: "head-captured", HeadSHA: "head-captured", Author: "reviewer", AuthorAssociation: "COLLABORATOR", Body: "Captured review"},
+			want:    PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "approved", CommitID: "head-captured", HeadSHA: "head-captured", Author: "reviewer", Body: "Captured review"},
 		},
 		{
 			name:    "checks settlement",
@@ -1055,12 +1055,64 @@ func set(fields map[string]any) func(map[string]any) {
 	}
 }
 
-// A listener that predates author_association carries none, and its review then names no
-// association, which no rule reads as a maintainer's (the workflow's decidesRound).
-func TestAReviewFromAListenerThatPredatesAuthorAssociationNamesNone(t *testing.T) {
-	decoded, err := withPayload(t, "review.json", "notifications.github.sjawhar.legion.pr.42.review",
-		func(payload map[string]any) { delete(payload, "author_association") })
-	if review, ok := decoded.Fact.(PullRequestReview); err != nil || !ok || review.AuthorAssociation != "" || len(decoded.Unread) != 0 {
-		t.Fatalf("the review decoded to %#v, unread %q, %v; want it with no association and nothing reported", decoded.Fact, decoded.Unread, err)
+// The workflow decides a review round inside a transaction and performs no I/O, so whether the
+// review's author may write to the repository is read before the fact is applied, and only for a
+// review whose state could decide a round: a comment costs no GitHub call. A read that fails is
+// returned, so the delivery is retried rather than applied with a permission nobody read, and a
+// daemon with no reader leaves every review's write access false.
+func TestADecidingReviewCarriesItsAuthorsWriteAccessBeforeItIsApplied(t *testing.T) {
+	review := PullRequestReview{Repo: "acme/widgets", Number: 42, State: "approved", Author: "a-writer", CommitID: "head"}
+	asked := []string{}
+	answering := func(canWrite bool, err error) ConsumerSpec {
+		asked = nil
+		return ConsumerSpec{ReviewPermission: func(_ context.Context, repository ghrepo.Repository, login string) (bool, error) {
+			asked = append(asked, repository.String()+" "+login)
+			return canWrite, err
+		}}
 	}
+	for _, tc := range []struct {
+		name     string
+		fact     Fact
+		spec     ConsumerSpec
+		want     bool
+		wantErr  bool
+		wantAsks []string
+	}{
+		{name: "an approval by an account with write access", fact: review, spec: answering(true, nil), want: true,
+			wantAsks: []string{"acme/widgets a-writer"}},
+		{name: "an approval by an account without it", fact: review, spec: answering(false, nil),
+			wantAsks: []string{"acme/widgets a-writer"}},
+		{name: "a request for changes", fact: withState(review, "changes_requested"), spec: answering(true, nil), want: true,
+			wantAsks: []string{"acme/widgets a-writer"}},
+		{name: "a comment, which decides nothing whoever writes it", fact: withState(review, "commented"), spec: answering(true, nil),
+			wantAsks: nil},
+		{name: "a daemon with no reader", fact: review, spec: ConsumerSpec{}, wantAsks: nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			asked = nil
+			got, err := resolveReviewPermission(context.Background(), tc.spec, tc.fact)
+			if err != nil {
+				t.Fatalf("resolve the review's permission: %v", err)
+			}
+			if resolved, ok := got.(PullRequestReview); !ok || resolved.AuthorCanWrite != tc.want {
+				t.Fatalf("the review = %#v, want AuthorCanWrite %v", got, tc.want)
+			}
+			if !slices.Equal(asked, tc.wantAsks) {
+				t.Fatalf("GitHub was asked %v, want %v", asked, tc.wantAsks)
+			}
+		})
+	}
+
+	if _, err := resolveReviewPermission(context.Background(), answering(false, errors.New("GitHub answered 502")), review); err == nil {
+		t.Fatal("a failed permission read resolved; want the error, so the delivery is retried")
+	}
+	other := PullRequestChecks{Repo: "acme/widgets", Number: 42}
+	if got, err := resolveReviewPermission(context.Background(), answering(true, nil), other); err != nil || !reflect.DeepEqual(got, Fact(other)) {
+		t.Fatalf("a fact that is not a review = %#v, %v; want it unchanged", got, err)
+	}
+}
+
+func withState(review PullRequestReview, state string) PullRequestReview {
+	review.State = state
+	return review
 }

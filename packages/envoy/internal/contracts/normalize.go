@@ -716,11 +716,8 @@ func githubPayload(event string, body map[string]any) string {
 			"title":       nestedString(body, "pull_request", "title"),
 			"parent_kind": "pr",
 			"author":      nestedString(body, "review", "user", "login"),
-			// GitHub's relation of the author to the repository (OWNER, MEMBER, COLLABORATOR,
-			// CONTRIBUTOR, NONE, ...): the Legion daemon lets a maintainer's review decide a round.
-			"author_association": nestedString(body, "review", "author_association"),
-			"url":                nestedString(body, "review", "html_url"),
-			"state":              nestedString(body, "review", "state"),
+			"url":         nestedString(body, "review", "html_url"),
+			"state":       nestedString(body, "review", "state"),
 			// Consumers order reviews by submitted_at, then review_id, rather than by delivery. The id
 			// alone is not enough: GitHub assigns it when a review is created, and a pending review
 			// keeps it when it is submitted later.

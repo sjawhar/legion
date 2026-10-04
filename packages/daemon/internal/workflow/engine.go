@@ -38,9 +38,9 @@ type Config struct {
 	Clock           func() time.Time
 	// ReviewAppLogin is the review App's bot login (<slug>[bot]) from its boot token lease. A push
 	// by it is never a fix attempt, and a red on its red tests is planned; a review it submits decides
-	// a round (decidesRound) and can be the reviewer's answer to a round it left undecided
-	// (reviewersAnswer). Empty matches no one. A workflow boot never leaves it empty: it refuses a
-	// review lease that names no login (daemon.mintAtBoot).
+	// a round whatever GitHub gives its bot account (decidesRound) and can be the reviewer's answer
+	// to a round it left undecided (reviewersAnswer). Empty matches no one. A workflow boot never
+	// leaves it empty: it refuses a review lease that names no login (daemon.mintAtBoot).
 	ReviewAppLogin string
 }
 

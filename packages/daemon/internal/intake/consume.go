@@ -31,6 +31,14 @@ type ConsumerSpec struct {
 	AckWait      time.Duration
 	NakDelay     time.Duration
 	Logger       *slog.Logger
+	// ReviewPermission answers whether login has write access or higher to repository, which is
+	// what lets a review decide a review round (PullRequestReview.AuthorCanWrite). The workflow
+	// decides inside a transaction and performs no I/O, so the answer is read here, before the
+	// fact is applied, and only for a review whose state could decide one. An author GitHub gives
+	// no write access is false; a lookup that fails is an error, and the message is retried rather
+	// than applied with a permission nobody read. No resolver (a test, or a daemon without one)
+	// leaves every review's AuthorCanWrite false, so only the review App's own reviews decide.
+	ReviewPermission func(ctx context.Context, repository ghrepo.Repository, login string) (bool, error)
 }
 
 // Consumers are this project's two durable JetStream consumers, created before intake runs so a
@@ -178,6 +186,15 @@ func consumeMessage(ctx context.Context, message jetstream.Msg, spec ConsumerSpe
 		ackMessage(spec.Logger, message)
 		return
 	}
+	fact, err := resolveReviewPermission(ctx, spec, decoded.Fact)
+	if err != nil {
+		logMessage(spec.Logger, slog.LevelWarn, "read the reviewer's repository permission", message, "event_id", decoded.EventID, "error", err)
+		if nakErr := message.NakWithDelay(spec.NakDelay); nakErr != nil {
+			logMessage(spec.Logger, slog.LevelError, "nak the reviewer's permission read", message, "event_id", decoded.EventID, "error", nakErr)
+		}
+		return
+	}
+	decoded.Fact = fact
 
 	result, err := ApplyFact(ctx, pool, decoded.Source, decoded.EventID, decoded.Fact, handlers...)
 	if err != nil {
@@ -196,6 +213,30 @@ func consumeMessage(ctx context.Context, message jetstream.Msg, spec ConsumerSpe
 		)
 	}
 	ackMessage(spec.Logger, message)
+}
+
+// resolveReviewPermission fills a review's AuthorCanWrite from ConsumerSpec.ReviewPermission,
+// before the fact enters its transaction. Only a review whose state could decide a round - an
+// approval or a request for changes - is looked up: a comment decides nothing whoever writes it,
+// so it costs no GitHub call. Every other fact passes through untouched.
+func resolveReviewPermission(ctx context.Context, spec ConsumerSpec, fact Fact) (Fact, error) {
+	review, ok := fact.(PullRequestReview)
+	if !ok || spec.ReviewPermission == nil || review.Author == "" {
+		return fact, nil
+	}
+	if review.State != "approved" && review.State != "changes_requested" {
+		return fact, nil
+	}
+	repository, err := ghrepo.Parse("the review's repository", review.Repo)
+	if err != nil {
+		return nil, err
+	}
+	canWrite, err := spec.ReviewPermission(ctx, repository, review.Author)
+	if err != nil {
+		return nil, err
+	}
+	review.AuthorCanWrite = canWrite
+	return review, nil
 }
 
 func ackMessage(logger *slog.Logger, message jetstream.Msg) {

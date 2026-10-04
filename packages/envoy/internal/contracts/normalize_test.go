@@ -2001,7 +2001,7 @@ func TestGithubPayloadFields(t *testing.T) {
 			want: map[string]string{
 				"commit_id": "review-commit-sha", "head_sha": "review-head-sha", "state": "approved",
 			},
-			omitted: []string{"review_id", "submitted_at", "author_association"},
+			omitted: []string{"review_id", "submitted_at"},
 		},
 		{
 			name:  "a review carries GitHub's review id and its submission time",
@@ -2014,20 +2014,6 @@ func TestGithubPayloadFields(t *testing.T) {
 					"submitted_at": "2026-09-26T12:03:00Z", "user": map[string]any{"login": "reviewer"}},
 			},
 			want: map[string]string{"review_id": "5325101010", "submitted_at": "2026-09-26T12:03:00Z"},
-		},
-		{
-			// GitHub's author_association says whether the reviewer maintains the repository, which
-			// is what lets a person's review decide a Legion review round.
-			name:  "a review carries its author's association with the repository",
-			event: "pull_request_review",
-			body: map[string]any{
-				"action":       "submitted",
-				"repository":   map[string]any{"full_name": "example-org/example-repo"},
-				"pull_request": map[string]any{"number": 19, "head": map[string]any{"sha": "head-sha"}},
-				"review": map[string]any{"id": float64(5325101011), "state": "changes_requested", "commit_id": "head-sha",
-					"author_association": "COLLABORATOR", "user": map[string]any{"login": "maintainer"}},
-			},
-			want: map[string]string{"author": "maintainer", "author_association": "COLLABORATOR"},
 		},
 		{
 			name:  "long comment body is capped and marked",
