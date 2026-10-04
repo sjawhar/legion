@@ -68,7 +68,10 @@ function inAgentComposer(): boolean {
 }
 
 /** Registers the `agents` scope over the rows inside `listRef` for the page's lifetime. */
-export function useAgentsKeymap(listRef: RefObject<HTMLElement | null>): void {
+export function useAgentsKeymap(
+  listRef: RefObject<HTMLElement | null>,
+  searchInputRef: RefObject<HTMLInputElement | null>
+): void {
   // A closed fold's rows, and the rows the filters exclude, stay mounted, hidden (`AgentsPage`'s
   // one list), and take no focus.
   const rows = () =>
@@ -101,6 +104,19 @@ export function useAgentsKeymap(listRef: RefObject<HTMLElement | null>): void {
   };
   useKeymapScope("agents");
   useKeymap("agents", [
+    // Shadows the `global` scope's own `$mod+k`: elsewhere that opens the search dialog, but a
+    // session this page already lists is faster to find by typing here than by searching Dispatch
+    // at large. `when` answers `false` rather than finding nothing to focus - with no agents
+    // connected the filter bar does not render at all - so the key falls through to the global
+    // binding instead of doing nothing.
+    {
+      id: "search",
+      inEditable: true,
+      keys: "$mod+k",
+      label: "Search agents",
+      run: () => searchInputRef.current?.focus(),
+      when: () => searchInputRef.current !== null,
+    },
     // Movement and marking walk the list with the row in hand; a palette row for either helps
     // nobody.
     {

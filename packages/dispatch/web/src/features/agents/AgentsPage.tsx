@@ -2,6 +2,7 @@ import { DELIVERY_CAPABILITIES } from "@legion/contracts";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   type ReactNode,
+  type RefObject,
   useCallback,
   useId,
   useLayoutEffect,
@@ -9,7 +10,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 
 import { api } from "../../api/client";
 import { agentMessagesQuery, inboxQuery, userAgentStateQuery } from "../../api/queries";
@@ -817,27 +818,51 @@ function FoldToggle({
 
 /**
  * What narrows the agent list, mirroring the `envoy broadcast` script's own selectors: one
- * machine, one role, and a directory substring. An empty field matches everything.
+ * machine, one role, and a free-text search. An empty field matches everything.
  */
 export interface AgentFilters {
-  readonly dir: string;
   readonly machine: string;
   readonly role: string;
+  readonly search: string;
 }
 
-export const NO_AGENT_FILTERS: AgentFilters = { dir: "", machine: "", role: "" };
+export const NO_AGENT_FILTERS: AgentFilters = { machine: "", role: "", search: "" };
 
-function matchesFilters(agent: Agent, filters: AgentFilters): boolean {
-  const dir = filters.dir.trim().toLowerCase();
+/** Every word `search` names, lowercased; an empty query has none. */
+function searchWords(search: string): readonly string[] {
+  return search
+    .trim()
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((word) => word !== "");
+}
+
+/** The text a session's search words match against: its title, directory, machine, session id,
+ *  and the key of every issue one of its asks names - once, lowercased, so a session with no
+ *  issue asks still matches on the other four. */
+function searchHaystack(agent: Agent, issueKeys: readonly string[]): string {
+  return [agent.title, agent.dir, agent.machine_id, agent.session_id, ...issueKeys]
+    .join(" ")
+    .toLowerCase();
+}
+
+/** `issueKeys` is every issue key an open ask by this session names (`AgentsPage`'s
+ *  `issueKeysBySession`), the free-text search's only field beyond what `Agent` itself carries. */
+export function matchesFilters(
+  agent: Agent,
+  filters: AgentFilters,
+  issueKeys: readonly string[]
+): boolean {
+  const words = searchWords(filters.search);
   return (
     (filters.machine === "" || agent.machine_id === filters.machine) &&
     (filters.role === "" || agent.roles.includes(filters.role)) &&
-    (dir === "" || agent.dir.toLowerCase().includes(dir))
+    (words.length === 0 || words.every((word) => searchHaystack(agent, issueKeys).includes(word)))
   );
 }
 
-/** The machines, roles and directories the live sessions actually occupy: a filter can only
- *  offer what is there, so a stale option can never hide every agent. */
+/** The machines and roles the live sessions actually occupy: a filter can only offer what is
+ *  there, so a stale option can never hide every agent. */
 function filterOptions(agents: readonly Agent[]): { machines: string[]; roles: string[] } {
   const machines = new Set<string>();
   const roles = new Set<string>();
@@ -852,10 +877,12 @@ function AgentFilterBar({
   agents,
   filters,
   onFilters,
+  searchInputRef,
 }: {
   agents: readonly Agent[];
   filters: AgentFilters;
   onFilters: (filters: AgentFilters) => void;
+  searchInputRef: RefObject<HTMLInputElement | null>;
 }): ReactNode {
   const { machines, roles } = filterOptions(agents);
   const field = `min-h-11 rounded-lg border px-3 py-2 text-sm ${inputClasses(true)}`;
@@ -888,13 +915,16 @@ function AgentFilterBar({
           </option>
         ))}
       </select>
+      {/* It takes the rest of the row, and a row of its own on a phone, so the fields it searches
+          stay readable in the placeholder. */}
       <input
-        aria-label="Directory contains"
-        className={field}
-        onChange={(event) => onFilters({ ...filters, dir: event.target.value })}
-        placeholder="Directory contains"
+        aria-label="Search agents"
+        className={`${field} min-w-0 flex-1 basis-64`}
+        onChange={(event) => onFilters({ ...filters, search: event.target.value })}
+        placeholder="Title, directory, machine, session or issue"
+        ref={searchInputRef}
         type="search"
-        value={filters.dir}
+        value={filters.search}
       />
     </fieldset>
   );
@@ -1102,7 +1132,50 @@ export function AgentsPage(): ReactNode {
     }
     return counts;
   }, [inbox.data]);
-  const [filters, setFilters] = useState<AgentFilters>(NO_AGENT_FILTERS);
+  // Every issue key an open ask by each session names, for the search box's "issue key" field:
+  // every ask the viewer can see, not only the ones waiting on them, so a session searches by an
+  // issue it has answered as readily as one still open on it.
+  const issueKeysBySession = useMemo(() => {
+    const keys = new Map<string, Set<string>>();
+    for (const ask of inbox.data ?? []) {
+      if (ask.author.kind !== "session" || ask.issue_key === null) continue;
+      const forSession = keys.get(ask.author.id) ?? new Set<string>();
+      forSession.add(ask.issue_key);
+      keys.set(ask.author.id, forSession);
+    }
+    return new Map([...keys].map(([session, forSession]) => [session, [...forSession]]));
+  }, [inbox.data]);
+  // The free-text query is the one filter field the page's address carries, so a reload or a
+  // shared link keeps it; `machine` and `role` stay plain state, as they were before this box.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const search = searchParams.get("q") ?? "";
+  const setSearch = useCallback(
+    (next: string) => {
+      setSearchParams(
+        (current) => {
+          const params = new URLSearchParams(current.toString());
+          if (next === "") {
+            params.delete("q");
+          } else {
+            params.set("q", next);
+          }
+          return params;
+        },
+        { replace: true }
+      );
+    },
+    [setSearchParams]
+  );
+  const [fieldFilters, setFieldFilters] = useState<Omit<AgentFilters, "search">>({
+    machine: "",
+    role: "",
+  });
+  const filters: AgentFilters = { ...fieldFilters, search };
+  const setFilters = (next: AgentFilters) => {
+    setFieldFilters({ machine: next.machine, role: next.role });
+    if (next.search !== search) setSearch(next.search);
+  };
+  const searchInputRef = useRef<HTMLInputElement>(null);
   // Selection is what the human ticked, not what the filters currently show: narrowing the
   // list after ticking a row must not quietly drop that row from the send. Every selected
   // session is named in the composer, so nothing is hidden either way.
@@ -1128,7 +1201,8 @@ export function AgentsPage(): ReactNode {
     needsYouBySession,
     Date.now()
   );
-  const matches = (agent: Agent) => matchesFilters(agent, filters);
+  const matches = (agent: Agent) =>
+    matchesFilters(agent, filters, issueKeysBySession.get(agent.session_id) ?? []);
   // The rows the filters match, in the order the page shows them - the open list, then each fold.
   // Select-all ticks this set in order and the composer names the selection in tick order, so a
   // set ordered any other way (the registry's own, say) would name the recipients in an order the
@@ -1166,7 +1240,7 @@ export function AgentsPage(): ReactNode {
   const [quietOpen, setQuietOpen] = useState(false);
   const [inactiveOpen, setInactiveOpen] = useState(false);
   const listRef = useRef<HTMLElement>(null);
-  useAgentsKeymap(listRef);
+  useAgentsKeymap(listRef, searchInputRef);
   // A layout effect, so the frame the move paints already has focus where the row went.
   // biome-ignore lint/correctness/useExhaustiveDependencies: `pinned` is the trigger, not a read
   useLayoutEffect(() => {
@@ -1260,7 +1334,12 @@ export function AgentsPage(): ReactNode {
         <EmptyState label="Agents empty state" message="No agents are connected." />
       ) : (
         <>
-          <AgentFilterBar agents={agents} filters={filters} onFilters={setFilters} />
+          <AgentFilterBar
+            agents={agents}
+            filters={filters}
+            onFilters={setFilters}
+            searchInputRef={searchInputRef}
+          />
           <SelectionHeader
             listed={agents}
             matching={matching}
