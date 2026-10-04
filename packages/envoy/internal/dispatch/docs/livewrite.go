@@ -74,11 +74,16 @@ type liveWrite struct {
 	// addedAskBlockIDs is every ask block id a readable operation of this transaction introduced,
 	// over its own before/after trees (applyJoined), credited to actor at commit (Ledger.credit,
 	// registerAskAuthors) rather than guessed from whichever update's observer happens to render
-	// this write's publish first (LEGION-503).
-	credits          map[string]model.Actor
-	actor            *model.Actor
-	versioned        bool
-	addedAskBlockIDs map[string]struct{}
+	// this write's publish first (LEGION-503). renamedAskBlockIDs is every id one of those
+	// operations' own block-id repair re-minted (registerStampedAskBlocks), excluded from
+	// addedAskBlockIDs: a rename is never a genuinely new block, whether or not an author could be
+	// carried forward for it, and must not be claimed for this write's actor just because
+	// applyJoined's own before/after diff cannot otherwise tell a rename from an insertion.
+	credits            map[string]model.Actor
+	actor              *model.Actor
+	versioned          bool
+	addedAskBlockIDs   map[string]struct{}
+	renamedAskBlockIDs map[string]struct{}
 	// loss records what this write's latest batch of operations inserted, so a merge with the
 	// room's concurrent changes can be told from a clean one (see lossCheck). A later operation
 	// of the same transaction that inserts nothing an operation claims - an accept's margin
