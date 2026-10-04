@@ -20,9 +20,5 @@ memory:
 images:
   urls:
     enabled: false
-eval:
-  # The worker image carries uv for repository-managed Python, not an OMP Python kernel. OMP keeps
-  # eval.js enabled by default; a later operator overlay may set py: true with a compatible kernel.
-  py: false
 dev:
   autoqa: false
