@@ -892,7 +892,9 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 }
 
 // applyOpsUnconditional preserves the precondition-free edit path's existing
-// validation and live-mutation behavior.
+// validation and live-mutation behavior. Its mutate callback below reads and writes applyLive's
+// own fork, never the live room directly: applyLive refuses an unjoined context (errUnjoined) and
+// always hands mutate a fork, a structural guarantee rather than a rule this function keeps.
 func (s *Service) applyOpsUnconditional(ctx context.Context, artifactID string, ops []model.EditOp, actor model.Actor) (EditOutcome, error) {
 	if len(ops) == 0 {
 		// Nothing to apply: the caller still gets the token of the document as it stands, the

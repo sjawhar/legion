@@ -24,7 +24,7 @@ import (
 // type at the document's start, so the document opens with a long run of rules: a walk that took
 // no lock would read the room's first block, then walk the rules while a keystroke rewrites it.
 func TestThreeBrowsersAndTheAPIEditOneRoomAtOnce(t *testing.T) {
-	seeded := strings.Repeat("***\n\n", 2_000) + "# Heading\n\nbefore\n\nafter\n"
+	seeded := rules(2_000) + "# Heading\n\nbefore\n\nafter\n"
 	service, artifactID, serverURL := newPeeredService(t, seeded)
 	browsers := make([]crdt.ClientID, 3)
 	for index := range browsers {

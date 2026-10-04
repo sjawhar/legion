@@ -21,6 +21,11 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
 
+// rules is count horizontal rules in a row, a block a walk of the live tree meets no lock at,
+// unlike a run of text (YXmlText.ToDelta): seeding a document with enough of them in a row gives a
+// keystroke room to land inside an unlocked walk.
+func rules(count int) string { return strings.Repeat("***\n\n", count) }
+
 // Every read of a resident room runs while the room's websocket peers write it. A walk of the live
 // tree takes no lock (YXmlFragment.Children), so a read that walks it beside a peer's update reads
 // that update halfway - a torn tree, or the process's death on a concurrent map read and write -
@@ -30,7 +35,6 @@ import (
 // meets a lock at each text it reads (YXmlText.ToDelta) and none in a run of rules, so the document
 // holds one long enough that a keystroke lands inside the walk.
 func TestReadsOfALiveDocumentRunBesideItsPeers(t *testing.T) {
-	rules := func(count int) string { return strings.Repeat("***\n\n", count) }
 	seeded := "# Heading\n\n" + rules(200) + "before\n\nafter\n"
 	alice := model.Actor{Kind: "user", ID: "alice"}
 	reads := []struct {
