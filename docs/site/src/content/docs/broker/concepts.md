@@ -1,6 +1,6 @@
 ---
 title: Concepts
-description: Sessions and enrollment, machine logins, rules and approvers, grants and their lifetime, approvals, and the audit record.
+description: Sessions and enrollment, machine logins, owner and tier, grants and their lifetime, approvals, and the audit record.
 sidebar:
   order: 2
 ---
@@ -71,59 +71,46 @@ A credential enrolls sessions only for its own operator: an enrollment naming an
 `OPERATOR_MISMATCH`. The broker's rate limiter caps how often anyone can start a machine login, per
 source address and per named operator.
 
-## Rules: who may have which secret
+## Owner and tier: who may have which secret
 
-The broker decides every request with a **rules file**, `agent-secret-rules.yaml`, which it reads
-from S3 in production (`BROKER_RULES_S3_URI`) or from a local file in development
-(`BROKER_RULES_FILE`) and rereads every `BROKER_RULES_RELOAD_SECONDS`. A file that does not parse is
-refused at startup; a reload that does not parse is logged and the previous rules stay in force.
+The broker reads who may have a secret from the secret itself
+(`packages/envoy/internal/broker/policy/`). Every agent secret is a secret in AWS Secrets Manager
+under one namespace, `BROKER_SECRETS_PREFIX` (such as `production/agent-secrets/`), encrypted with
+one KMS key, `BROKER_SECRETS_KMS_KEY_ARN`, and tagged with its owner and its tier:
 
-```yaml
-version: 1
-secrets:
-  DEMO_API_KEY:
-    source: example/agent-secrets/DEMO_API_KEY   # where the value lives in the secret store
-    owner: ada@example.com                        # who answers for this secret
-    delivery: inject                              # put the value in the command's environment
-    max_lifetime_seconds: 3600                    # the longest a grant of it lives
-    requesters:
-      - kind: host
-        operator: ada@example.com
-        decision: approval
-        approver: operator
-      - kind: pod
-        service_account: system:serviceaccount:legion:legion-worker
-        decision: approval
-        approver: login:ada@example.com
-  DEMO_READ_TOKEN:
-    source: example/agent-secrets/DEMO_READ_TOKEN
-    owner: ada@example.com
-    delivery: inject
-    max_lifetime_seconds: 3600
-    requesters:
-      - {kind: host, operator: ada@example.com, decision: automatic}
-```
+- **Its name** under the prefix is the name a session asks for, in lowercase with each underscore a
+  hyphen: `production/agent-secrets/deel-api-key` is `DEEL_API_KEY`. It is lowercase letters, digits
+  and single hyphens, starting with a letter.
+- **`owner`** is `shared`, or a person's email in lowercase, the email they sign in to Dispatch with.
+- **`tier`** is `agent` or `human`.
 
-Each secret names its `source`, its `owner`, how it is delivered, the longest a grant of it may
-live, and a list of `requesters`. Every field is required; an unknown key is refused.
+Who gets a secret follows from those two tags alone:
 
-- **`owner`** names who answers for the secret. The broker requires it and keeps it with the
-  secret, but no decision reads it: the requester entries alone decide who gets the secret.
-- **`requesters`** is matched against the requesting enrollment. A `box` or `host` entry matches
-  enrollments of that kind whose operator is the entry's `operator`; a `pod` entry matches pods
-  running as its `service_account`, or every pod when it names none. The broker refuses a file in
-  which two entries could match the same caller. An enrollment no entry matches is denied, and an
-  empty list denies everyone.
-- **`decision`** is the whole of the policy, and there are three: `automatic` grants at once,
-  `deny` refuses, and `approval` asks a person. There are no other tiers.
-- **`approver`**, on an `approval` entry, names that person: `operator` (the requesting
-  enrollment's own operator, so people approve their own agents) or `login:<name>` (a fixed
-  Dispatch login). A pod has no operator, so its approval entries use `login:`.
-- **`delivery`** is `inject` or `proxy`. The broker releases only `inject` values; it accepts a
-  `proxy` secret (which must carry a `proxy` block) but releases no value for it and runs no proxy.
+| The secret | Its owner's own session | Another person's session, or a pod |
+| --- | --- | --- |
+| A person's, `tier=agent` | Granted at once. | Sent to the owner for approval. |
+| A person's, `tier=human` | Sent to the owner for approval. | Sent to the owner for approval. |
+| `owner=shared`, `tier=agent` | Granted at once. | Granted at once. |
+| `owner=shared`, `tier=human` | Approved by anyone signed in to Dispatch. | Approved by anyone signed in to Dispatch. |
 
-Logins compare case-insensitively everywhere. The rules' SHA-256 is their **version**, recorded on
-every request a person approves.
+A session is its owner's own when its operator is the owner: the owner approved the machine login
+it enrolled under. A pod has no operator, so a pod asking for a person's agent-tier secret sends it
+to that person for approval. An owner may also be a service, whose secrets go only to that
+service's own sessions; the broker has no way yet to register a service, so it refuses a secret
+whose owner tag names one.
+
+The broker reads the namespace when it starts, and refuses to start when it cannot, then again every
+five minutes, a fixed time rather than a setting (`policyRefresh` in
+`packages/envoy/cmd/broker/main.go`). A tag change takes effect at the next read. A read that fails
+(Secrets Manager or KMS out of reach) is logged, and the policy from the last good read stays in
+force. The broker leaves out a secret it cannot serve, and logs it by name on every read ([Operating
+the broker](/legion/broker/operate/#health-and-logs)): a missing or malformed `owner` or `tier`
+tag (an email with a capital letter is malformed), a name that is not in the form above, or a
+secret encrypted with any key but the agent-secrets key, the AWS-managed key included. A request
+for a secret left out is refused `UNKNOWN_SECRET`, and a grant of it stops.
+
+The policy's **version** is the SHA-256 of every served secret's name, owner, tier and ARN, recorded
+on every request.
 
 ## Requests and grants
 
@@ -131,8 +118,10 @@ A session asks for one or more secrets by name in a **request**, signed with its
 reason of at most 400 characters. The broker evaluates every name
 (`packages/envoy/internal/broker/requests/machine_state.go`):
 
-- A name no rule mentions refuses the whole request with `UNKNOWN_SECRET`, and nothing is recorded.
-- A name the rules deny denies the whole request; nothing is ever half-granted.
+- A name the policy does not serve refuses the whole request with `UNKNOWN_SECRET`, and nothing is
+  recorded.
+- A name the policy denies denies the whole request; nothing is ever half-granted. Only a service's
+  secret, asked for by anyone but that service, is denied.
 - Names that need approval must all need the same approver, else the request is refused
   `MIXED_APPROVERS`; request them separately.
 - When every name is automatic, the request is granted at once.
@@ -141,14 +130,14 @@ reason of at most 400 characters. The broker evaluates every name
   asking twice.
 
 A granted request yields a **grant**: the session's right to read those values until the grant
-expires. A grant lives the shortest of `BROKER_MAX_GRANT_SECONDS` and each of its secrets'
-`max_lifetime_seconds`, counted from the moment it is granted. While it lives, a new request from
-the same session for exactly the same names gets the same grant back, without asking anyone again,
-as long as the current rules still allow it.
+expires. A grant lives `BROKER_MAX_GRANT_SECONDS`, counted from the moment it is granted, unless its
+session ends first. While it lives, a new request from the same session for exactly the same names
+gets the same grant back, without asking anyone again, as long as the current policy still allows
+it.
 
 The broker never stores a value. Each time a session reads a grant, the broker checks that the
-session is still enrolled, the grant is live, its approval still verifies, and the current rules
-still allow every name; then it reads the value from the secret store (AWS Secrets Manager in
+session is still enrolled, the grant is live, its approval still verifies, and the current policy
+still allows every name; then it reads the value from the secret store (AWS Secrets Manager in
 production) and returns it to that session alone. `agent-secrets NAME -- command` puts each value
 in the command's environment under its name and replaces itself with the command. `agent-secrets`
 itself never prints a value, but the command is the agent's choice, and a command can print or send
@@ -158,8 +147,8 @@ the value: approve a secret only for a session you would trust with the value it
 A grant ends when it expires, when its session revokes it (`agent-secrets revoke`), when its
 approver or its enrollment's operator revokes it in Dispatch (an approved grant) or through the
 broker's revoke route, or when its enrollment ends. Ending a grant ends access only to a secret
-someone must approve: a secret the rules grant automatically is granted again at the session's next
-request. To end access to one, change its rule
+someone must approve: a secret granted automatically is granted again at the session's next
+request. To end access to one, change its tags
 ([revoke a session or a grant](/legion/broker/guides/revoke-a-session/#end-access-to-an-automatic-secret)).
 
 ## Approvals
@@ -169,7 +158,30 @@ sends Dispatch nothing: Dispatch's server reads the broker's pending list and re
 person signed in, and when that person clicks **Approve** or **Deny**, Dispatch's server calls the
 broker with the shared UI token (`BROKER_UI_TOKEN`) and that person's Dispatch login, taken from
 their Dispatch session. The broker then checks that login against the record's approver: anyone
-else is refused `NOT_APPROVER`, whatever state the record is in.
+else is refused `NOT_APPROVER`, whatever state the record is in. A request for a shared human-tier
+secret names the approver `anyone`: it waits on every person's pending list, and any person signed
+in to Dispatch may decide it.
+
+An approval belongs to the person who gave it, so a change to a secret's tags reaches what was
+approved before it wherever the new tags want the secret approved for that session:
+
+- An approved grant keeps releasing its value only while the person who approved it may still
+  approve the secret for its session. Once a shared human-tier secret becomes a person's, or a
+  person's secret becomes another's, every such grant the new owner must approve and did not stops
+  with `GRANT_NOT_LIVE`, whatever value the secret holds by then, and the session's next request is
+  decided under the new tags. A grant keeps working when the secret becomes shared (anyone may
+  approve a shared human-tier secret, and a shared agent-tier one needs no approval), and when the
+  new tags give its session the secret without asking, as they do once an agent-tier secret is the
+  session's operator's.
+- A pending request is approved by whomever the new tags name to approve it for its session. One
+  waiting on anyone for a secret that has become a person's is that person's alone to approve;
+  anyone else's approval is refused `NOT_APPROVER`, the requester's own operator included. One
+  waiting on a person for a secret another person must now approve can be approved by no one. One
+  waiting on a person stays that person's when the secret becomes shared, or when the new tags give
+  its session the secret without asking. A denial releases nothing, so the approver a request waits
+  on can still deny it, which takes it off the pending list: for a request waiting on anyone, any
+  signed-in person may deny it. Otherwise it expires, or its session cancels it
+  (`agent-secrets cancel`) and asks again.
 
 A record is decided once. A second click, a concurrent one, or one after the record expired gets
 `RECORD_TERMINAL`. A pending request nobody decides expires after 12 hours, a fixed time rather than
@@ -182,7 +194,7 @@ server may hold it.
 Everything a person decides rests on a **credential-request record**
 (`packages/envoy/internal/broker/record/record.go`): a fixed, line-by-line text holding the
 session's signed request verbatim, the approver, the enrollment's kind, runtime id and operator,
-the lifetime, the rules version, the expiry, and, for a machine login, its confirmation code. The
+the lifetime, the policy version, the expiry, and, for a machine login, its confirmation code. The
 record's id is the SHA-256 of that text, so a record cannot change without changing its id.
 Decisions are events on the record (`approved`, `denied`, `expired`, `cancelled`, `revoked`), each
 naming who made it.

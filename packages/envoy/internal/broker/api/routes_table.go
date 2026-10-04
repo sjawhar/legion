@@ -87,7 +87,7 @@ func routes() []apiRoute {
 		{http.MethodPost, "/v1/enrollments/{id}/renew", sessionAuth((*server).renewEnrollment)},
 		// Describe the calling session's enrollment and its live grants.
 		{http.MethodGet, "/v1/enrollments/self", sessionAuth((*server).readSelf)},
-		// Request secrets: the rules grant or deny them at once, or a person must approve them.
+		// Request secrets: the policy grants or denies them at once, or a person must approve them.
 		{http.MethodPost, "/v1/requests", sessionAuth((*server).createRequest)},
 		// Read one of the calling session's requests.
 		{http.MethodGet, "/v1/requests/{id}", sessionAuth((*server).readRequest)},
