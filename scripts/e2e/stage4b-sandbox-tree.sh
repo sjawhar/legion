@@ -546,9 +546,8 @@ workspace_jj() {
   pod=$(tree_pod "$(issue_tree "$issue")") || return 1
   pod_exec "$pod" architect jj -R "/legion/workspaces/$repo/${issue,,}" "$@"
 }
-# assert_claim_endpoints ISSUE ROLE: the claim's pod names production's services,
-# and its Oh My Pi has no Anthropic key: a turn off that route, or a pod reaching another rig, would
-# not be this proof.
+# assert_claim_endpoints ISSUE ROLE: the claim's Oh My Pi names production's services and has no
+# Anthropic key: a turn off that route, or a pod reaching another rig, would not be this proof.
 assert_claim_endpoints() {
   local issue=$1 role=$2 pod mismatch
   pod=$(claim_sandbox "$issue" "$role") || fail "$role on $issue has no Sandbox locator"
@@ -556,14 +555,36 @@ assert_claim_endpoints() {
     fail "ABORT: $role pod $pod on $issue has $mismatch"
   fi
 }
+# pod_env POD ROLE prints the environment of ROLE's Oh My Pi in POD, one NAME=value a line, from
+# /proc in the role's container: the process whose argv[0] is omp and whose parent is the role's
+# `legion worker-shim`. The container's spec is not where a role's environment is: it carries only
+# what the kubelet resolves (POD_UID, the operator's Secret references), and every other variable
+# reaches the role in its launcher's start command.
 pod_env() {
-  op get pod "$1" -o json | jq -r --arg role "$2" \
-    '.spec.containers[] | select(.name == $role) | .env[]? | select(.value != null) | "\(.name)=\(.value)"'
+  # shellcheck disable=SC2016  # expanded by the pod's shell
+  pod_exec "$1" "$2" sh -c '
+    found=
+    for d in /proc/[0-9]*; do
+      argv0=$(tr "\0" "\n" 2>/dev/null <"$d/cmdline" | sed -n 1p)
+      [ "${argv0##*/}" = omp ] || continue
+      parent=$(sed -n "s/^PPid:[[:space:]]*//p" "$d/status" 2>/dev/null)
+      tr "\0" "\n" 2>/dev/null <"/proc/$parent/cmdline" | grep -qx worker-shim || continue
+      if [ -n "$found" ]; then
+        echo "more than one Oh My Pi under a legion worker-shim: pids ${found#/proc/} and ${d#/proc/}" >&2
+        exit 1
+      fi
+      found=$d
+    done
+    if [ -z "$found" ]; then
+      echo "no Oh My Pi under a legion worker-shim" >&2
+      exit 1
+    fi
+    tr "\0" "\n" <"$found/environ"'
 }
 pod_endpoint_mismatch() {
   local pod=$1 role=$2 env name want got
-  env=$(pod_env "$pod" "$role") || {
-    printf 'no readable spec\n'
+  env=$(pod_env "$pod" "$role" 2>&1) || {
+    printf 'no readable Oh My Pi environment in its %s container: %s\n' "$role" "$(tr '\n' ' ' <<<"$env" | scrub | cut -c1-300)"
     return 0
   }
   local source
@@ -586,7 +607,7 @@ pod_endpoint_mismatch() {
     fi
   done
   if grep -q '^ANTHROPIC_API_KEY=' <<<"$env"; then
-    printf 'ANTHROPIC_API_KEY in its spec\n'
+    printf "ANTHROPIC_API_KEY in its Oh My Pi's environment\n"
     return 0
   fi
   return 1
