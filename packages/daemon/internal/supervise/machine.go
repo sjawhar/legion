@@ -686,7 +686,7 @@ func (m *Machine) start(ctx context.Context, token string) (runtime.Locator, err
 		return runtime.Locator{}, fmt.Errorf("build the launch of %s: %w", m.claim.Token, err)
 	}
 	spec.Claim, spec.Project, spec.Tree, spec.Issue, spec.Role = m.claim.Token, m.claim.Project, m.claim.Tree, m.claim.Issue, m.claim.Role
-	spec.Generation, spec.TreeEpoch, spec.BootToken, spec.ResumeSessionFile = m.claim.Generation, m.claim.TreeEpoch, token, ""
+	spec.Generation, spec.BootToken, spec.ResumeSessionFile = m.claim.Generation, token, ""
 	if m.claim.SessionFile == "" {
 		return m.deps.Runtime.Spawn(ctx, spec)
 	}
