@@ -54,7 +54,7 @@ shows nothing.
 The root `package.json` pins `@biomejs/biome` and `typescript` as devDependencies, so after
 `bun install`, `bunx biome` and `bunx tsc` resolve to the pinned tools from the root or from any
 package directory. CI's required `lint` job runs `bunx biome check .` from the root. A package's
-`bun run lint` checks only its source directories.
+`bun run lint` checks only the paths its recipe names.
 
 Before trusting either tool's verdict, confirm the version is the pinned one
 (`bunx tsc --version` → 5.9.x; `bunx biome --version` → 2.4.x). Any `Resolving dependencies`
