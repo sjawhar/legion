@@ -93,10 +93,9 @@ implementer's production check after the merge
 Reach any live role on this issue the same way you reach the architect: `envoy_publish` to
 `notifications.role.` followed by that role's encoded token. Use it when you need context an
 earlier phase has that its handoff doesn't cover — ask the planner why a constraint was
-scoped that way, ask the implementer what a commit actually did. A role that finished its
-phase stays live and answers: under the Go daemon until its issue leaves the workflow, under the
-TypeScript daemon for its idle-retire window. Once a role has no live holder (a publish is rejected
-404), read its committed handoff, or under the TypeScript daemon ask the architect to `spawn_worker` it.
+scoped that way, ask the implementer what a commit actually did. A role that finished its phase
+stays live and answers until its issue leaves the workflow. If a publish is rejected with 404,
+read that role's committed handoff.
 
 ## Workspace and handoff precedence
 
@@ -364,51 +363,28 @@ cd -- "$LEGION_WORKSPACE" && \
 
 **Every role pushes its own commits.** After the handoff commit — and, for the tester, the red
 tests it wrote — advance the issue bookmark and push it with the provisioned credential helper,
-which authenticates as your role's App (`appRoleForLegionRole` in
-`packages/daemon/src/daemon/github-apps.ts`).
+which authenticates as your role's App (`appauth.AppRoleFor` in
+`packages/daemon/internal/appauth/identity.go`).
 
-**Under the Go daemon, every push is `legion push`,** run from bash in your workspace in place of
-the commands below. It runs this same procedure on `@-`: the ancestry check, against the remote
-branch or the tip you recorded before rewriting pushed commits (below), then the bookmark and the
+**Every push is `legion push`,** run from bash in your workspace. It pushes `@-`: first the
+ancestry check against the remote branch or the tip you recorded before rewriting pushed commits
+(below), then the bookmark and the
 push. It also decides whether the push skips CI. A push skips CI only when none of its commits
 touches anything but handoffs whose phase guarantees a later push: the planner's
 `.legion/plan.json`, the tester's `.legion/test.json`, and a reviewer's `.legion/review.json` whose
 `verdict` is `"changes_requested"`. Its head then ends with GitHub's `skip-checks: true` trailer,
-and the Go daemon carries the code head's verdict to it. Every other push runs CI in full. Never
+and the daemon carries the code head's verdict to it. Every other push runs CI in full. Never
 add or remove that trailer yourself, never write one of GitHub's bracket keywords (`[skip ci]`,
-`[ci skip]`, `[no ci]`, `[skip actions]`, `[actions skip]`) into a commit message, and never push
-the issue branch with the commands below under the Go daemon: a hand-run push of a handoff that
-could skip CI runs it in full, and a hand-added trailer or keyword on any other push skips CI on a
-head a human may merge. `legion push` refuses a head whose message carries a keyword and pushes
-nothing until you take it out. Under the TypeScript daemon, whose `legion` has no `push` command,
-run the commands below yourself.
-
-`-r @-` puts the bookmark on the commit you just
-split off: the working copy left above it has no description, and `jj git push` refuses a
-commit without one. `--allow-backwards` is for that local step alone: after a split the bookmark
-can sit on the undescribed working copy above `@-`. `--bookmark` also publishes the locally
-provisioned bookmark on its first push — a bookmark not yet tracking a remote one is tracked
-automatically. This is the one push procedure, run as `legion push` under the Go daemon and by
-hand under the TypeScript daemon; every push of the issue branch uses it:
+`[ci skip]`, `[no ci]`, `[skip actions]`, `[actions skip]`) into a commit message, and never
+hand-push the issue branch: that bypasses the daemon's decision about which head may skip checks.
+`legion push` refuses a head whose message carries a keyword and pushes nothing until you remove it.
 
 ```bash
-cd -- "$LEGION_WORKSPACE" && \
-  tip_file="${TMPDIR:-/tmp}/legion-<KEY>-$LEGION_ROLE-rewritten-tip" && \
-  old=$(cat -- "$tip_file" 2>/dev/null || true) && \
-  behind=$(jj -R "$LEGION_WORKSPACE" log --no-graph -T 'commit_id.short() ++ "\n"' \
-    -r "remote_bookmarks(exact:\"legion/<KEY>\", exact:\"origin\") ~ (::@-${old:+ | $old})") && \
-  { [ -z "$behind" ] || { echo "legion/<KEY>@origin is at $behind, which @- does not descend from" >&2; false; }; } && \
-  jj -R "$LEGION_WORKSPACE" bookmark set legion/<KEY> -r @- --allow-backwards && \
-  jj -R "$LEGION_WORKSPACE" git push --bookmark legion/<KEY> && \
-  rm -f -- "$tip_file"
+cd -- "$LEGION_WORKSPACE" && legion push
 ```
 
-The `behind` check refuses unless `@-` descends from `legion/<KEY>@origin` (or the branch is not
-on GitHub yet). Every issue workspace shares one clone, so another role's push moves
-`legion/<KEY>@origin` here at once. With the flag and no check, `jj git push` then moves the
-remote branch sideways onto your commit and drops theirs (jj 0.45.1:
-`bookmark: legion/K [move sideways from <theirs> to <yours>]`). A clone that has not seen the other
-push is refused by jj itself (`unexpectedly moved on the remote`).
+The ancestry check protects another role's commits in the shared clone: a push must descend from
+the remote issue branch unless it names the tip recorded for an authorized rewrite below.
 
 Before any rewrite of a commit you already pushed — a `jj squash --into` one, or any other
 rewrite — read *Rewriting pushed commits* in
@@ -478,14 +454,12 @@ Quote the answer verbatim in what you tell the architect: with the run and phase
 difference between "my work is lost" and "my work belongs to the previous run" is visible.
 
 **Stay in this session afterward.** Your process does not exit when your phase completes; it
-goes idle in its pane. Under the Go daemon it stays live until your issue leaves the workflow: no
-move between phases stops it, and only an explicit stop does — the issue closing, the issue moved
-to `backlog`, `icebox` or `triage` (a child by a person or its architect's `park_child`, or the
-tree's root, which stops the whole tree), a child set back to `todo` (which stops the worker of the
-phase it interrupted, while the earlier phases' roles stay live), or an operator. A stop keeps
-your session, and a crash relaunches it. Under the TypeScript daemon, after
-`worker_idle_retire_seconds` (default 600 s) idle with no active phase the daemon retires it.
-Either way your next assignment arrives in this same session, so it is still you. Other roles on
+stays live until your issue leaves the workflow. No move between phases stops it, and only an
+explicit stop does: the issue closing; a move to `backlog`, `icebox` or `triage` (a child by a
+person or its architect's `park_child`, or the root, which stops the whole tree); a child set back
+to `todo` (which stops the interrupted phase's worker, not earlier roles); or an operator stop.
+A stop keeps your session, and a crash relaunches it. Your next assignment arrives in this same
+session. Other roles on
 this issue may reach you through Envoy with
 questions about the work you did — answer them, reading `$LEGION_WORKSPACE` and your own
 committed handoff as needed, without mutating anything (see Workspace and handoff
