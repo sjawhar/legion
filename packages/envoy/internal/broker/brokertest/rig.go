@@ -22,9 +22,10 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/api"
 	"github.com/sjawhar/envoy/internal/broker/enroll"
 	"github.com/sjawhar/envoy/internal/broker/machine"
+	"github.com/sjawhar/envoy/internal/broker/policy"
+	"github.com/sjawhar/envoy/internal/broker/policy/policytest"
 	"github.com/sjawhar/envoy/internal/broker/proof"
 	"github.com/sjawhar/envoy/internal/broker/requests"
-	"github.com/sjawhar/envoy/internal/broker/rules"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
 	"github.com/sjawhar/envoy/internal/broker/store"
 	"github.com/sjawhar/envoy/internal/broker/store/storetest"
@@ -48,8 +49,8 @@ type Rig struct {
 	// URL is the broker's own httptest.Server base URL: every proof's htu and every request
 	// object's aud must check against this one value.
 	URL string
-	// Operator is the approver, named by email as Dispatch names a signed-in person, also named
-	// as the box operator in the fixture rules file below.
+	// Operator is the approver, named by email as Dispatch names a signed-in person, also the
+	// owner of the fixture secrets below and the operator of the sessions a test enrolls.
 	Operator string
 	// OperatorFile already holds Operator, trimmed — ready to hand to a helper.Broker as its
 	// OperatorFile field.
@@ -62,42 +63,21 @@ type Rig struct {
 	podKey    *oidctest.Key
 }
 
-// NewRig writes a rules file naming the person ada@example.com as a test secret's approver and as
-// a box operator, with a delivery: proxy secret (TEST_PROXY_SECRET) granted to that operator's boxes
-// automatically, wires a real pod verifier (a local OIDC issuer trusted by an
-// enroll.K8sPodVerifier, mirroring cmd/broker/main.go's own wiring), and mounts api.Register on an
-// httptest.Server — wired exactly as cmd/broker/main.go and api_test.go's newTestServer wire it. It
-// skips t when BROKER_TEST_DATABASE_URL is unset (storetest.Open's own contract).
+// NewRig holds two secrets the person ada@example.com owns: TEST_SECRET, human-tier, which a
+// request from any session makes an approval request to her, and TEST_AUTO_SECRET, agent-tier,
+// which her own sessions get at once. It wires a real pod verifier (a local OIDC issuer trusted by
+// an enroll.K8sPodVerifier, mirroring cmd/broker/main.go's own wiring), and mounts api.Register on
+// an httptest.Server — wired exactly as cmd/broker/main.go and api_test.go's newTestServer wire
+// it. It skips t when BROKER_TEST_DATABASE_URL is unset (storetest.Open's own contract).
 func NewRig(t *testing.T) *Rig {
 	t.Helper()
 	st := storetest.Open(t)
 	operator := "ada@example.com"
-	rulesYAML := `version: 1
-secrets:
-  TEST_SECRET:
-    source: example/agent-secrets/TEST_SECRET
-    owner: ` + operator + `
-    delivery: inject
-    max_lifetime_seconds: 43200
-    requesters:
-      - {kind: box, operator: ` + operator + `, decision: approval, approver: operator}
-  TEST_PROXY_SECRET:
-    source: example/agent-secrets/TEST_PROXY_SECRET
-    owner: ` + operator + `
-    delivery: proxy
-    max_lifetime_seconds: 43200
-    proxy: {scheme: https, host: api.example.com, port: 443, path_prefix: /, methods: [GET], header: Authorization, header_format: "Bearer {value}"}
-    requesters:
-      - {kind: box, operator: ` + operator + `, decision: automatic}
-`
-	rulesPath := t.TempDir() + "/rules.yaml"
-	if err := os.WriteFile(rulesPath, []byte(rulesYAML), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	cur, err := rules.NewCurrent(context.Background(), rules.FileLoader{Path: rulesPath}, time.Hour, func(error) {})
-	if err != nil {
-		t.Fatalf("rules.NewCurrent: %v", err)
-	}
+	local := secrets.NewLocal(
+		policytest.Secret("TEST_SECRET", operator, policy.TierHuman, "test-secret-v1"),
+		policytest.Secret("TEST_AUTO_SECRET", operator, policy.TierAgent, "test-auto-secret-v1"),
+	)
+	cur := policytest.Current(t, local)
 
 	mux := http.NewServeMux()
 	srv := httptest.NewServer(mux)
@@ -114,13 +94,13 @@ secrets:
 	enr.Chain = enroll.NewChainVerifier(st, srv.URL, time.Minute)
 
 	reqMachine := &requests.Machine{
-		Store: st, Rules: cur, Secrets: secrets.Fake{"example/agent-secrets/TEST_SECRET": "test-secret-v1"},
+		Store: st, Policy: cur, Secrets: secrets.AWS{Client: local},
 		MaxGrant: time.Hour, PendingTTL: 12 * time.Hour,
 		Audience: srv.URL, Skew: time.Minute, Replay: enr.Replay,
 	}
 	reqMachine.Chain = requests.NewChainVerifier(st, srv.URL, time.Minute)
 	mach := &machine.Service{
-		Store: st, Enroll: enr, Rules: cur,
+		Store: st, Enroll: enr, Policy: cur,
 		Audience: srv.URL, Skew: time.Minute, PendingTTL: 15 * time.Minute, CredentialLifetime: 7 * 24 * time.Hour,
 		Replay: enr.Replay,
 	}

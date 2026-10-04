@@ -126,11 +126,11 @@ function select(): HTMLSelectElement {
   return screen.getByRole("combobox", { name: "Assignee of CORE-1" }) as HTMLSelectElement;
 }
 
-test("AssigneeControl reads the allowlist only once the reader reaches for it, then lists Unassigned first", async () => {
+test("AssigneeControl reads who has signed in only once the reader reaches for it, then lists Unassigned first", async () => {
   const { listUsers, unmount } = renderControl();
   try {
     // Mounted with the badge showing, nothing has been requested: a fresh issue load costs no
-    // allowlist read.
+    // read of who has signed in.
     expect(screen.getByText("alice", { selector: "span" })).toBeTruthy();
     expect([...select().options].map((option) => option.textContent)).toEqual([
       "Unassigned",
@@ -194,11 +194,11 @@ test("AssigneeControl sends null for Unassigned", async () => {
   }
 });
 
-test("AssigneeControl rolls back and shows the server's refusal when the login is not allowed", async () => {
+test("AssigneeControl rolls back and shows the server's refusal when the person has not signed in", async () => {
   const patchIssue = spyOn(api, "patchIssue").mockRejectedValue(
     new ApiError(400, {
       code: "ASSIGNEE_NOT_ALLOWED",
-      error: '"bob" is not a login on the sign-in allowlist',
+      error: '"bob" has not signed in to Dispatch',
     })
   );
   const { queryClient, unmount } = renderControl();
@@ -207,7 +207,7 @@ test("AssigneeControl rolls back and shows the server's refusal when the login i
     await waitFor(() => expect(select().options.length).toBe(3));
     fireEvent.change(select(), { target: { value: "bob" } });
     const alert = await screen.findByRole("alert");
-    expect(alert.textContent).toContain('"bob" is not a login on the sign-in allowlist');
+    expect(alert.textContent).toContain('"bob" has not signed in to Dispatch');
     expect(select().value).toBe("alice");
     expect(queryClient.getQueryData<IssueSummary[]>(listKey)).toEqual([summary]);
     expect(queryClient.getQueryData<InboxRow[]>(inboxKey)).toEqual([inboxRow]);

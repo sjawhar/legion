@@ -70,9 +70,9 @@ function renderChildren() {
 }
 
 test("ChildrenTab shows each child's subtree progress, activity, and PR link", async () => {
-  // No GitHub credentials: GitHubLink must still render the link itself.
+  // The GitHub App cannot read the repository: GitHubLink must still render the link itself.
   const githubRest = spyOn(api, "githubRest").mockRejectedValue(
-    new ApiError(403, { code: "GITHUB_TOKEN_UNAVAILABLE", error: "no token" })
+    new ApiError(503, { code: "GITHUB_TOKEN_UNAVAILABLE", error: "no installation" })
   );
   const view = renderChildren();
   try {

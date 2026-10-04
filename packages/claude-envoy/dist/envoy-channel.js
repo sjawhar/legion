@@ -36679,7 +36679,7 @@ var dispatchToolSpecs = [
       spec: z2.string().describe(`Optional initial primary-document markdown. ${SPEC_WRITING_POINTER}`).optional(),
       labels: z2.array(z2.string({ min: 1, max: 40 }), { max: 20 }).describe("Optional initial labels, at most 20 labels of up to 40 characters.").optional(),
       priority: z2.number({ int: true, min: 0, max: 3 }).describe("Optional coarse priority: P0 is highest and P3 is lowest.").optional(),
-      assignee: z2.string().describe("GitHub login of the human who answers this issue's asks; defaults to your owner when you act for a person, else the parent's assignee, else unassigned.").optional(),
+      assignee: z2.string().describe("Email of the person who answers this issue's asks (someone who has signed in to Dispatch); defaults to your owner when you act for a person, else the parent's assignee, else unassigned.").optional(),
       components: componentsArgument(z2).optional()
     })
   },
@@ -36920,7 +36920,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_doc_read",
     example: { issue: "DSP-1" },
-    description: "Read a live document or a named document version. Do not use it for issue status, asks, or events; " + "use dispatch_read instead. Supply ref, issue, or project plus artifact; issue plus an omitted artifact reads the primary document. " + "A live read returns its document token for an optional dispatch_doc_edit precondition; use /blocks for per-block tokens. " + OWNER_REFERENCE,
+    description: "Read a live document or a named document version, or the text of an uploaded file at its latest or named version. " + "Do not use it for issue status, asks, or events; " + "use dispatch_read instead. Supply ref, issue, or project plus artifact; issue plus an omitted artifact reads the primary document. " + "A live read returns its document token for an optional dispatch_doc_edit precondition; use /blocks for per-block tokens. " + "A file that is not UTF-8 text is described, with the route that serves its bytes. " + OWNER_REFERENCE,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE).optional(),
       project: z2.string().describe("Project key owning the document.").optional(),
@@ -37034,7 +37034,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_whoami",
     example: {},
-    description: "Who Dispatch takes this session for: {session, owner}. owner is the lowercase GitHub login of the human whose personal token you run under (the default assignee of issues you create), or null under the shared token.",
+    description: "Who Dispatch takes this session for: {session, owner}. owner is the lowercase email of the person whose personal token you run under (the default assignee of issues you create), or null under the shared token.",
     arguments: () => ({}),
     strict: true
   }
@@ -38879,6 +38879,20 @@ class DispatchClient {
   async docRead(id, version2) {
     return version2 === undefined ? this.#json("GET", ["api", "v1", "artifacts", id, "text"]) : this.#json("GET", ["api", "v1", "artifacts", id, "versions", String(version2)]);
   }
+  async fileVersion(id, version2) {
+    const url2 = this.#url(["api", "v1", "artifacts", id, "versions", String(version2)]);
+    const response = await this.fetchImpl(url2, {
+      method: "GET",
+      headers: { Accept: "*/*", Authorization: `Bearer ${this.token}` },
+      signal: this.#signal
+    });
+    if (!response.ok)
+      return this.#response("GET", url2, response);
+    return {
+      mime: response.headers.get("Content-Type") ?? "application/octet-stream",
+      bytes: new Uint8Array(await response.arrayBuffer())
+    };
+  }
   async artifactBlocks(id) {
     return this.#json("GET", ["api", "v1", "artifacts", id, "blocks"]);
   }
@@ -40138,6 +40152,30 @@ async function blockAsks(client, resolved, state) {
   const asks = await (resolved.issue === undefined ? client.getArtifactAsks(resolved.artifact.id, state) : client.listIssueAsks(resolved.issue.key, state));
   return asks.filter((ask) => typeof ask.block_id === "string" && ask.block_artifact?.id === resolved.artifact.id);
 }
+async function readUploadedFile(client, resolved, requested) {
+  const { artifact } = resolved;
+  const latest = Math.max(0, ...artifact.versions.map((version2) => version2.number));
+  const number4 = requested ?? latest;
+  const file2 = await client.fileVersion(artifact.id, number4);
+  const of = number4 === latest ? "" : ` of ${latest}`;
+  const size = `${file2.bytes.length.toLocaleString("en-US")} bytes`;
+  const details = resolved.owner.kind === "project" ? { project: artifact.project, document: documentLabel(artifact.project, artifact.slug) } : { issue: resolved.issue?.key };
+  let text;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(file2.bytes);
+  } catch {
+    return {
+      text: `${artifact.name} is an uploaded ${file2.mime} file (version ${number4}${of}, ${size}) that is not ` + `UTF-8 text, so dispatch_doc_read cannot show it. GET /api/v1/artifacts/${artifact.id}/versions/${number4} serves its bytes.`,
+      details
+    };
+  }
+  return {
+    text: `File ${artifact.name}: ${file2.mime}, version ${number4}${of}, ${size}.
+
+${text}`,
+    details
+  };
+}
 async function refuseOpenDecisionBlocks(client, tool, resolved) {
   const artifact = resolved.artifact;
   const latest = artifact.approval?.latest_version;
@@ -40842,6 +40880,9 @@ ${followsAsk(askOwner)}`,
       const artifactReference = optionalString(args, "artifact") ?? (ownerArguments.ref?.kind === "spec" || ownerArguments.ref?.kind === "artifact" ? ownerArguments.ref.id : undefined);
       const resolved = await resolveDocument(documentOwner(), artifactReference);
       const version2 = optionalNumber(args, "version") ?? ownerArguments.ref?.version;
+      if (resolved.artifact.kind === "file" || resolved.artifact.kind === "image") {
+        return readUploadedFile(client, resolved, version2);
+      }
       const documentPromise = client.docRead(resolved.artifact.id, version2);
       const marksPromise = openArtifactMarks(client, resolved);
       const marksResultPromise = marksPromise.then((value) => ({ status: "fulfilled", value }), (reason) => ({ status: "rejected", reason }));

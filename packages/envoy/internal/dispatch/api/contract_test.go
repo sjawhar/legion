@@ -19,7 +19,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -29,24 +28,24 @@ import (
 	brokerapi "github.com/sjawhar/envoy/internal/broker/api"
 	"github.com/sjawhar/envoy/internal/broker/enroll"
 	"github.com/sjawhar/envoy/internal/broker/machine"
+	"github.com/sjawhar/envoy/internal/broker/policy"
+	"github.com/sjawhar/envoy/internal/broker/policy/policytest"
 	"github.com/sjawhar/envoy/internal/broker/proof"
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/requests"
-	"github.com/sjawhar/envoy/internal/broker/rules"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
 	"github.com/sjawhar/envoy/internal/broker/store"
 	brokerstoretest "github.com/sjawhar/envoy/internal/broker/store/storetest"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
-	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
 const (
-	contractApprover = "sjawhar"
+	contractApprover = "sami@example.com"
 	// contractOther is a second allowed Dispatch login, neither any record's approver nor any
 	// enrollment's operator.
-	contractOther   = "mallory"
+	contractOther   = "mallory@example.com"
 	contractUIToken = "contract-ui-token"
 )
 
@@ -65,24 +64,8 @@ func newContractRig(t *testing.T) *contractRig {
 	t.Helper()
 	brokerStore := brokerstoretest.Open(t)
 
-	rulesYAML := `version: 1
-secrets:
-  DEEL_API_KEY:
-    source: example/agent-secrets/DEEL_API_KEY
-    owner: ` + contractApprover + `
-    delivery: inject
-    max_lifetime_seconds: 43200
-    requesters:
-      - {kind: box, operator: ` + contractApprover + `, decision: approval, approver: operator}
-`
-	rulesPath := t.TempDir() + "/rules.yaml"
-	if err := os.WriteFile(rulesPath, []byte(rulesYAML), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	cur, err := rules.NewCurrent(context.Background(), rules.FileLoader{Path: rulesPath}, time.Hour, func(error) {})
-	if err != nil {
-		t.Fatalf("rules.NewCurrent: %v", err)
-	}
+	local := secrets.NewLocal(policytest.Secret("DEEL_API_KEY", contractApprover, policy.TierHuman, "deel-v1"))
+	cur := policytest.Current(t, local)
 
 	brokerMux := http.NewServeMux()
 	brokerServer := httptest.NewServer(brokerMux)
@@ -91,13 +74,13 @@ secrets:
 	enr := &enroll.Service{Store: brokerStore, Lease: time.Hour}
 	enr.Chain = enroll.NewChainVerifier(brokerStore, brokerServer.URL, time.Minute)
 	reqMachine := &requests.Machine{
-		Store: brokerStore, Rules: cur, Secrets: secrets.Fake{"example/agent-secrets/DEEL_API_KEY": "deel-v1"},
+		Store: brokerStore, Policy: cur, Secrets: secrets.AWS{Client: local},
 		MaxGrant: time.Hour, PendingTTL: 12 * time.Hour,
 		Audience: brokerServer.URL, Skew: time.Minute, Replay: enr.Replay,
 	}
 	reqMachine.Chain = requests.NewChainVerifier(brokerStore, brokerServer.URL, time.Minute)
 	mach := &machine.Service{
-		Store: brokerStore, Enroll: enr, Rules: cur,
+		Store: brokerStore, Enroll: enr, Policy: cur,
 		Audience: brokerServer.URL, Skew: time.Minute, PendingTTL: 15 * time.Minute, CredentialLifetime: 7 * 24 * time.Hour,
 		Replay: enr.Replay,
 	}
@@ -112,10 +95,10 @@ secrets:
 		Store: dispatchDB, Events: events.NewBroker(), ServerURL: "https://dispatch.example", Settle: 20 * time.Millisecond,
 	})
 	t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
-	allowed := map[string]struct{}{contractApprover: {}, contractOther: {}}
+	seedPeople(t, dispatchDB, contractApprover, contractOther)
 	deps, err := NewDeps(DepsInput{
-		Store: dispatchDB, Identity: identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: allowed},
-		AllowedLogins: allowed, ServerURL: "https://dispatch.example", Docs: documentService, Events: events.NewBroker(),
+		Store: dispatchDB, Identity: headerIdentity(dispatchDB),
+		ServerURL: "https://dispatch.example", Docs: documentService, Events: events.NewBroker(),
 		AgentSecretsURL: brokerServer.URL, AgentSecretsToken: contractUIToken,
 	})
 	if err != nil {

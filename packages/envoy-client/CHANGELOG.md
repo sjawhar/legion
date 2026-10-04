@@ -97,6 +97,11 @@
 
 ### Fixed
 
+- `dispatch_doc_read` of an uploaded file or image returns the file's text at its latest or named
+  version, after a line naming its type, version and size, where it failed with Dispatch's
+  `artifact is not a document`: it asked `/text`, which answers a file 400 `NOT_DOCUMENT`. A file
+  that is not UTF-8 text is described, with the `GET /api/v1/artifacts/{id}/versions/{n}` route that
+  serves its bytes. `DispatchClient.fileVersion` reads one version's bytes and MIME type.
 - `dispatch_doc_edit` given `lost_ops: null` says the live document is being reloaded or holds a
   tree too deep to read, where it said only that it was being reloaded: a document past the
   schema's depth bound reaches no verdict either, and a re-read answers it `DOC_SCHEMA`

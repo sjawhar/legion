@@ -131,7 +131,7 @@ func listenerView(runs []observedRun, at string, onlyConcluded bool) (Settlement
 			latest[run.name] = run
 		}
 	}
-	candidate := SettlementCandidate{CheckRuns: []record.AttemptRun{}, Failing: []string{}, Verdict: "green"}
+	candidate := SettlementCandidate{CheckRuns: []record.AttemptRun{}, Failing: []string{}}
 	complete := true
 	for name, run := range latest {
 		concluded := run.completed <= at
@@ -142,7 +142,6 @@ func listenerView(runs []observedRun, at string, onlyConcluded bool) (Settlement
 		candidate.CheckRuns = append(candidate.CheckRuns, record.AttemptRun{Name: name, ID: run.id})
 		if concluded && run.conclusion == "failure" {
 			candidate.Failing = append(candidate.Failing, name)
-			candidate.Verdict = "red"
 		}
 	}
 	sort.Slice(candidate.CheckRuns, func(i, j int) bool { return candidate.CheckRuns[i].Name < candidate.CheckRuns[j].Name })
@@ -186,8 +185,23 @@ type verdictChange struct {
 	verdict string
 }
 
+// failingVerdict is what the failures the fence keeps say of the head: none before any settlement
+// is applied, red while a check is named failing, green otherwise. It is the settlement's half of
+// the verdict, which the base branch's required set then judges (HeadVerdict); LEGION-152 was a
+// failure the fence lost and found again.
+func failingVerdict(pr record.PullRequest) string {
+	switch {
+	case pr.CheckRuns == nil:
+		return ""
+	case len(pr.Failing) > 0:
+		return "red"
+	default:
+		return "green"
+	}
+}
+
 // settleAll applies the settlements in order, as the workflow engine does, and returns the pull
-// request and every change of its verdict.
+// request and every change of its failing verdict.
 func settleAll(pr record.PullRequest, settlements []namedSettlement) (record.PullRequest, []verdictChange) {
 	var changes []verdictChange
 	for _, settlement := range settlements {
@@ -195,8 +209,8 @@ func settleAll(pr record.PullRequest, settlements []namedSettlement) (record.Pul
 		if !applied {
 			continue
 		}
-		if settled.Verdict != pr.Verdict {
-			changes = append(changes, verdictChange{label: settlement.label, verdict: settled.Verdict})
+		if failingVerdict(settled) != failingVerdict(pr) {
+			changes = append(changes, verdictChange{label: settlement.label, verdict: failingVerdict(settled)})
 		}
 		pr = settled
 	}
@@ -258,7 +272,7 @@ func TestPR1084HeadReplayGoesRedAtMostOnceAndNeverReturnsToRed(t *testing.T) {
 	tail := []namedSettlement{{"recreated record", recreatedRecord(every[len(every)-1].candidate, "pr-title", "dispatch")}}
 	tail = append(tail, every...)
 	if _, changes := settleAll(pr, tail); len(changes) != 0 {
-		t.Fatalf("recreated record and redelivered settlements changed the verdict %v, want no change from %s", changes, pr.Verdict)
+		t.Fatalf("recreated record and redelivered settlements changed the verdict %v, want no change from %s", changes, failingVerdict(pr))
 	}
 }
 
@@ -271,15 +285,15 @@ func TestPR1084HeadReplayGoesRedAtMostOnceAndNeverReturnsToRed(t *testing.T) {
 // old failure as a new name.
 func TestAPassedCheckStaysRetiredWhileAnotherCheckSettlesRepeatedly(t *testing.T) {
 	settlements := []namedSettlement{
-		{"title fails", SettlementCandidate{CheckRuns: []record.AttemptRun{{Name: "title", ID: 10}}, Verdict: "red", Failing: []string{"title"}}},
-		{"title passes", SettlementCandidate{CheckRuns: []record.AttemptRun{{Name: "ci", ID: 20}, {Name: "title", ID: 11}}, Verdict: "green", Failing: []string{}}},
+		{"title fails", SettlementCandidate{CheckRuns: []record.AttemptRun{{Name: "title", ID: 10}}, Failing: []string{"title"}}},
+		{"title passes", SettlementCandidate{CheckRuns: []record.AttemptRun{{Name: "ci", ID: 20}, {Name: "title", ID: 11}}, Failing: []string{}}},
 	}
 	for id := int64(21); id <= 30; id++ {
 		runs := []record.AttemptRun{{Name: "ci", ID: id}, {Name: "title", ID: 11}}
 		if id%2 == 0 { // every other settlement comes from a recreated record holding only ci
 			runs = runs[:1]
 		}
-		settlements = append(settlements, namedSettlement{fmt.Sprintf("ci %d", id), SettlementCandidate{CheckRuns: runs, Verdict: "green", Failing: []string{}}})
+		settlements = append(settlements, namedSettlement{fmt.Sprintf("ci %d", id), SettlementCandidate{CheckRuns: runs, Failing: []string{}}})
 	}
 	for i := range settlements {
 		settlements[i].candidate.Generation = int64(i + 1)

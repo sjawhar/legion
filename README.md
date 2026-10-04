@@ -64,12 +64,12 @@ for OpenCode, all built on `packages/envoy-client`.
 ### Secrets Broker
 
 Credentials an agent asks for and a person approves. An agent runs
-`agent-secrets NAME -- <command>`, and the broker's rules grant the request at once, refuse it, or
-send it to a named person, who approves or denies it in their Dispatch Inbox. The granted value
-reaches only the session that asked, in the environment of the command it runs, so an agent never
-holds a long-lived key. Each session signs its requests with a key of its own, and every request,
-decision and use is recorded. Legion enrolls every worker pod it starts on Kubernetes when its
-deployment names a broker.
+`agent-secrets NAME -- <command>`, and the secret's owner and tier tags grant the request at once,
+refuse it, or send it to a person, who approves or denies it in their Dispatch Inbox. The granted
+value reaches only the session that asked, in the environment of the command it runs, so an agent
+never holds a long-lived key. Each session signs its requests with a key of its own, and every
+request, decision and use is recorded. Legion enrolls every worker pod it starts on Kubernetes when
+its deployment names a broker.
 
 [The Secrets Broker's documentation](https://sjawhar.github.io/legion/broker/) ·
 [a walkthrough video of one request](https://sjawhar.github.io/legion/broker/walkthrough/)

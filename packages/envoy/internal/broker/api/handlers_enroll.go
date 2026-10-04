@@ -10,7 +10,7 @@ import (
 )
 
 // createEnrollmentBody is POST /v1/enrollments's body (the AGENTC-393 overview document's
-// enrollment route). It names no approver: the rules pick a request's approver at request time,
+// enrollment route). It names no approver: the policy picks a request's approver at request time,
 // never at enrollment. slot is optional and pod-only: omitted or "" is the runtime's one
 // enrollment, and a slot names one of several independent enrollments of the same pod
 // (enroll.Enrollment.Slot), chosen by the launcher whose proof authenticates the call.
