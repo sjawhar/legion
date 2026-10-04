@@ -22,6 +22,9 @@ const (
 	// retainedAssetFetchTimeout bounds the whole read of a retained asset from the store, object
 	// body included. The browser's download of the bytes read is not bounded by it.
 	retainedAssetFetchTimeout = 3 * time.Second
+	// maxRetainedBytesHeld caps the bytes of retained objects the handler holds at once. A client
+	// that stops reading keeps its object in memory, and the server sets no write timeout.
+	maxRetainedBytesHeld int64 = 64 << 20
 )
 
 // ErrAssetNotFound distinguishes an absent retained asset from a store failure.
@@ -90,12 +93,17 @@ func (s *s3AssetStore) GetAsset(ctx context.Context, key string) ([]byte, error)
 	if size < 0 || size > maxRetainedAssetSize {
 		return nil, fmt.Errorf("get retained asset %q: %d bytes, limit %d", key, size, maxRetainedAssetSize)
 	}
-	data, err := io.ReadAll(io.LimitReader(object.Body, size+1))
-	if err != nil {
-		return nil, fmt.Errorf("read retained asset %q: %w", key, err)
+	// One buffer of the declared size, so a request holds the object's bytes and no more.
+	data := make([]byte, size)
+	if _, err := io.ReadFull(object.Body, data); err != nil {
+		return nil, fmt.Errorf("read retained asset %q, %d bytes declared: %w", key, size, err)
 	}
-	if int64(len(data)) != size {
-		return nil, fmt.Errorf("read retained asset %q: body is not the %d bytes declared", key, size)
+	var extra [1]byte
+	switch _, err := io.ReadFull(object.Body, extra[:]); {
+	case err == nil:
+		return nil, fmt.Errorf("read retained asset %q: body is longer than the %d bytes declared", key, size)
+	case !errors.Is(err, io.EOF):
+		return nil, fmt.Errorf("read retained asset %q: %w", key, err)
 	}
 	return data, nil
 }

@@ -28,6 +28,8 @@ import (
 	"time"
 	"unicode"
 
+	"golang.org/x/sync/semaphore"
+
 	"github.com/sjawhar/envoy/internal/dispatch/agentstream"
 	"github.com/sjawhar/envoy/internal/dispatch/api"
 	"github.com/sjawhar/envoy/internal/dispatch/architecture"
@@ -197,6 +199,9 @@ type router struct {
 	ctx           *AppContext
 	pendingMu     sync.Mutex
 	pendingStates map[string]pendingState
+	// retainedHeld counts the bytes of retained objects held by responses in flight, up to
+	// maxRetainedBytesHeld (serveRetainedAsset).
+	retainedHeld *semaphore.Weighted
 }
 
 type pendingState struct {
@@ -207,7 +212,7 @@ type pendingState struct {
 
 // New returns an http.Handler that serves all dispatch routes.
 func New(ctx *AppContext) http.Handler {
-	r := &router{ctx: ctx, pendingStates: make(map[string]pendingState)}
+	r := &router{ctx: ctx, pendingStates: make(map[string]pendingState), retainedHeld: semaphore.NewWeighted(maxRetainedBytesHeld)}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /auth/start", r.authStart)
 	mux.HandleFunc("GET /auth/callback", r.authCallback)
@@ -509,7 +514,22 @@ func isRetainedAssetPath(normalized string) bool {
 // read under retainedAssetFetchTimeout before anything is written, so a slow, failed or short read
 // is an uncached 502 and never a 200 carrying the immutable header; the browser's download of the
 // bytes read is not bounded by that timeout.
+//
+// An object stays in memory until its client has read it, so the bytes held at once are capped at
+// maxRetainedBytesHeld. Before asking the store a request reserves the most one object can hold,
+// so a request past the cap asks it nothing; once the object is read it keeps the object's size
+// until its response is written or its client goes away.
 func (r *router) serveRetainedAsset(w http.ResponseWriter, req *http.Request, key string) {
+	if !r.retainedHeld.TryAcquire(maxRetainedAssetSize) {
+		slog.Warn("dispatch: retained asset refused at the memory cap", "key", key, "cap_bytes", maxRetainedBytesHeld)
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Retry-After", "1")
+		writeError(w, http.StatusServiceUnavailable, "retained assets are at their memory cap; retry")
+		return
+	}
+	held := maxRetainedAssetSize
+	defer func() { r.retainedHeld.Release(held) }()
+
 	ctx, cancel := context.WithTimeout(req.Context(), retainedAssetFetchTimeout)
 	asset, err := r.ctx.AssetStore.GetAsset(ctx, key)
 	cancel()
@@ -522,6 +542,9 @@ func (r *router) serveRetainedAsset(w http.ResponseWriter, req *http.Request, ke
 		writeError(w, http.StatusBadGateway, "retained asset store unavailable")
 		return
 	}
+	r.retainedHeld.Release(held - int64(len(asset)))
+	held = int64(len(asset))
+
 	w.Header().Set("Cache-Control", assetCacheControl)
 	w.Header().Set("Content-Type", contentType(key))
 	http.ServeContent(w, req, key, time.Time{}, bytes.NewReader(asset))

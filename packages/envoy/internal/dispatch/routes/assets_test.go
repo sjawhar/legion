@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -14,6 +15,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -282,6 +285,10 @@ func TestS3AssetStoreGetAsset(t *testing.T) {
 				if err != nil || string(data) != tc.want {
 					t.Fatalf("data %q, err = %v, want %q", data, err, tc.want)
 				}
+				// The byte budget counts len(data), so the object must hold no more than that.
+				if cap(data) != len(data) {
+					t.Errorf("a %d-byte object holds %d bytes", len(data), cap(data))
+				}
 			}
 			if tracked != nil {
 				if !tracked.closed {
@@ -418,5 +425,159 @@ func TestStaticHandlerLogsARetainedAssetStoreFailure(t *testing.T) {
 	}
 	if failures != 1 {
 		t.Fatalf("store failure: %d ERROR records naming the key and the error, want 1; log %q", failures, logs.String())
+	}
+}
+
+// countingStore answers every key with one shared object and counts the calls.
+type countingStore struct {
+	object []byte
+	calls  atomic.Int32
+}
+
+func (s *countingStore) GetAsset(context.Context, string) ([]byte, error) {
+	s.calls.Add(1)
+	return s.object, nil
+}
+
+// stalledClient is a browser that stops reading: its first write blocks until the client goes
+// away, and then fails, as a write to a closed connection does.
+type stalledClient struct {
+	header  http.Header
+	status  int
+	writing chan struct{} // closed at the first write
+	gone    chan struct{} // closed when the client goes away
+	served  chan struct{} // closed when the handler returns
+	once    sync.Once
+}
+
+func (c *stalledClient) Header() http.Header    { return c.header }
+func (c *stalledClient) WriteHeader(status int) { c.status = status }
+func (c *stalledClient) Write([]byte) (int, error) {
+	c.once.Do(func() { close(c.writing) })
+	<-c.gone
+	return 0, errors.New("client went away")
+}
+
+// stallRetainedReaders starts n clients that each get a retained asset and stop reading it,
+// one at a time, and returns once all n are writing. Each goes away when the test ends.
+func stallRetainedReaders(t *testing.T, handler http.Handler, n int) []*stalledClient {
+	t.Helper()
+	clients := make([]*stalledClient, n)
+	for i := range clients {
+		client := &stalledClient{header: http.Header{}, writing: make(chan struct{}), gone: make(chan struct{}), served: make(chan struct{})}
+		clients[i] = client
+		go func() {
+			defer close(client.served)
+			handler.ServeHTTP(client, httptest.NewRequest(http.MethodGet, fmt.Sprintf("/assets/stalled-%d.js", i), nil))
+		}()
+		<-client.writing
+		if client.status != http.StatusOK {
+			t.Fatalf("stalled reader %d: status %d, want 200", i, client.status)
+		}
+	}
+	t.Cleanup(func() {
+		for _, client := range clients {
+			select {
+			case <-client.gone:
+			default:
+				close(client.gone)
+			}
+			<-client.served
+		}
+	})
+	return clients
+}
+
+// A retained object stays in memory until its client has read it, and nothing bounds how long a
+// client takes, so the bytes held at once are capped. A request that would pass the cap is
+// refused before the store is asked: 503, not kept, retried after a second.
+func TestStaticHandlerCapsRetainedBytesHeldAtOnce(t *testing.T) {
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	handler, context := newTestRouter(t, &memoryUserStore{users: map[string]*auth.User{}}, nil)
+	context.WebDistDir = t.TempDir()
+	store := &countingStore{object: bytes.Repeat([]byte("/"), int(maxRetainedAssetSize))}
+	context.AssetStore = store
+	stallRetainedReaders(t, handler, int(maxRetainedBytesHeld/maxRetainedAssetSize))
+
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/assets/one-more.js", nil))
+
+	if held := int64(store.calls.Load()) * maxRetainedAssetSize; held > maxRetainedBytesHeld {
+		t.Errorf("the store handed out %d bytes still held, past the %d-byte cap", held, maxRetainedBytesHeld)
+	}
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("past the cap: status %d with %d body bytes, want 503", recorder.Code, recorder.Body.Len())
+	}
+	if got := store.calls.Load(); got != int32(maxRetainedBytesHeld/maxRetainedAssetSize) {
+		t.Errorf("past the cap: the store was asked %d times, want %d (no call for the refused request)", got, maxRetainedBytesHeld/maxRetainedAssetSize)
+	}
+	if got := recorder.Header().Get("Cache-Control"); got != "no-store" {
+		t.Errorf("past the cap: Cache-Control %q, want no-store", got)
+	}
+	if got := recorder.Header().Get("Retry-After"); got != "1" {
+		t.Errorf("past the cap: Retry-After %q, want 1", got)
+	}
+	var warnings int
+	for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+		var record struct {
+			Level string `json:"level"`
+			Key   string `json:"key"`
+		}
+		if json.Unmarshal([]byte(line), &record) == nil && record.Level == "WARN" && record.Key == "assets/one-more.js" {
+			warnings++
+		}
+	}
+	if warnings != 1 {
+		t.Errorf("past the cap: %d WARN records naming the key, want 1; log %q", warnings, logs.String())
+	}
+}
+
+// A client that goes away mid-response gives its bytes back, so the next request is served.
+func TestStaticHandlerReleasesRetainedBytesWhenAClientGoesAway(t *testing.T) {
+	handler, context := newTestRouter(t, &memoryUserStore{users: map[string]*auth.User{}}, nil)
+	context.WebDistDir = t.TempDir()
+	store := &countingStore{object: bytes.Repeat([]byte("/"), int(maxRetainedAssetSize))}
+	context.AssetStore = store
+	clients := stallRetainedReaders(t, handler, int(maxRetainedBytesHeld/maxRetainedAssetSize))
+
+	full := httptest.NewRecorder()
+	handler.ServeHTTP(full, httptest.NewRequest(http.MethodGet, "/assets/while-full.js", nil))
+	if full.Code != http.StatusServiceUnavailable {
+		t.Fatalf("at the cap: status %d, want 503", full.Code)
+	}
+
+	close(clients[0].gone)
+	<-clients[0].served
+
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/assets/after.js", nil))
+	if recorder.Code != http.StatusOK || int64(recorder.Body.Len()) != maxRetainedAssetSize {
+		t.Fatalf("after a client went away: status %d with %d body bytes, want 200 with %d", recorder.Code, recorder.Body.Len(), maxRetainedAssetSize)
+	}
+}
+
+// A failed read gives back what it reserved: more failures than the cap holds objects, then a hit.
+func TestStaticHandlerReleasesRetainedBytesWhenTheStoreFails(t *testing.T) {
+	handler, context := newTestRouter(t, &memoryUserStore{users: map[string]*auth.User{}}, nil)
+	context.WebDistDir = t.TempDir()
+	failing := &fakeAssetStore{err: errors.New("object store unavailable")}
+	context.AssetStore = failing
+	for i := range int(maxRetainedBytesHeld/maxRetainedAssetSize) + 1 {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, fmt.Sprintf("/assets/failing-%d.js", i), nil))
+		if recorder.Code != http.StatusBadGateway {
+			t.Fatalf("failure %d: status %d, want 502", i, recorder.Code)
+		}
+	}
+
+	context.AssetStore = &fakeAssetStore{assets: map[string]string{"assets/after.js": "after"}}
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/assets/after.js", nil))
+	if recorder.Code != http.StatusOK || recorder.Body.String() != "after" {
+		t.Fatalf("after the store failed: status %d body %q, want 200 \"after\"", recorder.Code, recorder.Body.String())
 	}
 }
