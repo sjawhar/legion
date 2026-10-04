@@ -29,11 +29,11 @@ func newInteractionHandler(t *testing.T, makeDocs func(*store.Store) docs.API) (
 	}
 	seedPeople(t, database, "alice", "bob")
 	deps, err := NewDeps(DepsInput{
-		Store:      database,
-		Identity:   headerIdentity(database),
-		AgentToken: "agent-token",
-		Docs:       docsAPI,
-		ServerURL:  "https://dispatch.example",
+		Store:       database,
+		Identity:    headerIdentity(database),
+		AgentTokens: sharedAgentTokens(t, "agent-token"),
+		Docs:        docsAPI,
+		ServerURL:   "https://dispatch.example",
 	})
 	if err != nil {
 		t.Fatalf("new API dependencies: %v", err)
