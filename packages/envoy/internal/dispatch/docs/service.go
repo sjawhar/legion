@@ -185,8 +185,15 @@ type roomState struct {
 	// askBlocks are the ask blocks the room's document held when its update observer last
 	// rendered it, or when it loaded; nil when neither could read it. askAuthors names the author
 	// of the update that introduced each one no settlement has indexed yet (observeAskBlocks).
-	askBlocks  map[string]struct{}
-	askAuthors map[string]model.Actor
+	// pendingAskAuthors credits a committed transaction's write or a service mutation with the ask
+	// ids it introduces, registered at the write site before the update can reach any observer
+	// (registerAskAuthors, carryForwardRenamedAskAuthors); observeAskBlocks consumes each entry
+	// into askAuthors the first time it sees the id and never prunes one it has not consumed, so
+	// attribution survives however many updates land before an observer finally renders the id
+	// (LEGION-503).
+	askBlocks         map[string]struct{}
+	askAuthors        map[string]model.Actor
+	pendingAskAuthors map[string]model.Actor
 	// lastActor is the most recent edit's source: the actor of a service mutation, or the sole
 	// connected peer of a browser edit. A settlement uses it for derived events and approval moves
 	// when its version credits that actor or credits nobody; ambiguous browser edits use

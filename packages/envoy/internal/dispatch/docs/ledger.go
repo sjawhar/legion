@@ -208,8 +208,10 @@ func (l *Ledger) addLiveWrite(write *liveWrite) {
 
 // credit credits each content change of a committed transaction to its room, for the room's
 // next version, unless a version the transaction wrote holds every change of the write and
-// credits its authors already (liveWrite.versioned). It runs before the transaction's own
-// versions are released.
+// credits its authors already (liveWrite.versioned). It also registers the ask ids the write
+// introduced to its actor (registerAskAuthors), before this commit's own publish can reach any
+// observer, so attribution does not depend on whichever update's observer ends up rendering the
+// publish first (LEGION-503). It runs before the transaction's own versions are released.
 func (l *Ledger) credit() {
 	for _, artifactID := range l.order {
 		write := l.live[artifactID]
@@ -224,6 +226,7 @@ func (l *Ledger) credit() {
 			}
 		}
 		state.lastActor = write.actor
+		state.registerAskAuthors(write.addedAskBlockIDs, *write.actor)
 		state.mu.Unlock()
 	}
 }

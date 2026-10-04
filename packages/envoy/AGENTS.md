@@ -94,16 +94,24 @@ document. Every write path that changes a document queues that closer once its t
 a live edit (`POST /api/v1/artifacts/{id}/edits`), an uploaded document version
 (`POST /api/v1/issues/{key}/artifacts`, `POST /api/v1/projects/{key}/artifacts`), and a spec seeded
 at issue creation, so ask blocks written by any of them become asks without waiting for a later live
-change. The closer attributes a new ask and its `ask.opened` event to the author of the update
-that introduced its block, as the room's update observer recorded it when it rendered that update
-(`observeAskBlocks`): a service write's or a committed transaction's actor, the one browser
-connected when a browser's update arrived, or `SettlementActor` for a browser's update while
-several people are connected. A seeded spec's blocks are its creator's. A block in the tree whose
+change. The closer attributes a new ask and its `ask.opened` event to whoever introduced its
+block: a service write's or a committed transaction's own before/after trees name the ids it
+adds, which it registers before its update can reach any observer (`registerAskAuthors`,
+`Ledger.credit`), rather than leaving attribution to whichever update's observer ends up
+rendering a merged catch-up first (LEGION-503); an id no write registered this way can only be a
+browser's, and gets the one browser connected when its update arrived, or `SettlementActor` while
+several are (`observeAskBlocks`). A settlement's own id repair and an edit's repair of an
+existing, unrelated block (`ApplyOps`'s `EnsureBlockIDs`) each carry forward the author recorded
+for the id a rename replaces, unless it is a copy of the block that keeps that id
+(`recordStampedAskBlocks`, `carryForwardRenamedAskAuthors`); a rename whose own update's observer
+had not yet recorded an author carries none forward, and is named after the settlement's own
+actor rather than its editor. A seeded spec's blocks are its creator's. A block in the tree whose
 update the observer has not rendered yet waits for the settlement that observer arms. A block the
-room held when it loaded, which no update the observer saw introduced, is attributed as the
-settlement's other events are. Those name the room's latest editor when the version credits them,
-including an approval request's move; ambiguous browser edits name `SettlementActor`. A free-text
-ask block (no bullet list) carries `options: []` on the wire, never JSON null.
+room held when it loaded, which no write registered and no update the observer saw introduced, is
+attributed as the settlement's other events are. Those name the room's latest editor when the
+version credits them, including an approval request's move; ambiguous browser edits name
+`SettlementActor`. A free-text ask block (no bullet list) carries `options: []` on the wire, never
+JSON null.
 
 The closer's timer lives in memory, so the database says which documents still owe it: every
 durable document update writes the document's `doc_settlements_pending` row in its own transaction
