@@ -87,12 +87,14 @@ type codeFlow struct {
 
 // revocation is the state of the revocation endpoint: every token the client
 // sent it, in order, whatever it answered; the status and OAuth error code it
-// answers instead of revoking, when FailRevocation set one; and how long it
-// waits before answering.
+// answers instead of revoking, when FailRevocation set one; where it redirects
+// instead, when RedirectRevocation set it; and how long it waits before
+// answering.
 type revocation struct {
 	requests []string
 	status   int
 	code     string
+	redirect string
 	delay    time.Duration
 }
 
@@ -233,6 +235,14 @@ func (i *Issuer) DelayRevocation(d time.Duration) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	i.codeFlow.revocation.delay = d
+}
+
+// RedirectRevocation makes the revocation endpoint answer 307 to target
+// instead of revoking: a client that follows it re-sends the token there.
+func (i *Issuer) RedirectRevocation(target string) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.codeFlow.revocation.redirect = target
 }
 
 // RevocationRequests is every token the client has sent the revocation
@@ -506,7 +516,7 @@ func (i *Issuer) handleRevoke(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	flow.revocation.requests = append(flow.revocation.requests, token)
-	status, code, delay := flow.revocation.status, flow.revocation.code, flow.revocation.delay
+	status, code, redirect, delay := flow.revocation.status, flow.revocation.code, flow.revocation.redirect, flow.revocation.delay
 	i.mu.Unlock()
 	if delay > 0 {
 		select {
@@ -514,6 +524,10 @@ func (i *Issuer) handleRevoke(w http.ResponseWriter, r *http.Request) {
 		case <-r.Context().Done():
 			return
 		}
+	}
+	if redirect != "" {
+		http.Redirect(w, r, redirect, http.StatusTemporaryRedirect)
+		return
 	}
 	if status != 0 {
 		if code == "" {

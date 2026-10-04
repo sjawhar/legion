@@ -11,7 +11,6 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
-	"github.com/sjawhar/envoy/internal/oidc"
 )
 
 // RefreshTokenRevoker revokes a refresh token at the sign-in pool that issued it; *oidc.CodeFlow
@@ -46,7 +45,8 @@ func (s *PgPeopleStore) Record(ctx context.Context, email string) error {
 
 // SignIn records a sign-in through the pool, replacing any membership email held before. A refresh
 // token the row holds in plain text is retired first, so the replacement never forgets one the pool
-// still accepts; when the pool does not revoke it, retire has logged that, and the sign-in proceeds.
+// still accepts. When the pool does not revoke it, the sign-in logs that at ERROR, naming the person
+// to sign out at the pool since no later boot will see the token, and proceeds.
 func (s *PgPeopleStore) SignIn(ctx context.Context, email, refreshToken string, confirmedAt time.Time) error {
 	var stored *string
 	err := s.pool.QueryRow(ctx, `select refresh_token from people where email = $1`, email).Scan(&stored)
@@ -54,7 +54,10 @@ func (s *PgPeopleStore) SignIn(ctx context.Context, email, refreshToken string, 
 		return fmt.Errorf("read the refresh token the sign-in of %q replaces: %w", email, err)
 	}
 	if stored != nil && !strings.HasPrefix(*stored, sealedRefreshTokenPrefix) {
-		if err := s.retire(ctx, email, *stored); err != nil && !errors.Is(err, errNotRevoked) {
+		switch err := s.retire(ctx, email, *stored); {
+		case errors.Is(err, errNotRevoked):
+			slog.Error("dispatch: a sign-in replaced a refresh token the pool did not revoke; sign this person out at the pool", "email", email, "error", err)
+		case err != nil:
 			return err
 		}
 	}
@@ -114,8 +117,9 @@ func (s *PgPeopleStore) End(ctx context.Context, email string) error {
 // RetirePlainRefreshTokens retires every refresh token people holds in plain text (retire): one
 // stored before Dispatch sealed them, or by a task of that earlier release since, during a roll or
 // after a rollback. Dispatch runs it at every boot. It returns how many the pool revoked and how
-// many it did not, each of those left in its row for the next boot; once ctx is done, each token
-// not yet revoked fails at once. The error is the database's, and stops the sweep.
+// many it did not, each of those logged at ERROR naming the person and left in its row for the next
+// boot; once ctx is done, each token not yet revoked fails at once. The error is the database's,
+// and stops the sweep.
 func (s *PgPeopleStore) RetirePlainRefreshTokens(ctx context.Context) (retired, failed int, err error) {
 	rows, err := s.pool.Query(ctx, `select email, refresh_token from people where refresh_token is not null and refresh_token not like '`+sealedRefreshTokenPrefix+`%' order by email`)
 	if err != nil {
@@ -132,6 +136,7 @@ func (s *PgPeopleStore) RetirePlainRefreshTokens(ctx context.Context) (retired, 
 	for _, p := range tokens {
 		switch err := s.retire(ctx, p.email, p.token); {
 		case errors.Is(err, errNotRevoked):
+			slog.Error("dispatch: the sign-in pool did not revoke a refresh token stored in plain text", "email", p.email, "error", err)
 			failed++
 		case err != nil:
 			return retired, failed, err
@@ -142,8 +147,7 @@ func (s *PgPeopleStore) RetirePlainRefreshTokens(ctx context.Context) (retired, 
 	return retired, failed, nil
 }
 
-// errNotRevoked is a refresh token stored in plain text that the sign-in pool did not revoke;
-// retire has logged why.
+// errNotRevoked is a refresh token stored in plain text that the sign-in pool did not revoke.
 var errNotRevoked = errors.New("the sign-in pool did not revoke the refresh token stored in plain text")
 
 // errNoSignInPool is a revocation asked of a store with no sign-in pool to revoke at.
@@ -153,30 +157,20 @@ var errNoSignInPool = errors.New("no sign-in pool is configured (DISPATCH_SIGNIN
 // forgets it with its confirmation while the row still holds it, so a sign-in recorded since keeps
 // its own. Anyone holding a copy of a plain token (a database backup, say) can redeem it with the
 // client's secret until the pool revokes it, which forgetting alone never does. A revocation that
-// fails leaves the row as it is and returns errNotRevoked, logged once at ERROR naming the person
-// and the pool's HTTP status, never the token. Only a value without the sealed format's prefix
-// reaches it: a sealed one is never sent to the pool.
+// fails leaves the row as it is and returns errNotRevoked wrapping the pool's error, which never
+// carries the token; the caller logs it. Only a value without the sealed format's prefix reaches
+// it: a sealed one is never sent to the pool.
 func (s *PgPeopleStore) retire(ctx context.Context, email, plain string) error {
-	if err := s.revoke(ctx, plain); err != nil {
-		attrs := []any{"email", email}
-		var refused *oidc.RevocationError
-		if errors.As(err, &refused) {
-			attrs = append(attrs, "status", refused.Status)
-		}
-		slog.Error("dispatch: the sign-in pool did not revoke a refresh token stored in plain text", append(attrs, "error", err.Error())...)
-		return errNotRevoked
+	if s.revoker == nil {
+		return fmt.Errorf("%w: %w", errNotRevoked, errNoSignInPool)
+	}
+	if err := s.revoker.Revoke(ctx, plain); err != nil {
+		return fmt.Errorf("%w: %w", errNotRevoked, err)
 	}
 	if _, err := s.pool.Exec(ctx, `update people set refresh_token = null, confirmed_at = null where email = $1 and refresh_token = $2`, email, plain); err != nil {
 		return fmt.Errorf("forget the revoked refresh token of %q: %w", email, err)
 	}
 	return nil
-}
-
-func (s *PgPeopleStore) revoke(ctx context.Context, plain string) error {
-	if s.revoker == nil {
-		return errNoSignInPool
-	}
-	return s.revoker.Revoke(ctx, plain)
 }
 
 var _ auth.PeopleStore = (*PgPeopleStore)(nil)

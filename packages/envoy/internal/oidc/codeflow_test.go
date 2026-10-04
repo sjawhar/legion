@@ -2,11 +2,11 @@ package oidc
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -172,25 +172,37 @@ func TestCodeFlowRevokeEndsTheRefreshToken(t *testing.T) {
 	}
 }
 
-// A revocation the issuer does not accept is a RevocationError naming its HTTP status and the OAuth
-// error code its body names, if any, and never the token.
+// A revocation the issuer does not accept is an error naming its HTTP status and the OAuth error
+// code its body names, if any, and never the token.
 func TestCodeFlowRevokeReportsTheIssuersRefusalWithoutTheToken(t *testing.T) {
 	for _, refusal := range []struct {
 		status int
 		code   string
-	}{{http.StatusBadRequest, "invalid_request"}, {http.StatusServiceUnavailable, ""}} {
+		want   string
+	}{{http.StatusBadRequest, "invalid_request", "HTTP 400 invalid_request"}, {http.StatusServiceUnavailable, "", "HTTP 503"}} {
 		issuer, flow := newCodeFlowFor(t)
 		issuer.FailRevocation(refusal.status, refusal.code)
 		token := "plain-refresh-token-" + refusal.code
 		err := flow.Revoke(context.Background(), token)
-		var refused *RevocationError
-		if !errors.As(err, &refused) || refused.Status != refusal.status || refused.Code != refusal.code {
-			t.Errorf("Revoke against an issuer answering %d %q: err = %#v, want a RevocationError with that status and code", refusal.status, refusal.code, err)
-			continue
+		if err == nil || !strings.Contains(err.Error(), refusal.want) || strings.Contains(err.Error(), token) {
+			t.Errorf("Revoke against an issuer answering %d %q: err = %v, want one naming %s and not the token", refusal.status, refusal.code, err, refusal.want)
 		}
-		if strings.Contains(err.Error(), token) || !strings.Contains(err.Error(), fmt.Sprintf("HTTP %d", refusal.status)) {
-			t.Errorf("Revoke's error %q carries the token or does not name HTTP %d", err, refusal.status)
-		}
+	}
+}
+
+// A revocation endpoint that redirects is answered as a refusal, never followed: following a 307
+// would re-send the token to the redirect's target.
+func TestCodeFlowRevokeDoesNotFollowARedirect(t *testing.T) {
+	var received atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { received.Add(1) }))
+	t.Cleanup(target.Close)
+	issuer, flow := newCodeFlowFor(t)
+	issuer.RedirectRevocation(target.URL + "/elsewhere")
+	if err := flow.Revoke(context.Background(), "plain-refresh-token"); err == nil || !strings.Contains(err.Error(), "HTTP 307") {
+		t.Errorf("Revoke against a redirecting endpoint: err = %v, want one naming HTTP 307", err)
+	}
+	if n := received.Load(); n != 0 {
+		t.Errorf("the redirect's target received %d requests, want none", n)
 	}
 }
 

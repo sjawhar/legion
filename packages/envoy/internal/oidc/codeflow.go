@@ -70,7 +70,11 @@ func NewCodeFlow(ctx context.Context, issuer, clientID, clientSecret string) (*C
 			Scopes:       signInScopes,
 		},
 		revocationURL: revocation.Endpoint,
-		http:          &http.Client{Timeout: tokenTimeout},
+		// A redirect is answered as it stands: following a 307 or 308 would re-send the form, and
+		// with it a code or a refresh token, to wherever the redirect points.
+		http: &http.Client{Timeout: tokenTimeout, CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		}},
 	}, nil
 }
 
@@ -124,25 +128,12 @@ func (f *CodeFlow) Refresh(ctx context.Context, refreshToken string) (Session, e
 	return f.session(ctx, token)
 }
 
-// RevocationError is the issuer's answer to a revocation it did not accept: the HTTP status, and
-// the OAuth error code its body names, if it names one.
-type RevocationError struct {
-	Status int
-	Code   string
-}
-
-func (e *RevocationError) Error() string {
-	if e.Code == "" {
-		return fmt.Sprintf("oidc: revoke: the issuer answered HTTP %d", e.Status)
-	}
-	return fmt.Sprintf("oidc: revoke: the issuer answered HTTP %d %s", e.Status, e.Code)
-}
-
 // Revoke revokes refreshToken at the revocation endpoint the issuer's discovery document names
 // (RFC 7009), as the client with HTTP Basic, as Cognito's /oauth2/revoke requires of a client with
 // a secret; the issuer ends every token it issued from it. An issuer answers 200 for a token it
-// has revoked already or does not know, so that is success too. The error is a *RevocationError
-// when the issuer answered otherwise, and never carries the token.
+// has revoked already or does not know, so that is success too. Any other answer, a redirect
+// included, is an error naming the HTTP status and the OAuth error code the body names, if any;
+// the error never carries the token.
 func (f *CodeFlow) Revoke(ctx context.Context, refreshToken string) error {
 	if f.revocationURL == "" {
 		return errors.New("oidc: revoke: the issuer names no revocation_endpoint in its discovery document")
@@ -162,15 +153,14 @@ func (f *CodeFlow) Revoke(ctx context.Context, refreshToken string) error {
 	if response.StatusCode >= 200 && response.StatusCode < 300 {
 		return nil
 	}
-	refused := &RevocationError{Status: response.StatusCode}
 	var body struct {
 		Error string `json:"error"`
 	}
 	// A body that is not an OAuth error (a proxy's page) names no code; the status still stands.
-	if json.NewDecoder(io.LimitReader(response.Body, 4096)).Decode(&body) == nil {
-		refused.Code = body.Error
+	if json.NewDecoder(io.LimitReader(response.Body, 4096)).Decode(&body) != nil || body.Error == "" {
+		return fmt.Errorf("oidc: revoke: the issuer answered HTTP %d", response.StatusCode)
 	}
-	return refused
+	return fmt.Errorf("oidc: revoke: the issuer answered HTTP %d %s", response.StatusCode, body.Error)
 }
 
 func (f *CodeFlow) session(ctx context.Context, token *oauth2.Token) (Session, error) {

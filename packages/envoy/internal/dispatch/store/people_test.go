@@ -325,8 +325,8 @@ func TestRetirePlainRefreshTokensLeavesATokenThePoolDidNotRevoke(t *testing.T) {
 		t.Fatalf("the row holds %v after a revocation the pool refused, want the token kept for the next attempt", kept)
 	}
 	out := logs.String()
-	if retireLines(logs) != 1 || !strings.Contains(out, "level=ERROR") || !strings.Contains(out, "email="+email) || !strings.Contains(out, "status=503") {
-		t.Errorf("logged, want one ERROR naming %s and status=503:\n%s", email, out)
+	if retireLines(logs) != 1 || !strings.Contains(out, "level=ERROR") || !strings.Contains(out, "email="+email) || !strings.Contains(out, "HTTP 503") {
+		t.Errorf("logged, want one ERROR naming %s and HTTP 503:\n%s", email, out)
 	}
 	if strings.Contains(out, "plain-token") {
 		t.Errorf("the log carries the token:\n%s", out)
@@ -378,8 +378,9 @@ func TestRetirePlainRefreshTokensRetiresATokenStoredAfterTheLastBoot(t *testing.
 
 // A sign-in replaces the refresh token a row holds; one in plain text is retired first, so the
 // replacement never forgets a token the pool still accepts without revoking it. When the pool does
-// not revoke it, the sign-in logs that, naming the person and the status and never the value, and
-// proceeds: the person just signed in at the pool.
+// not revoke it, the sign-in proceeds (the person just signed in at the pool) and logs a line of its
+// own, apart from the boot's, naming the person to sign out at the pool and the status, never the
+// value: no later boot will see that token.
 func TestPgPeopleStoreSignInRetiresThePlainTokenItReplaces(t *testing.T) {
 	ctx := context.Background()
 	database := openTestStore(t)
@@ -404,12 +405,34 @@ func TestPgPeopleStoreSignInRetiresThePlainTokenItReplaces(t *testing.T) {
 			t.Errorf("pool answering %d: membership = %#v err=%v, want the new sign-in's refresh-fresh", status, membership, err)
 		}
 		out := logs.String()
-		if wantLines := map[bool]int{true: 0, false: 1}[status == 0]; retireLines(logs) != wantLines ||
-			(wantLines == 1 && (!strings.Contains(out, "email="+email) || !strings.Contains(out, "status=400"))) {
-			t.Errorf("pool answering %d: logged, want %d ERROR lines naming %s and the status:\n%s", status, wantLines, email, out)
+		replaced := strings.Count(out, "a sign-in replaced a refresh token the pool did not revoke; sign this person out at the pool")
+		if status == 0 && (replaced != 0 || retireLines(logs) != 0) {
+			t.Errorf("pool answering 0: logged, want nothing:\n%s", out)
+		}
+		if status != 0 && (replaced != 1 || retireLines(logs) != 0 || !strings.Contains(out, "email="+email) || !strings.Contains(out, "HTTP 400")) {
+			t.Errorf("pool answering %d: logged, want one sign-in line naming %s and HTTP 400, and no boot line:\n%s", status, email, out)
 		}
 		if strings.Contains(out, plain) {
 			t.Errorf("pool answering %d: the log carries the token:\n%s", status, out)
 		}
+	}
+}
+
+// retire forgets the token only while the row still holds the value the sweep read: a sign-in
+// recorded since keeps its own refresh token.
+func TestRetireKeepsASignInRecordedSinceTheRead(t *testing.T) {
+	ctx := context.Background()
+	database := migratedEmptyStore(t)
+	_, flow := revokingPool(t)
+	people := NewPgPeopleStore(database.Pool, "signing-key", flow)
+	email := "raced@d.example"
+	if err := people.SignIn(ctx, email, "refresh-new", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := people.retire(ctx, email, "plain-the-sweep-read"); err != nil {
+		t.Fatal(err)
+	}
+	if membership, _, err := people.Membership(ctx, email); err != nil || membership.RefreshToken != "refresh-new" {
+		t.Errorf("membership = %#v err=%v, want the later sign-in's refresh-new", membership, err)
 	}
 }

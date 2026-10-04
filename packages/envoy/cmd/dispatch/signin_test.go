@@ -45,6 +45,11 @@ func TestRetirePlainRefreshTokensAtBootStopsAtItsBound(t *testing.T) {
 	if elapsed := time.Since(start); elapsed > 5*time.Second {
 		t.Errorf("the boot's retirement took %s against a pool that never answers, want about its 500ms bound", elapsed)
 	}
+	// The store main builds revokes through the discovered pool: without it every token would fail
+	// at once with no request made, and this bound would hold for the wrong reason.
+	if got := pool.RevocationRequests(); len(got) == 0 {
+		t.Error("the boot's retirement sent the sign-in pool nothing, want it to try to revoke the plain tokens")
+	}
 	out := logs.String()
 	if !strings.Contains(out, "retired the refresh tokens stored in plain text") || !strings.Contains(out, "retired=0 failed=3") {
 		t.Errorf("logged, want the counts retired=0 failed=3:\n%s", out)

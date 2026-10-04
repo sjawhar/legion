@@ -107,13 +107,17 @@
   value, and the person signs in again. Every boot retires each refresh token stored in plain
   text, by `0068`'s release or by one of its tasks during a roll or after a rollback: it revokes
   the token at the pool's discovered `revocation_endpoint`, then clears it; a sign-in that replaces
-  one retires it first. A token the pool does not revoke stays for the next boot and is logged at
-  ERROR with the email and the pool's HTTP status, never the token; the boot logs how many it
-  retired and how many failed, and stops after 30 seconds without holding up the start. A
-  database backup holds no refresh token the pool would accept only once a boot of this release
-  has retired every plain-text token; after the roll,
+  one retires it first. A token the boot cannot revoke stays for the next boot and is logged at
+  ERROR with the email and the error, never the token; a sign-in that cannot revoke the token it
+  replaces goes on and logs its own ERROR line, `dispatch: a sign-in replaced a refresh token the
+  pool did not revoke; sign this person out at the pool`. A redirect from the revocation endpoint
+  is a failure, never followed. The boot logs how many it retired and how many failed, and stops
+  after 30 seconds without holding up the start. A database backup holds no refresh token the
+  pool would accept only once a boot of this release has retired every plain-text token; after the
+  last earlier-release task is gone, restart Dispatch once, then check that boot logged
+  `failed=0`, no sign-in-replaced line appeared, and
   `select count(*) from people where refresh_token is not null and refresh_token not like 'v1:%'`
-  answers `0`. Rotating `DISPATCH_SIGNING_KEY` leaves Dispatch unable to open any stored refresh
+  answers `0` (`cmd/dispatch/README.md`). Rotating `DISPATCH_SIGNING_KEY` leaves Dispatch unable to open any stored refresh
   token, so everyone signs in again, but revokes none at the pool: after a key leak, sign people
   out at the pool.
 - A blank approval-request `summary` is refused (`400 SUMMARY_INPUT`) with text that asks for what

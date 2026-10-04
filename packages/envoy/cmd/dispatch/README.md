@@ -164,14 +164,18 @@ lowercase email:
   (the `revocation_endpoint` the issuer's discovery document names) as the app
   client, then clears it and its confirmation while the row still holds that
   value. A sign-in that replaces a plain-text token retires it the same way
-  first. A sealed value is never sent to the pool. A token the pool does not
-  revoke stays in its row for the next boot, and each such attempt logs
+  first. A sealed value is never sent to the pool, and a redirect from the
+  revocation endpoint is a failure, never followed. A token the boot cannot
+  revoke stays in its row for the next boot and logs
   `msg="dispatch: the sign-in pool did not revoke a refresh token stored in plain text"`
-  at ERROR with the email, the pool's HTTP `status` when it answered, and never
-  the token; a sign-in replacing it goes on after that line, and then only
-  signing the person out at the pool revokes it. The boot's retirement stops
-  after 30 seconds, failing each token it has not revoked, and the start goes
-  on; it logs
+  at ERROR with the email and the error (the pool's HTTP status, when it
+  answered), never the token. A sign-in that cannot revoke the token it
+  replaces goes on, since the person just signed in at the pool, and logs
+  `msg="dispatch: a sign-in replaced a refresh token the pool did not revoke; sign this person out at the pool"`
+  at ERROR with the email and the error: no later boot will see that token, so
+  signing the person out at the pool is the only way to end it. The boot's
+  retirement stops after 30 seconds, failing each token it has not revoked, and
+  the start goes on; it logs
   `msg="dispatch: retired the refresh tokens stored in plain text" retired=<n> failed=<n>`.
 
   A database backup therefore holds no refresh token the pool would accept only
@@ -343,13 +347,16 @@ transaction, a table over the limit) still stops the deploy.
 
 No migration retires the refresh tokens that `0068`'s release stored in plain text: every boot does
 (Identity, above), since a task of that release can write one during the roll, or after a
-rollback, once every migration has run. After the roll, once no task of the earlier release
-serves, the deployer checks that
+rollback, once every migration has run, and a token written after a boot waits for the next one.
+So once the last task of the earlier release is gone, the deployer restarts Dispatch once and then
+checks three things: that boot logged `failed=0`; no
+`a sign-in replaced a refresh token the pool did not revoke` line has appeared since the roll began
+(each one names a person to sign out at the pool); and
 `select count(*) from people where refresh_token is not null and refresh_token not like 'v1:%'`
-answers `0`. Zero means each plain-text token was revoked at the pool, or was logged as one the
-pool did not revoke (an ERROR line naming the person) before that person's sign-in replaced it.
-Any other count is a token the pool has not revoked yet, each named by an ERROR line from the
-boot; the next boot tries again, and signing that person out at the pool ends it at once.
+answers `0`. A boot line with `failed=<n>` above zero names each token it could not revoke in an
+ERROR line; the next boot tries again, and signing that person out at the pool ends it at once. A
+non-zero count with no such line is a token a task of the earlier release wrote after the last
+boot, which another restart retires.
 
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a
