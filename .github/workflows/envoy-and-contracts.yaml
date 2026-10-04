@@ -70,13 +70,8 @@ on:
   merge_group:
     types: [checks_requested]
 
-# A new push to a pull request cancels that pull request's still-running checks here. Outside
-# pull_request the group key is github.sha, distinct for every push to main and every
-# merge-queue entry, so those runs never share a group with each other or a pull request: GitHub
-# cancels a group's previously *queued* run whenever a newer one joins, regardless of
-# cancel-in-progress (https://docs.github.com/en/actions/concepts/workflows-and-actions/concurrency,
-# "only one run can be pending in a concurrency group"), so keying push/merge_group on github.ref
-# (constant per branch/queue) would silently drop a commit's CI under a backed-up runner pool.
+# A new push to a pull request cancels that pull request's still-running checks here; outside
+# pull_request the key is github.sha, not github.ref, so a busy runner pool never drops a main push's or merge-queue entry's run (why: this PR's description).
 concurrency:
   group: envoy-and-contracts-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}

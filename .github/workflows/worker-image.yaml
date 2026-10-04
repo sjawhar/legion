@@ -76,18 +76,10 @@ jobs:
     runs-on: ubuntu-24.04
     # Job-level (not workflow-level): this file is also a called workflow, and job-level concurrency/env
     # behave identically for `workflow_call`, `workflow_dispatch`, and `pull_request`.
-    # Two pushes to one PR serialize on the PR number. Other events serialize on github.sha, not
-    # github.ref: other systems pin this image by commit, and GitHub cancels a concurrency
-    # group's previously-queued run whenever a newer one joins regardless of cancel-in-progress
-    # (only one pending run per group:
-    # https://docs.github.com/en/actions/concepts/workflows-and-actions/concurrency), so keying
-    # on github.ref (constant for every push to main) could silently drop a commit's image build
-    # under a backed-up runner pool, leaving that commit with no image for anything to pin.
-    # github.sha is distinct per push and, for workflow_call from release.yaml, per the calling
-    # run's commit, so it still serializes same-commit workflow_dispatch re-runs without ever
-    # colliding two different commits.
+    # Two pushes to one PR serialize on the PR number (unchanged). Other events key on github.sha,
+    # not github.ref, so a dropped pending main run never leaves a commit with no image to pin (why: this PR's description).
     concurrency:
-      group: worker-image-${{ github.event.pull_request.number || github.sha }}
+      group: worker-image-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
       cancel-in-progress: false
     env:
       IMAGE: ghcr.io/sjawhar/legion-worker
