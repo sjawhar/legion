@@ -54,9 +54,17 @@ import {
 } from "./board-keys";
 import {
   type BoardColumn,
+  type BoardLane,
   dropTarget,
+  groupIssuesByLane,
   groupIssuesByStatus,
   type IssueStatus,
+  laneColumnId,
+  laneDropTarget,
+  laneFromKey,
+  laneKey,
+  laneLabel,
+  type PriorityLane,
   statusLabel,
 } from "./board-model";
 import { useBoardMoves } from "./board-moves";
@@ -165,19 +173,26 @@ function IssueCard({ issue, unread }: { issue: IssueSummary; unread: boolean }):
 }
 
 /**
- * One lifecycle column: the `status:<s>` droppable. Every column stretches to the board's
- * height, so a card can be dropped anywhere in a column's body - below its last card, or into
- * an empty column whose header has scrolled out of view on a phone - not only on the header.
+ * One lifecycle column: the `status:<s>` droppable (`lane:<l>|status:<s>` inside a swimlane).
+ * Every column stretches to the board's height, so a card can be dropped anywhere in a column's
+ * body - below its last card, or into an empty column whose header has scrolled out of view on
+ * a phone - not only on the header.
  */
 const BoardColumnView = memo(function BoardColumnView({
   column,
+  dropId,
+  lane,
   userState,
 }: {
   column: BoardColumn;
+  /** The droppable id; defaults to the flat `status:<s>` form. */
+  dropId?: string;
+  /** The enclosing swimlane's key (`laneKey`), when this column sits inside one. */
+  lane?: string;
   userState: UserState | undefined;
 }): ReactNode {
   const { isOver, setNodeRef } = useDroppable({
-    id: `status:${column.status}`,
+    id: dropId ?? `status:${column.status}`,
   });
 
   return (
@@ -185,6 +200,7 @@ const BoardColumnView = memo(function BoardColumnView({
       aria-label={statusLabel(column.status)}
       className={`w-72 shrink-0 snap-start ${boardFocusRing}`}
       data-board-column={column.status}
+      data-board-lane={lane}
       ref={setNodeRef}
       tabIndex={-1}
     >
@@ -232,13 +248,74 @@ const BoardColumnView = memo(function BoardColumnView({
   );
 });
 
+/**
+ * One swimlane: a heading naming the priority band and its issue count, then the same
+ * horizontally scrolling row of nine lifecycle columns a flat board renders - each column's
+ * droppable id scoped to this lane (`laneColumnId`) so a card dropped in it takes on the lane's
+ * priority along with its status.
+ */
+const BoardLaneRow = memo(function BoardLaneRow({
+  boardLane,
+  dragging,
+  isCollapsed,
+  userState,
+}: {
+  boardLane: BoardLane;
+  dragging: boolean;
+  isCollapsed: (status: IssueStatus) => boolean;
+  userState: UserState | undefined;
+}): ReactNode {
+  const count = boardLane.columns.reduce((total, column) => total + column.issues.length, 0);
+  const lane = laneKey(boardLane.lane);
+  return (
+    <section aria-label={`${laneLabel(boardLane.lane)} lane`}>
+      <h2
+        className={`mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-wide ${textSecondaryOnSurface}`}
+      >
+        {laneLabel(boardLane.lane)}
+        <Pill>{count}</Pill>
+      </h2>
+      <div
+        className={`overflow-x-auto pb-3 ${dragging ? "" : "snap-x snap-mandatory"}`}
+        data-testid="board-lane-scroll-container"
+      >
+        <div className="flex w-max items-stretch gap-4">
+          {boardLane.columns.map((column) =>
+            isCollapsed(column.status) ? (
+              <CollapsedColumn
+                column={column}
+                dropId={laneColumnId(column.status, boardLane.lane)}
+                key={column.status}
+                lane={lane}
+              />
+            ) : (
+              <BoardColumnView
+                column={column}
+                dropId={laneColumnId(column.status, boardLane.lane)}
+                key={column.status}
+                lane={lane}
+                userState={userState}
+              />
+            )
+          )}
+        </div>
+      </div>
+    </section>
+  );
+});
+
 export function IssueBoard({
   project,
   showEdges = false,
+  lanes = false,
 }: {
   project: string;
   /** Render Icebox and Done as full columns instead of collapsed rails. */
   showEdges?: boolean;
+  /** Group the board into swimlanes by priority - rows across the nine status columns, one band
+   *  per priority plus one for no priority - rank still ordering cards within a lane+column
+   *  cell. */
+  lanes?: boolean;
 }): ReactNode {
   const queryClient = useQueryClient();
   const { labels, matches } = useIssueFilters();
@@ -258,7 +335,7 @@ export function IssueBoard({
     (issue: IssueSummary) => matches(issue, userState.data?.[issue.key]?.last_read_seq ?? 0),
     [matches, userState.data]
   );
-  const { error, moveCard } = useBoardMoves(project, labels, isVisible);
+  const { error, moveCard, moveCardToLane } = useBoardMoves(project, labels, isVisible);
   const sensors = useSensors(
     useSensor(MouseSensor, { activationConstraint: { distance: 8 } }),
     useSensor(TouchSensor, { activationConstraint: { delay: 150, tolerance: 5 } })
@@ -303,14 +380,26 @@ export function IssueBoard({
     () => (issues.data === undefined ? [] : groupIssuesByStatus(issues.data.filter(isVisible))),
     [issues.data, isVisible]
   );
+  const boardLanes = useMemo(
+    () => (issues.data === undefined ? [] : groupIssuesByLane(issues.data.filter(isVisible))),
+    [issues.data, isVisible]
+  );
   const onDragEnd = ({ active, over }: DragEndEvent) => {
     landCard();
     const current = queryClient.getQueryData<IssueSummary[]>(queryKey);
     if (over === null || current === undefined) {
       return;
     }
-    // Indices count the rendered - visible - cards, so `moveCard` sends visible neighbours.
-    const target = dropTarget(current.filter(isVisible), String(active.id), String(over.id));
+    // Indices count the rendered - visible - cards, so a move sends visible neighbours.
+    const visible = current.filter(isVisible);
+    if (lanes) {
+      const target = laneDropTarget(visible, String(active.id), String(over.id));
+      if (target !== undefined) {
+        void moveCardToLane(String(active.id), target.status, target.lane, target.insertionIndex);
+      }
+      return;
+    }
+    const target = dropTarget(visible, String(active.id), String(over.id));
     if (target !== undefined) {
       void moveCard(String(active.id), target.status, target.insertionIndex);
     }
@@ -323,12 +412,23 @@ export function IssueBoard({
   // One `aria-live` sentence per keyboard move; `focusAfterMove` names the card focus follows
   // once the optimistic list has rendered (a status move remounts the article under its new
   // column, so the old node cannot keep focus; a card moved into a rail has no node, and focus
-  // lands on the rail). The effect runs on the `columns` render - the announcement's own render
-  // comes first, before the query observer has notified, and would focus the doomed node.
+  // lands on the rail). The effect runs on the `columns`/`boardLanes` render - the
+  // announcement's own render comes first, before the query observer has notified, and would
+  // focus the doomed node.
   const [announcement, setAnnouncement] = useState("");
-  const focusAfterMove = useRef<{ key: string; status: IssueStatus } | null>(null);
+  const focusAfterMove = useRef<{
+    key: string;
+    status: IssueStatus;
+    laneId: string | null;
+  } | null>(null);
   const boardNode = (selector: string) => boardRef.current?.querySelector<HTMLElement>(selector);
-  // biome-ignore lint/correctness/useExhaustiveDependencies: `columns` is the trigger, not a read; `boardNode` reads a ref
+  /** The `data-board-column` selector for `status`, scoped to `laneId` (`null` outside a
+   *  swimlane). */
+  const laneColumnSelector = (status: IssueStatus, laneId: string | null): string =>
+    laneId === null
+      ? `[data-board-column="${status}"]`
+      : `[data-board-column="${status}"][data-board-lane="${laneId}"]`;
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `columns`/`boardLanes` are the trigger, not a read; `boardNode` reads a ref
   useEffect(() => {
     const pending = focusAfterMove.current;
     if (pending === null) {
@@ -337,9 +437,20 @@ export function IssueBoard({
     focusAfterMove.current = null;
     (
       boardNode(`[data-board-card="${pending.key}"]`) ??
-      boardNode(`[data-board-column="${pending.status}"]`)
+      boardNode(laneColumnSelector(pending.status, pending.laneId))
     )?.focus();
-  }, [columns]);
+  }, [columns, boardLanes]);
+  /** The columns `j`/`k`/`h`/`l` and `Shift+J/K/H/L` act on: the swimlane holding the current
+   *  focus (by its `data-board-lane` key) while lanes are on, the board's flat columns
+   *  otherwise. */
+  const focusedLaneColumns = (laneId: string | null): BoardColumn[] =>
+    lanes && laneId !== null
+      ? (boardLanes.find((entry) => laneKey(entry.lane) === laneId)?.columns ?? [])
+      : columns;
+  /** The focused card or column's lane key, or `null` outside lane mode or with nothing
+   *  focused there. */
+  const currentLaneId = (): string | null =>
+    columnAround(document.activeElement)?.dataset.boardLane ?? null;
   /** Where keyboard focus sits on the board right now, or `null` when it is elsewhere. */
   const currentFocus = (): BoardFocus | null => {
     const active = document.activeElement;
@@ -352,19 +463,21 @@ export function IssueBoard({
     const index =
       key === undefined
         ? -1
-        : (columns
+        : (focusedLaneColumns(column.dataset.boardLane ?? null)
             .find((entry) => entry.status === status)
             ?.issues.findIndex((issue) => issue.key === key) ?? -1);
     return { status, index: index === -1 ? null : index };
   };
   const rove = (key: RoveKey) => {
-    const target = focusTarget(columns, isCollapsed, currentFocus(), key);
+    const laneId = currentLaneId();
+    const laneColumns = focusedLaneColumns(laneId);
+    const target = focusTarget(laneColumns, isCollapsed, currentFocus(), key);
     const issue =
       target.index === null
         ? undefined
-        : columns.find((entry) => entry.status === target.status)?.issues[target.index];
+        : laneColumns.find((entry) => entry.status === target.status)?.issues[target.index];
     (issue === undefined
-      ? boardNode(`[data-board-column="${target.status}"]`)
+      ? boardNode(laneColumnSelector(target.status, laneId))
       : boardNode(`[data-board-card="${issue.key}"]`)
     )?.focus();
   };
@@ -373,20 +486,30 @@ export function IssueBoard({
     if (key === undefined) {
       return;
     }
-    const target = keyboardMove(columns, key, direction);
+    const laneId = currentLaneId();
+    const laneColumns = focusedLaneColumns(laneId);
+    const target = keyboardMove(laneColumns, key, direction);
     if (target === undefined) {
       return;
     }
-    // `moveCard` places the card in the cache synchronously before its request goes out, so
-    // the announcement reads the optimistic position - the one the user sees.
-    void moveCard(key, target.status, target.insertionIndex);
-    // The announcement's position and count are the visible column - the one the user sees.
+    // Both move functions place the card in the cache synchronously before their request goes
+    // out, so the announcement reads the optimistic position - the one the user sees.
+    const lane: PriorityLane | undefined = laneId === null ? undefined : laneFromKey(laneId);
+    if (lanes && lane !== undefined) {
+      void moveCardToLane(key, target.status, lane, target.insertionIndex);
+    } else {
+      void moveCard(key, target.status, target.insertionIndex);
+    }
+    // The announcement's position and count are the visible cell - the one the user sees.
     const column = (queryClient.getQueryData<IssueSummary[]>(queryKey) ?? []).filter(
-      (issue) => issue.status === target.status && isVisible(issue)
+      (issue) =>
+        issue.status === target.status &&
+        isVisible(issue) &&
+        (lane === undefined || issue.priority === lane)
     );
     const position = column.findIndex((issue) => issue.key === key);
     setAnnouncement(announceMove(key, target.status, position + 1, column.length));
-    focusAfterMove.current = { key, status: target.status };
+    focusAfterMove.current = { key, status: target.status, laneId };
   };
   const focusedCard = () => cardAround(document.activeElement) !== null;
   /** Copies the focused card's key or `dispatch://` reference and announces which. */
@@ -557,20 +680,38 @@ export function IssueBoard({
           onDragStart={liftCard}
           sensors={sensors}
         >
-          <div
-            className={`overflow-x-auto pb-3 ${dragging ? "" : "snap-x snap-mandatory"}`}
-            data-testid="board-scroll-container"
-          >
-            <div className="flex w-max items-stretch gap-4">
-              {columns.map((column) =>
-                isCollapsed(column.status) ? (
-                  <CollapsedColumn column={column} key={column.status} />
-                ) : (
-                  <BoardColumnView column={column} key={column.status} userState={userState.data} />
-                )
-              )}
+          {lanes ? (
+            <div className="flex flex-col gap-6" data-testid="board-lanes-container">
+              {boardLanes.map((boardLane) => (
+                <BoardLaneRow
+                  boardLane={boardLane}
+                  dragging={dragging}
+                  isCollapsed={isCollapsed}
+                  key={laneKey(boardLane.lane)}
+                  userState={userState.data}
+                />
+              ))}
             </div>
-          </div>
+          ) : (
+            <div
+              className={`overflow-x-auto pb-3 ${dragging ? "" : "snap-x snap-mandatory"}`}
+              data-testid="board-scroll-container"
+            >
+              <div className="flex w-max items-stretch gap-4">
+                {columns.map((column) =>
+                  isCollapsed(column.status) ? (
+                    <CollapsedColumn column={column} key={column.status} />
+                  ) : (
+                    <BoardColumnView
+                      column={column}
+                      key={column.status}
+                      userState={userState.data}
+                    />
+                  )
+                )}
+              </div>
+            </div>
+          )}
         </DndContext>
       )}
     </section>

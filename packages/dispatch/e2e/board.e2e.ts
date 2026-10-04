@@ -872,3 +872,96 @@ test("a filtered drag names the visible neighbours and the hidden card interleav
     await context.close();
   }
 });
+
+test("the board groups into priority swimlanes on a toggle, the choice lives in the URL, and dragging across lanes reassigns priority", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const p0 = await createIssue({ project: "CORE", title: "P0 card" });
+  await patchIssue(p0.key, { status: "todo", priority: 0 });
+  const p3 = await createIssue({ project: "CORE", title: "P3 card" });
+  await patchIssue(p3.key, { status: "todo", priority: 3 });
+  const none = await createIssue({ project: "CORE", title: "No priority card" });
+  await patchIssue(none.key, { status: "todo" });
+
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  if (testInfo.project.name === "chromium") {
+    await page.setViewportSize({ width: 1920, height: 900 });
+  }
+  try {
+    await page.goto("/projects/CORE");
+    await page.getByRole("button", { name: "Board" }).click();
+
+    // Off by default: one flat Todo column holding every card.
+    const lanesToggle = page.getByRole("button", { name: "Show lanes" });
+    await expect(lanesToggle).toHaveAttribute("aria-pressed", "false");
+    const flatTodo = page.getByRole("region", { name: "Todo" });
+    await expect(flatTodo.getByRole("article")).toHaveCount(3);
+    if (testInfo.project.name === "iphone") {
+      await expect(lanesToggle).toHaveCSS("min-height", "44px");
+    }
+
+    await lanesToggle.click();
+    await expect(page).toHaveURL(/[?&]lanes=1(&|$)/);
+    await expect(page.getByRole("button", { name: "Hide lanes" })).toHaveAttribute(
+      "aria-pressed",
+      "true"
+    );
+
+    const p0Lane = page.getByRole("region", { name: "P0 lane" });
+    const p3Lane = page.getByRole("region", { name: "P3 lane" });
+    const noPriorityLane = page.getByRole("region", { name: "No priority lane" });
+    await expect(p0Lane.getByRole("region", { name: "Todo" }).getByRole("article")).toHaveText([
+      /P0 card/,
+    ]);
+    await expect(p3Lane.getByRole("region", { name: "Todo" }).getByRole("article")).toHaveText([
+      /P3 card/,
+    ]);
+    await expect(
+      noPriorityLane.getByRole("region", { name: "Todo" }).getByRole("article")
+    ).toHaveText([/No priority card/]);
+
+    // The choice persists through the URL, not per-login storage: a reload keeps it.
+    await page.reload();
+    await expect(page.getByRole("button", { name: "Hide lanes" })).toHaveAttribute(
+      "aria-pressed",
+      "true"
+    );
+    await expect(page.getByRole("region", { name: "P0 lane" })).toBeVisible();
+
+    if (testInfo.project.name === "chromium") {
+      // Dragging the no-priority card into the P0 lane's Todo column reassigns its priority -
+      // the same gesture that reassigns status when a card crosses a column.
+      const noPriorityCard = page
+        .getByRole("region", { name: "No priority lane" })
+        .getByRole("article", { name: `${none.key} No priority card` });
+      const p0Todo = page.getByRole("region", { name: "P0 lane" }).getByRole("region", {
+        name: "Todo",
+      });
+      const reassignPatch = patchOf(page, none.key);
+      await mouseDrag(page, noPriorityCard, p0Todo.getByRole("article").first());
+      const reassignResponse = await reassignPatch;
+      expect(reassignResponse.status()).toBe(200);
+      expect(reassignResponse.request().postDataJSON()).toEqual({
+        priority: 0,
+        rank: { before: p0.key },
+      });
+      await expect(p0Todo.getByRole("article")).toHaveText([/No priority card/, /P0 card/]);
+      await expect(
+        page.getByRole("region", { name: "No priority lane" }).getByRole("article")
+      ).toHaveCount(0);
+      await expect.poll(() => getIssue(none.key)).toMatchObject({ priority: 0 });
+      await page.reload();
+      await expect(p0Todo.getByRole("article")).toHaveText([/No priority card/, /P0 card/]);
+    }
+
+    // Turning lanes off restores the flat board - the toggle state, not the data, decides the
+    // layout.
+    await page.getByRole("button", { name: "Hide lanes" }).click();
+    await expect(page).not.toHaveURL(/lanes=1/);
+    await expect(page.getByRole("region", { name: "P0 lane" })).toHaveCount(0);
+  } finally {
+    await context.close();
+  }
+});

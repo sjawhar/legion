@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 
-import { Link, Navigate, useLocation, useNavigate } from "react-router-dom";
+import { Link, Navigate, useLocation, useNavigate, useSearchParams } from "react-router-dom";
 
 import { api } from "../../api/client";
 import { projectsQuery } from "../../api/queries";
@@ -53,7 +53,24 @@ export function ProjectPage(): ReactNode {
     (stored) => stored === "shown",
     (shown) => (shown ? "shown" : "hidden")
   );
-
+  // Unlike the Icebox/Done toggle, the swimlane choice lives in the URL rather than per-login
+  // storage: a board grouped into priority lanes is a view worth linking to, not just recalling.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const lanes = searchParams.get("lanes") === "1";
+  const setLanes = (next: boolean) => {
+    setSearchParams(
+      (current) => {
+        const nextParams = new URLSearchParams(current.toString());
+        if (next) {
+          nextParams.set("lanes", "1");
+        } else {
+          nextParams.delete("lanes");
+        }
+        return nextParams;
+      },
+      { replace: true }
+    );
+  };
   const route = parseProjectPath(location.pathname, location.search);
   const projectKey = route?.project;
   const inbox = useQuery({
@@ -221,6 +238,18 @@ export function ProjectPage(): ReactNode {
             {showEdges ? "Hide Icebox & Done" : "Show Icebox & Done"}
           </button>
         ) : null}
+        {activeTab === "issues" && issueView === "board" ? (
+          <button
+            aria-pressed={lanes}
+            className={`order-8 min-h-11 shrink-0 rounded-xl border px-3 text-sm font-medium md:order-4 md:min-h-9 md:px-2 ${borderDefault} ${
+              lanes ? surfaceMutedStrongBg : surfaceMutedBg
+            } ${textSecondaryOnCanvas}`}
+            onClick={() => setLanes(!lanes)}
+            type="button"
+          >
+            {lanes ? "Hide lanes" : "Show lanes"}
+          </button>
+        ) : null}
       </header>
       {hasSource ? (
         <div
@@ -252,7 +281,7 @@ export function ProjectPage(): ReactNode {
             {issueView === "list" ? (
               <IssueList project={route.project} />
             ) : (
-              <IssueBoard project={route.project} showEdges={showEdges} />
+              <IssueBoard lanes={lanes} project={route.project} showEdges={showEdges} />
             )}
           </>
         ) : null}

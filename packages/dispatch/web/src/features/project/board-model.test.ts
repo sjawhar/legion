@@ -1,7 +1,20 @@
 import { expect, test } from "bun:test";
 
 import type { IssueSummary } from "../../api/types";
-import { dropTarget, groupIssuesByStatus, moveIssue, rankInputForInsertion } from "./board-model";
+import {
+  dropTarget,
+  groupIssuesByLane,
+  groupIssuesByStatus,
+  laneColumnId,
+  laneDropTarget,
+  laneFromKey,
+  laneKey,
+  laneLabel,
+  moveIssue,
+  moveIssueToLane,
+  priorityLanes,
+  rankInputForInsertion,
+} from "./board-model";
 
 function issue(overrides: Partial<IssueSummary> = {}): IssueSummary {
   return {
@@ -204,4 +217,123 @@ test("moveIssue into a column whose only cards are hidden appends with no neighb
     "CORE-4",
     "CORE-5",
   ]);
+});
+
+test("groupIssuesByLane splits by priority (P0-P3, then no priority), each lane split by status", () => {
+  const lanes = groupIssuesByLane([
+    issue({ key: "CORE-1", priority: 0, status: "todo", rank: "a" }),
+    issue({ key: "CORE-2", priority: null, status: "todo", rank: "b" }),
+    issue({ key: "CORE-3", priority: 0, status: "in_progress", rank: "c" }),
+    issue({ key: "CORE-4", priority: 3, status: "todo", rank: "d" }),
+  ]);
+  expect(lanes.map((entry) => entry.lane)).toEqual([0, 1, 2, 3, null]);
+  const p0 = lanes.find((entry) => entry.lane === 0);
+  expect(p0?.columns.find((column) => column.status === "todo")?.issues.map((i) => i.key)).toEqual([
+    "CORE-1",
+  ]);
+  expect(
+    p0?.columns.find((column) => column.status === "in_progress")?.issues.map((i) => i.key)
+  ).toEqual(["CORE-3"]);
+  const noPriority = lanes.find((entry) => entry.lane === null);
+  expect(
+    noPriority?.columns.find((column) => column.status === "todo")?.issues.map((i) => i.key)
+  ).toEqual(["CORE-2"]);
+});
+
+test("laneLabel, laneKey and laneFromKey round-trip every priority lane", () => {
+  expect(priorityLanes.map(laneLabel)).toEqual(["P0", "P1", "P2", "P3", "No priority"]);
+  for (const lane of priorityLanes) {
+    expect(laneFromKey(laneKey(lane))).toBe(lane);
+  }
+  expect(laneFromKey("nonsense")).toBeUndefined();
+});
+
+test("laneColumnId round-trips through laneDropTarget as a cell id", () => {
+  const cell = [
+    issue({ key: "CORE-1", priority: 0, status: "todo", rank: "a" }),
+    issue({ key: "CORE-2", priority: 0, status: "todo", rank: "b" }),
+    issue({ key: "CORE-3", priority: null, status: "todo", rank: "c" }),
+  ];
+  // Appending onto an empty P3/todo cell: no neighbours in that cell even though todo has cards
+  // in other lanes.
+  expect(laneDropTarget(cell, "CORE-3", laneColumnId("todo", 3))).toEqual({
+    status: "todo",
+    lane: 3,
+    insertionIndex: 0,
+  });
+  // Onto the P0/todo cell's own id: appends after its two cards.
+  expect(laneDropTarget(cell, "CORE-3", laneColumnId("todo", 0))).toEqual({
+    status: "todo",
+    lane: 0,
+    insertionIndex: 2,
+  });
+});
+
+test("laneDropTarget onto a card takes that card's own status and priority as the target cell", () => {
+  const cell = [
+    issue({ key: "CORE-1", priority: 0, status: "todo", rank: "a" }),
+    issue({ key: "CORE-2", priority: 0, status: "todo", rank: "b" }),
+    issue({ key: "CORE-3", priority: 3, status: "todo", rank: "c" }),
+  ];
+  // CORE-3 (P3) dropped onto CORE-2 (P0) lands in the P0 lane at CORE-2's position.
+  expect(laneDropTarget(cell, "CORE-3", "CORE-2")).toEqual({
+    status: "todo",
+    lane: 0,
+    insertionIndex: 1,
+  });
+});
+
+test("laneDropTarget onto itself, an unknown cell id or an unknown card is not a move", () => {
+  const cell = [issue({ key: "CORE-1", priority: 0, status: "todo" })];
+  expect(laneDropTarget(cell, "CORE-1", "CORE-1")).toBeUndefined();
+  expect(laneDropTarget(cell, "CORE-1", "status:todo")).toBeUndefined();
+  expect(laneDropTarget(cell, "CORE-1", laneColumnId("nowhere" as never, 0))).toBeUndefined();
+  expect(laneDropTarget(cell, "CORE-9", "CORE-1")).toBeUndefined();
+});
+
+const laneBoard = [
+  issue({ key: "CORE-1", priority: 0, status: "todo", rank: "a" }),
+  issue({ key: "CORE-2", priority: 0, status: "todo", rank: "b" }),
+  issue({ key: "CORE-3", priority: 3, status: "todo", rank: "c" }),
+  issue({ key: "CORE-4", priority: null, status: "in_progress", rank: "d" }),
+];
+
+test("moveIssueToLane within one lane+status cell only sets rank", () => {
+  const moved = moveIssueToLane(laneBoard, "CORE-1", "todo", 0, 1);
+  expect(moved?.issues.map((item) => `${item.key}:${item.priority ?? "none"}`)).toEqual([
+    "CORE-2:0",
+    "CORE-1:0",
+    "CORE-3:3",
+    "CORE-4:none",
+  ]);
+  expect(moved?.input).toEqual({ rank: { after: "CORE-2" } });
+});
+
+test("moveIssueToLane into a different lane reassigns priority alongside status and rank", () => {
+  // CORE-3 (P3, todo) dragged into the P0/in_progress cell, after CORE-4 (no priority) does not
+  // match the P0 cell, so it lands with no neighbours.
+  const moved = moveIssueToLane(laneBoard, "CORE-3", "in_progress", 0, 0);
+  expect(moved?.input).toEqual({ status: "in_progress", priority: 0, rank: {} });
+  expect(moved?.issues.find((item) => item.key === "CORE-3")).toMatchObject({
+    priority: 0,
+    status: "in_progress",
+  });
+});
+
+test("moveIssueToLane is a no-op when the card would stay in the same lane and cell position", () => {
+  expect(moveIssueToLane(laneBoard, "CORE-1", "todo", 0, 0)).toBeUndefined();
+  expect(moveIssueToLane(laneBoard, "CORE-9", "todo", 0, 0)).toBeUndefined();
+});
+
+test("moveIssueToLane under a filter names visible neighbours within the lane+status cell", () => {
+  const filtered = [
+    issue({ key: "CORE-1", priority: 0, status: "todo", rank: "a" }),
+    issue({ key: "CORE-2", priority: 0, status: "todo", rank: "b" }),
+    issue({ key: "CORE-3", priority: 0, status: "todo", rank: "c" }),
+  ];
+  const hidesTwo = (candidate: IssueSummary) => candidate.key !== "CORE-2";
+  const moved = moveIssueToLane(filtered, "CORE-3", "todo", 0, 1, hidesTwo);
+  expect(moved?.input).toEqual({ rank: { after: "CORE-1" } });
+  // CORE-2 stays in place even though it is invisible to the filter.
+  expect(moved?.issues.map((item) => item.key)).toEqual(["CORE-1", "CORE-3", "CORE-2"]);
 });

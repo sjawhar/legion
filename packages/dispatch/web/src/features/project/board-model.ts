@@ -1,5 +1,5 @@
 import { ISSUE_STATUSES, type IssueStatus } from "@legion/contracts/dispatch-tools";
-import type { IssueSummary, UpdateIssueInput } from "../../api/types";
+import type { IssuePriority, IssueSummary, UpdateIssueInput } from "../../api/types";
 
 /** The Go server's `model.IssueStatuses`, in lifecycle order: the board's columns. */
 export const issueStatuses = ISSUE_STATUSES;
@@ -153,5 +153,164 @@ export function moveIssue(
   return {
     issues: moved,
     input: { ...(active.status === targetStatus ? {} : { status: targetStatus }), rank },
+  };
+}
+
+/** A swimlane: one of the four priorities, or `null` for an issue with none set. */
+export type PriorityLane = IssuePriority | null;
+
+/** Lane order: P0 through P3, then issues with no priority - the five bands Sami asked for. */
+export const priorityLanes: readonly PriorityLane[] = [0, 1, 2, 3, null];
+
+export function laneLabel(lane: PriorityLane): string {
+  return lane === null ? "No priority" : `P${lane}`;
+}
+
+/** A lane's value as a DOM attribute and droppable-id fragment: `"0"`-`"3"` or `"none"`. */
+export function laneKey(lane: PriorityLane): string {
+  return lane === null ? "none" : String(lane);
+}
+
+/** The inverse of `laneKey`; `undefined` for anything else. */
+export function laneFromKey(value: string): PriorityLane | undefined {
+  if (value === "none") {
+    return null;
+  }
+  const parsed = Number(value);
+  return (priorityLanes as readonly (IssuePriority | null)[]).includes(parsed as IssuePriority)
+    ? (parsed as IssuePriority)
+    : undefined;
+}
+
+export interface BoardLane {
+  readonly lane: PriorityLane;
+  readonly columns: BoardColumn[];
+}
+
+/**
+ * Splits the project list into swimlanes by priority - rows across the nine status columns, one
+ * band per priority (P0-P3, then no priority) - each lane itself split into the nine lifecycle
+ * columns exactly as `groupIssuesByStatus` does. Rank still orders cards within a lane+column
+ * cell, as it orders them within a plain column.
+ */
+export function groupIssuesByLane(issues: readonly IssueSummary[]): BoardLane[] {
+  return priorityLanes.map((lane) => ({
+    lane,
+    columns: groupIssuesByStatus(issues.filter((issue) => issue.priority === lane)),
+  }));
+}
+
+/** The droppable id for one lane+status cell: a card dropped here lands in `status` and takes
+ *  on `lane`'s priority. */
+export function laneColumnId(status: IssueStatus, lane: PriorityLane): string {
+  return `lane:${laneKey(lane)}|status:${status}`;
+}
+
+function parseLaneColumnId(id: string): { status: IssueStatus; lane: PriorityLane } | undefined {
+  const match = /^lane:([^|]+)\|status:(.+)$/.exec(id);
+  if (match === null) {
+    return undefined;
+  }
+  const [, lanePart, statusPart] = match;
+  const lane = lanePart === undefined ? undefined : laneFromKey(lanePart);
+  if (lane === undefined || statusPart === undefined || !isIssueStatus(statusPart)) {
+    return undefined;
+  }
+  return { status: statusPart, lane };
+}
+
+export interface LaneDropTarget {
+  readonly status: IssueStatus;
+  readonly lane: PriorityLane;
+  readonly insertionIndex: number;
+}
+
+/**
+ * The lane-aware `dropTarget`: `overId` is a card key or a `lane:<l>|status:<s>` cell id (full
+ * or collapsed). A drop onto a card takes that card's own status and priority as the target
+ * cell; a drop onto a cell takes the cell's. Dragging a card into a different lane reassigns its
+ * priority - the same gesture that reassigns status when a card crosses a column, now
+ * reassigning the lane's own dimension.
+ */
+export function laneDropTarget(
+  issues: readonly IssueSummary[],
+  activeKey: string,
+  overId: string
+): LaneDropTarget | undefined {
+  if (activeKey === overId) {
+    return undefined;
+  }
+  if (!issues.some((issue) => issue.key === activeKey)) {
+    return undefined;
+  }
+  const overIssue = issues.find((issue) => issue.key === overId);
+  if (overIssue !== undefined) {
+    const status = overIssue.status as IssueStatus;
+    const lane = overIssue.priority;
+    const cell = issues.filter((issue) => issue.status === status && issue.priority === lane);
+    return { status, lane, insertionIndex: cell.findIndex((issue) => issue.key === overId) };
+  }
+  const parsed = parseLaneColumnId(overId);
+  if (parsed === undefined) {
+    return undefined;
+  }
+  return {
+    ...parsed,
+    insertionIndex: issues.filter(
+      (issue) =>
+        issue.status === parsed.status && issue.priority === parsed.lane && issue.key !== activeKey
+    ).length,
+  };
+}
+
+/**
+ * `moveIssue`'s lane-aware twin: places `key` at `insertionIndex` of the `targetLane`+
+ * `targetStatus` cell, naming the cell's visible neighbours for `rank` and setting `status`
+ * and/or `priority` in the same PATCH when either changes.
+ */
+export function moveIssueToLane(
+  issues: readonly IssueSummary[],
+  key: string,
+  targetStatus: IssueStatus,
+  targetLane: PriorityLane,
+  insertionIndex: number,
+  isVisible: (issue: IssueSummary) => boolean = () => true
+): { issues: IssueSummary[]; input: UpdateIssueInput } | undefined {
+  const active = issues.find((issue) => issue.key === key);
+  if (active === undefined) {
+    return undefined;
+  }
+  const columns = groupIssuesByStatus(issues.filter((issue) => issue.key !== key));
+  const target = columns.find((column) => column.status === targetStatus);
+  if (target === undefined) {
+    return undefined;
+  }
+  const cell = target.issues.filter((issue) => issue.priority === targetLane && isVisible(issue));
+  const index = Math.min(Math.max(insertionIndex, 0), cell.length);
+  const rank = rankInputForInsertion(cell, index);
+  const below = cell[index];
+  const above = cell[index - 1];
+  const spliceAt =
+    below !== undefined
+      ? target.issues.findIndex((issue) => issue.key === below.key)
+      : above !== undefined
+        ? target.issues.findIndex((issue) => issue.key === above.key) + 1
+        : target.issues.length;
+  target.issues.splice(spliceAt, 0, { ...active, status: targetStatus, priority: targetLane });
+  const moved = columns.flatMap((column) => column.issues);
+  if (
+    active.status === targetStatus &&
+    active.priority === targetLane &&
+    moved.every((issue, position) => issue.key === issues[position]?.key)
+  ) {
+    return undefined;
+  }
+  return {
+    issues: moved,
+    input: {
+      ...(active.status === targetStatus ? {} : { status: targetStatus }),
+      ...(active.priority === targetLane ? {} : { priority: targetLane }),
+      rank,
+    },
   };
 }
