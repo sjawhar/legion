@@ -1984,6 +1984,16 @@ describe("executeDispatchTool", () => {
     expect(held.agentCalls).toBe(1);
     const unrouted = await read({ route: null, route_status: null, route_holder: null });
     expect(unrouted.text).toContain("Route: none\n");
+    // The fixture carries no progress, as a server answering before the field existed; a spec
+    // with no task list and no child answers both counts null, and both print as none.
+    expect(unrouted.text).toContain("Route: none\nProgress: none\n");
+    const uncounted = await read({ route: null, progress: { tasks: null, children: null } });
+    expect(uncounted.text).toContain("Progress: none\n");
+    const childrenOnly = await read({
+      route: null,
+      progress: { tasks: null, children: { done: 2, total: 5 } },
+    });
+    expect(childrenOnly.text).toContain("Progress: children 2/5\n");
   });
 
   // Every Dispatch the hosts reach pages the listing (sjawhar/legion#1612), so an array answered to
