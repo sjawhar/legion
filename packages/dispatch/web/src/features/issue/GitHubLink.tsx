@@ -25,7 +25,7 @@ interface GitHubReference {
 /**
  * One external link on the issue header's details line. A GitHub issue or pull request is
  * shown as its number and title (the repository while the title is unknown — loading, or no
- * GitHub App credentials for this sign-in), never as the raw address, so it fits the line on a
+ * GitHub App installation for the repository), never as the raw address, so it fits the line on a
  * phone; the title is truncated and carried in full by the link's tooltip.
  */
 export function GitHubLink({ link }: { link: ExternalLink }): ReactNode {
@@ -114,7 +114,7 @@ export function GitHubLink({ link }: { link: ExternalLink }): ReactNode {
       href={href}
       title={
         unavailable
-          ? "GitHub details are unavailable for this sign-in."
+          ? "GitHub details are unavailable for this repository."
           : reference === undefined
             ? link.url
             : `${repository}${number}: ${reference.title}`

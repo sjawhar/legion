@@ -1,4 +1,4 @@
--- 0029_issue_resources.up.sql — an issue owns one Agent Sandbox, its role Secrets and, for a
+-- 0031_issue_resources.up.sql — an issue owns one Agent Sandbox, its role Secrets and, for a
 -- root issue, the tree PVC. Per-role release never deletes those resources: cleanup begins only
 -- through the durable issue-resource lifecycle after the issue close fence has observed every
 -- stored sibling claim.

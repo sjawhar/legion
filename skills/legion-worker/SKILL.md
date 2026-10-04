@@ -57,9 +57,9 @@ Once ready, your assignment arrives as the first prompt in your session — you 
 it. Read the current issue and its acceptance criteria before changing the workspace. Work
 only on this phase's artifact.
 
-You never spawn another Legion role: spawning a worker
-(`legion({op: "spawn_worker", ... })`) is architect-only. You may still use ordinary `task`
-subagents for your own phase work; none of them is a Legion role.
+You never start another Legion role: the daemon starts every phase worker itself, from its fixed
+workflow table. You may still use ordinary `task` subagents for your own phase work; none of them
+is a Legion role.
 Escalate a product, scope, design, cross-phase, or lifecycle decision to the owning architect with
 `envoy_publish` to its role topic (`notifications.role.` followed by its encoded token, see
 above), carrying the verified facts and the decision needed. `hub` only reaches subagents
@@ -68,11 +68,11 @@ spec yourself: the architect decides whether the human must answer it and writes
 a new version of an approved root spec closes the tree's design gate. A standalone to-do only a
 human can do is a `dispatch_ask`, and its replies return to your own session.
 
-Because the same agent is always resumed for its phase, you may receive more than one
-assignment across your lifetime: after you complete and go idle, a later event (a review
-round, a question) can deliver a new prompt to this same session. Treat it as a
-continuation — re-read the current issue and your own prior handoff, since time has
-passed — never as a fresh identity.
+Because the same agent works its role until the issue closes, you may receive more than one
+assignment across your lifetime: your session stays live after your phase ends, and when a later
+event (a review round, a red check) starts your role again the new prompt arrives in this same
+session. Treat it as a continuation — re-read the current issue and your own prior handoff, since
+time has passed — never as a fresh identity.
 
 ## Deployment instructions
 

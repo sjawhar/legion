@@ -18,6 +18,29 @@ import (
 
 const testTimeout = 30 * time.Second
 
+// TestMain isolates every real jj invocation this package's tests make from the operator's own
+// jj configuration — in particular fsmonitor.backend = "watchman" on this devbox: JJ_CONFIG
+// names a file that does not exist, so jj falls back to its built-in defaults instead of reading
+// ~/.jjconfig.toml, and no test-created repository ever registers a root with the operator's
+// long-running watchman. watchman drops a root once its directory is deleted, so without this,
+// the roots that pile up are the ones from a run this devbox's load killed before t.TempDir's
+// cleanup ran. A test that sets its own JJ_CONFIG afterward (newLocalRunner's isolated one)
+// still wins: os.Environ() is read fresh by every exec.Command.
+func TestMain(m *testing.M) {
+	configDir, err := os.MkdirTemp("", "legion-test-jj-config")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "TestMain:", err)
+		os.Exit(1)
+	}
+	if err := os.Setenv("JJ_CONFIG", filepath.Join(configDir, "no-user-config.toml")); err != nil {
+		fmt.Fprintln(os.Stderr, "TestMain:", err)
+		os.Exit(1)
+	}
+	code := m.Run()
+	os.RemoveAll(configDir)
+	os.Exit(code)
+}
+
 // recordingRunner runs every command through the production runner, NewRunner, with the real jj
 // and git, but replaces the GitHub clone URL with the local bare remote. That keeps
 // provisioning's argv and credential environment observable, and what the runner adds to every

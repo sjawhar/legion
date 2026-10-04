@@ -999,7 +999,8 @@ func TestAResidentWorkerIsHandedItsNewPhaseNotATaskLeftPendingFromTheLast(t *tes
 			putOutboxIssue(t, pool, records, issue)
 			const head = "16973163"
 			if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
-				return records.PutPullRequest(ctx, tx, record.PullRequest{Issue: issue.Key, Repo: "acme/widgets", Number: 118, Branch: "legion/LEGION-208", HeadSHA: head, CheckedHead: head, Verdict: "green", Failing: []string{}, State: record.PullRequestOpen})
+				// The base branch requires no check, so the head's green settlement is all an approval waits for.
+				return records.PutPullRequest(ctx, tx, record.PullRequest{Issue: issue.Key, Repo: "acme/widgets", Number: 118, Branch: "legion/LEGION-208", HeadSHA: head, CheckedHead: head, Failing: []string{}, Required: []string{}, State: record.PullRequestOpen})
 			}); err != nil {
 				t.Fatalf("put the pull request: %v", err)
 			}
