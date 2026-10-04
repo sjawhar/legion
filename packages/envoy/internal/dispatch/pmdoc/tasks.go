@@ -14,10 +14,13 @@ type TaskProgress struct {
 	Total int
 }
 
-// CountTasks counts the document's task items, nested lists and lists inside callouts and quotes
-// included. A task item is a list item whose `checked` attribute is set (Parse sets it from
-// `- [ ]` and `- [x]`, and leaves it nil for a plain item); a list item emptied of its text and
-// written as a plain item carries none, and code is never a list, so neither counts.
+// CountTasks counts the document's task items as its rendering carries them, nested lists and
+// lists inside callouts and quotes included. A task item is a list item whose `checked` attribute
+// is set (Parse sets it from `- [ ]` and `- [x]`, and leaves it nil for a plain item) and that
+// holds text: the renderer writes an item emptied of its text as a plain `- ` (render.go), so a
+// blank checkbox a browser has just added is not a task until it has words, and the count of a
+// live tree equals the count of the markdown its version stores. Code is never a list, so nothing
+// inside a code block counts.
 func CountTasks(doc *Node) TaskProgress {
 	var progress TaskProgress
 	Walk(doc, func(node *Node) bool {
@@ -25,7 +28,7 @@ func CountTasks(doc *Node) TaskProgress {
 			return true
 		}
 		checked, task := node.Attrs["checked"].(bool)
-		if !task {
+		if !task || holdsOnlyAnEmptyParagraph(node) {
 			return true
 		}
 		progress.Total++

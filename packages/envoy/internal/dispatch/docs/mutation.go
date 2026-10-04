@@ -247,11 +247,6 @@ func (s *Service) SeedText(ctx context.Context, artifactID, markdown string, act
 	if _, err := s.persistence.AppendUpdateTx(ctx, tx, artifactID, update, true); err != nil {
 		return "", fmt.Errorf("seed live document: %w", err)
 	}
-	// The caller writes the seeded document's first version itself, so the issue's task counts
-	// are recorded here with it (LEGION-542).
-	if err := RecordTaskProgress(ctx, tx, artifactID, tree); err != nil {
-		return "", err
-	}
 	// The seeding actor is the caller's own first version author (written directly by the
 	// caller, never through writeVersionTx), so it must not join `pending` - only the
 	// settlement that indexes the seeded ask blocks needs to know who wrote them. Recording it
@@ -270,7 +265,6 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 	}
 	var canonical string
 	var unchanged bool
-	var target *pmdoc.Node
 	err = s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) error {
 		fragment := doc.GetXmlFragment(fragmentName)
 		current, err := treeOf(doc)
@@ -287,7 +281,7 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 		if repairing {
 			current = nil
 		}
-		target, err = parseReplacing(current, markdown)
+		target, err := parseReplacing(current, markdown)
 		if err != nil {
 			return err
 		}
@@ -363,14 +357,6 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 	}
 	if err != nil {
 		return "", wrapUnlessTooLarge(err, "replace live document")
-	}
-	// An upload's caller writes the replaced document's version itself, so the issue's task
-	// counts are recorded here with it (LEGION-542); a replacement outside a transaction (a
-	// test's) leaves them to the settlement that versions it.
-	if tx, joined := txFromContext(ctx); joined {
-		if err := RecordTaskProgress(ctx, tx, artifactID, target); err != nil {
-			return "", err
-		}
 	}
 	return canonical, nil
 }

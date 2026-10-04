@@ -30,3 +30,26 @@ func TestCountTasks(t *testing.T) {
 		})
 	}
 }
+
+// A task item emptied of its text, as a browser leaves one it has just added, renders as a plain
+// `- ` (render.go), so the live tree's count agrees with its stored rendering's: zero.
+func TestCountTasksSkipsAnEmptyTaskItem(t *testing.T) {
+	doc := &Node{Type: "doc", Children: []*Node{{Type: "bullet_list", Attrs: Attrs{"spread": false}, Children: []*Node{
+		{Type: "list_item", Attrs: Attrs{"label": "•", "listType": "bullet", "checked": true, "spread": false}, Children: []*Node{{Type: "paragraph"}}},
+		{Type: "list_item", Attrs: Attrs{"label": "•", "listType": "bullet", "checked": false, "spread": false}, Children: []*Node{{Type: "paragraph", Children: []*Node{{Type: "text", Text: "real"}}}}},
+	}}}}
+	if got := CountTasks(doc); got != (TaskProgress{Done: 0, Total: 1}) {
+		t.Fatalf("CountTasks = %+v, want 0/1: the empty checked item renders as a plain item", got)
+	}
+	markdown, err := Render(doc)
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	back, err := ParseRendering(markdown)
+	if err != nil {
+		t.Fatalf("parse rendering %q: %v", markdown, err)
+	}
+	if got := CountTasks(back); got != (TaskProgress{Done: 0, Total: 1}) {
+		t.Fatalf("CountTasks of the rendering %q = %+v, want 0/1", markdown, got)
+	}
+}

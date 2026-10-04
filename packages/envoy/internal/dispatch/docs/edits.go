@@ -806,6 +806,16 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp, budget *pmdoc.WriteBudget
 			// literal text it has always been.
 			if r.From == at.Content.From && pmdoc.TaskItemAt(tree, r.From) {
 				if checked, found, width := pmdoc.LeadingTaskCheckbox(replacement); found {
+					if strings.TrimSpace(replacement[width:]) == "" {
+						// The checkbox alone would tick the item and empty it, and an empty task
+						// item renders as a plain `- ` (pmdoc/render.go), so the next version would
+						// lose the task: the empty-text refusal LEGION-280 added to inlineReplacement
+						// must see the whole `with`, not the text past the box.
+						return nil, &ErrInvalidOp{Field: "with", Reason: fmt.Sprintf(
+							"with %q sets the item's checkbox but leaves it no text, and an empty task item is written as a plain item; write the box and the item's text, or pass an empty with to delete the text",
+							op.With,
+						)}
+					}
 					replacement = replacement[width:]
 					tick = &checked
 				}

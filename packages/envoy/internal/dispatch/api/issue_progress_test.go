@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -97,6 +98,19 @@ func TestIssueProgressFollowsReplaceThatTicksAnItem(t *testing.T) {
 	}
 	waitForArtifactVersion(t, handler, issue.PrimaryArtifactID, 3)
 	wantCount(t, "tasks after the untick", progressOf(t, handler, issue.Key).Tasks, 0, 2)
+
+	// A box with no text behind it would tick the item and empty it, which renders as a plain
+	// item and loses the task; it is refused before anything is written.
+	for _, with := range []string{"[x] ", "[ ]\t", "[x]   "} {
+		refused := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+			"ops":   []map[string]string{{"op": "replace", "find": "write it again", "with": with}},
+			"actor": sessionActor(),
+		})
+		if refused.Code != http.StatusBadRequest || !strings.Contains(refused.Body.String(), `"code":"INVALID_OP"`) || !strings.Contains(refused.Body.String(), "leaves it no text") {
+			t.Fatalf("with %q: status=%d body=%s, want 400 INVALID_OP naming the emptied item", with, refused.Code, refused.Body.String())
+		}
+	}
+	wantCount(t, "tasks after the refusals", progressOf(t, handler, issue.Key).Tasks, 0, 2)
 }
 
 // An upload that replaces the spec recounts the issue in the upload's own transaction.
@@ -189,35 +203,55 @@ func TestIssueProgressCountsDirectChildren(t *testing.T) {
 	}
 }
 
-// The backfill counts the spec of every issue whose counts were never recorded from its latest
-// version's markdown, leaves counted issues alone, and does nothing on a second run.
-func TestIssueProgressBackfillCountsUncountedIssues(t *testing.T) {
+// The reconciliation counts the spec of every issue whose stored count is not its latest
+// version's: never counted (as the migration leaves every row), or versioned by a server that
+// wrote no count (the task a deploy replaces); it leaves current rows alone and finds nothing on
+// a second pass.
+func TestIssueProgressReconciliationCountsDriftedIssues(t *testing.T) {
 	handler, database, deps := newTestServer(t, testServerOptions{})
 	counted := createInteractionIssue(t, handler, "TEST", "Counted", "- [x] a\n- [ ] b\n")
 	uncounted := createInteractionIssue(t, handler, "SECOND", "Uncounted", "- [x] c\n- [x] d\n- [ ] e\n")
 	empty := createInteractionIssue(t, handler, "THIRD", "Empty", "prose\n")
+	stale := createInteractionIssue(t, handler, "FOURTH", "Stale", "- [ ] one\n")
 	ctx := context.Background()
-	// The deploy leaves every existing row with both columns null; these two were counted at
+	// The deploy leaves every existing row with the columns null; these two were counted at
 	// creation, so the test clears them to stand for rows the migration found.
-	if _, err := database.Pool.Exec(ctx, `update issues set tasks_done = null, tasks_total = null where key in ($1, $2)`, uncounted.Key, empty.Key); err != nil {
+	if _, err := database.Pool.Exec(ctx, `update issues set tasks_done = null, tasks_total = null, tasks_version = null where key in ($1, $2)`, uncounted.Key, empty.Key); err != nil {
 		t.Fatalf("clear counts: %v", err)
 	}
-	wantNull(t, "uncounted tasks before the backfill", progressOf(t, handler, uncounted.Key).Tasks)
+	// The old task, which records no count, wrote this issue's version 2 during the deploy: the
+	// row keeps version 1's count and names version 1. The row carries the document's update
+	// cursor, as every version write does, so the room's settlement finds nothing past it to
+	// version; without it the settlement would write version 3 from the live tree first.
+	if _, err := database.Pool.Exec(ctx, `
+		insert into artifact_versions (artifact_id, number, markdown, authors, doc_update_version)
+		values ($1::uuid, 2, '- [x] one' || chr(10) || '- [x] two' || chr(10) || '- [ ] three' || chr(10), '[]',
+		        coalesce((select max(version) from doc_updates where artifact_id = $1::uuid), 0))
+	`, stale.PrimaryArtifactID); err != nil {
+		t.Fatalf("write a version the old task left uncounted: %v", err)
+	}
+	wantNull(t, "uncounted tasks before the pass", progressOf(t, handler, uncounted.Key).Tasks)
+	wantCount(t, "stale tasks before the pass", progressOf(t, handler, stale.Key).Tasks, 0, 1)
 
 	runCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	deps.Docs.(*docs.Service).RunTaskProgressBackfill(runCtx)
+	deps.Docs.(*docs.Service).ReconcileTaskProgress(runCtx)
 
 	wantCount(t, "counted", progressOf(t, handler, counted.Key).Tasks, 1, 2)
 	wantCount(t, "uncounted", progressOf(t, handler, uncounted.Key).Tasks, 2, 3)
 	wantNull(t, "empty", progressOf(t, handler, empty.Key).Tasks)
+	wantCount(t, "stale, recounted from version 2", progressOf(t, handler, stale.Key).Tasks, 2, 3)
 	var remaining int
-	if err := database.Pool.QueryRow(ctx, `select count(*) from issues where tasks_total is null`).Scan(&remaining); err != nil {
-		t.Fatalf("count uncounted: %v", err)
+	if err := database.Pool.QueryRow(ctx, `
+		select count(*) from issues i where i.tasks_version is distinct from (
+			select coalesce(max(v.number), 0) from artifacts a join artifact_versions v on v.artifact_id = a.id
+			where a.issue_key = i.key and a.is_primary)
+	`).Scan(&remaining); err != nil {
+		t.Fatalf("count drift: %v", err)
 	}
 	if remaining != 0 {
-		t.Fatalf("uncounted issues after the backfill = %d, want 0", remaining)
+		t.Fatalf("drifted issues after the pass = %d, want 0", remaining)
 	}
-	deps.Docs.(*docs.Service).RunTaskProgressBackfill(runCtx)
-	wantCount(t, "uncounted after a second run", progressOf(t, handler, uncounted.Key).Tasks, 2, 3)
+	deps.Docs.(*docs.Service).ReconcileTaskProgress(runCtx)
+	wantCount(t, "uncounted after a second pass", progressOf(t, handler, uncounted.Key).Tasks, 2, 3)
 }
