@@ -454,23 +454,37 @@ func stampedAskBlocks(before, after []string) []stampedAsk {
 	return stamped
 }
 
-// recordStampedAskBlocks records ask blocks whose ids a settlement's own stamp minted. The room's
-// update observer skips that stamp, so no update it renders introduces those ids: each is marked
-// seen, and keeps the author recorded for the id it replaced, unless it is a copy of the block
-// that keeps that id. The id it replaced is forgotten from the room's held blocks too, so a later
-// typed block that reuses that literal id - author-controlled text, unlike a minted one - is seen
-// as new rather than mistaken for the one this stamp just retired. The caller holds state.mu.
+// recordStampedAskBlocks records ask blocks whose ids a settlement's own stamp minted. The stamp's
+// own transaction is suppressed, so no update it fires itself goes through the room's regular
+// observer - but the next observer to render does catch the room up past the stamp, and its own
+// tree walk, run outside state.mu, can straddle it: read askBlockIDs before the stamp lands, then
+// relock and write state.askBlocks back after, wiping the seen mark this records. Each renamed
+// block is still marked seen directly, for the ordinary case where no straddle happens, unless it
+// is a copy of the block that keeps its previous id - a live block still carries that id, so it
+// must stay in state.askBlocks rather than be forgotten as retired. The author recorded for the id
+// a non-copied rename replaces is carried to the minted one in both state.askAuthors, for the
+// ordinary case, and state.pendingAskAuthors, which a straddling observer's own "newly seen"
+// branch still finds and correctly restores even when its stale read wiped the seen mark
+// (observeAskBlocks consumes a pending entry for any id it sees, seen or newly seen, so one this
+// writes is never orphaned either) - LEGION-503. The caller holds state.mu.
 func (state *roomState) recordStampedAskBlocks(stamped []stampedAsk) {
 	for _, ask := range stamped {
 		if state.askBlocks != nil {
 			state.askBlocks[ask.minted] = struct{}{}
-			delete(state.askBlocks, ask.previous)
+			if !ask.copied {
+				delete(state.askBlocks, ask.previous)
+			}
 		}
-		if author, recorded := state.askAuthors[ask.previous]; recorded && !ask.copied {
-			state.askAuthors[ask.minted] = author
-		} else {
+		author, recorded := state.askAuthors[ask.previous]
+		if !recorded || ask.copied {
 			delete(state.askAuthors, ask.minted)
+			continue
 		}
+		state.askAuthors[ask.minted] = author
+		if state.pendingAskAuthors == nil {
+			state.pendingAskAuthors = make(map[string]model.Actor)
+		}
+		state.pendingAskAuthors[ask.minted] = author
 	}
 }
 
@@ -498,13 +512,10 @@ func (state *roomState) registerAskAuthors(ids map[string]struct{}, actor model.
 // carryForwardRenamedAskAuthors registers the author recorded for each renamed ask block's
 // previous id as the pending author of its minted one, for a stamp whose own update the room's
 // observer renders normally - ApplyOps's own id repair - unlike a settlement's or the backfill's
-// suppressed stamp (recordStampedAskBlocks), which marks the minted id seen itself because no
-// observer ever will. Marking it seen here instead would race a concurrent, unrelated update's own
-// render, which replaces state.askBlocks wholesale: the normal observer that renders this stamp's
-// own update marks it seen when it runs, and pendingAskAuthors survives until then because
-// registerAskAuthors's caller never prunes it (LEGION-503). A rename with no author to carry
-// forward registers nothing, leaving the block to the observer's own fallback when it runs. The
-// caller holds state.mu.
+// suppressed stamp (recordStampedAskBlocks), which marks the minted id seen itself since the room's
+// own observer does not reach that specific suppressed update directly. A rename with no author to
+// carry forward registers nothing, leaving the block to the observer's own fallback when it runs.
+// The caller holds state.mu.
 func (state *roomState) carryForwardRenamedAskAuthors(stamped []stampedAsk) {
 	for _, ask := range stamped {
 		author, recorded := state.askAuthors[ask.previous]
@@ -520,35 +531,40 @@ func (state *roomState) carryForwardRenamedAskAuthors(stamped []stampedAsk) {
 
 // observeAskBlocks records ids, the ask blocks the room holds after an update its observer
 // rendered, and attributes each one not already recorded: first to whichever write registered it
-// (registerAskAuthors, carryForwardRenamedAskAuthors - consumed here the first time its id is
-// seen, and never pruned, since no render order can tell which write introduced a block another
-// update's catch-up happens to include first), otherwise to author, the room's one connected
-// browser or SettlementActor when several are, nil for none - an id no write registered can only
-// have come from a browser, whichever update's own observer ends up being the one to see it
-// (LEGION-503). It forgets the author of a block the room no longer holds. A room whose earlier
-// ask blocks are unknown - its load could not read the document - takes ids as its baseline and
-// records no author at all, since it cannot tell which blocks are new; its caller passes author as
-// nil for the same reason on a fresh load. The caller holds state.mu.
+// (registerAskAuthors, carryForwardRenamedAskAuthors, recordStampedAskBlocks - consumed here the
+// first time its id is seen in a render, seen or newly seen, and never pruned otherwise, since no
+// render order can tell which write introduced a block another update's catch-up happens to
+// include first, or guarantee a straddling render has not wiped the room's own record that it was
+// already seen), otherwise, for an id newly seen with no write's registration, to author, the room's
+// one connected browser or SettlementActor when several are, nil for none - an id no write
+// registered can only have come from a browser, whichever update's own observer ends up being the
+// one to see it (LEGION-503). It forgets the author of a block the room no longer holds. A room
+// whose earlier ask blocks are unknown - its load could not read the document - takes ids as its
+// baseline and records no author at all, since it cannot tell which blocks are new; its caller
+// passes author as nil for the same reason on a fresh load. The caller holds state.mu.
 func (state *roomState) observeAskBlocks(ids map[string]struct{}, author *model.Actor) {
 	for id := range state.askAuthors {
 		if _, held := ids[id]; !held {
 			delete(state.askAuthors, id)
 		}
 	}
-	if state.askBlocks != nil {
+	for id := range ids {
+		registered, pending := state.pendingAskAuthors[id]
+		if !pending {
+			continue
+		}
+		delete(state.pendingAskAuthors, id)
+		if state.askAuthors == nil {
+			state.askAuthors = make(map[string]model.Actor)
+		}
+		state.askAuthors[id] = registered
+	}
+	if state.askBlocks != nil && author != nil {
 		for id := range ids {
 			if _, seen := state.askBlocks[id]; seen {
 				continue
 			}
-			if registered, pending := state.pendingAskAuthors[id]; pending {
-				delete(state.pendingAskAuthors, id)
-				if state.askAuthors == nil {
-					state.askAuthors = make(map[string]model.Actor)
-				}
-				state.askAuthors[id] = registered
-				continue
-			}
-			if author == nil {
+			if _, already := state.askAuthors[id]; already {
 				continue
 			}
 			if state.askAuthors == nil {

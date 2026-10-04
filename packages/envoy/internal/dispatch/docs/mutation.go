@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"runtime/debug"
 	"sort"
 	"strings"
@@ -173,13 +174,15 @@ func (s *Service) applyJoined(ctx context.Context, artifactID string, actor mode
 	recorded = true
 	if contentChanged {
 		s.creditLiveWrite(write, actor)
-		if added := addedAskBlockIDs(before, tree); len(added) > 0 {
+		added := addedAskBlockIDs(before, tree)
+		for id := range write.renamedAskBlockIDs {
+			delete(added, id)
+		}
+		if len(added) > 0 {
 			if write.addedAskBlockIDs == nil {
 				write.addedAskBlockIDs = make(map[string]struct{}, len(added))
 			}
-			for id := range added {
-				write.addedAskBlockIDs[id] = struct{}{}
-			}
+			maps.Copy(write.addedAskBlockIDs, added)
 		}
 	}
 	return nil
@@ -319,7 +322,6 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 				reanchors = append(reanchors, reanchor{mark: mark, range_: range_, attrs: attrs})
 			}
 		}
-		s.registerAskAuthors(artifactID, addedAskBlockIDs(current, target), actor)
 		var updateErr error
 		transact(func(transaction *crdt.Transaction) {
 			// A repair keeps nothing of the unreadable tree, which pmdoc.Update would otherwise
@@ -342,6 +344,9 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 				} else if updateErr != nil {
 					return
 				}
+			}
+			if _, joined := txFromContext(ctx); !joined {
+				s.registerUnjoinedAskAuthors(artifactID, addedAskBlockIDs(current, target), actor)
 			}
 		})
 		if updateErr != nil {
@@ -861,7 +866,7 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 			// Block addressing (delete/move by id, whole-text delete) needs every block
 			// identified; a browser-authored block the closer has not yet stamped gets its id
 			// here, and the same ids persist through the update below.
-			s.carryForwardStampedAskAuthors(artifactID, tree, func() { pmdoc.EnsureBlockIDs(tree) })
+			stamped := stampAskBlockIDs(tree)
 			batch, err := applyOperations(tree, ops)
 			if err != nil {
 				mutationErr = err
@@ -881,7 +886,11 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 				return
 			}
 			mutationErr = recordInsertedText(ctx, artifactID, "", fragment, since, batch.writes, func() error {
-				return pmdoc.Update(transaction, fragment, next)
+				if err := pmdoc.Update(transaction, fragment, next); err != nil {
+					return err
+				}
+				s.registerStampedAskBlocks(ctx, artifactID, stamped)
+				return nil
 			})
 		})
 		if mutationErr != nil {
@@ -923,7 +932,7 @@ func (s *Service) applyOpsUnconditional(ctx context.Context, artifactID string, 
 		if err != nil {
 			return err
 		}
-		s.carryForwardStampedAskAuthors(artifactID, tree, func() { pmdoc.EnsureBlockIDs(tree) })
+		stamped := stampAskBlockIDs(tree)
 		batch, err := s.applyOperations(ctx, artifactID, tree, ops)
 		if err != nil {
 			return err
@@ -936,11 +945,20 @@ func (s *Service) applyOpsUnconditional(ctx context.Context, artifactID string, 
 		if outcome, err = batch.outcome(len(ops)); err != nil {
 			return err
 		}
-		s.registerAskAuthors(artifactID, addedAskBlockIDs(tree, next), actor)
 		return recordInsertedText(ctx, artifactID, "", fragment, since, batch.writes, func() error {
 			var updateErr error
 			transact(func(transaction *crdt.Transaction) {
-				updateErr = pmdoc.Update(transaction, fragment, next)
+				if updateErr = pmdoc.Update(transaction, fragment, next); updateErr != nil {
+					return
+				}
+				renamed := s.registerStampedAskBlocks(ctx, artifactID, stamped)
+				if _, joined := txFromContext(ctx); !joined {
+					added := addedAskBlockIDs(tree, next)
+					for id := range renamed {
+						delete(added, id)
+					}
+					s.registerUnjoinedAskAuthors(artifactID, added, actor)
+				}
 			})
 			return updateErr
 		})
@@ -1069,12 +1087,12 @@ func (s *Service) recordSeed(room string, tree *pmdoc.Node, actor model.Actor) {
 	state.mu.Unlock()
 }
 
-// registerAskAuthors credits actor as the author of every id in ids this non-joined service
+// registerUnjoinedAskAuthors credits actor as the author of every id in ids this non-joined
 // write introduces, computed from its own before/after trees at the write site (ApplyOps,
-// ReplaceText), before the update that carries them can reach any observer
-// (roomState.registerAskAuthors; a joined write's equivalent is Ledger.credit, which runs before
-// its own publish instead, since a joined write only reaches a room at commit) - LEGION-503.
-func (s *Service) registerAskAuthors(room string, ids map[string]struct{}, actor model.Actor) {
+// ReplaceText), after the write has actually landed in the live document - a write joined to a
+// transaction registers its own ids at commit instead (Ledger.credit), since only then is it
+// certain to reach the room (LEGION-503).
+func (s *Service) registerUnjoinedAskAuthors(room string, ids map[string]struct{}, actor model.Actor) {
 	if len(ids) == 0 {
 		return
 	}
@@ -1084,29 +1102,49 @@ func (s *Service) registerAskAuthors(room string, ids map[string]struct{}, actor
 	state.mu.Unlock()
 }
 
-// carryForwardStampedAskAuthors captures the ask block order of tree, runs stamp (an
-// EnsureBlockIDs call that may rename an existing, unrelated block holding no id or a duplicate
-// one), and, for each ask the stamp renamed, carries forward the author recorded for the id it
-// replaced - the same rule a settlement's or the backfill's own suppressed stamp applies
-// (recordStampedAskBlocks) - so an edit elsewhere in the document cannot take credit for a
-// browser's re-minted ask id (LEGION-503). Unlike that suppressed stamp, this one's own update
-// reaches the room's update observer normally, which marks the minted id seen itself when it
-// runs; carryForwardStampedAskAuthors only registers the author to carry forward, in
-// pendingAskAuthors, for that normal observer to consume.
-func (s *Service) carryForwardStampedAskAuthors(room string, tree *pmdoc.Node, stamp func()) {
+// stampAskBlockIDs stamps tree's block ids (EnsureBlockIDs) and returns each ask whose id it
+// renamed, pairing the tree's ask-block order before and after. It runs eagerly, since the stamp
+// must happen before the edit's own operations read tree's ids, but registering the rename into
+// the room's bookkeeping waits until the write that ran it is certain to land
+// (registerStampedAskBlocks): an earlier-looking success here does not mean the edit's later
+// operations, validation or outcome will not still fail before the stamp's rename ever reaches
+// the document.
+func stampAskBlockIDs(tree *pmdoc.Node) []stampedAsk {
 	before := askBlockOrder(tree)
-	stamp()
+	pmdoc.EnsureBlockIDs(tree)
 	if len(before) == 0 {
-		return
+		return nil
 	}
-	stamped := stampedAskBlocks(before, askBlockOrder(tree))
+	return stampedAskBlocks(before, askBlockOrder(tree))
+}
+
+// registerStampedAskBlocks carries forward the author recorded for each renamed ask block's
+// previous id (carryForwardRenamedAskAuthors) - the same rule a settlement's or the backfill's
+// own suppressed stamp applies, so an edit elsewhere in the document cannot take credit for a
+// browser's re-minted ask id - and reports every id the stamp renamed, which the caller, and, when
+// this write is joined to a transaction, applyJoined's own before/after diff (via the write's own
+// renamedAskBlockIDs), excludes from "this write added this id": a rename is never a genuinely
+// new block, whether or not an author could be carried forward for it (LEGION-503). Call only once
+// the write that ran the stamp (stampAskBlockIDs) is certain to reach the room.
+func (s *Service) registerStampedAskBlocks(ctx context.Context, room string, stamped []stampedAsk) map[string]struct{} {
 	if len(stamped) == 0 {
-		return
+		return nil
 	}
 	state := s.room(room)
 	state.mu.Lock()
 	state.carryForwardRenamedAskAuthors(stamped)
 	state.mu.Unlock()
+	renamed := make(map[string]struct{}, len(stamped))
+	for _, ask := range stamped {
+		renamed[ask.minted] = struct{}{}
+	}
+	if write := joinedLiveWrite(ctx, room); write != nil {
+		if write.renamedAskBlockIDs == nil {
+			write.renamedAskBlockIDs = make(map[string]struct{}, len(renamed))
+		}
+		maps.Copy(write.renamedAskBlockIDs, renamed)
+	}
+	return renamed
 }
 
 // captureLiveTextAndAuthors is the tree a version records and whom it credits, taken no later than

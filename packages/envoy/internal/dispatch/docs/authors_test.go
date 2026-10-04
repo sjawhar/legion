@@ -356,11 +356,11 @@ func currentLiveMarkdown(t *testing.T, service *Service, artifactID string) stri
 	return markdown
 }
 
-// holdNextObserver runs write on a goroutine of its own and returns once its mutation has reached
-// the room - and its update observer has reached beforeObserveUpdate, held there - so write is in
-// the live document but not yet reflected in the room's rendered replica or its ask-block
-// bookkeeping. release lets the held observer go on and returns once write has finished.
-func holdNextObserver(t *testing.T, service *Service, artifactID string, write func() error) (release func()) {
+// holdObserver runs write on a goroutine of its own and returns once its mutation has reached the
+// room - and its update observer has reached hook, one of the observer's test hooks, held there -
+// so write is in the live document but not yet reflected in the room's rendered replica or its
+// ask-block bookkeeping. release lets the held observer go on and returns once write has finished.
+func holdObserver(t *testing.T, service *Service, artifactID string, hook *func(room string), write func() error) (release func()) {
 	t.Helper()
 	held := make(chan struct{})
 	proceed := make(chan struct{})
@@ -368,7 +368,7 @@ func holdNextObserver(t *testing.T, service *Service, artifactID string, write f
 	t.Cleanup(let)
 	var holding atomic.Bool
 	holding.Store(true)
-	service.beforeObserveUpdate = func(name string) {
+	*hook = func(name string) {
 		if name == artifactID && holding.CompareAndSwap(true, false) {
 			close(held)
 			<-proceed
@@ -414,7 +414,7 @@ func TestAServiceWriteAndABrowserEditLandTogetherEachAskGoesToItsOwnAuthor(t *te
 
 	current := currentLiveMarkdown(t, service, artifactID)
 	agentAsk := "\n:::ask{#agent-ask urgency=\"high\" multiple=\"false\"}\nWhich database?\n:::\n"
-	release := holdNextObserver(t, service, artifactID, func() error {
+	release := holdObserver(t, service, artifactID, &service.beforeObserveUpdate, func() error {
 		_, err := service.ReplaceText(context.Background(), artifactID, current+agentAsk, session)
 		return err
 	})
@@ -458,7 +458,7 @@ func TestAPublishedAgentWriteAndABrowserEditLandTogetherEachAskGoesToItsOwnAutho
 	if _, err := service.ReplaceText(joined, artifactID, current+agentAsk, session); err != nil {
 		t.Fatalf("agent joined edit: %v", err)
 	}
-	release := holdNextObserver(t, service, artifactID, func() error {
+	release := holdObserver(t, service, artifactID, &service.beforeObserveUpdate, func() error {
 		return ledger.Commit(context.Background())
 	})
 	room := service.srv.GetDoc(artifactID)
@@ -544,6 +544,124 @@ func TestApplyOpsOwnBlockIDRepairCarriesForwardTheRenamedBlocksAuthor(t *testing
 	}
 }
 
+// ApplyOps's conditional branch (a precondition given) is always joined - never reachable without
+// one (ApplyOps refuses a precondition outside a transaction) - so it relies entirely on
+// applyJoined's own generic before/after diff, deferred to Ledger.credit at commit, rather than an
+// inline registerAskAuthors call of its own: a new ask block a conditional edit introduces still
+// goes to its own actor, not to whichever update's observer happens to render the commit's publish
+// first (LEGION-503).
+func TestAConditionalEditIntroducesAnAskCreditedToItsAuthor(t *testing.T) {
+	session := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
+	settleCurrentGeneration(t, service, artifactID)
+
+	_, token, err := service.TextWithToken(context.Background(), artifactID)
+	if err != nil {
+		t.Fatalf("read token: %v", err)
+	}
+	tx, err := service.store.Pool.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(context.Background())
+	joined, ledger := service.Join(context.Background(), tx)
+	defer ledger.Discard()
+	if _, err := service.ApplyOps(joined, artifactID, []model.EditOp{
+		{Op: "insert", After: "end", Markdown: ":::ask{#agent-ask urgency=\"high\" multiple=\"false\"}\nWhich database?\n:::\n"},
+	}, session, &model.EditPrecondition{Document: token}); err != nil {
+		t.Fatalf("conditional agent edit: %v", err)
+	}
+	if err := ledger.Commit(context.Background()); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	settleCurrentGeneration(t, service, artifactID)
+	if author := blockAskAuthor(t, service, artifactID, "agent-ask"); author != session {
+		t.Errorf("agent-ask author = %#v, want %v", author, session)
+	}
+}
+
+// appendDuplicateIDBlock appends a block holding the same literal id an existing one carries, so
+// EnsureBlockIDs's repair re-mints the second occurrence as a copy.
+func appendDuplicateIDBlock(t *testing.T, markdown, id string) func(*pmdoc.Node) *pmdoc.Node {
+	t.Helper()
+	return appendBlockWithCraftedID(t, markdown, id)
+}
+
+// A joined write's own before/after diff (applyJoined) only registers its ask ids at commit
+// (Ledger.credit) - after Discard, none of it ever reaches the room. registerAskAuthors's
+// first-registration-wins rule must not let a discarded write's registration outrank a later,
+// legitimate commit of the same author-chosen literal id (LEGION-503).
+func TestADiscardedJoinedWriteDoesNotOutrankALaterCommitOfTheSameAskID(t *testing.T) {
+	alice := model.Actor{Kind: "user", ID: "alice"}
+	bob := model.Actor{Kind: "user", ID: "bob"}
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
+	settleCurrentGeneration(t, service, artifactID)
+
+	tx1, err := service.store.Pool.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("begin tx1: %v", err)
+	}
+	joined1, ledger1 := service.Join(context.Background(), tx1)
+	if _, err := service.ApplyOps(joined1, artifactID, []model.EditOp{
+		{Op: "insert", After: "end", Markdown: ":::ask{#decision urgency=\"high\" multiple=\"false\"}\nAlice's question?\n:::\n"},
+	}, alice, nil); err != nil {
+		t.Fatalf("alice's discarded edit: %v", err)
+	}
+	ledger1.Discard()
+	tx1.Rollback(context.Background())
+
+	tx2, err := service.store.Pool.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("begin tx2: %v", err)
+	}
+	defer tx2.Rollback(context.Background())
+	joined2, ledger2 := service.Join(context.Background(), tx2)
+	defer ledger2.Discard()
+	if _, err := service.ApplyOps(joined2, artifactID, []model.EditOp{
+		{Op: "insert", After: "end", Markdown: ":::ask{#decision urgency=\"high\" multiple=\"false\"}\nBob's question?\n:::\n"},
+	}, bob, nil); err != nil {
+		t.Fatalf("bob's committed edit: %v", err)
+	}
+	if err := ledger2.Commit(context.Background()); err != nil {
+		t.Fatalf("commit bob's edit: %v", err)
+	}
+	settleCurrentGeneration(t, service, artifactID)
+	if author := blockAskAuthor(t, service, artifactID, "decision"); author != bob {
+		t.Errorf("decision author = %#v, want %v (alice's discarded write must not leak)", author, bob)
+	}
+}
+
+// recordStampedAskBlocks must not forget a renamed ask block's previous id from state.askBlocks
+// when the rename is a copy: another live block still carries that id, so it is not retired.
+// Forgetting it anyway would make the room's next observer treat the still-live original as newly
+// introduced (LEGION-503).
+func TestRecordStampedAskBlocksKeepsACopiedRenamesPreviousIDLive(t *testing.T) {
+	bob := model.Actor{Kind: "user", ID: "bob"}
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
+	settleCurrentGeneration(t, service, artifactID)
+	service.addConnection(artifactID, 1, bob)
+	editAsPeer(t, service, artifactID, appendBlockWithCraftedID(t,
+		":::ask{urgency=\"high\" multiple=\"false\"}\nFirst question?\n:::\n", "first"))
+	settleCurrentGeneration(t, service, artifactID)
+	editAsPeer(t, service, artifactID, appendDuplicateIDBlock(t,
+		":::ask{urgency=\"high\" multiple=\"false\"}\nDuplicate question?\n:::\n", "first"))
+	settleCurrentGeneration(t, service, artifactID)
+
+	state := service.room(artifactID)
+	state.mu.Lock()
+	_, stillHeld := state.askBlocks["first"]
+	state.mu.Unlock()
+	if !stillHeld {
+		t.Errorf("state.askBlocks lost %q after a copied rename, even though the original live block still carries it", "first")
+	}
+}
+
 // holdPeerEdit applies a browser's edit to the room on a goroutine of its own and returns once
 // the edit's update observer reaches hook, one of the observer's test hooks, which holds it there.
 // release lets the observer go on and returns once the edit has finished applying.
@@ -554,35 +672,7 @@ func holdPeerEdit(t *testing.T, service *Service, artifactID string, hook *func(
 		t.Fatal("document room is not resident")
 	}
 	_, update := peerEdit(t, room, edit)
-	held := make(chan struct{})
-	proceed := make(chan struct{})
-	let := sync.OnceFunc(func() { close(proceed) })
-	t.Cleanup(let)
-	var holding atomic.Bool
-	holding.Store(true)
-	*hook = func(name string) {
-		if name == artifactID && holding.CompareAndSwap(true, false) {
-			close(held)
-			<-proceed
-		}
-	}
-	applied := make(chan error, 1)
-	go func() { applied <- crdt.ApplyUpdateV1(room, update, "peer") }()
-	select {
-	case <-held:
-	case <-time.After(5 * time.Second):
-		t.Error("the peer's edit never reached its update observer's hook")
-	}
-	return func() {
-		t.Helper()
-		let()
-		select {
-		case err := <-applied:
-			if err != nil {
-				t.Fatalf("apply the peer's edit: %v", err)
-			}
-		case <-time.After(10 * time.Second):
-			t.Fatal("the peer's edit never finished applying")
-		}
-	}
+	return holdObserver(t, service, artifactID, hook, func() error {
+		return crdt.ApplyUpdateV1(room, update, "peer")
+	})
 }
