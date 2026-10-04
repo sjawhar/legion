@@ -35,6 +35,11 @@ const (
 	// ever shows; this is a generous multiple of the 4,000-character snippet window search.go
 	// already uses, not a tight limit.
 	maxInputChars = 32000
+	// maxResponseBytes bounds one call's response. A full MaxBatchTexts batch at Dimension floats
+	// each, JSON-encoded, runs to a couple of megabytes before the texts and metadata the response
+	// also echoes back; 16 MiB leaves a wide margin rather than silently truncating one (which
+	// produces invalid JSON - "unexpected end of JSON input" - not a clean size-limit error).
+	maxResponseBytes = 16 << 20
 )
 
 // InputType is Cohere's asymmetric embedding mode: a stored document is embedded differently
@@ -154,7 +159,7 @@ func (c *Client) Embed(ctx context.Context, texts []string, inputType InputType)
 		return nil, fmt.Errorf("embed: request: %w", err)
 	}
 	defer resp.Body.Close()
-	payload, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	payload, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
 		return nil, fmt.Errorf("embed: read response: %w", err)
 	}

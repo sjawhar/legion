@@ -41,6 +41,13 @@ export function searchAnswer(
   const lines = results.map((result) => searchResultLine(result, configUrl));
   const noun = count === 1 ? "result" : "results";
   const noResults = `No results for "${query}".`;
+  // Meaning search is off for this request (no Cohere key, a timed-out or failing query
+  // embedding): the ranking below is keyword-only, and the caller is told so rather than
+  // silently reading a hybrid ranking that did not run.
+  const degraded =
+    search.degraded === "embedder_unavailable"
+      ? "Searched by keyword only: meaning search was unavailable for this request."
+      : undefined;
   // A Dispatch from before search paging answers no total and serves its first page whatever
   // the offset, so a later page from it would silently repeat the first.
   if (typeof search.total !== "number") {
@@ -52,9 +59,13 @@ export function searchAnswer(
     return {
       text:
         count === 0
-          ? noResults
-          : [`${count} ${noun} for "${query}" (${search.took_ms} ms)`, ...lines].join("\n"),
-      details: { query, results },
+          ? [noResults, ...(degraded === undefined ? [] : [degraded])].join("\n")
+          : [
+              `${count} ${noun} for "${query}" (${search.took_ms} ms)`,
+              ...(degraded === undefined ? [] : [degraded]),
+              ...lines,
+            ].join("\n"),
+      details: { query, results, ...(degraded === undefined ? {} : { degraded: search.degraded }) },
     };
   }
   const { total, reachable, offset: pageOffset } = search;
@@ -70,14 +81,16 @@ export function searchAnswer(
     reachable,
     offset: pageOffset,
     limit: search.limit,
+    ...(degraded === undefined ? {} : { degraded: search.degraded }),
   };
   if (count === 0) {
     return {
       text:
         total === 0
-          ? noResults
+          ? [noResults, ...(degraded === undefined ? [] : [degraded])].join("\n")
           : [
               `No results for "${query}" at offset ${pageOffset}: it matches ${total}, and the pages reach the first ${reachable}.`,
+              ...(degraded === undefined ? [] : [degraded]),
               ...(cut === undefined ? [] : [cut]),
             ].join("\n"),
       details,
@@ -88,6 +101,7 @@ export function searchAnswer(
   return {
     text: [
       `${count} ${noun} for "${query}" (${showing}${search.took_ms} ms)`,
+      ...(degraded === undefined ? [] : [degraded]),
       ...(cut === undefined ? [] : [cut]),
       ...lines,
       ...(end < reachable ? [`Next page: offset ${end}.`] : []),
