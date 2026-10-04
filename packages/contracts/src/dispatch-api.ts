@@ -1170,15 +1170,7 @@ export interface SearchResultsPage {
 export type SearchResponse = {
   readonly results: SearchResult[];
   readonly took_ms: number;
-} & (
-  | SearchResultsPage
-  | {
-      readonly total?: undefined;
-      readonly reachable?: undefined;
-      readonly limit?: undefined;
-      readonly offset?: undefined;
-    }
-);
+} & (SearchResultsPage | { readonly [K in keyof SearchResultsPage]?: undefined });
 
 export interface DuplicateCandidate {
   readonly key: string;
