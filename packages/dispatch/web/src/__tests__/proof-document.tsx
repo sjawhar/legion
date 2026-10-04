@@ -106,7 +106,7 @@ export function renderProofDocument({
                 seq: number;
               }
             | undefined;
-          settleCompose(outcome: "saved" | "cancelled"): void;
+          cancelCompose(seq: number): void;
         }
       | undefined,
   };

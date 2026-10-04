@@ -248,6 +248,8 @@ interface TargetedMessageCardProps {
   readonly lastSeq?: number;
   readonly onReply?: () => void;
   readonly onRetry?: (delivery: MessageDeliveryMode) => void;
+  /** Holds the Reply button while the composer it would address is busy with a send. */
+  readonly replyDisabled?: boolean;
   readonly register?: (element: HTMLLIElement | null) => void;
   readonly retrying?: boolean;
   readonly targetName: string;
@@ -271,6 +273,7 @@ export function TargetedMessageCard({
   onReply,
   onRetry,
   register,
+  replyDisabled = false,
   retrying = false,
   targetName,
   thread,
@@ -291,7 +294,7 @@ export function TargetedMessageCard({
         {header}
         <div className="min-w-0 flex-1">{body}</div>
         {onReply === undefined || isClosed ? null : (
-          <ReplyButton className="self-start" onClick={onReply} />
+          <ReplyButton className="self-start" disabled={replyDisabled} onClick={onReply} />
         )}
       </div>
       <DeliveryStatus

@@ -1,6 +1,7 @@
 import { expect, type Locator, type Page, test } from "@playwright/test";
 
 import {
+  acceptSuggestion,
   createAsk,
   createComment,
   createIssue,
@@ -11,6 +12,7 @@ import {
 } from "./api";
 import { threadCard } from "./editor";
 import { resetDatabase } from "./seed";
+import { holdPosts, refusePosts } from "./sends";
 import { asUser } from "./users";
 
 // "bob" names the session that opened the ask - authenticated over the API with
@@ -142,6 +144,70 @@ test("an ask is a thread: replies before and after answering, then a live agent 
   await expect(replies.nth(2)).toContainText("Thanks, merging.");
 
   await alice.close();
+});
+
+// The row above, with the race it can lose made certain: the margin's answered-ask read is held
+// until a reply has been typed into the answered card's thread, so the card moves out of Needs you
+// with the reply in it. The card moves in place, and the reply is still there to send.
+test("an answered ask's thread keeps a reply typed before the card leaves Needs you", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: "Ship the change to production",
+    title: "Reply across the move",
+  });
+  const ask = await createAsk(
+    issue.key,
+    {
+      anchor: { artifact: "spec", quote: "production" },
+      options: [{ label: "Ship" }, { label: "Hold" }],
+      question: "Ship the change?",
+    },
+    bobSession
+  );
+  await expect
+    .poll(async () =>
+      (await getIssueEvents(issue.key)).some((event) => event.type === "ask.opened")
+    )
+    .toBe(true);
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}`);
+    await page.getByRole("tab", { name: "Spec" }).click();
+    await setSheet(page, testInfo.project.name, true);
+    const margin = page.getByTestId("margin-sheet");
+    const card = margin.getByTestId(`ask-${ask.id}`);
+    await expect(card).toContainText("Ship the change?");
+    await expect(margin.getByRole("heading", { name: "Needs you" })).toBeVisible();
+
+    // From here on the issue's asks read waits until the reply is typed.
+    const { promise: typed, resolve: releaseAsks } = Promise.withResolvers<void>();
+    await page.route(
+      (url) => url.pathname === `/api/v1/issues/${issue.key}/asks`,
+      async (route) => {
+        await typed;
+        await route.fallback();
+      }
+    );
+    await card.getByRole("radio", { name: "Ship" }).check();
+    await card.getByRole("button", { exact: true, name: "Answer" }).click();
+    await expect(margin.getByText(/Answered by/)).toBeVisible();
+    await expect(margin.getByRole("heading", { name: "Needs you" })).toBeVisible();
+
+    const thread = margin.getByTestId(`thread-${ask.id}`);
+    await thread.getByLabel("Reply").fill("Shipping now.");
+    releaseAsks();
+    await expect(margin.getByRole("heading", { name: "Needs you" })).toHaveCount(0);
+    await expect(thread.getByLabel("Reply")).toHaveValue("Shipping now.");
+    await thread.getByRole("button", { name: "Reply" }).click();
+    await expect(thread.getByText("Shipping now.")).toBeVisible();
+  } finally {
+    await alice.close();
+  }
 });
 
 test("a Conversation reply after an agent-authored reply targets the root without copying its anchor", async ({
@@ -647,7 +713,9 @@ test("an orphaned suggestion stays non-actionable through resolve and reopen", a
   }
 });
 
-test("a failed queued Conversation comment action clears later clicks and retries explicitly", async ({
+// A Resolve closes its thread only once the server takes it: a refused one leaves the thread open,
+// with the reply the reader was writing in it.
+test("a failed queued Conversation comment action keeps its thread and reply, clears later clicks and retries explicitly", async ({
   browser,
 }, testInfo) => {
   test.skip(
@@ -689,6 +757,8 @@ test("a failed queued Conversation comment action clears later clicks and retrie
     await page.goto(`/issues/${issue.key}/conversation`);
     const firstThread = await expandedThread(page, first.id);
     const secondThread = await expandedThread(page, second.id);
+    const firstReply = firstThread.getByRole("textbox", { name: "Reply" });
+    await firstReply.fill("Half a reply");
     await firstThread.getByRole("button", { name: "Resolve" }).click();
     await secondThread.getByRole("button", { name: "Resolve" }).click();
     resolveFirst?.();
@@ -696,10 +766,106 @@ test("a failed queued Conversation comment action clears later clicks and retrie
     // of it, as the header, settings and composer do.
     await expect(firstThread.getByText("Dispatch request failed (500)")).toBeVisible();
     await expect.poll(() => requests).toBe(1);
+    await expect(firstReply).toHaveValue("Half a reply");
     await firstThread.getByRole("button", { name: "Retry" }).click();
     await expect.poll(() => requests).toBe(2);
     await expect(threadCard(page, first.id)).toHaveCount(0);
     await expect(threadCard(page, second.id)).toBeVisible();
+  } finally {
+    await alice.close();
+  }
+});
+
+/** An issue whose spec's last word carries a suggestion, and the route its comment sends post to. */
+async function seedSuggestion(
+  title: string
+): Promise<{ comments: string; issueKey: string; suggestionId: string }> {
+  await createProject({ key: "SUGG", name: "Suggestion cards" });
+  const issue = await createIssue({ project: "SUGG", spec: "The quick brown fox", title });
+  const suggestion = await createComment(issue.key, {
+    anchor: { artifact: "spec", quote: "fox" },
+    body: "Suggested replacement.",
+    suggestion: { replace_with: "cat" },
+  });
+  return {
+    comments: `**/api/v1/issues/${issue.key}/comments`,
+    issueKey: issue.key,
+    suggestionId: suggestion.id,
+  };
+}
+
+// A decided suggestion's thread offers no reply, but a reply already out when someone else accepts
+// the suggestion is still the reader's: its composer stays with the draft until the server answers,
+// a refusal hands that draft back beside Retry, and Retry still sends it as a reply.
+test("a suggestion accepted while its thread's own reply is out keeps the reply's draft and refusal", async ({
+  browser,
+}) => {
+  const { comments, issueKey, suggestionId } = await seedSuggestion("Accepted under a reply");
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issueKey}/conversation`);
+    const thread = await expandedThread(page, suggestionId);
+    const form = thread.getByRole("form", { name: "Comment composer" });
+    const field = form.getByRole("textbox", { name: "Reply" });
+    const refuse = await refusePosts(page, comments);
+    await field.fill("Reply under an accept");
+    await form.getByRole("button", { exact: true, name: "Send" }).click();
+    await expect(field).toBeDisabled();
+
+    await acceptSuggestion(suggestionId, { login: "bob" });
+    await expect(thread.getByText(/^Accepted by bob/)).toBeVisible();
+    await expect(thread.getByRole("button", { name: "Accept suggestion" })).toHaveCount(0);
+    await expect(field).toHaveValue("Reply under an accept");
+
+    refuse();
+    await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expect(field).toHaveValue("Reply under an accept");
+    await expect(field).toBeEnabled();
+
+    await page.unroute(comments);
+    await form.getByRole("button", { name: "Retry" }).click();
+    await expect(thread.getByRole("list", { name: "Replies" })).toContainText(
+      "Reply under an accept"
+    );
+    await expect(form).toHaveCount(0);
+  } finally {
+    await alice.close();
+  }
+});
+
+// The composer a decided suggestion's thread keeps for a reply out is only that reply's: once the
+// reply lands it leaves, as the thread offers no new one.
+test("a reply out when its suggestion is accepted lands and leaves no composer behind", async ({
+  browser,
+}) => {
+  const { comments, issueKey, suggestionId } = await seedSuggestion(
+    "Accepted before a reply lands"
+  );
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issueKey}/conversation`);
+    const thread = await expandedThread(page, suggestionId);
+    const form = thread.getByRole("form", { name: "Comment composer" });
+    const field = form.getByRole("textbox", { name: "Reply" });
+    const send = await holdPosts(page, comments);
+    await field.fill("Reply that lands after");
+    await form.getByRole("button", { exact: true, name: "Send" }).click();
+    await expect(field).toBeDisabled();
+
+    await acceptSuggestion(suggestionId, { login: "bob" });
+    await expect(thread.getByText(/^Accepted by bob/)).toBeVisible();
+    await expect(field).toHaveValue("Reply that lands after");
+
+    send.release();
+    await expect(thread.getByRole("list", { name: "Replies" })).toContainText(
+      "Reply that lands after"
+    );
+    await expect(form).toHaveCount(0);
+    expect(send.posts()).toBe(1);
   } finally {
     await alice.close();
   }

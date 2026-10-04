@@ -21,6 +21,14 @@ export function connectedDot(scope: Page | Locator): Locator {
   return scope.getByRole("status", { name: "connected" });
 }
 
+/** Opens an issue's spec and waits until its editor shows `text` and its document is connected,
+ *  so a selection or a margin card the row reaches for next is live. */
+export async function openSpec(page: Page, issueKey: string, text: string): Promise<void> {
+  await page.goto(`/issues/${issueKey}/spec`);
+  await expect(documentEditor(page)).toContainText(text);
+  await expect(connectedDot(page)).toHaveText("connected");
+}
+
 /** Opens an issue's spec in page and waits for the update its editor makes on its own as it opens
  * the document: an id for each heading an agent wrote, which changes the document's full-state
  * token and none of its text. The spec needs a heading. Returns the token after that update. */
@@ -49,6 +57,11 @@ export function actionBar(page: Page): Locator {
 
 export async function barAction(page: Page, label: "Comment" | "Suggest" | "Ask"): Promise<void> {
   await actionBar(page).getByRole("button", { exact: true, name: label }).click();
+}
+
+/** The comment composer: on a document page, the margin's, which a selection-bar action opens. */
+export function composer(page: Page): Locator {
+  return page.getByRole("form", { name: "Comment composer" });
 }
 
 export function markSpan(page: Page, markId: string): Locator {
@@ -196,6 +209,13 @@ export async function setSheet(page: Page, project: string, open: boolean): Prom
  *  its own card, so a bare `[data-margin-item]` lookup would match both). */
 export function threadCard(page: Page, rootId: string): Locator {
   return page.locator(`[data-turn="comment:${rootId}"]`).locator(`[data-margin-item="${rootId}"]`);
+}
+
+/** The margin's open asks waiting on the reader. Every margin ask card, open or decided, is in one
+ *  keyed list - an answered ask moves to the decided ones in place - so the group is each card's
+ *  own `data-margin-section`, and a card is found inside it by its `ask-<id>` test id. */
+export function needsYouCards(page: Page): Locator {
+  return page.locator('[data-margin-section="needs-you"]');
 }
 
 export async function replyInThread(page: Page, rootId: string, body: string): Promise<void> {

@@ -1,7 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { RECEIPT_TIMEOUT_CAUSE } from "@legion/contracts";
 import { focusManager, QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 import { api } from "../../api/client";
@@ -193,6 +193,14 @@ function card(region: HTMLElement, name: string): HTMLElement {
   return result;
 }
 
+/** A row in a closed fold is on the page, mounted and hidden (`AgentsPage`'s one keyed list): no
+ *  reader can reach its heading, and the row holding it is hidden. */
+function expectFolded(region: HTMLElement, name: string): void {
+  expect(within(region).queryByRole("heading", { name })).toBeNull();
+  const heading = within(region).getByRole("heading", { hidden: true, name });
+  expect(heading.closest("article")?.hidden).toBe(true);
+}
+
 /** Cards collapse by default; the title button toggles the conversation and composer. */
 function expand(agentCard: HTMLElement, name: string): void {
   fireEvent.click(within(agentCard).getByRole("button", { name }));
@@ -225,7 +233,8 @@ test("Agents collapses every card by default and expands each one independently"
 
   try {
     const region = await screen.findByRole("region", { name: "Agents" });
-    expect(within(region).queryByRole("textbox", { name: "Comment" })).toBeNull();
+    // Nothing is mounted before a card's first open, hidden or not.
+    expect(within(region).queryByRole("textbox", { hidden: true, name: "Comment" })).toBeNull();
     expect(page.listAgentMessages).not.toHaveBeenCalled();
     const planner = card(region, "Planner");
     const toggle = within(planner).getByRole("button", { name: "Planner" });
@@ -236,14 +245,17 @@ test("Agents collapses every card by default and expands each one independently"
     expect(within(planner).getByRole("textbox", { name: "Comment" })).toBeTruthy();
     await waitFor(() => expect(page.listAgentMessages).toHaveBeenCalledWith("planner-session"));
     const reviewer = card(region, "Reviewer");
-    expect(within(reviewer).queryByRole("textbox", { name: "Comment" })).toBeNull();
+    expect(within(reviewer).queryByRole("textbox", { hidden: true, name: "Comment" })).toBeNull();
 
     expand(reviewer, "Reviewer");
     expect(within(region).getAllByRole("textbox", { name: "Comment" })).toHaveLength(2);
     expect(toggle.getAttribute("aria-expanded")).toBe("true");
 
     expand(planner, "Planner");
+    // A card opened once keeps its composer - and its draft - when it collapses, hidden.
     expect(within(planner).queryByRole("textbox", { name: "Comment" })).toBeNull();
+    const kept = within(planner).getByRole("textbox", { hidden: true, name: "Comment" });
+    expect(kept.closest("[hidden]")).not.toBeNull();
     expect(within(reviewer).getByRole("textbox", { name: "Comment" })).toBeTruthy();
   } finally {
     page.view.unmount();
@@ -466,7 +478,7 @@ test("Agents orders who needs you before Dispatch recency before liveness, folds
     const region = await screen.findByRole("region", { name: "Agents" });
     const titles = () =>
       within(region)
-        .getAllByRole("heading", { level: 2 })
+        .getAllByRole("heading", { hidden: false, level: 2 })
         .map((heading) => heading.textContent);
     await within(region).findByText("Needs you 2", { exact: true });
     expect(titles()).toEqual(["Planner", "Alpha", "Zulu"]);
@@ -475,11 +487,10 @@ test("Agents orders who needs you before Dispatch recency before liveness, folds
 
     const disclosure = within(region).getByRole("button", { name: "No Dispatch activity (1)" });
     expect(disclosure.getAttribute("aria-expanded")).toBe("false");
-    expect(within(region).queryByRole("region", { name: "No Dispatch activity" })).toBeNull();
+    expectFolded(region, "None");
     fireEvent.click(disclosure);
     expect(disclosure.getAttribute("aria-expanded")).toBe("true");
-    const fold = within(region).getByRole("region", { name: "No Dispatch activity" });
-    const noneCard = card(fold, "None");
+    const noneCard = card(region, "None");
     expect(within(noneCard).getByText("No Dispatch activity", { exact: true })).toBeTruthy();
     expect(titles()).toEqual(["Planner", "Alpha", "Zulu", "None"]);
     expand(noneCard, "None");
@@ -518,14 +529,14 @@ test("Agents lists a pinned silent session among the active rows, and folds it a
     await screen.findByRole("button", { name: "Unpin Silent" });
     expect(
       within(region)
-        .getAllByRole("heading", { level: 2 })
+        .getAllByRole("heading", { hidden: false, level: 2 })
         .map((heading) => heading.textContent)
     ).toEqual(["Silent", "Planner", "Reviewer"]);
     expect(within(region).queryByRole("button", { name: /^No Dispatch activity \(/ })).toBeNull();
 
     fireEvent.click(within(region).getByRole("button", { name: "Unpin Silent" }));
     expect(within(region).getByRole("button", { name: "No Dispatch activity (1)" })).toBeTruthy();
-    expect(within(region).queryByRole("heading", { name: "Silent" })).toBeNull();
+    expectFolded(region, "Silent");
   } finally {
     page.view.unmount();
     page.restore();
@@ -548,18 +559,17 @@ test("Agents folds sessions unseen for ten minutes under a collapsed Inactive di
     const region = await screen.findByRole("region", { name: "Agents" });
     const titles = () =>
       within(region)
-        .getAllByRole("heading", { level: 2 })
+        .getAllByRole("heading", { hidden: false, level: 2 })
         .map((heading) => heading.textContent);
     // Newest Dispatch activity would put Stale first; the grey-dot rule folds it instead.
     expect(titles()).toEqual(["Planner", "Reviewer"]);
     const disclosure = within(region).getByRole("button", { name: "Inactive (1)" });
     expect(disclosure.getAttribute("aria-expanded")).toBe("false");
-    expect(within(region).queryByRole("region", { name: "Inactive" })).toBeNull();
+    expectFolded(region, "Stale");
 
     fireEvent.click(disclosure);
     expect(disclosure.getAttribute("aria-expanded")).toBe("true");
-    const fold = within(region).getByRole("region", { name: "Inactive" });
-    const staleCard = card(fold, "Stale");
+    const staleCard = card(region, "Stale");
     expect(
       within(staleCard).getByRole("status", { name: "Seen 10 minutes ago or longer" })
     ).toBeTruthy();
@@ -596,14 +606,14 @@ test("Agents keeps a pinned session in the active list however long it has been 
     await screen.findByRole("button", { name: "Unpin Stale" });
     expect(
       within(region)
-        .getAllByRole("heading", { level: 2 })
+        .getAllByRole("heading", { hidden: false, level: 2 })
         .map((heading) => heading.textContent)
     ).toEqual(["Stale", "Planner", "Reviewer"]);
     expect(within(region).queryByRole("button", { name: /^Inactive \(/ })).toBeNull();
 
     fireEvent.click(within(region).getByRole("button", { name: "Unpin Stale" }));
     expect(within(region).getByRole("button", { name: "Inactive (1)" })).toBeTruthy();
-    expect(within(region).queryByRole("heading", { name: "Stale" })).toBeNull();
+    expectFolded(region, "Stale");
   } finally {
     page.view.unmount();
     page.restore();
@@ -668,28 +678,26 @@ test("Agents sends without an issue through the agent message route", async () =
   }
 });
 
+const coreIssue: IssueSummary = {
+  assignee: null,
+  claim: null,
+  components: { mode: "inherit", ids: [], unknown: [], reason: null, inherited_from: null },
+  key: "CORE-1",
+  last_seq: 0,
+  open_asks: 0,
+  parent: null,
+  priority: null,
+  rank: "U",
+  route: null,
+  route_holder: null,
+  route_status: null,
+  status: "todo",
+  title: "Core work",
+  updated_at: "2026-09-14T00:00:00Z",
+};
+
 test("Agents keeps selected-issue sends on the issue message route", async () => {
-  const page = renderAgents({
-    issues: [
-      {
-        route: null,
-        route_status: null,
-        route_holder: null,
-        key: "CORE-1",
-        last_seq: 0,
-        open_asks: 0,
-        parent: null,
-        assignee: null,
-        claim: null,
-        components: { mode: "inherit", ids: [], unknown: [], reason: null, inherited_from: null },
-        priority: null,
-        rank: "U",
-        status: "todo",
-        title: "Core work",
-        updated_at: "2026-09-14T00:00:00Z",
-      },
-    ],
-  });
+  const page = renderAgents({ issues: [coreIssue] });
 
   try {
     const region = await screen.findByRole("region", { name: "Agents" });
@@ -2307,6 +2315,198 @@ test("the header checkbox selects a folded row and the fold says how many of its
         .getAllByRole("button")
         .map((chip) => chip.textContent)
     ).toEqual(["Planner ✕", "Silent ✕"]);
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+// A closed fold keeps its rows mounted, hidden, so a row the reader had open is still expanded
+// in there. Nobody can see it, so a reply that arrives then must stay unread - in the navigation
+// and on the row - until the fold opens and puts the conversation back on screen.
+test("an open row a closed fold hides marks nothing read, and opening the fold reads what it shows", async () => {
+  const asked = exchange("m1", "Still there?", "2026-09-14T01:00:00Z");
+  const page = renderAgents({ listedAgents: [stale, ...agents], messages: [asked] });
+
+  try {
+    const region = await screen.findByRole("region", { name: "Agents" });
+    const fold = within(region).getByRole("button", { name: "Inactive (1)" });
+    fireEvent.click(fold);
+    const staleCard = card(region, "Stale");
+    expand(staleCard, "Stale");
+    await within(staleCard).findByText("Still there?");
+    fireEvent.click(fold);
+    expectFolded(region, "Stale");
+
+    const answered = exchange("m1", "Still there?", "2026-09-14T01:00:00Z", {
+      body: "Yes, still here.",
+      createdAt: "2026-09-14T01:05:00Z",
+      unread: true,
+    });
+    page.listAgentMessages.mockResolvedValue([
+      {
+        ...answered,
+        replies: answered.replies.map((reply) => ({
+          ...reply,
+          author: { id: "stale-session", kind: "session" as const },
+        })),
+      },
+    ]);
+    page.getMyAgentState.mockResolvedValue({ "stale-session": { unread_replies: 1 } });
+    await page.queryClient.invalidateQueries();
+    await within(staleCard).findByText("Yes, still here.");
+    // A mark the hidden row sent would go out from an effect a few microtasks on; give it a
+    // task, so the assertion below is not merely early.
+    const settled = Promise.withResolvers<void>();
+    setTimeout(settled.resolve, 20);
+    await settled.promise;
+    expect(page.putAgentState).not.toHaveBeenCalled();
+    expect(screen.getByRole("link", { name: "New reply 1" })).toBeTruthy();
+
+    fireEvent.click(fold);
+    await waitFor(() =>
+      expect(page.putAgentState).toHaveBeenCalledWith("stale-session", {
+        read_through: "2026-09-14T01:05:00Z",
+      })
+    );
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+// A collapse keeps the row's picker as the reader left it, open included, so `i` opens the
+// picker rather than toggling it: on a picker already open it goes into the select instead of
+// clicking it shut.
+test("i on a row collapsed with its picker open goes back into the picker's select", async () => {
+  const page = renderAgents({ issues: [coreIssue] });
+
+  try {
+    const region = await screen.findByRole("region", { name: "Agents" });
+    const planner = card(region, "Planner");
+    expand(planner, "Planner");
+    const toggle = within(planner).getByRole("button", { name: "Choose issue" });
+    fireEvent.click(toggle);
+    await within(planner).findByRole("combobox", { name: "Issue" });
+    expand(planner, "Planner");
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+
+    planner.focus();
+    fireEvent.keyDown(planner, { key: "i" });
+    const select = within(planner).getByRole("combobox", { hidden: true, name: "Issue" });
+    await waitFor(() => expect(document.activeElement).toBe(select));
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+// One failed poll of the registry is not the agents leaving: each row keeps what it holds - here
+// a draft - and the page says the list could not be refreshed.
+test("a registry poll that fails keeps every row and what it holds, and says so", async () => {
+  const page = renderAgents();
+
+  try {
+    const region = await screen.findByRole("region", { name: "Agents" });
+    const planner = card(region, "Planner");
+    expand(planner, "Planner");
+    const field = within(planner).getByRole("textbox", { name: "Comment" }) as HTMLTextAreaElement;
+    fireEvent.change(field, { target: { value: "Half a thought" } });
+
+    page.listAgents.mockRejectedValue(new Error("Envoy listener unreachable"));
+    await page.queryClient.refetchQueries({ queryKey: ["agents"] });
+    expect((await screen.findByRole("alert")).textContent).toBe(
+      "Could not refresh agents: Envoy listener unreachable"
+    );
+    expect(card(region, "Planner")).toBe(planner);
+    expect(field.isConnected).toBe(true);
+    expect(field.value).toBe("Half a thought");
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+// A row whose session leaves the registry unmounts; the send it had out is the held-send store's,
+// which holds it for the session. The row that comes back shows that send, held - its picker and
+// its draft - until it lands, and then they are the reader's.
+test("a row back after its session left mid-send holds the send it left until it lands", async () => {
+  const sent = Promise.withResolvers<Message>();
+  const page = renderAgents({ issues: [coreIssue] });
+  page.createAgentMessage.mockImplementationOnce(() => sent.promise);
+
+  try {
+    const region = await screen.findByRole("region", { name: "Agents" });
+    const planner = card(region, "Planner");
+    expand(planner, "Planner");
+    fireEvent.change(within(planner).getByRole("textbox", { name: "Comment" }), {
+      target: { value: "Status please" },
+    });
+    fireEvent.submit(within(planner).getByRole("form", { name: "Comment composer" }));
+    await waitFor(() =>
+      expect(
+        (within(planner).getByRole("button", { name: "Choose issue" }) as HTMLButtonElement)
+          .disabled
+      ).toBe(true)
+    );
+
+    page.listAgents.mockResolvedValue([agents[1]]);
+    await page.queryClient.refetchQueries({ queryKey: ["agents"] });
+    await waitFor(() =>
+      expect(within(region).queryByRole("heading", { name: "Planner" })).toBeNull()
+    );
+    page.listAgents.mockResolvedValue(agents);
+    await page.queryClient.refetchQueries({ queryKey: ["agents"] });
+    const back = card(await screen.findByRole("region", { name: "Agents" }), "Planner");
+    expect(back).not.toBe(planner);
+    expand(back, "Planner");
+    const choose = () =>
+      within(back).getByRole("button", { name: "Choose issue" }) as HTMLButtonElement;
+    const field = () =>
+      within(back).getByRole("textbox", { name: "Comment" }) as HTMLTextAreaElement;
+    // The composer holds its draft through its control fieldset.
+    const held = () => field().closest("fieldset")?.disabled;
+    expect(choose().disabled).toBe(true);
+    expect(held()).toBe(true);
+    expect(field().value).toBe("Status please");
+
+    await act(async () => {
+      sent.resolve(message("Status please"));
+      await sent.promise;
+    });
+    await waitFor(() => expect(choose().disabled).toBe(false));
+    expect(held()).toBe(false);
+    expect(field().value).toBe("");
+  } finally {
+    sent.resolve(message("Status please"));
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+// A filter hides the rows it excludes rather than dropping them, as a closed fold does, so
+// narrowing the list and widening it again loses nothing a row holds.
+test("a row a filter hides keeps its draft and comes back as the reader left it", async () => {
+  const page = renderAgents();
+
+  try {
+    const region = await screen.findByRole("region", { name: "Agents" });
+    const planner = card(region, "Planner");
+    expand(planner, "Planner");
+    const field = within(planner).getByRole("textbox", { name: "Comment" }) as HTMLTextAreaElement;
+    fireEvent.change(field, { target: { value: "Half a thought" } });
+    const directory = within(region).getByRole("searchbox", { name: "Directory contains" });
+
+    fireEvent.change(directory, { target: { value: "REVIEWER" } });
+    expectFolded(region, "Planner");
+    fireEvent.change(directory, { target: { value: "" } });
+
+    expect(card(region, "Planner")).toBe(planner);
+    expect(
+      within(planner).getByRole("button", { name: "Planner" }).getAttribute("aria-expanded")
+    ).toBe("true");
+    expect(field.value).toBe("Half a thought");
   } finally {
     page.view.unmount();
     page.restore();

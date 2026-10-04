@@ -516,7 +516,11 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 	var reopenedArtifactName string
 	if replyRoot != nil {
 		root := *replyRoot
-		if root.Resolved {
+		// A reply reopens a resolved root, except a decided suggestion's: accepting or rejecting
+		// it is final, so the reply joins the thread and leaves who decided it, and when, as they
+		// were.
+		decided := root.Suggestion != nil && root.Suggestion.Accepted != nil
+		if root.Resolved && !decided {
 			if _, err := tx.Exec(r.Context(), `
 				update comments
 				set resolved = false, resolved_by = null, resolved_at = null
@@ -541,10 +545,17 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 				s.writeHandlerError(w, err)
 				return
 			}
-			rootProjectionKind, err := s.commentProjectionKind(documentCtx, root)
-			if err != nil {
-				s.writeHandlerError(w, err)
+			// A decided or orphaned suggestion's mark is gone, so it has no projection kind to
+			// carry; the reply still lands and ProjectMark writes only the marks map, as a reopen
+			// or a resolve of that suggestion does.
+			rootProjectionKind := ""
+			kind, kindErr := s.commentProjectionKind(documentCtx, root)
+			if kindErr != nil && !errors.Is(kindErr, docs.ErrAnchorMissing) {
+				s.writeHandlerError(w, kindErr)
 				return
+			}
+			if kindErr == nil {
+				rootProjectionKind = kind
 			}
 			if err := s.deps.Docs.ProjectMark(documentCtx, root.Anchor.ArtifactID, root.Anchor.MarkID, commentMarkRecord(root, replies, rootProjectionKind), actor); err != nil {
 				s.writeHandlerError(w, err)

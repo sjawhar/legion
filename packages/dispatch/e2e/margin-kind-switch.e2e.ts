@@ -3,15 +3,18 @@ import { type Browser, expect, type Page, test } from "@playwright/test";
 import { createComment, createIssue, createProject, getAsk, listComments } from "./api";
 import {
   barAction,
+  composer,
   connectedDot,
   deleteEditorText,
   documentEditor,
   expectMark,
   markTexts,
+  needsYouCards,
   placeCaret,
   selectEditorText,
 } from "./editor";
 import { resetDatabase } from "./seed";
+import { refusePosts } from "./sends";
 import { asUser } from "./users";
 
 // The margin composer a selection-bar action opens can switch between Comment, Suggest and Ask;
@@ -65,10 +68,6 @@ function anyMarks(page: Page) {
   return documentEditor(page).locator("span[data-id]");
 }
 
-function composer(page: Page) {
-  return page.getByRole("form", { name: "Comment composer" });
-}
-
 function kindButton(page: Page, name: "Comment" | "Suggest" | "Ask") {
   return composer(page).getByRole("group", { name: "Kind" }).getByRole("button", {
     exact: true,
@@ -118,10 +117,7 @@ test("switching an anchored composer from Comment to Ask retypes its mark and as
 
       await composer(alicePage).getByLabel("Question").fill("Why brown?");
       await composer(alicePage).locator('button[type="submit"]').click();
-      const askCard = alicePage
-        .getByRole("region", { name: "Needs you" })
-        .locator("[data-margin-item]")
-        .filter({ hasText: "Why brown?" });
+      const askCard = needsYouCards(alicePage).filter({ hasText: "Why brown?" });
       await expect(askCard).toBeVisible();
       const askId = await askCard.getAttribute("data-margin-item");
       if (askId === null) {
@@ -139,6 +135,78 @@ test("switching an anchored composer from Comment to Ask retypes its mark and as
       expect(await listComments(issueKey, artifactId)).toEqual([]);
     }
   );
+});
+
+test("a send holds every suggestion control and restores its replacement on refusal", async ({
+  browser,
+}) => {
+  await withReaders(browser, "Held suggestion", async ({ alicePage }) => {
+    await selectEditorText(alicePage, "quick");
+    await barAction(alicePage, "Suggest");
+    const refusal = await refusePosts(alicePage, "**/api/v1/issues/*/comments");
+    const form = composer(alicePage);
+    const reason = form.getByLabel("Reason");
+    const replacement = form.getByLabel("Replacement");
+    await reason.fill("Why this replacement");
+    await replacement.fill("red");
+    await form.getByRole("button", { exact: true, name: "Send" }).click();
+
+    await expect(reason).toBeDisabled();
+    await expect(replacement).toBeDisabled();
+    await expect(form.getByRole("button", { name: "Close" })).toBeDisabled();
+    refusal();
+
+    await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expect(replacement).toHaveValue("red");
+  });
+});
+
+test("a send holds every ask control", async ({ browser }) => {
+  await withReaders(browser, "Held ask", async ({ alicePage }) => {
+    await selectEditorText(alicePage, "brown");
+    await barAction(alicePage, "Ask");
+    const refusal = await refusePosts(alicePage, "**/api/v1/issues/*/asks");
+    const form = composer(alicePage);
+    const question = form.getByLabel("Question");
+    await question.fill("Why brown?");
+    await form.locator('button[type="submit"]').click();
+
+    await expect(question).toBeDisabled();
+    await expect(form.getByRole("button", { name: "High" })).toBeDisabled();
+    await expect(form.getByLabel("Allow multiple")).toBeDisabled();
+    await expect(form.getByRole("button", { name: "Add option" })).toBeDisabled();
+    await expect(form.getByLabel("Option 1 label")).toBeDisabled();
+    refusal();
+    await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+  });
+});
+
+// A key reaches the composer from a control in it, never from the form, which takes no focus: the
+// Escape goes to the field, in Send's own task, before React has disabled anything.
+test("an Escape in Send's task cannot open a margin Discard prompt", async ({ browser }) => {
+  await withReaders(browser, "Held margin close", async ({ alicePage }) => {
+    await selectEditorText(alicePage, "brown");
+    await barAction(alicePage, "Comment");
+    const refusal = await refusePosts(alicePage, "**/api/v1/issues/*/comments");
+    const form = composer(alicePage);
+    const field = form.getByLabel("Comment");
+    await field.fill("Keep this draft");
+    const input = await field.elementHandle();
+    await form.evaluate((node, control) => {
+      const send = node.querySelector<HTMLButtonElement>('button[type="submit"]');
+      if (send === null || !(control instanceof HTMLTextAreaElement)) {
+        throw new Error("expected Send and the Comment field");
+      }
+      send.click();
+      control.dispatchEvent(
+        new KeyboardEvent("keydown", { bubbles: true, cancelable: true, key: "Escape" })
+      );
+    }, input);
+
+    await expect(form.getByRole("button", { name: "Discard" })).toHaveCount(0);
+    refusal();
+    await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+  });
 });
 
 test("undo and redo after a switch write back no comment mark and take no ask mark", async ({

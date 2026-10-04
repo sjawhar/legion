@@ -3,10 +3,11 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
-import { api } from "../../api/client";
+import { ApiError, api } from "../../api/client";
 import { prependEventToLog } from "../../api/sse";
 import type { Actor, Artifact, Comment, Event, UserIssueState, UserState } from "../../api/types";
 import { KeymapProvider } from "../shell/KeymapProvider";
+import { PHONE_VIEWPORT_QUERY } from "../shell/useDialog";
 import { ConversationTab } from "./ConversationTab";
 import { answeredWithErrorGuidance, safeRetryGuidance } from "./delivery";
 
@@ -85,7 +86,7 @@ function tab(
   issueArtifacts: ReadonlyMap<string, Artifact> = new Map()
 ): ReactNode {
   return (
-    <MemoryRouter>
+    <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
       <KeymapProvider>
         <QueryClientProvider client={queryClient}>
           <ConversationTab
@@ -198,6 +199,41 @@ test("observes message rows only while the Conversation panel is visible", async
     api.getIssueEvents = originalGetIssueEvents;
     api.listAgents = originalListAgents;
     globalThis.IntersectionObserver = originalIntersectionObserver;
+  }
+});
+
+test("Conversation holds Reply while its composer sends", async () => {
+  const originalGetIssueEvents = api.getIssueEvents;
+  const originalListAgents = api.listAgents;
+  const sent = Promise.withResolvers<Comment>();
+  const createComment = spyOn(api, "createComment").mockReturnValueOnce(sent.promise);
+  const queryClient = newQueryClient();
+  let unmount: (() => void) | undefined;
+
+  try {
+    const event = message(1, "Earlier message");
+    api.getIssueEvents = async () => [event];
+    api.listAgents = async () => [];
+    queryClient.setQueryData(["events", "CORE-1"], { pageParams: [null], pages: [[event]] });
+    unmount = render(tab({ "CORE-1": issueState() }, true, queryClient)).unmount;
+
+    const field = await screen.findByLabelText<HTMLTextAreaElement>("Comment");
+    fireEvent.change(field, { target: { value: "Status please" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(field.closest("fieldset")?.disabled).toBe(true));
+    const reply = screen.getByRole("button", { name: "Reply" }) as HTMLButtonElement;
+    expect(reply.disabled).toBe(true);
+    fireEvent.click(reply);
+    expect(screen.queryByRole("button", { name: "Cancel reply" })).toBeNull();
+
+    sent.reject(new Error("the server is down"));
+    await screen.findByText("Couldn't send — network error");
+    expect(createComment.mock.calls[0]).toEqual(["CORE-1", { body: "Status please" }]);
+  } finally {
+    unmount?.();
+    createComment.mockRestore();
+    api.getIssueEvents = originalGetIssueEvents;
+    api.listAgents = originalListAgents;
   }
 });
 
@@ -787,6 +823,381 @@ test("hides resolved comment turns behind their disclosure", async () => {
     unmount?.();
     api.getIssueEvents = originalGetIssueEvents;
     api.listAgents = originalListAgents;
+  }
+});
+
+// A thread the reader has open is in their hand: resolving its comment - anyone's resolve, here
+// arriving on the stream - leaves the turn, its open thread and the reply they are writing where
+// they are, and the turn takes the resolved filter only once they collapse the thread.
+test("a comment resolved while its thread is open stays, with its reply, until the thread closes", async () => {
+  const originalGetIssueEvents = api.getIssueEvents;
+  const originalListAgents = api.listAgents;
+  const queryClient = newQueryClient();
+  const root = commentEvent(1, "root-comment", "Root comment");
+  const resolved: Event = {
+    ...root,
+    id: 2,
+    payload: {
+      ...root.payload,
+      resolved: true,
+      resolved_at: "2026-09-20T00:01:00Z",
+      resolved_by: { id: "bob", kind: "user" },
+    },
+    seq: 2,
+    type: "comment.resolved",
+  };
+  let unmount: (() => void) | undefined;
+
+  try {
+    api.getIssueEvents = async () => [root];
+    api.listAgents = async () => [];
+    unmount = render(tab({ "CORE-1": issueState() }, true, queryClient)).unmount;
+    await screen.findByText("Root comment");
+    fireEvent.click(screen.getByRole("button", { name: "Expand thread" }));
+    const field = await screen.findByRole<HTMLTextAreaElement>("textbox", { name: "Reply" });
+    fireEvent.change(field, { target: { value: "Half a reply" } });
+
+    act(() => {
+      prependEventToLog(queryClient, resolved);
+    });
+    await screen.findByRole("button", { name: "Resolved (1)" });
+    expect(screen.getByText("Root comment")).toBeTruthy();
+    expect(screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Reply" })).toBe(field);
+    expect(field.value).toBe("Half a reply");
+
+    fireEvent.click(screen.getByRole("button", { name: "Collapse thread" }));
+    await waitFor(() => expect(screen.queryByText("Root comment")).toBeNull());
+  } finally {
+    unmount?.();
+    api.getIssueEvents = originalGetIssueEvents;
+    api.listAgents = originalListAgents;
+  }
+});
+
+// Resolve inside a thread closes it once the server takes it, never before: a refusal leaves the
+// thread open with the reply the reader was writing, and the Retry that lands closes it.
+test("a refused Resolve keeps the thread and its reply, and the one that lands closes it", async () => {
+  const originalGetIssueEvents = api.getIssueEvents;
+  const originalListAgents = api.listAgents;
+  const originalResolveComment = api.resolveComment;
+  const queryClient = newQueryClient();
+  const root = commentEvent(1, "root-comment", "Root comment");
+  let refuse = true;
+  const resolves: string[] = [];
+  let unmount: (() => void) | undefined;
+
+  try {
+    api.getIssueEvents = async () => [root];
+    api.listAgents = async () => [];
+    api.resolveComment = async (id) => {
+      resolves.push(id);
+      if (refuse) throw new ApiError(503, { error: "the server is down" });
+      return { ...root.payload, deliveries: [], mentions: [], resolved: true };
+    };
+    unmount = render(tab({ "CORE-1": issueState() }, true, queryClient)).unmount;
+    await screen.findByText("Root comment");
+    fireEvent.click(screen.getByRole("button", { name: "Expand thread" }));
+    const field = await screen.findByRole<HTMLTextAreaElement>("textbox", { name: "Reply" });
+    fireEvent.change(field, { target: { value: "Half a reply" } });
+
+    fireEvent.click(screen.getByRole("button", { name: "Resolve" }));
+    await screen.findByText("the server is down");
+    expect(screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Reply" })).toBe(field);
+    expect(field.value).toBe("Half a reply");
+
+    refuse = false;
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(screen.queryByRole("textbox", { name: "Reply" })).toBeNull());
+    expect(resolves).toEqual(["root-comment", "root-comment"]);
+  } finally {
+    unmount?.();
+    api.getIssueEvents = originalGetIssueEvents;
+    api.listAgents = originalListAgents;
+    api.resolveComment = originalResolveComment;
+  }
+});
+
+// With resolved comments shown, a resolved comment stays in the list, so its thread does too.
+test("with resolved comments shown, a Resolve that lands keeps its thread open", async () => {
+  const originalGetIssueEvents = api.getIssueEvents;
+  const originalListAgents = api.listAgents;
+  const originalResolveComment = api.resolveComment;
+  const queryClient = newQueryClient();
+  const earlier = commentEvent(1, "earlier-comment", "Earlier comment");
+  const earlierResolved: Event = {
+    ...earlier,
+    id: 2,
+    payload: {
+      ...earlier.payload,
+      resolved: true,
+      resolved_at: "2026-09-20T00:01:00Z",
+      resolved_by: { id: "bob", kind: "user" },
+    },
+    seq: 2,
+    type: "comment.resolved",
+  };
+  const root = commentEvent(3, "root-comment", "Root comment");
+  const resolved = Promise.withResolvers<Comment>();
+  let unmount: (() => void) | undefined;
+
+  try {
+    api.getIssueEvents = async () => [earlier, earlierResolved, root];
+    api.listAgents = async () => [];
+    api.resolveComment = () => resolved.promise;
+    unmount = render(tab({ "CORE-1": issueState() }, true, queryClient)).unmount;
+    fireEvent.click(await screen.findByRole("button", { name: "Resolved (1)" }));
+    const turn = (await screen.findByText("Root comment")).closest("li");
+    if (turn === null) throw new Error("expected the root comment's turn");
+    fireEvent.click(within(turn).getByRole("button", { name: "Expand thread" }));
+    const field = await within(turn).findByRole<HTMLTextAreaElement>("textbox", { name: "Reply" });
+    fireEvent.change(field, { target: { value: "Half a reply" } });
+
+    fireEvent.click(within(turn).getByRole("button", { name: "Resolve" }));
+    await act(async () => {
+      resolved.resolve({ ...root.payload, deliveries: [], mentions: [], resolved: true });
+      await resolved.promise;
+    });
+    await waitFor(() => expect(within(turn).queryByText("Saving…")).toBeNull());
+    expect(within(turn).getByRole<HTMLTextAreaElement>("textbox", { name: "Reply" })).toBe(field);
+    expect(field.value).toBe("Half a reply");
+  } finally {
+    unmount?.();
+    api.getIssueEvents = originalGetIssueEvents;
+    api.listAgents = originalListAgents;
+    api.resolveComment = originalResolveComment;
+  }
+});
+
+/** Stubs the viewport as a phone's (`PHONE_VIEWPORT_QUERY`); the call returned puts it back. */
+function phoneViewport(): () => void {
+  const original = window.matchMedia;
+  window.matchMedia = ((query: string) => ({
+    addEventListener: () => {},
+    addListener: () => {},
+    dispatchEvent: () => false,
+    matches: query === PHONE_VIEWPORT_QUERY,
+    media: query,
+    onchange: null,
+    removeEventListener: () => {},
+    removeListener: () => {},
+  })) as unknown as typeof window.matchMedia;
+  return () => {
+    window.matchMedia = original;
+  };
+}
+
+/** A tab whose one comment the reader resolves: `land` lets the server take the Resolve, after
+ *  which the events read lists the comment resolved, and `refuse` refuses the reply sent. */
+function ownResolveOverAReply() {
+  const root = commentEvent(1, "root-comment", "Root comment");
+  const resolvedRoot: Event = {
+    ...root,
+    id: 2,
+    payload: {
+      ...root.payload,
+      resolved: true,
+      resolved_at: "2026-09-20T00:01:00Z",
+      resolved_by: { id: "alice", kind: "user" },
+    },
+    seq: 2,
+    type: "comment.resolved",
+  };
+  const resolution = Promise.withResolvers<void>();
+  const reply = Promise.withResolvers<Comment>();
+  let resolvedOnServer = false;
+  const spies = [
+    spyOn(api, "getIssueEvents").mockImplementation(async () =>
+      resolvedOnServer ? [resolvedRoot, root] : [root]
+    ),
+    spyOn(api, "listAgents").mockImplementation(async () => []),
+    spyOn(api, "createComment").mockImplementation(() => reply.promise),
+    spyOn(api, "resolveComment").mockImplementation(async () => {
+      await resolution.promise;
+      resolvedOnServer = true;
+      return { ...root.payload, deliveries: [], mentions: [], resolved: true };
+    }),
+  ];
+  const queryClient = newQueryClient();
+  const view = render(tab({ "CORE-1": issueState() }, true, queryClient));
+  const turn = () => view.container.querySelector('[data-turn="comment:root-comment"]');
+  return {
+    land: async () => {
+      await act(async () => {
+        resolution.resolve();
+        await resolution.promise;
+      });
+      // The read after the Resolve lists the comment resolved, so only a hold keeps it.
+      await screen.findByRole("button", { name: "Resolved (1)" });
+    },
+    refuse: async () => {
+      await act(async () => {
+        reply.reject(new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" }));
+        await reply.promise.catch(() => {});
+      });
+    },
+    restore: () => {
+      view.unmount();
+      for (const spy of spies) spy.mockRestore();
+    },
+    turn,
+  };
+}
+
+const refusedText = "Couldn't send — the server is down";
+
+// A decision closes its thread once the server takes it, and the thread's reply stays the
+// reader's: the refusal it holds, and the comment that reply answers, outlive the reader's own
+// Resolve on a phone as they do at a desktop width.
+test("on a phone, the reader's own Resolve keeps the thread composer's refused reply and its comment", async () => {
+  const restoreViewport = phoneViewport();
+  const resolve = ownResolveOverAReply();
+
+  try {
+    await screen.findByText("Root comment");
+    fireEvent.click(screen.getByRole("button", { name: "Reply" }));
+    const dialog = await screen.findByRole("dialog", { name: "Thread" });
+    const field = within(dialog).getByRole<HTMLTextAreaElement>("textbox", { name: "Comment" });
+    fireEvent.change(field, { target: { value: "Refused reply" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Send" }));
+    await resolve.refuse();
+    await within(dialog).findByText(refusedText);
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Resolve" }));
+    await resolve.land();
+    expect(screen.queryByRole("dialog", { name: "Thread" })).toBeNull();
+    const turn = resolve.turn();
+    if (turn === null) throw new Error("expected the resolved comment to stay listed");
+
+    fireEvent.click(within(turn as HTMLElement).getByRole("button", { name: "Expand thread" }));
+    const reopened = await screen.findByRole("dialog", { name: "Thread" });
+    expect(within(reopened).getByText(refusedText)).toBeTruthy();
+    expect(
+      within(reopened).getByRole<HTMLTextAreaElement>("textbox", { name: "Comment" }).value
+    ).toBe("Refused reply");
+  } finally {
+    resolve.restore();
+    restoreViewport();
+  }
+});
+
+// The same, with the reply refused while the Resolve is still out: the decision lands on a thread
+// that already shows the refusal.
+test("on a phone, a thread reply refused while the reader's Resolve is out outlives the Resolve", async () => {
+  const restoreViewport = phoneViewport();
+  const resolve = ownResolveOverAReply();
+
+  try {
+    await screen.findByText("Root comment");
+    fireEvent.click(screen.getByRole("button", { name: "Reply" }));
+    const dialog = await screen.findByRole("dialog", { name: "Thread" });
+    const field = within(dialog).getByRole<HTMLTextAreaElement>("textbox", { name: "Comment" });
+    fireEvent.change(field, { target: { value: "Refused reply" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(api.createComment).toHaveBeenCalledTimes(1));
+    fireEvent.click(within(dialog).getByRole("button", { name: "Resolve" }));
+    await waitFor(() => expect(api.resolveComment).toHaveBeenCalledTimes(1));
+    await resolve.refuse();
+    await within(dialog).findByText(refusedText);
+
+    await resolve.land();
+    const turn = resolve.turn();
+    if (turn === null) throw new Error("expected the resolved comment to stay listed");
+    fireEvent.click(within(turn as HTMLElement).getByRole("button", { name: "Expand thread" }));
+    const reopened = await screen.findByRole("dialog", { name: "Thread" });
+    expect(within(reopened).getByText(refusedText)).toBeTruthy();
+    expect(
+      within(reopened).getByRole<HTMLTextAreaElement>("textbox", { name: "Comment" }).value
+    ).toBe("Refused reply");
+  } finally {
+    resolve.restore();
+    restoreViewport();
+  }
+});
+
+// The thread card's own reply, at a phone width and at a desktop one: the reader's own Resolve
+// closes the thread and keeps the reply's refusal for the thread's return.
+for (const width of ["phone", "desktop"] as const) {
+  test(`at a ${width} width, the reader's own Resolve keeps the card's refused reply and its comment`, async () => {
+    const restoreViewport = width === "phone" ? phoneViewport() : () => {};
+    const resolve = ownResolveOverAReply();
+
+    try {
+      await screen.findByText("Root comment");
+      fireEvent.click(screen.getByRole("button", { name: "Expand thread" }));
+      const field = await screen.findByRole<HTMLTextAreaElement>("textbox", { name: "Reply" });
+      const form = field.closest("form");
+      if (form === null) throw new Error("expected the card's reply form");
+      fireEvent.change(field, { target: { value: "Refused reply" } });
+      fireEvent.click(within(form).getByRole("button", { name: "Send" }));
+      await resolve.refuse();
+      await within(form).findByText(refusedText);
+
+      fireEvent.click(screen.getByRole("button", { name: "Resolve" }));
+      await resolve.land();
+      await waitFor(() => expect(screen.queryByRole("textbox", { name: "Reply" })).toBeNull());
+      const turn = resolve.turn();
+      if (turn === null) throw new Error("expected the resolved comment to stay listed");
+
+      fireEvent.click(within(turn as HTMLElement).getByRole("button", { name: "Expand thread" }));
+      const reopened = await screen.findByRole<HTMLTextAreaElement>("textbox", { name: "Reply" });
+      expect(reopened.value).toBe("Refused reply");
+      expect(screen.getByText(refusedText)).toBeTruthy();
+    } finally {
+      resolve.restore();
+      restoreViewport();
+    }
+  });
+}
+
+// The thread composer's refusal is its comment's. Left with Back while its send was out, it comes
+// back in that comment's thread: another comment's Reply opens it there, rather than readdressing
+// the composer, and its draft, to the other comment.
+test("on a phone, another comment's Reply opens the thread whose reply was refused after Back", async () => {
+  const restoreViewport = phoneViewport();
+  const a = commentEvent(1, "comment-a", "Comment A");
+  const b = commentEvent(2, "comment-b", "Comment B");
+  const reply = Promise.withResolvers<Comment>();
+  const getIssueEvents = spyOn(api, "getIssueEvents").mockImplementation(async () => [b, a]);
+  const listAgents = spyOn(api, "listAgents").mockImplementation(async () => []);
+  const createComment = spyOn(api, "createComment").mockImplementation(() => reply.promise);
+  const queryClient = newQueryClient();
+  const view = render(tab({ "CORE-1": issueState() }, true, queryClient));
+  const turn = (id: string) => {
+    const element = view.container.querySelector<HTMLElement>(`[data-turn="comment:${id}"]`);
+    if (element === null) throw new Error(`expected ${id}'s turn`);
+    return element;
+  };
+
+  try {
+    await screen.findByText("Comment A");
+    fireEvent.click(within(turn("comment-a")).getByRole("button", { name: "Reply" }));
+    let dialog = await screen.findByRole("dialog", { name: "Thread" });
+    const field = within(dialog).getByRole<HTMLTextAreaElement>("textbox", { name: "Comment" });
+    fireEvent.change(field, { target: { value: "Reply meant for A" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(createComment).toHaveBeenCalledTimes(1));
+    fireEvent.click(within(dialog).getByRole("button", { name: "Back" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Thread" })).toBeNull());
+    await act(async () => {
+      reply.reject(new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" }));
+      await reply.promise.catch(() => {});
+    });
+
+    fireEvent.click(within(turn("comment-b")).getByRole("button", { name: "Reply" }));
+    dialog = await screen.findByRole("dialog", { name: "Thread" });
+    expect(within(dialog).getByText("Comment A")).toBeTruthy();
+    expect(within(dialog).queryByText("Comment B")).toBeNull();
+    expect(within(dialog).getByText(refusedText)).toBeTruthy();
+    expect(
+      within(dialog).getByRole<HTMLTextAreaElement>("textbox", { name: "Comment" }).value
+    ).toBe("Reply meant for A");
+    expect(createComment).toHaveBeenCalledTimes(1);
+  } finally {
+    view.unmount();
+    getIssueEvents.mockRestore();
+    listAgents.mockRestore();
+    createComment.mockRestore();
+    restoreViewport();
   }
 });
 

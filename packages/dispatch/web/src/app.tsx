@@ -498,10 +498,13 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
         >
           Skip to content
         </a>
+        {/* Above the highest composer fixed at the foot of the screen (`--foot-composer-inset`,
+            `useFootInset`), so the pill never sits over its controls; otherwise just above the
+            phone's bottom bar. */}
         {connection === "reconnecting" ? (
           <p
             aria-live="polite"
-            className={`fixed right-4 bottom-20 z-40 rounded-full border px-3 py-1 text-xs font-medium shadow-lg xl:bottom-4 ${calloutWarningBorder} ${statusConnecting.bg} ${statusConnecting.text}`}
+            className={`fixed right-4 bottom-[max(5rem,calc(var(--foot-composer-inset,0px)_+_1rem))] z-40 rounded-full border px-3 py-1 text-xs font-medium shadow-lg xl:bottom-[calc(var(--foot-composer-inset,0px)_+_1rem)] ${calloutWarningBorder} ${statusConnecting.bg} ${statusConnecting.text}`}
             data-testid="connection-pill"
           >
             Reconnecting…
@@ -509,7 +512,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
         ) : connection === "unavailable" ? (
           <p
             aria-live="polite"
-            className={`fixed right-4 bottom-20 z-40 flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-medium shadow-lg xl:bottom-4 ${calloutDangerBorder} ${calloutDangerBg} ${badgeBlocking.text}`}
+            className={`fixed right-4 bottom-[max(5rem,calc(var(--foot-composer-inset,0px)_+_1rem))] z-40 flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-medium shadow-lg xl:bottom-[calc(var(--foot-composer-inset,0px)_+_1rem)] ${calloutDangerBorder} ${calloutDangerBg} ${badgeBlocking.text}`}
             data-testid="connection-pill"
           >
             Live updates unavailable
