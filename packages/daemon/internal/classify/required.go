@@ -62,6 +62,9 @@ func Judge(required []string, results map[string]string) []Standing {
 // (intake.PullRequestChecks).
 const Failed = "failure"
 
+// Cancelled is the result RunResult gives a run GitHub cancelled: its conclusion, passed through.
+const Cancelled = "cancelled"
+
 // HeadChecks is each check the pull request's base branch requires (Required), judged by the
 // settlement that stands for its head (settled), its own or one carried back from a head a
 // .legion/-only push replaced, then each workflow it requires (Workflows), judged by its latest run
@@ -98,7 +101,7 @@ func HeadChecks(pr record.PullRequest) (checks []Standing, ok bool) {
 	checks = Judge(pr.Required, results)
 	for _, workflow := range pr.Workflows {
 		result := workflow.Result
-		if pr.WorkflowsHead != pr.CheckedHead || (result == "cancelled" && pr.WorkflowsHead != pr.HeadSHA) {
+		if pr.WorkflowsHead != pr.CheckedHead || (result == Cancelled && pr.WorkflowsHead != pr.HeadSHA) {
 			result = Pending
 		}
 		checks = append(checks, Standing{Name: workflow.Path, Result: result})
@@ -138,4 +141,28 @@ func HeadVerdict(pr record.PullRequest) string {
 		}
 	}
 	return verdict
+}
+
+// RedOnlyByWorkflows says whether CI is red at the pull request's head only because a workflow its
+// base branch requires failed there: no required check is red (each passed, is pending or has no
+// result), and at least one required workflow's run is red (HeadChecks, which lists the required
+// checks before the workflows). Such a red is a required workflow's verdict on the head, which a
+// review workflow gives on its findings, and in testing and reviewing it is the reviewer's round's
+// to decide (RedSendsBack).
+func RedOnlyByWorkflows(pr record.PullRequest) bool {
+	standings, ok := HeadChecks(pr)
+	if !ok {
+		return false
+	}
+	workflowRed := false
+	for i, standing := range standings {
+		if !standing.Red() {
+			continue
+		}
+		if i < len(pr.Required) {
+			return false
+		}
+		workflowRed = true
+	}
+	return workflowRed
 }

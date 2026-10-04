@@ -363,7 +363,13 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 			return intake.Result{}, e.transition(ctx, tx, *issue, TriggerTesterFailed, "", row, pr, "")
 		}
 		if fact.Verdict == "pass" {
-			return intake.Result{}, e.transition(ctx, tx, *issue, TriggerTesterPassed, "", row, pr, "")
+			// A red only required workflows make stayed with the round (classify.RedSendsBack), so the
+			// reviewer it now starts is told it, and what the round owes it.
+			reason := ""
+			if pr != nil && classify.RedOnlyByWorkflows(*pr) {
+				reason = redAt(*pr) + workflowsToAdjudicate
+			}
+			return intake.Result{}, e.transition(ctx, tx, *issue, TriggerTesterPassed, "", row, pr, reason)
 		}
 	case phase.Reviewing:
 		_, err := e.settleRound(ctx, tx, *issue, row, pr, round{}, byCompletion)

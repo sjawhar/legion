@@ -487,3 +487,54 @@ func TestThreadsResolveWithoutAGrantNamesGh(t *testing.T) {
 		t.Fatalf("threads resolve with no grant = %d, stderr %q; want 1 and %q", code, errb.String(), want)
 	}
 }
+
+// In the reviewer's pane the command asks the daemon to resolve, since GitHub refuses the review App
+// a resolve on the implementer's pull request: it sends the pane's grant and the pull request it
+// was given, prints each outcome the daemon answers as the command always prints it, and redeems
+// no token of its own. A refusal from the daemon fails the command with the daemon's words.
+func TestThreadsResolveInTheReviewersPaneAsksTheDaemon(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		answer string
+		code   int
+		stdout string
+		stderr string
+	}{
+		{"the daemon resolves", http.StatusOK,
+			`{"threads":[{"url":"https://github.test/thread/bot","resolved":"the Legion reviewer's acceptance of a bot's thread","newestBy":"legion-reviewer"},` +
+				`{"url":"https://github.test/thread/own","leftOpen":"not an acceptance","newestBy":"legion-implementer"}]}`, 0,
+			"resolved https://github.test/thread/bot — the Legion reviewer's acceptance of a bot's thread\nleft open https://github.test/thread/own — newest reply by legion-implementer is not an acceptance\n", ""},
+		{"no thread is unresolved", http.StatusOK, `{"threads":[]}`, 0, "no unresolved threads\n", ""},
+		{"the daemon refuses", http.StatusForbidden, `{"code":"PULL_REQUEST_NOT_THE_ISSUES","error":"the grant is for LEGION-208, whose pull request is owner/repo#8, not owner/repo#7"}`, 1, "",
+			"legion threads resolve: daemon returned 403: {\"code\":\"PULL_REQUEST_NOT_THE_ISSUES\",\"error\":\"the grant is for LEGION-208, whose pull request is owner/repo#8, not owner/repo#7\"}\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var asked []string
+			daemon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, _ := io.ReadAll(r.Body)
+				asked = append(asked, r.URL.Path+" "+string(body))
+				w.WriteHeader(tc.status)
+				_, _ = io.WriteString(w, tc.answer)
+			}))
+			t.Cleanup(daemon.Close)
+			github, resolved := fakeThreadsGitHub(t, threadsPage())
+			t.Setenv("LEGION_DAEMON_URL", daemon.URL)
+			t.Setenv("LEGION_GITHUB_GRAPHQL_URL", github)
+			t.Setenv("LEGION_GRANT", "one-command-grant")
+			t.Setenv("LEGION_ROLE", "reviewer")
+			var out, errb bytes.Buffer
+			code := run(context.Background(), []string{"legion", "threads", "resolve", "--repo", "owner/repo", "--pr", "7"}, &out, &errb)
+			if code != tc.code || out.String() != tc.stdout || errb.String() != tc.stderr {
+				t.Fatalf("threads resolve in the reviewer's pane = %d, stdout %q, stderr %q; want %d, %q, %q", code, out.String(), errb.String(), tc.code, tc.stdout, tc.stderr)
+			}
+			want := `/legion/v1/threads/resolve {"grantId":"one-command-grant","repo":"owner/repo","number":7}`
+			if len(asked) != 1 || asked[0] != want {
+				t.Fatalf("the daemon was asked %q, want only %q", asked, want)
+			}
+			if got := resolved(); len(got) != 0 {
+				t.Fatalf("the command resolved %v itself, want GitHub left to the daemon", got)
+			}
+		})
+	}
+}

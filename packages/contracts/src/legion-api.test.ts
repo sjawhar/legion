@@ -26,6 +26,8 @@ import {
   LegionRootCloseRequest,
   LegionSignOffRequest,
   LegionStateResponse,
+  LegionThreadsResolveRequest,
+  LegionThreadsResolveResponse,
   LegionWaveReleaseRequest,
   LegionWaveReleaseResponse,
 } from "./legion-api";
@@ -48,6 +50,7 @@ const schemas: Record<string, z.ZodType> = {
   "github-token.json": LegionGitHubTokenResponse,
   "git-credential.json": LegionGitCredentialResponse,
   "provisioning-credential.json": LegionGitHubTokenResponse,
+  "threads-resolve.json": LegionThreadsResolveResponse,
   "handoff-complete.json": LegionEmptyResponse,
   "issue-status.json": LegionEmptyResponse,
   "gate-register.json": LegionEmptyResponse,
@@ -139,6 +142,11 @@ test("every workflow request has a strict schema", () => {
       { sessionId: "ses_controller", secret: "s" },
     ],
     ["grant credential", LegionGrantCredentialRequest, { grantId: "grant-208" }],
+    [
+      "threads resolve",
+      LegionThreadsResolveRequest,
+      { grantId: "grant-208", repo: "acme/widgets", number: 42 },
+    ],
     [
       "handoff complete",
       LegionHandoffCompleteRequest,

@@ -28,17 +28,21 @@ func (e *Engine) ready(ctx context.Context, tx pgx.Tx, issue record.Issue, packe
 	return e.enqueue(ctx, tx, issue.Key, record.MergeQueuePublish{Role: e.cfg.MergeQueueRole, Packet: packet})
 }
 
-// withdrawReady tells the project's merge queue role, when it names one, that the READY ready
-// published for the issue no longer stands: the head's own CI turned red (reason, which names the
-// head and the red checks; classify.RedWithdrawsReady), so the issue left awaiting_merge for
-// implementing, GitHub will not merge the head, and a new READY follows once the work comes back
-// through testing and review. The Dispatch issue shows the same through its status, and the
-// architect through its checks-red notice.
+// withdrawReady tells whoever ready told that the READY it posted for the issue no longer stands:
+// the head's own CI turned red (reason, which names the head and the red checks;
+// classify.RedWithdrawsReady), so the issue left awaiting_merge for implementing, GitHub will not
+// merge the head, and a new READY follows once the work comes back through testing and review. The
+// withdrawal goes where the READY went: posted on the Dispatch issue under it, and published to the
+// project's merge queue role when it names one. The architect hears it through its checks-red
+// notice.
 func (e *Engine) withdrawReady(ctx context.Context, tx pgx.Tx, issue record.Issue, pr *record.PullRequest, reason string) error {
+	packet := fmt.Sprintf("READY withdrawn for %s, pull request #%d: %s. Do not merge it: the issue is back in implementing, and a new READY will follow.", issue.Key, pr.Number, reason)
+	if err := e.enqueue(ctx, tx, issue.Key, record.MessagePost{Body: packet}); err != nil {
+		return err
+	}
 	if e.cfg.MergeQueueRole == "" {
 		return nil
 	}
-	packet := fmt.Sprintf("READY withdrawn for %s, pull request #%d: %s. Do not merge it: the issue is back in implementing, and a new READY will follow.", issue.Key, pr.Number, reason)
 	return e.enqueue(ctx, tx, issue.Key, record.MergeQueuePublish{Role: e.cfg.MergeQueueRole, Packet: packet})
 }
 

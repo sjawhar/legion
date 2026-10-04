@@ -239,12 +239,12 @@ func requiredWorkflowStandIn(t *testing.T, runs string) *httptest.Server {
 }
 
 // The daemon's pass judges a ruleset's required workflow by its latest run on the head, as it
-// judges a required check by the settlement: a failed run is CI red at the head. In testing that
-// sends the work back to implementing, as a failed required check does. In awaiting_merge, where
-// every worker is suspended, it does too, so a READY head that turns red wakes the implementer
-// instead of stranding the tree. A run still going, or one that succeeded, moves nothing. The
-// pull request's required checks were read before and passed at the head, so only the workflow
-// can decide anything.
+// judges a required check by the settlement: a failed run is CI red at the head. In testing, where
+// the required checks passed, that red is only the workflow's, which the reviewer's round decides,
+// so the tester goes on. In awaiting_merge, where every worker is suspended, it sends the work back
+// to implementing, so a READY head that turns red wakes the implementer instead of stranding the
+// tree. A run still going, or one that succeeded, moves nothing. The pull request's required checks
+// were read before and passed at the head, so only the workflow can decide anything.
 func TestARequiredWorkflowThatFailsOnTheHeadSendsTheWorkBack(t *testing.T) {
 	review := func(status, conclusion string) string {
 		return `[{"id":37,"name":"Review PR #86","path":".github/workflows/claude-pr-review.yml","event":"pull_request","status":"` + status +
@@ -258,7 +258,7 @@ func TestARequiredWorkflowThatFailsOnTheHeadSendsTheWorkBack(t *testing.T) {
 		runs   string
 		want   phase.Phase
 	}{
-		{"failed, in testing", phase.Testing, "testing", review("completed", `"failure"`), phase.Implementing},
+		{"failed, in testing", phase.Testing, "testing", review("completed", `"failure"`), phase.Testing},
 		{"failed, in awaiting_merge", phase.AwaitingMerge, "retro", review("completed", `"failure"`), phase.Implementing},
 		{"still running, in awaiting_merge", phase.AwaitingMerge, "retro", review("in_progress", "null"), phase.AwaitingMerge},
 		{"succeeded, in awaiting_merge", phase.AwaitingMerge, "retro", review("completed", `"success"`), phase.AwaitingMerge},

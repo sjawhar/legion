@@ -2,7 +2,8 @@
 
 Part of `skill://legion-worker`. Read it when you reply to, accept, or resolve a review thread,
 or run `legion threads resolve`: the implementer after every push that answers a review, the
-merger before READY, and the reviewer, who answers threads on every re-review and runs nothing.
+merger before READY, and the reviewer, who answers threads on every re-review and runs the command
+only when a required workflow is red on a bot's findings.
 Every path it cites is in sjawhar/legion.
 
 - **Threads are dispositioned individually, never resolved in bulk.** Every open review
@@ -15,7 +16,11 @@ Every path it cites is in sjawhar/legion.
   considers only the newest comment). The review App can reply on a thread but cannot resolve it:
   GitHub grants resolving a review thread to the pull request's author, and the implementer opens
   every Legion pull request (`docs/site/src/content/docs/legion/running-legion.md`, "The two
-  GitHub Apps").
+  GitHub Apps"). In the reviewer's pane (`LEGION_ROLE=reviewer`), `legion threads resolve` asks
+  the daemon instead (`POST /legion/v1/threads/resolve`), which resolves as the implementer's App
+  only the threads a bot outside Legion's role Apps opened whose newest submitted comment is the
+  reviewer's `Accepted:`, on the pull request of the reviewer's own issue, and prints the same
+  lines; the reviewer never holds the implementer's token.
   When `LEGION_GRANT_FILE` or `LEGION_GRANT` is set, use `legion threads resolve --pr <number> --repo <owner>/<repo>`.
   When neither is set, add `--gh` to that command, which applies the fallback's rule below through
   your own `gh`; where no `legion` command is installed, use `gh api graphql` with the session's
@@ -80,5 +85,8 @@ Every path it cites is in sjawhar/legion.
   opener's (read the newest comments with `gh api graphql`, never from the PR body). Another
   opener's thread that a person resolved with GitHub's button, with no `Accepted:`, gates nothing:
   neither `legion threads resolve` nor the merge queue's gate counts a resolved thread. Resolution
-  is the pull request author's App's, so your approval never waits on it. The merger resolves
-  accepted threads that remain open before publishing READY.
+  is the pull request author's App's, so your approval never waits on it, except when a workflow
+  the base branch requires is red on its findings: such a workflow passes on a re-run only once
+  its threads are resolved, so you run `legion threads resolve` (the daemon resolves the bot
+  threads you accepted) and re-run the failed run before you approve, as your role prompt says.
+  The merger resolves accepted threads that remain open before publishing READY.

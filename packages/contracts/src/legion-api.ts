@@ -334,6 +334,28 @@ export const LegionGitCredentialResponse = z.strictObject({
   password: nonEmptyString,
 });
 
+/** `api.ThreadsResolveRequest`, the reviewer pane's `legion threads resolve`: its grant, and the
+ * pull request it names, which must be its issue's. */
+export const LegionThreadsResolveRequest = z.strictObject({
+  grantId: nonEmptyString,
+  repo: nonEmptyString,
+  number: z.number().int().positive(),
+});
+/** `reviewthreads.Outcome`: an unresolved review thread the daemon resolved for the reviewer, on
+ * whose acceptance (`resolved`), or left open and why (`leftOpen`), with its newest comment's
+ * author. */
+const LegionThreadOutcome = z.strictObject({
+  url: nonEmptyString,
+  resolved: nonEmptyString.optional(),
+  leftOpen: nonEmptyString.optional(),
+  newestBy: nonEmptyString.optional(),
+});
+/** `api.ThreadsResolveResponse`, the body of `POST /legion/v1/threads/resolve`: each unresolved
+ * thread's outcome, in GitHub's order. */
+export const LegionThreadsResolveResponse = z.strictObject({
+  threads: z.array(LegionThreadOutcome),
+});
+
 /** Every completed fact route returns an intentional empty JSON object, never an unconstrained body. */
 export const LegionEmptyResponse = z.strictObject({});
 export const LegionWaveReleaseResponse = z.strictObject({

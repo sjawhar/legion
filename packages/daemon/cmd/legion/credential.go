@@ -11,6 +11,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/config"
 )
 
@@ -24,7 +25,7 @@ type githubTokenResponse struct {
 	// LegionAppLogins is each Legion role App's login, keyed by its App role ("implement",
 	// "review"), which gh-token names beside the caller's; absent when the daemon could not read
 	// every one.
-	LegionAppLogins map[string]string `json:"legionAppLogins"`
+	LegionAppLogins map[appauth.AppRole]string `json:"legionAppLogins"`
 }
 
 // errNoGrant is grantFromEnvironment's refusal when neither the pane's grant file pointer nor the

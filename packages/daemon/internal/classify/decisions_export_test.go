@@ -66,6 +66,39 @@ func TestRedSendsBackOnlyOnTheRedThatStandsForTheHead(t *testing.T) {
 	}
 }
 
+// A red that only required workflows make is the reviewer's round's to decide, so it sends nothing
+// back; a red required check sends the tree back whatever the workflows say. A required check still
+// pending or with no result is not red, so a workflow's red beside it is still the workflows' alone.
+func TestRedSendsBackLeavesARedOnlyRequiredWorkflowsMakeToTheReviewer(t *testing.T) {
+	const workflow = ".github/workflows/review.yml"
+	code := func(failing []string, cancelled []string, runs []record.AttemptRun, result string) record.PullRequest {
+		return record.PullRequest{HeadSHA: "head", CheckedHead: "head", Failing: failing, Cancelled: cancelled, CheckRuns: runs, Required: []string{"ci"},
+			Workflows: []record.RequiredWorkflow{{Path: workflow, Result: result}}, WorkflowsHead: "head"}
+	}
+	green := []record.AttemptRun{{Name: "ci", ID: 1}}
+	for _, tc := range []struct {
+		name                string
+		pr                  record.PullRequest
+		onlyWorkflows, back bool
+	}{
+		{"the required workflow failed beside a green check", code([]string{}, nil, green, "failure"), true, false},
+		{"the required workflow timed out beside a check with no result", code([]string{}, nil, nil, "timed_out"), true, false},
+		{"the required workflow failed beside a cancelled check", code([]string{}, []string{"ci"}, nil, "failure"), true, false},
+		{"the required check failed beside a green workflow", code([]string{"ci"}, nil, green, Success), false, true},
+		{"both failed", code([]string{"ci"}, nil, green, "failure"), false, true},
+		{"the workflow still running beside a green check", code([]string{}, nil, green, Pending), false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := RedOnlyByWorkflows(tc.pr); got != tc.onlyWorkflows {
+				t.Errorf("RedOnlyByWorkflows = %t, want %t", got, tc.onlyWorkflows)
+			}
+			if got := RedSendsBack(tc.pr); got != tc.back {
+				t.Errorf("RedSendsBack = %t, want %t", got, tc.back)
+			}
+		})
+	}
+}
+
 // A READY stands until the head's own CI turns red: a red the head's own settlement and run bring
 // withdraws it, a head a .legion/-only push reached included, while a red carried to it from the
 // head before it, which READY found green on GitHub since, does not; nor does any red on a pull
