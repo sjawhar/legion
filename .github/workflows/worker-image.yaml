@@ -76,8 +76,9 @@ jobs:
     runs-on: ubuntu-24.04
     # Job-level (not workflow-level): this file is also a called workflow, and job-level concurrency/env
     # behave identically for `workflow_call`, `workflow_dispatch`, and `pull_request`.
-    # Two pushes to one PR serialize on the PR number (unchanged). Other events key on github.sha,
-    # not github.ref, so a dropped pending main run never leaves a commit with no image to pin (why: this PR's description).
+    # Two pushes to one PR serialize on the PR number (unchanged). Other events key on
+    # github.sha, not github.ref, so a dropped pending main run never leaves a commit with no
+    # image to pin (why: this PR's description).
     concurrency:
       group: worker-image-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
       cancel-in-progress: false
