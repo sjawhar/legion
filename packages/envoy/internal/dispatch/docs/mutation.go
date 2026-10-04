@@ -1088,19 +1088,17 @@ func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, ac
 				s.afterReadWarm(room)
 			}
 			state := s.room(room)
+			state.mu.Lock()
 			var doc *crdt.Doc
 			var release func()
-			func() {
-				state.mu.Lock()
-				defer state.mu.Unlock()
-				if doc, release, readErr = s.holdLive(room, live); readErr == nil {
-					capture, authors = captureAuthors(state, joinedLiveWrite(ctx, room), actor)
-				}
-			}()
+			doc, release, readErr = s.holdLive(room, live)
 			if readErr != nil {
+				state.mu.Unlock()
 				return
 			}
 			defer release()
+			capture, authors = captureAuthors(state, joinedLiveWrite(ctx, room), actor)
+			state.mu.Unlock()
 			tree, readErr = treeOf(doc)
 		})
 		if readErr != nil {
