@@ -414,6 +414,12 @@ func perDocumentStateProblems(service *Service) []string {
 	if suppressed != 0 {
 		problems = append(problems, fmt.Sprintf("the service holds persistence-suppression slots for %d documents, want none", suppressed))
 	}
+	service.srv.gatesMu.Lock()
+	gates := len(service.srv.gates)
+	service.srv.gatesMu.Unlock()
+	if gates != 0 {
+		problems = append(problems, fmt.Sprintf("the service holds room close gates for %d documents, want none", gates))
+	}
 	persistence := service.persistence.(*PgVersioned)
 	persistence.locksMu.Lock()
 	locks := len(persistence.locks)

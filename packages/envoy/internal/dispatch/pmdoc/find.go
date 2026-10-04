@@ -167,8 +167,8 @@ func TargetSpansBlocks(doc *Node, r Range) bool {
 	return !withinTextblock
 }
 
-// FindHeading finds the heading whose text equals title exactly. occurrence is
-// zero-based; without it, repeated titles return ErrTargetAmbiguous.
+// FindHeading finds the heading whose text, as a read serves it (TextContent), equals title
+// exactly. occurrence is zero-based; without it, repeated titles return ErrTargetAmbiguous.
 func FindHeading(doc *Node, title string, occurrence *int) (Range, error) {
 	if doc == nil {
 		return Range{}, fmt.Errorf("%w: FindHeading wants a document", ErrSchema)
@@ -182,13 +182,7 @@ func FindHeading(doc *Node, title string, occurrence *int) (Range, error) {
 	for _, child := range doc.Children {
 		end := pos + nodeSize(child)
 		if child.Type == "heading" {
-			var text strings.Builder
-			for _, inline := range child.Children {
-				if inline.Type == "text" {
-					text.WriteString(inline.Text)
-				}
-			}
-			headingText := text.String()
+			headingText := TextContent(child)
 			if headingText == title {
 				matches = append(matches, Candidate{
 					Range:   Range{From: pos, To: end},
@@ -225,7 +219,7 @@ func headingNotFound(doc *Node, title string) error {
 		if child.Type != "heading" {
 			continue
 		}
-		heading := textContent(child)
+		heading := TextContent(child)
 		candidates = append(candidates, ranked{text: heading, prefix: commonPrefixLength(title, heading)})
 	}
 	sort.SliceStable(candidates, func(left, right int) bool {
@@ -304,7 +298,9 @@ func buildFlattenedText(doc *Node) flattenedText {
 			marks = append(marks, 0)
 		}
 		markup := nodeInlineMarkup(node)
-		for _, char := range node.Text {
+		// A quote is matched against the text every read serves, so a browser's U+0000 is U+FFFD
+		// here too; both are one UTF-16 unit, so no position moves.
+		for _, char := range nulAsReplacement(node.Text) {
 			out.WriteRune(char)
 			width := 1
 			if char > 0xffff {
@@ -503,7 +499,7 @@ func nearestBlocks(doc *Node, quote string, limit int) []string {
 	var candidates []ranked
 	walk(doc, func(node *Node, _ []int, _, _ int) bool {
 		if isTextblock(node.Type) {
-			candidate := textContent(node)
+			candidate := TextContent(node)
 			candidates = append(candidates, ranked{text: candidate, prefix: commonPrefixLength(quote, candidate)})
 		}
 		return true
@@ -540,16 +536,19 @@ func headingQuoteMatches(doc *Node, text flattenedText, title string) []quoteMat
 	return matches
 }
 
-func textContent(node *Node) string {
+// TextContent is node's text, hard breaks as line feeds, as a read serves it: each U+0000 a browser
+// edit left as U+FFFD (nulAsReplacement). An ask row's question and options, a heading anchor and
+// a miss's nearest blocks and headings are read through it.
+func TextContent(node *Node) string {
 	if node.Type == "text" {
-		return node.Text
+		return nulAsReplacement(node.Text)
 	}
 	if node.Type == "hardbreak" {
 		return "\n"
 	}
 	var out strings.Builder
 	for _, child := range node.Children {
-		out.WriteString(textContent(child))
+		out.WriteString(TextContent(child))
 	}
 	return out.String()
 }
@@ -686,7 +685,9 @@ func MarkSpans(doc *Node, markType, id string) []Range {
 }
 
 // FindMark finds the first document-contiguous range covered by a mark identity, the first of
-// its MarkSpans, and its text, the runs joined with a space where a block boundary lies between.
+// its MarkSpans, and its text, the runs joined with a space where a block boundary lies between,
+// each U+0000 written as U+FFFD (nulAsReplacement): the text is what an anchor row stores as its
+// quote.
 func FindMark(doc *Node, markType, id string) (Range, string, bool) {
 	spans := MarkSpans(doc, markType, id)
 	if len(spans) == 0 {
@@ -709,7 +710,7 @@ func FindMark(doc *Node, markType, id string) (Range, string, bool) {
 		last = end
 		return true
 	})
-	return marked, quote.String(), true
+	return marked, nulAsReplacement(quote.String()), true
 }
 
 // anchorMarkTypes are the marks an ask or comment row anchors to: its quote is the text they

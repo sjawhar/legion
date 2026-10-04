@@ -164,10 +164,10 @@ func (a *servicePersistenceAdapter) StoreUpdateContext(ctx context.Context, room
 }
 
 func (a *servicePersistenceAdapter) Compact(ctx context.Context, room string) error {
-	// ygo's persistence worker calls this, at its exit among other times. A failed room's eviction
-	// compacts under the room's lock, which every transaction meeting the failed room fails fast
-	// instead of waiting for; any other compaction leaves a room whose lock another holder has,
-	// which can be a settlement waiting for the worker's exit (compactIfIdle).
+	// ygo's persistence worker calls this, at its exit among other times. roomServer guards a
+	// repair but not a published live write (it is already durable), so a worker can still exit
+	// under that Apply. Any nonfailed compaction leaves a busy document lock to the next pass;
+	// a failed room's eviction compacts under the lock so recovery remains fail-fast (compactIfIdle).
 	if !a.service.roomFailed(room) {
 		ctx = compactIfIdle(ctx)
 	}
@@ -342,13 +342,17 @@ func (s *Service) authorizeSchemaVersion(room, clientSchemaVersion string) (webs
 	return websocket.ConnectionConfig{ReadOnly: schemaReadOnly(open, clientSchemaVersion)}, nil
 }
 
+// ActorHeader is the header a document websocket's bearer names its session in, as the JSON of a
+// session actor.
+const ActorHeader = "X-Dispatch-Actor"
+
 func (s *Service) requestActor(r *http.Request) (model.Actor, error) {
 	if token, present := auth.BearerToken(r); present {
 		if !auth.MatchesSharedAgentToken(token, s.agentToken) {
 			return model.Actor{}, errors.New("invalid document bearer token")
 		}
 		var supplied model.Actor
-		if err := json.Unmarshal([]byte(r.Header.Get("X-Dispatch-Actor")), &supplied); err != nil {
+		if err := json.Unmarshal([]byte(r.Header.Get(ActorHeader)), &supplied); err != nil {
 			return model.Actor{}, fmt.Errorf("decode document bearer actor: %w", err)
 		}
 		if supplied.Kind != "session" || strings.TrimSpace(supplied.ID) == "" {
@@ -483,7 +487,7 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 			s.finishSuppressedPersistence(published.slot, update)
 		}
 		if repair, identityRepair := origin.(*identityClosureOrigin); identityRepair {
-			s.recordSuppressedCommit(repair.slot, doc, update)
+			s.recordSuppressedCommit(repair.slot, update)
 			return
 		}
 		replica.mu.Lock()
