@@ -15,7 +15,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"slices"
 	"testing"
 	"time"
@@ -25,10 +24,11 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/api"
 	"github.com/sjawhar/envoy/internal/broker/enroll"
 	"github.com/sjawhar/envoy/internal/broker/machine"
+	"github.com/sjawhar/envoy/internal/broker/policy"
+	"github.com/sjawhar/envoy/internal/broker/policy/policytest"
 	"github.com/sjawhar/envoy/internal/broker/proof"
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/requests"
-	"github.com/sjawhar/envoy/internal/broker/rules"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
 	"github.com/sjawhar/envoy/internal/broker/store"
 	"github.com/sjawhar/envoy/internal/broker/store/storetest"
@@ -38,9 +38,9 @@ import (
 
 const (
 	testUIToken = "test-ui-token-0123456789abcdef"
-	// testApprover is DEEL_API_KEY's approver (approver: operator for a box sjawhar operates) and
-	// every machine login's login_hint below.
-	testApprover = "sjawhar"
+	// testApprover owns DEEL_API_KEY, a human-tier secret, so every request for it is an approval
+	// request to them; they are also every machine login's login_hint below.
+	testApprover = "sami@example.com"
 )
 
 // testServer is a live broker HTTP server (real handlers, real Postgres) plus a direct handle to
@@ -57,41 +57,22 @@ type testServer struct {
 // podAudience is the audience the test server's pod verifier checks and podToken mints for.
 const podAudience = "legion-broker-pod"
 
-// newTestServer writes a rules file naming the box operator sjawhar as DEEL_API_KEY's approver,
-// and login sjawhar for a pod of service account legion:worker, which WORKER_TOKEN is automatic
-// for; wires a real pod verifier against a local OIDC issuer, as cmd/broker/main.go does when
-// BROKER_K8S_OIDC_ISSUER is set; and mounts api.Register on an httptest.Server so every proof's
+// newTestServer holds three secrets: DEEL_API_KEY, human-tier, which testApprover owns and so
+// approves for every requester; WORKER_TOKEN, shared and agent-tier, which every session and pod
+// gets at once; and SHARED_KEY, shared and human-tier, which anyone signed in approves. It wires a
+// real pod verifier against a local OIDC issuer, as cmd/broker/main.go does when
+// BROKER_K8S_OIDC_ISSUER is set, and mounts api.Register on an httptest.Server so every proof's
 // htu and every request object's aud have one real, consistent PublicURL to check against.
 func newTestServer(t *testing.T) *testServer {
 	t.Helper()
 	st := storetest.Open(t)
 
-	rulesYAML := `version: 1
-secrets:
-  DEEL_API_KEY:
-    source: example/agent-secrets/DEEL_API_KEY
-    owner: sjawhar
-    delivery: inject
-    max_lifetime_seconds: 43200
-    requesters:
-      - {kind: box, operator: sjawhar, decision: approval, approver: operator}
-      - {kind: pod, service_account: 'system:serviceaccount:legion:worker', decision: approval, approver: "login:sjawhar"}
-  WORKER_TOKEN:
-    source: example/agent-secrets/WORKER_TOKEN
-    owner: sjawhar
-    delivery: inject
-    max_lifetime_seconds: 3600
-    requesters:
-      - {kind: pod, service_account: 'system:serviceaccount:legion:worker', decision: automatic}
-`
-	rulesPath := t.TempDir() + "/rules.yaml"
-	if err := os.WriteFile(rulesPath, []byte(rulesYAML), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	cur, err := rules.NewCurrent(context.Background(), rules.FileLoader{Path: rulesPath}, time.Hour, func(error) {})
-	if err != nil {
-		t.Fatalf("rules.NewCurrent: %v", err)
-	}
+	local := secrets.NewLocal(
+		policytest.Secret("DEEL_API_KEY", testApprover, policy.TierHuman, "deel-v1"),
+		policytest.Secret("WORKER_TOKEN", policy.OwnerShared, policy.TierAgent, "worker-v1"),
+		policytest.Secret("SHARED_KEY", policy.OwnerShared, policy.TierHuman, "shared-v1"),
+	)
+	cur := policytest.Current(t, local)
 
 	mux := http.NewServeMux()
 	srv := httptest.NewServer(mux)
@@ -107,13 +88,13 @@ secrets:
 	enr.Chain = enroll.NewChainVerifier(st, srv.URL, time.Minute)
 
 	reqMachine := &requests.Machine{
-		Store: st, Rules: cur, Secrets: secrets.Fake{"example/agent-secrets/DEEL_API_KEY": "deel-v1", "example/agent-secrets/WORKER_TOKEN": "worker-v1"},
+		Store: st, Policy: cur, Secrets: secrets.AWS{Client: local},
 		MaxGrant: time.Hour, PendingTTL: 12 * time.Hour,
 		Audience: srv.URL, Skew: time.Minute, Replay: enr.Replay,
 	}
 	reqMachine.Chain = requests.NewChainVerifier(st, srv.URL, time.Minute)
 	mach := &machine.Service{
-		Store: st, Enroll: enr, Rules: cur,
+		Store: st, Enroll: enr, Policy: cur,
 		Audience: srv.URL, Skew: time.Minute, PendingTTL: 15 * time.Minute, CredentialLifetime: 7 * 24 * time.Hour,
 		Replay: enr.Replay,
 	}
@@ -462,7 +443,7 @@ func TestLauncherProofRejectedOnSessionAuthRoute(t *testing.T) {
 func TestMachineLoginApprovalMintsAKeyBoundLauncherCredentialForEnrollment(t *testing.T) {
 	ts := newTestServer(t)
 	machineKey := newSigningKey(t)
-	compact := signMachineLoginRequest(t, machineKey, ts.URL, "sjawhar", "example-host-devbox")
+	compact := signMachineLoginRequest(t, machineKey, ts.URL, testApprover, "example-host-devbox")
 
 	status, body := ts.req(t, http.MethodPost, "/v1/launcher-credentials", nil, map[string]any{"request": compact})
 	if status != http.StatusAccepted {
@@ -562,7 +543,7 @@ func TestMachineLoginApprovalMintsAKeyBoundLauncherCredentialForEnrollment(t *te
 		t.Fatalf("thumbprint: %v", err)
 	}
 	status, body = ts.launcher(t, machineKey, credentialID, http.MethodPost, "/v1/enrollments", map[string]any{
-		"kind": "box", "runtime_id": "box-" + t.Name(), "operator": "sjawhar", "thumbprint": sessionThumbprint,
+		"kind": "box", "runtime_id": "box-" + t.Name(), "operator": testApprover, "thumbprint": sessionThumbprint,
 	})
 	if status != http.StatusCreated {
 		t.Fatalf("POST /v1/enrollments (launcher proof) = %d, want 201: %s", status, body)
@@ -599,7 +580,7 @@ func TestMachineLoginLookupUnknownCodeIsNoSuchCode(t *testing.T) {
 func TestApproveMachineRecordWithoutCodeIsCodeRequired(t *testing.T) {
 	ts := newTestServer(t)
 	machineKey := newSigningKey(t)
-	compact := signMachineLoginRequest(t, machineKey, ts.URL, "sjawhar", "example-host-devbox")
+	compact := signMachineLoginRequest(t, machineKey, ts.URL, testApprover, "example-host-devbox")
 	_, body := ts.req(t, http.MethodPost, "/v1/launcher-credentials", nil, map[string]any{"request": compact})
 	login := decode[struct {
 		PendingID string `json:"pending_id"`
@@ -626,7 +607,7 @@ func TestApproveMachineRecordWithoutCodeIsCodeRequired(t *testing.T) {
 // grant list, and human revocation, refused for any login but the approver's.
 func TestAgentSecretRequestLifecycle(t *testing.T) {
 	ts := newTestServer(t)
-	enrollmentID, sessionKey := ts.newSessionEnrollment(t, "box", "box-"+t.Name(), "sjawhar")
+	enrollmentID, sessionKey := ts.newSessionEnrollment(t, "box", "box-"+t.Name(), testApprover)
 
 	compact := signAgentSecretRequest(t, sessionKey, ts.URL, "need it for the demo", "DEEL_API_KEY")
 	status, body := ts.session(t, sessionKey, enrollmentID, http.MethodPost, "/v1/requests",
@@ -640,7 +621,7 @@ func TestAgentSecretRequestLifecycle(t *testing.T) {
 	}
 	requestID, recordID := created.RequestID, *created.RecordID
 
-	status, body = ts.ui(t, http.MethodGet, "/v1/pending?approver=sjawhar", nil)
+	status, body = ts.ui(t, http.MethodGet, "/v1/pending?approver="+testApprover, nil)
 	if status != http.StatusOK {
 		t.Fatalf("GET /v1/pending = %d: %s", status, body)
 	}
@@ -668,8 +649,8 @@ func TestAgentSecretRequestLifecycle(t *testing.T) {
 	if readBack.State != "pending" || readBack.Approver != testApprover {
 		t.Fatalf("record read = %+v, want pending with approver %s", readBack, testApprover)
 	}
-	if readBack.Enrollment == nil || readBack.Enrollment.Kind != "box" || readBack.Enrollment.Operator != "sjawhar" || readBack.Enrollment.Slot != nil {
-		t.Fatalf("record enrollment = %+v, want kind=box operator=sjawhar and no slot", readBack.Enrollment)
+	if readBack.Enrollment == nil || readBack.Enrollment.Kind != "box" || readBack.Enrollment.Operator != testApprover || readBack.Enrollment.Slot != nil {
+		t.Fatalf("record enrollment = %+v, want kind=box operator=%s and no slot", readBack.Enrollment, testApprover)
 	}
 
 	status, body = ts.ui(t, http.MethodPost, "/v1/credential-requests/"+recordID+"/approve",
@@ -704,8 +685,8 @@ func TestAgentSecretRequestLifecycle(t *testing.T) {
 	if statusResp.State != "granted" || statusResp.GrantID == nil || *statusResp.GrantID != grantID {
 		t.Fatalf("request status = %+v, want granted with grant_id %s", statusResp, grantID)
 	}
-	if statusResp.Decision == nil || statusResp.Decision.By != "sjawhar" {
-		t.Fatalf("request decision = %+v, want by=sjawhar", statusResp.Decision)
+	if statusResp.Decision == nil || statusResp.Decision.By != testApprover {
+		t.Fatalf("request decision = %+v, want by=%s", statusResp.Decision, testApprover)
 	}
 
 	status, body = ts.session(t, sessionKey, enrollmentID, http.MethodPost, "/v1/grants/"+grantID+"/values", nil)
@@ -719,7 +700,7 @@ func TestAgentSecretRequestLifecycle(t *testing.T) {
 		t.Fatalf("values = %+v, want DEEL_API_KEY=deel-v1", values.Values)
 	}
 
-	status, body = ts.ui(t, http.MethodGet, "/v1/grants?approver=sjawhar", nil)
+	status, body = ts.ui(t, http.MethodGet, "/v1/grants?approver="+testApprover, nil)
 	if status != http.StatusOK {
 		t.Fatalf("GET /v1/grants = %d: %s", status, body)
 	}
@@ -739,8 +720,8 @@ func TestAgentSecretRequestLifecycle(t *testing.T) {
 		t.Fatalf("listed grant = %+v, want names [DEEL_API_KEY] approved by %s on an enrollment with no slot", listed, testApprover)
 	}
 
-	// Revoking by approver takes the grant's approver or its enrollment's operator (both sjawhar
-	// here); any other login is refused.
+	// Revoking by approver takes the grant's approver or its enrollment's operator (both
+	// testApprover here); any other login is refused.
 	status, body = ts.ui(t, http.MethodPost, "/v1/grants/"+grantID+"/revoke-by-approver",
 		map[string]any{"approver": "mallory"})
 	if status != http.StatusForbidden || decode[wireError](t, body).Code != "NOT_APPROVER" {
@@ -761,7 +742,7 @@ func TestAgentSecretRequestLifecycle(t *testing.T) {
 		t.Fatalf("code = %q, want GRANT_NOT_LIVE", werr.Code)
 	}
 
-	status, body = ts.ui(t, http.MethodGet, "/v1/grants?approver=sjawhar", nil)
+	status, body = ts.ui(t, http.MethodGet, "/v1/grants?approver="+testApprover, nil)
 	if status != http.StatusOK {
 		t.Fatalf("GET /v1/grants (after revoke) = %d: %s", status, body)
 	}
@@ -792,10 +773,9 @@ func TestCreateRequestWithProofTypJWSIs400(t *testing.T) {
 	}
 }
 
-// TestCreateRequestWithUnknownSecretNameIs400UnknownSecret pins the shared broker contract's
-// "identifier must name a rule's secret (else 400 UNKNOWN_SECRET at record time)"
-// (dispatch://AGENTC-393/artifact/plan-overview-md) over real HTTP: a request naming
-// a secret no rule mentions is refused, not folded into an ordinary deny decision.
+// TestCreateRequestWithUnknownSecretNameIs400UnknownSecret pins, over real HTTP, that a request
+// naming a secret the policy does not serve is 400 UNKNOWN_SECRET at record time, not folded into
+// an ordinary deny decision.
 func TestCreateRequestWithUnknownSecretNameIs400UnknownSecret(t *testing.T) {
 	ts := newTestServer(t)
 	enrollmentID, sessionKey := ts.newSessionEnrollment(t, "box", "box-"+t.Name(), "sjawhar")
@@ -808,6 +788,20 @@ func TestCreateRequestWithUnknownSecretNameIs400UnknownSecret(t *testing.T) {
 	werr := decode[wireError](t, body)
 	if werr.Code != "UNKNOWN_SECRET" {
 		t.Fatalf("code = %q, want UNKNOWN_SECRET", werr.Code)
+	}
+}
+
+// TestCreateRequestNeedingTwoApproversIs400MixedApprovers pins, over real HTTP, that a request for
+// testApprover's human-tier secret beside a shared human-tier one, whose approver is anyone, is
+// refused 400 MIXED_APPROVERS rather than recorded as one decision.
+func TestCreateRequestNeedingTwoApproversIs400MixedApprovers(t *testing.T) {
+	ts := newTestServer(t)
+	enrollmentID, sessionKey := ts.newSessionEnrollment(t, "box", "box-"+t.Name(), testApprover)
+	compact := signAgentSecretRequest(t, sessionKey, ts.URL, "need both", "DEEL_API_KEY", "SHARED_KEY")
+	status, body := ts.session(t, sessionKey, enrollmentID, http.MethodPost, "/v1/requests",
+		map[string]any{"request": compact, "session_id": nil})
+	if status != http.StatusBadRequest || decode[wireError](t, body).Code != "MIXED_APPROVERS" {
+		t.Fatalf("POST /v1/requests (DEEL_API_KEY, SHARED_KEY) = %d %s, want 400 MIXED_APPROVERS", status, body)
 	}
 }
 
