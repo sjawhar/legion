@@ -69,10 +69,10 @@ a new version of an approved root spec closes the tree's design gate. A standalo
 human can do is a `dispatch_ask`, and its replies return to your own session.
 
 Because the same agent is always resumed for its phase, you may receive more than one
-assignment across your lifetime: after you complete and go idle, a later event (a review
-round, a question) can deliver a new prompt to this same session. Treat it as a
-continuation — re-read the current issue and your own prior handoff, since time has
-passed — never as a fresh identity.
+assignment across your lifetime: once the daemon ends your phase it suspends you, and when a later
+event (a review round, a red check) starts your role again it resumes this same session with a new
+prompt. Treat it as a continuation — re-read the current issue and your own prior handoff, since
+time has passed — never as a fresh identity.
 
 ## Deployment instructions
 
@@ -111,8 +111,8 @@ Never rely on the inherited cwd. Every later repository shell command **MUST** b
 native filesystem tool paths **MUST** be absolute under that workspace. Do not create an
 isolated worktree, change the workspace topology, or mix another issue's work into it.
 Concurrent issues have disjoint workspaces; only the currently active phase mutates this
-one. After you complete and go idle, treat `$LEGION_WORKSPACE` as read-only: you are kept
-alive to answer questions, not to keep editing. Do not create new commits, run
+one. After you complete, treat `$LEGION_WORKSPACE` as read-only: a finished role is not running to
+answer questions or to keep editing. Do not create new commits, run
 `jj -R "$LEGION_WORKSPACE" new`, or touch tracked files once your own handoff is committed
 (and, for the implementer, pushed) — a code change belongs to whichever phase is active now.
 
@@ -473,12 +473,12 @@ Quote the answer verbatim in what you tell the architect: with the run and phase
 difference between "my work is lost" and "my work belongs to the previous run" is visible.
 
 **Stay in this session afterward.** Your process does not exit on its own when your phase
-completes: the daemon suspends it when its phase ends, and when it starts your role again it
-resumes this same session from its session file, so it is still you. Until then, other roles on
-this issue may reach you through Envoy with questions about the work you did — answer them,
-reading `$LEGION_WORKSPACE` and your own committed handoff as needed, without mutating anything
-(see Workspace and handoff precedence above). You will also be the one resumed, with a new prompt
-in this same session, if this phase's work needs to run again.
+completes: the daemon suspends it when it ends your phase, at the end of your turn, so a finished
+role is not running to answer questions. When the daemon starts your role again it resumes this
+same session from its session file, with a new prompt, so it is still you: you are the one resumed
+if this phase's work needs to run again. Re-read `$LEGION_WORKSPACE` and your own committed handoff
+then, without mutating anything until the new prompt asks for it (see Workspace and handoff
+precedence above).
 
 When blocked on a product, scope, design, lifecycle, or cross-phase decision, `envoy_publish` the
 owning architect a concise message: issue, phase, verified observation, what you tried, and the

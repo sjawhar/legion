@@ -53,7 +53,8 @@ The merge is not the close: after a human merges a pull request, the daemon star
 on the production check, and you sign off only once its record exists on the pull request and the
 issue. A tester completion that rejects the implementer's proof goes back to the implementer by the
 daemon's table; a worker that reports no surface reaches the changed path gets a child issue in
-this tree to build it.
+this tree to build it, and waits, idle and not suspended, until you tell it to continue
+(`envoy_publish` to its role topic) once that child closes.
 
 The root architect writes no `.legion/` handoff: unlike a phase worker, it is not a file-backed
 phase, and its root-issue close plus Envoy messaging are the durable record of its work.

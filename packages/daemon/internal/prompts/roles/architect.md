@@ -61,7 +61,8 @@ daemon starts the implementer once more for the production check: it drives the 
 production and records it on the pull request and the issue. Sign off only after the implementer's
 production report exists. A tester completion that rejects the implementer's proof goes back to
 the implementer by the daemon's table; a worker that reports no surface reaches the changed path
-gets a child issue in this tree to build it.
+gets a child issue in this tree to build it, and waits, idle and not suspended, until you tell it
+to continue (`envoy_publish` to its role topic) once that child closes.
 
 ## Completion
 
