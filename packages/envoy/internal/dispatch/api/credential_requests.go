@@ -4,9 +4,9 @@
 // require a human caller, require the broker to be configured, resolve or read its input, call
 // the matching agentsecrets.Client method, and forward the broker's exact status and body — the
 // broker decides. The pending list alone answers null rather than 404 FEATURE_OFF without a broker.
-// The one thing Dispatch supplies is who decides: approve, deny and revoke send the
-// login requireHuman resolved, in Dispatch's canonical lowercase form, as the approver, and never
-// forward the browser's body, so nothing a browser sends can name the approver (AGENTC-393).
+// The one thing Dispatch supplies is who decides: approve, deny, revoke and the machine-login list
+// send the login requireHuman resolved, in Dispatch's canonical lowercase form, as the approver,
+// and never forward the browser's body, so nothing a browser sends can name the approver.
 package api
 
 import (
@@ -219,5 +219,39 @@ func (s *server) revokeCredentialGrant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	body, err := client.RevokeByApprover(r.Context(), r.PathValue("id"), canonicalLogin(actor.ID))
+	relayBrokerResponse(w, body, err)
+}
+
+// --- GET /api/v1/machine-logins, POST .../{id}/revoke ---
+
+// listMachineLogins answers the machine logins the caller approved that can still reach a secret,
+// a service's among them and an expired one whose sessions still run: Dispatch names the caller as
+// the approver, so no one lists another person's.
+func (s *server) listMachineLogins(w http.ResponseWriter, r *http.Request) {
+	actor, ok := s.requireHuman(w, r)
+	if !ok {
+		return
+	}
+	client, ok := s.requireAgentSecrets(w)
+	if !ok {
+		return
+	}
+	body, err := client.MachineLogins(r.Context(), canonicalLogin(actor.ID))
+	relayBrokerResponse(w, body, err)
+}
+
+// revokeMachineLogin ends a machine login the caller approved, expired or not, and with it every
+// session that login enrolled (a service's login: every pod it started): the broker allows it only
+// when the caller is the person who approved it. The browser's body carries nothing Dispatch reads.
+func (s *server) revokeMachineLogin(w http.ResponseWriter, r *http.Request) {
+	actor, ok := s.requireHuman(w, r)
+	if !ok {
+		return
+	}
+	client, ok := s.requireAgentSecrets(w)
+	if !ok {
+		return
+	}
+	body, err := client.RevokeMachineLogin(r.Context(), r.PathValue("id"), canonicalLogin(actor.ID))
 	relayBrokerResponse(w, body, err)
 }

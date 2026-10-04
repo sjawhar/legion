@@ -13,11 +13,10 @@ import (
 	gws "github.com/gorilla/websocket"
 	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/encoding"
+	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
-	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
-	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
@@ -176,7 +175,7 @@ func TestLoadFailureMakesDocumentServiceUnavailable(t *testing.T) {
 		Store:       database,
 		Persistence: failingVersionedStore{VersionedStore: NewPgVersioned(database), loadErr: errors.New("load failed")},
 		Events:      events.NewBroker(),
-		Identity:    identity.HeaderIdentity{Header: "X-Dispatch-User", People: store.NewPgPeopleStore(database.Pool)},
+		Identity:    headerIdentity(database),
 	})
 	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
 
@@ -205,7 +204,7 @@ func TestCorruptLoadRefusesTheSocketAndReadsAsUnloadable(t *testing.T) {
 		Store:       database,
 		Persistence: failingVersionedStore{VersionedStore: NewPgVersioned(database), loadUpdate: []byte{0xff}},
 		Events:      events.NewBroker(),
-		Identity:    identity.HeaderIdentity{Header: "X-Dispatch-User", People: store.NewPgPeopleStore(database.Pool)},
+		Identity:    headerIdentity(database),
 	})
 	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
 
@@ -322,7 +321,7 @@ func TestShutdownClosesDocumentPeersBeforeDrain(t *testing.T) {
 	artifactID := createDocument(t, database, "before")
 	service := New(Deps{
 		Store: database, Events: events.NewBroker(),
-		Identity: identity.HeaderIdentity{Header: "X-Dispatch-User", People: store.NewPgPeopleStore(database.Pool)},
+		Identity: headerIdentity(database),
 	})
 	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
 	seedServiceText(t, service, artifactID, "before")
@@ -362,7 +361,7 @@ func TestShutdownBoundsPeerCloseDuringLockedAppend(t *testing.T) {
 	artifactID := createDocument(t, database, "before")
 	service := New(Deps{
 		Store: database, Events: events.NewBroker(),
-		Identity: identity.HeaderIdentity{Header: "X-Dispatch-User", People: store.NewPgPeopleStore(database.Pool)},
+		Identity: headerIdentity(database),
 		Settle:   time.Hour,
 	})
 	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
@@ -414,7 +413,7 @@ func TestAppendFailureClosesDocumentConnectionAndReloadsRoom(t *testing.T) {
 		Store:       database,
 		Persistence: failingVersionedStore{VersionedStore: NewPgVersioned(database), appendErr: errors.New("append failed")},
 		Events:      events.NewBroker(),
-		Identity:    identity.HeaderIdentity{Header: "X-Dispatch-User", People: store.NewPgPeopleStore(database.Pool)},
+		Identity:    headerIdentity(database),
 		Settle:      time.Hour,
 	})
 	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
@@ -452,7 +451,7 @@ func TestFailedRoomEvictsAndReloadsOnNextAccess(t *testing.T) {
 		Store:       database,
 		Persistence: &failingOnceVersionedStore{VersionedStore: NewPgVersioned(database)},
 		Events:      events.NewBroker(),
-		Identity:    identity.HeaderIdentity{Header: "X-Dispatch-User", People: store.NewPgPeopleStore(database.Pool)},
+		Identity:    headerIdentity(database),
 	})
 	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
 	seedServiceText(t, service, artifactID, "before")
@@ -484,12 +483,12 @@ func TestDocumentBearerCannotForgeVerifiedServiceSubject(t *testing.T) {
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "# First")
 	service := New(Deps{
-		Store:      database,
-		Events:     events.NewBroker(),
-		Identity:   identity.HeaderIdentity{Header: "X-Dispatch-User", People: store.NewPgPeopleStore(database.Pool)},
-		AgentToken: "doc-agent-token",
-		ServerURL:  "https://dispatch.example",
-		Settle:     20 * time.Millisecond,
+		Store:       database,
+		Events:      events.NewBroker(),
+		Identity:    headerIdentity(database),
+		AgentTokens: sharedAgentTokens(t, "doc-agent-token"),
+		ServerURL:   "https://dispatch.example",
+		Settle:      20 * time.Millisecond,
 	})
 	t.Cleanup(func() {
 		if err := service.Shutdown(context.Background()); err != nil {
@@ -546,16 +545,29 @@ func TestDocumentBearerCannotForgeVerifiedServiceSubject(t *testing.T) {
 	}
 }
 
-// The document websocket takes a bearer's session actor only when the bearer is the shared agent
-// token; one byte off, the same actor is refused.
+// sharedAgentTokens is a DISPATCH_AGENT_TOKEN setting parsed as the server parses it at boot.
+func sharedAgentTokens(t *testing.T, setting string) *auth.SharedAgentTokens {
+	t.Helper()
+	tokens, err := auth.ParseSharedAgentTokens(setting)
+	if err != nil {
+		t.Fatalf("ParseSharedAgentTokens(%q): %v", setting, err)
+	}
+	return tokens
+}
+
+// The document websocket takes a bearer's session actor only when the bearer is one of the shared
+// agent token's values; one byte off, or a value the setting does not list, the same actor is
+// refused.
 func TestDocumentBearerMustBeTheSharedToken(t *testing.T) {
-	service := &Service{agentToken: "doc-agent-token"}
+	service := &Service{agentTokens: sharedAgentTokens(t, "doc-agent-token old-doc-token")}
 	for _, test := range []struct {
 		authorization string
 		admitted      bool
 	}{
 		{authorization: "Bearer doc-agent-token", admitted: true},
+		{authorization: "Bearer old-doc-token", admitted: true},
 		{authorization: "Bearer doc-agent-tokem", admitted: false},
+		{authorization: "Bearer other-doc-token", admitted: false},
 	} {
 		request := httptest.NewRequest(http.MethodGet, "/ws/doc/room", nil)
 		request.Header.Set("Authorization", test.authorization)

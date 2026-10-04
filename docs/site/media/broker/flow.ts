@@ -5,8 +5,9 @@
 // person acts on, and the Dispatch pages and controls a person uses to approve it.
 import type { Locator, Page } from "@playwright/test";
 
-/** The harness's signed-in human: the agent machine's operator and every request's approver. */
-export const operator = "alice";
+/** The harness's signed-in human: the agent machine's operator, and the owner and so the approver
+ *  of the demo's one secret. */
+export const operator = "alice@example.com";
 export const agentHost = "example-host-build";
 export const reason = "Publish the docs preview for PR 42 with the demo API";
 

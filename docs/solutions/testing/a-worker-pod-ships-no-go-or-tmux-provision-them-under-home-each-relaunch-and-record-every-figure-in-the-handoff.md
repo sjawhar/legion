@@ -37,7 +37,7 @@ related_issues:
 - Run the recipe from a plan task with exact URLs and versions, so the tester reproduces the
   environment rather than the implementer's memory of it.
 
-## The recipe (worker image at Debian 13 trixie, `go 1.26.1`)
+## The recipe (worker image at Debian 13 trixie, `go 1.26.8`)
 
 Download with `bun` (the image has it; it has no `curl`). Write the downloader with the `write`
 tool if the pane refuses a heredoc.
@@ -57,7 +57,7 @@ for (let i = 0; i + 1 < a.length; i += 2) {
 ```bash
 mkdir -p "$HOME/tools" "$HOME/proof" && cd "$HOME/tools"
 P=https://deb.debian.org/debian/pool/main
-bun fetch.ts https://go.dev/dl/go1.26.1.linux-amd64.tar.gz go.tgz \
+bun fetch.ts https://go.dev/dl/go1.26.8.linux-amd64.tar.gz go.tgz \
   $P/t/tmux/tmux_3.5a-3_amd64.deb tmux.deb \
   "$P/libe/libevent/libevent-core-2.1-7t64_2.1.13-stable-1~deb13u1_amd64.deb" libevent.deb \
   $P/libu/libutempter/libutempter0_1.2.1-5_amd64.deb libutempter.deb \
@@ -68,7 +68,7 @@ printf '%s\n' '#!/bin/sh' \
 chmod +x bin/tmux
 printf '%s\n' 'export PATH="$HOME/tools/go/bin:$HOME/tools/bin:$PATH" GOTOOLCHAIN=local' \
   'unset LD_LIBRARY_PATH' 'export GOWORK=off' > "$HOME/proof/env.sh"
-. "$HOME/proof/env.sh" && go version && tmux -V   # go1.26.1 linux/amd64, tmux 3.5a
+. "$HOME/proof/env.sh" && go version && tmux -V   # go1.26.8 linux/amd64, tmux 3.5a
 ```
 
 Every later `go` or `tmux` command begins `. "$HOME/proof/env.sh" &&`; a bash call starts without

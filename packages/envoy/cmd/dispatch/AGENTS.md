@@ -143,7 +143,16 @@ write identity errors with `identity.WriteError`.
   token, and `identity.Membership` renews that sign-in at least hourly: a
   refresh the pool refuses, or one whose ID token no longer puts the person in
   the group, advances their session generation and forgets the token, ending
-  every session they hold.
+  every session they hold. `store.PgPeopleStore` seals that token at rest
+  (`store/refresh_token_seal.go`; the format is in the README's Identity
+  section) under a key derived from the session signing key, which main hands
+  it with the cookie key (`openPeople`, `signin.go`). A stored value that does
+  not open is no refresh token: `Membership` answers none and logs, writing
+  nothing. Every boot retires each token stored in plain text
+  (`retirePlainRefreshTokens`, `PgPeopleStore.RetirePlainRefreshTokens`):
+  revoke at the pool (`oidc.CodeFlow.Revoke`), then compare-and-clear;
+  `SignIn` retires the plain-text token it replaces through the same
+  `retire`. A sealed value is never sent to the pool.
 - `DISPATCH_IDENTITY=header:<Header-Name>` is for tests and local harnesses
   only, never for a production Dispatch deployment. It accepts the named
   header's value lowercased and records it in `people`; it requires
@@ -199,10 +208,19 @@ write identity errors with `identity.WriteError`.
 - Agents normally authenticate as a `session` actor with a personal `dsp_` token
   minted by a human in Settings, sent as `Authorization: Bearer <token>`.
   `DISPATCH_AGENT_TOKEN` is the shared devbox fallback; its callers have no
-  owner attribution. The API and the document websocket (`/ws/doc/{room}`)
-  read the bearer with one helper, `auth.BearerToken`, and compare it with one
-  constant-time helper, `auth.MatchesSharedAgentToken`. Bearer callers cannot
-  act as users.
+  owner attribution. It holds one value or several separated by whitespace, so
+  the token can rotate with an overlap, and `resolveBootConfig` parses it once
+  (`auth.ParseSharedAgentTokens`, which refuses an empty or repeated entry by
+  position) into the one `*auth.SharedAgentTokens` that `appContextOptions`
+  hands the router and `newDocumentService` hands the document service, so the
+  settings tests drive both from the variable. The API and the document
+  websocket (`/ws/doc/{room}`) read the bearer with one helper,
+  `auth.BearerToken`, and compare it with one helper,
+  `auth.MatchesSharedAgentToken`, which compares it with every value in
+  constant time and logs a match on a value after the first once per
+  `X-Forwarded-For` address and User-Agent every 10 minutes
+  (`cmd/dispatch/README.md` names the line's fields). Bearer callers cannot act
+  as users.
 - `DISPATCH_OIDC_ISSUER` + `DISPATCH_OIDC_AUDIENCE` (both or neither; half the
   pair refuses to boot naming the missing one) make a Kubernetes pod's projected
   service-account token a third bearer credential. `resolveBootConfig` only
@@ -257,7 +275,7 @@ the table says human only.
 | --- | --- | --- | --- |
 | `/api/v1` | GET | public | List every `/api/v1` route with method, auth, and purpose. |
 | `/auth/start` | GET | public | Start Google sign-in through the sign-in pool; `503 SIGNIN_UNCONFIGURED` on a server with no `DISPATCH_SIGNIN_*`. |
-| `/auth/callback` | GET | sign-in state | Exchange the pool's code, name the person by the email in their username, sign in a member of `DISPATCH_SIGNIN_GROUP` (a 403 page naming anyone else), record them in `people` with the refresh token, and issue the session cookie. |
+| `/auth/callback` | GET | sign-in state | Exchange the pool's code, name the person by the email in their username, sign in a member of `DISPATCH_SIGNIN_GROUP` (a 403 page naming anyone else), record them in `people` with the refresh token sealed, and issue the session cookie. |
 | `/auth/logout` | POST | identity | Advance the person's session generation, forget their refresh token, and clear the cookie. Local only: the pool's own session is left alone. |
 | `/auth/whoami` | GET | identity | Return the resolved person, `{kind: "user", login}` with `login` their lowercase email. |
 | `/auth/_dev/signin` | GET | public, `DISPATCH_DEV_SIGNIN=1` only; loopback peer, no forwarding header | Record the lowercased person `login` names and issue their session cookie with no pool exchange, then redirect to the sanitized `next`; `400 DEV_SIGNIN_INPUT`, `403 DEV_SIGNIN_FORBIDDEN`. Not mounted otherwise. |
