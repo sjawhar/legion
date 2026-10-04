@@ -47,7 +47,10 @@ are ones you checked.
    established: the problem and its evidence, what the human has said in their own words, the
    facts the next questions need, and each question that is ready, as a decision block at the end
    of the section that sets it up. Write nothing past those questions: no design, no defaults you
-   chose, no "what we will build", and no recommendation outside a decision block's own text.
+   chose, no "what we will build", and no recommendation outside a decision block's own text. A
+   point the human has not stated, however obvious it seems (what a word in the request means, how
+   an edge case behaves, what a change does to an existing command), goes inside a decision block
+   or stays out.
 2. **The human answers or comments.** Reply to each human comment in its thread
    (`dispatch_comment` with `reply_to`), then rewrite the passage the answer or the comment changes.
    Under an open ask whose next move is yours, such as the approval request you must revise or
