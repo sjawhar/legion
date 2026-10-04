@@ -44,6 +44,8 @@ const ASK_OPTIONS_CONTRACT =
   "Options carry the genuinely different approaches. Each option has a label, and its description " +
   "says what that approach costs.";
 
+const HUMAN_AGREED_TO_DOCUMENT = "the human has agreed to every point in the document";
+
 function documentOwnerValidation(
   requireArtifact: boolean,
   alwaysRequireArtifact = false
@@ -412,15 +414,20 @@ export const dispatchToolSpecs = [
       ],
     },
     description:
-      "Open a durable, answerable decision on an issue or project document. Do not use it for a " +
-      "status update or discussion; use dispatch_message instead. " +
+      "Open a to-do or permission only a human can give, or a decision that has no document to " +
+      "live in. A question about the design an issue's document records is not this tool: write " +
+      "it into that document as a decision block (dispatch_doc_edit inserting an ask block at the " +
+      "end of the section it concerns), at every phase, approved spec or not; the block reaches " +
+      "the Inbox and its answer lands next to its context. Never give an ask an Approve option: a " +
+      "document is approved through dispatch_request_approval. Do not use this tool for a status " +
+      "update or discussion; use dispatch_message instead. " +
       ASK_QUESTION_CONTRACT +
       " " +
       ASK_OPTIONS_CONTRACT +
       " For an action only a human can perform, state what it changes and risks as constraints. " +
-      "Anything you are blocked on a human for, including a credential or grant to renew, an " +
-      "approval, or a decision, is an ask, never a message. " +
-      "Anchor a document question, thread reply_to/reply_to_ask, or cite a dispatch:// " +
+      "Anything that requires a human to do, including a credential or grant renewal, is an ask, " +
+      "never a message. " +
+      "Anchor a to-do about a document passage, thread reply_to/reply_to_ask, or cite a dispatch:// " +
       `reference — it must be answerable from its own text and anchor alone, never "see above". ` +
       `A quote anchor is pinned to its block. Question is at most ${ASK_QUESTION_MAX} characters ` +
       `and has at most 8 options. ${OWNER_REFERENCE}`,
@@ -690,11 +697,11 @@ export const dispatchToolSpecs = [
     name: "dispatch_message",
     example: { issue: "DSP-1", body: "Implementation started." },
     description:
-      "Post a note humans must read now: a reply to a human's message or a deliverable that landed. A blocker only a human can " +
-      "clear is an ask (dispatch_ask), so it lands in their inbox. Never progress or status updates - Dispatch is a high-signal " +
-      "record, not a log. Not a decision (dispatch_ask) or document feedback (dispatch_comment). To answer a human's direct message to this session - " +
-      "one sent from the Agents page, which names no issue - pass that message's bare id as in_reply_to and no issue; " +
-      "the reply lands in that conversation. Another call with the same in_reply_to and new text posts a follow-up, " +
+      "Post a note humans must read now: a reply to a human's message or a deliverable that landed. A to-do only a human can " +
+      "complete is an ask (dispatch_ask), so it reaches their inbox. Never progress or status updates - Dispatch is a high-signal " +
+      "record, not a log. Not a design decision (write it as a decision block in the document) or document feedback (dispatch_comment). " +
+      "To answer a human's direct message to this session - one sent from the Agents page, which names no issue - pass that message's bare id as " +
+      "in_reply_to and no issue; the reply lands in that conversation. Another call with the same in_reply_to and new text posts a follow-up, " +
       "threaded under this session's first reply; the same text again posts nothing. dispatch_read({message}) reads " +
       "that conversation back. Every other message names its issue. " +
       `Body is at most 2,000 characters. ${ISSUE_REFERENCE}`,
@@ -848,9 +855,11 @@ export const dispatchToolSpecs = [
     name: "dispatch_doc_read",
     example: { issue: "DSP-1" },
     description:
-      "Read a live document or a named document version. Do not use it for issue status, asks, or events; " +
+      "Read a live document or a named document version, or the text of an uploaded file at its latest or named version. " +
+      "Do not use it for issue status, asks, or events; " +
       "use dispatch_read instead. Supply ref, issue, or project plus artifact; issue plus an omitted artifact reads the primary document. " +
       "A live read returns its document token for an optional dispatch_doc_edit precondition; use /blocks for per-block tokens. " +
+      "A file that is not UTF-8 text is described, with the route that serves its bytes. " +
       OWNER_REFERENCE,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
@@ -873,12 +882,22 @@ export const dispatchToolSpecs = [
       "Ask a human to approve a document at its current version. Opens an approval ask (Approve / " +
       "Request changes) in the human's Inbox whose question names the document and version, " +
       "followed by the summary; the answer pins a review to that version and arrives as " +
-      "artifact.approved or artifact.changes_requested. A later version carries the same open " +
-      "request forward and leaves it waiting on you; once the revision is complete and the human " +
-      "has agreed to every point in it, call this again to hand that request back. The request " +
-      "carries nothing new. A call while it already waits on the human hands nothing back: the " +
-      "same summary changes nothing, and a different one is refused, since it would rewrite the " +
-      "card the human is reading. " +
+      "artifact.approved or artifact.changes_requested. An open request follows the document: a " +
+      "later version moves it to that version and leaves it waiting on you, as a human's reply in " +
+      "its thread does. Only the first move since the request was opened or handed back sends an " +
+      "event, and never to the session whose version made it; dispatch_doc_read shows whom it " +
+      "waits on. Once the revision is complete and " +
+      HUMAN_AGREED_TO_DOCUMENT +
+      ", call this again to hand that same Inbox row back. The request carries nothing new. A " +
+      "call while it already waits on the human hands nothing back: the same summary changes " +
+      "nothing, and a different one is refused, since it would rewrite the card the human is " +
+      "reading. Approve and Request changes each close the request, so the next call opens a new " +
+      "one. Call it once per revision, when the revision is complete, never after each edit. An " +
+      "approval goes stale when the document changes after it: request approval again once that " +
+      "revision is complete and " +
+      HUMAN_AGREED_TO_DOCUMENT +
+      ". A new version of a Legion root spec closes its armed design gate until a human approves " +
+      "it. " +
       "Refused, with nothing sent, while the document holds an open decision block, even when a " +
       "human asked for approval: the refusal names each block; ask the human to answer or waive " +
       "it first. " +
@@ -895,7 +914,7 @@ export const dispatchToolSpecs = [
       summary: z
         .string({ min: 1 })
         .describe(
-          "What the human is approving, in one to three sentences, and nothing else: no commentary on itself or the conversation, and no question. Request approval only once the human has agreed to every point in the document."
+          `What the human is approving, in one to three sentences, and nothing else: no commentary on itself or the conversation, and no question. Request approval only once ${HUMAN_AGREED_TO_DOCUMENT}.`
         ),
     }),
     validation: documentOwnerValidation(true),

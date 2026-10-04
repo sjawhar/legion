@@ -181,6 +181,10 @@ func (s *Service) recordUpdateClass(room string, update []byte, class documentUp
 	}
 }
 
+// consumeUpdateClass takes the class the room's update observer recorded for update, wherever it
+// stands among the room's recorded updates. ygo fires a transaction's observers after the
+// transaction has released the document's lock, so two peers' updates reach persistence in the
+// order their read loops hand them on, which need not be the order the room recorded them in.
 func (s *Service) consumeUpdateClass(room string, update []byte) (documentUpdateClass, bool) {
 	state := s.lockExistingState(room)
 	if state == nil {

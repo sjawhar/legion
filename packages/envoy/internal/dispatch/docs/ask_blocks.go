@@ -363,6 +363,37 @@ func askFingerprints(tree *pmdoc.Node, fingerprint func(*pmdoc.Node) (string, er
 	return held, err
 }
 
+// addedAskBlocks counts the readable ask blocks in after whose block id no readable ask block in
+// before carries: one an edit inserted, retyped another block into, or repaired after a browser left
+// it unreadable, wherever it lands - a blockquote, a list item - as the parser reads it, so an opener
+// quoted in code adds none. One the edit moved, reworded or left alone keeps its id and counts
+// nothing.
+func addedAskBlocks(before, after *pmdoc.Node) int {
+	held := map[string]struct{}{}
+	pmdoc.Walk(before, func(node *pmdoc.Node) bool {
+		if node.Type == "ask" {
+			if _, err := parseAskBlock(node); err == nil {
+				id, _ := node.Attrs[pmdoc.BlockIDAttr].(string)
+				held[id] = struct{}{}
+			}
+		}
+		return true
+	})
+	added := 0
+	pmdoc.Walk(after, func(node *pmdoc.Node) bool {
+		if node.Type == "ask" {
+			if _, err := parseAskBlock(node); err == nil {
+				id, _ := node.Attrs[pmdoc.BlockIDAttr].(string)
+				if _, kept := held[id]; !kept {
+					added++
+				}
+			}
+		}
+		return true
+	})
+	return added
+}
+
 // newAskMarkdown is what an uploaded version can say of an ask, for one refuseChangedAsks call: its
 // rendering alone, taken as an upload is (asUploaded) - without anchor marks, and with its
 // server-owned attributes (`state`, the answer, `invalid`) at their defaults, since an upload's are
@@ -460,13 +491,13 @@ func parseAskBlock(node *pmdoc.Node) (askBlock, error) {
 	for _, child := range node.Children {
 		switch child.Type {
 		case "paragraph":
-			questionParts = append(questionParts, strings.TrimSpace(nodeText(child)))
+			questionParts = append(questionParts, strings.TrimSpace(pmdoc.TextContent(child)))
 		case "bullet_list":
 			for _, item := range child.Children {
 				if len(item.Children) == 0 {
 					return askBlock{}, fmt.Errorf("ask block %q has an empty option", blockID)
 				}
-				label, description, found := strings.Cut(strings.TrimSpace(nodeText(item.Children[0])), ": ")
+				label, description, found := strings.Cut(strings.TrimSpace(pmdoc.TextContent(item.Children[0])), ": ")
 				if !found {
 					description = ""
 				}
@@ -485,20 +516,6 @@ func parseAskBlock(node *pmdoc.Node) (askBlock, error) {
 		return askBlock{}, fmt.Errorf("ask block %q has an empty question", blockID)
 	}
 	return askBlock{node: node, id: blockID, question: question, options: options, multiple: multiple, urgency: urgency}, nil
-}
-
-func nodeText(node *pmdoc.Node) string {
-	if node.Type == "text" {
-		return node.Text
-	}
-	if node.Type == "hardbreak" {
-		return "\n"
-	}
-	var text strings.Builder
-	for _, child := range node.Children {
-		text.WriteString(nodeText(child))
-	}
-	return text.String()
 }
 
 // loadAskBlocks reads and locks every ask anchored to a block of this document. `for no key
