@@ -134,12 +134,12 @@ func (s *Store) ReserveOperatorTreeCleanup(ctx context.Context, project, tree st
 	return lifecycle, true, nil
 }
 
-// PendingTreeClaims names every stored claim of the tree that has not retired, as token:state.
+// pendingTreeClaims names every stored claim of the tree that has not retired, as token:state.
 // Read after the tree's cleanup reservation committed, it is the tree's complete runnable
 // population: no later claim can bind to the reserved epoch, and a claim that won before the
 // reservation is already stored, whether or not its process launched yet.
-func (s *Store) PendingTreeClaims(ctx context.Context, project, tree string) ([]string, error) {
-	rows, err := s.pool.Query(ctx, `select token, state from claims where project = $1 and tree = $2 and state <> 'retired'
+func pendingTreeClaims(ctx context.Context, tx pgx.Tx, project, tree string) ([]string, error) {
+	rows, err := tx.Query(ctx, `select token, state from claims where project = $1 and tree = $2 and state <> 'retired'
 		order by token`, project, tree)
 	if err != nil {
 		return nil, fmt.Errorf("census claims of tree %s: %w", tree, err)
@@ -167,18 +167,28 @@ type TreeReleaser interface {
 }
 
 // CleanupReservedTree finishes the cleanup of tree that its caller reserved at epoch, for the
-// workflow (ReserveWorkflowTreeCleanup) or the operator (ReserveOperatorTreeCleanup). It is a wait
-// while any stored claim of the tree has not retired (PendingTreeClaims); then the runtime
-// releases the tree's resources and the reservation is confirmed, after which only a fresh root
-// admission opens the tree's next epoch. A retry after a failed release runs it again: releasing
-// what is already gone succeeds.
+// workflow (ReserveWorkflowTreeCleanup) or the operator (ReserveOperatorTreeCleanup). One short
+// transaction proves epoch is still the tree's unconfirmed reservation and reads the tree's claims:
+// any claim that has not retired makes it a wait (pendingTreeClaims). Then the runtime releases the
+// tree's resources and the reservation is confirmed, after which only a fresh root admission opens
+// the tree's next epoch. A caller whose reservation is no longer current releases nothing. A retry
+// after a failed release runs it again: releasing what is already gone succeeds.
 func (s *Store) CleanupReservedTree(ctx context.Context, project, tree string, epoch uint64, releaser TreeReleaser) error {
-	pending, err := s.PendingTreeClaims(ctx, project, tree)
+	err := s.Tx(ctx, func(tx pgx.Tx) error {
+		if err := treelifecycle.CheckReservation(ctx, tx, project, tree, epoch); err != nil {
+			return err
+		}
+		pending, err := pendingTreeClaims(ctx, tx, project, tree)
+		if err != nil {
+			return err
+		}
+		if len(pending) > 0 {
+			return wait.Errorf("cleanup of tree %s waits for its claims %s to retire", tree, strings.Join(pending, ", "))
+		}
+		return nil
+	})
 	if err != nil {
 		return err
-	}
-	if len(pending) > 0 {
-		return wait.Errorf("cleanup of tree %s waits for its claims %s to retire", tree, strings.Join(pending, ", "))
 	}
 	if err := releaser.CleanupTree(ctx, tree); err != nil {
 		return fmt.Errorf("release the resources of tree %s: %w", tree, err)
