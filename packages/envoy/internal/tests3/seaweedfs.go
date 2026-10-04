@@ -10,10 +10,10 @@ package tests3
 import (
 	"context"
 	"net/http"
-	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/dispatch/files/filestest"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 )
@@ -24,11 +24,9 @@ import (
 const Image = "chrislusf/seaweedfs:3.97"
 
 // Start runs an S3-compatible server holding the empty bucket, removed when t ends, points this
-// process's AWS SDK at it for the rest of t through the variables the SDK reads for itself (the
-// endpoint, a region, static credentials, no shared config), so files.NewS3(ctx, bucket) reaches it
-// exactly as a deployment's reaches its bucket, and returns the endpoint for a caller that hands it
-// to another process. The server takes any credentials, so the static pair is only what the SDK
-// needs to sign. t.Setenv makes it unusable in a parallel test.
+// process's AWS SDK at it for the rest of t (filestest.PointSDKAt), so files.NewS3(ctx, bucket)
+// reaches it exactly as a deployment's reaches its bucket, and returns the endpoint for a caller
+// that hands it to another process. t.Setenv makes it unusable in a parallel test.
 func Start(t testing.TB, bucket string) string {
 	t.Helper()
 	ctx := context.Background()
@@ -58,27 +56,6 @@ func Start(t testing.TB, bucket string) string {
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("create bucket %s: %s", bucket, response.Status)
 	}
-	none := filepath.Join(t.TempDir(), "none")
-	for name, value := range map[string]string{
-		"AWS_ENDPOINT_URL_S3":                 endpoint,
-		"AWS_ENDPOINT_URL":                    "",
-		"AWS_IGNORE_CONFIGURED_ENDPOINT_URLS": "",
-		"AWS_USE_DUALSTACK_ENDPOINT":          "",
-		"AWS_USE_FIPS_ENDPOINT":               "",
-		"AWS_REGION":                          "us-east-1",
-		"AWS_DEFAULT_REGION":                  "",
-		"AWS_ACCESS_KEY_ID":                   "test",
-		"AWS_SECRET_ACCESS_KEY":               "test",
-		"AWS_SESSION_TOKEN":                   "",
-		"AWS_PROFILE":                         "",
-		"AWS_DEFAULT_PROFILE":                 "",
-		"AWS_CONFIG_FILE":                     none,
-		"AWS_SHARED_CREDENTIALS_FILE":         none,
-		"AWS_EC2_METADATA_DISABLED":           "true",
-		"AWS_MAX_ATTEMPTS":                    "",
-		"AWS_RETRY_MODE":                      "",
-	} {
-		t.Setenv(name, value)
-	}
+	filestest.PointSDKAt(t, endpoint)
 	return endpoint
 }

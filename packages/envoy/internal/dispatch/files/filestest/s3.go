@@ -27,17 +27,28 @@ type S3 struct {
 }
 
 // ServeS3 starts an S3 holding the empty bucket and, for the rest of t, points this process's AWS
-// SDK at it through the variables the SDK reads for itself: the endpoint, a region, static
-// credentials, and no shared config or credentials file. files.NewS3(ctx, bucket) then reaches it
-// exactly as a deployment's reaches its bucket. t.Setenv makes it unusable in a parallel test.
+// SDK at it (PointSDKAt). files.NewS3(ctx, bucket) then reaches it exactly as a deployment's
+// reaches its bucket. t.Setenv makes it unusable in a parallel test.
 func ServeS3(t *testing.T, bucket string) *S3 {
 	t.Helper()
 	fake := &S3{bucket: bucket, objects: map[string]memoryObject{}}
 	server := httptest.NewServer(fake)
 	t.Cleanup(server.Close)
+	PointSDKAt(t, server.URL)
+	return fake
+}
+
+// PointSDKAt points this process's AWS SDK at the S3-compatible server at endpoint for the rest of
+// t, through the variables the SDK reads for itself: the endpoint, a region, static credentials
+// (any pair; the fake and the test container take all and the SDK needs one to sign), and no
+// shared config or credentials file, so a developer's own profile never reaches a test. The
+// variables that would redirect or retry differently are cleared too. t.Setenv makes the caller
+// unusable in a parallel test.
+func PointSDKAt(t testing.TB, endpoint string) {
+	t.Helper()
 	none := filepath.Join(t.TempDir(), "none")
 	for name, value := range map[string]string{
-		"AWS_ENDPOINT_URL_S3":                 server.URL,
+		"AWS_ENDPOINT_URL_S3":                 endpoint,
 		"AWS_ENDPOINT_URL":                    "",
 		"AWS_IGNORE_CONFIGURED_ENDPOINT_URLS": "",
 		"AWS_USE_DUALSTACK_ENDPOINT":          "",
@@ -57,7 +68,6 @@ func ServeS3(t *testing.T, bucket string) *S3 {
 	} {
 		t.Setenv(name, value)
 	}
-	return fake
 }
 
 // Object is what the bucket holds under key.

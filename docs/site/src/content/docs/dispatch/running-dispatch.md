@@ -102,8 +102,9 @@ Sign in, then open **Settings**:
   `db: false`.
 - `nats` is whether NATS is connected, or `null` when NATS is turned off.
 - `files` is whether the file store's bucket (`DISPATCH_FILE_STORE_BUCKET`) answered within two
-  seconds, or `null` when no bucket is set. When it does not, the answer is `503` with
-  `files: false`.
+  seconds, or `null` when no bucket is set. It never decides `ok` or the status: a bucket that
+  stops answering is `200` with `files: false`, so an outage of the bucket fails uploads and
+  downloads and nothing else; a check that wants the bucket asserts `files: true` itself.
 - `commit` is the source commit the image was built from, or `null` in a build that was not
   stamped.
 - `schema_version` is the newest database migration applied.
