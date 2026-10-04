@@ -152,62 +152,86 @@ func TestAReservedTreeCloseFinishesItsCleanupAfterReadmission(t *testing.T) {
 // A child of a lingering tree set back to todo is re-admitted as a root of its own (an orphan),
 // while its roles' claims, suspended by the old tree's close, still name the old tree. The old
 // tree's cleanup does not wait on those claims, which run nothing and are no longer its, and the
-// orphan's start re-points its claim to the orphan's own tree before it resumes the kept session,
-// so the claim binds the new tree's lifecycle rather than the old tree's confirmed one.
+// orphan's start re-points its claim to the orphan's own tree before it starts it, so the claim
+// binds the new tree's lifecycle rather than the old tree's confirmed one. Under tmux the kept
+// session is on the host and resumes. Under a runtime that keeps sessions on the tree's volume the
+// session stayed on the old tree's volume, which the new tree's pods never mount: the claim drops
+// it and starts fresh, recreating its workspace, rather than resuming a session the launcher
+// refuses until the launch budget runs out.
 func TestAnOrphansClaimsLeaveTheirOldTreeAndStartInTheirOwn(t *testing.T) {
-	ctx := context.Background()
-	pool := isolatedOutboxPool(t)
-	st := outboxTreeStore(t, pool, "LEGION-208")
-	records := record.NewStore()
-	until := time.Now().Add(-time.Minute)
-	root := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "root", Phase: phase.Done, Generation: 1, Status: "done", Rank: "U", LingerUntil: &until}
-	putOutboxIssue(t, pool, records, root)
-	parent := root.Key
-	child := record.Issue{Key: "LEGION-209", Project: "LEGION", Tree: root.Key, Parent: &parent, Title: "child", Phase: phase.Planning, Generation: 1, Status: "in_progress", Rank: "V"}
-	putOutboxIssue(t, pool, records, child)
+	for _, tc := range []struct {
+		name  string
+		inPod bool
+	}{{"tmux", false}, {"a runtime that keeps sessions on the tree volume", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			pool := isolatedOutboxPool(t)
+			st := outboxTreeStore(t, pool, "LEGION-208")
+			records := record.NewStore()
+			until := time.Now().Add(-time.Minute)
+			root := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "root", Phase: phase.Done, Generation: 1, Status: "done", Rank: "U", LingerUntil: &until}
+			putOutboxIssue(t, pool, records, root)
+			parent := root.Key
+			child := record.Issue{Key: "LEGION-209", Project: "LEGION", Tree: root.Key, Parent: &parent, Title: "child", Phase: phase.Planning, Generation: 1, Status: "in_progress", Rank: "V"}
+			putOutboxIssue(t, pool, records, child)
 
-	rt := fake.NewRuntime()
-	sup := newSupervisor(ctx, st, "legion", t.TempDir(), quietLogger())
-	sup.deps = supervise.Deps{
-		Runtime: rt, Conns: fake.NewConns(), Store: st, Specs: outboxSpecs{}, Clock: stillClock{}, Log: quietLogger(),
-		Limits:   supervise.Limits{LaunchFailures: 2, PromptFailures: 2, PromptRetires: 2},
-		Timeouts: supervise.Timeouts{Boot: time.Second, RegistrationIntervals: 2, RPC: time.Second, Probe: time.Second, Stop: time.Second},
-	}
-	t.Cleanup(sup.stop)
-	token, err := claim.NewToken("legion", child.Key, claim.RolePlanner)
-	if err != nil {
-		t.Fatal(err)
-	}
-	machine, _, err := sup.Create(ctx, supervise.Claim{Token: token, Project: "legion", Tree: root.Key, TreeEpoch: 1, Issue: child.Key, Role: claim.RolePlanner,
-		Generation: 1, State: supervise.StateSuspended, Session: "ses-planner", SessionFile: "/legion/sessions/planner.jsonl"}, "")
-	if err != nil {
-		t.Fatal(err)
-	}
+			rt := fake.NewRuntime()
+			rt.InPod = tc.inPod
+			sup := newSupervisor(ctx, st, "legion", t.TempDir(), quietLogger())
+			sup.deps = supervise.Deps{
+				Runtime: rt, Conns: fake.NewConns(), Store: st, Specs: outboxSpecs{}, Clock: stillClock{}, Log: quietLogger(),
+				Limits:   supervise.Limits{LaunchFailures: 2, PromptFailures: 2, PromptRetires: 2},
+				Timeouts: supervise.Timeouts{Boot: time.Second, RegistrationIntervals: 2, RPC: time.Second, Probe: time.Second, Stop: time.Second},
+			}
+			t.Cleanup(sup.stop)
+			token, err := claim.NewToken("legion", child.Key, claim.RolePlanner)
+			if err != nil {
+				t.Fatal(err)
+			}
+			machine, _, err := sup.Create(ctx, supervise.Claim{Token: token, Project: "legion", Tree: root.Key, TreeEpoch: 1, Issue: child.Key, Role: claim.RolePlanner,
+				Generation: 1, State: supervise.StateSuspended, Session: "ses-planner", SessionFile: "/legion/sessions/planner.jsonl"}, "")
+			if err != nil {
+				t.Fatal(err)
+			}
 
-	// The old tree's linger expired and reserved its cleanup; the child was re-admitted as a root.
-	lifecycle, reserved, err := st.ReserveWorkflowTreeCleanup(ctx, "legion", root.Key, root.Generation)
-	if err != nil || !reserved {
-		t.Fatalf("reserve the old tree's cleanup = %v, %v", reserved, err)
-	}
-	child.Tree, child.Parent, child.Generation = child.Key, nil, 2
-	putOutboxIssue(t, pool, records, child)
-	if _, err := st.OpenTreeLifecycle(ctx, "legion", child.Key, treelifecycle.AuthorityWorkflow); err != nil {
-		t.Fatalf("admit the orphan's tree: %v", err)
-	}
-	if err := st.CleanupReservedTree(ctx, "legion", root.Key, lifecycle.Epoch, rt); err != nil {
-		t.Fatalf("the old tree's cleanup with the orphan's suspended claim = %v, want it confirmed", err)
-	}
+			// The old tree's linger expired and reserved its cleanup; the child was re-admitted as a root.
+			lifecycle, reserved, err := st.ReserveWorkflowTreeCleanup(ctx, "legion", root.Key, root.Generation)
+			if err != nil || !reserved {
+				t.Fatalf("reserve the old tree's cleanup = %v, %v", reserved, err)
+			}
+			child.Tree, child.Parent, child.Generation = child.Key, nil, 2
+			putOutboxIssue(t, pool, records, child)
+			if _, err := st.OpenTreeLifecycle(ctx, "legion", child.Key, treelifecycle.AuthorityWorkflow); err != nil {
+				t.Fatalf("admit the orphan's tree: %v", err)
+			}
+			if err := st.CleanupReservedTree(ctx, "legion", root.Key, lifecycle.Epoch, rt); err != nil {
+				t.Fatalf("the old tree's cleanup with the orphan's suspended claim = %v, want it confirmed", err)
+			}
 
-	runner := &outbox{log: quietLogger(), dispatchProject: "LEGION", pool: pool, records: records, supervisor: sup, trees: st, tokens: outboxTokens{},
-		project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets")}
-	start := mustOutboxRow(t, child.Key, record.SuperviseRequest{Op: "start", Tree: child.Key, Role: claim.RolePlanner, Generation: 2, Phase: phase.Planning, Task: "Plan it."}, time.Now())
-	if err := runner.execute(ctx, start); err != nil {
-		t.Fatalf("the orphan's planner start: %v", err)
-	}
-	if got := machine.Claim(); got.Tree != child.Key || got.TreeEpoch != 1 || got.State != supervise.StateLaunching {
-		t.Fatalf("orphan's planner = tree %s epoch %d %s, want tree %s epoch 1 launching", got.Tree, got.TreeEpoch, got.State, child.Key)
-	}
-	if resumes := rt.CallsOf("Resume"); len(resumes) != 1 || resumes[0].Spec.Tree != child.Key || resumes[0].Spec.ResumeSessionFile != "/legion/sessions/planner.jsonl" {
-		t.Fatalf("resumes = %+v, want the kept session resumed once in tree %s", resumes, child.Key)
+			runner := &outbox{log: quietLogger(), dispatchProject: "LEGION", pool: pool, records: records, supervisor: sup, trees: st, tokens: outboxTokens{},
+				project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"),
+				provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
+					return workspace.Workspace{Dir: t.TempDir(), Bookmark: "legion/LEGION-209"}, nil
+				},
+			}
+			start := mustOutboxRow(t, child.Key, record.SuperviseRequest{Op: "start", Tree: child.Key, Role: claim.RolePlanner, Generation: 2, Phase: phase.Planning, Task: "Plan it."}, time.Now())
+			if err := runner.execute(ctx, start); err != nil {
+				t.Fatalf("the orphan's planner start: %v", err)
+			}
+			got := machine.Claim()
+			if got.Tree != child.Key || got.TreeEpoch != 1 || got.State != supervise.StateLaunching {
+				t.Fatalf("orphan's planner = tree %s epoch %d %s, want tree %s epoch 1 launching", got.Tree, got.TreeEpoch, got.State, child.Key)
+			}
+			resumes, spawns := rt.CallsOf("Resume"), rt.CallsOf("Spawn")
+			if tc.inPod {
+				if len(resumes) != 0 || len(spawns) != 1 || spawns[0].Spec.Tree != child.Key || got.SessionFile != "" || !got.WorkspaceLost {
+					t.Fatalf("resumes %+v, spawns %+v, claim %+v; want one fresh spawn in tree %s, the old volume's session dropped", resumes, spawns, got, child.Key)
+				}
+				return
+			}
+			if len(resumes) != 1 || resumes[0].Spec.Tree != child.Key || resumes[0].Spec.ResumeSessionFile != "/legion/sessions/planner.jsonl" {
+				t.Fatalf("resumes = %+v, want the kept session resumed once in tree %s", resumes, child.Key)
+			}
+		})
 	}
 }
