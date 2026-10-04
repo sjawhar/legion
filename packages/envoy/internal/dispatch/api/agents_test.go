@@ -25,7 +25,7 @@ func agentsHandlerWithStore(t *testing.T, envoyURL string, database *store.Store
 		Store: database,
 		Identity: identity.HeaderIdentity{
 			Header: "X-Dispatch-User",
-			People: store.NewPgPeopleStore(database.Pool),
+			People: store.NewPgPeopleStore(database.Pool, "signing-key"),
 		},
 		AgentToken: "agent-token",
 		Envoy:      envoy.New(envoyURL),
