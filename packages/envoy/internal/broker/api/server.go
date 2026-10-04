@@ -46,6 +46,9 @@ type Deps struct {
 	// RereadLimit bounds POST /v1/secrets/{name}/reread per source address; nil means
 	// DefaultRereadLimit.
 	RereadLimit *ratelimit.Limit
+	// RereadOverallLimit bounds that route across every caller at once; nil means
+	// DefaultRereadOverallLimit.
+	RereadOverallLimit *ratelimit.Limit
 	// TrustedProxyHeader names a request header (e.g. "X-Forwarded-For") the rate limiters'
 	// per-address buckets trust for the real client address; empty means keying on r.RemoteAddr,
 	// correct only when the broker is reached directly rather than through a reverse proxy or load
@@ -56,10 +59,13 @@ type Deps struct {
 type server struct {
 	deps            Deps
 	launcherLimiter *launcherLimiter
-	// rereadLimiter is RereadLimit applied per source address (clientAddress), and rereadEvery
-	// its refill interval, the Retry-After a refusal names.
-	rereadLimiter *ratelimit.Keyed
-	rereadEvery   time.Duration
+	// rereadLimiter is RereadLimit applied per source address (clientAddress) and rereadOverall
+	// RereadOverallLimit over one bucket every caller shares (rereadOverallKey); rereadEvery and
+	// rereadOverallEvery are their refill intervals, the Retry-After each one's refusal names.
+	rereadLimiter      *ratelimit.Keyed
+	rereadEvery        time.Duration
+	rereadOverall      *ratelimit.Keyed
+	rereadOverallEvery time.Duration
 }
 
 func Register(mux *http.ServeMux, deps Deps) {
@@ -71,11 +77,17 @@ func Register(mux *http.ServeMux, deps Deps) {
 	if deps.RereadLimit != nil {
 		reread = *deps.RereadLimit
 	}
+	rereadOverall := DefaultRereadOverallLimit
+	if deps.RereadOverallLimit != nil {
+		rereadOverall = *deps.RereadOverallLimit
+	}
 	s := &server{
-		deps:            deps,
-		launcherLimiter: newLauncherLimiter(limits, deps.TrustedProxyHeader),
-		rereadLimiter:   ratelimit.NewKeyed(reread),
-		rereadEvery:     reread.Every,
+		deps:               deps,
+		launcherLimiter:    newLauncherLimiter(limits, deps.TrustedProxyHeader),
+		rereadLimiter:      ratelimit.NewKeyed(reread),
+		rereadEvery:        reread.Every,
+		rereadOverall:      ratelimit.NewKeyed(rereadOverall),
+		rereadOverallEvery: rereadOverall.Every,
 	}
 	for _, route := range routes() {
 		mux.HandleFunc(route.Method+" "+route.Pattern, func(w http.ResponseWriter, r *http.Request) {

@@ -32,6 +32,15 @@ var DefaultLauncherLimits = LauncherLimits{
 // burst passes; a flood cannot make the broker hammer DescribeSecret.
 var DefaultRereadLimit = ratelimit.Limit{Every: 2 * time.Second, Burst: 30}
 
+// DefaultRereadOverallLimit bounds POST /v1/secrets/{name}/reread across every caller at once,
+// whatever address each comes from. Every reread takes the policy's writer lock for one
+// DescribeSecret, so a per-address limit alone bounds nothing a flood spread over addresses
+// cannot pass: with no cap of its own it could keep that lock busy and hold up the five-minute
+// reload and the miss-path rereads a session's own request waits on. Four a second, burst ten:
+// well above the rereads a person's writes make (one per secret written, in bursts), and far
+// below what would keep the lock busy.
+var DefaultRereadOverallLimit = ratelimit.Limit{Every: 250 * time.Millisecond, Burst: 10}
+
 type launcherLimiter struct {
 	perAddress, perOperator *ratelimit.Keyed
 	retryAfter              time.Duration
@@ -94,13 +103,34 @@ func (l *launcherLimiter) refuse(w http.ResponseWriter, r *http.Request, operato
 	return true
 }
 
-// refuseReread writes 429 RATE_LIMITED and reports true when r's source address has no reread
-// left in its bucket.
+// rereadOverallKey is the one bucket every reread shares: ratelimit.Keyed gives each key a bucket
+// of its own, so one constant key is one bucket for the whole broker.
+const rereadOverallKey = "all"
+
+// refuseReread writes 429 RATE_LIMITED and reports true when the broker as a whole, or r's source
+// address, has no reread left in its bucket. The broker-wide bucket is taken first, so the cap on
+// the policy's writer lock holds however many addresses a flood comes from, and the refusal names
+// that bucket's own longer wait. One address spending those tokens therefore refuses the others
+// until the bucket refills, which is inherent to a cap over every caller at once and is the point
+// of it: what the lock can be made to do is what matters, not who asked.
 func (s *server) refuseReread(w http.ResponseWriter, r *http.Request) bool {
-	if s.rereadLimiter.Allow(clientAddress(r, s.deps.TrustedProxyHeader)) {
-		return false
+	now := time.Now()
+	if !s.rereadOverall.AllowAt(rereadOverallKey, now) {
+		refuseWithRetryAfter(w, s.rereadOverallEvery, "too many secret rereads; try again later")
+		return true
 	}
-	w.Header().Set("Retry-After", strconv.Itoa(int(s.rereadEvery.Seconds())))
-	writeError(w, http.StatusTooManyRequests, "RATE_LIMITED", "too many secret rereads; try again later")
-	return true
+	if !s.rereadLimiter.AllowAt(clientAddress(r, s.deps.TrustedProxyHeader), now) {
+		refuseWithRetryAfter(w, s.rereadEvery, "too many secret rereads; try again later")
+		return true
+	}
+	return false
+}
+
+// refuseWithRetryAfter answers 429 RATE_LIMITED with the Retry-After a bucket refilled one every
+// every names: whole seconds rounded up, and never 0, which would invite an immediate retry the
+// bucket would refuse again.
+func refuseWithRetryAfter(w http.ResponseWriter, every time.Duration, msg string) {
+	seconds := max(int((every+time.Second-1)/time.Second), 1)
+	w.Header().Set("Retry-After", strconv.Itoa(seconds))
+	writeError(w, http.StatusTooManyRequests, "RATE_LIMITED", msg)
 }

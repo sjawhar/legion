@@ -126,8 +126,9 @@ func routes() []apiRoute {
 		// what the CLI needs so it and the broker never disagree about which secret a name means.
 		{http.MethodGet, "/v1/settings", public((*server).readSettings)},
 		// Reread one secret from Secrets Manager now (the CLI calls it after every write): the change is
-		// served, or gone, within seconds instead of at the next five-minute reload. Open to any caller
-		// and rate-limited per source address; a reread only moves the broker toward AWS's own truth.
+		// served, or gone, within seconds instead of at the next five-minute reload. Open to any caller,
+		// and rate-limited both per source address and over every caller at once, since each reread holds
+		// the policy's writer lock while it reads; a reread only moves the broker toward AWS's own truth.
 		{http.MethodPost, "/v1/secrets/{name}/reread", public((*server).rereadSecret)},
 		// Report whether the broker can reach its database.
 		{http.MethodGet, "/healthz", public((*server).healthz)},

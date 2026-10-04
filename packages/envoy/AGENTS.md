@@ -2058,8 +2058,11 @@ answer while authenticating is a 503 naming it. Every 500 is logged with its cau
 (`writeInternal`), every JSON body is capped at 1 MiB with unknown fields refused (`readJSON`),
 non-UUID path ids are 400 naming the kind (`pathUUID`), a content-addressed record id is checked
 against its own lowercase-hex-sha256 shape rather than a UUID's (`pathRecordID`), the
-unauthenticated `POST /v1/secrets/{name}/reread` is rate limited per source address
-(`DefaultRereadLimit`, `429 RATE_LIMITED` with `Retry-After`), and the
+unauthenticated `POST /v1/secrets/{name}/reread` is rate limited both per source address and over
+every caller at once (`DefaultRereadLimit` and `DefaultRereadOverallLimit`, the broker-wide bucket
+taken first since each reread holds the policy's writer lock for one `DescribeSecret`, so a flood
+spread over addresses cannot hold up a reload; `429 RATE_LIMITED` with the refusing limit's
+`Retry-After`), and the
 unauthenticated `POST /v1/launcher-credentials` is rate limited per source address (see
 `BROKER_TRUSTED_PROXY_HEADER` above) and per named operator — the per-operator bucket keys on the
 request body's own `operator` field, so an attacker naming a specific victim operator repeatedly

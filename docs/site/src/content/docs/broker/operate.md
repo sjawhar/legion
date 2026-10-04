@@ -71,10 +71,13 @@ and also while a variable it no longer reads is still set.
   broker read one secret from Secrets Manager at once, and answers whether it now serves it and, if
   not, why. Neither releases a value: a reread tells its caller what an enrolled session already
   learns from `UNKNOWN_SECRET`, and what anyone allowed to list the namespace reads from its tags.
-  Rereads are limited per source address to a burst of 30, refilled one every 2 seconds, a fixed
-  limit rather than a setting (`DefaultRereadLimit` in
-  `packages/envoy/internal/broker/api/limits.go`); past it the broker answers `429 RATE_LIMITED`
-  with a `Retry-After` header.
+  Rereads are limited twice, by fixed limits rather than settings (`DefaultRereadLimit` and
+  `DefaultRereadOverallLimit` in `packages/envoy/internal/broker/api/limits.go`): each source
+  address gets a burst of 30, refilled one every 2 seconds, and the broker as a whole takes 4 a
+  second, burst 10, however many addresses the rereads come from — each one takes the policy's
+  writer lock while it reads the secret, so that lock, not the caller, is what the second limit
+  bounds. Past either, the broker answers `429 RATE_LIMITED` with a `Retry-After` header naming
+  the limit that refused.
 - Agents never see the broker's database or the secret store; whoever can write the database can
   forge a record, so its access control is part of the broker's. Whoever can tag a secret under the
   namespace decides who gets it, so the tags' write access is part of the broker's too.
