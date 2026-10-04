@@ -27,6 +27,8 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/config"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/embed"
+	"github.com/sjawhar/envoy/internal/dispatch/embedqueue"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/outbox"
 	"github.com/sjawhar/envoy/internal/dispatch/redeliver"
@@ -96,6 +98,11 @@ type bootConfig struct {
 	InsecureCookie bool
 	// EnvoyToken is ENVOY_TOKEN, the bearer every Envoy listener call sends.
 	EnvoyToken string
+	// CohereAPIKey is COHERE_API_KEY, the company's Cohere key: embeds a write's text after
+	// commit (internal/dispatch/embedqueue) and a search request's query, for meaning search
+	// (LEGION-549). Empty turns meaning search off everywhere - search answers keyword-only and
+	// says so, and the embedding queue poller never starts.
+	CohereAPIKey string
 }
 
 func main() {
@@ -255,6 +262,14 @@ func main() {
 		slog.Info("dispatch: verifying service-account tokens", "issuer", boot.OIDCIssuer, "audience", boot.OIDCAudience)
 	}
 
+	// embedder is nil (meaning search off, search answers keyword-only and says so) when
+	// CohereAPIKey is unset; embed.New panics on an empty key, so this is the one place that
+	// decides whether Dispatch calls Cohere at all.
+	var embedder embed.Embedder
+	if boot.CohereAPIKey != "" {
+		embedder = embed.New(boot.CohereAPIKey)
+	}
+
 	appCtx, err := routes.BuildAppContext(appContextOptions(boot, routes.AppContextOptions{
 		SigningKey:  signingKey,
 		WebDistDir:  webDistDir,
@@ -266,6 +281,7 @@ func main() {
 		Store:       database,
 		ServerURL:   serverURL,
 		Docs:        documentService,
+		Embedder:    embedder,
 		Events:      broker,
 		App:         appCfg,
 		OIDC:        serviceTokens,
@@ -286,6 +302,10 @@ func main() {
 			Docs:      documentService,
 		})
 	}
+	// embedqueue.Run no-ops when embedder is nil (its own Deps.Embedder), so this always starts:
+	// a later deploy that sets COHERE_API_KEY needs no other wiring change to pick up meaning
+	// search for existing content once a backfill (envoy-dispatch backfill-embeddings) runs.
+	go embedqueue.Run(ctx, embedqueue.Deps{Store: database, Embedder: embedder})
 	// A settlement a shutdown cut short, here or in the task this one replaces, runs without
 	// anyone opening its document.
 	go documentService.RunSettlementResumption(ctx)
@@ -456,6 +476,7 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 		SigningKey:         env.get("DISPATCH_SIGNING_KEY"),
 		InsecureCookie:     env.get("DISPATCH_INSECURE_COOKIE") != "",
 		EnvoyToken:         env.get("ENVOY_TOKEN"),
+		CohereAPIKey:       strings.TrimSpace(env.get("COHERE_API_KEY")),
 	}
 	if boot.DatabaseURL == "" {
 		return bootConfig{}, errors.New("DATABASE_URL required")

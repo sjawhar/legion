@@ -107,6 +107,8 @@ var settings = []setting{
 		Description: "Set to `1` on a loopback-only local server to sign anyone in by email at `/auth/_dev/signin` without the sign-in pool; refused alongside any `DISPATCH_SIGNIN_*` setting."},
 	{Name: "DISPATCH_TEST_HOOKS", Required: "no",
 		Description: "Set to `1` to mount the end-to-end tests' hook routes; never in a real deployment."},
+	{Name: "COHERE_API_KEY", Required: "no",
+		Description: "The company's Cohere key: embeds a write's text after commit and a search request's query, for meaning search (LEGION-549). Unset, search answers keyword-only and says so, and `backfill-embeddings` refuses to run."},
 }
 
 // removedSettings are the variables a release stopped reading, each with what replaced it. None is

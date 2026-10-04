@@ -35,6 +35,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/architecture"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/embed"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapi"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
@@ -90,8 +91,10 @@ type AppContextOptions struct {
 	EnvoyURL       string
 	// EnvoyToken is the bearer every Envoy listener call sends (cmd/dispatch: ENVOY_TOKEN); empty
 	// sends none.
-	EnvoyToken    string
-	Docs          docs.API
+	EnvoyToken string
+	Docs       docs.API
+	// Embedder embeds a search request's query for meaning search (LEGION-549); nil turns it off.
+	Embedder      embed.Embedder
 	Events        *events.Broker
 	App           *auth.AppConfig
 	GitHubAPIBase string
@@ -144,6 +147,7 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 		EnvoyURL:          opts.EnvoyURL,
 		EnvoyToken:        opts.EnvoyToken,
 		Docs:              opts.Docs,
+		Embedder:          opts.Embedder,
 		Events:            opts.Events,
 		App:               opts.App,
 		GitHubAPIBase:     opts.GitHubAPIBase,

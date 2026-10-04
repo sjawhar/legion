@@ -1,7 +1,9 @@
 package api
 
 import (
+	"context"
 	"html"
+	"log/slog"
 	"math"
 	"net/http"
 	"net/url"
@@ -10,40 +12,53 @@ import (
 	"unicode/utf8"
 
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dispatch/embed"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
 const (
 	searchDefaultLimit = 20
 	searchMaxLimit     = 50
-	// searchFusionK is reciprocal rank fusion's constant: a row at position p of its kind's list
-	// scores 1/(searchFusionK+p). 60 is the value of the paper that introduced the method (Cormack,
-	// Clarke and Buettcher, 2009) and Elasticsearch's and OpenSearch's default; nothing tunes it.
-	searchFusionK   = 60
-	markStart       = "\uE000" // private-use sentinels: ts_headline writes them, markSnippet turns them into <mark>
-	markEnd         = "\uE001"
-	headlineOptions = "StartSel=" + markStart + ", StopSel=" + markEnd + ", MaxWords=24, MinWords=12, MaxFragments=1"
+	// searchFusionK is reciprocal rank fusion's constant: a row at position p of one of its
+	// kind's lists scores 1/(searchFusionK+p). 60 is the value of the paper that introduced the
+	// method (Cormack, Clarke and Buettcher, 2009) and Elasticsearch's and OpenSearch's default;
+	// nothing tunes it.
+	searchFusionK = 60
+	// searchEmbedTimeout bounds the one Cohere call search makes (the query's own embedding).
+	// Past it, or any other embedder failure, search answers keyword-only and says so (LEGION-549)
+	// rather than making every search wait indefinitely on a degraded embedder.
+	searchEmbedTimeout = 3 * time.Second
+	// degradedEmbedderUnavailable is SearchResponse.Degraded's value when meaning search could not
+	// run for this request - the embedder is unconfigured, timed out, or Cohere answered an
+	// error - and search fell back to keyword-only ranking.
+	degradedEmbedderUnavailable = "embedder_unavailable"
+	markStart                   = "\uE000" // private-use sentinels: ts_headline writes them, markSnippet turns them into <mark>
+	markEnd                     = "\uE001"
+	headlineOptions             = "StartSel=" + markStart + ", StopSel=" + markEnd + ", MaxWords=24, MinWords=12, MaxFragments=1"
 )
 
-// searchQuery ranks each kind of content on its own list, then merges the lists by reciprocal
-// rank fusion, so a page takes each kind's best in turn: its top holds the best issue, document,
-// ask, comment and message. kinds unions the five kinds' matches with no per-kind limit or order
-// of its own; one window over it, partitioned by kind, orders each kind's matches by ts_rank_cd,
-// then recency, then id, and numbers them (pos), and the same partition's count(*), taken before
-// any cut, is that kind's every match (matches). Filtering to pos <= $7 (contracts.SearchKindDepth)
-// then keeps each kind's best $7 as legs, the one place the kind's total order is written. An
-// issue whose key is the whole query heads the issue list, since ts_rank_cd scores its own key no
-// higher than another issue's title citing it. Rows that score alike (every kind's first row
-// scores 1/61) are ordered issue, document, ask, comment, message (the thing before what is
-// inside it), then recency, then id, which makes the order total, so consecutive offsets cover
-// the reachable rows once while the corpus holds still. legs and fused carry no row's text, so
-// the union, the window and the fused score cost nothing per kind's full body; only the page's
-// own rows pay for one lateral fetch of their text and, after that, a snippet. totals is joined
-// outside the page, so a page past the end still answers how many rows the query matches.
+// searchQueryKeyword ranks each kind of content on one keyword list (ts_rank_cd, then recency,
+// then id) and merges the lists by reciprocal rank fusion, exactly as search ran before meaning
+// search existed (LEGION-386). It is the keyword-only fallback: Dispatch runs it whenever the
+// embedder is unconfigured or a request's query embedding failed, so a degraded Cohere never
+// turns search into no search. kinds unions the five kinds' matches with no per-kind limit or
+// order of its own; one window over it, partitioned by kind, orders each kind's matches by
+// ts_rank_cd, then recency, then id, and numbers them (pos), and the same partition's count(*),
+// taken before any cut, is that kind's every match (matches). Filtering to pos <= $7
+// (contracts.SearchKindDepth) then keeps each kind's best $7 as legs, the one place the kind's
+// total order is written. An issue whose key is the whole query heads the issue list, since
+// ts_rank_cd scores its own key no higher than another issue's title citing it. Rows that score
+// alike (every kind's first row scores 1/61) are ordered issue, document, ask, comment, message
+// (the thing before what is inside it), then recency, then id, which makes the order total, so
+// consecutive offsets cover the reachable rows once while the corpus holds still. legs and fused
+// carry no row's text, so the union, the window and the fused score cost nothing per kind's full
+// body; only the page's own rows pay for one lateral fetch of their text and, after that, a
+// snippet. totals is joined outside the page, so a page past the end still answers how many rows
+// the query matches.
 //
 // Parameters: $1 q, $2 project (empty for every project), $3 limit, $4 firstTerm,
 // $5 headlineOptions, $6 offset, $7 contracts.SearchKindDepth, $8 searchFusionK.
-const searchQuery = `
+const searchQueryKeyword = `
 with q as (select websearch_to_tsquery('english', $1) as tsq, $4::text as term, upper(btrim($1)) as own_key),
 kinds as (
   select 'issue' as kind, i.key as issue_key, null::uuid as owner_artifact_id, null::uuid as artifact_id, i.key as id, null::text as block_id,
@@ -115,19 +130,173 @@ select t.total, t.reachable, r.kind, case when r.owner_artifact_id is null then 
        r.owner_project, r.owner_slug, r.owner_artifact_id::text, r.owner_name,
        ar.slug, ar.name, coalesce(ar.is_primary, false), r.id, r.block_id, r.score::float8,
        ts_headline('english',
-         search_text(case when q.term <> '' and strpos(lower(txt.text), lower(q.term)) > 0
+         case when q.term <> '' and strpos(lower(txt.text), lower(q.term)) > 0
               then substr(txt.text, greatest(1, strpos(lower(txt.text), lower(q.term)) - 1500), 4000)
-              else left(txt.text, 4000) end),
+              else left(txt.text, 4000) end,
          q.tsq, $5) as headline
   from totals t cross join q
   left join (page r left join artifacts ar on ar.id = r.artifact_id) on true
-  -- Mirrors the kind arms in kinds above (issue/document/comment/ask/message -> table and
-  -- text column); the two must stay in sync. issue reuses r.issue_title, already carried from
-  -- the same issues row by kinds, rather than re-reading it.
   left join lateral (
     select case r.kind
       when 'issue' then r.issue_title
-      when 'document' then (select v.markdown from artifact_versions v where v.artifact_id = r.artifact_id order by v.number desc limit 1) -- re-resolves the latest version kinds already found once; accepted, bounded by the page size
+      when 'document' then (select v.markdown from artifact_versions v where v.artifact_id = r.artifact_id order by v.number desc limit 1)
+      when 'comment' then (select c.body from comments c where c.id = r.id::uuid)
+      when 'ask' then (select k.question || ' ' || coalesce(k.options::text, '') || ' ' || coalesce(k.answer->>'text', '') from asks k where k.id = r.id::uuid)
+      when 'message' then (select m.body from messages m where m.id = r.id::uuid)
+    end as text
+  ) txt on true
+ order by r.score desc, r.kind_order, r.updated_at desc, r.id
+`
+
+// searchQueryMeaning extends searchQueryKeyword with a second list per kind, ranked by cosine
+// distance to the query's own embedding ($9, a pgvector literal) against embeddings.embedding
+// (0054_embeddings.up.sql), rather than ts_rank_cd. Every leg now carries which list it belongs
+// to (list), and ranked's window partitions by (kind, list): each list keeps its own top $7 and
+// its own position numbering, so a row that matches both lists for the same (kind, id) occupies
+// two rows of legs - one per list - each contributing its own 1/($8+pos) term. fused sums those
+// terms grouped by (kind, id), which is reciprocal rank fusion of the two lists exactly as it
+// fuses the five kinds: an item only the keyword list reached, only the meaning list reached, or
+// both, is ranked once, at the sum of whichever lists found it. legs_unique picks one
+// representative row's owner/text-location columns per (kind, id) - both lists' rows carry the
+// same ones, read from the same underlying issue/document/comment/ask/message - before the page
+// is cut and joined back to fused's score. total is every distinct (kind, id) either list
+// matched, not a sum of list sizes, so an id both lists reach is counted once.
+//
+// Parameters: $1 q, $2 project, $3 limit, $4 firstTerm, $5 headlineOptions, $6 offset,
+// $7 contracts.SearchKindDepth, $8 searchFusionK, $9 the query's embedding (a vector literal).
+const searchQueryMeaning = `
+with q as (select websearch_to_tsquery('english', $1) as tsq, $4::text as term, upper(btrim($1)) as own_key, $9::vector as qvec),
+kinds as (
+  select 'issue' as kind, 'keyword' as list, i.key as issue_key, null::uuid as owner_artifact_id, null::uuid as artifact_id, i.key as id, null::text as block_id,
+         i.title as issue_title, i.status as issue_status,
+         null::text as owner_project, null::text as owner_slug, null::text as owner_name, i.updated_at,
+         i.key = q.own_key as own, ts_rank_cd(i.search, q.tsq) as r
+    from issues i, q where i.search @@ q.tsq and ($2 = '' or i.project_key = $2)
+  union all
+  select 'document' as kind, 'keyword', a.issue_key, case when a.issue_key is null then a.id else null::uuid end, a.id, a.id::text, null::text,
+         i.title, i.status, p.key, a.slug, a.name,
+         coalesce(i.updated_at, v.created_at),
+         false, ts_rank_cd(v.search, q.tsq)
+    from artifacts a
+    left join issues i on i.key = a.issue_key
+    join projects p on p.key = a.project_key
+    join lateral (select v.search, v.created_at from artifact_versions v
+                  where v.artifact_id = a.id order by v.number desc limit 1) v on true, q
+   where a.kind = 'doc' and v.search @@ q.tsq and ($2 = '' or p.key = $2)
+  union all
+  select 'comment' as kind, 'keyword', c.issue_key, c.artifact_id, coalesce(c.artifact_id, (c.anchor->>'artifact_id')::uuid), c.id::text, null::text,
+         i.title, i.status, p.key, a.slug, a.name,
+         coalesce(i.updated_at, c.created_at),
+         false, ts_rank_cd(c.search, q.tsq)
+    from comments c
+    left join issues i on i.key = c.issue_key
+    left join artifacts a on a.id = c.artifact_id
+    left join projects p on p.key = a.project_key, q
+   where c.search @@ q.tsq and ($2 = '' or coalesce(i.project_key, p.key) = $2)
+  union all
+  select 'ask' as kind, 'keyword', k.issue_key, case when k.issue_key is null then coalesce(k.artifact_id, k.block_artifact_id) else null::uuid end,
+         coalesce(k.artifact_id, k.block_artifact_id, (k.anchor->>'artifact_id')::uuid), k.id::text, k.block_id,
+         i.title, i.status, p.key, a.slug, a.name, coalesce(i.updated_at, k.created_at),
+         false, ts_rank_cd(k.search, q.tsq)
+    from asks k
+    left join issues i on i.key = k.issue_key
+    left join artifacts a on a.id = coalesce(k.artifact_id, k.block_artifact_id)
+    left join projects p on p.key = a.project_key, q
+   where k.search @@ q.tsq and ($2 = '' or coalesce(i.project_key, p.key) = $2)
+  union all
+  select 'message' as kind, 'keyword', m.issue_key, null::uuid, null::uuid, m.id::text, null::text,
+         i.title, i.status, null::text, null::text, null::text, i.updated_at,
+         false, ts_rank_cd(m.search, q.tsq)
+    from messages m join issues i on i.key = m.issue_key, q
+   where m.search @@ q.tsq and ($2 = '' or i.project_key = $2)
+  union all
+  select 'issue' as kind, 'meaning', i.key, null::uuid, null::uuid, i.key, null::text,
+         i.title, i.status, null::text, null::text, null::text, i.updated_at,
+         false, 1 - (e.embedding <=> q.qvec)
+    from issues i
+    join embeddings e on e.kind = 'issue' and e.id = i.key, q
+   where e.embedding is not null and ($2 = '' or i.project_key = $2)
+  union all
+  select 'document' as kind, 'meaning', a.issue_key, case when a.issue_key is null then a.id else null::uuid end, a.id, a.id::text, null::text,
+         i.title, i.status, p.key, a.slug, a.name,
+         coalesce(i.updated_at, v.created_at),
+         false, 1 - (e.embedding <=> q.qvec)
+    from artifacts a
+    left join issues i on i.key = a.issue_key
+    join projects p on p.key = a.project_key
+    join embeddings e on e.kind = 'document' and e.id = a.id::text
+    join lateral (select created_at from artifact_versions v where v.artifact_id = a.id order by v.number desc limit 1) v on true, q
+   where a.kind = 'doc' and e.embedding is not null and ($2 = '' or p.key = $2)
+  union all
+  select 'comment' as kind, 'meaning', c.issue_key, c.artifact_id, coalesce(c.artifact_id, (c.anchor->>'artifact_id')::uuid), c.id::text, null::text,
+         i.title, i.status, p.key, a.slug, a.name,
+         coalesce(i.updated_at, c.created_at),
+         false, 1 - (e.embedding <=> q.qvec)
+    from comments c
+    left join issues i on i.key = c.issue_key
+    left join artifacts a on a.id = c.artifact_id
+    left join projects p on p.key = a.project_key
+    join embeddings e on e.kind = 'comment' and e.id = c.id::text, q
+   where e.embedding is not null and ($2 = '' or coalesce(i.project_key, p.key) = $2)
+  union all
+  select 'ask' as kind, 'meaning', k.issue_key, case when k.issue_key is null then coalesce(k.artifact_id, k.block_artifact_id) else null::uuid end,
+         coalesce(k.artifact_id, k.block_artifact_id, (k.anchor->>'artifact_id')::uuid), k.id::text, k.block_id,
+         i.title, i.status, p.key, a.slug, a.name, coalesce(i.updated_at, k.created_at),
+         false, 1 - (e.embedding <=> q.qvec)
+    from asks k
+    left join issues i on i.key = k.issue_key
+    left join artifacts a on a.id = coalesce(k.artifact_id, k.block_artifact_id)
+    left join projects p on p.key = a.project_key
+    join embeddings e on e.kind = 'ask' and e.id = k.id::text, q
+   where e.embedding is not null and ($2 = '' or coalesce(i.project_key, p.key) = $2)
+  union all
+  select 'message' as kind, 'meaning', m.issue_key, null::uuid, null::uuid, m.id::text, null::text,
+         i.title, i.status, null::text, null::text, null::text, i.updated_at,
+         false, 1 - (e.embedding <=> q.qvec)
+    from messages m
+    join issues i on i.key = m.issue_key
+    join embeddings e on e.kind = 'message' and e.id = m.id::text, q
+   where e.embedding is not null and ($2 = '' or i.project_key = $2)
+),
+ranked as (
+  select *, row_number() over (partition by kind, list order by own desc, r desc, updated_at desc, id) as pos
+    from kinds
+),
+legs as (
+  select * from ranked where pos <= $7
+),
+fused as (select kind, id, sum(1.0 / ($8 + pos)) as score from legs group by kind, id),
+legs_unique as (
+  select distinct on (kind, id) kind, issue_key, owner_artifact_id, artifact_id, id, block_id,
+         issue_title, issue_status, owner_project, owner_slug, owner_name, updated_at
+    from legs
+   order by kind, id
+),
+totals as (
+  select (select count(*) from (select distinct kind, id from kinds) u) as total,
+         (select count(*) from fused) as reachable
+),
+page as (
+  select l.*, f.score, array_position(array['issue', 'document', 'ask', 'comment', 'message'], l.kind) as kind_order
+    from legs_unique l join fused f using (kind, id)
+   order by f.score desc, kind_order, l.updated_at desc, l.id
+   limit $3 offset $6
+)
+select t.total, t.reachable, r.kind, case when r.owner_artifact_id is null then 'issue' else 'document' end,
+       r.issue_key, r.issue_title, r.issue_status,
+       r.owner_project, r.owner_slug, r.owner_artifact_id::text, r.owner_name,
+       ar.slug, ar.name, coalesce(ar.is_primary, false), r.id, r.block_id, r.score::float8,
+       ts_headline('english',
+         case when q.term <> '' and strpos(lower(txt.text), lower(q.term)) > 0
+              then substr(txt.text, greatest(1, strpos(lower(txt.text), lower(q.term)) - 1500), 4000)
+              else left(txt.text, 4000) end,
+         q.tsq, $5) as headline
+  from totals t cross join q
+  left join (page r left join artifacts ar on ar.id = r.artifact_id) on true
+  left join lateral (
+    select case r.kind
+      when 'issue' then r.issue_title
+      when 'document' then (select v.markdown from artifact_versions v where v.artifact_id = r.artifact_id order by v.number desc limit 1)
       when 'comment' then (select c.body from comments c where c.id = r.id::uuid)
       when 'ask' then (select k.question || ' ' || coalesce(k.options::text, '') || ' ' || coalesce(k.answer->>'text', '') from asks k where k.id = r.id::uuid)
       when 'message' then (select m.body from messages m where m.id = r.id::uuid)
@@ -188,16 +357,30 @@ func (s *server) search(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	sqlText := searchQueryKeyword
+	args := []any{searchText, project, limit, firstTerm(searchText), headlineOptions, offset, contracts.SearchKindDepth, searchFusionK}
+	degraded := ""
+	if s.deps.Embedder != nil {
+		if vector, err := s.embedQuery(r.Context(), searchText); err != nil {
+			slog.Warn("dispatch search: query embedding unavailable, answering keyword-only", "error", err)
+			degraded = degradedEmbedderUnavailable
+		} else {
+			sqlText = searchQueryMeaning
+			args = append(args, embed.Literal(vector))
+		}
+	} else {
+		degraded = degradedEmbedderUnavailable
+	}
+
 	started := time.Now()
-	rows, err := s.deps.Store.Pool.Query(r.Context(), searchQuery, searchText, project, limit, firstTerm(searchText), headlineOptions,
-		offset, contracts.SearchKindDepth, searchFusionK)
+	rows, err := s.deps.Store.Pool.Query(r.Context(), sqlText, args...)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
 	defer rows.Close()
 
-	response := model.SearchResponse{Results: []model.SearchResult{}, Limit: limit, Offset: offset}
+	response := model.SearchResponse{Results: []model.SearchResult{}, Limit: limit, Offset: offset, Degraded: degraded}
 	for rows.Next() {
 		var result model.SearchResult
 		var kind, ownerKind, id, headline *string
@@ -259,6 +442,22 @@ func (s *server) search(w http.ResponseWriter, r *http.Request) {
 
 	response.TookMS = time.Since(started).Milliseconds()
 	WriteJSON(w, http.StatusOK, response)
+}
+
+// embedQuery embeds searchText for meaning search (embed.InputQuery - Cohere's asymmetric mode
+// embeds a query differently from a stored document), bounded by searchEmbedTimeout so one
+// degraded request never holds the whole search handler open on a slow or wedged Cohere call.
+func (s *server) embedQuery(ctx context.Context, searchText string) ([]float32, error) {
+	ctx, cancel := context.WithTimeout(ctx, searchEmbedTimeout)
+	defer cancel()
+	vectors, err := s.deps.Embedder.Embed(ctx, []string{searchText}, embed.InputQuery)
+	if err != nil {
+		return nil, err
+	}
+	if len(vectors) != 1 {
+		return nil, context.DeadlineExceeded
+	}
+	return vectors[0], nil
 }
 
 func firstTerm(query string) string {
