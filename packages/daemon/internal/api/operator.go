@@ -15,7 +15,9 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
+	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
 )
 
 // invalidOperatorToken is every operator route's one refusal.
@@ -181,8 +183,9 @@ func (s *server) spawn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := context.WithoutCancel(r.Context())
-	if s.treeCleaner != nil && req.Tree == req.Issue && req.Role == claim.RoleArchitect {
-		if _, err := s.treeCleaner.OpenOperatorTree(ctx, s.project, req.Tree); err != nil {
+	if req.Tree == req.Issue && req.Role == claim.RoleArchitect {
+		st := store.FromPool(s.pool)
+		if _, err := st.OpenTreeLifecycle(ctx, s.project, req.Tree, treelifecycle.AuthorityOperator); err != nil {
 			writeJSON(w, http.StatusConflict, errorBody(fmt.Sprintf("operator tree %s is waiting for durable cleanup: %v", req.Tree, err)))
 			return
 		}
@@ -270,12 +273,13 @@ func stopEvent(_ http.ResponseWriter, _ *http.Request, c supervise.Claim) (super
 // nothing, and the refusal an operator sees is the machine's. A close of a tree already retired
 // answers 200: the operator asked for an outcome that holds, and a retry after a timeout is not a
 // failure. Then every other claim of the tree that has not retired is stopped, as tree_close stops
-// each, so no worker is left on a tree volume that is being deleted. After every claim stopped, the
-// explicit TreeCleaner deletes that non-workflow tree's durable child resources and then its root
-// Sandbox. A cleaner failure leaves its cleanup marker durable for the same close to resume; a
-// claim the daemon supervises no machine for cannot be stopped that way, since the stop route
-// answers 404 for it, until the daemon restarts and builds a machine for every stored claim; the
-// 500 says so for that claim. Nothing retries either for the operator.
+// each, so no worker is left on a tree volume that is being deleted. The close reserves the tree's
+// cleanup first, so no claim of the tree can bind or launch meanwhile; after every claim stopped,
+// the store's reserved cleanup has the runtime release the tree (Options.Releaser) and confirms
+// it. A release failure leaves the reservation durable for the same close to resume; a claim the
+// daemon supervises no machine for cannot be stopped that way, since the stop route answers 404 for
+// it, until the daemon restarts and builds a machine for every stored claim; the 500 says so for
+// that claim. Nothing retries either for the operator.
 func (s *server) closeTree(w http.ResponseWriter, r *http.Request) {
 	token := claim.Token(r.PathValue("token"))
 	root, ok := s.supervisor.Machine(token)
@@ -289,16 +293,12 @@ func (s *server) closeTree(w http.ResponseWriter, r *http.Request) {
 		s.operatorFailure(w, "close", token, err)
 		return
 	}
-	var treeEpoch uint64
-	cleanup := false
-	if s.treeCleaner != nil {
-		var err error
-		treeEpoch, cleanup, err = s.treeCleaner.ReserveOperatorTreeCleanup(ctx, s.project, c.Tree)
-		if err != nil {
-			s.log.Error("api: reserve cleanup of an operator-closed tree", "tree", c.Tree, "error", err)
-			writeJSON(w, http.StatusConflict, errorBody(fmt.Sprintf("closed %s's root claim, but its durable tree cleanup could not be reserved: %v. Retry legion claims close once that is resolved", c.Tree, err)))
-			return
-		}
+	st := store.FromPool(s.pool)
+	lifecycle, cleanup, err := st.ReserveOperatorTreeCleanup(ctx, s.project, c.Tree)
+	if err != nil {
+		s.log.Error("api: reserve cleanup of an operator-closed tree", "tree", c.Tree, "error", err)
+		writeJSON(w, http.StatusConflict, errorBody(fmt.Sprintf("closed %s's root claim, but its durable tree cleanup could not be reserved: %v. Retry legion claims close once that is resolved", c.Tree, err)))
+		return
 	}
 	claims, err := s.supervisor.Claims(ctx)
 	if err != nil {
@@ -328,7 +328,7 @@ func (s *server) closeTree(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if cleanup {
-		if err := s.treeCleaner.CleanupTree(ctx, s.project, c.Tree, treeEpoch); err != nil {
+		if err := st.CleanupReservedTree(ctx, s.project, c.Tree, lifecycle.Epoch, s.releaser); err != nil {
 			s.log.Error("api: cleanup an operator-closed tree", "tree", c.Tree, "error", err)
 			writeJSON(w, http.StatusInternalServerError, errorBody(fmt.Sprintf("closed %s's claims, but durable resource cleanup is pending: %v. Retry legion claims close after the reported cleanup error is resolved", c.Tree, err)))
 			return

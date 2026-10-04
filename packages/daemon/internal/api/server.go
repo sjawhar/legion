@@ -1,7 +1,6 @@
 package api
 
 import (
-	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"log/slog"
@@ -20,21 +19,13 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/record"
+	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
 // readHeaderTimeout bounds how long a client may take to send its request headers; without it a
 // slow-header client holds a listener slot for as long as it likes.
 const readHeaderTimeout = 10 * time.Second
-
-// TreeResourceCleaner owns explicit operator tree cleanup. Reservation precedes the claim snapshot
-// so a child start cannot persist outside its deletion population. It is separate from Supervisor:
-// claim routes decide lifecycle, while this capability owns shared issue resources.
-type TreeResourceCleaner interface {
-	OpenOperatorTree(ctx context.Context, project, tree string) (treeEpoch uint64, err error)
-	ReserveOperatorTreeCleanup(ctx context.Context, project, tree string) (treeEpoch uint64, reserved bool, err error)
-	CleanupTree(ctx context.Context, project, tree string, treeEpoch uint64) error
-}
 
 // Options are what the routes answer from.
 type Options struct {
@@ -63,9 +54,9 @@ type Options struct {
 	// GitHubOwner is the configured repository's owner: the account both Apps are installed on,
 	// whose installation every credential route mints for.
 	GitHubOwner string
-	// TreeCleaner runs an explicit operator close's durable resource cleanup after every claim of
-	// the tree stopped. Nil for runtimes with no shared issue resources.
-	TreeCleaner TreeResourceCleaner
+	// Releaser releases what the runtime holds for a tree whose operator close reserved and
+	// finished its cleanup: the daemon's runtime.
+	Releaser store.TreeReleaser
 	// Grants mints and redeems the daemon-local one-command credential handles.
 	Grants   *credential.Grants
 	Pool     *pgxpool.Pool
@@ -95,7 +86,7 @@ type server struct {
 	tokens       appauth.Tokens
 	githubOwner  string
 	grants       *credential.Grants
-	treeCleaner  TreeResourceCleaner
+	releaser     store.TreeReleaser
 	pool         *pgxpool.Pool
 	handlers     []intake.Handler
 	records      record.Store
@@ -126,7 +117,7 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		designGate:        opts.DesignGate,
 		tokens:            opts.Tokens,
 		githubOwner:       opts.GitHubOwner,
-		treeCleaner:       opts.TreeCleaner,
+		releaser:          opts.Releaser,
 		grants:            opts.Grants,
 		pool:              opts.Pool,
 		handlers:          opts.Handlers,
