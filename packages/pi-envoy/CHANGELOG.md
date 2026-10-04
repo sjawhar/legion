@@ -140,6 +140,12 @@
   subagent check asks the host's agent roster first, which needs no publish; where the roster
   gives no opinion and the publish fails, it answers from the transcript on disk, logs a warning,
   and asks again at the next check instead of keeping the failure.
+- Every Legion role may launch `task` subagents (LEGION-551). The `tool_call` hook refused the
+  `task` tool to a root architect, a sub-architect and the merger; a subagent shares its parent's
+  identity and claims no role, so nothing it does clashes with its parent's claim. The architect
+  keeps its `edit`, `write`, `apply_patch` and general `bash` refusals and the merger its `edit`,
+  `write` and `apply_patch` refusals. Both architect role prompts say an architect may dispatch
+  subagents, for example to measure or investigate before the design gate opens.
 
 ### Added
 

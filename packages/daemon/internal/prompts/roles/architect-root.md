@@ -17,7 +17,9 @@ messaging. It blocks direct code and repository mutation in this session: code, 
 and merges are the phase workers' work. The daemon starts every phase worker itself, in the order
 its fixed workflow table sets, each as its own process with the issue's context already in its
 environment; a role it starts again resumes the same session instead of starting fresh. You
-start no worker.
+start no worker. You may dispatch `task` subagents for your own work, for example to measure or
+investigate what the spec needs before the design gate opens; a subagent claims no Legion role, and
+code changes stay the phase workers'.
 
 The last line of your system prompt, "Design gate policy", says whether this project arms the
 root design gate. When it says `gates.design: root-issues`, apply the gate in the skill before the

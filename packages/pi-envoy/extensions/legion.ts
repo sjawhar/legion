@@ -344,13 +344,12 @@ function paneRuleRefusal(toolCall: ToolCallEvent, rules: readonly PaneRule[]): s
 // OMP's own plugin registry.
 const LEGION_LOADED_MARKER = Symbol.for("legion.pi-envoy.legion-loaded");
 
-/** Code-mutation tools blocked for an architect session (root or sub-architect) and a reviewer
- * (whose only sanctioned mutation is the final `.legion/` cleanup commit, made via `bash`).
- * `write` here means a real filesystem write; see `isToolDeviceInvocation` for the `xd://`
- * tool-device carve-out. */
+/** Code-mutation tools blocked for an architect session (root or sub-architect), a reviewer
+ * (whose only sanctioned mutation is the final `.legion/` cleanup commit, made via `bash`), and the
+ * merger (which only verifies and reports). `write` here means a real filesystem write; see
+ * `isToolDeviceInvocation` for the `xd://` tool-device carve-out. No role's list holds `task`:
+ * every Legion role may launch `task` subagents. */
 const CODE_MUTATION_TOOLS = ["edit", "write", "apply_patch"];
-/** The merger verifies and reports only: no code mutation, and no further Legion spawns. */
-const MERGER_BLOCKED_TOOLS = [...CODE_MUTATION_TOOLS, "task"];
 
 /** An `xd://` URL, its scheme in any case. */
 const TOOL_DEVICE_URL = /^xd:\/\//iu;
@@ -484,9 +483,9 @@ export default function legionExtension(pi: PiApi): void {
     paneRules ??= PANE_RULES[classifySession(process.env).kind] ?? [];
     const refusal = paneRuleRefusal(toolCall, paneRules);
     if (refusal !== undefined) return { block: true, reason: refusal };
-    // No other gate applies to a subagent's own tool calls: the parent session's gate, running
-    // in the parent's own module instance, already governs the parent's `task` call that spawned
-    // it (see the architect `task` block below and isSubagentSession).
+    // No other gate applies to a subagent's own tool calls: the role gates below bind the session
+    // that holds the claim, and a subagent shares its parent's identity and claims no role (see
+    // isSubagentSession). Every role may launch one with `task`.
     if (await checkSubagentSession(context)) return undefined;
     const sessionID = context.sessionManager.getSessionId();
     const active = claimSession.capability(sessionID);
@@ -504,17 +503,6 @@ export default function legionExtension(pi: PiApi): void {
     ) {
       return { block: true, reason: "the architect delegates all code work to phase workers" };
     }
-    // The architect's work reaches other agents only as child issues and the phase workers the
-    // daemon runs: Legion runs one agent per process, and an in-process `task` subagent would
-    // inherit the architect's Legion environment and clash with its own daemon-registered role
-    // (see isSubagentSession).
-    if (active?.role === "architect" && toolCall.toolName === "task") {
-      return {
-        block: true,
-        reason:
-          "the architect delegates only through child issues and the daemon's phase workers; Legion runs one agent per process",
-      };
-    }
     if (
       active?.role === "reviewer" &&
       !isToolDevice &&
@@ -528,7 +516,7 @@ export default function legionExtension(pi: PiApi): void {
     if (
       active?.role === "merger" &&
       !isToolDevice &&
-      MERGER_BLOCKED_TOOLS.includes(toolCall.toolName)
+      CODE_MUTATION_TOOLS.includes(toolCall.toolName)
     ) {
       return { block: true, reason: "the merger only verifies and reports" };
     }

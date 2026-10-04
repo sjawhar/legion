@@ -1159,71 +1159,38 @@ describe("Legion OMP extension", () => {
     expect(await jjRepoConfig(workspace, "user.name")).toBe('user.name = "Sentinel Before Boot"');
     expect(await jjRepoConfig(workspace, "user.email")).toBe("");
   });
-  test("restricts phase-worker tool access per LEGION_ROLE", async () => {
-    const blockedReason = (role: LegionRole, toolName: string): string | undefined => {
-      if (role === "architect" && ["edit", "write", "apply_patch"].includes(toolName)) {
-        return "the architect delegates all code work to phase workers";
-      }
-      if (role === "architect" && toolName === "task") {
-        return "the architect delegates only through child issues and the daemon's phase workers; Legion runs one agent per process";
-      }
-      if (role === "reviewer" && ["edit", "write", "apply_patch"].includes(toolName)) {
-        return "the reviewer edits nothing except the final .legion/ cleanup commit via bash";
-      }
-      if (role === "merger" && ["edit", "write", "apply_patch", "task"].includes(toolName)) {
-        return "the merger only verifies and reports";
-      }
-      return undefined;
+  // Every pane but the root architect's is on a child issue, a sub-architect's included; the root
+  // architect's issue is its tree's.
+  test.each([
+    ["planner", "REPO-43"],
+    ["implementer", "REPO-43"],
+    ["tester", "REPO-43"],
+    ["reviewer", "REPO-43"],
+    ["merger", "REPO-43"],
+    ["architect", "REPO-43"],
+    ["architect", "REPO-42"],
+  ] as const)("restricts code tools for the %s on %s but lets it launch a `task` subagent", async (role, issue) => {
+    const codeToolRefusal: Partial<Record<LegionRole, string>> = {
+      architect: "the architect delegates all code work to phase workers",
+      reviewer: "the reviewer edits nothing except the final .legion/ cleanup commit via bash",
+      merger: "the merger only verifies and reports",
     };
-    const roles: readonly LegionRole[] = [
-      "planner",
-      "implementer",
-      "tester",
-      "reviewer",
-      "merger",
-      "architect",
-    ];
-    const toolNames = ["edit", "write", "apply_patch", "task", "hub"];
-
-    for (const role of roles) {
-      const { toolCall, context } = await bootPane({ role, sessionId: `ses_${role}` });
-      for (const toolName of toolNames) {
-        const reason = blockedReason(role, toolName);
-        const result = await toolCall(
-          { toolName, toolCallId: `call-${role}-${toolName}`, input: {} },
-          context
-        );
-        if (reason === undefined) expect(result).toBeUndefined();
-        else expect(result).toEqual({ block: true, reason });
-      }
+    const { toolCall, context } = await bootPane({
+      role,
+      issue,
+      sessionId: `ses_${role}_${issue}`,
+    });
+    for (const toolName of ["edit", "write", "apply_patch", "task", "hub"]) {
+      const reason = ["edit", "write", "apply_patch"].includes(toolName)
+        ? codeToolRefusal[role]
+        : undefined;
+      const result = await toolCall(
+        { toolName, toolCallId: `call-${role}-${issue}-${toolName}`, input: {} },
+        context
+      );
+      if (reason === undefined) expect(result).toBeUndefined();
+      else expect(result).toEqual({ block: true, reason });
     }
-  });
-  test("blocks the architect's task tool but allows an implementer's, per the one-agent-per-process rule", async () => {
-    const { toolCall: architectToolCall, context: architectContext } = await bootPane({
-      role: "architect",
-      sessionId: "ses_architect_task",
-    });
-    await expect(
-      architectToolCall(
-        { toolName: "task", toolCallId: "call-architect-task", input: {} },
-        architectContext
-      )
-    ).resolves.toEqual({
-      block: true,
-      reason:
-        "the architect delegates only through child issues and the daemon's phase workers; Legion runs one agent per process",
-    });
-
-    const { toolCall: implementerToolCall, context: implementerContext } = await bootPane({
-      role: "implementer",
-      sessionId: "ses_implementer_task",
-    });
-    await expect(
-      implementerToolCall(
-        { toolName: "task", toolCallId: "call-implementer-task", input: {} },
-        implementerContext
-      )
-    ).resolves.toBeUndefined();
   });
   test("allows xd:// tool-device writes through the mutation gate but still blocks real file writes", async () => {
     const blockedReason = (role: LegionRole): string =>
