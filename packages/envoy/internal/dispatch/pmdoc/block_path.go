@@ -112,5 +112,5 @@ func columnHeader(table *Node, row, column int) string {
 // oneLineText is node's text on one line, as the renderer writes a table cell (hard breaks as
 // spaces).
 func oneLineText(node *Node) string {
-	return strings.Join(strings.Fields(textContent(node)), " ")
+	return strings.Join(strings.Fields(TextContent(node)), " ")
 }

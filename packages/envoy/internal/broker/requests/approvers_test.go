@@ -140,6 +140,86 @@ func TestAPendingRequestIsApprovedByWhomTheTagsNameNow(t *testing.T) {
 	}
 }
 
+// TestADenialAfterAnOwnerChangeReleasesNothingAndClosesTheRecord pins what a denial of a stranded
+// request leaves behind: alice denies the one waiting on her for a secret that is now bob's, and
+// mallory, its requester, denies her own waiting on anyone for a secret that is now alice's. Neither
+// releases anything, each record holds its one denied event and leaves every pending list, no one
+// decides it again, and the session's next ask for each name is a new request to the secret's new
+// owner rather than the denied one reused.
+func TestADenialAfterAnOwnerChangeReleasesNothingAndClosesTheRecord(t *testing.T) {
+	m, _, _, _ := newFixture(t)
+	ctx := context.Background()
+	enr, key := newEnrollment(t, m.Store, "box", "box-mallory-"+t.Name(), new(mallory), nil)
+	pending := func(name string) Request {
+		t.Helper()
+		req, err := m.Create(ctx, enr, signRequest(t, m, key, "need "+name, name), "")
+		if err != nil || req.RecordID == nil {
+			t.Fatalf("Create(%s) = %+v, %v, want pending", name, req, err)
+		}
+		return req
+	}
+	alices := pending("ALICE_KEY")
+	shared := pending("SHARED_KEY")
+	retag(t, m,
+		policytest.Secret("ALICE_KEY", bob, policy.TierAgent, "bob-owned-v2"),
+		policytest.Secret("SHARED_KEY", otherPerson, policy.TierHuman, "alice-owned-v2"))
+
+	for _, c := range []struct {
+		req   Request
+		login string
+	}{{alices, otherPerson}, {shared, mallory}} {
+		dec, err := m.ApplyDecision(ctx, *c.req.RecordID, false, c.login)
+		if err != nil || dec.State != "denied" || dec.GrantID != "" {
+			t.Fatalf("deny %s by %s after the handover = %+v, %v; want denied with no grant", c.req.Secrets[0].Name, c.login, dec, err)
+		}
+	}
+	people := []string{otherPerson, bob, mallory, "carol@example.com"}
+	for _, req := range []Request{alices, shared} {
+		var grants, events int
+		if err := m.Store.Pool.QueryRow(ctx, `select count(*) from grants where request_id=$1`, req.ID).Scan(&grants); err != nil || grants != 0 {
+			t.Errorf("grants of the denied %s request = %d, %v; want none", req.Secrets[0].Name, grants, err)
+		}
+		if err := m.Store.Pool.QueryRow(ctx, `select count(*) from credential_request_events where record_id=$1`, *req.RecordID).Scan(&events); err != nil || events != 1 {
+			t.Errorf("events on the denied %s record = %d, %v; want its one denied event", req.Secrets[0].Name, events, err)
+		}
+		for _, login := range people {
+			for _, approve := range []bool{true, false} {
+				if dec, err := m.ApplyDecision(ctx, *req.RecordID, approve, login); !errors.Is(err, record.ErrNotApprover) && !errors.Is(err, ErrTerminal) {
+					t.Errorf("ApplyDecision(denied %s, approve=%v, %s) = %+v, %v; want NOT_APPROVER or RECORD_TERMINAL", req.Secrets[0].Name, approve, login, dec, err)
+				}
+			}
+		}
+		if err := m.Cancel(ctx, req.ID, enr); err == nil {
+			t.Errorf("Cancel(denied %s) = nil; want a refusal", req.Secrets[0].Name)
+		}
+		if got, err := m.Get(ctx, req.ID); err != nil || got.State != "denied" {
+			t.Errorf("Get(denied %s) = %+v, %v; want denied", req.Secrets[0].Name, got, err)
+		}
+	}
+	for _, person := range people {
+		listed, err := m.PendingForApprover(ctx, person)
+		if err != nil {
+			t.Fatalf("PendingForApprover(%s): %v", person, err)
+		}
+		for _, p := range listed {
+			if p.RecordID == *alices.RecordID || p.RecordID == *shared.RecordID {
+				t.Errorf("PendingForApprover(%s) lists the denied record %s", person, p.RecordID)
+			}
+		}
+	}
+	for name, owner := range map[string]string{"ALICE_KEY": bob, "SHARED_KEY": otherPerson} {
+		again, err := m.Create(ctx, enr, signRequest(t, m, key, "need it again", name), "")
+		if err != nil || again.State != "pending" || again.RecordID == nil || again.Coalesced || again.GrantID != nil ||
+			*again.RecordID == *alices.RecordID || *again.RecordID == *shared.RecordID {
+			t.Fatalf("Create(%s) after the denial = %+v, %v; want a new pending request", name, again, err)
+		}
+		var approver string
+		if err := m.Store.Pool.QueryRow(ctx, `select approver from credential_requests where id=$1`, *again.RecordID).Scan(&approver); err != nil || approver != owner {
+			t.Errorf("new %s request's approver = %q, %v; want the new owner %s", name, approver, err, owner)
+		}
+	}
+}
+
 // TestAnOwnersApprovalSurvivesLooseningToShared pins the control: once alice's agent-tier secret
 // is shared and human-tier, whose approver is anyone, the grant alice approved keeps releasing its
 // value and is handed back by reuse, and a request still waiting on alice is hers to decide.
@@ -222,9 +302,7 @@ func TestAnApprovalOfASecretNoLongerServedIsLeftToItsApprover(t *testing.T) {
 	}
 
 	fixtureStore(m).Delete(policytest.ID("ALICE_KEY"))
-	if err := m.Policy.Refresh(ctx); err != nil {
-		t.Fatalf("policy refresh: %v", err)
-	}
+	retag(t, m)
 	dec, err := m.ApplyDecision(ctx, *req.RecordID, true, otherPerson)
 	if err != nil || dec.State != "granted" {
 		t.Fatalf("ApplyDecision(alice) once ALICE_KEY is gone = %+v, %v; want granted", dec, err)

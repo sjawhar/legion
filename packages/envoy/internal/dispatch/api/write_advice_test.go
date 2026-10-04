@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -27,6 +28,7 @@ type testWriteAdvice struct {
 	SessionWritesSinceHuman int             `json:"session_writes_since_human"`
 	YourOpenAsks            []testAdviceAsk `json:"your_open_asks"`
 	DecisionBlocks          *int            `json:"decision_blocks"`
+	DecisionBlocksAdded     *int            `json:"decision_blocks_added"`
 	UnparsedOpeners         *struct {
 		Count    int      `json:"count"`
 		Examples []string `json:"examples"`
@@ -436,6 +438,103 @@ func TestWriteAdviceReportsIssueStatusAtWriteTime(t *testing.T) {
 	}
 }
 
+// An edit's advice counts the ask blocks the edit added, as the server's parser reads the document
+// it wrote: an opener is a block inside a blockquote or a list item, or behind more than three
+// colons, and quoted in code it is text - in a fence at the top level, in a fence in a list item,
+// or in indented code. A block the edit moved or reworded was already there.
+func TestDocumentEditAdviceCountsTheAskBlocksTheEditAdded(t *testing.T) {
+	handler := newTestHandler(t)
+	createAdviceProject(t, handler, "ADDED")
+	const spec = "# Spec\n\nPick a transport.\n\n:::ask{#decision urgency=\"high\"}\nWhich transport?\n:::\n\nContext ends with no drift.\n"
+	insert := func(markdown string) func(t *testing.T, artifactID string) []map[string]any {
+		return func(*testing.T, string) []map[string]any {
+			return []map[string]any{{"op": "insert", "markdown": markdown, "after": "end"}}
+		}
+	}
+	for _, test := range []struct {
+		name  string
+		ops   func(t *testing.T, artifactID string) []map[string]any
+		added int
+	}{
+		{name: "a block at the top level", ops: insert(":::ask{#window}\nWhich deployment window?\n:::"), added: 1},
+		{name: "a block in a blockquote", ops: insert("> :::ask{#window}\n> Which deployment window?\n> :::"), added: 1},
+		{name: "a block on a list item's first line", ops: insert("- :::ask{#window}\n  Which deployment window?\n  :::"), added: 1},
+		{name: "a block opened with four colons", ops: insert("::::ask{#window}\nWhich deployment window?\n::::"), added: 1},
+		{name: "a block after a fence a list item's end closes", ops: insert("- Example:\n\n  ```md\n  code\n\n:::ask{#window}\nWhich deployment window?\n:::"), added: 1},
+		{name: "a block after a tilde fence a longer run closes", ops: insert("~~~md\n:::ask{#example}\n:::\n~~~~\n\n:::ask{#window}\nWhich deployment window?\n:::"), added: 1},
+		{name: "two blocks", ops: insert(":::ask{#window}\nWhich deployment window?\n:::\n\n> :::ask{#region}\n> Which region?\n> :::"), added: 2},
+		{name: "a fenced example at the top level", ops: insert("Example:\n\n```md\n:::ask{#example}\nWhich?\n:::\n```"), added: 0},
+		{name: "a fenced example four columns into a nested list item", ops: insert("- Format notes:\n  - Example:\n\n    ```md\n    :::ask{#example}\n    Which?\n    :::\n    ```"), added: 0},
+		{name: "a fenced example four columns into item 10", ops: insert("10. Example:\n\n    ```md\n    :::ask{#example}\n    Which?\n    :::\n    ```"), added: 0},
+		{name: "a fence opened on a list item's first line", ops: insert("- ```md\n  :::ask{#example}\n  Which?\n  :::\n  ```"), added: 0},
+		{name: "an indented-code example", ops: insert("Example:\n\n    :::ask{#example}\n    Which?\n    :::"), added: 0},
+		{name: "plain text", ops: insert("A plain revision."), added: 0},
+		{name: "a retype into an ask block", ops: func(t *testing.T, artifactID string) []map[string]any {
+			blocks := decodeBody[[]model.ArtifactBlock](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+artifactID+"/blocks", nil, "alice"))
+			for _, block := range blocks {
+				if block.Type == "paragraph" {
+					return []map[string]any{{"op": "retype", "block": block.ID, "type": "ask", "attributes": map[string]any{"urgency": "high"}}}
+				}
+			}
+			t.Fatalf("blocks = %#v, want a paragraph", blocks)
+			return nil
+		}, added: 1},
+		{name: "a move of an ask block", ops: func(*testing.T, string) []map[string]any {
+			return []map[string]any{{"op": "move", "block": "decision", "after": "no drift."}}
+		}, added: 0},
+		{name: "a reworded ask block", ops: func(*testing.T, string) []map[string]any {
+			return []map[string]any{{"op": "replace", "find": "Which transport?", "with": "Which wire transport?"}}
+		}, added: 0},
+	} {
+		// Unguarded and under a document precondition, which applies the batch on its own path.
+		for _, guarded := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s, guarded=%t", test.name, guarded), func(t *testing.T) {
+				specText := spec
+				issue := createAdviceIssue(t, handler, "ADDED", test.name, &specText)
+				body := map[string]any{"ops": test.ops(t, issue.PrimaryArtifactID)}
+				if guarded {
+					document := decodeBody[documentPreconditionRead](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/text", nil, "alice"))
+					body["precondition"] = map[string]string{"document": document.Token}
+				}
+				edited := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", body, "alice")
+				advice := adviceFromResponse(t, edited.Code, edited.Body.String())
+				if advice.DecisionBlocksAdded == nil || *advice.DecisionBlocksAdded != test.added {
+					t.Fatalf("decision_blocks_added = %v, want %d: %s", advice.DecisionBlocksAdded, test.added, edited.Body.String())
+				}
+				if advice.DecisionBlocks != nil || advice.IssueStatus != "triage" {
+					t.Fatalf("edit advice = %#v, want the issue's status and no decision_blocks", advice)
+				}
+			})
+		}
+	}
+
+	// A project document has no issue state to report, so its edit's advice is the count alone.
+	upload := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects/ADDED/artifacts", map[string]string{
+		"name": "project-notes.md", "content": "# Notes\n\nBody.\n",
+	}, "alice")
+	if upload.Code != http.StatusCreated {
+		t.Fatalf("project upload: status=%d body=%s", upload.Code, upload.Body.String())
+	}
+	document := decodeBody[struct {
+		Artifact struct {
+			ID string `json:"id"`
+		} `json:"artifact"`
+	}](t, upload)
+	edited := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+document.Artifact.ID+"/edits", map[string]any{
+		"ops": []map[string]any{{"op": "insert", "markdown": "> :::ask{#window}\n> Which deployment window?\n> :::", "after": "end"}},
+	}, "alice")
+	if edited.Code != http.StatusOK {
+		t.Fatalf("project document edit: status=%d body=%s", edited.Code, edited.Body.String())
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(edited.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode project document edit: %v", err)
+	}
+	if advice := string(raw["advice"]); advice != `{"decision_blocks_added":1}` {
+		t.Fatalf("project document edit advice = %s, want the count alone", advice)
+	}
+}
+
 func TestWriteAdviceOnIdempotentExternalIssueCreate(t *testing.T) {
 	handler := newTestHandler(t)
 	createAdviceProject(t, handler, "EXTERNAL")
@@ -554,6 +653,31 @@ func TestWriteAdviceFailureDoesNotAbortWrite(t *testing.T) {
 	}
 	if messages != 1 {
 		t.Fatalf("committed messages = %d, want 1", messages)
+	}
+}
+func TestDocumentEditAdviceKeepsCountWhenIssueAdviceFails(t *testing.T) {
+	handler, _ := newFailingAdviceHandler(t, "session_writes_since_human")
+	createAdviceProject(t, handler, "COUNT")
+	spec := "# Count-only advice\n"
+	issue := createAdviceIssue(t, handler, "COUNT", "Failed issue advice", &spec)
+
+	edited := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"ops": []map[string]string{{"op": "insert", "markdown": ":::ask{#window}\nWhich deployment window?\n:::", "after": "end"}},
+	}, "alice")
+	advice := adviceFromResponse(t, edited.Code, edited.Body.String())
+	if advice.DecisionBlocksAdded == nil || *advice.DecisionBlocksAdded != 1 {
+		t.Fatalf("edit advice = %#v, want one added decision block: %s", advice, edited.Body.String())
+	}
+	var body map[string]json.RawMessage
+	if err := json.Unmarshal(edited.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode count-only edit response: %v", err)
+	}
+	var rawAdvice map[string]json.RawMessage
+	if err := json.Unmarshal(body["advice"], &rawAdvice); err != nil {
+		t.Fatalf("decode count-only advice: %v body=%s", err, edited.Body.String())
+	}
+	if len(rawAdvice) != 1 {
+		t.Fatalf("count-only advice fields = %#v, want decision_blocks_added alone", rawAdvice)
 	}
 }
 

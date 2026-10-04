@@ -200,8 +200,9 @@ approved before it wherever the new tags want the secret approved for that sessi
   waiting on a person for a secret another person must now approve can be approved by no one. One
   waiting on a person stays that person's when the secret becomes shared, or when the new tags give
   its session the secret without asking. A denial releases nothing, so the approver a request waits
-  on can still deny it, which takes it off the pending list; otherwise it expires, or its session
-  cancels it (`agent-secrets cancel`) and asks again.
+  on can still deny it, which takes it off the pending list: for a request waiting on anyone, any
+  signed-in person may deny it. Otherwise it expires, or its session cancels it
+  (`agent-secrets cancel`) and asks again.
 
 A record is decided once. A second click, a concurrent one, or one after the record expired gets
 `RECORD_TERMINAL`. A pending request nobody decides expires after 12 hours, a fixed time rather than

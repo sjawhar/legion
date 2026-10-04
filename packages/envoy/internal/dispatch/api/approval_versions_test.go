@@ -837,10 +837,10 @@ func TestANewVersionMovesTheOpenApprovalAsk(t *testing.T) {
 		}
 	})
 
-	// A further version of a request already waiting on its agent changes only the version it
+	// A further version of a request an earlier version already moved changes only the version it
 	// names, so it is recorded as a human's unnamed version is: on the issue's own topic with notify
-	// off, and on no follower's. Only the move that takes the request from the human wakes anyone,
-	// and once the agent hands it back the next version's move wakes again.
+	// off, and on no follower's. Only the first move since the request was opened or handed back
+	// wakes anyone, so once the agent hands it back the next version's move wakes again.
 	t.Run("a human typing settled versions one after another", func(t *testing.T) {
 		doc := open(t, 50*time.Millisecond)
 		typist := connect(t, doc, humanPeer)
