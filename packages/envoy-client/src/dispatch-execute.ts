@@ -24,6 +24,7 @@ import type {
   IssueComponentsMode,
   IssueDetails,
   IssuePriority,
+  IssueProgress,
   IssueReferences,
   IssueRouteReach,
   IssueRouteStatus,
@@ -1270,6 +1271,21 @@ function routeText(issue: RoutedIssue, titles?: ReadonlyMap<string, string>): st
   return issue.route + (issue.route_status == null ? "" : reach[issue.route_status]);
 }
 
+/**
+ * One issue's progress as the tools print it: `tasks 3/7, children 2/5`, each part only when the
+ * server counted it (`null` is a spec with no task list, an issue with no child), joined by sep.
+ * Empty when neither counted.
+ */
+function progressText(progress: IssueProgress | undefined, sep: string): string {
+  if (progress === undefined) return "";
+  const parts: string[] = [];
+  if (progress.tasks !== null) parts.push(`tasks ${progress.tasks.done}/${progress.tasks.total}`);
+  if (progress.children !== null) {
+    parts.push(`children ${progress.children.done}/${progress.children.total}`);
+  }
+  return parts.join(sep);
+}
+
 function issueSummary(
   issue: IssueDetails,
   events: readonly Event[],
@@ -1297,6 +1313,7 @@ function issueSummary(
     `Labels: ${issue.labels.length === 0 ? "none" : issue.labels.join(", ")}`,
     componentsLine(issue.components),
     `Route: ${routeText(issue, titles)}`,
+    `Progress: ${progressText(issue.progress, ", ") || "none"}`,
     ...(specApproval === undefined
       ? []
       : [`Spec ${specApproval.replace(/^Approval/, "approval")}`]),
@@ -2315,6 +2332,7 @@ export async function executeDispatchTool(
         route_status: row.route_status ?? null,
         route_holder: row.route_holder ?? null,
         updated_at: row.updated_at,
+        progress: row.progress,
       }));
       const titles = await liveSessionTitles(
         client,
@@ -2340,6 +2358,9 @@ export async function executeDispatchTool(
                       ? ""
                       : ` · ${row.open_asks} open ${row.open_asks === 1 ? "ask" : "asks"}`) +
                     (row.claim === null ? "" : ` · claimed by ${claimText(row.claim, titles)}`) +
+                    (progressText(row.progress, " · ") === ""
+                      ? ""
+                      : ` · ${progressText(row.progress, " · ")}`) +
                     // A route that reaches a live session changes nothing about the row; one
                     // that reaches nobody, or cannot be judged, is what the owner audit reads.
                     (row.route === null || row.route_status === "live" || row.route_status === null

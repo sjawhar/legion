@@ -678,6 +678,7 @@ test("Agents keeps selected-issue sends on the issue message route", async () =>
         key: "CORE-1",
         last_seq: 0,
         open_asks: 0,
+        progress: { tasks: null, children: null },
         parent: null,
         assignee: null,
         claim: null,

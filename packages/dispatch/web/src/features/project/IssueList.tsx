@@ -20,6 +20,7 @@ import {
 } from "../../theme/classes";
 import { ClaimChip } from "../issue/ClaimChip";
 import { PriorityControl } from "../issue/PriorityControl";
+import { ProgressChips } from "../issue/ProgressChips";
 import { UnreachableRouteMarker } from "../issue/RouteReach";
 import { referenceTriggerProps } from "../refs/RefPreview";
 import { buildIssuePath } from "../refs/routes";
@@ -76,6 +77,7 @@ function IssueRow({ issue, unread }: { issue: IssueSummary; unread: boolean }): 
             priority={issue.priority}
           />
           <ClaimChip claim={issue.claim} />
+          <ProgressChips progress={issue.progress} />
           <UnreachableRouteMarker issue={issue} />
           {(issue.labels ?? []).map((label) => (
             <LabelPill key={label}>{label}</LabelPill>

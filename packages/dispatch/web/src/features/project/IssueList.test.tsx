@@ -16,6 +16,7 @@ function issue(overrides: Partial<IssueSummary> = {}): IssueSummary {
     labels: [],
     last_seq: 0,
     open_asks: 0,
+    progress: { tasks: null, children: null },
     parent: null,
     assignee: null,
     claim: null,
@@ -140,6 +141,39 @@ test("marks only the rows whose route reaches nobody", async () => {
     expect(marked).toEqual([
       ["CORE-1 Unheld role", expect.stringContaining("Nobody holds it right now")],
       ["CORE-2 Gone session", expect.stringContaining("Not running right now")],
+    ]);
+  } finally {
+    view.unmount();
+    getMyState.mockRestore();
+    listIssues.mockRestore();
+  }
+});
+
+test("a row shows each progress count the server counted and nothing for a null", async () => {
+  const { getMyState, listIssues, view } = renderList([
+    issue({
+      key: "CORE-1",
+      title: "Both counted",
+      progress: { tasks: { done: 3, total: 7 }, children: { done: 2, total: 5 } },
+    }),
+    issue({
+      key: "CORE-2",
+      title: "Tasks only",
+      progress: { tasks: { done: 0, total: 2 }, children: null },
+    }),
+    issue({ key: "CORE-3", title: "Neither" }),
+  ]);
+
+  try {
+    await screen.findByRole("link", { name: /CORE-1.*Both counted/ });
+    const chips = [
+      ...screen.getAllByTestId("issue-progress-tasks"),
+      ...screen.getAllByTestId("issue-progress-children"),
+    ].map((chip) => [chip.closest("li")?.getAttribute("aria-label"), chip.textContent]);
+    expect(chips).toEqual([
+      ["CORE-1 Both counted", "3/7 tasks"],
+      ["CORE-2 Tasks only", "0/2 tasks"],
+      ["CORE-1 Both counted", "2/5 children"],
     ]);
   } finally {
     view.unmount();

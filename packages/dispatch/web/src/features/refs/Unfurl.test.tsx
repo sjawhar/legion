@@ -71,6 +71,7 @@ test("Unfurl reads the immutable document version named by a reference", async (
     rank: "U",
     title: "Design decision",
     open_asks: [],
+    progress: { tasks: null, children: null },
     updated_at: "2026-09-09T00:00:00Z",
   };
   const getIssue = spyOn(api, "getIssue").mockResolvedValue(issue);
@@ -184,6 +185,7 @@ test("Unfurl unfurls a dispatch ask reference with the question, not the issue t
     rank: "U",
     title: "Design decision",
     open_asks: [],
+    progress: { tasks: null, children: null },
     updated_at: "2026-09-09T00:00:00Z",
   };
   const askRead: AskRead = {
@@ -257,6 +259,7 @@ test("Unfurl unfurls a dispatch comment reference with its first line, not the i
     rank: "U",
     title: "Design decision",
     open_asks: [],
+    progress: { tasks: null, children: null },
     updated_at: "2026-09-09T00:00:00Z",
   };
   const commentRead: CommentRead = {

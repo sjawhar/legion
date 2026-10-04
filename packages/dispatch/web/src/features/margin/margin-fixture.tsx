@@ -45,6 +45,7 @@ export const issue: IssueDetails = {
   rank: "U",
   title: "Review the spec",
   open_asks: [],
+  progress: { tasks: null, children: null },
   updated_at: "2026-09-09T00:00:00Z",
 };
 

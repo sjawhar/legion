@@ -789,12 +789,23 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp, budget *pmdoc.TablePaddin
 		code := at.Node.Type == "code_block"
 		var with *pmdoc.Node
 		level := 0
+		var tick *bool
 		if code {
 			with = codeReplacement(op.With)
 		} else {
 			var replacement string
 			if replacement, level, err = replacementMarkdown(tree, r, op.Find, op.With); err != nil {
 				return nil, err
+			}
+			// A task item's text replaced from its start by one opening with a checkbox is the
+			// item being ticked (or unticked): the box is the item's `checked` attribute, not
+			// text, and written as text it would read `- [ ] [x] …`. Elsewhere `[x] ` stays the
+			// literal text it has always been.
+			if r.From == at.Content.From && pmdoc.TaskItemAt(tree, r.From) {
+				if checked, found, width := pmdoc.LeadingTaskCheckbox(replacement); found {
+					replacement = replacement[width:]
+					tick = &checked
+				}
 			}
 			if with, err = inlineReplacement(replacement, edgesOf(at, r)); err != nil {
 				return nil, err
@@ -813,6 +824,9 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp, budget *pmdoc.TablePaddin
 		err = invalidSchemaOp("with", err)
 		if err == nil && level != 0 {
 			next, err = pmdoc.SetHeadingLevel(next, r.From, level)
+		}
+		if err == nil && tick != nil {
+			next, err = pmdoc.SetTaskChecked(next, r.From, *tick)
 		}
 		if err != nil {
 			return nil, err

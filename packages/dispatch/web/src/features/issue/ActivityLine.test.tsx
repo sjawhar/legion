@@ -51,6 +51,7 @@ const issue: IssueDetails = {
   last_seq: 5,
   number: 52,
   open_asks: [],
+  progress: { tasks: null, children: null },
   parent: null,
   primary_artifact_id: "artifact-1",
   priority: null,

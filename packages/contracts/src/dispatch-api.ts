@@ -221,6 +221,27 @@ export interface IssueClaim {
   readonly at: string;
 }
 
+/** Done of total: the task items of a spec, or the direct children of an issue; `done` ≤ `total`. */
+export interface ProgressCount {
+  readonly done: number;
+  readonly total: number;
+}
+
+/**
+ * An issue's progress, counted as GitHub counts an issue's. `tasks` is the task-list items
+ * (`- [ ]` / `- [x]`, nested lists and callouts included) of the issue's primary document as its
+ * latest version renders, stored on the issue whenever a version of that document is written and
+ * `null` when it holds none. `children` is the issue's direct children, every status (icebox
+ * included), `done` being those whose status is `done`, computed from the children's statuses on
+ * each read and `null` when it has none. It is on every issue of the read, the list and the pinned
+ * list, never on an event payload. The check-in collector reads `tasks` and `children` here, so the
+ * shape is a contract.
+ */
+export interface IssueProgress {
+  readonly tasks: ProgressCount | null;
+  readonly children: ProgressCount | null;
+}
+
 export interface Issue {
   readonly key: string;
   readonly project: string;
@@ -285,6 +306,7 @@ export interface IssueSummary
     IssueRouteReach {
   readonly labels?: string[];
   readonly open_asks: number;
+  readonly progress: IssueProgress;
 }
 
 /**
@@ -1828,6 +1850,7 @@ export interface EditArtifactInput {
 }
 
 export interface IssueDetails extends Issue, IssueRouteReach {
+  readonly progress: IssueProgress;
   readonly artifacts: Artifact[];
   readonly open_asks: Ask[];
   readonly children: IssueChild[];

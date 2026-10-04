@@ -276,6 +276,9 @@ func main() {
 	// A settlement a shutdown cut short, here or in the task this one replaces, runs without
 	// anyone opening its document.
 	go documentService.RunSettlementResumption(ctx)
+	// Issues whose spec's task items were never counted (every row migration 0069 found) are
+	// counted once, in batches, so their progress shows without anyone editing them (LEGION-542).
+	go documentService.RunTaskProgressBackfill(ctx)
 
 	sweeper, err := webhookSweeper(natsClient, appCfg, boot.GitHubAPIBase)
 	if err != nil {

@@ -74,7 +74,11 @@ which is written as text with a backslash escape (`1999\. was a year`) — omit 
 plus `delete` to change the block's kind, level or number. The one exception is a heading rename whose `find` carried a heading
 marker: `replace(find="## Old", with="## New")` gives `## New`. A different level in `with` applies only when `find` named the
 heading's actual level — `find="## Old"`, `with="### New"` retitles and makes it an h3 — because `# ` is the level-blind selector,
-so `find="# Old"` renames the text and keeps whatever level it selected. `with` that forms more than one
+so `find="# Old"` renames the text and keeps whatever level it selected. A task item (`- [ ]` / `- [x]`) is ticked the same way:
+when `find` matches from the start of the item's text and `with` opens with `[x] ` or `[ ] `, the opening sets the item's
+checkbox and the rest is its new text — `replace(find="Write it", with="[x] Write it")` ticks it, keeping its block id — since
+the box is the item's attribute, not text, and written as text it would read `- [ ] [x] …`. The same opening over a plain list
+item or a paragraph stays literal text, as any marker of another kind does. `with` that forms more than one
 paragraph is rejected (`INVALID_OP` on `with`) — see the recipe for a multi-paragraph rewrite below; so is any non-empty `with` that
 renders to no text, which a line indented four spaces or a tab does (markdown reads that as a code block), as does whitespace
 alone. An empty `with` deletes the matched text on purpose; a list item, quote, typed block or footnote definition left

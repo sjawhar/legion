@@ -150,6 +150,7 @@ test("ProofDocument opens a hover card for a dispatch:// link in the live editor
     rank: "U",
     title: "Ship the release",
     open_asks: [],
+    progress: { tasks: null, children: null },
     updated_at: "2026-09-09T00:00:00Z",
   };
   const getIssue = spyOn(api, "getIssue").mockResolvedValue(issue);

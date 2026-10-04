@@ -1827,6 +1827,7 @@ describe("executeDispatchTool", () => {
             updated_at: "2026-09-13T00:00:00Z",
             last_seq: 4,
             open_asks: 2,
+            progress: { tasks: { done: 3, total: 7 }, children: { done: 2, total: 5 } },
             claim: {
               actor: { kind: "session", id: "s1", origin: { session_title: "Implementer" } },
               at: "2026-09-13T01:00:00Z",
@@ -1879,9 +1880,12 @@ describe("executeDispatchTool", () => {
       ["limit", "50"],
       ["offset", "0"],
     ]);
-    // A route that reaches nobody is what the owner audit reads, so the row says so.
+    // A route that reaches nobody is what the owner audit reads, so the row says so; the
+    // progress comes after the claim, each part only when the server counted it.
     expect(result.text).toContain("AGENTC-1 [todo] P1 First · 2 open asks · claimed by ");
-    expect(result.text).toContain(" · route role:sre (nobody holds it right now)");
+    expect(result.text).toContain(
+      " · tasks 3/7 · children 2/5 · route role:sre (nobody holds it right now)"
+    );
     expect(result.details).toEqual({
       issues: [
         {
@@ -1900,6 +1904,7 @@ describe("executeDispatchTool", () => {
           route_status: "no_holder",
           route_holder: null,
           updated_at: "2026-09-13T00:00:00Z",
+          progress: { tasks: { done: 3, total: 7 }, children: { done: 2, total: 5 } },
         },
       ],
       total: 1,
@@ -6607,6 +6612,7 @@ describe("executeDispatchTool", () => {
             { url: "https://example.com/runs/3" },
           ],
           open_asks: [],
+          progress: { tasks: { done: 1, total: 4 }, children: null },
           last_seq: 0,
           labels: ["frontend", "urgent"],
           priority: 1,
@@ -6705,12 +6711,12 @@ describe("executeDispatchTool", () => {
     expect(result.text).toContain("Status: open\nAssignee: alice\n");
     expect(result.text).toContain("Claimed by: Implementer since 2026-09-13T01:00:00Z");
     expect(result.text).toContain(
-      "Labels: frontend, urgent\nComponents: web (inherited from DSP-40) (retired: legacy-ui)\nRoute: none\n"
+      "Labels: frontend, urgent\nComponents: web (inherited from DSP-40) (retired: legacy-ui)\nRoute: none\nProgress: tasks 1/4\n"
     );
     // The pull request a person linked is on the read, as on the issue page; the reference graph
     // at the end carries none of it.
     expect(result.text).toContain(
-      "Route: none\nExternal links:\n- https://github.com/owner/repo/pull/7 (github_pr)\n- https://example.com/runs/3\nOpen asks:"
+      "Progress: tasks 1/4\nExternal links:\n- https://github.com/owner/repo/pull/7 (github_pr)\n- https://example.com/runs/3\nOpen asks:"
     );
     expect(
       result.text.endsWith(

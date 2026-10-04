@@ -48,10 +48,19 @@ var listPinnedIssuesQuery = issueSummaryHead + `
 // issueComponentsColumns so every read scans the two columns in one order.
 const issueClaimColumns = `i.claimed_by, i.claimed_at`
 
+// issueProgressColumns are an issue's progress in one order (progressScan): the task counts a
+// version write stored on the row, and its direct children counted on this read, every status,
+// done being `status = 'done'`. The children subquery pairs with the partial issues_parent_key
+// index, so a listing pays one index probe per issue and never scans the table for them.
+const issueProgressColumns = `i.tasks_done, i.tasks_total,
+	       (select count(*) filter (where c.status = 'done') from issues c where c.parent_key = i.key),
+	       (select count(*) from issues c where c.parent_key = i.key)`
+
 const issueSummaryHead = `
 	select i.key, i.title, i.status, i.priority, i.rank, i.labels, i.parent_key, i.assignee, i.route, i.updated_at, i.last_seq,
 	       ` + issueClaimColumns + `,
 	       count(a.id) filter (where i.closed_at is null),
+	       ` + issueProgressColumns + `,
 	       ` + issueComponentsColumns + `
 	from issues i`
 
@@ -116,6 +125,30 @@ func (c *claimScan) resolve(key string) (*model.IssueClaim, error) {
 		return nil, fmt.Errorf("decode issue %s claim actor: %w", key, err)
 	}
 	return &claim, nil
+}
+
+// progressScan reads issueProgressColumns for one issue. The task columns are null together on an
+// issue whose spec was never counted (issues_task_progress_complete), and a counted spec with no
+// task item is total 0: both answer nil, so the API's `tasks: null` means "no task list" either
+// way. Children is nil for an issue with no child.
+type progressScan struct {
+	tasksDone, tasksTotal       *int
+	childrenDone, childrenTotal int
+}
+
+func (p *progressScan) targets() []any {
+	return []any{&p.tasksDone, &p.tasksTotal, &p.childrenDone, &p.childrenTotal}
+}
+
+func (p *progressScan) resolve() model.IssueProgress {
+	var progress model.IssueProgress
+	if p.tasksTotal != nil && *p.tasksTotal > 0 {
+		progress.Tasks = &model.ProgressCount{Done: *p.tasksDone, Total: *p.tasksTotal}
+	}
+	if p.childrenTotal > 0 {
+		progress.Children = &model.ProgressCount{Done: p.childrenDone, Total: p.childrenTotal}
+	}
+	return progress
 }
 
 func normalizeIssueLabels(values []string) ([]string, error) {
@@ -239,9 +272,11 @@ func (s *server) scanIssueSummaries(ctx context.Context, listQuery string, argum
 		var issue model.IssueSummary
 		var components componentsScan
 		var claim claimScan
+		var progress progressScan
 		targets := []any{&issue.Key, &issue.Title, &issue.Status, &issue.Priority, &issue.Rank, &issue.Labels, &issue.Parent, &issue.Assignee, &issue.Route, &issue.UpdatedAt, &issue.LastSeq}
 		targets = append(targets, claim.targets()...)
 		targets = append(targets, &issue.OpenAsks)
+		targets = append(targets, progress.targets()...)
 		if err := rows.Scan(append(targets, components.targets()...)...); err != nil {
 			return nil, err
 		}
@@ -250,6 +285,7 @@ func (s *server) scanIssueSummaries(ctx context.Context, listQuery string, argum
 			return nil, err
 		}
 		issue.Claim = resolved
+		issue.Progress = progress.resolve()
 		issue.Components = components.resolve(issue.Key)
 		issues = append(issues, issue)
 	}
@@ -260,7 +296,7 @@ func (s *server) getIssue(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
 	}
-	issue, err := s.loadIssue(r.Context(), s.deps.Store.Pool, r.PathValue("key"))
+	issue, progress, err := s.loadIssueWithProgress(r.Context(), s.deps.Store.Pool, r.PathValue("key"))
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -292,9 +328,10 @@ func (s *server) getIssue(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusOK, struct {
 		model.Issue
 		model.IssueRouteReach
-		Artifacts []model.Artifact   `json:"artifacts"`
-		OpenAsks  []issueOpenAsk     `json:"open_asks"`
-		Children  []model.IssueChild `json:"children"`
+		Progress  model.IssueProgress `json:"progress"`
+		Artifacts []model.Artifact    `json:"artifacts"`
+		OpenAsks  []issueOpenAsk      `json:"open_asks"`
+		Children  []model.IssueChild  `json:"children"`
 		// ReferencedByCount is what the header's `Referenced by (N)` control names. The page
 		// pays for it here, with the detail it already reads, instead of a graph request of
 		// its own; the edges themselves are read only when the reader opens the panel.
@@ -302,6 +339,7 @@ func (s *server) getIssue(w http.ResponseWriter, r *http.Request) {
 	}{
 		Issue:             issue,
 		IssueRouteReach:   reach,
+		Progress:          progress,
 		Artifacts:         artifacts,
 		OpenAsks:          openAsks,
 		Children:          children,
@@ -337,54 +375,64 @@ func (s *server) loadOpenAsks(ctx context.Context, q queryer, key string) ([]iss
 }
 
 func (s *server) loadIssue(ctx context.Context, q queryer, key string) (model.Issue, error) {
+	issue, _, err := s.loadIssueWithProgress(ctx, q, key)
+	return issue, err
+}
+
+// loadIssueWithProgress is loadIssue together with the issue's progress, which the read response
+// carries beside the issue (model.IssueProgress says why it is not a field of it).
+func (s *server) loadIssueWithProgress(ctx context.Context, q queryer, key string) (model.Issue, model.IssueProgress, error) {
 	var issue model.Issue
 	var createdBy []byte
 	var components componentsScan
 	var claim claimScan
+	var progress progressScan
 	targets := []any{
 		&issue.Key, &issue.Project, &issue.Number, &issue.Title, &issue.Status, &issue.Priority, &issue.Rank, &issue.Labels,
 		&issue.Parent, &issue.Assignee, &issue.Route, &createdBy, &issue.CreatedAt, &issue.UpdatedAt, &issue.ClosedAt,
 		&issue.PrimaryArtifactID, &issue.LastSeq,
 	}
 	targets = append(targets, claim.targets()...)
+	targets = append(targets, progress.targets()...)
 	if err := q.QueryRow(ctx, `
 		select i.key, i.project_key, i.number, i.title, i.status, i.priority, i.rank, i.labels, i.parent_key, i.assignee, i.route,
 		       i.created_by, i.created_at, i.updated_at, i.closed_at,
 		       coalesce((select a.id::text from artifacts a where a.issue_key = i.key and a.is_primary), ''),
 		       i.last_seq, `+issueClaimColumns+`,
+		       `+issueProgressColumns+`,
 		       `+issueComponentsColumns+`
 		from issues i
 		`+issueComponentsLateral+`
 		where i.key = $1
 	`, key).Scan(append(targets, components.targets()...)...); err != nil {
-		return model.Issue{}, err
+		return model.Issue{}, model.IssueProgress{}, err
 	}
 	issue.Components = components.resolve(issue.Key)
 	resolved, err := claim.resolve(issue.Key)
 	if err != nil {
-		return model.Issue{}, err
+		return model.Issue{}, model.IssueProgress{}, err
 	}
 	issue.Claim = resolved
 	if err := json.Unmarshal(createdBy, &issue.CreatedBy); err != nil {
-		return model.Issue{}, fmt.Errorf("decode issue actor: %w", err)
+		return model.Issue{}, model.IssueProgress{}, fmt.Errorf("decode issue actor: %w", err)
 	}
 	rows, err := q.Query(ctx, `select url, kind from issue_external_links where issue_key = $1 order by url`, key)
 	if err != nil {
-		return model.Issue{}, err
+		return model.Issue{}, model.IssueProgress{}, err
 	}
 	defer rows.Close()
 	issue.ExternalLinks = []model.ExternalLink{}
 	for rows.Next() {
 		var link model.ExternalLink
 		if err := rows.Scan(&link.URL, &link.Kind); err != nil {
-			return model.Issue{}, err
+			return model.Issue{}, model.IssueProgress{}, err
 		}
 		issue.ExternalLinks = append(issue.ExternalLinks, link)
 	}
 	if err := rows.Err(); err != nil {
-		return model.Issue{}, err
+		return model.Issue{}, model.IssueProgress{}, err
 	}
-	return issue, nil
+	return issue, progress.resolve(), nil
 }
 
 // loadChildren returns the issue's direct children, each with a rollup over its whole
