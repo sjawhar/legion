@@ -391,11 +391,12 @@
   of 900 KB returned by one 1,540-byte edit had left a 21.6 MB document whose cold text read held
   368 MiB.
   Browser edits over the websocket are applied before any check and are not bounded by
-  this (LEGION-487). Nor is a document's stored history: every update a write appends is kept with
-  the content later writes delete, and a cold load builds all of it, so repeated uploads of a
-  version or replies to one comment, whose margin record each reply rewrites whole, still grow what
-  a load costs (500 replies of 2,000 characters left 257 MB stored and a one-word edit holding
-  1,842 MiB) until LEGION-496 folds that history.
+  this (LEGION-487). A document's stored history is bounded too: compaction runs as a room
+  closes, as the server shuts down, and daily, folding every update into the document's state
+  (LEGION-496), so repeated uploads of a version or replies to one comment, whose margin record
+  each reply rewrites whole, cost a load only for as long as a room stays open between those -
+  the same 500 replies of 2,000 characters that left 257 MB stored and a one-word edit holding
+  1,842 MiB before LEGION-496 compact to the document's own state now.
 - Document settlement no longer undoes an edit a browser or an agent makes while it settles
   (LEGION-479). Settlement wrote its repairs (the block ids it stamps, an ask block's server-owned
   attributes it restores) as the tree it had read before its database work, so an edit made in

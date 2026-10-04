@@ -42,11 +42,17 @@ import (
 // marks (unmarkExpired) add no caller text, and settlement's own repair of a returning answer
 // (withholdAnswers, returnAnswersWithRoom) is weighed for size the same way a caller's answer is.
 // None of these three calls refuseGrowth, so none reaches refuseUndecodable either: a document
-// already past the decode cap still accepts them, unrefused. What the bound weighs is the
-// document a write leaves, not the history its store keeps: every update stays stored with the
-// content later writes delete, and a cold load builds all of it, so repeated versions and a
-// comment's margin record, which each reply rewrites whole, still grow what a load costs
-// (LEGION-496).
+// already past the decode cap still accepts them, unrefused (LEGION-545). Settlement's own
+// repair is the one of the three with a plausible route there - two rounds of a 50,000-byte
+// answer added 24 clocks, so reaching the cap this way takes on the order of tens of thousands
+// of repair cycles on one document. The other two are narrower triggers, not cheaper ones: the
+// block-id backfill runs only for a duplicate or missing id a browser edit left (LEGION-487's
+// gap), and the mark sweep only for a mark a browser race left with no comment, ask or
+// suggestion row to match; neither fires on every settlement the way an answer's return can.
+// What the bound weighs is the document a write leaves, not the history its store keeps - that
+// is now compaction's (LEGION-496), which folds every update into the document's state as a
+// room closes, as the server shuts down, and daily; what grows between those is bounded by how
+// long a room stays open, not by how many versions or replies it has had.
 
 // growth is what one write leaves a document, as refuseGrowth weighs it.
 type growth struct {
