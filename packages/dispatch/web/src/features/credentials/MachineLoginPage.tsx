@@ -15,27 +15,32 @@ import {
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { CredentialDecisionButtons } from "./CredentialDecisionButtons";
 import { CredentialRecordFacts } from "./CredentialRecordFacts";
+import { MachineLoginsSection } from "./MachineLoginsSection";
+import { machineLoginsQuery, machineName } from "./machineLogins";
 
 /** What the login's decision was, in place of the buttons that decide it: one just made on this
- *  page, or the one a looked-up record already carries. */
+ *  page, or the one a looked-up record already carries. A service's approved login (the Legion
+ *  daemon's) starts worker pods as the service, where a person's machine starts sessions as them. */
 function MachineLoginDecision({
   credentialId,
   event,
   host,
+  service,
 }: {
   credentialId: string | null;
   event: string;
   host: string;
+  service: string | null;
 }): ReactNode {
   return (
     <div className="space-y-1 text-sm">
       <p className={`font-medium ${textPrimaryOnCanvas}`}>
-        {event === "approved" ? (
-          `Approved. ${host} can start agent sessions as you.`
-        ) : (
+        {event !== "approved" ? (
           <>
             <span className="capitalize">{event}</span>. {host} is not logged in.
           </>
+        ) : (
+          `Approved. ${machineName({ host, service })} can start ${service ? `worker pods as ${service}` : "agent sessions as you"}.`
         )}
       </p>
       {credentialId === null ? null : (
@@ -46,13 +51,14 @@ function MachineLoginDecision({
 }
 
 /**
- * The machine-login code-entry page: `agent-secrets launcher login` prints an 8-character code
- * on the machine, and the operator types it here. Ruling 13 of the shared broker contract
+ * The machine-login page: `agent-secrets launcher login` prints an 8-character code on the
+ * machine, and the operator types it here. Ruling 13 of the shared broker contract
  * (dispatch://AGENTC-393/artifact/plan-overview-md): only this code-lookup route selects a
  * `launcher_credential` record, and deciding it sends the same code again, so this is the one
  * place a machine record gets Approve/Deny buttons. A looked-up login already decided shows its
  * decision, and so does one decided here, in their place, as the record page does, so a second
- * click never reaches the broker's already-decided refusal.
+ * click never reaches the broker's already-decided refusal. Below it, the viewer's machine logins
+ * that can still reach a secret, each revocable.
  */
 export function MachineLoginPage(): ReactNode {
   const [code, setCode] = useState("");
@@ -70,7 +76,10 @@ export function MachineLoginPage(): ReactNode {
   const approve = useMutation({
     mutationFn: () => api.approveCredentialRecord(record?.record_id ?? "", { code: lookedUpCode }),
     onSettled: () => submitGuard.release(),
-    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["credential-pending"] }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["credential-pending"] });
+      void queryClient.invalidateQueries({ queryKey: machineLoginsQuery().queryKey });
+    },
   });
   const deny = useMutation({
     mutationFn: () => api.denyCredentialRecord(record?.record_id ?? "", { code: lookedUpCode }),
@@ -149,10 +158,12 @@ export function MachineLoginPage(): ReactNode {
               credentialId={view.decided.credential_id}
               event={view.decided.event}
               host={view.record.identifiers[0] ?? ""}
+              service={view.record.service}
             />
           )}
         </div>
       )}
+      <MachineLoginsSection />
     </section>
   );
 }
