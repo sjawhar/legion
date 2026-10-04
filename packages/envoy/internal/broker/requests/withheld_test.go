@@ -540,6 +540,79 @@ func TestAnotherPersonsRevokeDoesNotWithholdTheOperatorsOwnSecret(t *testing.T) 
 	}
 }
 
+// TestTheOperatorWhoApprovedAGrantWithholdsWhenRevokingIt pins that the operator is checked before
+// the approver: the operator approves the operator's own session's request for {AUTO_TOKEN
+// (automatic), DEEL_API_KEY} and then revokes the grant, and the revoke, the operator's as much as
+// the approver's, withholds AUTO_TOKEN, so the session's next request for it asks the operator.
+func TestTheOperatorWhoApprovedAGrantWithholdsWhenRevokingIt(t *testing.T) {
+	m, enr, key, operator := newFixture(t)
+	ctx := context.Background()
+	mixed, err := m.Create(ctx, enr, signRequest(t, m, key, "deploy", "AUTO_TOKEN", "DEEL_API_KEY"), "")
+	if err != nil || mixed.State != "pending" || mixed.RecordID == nil {
+		t.Fatalf("Create(AUTO_TOKEN, DEEL_API_KEY) = %+v, %v; want pending", mixed, err)
+	}
+	dec, err := m.ApplyDecision(ctx, *mixed.RecordID, true, operator)
+	if err != nil || dec.GrantID == "" {
+		t.Fatalf("ApplyDecision(%s) = %+v, %v; want granted", operator, dec, err)
+	}
+	if err := m.RevokeByApprover(ctx, dec.GrantID, operator); err != nil {
+		t.Fatalf("RevokeByApprover(%s) = %v", operator, err)
+	}
+	if got := withheldFrom(t, m, enr); !slices.Equal(got, []string{"AUTO_TOKEN"}) {
+		t.Fatalf("withheld after the operator, who also approved the grant, revoked it = %v; want [AUTO_TOKEN]", got)
+	}
+	next, err := m.Create(ctx, enr, signRequest(t, m, key, "again", "AUTO_TOKEN"), "")
+	if err != nil || next.State != "pending" || recordApprover(t, m, next) != operator {
+		t.Fatalf("Create(AUTO_TOKEN) after the revoke = %+v, %v; want a request waiting on %s", next, err, operator)
+	}
+}
+
+// TestAnApprovalOfAWithheldSecretOutOfThePolicyIsRefused pins that no one approves a withheld name
+// while the policy does not serve it: {AUTO_TOKEN (automatic), SHARED_KEY (shared, human tier)}
+// waits on anyone, the operator withholds AUTO_TOKEN, and AUTO_TOKEN leaves the namespace. carol's
+// approval is refused NOT_APPROVER, so when AUTO_TOKEN returns with the tags it had, which brings
+// back the policy version the request was made under, nothing she approved can release it; she is
+// still refused, the request still waits, and the operator, AUTO_TOKEN's owner, approves it.
+func TestAnApprovalOfAWithheldSecretOutOfThePolicyIsRefused(t *testing.T) {
+	m, enr, key, operator := newFixture(t)
+	ctx := context.Background()
+	mixed, err := m.Create(ctx, enr, signRequest(t, m, key, "mixed", "AUTO_TOKEN", "SHARED_KEY"), "")
+	if err != nil || mixed.State != "pending" || mixed.RecordID == nil {
+		t.Fatalf("Create(AUTO_TOKEN, SHARED_KEY) = %+v, %v; want pending", mixed, err)
+	}
+	single, err := m.Create(ctx, enr, signRequest(t, m, key, "one", "AUTO_TOKEN"), "")
+	if err != nil || single.GrantID == nil {
+		t.Fatalf("Create(AUTO_TOKEN) = %+v, %v; want granted", single, err)
+	}
+	if err := m.RevokeByApprover(ctx, *single.GrantID, operator); err != nil {
+		t.Fatalf("RevokeByApprover: %v", err)
+	}
+	madeUnder := m.Policy.Get().Version
+
+	fixtureStore(m).Delete(policytest.ID("AUTO_TOKEN"))
+	retag(t, m)
+	if dec, err := m.ApplyDecision(ctx, *mixed.RecordID, true, carol); !errors.Is(err, record.ErrNotApprover) {
+		t.Fatalf("ApplyDecision(%s) while the withheld AUTO_TOKEN is out of the policy = %+v, %v; want NOT_APPROVER", carol, dec, err)
+	}
+	retag(t, m, policytest.Secret("AUTO_TOKEN", operator, policy.TierAgent, "auto-v1"))
+	if got := m.Policy.Get().Version; got != madeUnder {
+		t.Fatalf("policy version once AUTO_TOKEN is back = %s, want %s, the one the request was made under", got, madeUnder)
+	}
+	if dec, err := m.ApplyDecision(ctx, *mixed.RecordID, true, carol); !errors.Is(err, record.ErrNotApprover) {
+		t.Fatalf("ApplyDecision(%s) once AUTO_TOKEN is back = %+v, %v; want NOT_APPROVER", carol, dec, err)
+	}
+	if got, err := m.Get(ctx, mixed.ID); err != nil || got.State != "pending" {
+		t.Fatalf("Get(mixed) = %+v, %v; want still pending", got, err)
+	}
+	dec, err := m.ApplyDecision(ctx, *mixed.RecordID, true, operator)
+	if err != nil || dec.GrantID == "" {
+		t.Fatalf("ApplyDecision(%s) = %+v, %v; want granted", operator, dec, err)
+	}
+	if values, _, err := m.Values(ctx, dec.GrantID, enr); err != nil || values["AUTO_TOKEN"] != "auto-v1" {
+		t.Fatalf("Values of the owner's approval = %v, %v; want AUTO_TOKEN released", values, err)
+	}
+}
+
 // TestRetagToOwnersAgentTierLeavesAWithheldRequestToItsOwner pins that a withheld name follows its
 // owner: a shared agent-tier secret withheld from the operator's session waits on anyone, and once
 // it is retagged to the operator's own agent tier only the operator may approve it there, so

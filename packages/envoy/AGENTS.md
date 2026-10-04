@@ -1994,9 +1994,12 @@ revoking its own grant. A withheld name is human tier to its session: `policy.Re
 carries the session's withheld names, and `policy.Set.Evaluate` answers each as an approval request
 to the owner (`anyone` for a shared secret; a service's own secret is denied). Every path that
 evaluates for a session builds the requester with them: `Create`, `currentPolicyAdmits` (so a
-request that was pending when a name was withheld is that name's owner's to approve) and
-`stillAllowed` on release and reuse. So the session asks before it gets the name again while
-every other session is unaffected. `RevokeByApprover` locks the session's row `for no key update`
+request that was pending when a name was withheld is that name's owner's to approve, and no one's
+while the policy does not serve the name: admitted then, the approval would release it once the
+name returned with its old tags, since that restores the request's policy version and `Values`
+runs `stillAllowed` only when the version moved) and `stillAllowed` on release and reuse. So the
+session asks before it gets the name again while every other session is unaffected.
+`RevokeByApprover` locks the session's row `for no key update`
 in the statement that reads the grant, before writing the grant, and `Create` and `ApplyDecision`
 read the withheld names after taking that row `for share`: a request deciding as the revoke runs
 is either written first, and then ended by the withhold if it got a withheld name, or decides with
