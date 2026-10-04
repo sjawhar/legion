@@ -599,7 +599,10 @@ test("record the broker walkthrough's raw footage", async ({ browser }) => {
       await expect(grantRow).toBeInViewport({ ratio: 1 });
       mark("row");
       await sleep(1_000);
-      await pointAt(page, grants.getByRole("cell", { name: operator, exact: true }));
+      await pointAt(
+        page,
+        grants.getByRole("cell", { name: `Approved by ${operator}`, exact: true })
+      );
       await sleep(2_000);
       mark("revoke");
       await pointAt(page, grants.getByRole("button", { name: "Revoke" }));

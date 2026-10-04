@@ -15,9 +15,12 @@ type Enrollment struct {
 	Incarnation string
 }
 
-// PodEnrollment is what the machine hands the broker for one process generation: the real pod
-// UID stays the verified runtime identity, while Slot is a daemon-derived role/generation label
-// for multiple private enrollments in one pod. Tmux leaves Slot empty.
+// PodEnrollment is what the machine hands the broker for one process generation: the pod UID the
+// runtime recorded as the locator's incarnation, the identity the shim's hello carried, and the
+// agent's session id. The real pod UID stays the verified runtime identity, while Slot is a
+// daemon-derived role/generation label for several private enrollments in one pod; tmux leaves
+// Slot empty. It carries no issue: each secret's owner and tier tags pick a request's approver at
+// request time, never at enrollment.
 type PodEnrollment struct {
 	PodUID, Slot, Thumbprint, PodToken, Session string
 }

@@ -21,7 +21,8 @@ import (
 
 // Config supplies the project-scoped workflow limits and the clock used only to stamp durable
 // outbox deadlines. Zero limits take their shipped defaults. MergeQueueRole is the project's
-// `merge_queue_role`, the role the merger's READY is published to; empty, it is posted only.
+// `merge_queue_role`, the role the merger's READY is published to, and its withdrawal when the
+// head's own CI turns red before the merge; empty, the READY is posted only.
 type Config struct {
 	Project        string
 	DesignGate     config.DesignGate
@@ -403,9 +404,11 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 // pullRequestOpened records the pull request a branch opened, and a reopen is the same pull
 // request: its fix and blocked attempts are what bound the review rounds, so they are carried
 // over rather than rebuilt at zero, which made closing and reopening a way to buy a fresh cap, and
-// so is its newest review, which orders every review it will have, and the checks its base branch
-// requires, as last read. A new generation deletes a pull request that is not open, and all of
-// them with it.
+// so is its newest review, which orders every review it will have, and what its base branch
+// requires - its required checks, and its required workflows with their runs at the head they were
+// read at - as last read, so the reopened head's first settlement is judged by all of it
+// (classify.HeadChecks). A new generation deletes a pull request that is not open, and all of them
+// with it.
 func (e *Engine) pullRequestOpened(ctx context.Context, tx pgx.Tx, fact intake.PullRequestOpened) (intake.Result, error) {
 	issue, err := e.issueForBranch(ctx, tx, fact.Branch)
 	if err != nil || issue == nil {
@@ -434,7 +437,8 @@ func (e *Engine) pullRequestOpened(ctx context.Context, tx pgx.Tx, fact intake.P
 		if !fact.Reopened || recorded.State == record.PullRequestMerged {
 			return intake.Result{}, nil
 		}
-		pr.FixAttempts, pr.BlockedAttempts, pr.ReviewSeen, pr.Required = recorded.FixAttempts, recorded.BlockedAttempts, recorded.ReviewSeen, recorded.Required
+		pr.FixAttempts, pr.BlockedAttempts, pr.ReviewSeen = recorded.FixAttempts, recorded.BlockedAttempts, recorded.ReviewSeen
+		pr.Required, pr.Workflows, pr.WorkflowsHead = recorded.Required, recorded.Workflows, recorded.WorkflowsHead
 		pr.HeadUpdatedAt = classify.LatestClock(recorded.HeadUpdatedAt, fact.UpdatedAt)
 	}
 	if err := e.store.PutPullRequest(ctx, tx, pr); err != nil {
@@ -784,6 +788,9 @@ func (e *Engine) transition(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 	}
 	if err := e.notice(ctx, tx, issue.Key, noticeFor(trigger, from, handoff, reason)); err != nil {
 		return err
+	}
+	if from == phase.AwaitingMerge && trigger == TriggerChecksRed {
+		return e.withdrawReady(ctx, tx, issue, pr, reason)
 	}
 	if row.To == phase.AwaitingMerge {
 		// A pull request that merged before the issue reached awaiting_merge leaves nothing to merge:

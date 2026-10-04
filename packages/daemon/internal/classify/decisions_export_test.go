@@ -66,6 +66,31 @@ func TestRedSendsBackOnlyOnTheRedThatStandsForTheHead(t *testing.T) {
 	}
 }
 
+// A READY stands until the head's own CI turns red: a red the head's own settlement and run bring
+// withdraws it, a head a .legion/-only push reached included, while a red carried to it from the
+// head before it, which READY found green on GitHub since, does not; nor does any red on a pull
+// request that is no longer open.
+func TestRedWithdrawsReadyOnlyOnTheHeadsOwnRed(t *testing.T) {
+	handoff := []record.ClassifiedPush{{SHA: "ready", Before: "code", HandoffOnly: true}}
+	for _, tc := range []struct {
+		name string
+		pr   record.PullRequest
+		want bool
+	}{
+		{"the READY head's own red", record.PullRequest{State: record.PullRequestOpen, HeadSHA: "ready", CheckedHead: "ready", Pushes: handoff, Failing: []string{"ci"}, Required: []string{"ci"}}, true},
+		{"its own required workflow run red", record.PullRequest{State: record.PullRequestOpen, HeadSHA: "ready", CheckedHead: "ready", Pushes: handoff, Required: []string{},
+			Workflows: []record.RequiredWorkflow{{Path: "review.yml", Result: "failure"}}, WorkflowsHead: "ready"}, true},
+		{"a red carried from the code head", record.PullRequest{State: record.PullRequestOpen, HeadSHA: "ready", CheckedHead: "code", Pushes: handoff, Failing: []string{"ci"}, Required: []string{"ci"}}, false},
+		{"a closed pull request's red", record.PullRequest{State: record.PullRequestClosed, HeadSHA: "ready", CheckedHead: "ready", Failing: []string{"ci"}, Required: []string{"ci"}}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := RedWithdrawsReady(tc.pr); got != tc.want {
+				t.Fatalf("RedWithdrawsReady = %t, want %t", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestBlockFixAttemptPublishesOnlyOnARedSettlement(t *testing.T) {
 	stale := record.PullRequest{HeadSHA: "fix", CheckedHead: "head", Failing: []string{"ci"}, Required: []string{"ci"}, FixAttempts: 3}
 	if got, blocked := BlockFixAttempt(stale, 3); blocked || got.BlockedAttempts != 0 {

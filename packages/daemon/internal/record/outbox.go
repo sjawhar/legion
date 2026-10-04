@@ -263,8 +263,9 @@ type WorkspaceRemove struct {
 
 func (WorkspaceRemove) OutboxKind() OutboxKind { return OutboxKindWorkspaceRemove }
 
-// MergeQueuePublish is the merger's READY packet published to the project's merge queue role,
-// `projects.<KEY>.merge_queue_role`: its bare name, which the runner addresses as a role topic.
+// MergeQueuePublish is the merger's READY packet, or the daemon's withdrawal of it, published to
+// the project's merge queue role, `projects.<KEY>.merge_queue_role`: its bare name, which the
+// runner addresses as a role topic.
 type MergeQueuePublish struct {
 	Role   string `json:"role"`
 	Packet string `json:"packet"`

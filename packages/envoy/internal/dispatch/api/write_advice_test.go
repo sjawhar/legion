@@ -695,12 +695,12 @@ func newFailingAdviceHandler(t *testing.T, query string) (http.Handler, *store.S
 	})
 	seedPeople(t, database, "alice", "bob")
 	deps, err := NewDeps(DepsInput{
-		Store:      database,
-		Identity:   headerIdentity(database),
-		AgentToken: "agent-token",
-		ServerURL:  "https://dispatch.example",
-		Docs:       documentService,
-		Events:     broker,
+		Store:       database,
+		Identity:    headerIdentity(database),
+		AgentTokens: sharedAgentTokens(t, "agent-token"),
+		ServerURL:   "https://dispatch.example",
+		Docs:        documentService,
+		Events:      broker,
 	})
 	if err != nil {
 		t.Fatalf("new API dependencies: %v", err)

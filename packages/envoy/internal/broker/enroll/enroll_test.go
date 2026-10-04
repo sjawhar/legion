@@ -66,8 +66,16 @@ func str(s string) *string { return &s }
 // returns the Credential these Create/Revoke tests exercise. These tests care about Create and
 // Revoke given an already-minted credential, not about how a credential comes to exist (that is
 // machine_test.go's job, including AuthenticateLauncher's own issuance-chain re-verification), so
-// there is no record to back this credential and no need for one.
+// there is no record to back this credential and no need for one. A test of who may list or revoke
+// a credential, which follows its record's approver, mints one with mintApprovedCredential.
 func mintCredential(t *testing.T, svc *Service, operator, service *string, host string) Credential {
+	t.Helper()
+	return mintCredentialFrom(t, svc, operator, service, host, "")
+}
+
+// mintCredentialFrom is mintCredential minting from credential-request record recordID ("" for
+// none).
+func mintCredentialFrom(t *testing.T, svc *Service, operator, service *string, host, recordID string) Credential {
 	t.Helper()
 	key, err := proof.NewKey()
 	if err != nil {
@@ -81,7 +89,7 @@ func mintCredential(t *testing.T, svc *Service, operator, service *string, host 
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := svc.mintLauncherCredential(context.Background(), svc.Store.Pool, operator, service, host, thumbprint, jwk, "", time.Now().Add(time.Hour))
+	id, err := svc.mintLauncherCredential(context.Background(), svc.Store.Pool, operator, service, host, thumbprint, jwk, recordID, time.Now().Add(time.Hour))
 	if err != nil {
 		t.Fatalf("mintLauncherCredential: %v", err)
 	}
@@ -316,16 +324,7 @@ func TestRevokeRevokesLiveGrantsUnderEnrollment(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	requestID := uuid.New()
-	if _, err := svc.Store.Pool.Exec(ctx, `insert into requests (id, enrollment_id, reason, state, rules_version, lifetime_seconds)
-		values ($1,$2,'test fixture','granted','v1',3600)`, requestID, enr.ID); err != nil {
-		t.Fatalf("insert request fixture: %v", err)
-	}
-	grantID := uuid.New()
-	if _, err := svc.Store.Pool.Exec(ctx, `insert into grants (id, request_id, enrollment_id, expires_at) values ($1,$2,$3, now() + interval '1 hour')`,
-		grantID, requestID, enr.ID); err != nil {
-		t.Fatalf("insert grant fixture: %v", err)
-	}
+	grantID := insertLiveGrant(t, svc, enr.ID)
 
 	if err := svc.Revoke(ctx, cred, enr.ID.String(), "ada@example.com"); err != nil {
 		t.Fatalf("Revoke: %v", err)

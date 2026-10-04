@@ -3,6 +3,7 @@ package docs
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -10,6 +11,7 @@ import (
 	"github.com/reearth/ygo/persistence"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
@@ -188,5 +190,57 @@ func TestRebuildDocumentWritesThroughItsInjectedPersistence(t *testing.T) {
 	}
 	if persist.rebuilds != 1 {
 		t.Fatalf("injected persistence rebuild calls = %d, want 1", persist.rebuilds)
+	}
+}
+
+// A rebuild from the latest version restores the server's own rendering of the document, which it
+// reads back as every stored rendering is read, counting no elements: a version of 16,385
+// paragraphs, past the 65,536 elements one write may make - stored before that bound, or grown past
+// it by browser edits - rebuilds whole.
+func TestARebuildFromTheLatestVersionRestoresItWhateverItWeighs(t *testing.T) {
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "before\n")
+	heavy := strings.Repeat("a\n\n", 16_384) + "a\n"
+	if size := pmdoc.MeasureDocument(heavy); !size.TooHeavy() {
+		t.Fatalf("the version measures %+v, want past the element limit", size)
+	}
+	if _, err := database.Pool.Exec(context.Background(), `update artifact_versions set markdown = $2 where artifact_id = $1`, artifactID, heavy); err != nil {
+		t.Fatalf("store a version past the element limit: %v", err)
+	}
+	service := New(Deps{Store: database, Persistence: &rebuildCaptureStore{VersionedStore: NewPgVersioned(database), invalid: true}})
+	if _, _, err := rebuildDocument(t, service, artifactID, nil); err != nil {
+		t.Fatalf("rebuild from a version past the element limit: %v", err)
+	}
+	if text, err := service.Text(context.Background(), artifactID); err != nil || text != heavy {
+		t.Fatalf("the rebuilt document reads %d bytes (%v), want the version's %d", len(text), err, len(heavy))
+	}
+}
+
+// Markdown a caller supplies to a rebuild is weighed as a new document's is (SeedText): its
+// rendering, which can run longer than what was sent, may hold no more than one upload. 16,384
+// headings of exactly 1 MiB, which render as 1,064,959 bytes, are refused and replace no history;
+// the same headings two bytes shorter rebuild the document.
+func TestARebuildFromSuppliedMarkdownIsWeighedAsANewDocument(t *testing.T) {
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "before\n")
+	persist := &rebuildCaptureStore{VersionedStore: NewPgVersioned(database), invalid: true}
+	service := New(Deps{Store: database, Persistence: persist})
+	headings := func(width int) string {
+		return strings.Repeat("# "+strings.Repeat("a", width-3)+"\n", 16_384)
+	}
+	long := headings(64)
+	if _, _, err := rebuildDocument(t, service, artifactID, &long); !errors.Is(err, ErrDocumentTooLarge) || !strings.Contains(err.Error(), "1064959 bytes") {
+		t.Fatalf("rebuild from 1 MiB of headings that render as 1,064,959 bytes: %v, want ErrDocumentTooLarge naming the rendering", err)
+	}
+	if persist.rebuilds != 0 {
+		t.Fatalf("the refused rebuild replaced the history %d times, want none", persist.rebuilds)
+	}
+	persist.invalid = true
+	short := headings(62)
+	if _, _, err := rebuildDocument(t, service, artifactID, &short); err != nil {
+		t.Fatalf("rebuild from headings whose rendering fits: %v", err)
+	}
+	if persist.rebuilds != 1 {
+		t.Fatalf("the rebuild that fits replaced the history %d times, want once", persist.rebuilds)
 	}
 }
