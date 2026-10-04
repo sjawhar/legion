@@ -72,11 +72,10 @@ are ones you checked.
    `summary` is refused while it waits on them.
 3. **Each next version folds the answers in and adds what they open.** Keep each answered
    decision block where it is, fold its answer into the surrounding text in the human's words with
-   the date, in the form `skill://dispatch`'s "Writing a spec" gives for a settled point — naming
-   whoever answered from `dispatch_whoami` or the conversation, or "the person" when the token
-   names no owner, never a name you were not given. Then add the next sections, each with its
-   question. Every question that is ready goes out at once, each as a decision block at the end of
-   the section that sets it up; a question waits only when it depends on an answer still open.
+   the date, recording the person as `skill://dispatch`'s "Writing a spec" says for a settled
+   point. Then add the next sections, each with its question. Every question that is ready goes out
+   at once, each as a decision block at the end of the section that sets it up; a question waits
+   only when it depends on an answer still open.
 4. **A comment that answers a question settles it** as surely as the block does. Fold it into the
    text at once, and close the block with `dispatch_resolve_ask` if the human has not.
 5. **Request approval at the end, not after each section.** Once nothing in the spec is new to the
