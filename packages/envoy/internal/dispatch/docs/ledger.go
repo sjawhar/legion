@@ -199,8 +199,10 @@ func (l *Ledger) addLiveWrite(write *liveWrite) {
 }
 
 // recordSettlementCredit adds each committed transaction's credit to the pending-settlement row in
-// the transaction that wrote the document. The durable row therefore commits or rolls back with
-// its content, before the request context can be canceled after commit.
+// the transaction that wrote the document, then takes out the authors each version it wrote
+// credited, as commitVersion takes them out of the room once the transaction commits. The durable
+// row therefore commits or rolls back with its content, before the request context can be canceled
+// after commit, and owes no author a version already credited.
 func (l *Ledger) recordSettlementCredit(ctx context.Context) error {
 	for artifactID, actor := range l.seeds {
 		if err := upsertSettlementCredit(ctx, l.tx, artifactID, settlementCreditFor(nil, &actor), false); err != nil {
@@ -213,6 +215,11 @@ func (l *Ledger) recordSettlementCredit(ctx context.Context) error {
 			continue
 		}
 		if err := upsertSettlementCredit(ctx, l.tx, artifactID, settlementCreditFor(write.credits, write.actor), false); err != nil {
+			return err
+		}
+	}
+	for _, written := range l.versions {
+		if err := releaseSettlementCredit(ctx, l.tx, written.artifactID, written.version.Authors); err != nil {
 			return err
 		}
 	}
