@@ -138,10 +138,9 @@ type LauncherChild struct {
 // LauncherExit is the last child exit the launcher observed. A launcher reports it after a
 // reconnect before it accepts another start, so the daemon never invents Gone from a lost reply.
 type LauncherExit struct {
-	Generation    uint64 `json:"generation"`
-	Code          int    `json:"code"`
-	Signal        string `json:"signal,omitempty"`
-	WorkspaceLost bool   `json:"workspaceLost,omitempty"`
+	Generation uint64 `json:"generation"`
+	Code       int    `json:"code"`
+	Signal     string `json:"signal,omitempty"`
 }
 
 // LauncherState is the launcher's actual child state at hello and after every child transition.

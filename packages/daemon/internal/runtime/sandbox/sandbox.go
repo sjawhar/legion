@@ -662,14 +662,23 @@ func (r *Runtime) ReconcileOrphans(ctx context.Context, known []runtime.Known, g
 	return errors.Join(errs...)
 }
 
-// sweep deletes u, the Sandbox as the informer held it, unless its tree's lifecycle owns it. The
-// issue's launch lock is held from the lifecycle read through the delete (lockIssue). A Sandbox
-// whose labels name no issue and tree keys is kept and reported: what cannot be told apart from a
-// live tree's is never deleted.
+// sweep deletes u, the Sandbox as the informer held it, unless its tree's lifecycle owns it. A
+// live tree is checked before any lock is taken, so a Sandbox a concurrent launch of the same
+// issue is still creating or waiting on is never serialized behind that launch: the common case,
+// where the tree stays live, costs no lock at all. Only once the tree looks closed does the issue's
+// launch lock apply, held from a second, authoritative TreeLive read through the delete
+// (lockIssue), so a launch that begins meanwhile still waits for the delete and then creates the
+// Sandbox afresh. A Sandbox whose labels name no issue and tree keys is kept and reported: what
+// cannot be told apart from a live tree's is never deleted.
 func (r *Runtime) sweep(ctx context.Context, u *unstructured.Unstructured) error {
 	issue, tree := u.GetLabels()[labelIssue], u.GetLabels()[labelTree]
 	if !claim.IsIssueKey(issue) || !claim.IsIssueKey(tree) {
 		return fmt.Errorf("reconcile orphans: Sandbox %s names no issue and tree (labels %s=%q, %s=%q); kept", u.GetName(), labelIssue, issue, labelTree, tree)
+	}
+	if live, err := r.store.TreeLive(ctx, r.project, tree); err != nil {
+		return fmt.Errorf("reconcile orphans: %w", err)
+	} else if live {
+		return nil
 	}
 	release, err := r.lockIssue(ctx, issue)
 	if err != nil {
