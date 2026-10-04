@@ -48,13 +48,17 @@ func TestPostSendsJSONAndAnswersWithTheStatus(t *testing.T) {
 	}
 }
 
-// GetPages follows GitHub's next pages wherever GitHub names them on the API's own origin, its
-// /repositories/<id>/ form included, and an answer on such a page names that page's path. A next
-// page on another host is refused before the token is sent there.
+// GetPages and GetListPages follow GitHub's next pages wherever GitHub names them on the API's own
+// origin, its /repositories/<id>/ form included, and an answer on such a page names that page's
+// path. A next page on another host is refused before the token is sent there.
 func TestGetPagesFollowsNextPagesOnTheAPIsOriginOnly(t *testing.T) {
 	var elsewhere atomic.Int32
 	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		elsewhere.Add(1)
+		if strings.HasSuffix(r.URL.Path, "/check-runs") {
+			w.Write([]byte(`{"total_count":1,"check_runs":["leaked"]}`))
+			return
+		}
 		w.Write([]byte(`["leaked"]`))
 	}))
 	defer other.Close()
@@ -72,6 +76,12 @@ func TestGetPagesFollowsNextPagesOnTheAPIsOriginOnly(t *testing.T) {
 				return
 			}
 			w.Write([]byte(`["second"]`))
+		case "/repos/acme/widgets/commits/head/check-runs":
+			next := *nextHost.Load() + "/repositories/42/commits/head/check-runs?per_page=100&page=2"
+			w.Header().Set("Link", "<"+next+`>; rel="next"`)
+			w.Write([]byte(`{"total_count":2,"check_runs":["first"]}`))
+		case "/repositories/42/commits/head/check-runs":
+			w.Write([]byte(`{"total_count":2,"check_runs":["second"]}`))
 		default:
 			http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound)
 		}
@@ -83,6 +93,9 @@ func TestGetPagesFollowsNextPagesOnTheAPIsOriginOnly(t *testing.T) {
 	pageTwo.Store(http.StatusOK)
 	if got, err := GetPages[string](context.Background(), client, "/rules/branches/main"); err != nil || !slices.Equal(got, []string{"first", "second"}) {
 		t.Fatalf("GetPages = %v, %v; want both pages", got, err)
+	}
+	if got, err := GetListPages[string](context.Background(), client, "/commits/head/check-runs", "check_runs"); err != nil || !slices.Equal(got, []string{"first", "second"}) {
+		t.Fatalf("GetListPages = %v, %v; want both pages' check runs", got, err)
 	}
 
 	pageTwo.Store(http.StatusForbidden)
@@ -96,6 +109,10 @@ func TestGetPagesFollowsNextPagesOnTheAPIsOriginOnly(t *testing.T) {
 	got, err := GetPages[string](context.Background(), client, "/rules/branches/main")
 	if err == nil || !strings.Contains(err.Error(), other.URL) || got != nil {
 		t.Fatalf("GetPages with a next page on another host = %v, %v; want an error naming it and no items", got, err)
+	}
+	list, err := GetListPages[string](context.Background(), client, "/commits/head/check-runs", "check_runs")
+	if err == nil || !strings.Contains(err.Error(), other.URL) || list != nil {
+		t.Fatalf("GetListPages with a next page on another host = %v, %v; want an error naming it and no items", list, err)
 	}
 	if n := elsewhere.Load(); n != 0 {
 		t.Fatalf("the other host saw %d requests, want none", n)

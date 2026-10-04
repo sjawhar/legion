@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -197,6 +198,114 @@ func TestARateLimitAnswerEndsTheRequiredChecksPass(t *testing.T) {
 			requiredRuntime(pool, server.URL, quietLogger()).readRequiredChecks(context.Background())
 			if got := reads.Load(); got != tc.reads {
 				t.Fatalf("the pass read GitHub %d times, want %d", got, tc.reads)
+			}
+		})
+	}
+}
+
+// requiredWorkflowStandIn is GitHub's REST API for acme/widgets with a live repository's rule
+// shapes: pull request 86 on base main, whose rulesets require the workflow
+// .github/workflows/claude-pr-review.yml (a workflows rule) and the check pr-checks-result (a
+// required_status_checks rule), and whose branch protection requires nothing. The head code's
+// workflow runs are runs, a JSON array.
+func requiredWorkflowStandIn(t *testing.T, runs string) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer outbox-token" {
+			http.Error(w, `{"message":"Bad credentials"}`, http.StatusUnauthorized)
+			return
+		}
+		switch r.URL.Path {
+		case "/repos/acme/widgets/pulls/86":
+			w.Write([]byte(`{"number":86,"base":{"ref":"main"}}`))
+		case "/repos/acme/widgets/rules/branches/main":
+			w.Write([]byte(`[{"type":"workflows","parameters":{"do_not_enforce_on_create":true,"workflows":[{"repository_id":4242,"path":".github/workflows/claude-pr-review.yml","ref":"refs/heads/main"}]}},` +
+				`{"type":"deletion","parameters":null},{"type":"pull_request","parameters":{"required_approving_review_count":0}},` +
+				`{"type":"required_status_checks","parameters":{"strict_required_status_checks_policy":false,"required_status_checks":[{"context":"pr-checks-result","integration_id":15368}]}}]`))
+		case "/repos/acme/widgets/branches/main":
+			w.Write([]byte(`{"name":"main","protected":false}`))
+		case "/repos/acme/widgets/actions/runs":
+			if r.URL.Query().Get("head_sha") != "code" {
+				http.NotFound(w, r)
+				return
+			}
+			w.Write([]byte(`{"total_count":` + strconv.Itoa(strings.Count(runs, `"path"`)) + `,"workflow_runs":` + runs + `}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+// The daemon's pass judges a ruleset's required workflow by its latest run on the head, as it
+// judges a required check by the settlement: a failed run is CI red at the head. In testing that
+// sends the work back to implementing, as a failed required check does. In awaiting_merge, where
+// every worker is suspended, it does too, so a READY head that turns red wakes the implementer
+// instead of stranding the tree. A run still going, or one that succeeded, moves nothing. The
+// pull request's required checks were read before and passed at the head, so only the workflow
+// can decide anything.
+func TestARequiredWorkflowThatFailsOnTheHeadSendsTheWorkBack(t *testing.T) {
+	review := func(status, conclusion string) string {
+		return `[{"id":37,"name":"Review PR #86","path":".github/workflows/claude-pr-review.yml","event":"pull_request","status":"` + status +
+			`","conclusion":` + conclusion + `,"repository":{"id":4242}},` +
+			`{"id":38,"name":"PR Checks","path":".github/workflows/pr-checks.yml","event":"pull_request","status":"completed","conclusion":"success","repository":{"id":4242}}]`
+	}
+	for _, tc := range []struct {
+		name   string
+		from   phase.Phase
+		status string
+		runs   string
+		want   phase.Phase
+	}{
+		{"failed, in testing", phase.Testing, "testing", review("completed", `"failure"`), phase.Implementing},
+		{"failed, in awaiting_merge", phase.AwaitingMerge, "retro", review("completed", `"failure"`), phase.Implementing},
+		{"still running, in awaiting_merge", phase.AwaitingMerge, "retro", review("in_progress", "null"), phase.AwaitingMerge},
+		{"succeeded, in awaiting_merge", phase.AwaitingMerge, "retro", review("completed", `"success"`), phase.AwaitingMerge},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := isolatedOutboxPool(t)
+			records := record.NewStore()
+			if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
+				ctx := context.Background()
+				if err := records.PutIssue(ctx, tx, record.Issue{Key: "CAPTURE-1", Tree: "CAPTURE-1", Project: "CAPTURE", Title: "root",
+					Phase: tc.from, Generation: 1, Status: tc.status, Rank: "U"}); err != nil {
+					return err
+				}
+				if err := records.PutPullRequest(ctx, tx, record.PullRequest{State: record.PullRequestOpen, Issue: "CAPTURE-1", Repo: "acme/widgets",
+					Number: 86, Branch: "legion/CAPTURE-1", HeadSHA: "code", CheckedHead: "code", Failing: []string{},
+					CheckRuns:  []record.AttemptRun{{Name: "pr-checks-result", ID: 1}, {Name: "review", ID: 2}},
+					Generation: 1, Snapshot: "settled", Required: []string{"pr-checks-result"}}); err != nil {
+					return err
+				}
+				return records.PutPhase(ctx, tx, record.PhaseRow{Issue: "CAPTURE-1", Role: claim.RoleImplementer, Claim: "implement-claim"})
+			}); err != nil {
+				t.Fatalf("seed the issue: %v", err)
+			}
+			requiredRuntime(pool, requiredWorkflowStandIn(t, tc.runs).URL, quietLogger()).readRequiredChecks(context.Background())
+			if got, _ := capturePhase(t, pool); got != tc.want {
+				t.Fatalf("after the pass the issue is in %s, want %s", got, tc.want)
+			}
+			var reasons []string
+			rows, err := pool.Query(context.Background(), "select payload->>'reason' from outbox where kind = 'notice' and payload->>'kind' = 'checks-red'")
+			if err != nil {
+				t.Fatal(err)
+			}
+			for rows.Next() {
+				var reason string
+				if err := rows.Scan(&reason); err != nil {
+					t.Fatal(err)
+				}
+				reasons = append(reasons, reason)
+			}
+			if err := rows.Err(); err != nil {
+				t.Fatal(err)
+			}
+			if want := "CI is red at code: .github/workflows/claude-pr-review.yml"; tc.want == phase.Implementing && (len(reasons) != 1 || reasons[0] != want) {
+				t.Fatalf("checks-red notices %q, want one saying %q", reasons, want)
+			}
+			if tc.want != phase.Implementing && len(reasons) != 0 {
+				t.Fatalf("checks-red notices %q, want none", reasons)
 			}
 		})
 	}

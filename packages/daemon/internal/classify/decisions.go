@@ -271,6 +271,21 @@ func RedSendsBack(pr record.PullRequest) bool {
 	return true
 }
 
+// RedWithdrawsReady says whether the verdict that stands for the pull request's head sends an
+// issue in awaiting_merge back to implementing, withdrawing its READY: the pull request is open,
+// and CI is red at the head by its own settlement and its own workflow runs (HeadVerdict, with the
+// settlement of the head itself). The merger's READY found the head's own checks and runs green on
+// GitHub, which is what GitHub merges by, so a red carried to it from the head a .legion/-only push
+// replaced (SettlementFor) contradicts that and sends nothing back; the head's own red - a required
+// check failing on a rerun, a newly required one, a required workflow re-run red - keeps GitHub
+// from merging it. Unlike RedSendsBack in testing and reviewing, a head a .legion/-only push
+// reached is no exception: every worker is suspended in awaiting_merge and no round is open to
+// decide its red, so only the implementer can change it. PlannedRed is a red the tester's own tests
+// planned for the review round, and READY found the head green since, so it is not read.
+func RedWithdrawsReady(pr record.PullRequest) bool {
+	return pr.State == record.PullRequestOpen && pr.CheckedHead == pr.HeadSHA && HeadVerdict(pr) == "red"
+}
+
 // BlockFixAttempt marks and reports one exhausted fix-attempt count when the verdict that stands
 // for the head is red after a settlement or a new required set, as the shipped reducer decides
 // pr-blocked on ci-settled-red alone: a green head at an exhausted count is the fix that worked. A

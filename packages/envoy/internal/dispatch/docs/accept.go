@@ -158,7 +158,7 @@ func acceptRefusal(before, after *pmdoc.Node, match pmdoc.Range, at pmdoc.Textbl
 // padCutTables pads each table in the document-level blocks a splice of r changed, from before to
 // after (changedBlocks), to its width (pmdoc.PadTables), as the browser editor's table plugin pads a
 // table after any change, spending budget, the accept's or reject's.
-func padCutTables(before, after *pmdoc.Node, r pmdoc.Range, budget *pmdoc.TablePaddingBudget) (*pmdoc.Node, error) {
+func padCutTables(before, after *pmdoc.Node, r pmdoc.Range, budget *pmdoc.WriteBudget) (*pmdoc.Node, error) {
 	first, _, last, err := changedBlocks(before, after, r)
 	if err != nil {
 		return nil, err

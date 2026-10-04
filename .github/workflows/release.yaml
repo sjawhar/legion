@@ -25,6 +25,12 @@ on:
       - "packages/contracts/**"
       - "packages/pi-envoy/**"
       - "skills/**"
+      # The notices each artifact ships: the bundles', the Go binaries' and the worker image's, and
+      # the Go archives' target list.
+      - "scripts/third-party-notices.ts"
+      - "scripts/go-third-party-notices.sh"
+      - "scripts/assemble-third-party-notices.sh"
+      - ".github/go-release-targets.json"
       # The worker image's remaining inputs (worker_image below).
       - ".omp-pin"
       - ".dockerignore"
@@ -107,31 +113,37 @@ jobs:
           base: ${{ steps.base.outputs.sha }}
           filters: |
             # The Go `legion` the legion job releases and worker.Dockerfile's go stage compiles: its
-            # module, which embeds the role prompts, and the modules go.work binds it to
-            # (packages/envoy is also copied whole into the image for the agent-secrets binary it
-            # builds, AGENTC-393).
+            # module, which embeds the role prompts, the modules go.work binds it to (packages/envoy
+            # is also copied whole into the image for the agent-secrets binary it builds,
+            # AGENTC-393), the notices scripts that change its archives or worker image, and the
+            # list of the targets it builds.
             legion:
               - 'packages/daemon/**'
               - 'go.work'
               - 'go.work.sum'
               - 'packages/envoy/**'
+              - 'scripts/go-third-party-notices.sh'
+              - 'scripts/assemble-third-party-notices.sh'
+              - '.github/go-release-targets.json'
             envoy_plugin:
               - 'packages/envoy-plugin/**'
               - 'packages/envoy-client/**'
               - 'packages/contracts/**'
               - 'skills/**'
+              - 'scripts/third-party-notices.ts'
             pi_envoy:
               - 'packages/pi-envoy/**'
               - 'packages/envoy-client/**'
               - 'packages/contracts/**'
               - 'skills/**'
+              - 'scripts/third-party-notices.ts'
             # The plugin stage's frozen install needs the root manifest, lockfile, patches, and each
             # root-workspace manifest. Keep this explicit because a workspace can affect Bun's
             # install without its source becoming part of the worker image. The OMP pin, the
             # context's .dockerignore and the called workflow change the image too. With legion
-            # (which holds the Dockerfile, packages/daemon/docker) and pi_envoy this covers every
-            # file worker.Dockerfile builds from; .github/scripts/check-image-trigger-paths.sh fails
-            # the build when it misses one.
+            # (which holds the Dockerfile, packages/daemon/docker, and the notices scripts) and
+            # pi_envoy this covers every file worker.Dockerfile builds from;
+            # .github/scripts/check-image-trigger-paths.sh fails the build when it misses one.
             worker_image:
               - 'package.json'
               - 'bun.lock'
@@ -149,11 +161,12 @@ jobs:
               - '.dockerignore'
               - '.github/workflows/worker-image.yaml'
 
-  # The Go `legion`: linux and darwin archives of the binary, which embeds its role prompts, on a
-  # legion-v* tag of the commit the run checked out. Nothing is committed: a Go module carries no
-  # version file, so the tag alone records the version, and `legion version` names it. Only main
-  # releases one: a workflow_dispatch from another branch skips this job, and the worker image job
-  # below then publishes that commit's sha- tag alone, as it does for any branch.
+  # The Go `legion`: linux and darwin archives of the binary, which embeds its role prompts, with
+  # its THIRD_PARTY_NOTICES, on a legion-v* tag of the commit the run checked out. Nothing is
+  # committed: a Go module carries no version file, so the tag alone records the version, and
+  # `legion version` names it. Only main releases one: a workflow_dispatch from another branch skips
+  # this job, and the worker image job below then publishes that commit's sha- tag alone, as it does
+  # for any branch.
   legion:
     needs: changes
     if: >-
@@ -189,11 +202,16 @@ jobs:
             PREV_VERSION="${PREV_TAG#legion-v}"
           fi
           # The binary embeds its prompts (internal/prompts/roles and go), so a docs: commit there
-          # still releases. release-bump.sh reads a --patch-path only when it is also one of the
+          # still releases. The notices scripts and the target list are runtime inputs of the
+          # release archives and worker image, so any change to one needs a new tag rather than a
+          # CI-only rebuild. release-bump.sh reads a --patch-path only when it is also one of the
           # paths after --.
           VERSION=$(.github/scripts/release-bump.sh "$PREV_VERSION" "${PREV_TAG}..HEAD" \
             --patch-path packages/daemon/internal/prompts/roles/ --patch-path packages/daemon/internal/prompts/go/ \
-            -- packages/daemon/ packages/daemon/internal/prompts/roles/ packages/daemon/internal/prompts/go/)
+            --patch-path scripts/go-third-party-notices.sh --patch-path scripts/assemble-third-party-notices.sh \
+            --patch-path .github/go-release-targets.json \
+            -- packages/daemon/ packages/daemon/internal/prompts/roles/ packages/daemon/internal/prompts/go/ \
+            scripts/go-third-party-notices.sh scripts/assemble-third-party-notices.sh .github/go-release-targets.json)
 
           if [ "$VERSION" = "empty" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
@@ -221,15 +239,19 @@ jobs:
             packages/daemon/go.sum
             packages/envoy/go.sum
       # CGO_ENABLED=0: a static binary, as the worker image builds it, so a linux archive runs on any
-      # distribution. Each archive holds one top-level directory, legion-<os>-<arch>, with `legion`
-      # in it: mise's github backend strips that one directory, leaving the binary.
+      # distribution. One archive per target .github/go-release-targets.json lists (the pull
+      # request's notices check reads the same list), each holding one top-level directory,
+      # legion-<os>-<arch>, with `legion` and THIRD_PARTY_NOTICES in it: mise's github backend
+      # strips that one directory, leaving the binary. THIRD_PARTY_NOTICES is the license of every
+      # Go module that target's binary compiles in (scripts/go-third-party-notices.sh, run with the
+      # build's own GOOS, GOARCH and CGO_ENABLED), and fails the build when one cannot be determined.
       - name: Build legion
         if: steps.version.outputs.skip != 'true'
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           mkdir -p out assets
-          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+          for target in $(jq -r '.legion[]' .github/go-release-targets.json); do
             os=${target%/*}
             arch=${target#*/}
             dir="legion-$os-$arch"
@@ -237,6 +259,8 @@ jobs:
             CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go -C packages/daemon build -buildvcs=false \
               -ldflags "-X main.revision=$GITHUB_SHA -X main.release=v$VERSION" \
               -o "$GITHUB_WORKSPACE/out/$dir/legion" ./cmd/legion
+            (cd packages/daemon && CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" \
+              ../../scripts/go-third-party-notices.sh "$GITHUB_WORKSPACE/out/$dir/THIRD_PARTY_NOTICES" ./cmd/legion)
             tar czf "assets/$dir.tar.gz" -C out "$dir"
           done
           (cd assets && sha256sum -- * > SHA256SUMS)
@@ -357,17 +381,21 @@ jobs:
         run: |
           # The package's prepack copies skills/ into the tarball (package.json "prepack"), where
           # OpenCode loads it as the plugin's skills, so a commit there releases whatever its type.
+          # Its notices generator is another shipped build input, so it gets the same patch release.
           PREV_TAG=$(git tag -l 'opencode-legion-envoy-v*' --sort=-v:refname | head -1)
           if [ -z "$PREV_TAG" ]; then
             # When no release tag exists, seed from the published npm version so
             # an already-published version is never recomputed. Once a release
             # tags successfully, this branch stops running.
             PREV_VERSION=$(npm view @sjawhar/opencode-legion-envoy version 2>/dev/null || echo "0.0.0")
-            VERSION=$(.github/scripts/release-bump.sh "$PREV_VERSION" HEAD --patch-path skills/ -- packages/envoy-plugin/ packages/contracts/ packages/envoy-client/ skills/)
+            RANGE=HEAD
           else
             PREV_VERSION="${PREV_TAG#opencode-legion-envoy-v}"
-            VERSION=$(.github/scripts/release-bump.sh "$PREV_VERSION" "${PREV_TAG}..HEAD" --patch-path skills/ -- packages/envoy-plugin/ packages/contracts/ packages/envoy-client/ skills/)
+            RANGE="${PREV_TAG}..HEAD"
           fi
+          VERSION=$(.github/scripts/release-bump.sh "$PREV_VERSION" "$RANGE" \
+            --patch-path skills/ --patch-path scripts/third-party-notices.ts \
+            -- packages/envoy-plugin/ packages/contracts/ packages/envoy-client/ skills/ scripts/third-party-notices.ts)
 
           if [ "$VERSION" = "empty" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
@@ -469,18 +497,22 @@ jobs:
         id: version
         run: |
           # prepack.sh copies skills/ into dist/skills, which every Oh My Pi session loads as the
-          # plugin's skills, so a commit there releases whatever its type.
+          # plugin's skills, so a commit there releases whatever its type. Its notices generator is
+          # another shipped build input, so it gets the same patch release.
           PREV_TAG=$(git tag -l 'pi-legion-envoy-v*' --sort=-v:refname | head -1)
           if [ -z "$PREV_TAG" ]; then
             # When no release tag exists, seed from the published npm version so
             # an already-published version is never recomputed. Once a release
             # tags successfully, this branch stops running.
             PREV_VERSION=$(npm view @sjawhar/pi-legion-envoy version 2>/dev/null || echo "0.0.0")
-            VERSION=$(.github/scripts/release-bump.sh "$PREV_VERSION" HEAD --patch-path skills/ -- packages/pi-envoy/ packages/envoy-client/ packages/contracts/ skills/)
+            RANGE=HEAD
           else
             PREV_VERSION="${PREV_TAG#pi-legion-envoy-v}"
-            VERSION=$(.github/scripts/release-bump.sh "$PREV_VERSION" "${PREV_TAG}..HEAD" --patch-path skills/ -- packages/pi-envoy/ packages/envoy-client/ packages/contracts/ skills/)
+            RANGE="${PREV_TAG}..HEAD"
           fi
+          VERSION=$(.github/scripts/release-bump.sh "$PREV_VERSION" "$RANGE" \
+            --patch-path skills/ --patch-path scripts/third-party-notices.ts \
+            -- packages/pi-envoy/ packages/envoy-client/ packages/contracts/ skills/ scripts/third-party-notices.ts)
 
           if [ "$VERSION" = "empty" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"

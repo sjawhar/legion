@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -61,12 +62,15 @@ func TestAWSReadWrapsGenericErrorInsteadOfMappingToErrNotFound(t *testing.T) {
 }
 
 // TestLocalFromFileServesTheFileAsSecretsManagerWould pins the development file's shape: each
-// secret is listed under its name with its tags and key, filtered by name prefix as Secrets
-// Manager filters, case-sensitively, and read by name or by the ARN the listing gave it.
+// secret is listed under its name with its tags, key and version stages, filtered by name prefix as
+// Secrets Manager filters, case-sensitively, and read by name or by the ARN the listing gave it. A
+// secret the file gives no value is one created without a value: listed with no version, its read
+// is ErrNotFound, until a value is put, which gives it an AWSCURRENT version.
 func TestLocalFromFileServesTheFileAsSecretsManagerWould(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "secrets.json")
 	content := `{"secrets": [
 		{"name": "dev/agent-secrets/demo-key", "kms_key_id": "alias/dev", "tags": {"owner": "shared", "tier": "agent"}, "value": "demo-v1"},
+		{"name": "dev/agent-secrets/unseeded-key", "kms_key_id": "alias/dev", "tags": {"owner": "shared", "tier": "agent"}},
 		{"name": "other/demo-key", "kms_key_id": "", "tags": {}, "value": "other-v1"}
 	]}`
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
@@ -89,13 +93,19 @@ func TestLocalFromFileServesTheFileAsSecretsManagerWould(t *testing.T) {
 	if listed := listByPrefix("DEV/agent-secrets/"); len(listed) != 0 {
 		t.Fatalf("ListSecrets(DEV/agent-secrets/) = %+v; want nothing, as Secrets Manager's name filter is case-sensitive", listed)
 	}
-	listed := listByPrefix("dev/agent-secrets/")
+	listed := listByPrefix("dev/agent-secrets/demo-key")
 	if len(listed) != 1 {
-		t.Fatalf("ListSecrets(dev/agent-secrets/) = %+v; want only dev/agent-secrets/demo-key", listed)
+		t.Fatalf("ListSecrets(dev/agent-secrets/demo-key) = %+v; want only dev/agent-secrets/demo-key", listed)
 	}
 	entry := listed[0]
 	if aws.ToString(entry.Name) != "dev/agent-secrets/demo-key" || aws.ToString(entry.KmsKeyId) != "alias/dev" || len(entry.Tags) != 2 {
 		t.Fatalf("listed entry = %+v, want its name, key and two tags", entry)
+	}
+	if stages := currentStages(entry); stages != 1 {
+		t.Fatalf("demo-key lists %d AWSCURRENT versions in %v; want one", stages, entry.SecretVersionsToStages)
+	}
+	if listed := listByPrefix("dev/agent-secrets/"); len(listed) != 2 {
+		t.Fatalf("ListSecrets(dev/agent-secrets/) = %+v; want demo-key and unseeded-key", listed)
 	}
 	for _, id := range []string{"dev/agent-secrets/demo-key", aws.ToString(entry.ARN)} {
 		v, err := AWS{Client: local}.Read(ctx, id)
@@ -106,6 +116,32 @@ func TestLocalFromFileServesTheFileAsSecretsManagerWould(t *testing.T) {
 	if _, err := (AWS{Client: local}).Read(ctx, "dev/agent-secrets/missing"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("Read(missing) = %v, want ErrNotFound", err)
 	}
+
+	unseeded := listByPrefix("dev/agent-secrets/unseeded-key")
+	if len(unseeded) != 1 || len(unseeded[0].SecretVersionsToStages) != 0 {
+		t.Fatalf("ListSecrets(unseeded-key) = %+v; want it listed with no version", unseeded)
+	}
+	if _, err := (AWS{Client: local}).Read(ctx, "dev/agent-secrets/unseeded-key"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Read(unseeded-key) = %v, want ErrNotFound", err)
+	}
+	local.Put(LocalSecret{Name: "dev/agent-secrets/unseeded-key", KmsKeyID: "alias/dev", Tags: map[string]string{"owner": "shared", "tier": "agent"}, Value: "seeded-v1"})
+	if seeded := listByPrefix("dev/agent-secrets/unseeded-key"); len(seeded) != 1 || currentStages(seeded[0]) != 1 {
+		t.Fatalf("ListSecrets(unseeded-key) after its value was put = %+v; want one AWSCURRENT version", seeded)
+	}
+	if v, err := (AWS{Client: local}).Read(ctx, "dev/agent-secrets/unseeded-key"); err != nil || v != "seeded-v1" {
+		t.Fatalf("Read(unseeded-key) after its value was put = %q, %v; want seeded-v1", v, err)
+	}
+}
+
+// currentStages counts the versions entry's SecretVersionsToStages labels AWSCURRENT.
+func currentStages(entry types.SecretListEntry) int {
+	n := 0
+	for _, stages := range entry.SecretVersionsToStages {
+		if slices.Contains(stages, "AWSCURRENT") {
+			n++
+		}
+	}
+	return n
 }
 
 func TestLocalFromFileRejectsMissingFile(t *testing.T) {
