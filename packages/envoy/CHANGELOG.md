@@ -77,15 +77,17 @@
 
 ### Changed
 
-- Dispatch event payloads read from the event log are served exactly as stored by
-  `GET /api/v1/issues/{key}/events`, `GET /api/v1/artifacts/{id}/events` and the replay from
-  `GET /api/v1/events`: numbers keep their stored spelling
-  and precision (`9007199254740993` stays that integer and `1.00` keeps its trailing zeros), and
-  object keys come in PostgreSQL `jsonb` order, shorter keys first and keys of one length in byte
-  order, rather than Go's sorted map order. The JSON is compact. `ask.*` payloads are still decoded
-  to add their opened-event, backlink-count and anchor-document fields. The dashboard, the agent
-  Dispatch tools and the Legion daemon read named fields from these payloads, and none compares
-  payload bytes or relies on Go's map ordering or `float64` rounding.
+- Event-log payloads served by `GET /api/v1/issues/{key}/events`, `GET /api/v1/artifacts/{id}/events`
+  and the replay from `GET /api/v1/events` keep their stored numbers and PostgreSQL `jsonb` object
+  order: `9007199254740993` stays that integer, `1.00` keeps its trailing zeros, and object keys come
+  shorter first and, for keys of one length, in byte order. The JSON is compact, and Go's encoder
+  still writes `<`, `>`, `&`, U+2028 and U+2029 inside strings as `\u` escapes, as it did before.
+  Six ask payloads are decoded to add read-time fields and come back in Go's sorted-key, `float64`
+  form: `ask.opened`, `ask.anchor_refreshed`, `ask.answered`, `ask.resolved`, `ask.edited` and
+  `ask.handed_back`; `ask.follower_added` and `ask.follower_removed` keep the stored order. A live
+  event on `GET /api/v1/events` keeps its producer's field order. The dashboard, the agent Dispatch
+  tools and the Legion daemon read named fields from these payloads, and none compares payload bytes
+  or relies on Go's map ordering or `float64` rounding.
 - A blank approval-request `summary` is refused (`400 SUMMARY_INPUT`) with text that asks for what
   the human is approving, rather than for what the version proposes that the human has not agreed
   to, and the advice in `409 APPROVAL_WAITS_ON_HUMAN` and in an approval ask's `409 ASK_KIND_FIXED`

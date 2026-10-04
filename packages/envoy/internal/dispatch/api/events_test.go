@@ -107,7 +107,7 @@ func TestEventPayloadsAreServedAsStoredForEveryEventKind(t *testing.T) {
 	firstSeq := lastSeq
 	var firstID int64
 	stored := map[int64]storedEvent{}
-	const nonAskPayload = `{"zeta":"last","scaled":1.00,"precise":9007199254740993,"alpha":{"kept":true},"values":["one","two"]}`
+	const nonAskPayload = `{"zeta":"last","scaled":1.00,"precise":9007199254740993,"alpha":{"kept":true},"values":["one","two"],"html":"a < b && c > d","separators":"x\u2028y\u2029z"}`
 	for _, eventType := range eventTypes {
 		lastSeq++
 		payload := nonAskPayload
@@ -131,7 +131,9 @@ func TestEventPayloadsAreServedAsStoredForEveryEventKind(t *testing.T) {
 		if err := json.Compact(&compacted, []byte(text)); err != nil {
 			t.Fatalf("compact stored %s payload %s: %v", eventType, text, err)
 		}
-		stored[id] = storedEvent{eventType: eventType, ask: isAsk, payload: compacted.Bytes()}
+		var escaped bytes.Buffer
+		json.HTMLEscape(&escaped, compacted.Bytes())
+		stored[id] = storedEvent{eventType: eventType, ask: isAsk, payload: escaped.Bytes()}
 	}
 
 	type servedEvent struct {
