@@ -1178,6 +1178,12 @@ export type SearchResultsPageAbsentAs<V> = { readonly [K in keyof SearchResultsP
 export type SearchResponse = {
   readonly results: SearchResult[];
   readonly took_ms: number;
+  /**
+   * Why this search fell back to keyword-only ranking - today only `"embedder_unavailable"`
+   * (LEGION-549: no Cohere key configured, the query's own embedding timed out, or Cohere
+   * answered an error) - absent when meaning search ran normally.
+   */
+  readonly degraded?: "embedder_unavailable";
 } & (SearchResultsPage | SearchResultsPageAbsentAs<undefined>);
 
 export interface DuplicateCandidate {

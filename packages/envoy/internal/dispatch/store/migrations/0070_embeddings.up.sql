@@ -1,4 +1,4 @@
--- 0069_embeddings.up.sql
+-- 0070_embeddings.up.sql
 -- Meaning search (LEGION-549): one vector per (kind, id) searchable unit - the same grain
 -- search.go's keyword legs already key hits by (issue by key, document by artifact id, comment /
 -- ask / message by id) - embedded by Cohere after commit through a durable retry queue that
