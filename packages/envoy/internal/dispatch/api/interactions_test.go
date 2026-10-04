@@ -15,7 +15,6 @@ import (
 
 	"github.com/reearth/ygo/crdt"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
-	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
@@ -28,14 +27,13 @@ func newInteractionHandler(t *testing.T, makeDocs func(*store.Store) docs.API) (
 	if makeDocs != nil {
 		docsAPI = makeDocs(database)
 	}
-	allowed := map[string]struct{}{"alice": {}, "bob": {}}
+	seedPeople(t, database, "alice", "bob")
 	deps, err := NewDeps(DepsInput{
-		Store:         database,
-		Identity:      identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: allowed},
-		AllowedLogins: allowed,
-		AgentTokens:   sharedAgentTokens("agent-token"),
-		Docs:          docsAPI,
-		ServerURL:     "https://dispatch.example",
+		Store:       database,
+		Identity:    headerIdentity(database),
+		AgentTokens: sharedAgentTokens(t, "agent-token"),
+		Docs:        docsAPI,
+		ServerURL:   "https://dispatch.example",
 	})
 	if err != nil {
 		t.Fatalf("new API dependencies: %v", err)

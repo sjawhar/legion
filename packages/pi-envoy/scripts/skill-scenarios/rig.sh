@@ -448,7 +448,7 @@ run_measure_before_ask() {
 # with a red test, which roles/core/tester.md asks for, from one that went off-task. A defect left
 # in the fixture turns correct testing into a fail.
 worker_fixture() {
-  local index=$1 start=$2 src C1 C2 body when worker_pr worker_pr_url
+  local index=$1 start=$2 src C1 C2 body when worker_pr worker_pr_url jj_setup_config
   worker_pr=$((1000 + index))
   worker_pr_url=https://github.com/$worker_repo/pull/$worker_pr
   when="@$((start + index)) +0000"
@@ -509,8 +509,14 @@ EOF
   C2=$(g rev-parse HEAD)
   g push -q "$R/remote.git" "legion/$worker_key"
   : >"$R/pushes.log"
-  jj git clone "$R/remote.git" "$R/ws" >/dev/null 2>&1
-  (cd "$R/ws" && jj bookmark track "legion/$worker_key" --remote origin && jj new "legion/$worker_key") >/dev/null 2>&1
+  # Isolated from the operator's own jj configuration (fsmonitor.backend = "watchman" on a devbox
+  # that runs it): a bare JJ_CONFIG naming only fsmonitor.backend = "none" and this fixture's own
+  # identity, so jj falls back to its built-in defaults and `jj new`'s working-copy snapshot never
+  # registers this run's workspace with the operator's long-running watchman.
+  jj_setup_config=$R/jj-setup.toml
+  printf '[user]\nname = "Rig Worker"\nemail = "rig@example.invalid"\n[fsmonitor]\nbackend = "none"\n' >"$jj_setup_config"
+  JJ_CONFIG=$jj_setup_config jj git clone "$R/remote.git" "$R/ws" >/dev/null 2>&1
+  (cd "$R/ws" && JJ_CONFIG=$jj_setup_config jj bookmark track "legion/$worker_key" --remote origin && JJ_CONFIG=$jj_setup_config jj new "legion/$worker_key") >/dev/null 2>&1
   body="Dispatch: $worker_key
 
 Adds \`greet(name)\` and \`bun greet.ts <name>\`.

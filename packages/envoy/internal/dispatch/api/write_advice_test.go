@@ -13,7 +13,6 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
-	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
@@ -694,15 +693,14 @@ func newFailingAdviceHandler(t *testing.T, query string) (http.Handler, *store.S
 			t.Errorf("shutdown document service: %v", err)
 		}
 	})
-	allowed := map[string]struct{}{"alice": {}, "bob": {}}
+	seedPeople(t, database, "alice", "bob")
 	deps, err := NewDeps(DepsInput{
-		Store:         database,
-		Identity:      identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: allowed},
-		AllowedLogins: allowed,
-		AgentTokens:   sharedAgentTokens("agent-token"),
-		ServerURL:     "https://dispatch.example",
-		Docs:          documentService,
-		Events:        broker,
+		Store:       database,
+		Identity:    headerIdentity(database),
+		AgentTokens: sharedAgentTokens(t, "agent-token"),
+		ServerURL:   "https://dispatch.example",
+		Docs:        documentService,
+		Events:      broker,
 	})
 	if err != nil {
 		t.Fatalf("new API dependencies: %v", err)

@@ -24,10 +24,10 @@ func agentsHandlerWithStore(t *testing.T, envoyURL string, database *store.Store
 	deps := Deps{
 		Store: database,
 		Identity: identity.HeaderIdentity{
-			Header:        "X-Dispatch-User",
-			AllowedLogins: map[string]struct{}{"alice": {}},
+			Header: "X-Dispatch-User",
+			People: store.NewPgPeopleStore(database.Pool),
 		},
-		AgentTokens: sharedAgentTokens("agent-token"),
+		AgentTokens: sharedAgentTokens(t, "agent-token"),
 		Envoy:       envoy.New(envoyURL),
 	}
 	mux := http.NewServeMux()

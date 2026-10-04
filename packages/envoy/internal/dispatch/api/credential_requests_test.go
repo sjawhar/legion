@@ -14,7 +14,6 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
-	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
@@ -30,15 +29,14 @@ func newCredentialTestHandler(t *testing.T, brokerURL string) http.Handler {
 		Store: database, Events: events.NewBroker(), ServerURL: "https://dispatch.example", Settle: 20 * time.Millisecond,
 	})
 	t.Cleanup(func() { _ = documentService.Shutdown(t.Context()) })
-	allowed := map[string]struct{}{"alice": {}, "bob": {}}
+	seedPeople(t, database, "alice", "bob")
 	depsInput := DepsInput{
-		Store:         database,
-		Identity:      identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: allowed},
-		AllowedLogins: allowed,
-		AgentTokens:   sharedAgentTokens("agent-token"),
-		ServerURL:     "https://dispatch.example",
-		Docs:          documentService,
-		Events:        events.NewBroker(),
+		Store:       database,
+		Identity:    headerIdentity(database),
+		AgentTokens: sharedAgentTokens(t, "agent-token"),
+		ServerURL:   "https://dispatch.example",
+		Docs:        documentService,
+		Events:      events.NewBroker(),
 	}
 	if brokerURL != "" {
 		depsInput.AgentSecretsURL = brokerURL

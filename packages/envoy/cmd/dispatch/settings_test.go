@@ -16,9 +16,9 @@ import (
 	"go/token"
 	"io/fs"
 	"log/slog"
-	"maps"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -26,6 +26,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	gws "github.com/gorilla/websocket"
 
@@ -34,10 +35,10 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/config"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
-	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/routes"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/oidc/oidctest"
 )
 
 // storetestImport is the one package under internal/dispatch that reads the process environment
@@ -184,6 +185,15 @@ func TestSettingsTableNamesEachVariableOnce(t *testing.T) {
 			t.Errorf("%s: Description %q, want one line", row.Name, row.Description)
 		}
 	}
+	// A removed setting refuses startup, so it can never also be a row the server reads.
+	for _, removed := range removedSettings {
+		if seen[removed.Name] {
+			t.Errorf("%s is both a settings row and a removed setting", removed.Name)
+		}
+		if !name.MatchString(removed.Name) || removed.Replacement == "" {
+			t.Errorf("removed setting %+v, want a variable name and what replaced it", removed)
+		}
+	}
 }
 
 // `envoy-dispatch settings` is what the docs site's configuration reference is generated from, so
@@ -232,15 +242,9 @@ func TestSettingValuesRefuseAVariableTheTableDoesNotList(t *testing.T) {
 }
 
 // bootEnvironment is an environment resolveBootConfig accepts, with overrides applied; an override
-// of "" leaves the variable empty.
+// of "" leaves the variable empty. It is a production cookie server: signInEnvironment's.
 func bootEnvironment(overrides map[string]string) settingValues {
-	values := map[string]string{
-		"DATABASE_URL":            "postgres://dispatch",
-		"DISPATCH_AGENT_TOKEN":    "agent-token",
-		"DISPATCH_ALLOWED_LOGINS": "alice",
-	}
-	maps.Copy(values, overrides)
-	return envGetter(values)
+	return envGetter(signInEnvironment(overrides))
 }
 
 func resolveWith(t *testing.T, overrides map[string]string) bootConfig {
@@ -293,15 +297,24 @@ func routerFor(t *testing.T, boot bootConfig, built routes.AppContextOptions) ht
 	return routes.New(appCtx)
 }
 
-// appContextFor is routes.BuildAppContext as main calls it, with the signing key, the user and
-// session stores and the cookie identity filled in, so a request carrying signedIn's cookie is
-// that login's.
+// appContextFor is routes.BuildAppContext as main calls it, with the signing key, the session store
+// and the request identity main builds for boot (requestIdentityFor) filled in, so a request
+// carrying signedIn's cookie is that person's. built.People is a store with no database unless the
+// case's requests record people (dev sign-in, a pool sign-in, header identity).
 func appContextFor(boot bootConfig, built routes.AppContextOptions) (*routes.AppContext, error) {
 	built.SigningKey = "signing-key"
-	built.Users = store.NewPgUserStore(nil)
+	if built.People == nil {
+		built.People = store.NewPgPeopleStore(nil)
+	}
 	built.Sessions = currentSessions{}
-	built.Identity = identity.CookieIdentity{SigningKey: "signing-key", AllowedLogins: boot.AllowedLogins, Sessions: built.Sessions}
+	built.Identity = requestIdentityFor(boot, built.SigningKey, built.People, built.Sessions, built.SignIn)
 	return routes.BuildAppContext(appContextOptions(boot, built))
+}
+
+// peopleStore is a people store over a fresh test database, for a case whose requests record people.
+func peopleStore(t *testing.T) auth.PeopleStore {
+	t.Helper()
+	return store.NewPgPeopleStore(storetest.Open(t).Pool)
 }
 
 // currentSessions is a session store holding every login's session at generation 0, as a fresh
@@ -331,11 +344,70 @@ func signedIn(t *testing.T, request *http.Request, login string) *http.Request {
 // the dashboard origin, from the router main serves for boot.
 func devSignIn(t *testing.T, boot bootConfig, login string) *httptest.ResponseRecorder {
 	t.Helper()
-	request := httptest.NewRequest(http.MethodGet, devSignInOrigin+"/auth/_dev/signin?login="+login, nil)
+	request := httptest.NewRequest(http.MethodGet, devSignInOrigin+"/auth/_dev/signin?login="+url.QueryEscape(login), nil)
 	request.RemoteAddr = "127.0.0.1:40000"
 	response := httptest.NewRecorder()
-	routerFor(t, boot, routes.AppContextOptions{ServerURL: devSignInOrigin}).ServeHTTP(response, request)
+	routerFor(t, boot, routes.AppContextOptions{ServerURL: devSignInOrigin, People: peopleStore(t)}).ServeHTTP(response, request)
 	return response
+}
+
+// signInPool is a sign-in pool on this machine with Dispatch's app client, clientID and
+// clientSecret, the one DISPATCH_SIGNIN_ISSUER names in a case.
+func signInPool(t *testing.T, clientID, clientSecret string) *oidctest.Issuer {
+	t.Helper()
+	pool := oidctest.New(t)
+	pool.EnableCodeFlow(pool.PublishKey(t, "signing-key"), clientID, clientSecret)
+	return pool
+}
+
+// signInRouter is the router main serves for boot over people, with the sign-in pool's code flow
+// main discovers from boot's DISPATCH_SIGNIN_* settings (discoverSignIn).
+func signInRouter(t *testing.T, boot bootConfig, people auth.PeopleStore) http.Handler {
+	t.Helper()
+	flow, err := discoverSignIn(context.Background(), boot)
+	if err != nil || flow == nil {
+		t.Fatalf("discover the sign-in pool %s: %v, %v", boot.SignInIssuer, flow, err)
+	}
+	return routerFor(t, boot, routes.AppContextOptions{SignIn: flow, People: people})
+}
+
+// startSignIn answers GET /auth/start from handler: the redirect to the pool's authorization
+// endpoint, with the state cookie.
+func startSignIn(t *testing.T, handler http.Handler) *httptest.ResponseRecorder {
+	t.Helper()
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "http://dispatch.test/auth/start", nil))
+	if response.Code != http.StatusFound {
+		t.Fatalf("GET /auth/start: %d %s, want a redirect to the sign-in pool", response.Code, response.Body.String())
+	}
+	return response
+}
+
+// poolSignIn runs a whole sign-in through handler, a router signInRouter built, against pool: start,
+// the pool's sign-in as a person the federated provider names alice@example.com in groups, and the
+// callback, whose answer it returns.
+func poolSignIn(t *testing.T, handler http.Handler, pool *oidctest.Issuer, groups ...string) *httptest.ResponseRecorder {
+	t.Helper()
+	pool.SignInAs(map[string]any{
+		"sub":              "person-subject",
+		"cognito:username": "ExampleIdP_alice@example.com",
+		"cognito:groups":   groups,
+		"identities":       []map[string]any{{"providerName": "ExampleIdP"}},
+	})
+	start := startSignIn(t, handler)
+	code, state := pool.Authorize(t, start.Header().Get("Location"))
+	callback := httptest.NewRequest(http.MethodGet, "http://dispatch.test/auth/callback?code="+url.QueryEscape(code)+"&state="+url.QueryEscape(state), nil)
+	for _, cookie := range start.Result().Cookies() {
+		callback.AddCookie(cookie)
+	}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, callback)
+	return response
+}
+
+// sessionCookieSet reports whether response set Dispatch's session cookie.
+func sessionCookieSet(response *httptest.ResponseRecorder) bool {
+	return slices.ContainsFunc(response.Result().Cookies(), func(cookie *http.Cookie) bool { return cookie.Name == "dsession" && cookie.Value != "" })
 }
 
 // errorCode is the code of a JSON error response.
@@ -352,7 +424,7 @@ func errorCode(response *httptest.ResponseRecorder) string {
 // never the process environment, so a reader that reads around the table fails its case.
 func TestEverySettingReachesItsReader(t *testing.T) {
 	appJSON := func(t *testing.T) string {
-		return filepath.Dir(writeFile(t, "app.json", `{"clientId":"Iv1.file","clientSecret":"file-secret"}`))
+		return filepath.Dir(writeFile(t, "app.json", `{"clientId":"Iv1.file"}`))
 	}
 	loadApp := func(t *testing.T, values map[string]string) (string, string, error) {
 		t.Helper()
@@ -445,41 +517,143 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			t.Run("several values", sharedAgentTokenListReachesTheAPIAndTheDocumentWebsocket)
 		},
 		"DISPATCH_IDENTITY": func(t *testing.T) {
-			if boot := resolveWith(t, map[string]string{"DISPATCH_IDENTITY": "header:X-Dispatch-User"}); boot.IdentityHeader != "X-Dispatch-User" {
-				t.Errorf("IdentityHeader = %q", boot.IdentityHeader)
+			header, err := resolveBootConfig(envGetter(headerIdentityEnvironment(map[string]string{"DISPATCH_IDENTITY": " header:X-Dispatch-User "})))
+			if err != nil || header.IdentityHeader != "X-Dispatch-User" {
+				t.Errorf("header: IdentityHeader = %q, %v", header.IdentityHeader, err)
 			}
 			if boot := resolveWith(t, nil); boot.IdentityHeader != "" {
 				t.Errorf("unset: IdentityHeader = %q, want cookie identity", boot.IdentityHeader)
 			}
 			refusedWith(t, map[string]string{"DISPATCH_IDENTITY": "basic"}, "DISPATCH_IDENTITY")
-		},
-		"DISPATCH_ALLOWED_LOGINS": func(t *testing.T) {
-			boot := resolveWith(t, map[string]string{"DISPATCH_ALLOWED_LOGINS": " Alice ,bob,"})
-			if !maps.Equal(boot.AllowedLogins, map[string]struct{}{"alice": {}, "bob": {}}) {
-				t.Errorf("AllowedLogins = %v", boot.AllowedLogins)
-			}
-			refusedWith(t, map[string]string{"DISPATCH_ALLOWED_LOGINS": ""}, "DISPATCH_ALLOWED_LOGINS")
-			resolveWith(t, map[string]string{"DISPATCH_ALLOWED_LOGINS": "", "DISPATCH_IDENTITY": "header:X-Dispatch-User"})
-			// The logins the router's sign-in takes: dev sign-in checks the list as the GitHub
-			// callback does.
+			// The identity main builds for the router: a header server names the person the
+			// header names, lowercased, and records them.
 			t.Run("router", func(t *testing.T) {
-				boot, err := resolveBootConfig(devSignInEnvironment(map[string]string{"DISPATCH_ALLOWED_LOGINS": "Alice,bob"}))
-				if err != nil {
-					t.Fatal(err)
+				request := httptest.NewRequest(http.MethodGet, "/auth/whoami", nil)
+				request.Header.Set("X-Dispatch-User", "Alice@Example.com")
+				response := httptest.NewRecorder()
+				routerFor(t, header, routes.AppContextOptions{People: peopleStore(t)}).ServeHTTP(response, request)
+				if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"login":"alice@example.com"`) {
+					t.Errorf("DISPATCH_IDENTITY=header:X-Dispatch-User: GET /auth/whoami answered %d %s, want alice@example.com", response.Code, response.Body.String())
 				}
-				if response := devSignIn(t, boot, "bob"); response.Code != http.StatusFound {
-					t.Errorf("dev sign-in as bob, whom DISPATCH_ALLOWED_LOGINS lists: %d %s, want 302", response.Code, response.Body.String())
+			})
+		},
+		"DISPATCH_SIGNIN_ISSUER": func(t *testing.T) {
+			pool := signInPool(t, "dispatch-client", "client-secret")
+			boot := resolveWith(t, map[string]string{"DISPATCH_SIGNIN_ISSUER": " " + pool.URL() + " "})
+			if boot.SignInIssuer != pool.URL() {
+				t.Errorf("SignInIssuer = %q", boot.SignInIssuer)
+			}
+			refusedWith(t, map[string]string{"DISPATCH_SIGNIN_ISSUER": ""}, "DISPATCH_SIGNIN_ISSUER missing")
+			// Cookie identity is Google sign-in: with none of the four, the server refuses to start.
+			refusedWith(t, map[string]string{"DISPATCH_SIGNIN_ISSUER": "", "DISPATCH_SIGNIN_CLIENT_ID": "", "DISPATCH_SIGNIN_CLIENT_SECRET": "", "DISPATCH_SIGNIN_GROUP": ""}, "DISPATCH_SIGNIN_ISSUER")
+			// The pool main discovers: /auth/start sends the browser to its authorization endpoint.
+			t.Run("router", func(t *testing.T) {
+				if location := startSignIn(t, signInRouter(t, boot, peopleStore(t))).Header().Get("Location"); !strings.HasPrefix(location, pool.URL()+"/") {
+					t.Errorf("DISPATCH_SIGNIN_ISSUER=%s: GET /auth/start redirected to %q, want the pool's authorization endpoint", pool.URL(), location)
 				}
-				if response := devSignIn(t, boot, "carol"); response.Code != http.StatusForbidden || errorCode(response) != "LOGIN_NOT_ALLOWED" {
-					t.Errorf("dev sign-in as carol, whom it does not: %d %s, want 403 LOGIN_NOT_ALLOWED", response.Code, response.Body.String())
+				pool.FailDiscovery(http.StatusServiceUnavailable)
+				if _, err := discoverSignIn(context.Background(), boot); err == nil || !strings.Contains(err.Error(), pool.URL()) {
+					t.Errorf("a pool whose discovery fails: err = %v, want a refusal naming %s", err, pool.URL())
+				}
+			})
+		},
+		"DISPATCH_SIGNIN_CLIENT_ID": func(t *testing.T) {
+			pool := signInPool(t, "table-client", "client-secret")
+			boot := resolveWith(t, map[string]string{"DISPATCH_SIGNIN_ISSUER": pool.URL(), "DISPATCH_SIGNIN_CLIENT_ID": " table-client "})
+			if boot.SignInClientID != "table-client" {
+				t.Errorf("SignInClientID = %q", boot.SignInClientID)
+			}
+			refusedWith(t, map[string]string{"DISPATCH_SIGNIN_CLIENT_ID": ""}, "DISPATCH_SIGNIN_CLIENT_ID missing")
+			// The client the router's sign-in names to the pool.
+			t.Run("router", func(t *testing.T) {
+				location, err := url.Parse(startSignIn(t, signInRouter(t, boot, peopleStore(t))).Header().Get("Location"))
+				if err != nil || location.Query().Get("client_id") != "table-client" {
+					t.Errorf("DISPATCH_SIGNIN_CLIENT_ID=table-client: GET /auth/start redirected to %v (%v), want client_id table-client", location, err)
+				}
+			})
+		},
+		"DISPATCH_SIGNIN_CLIENT_SECRET": func(t *testing.T) {
+			pool := signInPool(t, "dispatch-client", "table-secret")
+			boot := resolveWith(t, map[string]string{"DISPATCH_SIGNIN_ISSUER": pool.URL(), "DISPATCH_SIGNIN_CLIENT_SECRET": " table-secret "})
+			if boot.SignInClientSecret != "table-secret" {
+				t.Errorf("SignInClientSecret = %q", boot.SignInClientSecret)
+			}
+			refusedWith(t, map[string]string{"DISPATCH_SIGNIN_CLIENT_SECRET": ""}, "DISPATCH_SIGNIN_CLIENT_SECRET missing")
+			// The secret the router's code exchange authenticates with: the pool refuses any other.
+			t.Run("router", func(t *testing.T) {
+				if response := poolSignIn(t, signInRouter(t, boot, peopleStore(t)), pool, "dispatch-members"); response.Code != http.StatusFound || !sessionCookieSet(response) {
+					t.Errorf("DISPATCH_SIGNIN_CLIENT_SECRET=table-secret: the callback answered %d %s, want a signed-in redirect", response.Code, response.Body.String())
+				}
+				wrong := resolveWith(t, map[string]string{"DISPATCH_SIGNIN_ISSUER": pool.URL(), "DISPATCH_SIGNIN_CLIENT_SECRET": "another-secret"})
+				if response := poolSignIn(t, signInRouter(t, wrong, peopleStore(t)), pool, "dispatch-members"); response.Code != http.StatusBadGateway || sessionCookieSet(response) {
+					t.Errorf("a secret the pool does not hold: the callback answered %d %s, want 502 and no session", response.Code, response.Body.String())
+				}
+			})
+		},
+		"DISPATCH_SIGNIN_GROUP": func(t *testing.T) {
+			pool := signInPool(t, "dispatch-client", "client-secret")
+			boot := resolveWith(t, map[string]string{"DISPATCH_SIGNIN_ISSUER": pool.URL(), "DISPATCH_SIGNIN_GROUP": " table-group "})
+			if boot.SignInGroup != "table-group" {
+				t.Errorf("SignInGroup = %q", boot.SignInGroup)
+			}
+			refusedWith(t, map[string]string{"DISPATCH_SIGNIN_GROUP": ""}, "DISPATCH_SIGNIN_GROUP missing")
+			// The group the router's sign-in admits: a member signs in, anyone else is refused. Past
+			// the hour, the membership check main attaches to cookie identity renews the member's
+			// sign-in with the pool against the same group, and signs out a person the pool no
+			// longer puts in it.
+			t.Run("router", func(t *testing.T) {
+				people := peopleStore(t)
+				handler := signInRouter(t, boot, people)
+				member := poolSignIn(t, handler, pool, "other-group", "table-group")
+				if member.Code != http.StatusFound || !sessionCookieSet(member) {
+					t.Fatalf("a member of table-group: the callback answered %d %s, want a signed-in redirect", member.Code, member.Body.String())
+				}
+				if response := poolSignIn(t, handler, pool, "dispatch-members"); response.Code != http.StatusForbidden || sessionCookieSet(response) {
+					t.Errorf("a person outside table-group: the callback answered %d %s, want 403 and no session", response.Code, response.Body.String())
+				}
+				whoami := func() *httptest.ResponseRecorder {
+					request := httptest.NewRequest(http.MethodGet, "http://dispatch.test/auth/whoami", nil)
+					for _, cookie := range member.Result().Cookies() {
+						if cookie.Name == "dsession" {
+							request.AddCookie(cookie)
+						}
+					}
+					response := httptest.NewRecorder()
+					handler.ServeHTTP(response, request)
+					return response
+				}
+				// ageConfirmation dates the member's last confirmation two hours back, so their next
+				// request finds it older than the hour.
+				ageConfirmation := func() {
+					t.Helper()
+					membership, found, err := people.Membership(context.Background(), "alice@example.com")
+					if err != nil || !found || membership.RefreshToken == "" {
+						t.Fatalf("the member's membership: %+v, found %t, %v; want a refresh token", membership, found, err)
+					}
+					if err := people.Confirm(context.Background(), "alice@example.com", membership.RefreshToken, time.Now().Add(-2*time.Hour)); err != nil {
+						t.Fatal(err)
+					}
+				}
+				ageConfirmation()
+				if response := whoami(); response.Code != http.StatusOK || pool.Refreshes() != 1 {
+					t.Errorf("a member of table-group past the hour: whoami answered %d %s after %d refreshes, want 200 after one refresh", response.Code, response.Body.String(), pool.Refreshes())
+				}
+				ageConfirmation()
+				pool.UpdateGrants(func(claims map[string]any) { claims["cognito:groups"] = []string{"other-group"} })
+				if response := whoami(); response.Code != http.StatusUnauthorized {
+					t.Errorf("a member the pool dropped from table-group, past the hour: whoami answered %d %s, want 401", response.Code, response.Body.String())
 				}
 			})
 		},
 		"DISPATCH_IDENTITY_HEADER_TRUSTED": func(t *testing.T) {
-			header := map[string]string{"DISPATCH_IDENTITY": "header:X-Dispatch-User", "DISPATCH_APP_CLIENT_ID": "Iv1.app"}
-			refusedWith(t, header, "DISPATCH_IDENTITY_HEADER_TRUSTED")
-			header["DISPATCH_IDENTITY_HEADER_TRUSTED"] = "1"
-			resolveWith(t, header)
+			for _, value := range []string{"", "true"} {
+				if _, err := resolveBootConfig(envGetter(headerIdentityEnvironment(map[string]string{"DISPATCH_IDENTITY_HEADER_TRUSTED": value}))); err == nil || !strings.Contains(err.Error(), "DISPATCH_IDENTITY_HEADER_TRUSTED=1") {
+					t.Errorf("header identity with DISPATCH_IDENTITY_HEADER_TRUSTED=%q: err = %v, want a refusal naming it", value, err)
+				}
+			}
+			if _, err := resolveBootConfig(envGetter(headerIdentityEnvironment(nil))); err != nil {
+				t.Errorf("header identity with DISPATCH_IDENTITY_HEADER_TRUSTED=1: %v", err)
+			}
 		},
 		"DISPATCH_LISTEN_HOST": func(t *testing.T) {
 			if boot := resolveWith(t, map[string]string{"DISPATCH_LISTEN_HOST": "[::1]"}); boot.ListenAddr != "[::1]:8766" {
@@ -629,48 +803,39 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			})
 		},
 		"DISPATCH_APP_CLIENT_ID": func(t *testing.T) {
-			if clientID, source, err := loadApp(t, map[string]string{"DISPATCH_APP_CLIENT_ID": "Iv1.env", "DISPATCH_APP_CLIENT_SECRET": "secret"}); err != nil || clientID != "Iv1.env" || source != "env" {
+			if clientID, source, err := loadApp(t, map[string]string{"DISPATCH_APP_CLIENT_ID": "Iv1.env"}); err != nil || clientID != "Iv1.env" || source != "env" {
 				t.Errorf("set: client %q from %q, %v; want the variable over app.json", clientID, source, err)
 			}
 			if clientID, source, err := loadApp(t, nil); err != nil || clientID != "Iv1.file" || !strings.HasPrefix(source, "file:") {
 				t.Errorf("unset: client %q from %q, %v; want app.json's", clientID, source, err)
 			}
 		},
-		"DISPATCH_APP_CLIENT_SECRET": func(t *testing.T) {
-			if _, _, err := loadApp(t, map[string]string{"DISPATCH_APP_CLIENT_ID": "Iv1.env"}); err == nil || !strings.Contains(err.Error(), "DISPATCH_APP_CLIENT_SECRET") {
-				t.Errorf("client ID without a secret: err = %v, want a refusal naming DISPATCH_APP_CLIENT_SECRET", err)
-			}
-			app, _, err := loadAppCredentials(envGetter(map[string]string{"DISPATCH_APP_CLIENT_ID": "Iv1.env", "DISPATCH_APP_CLIENT_SECRET": "table-secret"}), t.TempDir())
-			if err != nil || app.ClientSecret != "table-secret" {
-				t.Errorf("app %+v, %v", app, err)
-			}
-		},
 		"DISPATCH_APP_PEM_B64": func(t *testing.T) {
-			app, _, err := loadAppCredentials(envGetter(map[string]string{"DISPATCH_APP_CLIENT_ID": "Iv1.env", "DISPATCH_APP_CLIENT_SECRET": "secret", "DISPATCH_APP_PEM_B64": base64.StdEncoding.EncodeToString([]byte("app private key"))}), t.TempDir())
+			app, _, err := loadAppCredentials(envGetter(map[string]string{"DISPATCH_APP_CLIENT_ID": "Iv1.env", "DISPATCH_APP_PEM_B64": base64.StdEncoding.EncodeToString([]byte("app private key"))}), t.TempDir())
 			if err != nil || app.PEM != "app private key" {
 				t.Errorf("app %+v, %v", app, err)
 			}
-			if _, _, err := loadApp(t, map[string]string{"DISPATCH_APP_CLIENT_ID": "Iv1.env", "DISPATCH_APP_CLIENT_SECRET": "secret", "DISPATCH_APP_PEM_B64": "not base64!"}); err == nil || !strings.Contains(err.Error(), "DISPATCH_APP_PEM_B64") {
+			if _, _, err := loadApp(t, map[string]string{"DISPATCH_APP_CLIENT_ID": "Iv1.env", "DISPATCH_APP_PEM_B64": "not base64!"}); err == nil || !strings.Contains(err.Error(), "DISPATCH_APP_PEM_B64") {
 				t.Errorf("malformed: err = %v, want a refusal naming DISPATCH_APP_PEM_B64", err)
 			}
 		},
 		"DISPATCH_APP_ID": func(t *testing.T) {
-			app, _, err := loadAppCredentials(envGetter(map[string]string{"DISPATCH_APP_CLIENT_ID": "Iv1.env", "DISPATCH_APP_CLIENT_SECRET": "secret", "DISPATCH_APP_ID": "4242"}), t.TempDir())
+			app, _, err := loadAppCredentials(envGetter(map[string]string{"DISPATCH_APP_CLIENT_ID": "Iv1.env", "DISPATCH_APP_ID": "4242"}), t.TempDir())
 			if err != nil || app.ID != 4242 {
 				t.Errorf("app %+v, %v", app, err)
 			}
-			if _, _, err := loadApp(t, map[string]string{"DISPATCH_APP_CLIENT_ID": "Iv1.env", "DISPATCH_APP_CLIENT_SECRET": "secret", "DISPATCH_APP_ID": "app"}); err == nil || !strings.Contains(err.Error(), "DISPATCH_APP_ID") {
+			if _, _, err := loadApp(t, map[string]string{"DISPATCH_APP_CLIENT_ID": "Iv1.env", "DISPATCH_APP_ID": "app"}); err == nil || !strings.Contains(err.Error(), "DISPATCH_APP_ID") {
 				t.Errorf("not an integer: err = %v, want a refusal naming DISPATCH_APP_ID", err)
 			}
 		},
 		"DISPATCH_APP_SLUG": func(t *testing.T) {
-			app, _, err := loadAppCredentials(envGetter(map[string]string{"DISPATCH_APP_CLIENT_ID": "Iv1.env", "DISPATCH_APP_CLIENT_SECRET": "secret", "DISPATCH_APP_SLUG": "table-slug"}), t.TempDir())
+			app, _, err := loadAppCredentials(envGetter(map[string]string{"DISPATCH_APP_CLIENT_ID": "Iv1.env", "DISPATCH_APP_SLUG": "table-slug"}), t.TempDir())
 			if err != nil || app.Slug != "table-slug" {
 				t.Errorf("app %+v, %v", app, err)
 			}
 		},
 		"DISPATCH_APP_NAME": func(t *testing.T) {
-			app, _, err := loadAppCredentials(envGetter(map[string]string{"DISPATCH_APP_CLIENT_ID": "Iv1.env", "DISPATCH_APP_CLIENT_SECRET": "secret", "DISPATCH_APP_NAME": "Table App"}), t.TempDir())
+			app, _, err := loadAppCredentials(envGetter(map[string]string{"DISPATCH_APP_CLIENT_ID": "Iv1.env", "DISPATCH_APP_NAME": "Table App"}), t.TempDir())
 			if err != nil || app.Name != "Table App" {
 				t.Errorf("app %+v, %v", app, err)
 			}
@@ -694,7 +859,7 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				app := &auth.AppConfig{ClientID: "Iv1.env", ClientSecret: "secret", PEM: string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)}))}
+				app := &auth.AppConfig{ClientID: "Iv1.env", PEM: string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)}))}
 				called := make(chan string, 1)
 				github := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					select {
@@ -739,14 +904,12 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 		},
 		"DISPATCH_INSECURE_COOKIE": func(t *testing.T) {
 			// The flag as the router's cookies carry it: the state cookie GET /auth/start sets.
-			app := &auth.AppConfig{ClientID: "Iv1.env", ClientSecret: "secret"}
+			pool := signInPool(t, "dispatch-client", "client-secret")
 			for value, insecure := range map[string]bool{"": false, "1": true, "false": true} {
-				response := httptest.NewRecorder()
-				routerFor(t, resolveWith(t, map[string]string{"DISPATCH_INSECURE_COOKIE": value}), routes.AppContextOptions{App: app}).
-					ServeHTTP(response, httptest.NewRequest(http.MethodGet, "http://dispatch.test/auth/start", nil))
+				response := startSignIn(t, signInRouter(t, resolveWith(t, map[string]string{"DISPATCH_SIGNIN_ISSUER": pool.URL(), "DISPATCH_INSECURE_COOKIE": value}), peopleStore(t)))
 				cookies := response.Result().Cookies()
-				if response.Code != http.StatusFound || len(cookies) != 1 || cookies[0].Secure == insecure {
-					t.Errorf("DISPATCH_INSECURE_COOKIE=%q: /auth/start answered %d setting %v, want one state cookie with Secure %t", value, response.Code, cookies, !insecure)
+				if len(cookies) != 1 || cookies[0].Secure == insecure {
+					t.Errorf("DISPATCH_INSECURE_COOKIE=%q: /auth/start set %v, want one state cookie with Secure %t", value, cookies, !insecure)
 				}
 			}
 		},
@@ -818,16 +981,16 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 				t.Errorf("DISPATCH_DEV_SIGNIN=1: DevSignIn %t, %v", boot.DevSignIn, err)
 			}
 			refusedWith(t, map[string]string{"DISPATCH_DEV_SIGNIN": "yes"}, "DISPATCH_DEV_SIGNIN")
-			// The route the flag mounts: a sign-in as an allowlisted login sets its session
-			// cookie, and without the flag the route is not there.
+			// The route the flag mounts: a sign-in as any email sets its session cookie, and
+			// without the flag the route is not there.
 			t.Run("router", func(t *testing.T) {
 				for value, want := range map[string]int{"1": http.StatusFound, "": http.StatusNotFound} {
 					boot, err := resolveBootConfig(devSignInEnvironment(map[string]string{"DISPATCH_DEV_SIGNIN": value}))
 					if err != nil {
 						t.Fatal(err)
 					}
-					response := devSignIn(t, boot, "alice")
-					cookieSet := slices.ContainsFunc(response.Result().Cookies(), func(cookie *http.Cookie) bool { return cookie.Name == "dsession" })
+					response := devSignIn(t, boot, "alice@example.com")
+					cookieSet := sessionCookieSet(response)
 					if response.Code != want || cookieSet != (want == http.StatusFound) {
 						t.Errorf("DISPATCH_DEV_SIGNIN=%q: dev sign-in answered %d %s (session cookie set: %t), want %d", value, response.Code, response.Body.String(), cookieSet, want)
 					}

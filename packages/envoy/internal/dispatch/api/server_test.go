@@ -38,10 +38,11 @@ import (
 func TestMain(m *testing.M) { os.Exit(storetest.Main(m)) }
 
 // sharedAgentTokens is a DISPATCH_AGENT_TOKEN setting parsed as the server parses it at boot.
-func sharedAgentTokens(setting string) *auth.SharedAgentTokens {
+func sharedAgentTokens(t testing.TB, setting string) *auth.SharedAgentTokens {
+	t.Helper()
 	tokens, err := auth.ParseSharedAgentTokens(setting)
 	if err != nil {
-		panic(err)
+		t.Fatalf("ParseSharedAgentTokens(%q): %v", setting, err)
 	}
 	return tokens
 }
@@ -77,6 +78,21 @@ type testServerOptions struct {
 	agentStream agentstream.Source
 }
 
+// headerIdentity is the test header identity that records each named person in the database.
+func headerIdentity(database *store.Store) identity.HeaderIdentity {
+	return identity.HeaderIdentity{Header: "X-Dispatch-User", People: store.NewPgPeopleStore(database.Pool)}
+}
+
+// seedPeople records emails as people who have signed in: the assignee picker's options.
+func seedPeople(t *testing.T, database *store.Store, emails ...string) {
+	t.Helper()
+	people := store.NewPgPeopleStore(database.Pool)
+	for _, email := range emails {
+		if err := people.Record(context.Background(), email); err != nil {
+			t.Fatalf("seed person %q: %v", email, err)
+		}
+	}
+}
 func newTestHandler(t *testing.T) http.Handler {
 	t.Helper()
 	handler, _, _ := newTestServer(t, testServerOptions{})
@@ -123,12 +139,11 @@ func newTestServer(t *testing.T, options testServerOptions) (http.Handler, *stor
 			t.Errorf("shutdown document service: %v", err)
 		}
 	})
-	allowed := map[string]struct{}{"alice": {}, "bob": {}}
+	seedPeople(t, database, "alice", "bob")
 	deps, err := NewDeps(DepsInput{
 		Store:            database,
-		Identity:         identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: allowed},
-		AllowedLogins:    allowed,
-		AgentTokens:      sharedAgentTokens("agent-token"),
+		Identity:         headerIdentity(database),
+		AgentTokens:      sharedAgentTokens(t, "agent-token"),
 		DefaultProject:   options.defaultProject,
 		ServerURL:        "https://dispatch.example",
 		Docs:             documentService,
@@ -447,13 +462,11 @@ func TestDocumentTextReportsUnavailableService(t *testing.T) {
 		Events:      broker,
 	})
 	t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
-	allowed := map[string]struct{}{"alice": {}}
 	deps, err := NewDeps(DepsInput{
-		Store:         database,
-		Identity:      identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: allowed},
-		AllowedLogins: allowed,
-		Docs:          documentService,
-		Events:        broker,
+		Store:    database,
+		Identity: headerIdentity(database),
+		Docs:     documentService,
+		Events:   broker,
 	})
 	if err != nil {
 		t.Fatalf("new API dependencies: %v", err)
@@ -1776,16 +1789,15 @@ func TestIssueDocumentCreationIndexesDispatchReferences(t *testing.T) {
 
 func TestRevokedCookieIsRejectedAcrossDispatchSurfaces(t *testing.T) {
 	database := storetest.Open(t)
-	allowed := map[string]struct{}{"alice": {}}
 	sessions := store.NewPgSessionStore(database.Pool)
-	cookieIdentity := identity.CookieIdentity{SigningKey: "signing-key", AllowedLogins: allowed, Sessions: sessions}
+	cookieIdentity := identity.CookieIdentity{SigningKey: "signing-key", Sessions: sessions}
 	broker := events.NewBroker()
 	documentService := docs.New(docs.Deps{
 		Store: database, Events: broker, Identity: cookieIdentity, Settle: time.Hour,
 	})
 	t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
 	deps, err := NewDeps(DepsInput{
-		Store: database, Identity: cookieIdentity, AllowedLogins: allowed, AgentTokens: sharedAgentTokens("agent-token"),
+		Store: database, Identity: cookieIdentity, AgentTokens: sharedAgentTokens(t, "agent-token"),
 		Docs: documentService, Events: broker,
 	})
 	if err != nil {
@@ -1793,11 +1805,11 @@ func TestRevokedCookieIsRejectedAcrossDispatchSurfaces(t *testing.T) {
 	}
 	handler := http.NewServeMux()
 	Register(handler, deps)
-	generation, err := sessions.EnsureSession(context.Background(), "alice")
+	generation, err := sessions.EnsureSession(context.Background(), "alice@d.example")
 	if err != nil {
 		t.Fatalf("establish alice's session: %v", err)
 	}
-	cookie, err := http.ParseSetCookie(auth.IssueSessionCookie("alice", generation, "signing-key", true))
+	cookie, err := http.ParseSetCookie(auth.IssueSessionCookie("alice@d.example", generation, "signing-key", true))
 	if err != nil {
 		t.Fatalf("parse session cookie: %v", err)
 	}
@@ -1834,10 +1846,12 @@ func TestRevokedCookieIsRejectedAcrossDispatchSurfaces(t *testing.T) {
 		PrimaryArtifactID string `json:"primary_artifact_id"`
 	}](t, created)
 
-	delete(allowed, "alice")
+	if err := sessions.RevokeSessions(context.Background(), "alice@d.example"); err != nil {
+		t.Fatalf("revoke alice's sessions: %v", err)
+	}
 	for _, target := range []string{"/api/v1/issues/" + issue.Key, "/api/v1/events"} {
 		response := request(http.MethodGet, target, nil)
-		if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), `"code":"LOGIN_NOT_ALLOWED"`) {
+		if response.Code != http.StatusUnauthorized || !strings.Contains(response.Body.String(), `"code":"NO_IDENTITY"`) {
 			t.Fatalf("revoked cookie %s: status=%d body=%s", target, response.Code, response.Body.String())
 		}
 	}
@@ -2060,15 +2074,14 @@ func newTestHandlerWithBroker(t *testing.T) (http.Handler, *store.Store, *events
 			t.Errorf("shutdown document service: %v", err)
 		}
 	})
-	allowed := map[string]struct{}{"alice": {}, "bob": {}}
+	seedPeople(t, database, "alice", "bob")
 	deps, err := NewDeps(DepsInput{
-		Store:         database,
-		Identity:      identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: allowed},
-		AllowedLogins: allowed,
-		AgentTokens:   sharedAgentTokens("agent-token"),
-		ServerURL:     "https://dispatch.example",
-		Docs:          documentService,
-		Events:        broker,
+		Store:       database,
+		Identity:    headerIdentity(database),
+		AgentTokens: sharedAgentTokens(t, "agent-token"),
+		ServerURL:   "https://dispatch.example",
+		Docs:        documentService,
+		Events:      broker,
 	})
 	if err != nil {
 		t.Fatalf("new API dependencies: %v", err)
