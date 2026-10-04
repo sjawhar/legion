@@ -27,7 +27,9 @@ func RecordTaskProgress(ctx context.Context, tx pgx.Tx, artifactID string, tree 
 
 // recordTaskProgress writes progress onto the issue owning artifactID, when that artifact is its
 // primary document, naming the document's latest version, which the caller has written already.
-func recordTaskProgress(ctx context.Context, tx pgx.Tx, artifactID string, progress pmdoc.TaskProgress) error {
+func recordTaskProgress(
+	ctx context.Context, tx pgx.Tx, artifactID string, progress pmdoc.TaskProgress,
+) error {
 	if _, err := tx.Exec(ctx, `
 		update issues i
 		set tasks_done = $2, tasks_total = $3,
@@ -89,8 +91,10 @@ const TaskProgressReconcileInterval = 5 * time.Minute
 // while a row stays locked. Each pass runs until no drift it can lock remains; a batch that fails,
 // or that was short because rows were locked, is retried after a short wait, a bounded number of
 // times, so one bad batch ends the pass and not the loop. Each issue's latest version markdown is
-// parsed as the stored rendering it is (pmdoc.ParseRendering); an issue whose spec does not parse
-// is logged and counted as holding none, so one broken document does not hold the rest back.
+// read for its task items alone (pmdoc.CountTasksMarkdown), so a spec the Proof schema refuses
+// elsewhere - a table row wider than its header - is still counted; an issue whose spec the reader
+// cannot read at all is logged and counted as holding none, so one broken document does not hold
+// the rest back.
 func (s *Service) RunTaskProgressReconciliation(ctx context.Context) {
 	for {
 		s.ReconcileTaskProgress(ctx)

@@ -87,8 +87,11 @@ func TestCountTasksMarkdownCountsPastATableTheSchemaRefuses(t *testing.T) {
 	}
 }
 
-// On every document both can read, CountTasksMarkdown agrees with CountTasks of the parsed tree,
-// the empty item and front matter included; markdown the reader cannot read at all is the error.
+// On every document both can read, CountTasksMarkdown agrees with CountTasks of the parsed tree:
+// the empty item, closed front matter, and an unclosed `---` opener, which Parse reads as front
+// matter dropping the list under it and which a count reading the markdown alone must drop too
+// (the first version of this counter did not, and creation would have stored 1/2 where the
+// document holds 0/0). Markdown the reader cannot read at all is the error.
 func TestCountTasksMarkdownAgreesWithCountTasks(t *testing.T) {
 	for _, markdown := range []string{
 		"A paragraph.\n",
@@ -101,6 +104,8 @@ func TestCountTasksMarkdownAgreesWithCountTasks(t *testing.T) {
 		"```\n- [ ] not a task\n```\n\n- [x] real\n",
 		"- [x](https://example.com) link\n",
 		"---\ntitle: Spec\n---\n\n- [x] after front matter\n- [ ] two\n",
+		"---\n- [x] task one\n- [ ] task two\n",
+		"---\n- [x] task one\n\n- [ ] after a blank\n",
 		"- [ ] \n- [x] real\n",
 	} {
 		doc, err := ParseRendering(markdown)
@@ -117,5 +122,33 @@ func TestCountTasksMarkdownAgreesWithCountTasks(t *testing.T) {
 	}
 	if _, err := CountTasksMarkdown(strings.Repeat("> ", 200) + "- [x] deep\n"); err == nil {
 		t.Fatal("CountTasksMarkdown read markdown nested past the reader's bound")
+	}
+}
+
+// A document the Proof schema refuses for a block beside the list - an html block, an unknown
+// typed block - still has its task items counted, as the wide-row table is.
+func TestCountTasksMarkdownCountsPastOtherSchemaRefusals(t *testing.T) {
+	for _, test := range []struct{ name, markdown, refusal string }{
+		{"html block", "<div>\nx\n</div>\n\n- [x] one\n- [ ] two\n", "block HTML"},
+		{"unknown typed block", ":::unknown{#b1}\nBody.\n:::\n\n- [x] one\n- [ ] two\n- [ ] three\n", "unknown typed block"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := ParseRendering(test.markdown); err == nil {
+				t.Fatal("ParseRendering accepted the document; the test no longer stands for a refused one")
+			} else if !strings.Contains(err.Error(), test.refusal) {
+				t.Fatalf("ParseRendering refused for another reason: %v", err)
+			}
+			got, err := CountTasksMarkdown(test.markdown)
+			if err != nil {
+				t.Fatalf("CountTasksMarkdown: %v", err)
+			}
+			want := TaskProgress{Done: 1, Total: 2}
+			if test.name == "unknown typed block" {
+				want.Total = 3
+			}
+			if got != want {
+				t.Fatalf("CountTasksMarkdown = %+v, want %+v", got, want)
+			}
+		})
 	}
 }

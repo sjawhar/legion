@@ -136,11 +136,16 @@ back what they held open; with nothing in flight over HTTP that is about 21 s af
 
 An issue's task counts (`issues.tasks_done`, `tasks_total`, `tasks_version`, added by the
 `issue_task_progress` migration; LEGION-542) are the `- [ ]` / `- [x]` items of its primary
-document as its latest version renders (`pmdoc.CountTasks`, which skips an item emptied of its
-text, since the renderer writes one as a plain `- `), and the number of the version they were
-counted from. Every version write records them in its own transaction (`docs.RecordTaskProgress`
-from `writeVersionTx`; issue creation and an upload call `docs.RecordTaskProgressMarkdown` after
-they insert their version row, so the count names it). The row the API reads
+document's latest version, and the number of that version. A writer holding the parsed tree counts
+it (`pmdoc.CountTasks`); one holding the stored markdown counts that alone
+(`pmdoc.CountTasksMarkdown`: goldmark's tree before the Proof schema's refusals, so a spec holding a
+table row wider than its header, an html block or an unknown typed block is still counted, where
+reading it as a document reports nothing - the first production run did so for three issues).
+Both skip an item emptied of its text, since the renderer writes one as a plain `- `, and both read
+front matter as Parse does, so they agree on every document both can read. Every version write
+records the count in its own transaction (`docs.RecordTaskProgress` from `writeVersionTx`; issue
+creation and an upload call `docs.RecordTaskProgressMarkdown` after they insert their version row,
+so the count names it). The row the API reads
 (`model.IssueProgress`, on `IssueSummary` and the issue read, never on an event payload) can lag
 its document - every row the migration found, any the task a deploy replaces versions while both
 run (its code records no count), a row another writer held - so `cmd/dispatch` runs
