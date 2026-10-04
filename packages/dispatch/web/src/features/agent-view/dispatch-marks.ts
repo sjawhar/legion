@@ -1,8 +1,9 @@
 /**
- * What AgentRuntimeThread tells AgentThread about a message Dispatch stored, carried in
- * assistant-ui's untyped `metadata.custom`: `dispatch` marks the session's own reply sent through
- * Dispatch rather than streamed, and `author` names whoever other than the viewer sent the session
- * a message. The viewer's own messages carry neither.
+ * What AgentRuntimeThread tells AgentThread about a message that came through Dispatch, carried
+ * in assistant-ui's untyped `metadata.custom`: `dispatch` marks the session's own reply sent
+ * through Dispatch rather than streamed, and `author` names whoever other than the viewer sent the
+ * session a message, whether Dispatch's stored copy shows or the turn the session took from it.
+ * The viewer's own messages carry neither.
  */
 export interface DispatchMarks {
   readonly author?: string;

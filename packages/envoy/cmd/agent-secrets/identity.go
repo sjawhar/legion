@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/helper"
@@ -71,6 +72,13 @@ func helperSocket() (sock string, named bool) {
 		return sock, true
 	}
 	return helper.DefaultSocket(os.Getenv), false
+}
+
+// approveURL is AGENT_SECRETS_APPROVE_URL, Dispatch's origin, without a trailing slash: the base
+// of the pages `launcher login` and a pending exec form name for a person to decide on. Empty
+// when unset.
+func approveURL() string {
+	return strings.TrimSuffix(os.Getenv("AGENT_SECRETS_APPROVE_URL"), "/")
 }
 
 func exists(path string) bool {
@@ -139,8 +147,12 @@ func helperInstalled() bool {
 // its other backend does not do so silently. With no key dir, no socket named or present, and no
 // helper installed (a laptop), it is exit 1 and silent.
 func cmdIdentity(args []string, stdout, stderr io.Writer) int {
-	if len(args) > 0 {
-		fmt.Fprintf(stderr, "agent-secrets identity: unexpected argument %q\n", args[0])
+	flagArgs, positional := splitArgs(args, nil)
+	if err := newFlagSet("identity", stderr).Parse(flagArgs); err != nil {
+		return exitUsage(err)
+	}
+	if len(positional) > 0 {
+		fmt.Fprintf(stderr, "agent-secrets identity: unexpected argument %q\n", positional[0])
 		return exitUsageError
 	}
 	dir := keyDir()

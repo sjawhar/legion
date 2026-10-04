@@ -11,7 +11,10 @@ test("passes an unidentifiable envelope to the shared renderer instead of droppi
   const connection = await connect({ servers: broker.url })
   const delivered = Promise.withResolvers<string>()
   const forwarder = createChannelForwarder(connection, {
-    deliver: async (message) => delivered.resolve(new TextDecoder().decode(message.data)),
+    deliver: async (message) => {
+      delivered.resolve(new TextDecoder().decode(message.data))
+      return true
+    },
   })
 
   try {

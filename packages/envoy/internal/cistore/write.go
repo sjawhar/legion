@@ -235,14 +235,14 @@ func (s *Store) nextRewatch() <-chan struct{} {
 // (authorization, an expired credential, a permissions violation); the bucket is not there when
 // the handle is taken; JetStream is not enabled for the server or the account, which JetStream
 // reports as a 503 but which is configuration no retry within the budget changes, unlike the 503
-// of a server restarting; JetStream refuses the request itself (any other 4xx, an invalid key,
-// a record over the payload limit); or the handle refuses the key before sending anything
-// (bus.ErrRefused, bus.EnsureKeyValue). Anything else is transient, and what the retry actually
-// rescues is a NATS reconnect (ErrReconnectBufExceeded, a request refused while the connection
-// reconnects, and errKVRewatched, a request given up on at the rewatch that follows it), a
-// JetStream 503 while a server restarts, and no responders, which a request gets whenever no
-// server answers for the stream it names; a timeout is transient too, but it arrives only after
-// the JetStream MaxWait, past the whole budget (recordBudget).
+// of a server restarting; JetStream refuses the request itself (any other 4xx, a record over the
+// payload limit); or the handle refuses the key (bus.ErrRefused, bus.EnsureKeyValue: one whose
+// subject NATS would refuse, or one outside nats.go's key alphabet). Anything else is transient,
+// and what the retry actually rescues is a NATS reconnect (ErrReconnectBufExceeded, a request
+// refused while the connection reconnects, and errKVRewatched, a request given up on at the
+// rewatch that follows it), a JetStream 503 while a server restarts, and no responders, which a
+// request gets whenever no server answers for the stream it names; a timeout is transient too, but
+// it arrives only after the JetStream MaxWait, past the whole budget (recordBudget).
 //
 // No responders is transient because it cannot be told apart from a restart: a restarting server
 // answers it for as long as it is away, and a batch that should have been retried failed instead.
@@ -276,5 +276,5 @@ var lastingKVErrors = []error{
 	nats.ErrAuthorization, nats.ErrAuthExpired, nats.ErrPermissionViolation,
 	nats.ErrBucketNotFound,
 	nats.ErrJetStreamNotEnabled, nats.ErrJetStreamNotEnabledForAccount,
-	nats.ErrInvalidKey, nats.ErrMaxPayload, bus.ErrRefused,
+	nats.ErrMaxPayload, bus.ErrRefused,
 }

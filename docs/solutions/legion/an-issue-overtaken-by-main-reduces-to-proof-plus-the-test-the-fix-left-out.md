@@ -75,13 +75,13 @@ table records the third path explicitly: "Closing this issue on the code-level a
 without the loop and the unit test: … skipping either leaves the collision branch untested on
 main."
 
-## Record the reduction in the spec, in "New since we talked"
+## Record the reduction in the spec
 
-The spec kept the original Summary verbatim — it is the operator's record of what was reported —
-and put every consequence of the overtaking merge under **New since we talked**, one line each,
-each tagged `inferred`: the race no longer exists on `main` (with the merge SHA and time), option
-(a) is not taken and why, the one remaining gap, the reworded Acceptance 3, no planner phase, and
-the coordination instruction being moot. **Decisions needed** stayed `None`. That is the shape
+The spec kept the original report verbatim — it is the operator's record of what was reported —
+and recorded every consequence of the overtaking merge as a point the architect inferred, one line
+each, with its reasoning: the race no longer exists on `main` (with the merge SHA and time), option
+(a) is not taken and why, the one remaining gap, the reworded acceptance check, no planner phase,
+and the coordination instruction being moot. No decision was left open. That is what
 [skills/dispatch's Writing a spec](../../../skills/dispatch/SKILL.md) asks for, and it is what let
 the implementer and tester read one document and know both what the issue originally said and
 what it now owed.

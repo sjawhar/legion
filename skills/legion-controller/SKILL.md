@@ -69,9 +69,8 @@ their own machine, and you are that foreground OMP session. The command fetched 
 secret from the daemon with the operator's token, wrote it to a 0600 file under `LEGION_STATE_DIR`
 (`~/.local/state/legion/<project>-controller` by default) beside the `gh` shim and the `legion`
 launcher, and started you with `LEGION_CONTROLLER=1` and the same environment a tmux controller pane
-carries, so nothing changes in how you handle wakes. Under the TypeScript daemon the extension
-claims the role and calls `/controller/ready` exactly as under tmux; under the Go daemon
-(`LEGION_DAEMON_API=go` in your environment) it registers on `/legion/v1/claims/register` with the
+carries, so nothing changes in how you handle wakes. The extension registers on
+`/legion/v1/claims/register` with the
 secret, claims the role, then subscribes to `notifications.legion.<project>.controller`, where the
 Go daemon publishes the rows marked from the Go daemon in the wake routing table. The daemon records
 you as `controllerLocator: {runtime, external: true, sessionId, registeredAt}`, `runtime` being the
@@ -198,7 +197,7 @@ dispatch_issues({ project: "<PROJECT>", status: "todo", priority: [0], limit: 25
 
 When the first line ends `(showing 1-250 of N)`, the next page is `offset: 250`, then `500`. Read
 pages only as far as you need: stop listing once the free slots are filled. `<PROJECT>` is the
-Dispatch project key, the prefix of this deployment's issue keys (`AGENTC-12` → `AGENTC`), which is
+Dispatch project key, the prefix of this deployment's issue keys (`PROJ-12` → `PROJ`), which is
 also `daemon.project` in `legion state --json`: the project key exactly as `legion.yaml` writes it.
 A row that shows `claimed by …` and does not end its claim with `· not running` (the route, when
 the row shows one, comes after the claim) is claimed, as the table below says: skip it without
@@ -324,7 +323,7 @@ priority first, then board rank ([Keeping the slots full](#keeping-the-slots-ful
 | `slot-free on <KEY>` from the Go daemon (payload `{kind: "slot-free"}`) | the root whose slot the daemon released with no waiting root to take it | Verify a free slot in `legion state --json`, then fill it ([Keeping the slots full](#keeping-the-slots-full-go-daemon)) |
 | `todo on <KEY>` from the Go daemon (payload `{kind: "todo"}`) | an issue not handed to Legion that changed while in `todo` and a slot stood free, sent half a minute later | Verify a free slot, then walk the whole `todo` list ([Keeping the slots full](#keeping-the-slots-full-go-daemon)) |
 | `tick on <PROJECT>` from the Go daemon (payload `{kind: "tick"}`) | the project key; the daemon's periodic wake, whatever the slots | Recheck the trees waiting on a claim, then walk if a slot is free; post the day's report if this is the day's first turn |
-| Architect escalation (controller-actionable only: re-file a child as a root issue, capacity, cross-tree conflicts) | request + context | Judge and act; issue-scoped human Q&A goes through `dispatch_ask` from the owning architect, not here |
+| Architect escalation (controller-actionable only: re-file a child as a root issue, capacity, cross-tree conflicts) | request + context | Judge and act; the owning architect writes an issue-design decision as a decision block and opens `dispatch_ask` only for a human to-do |
 | Resync report | artifact-driven anomaly list (zero-owner trees, untriaged-open, launch-failed, admission-drift) | Verify against fresh state, then heal |
 | Resync report: `admission-drift` entry | issue key + whether the daemon added it to, or removed it from, its admission list (the detail says which) | No action: the daemon already repaired it in the same run. An issue that reappears in consecutive reports is a live leak — file a LEGION issue on Dispatch with both reports pasted as evidence (never a GitHub issue) |
 | `child-status` | child key + status transition | Not controller-actionable by default; if the daemon could not route it to the parent's architect role, verify the transition and forward it with `envoy_publish` |
@@ -391,8 +390,8 @@ controller decision, not a no-op.
 ## Architect escalation
 
 Only decide controller-actionable escalations: re-filing independent work, capacity, and
-cross-tree conflicts. Issue-scoped human Q&A goes through `dispatch_ask` from the owning
-architect, not the controller.
+cross-tree conflicts. The owning architect writes an issue-design decision as a decision block and
+uses `dispatch_ask` only for a human to-do, not the controller.
 
 For an independence judgment, verify the child and its parent against current daemon state
 and the Dispatch issue. If the work belongs in an independent root:

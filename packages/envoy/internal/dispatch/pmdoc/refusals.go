@@ -15,13 +15,14 @@ import (
 // refused for two reasons names the one it meets first. It refuses every block kind conversion does
 // not convert (convertedBlocks), so conversion refuses no block. Spacing is refused apart from it,
 // before it (browserListSpacing). The inline content of a paragraph, a heading or a table cell holds
-// no block, and the walk does not enter it.
-func refuseBlocks(root ast.Node, source []byte) error {
+// no block, and the walk does not enter it. firstLine is the number source's first line has in the
+// markdown the caller wrote, so a refusal naming a line names it there.
+func refuseBlocks(root ast.Node, source []byte, firstLine int) error {
 	return ast.Walk(root, func(node ast.Node, entering bool) (ast.WalkStatus, error) {
 		if !entering {
 			return ast.WalkContinue, nil
 		}
-		if err := blockRefusal(node, source); err != nil {
+		if err := blockRefusal(node, source, firstLine); err != nil {
 			return ast.WalkStop, err
 		}
 		switch node.(type) {
@@ -35,11 +36,11 @@ func refuseBlocks(root ast.Node, source []byte) error {
 // blockRefusal is why node cannot be stored: the browser editor's parser reads it differently
 // from goldmark or refuses it, or the Proof schema holds nothing like it. A typed block that passes
 // keeps its attributes' values for conversion (typedDirective.values).
-func blockRefusal(node ast.Node, source []byte) error {
+func blockRefusal(node ast.Node, source []byte, firstLine int) error {
 	refuse := func(reason string) error { return fmt.Errorf("%w: %s", ErrSchema, reason) }
 	switch current := node.(type) {
 	case *ast.Paragraph, *ast.TextBlock:
-		if reason, ok := paragraphDirectiveReason(current.Lines(), source); ok {
+		if reason, ok := paragraphDirectiveReason(current.Lines(), source, firstLine); ok {
 			return refuse(reason)
 		}
 	case *ast.Heading:
@@ -94,6 +95,12 @@ func blockRefusal(node ast.Node, source []byte) error {
 		}
 		if _, block := current.Attribute(blockRowAttr); block {
 			return refuse("a table a line opening another block would be a row of - a list item that cannot interrupt a paragraph, or indented code - which the browser editor's parser reads as that block after the table")
+		}
+		if value, wide := current.Attribute(wideRowAttr); wide {
+			row := value.(wideRow)
+			// Where the table stands is for parseTableRows, which maps only its own table's refusal.
+			row.firstBlock = current.PreviousSibling() == nil && current.Parent().Kind() == ast.KindDocument
+			return fmt.Errorf("%w: %w", ErrSchema, row)
 		}
 	default:
 		if node.Type() == ast.TypeBlock && !convertedBlocks[node.Kind()] {

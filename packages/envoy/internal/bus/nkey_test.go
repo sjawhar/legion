@@ -49,10 +49,12 @@ func publishOnce(t *testing.T, client *bus.Client, name string) {
 }
 
 // With no seed configured, a client connects to a server that asks for no credential, as every
-// client did before servers required one.
+// client did before servers required one. The shared server asks for a password, so the test
+// starts one of its own.
 func TestAClientWithNoSeedConnectsToAServerWithoutAuthorization(t *testing.T) {
 	unsetNkeyEnvironment(t)
-	client, err := bus.ConnectOwningStream([]string{testnats.URL(t)})
+	_, uri := testnats.Start(t)
+	client, err := bus.ConnectOwningStream([]string{uri})
 	if err != nil {
 		t.Fatalf("connect without a seed: %v", err)
 	}
@@ -159,7 +161,7 @@ func TestAnUnusableSeedIsAnErrorNamingItsVariable(t *testing.T) {
 			if strings.Contains(err.Error(), userSeed) || strings.Contains(err.Error(), "hunter2") {
 				t.Fatalf("error %q carries the seed", err)
 			}
-			if _, err := bus.Dial("nkey-test", []string{"nats://127.0.0.1:1"}); err == nil || !strings.Contains(err.Error(), tc.want) {
+			if _, err := bus.Dial("nkey-test", []string{"nats://127.0.0.1:1"}, os.LookupEnv); err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("Dial error = %v, want it to contain %q", err, tc.want)
 			}
 		})
@@ -168,9 +170,10 @@ func TestAnUnusableSeedIsAnErrorNamingItsVariable(t *testing.T) {
 
 // A seed against a server with no users is refused, never silently dropped: the server sends no
 // nonce, and nats.go refuses the nkey. This pins the deploy order (a process gets a seed only after
-// its server has nkey users) and catches a change that falls back to connecting without it.
+// its server has nkey users) and catches a change that falls back to connecting without it. The
+// shared server has users, so the test starts one of its own.
 func TestASeedAgainstAServerWithoutUsersIsRefused(t *testing.T) {
-	uri := testnats.URL(t)
+	_, uri := testnats.Start(t)
 	seed, _ := testnats.User(t)
 	unsetNkeyEnvironment(t)
 	t.Setenv("NATS_NKEY_SEED", seed)

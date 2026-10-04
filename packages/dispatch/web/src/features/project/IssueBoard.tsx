@@ -404,10 +404,17 @@ export function IssueBoard({
     document.activeElement?.matches(`${CARD_SELECTOR}, ${COLUMN_SELECTOR}`) === true;
   useKeymapScope("board");
   useKeymap("board", [
-    { id: "next", keys: "j", label: "Next card", run: () => rove("j") },
-    { id: "previous", keys: "k", label: "Previous card", run: () => rove("k") },
-    { id: "column", keys: "l", label: "Next column", run: () => rove("l") },
-    { id: "previous-column", keys: "h", label: "Previous column", run: () => rove("h") },
+    // Movement is what the arrow keys are for; a palette row that moves the cursor helps nobody.
+    { id: "next", keys: "j", label: "Next card", palette: false, run: () => rove("j") },
+    { id: "previous", keys: "k", label: "Previous card", palette: false, run: () => rove("k") },
+    { id: "column", keys: "l", label: "Next column", palette: false, run: () => rove("l") },
+    {
+      id: "previous-column",
+      keys: "h",
+      label: "Previous column",
+      palette: false,
+      run: () => rove("h"),
+    },
     {
       id: "arrows-vertical",
       keys: ["ArrowDown", "ArrowUp"],
@@ -458,10 +465,12 @@ export function IssueBoard({
       when: focusedCard,
     },
     {
-      // Only from the card itself: Enter on the title link is the browser's own navigation.
+      // Only from the card itself: Enter on the title link is the browser's own navigation. Out of
+      // the palette, where `open` above is already the row for the same action.
       id: "open-enter",
       keys: "Enter",
       label: "Open the focused card's issue",
+      palette: false,
       run: () => cardAround(document.activeElement)?.querySelector("a")?.click(),
       when: () => document.activeElement?.matches(CARD_SELECTOR) === true,
     },

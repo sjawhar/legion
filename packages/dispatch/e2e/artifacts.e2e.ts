@@ -3,9 +3,18 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, type Locator, type Page, test } from "@playwright/test";
 
-import { createAsk, createComment, createIssue, createIssueArtifact, createProject } from "./api";
-import { countDocumentSockets, documentEditor } from "./editor";
+import {
+  createAsk,
+  createComment,
+  createIssue,
+  createIssueArtifact,
+  createProject,
+  dashboardOrigin,
+  getArtifactText,
+} from "./api";
+import { countDocumentSockets, documentEditor, documentTransport, typeAtEnd } from "./editor";
 import { resetDatabase } from "./seed";
+import { signIn } from "./users";
 
 const fixtureDirectory = fileURLToPath(new URL("./fixtures", import.meta.url));
 const diagramPath = join(fixtureDirectory, "diagram.png");
@@ -13,16 +22,15 @@ const notesPath = join(fixtureDirectory, "notes.md");
 const tinyPng =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL0eAAAAABJRU5ErkJggg==";
 
-test.use({ extraHTTPHeaders: { "X-Dispatch-User": "alice" } });
-
 test.beforeAll(async () => {
   await mkdir(fixtureDirectory, { recursive: true });
   await access(diagramPath).catch(() => writeFile(diagramPath, Buffer.from(tinyPng, "base64")));
   await writeFile(notesPath, "# Review notes\n\nThese notes replace the initial spec.\n");
 });
 
-test.beforeEach(async () => {
+test.beforeEach(async ({ context }) => {
   await resetDatabase();
+  await signIn(context, "alice");
 });
 
 async function openArtifacts(page: Page, isPhone: boolean) {
@@ -39,6 +47,12 @@ async function openArtifacts(page: Page, isPhone: boolean) {
 // "Upload" button (or "Cancel" to discard the pick) before it actually creates the version.
 async function confirmUpload(page: Page): Promise<void> {
   await page.getByRole("button", { exact: true, name: "Upload" }).click();
+}
+
+// `page.request` sends the page's session cookie and no `Origin`, and the server refuses a
+// cookie-authenticated write whose `Origin` is not the dashboard's (enforceCookieOrigin).
+function postAsPage(page: Page, path: string, data?: object) {
+  return page.request.post(path, { data, headers: { Origin: dashboardOrigin } });
 }
 
 test("artifacts upload, version, references, and phone layout", async ({ page }, testInfo) => {
@@ -296,4 +310,171 @@ test("the Artifacts badge counts the rows the tab lists, and a row's details are
       true
     );
   }
+});
+
+// The repair replaces the unreadable document whatever the picked file is called: a second
+// document beside the broken one would leave it unreadable.
+test("an out-of-schema document names its repair and uploads replacement markdown", async ({
+  page,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Repair an unreadable document" });
+  const upload = await createIssueArtifact(issue.key, {
+    content: "before\n",
+    name: "repair.md",
+  });
+  const corrupted = await postAsPage(
+    page,
+    `/api/v1/artifacts/${upload.artifact.id}/_test/outside-schema`
+  );
+  expect(corrupted.status()).toBe(204);
+
+  await page.goto(`/issues/${issue.key}/artifacts/${upload.artifact.slug}`);
+  await expect(page.getByText("replace the document from markdown to repair it")).toBeVisible();
+  await page.getByLabel("Upload artifact").setInputFiles({
+    buffer: Buffer.from("repaired\n"),
+    mimeType: "text/markdown",
+    name: "repair (1).md",
+  });
+  await confirmUpload(page);
+  await expect(documentEditor(page)).toContainText("repaired");
+  expect((await getArtifactText(upload.artifact.id)).markdown).toBe("repaired\n");
+});
+
+test("an out-of-schema document does not reconnect from cached text", async ({ page }) => {
+  const sockets = countDocumentSockets(page);
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Do not reconnect from stale text" });
+  const upload = await createIssueArtifact(issue.key, {
+    content: "before\n",
+    name: "cached-repair.md",
+  });
+
+  await page.goto(`/issues/${issue.key}/artifacts/${upload.artifact.slug}`);
+  await expect(documentEditor(page)).toContainText("before");
+  await expect.poll(sockets).toBe(1);
+
+  await page.goto(`/issues/${issue.key}`);
+  const corrupted = await postAsPage(
+    page,
+    `/api/v1/artifacts/${upload.artifact.id}/_test/outside-schema`
+  );
+  expect(corrupted.status()).toBe(204);
+  await page.goto(`/issues/${issue.key}/artifacts/${upload.artifact.slug}`);
+
+  await expect(page.getByText("replace the document from markdown to repair it")).toBeVisible();
+  await expect.poll(sockets).toBe(1);
+});
+
+// A mounted editor's provider reconnects on its own after a dropped socket. Another client makes
+// the stored tree invalid while that socket is down; the server refuses the reconnect before any
+// sync, so the browser never holds the tree it would normalize and write back, and the page turns
+// the refusal into the repair message instead of reconnecting again.
+test("a mounted editor does not reconnect into a document made unreadable while its socket was down", async ({
+  page,
+}) => {
+  const sockets = countDocumentSockets(page);
+  const transport = await documentTransport(page);
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    title: "No reconnect into an unreadable room",
+  });
+  const upload = await createIssueArtifact(issue.key, {
+    content: "before\n",
+    name: "reconnect-repair.md",
+  });
+
+  await page.goto(`/issues/${issue.key}/artifacts/${upload.artifact.slug}`);
+  await expect(documentEditor(page)).toContainText("before");
+  await expect.poll(sockets).toBe(1);
+
+  // The reconnect the drop starts is held, so it reaches the server only after the tree is made
+  // invalid. A held socket opens no network connection, so it is counted once it is released.
+  transport.hold();
+  await transport.sever();
+  const corrupted = await postAsPage(
+    page,
+    `/api/v1/artifacts/${upload.artifact.id}/_test/outside-schema`
+  );
+  expect(corrupted.status()).toBe(204);
+  await transport.release();
+
+  await expect(page.getByText("replace the document from markdown to repair it")).toBeVisible();
+  await expect(documentEditor(page)).toBeHidden();
+  const text = await page.request.get(`/api/v1/artifacts/${upload.artifact.id}/text`);
+  expect(text.status()).toBe(409);
+  await expect(text.text()).resolves.toContain(`"code":"DOC_SCHEMA"`);
+  expect(sockets()).toBe(2);
+});
+
+// A refetch of the document's text that fails says nothing about the editor already connected:
+// an edit typed while its socket was down lives only in the editor, so an outage that answers the
+// refetch 503 leaves the editor, and the edit reaches the server once the socket is back.
+test("an edit typed while the socket was down survives a text refetch the server answers 503", async ({
+  page,
+}) => {
+  const transport = await documentTransport(page);
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Keep an offline edit" });
+  const upload = await createIssueArtifact(issue.key, {
+    content: "before\n",
+    name: "offline-edit.md",
+  });
+
+  await page.goto(`/issues/${issue.key}/artifacts/${upload.artifact.slug}`);
+  await expect(documentEditor(page)).toContainText("before");
+
+  transport.hold();
+  await transport.sever();
+  await typeAtEnd(page, "offline edit");
+  let refused = 0;
+  const textRoute = `**/api/v1/artifacts/${upload.artifact.id}/text`;
+  await page.route(textRoute, async (route) => {
+    refused += 1;
+    await route.fulfill({
+      body: JSON.stringify({
+        code: "DOC_SERVICE_UNAVAILABLE",
+        error: "document service is unavailable",
+      }),
+      contentType: "application/json",
+      status: 503,
+    });
+  });
+  // A tab that becomes visible reopens the event stream, which refreshes every query the page
+  // holds, the document's text among them; the app retries a 5xx twice before it fails the read.
+  await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+  await expect.poll(() => refused).toBeGreaterThanOrEqual(3);
+  // The third answer fails the read; nothing on a page that keeps its editor marks that moment, so
+  // the page is given a moment to render the failure before what it shows is read.
+  await page.waitForTimeout(500);
+  await expect(documentEditor(page)).toBeVisible();
+  await expect(documentEditor(page)).toContainText("offline edit");
+  await expect(page.getByRole("button", { name: "Rebuild from the latest version" })).toHaveCount(
+    0
+  );
+  await expect(page.getByText("This document could not load")).toHaveCount(0);
+
+  await page.unroute(textRoute);
+  await transport.release();
+  await expect
+    .poll(async () => (await getArtifactText(upload.artifact.id)).markdown)
+    .toBe("before\n\noffline edit\n");
+  await expect(documentEditor(page)).toContainText("offline edit");
+});
+
+test("a live document refuses a rebuild", async ({ page }) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Refuse live rebuild" });
+  const upload = await createIssueArtifact(issue.key, {
+    content: "before\n",
+    name: "live-rebuild.md",
+  });
+
+  await page.goto(`/issues/${issue.key}/artifacts/${upload.artifact.slug}`);
+  await expect(documentEditor(page)).toContainText("before");
+  const rebuilt = await postAsPage(page, `/api/v1/artifacts/${upload.artifact.id}/rebuild`, {});
+  expect(rebuilt.status()).toBe(409);
+  await expect(rebuilt.text()).resolves.toContain(`"code":"DOCUMENT_LIVE"`);
+  await expect(documentEditor(page)).toContainText("before");
 });

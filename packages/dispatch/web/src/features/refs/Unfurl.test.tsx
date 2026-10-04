@@ -304,7 +304,72 @@ test("isBareReferenceBody accepts only whitespace-joined bare references", () =>
   expect(isBareReferenceBody("dispatch://CORE-1")).toBe(true);
   expect(isBareReferenceBody("  dispatch://CORE-1  ")).toBe(true);
   expect(isBareReferenceBody("dispatch://CORE-1 dispatch://CORE-2")).toBe(true);
+  expect(isBareReferenceBody("dispatch://CORE-1\nhttps://dispatch.test/issues/CORE-2")).toBe(true);
+  expect(isBareReferenceBody("dispatch://CORE-1https://dispatch.test/issues/CORE-2")).toBe(true);
   expect(isBareReferenceBody("See dispatch://CORE-1")).toBe(false);
   expect(isBareReferenceBody("dispatch://CORE-1 for details")).toBe(false);
+  expect(isBareReferenceBody("dispatch://")).toBe(false);
   expect(isBareReferenceBody("")).toBe(false);
+});
+
+// Every comment body and ask question passes this check as it renders, and a comment holds up to
+// 2,000 UTF-16 units. A body of repeated schemes splits into references in exponentially many
+// ways, and a pattern that tried them ran for minutes in V8 on one of these bodies, hanging every
+// reader's tab; JavaScriptCore, which runs these tests, gives up after a second or so per body.
+test("isBareReferenceBody reads 2,000-character bodies of repeated schemes in one pass", () => {
+  const start = performance.now();
+  for (const scheme of ["http://", "https://", "dispatch://"]) {
+    const references = scheme.repeat(Math.floor(1998 / scheme.length));
+    expect(isBareReferenceBody(`${references} x`)).toBe(false);
+    expect(isBareReferenceBody(`${references}\nx`)).toBe(false);
+    expect(isBareReferenceBody(references)).toBe(true);
+  }
+  expect(performance.now() - start).toBeLessThan(2000);
+});
+
+test("Unfurl resolves a bold GitHub link without its emphasis", async () => {
+  const githubRest = spyOn(api, "githubRest").mockResolvedValue(
+    new Response(JSON.stringify({ title: "Pull title" }), {
+      headers: { "Content-Type": "application/json" },
+    })
+  );
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const view = render(
+    <QueryClientProvider client={queryClient}>
+      <Unfurl body={"See **https://github.com/owner/repository/pull/2**."} />
+    </QueryClientProvider>
+  );
+
+  try {
+    await waitFor(() => {
+      expect(githubRest).toHaveBeenCalledWith("/repos/owner/repository/issues/2");
+    });
+    expect(within(view.container).getByRole("link").getAttribute("href")).toBe(
+      "https://github.com/owner/repository/pull/2"
+    );
+  } finally {
+    githubRest.mockRestore();
+    view.unmount();
+  }
+});
+
+// The trim once rescanned the closing run from every position in it, taking seconds on 64 KiB.
+test("Unfurl reads a GitHub link trailed by a long closing run in one pass", () => {
+  const githubRest = spyOn(api, "githubRest");
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const start = performance.now();
+  const view = render(
+    <QueryClientProvider client={queryClient}>
+      <Unfurl body={`https://github.com/owner/repository/pull/3${")".repeat(1 << 16)}x`} />
+    </QueryClientProvider>
+  );
+
+  try {
+    expect(performance.now() - start).toBeLessThan(2000);
+    expect(view.container.querySelector("section")).toBeNull();
+    expect(githubRest).not.toHaveBeenCalled();
+  } finally {
+    githubRest.mockRestore();
+    view.unmount();
+  }
 });

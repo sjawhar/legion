@@ -11,13 +11,13 @@ const duplicateHeadlineOptions = "StartSel=" + markStart + ", StopSel=" + markEn
 const duplicateQuery = `
 with parent as (select coalesce((select title from issues where key = $3), '') as title),
 new_title as (
-  select array(select unnest(tsvector_to_array(to_tsvector('english', $2)))
-               except select unnest(tsvector_to_array(to_tsvector('english', p.title)))) as lex
+  select array(select unnest(tsvector_to_array(to_tsvector('english', search_text($2))))
+               except select unnest(tsvector_to_array(to_tsvector('english', search_text(p.title))))) as lex
     from parent p),
 cand as (
   select i.key, i.title, i.status, i.updated_at,
-         array(select unnest(tsvector_to_array(to_tsvector('english', i.title)))
-               except select unnest(tsvector_to_array(to_tsvector('english', p.title)))) as lex
+         array(select unnest(tsvector_to_array(to_tsvector('english', search_text(i.title))))
+               except select unnest(tsvector_to_array(to_tsvector('english', search_text(p.title))))) as lex
     from issues i, parent p
    where i.project_key = $1 and i.key <> $3),
 scored as (
@@ -27,7 +27,7 @@ scored as (
     from cand c, new_title n
    where c.lex && n.lex)
 select key, title, status, shared,
-       ts_headline('english', title,
+       ts_headline('english', search_text(title),
          to_tsquery('simple', (select string_agg(quote_literal(x), ' | ') from unnest(new_lex) x)), $4) as headline
   from scored
  where (shared >= 3 and 2 * shared >= shorter) or (shared >= 1 and shared = shorter)

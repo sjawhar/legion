@@ -85,9 +85,9 @@ const Reasoning: ReasoningMessagePartComponent = ({ text }) => (
 );
 
 function UserMessage(): ReactNode {
-  // A stored message someone other than the viewer sent the session (AgentRuntimeThread names
-  // them): it sits on the session's side of the thread with its author, never styled as the
-  // viewer's own.
+  // A message someone other than the viewer sent the session, stored or taken as its own turn
+  // (AgentRuntimeThread names them): it sits on the session's side of the thread with its author,
+  // never styled as the viewer's own.
   const author = useAuiState((state) => readDispatchMarks(state.message.metadata.custom).author);
   if (author !== undefined) {
     return (

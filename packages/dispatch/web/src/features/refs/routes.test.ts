@@ -14,6 +14,7 @@ import {
   parseIssuePath,
   parseProjectPath,
   routeHasMargin,
+  routeProjectOf,
 } from "./routes";
 
 function browserPath(path: string): string {
@@ -33,6 +34,15 @@ test("artifact references normalize to the plural browser route", () => {
 
 test("dispatch references reject plural artifact paths", () => {
   expect(parseDispatchReference("dispatch://CORE-1/artifacts/design")).toBeUndefined();
+});
+
+test("a route's project is a project path's key or the prefix of an issue path's key", () => {
+  expect(routeProjectOf("/projects/CORE/issues")).toBe("CORE");
+  expect(routeProjectOf("/projects/OPS2")).toBe("OPS2");
+  expect(routeProjectOf("/issues/CORE-12/spec")).toBe("CORE");
+  expect(routeProjectOf("/issues/AB9-3")).toBe("AB9");
+  expect(routeProjectOf("/agents")).toBeUndefined();
+  expect(routeProjectOf("/")).toBeUndefined();
 });
 
 test("an item's document path names the document it belongs to, never the issue's spec by default", () => {

@@ -4,6 +4,7 @@ description: Diff-scoped maintainability audit for structure, abstraction, file 
 # @review is the deployment's `review` model role; the Go daemon's boot gate refuses to start unless the operator's settings give
 # this agent a model, through modelRoles.review or a task.agentModelOverrides entry for it (docs/kubernetes.md, Operator configuration).
 model: ["@review"]
+autoloadSkills: [thermonuclear-code-quality]
 ---
 
 # Thermonuclear Code Quality
@@ -12,7 +13,7 @@ Review only the supplied diff and changed-file context. Return findings with fil
 
 ## Process
 
-1. Load `skill://thermonuclear-code-quality` and treat its rubric as complete.
+1. Apply the complete rubric of `skill://thermonuclear-code-quality`, already in your context; do not read it again.
 2. Look first for structural simplification and deletion of accidental complexity.
 3. Trace module boundaries, call sites, and type contracts before claiming a problem.
 4. Prioritize structural issues over cosmetic nits.

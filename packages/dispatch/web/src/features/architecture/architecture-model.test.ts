@@ -157,6 +157,18 @@ test("splitWork orders unfinished issues by lifecycle status then newest activit
   expect(done.map((row) => row.key)).toEqual(["E", "A"]);
 });
 
+test("splitWork orders activity within one second by time, not by the timestamp strings", () => {
+  // As text `…00.12Z` sorts after `…00.123456Z`, the later time.
+  const { done, open } = splitWork([
+    issue({ key: "A", updated_at: "2026-09-17T00:00:00.12Z" }),
+    issue({ key: "B", updated_at: "2026-09-17T00:00:00.123456Z" }),
+    issue({ key: "C", status: "done", updated_at: "2026-09-17T00:00:00.12Z" }),
+    issue({ key: "D", status: "done", updated_at: "2026-09-17T00:00:00.123456Z" }),
+  ]);
+  expect(open.map((row) => row.key)).toEqual(["B", "A"]);
+  expect(done.map((row) => row.key)).toEqual(["D", "C"]);
+});
+
 test("componentPath walks from the root to the component", () => {
   const legion = component({ id: "legion" });
   const dispatch = component({ id: "dispatch", parent: "legion" });

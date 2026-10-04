@@ -19,9 +19,8 @@ import (
 // holding the claim while coordinators gate its pull requests, and those gates must neither
 // claim it nor collide with it.
 //
-// The claim and the issue's status are separate, on Sami's decision (2026-09-24, verbatim:
-// "Keep them separate — Separate because humans might be using them to keep track of work").
-// So claiming an issue never moves its status, and the only thing that creates a claim is
+// The claim and the issue's status are separate, because humans may use the status to keep track
+// of work. So claiming an issue never moves its status, and the only thing that creates a claim is
 // POST /api/v1/issues/{key}/claim (the `dispatch_claim` tool). Messages, comments, asks,
 // labels, links, priority, route and component writes, and every read, leave the claim alone;
 // closing an issue is the one status move that touches it, clearing it because the work is
@@ -38,9 +37,8 @@ import (
 //
 // The taking rule lives in claimBlockedBy alone: a claim whose session the Envoy listener
 // still lists as live belongs to that session until it releases it or a human forces it; a
-// claim whose session is gone may be taken by any agent (Sami, 2026-09-24, on whether that
-// needs asking: "Yes, automatically"), and the takeover is recorded on the issue and
-// delivered to the session that lost it.
+// claim whose session is gone may be taken by any agent without asking, and the takeover is
+// recorded on the issue and delivered to the session that lost it.
 //
 // Every claim write is the resolve-then-lock pair envoy_resolve.go owns, because the listener
 // lookup never runs inside a transaction (fetchLiveSessions carries the reason): judgeHolder

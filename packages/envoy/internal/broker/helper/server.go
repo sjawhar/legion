@@ -150,7 +150,7 @@ func (s *Server) register(ctx context.Context, peer *Peer, pid int, wait time.Du
 	sess, err := newSession(pid, ticks, fmt.Sprintf("%s:%d:%d", s.Hostname, pid, ticks), peer)
 	if err != nil {
 		peer.Close()
-		return Response{Code: "KEYGEN", Error: err.Error()}
+		return Response{Code: CodeKeygen, Error: err.Error()}
 	}
 	existing, won := s.Registry.addRootIfAbsent(pid, sess)
 	if peer.PID() != pid {
@@ -173,14 +173,16 @@ func (s *Server) register(ctx context.Context, peer *Peer, pid int, wait time.Du
 // registerReply answers a register, first waiting up to wait for the session to enroll. Without a
 // launcher credential the enroll loop cannot succeed until a human logs the helper in, so it does
 // not wait at all: a launcher's `register --wait N` then costs nothing on a helper that was never
-// logged in, or whose credential the broker has refused once. An expired credential stays held
-// until a call is refused, so the first register after it expires still waits the full N. A
+// logged in, or whose credential the broker has refused or that reached its expiry. A credential
+// the broker revoked early, or one an older broker named no expiry for, stays held until a call is
+// refused, so the first register after that still waits the full N. A
 // session the helper cannot enroll for want of a credential gets Code NO_CREDENTIAL and that reason
 // in Error, so a launcher can say what the session will do. The credential is read once, before
 // the wait, and that one reading decides both: an unenrolled session's reply says NO_CREDENTIAL
 // exactly when the wait was skipped for want of a credential, whatever a login or a refusal
 // changed meanwhile. A session whose enrollment lapsed waits for its re-enrollment, since a lapse
-// reopens its ready channel (markLapsed).
+// reopens its ready channel (markLapsed). The reply's id, state and error come from one snapshot,
+// so a lapse landing after the wait cannot give it an id from before and a state from after.
 func (s *Server) registerReply(sess *Session, wait time.Duration) Response {
 	credential := s.Broker.HasCredential()
 	if wait > 0 && credential {
@@ -190,7 +192,8 @@ func (s *Server) registerReply(sess *Session, wait time.Duration) Response {
 		case <-sess.stop:
 		}
 	}
-	resp := Response{OK: true, EnrollmentID: sess.EnrollmentID(), RuntimeID: sess.RuntimeID, Operator: s.Broker.Operator(), State: sess.State(), Error: sess.LastError()}
+	st := sess.snapshot()
+	resp := Response{OK: true, EnrollmentID: st.EnrollmentID, RuntimeID: sess.RuntimeID, Operator: s.Broker.Operator(), State: st.State, Error: st.LastError}
 	if resp.EnrollmentID == "" && !credential {
 		resp.Code, resp.Error = CodeNoCredential, noCredentialMsg
 	}
@@ -201,14 +204,15 @@ func (s *Server) registerReply(sess *Session, wait time.Duration) Response {
 // enrolling (NOT_ENROLLED) while the helper holds a launcher credential, and without one the
 // helper enrolls no one until a human logs it in, so the session has no broker identity
 // (NO_CREDENTIAL). NOT_ENROLLED names the last attempt's failure when there is one: an enroll
-// error, or a lapse's refused renew (markLapsed).
-func (s *Server) notEnrolled(sess *Session) Response {
+// error, or a lapse's refused renew (markLapsed). st is the snapshot the caller found unenrolled,
+// so the failure named is the one that goes with that answer.
+func (s *Server) notEnrolled(st enrollmentState) Response {
 	if !s.Broker.HasCredential() {
 		return Response{Code: CodeNoCredential, Error: noCredentialMsg}
 	}
 	msg := "this session is not enrolled with the broker yet"
-	if last := sess.LastError(); last != "" {
-		msg += "; last attempt: " + last
+	if st.LastError != "" {
+		msg += "; last attempt: " + st.LastError
 	}
 	return Response{Code: CodeNotEnrolled, Error: msg}
 }
@@ -241,24 +245,25 @@ func (s *Server) sign(peer *Peer, pid int, method, url string) Response {
 		peer.Close()
 		return Response{Code: CodeBadRequest, Error: "sign needs method and url"}
 	}
-	sess, resp, ok := s.resolveDescendant(peer, pid, fmt.Sprintf("pid %d is not inside a registered host session; a session root is started with `agent-secrets register --exec -- <agent argv>` (shims/omp does this)", pid))
+	sess, resp, ok := s.resolveDescendant(peer, pid, fmt.Sprintf("pid %d is not inside a registered host session; a session root is started with `agent-secrets register --exec -- <agent argv>`", pid))
 	if !ok {
 		return resp
 	}
-	id := sess.EnrollmentID()
+	st := sess.snapshot()
+	id := st.EnrollmentID
 	if id == "" {
-		return s.notEnrolled(sess)
+		return s.notEnrolled(st)
 	}
 	compact, err := proof.Sign(sess.Key, id, method, url, time.Now())
 	if err != nil {
-		return Response{Code: "SIGN", Error: err.Error()}
+		return Response{Code: CodeSign, Error: err.Error()}
 	}
 	return Response{OK: true, Proof: compact, EnrollmentID: id, RuntimeID: sess.RuntimeID}
 }
 
 // signRequest builds and signs a credential-request object naming one agent_secret
-// authorization_detail per requested name (contract v9: POST /v1/requests embeds this signed
-// object rather than carrying "secrets"/"reason" as plain fields), for a pid resolveDescendant
+// authorization_detail per requested name (POST /v1/requests embeds this signed object
+// rather than carrying "secrets"/"reason" as plain fields), for a pid resolveDescendant
 // ties to a registered session. The audience is always s.Broker.URL, never a value the peer
 // supplies: a request object's aud claim must be the broker's own public URL for the broker to
 // accept it, and there is no reason to trust an untrusted local peer's opinion of that value
@@ -268,20 +273,20 @@ func (s *Server) signRequest(peer *Peer, pid int, names []string, reason string)
 		peer.Close()
 		return Response{Code: CodeBadRequest, Error: "sign-request needs at least one secret name"}
 	}
-	sess, resp, ok := s.resolveDescendant(peer, pid, fmt.Sprintf("pid %d is not inside a registered host session; a session root is started with `agent-secrets register --exec -- <agent argv>` (shims/omp does this)", pid))
+	sess, resp, ok := s.resolveDescendant(peer, pid, fmt.Sprintf("pid %d is not inside a registered host session; a session root is started with `agent-secrets register --exec -- <agent argv>`", pid))
 	if !ok {
 		return resp
 	}
-	if sess.EnrollmentID() == "" {
-		return s.notEnrolled(sess)
+	if st := sess.snapshot(); st.EnrollmentID == "" {
+		return s.notEnrolled(st)
 	}
 	details := make([]record.AuthorizationDetail, len(names))
 	for i, name := range names {
-		details[i] = record.AuthorizationDetail{Type: "agent_secret", Identifier: name, Actions: []string{"inject"}}
+		details[i] = record.AuthorizationDetail{Type: record.KindAgentSecret, Identifier: name, Actions: []string{"inject"}}
 	}
 	compact, err := record.Sign(sess.Key, s.Broker.URL, details, reason, "", time.Now())
 	if err != nil {
-		return Response{Code: "SIGN", Error: err.Error()}
+		return Response{Code: CodeSign, Error: err.Error()}
 	}
 	return Response{OK: true, RequestObject: compact}
 }
@@ -316,23 +321,46 @@ func (s *Server) login(ctx context.Context) Response {
 	return Response{OK: true, Code: code, LoginState: s.Broker.LoginStatus().State}
 }
 
-// loginStatus reports the current (or most recently settled) machine login; an empty
-// LoginState means none has ever run, and LoginRefused marks an "expired" that is a credential
-// the broker refused rather than a login nobody approved.
+// loginStatus reports the most recent machine login, current or settled, whether the helper holds
+// a launcher credential and when it expires; an empty LoginState means none has ever run.
+// CredentialHeld stays true through a re-login that is denied, expires or is pending while an
+// earlier login's credential is held, and LoginRefused marks a credential the helper dropped
+// rather than a login nobody approved, with CredentialDropped saying why (the broker refused it,
+// or it reached its expiry).
 func (s *Server) loginStatus() Response {
 	ls := s.Broker.LoginStatus()
-	return Response{OK: true, Code: ls.Code, LoginState: ls.State, LoginRefused: ls.Refused}
+	resp := Response{OK: true, Code: ls.Code, LoginState: ls.State, CredentialHeld: ls.CredentialHeld, LoginRefused: ls.Refused, CredentialDropped: ls.Dropped}
+	if !ls.CredentialExpiresAt.IsZero() {
+		resp.CredentialExpiresAt = ls.CredentialExpiresAt.UTC().Format(time.RFC3339)
+	}
+	return resp
+}
+
+// cannotEnrollMsg is the ERROR an enrollment (a host session's or a box's) logs while the helper
+// holds no launcher credential to attempt it with, beside why (noCredentialReason).
+const cannotEnrollMsg = "session cannot enroll: the helper holds no launcher credential; run: agent-secrets launcher login, and have a human approve it"
+
+// lacksCredential reports whether err failed for want of a launcher credential the helper still
+// lacks: errNoCredential, unless a login has installed one since the attempt failed. That login
+// woke the retry, which uses the new credential at once, so the failure is an ordinary retry
+// rather than a session that cannot enroll.
+func (s *Server) lacksCredential(err error) bool {
+	return errors.Is(err, errNoCredential) && !s.Broker.HasCredential()
 }
 
 // enrollBox registers a box's key as kind box — a pass-through broker call requiring no
 // registered session (a box enrollment is not a registry session; see Broker.EnrollBox's doc
-// comment), so unlike sign it does not check descendancy at all.
+// comment), so unlike sign it does not check descendancy at all. An enrollment the helper cannot
+// attempt for want of a launcher credential logs cannotEnrollMsg, as a host session's does.
 func (s *Server) enrollBox(ctx context.Context, runtimeID, thumbprint string, sessionID *string) Response {
 	if runtimeID == "" || thumbprint == "" {
 		return Response{Code: CodeBadRequest, Error: "enroll-box needs runtime_id and thumbprint"}
 	}
 	id, lease, err := s.Broker.EnrollBox(ctx, runtimeID, thumbprint, sessionID)
 	if err != nil {
+		if s.lacksCredential(err) {
+			s.Log.Error(cannotEnrollMsg, "runtime_id", runtimeID, "why", s.Broker.noCredentialReason())
+		}
 		return Response{Code: CodeEnrollFailed, Error: err.Error()}
 	}
 	return Response{OK: true, EnrollmentID: id, LeaseExpires: lease.UTC().Format(time.RFC3339Nano)}
@@ -428,6 +456,10 @@ func (s *Server) enrollLoop(ctx context.Context, sess *Session) {
 		// rather than when a backoff of up to a minute comes round.
 		enrolled := retryUntilStop(ctx, sess.stop, s.Broker.CredentialInstalled, 0, time.Second, time.Minute, func(attempt int, err error, delay time.Duration, retrying bool) {
 			sess.setError(err.Error())
+			if s.lacksCredential(err) {
+				s.Log.Error(cannotEnrollMsg, "runtime_id", sess.RuntimeID, "why", s.Broker.noCredentialReason(), "in", delay)
+				return
+			}
 			s.Log.Warn("enroll failed; retrying", "runtime_id", sess.RuntimeID, "error", err, "in", delay)
 		}, func() error {
 			var err error
@@ -491,6 +523,11 @@ func (s *Server) renewLoop(ctx context.Context, sess *Session, lease time.Time) 
 // nothing further is attempted.
 func (s *Server) revokeLapsed(ctx context.Context, sess *Session, id string) bool {
 	revoked := retryUntilStop(ctx, sess.stop, s.Broker.CredentialInstalled, 0, time.Second, time.Minute, func(attempt int, err error, delay time.Duration, retrying bool) {
+		if s.lacksCredential(err) {
+			s.Log.Error("session cannot enroll: revoking its lapsed enrollment first needs a launcher credential, and the helper holds none; run: agent-secrets launcher login, and have a human approve it",
+				"runtime_id", sess.RuntimeID, "enrollment_id", id, "why", s.Broker.noCredentialReason(), "in", delay)
+			return
+		}
 		s.Log.Warn("revoking the lapsed enrollment failed; retrying", "runtime_id", sess.RuntimeID, "enrollment_id", id, "error", err, "in", delay)
 	}, func() error { return s.revokeOnce(ctx, id) })
 	if !revoked && ctx.Err() == nil {

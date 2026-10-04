@@ -124,17 +124,16 @@ func TestAskSnoozeSurfacesOnTheSnoozersInboxOnly(t *testing.T) {
 	}
 }
 
-// A human's actor id is the login as their identity source spells it - GitHub's display
-// casing through a cookie, the header verbatim otherwise - so the snooze is keyed on the
-// canonical login. One person reaching the API under either spelling holds one snooze, not
-// two, and un-snoozes under either.
-func TestAskSnoozeIsKeyedOnTheCanonicalLogin(t *testing.T) {
+// Every identity names a person by lowercase email, whatever casing the identity header carried,
+// so one person reaching the API under two spellings holds one snooze, not two, and un-snoozes
+// under either.
+func TestAskSnoozeHoldsOnePersonUnderAnyCasing(t *testing.T) {
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Casing", "spec")
 	askID := createSnoozeAsk(t, handler, "/api/v1/issues/"+issue.Key+"/asks", "Which approach?")
 	until := time.Now().UTC().Add(4 * time.Hour).Truncate(time.Millisecond)
 
-	// Written under the display casing GitHub hands back.
+	// Written under a mixed-case header.
 	if saved := dispatchRequest(t, handler, http.MethodPut, "/api/v1/me/asks/"+askID+"/snooze", map[string]any{
 		"snoozed_until": until.Format(time.RFC3339Nano),
 	}, "Alice"); saved.Code != http.StatusOK {
@@ -150,14 +149,12 @@ func TestAskSnoozeIsKeyedOnTheCanonicalLogin(t *testing.T) {
 		}
 	}
 
-	// The un-snooze is issued under the display casing too. Under `alice` it would delete the
-	// canonical row whether or not the delete canonicalises - raw and canonical are the same
-	// string there - so that spelling pins nothing; `Alice` is what makes a raw delete miss.
+	// The un-snooze is issued under the mixed-case header too, and clears the one snooze.
 	if cleared := dispatchRequest(t, handler, http.MethodDelete, "/api/v1/me/asks/"+askID+"/snooze", nil, "Alice"); cleared.Code != http.StatusNoContent {
 		t.Fatalf("un-snooze as Alice: status=%d body=%s", cleared.Code, cleared.Body.String())
 	}
 	if got := inboxSnoozes(t, handler, "alice")[askID]; got != nil {
-		t.Fatalf("snoozed_until after an un-snooze under the display casing = %q, want null", *got)
+		t.Fatalf("snoozed_until after an un-snooze under the mixed-case header = %q, want null", *got)
 	}
 }
 

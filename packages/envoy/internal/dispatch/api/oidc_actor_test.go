@@ -234,7 +234,7 @@ func TestRejectionLogOmitsTheTokensUnverifiedClaims(t *testing.T) {
 }
 
 // With no issuer configured the JWT branch does not exist: a JWT-shaped bearer is
-// an unknown personal token, exactly as before this change.
+// an unknown personal token.
 func TestJWTBearerWithoutConfiguredIssuerTakesThePersonalTokenPath(t *testing.T) {
 	issuer := newServiceTokenIssuer(t)
 	handler, _, _ := newTestServer(t, testServerOptions{})

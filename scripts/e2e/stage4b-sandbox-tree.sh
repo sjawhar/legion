@@ -9,7 +9,8 @@
 # Requirement 12 asks for.
 #
 # Three roots are set todo under admission_cap 2. Tree 1 runs the whole workflow with real agents to
-# `done`, lingers, and closes. Tree 2 runs through its planner beside tree 1's implementer, on its own
+# `done`, through one changes-requested review round whose thread the reviewer opens, lingers, and
+# closes. Tree 2 runs through its planner beside tree 1's implementer, on its own
 # node, carrying the repository-configuration fixture, and is then moved to backlog. Tree 3 is
 # admitted when tree 2 leaves the line, supplies the held phase the controller checkpoint needs, and
 # is taken out from an operator shell. Tree 4 is admitted once tree 3 has left, supplies a planner
@@ -46,13 +47,17 @@
 #   never the proof, and never prints PASS.
 # - STAGE4B_SKIP_CONTROLLER=1, in a development run only, runs none of `controller`'s checks and only
 #   takes tree 3 out, so a checkpoint after it runs while the controller's own defect is unfixed.
+# - STAGE4B_DESIGN_GATE=root-issues, in a development run that stops at spec-posted or before it,
+#   arms the design gate (`gates.design: root-issues`) and runs tree 1 alone: its root architect
+#   settles its spec's decision blocks with a human, requests approval with a summary and registers
+#   the gate, and spec-posted waits up to 12 hours for a human to approve the spec in Dispatch.
 # - STAGE4B_EVIDENCE_DIR (default a fresh /tmp directory, kept and printed) holds the transcript, the
 #   daemon log, the pod watch, every agent transcript, and the negative controls.
 #
 # The production bearers (the two Secrets Manager ids above) are read with the devbox admin role
 # into 0600 files under the run's scratch directory. They are never printed, never in an argv (curl
 # reads them from header files), and never in the evidence. One run at a time: the project, the NATS
-# durable consumer names, ports 13370/13371 and the namespace label are shared, so the run takes a
+# durable consumer names, ports 13372/13373 and the namespace label are shared, so the run takes a
 # lock and refuses to start while another holds it, or while LEGSMOKE has pods, Sandboxes or claims
 # it did not create.
 set -Eeuo pipefail
@@ -60,11 +65,18 @@ set -Eeuo pipefail
 root=$(cd "$(dirname "$0")/../.." && pwd)
 work=$(mktemp -d "/tmp/legion-e2e4b.$$.XXXXXXXX")
 evidence=${STAGE4B_EVIDENCE_DIR:-$(mktemp -d /tmp/legion-e2e4b-evidence.XXXXXXXX)}
+# Refused before anything is written into the evidence directory, the transcript's tee started or
+# any trap set, so it prints the run's verdict line itself (lib/model-gateway-unserved.sh --fresh).
+if ! reason=$(bash "$root/scripts/e2e/lib/model-gateway-unserved.sh" --fresh "$evidence"); then
+  echo "CHECK setup: FAIL: $reason"
+  echo "stage 4b e2e: FAIL (check setup)"
+  rmdir "$work"
+  exit 1
+fi
 mkdir -p "$evidence/logs" "$evidence/transcripts" "$evidence/pods" "$evidence/controls"
-# tee shares the driver's process group, so a signal to the group (Ctrl-C, a closed pane, timeout's
-# TERM) would end it before cleanup writes, and cleanup's first write would die of SIGPIPE: tee
-# ignores the signals the driver traps, and outlives the driver's last line.
-exec > >(trap '' HUP INT TERM && exec tee -a "$evidence/transcript.log") 2>&1
+# shellcheck source-path=SCRIPTDIR source=lib/transcript.sh
+. "$root/scripts/e2e/lib/transcript.sh"
+transcript_to "$evidence/transcript.log"
 # fd 7 keeps the transcript for cleanup: a signal runs the EXIT trap under the redirections of the
 # command it interrupted, whose output may be /dev/null or an evidence file.
 exec 7>&1
@@ -78,6 +90,7 @@ dispatch_token_secret_id=${LEGION_E2E_DISPATCH_TOKEN_SECRET_ID:-}
 envoy_token_secret_id=${LEGION_E2E_ENVOY_TOKEN_SECRET_ID:-}
 until=${STAGE4B_UNTIL:-}
 skip_controller=${STAGE4B_SKIP_CONTROLLER:-}
+design_gate=${STAGE4B_DESIGN_GATE:-}
 # The Dispatch project key (the workflow's) and its token (the pods' label, the claims' prefix).
 project=LEGSMOKE
 run_label=legsmoke
@@ -85,7 +98,8 @@ label_exact=legsmoke
 repo=sjawhar/legion-smoke
 dispatch_base=${LEGION_E2E_DISPATCH_URL:-}
 # The proof human writes with the agents' bearer, so it names a session of its own: one that holds
-# no claim, whose status writes the workflow therefore reads as a human's.
+# no claim, whose status write on a live root the daemon therefore sets back, as it does any outside
+# session's. The run takes a tree out with `legion status` (take_out), the daemon's own write.
 dispatch_actor=legion-e2e4b-proof-human-$$
 envoy_url=${LEGION_E2E_ENVOY_URL:-}
 nats_url=${LEGION_E2E_NATS_URL:-}
@@ -103,8 +117,10 @@ providers_secret=legion-$run_label-providers
 # daemon's spawn requires; the trailing digit keeps the child apart from the root.
 optree="S4BOP-$$"
 opchild="S4BOP-${$}1"
-port_daemon=13370
-port_worker_stream=13371
+# The rigs' own pair, beside the production daemon's 13370/13371: the devbox admits both pairs from
+# the Legion nodes, so a run never waits for the production daemon to stop.
+port_daemon=13372
+port_worker_stream=13373
 stream=ENVOY_NOTIFICATIONS
 # One path for every run on the devbox, whatever its environment names as its state directory.
 lock=$HOME/.local/state/legion/e2e/stage4b.lock
@@ -118,7 +134,9 @@ omp_home=$work/omp-home
 profile_agent=$omp_home/.omp/profiles/$profile/agent
 daemon_log=$evidence/logs/daemon.log
 check=setup
+TZ=UTC printf -v check_started '%(%FT%TZ)T' -1 # when the current check began (lib/model-gateway-unserved.sh)
 ok=
+was_blocked= # set by blocked: the run stopped on a prerequisite, so it did not run, and did not fail
 torn_down=
 snapshotted=
 compared=
@@ -150,6 +168,7 @@ pair_session=
 
 begin() {
   check=$1
+  TZ=UTC printf -v check_started '%(%FT%TZ)T' -1
   echo "== $check"
 }
 note() { echo "   $*"; }
@@ -177,6 +196,7 @@ fail() {
 }
 blocked() {
   echo "CHECK $check: BLOCKED: $*"
+  was_blocked=1
   exit 1
 }
 # shellcheck source-path=SCRIPTDIR source=lib/rig.sh
@@ -189,8 +209,6 @@ blocked() {
 . "$root/scripts/e2e/lib/namespace-rig.sh"
 # shellcheck source-path=SCRIPTDIR source=lib/leftovers.sh
 . "$root/scripts/e2e/lib/leftovers.sh"
-# shellcheck source-path=SCRIPTDIR source=lib/stage-role-prompts.sh
-. "$root/scripts/e2e/lib/stage-role-prompts.sh"
 
 
 rk() { timeout --foreground 300 kubectl --kubeconfig "$runtime_kubeconfig" --context "$runtime_context" "$@"; }
@@ -221,6 +239,23 @@ take_out() {
   until_true 120 "Dispatch to show $issue in backlog" dispatch_status_is "$issue" backlog
   until_true 600 "$issue's pods to be gone" sh -c \
     "out=\$(timeout 120 kubectl --context '$operator' -n '$namespace' get pods -l 'legion.dev/project=$run_label,legion.dev/tree=$issue' -o name) && [ -z \"\$out\" ]"
+}
+# status_set_back ISSUE WRITTEN: Dispatch no longer shows the status WRITTEN on ISSUE, and shows the
+# status the daemon records for it: the daemon set its own status back over the write.
+status_set_back() {
+  local status
+  status=$(dispatch_get "issues/$1" | jq -er .status) || return 1
+  [ "$status" != "$2" ] && daemon_state | jq -e --arg issue "$1" --arg status "$status" '.issues[$issue].status == $status' >/dev/null
+}
+# set_back_by_daemon FILE: in the issue events FILE, the newest backlog write is the proof human's,
+# and the status write after it is the daemon's own.
+set_back_by_daemon() {
+  jq -e --arg human "$dispatch_actor" --arg daemon "legion-daemon:$project" '
+    [.[] | select(.type | IN("issue.updated", "issue.closed"))] | sort_by(.seq)
+    | (map(select(.payload.status == "backlog")) | last) as $write
+    | $write != null and $write.actor.id == $human
+      and ([.[] | select(.seq > $write.seq and .payload.status != "backlog")] | first | .actor.id) == $daemon
+  ' "$1" >/dev/null
 }
 # tree_pod TREE prints a Running pod of the tree, whose worker container mounts the tree volume.
 tree_pod() {
@@ -308,6 +343,19 @@ record_pair() {
   done
   printf '%s\n' "$(basename "$pair_session" .jsonl)" >"$evidence/review-pair/session-stem"
   pair_recorded=1
+}
+# reviewer_decision CHANGES writes `approve` to $work/review-decision once legion-reviewer[bot] has
+# approved the pull request's head, or `changes` once it has posted CHANGES reviews requesting
+# changes, and fails while it has done neither. The wait's own poll records what it saw, so a head
+# that moves after the approval (retro's commit) cannot change the answer.
+reviewer_decision() {
+  if reviewer_approved_head; then
+    echo approve >"$work/review-decision"
+  elif reviewer_requested_changes "$1"; then
+    echo changes >"$work/review-decision"
+  else
+    return 1
+  fi
 }
 claim_session_file() {
   "$work/legion" claims list --json --config "$work/legion.yaml" --operator-token-file "$work/operator-token" |
@@ -415,7 +463,7 @@ dispatch_token_file: $work/dispatch-token
 projects:
   $project: { repo: $repo }
 gates:
-  design: "off"
+  design: "${design_gate:-off}"
 admission_cap: 2
 linger_hours: 0.3
 controller_wake_interval_seconds: 60
@@ -460,7 +508,7 @@ create_route_configmap() {
   printf '%s\n' "${models//"$placeholder"/"$gateway"}" >"$work/models.yml"
   grep -qFx "    baseUrl: $gateway" "$work/models.yml" || fail "the operator route's models.yml has no baseUrl $placeholder to point at the gateway"
   op create configmap "$route_configmap" --from-file=models.yml="$work/models.yml" --from-file=overlay.yml="$operator_route/overlay.yml" \
-    --dry-run=client -o yaml | kubectl label --local -f - "legion.dev/project=$run_label" -o yaml | op create -f - >/dev/null ||
+    --dry-run=client -o yaml | op label --local -f - "legion.dev/project=$run_label" -o yaml | op create -f - >/dev/null ||
     fail "the operator could not create ConfigMap $route_configmap"
   note "[operator] ConfigMap $route_configmap: models.yml (baseUrl from LEGION_E2E_MODEL_GATEWAY_URL) and overlay.yml from $operator_route, label legion.dev/project=$run_label"
 }
@@ -480,12 +528,33 @@ create_providers_secret() {
   fi
   [ -s "$seed_file" ] || fail "the operator's NATS nkey seed is empty"
   op create secret generic "$providers_secret" --from-file=NATS_NKEY_SEED="$seed_file" \
-    --dry-run=client -o yaml | kubectl label --local -f - "legion.dev/project=$run_label" -o yaml | op create -f - >/dev/null ||
+    --dry-run=client -o yaml | op label --local -f - "legion.dev/project=$run_label" -o yaml | op create -f - >/dev/null ||
     fail "the operator could not create Secret $providers_secret"
   rm -f "$seed_file"
   note "[operator] Secret $providers_secret: NATS_NKEY_SEED from the operator's seed, label legion.dev/project=$run_label"
 }
+# ports_free fails naming the holder when anything listens on the daemon's API or worker-stream
+# port.
+ports_free() {
+  local port
+  for port in "$port_daemon" "$port_worker_stream"; do
+    [ -z "$(ss -Hltn "sport = :$port")" ] || fail "port $port is taken on the devbox: $(ss -Hltnp "sport = :$port")"
+  done
+}
+# ports_ours fails naming the holder unless the run's daemon listens on both ports: a /healthz
+# answer says only that something on $host:$port_daemon answers.
+ports_ours() {
+  local port holder
+  for port in "$port_daemon" "$port_worker_stream"; do
+    holder=$(ss -Hltnp "sport = :$port")
+    [[ $holder == *"pid=$daemon_pid,"* ]] ||
+      fail "port $port is held by another process, not the run's daemon (pid $daemon_pid): ${holder:-nothing listens}"
+  done
+}
 start_daemon() {
+  # Prerequisites found both ports free, minutes before this boot; a process that took one since
+  # would answer /healthz in the run's daemon's place.
+  ports_free
   env -u GH_PUBLIC_REPO_PAT -u LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 -u GH_AGENT_APP_PRIVATE_KEY_B64 \
     -u GH_REVIEW_APP_PRIVATE_KEY_B64 "$work/legion" start --config "$work/legion.yaml" >>"$daemon_log" 2>&1 9>&- 7>&- &
   daemon_pid=$!
@@ -494,10 +563,17 @@ start_daemon() {
   until_true 900 "the Go daemon to boot and answer /healthz" daemon_answers_or_exited
   timeout_hook=
   kill -0 "$daemon_pid" 2>/dev/null || fail "the Go daemon exited before it answered /healthz: $(tail -3 "$daemon_log" | cut -c1-300 | tr '\n' ' ')"
+  ports_ours
 }
 daemon_answers_or_exited() { ! kill -0 "$daemon_pid" 2>/dev/null || curl -fsS "http://$host:$port_daemon/healthz"; }
 report_boot() { note "the daemon log's tail: $(tail -5 "$daemon_log" | cut -c1-300)"; }
 log_lines() { jq -R -c --arg m "$1" 'fromjson? | select(.msg == $m)' "$daemon_log"; }
+# left_planning ISSUE prints when and for what ISSUE first left planning, from the daemon's log, and
+# fails when it has not.
+left_planning() {
+  log_lines "workflow: phase changed" |
+    jq -s -e -c --arg issue "$1" 'map(select(.issue == $issue and .from == "planning")) | first // empty | {time, to}'
+}
 
 # ---- the pod watch (checkpoint pod-watch) ---------------------------------------------------------
 
@@ -968,6 +1044,60 @@ fixture_markers() {
   local pod=$1
   pod_exec "$pod" sh -c 'ls /tmp/legion-fixture 2>/dev/null | sort | tr "\n" " "' 2>&1
 }
+# completion_verdict reads a phase worker's session (JSONL on stdin) and prints, for every
+# assignment (the daemon's task, a user message) its worker answered with the legion tool's
+# handoff_complete, the calls that got no result, how many results succeeded, and whether the phase
+# stall recorded `closed` after the call that succeeded (the extension records it inside the call,
+# before Oh My Pi writes the result); and how many phase-stall follow-ups came after the session's
+# last successful completion. It is the 4b.13b acceptance's stall check
+# (stage3-4b13b-acceptance.sh, pane-rule-phase-worker-and-stall) for a pod's saved session: a worker
+# suspended while its handoff_complete call runs leaves that call with no result and no `closed`
+# (LEGION-283), and a worker resumed from such a session may report the phase again.
+completion_verdict() {
+  jq -R -s -c --arg followup "Your turn ended with your Legion phase still open" '
+    [split("\n")[] | fromjson?] | to_entries
+    | [.[] | .key as $i | .value as $e
+        | if $e.type == "message" and $e.message.role == "user" then {i: $i, kind: "assignment"}
+          elif $e.type == "message" and $e.message.role == "assistant" then
+            [$e.message.content[]? | select(.type == "toolCall" and .name == "legion" and .arguments.op == "handoff_complete") | .id] as $ids
+            | if ($ids | length) > 0 then {i: $i, kind: "call", ids: $ids} else empty end
+          elif $e.type == "message" and $e.message.role == "toolResult" and $e.message.toolName == "legion" then
+            {i: $i, kind: "result", id: $e.message.toolCallId, ok: ($e.message.isError != true)}
+          elif $e.type == "custom" and $e.customType == "legion-phase-stall" then {i: $i, kind: "stall", state: $e.data.state}
+          elif (($e | tostring) | contains($followup)) then {i: $i, kind: "followup"}
+          else empty end] as $t
+    | [$t[] | select(.kind == "assignment") | .i] as $starts
+    | [range(0; $starts | length) as $k | $starts[$k] as $from | ($starts[$k + 1] // ($t | map(.i) | max + 1)) as $to
+        | [$t[] | select(.i >= $from and .i < $to)] as $seg
+        | [$seg[] | select(.kind == "call") | .ids[]] as $calls
+        | select(($calls | length) > 0)
+        | [$seg[] | select(.kind == "result") | select(.id as $id | $calls | index($id) != null)] as $results
+        | [$results[] | select(.ok)] as $ok
+        | ([$seg[] | select(.kind == "call" and ($ok[0].id as $id | .ids | index($id) != null)) | .i] | first) as $okcall
+        | {assignment: $from, calls: ($calls | length),
+           unanswered: [$calls[] | select(. as $id | [$results[].id] | index($id) == null)],
+           succeeded: ($ok | length),
+           closed: (($ok | length) == 1 and $okcall != null and any($seg[]; .kind == "stall" and .state == "closed" and .i > $okcall))}] as $segments
+    | ([$t[] | select(.kind == "result" and .ok) | .i] | last) as $last
+    | {segments: $segments,
+       followups_after: (if $last == null then null else [$t[] | select(.kind == "followup" and .i > $last)] | length end)}'
+}
+# completions_answered FILE: every assignment its worker answered with handoff_complete got a
+# result for each call, exactly one success (the report, made once), and `closed` after the call
+# that succeeded, and no phase-stall follow-up came after the last success.
+completions_answered() {
+  completion_verdict <"$1" | jq -e '(.segments | length) > 0
+    and all(.segments[]; (.unanswered | length) == 0 and .succeeded == 1 and .closed)
+    and .followups_after == 0' >/dev/null
+}
+# cut_at_completion_call FILE prints FILE's session up to and including its last assistant entry that
+# calls handoff_complete: the transcript a suspension that stops the worker inside that call leaves.
+cut_at_completion_call() {
+  jq -R -s -r '[split("\n")[] | select(length > 0)] as $lines
+    | ([$lines | to_entries[] | select(.value | fromjson? | .type == "message" and .message.role == "assistant"
+        and any(.message.content[]?; .type == "toolCall" and .name == "legion" and .arguments.op == "handoff_complete")) | .key] | last) as $k
+    | $lines[0:$k + 1][]' "$1"
+}
 
 # ---- teardown ------------------------------------------------------------------------------------
 
@@ -1018,7 +1148,7 @@ collect_transcripts() {
   fi
 }
 cleanup() {
-  local status=$? p
+  local status=$? p teardown_failed=""
   # A second signal must not cut the teardown short, and a closed output must not end it.
   trap '' HUP INT TERM PIPE
   exec >&7 2>&7
@@ -1045,16 +1175,33 @@ cleanup() {
     # own control pods (the memory hog, the reachability pod) go first.
     op delete pod -l "legion.dev/project=$run_label,legion.dev/e2e-control" --ignore-not-found --wait=false >/dev/null 2>&1
     teardown
-    if [ -z "$compared" ] && [ -n "$snapshotted" ]; then (namespace_clean) || status=1; fi
+    if [ -z "$compared" ] && [ -n "$snapshotted" ]; then (namespace_clean) || teardown_failed+="${teardown_failed:+, }namespace-clean"; fi
     delete_consumers
     remove_run_branches
-    if [ -z "$audited" ] && [ -n "$prod_baseline" ]; then production_audit || status=1; fi
+    if [ -z "$audited" ] && [ -n "$prod_baseline" ] && ! production_audit; then
+      teardown_failed+="${teardown_failed:+, }production-audit"
+      echo "CHECK production-audit: FAIL: $(audit_failure)"
+    fi
   fi
   for p in $(run_processes); do kill -KILL "$p" 2>/dev/null; done
   docker rm -f "$pg_container" >/dev/null 2>&1
   rm -rf "$work"
-  [ -n "$ok" ] || echo "stage 4b e2e: FAIL (check $check)"
+  # The notes are for a checkpoint that failed itself: none once ok is set, after a blocked
+  # checkpoint, or after a signal (129, 130, 143, as trapped below). Otherwise a failed teardown
+  # check (a namespace left dirty, a write outside LEGSMOKE) names itself, and only a clean teardown
+  # lets a blocked checkpoint end BLOCKED.
+  if [ -z "$ok" ] && [ -z "$was_blocked" ] && [[ ! $status =~ ^(129|130|143)$ ]]; then
+    bash "$root/scripts/e2e/lib/model-gateway-unserved.sh" --notes "$evidence/model-gateway" "$check_started" "$check" || true
+    echo "stage 4b e2e: FAIL (check $check)"
+  elif [ -n "$teardown_failed" ]; then
+    echo "stage 4b e2e: FAIL (check $teardown_failed, in the teardown after check $check)"
+  elif [ -n "$was_blocked" ]; then
+    echo "stage 4b e2e: BLOCKED (check $check): the checkpoint could not run, so the run is no verdict on the change; the checkpoints before it stand"
+  elif [ -z "$ok" ]; then
+    echo "stage 4b e2e: FAIL (check $check)"
+  fi
   echo "evidence: $evidence (transcript.log, logs/daemon.log, pod-watch.json, pods/, transcripts/, the namespace snapshots)"
+  [ -z "$teardown_failed" ] || status=1
   exit "$status"
 }
 trap cleanup EXIT
@@ -1246,6 +1393,8 @@ interests_outside() {
     | select((contains($p) or contains($t) or startswith($space) or startswith($repo) or contains($op) or contains($s)) | not) | {session: $s, topic: .}] | unique' "$1"
 }
 audit_verdict() { [ "$(jq -c . "$1")" = "[]" ] && [ "$(jq -c . "$2")" = "[]" ]; }
+# audit_failure is what a failed production audit says, in the checkpoint and in the teardown.
+audit_failure() { echo "the run wrote outside LEGSMOKE or subscribed outside it: $evidence/production-issues-touched-outside.json, $evidence/production-interests-outside.json"; }
 
 # ==== checkpoints ===================================================================================
 
@@ -1280,9 +1429,7 @@ mkdir -p "$(dirname "$lock")"
 exec 9>"$lock"
 flock -n 9 || fail "another Stage 4b run holds $lock: one run at a time"
 refuse_leftovers legion-e2e4b
-for port in "$port_daemon" "$port_worker_stream"; do
-  [ -z "$(ss -Hltn "sport = :$port")" ] || fail "port $port is taken on the devbox: $(ss -Hltnp "sport = :$port")"
-done
+ports_free
 imds=$(curl -sf -m 5 -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 60') ||
   fail "instance metadata is unreachable; the daemon binds the devbox's private address, read from it"
 host=$(curl -sf -m 5 -H "X-aws-ec2-metadata-token: $imds" http://169.254.169.254/latest/meta-data/local-ipv4) || fail "instance metadata has no local-ipv4"
@@ -1311,12 +1458,21 @@ if [ -n "$skip_controller" ]; then
   [ -n "$until" ] || fail "STAGE4B_SKIP_CONTROLLER is for a development run: set STAGE4B_UNTIL too"
   note "STAGE4B_SKIP_CONTROLLER=$skip_controller: controller's checks are skipped; it only takes tree 3 out"
 fi
+if [ -n "$design_gate" ]; then
+  [ "$design_gate" = root-issues ] || fail "STAGE4B_DESIGN_GATE=$design_gate: the one policy it arms is root-issues"
+  [ -n "$until" ] || fail "STAGE4B_DESIGN_GATE is for a development run: set STAGE4B_UNTIL too"
+  # Only tree 1 exists under the switch, so a checkpoint past spec-posted, which drives trees 2 to
+  # 4, cannot run.
+  sed -n '1,/^begin spec-posted$/s/^begin //p' "$root/scripts/e2e/stage4b-sandbox-tree.sh" | grep -qxF "$until" ||
+    fail "STAGE4B_DESIGN_GATE runs tree 1 alone, so STAGE4B_UNTIL must be spec-posted or a checkpoint before it, not $until"
+  note "STAGE4B_DESIGN_GATE=$design_gate: the design gate is armed and tree 1 runs alone"
+fi
 read_bearers
 pass
 
 begin preflight
 # The runtime identity is the restricted role, and nothing more: the assumed-role pattern Stage 4a's
-# identity check uses (packages/daemon-go/internal/runtime/sandbox/live_install_test.go:52).
+# identity check uses (packages/daemon/internal/runtime/sandbox/live_install_test.go:52).
 who=$(rk auth whoami -o json) || blocked "kubectl auth whoami under $runtime_context failed"
 jq -e '.status.userInfo.username | test(":assumed-role/[A-Za-z0-9+=,.@_-]*legion-daemon/")' <<<"$who" >/dev/null ||
   fail "the runtime identity $(jq -r .status.userInfo.username <<<"$who") is not the assumed Legion daemon role"
@@ -1329,12 +1485,12 @@ floor=$(kubectl --context "$operator" get nodepool legion -o json |
 jq -e 'any(.[]; .operator == "Gt" and (.values | index("3")))' <<<"$floor" >/dev/null || fail "the legion NodePool has no instance-cpu Gt 3 floor: $floor"
 note "[operator] CRD sandboxes.agents.x-k8s.io installed; NodePool legion floor $floor"
 # LEGSMOKE's stale todo roots would be admitted at boot ahead of the run's own.
-stale=$(dispatch_get "issues?project=$project&status=todo&limit=200" | jq -r '.[] | select(.parent == null or .parent == "") | .key')
+stale=$(dispatch_get "issues?project=$project&status=todo" | jq -r '.[] | select(.parent == null or .parent == "") | .key')
 for key in $stale; do
   set_status "$key" backlog
   note "moved stale todo root $key to backlog"
 done
-[ -z "$(dispatch_get "issues?project=$project&status=todo&limit=200" | jq -r '.[].key')" ] || fail "LEGSMOKE still holds todo issues"
+[ -z "$(dispatch_get "issues?project=$project&status=todo" | jq -r '.[].key')" ] || fail "LEGSMOKE still holds todo issues"
 # The configured stream carries both halves of the workflow's intake. Dispatch publishes every
 # project's issue events under subjects that name the issue, so any project's shows the Dispatch
 # half (LEGSMOKE's own age out between runs; admission is where the run's are seen); the GitHub
@@ -1414,14 +1570,12 @@ note "streaming the run's pods, the nodes' events, and node memory into $evidenc
 pass
 
 begin boot
-(cd "$root/packages/daemon-go" && go build -o "$work/legion" ./cmd/legion)
-stage_role_prompts "$root" "$work"
+(cd "$root/packages/daemon" && go build -o "$work/legion" ./cmd/legion)
 built=$(bash "$root/scripts/e2e/lib/built-from.sh" "$root" "$work/legion") || fail "lib/built-from.sh could not say what the run built"
 while IFS= read -r line; do note "$line"; done <<<"$built"
 # The build's source is the run's recorded source, or the tree changed between the two.
 [ "$(sed -n 's/^source: //p' <<<"$built")" = "$(jq -r .revision "$evidence/run.json")" ] ||
   fail "the tree changed between prerequisites ($(jq -r .revision "$evidence/run.json")) and the build ($(sed -n 's/^source: //p' <<<"$built"))"
-# The prompt bundle is deployed beside this binary, not read from the checkout it was built in.
 docker run -d --name "$pg_container" --mount type=tmpfs,destination=/var/lib/postgresql/data \
   -e POSTGRES_USER=legion -e POSTGRES_PASSWORD="$(cat "$work/postgres-password")" -e POSTGRES_DB=legion \
   -p "127.0.0.1::5432" postgres:16 >/dev/null
@@ -1478,19 +1632,35 @@ note "the first probe attempt's timeline (scheduling, node launch, image pull): 
 pass
 
 begin admitted-issue-cap
-tree1=$(new_issue "Stage 4b proof tree 1: the whole workflow ($work)")
-tree2=$(new_issue "Stage 4b proof tree 2: planner beside tree 1, with the repository fixture ($work)")
-tree3=$(new_issue "Stage 4b proof tree 3: the held phase for the controller ($work)")
-push_fixture "$tree2"
-for issue in "$tree1" "$tree2" "$tree3"; do set_status "$issue" todo; done
-until_true 300 "two roots admitted and one waiting in rank order" sh -c \
-  "'$work/legion' state --json --config '$work/legion.yaml' | jq -e --arg a '$tree1' --arg b '$tree2' --arg c '$tree3' '.admission.cap == 2 and .admission.active == [\$a,\$b] and .admission.waiting == [\$c]'"
+if [ -n "$design_gate" ]; then
+  # One root: each admitted root's architect requests approval on its own, so a second tree would
+  # put a second approval in a human's Inbox. The cap check needs three roots, so it is skipped.
+  # Tree 1's document leaves one choice to the human, so its architect has a decision block to
+  # settle before it may request approval.
+  gate_spec=$(printf '%s\n' "## Summary" "" \
+    "A Legion smoke proof of the design gate. Make one tiny, concrete one-file change in \`$repo\`: add one new Markdown file holding a single line that names this issue." "" \
+    "Where the file goes is the human's choice, and nobody has made it yet: under \`smoke/\` at the repository root, or under \`docs/smoke/\`." "" \
+    "## Scope" "" \
+    "A review of the pull request may ask for one more line appended to that same file; that is in scope. Nothing else changes.")
+  tree1=$(new_issue "Stage 4b design gate tree 1: the spec's decision blocks, then approval ($work)" "" "$gate_spec")
+  set_status "$tree1" todo
+  until_true 300 "tree 1 admitted" sh -c \
+    "'$work/legion' state --json --config '$work/legion.yaml' | jq -e --arg a '$tree1' '.admission.active == [\$a]'"
+else
+  tree1=$(new_issue "Stage 4b proof tree 1: the whole workflow ($work)")
+  tree2=$(new_issue "Stage 4b proof tree 2: planner beside tree 1, with the repository fixture ($work)")
+  tree3=$(new_issue "Stage 4b proof tree 3: the held phase for the controller ($work)")
+  push_fixture "$tree2"
+  for issue in "$tree1" "$tree2" "$tree3"; do set_status "$issue" todo; done
+  until_true 300 "two roots admitted and one waiting in rank order" sh -c \
+    "'$work/legion' state --json --config '$work/legion.yaml' | jq -e --arg a '$tree1' --arg b '$tree2' --arg c '$tree3' '.admission.cap == 2 and .admission.active == [\$a,\$b] and .admission.waiting == [\$c]'"
+fi
 state_file admission
 note "active $(jq -c .admission.active "$evidence/admission.json"), waiting $(jq -c .admission.waiting "$evidence/admission.json")"
 shape_pid=
 pod_shape_watcher 9>&- 7>&- &
 shape_pid=$!
-pass
+if [ -n "$design_gate" ]; then skipped "STAGE4B_DESIGN_GATE: tree 1 alone, so the cap is not exercised"; else pass; fi
 
 # drive_spec ISSUE: the architect registers the gate on its own (architect_registers_gate); with
 # gates.design off the daemon approves the registered version itself and the issue moves to
@@ -1500,11 +1670,62 @@ drive_spec() {
   architect_registers_gate "$issue" "the $issue"
   wait_for_phase "$issue" planning
 }
+gate_open() {
+  daemon_state | jq -e --arg issue "$1" --arg artifact "$2" \
+    '.issues[$issue].designGate as $g | $g.artifactId == $artifact and $g.approvedVersion != null and $g.approvedVersion == $g.currentVersion'
+}
+# drive_gated_spec ISSUE waits, up to 12 hours, for a human to answer the spec's decision blocks and
+# approve the version the architect asked about, then checks what the architect did
+# (lib/design-gate-verdict.jq): its approval request at the approved version carries a summary after
+# "Approve <name> (version N)?", a human answered at least one of the spec's decision blocks, and no
+# approval request it made on the spec named a version holding one open or came before a human
+# answered one raised before the human's turn on that request.
+drive_gated_spec() {
+  local issue=$1 artifact approved asks events version verdict request early blocks requested_versions
+  local -a requested=()
+  artifact=$(dispatch_get "issues/$issue" | jq -er .primary_artifact_id)
+  wait_for_worker "$issue" architect
+  until_true 300 "the $issue architect to be given its catch-up notice" notice_delivered "$issue" architect "$(notice_needle catch-up "$issue")"
+  until_true 43200 "a human to approve the $issue spec in Dispatch, opening its design gate" gate_open "$issue" "$artifact"
+  approved=$(daemon_state | jq -er --arg issue "$issue" '.issues[$issue].designGate.approvedVersion')
+  asks=$(dispatch_get "issues/$issue/asks")
+  events=$(dispatch_events "$issue")
+  jq . <<<"$asks" >"$evidence/$issue-asks.json"
+  jq . <<<"$events" >"$evidence/$issue-events.json"
+  # An approval row follows versions. The shared selector reads the full event history: ask.opened
+  # records its first hand-back and each ask.handed_back a later one.
+  requested_versions=$(jq -r -L "$root/scripts/e2e/lib" --arg artifact "$artifact" '
+    include "design-gate-approval-requests";
+    approval_requested_versions($artifact)
+  ' <<<"$events")
+  for version in $requested_versions; do
+    dispatch_get "artifacts/$artifact/versions/$version" >"$evidence/$issue-spec-v$version.json" ||
+      fail "$issue: version $version of its spec could not be read"
+    requested+=("$evidence/$issue-spec-v$version.json")
+  done
+  verdict=$(jq -c -s -L "$root/scripts/e2e/lib" --arg artifact "$artifact" --argjson version "$approved" -f "$root/scripts/e2e/lib/design-gate-verdict.jq" "$evidence/$issue-asks.json" "$evidence/$issue-events.json" "${requested[@]}")
+  printf '%s\n' "$verdict" >"$evidence/$issue-gate-verdict.json"
+  request=$(jq -r '.request // empty' <<<"$verdict")
+  [ -n "$request" ] || fail "$issue: no approval request names version $approved of its spec ($evidence/$issue-asks.json)"
+  jq -e .summarized <<<"$verdict" >/dev/null || fail "$issue: the approval request carries no summary: $request"
+  early=$(jq -c .early <<<"$verdict")
+  [ "$early" = "[]" ] || fail "$issue: approval was requested before the spec's decision blocks were settled: $early"
+  blocks=$(jq .blocks <<<"$verdict")
+  [ "$blocks" -gt 0 ] || fail "$issue: a human answered none of the spec's decision blocks, so its open choice was never settled as one ($evidence/$issue-asks.json)"
+  note "$issue: a human answered $blocks of the spec's decision blocks, and no approval hand-back named a version with one open or came before the answer to one raised before the human's turn on it"
+  note "$issue: the approval request at version $approved asked: $request"
+  wait_for_phase "$issue" planning
+}
 
 begin spec-posted
-drive_spec "$tree1"
-drive_spec "$tree2"
-for issue in "$tree1" "$tree2"; do
+specs=("$tree1")
+if [ -n "$design_gate" ]; then
+  drive_gated_spec "$tree1"
+else
+  specs+=("$tree2")
+  for issue in "${specs[@]}"; do drive_spec "$issue"; done
+fi
+for issue in "${specs[@]}"; do
   version=$(daemon_state | jq -er --arg issue "$issue" '.issues[$issue].designGate.currentVersion')
   note "$issue: the architect posted its spec (version $version) and the daemon moved it to planning"
 done
@@ -1515,7 +1736,15 @@ wait_for_worker "$tree1" planner
 send_agent "$tree1" planner "Stage 4b proof planning operation: write the required .legion/plan.json handoff for the one-file smoke change, then call the legion tool's handoff_complete with a concise summary. Do not start another role."
 wait_for_phase "$tree1" implementing 900
 wait_for_worker "$tree1" implementer
-wait_for_worker "$tree2" planner
+# Tree 2's planner holds for the driver, which has sent it nothing yet, and the checkpoints below
+# read its live pod. A planner that took the daemon's task line as its go-ahead has planned and been
+# suspended by now, so it never reads as live: name that rather than time out on its registration.
+tree2_planner_live_or_gone() { issue_worker_live "$tree2" planner || left_planning "$tree2" >/dev/null; }
+until_true 300 "planner worker on $tree2 to register" tree2_planner_live_or_gone
+if left=$(left_planning "$tree2"); then
+  fail "tree 2's planner did not hold for the driver's instruction: $tree2 left planning on its own ($left) before the driver sent it anything"
+fi
+assert_claim_endpoints "$tree2" planner
 node_of_tree() { op get pods -l "legion.dev/project=$run_label,legion.dev/tree=$1" -o jsonpath='{range .items[*]}{.spec.nodeName}{"\n"}{end}' | sort -u; }
 at=$(date -u +%FT%TZ)
 nodes1=$(node_of_tree "$tree1")
@@ -1555,13 +1784,32 @@ wait_for_phase "$tree2" implementing 900
 pass
 
 begin issue-cap-moves
-# Tree 2 leaves the line: its slot frees and the waiting root takes it.
+# The proof human's session holds no claim in tree 2, so its backlog on tree 2's live root is set
+# back: Dispatch shows the daemon's own status again, written as legion-daemon:$project, tree 2's
+# architect is told who wrote backlog, and tree 2 keeps its slot. Tree 2 then leaves the line
+# through `legion status`, the daemon's own write: its slot frees and the waiting root takes it.
 set_status "$tree2" backlog
+until_true 300 "the daemon to set $tree2 back from backlog" status_set_back "$tree2" backlog
+needle=$(notice_needle status-reasserted "$tree2")
+until_true 300 "tree 2's architect to be told of the proof human's backlog" notice_delivered "$tree2" architect "$needle"
+# head ends the pipeline early, which pipefail would report as a failure, hence `|| true`: an empty
+# line fails the check below, naming it.
+told=$(notice_line "$tree2" architect "$needle" | head -1 || true)
+printf '%s\n' "$told" >"$evidence/notice-status-reasserted.jsonl"
+grep -qF -- "$dispatch_actor" <<<"$told" || fail "tree 2's status-reasserted notice does not name the proof human $dispatch_actor: $told"
+dispatch_events "$tree2" >"$evidence/tree2-events-set-back.json" || fail "tree 2's events could not be read"
+# The control re-attributes every write after the proof human's backlog to the proof human.
+jq --arg human "$dispatch_actor" '([.[] | select(.payload.status == "backlog") | .seq] | max) as $w | map(if .seq > $w then .actor.id = $human else . end)' \
+  "$evidence/tree2-events-set-back.json" >"$evidence/tree2-events-set-back-negative.json"
+expect_failure set-back-actor set_back_by_daemon "$evidence/tree2-events-set-back-negative.json"
+set_back_by_daemon "$evidence/tree2-events-set-back.json" || fail "tree 2's backlog was not the proof human's, or the write after it not legion-daemon:$project's"
+daemon_state | jq -e --arg b "$tree2" --arg c "$tree3" '(.admission.active | index($b)) != null and (.admission.waiting | index($c)) != null and .issues[$b].phase != "done"' >/dev/null ||
+  fail "the proof human's backlog took tree 2 out: $(daemon_state | jq -c --arg b "$tree2" '{admission, phase: .issues[$b].phase}')"
+note "the proof human's backlog on tree 2 was set back to $(dispatch_get "issues/$tree2" | jq -r .status) by legion-daemon:$project, its architect told, and tree 2 kept its slot"
+take_out "$tree2"
 until_true 300 "tree 3 to take tree 2's admission slot" sh -c \
   "'$work/legion' state --json --config '$work/legion.yaml' | jq -e --arg c '$tree3' '(.admission.active | index(\$c)) != null'"
-until_true 300 "tree 2's Sandboxes to be suspended" sh -c \
-  "out=\$(timeout 120 kubectl --context '$operator' -n '$namespace' get pods -l 'legion.dev/project=$run_label,legion.dev/tree=$tree2' -o name) && [ -z \"\$out\" ]"
-note "tree 2 moved to backlog, its pods gone; tree 3 ($tree3) admitted"
+note "legion status moved tree 2 to backlog, its pods gone; tree 3 ($tree3) admitted"
 pass
 
 begin tree-moved
@@ -1583,19 +1831,133 @@ send_agent "$tree1" tester "Stage 4b proof test operation: inspect the implement
 wait_for_phase "$tree1" reviewing 1200
 assert_handoff_committer "$tree1" tester testing 0
 wait_for_worker "$tree1" reviewer
-send_agent "$tree1" reviewer "Stage 4b proof review operation: review pull request #$pr_number in $repo as your role requires, running the deep and code-quality review passes your instructions name as task subagents. Your decision is APPROVE, submitted as legion-reviewer[bot]; take the round's steps in the order your role gives, and complete the reviewer handoff."
+# A round no review decides (LEGION-326): the reviewer comments instead of deciding, and completes.
+# The daemon leaves the issue in reviewing and tells the architect, naming the head. The proof's
+# instructions hold every agent until a targeted message gives its next operation, so the driver
+# then tells the architect only to handle that notice as its role says, naming no topic, head or
+# decision: the architect takes those from the notice and asks the reviewer for the decision over
+# Envoy. The requested correction then starts another implementer/tester/reviewer cycle.
+# The proof counts only messages the architect sent after the reviewer's completion. An architect acting on
+# the notice unprompted, as it must where no driver holds it, is not what this checkpoint proves
+# (LEGION-413).
+send_agent "$tree1" reviewer "Stage 4b proof review operation: review pull request #$pr_number in $repo as your role requires, running the deep and code-quality review passes your instructions name as task subagents. This round deliberately proves what the daemon does with a round no review decides: submit your review as legion-reviewer[bot] as a COMMENT review with no inline comment, never APPROVE or REQUEST_CHANGES, take the round's other steps in the order your role gives, and complete the reviewer handoff. Submit no other review until you are asked for the round's decision; when you are, your decision is REQUEST_CHANGES with exactly one inline comment, on the last line of $smoke_file, asking for the line \`$(round_line 1)\` to be appended below the lines already there. The spec permits that correction. Your completion is already recorded: submit that decision on the completed handoff's head without writing another handoff or calling handoff_complete again. This exact smoke instruction takes precedence over your own review."
 pair_session=$(claim_session_file "$tree1" reviewer) || fail "the reviewer on $tree1 has no session file"
 until_true 1800 "the reviewer's two thermonuclear dispatches to reach an outcome" pair_settled
 record_pair || fail "the reviewer's session and its review pair could not be recorded"
 note "the review pair's dispatches are kept in $evidence/review-pair ($(jq -r -s 'map("\(.agent): \(.calls | length) calls, \(.results | length) results, \(.deliveries | length) deliveries") | join("; ")' "$evidence"/review-pair/thermonuclear-*.json))"
-until_true 1800 "legion-reviewer[bot] approval of pull request #$pr_number at its head" reviewer_approved_head
+until_true 1800 "legion-reviewer[bot]'s COMMENT review of pull request #$pr_number" reviewer_commented
+until_true 900 "the daemon to record the reviewer's completion of $tree1's round" reviewer_completed "$tree1"
+# The ask baseline is read here, not before the reviewer is instructed: the notice is written in the
+# completion's own transaction and the architect needs a model turn after it, so no real ask can
+# precede this read, while a message the architect sent the reviewer earlier in the round (a reply to
+# the reviewer's own round report) stays out of the count, the path and the saved lines.
+asked_before=$(architect_messages "$tree1" reviewer)
+# At the completion, before the architect can have asked anything: no approval yet, and the round
+# still open.
+early_approvals=$(review_app_reviews '.state == "APPROVED"' id) || fail "read the reviews on pull request #$pr_number"
+[ -z "$early_approvals" ] || fail "the reviewer approved pull request #$pr_number before anyone asked it for the round's decision"
+issue_phase "$tree1" reviewing >/dev/null || fail "$tree1 left reviewing on a round no review decided"
+until_true 300 "the review-stuck notice on $tree1's architect" notice_delivered "$tree1" architect "$(notice_needle review-stuck "$tree1")"
+stuck=$(notice_line "$tree1" architect "$(notice_needle review-stuck "$tree1")" | head -1 || true)
+printf '%s\n' "$stuck" >"$evidence/notice-review-stuck.jsonl"
+# The head the notice names is the one the completion left, which GitHub's current head can have
+# moved past since: it must be a commit of the pull request, and the reviewer's completion wrote it.
+stuck_head=$(grep -oE 'APPROVE of head [0-9a-f]{40}' <<<"$stuck" | head -1 | awk '{print $4}' || true)
+[ -n "$stuck_head" ] || fail "the review-stuck notice on $tree1's architect names no head: $stuck"
+pr_commits=$(gh api --paginate "repos/$repo/pulls/$pr_number/commits" --jq '.[].sha') || fail "read the commits of pull request #$pr_number"
+grep -qx -- "$stuck_head" <<<"$pr_commits" || fail "the review-stuck notice names $stuck_head, which is no commit of pull request #$pr_number"
+grep -qF -- "the reviewer's completion" <<<"$stuck" || fail "the review-stuck notice was not written by the reviewer's completion: $stuck"
+note "the reviewer commented and completed; $tree1 stayed in reviewing and its architect was told review-stuck naming $stuck_head (kept in $evidence/notice-review-stuck.jsonl)"
+# What the checkpoint proves is that a stuck round got unstuck. An ask the architect made on its own,
+# before the driver sent its message, is the production behaviour, so it counts too, as the stronger
+# pass, and the run notes it.
+asked_unprompted=$(architect_messages "$tree1" reviewer)
+send_agent "$tree1" architect "Stage 4b proof review-stuck operation: handle the daemon's review-stuck notice on $tree1 now, exactly as your role says to handle a review-stuck notice."
+architect_asked() { [ "$(architect_messages "$tree1" reviewer)" -gt "$asked_before" ]; }
+until_true 900 "$tree1's architect, sent the review-stuck operation, to ask the reviewer for the round's decision" architect_asked
+notice_line "$tree1" reviewer "notifications.role.$(claim_token "$tree1" architect)" | tail -n +"$((asked_before + 1))" >"$evidence/architect-ask.jsonl"
+[ "$asked_unprompted" -le "$asked_before" ] || note "the architect asked the reviewer before the driver's message"
+until_true 1800 "legion-reviewer[bot]'s round 1 decision on pull request #$pr_number" reviewer_decision 1
+[ "$(<"$work/review-decision")" = changes ] || fail "the reviewer approved pull request #$pr_number in round 1, which the proof asked to request changes"
+wait_for_phase "$tree1" implementing 1200
+assert_handoff_committer "$tree1" reviewer reviewing 1
+assert_review_of_own_handoff "$tree1" 1 CHANGES_REQUESTED
+thread_id=$(reviewer_thread 2>"$work/reviewer-thread.err") ||
+  fail "the reviewer's round 1 review did not leave one thread of its own: $(cat "$work/reviewer-thread.err")"
+note "the reviewer's round 1 review opened one thread, $thread_id"
+wait_for_worker "$tree1" implementer
+send_agent "$tree1" implementer "Stage 4b proof correction round 1: make the correction the review names (append the line \`$(round_line 1)\` to $smoke_file), push it to pull request #$pr_number, answer the review's thread as your role says, write the implementation handoff, then call the legion tool's handoff_complete: a push alone does not finish this round."
+wait_for_phase "$tree1" testing 1200
+until_true 120 "round 1's correction on pull request #$pr_number" round_correction_pushed 1
+assert_round_handoff "$tree1" 1
+assert_handoff_committer "$tree1" implementer implementing 1
+review_thread "$thread_id" >"$evidence/review-thread-after-correction.json" ||
+  fail "read the reviewer's thread $thread_id after the correction round"
+note "after the correction round the reviewer's thread reads isResolved $(jq -r .isResolved "$evidence/review-thread-after-correction.json"), newest comment by $(jq -r '[.comments[] | select(.state == "SUBMITTED")] | last | .author' "$evidence/review-thread-after-correction.json")"
+wait_for_worker "$tree1" tester
+send_agent "$tree1" tester "Stage 4b proof retest round 1: verify the correction on pull request #$pr_number, write the tester handoff with verdict pass, and complete the phase."
+wait_for_phase "$tree1" reviewing 1200
+assert_handoff_committer "$tree1" tester testing 1
+wait_for_worker "$tree1" reviewer
+# The re-review's decision is the reviewer's own: the proof names the head, never the verdict.
+send_agent "$tree1" reviewer "Stage 4b proof re-review: review pull request #$pr_number in $repo as your role requires, the thread your round 1 review opened included. The decision is yours; take the round's steps in the order your role gives, and complete the reviewer handoff."
+until_true 1800 "legion-reviewer[bot]'s re-review decision on pull request #$pr_number" reviewer_decision 2
+# Read the thread at once: nothing resolves it between the approval and the merger's run.
+decision=$(<"$work/review-decision")
+review_thread "$thread_id" >"$evidence/review-thread-at-approval.json" ||
+  fail "read the reviewer's thread $thread_id when its re-review decision landed"
+[ "$decision" = approve ] ||
+  fail "the reviewer requested changes again on its re-review of pull request #$pr_number; its thread then read $(jq -c . "$evidence/review-thread-at-approval.json")"
+note "the reviewer approved pull request #$pr_number at its head; its thread then read isResolved $(jq -r .isResolved "$evidence/review-thread-at-approval.json")"
 until_true 900 "$tree1 to leave reviewing for retro" issue_phase_in "$tree1" retro merging
 if issue_phase "$tree1" retro >/dev/null; then
   wait_for_worker "$tree1" implementer
   send_agent "$tree1" implementer "Stage 4b proof retro: write the required retro handoff for pull request #$pr_number and complete the phase. Do not change the approved implementation."
 fi
 wait_for_phase "$tree1" merging 1800
-note "$tree1 moved planner → implementer → tester → reviewer → retro → merging with real agents; $repo#$pr_number changes $smoke_file"
+note "$tree1 moved planner → implementer → tester → reviewer (changes requested) → implementer → tester → reviewer (approved) → retro → merging with real agents; $repo#$pr_number changes $smoke_file"
+pass
+
+begin review-thread
+# The reviewer approved without waiting for its thread to resolve (LEGION-316): when the approval
+# landed, the thread it opened in round 1 carried its own Accepted: as the newest submitted comment
+# and still read isResolved false, since only the pull request author's App resolves it and the
+# implementer's last run came before the acceptance. tree-moved recorded the thread then.
+thread_accepted_unresolved "$evidence/review-thread-at-approval.json" ||
+  fail "when the reviewer approved, its thread $thread_id read $(jq -c . "$evidence/review-thread-at-approval.json"), want isResolved false and its newest submitted comment the reviewer's Accepted:"
+# Controls: the same record resolved (an approval that waited for the resolution), and with the
+# implementer's reply as its newest comment (an approval before the reviewer accepted), both fail.
+jq '.isResolved = true' "$evidence/review-thread-at-approval.json" >"$evidence/review-thread-resolved-negative.json"
+expect_failure review-thread-resolved-at-approval thread_accepted_unresolved "$evidence/review-thread-resolved-negative.json"
+jq '.comments += [{author: "legion-implementer", body: "Fixed in 0000000: the line is appended.", state: "SUBMITTED"}]' \
+  "$evidence/review-thread-at-approval.json" >"$evidence/review-thread-unaccepted-negative.json"
+expect_failure review-thread-not-accepted thread_accepted_unresolved "$evidence/review-thread-unaccepted-negative.json"
+thread_accepted_unresolved "$evidence/review-thread-at-approval.json" || fail "the thread record failed its own check after its controls"
+note "the reviewer's thread $thread_id read isResolved false with its Accepted: newest when the approval landed: $(jq -r '[.comments[] | select(.state == "SUBMITTED")] | last | .body | split("\n")[0]' "$evidence/review-thread-at-approval.json")"
+pass
+
+begin completion-closed
+# Each phase worker of tree 1 is suspended as its phase ends — the planner, the implementer
+# (implementing, and retro when it ran), the tester and the reviewer — and the workflow suspends a
+# worker as it records the completion the worker reports from inside its turn. The suspension is
+# held until that turn ends (LEGION-283), so each saved session answers every handoff_complete call,
+# reports each assignment once, and records the phase stall `closed` after the call that
+# succeeded: the 4b.13b acceptance's stall check (completion_verdict), which a suspension inside the
+# call fails. The planner, never resumed, is the case the 4b.13b acceptance saw; the implementer is
+# resumed for retro, where a session holding an unanswered report is the one that reports again.
+for role in planner implementer tester reviewer; do
+  until_true 300 "$role on $tree1 to be suspended after its phase" issue_worker_state "$tree1" "$role" suspended
+  session_copy="$evidence/completion-$role.jsonl"
+  claim_session_text "$tree1" "$role" >"$session_copy" || fail "$role on $tree1 has no readable session"
+  completion_verdict <"$session_copy" >"$evidence/completion-$role-verdict.json"
+  completions_answered "$session_copy" ||
+    fail "$role on $tree1 left a phase completion unanswered, unclosed or repeated: $(cat "$evidence/completion-$role-verdict.json")"
+  note "$role on $tree1, suspended: $(jq -c '[.segments[] | {calls, succeeded, closed}]' "$evidence/completion-$role-verdict.json")"
+done
+# The control: the planner's session cut at its handoff_complete call, the transcript a suspension
+# inside the call leaves, is refused.
+cut_at_completion_call "$evidence/completion-planner.jsonl" >"$evidence/completion-planner-cut-at-the-call.jsonl"
+expect_failure completion-cut-at-the-call completions_answered "$evidence/completion-planner-cut-at-the-call.jsonl"
 pass
 
 begin review-pair
@@ -1652,10 +2014,11 @@ pass
 
 begin token-rotation
 # A pod's projected operator token (pod.yml: expiration_seconds 3600) is renewed by the kubelet at
-# 80 % of its life, 2880 s after it was issued, and a model turn after the renewal still runs on the
-# gateway's aliases. The architect's pod is the longest-lived. A token whose issue time (iat) is
-# later than the pod's start is a renewal: the pod's first token was issued as it started. By
-# token-rotation the architect has usually run long enough for one, so the wait is often none.
+# 80 % of its life, 2880 s after it was issued, and a model turn after the renewal still runs on a
+# model the operator fixture's overlay gives a role. The architect's pod is the longest-lived. A
+# token whose issue time (iat) is later than the pod's start is a renewal: the pod's first token was
+# issued as it started. By token-rotation the architect has usually run long enough for one, so the
+# wait is often none.
 pod=$(claim_sandbox "$tree1" architect)
 pod_uid=$(op get pod "$pod" -o jsonpath='{.metadata.uid}')
 pod_started=$(date -d "$(op get pod "$pod" -o jsonpath='{.status.startTime}')" +%s) || fail "the architect pod $pod has no start time"
@@ -1694,7 +2057,9 @@ until_true 600 "a completed architect turn after the rotation" turn_after_rotati
 architect_pod_kept "before the turn after the rotation completed"
 after=$(claim_session_text "$tree1" architect | jq -R -s -c --arg at "$rotated" '[split("\n")[] | fromjson? | select(.type == "message" and .message.role == "assistant" and .timestamp > $at) | "\(.message.provider)/\(.message.model)"] | unique')
 note "turns after the rotation were answered by $after"
-jq -e 'all(.[]; test("^anthropic/claude-[a-z0-9.-]+-legion$"))' <<<"$after" >/dev/null || fail "a turn after the rotation left the gateway's aliases: $after"
+route_models=$(sed -n '/^modelRoles:/,/^[^ ]/s/^  [a-z]*: \([^:]*\).*/\1/p' "$operator_route/overlay.yml" | jq -R -s -c 'split("\n") | map(select(. != "")) | unique')
+jq -e --argjson route "$route_models" 'all(.[]; . as $m | any($route[]; . == $m))' <<<"$after" >/dev/null ||
+  fail "a turn after the rotation left the operator fixture's role models $route_models: $after"
 pass
 
 begin idle-suspend
@@ -1732,7 +2097,7 @@ begin fence
 # claim relaunches with a third uid.
 # (b) needs the boot token of the generation (a) replaces, so it is read before the delete.
 boot_token() { op get secret "$pod-boot" -o json | jq -er '.data.LEGION_BOOT_TOKEN // empty | @base64d' | grep .; }
-old_token=$(boot_token) || blocked "the merger's boot Secret $pod-boot has no LEGION_BOOT_TOKEN"
+old_token=$(boot_token) || fail "the merger's boot Secret $pod-boot has no LEGION_BOOT_TOKEN: the Sandbox runtime under test writes it"
 (umask 077 && printf '%s' "$old_token" >"$work/old-boot-token")
 end_claim_pod "$tree1" merger delete
 uid=$ended_pod_uid
@@ -1797,7 +2162,7 @@ make_omp_home "$omp_home"
 bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --profile "$profile" --home "$omp_home" --dest "$work/plugin" >/dev/null
 bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --home "$omp_home" --dest "$evidence/model-gateway" --cache-dir "$work/model-gateway-cache" >/dev/null ||
   blocked "the controller's model route could not be installed (lib/install-model-gateway.sh)"
-pin=$(bun "$root/packages/daemon/src/daemon/omp-pin.ts")
+pin=$(<"$root/.omp-pin")
 cat >"$work/controller.yaml" <<EOF
 project: $project
 daemon_url: http://$host:$port_daemon
@@ -1987,7 +2352,7 @@ if [ -n "$skip_controller" ]; then
 else
 # report_key STATUS prints the key of this run's report issue in STATUS, or nothing.
 report_key() {
-  dispatch_get "issues?project=$project&status=$1&limit=250" | jq -r --arg t "$report_title" '[.[] | select(.title == $t)][0].key // empty'
+  dispatch_get "issues?project=$project&status=$1" | jq -r --arg t "$report_title" '[.[] | select(.title == $t)][0].key // empty'
 }
 report_in_icebox() { [ -n "$(report_key icebox)" ]; }
 until_true 600 "the controller's report issue '$report_title' in $project, parked in icebox" report_in_icebox
@@ -2095,6 +2460,27 @@ begin "done"
 wait_for_worker "$tree1" merger
 send_agent "$tree1" merger "Stage 4b proof READY operation: verify pull request #$pr_number is ready to merge and call the legion tool's handoff_complete with ready true."
 wait_for_phase "$tree1" awaiting_merge 900
+# READY is posted with no review thread left unresolved at the head: the merger's legion threads
+# resolve, the run the reviewer's approval leaves the last round's acceptances to, closed the
+# reviewer's thread, and nothing else is open for the queue's unresolved-thread gate to count.
+ready_packet() {
+  dispatch_events "$tree1" | jq -er --arg ready "READY #$pr_number at " \
+    '[.[] | select(.type == "message.created" and (.payload.body | startswith($ready))) | .payload.body] | last | select(. != null)'
+}
+until_true 300 "the daemon's READY packet for pull request #$pr_number on $tree1" ready_packet
+ready_packet >"$evidence/ready-packet.txt"
+ready_head=$(timeout 60 gh api "repos/$repo/pulls/$pr_number" --jq .head.sha) || fail "read pull request #$pr_number's head"
+ready_sha=$(sed -n '1s/^READY #[0-9]* at \([0-9a-f]\{7,40\}\) .*/\1/p' "$evidence/ready-packet.txt")
+[ -n "$ready_sha" ] && [ "${ready_head#"$ready_sha"}" != "$ready_head" ] ||
+  fail "the READY packet's first line names '${ready_sha:-no sha}', not pull request #$pr_number's head $ready_head: $(head -1 "$evidence/ready-packet.txt")"
+review_threads >"$evidence/review-threads-at-ready.json" || fail "read pull request #$pr_number's review threads at READY"
+threads_all_resolved "$evidence/review-threads-at-ready.json" "$thread_id" ||
+  fail "READY was posted at $ready_head with review threads unresolved: $(jq -c '[.[] | select(.isResolved | not) | {id, newest: ([.comments[] | select(.state == "SUBMITTED")] | last | .author)}]' "$evidence/review-threads-at-ready.json"), or without the reviewer's thread $thread_id"
+# Control: the same record with the reviewer's thread unresolved fails.
+jq --arg id "$thread_id" 'map(if .id == $id then .isResolved = false else . end)' \
+  "$evidence/review-threads-at-ready.json" >"$evidence/review-threads-unresolved-negative.json"
+expect_failure unresolved-thread-at-ready threads_all_resolved "$evidence/review-threads-unresolved-negative.json" "$thread_id"
+note "READY #$pr_number was posted at $ready_head with $(jq length "$evidence/review-threads-at-ready.json") review threads, 0 unresolved, the reviewer's $thread_id resolved"
 # The hold is an open descriptor (hold_smoke_main): start no background child before
 # release_smoke_main below, or it inherits the descriptor and holds the smoke main past this run's
 # window. `9>&- 7>&-` does not close it: its number is allocated at runtime, not fixed.
@@ -2123,16 +2509,53 @@ note "$tree1's architect claimed its root issue, and the done released the claim
 pass
 
 begin node-release
-# Tree 1 lingers (linger_hours 0.3): after the pool's consolidateAfter, its node is gone while its
-# Sandboxes still exist Suspended and its volume is Bound.
+# Tree 1 lingers (linger_hours 0.3): its Sandboxes stay Suspended, its volume stays Bound, and no pod
+# of the run is left on its node. The pool consolidates a node only once it is empty, so the node is
+# gone after consolidateAfter unless another project's pod is now on it: a tree pod refuses only a
+# node holding another tree's pod (the runtime's affinity, internal/runtime/sandbox/manifest.go), and
+# the image probe carries no tree label, so a production daemon running beside the run can place a
+# pod on the node tree 1 emptied. That pod keeps the node from the moment it is bound, Pending through
+# its init containers included. Either case passes, and the note says which one it saw.
 node=$(jq -r 'select(.object.kind == "Pod") | .object | select(.metadata.labels["legion.dev/tree"] == "'"$tree1"'") | .spec.nodeName // empty' "$evidence/pod-watch.json" | tail -1)
 [ -n "$node" ] || fail "the pod watch saw no pod of tree 1 on a node, so there is no node whose release to wait for"
-until_true 1500 "tree 1's node $node to be released" sh -c "out=\$(timeout 120 kubectl --context '$operator' get node '$node' -o name --ignore-not-found) && [ -z \"\$out\" ]"
+node_release=
+node_released() {
+  local out pods others
+  out=$(timeout 120 kubectl --context "$operator" get node "$1" -o name --ignore-not-found) || return 1
+  if [ -z "$out" ]; then
+    node_release="node $1 is gone"
+    return 0
+  fi
+  pods=$(timeout 120 kubectl --context "$operator" -n "$namespace" get pods --field-selector "spec.nodeName=$1" -o json) || return 1
+  jq -e --arg run "$run_label" '[.items[] | select(.metadata.labels["legion.dev/project"] == $run and .status.phase != "Succeeded" and .status.phase != "Failed")] | length == 0' <<<"$pods" >/dev/null || return 1
+  others=$(jq -r --arg run "$run_label" '[.items[] | select(.status.phase != "Succeeded" and .status.phase != "Failed") | (.metadata.labels["legion.dev/project"] // empty) as $p | select($p != $run) | "\($p)/\(.metadata.name) \(.status.phase)"] | join(", ")' <<<"$pods")
+  [ -n "$others" ] || return 1
+  node_release="node $1 stays, carrying no pod of the run while another project's pod is on it ($others)"
+}
+# A timed-out wait says what the node held: a pod of the run that never left, another project's pod,
+# or nothing the pool ever deleted.
+report_node_release() {
+  local out
+  if ! out=$(timeout 120 kubectl --context "$operator" get node "$node" -o name --ignore-not-found 2>&1); then
+    note "node $node could not be read: $out"
+    return
+  fi
+  if [ -z "$out" ]; then
+    note "node $node no longer exists"
+    return
+  fi
+  note "node $node still exists; its pods (namespace/name, project label, phase):"
+  timeout 120 kubectl --context "$operator" get pods -A --field-selector "spec.nodeName=$node" -o json |
+    jq -r '.items[] | "     \(.metadata.namespace)/\(.metadata.name) \(.metadata.labels["legion.dev/project"] // "-") \(.status.phase)"'
+}
+timeout_hook=report_node_release
+until_true 1500 "tree 1's node $node to be released, or to carry no pod of the run while another project's pod is on it" node_released "$node"
+timeout_hook=
 modes=$(op get sandboxes -l "legion.dev/project=$run_label,legion.dev/tree=$tree1" -o jsonpath='{.items[*].spec.operatingMode}')
 bound=$(op get pvc -l "legion.dev/project=$run_label,legion.dev/tree=$tree1" -o jsonpath='{.items[*].status.phase}')
-if [ -z "$modes" ] || grep -qv Suspended <<<"$(tr ' ' '\n' <<<"$modes")"; then fail "tree 1's Sandboxes are '$modes' after its node went, want all Suspended"; fi
-[ "$bound" = Bound ] || fail "tree 1's volume is '$bound' after its node went, want Bound"
-note "at $(date -u +%FT%TZ) node $node is gone; tree 1's Sandboxes Suspended ($modes), its volume Bound"
+if [ -z "$modes" ] || grep -qv Suspended <<<"$(tr ' ' '\n' <<<"$modes")"; then fail "tree 1's Sandboxes are '$modes' after its node was released ($node_release), want all Suspended"; fi
+[ "$bound" = Bound ] || fail "tree 1's volume is '$bound' after its node was released ($node_release), want Bound"
+note "at $(date -u +%FT%TZ) $node_release; tree 1's Sandboxes Suspended ($modes), its volume Bound"
 pass
 
 begin close
@@ -2179,7 +2602,7 @@ esac
 [ "$(tree_objects "$tree1")" = "$objects_before" ] || fail "the refused close changed tree 1's objects: $objects_before, then $(tree_objects "$tree1")"
 [ "$(states1)" = "$claims_before" ] || fail "the refused close changed tree 1's claims: $claims_before, then $(states1)"
 note "the operator's close of workflow tree $tree1 was refused ($refusal); its claims $claims_before and objects $objects_before are unchanged"
-set_status "$tree1" backlog
+take_out "$tree1"
 printf '%s\n' "You are a Stage 4b operator-close fixture, the root of a tree no workflow issue backs. Do nothing and wait." >"$work/op-architect.md"
 printf '%s\n' "You are a Stage 4b operator-close fixture, a worker of that tree. Do nothing and wait." >"$work/op-worker.md"
 op_root=$(claims_cli spawn --json --tree "$optree" --issue "$optree" --role architect --prompt-file "$work/op-architect.md" | jq -er .token) ||
@@ -2281,17 +2704,17 @@ namespace_clean
 begin production-audit
 audit_verdict_ok=
 if production_audit; then audit_verdict_ok=1; fi
-[ -n "$audit_verdict_ok" ] || fail "the run wrote outside LEGSMOKE or subscribed outside it: $evidence/production-issues-touched-outside.json, $evidence/production-interests-outside.json"
-printf '["AGENTC-1"]\n' >"$evidence/controls/audit-outside.json"
+[ -n "$audit_verdict_ok" ] || fail "$(audit_failure)"
+printf '["ACME-1"]\n' >"$evidence/controls/audit-outside.json"
 expect_failure production-audit-outside audit_verdict "$evidence/controls/audit-outside.json" "$evidence/production-interests-outside.json"
 # The interest filter, on the run's own samples with one topic outside the run added for a session
 # of the run, must find that topic.
 control_session=$(jq -r '.[0] // "legion-e2e4b-control"' "$evidence/run-sessions.json")
-{ cat "$evidence/interests.jsonl"; jq -cn --arg s "$control_session" '{at: "control", session_id: $s, topics: ["notifications.dispatch.issue.AGENTC-1"]}'; } >"$evidence/controls/interests-outside.jsonl"
+{ cat "$evidence/interests.jsonl"; jq -cn --arg s "$control_session" '{at: "control", session_id: $s, topics: ["notifications.dispatch.issue.ACME-1"]}'; } >"$evidence/controls/interests-outside.jsonl"
 caught=$(interests_outside "$evidence/controls/interests-outside.jsonl")
-jq -e 'any(.[]; .topic == "notifications.dispatch.issue.AGENTC-1")' <<<"$caught" >/dev/null ||
+jq -e 'any(.[]; .topic == "notifications.dispatch.issue.ACME-1")' <<<"$caught" >/dev/null ||
   fail "the interest filter let an outside topic through: $caught"
-note "the interest filter's control: an added topic outside the run (notifications.dispatch.issue.AGENTC-1) is caught"
+note "the interest filter's control: an added topic outside the run (notifications.dispatch.issue.ACME-1) is caught"
 # The unanswered-sample rule: a blip passes, a listener that stops answering fails, and so does a
 # listener restart past its bound or a 503 of another body; a restart within the bound passes.
 outcomes() { # outcomes START_SECOND OUTCOME…: one control sample per OUTCOME, 5 s apart

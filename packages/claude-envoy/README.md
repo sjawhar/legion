@@ -78,8 +78,8 @@ Claude Code drops invalid meta keys, so the server filters them before writing t
 | --- | --- |
 | `producer` | Envoy producer, or `unknown` for a malformed envelope (`source` is Claude Code's own attribute, naming the channel). |
 | `topic` | NATS subject that delivered the event. |
-| `event_id` | Envoy event identity; used for channel-side deduplication. |
-| `dedupe_key` | Legacy/logical identity when supplied by Envoy. |
+| `event_id` | Envoy event identity of this publish; the listener mints a new one for every send. The channel uses it to deliver one copy of a publish that arrives on two overlapping subscriptions. |
+| `dedupe_key` | Identity a re-send shares with the first delivery; the channel uses it to drop the re-send. |
 | `urgency` | Optional Envoy priority. |
 | `from_session` | Optional source session identifier. |
 | `expects_reply` | Optional Envoy reply expectation. |
@@ -104,14 +104,16 @@ human approval surface.
 
 ## Skills
 
-The plugin ships three skills, `claude-envoy:envoy`, `claude-envoy:dispatch` and
-`claude-envoy:dispatch-first`, which teach the tools above. `skills/` holds one relative symlink per
-skill into the repository-root `skills/`, which stays their only source; Claude Code copies each
-target into the plugin cache at install. With Dispatch configured, the `dispatch-first` hook also
-puts `dispatch-first` into the model's context on every `SessionStart` (startup, resume, clear,
-compact, fork) and `SubagentStart`, as the `hooks/hooks.json` bullet above describes.
+The plugin ships four skills, `claude-envoy:envoy`, `claude-envoy:dispatch`,
+`claude-envoy:dispatch-first` and `claude-envoy:dispatch-brainstorming`, which teach the tools
+above. `skills/` holds one relative symlink per skill into the repository-root `skills/`, which
+stays their only source; Claude Code copies each target into the plugin cache at install. With
+Dispatch configured, the `dispatch-first` hook also puts `dispatch-first` into the model's context
+on every `SessionStart` (startup, resume, clear, compact, fork) and `SubagentStart`, as the
+`hooks/hooks.json` bullet above describes; it sends a design conversation or a plan to
+`dispatch-brainstorming`, which the session loads by name.
 
-`envoy`, `dispatch` and `dispatch-first` are the three a standalone Claude Code session uses. The other root skills
+`envoy`, `dispatch`, `dispatch-first` and `dispatch-brainstorming` are the four a standalone Claude Code session uses. The other root skills
 stay out: they belong to Legion's roles (the architect, controller, oracle and retro skills, and the
 phase workers' `legion-worker` and `ce-simplify-code`) and to the reviewer's `thermonuclear-*`
 pair, and those run on Oh My Pi (`skills/AGENTS.md`). The `thermonuclear-*` rubrics also ship in
@@ -125,10 +127,12 @@ The marketplace installs this package's git tree into Claude Code's plugin cache
 dependency install because the package has no lockfile of its own (the monorepo's lives at the
 root). So the two executables ship as committed single-file Bun bundles, `dist/envoy-channel.js`
 and `dist/session-hook.js`, with every dependency inlined (`@legion/contracts`,
-`@legion/envoy-client`, `@modelcontextprotocol/sdk`, `nats`, `zod`, `ky`; the package version is
-inlined from `package.json`, so the MCP server, `plugin.json`, and `package.json` spell one version).
+`@legion/envoy-client`, `@modelcontextprotocol/sdk`, `nats`, `zod` and theirs; the package version
+is inlined from `package.json`, so the MCP server, `plugin.json`, and `package.json` spell one
+version). `dist/THIRD_PARTY_NOTICES` beside them carries the license of every third-party package
+they inline, written from Bun's metafile by `scripts/third-party-notices.ts` at the repository root.
 
-- `bun run build` rebuilds `dist/` (`Bun.build`, target `bun`, minification disabled: whitespace and identifiers stay readable so independent changes merge at line level; syntax stays off because Bun 1.3.14's constant folding can truncate concatenated string literals in CI builds; no sourcemap).
+- `bun run build` rebuilds `dist/` (`Bun.build`, target `bun`, minification disabled: whitespace and identifiers stay readable so independent changes merge at line level; syntax stays off because Bun 1.3.14's constant folding can truncate concatenated string literals in CI builds; no sourcemap), notices included.
 - `bun run check-dist` rebuilds into a scratch directory and fails when it differs from the
   committed files. CI runs it on the Bun version pinned in the repo-root `.bun-version`, because
   bundler output differs across Bun releases; rebuild on that version before committing.

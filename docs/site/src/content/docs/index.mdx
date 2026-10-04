@@ -1,0 +1,48 @@
+---
+title: Legion, Dispatch and the Secrets Broker
+description: Coding agents that work tracked issues end to end, with every human decision made and recorded in one place.
+sidebar:
+  label: Welcome
+---
+
+import { CardGrid, LinkCard } from "@astrojs/starlight/components";
+
+Legion runs teams of coding agents on real issues: an architect writes the spec, and a planner,
+implementer, tester and reviewer carry each change to a pull request that is ready to merge. People
+stay in charge of the decisions that matter. They say what to build, approve the spec before work
+starts, answer the questions agents raise, approve the credentials agents use, and merge the
+result.
+
+Three components make that work, joined by Envoy, which carries the events between them:
+
+<CardGrid>
+  <LinkCard
+    title="Legion"
+    description="The coordinator. It admits the issues handed to it, runs the agents that work them, and keeps each one to its phase and its gates."
+    href="/legion/legion/"
+  />
+  <LinkCard
+    title="Dispatch"
+    description="The record of work and decisions: projects, issues, specs, comments, and the Inbox where every question for a person waits for an answer."
+    href="/legion/dispatch/"
+  />
+  <LinkCard
+    title="Secrets Broker"
+    description="Short-lived credentials for agents, granted by rule or by a person's approval in Dispatch, and never handed out as standing secrets."
+    href="/legion/broker/"
+  />
+  <LinkCard
+    title="How they fit together"
+    description="Who uses each component, how they connect, and how an issue travels from Triage to Done."
+    href="/legion/how-it-fits/"
+  />
+</CardGrid>
+
+## Where to start
+
+- **You review and decide.** Start with [Dispatch](/legion/dispatch/): the Inbox is where agents'
+  questions, spec approvals and credential requests reach you.
+- **You run Legion.** Start with [how the pieces fit together](/legion/how-it-fits/), then
+  [Legion](/legion/legion/) for running the coordinator and its agents.
+- **You write these docs.** [Contributing to these docs](/legion/contributing/) covers page layout,
+  generated reference pages and media.

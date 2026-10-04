@@ -5,13 +5,11 @@
 package architecture
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"io"
 	"sort"
 	"strings"
-	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
 
@@ -71,13 +69,19 @@ func Parse(files map[string][]byte) (Model, error) {
 		// Text only: the prose lands in a text column and the snapshot in
 		// jsonb, neither of which takes invalid UTF-8 or NUL — reject here so
 		// the failure is a named model problem, not a projection error.
-		if !utf8.Valid(content) || bytes.IndexByte(content, 0) >= 0 {
+		if !text.StorableBytes(content) {
 			problems = append(problems, fmt.Errorf("%s: file must be valid UTF-8 text without NUL bytes", name))
 			continue
 		}
 		matter, prose, err := splitFrontMatter(content)
 		if err != nil {
 			problems = append(problems, fmt.Errorf("%s: %w", name, err))
+			continue
+		}
+		// YAML spells U+0000 in plain ASCII ("\0", "\x00", "\u0000"), so the
+		// decoded front matter is checked as the bytes were.
+		if field := unstorableFrontMatter(matter); field != "" {
+			problems = append(problems, fmt.Errorf("%s: front matter %s must be valid UTF-8 text without NUL characters", name, field))
 			continue
 		}
 		if existing, dup := firstFile[id]; dup {
@@ -140,6 +144,28 @@ func Parse(files map[string][]byte) (Model, error) {
 		model.Components = append(model.Components, components[id])
 	}
 	return model, nil
+}
+
+// unstorableFrontMatter names the first front-matter field holding a
+// string PostgreSQL cannot store (text.Storable), or returns "".
+func unstorableFrontMatter(matter frontMatter) string {
+	fields := []struct {
+		name   string
+		values []string
+	}{
+		{"title", []string{matter.Title}},
+		{"parent", []string{matter.Parent}},
+		{"depends_on", matter.DependsOn},
+		{"paths", matter.Paths},
+	}
+	for _, field := range fields {
+		for _, value := range field.values {
+			if !text.Storable(value) {
+				return field.name
+			}
+		}
+	}
+	return ""
 }
 
 // containmentCycles walks each component's parent chain in ids order and

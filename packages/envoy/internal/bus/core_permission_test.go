@@ -2,6 +2,7 @@ package bus_test
 
 import (
 	"errors"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -31,7 +32,7 @@ func grantedClient(t *testing.T) (*bus.Client, *natsgo.Conn) {
 		t.Fatalf("connect: %v", err)
 	}
 	t.Cleanup(client.Close)
-	subscriber, err := bus.Dial("role-subscriber", []string{uri})
+	subscriber, err := bus.Dial("role-subscriber", []string{uri}, os.LookupEnv)
 	if err != nil {
 		t.Fatalf("connect subscriber: %v", err)
 	}

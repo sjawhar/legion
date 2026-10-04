@@ -151,7 +151,7 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	assignee, assigneeProvided, err := s.parseIssueAssignee(input.Assignee)
+	assignee, assigneeProvided, err := s.parseIssueAssignee(r.Context(), input.Assignee)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -341,7 +341,7 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 	s.deps.Docs.ScheduleSettlement(artifactID)
 	s.publish(event)
 	if advice != nil && input.Spec != nil && strings.TrimSpace(*input.Spec) != "" {
-		advice.DecisionBlocks = countAskBlocks(markdown)
+		advice.documentBlocks = readDocumentBlocks(markdown)
 	}
 	WriteJSON(w, http.StatusCreated, withAdvice(issue, advice))
 }

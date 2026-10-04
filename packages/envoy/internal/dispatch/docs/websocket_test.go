@@ -13,8 +13,8 @@ import (
 	gws "github.com/gorilla/websocket"
 	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/encoding"
+	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
-	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
@@ -175,7 +175,7 @@ func TestLoadFailureMakesDocumentServiceUnavailable(t *testing.T) {
 		Store:       database,
 		Persistence: failingVersionedStore{VersionedStore: NewPgVersioned(database), loadErr: errors.New("load failed")},
 		Events:      events.NewBroker(),
-		Identity:    identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: map[string]struct{}{"alice": {}}},
+		Identity:    headerIdentity(database),
 	})
 	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
 
@@ -195,14 +195,16 @@ func TestLoadFailureMakesDocumentServiceUnavailable(t *testing.T) {
 	}
 }
 
-func TestCorruptLoadMakesDocumentServiceUnavailable(t *testing.T) {
+// A history that does not decode refuses the socket before any upgrade, and a read of it is the
+// state a rebuild repairs (ErrDocumentUnloadable) rather than any failed room's ErrServiceUnavailable.
+func TestCorruptLoadRefusesTheSocketAndReadsAsUnloadable(t *testing.T) {
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "before")
 	service := New(Deps{
 		Store:       database,
 		Persistence: failingVersionedStore{VersionedStore: NewPgVersioned(database), loadUpdate: []byte{0xff}},
 		Events:      events.NewBroker(),
-		Identity:    identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: map[string]struct{}{"alice": {}}},
+		Identity:    headerIdentity(database),
 	})
 	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
 
@@ -217,8 +219,100 @@ func TestCorruptLoadMakesDocumentServiceUnavailable(t *testing.T) {
 	if err == nil || response == nil || response.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("corrupt-room connection: response=%#v err=%v, want HTTP 503", response, err)
 	}
-	if _, err := service.Text(context.Background(), artifactID); !errors.Is(err, ErrServiceUnavailable) {
-		t.Fatalf("corrupt load = %v, want ErrServiceUnavailable", err)
+	if _, err := service.Text(context.Background(), artifactID); !errors.Is(err, ErrDocumentUnloadable) || errors.Is(err, ErrServiceUnavailable) {
+		t.Fatalf("corrupt load = %v, want ErrDocumentUnloadable", err)
+	}
+}
+
+// A cold socket's admission check hands the room's load the history it decoded, so the history
+// is read once - but only while it is still the stored one. An update appended in between raises
+// the head, and the load reads the store again rather than open the room without that update.
+func TestASocketsPreloadIsServedOnlyWhileTheHistoryHasNotMoved(t *testing.T) {
+	service, artifactID := newTestService(t)
+	seedServiceText(t, service, artifactID, "before")
+	adapter := &servicePersistenceAdapter{store: service.persistence, service: service}
+	preload := func(t *testing.T) []byte {
+		t.Helper()
+		_, loaded, err := service.loadDocument(context.Background(), artifactID)
+		if err != nil || loaded == nil || len(loaded.Update) == 0 {
+			t.Fatalf("load cold document: loaded=%v err=%v, want its durable history", loaded, err)
+		}
+		service.preloads.Store(artifactID, &preloadedDocument{loaded: *loaded})
+		return loaded.Update
+	}
+
+	held := preload(t)
+	served, err := adapter.LoadDoc(artifactID)
+	if err != nil || &served[0] != &held[0] {
+		t.Fatalf("load with a current preload served %d bytes (%v), want the preloaded history itself", len(served), err)
+	}
+	if _, kept := service.preloads.Load(artifactID); kept {
+		t.Fatal("a served preload stayed behind for a later load")
+	}
+
+	preload(t)
+	moved, err := encodeDocumentTree(&pmdoc.Node{Type: "doc", Children: []*pmdoc.Node{{
+		Type: "paragraph", Children: []*pmdoc.Node{{Type: "text", Text: "appended"}},
+	}}})
+	if err != nil {
+		t.Fatalf("encode appended update: %v", err)
+	}
+	if _, err := service.persistence.AppendUpdate(context.Background(), artifactID, moved); err != nil {
+		t.Fatalf("append update after the check: %v", err)
+	}
+	served, err = adapter.LoadDoc(artifactID)
+	if err != nil {
+		t.Fatalf("load after the history moved: %v", err)
+	}
+	doc := crdt.New()
+	if err := crdt.ApplyUpdateV1(doc, served, nil); err != nil {
+		t.Fatalf("decode the loaded history: %v", err)
+	}
+	if markdown, err := renderDocument(doc); err != nil || !strings.Contains(markdown, "appended") {
+		t.Fatalf("load after the history moved served %q (%v), want the appended update", markdown, err)
+	}
+}
+
+// A browser editor normalizes a tree it cannot represent and writes the result back, so the
+// document websocket admits no connection to a room outside the Proof schema: resident or only
+// stored, refused by the tree reader or only by the renderer. It completes the upgrade only to
+// close with documentSchemaCloseCode before any sync, a code a browser can read, and neither loads
+// nor fails the room.
+func TestDocumentSocketRefusesARoomOutsideTheSchema(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		corrupt func(*testing.T, *Service, string)
+	}{
+		{"a resident room the reader refuses", writeSchemaInvalidElement},
+		{"a stored history only the renderer refuses", func(t *testing.T, service *Service, artifactID string) {
+			if err := AppendRenderOnlySchemaViolationForTest(context.Background(), service.store, artifactID); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service, artifactID := newTestService(t)
+			seedServiceText(t, service, artifactID, "before")
+			test.corrupt(t, service, artifactID)
+			httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
+			t.Cleanup(httpServer.Close)
+			headers := http.Header{"X-Dispatch-User": []string{"alice"}}
+			wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/ws/doc/" + artifactID
+			connection, response, err := gws.DefaultDialer.Dial(wsURL, headers)
+			if err != nil {
+				t.Fatalf("connect outside-schema document: response=%#v err=%v, want an upgrade the server closes", response, err)
+			}
+			t.Cleanup(func() { _ = connection.Close() })
+			connection.SetReadDeadline(time.Now().Add(time.Second))
+			_, message, err := connection.ReadMessage()
+			var closed *gws.CloseError
+			if !errors.As(err, &closed) || closed.Code != documentSchemaCloseCode {
+				t.Fatalf("first frame = %q (%v), want close %d before any sync", message, err, documentSchemaCloseCode)
+			}
+			if _, err := service.Text(context.Background(), artifactID); !errors.Is(err, ErrDocOutsideSchema) {
+				t.Fatalf("read after refused socket: %v, want ErrDocOutsideSchema", err)
+			}
+		})
 	}
 }
 
@@ -227,7 +321,7 @@ func TestShutdownClosesDocumentPeersBeforeDrain(t *testing.T) {
 	artifactID := createDocument(t, database, "before")
 	service := New(Deps{
 		Store: database, Events: events.NewBroker(),
-		Identity: identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: map[string]struct{}{"alice": {}}},
+		Identity: headerIdentity(database),
 	})
 	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
 	seedServiceText(t, service, artifactID, "before")
@@ -267,7 +361,7 @@ func TestShutdownBoundsPeerCloseDuringLockedAppend(t *testing.T) {
 	artifactID := createDocument(t, database, "before")
 	service := New(Deps{
 		Store: database, Events: events.NewBroker(),
-		Identity: identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: map[string]struct{}{"alice": {}}},
+		Identity: headerIdentity(database),
 		Settle:   time.Hour,
 	})
 	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
@@ -290,9 +384,7 @@ func TestShutdownBoundsPeerCloseDuringLockedAppend(t *testing.T) {
 	if _, err := locker.Exec(context.Background(), `select pg_advisory_xact_lock(hashtext($1))`, artifactID); err != nil {
 		t.Fatalf("lock document append: %v", err)
 	}
-	if _, err := service.ReplaceText(context.Background(), artifactID, "after", model.Actor{Kind: "user", ID: "alice"}); err != nil {
-		t.Fatalf("write delayed document: %v", err)
-	}
+	editLiveTree(t, service, artifactID, replaceRun("before", "after"))
 	if !service.hasDurableAppend(artifactID) {
 		t.Fatal("durable append finished while its advisory lock was held")
 	}
@@ -319,7 +411,7 @@ func TestAppendFailureClosesDocumentConnectionAndReloadsRoom(t *testing.T) {
 		Store:       database,
 		Persistence: failingVersionedStore{VersionedStore: NewPgVersioned(database), appendErr: errors.New("append failed")},
 		Events:      events.NewBroker(),
-		Identity:    identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: map[string]struct{}{"alice": {}}},
+		Identity:    headerIdentity(database),
 		Settle:      time.Hour,
 	})
 	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
@@ -334,9 +426,7 @@ func TestAppendFailureClosesDocumentConnectionAndReloadsRoom(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = connection.Close() })
 
-	if _, err := service.ReplaceText(context.Background(), artifactID, "after", model.Actor{Kind: "user", ID: "alice"}); err != nil {
-		t.Fatalf("replace text before persistence failure: %v", err)
-	}
+	editLiveTree(t, service, artifactID, replaceRun("before", "after"))
 	connection.SetReadDeadline(time.Now().Add(time.Second))
 	for {
 		if _, _, err := connection.ReadMessage(); err != nil {
@@ -357,7 +447,7 @@ func TestFailedRoomEvictsAndReloadsOnNextAccess(t *testing.T) {
 		Store:       database,
 		Persistence: &failingOnceVersionedStore{VersionedStore: NewPgVersioned(database)},
 		Events:      events.NewBroker(),
-		Identity:    identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: map[string]struct{}{"alice": {}}},
+		Identity:    headerIdentity(database),
 	})
 	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
 	seedServiceText(t, service, artifactID, "before")
@@ -389,12 +479,12 @@ func TestDocumentBearerCannotForgeVerifiedServiceSubject(t *testing.T) {
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "# First")
 	service := New(Deps{
-		Store:      database,
-		Events:     events.NewBroker(),
-		Identity:   identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: map[string]struct{}{"alice": {}}},
-		AgentToken: "doc-agent-token",
-		ServerURL:  "https://dispatch.example",
-		Settle:     20 * time.Millisecond,
+		Store:       database,
+		Events:      events.NewBroker(),
+		Identity:    headerIdentity(database),
+		AgentTokens: sharedAgentTokens(t, "doc-agent-token"),
+		ServerURL:   "https://dispatch.example",
+		Settle:      20 * time.Millisecond,
 	})
 	t.Cleanup(func() {
 		if err := service.Shutdown(context.Background()); err != nil {
@@ -448,6 +538,39 @@ func TestDocumentBearerCannotForgeVerifiedServiceSubject(t *testing.T) {
 	}
 	if session.Origin == nil || session.Origin.Host != "forge" {
 		t.Fatalf("author origin = %#v, want the header's origin preserved", session.Origin)
+	}
+}
+
+// sharedAgentTokens is a DISPATCH_AGENT_TOKEN setting parsed as the server parses it at boot.
+func sharedAgentTokens(t *testing.T, setting string) *auth.SharedAgentTokens {
+	t.Helper()
+	tokens, err := auth.ParseSharedAgentTokens(setting)
+	if err != nil {
+		t.Fatalf("ParseSharedAgentTokens(%q): %v", setting, err)
+	}
+	return tokens
+}
+
+// The document websocket takes a bearer's session actor only when the bearer is one of the shared
+// agent token's values; one byte off, or a value the setting does not list, the same actor is
+// refused.
+func TestDocumentBearerMustBeTheSharedToken(t *testing.T) {
+	service := &Service{agentTokens: sharedAgentTokens(t, "doc-agent-token old-doc-token")}
+	for _, test := range []struct {
+		authorization string
+		admitted      bool
+	}{
+		{authorization: "Bearer doc-agent-token", admitted: true},
+		{authorization: "Bearer old-doc-token", admitted: true},
+		{authorization: "Bearer doc-agent-tokem", admitted: false},
+		{authorization: "Bearer other-doc-token", admitted: false},
+	} {
+		request := httptest.NewRequest(http.MethodGet, "/ws/doc/room", nil)
+		request.Header.Set("Authorization", test.authorization)
+		request.Header.Set("X-Dispatch-Actor", `{"kind":"session","id":"session-0123456789abcdef"}`)
+		if _, err := service.requestActor(request); (err == nil) != test.admitted {
+			t.Errorf("requestActor(Authorization %q) err = %v, want admitted %t", test.authorization, err, test.admitted)
+		}
 	}
 }
 

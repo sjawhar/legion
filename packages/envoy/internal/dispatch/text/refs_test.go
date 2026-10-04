@@ -1,8 +1,13 @@
 package text
 
 import (
+	"encoding/json"
+	"os"
 	"reflect"
+	"slices"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestExtractRecognizesDispatchAndServerReferences(t *testing.T) {
@@ -87,6 +92,86 @@ func TestExtractTerminatesArtifactSlugsAtMarkdownPunctuation(t *testing.T) {
 	}
 	if got := Extract(body, "https://dispatch.example"); !reflect.DeepEqual(got, want) {
 		t.Fatalf("Extract() = %#v, want %#v", got, want)
+	}
+}
+
+// The Go reader's half of the shared text table: each body cites the references its row lists, in
+// order of first appearance, and nothing else, so the reference graph and the dashboard composer
+// agree on what a text cites. The table is generated from `DISPATCH_TEXT_REFERENCES` in
+// `@legion/contracts`, which `packages/contracts/src/dispatch-text-references.test.ts` holds this
+// file to; the composer walks the same rows.
+func TestExtractMatchesTheSharedTextTable(t *testing.T) {
+	raw, err := os.ReadFile("testdata/dispatch-text-references.json")
+	if err != nil {
+		t.Fatalf("read table: %v", err)
+	}
+	var rows []struct {
+		Body   string   `json:"body"`
+		Origin string   `json:"origin"`
+		Refs   []string `json:"refs"`
+	}
+	if err := json.Unmarshal(raw, &rows); err != nil {
+		t.Fatalf("parse table: %v", err)
+	}
+	if len(rows) == 0 {
+		t.Fatal("the shared text table is empty")
+	}
+
+	for _, row := range rows {
+		t.Run(row.Body, func(t *testing.T) {
+			server := row.Origin
+			if server == "" {
+				server = "https://dispatch.test"
+			}
+			want := []Ref{}
+			for _, ref := range row.Refs {
+				parsed := Extract(ref, server)
+				if len(parsed) != 1 || parsed[0].Kind == "url" {
+					t.Fatalf("%s is not a reference: %#v", ref, parsed)
+				}
+				want = append(want, parsed[0])
+			}
+			got := []Ref{}
+			for _, ref := range Extract(row.Body, server) {
+				if ref.Kind != "url" && !slices.Contains(got, ref) {
+					got = append(got, ref)
+				}
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("Extract() cites %#v; want %#v", got, want)
+			}
+		})
+	}
+}
+
+// A body near the 1 MiB request cap that trails a reference with a run of closing parentheses,
+// alone or between the emphasis delimiters the trim also drops, or with a run of square brackets
+// after a dashboard URL, still cites that reference, in one pass over the run. The bound is
+// generous for a loaded machine; a trim that recounts the parentheses for every character it drops
+// takes tens of seconds on these bodies.
+func TestExtractTrimsALongClosingRunInLinearTime(t *testing.T) {
+	const server = "https://dispatch.example"
+	const size = 1 << 20
+	issue := []Ref{{Kind: "issue", IssueKey: "CORE-1", ID: "CORE-1"}}
+	for _, test := range []struct {
+		name string
+		body string
+	}{
+		{"parentheses", "dispatch://CORE-1" + strings.Repeat(")", size)},
+		{"parentheses and underscores", "dispatch://CORE-1" + strings.Repeat(")_", size/2)},
+		{"parentheses and asterisks after a dashboard URL", server + "/issues/CORE-1" + strings.Repeat(")*", size/2)},
+		{"square brackets after a dashboard URL", server + "/issues/CORE-1" + strings.Repeat("]", size)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			start := time.Now()
+			got := Extract(test.body, server)
+			if elapsed := time.Since(start); elapsed > 3*time.Second {
+				t.Errorf("Extract() took %s on a %d-byte body; want one pass", elapsed, len(test.body))
+			}
+			if !reflect.DeepEqual(got, issue) {
+				t.Errorf("Extract() = %#v; want %#v", got, issue)
+			}
+		})
 	}
 }
 

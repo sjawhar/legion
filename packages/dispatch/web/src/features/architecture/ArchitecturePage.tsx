@@ -232,8 +232,21 @@ function ArchitectureTreeView({
   };
   useKeymapScope("architecture");
   useKeymap("architecture", [
-    { id: "next", keys: "j", label: "Next component", run: () => rove(1) },
-    { id: "previous", keys: "k", label: "Previous component", run: () => rove(-1) },
+    // Movement is what the arrow keys are for; a palette row that moves the cursor helps nobody.
+    {
+      id: "next",
+      keys: "j",
+      label: "Next component",
+      palette: false,
+      run: () => rove(1),
+    },
+    {
+      id: "previous",
+      keys: "k",
+      label: "Previous component",
+      palette: false,
+      run: () => rove(-1),
+    },
     {
       id: "arrows",
       keys: ["ArrowDown", "ArrowUp"],
@@ -242,9 +255,11 @@ function ArchitectureTreeView({
       when: () => rowAround(document.activeElement) !== null,
     },
     {
+      // Both keys do the same thing, so the palette offers it; a row presses Enter.
       id: "open",
       keys: ["Enter", "o"],
       label: "Open the focused component: its children, else its details",
+      palette: true,
       run: () => {
         const id = focusedRowId();
         if (id === undefined) {
@@ -259,16 +274,21 @@ function ArchitectureTreeView({
       when: () => document.activeElement?.matches(ROW_SELECTOR) === true,
     },
     {
+      // Out of the palette: on a row with children `open` above already goes into them, and on
+      // a leaf this row would do nothing.
       id: "descend",
       keys: ["l", "ArrowRight"],
       label: "Into the focused component's children",
+      palette: false,
       run: descend,
       when: () => rowAround(document.activeElement) !== null,
     },
     {
+      // Both keys do the same thing, and its `when` needs no focused row, so it is a row.
       id: "ascend",
       keys: ["h", "ArrowLeft"],
       label: "Up one level",
+      palette: true,
       run: ascend,
       when: () => level !== undefined,
     },

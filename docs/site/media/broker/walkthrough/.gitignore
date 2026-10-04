@@ -1,0 +1,6 @@
+# build.py's renders, rebuilt from raw/ and narration/ in seconds; Python's bytecode; and the
+# recorder's scratch (Playwright's unsaved recordings and each browser section's result frame),
+# which a failed take leaves behind.
+build/
+__pycache__/
+raw/.video/

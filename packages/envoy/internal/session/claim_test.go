@@ -14,8 +14,7 @@ import (
 // that merely has it loaded. Every such process heartbeats a claim. Blind
 // last-writer-wins therefore routes deliveries to an arbitrary holder, and a
 // holder that is not driving the session starts its own model loop on delivery —
-// two loops interleaving one transcript (observed 2026-07-29 on
-// ses_05fce2520ffeoVkqBxn2DfJyft, which flip-flopped between four ports).
+// two loops interleaving one transcript.
 //
 // mergeForClaim decides which claim survives.
 

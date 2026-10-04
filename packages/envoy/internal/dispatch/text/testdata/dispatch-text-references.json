@@ -1,0 +1,153 @@
+[
+  {
+    "body": "Tied to dispatch://CORE-1 here.",
+    "refs": [
+      "dispatch://CORE-1"
+    ]
+  },
+  {
+    "body": "Tied to **dispatch://CORE-1** here.",
+    "refs": [
+      "dispatch://CORE-1"
+    ]
+  },
+  {
+    "body": "Tied to `dispatch://CORE-1` here.",
+    "refs": [
+      "dispatch://CORE-1"
+    ]
+  },
+  {
+    "body": "_dispatch://CORE-1/spec_, ~~dispatch://CORE-2~~ and __dispatch://CORE-3/ask/22222222-2222-4222-8222-222222222222__.",
+    "refs": [
+      "dispatch://CORE-1/spec",
+      "dispatch://CORE-2",
+      "dispatch://CORE-3/ask/22222222-2222-4222-8222-222222222222"
+    ]
+  },
+  {
+    "body": "`dispatch://CORE-5`/`dispatch://CORE-6`",
+    "refs": [
+      "dispatch://CORE-5",
+      "dispatch://CORE-6"
+    ]
+  },
+  {
+    "body": "See [dispatch://CORE-7/spec](dispatch://CORE-7/spec).",
+    "refs": [
+      "dispatch://CORE-7/spec"
+    ]
+  },
+  {
+    "body": "See [**dispatch://CORE-8**](dispatch://CORE-8).",
+    "refs": [
+      "dispatch://CORE-8"
+    ]
+  },
+  {
+    "body": "(**https://dispatch.test/issues/CORE-4**)",
+    "refs": [
+      "dispatch://CORE-4"
+    ]
+  },
+  {
+    "body": "See [https://dispatch.test/issues/CORE-9](https://dispatch.test/issues/CORE-9).",
+    "refs": [
+      "dispatch://CORE-9"
+    ]
+  },
+  {
+    "body": "See [**https://dispatch.test/issues/CORE-9/spec**](https://dispatch.test/issues/CORE-9/spec).",
+    "refs": [
+      "dispatch://CORE-9/spec"
+    ]
+  },
+  {
+    "body": "(see dispatch://CORE-10).",
+    "refs": [
+      "dispatch://CORE-10"
+    ]
+  },
+  {
+    "body": "Quoted \"dispatch://CORE-11\", 'dispatch://CORE-12' and <dispatch://CORE-13>.",
+    "refs": [
+      "dispatch://CORE-11",
+      "dispatch://CORE-12",
+      "dispatch://CORE-13"
+    ]
+  },
+  {
+    "body": "A no-break space after dispatch://CORE-14 and an ideographic one after dispatch://CORE-15　end",
+    "refs": [
+      "dispatch://CORE-14",
+      "dispatch://CORE-15"
+    ]
+  },
+  {
+    "body": "Neither a vertical tab nor a BOM ends one: dispatch://CORE-18\u000b dispatch://CORE-19﻿.",
+    "refs": []
+  },
+  {
+    "body": "See http://[::1]:8766/issues/CORE-20 and [http://[::1]:8766/issues/CORE-21/spec](http://[::1]:8766/issues/CORE-21/spec).",
+    "origin": "http://[::1]:8766",
+    "refs": [
+      "dispatch://CORE-20",
+      "dispatch://CORE-21/spec"
+    ]
+  },
+  {
+    "body": "~~dispatch://CORE/artifact/handbook-md~~ and **dispatch://CORE-17/artifact/design-md@v3**",
+    "refs": [
+      "dispatch://CORE/artifact/handbook-md",
+      "dispatch://CORE-17/artifact/design-md@v3"
+    ]
+  },
+  {
+    "body": "`https://dispatch.test/issues/CORE-1/spec?comment=44444444-4444-4444-8444-444444444444`;",
+    "refs": [
+      "dispatch://CORE-1/comment/44444444-4444-4444-8444-444444444444"
+    ]
+  },
+  {
+    "body": "Pairs part at & alone: https://dispatch.test/issues/CORE-1/spec?comment=c1;c2, https://dispatch.test/issues/CORE-1/artifacts/notes-md?v=2;3 and https://dispatch.test/issues/CORE-2/spec?ask=a1;x&comment=c1.",
+    "refs": [
+      "dispatch://CORE-1/comment/c1%3Bc2"
+    ]
+  },
+  {
+    "body": "A % that two hex digits do not follow stays a %: https://dispatch.test/issues/CORE-3/spec?comment=c%2%34 here",
+    "refs": [
+      "dispatch://CORE-3/comment/c%24"
+    ]
+  },
+  {
+    "body": "|ref|state|\n|---|---|\n|dispatch://CORE-1/artifact/plan-md|done|\n|dispatch://CORE-2|open|\n|https://dispatch.test/issues/CORE-3/spec|open|",
+    "refs": [
+      "dispatch://CORE-1/artifact/plan-md",
+      "dispatch://CORE-2",
+      "dispatch://CORE-3/spec"
+    ]
+  },
+  {
+    "body": "A control character or a BOM after a slug or an id: dispatch://CORE-1/artifact/notes-md\u000b dispatch://CORE-1/comment/c1\u0001 dispatch://CORE/artifact/handbook-md https://dispatch.test/issues/CORE-1/asks/a1 dispatch://CORE-1/ask/a1﻿",
+    "refs": []
+  },
+  {
+    "body": "An id decoding to a NUL: dispatch://CORE-1/comment/%00, https://dispatch.test/issues/CORE-1/comments/%00, https://dispatch.test/issues/CORE-1/spec?comment=%2500, https://dispatch.test/issues/CORE-1/spec?comment=%00 and dispatch://CORE/artifact/handbook-md/comment/%00",
+    "refs": []
+  },
+  {
+    "body": "A slug is all of its segment and a version has no leading zero: dispatch://CORE-1/artifact/notes-md!x, dispatch://CORE/artifact/Notes-md, https://dispatch.test/issues/CORE-1/artifacts/notes_md and dispatch://CORE-1/artifact/notes-md@v03",
+    "refs": []
+  },
+  {
+    "body": "*https://example.com/~ops/snake_case_path?glob=*.md* and https://dispatch.test/issues/CORE-16_",
+    "refs": [
+      "dispatch://CORE-16"
+    ]
+  },
+  {
+    "body": "Broken: **dispatch://CORE-1x**, dispatch://CORE-1_suffix, `dispatch://core-1`, ~~dispatch://CORE~~ and _dispatch://CORE-0_.",
+    "refs": []
+  }
+]

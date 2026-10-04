@@ -13,11 +13,44 @@ import {
   patchIssue,
 } from "./api";
 import { recordClipboard } from "./clipboard";
+import { needsYouCards } from "./editor";
 import { clearIssueCreator, resetDatabase } from "./seed";
 import { asUser } from "./users";
 
 test.beforeEach(async () => {
   await resetDatabase();
+});
+
+test("database reset clears fake Envoy subscribers before the next issue", async ({ browser }) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const staleIssue = await createIssue({ project: "CORE", title: "Stale subscriber" });
+  await setLiveSessions([{ session_id: "stale-session", title: "Stale session" }]);
+  await setInterests([
+    {
+      session_id: "stale-session",
+      topics: [
+        `notifications.dispatch.issue.${staleIssue.key}`,
+        `notifications.dispatch.issue.${staleIssue.key}.>`,
+      ],
+    },
+  ]);
+  await resetDatabase();
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "No stale subscriber" });
+  expect(issue.key).toBe(staleIssue.key);
+
+  const context = await asUser(browser, "alice");
+  try {
+    const page = await context.newPage();
+    const subscribers = page.waitForResponse(
+      (response) => new URL(response.url()).pathname === `/api/v1/issues/${issue.key}/subscribers`
+    );
+    await page.goto(`/issues/${issue.key}`);
+    expect((await subscribers).status()).toBe(200);
+    await expect(page.getByRole("button", { name: "Subscribers: 0" })).toBeVisible();
+  } finally {
+    await context.close();
+  }
 });
 
 test("issue header closes an issue and reopens it into Backlog", async ({ browser }) => {
@@ -306,7 +339,7 @@ test("issue pages show subscribers, external-link fallbacks, and children", asyn
     // Without GitHub App credentials the link still reads as the reference, never the raw address.
     await expect(page.getByRole("link", { name: "#815 sjawhar/legion" })).toHaveAttribute(
       "title",
-      "GitHub details are unavailable for this sign-in."
+      "GitHub details are unavailable for this repository."
     );
     await expect(
       page.getByRole("link", { name: "https://github.com/sjawhar/legion/issues/815" })
@@ -431,7 +464,7 @@ test("a quote-anchored ask identifies its document in the margin and Conversatio
     if (testInfo.project.name === "iphone") {
       await page.getByRole("button", { name: "Open review panel (1 open ask)" }).click();
     }
-    const marginCard = page.getByRole("region", { name: "Needs you" }).getByTestId(`ask-${ask.id}`);
+    const marginCard = needsYouCards(page).getByTestId(`ask-${ask.id}`);
     await expect(marginCard.getByRole("link", { name: "spec.md" })).toHaveAttribute(
       "href",
       documentHref
@@ -586,18 +619,16 @@ test("a human can unsubscribe an agent from an issue and the session is told", a
 }) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Subscriber removal" });
-  if (!process.env.PLAYWRIGHT_BASE_URL) {
-    await setLiveSessions([{ session_id: "e2e-unsub-session", title: "Worker (e2e)" }]);
-    await setInterests([
-      {
-        session_id: "e2e-unsub-session",
-        topics: [
-          `notifications.dispatch.issue.${issue.key}`,
-          `notifications.dispatch.issue.${issue.key}.>`,
-        ],
-      },
-    ]);
-  }
+  await setLiveSessions([{ session_id: "e2e-unsub-session", title: "Worker (e2e)" }]);
+  await setInterests([
+    {
+      session_id: "e2e-unsub-session",
+      topics: [
+        `notifications.dispatch.issue.${issue.key}`,
+        `notifications.dispatch.issue.${issue.key}.>`,
+      ],
+    },
+  ]);
 
   const alice = await asUser(browser, "alice");
   const page = await alice.newPage();
@@ -607,9 +638,7 @@ test("a human can unsubscribe an agent from an issue and the session is told", a
     await page.getByRole("button", { name: "Subscribers: 1" }).click();
     const subscribedAgents = page.getByRole("region", { name: "Subscribed agents" });
     await expect(subscribedAgents.getByText("Worker (e2e)", { exact: true })).toBeVisible();
-    if (!process.env.PLAYWRIGHT_BASE_URL) {
-      await expect(subscribedAgents.locator("[title='Live']")).toHaveCount(1);
-    }
+    await expect(subscribedAgents.locator("[title='Live']")).toHaveCount(1);
 
     await subscribedAgents.getByRole("button", { name: "Unsubscribe" }).click();
     const dialog = page.getByRole("dialog", { name: "Unsubscribe" });
@@ -620,13 +649,11 @@ test("a human can unsubscribe an agent from an issue and the session is told", a
 
     await expect(page.getByRole("region", { name: "Subscribed agents" })).toHaveCount(0);
 
-    if (!process.env.PLAYWRIGHT_BASE_URL) {
-      await expect
-        .poll(async () =>
-          (await getUnsubscribeCalls()).some((call) => call.session_id === "e2e-unsub-session")
-        )
-        .toBe(true);
-    }
+    await expect
+      .poll(async () =>
+        (await getUnsubscribeCalls()).some((call) => call.session_id === "e2e-unsub-session")
+      )
+      .toBe(true);
 
     await expect
       .poll(async () =>
@@ -644,7 +671,6 @@ test("a human can unsubscribe an agent from an issue and the session is told", a
 });
 
 async function subscribeSession(issueKey: string): Promise<void> {
-  if (process.env.PLAYWRIGHT_BASE_URL) return;
   await setLiveSessions([{ session_id: "e2e-session", title: "e2e-session-title" }]);
   await setInterests([
     {
@@ -825,7 +851,7 @@ test("issue header gives the title the row's free space beside a short details l
     // A busy details line (whose-turn badge, one label, Route, Subscribers) that fits beside a
     // 12rem title but not beside the whole title: just below 1280 the title must keep at least
     // half the card rather than share the row and drop to its minimum. The line without the
-    // GitHub link is the one that used to squeeze (with the link it was too wide to share).
+    // GitHub link is the one that could squeeze (with the link it is too wide to share).
     await patchIssue(issue.key, {
       labels: ["api"],
       title: "Migrate the issue header to a single row",
@@ -938,11 +964,11 @@ test("issue header reassigns through the Assignee picker; a personal token's iss
     await page.goto(`/issues/${issue.key}`);
     const control = page.getByLabel(`Assignee of ${issue.key}`);
     await expect(control).toHaveValue("bob");
-    // The allowlist is read only once the reader reaches for the control.
+    // Who has signed in is read only once the reader reaches for the control.
     await control.focus();
     await expect(control.locator("option")).toHaveText(["Unassigned", "alice", "bob"]);
 
-    // Anyone on the allowlist may reassign: Alice takes it, and the header shows her at once.
+    // Anyone signed in may reassign: Alice takes it, and the header shows her at once.
     const patch = page.waitForRequest(
       (request) =>
         request.method() === "PATCH" &&

@@ -1,29 +1,31 @@
-// e2e_test.go is contract v9's (AGENTC-393) acceptance proof for the secrets broker: the whole
-// credential-request story driven as real HTTP against the mux built by api.Register, on a real
-// Postgres store, a fake Secrets Manager, and webauthntest's software authenticators. Every step
-// below drives HTTP; none calls a service method directly (Machine.ApplyDecision and friends are
-// exercised only through the routes that wrap them).
+// e2e_test.go is the acceptance proof for the secrets broker: the whole credential-request story
+// driven as real HTTP against the mux built by api.Register, on a real Postgres store and a fake
+// Secrets Manager. Every step below drives HTTP; none calls a service method directly
+// (Machine.ApplyDecision and friends are exercised only through the routes that wrap them). A
+// human decision is a UI-route call naming the approver's login, the body Dispatch's server sends
+// on the human's behalf.
 //
 // Unlike internal/broker/api/api_test.go's per-route unit coverage, this test's wiring mirrors
-// cmd/broker/main.go exactly: rules.NewCurrent reads a real file on disk through a real
-// rules.FileLoader and reloads it on a real ticker, with onReload wired to
-// approvers.Service.Reconcile precisely as main.go wires it. Task 11's key-rotation step (8)
-// rewrites that file on disk and waits for the live ticker to pick it up (a short reload interval
-// plus a bounded poll), rather than standing up a second rules.Current to fake "a reload
-// happened" — this is the only way to genuinely exercise main.go's reload-reconciliation path.
+// cmd/broker/main.go exactly: policy.NewCurrent runs a real policy.Loader over the fake Secrets
+// Manager and reloads it on a real ticker, so step 8 edits a secret's tags in that store and waits
+// for the live ticker to pick the edit up rather than standing up a second policy.Current to fake
+// "a reload happened".
 //
-// Step-to-subtest map (brief's nine numbered steps):
+// Step-to-subtest map:
 //
-//  1. rules load with a seeded approvers section; reconcile persists it  -> newE2EServer + "1_..."
-//  2. machine login -> code -> lookup -> approve -> credential id;
-//     enrollment routes accept lid proofs by the machine key            -> "2_..."
-//  3. box enrollment, session request -> pending in GET /v1/pending     -> "3_..."
-//  4. UI record read -> approve -> grant -> values releases             -> "4_..."
-//  5. deny path on a second request                                    -> "5_..."
-//  6. revoke-by-approver kills the grant                                -> "6_..."
-//  7. forged grant row releases nothing                                -> "7_..."
-//  8. key rotation: endorse, reload with both, tombstone, key1 refused  -> "8_..."
-//  9. wrong-origin assertion refused end to end                         -> "9_..."
+//  1. machine login -> code -> lookup -> approve by the operator's login -> credential id;
+//     enrollment routes accept lid proofs by the machine key            -> "1_..."
+//  2. box enrollment, session request -> pending in GET /v1/pending     -> "2_..."
+//  3. UI record read -> approve -> grant -> values releases             -> "3_..."
+//  4. deny path on a second request                                    -> "4_..."
+//  5. revoke-by-approver kills the grant                                -> "5_..."
+//  6. forged grant row releases nothing                                -> "6_..."
+//  7. another login, or no UI bearer, decides nothing                   -> "7_..."
+//  8. a secret whose owner tag is edited to no person is refused by the
+//     live reload, logged by name, and served again once fixed          -> "8_..."
+//  9. anyone signed in approves a shared human-tier secret              -> "9_..."
+//  10. another person's session asking for the operator's agent-tier
+//     secret waits for the operator's approval                          -> "10_..."
 package e2e
 
 import (
@@ -31,45 +33,43 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
-	"gopkg.in/yaml.v3"
 
 	"github.com/sjawhar/envoy/internal/broker/api"
-	"github.com/sjawhar/envoy/internal/broker/approvers"
 	"github.com/sjawhar/envoy/internal/broker/enroll"
 	"github.com/sjawhar/envoy/internal/broker/machine"
+	"github.com/sjawhar/envoy/internal/broker/policy"
+	"github.com/sjawhar/envoy/internal/broker/policy/policytest"
 	"github.com/sjawhar/envoy/internal/broker/proof"
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/requests"
-	"github.com/sjawhar/envoy/internal/broker/rules"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
 	"github.com/sjawhar/envoy/internal/broker/store"
 	"github.com/sjawhar/envoy/internal/broker/store/storetest"
-	"github.com/sjawhar/envoy/internal/broker/webauthntest"
 )
 
 const (
-	testOrigin  = "https://dispatch.test"
-	testRPID    = "dispatch.test"
-	testAAGUID  = "ee882879-721c-4913-9775-3dfcce97072a"
 	testUIToken = "test-ui-token-e2e-0123456789abcdef"
+	// testApprover operates the box every request below comes from, owns every secret but the
+	// shared one, and so is every approval's approver but the shared one's; and the machine
+	// login's login_hint.
+	testApprover = "sami@example.com"
+	// otherPerson signs in to Dispatch too: they approve the shared secret, and their own machine
+	// asks for testApprover's agent-tier secret.
+	otherPerson = "ben@example.com"
 
-	// reloadInterval is rules.NewCurrent's own ticker period for this test: short enough that the
-	// key-rotation step's bounded poll (reloadTimeout) sees the real reload path run several
-	// times without slowing the suite down.
+	// reloadInterval is policy.NewCurrent's own ticker period for this test: short enough that
+	// step 8's bounded wait (reloadTimeout) sees the real reload path run several times without
+	// slowing the suite down.
 	reloadInterval = 40 * time.Millisecond
 	reloadTimeout  = 5 * time.Second
 )
@@ -77,184 +77,76 @@ const (
 // --- harness ---
 
 // e2eServer is a live broker HTTP server (real handlers, real Postgres) wired exactly like
-// cmd/broker/main.go: a real rules.FileLoader over RulesPath, reloading on a real ticker, with
-// onReload calling approvers.Service.Reconcile.
+// cmd/broker/main.go: a real policy.Loader over Secrets, reloading on a real ticker. Log holds
+// everything the broker logged.
 type e2eServer struct {
-	URL       string
-	Store     *store.Store
-	RulesPath string
+	URL     string
+	Store   *store.Store
+	Secrets *secrets.Local
+	Log     fmt.Stringer
 }
 
-// newE2EServer seeds login "sjawhar"'s first approver key via the break-glass approver_key_seeds
-// row (ruling 9: there is no HTTP route that creates a login's first key), writes the initial
-// scratch rules file naming that seed, and wires the full service graph — approvers.Service,
-// enroll.Service (+ ChainVerifier), requests.Machine, machine.Service, rules.NewCurrent — the same
-// way main.go does, minus the HTTP listener and signal handling (api.Register mounts on an
-// httptest.Server instead of a real net/http.Server, as api_test.go's newTestServer does).
-func newE2EServer(t *testing.T, ca *webauthntest.CA, seedKey approvers.KeyEntry) *e2eServer {
+// newE2EServer holds e2eSecrets in a fake Secrets Manager and wires the full service graph —
+// enroll.Service (+ ChainVerifier), requests.Machine, machine.Service, policy.NewCurrent — the
+// same way main.go does, minus the HTTP listener and signal handling (api.Register mounts on an
+// httptest.Server instead of a real net/http.Server, as api_test.go's newTestServer does). The
+// broker logs through slog's default handler, as main.go's does, here into Log.
+func newE2EServer(t *testing.T) *e2eServer {
 	t.Helper()
 	st := storetest.Open(t)
-	if _, err := st.Pool.Exec(context.Background(),
-		`insert into approver_key_seeds (login, credential_id) values ($1,$2)`, "sjawhar", seedKey.CredentialID); err != nil {
-		t.Fatalf("insert approver_key_seeds: %v", err)
-	}
-
-	rulesPath := t.TempDir() + "/rules.yaml"
-	writeRulesFile(t, rulesPath, renderRulesYAML([]approvers.KeyEntry{seedKey}))
+	logged := policytest.CaptureLog(t)
 
 	mux := http.NewServeMux()
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 
-	approversSvc := &approvers.Service{Store: st, Verifier: &approvers.Verifier{
-		Roots: ca.Pool(), Origin: testOrigin, AAGUIDs: map[uuid.UUID]bool{uuid.MustParse(testAAGUID): true},
-	}}
-
 	enr := &enroll.Service{Store: st, Lease: time.Hour}
-	enr.Chain = enroll.NewChainVerifier(st, approversSvc, srv.URL, time.Minute)
+	enr.Chain = enroll.NewChainVerifier(st, srv.URL, time.Minute)
 
-	// onReload mirrors main.go's own hook precisely: check the file's declared origin against
-	// this broker's configured UI origin first, and only reconcile the freshly parsed approvers
-	// section against the persisted key set once that passes. approversSvc.Reconcile commits its
-	// own transaction unconditionally on success, so reconciling before the origin check would
-	// permanently persist key-set changes from a rules file this reload is about to refuse.
-	onReload := func(set *rules.Set) error {
-		if set.Approvers.Origin != testOrigin {
-			return fmt.Errorf("rules approvers.origin %q does not match configured origin %q", set.Approvers.Origin, testOrigin)
-		}
-		if err := approversSvc.Reconcile(context.Background(), set.Approvers.Logins); err != nil {
-			return err
-		}
-		return nil
-	}
+	local := secrets.NewLocal(e2eSecrets...)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	current, err := rules.NewCurrent(ctx, rules.FileLoader{Path: rulesPath}, reloadInterval, func(error) {}, onReload)
+	current, err := policy.NewCurrent(ctx, policytest.Loader(local), reloadInterval)
 	if err != nil {
-		t.Fatalf("rules.NewCurrent: %v", err)
+		t.Fatalf("policy.NewCurrent: %v", err)
 	}
 
 	reqMachine := &requests.Machine{
-		Store: st, Rules: current, Secrets: secrets.Fake{"example/agent-secrets/DEEL_API_KEY": "deel-v1"},
-		Approvers: approversSvc, MaxGrant: time.Hour, PendingTTL: 12 * time.Hour,
+		Store: st, Policy: current, Secrets: secrets.AWS{Client: local},
+		MaxGrant: time.Hour, PendingTTL: 12 * time.Hour,
 		Audience: srv.URL, Skew: time.Minute, Replay: enr.Replay,
 	}
-	reqMachine.Chain = requests.NewChainVerifier(st, approversSvc, srv.URL, time.Minute)
+	reqMachine.Chain = requests.NewChainVerifier(st, srv.URL, time.Minute)
 	mach := &machine.Service{
-		Store: st, Enroll: enr, Approvers: approversSvc, Rules: current,
+		Store: st, Enroll: enr, Policy: current,
 		Audience: srv.URL, Skew: time.Minute, PendingTTL: 15 * time.Minute, CredentialLifetime: 7 * 24 * time.Hour,
 		Replay: enr.Replay,
 	}
 
 	api.Register(mux, api.Deps{
-		PublicURL: srv.URL, UIOrigin: testOrigin, UIToken: testUIToken,
-		Enroll: enr, Machine: reqMachine, MachineLogin: mach, Approvers: approversSvc,
+		PublicURL: srv.URL, UIToken: testUIToken,
+		Enroll: enr, Machine: reqMachine, MachineLogin: mach,
 		Proof: &proof.Verifier{Skew: time.Minute, Lookup: enr.Lookup, LookupLauncher: enr.AuthenticateLauncher, Replay: enr.Replay},
 	})
 
-	return &e2eServer{URL: srv.URL, Store: st, RulesPath: rulesPath}
+	return &e2eServer{URL: srv.URL, Store: st, Secrets: local, Log: logged}
 }
 
-// writeRulesFile writes content to path via a temp-file-then-rename, so rules.FileLoader (a plain
-// os.ReadFile) never observes a half-written file when the reload ticker fires mid-write.
-func writeRulesFile(t *testing.T, path, content string) {
-	t.Helper()
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(content), 0o600); err != nil {
-		t.Fatalf("write rules file: %v", err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		t.Fatalf("rename rules file into place: %v", err)
-	}
-}
-
-// renderKeyBlock renders one approvers.logins.sjawhar.keys[] list entry, verbatim JSON embedded
-// under "response"/"assertion" (valid YAML flow syntax), matching the shape api_test.go's own
-// newTestServer builds.
-func renderKeyBlock(e approvers.KeyEntry) string {
-	block := `        - credential_id: "` + e.CredentialID + `"
-          registration:
-            challenge_nonce: "` + e.ChallengeNonce + `"
-            response: ` + string(e.Registration) + "\n"
-	if e.Seed {
-		return block + "          seed: true\n"
-	}
-	return block + `          endorsement:
-            by: "` + e.Endorsement.By + `"
-            assertion: ` + string(e.Endorsement.Assertion) + "\n"
-}
-
-// renderRulesYAML builds a complete scratch rules file naming login "sjawhar"'s keys (in order).
-// Every agent_secret is approval-needing (approver: operator) except AUTO_TOKEN (fully
-// automatic, the shape the brief's Step 1 setup calls for) — and each approval-needing secret
-// used across the nine steps gets its own distinct name: requests.Machine.Create's
-// reuseLiveGrant check reuses any still-live grant for an exact name-set match against the same
-// enrollment before ever looking at the rules, so two steps sharing one secret name would make a
-// later "fresh pending request" silently resolve to an earlier step's already-decided grant
-// instead of creating the new record the step means to test.
-func renderRulesYAML(keys []approvers.KeyEntry) string {
-	var blocks strings.Builder
-	for _, k := range keys {
-		blocks.WriteString(renderKeyBlock(k))
-	}
-	return `version: 1
-secrets:
-  DEEL_API_KEY:
-    source: example/agent-secrets/DEEL_API_KEY
-    owner: sjawhar
-    delivery: inject
-    max_lifetime_seconds: 43200
-    requesters:
-      - {kind: box, operator: sjawhar, decision: approval, approver: operator}
-  SLACK_MCP_XOXP_TOKEN:
-    source: example/agent-secrets/SLACK_MCP_XOXP_TOKEN
-    owner: sjawhar
-    delivery: inject
-    max_lifetime_seconds: 43200
-    requesters:
-      - {kind: box, operator: sjawhar, decision: approval, approver: operator}
-  GITHUB_TOKEN:
-    source: example/agent-secrets/GITHUB_TOKEN
-    owner: sjawhar
-    delivery: inject
-    max_lifetime_seconds: 43200
-    requesters:
-      - {kind: box, operator: sjawhar, decision: approval, approver: operator}
-  NOTION_API_KEY:
-    source: example/agent-secrets/NOTION_API_KEY
-    owner: sjawhar
-    delivery: inject
-    max_lifetime_seconds: 43200
-    requesters:
-      - {kind: box, operator: sjawhar, decision: approval, approver: operator}
-  LINEAR_API_KEY:
-    source: example/agent-secrets/LINEAR_API_KEY
-    owner: sjawhar
-    delivery: inject
-    max_lifetime_seconds: 43200
-    requesters:
-      - {kind: box, operator: sjawhar, decision: approval, approver: operator}
-  FIGMA_API_KEY:
-    source: example/agent-secrets/FIGMA_API_KEY
-    owner: sjawhar
-    delivery: inject
-    max_lifetime_seconds: 43200
-    requesters:
-      - {kind: box, operator: sjawhar, decision: approval, approver: operator}
-  AUTO_TOKEN:
-    source: example/agent-secrets/AUTO_TOKEN
-    owner: sjawhar
-    delivery: inject
-    max_lifetime_seconds: 43200
-    requesters:
-      - {kind: box, operator: sjawhar, decision: automatic}
-approvers:
-  origin: ` + testOrigin + `
-  aaguids: ["` + testAAGUID + `"]
-  logins:
-    sjawhar:
-      keys:
-` + blocks.String()
+// e2eSecrets are the fake Secrets Manager's secrets. Every one testApprover owns is human-tier but
+// AUTO_READ_TOKEN, so it needs their approval, and each approval-needing secret used across the
+// steps gets its own distinct name: requests.Machine.Create's reuseLiveGrant check reuses any
+// still-live grant for an exact name-set match against the same enrollment before ever evaluating
+// the policy, so two steps sharing one secret name would make a later "fresh pending request"
+// silently resolve to an earlier step's already-decided grant instead of creating the new record
+// the step means to test.
+var e2eSecrets = []secrets.LocalSecret{
+	policytest.Secret("DEEL_API_KEY", testApprover, policy.TierHuman, "deel-v1"),
+	policytest.Secret("SLACK_MCP_XOXP_TOKEN", testApprover, policy.TierHuman, "slack-v1"),
+	policytest.Secret("GITHUB_TOKEN", testApprover, policy.TierHuman, "github-v1"),
+	policytest.Secret("NOTION_API_KEY", testApprover, policy.TierHuman, "notion-v1"),
+	policytest.Secret("LINEAR_API_KEY", testApprover, policy.TierHuman, "linear-v1"),
+	policytest.Secret("SHARED_DEPLOY_KEY", policy.OwnerShared, policy.TierHuman, "shared-deploy-v1"),
+	policytest.Secret("AUTO_READ_TOKEN", testApprover, policy.TierAgent, "read-v1"),
 }
 
 // --- HTTP helpers ---
@@ -314,6 +206,23 @@ func (s *e2eServer) launcher(t *testing.T, key *ecdsa.PrivateKey, launcherID, me
 	return s.req(t, method, path, map[string]string{"Proof": p}, body)
 }
 
+// createPending opens a pending agent_secret request for name from the step-1 enrollment and
+// returns its request and record ids.
+func (s *e2eServer) createPending(t *testing.T, key *ecdsa.PrivateKey, enrollmentID, reason, name string) (requestID, recordID string) {
+	t.Helper()
+	compact := signAgentSecretRequest(t, key, s.URL, reason, name)
+	status, body := s.session(t, key, enrollmentID, http.MethodPost, "/v1/requests",
+		map[string]any{"request": compact, "session_id": nil})
+	if status != http.StatusOK {
+		t.Fatalf("POST /v1/requests (%s) = %d, want 200: %s", name, status, body)
+	}
+	created := decode[wireCreateRequestResponse](t, body)
+	if created.State != "pending" || created.RecordID == nil || *created.RecordID == "" {
+		t.Fatalf("create response (%s) = %+v, want state=pending with a record_id", name, created)
+	}
+	return created.RequestID, *created.RecordID
+}
+
 func decode[T any](t *testing.T, body []byte) T {
 	t.Helper()
 	var v T
@@ -321,15 +230,6 @@ func decode[T any](t *testing.T, body []byte) T {
 		t.Fatalf("decode response: %v (body: %s)", err, body)
 	}
 	return v
-}
-
-func decodeChallenge(t *testing.T, b64 string) []byte {
-	t.Helper()
-	raw, err := base64.RawURLEncoding.DecodeString(b64)
-	if err != nil {
-		t.Fatalf("decode challenge %q: %v", b64, err)
-	}
-	return raw
 }
 
 func newSigningKey(t *testing.T) *ecdsa.PrivateKey {
@@ -341,49 +241,18 @@ func newSigningKey(t *testing.T) *ecdsa.PrivateKey {
 	return key
 }
 
-func randomNonceHex(t *testing.T) string {
-	t.Helper()
-	var b [32]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		t.Fatalf("random nonce: %v", err)
-	}
-	return hex.EncodeToString(b[:])
-}
-
-// waitUntil polls cond until it reports true or timeout elapses, failing the test on timeout.
-// Used by the key-rotation step to observe the real rules.NewCurrent reload ticker actually pick
-// up a rewritten file, rather than assuming a fixed sleep is long enough.
-func waitUntil(t *testing.T, timeout time.Duration, what string, cond func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for {
-		if cond() {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("timed out after %s waiting for %s", timeout, what)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-}
-
-// --- wire-shape mirrors (contract v9), the fields this test actually reads ---
+// --- wire-shape mirrors of the shared broker contract, the fields this test actually reads ---
 
 type wireError struct {
 	Code  string `json:"code"`
 	Error string `json:"error"`
 }
 
-type wireChallenges struct {
-	Approve string `json:"approve"`
-	Deny    string `json:"deny"`
-}
-
 type wireRecord struct {
-	RecordID   string          `json:"record_id"`
-	Kind       string          `json:"kind"`
-	State      string          `json:"state"`
-	Challenges *wireChallenges `json:"challenges"`
+	RecordID string `json:"record_id"`
+	Kind     string `json:"kind"`
+	State    string `json:"state"`
+	Approver string `json:"approver"`
 }
 
 type wireCreateRequestResponse struct {
@@ -402,12 +271,6 @@ type wirePendingEntry struct {
 	RecordID    string   `json:"record_id"`
 	Kind        string   `json:"kind"`
 	Identifiers []string `json:"identifiers"`
-}
-
-type wireKeyInfo struct {
-	CredentialID string `json:"credential_id"`
-	State        string `json:"state"`
-	Seeded       bool   `json:"seeded"`
 }
 
 // --- signing helpers ---
@@ -436,113 +299,26 @@ func signMachineLoginRequest(t *testing.T, key *ecdsa.PrivateKey, audience, logi
 	return compact
 }
 
-// --- YAML extraction for the key-rotation step ---
-//
-// approvers.Service.FinishRegister/FinishEndorse return pasteable rules-file YAML fragments
-// (renderKeyEntryYAML/renderEndorsementYAML in approvers.go); the register ceremony's nonce is
-// server-generated and never handed back except embedded in that fragment, so recovering it to
-// build this test's own rewritten rules file means parsing the fragment back out.
-
-type registerYAMLDoc struct {
-	Logins map[string]struct {
-		Keys []struct {
-			CredentialID string `yaml:"credential_id"`
-			Registration struct {
-				ChallengeNonce string `yaml:"challenge_nonce"`
-				Response       any    `yaml:"response"`
-			} `yaml:"registration"`
-		} `yaml:"keys"`
-	} `yaml:"logins"`
-}
-
-func extractRegistration(t *testing.T, yamlText, login string) (credentialID, nonce string, response json.RawMessage) {
-	t.Helper()
-	var doc registerYAMLDoc
-	if err := yaml.Unmarshal([]byte(yamlText), &doc); err != nil {
-		t.Fatalf("parse register/finish yaml: %v\n%s", err, yamlText)
-	}
-	entry, ok := doc.Logins[login]
-	if !ok || len(entry.Keys) != 1 {
-		t.Fatalf("register/finish yaml has no single key for %s: %s", login, yamlText)
-	}
-	k := entry.Keys[0]
-	raw, err := json.Marshal(k.Registration.Response)
-	if err != nil {
-		t.Fatalf("re-marshal registration response: %v", err)
-	}
-	return k.CredentialID, k.Registration.ChallengeNonce, raw
-}
-
-type endorsementYAMLDoc struct {
-	Endorsement struct {
-		By        string `yaml:"by"`
-		Assertion any    `yaml:"assertion"`
-	} `yaml:"endorsement"`
-}
-
-func extractEndorsement(t *testing.T, yamlText string) (by string, assertion json.RawMessage) {
-	t.Helper()
-	var doc endorsementYAMLDoc
-	if err := yaml.Unmarshal([]byte(yamlText), &doc); err != nil {
-		t.Fatalf("parse endorse/finish yaml: %v\n%s", err, yamlText)
-	}
-	raw, err := json.Marshal(doc.Endorsement.Assertion)
-	if err != nil {
-		t.Fatalf("re-marshal endorsement assertion: %v", err)
-	}
-	return doc.Endorsement.By, raw
-}
-
 // --- the test ---
 
 func TestEndToEnd(t *testing.T) {
-	ca := webauthntest.NewCA(t)
-	key1Auth := ca.NewAuthenticator(t, uuid.MustParse(testAAGUID))
-	nonce1 := randomNonceHex(t)
-	key1Challenge := record.RegisterChallenge("sjawhar", nonce1)
-	key1Entry := approvers.KeyEntry{
-		CredentialID:   base64.RawURLEncoding.EncodeToString(key1Auth.CredentialID),
-		ChallengeNonce: nonce1,
-		Registration:   key1Auth.Register(t, testRPID, testOrigin, key1Challenge[:]),
-		Seed:           true,
-	}
+	ts := newE2EServer(t)
 
-	ts := newE2EServer(t, ca, key1Entry)
-
-	// Shared across steps: the box enrollment and its session key (step 2), the step-4 grant
-	// later revoked in step 6, and key2 (minted in step 8, still live in step 9).
+	// Shared across steps: the box enrollment and its session key (step 1), and the step-3 grant
+	// later revoked in step 5.
 	var (
 		enrollmentID string
 		sessionKey   *ecdsa.PrivateKey
 		grantID      string
-		key2Auth     *webauthntest.Authenticator
 	)
 
-	// Step 1: rules load with an approvers section whose first key is seeded (the break-glass
-	// approver_key_seeds row newE2EServer inserted) — reconcile persists it. NewCurrent's first
-	// load already ran synchronously by the time newE2EServer returned, so this is a direct
-	// assertion that it actually adopted the seed, driven over the real UI route.
-	t.Run("1_SeedKeyReconciledOnBoot", func(t *testing.T) {
-		status, body := ts.ui(t, http.MethodGet, "/v1/approvers/sjawhar/keys", nil)
-		if status != http.StatusOK {
-			t.Fatalf("GET keys = %d: %s", status, body)
-		}
-		keys := decode[struct {
-			Keys []wireKeyInfo `json:"keys"`
-		}](t, body)
-		if len(keys.Keys) != 1 || keys.Keys[0].CredentialID != key1Entry.CredentialID ||
-			!keys.Keys[0].Seeded || keys.Keys[0].State != "active" {
-			t.Fatalf("keys after boot-shaped FileLoader+onReload wiring = %+v, want one seeded active key %s",
-				keys.Keys, key1Entry.CredentialID)
-		}
-	})
-
-	// Step 2: machine login (request object -> code -> UI lookup by code -> approve with
-	// assertion+code -> credential id), then prove the enrollment routes accept a launcher proof
-	// ("lid") signed by the machine's own key by creating the box enrollment steps 3-9 reuse.
-	t.Run("2_MachineLoginMintsCredentialAcceptedByEnrollmentRoutes", func(t *testing.T) {
+	// Step 1: machine login (request object -> code -> UI lookup by code -> approve by the
+	// operator's login with the code -> credential id), then prove the enrollment routes accept
+	// a launcher proof ("lid") signed by the machine's own key by creating the box enrollment the
+	// later steps reuse.
+	t.Run("1_MachineLoginMintsCredentialAcceptedByEnrollmentRoutes", func(t *testing.T) {
 		machineKey := newSigningKey(t)
-		compact := signMachineLoginRequest(t, machineKey, ts.URL, "sjawhar", "e2e-agents")
+		compact := signMachineLoginRequest(t, machineKey, ts.URL, testApprover, "e2e-agents")
 		status, body := ts.req(t, http.MethodPost, "/v1/launcher-credentials", nil, map[string]any{"request": compact})
 		if status != http.StatusAccepted {
 			t.Fatalf("POST /v1/launcher-credentials = %d, want 202: %s", status, body)
@@ -560,13 +336,12 @@ func TestEndToEnd(t *testing.T) {
 			t.Fatalf("POST /v1/machine-logins/lookup = %d: %s", status, body)
 		}
 		looked := decode[wireRecord](t, body)
-		if looked.Kind != "launcher_credential" || looked.State != "pending" || looked.Challenges == nil {
-			t.Fatalf("lookup = %+v, want kind=launcher_credential state=pending with challenges", looked)
+		if looked.Kind != "launcher_credential" || looked.State != "pending" || looked.Approver != testApprover {
+			t.Fatalf("lookup = %+v, want kind=launcher_credential state=pending approver=%s", looked, testApprover)
 		}
 
-		assertion := key1Auth.Assert(t, testRPID, testOrigin, decodeChallenge(t, looked.Challenges.Approve))
 		status, body = ts.ui(t, http.MethodPost, "/v1/credential-requests/"+looked.RecordID+"/approve",
-			map[string]any{"assertion": json.RawMessage(assertion), "code": login.Code})
+			map[string]any{"approver": testApprover, "code": login.Code})
 		if status != http.StatusOK {
 			t.Fatalf("approve machine login = %d: %s", status, body)
 		}
@@ -585,7 +360,7 @@ func TestEndToEnd(t *testing.T) {
 			t.Fatalf("thumbprint: %v", err)
 		}
 		status, body = ts.launcher(t, machineKey, launcherCredentialID, http.MethodPost, "/v1/enrollments", map[string]any{
-			"kind": "box", "runtime_id": "e2e-box", "operator": "sjawhar", "thumbprint": sessionThumbprint,
+			"kind": "box", "runtime_id": "e2e-box", "operator": testApprover, "thumbprint": sessionThumbprint,
 		})
 		if status != http.StatusCreated {
 			t.Fatalf("POST /v1/enrollments (launcher proof by the machine's own key) = %d, want 201: %s", status, body)
@@ -601,22 +376,12 @@ func TestEndToEnd(t *testing.T) {
 
 	var pendingRecordID string
 
-	// Step 3: box enrollment (from step 2), session request with a request object -> pending
+	// Step 2: box enrollment (from step 1), session request with a request object -> pending
 	// record listed in GET /v1/pending?approver=sjawhar.
-	t.Run("3_SessionRequestGoesPendingAndListsForApprover", func(t *testing.T) {
-		compact := signAgentSecretRequest(t, sessionKey, ts.URL, "e2e needs it for the demo", "DEEL_API_KEY")
-		status, body := ts.session(t, sessionKey, enrollmentID, http.MethodPost, "/v1/requests",
-			map[string]any{"request": compact, "session_id": nil})
-		if status != http.StatusOK {
-			t.Fatalf("POST /v1/requests = %d, want 200: %s", status, body)
-		}
-		created := decode[wireCreateRequestResponse](t, body)
-		if created.State != "pending" || created.RecordID == nil || *created.RecordID == "" {
-			t.Fatalf("create response = %+v, want state=pending with a record_id", created)
-		}
-		pendingRecordID = *created.RecordID
+	t.Run("2_SessionRequestGoesPendingAndListsForApprover", func(t *testing.T) {
+		_, pendingRecordID = ts.createPending(t, sessionKey, enrollmentID, "e2e needs it for the demo", "DEEL_API_KEY")
 
-		status, body = ts.ui(t, http.MethodGet, "/v1/pending?approver=sjawhar", nil)
+		status, body := ts.ui(t, http.MethodGet, "/v1/pending?approver="+testApprover, nil)
 		if status != http.StatusOK {
 			t.Fatalf("GET /v1/pending = %d: %s", status, body)
 		}
@@ -637,22 +402,20 @@ func TestEndToEnd(t *testing.T) {
 		}
 	})
 
-	// Step 4: UI record read (challenges present) -> approve with an assertion over the approve
-	// challenge -> grant -> the session's own POST .../values releases the fake secret's exact
-	// configured value.
-	t.Run("4_UIApprovalGrantsAndValuesReleases", func(t *testing.T) {
+	// Step 3: UI record read -> approve by the record's approver -> grant -> the session's own
+	// POST .../values releases the fake secret's exact configured value.
+	t.Run("3_UIApprovalGrantsAndValuesReleases", func(t *testing.T) {
 		status, body := ts.ui(t, http.MethodGet, "/v1/credential-requests/"+pendingRecordID, nil)
 		if status != http.StatusOK {
 			t.Fatalf("GET /v1/credential-requests/{id} = %d: %s", status, body)
 		}
 		readBack := decode[wireRecord](t, body)
-		if readBack.State != "pending" || readBack.Challenges == nil {
-			t.Fatalf("record read = %+v, want pending with challenges", readBack)
+		if readBack.State != "pending" || readBack.Approver != testApprover {
+			t.Fatalf("record read = %+v, want pending with approver %s", readBack, testApprover)
 		}
 
-		assertion := key1Auth.Assert(t, testRPID, testOrigin, decodeChallenge(t, readBack.Challenges.Approve))
 		status, body = ts.ui(t, http.MethodPost, "/v1/credential-requests/"+pendingRecordID+"/approve",
-			map[string]any{"assertion": json.RawMessage(assertion)})
+			map[string]any{"approver": testApprover})
 		if status != http.StatusOK {
 			t.Fatalf("approve = %d: %s", status, body)
 		}
@@ -677,27 +440,13 @@ func TestEndToEnd(t *testing.T) {
 		}
 	})
 
-	// Step 5: deny path on a second request — a fresh request from the same enrollment, decided
-	// by an assertion over the deny challenge, ends denied with no grant.
-	t.Run("5_SecondRequestDeniedHasNoGrant", func(t *testing.T) {
-		compact := signAgentSecretRequest(t, sessionKey, ts.URL, "e2e second ask", "SLACK_MCP_XOXP_TOKEN")
-		status, body := ts.session(t, sessionKey, enrollmentID, http.MethodPost, "/v1/requests",
-			map[string]any{"request": compact, "session_id": nil})
-		if status != http.StatusOK {
-			t.Fatalf("POST /v1/requests (second) = %d, want 200: %s", status, body)
-		}
-		created := decode[wireCreateRequestResponse](t, body)
-		recordID := *created.RecordID
+	// Step 4: deny path on a second request — a fresh request from the same enrollment, denied by
+	// its approver, ends denied with no grant.
+	t.Run("4_SecondRequestDeniedHasNoGrant", func(t *testing.T) {
+		requestID, recordID := ts.createPending(t, sessionKey, enrollmentID, "e2e second ask", "SLACK_MCP_XOXP_TOKEN")
 
-		status, body = ts.ui(t, http.MethodGet, "/v1/credential-requests/"+recordID, nil)
-		if status != http.StatusOK {
-			t.Fatalf("GET /v1/credential-requests/{id} (second) = %d: %s", status, body)
-		}
-		readBack := decode[wireRecord](t, body)
-
-		denyAssertion := key1Auth.Assert(t, testRPID, testOrigin, decodeChallenge(t, readBack.Challenges.Deny))
-		status, body = ts.ui(t, http.MethodPost, "/v1/credential-requests/"+recordID+"/deny",
-			map[string]any{"assertion": json.RawMessage(denyAssertion)})
+		status, body := ts.ui(t, http.MethodPost, "/v1/credential-requests/"+recordID+"/deny",
+			map[string]any{"approver": testApprover})
 		if status != http.StatusOK {
 			t.Fatalf("deny = %d: %s", status, body)
 		}
@@ -708,7 +457,7 @@ func TestEndToEnd(t *testing.T) {
 			t.Fatalf("deny response = %+v, want state=denied", denied)
 		}
 
-		status, body = ts.session(t, sessionKey, enrollmentID, http.MethodGet, "/v1/requests/"+created.RequestID, nil)
+		status, body = ts.session(t, sessionKey, enrollmentID, http.MethodGet, "/v1/requests/"+requestID, nil)
 		if status != http.StatusOK {
 			t.Fatalf("GET /v1/requests/{id} (denied) = %d: %s", status, body)
 		}
@@ -718,12 +467,10 @@ func TestEndToEnd(t *testing.T) {
 		}
 	})
 
-	// Step 6: revoke-by-approver kills the step-4 grant — a subsequent values call refuses it.
-	t.Run("6_RevokeByApproverKillsTheGrant", func(t *testing.T) {
-		revokeChallenge := record.RevokeChallenge(grantID)
-		revokeAssertion := key1Auth.Assert(t, testRPID, testOrigin, revokeChallenge[:])
+	// Step 5: revoke-by-approver kills the step-3 grant — a subsequent values call refuses it.
+	t.Run("5_RevokeByApproverKillsTheGrant", func(t *testing.T) {
 		status, body := ts.ui(t, http.MethodPost, "/v1/grants/"+grantID+"/revoke-by-approver",
-			map[string]any{"assertion": json.RawMessage(revokeAssertion)})
+			map[string]any{"approver": testApprover})
 		if status != http.StatusOK {
 			t.Fatalf("revoke-by-approver = %d: %s", status, body)
 		}
@@ -738,30 +485,21 @@ func TestEndToEnd(t *testing.T) {
 		}
 	})
 
-	// Step 7: a forged grant row — inserted straight into Postgres, bypassing every handler,
+	// Step 6: a forged grant row — inserted straight into Postgres, bypassing every handler,
 	// pointing at a request whose record was never decided (no approved event exists at all) —
 	// releases nothing: VerifyChain's re-verification finds no approval event and refuses with
 	// GRANT_CHAIN_INVALID.
-	t.Run("7_ForgedGrantRowReleasesNothing", func(t *testing.T) {
-		compact := signAgentSecretRequest(t, sessionKey, ts.URL, "e2e forged-grant target", "GITHUB_TOKEN")
-		status, body := ts.session(t, sessionKey, enrollmentID, http.MethodPost, "/v1/requests",
-			map[string]any{"request": compact, "session_id": nil})
-		if status != http.StatusOK {
-			t.Fatalf("POST /v1/requests (left pending, never decided) = %d, want 200: %s", status, body)
-		}
-		created := decode[wireCreateRequestResponse](t, body)
-		if created.State != "pending" {
-			t.Fatalf("create response = %+v, want state=pending (never decided, on purpose)", created)
-		}
+	t.Run("6_ForgedGrantRowReleasesNothing", func(t *testing.T) {
+		requestID, _ := ts.createPending(t, sessionKey, enrollmentID, "e2e forged-grant target", "GITHUB_TOKEN")
 
 		forgedGrantID := uuid.NewString()
 		if _, err := ts.Store.Pool.Exec(context.Background(),
 			`insert into grants (id, request_id, enrollment_id, approver, expires_at) values ($1,$2,$3,$4, now() + interval '1 hour')`,
-			forgedGrantID, created.RequestID, enrollmentID, "sjawhar"); err != nil {
+			forgedGrantID, requestID, enrollmentID, testApprover); err != nil {
 			t.Fatalf("insert forged grants row: %v", err)
 		}
 
-		status, body = ts.session(t, sessionKey, enrollmentID, http.MethodPost, "/v1/grants/"+forgedGrantID+"/values", nil)
+		status, body := ts.session(t, sessionKey, enrollmentID, http.MethodPost, "/v1/grants/"+forgedGrantID+"/values", nil)
 		if status != http.StatusForbidden {
 			t.Fatalf("values on forged grant = %d, want 403: %s", status, body)
 		}
@@ -771,334 +509,206 @@ func TestEndToEnd(t *testing.T) {
 		}
 	})
 
-	// Step 8: key rotation. Register and endorse a second key through the real UI ceremonies,
-	// rewrite the rules file with both keys and wait for the live reload ticker to reconcile it,
-	// confirm key2 can approve, then rewrite again dropping key1 (tombstoning it) and confirm
-	// key1's assertion is now refused on a fresh record.
-	t.Run("8_KeyRotationEndorseThenTombstone", func(t *testing.T) {
-		status, body := ts.ui(t, http.MethodPost, "/v1/approvers/sjawhar/keys/register/begin", nil)
-		if status != http.StatusOK {
-			t.Fatalf("register/begin = %d: %s", status, body)
-		}
-		begin := decode[struct {
-			CeremonyID string `json:"ceremony_id"`
-			PublicKey  struct {
-				Challenge string `json:"challenge"`
-			} `json:"publicKey"`
-		}](t, body)
-		if begin.CeremonyID == "" {
-			t.Fatalf("register/begin = %+v, want a ceremony id", begin)
-		}
+	// Step 7: only the record's approver decides it, and only through the UI bearer: the approver's
+	// own login sent without the bearer is 401, another login is 403 NOT_APPROVER, and the record
+	// is still pending for its approver, whose approval then releases the value.
+	t.Run("7_AnotherLoginOrNoBearerDecidesNothing", func(t *testing.T) {
+		_, recordID := ts.createPending(t, sessionKey, enrollmentID, "e2e wrong login", "NOTION_API_KEY")
 
-		key2Auth = ca.NewAuthenticator(t, uuid.MustParse(testAAGUID))
-		registration := key2Auth.Register(t, testRPID, testOrigin, decodeChallenge(t, begin.PublicKey.Challenge))
-		status, body = ts.ui(t, http.MethodPost, "/v1/approvers/sjawhar/keys/register/finish",
-			map[string]any{"ceremony_id": begin.CeremonyID, "response": json.RawMessage(registration)})
-		if status != http.StatusOK {
-			t.Fatalf("register/finish = %d: %s", status, body)
+		status, body := ts.req(t, http.MethodPost, "/v1/credential-requests/"+recordID+"/approve", nil,
+			map[string]any{"approver": testApprover})
+		if status != http.StatusUnauthorized || decode[wireError](t, body).Code != "UI_INVALID" {
+			t.Fatalf("approve without the UI bearer = %d %s, want 401 UI_INVALID", status, body)
 		}
-		finished := decode[struct {
-			YAML string `json:"yaml"`
-		}](t, body)
-		key2CredentialID, key2Nonce, key2Registration := extractRegistration(t, finished.YAML, "sjawhar")
-
-		keyHash2 := sha256.Sum256(key2Auth.CredentialID)
-		status, body = ts.ui(t, http.MethodPost, "/v1/approvers/sjawhar/keys/endorse/begin",
-			map[string]any{"credential_id": key1Entry.CredentialID, "key_hash": hex.EncodeToString(keyHash2[:])})
-		if status != http.StatusOK {
-			t.Fatalf("endorse/begin = %d: %s", status, body)
-		}
-		endorseBegin := decode[struct {
-			CeremonyID string `json:"ceremony_id"`
-			PublicKey  struct {
-				Challenge string `json:"challenge"`
-			} `json:"publicKey"`
-		}](t, body)
-		if endorseBegin.CeremonyID == "" {
-			t.Fatalf("endorse/begin = %+v, want a ceremony id", endorseBegin)
-		}
-
-		endorseAssertion := key1Auth.Assert(t, testRPID, testOrigin, decodeChallenge(t, endorseBegin.PublicKey.Challenge))
-		status, body = ts.ui(t, http.MethodPost, "/v1/approvers/sjawhar/keys/endorse/finish",
-			map[string]any{"ceremony_id": endorseBegin.CeremonyID, "response": json.RawMessage(endorseAssertion)})
-		if status != http.StatusOK {
-			t.Fatalf("endorse/finish = %d: %s", status, body)
-		}
-		endorseFinished := decode[struct {
-			YAML string `json:"yaml"`
-		}](t, body)
-		endorsedBy, endorsementAssertion := extractEndorsement(t, endorseFinished.YAML)
-
-		key2Entry := approvers.KeyEntry{
-			CredentialID:   key2CredentialID,
-			ChallengeNonce: key2Nonce,
-			Registration:   key2Registration,
-			Endorsement:    &approvers.Endorsement{By: endorsedBy, Assertion: endorsementAssertion},
-		}
-
-		// Rewrite with both keys; wait for the live reload ticker (not a second rules.Current) to
-		// reconcile them.
-		writeRulesFile(t, ts.RulesPath, renderRulesYAML([]approvers.KeyEntry{key1Entry, key2Entry}))
-		waitUntil(t, reloadTimeout, "both keys reconciled after rewrite", func() bool {
-			status, body := ts.ui(t, http.MethodGet, "/v1/approvers/sjawhar/keys", nil)
-			if status != http.StatusOK {
-				return false
-			}
-			keys := decode[struct {
-				Keys []wireKeyInfo `json:"keys"`
-			}](t, body)
-			return len(keys.Keys) == 2
-		})
-
-		// A new record approved with key2's assertion succeeds.
-		compact := signAgentSecretRequest(t, sessionKey, ts.URL, "e2e key2 approves", "NOTION_API_KEY")
-		status, body = ts.session(t, sessionKey, enrollmentID, http.MethodPost, "/v1/requests",
-			map[string]any{"request": compact, "session_id": nil})
-		if status != http.StatusOK {
-			t.Fatalf("POST /v1/requests (for key2) = %d, want 200: %s", status, body)
-		}
-		created := decode[wireCreateRequestResponse](t, body)
-		recordID := *created.RecordID
-
-		status, body = ts.ui(t, http.MethodGet, "/v1/credential-requests/"+recordID, nil)
-		if status != http.StatusOK {
-			t.Fatalf("GET /v1/credential-requests/{id} (for key2) = %d: %s", status, body)
-		}
-		readBack := decode[wireRecord](t, body)
-		key2Assertion := key2Auth.Assert(t, testRPID, testOrigin, decodeChallenge(t, readBack.Challenges.Approve))
 		status, body = ts.ui(t, http.MethodPost, "/v1/credential-requests/"+recordID+"/approve",
-			map[string]any{"assertion": json.RawMessage(key2Assertion)})
-		if status != http.StatusOK {
-			t.Fatalf("approve with key2's assertion = %d, want 200: %s", status, body)
+			map[string]any{"approver": "mallory"})
+		if status != http.StatusForbidden || decode[wireError](t, body).Code != "NOT_APPROVER" {
+			t.Fatalf("approve as mallory = %d %s, want 403 NOT_APPROVER", status, body)
+		}
+		_, body = ts.ui(t, http.MethodGet, "/v1/credential-requests/"+recordID, nil)
+		if read := decode[wireRecord](t, body); read.State != "pending" {
+			t.Fatalf("record after refused decisions = %+v, want pending", read)
 		}
 
-		// Rewrite dropping key1 entirely (tombstoning it); wait for the reload again.
-		writeRulesFile(t, ts.RulesPath, renderRulesYAML([]approvers.KeyEntry{key2Entry}))
-		waitUntil(t, reloadTimeout, "key1 tombstoned after rewrite", func() bool {
-			status, body := ts.ui(t, http.MethodGet, "/v1/approvers/sjawhar/keys", nil)
-			if status != http.StatusOK {
-				return false
-			}
-			keys := decode[struct {
-				Keys []wireKeyInfo `json:"keys"`
-			}](t, body)
-			for _, k := range keys.Keys {
-				if k.CredentialID == key1Entry.CredentialID {
-					return k.State == "tombstoned"
-				}
-			}
-			return false
-		})
-
-		// key1's assertion against a FRESH record is now refused.
-		compact2 := signAgentSecretRequest(t, sessionKey, ts.URL, "e2e tombstoned key1", "LINEAR_API_KEY")
-		status, body = ts.session(t, sessionKey, enrollmentID, http.MethodPost, "/v1/requests",
-			map[string]any{"request": compact2, "session_id": nil})
+		status, body = ts.ui(t, http.MethodPost, "/v1/credential-requests/"+recordID+"/approve",
+			map[string]any{"approver": testApprover})
 		if status != http.StatusOK {
-			t.Fatalf("POST /v1/requests (for tombstoned key1) = %d, want 200: %s", status, body)
+			t.Fatalf("approve by the approver = %d: %s", status, body)
 		}
-		created2 := decode[wireCreateRequestResponse](t, body)
-		recordID2 := *created2.RecordID
-
-		status, body = ts.ui(t, http.MethodGet, "/v1/credential-requests/"+recordID2, nil)
-		if status != http.StatusOK {
-			t.Fatalf("GET /v1/credential-requests/{id} (for tombstoned key1) = %d: %s", status, body)
-		}
-		readBack2 := decode[wireRecord](t, body)
-		key1AssertionNow := key1Auth.Assert(t, testRPID, testOrigin, decodeChallenge(t, readBack2.Challenges.Approve))
-		status, body = ts.ui(t, http.MethodPost, "/v1/credential-requests/"+recordID2+"/approve",
-			map[string]any{"assertion": json.RawMessage(key1AssertionNow)})
-		if status != http.StatusForbidden {
-			t.Fatalf("approve with tombstoned key1's assertion = %d, want 403: %s", status, body)
-		}
-		werr := decode[wireError](t, body)
-		if werr.Code != "ASSERTION_INVALID" {
-			t.Fatalf("code = %q, want ASSERTION_INVALID", werr.Code)
+		granted := decode[struct {
+			GrantID *string `json:"grant_id"`
+		}](t, body)
+		status, body = ts.session(t, sessionKey, enrollmentID, http.MethodPost, "/v1/grants/"+*granted.GrantID+"/values", nil)
+		if status != http.StatusOK || decode[struct {
+			Values map[string]string `json:"values"`
+		}](t, body).Values["NOTION_API_KEY"] != "notion-v1" {
+			t.Fatalf("values after the approver's approval = %d %s, want NOTION_API_KEY=notion-v1", status, body)
 		}
 	})
 
-	// Step 9: an otherwise-valid assertion signed at the wrong origin is refused end to end, by
-	// the currently live key (key2, post-rotation).
-	t.Run("9_WrongOriginAssertionRefused", func(t *testing.T) {
-		compact := signAgentSecretRequest(t, sessionKey, ts.URL, "e2e wrong origin", "FIGMA_API_KEY")
+	// Step 8: an owner edits LINEAR_API_KEY's owner tag to a GitHub login, which names no person.
+	// The live reload refuses that one secret, logging its name and why in the line the
+	// deployment's alarm filters on, and a fresh request for it answers 400 UNKNOWN_SECRET while
+	// every other secret is still served; once the tag names a person again the next reload
+	// serves it again.
+	t.Run("8_MalformedOwnerTagIsRefusedByTheLiveReload", func(t *testing.T) {
+		linear := policytest.Secret("LINEAR_API_KEY", "sjawhar", policy.TierHuman, "linear-v1")
+		ts.Secrets.Put(linear)
+		refused := "ERROR agent secret policy refused name=" + policytest.ID("LINEAR_API_KEY") + " reason=owner-tag-malformed\n"
+		ts.awaitStatus(t, "LINEAR_API_KEY", http.StatusBadRequest, "UNKNOWN_SECRET")
+		if !strings.Contains(ts.Log.String(), refused) {
+			t.Fatalf("broker log has no line %q:\n%s", refused, ts.Log.String())
+		}
+		ts.createPending(t, sessionKey, enrollmentID, "e2e other secrets still served", "SLACK_MCP_XOXP_TOKEN")
+
+		ts.Secrets.Put(policytest.Secret("LINEAR_API_KEY", testApprover, policy.TierHuman, "linear-v1"))
+		ts.awaitStatus(t, "LINEAR_API_KEY", http.StatusOK, "")
+	})
+
+	// Step 9: a shared human-tier secret's request names "anyone" as its approver, reaches the
+	// pending list of a person who is neither its requester's operator nor anyone the policy names,
+	// is refused to the sentinel itself, and that person's approval releases its value.
+	t.Run("9_AnyoneSignedInApprovesASharedHumanTierSecret", func(t *testing.T) {
+		_, recordID := ts.createPending(t, sessionKey, enrollmentID, "e2e shared deploy", "SHARED_DEPLOY_KEY")
+		_, body := ts.ui(t, http.MethodGet, "/v1/credential-requests/"+recordID, nil)
+		if read := decode[wireRecord](t, body); read.Approver != record.AnyoneApprover {
+			t.Fatalf("shared record = %+v, want approver %q", read, record.AnyoneApprover)
+		}
+		ts.awaitPendingFor(t, otherPerson, recordID)
+
+		status, body := ts.ui(t, http.MethodPost, "/v1/credential-requests/"+recordID+"/approve",
+			map[string]any{"approver": record.AnyoneApprover})
+		if status != http.StatusForbidden || decode[wireError](t, body).Code != "NOT_APPROVER" {
+			t.Fatalf("approve as %q = %d %s, want 403 NOT_APPROVER", record.AnyoneApprover, status, body)
+		}
+		status, body = ts.ui(t, http.MethodPost, "/v1/credential-requests/"+recordID+"/approve",
+			map[string]any{"approver": otherPerson})
+		if status != http.StatusOK {
+			t.Fatalf("approve as %s = %d: %s", otherPerson, status, body)
+		}
+		granted := decode[struct {
+			GrantID *string `json:"grant_id"`
+		}](t, body)
+		ts.awaitValue(t, sessionKey, enrollmentID, *granted.GrantID, "SHARED_DEPLOY_KEY", "shared-deploy-v1")
+	})
+
+	// Step 10: otherPerson logs their own machine in and its session asks for testApprover's
+	// agent-tier AUTO_READ_TOKEN, which testApprover's own session gets at once: the request is an
+	// approval request to testApprover, the owner, never to otherPerson, and the owner's approval
+	// releases it.
+	t.Run("10_AnotherPersonsSessionAsksTheOwnerOfAnAgentTierSecret", func(t *testing.T) {
 		status, body := ts.session(t, sessionKey, enrollmentID, http.MethodPost, "/v1/requests",
-			map[string]any{"request": compact, "session_id": nil})
-		if status != http.StatusOK {
-			t.Fatalf("POST /v1/requests (wrong origin target) = %d, want 200: %s", status, body)
+			map[string]any{"request": signAgentSecretRequest(t, sessionKey, ts.URL, "mine", "AUTO_READ_TOKEN"), "session_id": nil})
+		if status != http.StatusOK || decode[wireCreateRequestResponse](t, body).State != "granted" {
+			t.Fatalf("the owner's own session asking for AUTO_READ_TOKEN = %d %s, want granted at once", status, body)
 		}
-		created := decode[wireCreateRequestResponse](t, body)
-		recordID := *created.RecordID
 
-		status, body = ts.ui(t, http.MethodGet, "/v1/credential-requests/"+recordID, nil)
-		if status != http.StatusOK {
-			t.Fatalf("GET /v1/credential-requests/{id} (wrong origin target) = %d: %s", status, body)
+		otherEnrollment, otherKey := ts.loginAndEnroll(t, otherPerson, "e2e-ben")
+		_, recordID := ts.createPending(t, otherKey, otherEnrollment, "ben's agent needs it", "AUTO_READ_TOKEN")
+		_, body = ts.ui(t, http.MethodGet, "/v1/credential-requests/"+recordID, nil)
+		if read := decode[wireRecord](t, body); read.Approver != testApprover {
+			t.Fatalf("ben's request = %+v, want its approver to be the owner %s", read, testApprover)
 		}
-		readBack := decode[wireRecord](t, body)
-
-		wrongOrigin := key2Auth.AssertAtOrigin(t, testRPID, "https://evil.example", decodeChallenge(t, readBack.Challenges.Approve))
+		ts.awaitPendingFor(t, testApprover, recordID)
 		status, body = ts.ui(t, http.MethodPost, "/v1/credential-requests/"+recordID+"/approve",
-			map[string]any{"assertion": json.RawMessage(wrongOrigin)})
-		if status != http.StatusForbidden {
-			t.Fatalf("approve with wrong-origin assertion = %d, want 403: %s", status, body)
+			map[string]any{"approver": otherPerson})
+		if status != http.StatusForbidden || decode[wireError](t, body).Code != "NOT_APPROVER" {
+			t.Fatalf("approve as the requester's own operator = %d %s, want 403 NOT_APPROVER", status, body)
 		}
-		werr := decode[wireError](t, body)
-		if werr.Code != "ASSERTION_INVALID" {
-			t.Fatalf("code = %q, want ASSERTION_INVALID", werr.Code)
-		}
-	})
-}
-
-// TestReloadRefusedForWrongOriginLeavesKeySetUnchanged pins the merge-gate fix wave's ordering
-// fix (commit aea942e745c6): onReload must check the rules file's declared origin against the
-// broker's configured origin BEFORE calling approversSvc.Reconcile, never after — Reconcile
-// commits its own transaction unconditionally on success, so checking the origin second would
-// let an origin-mismatched file's key-set changes land permanently even though the reload is
-// reported (and logged) as refused. This writes a wrong-origin file that ALSO endorses a second,
-// genuinely valid key — a change Reconcile would apply if it ran — and confirms the persisted key
-// set is untouched after several live reload cycles; then, to rule out "the endorsement itself
-// was broken so nothing would have happened anyway," it rewrites the identical key content under
-// the CORRECT origin and confirms Reconcile now does add the second key, exactly as it should.
-func TestReloadRefusedForWrongOriginLeavesKeySetUnchanged(t *testing.T) {
-	ca := webauthntest.NewCA(t)
-	key1Auth := ca.NewAuthenticator(t, uuid.MustParse(testAAGUID))
-	nonce1 := randomNonceHex(t)
-	key1Challenge := record.RegisterChallenge("sjawhar", nonce1)
-	key1Entry := approvers.KeyEntry{
-		CredentialID:   base64.RawURLEncoding.EncodeToString(key1Auth.CredentialID),
-		ChallengeNonce: nonce1,
-		Registration:   key1Auth.Register(t, testRPID, testOrigin, key1Challenge[:]),
-		Seed:           true,
-	}
-	ts := newE2EServer(t, ca, key1Entry)
-
-	readKeys := func(t *testing.T) []wireKeyInfo {
-		t.Helper()
-		status, body := ts.ui(t, http.MethodGet, "/v1/approvers/sjawhar/keys", nil)
+		status, body = ts.ui(t, http.MethodPost, "/v1/credential-requests/"+recordID+"/approve",
+			map[string]any{"approver": testApprover})
 		if status != http.StatusOK {
-			t.Fatalf("GET keys = %d: %s", status, body)
+			t.Fatalf("approve as the owner = %d: %s", status, body)
 		}
-		return decode[struct {
-			Keys []wireKeyInfo `json:"keys"`
-		}](t, body).Keys
-	}
-	if keys := readKeys(t); len(keys) != 1 || keys[0].CredentialID != key1Entry.CredentialID || keys[0].State != "active" {
-		t.Fatalf("keys before rewrite = %+v, want exactly key1 active", keys)
-	}
-
-	// Register and endorse a second key through the real UI ceremonies, exactly as step 8 of
-	// TestEndToEnd does — a genuinely valid endorsed key, not a synthetic placeholder, so applying
-	// it is a real, detectable Reconcile side effect.
-	status, body := ts.ui(t, http.MethodPost, "/v1/approvers/sjawhar/keys/register/begin", nil)
-	if status != http.StatusOK {
-		t.Fatalf("register/begin = %d: %s", status, body)
-	}
-	begin := decode[struct {
-		CeremonyID string `json:"ceremony_id"`
-		PublicKey  struct {
-			Challenge string `json:"challenge"`
-		} `json:"publicKey"`
-	}](t, body)
-	key2Auth := ca.NewAuthenticator(t, uuid.MustParse(testAAGUID))
-	registration := key2Auth.Register(t, testRPID, testOrigin, decodeChallenge(t, begin.PublicKey.Challenge))
-	status, body = ts.ui(t, http.MethodPost, "/v1/approvers/sjawhar/keys/register/finish",
-		map[string]any{"ceremony_id": begin.CeremonyID, "response": json.RawMessage(registration)})
-	if status != http.StatusOK {
-		t.Fatalf("register/finish = %d: %s", status, body)
-	}
-	finished := decode[struct {
-		YAML string `json:"yaml"`
-	}](t, body)
-	key2CredentialID, key2Nonce, key2Registration := extractRegistration(t, finished.YAML, "sjawhar")
-
-	keyHash2 := sha256.Sum256(key2Auth.CredentialID)
-	status, body = ts.ui(t, http.MethodPost, "/v1/approvers/sjawhar/keys/endorse/begin",
-		map[string]any{"credential_id": key1Entry.CredentialID, "key_hash": hex.EncodeToString(keyHash2[:])})
-	if status != http.StatusOK {
-		t.Fatalf("endorse/begin = %d: %s", status, body)
-	}
-	endorseBegin := decode[struct {
-		CeremonyID string `json:"ceremony_id"`
-		PublicKey  struct {
-			Challenge string `json:"challenge"`
-		} `json:"publicKey"`
-	}](t, body)
-	endorseAssertion := key1Auth.Assert(t, testRPID, testOrigin, decodeChallenge(t, endorseBegin.PublicKey.Challenge))
-	status, body = ts.ui(t, http.MethodPost, "/v1/approvers/sjawhar/keys/endorse/finish",
-		map[string]any{"ceremony_id": endorseBegin.CeremonyID, "response": json.RawMessage(endorseAssertion)})
-	if status != http.StatusOK {
-		t.Fatalf("endorse/finish = %d: %s", status, body)
-	}
-	endorseFinished := decode[struct {
-		YAML string `json:"yaml"`
-	}](t, body)
-	endorsedBy, endorsementAssertion := extractEndorsement(t, endorseFinished.YAML)
-	key2Entry := approvers.KeyEntry{
-		CredentialID:   key2CredentialID,
-		ChallengeNonce: key2Nonce,
-		Registration:   key2Registration,
-		Endorsement:    &approvers.Endorsement{By: endorsedBy, Assertion: endorsementAssertion},
-	}
-
-	// Same two-key content, wrong declared origin. If onReload's ordering regressed (Reconcile
-	// before the origin check), key2 would be added despite the reload being refused.
-	twoKeyFile := renderRulesYAML([]approvers.KeyEntry{key1Entry, key2Entry})
-	wrongOrigin := strings.Replace(twoKeyFile, "origin: "+testOrigin, "origin: https://evil.example", 1)
-	if wrongOrigin == twoKeyFile {
-		t.Fatalf("wrong-origin substitution matched nothing; rendered file = %s", twoKeyFile)
-	}
-	writeRulesFile(t, ts.RulesPath, wrongOrigin)
-
-	// Give the live reload ticker (reloadInterval = 40ms) many cycles to prove this isn't a race
-	// won by chance, then confirm the key set is exactly as it was before the rewrite.
-	time.Sleep(reloadTimeout)
-	if keys := readKeys(t); len(keys) != 1 || keys[0].CredentialID != key1Entry.CredentialID || keys[0].State != "active" {
-		t.Fatalf("keys after wrong-origin rewrite = %+v, want key1 unchanged and key2 never added "+
-			"(onReload's origin check must refuse before Reconcile ever runs)", keys)
-	}
-
-	// Same content, correct origin: confirms the endorsement itself was valid all along, so the
-	// prior non-application was genuinely the origin refusal, not a broken test fixture.
-	writeRulesFile(t, ts.RulesPath, twoKeyFile)
-	waitUntil(t, reloadTimeout, "both keys reconciled once the origin is correct", func() bool {
-		return len(readKeys(t)) == 2
+		granted := decode[struct {
+			GrantID *string `json:"grant_id"`
+		}](t, body)
+		ts.awaitValue(t, otherKey, otherEnrollment, *granted.GrantID, "AUTO_READ_TOKEN", "read-v1")
 	})
 }
 
-// TestRulesTestdataFixturesParse proves the rewritten v9-shaped fixtures under testdata/ are
-// exactly what the task's "full rewrite for v9" calls for: no issue_assignee reference remains,
-// and rules.Parse accepts the well-formed one while still refusing the ambiguous one exactly as
-// it did before the rewrite. The fixtures' approvers section is a structural placeholder only
-// (rules.Parse never verifies attestation cryptography — that is approvers.Service.Reconcile's
-// job against a persisted, attested key set); TestEndToEnd above builds its own scratch rules file
-// with real, dynamically generated key material for the live HTTP flow.
-func TestRulesTestdataFixturesParse(t *testing.T) {
-	t.Run("rules.yaml parses under v9's schema", func(t *testing.T) {
-		data, err := os.ReadFile("testdata/rules.yaml")
-		if err != nil {
-			t.Fatalf("read testdata/rules.yaml: %v", err)
+// awaitStatus asks for name from a fresh session until the create route answers status (and, for
+// an error, code), failing after reloadTimeout: the reload ticker applies a tag edit on its next
+// tick.
+func (s *e2eServer) awaitStatus(t *testing.T, name string, status int, code string) {
+	t.Helper()
+	enrollmentID, key := s.loginAndEnroll(t, testApprover, "e2e-reload-"+uuid.NewString()[:8])
+	deadline := time.Now().Add(reloadTimeout)
+	for {
+		got, body := s.session(t, key, enrollmentID, http.MethodPost, "/v1/requests",
+			map[string]any{"request": signAgentSecretRequest(t, key, s.URL, "reload", name), "session_id": nil})
+		if got == status && (code == "" || decode[wireError](t, body).Code == code) {
+			return
 		}
-		set, err := rules.Parse(data)
-		if err != nil {
-			t.Fatalf("rules.Parse(testdata/rules.yaml) = %v, want success", err)
+		if time.Now().After(deadline) {
+			t.Fatalf("POST /v1/requests (%s) = %d %s; want %d %s within %s", name, got, body, status, code, reloadTimeout)
 		}
-		if _, ok := set.Secrets["DEEL_API_KEY"]; !ok {
-			t.Fatalf("parsed set is missing DEEL_API_KEY: %+v", set.Secrets)
+		time.Sleep(reloadInterval)
+	}
+}
+
+// awaitPendingFor fails t unless GET /v1/pending?approver=<person> lists recordID.
+func (s *e2eServer) awaitPendingFor(t *testing.T, person, recordID string) {
+	t.Helper()
+	status, body := s.ui(t, http.MethodGet, "/v1/pending?approver="+person, nil)
+	if status != http.StatusOK {
+		t.Fatalf("GET /v1/pending?approver=%s = %d: %s", person, status, body)
+	}
+	for _, p := range decode[struct {
+		Pending []wirePendingEntry `json:"pending"`
+	}](t, body).Pending {
+		if p.RecordID == recordID {
+			return
 		}
-		if len(set.Approvers.Logins["sjawhar"]) != 1 {
-			t.Fatalf("approvers.logins.sjawhar = %v, want one key", set.Approvers.Logins["sjawhar"])
-		}
-	})
-	t.Run("rules_ambiguous.yaml is refused as ambiguous", func(t *testing.T) {
-		data, err := os.ReadFile("testdata/rules_ambiguous.yaml")
-		if err != nil {
-			t.Fatalf("read testdata/rules_ambiguous.yaml: %v", err)
-		}
-		_, err = rules.Parse(data)
-		if err == nil {
-			t.Fatal("rules.Parse(testdata/rules_ambiguous.yaml) succeeded, want an ambiguous-requester refusal")
-		}
-		if !strings.Contains(err.Error(), "ambiguous requester") {
-			t.Fatalf("error = %v, want it to mention \"ambiguous requester\"", err)
-		}
-	})
+	}
+	t.Fatalf("GET /v1/pending?approver=%s = %s, want record %s listed", person, body, recordID)
+}
+
+// awaitValue fails t unless the session's grant releases name's value.
+func (s *e2eServer) awaitValue(t *testing.T, key *ecdsa.PrivateKey, enrollmentID, grantID, name, value string) {
+	t.Helper()
+	status, body := s.session(t, key, enrollmentID, http.MethodPost, "/v1/grants/"+grantID+"/values", nil)
+	if status != http.StatusOK || decode[struct {
+		Values map[string]string `json:"values"`
+	}](t, body).Values[name] != value {
+		t.Fatalf("values of grant %s = %d %s, want %s=%s", grantID, status, body, name, value)
+	}
+}
+
+// loginAndEnroll logs a machine of person in (their own approval of their own machine login) and
+// enrolls a box session under it, as step 1 does for testApprover.
+func (s *e2eServer) loginAndEnroll(t *testing.T, person, host string) (string, *ecdsa.PrivateKey) {
+	t.Helper()
+	machineKey := newSigningKey(t)
+	status, body := s.req(t, http.MethodPost, "/v1/launcher-credentials", nil,
+		map[string]any{"request": signMachineLoginRequest(t, machineKey, s.URL, person, host)})
+	if status != http.StatusAccepted {
+		t.Fatalf("POST /v1/launcher-credentials (%s) = %d: %s", person, status, body)
+	}
+	code := decode[struct {
+		Code string `json:"code"`
+	}](t, body).Code
+	_, body = s.ui(t, http.MethodPost, "/v1/machine-logins/lookup", map[string]any{"code": code})
+	recordID := decode[wireRecord](t, body).RecordID
+	status, body = s.ui(t, http.MethodPost, "/v1/credential-requests/"+recordID+"/approve",
+		map[string]any{"approver": person, "code": code})
+	if status != http.StatusOK {
+		t.Fatalf("approve %s's machine login = %d: %s", person, status, body)
+	}
+	credentialID := *decode[struct {
+		CredentialID *string `json:"credential_id"`
+	}](t, body).CredentialID
+	sessionKey := newSigningKey(t)
+	thumbprint, err := proof.Thumbprint(&sessionKey.PublicKey)
+	if err != nil {
+		t.Fatalf("thumbprint: %v", err)
+	}
+	status, body = s.launcher(t, machineKey, credentialID, http.MethodPost, "/v1/enrollments",
+		map[string]any{"kind": "box", "runtime_id": host + "-box", "thumbprint": thumbprint})
+	if status != http.StatusCreated {
+		t.Fatalf("enroll %s's session = %d: %s", person, status, body)
+	}
+	return decode[struct {
+		EnrollmentID string `json:"enrollment_id"`
+	}](t, body).EnrollmentID, sessionKey
 }

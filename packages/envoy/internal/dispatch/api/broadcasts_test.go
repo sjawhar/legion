@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -23,10 +25,20 @@ type broadcastListener struct {
 	sends []struct{ target, key, body string }
 }
 
-func newBroadcastListener(t *testing.T, sessionsJSON string) (*httptest.Server, *broadcastListener) {
+// newBroadcastListener's intercepts run first on every request, in order; one that answers the
+// request returns true, and one that returns false lets the fake answer as usual - a test's own
+// outage, or a barrier held before the registry read goes through.
+func newBroadcastListener(
+	t *testing.T, sessionsJSON string, intercepts ...func(http.ResponseWriter, *http.Request) bool,
+) (*httptest.Server, *broadcastListener) {
 	t.Helper()
 	state := &broadcastListener{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for _, intercept := range intercepts {
+			if intercept(w, r) {
+				return
+			}
+		}
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
 			_, _ = w.Write([]byte(sessionsJSON))
@@ -64,6 +76,16 @@ func (l *broadcastListener) targets() []string {
 	return targets
 }
 
+// postBroadcast sends one create as login, minting an idempotency key when the input names
+// none: every send carries one, and most tests have no interest in which.
+func postBroadcast(t *testing.T, handler http.Handler, input map[string]any, login string) *httptest.ResponseRecorder {
+	t.Helper()
+	if _, ok := input["idempotency_key"]; !ok {
+		input["idempotency_key"] = uuid.NewString()
+	}
+	return dispatchRequest(t, handler, http.MethodPost, "/api/v1/broadcasts", input, login)
+}
+
 // broadcastResponse mirrors the create and read shapes the browser consumes.
 type broadcastResponse struct {
 	ID         string `json:"id"`
@@ -94,7 +116,7 @@ func TestBroadcastSendsOneMessagePerRecipientAndExcludesTheRest(t *testing.T) {
 	listener, sends := newBroadcastListener(t, broadcastSessions)
 	handler, _ := newTargetedMessageHandler(t, listener.URL)
 
-	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/broadcasts", map[string]any{
+	response := postBroadcast(t, handler, map[string]any{
 		"body":     "Stand down and report status.",
 		"delivery": "steer",
 		// "planner" twice: a selection that names a session more than once is one recipient.
@@ -190,7 +212,7 @@ func TestBroadcastRecipientRepliesAppearInTheBroadcastAndItsSummary(t *testing.T
 	listener, _ := newBroadcastListener(t, broadcastSessions)
 	handler, _ := newTargetedMessageHandler(t, listener.URL)
 
-	created := decodeBody[broadcastResponse](t, dispatchRequest(t, handler, http.MethodPost, "/api/v1/broadcasts", map[string]any{
+	created := decodeBody[broadcastResponse](t, postBroadcast(t, handler, map[string]any{
 		"body": "Status?", "delivery": "btw", "session_ids": []string{"planner", "tester"},
 	}, "alice"))
 	var plannerMessage string
@@ -250,13 +272,79 @@ func TestBroadcastRecipientRepliesAppearInTheBroadcastAndItsSummary(t *testing.T
 	}
 }
 
+// Every message read names the broadcast that sent the message, and says null for a message no
+// broadcast sent, so a session reading a direct message back can tell a person's own message to
+// it from one recipient's copy of a broadcast: the thread read a session confirms a delivery
+// with, the Agents page's conversation list, and each reply in a thread.
+func TestMessageReadsNameTheBroadcastThatSentThem(t *testing.T) {
+	listener, _ := newBroadcastListener(t, broadcastSessions)
+	handler, _ := newTargetedMessageHandler(t, listener.URL)
+
+	created := decodeBody[broadcastResponse](t, postBroadcast(t, handler, map[string]any{
+		"body": "Status?", "delivery": "steer", "session_ids": []string{"planner"},
+	}, "alice"))
+	broadcastMessage := awaitBroadcastDeliveries(t, handler, created.ID).Recipients[0].Message.ID
+	direct := dispatchRequest(t, handler, http.MethodPost, "/api/v1/agents/planner/messages", map[string]any{
+		"body": "Where is the dashboard?", "delivery": "steer",
+	}, "alice")
+	if direct.Code != http.StatusCreated {
+		t.Fatalf("direct message: status=%d body=%s", direct.Code, direct.Body.String())
+	}
+	directMessage := decodeBody[model.Message](t, direct).ID
+	if reply := bearerRequest(t, handler, http.MethodPost, "/api/v1/messages/"+broadcastMessage+"/reply", map[string]any{
+		"actor": map[string]any{"kind": "session", "id": "planner"}, "attempt": 1, "body": "Green.",
+	}); reply.Code != http.StatusCreated {
+		t.Fatalf("recipient reply: status=%d body=%s", reply.Code, reply.Body.String())
+	}
+
+	type rawRead struct {
+		Message map[string]json.RawMessage   `json:"message"`
+		Replies []map[string]json.RawMessage `json:"replies"`
+	}
+	broadcastID := `"` + created.ID + `"`
+	threadRead := func(id string) rawRead {
+		t.Helper()
+		read := bearerRequest(t, handler, http.MethodGet, "/api/v1/messages/"+id+"?session=planner", nil)
+		if read.Code != http.StatusOK {
+			t.Fatalf("GET /api/v1/messages/%s: status=%d body=%s", id, read.Code, read.Body.String())
+		}
+		return decodeBody[rawRead](t, read)
+	}
+	fromBroadcast := threadRead(broadcastMessage)
+	if got := string(fromBroadcast.Message["broadcast_id"]); got != broadcastID {
+		t.Fatalf("a broadcast recipient's message reads broadcast_id %s, want %s", got, broadcastID)
+	}
+	if len(fromBroadcast.Replies) != 1 || string(fromBroadcast.Replies[0]["broadcast_id"]) != "null" {
+		t.Fatalf("the session's reply in a broadcast thread = %v, want one reply with broadcast_id null", fromBroadcast.Replies)
+	}
+	if got, present := threadRead(directMessage).Message["broadcast_id"]; !present || string(got) != "null" {
+		t.Fatalf("a direct message reads broadcast_id %q (present %v), want null", got, present)
+	}
+
+	listed := dispatchRequest(t, handler, http.MethodGet, "/api/v1/agents/planner/messages", nil, "alice")
+	if listed.Code != http.StatusOK {
+		t.Fatalf("GET /api/v1/agents/planner/messages: status=%d body=%s", listed.Code, listed.Body.String())
+	}
+	byID := map[string]string{}
+	for _, read := range decodeBody[[]rawRead](t, listed) {
+		var id string
+		if err := json.Unmarshal(read.Message["id"], &id); err != nil {
+			t.Fatalf("decode a listed conversation's id: %v", err)
+		}
+		byID[id] = string(read.Message["broadcast_id"])
+	}
+	if byID[broadcastMessage] != broadcastID || byID[directMessage] != "null" {
+		t.Fatalf("the Agents page's conversations read broadcast_id %v, want %s for the broadcast and null for the direct message", byID, broadcastID)
+	}
+}
+
 // Nothing is written when no selected session can take the mode: the sender is told why
 // rather than left with an empty broadcast to explain.
 func TestBroadcastWithNoReachableRecipientIsRefusedAndWritesNothing(t *testing.T) {
 	listener, sends := newBroadcastListener(t, broadcastSessions)
 	handler, _ := newTargetedMessageHandler(t, listener.URL)
 
-	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/broadcasts", map[string]any{
+	response := postBroadcast(t, handler, map[string]any{
 		"body": "Anyone?", "delivery": "steer", "session_ids": []string{"reviewer", "ghost"},
 	}, "alice")
 	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"code":"BROADCAST_EMPTY"`) {
@@ -280,7 +368,7 @@ func TestBroadcastRoutesRefuseBearerCallers(t *testing.T) {
 	listener, _ := newBroadcastListener(t, broadcastSessions)
 	handler, _ := newTargetedMessageHandler(t, listener.URL)
 
-	created := decodeBody[broadcastResponse](t, dispatchRequest(t, handler, http.MethodPost, "/api/v1/broadcasts", map[string]any{
+	created := decodeBody[broadcastResponse](t, postBroadcast(t, handler, map[string]any{
 		"body": "Status?", "delivery": "btw", "session_ids": []string{"planner"},
 	}, "alice"))
 
@@ -291,7 +379,7 @@ func TestBroadcastRoutesRefuseBearerCallers(t *testing.T) {
 	}{
 		"create": {http.MethodPost, "/api/v1/broadcasts", map[string]any{
 			"body": "From a session", "delivery": "btw", "session_ids": []string{"planner"},
-			"actor": map[string]string{"kind": "session", "id": "tester"},
+			"idempotency_key": "from-a-session", "actor": map[string]string{"kind": "session", "id": "tester"},
 		}},
 		"list": {http.MethodGet, "/api/v1/broadcasts", nil},
 		"read": {http.MethodGet, "/api/v1/broadcasts/" + created.ID, nil},
@@ -325,13 +413,45 @@ func TestBroadcastRejectsMalformedInput(t *testing.T) {
 			map[string]any{"body": strings.Repeat("x", maxMessageBody16+1), "delivery": "btw", "session_ids": []string{"planner"}},
 			"CAP_EXCEEDED",
 		},
+		"key with a space": {
+			map[string]any{"body": "hi", "delivery": "btw", "session_ids": []string{"planner"}, "idempotency_key": "press 1"},
+			"BROADCAST_INPUT",
+		},
+		"key with a slash": {
+			map[string]any{"body": "hi", "delivery": "btw", "session_ids": []string{"planner"}, "idempotency_key": "a/b"},
+			"BROADCAST_INPUT",
+		},
+		"over the key cap": {
+			map[string]any{"body": "hi", "delivery": "btw", "session_ids": []string{"planner"}, "idempotency_key": strings.Repeat("k", 129)},
+			"CAP_EXCEEDED",
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/broadcasts", input.body, "alice")
+			response := postBroadcast(t, handler, input.body, "alice")
 			if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"code":"`+input.code+`"`) {
 				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 			}
 		})
+	}
+	// A tab opened before send keys shipped posts none. Its failed row is the only copy of the
+	// message and a reload drops it, so the refusal it shows says what to do, in order.
+	t.Run("no key", func(t *testing.T) {
+		response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/broadcasts", map[string]any{
+			"body": "hi", "delivery": "btw", "session_ids": []string{"planner"},
+		}, "alice")
+		if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"code":"BROADCAST_INPUT"`) {
+			t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+		}
+		for _, phrase := range []string{"Restore draft", "reload the page"} {
+			if !strings.Contains(response.Body.String(), phrase) {
+				t.Fatalf("the refusal %s does not say %q", response.Body.String(), phrase)
+			}
+		}
+	})
+	if accepted := postBroadcast(t, handler, map[string]any{
+		"body": "hi", "delivery": "btw", "session_ids": []string{"planner"}, "idempotency_key": "A1._:-z",
+	}, "alice"); accepted.Code != http.StatusCreated {
+		t.Fatalf("a key using every allowed class: status=%d body=%s", accepted.Code, accepted.Body.String())
 	}
 
 	missing := dispatchRequest(t, handler, http.MethodGet, "/api/v1/broadcasts/5a660655-04ad-4ce0-8a9b-93dd03c412b7", nil, "alice")
@@ -371,11 +491,11 @@ func awaitBroadcastDeliveries(t *testing.T, handler http.Handler, id string) bro
 	}
 }
 
-// LEGION-233 review, P1. Delivery used to run inside the create request, so a request cut off
-// partway - a closed tab, a deploy's shutdown, the load balancer's idle timeout - left one
-// attempt stranded pending and every later recipient with no attempt at all, and nothing
-// recovered them. The send now answers as soon as the messages are committed and delivers
-// behind the request, on the server's lifetime rather than the request's.
+// LEGION-233 review, P1. The send answers as soon as the messages are committed and delivers
+// behind the request, on the server's lifetime rather than the request's: delivering inside the
+// create request would let a request cut off partway - a closed tab, a deploy's shutdown, the
+// load balancer's idle timeout - strand one attempt pending and leave every later recipient with
+// no attempt at all, with nothing to recover them.
 func TestBroadcastAnswersBeforeDeliveringAndStillReachesEveryRecipient(t *testing.T) {
 	release := make(chan struct{})
 	var listenerState struct {
@@ -401,7 +521,7 @@ func TestBroadcastAnswersBeforeDeliveringAndStillReachesEveryRecipient(t *testin
 
 	// Every listener send is blocked, so a handler that delivered inside the request could not
 	// answer at all.
-	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/broadcasts", map[string]any{
+	response := postBroadcast(t, handler, map[string]any{
 		"body": "Status?", "delivery": "btw", "session_ids": []string{"planner", "tester"},
 	}, "alice")
 	if response.Code != http.StatusCreated {
@@ -447,9 +567,9 @@ func TestBroadcastAnswersBeforeDeliveringAndStillReachesEveryRecipient(t *testin
 
 // LEGION-233 review, second round. A broadcast's worker is queued behind its own attempt, so a
 // human who changes the mode from the agent card in the meantime settles attempt 1 and sends
-// their own frame. The worker used to find no pending attempt, open one of its own, and send a
-// SECOND frame to the same session. It is bound to attempt 1 now, and skips the recipient once
-// that attempt is no longer its to send.
+// their own frame. The worker is bound to attempt 1, and skips the recipient once that attempt is
+// no longer its to send; a worker that opened an attempt of its own would send a SECOND frame to
+// the same session.
 func TestBroadcastWorkerSkipsARecipientTakenOverFromTheAgentCard(t *testing.T) {
 	release := make(chan struct{})
 	// The worker announces itself when it parks, so the takeover below happens while it is
@@ -495,7 +615,7 @@ func TestBroadcastWorkerSkipsARecipientTakenOverFromTheAgentCard(t *testing.T) {
 	defer listener.Close()
 	handler, database := newTargetedMessageHandler(t, listener.URL)
 
-	created := decodeBody[broadcastResponse](t, dispatchRequest(t, handler, http.MethodPost, "/api/v1/broadcasts", map[string]any{
+	created := decodeBody[broadcastResponse](t, postBroadcast(t, handler, map[string]any{
 		"body": "Status?", "delivery": "btw", "session_ids": []string{"planner"},
 	}, "alice"))
 	message := created.Recipients[0].Message.ID
@@ -577,7 +697,7 @@ func TestBroadcastRecipientsReadBackInRequestOrder(t *testing.T) {
 			handler, database := newTargetedMessageHandler(t, listener.URL)
 			installReverseBroadcastMessageIDDefault(t, database)
 
-			created := decodeBody[broadcastResponse](t, dispatchRequest(t, handler, http.MethodPost, "/api/v1/broadcasts", map[string]any{
+			created := decodeBody[broadcastResponse](t, postBroadcast(t, handler, map[string]any{
 				"body": "Keep this recipient order.", "delivery": "btw", "session_ids": requested,
 			}, "alice"))
 			var createdAtCount int

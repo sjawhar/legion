@@ -87,23 +87,24 @@ func TestRegisterExecRunsTheCommandAsTheRegisteredPid(t *testing.T) {
 // listening), so every session it registers stays unenrolled.
 func realHelper(t *testing.T) string {
 	t.Helper()
-	_, sock := serveRealHelper(t, "http://127.0.0.1:1")
+	_, sock := serveRealHelper(t, "http://127.0.0.1:1", "ada@example.com")
 	return sock
 }
 
 // serveRealHelper serves a real helper.Server against the broker at brokerURL, with an operator
-// file so a test can log it in (Broker.Login). It waits for every session to be retired, and the
-// server to stop, before the test's temporary directories go.
-func serveRealHelper(t *testing.T, brokerURL string) (*helper.Server, string) {
+// file naming operator (an email, as Dispatch names the person who approves) so a test can log it
+// in (Broker.Login). It waits for every session to be retired, and the server to stop, before the
+// test's temporary directories go.
+func serveRealHelper(t *testing.T, brokerURL, operator string) (*helper.Server, string) {
 	t.Helper()
 	dir := t.TempDir()
-	operator := filepath.Join(dir, "operator")
-	if err := os.WriteFile(operator, []byte("sjawhar\n"), 0o600); err != nil {
+	operatorFile := filepath.Join(dir, "operator")
+	if err := os.WriteFile(operatorFile, []byte(operator+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	srv := &helper.Server{
 		Registry: helper.NewRegistry(filepath.Join(dir, "sessions.json")),
-		Broker:   &helper.Broker{URL: brokerURL, OperatorFile: operator, HTTP: http.DefaultClient},
+		Broker:   &helper.Broker{URL: brokerURL, OperatorFile: operatorFile, HTTP: http.DefaultClient},
 		Hostname: "testhost",
 		PeerOf:   helper.PeerOf,
 		Log:      slog.New(slog.NewTextHandler(io.Discard, nil)),

@@ -5,7 +5,7 @@ import { createElement } from "react";
 import { MemoryRouter } from "react-router-dom";
 
 import { api } from "../api/client";
-import type { IssueSummary, Project } from "../api/types";
+import type { CredentialPendingRow, IssueSummary, Project } from "../api/types";
 import { Sidebar } from "../features/sidebar/Sidebar";
 
 function issue(overrides: Partial<IssueSummary> = {}): IssueSummary {
@@ -40,7 +40,9 @@ function project(overrides: Partial<Project> = {}): Project {
   };
 }
 
-function renderSidebar(pathname = "/") {
+/** `pending` is the broker's list of credential requests waiting on the viewer; without it this
+ *  Dispatch has no broker (the list answers `null`). */
+function renderSidebar(pathname = "/", pending?: CredentialPendingRow[]) {
   const getInbox = spyOn(api, "getInbox").mockResolvedValue([
     {
       anchor: null,
@@ -108,6 +110,9 @@ function renderSidebar(pathname = "/") {
       urgency: "med",
     },
   ]);
+  const getCredentialPending = spyOn(api, "getCredentialPending").mockResolvedValue(
+    pending === undefined ? null : { pending }
+  );
   const getIssue = spyOn(api, "getIssue").mockResolvedValue(undefined as never);
   const listIssues = spyOn(api, "listIssues").mockResolvedValue([issue()]);
   const listProjects = spyOn(api, "listProjects").mockResolvedValue([
@@ -128,7 +133,7 @@ function renderSidebar(pathname = "/") {
       )
     )
   );
-  return { getInbox, getIssue, listIssues, listProjects, view };
+  return { getCredentialPending, getInbox, getIssue, listIssues, listProjects, view };
 }
 
 test("sidebar lists Inbox, Pinned, Projects, and Settings with a truthful Needs-you count", async () => {
@@ -145,6 +150,29 @@ test("sidebar lists Inbox, Pinned, Projects, and Settings with a truthful Needs-
     expect(screen.getByRole("link", { name: "Settings" })).toBeTruthy();
   } finally {
     sidebar.view.unmount();
+    sidebar.getCredentialPending.mockRestore();
+    sidebar.getInbox.mockRestore();
+    sidebar.getIssue.mockRestore();
+    sidebar.listIssues.mockRestore();
+    sidebar.listProjects.mockRestore();
+  }
+});
+
+test("sidebar counts a pending credential request in Needs you, beside the asks waiting on you", async () => {
+  const sidebar = renderSidebar("/", [
+    {
+      identifiers: ["DEMO_API_KEY"],
+      kind: "agent_secret",
+      record_id: "record-1",
+      requested_at: "2026-09-10T00:00:00Z",
+    },
+  ]);
+
+  try {
+    expect(await screen.findByRole("link", { name: /Inbox.*Needs you 3/ })).toBeTruthy();
+  } finally {
+    sidebar.view.unmount();
+    sidebar.getCredentialPending.mockRestore();
     sidebar.getInbox.mockRestore();
     sidebar.getIssue.mockRestore();
     sidebar.listIssues.mockRestore();
@@ -160,6 +188,7 @@ test("sidebar marks the current project", async () => {
     expect(core.getAttribute("aria-current")).toBe("page");
   } finally {
     sidebar.view.unmount();
+    sidebar.getCredentialPending.mockRestore();
     sidebar.getInbox.mockRestore();
     sidebar.getIssue.mockRestore();
     sidebar.listIssues.mockRestore();
@@ -177,6 +206,7 @@ test("sidebar never requests the full issue list", async () => {
     expect(sidebar.getIssue).not.toHaveBeenCalled();
   } finally {
     sidebar.view.unmount();
+    sidebar.getCredentialPending.mockRestore();
     sidebar.getInbox.mockRestore();
     sidebar.getIssue.mockRestore();
     sidebar.listIssues.mockRestore();
@@ -186,6 +216,9 @@ test("sidebar never requests the full issue list", async () => {
 
 test("sidebar keeps its hide control available while navigation loads", () => {
   const getInbox = spyOn(api, "getInbox").mockImplementation(() => new Promise<never>(() => {}));
+  const getCredentialPending = spyOn(api, "getCredentialPending").mockImplementation(
+    () => new Promise<never>(() => {})
+  );
   const listIssues = spyOn(api, "listIssues").mockResolvedValue([]);
   const listProjects = spyOn(api, "listProjects").mockResolvedValue([]);
   let hideCount = 0;
@@ -213,6 +246,7 @@ test("sidebar keeps its hide control available while navigation loads", () => {
   } finally {
     view.unmount();
     getInbox.mockRestore();
+    getCredentialPending.mockRestore();
     listIssues.mockRestore();
     listProjects.mockRestore();
   }

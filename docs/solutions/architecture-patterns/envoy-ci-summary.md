@@ -57,17 +57,18 @@ which is stop-then-start, on a slow path whose named terms are a floor:
 | `bus.ConnectOwningStream`: a first 5 s dial, then the stream's info and update, each bounded by the 10 s JetStream MaxWait | 25 s |
 | durable check (`listenerDurable`), one JetStream call | 10 s |
 | interest and session cache gates (`registry.WaitForCacheReady`, `sessions.WaitForCacheReady`) | 60 s |
-| subscribe retry loop around `startListenerSubscription`, sleeping attempt×3 s after each of its first nine attempts | 135 s |
+| durable bind (`bindListenerDurable`), polled every 2 s until its deadline | 135 s |
 | **floor, before container start and image pull** | **260 s** |
 
 `cistore.go` (`handoverGrace`) and `packages/envoy/AGENTS.md` cite this total; update them if it changes.
 
 The degraded path adds terms that are bounded but not counted: `bus.connectWithContext` retries the
 dial up to ten times (about 59 s); `cistore.Open`, `store.Open`'s two buckets and
-`session.OpenSessionRegistry` each wait up to the 10 s MaxWait (40 s); and
-`startListenerSubscription` reruns `listenerDurable`'s ConsumerInfo on every attempt (up to about
-100 s), which is slow exactly when the backoff runs. Production's ECS rollouts take 0.6 to 20.5 s
-from SIGTERM to ready, once 58.9 s (2026-09-28).
+`session.OpenSessionRegistry` each wait up to the 10 s MaxWait (40 s); and the bind's deadline
+counts its attempts' own time, so slow JetStream calls add only the attempt in flight at the
+deadline: `listenerDurable`'s ConsumerInfo, an update and the bind, each up to the 10 s MaxWait
+(30 s). Production's ECS rollouts take 0.6 to 20.5 s from SIGTERM to ready, once 58.9 s
+(2026-09-28).
 
 Every admitted record is at most debounce plus grace old, by construction. The head-gated listener
 keeps leaving non-head records until its SIGTERM, so any width admits the ones it left in its last

@@ -45,7 +45,7 @@ Envoy renders an annotated delivery before its source summary and complete paylo
 
 ```text
 envoy:
-  to: you (01a0…)
+  to: you (ses_example_recipient)
   from: 01a0bbbb-cccc-7ddd-eeee-0123456789ab (Reviewer)
   at: "2026-09-07T04:41:12Z"
   id: agent-message-2

@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/url"
 	"os"
 	"sort"
 	"strconv"
@@ -22,8 +23,6 @@ import (
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/kvwatch"
 	"github.com/sjawhar/envoy/internal/testnats"
-	"github.com/testcontainers/testcontainers-go"
-	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
 )
 
 // --- Unit Tests (no NATS needed — test Match() against pre-populated cache) ---
@@ -174,11 +173,9 @@ func TestMatch_MultipleTopicsOnOneEntry(t *testing.T) {
 
 // --- Unit Tests for mergeForUpsert (pure logic, no NATS) ---
 //
-// Regression coverage for the silent-fallback bug that caused Atlas's pr.11416.>
-// subscription to be silently truncated to [agent-self] across 235 dropped events:
-// when the interest bucket's Get returned a transient error, the original Upsert silently
-// treated it the same as ErrKeyNotFound and clobbered durable state with whatever
-// the heartbeat sent (only the agent topic).
+// Regression coverage for a silent fallback: an Upsert that treats a transient error from the
+// interest bucket's Get as ErrKeyNotFound clobbers durable state with whatever the heartbeat sent
+// (only the agent topic), truncating the session's subscriptions to its own topic.
 
 func TestMergeForUpsert_SuccessfulGetMergesTopics(t *testing.T) {
 	cur := Interest{
@@ -286,77 +283,11 @@ func TestMergeForUpsert_PreservesMachineIDAndDirFromExistingEntry(t *testing.T) 
 
 // --- Integration Tests (testcontainers NATS) ---
 
-var (
-	sharedNATSOnce sync.Once
-	sharedNATSURI  string
-	sharedNATSErr  error
-	// sharedNATSContainer is the container the tests share, which TestMain terminates.
-	sharedNATSContainer *tcnats.NATSContainer
-)
-
-func sharedTestNATSURI(t *testing.T) string {
-	t.Helper()
-	sharedNATSOnce.Do(func() {
-		ctr, err := tcnats.Run(context.Background(), testnats.Image)
-		if err != nil {
-			sharedNATSErr = errors.Join(err, testcontainers.TerminateContainer(ctr))
-			return
-		}
-		sharedNATSURI, sharedNATSErr = ctr.ConnectionString(context.Background())
-		if sharedNATSErr != nil {
-			sharedNATSErr = errors.Join(sharedNATSErr, testcontainers.TerminateContainer(ctr))
-			return
-		}
-		sharedNATSContainer = ctr
-	})
-	if sharedNATSErr != nil {
-		t.Fatalf("failed to start shared NATS: %v", sharedNATSErr)
-	}
-	return sharedNATSURI
-}
-
-// bucketNames are the interest and role buckets one test uses on the shared server.
-type bucketNames struct{ interests, roles string }
-
-var testBucketNames = struct {
-	sync.Mutex
-	next  int
-	names map[testing.TB]bucketNames
-}{names: map[testing.TB]bucketNames{}}
-
-// testBuckets names buckets no other test uses, so no test deletes and recreates a bucket on the
-// shared server: nats-server removes a deleted stream's directories from background goroutines,
-// and a same-named bucket created right after the delete races that cleanup ("error creating
-// store for stream").
-func testBuckets(t testing.TB) bucketNames {
-	testBucketNames.Lock()
-	defer testBucketNames.Unlock()
-	if names, ok := testBucketNames.names[t]; ok {
-		return names
-	}
-	testBucketNames.next++
-	names := bucketNames{
-		interests: fmt.Sprintf("%s_%d", Bucket, testBucketNames.next),
-		roles:     fmt.Sprintf("%s_%d", RoleBucket, testBucketNames.next),
-	}
-	testBucketNames.names[t] = names
-	t.Cleanup(func() {
-		testBucketNames.Lock()
-		delete(testBucketNames.names, t)
-		testBucketNames.Unlock()
-	})
-	return names
-}
-
-// withTestBuckets opens the registry on t's own buckets.
-func withTestBuckets(t testing.TB) OpenOption {
-	names := testBuckets(t)
-	return func(o *openOpts) { o.interestBucket, o.roleBucket = names.interests, names.roles }
-}
-
+// connectNATS connects to the package's shared NATS server, in the JetStream account
+// testnats.URL hands t, where no earlier test made an interest or role bucket.
 func connectNATS(t *testing.T) (*natsgo.Conn, func()) {
 	t.Helper()
-	conn := testnats.Connect(t, sharedTestNATSURI(t))
+	conn := testnats.Connect(t, testnats.URL(t))
 	return conn, conn.Close
 }
 
@@ -405,14 +336,14 @@ func TestOpen_WatchPopulatesExistingKeys(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to get JetStream: %v", err)
 	}
-	kv, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: testBuckets(t).interests, Replicas: 1, Storage: natsgo.FileStorage})
+	kv, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: Bucket, Replicas: 1, Storage: natsgo.FileStorage})
 	if err != nil {
 		t.Fatalf("failed to create KV bucket: %v", err)
 	}
 	putInterest(t, kv, Interest{SessionID: "ses_preload", MachineID: "m1", Topics: []string{"notifications.>"}})
 
 	// Open registry — watch() populates cache asynchronously
-	reg, err := Open(conn, WithReplicas(1), withTestBuckets(t))
+	reg, err := Open(conn, WithReplicas(1))
 	if err != nil {
 		t.Fatalf("Open failed: %v", err)
 	}
@@ -428,7 +359,7 @@ func TestWatch_PropagatesUpsert(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 
-	reg, err := Open(conn, WithReplicas(1), withTestBuckets(t))
+	reg, err := Open(conn, WithReplicas(1))
 	if err != nil {
 		t.Fatalf("Open failed: %v", err)
 	}
@@ -460,13 +391,13 @@ func TestWatch_PropagatesDelete(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to get JetStream: %v", err)
 	}
-	kv, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: testBuckets(t).interests, Replicas: 1, Storage: natsgo.FileStorage})
+	kv, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: Bucket, Replicas: 1, Storage: natsgo.FileStorage})
 	if err != nil {
 		t.Fatalf("failed to create KV bucket: %v", err)
 	}
 	putInterest(t, kv, Interest{SessionID: "ses_del", MachineID: "m1", Topics: []string{"notifications.>"}})
 
-	reg, err := Open(conn, WithReplicas(1), withTestBuckets(t))
+	reg, err := Open(conn, WithReplicas(1))
 	if err != nil {
 		t.Fatalf("Open failed: %v", err)
 	}
@@ -492,13 +423,13 @@ func TestWatch_PropagatesPurge(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to get JetStream: %v", err)
 	}
-	kv, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: testBuckets(t).interests, Replicas: 1, Storage: natsgo.FileStorage})
+	kv, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: Bucket, Replicas: 1, Storage: natsgo.FileStorage})
 	if err != nil {
 		t.Fatalf("failed to create KV bucket: %v", err)
 	}
 	putInterest(t, kv, Interest{SessionID: "ses_purge", MachineID: "m1", Topics: []string{"notifications.>"}})
 
-	reg, err := Open(conn, WithReplicas(1), withTestBuckets(t))
+	reg, err := Open(conn, WithReplicas(1))
 	if err != nil {
 		t.Fatalf("Open failed: %v", err)
 	}
@@ -527,13 +458,13 @@ func TestMatch_IndependentOfKVAfterStartup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to get JetStream: %v", err)
 	}
-	kv, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: testBuckets(t).interests, Replicas: 1, Storage: natsgo.FileStorage})
+	kv, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: Bucket, Replicas: 1, Storage: natsgo.FileStorage})
 	if err != nil {
 		t.Fatalf("failed to create KV bucket: %v", err)
 	}
 	putInterest(t, kv, Interest{SessionID: "ses_survive", MachineID: "m1", Topics: []string{"notifications.>"}})
 
-	reg, err := Open(conn, WithReplicas(1), withTestBuckets(t))
+	reg, err := Open(conn, WithReplicas(1))
 	if err != nil {
 		t.Fatalf("Open failed: %v", err)
 	}
@@ -561,7 +492,7 @@ func TestOpen_EmptyBucketSucceeds(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 
-	reg, err := Open(conn, WithReplicas(1), withTestBuckets(t))
+	reg, err := Open(conn, WithReplicas(1))
 	if err != nil {
 		t.Fatalf("Open failed on empty bucket: %v", err)
 	}
@@ -585,11 +516,11 @@ func coldRegistry(t *testing.T, conn *natsgo.Conn) (*Registry, natsgo.KeyValue) 
 	if err != nil {
 		t.Fatalf("failed to get JetStream: %v", err)
 	}
-	kv, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: testBuckets(t).interests, Replicas: 1, Storage: natsgo.FileStorage})
+	kv, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: Bucket, Replicas: 1, Storage: natsgo.FileStorage})
 	if err != nil {
 		t.Fatalf("failed to create KV bucket: %v", err)
 	}
-	roleKV, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: testBuckets(t).roles, Replicas: 1, Storage: natsgo.FileStorage})
+	roleKV, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: RoleBucket, Replicas: 1, Storage: natsgo.FileStorage})
 	if err != nil {
 		t.Fatalf("failed to create role KV bucket: %v", err)
 	}
@@ -1232,7 +1163,7 @@ func TestPing_HealthyConnReturnsNil(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 
-	reg, err := Open(conn, WithReplicas(1), withTestBuckets(t))
+	reg, err := Open(conn, WithReplicas(1))
 	if err != nil {
 		t.Fatalf("Open failed: %v", err)
 	}
@@ -1248,7 +1179,7 @@ func TestPing_ClosedConnReturnsError(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 
-	reg, err := Open(conn, WithReplicas(1), withTestBuckets(t))
+	reg, err := Open(conn, WithReplicas(1))
 	if err != nil {
 		t.Fatalf("Open failed: %v", err)
 	}
@@ -1266,17 +1197,15 @@ func TestPing_ClosedConnReturnsError(t *testing.T) {
 
 // --- Cache readiness tests ---
 //
-// Follow-up to PR #610. The Upsert silent-fallback fix doesn't address the
-// initial-cache-warmup race: after Open() returns, watch() populates the cache
+// The initial-cache-warmup race: after Open() returns, watch() populates the cache
 // asynchronously, and events arriving in that window get "no matching
-// interests" even when the durable KV entry has subscribers. This was ~36/235
-// of Atlas's observed drops (the 07:39:38 burst right at listener restart).
+// interests" even when the durable KV entry has subscribers.
 
 func TestWaitForCacheReady_ReturnsAfterInitialScan(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 
-	reg, err := Open(conn, WithReplicas(1), withTestBuckets(t))
+	reg, err := Open(conn, WithReplicas(1))
 	if err != nil {
 		t.Fatalf("Open failed: %v", err)
 	}
@@ -1297,7 +1226,7 @@ func TestWaitForCacheReady_PrePopulatedKVIsVisibleAfterReady(t *testing.T) {
 
 	// Pre-populate KV via a temporary registry, then Close conn to release
 	// any watcher state.
-	reg1, err := Open(conn, WithReplicas(1), withTestBuckets(t))
+	reg1, err := Open(conn, WithReplicas(1))
 	if err != nil {
 		t.Fatalf("first Open failed: %v", err)
 	}
@@ -1312,7 +1241,7 @@ func TestWaitForCacheReady_PrePopulatedKVIsVisibleAfterReady(t *testing.T) {
 
 	// Second registry on the same bucket — simulates listener restart against
 	// existing KV state.
-	reg2, err := Open(conn, WithReplicas(1), withTestBuckets(t))
+	reg2, err := Open(conn, WithReplicas(1))
 	if err != nil {
 		t.Fatalf("second Open failed: %v", err)
 	}
@@ -1559,7 +1488,7 @@ func TestWatcherEvictsMalformedValue(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 
-	reg, err := Open(conn, WithReplicas(1), withTestBuckets(t))
+	reg, err := Open(conn, WithReplicas(1))
 	if err != nil {
 		t.Fatalf("Open failed: %v", err)
 	}
@@ -1860,7 +1789,7 @@ func TestRemoveDoesNotOverwriteNewerWatcherValue(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 
-	reg, err := Open(conn, WithReplicas(1), withTestBuckets(t))
+	reg, err := Open(conn, WithReplicas(1))
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -2011,20 +1940,8 @@ func (kv *historyFailKeyValue) History(string, ...natsgo.WatchOpt) ([]natsgo.Key
 	return nil, kv.err
 }
 
-// TestMain terminates the NATS container this package's tests share once they have all run.
-// Nothing else would: CI disables Ryuk, and without it a container outlives the test binary.
-func TestMain(m *testing.M) {
-	code := m.Run()
-	if sharedNATSContainer != nil {
-		if err := testcontainers.TerminateContainer(sharedNATSContainer); err != nil {
-			fmt.Fprintf(os.Stderr, "terminate the shared NATS container: %v\n", err)
-			if code == 0 {
-				code = 1
-			}
-		}
-	}
-	os.Exit(code)
-}
+// TestMain removes the NATS server the package's tests share (testnats.Main).
+func TestMain(m *testing.M) { os.Exit(testnats.Main(m)) }
 
 // The registry's clock stamps what it records: an interest's UpdatedAt and a role claim's
 // ClaimedAt come from the clock Open was given, as the grace window does.
@@ -2032,7 +1949,7 @@ func TestTheRegistryClockStampsWhatItRecords(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 	at := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
-	reg, err := Open(conn, WithReplicas(1), withTestBuckets(t), WithClock(func() time.Time { return at }))
+	reg, err := Open(conn, WithReplicas(1), WithClock(func() time.Time { return at }))
 	if err != nil {
 		t.Fatalf("Open failed: %v", err)
 	}
@@ -2062,7 +1979,7 @@ func TestTheRegistryClockStampsWhatItRecords(t *testing.T) {
 func TestRewatchOntoARecreatedBucketRefillsTheCache(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
-	reg, err := Open(conn, WithReplicas(1), withTestBuckets(t))
+	reg, err := Open(conn, WithReplicas(1))
 	if err != nil {
 		t.Fatalf("Open failed: %v", err)
 	}
@@ -2086,11 +2003,10 @@ func TestRewatchOntoARecreatedBucketRefillsTheCache(t *testing.T) {
 	if err != nil {
 		t.Fatalf("jetstream: %v", err)
 	}
-	bucket := testBuckets(t).interests
-	if err := js.DeleteKeyValue(bucket); err != nil {
+	if err := js.DeleteKeyValue(Bucket); err != nil {
 		t.Fatalf("delete the interest bucket: %v", err)
 	}
-	recreated, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: bucket, Replicas: 1, Storage: natsgo.FileStorage})
+	recreated, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: Bucket, Replicas: 1, Storage: natsgo.FileStorage})
 	if err != nil {
 		t.Fatalf("recreate the interest bucket: %v", err)
 	}
@@ -2114,7 +2030,7 @@ func TestRewatchOntoARecreatedBucketRefillsTheCache(t *testing.T) {
 func TestARewatchThatCannotOpenTheRoleBucketMovesNothing(t *testing.T) {
 	first, closeFirst := connectNATS(t)
 	defer closeFirst()
-	reg, err := Open(first, WithReplicas(1), withTestBuckets(t))
+	reg, err := Open(first, WithReplicas(1))
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -2123,7 +2039,7 @@ func TestARewatchThatCannotOpenTheRoleBucketMovesNothing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("jetstream: %v", err)
 	}
-	if err := js.DeleteKeyValue(testBuckets(t).roles); err != nil {
+	if err := js.DeleteKeyValue(RoleBucket); err != nil {
 		t.Fatalf("delete the role bucket: %v", err)
 	}
 	second, closeSecond := connectNATS(t)
@@ -2147,12 +2063,11 @@ func TestARewatchThatCannotOpenTheRoleBucketMovesNothing(t *testing.T) {
 func TestOpeningTheRegistryReadsEveryRoleRevisionWithoutAGetPerKey(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
-	names := testBuckets(t)
 	js, err := conn.JetStream()
 	if err != nil {
 		t.Fatalf("jetstream: %v", err)
 	}
-	rawRoles, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: names.roles, Storage: natsgo.FileStorage})
+	rawRoles, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: RoleBucket, Storage: natsgo.FileStorage})
 	if err != nil {
 		t.Fatalf("create the role bucket: %v", err)
 	}
@@ -2173,12 +2088,12 @@ func TestOpeningTheRegistryReadsEveryRoleRevisionWithoutAGetPerKey(t *testing.T)
 
 	// Every read of one key is a request the store sends on this connection: a direct get when the
 	// bucket allows one, a stream message get otherwise.
-	gets, err := conn.SubscribeSync(fmt.Sprintf("$JS.API.DIRECT.GET.KV_%s.>", names.roles))
+	gets, err := conn.SubscribeSync(fmt.Sprintf("$JS.API.DIRECT.GET.KV_%s.>", RoleBucket))
 	if err != nil {
 		t.Fatalf("watch direct gets: %v", err)
 	}
 	defer func() { _ = gets.Unsubscribe() }()
-	legacyGets, err := conn.SubscribeSync(fmt.Sprintf("$JS.API.STREAM.MSG.GET.KV_%s", names.roles))
+	legacyGets, err := conn.SubscribeSync(fmt.Sprintf("$JS.API.STREAM.MSG.GET.KV_%s", RoleBucket))
 	if err != nil {
 		t.Fatalf("watch stream message gets: %v", err)
 	}
@@ -2187,7 +2102,7 @@ func TestOpeningTheRegistryReadsEveryRoleRevisionWithoutAGetPerKey(t *testing.T)
 		t.Fatalf("flush the watches: %v", err)
 	}
 
-	registry, err := Open(conn, WithReplicas(1), withTestBuckets(t))
+	registry, err := Open(conn, WithReplicas(1))
 	if err != nil {
 		t.Fatalf("Open failed: %v", err)
 	}
@@ -2254,7 +2169,7 @@ func TestOpeningTheRegistryLogsHowManyRoleClaimsItRestored(t *testing.T) {
 	if err != nil {
 		t.Fatalf("jetstream: %v", err)
 	}
-	rawRoles, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: testBuckets(t).roles, Storage: natsgo.FileStorage})
+	rawRoles, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: RoleBucket, Storage: natsgo.FileStorage})
 	if err != nil {
 		t.Fatalf("create the role bucket: %v", err)
 	}
@@ -2274,7 +2189,7 @@ func TestOpeningTheRegistryLogsHowManyRoleClaimsItRestored(t *testing.T) {
 	}
 
 	logs := captureRegistryLogs(t)
-	registry, err := Open(conn, WithReplicas(1), withTestBuckets(t))
+	registry, err := Open(conn, WithReplicas(1))
 	if err != nil {
 		t.Fatalf("Open failed: %v", err)
 	}
@@ -2347,7 +2262,7 @@ func TestARoleRevisionScanThatEndsEarlyIsAnErrorNotAShortSnapshot(t *testing.T) 
 	if err != nil {
 		t.Fatalf("jetstream: %v", err)
 	}
-	rawRoles, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: testBuckets(t).roles, Storage: natsgo.FileStorage})
+	rawRoles, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: RoleBucket, Storage: natsgo.FileStorage})
 	if err != nil {
 		t.Fatalf("create the role bucket: %v", err)
 	}
@@ -2502,39 +2417,36 @@ func stallingProxy(t *testing.T, target, trigger string, budget int, hold time.D
 // by load ending the run early — reds this test instead of passing it. That catches a PERMANENT
 // hold and nothing subtler: with budget 0 the consumer-create reply is held too, so the watch
 // fails on its own request deadline, the link still comes back, the Flush still answers and this
-// test passes on every build ("came back: context deadline exceeded", measured here; the review
-// measured the same at 88f9fbaa and 3fa4774d). Held against three builds of this package:
+// test passes on every build ("came back: context deadline exceeded"). Two other ways of reading
+// the bucket, and this package's own, against this test:
 //
-//	88f9fbaa  Keys() plus a Get per key             FAIL  "restoring 232 of 400 claims", err=nil
-//	3fa4774d  one watch, closed-channel check only  FAIL  "restoring 232 of 400 claims", err=nil
-//	this build                                      PASS  "the bucket's watch stopped after 232
-//	                                                      keys: nats: key watcher timed out
-//	                                                      waiting for initial keys"
+//	Keys() plus a Get per key             FAIL  "restoring 232 of 400 claims", err=nil
+//	one watch, closed-channel check only  FAIL  "restoring 232 of 400 claims", err=nil
+//	this build                            PASS  "the bucket's watch stopped after 232
+//	                                            keys: nats: key watcher timed out
+//	                                            waiting for initial keys"
 //
-// How far each partial scan got varies with the link; that it completed and returned no error is
+// How far each partial scan gets varies with the link; that it completes and returns no error is
 // the constant. A one-hour hold, the weakening, reds here on the Flush: "the link never came back
 // after the hold ... nats: timeout".
 //
-// 88f9fbaa is main, so the defect predates the one-pass read: Keys() is itself a watch carrying
-// the same timer. With a stall that never recovers all three would pass, main because its per-key
-// Gets then time out on a dead link — a second route to a failed start that hides the first — and
-// that is the run the Flush assertion refuses.
+// Keys() is itself a watch carrying the same timer, so a Get per key does not escape it. With a
+// stall that never recovers all three would pass, the Get per key because those Gets then time out
+// on a dead link — a second route to a failed start that hides the first — and that is the run the
+// Flush assertion refuses.
 //
-// Those FAIL rows can flip to PASS under load, and do: this test's review saw 2 false passes at
-// 88f9fbaa in 45 iterations, both "context deadline exceeded", and 3fa4774d passed 1 of 3 runs
-// here the same way. A run whose requests time out before the release never reaches the shape
-// being measured. It has never gone red on correct code, so this is a demonstration, and it is
-// not the regression lock. The lock is TestARoleRevisionScanThatEndsEarlyIsAnErrorNotAShortSnapshot,
-// which is deterministic, cannot pass vacuously, and failed on both of those builds in every run.
+// Those FAIL rows can flip to PASS under load: a run whose requests time out before the release
+// never reaches the shape being measured. So this test is a demonstration, and it is not the
+// regression lock. The lock is TestARoleRevisionScanThatEndsEarlyIsAnErrorNotAShortSnapshot,
+// which is deterministic, cannot pass vacuously, and fails on either of those two readings.
 func TestOpenFailsWhenTheRoleRevisionScanStalls(t *testing.T) {
-	names := testBuckets(t)
 	direct, cleanup := connectNATS(t)
 	defer cleanup()
 	js, err := direct.JetStream()
 	if err != nil {
 		t.Fatalf("jetstream: %v", err)
 	}
-	rawRoles, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: names.roles, Storage: natsgo.FileStorage})
+	rawRoles, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: RoleBucket, Storage: natsgo.FileStorage})
 	if err != nil {
 		t.Fatalf("create the role bucket: %v", err)
 	}
@@ -2543,11 +2455,19 @@ func TestOpenFailsWhenTheRoleRevisionScanStalls(t *testing.T) {
 		putRoleClaim(t, rawRoles, fmt.Sprintf("role-%03d", i), fmt.Sprintf("ses_%03d", i))
 	}
 
-	target := strings.TrimPrefix(sharedTestNATSURI(t), "nats://")
-	stalled := testnats.Connect(t, stallingProxy(t, target, "$JS.API.CONSUMER.CREATE.KV_"+names.roles, 16*1024, 13*time.Second))
+	account, err := url.Parse(testnats.URL(t))
+	if err != nil {
+		t.Fatalf("read the test's NATS URL: %v", err)
+	}
+	proxy, err := url.Parse(stallingProxy(t, account.Host, "$JS.API.CONSUMER.CREATE.KV_"+RoleBucket, 16*1024, 13*time.Second))
+	if err != nil {
+		t.Fatalf("read the proxy's URL: %v", err)
+	}
+	proxy.User = account.User
+	stalled := testnats.Connect(t, proxy.String())
 	defer stalled.Close()
 
-	registry, err := Open(stalled, WithReplicas(1), withTestBuckets(t))
+	registry, err := Open(stalled, WithReplicas(1))
 	// The link has to have come back before Open's outcome means anything: a stall that stays down
 	// fails every build, main by its per-key Gets timing out, so this run could not tell them
 	// apart. Assert it rather than trusting the hold, since load can end a run before the release

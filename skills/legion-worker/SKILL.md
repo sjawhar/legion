@@ -57,38 +57,45 @@ Once ready, your assignment arrives as the first prompt in your session — you 
 it. Read the current issue and its acceptance criteria before changing the workspace. Work
 only on this phase's artifact.
 
-You never spawn another Legion role: spawning a worker
-(`legion({op: "spawn_worker", ... })`) is architect-only. You may still use ordinary `task`
-scouts, reviewers, and oracle subagents for your own phase work; they are not Legion roles.
-Escalate a product, scope, cross-phase, or lifecycle decision to the owning architect with
+You never start another Legion role: the daemon starts every phase worker itself, from its fixed
+workflow table. You may still use ordinary `task` subagents for your own phase work; none of them
+is a Legion role.
+Escalate a product, scope, design, cross-phase, or lifecycle decision to the owning architect with
 `envoy_publish` to its role topic (`notifications.role.` followed by its encoded token, see
 above), carrying the verified facts and the decision needed. `hub` only reaches subagents
-inside your own process, not the architect's separate one. For a durable question that needs
-Sami directly, you may use `dispatch_ask` yourself; replies return to your own
-session.
+inside your own process, not the architect's separate one. Never write a decision block into a
+spec yourself: the architect decides whether the human must answer it and writes the block, since
+a new version of an approved root spec closes the tree's design gate. A standalone to-do only a
+human can do is a `dispatch_ask`, and its replies return to your own session.
 
 Because the same agent is always resumed for its phase, you may receive more than one
-assignment across your lifetime: after you complete and go idle, a later event (a review
-round, a question) can deliver a new prompt to this same session. Treat it as a
-continuation — re-read the current issue and your own prior handoff, since time has
-passed — never as a fresh identity.
+assignment across your lifetime: once the daemon ends your phase it suspends you, and when a later
+event (a review round, a red check) starts your role again it resumes this same session with a new
+prompt. Treat it as a continuation — re-read the current issue and your own prior handoff, since
+time has passed — never as a fresh identity.
 
 ## Deployment instructions
 
 Deployment instructions, when present, are the operator's standing rules for this repository —
 required checks, deploy/smoke commands, code-owner expectations, standing roles you may consult,
-the merge credential. They override this skill's defaults where they conflict; they never
-override a Sami ruling quoted here.
+the merge credential. They override this skill's defaults where they conflict, except four rules
+they never override: no deferrals (*PR body, review, and the merge gate*, below); bringing the base
+into the branch only on a real conflict or a retarget
+(`skill://legion-worker/references/conflicts-and-rewrites.md#reintegrating-the-base`); the
+implementer's own proof on a production-like surface at the head that merges, an applied simplify
+head included (`skill://legion-worker/references/pr-body.md#what-a-proof-is`,
+`skill://legion-worker/references/pr-body.md#the-rules-every-phases-evidence-follows`); and the
+implementer's production check after the merge
+(`skill://legion-worker/references/merge-gate.md#after-the-human-merge`).
 
 ## Asking another role
 
 Reach any live role on this issue the same way you reach the architect: `envoy_publish` to
 `notifications.role.` followed by that role's encoded token. Use it when you need context an
 earlier phase has that its handoff doesn't cover — ask the planner why a constraint was
-scoped that way, ask the implementer what a commit actually did. A role that finished its
-phase stays idle in its pane for the daemon's idle-retire window and answers; once retired (no
-live holder, a publish is rejected 404), read its committed handoff or ask the architect to
-`spawn_worker` it.
+scoped that way, ask the implementer what a commit actually did. The daemon suspends a role when
+its phase ends, so a role that finished is not running to answer you: read its committed handoff
+instead.
 
 ## Workspace and handoff precedence
 
@@ -104,8 +111,8 @@ Never rely on the inherited cwd. Every later repository shell command **MUST** b
 native filesystem tool paths **MUST** be absolute under that workspace. Do not create an
 isolated worktree, change the workspace topology, or mix another issue's work into it.
 Concurrent issues have disjoint workspaces; only the currently active phase mutates this
-one. After you complete and go idle, treat `$LEGION_WORKSPACE` as read-only: you are kept
-alive to answer questions, not to keep editing. Do not create new commits, run
+one. After you complete, treat `$LEGION_WORKSPACE` as read-only: a finished role is not running to
+answer questions or to keep editing. Do not create new commits, run
 `jj -R "$LEGION_WORKSPACE" new`, or touch tracked files once your own handoff is committed
 (and, for the implementer, pushed) — a code change belongs to whichever phase is active now.
 
@@ -118,12 +125,10 @@ committed predecessor handoffs in lifecycle order from `$LEGION_WORKSPACE/.legio
 4. `test.json`
 5. `review.json`
 
-Read only files that precede the assigned phase. Every handoff is validated when it is read:
-`validatePhaseHandoff` (`packages/contracts/src/handoff-schema.ts`) checks the
-file, and the ledger (`packages/daemon/src/handoff/ledger.ts`) treats a file that
-fails validation as missing.
-Undeclared fields pass validation untouched and reach the next worker; a declared field of the
-wrong type fails the whole file, so the `legion` tool's `handoff_read` returns null for that phase.
+Read only files that precede the assigned phase. Each was held to its phase's rules when it was
+written (`handoff_write`, in the completion gate below): fields the phase does not declare passed
+untouched and reach the next worker. The `legion` tool's `handoff_read` returns each file as it
+stands in the workspace.
 Write the phase-specific fields the next phase and the architect need, consistent with what
 predecessor phases already wrote. The durable copy lives in
 `$LEGION_WORKSPACE/.legion/<phase>.json`. If a committed handoff conflicts with memory or a prior
@@ -145,8 +150,7 @@ new work.
 
 **Shared operation safety:** Every Legion issue workspace is a `jj workspace` of one shared
 clone, so they all share one operation log: `jj undo`, `jj abandon`, and
-`jj op restore|revert|abandon|undo` rewrite it for every tree at once (on 2026-09-12 one
-worker's `jj undo` rewrote nine of another tree's commits). The extension refuses them in every
+`jj op restore|revert|abandon|undo` rewrite it for every tree at once. The extension refuses them in every
 phase-worker pane before they run — a `bash` command in any position of a pipeline or `&&`
 chain, with or without `-R`, judged on the whole argument list; `eval` code; and a `hub`
 process start — from your own tool calls and from any `task` subagent you spawn (it runs in
@@ -161,7 +165,7 @@ other tree paused.
 
 ## Phase work
 
-Specifications written into Dispatch follow `skill://dispatch`'s [Writing a spec](../dispatch/SKILL.md#writing-a-spec).
+Specifications written into Dispatch follow `skill://dispatch`'s [Writing a spec](../dispatch/SKILL.md#writing-a-spec), except that a phase worker writes no decision block: it sends an open product, scope or design decision to its architect, which writes the block.
 
 Follow the repository's normal engineering workflow and the assigned issue's acceptance
 criteria. Your phase's own charter and the predecessor handoffs you read define the phase
@@ -196,7 +200,7 @@ committer at all, and the one rewrite still open to you (*Rewriting pushed commi
 reference) resets the committer only of commits on your own chain that descend from the commit
 you named, after its guard cleared. Another role's commit
 carrying you as committer, which you did not rewrite that way, is evidence that something
-rewrote commits it should not have — the observable symptom of LEGION-118. Stop and send the
+rewrote commits it should not have. Stop and send the
 architect that log; do not accept it as a side effect. A wrong identity on your own commit, the
 other App or none, is a pane-environment problem to report to the architect, not something to
 pin (`docs/solutions/legion/shared-main-repo-hazards-for-concurrent-issue-workspaces.md`,
@@ -220,7 +224,7 @@ subcommand's `comment`, `create`, `edit`, `close`, `reopen`, `delete`, `pin`, `u
 GET (an explicit `-X`, or the POST that `-f`/`-F`/`--input` imply; pull-request conversation
 comments live on that path too, so edit them with `gh pr comment`) — printing
 `Legion issues live on Dispatch; use dispatch_message or dispatch_comment on <your LEGION_ISSUE>`:
-Legion never reads or writes a GitHub issue (LEGION-78). `pr comment`, `pr review`,
+Legion never reads or writes a GitHub issue. `pr comment`, `pr review`,
 `api …/pulls/…`, `api graphql`, and issue reads are unaffected. The credential reaches `legion`
 through the file `$LEGION_GRANT_FILE` names, written by the extension before each of your bash
 commands, each `github` tool call, and each `read`/`grep` of a `pr://` or `issue://` URL (and by
@@ -256,12 +260,19 @@ legion gh -- pr comment <pr-number> \
 
 ## Planner artifact
 
-The plan lives in `.legion/plan.json` and the Dispatch issue document; never commit a plan or spec file to the repository.
+The plan lives in `.legion/plan.json` and the issue's `plan.md` document, never in the issue's
+primary document, which is its spec; never commit a plan or spec file to the repository.
 No `docs/plans/*`, `docs/superpowers/plans/*`, or spec markdown goes into the pull request: plan
 and spec content goes into the issue, never into a PR (the root `AGENTS.md`
 calls its own `docs/plans/` human-authored design history, not a Legion artifact). A skill step that says "save the plan
 to a file" is satisfied by the handoff write in the completion gate below; the planner's only
 commit is `plan: record handoff`.
+
+A plan that departs from the spec's design records the departure in `plan.md` and in the required
+`.legion/plan.json` `specDepartures`: `[]` means no departure; otherwise each bounded record names
+the spec, plan, evidence and outcome. The planner's role prompt defines that record. The planner
+never edits the spec. Whether the spec changes is the architect's decision
+(`skill://legion-architect`, section 1), and the reviewer reads the plan beside the spec.
 
 ## Implementer push and pull request
 
@@ -281,7 +292,7 @@ rather than creating a replacement bookmark or PR.
 
 ## PR body, review, and the merge gate
 
-The implementer writes the pull request body in the READY format when it opens the pull request,
+The implementer writes the pull request body from the template when it opens the pull request,
 and every later phase edits its own lines of the live body rather than replacing it. Each proof
 (the implementer's `E2E (implementer)` line and `proof` array, the tester's `E2E (tester)` line
 and `proof` array) is the changed behaviour exercised on a production-like surface, recorded as
@@ -292,9 +303,9 @@ line), the full definition of a proof, what the tester verifies, and the simplif
 
 - **Review threads** are disposed of one by one, never in bulk, and only an `Accepted:` from the
   thread's opener (or, on a bot's thread, from the Legion reviewer) closes one. The implementer
-  runs `legion threads resolve` before every push that answers a review, and the merger before
-  READY: `skill://legion-worker/references/review-threads.md`.
-- **No deferrals.** Sami, 2026-09-11, verbatim: "My rule is no deferrals." A finding that changes
+  runs `legion threads resolve` after every push that answers a review, before its completion,
+  and the merger before READY: `skill://legion-worker/references/review-threads.md`.
+- **No deferrals.** A finding that changes
   behaviour, hides an error, or breaks a gate is fixed in this pull request; naming, duplication,
   or wording cleanup is batched into the one `Fast-follow:` line instead of iterating per push.
 - **A red CI job** that failed on its own is re-run with
@@ -313,7 +324,7 @@ line), the full definition of a proof, what the tester verifies, and the simplif
 ## Completion gate: handoff write, verification, and persistence
 
 The merger writes no handoff and pushes nothing, so this gate does not apply to it
-(`packages/pi-envoy/roles/merger.md`).
+(`packages/daemon/internal/prompts/roles/merger.md`).
 
 Write the phase-specific handoff: call the `legion` tool with `op: "handoff_write"`, `phase: "<p>"`,
 and `data`: a JSON object of the phase-specific fields only. It runs `legion handoff write` in
@@ -329,7 +340,9 @@ with. With `--data` omitted, `legion handoff write` reads the JSON object from s
 
 `handoff_write` validates the payload against the phase's schema before writing: an
 implement handoff without a well-formed `proof`, or a test handoff that reports no failure and
-carries no `proof` of its own, exits 1 naming the field and writes nothing.
+carries no `proof` of its own, exits 1 naming the field and writes nothing. Each `proof` entry, in
+either phase, is an object of six non-empty strings: `criterion` (the acceptance line it proves),
+`surface`, `command`, `observed`, `headSha` (the commit it ran at) and `negativeControl`.
 
 Then verify the durable artifact exists:
 
@@ -459,22 +472,20 @@ do:
 Quote the answer verbatim in what you tell the architect: with the run and phase it names, the
 difference between "my work is lost" and "my work belongs to the previous run" is visible.
 
-**Stay in this session afterward.** Your process does not exit when your phase completes;
-it goes idle in its pane, and after `worker_idle_retire_seconds` (default 600 s) idle with no
-active phase the daemon retires it — your next assignment resumes this same session from its
-session file, so it is still you. Other roles on this issue may reach you through Envoy with
-questions about the work you did — answer them, reading `$LEGION_WORKSPACE` and your own
-committed handoff as needed, without mutating anything (see Workspace and handoff
-precedence above). You will also be the one resumed, with a new prompt in this same
-session, if this phase's work needs to run again.
+**Stay in this session afterward.** Your process does not exit on its own when your phase
+completes: the daemon suspends it when it ends your phase, at the end of your turn, so a finished
+role is not running to answer questions. When the daemon starts your role again it resumes this
+same session from its session file, with a new prompt, so it is still you: you are the one resumed
+if this phase's work needs to run again. Re-read `$LEGION_WORKSPACE` and your own committed handoff
+then, without mutating anything until the new prompt asks for it (see Workspace and handoff
+precedence above).
 
-When blocked on lifecycle, scope, or cross-phase matters, `envoy_publish` the owning
-architect a concise message: issue, phase, verified observation, what you tried, and the
-decision required. Reach for `dispatch_ask` yourself only for a standalone human question
-outside that coordination.
+When blocked on a product, scope, design, lifecycle, or cross-phase decision, `envoy_publish` the
+owning architect a concise message: issue, phase, verified observation, what you tried, and the
+decision required.
 
-Never yield while blocked on a decision someone else owns. Before you stop, make the block
-visible where its owner will see it: a lifecycle, scope, or cross-phase decision goes to the
-owning architect as above, and a standalone human question goes in `dispatch_ask`. Otherwise
-proceed: proceeding is the default, and a phase that stops silently holds its issue until
-someone notices.
+Never yield while blocked on a decision someone else owns. Before you stop, make the block visible
+where its owner will see it: a product, scope, design, lifecycle, or cross-phase decision goes to
+the owning architect as above, and a standalone human to-do goes in `dispatch_ask`. Otherwise
+proceed: proceeding is the default, and a phase that stops silently holds its issue until someone
+notices.

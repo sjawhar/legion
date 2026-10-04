@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net"
 	"net/url"
-	"os"
 	"strings"
 )
 
@@ -27,10 +26,11 @@ const AllowRemoteEnvVar = "ENVOY_ALLOW_REMOTE_NATS"
 // ErrRemoteNATS is what a connect refuses a NATS server this machine does not run with.
 var ErrRemoteNATS = errors.New("bus: refusing a NATS server that is not this machine's")
 
-// refuseRemoteNATS reports the first url naming another machine, unless the run opted in. An
-// empty urls is nats.go's own default, this machine's server, and passes.
-func refuseRemoteNATS(urls []string) error {
-	if os.Getenv(AllowRemoteEnvVar) == "1" {
+// refuseRemoteNATS reports the first url naming another machine, unless the run opted in through
+// lookup (the connect's environment, WithEnvironment). An empty urls is nats.go's own default,
+// this machine's server, and passes.
+func refuseRemoteNATS(urls []string, lookup func(string) (string, bool)) error {
+	if allow, _ := lookup(AllowRemoteEnvVar); allow == "1" {
 		return nil
 	}
 	for _, raw := range urls {

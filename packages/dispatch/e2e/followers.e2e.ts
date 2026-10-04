@@ -21,11 +21,6 @@ const replier = { kind: "session" as const, id: "e2e-follow-replier" };
 
 test.beforeEach(async () => {
   await resetDatabase();
-  // `Reaches N` counts the fake Envoy's persisted interests, which outlive the database reset
-  // and match the recycled issue keys, so each test starts from none.
-  if (!process.env.PLAYWRIGHT_BASE_URL) {
-    await setInterests([]);
-  }
 });
 
 test("the ask card lists every session that wrote to the ask and a human can unfollow one", async ({
@@ -43,12 +38,10 @@ test("the ask card lists every session that wrote to the ask and a human can unf
     { ask_id: ask.id, body: "Tests are green on my side." },
     { actor: replier, as: "agent" }
   );
-  if (!process.env.PLAYWRIGHT_BASE_URL) {
-    await setLiveSessions([
-      { session_id: asker.id, title: "Asker (e2e)" },
-      { session_id: replier.id, title: "Replier (e2e)" },
-    ]);
-  }
+  await setLiveSessions([
+    { session_id: asker.id, title: "Asker (e2e)" },
+    { session_id: replier.id, title: "Replier (e2e)" },
+  ]);
   expect((await listAskFollowers(ask.id)).followers.map((row) => row.session_id)).toEqual([
     asker.id,
     replier.id,
@@ -63,11 +56,9 @@ test("the ask card lists every session that wrote to the ask and a human can unf
     await expect(followers).toContainText("Reaches 2");
     // The routing list is folded at rest; the count names it, and the chips are inside.
     await followers.getByRole("button", { name: /^Reaches/ }).click();
-    if (!process.env.PLAYWRIGHT_BASE_URL) {
-      await expect(followers.getByText("Asker (e2e)", { exact: true })).toBeVisible();
-      await expect(followers.getByText("Replier (e2e)", { exact: true })).toBeVisible();
-      await expect(followers.locator("[title='Live']")).toHaveCount(2);
-    }
+    await expect(followers.getByText("Asker (e2e)", { exact: true })).toBeVisible();
+    await expect(followers.getByText("Replier (e2e)", { exact: true })).toBeVisible();
+    await expect(followers.locator("[title='Live']")).toHaveCount(2);
     await expect(followers.locator(`[title='${asker.id}']`)).toHaveCount(1);
     await expect(followers.locator(`[title='${replier.id}']`)).toHaveCount(1);
 
@@ -79,9 +70,7 @@ test("the ask card lists every session that wrote to the ask and a human can unf
       .click();
     const dialog = page.getByRole("dialog", { name: "Unfollow" });
     await expect(dialog).toContainText(
-      process.env.PLAYWRIGHT_BASE_URL
-        ? "from this ask? Its answer and replies will no longer reach them. They will be told."
-        : "Unfollow Replier (e2e) from this ask? Its answer and replies will no longer reach them. They will be told."
+      "Unfollow Replier (e2e) from this ask? Its answer and replies will no longer reach them. They will be told."
     );
     await dialog.getByRole("button", { name: "Confirm" }).click();
 
@@ -114,7 +103,6 @@ test("the ask card lists every session that wrote to the ask and a human can unf
 test("the ask card lists the issue's subscribers and removing one cuts the issue subscription", async ({
   browser,
 }) => {
-  test.skip(Boolean(process.env.PLAYWRIGHT_BASE_URL), "seeds Envoy interests on the fake listener");
   const watcher = "e2e-issue-watcher";
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Who else hears the answer" });

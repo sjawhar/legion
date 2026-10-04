@@ -16,6 +16,11 @@
 //   - FindQuote, FindMark, MarkRange, Unmark, and Splice locate and edit ranges
 //     within a tree by quoted text or existing marks.
 //
+// The three record marks a suggestion, comment or ask anchors to
+// (proofSuggestion, proofComment, dispatchAsk) do not exclude their own type,
+// so two of one type may cover one character: each is stored under its own
+// Y.Text attribute key (markAttributeKey) and found by its type and id.
+//
 // pmdoc has no Postgres, HTTP, or ygo-server dependency; it imports only
 // crdt, goldmark, and the standard library. The Dispatch server composes it.
 //

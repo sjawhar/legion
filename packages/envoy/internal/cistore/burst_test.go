@@ -936,7 +936,7 @@ func TestADeletedBucketFailsAWriteWithinTheBudget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("jetstream: %v", err)
 	}
-	if err := js.DeleteKeyValue(testBucket(t)); err != nil {
+	if err := js.DeleteKeyValue(Bucket); err != nil {
 		t.Fatalf("delete the bucket: %v", err)
 	}
 	h := head{"example-org", "example-repo", "42", "6666666666666666666666666666666666666666"}

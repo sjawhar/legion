@@ -33,7 +33,7 @@ dies, or two workers arguing the same point in two review rounds.
 literally titled "Reported to the architect (decisions outside this issue's spec)":
 
 1. CI never ran `packages/workspace` (fact F8). Recommendation: add it in this PR. Architect: keep
-   it (spec v5 "New since we talked"). Nine lines of YAML that turned every acceptance check into
+   it (spec v5). Nine lines of YAML that turned every acceptance check into
    something CI enforces.
 2. A pre-existing jj hazard the fix would expose (F6: the fetch abandons a merged branch's commits
    under a live workspace and leaves it stale). Recommendation: separate issue — changing what a

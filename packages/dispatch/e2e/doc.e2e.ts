@@ -11,6 +11,7 @@ import {
   getArtifactVersion,
 } from "./api";
 import {
+  connectedDot,
   countDocumentSockets,
   cursorLabel,
   documentEditor,
@@ -186,8 +187,8 @@ test("two users edit the same spec, see each other's text and cursor, and settle
     await bobPage.goto(`/issues/${issue.key}/spec`);
     const bobEditor = documentEditor(bobPage);
     await expect(bobEditor).toContainText("Use SQLite");
-    await expect(alicePage.getByRole("status")).toHaveText("connected");
-    await expect(bobPage.getByRole("status")).toHaveText("connected");
+    await expect(connectedDot(alicePage)).toHaveText("connected");
+    await expect(connectedDot(bobPage)).toHaveText("connected");
 
     await typeAtEnd(alicePage, "hello from alice");
     await expect(bobEditor).toContainText("hello from alice");
@@ -477,7 +478,7 @@ test("a dropped document transport reconnects the mounted editor and leaves one 
     await page.goto(`/issues/${issue.key}/spec`);
     const editor = documentEditor(page);
     await expect(editor).toContainText("Original body.");
-    await expect(page.getByRole("status", { name: "connected" })).toHaveText("connected");
+    await expect(connectedDot(page)).toHaveText("connected");
     await expect.poll(sockets).toBe(1);
 
     const bobPage = await bob.newPage();
@@ -486,7 +487,7 @@ test("a dropped document transport reconnects the mounted editor and leaves one 
 
     await transport.sever();
     await expect.poll(sockets).toBe(2);
-    await expect(page.getByRole("status", { name: "connected" })).toHaveText("connected");
+    await expect(connectedDot(page)).toHaveText("connected");
     await expect.poll(open).toBe(1);
 
     // The reconnected document is live in both directions, not merely re-opened.
@@ -516,17 +517,13 @@ test("document marks and table alignment use classes rather than inline styles",
     session
   );
 
-  const alice = await asUser(browser, "alice");
   // Dispatch omits collaborative awareness below 1280 px, so exercise the peer selection in an
   // explicit desktop context even while the mark/table invariant runs under every project.
-  const selectionAlice = await browser.newContext({
-    extraHTTPHeaders: { "X-Dispatch-User": "alice" },
-    viewport: { height: 900, width: 1440 },
-  });
-  const selectionBob = await browser.newContext({
-    extraHTTPHeaders: { "X-Dispatch-User": "bob" },
-    viewport: { height: 900, width: 1440 },
-  });
+  const [alice, selectionAlice, selectionBob] = await Promise.all([
+    asUser(browser, "alice"),
+    asUser(browser, "alice", { viewport: { height: 900, width: 1440 } }),
+    asUser(browser, "bob", { viewport: { height: 900, width: 1440 } }),
+  ]);
   try {
     const page = await alice.newPage();
     await page.goto(`/issues/${issue.key}/spec`);

@@ -1,11 +1,5 @@
 # Classification fixtures
 
-The shipped Bun reducer suite records these fixtures when `LEGION_RECORD_FIXTURES=1`. The preloaded recorder is `packages/daemon/src/daemon/__tests__/fixture-recorder.ts`; it writes one canonical, SHA-256-named JSON record for each classifier input.
+The Go classifier replay (`packages/daemon/internal/classify/fixtures_test.go`) replays every record here byte-exactly. A record is one JSON object with `fn`, `input` and `output`, in the directory named for its `fn`.
 
-To re-record, run the daemon suite from `packages/daemon`:
-
-```sh
-LEGION_RECORD_FIXTURES=1 LEGION_E2E=1 LEGION_TMUX_LIVE=1 bun test
-```
-
-Stage 7 deletes this recorder, its preload, and these fixtures after the Go classifier replay replaces them.
+Records change only by hand. A record's bytes are its canonical JSON (keys sorted, no whitespace, no trailing newline), which `jq -cjS . <record>` prints. Its file name is the SHA-256 of its input's canonical JSON, which `jq -cjS .input <record> | sha256sum` prints. `TestFixtureRecordsFollowTheDirectoryContract` fails on a record that is in another function's directory or breaks either rule.

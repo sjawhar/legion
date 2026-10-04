@@ -37,17 +37,24 @@ type rig struct {
 // is newRig plus that login, for every test that doesn't care about the pre-login state itself.
 func newRig(t *testing.T, statePath string) *rig {
 	t.Helper()
+	return newLoggedRig(t, statePath, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+}
+
+// newLoggedRig is newRig with log as both the Server's and the Broker's logger, as
+// cmd/agent-secrets-helper wires them, so a test can read every line the helper writes.
+func newLoggedRig(t *testing.T, statePath string, log *slog.Logger) *rig {
+	t.Helper()
 	f := newFakeBroker(t)
-	of := operatorFile(t, "sjawhar")
+	of := operatorFile(t, "ada@example.com")
 	r := &rig{fake: f}
 	if statePath == "" {
 		statePath = filepath.Join(t.TempDir(), "sessions.json")
 	}
 	r.srv = &Server{
 		Registry: NewRegistry(statePath),
-		Broker:   &Broker{URL: f.srv.URL, OperatorFile: of, HTTP: f.srv.Client()},
+		Broker:   &Broker{URL: f.srv.URL, OperatorFile: of, HTTP: f.srv.Client(), Log: log},
 		Hostname: "testhost",
-		Log:      slog.New(slog.NewTextHandler(os.Stderr, nil)),
+		Log:      log,
 		MinRenew: 50 * time.Millisecond,
 	}
 	r.srv.PeerOf = func(conn *net.UnixConn) (*Peer, error) {
@@ -132,7 +139,7 @@ func (r *rig) call(t *testing.T, req Request) Response {
 func TestRegisterPinsCallerEnrollsAndSigns(t *testing.T) {
 	r := startRig(t, "")
 	resp := r.call(t, Request{Op: "register", WaitSeconds: 5})
-	if !resp.OK || resp.State != "enrolled" || resp.EnrollmentID == "" || resp.Operator != "sjawhar" {
+	if !resp.OK || resp.State != "enrolled" || resp.EnrollmentID == "" || resp.Operator != "ada@example.com" {
 		t.Fatalf("register: %+v", resp)
 	}
 	want := "testhost:" + strconv.Itoa(os.Getpid()) + ":"
@@ -203,7 +210,7 @@ func TestSignRequestBuildsAValidRequestObject(t *testing.T) {
 	if !reg.OK || reg.State != "enrolled" {
 		t.Fatalf("register: %+v", reg)
 	}
-	resp := r.call(t, Request{Op: "sign-request", Secrets: []string{"DEEL_API_KEY"}, Reason: "deel sync for AGENTC-1"})
+	resp := r.call(t, Request{Op: "sign-request", Secrets: []string{"DEEL_API_KEY"}, Reason: "deel sync for ACME-1"})
 	if !resp.OK || resp.RequestObject == "" {
 		t.Fatalf("sign-request: %+v", resp)
 	}
@@ -215,7 +222,7 @@ func TestSignRequestBuildsAValidRequestObject(t *testing.T) {
 	if ro.Thumbprint != sess.Thumbprint {
 		t.Fatalf("iss must be the calling session's own key thumbprint: got %q, want %q", ro.Thumbprint, sess.Thumbprint)
 	}
-	if len(ro.Details) != 1 || ro.Details[0].Type != "agent_secret" || ro.Details[0].Identifier != "DEEL_API_KEY" || ro.Reason != "deel sync for AGENTC-1" {
+	if len(ro.Details) != 1 || ro.Details[0].Type != "agent_secret" || ro.Details[0].Identifier != "DEEL_API_KEY" || ro.Reason != "deel sync for ACME-1" {
 		t.Fatalf("claims: %+v", ro.Details)
 	}
 	v := &proof.Verifier{Skew: time.Minute}
@@ -318,10 +325,10 @@ func TestEnrollRetriesUntilTheBrokerAnswers(t *testing.T) {
 		t.Fatalf("before enrollment: %+v", signed)
 	}
 	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) && r.srv.Registry.Get(os.Getpid()).State() != "enrolled" {
+	for time.Now().Before(deadline) && r.srv.Registry.Get(os.Getpid()).snapshot().State != "enrolled" {
 		time.Sleep(100 * time.Millisecond)
 	}
-	if r.srv.Registry.Get(os.Getpid()).State() != "enrolled" {
+	if r.srv.Registry.Get(os.Getpid()).snapshot().State != "enrolled" {
 		t.Fatal("two 503s then a 201 must end enrolled within 10 s (1 s + 2 s backoff)")
 	}
 }
@@ -415,7 +422,7 @@ func TestRecoverRepinsLiveSessionsWithFreshKeys(t *testing.T) {
 	r.cancel() // the helper dies; keys are gone with it
 	time.Sleep(100 * time.Millisecond)
 	// A second helper on the same state and the same fake broker.
-	of := operatorFile(t, "sjawhar")
+	of := operatorFile(t, "ada@example.com")
 	srv2 := &Server{Registry: NewRegistry(state), Broker: &Broker{URL: r.fake.srv.URL, OperatorFile: of, HTTP: r.fake.srv.Client()},
 		Hostname: "testhost", PeerOf: PeerOf, Log: slog.Default(), MinRenew: time.Second}
 	if _, err := srv2.Broker.Login(context.Background(), "testhost"); err != nil {
@@ -428,22 +435,21 @@ func TestRecoverRepinsLiveSessionsWithFreshKeys(t *testing.T) {
 	deadline := time.Now().Add(5 * time.Second)
 	var sess *Session
 	for time.Now().Before(deadline) {
-		if sess = srv2.Registry.Get(child.Process.Pid); sess != nil && sess.State() == "enrolled" {
+		if sess = srv2.Registry.Get(child.Process.Pid); sess != nil && sess.snapshot().State == "enrolled" {
 			break
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	if sess == nil || sess.State() != "enrolled" {
+	if sess == nil || sess.snapshot().State != "enrolled" {
 		t.Fatal("the live session must be re-pinned and enrolled")
 	}
 	if sess.Thumbprint == oldTP || sess.EnrollmentID() == first.EnrollmentID || sess.RuntimeID != first.RuntimeID {
 		t.Fatalf("recovery uses a fresh key and a new enrollment for the same runtime_id: %+v", sess.Info())
 	}
 	// The recovered session's own goroutine revokes the old enrollment before its first enroll
-	// call (the AGENTC-834 thermonuclear review's finding on Recover's ordering, fixed by
-	// revoking the session's lapsed id at the top of enrollLoop): by the time sess reads
-	// "enrolled" above, the old id must already be revoked, so this poll should already find it
-	// on the first check.
+	// call (Recover's ordering, from a review of the helper; enrollLoop revokes the session's
+	// lapsed id first): by the time sess reads "enrolled" above, the old id must already be
+	// revoked, so this poll should already find it on the first check.
 	revokeDeadline := time.Now().Add(5 * time.Second)
 	for {
 		r.fake.mu.Lock()
@@ -485,7 +491,7 @@ func TestRecoverRepinsLiveSessionsWithFreshKeys(t *testing.T) {
 }
 
 // TestRecoverRevokesThePriorEnrollmentBeforeReenrolling is the regression for the Important
-// finding on Recover's ordering (AGENTC-834 thermonuclear review, second pass): against the
+// finding on Recover's ordering (a review's second pass over the helper): against the
 // real broker, Recover's old enrollment id must be gone before the re-pinned session's first
 // enroll call, because the real broker's idempotent-enroll conflict is keyed on
 // (launcher_credential_id, runtime_id), not thumbprint — a fresh key for a runtime that still
@@ -532,11 +538,11 @@ func TestRecoverRevokesThePriorEnrollmentBeforeReenrolling(t *testing.T) {
 	r.cancel() // the helper dies; keys are gone with it
 	time.Sleep(100 * time.Millisecond)
 	// Hold the old row "live" for 300ms once srv2.Recover asks to revoke it: nothing has issued
-	// a DELETE for this broker yet, so this is that first (and, under the fix, only) one.
+	// a DELETE for this broker yet, so this is that first (and only) one.
 	r.fake.mu.Lock()
 	r.fake.revokeFirstDelay = 300 * time.Millisecond
 	r.fake.mu.Unlock()
-	of := operatorFile(t, "sjawhar")
+	of := operatorFile(t, "ada@example.com")
 	srv2 := &Server{Registry: NewRegistry(state), Broker: &Broker{URL: r.fake.srv.URL, OperatorFile: of, HTTP: r.fake.srv.Client()},
 		Hostname: "testhost", PeerOf: PeerOf, Log: slog.Default(), MinRenew: time.Second}
 	if _, err := srv2.Broker.Login(context.Background(), "testhost"); err != nil {
@@ -549,12 +555,12 @@ func TestRecoverRevokesThePriorEnrollmentBeforeReenrolling(t *testing.T) {
 	deadline := time.Now().Add(5 * time.Second)
 	var sess *Session
 	for time.Now().Before(deadline) {
-		if sess = srv2.Registry.Get(child.Process.Pid); sess != nil && sess.State() == "enrolled" {
+		if sess = srv2.Registry.Get(child.Process.Pid); sess != nil && sess.snapshot().State == "enrolled" {
 			break
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	if sess == nil || sess.State() != "enrolled" {
+	if sess == nil || sess.snapshot().State != "enrolled" {
 		t.Fatal("the live session must be re-pinned and enrolled despite the delayed revoke")
 	}
 	r.fake.mu.Lock()
@@ -586,14 +592,13 @@ func TestRecoverRevokesThePriorEnrollmentBeforeReenrolling(t *testing.T) {
 }
 
 // TestRecoverFallsBackToIndependentRevokeIfTheRepinnedSessionEndsMidBackoff is the regression for
-// the Important finding on the third fix pass (AGENTC-834 thermonuclear review): enrollLoop's
-// revoke-before-enroll guard calls revokeLapsed synchronously, and revokeLapsed retries
-// indefinitely with backoff — so if the re-pinned session ends (Registry.Remove, exactly what
-// retire/unregister would do) while that revoke is genuinely stuck retrying against a failing
-// broker, the prior id would be abandoned: retire's own revoke only ever touches
-// sess.EnrollmentID(), still empty at this point since this session never reached its first
-// successful Enroll, and once Registry.Remove drops the record a later restart's Recover has no
-// way to find the prior id either. revokeLapsed therefore hands the id to the same bounded,
+// this: enrollLoop's revoke-before-enroll guard calls revokeLapsed synchronously, and
+// revokeLapsed retries indefinitely with backoff — so if the re-pinned session ends
+// (Registry.Remove, exactly what retire/unregister would do) while that revoke is genuinely stuck
+// retrying against a failing broker, the prior id would be abandoned: retire's own revoke only
+// ever touches sess.EnrollmentID(), still empty at this point since this session never reached its
+// first successful Enroll, and once Registry.Remove drops the record a later restart's Recover has
+// no way to find the prior id either. revokeLapsed therefore hands the id to the same bounded,
 // independent s.revoke used elsewhere whenever it gives up because the session ended rather than
 // because ctx was canceled. fakeBroker's revokeFailFirst answers every revoke with a 503 (an
 // unreachable broker, not merely a slow one) until the session has ended and its own retry loop
@@ -640,7 +645,7 @@ func TestRecoverFallsBackToIndependentRevokeIfTheRepinnedSessionEndsMidBackoff(t
 	r.fake.mu.Lock()
 	r.fake.revokeFailFirst = failAlways
 	r.fake.mu.Unlock()
-	of := operatorFile(t, "sjawhar")
+	of := operatorFile(t, "ada@example.com")
 	srv2 := &Server{Registry: NewRegistry(state), Broker: &Broker{URL: r.fake.srv.URL, OperatorFile: of, HTTP: r.fake.srv.Client()},
 		Hostname: "testhost", PeerOf: PeerOf, Log: slog.Default(), MinRenew: time.Second}
 	if _, err := srv2.Broker.Login(context.Background(), "testhost"); err != nil {
@@ -846,7 +851,7 @@ func TestRegisterRejectsAPeerWhosePIDChangedBeforeAdopting(t *testing.T) {
 }
 
 // TestSignRejectsAPeerWhosePIDChangedDuringTheAncestryWalk is the regression for finding 1 (HIGH,
-// AGENTC-834 thermonuclear review): sign() must keep the connecting peer's pidfd open through
+// a review of the helper): sign() must keep the connecting peer's pidfd open through
 // Registry.Root's ancestry walk and re-verify peer.PID() against pid before trusting a resolved
 // session, exactly like register's "existing session" path — otherwise a pid the kernel reuses
 // mid-walk could get a signed proof for another session's enrollment (full impersonation).
@@ -908,7 +913,7 @@ func (d *delayingTransport) RoundTrip(req *http.Request) (*http.Response, error)
 }
 
 // TestLoginOverTheSocketReturnsTheCodeAndEnrollBoxWorksAfterIssue drives the socket protocol
-// end to end for the new pass-through ops (AGENTC-393 Plan B, Task 2): enroll-box before any
+// end to end for the new pass-through ops: enroll-box before any
 // machine login names the login command (the same fail-closed error Broker.EnrollBox's
 // launcherProof call produces); login returns a human-facing code and a repeat while pending
 // returns the SAME code; once the fake issues it, login-status reports "issued" and enroll-box

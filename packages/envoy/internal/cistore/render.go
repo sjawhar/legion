@@ -75,7 +75,6 @@ type Summary struct {
 	CheckRuns            []CheckRunRef  `json:"check_runs"`
 	Generation           uint64         `json:"generation"`
 	Snapshot             string         `json:"snapshot"`
-	SettledAt            int64          `json:"settled_at,omitempty"`
 	SupersededSettlement string         `json:"superseded_settlement,omitempty"`
 	Failed               StatusGroup    `json:"failed"`
 	Running              StatusGroup    `json:"running"`

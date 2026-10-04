@@ -1,5 +1,5 @@
 package session
 
-// SharedTestNATSURI is the package's shared test NATS for its external tests, so one test binary
-// starts, and TestMain terminates, one container.
-var SharedTestNATSURI = sharedTestNATSURI
+// SetupNATS is setupNATS for the package's external tests, so they connect to the package's shared
+// test NATS in an account of their own.
+var SetupNATS = setupNATS

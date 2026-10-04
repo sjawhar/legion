@@ -30,5 +30,6 @@
     "deliveredAt": "2026-09-22T09:31:04Z",
     "confirmedAt": "2026-09-22T09:31:04Z",
     "interrupted": true
-  }
+  },
+  "suspensionHeld": true
 }

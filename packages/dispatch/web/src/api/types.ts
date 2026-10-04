@@ -17,6 +17,7 @@ export type {
   Artifact,
   ArtifactApproval,
   ArtifactBlock,
+  ArtifactRebuildReport,
   ArtifactReview,
   ArtifactReviewEventPayload,
   ArtifactReviewState,
@@ -124,9 +125,9 @@ export type {
   Version,
 } from "@legion/contracts";
 
-// Dispatch-UI-only DTOs mirroring the credential broker's JSON verbatim (contract v9's "UI
-// routes" section). These have no reason to live in the shared @legion/contracts package,
-// which is for Envoy event contracts.
+// Dispatch-UI-only DTOs mirroring the credential broker's JSON verbatim (its UI routes, in the
+// broker's HTTP API reference: https://sjawhar.github.io/legion/broker/reference/api/). These have
+// no reason to live in the shared @legion/contracts package, which is for Envoy event contracts.
 export type CredentialRequestKind = "agent_secret" | "launcher_credential";
 export type CredentialRequestState =
   | "pending"
@@ -150,15 +151,14 @@ export interface CredentialEnrollment {
   kind: string;
   runtime_id: string;
   operator: string | null;
+  /** A pod enrollment's slot: one of several independent identities in one pod, chosen by the
+   *  launcher that enrolled it. Null for every enrollment without one. */
+  slot: string | null;
 }
 export interface CredentialDecisionEvent {
   event: string; // "approved" | "denied" | "expired" | "cancelled" | "revoked"
   at: string;
   credential_id: string | null;
-}
-export interface CredentialChallenges {
-  approve: string; // base64url
-  deny: string; // base64url
 }
 export interface CredentialRecord {
   record_id: string;
@@ -174,85 +174,64 @@ export interface CredentialRecord {
   expires_at: string;
   requested_at: string;
   decided: CredentialDecisionEvent | null;
-  challenges: CredentialChallenges | null; // present only while pending, never for a machine record
 }
 
-export interface CredentialDecisionResponse {
-  state: "approved" | "denied";
+export interface CredentialApproval {
+  state: "approved";
   grant_id: string | null;
   credential_id: string | null;
 }
-
-export interface CredentialKey {
-  credential_id: string;
-  aaguid: string;
-  registered_at: string;
-  last_used_at: string | null;
-  state: "active" | "tombstoned" | "revoked";
-  endorsed_by: string | null;
-  seeded: boolean;
+export interface CredentialDenial {
+  state: "denied";
 }
-export interface CredentialKeysResponse {
-  keys: CredentialKey[];
-}
+/** What approve and deny answer, relayed verbatim from the broker: an approval names the grant or
+ *  the launcher credential it made, and a denial is `{state: "denied"}` alone. */
+export type CredentialDecisionResponse = CredentialApproval | CredentialDenial;
 
-export interface CredentialGrant {
+interface CredentialGrantFields {
   grant_id: string;
-  record_id: string;
   enrollment: CredentialEnrollment;
   names: string[];
   expires_at: string;
   created_at: string;
 }
+/** A grant the policy gave a session the viewer operates without asking: no one approved it, so it
+ *  has no approver and rests on no record. */
+export interface AutomaticCredentialGrant extends CredentialGrantFields {
+  granted: "automatic";
+  approver: null;
+  record_id: null;
+}
+/** A grant someone approved: `approver` names the login that did (another person's, on a session
+ *  the viewer operates), and `record_id` the record the approval rests on. */
+export interface ApprovedCredentialGrant extends CredentialGrantFields {
+  granted: "approval";
+  approver: string;
+  record_id: string;
+}
+/** A live grant on `GET /api/v1/credential-grants?approver=me`: one on a session the viewer
+ *  operates, given automatically or approved by anyone, or one the viewer approved on anyone's
+ *  session. */
+export type CredentialGrant = AutomaticCredentialGrant | ApprovedCredentialGrant;
 export interface CredentialGrantsResponse {
   grants: CredentialGrant[];
 }
 
-// Raw WebAuthn JSON shapes as go-webauthn's `protocol` package emits/consumes them (field names
-// are load-bearing - they must match exactly what the broker parses). Kept permissive (the
-// fields navigator.credentials actually needs) rather than modeling every optional extension.
-export interface PublicKeyCredentialCreationOptionsJSON {
-  rp: { id?: string; name: string };
-  user: { id: string; name: string; displayName: string }; // id is base64url
-  challenge: string; // base64url
-  pubKeyCredParams: { type: "public-key"; alg: number }[];
-  authenticatorSelection?: { userVerification?: string; residentKey?: string };
-  attestation?: string;
-  timeout?: number;
-  excludeCredentials?: { id: string; type: "public-key" }[];
+/** One of the machine logins the viewer approved on `GET /api/v1/machine-logins`: the launcher
+ *  credential it minted, for one of the viewer's machines or for a service, not revoked, and
+ *  either unexpired or expired with a session it started still running. */
+export interface MachineLogin {
+  credential_id: string;
+  host: string;
+  /** The service a service's login is for (`legion-daemon`), whose sessions are its worker pods;
+   *  null for the viewer's own machine. */
+  service: string | null;
+  issued_at: string;
+  expires_at: string;
+  /** True once `expires_at` has passed: the login starts no more sessions, but sessions it
+   *  started renew with their own keys and still run until they end or it is revoked. */
+  expired: boolean;
 }
-export interface PublicKeyCredentialRequestOptionsJSON {
-  challenge: string; // base64url
-  rpId?: string;
-  allowCredentials?: { id: string; type: "public-key" }[];
-  userVerification?: string;
-  timeout?: number;
-}
-export interface AuthenticationResponseJSON {
-  id: string;
-  rawId: string;
-  type: "public-key";
-  response: {
-    clientDataJSON: string;
-    authenticatorData: string;
-    signature: string;
-    userHandle?: string;
-  };
-}
-export interface RegistrationResponseJSON {
-  id: string;
-  rawId: string;
-  type: "public-key";
-  response: {
-    clientDataJSON: string;
-    attestationObject: string;
-  };
-}
-
-export interface CredentialCeremonyBeginResponse {
-  ceremony_id: string;
-  publicKey: PublicKeyCredentialCreationOptionsJSON | PublicKeyCredentialRequestOptionsJSON;
-}
-export interface CredentialCeremonyFinishResponse {
-  yaml: string;
+export interface MachineLoginsResponse {
+  credentials: MachineLogin[];
 }

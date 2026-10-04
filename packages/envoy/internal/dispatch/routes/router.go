@@ -1,15 +1,18 @@
 // Package routes assembles the Dispatch HTTP server routes.
 //
-// Authenticated humans identify through either a signed cookie or a trusted
-// proxy header. GitHub OAuth stores each allowed user's refreshable token pair
-// so the GitHub REST and GraphQL proxy can act on their behalf.
+// Authenticated people use a signed cookie issued when they sign in with Google Workspace through
+// the sign-in pool. Test and local harnesses can inject header identity. The web app's GitHub reads
+// go to GitHub as the GitHub App.
 package routes
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"html"
@@ -19,10 +22,13 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 	"unicode"
+
+	"golang.org/x/sync/semaphore"
 
 	"github.com/sjawhar/envoy/internal/dispatch/agentstream"
 	"github.com/sjawhar/envoy/internal/dispatch/api"
@@ -42,20 +48,26 @@ import (
 type AppContext struct {
 	SigningKey     string
 	WebDistDir     string
-	Users          auth.UserStore
+	AssetStore     AssetStore
 	Sessions       auth.SessionStore
+	People         auth.PeopleStore
 	Identity       identity.Identity
-	AllowedLogins  map[string]struct{}
 	Store          *store.Store
-	AgentToken     string
-	RepoProjects   string
 	DefaultProject string
 	ServerURL      string
-	HTTPClient     auth.HTTPClient
+	// SignIn is the sign-in pool's authorization code flow and SignInGroup the group a person
+	// must be in to sign in; a nil SignIn is a test/local header-identity or dev sign-in server,
+	// whose /auth/start and /auth/callback answer 503.
+	SignIn      *oidc.CodeFlow
+	SignInGroup string
+	// InsecureCookie drops the Secure attribute from every cookie the router sets, for browsers
+	// reaching Dispatch over plain http (cmd/dispatch: DISPATCH_INSECURE_COOKIE).
+	InsecureCookie bool
 	apiDeps        api.Deps
-	app            *auth.AppConfig // nil ⇒ not configured
-	appSource      string          // "env" | "file:<path>" | "" — for diagnostic logs
-	appMu          sync.RWMutex
+	// devSignInHost is the dashboard origin's host:port when the dev sign-in route is mounted,
+	// and empty otherwise. Only BuildAppContext sets it, from DevSignInOrigin, so no caller can
+	// turn the route on without the origin check.
+	devSignInHost string
 }
 
 // AppContextOptions is the explicit-injection bundle main.go assembles
@@ -64,29 +76,38 @@ type AppContext struct {
 type AppContextOptions struct {
 	SigningKey     string
 	WebDistDir     string
-	Users          auth.UserStore
+	AssetStore     AssetStore
 	Sessions       auth.SessionStore
+	People         auth.PeopleStore
 	Identity       identity.Identity
-	AllowedLogins  map[string]struct{}
+	SignIn         *oidc.CodeFlow
+	SignInGroup    string
 	Store          *store.Store
-	AgentToken     string
-	RepoProjects   string
+	AgentTokens    *auth.SharedAgentTokens
 	DefaultProject string
 	ServerURL      string
+	InsecureCookie bool
 	EnvoyURL       string
-	Docs           docs.API
-	Events         *events.Broker
-	App            *auth.AppConfig
-	AppSource      string
-	GitHubAPIBase  string
-	OIDC           *oidc.Verifier
-	AgentStream    agentstream.Source
-	Lifetime       context.Context
+	// EnvoyToken is the bearer every Envoy listener call sends (cmd/dispatch: ENVOY_TOKEN); empty
+	// sends none.
+	EnvoyToken    string
+	Docs          docs.API
+	Events        *events.Broker
+	App           *auth.AppConfig
+	GitHubAPIBase string
+	OIDC          *oidc.Verifier
+	AgentStream   agentstream.Source
+	Lifetime      context.Context
 	// AgentSecretsURL/AgentSecretsToken configure the credential-request UI's secrets broker
 	// client; empty URL means the feature is off. See api.DepsInput.
 	AgentSecretsURL   string
 	AgentSecretsToken string
 	TestHooksEnabled  bool
+	// DevSignIn mounts GET /auth/_dev/signin, which issues the session cookie for any person
+	// named with no sign-in pool exchange, and makes the whole router refuse a request whose Host
+	// is not the dashboard origin. cmd/dispatch sets it from DISPATCH_DEV_SIGNIN behind its boot
+	// fence; BuildAppContext refuses it for a non-loopback ServerURL.
+	DevSignIn bool
 }
 
 // BuildAppContext bundles the shared HTTP-handler state.
@@ -94,21 +115,34 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 	if opts.SigningKey == "" {
 		return nil, fmt.Errorf("BuildAppContext: SigningKey required")
 	}
-	if opts.Users == nil {
-		return nil, fmt.Errorf("BuildAppContext: Users store required")
+	if opts.People == nil {
+		return nil, fmt.Errorf("BuildAppContext: People store required")
+	}
+	if opts.SignIn != nil && opts.SignInGroup == "" {
+		return nil, fmt.Errorf("BuildAppContext: SignIn requires a SignInGroup")
 	}
 	if opts.Identity == nil {
 		return nil, fmt.Errorf("BuildAppContext: Identity required")
 	}
+	var devSignInHost string
+	if opts.DevSignIn {
+		if opts.Sessions == nil {
+			return nil, fmt.Errorf("BuildAppContext: DevSignIn requires a Sessions store")
+		}
+		host, err := DevSignInOrigin(opts.ServerURL)
+		if err != nil {
+			return nil, fmt.Errorf("BuildAppContext: %w", err)
+		}
+		devSignInHost = host
+	}
 	apiDeps, err := api.NewDeps(api.DepsInput{
 		Store:             opts.Store,
 		Identity:          opts.Identity,
-		AllowedLogins:     opts.AllowedLogins,
-		AgentToken:        opts.AgentToken,
-		RepoProjectsRaw:   opts.RepoProjects,
+		AgentTokens:       opts.AgentTokens,
 		DefaultProject:    opts.DefaultProject,
 		ServerURL:         opts.ServerURL,
 		EnvoyURL:          opts.EnvoyURL,
+		EnvoyToken:        opts.EnvoyToken,
 		Docs:              opts.Docs,
 		Events:            opts.Events,
 		App:               opts.App,
@@ -126,27 +160,19 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 	return &AppContext{
 		SigningKey:     opts.SigningKey,
 		WebDistDir:     opts.WebDistDir,
-		Users:          opts.Users,
+		AssetStore:     opts.AssetStore,
 		Sessions:       opts.Sessions,
+		People:         opts.People,
 		Identity:       opts.Identity,
-		AllowedLogins:  opts.AllowedLogins,
 		Store:          opts.Store,
-		AgentToken:     opts.AgentToken,
-		RepoProjects:   opts.RepoProjects,
 		DefaultProject: opts.DefaultProject,
 		ServerURL:      strings.TrimSuffix(opts.ServerURL, "/"),
+		SignIn:         opts.SignIn,
+		SignInGroup:    opts.SignInGroup,
+		InsecureCookie: opts.InsecureCookie,
+		devSignInHost:  devSignInHost,
 		apiDeps:        apiDeps,
-		app:            opts.App,
-		appSource:      opts.AppSource,
 	}, nil
-}
-
-// App returns the loaded Envoy App credentials, or nil if app.json is missing
-// or malformed. Callers must handle nil explicitly (503).
-func (ctx *AppContext) App() *auth.AppConfig {
-	ctx.appMu.RLock()
-	defer ctx.appMu.RUnlock()
-	return ctx.app
 }
 
 // Architecture is the shared architecture importer the HTTP routes use, so the
@@ -167,6 +193,9 @@ type router struct {
 	ctx           *AppContext
 	pendingMu     sync.Mutex
 	pendingStates map[string]pendingState
+	// retainedHeld counts the bytes of retained objects held by responses in flight, up to
+	// maxRetainedBytesHeld (serveRetainedAsset).
+	retainedHeld *semaphore.Weighted
 }
 
 type pendingState struct {
@@ -177,25 +206,27 @@ type pendingState struct {
 
 // New returns an http.Handler that serves all dispatch routes.
 func New(ctx *AppContext) http.Handler {
-	r := &router{ctx: ctx, pendingStates: make(map[string]pendingState)}
+	r := &router{ctx: ctx, pendingStates: make(map[string]pendingState), retainedHeld: semaphore.NewWeighted(maxRetainedBytesHeld)}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /auth/start", r.authStart)
 	mux.HandleFunc("GET /auth/callback", r.authCallback)
 	mux.HandleFunc("POST /auth/logout", r.authLogout)
 	mux.HandleFunc("GET /auth/whoami", r.authWhoami)
-	mux.HandleFunc("/api/github/rest/", r.apiGithubRest)
-	mux.HandleFunc("/api/github/graphql", r.apiGithubGraphql)
+	mux.HandleFunc(githubapi.Prefix, r.apiGithubRest)
 	api.Register(mux, r.ctx.apiDeps)
 	mux.HandleFunc("/", r.staticHandler)
-	return r.enforceCookieOrigin(mux)
+	if ctx.devSignInHost == "" {
+		return r.enforceCookieOrigin(mux)
+	}
+	mux.HandleFunc("GET /auth/_dev/signin", r.authDevSignIn)
+	return requireHost(ctx.devSignInHost, r.enforceCookieOrigin(mux))
 }
 
 // ───── auth ─────────────────────────────────────────────────────────────────
 
 func (r *router) authStart(w http.ResponseWriter, req *http.Request) {
-	app := r.ctx.App()
-	if app == nil {
-		writeError(w, http.StatusServiceUnavailable, "Envoy App not configured — set DISPATCH_APP_CLIENT_ID/_SECRET/_PEM_B64 (env) or write ~/.local/share/dispatch/app.json")
+	if r.ctx.SignIn == nil {
+		signInUnconfigured(w)
 		return
 	}
 	state, err := randomToken()
@@ -213,16 +244,17 @@ func (r *router) authStart(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusTooManyRequests, "too many pending sign-in attempts")
 		return
 	}
-	http.SetCookie(w, oauthStateCookieFor(nonce, oauthStateMaxAge))
-	redirectURI := callbackURL(r.ctx.ServerURL, req)
-	target := auth.BuildAuthorizeURL(app.ClientID, redirectURI, state)
-	http.Redirect(w, req, target, http.StatusFound)
+	http.SetCookie(w, oauthStateCookieFor(nonce, oauthStateMaxAge, !r.ctx.InsecureCookie))
+	http.Redirect(w, req, r.ctx.SignIn.AuthURL(callbackURL(r.ctx.ServerURL, req), state, nonce), http.StatusFound)
 }
 
+// authCallback completes a sign-in the sign-in pool redirected back: it exchanges the code for
+// the person's ID token, names them by the email their Google Workspace username carries, and
+// signs in only a member of SignInGroup, keeping the pool's refresh token to confirm that
+// membership hourly.
 func (r *router) authCallback(w http.ResponseWriter, req *http.Request) {
-	app := r.ctx.App()
-	if app == nil {
-		writeError(w, http.StatusServiceUnavailable, "Envoy App not configured — set DISPATCH_APP_CLIENT_ID/_SECRET/_PEM_B64 (env) or write ~/.local/share/dispatch/app.json")
+	if r.ctx.SignIn == nil {
+		signInUnconfigured(w)
 		return
 	}
 	code, state, err := auth.ParseCallback(req)
@@ -230,7 +262,7 @@ func (r *router) authCallback(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	http.SetCookie(w, oauthStateCookieFor("", -1))
+	http.SetCookie(w, oauthStateCookieFor("", -1, !r.ctx.InsecureCookie))
 	pending, ok := r.takePendingState(state)
 	if !ok {
 		writeError(w, http.StatusBadRequest, "invalid or expired state — start over at /auth/start")
@@ -241,95 +273,80 @@ func (r *router) authCallback(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid or expired state — start over at /auth/start")
 		return
 	}
-	tokens, err := auth.ExchangeCode(req.Context(), app.ClientID, app.ClientSecret, code, callbackURL(r.ctx.ServerURL, req), r.ctx.HTTPClient)
+	session, err := r.ctx.SignIn.Exchange(req.Context(), callbackURL(r.ctx.ServerURL, req), code, pending.nonce)
 	if err != nil {
-		slog.Warn("dispatch: oauth code exchange failed", "error", err)
-		writeError(w, http.StatusBadGateway, "code exchange failed: "+err.Error())
+		slog.Warn("dispatch: sign-in code exchange failed", "error", err)
+		writeError(w, http.StatusBadGateway, "sign-in failed: "+err.Error())
 		return
 	}
-	if _, allowed := r.ctx.AllowedLogins[strings.ToLower(tokens.GithubLogin)]; !allowed {
-		slog.Warn("dispatch: login not allowed", "login", tokens.GithubLogin)
-		writeLoginRefusedPage(w, tokens.GithubLogin)
+	email, err := identity.Person(session.Claims, r.ctx.SignInGroup)
+	if err != nil {
+		slog.Warn("dispatch: sign-in refused", "username", session.Claims.Username, "reason", err)
+		writeSignInRefusedPage(w, email, err)
 		return
 	}
-	user := &auth.User{Login: tokens.GithubLogin, Tokens: *tokens}
-	if err := r.ctx.Users.Write(req.Context(), user); err != nil {
-		slog.Error("dispatch: persist user failed", "login", user.Login, "error", err)
-		writeError(w, http.StatusInternalServerError, "persist user")
+	if err := r.ctx.People.SignIn(req.Context(), email, session.RefreshToken, time.Now()); err != nil {
+		slog.Error("dispatch: record sign-in failed", "email", email, "error", err)
+		writeError(w, http.StatusInternalServerError, "record sign-in")
 		return
 	}
-	generation := int64(0)
-	if r.ctx.Sessions != nil {
-		generation, err = r.ctx.Sessions.EnsureSession(req.Context(), user.Login)
-		if err != nil {
-			slog.Error("dispatch: ensure session generation failed", "login", user.Login, "error", err)
-			writeError(w, http.StatusInternalServerError, "session generation")
-			return
-		}
+	if !r.issueSession(w, req, email) {
+		return
 	}
-	w.Header().Add("Set-Cookie", auth.IssueSessionCookie(user.Login, generation, r.ctx.SigningKey))
 	http.Redirect(w, req, pending.next, http.StatusFound)
 }
+
+// issueSession ensures the person's session generation and sets the session cookie a sign-in
+// issues, answering 500 when the generation cannot be recorded. authCallback and authDevSignIn
+// both mint through it, so a local dev sign-in carries exactly the cookie a pool sign-in does.
+func (r *router) issueSession(w http.ResponseWriter, req *http.Request, email string) bool {
+	generation := int64(0)
+	if r.ctx.Sessions != nil {
+		var err error
+		generation, err = r.ctx.Sessions.EnsureSession(req.Context(), email)
+		if err != nil {
+			slog.Error("dispatch: ensure session generation failed", "email", email, "error", err)
+			writeError(w, http.StatusInternalServerError, "session generation")
+			return false
+		}
+	}
+	w.Header().Add("Set-Cookie", auth.IssueSessionCookie(email, generation, r.ctx.SigningKey, !r.ctx.InsecureCookie))
+	return true
+}
+
 func (r *router) authLogout(w http.ResponseWriter, req *http.Request) {
-	login, ok := r.login(w, req)
+	email, ok := r.login(w, req)
 	if !ok {
 		return
 	}
 	if r.ctx.Sessions != nil {
-		if err := r.ctx.Sessions.RevokeSessions(req.Context(), login); err != nil {
-			slog.Warn("dispatch: revoke sessions failed", "login", login, "error", err)
+		if err := r.ctx.Sessions.RevokeSessions(req.Context(), email); err != nil {
+			slog.Warn("dispatch: revoke sessions failed", "email", email, "error", err)
 			writeError(w, http.StatusInternalServerError, "revoke session")
 			return
 		}
 	}
-	if err := r.ctx.Users.Remove(req.Context(), login); err != nil {
-		slog.Warn("dispatch: remove user failed", "login", login, "error", err)
+	if err := r.ctx.People.End(req.Context(), email); err != nil {
+		slog.Warn("dispatch: forget the sign-in's refresh token failed", "email", email, "error", err)
 	}
-	w.Header().Set("Set-Cookie", auth.ClearSessionCookie())
+	w.Header().Set("Set-Cookie", auth.ClearSessionCookie(!r.ctx.InsecureCookie))
 	api.WriteJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 func (r *router) authWhoami(w http.ResponseWriter, req *http.Request) {
-	login, ok := r.login(w, req)
+	email, ok := r.login(w, req)
 	if !ok {
 		return
 	}
-	api.WriteJSON(w, http.StatusOK, map[string]any{"kind": "user", "login": login})
+	api.WriteJSON(w, http.StatusOK, map[string]any{"kind": "user", "login": email})
 }
 
+// apiGithubRest serves the web app's GitHub reads to a person, as the GitHub App.
 func (r *router) apiGithubRest(w http.ResponseWriter, req *http.Request) {
-	cfg, ok := r.buildProxyConfig(w, req)
-	if !ok {
+	if _, ok := r.login(w, req); !ok {
 		return
 	}
-	githubapi.ProxyREST(w, req, cfg)
-}
-
-func (r *router) apiGithubGraphql(w http.ResponseWriter, req *http.Request) {
-	cfg, ok := r.buildProxyConfig(w, req)
-	if !ok {
-		return
-	}
-	githubapi.ProxyGraphQL(w, req, cfg)
-}
-
-// requireUser resolves the request identity to its stored GitHub token pair.
-func (r *router) requireUser(w http.ResponseWriter, req *http.Request) *auth.User {
-	login, ok := r.login(w, req)
-	if !ok {
-		return nil
-	}
-	user, err := r.ctx.Users.Read(req.Context(), login)
-	if err != nil {
-		slog.Warn("dispatch: read user failed", "login", login, "error", err)
-		writeError(w, http.StatusInternalServerError, "read user")
-		return nil
-	}
-	if user == nil {
-		writeCodeError(w, http.StatusServiceUnavailable, "github token unavailable", "GITHUB_TOKEN_UNAVAILABLE")
-		return nil
-	}
-	return user
+	githubapi.ProxyREST(w, req, r.ctx.apiDeps.GitHub)
 }
 
 func (r *router) login(w http.ResponseWriter, req *http.Request) (string, bool) {
@@ -341,31 +358,8 @@ func (r *router) login(w http.ResponseWriter, req *http.Request) (string, bool) 
 	return login, true
 }
 
-func (r *router) buildProxyConfig(w http.ResponseWriter, req *http.Request) (*githubapi.ProxyConfig, bool) {
-	user := r.requireUser(w, req)
-	if user == nil {
-		return nil, false
-	}
-	return r.proxyConfigForUser(w, user)
-}
-
-// proxyConfigForUser builds a GitHub proxy config from an already-resolved
-// user. Returns false (writing 503) when the Envoy App credentials are absent,
-// since no per-user GitHub call can be authorized without them.
-func (r *router) proxyConfigForUser(w http.ResponseWriter, user *auth.User) (*githubapi.ProxyConfig, bool) {
-	app := r.ctx.App()
-	if app == nil {
-		writeError(w, http.StatusServiceUnavailable, "Envoy App not configured — set DISPATCH_APP_CLIENT_ID/_SECRET/_PEM_B64 (env) or write ~/.local/share/dispatch/app.json")
-		return nil, false
-	}
-	return &githubapi.ProxyConfig{
-		Tokens:       &user.Tokens,
-		Users:        r.ctx.Users,
-		Login:        user.Login,
-		ClientID:     app.ClientID,
-		ClientSecret: app.ClientSecret,
-		HTTPClient:   r.ctx.HTTPClient,
-	}, true
+func signInUnconfigured(w http.ResponseWriter) {
+	writeCodeError(w, http.StatusServiceUnavailable, "Google sign-in is not configured on this server (DISPATCH_SIGNIN_ISSUER, DISPATCH_SIGNIN_CLIENT_ID, DISPATCH_SIGNIN_CLIENT_SECRET, DISPATCH_SIGNIN_GROUP)", "SIGNIN_UNCONFIGURED")
 }
 
 // ───── static ───────────────────────────────────────────────────────────────
@@ -376,8 +370,22 @@ func (r *router) proxyConfigForUser(w http.ResponseWriter, user *auth.User) (*gi
 // that must be answered as one.
 var serverRoots = []string{"/api", "/v1", "/auth", "/ws", "/healthz"}
 
+// assetRoots hold Vite's content-hashed build output: a file there never changes under its name,
+// because a changed file is written under a new one.
+var assetRoots = []string{"/assets"}
+
+const (
+	// pageCacheControl makes a browser revalidate a page before it runs it. A page names the
+	// hashed assets of the build that wrote it, and one kept by heuristic freshness from a
+	// Last-Modified would, after a deploy, ask for assets the server no longer has.
+	pageCacheControl = "no-cache"
+	// assetCacheControl lets a browser keep a hashed asset for a year without asking.
+	assetCacheControl = "public, max-age=31536000, immutable"
+)
+
 func (r *router) staticHandler(w http.ResponseWriter, req *http.Request) {
 	requestedPath := req.URL.Path
+	// A rooted clean holds no `..`, so every path joined under the dist directory below stays in it.
 	normalized := filepath.Clean("/" + requestedPath)
 	if isReservedPath(normalized, serverRoots) {
 		api.WriteJSON(w, http.StatusNotFound, map[string]string{
@@ -404,12 +412,17 @@ func (r *router) staticHandler(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	candidate := filepath.Join(r.ctx.WebDistDir, normalized)
-	if !strings.HasPrefix(candidate, r.ctx.WebDistDir) {
-		writeError(w, http.StatusNotFound, "not found")
-		return
-	}
 	info, err := os.Stat(candidate)
 	if err == nil && !info.IsDir() {
+		if filepath.Ext(candidate) == ".html" {
+			servePage(w, req, candidate)
+			return
+		}
+		if isReservedPath(normalized, assetRoots) {
+			// A 304 keeps it, and net/http drops it from an error it answers instead (a file
+			// removed after its stat), so a failure is never kept for an asset's year.
+			w.Header().Set("Cache-Control", assetCacheControl)
+		}
 		serveFile(w, req, candidate)
 		return
 	}
@@ -417,16 +430,85 @@ func (r *router) staticHandler(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusInternalServerError, "stat failed")
 		return
 	}
+	if isRetainedAssetPath(normalized) && r.ctx.AssetStore != nil {
+		r.serveRetainedAsset(w, req, strings.TrimPrefix(normalized, "/"))
+		return
+	}
 	if !isBrowserRoute(normalized) {
 		writeError(w, http.StatusNotFound, "not found")
 		return
 	}
-	indexPath := filepath.Join(r.ctx.WebDistDir, "index.html")
-	if _, err := os.Stat(indexPath); err != nil {
-		writeError(w, http.StatusNotFound, "dashboard build not found")
+	servePage(w, req, filepath.Join(r.ctx.WebDistDir, "index.html"))
+}
+
+// isRetainedAssetPath reports whether normalized names a file below an asset root: the only paths
+// the retained-asset store is asked for, never a page or an asset root itself.
+func isRetainedAssetPath(normalized string) bool {
+	return isReservedPath(normalized, assetRoots) && !slices.Contains(assetRoots, normalized)
+}
+
+// serveRetainedAsset answers a local asset miss from the retained-asset store. The whole object is
+// read under retainedAssetFetchTimeout before anything is written, so a slow, failed or short read
+// is an uncached 502 and never a 200 carrying the immutable header; the browser's download of the
+// bytes read is not bounded by that timeout. A read that instead runs out of that shared bound
+// (errors.Is(err, context.DeadlineExceeded), most often because most of it was already spent
+// waiting for memory-cap room) is answered the same way the cap's own refusal is, a 503, not a 502
+// store failure: the store was never actually unhealthy, only asked too late to answer in time.
+//
+// An object stays in memory until its client has read it, so the bytes held at once are capped at
+// maxRetainedBytesHeld. Before asking the store a request reserves the most one object can hold,
+// waiting within the same bound for earlier requests to give theirs back, so a burst of a stale
+// tab's chunks is served in turn and a request that cannot reserve in time is a 503 that asks the
+// store nothing. A request whose context ends because its client went away while still queued for
+// that room logs nothing more than a debug line and writes no response, since the cap was never
+// the reason and nobody is left to answer. Once the object is read the request keeps only its size
+// until its response is written or its client goes away.
+func (r *router) serveRetainedAsset(w http.ResponseWriter, req *http.Request, key string) {
+	ctx, cancel := context.WithTimeout(req.Context(), retainedAssetFetchTimeout)
+	defer cancel()
+	if err := r.retainedHeld.Acquire(ctx, maxRetainedAssetSize); err != nil {
+		if errors.Is(err, context.Canceled) {
+			slog.Debug("dispatch: retained asset request canceled while queued for the memory cap", "key", key)
+			return
+		}
+		refuseRetainedAssetAtCap(w, key)
 		return
 	}
-	serveFile(w, req, indexPath)
+	held := maxRetainedAssetSize
+	// Release reads held when the handler returns: the object's size once it is read.
+	defer func() { r.retainedHeld.Release(held) }()
+
+	asset, err := r.ctx.AssetStore.GetAsset(ctx, key)
+	if errors.Is(err, ErrAssetNotFound) {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		refuseRetainedAssetAtCap(w, key)
+		return
+	}
+	if err != nil {
+		slog.Error("dispatch: retained asset store failed", "key", key, "error", err)
+		writeError(w, http.StatusBadGateway, "retained asset store unavailable")
+		return
+	}
+	r.retainedHeld.Release(held - int64(len(asset)))
+	held = int64(len(asset))
+
+	w.Header().Set("Cache-Control", assetCacheControl)
+	w.Header().Set("Content-Type", contentType(key))
+	http.ServeContent(w, req, key, time.Time{}, bytes.NewReader(asset))
+}
+
+// refuseRetainedAssetAtCap answers the shared 503 a request past its fetch bound gets, whether the
+// bound ran out waiting for memory-cap room or inside the store call itself: both are the same
+// "try again shortly" condition from the client's side, never a store failure to alarm an operator
+// over.
+func refuseRetainedAssetAtCap(w http.ResponseWriter, key string) {
+	slog.Warn("dispatch: retained asset refused at the memory cap", "key", key, "cap_bytes", maxRetainedBytesHeld)
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Retry-After", "1")
+	writeError(w, http.StatusServiceUnavailable, "retained assets are at their memory cap; retry")
 }
 
 // isBrowserRoute reports whether an unmatched, non-static path should fall
@@ -435,7 +517,7 @@ func (r *router) staticHandler(w http.ResponseWriter, req *http.Request) {
 // anything that looks like a missing static asset must stay a real 404
 // instead, so asset clients never get an HTML body where they expected a file.
 func isBrowserRoute(normalized string) bool {
-	if isReservedPath(normalized, []string{"/assets"}) {
+	if isReservedPath(normalized, assetRoots) {
 		return false
 	}
 	// Issue routes carry user-controlled segments (artifact slugs, ask/comment
@@ -459,6 +541,29 @@ func isReservedPath(normalized string, roots []string) bool {
 	return false
 }
 
+// servePage serves an HTML page that the browser must revalidate, validated by its content and
+// never by its modification time. The servers behind one load balancer can hold different builds
+// whose pages' times say nothing about which build wrote them (a rollback serves the older file),
+// so a revalidation answered by If-Modified-Since could keep one build's page in front of another
+// build's assets. The page carries an ETag of its bytes and no Last-Modified, so a browser holding
+// another build's page, or one cached before this, gets the page this server has.
+func servePage(w http.ResponseWriter, req *http.Request, path string) {
+	page, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		writeError(w, http.StatusNotFound, "dashboard build not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "read failed")
+		return
+	}
+	sum := sha256.Sum256(page)
+	w.Header().Set("Content-Type", contentType(path))
+	w.Header().Set("Cache-Control", pageCacheControl)
+	w.Header().Set("ETag", `"`+hex.EncodeToString(sum[:16])+`"`)
+	http.ServeContent(w, req, path, time.Time{}, bytes.NewReader(page))
+}
+
 func serveFile(w http.ResponseWriter, req *http.Request, path string) {
 	w.Header().Set("Content-Type", contentType(path))
 	http.ServeFile(w, req, path)
@@ -474,6 +579,10 @@ func contentType(path string) string {
 		return "text/css; charset=utf-8"
 	case ".svg":
 		return "image/svg+xml"
+	case ".txt":
+		return "text/plain; charset=utf-8"
+	case ".png":
+		return "image/png"
 	case ".json":
 		return "application/json; charset=utf-8"
 	default:
@@ -573,13 +682,13 @@ func (r *router) takePendingState(token string) (pendingState, bool) {
 	return pending, pending.expiresAt.After(time.Now())
 }
 
-func oauthStateCookieFor(value string, maxAge int) *http.Cookie {
+func oauthStateCookieFor(value string, maxAge int, secure bool) *http.Cookie {
 	return &http.Cookie{
 		Name:     oauthStateCookie,
 		Value:    value,
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   os.Getenv("DISPATCH_INSECURE_COOKIE") == "",
+		Secure:   secure,
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   maxAge,
 	}
@@ -593,23 +702,25 @@ func writeCodeError(w http.ResponseWriter, status int, message, code string) {
 	api.WriteJSON(w, status, map[string]string{"error": message, "code": code})
 }
 
-// writeLoginRefusedPage answers the OAuth callback — a top-level browser
-// navigation from GitHub, so JSON would be unreadable there — for a login
-// GitHub vouched for but the allowlist does not. The page names the login so
-// the person knows what to ask an operator to add.
-func writeLoginRefusedPage(w http.ResponseWriter, login string) {
-	escaped := html.EscapeString(login)
+// writeSignInRefusedPage answers the sign-in callback, a top-level browser navigation back from
+// the sign-in pool where JSON would be unreadable, for a person the pool vouched for but Dispatch
+// does not admit: one outside the group, named by email, or a sign-in that names nobody by email.
+func writeSignInRefusedPage(w http.ResponseWriter, email string, reason error) {
+	message := "This sign-in does not name a person by a Google Workspace email. Sign in with your Google Workspace account."
+	if errors.Is(reason, identity.ErrNotMember) {
+		message = html.EscapeString(email) + " is not in the group that may use Dispatch. Ask an administrator to add you, then sign in again."
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusForbidden)
 	fmt.Fprintf(w, `<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><title>Dispatch: %s is not on the allowlist</title></head>
+<html lang="en"><head><meta charset="utf-8"><title>Dispatch: sign-in refused</title></head>
 <body style="font-family:system-ui,sans-serif;max-width:40rem;margin:4rem auto;padding:0 1rem">
-<h1>Not on the allowlist</h1>
-<p>%s is not on the Dispatch allowlist. Ask an operator to add your GitHub login.</p>
+<h1>Sign-in refused</h1>
+<p>%s</p>
 <p><a href="/auth/start">Sign in with a different account</a></p>
 </body></html>
-`, escaped, escaped)
+`, message)
 }
 
 func randomToken() (string, error) {

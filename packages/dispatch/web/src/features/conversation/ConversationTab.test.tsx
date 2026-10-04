@@ -3,11 +3,21 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
-import { api } from "../../api/client";
+import { ApiError, api } from "../../api/client";
 import { prependEventToLog } from "../../api/sse";
-import type { Actor, Artifact, Comment, Event, UserIssueState, UserState } from "../../api/types";
+import type {
+  Actor,
+  Artifact,
+  Comment,
+  Event,
+  Message,
+  UserIssueState,
+  UserState,
+} from "../../api/types";
+import { stubMatchMedia } from "../margin/margin-fixture";
 import { KeymapProvider } from "../shell/KeymapProvider";
 import { ConversationTab } from "./ConversationTab";
+import { answeredWithErrorGuidance, safeRetryGuidance } from "./delivery";
 
 function message(
   id: number,
@@ -84,7 +94,7 @@ function tab(
   issueArtifacts: ReadonlyMap<string, Artifact> = new Map()
 ): ReactNode {
   return (
-    <MemoryRouter>
+    <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
       <KeymapProvider>
         <QueryClientProvider client={queryClient}>
           <ConversationTab
@@ -197,6 +207,41 @@ test("observes message rows only while the Conversation panel is visible", async
     api.getIssueEvents = originalGetIssueEvents;
     api.listAgents = originalListAgents;
     globalThis.IntersectionObserver = originalIntersectionObserver;
+  }
+});
+
+test("Conversation holds Reply while its composer sends", async () => {
+  const originalGetIssueEvents = api.getIssueEvents;
+  const originalListAgents = api.listAgents;
+  const sent = Promise.withResolvers<Comment>();
+  const createComment = spyOn(api, "createComment").mockReturnValueOnce(sent.promise);
+  const queryClient = newQueryClient();
+  let unmount: (() => void) | undefined;
+
+  try {
+    const event = message(1, "Earlier message");
+    api.getIssueEvents = async () => [event];
+    api.listAgents = async () => [];
+    queryClient.setQueryData(["events", "CORE-1"], { pageParams: [null], pages: [[event]] });
+    unmount = render(tab({ "CORE-1": issueState() }, true, queryClient)).unmount;
+
+    const field = await screen.findByLabelText<HTMLTextAreaElement>("Comment");
+    fireEvent.change(field, { target: { value: "Status please" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(field.closest("fieldset")?.disabled).toBe(true));
+    const reply = screen.getByRole("button", { name: "Reply" }) as HTMLButtonElement;
+    expect(reply.disabled).toBe(true);
+    fireEvent.click(reply);
+    expect(screen.queryByRole("button", { name: "Cancel reply" })).toBeNull();
+
+    sent.reject(new Error("the server is down"));
+    await screen.findByText("Couldn't send — network error");
+    expect(createComment.mock.calls[0]).toEqual(["CORE-1", { body: "Status please" }]);
+  } finally {
+    unmount?.();
+    createComment.mockRestore();
+    api.getIssueEvents = originalGetIssueEvents;
+    api.listAgents = originalListAgents;
   }
 });
 
@@ -418,8 +463,161 @@ test("hides targeted-message retries on a closed issue", async () => {
     unmount = render(tab({ "CORE-1": issueState() }, true, queryClient, true)).unmount;
     await screen.findByText("Failed: no live session s1");
 
-    expect(screen.queryByRole("button", { name: "Send as BTW instead" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "Send normally instead" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Use BTW instead" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Use Send instead" })).toBeNull();
+  } finally {
+    unmount?.();
+    api.getIssueEvents = originalGetIssueEvents;
+    api.listAgents = originalListAgents;
+  }
+});
+
+// The issue feed reads an attempt from its receipts. The session's error reply appends the
+// attempt's second receipt as that session, after Dispatch's own `sent` one; that attempt gets a
+// mode change, not a same-mode Retry whose repeated key the stream has already stored.
+test("a targeted message its session answered with an error offers a mode change, not Retry", async () => {
+  const originalGetIssueEvents = api.getIssueEvents;
+  const originalListAgents = api.listAgents;
+  const queryClient = newQueryClient();
+  let unmount: (() => void) | undefined;
+
+  try {
+    const question: Event = {
+      actor: { id: "alice", kind: "user" },
+      created_at: "2026-09-12T00:00:00Z",
+      id: 1,
+      issue_key: "CORE-1",
+      notify: false,
+      payload: {
+        author: { id: "alice", kind: "user" },
+        body: "Can this ship?",
+        created_at: "2026-09-12T00:00:00Z",
+        deliveries: [],
+        id: "message-1",
+        in_reply_to: null,
+        issue_key: "CORE-1",
+        target: "session:s1",
+      },
+      seq: 1,
+      type: "message.created",
+    };
+    const receipt = (seq: number, actor: Actor, state: "sent" | "failed"): Event => ({
+      actor,
+      created_at: recentAttemptAt,
+      id: seq,
+      issue_key: "CORE-1",
+      notify: false,
+      payload: {
+        attempt: 1,
+        delivery: "btw",
+        ...(state === "failed" ? { error: "side turn failed" } : {}),
+        message_id: "message-1",
+        session_id: "s1",
+        state,
+        title: actor.kind === "user" ? "planner" : "",
+      },
+      seq,
+      type: "message.delivery",
+    });
+    const sent = receipt(2, { id: "alice", kind: "user" }, "sent");
+    const answeredError = receipt(3, { id: "s1", kind: "session" }, "failed");
+    api.getIssueEvents = async () => [question, sent, answeredError];
+    api.listAgents = async () => [];
+
+    unmount = render(tab({ "CORE-1": issueState() }, true, queryClient)).unmount;
+    await screen.findByText(`Failed: side turn failed. ${answeredWithErrorGuidance("card")}`);
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Use Send instead" })).toBeTruthy();
+  } finally {
+    unmount?.();
+    api.getIssueEvents = originalGetIssueEvents;
+    api.listAgents = originalListAgents;
+  }
+});
+
+// A mention's receipt carries the same mark. The mention list has no mode-change action, so the
+// attempt gets no Retry and is pointed at a new comment; the failure Dispatch recorded for the
+// same attempt keeps its Retry.
+test("a mention its session answered with an error is pointed at a new comment, not Retry", async () => {
+  const originalGetIssueEvents = api.getIssueEvents;
+  const originalListAgents = api.listAgents;
+  const queryClient = newQueryClient();
+  let unmount: (() => void) | undefined;
+
+  try {
+    const comment = (target: string, session: string, seq: number): Event =>
+      ({
+        actor: { id: "alice", kind: "user" },
+        created_at: "2026-09-14T00:00:00Z",
+        id: seq,
+        issue_key: "CORE-1",
+        notify: false,
+        payload: {
+          anchor: null,
+          artifact_name: "",
+          ask_id: null,
+          author: { id: "alice", kind: "user" },
+          body: `@${session} take a look`,
+          created_at: "2026-09-14T00:00:00Z",
+          deliveries: [],
+          edited_at: null,
+          id: `comment-${seq}`,
+          issue_key: "CORE-1",
+          mentions: [{ delivery: "btw", session_id: session, target }],
+          reply_to: null,
+          resolved: false,
+          resolved_at: null,
+          resolved_by: null,
+          suggestion: null,
+          turn: null,
+        },
+        seq,
+        type: "comment.created",
+      }) as Event;
+    const failed = (seq: number, commentSeq: number, session: string, actor: Actor): Event =>
+      ({
+        actor,
+        created_at: recentAttemptAt,
+        id: seq,
+        issue_key: "CORE-1",
+        notify: false,
+        payload: {
+          attempt: 1,
+          comment_id: `comment-${commentSeq}`,
+          delivery: "btw",
+          error: `${session} failed`,
+          reply_id: null,
+          session_id: session,
+          state: "failed",
+          target: `session:${session}`,
+        },
+        seq,
+        type: "comment.delivery",
+      }) as Event;
+    api.getIssueEvents = async () => [
+      comment("session:worker", "worker", 1),
+      failed(2, 1, "worker", { id: "worker", kind: "session" }),
+      comment("session:reviewer", "reviewer", 3),
+      failed(4, 3, "reviewer", { id: "alice", kind: "user" }),
+    ];
+    api.listAgents = async () => [];
+
+    unmount = render(tab({ "CORE-1": issueState() }, true, queryClient)).unmount;
+    await screen.findByText(
+      `session:worker · failed · worker failed. ${answeredWithErrorGuidance("mention")}`
+    );
+    screen.getByText(
+      `session:reviewer · failed · reviewer failed. ${safeRetryGuidance("mention", "reviewer failed")}`
+    );
+    expect(screen.getAllByRole("button", { name: "Retry" })).toHaveLength(1);
+    unmount();
+
+    // A closed issue shows no Retry and takes no new comment, so neither sentence is said: the
+    // same rule the card follows, where each sentence names a control in the retry row.
+    unmount = render(tab({ "CORE-1": issueState() }, true, queryClient, true)).unmount;
+    await screen.findByText("session:worker · failed · worker failed");
+    screen.getByText("session:reviewer · failed · reviewer failed");
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
   } finally {
     unmount?.();
     api.getIssueEvents = originalGetIssueEvents;
@@ -631,6 +829,461 @@ test("hides resolved comment turns behind their disclosure", async () => {
     expect(await screen.findByText("Resolved timeline comment")).toBeTruthy();
   } finally {
     unmount?.();
+    api.getIssueEvents = originalGetIssueEvents;
+    api.listAgents = originalListAgents;
+  }
+});
+
+// A thread the reader has open is in their hand: resolving its comment - anyone's resolve, here
+// arriving on the stream - leaves the turn, its open thread and the reply they are writing where
+// they are, and the turn takes the resolved filter only once they collapse the thread.
+test("a comment resolved while its thread is open stays, with its reply, until the thread closes", async () => {
+  const originalGetIssueEvents = api.getIssueEvents;
+  const originalListAgents = api.listAgents;
+  const queryClient = newQueryClient();
+  const root = commentEvent(1, "root-comment", "Root comment");
+  const resolved: Event = {
+    ...root,
+    id: 2,
+    payload: {
+      ...root.payload,
+      resolved: true,
+      resolved_at: "2026-09-20T00:01:00Z",
+      resolved_by: { id: "bob", kind: "user" },
+    },
+    seq: 2,
+    type: "comment.resolved",
+  };
+  let unmount: (() => void) | undefined;
+
+  try {
+    api.getIssueEvents = async () => [root];
+    api.listAgents = async () => [];
+    unmount = render(tab({ "CORE-1": issueState() }, true, queryClient)).unmount;
+    await screen.findByText("Root comment");
+    fireEvent.click(screen.getByRole("button", { name: "Expand thread" }));
+    const field = await screen.findByRole<HTMLTextAreaElement>("textbox", { name: "Reply" });
+    fireEvent.change(field, { target: { value: "Half a reply" } });
+
+    act(() => {
+      prependEventToLog(queryClient, resolved);
+    });
+    await screen.findByRole("button", { name: "Resolved (1)" });
+    expect(screen.getByText("Root comment")).toBeTruthy();
+    expect(screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Reply" })).toBe(field);
+    expect(field.value).toBe("Half a reply");
+
+    fireEvent.click(screen.getByRole("button", { name: "Collapse thread" }));
+    await waitFor(() => expect(screen.queryByText("Root comment")).toBeNull());
+  } finally {
+    unmount?.();
+    api.getIssueEvents = originalGetIssueEvents;
+    api.listAgents = originalListAgents;
+  }
+});
+
+// Resolve inside a thread closes it once the server takes it, never before: a refusal leaves the
+// thread open with the reply the reader was writing, and the Retry that lands closes it.
+test("a refused Resolve keeps the thread and its reply, and the one that lands closes it", async () => {
+  const originalGetIssueEvents = api.getIssueEvents;
+  const originalListAgents = api.listAgents;
+  const originalResolveComment = api.resolveComment;
+  const queryClient = newQueryClient();
+  const root = commentEvent(1, "root-comment", "Root comment");
+  let refuse = true;
+  const resolves: string[] = [];
+  let unmount: (() => void) | undefined;
+
+  try {
+    api.getIssueEvents = async () => [root];
+    api.listAgents = async () => [];
+    api.resolveComment = async (id) => {
+      resolves.push(id);
+      if (refuse) throw new ApiError(503, { error: "the server is down" });
+      return { ...root.payload, deliveries: [], mentions: [], resolved: true };
+    };
+    unmount = render(tab({ "CORE-1": issueState() }, true, queryClient)).unmount;
+    await screen.findByText("Root comment");
+    fireEvent.click(screen.getByRole("button", { name: "Expand thread" }));
+    const field = await screen.findByRole<HTMLTextAreaElement>("textbox", { name: "Reply" });
+    fireEvent.change(field, { target: { value: "Half a reply" } });
+
+    fireEvent.click(screen.getByRole("button", { name: "Resolve" }));
+    await screen.findByText("the server is down");
+    expect(screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Reply" })).toBe(field);
+    expect(field.value).toBe("Half a reply");
+
+    refuse = false;
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(screen.queryByRole("textbox", { name: "Reply" })).toBeNull());
+    expect(resolves).toEqual(["root-comment", "root-comment"]);
+  } finally {
+    unmount?.();
+    api.getIssueEvents = originalGetIssueEvents;
+    api.listAgents = originalListAgents;
+    api.resolveComment = originalResolveComment;
+  }
+});
+
+// With resolved comments shown, a resolved comment stays in the list, so its thread does too.
+test("with resolved comments shown, a Resolve that lands keeps its thread open", async () => {
+  const originalGetIssueEvents = api.getIssueEvents;
+  const originalListAgents = api.listAgents;
+  const originalResolveComment = api.resolveComment;
+  const queryClient = newQueryClient();
+  const earlier = commentEvent(1, "earlier-comment", "Earlier comment");
+  const earlierResolved: Event = {
+    ...earlier,
+    id: 2,
+    payload: {
+      ...earlier.payload,
+      resolved: true,
+      resolved_at: "2026-09-20T00:01:00Z",
+      resolved_by: { id: "bob", kind: "user" },
+    },
+    seq: 2,
+    type: "comment.resolved",
+  };
+  const root = commentEvent(3, "root-comment", "Root comment");
+  const resolved = Promise.withResolvers<Comment>();
+  let unmount: (() => void) | undefined;
+
+  try {
+    api.getIssueEvents = async () => [earlier, earlierResolved, root];
+    api.listAgents = async () => [];
+    api.resolveComment = () => resolved.promise;
+    unmount = render(tab({ "CORE-1": issueState() }, true, queryClient)).unmount;
+    fireEvent.click(await screen.findByRole("button", { name: "Resolved (1)" }));
+    const turn = (await screen.findByText("Root comment")).closest("li");
+    if (turn === null) throw new Error("expected the root comment's turn");
+    fireEvent.click(within(turn).getByRole("button", { name: "Expand thread" }));
+    const field = await within(turn).findByRole<HTMLTextAreaElement>("textbox", { name: "Reply" });
+    fireEvent.change(field, { target: { value: "Half a reply" } });
+
+    fireEvent.click(within(turn).getByRole("button", { name: "Resolve" }));
+    await act(async () => {
+      resolved.resolve({ ...root.payload, deliveries: [], mentions: [], resolved: true });
+      await resolved.promise;
+    });
+    await waitFor(() => expect(within(turn).queryByText("Saving…")).toBeNull());
+    expect(within(turn).getByRole<HTMLTextAreaElement>("textbox", { name: "Reply" })).toBe(field);
+    expect(field.value).toBe("Half a reply");
+  } finally {
+    unmount?.();
+    api.getIssueEvents = originalGetIssueEvents;
+    api.listAgents = originalListAgents;
+    api.resolveComment = originalResolveComment;
+  }
+});
+
+/** A tab whose one comment the reader resolves: `land` lets the server take the Resolve, after
+ *  which the events read lists the comment resolved, and `refuse` refuses the reply sent. */
+function ownResolveOverAReply() {
+  const root = commentEvent(1, "root-comment", "Root comment");
+  const resolvedRoot: Event = {
+    ...root,
+    id: 2,
+    payload: {
+      ...root.payload,
+      resolved: true,
+      resolved_at: "2026-09-20T00:01:00Z",
+      resolved_by: { id: "alice", kind: "user" },
+    },
+    seq: 2,
+    type: "comment.resolved",
+  };
+  const resolution = Promise.withResolvers<void>();
+  const reply = Promise.withResolvers<Comment>();
+  let resolvedOnServer = false;
+  const spies = [
+    spyOn(api, "getIssueEvents").mockImplementation(async () =>
+      resolvedOnServer ? [resolvedRoot, root] : [root]
+    ),
+    spyOn(api, "listAgents").mockImplementation(async () => []),
+    spyOn(api, "createComment").mockImplementation(() => reply.promise),
+    spyOn(api, "resolveComment").mockImplementation(async () => {
+      await resolution.promise;
+      resolvedOnServer = true;
+      return { ...root.payload, deliveries: [], mentions: [], resolved: true };
+    }),
+  ];
+  const queryClient = newQueryClient();
+  const view = render(tab({ "CORE-1": issueState() }, true, queryClient));
+  const turn = () => view.container.querySelector('[data-turn="comment:root-comment"]');
+  return {
+    land: async () => {
+      await act(async () => {
+        resolution.resolve();
+        await resolution.promise;
+      });
+      // The read after the Resolve lists the comment resolved, so only a hold keeps it.
+      await screen.findByRole("button", { name: "Resolved (1)" });
+    },
+    refuse: async () => {
+      await act(async () => {
+        reply.reject(new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" }));
+        await reply.promise.catch(() => {});
+      });
+    },
+    restore: () => {
+      view.unmount();
+      for (const spy of spies) spy.mockRestore();
+    },
+    turn,
+  };
+}
+
+const refusedText = "Couldn't send — the server is down";
+
+// A decision closes its thread once the server takes it, and the thread's reply stays the
+// reader's: the refusal it holds, and the comment that reply answers, outlive the reader's own
+// Resolve on a phone as they do at a desktop width.
+test("on a phone, the reader's own Resolve keeps the thread composer's refused reply and its comment", async () => {
+  const restoreViewport = stubMatchMedia(true);
+  const resolve = ownResolveOverAReply();
+
+  try {
+    await screen.findByText("Root comment");
+    fireEvent.click(screen.getByRole("button", { name: "Reply" }));
+    const dialog = await screen.findByRole("dialog", { name: "Thread" });
+    const field = within(dialog).getByRole<HTMLTextAreaElement>("textbox", { name: "Comment" });
+    fireEvent.change(field, { target: { value: "Refused reply" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Send" }));
+    await resolve.refuse();
+    await within(dialog).findByText(refusedText);
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Resolve" }));
+    await resolve.land();
+    expect(screen.queryByRole("dialog", { name: "Thread" })).toBeNull();
+    const turn = resolve.turn();
+    if (turn === null) throw new Error("expected the resolved comment to stay listed");
+
+    fireEvent.click(within(turn as HTMLElement).getByRole("button", { name: "Expand thread" }));
+    const reopened = await screen.findByRole("dialog", { name: "Thread" });
+    expect(within(reopened).getByText(refusedText)).toBeTruthy();
+    expect(
+      within(reopened).getByRole<HTMLTextAreaElement>("textbox", { name: "Comment" }).value
+    ).toBe("Refused reply");
+  } finally {
+    resolve.restore();
+    restoreViewport();
+  }
+});
+
+// The same, with the reply refused while the Resolve is still out: the decision lands on a thread
+// that already shows the refusal.
+test("on a phone, a thread reply refused while the reader's Resolve is out outlives the Resolve", async () => {
+  const restoreViewport = stubMatchMedia(true);
+  const resolve = ownResolveOverAReply();
+
+  try {
+    await screen.findByText("Root comment");
+    fireEvent.click(screen.getByRole("button", { name: "Reply" }));
+    const dialog = await screen.findByRole("dialog", { name: "Thread" });
+    const field = within(dialog).getByRole<HTMLTextAreaElement>("textbox", { name: "Comment" });
+    fireEvent.change(field, { target: { value: "Refused reply" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(api.createComment).toHaveBeenCalledTimes(1));
+    fireEvent.click(within(dialog).getByRole("button", { name: "Resolve" }));
+    await waitFor(() => expect(api.resolveComment).toHaveBeenCalledTimes(1));
+    await resolve.refuse();
+    await within(dialog).findByText(refusedText);
+
+    await resolve.land();
+    const turn = resolve.turn();
+    if (turn === null) throw new Error("expected the resolved comment to stay listed");
+    fireEvent.click(within(turn as HTMLElement).getByRole("button", { name: "Expand thread" }));
+    const reopened = await screen.findByRole("dialog", { name: "Thread" });
+    expect(within(reopened).getByText(refusedText)).toBeTruthy();
+    expect(
+      within(reopened).getByRole<HTMLTextAreaElement>("textbox", { name: "Comment" }).value
+    ).toBe("Refused reply");
+  } finally {
+    resolve.restore();
+    restoreViewport();
+  }
+});
+
+// The thread card's own reply, at a phone width and at a desktop one: the reader's own Resolve
+// closes the thread and keeps the reply's refusal for the thread's return.
+for (const width of ["phone", "desktop"] as const) {
+  test(`at a ${width} width, the reader's own Resolve keeps the card's refused reply and its comment`, async () => {
+    const restoreViewport = width === "phone" ? stubMatchMedia(true) : () => {};
+    const resolve = ownResolveOverAReply();
+
+    try {
+      await screen.findByText("Root comment");
+      fireEvent.click(screen.getByRole("button", { name: "Expand thread" }));
+      const field = await screen.findByRole<HTMLTextAreaElement>("textbox", { name: "Reply" });
+      const form = field.closest("form");
+      if (form === null) throw new Error("expected the card's reply form");
+      fireEvent.change(field, { target: { value: "Refused reply" } });
+      fireEvent.click(within(form).getByRole("button", { name: "Send" }));
+      await resolve.refuse();
+      await within(form).findByText(refusedText);
+
+      fireEvent.click(screen.getByRole("button", { name: "Resolve" }));
+      await resolve.land();
+      await waitFor(() => expect(screen.queryByRole("textbox", { name: "Reply" })).toBeNull());
+      const turn = resolve.turn();
+      if (turn === null) throw new Error("expected the resolved comment to stay listed");
+
+      fireEvent.click(within(turn as HTMLElement).getByRole("button", { name: "Expand thread" }));
+      const reopened = await screen.findByRole<HTMLTextAreaElement>("textbox", { name: "Reply" });
+      expect(reopened.value).toBe("Refused reply");
+      expect(screen.getByText(refusedText)).toBeTruthy();
+    } finally {
+      resolve.restore();
+      restoreViewport();
+    }
+  });
+}
+
+// The thread composer's refusal is its comment's. Left with Back while its send was out, it comes
+// back in that comment's thread: another comment's Reply opens it there, rather than readdressing
+// the composer, and its draft, to the other comment.
+test("on a phone, another comment's Reply opens the thread whose reply was refused after Back", async () => {
+  const restoreViewport = stubMatchMedia(true);
+  const a = commentEvent(1, "comment-a", "Comment A");
+  const b = commentEvent(2, "comment-b", "Comment B");
+  const reply = Promise.withResolvers<Comment>();
+  const getIssueEvents = spyOn(api, "getIssueEvents").mockImplementation(async () => [b, a]);
+  const listAgents = spyOn(api, "listAgents").mockImplementation(async () => []);
+  const createComment = spyOn(api, "createComment").mockImplementation(() => reply.promise);
+  const queryClient = newQueryClient();
+  const view = render(tab({ "CORE-1": issueState() }, true, queryClient));
+  const turn = (id: string) => {
+    const element = view.container.querySelector<HTMLElement>(`[data-turn="comment:${id}"]`);
+    if (element === null) throw new Error(`expected ${id}'s turn`);
+    return element;
+  };
+
+  try {
+    await screen.findByText("Comment A");
+    fireEvent.click(within(turn("comment-a")).getByRole("button", { name: "Reply" }));
+    let dialog = await screen.findByRole("dialog", { name: "Thread" });
+    const field = within(dialog).getByRole<HTMLTextAreaElement>("textbox", { name: "Comment" });
+    fireEvent.change(field, { target: { value: "Reply meant for A" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(createComment).toHaveBeenCalledTimes(1));
+    fireEvent.click(within(dialog).getByRole("button", { name: "Back" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Thread" })).toBeNull());
+    await act(async () => {
+      reply.reject(new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" }));
+      await reply.promise.catch(() => {});
+    });
+
+    fireEvent.click(within(turn("comment-b")).getByRole("button", { name: "Reply" }));
+    dialog = await screen.findByRole("dialog", { name: "Thread" });
+    expect(within(dialog).getByText("Comment A")).toBeTruthy();
+    expect(within(dialog).queryByText("Comment B")).toBeNull();
+    expect(within(dialog).getByText(refusedText)).toBeTruthy();
+    expect(
+      within(dialog).getByRole<HTMLTextAreaElement>("textbox", { name: "Comment" }).value
+    ).toBe("Reply meant for A");
+    expect(createComment).toHaveBeenCalledTimes(1);
+  } finally {
+    view.unmount();
+    getIssueEvents.mockRestore();
+    listAgents.mockRestore();
+    createComment.mockRestore();
+    restoreViewport();
+  }
+});
+
+// At a desktop width a comment's Reply answers the same docked composer and send name the phone
+// thread composer uses on a phone (`CommentTurn`'s `onReply` prop in `ConversationTab.tsx`), so
+// the same hazard applies: a refusal the composer holds for one comment must redirect, not be
+// silently overwritten, when the reader taps Reply on a different one.
+test("at a desktop width, another comment's Reply redirects onto the one whose refusal it holds", async () => {
+  const a = commentEvent(1, "comment-a", "Comment A");
+  const b = commentEvent(2, "comment-b", "Comment B");
+  const reply = Promise.withResolvers<Comment>();
+  const getIssueEvents = spyOn(api, "getIssueEvents").mockImplementation(async () => [b, a]);
+  const listAgents = spyOn(api, "listAgents").mockImplementation(async () => []);
+  const createComment = spyOn(api, "createComment").mockImplementation(() => reply.promise);
+  const queryClient = newQueryClient();
+  const view = render(tab({ "CORE-1": issueState() }, true, queryClient));
+  const turn = (id: string) => {
+    const element = view.container.querySelector<HTMLElement>(`[data-turn="comment:${id}"]`);
+    if (element === null) throw new Error(`expected ${id}'s turn`);
+    return element;
+  };
+
+  try {
+    await screen.findByText("Comment A");
+    fireEvent.click(within(turn("comment-a")).getByRole("button", { name: "Reply" }));
+    const composer = screen.getByRole("form", { name: "Comment composer" });
+    const field = within(composer).getByRole<HTMLTextAreaElement>("textbox", { name: "Comment" });
+    fireEvent.change(field, { target: { value: "Reply meant for A" } });
+    fireEvent.click(within(composer).getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(createComment).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      reply.reject(new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" }));
+      await reply.promise.catch(() => {});
+    });
+    await within(composer).findByText(refusedText);
+
+    fireEvent.click(within(turn("comment-b")).getByRole("button", { name: "Reply" }));
+    expect(within(composer).getByText(/Comment A/)).toBeTruthy();
+    expect(within(composer).queryByText(/Comment B/)).toBeNull();
+    expect(within(composer).getByText(refusedText)).toBeTruthy();
+    expect(field.value).toBe("Reply meant for A");
+    expect(createComment).toHaveBeenCalledTimes(1);
+  } finally {
+    view.unmount();
+    getIssueEvents.mockRestore();
+    listAgents.mockRestore();
+    createComment.mockRestore();
+  }
+});
+
+// A message's Reply answers the same docked composer at every width (`MessageTurn`'s `onReply`
+// prop in `ConversationTab.tsx`, unconditional - not gated on phone viewport the way a
+// comment's is), so the hazard, and the redirect that closes it, hold here too.
+test("another message's Reply redirects onto the one whose refusal the docked composer holds", async () => {
+  const originalGetIssueEvents = api.getIssueEvents;
+  const originalListAgents = api.listAgents;
+  const reply = Promise.withResolvers<Message>();
+  const createMessage = spyOn(api, "createMessage").mockImplementation(() => reply.promise);
+  const queryClient = newQueryClient();
+  let unmount: (() => void) | undefined;
+
+  try {
+    const a = message(1, "Message A");
+    const b = message(2, "Message B");
+    api.getIssueEvents = async () => [b, a];
+    api.listAgents = async () => [];
+    const view = render(tab({ "CORE-1": issueState() }, true, queryClient));
+    unmount = view.unmount;
+    const turn = (id: number) => {
+      const element = view.container.querySelector<HTMLElement>(`[data-turn="message:${id}"]`);
+      if (element === null) throw new Error(`expected message ${id}'s turn`);
+      return element;
+    };
+
+    await screen.findByText("Message A");
+    fireEvent.click(within(turn(1)).getByRole("button", { name: "Reply" }));
+    const composer = screen.getByRole("form", { name: "Comment composer" });
+    const field = within(composer).getByRole<HTMLTextAreaElement>("textbox", { name: "Comment" });
+    fireEvent.change(field, { target: { value: "Reply meant for A" } });
+    fireEvent.click(within(composer).getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(createMessage).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      reply.reject(new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" }));
+      await reply.promise.catch(() => {});
+    });
+    await within(composer).findByText(refusedText);
+
+    fireEvent.click(within(turn(2)).getByRole("button", { name: "Reply" }));
+    expect(within(composer).getByText(/Message A/)).toBeTruthy();
+    expect(within(composer).queryByText(/Message B/)).toBeNull();
+    expect(within(composer).getByText(refusedText)).toBeTruthy();
+    expect(field.value).toBe("Reply meant for A");
+    expect(createMessage).toHaveBeenCalledTimes(1);
+  } finally {
+    unmount?.();
+    createMessage.mockRestore();
     api.getIssueEvents = originalGetIssueEvents;
     api.listAgents = originalListAgents;
   }
@@ -996,9 +1649,7 @@ test("a comment-delivery retry disables when the target no longer advertises the
     unmount = render(tab({ "CORE-1": issueState() }, true, queryClient)).unmount;
     await screen.findByText(/no live session worker/);
     expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
-    expect(
-      screen.getByText(/session:worker-session no longer supports\s+normal delivery\./)
-    ).toBeTruthy();
+    expect(screen.getByText(/session:worker-session no longer supports Send\./)).toBeTruthy();
   } finally {
     unmount?.();
     api.getIssueEvents = originalGetIssueEvents;
@@ -1074,7 +1725,7 @@ test("a comment-delivery retry to a role target checks the role's current live h
     unmount = render(tab({ "CORE-1": issueState() }, true, queryClient)).unmount;
     await screen.findByText(/no live session reviewer/);
     expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
-    expect(screen.getByText(/role:reviewer no longer supports\s+normal delivery\./)).toBeTruthy();
+    expect(screen.getByText(/role:reviewer no longer supports Send\./)).toBeTruthy();
   } finally {
     unmount?.();
     api.getIssueEvents = originalGetIssueEvents;
@@ -1246,9 +1897,9 @@ test("a root targeted-message retry checks the role's current holder after a han
     // The new holder dropped steer, so the same-mode Retry of a steer attempt is refused.
     const sendNormally = await screen.findByRole("button", { name: "Retry" });
     expect(sendNormally.hasAttribute("disabled")).toBe(true);
-    expect(
-      screen.getByRole("button", { name: "Send as BTW instead" }).hasAttribute("disabled")
-    ).toBe(false);
+    expect(screen.getByRole("button", { name: "Use BTW instead" }).hasAttribute("disabled")).toBe(
+      false
+    );
   } finally {
     unmount?.();
     api.getIssueEvents = originalGetIssueEvents;
@@ -1379,9 +2030,9 @@ test("a reply's targeted-message retry checks the thread's current role holder a
     // The new holder dropped steer, so the same-mode Retry of a steer attempt is refused.
     const sendNormally = await screen.findByRole("button", { name: "Retry" });
     expect(sendNormally.hasAttribute("disabled")).toBe(true);
-    expect(
-      screen.getByRole("button", { name: "Send as BTW instead" }).hasAttribute("disabled")
-    ).toBe(false);
+    expect(screen.getByRole("button", { name: "Use BTW instead" }).hasAttribute("disabled")).toBe(
+      false
+    );
   } finally {
     unmount?.();
     api.getIssueEvents = originalGetIssueEvents;

@@ -14,6 +14,20 @@ const AGENT_ROW_ATTRIBUTE = "data-agent-row";
 export const AGENT_ROW_SELECTOR = `[${AGENT_ROW_ATTRIBUTE}]`;
 const AGENT_COMPOSER_SELECTOR = "[data-agent-composer]";
 export const ISSUE_PICKER_SELECTOR = "[data-agent-issue-picker]";
+const ISSUE_SELECT_SELECTOR = "[data-agent-issue-select]";
+const AGENT_FOLD_ATTRIBUTE = "data-agent-fold";
+/** A fold's toggle: the one item of the list that is not a row, sitting between the rows. */
+const AGENT_FOLD_SELECTOR = `[${AGENT_FOLD_ATTRIBUTE}]`;
+
+/** The toggle of the fold `row` sits in, by the row's `data-agent-section`: where focus goes
+ *  when a pin lands the row in that fold closed. */
+export function foldToggleOf(row: HTMLElement): HTMLElement | null {
+  return (
+    row.parentElement?.querySelector<HTMLElement>(
+      `[${AGENT_FOLD_ATTRIBUTE}="${row.dataset.agentSection}"] button`
+    ) ?? null
+  );
+}
 
 /** The agent row that holds keyboard focus itself — not one merely containing a focused control. */
 function focusedAgentRow(): HTMLElement | null {
@@ -55,9 +69,27 @@ function inAgentComposer(): boolean {
 
 /** Registers the `agents` scope over the rows inside `listRef` for the page's lifetime. */
 export function useAgentsKeymap(listRef: RefObject<HTMLElement | null>): void {
-  const rows = () => [
-    ...(listRef.current?.querySelectorAll<HTMLElement>(AGENT_ROW_SELECTOR) ?? []),
-  ];
+  // A closed fold's rows, and the rows the filters exclude, stay mounted, hidden (`AgentsPage`'s
+  // one list), and take no focus.
+  const rows = () =>
+    [...(listRef.current?.querySelectorAll<HTMLElement>(AGENT_ROW_SELECTOR) ?? [])].filter(
+      (row) => !row.hidden
+    );
+  /** One step from where the reader stands. On a fold's toggle - where a pin into a closed fold
+   *  leaves focus - that is the toggle's place between the rows, so `j` goes on to the first row
+   *  shown after it and `k` to the last one before it, rather than to either end of the list. */
+  const step = (delta: 1 | -1) => {
+    const shown = rows();
+    const fold = closestMatching(document.activeElement, AGENT_FOLD_SELECTOR);
+    if (fold === null) {
+      roveFocus(shown, closestMatching(document.activeElement, AGENT_ROW_SELECTOR), delta);
+      return;
+    }
+    const before = shown.filter(
+      (row) => (row.compareDocumentPosition(fold) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0
+    );
+    (delta === 1 ? shown[before.length] : before.at(-1))?.focus();
+  };
   // Both actions that live inside a row's details open it first; the details render in the click's
   // own commit, so the control they want exists on the next frame.
   const inOpenRow = (act: (row: HTMLElement) => void) => {
@@ -69,18 +101,22 @@ export function useAgentsKeymap(listRef: RefObject<HTMLElement | null>): void {
   };
   useKeymapScope("agents");
   useKeymap("agents", [
+    // Movement and marking walk the list with the row in hand; a palette row for either helps
+    // nobody.
     {
       id: "next",
       keys: "j",
       label: "Next agent",
-      run: () => roveFocus(rows(), closestMatching(document.activeElement, AGENT_ROW_SELECTOR), 1),
+      palette: false,
+      run: () => step(1),
       when: () => rows().length > 0,
     },
     {
       id: "previous",
       keys: "k",
       label: "Previous agent",
-      run: () => roveFocus(rows(), closestMatching(document.activeElement, AGENT_ROW_SELECTOR), -1),
+      palette: false,
+      run: () => step(-1),
       when: () => rows().length > 0,
     },
     {
@@ -97,11 +133,29 @@ export function useAgentsKeymap(listRef: RefObject<HTMLElement | null>): void {
       id: "issue-picker",
       keys: "i",
       label: "Pick an issue for the message",
-      // The picker takes focus itself once its list lands (`AgentsPage.tsx`'s `issueSelect`), so
-      // the key that opens it leaves the reader inside it, where the arrows choose an issue and
-      // Escape is the control's own way out.
-      run: () => inOpenRow((row) => row.querySelector<HTMLElement>(ISSUE_PICKER_SELECTOR)?.click()),
-      when: () => focusedAgentRow()?.hasAttribute("data-agent-can-pick-issue") === true,
+      // The picker takes focus itself once its list lands (`AgentMessageComposer.tsx`'s
+      // `issueSelect`), so the key that opens it leaves the reader inside it, where the arrows
+      // choose an issue and Escape is the control's own way out. It opens rather than toggles:
+      // a picker left open when the row collapsed is still open, so the key goes into its select
+      // instead of clicking it shut. A row not yet opened has no picker at all and a collapsed
+      // one's is hidden, so the row says whether one can open; an open row's picker is disabled
+      // while its message is in flight.
+      run: () =>
+        inOpenRow((row) => {
+          const toggle = row.querySelector<HTMLElement>(ISSUE_PICKER_SELECTOR);
+          if (toggle?.getAttribute("aria-expanded") === "true") {
+            row.querySelector<HTMLElement>(ISSUE_SELECT_SELECTOR)?.focus();
+            return;
+          }
+          toggle?.click();
+        }),
+      when: () => {
+        const row = focusedAgentRow();
+        return (
+          row?.hasAttribute("data-agent-can-pick-issue") === true &&
+          row.querySelector<HTMLButtonElement>(ISSUE_PICKER_SELECTOR)?.disabled !== true
+        );
+      },
     },
     {
       id: "pin",
@@ -114,6 +168,7 @@ export function useAgentsKeymap(listRef: RefObject<HTMLElement | null>): void {
       id: "select",
       keys: "x",
       label: "Select or deselect the focused agent",
+      palette: false,
       run: () => focusedAgentRow()?.querySelector<HTMLElement>("[data-agent-select]")?.click(),
       when: () => focusedAgentRow() !== null,
     },

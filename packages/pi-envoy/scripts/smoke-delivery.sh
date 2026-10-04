@@ -132,9 +132,9 @@ send_prompt() {
 
 # Polls the role endpoint until it is claimed. A `send-keys ... Enter`
 # occasionally races the compose box's own render and is swallowed with no
-# visible effect (reproduced live while building this script), so this
-# resends Enter for as long as the unsent text is still visibly sitting
-# there, instead of waiting out the whole timeout to discover that.
+# visible effect, so this resends Enter for as long as the unsent text is
+# still visibly sitting there, instead of waiting out the whole timeout to
+# discover that.
 wait_for_role_claim() {
   local start=$SECONDS remaining request_timeout status
   while true; do

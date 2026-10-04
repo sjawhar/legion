@@ -73,11 +73,11 @@ func record(t *testing.T, records []map[string]any, msg string) map[string]any {
 	return found[0]
 }
 
-// A cache's warm-up says what it cost and how it ended. A listener restart is 17-25 s of no
-// deliveries on the on-prem machines (LEGION-374) and nothing in its log said where that went: the
-// interest bucket carries ~41,833 delete markers behind 40 live keys, and every warm-up streams
-// them all. The two counts are disjoint, like the role restore line's: entries are the live keys
-// the scan delivered, delete_markers what it streamed past to find them.
+// A cache's warm-up says what it cost and how it ended: an interest bucket can carry tens of
+// thousands of delete markers behind a few live keys, every warm-up streams them all, and the
+// restart's log has to say where that time went (LEGION-374). The two counts are disjoint, like
+// the role restore line's: entries are the live keys the scan delivered, delete_markers what it
+// streamed past to find them.
 func TestAWarmUpLogsWhatItStreamedAndThatItCompleted(t *testing.T) {
 	uri := testnats.URL(t)
 	_, kv := bucket(t, uri)

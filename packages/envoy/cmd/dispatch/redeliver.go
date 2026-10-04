@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"os"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -44,7 +43,7 @@ func webhookSweeper(natsClient *bus.Client, app *auth.AppConfig, apiBase string)
 // redeliverWebhooks is the operator command over the same sweep: it lists the App webhook's
 // failed deliveries since --since and, unless --dry-run, redelivers them under the running
 // sweep's rules and records. It leaves the running sweep's cursor alone.
-func redeliverWebhooks(ctx context.Context, args []string, out io.Writer) int {
+func redeliverWebhooks(ctx context.Context, args []string, env settingValues, out io.Writer) int {
 	flags := flag.NewFlagSet("redeliver-webhooks", flag.ContinueOnError)
 	flags.SetOutput(out)
 	since := flags.Duration("since", 0, "list failed deliveries this far back (GitHub keeps 72h)")
@@ -56,12 +55,12 @@ func redeliverWebhooks(ctx context.Context, args []string, out io.Writer) int {
 		fmt.Fprintln(out, "redeliver-webhooks: --since is required, for example --since 72h")
 		return 2
 	}
-	envoyConfig, err := config.Load(config.LoadOptions{})
+	envoyConfig, err := loadEnvoyConfig(env, config.LoadOptions{})
 	if err != nil {
 		fmt.Fprintf(out, "redeliver-webhooks: load envoy config: %v\n", err)
 		return 1
 	}
-	natsClient, err := bus.Connect(envoyConfig.NatsURLs)
+	natsClient, err := bus.Connect(envoyConfig.NatsURLs, bus.WithEnvironment(env.lookup))
 	if err != nil {
 		fmt.Fprintf(out, "redeliver-webhooks: connect NATS: %v\n", err)
 		return 1
@@ -72,12 +71,12 @@ func redeliverWebhooks(ctx context.Context, args []string, out io.Writer) int {
 		fmt.Fprintf(out, "redeliver-webhooks: resolve data dir: %v\n", err)
 		return 1
 	}
-	app, _, err := loadAppCredentials(dataDir)
+	app, _, err := loadAppCredentials(env, dataDir)
 	if err != nil {
 		fmt.Fprintf(out, "redeliver-webhooks: load app credentials: %v\n", err)
 		return 1
 	}
-	sweeper, err := webhookSweeper(natsClient, app, strings.TrimSpace(os.Getenv("DISPATCH_GITHUB_API_BASE")))
+	sweeper, err := webhookSweeper(natsClient, app, strings.TrimSpace(env.get("DISPATCH_GITHUB_API_BASE")))
 	if err != nil {
 		fmt.Fprintf(out, "redeliver-webhooks: %v\n", err)
 		return 1

@@ -57,6 +57,7 @@ import { actorLabel } from "../refs/actor";
 import { CopyRefButton } from "../refs/CopyRefButton";
 import { ReferencedBy, ReferencedByToggle } from "../refs/ReferencedBy";
 import { buildDispatchReference, buildIssuePath } from "../refs/routes";
+import { useKeymap } from "../shell/keymap";
 import { AssigneeControl } from "./AssigneeControl";
 import { ClaimChip } from "./ClaimChip";
 import { GitHubLink } from "./GitHubLink";
@@ -82,8 +83,8 @@ export function IssueHeader({
   documentArtifact: Artifact | undefined;
   isClosed: boolean;
   issue: IssueDetails;
-  /** The page's one priority write, shared with the keyboard's `0`–`3`, so a refusal of
-   *  either is reported once and by this header. */
+  /** The page's one priority write, shared with the keyboard's `0`–`3` and the palette's Set
+   *  priority rows, so a refusal of any of them is reported once and by this header. */
   priorityWrite: IssuePriorityWrite;
   state: UserIssueState;
 }): ReactNode {
@@ -184,6 +185,35 @@ export function IssueHeader({
     },
   });
   const drafts = useIssueDrafts(issue, updateIssue);
+  // Palette-only: closing and reopening an issue are too consequential for a single key, so they
+  // are reachable from `$mod+k` alone, through the same handlers and the same guards as the
+  // Close and Reopen buttons below. `IssuePage` pushes the `issue` scope these are offered under.
+  useKeymap("issue", [
+    {
+      id: "close",
+      keys: [],
+      label: "Close issue",
+      run: () => drafts.requestStatusSubmit("done"),
+      // `disabled={updateIssue.isPending}` on the button, and `isClosed` decides whether it is
+      // rendered at all; a row offered while the write is in flight would submit a second one.
+      when: () => !isClosed && !updateIssue.isPending,
+    },
+    {
+      id: "reopen",
+      keys: [],
+      label: "Reopen issue",
+      run: () => drafts.requestStatusSubmit("backlog"),
+      when: () => isClosed && !updateIssue.isPending,
+    },
+    ...([0, 1, 2, 3] as const).map((level) => ({
+      id: `set-p${level}`,
+      keys: [],
+      label: `Set priority P${level}`,
+      run: () => priorityWrite.submit(level),
+      // The same condition as `PriorityEditor`'s `disabled` below.
+      when: () => !(isClosed || updateIssue.isPending),
+    })),
+  ]);
   const statusSaving = updateIssue.isPending && updateIssue.variables?.status !== undefined;
   const pendingStatus = statusSaving ? updateIssue.variables?.status : undefined;
   const selectableStatuses = isClosed ? issueStatuses : openIssueStatuses;

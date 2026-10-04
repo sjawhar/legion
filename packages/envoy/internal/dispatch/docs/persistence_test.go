@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"sync"
 	"testing"
@@ -18,6 +19,12 @@ import (
 func TestMain(m *testing.M) { os.Exit(storetest.Main(m)) }
 
 func createDocument(t *testing.T, database *store.Store, markdown string) string {
+	t.Helper()
+	return createIssueDocument(t, database, 1, markdown)
+}
+
+// createIssueDocument creates a document on issue DOC-<number>, creating the issue if need be.
+func createIssueDocument(t *testing.T, database *store.Store, number int, markdown string) string {
 	t.Helper()
 	tree, err := pmdoc.Parse(markdown)
 	if err != nil {
@@ -39,19 +46,20 @@ func createDocument(t *testing.T, database *store.Store, markdown string) string
 	`); err != nil {
 		t.Fatalf("create test project: %v", err)
 	}
+	issueKey := fmt.Sprintf("DOC-%d", number)
 	if _, err := tx.Exec(ctx, `
 		insert into issues (key, project_key, number, title, created_by, rank)
-		values ('DOC-1', 'DOC', 1, 'Document', '{"kind":"user","id":"alice"}', 'U')
+		values ($1, 'DOC', $2, 'Document', '{"kind":"user","id":"alice"}', 'U')
 		on conflict (key) do nothing
-	`); err != nil {
+	`, issueKey, number); err != nil {
 		t.Fatalf("create test issue: %v", err)
 	}
 	var artifactID string
 	if err := tx.QueryRow(ctx, `
 		insert into artifacts (issue_key, project_key, slug, name, kind, is_primary, created_by)
-		values ('DOC-1', 'DOC', $1, 'document.md', 'doc', false, '{"kind":"user","id":"alice"}')
+		values ($1, 'DOC', $2, 'document.md', 'doc', false, '{"kind":"user","id":"alice"}')
 		returning id::text
-	`, "document-"+genRandomSuffix(t)).Scan(&artifactID); err != nil {
+	`, issueKey, "document-"+genRandomSuffix(t)).Scan(&artifactID); err != nil {
 		t.Fatalf("create test artifact: %v", err)
 	}
 	if _, err := tx.Exec(ctx, `

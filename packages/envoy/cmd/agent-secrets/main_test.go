@@ -7,12 +7,14 @@ package main
 
 import (
 	"bufio"
+	"crypto/ecdsa"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -47,13 +49,15 @@ func buildAgentSecrets(t *testing.T) string {
 
 // brokerCounters records how many times fakeBroker served each route, so a test can assert on
 // call counts (e.g. "no second ask", "never entered the polling loop") instead of only on the
-// final observable outcome, plus (guarded by mu) the last session_id POST /v1/requests recorded.
+// final observable outcome, plus (guarded by mu) the last session_id POST /v1/requests recorded
+// and the gate a test may hold the pending request's status polls behind.
 type brokerCounters struct {
 	createRequest int32
 	getRequest    int32
 
 	mu            sync.Mutex
 	lastSessionID string
+	pendingPoll   chan struct{}
 }
 
 func (c *brokerCounters) sessionID() string {
@@ -62,15 +66,22 @@ func (c *brokerCounters) sessionID() string {
 	return c.lastSessionID
 }
 
-// fakeBroker serves just enough of the AGENTC-393 contract (v9) for the exec-form and --json
+// holdPendingPolls makes GET /v1/requests/req-pending wait until gate is closed.
+func (c *brokerCounters) holdPendingPolls(gate chan struct{}) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.pendingPoll = gate
+}
+
+// fakeBroker serves just enough of the broker's HTTP API for the exec-form and --json
 // tests: POST /v1/requests decodes the signed request object CreateRequest posts (verifying it
 // with record.VerifyRequestObject against the fake's own URL as audience — a real, non-stubbed
 // check, since the wire shape under test IS that signed object) and routes on its first
-// authorization_detail's identifier to a canned granted/pending/denied/proxy-only/no-trailing-
+// authorization_detail's identifier to a canned granted/pending/denied/unreleased/no-trailing-
 // newline response, GET /v1/requests/{id} answers the pending case's own request id with the
 // same never-resolving pending state (and 404s any other id, since a granted-or-denied-
 // immediately response must never be polled), POST /v1/grants/{id}/values releases one canned
-// value (or, for the proxy-only case, none at all), and GET /v1/enrollments/self echoes
+// value (or, for the unreleased case, none at all), and GET /v1/enrollments/self echoes
 // testEnrollmentID. It does not verify the outer Proof header at all — proof.Verifier's own
 // behavior is covered by internal/broker/proof and internal/broker/api's test suites, not this
 // package's.
@@ -103,33 +114,33 @@ func fakeBroker(t *testing.T) (*httptest.Server, *brokerCounters) {
 		case "GRANT_ME":
 			writeJSON(w, map[string]any{
 				"request_id": "req-granted", "state": "granted",
-				"secrets":  []map[string]string{{"name": name, "decision": "automatic", "delivery": "inject"}},
+				"secrets":  []map[string]string{{"name": name, "decision": "automatic"}},
 				"grant_id": "grant-granted", "record_id": nil,
 			})
 		case "PENDING_ME":
 			writeJSON(w, map[string]any{
 				"request_id": "req-pending", "state": "pending",
-				"secrets":  []map[string]string{{"name": name, "decision": "approval", "delivery": "inject"}},
+				"secrets":  []map[string]string{{"name": name, "decision": "approval"}},
 				"grant_id": nil, "record_id": "rec-pending-1",
 			})
 		case "DENY_ME":
 			writeJSON(w, map[string]any{
 				"request_id": "req-denied", "state": "denied",
-				"secrets":  []map[string]string{{"name": name, "decision": "deny", "delivery": "inject"}},
+				"secrets":  []map[string]string{{"name": name, "decision": "deny"}},
 				"grant_id": nil, "record_id": nil,
 			})
-		case "PROXY_ME":
+		case "UNRELEASED_ME":
 			writeJSON(w, map[string]any{
-				"request_id": "req-proxy", "state": "granted",
-				"secrets":  []map[string]string{{"name": name, "decision": "automatic", "delivery": "proxy"}},
-				"grant_id": "grant-proxy", "record_id": nil,
+				"request_id": "req-unreleased", "state": "granted",
+				"secrets":  []map[string]string{{"name": name, "decision": "automatic"}},
+				"grant_id": "grant-unreleased", "record_id": nil,
 			})
 		case "NONEWLINE_ME":
 			// Written with http.ResponseWriter.Write directly, with NO trailing newline, unlike
 			// every other case (which goes through writeJSON's json.Encoder, always "\n"
 			// terminated) — this is the fixture for the writeVerbatim byte-exact test.
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"request_id":"req-nonewline","state":"granted","secrets":[{"name":"NONEWLINE_ME","decision":"automatic","delivery":"inject"}],"grant_id":"grant-nonewline","record_id":null}`))
+			_, _ = w.Write([]byte(`{"request_id":"req-nonewline","state":"granted","secrets":[{"name":"NONEWLINE_ME","decision":"automatic"}],"grant_id":"grant-nonewline","record_id":null}`))
 		default:
 			w.WriteHeader(http.StatusBadRequest)
 		}
@@ -143,32 +154,39 @@ func fakeBroker(t *testing.T) (*httptest.Server, *brokerCounters) {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
+		counters.mu.Lock()
+		gate := counters.pendingPoll
+		counters.mu.Unlock()
+		if gate != nil {
+			select {
+			case <-gate:
+			case <-r.Context().Done():
+				return
+			}
+		}
 		writeJSON(w, map[string]any{"state": "pending", "grant_id": nil, "record_id": "rec-pending-1", "decided_at": nil, "decision": nil})
 	})
 	mux.HandleFunc("POST /v1/grants/grant-granted/values", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{
 			"values":     map[string]string{"GRANT_ME": "topsecretvalue123"},
 			"expires_at": time.Now().Add(time.Hour),
-			"proxy_only": []string{},
 		})
 	})
-	mux.HandleFunc("POST /v1/grants/grant-proxy/values", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /v1/grants/grant-unreleased/values", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{
 			"values":     map[string]string{},
 			"expires_at": time.Now().Add(time.Hour),
-			"proxy_only": []string{"PROXY_ME"},
 		})
 	})
 	mux.HandleFunc("POST /v1/grants/grant-nonewline/values", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{
 			"values":     map[string]string{"NONEWLINE_ME": "irrelevant"},
 			"expires_at": time.Now().Add(time.Hour),
-			"proxy_only": []string{},
 		})
 	})
 	mux.HandleFunc("GET /v1/enrollments/self", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{
-			"enrollment_id": testEnrollmentID, "kind": "box", "operator": "sjawhar",
+			"enrollment_id": testEnrollmentID, "kind": "box", "operator": "ada@example.com",
 			"lease_expires_at": time.Now().Add(time.Hour), "grants": []any{},
 		})
 	})
@@ -188,11 +206,17 @@ func writeJSON(w http.ResponseWriter, v any) {
 // subcommand.
 func newKeyDir(t *testing.T) string {
 	t.Helper()
-	dir := t.TempDir()
 	key, err := proof.NewKey()
 	if err != nil {
 		t.Fatalf("proof.NewKey: %v", err)
 	}
+	return writeKeyDir(t, key, testEnrollmentID)
+}
+
+// writeKeyDir writes key as key.pem and enrollmentID as the enrollment file into a new key dir.
+func writeKeyDir(t *testing.T, key *ecdsa.PrivateKey, enrollmentID string) string {
+	t.Helper()
+	dir := t.TempDir()
 	der, err := x509.MarshalPKCS8PrivateKey(key)
 	if err != nil {
 		t.Fatalf("MarshalPKCS8PrivateKey: %v", err)
@@ -201,7 +225,7 @@ func newKeyDir(t *testing.T) string {
 	if err := os.WriteFile(filepath.Join(dir, "key.pem"), pemBytes, 0o600); err != nil {
 		t.Fatalf("write key.pem: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "enrollment"), []byte(testEnrollmentID+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "enrollment"), []byte(enrollmentID+"\n"), 0o600); err != nil {
 		t.Fatalf("write enrollment: %v", err)
 	}
 	return dir
@@ -297,22 +321,79 @@ func TestExecFormGrantRunsChildWithValueInEnvironment(t *testing.T) {
 	}
 }
 
+// TestExecFormPendingExitsSeventyFiveWithNoChild also pins what the wait says, and that it says it
+// before it waits: the request id and the bound, and where to decide it — the record's Dispatch
+// page under AGENT_SECRETS_APPROVE_URL, or the Inbox when that is unset. The fake broker holds the
+// first status poll until the test has read those two lines from the command's stderr, so lines
+// printed only once the wait ends never arrive in time.
 func TestExecFormPendingExitsSeventyFiveWithNoChild(t *testing.T) {
 	binary := buildAgentSecrets(t)
-	broker, _ := fakeBroker(t)
+	broker, counters := fakeBroker(t)
 	defer broker.Close()
 	keyDir := newKeyDir(t)
 
-	stdout, stderr, exit := runAgentSecrets(t, binary, broker.URL, keyDir, nil,
-		"PENDING_ME", "--wait", "200ms", "--", "sh", "-c", "echo ran-the-child")
-	if exit != exitPending {
-		t.Fatalf("exit = %d, want %d (pending): stdout=%q stderr=%q", exit, exitPending, stdout, stderr)
-	}
-	if strings.Contains(stdout, "ran-the-child") {
-		t.Fatalf("child ran while request was still pending: stdout=%q", stdout)
-	}
-	if !strings.Contains(stderr, "agent-secrets status req-pending") {
-		t.Fatalf("stderr = %q, want the request id and the status command to check it", stderr)
+	for _, tc := range []struct {
+		name, approveURL, where string
+	}{
+		{"inbox", "", "agent-secrets: approve or deny it under Credential requests in the Dispatch Inbox\n"},
+		{"record page", "https://dispatch.example/", "agent-secrets: approve or deny it at https://dispatch.example/credentials/rec-pending-1\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			announced := make(chan struct{})
+			counters.holdPendingPolls(announced)
+			released := false
+			release := func() {
+				if !released {
+					released = true
+					close(announced)
+				}
+			}
+			defer release()
+
+			cmd := exec.Command(binary, "PENDING_ME", "--wait", "200ms", "--", "sh", "-c", "echo ran-the-child")
+			cmd.Env = append(os.Environ(), "AGENT_SECRETS_URL="+broker.URL, "AGENT_SECRETS_KEY_DIR="+keyDir,
+				"AGENT_SECRETS_APPROVE_URL="+tc.approveURL)
+			var stdout strings.Builder
+			cmd.Stdout = &stdout
+			pipe, err := cmd.StderrPipe()
+			if err != nil {
+				t.Fatalf("stderr pipe: %v", err)
+			}
+			if err := cmd.Start(); err != nil {
+				t.Fatalf("start agent-secrets: %v", err)
+			}
+			stderr := bufio.NewReader(pipe)
+			lines := make(chan string, 1)
+			go func() {
+				first, _ := stderr.ReadString('\n')
+				second, _ := stderr.ReadString('\n')
+				lines <- first + second
+			}()
+			want := "agent-secrets: request req-pending is waiting for approval; waiting up to 200ms\n" + tc.where
+			select {
+			case got := <-lines:
+				if got != want {
+					t.Errorf("stderr began %q, want %q", got, want)
+				}
+			case <-time.After(10 * time.Second):
+				release()
+				t.Errorf("stderr said nothing within 10s while the status poll was held, and %q once it returned; want %q before the wait",
+					<-lines, want)
+			}
+			release()
+			rest, _ := io.ReadAll(stderr)
+			err = cmd.Wait()
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) || exitErr.ExitCode() != exitPending {
+				t.Fatalf("exit = %v, want %d (pending): stdout=%q stderr=%q", err, exitPending, stdout.String(), rest)
+			}
+			if strings.Contains(stdout.String(), "ran-the-child") {
+				t.Fatalf("child ran while request was still pending: stdout=%q", stdout.String())
+			}
+			if !strings.Contains(string(rest), "agent-secrets status req-pending") {
+				t.Fatalf("stderr = %q, want the request id and the status command to check it", rest)
+			}
+		})
 	}
 }
 
@@ -374,30 +455,51 @@ func TestTopLevelHelpExitsZero(t *testing.T) {
 	}
 }
 
-// TestExecFormRefusesToRunWhenAGrantedNameIsProxyOnly is the regression for the review's
-// Important finding 3: a granted request whose delivery is "proxy" (or otherwise missing from
-// the grant's values) must never exec — a proxy-only secret has no value for the CLI to release
-// into the child's environment at all, and silently execing without it would be a silent partial
-// grant.
-func TestExecFormRefusesToRunWhenAGrantedNameIsProxyOnly(t *testing.T) {
+// TestEveryFormAnswersHelp pins that each form usage lists answers -h with its own synopsis and
+// exit 0, flags or none, before it needs a broker, a key or a helper; the docs site's CLI
+// reference is built from these answers.
+func TestEveryFormAnswersHelp(t *testing.T) {
+	binary := buildAgentSecrets(t)
+	for _, c := range commands {
+		if c.name == "--version" {
+			continue
+		}
+		args := append(strings.Fields(c.name), "-h")
+		if c.name == "" {
+			args = []string{"NAME", "-h", "--", "true"}
+		}
+		_, stderr, exit := runAgentSecrets(t, binary, "http://unused", t.TempDir(), nil, args...)
+		if exit != 0 {
+			t.Fatalf("agent-secrets %s: exit = %d, want 0: %s", strings.Join(args, " "), exit, stderr)
+		}
+		if !strings.Contains(stderr, "usage: "+c.synopsis) {
+			t.Fatalf("agent-secrets %s: stderr = %q, want its synopsis %q", strings.Join(args, " "), stderr, c.synopsis)
+		}
+	}
+}
+
+// TestExecFormRefusesToRunWhenAGrantedNameHasNoValue is the regression for the review's Important
+// finding 3: a granted request whose values come back without one of its names must never exec,
+// since silently execing without it would be a silent partial grant.
+func TestExecFormRefusesToRunWhenAGrantedNameHasNoValue(t *testing.T) {
 	binary := buildAgentSecrets(t)
 	broker, _ := fakeBroker(t)
 	defer broker.Close()
 	keyDir := newKeyDir(t)
 
 	stdout, stderr, exit := runAgentSecrets(t, binary, broker.URL, keyDir, nil,
-		"PROXY_ME", "--", "sh", "-c", "echo ran-the-child")
+		"UNRELEASED_ME", "--", "sh", "-c", "echo ran-the-child")
 	if exit == 0 {
-		t.Fatalf("exit = 0, want a nonzero refusal for a proxy-only grant: stdout=%q stderr=%q", stdout, stderr)
+		t.Fatalf("exit = 0, want a nonzero refusal for a grant with no value: stdout=%q stderr=%q", stdout, stderr)
 	}
 	if exit == exitPending || exit == exitDenied {
 		t.Fatalf("exit = %d, want a plain operational refusal (not 75/76/77): stdout=%q stderr=%q", exit, stdout, stderr)
 	}
 	if strings.Contains(stdout, "ran-the-child") {
-		t.Fatalf("child ran despite a proxy-only (unreleased) secret: stdout=%q", stdout)
+		t.Fatalf("child ran despite an unreleased secret: stdout=%q", stdout)
 	}
-	if !strings.Contains(stderr, "PROXY_ME") {
-		t.Fatalf("stderr should name the missing secret PROXY_ME: %q", stderr)
+	if !strings.Contains(stderr, "UNRELEASED_ME") {
+		t.Fatalf("stderr should name the missing secret UNRELEASED_ME: %q", stderr)
 	}
 }
 
@@ -427,7 +529,7 @@ func TestExecFormDoesNotLetInheritedEnvShadowAGrantedValue(t *testing.T) {
 
 // TestExecFormSecondInvocationReusesGrantTransparently proves cmd/agent-secrets needs no
 // client-side change to benefit from Machine.Create's server-side grant reuse (the review's
-// Critical finding, fixed in requests/machine.go): running the exec form twice for the same
+// Critical finding; requests/machine.go): running the exec form twice for the same
 // already-granted secret name must both times grant immediately, and — critically — must never
 // poll GET /v1/requests/{id} (proof that neither invocation ever entered the pending-wait loop,
 // whether the broker minted the grant fresh or handed back a reused one).
@@ -673,7 +775,7 @@ func TestRequestJSONIsByteIdenticalToTheBrokerResponse(t *testing.T) {
 	defer broker.Close()
 	keyDir := newKeyDir(t)
 
-	const wantExact = `{"request_id":"req-nonewline","state":"granted","secrets":[{"name":"NONEWLINE_ME","decision":"automatic","delivery":"inject"}],"grant_id":"grant-nonewline","record_id":null}`
+	const wantExact = `{"request_id":"req-nonewline","state":"granted","secrets":[{"name":"NONEWLINE_ME","decision":"automatic"}],"grant_id":"grant-nonewline","record_id":null}`
 	stdout, stderr, exit := runAgentSecrets(t, binary, broker.URL, keyDir, nil, "request", "NONEWLINE_ME", "--json")
 	if exit != 0 {
 		t.Fatalf("exit = %d, want 0: stdout=%q stderr=%q", exit, stdout, stderr)
@@ -703,7 +805,7 @@ func TestSelfJSONPrintsExactlyOneContractObjectNamingTheIssuedEnrollment(t *test
 	}
 }
 
-// TestRequestSignsARequestObject pins contract v9's core wire-shape change: POST /v1/requests
+// TestRequestSignsARequestObject pins the broker's request shape: POST /v1/requests
 // posts a signed request object (record.Sign, via Signer.SignRequestObject) instead of plain
 // top-level "secrets"/"reason"/"issue" fields. The fake broker asserts the body is exactly
 // {"request": <jws>, "session_id": null}, verifies the JWS with record.VerifyRequestObject
@@ -737,7 +839,7 @@ func TestRequestSignsARequestObject(t *testing.T) {
 		mu.Unlock()
 		writeJSON(w, map[string]any{
 			"request_id": "req-signed", "state": "granted",
-			"secrets":  []map[string]string{{"name": "GRANT_ME", "decision": "automatic", "delivery": "inject"}},
+			"secrets":  []map[string]string{{"name": "GRANT_ME", "decision": "automatic"}},
 			"grant_id": "grant-signed", "record_id": nil,
 		})
 	})
@@ -864,38 +966,81 @@ func TestLauncherLoginExitsOneOnDenied(t *testing.T) {
 	}
 }
 
-// TestLauncherLoginStatusPrintsStateAndExitsZeroOnlyWhenIssued pins login-status's read-only,
-// single-shot contract (AGENTC-834): it prints the bare state on stdout and its exit code is a
-// liveness probe — 0 only for "issued", 1 for every other terminal/pending state and for "none"
-// when login was never run (empty LoginState) — with a single helper call, never login's
-// mint-a-fresh-key-and-poll side effect. Every state with no credential and no login in flight
-// (never logged in, denied, or expired, which is also what a credential the broker rejected
-// becomes) says on stderr to run the login again.
-func TestLauncherLoginStatusPrintsStateAndExitsZeroOnlyWhenIssued(t *testing.T) {
+// TestLauncherLoginStatusExitsZeroOnlyWhileACredentialIsHeld pins login-status's read-only,
+// single-shot contract: it prints a bare state on stdout and its exit code is a
+// liveness probe — 0, printing "issued", while the helper holds a launcher credential, and 1 for
+// every login state with none, "none" when login was never run (empty LoginState) — with a single
+// helper call, never login's mint-a-fresh-key-and-poll side effect. A re-login still pending or
+// expired unapproved beside a held credential prints "issued" and names that login on stderr; a
+// helper from before credential_held sends "issued" alone exactly while it holds one. Every held
+// credential's answer ends with when it expires, or that the helper cannot say. Every state with
+// no credential and no login in flight (never logged in, denied, or expired, which is also what a
+// credential the broker rejected becomes) says on stderr to run the login again, and a login in
+// flight outranks a refused credential.
+func TestLauncherLoginStatusExitsZeroOnlyWhileACredentialIsHeld(t *testing.T) {
 	binary := buildAgentSecrets(t)
+	const held = "the helper still holds the launcher credential an earlier login issued"
+	const prefix = "agent-secrets launcher login-status: "
+	const unknown = prefix + "the helper does not know when the launcher credential expires (it, or its broker, is older than this client)\n"
+	expiresAt := time.Now().Add(50 * time.Hour).UTC().Format(time.RFC3339)
 	for _, tc := range []struct {
-		state  string
+		name   string
+		resp   helper.Response
 		want   string
 		exit   int
 		remedy bool
+		stderr string // the whole of stderr, when the case pins it
 	}{
-		{"issued", "issued\n", 0, false},
-		{"pending", "pending\n", 1, false},
-		{"denied", "denied\n", 1, true},
-		{"expired", "expired\n", 1, true},
-		{"", "none\n", 1, true},
+		{name: "issued", resp: helper.Response{LoginState: "issued"}, want: "issued\n", stderr: unknown},
+		{name: "issued with its expiry", resp: helper.Response{LoginState: "issued", CredentialHeld: true, CredentialExpiresAt: expiresAt}, want: "issued\n",
+			stderr: prefix + "the launcher credential expires at " + expiresAt + " (in 2d1h59m); the broker has no renewal, so a new machine login a human approves must replace it before then\n"},
+		{name: "pending", resp: helper.Response{LoginState: "pending"}, want: "pending\n", exit: 1},
+		{name: "denied", resp: helper.Response{LoginState: "denied"}, want: "denied\n", exit: 1, remedy: true},
+		{name: "expired", resp: helper.Response{LoginState: "expired"}, want: "expired\n", exit: 1, remedy: true},
+		{name: "none", resp: helper.Response{}, want: "none\n", exit: 1, remedy: true},
+		{name: "pending beside a refused credential", resp: helper.Response{LoginState: "pending", LoginRefused: true}, want: "pending\n", exit: 1},
+		{name: "pending beside a held credential", resp: helper.Response{LoginState: "pending", CredentialHeld: true}, want: "issued\n",
+			stderr: prefix + "a machine login is waiting for approval (code KQ7M-X4PZ); " + held + "\n" + unknown},
+		{name: "expired beside a held credential", resp: helper.Response{LoginState: "expired", CredentialHeld: true}, want: "issued\n",
+			stderr: prefix + "the most recent machine login (code KQ7M-X4PZ) expired before anyone approved it; " + held + "\n" + unknown},
 	} {
-		t.Run(tc.state, func(t *testing.T) {
-			sock := fakeLoginHelper(t, "KQ7M-X4PZ", []string{tc.state})
+		t.Run(tc.name, func(t *testing.T) {
+			tc.resp.OK, tc.resp.Code = true, "KQ7M-X4PZ"
+			sock, reqs := fakeHelper(t, tc.resp)
 			stdout, stderr, exit := runAgentSecrets(t, binary, "http://unused", t.TempDir(),
 				[]string{"AGENT_SECRETS_HELPER_SOCK=" + sock}, "launcher", "login-status")
 			if exit != tc.exit || stdout != tc.want {
-				t.Fatalf("state %q: exit = %d stdout = %q, want exit %d stdout %q (stderr=%q)", tc.state, exit, stdout, tc.exit, tc.want, stderr)
+				t.Fatalf("exit = %d stdout = %q, want exit %d stdout %q (stderr=%q)", exit, stdout, tc.exit, tc.want, stderr)
 			}
 			if got := strings.Contains(stderr, "run: agent-secrets launcher login"); got != tc.remedy {
-				t.Fatalf("state %q: stderr = %q, want the login remedy: %v", tc.state, stderr, tc.remedy)
+				t.Fatalf("stderr = %q, want the login remedy: %v", stderr, tc.remedy)
+			}
+			if tc.stderr != "" && stderr != tc.stderr {
+				t.Fatalf("stderr = %q, want %q", stderr, tc.stderr)
+			}
+			if req := <-reqs; req.Op != "login-status" || len(reqs) != 0 {
+				t.Fatalf("helper calls: first %q, %d more; want one login-status", req.Op, len(reqs))
 			}
 		})
+	}
+}
+
+// TestCredentialExpiryLine: login-status's expiry line rounds to the minute with days, names a
+// credential already past its expiry (the helper has not dropped it yet) with the login remedy,
+// and says plainly when the helper's answer carries no expiry or one it cannot read.
+func TestCredentialExpiryLine(t *testing.T) {
+	now := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
+	for _, tc := range []struct{ expiresAt, want string }{
+		{"2026-10-10T11:59:30Z", "the launcher credential expires at 2026-10-10T11:59:30Z (in 6d23h59m); the broker has no renewal, so a new machine login a human approves must replace it before then"},
+		{"2026-10-03T15:05:00Z", "the launcher credential expires at 2026-10-03T15:05:00Z (in 3h5m); the broker has no renewal, so a new machine login a human approves must replace it before then"},
+		{"2026-10-03T12:00:40Z", "the launcher credential expires at 2026-10-03T12:00:40Z (in 0m); the broker has no renewal, so a new machine login a human approves must replace it before then"},
+		{"2026-10-03T12:00:00Z", "the launcher credential expired at 2026-10-03T12:00:00Z; run: agent-secrets launcher login"},
+		{"", "the helper does not know when the launcher credential expires (it, or its broker, is older than this client)"},
+		{"next tuesday", `the helper reported an unreadable launcher credential expiry "next tuesday"`},
+	} {
+		if got := credentialExpiry(tc.expiresAt, now); got != tc.want {
+			t.Errorf("credentialExpiry(%q) = %q, want %q", tc.expiresAt, got, tc.want)
+		}
 	}
 }
 

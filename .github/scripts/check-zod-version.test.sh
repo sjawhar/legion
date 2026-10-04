@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Tests for `check-zod-version.sh`: every manifest that declares zod names one exact version, the
-# excluded zod 3 manifest stays on zod 3, and the check says what it covered.
+# Tests for `check-zod-version.sh`: every manifest that declares zod names one exact version, and
+# the check says what it covered.
 #
 # Each case builds a miniature repository under a temporary directory and symlinks the real
 # script into it, so the script under test is the file CI runs.
@@ -19,7 +19,7 @@ trap 'rm -rf "$work"' EXIT
 source "$script_dir/test-lib.sh"
 
 # fixture <name>: a tree that passes — the root and two workspaces on zod 4.3.6 (one of them as a
-# devDependency), the daemon on zod 3, and a workspace that declares no zod. Echoes its root.
+# devDependency), and a workspace that declares no zod. Echoes its root.
 fixture() {
   local root="$work/$1"
   if [ -e "$root" ]; then
@@ -27,11 +27,11 @@ fixture() {
     return 1
   fi
   mkdir -p "$root/.github/scripts" "$root/packages/contracts" "$root/packages/pi-envoy" \
-    "$root/packages/daemon" "$root/packages/dispatch"
+    "$root/packages/dispatch"
   ln -s "$check_script" "$root/.github/scripts/check-zod-version.sh"
   cat > "$root/package.json" <<'JSON'
 {
-  "workspaces": ["packages/contracts", "packages/pi-envoy", "packages/daemon", "packages/dispatch"],
+  "workspaces": ["packages/contracts", "packages/pi-envoy", "packages/dispatch"],
   "dependencies": {
     "zod": "4.3.6"
   }
@@ -50,14 +50,6 @@ JSON
   "name": "@sjawhar/pi-legion-envoy",
   "devDependencies": {
     "zod": "4.3.6"
-  }
-}
-JSON
-  cat > "$root/packages/daemon/package.json" <<'JSON'
-{
-  "name": "@legion/daemon",
-  "dependencies": {
-    "zod": "^3.24.4"
   }
 }
 JSON
@@ -83,7 +75,7 @@ root=$(fixture green)
 run_check "$root"
 check "exits 0" "$(is "$status" 0)"
 check "says what it covered" \
-  "$(contains "$out" 'every zod declaration names 4.3.6 (3 across 5 manifests; packages/daemon/package.json excluded, on zod 3)')"
+  "$(contains "$out" 'every zod declaration names 4.3.6 (3 across 4 manifests)')"
 
 echo "case: a range in one manifest"
 ranges=("^4.3.6" "~4.3.6" "4" "4.x" ">=4.3.6" "latest")
@@ -157,18 +149,6 @@ sed -i 's|"packages/dispatch"\]|"packages/dispatch", "packages/newcomer"]|' "$ro
 run_check "$root"
 check "a range in it fails" "$(is "$status" 1)"
 check "names it" "$(contains "$out" 'packages/newcomer/package.json:4: dependencies name zod ^4.1.8')"
-
-echo "case: the excluded manifest must stay on zod 3"
-root=$(fixture daemon-exact-3)
-set_zod "$root/packages/daemon/package.json" "3.25.76"
-run_check "$root"
-check "an exact zod 3 in it passes" "$(is "$status" 0)"
-
-root=$(fixture daemon-on-4)
-set_zod "$root/packages/daemon/package.json" "4.3.6"
-run_check "$root"
-check "zod 4 in it fails, even at the shared version" "$(is "$status" 1)"
-check "asks for the exclusion to go" "$(contains "$out" 'remove it from EXCLUDED')"
 
 echo "case: nothing declares zod"
 root=$(fixture empty)

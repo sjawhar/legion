@@ -13,7 +13,7 @@ const seedKeys: { fromSeed(seed: Uint8Array): { getPublicKey(): string } } = nke
  * that is not a user nkey seed. Neither set is `{}`: the connection carries no credential, as
  * every connection did before servers required one. No error carries the seed. The Go clients
  * read the same two variables (`packages/envoy/internal/bus/nkey.go`,
- * `packages/daemon-go/internal/natsauth`). */
+ * `packages/daemon/internal/natsauth`). */
 export function natsAuthOptions(env: NodeJS.ProcessEnv): {
   readonly authenticator?: Authenticator;
 } {

@@ -1,5 +1,7 @@
 name: Tests
 
+# lint, typecheck and test are the checks main's ruleset requires, so they run on every pull request
+# with no path filter, and each covers the shipped daemon (packages/daemon, the Go `legion`).
 on:
   push:
     branches:
@@ -9,12 +11,25 @@ on:
   pull_request:
     types: [opened, reopened, synchronize]
 
+# Read-only: no job here writes to the repository, a registry or the API. The token clones and
+# downloads pinned tools; the `lint` job's own permissions block below additionally grants
+# `pull-requests: read`, the one job that reads a pull request's commits through the API
+# (check-pr-text.sh).
+permissions:
+  contents: read
+
 jobs:
   lint:
     runs-on: ubuntu-24.04
+    # The pull request text step also reads the pull request's commits through the API.
+    permissions:
+      contents: read
+      pull-requests: read
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
 
       # This workflow runs on every pull request with no path filter, so the pin check runs on
       # every change rather than only on one that touches a package.
@@ -30,74 +45,142 @@ jobs:
       - name: Check image triggers cover every image input
         run: .github/scripts/check-image-trigger-paths.sh
 
+      - name: Check every remote action is pinned to a commit SHA
+        run: .github/scripts/check-action-pins.sh
+
+      - name: Check no file names the private deployment repository, company, or internal host
+        run: .github/scripts/check-private-names.sh
+
+      # A pull request's title, body and commit messages reach main's squash commit, the
+      # generated release notes and GitHub's pages, so this required job checks them at every
+      # push. pr-title.yaml checks them again when the pull request is edited. A push to main or a
+      # merge-queue run carries no pull request.
+      - name: Check the pull request's title, body, branch name and commits name nothing private
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: .github/scripts/check-pr-text.sh
+
+      # No Go cache here: gofmt needs none, and this job, which ends first, would save a nearly
+      # empty one under the key the typecheck and test jobs share (the daemon's go.sum), where the
+      # first save is the one every later run restores.
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: packages/daemon/go.mod
+          cache: false
+
+      # The grant rig's daemon-pane.go belongs to no module (it runs with `go run -overlay` inside
+      # packages/daemon), so it is formatted here with the daemon.
+      - name: Check the Go daemon's formatting
+        run: |
+          unformatted=$(gofmt -l packages/daemon packages/pi-envoy/scripts/grant-rig/daemon-pane.go)
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt -l lists files that are not gofmt-formatted; run gofmt -w on them:"
+            echo "$unformatted"
+            exit 1
+          fi
+
       - name: Setup Bun
         uses: ./.github/actions/setup-bun
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - name: Lint daemon
-        run: bunx biome check --error-on-warnings src/
-        working-directory: packages/daemon
+      # A package's `bun run lint` checks only the paths its recipe names. This is the command
+      # AGENTS.md documents, over the whole tree, so a fixture, config or test file that Biome
+      # would rewrite fails here instead of on the next person who runs it.
+      - name: Check the whole tree with Biome
+        run: bunx biome check .
 
-      - name: Lint workspace
-        run: bunx biome check --error-on-warnings src/
-        working-directory: packages/workspace
+      # The notices step below builds go-licenses and loads every release binary's modules. It
+      # keeps them under a key of its own, apart from the one setup-go above leaves unsaved.
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+            ~/.cache/legion
+          key: go-notices-${{ runner.os }}-${{ hashFiles('go.work.sum', 'packages/daemon/go.sum', 'packages/envoy/go.sum', 'scripts/go-third-party-notices.sh') }}
+
+      # Every Go archive a release ships carries THIRD_PARTY_NOTICES, written at build time with
+      # the build's own GOOS, GOARCH and CGO_ENABLED (release.yaml's legion job and
+      # release-envoy-listener.yaml, whose targets .github/go-release-targets.json lists for all of
+      # them). Writing them here for each of those builds fails the pull request that brings in a
+      # module whose license cannot be determined, before a release does.
+      - name: Check every Go release archive's third-party notices can be written
+        run: |
+          notices="$RUNNER_TEMP/notices"
+          mkdir -p "$notices"
+          for target in $(jq -r '.legion[]' .github/go-release-targets.json); do
+            (cd packages/daemon && CGO_ENABLED=0 GOOS="${target%/*}" GOARCH="${target#*/}" \
+              ../../scripts/go-third-party-notices.sh "$notices/legion-${target%/*}-${target#*/}" ./cmd/legion)
+          done
+          for arch in $(jq -r '.envoy[]' .github/go-release-targets.json); do
+            (cd packages/envoy && GOOS=linux GOARCH="$arch" \
+              ../../scripts/go-third-party-notices.sh "$notices/legion-envoy-$arch" ./cmd/listener)
+            (cd packages/envoy && CGO_ENABLED=0 GOOS=linux GOARCH="$arch" \
+              ../../scripts/go-third-party-notices.sh "$notices/agent-secrets-$arch" \
+              ./cmd/agent-secrets ./cmd/agent-secrets-helper)
+          done
+          wc -l "$notices"/*
 
 
   typecheck:
     runs-on: ubuntu-24.04
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
 
-      - name: Setup Bun
-        uses: ./.github/actions/setup-bun
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: packages/daemon/go.mod
+          cache-dependency-path: packages/daemon/go.sum
 
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
-
-      - name: Typecheck daemon
-        run: bunx tsc --noEmit
+      # With the e2e tag, vet also compiles the live proofs behind it (the Stage 4a harness,
+      # sandbox/live*_test.go), which run on the devbox against a real cluster.
+      - name: Vet the Go daemon, its e2e-tagged live proofs included
+        run: go vet -tags e2e ./...
         working-directory: packages/daemon
-
-      - name: Typecheck workspace
-        run: bunx tsc --noEmit
-        working-directory: packages/workspace
 
 
   test:
     runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: ci
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      # One service for both: the Go daemon's unit tests' Postgres and the Stage 1 script's.
+      # Setting LEGION_E2E_PG_DSN is what tells the script not to start a container of its own —
+      # that path is the devbox's.
+      LEGION_TEST_PG_DSN: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
+      LEGION_E2E_PG_DSN: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
 
       - name: Setup Bun
         uses: ./.github/actions/setup-bun
-
-
-
-      - uses: ./.github/actions/install-jj
-
-      # The workspace suite also drives stock jj 0.44 as a second binary (STOCK_JJ in
-      # packages/workspace/src/workspace.test.ts, through `mise x`), installed here beside the
-      # worker image's jj on PATH so no test downloads it.
-      - name: Install the workspace suite's stock jj
-        env:
-          MISE_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: mise install github:jj-vcs/jj@0.44.0
-
-      - name: Verify daemon live-test tools
-        run: |
-          command -v git
-          command -v gh
-          command -v tmux
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
       - name: Test release scripts
         run: .github/scripts/release-push.test.sh
+
+      - name: Test third-party notices
+        run: bun test scripts/third-party-notices.test.ts
 
       - name: Test the Bun pin check
         run: .github/scripts/check-bun-version.test.sh
@@ -111,20 +194,54 @@ jobs:
       - name: Test the image trigger path check
         run: .github/scripts/check-image-trigger-paths.test.sh
 
-      - name: Test the live proofs' libraries (the GitHub ingress bridge, the proof human's check, the model gateway key command)
+      - name: Test the action pin check
+        run: .github/scripts/check-action-pins.test.sh
+
+      - name: Test the private-name check
+        run: .github/scripts/check-private-names.test.sh
+
+      - name: Test the live proofs' libraries (the GitHub ingress bridge, the proof human's check, the model gateway key command, the design-gate verdict)
         run: bun test scripts/e2e/lib
 
-      - name: Pre-pull daemon E2E NATS image
-        run: docker pull nats:2.10
+      - name: Lint the Dispatch census script
+        run: bunx biome check --error-on-warnings scripts/dispatch
 
-      - name: Test daemon
-        run: bun test
+      # scripts/dispatch is no workspace; the root package pins its TypeScript and Bun types.
+      - name: Typecheck the Dispatch census script
+        run: bunx tsc --noEmit -p scripts/dispatch
+
+      - name: Test the Dispatch census script
+        run: bun test scripts/dispatch
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: packages/daemon/go.mod
+          cache-dependency-path: packages/daemon/go.sum
+
+      # The tmux runtime's tests drive a real tmux server and skip without one, and the daemon
+      # supervises under tmux and refuses to start without it.
+      - name: Install tmux
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends tmux
+
+      # The workspace and boundary tests drive a real jj, the one the worker image ships (its
+      # working-copy filters are among what they plant), and the daemon resolves jj at boot and
+      # refuses to start without it.
+      - uses: ./.github/actions/install-jj
+
+      # internal/podsafety's baseline test and the pod agent's argv test run the Oh My Pi the worker
+      # image ships, and refuse on GitHub Actions without one. The pin is read from
+      # .omp-pin, the repository's one copy of it, installed through the mise above
+      # (.github/actions/install-omp).
+      - uses: ./.github/actions/install-omp
+
+      # internal/runtime/sandbox's uv link-mode test installs a wheel with the uv the worker image
+      # ships (ARG UV_VERSION, checked against ARG UV_SHA256), and refuses on GitHub Actions
+      # without one (.github/actions/install-uv).
+      - uses: ./.github/actions/install-uv
+
+      - name: Test the Go daemon
+        run: go test -count=1 ./...
         working-directory: packages/daemon
-        env:
-          LEGION_E2E: "1"
-          LEGION_TMUX_LIVE: "1"
 
-      - name: Test workspace
-        run: bun test
-        working-directory: packages/workspace
-
+      - name: Stage 1 live proof
+        run: bash scripts/e2e/stage1-skeleton.sh

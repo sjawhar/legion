@@ -37,7 +37,7 @@ const failAlways = 1 << 30
 // the SAME stored (possibly already-expired) lease rather than a freshly computed one — the real
 // bug C2's fix works around. runtimeIDToID additionally models the real broker's OTHER
 // idempotent-enroll conflict key, (launcher_credential_id, runtime_id) rather than thumbprint
-// (AGENTC-834 thermonuclear finding on Recover's ordering): an Enroll whose runtime_id already
+// (a review finding on Recover's ordering): an Enroll whose runtime_id already
 // has a different, still-live enrollment id refuses with 409 ALREADY_ENROLLED, whatever
 // thumbprint it carries — exactly the conflict a fresh Recover enroll racing ahead of the old
 // row's revoke can hit for real, which byTP alone (keyed on the NEW session's fresh thumbprint)
@@ -57,7 +57,7 @@ const failAlways = 1 << 30
 // credential.
 //
 // The launcher half (Enroll, Revoke) now authenticates with a Proof header carrying an "lid"
-// claim instead of a bearer token (AGENTC-834 Task 1): enrollUnauthorizedNext simulates an
+// claim instead of a bearer token: enrollUnauthorizedNext simulates an
 // expired or revoked credential (401 LAUNCHER_INVALID) independent of failFirst's unrelated 503.
 // The fake also serves the machine-login routes a Broker.Login talks to: POST
 // /v1/launcher-credentials verifies the posted request object with record.VerifyRequestObject and
@@ -96,6 +96,10 @@ type fakeBroker struct {
 	pendingCode        string // the confirmation code minted for the most recent login
 	loginOutcome       string // what the pending login's poll answers: "issued", "pending", "denied", or "expired"
 	issuedCredentialID string // the launcher credential id minted for the most recent "issued" login
+	// loginLifetime is how long an issued credential lives: the poll answers expires_at that far
+	// past the poll, a week unless a test shortens it; zero answers no expires_at, as a broker from
+	// before it does.
+	loginLifetime time.Duration
 
 	// refuseRenewNext answers the next N renews 401 LEASE_EXPIRED whatever the lease, so a test
 	// lapses a session on its next renew without racing the lease's wall clock. A renew that
@@ -104,6 +108,9 @@ type fakeBroker struct {
 	// enrollGate, when set, holds every enroll POST until the test closes it, so a test can keep a
 	// session enrolling for exactly as long as it needs.
 	enrollGate chan struct{}
+	// enrollArrivals counts every enroll POST this fake received, on arrival and before any gate, so
+	// a test can tell that an enroll is waiting at the gate.
+	enrollArrivals int
 	// renewGate, when set, holds every renew until the test closes it. A renew reads the gate as it
 	// arrives, so a test can hold one renew, swap in another gate for the next, and release them
 	// one at a time.
@@ -124,11 +131,12 @@ func newFakeBroker(t *testing.T) *fakeBroker {
 	f := &fakeBroker{
 		enrolled: map[string]string{}, byTP: map[string]string{}, runtimeIDToID: map[string]string{},
 		leaseExpiry: map[string]time.Time{}, seen: map[string]bool{}, lease: 900 * time.Second,
-		loginOutcome: "issued",
+		loginOutcome: "issued", loginLifetime: 7 * 24 * time.Hour,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/enrollments", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
+		f.enrollArrivals++
 		gate := f.enrollGate
 		f.mu.Unlock()
 		if gate != nil {
@@ -308,7 +316,11 @@ func newFakeBroker(t *testing.T) *fakeBroker {
 		default:
 			f.next++
 			f.issuedCredentialID = fmt.Sprintf("lcred-%d", f.next)
-			writeJSON(w, 200, map[string]string{"state": "issued", "credential_id": f.issuedCredentialID})
+			issued := map[string]string{"state": "issued", "credential_id": f.issuedCredentialID}
+			if f.loginLifetime != 0 {
+				issued["expires_at"] = time.Now().Add(f.loginLifetime).UTC().Format(time.RFC3339Nano)
+			}
+			writeJSON(w, 200, issued)
 		}
 	})
 	f.srv = httptest.NewServer(mux)
@@ -413,13 +425,13 @@ func waitFor(t *testing.T, cond func() bool) {
 
 func TestLoginHoldsTheKeyInMemoryAndEnrollSignsLauncherProofs(t *testing.T) {
 	f := newFakeBroker(t) // records the login request object; issues after one poll
-	b := &Broker{URL: f.srv.URL, OperatorFile: operatorFile(t, "sjawhar"), HTTP: f.srv.Client()}
+	b := &Broker{URL: f.srv.URL, OperatorFile: operatorFile(t, "ada@example.com"), HTTP: f.srv.Client()}
 	code, err := b.Login(context.Background(), "example-host-devbox")
 	if err != nil || !regexp.MustCompile(`^[A-Z2-9]{4}-[A-Z2-9]{4}$`).MatchString(code) {
 		t.Fatalf("code %q err %v", code, err)
 	}
 	ro, err := record.VerifyRequestObject(f.lastLoginRequest, f.srv.URL, time.Minute, time.Now())
-	if err != nil || ro.LoginHint != "sjawhar" || ro.Details[0].Type != "launcher_credential" || ro.Details[0].Identifier != "example-host-devbox" {
+	if err != nil || ro.LoginHint != "ada@example.com" || ro.Details[0].Type != "launcher_credential" || ro.Details[0].Identifier != "example-host-devbox" {
 		t.Fatalf("request object: %+v %v", ro, err)
 	}
 	waitFor(t, func() bool { return b.LoginStatus().State == "issued" })
@@ -444,7 +456,7 @@ func TestNoCredentialAndExpiredCredentialBothNameTheLoginCommand(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	f := newFakeBroker(t)
-	b := &Broker{URL: f.srv.URL, OperatorFile: operatorFile(t, "sjawhar"), HTTP: f.srv.Client()}
+	b := &Broker{URL: f.srv.URL, OperatorFile: operatorFile(t, "ada@example.com"), HTTP: f.srv.Client()}
 	sess, _ := newSession(1, 1, "h:1:1", nil)
 
 	if _, _, err := b.Enroll(context.Background(), sess); err == nil || !strings.Contains(err.Error(), "agent-secrets launcher login") {
@@ -492,10 +504,12 @@ func TestNoCredentialAndExpiredCredentialBothNameTheLoginCommand(t *testing.T) {
 // TestALateRejectionOfAnOldCredentialLeavesTheNewLoginAlone covers a 401 LAUNCHER_INVALID that
 // answers a call signed with a credential another login has since replaced (a session's enroll
 // retry in flight while the operator logs in again): it clears nothing, since the credential it
-// rejects is no longer the one installed, and the new login still reports "issued".
+// rejects is no longer the one installed, and the new login still reports "issued". The caller
+// gets the broker's refusal rather than errNoCredential, since the helper holds a credential and
+// its retry can use it.
 func TestALateRejectionOfAnOldCredentialLeavesTheNewLoginAlone(t *testing.T) {
 	f := newFakeBroker(t)
-	b := loggedInBroker(t, f, "sjawhar")
+	b := loggedInBroker(t, f, "ada@example.com")
 	old := b.cred.Load()
 	if _, err := b.Login(context.Background(), "helper-host"); err != nil {
 		t.Fatal(err)
@@ -504,8 +518,8 @@ func TestALateRejectionOfAnOldCredentialLeavesTheNewLoginAlone(t *testing.T) {
 	fresh := b.cred.Load()
 
 	rejected := &BrokerError{Status: http.StatusUnauthorized, Code: "LAUNCHER_INVALID", Message: "the launcher credential is not valid"}
-	if err := b.clearOnInvalid(old, rejected); !errors.Is(err, errNoCredential) {
-		t.Fatalf("a rejected credential still reports the login command to its caller: %v", err)
+	if err := b.clearOnInvalid(old, rejected); err != rejected {
+		t.Fatalf("a rejection of a replaced credential reached its caller as %v; want the broker's refusal as it came", err)
 	}
 	if b.cred.Load() != fresh || b.LoginStatus().State != "issued" {
 		t.Fatalf("a late rejection of the replaced credential changed the new login: cred replaced %v, state %q", b.cred.Load() != fresh, b.LoginStatus().State)
@@ -519,12 +533,81 @@ func TestALateRejectionOfAnOldCredentialLeavesTheNewLoginAlone(t *testing.T) {
 	}
 }
 
+// TestLoginStatusReadsARefusalWithTheClearThatCausedIt: a refusal clears the credential and
+// records that the broker refused it in one write under stateMu. A login-status read between the
+// two would find no credential and no refusal, and report the denied re-login before it as the
+// answer, where the answer is the refused credential. The test hook reads login-status between the
+// clear and the record; it waits up to 200 ms for that read, which returns at once unless the lock
+// holds it back until the refusal is recorded.
+func TestLoginStatusReadsARefusalWithTheClearThatCausedIt(t *testing.T) {
+	f := newFakeBroker(t)
+	b := loggedInBroker(t, f, "ada@example.com")
+	held := b.cred.Load()
+	f.mu.Lock()
+	f.loginOutcome = "denied"
+	f.mu.Unlock()
+	if _, err := b.Login(context.Background(), "helper-host"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return b.LoginStatus().State == "denied" })
+	read := make(chan loginState, 1)
+	b.testClearHook = func() {
+		go func() { read <- b.LoginStatus() }()
+		select {
+		case got := <-read:
+			read <- got
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+	rejected := &BrokerError{Status: http.StatusUnauthorized, Code: "LAUNCHER_INVALID", Message: "the launcher credential is not valid"}
+	if err := b.clearOnInvalid(held, rejected); !errors.Is(err, errNoCredential) {
+		t.Fatal(err)
+	}
+	if got := <-read; got.State != "expired" || !got.Refused || got.CredentialHeld {
+		t.Fatalf("login-status read as the credential was refused after a denied re-login: %+v, want expired, refused, no credential", got)
+	}
+}
+
+// TestALoginPendingWhenTheCredentialIsRefusedReportsItsOwnOutcome: a re-login is waiting for
+// approval when the broker refuses the credential an earlier login installed. While it waits,
+// login-status reads it pending and the credential refused. Once the operator denies it, it reads
+// denied and no longer refused: its outcome is newer than the refusal, and `launcher login`, which
+// reads the same answer, must tell the operator it was denied.
+func TestALoginPendingWhenTheCredentialIsRefusedReportsItsOwnOutcome(t *testing.T) {
+	f := newFakeBroker(t)
+	b := loggedInBroker(t, f, "ada@example.com")
+	held := b.cred.Load()
+	f.mu.Lock()
+	f.loginOutcome = "pending"
+	f.mu.Unlock()
+	if _, err := b.Login(context.Background(), "helper-host"); err != nil {
+		t.Fatal(err)
+	}
+	rejected := &BrokerError{Status: http.StatusUnauthorized, Code: "LAUNCHER_INVALID", Message: "the launcher credential is not valid"}
+	if err := b.clearOnInvalid(held, rejected); !errors.Is(err, errNoCredential) {
+		t.Fatal(err)
+	}
+	if got := b.LoginStatus(); got.State != "pending" || !got.Refused || got.CredentialHeld {
+		t.Fatalf("a re-login pending when the credential was refused: %+v, want pending, refused, no credential", got)
+	}
+	f.mu.Lock()
+	f.loginOutcome = "denied"
+	f.mu.Unlock()
+	deadline := time.Now().Add(15 * time.Second) // pollLogin backs off 2 s, then 4 s, between polls
+	for b.login.Load().State == "pending" && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got := b.LoginStatus(); got.State != "denied" || got.Refused || got.CredentialHeld {
+		t.Fatalf("that re-login once denied: %+v, want denied, not refused, no credential", got)
+	}
+}
+
 // TestDeniedAndExpiredLoginsSurfaceTheirState drives the fake through both terminal non-issued
 // outcomes and confirms a later Login, once the prior one is no longer pending, starts completely
 // fresh rather than reusing the denied/expired attempt's key.
 func TestDeniedAndExpiredLoginsSurfaceTheirState(t *testing.T) {
 	f := newFakeBroker(t)
-	b := &Broker{URL: f.srv.URL, OperatorFile: operatorFile(t, "sjawhar"), HTTP: f.srv.Client()}
+	b := &Broker{URL: f.srv.URL, OperatorFile: operatorFile(t, "ada@example.com"), HTTP: f.srv.Client()}
 
 	f.mu.Lock()
 	f.loginOutcome = "denied"
@@ -563,7 +646,7 @@ func TestDeniedAndExpiredLoginsSurfaceTheirState(t *testing.T) {
 
 func TestEnrollSendsKindHostAndAcceptsBothStatuses(t *testing.T) {
 	f := newFakeBroker(t)
-	b := loggedInBroker(t, f, "sjawhar")
+	b := loggedInBroker(t, f, "ada@example.com")
 	sess, _ := newSession(1234, 77, "example-host-devbox:1234:77", nil)
 	id, lease, err := b.Enroll(context.Background(), sess)
 	if err != nil || id == "" || time.Until(lease) < 10*time.Minute {
@@ -571,7 +654,7 @@ func TestEnrollSendsKindHostAndAcceptsBothStatuses(t *testing.T) {
 	}
 	posts, _, _ := f.snapshot()
 	post := posts[0]
-	if post["kind"] != "host" || post["runtime_id"] != "example-host-devbox:1234:77" || post["operator"] != "sjawhar" ||
+	if post["kind"] != "host" || post["runtime_id"] != "example-host-devbox:1234:77" || post["operator"] != "ada@example.com" ||
 		post["thumbprint"] != sess.Thumbprint || post["approver"] != nil ||
 		post["session_id"] != nil || post["pod_token"] != nil {
 		t.Fatalf("enroll body: %+v", post)
@@ -584,7 +667,7 @@ func TestEnrollSendsKindHostAndAcceptsBothStatuses(t *testing.T) {
 
 func TestRenewSignsWithTheSessionKeyAndRevokeIsIdempotent(t *testing.T) {
 	f := newFakeBroker(t)
-	b := loggedInBroker(t, f, "sjawhar")
+	b := loggedInBroker(t, f, "ada@example.com")
 	sess, _ := newSession(1, 1, "h:1:1", nil)
 	id, _, err := b.Enroll(context.Background(), sess)
 	if err != nil {

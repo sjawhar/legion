@@ -80,10 +80,12 @@ type messageBody struct {
 }
 
 // sendResponse is the answer to a targeted send. Duplicate reports that JetStream already held
-// this message, so nothing new reached the agent's subject; it can only be true for a send whose
-// dedupe key names the upstream event (contracts.DedupeKeyNamesTheUpstreamEvent), and
-// Dispatch is the one sender that uses it. Absent means false, which is what an older listener's
-// answer reads as.
+// this message, so the stream stored nothing new; the publish still reached the agent's subject.
+// What recognises that repeat, and for how long, is stated on DELIVERY_DUPLICATE_WINDOW_MS in
+// @legion/contracts (contracts.DeliveryDuplicateWindow here). It can only be true for a send whose
+// dedupe key names the upstream event (contracts.DedupeKeyNamesTheUpstreamEvent), and Dispatch is
+// the one sender that uses it. Absent means false, which is what an older listener's answer reads
+// as.
 type sendResponse struct {
 	contracts.Envelope
 	Recipient string `json:"recipient"`
@@ -126,7 +128,7 @@ func hasCapability(capabilities []string, value string) bool {
 // (packages/envoy-client/src/delivery.ts's parseDispatchFrame) gets there via JSON.parse plus
 // plain object property access, which is exact and case-sensitive in JavaScript; the wire key
 // is fixed lower-case ("delivery") in packages/contracts/src/dispatch-api.ts. Decoding straight
-// into a Go struct, as this used to do, is a *second, more lenient* reader of the same bytes:
+// into a Go struct would be a *second, more lenient* reader of the same bytes:
 // encoding/json matches JSON object keys case-insensitively when no exact match exists, so a
 // payload carrying both the receiver's exact "delivery" key and a same-key-different-case
 // sibling like "Delivery" could make that lenient decode read the sibling's mode while the
@@ -150,9 +152,9 @@ func hasCapability(capabilities []string, value string) bool {
 //   - "delivery" is present and its mode reads unambiguously as one of the three delivery
 //     modes: mode=<that string>, err=nil.
 //   - "delivery" is present and its mode reads unambiguously as something else: mode="",
-//     err!=nil, refused like any other unreadable claim. This used to be waved through on the
-//     grounds that the capability check behind it would refuse a mode no session advertises -
-//     but `capabilities` is an open list from the registry, so a session that advertises a
+//     err!=nil, refused like any other unreadable claim. Waving it through on the grounds that
+//     the capability check behind it would refuse a mode no session advertises does not hold:
+//     `capabilities` is an open list from the registry, so a session that advertises a
 //     bogus string is exactly what makes that argument fail. The Dispatch server's
 //     `validDelivery` already refuses the same set at its own boundary; this is the listener's.
 func frameDeliveryMode(payload *string) (mode string, err error) {
@@ -225,15 +227,16 @@ func writeJSONError(w http.ResponseWriter, status int, message string, expected 
 }
 
 // writeNATSError answers a request NATS did not serve. What NATS refuses however often it is sent
-// is the caller's own input, so it is answered naming why: a message too large to take whole, or a
-// session id or role whose KV key would make a subject too long (bus.ErrTooLarge), is a 413, and a
-// topic or key NATS does not accept in a subject (bus.ErrInvalidSubject) a 400. Any other failure
-// is status with message.
+// (bus.ErrRefused) is the caller's own input, so it is answered naming why: a message too large to
+// take whole, or a session id or role whose KV key would make a subject too long (bus.ErrTooLarge),
+// is a 413, and any other refusal, a topic or key NATS does not accept in a subject
+// (bus.ErrInvalidSubject) or a key outside nats.go's key alphabet (bus.ErrInvalidKey: `ses:bad`), a
+// 400. Any other failure is status with message.
 func writeNATSError(w http.ResponseWriter, err error, status int, message string) {
 	switch {
 	case errors.Is(err, bus.ErrTooLarge):
 		writeJSONError(w, http.StatusRequestEntityTooLarge, err.Error())
-	case errors.Is(err, bus.ErrInvalidSubject):
+	case errors.Is(err, bus.ErrRefused):
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 	default:
 		writeJSONError(w, status, message)
@@ -393,6 +396,37 @@ func releaseExpiredRoleClaim(registry roleClaimResolver, role, sessionID string,
 	return release, release == store.ExpiredRoleClaimSuperseded, nil
 }
 
+// roleHolderSession is a role holder's session entry for a decision that can take the role from it:
+// a lookup or role delivery that releases a lapsed claim, a soft claim that supersedes a gone holder,
+// the role reaper. live is the caller's test of an entry. The cache answers when it holds an entry
+// live accepts; otherwise the holder is read again from the session bucket
+// (session.SessionRegistry.Refresh), because the cache trails the bucket while a claim is read from
+// the role bucket itself: a holder another listener registered and gave the role a moment ago is in
+// both buckets before it is in this cache, and during a rolling deploy the old task resolves the
+// claims the replacement accepts. nats.ErrKeyNotFound is the bucket's word that the holder is gone
+// or fails live; any other error is a read that did not answer, on which nothing is taken from it.
+// The bucket read gets roleHolderReadTimeout, so a lookup that cannot read the bucket answers its
+// 500, and a soft claim its 503, inside the listener's 10 s HTTP write timeout.
+func roleHolderSession(sessions *session.SessionRegistry, sessionID string, live func(session.SessionEntry) bool) (session.SessionEntry, error) {
+	if entry, err := sessions.Get(sessionID); err == nil && live(entry) {
+		return entry, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), roleHolderReadTimeout)
+	defer cancel()
+	entry, err := sessions.Refresh(ctx, sessionID)
+	if err == nil && !live(entry) {
+		return session.SessionEntry{}, nats.ErrKeyNotFound
+	}
+	return entry, err
+}
+
+// registered is the liveness a lookup, a soft claim and the reaper ask of a role holder: any entry.
+func registered(session.SessionEntry) bool { return true }
+
+// roleHolderReadTimeout bounds roleHolderSession's bucket read, well inside the listener's 10 s HTTP
+// write timeout (main.go) and the 10 s JetStream MaxWait the read would otherwise wait out.
+const roleHolderReadTimeout = 2 * time.Second
+
 func resolveLiveRoleHolder(registry roleClaimResolver, sessions *session.SessionRegistry, role string) (roleHolderResult, error) {
 	for range roleHolderResolutionAttempts {
 		claim, err := registry.RoleClaim(role)
@@ -402,7 +436,7 @@ func resolveLiveRoleHolder(registry roleClaimResolver, sessions *session.Session
 		if claim.HolderSessionID == "" {
 			return roleHolderResult{state: roleHolderUnclaimed}, nil
 		}
-		entry, err := sessions.Get(claim.HolderSessionID)
+		entry, err := roleHolderSession(sessions, claim.HolderSessionID, registered)
 		if errors.Is(err, nats.ErrKeyNotFound) {
 			lastSeen := sessions.LastSeen(claim.HolderSessionID)
 			release, superseded, err := releaseExpiredRoleClaim(registry, role, claim.HolderSessionID, sessions.TTL())
@@ -530,8 +564,14 @@ func deleteSessionHandler(sessions *session.SessionRegistry) http.HandlerFunc {
 // publishHandler rejects agent-targeted topics (must use /v1/messages/send
 // instead) and publishes the envelope to NATS. An explicit dedupe_key is used
 // verbatim (a re-send a receiver's own dedupe recognises); it is mutually
-// exclusive with idempotency_key and may not begin with roleForwardDedupePrefix,
-// the mark the role arbiter drops on sight.
+// exclusive with idempotency_key, may not begin with roleForwardDedupePrefix,
+// the mark the role arbiter drops on sight, and may not ride a dispatch
+// envelope. Every host drops a repeat of any dispatch key
+// (contracts.DedupeKeyNamesTheUpstreamEvent), and Dispatch's outbox keys are
+// sequential (dispatch-<event id>), so a caller that chose one could make a
+// host drop the real event it names. Dispatch itself never needs this route's
+// key: its outbox publishes to the bus directly and its sends go through
+// /v1/messages/send, whose key is the listener's.
 func publishHandler(d *listenerDeps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -568,6 +608,10 @@ func publishHandler(d *listenerDeps) http.HandlerFunc {
 		}
 		if strings.HasPrefix(request.DedupeKey, roleForwardDedupePrefix) {
 			writeJSONError(w, http.StatusBadRequest, "dedupe_key must not begin with the reserved prefix "+roleForwardDedupePrefix, "dedupe_key")
+			return
+		}
+		if request.DedupeKey != "" && request.Source == "dispatch" {
+			writeJSONError(w, http.StatusBadRequest, "dedupe_key cannot be chosen for a dispatch envelope", "dedupe_key")
 			return
 		}
 		dedupeKey := "publish." + id.New()
@@ -753,10 +797,11 @@ func roleSetHandler(d *listenerDeps, machineID string) http.HandlerFunc {
 		previous := ""
 		var supersedable []string
 		if body.Soft {
-			// The registry sees only interest rows; liveness is this registry's
-			// call. A holder whose session entry has aged out (5m TTL) is dead
-			// and may be superseded; so may the claimant's own predecessor,
-			// live or not; any other live holder is protected.
+			// The registry sees only interest rows; liveness is the session
+			// bucket's call (roleHolderSession). A holder whose session entry
+			// has aged out (5m TTL) is dead and may be superseded; so may the
+			// claimant's own predecessor, live or not; any other live holder is
+			// protected.
 			holder, err := d.registry.RoleHolder(body.Role)
 			if err != nil {
 				writeNATSError(w, err, http.StatusServiceUnavailable, "read role holder: "+err.Error())
@@ -766,7 +811,7 @@ func roleSetHandler(d *listenerDeps, machineID string) http.HandlerFunc {
 			if holder != "" && holder != body.SessionID {
 				if previous != "" && holder == previous {
 					supersedable = append(supersedable, holder)
-				} else if _, liveErr := d.sessions.Get(holder); errors.Is(liveErr, nats.ErrKeyNotFound) {
+				} else if _, liveErr := roleHolderSession(d.sessions, holder, registered); errors.Is(liveErr, nats.ErrKeyNotFound) {
 					supersedable = append(supersedable, holder)
 				} else if liveErr != nil {
 					writeJSONError(w, http.StatusServiceUnavailable, "read role holder liveness: "+liveErr.Error())

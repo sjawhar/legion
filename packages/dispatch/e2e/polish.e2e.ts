@@ -1,7 +1,8 @@
 import { expect, test } from "@playwright/test";
 
-import { setInterests, setLiveSessions } from "./agents";
+import { setLiveSessions } from "./agents";
 import { createAsk, createIssue, createProject, patchIssue } from "./api";
+import { needsYouCards } from "./editor";
 import { filterPicker, pickFilterOption } from "./filters";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
@@ -10,11 +11,6 @@ const session = { actor: { id: "e2e-polish", kind: "session" as const }, as: "ag
 
 test.beforeEach(async () => {
   await resetDatabase();
-  // The ask card's `Reaches N` counts the fake Envoy's persisted interests, which outlive the
-  // database reset and match the recycled issue keys, so each test starts from none.
-  if (!process.env.PLAYWRIGHT_BASE_URL) {
-    await setInterests([]);
-  }
 });
 
 test("project filters stay collapsed until needed and margin asks use the compact composer", async ({
@@ -83,7 +79,7 @@ test("project filters stay collapsed until needed and margin asks use the compac
     if (testInfo.project.name === "iphone") {
       await page.getByRole("button", { name: "Open review panel (1 open ask)" }).click();
     }
-    const marginCard = page.getByRole("region", { name: "Needs you" }).getByTestId(`ask-${ask.id}`);
+    const marginCard = needsYouCards(page).getByTestId(`ask-${ask.id}`);
     await expect(marginCard.getByRole("radio", { name: "Ship" })).toBeVisible();
     await expect(marginCard.getByLabel("Your answer")).toBeHidden();
     await marginCard.getByText("Add a note or answer in your own words", { exact: true }).click();
@@ -92,10 +88,6 @@ test("project filters stay collapsed until needed and margin asks use the compac
       path: testInfo.outputPath(`polish-margin-${viewport}.png`),
       fullPage: true,
     });
-    if (!process.env.PLAYWRIGHT_BASE_URL) {
-      await setLiveSessions([]);
-    }
-
     await page.goto("/agents");
     await expect(page.getByRole("region", { name: "Agents empty state" })).toBeVisible();
     await page.screenshot({
@@ -119,9 +111,7 @@ test("an untitled session reads the same on the Agents page, the ask card, its f
     { options: [{ label: "Ship" }], question: "Same name everywhere?" },
     { actor: { id: sessionId, kind: "session" }, as: "agent" }
   );
-  if (!process.env.PLAYWRIGHT_BASE_URL) {
-    await setLiveSessions([{ session_id: sessionId, title: "" }]);
-  }
+  await setLiveSessions([{ session_id: sessionId, title: "" }]);
 
   const context = await asUser(browser, "alice");
   const page = await context.newPage();

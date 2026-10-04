@@ -87,7 +87,7 @@ func documentBlock(doc *Node, target Range, caller string) (index, start, end in
 // InsertTableRows inserts a pipe-table row fragment beside the row containing target, its rows
 // padded to the table's width on budget, the caller write's. It reports inserted=false when target
 // is outside a table or markdown is not exclusively table rows.
-func InsertTableRows(doc *Node, target Range, markdown string, after bool, budget *TablePaddingBudget) (*Node, bool, error) {
+func InsertTableRows(doc *Node, target Range, markdown string, after bool, budget *WriteBudget) (*Node, bool, error) {
 	if doc == nil || doc.Type != "doc" {
 		return nil, false, fmt.Errorf("%w: InsertTableRows wants a document", ErrSchema)
 	}
@@ -116,14 +116,16 @@ func InsertTableRows(doc *Node, target Range, markdown string, after bool, budge
 
 	table := nodeAtPath(doc, tablePath)
 	width := len(table.Children[0].Children)
-	rows, supported, err := parseTableRows(markdown, width, budget)
+	// The rows are parsed on a copy of the budget, which is spent only when they are inserted:
+	// markdown that is not rows alone goes to the block path, which parses it again on budget,
+	// and the elements and padding it costs are charged once.
+	trial := *budget
+	rows, supported, err := parseTableRows(markdown, width, &trial)
 	if err != nil || !supported {
 		return nil, supported, err
 	}
-	rows, err = normalizeTableRows(rows, table.Children[0], width)
-	if err != nil {
-		return nil, true, err
-	}
+	*budget = trial
+	rows = normalizeTableRows(rows, table.Children[0], width)
 
 	out := cloneNode(doc)
 	outTable := nodeAtPath(out, tablePath)
@@ -142,12 +144,12 @@ func InsertTableRows(doc *Node, target Range, markdown string, after bool, budge
 	return out, true, nil
 }
 
-func normalizeTableRows(rows []*Node, header *Node, width int) ([]*Node, error) {
+// normalizeTableRows pads each parsed row to width with cells taking the header's attributes. No
+// row holds more: goldmark cuts every body row at its synthetic header's width, and the parse
+// refuses one holding text past it (markWideRows).
+func normalizeTableRows(rows []*Node, header *Node, width int) []*Node {
 	out := make([]*Node, 0, len(rows))
 	for _, row := range rows {
-		if len(row.Children) > width {
-			return nil, fmt.Errorf("%w: got %d cells, table has %d", ErrTableWidth, len(row.Children), width)
-		}
 		normalized := cloneNode(row)
 		for len(normalized.Children) < width {
 			template := header.Children[len(normalized.Children)]
@@ -161,7 +163,7 @@ func normalizeTableRows(rows []*Node, header *Node, width int) ([]*Node, error) 
 		}
 		out = append(out, normalized)
 	}
-	return out, nil
+	return out
 }
 
 type insertionBoundary struct {
@@ -457,7 +459,7 @@ func joinAcrossBoundary(doc *Node, selection spliceSelection, r Range, with *Nod
 func buildMergedTextblock(doc *Node, selection spliceSelection, r Range, with *Node) (*Node, bool, error) {
 	left := nodeAtPath(doc, selection.first.path)
 	right := nodeAtPath(doc, selection.last.path)
-	if left.Type == right.Type && !nodeAttrsEqual(left.Attrs, right.Attrs, false) {
+	if left.Type == right.Type && !attrsEqualButBlockID(left.Attrs, right.Attrs) {
 		return nil, false, nil
 	}
 	prefix, err := inlineRange(left, selection.first.pos, selection.first.pos+1, r.From)

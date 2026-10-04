@@ -13,6 +13,54 @@
     <meta name="theme-color" content="#0f172a" />
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <title>Dispatch</title>
+    <!--
+      A script of this build that fails to download (the entry chunk, or one it imports) reloads
+      the page once: a rolling deploy can serve this page from one server and its assets from
+      another that never built them, and no app code runs to recover. A script of another origin
+      (a browser extension's) is never this build's, whatever its path. It shares the lazy-chunk
+      recovery's once-per-session budget (its sessionStorage key, in
+      src/features/shell/DeploymentResilience.tsx) and offline rule, and skips a page being left,
+      from beforeunload or pagehide (iOS Safari fires no beforeunload) until pageshow.
+      Dispatch sends no Content-Security-Policy; one would have to allow this script by its hash.
+    -->
+    <script>
+      (function () {
+        var leaving = false;
+        function markLeaving() {
+          leaving = true;
+        }
+        window.addEventListener("beforeunload", markLeaving);
+        window.addEventListener("pagehide", markLeaving);
+        window.addEventListener("pageshow", function () {
+          leaving = false;
+        });
+        window.addEventListener(
+          "error",
+          function (event) {
+            var script = event.target;
+            if (!(script instanceof HTMLScriptElement)) {
+              return;
+            }
+            if (script.src.indexOf(window.location.origin + "/assets/") !== 0) {
+              return;
+            }
+            if (leaving || !navigator.onLine) {
+              return;
+            }
+            try {
+              if (window.sessionStorage.getItem("dispatch.reloaded-for-chunk") === "true") {
+                return;
+              }
+              window.sessionStorage.setItem("dispatch.reloaded-for-chunk", "true");
+            } catch (unavailable) {
+              return;
+            }
+            window.location.reload();
+          },
+          true
+        );
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

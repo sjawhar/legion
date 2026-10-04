@@ -10,7 +10,7 @@ import (
 // A document a caller writes is stored as its rendering, so one whose rendering does not read back
 // as the document is refused rather than stored: the next read of what was stored would give
 // another document, or refuse it. Each document here is read as the browser editor's engine reads
-// it, and its rendering read back otherwise at bc74741f, where it was stored.
+// it, and its rendering reads back otherwise.
 func TestParseForWriteRefusesADocumentItsRenderingReadsBackOtherwise(t *testing.T) {
 	for _, markdown := range []string{
 		"> [^n]: -\n> -\n",

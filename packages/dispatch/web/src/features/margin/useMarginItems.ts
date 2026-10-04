@@ -1,10 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useCallback, useMemo } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { useLocation } from "react-router-dom";
 
 import { api } from "../../api/client";
 import { inboxQuery, userStateQuery } from "../../api/queries";
 import type { Anchor, Artifact, Ask, Comment, Event } from "../../api/types";
+import { compareTimestamps } from "../../lib/timestamps";
+import type { ComposerOwner } from "../conversation/composer-model";
 import { useProjectArtifact } from "../document/useProjectArtifact";
 import { pinnedEventIds } from "../issue/pins";
 import { parseIssuePath, parseProjectPath } from "../refs/routes";
@@ -16,6 +18,13 @@ export type MarginTab = "comments" | "pinned";
 export type MarginOwner =
   | { kind: "issue"; key: string }
   | { kind: "document"; artifactId: string; project: string; slug: string };
+
+/** Where a composer in the margin sends: the margin's issue, or its project document. */
+export function composerOwner(owner: MarginOwner): ComposerOwner {
+  return owner.kind === "issue"
+    ? { issueKey: owner.key, kind: "issue" }
+    : { artifactId: owner.artifactId, kind: "artifact", project: owner.project };
+}
 
 /** The margin's owner, stable while the route and its artifact are: a fresh object here gave
  *  every `owner`-keyed memo, callback and effect in the margin a new identity each render. */
@@ -156,7 +165,10 @@ function commentThreads(comments: Comment[]): Thread[] {
     threads.set(rootId, entry);
   }
   return [...threads.values()].map(({ replies, root }) => {
-    replies.sort((left, right) => left.created_at.localeCompare(right.created_at));
+    replies.sort(
+      (left, right) =>
+        compareTimestamps(left.created_at, right.created_at) || left.id.localeCompare(right.id)
+    );
     return {
       anchor: root.anchor,
       key: root.id,
@@ -168,16 +180,17 @@ function commentThreads(comments: Comment[]): Thread[] {
   });
 }
 
+/** The ask or comment a card shows. */
+export function marginItemRecord(item: MarginItem): Ask | ThreadComment {
+  return item.kind === "ask" ? item.ask : item.comment;
+}
+
 export function marginItemId(item: MarginItem): string {
-  return item.kind === "ask" ? item.ask.id : item.comment.id;
+  return marginItemRecord(item).id;
 }
 
 export function marginItemMarkId(item: MarginItem): string | undefined {
-  return item.kind === "ask" ? item.ask.anchor?.mark_id : item.comment.anchor?.mark_id;
-}
-
-export function marginItemCreatedAt(item: MarginItem): string {
-  return item.kind === "ask" ? item.ask.created_at : item.comment.created_at;
+  return marginItemRecord(item).anchor?.mark_id;
 }
 
 export function threadMarkId(thread: Thread): string | undefined {
@@ -202,34 +215,27 @@ function isInBlock(anchor: Anchor | null, blockFilterId: string | undefined): bo
   return blockFilterId === undefined || anchor?.block_id === blockFilterId;
 }
 
-function itemAnchor(item: MarginItem): Anchor | null {
-  return item.kind === "ask" ? item.ask.anchor : item.comment.anchor;
-}
-
-function itemPlacement(
-  item: MarginItem,
+/** Document order for anchored cards: placed ones by position, unplaced ones after them, and
+ *  among the unplaced the newest first, by time and then by id. */
+function byPlacementThenNewest(
+  left: Ask | ThreadComment,
+  right: Ask | ThreadComment,
   markPlacements: ReadonlyMap<string, MarkPlacement>,
   blockPlacements: ReadonlyMap<string, MarkPlacement>
-): MarkPlacement | undefined {
-  return anchorPlacement(itemAnchor(item), markPlacements, blockPlacements);
-}
-
-/** Document order for anchored cards: placed ones by position, unplaced ones after them, and
- *  among the unplaced the newest first. */
-function byPlacementThenNewest(
-  leftPlacement: MarkPlacement | undefined,
-  rightPlacement: MarkPlacement | undefined,
-  leftCreatedAt: string,
-  rightCreatedAt: string
 ): number {
+  const leftPlacement = anchorPlacement(left.anchor, markPlacements, blockPlacements);
+  const rightPlacement = anchorPlacement(right.anchor, markPlacements, blockPlacements);
   if (leftPlacement !== undefined && rightPlacement !== undefined) {
     return leftPlacement.pos - rightPlacement.pos;
   }
   if (leftPlacement !== undefined || rightPlacement !== undefined) {
     return leftPlacement === undefined ? 1 : -1;
   }
-  return rightCreatedAt.localeCompare(leftCreatedAt);
+  return compareTimestamps(right.created_at, left.created_at) || left.id.localeCompare(right.id);
 }
+
+const NO_THREADS: ReadonlySet<string> = new Set();
+const NO_PLACEMENTS: ReadonlyMap<string, boolean> = new Map();
 
 export function useMarginItems(
   owner: MarginOwner | undefined,
@@ -237,7 +243,15 @@ export function useMarginItems(
   visibleArtifact: Artifact | undefined,
   markPlacements: ReadonlyMap<string, MarkPlacement>,
   blockPlacements: ReadonlyMap<string, MarkPlacement>,
-  blockFilterId: string | undefined
+  blockFilterId: string | undefined,
+  {
+    held = NO_THREADS,
+  }: {
+    /** Threads whose card's reply holds a send of its own - out, or refused - each of which stays
+     *  in the list it was in, open or resolved, whoever resolves or reopens it meanwhile: moving
+     *  it between them would remount its card, and the composer and what it holds with it. */
+    readonly held?: ReadonlySet<string>;
+  } = {}
 ) {
   const queryClient = useQueryClient();
   const issueKey = owner?.kind === "issue" ? owner.key : undefined;
@@ -320,25 +334,39 @@ export function useMarginItems(
   }, [blockFilterId, comments.data, ownerKind, visibleArtifact?.id]);
   const compareThreads = useCallback(
     (left: Thread, right: Thread) =>
-      byPlacementThenNewest(
-        anchorPlacement(left.anchor, markPlacements, blockPlacements),
-        anchorPlacement(right.anchor, markPlacements, blockPlacements),
-        left.root.comment.created_at,
-        right.root.comment.created_at
-      ),
+      byPlacementThenNewest(left.root.comment, right.root.comment, markPlacements, blockPlacements),
     [blockPlacements, markPlacements]
   );
   const sortedThreads = useMemo(
     () => [...allThreads].sort(compareThreads),
     [allThreads, compareThreads]
   );
+  // Whether each held thread sits with the resolved ones: where it was when its hold began. Kept
+  // across renders, and set during render (React's pattern for state derived from props), so the
+  // render that first holds a thread already places it.
+  const [heldPlacement, setHeldPlacement] = useState(NO_PLACEMENTS);
+  const placement = useMemo(() => {
+    const next = new Map<string, boolean>();
+    for (const thread of sortedThreads) {
+      if (held.has(thread.key)) {
+        next.set(thread.key, heldPlacement.get(thread.key) ?? thread.resolved);
+      }
+    }
+    return next;
+  }, [held, heldPlacement, sortedThreads]);
+  if (
+    placement.size !== heldPlacement.size ||
+    [...placement].some(([key, resolved]) => heldPlacement.get(key) !== resolved)
+  ) {
+    setHeldPlacement(placement);
+  }
   const threads = useMemo(
-    () => sortedThreads.filter((thread) => !thread.resolved),
-    [sortedThreads]
+    () => sortedThreads.filter((thread) => !(placement.get(thread.key) ?? thread.resolved)),
+    [placement, sortedThreads]
   );
   const resolvedThreads = useMemo(
-    () => sortedThreads.filter((thread) => thread.resolved),
-    [sortedThreads]
+    () => sortedThreads.filter((thread) => placement.get(thread.key) ?? thread.resolved),
+    [placement, sortedThreads]
   );
   const items = useMemo<MarginItem[]>(() => {
     const commentItems = sortedThreads.map(({ root }) => ({
@@ -349,10 +377,10 @@ export function useMarginItems(
     return [...anchoredAsks.map((ask) => ({ ask, kind: "ask" as const })), ...commentItems].sort(
       (left, right) =>
         byPlacementThenNewest(
-          itemPlacement(left, markPlacements, blockPlacements),
-          itemPlacement(right, markPlacements, blockPlacements),
-          marginItemCreatedAt(left),
-          marginItemCreatedAt(right)
+          marginItemRecord(left),
+          marginItemRecord(right),
+          markPlacements,
+          blockPlacements
         )
     );
   }, [anchoredAsks, blockPlacements, markPlacements, sortedThreads]);

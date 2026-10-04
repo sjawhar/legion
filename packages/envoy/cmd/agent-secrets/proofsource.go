@@ -1,10 +1,11 @@
 // packages/envoy/cmd/agent-secrets/proofsource.go
 //
 // Signer produces the compact JWS this process puts in a broker call's Proof header, and the
-// signed credential-request object POST /v1/requests embeds (contract v9: authorization_details
-// and reason live inside that signed object, not plain top-level fields). An agent box or pod
-// has its own key on tmpfs under AGENT_SECRETS_KEY_DIR and signs both directly for its own
-// enrollment id (fileSigner); a host session has no key of its own and asks
+// signed credential-request object POST /v1/requests embeds (the broker puts
+// authorization_details and reason inside
+// that signed object, not plain top-level fields). An agent box or pod has its own key on tmpfs
+// under AGENT_SECRETS_KEY_DIR and signs both directly for its own enrollment id (fileSigner); a
+// host session has no key of its own and asks
 // agent-secrets-helper, over AGENT_SECRETS_HELPER_SOCK, which signs only for processes that
 // descend from a registered session root (helperSigner) — the session's key never leaves the
 // helper process, so building the request object is also the helper's job in that mode.
@@ -43,7 +44,7 @@ func (f *fileSigner) Sign(method, url string) (string, error) {
 func (f *fileSigner) SignRequestObject(audience string, names []string, reason string) (string, error) {
 	details := make([]record.AuthorizationDetail, len(names))
 	for i, name := range names {
-		details[i] = record.AuthorizationDetail{Type: "agent_secret", Identifier: name, Actions: []string{"inject"}}
+		details[i] = record.AuthorizationDetail{Type: record.KindAgentSecret, Identifier: name, Actions: []string{"inject"}}
 	}
 	return record.Sign(f.key, audience, details, reason, "", time.Now())
 }

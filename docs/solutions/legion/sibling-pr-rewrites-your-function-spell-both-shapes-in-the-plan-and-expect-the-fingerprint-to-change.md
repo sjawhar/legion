@@ -46,7 +46,7 @@ The planner wrote task 0 — *base selection, no code* — and two versions of t
   the post-merge shape; if `OPEN`, implement on the current base and rebase only when GitHub
   reports `CONFLICTING`. Choosing a base before a pull request exists is not the rebase Sami's
   rule forbids ("Please don't do unnecessary rebases (i.e. unless there are merge conflicts)",
-  2026-09-11); the architect agreed and the spec's *New since we talked* records it.
+  2026-09-11); the architect agreed and the spec records it.
 - **Task 1, step 8a (`shapeOnCurrentMain`)** and **step 8c (`shapeAfterLegion57`)**: the exact
   code for each base. 8c names LEGION-57's `todo` line (`return admitOnTodo(state, node)` —
   keep it), its `own`/`result` body in `reduceIssueClosed`, and the single expression to change:
@@ -68,7 +68,7 @@ and the reviewer's round 2 verified the resolution against the plan rather than 
 **Rule.** When `knives`/`legion gh -- pr list` shows another open PR touching the function your
 plan edits, the planner spells out the resolved shape for *both* landing orders as plan steps,
 with the exact expression that differs and the one test file that proves it. The concern goes
-in the plan's `concerns` and the spec's *New since we talked*, agreed with the architect, so
+in the plan's `concerns` and its `plan.md`, agreed with the architect, so
 the reviewer can hold the resolution to a written target.
 
 ## 2. The rebase itself
@@ -158,10 +158,11 @@ The architect's end-game assignment reads mergeability *first*:
 2. `CONFLICTING` → do **not** push the `.legion/` deletion. Rebase as above, post the
    fingerprint comment, push, the `legion` tool's `handoff_complete` with both fingerprints. The architect
    routes the next round.
-3. `MERGEABLE` → `legion threads resolve --pr <n> --repo <owner>/<repo>` (expect `No unresolved
-   threads` when the review was clean), `rm -r .legion`, `jj split -m "chore: remove .legion/
-   handoffs after clean review (<KEY>)" .legion`, bookmark on `@-`, push, and confirm
-   `jj diff --from <reviewed head> --to <new head> --summary` prints only `D .legion/…` lines.
+3. `MERGEABLE` → `rm -r .legion`, `jj split -m "chore: remove .legion/ handoffs after clean
+   review (<KEY>)" .legion`, bookmark on `@-`, push, confirm
+   `jj diff --from <reviewed head> --to <new head> --summary` prints only `D .legion/…` lines,
+   then `legion threads resolve --pr <n> --repo <owner>/<repo>` before the completion (expect
+   `no unresolved threads` when the review was clean).
 
 LEGION-79 took branch 2 on its first end-game (the sibling had merged in the 40 minutes since
 approval) and branch 3 on the second. Reading `mergeable` before acting is what kept the

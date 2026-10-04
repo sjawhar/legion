@@ -1451,8 +1451,8 @@ func TestStrandedMessageAttemptIsResumedRatherThanDeliveredTwice(t *testing.T) {
 			listenerState.Lock()
 			listenerState.keys = append(listenerState.keys, request.IdempotencyKey)
 			first := len(listenerState.keys) == 1
-			// The listener's own (dedupe_key, session) cache: a repeat of a key it already
-			// delivered to that session reaches the agent no second time.
+			// Stands in for the stream's (dedupe_key, session) memory: a repeat of a key it
+			// already stored for that session is stored no second time.
 			listenerState.delivered[request.IdempotencyKey+"@"+request.TargetSession] = struct{}{}
 			listenerState.Unlock()
 			if first {
@@ -1573,8 +1573,8 @@ func TestSendThatLandedThenMissedTheReceiptIsNotDeliveredTwiceOnRetry(t *testing
 			first := len(listenerState.keys) == 1
 			// The real listener publishes the envelope before it answers, so the send has
 			// landed by this point whatever the caller later learns. JetStream's MsgId, built
-			// from this key, is what keeps a repeat off the agent's subject - and what makes
-			// the listener answer duplicate.
+			// from this key, is what keeps a repeat out of the stream - and what makes the
+			// listener answer duplicate; the publish itself still reaches the agent's subject.
 			key := request.IdempotencyKey + "@" + request.TargetSession
 			_, held := listenerState.delivered[key]
 			listenerState.delivered[key] = struct{}{}
@@ -1747,12 +1747,12 @@ func TestSendThatFailedBeforeLandingStillDeliversOnRetry(t *testing.T) {
 }
 
 // LEGION-271, acceptance 3 and 6. The key is scoped to the mode, so a retry in a different mode
-// must reach the agent - and it must not ride on the stranded attempt's row, which
-// recordPendingMessageDelivery used to resume while overwriting its mode. That would publish a
-// second frame under one attempt number and make the history lie. The stranded attempt is
-// settled failed as superseded, with its own message.delivery receipt, and the new mode gets a
-// row pinned to the session the stranded row named. A role: message takes the same path without
-// a 409: the new attempt's route is that pinned session, not whoever holds the role now.
+// must reach the agent - and it must not ride on the stranded attempt's row: resuming that row
+// while overwriting its mode would publish a second frame under one attempt number and make the
+// history lie. The stranded attempt is settled failed as superseded, with its own message.delivery
+// receipt, and the new mode gets a row pinned to the session the stranded row named. A role:
+// message takes the same path without a 409: the new attempt's route is that pinned session, not
+// whoever holds the role now.
 func TestRetryInAnotherModeSupersedesTheStrandedAttempt(t *testing.T) {
 	for _, target := range []string{"session:s1", "role:planner"} {
 		t.Run(target, func(t *testing.T) {

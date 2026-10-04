@@ -9,9 +9,9 @@ import (
 )
 
 // A project document's owner row is the artifact itself, and the upload has to take it before the
-// document's room lock. A settlement holds that owner row and then takes the room; while the
-// upload took the room first - it locked no owner until the event it appends at the end - the two
-// closed a cycle and Postgres broke it with `deadlock detected`, the 500 this path returned under
+// document's room lock. A settlement holds that owner row and then takes the room; an upload that
+// took the room first - locking no owner until the event it appends at the end - would close a
+// cycle with it, which Postgres breaks with `deadlock detected`, a 500 from this path under
 // load. Holding the owner row here must therefore stop the upload before the room lock, leaving
 // the room free to take behind it.
 func TestProjectDocumentUploadTakesItsOwnerRowBeforeTheRoomLock(t *testing.T) {

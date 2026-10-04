@@ -5,126 +5,64 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
-	"encoding/base64"
-	"encoding/json"
 	"errors"
-	"fmt"
-	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgconn"
 
-	"github.com/sjawhar/envoy/internal/broker/approvers"
+	"github.com/sjawhar/envoy/internal/broker/policy"
+	"github.com/sjawhar/envoy/internal/broker/policy/policytest"
 	"github.com/sjawhar/envoy/internal/broker/proof"
 	"github.com/sjawhar/envoy/internal/broker/record"
-	"github.com/sjawhar/envoy/internal/broker/rules"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
 	"github.com/sjawhar/envoy/internal/broker/store"
 	"github.com/sjawhar/envoy/internal/broker/store/storetest"
-	"github.com/sjawhar/envoy/internal/broker/webauthntest"
 )
+
+const testAudience = "broker"
 
 const (
-	testAudience = "broker"
-	testOrigin   = "https://dispatch.test"
-	testRPID     = "dispatch.test"
-	testAAGUID   = "ee882879-721c-4913-9775-3dfcce97072a"
+	// fixtureOperator is the person whose machine the fixture's session runs on.
+	fixtureOperator = "sami@example.com"
+	// otherPerson owns ALICE_KEY.
+	otherPerson = "alice@example.com"
+	// fixtureService is the one registered service, which owns SERVICE_KEY.
+	fixtureService = "legion"
 )
 
-func str(s string) *string { return &s }
-
-// ch flattens a domain-separated challenge's fixed-size digest to the []byte shape
-// Authenticator.Assert wants.
-func ch(c [32]byte) []byte { return c[:] }
-
-// newApprover registers a real WebAuthn key (webauthntest packed attestation over a fresh test
-// CA) for login and returns the CA (the trust root a fixture's approvers.Verifier must share), the
-// authenticator (for later Assert calls), and the parsed KeyEntry a rules file's
-// approvers.logins.<login>.keys needs to reference it — seeded, not endorsed, so Reconcile accepts
-// it with no other live key on the login.
-func newApproverKey(t *testing.T, ca *webauthntest.CA, login string) (*webauthntest.Authenticator, approvers.KeyEntry) {
-	t.Helper()
-	auth := ca.NewAuthenticator(t, uuid.MustParse(testAAGUID))
-	nonce := strings.Repeat("a", 64)
-	challenge := record.RegisterChallenge(login, nonce)
-	entry := approvers.KeyEntry{
-		CredentialID:   base64.RawURLEncoding.EncodeToString(auth.CredentialID),
-		ChallengeNonce: nonce,
-		Registration:   auth.Register(t, testRPID, testOrigin, challenge[:]),
-		Seed:           true,
+// fixtureSecrets are the fixture's namespace secrets: DEEL_API_KEY, the operator's and human-tier,
+// needs the operator's approval whoever asks; ALICE_KEY, another person's agent-tier secret, needs
+// alice's approval for the operator's session; AUTO_TOKEN, the operator's agent-tier secret, is
+// automatic for the operator's session; SHARED_KEY, shared and human-tier, needs anyone's approval;
+// SERVICE_KEY, the registered service's, is denied to every session, since none is the service.
+func fixtureSecrets() []secrets.LocalSecret {
+	return []secrets.LocalSecret{
+		policytest.Secret("DEEL_API_KEY", fixtureOperator, policy.TierHuman, "deel-v1"),
+		policytest.Secret("ALICE_KEY", otherPerson, policy.TierAgent, "alice-v1"),
+		policytest.Secret("AUTO_TOKEN", fixtureOperator, policy.TierAgent, "auto-v1"),
+		policytest.Secret("SHARED_KEY", policy.OwnerShared, policy.TierHuman, "shared-v1"),
+		policytest.Secret("SERVICE_KEY", fixtureService, policy.TierAgent, "service-v1"),
 	}
-	return auth, entry
 }
 
-func newApprover(t *testing.T, login string) (*webauthntest.CA, *webauthntest.Authenticator, approvers.KeyEntry) {
+// fixtureStore is the secrets.Local m's policy and values come from.
+func fixtureStore(m *Machine) *secrets.Local {
+	return m.Secrets.(secrets.AWS).Client.(*secrets.Local)
+}
+
+// retag puts changed into the fixture's store, replacing each secret of the same name, and reloads
+// the policy, as the broker's next refresh does after someone edits a secret in Secrets Manager.
+func retag(t *testing.T, m *Machine, changed ...secrets.LocalSecret) {
 	t.Helper()
-	ca := webauthntest.NewCA(t)
-	auth, entry := newApproverKey(t, ca, login)
-	return ca, auth, entry
-}
-
-// approversYAML renders the rules file's approvers: section for one login's key entry, in the
-// same string-building shape rules_test.go's TestApproversSectionParses uses (YAML is a JSON
-// superset, so the registration blob embeds verbatim).
-func approversYAML(login string, entry approvers.KeyEntry) string {
-	return "approvers:\n  origin: " + testOrigin + "\n  aaguids: [\"" + testAAGUID + "\"]\n  logins:\n    " + login + ":\n      keys:\n" +
-		"        - credential_id: \"" + entry.CredentialID + "\"\n" +
-		"          registration:\n            challenge_nonce: \"" + entry.ChallengeNonce + "\"\n            response: " + string(entry.Registration) + "\n" +
-		"          seed: true\n"
-}
-
-// baseRulesYAML is the fixture's secrets section: DEEL_API_KEY needs sjawhar's approval for a box
-// operated by sjawhar or for any pod, AUTO_TOKEN is automatic for a box operated by sjawhar,
-// DENIED_KEY matches no requester and always denies.
-const baseRulesYAML = `version: 1
-secrets:
-  DEEL_API_KEY:
-    source: example/agent-secrets/DEEL_API_KEY
-    owner: sjawhar
-    delivery: inject
-    max_lifetime_seconds: 43200
-    requesters:
-      - {kind: box, operator: sjawhar, decision: approval, approver: operator}
-      - {kind: pod, decision: approval, approver: "login:sjawhar"}
-  AUTO_TOKEN:
-    source: example/agent-secrets/AUTO_TOKEN
-    owner: sjawhar
-    delivery: inject
-    max_lifetime_seconds: 43200
-    requesters: [{kind: box, operator: sjawhar, decision: automatic}]
-  DENIED_KEY:
-    source: example/agent-secrets/DENIED_KEY
-    owner: sjawhar
-    delivery: inject
-    max_lifetime_seconds: 43200
-    requesters: []
-`
-
-// newRulesCurrent points a fresh *rules.Current at yaml, written to a temp file (rules.Current has
-// no in-memory loader, only FileLoader/S3Loader).
-func newRulesCurrent(t *testing.T, yaml string) *rules.Current {
-	t.Helper()
-	path := t.TempDir() + "/rules.yaml"
-	if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
-		t.Fatalf("write rules: %v", err)
+	for _, s := range changed {
+		fixtureStore(m).Put(s)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	cur, err := rules.NewCurrent(ctx, rules.FileLoader{Path: path}, time.Hour, func(error) {})
-	if err != nil {
-		t.Fatalf("rules.NewCurrent: %v", err)
+	if err := m.Policy.Refresh(context.Background()); err != nil {
+		t.Fatalf("policy refresh: %v", err)
 	}
-	return cur
-}
-
-// withRules re-points m at a rules file holding yaml — for a test that starts with the fixture's
-// rules and then simulates a reload.
-func withRules(t *testing.T, m *Machine, yaml string) {
-	t.Helper()
-	m.Rules = newRulesCurrent(t, yaml)
 }
 
 // replayer builds a Machine.Replay backed directly by the proof_jtis table, mirroring
@@ -132,8 +70,7 @@ func withRules(t *testing.T, m *Machine, yaml string) {
 func replayer(st *store.Store) func(context.Context, string, time.Time) (bool, error) {
 	return func(ctx context.Context, jti string, expires time.Time) (bool, error) {
 		_, err := st.Pool.Exec(ctx, `insert into proof_jtis (jti, expires_at) values ($1,$2)`, jti, expires)
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+		if store.IsUniqueViolation(err) {
 			return false, nil
 		}
 		return err == nil, err
@@ -170,45 +107,28 @@ func newEnrollment(t *testing.T, st *store.Store, kind, runtimeID string, operat
 	return id, key
 }
 
-// newFixture opens a store on a fresh schema, registers and reconciles a real "sjawhar" approver
-// key, builds a *rules.Current from baseRulesYAML plus that key's approvers section, and enrolls
-// one live box/sjawhar enrollment. Returns the Machine, that enrollment's id, its own signing key
-// (for record.Sign), and the approver's authenticator (for Assert/AssertWithCounter/RevokeKey).
-func newFixture(t *testing.T) (m *Machine, enrollmentID string, requesterKey *ecdsa.PrivateKey, approver *webauthntest.Authenticator) {
+// newFixture opens a store on a fresh schema, loads the policy of fixtureSecrets with
+// fixtureService registered, and enrolls one live box session the operator runs. Returns the
+// Machine, that enrollment's id, its own signing key (for record.Sign), and the login
+// DEEL_API_KEY's records name as approver (its owner, the operator).
+func newFixture(t *testing.T) (m *Machine, enrollmentID string, requesterKey *ecdsa.PrivateKey, approver string) {
 	t.Helper()
-	ctx := context.Background()
 	st := storetest.Open(t)
-
-	ca, auth, entry := newApprover(t, "sjawhar")
-	if _, err := st.Pool.Exec(ctx, `insert into approver_key_seeds (login, credential_id) values ($1,$2)`, "sjawhar", entry.CredentialID); err != nil {
-		t.Fatalf("insert approver_key_seeds: %v", err)
-	}
-	approversSvc := &approvers.Service{Store: st, Verifier: &approvers.Verifier{
-		Roots: ca.Pool(), Origin: testOrigin, AAGUIDs: map[uuid.UUID]bool{uuid.MustParse(testAAGUID): true},
-	}}
-	if err := approversSvc.Reconcile(ctx, map[string][]approvers.KeyEntry{"sjawhar": {entry}}); err != nil {
-		t.Fatalf("Reconcile: %v", err)
-	}
-
-	cur := newRulesCurrent(t, baseRulesYAML+approversYAML("sjawhar", entry))
-	enrollmentID, requesterKey = newEnrollment(t, st, "box", "box-a-"+t.Name(), str("sjawhar"), nil)
+	local := secrets.NewLocal(fixtureSecrets()...)
+	enrollmentID, requesterKey = newEnrollment(t, st, "box", "box-a-"+t.Name(), new(fixtureOperator), nil)
 
 	m = &Machine{
-		Store: st,
-		Rules: cur,
-		Secrets: secrets.Fake{
-			"example/agent-secrets/DEEL_API_KEY": "deel-v1",
-			"example/agent-secrets/AUTO_TOKEN":   "auto-v1",
-		},
-		Approvers:  approversSvc,
+		Store:      st,
+		Policy:     policytest.Current(t, local, fixtureService),
+		Secrets:    secrets.AWS{Client: local},
 		MaxGrant:   time.Hour,
 		PendingTTL: 12 * time.Hour,
 		Audience:   testAudience,
 		Skew:       time.Minute,
 		Replay:     replayer(st),
 	}
-	m.Chain = NewChainVerifier(st, approversSvc, testAudience, time.Minute)
-	return m, enrollmentID, requesterKey, auth
+	m.Chain = NewChainVerifier(st, testAudience, time.Minute)
+	return m, enrollmentID, requesterKey, fixtureOperator
 }
 
 // signRequest signs an agent_secret request object over names, ready for Machine.Create.
@@ -241,59 +161,49 @@ func TestCreatePendingWritesTheRecordAndApproveMintsTheGrant(t *testing.T) {
 		t.Fatalf("read record body: %v", err)
 	}
 	parsed, err := record.ParseBody(body)
-	if err != nil || parsed.Approver != "sjawhar" || parsed.ID() != *req.RecordID {
+	if err != nil || parsed.Approver != fixtureOperator || parsed.ID() != *req.RecordID {
 		t.Fatalf("record body %q: %+v %v", body, parsed, err)
 	}
-	assertion := approver.Assert(t, testRPID, testOrigin, ch(record.ApproveChallenge(*req.RecordID)))
-	dec, err := m.ApplyDecision(ctx, *req.RecordID, true, assertion)
+	dec, err := m.ApplyDecision(ctx, *req.RecordID, true, approver)
 	if err != nil || dec.GrantID == "" {
 		t.Fatal(err)
 	}
 	// second decision changes nothing
-	if _, err := m.ApplyDecision(ctx, *req.RecordID, false, assertion); !errors.Is(err, ErrTerminal) {
+	if _, err := m.ApplyDecision(ctx, *req.RecordID, false, approver); !errors.Is(err, ErrTerminal) {
 		t.Fatalf("late deny: %v", err)
 	}
 }
 
-// TestValuesSucceedsTwiceOnALiveApprovedGrant pins that VerifyChain's re-verification of the
-// stored approval assertion is idempotent: the deciding transaction already bumped sign_count to
-// exactly that assertion's own counter, so a re-verification of the same historical assertion
-// always finds counter<=sign_count (approvers.ErrCounterReplay) and must treat that as expected,
-// not as chain failure — otherwise a grant would work exactly once and never again.
-func TestValuesSucceedsTwiceOnALiveApprovedGrant(t *testing.T) {
-	m, enr, key, approver := newFixture(t)
-	ctx := context.Background()
-	req, err := m.Create(ctx, enr, signRequest(t, m, key, "why", "DEEL_API_KEY"), "")
-	if err != nil || req.RecordID == nil {
-		t.Fatalf("Create: %+v %v", req, err)
-	}
-	assertion := approver.Assert(t, testRPID, testOrigin, ch(record.ApproveChallenge(*req.RecordID)))
-	dec, err := m.ApplyDecision(ctx, *req.RecordID, true, assertion)
-	if err != nil || dec.GrantID == "" {
-		t.Fatalf("ApplyDecision: %+v %v", dec, err)
-	}
-	if _, _, _, err := m.Values(ctx, dec.GrantID, enr); err != nil {
-		t.Fatalf("Values(first release) = %v, want success", err)
-	}
-	if _, _, _, err := m.Values(ctx, dec.GrantID, enr); err != nil {
-		t.Fatalf("Values(second release, same never-revoked grant) = %v, want success", err)
-	}
-}
-
-func TestADenyAssertionCannotApprove(t *testing.T) {
+// TestOnlyTheRecordsApproverDecides pins the decision rule: any login but the record's approver
+// is refused on both approve and deny with record.ErrNotApprover and leaves the request pending,
+// the approver decides whatever casing Dispatch sends, and the approved event records the
+// canonical deciding login the chain later re-checks.
+func TestOnlyTheRecordsApproverDecides(t *testing.T) {
 	m, enr, key, approver := newFixture(t)
 	ctx := context.Background()
 	req, err := m.Create(ctx, enr, signRequest(t, m, key, "why", "DEEL_API_KEY"), "")
 	if err != nil || req.RecordID == nil {
 		t.Fatalf("%+v %v", req, err)
 	}
-	denyAssertion := approver.Assert(t, testRPID, testOrigin, ch(record.DenyChallenge(*req.RecordID)))
-	if _, err := m.ApplyDecision(ctx, *req.RecordID, true, denyAssertion); err == nil {
-		t.Fatal("approve with an assertion signed over the deny challenge succeeded, want it refused")
+	for _, approve := range []bool{true, false} {
+		if _, err := m.ApplyDecision(ctx, *req.RecordID, approve, "mallory"); !errors.Is(err, record.ErrNotApprover) {
+			t.Fatalf("ApplyDecision(approve=%v, mallory) = %v, want record.ErrNotApprover", approve, err)
+		}
 	}
-	got, err := m.Get(ctx, req.ID)
-	if err != nil || got.State != "pending" {
-		t.Fatalf("Get = %+v, %v, want still pending", got, err)
+	if got, err := m.Get(ctx, req.ID); err != nil || got.State != "pending" {
+		t.Fatalf("Get after refused decisions = %+v, %v, want still pending", got, err)
+	}
+
+	dec, err := m.ApplyDecision(ctx, *req.RecordID, true, " Sami@Example.com ")
+	if err != nil || dec.State != "granted" {
+		t.Fatalf("ApplyDecision(the approver in another casing) = %+v, %v, want granted", dec, err)
+	}
+	var login string
+	if err := m.Store.Pool.QueryRow(ctx, `select login from credential_request_events where record_id=$1 and event='approved'`, *req.RecordID).Scan(&login); err != nil {
+		t.Fatalf("read approved event: %v", err)
+	}
+	if login != approver {
+		t.Fatalf("approved event login = %q, want %q", login, approver)
 	}
 }
 
@@ -307,45 +217,81 @@ func TestValuesRefusesAGrantWhoseRowWasForged(t *testing.T) {
 	// Simulate a database writer other than the broker: a grant row pointing at a request whose
 	// record has never received an approval event.
 	grantID := uuid.NewString()
-	if _, err := m.Store.Pool.Exec(ctx, `insert into grants (id, request_id, enrollment_id, approver, expires_at) values ($1,$2,$3,'sjawhar', now() + interval '1 hour')`,
+	if _, err := m.Store.Pool.Exec(ctx, `insert into grants (id, request_id, enrollment_id, approver, expires_at) values ($1,$2,$3,'sami@example.com', now() + interval '1 hour')`,
 		grantID, req.ID, enr); err != nil {
 		t.Fatalf("insert forged grant: %v", err)
 	}
-	if _, _, _, err := m.Values(ctx, grantID, enr); !errors.Is(err, ErrGrantChainInvalid) {
+	if _, _, err := m.Values(ctx, grantID, enr); !errors.Is(err, ErrGrantChainInvalid) {
 		t.Fatalf("Values(forged grant) = %v, want ErrGrantChainInvalid", err)
 	}
 }
 
-func TestRevokingTheApprovingKeyKillsTheGrantAtNextRelease(t *testing.T) {
-	m, enr, key, approver := newFixture(t)
-	ctx := context.Background()
-	req, err := m.Create(ctx, enr, signRequest(t, m, key, "why", "DEEL_API_KEY"), "")
-	if err != nil || req.RecordID == nil {
-		t.Fatalf("%+v %v", req, err)
-	}
-	assertion := approver.Assert(t, testRPID, testOrigin, ch(record.ApproveChallenge(*req.RecordID)))
-	dec, err := m.ApplyDecision(ctx, *req.RecordID, true, assertion)
-	if err != nil || dec.GrantID == "" {
-		t.Fatalf("ApplyDecision: %+v %v", dec, err)
-	}
-	if _, _, _, err := m.Values(ctx, dec.GrantID, enr); err != nil {
-		t.Fatalf("Values before revoke: %v", err)
-	}
+// TestValuesRefusesAChainTheBrokerDidNotWrite pins what "every release re-verifies the whole
+// chain" means now that no approval signature exists: a grant releases only while its record is
+// an agent_secret record, reproduces its own content-addressed id, embeds a request object its
+// requester really signed, and carries exactly one terminal decision, an approval by the record's
+// approver. Each subtest writes the kind of row only a writer other than the broker could — past
+// the append-only trigger and the one-decision unique index where it must — and the grant that
+// released before the write releases nothing after it. Nor does reuse hand it back: a new request
+// for the same name opens a fresh pending request rather than returning the grant whose chain no
+// longer verifies.
+func TestValuesRefusesAChainTheBrokerDidNotWrite(t *testing.T) {
+	for name, tamper := range map[string]func(t testing.TB, st *store.Store, recordID string){
+		"a tampered body": storetest.Exec(
+			`alter table credential_requests disable trigger credential_requests_no_update`,
+			`update credential_requests set body = replace(body, 'lifetime_seconds: 3600', 'lifetime_seconds: 43200')
+				where id=$1 and body like '%lifetime_seconds: 3600%'`,
+		),
+		"an approval by another login": storetest.Exec(
+			`update credential_request_events set login='mallory' where record_id=$1 and event='approved'`,
+		),
+		"a second terminal event": storetest.Exec(
+			`drop index credential_request_decision`,
+			`insert into credential_request_events (record_id, event, login, actor) values ($1, 'denied', 'sami@example.com', 'human:sami@example.com')`,
+		),
+		"a request object whose signature was altered": func(t testing.TB, st *store.Store, recordID string) {
+			forged := storetest.ForgeRequestSignature(t, st, recordID)
+			tag, err := st.Pool.Exec(context.Background(), `update requests set record_id=$2 where record_id=$1`, recordID, forged)
+			if err != nil || tag.RowsAffected() != 1 {
+				t.Fatalf("point the request at the forged record: %d rows, %v", tag.RowsAffected(), err)
+			}
+		},
+		"a record of the other kind": func(t testing.TB, st *store.Store, recordID string) {
+			copyID := storetest.CopyAsOtherKind(t, st, recordID)
+			tag, err := st.Pool.Exec(context.Background(), `update requests set record_id=$2 where record_id=$1`, recordID, copyID)
+			if err != nil || tag.RowsAffected() != 1 {
+				t.Fatalf("point the request at the other kind's record: %d rows, %v", tag.RowsAffected(), err)
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			m, enr, key, approver := newFixture(t)
+			ctx := context.Background()
+			req, err := m.Create(ctx, enr, signRequest(t, m, key, "why", "DEEL_API_KEY"), "")
+			if err != nil || req.RecordID == nil {
+				t.Fatalf("%+v %v", req, err)
+			}
+			dec, err := m.ApplyDecision(ctx, *req.RecordID, true, approver)
+			if err != nil || dec.GrantID == "" {
+				t.Fatalf("ApplyDecision: %+v %v", dec, err)
+			}
+			if _, _, err := m.Values(ctx, dec.GrantID, enr); err != nil {
+				t.Fatalf("Values before the write: %v", err)
+			}
 
-	credentialID := base64.RawURLEncoding.EncodeToString(approver.CredentialID)
-	tx, err := m.Store.Pool.Begin(ctx)
-	if err != nil {
-		t.Fatalf("begin: %v", err)
-	}
-	if err := m.Approvers.RevokeKey(ctx, tx, credentialID, "human:sjawhar"); err != nil {
-		t.Fatalf("RevokeKey: %v", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		t.Fatalf("commit: %v", err)
-	}
+			tamper(t, m.Store, *req.RecordID)
 
-	if _, _, _, err := m.Values(ctx, dec.GrantID, enr); !errors.Is(err, ErrGrantChainInvalid) {
-		t.Fatalf("Values after the approving key was revoked = %v, want ErrGrantChainInvalid", err)
+			if _, _, err := m.Values(ctx, dec.GrantID, enr); !errors.Is(err, ErrGrantChainInvalid) {
+				t.Fatalf("Values after %s = %v, want ErrGrantChainInvalid", name, err)
+			}
+			again, err := m.Create(ctx, enr, signRequest(t, m, key, "why, again", "DEEL_API_KEY"), "")
+			if err != nil {
+				t.Fatalf("Create after %s: %v", name, err)
+			}
+			if again.ID == req.ID || again.State != "pending" || again.GrantID != nil {
+				t.Fatalf("Create after %s = %+v, want a fresh pending request, not request %s's grant %s", name, again, req.ID, dec.GrantID)
+			}
+		})
 	}
 }
 
@@ -353,7 +299,7 @@ func TestCreateRefusesLoginHintAndForeignThumbprint(t *testing.T) {
 	m, enr, key, _ := newFixture(t)
 	ctx := context.Background()
 
-	withHint, err := record.Sign(key, m.Audience, []record.AuthorizationDetail{{Type: "agent_secret", Identifier: "DEEL_API_KEY", Actions: []string{"inject"}}}, "why", "sjawhar", time.Now())
+	withHint, err := record.Sign(key, m.Audience, []record.AuthorizationDetail{{Type: "agent_secret", Identifier: "DEEL_API_KEY", Actions: []string{"inject"}}}, "why", fixtureOperator, time.Now())
 	if err != nil {
 		t.Fatalf("record.Sign(login_hint): %v", err)
 	}
@@ -379,7 +325,7 @@ func TestAutomaticAndDeniedEvaluationsWriteNoRecordRow(t *testing.T) {
 	if err != nil || auto.State != "granted" || auto.RecordID != nil || auto.GrantID == nil {
 		t.Fatalf("Create(automatic) = %+v, %v, want granted with a grant and no record", auto, err)
 	}
-	denied, err := m.Create(ctx, enr, signRequest(t, m, key, "need it", "DENIED_KEY"), "")
+	denied, err := m.Create(ctx, enr, signRequest(t, m, key, "need it", "SERVICE_KEY"), "")
 	if err != nil || denied.State != "denied" || denied.RecordID != nil {
 		t.Fatalf("Create(denied) = %+v, %v, want denied with no record", denied, err)
 	}
@@ -392,22 +338,23 @@ func TestAutomaticAndDeniedEvaluationsWriteNoRecordRow(t *testing.T) {
 func TestDenyOpensNoRecord(t *testing.T) {
 	m, enr, key, _ := newFixture(t)
 	ctx := context.Background()
-	req, err := m.Create(ctx, enr, signRequest(t, m, key, "need it", "DEEL_API_KEY", "DENIED_KEY"), "")
+	req, err := m.Create(ctx, enr, signRequest(t, m, key, "need it", "DEEL_API_KEY", "SERVICE_KEY"), "")
 	if err != nil || req.State != "denied" || req.RecordID != nil {
 		t.Fatalf("Create = %+v, %v, want denied with no record (any denied name refuses the whole request)", req, err)
 	}
 }
 
-// TestCreateRefusesAnUnknownSecretNameWithNoRecordWritten pins contract v9's "identifier must
-// name a rule's secret (else 400 UNKNOWN_SECRET at record time)": a request naming a secret no
-// rule mentions at all aborts the whole Create call with rules.ErrUnknownSecret rather than
+// TestCreateRefusesAnUnknownSecretNameWithNoRecordWritten pins the shared broker contract's
+// "identifier must name a rule's secret (else 400 UNKNOWN_SECRET at record time)": a request
+// naming a secret no
+// policy serves at all aborts the whole Create call with policy.ErrUnknownSecret rather than
 // folding silently into an ordinary "deny" decision, and writes no request row at all.
 func TestCreateRefusesAnUnknownSecretNameWithNoRecordWritten(t *testing.T) {
 	m, enr, key, _ := newFixture(t)
 	ctx := context.Background()
 	_, err := m.Create(ctx, enr, signRequest(t, m, key, "need it", "NOT_A_REAL_SECRET"), "")
-	if !errors.Is(err, rules.ErrUnknownSecret) {
-		t.Fatalf("Create(unknown secret) error = %v, want rules.ErrUnknownSecret", err)
+	if !errors.Is(err, policy.ErrUnknownSecret) {
+		t.Fatalf("Create(unknown secret) error = %v, want policy.ErrUnknownSecret", err)
 	}
 	var count int
 	if err := m.Store.Pool.QueryRow(ctx, `select count(*) from requests where enrollment_id=$1`, enr).Scan(&count); err != nil || count != 0 {
@@ -462,10 +409,45 @@ func TestExpirePendingWritesTheExpiredEventAndFlipsTheRequest(t *testing.T) {
 	}
 }
 
+// TestApplyDecisionRefusesARecordPastItsExpiry pins that a record past its expiry is decided no
+// more, before the sweeper has expired it as well as after: approve and deny both answer
+// ErrExpired, whose message says the record expired rather than that it was decided, and neither
+// writes a decision or a grant — including after the sweep has actually run, which writes exactly
+// the one 'expired' event and nothing a later decision adds to.
+func TestApplyDecisionRefusesARecordPastItsExpiry(t *testing.T) {
+	m, enr, key, approver := newFixture(t)
+	ctx := context.Background()
+	m.PendingTTL = -time.Minute
+	req, err := m.Create(ctx, enr, signRequest(t, m, key, "need it", "DEEL_API_KEY"), "")
+	if err != nil || req.RecordID == nil {
+		t.Fatalf("Create = %+v, %v", req, err)
+	}
+	for _, approve := range []bool{true, false} {
+		dec, err := m.ApplyDecision(ctx, *req.RecordID, approve, approver)
+		if !errors.Is(err, ErrExpired) {
+			t.Fatalf("ApplyDecision(approve=%v) before the sweep = %+v, %v, want ErrExpired", approve, dec, err)
+		}
+	}
+	if _, err := m.ExpirePending(ctx, time.Now()); err != nil {
+		t.Fatalf("ExpirePending: %v", err)
+	}
+	for _, approve := range []bool{true, false} {
+		dec, err := m.ApplyDecision(ctx, *req.RecordID, approve, approver)
+		if !errors.Is(err, ErrExpired) {
+			t.Fatalf("ApplyDecision(approve=%v) after the sweep = %+v, %v, want ErrExpired", approve, dec, err)
+		}
+	}
+	var events, grants int
+	if err := m.Store.Pool.QueryRow(ctx, `select (select count(*) from credential_request_events where record_id=$1),
+		(select count(*) from grants where request_id=$2)`, *req.RecordID, req.ID).Scan(&events, &grants); err != nil || events != 1 || grants != 0 {
+		t.Fatalf("after the refused decisions: %d events, %d grants, %v; want 1 event (the sweep's own), 0 grants", events, grants, err)
+	}
+}
+
 func TestExpirePendingAuditsEveryExpiredRequest(t *testing.T) {
 	m, enrA, keyA, _ := newFixture(t)
 	ctx := context.Background()
-	enrB, keyB := newEnrollment(t, m.Store, "box", "box-b-"+t.Name(), str("sjawhar"), nil)
+	enrB, keyB := newEnrollment(t, m.Store, "box", "box-b-"+t.Name(), new(fixtureOperator), nil)
 
 	reqA, err := m.Create(ctx, enrA, signRequest(t, m, keyA, "need it", "DEEL_API_KEY"), "")
 	if err != nil {
@@ -502,7 +484,7 @@ func TestExpirePendingAuditsEveryExpiredRequest(t *testing.T) {
 func TestOtherEnrollmentCannotUseGrant(t *testing.T) {
 	m, enrA, keyA, _ := newFixture(t)
 	ctx := context.Background()
-	enrB, _ := newEnrollment(t, m.Store, "box", "box-b-"+t.Name(), str("sjawhar"), nil)
+	enrB, _ := newEnrollment(t, m.Store, "box", "box-b-"+t.Name(), new(fixtureOperator), nil)
 
 	granted, err := m.Create(ctx, enrA, signRequest(t, m, keyA, "need it", "AUTO_TOKEN"), "")
 	if err != nil {
@@ -512,7 +494,7 @@ func TestOtherEnrollmentCannotUseGrant(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create(pending): %v", err)
 	}
-	if _, _, _, err := m.Values(ctx, *granted.GrantID, enrB); !errors.Is(err, ErrNotYours) {
+	if _, _, err := m.Values(ctx, *granted.GrantID, enrB); !errors.Is(err, ErrNotYours) {
 		t.Fatalf("Values(other enrollment) = %v, want ErrNotYours", err)
 	}
 	if err := m.Cancel(ctx, pending.ID, enrB); !errors.Is(err, ErrNotYours) {
@@ -533,7 +515,7 @@ func TestRevokeStopsValues(t *testing.T) {
 	if err := m.RevokeGrant(ctx, *req.GrantID, enr); err != nil {
 		t.Fatalf("RevokeGrant: %v", err)
 	}
-	if _, _, _, err := m.Values(ctx, *req.GrantID, enr); !errors.Is(err, ErrGrantNotLive) {
+	if _, _, err := m.Values(ctx, *req.GrantID, enr); !errors.Is(err, ErrGrantNotLive) {
 		t.Fatalf("Values(after revoke) = %v, want ErrGrantNotLive", err)
 	}
 }
@@ -541,7 +523,7 @@ func TestRevokeStopsValues(t *testing.T) {
 func TestMachineSessionID(t *testing.T) {
 	m, enrA, keyA, _ := newFixture(t)
 	ctx := context.Background()
-	enrB, keyB := newEnrollment(t, m.Store, "box", "box-b-"+t.Name(), str("sjawhar"), nil)
+	enrB, keyB := newEnrollment(t, m.Store, "box", "box-b-"+t.Name(), new(fixtureOperator), nil)
 
 	compact, err := record.Sign(keyA, m.Audience, []record.AuthorizationDetail{{Type: "agent_secret", Identifier: "AUTO_TOKEN", Actions: []string{"inject"}}}, "need it", "", time.Now())
 	if err != nil {
@@ -574,8 +556,7 @@ func TestCreateReusesLiveGrantForIdenticalNameSetWithoutNewRecord(t *testing.T) 
 	if err != nil || req.RecordID == nil {
 		t.Fatalf("Create: %+v %v", req, err)
 	}
-	assertion := approver.Assert(t, testRPID, testOrigin, ch(record.ApproveChallenge(*req.RecordID)))
-	dec, err := m.ApplyDecision(ctx, *req.RecordID, true, assertion)
+	dec, err := m.ApplyDecision(ctx, *req.RecordID, true, approver)
 	if err != nil || dec.GrantID == "" {
 		t.Fatalf("ApplyDecision: %+v %v", dec, err)
 	}
@@ -600,8 +581,7 @@ func TestCreateDoesNotReuseLiveGrantForADifferentNameSet(t *testing.T) {
 	if err != nil || first.RecordID == nil {
 		t.Fatalf("Create: %+v %v", first, err)
 	}
-	assertion := approver.Assert(t, testRPID, testOrigin, ch(record.ApproveChallenge(*first.RecordID)))
-	if _, err := m.ApplyDecision(ctx, *first.RecordID, true, assertion); err != nil {
+	if _, err := m.ApplyDecision(ctx, *first.RecordID, true, approver); err != nil {
 		t.Fatalf("ApplyDecision: %v", err)
 	}
 
@@ -655,11 +635,11 @@ func TestValuesHoldsNoPooledConnectionWhileReadingSecrets(t *testing.T) {
 	if err != nil || req.GrantID == nil {
 		t.Fatalf("Create = %+v, %v, want an automatic grant", req, err)
 	}
-	reader := gatedReader{Fake: m.Secrets.(secrets.Fake), entered: make(chan struct{}, 1), gate: make(chan struct{})}
+	reader := gatedReader{Reader: m.Secrets, entered: make(chan struct{}, 1), gate: make(chan struct{})}
 	m.Secrets = reader
 	done := make(chan error, 1)
 	go func() {
-		_, _, _, err := m.Values(ctx, *req.GrantID, enr)
+		_, _, err := m.Values(ctx, *req.GrantID, enr)
 		done <- err
 	}()
 	awaitEntered(t, reader.entered, "the secret read")
@@ -673,10 +653,10 @@ func TestValuesHoldsNoPooledConnectionWhileReadingSecrets(t *testing.T) {
 	}
 }
 
-// gatedReader is a secrets.Reader that announces each Read on entered and answers from its Fake
-// only once gate is closed.
+// gatedReader is a secrets.Reader that announces each Read on entered and answers from the
+// Reader it wraps only once gate is closed.
 type gatedReader struct {
-	secrets.Fake
+	secrets.Reader
 	entered chan struct{}
 	gate    chan struct{}
 }
@@ -684,7 +664,7 @@ type gatedReader struct {
 func (g gatedReader) Read(ctx context.Context, source string) (string, error) {
 	g.entered <- struct{}{}
 	<-g.gate
-	return g.Fake.Read(ctx, source)
+	return g.Reader.Read(ctx, source)
 }
 
 // awaitEntered waits for one announcement on entered, failing t after five seconds.
@@ -697,153 +677,52 @@ func awaitEntered(t *testing.T, entered <-chan struct{}, what string) {
 	}
 }
 
-// approverKeyEntry reads back login's already-reconciled key from Postgres as a KeyEntry, for a
-// test that needs to embed the same key's approvers: section into a different rules file than the
-// fixture's own — reconciling the same credential id again is a no-op once its registration
-// matches byte-for-byte, so this never needs a second CA-signed registration.
-func approverKeyEntry(t *testing.T, m *Machine, login string) approvers.KeyEntry {
-	t.Helper()
-	var entry approvers.KeyEntry
-	if err := m.Store.Pool.QueryRow(context.Background(), `select credential_id, challenge_nonce, registration from approver_keys where login=$1 limit 1`, login).
-		Scan(&entry.CredentialID, &entry.ChallengeNonce, &entry.Registration); err != nil {
-		t.Fatalf("read %s's persisted key: %v", login, err)
-	}
-	entry.Seed = true
-	return entry
-}
-
 // TestRevokeByApproverIsLimitedToTheApproverOrOperator pins that a human may end only a grant they
-// approved or one whose enrollment they operate: any other key is refused and the grant stays
-// live. Needs a second login (mallory) under the same trust root, so it builds its own
-// environment from the shared low-level helpers rather than newFixture.
+// approved or one whose enrollment they operate: any other login is refused and the grant stays
+// live. ALICE_KEY's approver (alice, its owner) is not its enrollment's operator, so each half of
+// the rule is exercised on its own.
 func TestRevokeByApproverIsLimitedToTheApproverOrOperator(t *testing.T) {
+	m, enr, key, operator := newFixture(t)
 	ctx := context.Background()
-	st := storetest.Open(t)
-	ca := webauthntest.NewCA(t)
-	sjawharAuth, sjawharEntry := newApproverKey(t, ca, "sjawhar")
-	malloryAuth, malloryEntry := newApproverKey(t, ca, "mallory")
-	for login, entry := range map[string]approvers.KeyEntry{"sjawhar": sjawharEntry, "mallory": malloryEntry} {
-		if _, err := st.Pool.Exec(ctx, `insert into approver_key_seeds (login, credential_id) values ($1,$2)`, login, entry.CredentialID); err != nil {
-			t.Fatalf("insert approver_key_seeds(%s): %v", login, err)
-		}
-	}
-	approversSvc := &approvers.Service{Store: st, Verifier: &approvers.Verifier{
-		Roots: ca.Pool(), Origin: testOrigin, AAGUIDs: map[uuid.UUID]bool{uuid.MustParse(testAAGUID): true},
-	}}
-	if err := approversSvc.Reconcile(ctx, map[string][]approvers.KeyEntry{"sjawhar": {sjawharEntry}, "mallory": {malloryEntry}}); err != nil {
-		t.Fatalf("Reconcile: %v", err)
-	}
-	cur := newRulesCurrent(t, baseRulesYAML+approversYAML("sjawhar", sjawharEntry))
-	enr, key := newEnrollment(t, st, "box", "box-a-"+t.Name(), str("sjawhar"), nil)
-	m := &Machine{
-		Store: st, Rules: cur,
-		Secrets:    secrets.Fake{"example/agent-secrets/DEEL_API_KEY": "deel-v1", "example/agent-secrets/AUTO_TOKEN": "auto-v1"},
-		Approvers:  approversSvc,
-		MaxGrant:   time.Hour,
-		PendingTTL: 12 * time.Hour,
-		Audience:   testAudience,
-		Skew:       time.Minute,
-		Replay:     replayer(st),
-	}
-	m.Chain = NewChainVerifier(st, approversSvc, testAudience, time.Minute)
 
-	// The operator's own key may revoke an automatic grant it never personally approved; mallory,
-	// neither its approver nor its operator, may not.
+	// The operator may revoke an automatic grant nobody approved; mallory, neither its approver
+	// nor its operator, may not.
 	automatic, err := m.Create(ctx, enr, signRequest(t, m, key, "need it", "AUTO_TOKEN"), "")
 	if err != nil || automatic.GrantID == nil {
 		t.Fatalf("Create(automatic) = %+v, %v", automatic, err)
 	}
-	revokeAssertion := func(auth *webauthntest.Authenticator, grantID string) json.RawMessage {
-		return auth.Assert(t, testRPID, testOrigin, ch(record.RevokeChallenge(grantID)))
-	}
-	if err := m.RevokeByApprover(ctx, *automatic.GrantID, revokeAssertion(malloryAuth, *automatic.GrantID)); !errors.Is(err, ErrNotApprover) {
+	if err := m.RevokeByApprover(ctx, *automatic.GrantID, "mallory"); !errors.Is(err, ErrNotApprover) {
 		t.Fatalf("RevokeByApprover(mallory, not the operator) = %v, want ErrNotApprover", err)
 	}
-	if _, _, _, err := m.Values(ctx, *automatic.GrantID, enr); err != nil {
+	if _, _, err := m.Values(ctx, *automatic.GrantID, enr); err != nil {
 		t.Fatalf("Values after a refused revoke = %v, want the grant still live", err)
 	}
-	if err := m.RevokeByApprover(ctx, *automatic.GrantID, revokeAssertion(sjawharAuth, *automatic.GrantID)); err != nil {
-		t.Fatalf("RevokeByApprover(sjawhar, the operator) = %v", err)
+	if err := m.RevokeByApprover(ctx, *automatic.GrantID, operator); err != nil {
+		t.Fatalf("RevokeByApprover(the operator) = %v", err)
 	}
 
-	// A pending, then approved, request: only its approver (or the enrollment's operator, tested
-	// above) may revoke it.
-	pending, err := m.Create(ctx, enr, signRequest(t, m, key, "need it", "DEEL_API_KEY"), "")
+	// A grant alice approved: alice, its approver though not its operator, may revoke it, and
+	// mallory still may not.
+	pending, err := m.Create(ctx, enr, signRequest(t, m, key, "need it", "ALICE_KEY"), "")
 	if err != nil || pending.RecordID == nil {
 		t.Fatalf("Create(pending) = %+v, %v", pending, err)
 	}
-	approveAssertion := sjawharAuth.Assert(t, testRPID, testOrigin, ch(record.ApproveChallenge(*pending.RecordID)))
-	dec, err := m.ApplyDecision(ctx, *pending.RecordID, true, approveAssertion)
+	dec, err := m.ApplyDecision(ctx, *pending.RecordID, true, otherPerson)
 	if err != nil || dec.GrantID == "" {
-		t.Fatalf("ApplyDecision: %+v %v", dec, err)
+		t.Fatalf("ApplyDecision(alice): %+v %v", dec, err)
 	}
-	if err := m.RevokeByApprover(ctx, dec.GrantID, revokeAssertion(malloryAuth, dec.GrantID)); !errors.Is(err, ErrNotApprover) {
-		t.Fatalf("RevokeByApprover(a key that is neither approver nor operator) = %v, want ErrNotApprover", err)
+	if err := m.RevokeByApprover(ctx, dec.GrantID, "mallory"); !errors.Is(err, ErrNotApprover) {
+		t.Fatalf("RevokeByApprover(a login that is neither approver nor operator) = %v, want ErrNotApprover", err)
 	}
-	if err := m.RevokeByApprover(ctx, dec.GrantID, revokeAssertion(sjawharAuth, dec.GrantID)); err != nil {
+	if _, _, err := m.Values(ctx, dec.GrantID, enr); err != nil {
+		t.Fatalf("Values after a refused revoke = %v, want the grant still live", err)
+	}
+	if err := m.RevokeByApprover(ctx, dec.GrantID, "Alice@Example.com"); err != nil {
 		t.Fatalf("RevokeByApprover(the approver) = %v", err)
 	}
 	var actor string
-	if err := m.Store.Pool.QueryRow(ctx, `select actor from audit where kind='grant.revoked' and grant_id=$1`, dec.GrantID).Scan(&actor); err != nil || actor != "human:sjawhar" {
-		t.Fatalf("grant.revoked actor = %q, %v, want human:sjawhar", actor, err)
-	}
-}
-
-func TestCoalescingComparesWholeNames(t *testing.T) {
-	m, enr, key, _ := newFixture(t)
-	ctx := context.Background()
-	rule := `
-    source: example/agent-secrets/%s
-    owner: sjawhar
-    delivery: inject
-    max_lifetime_seconds: 3600
-    requesters:
-      - {kind: box, operator: sjawhar, decision: approval, approver: operator}
-`
-	entry := approverKeyEntry(t, m, "sjawhar")
-	withRules(t, m, "version: 1\nsecrets:\n  PAIR_A:"+fmt.Sprintf(rule, "a")+"  PAIR_B:"+fmt.Sprintf(rule, "b")+"  \"PAIR_A,PAIR_B\":"+fmt.Sprintf(rule, "ab")+approversYAML("sjawhar", entry))
-
-	pair, err := m.Create(ctx, enr, signRequest(t, m, key, "need both", "PAIR_A", "PAIR_B"), "")
-	if err != nil || pair.State != "pending" {
-		t.Fatalf("Create(pair) = %+v, %v, want pending", pair, err)
-	}
-	joined, err := m.Create(ctx, enr, signRequest(t, m, key, "need the joined one", "PAIR_A,PAIR_B"), "")
-	if err != nil || joined.State != "pending" {
-		t.Fatalf("Create(joined) = %+v, %v, want pending", joined, err)
-	}
-	if joined.Coalesced || joined.ID == pair.ID {
-		t.Fatalf("joined = %+v, want its own request, never the pair's", joined)
-	}
-}
-
-// TestAuditSurvivesControlCharactersInSecretNames pins that the audit trail round-trips a secret
-// name containing control characters. The name is a rule's own secret (denied for everyone) so
-// this exercises the ordinary deny path rather than the unknown-secret refusal
-// (TestCreateRefusesAnUnknownSecretNameWithNoRecordWritten covers that one, and an unknown name
-// aborts Create before anything is audited).
-func TestAuditSurvivesControlCharactersInSecretNames(t *testing.T) {
-	m, enr, key, _ := newFixture(t)
-	ctx := context.Background()
-	name := "BELL\aNAME\vTAB"
-	withRules(t, m, `version: 1
-secrets:
-  "BELL\aNAME\vTAB":
-    source: example/agent-secrets/odd-name
-    owner: sjawhar
-    delivery: inject
-    max_lifetime_seconds: 43200
-    requesters: []
-`)
-	req, err := m.Create(ctx, enr, signRequest(t, m, key, "odd name", name), "")
-	if err != nil || req.State != "denied" {
-		t.Fatalf("Create = %+v, %v, want denied", req, err)
-	}
-	var recorded []string
-	if err := m.Store.Pool.QueryRow(ctx, `select array(select jsonb_array_elements_text(detail->'secrets')) from audit where kind='request.created' and request_id=$1`, req.ID).Scan(&recorded); err != nil {
-		t.Fatalf("read request.created audit row: %v", err)
-	}
-	if len(recorded) != 1 || recorded[0] != name {
-		t.Fatalf("audited secrets = %q, want [%q]", recorded, name)
+	if err := m.Store.Pool.QueryRow(ctx, `select actor from audit where kind='grant.revoked' and grant_id=$1`, dec.GrantID).Scan(&actor); err != nil || actor != "human:"+otherPerson {
+		t.Fatalf("grant.revoked actor = %q, %v, want human:%s", actor, err, otherPerson)
 	}
 }
 
@@ -859,8 +738,7 @@ func TestApprovalAfterTheEnrollmentLapsedDenies(t *testing.T) {
 	if _, err := m.Store.Pool.Exec(ctx, `update enrollments set lease_expires_at = now() - interval '1 minute' where id=$1`, enr); err != nil {
 		t.Fatalf("lapse lease: %v", err)
 	}
-	assertion := approver.Assert(t, testRPID, testOrigin, ch(record.ApproveChallenge(*req.RecordID)))
-	dec, err := m.ApplyDecision(ctx, *req.RecordID, true, assertion)
+	dec, err := m.ApplyDecision(ctx, *req.RecordID, true, approver)
 	if err != nil {
 		t.Fatalf("ApplyDecision: %v", err)
 	}
@@ -873,26 +751,38 @@ func TestApprovalAfterTheEnrollmentLapsedDenies(t *testing.T) {
 	}
 }
 
-const tightenedRules = `version: 1
-secrets:
-  AUTO_TOKEN:
-    source: example/agent-secrets/AUTO_TOKEN
-    owner: sjawhar
-    delivery: inject
-    max_lifetime_seconds: 43200
-    requesters: %s
-`
-
-// TestTightenedRulesStopLiveGrants pins that a live grant is re-checked against rules that changed
-// after it was decided: once the rules deny the requester, or want an approval the automatic
-// grant never had, values are refused and the grant is no longer handed back by reuse.
-func TestTightenedRulesStopLiveGrants(t *testing.T) {
-	for name, requesters := range map[string]string{
-		"denied":            "[]",
-		"approval-now":      "[{kind: box, operator: sjawhar, decision: approval, approver: operator}]",
-		"other-operator":    "[{kind: box, operator: mallory, decision: automatic}]",
-		"other-kind":        "[{kind: host, operator: sjawhar, decision: automatic}]",
-		"explicitly-denied": "[{kind: box, operator: sjawhar, decision: deny}]",
+// TestTightenedPolicyStopsLiveGrants pins that a live automatic grant is re-checked against tags
+// edited after it was decided: once the policy denies the requester, wants an approval the
+// automatic grant never had, or no longer serves the secret at all, values are refused and the
+// grant is no longer handed back by reuse.
+func TestTightenedPolicyStopsLiveGrants(t *testing.T) {
+	autoToken := func(owner, tier string) secrets.LocalSecret {
+		return policytest.Secret("AUTO_TOKEN", owner, tier, "auto-v1")
+	}
+	for name, tighten := range map[string]func(t *testing.T, m *Machine){
+		"tier raised to human": func(t *testing.T, m *Machine) {
+			retag(t, m, autoToken(fixtureOperator, policy.TierHuman))
+		},
+		"owner changed to another person": func(t *testing.T, m *Machine) {
+			retag(t, m, autoToken(otherPerson, policy.TierAgent))
+		},
+		"owner changed to a service": func(t *testing.T, m *Machine) {
+			retag(t, m, autoToken(fixtureService, policy.TierAgent))
+		},
+		"owner tag removed": func(t *testing.T, m *Machine) {
+			untagged := autoToken(fixtureOperator, policy.TierAgent)
+			delete(untagged.Tags, policy.TagOwner)
+			retag(t, m, untagged)
+		},
+		"moved to another key": func(t *testing.T, m *Machine) {
+			moved := autoToken(fixtureOperator, policy.TierAgent)
+			moved.KmsKeyID = "arn:aws:kms:us-east-1:111122223333:key/another-key"
+			retag(t, m, moved)
+		},
+		"deleted": func(t *testing.T, m *Machine) {
+			fixtureStore(m).Delete(policytest.ID("AUTO_TOKEN"))
+			retag(t, m)
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			m, enr, key, _ := newFixture(t)
@@ -901,88 +791,61 @@ func TestTightenedRulesStopLiveGrants(t *testing.T) {
 			if err != nil || granted.GrantID == nil {
 				t.Fatalf("Create = %+v, %v, want an automatic grant", granted, err)
 			}
-			withRules(t, m, fmt.Sprintf(tightenedRules, requesters)+approversYAML("sjawhar", approverKeyEntry(t, m, "sjawhar")))
-			if _, _, _, err := m.Values(ctx, *granted.GrantID, enr); !errors.Is(err, ErrGrantNotLive) {
-				t.Fatalf("Values under tightened rules = %v, want ErrGrantNotLive", err)
+			tighten(t, m)
+			if _, _, err := m.Values(ctx, *granted.GrantID, enr); !errors.Is(err, ErrGrantNotLive) {
+				t.Fatalf("Values under the tightened policy = %v, want ErrGrantNotLive", err)
 			}
 			again, err := m.Create(ctx, enr, signRequest(t, m, key, "need it again", "AUTO_TOKEN"), "")
-			if err != nil {
-				t.Fatalf("Create(again): %v", err)
-			}
-			if again.ID == granted.ID {
-				t.Fatalf("Create(again) reused the grant the tightened rules no longer allow")
+			if err == nil && again.ID == granted.ID {
+				t.Fatalf("Create(again) reused the grant the tightened policy no longer allows")
 			}
 		})
 	}
 }
 
-// TestUnchangedPermissionSurvivesARulesChange pins the other side: a rules change that still
-// allows the grant (here, only the lifetime changes) keeps it usable and reusable.
-func TestUnchangedPermissionSurvivesARulesChange(t *testing.T) {
+// TestUnchangedPermissionSurvivesAPolicyChange pins the other side: a tag edit that still lets the
+// requester have the secret at once keeps its grant usable and reusable, whether the edit is to
+// another secret or to this one.
+func TestUnchangedPermissionSurvivesAPolicyChange(t *testing.T) {
+	for name, edit := range map[string]secrets.LocalSecret{
+		"another secret retiered": policytest.Secret("DEEL_API_KEY", fixtureOperator, policy.TierAgent, "deel-v1"),
+		"this secret now shared":  policytest.Secret("AUTO_TOKEN", policy.OwnerShared, policy.TierAgent, "auto-v1"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			m, enr, key, _ := newFixture(t)
+			ctx := context.Background()
+			granted, err := m.Create(ctx, enr, signRequest(t, m, key, "need it", "AUTO_TOKEN"), "")
+			if err != nil || granted.GrantID == nil {
+				t.Fatalf("Create = %+v, %v", granted, err)
+			}
+			before := m.Policy.Get().Version
+			retag(t, m, edit)
+			if m.Policy.Get().Version == before {
+				t.Fatalf("the edit left the policy version %s unchanged, so it re-checks nothing", before)
+			}
+			if _, _, err := m.Values(ctx, *granted.GrantID, enr); err != nil {
+				t.Fatalf("Values = %v, want the grant still usable", err)
+			}
+			if again, err := m.Create(ctx, enr, signRequest(t, m, key, "again", "AUTO_TOKEN"), ""); err != nil || again.ID != granted.ID {
+				t.Fatalf("Create(again) = %+v, %v, want the live grant reused", again, err)
+			}
+		})
+	}
+}
+
+// TestValuesNamesASecretDeletedBeforeTheNextRefresh pins that a granted secret deleted from Secrets
+// Manager before the policy's next refresh is refused as ErrSecretNotInStore naming the secret, not
+// an opaque failure.
+func TestValuesNamesASecretDeletedBeforeTheNextRefresh(t *testing.T) {
 	m, enr, key, _ := newFixture(t)
 	ctx := context.Background()
 	granted, err := m.Create(ctx, enr, signRequest(t, m, key, "need it", "AUTO_TOKEN"), "")
 	if err != nil || granted.GrantID == nil {
 		t.Fatalf("Create = %+v, %v", granted, err)
 	}
-	withRules(t, m, strings.Replace(fmt.Sprintf(tightenedRules, "[{kind: box, operator: sjawhar, decision: automatic}]"), "43200", "600", 1))
-	if _, _, _, err := m.Values(ctx, *granted.GrantID, enr); err != nil {
-		t.Fatalf("Values = %v, want the grant still usable", err)
-	}
-	if again, err := m.Create(ctx, enr, signRequest(t, m, key, "again", "AUTO_TOKEN"), ""); err != nil || again.ID != granted.ID {
-		t.Fatalf("Create(again) = %+v, %v, want the live grant reused", again, err)
-	}
-}
-
-// TestProxyGrantNeverWidensToInject pins that the delivery frozen at grant time is a ceiling: a
-// name granted for proxy delivery stays proxy-only even after the rules switch it to inject.
-func TestProxyGrantNeverWidensToInject(t *testing.T) {
-	m, enr, key, _ := newFixture(t)
-	ctx := context.Background()
-	proxied := `version: 1
-secrets:
-  AUTO_TOKEN:
-    source: example/agent-secrets/AUTO_TOKEN
-    owner: sjawhar
-    delivery: %s
-    max_lifetime_seconds: 43200
-    requesters: [{kind: box, operator: sjawhar, decision: automatic}]
-%s`
-	withRules(t, m, fmt.Sprintf(proxied, "proxy", "    proxy: {scheme: https, host: example.com, port: 443, path_prefix: /, methods: [GET], header: Authorization, header_format: 'Bearer {value}'}\n"))
-	granted, err := m.Create(ctx, enr, signRequest(t, m, key, "need it", "AUTO_TOKEN"), "")
-	if err != nil || granted.GrantID == nil {
-		t.Fatalf("Create = %+v, %v", granted, err)
-	}
-	withRules(t, m, fmt.Sprintf(proxied, "inject", ""))
-	values, proxyOnly, _, err := m.Values(ctx, *granted.GrantID, enr)
-	if err != nil {
-		t.Fatalf("Values: %v", err)
-	}
-	if len(values) != 0 || len(proxyOnly) != 1 || proxyOnly[0] != "AUTO_TOKEN" {
-		t.Fatalf("Values released %d values, proxy_only %v; want none released and AUTO_TOKEN proxy-only", len(values), proxyOnly)
-	}
-}
-
-// TestValuesNamesASecretMissingFromTheStore pins that a rule whose source the secrets store does
-// not hold is refused as ErrSecretNotInStore naming the secret, not an opaque failure.
-func TestValuesNamesASecretMissingFromTheStore(t *testing.T) {
-	m, enr, key, _ := newFixture(t)
-	ctx := context.Background()
-	withRules(t, m, `version: 1
-secrets:
-  GHOST_KEY:
-    source: example/agent-secrets/GHOST_KEY
-    owner: sjawhar
-    delivery: inject
-    max_lifetime_seconds: 3600
-    requesters: [{kind: box, operator: sjawhar, decision: automatic}]
-`)
-	granted, err := m.Create(ctx, enr, signRequest(t, m, key, "need it", "GHOST_KEY"), "")
-	if err != nil || granted.GrantID == nil {
-		t.Fatalf("Create = %+v, %v", granted, err)
-	}
-	if _, _, _, err := m.Values(ctx, *granted.GrantID, enr); !errors.Is(err, ErrSecretNotInStore) || !strings.Contains(err.Error(), "GHOST_KEY") {
-		t.Fatalf("Values = %v, want ErrSecretNotInStore naming GHOST_KEY", err)
+	fixtureStore(m).Delete(policytest.ID("AUTO_TOKEN"))
+	if _, _, err := m.Values(ctx, *granted.GrantID, enr); !errors.Is(err, ErrSecretNotInStore) || !strings.Contains(err.Error(), "AUTO_TOKEN") {
+		t.Fatalf("Values = %v, want ErrSecretNotInStore naming AUTO_TOKEN", err)
 	}
 }
 
@@ -1012,26 +875,112 @@ func TestRevokingARevokedGrantWritesNoSecondAuditRow(t *testing.T) {
 	}
 }
 
-// TestPodRulesMatchTheVerifiedServiceAccount pins that a pod entry naming a service account
-// matches only pods whose enrollment carries that verified service-account subject.
-func TestPodRulesMatchTheVerifiedServiceAccount(t *testing.T) {
-	m, _, _, _ := newFixture(t)
-	ctx := context.Background()
-	withRules(t, m, `version: 1
-secrets:
-  WORKER_KEY:
-    source: example/agent-secrets/AUTO_TOKEN
-    owner: sjawhar
-    delivery: inject
-    max_lifetime_seconds: 3600
-    requesters: [{kind: pod, service_account: 'system:serviceaccount:legion:worker', decision: automatic}]
-`)
-	workerID, workerKey := newEnrollment(t, m.Store, "pod", "pod-worker", nil, str("system:serviceaccount:legion:worker"))
-	if req, err := m.Create(ctx, workerID, signRequest(t, m, workerKey, "need it", "WORKER_KEY"), ""); err != nil || req.State != "granted" {
-		t.Fatalf("Create(pod running as legion:worker) = %+v, %v, want granted", req, err)
+// TestEveryRequesterIsDecidedByOwnerAndTier drives the policy's whole table through Create: the
+// owner's own session, another person's session and a pod each ask for a person's agent-tier and
+// human-tier secret, a shared agent-tier and human-tier secret, and a service's secret. A request
+// that needs approval writes a record naming the approver and reaches that approver's pending
+// list: another person's session or a pod asking for a person's agent-tier secret is an approval
+// request to its owner.
+func TestEveryRequesterIsDecidedByOwnerAndTier(t *testing.T) {
+	const otherOperator = "bob@example.com"
+	type outcome struct{ state, approver string }
+	granted, denied := outcome{state: "granted"}, outcome{state: "denied"}
+	approval := func(approver string) outcome { return outcome{state: "pending", approver: approver} }
+	table := map[string]map[string]outcome{
+		"owner's session": {
+			"AUTO_TOKEN": granted, "DEEL_API_KEY": approval(fixtureOperator),
+			"SHARED_TOKEN": granted, "SHARED_KEY": approval(record.AnyoneApprover), "SERVICE_KEY": denied,
+		},
+		"another person's session": {
+			"AUTO_TOKEN": approval(fixtureOperator), "DEEL_API_KEY": approval(fixtureOperator),
+			"SHARED_TOKEN": granted, "SHARED_KEY": approval(record.AnyoneApprover), "SERVICE_KEY": denied,
+		},
+		"pod": {
+			"AUTO_TOKEN": approval(fixtureOperator), "DEEL_API_KEY": approval(fixtureOperator),
+			"SHARED_TOKEN": granted, "SHARED_KEY": approval(record.AnyoneApprover), "SERVICE_KEY": denied,
+		},
 	}
-	strangerID, strangerKey := newEnrollment(t, m.Store, "pod", "pod-stranger", nil, str("system:serviceaccount:default:stranger"))
-	if req, err := m.Create(ctx, strangerID, signRequest(t, m, strangerKey, "need it", "WORKER_KEY"), ""); err != nil || req.State != "denied" {
-		t.Fatalf("Create(pod running as default:stranger) = %+v, %v, want denied", req, err)
+	m, ownerEnr, ownerKey, _ := newFixture(t)
+	retag(t, m, policytest.Secret("SHARED_TOKEN", policy.OwnerShared, policy.TierAgent, "shared-token-v1"))
+	ctx := context.Background()
+	otherEnr, otherKey := newEnrollment(t, m.Store, "box", "box-other-"+t.Name(), new(otherOperator), nil)
+	podEnr, podKey := newEnrollment(t, m.Store, "pod", "pod-"+t.Name(), nil, new("system:serviceaccount:legion:worker"))
+	requesters := map[string]struct {
+		enrollment string
+		key        *ecdsa.PrivateKey
+	}{
+		"owner's session":          {ownerEnr, ownerKey},
+		"another person's session": {otherEnr, otherKey},
+		"pod":                      {podEnr, podKey},
+	}
+	for who, row := range table {
+		for name, want := range row {
+			r := requesters[who]
+			req, err := m.Create(ctx, r.enrollment, signRequest(t, m, r.key, "need it", name), "")
+			if err != nil || req.State != want.state {
+				t.Errorf("%s asking for %s = %+v, %v; want %s", who, name, req, err, want.state)
+				continue
+			}
+			if want.state != "pending" {
+				continue
+			}
+			var approver string
+			if err := m.Store.Pool.QueryRow(ctx, `select approver from credential_requests where id=$1`, *req.RecordID).Scan(&approver); err != nil || approver != want.approver {
+				t.Errorf("%s asking for %s: record approver %q, %v; want %q", who, name, approver, err, want.approver)
+			}
+			listedFor := want.approver
+			if listedFor == record.AnyoneApprover {
+				listedFor = "carol@example.com"
+			}
+			pending, err := m.PendingForApprover(ctx, listedFor)
+			if err != nil || !slices.ContainsFunc(pending, func(p PendingSummary) bool { return p.RecordID == *req.RecordID }) {
+				t.Errorf("%s asking for %s: %s's pending list %+v, %v; want the record listed", who, name, listedFor, pending, err)
+			}
+		}
+	}
+}
+
+// TestAnyoneDecidesASharedHumanTierRequest pins the approver record.AnyoneApprover: a request for a
+// shared human-tier secret reaches every person's pending list, any person's login decides it and
+// is recorded as the decider, the sentinel itself, in any casing, and a blank login decide nothing,
+// approve or deny, and the grant releases its value because its chain verifies under that approver.
+func TestAnyoneDecidesASharedHumanTierRequest(t *testing.T) {
+	m, enr, key, _ := newFixture(t)
+	ctx := context.Background()
+	req, err := m.Create(ctx, enr, signRequest(t, m, key, "need the shared one", "SHARED_KEY"), "")
+	if err != nil || req.State != "pending" || req.RecordID == nil {
+		t.Fatalf("Create = %+v, %v, want pending with a record", req, err)
+	}
+	for _, person := range []string{"bob@example.com", "carol@example.com", fixtureOperator} {
+		pending, err := m.PendingForApprover(ctx, person)
+		if err != nil || len(pending) != 1 || pending[0].RecordID != *req.RecordID {
+			t.Fatalf("PendingForApprover(%s) = %+v, %v, want the shared record", person, pending, err)
+		}
+	}
+	for _, approve := range []bool{true, false} {
+		for _, login := range []string{record.AnyoneApprover, " ANYONE ", "", "  ", "\t"} {
+			if _, err := m.ApplyDecision(ctx, *req.RecordID, approve, login); !errors.Is(err, record.ErrNotApprover) {
+				t.Fatalf("ApplyDecision(approve=%v, %q) = %v, want record.ErrNotApprover", approve, login, err)
+			}
+		}
+	}
+	dec, err := m.ApplyDecision(ctx, *req.RecordID, true, "Bob@Example.com")
+	if err != nil || dec.State != "granted" || dec.GrantID == "" {
+		t.Fatalf("ApplyDecision(bob) = %+v, %v, want granted", dec, err)
+	}
+	var login string
+	if err := m.Store.Pool.QueryRow(ctx, `select login from credential_request_events where record_id=$1 and event='approved'`, *req.RecordID).Scan(&login); err != nil || login != "bob@example.com" {
+		t.Fatalf("approved event login = %q, %v, want bob@example.com", login, err)
+	}
+	values, _, err := m.Values(ctx, dec.GrantID, enr)
+	if err != nil || values["SHARED_KEY"] != "shared-v1" {
+		t.Fatalf("Values = %v, %v, want SHARED_KEY released", values, err)
+	}
+	grants, err := m.GrantsForApprover(ctx, "bob@example.com")
+	if err != nil || len(grants) != 1 || grants[0].GrantID != dec.GrantID || grants[0].Approver != "bob@example.com" {
+		t.Fatalf("GrantsForApprover(bob) = %+v, %v, want the grant bob approved", grants, err)
+	}
+	if pending, err := m.PendingForApprover(ctx, "carol@example.com"); err != nil || len(pending) != 0 {
+		t.Fatalf("PendingForApprover(carol) after bob decided = %+v, %v, want nothing", pending, err)
 	}
 }

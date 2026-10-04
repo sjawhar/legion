@@ -1,13 +1,7 @@
 import { expect, test } from "bun:test";
 import { Schema } from "prosemirror-model";
 
-import {
-  blockPlacements,
-  composerKindFor,
-  markPlacements,
-  setActiveBlockClass,
-  setActiveMarkClass,
-} from "./marks";
+import { blockPlacements, composerKindFor, markPlacements } from "./marks";
 
 const schema = new Schema({
   marks: {
@@ -99,38 +93,4 @@ test("composerKindFor maps every selection-bar composer action", () => {
   expect(composerKindFor("comment")).toBe("comment");
   expect(composerKindFor("suggest")).toBe("suggestion");
   expect(composerKindFor("ask")).toBe("ask");
-});
-
-test("setActiveMarkClass toggles the active class on matching spans only", () => {
-  const root = document.createElement("div");
-  root.innerHTML = '<span data-id="a"></span><span data-id="b"></span><span></span>';
-
-  setActiveMarkClass(root, ["a"]);
-
-  expect(root.querySelector('[data-id="a"]')?.classList.contains("dispatch-mark-active")).toBe(
-    true
-  );
-  expect(root.querySelector('[data-id="b"]')?.classList.contains("dispatch-mark-active")).toBe(
-    false
-  );
-
-  setActiveMarkClass(root, []);
-
-  expect(root.querySelector('[data-id="a"]')?.classList.contains("dispatch-mark-active")).toBe(
-    false
-  );
-});
-
-test("setActiveBlockClass toggles the active class on matching block elements only", () => {
-  const root = document.createElement("div");
-  root.innerHTML = '<p data-block-id="a"></p><p data-block-id="b"></p>';
-
-  setActiveBlockClass(root, ["a"]);
-
-  expect(
-    root.querySelector('[data-block-id="a"]')?.classList.contains("dispatch-block-active")
-  ).toBe(true);
-  expect(
-    root.querySelector('[data-block-id="b"]')?.classList.contains("dispatch-block-active")
-  ).toBe(false);
 });

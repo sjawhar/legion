@@ -438,7 +438,7 @@ func marksToAttributes(marks []Mark) crdt.Attributes {
 		for key, attr := range mark.Attrs {
 			value[key] = attr
 		}
-		attributes[mark.Type] = value
+		attributes[markAttributeKey(mark)] = value
 	}
 	return attributes
 }

@@ -39,21 +39,11 @@ type documentPreconditionConflict struct {
 	Mismatches []documentPreconditionMismatch `json:"mismatches"`
 }
 
-func preconditionTestHandler(t *testing.T) (http.Handler, *store.Store, *docs.Service) {
+// preconditionTestHandler is newTestServer with settlement held back for the test's duration.
+func preconditionTestHandler(t *testing.T) (http.Handler, *store.Store, docs.API) {
 	t.Helper()
-	var service *docs.Service
-	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
-		service = docs.New(docs.Deps{Store: database, Settle: time.Hour})
-		t.Cleanup(func() {
-			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-			defer cancel()
-			if err := service.Shutdown(ctx); err != nil {
-				t.Errorf("shutdown document service: %v", err)
-			}
-		})
-		return service
-	})
-	return handler, database, service
+	handler, database, deps := newTestServer(t, testServerOptions{settle: time.Hour})
+	return handler, database, deps.Docs
 }
 
 func readDocumentPrecondition(t *testing.T, handler http.Handler, artifactID string) documentPreconditionRead {
@@ -212,8 +202,8 @@ func guardedDocumentEdit(t *testing.T, handler http.Handler, artifactID, find, w
 }
 
 // A chain of guarded edits reads the document once: each edit returns the token of the tree its
-// own transaction wrote, which is the next edit's precondition. AGENTC-393 paid for eleven spec
-// edits with six full re-reads of a 30 KB document to learn tokens the edits had just minted.
+// own transaction wrote, which is the next edit's precondition, so no edit re-reads the document
+// to learn a token the edit before it just minted.
 func TestDocumentEditReturnsTheTokenItProduced(t *testing.T) {
 	handler, _, _ := preconditionTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Chained document edits", "before")
@@ -385,7 +375,7 @@ func TestDocumentPreconditionRejectsAnchorAddedAfterRead(t *testing.T) {
 }
 
 func TestDocumentEditPreconditionRejectsWriterAfterDurableAppendRace(t *testing.T) {
-	handler, database, service := preconditionTestHandler(t)
+	service, handler, database := browserDocumentService(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Precondition race", "before")
 	stale := readDocumentPrecondition(t, handler, issue.PrimaryArtifactID)
 
@@ -398,13 +388,10 @@ func TestDocumentEditPreconditionRejectsWriterAfterDurableAppendRace(t *testing.
 		t.Fatalf("lock document room: %v", err)
 	}
 
-	writerDone := make(chan error, 1)
-	go func() {
-		_, err := service.ApplyOps(context.Background(), issue.PrimaryArtifactID, []model.EditOp{{
-			Op: "replace", Find: "before", With: "writer",
-		}}, model.Actor{Kind: "user", ID: "alice"}, nil)
-		writerDone <- err
-	}()
+	// A browser's edit reaches the room at once, and its durable append waits for the room's
+	// lock: the one writer that does not first take the document's owner row, as every server
+	// write and the conditional edit below do.
+	writeBrowserDocument(t, service, issue.PrimaryArtifactID, "writer")
 	waitForDatabaseLocks(t, blocker, 1)
 
 	conditionalDone := make(chan *httptest.ResponseRecorder, 1)
@@ -417,9 +404,6 @@ func TestDocumentEditPreconditionRejectsWriterAfterDurableAppendRace(t *testing.
 	waitForDatabaseLocks(t, blocker, 2)
 	if err := blocker.Commit(context.Background()); err != nil {
 		t.Fatalf("release document lock: %v", err)
-	}
-	if err := <-writerDone; err != nil {
-		t.Fatalf("concurrent writer: %v", err)
 	}
 	response := awaitResponse(t, conditionalDone)
 	if response.Code != http.StatusConflict {

@@ -134,8 +134,8 @@ test("a toggled resolved section contains resolved comment threads", () => {
 
 test("an anchored card keeps its identity when its mark placement arrives after the first render", () => {
   // Placements are measured after the document renders. A card that changed section - and so
-  // React parent - once its placement landed was remounted, and an editor open on it lost its
-  // draft. Membership comes from the anchor; placement only positions the card.
+  // React parent - once its placement landed would be remounted, and an editor open on it would
+  // lose its draft. Membership comes from the anchor; placement only positions the card.
   const view = renderList({ markPlacements: new Map() });
   try {
     const before = screen.getByTestId("margin-comment-open");

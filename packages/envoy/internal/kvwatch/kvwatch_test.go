@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
-	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -15,6 +14,7 @@ import (
 
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/bus"
+	"github.com/sjawhar/envoy/internal/goroutinetest"
 	"github.com/sjawhar/envoy/internal/kvwatch"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
@@ -80,9 +80,7 @@ var lockedInWatch = regexp.MustCompile(`sync\.\(\*Mutex\)\.Lock\([^\n]*\n\t[^\n]
 // waits for this before it releases the apply, so the watch is already queued for the lock the
 // release frees.
 func waitingForTheApplyLock() bool {
-	buf := make([]byte, 1<<22)
-	buf = buf[:runtime.Stack(buf, true)]
-	for _, goroutine := range strings.Split(string(buf), "\n\n") {
+	for _, goroutine := range goroutinetest.Traces() {
 		if strings.Contains(goroutine, "[sync.Mutex.Lock") && lockedInWatch.MatchString(goroutine) {
 			return true
 		}
@@ -299,10 +297,7 @@ func TestARewatchOntoARecreatedBucketResetsTheCache(t *testing.T) {
 	if err := js.DeleteKeyValue("kvwatch-test"); err != nil {
 		t.Fatalf("delete bucket: %v", err)
 	}
-	recreated, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: "kvwatch-test"})
-	if err != nil {
-		t.Fatalf("recreate bucket: %v", err)
-	}
+	recreated := testnats.RecreateKeyValue(t, js, &natsgo.KeyValueConfig{Bucket: "kvwatch-test"})
 	if _, err := recreated.Put("fresh", []byte("1")); err != nil {
 		t.Fatalf("put: %v", err)
 	}
@@ -340,9 +335,7 @@ func TestCheckReportsABucketRecreatedUnderALiveWatcher(t *testing.T) {
 	if err := js.DeleteKeyValue("kvwatch-test"); err != nil {
 		t.Fatalf("delete bucket: %v", err)
 	}
-	if _, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: "kvwatch-test"}); err != nil {
-		t.Fatalf("recreate bucket: %v", err)
-	}
+	testnats.RecreateKeyValue(t, js, &natsgo.KeyValueConfig{Bucket: "kvwatch-test"})
 	if err := w.Check(); err != nil {
 		t.Fatalf("Check on the recreated bucket: %v", err)
 	}
@@ -568,10 +561,7 @@ func TestConcurrentRewatchesOntoARecreatedBucketKeepTheNewKeys(t *testing.T) {
 	if err := js.DeleteKeyValue("kvwatch-test"); err != nil {
 		t.Fatalf("delete bucket: %v", err)
 	}
-	recreated, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: "kvwatch-test"})
-	if err != nil {
-		t.Fatalf("recreate bucket: %v", err)
-	}
+	recreated := testnats.RecreateKeyValue(t, js, &natsgo.KeyValueConfig{Bucket: "kvwatch-test"})
 	if _, err := recreated.Put("fresh", []byte("1")); err != nil {
 		t.Fatalf("put: %v", err)
 	}
@@ -648,10 +638,7 @@ func TestAWatchOfTheOldStreamDoesNotReplaceANewerOne(t *testing.T) {
 	if err := js.DeleteKeyValue("kvwatch-test"); err != nil {
 		t.Fatalf("delete bucket: %v", err)
 	}
-	recreated, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: "kvwatch-test"})
-	if err != nil {
-		t.Fatalf("recreate bucket: %v", err)
-	}
+	recreated := testnats.RecreateKeyValue(t, js, &natsgo.KeyValueConfig{Bucket: "kvwatch-test"})
 	if _, err := recreated.Put("fresh", []byte("1")); err != nil {
 		t.Fatalf("put: %v", err)
 	}
@@ -714,9 +701,7 @@ func TestADiscardedWatchOfTheOldStreamIsDrainedUntilItEnds(t *testing.T) {
 	if err := js.DeleteKeyValue("kvwatch-test"); err != nil {
 		t.Fatalf("delete bucket: %v", err)
 	}
-	if _, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: "kvwatch-test"}); err != nil {
-		t.Fatalf("recreate bucket: %v", err)
-	}
+	testnats.RecreateKeyValue(t, js, &natsgo.KeyValueConfig{Bucket: "kvwatch-test"})
 	liveConn, _ := bucket(t, uri)
 	if err := w.Rewatch(liveConn); err != nil {
 		t.Fatalf("rewatch: %v", err)
@@ -838,11 +823,7 @@ func TestARewatchOntoABucketRestoredWithAnOlderStreamRefillsTheCache(t *testing.
 	if err := js.DeleteKeyValue("kvwatch-test"); err != nil {
 		t.Fatalf("delete the first bucket: %v", err)
 	}
-	time.Sleep(50 * time.Millisecond)
-	live, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: "kvwatch-test"})
-	if err != nil {
-		t.Fatalf("create the live bucket: %v", err)
-	}
+	live := testnats.RecreateKeyValue(t, js, &natsgo.KeyValueConfig{Bucket: "kvwatch-test"})
 	if _, err := live.Put("live-key", []byte("1")); err != nil {
 		t.Fatalf("put live-key: %v", err)
 	}

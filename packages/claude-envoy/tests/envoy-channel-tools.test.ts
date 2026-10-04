@@ -16,7 +16,7 @@ isolatePaneEnvironment()
 function sessionWith(followed: string[]): ChannelSession {
   return {
     delivery: {
-      enqueue: async () => undefined,
+      enqueue: async () => true,
       announceFollow: async () => undefined,
       inbox: () => [],
     },

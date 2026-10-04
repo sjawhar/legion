@@ -19,77 +19,19 @@ import (
 	"github.com/sjawhar/envoy/internal/kvwatch"
 	"github.com/sjawhar/envoy/internal/logging"
 	"github.com/sjawhar/envoy/internal/testnats"
-	"github.com/testcontainers/testcontainers-go"
-	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
 )
 
-var (
-	sharedNATSOnce sync.Once
-	sharedNATSURI  string
-	sharedNATSErr  error
-	// sharedNATSContainer is the container the tests share, which TestMain terminates.
-	sharedNATSContainer *tcnats.NATSContainer
-)
-
-func sharedTestNATSURI(t testing.TB) string {
-	t.Helper()
-	sharedNATSOnce.Do(func() {
-		ctr, err := tcnats.Run(context.Background(), testnats.Image)
-		if err != nil {
-			sharedNATSErr = errors.Join(err, testcontainers.TerminateContainer(ctr))
-			return
-		}
-		sharedNATSURI, sharedNATSErr = ctr.ConnectionString(context.Background())
-		if sharedNATSErr != nil {
-			sharedNATSErr = errors.Join(sharedNATSErr, testcontainers.TerminateContainer(ctr))
-			return
-		}
-		sharedNATSContainer = ctr
-	})
-	if sharedNATSErr != nil {
-		t.Fatalf("failed to start shared NATS: %v", sharedNATSErr)
-	}
-	return sharedNATSURI
-}
-
-var testBucketNames = struct {
-	sync.Mutex
-	next  int
-	names map[testing.TB]string
-}{names: map[testing.TB]string{}}
-
-// testBucket names a bucket no other test uses, so no test deletes and recreates the bucket on the
-// shared server: nats-server removes a deleted stream's directories from background goroutines,
-// and a same-named bucket created right after the delete races that cleanup ("error creating
-// store for stream").
-func testBucket(t testing.TB) string {
-	testBucketNames.Lock()
-	defer testBucketNames.Unlock()
-	if name, ok := testBucketNames.names[t]; ok {
-		return name
-	}
-	testBucketNames.next++
-	name := fmt.Sprintf("%s_%d", Bucket, testBucketNames.next)
-	testBucketNames.names[t] = name
-	t.Cleanup(func() {
-		testBucketNames.Lock()
-		delete(testBucketNames.names, t)
-		testBucketNames.Unlock()
-	})
-	return name
-}
-
-// connectNATS creates an isolated connection to the package's shared NATS server.
+// connectNATS connects to the package's shared NATS server, in the JetStream account
+// testnats.URL hands t, where no earlier test made a CI bucket.
 func connectNATS(t testing.TB) (*natsgo.Conn, func()) {
 	t.Helper()
-	conn := testnats.Connect(t, sharedTestNATSURI(t))
+	conn := testnats.Connect(t, testnats.URL(t))
 	return conn, conn.Close
 }
 
 func openStore(t testing.TB, conn *natsgo.Conn) *Store {
 	t.Helper()
-	name := testBucket(t)
-	st, err := Open(conn, logging.New("test"), WithReplicas(1), WithTTL(time.Hour), func(o *openOpts) { o.bucket = name })
+	st, err := Open(conn, logging.New("test"), WithReplicas(1), WithTTL(time.Hour))
 	if err != nil {
 		t.Fatalf("open cistore: %v", err)
 	}
@@ -549,7 +491,7 @@ func TestRewatchRestartsStoppedWatcher(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open replacement JetStream: %v", err)
 	}
-	kv, err := js.KeyValue(testBucket(t))
+	kv, err := js.KeyValue(Bucket)
 	if err != nil {
 		t.Fatalf("open replacement CI bucket: %v", err)
 	}
@@ -1015,17 +957,5 @@ func TestMarkSettledCacheWriteDoesNotOverwriteNewerWatcherRevision(t *testing.T)
 	}
 }
 
-// TestMain terminates the NATS container this package's tests share once they have all run.
-// Nothing else would: CI disables Ryuk, and without it a container outlives the test binary.
-func TestMain(m *testing.M) {
-	code := m.Run()
-	if sharedNATSContainer != nil {
-		if err := testcontainers.TerminateContainer(sharedNATSContainer); err != nil {
-			fmt.Fprintf(os.Stderr, "terminate the shared NATS container: %v\n", err)
-			if code == 0 {
-				code = 1
-			}
-		}
-	}
-	os.Exit(code)
-}
+// TestMain removes the NATS server the package's tests share (testnats.Main).
+func TestMain(m *testing.M) { os.Exit(testnats.Main(m)) }

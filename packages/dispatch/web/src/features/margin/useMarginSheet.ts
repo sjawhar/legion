@@ -7,7 +7,9 @@ import { api } from "../../api/client";
 import { primarySpec } from "../../api/issue-cache";
 import { whoAmIQuery } from "../../api/queries";
 import type { UserState } from "../../api/types";
+import { useSending } from "../../hooks/useSending";
 import { isRetractedAsk } from "../conversation/conversation-model";
+import { useHeldSend, useHeldSends, useHeldSendsUnder } from "../conversation/held-sends";
 import { useProjectArtifact } from "../document/useProjectArtifact";
 import { eventItemId, stateForIssue } from "../issue/pins";
 import {
@@ -19,13 +21,20 @@ import { parseIssuePath, parseProjectPath } from "../refs/routes";
 import { COMPACT_VIEWPORT_QUERY, PHONE_VIEWPORT_QUERY } from "../shell/useDialog";
 import type { MarginComposer } from "./CommentsTab";
 import type { MarginSheetModel } from "./MarginSheet";
-import { useMargin } from "./margin-context";
 import {
+  MARGIN_REPLY_SEND_KEY,
+  marginComposeSendKey,
+  marginReplySendKey,
+  useMargin,
+} from "./margin-context";
+import {
+  composerOwner,
   type MarginItem,
   type MarginItemAction,
   type MarginTab,
   marginItemId,
   marginItemMarkId,
+  marginItemRecord,
   threadMarkId,
   useMarginItems,
   useMarginOwner,
@@ -54,6 +63,7 @@ export function useMarginSheet(): MarginSheetModel {
   const {
     blockFilterId,
     blockPlacements,
+    cancelCompose,
     clearBlockFilter,
     documentBridge,
     focusBlock,
@@ -63,12 +73,15 @@ export function useMarginSheet(): MarginSheetModel {
     markPlacements,
     pendingCompose,
     placementsReported,
+    retypeCompose,
+    revealCompose,
     selectItem,
     selectedItemId,
     setHoveredItemId,
     setMarkItemIds,
-    settleCompose,
+    shownCompose,
   } = useMargin();
+  const store = useHeldSends();
   const queryClient = useQueryClient();
   const { key: locationKey, pathname, search } = useLocation();
   const issueRoute = parseIssuePath(pathname, search);
@@ -94,13 +107,38 @@ export function useMarginSheet(): MarginSheetModel {
   // reading it first would pin the linked card as selected for the rest of the visit.
   const displayedSelectedItemId = selectedItemId ?? routeItemId;
   const [tab, setTab] = useState<MarginTab>("comments");
-  const [composer, setComposer] = useState<MarginComposer>();
   const [expandedOwnerId, setExpandedOwnerId] = useState<string>();
   const [expandedThreadKey, setExpandedThreadKey] = useState<string>();
   const [editingCommentId, setEditingCommentId] = useState<string>();
   const [savingCommentEditId, setSavingCommentEditId] = useState<string>();
   const [sheetThreadKey, setSheetThreadKey] = useState<string>();
   const [showResolved, setShowResolved] = useState(false);
+  // Threads whose reply holds a send of its own, out or refused, in the held-send store: each
+  // stays in the list it was in (`useMarginItems`'s `held`), whoever resolves it meanwhile.
+  const heldReplies = useHeldSendsUnder(MARGIN_REPLY_SEND_KEY);
+  const heldReplyKeys = useMemo(
+    () =>
+      new Set(
+        heldReplies.flatMap((held) =>
+          held.request.replyTo === null ? [] : [held.request.replyTo.id]
+        )
+      ),
+    [heldReplies]
+  );
+  // The phone margin thread's reply names its send, so the thread's Back and Escape hold while it
+  // is out, until its deadline. No thread has the empty key, so with none open nothing matches.
+  const sheetReplyKey = useMemo(() => marginReplySendKey(sheetThreadKey ?? ""), [sheetThreadKey]);
+  const { sending: sheetReplySending, sendingNow: sheetReplySendingNow } = useSending(
+    sheetReplyKey,
+    { untilDeadline: true }
+  );
+  const closeThread = useCallback(() => {
+    if (sheetReplySendingNow()) return;
+    setSheetThreadKey(undefined);
+    // Back drops a refusal the thread's reply holds, its draft with it, as a Conversation phone
+    // thread's does; a send still out past the deadline stays held for the thread's return.
+    if (sheetThreadKey !== undefined) store.discard(marginReplySendKey(sheetThreadKey));
+  }, [sheetReplySendingNow, sheetThreadKey, store]);
   const marginRef = useRef<HTMLElement>(null);
   const issue = useQuery({
     enabled: issueKey !== undefined,
@@ -119,6 +157,7 @@ export function useMarginSheet(): MarginSheetModel {
         ? primarySpec(issue.data)
         : issue.data?.artifacts.find((artifact) => artifact.slug === routeArtifactSlug)
       : documentArtifact.data;
+  const visibleArtifactId = visibleArtifact?.id;
   const unpin = useCallback(
     (eventId: number) => {
       if (owner?.kind !== "issue") {
@@ -172,7 +211,9 @@ export function useMarginSheet(): MarginSheetModel {
     retryComments,
     retryItem,
     threads,
-  } = useMarginItems(owner, tab, visibleArtifact, markPlacements, blockPlacements, blockFilterId);
+  } = useMarginItems(owner, tab, visibleArtifact, markPlacements, blockPlacements, blockFilterId, {
+    held: heldReplyKeys,
+  });
   const onEdit = useCallback(
     async (id: string, body: string) => {
       setSavingCommentEditId(id);
@@ -308,36 +349,92 @@ export function useMarginSheet(): MarginSheetModel {
       const nextExpanded = expanded ?? !sheetExpanded;
       setExpandedOwnerId(nextExpanded ? ownerId : undefined);
       if (!nextExpanded) {
-        setSheetThreadKey(undefined);
+        closeThread();
       }
     },
-    [ownerId, sheetExpanded]
+    [closeThread, ownerId, sheetExpanded]
   );
-  const closeComposer = useCallback(() => {
-    setComposer(undefined);
-    settleCompose("cancelled");
-  }, [settleCompose]);
-  const onComposerSaved = useCallback(() => {
-    settleCompose("saved");
-  }, [settleCompose]);
-
+  // The composer's Close, Escape and Discard. The open compose ends unsaved; a refusal the store
+  // holds for the document goes, its draft and its mark with it (`MarginProvider` takes the mark).
+  // A send still out is not the reader's to drop, and one that landed has left the store already.
+  const closeComposer = useCallback(
+    (composer: MarginComposer) => {
+      if (composer.seq !== undefined) cancelCompose(composer.seq);
+      store.discard(marginComposeSendKey(composer.anchor.artifact));
+    },
+    [cancelCompose, store]
+  );
+  // Each compose the margin shows - a new one, one a newer selection-bar action had to wait on, or
+  // one held for the document the reader came back to - is shown on the Comments tab, and on a
+  // compact viewport in the sheet. Once each: the margin keeps the last one shown.
+  const handledShownCompose = useRef<number | undefined>(undefined);
   useEffect(() => {
-    if (pendingCompose === undefined) {
+    if (shownCompose === undefined || handledShownCompose.current === shownCompose.seq) return;
+    handledShownCompose.current = shownCompose.seq;
+    setTab("comments");
+    openCompactSheet();
+  }, [openCompactSheet, shownCompose]);
+  // An unsent compose ends when the reader leaves its document, and when its issue closes. One
+  // that was sent is the held-send store's (`MarginProvider` hands it over at Send) and stays.
+  useEffect(() => {
+    if (pendingCompose === undefined) return;
+    if (pendingCompose.anchor.artifact !== visibleArtifactId || isClosed) {
+      cancelCompose(pendingCompose.seq);
+    }
+  }, [cancelCompose, isClosed, pendingCompose, visibleArtifactId]);
+  // Coming back to a document that holds a send of the margin's shows it: the compose held for
+  // the document, and a thread whose reply is held, opened as the reader left it. Once per arrival,
+  // once the document's threads are in.
+  const arrivedAt = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (visibleArtifactId === undefined) {
+      arrivedAt.current = undefined;
       return;
     }
-    setTab("comments");
-    setComposer({ anchor: pendingCompose.anchor, kind: pendingCompose.kind });
-    openCompactSheet();
-  }, [openCompactSheet, pendingCompose]);
-  useEffect(() => {
-    if (
-      composer !== undefined &&
-      (isClosed ||
-        (composer.anchor !== undefined && composer.anchor.artifact !== visibleArtifact?.id))
-    ) {
-      closeComposer();
+    if (arrivedAt.current === visibleArtifactId || commentsPending) return;
+    arrivedAt.current = visibleArtifactId;
+    if (store.get(marginComposeSendKey(visibleArtifactId)) !== undefined) {
+      revealCompose(visibleArtifactId);
     }
-  }, [closeComposer, composer, isClosed, visibleArtifact?.id]);
+    const heldThread = [...heldReplyKeys].find((key) => threadsByKey.has(key));
+    if (heldThread !== undefined) selectMarginItem(heldThread);
+  }, [
+    commentsPending,
+    heldReplyKeys,
+    revealCompose,
+    selectMarginItem,
+    store,
+    threadsByKey,
+    visibleArtifactId,
+  ]);
+  // The composer on the open document: the one its held send is - out, or refused - from Send
+  // on, or the compose the reader has open there.
+  const heldCompose = useHeldSend(
+    visibleArtifactId === undefined ? undefined : marginComposeSendKey(visibleArtifactId)
+  );
+  const heldRequest = heldCompose?.request;
+  const turnedAway =
+    shownCompose?.turnedAway === true && shownCompose.artifact === visibleArtifactId;
+  const shownComposer = useMemo<MarginComposer | undefined>(() => {
+    if (heldRequest?.anchor !== undefined) {
+      return {
+        anchor: heldRequest.anchor,
+        kind: heldRequest.kind,
+        owner: heldRequest.owner,
+        seq: undefined,
+        turnedAway,
+      };
+    }
+    if (
+      pendingCompose === undefined ||
+      owner === undefined ||
+      pendingCompose.anchor.artifact !== visibleArtifactId
+    ) {
+      return undefined;
+    }
+    const { anchor, kind, seq } = pendingCompose;
+    return { anchor, kind, owner: composerOwner(owner), seq, turnedAway: false };
+  }, [heldRequest, owner, pendingCompose, turnedAway, visibleArtifactId]);
   // A project-document item link has nowhere else to land, so the compact sheet opens on it.
   // An issue's comment or ask deep link lands on its Conversation turn; the margin selects the
   // card without covering that turn with the sheet.
@@ -383,7 +480,7 @@ export function useMarginSheet(): MarginSheetModel {
       .map((item) => marginItemMarkId(item))
       .filter((markId): markId is string => markId !== undefined);
     const blockIds = selectedItems
-      .map((item) => (item.kind === "ask" ? item.ask.anchor : item.comment.anchor))
+      .map((item) => marginItemRecord(item).anchor)
       .flatMap((anchor) =>
         anchor?.orphaned && typeof anchor.block_id === "string" ? [anchor.block_id] : []
       );
@@ -399,8 +496,7 @@ export function useMarginSheet(): MarginSheetModel {
   );
   useEffect(() => {
     const item = marginItems.find((candidate) => marginItemId(candidate) === selectedItemId);
-    const anchor =
-      item === undefined ? undefined : item.kind === "ask" ? item.ask.anchor : item.comment.anchor;
+    const anchor = item === undefined ? undefined : marginItemRecord(item).anchor;
     if (!anchor?.orphaned || typeof anchor.block_id !== "string") {
       selectedBlockFocus.current = undefined;
       return;
@@ -467,11 +563,18 @@ export function useMarginSheet(): MarginSheetModel {
   }, [documentBridge, marginItems, markPlacements, routeItemId, routeItemKey, selectMarginItem]);
 
   useMarginListeners({
-    composerOpen: composer !== undefined,
+    composer: shownComposer,
     focus,
     margin: marginRef,
     onSelectCard,
-    placementsPublished: placementsReported,
+    // Only the report of the document whose cards this margin shows. A document the route has
+    // left can stay registered behind the next route's loading view - Suspense keeps the old
+    // page mounted, hidden, until the new page's code has arrived and its throttled reveal
+    // commits - and its report would read a press there as the reader working a placed document.
+    placementsPublished:
+      placementsReported &&
+      visibleArtifact !== undefined &&
+      documentBridge?.artifactId === visibleArtifact.id,
     routeItemId,
     routeItemKey,
     setHoveredItemId,
@@ -486,7 +589,7 @@ export function useMarginSheet(): MarginSheetModel {
       onEditingChange: setEditingCommentId,
       closeComposer,
       onAction,
-      onComposerSaved,
+      onComposerKindChange: retypeCompose,
       onEdit,
       onUnpin: unpin,
       onRetryAction: retryItem,
@@ -496,7 +599,7 @@ export function useMarginSheet(): MarginSheetModel {
       onToggleResolved: () => setShowResolved((current) => !current),
       onToggleThread,
     },
-    composer,
+    composer: shownComposer,
     items: {
       actionFailure,
       answeredAsksPending,
@@ -539,8 +642,9 @@ export function useMarginSheet(): MarginSheetModel {
       showResolved,
     },
     sheet: {
-      closeThread: () => setSheetThreadKey(undefined),
+      closeThread,
       expanded: sheetExpanded,
+      replySending: sheetReplySending,
       thread: sheetThreadKey === undefined ? undefined : threadsByKey.get(sheetThreadKey),
       toggle: toggleSheet,
     },

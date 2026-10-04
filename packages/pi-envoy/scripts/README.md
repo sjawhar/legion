@@ -100,3 +100,29 @@ Cleanup (`tmux kill-session`, `rm -rf` the temp dir) runs in an exit trap on
 every exit path, so a failed run leaves nothing behind either. Both smokes run
 their tmux on a private socket in their temp dir, so the kill can end only the
 session the smoke started; on the shared default server it could end anyone's.
+
+## skill-scenarios/rig.sh
+
+Replays skill scenarios on real agents, to compare two versions of a skill. Each label is one
+checkout's packed plugin in an isolated Oh My Pi home (`rig.sh profile <label> <checkout>`); each
+run is one fresh `omp -p` agent given one task a skill rule governs, scored afterwards from what the
+stand-ins and the scratch Dispatch recorded (`rig.sh score`). `rig.sh live-read <label> <skill>...`
+has one session read every file of a skill and reports whether each arrived whole.
+
+```bash
+cd packages/pi-envoy/scripts/skill-scenarios
+LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic ./rig.sh profile head <checkout>
+./rig.sh batch ask-on-message 5 head base   # starts and stops the scratch Dispatch, Postgres, NATS, listener
+./rig.sh batch tester-proof 5 head base
+./rig.sh score
+```
+
+The scenarios and every input are in the script's header (`./rig.sh` with no arguments prints it),
+and each scenario's scoring rule is on the `score.ts` function that scores it. It needs the model
+gateway and Docker. Its bounded waits, port picks and process stops are
+[`scripts/e2e/lib/rig.sh`](../../../scripts/e2e/README.md#librigsh)'s. Nothing it runs reaches
+production Dispatch, GitHub, Envoy or NATS: it starts nothing with the caller's `DISPATCH_*`,
+`ENVOY_*` or `NATS_*` variables, and `seed.ts` refuses to run while `PLAYWRIGHT_BASE_URL` or
+`E2E_AGENT_TOKEN` is set. That is the environment only: an agent reads the whole filesystem, the
+other label's checkout included, so `score.ts` does not score a run that read outside its own
+label.

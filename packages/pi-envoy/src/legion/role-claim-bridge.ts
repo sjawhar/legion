@@ -25,7 +25,6 @@ export type LegionNoticeSubscription = (
   whileHolding?: string
 ) => Promise<void>;
 
-
 /**
  * Why the heartbeat decided the listener had lost sight of this session's role: `"reclaimed"` —
  * the listener no longer named this session and a soft claim landed; `"reregistered"` — the
@@ -147,10 +146,10 @@ export async function subscribeLegionNotice(
   const instance =
     bridge.instances.findLast((candidate) => candidate.sessionID() === sessionID) ??
     bridge.instances.at(-1);
-  if (instance === undefined) throw new Error("Envoy has no bound instance for a notice subscription");
+  if (instance === undefined)
+    throw new Error("Envoy has no bound instance for a notice subscription");
   await instance.subscribe(sessionID, topic, context, whileHolding);
 }
-
 
 /**
  * Registers the hook the heartbeat fires after it re-establishes this session as `role`'s live

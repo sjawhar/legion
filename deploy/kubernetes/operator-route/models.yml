@@ -1,16 +1,19 @@
-# One operator's model route (pod.yml mounts this file into the image's Oh My Pi profile):
-# anthropic through the Hawk model gateway (middleman), keyed by the pod's projected
+# An example of the operator's models.yml, the Oh My Pi provider file every Legion pod reads
+# (pod.yml mounts it into the image's Oh My Pi profile). The operator copies it into their own
+# directory with overlay.yml, puts the model endpoint's base URL in place of the baseUrl
+# placeholder, and applies both with apply.sh (README.md beside this file).
+#
+# anthropic through the operator's model gateway, keyed by the pod's projected
 # ServiceAccount token. The gateway reads the key from x-api-key; Oh My Pi caches the command's
 # value for the process and runs it again on a 401, so the token the kubelet rotated is read on
-# the first refusal. `auth: apiKey` makes these custom models plain API-key callers: without it Oh
-# My Pi sends an anthropic-messages custom model in its Claude Code OAuth shape.
+# the first refusal. `auth: apiKey` makes these models plain API-key callers: without it Oh My Pi
+# sends an anthropic-messages custom model in its Claude Code OAuth shape.
 #
-# The model ids are the ones the operator's endpoint serves. Oh My Pi finds no catalog entry for
-# them, so each carries its model's catalog metadata.
+# The models carry the gateway's current names. Each entry gives Oh My Pi the metadata for the
+# model the gateway serves; overlay.yml chooses each role's.
 #
-# baseUrl is the operator's own gateway, so this file carries a placeholder instead: apply.sh
-# substitutes the base URL it is given, and the live harnesses substitute
-# LEGION_E2E_MODEL_GATEWAY_URL, before either creates the ConfigMap.
+# The live harnesses run on this file, each putting LEGION_E2E_MODEL_GATEWAY_URL in place of the
+# placeholder in its own copy.
 providers:
   anthropic:
     baseUrl: ${MODEL_BASE_URL}

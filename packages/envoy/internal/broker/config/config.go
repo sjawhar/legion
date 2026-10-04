@@ -1,6 +1,11 @@
 // packages/envoy/internal/broker/config/config.go
 // Package config reads the broker's BROKER_* environment. A missing required variable, an
-// unreadable file, or two sources for one value refuses to start naming the variable.
+// unreadable or empty _FILE, a value out of range or of the wrong form, or a removed variable
+// refuses to start naming the variable.
+//
+// Each Config field's doc comment opens with the variables it reads and a colon; the broker's
+// generated configuration reference (cmd/broker-refgen) is built from those comments
+// and refuses a variable Load reads that no field documents.
 package config
 
 import (
@@ -9,48 +14,93 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"unicode"
 
+	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/oidc"
 )
 
 type Config struct {
-	ListenAddr         string
-	DatabaseURL        string
-	PublicURL          string
-	UIOrigin           string
-	UIToken            string
-	RulesFile          string
-	RulesS3URI         string
-	RulesReloadSeconds int
-	K8sOIDCIssuer      string
-	K8sOIDCAudience    string
-	EnvoyURL           string
-	EnvoyToken         string
-	LeaseSeconds       int
-	ProofSkewSeconds   int
-	MaxGrantSeconds    int
-	// LauncherCredentialSeconds is a machine login's minted launcher credential lifetime
-	// (BROKER_LAUNCHER_CREDENTIAL_SECONDS).
+	// BROKER_LISTEN_ADDR: the host:port the broker listens on.
+	ListenAddr string
+	// BROKER_DATABASE_URL, BROKER_DATABASE_PASSWORD: the Postgres connection URL. Required. The
+	// broker applies its own migrations at startup. A literal ${BROKER_DATABASE_PASSWORD} in the
+	// URL is replaced with BROKER_DATABASE_PASSWORD, URL-escaped; setting either without the
+	// other is refused.
+	DatabaseURL string
+	// BROKER_PUBLIC_URL: the broker's own address as its callers reach it, an absolute URL with no
+	// path. Required. Every signed proof and request object names it, so a client's
+	// AGENT_SECRETS_URL must be exactly this.
+	PublicURL string
+	// BROKER_UI_TOKEN, BROKER_UI_TOKEN_FILE: the bearer token Dispatch's server presents on the
+	// broker's approval routes, given directly or as a file whose trimmed contents win over the
+	// variable. Required. It vouches for the approver each decision names, so only Dispatch's
+	// server may hold it.
+	UIToken string
+	// BROKER_SECRETS_PREFIX: the Secrets Manager namespace of the agent secrets, ending in "/"
+	// (for example production/agent-secrets/). Required. The broker serves every secret under it
+	// that carries an owner and a tier tag and is encrypted with BROKER_SECRETS_KMS_KEY_ARN, and
+	// rereads them every five minutes.
+	SecretsPrefix string
+	// BROKER_SECRETS_KMS_KEY_ARN: the ARN of the KMS key every agent secret is encrypted with.
+	// Required. A secret under the prefix encrypted with any other key, the AWS-managed one
+	// included, is refused.
+	SecretsKMSKeyARN string
+	// BROKER_K8S_OIDC_ISSUER: the issuer of the Kubernetes service-account tokens pods enroll
+	// with. Set it with BROKER_K8S_OIDC_AUDIENCE, or neither, in which case no pod can enroll.
+	K8sOIDCIssuer string
+	// BROKER_K8S_OIDC_AUDIENCE: the audience a pod's projected service-account token must carry.
+	K8sOIDCAudience string
+	// BROKER_ENVOY_URL: an Envoy listener the broker notifies, best effort, when a session's
+	// pending request expires undecided. Unset, the broker sends nothing.
+	EnvoyURL string
+	// BROKER_ENVOY_TOKEN, BROKER_ENVOY_TOKEN_FILE: the bearer token for BROKER_ENVOY_URL, given
+	// directly or as a file whose trimmed contents win over the variable; read only when
+	// BROKER_ENVOY_URL is set.
+	EnvoyToken string
+	// BROKER_LEASE_SECONDS: an enrollment's lease. A session renews it while it runs; one whose
+	// lease runs out is no longer enrolled and its calls are refused.
+	LeaseSeconds int
+	// BROKER_PROOF_SKEW_SECONDS: how far the issue time of a signed proof or request object may
+	// differ from the broker's clock.
+	ProofSkewSeconds int
+	// BROKER_MAX_GRANT_SECONDS: how long a grant lives, unless its session ends first.
+	MaxGrantSeconds int
+	// BROKER_LAUNCHER_CREDENTIAL_SECONDS: how long a machine login's credential lasts once
+	// approved; past it the machine logs in again, with a new key, a new code and a new approval.
 	LauncherCredentialSeconds int
-	// SweepSeconds is the Sweeper's tick interval (BROKER_SWEEP_SECONDS).
+	// BROKER_SWEEP_SECONDS: how often the broker ends the enrollments whose lease lapsed and expires
+	// the pending requests and machine logins nobody decided in time.
 	SweepSeconds int
-	// TrustedProxyHeader is the request header the launcher-credential rate limiter trusts for
-	// the caller's real address (BROKER_TRUSTED_PROXY_HEADER), e.g. "X-Forwarded-For". Empty (the
-	// default) means the broker is reached directly, so it keys on r.RemoteAddr as before. Set it
-	// only when every request truly passes through your own trusted reverse proxy first —
-	// otherwise a caller can forge the header and pick its own rate-limit bucket.
+	// BROKER_TRUSTED_PROXY_HEADER: the request header (e.g. X-Forwarded-For) whose last entry the
+	// machine-login rate limiter takes as the caller's address. Unset, it uses the connection's
+	// own address, which is right only when nothing proxies the broker. Set it only when every
+	// request passes through your own reverse proxy, which appends that entry; otherwise a caller
+	// can forge the header and pick its own rate-limit bucket.
 	TrustedProxyHeader string
 }
 
-// removedVars are AGENTC-393 v9's removed Dispatch environment variables: the broker holds no
-// Dispatch credential and asks/issues nothing, so a stale deployment still setting one of these
-// must fail loudly rather than silently running with a Dispatch dependency it no longer has.
-var removedVars = []string{
-	"BROKER_DISPATCH_URL",
-	"BROKER_DISPATCH_TOKEN",
-	"BROKER_DISPATCH_TOKEN_FILE",
-	"BROKER_DISPATCH_PROJECT",
-	"BROKER_ASK_POLL_SECONDS",
+// noDispatchCredential is why the broker's Dispatch variables are gone: it asks and issues nothing
+// in Dispatch.
+const noDispatchCredential = "the broker holds no Dispatch credential"
+
+// noRulesFile is why the rules file's variables are gone: each secret's own tags say who owns it
+// and its tier.
+const noRulesFile = "the broker reads each secret's owner and tier from the secret's own tags under BROKER_SECRETS_PREFIX, so there is no rules file"
+
+// removedVars are environment variables the broker no longer reads. A stale deployment still
+// setting one must fail loudly rather than silently running on configuration that means nothing
+// any more.
+var removedVars = []struct{ name, reason string }{
+	{"BROKER_DISPATCH_URL", noDispatchCredential},
+	{"BROKER_DISPATCH_TOKEN", noDispatchCredential},
+	{"BROKER_DISPATCH_TOKEN_FILE", noDispatchCredential},
+	{"BROKER_DISPATCH_PROJECT", noDispatchCredential},
+	{"BROKER_ASK_POLL_SECONDS", noDispatchCredential},
+	{"BROKER_UI_ORIGIN", "approval is by Dispatch login, so the broker checks no WebAuthn origin"},
+	{"BROKER_RULES_FILE", noRulesFile},
+	{"BROKER_RULES_S3_URI", noRulesFile},
+	{"BROKER_RULES_RELOAD_SECONDS", noRulesFile},
 }
 
 // databasePasswordPlaceholder is substituted in BROKER_DATABASE_URL with the URL-escaped value of
@@ -77,9 +127,9 @@ func substituteDatabasePassword(rawURL string, getenv func(string) string) (stri
 }
 
 func Load(getenv func(string) string) (Config, error) {
-	for _, name := range removedVars {
-		if getenv(name) != "" {
-			return Config{}, fmt.Errorf("%s is removed; the broker holds no Dispatch credential (AGENTC-393 v9)", name)
+	for _, removed := range removedVars {
+		if getenv(removed.name) != "" {
+			return Config{}, fmt.Errorf("%s is removed; %s", removed.name, removed.reason)
 		}
 	}
 	databaseURL, err := substituteDatabasePassword(getenv("BROKER_DATABASE_URL"), getenv)
@@ -90,34 +140,29 @@ func Load(getenv func(string) string) (Config, error) {
 		ListenAddr:         orDefault(getenv("BROKER_LISTEN_ADDR"), "127.0.0.1:13380"),
 		DatabaseURL:        databaseURL,
 		PublicURL:          getenv("BROKER_PUBLIC_URL"),
-		UIOrigin:           getenv("BROKER_UI_ORIGIN"),
-		RulesFile:          getenv("BROKER_RULES_FILE"),
-		RulesS3URI:         getenv("BROKER_RULES_S3_URI"),
+		SecretsPrefix:      getenv("BROKER_SECRETS_PREFIX"),
+		SecretsKMSKeyARN:   getenv("BROKER_SECRETS_KMS_KEY_ARN"),
 		K8sOIDCIssuer:      getenv("BROKER_K8S_OIDC_ISSUER"),
 		K8sOIDCAudience:    getenv("BROKER_K8S_OIDC_AUDIENCE"),
 		EnvoyURL:           getenv("BROKER_ENVOY_URL"),
 		TrustedProxyHeader: getenv("BROKER_TRUSTED_PROXY_HEADER"),
 	}
 	for _, req := range []struct{ name, value string }{
-		{"BROKER_DATABASE_URL", cfg.DatabaseURL}, {"BROKER_PUBLIC_URL", cfg.PublicURL}, {"BROKER_UI_ORIGIN", cfg.UIOrigin},
+		{"BROKER_DATABASE_URL", cfg.DatabaseURL}, {"BROKER_PUBLIC_URL", cfg.PublicURL},
+		{"BROKER_SECRETS_PREFIX", cfg.SecretsPrefix}, {"BROKER_SECRETS_KMS_KEY_ARN", cfg.SecretsKMSKeyARN},
 	} {
 		if strings.TrimSpace(req.value) == "" {
 			return Config{}, fmt.Errorf("%s is required", req.name)
 		}
 	}
-	for _, u := range []struct{ name, value string }{
-		{"BROKER_PUBLIC_URL", cfg.PublicURL}, {"BROKER_UI_ORIGIN", cfg.UIOrigin},
-	} {
-		parsed, err := url.Parse(u.value)
-		if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.Path != "" {
-			return Config{}, fmt.Errorf("%s must be an absolute URL with no path: %q", u.name, u.value)
-		}
+	if parsed, err := url.Parse(cfg.PublicURL); err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.Path != "" {
+		return Config{}, fmt.Errorf("BROKER_PUBLIC_URL must be an absolute URL with no path: %q", cfg.PublicURL)
 	}
-	if (cfg.RulesFile == "") == (cfg.RulesS3URI == "") {
-		return Config{}, fmt.Errorf("exactly one of BROKER_RULES_FILE and BROKER_RULES_S3_URI must be set")
+	if !strings.HasSuffix(cfg.SecretsPrefix, "/") || strings.HasPrefix(cfg.SecretsPrefix, "/") || strings.ContainsFunc(cfg.SecretsPrefix, unicode.IsSpace) {
+		return Config{}, fmt.Errorf("BROKER_SECRETS_PREFIX must be a Secrets Manager name prefix ending in /, such as production/agent-secrets/, got %q", cfg.SecretsPrefix)
 	}
-	if cfg.RulesS3URI != "" && !strings.HasPrefix(cfg.RulesS3URI, "s3://") {
-		return Config{}, fmt.Errorf("BROKER_RULES_S3_URI must be s3://<bucket>/<key>, got %q", cfg.RulesS3URI)
+	if !policy.ValidKeyARN(cfg.SecretsKMSKeyARN) {
+		return Config{}, fmt.Errorf("BROKER_SECRETS_KMS_KEY_ARN must be a KMS key ARN, arn:aws:kms:<region>:<account>:key/<key id>, got %q", cfg.SecretsKMSKeyARN)
 	}
 	issuer, audience, err := oidc.ConfigFromEnv(getenv, "BROKER_K8S_OIDC_ISSUER", "BROKER_K8S_OIDC_AUDIENCE")
 	if err != nil {
@@ -138,17 +183,16 @@ func Load(getenv func(string) string) (Config, error) {
 		}
 	}
 	ints := []struct {
-		name string
-		dst  *int
-		def  int
-		max  int
+		name     string
+		dst      *int
+		def      int
+		min, max int
 	}{
-		{"BROKER_LEASE_SECONDS", &cfg.LeaseSeconds, 900, 3600},
-		{"BROKER_PROOF_SKEW_SECONDS", &cfg.ProofSkewSeconds, 60, 300},
-		{"BROKER_MAX_GRANT_SECONDS", &cfg.MaxGrantSeconds, 43200, 43200},
-		{"BROKER_RULES_RELOAD_SECONDS", &cfg.RulesReloadSeconds, 300, 3600},
-		{"BROKER_LAUNCHER_CREDENTIAL_SECONDS", &cfg.LauncherCredentialSeconds, 604800, 2592000},
-		{"BROKER_SWEEP_SECONDS", &cfg.SweepSeconds, 5, 60},
+		{"BROKER_LEASE_SECONDS", &cfg.LeaseSeconds, 900, 1, 3600},
+		{"BROKER_PROOF_SKEW_SECONDS", &cfg.ProofSkewSeconds, 60, 1, 300},
+		{"BROKER_MAX_GRANT_SECONDS", &cfg.MaxGrantSeconds, 43200, 1, 43200},
+		{"BROKER_LAUNCHER_CREDENTIAL_SECONDS", &cfg.LauncherCredentialSeconds, 604800, 1, 2592000},
+		{"BROKER_SWEEP_SECONDS", &cfg.SweepSeconds, 5, 1, 60},
 	}
 	for _, i := range ints {
 		raw := getenv(i.name)
@@ -157,8 +201,8 @@ func Load(getenv func(string) string) (Config, error) {
 			continue
 		}
 		n, err := strconv.Atoi(raw)
-		if err != nil || n < 1 || n > i.max {
-			return Config{}, fmt.Errorf("%s must be a whole number between 1 and %d, got %q", i.name, i.max, raw)
+		if err != nil || n < i.min || n > i.max {
+			return Config{}, fmt.Errorf("%s must be a whole number between %d and %d, got %q", i.name, i.min, i.max, raw)
 		}
 		*i.dst = n
 	}

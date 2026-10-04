@@ -52,8 +52,10 @@ var (
 // keeping such a site off `for update` is a review matter rather than a guarantee this check
 // makes.
 //
-// `for update` elsewhere is untouched: doc_checkpoints, comments, messages, message_deliveries,
-// comment_mentions, comment_deliveries, user_issue_state and architecture_sources all use it.
+// `for update` elsewhere is untouched: doc_checkpoints, comments, message_deliveries,
+// comment_mentions, comment_deliveries, user_issue_state and architecture_sources all use it. A
+// targeted message's own row is taken `for no key update` (message_delivery.go), so the session's
+// reply, whose foreign key takes it `for key share`, never waits on it.
 //
 // The match is statement-scoped and conservative, and it prints the statement rather than naming
 // a table, because which row a statement locks is a property of the whole statement. `for update`

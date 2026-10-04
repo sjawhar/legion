@@ -19,6 +19,8 @@ applies_when:
 related_issues:
   - "LEGION-35"
   - "sjawhar/legion#1004"
+  - "LEGION-370"
+  - "sjawhar/legion#1678"
 ---
 
 # Widen the Contender Count Before Calling a Race Unreproducible
@@ -66,7 +68,20 @@ script taking `<workdir> <iterations> <busy-loops> <bun test args…>`:
 The `load=` figure is the host's *actual* condition, not the recipe's nominal one — this machine
 ran other agents' work throughout, and the number is what makes two results comparable. Save the
 full output to a file (`before.txt`, `after.txt`) and paste the `RESULT` line plus one failing
-block into the PR body under the acceptance criterion it satisfies.
+block into the PR body under the acceptance criterion it satisfies. In a gVisor worker pod
+`/proc/loadavg` reads `0.00` throughout; record `busy=<n>` and wall seconds there and say so
+(`a-worker-pod-ships-no-go-or-tmux-provision-them-under-home-each-relaunch-and-record-every-figure-in-the-handoff.md`).
+
+## Classify the failures by the value they carried
+
+The census of a before-run is a check on the spec's state model, not only a flake rate. Tabulate
+every failure by the value it carried (`sed -E 's/ At:.*//' | sort | uniq -c`); a kind the spec
+says to fail on is a question for the architect before any code is written, never a tolerance to
+widen quietly. LEGION-370: the unchanged `TestRealTmuxObserveReportsGoneOnce` under this recipe
+failed 13 of 40 — 8 `Kind:uncertain` (`no current target`) and 5 `Kind:not_recorded_process` —
+and the spec's first version said to fail only on the second. The 5 contradicted it; the planner
+escalated with the table, the spec moved to v3 (the loop ends on either final verdict), and the
+tester reproduced the distribution in two further pods (10 and 9 of 40, both kinds present).
 
 ## Before/after discipline
 
@@ -93,3 +108,5 @@ block into the PR body under the acceptance criterion it satisfies.
 - `docs/solutions/testing/loop-a-flaky-suite-sequentially-parallel-lanes-of-it-starve-its-timer-tests.md`
   — why the load recipe above is external busy loops and not parallel lanes of the suite itself:
   lanes starve the suite's real-timer tests and hide the target race.
+- `docs/solutions/testing/a-stream-consumer-ends-on-the-producers-terminal-set-and-its-deadline-names-the-last-observation.md`
+  — the Go real-tmux flake whose before-run census is quoted above, and the rule its fix follows.

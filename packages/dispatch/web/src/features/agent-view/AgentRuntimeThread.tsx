@@ -5,20 +5,28 @@ import {
 } from "@assistant-ui/react";
 import { type ReactNode, useMemo } from "react";
 
-import type { MessageRead } from "../../api/types";
+import type { Message, MessageRead } from "../../api/types";
+import { compareTimestamps } from "../../lib/timestamps";
 import { actorName, isViewer } from "../refs/actor";
 import { AgentThread } from "./AgentThread";
-import { type AgentConversation, isRunning, toThreadMessages } from "./conversation";
+import { type AgentConversation, dispatchTurns, isRunning, toThreadMessages } from "./conversation";
 import { dispatchMetadata } from "./dispatch-marks";
+
+/** Who wrote a stored message, when it was not the viewer: its author, and its issue if any. */
+function otherAuthor(message: Message, viewer: string | undefined): string | undefined {
+  return isViewer(message.author, viewer)
+    ? undefined
+    : [actorName(message.author), message.issue_key].filter(Boolean).join(" · ");
+}
 
 /**
  * Everything that reads the conversation, in one component so a boundary can be put around it.
  *
  * assistant-ui converts every message while the runtime is built, so a message it refuses throws
- * from `useExternalStoreRuntime` — in the render of whichever component calls it. While that was
- * the page, no boundary the page rendered could catch it and a bad frame took the header and the
- * delivery controls with the thread. Here, a boundary the page puts around this component does
- * catch it, and the page's own render never touches a frame.
+ * from `useExternalStoreRuntime` — in the render of whichever component calls it. Called from the
+ * page, it would throw where no boundary the page renders can catch it, and a bad frame would take
+ * the header and the delivery controls with the thread. Here, a boundary the page puts around this
+ * component does catch it, and the page's own render never touches a frame.
  */
 export function AgentRuntimeThread({
   conversation,
@@ -42,12 +50,36 @@ export function AgentRuntimeThread({
   viewer: string | undefined;
 }): ReactNode {
   const messages = useMemo(() => {
-    const streamed = toThreadMessages(conversation);
+    const storedMessages = stored.flatMap((read) => [read.message, ...read.replies]);
+    // A person's direct message the session took as its own user turn is in the stream too,
+    // normally tagged with its Dispatch id: then it shows once, where the session took it, still
+    // naming whoever wrote it. An untagged one is returned unchanged and its stored copy is never
+    // taken, so it shows twice (`packages/pi-envoy/AGENTS.md` says which turns go untagged). Any
+    // bus client can publish a tag, so only a person's stored message can be one, and only a
+    // streamed message saying exactly what that person sent replaces its stored copy.
+    const byID = new Map(
+      storedMessages
+        .filter((message) => message.author.kind === "user")
+        .map((message) => [message.id, message])
+    );
+    const turns = dispatchTurns(conversation);
+    const taken = new Set<string>();
+    const streamed = toThreadMessages(conversation).map((message) => {
+      const turn = turns.get(message.id ?? "");
+      const source = byID.get(turn?.dispatchMessageId ?? "");
+      if (turn === undefined || source === undefined || turn.text !== source.body) return message;
+      taken.add(source.id);
+      return { ...message, metadata: dispatchMetadata({ author: otherAuthor(source, viewer) }) };
+    });
     // Dispatch's side of the conversation, interleaved with the stream by time: what the session
     // wrote is its reply, what the viewer wrote is theirs, and anything anyone else sent the
-    // session (another human's direct message, an issue message, another agent) says who.
-    const dispatch: ThreadMessageLike[] = stored
-      .flatMap((read) => [read.message, ...read.replies])
+    // session (another human's direct message, an issue message, another agent) says who. The
+    // stream's times are whole milliseconds, so the merge below compares milliseconds; the stored
+    // messages carry microseconds, so they are put in time order first, and the stable merge keeps
+    // that order between two stored messages in one millisecond.
+    const dispatch: ThreadMessageLike[] = storedMessages
+      .filter((message) => !taken.has(message.id))
+      .sort((left, right) => compareTimestamps(left.created_at, right.created_at))
       .map((message) => {
         const content = [{ text: message.body, type: "text" as const }];
         const createdAt = new Date(message.created_at);
@@ -62,14 +94,11 @@ export function AgentRuntimeThread({
             status: { reason: "stop", type: "complete" } as const,
           };
         }
-        const author = isViewer(message.author, viewer)
-          ? undefined
-          : [actorName(message.author), message.issue_key].filter(Boolean).join(" · ");
         return {
           content,
           createdAt,
           id,
-          metadata: dispatchMetadata({ author }),
+          metadata: dispatchMetadata({ author: otherAuthor(message, viewer) }),
           role: "user" as const,
         };
       });

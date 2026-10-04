@@ -58,8 +58,6 @@ stop_daemon() {
 }
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
-# shellcheck source-path=SCRIPTDIR source=lib/stage-role-prompts.sh
-. "$root/scripts/e2e/lib/stage-role-prompts.sh"
 trap cleanup EXIT
 mkdir -p "$work/state" "$work/xdg" "$work/home"
 export XDG_STATE_HOME="$work/xdg" # the registry lands here, never in the devbox's real one
@@ -72,8 +70,7 @@ command -v tmux >/dev/null || {
 # below the kernel's ephemeral range, so no socket the run opens before the daemon binds can take
 # it (scripts/e2e/lib/free-port.sh). The restart reuses it.
 port=$(bash "$root/scripts/e2e/lib/free-port.sh")
-cd "$root/packages/daemon-go" && go build -o "$work/legion" ./cmd/legion
-stage_role_prompts "$root" "$work"
+cd "$root/packages/daemon" && go build -o "$work/legion" ./cmd/legion
 bash "$root/scripts/e2e/lib/built-from.sh" "$root" "$work/legion" | sed 's/^/   /'
 
 # CI passes its service's DSN; the devbox brings its own container on an ephemeral port.

@@ -1,5 +1,5 @@
-// Command dispatch serves the Dispatch dashboard, GitHub OAuth flow, and
-// per-user GitHub REST and GraphQL proxy.
+// Command dispatch serves the Dispatch dashboard and API, signs people in with Google Workspace
+// through the sign-in pool, and reads GitHub for the web app as the GitHub App.
 package main
 
 import (
@@ -7,8 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -18,6 +18,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/dispatch/agentstream"
 	"github.com/sjawhar/envoy/internal/dispatch/api"
@@ -26,17 +28,18 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/config"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
-	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/outbox"
 	"github.com/sjawhar/envoy/internal/dispatch/redeliver"
-	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/routes"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/oidc"
 )
 
 const (
-	defaultListenAddr = ":8766"
+	// defaultListenPort is the port when DISPATCH_PORT is unset; listenAddress joins it to the host.
+	defaultListenPort = "8766"
+	// defaultEnvoyURL is the Envoy listener when ENVOY_URL is unset: this machine's.
+	defaultEnvoyURL   = "http://127.0.0.1:9020"
 	shutdownTimout    = 5 * time.Second
 	readHeaderTimeout = 10 * time.Second
 	idleTimeout       = 2 * time.Minute
@@ -49,16 +52,23 @@ const (
 var buildCommit string
 
 type bootConfig struct {
-	DatabaseURL      string
-	AgentToken       string
-	RepoProjects     string
-	DefaultProject   string
-	EnvoyURL         string
-	GitHubAPIBase    string
-	IdentityHeader   string
-	AllowedLogins    map[string]struct{}
-	NATSDisabled     bool
-	TestHooksEnabled bool
+	DatabaseURL string
+	// AgentTokens is DISPATCH_AGENT_TOKEN parsed: every value the API and the document websocket
+	// accept as the shared agent token, the first the current one.
+	AgentTokens    *auth.SharedAgentTokens
+	RepoProjects   string
+	DefaultProject string
+	EnvoyURL       string
+	GitHubAPIBase  string
+	IdentityHeader string
+	// SignInIssuer, SignInClientID, SignInClientSecret and SignInGroup configure Google sign-in
+	// through the sign-in pool (DISPATCH_SIGNIN_*): all four or none; empty means no sign-in.
+	SignInIssuer       string
+	SignInClientID     string
+	SignInClientSecret string
+	SignInGroup        string
+	NATSDisabled       bool
+	TestHooksEnabled   bool
 	// OIDCIssuer and OIDCAudience configure verification of projected
 	// service-account tokens. Both set or neither; empty means no verifier.
 	OIDCIssuer   string
@@ -68,29 +78,39 @@ type bootConfig struct {
 	// (required when AgentSecretsURL is set).
 	AgentSecretsURL   string
 	AgentSecretsToken string
+	// ListenAddr is the address the server binds, from DISPATCH_LISTEN_HOST and DISPATCH_PORT
+	// (listenAddress). The dev sign-in fence checks this value, so what it checks is what binds.
+	ListenAddr string
+	// DevSignIn (DISPATCH_DEV_SIGNIN=1) mounts GET /auth/_dev/signin behind the dev sign-in
+	// fence; the signing key is then per process.
+	DevSignIn bool
+	// WebDist is DISPATCH_WEB_DIST: the dashboard directory to serve, or empty to find it from
+	// the binary (defaultWebDistDir).
+	WebDist string
+	// AssetStoreBucket is DISPATCH_ASSET_STORE_BUCKET. Empty preserves local-only asset serving.
+	AssetStoreBucket string
+	// SigningKey is DISPATCH_SIGNING_KEY: the session cookie key, or empty to keep one in the
+	// data dir (sessionSigningKey).
+	SigningKey string
+	// InsecureCookie (DISPATCH_INSECURE_COOKIE set to anything) drops Secure from every cookie.
+	InsecureCookie bool
+	// EnvoyToken is ENVOY_TOKEN, the bearer every Envoy listener call sends.
+	EnvoyToken string
 }
 
 func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	env := processSettings()
 	if len(os.Args) > 1 {
-		switch os.Args[1] {
-		case "backfill-block-ids":
-			os.Exit(backfillBlockIDs(context.Background(), os.Getenv("DATABASE_URL"), os.Stdout))
-		case "backfill-anchor-blocks":
-			os.Exit(backfillAnchorBlocks(context.Background(), os.Getenv("DATABASE_URL"), os.Stdout))
-		case "rebuild-refs":
-			os.Exit(rebuildRefs(context.Background(), os.Getenv("DATABASE_URL"), loadServerURL(), os.Stdout))
-		case "redeliver-webhooks":
-			os.Exit(redeliverWebhooks(context.Background(), os.Args[2:], os.Stdout))
-		}
+		os.Exit(runSubcommand(context.Background(), os.Args[1:], env, os.Stdout, os.Stderr))
 	}
-	boot, err := resolveBootConfig(os.Getenv)
+	boot, err := resolveBootConfig(env)
 	if err != nil {
 		slog.Error("dispatch: resolve boot config", "error", err)
 		os.Exit(1)
 	}
 
-	envoyConfig, err := config.Load(config.LoadOptions{})
+	envoyConfig, err := loadEnvoyConfig(env, config.LoadOptions{})
 	if err != nil {
 		slog.Error("dispatch: load envoy config", "error", err)
 		os.Exit(1)
@@ -98,6 +118,30 @@ func main() {
 	serverURL := ""
 	if envoyConfig.Dispatch != nil {
 		serverURL = envoyConfig.Dispatch.ServerURL
+	}
+	// The App credentials are read before anything connects, so the dev sign-in fence refuses a
+	// key it will not sign with before NATS or Postgres is dialled.
+	dataDir, err := defaultDataDir()
+	if err != nil {
+		slog.Error("dispatch: resolve data dir", "error", err)
+		os.Exit(1)
+	}
+	appCfg, appSource, err := loadAppCredentials(env, dataDir)
+	if err != nil {
+		slog.Error("dispatch: load app credentials", "error", err)
+		os.Exit(1)
+	}
+	if err := devSignInLoadedFence(boot, serverURL, appCfg, appSource); err != nil {
+		slog.Error("dispatch: dev sign-in", "error", err)
+		os.Exit(1)
+	}
+	if appCfg == nil {
+		slog.Info("dispatch: no app credentials yet — dashboard will respond 503 until configured")
+	} else {
+		slog.Info("dispatch: loaded github app", "slug", appCfg.Slug, "client_id", appCfg.ClientID, "source", appSource.String())
+	}
+	if boot.DevSignIn {
+		slog.Warn("dispatch: dev sign-in mounted: any email signs in at /auth/_dev/signin without the sign-in pool; cookies are valid on this process only", "origin", serverURL)
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -107,7 +151,7 @@ func main() {
 	if boot.NATSDisabled {
 		slog.Info("dispatch: NATS publisher disabled")
 	} else {
-		natsClient, err = bus.ConnectOwningStream(envoyConfig.NatsURLs)
+		natsClient, err = bus.ConnectOwningStream(envoyConfig.NatsURLs, bus.WithEnvironment(env.lookup))
 		if err != nil {
 			slog.Error("dispatch: connect NATS", "error", err)
 			os.Exit(1)
@@ -128,7 +172,7 @@ func main() {
 			slog.Info("dispatch: agent conversation relay off: it needs NATS")
 		}
 	} else {
-		streamConn, err := bus.Dial("dispatch-agent-stream", envoyConfig.NatsURLs)
+		streamConn, err := bus.Dial("dispatch-agent-stream", envoyConfig.NatsURLs, env.lookup)
 		if err != nil {
 			slog.Error("dispatch: connect the agent conversation relay", "error", err)
 			os.Exit(1)
@@ -157,59 +201,49 @@ func main() {
 		os.Exit(1)
 	}
 
-	dataDir, err := defaultDataDir()
-	if err != nil {
-		slog.Error("dispatch: resolve data dir", "error", err)
-		os.Exit(1)
-	}
-	webDistDir, err := defaultWebDistDir()
+	webDistDir, err := defaultWebDistDir(boot.WebDist)
 	if err != nil {
 		slog.Error("dispatch: resolve web dist dir", "error", err)
 		os.Exit(1)
 	}
 
-	signingKey, err := auth.LoadSigningKey(filepath.Join(dataDir, "signing-key"))
+	var assetStore routes.AssetStore
+	if boot.AssetStoreBucket != "" {
+		assetStore, err = routes.NewS3AssetStore(ctx, boot.AssetStoreBucket)
+		if err != nil {
+			slog.Error("dispatch: configure retained asset store", "error", err)
+			os.Exit(1)
+		}
+	}
+
+	signIn, err := discoverSignIn(ctx, boot)
+	if err != nil {
+		slog.Error("dispatch: discover the sign-in issuer", "error", err)
+		os.Exit(1)
+	}
+	if signIn != nil {
+		slog.Info("dispatch: signing people in through the sign-in pool", "issuer", boot.SignInIssuer, "client_id", boot.SignInClientID, "group", boot.SignInGroup)
+	}
+
+	people, signingKey, err := openPeople(boot, dataDir, database.Pool, signIn)
 	if err != nil {
 		slog.Error("dispatch: load signing key", "error", err)
 		os.Exit(1)
 	}
-
-	appCfg, appSource, err := loadAppCredentials(dataDir)
-	if err != nil {
-		slog.Error("dispatch: load app credentials", "error", err)
-		os.Exit(1)
-	}
-	if appCfg == nil {
-		slog.Info("dispatch: no app credentials yet — dashboard will respond 503 until configured")
-	} else {
-		slog.Info("dispatch: loaded github app", "slug", appCfg.Slug, "client_id", appCfg.ClientID, "source", appSource)
-	}
-
-	users := store.NewPgUserStore(database.Pool)
+	retirePlainRefreshTokens(ctx, people, plainRefreshTokenRetireTimeout)
 	sessions := store.NewPgSessionStore(database.Pool)
 
-	var requestIdentity identity.Identity
-	if boot.IdentityHeader == "" {
-		requestIdentity = identity.CookieIdentity{
-			SigningKey:    signingKey,
-			AllowedLogins: boot.AllowedLogins,
-			Sessions:      sessions,
-		}
-	} else {
-		slog.Warn("dispatch: trusting request identity header", "header", boot.IdentityHeader)
-		requestIdentity = identity.HeaderIdentity{
-			Header:        boot.IdentityHeader,
-			AllowedLogins: boot.AllowedLogins,
-		}
+	if boot.IdentityHeader != "" {
+		slog.Warn("dispatch: using test/local header identity", "header", boot.IdentityHeader)
 	}
+	requestIdentity := requestIdentityFor(boot, signingKey, people, sessions, signIn)
 
 	broker := events.NewBroker()
-	documentService := docs.New(docs.Deps{
-		Store:      database,
-		Events:     broker,
-		Identity:   requestIdentity,
-		AgentToken: boot.AgentToken,
-		ServerURL:  serverURL,
+	documentService := newDocumentService(boot, docs.Deps{
+		Store:     database,
+		Events:    broker,
+		Identity:  requestIdentity,
+		ServerURL: serverURL,
 	})
 
 	serviceTokens, err := oidc.Discover(ctx, boot.OIDCIssuer, boot.OIDCAudience, oidc.DiscoveryTimeout)
@@ -221,34 +255,23 @@ func main() {
 		slog.Info("dispatch: verifying service-account tokens", "issuer", boot.OIDCIssuer, "audience", boot.OIDCAudience)
 	}
 
-	appCtx, err := routes.BuildAppContext(routes.AppContextOptions{
-		SigningKey: signingKey,
-		WebDistDir: webDistDir,
-		Users:      users,
-		Sessions:   sessions,
-		Identity:   requestIdentity,
-
-		AllowedLogins:  boot.AllowedLogins,
-		Store:          database,
-		AgentToken:     boot.AgentToken,
-		RepoProjects:   boot.RepoProjects,
-		DefaultProject: boot.DefaultProject,
-		ServerURL:      serverURL,
-		EnvoyURL:       boot.EnvoyURL,
-		Docs:           documentService,
-		Events:         broker,
-		App:            appCfg,
-		AppSource:      appSource,
-		GitHubAPIBase:  boot.GitHubAPIBase,
-		OIDC:           serviceTokens,
-		AgentStream:    agentStream,
-		Lifetime:       ctx,
-
-		AgentSecretsURL:   boot.AgentSecretsURL,
-		AgentSecretsToken: boot.AgentSecretsToken,
-
-		TestHooksEnabled: boot.TestHooksEnabled,
-	})
+	appCtx, err := routes.BuildAppContext(appContextOptions(boot, routes.AppContextOptions{
+		SigningKey:  signingKey,
+		WebDistDir:  webDistDir,
+		AssetStore:  assetStore,
+		People:      people,
+		Sessions:    sessions,
+		Identity:    requestIdentity,
+		SignIn:      signIn,
+		Store:       database,
+		ServerURL:   serverURL,
+		Docs:        documentService,
+		Events:      broker,
+		App:         appCfg,
+		OIDC:        serviceTokens,
+		AgentStream: agentStream,
+		Lifetime:    ctx,
+	}))
 
 	if err != nil {
 		slog.Error("dispatch: build app context", "error", err)
@@ -263,6 +286,9 @@ func main() {
 			Docs:      documentService,
 		})
 	}
+	// A settlement a shutdown cut short, here or in the task this one replaces, runs without
+	// anyone opening its document.
+	go documentService.RunSettlementResumption(ctx)
 
 	sweeper, err := webhookSweeper(natsClient, appCfg, boot.GitHubAPIBase)
 	if err != nil {
@@ -279,23 +305,24 @@ func main() {
 	go architecture.Run(ctx, appCtx.Architecture())
 
 	handler := dispatchHandler(routes.New(appCtx), database, natsClient, buildCommit)
-	listenAddr, err := listenAddress()
-	if err != nil {
-		slog.Error("dispatch: resolve listen address", "error", err)
-		os.Exit(1)
-	}
 	server := &http.Server{
-		Addr:              listenAddr,
 		Handler:           handler,
 		ReadHeaderTimeout: readHeaderTimeout,
 		IdleTimeout:       idleTimeout,
 		// WriteTimeout remains zero because the event stream is long-lived.
 	}
-
+	// Bound before serving, so an address that cannot be taken ends the process with 1: a
+	// supervisor must not read a port clash as a clean stop.
+	listener, err := net.Listen("tcp", boot.ListenAddr)
+	if err != nil {
+		slog.Error("dispatch: listen", "addr", boot.ListenAddr, "error", err)
+		os.Exit(1)
+	}
+	serveErr := make(chan error, 1)
 	go func() {
-		slog.Info("dispatch: listening", "addr", listenAddr)
-		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			slog.Error("dispatch: listen", "error", err)
+		slog.Info("dispatch: listening", "addr", boot.ListenAddr)
+		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			serveErr <- err
 			cancel()
 		}
 	}()
@@ -310,6 +337,12 @@ func main() {
 	if err := documentService.Shutdown(shutdownCtx); err != nil {
 		slog.Warn("dispatch: shutdown document service", "error", err)
 	}
+	select {
+	case err := <-serveErr:
+		slog.Error("dispatch: serve", "error", err)
+		os.Exit(1)
+	default:
+	}
 }
 
 func defaultDataDir() (string, error) {
@@ -320,13 +353,14 @@ func defaultDataDir() (string, error) {
 	return filepath.Join(home, ".local", "share", "dispatch"), nil
 }
 
-// defaultWebDistDir resolves the SPA build directory relative to the running
-// binary. The binary lives at packages/envoy/dispatch (when built locally) or
-// is installed elsewhere; we walk up to find packages/dispatch/web/dist.
-func defaultWebDistDir() (string, error) {
-	// First try $DISPATCH_WEB_DIST.
-	if env := os.Getenv("DISPATCH_WEB_DIST"); env != "" {
-		return env, nil
+// defaultWebDistDir resolves the SPA build directory: configured (DISPATCH_WEB_DIST) when it is
+// not empty, otherwise relative to the running binary. The binary lives at packages/envoy/dispatch
+// (when built locally) or is installed elsewhere; we walk up to find packages/dispatch/web/dist.
+func defaultWebDistDir(configured string) (string, error) {
+	// The configured directory is made absolute and clean like every path below, so a value
+	// spelled through `..` names the same directory the static handler joins requests under.
+	if configured != "" {
+		return filepath.Abs(configured)
 	}
 	exe, err := os.Executable()
 	if err != nil {
@@ -363,63 +397,115 @@ func defaultWebDistDir() (string, error) {
 	return filepath.Join(cwd, "packages", "dispatch", "web", "dist"), nil
 }
 
-// loadAppCredentials returns (cfg, source, err). source is "env" or
-// "file:<path>" for diagnostic logging. Env wins over file; either may be
-// absent (returns nil, "", nil).
-func loadAppCredentials(dataDir string) (*auth.AppConfig, string, error) {
-	if cfg, err := auth.LoadAppFromEnv(); err != nil {
-		return nil, "", fmt.Errorf("load app from env: %w", err)
+// appCredentialSource is where loadAppCredentials found the App: the environment, or the data
+// dir's app.json at Path. The dev sign-in fence decides on it; String is the form the boot log
+// prints.
+type appCredentialSource struct {
+	Path string
+}
+
+func (s appCredentialSource) String() string {
+	if s.Path != "" {
+		return "file:" + s.Path
+	}
+	return "env"
+}
+
+// loadAppCredentials returns the App and where it came from. The environment (the DISPATCH_APP_*
+// rows of the settings table) wins over the file; either may be absent, which returns a nil App.
+func loadAppCredentials(env settingValues, dataDir string) (*auth.AppConfig, appCredentialSource, error) {
+	if cfg, err := auth.LoadAppFromEnv(env.get); err != nil {
+		return nil, appCredentialSource{}, fmt.Errorf("load app from env: %w", err)
 	} else if cfg != nil {
-		return cfg, "env", nil
+		return cfg, appCredentialSource{}, nil
 	}
 	path := filepath.Join(dataDir, "app.json")
 	cfg, err := auth.ReadApp(path)
 	if err != nil {
-		return nil, "", fmt.Errorf("read %s: %w", path, err)
+		return nil, appCredentialSource{}, fmt.Errorf("read %s: %w", path, err)
 	}
 	if cfg == nil {
-		return nil, "", nil
+		return nil, appCredentialSource{}, nil
 	}
-	return cfg, "file:" + path, nil
+	return cfg, appCredentialSource{Path: path}, nil
 }
 
-func resolveBootConfig(getenv func(string) string) (bootConfig, error) {
+// resolveBootConfig is the server's configuration from what the settings table read (env),
+// checked before anything connects. It holds the settings main hands on as values; three groups
+// reach their readers from env instead, through the table's lookup: the GitHub App credentials
+// (loadAppCredentials), the envoy.json overrides (loadEnvoyConfig) and NATS's reach and nkey (the
+// bus connects). A new setting goes wherever its reader takes it, and always into the table.
+// A variable a release removed (removedSettings) refuses startup before anything else is read.
+func resolveBootConfig(env settingValues) (bootConfig, error) {
+	if err := refuseRemovedSettings(env); err != nil {
+		return bootConfig{}, err
+	}
 	boot := bootConfig{
-		DatabaseURL:      strings.TrimSpace(getenv("DATABASE_URL")),
-		AgentToken:       strings.TrimSpace(getenv("DISPATCH_AGENT_TOKEN")),
-		RepoProjects:     strings.TrimSpace(getenv("DISPATCH_REPO_PROJECTS")),
-		DefaultProject:   strings.TrimSpace(getenv("DISPATCH_DEFAULT_PROJECT")),
-		GitHubAPIBase:    strings.TrimSpace(getenv("DISPATCH_GITHUB_API_BASE")),
-		AllowedLogins:    parseAllowedLogins(getenv("DISPATCH_ALLOWED_LOGINS")),
-		NATSDisabled:     getenv("DISPATCH_NATS_DISABLED") == "1",
-		TestHooksEnabled: getenv("DISPATCH_TEST_HOOKS") == "1",
+		DatabaseURL:        strings.TrimSpace(env.get("DATABASE_URL")),
+		RepoProjects:       strings.TrimSpace(env.get("DISPATCH_REPO_PROJECTS")),
+		DefaultProject:     strings.TrimSpace(env.get("DISPATCH_DEFAULT_PROJECT")),
+		GitHubAPIBase:      strings.TrimSpace(env.get("DISPATCH_GITHUB_API_BASE")),
+		SignInIssuer:       strings.TrimSpace(env.get("DISPATCH_SIGNIN_ISSUER")),
+		SignInClientID:     strings.TrimSpace(env.get("DISPATCH_SIGNIN_CLIENT_ID")),
+		SignInClientSecret: strings.TrimSpace(env.get("DISPATCH_SIGNIN_CLIENT_SECRET")),
+		SignInGroup:        strings.TrimSpace(env.get("DISPATCH_SIGNIN_GROUP")),
+		NATSDisabled:       env.get("DISPATCH_NATS_DISABLED") == "1",
+		TestHooksEnabled:   env.get("DISPATCH_TEST_HOOKS") == "1",
+		WebDist:            env.get("DISPATCH_WEB_DIST"),
+		AssetStoreBucket:   strings.TrimSpace(env.get("DISPATCH_ASSET_STORE_BUCKET")),
+		SigningKey:         env.get("DISPATCH_SIGNING_KEY"),
+		InsecureCookie:     env.get("DISPATCH_INSECURE_COOKIE") != "",
+		EnvoyToken:         env.get("ENVOY_TOKEN"),
 	}
 	if boot.DatabaseURL == "" {
 		return bootConfig{}, errors.New("DATABASE_URL required")
 	}
-	if boot.AgentToken == "" {
+	agentTokens := env.get("DISPATCH_AGENT_TOKEN")
+	if strings.TrimSpace(agentTokens) == "" {
 		return bootConfig{}, errors.New("DISPATCH_AGENT_TOKEN required")
 	}
+	tokens, err := auth.ParseSharedAgentTokens(agentTokens)
+	if err != nil {
+		return bootConfig{}, fmt.Errorf("DISPATCH_AGENT_TOKEN %w", err)
+	}
+	boot.AgentTokens = tokens
+	listenAddr, err := listenAddress(env)
+	if err != nil {
+		return bootConfig{}, err
+	}
+	boot.ListenAddr = listenAddr
+	identityMode := strings.TrimSpace(env.get("DISPATCH_IDENTITY"))
+	if err := checkSignInSettings(boot, identityMode); err != nil {
+		return bootConfig{}, err
+	}
+	var devSignIn bool
+	switch flag := env.get("DISPATCH_DEV_SIGNIN"); flag {
+	case "":
+	case "1":
+		devSignIn = true
+	default:
+		return bootConfig{}, fmt.Errorf("DISPATCH_DEV_SIGNIN=%q (expected 1 or unset)", flag)
+	}
 
-	switch mode := strings.TrimSpace(getenv("DISPATCH_IDENTITY")); {
+	switch mode := identityMode; {
 	case mode == "" || mode == "cookie":
-		if len(boot.AllowedLogins) == 0 {
-			return bootConfig{}, errors.New("DISPATCH_ALLOWED_LOGINS required in cookie identity mode")
+		if err := requireCookieSignIn(boot, devSignIn); err != nil {
+			return bootConfig{}, err
 		}
 	case strings.HasPrefix(mode, "header:"):
 		boot.IdentityHeader = strings.TrimSpace(strings.TrimPrefix(mode, "header:"))
 		if boot.IdentityHeader == "" {
 			return bootConfig{}, errors.New("DISPATCH_IDENTITY header name required")
 		}
-		if getenv("DISPATCH_APP_CLIENT_ID") != "" && getenv("DISPATCH_IDENTITY_HEADER_TRUSTED") != "1" {
-			return bootConfig{}, errors.New("DISPATCH_IDENTITY_HEADER_TRUSTED=1 required with OAuth and header identity")
+		if env.get("DISPATCH_IDENTITY_HEADER_TRUSTED") != "1" {
+			return bootConfig{}, errors.New("DISPATCH_IDENTITY_HEADER_TRUSTED=1 required: header identity is only for tests and local harnesses")
 		}
 	default:
 		return bootConfig{}, fmt.Errorf("DISPATCH_IDENTITY=%q (expected cookie or header:<Header-Name>)", mode)
 	}
-	envoyURL := strings.TrimSpace(getenv("ENVOY_URL"))
+	envoyURL := strings.TrimSpace(env.get("ENVOY_URL"))
 	if envoyURL == "" {
-		envoyURL = "http://127.0.0.1:9020"
+		envoyURL = defaultEnvoyURL
 	}
 	parsed, err := url.Parse(envoyURL)
 	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
@@ -430,20 +516,20 @@ func resolveBootConfig(getenv func(string) string) (bootConfig, error) {
 	// The pair's both-or-neither rule lives in internal/oidc so the listener
 	// applies the same one; oidc.New stays out of this function, which reads
 	// the environment and returns errors and nothing else.
-	boot.OIDCIssuer, boot.OIDCAudience, err = oidc.ConfigFromEnv(getenv,
+	boot.OIDCIssuer, boot.OIDCAudience, err = oidc.ConfigFromEnv(env.get,
 		"DISPATCH_OIDC_ISSUER", "DISPATCH_OIDC_AUDIENCE")
 	if err != nil {
 		return bootConfig{}, err
 	}
 
-	agentSecretsURL := strings.TrimSuffix(strings.TrimSpace(getenv("DISPATCH_AGENT_SECRETS_URL")), "/")
+	agentSecretsURL := strings.TrimSuffix(strings.TrimSpace(env.get("DISPATCH_AGENT_SECRETS_URL")), "/")
 	if agentSecretsURL != "" {
 		parsed, err := url.Parse(agentSecretsURL)
 		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.Path != "" {
 			return bootConfig{}, fmt.Errorf("DISPATCH_AGENT_SECRETS_URL=%q (expected an absolute http(s) URL with no path)", agentSecretsURL)
 		}
 		boot.AgentSecretsURL = agentSecretsURL
-		boot.AgentSecretsToken, err = agentSecretsToken(getenv)
+		boot.AgentSecretsToken, err = agentSecretsToken(env)
 		if err != nil {
 			return bootConfig{}, err
 		}
@@ -452,26 +538,146 @@ func resolveBootConfig(getenv func(string) string) (bootConfig, error) {
 		}
 	}
 
+	if devSignIn {
+		if err := devSignInFence(boot, env); err != nil {
+			return bootConfig{}, err
+		}
+		boot.DevSignIn = true
+	}
 	return boot, nil
 }
 
-// agentSecretsToken resolves the secrets broker's UI bearer, reading
-// DISPATCH_AGENT_SECRETS_TOKEN_FILE (trimmed contents) ahead of
-// DISPATCH_AGENT_SECRETS_TOKEN; a set-but-unreadable or blank file is an error naming both,
-// never a silent fallback to the bare variable.
-func agentSecretsToken(getenv func(string) string) (string, error) {
-	if path := strings.TrimSpace(getenv("DISPATCH_AGENT_SECRETS_TOKEN_FILE")); path != "" {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return "", fmt.Errorf("DISPATCH_AGENT_SECRETS_TOKEN_FILE names %s, which could not be read: %w", path, err)
-		}
-		value := strings.TrimSpace(string(data))
-		if value == "" {
-			return "", fmt.Errorf("DISPATCH_AGENT_SECRETS_TOKEN_FILE names %s, which is empty", path)
-		}
-		return value, nil
+// devSignInFence is the dev sign-in fence over the environment; devSignInLoadedFence covers what
+// main loads after it. With the flag any loopback client signs in as any person it names, so the
+// process must listen, keep its data and reach the services that act on a human's word (NATS, the
+// secrets broker, the Envoy listener that delivers mentions and messages, GitHub as the App) on
+// this machine alone, and sign its cookies with a key no other process holds.
+func devSignInFence(boot bootConfig, env settingValues) error {
+	if boot.IdentityHeader != "" {
+		return errors.New("DISPATCH_DEV_SIGNIN=1 mints session cookies, so DISPATCH_IDENTITY must be cookie")
 	}
-	return strings.TrimSpace(getenv("DISPATCH_AGENT_SECRETS_TOKEN")), nil
+	if boot.SignInIssuer != "" {
+		return errors.New("DISPATCH_DEV_SIGNIN=1 signs people in without the sign-in pool, so DISPATCH_SIGNIN_* must be unset: a loopback server holds no sign-in client secret")
+	}
+	if !routes.LoopbackHostPort(boot.ListenAddr) {
+		return fmt.Errorf("DISPATCH_DEV_SIGNIN=1 is for a loopback server only: DISPATCH_LISTEN_HOST=%q (listen address %q) must be 127.0.0.1 or [::1]", env.get("DISPATCH_LISTEN_HOST"), boot.ListenAddr)
+	}
+	if err := loopbackDatabase(boot.DatabaseURL); err != nil {
+		return err
+	}
+	if boot.SigningKey != "" {
+		return errors.New("DISPATCH_DEV_SIGNIN=1 signs cookies with a key generated for this process; unset DISPATCH_SIGNING_KEY")
+	}
+	if !boot.NATSDisabled && env.get(bus.AllowRemoteEnvVar) == "1" {
+		return fmt.Errorf("DISPATCH_DEV_SIGNIN=1 publishes to this machine's NATS only: unset %s, or set DISPATCH_NATS_DISABLED=1", bus.AllowRemoteEnvVar)
+	}
+	if boot.AgentSecretsURL != "" {
+		if !routes.LoopbackURL(boot.AgentSecretsURL) {
+			return fmt.Errorf("DISPATCH_DEV_SIGNIN=1 decides credential requests on this machine's secrets broker only: DISPATCH_AGENT_SECRETS_URL=%q must name 127.0.0.1, [::1] or localhost", boot.AgentSecretsURL)
+		}
+	}
+	if !routes.LoopbackURL(boot.EnvoyURL) {
+		return fmt.Errorf("DISPATCH_DEV_SIGNIN=1 delivers through this machine's Envoy listener only: ENVOY_URL=%q must name 127.0.0.1, [::1] or localhost", boot.EnvoyURL)
+	}
+	return nil
+}
+
+// devSignInLoadedFence is the dev sign-in fence over what main loads after the environment: the
+// dashboard origin from envoy.json, and the GitHub App from the environment or the data dir's
+// app.json. With the flag a loopback client acts as any person it names, and a person can make the
+// App act: saving an architecture source has the App probe and import the repository the caller
+// names. The private key is the credential that acts (githubapp.New builds no client without it,
+// the App JWT names the client ID, and nothing sends the numeric App ID), so:
+//   - a key from app.json, where a developer keeps the real App's key, is refused whatever the
+//     base;
+//   - a key from the environment may sign calls only to a loopback host. That checks the host, not
+//     what listens there: every App call hands a signed App JWT to whatever owns the port, so the
+//     key must be a throwaway, as the one packages/dispatch/e2e/run-server.sh generates.
+func devSignInLoadedFence(boot bootConfig, serverURL string, app *auth.AppConfig, source appCredentialSource) error {
+	if !boot.DevSignIn {
+		return nil
+	}
+	if _, err := routes.DevSignInOrigin(serverURL); err != nil {
+		return err
+	}
+	if app == nil || app.PEM == "" {
+		return nil
+	}
+	if source.Path != "" {
+		return fmt.Errorf("DISPATCH_DEV_SIGNIN=1 refuses the App private key in %s, whatever DISPATCH_GITHUB_API_BASE names: that file is where the real App's key is kept, and with the flag any loopback client can have the App sign calls. Pass a throwaway App in the environment instead (DISPATCH_APP_CLIENT_ID and a generated DISPATCH_APP_PEM_B64, which take precedence over app.json), with DISPATCH_GITHUB_API_BASE naming a GitHub fake on a loopback host, as packages/dispatch/e2e/run-server.sh does", source.Path)
+	}
+	if !routes.LoopbackURL(boot.GitHubAPIBase) {
+		return fmt.Errorf("DISPATCH_DEV_SIGNIN=1 lets the App private key (DISPATCH_APP_PEM_B64) sign calls only to a loopback host: DISPATCH_GITHUB_API_BASE=%q (empty is https://api.github.com) must name 127.0.0.1, [::1] or localhost. Use a throwaway key: every App call hands a signed App JWT to whatever listens there", boot.GitHubAPIBase)
+	}
+	return nil
+}
+
+// loopbackDatabase refuses a DATABASE_URL with a host that is not this machine: the data a
+// dev-sign-in server serves to any local process must be a scratch database here. pgx parses
+// both the URL and the key=value forms, multi-host lists included, exactly as store.Open will.
+func loopbackDatabase(databaseURL string) error {
+	config, err := pgx.ParseConfig(databaseURL)
+	if err != nil {
+		return fmt.Errorf("DATABASE_URL: %w", err)
+	}
+	hosts := []string{config.Host}
+	for _, fallback := range config.Fallbacks {
+		hosts = append(hosts, fallback.Host)
+	}
+	for _, host := range hosts {
+		if !strings.HasPrefix(host, "/") && !routes.LoopbackName(host) {
+			return fmt.Errorf("DISPATCH_DEV_SIGNIN=1 serves a loopback database only: DATABASE_URL names host %q", host)
+		}
+	}
+	return nil
+}
+
+// sessionSigningKey is the key session cookies are signed with: one generated for this process
+// under dev sign-in, otherwise DISPATCH_SIGNING_KEY when it is set (a deployment's, from its
+// secrets manager), otherwise the data dir's signing-key file, created on first start (a local
+// run's). Outside dev sign-in the key must stay the same across deploys, or every dsession cookie
+// is invalidated whenever a container rolls.
+func sessionSigningKey(boot bootConfig, dataDir string) (string, error) {
+	if boot.DevSignIn {
+		return auth.NewSigningKey()
+	}
+	if boot.SigningKey != "" {
+		return boot.SigningKey, nil
+	}
+	return auth.LoadOrCreateSigningKey(filepath.Join(dataDir, "signing-key"))
+}
+
+// newDocumentService is the document service main serves the document websocket and the API's
+// documents from: built, what main made from the rest of the configuration, with every setting the
+// service takes from boot filled in. The settings tests build it through here, as they build the
+// router through appContextOptions, so dropping a hand-off here fails a case.
+func newDocumentService(boot bootConfig, built docs.Deps) *docs.Service {
+	built.AgentTokens = boot.AgentTokens
+	return docs.New(built)
+}
+
+// appContextOptions is what main hands routes.BuildAppContext: built, what main made from the
+// configuration, with every setting the router takes from boot filled in. The settings tests build
+// the router through it, so dropping any hand-off here fails a case.
+func appContextOptions(boot bootConfig, built routes.AppContextOptions) routes.AppContextOptions {
+	built.SignInGroup = boot.SignInGroup
+	built.AgentTokens = boot.AgentTokens
+	built.DefaultProject = boot.DefaultProject
+	built.InsecureCookie = boot.InsecureCookie
+	built.EnvoyURL = boot.EnvoyURL
+	built.EnvoyToken = boot.EnvoyToken
+	built.GitHubAPIBase = boot.GitHubAPIBase
+	built.AgentSecretsURL = boot.AgentSecretsURL
+	built.AgentSecretsToken = boot.AgentSecretsToken
+	built.TestHooksEnabled = boot.TestHooksEnabled
+	built.DevSignIn = boot.DevSignIn
+	return built
+}
+
+// loadEnvoyConfig is envoy.json as Dispatch reads it: the files config.Load finds, under the
+// DISPATCH_SERVER_URL and NATS_URLS rows of the settings table.
+func loadEnvoyConfig(env settingValues, options config.LoadOptions) (*config.EnvoyConfig, error) {
+	return config.Load(env.lookup, options)
 }
 
 // validateDefaultProject confirms DISPATCH_DEFAULT_PROJECT names a project
@@ -510,18 +716,6 @@ func seedRepoProjects(ctx context.Context, database *store.Store, raw string) er
 		}
 	}
 	return nil
-}
-
-// parseAllowedLogins lower-cases every entry: GitHub logins are case-insensitive, and the
-// login GitHub returns at sign-in carries the user's display casing.
-func parseAllowedLogins(raw string) map[string]struct{} {
-	logins := map[string]struct{}{}
-	for _, login := range strings.Split(raw, ",") {
-		if login = strings.ToLower(strings.TrimSpace(login)); login != "" {
-			logins[login] = struct{}{}
-		}
-	}
-	return logins
 }
 
 func parsePositiveInt(raw string) (int, error) {
@@ -601,157 +795,26 @@ func healthzHandler(database *store.Store, natsClient *bus.Client, commit string
 	}
 }
 
-// listenAddress builds the listen address from DISPATCH_LISTEN_HOST and
-// DISPATCH_PORT. An empty host binds every interface (the containerized
-// production default); local compose deployments set 127.0.0.1.
-func listenAddress() (string, error) {
-	host := strings.TrimSpace(os.Getenv("DISPATCH_LISTEN_HOST"))
-	port := strings.TrimSpace(os.Getenv("DISPATCH_PORT"))
+// listenAddress builds the listen address from DISPATCH_LISTEN_HOST and DISPATCH_PORT
+// (defaultListenPort when unset). An empty host binds every interface (the containerized
+// production default); local compose deployments set 127.0.0.1. An IPv6 host may be written with
+// or without brackets: one pair comes off here and JoinHostPort puts it back.
+func listenAddress(env settingValues) (string, error) {
+	host := strings.TrimSpace(env.get("DISPATCH_LISTEN_HOST"))
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		host = host[1 : len(host)-1]
+	}
+	port := strings.TrimSpace(env.get("DISPATCH_PORT"))
 	if port == "" {
-		return host + defaultListenAddr, nil
-	}
-	parsed, err := parsePositiveInt(port)
-	if err != nil {
-		return "", fmt.Errorf("invalid DISPATCH_PORT: %w", err)
-	}
-	if parsed > 65535 {
-		return "", fmt.Errorf("invalid DISPATCH_PORT: %q", port)
-	}
-	return host + ":" + port, nil
-}
-
-// openMigrated opens the database a DB subcommand works on and brings it to the current
-// schema, reporting each failure on out under the subcommand's label. The caller closes the
-// returned store's pool.
-func openMigrated(ctx context.Context, label, databaseURL string, out io.Writer) (*store.Store, bool) {
-	if strings.TrimSpace(databaseURL) == "" {
-		fmt.Fprintln(out, label+": DATABASE_URL is required")
-		return nil, false
-	}
-	database, err := store.Open(ctx, databaseURL)
-	if err != nil {
-		fmt.Fprintf(out, "%s: open database: %v\n", label, err)
-		return nil, false
-	}
-	if err := database.Migrate(ctx); err != nil {
-		fmt.Fprintf(out, "%s: migrate database: %v\n", label, err)
-		database.Pool.Close()
-		return nil, false
-	}
-	return database, true
-}
-
-func backfillBlockIDs(ctx context.Context, databaseURL string, out io.Writer) int {
-	database, ok := openMigrated(ctx, "backfill-block-ids", databaseURL, out)
-	if !ok {
-		return 1
-	}
-	defer database.Pool.Close()
-	service := docs.New(docs.Deps{Store: database, Events: events.NewBroker()})
-	defer service.Shutdown(context.Background())
-	reports, err := service.BackfillBlockIDs(ctx)
-	if err != nil {
-		fmt.Fprintf(out, "backfill-block-ids: %v\n", err)
-		return 1
-	}
-	exitCode := 0
-	for _, report := range reports {
-		if !writeBlockIDBackfillReport(out, report) {
-			exitCode = 1
+		port = defaultListenPort
+	} else {
+		parsed, err := parsePositiveInt(port)
+		if err != nil {
+			return "", fmt.Errorf("invalid DISPATCH_PORT: %w", err)
+		}
+		if parsed > 65535 {
+			return "", fmt.Errorf("invalid DISPATCH_PORT: %q", port)
 		}
 	}
-	return exitCode
-}
-
-func backfillAnchorBlocks(ctx context.Context, databaseURL string, out io.Writer) int {
-	database, ok := openMigrated(ctx, "backfill-anchor-blocks", databaseURL, out)
-	if !ok {
-		return 1
-	}
-	defer database.Pool.Close()
-	service := docs.New(docs.Deps{Store: database, Events: events.NewBroker()})
-	defer service.Shutdown(context.Background())
-	reports, err := service.BackfillBlockIDs(ctx)
-	if err != nil {
-		fmt.Fprintf(out, "backfill-anchor-blocks: stamp document blocks: %v\n", err)
-		return 1
-	}
-	for _, report := range reports {
-		if report.Err != nil {
-			fmt.Fprintf(out, "backfill-anchor-blocks: stamp document %s: %v\n", report.ArtifactID, report.Err)
-			return 1
-		}
-	}
-	result, err := service.BackfillAnchorBlocks(ctx)
-	if err != nil {
-		fmt.Fprintf(out, "backfill-anchor-blocks: %v\n", err)
-		return 1
-	}
-	writeAnchorBlockBackfillReport(out, result)
-	return 0
-}
-
-// loadServerURL resolves the dashboard origin exactly as the server does, for a subcommand
-// that parses reference text.
-func loadServerURL() string {
-	envoyConfig, err := config.Load(config.LoadOptions{})
-	if err != nil {
-		slog.Error("dispatch: load envoy config", "error", err)
-		os.Exit(1)
-	}
-	if envoyConfig.Dispatch == nil {
-		return ""
-	}
-	return envoyConfig.Dispatch.ServerURL
-}
-
-// rebuildRefs reparses every reference source and reconciles the refs index with it. It
-// refuses an empty server URL: text.Extract recognises same-origin dashboard URLs only against
-// it, so an empty value would delete every URL-form mention.
-func rebuildRefs(ctx context.Context, databaseURL, serverURL string, out io.Writer) int {
-	if strings.TrimSpace(databaseURL) == "" {
-		fmt.Fprintln(out, "rebuild-refs: DATABASE_URL is required")
-		return 1
-	}
-	if strings.TrimSpace(serverURL) == "" {
-		fmt.Fprintln(out, "rebuild-refs: dispatch.server_url is required to recognise dashboard URLs; refusing to drop URL-form mentions")
-		return 1
-	}
-	database, ok := openMigrated(ctx, "rebuild-refs", databaseURL, out)
-	if !ok {
-		return 1
-	}
-	defer database.Pool.Close()
-	// rebuild-refs opens a transaction per source, so it marks its context like the other
-	// commands: a read taken inside one is refused rather than left to deadlock the pool.
-	report, err := refs.RebuildAll(store.WithTransactionTracking(ctx), database.Pool, serverURL)
-	if err != nil {
-		fmt.Fprintf(out, "rebuild-refs: %v\n", err)
-		return 1
-	}
-	writeRebuildRefsReport(out, report)
-	return 0
-}
-
-func writeRebuildRefsReport(out io.Writer, report refs.Rebuild) {
-	fmt.Fprintf(out, "rebuild-refs: documents=%d asks=%d comments=%d messages=%d orphans=%d edges=%d\n",
-		report.Documents, report.Asks, report.Comments, report.Messages, report.Orphans, report.Edges)
-}
-
-func writeAnchorBlockBackfillReport(out io.Writer, result docs.AnchorBlockBackfill) {
-	fmt.Fprintf(out, "backfill-anchor-blocks: asks=%d comments=%d skipped=%d\n", result.Asks, result.Comments, result.Skipped)
-}
-
-func writeBlockIDBackfillReport(out io.Writer, report docs.BlockIDBackfill) bool {
-	switch {
-	case report.Err != nil:
-		fmt.Fprintf(out, "%s error (%v)\n", report.ArtifactID, report.Err)
-		return false
-	case report.Skipped != "":
-		fmt.Fprintf(out, "%s skipped (%s)\n", report.ArtifactID, report.Skipped)
-		return true
-	default:
-		fmt.Fprintf(out, "%s stamped=%d\n", report.ArtifactID, report.Stamped)
-		return true
-	}
+	return net.JoinHostPort(host, port), nil
 }

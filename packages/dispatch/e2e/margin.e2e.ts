@@ -14,13 +14,19 @@ import {
 import {
   actionBar,
   barAction,
+  connectedDot,
   deleteEditorText,
   documentEditor,
   documentTransport,
+  expectMark,
   marginCard,
   markSpan,
+  needsYouCards,
+  openedThreadCard,
   selectEditorText,
+  setSheet,
 } from "./editor";
+import { commentWithBody } from "./margin-helpers";
 import { resetDatabase, setCommentAuthorService } from "./seed";
 import { asUser } from "./users";
 
@@ -30,47 +36,11 @@ const session = {
 };
 const initialMarkdown = "The quick brown fox";
 
-// On the phone layout the margin is a bottom sheet over the document. Acting on a selection
-// opens it; close it again before selecting another range, as a person would.
-async function setSheet(page: Page, project: string, open: boolean): Promise<void> {
-  if (project !== "iphone") {
-    return;
-  }
-  const sheet = page.getByTestId("margin-sheet");
-  if ((await sheet.getAttribute("data-expanded")) !== String(open)) {
-    if (open) {
-      await page.getByRole("button", { name: /Open review panel/ }).click();
-    } else {
-      await page.mouse.click(1, 1);
-    }
-  }
-  await expect(sheet).toHaveAttribute("data-expanded", String(open));
-}
-
 async function expandedConversationThread(page: Page, rootId: string): Promise<Locator> {
   const turn = page.locator(`[data-turn="comment:${rootId}"]`);
   await turn.getByRole("button", { name: "Expand thread" }).click();
   const phoneThread = page.getByRole("dialog", { name: "Thread" });
   return (await phoneThread.count()) === 0 ? turn : phoneThread;
-}
-
-async function commentWithBody(issueKey: string, artifactId: string | undefined, body: string) {
-  await expect
-    .poll(() =>
-      listComments(issueKey, artifactId).then((items) => items.find((item) => item.body === body))
-    )
-    .toBeDefined();
-  const comment = (await listComments(issueKey, artifactId)).find((item) => item.body === body);
-  if (comment === undefined) {
-    throw new Error(`Comment with body ${body} was not created.`);
-  }
-  return comment;
-}
-
-async function expectMark(page: Page, markId: string, quote: string): Promise<void> {
-  const mark = markSpan(page, markId);
-  await expect(mark).toBeVisible();
-  await expect(mark).toHaveText(quote);
 }
 
 test.beforeEach(async () => {
@@ -100,8 +70,8 @@ test("the selection bar comments, suggests, and asks on marks that both users se
     ]);
     await expect(documentEditor(alicePage)).toContainText(initialMarkdown);
     await expect(documentEditor(bobPage)).toContainText(initialMarkdown);
-    await expect(alicePage.getByRole("status", { name: "connected" })).toHaveText("connected");
-    await expect(bobPage.getByRole("status", { name: "connected" })).toHaveText("connected");
+    await expect(connectedDot(alicePage)).toHaveText("connected");
+    await expect(connectedDot(bobPage)).toHaveText("connected");
 
     // Cancelling a mark composer rejects the editor action and removes the provisional mark.
     await selectEditorText(alicePage, "brown");
@@ -177,10 +147,7 @@ test("the selection bar comments, suggests, and asks on marks that both users se
     const askComposer = alicePage.getByRole("form", { name: "Comment composer" });
     await askComposer.getByLabel("Question").fill("Why fox?");
     await askComposer.locator('button[type="submit"]').click();
-    const askCard = alicePage
-      .getByRole("region", { name: "Needs you" })
-      .locator("[data-margin-item]")
-      .filter({ hasText: "Why fox?" });
+    const askCard = needsYouCards(alicePage).filter({ hasText: "Why fox?" });
     await expect(askCard).toBeVisible();
     const askId = await askCard.getAttribute("data-margin-item");
     if (askId === null) {
@@ -197,6 +164,45 @@ test("the selection bar comments, suggests, and asks on marks that both users se
     ]);
   } finally {
     await bob.close();
+    await alice.close();
+  }
+});
+
+// A bar Comment mounts its composer before the margin has come back from its rail or its Pinned
+// tab, out of sight, where a field takes no focus; the composer takes focus once it is on screen.
+// On a phone the sheet opens for it, which `phone.e2e.ts` checks.
+test("a bar Comment focuses its composer from the margin's rail and from its Pinned tab", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name === "iphone", "below xl the margin is a sheet, with no rail");
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", spec: initialMarkdown, title: "Focus" });
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/spec`);
+    await expect(documentEditor(page)).toContainText(initialMarkdown);
+    await expect(connectedDot(page)).toHaveText("connected");
+    const form = page.getByRole("form", { name: "Comment composer" });
+
+    await page.getByRole("button", { name: "Hide margin" }).click();
+    await expect(page.getByTestId("margin-rail")).toBeVisible();
+    await selectEditorText(page, "brown");
+    await barAction(page, "Comment");
+    await expect(page.getByTestId("margin-rail")).toHaveCount(0);
+    await expect(form.getByLabel("Comment")).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(form).toHaveCount(0);
+
+    await page.getByRole("tab", { name: "Pinned" }).click();
+    await selectEditorText(page, "fox");
+    await barAction(page, "Comment");
+    await expect(page.getByRole("tab", { name: "Comments" })).toHaveAttribute(
+      "aria-selected",
+      "true"
+    );
+    await expect(form.getByLabel("Comment")).toBeFocused();
+  } finally {
     await alice.close();
   }
 });
@@ -220,8 +226,8 @@ test("an agent's quote-anchored comment and ask render as highlights in open edi
       alicePage.goto(`/issues/${issue.key}/spec`),
       bobPage.goto(`/issues/${issue.key}/spec`),
     ]);
-    await expect(alicePage.getByRole("status", { name: "connected" })).toHaveText("connected");
-    await expect(bobPage.getByRole("status", { name: "connected" })).toHaveText("connected");
+    await expect(connectedDot(alicePage)).toHaveText("connected");
+    await expect(connectedDot(bobPage)).toHaveText("connected");
 
     const comment = await createComment(
       issue.key,
@@ -270,8 +276,8 @@ test("highlights follow edits in the other browser and preserve their anchor sta
     ]);
     const aliceEditor = documentEditor(alicePage);
     const bobEditor = documentEditor(bobPage);
-    await expect(alicePage.getByRole("status", { name: "connected" })).toHaveText("connected");
-    await expect(bobPage.getByRole("status", { name: "connected" })).toHaveText("connected");
+    await expect(connectedDot(alicePage)).toHaveText("connected");
+    await expect(connectedDot(bobPage)).toHaveText("connected");
     const brown = await createComment(
       issue.key,
       { anchor: { artifact: "spec", quote: "brown" }, body: "brown note" },
@@ -351,8 +357,8 @@ test("accepting a suggestion changes the text in both browsers and names a versi
     ]);
     const aliceEditor = documentEditor(alicePage);
     const bobEditor = documentEditor(bobPage);
-    await expect(alicePage.getByRole("status", { name: "connected" })).toHaveText("connected");
-    await expect(bobPage.getByRole("status", { name: "connected" })).toHaveText("connected");
+    await expect(connectedDot(alicePage)).toHaveText("connected");
+    await expect(connectedDot(bobPage)).toHaveText("connected");
 
     await selectEditorText(bobPage, "brown");
     await barAction(bobPage, "Suggest");
@@ -525,7 +531,7 @@ test("a document mark opens its thread in the margin and stays on the document",
   try {
     const page = await alice.newPage();
     await page.goto(`/issues/${issue.key}/spec`);
-    await expect(page.getByRole("status", { name: "connected" })).toHaveText("connected");
+    await expect(connectedDot(page)).toHaveText("connected");
     const comment = await createComment(
       issue.key,
       { anchor: { artifact: "spec", quote: "brown" }, body: "focus this" },
@@ -540,10 +546,7 @@ test("a document mark opens its thread in the margin and stays on the document",
     // Proof's model: the thread opens beside the document (in the phone's Thread dialog on a
     // small viewport); the reader never leaves the document.
     const phoneThread = page.getByRole("dialog", { name: "Thread" });
-    const card =
-      testInfo.project.name === "iphone"
-        ? phoneThread.getByTestId(`margin-comment-${comment.id}`)
-        : marginCard(page, comment.id);
+    const card = openedThreadCard(page, testInfo.project.name, comment.id);
     await expect(card).toHaveAttribute("aria-current", "true");
     await expect(card).toContainText("focus this");
     await expect(card).toContainText("brown");
@@ -557,7 +560,7 @@ test("a document mark opens its thread in the margin and stays on the document",
       ).toHaveAttribute("aria-selected", "true");
     }
     await expect(page).toHaveURL(`/issues/${issue.key}/spec`);
-    await expect(page.getByRole("status", { name: "connected" })).toHaveText("connected");
+    await expect(connectedDot(page)).toHaveText("connected");
 
     // The comment is anchored, so its deep link lands on the document it quotes, with the
     // thread open beside it — the same place clicking the mark just opened. On a phone the
@@ -654,10 +657,9 @@ test("margin ask composer sends option choices that the inbox records as a selec
     });
     await composer.getByRole("button", { exact: true, name: "Ask" }).last().click();
 
-    const createdCard = page
-      .getByRole("region", { name: "Needs you" })
-      .locator("[data-margin-item]")
-      .filter({ hasText: "Which direction should we take?" });
+    const createdCard = needsYouCards(page).filter({
+      hasText: "Which direction should we take?",
+    });
     const askId = await createdCard.getAttribute("data-margin-item");
     if (askId === null) {
       throw new Error("The created ask has no margin id.");
@@ -790,7 +792,7 @@ test("long option labels and descriptions wrap inside the margin ask card", asyn
     const page = await alice.newPage();
     await page.goto(`/issues/${issue.key}`);
     await setSheet(page, testInfo.project.name, true);
-    const card = page.getByRole("region", { name: "Needs you" }).getByTestId(`ask-${ask.id}`);
+    const card = needsYouCards(page).getByTestId(`ask-${ask.id}`);
     await expect(card).toContainText("severity table shape");
     await expect(
       card.getByRole("button", { name: "Add a note or answer in your own words" })
@@ -867,11 +869,7 @@ test("a comment a verified service token wrote names its service account in the 
     await setSheet(page, testInfo.project.name, true);
     // Only an expanded thread carries the author line under each comment.
     await marginCard(page, comment.id).locator('button[aria-expanded="false"]').click();
-    const phoneThread = page.getByRole("dialog", { name: "Thread" });
-    const thread =
-      (await phoneThread.count()) === 0
-        ? marginCard(page, comment.id)
-        : phoneThread.getByTestId(`margin-comment-${comment.id}`);
+    const thread = openedThreadCard(page, testInfo.project.name, comment.id);
     await expect(thread).toContainText("Implementer (as legion/legion-worker)");
   } finally {
     await alice.close();
@@ -897,7 +895,7 @@ test("a browser reconnecting after an accept keeps the accepted text", async ({ 
     const page = await bob.newPage();
     const transport = await documentTransport(page);
     await page.goto(`/issues/${issue.key}/spec`);
-    const connected = page.getByRole("status", { name: "connected" });
+    const connected = connectedDot(page);
     await expect(connected).toHaveText("connected");
     await expect(markSpan(page, suggestion.anchor.mark_id)).not.toHaveCount(0);
 

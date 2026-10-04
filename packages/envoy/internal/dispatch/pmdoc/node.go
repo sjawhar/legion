@@ -47,8 +47,26 @@ var markTypes = map[string]bool{
 
 var yattrMarkSuffix = regexp.MustCompile(`^(.*)--[a-zA-Z0-9+/=]{8}$`)
 
+// sortMarks puts marks in one order whatever order they arrive in: by type, then, for two marks of
+// one type (the record marks, which may overlap: anchorMarkTypes), by id, and by their attributes
+// only when the ids tie. Every positional comparison of two mark sets (marksEqual, run joining)
+// relies on it.
 func sortMarks(marks []Mark) {
-	sort.Slice(marks, func(i, j int) bool { return marks[i].Type < marks[j].Type })
+	sort.Slice(marks, func(i, j int) bool { return markLess(marks[i], marks[j]) })
+}
+
+func markLess(left, right Mark) bool {
+	if left.Type != right.Type {
+		return left.Type < right.Type
+	}
+	leftID, _ := left.Attrs["id"].(string)
+	rightID, _ := right.Attrs["id"].(string)
+	if leftID != rightID {
+		return leftID < rightID
+	}
+	leftJSON, _ := json.Marshal(canonicalAttrs(left.Attrs))
+	rightJSON, _ := json.Marshal(canonicalAttrs(right.Attrs))
+	return string(leftJSON) < string(rightJSON)
 }
 
 func marksEqual(left, right []Mark) bool {
@@ -75,12 +93,15 @@ func yattrToMarkName(name string) string {
 }
 
 func (n *Node) Validate() error {
-	return validateNode(n)
+	return validateNode(n, 0)
 }
 
-func validateNode(n *Node) error {
+func validateNode(n *Node, depth int) error {
 	if n == nil {
 		return fmt.Errorf("%w: nil node", ErrSchema)
+	}
+	if err := treeDepthError(depth); err != nil {
+		return err
 	}
 	if !nodeTypes[n.Type] {
 		if _, typed := typedBlock(n.Type); !typed {
@@ -94,9 +115,15 @@ func validateNode(n *Node) error {
 		if !markTypes[m.Type] {
 			return fmt.Errorf("%w: mark %q", ErrSchema, m.Type)
 		}
+		if err := attrNestingError("mark", m.Type, m.Attrs); err != nil {
+			return err
+		}
+	}
+	if err := attrNestingError("node", n.Type, n.Attrs); err != nil {
+		return err
 	}
 	for _, child := range n.Children {
-		if err := validateNode(child); err != nil {
+		if err := validateNode(child, depth+1); err != nil {
 			return err
 		}
 	}
@@ -270,15 +297,22 @@ func askQuestionOpening(ask *Node) string {
 	if len(ask.Children) == 0 || ask.Children[0] == nil || ask.Children[0].Type != "paragraph" {
 		return ""
 	}
-	question := []rune(strings.Join(strings.Fields(textContent(ask.Children[0])), " "))
-	if len(question) == 0 {
+	question := openingWords(oneLineText(ask.Children[0]))
+	if question == "" {
 		return ""
 	}
+	return fmt.Sprintf(", asking %q,", question)
+}
+
+// openingWords is text's first 40 characters, cut short with an ellipsis where it runs on: how a
+// refusal names a block whose author has only its text to find it by.
+func openingWords(text string) string {
 	const opening = 40
-	if len(question) > opening {
-		question = append([]rune(strings.TrimRight(string(question[:opening]), " ")), '…')
+	runes := []rune(text)
+	if len(runes) <= opening {
+		return text
 	}
-	return fmt.Sprintf(", asking %q,", string(question))
+	return strings.TrimRight(string(runes[:opening]), " ") + "…"
 }
 
 // askContentBreak names the first child that breaks the content rule paragraph+ bullet_list? -
@@ -398,19 +432,49 @@ func isInlineNodeType(typeName string) bool {
 
 // Equal compares document content and structure while ignoring block identity.
 func (n *Node) Equal(o *Node) bool {
-	return equalNode(n, o, false)
+	return equalNode(n, o, func(_ string, a, b Attrs) bool { return attrsEqualButBlockID(a, b) })
 }
 
 // EqualWithBlockIDs compares document content, structure, and block identity.
 func (n *Node) EqualWithBlockIDs(o *Node) bool {
-	return equalNode(n, o, true)
+	return equalNode(n, o, func(_ string, a, b Attrs) bool { return attrsEqual(a, b) })
 }
 
-func equalNode(n, o *Node, includeBlockIDs bool) bool {
+// EqualOutsideServerState compares document content, structure and block identity as
+// EqualWithBlockIDs does, but for the attributes of a typed block that the server keeps (the
+// schema's server attributes) other than an ask's answer (IsAnswerAttribute): an ask's state, who
+// answered it and when, and whether it reads. No caller writes those, they say what the server
+// knows about the block's own text, and each is a word or a timestamp beside it.
+func (n *Node) EqualOutsideServerState(o *Node) bool {
+	return equalNode(n, o, attrsEqualOutsideServerState)
+}
+
+// IsAnswerAttribute reports whether name is a server attribute of an ask that holds the answer
+// itself rather than what the server knows of it: the answer's own words, and the options it
+// selects. The server keeps both in agreement with the ask, but both are caller text - a selection
+// copies the asker's option labels, and renders each escaped, a `<` as seven bytes, so one choice
+// of a 1,000,000-character label made a 1 MB document 8 MB. So a write that changes either is
+// weighed as caller text is (EqualOutsideServerState), and where the document has no room for
+// them the server records the answer on the ask and leaves both out of the block.
+func IsAnswerAttribute(name string) bool {
+	return name == "answer" || name == "selected"
+}
+
+func attrsEqualOutsideServerState(nodeType string, a, b Attrs) bool {
+	typ, typed := typedBlock(nodeType)
+	if !typed {
+		return attrsEqual(a, b)
+	}
+	return attrsEqualBut(a, b, func(name string) bool { return !IsAnswerAttribute(name) && typ.Attributes[name].Server })
+}
+
+// equalNode compares n and o, their content and structure, holding each node's attributes to
+// attrs, which is given the node's type.
+func equalNode(n, o *Node, attrs func(nodeType string, a, b Attrs) bool) bool {
 	if n == nil || o == nil {
 		return n == o
 	}
-	if n.Type != o.Type || n.Text != o.Text || !nodeAttrsEqual(n.Attrs, o.Attrs, includeBlockIDs) || len(n.Marks) != len(o.Marks) || len(n.Children) != len(o.Children) {
+	if n.Type != o.Type || n.Text != o.Text || !attrs(n.Type, n.Attrs, o.Attrs) || len(n.Marks) != len(o.Marks) || len(n.Children) != len(o.Children) {
 		return false
 	}
 	for i := range n.Marks {
@@ -419,19 +483,27 @@ func equalNode(n, o *Node, includeBlockIDs bool) bool {
 		}
 	}
 	for i := range n.Children {
-		if !equalNode(n.Children[i], o.Children[i], includeBlockIDs) {
+		if !equalNode(n.Children[i], o.Children[i], attrs) {
 			return false
 		}
 	}
 	return true
 }
 
-func nodeAttrsEqual(a, b Attrs, includeBlockIDs bool) bool {
-	if includeBlockIDs {
-		return attrsEqual(a, b)
-	}
+// attrsEqualButBlockID is attrsEqual over every attribute but the block id.
+func attrsEqualButBlockID(a, b Attrs) bool {
+	return attrsEqualBut(a, b, func(name string) bool { return name == BlockIDAttr })
+}
+
+// attrsEqual treats nil and empty as equal and compares values by JSON semantics.
+func attrsEqual(a, b Attrs) bool {
+	return attrsEqualBut(a, b, func(string) bool { return false })
+}
+
+// attrsEqualBut is attrsEqual over the attributes ignored does not name.
+func attrsEqualBut(a, b Attrs, ignored func(name string) bool) bool {
 	for key, av := range a {
-		if key == BlockIDAttr {
+		if ignored(key) {
 			continue
 		}
 		bv, ok := b[key]
@@ -446,30 +518,9 @@ func nodeAttrsEqual(a, b Attrs, includeBlockIDs bool) bool {
 		}
 	}
 	for key, bv := range b {
-		if key != BlockIDAttr {
-			if _, ok := a[key]; !ok && bv != nil {
-				return false
-			}
+		if ignored(key) {
+			continue
 		}
-	}
-	return true
-}
-
-// attrsEqual treats nil and empty as equal and compares values by JSON semantics.
-func attrsEqual(a, b Attrs) bool {
-	for key, av := range a {
-		bv, ok := b[key]
-		if !ok {
-			if av == nil {
-				continue
-			}
-			return false
-		}
-		if !reflect.DeepEqual(normalizeJSON(av), normalizeJSON(bv)) {
-			return false
-		}
-	}
-	for key, bv := range b {
 		if _, ok := a[key]; !ok && bv != nil {
 			return false
 		}

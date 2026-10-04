@@ -247,3 +247,66 @@ func TestDrainWhileReconnectingClosesAtOnce(t *testing.T) {
 		t.Fatal("Drain returned with the reconnecting connection still open")
 	}
 }
+
+// Drain does not wait for a bind in flight. A reconnect can lose a bind's request, which JetStream
+// then waits out for 10 s, so a shutdown that lands meanwhile, with the listener's 10 s drain
+// budget, would spend it on a subscription that delivers nothing yet. Drain returns once the
+// connection has drained, and the close ends the bind, which binds nothing.
+func TestDrainDoesNotWaitForABindInFlight(t *testing.T) {
+	_, uri := startNATS(t)
+	proxy := startRelayProxy(t, uri)
+	client, err := bus.ConnectOwningStream([]string{proxy.url()})
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer client.Close()
+	const consumer = "drain-bind-in-flight"
+	if _, err := client.JS().AddConsumer(bus.Stream, &natsgo.ConsumerConfig{
+		Durable:        consumer,
+		DeliverSubject: natsgo.NewInbox(),
+		AckPolicy:      natsgo.AckExplicitPolicy,
+		FilterSubjects: bus.StreamSubjects(),
+	}); err != nil {
+		t.Fatalf("add the durable: %v", err)
+	}
+	bound := make(chan error, 1)
+	proxy.arm("$JS.API.CONSUMER.INFO.")
+	go func() {
+		_, err := client.Subscribe("", func(msg *natsgo.Msg) { _ = msg.Ack() }, natsgo.Bind(bus.Stream, consumer), natsgo.ManualAck())
+		bound <- err
+	}()
+	select {
+	case <-proxy.swallowed:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the bind's consumer lookup never reached the link")
+	}
+	proxy.drop()
+	waitFor(t, 15*time.Second, "the connection to reconnect in place", func() bool {
+		return client.Connected() && client.Conn.Stats().Reconnects > 0
+	})
+	select {
+	case err := <-bound:
+		t.Fatalf("the bind returned before the drain (%v), so nothing was in flight", err)
+	default:
+	}
+
+	began := time.Now()
+	err = client.Drain(5 * time.Second)
+	if elapsed := time.Since(began); elapsed > 2*time.Second {
+		t.Fatalf("Drain took %s with a bind in flight (%v); want it not to wait for the bind", elapsed, err)
+	}
+	if err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+	select {
+	case err := <-bound:
+		if err == nil {
+			t.Fatal("the bind in flight at the drain bound the durable")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the bind was still in flight 2s after Drain closed the connection")
+	}
+	if client.SubOK() {
+		t.Fatal("SubOK reports the durable bound after the drain")
+	}
+}

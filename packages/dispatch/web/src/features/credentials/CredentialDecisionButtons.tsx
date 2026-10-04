@@ -16,8 +16,8 @@ import {
 
 /**
  * The Approve/Deny button pair both `CredentialRecordPage` and `MachineLoginPage` render for a
- * pending record with challenges: each page builds its own `approve`/`deny` mutations (the POST
- * body differs - `MachineLoginPage`'s approve carries the typed code, `CredentialRecordPage`'s
+ * pending record: each page builds its own `approve`/`deny` mutations (the POST
+ * body differs - `MachineLoginPage`'s decisions carry the typed code, `CredentialRecordPage`'s
  * doesn't), then hands the mutations here for the shared disabled-guard, click-wiring, and
  * verbatim broker-error rendering.
  */

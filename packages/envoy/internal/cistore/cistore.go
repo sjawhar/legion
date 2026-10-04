@@ -223,7 +223,7 @@ func (state *State) UnmarshalJSON(data []byte) error {
 }
 
 // retiredHeadKind marks the head record an earlier listener kept per pull request under its own
-// key, to settle only a pull request's head. Settlements no longer depend on the head, so nothing
+// key, to settle only a pull request's head. Settlements do not depend on the head, so nothing
 // writes or reads one; a record left in the bucket waits out its TTL uncached.
 const retiredHeadKind = "head"
 
@@ -299,7 +299,6 @@ type Store struct {
 type openOpts struct {
 	replicas int
 	ttl      time.Duration
-	bucket   string
 }
 
 // Option configures Open.
@@ -327,7 +326,7 @@ func WithTTL(d time.Duration) Option {
 // cache. Mirrors store.Open: the cache is populated asynchronously by watch()
 // so Open never blocks on per-key Gets. The store and its cache watcher log through logger.
 func Open(nc *nats.Conn, logger *logging.Logger, opts ...Option) (*Store, error) {
-	o := openOpts{replicas: 1, ttl: 7 * 24 * time.Hour, bucket: Bucket}
+	o := openOpts{replicas: 1, ttl: 7 * 24 * time.Hour}
 	for _, f := range opts {
 		f(&o)
 	}
@@ -336,7 +335,7 @@ func Open(nc *nats.Conn, logger *logging.Logger, opts ...Option) (*Store, error)
 		return nil, err
 	}
 	kv, err := bus.EnsureKeyValue(js, &nats.KeyValueConfig{
-		Bucket:   o.bucket,
+		Bucket:   Bucket,
 		Replicas: o.replicas,
 		Storage:  nats.FileStorage,
 		TTL:      o.ttl,

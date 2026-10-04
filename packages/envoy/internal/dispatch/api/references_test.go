@@ -213,16 +213,16 @@ func graphEdges(t *testing.T, handler http.Handler, query url.Values) model.Grap
 	return decodeBody[model.GraphReferences](t, response)
 }
 
-// A message on an AGENTC issue that cites a LEGION ask is a backlink on that ask: the edge names
+// A message on an ACME issue that cites a LEGION ask is a backlink on that ask: the edge names
 // the message with its own issue, project, and dispatch:// address, carries the message body as
 // excerpt, and is stamped with the events.id of the message.created write. Read from the
 // message, the same edge points out at the ask. Filters narrow it and malformed input is 400.
 func TestReferencesReadBacklinksAcrossProjectsWithProvenance(t *testing.T) {
 	handler, database := newTestHandlerWithStore(t)
 	createReferenceAPIProject(t, handler, "LEGION")
-	createReferenceAPIProject(t, handler, "AGENTC")
+	createReferenceAPIProject(t, handler, "ACME")
 	legion := createReferenceAPIIssue(t, handler, "LEGION")
-	agentc := createReferenceAPIIssue(t, handler, "AGENTC")
+	acme := createReferenceAPIIssue(t, handler, "ACME")
 	askResponse := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+legion.Key+"/asks", map[string]any{
 		"question": "Ship the reference graph?", "options": []map[string]string{{"label": "Yes"}, {"label": "No"}},
 	}, "alice")
@@ -231,7 +231,7 @@ func TestReferencesReadBacklinksAcrossProjectsWithProvenance(t *testing.T) {
 	}
 	ask := decodeBody[model.Ask](t, askResponse)
 	askRef := "dispatch://" + legion.Key + "/ask/" + ask.ID
-	messageResponse := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+agentc.Key+"/messages", map[string]any{
+	messageResponse := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+acme.Key+"/messages", map[string]any{
 		"body": "Decided in " + askRef + ", see also https://example.com/notes", "actor": sessionActor(),
 	})
 	if messageResponse.Code != http.StatusCreated {
@@ -241,7 +241,7 @@ func TestReferencesReadBacklinksAcrossProjectsWithProvenance(t *testing.T) {
 	var messageEventID int64
 	if err := database.Pool.QueryRow(context.Background(), `
 		select id from events where issue_key = $1 and type = 'message.created'
-	`, agentc.Key).Scan(&messageEventID); err != nil {
+	`, acme.Key).Scan(&messageEventID); err != nil {
 		t.Fatalf("read message.created event: %v", err)
 	}
 
@@ -251,11 +251,11 @@ func TestReferencesReadBacklinksAcrossProjectsWithProvenance(t *testing.T) {
 		t.Fatalf("queried node = %#v; want %#v", incoming.Node, want)
 	}
 	if len(incoming.Edges) != 1 {
-		t.Fatalf("incoming edges = %#v; want the AGENTC message only", incoming.Edges)
+		t.Fatalf("incoming edges = %#v; want the ACME message only", incoming.Edges)
 	}
 	edge := incoming.Edges[0]
-	agentcKey := agentc.Key
-	wantNode := model.GraphNode{Kind: "message", ID: message.ID, IssueKey: &agentcKey, Project: "AGENTC", Ref: "dispatch://" + agentc.Key + "/message/" + message.ID}
+	acmeKey := acme.Key
+	wantNode := model.GraphNode{Kind: "message", ID: message.ID, IssueKey: &acmeKey, Project: "ACME", Ref: "dispatch://" + acme.Key + "/message/" + message.ID}
 	if edge.Kind != "mentions" || edge.Direction != "in" || !reflect.DeepEqual(edge.Node, wantNode) {
 		t.Fatalf("backlink edge = %#v; want mentions in from %#v", edge, wantNode)
 	}
@@ -266,7 +266,7 @@ func TestReferencesReadBacklinksAcrossProjectsWithProvenance(t *testing.T) {
 		t.Fatalf("backlink provenance = seq %v at %v; want event %d at %v", edge.SourceSeq, edge.CreatedAt, messageEventID, message.CreatedAt)
 	}
 
-	outgoing := graphEdges(t, handler, url.Values{"from": {"dispatch://" + agentc.Key + "/message/" + message.ID}})
+	outgoing := graphEdges(t, handler, url.Values{"from": {"dispatch://" + acme.Key + "/message/" + message.ID}})
 	if len(outgoing.Edges) != 1 || outgoing.Edges[0].Direction != "out" || outgoing.Edges[0].Kind != "mentions" || outgoing.Edges[0].Node.Ref != askRef || outgoing.Edges[0].Node.Kind != "ask" {
 		t.Fatalf("outgoing edges = %#v; want one mention of the ask", outgoing.Edges)
 	}
@@ -369,6 +369,82 @@ func TestReferencesIncludeStructuralEdgesAndDocumentBlockExcerpts(t *testing.T) 
 	specBacklinks := graphEdges(t, handler, url.Values{"to": {"dispatch://" + parent.Key + "/spec"}})
 	if specBacklinks.Node.ID != parent.PrimaryArtifactID || len(specBacklinks.Edges) != 0 {
 		t.Fatalf("spec backlinks = %#v; want the spec node with no edges", specBacklinks)
+	}
+}
+
+// A spec seeded at issue creation that cites an issue in bold, another project's issue in a code
+// span and a third project's issue as an autolink, which the spec stores as a link whose text is
+// its target, mentions all three. The source of each mention is the spec document, not the issue
+// that owns it: the issue node writes no mention, and each target's backlink names the spec.
+func TestSeededSpecCitationsInMarkdownDelimitersAreDocumentMentions(t *testing.T) {
+	handler := newTestHandler(t)
+	createReferenceAPIProject(t, handler, "LEGION")
+	createReferenceAPIProject(t, handler, "ACME")
+	createReferenceAPIProject(t, handler, "CORE")
+	sameProject := createReferenceAPIIssue(t, handler, "LEGION")
+	otherProject := createReferenceAPIIssue(t, handler, "ACME")
+	autolinked := createReferenceAPIIssue(t, handler, "CORE")
+	response := createIssueRequest(t, handler, map[string]any{
+		"project": "LEGION", "title": "Due dates",
+		"spec": "Tied to **dispatch://" + sameProject.Key + "** and `dispatch://" + otherProject.Key + "`, " +
+			"see <dispatch://" + autolinked.Key + ">.\n",
+	})
+	if response.Code != http.StatusCreated {
+		t.Fatalf("create issue with spec: status=%d body=%s", response.Code, response.Body.String())
+	}
+	citing := decodeBody[model.Issue](t, response)
+	specRef := "dispatch://" + citing.Key + "/spec"
+	targets := []model.Issue{sameProject, otherProject, autolinked}
+
+	mentioned := map[string]bool{}
+	for _, edge := range graphEdges(t, handler, url.Values{"from": {specRef}, "kind": {"mentions"}}).Edges {
+		mentioned[edge.Node.Ref] = true
+	}
+	want := map[string]bool{}
+	for _, target := range targets {
+		want["dispatch://"+target.Key] = true
+	}
+	if !reflect.DeepEqual(mentioned, want) {
+		t.Fatalf("spec mentions = %v; want %v", mentioned, want)
+	}
+	if fromIssue := graphEdges(t, handler, url.Values{"from": {"dispatch://" + citing.Key}, "kind": {"mentions"}}); len(fromIssue.Edges) != 0 {
+		t.Fatalf("issue node mentions = %#v; want none, the spec document writes them", fromIssue.Edges)
+	}
+	for _, target := range targets {
+		backlinks := graphEdges(t, handler, url.Values{"to": {"dispatch://" + target.Key}, "kind": {"mentions"}}).Edges
+		if len(backlinks) != 1 || backlinks[0].Node.Kind != "artifact" || backlinks[0].Node.ID != citing.PrimaryArtifactID || backlinks[0].Node.Ref != specRef {
+			t.Fatalf("%s backlinks = %#v; want one mention from %s", target.Key, backlinks, specRef)
+		}
+	}
+}
+
+// An item id that decodes to a NUL names nothing. The index binds ids as `text[]`, and Postgres
+// refuses a NUL there, so a reader that decoded one failed the write holding it: the comment, the
+// seeded spec and the author's edit answered 500, and a rebuild stopped at the first stored body
+// that held one.
+func TestCitationsOfAnIDDecodingToNULDoNotFailTheWrite(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	createReferenceAPIProject(t, handler, "CORE")
+	target := createReferenceAPIIssue(t, handler, "CORE")
+	body := "See dispatch://" + target.Key + "/comment/%00, https://dispatch.example/issues/" + target.Key +
+		"/comments/%00 and https://dispatch.example/issues/" + target.Key + "/spec?comment=%2500.\n"
+
+	comment := createReferenceAPIComment(t, handler, target.Key, body)
+	commentRef := "dispatch://" + target.Key + "/comment/" + comment.ID
+	if edges := graphEdges(t, handler, url.Values{"from": {commentRef}, "kind": {"mentions"}}).Edges; len(edges) != 0 {
+		t.Fatalf("comment mentions = %#v; want none", edges)
+	}
+	if seeded := createIssueRequest(t, handler, map[string]any{"project": "CORE", "title": "Seeded", "spec": body}); seeded.Code != http.StatusCreated {
+		t.Fatalf("create issue whose spec cites a NUL id: status=%d body=%s", seeded.Code, seeded.Body.String())
+	}
+	plain := createReferenceAPIComment(t, handler, target.Key, "Plain comment.")
+	if edit := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/comments/"+plain.ID, map[string]string{
+		"body": body,
+	}, "alice"); edit.Code != http.StatusOK {
+		t.Fatalf("edit a comment to cite a NUL id: status=%d body=%s", edit.Code, edit.Body.String())
+	}
+	if _, err := refs.RebuildAll(context.Background(), database.Pool, "https://dispatch.example"); err != nil {
+		t.Fatalf("rebuild refs over bodies citing a NUL id: %v", err)
 	}
 }
 

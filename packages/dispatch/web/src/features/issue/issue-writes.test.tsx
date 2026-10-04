@@ -758,7 +758,7 @@ test("IssuePage retries a failed drained title before sending the queued route",
   }
 });
 
-test("IssuePage mounts the header without reading the allowlist until the assignee control is reached for", async () => {
+test("IssuePage mounts the header without reading who has signed in until the assignee control is reached for", async () => {
   const { restore } = stubIssueApi();
   const listUsers = spyOn(api, "listUsers").mockResolvedValue([
     { login: "alice" },

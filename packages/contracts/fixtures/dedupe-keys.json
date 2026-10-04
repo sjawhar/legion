@@ -1,0 +1,71 @@
+{
+  "keys": [
+    {
+      "name": "a Dispatch key",
+      "envelope": { "source": "dispatch", "dedupe_key": "agent.ses_a.m1:aside" },
+      "names": true
+    },
+    {
+      "name": "a webhook key of its delivery id",
+      "envelope": {
+        "source": "github",
+        "source_event_id": "delivery-7",
+        "dedupe_key": "github.delivery-7"
+      },
+      "names": true
+    },
+    {
+      "name": "a publish key the listener minted",
+      "envelope": { "source": "agent", "dedupe_key": "publish.0123456789abcdef0123456789abcdef" },
+      "names": true
+    },
+    {
+      "name": "a send key the listener minted",
+      "envelope": {
+        "source": "agent",
+        "dedupe_key": "agent.ses_a.0123456789abcdef0123456789abcdef"
+      },
+      "names": true
+    },
+    {
+      "name": "a key around the transport's idempotency key",
+      "envelope": {
+        "source": "agent",
+        "dedupe_key": "agent.ses_a.3f2a9c1e-5b7d-4e8f-9a0b-1c2d3e4f5a6b"
+      },
+      "names": true
+    },
+    {
+      "name": "a minted key the role arbiter forwarded",
+      "envelope": {
+        "source": "agent",
+        "dedupe_key": "envoy.role.forward.publish.0123456789abcdef0123456789abcdef"
+      },
+      "names": true
+    },
+    {
+      "name": "the MCP bridge's content hash",
+      "envelope": {
+        "source": "github",
+        "source_event_id": "mcp://acme/alerts",
+        "dedupe_key": "github.3f2a"
+      },
+      "names": false
+    },
+    {
+      "name": "the Go daemon's outbox row",
+      "envelope": { "source": "agent", "dedupe_key": "legion-outbox:1" },
+      "names": false
+    },
+    {
+      "name": "a caller's own idempotency key",
+      "envelope": { "source": "agent", "dedupe_key": "agent.ses_a.retry-abc" },
+      "names": false
+    },
+    {
+      "name": "a publish key of another shape",
+      "envelope": { "source": "agent", "dedupe_key": "publish.abc" },
+      "names": false
+    }
+  ]
+}

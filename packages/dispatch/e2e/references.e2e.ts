@@ -14,11 +14,11 @@ import {
 } from "./api";
 import { documentEditor } from "./editor";
 import { resetDatabase } from "./seed";
+import { signIn } from "./users";
 
-test.use({ extraHTTPHeaders: { "X-Dispatch-User": "alice" } });
-
-test.beforeEach(async () => {
+test.beforeEach(async ({ context }) => {
   await resetDatabase();
+  await signIn(context, "alice");
 });
 
 test("an issue and its ask show a cross-project message and structural backlinks", async ({

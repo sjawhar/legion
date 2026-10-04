@@ -18,10 +18,13 @@ import (
 type API interface {
 	SeedText(ctx context.Context, artifactID, markdown string, actor model.Actor) (string, error)
 	ReplaceText(ctx context.Context, artifactID, markdown string, actor model.Actor) (string, error)
+	RebuildDocument(ctx context.Context, artifactID string, markdown *string, actor model.Actor) (RebuildReport, VersionResult, error)
+	InjectSchemaInvalidForTest(ctx context.Context, artifactID string) error
 	Text(ctx context.Context, artifactID string) (string, error)
 	TextWithToken(ctx context.Context, artifactID string) (string, string, error)
 	Blocks(ctx context.Context, artifactID string) ([]model.ArtifactBlock, error)
 	TextWithBlocks(ctx context.Context, artifactID string) (string, []model.ArtifactBlock, error)
+	BlockPath(ctx context.Context, artifactID, blockID string) (model.BlockPath, error)
 	SnapshotVersion(ctx context.Context, artifactID string, actor model.Actor) (VersionResult, error)
 	SetIssueClosed(ctx context.Context, issueKey string, closed bool)
 	AcquireConditionalEdit(ctx context.Context, artifactID string) (func(), error)
@@ -38,15 +41,16 @@ type API interface {
 	ProjectMark(ctx context.Context, artifactID, markID string, record MarkRecord, actor model.Actor) error
 	Join(ctx context.Context, tx pgx.Tx) (context.Context, *Ledger)
 	NamedVersion(ctx context.Context, artifactID, summary string, actor model.Actor) (VersionResult, error)
-	CompactAll(ctx context.Context, keep int) error
+	CompactAll(ctx context.Context) error
 	Quiesce(ctx context.Context) error
 }
 
 // VersionResult is a written document version together with what its markdown moved in the
 // reference graph. Every caller that appends an `artifact.*` event for the version passes
 // Changes to the payload builder, so no producer can emit one that stays silent about the
-// batched backlink counts it changed. Wrote is false when SnapshotVersion found the live
-// document already matched the newest version and recorded nothing.
+// batched backlink counts it changed. Wrote is false when the operation recorded nothing:
+// SnapshotVersion found the live document already matched the newest version, or RebuildDocument
+// restored the latest version or was given its markdown.
 type VersionResult struct {
 	Version model.Version
 	Wrote   bool
@@ -61,10 +65,14 @@ type VersionResult struct {
 // the tree exactly as it found it. Token is that same whole-document identity after the batch,
 // taken from the tree this edit's own transaction wrote while it still held the room's writer
 // slot — never re-read after the commit, where a concurrent writer's change would fold into it —
-// so a caller passes it straight back as the next edit's document precondition.
+// so a caller passes it straight back as the next edit's document precondition. AskBlocksAdded
+// counts the readable ask blocks the batch left in the document that it did not hold before
+// (addedAskBlocks). Settlement opens an ask for each, except a block written back under the id of
+// an ask the document already holds and settlement leaves closed: answered, or resolved by a person.
 type EditOutcome struct {
-	Applied   int
-	Changed   bool
-	Unchanged []int
-	Token     string
+	Applied        int
+	Changed        bool
+	Unchanged      []int
+	Token          string
+	AskBlocksAdded int
 }

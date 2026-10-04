@@ -63,7 +63,7 @@ test("signing out shows the sign-in page without a reload and tears down the eve
     fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
 
     await waitFor(() => expect(logout).toHaveBeenCalled());
-    await screen.findByRole("link", { name: "Sign in with GitHub" });
+    await screen.findByRole("link", { name: "Sign in with Google" });
 
     expect(fetchSignals.some((signal) => signal.aborted)).toBe(true);
   } finally {
@@ -79,6 +79,13 @@ test("signing out shows the sign-in page without a reload and tears down the eve
 });
 
 test("project routes render the project page and a project document route", async () => {
+  // React.lazy loads each page module on its first render (app.tsx). Loading the two pages this
+  // test routes to first keeps their cold compile, hundreds of milliseconds on a loaded host, out
+  // of findBy's one-second window, which is for the routing under test.
+  await Promise.all([
+    import("./features/project/ProjectPage"),
+    import("./features/document/DocumentPage"),
+  ]);
   const originalMatchMedia = window.matchMedia;
   window.matchMedia = (() =>
     ({

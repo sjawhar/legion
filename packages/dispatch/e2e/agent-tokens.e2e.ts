@@ -1,10 +1,7 @@
 import { expect, test } from "@playwright/test";
-import { createIssue, createProject } from "./api";
-import { dispatchPort } from "./harness-ports";
+import { baseUrl, createIssue, createProject } from "./api";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
-
-const baseUrl = process.env.PLAYWRIGHT_BASE_URL || `http://127.0.0.1:${dispatchPort}`;
 
 async function createAskWithToken(issue: string, token: string): Promise<Response> {
   return fetch(new URL(`/api/v1/issues/${issue}/asks`, baseUrl), {

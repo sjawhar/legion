@@ -54,11 +54,13 @@ func (e *InvalidConfigError) Error() string {
 	return fmt.Sprintf("invalid config %s: %s", e.Path, strings.Join(e.Issues, "; "))
 }
 
-// Load reads user and repo config and applies DISPATCH_SERVER_URL and NATS_URLS
-// environment overrides. A missing file is not an error. A file that exists
-// but fails validation (an unrecognized key, a malformed value) stops the load
-// and returns an *InvalidConfigError naming the file and the key.
-func Load(opts LoadOptions) (*EnvoyConfig, error) {
+// Load reads user and repo config and applies the DISPATCH_SERVER_URL and NATS_URLS overrides
+// from environment, which answers as os.LookupEnv does: a variable that is set overrides the
+// files, and one set but empty is refused. envoy-dispatch hands it its settings table's lookup;
+// any other caller names the environment it means. A missing file is not an error. A file that
+// exists but fails validation (an unrecognized key, a malformed value) stops the load and returns
+// an *InvalidConfigError naming the file and the key.
+func Load(environment func(string) (string, bool), opts LoadOptions) (*EnvoyConfig, error) {
 	cwd := opts.CWD
 	if cwd == "" {
 		var err error
@@ -91,14 +93,14 @@ func Load(opts LoadOptions) (*EnvoyConfig, error) {
 	if repoCfg != nil {
 		merged = mergeConfig(merged, repoCfg)
 	}
-	if err := applyEnvironmentOverrides(merged); err != nil {
+	if err := applyEnvironmentOverrides(merged, environment); err != nil {
 		return nil, err
 	}
 	return merged, nil
 }
 
-func applyEnvironmentOverrides(cfg *EnvoyConfig) error {
-	if raw, set := os.LookupEnv("DISPATCH_SERVER_URL"); set {
+func applyEnvironmentOverrides(cfg *EnvoyConfig, lookup func(string) (string, bool)) error {
+	if raw, set := lookup("DISPATCH_SERVER_URL"); set {
 		serverURL, err := dispatchServerURL(raw)
 		if err != nil {
 			return fmt.Errorf("DISPATCH_SERVER_URL=%q (expected an absolute http(s) URL without a path)", raw)
@@ -108,7 +110,7 @@ func applyEnvironmentOverrides(cfg *EnvoyConfig) error {
 		}
 		cfg.Dispatch.ServerURL = serverURL
 	}
-	if raw, set := os.LookupEnv("NATS_URLS"); set {
+	if raw, set := lookup("NATS_URLS"); set {
 		natsURLs, err := natsURLs(raw)
 		if err != nil {
 			return fmt.Errorf("NATS_URLS=%q (expected a comma-separated list of NATS URLs)", raw)

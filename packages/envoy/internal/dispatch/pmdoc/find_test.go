@@ -343,6 +343,130 @@ func TestFindMarkSpansTextblocks(t *testing.T) {
 	}
 }
 
+// Two readers' record marks of one type may cover one character: Bob's comment over "quick brown",
+// Alice's over "brown fox". Whichever order the shared run lists them in, each reads as its own
+// whole text.
+func TestFindMarkReadsEachOfTwoMarksOfOneTypeOnOneRun(t *testing.T) {
+	bob := Mark{Type: "proofComment", Attrs: Attrs{"id": "c1", "by": "user:bob"}}
+	alice := Mark{Type: "proofComment", Attrs: Attrs{"id": "c2", "by": "user:alice"}}
+	for name, shared := range map[string][]Mark{"bob first": {bob, alice}, "alice first": {alice, bob}} {
+		t.Run(name, func(t *testing.T) {
+			doc := &Node{Type: "doc", Children: []*Node{{Type: "paragraph", Children: []*Node{
+				{Type: "text", Text: "quick ", Marks: []Mark{bob}},
+				{Type: "text", Text: "brown", Marks: shared},
+				{Type: "text", Text: " fox", Marks: []Mark{alice}},
+			}}}}
+			if got, quote, ok := FindMark(doc, "proofComment", "c1"); !ok || quote != "quick brown" || got != (Range{From: 1, To: 12}) {
+				t.Fatalf("FindMark(c1) = %v %q %t, want {1 12} \"quick brown\" true", got, quote, ok)
+			}
+			if got, quote, ok := FindMark(doc, "proofComment", "c2"); !ok || quote != "brown fox" || got != (Range{From: 7, To: 16}) {
+				t.Fatalf("FindMark(c2) = %v %q %t, want {7 16} \"brown fox\" true", got, quote, ok)
+			}
+			if attrs, ok := MarkAttrs(doc, "proofComment", "c2"); !ok || attrs["by"] != "user:alice" {
+				t.Fatalf("MarkAttrs(c2) = %v %t, want Alice's", attrs, ok)
+			}
+			covering := AnchorMarksCovering(doc, Range{From: 7, To: 12})
+			if len(covering) != 2 || !containsSameMark(covering, bob) || !containsSameMark(covering, alice) {
+				t.Fatalf("AnchorMarksCovering(brown) = %v, want both comments", covering)
+			}
+			if refs := ListMarks(doc); !reflect.DeepEqual(refs, []MarkRef{{Type: "proofComment", ID: "c1"}, {Type: "proofComment", ID: "c2"}}) &&
+				!reflect.DeepEqual(refs, []MarkRef{{Type: "proofComment", ID: "c2"}, {Type: "proofComment", ID: "c1"}}) {
+				t.Fatalf("ListMarks = %v, want each comment once", refs)
+			}
+		})
+	}
+}
+
+// The server writing a second record mark of one type over text the first covers keeps both: each
+// is its own Y attribute key, and removing one leaves the other whole.
+func TestMarkRangeKeepsAnotherMarkOfTheTypeOnTheSameText(t *testing.T) {
+	for _, markType := range []string{"proofComment", "proofSuggestion", "dispatchAsk"} {
+		t.Run(markType, func(t *testing.T) {
+			first := Mark{Type: markType, Attrs: Attrs{"id": "m1", "by": "user:bob"}}
+			second := Mark{Type: markType, Attrs: Attrs{"id": "m2", "by": "user:alice"}}
+			marked := func(t *testing.T) (*crdt.Doc, *crdt.YXmlFragment) {
+				t.Helper()
+				doc := crdt.New()
+				frag := doc.GetXmlFragment("prosemirror")
+				tree, err := Parse("The quick brown fox\n")
+				if err != nil {
+					t.Fatal(err)
+				}
+				doc.Transact(func(txn *crdt.Transaction) { err = Update(txn, frag, tree) })
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, step := range []struct {
+					quote string
+					mark  Mark
+				}{{"quick brown", first}, {"brown", second}} {
+					r, err := FindQuote(tree, step.quote, nil, nil)
+					if err != nil {
+						t.Fatal(err)
+					}
+					doc.Transact(func(txn *crdt.Transaction) { err = MarkRange(txn, frag, r, step.mark) })
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				return doc, frag
+			}
+			quoteOf := func(t *testing.T, frag *crdt.YXmlFragment, id string) (string, bool) {
+				t.Helper()
+				tree, err := Read(frag)
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, quote, ok := FindMark(tree, markType, id)
+				return quote, ok
+			}
+
+			_, frag := marked(t)
+			if quote, ok := quoteOf(t, frag, "m1"); !ok || quote != "quick brown" {
+				t.Fatalf("first mark reads %q %t, want \"quick brown\"", quote, ok)
+			}
+			if quote, ok := quoteOf(t, frag, "m2"); !ok || quote != "brown" {
+				t.Fatalf("second mark reads %q %t, want \"brown\"", quote, ok)
+			}
+			var brownKeys []string
+			spans, err := yTextRanges(frag)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, span := range spans {
+				operations, err := yTextDeltaInTransaction(span.text)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, operation := range operations {
+					if operation.Insert == "brown" {
+						for key := range operation.Attributes {
+							brownKeys = append(brownKeys, key)
+						}
+					}
+				}
+			}
+			if len(brownKeys) != 2 || brownKeys[0] == brownKeys[1] || yattrToMarkName(brownKeys[0]) != markType || yattrToMarkName(brownKeys[1]) != markType {
+				t.Fatalf("the shared run's Y attribute keys = %v, want two distinct keys that both read as %s", brownKeys, markType)
+			}
+
+			for _, removed := range []struct{ id, keptID, keptQuote string }{{"m1", "m2", "brown"}, {"m2", "m1", "quick brown"}} {
+				doc, frag := marked(t)
+				doc.Transact(func(txn *crdt.Transaction) { err = Unmark(txn, frag, markType, removed.id) })
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, ok := quoteOf(t, frag, removed.id); ok {
+					t.Fatalf("Unmark(%s) left it in the document", removed.id)
+				}
+				if quote, ok := quoteOf(t, frag, removed.keptID); !ok || quote != removed.keptQuote {
+					t.Fatalf("after Unmark(%s), %s reads %q %t, want %q", removed.id, removed.keptID, quote, ok, removed.keptQuote)
+				}
+			}
+		})
+	}
+}
+
 func TestSpliceInlineKeepsNeighbourMarks(t *testing.T) {
 	doc, err := Parse("Keep **this** and change that.\n")
 	if err != nil {

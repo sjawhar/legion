@@ -69,8 +69,7 @@ func TestBuildSignerSelectsMode(t *testing.T) {
 // key.pem is present but the enrollment file the launcher writes on success is missing (an
 // enroll that failed), buildSigner's error appends whatever the launcher recorded in
 // enrollment.error, so a caller sees why enrollment failed rather than a bare "no such file";
-// with no enrollment.error file, the message stays byte-identical to today's bare
-// missing-file error.
+// with no enrollment.error file, the message is the bare missing-file error.
 func TestBuildSignerNamesTheEnrollmentErrorDiagnostic(t *testing.T) {
 	dir := newKeyDir(t)
 	if err := os.Remove(filepath.Join(dir, "enrollment")); err != nil {
@@ -293,6 +292,57 @@ func TestRegisterWithoutExecExitsOneWhenWaitedButNotEnrolled(t *testing.T) {
 	code := cmdRegister([]string{"--wait", "1"}, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("register --wait, not enrolled: exit %d, stdout %q, stderr %q", code, stdout.String(), stderr.String())
+	}
+}
+
+// TestRegisterFindsTheHelperOnItsDefaultSocket pins that register, like launcher login and every
+// other helper-mode form, reaches a helper listening on its default socket
+// ($XDG_RUNTIME_DIR/agent-secrets/helper.sock) with AGENT_SECRETS_HELPER_SOCK unset: a machine set
+// up by starting the helper with no settings registers its sessions without exporting the variable.
+func TestRegisterFindsTheHelperOnItsDefaultSocket(t *testing.T) {
+	runtimeDir := t.TempDir()
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+	t.Setenv("AGENT_SECRETS_HELPER_SOCK", "")
+	reqs := fakeHelperAt(t, filepath.Join(runtimeDir, "agent-secrets", "helper.sock"),
+		helper.Response{OK: true, RuntimeID: "h:1:1", EnrollmentID: "enr-h", State: "enrolled"})
+	var stdout, stderr bytes.Buffer
+	if code := cmdRegister(nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("register with only the default socket: exit %d, stderr %q", code, stderr.String())
+	}
+	if got, want := stdout.String(), "h:1:1\tenr-h\tenrolled\n"; got != want {
+		t.Fatalf("register output: got %q, want %q", got, want)
+	}
+	select {
+	case req := <-reqs:
+		if req.Op != "register" {
+			t.Fatalf("request sent to the default socket: %+v", req)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the helper on the default socket never saw a request")
+	}
+}
+
+// TestRegisterRefusesWithNoHelperSocket pins the agent box's answer: with
+// AGENT_SECRETS_HELPER_SOCK unset and no socket at the default path (a box's runtime dir holds its
+// key dir, never a helper), register is a usage error at once, naming the variable and the path,
+// rather than waiting out the connect patience for a helper that is not there.
+func TestRegisterRefusesWithNoHelperSocket(t *testing.T) {
+	runtimeDir := t.TempDir()
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+	t.Setenv("AGENT_SECRETS_HELPER_SOCK", "")
+	var stdout, stderr bytes.Buffer
+	start := time.Now()
+	code := cmdRegister(nil, &stdout, &stderr)
+	if code != exitUsageError {
+		t.Fatalf("register with no helper socket: exit %d, want %d; stderr %q", code, exitUsageError, stderr.String())
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("register waited %s for a helper that is not there", elapsed)
+	}
+	sock := filepath.Join(runtimeDir, "agent-secrets", "helper.sock")
+	if msg := stderr.String(); !strings.Contains(msg, "AGENT_SECRETS_HELPER_SOCK is unset") || !strings.Contains(msg, sock) ||
+		!strings.Contains(msg, "an agent box has a key dir instead") {
+		t.Fatalf("the refusal names the variable, the default path and the box case: %q", msg)
 	}
 }
 

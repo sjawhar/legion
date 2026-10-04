@@ -20,10 +20,10 @@ const (
 // contents of the file NATS_NKEY_SEED_FILE names, else NATS_NKEY_SEED. A set variable is
 // authoritative, and the file pointer wins over the seed: an empty pointer, or a missing,
 // unreadable or blank file, is an error naming the variable and the path, never a fallback to
-// NATS_NKEY_SEED or to no credential (Legion's X_FILE rule, packages/daemon/src/daemon/secrets.ts
-// readSecretPointer); so is a blank NATS_NKEY_SEED, and a seed that is not a user nkey seed. Neither
-// set is a nil option: the connection carries no credential, as every connection did before servers
-// required one. No error carries the seed.
+// NATS_NKEY_SEED or to no credential (Legion's X_FILE rule, the Legion daemon's
+// config.ReadSecretPointer); so is a blank NATS_NKEY_SEED, and a seed that is not a user nkey
+// seed. Neither set is a nil option: the connection carries no credential, as every connection did
+// before servers required one. No error carries the seed.
 // Deploy order: a process gets a seed only after its server has nkey users (the SRE's stage 1, with
 // the no_auth_user fallback); a server with no users sends no nonce, and nats.go then refuses the
 // nkey ("nats: nkeys not supported by the server") rather than connecting without it.

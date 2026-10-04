@@ -55,8 +55,8 @@ run it before the push, and keep issue references in the knives notch and the Le
 
 When a spec names a variable the fork must read, ask first whether the fork change is going
 upstream. If it is, the name is the upstream's to give (its prefix, its settings namespace), and
-the spec changes — the architect records why under "New since we talked", not the implementer
-in a commit message.
+the spec changes — the architect records why in the spec, not the implementer in a commit
+message.
 
 ## Operational facts worth knowing before the next fork change
 

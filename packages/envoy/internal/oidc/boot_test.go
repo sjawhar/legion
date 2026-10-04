@@ -70,9 +70,8 @@ func TestDiscoverIsNilWhenNoIssuerIsConfigured(t *testing.T) {
 	}
 }
 
-// TestConfigFromEnvHoldsBothOrNeither: the rule each binary used to write for
-// itself. The refusal names the variable the operator has to set, because the
-// one they did set is not the one that is missing.
+// TestConfigFromEnvHoldsBothOrNeither: the one rule every binary shares. The refusal names the
+// variable the operator has to set, because the one they did set is not the one that is missing.
 func TestConfigFromEnvHoldsBothOrNeither(t *testing.T) {
 	const issuerVar, audienceVar = "X_OIDC_ISSUER", "X_OIDC_AUDIENCE"
 	env := func(values map[string]string) func(string) string {

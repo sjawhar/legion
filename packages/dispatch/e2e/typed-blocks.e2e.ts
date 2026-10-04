@@ -32,8 +32,8 @@ test("typedBlockDirectiveRoundTrip", async ({ browser }) => {
   }
 });
 
-// The header used to list every node attribute, so a reader met `callout / kind / title /
-// blockId` as bare lines - the internal block id included - above the block's own words.
+// A header listing every node attribute would show a reader `callout / kind / title / blockId` as
+// bare lines - the internal block id included - above the block's own words.
 test("a typed block's header shows the author's attributes and none of the internals", async ({
   browser,
 }) => {

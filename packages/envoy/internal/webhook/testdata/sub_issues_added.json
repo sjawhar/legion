@@ -19,7 +19,13 @@
       "type": "User"
     },
     "labels": [
-      {"id": 9876543210, "node_id": "LA_kwDORFy7ds8AAAAClskbqg", "name": "dispatch-spike", "color": "ededed", "default": false}
+      {
+        "id": 9876543210,
+        "node_id": "LA_kwDORFy7ds8AAAAClskbqg",
+        "name": "dispatch-spike",
+        "color": "ededed",
+        "default": false
+      }
     ],
     "state": "open",
     "locked": false,
@@ -33,7 +39,10 @@
     "author_association": "OWNER",
     "active_lock_reason": null,
     "body": "Parent work issue for Dispatch prototype threads.",
-    "reactions": {"url": "https://api.github.com/repos/sjawhar/legion/issues/641/reactions", "total_count": 0},
+    "reactions": {
+      "url": "https://api.github.com/repos/sjawhar/legion/issues/641/reactions",
+      "total_count": 0
+    },
     "timeline_url": "https://api.github.com/repos/sjawhar/legion/issues/641/timeline",
     "performed_via_github_app": null,
     "state_reason": null
@@ -69,7 +78,10 @@
     "author_association": "NONE",
     "active_lock_reason": null,
     "body": "<!-- dispatch:meta urgency=med request_id=abcd1234 -->\n\n**Canary?**\n\nNeed to decide rollout percentage.",
-    "reactions": {"url": "https://api.github.com/repos/sjawhar/legion/issues/999/reactions", "total_count": 0},
+    "reactions": {
+      "url": "https://api.github.com/repos/sjawhar/legion/issues/999/reactions",
+      "total_count": 0
+    },
     "timeline_url": "https://api.github.com/repos/sjawhar/legion/issues/999/timeline",
     "performed_via_github_app": null,
     "state_reason": null

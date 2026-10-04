@@ -1,6 +1,6 @@
 // Package record implements the credential-request record: its canonical body and content-addressed
-// id, the domain-separated challenges the broker asks approvers to sign, and verification of the
-// requester's signed request object (AGENTC-393 design v4, contract v9).
+// id, who may decide it, and verification of the requester's signed request object (the shared
+// broker contract).
 package record
 
 import (
@@ -38,14 +38,33 @@ var ErrRequestInvalid = errors.New("request object invalid")
 var (
 	hostnamePattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?)*$`)
 	servicePattern  = regexp.MustCompile(`^[a-z0-9-]{1,64}$`)
+	slotPattern     = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
 )
 
-// CanonicalLogin lowercases and trims a GitHub login. Every login comparison in the module goes
-// through this form on both sides. Moved here verbatim from the deleted internal/broker/dispatch
-// package's client.go (AGENTC-393 v9: the broker holds no Dispatch credential).
+// ValidSlot reports whether slot may name a pod enrollment's slot: one of several independent
+// identities in one pod, such as a Legion role and its generation. The empty slot is the
+// enrollment's one identity and is not a slot value.
+func ValidSlot(slot string) bool {
+	return slotPattern.MatchString(slot)
+}
+
+// CanonicalLogin lowercases and trims the name Dispatch signs a person in with, their email (a
+// record created before people were named by email keeps the GitHub login it was decided under).
+// Every login comparison in the module goes through this form on both sides.
 func CanonicalLogin(login string) string {
 	return strings.ToLower(strings.TrimSpace(login))
 }
+
+// AnyoneApprover is the approver of a record anyone signed in to Dispatch may decide: a request
+// for a shared human-tier secret. It is never a person's login, and no login is it.
+const AnyoneApprover = "anyone"
+
+// The two kinds of credential-request record: a session's request for agent secrets, and a
+// machine login, which mints a launcher credential.
+const (
+	KindAgentSecret        = "agent_secret"
+	KindLauncherCredential = "launcher_credential"
+)
 
 // AuthorizationDetail is one entry of a request object's RFC 9396 authorization_details.
 type AuthorizationDetail struct {
@@ -155,7 +174,7 @@ func validateDetails(details []AuthorizationDetail) error {
 	}
 	allSecret := true
 	for _, d := range details {
-		if d.Type != "agent_secret" {
+		if d.Type != KindAgentSecret {
 			allSecret = false
 			break
 		}
@@ -168,7 +187,7 @@ func validateDetails(details []AuthorizationDetail) error {
 		}
 		return nil
 	}
-	if len(details) != 1 || details[0].Type != "launcher_credential" {
+	if len(details) != 1 || details[0].Type != KindLauncherCredential {
 		return errors.New("authorization_details mixes types")
 	}
 	d := details[0]
@@ -196,14 +215,15 @@ func validateReason(reason string) error {
 }
 
 // Enrollment identifies the enrollment a credential request came from. A machine login (no
-// enrollment) carries "-", "-", "-".
-type Enrollment struct{ Kind, RuntimeID, Operator string }
+// enrollment) carries "-", "-", "-". Slot is a pod enrollment's slot, "" for every enrollment
+// without one.
+type Enrollment struct{ Kind, RuntimeID, Operator, Slot string }
 
 // Body is the credential-request record's decision fields, fixed at creation, plus the verbatim
 // signed request object. It is never updated after creation.
 type Body struct {
 	Request         string // compact JWS
-	Approver        string // canonical login
+	Approver        string // canonical login, or AnyoneApprover
 	Enrollment      Enrollment
 	LifetimeSeconds int
 	RulesVersion    string
@@ -212,7 +232,9 @@ type Body struct {
 }
 
 // Canonical renders the body in the contract's exact line format. Every line is "\n"-terminated;
-// an empty operator or code renders as "-".
+// an empty operator or code renders as "-". The enrollment line carries a pod's slot as a fourth
+// tab-separated field only when there is one: a body with no slot keeps the three-field line, the
+// bytes and record id every slotless record is stored under.
 func (b Body) Canonical() string {
 	operator := b.Enrollment.Operator
 	if operator == "" {
@@ -237,6 +259,10 @@ func (b Body) Canonical() string {
 	sb.WriteString(b.Enrollment.RuntimeID)
 	sb.WriteByte('\t')
 	sb.WriteString(operator)
+	if b.Enrollment.Slot != "" {
+		sb.WriteByte('\t')
+		sb.WriteString(b.Enrollment.Slot)
+	}
 	sb.WriteByte('\n')
 	sb.WriteString("lifetime_seconds: ")
 	sb.WriteString(strconv.Itoa(b.LifetimeSeconds))
@@ -286,8 +312,15 @@ func ParseBody(canonical string) (Body, error) {
 		return Body{}, fmt.Errorf("canonical body: bad enrollment line")
 	}
 	fields := strings.Split(enrollmentLine, "\t")
-	if len(fields) != 3 {
-		return Body{}, fmt.Errorf("canonical body: enrollment is not three tab-separated fields")
+	if len(fields) != 3 && len(fields) != 4 {
+		return Body{}, fmt.Errorf("canonical body: enrollment is not three or four tab-separated fields")
+	}
+	slot := ""
+	if len(fields) == 4 {
+		slot = fields[3]
+		if fields[0] != "pod" || !ValidSlot(slot) {
+			return Body{}, fmt.Errorf("canonical body: an enrollment's fourth field must be a pod's slot")
+		}
 	}
 	operator := fields[2]
 	if operator == "-" {
@@ -324,7 +357,7 @@ func ParseBody(canonical string) (Body, error) {
 	b := Body{
 		Request:         request,
 		Approver:        approver,
-		Enrollment:      Enrollment{Kind: fields[0], RuntimeID: fields[1], Operator: operator},
+		Enrollment:      Enrollment{Kind: fields[0], RuntimeID: fields[1], Operator: operator, Slot: slot},
 		LifetimeSeconds: lifetime,
 		RulesVersion:    rulesVersion,
 		ExpiresAt:       expiresAt.UTC(),
@@ -336,29 +369,30 @@ func ParseBody(canonical string) (Body, error) {
 	return b, nil
 }
 
-// ApproveChallenge is the domain-separated challenge an approver signs to approve a record.
-func ApproveChallenge(recordID string) [32]byte {
-	return sha256.Sum256([]byte("agent-secrets/approve/v1\n" + recordID))
+// ApproverLogin canonicalizes login and returns it when it may decide this record, a record of
+// kind, and ErrNotApprover otherwise (MayDecide). A record's approver is resolved when it is
+// created — a secret's owner, AnyoneApprover for a shared human-tier secret, or a machine login's
+// login_hint — so this one comparison is every decision's and every chain re-check's approver
+// rule, and the login it returns is the one a decision records.
+func (b Body) ApproverLogin(kind, login string) (string, error) {
+	login = CanonicalLogin(login)
+	if !MayDecide(kind, b.Approver, login) {
+		return "", ErrNotApprover
+	}
+	return login, nil
 }
 
-// DenyChallenge is the domain-separated challenge an approver signs to deny a record.
-func DenyChallenge(recordID string) [32]byte {
-	return sha256.Sum256([]byte("agent-secrets/deny/v1\n" + recordID))
-}
-
-// RevokeChallenge is the domain-separated challenge an approver or operator signs to revoke a
-// grant.
-func RevokeChallenge(grantID string) [32]byte {
-	return sha256.Sum256([]byte("agent-secrets/revoke/v1\n" + grantID))
-}
-
-// EndorseChallenge is the domain-separated challenge an already-persisted key signs to endorse a
-// new key for the same login.
-func EndorseChallenge(login, keyHashHex string) [32]byte {
-	return sha256.Sum256([]byte("agent-secrets/endorse/v1\n" + login + "\n" + keyHashHex))
-}
-
-// RegisterChallenge is the domain-separated challenge a new key signs during registration.
-func RegisterChallenge(login, nonceHex string) [32]byte {
-	return sha256.Sum256([]byte("agent-secrets/register/v1\n" + login + "\n" + nonceHex))
+// MayDecide reports whether login may decide a record of kind whose approver is approver: the
+// person the approver names, or, for an agent_secret record whose approver is AnyoneApprover, any
+// login at all. No login is AnyoneApprover itself. A machine login's approver is the person whose
+// machine it becomes, so AnyoneApprover there admits no one, whatever binary opened the record.
+func MayDecide(kind, approver, login string) bool {
+	login, approver = CanonicalLogin(login), CanonicalLogin(approver)
+	if login == "" || login == AnyoneApprover {
+		return false
+	}
+	if approver == AnyoneApprover && kind == KindAgentSecret {
+		return true
+	}
+	return login == approver
 }

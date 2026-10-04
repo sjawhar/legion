@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net"
@@ -18,32 +19,117 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/bus"
+	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
-func TestResolveBootConfigRejectsUntrustedHeaderIdentityWithOAuth(t *testing.T) {
-	_, err := resolveBootConfig(envGetter(map[string]string{
-		"DATABASE_URL":            "postgres://dispatch",
-		"DISPATCH_AGENT_TOKEN":    "agent-token",
-		"DISPATCH_IDENTITY":       "header:X-Dispatch-User",
-		"DISPATCH_APP_CLIENT_ID":  "client-id",
-		"DISPATCH_ALLOWED_LOGINS": "sjawhar",
-		"DISPATCH_REPO_PROJECTS":  "owner/repo=TEST",
+// signInEnvironment is a cookie-identity boot environment with all four sign-in settings.
+func signInEnvironment(overrides map[string]string) map[string]string {
+	values := map[string]string{
+		"DATABASE_URL":                  "postgres://dispatch",
+		"DISPATCH_AGENT_TOKEN":          "agent-token",
+		"DISPATCH_SIGNIN_ISSUER":        "https://issuer.example/pool",
+		"DISPATCH_SIGNIN_CLIENT_ID":     "dispatch-client",
+		"DISPATCH_SIGNIN_CLIENT_SECRET": "client-secret",
+		"DISPATCH_SIGNIN_GROUP":         "dispatch-members",
+	}
+	for name, value := range overrides {
+		values[name] = value
+	}
+	return values
+}
+
+func headerIdentityEnvironment(overrides map[string]string) map[string]string {
+	values := map[string]string{
+		"DATABASE_URL":                     "postgres://dispatch",
+		"DISPATCH_AGENT_TOKEN":             "agent-token",
+		"DISPATCH_IDENTITY":                "header:X-Dispatch-User",
+		"DISPATCH_IDENTITY_HEADER_TRUSTED": "1",
+	}
+	for name, value := range overrides {
+		values[name] = value
+	}
+	return values
+}
+
+func TestResolveBootConfigReadsTheFourSignInSettings(t *testing.T) {
+	boot, err := resolveBootConfig(envGetter(signInEnvironment(nil)))
+	if err != nil {
+		t.Fatalf("resolve boot config: %v", err)
+	}
+	if boot.IdentityHeader != "" || boot.SignInIssuer != "https://issuer.example/pool" || boot.SignInClientID != "dispatch-client" ||
+		boot.SignInClientSecret != "client-secret" || boot.SignInGroup != "dispatch-members" {
+		t.Fatalf("boot = %#v, want cookie identity with the four sign-in settings", boot)
+	}
+}
+
+// Cookie identity is Google sign-in: without the sign-in settings, or with only some of them, the
+// server refuses to boot and names what is missing.
+func TestResolveBootConfigRefusesCookieIdentityWithoutTheWholeSignIn(t *testing.T) {
+	if _, err := resolveBootConfig(envGetter(map[string]string{"DATABASE_URL": "postgres://dispatch", "DISPATCH_AGENT_TOKEN": "agent-token"})); err == nil ||
+		!strings.Contains(err.Error(), "DISPATCH_SIGNIN_ISSUER") {
+		t.Fatalf("cookie identity without sign-in: err = %v, want a refusal naming the settings", err)
+	}
+	_, err := resolveBootConfig(envGetter(signInEnvironment(map[string]string{"DISPATCH_SIGNIN_GROUP": ""})))
+	if err == nil || !strings.Contains(err.Error(), "DISPATCH_SIGNIN_GROUP missing") {
+		t.Fatalf("sign-in without its group: err = %v, want a refusal naming DISPATCH_SIGNIN_GROUP", err)
+	}
+}
+
+// A setting a release removed is refused, never silently ignored.
+func TestResolveBootConfigRefusesRemovedSettings(t *testing.T) {
+	for _, name := range []string{"DISPATCH_ALLOWED_LOGINS", "DISPATCH_APP_CLIENT_SECRET"} {
+		_, err := resolveBootConfig(envGetter(signInEnvironment(map[string]string{name: "value"})))
+		if err == nil || !strings.Contains(err.Error(), name+" is no longer read") {
+			t.Errorf("%s set: err = %v, want a refusal naming it", name, err)
+		}
+	}
+}
+
+func TestResolveBootConfigFencesHeaderIdentityToTrustedLocalHarnesses(t *testing.T) {
+	withoutAcknowledgement := headerIdentityEnvironment(map[string]string{
+		"DISPATCH_IDENTITY_HEADER_TRUSTED": "",
+	})
+	if _, err := resolveBootConfig(envGetter(withoutAcknowledgement)); err == nil ||
+		!strings.Contains(err.Error(), "DISPATCH_IDENTITY_HEADER_TRUSTED=1") {
+		t.Fatalf("header identity without acknowledgement: err = %v, want a refusal naming DISPATCH_IDENTITY_HEADER_TRUSTED", err)
+	}
+	if _, err := resolveBootConfig(envGetter(headerIdentityEnvironment(nil))); err != nil {
+		t.Fatalf("acknowledged header identity: %v", err)
+	}
+	for name, value := range map[string]string{
+		"DISPATCH_SIGNIN_ISSUER":        "https://issuer.example/pool",
+		"DISPATCH_SIGNIN_CLIENT_ID":     "dispatch-client",
+		"DISPATCH_SIGNIN_CLIENT_SECRET": "client-secret",
+		"DISPATCH_SIGNIN_GROUP":         "dispatch-members",
+	} {
+		if _, err := resolveBootConfig(envGetter(headerIdentityEnvironment(map[string]string{name: value}))); err == nil ||
+			!strings.Contains(err.Error(), name) ||
+			!strings.Contains(err.Error(), "header identity and Google sign-in cannot share a deployment") {
+			t.Errorf("header identity with %s: err = %v, want a refusal naming the setting and why it cannot share a deployment", name, err)
+		}
+	}
+}
+
+func TestDevSignInRefusesTheSignInSettings(t *testing.T) {
+	_, err := resolveBootConfig(devSignInEnvironment(map[string]string{
+		"DISPATCH_SIGNIN_ISSUER": "https://issuer.example/pool", "DISPATCH_SIGNIN_CLIENT_ID": "c",
+		"DISPATCH_SIGNIN_CLIENT_SECRET": "s", "DISPATCH_SIGNIN_GROUP": "g",
 	}))
-	if err == nil || !strings.Contains(err.Error(), "DISPATCH_IDENTITY_HEADER_TRUSTED") {
-		t.Fatalf("error: got %v, want trusted header rejection", err)
+	if err == nil || !strings.Contains(err.Error(), "DISPATCH_SIGNIN_* must be unset") {
+		t.Fatalf("dev sign-in with the sign-in settings: err = %v, want a refusal", err)
 	}
 }
 
 func TestResolveBootConfigAllowsRepositorySettingsWithoutDefaultProject(t *testing.T) {
 	boot, err := resolveBootConfig(envGetter(map[string]string{
-		"DATABASE_URL":            "postgres://dispatch",
-		"DISPATCH_AGENT_TOKEN":    "agent-token",
-		"DISPATCH_IDENTITY":       "header:X-Dispatch-User",
-		"DISPATCH_ALLOWED_LOGINS": "sjawhar",
+		"DATABASE_URL":                     "postgres://dispatch",
+		"DISPATCH_AGENT_TOKEN":             "agent-token",
+		"DISPATCH_IDENTITY":                "header:X-Dispatch-User",
+		"DISPATCH_IDENTITY_HEADER_TRUSTED": "1",
 	}))
 	if err != nil || boot.DefaultProject != "" {
 		t.Fatalf("resolve boot config: boot=%#v err=%v", boot, err)
@@ -52,11 +138,11 @@ func TestResolveBootConfigAllowsRepositorySettingsWithoutDefaultProject(t *testi
 
 func TestResolveBootConfigAcceptsDefaultProjectWithoutRepoMapping(t *testing.T) {
 	_, err := resolveBootConfig(envGetter(map[string]string{
-		"DATABASE_URL":             "postgres://dispatch",
-		"DISPATCH_AGENT_TOKEN":     "agent-token",
-		"DISPATCH_IDENTITY":        "header:X-Dispatch-User",
-		"DISPATCH_ALLOWED_LOGINS":  "sjawhar",
-		"DISPATCH_DEFAULT_PROJECT": "TEST",
+		"DATABASE_URL":                     "postgres://dispatch",
+		"DISPATCH_AGENT_TOKEN":             "agent-token",
+		"DISPATCH_IDENTITY":                "header:X-Dispatch-User",
+		"DISPATCH_IDENTITY_HEADER_TRUSTED": "1",
+		"DISPATCH_DEFAULT_PROJECT":         "TEST",
 	}))
 	if err != nil {
 		t.Fatalf("resolve boot config: %v", err)
@@ -65,12 +151,12 @@ func TestResolveBootConfigAcceptsDefaultProjectWithoutRepoMapping(t *testing.T) 
 
 func TestResolveBootConfigDisablesNATS(t *testing.T) {
 	boot, err := resolveBootConfig(envGetter(map[string]string{
-		"DATABASE_URL":            "postgres://dispatch",
-		"DISPATCH_AGENT_TOKEN":    "agent-token",
-		"DISPATCH_IDENTITY":       "header:X-Dispatch-User",
-		"DISPATCH_ALLOWED_LOGINS": "sjawhar",
-		"DISPATCH_NATS_DISABLED":  "1",
-		"DISPATCH_REPO_PROJECTS":  "owner/repo=TEST",
+		"DATABASE_URL":                     "postgres://dispatch",
+		"DISPATCH_AGENT_TOKEN":             "agent-token",
+		"DISPATCH_IDENTITY":                "header:X-Dispatch-User",
+		"DISPATCH_IDENTITY_HEADER_TRUSTED": "1",
+		"DISPATCH_NATS_DISABLED":           "1",
+		"DISPATCH_REPO_PROJECTS":           "owner/repo=TEST",
 	}))
 	if err != nil {
 		t.Fatalf("resolve boot config: %v", err)
@@ -82,10 +168,10 @@ func TestResolveBootConfigDisablesNATS(t *testing.T) {
 
 func TestResolveBootConfigDefaultsAndValidatesEnvoyURL(t *testing.T) {
 	base := map[string]string{
-		"DATABASE_URL":            "postgres://dispatch",
-		"DISPATCH_AGENT_TOKEN":    "t",
-		"DISPATCH_IDENTITY":       "header:X-Dispatch-User",
-		"DISPATCH_ALLOWED_LOGINS": "sjawhar",
+		"DATABASE_URL":                     "postgres://dispatch",
+		"DISPATCH_AGENT_TOKEN":             "t",
+		"DISPATCH_IDENTITY":                "header:X-Dispatch-User",
+		"DISPATCH_IDENTITY_HEADER_TRUSTED": "1",
 	}
 
 	boot, err := resolveBootConfig(envGetter(base))
@@ -112,10 +198,10 @@ func TestResolveBootConfigDefaultsAndValidatesEnvoyURL(t *testing.T) {
 // resolveBootConfig must not require a token when the URL is unset.
 func TestResolveBootConfigLeavesAgentSecretsOffByDefault(t *testing.T) {
 	boot, err := resolveBootConfig(envGetter(map[string]string{
-		"DATABASE_URL":            "postgres://dispatch",
-		"DISPATCH_AGENT_TOKEN":    "agent-token",
-		"DISPATCH_IDENTITY":       "header:X-Dispatch-User",
-		"DISPATCH_ALLOWED_LOGINS": "sjawhar",
+		"DATABASE_URL":                     "postgres://dispatch",
+		"DISPATCH_AGENT_TOKEN":             "agent-token",
+		"DISPATCH_IDENTITY":                "header:X-Dispatch-User",
+		"DISPATCH_IDENTITY_HEADER_TRUSTED": "1",
 	}))
 	if err != nil || boot.AgentSecretsURL != "" || boot.AgentSecretsToken != "" {
 		t.Fatalf("boot=%#v err=%v, want the feature off", boot, err)
@@ -124,12 +210,12 @@ func TestResolveBootConfigLeavesAgentSecretsOffByDefault(t *testing.T) {
 
 func TestResolveBootConfigAcceptsAgentSecretsURLAndToken(t *testing.T) {
 	boot, err := resolveBootConfig(envGetter(map[string]string{
-		"DATABASE_URL":                 "postgres://dispatch",
-		"DISPATCH_AGENT_TOKEN":         "agent-token",
-		"DISPATCH_IDENTITY":            "header:X-Dispatch-User",
-		"DISPATCH_ALLOWED_LOGINS":      "sjawhar",
-		"DISPATCH_AGENT_SECRETS_URL":   "https://broker.internal/",
-		"DISPATCH_AGENT_SECRETS_TOKEN": "ui-bearer",
+		"DATABASE_URL":                     "postgres://dispatch",
+		"DISPATCH_AGENT_TOKEN":             "agent-token",
+		"DISPATCH_IDENTITY":                "header:X-Dispatch-User",
+		"DISPATCH_IDENTITY_HEADER_TRUSTED": "1",
+		"DISPATCH_AGENT_SECRETS_URL":       "https://broker.internal/",
+		"DISPATCH_AGENT_SECRETS_TOKEN":     "ui-bearer",
 	}))
 	if err != nil {
 		t.Fatalf("resolve boot config: %v", err)
@@ -147,11 +233,11 @@ func TestResolveBootConfigAcceptsAgentSecretsURLAndToken(t *testing.T) {
 // call by appending a fixed path to this base.
 func TestResolveBootConfigRejectsAgentSecretsURLWithPathOrBadScheme(t *testing.T) {
 	base := map[string]string{
-		"DATABASE_URL":                 "postgres://dispatch",
-		"DISPATCH_AGENT_TOKEN":         "agent-token",
-		"DISPATCH_IDENTITY":            "header:X-Dispatch-User",
-		"DISPATCH_ALLOWED_LOGINS":      "sjawhar",
-		"DISPATCH_AGENT_SECRETS_TOKEN": "ui-bearer",
+		"DATABASE_URL":                     "postgres://dispatch",
+		"DISPATCH_AGENT_TOKEN":             "agent-token",
+		"DISPATCH_IDENTITY":                "header:X-Dispatch-User",
+		"DISPATCH_IDENTITY_HEADER_TRUSTED": "1",
+		"DISPATCH_AGENT_SECRETS_TOKEN":     "ui-bearer",
 	}
 	for _, badURL := range []string{"broker.internal:9090", "https://broker.internal/v1"} {
 		env := map[string]string{}
@@ -169,11 +255,11 @@ func TestResolveBootConfigRejectsAgentSecretsURLWithPathOrBadScheme(t *testing.T
 // construct a client that authenticates with an empty bearer.
 func TestResolveBootConfigRequiresTokenWhenAgentSecretsURLSet(t *testing.T) {
 	_, err := resolveBootConfig(envGetter(map[string]string{
-		"DATABASE_URL":               "postgres://dispatch",
-		"DISPATCH_AGENT_TOKEN":       "agent-token",
-		"DISPATCH_IDENTITY":          "header:X-Dispatch-User",
-		"DISPATCH_ALLOWED_LOGINS":    "sjawhar",
-		"DISPATCH_AGENT_SECRETS_URL": "https://broker.internal",
+		"DATABASE_URL":                     "postgres://dispatch",
+		"DISPATCH_AGENT_TOKEN":             "agent-token",
+		"DISPATCH_IDENTITY":                "header:X-Dispatch-User",
+		"DISPATCH_IDENTITY_HEADER_TRUSTED": "1",
+		"DISPATCH_AGENT_SECRETS_URL":       "https://broker.internal",
 	}))
 	if err == nil || !strings.Contains(err.Error(), "DISPATCH_AGENT_SECRETS_TOKEN") {
 		t.Fatalf("err = %v, want a token-required rejection", err)
@@ -192,7 +278,7 @@ func TestResolveBootConfigAgentSecretsTokenFileWinsOverBareVariable(t *testing.T
 		"DATABASE_URL":                      "postgres://dispatch",
 		"DISPATCH_AGENT_TOKEN":              "agent-token",
 		"DISPATCH_IDENTITY":                 "header:X-Dispatch-User",
-		"DISPATCH_ALLOWED_LOGINS":           "sjawhar",
+		"DISPATCH_IDENTITY_HEADER_TRUSTED":  "1",
 		"DISPATCH_AGENT_SECRETS_URL":        "https://broker.internal",
 		"DISPATCH_AGENT_SECRETS_TOKEN":      "bare-token",
 		"DISPATCH_AGENT_SECRETS_TOKEN_FILE": tokenPath,
@@ -208,7 +294,7 @@ func TestResolveBootConfigAgentSecretsTokenFileWinsOverBareVariable(t *testing.T
 		"DATABASE_URL":                      "postgres://dispatch",
 		"DISPATCH_AGENT_TOKEN":              "agent-token",
 		"DISPATCH_IDENTITY":                 "header:X-Dispatch-User",
-		"DISPATCH_ALLOWED_LOGINS":           "sjawhar",
+		"DISPATCH_IDENTITY_HEADER_TRUSTED":  "1",
 		"DISPATCH_AGENT_SECRETS_URL":        "https://broker.internal",
 		"DISPATCH_AGENT_SECRETS_TOKEN_FILE": dir + "/missing",
 	})); err == nil || !strings.Contains(err.Error(), "DISPATCH_AGENT_SECRETS_TOKEN_FILE") {
@@ -221,12 +307,12 @@ func TestResolveBootConfigAgentSecretsTokenFileWinsOverBareVariable(t *testing.T
 // verifies no service-account token at all.
 func TestResolveBootConfigRequiresBothOIDCVariables(t *testing.T) {
 	base := map[string]string{
-		"DATABASE_URL":            "postgres://dispatch",
-		"DISPATCH_AGENT_TOKEN":    "agent-token",
-		"DISPATCH_IDENTITY":       "header:X-Dispatch-User",
-		"DISPATCH_ALLOWED_LOGINS": "sjawhar",
+		"DATABASE_URL":                     "postgres://dispatch",
+		"DISPATCH_AGENT_TOKEN":             "agent-token",
+		"DISPATCH_IDENTITY":                "header:X-Dispatch-User",
+		"DISPATCH_IDENTITY_HEADER_TRUSTED": "1",
 	}
-	env := func(overrides map[string]string) func(string) string {
+	env := func(overrides map[string]string) settingValues {
 		values := map[string]string{}
 		for key, value := range base {
 			values[key] = value
@@ -530,11 +616,28 @@ func pumpUntilBlackholed(dst, src net.Conn, blackholed *atomic.Bool, done chan<-
 	}
 }
 
-func envGetter(values map[string]string) func(string) string {
-	return func(key string) string { return values[key] }
+// envGetter is what the settings table reads from an environment holding exactly values: a key
+// present is set, even when its value is empty.
+func envGetter(values map[string]string) settingValues {
+	return readSettings(func(key string) (string, bool) {
+		value, set := values[key]
+		return value, set
+	})
 }
 
-func TestMain(m *testing.M) { os.Exit(storetest.Main(m)) }
+// memoryTestServeEnv makes this test binary run main, so the memory tests (memory_test.go, built
+// under the `memory` tag) drive a real Dispatch process and read its own resident memory.
+const memoryTestServeEnv = "DISPATCH_MEMORY_TEST_SERVE"
+
+// TestMain runs the package's tests, or, run by a memory test with memoryTestServeEnv set, is that
+// test's Dispatch server.
+func TestMain(m *testing.M) {
+	if os.Getenv(memoryTestServeEnv) == "1" {
+		main()
+		os.Exit(0)
+	}
+	os.Exit(storetest.Main(m))
+}
 
 func TestSeedRepoProjectsAddsMissingRowsWithoutOverwritingSettings(t *testing.T) {
 	database := storetest.Open(t)
@@ -638,6 +741,101 @@ func TestRebuildRefsRefusesWithoutServerURL(t *testing.T) {
 	}
 }
 
+// An argument envoy-dispatch does not know is refused, never served: the server migrates the
+// database at boot, so `envoy-dispatch census` on an image that predates the subcommand would
+// otherwise apply the very migrations the census was to inspect.
+func TestRunSubcommandRefusesAnUnknownSubcommand(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runSubcommand(context.Background(), []string{"cenus"}, envGetter(nil), &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("exit %d, want 2", code)
+	}
+	for _, want := range []string{`unknown subcommand "cenus"`, "census", "redeliver-webhooks"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr %q lacks %q", stderr.String(), want)
+		}
+	}
+	if strings.Contains(stderr.String(), "DATABASE_URL") {
+		t.Errorf("stderr %q reads like a boot, not a refusal", stderr.String())
+	}
+}
+
+// The census exits 2 when it could not be taken and 0 when nothing refuses, and prints the report
+// to stdout.
+func TestCensusSubcommandExitCodes(t *testing.T) {
+	ctx := context.Background()
+	var out, errOut bytes.Buffer
+	if code := census(ctx, "", &out, &errOut); code != 2 || !strings.Contains(errOut.String(), "DATABASE_URL is required") {
+		t.Errorf("no URL: exit %d, stderr %q", code, errOut.String())
+	}
+	errOut.Reset()
+	if code := census(ctx, "postgres://nobody:nothing@127.0.0.1:1/none?sslmode=disable&connect_timeout=1", &out, &errOut); code != 2 || !strings.Contains(errOut.String(), "census: connect") {
+		t.Errorf("unreachable: exit %d, stderr %q", code, errOut.String())
+	}
+	if out.Len() != 0 {
+		t.Errorf("a census that could not be taken printed a report: %q", out.String())
+	}
+	database := storetest.Open(t)
+	out.Reset()
+	errOut.Reset()
+	if code := census(ctx, database.Pool.Config().ConnString(), &out, &errOut); code != 0 {
+		t.Fatalf("migrated database: exit %d, stderr %q, stdout %q", code, errOut.String(), out.String())
+	}
+	if !strings.Contains(out.String(), "no pending migration") || !strings.HasSuffix(strings.TrimSpace(out.String()), "census: ok") {
+		t.Errorf("stdout:\n%s", out.String())
+	}
+}
+
+// pgmigrate.Census already prefixes its errors with "census:", so the command prints that
+// prefix once when a census cannot be taken.
+func TestCensusSubcommandPrintsACensusErrorWithOnePrefix(t *testing.T) {
+	database := storetest.Open(t)
+	var out, errOut bytes.Buffer
+	if code := census(context.Background(), database.Pool.Config().ConnString()+"&search_path=nosuch", &out, &errOut); code != 2 {
+		t.Fatalf("exit %d, want 2; stderr %q", code, errOut.String())
+	}
+	const want = "census: the connection's search_path names no schema that exists, so current_schema() is null: the census would find neither schema_migrations nor any table, and the runner can create neither; name an existing schema in the search_path\n"
+	if got := errOut.String(); got != want {
+		t.Errorf("stderr = %q, want %q", got, want)
+	}
+}
+
+// A database at 52 holding a row 0053's check refuses is refused by the embedded 0053 census,
+// exit 1, and the report names the migration, the count and the census file.
+func TestCensusSubcommandExitsOneWhenAPendingMigrationsCensusCountsRows(t *testing.T) {
+	ctx := context.Background()
+	database := storetest.Open(t)
+	if _, err := database.Pool.Exec(ctx, `
+		alter table asks drop constraint asks_approval_kind_check;
+		delete from schema_migrations where version >= 53;
+		-- The template already applied 0068, which dropped users; a database at 52 still has it.
+		create table users (login text primary key);
+		insert into projects (key, name) values ('CORE', 'Core');
+		insert into issues (key, project_key, number, title, created_by, rank)
+			values ('CORE-1', 'CORE', 1, 'Spec', '{"kind":"session","id":"s"}', 'U');
+		insert into asks (issue_key, author, question, options, kind, approval)
+			values ('CORE-1', '{"kind":"session","id":"s"}', 'A question?', '[]', 'question', '{}');
+	`); err != nil {
+		t.Fatalf("seed a database at 52 with a row 0053 refuses: %v", err)
+	}
+	var out, errOut bytes.Buffer
+	if code := census(ctx, database.Pool.Config().ConnString(), &out, &errOut); code != 1 {
+		t.Fatalf("exit %d, want 1; stderr %q, stdout:\n%s", code, errOut.String(), out.String())
+	}
+	for _, want := range []string{
+		"census: schema version 52 (schema_migrations); pending: 0053_asks_approval_kind_check.up.sql, 0054_message_delivery_acceptance.up.sql, 0055_broadcast_idempotency_keys.up.sql",
+		"census: REFUSED 0053_asks_approval_kind_check.up.sql: its census counts 1 (0053_asks_approval_kind_check.census.sql)",
+		"census: 0055_broadcast_idempotency_keys.up.sql touches broadcasts: 0 rows, ",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("stdout lacks %q:\n%s", want, out.String())
+		}
+	}
+	if last := strings.TrimSpace(out.String()); !strings.HasSuffix(last, "census: REFUSED (1 reason)") {
+		t.Errorf("stdout does not end with the verdict:\n%s", out.String())
+	}
+}
+
 func TestWriteRebuildRefsReport(t *testing.T) {
 	var output bytes.Buffer
 	writeRebuildRefsReport(&output, refs.Rebuild{Documents: 4, Asks: 3, Comments: 2, Messages: 1, Orphans: 5, Edges: 9})
@@ -647,14 +845,314 @@ func TestWriteRebuildRefsReport(t *testing.T) {
 	}
 }
 
-func TestParseAllowedLoginsLowerCasesAndTrimsEntries(t *testing.T) {
-	logins := parseAllowedLogins(" sjawhar, Xodarap ,,")
-	if len(logins) != 2 {
-		t.Fatalf("logins: got %v, want two entries", logins)
+// devSignInEnvironment is a boot environment the dev sign-in fence accepts, with overrides
+// applied; an override of "" leaves that variable empty, which resolveBootConfig reads as unset.
+// With the flag overridden off it is a production cookie server, so it carries the sign-in.
+func devSignInEnvironment(overrides map[string]string) settingValues {
+	values := map[string]string{
+		"DATABASE_URL":         "postgres://postgres:x@127.0.0.1:5432/dispatch_e2e?sslmode=disable",
+		"DISPATCH_AGENT_TOKEN": "x",
+		"DISPATCH_LISTEN_HOST": "127.0.0.1",
+		"DISPATCH_DEV_SIGNIN":  "1",
 	}
-	for _, want := range []string{"sjawhar", "xodarap"} {
-		if _, ok := logins[want]; !ok {
-			t.Errorf("logins: missing %q in %v", want, logins)
+	for key, value := range overrides {
+		values[key] = value
+	}
+	if values["DISPATCH_DEV_SIGNIN"] == "" && values["DISPATCH_SIGNIN_ISSUER"] == "" {
+		values["DISPATCH_SIGNIN_ISSUER"] = "https://issuer.example/pool"
+		values["DISPATCH_SIGNIN_CLIENT_ID"] = "dispatch-client"
+		values["DISPATCH_SIGNIN_CLIENT_SECRET"] = "client-secret"
+		values["DISPATCH_SIGNIN_GROUP"] = "dispatch-members"
+	}
+	return envGetter(values)
+}
+
+func TestResolveBootConfigDevSignInFlagValue(t *testing.T) {
+	// Off (getenv answers "" for an unset variable as for an empty one), the fence asks nothing of
+	// the rest of the environment.
+	boot, err := resolveBootConfig(devSignInEnvironment(map[string]string{
+		"DISPATCH_DEV_SIGNIN":  "",
+		"DISPATCH_LISTEN_HOST": "0.0.0.0",
+		"DATABASE_URL":         "postgres://u@db.example.com/d",
+		"DISPATCH_SIGNING_KEY": "abc",
+	}))
+	if err != nil || boot.DevSignIn {
+		t.Fatalf("DISPATCH_DEV_SIGNIN unset: DevSignIn=%t err=%v, want off", boot.DevSignIn, err)
+	}
+
+	boot, err = resolveBootConfig(devSignInEnvironment(nil))
+	if err != nil || !boot.DevSignIn {
+		t.Fatalf("DISPATCH_DEV_SIGNIN=1: DevSignIn=%t err=%v, want on", boot.DevSignIn, err)
+	}
+
+	for _, flag := range []string{"true", "yes", "0", " 1"} {
+		_, err := resolveBootConfig(devSignInEnvironment(map[string]string{"DISPATCH_DEV_SIGNIN": flag}))
+		if err == nil || !strings.Contains(err.Error(), "DISPATCH_DEV_SIGNIN") || !strings.Contains(err.Error(), strconv.Quote(flag)) {
+			t.Errorf("DISPATCH_DEV_SIGNIN=%q: err = %v, want a refusal naming the variable and the value", flag, err)
+		}
+	}
+}
+
+func TestResolveBootConfigDevSignInRequiresCookieIdentity(t *testing.T) {
+	_, err := resolveBootConfig(devSignInEnvironment(map[string]string{
+		"DISPATCH_IDENTITY":                "header:X-Dispatch-User",
+		"DISPATCH_IDENTITY_HEADER_TRUSTED": "1",
+	}))
+	if err == nil || !strings.Contains(err.Error(), "DISPATCH_IDENTITY") {
+		t.Fatalf("header identity: err = %v, want a refusal naming DISPATCH_IDENTITY", err)
+	}
+}
+
+// The fence checks the address the server binds, not a second reading of the variable: every
+// spelling it accepts yields boot.ListenAddr, listenAddress's one value, which main binds.
+func TestResolveBootConfigDevSignInChecksTheAddressItBinds(t *testing.T) {
+	for _, host := range []string{"", "0.0.0.0", "::", "10.0.0.5", "localhost", "::ffff:127.0.0.1", "[::1%lo]", "]]::1[[", "[[::1]]", "127.0.0.1:9000", "[::1]:9000"} {
+		boot, err := resolveBootConfig(devSignInEnvironment(map[string]string{"DISPATCH_LISTEN_HOST": host}))
+		if err == nil || !strings.Contains(err.Error(), "DISPATCH_LISTEN_HOST") {
+			t.Errorf("DISPATCH_LISTEN_HOST=%q: listen address %q, err = %v; want a refusal naming DISPATCH_LISTEN_HOST", host, boot.ListenAddr, err)
+		}
+	}
+	for host, want := range map[string]string{
+		"127.0.0.1":       "127.0.0.1:8799",
+		" 127.0.0.1 ":     "127.0.0.1:8799",
+		"[127.0.0.1]":     "127.0.0.1:8799",
+		"127.255.255.254": "127.255.255.254:8799",
+		"::1":             "[::1]:8799",
+		"[::1]":           "[::1]:8799",
+		"0:0:0:0:0:0:0:1": "[0:0:0:0:0:0:0:1]:8799",
+	} {
+		environment := devSignInEnvironment(map[string]string{"DISPATCH_LISTEN_HOST": host, "DISPATCH_PORT": "8799"})
+		bound, err := listenAddress(environment)
+		if err != nil || bound != want {
+			t.Fatalf("DISPATCH_LISTEN_HOST=%q: listenAddress = %q, %v; want %q", host, bound, err, want)
+		}
+		boot, err := resolveBootConfig(environment)
+		if err != nil || boot.ListenAddr != bound {
+			t.Errorf("DISPATCH_LISTEN_HOST=%q: ListenAddr = %q, %v; want the bound %q accepted", host, boot.ListenAddr, err, bound)
+		}
+	}
+
+	// Without the flag the same field carries the address, so main binds one value either way, and
+	// a bad port is refused before anything connects.
+	boot, err := resolveBootConfig(devSignInEnvironment(map[string]string{"DISPATCH_DEV_SIGNIN": "", "DISPATCH_LISTEN_HOST": "", "DISPATCH_PORT": "8799"}))
+	if err != nil || boot.ListenAddr != ":8799" {
+		t.Errorf("without the flag: ListenAddr = %q, %v; want \":8799\"", boot.ListenAddr, err)
+	}
+	if _, err := resolveBootConfig(devSignInEnvironment(map[string]string{"DISPATCH_DEV_SIGNIN": "", "DISPATCH_PORT": "70000"})); err == nil || !strings.Contains(err.Error(), "DISPATCH_PORT") {
+		t.Errorf("DISPATCH_PORT=70000: err = %v, want a refusal naming DISPATCH_PORT", err)
+	}
+}
+
+func TestResolveBootConfigDevSignInRequiresALoopbackDatabase(t *testing.T) {
+	for _, tc := range []struct{ databaseURL, host string }{
+		{databaseURL: "postgres://postgres:x@db.example.com:5432/d", host: "db.example.com"},
+		{databaseURL: "postgres://u@10.0.0.5/d", host: "10.0.0.5"},
+		{databaseURL: "postgres://u@127.0.0.1:5432,db.example.com:5432/d", host: "db.example.com"},
+		{databaseURL: "host=db.example.com dbname=d", host: "db.example.com"},
+		// pgx dials the host parameter, not the URL's authority.
+		{databaseURL: "postgres://u@127.0.0.1:5432/d?host=db.example.com", host: "db.example.com"},
+	} {
+		_, err := resolveBootConfig(devSignInEnvironment(map[string]string{"DATABASE_URL": tc.databaseURL}))
+		if err == nil || !strings.Contains(err.Error(), "DATABASE_URL") || !strings.Contains(err.Error(), tc.host) {
+			t.Errorf("DATABASE_URL=%q: err = %v, want a refusal naming DATABASE_URL and %s", tc.databaseURL, err, tc.host)
+		}
+	}
+	for _, databaseURL := range []string{
+		"postgres://u@127.0.0.1:5432/d",
+		"postgres://u@localhost:5432/d",
+		"postgres://u@[::1]:5432/d",
+		"postgres:///d?host=/var/run/postgresql",
+		"host=/tmp dbname=d",
+	} {
+		if _, err := resolveBootConfig(devSignInEnvironment(map[string]string{"DATABASE_URL": databaseURL})); err != nil {
+			t.Errorf("DATABASE_URL=%q: %v, want a loopback database accepted", databaseURL, err)
+		}
+	}
+
+	// A URL naming no host is dialled at libpq's PGHOST default, which the check reads too.
+	t.Setenv("PGHOST", "db.example.com")
+	if _, err := resolveBootConfig(devSignInEnvironment(map[string]string{"DATABASE_URL": "postgres:///d"})); err == nil || !strings.Contains(err.Error(), "db.example.com") {
+		t.Errorf("DATABASE_URL=postgres:///d with PGHOST=db.example.com: err = %v, want a refusal naming db.example.com", err)
+	}
+}
+
+func TestResolveBootConfigDevSignInRefusesAConfiguredSigningKey(t *testing.T) {
+	_, err := resolveBootConfig(devSignInEnvironment(map[string]string{"DISPATCH_SIGNING_KEY": "abc"}))
+	if err == nil || !strings.Contains(err.Error(), "DISPATCH_SIGNING_KEY") {
+		t.Fatalf("configured signing key: err = %v, want a refusal naming DISPATCH_SIGNING_KEY", err)
+	}
+}
+
+// With the flag a loopback client acts as any person it names, so the process may not publish
+// into another machine's NATS.
+func TestResolveBootConfigDevSignInRefusesRemoteNATS(t *testing.T) {
+	if _, err := resolveBootConfig(devSignInEnvironment(map[string]string{"ENVOY_ALLOW_REMOTE_NATS": "1"})); err == nil || !strings.Contains(err.Error(), "ENVOY_ALLOW_REMOTE_NATS") {
+		t.Fatalf("ENVOY_ALLOW_REMOTE_NATS=1 with NATS on: err = %v, want a refusal naming ENVOY_ALLOW_REMOTE_NATS", err)
+	}
+	if _, err := resolveBootConfig(devSignInEnvironment(map[string]string{"ENVOY_ALLOW_REMOTE_NATS": "1", "DISPATCH_NATS_DISABLED": "1"})); err != nil {
+		t.Fatalf("ENVOY_ALLOW_REMOTE_NATS=1 with NATS off: %v, want accepted", err)
+	}
+	if _, err := resolveBootConfig(devSignInEnvironment(map[string]string{"ENVOY_ALLOW_REMOTE_NATS": "1", "DISPATCH_DEV_SIGNIN": ""})); err != nil {
+		t.Fatalf("ENVOY_ALLOW_REMOTE_NATS=1 without the flag: %v, want accepted", err)
+	}
+}
+
+// With the flag a loopback client acts as any person it names, so the process may not decide
+// another machine's secrets broker requests as one.
+func TestResolveBootConfigDevSignInRefusesARemoteAgentSecretsBroker(t *testing.T) {
+	broker := func(brokerURL string) map[string]string {
+		return map[string]string{"DISPATCH_AGENT_SECRETS_URL": brokerURL, "DISPATCH_AGENT_SECRETS_TOKEN": "ui-token"}
+	}
+	for _, brokerURL := range []string{"https://broker.example.com", "http://10.0.0.5:13380"} {
+		if _, err := resolveBootConfig(devSignInEnvironment(broker(brokerURL))); err == nil || !strings.Contains(err.Error(), "DISPATCH_AGENT_SECRETS_URL") {
+			t.Errorf("DISPATCH_AGENT_SECRETS_URL=%s: err = %v, want a refusal naming DISPATCH_AGENT_SECRETS_URL", brokerURL, err)
+		}
+	}
+	for _, brokerURL := range []string{"http://127.0.0.1:13380", "http://localhost:13380", "http://[::1]:13380"} {
+		if _, err := resolveBootConfig(devSignInEnvironment(broker(brokerURL))); err != nil {
+			t.Errorf("DISPATCH_AGENT_SECRETS_URL=%s: %v, want a loopback broker accepted", brokerURL, err)
+		}
+	}
+	withoutFlag := broker("https://broker.example.com")
+	withoutFlag["DISPATCH_DEV_SIGNIN"] = ""
+	if _, err := resolveBootConfig(devSignInEnvironment(withoutFlag)); err != nil {
+		t.Errorf("a remote broker without the flag: %v, want accepted", err)
+	}
+}
+
+// With the flag a loopback client acts as any person it names, so the process may not deliver
+// that human's mentions through another machine's Envoy listener.
+func TestResolveBootConfigDevSignInRefusesARemoteEnvoyListener(t *testing.T) {
+	for _, listenerURL := range []string{"https://listener.example.com", "http://10.0.0.5:9020"} {
+		if _, err := resolveBootConfig(devSignInEnvironment(map[string]string{"ENVOY_URL": listenerURL})); err == nil || !strings.Contains(err.Error(), "ENVOY_URL") {
+			t.Errorf("ENVOY_URL=%s: err = %v, want a refusal naming ENVOY_URL", listenerURL, err)
+		}
+	}
+	// Unset, ENVOY_URL defaults to this machine's listener.
+	for _, listenerURL := range []string{"", "http://127.0.0.1:9020", "http://localhost:9020", "http://[::1]:9020"} {
+		if _, err := resolveBootConfig(devSignInEnvironment(map[string]string{"ENVOY_URL": listenerURL})); err != nil {
+			t.Errorf("ENVOY_URL=%q: %v, want a loopback listener accepted", listenerURL, err)
+		}
+	}
+	if _, err := resolveBootConfig(devSignInEnvironment(map[string]string{"ENVOY_URL": "https://listener.example.com", "DISPATCH_DEV_SIGNIN": ""})); err != nil {
+		t.Errorf("a remote listener without the flag: %v, want accepted", err)
+	}
+}
+
+// devSignInOrigin is a dashboard origin the dev sign-in fence accepts.
+const devSignInOrigin = "http://127.0.0.1:8799"
+
+// With the flag a loopback client acts as any person it names, and a person can have the App probe
+// and import any repository it is installed on, so an App private key from the environment may
+// sign calls only to a loopback host.
+func TestDevSignInRefusesAnAppKeyThatReachesGitHub(t *testing.T) {
+	withKey := &auth.AppConfig{ClientID: "Iv1.app", PEM: "app private key"}
+	fromEnv := appCredentialSource{}
+	// Unset, the App calls https://api.github.com.
+	for _, base := range []string{"", "https://api.github.com", "http://10.0.0.5:9022", "http://127.0.0.1@api.github.com"} {
+		err := devSignInLoadedFence(devSignInBoot(t, map[string]string{"DISPATCH_GITHUB_API_BASE": base}), devSignInOrigin, withKey, fromEnv)
+		if err == nil || !strings.Contains(err.Error(), "DISPATCH_GITHUB_API_BASE="+strconv.Quote(base)) || !strings.Contains(err.Error(), "DISPATCH_APP_PEM_B64") {
+			t.Errorf("DISPATCH_GITHUB_API_BASE=%q: err = %v, want a refusal naming DISPATCH_GITHUB_API_BASE and DISPATCH_APP_PEM_B64", base, err)
+		}
+	}
+	// The e2e harness points the App at its fake GitHub on 127.0.0.1 (packages/dispatch/e2e/run-server.sh).
+	for _, base := range []string{"http://127.0.0.1:9022", "http://localhost:9022", "http://[::1]:9022"} {
+		if err := devSignInLoadedFence(devSignInBoot(t, map[string]string{"DISPATCH_GITHUB_API_BASE": base}), devSignInOrigin, withKey, fromEnv); err != nil {
+			t.Errorf("DISPATCH_GITHUB_API_BASE=%s: %v, want a loopback host accepted", base, err)
+		}
+	}
+	// No App, or an App without its private key, signs no App call.
+	for _, app := range []*auth.AppConfig{nil, {ClientID: "Iv1.app"}} {
+		if err := devSignInLoadedFence(devSignInBoot(t, nil), devSignInOrigin, app, fromEnv); err != nil {
+			t.Errorf("App %+v: %v, want accepted", app, err)
+		}
+	}
+	if err := devSignInLoadedFence(devSignInBoot(t, map[string]string{"DISPATCH_DEV_SIGNIN": ""}), devSignInOrigin, withKey, fromEnv); err != nil {
+		t.Errorf("an App key reaching GitHub without the flag: %v, want accepted", err)
+	}
+}
+
+// The dashboard origin comes from envoy.json, which main reads after the environment, so the fence
+// over loaded values checks it, before anything connects.
+func TestDevSignInLoadedFenceRefusesAPublicOrigin(t *testing.T) {
+	const public = "https://dispatch.example.com"
+	if err := devSignInLoadedFence(devSignInBoot(t, nil), public, nil, appCredentialSource{}); err == nil || !strings.Contains(err.Error(), "DISPATCH_SERVER_URL") {
+		t.Errorf("origin %s with the flag: err = %v, want a refusal naming DISPATCH_SERVER_URL", public, err)
+	}
+	if err := devSignInLoadedFence(devSignInBoot(t, map[string]string{"DISPATCH_DEV_SIGNIN": ""}), public, nil, appCredentialSource{}); err != nil {
+		t.Errorf("origin %s without the flag: %v, want accepted", public, err)
+	}
+}
+
+// app.json is where a developer keeps the real App's key, and a loopback base proves only where the
+// port is, not that a fake owns it. So with the flag a key from app.json is refused whatever the
+// base, naming the file and the environment key that replaces it, while a throwaway key in the
+// environment with a loopback fake boots, as packages/dispatch/e2e/run-server.sh's does.
+func TestDevSignInRefusesAnAppJSONKeyWhateverTheBase(t *testing.T) {
+	const fake = "http://127.0.0.1:9022"
+	dataDir := t.TempDir()
+	path := filepath.Join(dataDir, "app.json")
+	if err := os.WriteFile(path, []byte(`{"clientId":"Iv1.file","pem":"app private key"}`), 0o600); err != nil {
+		t.Fatalf("write app.json: %v", err)
+	}
+	app, source, err := loadAppCredentials(envGetter(nil), dataDir)
+	if err != nil || app == nil {
+		t.Fatalf("loadAppCredentials from app.json: %+v, %v", app, err)
+	}
+	for _, base := range []string{fake, "http://localhost:9022", "http://[::1]:9022", "", "https://api.github.com"} {
+		err := devSignInLoadedFence(devSignInBoot(t, map[string]string{"DISPATCH_GITHUB_API_BASE": base}), devSignInOrigin, app, source)
+		if err == nil || !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), "DISPATCH_APP_PEM_B64") {
+			t.Errorf("a key in app.json, DISPATCH_GITHUB_API_BASE=%q: err = %v, want a refusal naming %s and DISPATCH_APP_PEM_B64", base, err, path)
+		}
+	}
+	if err := devSignInLoadedFence(devSignInBoot(t, map[string]string{"DISPATCH_DEV_SIGNIN": ""}), devSignInOrigin, app, source); err != nil {
+		t.Errorf("a key in app.json without the flag: %v, want accepted", err)
+	}
+
+	app, source, err = loadAppCredentials(envGetter(map[string]string{
+		"DISPATCH_APP_CLIENT_ID": "Iv1.env",
+		"DISPATCH_APP_PEM_B64":   base64.StdEncoding.EncodeToString([]byte("throwaway key")),
+	}), dataDir)
+	if err != nil || app == nil {
+		t.Fatalf("loadAppCredentials from the environment: %+v, %v", app, err)
+	}
+	if err := devSignInLoadedFence(devSignInBoot(t, map[string]string{"DISPATCH_GITHUB_API_BASE": fake}), devSignInOrigin, app, source); err != nil {
+		t.Errorf("a key in DISPATCH_APP_PEM_B64 with a loopback fake: %v, want accepted", err)
+	}
+	if err := devSignInLoadedFence(devSignInBoot(t, nil), devSignInOrigin, app, source); err == nil || !strings.Contains(err.Error(), "DISPATCH_APP_PEM_B64") || strings.Contains(err.Error(), path) {
+		t.Errorf("a key in DISPATCH_APP_PEM_B64, DISPATCH_GITHUB_API_BASE unset: err = %v, want a refusal naming DISPATCH_APP_PEM_B64 and not %s", err, path)
+	}
+}
+
+// devSignInBoot resolves devSignInEnvironment(overrides), which the boot fence accepts.
+func devSignInBoot(t *testing.T, overrides map[string]string) bootConfig {
+	t.Helper()
+	boot, err := resolveBootConfig(devSignInEnvironment(overrides))
+	if err != nil {
+		t.Fatalf("resolveBootConfig(%v): %v", overrides, err)
+	}
+	return boot
+}
+
+func TestListenAddressJoinsAnIPv6LoopbackHost(t *testing.T) {
+	for _, tc := range []struct{ host, port, want string }{
+		{host: "::1", port: "", want: "[::1]:8766"},
+		{host: "::1", port: "8799", want: "[::1]:8799"},
+		{host: "[::1]", port: "", want: "[::1]:8766"},
+		{host: "[::1]", port: "8799", want: "[::1]:8799"},
+		{host: "127.0.0.1", port: "8799", want: "127.0.0.1:8799"},
+		{host: "127.0.0.1", port: "", want: "127.0.0.1:8766"},
+		{host: "", port: "", want: ":8766"},
+		{host: "", port: "8799", want: ":8799"},
+	} {
+		got, err := listenAddress(envGetter(map[string]string{"DISPATCH_LISTEN_HOST": tc.host, "DISPATCH_PORT": tc.port}))
+		if err != nil || got != tc.want {
+			t.Errorf("host %q port %q: listenAddress = %q, %v; want %q", tc.host, tc.port, got, err, tc.want)
+		}
+	}
+	for _, port := range []string{"0", "70000"} {
+		if got, err := listenAddress(envGetter(map[string]string{"DISPATCH_LISTEN_HOST": "127.0.0.1", "DISPATCH_PORT": port})); err == nil || !strings.Contains(err.Error(), "DISPATCH_PORT") {
+			t.Errorf("port %q: listenAddress = %q, %v; want a refusal naming DISPATCH_PORT", port, got, err)
 		}
 	}
 }

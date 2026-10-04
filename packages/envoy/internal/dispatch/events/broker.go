@@ -184,6 +184,8 @@ func agentEventSessionID(e model.Event) (string, error) {
 		}
 	case model.MessageDeliveryEventPayload:
 		target = payload.Target
+	case model.MessageAcceptedEventPayload:
+		target = payload.Target
 	case model.UserAgentStateEventPayload:
 		target = "session:" + payload.SessionID
 	}
@@ -255,6 +257,13 @@ func (b *Broker) Notify(e model.Event) bool {
 		// A child status flip or a reparent changes the parent's Children set whoever
 		// the actor is; the parent's watchers always hear about it.
 		return true
+	case "ask.edited":
+		// A version move of an approval request that an earlier version already moved since it was
+		// opened or last handed back changes only the version it names: quiet, as a human's unnamed
+		// version is below.
+		if edit, ok := e.Payload.(model.AskEditEventPayload); ok && edit.Quiet {
+			return false
+		}
 	}
 	if e.Actor.Kind != "user" {
 		return false

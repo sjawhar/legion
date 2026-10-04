@@ -58,12 +58,16 @@ type DispatchMarkNode = {
 
 export const dispatchAskAttr = $markAttr('dispatchAsk', () => ({}));
 
+/** The asks the markdown parser has open, outermost first, per parser state. */
+const openAskSpans = new WeakMap<object, Attrs[]>();
+
 export const dispatchAskSchema = $markSchema('dispatchAsk', (ctx) => ({
   attrs: {
     id: { default: null },
     by: { default: 'unknown' },
   },
   inclusive: false,
+  excludes: '',
   spanning: true,
   parseDOM: [
     {
@@ -86,12 +90,20 @@ export const dispatchAskSchema = $markSchema('dispatchAsk', (ctx) => ({
     runner: (state, node, markType) => {
       const n = node as DispatchMarkNode;
       const attrs = n.attrs || {};
-      state.openMark(markType, {
-        id: attrs.id ?? null,
-        by: attrs.by ?? 'unknown',
-      });
-      state.next((n.children as never[]) || []);
-      state.closeMark(markType);
+      const askAttrs = { id: attrs.id ?? null, by: attrs.by ?? 'unknown' };
+      // Two readers' asks may cover the same text, so their spans nest, but closeMark drops every
+      // open mark of the type: close this span, then re-open the asks around it.
+      const outer = openAskSpans.get(state) ?? [];
+      openAskSpans.set(state, outer);
+      state.openMark(markType, askAttrs);
+      outer.push(askAttrs);
+      try {
+        state.next((n.children as never[]) || []);
+      } finally {
+        outer.pop();
+        state.closeMark(markType);
+        for (const outerAttrs of outer) state.openMark(markType, outerAttrs);
+      }
     },
   },
   toMarkdown: {
@@ -463,13 +475,17 @@ export function createAskMark(view: EditorView, range: MarkRange, by: string): A
   return { id, from: range.from, to: range.to };
 }
 
-function collectAskMarkRanges(doc: ProseMirrorNode, markId: string): MarkRange[] {
-  const ranges: MarkRange[] = [];
+interface AskMarkSpan extends MarkRange {
+  mark: ProseMirrorMark;
+}
+
+function collectAskMarkRanges(doc: ProseMirrorNode, markId: string): AskMarkSpan[] {
+  const ranges: AskMarkSpan[] = [];
   doc.descendants((node, pos) => {
     if (!node.isText) return true;
     for (const mark of node.marks as ProseMirrorMark[]) {
       if (mark.type.name === 'dispatchAsk' && mark.attrs.id === markId) {
-        ranges.push({ from: pos, to: pos + node.nodeSize });
+        ranges.push({ from: pos, to: pos + node.nodeSize, mark });
       }
     }
     return true;
@@ -484,18 +500,16 @@ export function findAskMarkRange(doc: ProseMirrorNode, markId: string): MarkRang
   return { from: ranges[0].from, to: ranges[ranges.length - 1].to };
 }
 
-/** Removes every span of a dispatchAsk mark id. Returns false if none were found. */
+/** Removes every span of a dispatchAsk mark id, and only that mark: another ask may cover the same
+ *  text (the schema's `excludes: ''`), which a removal by type would take with it. Returns false if
+ *  none were found. */
 export function removeAskMark(view: EditorView, markId: string): boolean {
   const { state } = view;
-  const markType = state.schema.marks.dispatchAsk;
-  if (!markType) return false;
-
   const ranges = collectAskMarkRanges(state.doc, markId);
   if (ranges.length === 0) return false;
-
   let tr = state.tr;
-  for (const range of ranges.slice().reverse()) {
-    tr = tr.removeMark(range.from, range.to, markType);
+  for (const { from, to, mark } of ranges) {
+    tr = tr.removeMark(from, to, mark);
   }
   view.dispatch(tr);
   return true;

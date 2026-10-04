@@ -9,11 +9,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"mime/multipart"
+	"maps"
 	"net/http"
 	"net/http/httptest"
-	"net/textproto"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -23,6 +23,7 @@ import (
 	"github.com/reearth/ygo/persistence"
 
 	"github.com/sjawhar/envoy/internal/dispatch/agentstream"
+	"github.com/sjawhar/envoy/internal/dispatch/api/apitest"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
@@ -34,6 +35,16 @@ import (
 )
 
 func TestMain(m *testing.M) { os.Exit(storetest.Main(m)) }
+
+// sharedAgentTokens is a DISPATCH_AGENT_TOKEN setting parsed as the server parses it at boot.
+func sharedAgentTokens(t testing.TB, setting string) *auth.SharedAgentTokens {
+	t.Helper()
+	tokens, err := auth.ParseSharedAgentTokens(setting)
+	if err != nil {
+		t.Fatalf("ParseSharedAgentTokens(%q): %v", setting, err)
+	}
+	return tokens
+}
 
 // testServerOptions configure the server an API test drives.
 type testServerOptions struct {
@@ -58,11 +69,29 @@ type testServerOptions struct {
 	// envoyTimeout shortens that client's window, so a test can exercise a receipt timeout
 	// without holding a stand-in listener for the production five seconds.
 	envoyTimeout time.Duration
+	// persistence is an optional document-store seam for API handlers that need the document
+	// service to observe a persistence boundary condition.
+	persistence func(*store.Store) docs.VersionedStore
 	// agentStream is the live agent conversation relay; nil is the deployment with no NATS,
 	// where the viewer route answers 503.
 	agentStream agentstream.Source
 }
 
+// headerIdentity is the test header identity that records each named person in the database.
+func headerIdentity(database *store.Store) identity.HeaderIdentity {
+	return identity.HeaderIdentity{Header: "X-Dispatch-User", People: store.NewPgPeopleStore(database.Pool, "signing-key", nil)}
+}
+
+// seedPeople records emails as people who have signed in: the assignee picker's options.
+func seedPeople(t *testing.T, database *store.Store, emails ...string) {
+	t.Helper()
+	people := store.NewPgPeopleStore(database.Pool, "signing-key", nil)
+	for _, email := range emails {
+		if err := people.Record(context.Background(), email); err != nil {
+			t.Fatalf("seed person %q: %v", email, err)
+		}
+	}
+}
 func newTestHandler(t *testing.T) http.Handler {
 	t.Helper()
 	handler, _, _ := newTestServer(t, testServerOptions{})
@@ -99,19 +128,21 @@ func newTestServer(t *testing.T, options testServerOptions) (http.Handler, *stor
 	}
 	database := storetest.Open(t)
 	broker := events.NewBroker()
-	documentService := docs.New(docs.Deps{Store: database, Events: broker, ServerURL: "https://dispatch.example", Settle: settle})
+	var documentPersistence docs.VersionedStore
+	if options.persistence != nil {
+		documentPersistence = options.persistence(database)
+	}
+	documentService := docs.New(docs.Deps{Store: database, Persistence: documentPersistence, Events: broker, ServerURL: "https://dispatch.example", Settle: settle})
 	t.Cleanup(func() {
 		if err := documentService.Shutdown(context.Background()); err != nil {
 			t.Errorf("shutdown document service: %v", err)
 		}
 	})
-	allowed := map[string]struct{}{"alice": {}, "bob": {}}
+	seedPeople(t, database, "alice", "bob")
 	deps, err := NewDeps(DepsInput{
 		Store:            database,
-		Identity:         identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: allowed},
-		AllowedLogins:    allowed,
-		AgentToken:       "agent-token",
-		RepoProjectsRaw:  "owner/repo=TEST",
+		Identity:         headerIdentity(database),
+		AgentTokens:      sharedAgentTokens(t, "agent-token"),
 		DefaultProject:   options.defaultProject,
 		ServerURL:        "https://dispatch.example",
 		Docs:             documentService,
@@ -222,30 +253,12 @@ func dispatchRequest(t *testing.T, handler http.Handler, method, target string, 
 
 func multipartRequest(t *testing.T, handler http.Handler, target string, fields map[string]string, filename, contentType string, content []byte, login string) *httptest.ResponseRecorder {
 	t.Helper()
-	var body bytes.Buffer
-	writer := multipart.NewWriter(&body)
-	for key, value := range fields {
-		if err := writer.WriteField(key, value); err != nil {
-			t.Fatalf("write multipart field: %v", err)
-		}
-	}
-	header := textproto.MIMEHeader{}
-	header.Set("Content-Disposition", `form-data; name="file"; filename="`+filename+`"`)
-	if contentType != "" {
-		header.Set("Content-Type", contentType)
-	}
-	part, err := writer.CreatePart(header)
+	body, bodyType, err := apitest.MultipartUpload(fields, filename, contentType, content)
 	if err != nil {
-		t.Fatalf("create multipart file part: %v", err)
+		t.Fatal(err)
 	}
-	if _, err := part.Write(content); err != nil {
-		t.Fatalf("write multipart file: %v", err)
-	}
-	if err := writer.Close(); err != nil {
-		t.Fatalf("finish multipart request: %v", err)
-	}
-	request := httptest.NewRequest(http.MethodPost, target, &body)
-	request.Header.Set("Content-Type", writer.FormDataContentType())
+	request := httptest.NewRequest(http.MethodPost, target, body)
+	request.Header.Set("Content-Type", bodyType)
 	if login != "" {
 		request.Header.Set("X-Dispatch-User", login)
 	}
@@ -254,10 +267,63 @@ func multipartRequest(t *testing.T, handler http.Handler, target string, fields 
 	return response
 }
 
+// databaseFingerprint hashes every row of every table, so a test can tell a request wrote nothing
+// anywhere: no row inserted, updated or deleted.
+func databaseFingerprint(t *testing.T, database *store.Store) map[string]string {
+	t.Helper()
+	ctx := context.Background()
+	rows, err := database.Pool.Query(ctx, `select tablename from pg_tables where schemaname = 'public'`)
+	if err != nil {
+		t.Fatalf("list tables: %v", err)
+	}
+	tables, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		t.Fatalf("read table names: %v", err)
+	}
+	if len(tables) == 0 {
+		t.Fatal("the schema has no tables; a fingerprint of it proves nothing")
+	}
+	fingerprint := make(map[string]string, len(tables))
+	for _, table := range tables {
+		var digest string
+		if err := database.Pool.QueryRow(ctx, fmt.Sprintf(
+			`select count(*) || ':' || coalesce(md5(string_agg(t::text, ',' order by t::text)), '') from %s t`,
+			pgx.Identifier{table}.Sanitize(),
+		)).Scan(&digest); err != nil {
+			t.Fatalf("fingerprint %s: %v", table, err)
+		}
+		fingerprint[table] = digest
+	}
+	return fingerprint
+}
+
+// assertUnchanged fails for each table whose rows differ between two fingerprints of one database.
+func assertUnchanged(t *testing.T, request string, before, after map[string]string) {
+	t.Helper()
+	for _, table := range slices.Sorted(maps.Keys(after)) {
+		if before[table] != after[table] {
+			t.Errorf("%s changed table %s", request, table)
+		}
+	}
+}
+
+// assertRefusal checks an answer is 400 with code and an error naming field first.
+func assertRefusal(t *testing.T, request string, status int, body []byte, code, field string) {
+	t.Helper()
+	var refusal struct {
+		Code  string `json:"code"`
+		Error string `json:"error"`
+	}
+	_ = json.Unmarshal(body, &refusal)
+	if status != http.StatusBadRequest || refusal.Code != code || !strings.HasPrefix(refusal.Error, field+" holds a ") {
+		t.Errorf("%s = %d %s %q, want 400 %s naming %s", request, status, refusal.Code, refusal.Error, code, field)
+	}
+}
+
 func decodeBody[T any](t *testing.T, response *httptest.ResponseRecorder) T {
 	t.Helper()
 	var value T
-	if err := json.NewDecoder(response.Body).Decode(&value); err != nil {
+	if err := json.Unmarshal(response.Body.Bytes(), &value); err != nil {
 		t.Fatalf("decode response body %q: %v", response.Body.String(), err)
 	}
 	return value
@@ -377,13 +443,11 @@ func TestDocumentTextReportsUnavailableService(t *testing.T) {
 		Events:      broker,
 	})
 	t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
-	allowed := map[string]struct{}{"alice": {}}
 	deps, err := NewDeps(DepsInput{
-		Store:         database,
-		Identity:      identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: allowed},
-		AllowedLogins: allowed,
-		Docs:          documentService,
-		Events:        broker,
+		Store:    database,
+		Identity: headerIdentity(database),
+		Docs:     documentService,
+		Events:   broker,
 	})
 	if err != nil {
 		t.Fatalf("new API dependencies: %v", err)
@@ -1706,28 +1770,27 @@ func TestIssueDocumentCreationIndexesDispatchReferences(t *testing.T) {
 
 func TestRevokedCookieIsRejectedAcrossDispatchSurfaces(t *testing.T) {
 	database := storetest.Open(t)
-	allowed := map[string]struct{}{"alice": {}}
 	sessions := store.NewPgSessionStore(database.Pool)
-	cookieIdentity := identity.CookieIdentity{SigningKey: "signing-key", AllowedLogins: allowed, Sessions: sessions}
+	cookieIdentity := identity.CookieIdentity{SigningKey: "signing-key", Sessions: sessions}
 	broker := events.NewBroker()
 	documentService := docs.New(docs.Deps{
 		Store: database, Events: broker, Identity: cookieIdentity, Settle: time.Hour,
 	})
 	t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
 	deps, err := NewDeps(DepsInput{
-		Store: database, Identity: cookieIdentity, AllowedLogins: allowed, AgentToken: "agent-token",
-		RepoProjectsRaw: "owner/repo=TEST", Docs: documentService, Events: broker,
+		Store: database, Identity: cookieIdentity, AgentTokens: sharedAgentTokens(t, "agent-token"),
+		Docs: documentService, Events: broker,
 	})
 	if err != nil {
 		t.Fatalf("new API dependencies: %v", err)
 	}
 	handler := http.NewServeMux()
 	Register(handler, deps)
-	generation, err := sessions.EnsureSession(context.Background(), "alice")
+	generation, err := sessions.EnsureSession(context.Background(), "alice@d.example")
 	if err != nil {
 		t.Fatalf("establish alice's session: %v", err)
 	}
-	cookie, err := http.ParseSetCookie(auth.IssueSessionCookie("alice", generation, "signing-key"))
+	cookie, err := http.ParseSetCookie(auth.IssueSessionCookie("alice@d.example", generation, "signing-key", true))
 	if err != nil {
 		t.Fatalf("parse session cookie: %v", err)
 	}
@@ -1764,10 +1827,12 @@ func TestRevokedCookieIsRejectedAcrossDispatchSurfaces(t *testing.T) {
 		PrimaryArtifactID string `json:"primary_artifact_id"`
 	}](t, created)
 
-	delete(allowed, "alice")
+	if err := sessions.RevokeSessions(context.Background(), "alice@d.example"); err != nil {
+		t.Fatalf("revoke alice's sessions: %v", err)
+	}
 	for _, target := range []string{"/api/v1/issues/" + issue.Key, "/api/v1/events"} {
 		response := request(http.MethodGet, target, nil)
-		if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), `"code":"LOGIN_NOT_ALLOWED"`) {
+		if response.Code != http.StatusUnauthorized || !strings.Contains(response.Body.String(), `"code":"NO_IDENTITY"`) {
 			t.Fatalf("revoked cookie %s: status=%d body=%s", target, response.Code, response.Body.String())
 		}
 	}
@@ -1854,8 +1919,8 @@ func TestSSEPagesThroughCappedBacklogWithoutDisconnecting(t *testing.T) {
 	scanner := bufio.NewScanner(stream.Body)
 	// The 1005 seeded events plus the issue creation exceed one capped page
 	// (maxSSEReplay=1000); a single connection pages through all of them without
-	// ever disconnecting — a capped page used to end the stream and force a client
-	// reconnect, which left a gap where a low id committing between "read this page"
+	// ever disconnecting: a capped page that ended the stream and forced a client
+	// reconnect would leave a gap where a low id committing between "read this page"
 	// and "a new connection subscribes" could be lost forever.
 	for wantID := 2; wantID <= 1007; wantID++ {
 		frame := readSSEFrame(t, scanner)
@@ -1990,16 +2055,14 @@ func newTestHandlerWithBroker(t *testing.T) (http.Handler, *store.Store, *events
 			t.Errorf("shutdown document service: %v", err)
 		}
 	})
-	allowed := map[string]struct{}{"alice": {}, "bob": {}}
+	seedPeople(t, database, "alice", "bob")
 	deps, err := NewDeps(DepsInput{
-		Store:           database,
-		Identity:        identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: allowed},
-		AllowedLogins:   allowed,
-		AgentToken:      "agent-token",
-		RepoProjectsRaw: "owner/repo=TEST",
-		ServerURL:       "https://dispatch.example",
-		Docs:            documentService,
-		Events:          broker,
+		Store:       database,
+		Identity:    headerIdentity(database),
+		AgentTokens: sharedAgentTokens(t, "agent-token"),
+		ServerURL:   "https://dispatch.example",
+		Docs:        documentService,
+		Events:      broker,
 	})
 	if err != nil {
 		t.Fatalf("new API dependencies: %v", err)
@@ -2218,11 +2281,11 @@ func TestSSELiveEventBelowSinceIsNotDropped(t *testing.T) {
 	}
 }
 
-// TestSSECappedCatchupStillDeliversLowerIDCommittedDuringPaging proves the fix for
-// the recurrence: a capped catch-up page used to end the stream (forcing a client
-// reconnect with a higher Last-Event-ID), which meant a still-uncommitted low id —
-// invisible to every catch-up page, since each page's cursor only moves forward —
-// could never be recovered once it finally committed. Keeping one subscription
+// TestSSECappedCatchupStillDeliversLowerIDCommittedDuringPaging: a capped catch-up
+// page that ended the stream (forcing a client reconnect with a higher
+// Last-Event-ID) would mean a still-uncommitted low id — invisible to every
+// catch-up page, since each page's cursor only moves forward — could never be
+// recovered once it finally committed. Keeping one subscription
 // attached across every page closes that gap.
 func TestSSECappedCatchupStillDeliversLowerIDCommittedDuringPaging(t *testing.T) {
 	handler, database, broker := newTestHandlerWithBroker(t)
@@ -2308,10 +2371,9 @@ func TestSSECappedCatchupStillDeliversLowerIDCommittedDuringPaging(t *testing.T)
 	}
 }
 
-// TestSSEColdStartSubscribesBeforeReadingHeadSoLateCommitIsNotLost proves the fix
-// for the cold-start event-loss recurrence: the client used to make two separate
-// requests (GET /events/head, then GET /events?since=<head>), so a transaction
-// that grabbed a lower id before the head was read could commit in the gap
+// TestSSEColdStartSubscribesBeforeReadingHeadSoLateCommitIsNotLost: a client making
+// two separate requests (GET /events/head, then GET /events?since=<head>) would let a
+// transaction that grabbed a lower id before the head was read commit in the gap
 // between those two requests and never be delivered — invisible to a catch-up
 // query (its id is <= since) and to the subscription (registered only by the
 // second request, after the gap). A cold request (no since=, no Last-Event-ID)

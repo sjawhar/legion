@@ -68,7 +68,7 @@ const requiredArguments: Record<string, readonly string[]> = {
   dispatch_issue: ["project", "title"],
   dispatch_ask: ["question"],
   // …
-  dispatch_request_approval: [],
+  dispatch_request_approval: ["summary"],
   dispatch_open_asks: [],
 };
 

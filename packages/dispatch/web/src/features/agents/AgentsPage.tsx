@@ -1,16 +1,15 @@
-import { DELIVERY_CAPABILITIES, MAX_BROADCAST_RECIPIENTS } from "@legion/contracts";
+import { DELIVERY_CAPABILITIES } from "@legion/contracts";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   type ReactNode,
   useCallback,
-  useEffect,
   useId,
   useLayoutEffect,
   useMemo,
   useRef,
   useState,
 } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link } from "react-router-dom";
 
 import { api } from "../../api/client";
 import { agentMessagesQuery, inboxQuery, userAgentStateQuery } from "../../api/queries";
@@ -27,7 +26,10 @@ import { EmptyState } from "../../components/EmptyState";
 import { LoadingSkeleton } from "../../components/LoadingSkeleton";
 import { LabelPill } from "../../components/Pill";
 import { PinButton } from "../../components/PinButton";
+import { RefusableButton } from "../../components/RefusableButton";
 import { TruncatedText } from "../../components/TruncatedText";
+import { useSending } from "../../hooks/useSending";
+import { compareTimestamps } from "../../lib/timestamps";
 import {
   borderDefault,
   card,
@@ -41,9 +43,6 @@ import {
   linkText,
   liveDotBg,
   offlineDotBg,
-  primaryButtonBg,
-  primaryButtonDisabled,
-  primaryButtonEnabledHoverBg,
   secondaryButtonBorder,
   secondaryButtonHoverBorder,
   secondaryButtonText,
@@ -53,8 +52,9 @@ import {
   textSecondaryOnCanvas,
 } from "../../theme/classes";
 import { resolveAuthor } from "../conversation/authors";
-import type { CarriedDraft } from "../conversation/MentionComposer";
-import { MentionComposer, type ReplyTarget } from "../conversation/MentionComposer";
+import type { ReplyTarget } from "../conversation/composer-model";
+import { capabilityLabel, MODE_LABELS } from "../conversation/delivery";
+import { useHeldSends } from "../conversation/held-sends";
 import { firstLine, replyQuoteText } from "../conversation/ReplyQuote";
 import { ReplyTurn, ThreadReplies } from "../conversation/ReplyTurn";
 import { capabilitiesForTarget, TargetedMessageCard } from "../conversation/TargetedMessageCard";
@@ -64,22 +64,22 @@ import { sessionLabel } from "../refs/actor";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { buildInboxPath, buildIssuePath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
+import { closestMatching, focusOnDocument } from "../shell/roving";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { useUserPreference } from "../shell/userPreference";
+import { AgentMessageComposer, type AgentReply, agentSendKey } from "./AgentMessageComposer";
 import { deliveryAttempts } from "./attempts";
+import { type BroadcastSend, BroadcastSends, useBroadcastQueue } from "./BroadcastSends";
+import { useBroadcastComposition } from "./broadcast-composition";
+import { broadcastSendState, type ComposedBroadcast, composedBroadcast } from "./broadcast-plan";
 import { EndedAgentsWithReplies } from "./EndedAgentsWithReplies";
-import {
-  AGENT_ROW_SELECTOR,
-  ISSUE_PICKER_SELECTOR,
-  leaveAgentComposer,
-  useAgentsKeymap,
-} from "./keyboard";
+import { AGENT_ROW_SELECTOR, foldToggleOf, leaveAgentComposer, useAgentsKeymap } from "./keyboard";
 import { foldLabel, matchingSelection, selectionSummary, toggleMatching } from "./selection";
 import { storeAgentState, unreadRepliesLabel, useMarkRepliesRead, useUnreadAtOpen } from "./unread";
 
 const INACTIVE_AFTER_MS = 10 * 60_000;
 
-/** The composer's one notice slot: the recipient limit, a refused send or the exclusions, one at
+/** The composer's one notice slot: the recipient limit or the exclusions, one at
  *  a time. In the compact grid it is one line that scrolls sideways like the chips: between the
  *  mode and Send on a narrow screen, adding no height, and the third and last row on a short one. */
 const composerLine = `mt-2 text-sm narrow-or-short:order-2 narrow-or-short:col-start-2 narrow-or-short:mt-0 narrow-or-short:min-w-0 narrow-or-short:overflow-x-auto narrow-or-short:text-xs narrow-or-short:whitespace-nowrap short:order-3 short:col-span-4 short:col-start-1 ${dangerText}`;
@@ -142,8 +142,9 @@ export function orderAgents(
     if (left.last_activity === null || right.last_activity === null) {
       if (left.last_activity === null && right.last_activity !== null) return 1;
       if (left.last_activity !== null && right.last_activity === null) return -1;
-    } else if (left.last_activity !== right.last_activity) {
-      return right.last_activity.localeCompare(left.last_activity);
+    } else {
+      const byActivity = compareTimestamps(right.last_activity, left.last_activity);
+      if (byActivity !== 0) return byActivity;
     }
     return left.title.localeCompare(right.title) || left.session_id.localeCompare(right.session_id);
   });
@@ -178,19 +179,12 @@ export function partitionAgents(
   };
 }
 
-/** A reply the agent composer answers: the quoted message and the conversation it belongs to
- *  (an issue, or none), which decides the route the reply is created through. */
-interface AgentReply {
-  readonly issueKey: string | null;
-  readonly target: ReplyTarget;
-}
-
 /** The delivery a reply into this exchange inherits: the agent, in the mode of the exchange's
  *  most recent attempt across the root and every delivered reply. */
 function exchangeDelivery(agent: Agent, read: MessageRead): NonNullable<ReplyTarget["thread"]> {
   let last: MessageDelivery | undefined;
   for (const attempt of [read.message, ...read.replies].flatMap((item) => item.deliveries)) {
-    if (last === undefined || Date.parse(attempt.created_at) >= Date.parse(last.created_at)) {
+    if (last === undefined || compareTimestamps(attempt.created_at, last.created_at) >= 0) {
       last = attempt;
     }
   }
@@ -227,6 +221,7 @@ function AgentExchangeReply({
   onReply,
   read,
   reply,
+  replyDisabled,
   titles,
 }: {
   agent: Agent;
@@ -234,6 +229,7 @@ function AgentExchangeReply({
   onReply: (reply: AgentReply) => void;
   read: MessageRead;
   reply: Message;
+  replyDisabled: boolean;
   titles: ReadonlyMap<string, string>;
 }): ReactNode {
   const queryClient = useQueryClient();
@@ -250,6 +246,7 @@ function AgentExchangeReply({
   const answer = read.replies.find(
     (candidate) => candidate.in_reply_to === reply.id && candidate.author.kind === "session"
   );
+  const capabilities = capabilitiesForTarget(read.message.target, liveAgents);
   return (
     <ReplyTurn
       at={reply.created_at}
@@ -267,14 +264,9 @@ function AgentExchangeReply({
                 answer === undefined ? undefined : resolveAuthor(answer.author, titles).label,
               attempts: deliveryAttempts(reply.deliveries, label),
               retry: {
-                canAside:
-                  capabilitiesForTarget(read.message.target, liveAgents)?.includes("aside") !==
-                  false,
-                canBtw:
-                  capabilitiesForTarget(read.message.target, liveAgents)?.includes("btw") !== false,
-                canSteer:
-                  capabilitiesForTarget(read.message.target, liveAgents)?.includes("steer") !==
-                  false,
+                canAside: capabilities?.includes("aside") !== false,
+                canBtw: capabilities?.includes("btw") !== false,
+                canSteer: capabilities?.includes("steer") !== false,
                 onRetry: retry.mutate,
                 retrying: retry.isPending,
               },
@@ -297,6 +289,7 @@ function AgentExchangeReply({
                   }),
             }
       }
+      replyDisabled={replyDisabled}
       turnID={`message:${reply.id}`}
     />
   );
@@ -307,11 +300,13 @@ function AgentTargetedMessage({
   liveAgents,
   onReply,
   read,
+  replyDisabled,
 }: {
   agent: Agent;
   liveAgents: readonly Agent[];
   onReply: (reply: AgentReply) => void;
   read: MessageRead;
+  replyDisabled: boolean;
 }): ReactNode {
   const queryClient = useQueryClient();
   const retry = useMutation({
@@ -351,6 +346,7 @@ function AgentTargetedMessage({
       isClosed={false}
       onReply={() => onReply(agentReplyTo(agent, read, read.message, asker.label))}
       onRetry={retry.mutate}
+      replyDisabled={replyDisabled}
       retrying={retry.isPending}
       targetName={label}
       thread={
@@ -364,6 +360,7 @@ function AgentTargetedMessage({
                 onReply={onReply}
                 read={read}
                 reply={reply}
+                replyDisabled={replyDisabled}
                 titles={titles}
               />
             ))}
@@ -390,18 +387,24 @@ function exchangesAfter(
   clearedBefore: string | undefined
 ): readonly MessageRead[] {
   if (clearedBefore === undefined) return exchanges;
-  const cutoff = Date.parse(clearedBefore);
-  return exchanges.filter((read) => Date.parse(exchangeActivityAt(read)) > cutoff);
+  return exchanges.filter((read) => compareTimestamps(exchangeActivityAt(read), clearedBefore) > 0);
 }
 
 function AgentMessageList({
   agent,
   liveAgents,
   onReply,
+  open,
+  replyDisabled,
 }: {
   agent: Agent;
   liveAgents: readonly Agent[];
   onReply: (reply: AgentReply) => void;
+  /** Whether the row is open. Its list stays mounted while it is collapsed, and marks nothing read
+   *  there: a reply is read once it is on screen. */
+  open: boolean;
+  /** Holds every Reply while the row's send is in flight, as the picker is held. */
+  replyDisabled: boolean;
 }): ReactNode {
   const queryClient = useQueryClient();
   const messages = useQuery(agentMessagesQuery(agent.session_id));
@@ -417,14 +420,14 @@ function AgentMessageList({
   // opened is shown, not left behind "Show N older". The watermark stays where it was while the
   // row is open, so marking those replies read does not fold them away from the viewer reading
   // them.
-  const unreadAtOpen = useUnreadAtOpen(messages.data);
+  const unreadAtOpen = useUnreadAtOpen(messages.data, open);
   const olderShown = older.filter((read) => unreadAtOpen?.has(read.message.id) === true);
   const olderFolded = older.filter((read) => !olderShown.includes(read));
   const rendered =
     newest === undefined ? [] : [newest, ...olderShown, ...(showOlder ? olderFolded : [])];
   useMarkRepliesRead(
     agent.session_id,
-    messages.isPending || agentState.isPending ? undefined : rendered
+    !open || messages.isPending || agentState.isPending ? undefined : rendered
   );
   // The cutoff is the newest visible message's own timestamp, not the browser clock: both are
   // compared against `created_at` (the server's clock), so a slow browser clock would otherwise
@@ -449,6 +452,7 @@ function AgentMessageList({
       liveAgents={liveAgents}
       onReply={onReply}
       read={read}
+      replyDisabled={replyDisabled}
     />
   );
   return (
@@ -494,7 +498,7 @@ function AgentMessageList({
               clear.mutate(
                 visible
                   .map(exchangeActivityAt)
-                  .reduce((latest, at) => (Date.parse(at) > Date.parse(latest) ? at : latest))
+                  .reduce((latest, at) => (compareTimestamps(at, latest) > 0 ? at : latest))
               )
             }
             type="button"
@@ -503,260 +507,6 @@ function AgentMessageList({
           </button>
         )}
       </div>
-    </div>
-  );
-}
-
-function AgentMessageComposer({
-  agent,
-  onCancelReply,
-  onClose,
-  replyTo,
-}: {
-  agent: Agent;
-  onCancelReply: () => void;
-  /** One level out of the composer: the row it belongs to takes focus. The composer calls it on
-   *  Escape from an untouched draft and on Discard - and also right after a successful send,
-   *  which is NOT one level out; that case is filtered below. */
-  onClose: () => void;
-  replyTo: AgentReply | null;
-}): ReactNode {
-  const queryClient = useQueryClient();
-  const [issueKey, setIssueKey] = useState("");
-  const [issuePickerOpen, setIssuePickerOpen] = useState(false);
-  // `MentionComposer` calls `onSent` and then `onClose` on a successful send (its save's
-  // `onSuccess`), and a reader who has just sent a message is still writing to this agent: moving
-  // focus to the row would turn their next letters into `x` / `i` / `Shift+P` shortcuts. The flag
-  // is set on the way past `onSent` and consumed by the `onClose` that follows it.
-  const sentJustNow = useRef(false);
-  const box = useRef<HTMLDivElement>(null);
-  // `MentionComposer` disables its textarea while a send is in flight (`disabled={save.isPending}`),
-  // and a disabled field hands focus back to the document. The reader is still writing to this
-  // agent, so focus returns the moment React re-enables the field - watched, rather than guessed
-  // at with a frame or a timer, because the write's latency is the server's.
-  const refocusWatcher = useRef<MutationObserver | null>(null);
-  useEffect(() => () => refocusWatcher.current?.disconnect(), []);
-  /** Only the focus the disable took is the composer's to give back: through the whole round trip
-   *  it sits on the document, so a reader who has clicked something else in the meantime keeps
-   *  where they went - otherwise the next keys, `Ctrl+Enter` included, would land in the composer
-   *  they have already sent from, addressed to another agent. */
-  const refocusComposer = () => {
-    const field = box.current?.querySelector("textarea");
-    if (field === null || field === undefined) return;
-    const takeBack = () => {
-      const active = document.activeElement;
-      if (active === null || active === document.body) field.focus();
-    };
-    refocusWatcher.current?.disconnect();
-    if (!field.disabled) {
-      takeBack();
-      return;
-    }
-    const watcher = new MutationObserver(() => {
-      if (field.disabled) return;
-      watcher.disconnect();
-      takeBack();
-    });
-    watcher.observe(field, { attributeFilter: ["disabled"] });
-    refocusWatcher.current = watcher;
-  };
-  /** The draft as the composer last held it - body and accepted mentions together - so a pick
-   *  that remounts it to change the message's owner hands the reader's work to the new
-   *  instance rather than dropping it. Opaque here: it is handed back as it was given. */
-  const carried = useRef<CarriedDraft | undefined>(undefined);
-  const keepCarry = useCallback((draft: CarriedDraft) => {
-    carried.current = draft;
-  }, []);
-  /** What the picker's selection reads while it is open, which is the reader's until they commit
-   *  it: the select's own keys move it, `Enter`, or a pick made with the pointer or in the native
-   *  popup, takes it, and leaving the select without committing puts it back on `issueKey`. */
-  const [pendingIssue, setPendingIssue] = useState(issueKey);
-  /** Whether the change arriving now is a key on the select stepping its selection, which only
-   *  moves it: `Enter` is the pick. The test is the task the change arrives in, not the key.
-   *  Chromium, Firefox and WebKit all step a closed select from the key event's own default
-   *  action - the arrows, `Home`/`End` and the page keys from `keydown`, type-ahead from
-   *  `keypress` - and dispatch `change` in that same task. A key that opens the native popup
-   *  instead (the arrows on macOS; `Alt+ArrowDown` in Chromium and Firefox on Linux) steps
-   *  nothing, and the pick then made in the popup arrives in a later task, as a pointer's does:
-   *  that is a pick made, and it commits at once. So each key on the select marks the flag and
-   *  the next task clears it. */
-  const movedByKeyboard = useRef(false);
-  const markKeyStep = () => {
-    movedByKeyboard.current = true;
-    setTimeout(() => {
-      movedByKeyboard.current = false;
-    }, 0);
-  };
-  /** Bumped by every commit, the issue changed or not, since every commit unmounts the select the
-   *  reader is in. The hand-off keys on it rather than on `issueKey`, which re-confirming the
-   *  issue already held leaves alone. */
-  const [commits, setCommits] = useState(0);
-  const commitIssue = (value: string) => {
-    setIssueKey(value);
-    setIssuePickerOpen(false);
-    setCommits((count) => count + 1);
-  };
-  // A layout effect, so the frame the commit paints already has the field focused rather than
-  // the document: the reader's next keystroke is the message, whichever hand made the pick. When
-  // the pick changes the channel the composer remounts in that same commit, and the field this
-  // finds is the new instance's.
-  useLayoutEffect(() => {
-    if (commits === 0) return;
-    box.current?.querySelector("textarea")?.focus();
-  }, [commits]);
-  const issues = useQuery({
-    enabled: issuePickerOpen,
-    queryFn: () => api.listIssues({ open: true }),
-    queryKey: ["agents", "issue-picker"],
-  });
-  // The picker exists to be used, so opening it hands over the control inside it - the same
-  // move `MultiSelect` makes with its search box. It is what `i` needs (a key that opened
-  // something no keystroke could then reach would be a dead end) and what a pointer wants too,
-  // and it waits for the list rather than a frame, since the select renders only once the read
-  // lands.
-  //
-  // That wait is the whole latency of `GET /issues`, and a reader who has roved on in the
-  // meantime keeps where they went - `takeBack`'s rule above, widened to the row this composer
-  // belongs to: focus is the picker's to take only while it is still where the open left it.
-  // Once per open, so a refetch behind the reader never pulls them back either.
-  const issueSelect = useRef<HTMLSelectElement>(null);
-  const pickerTookFocus = useRef(false);
-  useEffect(() => {
-    if (!issuePickerOpen) return;
-    setPendingIssue(issueKey);
-  }, [issueKey, issuePickerOpen]);
-  useEffect(() => {
-    if (!issuePickerOpen) {
-      pickerTookFocus.current = false;
-      return;
-    }
-    // The list is the dependency that matters: the select renders only once it lands.
-    if (issues.data === undefined || pickerTookFocus.current || issueSelect.current === null) {
-      return;
-    }
-    // Where the open can have left focus, named: the row `i` was pressed on, the toggle a
-    // pointer clicked, or nothing at all. A reader who has gone on - to another row, or into
-    // this composer's own field - keeps where they went.
-    const active = document.activeElement;
-    const openedOn =
-      active === null ||
-      active === document.body ||
-      active === box.current?.closest(AGENT_ROW_SELECTOR) ||
-      (active instanceof Element && active.matches(ISSUE_PICKER_SELECTOR));
-    if (!openedOn) return;
-    pickerTookFocus.current = true;
-    issueSelect.current.focus();
-  }, [issuePickerOpen, issues.data]);
-  // Replies retain their parent owner: issue-attached legacy messages stay on that issue's
-  // message route, while issue-less roots keep the S3-deferred direct session channel.
-  const replyIssueKey = replyTo?.issueKey;
-  const useDirectChannel =
-    replyIssueKey === null || (replyIssueKey === undefined && issueKey === "");
-  const composerOwner = useDirectChannel
-    ? { kind: "session" as const, sessionId: agent.session_id }
-    : { issueKey: replyIssueKey ?? issueKey, kind: "issue" as const };
-
-  return (
-    <div className={`mt-3 border-t pt-3 ${borderDefault}`} ref={box}>
-      {replyTo === null ? (
-        <button
-          aria-expanded={issuePickerOpen}
-          aria-label="Choose issue"
-          className={`min-h-11 rounded-lg border px-3 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
-          data-agent-issue-picker=""
-          onClick={() => setIssuePickerOpen((open) => !open)}
-          type="button"
-        >
-          Issue: {issueKey === "" ? "No issue" : issueKey}
-        </button>
-      ) : null}
-      {issuePickerOpen && replyTo === null ? (
-        <div className="mt-2">
-          {issues.isPending ? (
-            <p className={`text-sm ${textMutedOnCanvas}`}>Loading issues…</p>
-          ) : null}
-          {issues.isError ? (
-            <p className={`text-sm ${dangerText}`}>Could not load issues.</p>
-          ) : null}
-          {issues.data === undefined ? null : (
-            <label className={`block text-sm font-medium ${textSecondaryOnCanvas}`}>
-              Issue (optional)
-              <select
-                aria-label="Issue"
-                className={`mt-1 block min-h-11 w-full rounded-lg px-3 py-2 text-sm font-normal ${inputClasses(true)}`}
-                onBlur={() => {
-                  // A step is not a pick until `Enter`, so leaving the select any other way -
-                  // Tab, Shift+Tab, a click elsewhere - drops it, as Escape does: the open select
-                  // never shows an issue the message is not addressed to.
-                  setPendingIssue(issueKey);
-                }}
-                onChange={(event) => {
-                  setPendingIssue(event.target.value);
-                  // A step from the select's own keys only moves the selection, so a keyboard
-                  // reader can pass the first option to reach the second; `Enter` below is the
-                  // pick. Any other change - a pointer's, or one made in the native popup - is a
-                  // pick already made.
-                  if (movedByKeyboard.current) return;
-                  commitIssue(event.target.value);
-                }}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") {
-                    // The commit is this key's, and it stops here: left to bubble it would land
-                    // in the message the pick just addressed, as a newline at its top.
-                    event.preventDefault();
-                    commitIssue(event.currentTarget.value);
-                    return;
-                  }
-                  markKeyStep();
-                }}
-                onKeyPress={markKeyStep}
-                ref={issueSelect}
-                value={pendingIssue}
-              >
-                <option value="">No issue</option>
-                {issues.data.map((issue) => (
-                  <option key={issue.key} value={issue.key}>
-                    {issue.key} · {issue.title}
-                  </option>
-                ))}
-              </select>
-            </label>
-          )}
-        </div>
-      ) : null}
-      <MentionComposer
-        initialMentions={
-          useDirectChannel
-            ? undefined
-            : [{ target: `session:${agent.session_id}`, title: agent.title || agent.session_id }]
-        }
-        carried={carried.current}
-        onCarry={keepCarry}
-        // The channel decides which mention the message needs - an issue comment reaches this
-        // agent by mentioning it, a direct message does not - so the composer is remounted when
-        // the channel changes, and only then; one issue to another keeps the same instance. The
-        // pick carries the reader's draft across that remount (`carried`).
-        key={useDirectChannel ? "session" : "issue"}
-        onCancelReply={onCancelReply}
-        onClose={() => {
-          if (sentJustNow.current) {
-            sentJustNow.current = false;
-            return;
-          }
-          onClose();
-        }}
-        onSent={() => {
-          sentJustNow.current = true;
-          onCancelReply();
-          void queryClient.invalidateQueries({
-            queryKey: agentMessagesQuery(agent.session_id).queryKey,
-          });
-          // Focus went to the document when the field disabled itself; take it back.
-          refocusComposer();
-        }}
-        owner={composerOwner}
-        replyTo={replyTo?.target ?? null}
-      />
     </div>
   );
 }
@@ -790,21 +540,30 @@ function AskCountPill({
   );
 }
 
+/** The list a row sits in: the open list, or one of the two folds below it. */
+type AgentSection = "active" | "inactive" | "quiet";
+
 function AgentRow({
   agent,
+  hidden,
   liveAgents,
   needsYou,
   onPin,
   onSelect,
   pinned,
+  section,
   selected,
 }: {
   agent: Agent;
+  /** A row in a closed fold, or one the filters exclude: still mounted, so a pin, a fold's toggle
+   *  or a filter loses nothing it holds. */
+  hidden: boolean;
   liveAgents: readonly Agent[];
   needsYou: number;
   onPin: () => void;
   onSelect: (selected: boolean) => void;
   pinned: boolean;
+  section: AgentSection;
   selected: boolean;
 }): ReactNode {
   const label = sessionLabel(agent.session_id, agent.title);
@@ -815,16 +574,35 @@ function AgentRow({
   const unreadReplies =
     useQuery(userAgentStateQuery()).data?.[agent.session_id]?.unread_replies ?? 0;
   const [expanded, setExpanded] = useState(false);
-  const [replyTo, setReplyTo] = useState<AgentReply | null>(null);
+  // A send the row's composer holds - out, or refused - still answers its reply when the row
+  // mounts again, so the row restores the reply it was sent as.
+  const heldSends = useHeldSends();
+  const [replyTo, setReplyTo] = useState<AgentReply | null>(() => {
+    const held = heldSends.get(agentSendKey(agent.session_id))?.request;
+    return held === undefined || held.replyTo === null
+      ? null
+      : {
+          issueKey: held.owner.kind === "issue" ? held.owner.issueKey : null,
+          target: held.replyTo,
+        };
+  });
+  // The conversation and the composer mount on the first open and stay mounted, hidden while the
+  // row is collapsed: an unsent draft, an upload, the unread set and what the reader unfolded each
+  // have one owner, which a collapse no more discards than a pin does. A send and its refusal are
+  // the held-send store's.
+  const [opened, setOpened] = useState(false);
+  if (expanded && !opened) setOpened(true);
   const detailsId = useId();
 
   return (
     <article
       className={`rounded-xl border outline-none focus-visible:ring-2 ${card} ${borderDefault} ${focusVisibleRing}`}
       data-agent-row={agent.session_id}
+      data-agent-section={section}
       // The issue picker renders only while this row is not answering a message, and a collapsed
-      // row has no picker in the DOM at all, so the row itself carries whether `i` can act.
+      // row's picker is not on screen, so the row itself carries whether `i` can act.
       data-agent-can-pick-issue={replyTo === null ? "" : undefined}
+      hidden={hidden}
       tabIndex={-1}
     >
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-1.5">
@@ -928,79 +706,111 @@ function AgentRow({
           </span>
         </div>
       </div>
-      {expanded ? (
-        <div className={`border-t px-4 pb-4 ${borderDefault}`} id={detailsId}>
-          <div
-            className={`mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs ${textMutedOnCanvas}`}
-          >
-            {agent.capabilities.map((capability) => (
-              <span key={capability}>{capability}</span>
-            ))}
-            <span>
-              Seen <Timestamp at={new Date(agent.last_seen).toISOString()} />
-            </span>
-          </div>
-          <AgentMessageList agent={agent} liveAgents={liveAgents} onReply={setReplyTo} />
-          <div data-agent-composer="">
-            <AgentMessageComposer
-              agent={agent}
-              onCancelReply={() => setReplyTo(null)}
-              onClose={leaveAgentComposer}
-              replyTo={replyTo}
-            />
-          </div>
-        </div>
+      {opened ? (
+        <AgentRowDetails
+          agent={agent}
+          expanded={expanded}
+          hidden={hidden}
+          id={detailsId}
+          liveAgents={liveAgents}
+          replyTo={replyTo}
+          setReplyTo={setReplyTo}
+        />
       ) : null}
     </article>
   );
 }
 
-/** A collapsed disclosure over rows the page keeps out of the way, labelled by `foldLabel`;
- * absent when empty, closed on every load, and open only while this page stays mounted. */
-function AgentFold({
-  agents,
-  label,
+/** What a row shows once opened: its conversation and its composer. It reads the row's send, so
+ *  a row never opened watches no send, and holds every Reply while that send is out, from Send's
+ *  own task on. */
+function AgentRowDetails({
+  agent,
+  expanded,
+  hidden,
+  id,
   liveAgents,
-  needsYouBySession,
-  onPin,
-  onSelect,
+  replyTo,
+  setReplyTo,
+}: {
+  agent: Agent;
+  expanded: boolean;
+  hidden: boolean;
+  id: string;
+  liveAgents: readonly Agent[];
+  replyTo: AgentReply | null;
+  setReplyTo: (reply: AgentReply | null) => void;
+}): ReactNode {
+  const sendKey = useMemo(() => agentSendKey(agent.session_id), [agent.session_id]);
+  const hold = useSending(sendKey);
+  return (
+    <div className={`border-t px-4 pb-4 ${borderDefault}`} hidden={!expanded} id={id}>
+      <div
+        className={`mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs ${textMutedOnCanvas}`}
+      >
+        {agent.capabilities.map((capability) => (
+          <span key={capability}>{capabilityLabel(capability)}</span>
+        ))}
+        <span>
+          Seen <Timestamp at={new Date(agent.last_seen).toISOString()} />
+        </span>
+      </div>
+      <AgentMessageList
+        agent={agent}
+        liveAgents={liveAgents}
+        onReply={(next) => {
+          if (!hold.sendingNow()) setReplyTo(next);
+        }}
+        // Open means on screen: an expanded row a closed fold or a filter hides is as unseen as
+        // a collapsed one, so it marks nothing read, and showing it again is an open that
+        // freezes its unread set afresh.
+        open={expanded && !hidden}
+        replyDisabled={hold.sending}
+      />
+      <div data-agent-composer="">
+        <AgentMessageComposer
+          agent={agent}
+          hold={hold}
+          onCancelReply={() => setReplyTo(null)}
+          onClose={leaveAgentComposer}
+          replyTo={replyTo}
+          sendKey={sendKey}
+        />
+      </div>
+    </div>
+  );
+}
+
+/**
+ * A fold's toggle: an item in the one list, between the open rows and the fold's own, labelled by
+ * `foldLabel`. Absent when the fold is empty; closed on every load, and open only while this page
+ * stays mounted. A block item rather than a bare button, so the toggle keeps its own width, and
+ * `keyboard.ts` has a handle on it (`data-agent-fold`): the pin's focus hand-off lands on it, and
+ * `j`/`k` step on from it.
+ */
+function FoldToggle({
+  agents,
+  expanded,
+  fold,
+  label,
+  onToggle,
   selected,
 }: {
   agents: readonly Agent[];
+  expanded: boolean;
+  fold: Exclude<AgentSection, "active">;
   label: string;
-  liveAgents: readonly Agent[];
-  needsYouBySession: NeedsYouBySession;
-  onPin: (sessionID: string) => void;
-  onSelect: (sessionID: string, selected: boolean) => void;
+  onToggle: () => void;
   selected: ReadonlySet<string>;
 }): ReactNode {
-  const [expanded, setExpanded] = useState(false);
   if (agents.length === 0) return null;
   return (
-    // A block wrapper, not a fragment: the global `button { display: inline-flex }` would
-    // otherwise let two collapsed toggles share one line below the desktop breakpoint.
-    <div className="space-y-3">
+    <div data-agent-fold={fold}>
       <DisclosureToggle
         expanded={expanded}
         label={foldLabel(label, agents, selected)}
-        onToggle={() => setExpanded((open) => !open)}
+        onToggle={onToggle}
       />
-      {expanded ? (
-        <section aria-label={label} className="space-y-3">
-          {agents.map((agent) => (
-            <AgentRow
-              agent={agent}
-              key={agent.session_id}
-              liveAgents={liveAgents}
-              needsYou={needsYouBySession.get(agent.session_id) ?? 0}
-              onPin={() => onPin(agent.session_id)}
-              onSelect={(next) => onSelect(agent.session_id, next)}
-              pinned={false}
-              selected={selected.has(agent.session_id)}
-            />
-          ))}
-        </section>
-      ) : null}
     </div>
   );
 }
@@ -1017,52 +827,13 @@ export interface AgentFilters {
 
 export const NO_AGENT_FILTERS: AgentFilters = { dir: "", machine: "", role: "" };
 
-export function filterAgents(agents: readonly Agent[], filters: AgentFilters): Agent[] {
+function matchesFilters(agent: Agent, filters: AgentFilters): boolean {
   const dir = filters.dir.trim().toLowerCase();
-  return agents.filter(
-    (agent) =>
-      (filters.machine === "" || agent.machine_id === filters.machine) &&
-      (filters.role === "" || agent.roles.includes(filters.role)) &&
-      (dir === "" || agent.dir.toLowerCase().includes(dir))
+  return (
+    (filters.machine === "" || agent.machine_id === filters.machine) &&
+    (filters.role === "" || agent.roles.includes(filters.role)) &&
+    (dir === "" || agent.dir.toLowerCase().includes(dir))
   );
-}
-
-/** A session a broadcast would leave out, worded the way the server reports it, so the
- *  composer and the create response say the same thing. */
-interface BroadcastExclusionPlan {
-  readonly reason: string;
-  readonly sessionID: string;
-  readonly title: string;
-}
-
-/**
- * What sending the current selection would do: the sessions it reaches, and the selected
- * sessions it leaves out. A session that does not advertise the chosen mode is excluded
- * rather than switched to another one - the mode is part of what the sender said - and a
- * selection kept across a session going away excludes it too, which is exactly the judgment
- * the server repeats against its own registry read when the send arrives.
- */
-export function broadcastPlan(
-  selected: ReadonlySet<string>,
-  agents: readonly Agent[],
-  delivery: MessageDeliveryMode
-): { excluded: BroadcastExclusionPlan[]; recipients: Agent[] } {
-  const live = new Map(agents.map((agent) => [agent.session_id, agent]));
-  const excluded: BroadcastExclusionPlan[] = [];
-  const recipients: Agent[] = [];
-  for (const sessionID of selected) {
-    const agent = live.get(sessionID);
-    if (agent === undefined) {
-      excluded.push({ reason: "no live session", sessionID, title: "" });
-      continue;
-    }
-    if (!agent.capabilities.includes(delivery)) {
-      excluded.push({ reason: `does not advertise ${delivery}`, sessionID, title: agent.title });
-      continue;
-    }
-    recipients.push(agent);
-  }
-  return { excluded, recipients };
 }
 
 /** The machines, roles and directories the live sessions actually occupy: a filter can only
@@ -1190,53 +961,40 @@ function SelectionHeader({
  * the ones this mode leaves out. It follows the list and sticks to the viewport's bottom, so
  * appearing costs no layout above the rows: the checkbox that summoned it stays under the
  * pointer. A long recipient list scrolls inside it rather than growing it past half the screen.
+ * Send hands the request to the page's queue (`onSend`) at the press: `composed`, which
+ * `composedBroadcast` decides - the restored request word for word while one is kept, else the
+ * live plan under the composition's key - with the plan the composer shows for it, so a session
+ * that has come back since a refused send is shown as not in the request being re-sent.
  */
 function BroadcastComposer({
   agents,
   body,
+  composed,
   delivery,
   onBody,
   onDelivery,
-  onSent,
+  onSend,
   selected,
   onDeselect,
 }: {
   agents: readonly Agent[];
   body: string;
+  composed: ComposedBroadcast;
   delivery: MessageDeliveryMode;
   onBody: (body: string) => void;
   onDelivery: (delivery: MessageDeliveryMode) => void;
   onDeselect: (sessionID: string) => void;
-  onSent: () => void;
+  onSend: (send: BroadcastSend) => void;
   selected: ReadonlySet<string>;
 }): ReactNode {
-  const navigate = useNavigate();
-  const queryClient = useQueryClient();
-  const { excluded, recipients } = broadcastPlan(selected, agents, delivery);
+  const { plan } = composed;
+  const { excluded, recipients } = plan;
   // The server counts the `session_ids` it is sent - these recipients - against the shared limit
-  // and refuses a send over it; saying so before Send saves the round trip. The same predicate
-  // gives the limit the notice slot.
-  const overLimit = recipients.length > MAX_BROADCAST_RECIPIENTS;
-  const send = useMutation({
-    mutationFn: () =>
-      api.createBroadcast({
-        body,
-        delivery,
-        session_ids: recipients.map((agent) => agent.session_id),
-      }),
-    onSuccess: (created) => {
-      onSent();
-      for (const recipient of created.recipients) {
-        void queryClient.invalidateQueries({
-          queryKey: agentMessagesQuery(recipient.session_id).queryKey,
-        });
-      }
-      void queryClient.invalidateQueries({ queryKey: ["broadcast"] });
-      // The exclusions travel with the navigation: they are a fact about this send, not about
-      // the broadcast, so the server stores none and this is the only place they can be shown.
-      void navigate(`/agents/broadcasts/${created.id}`, { state: { excluded: created.excluded } });
-    },
-  });
+  // and refuses a send over it; saying so before Send saves the round trip. The notice line is
+  // Send's reason when it refuses for the limit or for nobody to reach; otherwise it still bears
+  // on the send, so Send is described by it.
+  const sendState = broadcastSendState(plan, delivery, body);
+  const noticeId = useId();
 
   // On a narrow or short screen (`narrow-or-short`, styles.css) the composer is a compact grid,
   // so it takes about a third of a phone screen: the heading on one line, the recipients in one
@@ -1249,7 +1007,7 @@ function BroadcastComposer({
   return (
     <section
       aria-label="Broadcast"
-      className={`sticky bottom-0 z-10 mt-3 max-h-[50vh] overflow-y-auto rounded-xl border p-3 narrow-or-short:grid narrow-or-short:grid-cols-[auto_minmax(0,1fr)_auto] narrow-or-short:items-center narrow-or-short:gap-2 short:grid-cols-[auto_minmax(0,1fr)_auto_auto] ${card} ${borderDefault}`}
+      className={`max-h-[50vh] overflow-y-auto rounded-xl border p-3 narrow-or-short:sticky narrow-or-short:bottom-0 narrow-or-short:z-10 narrow-or-short:mt-3 narrow-or-short:grid narrow-or-short:grid-cols-[auto_minmax(0,1fr)_auto] narrow-or-short:items-center narrow-or-short:gap-2 short:grid-cols-[auto_minmax(0,1fr)_auto_auto] ${card} ${borderDefault}`}
     >
       <h2
         className={`text-sm font-semibold narrow-or-short:col-span-full narrow-or-short:truncate short:col-span-1 ${textPrimaryOnCanvas}`}
@@ -1288,7 +1046,7 @@ function BroadcastComposer({
         >
           {DELIVERY_CAPABILITIES.map((mode) => (
             <option key={mode} value={mode}>
-              {mode}
+              {MODE_LABELS[mode]}
             </option>
           ))}
         </select>
@@ -1301,35 +1059,20 @@ function BroadcastComposer({
         rows={3}
         value={body}
       />
-      {/* One notice at a time, in priority order: the limit, then a refused send, then the
-          exclusions. A higher notice hiding the Excluded line hides no name: every excluded
-          session's chip still carries its reason. */}
-      {overLimit ? (
-        <p className={composerLine}>
-          At most {MAX_BROADCAST_RECIPIENTS} recipients per broadcast; this one would reach{" "}
-          {recipients.length}.
-        </p>
-      ) : send.isError ? (
-        <p className={composerLine}>
-          Could not send: {send.error instanceof Error ? send.error.message : "network error"}
-        </p>
-      ) : excluded.length === 0 ? null : (
-        <p className={composerLine}>
-          Excluded:{" "}
-          {excluded
-            .map((item) => `${sessionLabel(item.sessionID, item.title)} (${item.reason})`)
-            .join(", ")}
-          . Nothing is sent to them, and no other mode is substituted.
+      {sendState.notice === null ? null : (
+        <p className={composerLine} id={noticeId}>
+          {sendState.notice}
         </p>
       )}
-      <button
-        className={`mt-2 rounded-lg px-3 py-2 text-sm font-semibold narrow-or-short:order-2 narrow-or-short:col-start-3 narrow-or-short:mt-0 narrow-or-short:justify-self-end short:col-start-4 ${primaryButtonBg} ${primaryButtonEnabledHoverBg} ${primaryButtonDisabled}`}
-        disabled={recipients.length === 0 || overLimit || body.trim() === "" || send.isPending}
-        onClick={() => send.mutate()}
-        type="button"
+      <RefusableButton
+        className="mt-2 narrow-or-short:order-2 narrow-or-short:col-start-3 narrow-or-short:mt-0 narrow-or-short:justify-self-end short:col-start-4"
+        describedBy={sendState.notice === null || sendState.refusalOnNotice ? undefined : noticeId}
+        onPress={() => onSend({ input: composed.input, selected: [...selected] })}
+        refusal={sendState.refusal}
+        refusalShownBy={sendState.refusalOnNotice ? noticeId : undefined}
       >
-        {send.isPending ? "Sending…" : `Send to ${recipients.length}`}
-      </button>
+        {sendState.label}
+      </RefusableButton>
     </section>
   );
 }
@@ -1363,26 +1106,49 @@ export function AgentsPage(): ReactNode {
   // Selection is what the human ticked, not what the filters currently show: narrowing the
   // list after ticking a row must not quietly drop that row from the send. Every selected
   // session is named in the composer, so nothing is hidden either way.
-  const [selected, setSelected] = useState<ReadonlySet<string>>(() => new Set());
-  // The draft is page state too: the composer unmounts whenever the selection empties, and
-  // clearing a selection to pick again must not throw away a typed message or its mode. A
-  // successful send clears it.
-  const [draft, setDraft] = useState("");
-  const [delivery, setDelivery] = useState<MessageDeliveryMode>("btw");
+  // The draft (message and mode), the selection and a restored request are page state, in one
+  // owner (`useBroadcastComposition`). Restore draft, on a send the server refused, puts them
+  // back; any message or selection here was started after Send cleared both, so Restore draft
+  // refuses rather than replace it - the same test the queue uses to hold off opening a broadcast
+  // while another is begun.
+  const composition = useBroadcastComposition();
+  const { delivery, draft, selected, setSelected } = composition;
+  const composing = draft.trim() !== "" || selected.size > 0;
+  const queue = useBroadcastQueue(composing);
+  const restoreRefusal = composing
+    ? "Restore draft would replace the broadcast you have started. Send it, or clear its message and selection, first."
+    : null;
+  const showComposer = selected.size > 0 && agents.length > 0;
   // Not memoised: the split is a function of the clock, like the freshness dot beside each row,
-  // and is recomputed on every render of this page.
+  // and is recomputed on every render of this page. Every listed session is split, the ones the
+  // filters exclude included: their rows stay mounted, hidden, like a closed fold's.
   const { active, quiet, inactive } = partitionAgents(
-    filterAgents(agents, filters),
+    agents,
     pinned,
     needsYouBySession,
     Date.now()
   );
+  const matches = (agent: Agent) => matchesFilters(agent, filters);
   // The rows the filters match, in the order the page shows them - the open list, then each fold.
   // Select-all ticks this set in order and the composer names the selection in tick order, so a
   // set ordered any other way (the registry's own, say) would name the recipients in an order the
   // reader never sees, and send them in it.
-  const matching = [...active, ...quiet, ...inactive];
+  const matchingQuiet = quiet.filter(matches);
+  const matchingInactive = inactive.filter(matches);
+  const matching = [...active.filter(matches), ...matchingQuiet, ...matchingInactive];
+  /** The row a pin was made from while it held focus, until the render that moves it. A pin can
+   *  move a row between the open list and a fold: React moves its node, which can drop focus to
+   *  the document, or the row lands in a closed fold, hidden. Focus follows the row to where it
+   *  lands - or, when that is a closed fold, to the fold's toggle, as `IssueBoard`'s
+   *  `focusAfterMove` lands on a collapsed rail - so the next `j`/`k` go on from the reader's
+   *  place rather than from the top (`useAgentsKeymap` steps from a fold's toggle too). */
+  const focusAfterPin = useRef<string | null>(null);
   const togglePin = (sessionID: string) => {
+    if (
+      closestMatching(document.activeElement, AGENT_ROW_SELECTOR)?.dataset.agentRow === sessionID
+    ) {
+      focusAfterPin.current = sessionID;
+    }
     const next = pinned.includes(sessionID)
       ? pinned.filter((candidate) => candidate !== sessionID)
       : [...pinned, sessionID];
@@ -1396,11 +1162,81 @@ export function AgentsPage(): ReactNode {
       return updated;
     });
   };
+  // Each fold is closed on every load and open only while this page stays mounted.
+  const [quietOpen, setQuietOpen] = useState(false);
+  const [inactiveOpen, setInactiveOpen] = useState(false);
   const listRef = useRef<HTMLElement>(null);
   useAgentsKeymap(listRef);
+  // A layout effect, so the frame the move paints already has focus where the row went.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `pinned` is the trigger, not a read
+  useLayoutEffect(() => {
+    const sessionID = focusAfterPin.current;
+    if (sessionID === null) return;
+    focusAfterPin.current = null;
+    const list = listRef.current;
+    const row = [...(list?.querySelectorAll<HTMLElement>(AGENT_ROW_SELECTOR) ?? [])].find(
+      (node) => node.dataset.agentRow === sessionID
+    );
+    if (row === undefined) return;
+    // A row the pin hides is in a closed fold: it held focus, so the filters match it, and a pin
+    // changes nothing they read.
+    const target = row.hidden ? foldToggleOf(row) : row;
+    // Only the focus the move took is the page's to give back: still on the row, now hidden, or
+    // dropped to the document.
+    const focused = document.activeElement;
+    if (focused !== row && !focusOnDocument()) return;
+    if (focused !== target) target?.focus();
+  }, [pinned]);
+  const rowIn = (section: AgentSection, foldOpen: boolean) => (agent: Agent) => (
+    <AgentRow
+      agent={agent}
+      hidden={!foldOpen || !matches(agent)}
+      key={agent.session_id}
+      liveAgents={agents}
+      needsYou={needsYouBySession.get(agent.session_id) ?? 0}
+      onPin={() => togglePin(agent.session_id)}
+      onSelect={(next) => select(agent.session_id, next)}
+      pinned={pinned.includes(agent.session_id)}
+      section={section}
+      selected={selected.has(agent.session_id)}
+    />
+  );
+  // One list, keyed by session, with each fold's toggle as an item between the rows - the Inbox's
+  // pattern (`Inbox.tsx`). A row that moves between the open list and a fold moves within the one
+  // parent, so React moves its node instead of remounting it, and a closed fold's rows stay
+  // mounted, hidden, as do the rows the filters exclude: nothing a row holds is ever handed from
+  // one instance to another. One flat array, not three: each array in the children is a slot of
+  // its own, and a row changing slots would remount.
+  const rows = [
+    ...active.map(rowIn("active", true)),
+    <FoldToggle
+      agents={matchingQuiet}
+      expanded={quietOpen}
+      fold="quiet"
+      key="fold:quiet"
+      label="No Dispatch activity"
+      onToggle={() => setQuietOpen((open) => !open)}
+      selected={selected}
+    />,
+    ...quiet.map(rowIn("quiet", quietOpen)),
+    <FoldToggle
+      agents={matchingInactive}
+      expanded={inactiveOpen}
+      fold="inactive"
+      key="fold:inactive"
+      label="Inactive"
+      onToggle={() => setInactiveOpen((open) => !open)}
+      selected={selected}
+    />,
+    ...inactive.map(rowIn("inactive", inactiveOpen)),
+  ];
 
   if (isPending) return <LoadingSkeleton label="Loading agents" />;
-  if (isError) return <p className={dangerText}>Could not load agents: {error}</p>;
+  // A refresh that fails keeps the list it has: unmounting every row would throw away what each
+  // holds - a draft, a send's refusal, an upload. With no rows there is nothing to keep.
+  if (isError && agents.length === 0) {
+    return <p className={dangerText}>Could not load agents: {error}</p>;
+  }
 
   return (
     <section aria-label="Agents" ref={listRef}>
@@ -1415,6 +1251,11 @@ export function AgentsPage(): ReactNode {
           </Link>
         </p>
       </header>
+      {isError ? (
+        <p className={`mb-3 text-sm ${dangerText}`} role="alert">
+          Could not refresh agents: {error}
+        </p>
+      ) : null}
       {agents.length === 0 ? (
         <EmptyState label="Agents empty state" message="No agents are connected." />
       ) : (
@@ -1423,7 +1264,7 @@ export function AgentsPage(): ReactNode {
           <SelectionHeader
             listed={agents}
             matching={matching}
-            onClear={() => setSelected(new Set())}
+            onClear={() => setSelected(() => new Set())}
             onToggle={() => setSelected((current) => toggleMatching(matching, current))}
             selected={selected}
           />
@@ -1432,56 +1273,45 @@ export function AgentsPage(): ReactNode {
               label="Agents filtered empty state"
               message="No agent matches these filters."
             />
-          ) : (
-            <div className="space-y-3">
-              {active.map((agent) => (
-                <AgentRow
-                  agent={agent}
-                  key={agent.session_id}
-                  liveAgents={agents}
-                  needsYou={needsYouBySession.get(agent.session_id) ?? 0}
-                  onPin={() => togglePin(agent.session_id)}
-                  onSelect={(next) => select(agent.session_id, next)}
-                  pinned={pinned.includes(agent.session_id)}
-                  selected={selected.has(agent.session_id)}
-                />
-              ))}
-              <AgentFold
-                agents={quiet}
-                label="No Dispatch activity"
-                liveAgents={agents}
-                needsYouBySession={needsYouBySession}
-                onPin={togglePin}
-                onSelect={select}
-                selected={selected}
-              />
-              <AgentFold
-                agents={inactive}
-                label="Inactive"
-                liveAgents={agents}
-                needsYouBySession={needsYouBySession}
-                onPin={togglePin}
-                onSelect={select}
-                selected={selected}
-              />
-            </div>
+          ) : null}
+          <div className="flex flex-col gap-3">{rows}</div>
+        </>
+      )}
+      {/* The sends sit outside the composer and outside the list, so a send's row outlives both:
+          the composer goes at every press, and the list empties when no agent is connected. On a
+          narrow or short screen only the composer sticks (the wrapper is `contents`), and the
+          strip stays at the end of the list: the composer alone fills the screen's budget. */}
+      {queue.rows.length === 0 && !showComposer ? null : (
+        <div className="sticky bottom-0 z-10 mt-3 space-y-2 narrow-or-short:contents">
+          {queue.rows.length === 0 ? null : (
+            <BroadcastSends
+              className="narrow-or-short:mt-3"
+              onRestore={(row) => {
+                queue.dismiss(row);
+                composition.restore(row.send);
+              }}
+              onRetry={queue.retry}
+              restoreRefusal={restoreRefusal}
+              rows={queue.rows}
+            />
           )}
-          {selected.size === 0 ? null : (
+          {showComposer ? (
             <BroadcastComposer
               agents={agents}
               body={draft}
+              composed={composedBroadcast(composition, agents)}
               delivery={delivery}
-              onBody={setDraft}
-              onDelivery={setDelivery}
+              onBody={composition.setDraft}
+              onDelivery={composition.setDelivery}
               onDeselect={(sessionID) => select(sessionID, false)}
-              onSent={() => {
-                setSelected(new Set());
-                setDraft("");
+              onSend={(send) => {
+                queue.enqueue(send);
+                composition.sent();
               }}
               selected={selected}
             />
-          )}
-        </>
+          ) : null}
+        </div>
       )}
       <EndedAgentsWithReplies live={agents} />
     </section>

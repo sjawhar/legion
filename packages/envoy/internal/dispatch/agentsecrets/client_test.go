@@ -74,41 +74,38 @@ func TestRecordSendsBearerAndPath(t *testing.T) {
 	}
 }
 
-func TestApproveSendsBearerPathAndBodyByteIdentical(t *testing.T) {
-	server, captured := serveCapturing(t, http.StatusOK, `{"ok":true}`)
-	defer server.Close()
-
-	requestBody := json.RawMessage(`{"note":"looks fine","ttl_seconds":300}`)
-	if _, err := New(server.URL, "ui-token").Approve(context.Background(), "req-1", requestBody); err != nil {
-		t.Fatalf("Approve: %v", err)
-	}
-	if captured.Method != http.MethodPost || captured.Path != "/v1/credential-requests/req-1/approve" {
-		t.Fatalf("request = %s %s, want POST /v1/credential-requests/req-1/approve", captured.Method, captured.Path)
-	}
-	if captured.Auth != "Bearer ui-token" {
-		t.Fatalf("Authorization = %q, want Bearer ui-token", captured.Auth)
-	}
-	if string(captured.Body) != string(requestBody) {
-		t.Fatalf("relayed body = %s, want byte-identical %s", captured.Body, requestBody)
-	}
-}
-
-func TestDenySendsBearerAndPath(t *testing.T) {
-	server, captured := serveCapturing(t, http.StatusOK, `{"ok":true}`)
-	defer server.Close()
-
-	requestBody := json.RawMessage(`{"reason":"suspicious"}`)
-	if _, err := New(server.URL, "ui-token").Deny(context.Background(), "req-1", requestBody); err != nil {
-		t.Fatalf("Deny: %v", err)
-	}
-	if captured.Method != http.MethodPost || captured.Path != "/v1/credential-requests/req-1/deny" {
-		t.Fatalf("request = %s %s, want POST /v1/credential-requests/req-1/deny", captured.Method, captured.Path)
-	}
-	if captured.Auth != "Bearer ui-token" {
-		t.Fatalf("Authorization = %q, want Bearer ui-token", captured.Auth)
-	}
-	if string(captured.Body) != string(requestBody) {
-		t.Fatalf("relayed body = %s, want byte-identical %s", captured.Body, requestBody)
+// Approve and Deny send exactly the Decision Dispatch built — the approver and, for a machine
+// login, the code — as the broker's strict decideBody reads it; a decision with no code carries
+// no code field at all.
+func TestDecisionsSendBearerPathAndTheApproverDispatchNames(t *testing.T) {
+	code := "ABCD-1234"
+	for _, tc := range []struct {
+		name, wantPath, wantBody string
+		decide                   func(*Client) (json.RawMessage, error)
+	}{
+		{"approve", "/v1/credential-requests/req-1/approve", `{"approver":"sjawhar"}`, func(c *Client) (json.RawMessage, error) {
+			return c.Approve(context.Background(), "req-1", Decision{Approver: "sjawhar"})
+		}},
+		{"deny with code", "/v1/credential-requests/req-1/deny", `{"approver":"sjawhar","code":"ABCD-1234"}`, func(c *Client) (json.RawMessage, error) {
+			return c.Deny(context.Background(), "req-1", Decision{Approver: "sjawhar", Code: &code})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server, captured := serveCapturing(t, http.StatusOK, `{"ok":true}`)
+			defer server.Close()
+			if _, err := tc.decide(New(server.URL, "ui-token")); err != nil {
+				t.Fatalf("%s: %v", tc.name, err)
+			}
+			if captured.Method != http.MethodPost || captured.Path != tc.wantPath {
+				t.Fatalf("request = %s %s, want POST %s", captured.Method, captured.Path, tc.wantPath)
+			}
+			if captured.Auth != "Bearer ui-token" {
+				t.Fatalf("Authorization = %q, want Bearer ui-token", captured.Auth)
+			}
+			if string(captured.Body) != tc.wantBody {
+				t.Fatalf("body = %s, want %s", captured.Body, tc.wantBody)
+			}
+		})
 	}
 }
 
@@ -131,45 +128,6 @@ func TestMachineLookupSendsBearerAndPath(t *testing.T) {
 	}
 }
 
-func TestKeysSendsBearerAndPath(t *testing.T) {
-	server, captured := serveCapturing(t, http.StatusOK, `{"keys":[]}`)
-	defer server.Close()
-
-	if _, err := New(server.URL, "ui-token").Keys(context.Background(), "sjawhar"); err != nil {
-		t.Fatalf("Keys: %v", err)
-	}
-	if captured.Method != http.MethodGet || captured.Path != "/v1/approvers/sjawhar/keys" {
-		t.Fatalf("request = %s %s, want GET /v1/approvers/sjawhar/keys", captured.Method, captured.Path)
-	}
-	if captured.Auth != "Bearer ui-token" {
-		t.Fatalf("Authorization = %q, want Bearer ui-token", captured.Auth)
-	}
-}
-
-func TestCeremonySendsBearerAndPathForEveryKindStepCombination(t *testing.T) {
-	for _, combination := range []struct{ kind, step string }{
-		{"register", "begin"}, {"register", "finish"}, {"endorse", "begin"}, {"endorse", "finish"},
-	} {
-		server, captured := serveCapturing(t, http.StatusOK, `{"ok":true}`)
-		requestBody := json.RawMessage(`{"step":"data"}`)
-		_, err := New(server.URL, "ui-token").Ceremony(context.Background(), "sjawhar", combination.kind, combination.step, requestBody)
-		server.Close()
-		if err != nil {
-			t.Fatalf("Ceremony(%s,%s): %v", combination.kind, combination.step, err)
-		}
-		wantPath := "/v1/approvers/sjawhar/keys/" + combination.kind + "/" + combination.step
-		if captured.Method != http.MethodPost || captured.Path != wantPath {
-			t.Fatalf("request = %s %s, want POST %s", captured.Method, captured.Path, wantPath)
-		}
-		if captured.Auth != "Bearer ui-token" {
-			t.Fatalf("Authorization = %q, want Bearer ui-token", captured.Auth)
-		}
-		if string(captured.Body) != string(requestBody) {
-			t.Fatalf("relayed body = %s, want byte-identical %s", captured.Body, requestBody)
-		}
-	}
-}
-
 func TestGrantsSendsBearerAndApproverQuery(t *testing.T) {
 	server, captured := serveCapturing(t, http.StatusOK, `{"grants":[]}`)
 	defer server.Close()
@@ -185,12 +143,11 @@ func TestGrantsSendsBearerAndApproverQuery(t *testing.T) {
 	}
 }
 
-func TestRevokeByApproverSendsBearerAndPath(t *testing.T) {
+func TestRevokeByApproverSendsBearerPathAndTheApprover(t *testing.T) {
 	server, captured := serveCapturing(t, http.StatusOK, `{"ok":true}`)
 	defer server.Close()
 
-	requestBody := json.RawMessage(`{"reason":"rotated"}`)
-	if _, err := New(server.URL, "ui-token").RevokeByApprover(context.Background(), "grant-1", requestBody); err != nil {
+	if _, err := New(server.URL, "ui-token").RevokeByApprover(context.Background(), "grant-1", "sjawhar"); err != nil {
 		t.Fatalf("RevokeByApprover: %v", err)
 	}
 	if captured.Method != http.MethodPost || captured.Path != "/v1/grants/grant-1/revoke-by-approver" {
@@ -199,8 +156,8 @@ func TestRevokeByApproverSendsBearerAndPath(t *testing.T) {
 	if captured.Auth != "Bearer ui-token" {
 		t.Fatalf("Authorization = %q, want Bearer ui-token", captured.Auth)
 	}
-	if string(captured.Body) != string(requestBody) {
-		t.Fatalf("relayed body = %s, want byte-identical %s", captured.Body, requestBody)
+	if string(captured.Body) != `{"approver":"sjawhar"}` {
+		t.Fatalf("body = %s, want {\"approver\":\"sjawhar\"}", captured.Body)
 	}
 }
 
@@ -208,7 +165,7 @@ func TestRevokeByApproverSendsBearerAndPath(t *testing.T) {
 // Task 2's proxy handlers can forward the broker's exact verdict to the browser rather than
 // flattening it into a generic error string.
 func TestNonTwoXXResponseReturnsTypedErrorWithStatusCodeAndBody(t *testing.T) {
-	responseBody := `{"code":"ASSERTION_INVALID","error":"the client assertion failed verification"}`
+	responseBody := `{"code":"NOT_APPROVER","error":"only the record's approver may decide it"}`
 	server, _ := serveCapturing(t, http.StatusForbidden, responseBody)
 	defer server.Close()
 
@@ -220,8 +177,8 @@ func TestNonTwoXXResponseReturnsTypedErrorWithStatusCodeAndBody(t *testing.T) {
 	if brokerErr.Status != http.StatusForbidden {
 		t.Fatalf("Status = %d, want %d", brokerErr.Status, http.StatusForbidden)
 	}
-	if brokerErr.Code != "ASSERTION_INVALID" {
-		t.Fatalf("Code = %q, want ASSERTION_INVALID", brokerErr.Code)
+	if brokerErr.Code != "NOT_APPROVER" {
+		t.Fatalf("Code = %q, want NOT_APPROVER", brokerErr.Code)
 	}
 	if string(brokerErr.Body) != responseBody {
 		t.Fatalf("Body = %s, want the broker's response preserved verbatim: %s", brokerErr.Body, responseBody)

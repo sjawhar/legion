@@ -41,7 +41,7 @@
     "mdast-util-directive": "^3.1.0",
     "micromark-extension-directive": "^4.0.0",
     "micromark-util-types": "^2.0.2",
-    "proof-sdk-upstream": "github:sjawhar/proof-sdk#06fc1977f1fee637d92c6393965555e88ab9adcb",
+    "proof-sdk-upstream": "github:sjawhar/proof-sdk#340653cfaeb52866aabfd2e9d3d1e9f0ba87f2cd",
     "remark-frontmatter": "^5.0.0",
     "remark-gfm": "^4.0.1",
     "remark-parse": "^11.0.0",

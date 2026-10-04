@@ -11,9 +11,8 @@ import (
 
 // KeyScan counts what one pass over a bucket's existing keys delivered, as disjoint fields: Puts is
 // the live keys (entries whose operation is a PUT), Markers the delete markers the pass streamed
-// past to find them. They must not be reported as one total of "keys": production's 9 role claims
-// beside 766 subjects reads as 757 claims left unrestored, which is the misreading LEGION-360 itself
-// was filed on.
+// past to find them. They must not be reported as one total of "keys": a few claims beside many
+// subjects would read as claims left unrestored (LEGION-360).
 type KeyScan struct {
 	Puts    int
 	Markers int
@@ -33,10 +32,9 @@ func (s *KeyScan) count(entry nats.KeyValueEntry) bool {
 // delivers, and returns what the watch delivered. That is the watch nats.go's kv.Keys() runs --
 // MetaOnly over every key -- which discards each entry's revision; this keeps it, so a caller reads
 // a revision without a round trip per key. The watch names no key, so a key this build cannot read
-// (bus.ErrRefused: an earlier build stored it past what a read of it may send) is delivered here
-// like any other. The markers are kept rather than dropped by nats.go's IgnoreDeletes, because they
-// are on the wire either way and their count is what a restart's log needs; visitLive never sees
-// one.
+// (bus.ErrRefused: too long, or outside nats.go's key alphabet) is delivered here like any other.
+// The markers are kept rather than dropped by nats.go's IgnoreDeletes, because they are on the wire
+// either way and their count is what a restart's log needs; visitLive never sees one.
 //
 // A snapshot short of the bucket is not a reading of it, so a scan that did not reach the end of
 // the bucket fails the caller instead of handing it what happened to arrive. nats.go ends a scan

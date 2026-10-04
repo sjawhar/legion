@@ -41,8 +41,10 @@ orchestrators (Pulumi, Kubernetes) time out and kill the container.
 3. Build HTTP mux           — /healthz always available, /v1/* and webhooks each behind a gate
 4. go server.Serve(ln)      — HTTP live immediately, /healthz returns {"status":"starting"}
 5. Slow init in main()      — NATS connect, CI store open, the webhook gate opens, then the
-                              other stores open and the consumer subscribes
-6. v1Gate.open, deps.Store   — /v1 handlers built, the /v1 gate opens, then the atomic publish
+                              other stores open and their caches warm
+6. role lane, v1Gate.open,  — the role lane subscribes, the /v1 gate opens onto the stores, the
+   bind, deps.Store            durable binds (polled every 2 s for up to 135 s), then the
+                              atomic publish turns /healthz healthy
 7. log.Fatal(<-fatal)        — block on HTTP server error channel
 ```
 
@@ -70,15 +72,17 @@ client and the CI store; each is built once, after what it takes is open: no han
 pointer on each request, and none can be constructed over a dependency that is not there.
 
 **Only what answers during startup reads an atomic pointer.** `/healthz` and the metrics
-gauges run before NATS is up, so they read `deps atomic.Pointer[listenerDeps]`, nil until
-phase 6, which is their "starting" sentinel. The NATS consumer callback captures the
-initialized locals directly.
+gauges run before NATS is up, so they read `deps atomic.Pointer[listenerDeps]`, nil until the
+durable binds at the end of phase 6, which is their "starting" sentinel. The NATS consumer
+callback captures the initialized locals directly.
 
 ## The Starting Gate
 
 ```go
 type startingGate struct {
-    mux atomic.Pointer[http.ServeMux]
+    name   string
+    logger *logging.Logger
+    mux    atomic.Pointer[http.ServeMux]
 }
 
 func (g *startingGate) open(mux *http.ServeMux) { g.mux.Store(mux) }
@@ -86,6 +90,7 @@ func (g *startingGate) open(mux *http.ServeMux) { g.mux.Store(mux) }
 func (g *startingGate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
     mux := g.mux.Load()
     if mux == nil {
+        g.logger.Warn("request refused while starting", /* gate, method, path */)
         writeJSONError(w, http.StatusServiceUnavailable, "service starting")
         return
     }
@@ -94,40 +99,51 @@ func (g *startingGate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 ```
 
 main registers two gates before `server.Serve`, one bare on every enabled webhook path and one
-inside `apiAuth` on `/v1`, so those paths answer 503 while the listener starts. Once NATS and the
-CI store are open, `openWebhooks` builds the webhook handlers and opens the webhook gate onto them.
-A webhook waits for nothing else, and in particular not for the durable consumer's bind, which
-during a rolling deploy waits out the task being replaced while the load balancer already sends
-the replacement webhooks: GitHub does not redeliver a refused delivery. In phase 6
-`openListener` builds the `/v1` routes over the complete deps, opens the `/v1` gate onto them, and
-only then stores `deps`:
+inside `apiAuth` on `/v1`, so those paths answer 503 while the listener starts, and each refusal
+logs `request refused while starting` with the gate, the method and the path: that line is the
+listener's only record of a caller it turned away. Once NATS and the CI store are open,
+`openWebhooks` builds the webhook handlers and opens the webhook gate onto them. In phase 6, once
+the interest and session caches are warm, the role lane subscribes and `openV1Routes` builds the
+`/v1` routes over the stores and opens the `/v1` gate onto them, logging `envoy-listener /v1 open`
+with `since_listening_ms`. Neither gate waits for the durable consumer's bind: no webhook and no
+`/v1` handler reads the durable, and during a rolling deploy the bind waits out the task being
+replaced while the load balancer already sends the replacement webhooks and callers that resolve
+the listener's name already reach it. GitHub does not redeliver a refused delivery, and a refused
+`/v1` call is a failed Dispatch delivery or a lost publish. The role lane opening early forwards no
+role message twice: both tasks of a machine are one core-NATS queue group, and NATS hands each
+message to one member.
 
 ```go
-var webhookGate, v1Gate startingGate
+webhookGate, v1Gate := newStartingGate("webhook", logger), newStartingGate("v1", logger)
 for _, hook := range hooks {
-    mux.Handle(hook.path, &webhookGate)
+    mux.Handle(hook.path, webhookGate)
 }
-mux.Handle("/v1/", apiAuth(apiToken, apiVerifier, logger, &v1Gate))
+mux.Handle("/v1/", apiAuth(apiToken, apiVerifier, logger, v1Gate))
 // ... phase 5, once NATS and the CI store are open:
-openWebhooks(&webhookGate, hooks, client, ciStore)
-// ... phase 6, once every store is open and the durable is bound:
-openListener(&v1Gate, ready, cfg.MachineID, logger, deps.Store)
+openWebhooks(webhookGate, hooks, client, ciStore)
+// ... phase 6, once the interest and session caches are warm:
+openV1Routes(v1Gate, ready, cfg.MachineID, logger, listeningAt)
+bind, err := bindListenerDurable(stopping, client, consumer, handler, logger, durableBindInterval, durableBindDeadline)
+// ... then deps.Store(ready)
 ```
 
-`TestAWebhookIsServedWhileAnotherTaskHoldsTheDurable` runs the listener binary against a durable
-another subscriber holds and requires a webhook to be served (and `/v1` to answer 503) until it
-lets go.
+`TestTheV1APIIsServedWhileAnotherTaskHoldsTheDurable` runs the listener binary against a durable
+another subscriber holds and requires a webhook, `/v1` and the role lane to be served while
+`/healthz` still says `starting`, until the holder lets go and the listener turns healthy.
+`TestARoleMessageReachesItsHolderOnceAcrossTwoTasksOfOneMachine` runs two listeners of one machine
+id and requires each of 64 role messages to reach its holder once, split across both tasks.
 
-**Open both gates before publishing `deps`.** Storing `deps` is what turns `/healthz` healthy, so
-the other order leaves a window in which `/healthz` says healthy while a route still answers
-503 -- and a caller that waits for healthy, as the shutdown test does, meets the 503.
-`TestOpenListener_PublishesOnlyOnceTheRoutesServe` holds the order for each gate.
+**Publish `deps` last.** Storing `deps` is what turns `/healthz` healthy, so it comes after both
+gates open and after the durable binds: `/healthz` is healthy only when every route serves and the
+durable delivers. Healthy before the bind would let a replacement that cannot bind read as ready,
+and ECS would stop the task still delivering; a 503 instead of `starting` would never let ECS stop
+the old task, so the replacement could never bind.
 
 ## Health States
 
 | Phase | `/healthz` | Body | Meaning |
 |-------|-----------|------|---------|
-| Starting | 200 | `{"status":"starting"}` | Alive, init in progress — don't restart; `/v1/*` answers 503, webhooks answer 503 until NATS and the CI store are open and are served after |
+| Starting | 200 | `{"status":"starting"}` | Alive, init in progress — don't restart; webhooks answer 503 until NATS and the CI store are open, `/v1/*` until the interest and session caches are warm too; both are served while the durable consumer binds, which `starting` alone waits for |
 | Healthy | 200 | `{"status":"healthy"}` | NATS connected, fully operational; `/v1/*` and webhooks are open |
 | Degraded | 200 | `{"status":"degraded","error":"..."}` | A KV dependency or the durable-consumer lookup failed transiently; NATS reconnect and the monitor retry |
 | Unhealthy | 503 | `{"status":"unhealthy","error":"..."}` | NATS, the subscription, a KV watcher or the durable consumer is gone |
@@ -136,9 +152,9 @@ Returning **200 during startup** is deliberate — it tells the orchestrator "I'
 waiting" without triggering a container restart. Startup is not short. The NATS connect makes up to
 10 attempts with a 5 s timeout each, 1 s apart (`internal/bus/nats.go`), so an unreachable NATS
 keeps the listener `starting` for about a minute before `log.Fatal`. The interest and session
-cache warm-ups are bounded at 30 s each. The durable-consumer subscribe tries up to 10 times
-with a 3 s × attempt backoff, 135 s of sleeps in all (`cmd/listener/main.go`), so a rolling
-deploy that waits for the old task's binding can stay `starting` for minutes.
+cache warm-ups are bounded at 30 s each. The durable's bind is polled every 2 s for up to 135 s
+(`bindListenerDurable`, `cmd/listener/durable.go`), so a rolling deploy that waits for the old task's
+binding stays `starting` until the old task stops, while `/v1` and the webhooks already serve.
 
 Because a starting listener answers 200, a start that cannot succeed must end rather than wait:
 a deploy that trusts the 200 would stop the old task for a replacement that never serves. A

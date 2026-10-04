@@ -20,6 +20,10 @@ import (
 const (
 	sessionMaxAgeSeconds = 30 * 24 * 60 * 60
 	sessionCookieName    = "dsession"
+	// sessionFormat leads every signed payload. The person's email is base64url-encoded so its
+	// dots cannot be read as the payload's separators; a cookie of the earlier shape, a bare
+	// GitHub login with three fields after it, has a part count of its own and never verifies.
+	sessionFormat = "2"
 )
 
 // LoadOrCreateSigningKey reads the per-server HMAC key. If missing, a fresh
@@ -32,11 +36,10 @@ func LoadOrCreateSigningKey(path string) (string, error) {
 	if !errors.Is(err, os.ErrNotExist) {
 		return "", err
 	}
-	buf := make([]byte, 32)
-	if _, err := rand.Read(buf); err != nil {
-		return "", fmt.Errorf("random: %w", err)
+	key, err := NewSigningKey()
+	if err != nil {
+		return "", err
 	}
-	key := base64.RawURLEncoding.EncodeToString(buf)
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return "", fmt.Errorf("create signing key dir: %w", err)
 	}
@@ -46,18 +49,14 @@ func LoadOrCreateSigningKey(path string) (string, error) {
 	return key, nil
 }
 
-// LoadSigningKey returns DISPATCH_SIGNING_KEY when set, otherwise falls
-// back to LoadOrCreateSigningKey(path). The env-var path is the production
-// shape (key sourced from a secrets manager and injected into the
-// container env) — the file path is the local-dev shape.
-//
-// Whichever source wins, the resulting key MUST be stable across deploys
-// or every dsession cookie invalidates whenever a container rolls.
-func LoadSigningKey(path string) (string, error) {
-	if key := os.Getenv("DISPATCH_SIGNING_KEY"); key != "" {
-		return key, nil
+// NewSigningKey returns a fresh 32-byte base64url key: the key of a process that must not share
+// cookies with any other (cmd/dispatch's dev sign-in).
+func NewSigningKey() (string, error) {
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", fmt.Errorf("random: %w", err)
 	}
-	return LoadOrCreateSigningKey(path)
+	return base64.RawURLEncoding.EncodeToString(buf), nil
 }
 
 func sign(payload, key string) string {
@@ -66,11 +65,11 @@ func sign(payload, key string) string {
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
-// IssueSessionCookie returns a Set-Cookie header value for a 30-day session.
-// When env DISPATCH_INSECURE_COOKIE is unset, the Secure flag is added.
-func IssueSessionCookie(login string, generation int64, signingKey string) string {
+// IssueSessionCookie returns a Set-Cookie header value for a 30-day session of the person named
+// by email, Secure when secure is true (cmd/dispatch: DISPATCH_INSECURE_COOKIE unset).
+func IssueSessionCookie(email string, generation int64, signingKey string, secure bool) string {
 	expiry := time.Now().Add(time.Duration(sessionMaxAgeSeconds) * time.Second).UnixMilli()
-	payload := fmt.Sprintf("%s.%d.%d", login, generation, expiry)
+	payload := sessionPayload(base64.RawURLEncoding.EncodeToString([]byte(email)), strconv.FormatInt(generation, 10), strconv.FormatInt(expiry, 10))
 	value := fmt.Sprintf("%s.%s", payload, sign(payload, signingKey))
 	attrs := []string{
 		fmt.Sprintf("%s=%s", sessionCookieName, value),
@@ -79,15 +78,19 @@ func IssueSessionCookie(login string, generation int64, signingKey string) strin
 		"SameSite=Strict",
 		fmt.Sprintf("Max-Age=%d", sessionMaxAgeSeconds),
 	}
-	if os.Getenv("DISPATCH_INSECURE_COOKIE") == "" {
+	if secure {
 		attrs = append(attrs, "Secure")
 	}
 	return strings.Join(attrs, "; ")
 }
 
+func sessionPayload(encodedEmail, generation, expiry string) string {
+	return strings.Join([]string{sessionFormat, encodedEmail, generation, expiry}, ".")
+}
+
 // ClearSessionCookie returns a Set-Cookie header value that immediately
-// invalidates the dsession cookie.
-func ClearSessionCookie() string {
+// invalidates the dsession cookie, Secure when secure is true.
+func ClearSessionCookie(secure bool) string {
 	attrs := []string{
 		fmt.Sprintf("%s=", sessionCookieName),
 		"HttpOnly",
@@ -95,13 +98,13 @@ func ClearSessionCookie() string {
 		"SameSite=Strict",
 		"Max-Age=0",
 	}
-	if os.Getenv("DISPATCH_INSECURE_COOKIE") == "" {
+	if secure {
 		attrs = append(attrs, "Secure")
 	}
 	return strings.Join(attrs, "; ")
 }
 
-// Session is the signed browser session identity and its server-revocable
+// Session is the signed browser session identity, the person's email, and its server-revocable
 // generation.
 type Session struct {
 	Login      string
@@ -112,13 +115,10 @@ type Session struct {
 // session generation on success.
 func VerifySession(value, signingKey string) (Session, bool) {
 	parts := strings.Split(value, ".")
-	if len(parts) != 4 {
+	if len(parts) != 5 || parts[0] != sessionFormat {
 		return Session{}, false
 	}
-	login, generationText, expiryStr, signature := parts[0], parts[1], parts[2], parts[3]
-	if login == "" {
-		return Session{}, false
-	}
+	encodedEmail, generationText, expiryStr, signature := parts[1], parts[2], parts[3], parts[4]
 	generation, err := strconv.ParseInt(generationText, 10, 64)
 	if err != nil || generation < 0 {
 		return Session{}, false
@@ -127,8 +127,7 @@ func VerifySession(value, signingKey string) (Session, bool) {
 	if err != nil || expiry <= time.Now().UnixMilli() {
 		return Session{}, false
 	}
-	payload := fmt.Sprintf("%s.%s.%s", login, generationText, expiryStr)
-	expected := sign(payload, signingKey)
+	expected := sign(sessionPayload(encodedEmail, generationText, expiryStr), signingKey)
 	// Constant-time compare on the raw hex strings; both come from hex.EncodeToString.
 	sigBytes, err := hex.DecodeString(signature)
 	if err != nil {
@@ -138,7 +137,11 @@ func VerifySession(value, signingKey string) (Session, bool) {
 	if err != nil || !hmac.Equal(sigBytes, expectedBytes) {
 		return Session{}, false
 	}
-	return Session{Login: login, Generation: generation}, true
+	email, err := base64.RawURLEncoding.DecodeString(encodedEmail)
+	if err != nil || len(email) == 0 {
+		return Session{}, false
+	}
+	return Session{Login: string(email), Generation: generation}, true
 }
 
 // SessionFromRequest returns the valid signed session identity. Identity

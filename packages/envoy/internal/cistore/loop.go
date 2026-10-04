@@ -158,7 +158,6 @@ func runSummaryTick(store *Store, pub Publisher, debounce time.Duration, logger 
 // settlementEnvelope is the checks envelope that settles state, issued at issuedAt.
 func settlementEnvelope(state State, issuedAt int64) (contracts.Envelope, error) {
 	sum := renderSummary(state)
-	sum.SettledAt = issuedAt
 	payload, err := json.Marshal(sum)
 	if err != nil {
 		return contracts.Envelope{}, err

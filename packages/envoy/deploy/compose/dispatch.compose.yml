@@ -21,7 +21,6 @@ services:
       DISPATCH_LISTEN_HOST: ${DISPATCH_LISTEN_HOST:-127.0.0.1}
       DISPATCH_PORT: ${DISPATCH_PORT:-8766}
       DISPATCH_APP_CLIENT_ID: ${DISPATCH_APP_CLIENT_ID:-}
-      DISPATCH_APP_CLIENT_SECRET: ${DISPATCH_APP_CLIENT_SECRET:-}
       DISPATCH_AGENT_TOKEN: ${DISPATCH_AGENT_TOKEN:?set DISPATCH_AGENT_TOKEN}
       DISPATCH_SERVER_URL: ${DISPATCH_SERVER_URL:?set DISPATCH_SERVER_URL (the browser origin)}
       NATS_URLS: ${NATS_URLS:?set NATS_URLS}
@@ -29,7 +28,12 @@ services:
       # than this host's. Every connect refuses a NATS that is not the machine's own without this
       # (packages/envoy/internal/bus/reach.go).
       ENVOY_ALLOW_REMOTE_NATS: "1"
-      DISPATCH_ALLOWED_LOGINS: ${DISPATCH_ALLOWED_LOGINS:?set DISPATCH_ALLOWED_LOGINS}
+      DISPATCH_SIGNIN_ISSUER: ${DISPATCH_SIGNIN_ISSUER:-}
+      DISPATCH_SIGNIN_CLIENT_ID: ${DISPATCH_SIGNIN_CLIENT_ID:-}
+      DISPATCH_SIGNIN_CLIENT_SECRET: ${DISPATCH_SIGNIN_CLIENT_SECRET:-}
+      DISPATCH_SIGNIN_GROUP: ${DISPATCH_SIGNIN_GROUP:-}
+      # Production uses cookie identity. header:<name> is only for test/local harnesses and
+      # requires DISPATCH_IDENTITY_HEADER_TRUSTED=1; it never shares a deployment with sign-in.
       DISPATCH_IDENTITY: ${DISPATCH_IDENTITY:-cookie}
       DISPATCH_IDENTITY_HEADER_TRUSTED: ${DISPATCH_IDENTITY_HEADER_TRUSTED:-}
       DISPATCH_NATS_DISABLED: ${DISPATCH_NATS_DISABLED:-}
@@ -47,46 +51,6 @@ services:
       # Signing key and optional app.json credentials.
       - dispatch-data:/home/envoy/.local/share/dispatch
 
-  # Acceptance run of the Playwright suite against the deployed image, isolated from the
-  # production database: `docker compose --profile acceptance up -d dispatch-acceptance`, then
-  # `bun run e2e:deployed` in packages/dispatch with the environment README.md lists.
-  postgres-acceptance:
-    profiles: ["acceptance"]
-    image: postgres:16
-    network_mode: host
-    command:
-      ["postgres", "-c", "listen_addresses=127.0.0.1", "-c", "port=${DISPATCH_ACCEPTANCE_PG_PORT:-55434}"]
-    environment:
-      POSTGRES_PASSWORD: ${DISPATCH_ACCEPTANCE_PG_PASSWORD:-dispatch}
-      POSTGRES_DB: dispatch_acceptance
-    volumes:
-      - dispatch-acceptance-pg:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p ${DISPATCH_ACCEPTANCE_PG_PORT:-55434} -U postgres"]
-      interval: 10s
-      timeout: 3s
-      retries: 3
-      start_period: 5s
 
-  dispatch-acceptance:
-    profiles: ["acceptance"]
-    image: ghcr.io/sjawhar/legion/envoy:${ENVOY_IMAGE_TAG:?set ENVOY_IMAGE_TAG (see deploy/README.md)}
-    network_mode: host
-    entrypoint: ["/usr/local/bin/envoy-dispatch"]
-    depends_on:
-      postgres-acceptance:
-        condition: service_healthy
-    environment:
-      HOME: /home/envoy
-      DATABASE_URL: postgres://postgres:${DISPATCH_ACCEPTANCE_PG_PASSWORD:-dispatch}@127.0.0.1:${DISPATCH_ACCEPTANCE_PG_PORT:-55434}/dispatch_acceptance?sslmode=disable
-      DISPATCH_LISTEN_HOST: 127.0.0.1
-      DISPATCH_PORT: "8767"
-      DISPATCH_AGENT_TOKEN: ${DISPATCH_ACCEPTANCE_TOKEN:-acceptance-token}
-      DISPATCH_ALLOWED_LOGINS: alice,bob
-      DISPATCH_IDENTITY: header:X-Dispatch-User
-      DISPATCH_NATS_DISABLED: "1"
-      DISPATCH_TEST_HOOKS: "1"
-      ENVOY_TOKEN: ${ENVOY_TOKEN:-}
 volumes:
   dispatch-data:
-  dispatch-acceptance-pg:

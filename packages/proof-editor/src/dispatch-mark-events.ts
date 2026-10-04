@@ -1,25 +1,19 @@
 /**
  * Margin-mode mark events: when a host renders comment threads itself it passes `onMarkClick`
  * and/or `onMarkHover`; this plugin replaces the mark popover. A click inside a proof or
- * dispatch mark span reports the span's id (the click is not consumed, so the caret still
- * moves); hover reports the id on enter and null on leave.
+ * dispatch mark span reports the id of the mark it names (./record-mark-target.ts: the narrowest
+ * record mark there) - the click is not consumed, so the caret still moves; hover reports that
+ * id on enter and null on leave.
  */
 import { $prose } from '@milkdown/kit/utils';
 import { Plugin, PluginKey } from '@milkdown/kit/prose/state';
+import { markIdAt } from './record-mark-target';
 
 const markEventsKey = new PluginKey('dispatch-mark-events');
-const MARK_SELECTOR = 'span[data-proof][data-id], span[data-dispatch][data-id]';
 
 export interface MarkEventsOptions {
   onMarkClick?: (markId: string) => void;
   onMarkHover?: (markId: string | null) => void;
-}
-
-function markIdAt(view: { dom: HTMLElement }, target: EventTarget | null): string | null {
-  const element = target instanceof Element ? target : null;
-  const span = element?.closest<HTMLElement>(MARK_SELECTOR) ?? null;
-  if (!span || !view.dom.contains(span) || !span.dataset.id) return null;
-  return span.dataset.id;
 }
 
 export const dispatchMarkEventsPlugin = (options: MarkEventsOptions) =>

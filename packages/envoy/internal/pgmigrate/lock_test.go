@@ -12,7 +12,7 @@ import (
 // Each row is the sequence that tells one term of the rule from its absence.
 func TestObserveNamesOnlyAHolderTheLatestReadingsSupport(t *testing.T) {
 	named := func(pid uint32) *LockWait {
-		return &LockWait{LockType: "relation", Mode: "AccessExclusiveLock", Object: "messages", Holders: []LockHolder{{PID: pid}}}
+		return &LockWait{LockType: "relation", Mode: "AccessExclusiveLock", Object: "messages", Holders: []Session{{PID: pid}}}
 	}
 	empty := func() *LockWait {
 		return &LockWait{LockType: "relation", Mode: "AccessExclusiveLock", Object: "messages"}

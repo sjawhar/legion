@@ -6,20 +6,25 @@
     ]
   },
   "version": "0.16.1",
+  "license": "Apache-2.0",
   "type": "module",
   "description": "Autonomous development swarm using Oh My Pi agents",
   "private": true,
+  "scripts": {
+    "docs:dev": "cd docs/site && bun run dev",
+    "docs:build": "cd docs/site && bun run build",
+    "docs:media": "bun docs/site/media/shots.ts"
+  },
   "workspaces": [
     "packages/contracts",
     "packages/envoy-client",
     "packages/pi-envoy",
-    "packages/daemon",
     "packages/envoy-plugin",
     "packages/claude-envoy",
     "packages/proof-editor",
     "packages/dispatch",
-    "packages/workspace",
-    "packages/envoy/internal/dispatch/pmdoc/gen"
+    "packages/envoy/internal/dispatch/pmdoc/gen",
+    "docs/site"
   ],
   "dependencies": {
     "@toon-format/toon": "^4.1.1",
@@ -27,7 +32,12 @@
     "zod": "4.3.6"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.3.14"
+    "@biomejs/biome": "^2.3.14",
+    "@types/bun": "latest",
+    "@types/spdx-expression-parse": "3.0.0",
+    "spdx-expression-parse": "3.0.1",
+    "spdx-license-list": "6.12.0",
+    "typescript": "^5.3.0"
   },
   "patchedDependencies": {
     "@milkdown/preset-gfm@7.22.1": "patches/@milkdown%2Fpreset-gfm@7.22.1.patch",

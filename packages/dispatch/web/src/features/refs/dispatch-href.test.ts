@@ -1,8 +1,7 @@
 import { expect, test } from "bun:test";
 import { DISPATCH_HREF_REFERENCES } from "@legion/contracts";
 
-import { referenceRouteFromHref } from "./RefLink";
-import { parseDispatchReference } from "./routes";
+import { parseDispatchReference, referenceRouteFromHref } from "./routes";
 
 // The SPA's half of the shared golden table: every dashboard href Dispatch emits must name the
 // same thing to the URL parser as its `dispatch://` reference does to the reference parser.

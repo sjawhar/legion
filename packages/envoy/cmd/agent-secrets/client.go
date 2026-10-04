@@ -1,14 +1,15 @@
 // packages/envoy/cmd/agent-secrets/client.go
 //
-// client is agent-secrets's own thin HTTP client for the broker routes it needs (contract v9,
-// the AGENTC-393 overview document). Session routes — everything but enrollment issuance/
-// revocation and launcher-credential issuance — are signed per call through a Signer
-// (proofsource.go: an agent box or pod's own key, or a host session's agent-secrets-helper),
-// producing exactly the Proof header internal/broker/proof.Verifier expects. CreateRequest
-// additionally needs a signed credential-request object (record.Sign) embedded in its body,
-// since contract v9 moved authorization_details and reason out of plain top-level JSON fields
-// and into that signed object; building it is also a Signer responsibility
-// (Signer.SignRequestObject), since a host session's key never leaves agent-secrets-helper.
+// client is agent-secrets's own thin HTTP client for the broker routes it needs, as the broker's
+// HTTP API reference (https://sjawhar.github.io/legion/broker/reference/api/) defines them. Session routes
+// — everything but enrollment issuance/revocation and launcher-credential issuance — are signed
+// per call through a Signer (proofsource.go: an agent box or pod's own key, or a host session's
+// agent-secrets-helper), producing exactly the Proof header internal/broker/proof.Verifier
+// expects. CreateRequest additionally needs a signed credential-request object (record.Sign)
+// embedded in its body, since the broker carries authorization_details and
+// reason inside that signed object rather than as plain top-level JSON fields; building it is
+// also a Signer responsibility (Signer.SignRequestObject), since a host session's key never
+// leaves agent-secrets-helper.
 // Enrollment issuance/revocation and launcher-credential issuance are Plan B/C helper-socket
 // operations now (see cmdEnrollHelper/cmdUnenrollHelper/cmdLauncher in main.go and
 // internal/broker/helper): no route here ever carries a bearer launcher token, and POST/GET
@@ -109,7 +110,6 @@ func (c *client) doProof(ctx context.Context, signer Signer, method, path string
 type SecretDecision struct {
 	Name     string `json:"name"`
 	Decision string `json:"decision"`
-	Delivery string `json:"delivery"`
 }
 
 // RequestResult is POST /v1/requests's exact response shape.
@@ -122,9 +122,9 @@ type RequestResult struct {
 	Coalesced bool             `json:"coalesced,omitempty"`
 }
 
-// createRequestBody is POST /v1/requests's exact contract v9 shape: a signed request object plus
-// an optional, unsigned session_id (wake-only). The v8 top-level "secrets"/"reason"/"issue"
-// fields are gone — they live inside the signed request object instead.
+// createRequestBody is POST /v1/requests's exact shape in the broker's HTTP API: a signed
+// request object plus an optional, unsigned session_id (wake-only). The v8 top-level
+// "secrets"/"reason"/"issue" fields are gone — they live inside the signed request object instead.
 type createRequestBody struct {
 	Request   string  `json:"request"`
 	SessionID *string `json:"session_id"`
@@ -193,14 +193,10 @@ func (c *client) CancelRequest(ctx context.Context, signer Signer, id string) er
 
 // --- POST /v1/grants/{id}/values, POST /v1/grants/{id}/revoke ---
 
-// GrantValues is POST /v1/grants/{id}/values's exact response shape. No proxy-delivery secrets
-// exist yet, so ProxyOnly is always empty in practice today; it is still decoded (never
-// dropped) so cmdExec can refuse to exec rather than silently omit a proxy-delivered name from
-// the child's environment.
+// GrantValues is POST /v1/grants/{id}/values's exact response shape.
 type GrantValues struct {
 	Values    map[string]string `json:"values"`
 	ExpiresAt time.Time         `json:"expires_at"`
-	ProxyOnly []string          `json:"proxy_only"`
 }
 
 func (c *client) GrantValues(ctx context.Context, signer Signer, grantID string) (GrantValues, error) {

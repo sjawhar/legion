@@ -2,13 +2,13 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { lazy, type ReactNode, type RefObject, Suspense, useEffect, useRef, useState } from "react";
 import { Link, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 
-import { api, isForbidden, isUnauthorized } from "./api/client";
+import { api, isUnauthorized } from "./api/client";
 import { useConnectionState } from "./api/live";
-import { inboxQuery, userAgentStateQuery, whoAmIQuery } from "./api/queries";
+import { userAgentStateQuery, whoAmIQuery } from "./api/queries";
 import { useEventStream } from "./api/sse";
 import type { AuthenticatedUser } from "./api/types";
 import { totalUnreadReplies, unreadRepliesLabel } from "./features/agents/unread";
-import { waitingOnYou } from "./features/inbox/BlockedOnYou";
+import { useNeedsYouCount } from "./features/inbox/BlockedOnYou";
 import { Inbox } from "./features/inbox/Inbox";
 import { CreateIssueDialog } from "./features/issue/CreateIssueDialog";
 import { DEFAULT_MARGIN_WIDTH, Margin } from "./features/margin/Margin";
@@ -16,13 +16,15 @@ import { MarginProvider } from "./features/margin/margin-context";
 import { RefPreviewHost } from "./features/refs/RefPreview";
 import {
   AGENT_LIVE_PATH,
+  buildProjectPath,
   parseIssuePath,
   parseProjectPath,
   routeFillsViewport,
   routeHasMargin,
+  routeProjectOf,
 } from "./features/refs/routes";
 import { SearchButton } from "./features/search/SearchButton";
-import { SearchPalette } from "./features/search/SearchPalette";
+import { type PaletteMode, SearchPalette } from "./features/search/SearchPalette";
 import { SettingsPage } from "./features/settings/SettingsPage";
 import { ErrorBoundary } from "./features/shell/ErrorBoundary";
 import { KeymapProvider } from "./features/shell/KeymapProvider";
@@ -108,9 +110,6 @@ const MachineLoginPage = lazy(() =>
     default: module.MachineLoginPage,
   }))
 );
-const KeysPage = lazy(() =>
-  import("./features/credentials/KeysPage").then((module) => ({ default: module.KeysPage }))
-);
 
 function IssuePageFallback(): ReactNode {
   return (
@@ -191,18 +190,8 @@ function SignInPage(): ReactNode {
         className={`mt-8 inline-flex rounded-lg px-4 py-2 font-semibold ${primaryButtonBg} ${primaryButtonHoverBg}`}
         href="/auth/start"
       >
-        Sign in with GitHub
+        Sign in with Google
       </a>
-    </ShellMessagePage>
-  );
-}
-
-function ForbiddenPage(): ReactNode {
-  return (
-    <ShellMessagePage title="This GitHub account isn't allowed here.">
-      <p className={`mt-3 ${textSecondaryOnSurface}`}>
-        Ask a Dispatch admin to add your account, then sign in again.
-      </p>
     </ShellMessagePage>
   );
 }
@@ -326,7 +315,9 @@ function NavigationContents({
 function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
   const queryClient = useQueryClient();
   const [navigationOpen, setNavigationOpen] = useState(false);
-  const [searchOpen, setSearchOpen] = useState(false);
+  // Which palette is open, and `null` for none: `$mod+k` and the rail's Search control list this
+  // page's actions and the hits, `/` searches only, and `g p` lists projects.
+  const [paletteMode, setPaletteMode] = useState<PaletteMode | null>(null);
   const [sidebarHidden, setSidebarHidden] = useUserPreference(
     "shell.sidebar",
     (stored) => stored === "hidden",
@@ -373,8 +364,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
   // on-screen keyboard while its composer has focus.
   const fillsViewport = routeFillsViewport(location.pathname);
   const connection = useConnectionState();
-  const inbox = useQuery(inboxQuery());
-  const needsYouCount = inbox.data === undefined ? 0 : waitingOnYou(inbox.data).length;
+  const needsYouCount = useNeedsYouCount();
   const unreadReplies = totalUnreadReplies(useQuery(userAgentStateQuery()).data);
 
   const mainRef = useRef<HTMLElement | null>(null);
@@ -391,13 +381,25 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
   // The registry as described when `?` fired (focus still on the caller); `null` while closed.
   const [helpSnapshot, setHelpSnapshot] = useState<readonly KeyBindingDescription[] | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
+  const routeProject = routeProjectOf(location.pathname);
   useKeymap("global", [
     {
+      // Opens only: while the palette is open the `dialog` scope is the only one consulted, and
+      // the palette's own `$mod+k` binding closes it.
       id: "search",
       inEditable: true,
       keys: "$mod+k",
-      label: "Search",
-      run: () => setSearchOpen((open) => !open),
+      label: "Search and actions",
+      run: () => setPaletteMode("all"),
+    },
+    {
+      // No row: chosen from `$mod+k`'s palette it would only reopen that palette with its actions
+      // taken away.
+      id: "search-only",
+      keys: "/",
+      label: "Search only",
+      palette: false,
+      run: () => setPaletteMode("search"),
     },
     {
       id: "help",
@@ -409,6 +411,40 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
     { id: "go-inbox", keys: "g i", label: "Go to Inbox", run: () => navigate("/") },
     { id: "go-agents", keys: "g a", label: "Go to Agents", run: () => navigate("/agents") },
     { id: "go-settings", keys: "g s", label: "Go to Settings", run: () => navigate("/settings") },
+    {
+      id: "go-documents",
+      keys: "g d",
+      label: "Go to Documents",
+      run: () => {
+        if (routeProject !== undefined) {
+          navigate(buildProjectPath({ kind: "documents", project: routeProject }));
+        }
+      },
+      when: () => routeProject !== undefined,
+    },
+    {
+      id: "go-project",
+      keys: "g p",
+      label: "Go to project…",
+      run: () => setPaletteMode("projects"),
+    },
+    {
+      id: "toggle-sidebar",
+      keys: "Shift+S",
+      label: "Toggle sidebar",
+      run: () => setSidebarHidden(!sidebarHidden),
+      // Below `xl` the sidebar is a sheet with its own Menu control, and the preference is inert.
+      when: () => !isCompactViewport,
+    },
+    {
+      id: "toggle-margin",
+      keys: "Shift+M",
+      label: "Toggle margin",
+      run: () => setMarginHidden(!marginHidden),
+      // Below `xl` the margin is a sheet the route opens itself: `Margin` reads the preference
+      // only from `xl`, so a toggle there would change nothing on screen and flip it for later.
+      when: () => !isCompactViewport && hasMargin,
+    },
   ]);
   const signOut = useMutation({
     mutationFn: () => api.logout(),
@@ -442,7 +478,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
       compact={isCompactViewport}
       onClose={() => setNavigationOpen(false)}
       onHideSidebar={() => setSidebarHidden(true)}
-      onSearch={() => setSearchOpen(true)}
+      onSearch={() => setPaletteMode("all")}
       onSignOut={() => signOut.mutate()}
       signOutError={signOut.isError}
       signOutPending={signOut.isPending}
@@ -462,10 +498,13 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
         >
           Skip to content
         </a>
+        {/* Above the highest composer fixed at the foot of the screen (`--foot-composer-inset`,
+            `useFootInset`), so the pill never sits over its controls; otherwise just above the
+            phone's bottom bar. */}
         {connection === "reconnecting" ? (
           <p
             aria-live="polite"
-            className={`fixed right-4 bottom-20 z-40 rounded-full border px-3 py-1 text-xs font-medium shadow-lg xl:bottom-4 ${calloutWarningBorder} ${statusConnecting.bg} ${statusConnecting.text}`}
+            className={`fixed right-4 bottom-[max(5rem,calc(var(--foot-composer-inset,0px)_+_1rem))] z-40 rounded-full border px-3 py-1 text-xs font-medium shadow-lg xl:bottom-[calc(var(--foot-composer-inset,0px)_+_1rem)] ${calloutWarningBorder} ${statusConnecting.bg} ${statusConnecting.text}`}
             data-testid="connection-pill"
           >
             Reconnecting…
@@ -473,7 +512,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
         ) : connection === "unavailable" ? (
           <p
             aria-live="polite"
-            className={`fixed right-4 bottom-20 z-40 flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-medium shadow-lg xl:bottom-4 ${calloutDangerBorder} ${calloutDangerBg} ${badgeBlocking.text}`}
+            className={`fixed right-4 bottom-[max(5rem,calc(var(--foot-composer-inset,0px)_+_1rem))] z-40 flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-medium shadow-lg xl:bottom-[calc(var(--foot-composer-inset,0px)_+_1rem)] ${calloutDangerBorder} ${calloutDangerBg} ${badgeBlocking.text}`}
             data-testid="connection-pill"
           >
             Live updates unavailable
@@ -591,7 +630,6 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
                 <Route element={<DocumentPage />} path="/projects/:key/documents/:slug" />
                 <Route element={<CredentialRecordPage />} path="/credentials/:recordId" />
                 <Route element={<MachineLoginPage />} path="/credentials/machine" />
-                <Route element={<KeysPage />} path="/credentials/keys" />
                 <Route element={<SettingsPage />} path="/settings" />
                 <Route element={<NotFoundPage />} path="*" />
               </Routes>
@@ -606,7 +644,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
             width={marginWidth}
           />
         </ErrorBoundary>
-        <SearchPalette onClose={() => setSearchOpen(false)} open={searchOpen} />
+        <SearchPalette mode={paletteMode} onClose={() => setPaletteMode(null)} />
         <ShortcutHelp onClose={() => setHelpSnapshot(null)} snapshot={helpSnapshot} />
         {createOpen ? <CreateIssueDialog onClose={() => setCreateOpen(false)} /> : null}
         <RefPreviewHost />
@@ -634,9 +672,6 @@ export function AuthGate(): ReactNode {
   // session expired or was revoked — otherwise a revoked user keeps the authenticated shell.
   if (whoAmI.isError && isUnauthorized(whoAmI.error)) {
     return <SignInPage />;
-  }
-  if (whoAmI.isError && isForbidden(whoAmI.error)) {
-    return <ForbiddenPage />;
   }
   if (whoAmI.data !== undefined) {
     return <AuthenticatedApp user={whoAmI.data} />;

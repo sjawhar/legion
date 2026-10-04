@@ -25,9 +25,22 @@ work=$(mktemp -d "/tmp/legion-e2e3.$$.XXXXXXXX")
 # and every agent transcript. Cleanup stops processes; removes containers, sockets, and profiles; and
 # closes the run's own pull requests on the smoke repository, deleting their branches.
 evidence=${STAGE3_EVIDENCE_DIR:-$(mktemp -d /tmp/legion-e2e3-evidence.XXXXXXXX)}
+# Refused before anything is written into the evidence directory or any trap is set
+# (lib/model-gateway-unserved.sh --fresh).
+if ! reason=$(bash "$root/scripts/e2e/lib/model-gateway-unserved.sh" --fresh "$evidence"); then
+  echo "FAIL setup: $reason" >&2
+  rmdir "$work"
+  exit 1
+fi
 mkdir -p "$evidence/logs" "$evidence/transcripts"
+# Every line of the run also goes to $evidence/transcript.log (lib/transcript.sh), so the driver and
+# its cleanup, which closes the run's pull requests, never fail on a write whoever is reading.
+# shellcheck source-path=SCRIPTDIR source=lib/transcript.sh
+. "$root/scripts/e2e/lib/transcript.sh"
+transcript_to "$evidence/transcript.log"
 ok=
 check=setup
+TZ=UTC printf -v check_started '%(%FT%TZ)T' -1 # when the current check began (lib/model-gateway-unserved.sh)
 project="S3$(( ($$ + $(date +%s)) % 100000000 ))"
 project=${project:0:10}
 ptoken=${project,,}
@@ -72,7 +85,7 @@ prod_dispatch_url=
 prod_envoy_url=${STAGE3_PRODUCTION_ENVOY_URL:-http://127.0.0.1:9020}
 audited=
 
-begin() { check=$1; printf '== %s\n' "$check"; }
+begin() { check=$1; TZ=UTC printf -v check_started '%(%FT%TZ)T' -1; printf '== %s\n' "$check"; }
 note() { printf '   %s\n' "$*"; }
 pass() { printf 'ok %s\n' "$check"; }
 fail() { printf 'FAIL %s: %s\n' "$check" "$*" >&2; exit 1; }
@@ -84,8 +97,6 @@ fail() { printf 'FAIL %s: %s\n' "$check" "$*" >&2; exit 1; }
 . "$root/scripts/e2e/lib/workflow.sh"
 # shellcheck source-path=SCRIPTDIR source=lib/leftovers.sh
 . "$root/scripts/e2e/lib/leftovers.sh"
-# shellcheck source-path=SCRIPTDIR source=lib/stage-role-prompts.sh
-. "$root/scripts/e2e/lib/stage-role-prompts.sh"
 
 # collect_transcripts copies every OMP session the rig's profile wrote into the evidence directory
 # before the isolated profile is removed.
@@ -96,7 +107,7 @@ collect_transcripts() {
 }
 
 cleanup() {
-  local p
+  local status=$? p
   set +e
   # Teardown is best effort, and errexit off does not turn the ERR trap off: a command that fails
   # here is a warning about the teardown, never a check's FAIL line, and the run's exit status is
@@ -124,6 +135,10 @@ cleanup() {
     printf "the run's scratch workspace is %s\n" "$work" >&2
   fi
   printf "the run's evidence is %s\n" "$evidence" >&2
+  # A diagnostic for a failed run: it never sets the status. A hangup, an interrupt or a termination
+  # (129, 130, 143, as trapped below) stopped the run and gets none.
+  [ -n "${ok:-}" ] || [[ $status =~ ^(129|130|143)$ ]] ||
+    bash "$root/scripts/e2e/lib/model-gateway-unserved.sh" --notes "$evidence/model-gateway" "$check_started" "$check" >&2 || true
   return 0
 }
 trap cleanup EXIT
@@ -167,7 +182,7 @@ start_dispatch() {
     offset=$(log_size dispatch)
     DATABASE_URL="postgres://legion:$pg_password@127.0.0.1:$port_pg/dispatch?sslmode=disable" \
       DISPATCH_AGENT_TOKEN="$dispatch_token" ENVOY_TOKEN="$envoy_token" HOME="$work/dispatch-home" \
-      DISPATCH_IDENTITY=header:X-Dispatch-User DISPATCH_ALLOWED_LOGINS=smoke \
+      DISPATCH_IDENTITY=header:X-Dispatch-User DISPATCH_IDENTITY_HEADER_TRUSTED=1 \
       DISPATCH_LISTEN_HOST=127.0.0.1 DISPATCH_PORT="$port_dispatch" \
       DISPATCH_SERVER_URL="http://127.0.0.1:$port_dispatch" NATS_URLS="nats://127.0.0.1:$port_nats" \
       ENVOY_URL="http://127.0.0.1:$port_listener" \
@@ -617,8 +632,7 @@ begin rig
   head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' >"$work/operator-token" &&
   head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' >"$work/postgres-password")
 chmod 0600 "$work"/*token "$work"/*-header "$work/postgres-password"
-(cd "$root/packages/daemon-go" && go build -o "$work/legion" ./cmd/legion)
-stage_role_prompts "$root" "$work"
+(cd "$root/packages/daemon" && go build -o "$work/legion" ./cmd/legion)
 (cd "$root/packages/envoy" && go build -o "$work/envoy-listener" ./cmd/listener && go build -o "$work/envoy-dispatch" ./cmd/dispatch)
 built=$(bash "$root/scripts/e2e/lib/built-from.sh" "$root" "$work/legion" "$work/envoy-listener" "$work/envoy-dispatch") || fail "lib/built-from.sh could not say what the run built"
 while IFS= read -r line; do note "$line"; done <<<"$built"
@@ -649,7 +663,7 @@ SMOKE_REPO="$repo" SMOKE_RIG_NATS="nats://127.0.0.1:$port_nats" \
 until_true 90 "the GitHub ingress bridge to report ready" grep -q 'BRIDGE READY' "$evidence/logs/bridge.log"
 (cd "$root" && bun install --frozen-lockfile >/dev/null)
 manifest=$(bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --profile "$profile" --home "$omp_home" --dest "$work/plugin")
-pin=$(bun "$root/packages/daemon/src/daemon/omp-pin.ts")
+pin=$(<"$root/.omp-pin")
 mise where "$pin" >/dev/null 2>&1 || mise install "$pin" >&2
 cat >"$work/instructions.md" <<'EOF'
 # Stage 3 proof instructions

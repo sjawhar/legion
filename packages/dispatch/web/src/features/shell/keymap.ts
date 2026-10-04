@@ -23,7 +23,10 @@ export type KeymapScope =
 export interface KeyBinding {
   /** Stable identifier, unique within the registering component. */
   id: string;
-  /** One or more alternatives in tinykeys syntax, e.g. `["j", "ArrowDown"]`. */
+  /**
+   * One or more alternatives in tinykeys syntax, e.g. `["j", "ArrowDown"]`. `[]` is a
+   * palette-only action: no key press ever matches it, and it is offered by `actions()` alone.
+   */
   keys: string | readonly string[];
   label: string;
   run: (event: KeyboardEvent) => void;
@@ -32,6 +35,16 @@ export interface KeyBinding {
   /** Fires while a control that takes typed text has focus: a `TEXTAREA`, a `SELECT`, a
    *  contentEditable element, or a text-entry `INPUT`. */
   inEditable?: boolean;
+  /** Whether `⌘K` offers this binding as an action. The default is `true` for a binding with one
+   *  key or none that is not `inEditable`, and `false` otherwise. A row presses only its first
+   *  key, and a binding with several keys may pick what it does by the key pressed (the arrows,
+   *  `1`–`9`), so one whose keys all do the same thing says `true`. An `inEditable` binding's key
+   *  is one that has to work while the reader types, which today is Escape or `$mod+k`, and both
+   *  mean something else inside the palette (Escape closes it; `$mod+k` is its own key), so such
+   *  a binding is a row only when it says `true`. Keys that walk a list with the row in hand set
+   *  `false`, as does a second key for an action that already has a row; any other binding that
+   *  sets it says why beside it. */
+  palette?: boolean;
 }
 
 /** A binding as `?` describes it: keys as typed, its scope, and whether it applies right now. */
@@ -40,6 +53,15 @@ export interface KeyBindingDescription {
   id: string;
   keys: readonly string[];
   label: string;
+  scope: KeymapScope;
+}
+
+/** A binding the palette offers as a row: its label, the keys that also run it, and the run. */
+export interface KeymapAction {
+  id: string;
+  keys: readonly string[];
+  label: string;
+  run: () => void;
   scope: KeymapScope;
 }
 
@@ -209,6 +231,13 @@ export interface KeymapOptions {
 }
 
 export interface Keymap {
+  /**
+   * The palette's rows: every enabled binding of the scopes beneath the innermost dialog whose
+   * `palette` is `true`, innermost scope first. Unset, `palette` is `false` for a binding with
+   * several keys or one that fires in an editable (`KeyBinding.palette`). A row runs its binding
+   * only if the binding is still registered and its `when()` still holds when the row is chosen.
+   */
+  actions(): KeymapAction[];
   /** Every registered binding with its `when()` evaluated now — the source for `?`. */
   describe(): KeyBindingDescription[];
   handleKeyDown(event: KeyboardEvent): void;
@@ -317,6 +346,57 @@ export function createKeymap(options: KeymapOptions = {}): Keymap {
   };
 
   return {
+    actions() {
+      // Everything beneath the innermost dialog: the palette is itself a dialog, so this is the
+      // page the reader is looking at. A scope pushed twice contributes one set of rows.
+      const stack: KeymapScope[] = ["global", ...scopes];
+      const dialog = stack.lastIndexOf(DIALOG_SCOPE);
+      const beneath = dialog === -1 ? stack : stack.slice(0, dialog);
+      const offered: KeymapAction[] = [];
+      const seen = new Set<KeymapScope>();
+      for (let depth = beneath.length - 1; depth >= 0; depth -= 1) {
+        const scope = beneath[depth] as KeymapScope;
+        if (seen.has(scope)) {
+          continue;
+        }
+        seen.add(scope);
+        const inScope: KeymapAction[] = [];
+        for (const registration of registrations) {
+          const { binding } = registration;
+          const keys = keysOf(binding);
+          if (
+            registration.scope !== scope ||
+            !(binding.palette ?? (keys.length <= 1 && binding.inEditable !== true)) ||
+            binding.when?.() === false
+          ) {
+            continue;
+          }
+          inScope.push({
+            id: binding.id,
+            keys,
+            label: binding.label,
+            // The rows are decided when the palette opens; by the time one is chosen its control
+            // may have gone (another writer reopened the issue) or its component unmounted (the
+            // page fell to its error view), so the row asks again.
+            run: () => {
+              if (registrations.includes(registration) && binding.when?.() !== false) {
+                binding.run(new KeyboardEvent("keydown", { key: keys[0] ?? "" }));
+              }
+            },
+            scope,
+          });
+        }
+        // Registration order is mount timing — the same page reached by a navigation and by a
+        // reload registers its scopes in a different order — so which row the palette highlights
+        // first would follow the load path. Within a scope the rows read alphabetically instead:
+        // collated, since a code-unit compare puts every capital before every lowercase letter
+        // ("Go to Settings" before "Go to project…"). English collation, as the labels are, so the
+        // order does not move with the reader's locale.
+        inScope.sort((a, b) => a.label.localeCompare(b.label, "en"));
+        offered.push(...inScope);
+      }
+      return offered;
+    },
     describe() {
       return registrations.map(({ binding, scope }) => ({
         enabled: binding.when?.() !== false,

@@ -20,21 +20,20 @@ nats_urls:
   - nats://nats.example:4222
 # The NATS nkey user seed the controller's Envoy connection authenticates as (the providers
 # Secret's NATS_NKEY_SEED, the legion-pane user), in a file only you can read (chmod 0600): the
-# controller's Oh My Pi reads it through NATS_NKEY_SEED_FILE. Optional; the Go `legion controller
-# start` alone reads it (the TypeScript CLI refuses the key), and refuses a blank or unreadable
-# file, one its group or others can read, or one holding no nkey user seed, before it asks the
-# daemon for anything.
+# controller's Oh My Pi reads it through NATS_NKEY_SEED_FILE. Optional; `legion controller start`
+# refuses a blank or unreadable file, one its group or others can read, or one holding no nkey user
+# seed, before it asks the daemon for anything.
 # nats_nkey_seed_file: ./nats-seed
 # Dispatch, for the controller's native tools (both keys or neither).
 dispatch_url: https://dispatch.example
 dispatch_token_file: ./dispatch-token
 # The deployment's standing rules, appended to the controller's system prompt like every pane's.
 instructions: ./instructions.md
-# How Oh My Pi is launched on this machine (defaults: no prefix; the TypeScript CLI's invocation is the
-# daemon's pinned `mise x … -- omp`, while the Go CLI holds no pin — set omp_invocation, or set
-# LEGION_OMP_PATH to an absolute omp, and it resolves the invocation as the Go daemon does).
+# How Oh My Pi is launched on this machine (defaults: no prefix and no pinned invocation — set
+# omp_invocation, or set LEGION_OMP_PATH to an absolute omp, and it resolves the invocation as the
+# Legion daemon does).
 # omp_invocation: mise x github:sjawhar/oh-my-pi@<version> -- omp
-# The Go `legion controller start` runs the prefix twice: once to probe the plugin Oh My Pi loads,
+# `legion controller start` runs the prefix twice: once to probe the plugin Oh My Pi loads,
 # before it asks the daemon for a capability, and once to launch. Both run at your terminal, as its
 # foreground job, so a prefix that asks for a PIN or a touch asks there, each time: `secrets` asks
 # once and the launch reuses its terminal-scoped grant. The prefix must run its command in that

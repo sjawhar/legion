@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useEffect, useId, useState } from "react";
 
-import { ApiError, api } from "../../api/client";
+import { ApiError, api, apiErrorMessage } from "../../api/client";
 import { inboxQuery, projectsQuery } from "../../api/queries";
 import type {
   AnswerAskInput,
@@ -42,14 +42,12 @@ interface AskAnswerFailure {
 /**
  * The refusals the same answer is refused with again however often it is sent, and what the card
  * says for each: the ask was answered or closed elsewhere, its question changed (the card reloads
- * it, so the next answer is to the new wording), or it is an approval ask naming an older version,
- * whose refusal says where the human can review instead. Any other failure may pass on a retry.
+ * it, so the next answer is to the new wording), or writing even its server state would leave the
+ * document's live state past what the server can decode. Any other failure may pass on a retry.
  */
 function answerFailure(error: Error): AskAnswerFailure {
   if (error instanceof ApiError) {
     switch (error.code) {
-      case "APPROVAL_ASK_STALE":
-        return { message: error.message, retryable: false };
       case "ASK_CLOSED":
         return {
           message: "This ask was already answered, so your answer was not saved.",
@@ -60,6 +58,14 @@ function answerFailure(error: Error): AskAnswerFailure {
       case "ASK_EDITED":
         return {
           message: "Your answer was not saved, because the question changed.",
+          retryable: false,
+        };
+      case "CAP_EXCEEDED":
+        return {
+          message: apiErrorMessage(
+            error,
+            "Your answer was not saved, because its document would be too large to load."
+          ),
           retryable: false,
         };
     }

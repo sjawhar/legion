@@ -1,0 +1,49 @@
+services:
+  # Acceptance run of the Playwright suite against a deployed image, isolated from production. The
+  # suite signs in through the fenced dev sign-in route, so it uses cookie identity, loopback
+  # listener, origin, and database, and no signing key is passed or mounted. The server generates
+  # one key for its process alone. ENVOY_URL derives from the harness port, and no Envoy token is
+  # set, so this server reaches only the fake listener Playwright starts. The acceptance service
+  # builds its own image, so the recipe needs none of the production service's variables.
+  postgres-acceptance:
+    image: postgres:16
+    network_mode: host
+    command:
+      ["postgres", "-c", "listen_addresses=127.0.0.1", "-c", "port=${DISPATCH_ACCEPTANCE_PG_PORT:-55434}"]
+    environment:
+      POSTGRES_PASSWORD: ${DISPATCH_ACCEPTANCE_PG_PASSWORD:-dispatch}
+      POSTGRES_DB: dispatch_acceptance
+    volumes:
+      - dispatch-acceptance-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p ${DISPATCH_ACCEPTANCE_PG_PORT:-55434} -U postgres"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+  dispatch-acceptance:
+    image: ghcr.io/sjawhar/legion/envoy:${ENVOY_IMAGE_TAG:?set ENVOY_IMAGE_TAG (see deploy/README.md)}
+    build:
+      context: ../../../..
+      dockerfile: packages/envoy/docker/Dockerfile
+    network_mode: host
+    entrypoint: ["/usr/local/bin/envoy-dispatch"]
+    depends_on:
+      postgres-acceptance:
+        condition: service_healthy
+    environment:
+      HOME: /home/envoy
+      DATABASE_URL: postgres://postgres:${DISPATCH_ACCEPTANCE_PG_PASSWORD:-dispatch}@127.0.0.1:${DISPATCH_ACCEPTANCE_PG_PORT:-55434}/dispatch_acceptance?sslmode=disable
+      DISPATCH_LISTEN_HOST: 127.0.0.1
+      DISPATCH_PORT: ${DISPATCH_ACCEPTANCE_PORT:-8767}
+      DISPATCH_AGENT_TOKEN: ${DISPATCH_ACCEPTANCE_TOKEN:-acceptance-token}
+      DISPATCH_DEV_SIGNIN: "1"
+      DISPATCH_IDENTITY: cookie
+      DISPATCH_INSECURE_COOKIE: "1"
+      DISPATCH_NATS_DISABLED: "1"
+      DISPATCH_SERVER_URL: http://127.0.0.1:${DISPATCH_ACCEPTANCE_PORT:-8767}
+      DISPATCH_TEST_HOOKS: "1"
+      ENVOY_URL: http://127.0.0.1:${FAKE_ENVOY_PORT:?set FAKE_ENVOY_PORT to the harness fake Envoy port; see packages/dispatch/README.md}
+volumes:
+  dispatch-acceptance-pg:

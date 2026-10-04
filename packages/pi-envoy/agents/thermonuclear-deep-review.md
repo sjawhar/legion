@@ -4,6 +4,7 @@ description: Diff-scoped security and correctness audit for bugs, breakages, dev
 # @review is the deployment's `review` model role; the Go daemon's boot gate refuses to start unless the operator's settings give
 # this agent a model, through modelRoles.review or a task.agentModelOverrides entry for it (docs/kubernetes.md, Operator configuration).
 model: ["@review"]
+autoloadSkills: [thermonuclear-deep-review]
 ---
 
 # Thermonuclear Deep Review
@@ -12,7 +13,7 @@ Review only the supplied diff and changed-file context. Return findings with fil
 
 ## Process
 
-1. Load `skill://thermonuclear-deep-review` and use its complete rubric.
+1. Apply the complete rubric of `skill://thermonuclear-deep-review`, already in your context; do not read it again.
 2. Trace effects across callers, package boundaries, configuration, and public contracts.
 3. Check feature gates and developer workflows when the change can affect either.
 4. Complete an independent review before reading PR discussion.

@@ -6,6 +6,7 @@ import type {
   ArchitectureTreeSource,
   IssueComponentsInput,
 } from "../../api/types";
+import { compareTimestamps } from "../../lib/timestamps";
 import { isIssueStatus, issueStatuses } from "../project/board-model";
 
 /** The importer's ticker runs every five minutes; a source unchecked for two ticks is stale. */
@@ -132,7 +133,7 @@ export function splitWork(issues: readonly ArchitectureTreeIssue[]): {
   done: ArchitectureTreeIssue[];
 } {
   const byActivity = (left: ArchitectureTreeIssue, right: ArchitectureTreeIssue) =>
-    right.updated_at.localeCompare(left.updated_at);
+    compareTimestamps(right.updated_at, left.updated_at) || left.key.localeCompare(right.key);
   const open = issues
     .filter((issue) => issue.status !== "done")
     .sort(

@@ -42,21 +42,27 @@ func waitForLockWait(t *testing.T, ctx context.Context, database *store.Store, l
 			t.Fatalf("the operation returned (%v) before any statement matching %s waited on a lock", err, like)
 		default:
 		}
-		var waiting int
-		// Poll from the pool, never from a transaction: a repeatable-read snapshot freezes
-		// pg_stat_activity and the loop spins until it times out.
-		if err := database.Pool.QueryRow(ctx, `
-			select count(*) from pg_stat_activity
-			where datname = current_database() and wait_event_type = 'Lock' and query like $1
-		`, like).Scan(&waiting); err != nil {
-			t.Fatalf("inspect database locks: %v", err)
-		}
-		if waiting > 0 {
+		if lockWaits(t, ctx, database, like) > 0 {
 			return
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
 	t.Fatalf("no statement waiting on a lock matching %s", like)
+}
+
+// lockWaits counts the sessions of the test's database waiting on a lock whose statement matches
+// like. It polls from the pool, never from a transaction: a repeatable-read snapshot freezes
+// pg_stat_activity, and a loop over it spins until it times out.
+func lockWaits(t *testing.T, ctx context.Context, database *store.Store, like string) int {
+	t.Helper()
+	var waiting int
+	if err := database.Pool.QueryRow(ctx, `
+		select count(*) from pg_stat_activity
+		where datname = current_database() and wait_event_type = 'Lock' and query like $1
+	`, like).Scan(&waiting); err != nil {
+		t.Fatalf("inspect database locks: %v", err)
+	}
+	return waiting
 }
 
 func TestConditionalEditDoesNotInvertTheRoomLockOrder(t *testing.T) {
@@ -178,11 +184,11 @@ func awaitUnblocked(t *testing.T, subject string, op func() error) {
 // event append and a comment write all lock the document's owner row - for a project document
 // that is the artifact row itself - while the durable writers take the room lock and then
 // reach that same row through doc_updates', doc_snapshots' and doc_checkpoints' foreign keys.
-// While the owner lock was `for update` it conflicted with those key-share checks, so the two
-// closed a cycle and Postgres broke it with `deadlock detected` - the 500 an upload returned
-// when it raced the settlement its own previous write had armed. The owner lock is
-// `for no key update` now: it still serialises the writers that take it, including the event
-// sequence allocation, and no longer blocks a foreign key.
+// A `for update` owner lock would conflict with those key-share checks, so the two would close
+// a cycle that Postgres breaks with `deadlock detected` - a 500 for an upload that races the
+// settlement its own previous write armed. The owner lock is `for no key update`: it still
+// serialises the writers that take it, including the event sequence allocation, and does not
+// block a foreign key.
 func TestDurableAppendIsNotBlockedByTheOwnerLock(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
