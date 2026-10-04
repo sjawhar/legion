@@ -21,6 +21,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
+	"github.com/sjawhar/legion/daemon/internal/prompts"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	legionstore "github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
@@ -418,6 +419,30 @@ func TestTheMergerIsStartedWithTheRoundsApprovedHead(t *testing.T) {
 				t.Fatalf("merger task %q, want it to end with %q", task, tc.want)
 			}
 		})
+	}
+}
+
+// The merger reads the approved head from its task by the label this package writes, so a rename
+// on either side alone fails here rather than leaving the merger reading a line it never gets.
+func TestTheMergerPromptReadsTheApprovedHeadLabel(t *testing.T) {
+	composer, err := prompts.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("compose the shipped prompts: %v", err)
+	}
+	parts, err := composer.Compose(claim.RoleMerger, false)
+	if err != nil {
+		t.Fatalf("compose the merger's prompt: %v", err)
+	}
+	var prompt strings.Builder
+	for _, path := range parts.RolePromptPaths {
+		part, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read role prompt part %s: %v", path, err)
+		}
+		prompt.Write(part)
+	}
+	if want := "task's `" + approvedHeadLabel + ":` line"; !strings.Contains(prompt.String(), want) {
+		t.Fatalf("the merger's prompt does not say %q, the label its start task carries", want)
 	}
 }
 
