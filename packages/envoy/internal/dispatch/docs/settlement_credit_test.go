@@ -21,7 +21,7 @@ import (
 
 // An ask block a session writes just before its issue closes - inside the settle delay, so no
 // settlement indexed it yet - is still that session's ask once the issue reopens and the document
-// settles: the asking session can reword it, and readers can tell who asked (AGENTC-150).
+// settles: the asking session can reword it, and readers can tell who asked.
 func TestAnAskWrittenJustBeforeItsIssueClosedKeepsItsAuthorAfterAReopen(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour // the issue closes before the edit's own settlement runs
