@@ -60,6 +60,7 @@ func TestAnEarlierGenerationsSuperviseRowNeverActsOnTheNextGeneration(t *testing
 	runner := &outbox{
 		dispatchProject: "LEGION",
 		pool:            pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"),
+		github:   newBranchGitHub(t, nil, branchExists).url,
 		dispatch: client, notices: &outboxPublisher{}, handlers: handlers, log: quietLogger(), now: time.Now,
 		provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
 			return workspace.Workspace{}, nil
@@ -88,8 +89,12 @@ func TestAnEarlierGenerationsSuperviseRowNeverActsOnTheNextGeneration(t *testing
 		t.Fatalf("ready: %v", err)
 	}
 
-	if err := runner.RunOnce(ctx); err != nil {
-		t.Fatalf("run the generation-1 linger rows: %v", err)
+	// The first run creates the re-admitted root's branch, which its architect's start waits for;
+	// the second runs that start.
+	for range 2 {
+		if err := runner.RunOnce(ctx); err != nil {
+			t.Fatalf("run the generation-1 linger rows: %v", err)
+		}
 	}
 	if got := machine.Claim().State; got != supervise.StateReady {
 		t.Fatalf("generation 2's implementer is %s after generation 1's linger rows ran, want ready", got)
