@@ -1514,50 +1514,75 @@ func TestReparentUnderSiblingDoesNotDeadlockWithItsStatusWrite(t *testing.T) {
 	}
 }
 
-// A board move locks its rank neighbours in turn. Reparenting the later neighbour under the
-// earlier one must take both rows in key order before it writes, so it queues behind the move or
-// the move queues behind it, rather than each holding one neighbour while waiting on the other.
+// A board move locks its two rank neighbours, and a reparent locks the issue and its new parent,
+// each pair in key order. Reparenting one neighbour under the other while an issue moves between
+// them therefore queues one write behind the other, whichever of the two the board shows first,
+// rather than each holding one neighbour while waiting on the other.
 func TestReparentDoesNotDeadlockWithBoardMoveBetweenItsEnds(t *testing.T) {
-	handler, database, _ := newTestServer(t, testServerOptions{settle: time.Hour})
-	keys := createListedIssues(t, handler, "CORE", 3)
-	moving, parent, child := keys[0], keys[1], keys[2]
-	gate, err := database.Pool.Begin(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer gate.Rollback(context.Background())
-	if _, err := gate.Exec(context.Background(), `select key from issues where key = $1 for no key update`, child); err != nil {
-		t.Fatal(err)
-	}
-	responses := make(chan *httptest.ResponseRecorder, 2)
-	go func() {
-		responses <- dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+child, map[string]string{"parent": parent}, "alice")
-	}()
-	waitForDatabaseLocks(t, gate, 1)
-	go func() {
-		responses <- dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+moving, map[string]any{
-			"rank": map[string]string{"after": parent, "before": child},
-		}, "alice")
-	}()
-	waitForDatabaseLocks(t, gate, 2)
-	if err := gate.Commit(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	for range 2 {
-		if response := awaitResponse(t, responses); response.Code != http.StatusOK {
-			t.Errorf("reparent beside a board move between its ends: %d %s", response.Code, response.Body.String())
-		}
-	}
-	issues := map[string]model.Issue{}
-	for _, key := range keys {
-		issues[key] = decodeBody[model.Issue](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+key, nil, "alice"))
-	}
-	if got := issues[child].Parent; got == nil || *got != parent {
-		t.Fatalf("reparent did not persist: %v", got)
-	}
-	if !(issues[parent].Rank < issues[moving].Rank && issues[moving].Rank < issues[child].Rank) {
-		t.Fatalf("board move did not land between its neighbours: %q < %q < %q",
-			issues[parent].Rank, issues[moving].Rank, issues[child].Rank)
+	for _, scenario := range []struct {
+		name string
+		// moving, parent and child index the three issues in creation order, which is key order.
+		moving, parent, child int
+		// childFirst moves the child ahead of its parent on the board before the race.
+		childFirst bool
+	}{
+		{name: "board order matches key order", moving: 0, parent: 1, child: 2},
+		{name: "board order reverses key order", moving: 2, parent: 0, child: 1, childFirst: true},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			handler, database, _ := newTestServer(t, testServerOptions{settle: time.Hour})
+			keys := createListedIssues(t, handler, "CORE", 3)
+			moving, parent, child := keys[scenario.moving], keys[scenario.parent], keys[scenario.child]
+			after, before := parent, child
+			if scenario.childFirst {
+				if response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+child, map[string]any{
+					"rank": map[string]string{"before": parent},
+				}, "alice"); response.Code != http.StatusOK {
+					t.Fatalf("rank the child first: %d %s", response.Code, response.Body.String())
+				}
+				after, before = child, parent
+			}
+			// The gate holds the neighbour the move names second, so the reparent waits for it and
+			// the move reaches the other neighbour before the gate opens.
+			gate, err := database.Pool.Begin(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer gate.Rollback(context.Background())
+			if _, err := gate.Exec(context.Background(), `select key from issues where key = $1 for no key update`, before); err != nil {
+				t.Fatal(err)
+			}
+			responses := make(chan *httptest.ResponseRecorder, 2)
+			go func() {
+				responses <- dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+child, map[string]string{"parent": parent}, "alice")
+			}()
+			waitForDatabaseLocks(t, gate, 1)
+			go func() {
+				responses <- dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+moving, map[string]any{
+					"rank": map[string]string{"after": after, "before": before},
+				}, "alice")
+			}()
+			waitForDatabaseLocks(t, gate, 2)
+			if err := gate.Commit(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			for range 2 {
+				if response := awaitResponse(t, responses); response.Code != http.StatusOK {
+					t.Errorf("reparent beside a board move between its ends: %d %s", response.Code, response.Body.String())
+				}
+			}
+			issues := map[string]model.Issue{}
+			for _, key := range keys {
+				issues[key] = decodeBody[model.Issue](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+key, nil, "alice"))
+			}
+			if got := issues[child].Parent; got == nil || *got != parent {
+				t.Fatalf("reparent did not persist: %v", got)
+			}
+			if !(issues[after].Rank < issues[moving].Rank && issues[moving].Rank < issues[before].Rank) {
+				t.Fatalf("board move did not put the issue between its neighbours: %q < %q < %q",
+					issues[after].Rank, issues[moving].Rank, issues[before].Rank)
+			}
+		})
 	}
 }
 
@@ -1639,6 +1664,10 @@ func TestConcurrentThreeWayDependenciesDoNotCommitCycle(t *testing.T) {
 	}
 }
 
+// A board move locks both rank neighbours in key order, so while it waits for its gated anchor it
+// holds its other neighbour (CORE-12 sorts before CORE-2). A status write on that neighbour waits
+// for the move and finishes once the gate opens; a dependency write naming the neighbour finishes
+// while the move still waits.
 func TestBoardMoveStatusAndDependencyWriteDoNotDeadlock(t *testing.T) {
 	handler, database, _ := newTestServer(t, testServerOptions{settle: time.Hour})
 	keys := createListedIssues(t, handler, "CORE", 12)
@@ -1663,25 +1692,26 @@ func TestBoardMoveStatusAndDependencyWriteDoNotDeadlock(t *testing.T) {
 		}, "alice")
 	}()
 	waitForDatabaseLocks(t, gate, 1)
-	others := make(chan *httptest.ResponseRecorder, 2)
+	statusWrites := make(chan *httptest.ResponseRecorder, 1)
 	go func() {
-		others <- dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+neighbor, map[string]string{"status": "todo"}, "alice")
+		statusWrites <- dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+neighbor, map[string]string{"status": "todo"}, "alice")
 	}()
+	waitForDatabaseLocks(t, gate, 2)
+	dependencyWrites := make(chan *httptest.ResponseRecorder, 1)
 	go func() {
-		others <- dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+dependent, map[string]any{"blocked_by": []string{neighbor}}, "alice")
+		dependencyWrites <- dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+dependent, map[string]any{"blocked_by": []string{neighbor}}, "alice")
 	}()
-	for range 2 {
-		response := awaitResponse(t, others)
-		if response.Code != http.StatusOK {
-			t.Fatalf("write beside a waiting board move: %d %s", response.Code, response.Body.String())
-		}
+	if response := awaitResponse(t, dependencyWrites); response.Code != http.StatusOK {
+		t.Fatalf("dependency write beside a waiting board move: %d %s", response.Code, response.Body.String())
 	}
 	if err := gate.Commit(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	response := awaitResponse(t, moves)
-	if response.Code != http.StatusOK || decodeBody[model.Issue](t, response).Status != "todo" {
+	if response := awaitResponse(t, moves); response.Code != http.StatusOK || decodeBody[model.Issue](t, response).Status != "todo" {
 		t.Fatalf("board move: %d %s", response.Code, response.Body.String())
+	}
+	if response := awaitResponse(t, statusWrites); response.Code != http.StatusOK || decodeBody[model.Issue](t, response).Status != "todo" {
+		t.Fatalf("status write on the board move's neighbour: %d %s", response.Code, response.Body.String())
 	}
 }
 

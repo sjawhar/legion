@@ -63,6 +63,28 @@ func lockProjectIssueDependencies(ctx context.Context, tx pgx.Tx, project string
 	return nil
 }
 
+// lockIssueRows locks the named issue rows `for no key update` in key order, the order
+// LockOwners takes event owners. A reparent locks the issue and its new parent through it and a
+// board move its two rank neighbours, so two writes naming the same pair queue one behind the
+// other instead of each holding one row while waiting for the other. It sorts keys in place. A
+// key with no row is skipped; the caller's own read of that key refuses it.
+func lockIssueRows(ctx context.Context, q queryer, keys ...string) error {
+	slices.Sort(keys)
+	for index, key := range keys {
+		if index > 0 && key == keys[index-1] {
+			continue
+		}
+		err := q.QueryRow(ctx, `select key from issues where key = $1 for no key update`, key).Scan(new(string))
+		if errors.Is(err, pgx.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // validateIssueParent reads the ancestor chain while the project's dependency lock is held.
 func validateIssueParent(ctx context.Context, tx pgx.Tx, key, project, parent string) error {
 	if parent == key {

@@ -30,6 +30,23 @@ func (s *server) rankForInput(ctx context.Context, q queryer, project, issueKey 
 		next     string
 		err      error
 	)
+	// Both neighbours are locked in key order before either is read, as a reparent locks an issue
+	// and its new parent, so a move between an issue and its parent and a reparent of one under
+	// the other queue one behind the other whichever the board shows first. rankBoundary refuses a
+	// neighbour that names no issue.
+	var neighbours [2]string
+	count := 0
+	if input.After != nil {
+		neighbours[count] = strings.TrimSpace(*input.After)
+		count++
+	}
+	if input.Before != nil {
+		neighbours[count] = strings.TrimSpace(*input.Before)
+		count++
+	}
+	if err := lockIssueRows(ctx, q, neighbours[:count]...); err != nil {
+		return "", err
+	}
 	if input.After != nil {
 		previous, err = rankBoundary(ctx, q, project, issueKey, *input.After)
 		if err != nil {
