@@ -54,11 +54,12 @@ test("lists live grants once credential requests are configured, and Revoke is o
   const getCredentialGrants = spyOn(api, "getCredentialGrants").mockResolvedValue({
     grants: [
       {
-        approver: "sami",
+        approver: "sami@example.com",
         created_at: "2026-09-30T00:00:00Z",
-        enrollment: { kind: "box", operator: "sami", runtime_id: "box-1", slot: null },
+        enrollment: { kind: "box", operator: "sami@example.com", runtime_id: "box-1", slot: null },
         expires_at: "2026-09-30T01:00:00Z",
         grant_id: "grant-1",
+        granted: "approval",
         names: ["DEEL_API_KEY"],
         record_id: "rec-1",
       },
@@ -85,23 +86,40 @@ test("lists live grants once credential requests are configured, and Revoke is o
   }
 });
 
-// The list holds grants on enrollments the viewer operates that another login approved, so each
-// row names the login that approved it.
-test("names the approver of a grant another login approved on the viewer's enrollment", async () => {
+// The list holds every grant of the viewer's sessions, so each row says how it was granted: by the
+// policy without asking, or on the approval of a login it names, which can be another person's.
+test("names how each grant was granted: automatically, or approved by whom", async () => {
   const unrelated = stubUnrelatedQueries();
   const getCredentialPending = spyOn(api, "getCredentialPending").mockResolvedValue({
     pending: [],
   });
+  const enrollment = {
+    kind: "host",
+    operator: "sami@example.com",
+    runtime_id: "example-host-devbox:4242:1",
+    slot: null,
+  };
   const getCredentialGrants = spyOn(api, "getCredentialGrants").mockResolvedValue({
     grants: [
       {
-        approver: "mallory",
+        approver: "mallory@example.com",
         created_at: "2026-09-30T00:00:00Z",
-        enrollment: { kind: "box", operator: "sami", runtime_id: "box-1", slot: null },
+        enrollment,
         expires_at: "2026-09-30T01:00:00Z",
         grant_id: "grant-1",
+        granted: "approval",
         names: ["DEEL_API_KEY"],
         record_id: "rec-1",
+      },
+      {
+        approver: null,
+        created_at: "2026-09-30T00:00:00Z",
+        enrollment,
+        expires_at: "2026-09-30T01:00:00Z",
+        grant_id: "grant-2",
+        granted: "automatic",
+        names: ["GWS_READ_TOKEN"],
+        record_id: null,
       },
     ],
   });
@@ -109,8 +127,10 @@ test("names the approver of a grant another login approved on the viewer's enrol
   try {
     renderPage();
 
-    expect(await screen.findByRole("columnheader", { name: "Approver" })).toBeDefined();
-    expect(screen.getByRole("cell", { name: "mallory" })).toBeDefined();
+    expect(await screen.findByRole("columnheader", { name: "Granted" })).toBeDefined();
+    expect(screen.getByRole("cell", { name: "Approved by mallory@example.com" })).toBeDefined();
+    expect(screen.getByRole("cell", { name: "Automatically" })).toBeDefined();
+    expect(screen.getAllByRole("button", { name: "Revoke" })).toHaveLength(2);
   } finally {
     cleanup();
     getCredentialPending.mockRestore();
@@ -129,11 +149,12 @@ test("two grants on one pod read apart by their slots", async () => {
     pending: [],
   });
   const grant = (grantId: string, slot: string | null) => ({
-    approver: "sami",
+    approver: "sami@example.com",
     created_at: "2026-09-30T00:00:00Z",
     enrollment: { kind: "pod", operator: "", runtime_id: "3f9c-pod-uid", slot },
     expires_at: "2026-09-30T01:00:00Z",
     grant_id: grantId,
+    granted: "approval" as const,
     names: ["DEEL_API_KEY"],
     record_id: `rec-${grantId}`,
   });

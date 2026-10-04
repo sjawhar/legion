@@ -7,6 +7,9 @@ set -euo pipefail
 
 readonly dispatch_url="${DISPATCH_URL%/}"
 readonly dispatch_user="$DISPATCH_USER"
+# DISPATCH_AGENT_TOKEN may list several values while the token rotates; the first is the current one.
+read -r agent_token _ <<<"$DISPATCH_AGENT_TOKEN"
+readonly agent_token
 readonly project_key="E2E${RANDOM}"
 readonly issue_key="${project_key}-1"
 readonly sse_file="$(mktemp)"
@@ -34,7 +37,7 @@ request() {
 
 agent_request() {
   curl -fsS \
-    -H "Authorization: Bearer ${DISPATCH_AGENT_TOKEN}" \
+    -H "Authorization: Bearer ${agent_token}" \
     -H "Content-Type: application/json" \
     "$@"
 }
@@ -74,7 +77,7 @@ jq -e --arg id "$ask_id" 'length == 1 and .[0].id == $id and .[0].issue.key != "
   exit 1
 }
 
-answer="$(request -X POST "${dispatch_url}/api/v1/asks/${ask_id}/answer" -d '{"selected":["brown"]}')"
+answer="$(request -X POST "${dispatch_url}/api/v1/asks/${ask_id}/answer" -d '{"selected":["brown"],"expected_edited_at":null}')"
 jq -e '.state == "answered" and .answer.user != "" and .answer.selected == ["brown"]' <<<"$answer" >/dev/null || {
   printf 'answer response was unexpected: %s\n' "$answer" >&2
   exit 1

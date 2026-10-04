@@ -61,7 +61,7 @@ page:
 | Enrollment | The session's kind, runtime and operator: `host · example-host-build:2150654:335907311 · ada@example.com` |
 | Lifetime | How long a grant would last: 1 hour |
 | Requested, Expires | When it was asked, and when it [expires](/legion/broker/concepts/#approvals) undecided |
-| Rules version | The version of the secret policy it was decided under: the SHA-256 of every agent secret's name, owner, tier and ARN |
+| Policy version | The version of the secret policy it was decided under: the SHA-256 of every agent secret's name, owner, tier and ARN |
 | Approver | `ada@example.com` |
 | The agent's stated reason | Deploy the example service |
 
