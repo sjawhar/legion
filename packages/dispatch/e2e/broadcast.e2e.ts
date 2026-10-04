@@ -155,6 +155,90 @@ test("a broadcast lists recipient cards in the non-alphabetical order the sender
   }
 });
 
+// LEGION-540. A broadcast's body is Markdown wherever it shows: the broadcast page's header, the
+// recipient's copy on the Agents page, and the list's one-line preview. A numbered list is a
+// list, not one run-on line, on the desktop and on a phone.
+test("a broadcast written as a numbered list renders as a list on the broadcast page, the Agents page and the broadcasts list", async ({
+  browser,
+}, testInfo) => {
+  await setLiveSessions([planner, tester]);
+  const body =
+    "Three things before the cut:\n\n1. **Stop** the deploy\n2. Check `dispatch-deploy.yml`\n3. Report back here";
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto("/agents");
+    const agents = page.getByRole("region", { name: "Agents" });
+    await agents.getByRole("button", { name: "No Dispatch activity (2)" }).click();
+    for (const title of ["Planner", "Tester"]) {
+      await page.getByRole("checkbox", { name: `Select ${title} for broadcast` }).check();
+    }
+    const composer = page.getByRole("region", { name: "Broadcast" });
+    await composer.getByRole("combobox", { name: "Delivery mode" }).selectOption("steer");
+    await composer.getByRole("textbox", { name: "Broadcast message" }).fill(body);
+    const send = composer.getByRole("button", { name: "Send to 2" });
+    await expect(send).toBeEnabled();
+    await send.click();
+    await page.waitForURL(/\/agents\/broadcasts\/[0-9a-f-]+$/);
+
+    // The broadcast page: its header shows the body as the author wrote it, a numbered list of
+    // three items with the bold and the code span, and nothing of the syntax.
+    const view = page.getByRole("region", { name: "Broadcast" });
+    await expect(view.getByRole("heading", { name: "Broadcast to 2 agents" })).toBeVisible();
+    const header = view.locator("header");
+    await expect(header.locator("ol > li")).toHaveText([
+      "Stop the deploy",
+      "Check dispatch-deploy.yml",
+      "Report back here",
+    ]);
+    await expect(header.locator("ol > li > strong")).toHaveText("Stop");
+    await expect(header.locator("ol > li > code")).toHaveText("dispatch-deploy.yml");
+    await expect(header).not.toContainText("**");
+    await expect(header).not.toContainText("1.");
+    await page.screenshot({
+      path: testInfo.outputPath("broadcast-markdown-view.png"),
+      fullPage: true,
+    });
+
+    // Every recipient was sent the list as written: the wire carries the line breaks.
+    const sends = await getSentMessages();
+    expect(sends.map((entry) => entry.message)).toEqual([body, body]);
+
+    // The recipient's copy on the Agents page renders the same way. A broadcast is the viewer's
+    // own send, not a signal from the session, so both recipients still sit under the fold.
+    await page.goto("/agents");
+    const agentsAgain = page.getByRole("region", { name: "Agents" });
+    await agentsAgain.getByRole("button", { name: "No Dispatch activity (2)" }).click();
+    await agentsAgain.locator("[data-agent-toggle]", { hasText: "Planner" }).click();
+    const conversation = page.getByRole("list", { name: "Conversation with Planner" });
+    await expect(conversation.locator("ol > li")).toHaveText([
+      "Stop the deploy",
+      "Check dispatch-deploy.yml",
+      "Report back here",
+    ]);
+    await page.screenshot({
+      path: testInfo.outputPath("broadcast-markdown-agents.png"),
+      fullPage: true,
+    });
+
+    // The list's one-line preview keeps the formatting and drops the syntax.
+    await page.goto("/agents/broadcasts");
+    const list = page.getByRole("region", { name: "Broadcasts" });
+    const preview = list.locator("[data-markdown-preview]");
+    await expect(preview).toContainText("Three things before the cut: Stop the deploy");
+    await expect(preview.locator("strong")).toHaveText("Stop");
+    await expect(preview).not.toContainText("**");
+    await expect(preview.locator("ol")).toHaveCount(0);
+    await page.screenshot({
+      path: testInfo.outputPath("broadcast-markdown-list.png"),
+      fullPage: true,
+    });
+  } finally {
+    await alice.close();
+  }
+});
+
 test("a session that goes away before the send is excluded by the server and named on the broadcast, and a failed recipient can be retried there", async ({
   browser,
 }, testInfo) => {

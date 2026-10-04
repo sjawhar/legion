@@ -1096,14 +1096,13 @@ test("Agents shows only the newest exchange and folds the rest behind Show N old
 
     fireEvent.click(older);
     expect(older.getAttribute("aria-expanded")).toBe("true");
-    // Newest first, the fold's rows beneath the newest exchange in the same list. The reply's
-    // quote of its parent renders through the same Markdown root, so only bodies are counted.
+    // Newest first, the fold's rows beneath the newest exchange in the same list. A body is a
+    // full Markdown block (its text in a `<p>` under the root); the reply's quote of its
+    // parent is a one-line preview with no paragraph, so only paragraphs are counted.
     await waitFor(() =>
       expect(
         within(conversation)
-          .getAllByText(/question$/, {
-            selector: ".dispatch-markdown:not([data-markdown-preview])",
-          })
+          .getAllByText(/question$/, { selector: ".dispatch-markdown > p" })
           .map((node) => node.textContent)
       ).toEqual(["Third question", "Second question", "First question"])
     );

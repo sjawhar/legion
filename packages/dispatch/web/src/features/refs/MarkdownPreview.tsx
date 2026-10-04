@@ -108,6 +108,7 @@ export function MarkdownPreview({
   lines,
   markdown,
   onRendered,
+  title,
 }: {
   className?: string;
   highlight?: readonly string[];
@@ -118,6 +119,9 @@ export function MarkdownPreview({
   lines: 1 | 2 | 3;
   markdown: string;
   onRendered?: () => void;
+  /** What a pointer reader sees on hover, for a surface whose text is long enough to be cut:
+   *  the full source, as `TruncatedText` offers. */
+  title?: string;
 }): ReactNode {
   const onRenderedRef = useRef(onRendered);
   onRenderedRef.current = onRendered;
@@ -195,6 +199,7 @@ export function MarkdownPreview({
       data-markdown-fallback={isFallback || undefined}
       data-markdown-preview=""
       ref={root}
+      title={title}
     >
       {referenceAnchors.map(({ anchor, key, route }) =>
         createPortal(<RefLink route={route} />, anchor, key)
