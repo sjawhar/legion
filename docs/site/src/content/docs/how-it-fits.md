@@ -74,9 +74,9 @@ Two decisions stay with people:
 - **The design gate.** Before implementation starts, a person approves the root issue's spec at a
   specific version in Dispatch. A later version of the spec closes the gate again until someone
   approves it. The gate is on by default; a deployment can turn it off.
-- **The merge.** The merger checks that every check the base branch requires has passed, then posts
-  `READY` on the Dispatch issue. A person merges the pull request under the repository's own rules.
-  Legion never merges.
+- **The merge.** The merger checks that every check and workflow the base branch requires has
+  passed, then posts `READY` on the Dispatch issue. A person merges the pull request under the
+  repository's own rules. Legion never merges.
 
 The coordinator runs its agents as Oh My Pi sessions, either in tmux panes on one host or as Agent
 Sandbox pods in a Kubernetes cluster.

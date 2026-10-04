@@ -1045,6 +1045,14 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 				}
 			})
 		},
+		"DISPATCH_ASSET_STORE_BUCKET": func(t *testing.T) {
+			if boot := resolveWith(t, map[string]string{"DISPATCH_ASSET_STORE_BUCKET": " retained-assets "}); boot.AssetStoreBucket != "retained-assets" {
+				t.Errorf("AssetStoreBucket = %q", boot.AssetStoreBucket)
+			}
+			if boot := resolveWith(t, nil); boot.AssetStoreBucket != "" {
+				t.Errorf("unset AssetStoreBucket = %q, want disabled", boot.AssetStoreBucket)
+			}
+		},
 		"DISPATCH_WEB_DIST": func(t *testing.T) {
 			if dir, err := defaultWebDistDir(resolveWith(t, map[string]string{"DISPATCH_WEB_DIST": "/srv/dispatch/dist"}).WebDist); err != nil || dir != "/srv/dispatch/dist" {
 				t.Errorf("web dist = %q, %v", dir, err)
@@ -1090,6 +1098,21 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 					}
 				}
 			})
+		},
+		"DISPATCH_TEST_SETTLE_DELAY": func(t *testing.T) {
+			const longDelay = 30 * time.Second
+			boot := resolveWith(t, map[string]string{
+				"DISPATCH_TEST_HOOKS":        "1",
+				"DISPATCH_TEST_SETTLE_DELAY": longDelay.String(),
+			})
+			if boot.SettleDelay != longDelay {
+				t.Errorf("DISPATCH_TEST_SETTLE_DELAY: SettleDelay = %v, want %v", boot.SettleDelay, longDelay)
+			}
+			for _, invalid := range []string{"not-a-duration", "-1s", "0s"} {
+				refusedWith(t, map[string]string{"DISPATCH_TEST_HOOKS": "1", "DISPATCH_TEST_SETTLE_DELAY": invalid},
+					fmt.Sprintf("DISPATCH_TEST_SETTLE_DELAY=%q (expected a positive Go duration)", invalid))
+			}
+			refusedWith(t, map[string]string{"DISPATCH_TEST_SETTLE_DELAY": "1s"}, "DISPATCH_TEST_HOOKS=1 required")
 		},
 	}
 	for _, row := range settings {

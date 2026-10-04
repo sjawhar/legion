@@ -1,4 +1,4 @@
-// Package machine implements AGENTC-393 Plan A machine logins: a typed-code approval flow that
+// Package machine implements machine logins: a typed-code approval flow that
 // mints key-bound launcher credentials. A machine (an operator's box, a Kubernetes pod, or an
 // automated service like the Legion daemon) signs a credential-request object naming the
 // operator it logs in as (login_hint) and a single launcher_credential authorization detail, and

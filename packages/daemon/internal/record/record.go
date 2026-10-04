@@ -177,10 +177,16 @@ type PullRequest struct {
 	PlannedRed bool
 	// Required is the checks the pull request's base branch requires (its rulesets' required status
 	// checks and its branch protection's), as the daemon last read them from GitHub
-	// (intake.RequiredChecks). Only a required check decides the checks verdict
-	// (classify.HeadVerdict), so nil, a set never read, decides none; an empty set is a base that
-	// requires no check, where nothing is red.
+	// (intake.RequiredChecks). Only a required check or workflow decides the checks verdict
+	// (classify.HeadVerdict), so nil, a set never read, decides none; an empty set, with no
+	// required workflow, is a base that requires nothing, where nothing is red.
 	Required []string
+	// Workflows is each workflow the base branch's rulesets require to succeed, read with Required,
+	// and the result of its latest run on WorkflowsHead, the head the daemon read the runs of; empty
+	// when the base requires no workflow, and WorkflowsHead then too. A result stands only for the
+	// head whose settlement is recorded (classify.HeadChecks). A reopen keeps both, with Required.
+	Workflows     []RequiredWorkflow
+	WorkflowsHead string
 	// ReviewSeen is the newest deciding review (changes requested or approved) GitHub reported for
 	// the pull request: a deciding review not after it was submitted before one already processed,
 	// and records nothing. A comment decides nothing and leaves it as it is. It lasts as long as the
@@ -190,10 +196,23 @@ type PullRequest struct {
 	State      PullRequestState
 }
 
-// RequiresExactly says whether names is the required set recorded: a set was read, and it is
-// names. Nil Required is a set never read, never the same as a read one, even an empty one.
-func (pr PullRequest) RequiresExactly(names []string) bool {
-	return pr.Required != nil && slices.Equal(pr.Required, names)
+// RequiredWorkflow is one workflow the base branch requires, named by its path, and the result of
+// its latest run on a head as the daemon read it (requiredchecks.Workflows): success, pending,
+// missing (the head has no run of it), or the conclusion it failed with. Run and Attempt are that
+// run's id and attempt, both zero when the head has no run of it: a re-run keeps its run's id and
+// raises its attempt, so a re-run that ends as the run did before is still a new read.
+type RequiredWorkflow struct {
+	Path    string `json:"path"`
+	Result  string `json:"result"`
+	Run     int64  `json:"run,omitempty"`
+	Attempt int    `json:"attempt,omitempty"`
+}
+
+// RequiredReadUnchanged says whether a read of what the base branch requires is what pr records:
+// names is its required check set, and workflows its required workflows' runs and their results,
+// read at head. Nil Required is a set never read, never the same as a read one, even an empty one.
+func (pr PullRequest) RequiredReadUnchanged(names []string, workflows []RequiredWorkflow, head string) bool {
+	return pr.Required != nil && slices.Equal(pr.Required, names) && slices.Equal(pr.Workflows, workflows) && pr.WorkflowsHead == head
 }
 
 // PullRequestState is whether a pull request is open, merged, or closed unmerged.
