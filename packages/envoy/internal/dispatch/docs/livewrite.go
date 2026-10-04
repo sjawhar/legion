@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"weak"
 
 	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/provider/websocket"
@@ -54,8 +55,9 @@ type liveWrite struct {
 	// transaction's updates applied, brought up to date before each operation (forkLive).
 	clientID crdt.ClientID
 	fork     *crdt.Doc
-	// forkedFrom is the room document fork was last brought up to date from.
-	forkedFrom *crdt.Doc
+	// forkedFrom is the room document fork was last brought up to date from, held weakly: a
+	// write open across a room's eviction must not be what keeps its document resident past it.
+	forkedFrom weak.Pointer[crdt.Doc]
 	updates    [][]byte
 	// tree and markdown are the document as this transaction's latest operation left it,
 	// rendered once by that operation (applyLive) for the version its transaction may write.
@@ -169,7 +171,7 @@ func (s *Service) forkLive(ctx context.Context, write *liveWrite) (*crdt.Doc, er
 	var incremental bool
 	err := s.srv.Apply(ctx, write.artifactID, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
 		room = doc
-		incremental = write.fork != nil && doc == write.forkedFrom
+		incremental = write.fork != nil && doc == write.forkedFrom.Value()
 		var since crdt.StateVector
 		if incremental {
 			since = write.fork.StateVector()
@@ -183,11 +185,11 @@ func (s *Service) forkLive(ctx context.Context, write *liveWrite) (*crdt.Doc, er
 	if err != nil {
 		// A fork an update failed to reach is in an unknown state, and so is the rendering taken
 		// from it: the next operation rebuilds both.
-		write.fork, write.forkedFrom = nil, nil
+		write.fork, write.forkedFrom = nil, weak.Pointer[crdt.Doc]{}
 		write.dropRendering()
 		return nil, err
 	}
-	write.fork, write.forkedFrom = fork, room
+	write.fork, write.forkedFrom = fork, weak.Make(room)
 	return fork, nil
 }
 

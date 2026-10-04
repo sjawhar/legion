@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"weak"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/reearth/ygo/crdt"
@@ -82,7 +83,7 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 	recorded := false
 	defer func() {
 		if !recorded && len(updates) > 0 {
-			write.fork, write.forkedFrom = nil, nil
+			write.fork, write.forkedFrom = nil, weak.Pointer[crdt.Doc]{}
 			// The rendering describes that fork, so it goes with it. forkLive's rebuild drops
 			// it too; keeping the two lines that abandon a fork together is what covers an
 			// operation that recorded the rendering and then failed to version.
