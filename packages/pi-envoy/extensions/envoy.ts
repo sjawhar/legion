@@ -38,6 +38,7 @@ import {
   readDispatchFirstContext,
 } from "@legion/envoy-client/dispatch-first";
 import { DispatchClient } from "@legion/envoy-client/dispatch-http";
+import { pictureAddresses } from "@legion/envoy-client/dispatch-pictures";
 import {
   createFollowAnnouncer,
   subscriptionRemovedTopics,
@@ -63,6 +64,7 @@ import { logger } from "@oh-my-pi/pi-utils";
 import { encode } from "@toon-format/toon";
 import { connect, type NatsConnection, StringCodec, type Subscription } from "nats";
 import { AgentStreamPublisher } from "../src/agent-stream";
+import { withDeliveredPictures } from "../src/delivery-pictures";
 import { withDispatchFirst } from "../src/dispatch-first";
 import {
   type AcceptedUserTurn,
@@ -100,6 +102,8 @@ import { registerEnvoyWhoamiCommand } from "./envoy-whoami-command";
 
 const codec = StringCodec();
 const NATS_RETRY_INTERVAL_MS = 15_000;
+/** How long a delivery waits for the pictures it embeds before it goes out as text alone. */
+const DELIVERY_PICTURES_TIMEOUT_MS = 20_000;
 
 /**
  * Aside and Steer go through `pi.sendMessage` on every OMP build; BTW only where the host has a
@@ -704,19 +708,47 @@ export default function envoyExtension(pi: PiApi): void {
           }
         } else {
           const turn = await acceptedUserTurn(rendered);
+          // The pictures the delivered text embeds reach the model beside it, read with this
+          // session's own Dispatch bearer.
+          const pictureClient = (): DispatchClient | undefined => {
+            const config = activeDispatchConfig(process.env, { cwd: process.cwd() });
+            return config === null
+              ? undefined
+              : new DispatchClient(
+                  config.url,
+                  config.token,
+                  fetch,
+                  AbortSignal.timeout(DELIVERY_PICTURES_TIMEOUT_MS)
+                );
+          };
           if (turn === undefined) {
             pi.sendMessage(
-              { customType: "envoy-message", content: rendered.content, display: true },
+              {
+                customType: "envoy-message",
+                content: await withDeliveredPictures(
+                  rendered.content,
+                  rendered.pictures ?? [],
+                  pictureClient,
+                  true
+                ),
+                display: true,
+              },
               {
                 deliverAs: rendered.delivery?.mode === "aside" ? "aside" : "steer",
                 triggerTurn: true,
               }
             );
           } else {
-            // Sent exactly as Enter, or an aside, at the terminal sends it.
+            // Sent exactly as Enter, or an aside, at the terminal sends it, the person's pictures
+            // beside their text.
             noteInjectedUserTurn(sessionID, turn.body, turn.messageId);
             pi.sendUserMessage(
-              turn.body,
+              await withDeliveredPictures(
+                turn.body,
+                pictureAddresses(turn.body),
+                pictureClient,
+                false
+              ),
               turn.mode === "aside" ? { deliverAs: "aside" } : undefined
             );
           }
@@ -1561,7 +1593,7 @@ export default function envoyExtension(pi: PiApi): void {
               signal,
               env: process.env,
             });
-            return toolSuccess(result.text, result.details);
+            return toolSuccess(result.text, result.details, result.images);
           } catch (error) {
             return toolFailure(error);
           }
