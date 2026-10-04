@@ -43,6 +43,9 @@ on:
 permissions: {}
 
 concurrency:
+  # Only one run at a time by design, and a pending run GitHub drops in favor of a newer one
+  # loses nothing: `changes`' base step below diffs since the last *successful* run, not this
+  # run's commit alone, so the next run picks up every commit a dropped run skipped.
   group: release-${{ github.ref }}
   cancel-in-progress: false
 

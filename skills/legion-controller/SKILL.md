@@ -16,10 +16,10 @@ The Legion extension claims `legion-<project>-controller` and registers controll
 with the daemon during session startup. Do not handle a wake unless that startup succeeded.
 
 The daemon runs the controller as an interactive OMP terminal session in its private tmux
-server (the pane runs plain `omp`, not `--mode rpc`, and no `legion worker-shim`; Sami reaches
+server (the pane runs plain `omp`, not `--mode rpc`, and no `legion worker-shim`; the operator reaches
 it with `tmux -L legion-<project> select-window -t <window id> \; attach -t legion-<project>`,
 the window id being `controllerLocator.tmuxWindowId` in `legion state --json` — every window
-opens detached, so a bare `attach` lands on whichever window is current). Sami may attach and
+opens detached, so a bare `attach` lands on whichever window is current). The operator may attach and
 type into this session at any time. The pane carries no GitHub credential: its GitHub token
 variables are emptied, and both `legion gh -- <args>` and `legion threads resolve` are refused.
 The controller reads Dispatch and applies its controller capability with `legion status <KEY>
