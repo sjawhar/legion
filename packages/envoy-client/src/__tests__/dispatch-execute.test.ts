@@ -2766,7 +2766,7 @@ describe("executeDispatchTool", () => {
       executeDispatchTool({
         tool: "dispatch_issue_update",
         args: {
-          issue: "AGENTC-175",
+          issue: "ACME-175",
           status: "done",
           reason: "Shipped in owner/repo#7.",
           title: "x".repeat(1001),
