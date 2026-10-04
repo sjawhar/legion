@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -13,6 +12,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go/logging"
+	"github.com/sjawhar/envoy/internal/dispatch/files"
 )
 
 const (
@@ -51,21 +51,11 @@ type s3AssetStore struct {
 // Loading it reads only the environment and shared config files; credentials are fetched on the
 // first request.
 func NewS3AssetStore(ctx context.Context, bucket string) (AssetStore, error) {
-	cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithLogger(logging.LoggerFunc(logSDK)))
+	cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithLogger(logging.LoggerFunc(files.LogSDK)))
 	if err != nil {
 		return nil, fmt.Errorf("load AWS configuration for retained assets: %w", err)
 	}
 	return &s3AssetStore{client: s3.NewFromConfig(cfg), bucket: bucket}, nil
-}
-
-// logSDK hands the AWS SDK's log lines to slog, so they are structured like Dispatch's own and its
-// debug lines (an object stored without a checksum) stay below slog's default level.
-func logSDK(classification logging.Classification, format string, v ...any) {
-	level := slog.LevelDebug
-	if classification == logging.Warn {
-		level = slog.LevelWarn
-	}
-	slog.Log(context.Background(), level, "dispatch: aws sdk", "message", fmt.Sprintf(format, v...))
 }
 
 func (s *s3AssetStore) GetAsset(ctx context.Context, key string) ([]byte, error) {
