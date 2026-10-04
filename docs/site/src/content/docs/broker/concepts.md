@@ -123,10 +123,11 @@ the person's own included, still get the secrets at once.
 
 The broker reads the namespace when it starts, and refuses to start when it cannot, then again every
 five minutes, a fixed time rather than a setting (`policyRefresh` in
-`packages/envoy/cmd/broker/main.go`). A tag change takes effect at the next read, and so does a
-value put into a secret that had none. A read that fails (Secrets Manager or KMS out of reach) is
-logged, and the policy from the last good read stays in force. The broker leaves out a secret it
-cannot serve, and logs it by name on every read ([Operating
+`packages/envoy/cmd/broker/main.go`). A tag change, or a value put into a secret that had none,
+takes effect within about ten minutes: at the next read, or the one after, since Secrets Manager's
+listing can lag a change by up to five minutes. A read that fails (Secrets Manager or KMS out of
+reach) is logged, and the policy from the last good read stays in force. The broker leaves out a
+secret it cannot serve, and logs it by name on every read ([Operating
 the broker](/legion/broker/operate/#health-and-logs)): a missing or malformed `owner` or `tier`
 tag (an email with a capital letter is malformed), a name that is not in the form above, a secret
 encrypted with any key but the agent-secrets key, the AWS-managed key included, or a secret with no
