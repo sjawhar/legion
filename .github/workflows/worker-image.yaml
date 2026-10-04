@@ -127,6 +127,11 @@ jobs:
           file: packages/daemon/docker/worker.Dockerfile
           # The OMP fork release ships linux-x64 (and darwin-arm64) only.
           platforms: linux/amd64
+          # provenance: false — the default provenance attestation embeds the build's full
+          # invocation, which on a pull_request event includes this workflow's job context (the
+          # PR title and body reach the job log through it too); this repository is public, so
+          # neither goes to a public log or a public ghcr attestation.
+          provenance: false
           push: true
           cache-from: type=gha
           cache-to: type=gha,mode=max

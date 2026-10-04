@@ -11,9 +11,10 @@ on:
   pull_request:
     types: [opened, reopened, synchronize]
 
-# Read-only: no job here writes to the repository, a registry or the API. The token clones,
-# downloads pinned tools, and, where a job calls dorny/paths-filter, reads the pull request's
-# file list, which this public repository serves without `pull-requests: read`.
+# Read-only: no job here writes to the repository, a registry or the API. The token clones and
+# downloads pinned tools; the `lint` job's own permissions block below additionally grants
+# `pull-requests: read`, the one job that reads a pull request's commits through the API
+# (check-pr-text.sh).
 permissions:
   contents: read
 

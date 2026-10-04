@@ -131,6 +131,10 @@ jobs:
           context: .
           file: packages/envoy/docker/Dockerfile
           platforms: linux/amd64,linux/arm64
+          # provenance: false — the default provenance attestation embeds the build's full
+          # invocation, including this job's GitHub Actions event context; this repository is
+          # public, so none of it belongs in a public ghcr attestation.
+          provenance: false
           push: true
           cache-from: type=gha
           cache-to: type=gha,mode=max

@@ -26,13 +26,13 @@
 # included, plus every untracked file git does not ignore, so a new file is caught before it is
 # added. With arguments it scans each named directory or file instead, tracked or not; docs.yaml
 # passes it the built site (docs/site/dist), whose generated reference pages and copied media
-# captions exist only after the build, and check-pr-text.sh a pull request's title, body and commit
-# messages. The first two rules also read every file's path, directories included, as git and find
-# print it unquoted. Binary files are skipped, and so are lockfiles (bun.lock, go.sum, go.work.sum),
-# whose integrity hashes are random text. Every
-# hit is printed as its file and line, never its text, and a path component a rule matches is
-# printed as <name>, so the log does not repeat the name; the only non-zero exits are named hits
-# (1) and a target or search that failed (2).
+# captions exist only after the build, and check-pr-text.sh a pull request's title, body, branch
+# name, and commits (each one's message, author and committer). The first two rules also read
+# every file's path, directories included, as git and find print it unquoted. Binary files are
+# skipped, and so are lockfiles (bun.lock, go.sum, go.work.sum), whose integrity hashes are random
+# text. Every hit is printed as its file and line, never its text, and a path component a rule
+# matches is printed as <name>, so the log does not repeat the name; the only non-zero exits are
+# named hits (1) and a target or search that failed (2).
 #
 # The rules below are spelled so that no line of this file matches them, which is why the check
 # needs no exception for itself.
@@ -57,7 +57,7 @@ spaces="( |$no_break_space|$figure_space|$narrow_no_break_space)+"
 separator="[-_]|$spaces|$encoded_byte|$dashes"
 repository_rule="(^|[^[:alnum:]]|$encoded_byte)agent($separator)?c([^[:alnum:]]|\$)"
 company_rule="t""rajectory($separator|[.])?labs"
-proper_noun_rule="(^|[^[:alnum:]_])(T""rajectory|T""RAJECTORY)([^[:alnum:]]|\$)"
+proper_noun_rule="(^|[^[:alnum:]])(T""rajectory|T""RAJECTORY)([^[:alnum:]]|\$)"
 private_host_rule='[[:alnum:]-]+[.]internal[.][[:alnum:].-]+'
 # Whole matches of the host rule that name no private host: a reserved example host (a trailing
 # full stop is the sentence's), and the NATS client's property in the bundle that vendors it.
