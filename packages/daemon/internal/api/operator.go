@@ -15,7 +15,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
-	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
 )
@@ -184,9 +183,11 @@ func (s *server) spawn(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := context.WithoutCancel(r.Context())
 	if req.Tree == req.Issue && req.Role == claim.RoleArchitect {
-		st := store.FromPool(s.pool)
-		if _, err := st.OpenTreeLifecycle(ctx, s.project, req.Tree, treelifecycle.AuthorityOperator); err != nil {
+		if _, err := s.trees.OpenTreeLifecycle(ctx, s.project, req.Tree, treelifecycle.AuthorityOperator); errors.Is(err, treelifecycle.ErrCleanupReserved) {
 			writeJSON(w, http.StatusConflict, errorBody(fmt.Sprintf("operator tree %s is waiting for durable cleanup: %v", req.Tree, err)))
+			return
+		} else if err != nil {
+			s.operatorFailure(w, "spawn", token, err)
 			return
 		}
 	}
@@ -293,8 +294,7 @@ func (s *server) closeTree(w http.ResponseWriter, r *http.Request) {
 		s.operatorFailure(w, "close", token, err)
 		return
 	}
-	st := store.FromPool(s.pool)
-	lifecycle, cleanup, err := st.ReserveOperatorTreeCleanup(ctx, s.project, c.Tree)
+	lifecycle, cleanup, err := s.trees.ReserveOperatorTreeCleanup(ctx, s.project, c.Tree)
 	if err != nil {
 		s.log.Error("api: reserve cleanup of an operator-closed tree", "tree", c.Tree, "error", err)
 		writeJSON(w, http.StatusConflict, errorBody(fmt.Sprintf("closed %s's root claim, but its durable tree cleanup could not be reserved: %v. Retry legion claims close once that is resolved", c.Tree, err)))
@@ -328,7 +328,7 @@ func (s *server) closeTree(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if cleanup {
-		if err := st.CleanupReservedTree(ctx, s.project, c.Tree, lifecycle.Epoch, s.releaser); err != nil {
+		if err := s.trees.CleanupReservedTree(ctx, s.project, c.Tree, lifecycle.Epoch, s.releaser); err != nil {
 			s.log.Error("api: cleanup an operator-closed tree", "tree", c.Tree, "error", err)
 			writeJSON(w, http.StatusInternalServerError, errorBody(fmt.Sprintf("closed %s's claims, but durable resource cleanup is pending: %v. Retry legion claims close after the reported cleanup error is resolved", c.Tree, err)))
 			return

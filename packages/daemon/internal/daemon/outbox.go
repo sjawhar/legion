@@ -25,6 +25,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/runtime/workerbin"
 	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
 	"github.com/sjawhar/legion/daemon/internal/wait"
 	"github.com/sjawhar/legion/daemon/internal/workflow"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
@@ -56,6 +57,7 @@ type outbox struct {
 	dispatch   dispatch.Client
 	notices    notify.Publisher
 	supervisor *supervisor
+	trees      outboxTrees
 	tokens     appauth.Tokens
 	handlers   []intake.Handler
 	project    string
@@ -70,12 +72,21 @@ type outbox struct {
 	remove          func(context.Context, workspace.Workspace) error
 }
 
-func newOutbox(pool *pgxpool.Pool, records record.Store, client dispatch.Client, publisher notify.Publisher, supervisor *supervisor, tokens appauth.Tokens, handlers []intake.Handler, project, dispatchProject, stateDir string, configured config.Project, tools map[string]string, log *slog.Logger) *outbox {
+// outboxTrees is the store's tree barrier (store.Store) as the outbox runs it: an issue close's
+// suspension, a stop's wait for a stored claim's machine, and a workflow tree close's cleanup.
+type outboxTrees interface {
+	IssueSuspension(ctx context.Context, project string, closing store.IssueClose, outOfWorkflow func(status string) bool) (bool, error)
+	StoredClaimMayRun(ctx context.Context, token claim.Token, row int64) (bool, error)
+	ReserveWorkflowTreeCleanup(ctx context.Context, project, tree string, rootGeneration uint64) (treelifecycle.Lifecycle, bool, error)
+	CleanupReservedTree(ctx context.Context, project, tree string, epoch uint64, releaser store.TreeReleaser) error
+}
+
+func newOutbox(pool *pgxpool.Pool, records record.Store, client dispatch.Client, publisher notify.Publisher, supervisor *supervisor, trees outboxTrees, tokens appauth.Tokens, handlers []intake.Handler, project, dispatchProject, stateDir string, configured config.Project, tools map[string]string, log *slog.Logger) *outbox {
 	if log == nil {
 		log = slog.Default()
 	}
 	return &outbox{
-		pool: pool, records: records, dispatch: client, notices: publisher, supervisor: supervisor, tokens: tokens,
+		pool: pool, records: records, dispatch: client, notices: publisher, supervisor: supervisor, trees: trees, tokens: tokens,
 		handlers: handlers, project: project, dispatchProject: dispatchProject, stateDir: stateDir, repo: configured.Repo, log: log, now: time.Now,
 		// WarmCodegraphIndexInBackground runs here, never in provisionWorkspace: every outbox
 		// test injects its own `provision`, so only this production closure starts codegraph.
@@ -247,8 +258,7 @@ func (r *outbox) execute(ctx context.Context, row record.OutboxRow) error {
 		closing := store.IssueClose{Issue: row.Issue, Tree: value.Tree, IssueGeneration: value.Generation,
 			TreeGeneration: value.TreeGeneration, Row: row.ID}
 		return suspender.SuspendIssue(ctx, row.Issue, value.Tree, func(ctx context.Context) (bool, error) {
-			st := store.FromPool(r.pool)
-			return st.IssueSuspension(ctx, r.project, closing, record.OutOfWorkflow)
+			return r.trees.IssueSuspension(ctx, r.project, closing, record.OutOfWorkflow)
 		})
 	case record.WorkspaceRemove:
 		return r.removeWorkspace(ctx, row, value)
@@ -563,8 +573,7 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 		if !found {
 			// Creation persists before publishing the machine in memory. Do not consume a close
 			// in that interval: the later machine still needs this durable stop.
-			st := store.FromPool(r.pool)
-			pending, err := st.StoredClaimMayRun(ctx, token, row.ID)
+			pending, err := r.trees.StoredClaimMayRun(ctx, token, row.ID)
 			if err != nil {
 				return err
 			}
@@ -627,8 +636,7 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 // reservation. It reports false, acting on nothing, when the tree holds no unconfirmed
 // reservation and this close could not take one; the ordinary fences then decide.
 func (r *outbox) reservedTreeClose(ctx context.Context, row record.OutboxRow, payload record.SuperviseRequest) (bool, error) {
-	st := store.FromPool(r.pool)
-	lifecycle, reserved, err := st.ReserveWorkflowTreeCleanup(ctx, r.project, payload.Tree, payload.Linger)
+	lifecycle, reserved, err := r.trees.ReserveWorkflowTreeCleanup(ctx, r.project, payload.Tree, payload.Linger)
 	if err != nil {
 		return true, fmt.Errorf("reserve cleanup of workflow tree %s: %w", payload.Tree, err)
 	}
@@ -644,7 +652,7 @@ func (r *outbox) reservedTreeClose(ctx context.Context, row record.OutboxRow, pa
 			return true, fmt.Errorf("close the tree of claim %s: %w", token, err)
 		}
 	}
-	return true, st.CleanupReservedTree(ctx, r.project, payload.Tree, lifecycle.Epoch, r.supervisor.deps.Runtime)
+	return true, r.trees.CleanupReservedTree(ctx, r.project, payload.Tree, lifecycle.Epoch, r.supervisor.deps.Runtime)
 }
 
 // root is issue's tree root as recorded, nil when it is not, read in a transaction of its own

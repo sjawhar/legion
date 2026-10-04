@@ -23,7 +23,9 @@ import (
 	legionclaim "github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
+	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
 )
 
 const (
@@ -53,8 +55,8 @@ func (anyLaunch) SpawnSpec(context.Context, supervise.Claim) (runtime.SpawnSpec,
 }
 
 // memoryClaims is the daemon's claims as the routes reach them: real machines, over a store kept
-// in memory — persistence is not what `legion claims` is held to. It is the routes' Supervisor,
-// the machines' Store, and the boot tokens' store at once.
+// in memory — persistence is not what `legion claims` is held to. It is the routes' Supervisor
+// and tree barrier, the machines' Store, and the boot tokens' store at once.
 type memoryClaims struct {
 	ctx  context.Context
 	deps supervise.Deps
@@ -135,6 +137,20 @@ func (s *memoryClaims) ClaimByBootTokenHash(_ context.Context, hash []byte) (sup
 	return supervise.Claim{}, false, nil
 }
 
+// The tree barrier is the store's, held to its own tests: here every tree is open at epoch 1, and
+// a close's cleanup releases the tree through the runtime at once.
+func (s *memoryClaims) OpenTreeLifecycle(_ context.Context, project, tree string, authority treelifecycle.Authority) (treelifecycle.Lifecycle, error) {
+	return treelifecycle.Lifecycle{Project: project, Tree: tree, Epoch: 1, Authority: authority}, nil
+}
+
+func (s *memoryClaims) ReserveOperatorTreeCleanup(_ context.Context, project, tree string) (treelifecycle.Lifecycle, bool, error) {
+	return treelifecycle.Lifecycle{Project: project, Tree: tree, Epoch: 1, Authority: treelifecycle.AuthorityOperator, CleanupStarted: true}, true, nil
+}
+
+func (s *memoryClaims) CleanupReservedTree(ctx context.Context, _, tree string, _ uint64, releaser store.TreeReleaser) error {
+	return releaser.CleanupTree(ctx, tree)
+}
+
 // seenRequest is one request that reached the daemon, and what the daemon answered it.
 type seenRequest struct {
 	method, path, authorization, contentType string
@@ -173,7 +189,7 @@ func newOperatorDaemon(t *testing.T) *operatorDaemon {
 		},
 	}
 	handler := api.NewServer("127.0.0.1", 0, api.Options{
-		Supervisor: claims, BootTokens: tokens, Project: claimsProject, OperatorToken: claimsOperatorToken, Log: quiet,
+		Supervisor: claims, Trees: claims, Releaser: rt, BootTokens: tokens, Project: claimsProject, OperatorToken: claimsOperatorToken, Log: quiet,
 	}).Handler
 
 	d := &operatorDaemon{t: t, runtime: rt, tokenFile: writeFile(t, "operator-token", claimsOperatorToken+"\n")}

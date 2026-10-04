@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"log/slog"
@@ -21,6 +22,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
 )
 
 // readHeaderTimeout bounds how long a client may take to send its request headers; without it a
@@ -57,6 +59,9 @@ type Options struct {
 	// Releaser releases what the runtime holds for a tree whose operator close reserved and
 	// finished its cleanup: the daemon's runtime.
 	Releaser store.TreeReleaser
+	// Trees is the store's durable tree barrier, which the operator routes open a root's tree
+	// through and reserve and finish a closed tree's cleanup through.
+	Trees TreeLifecycles
 	// Grants mints and redeems the daemon-local one-command credential handles.
 	Grants   *credential.Grants
 	Pool     *pgxpool.Pool
@@ -68,6 +73,15 @@ type Options struct {
 	// took the role back. A ready the claim refuses tells no one. Nil tells no one. It is called
 	// before the route answers the agent, so it returns at once.
 	ClaimReady func(c supervise.Claim)
+}
+
+// TreeLifecycles is the store's durable tree barrier (store.Store) as the operator routes use it:
+// an operator root opens its tree's lifecycle before its claim is stored, and the tree's close
+// reserves the tree's cleanup, then finishes it once every claim of the tree has retired.
+type TreeLifecycles interface {
+	OpenTreeLifecycle(ctx context.Context, project, tree string, authority treelifecycle.Authority) (treelifecycle.Lifecycle, error)
+	ReserveOperatorTreeCleanup(ctx context.Context, project, tree string) (treelifecycle.Lifecycle, bool, error)
+	CleanupReservedTree(ctx context.Context, project, tree string, epoch uint64, releaser store.TreeReleaser) error
 }
 
 type server struct {
@@ -87,6 +101,7 @@ type server struct {
 	githubOwner  string
 	grants       *credential.Grants
 	releaser     store.TreeReleaser
+	trees        TreeLifecycles
 	pool         *pgxpool.Pool
 	handlers     []intake.Handler
 	records      record.Store
@@ -118,6 +133,7 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		tokens:            opts.Tokens,
 		githubOwner:       opts.GitHubOwner,
 		releaser:          opts.Releaser,
+		trees:             opts.Trees,
 		grants:            opts.Grants,
 		pool:              opts.Pool,
 		handlers:          opts.Handlers,
