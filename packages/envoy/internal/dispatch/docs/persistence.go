@@ -18,6 +18,10 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
+// misreadWarning is the shared prefix Compact and stateThrough log when the stored updates
+// through a version do not fold into a state that reads back as them.
+const misreadWarning = "dispatch: a document's stored updates do not fold into a state that reads back as them"
+
 // PgVersioned persists a room's Yjs V1 updates in Dispatch's Postgres store.
 type PgVersioned struct {
 	store *store.Store
@@ -467,7 +471,7 @@ func (p *PgVersioned) Compact(ctx context.Context, room string, keep int) (int, 
 		`, room).Scan(&coveredCursor); err != nil {
 			return fmt.Errorf("read compactable document version cursor: %w", err)
 		}
-		// The list holds versions alone: stateThrough reads the updates it folds one at a time.
+		// The list holds versions alone: foldThrough reads the updates it folds one at a time.
 		rows, err := tx.Query(ctx, `
 			select version, content_changed from doc_updates where artifact_id = $1 order by version asc
 		`, room)
@@ -500,7 +504,7 @@ func (p *PgVersioned) Compact(ctx context.Context, room string, keep int) (int, 
 			return fmt.Errorf("fold compacted document updates: %w", err)
 		}
 		if misread != nil {
-			slog.Warn("dispatch: a document's stored updates do not fold into a state that reads back as them; compaction leaves them as stored",
+			slog.Warn(misreadWarning+"; compaction leaves them as stored",
 				"room", room, "version", int64(through), "error", misread)
 			return tx.Commit(ctx)
 		}
@@ -649,7 +653,7 @@ func stateThrough(ctx context.Context, tx pgx.Tx, room string, version persisten
 	if misread == nil {
 		return state, nil
 	}
-	slog.Warn("dispatch: a document's stored updates do not fold into a state that reads back as them; serving them merged",
+	slog.Warn(misreadWarning+"; serving them merged",
 		"room", room, "version", int64(version), "error", misread)
 	var updates [][]byte
 	if err := eachUpdateThrough(ctx, tx, room, version, func(update []byte) error {
