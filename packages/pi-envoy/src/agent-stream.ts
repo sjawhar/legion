@@ -98,6 +98,15 @@ export interface AgentStreamPublisherDeps {
 
 const encoder = new TextEncoder();
 
+/** `provider/model` combined and capped (e.g. `anthropic/claude-opus-5`), or undefined when
+ *  either is missing or empty — an empty string still satisfies `typeof x === "string"`, and
+ *  combining one anyway would publish a malformed `/claude-opus-5` or `anthropic/`. */
+function readModel(message: HostMessage): string | undefined {
+  if (typeof message.model !== "string" || message.model === "") return undefined;
+  if (typeof message.provider !== "string" || message.provider === "") return undefined;
+  return capAgentStreamText(`${message.provider}/${message.model}`, AGENT_STREAM_LIMITS.modelChars);
+}
+
 function readMessage(raw: unknown): ReadableMessage | null {
   if (typeof raw !== "object" || raw === null) return null;
   const message = raw as HostMessage;
@@ -107,10 +116,7 @@ function readMessage(raw: unknown): ReadableMessage | null {
   return {
     host: message,
     isError: message.isError === true,
-    model:
-      typeof message.model === "string" && typeof message.provider === "string"
-        ? `${message.provider}/${message.model}`
-        : undefined,
+    model: readModel(message),
     role: message.role,
     timestamp: message.timestamp,
     toolCallId: typeof message.toolCallId === "string" ? message.toolCallId : undefined,

@@ -112,6 +112,10 @@ function UserMessage(): ReactNode {
 }
 
 function AssistantMessage(): ReactNode {
+  // Two selectors, not one combined object read: `useAuiState` compares a selector's return by
+  // `Object.is` and documents that returning a new object literal (as reading both marks into one
+  // object here would) re-renders on every store update rather than only when the selected slice
+  // changes (@assistant-ui/store's useAuiState.d.ts).
   // A reply the session sent through Dispatch (AgentRuntimeThread marks it), not a streamed turn.
   const fromDispatch = useAuiState(
     (state) => readDispatchMarks(state.message.metadata.custom).dispatch === true

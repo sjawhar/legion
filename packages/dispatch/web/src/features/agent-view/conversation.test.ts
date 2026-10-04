@@ -237,6 +237,28 @@ describe("the model that produced an assistant turn", () => {
     expect(toThreadMessages(state)[0]?.metadata).toBeUndefined();
   });
 
+  // The bus is open to any client, so a user-turn frame naming a model is a claim this build
+  // does not honour: pi-envoy's own host object never puts one on a user message, and the
+  // contract documents the field as absent there, so a forged one is rendered with no metadata
+  // rather than shown as if the viewer had typed it with a model attached.
+  test("a forged user-turn frame naming a model carries no metadata either", () => {
+    const forged = {
+      kind: "message",
+      message: {
+        at: 10,
+        id: "u10",
+        model: "anthropic/claude-opus-5",
+        parts: [{ text: "ship it", type: "text" }],
+        role: "user",
+        streaming: false,
+      },
+      seq: 1,
+      v: 1,
+    } as unknown as AgentStreamFrame;
+    const state = applyFrames(EMPTY_CONVERSATION, [forged]);
+    expect(toThreadMessages(state)[0]?.metadata).toBeUndefined();
+  });
+
   test("currentModel is the most recent assistant turn's own report, whatever it is", () => {
     const sessionSwitchedModel = applyFrames(EMPTY_CONVERSATION, [
       message(1, "a10", 10, "first", false, "anthropic/claude-opus-5"),

@@ -169,17 +169,17 @@ export function toThreadMessages(state: AgentConversation): ThreadMessageLike[] 
 /**
  * The model the session is currently running, for the live view's header: the most recent
  * assistant turn's own report, whatever it is. A session whose client never reports one (Claude
- * Code, OpenCode) shows nothing here rather than a guess.
+ * Code, OpenCode) shows nothing here rather than a guess. `state.messages` is kept sorted
+ * ascending by `at` (`applyFrame`), so walking from the end finds the newest assistant entry
+ * first; `Array.prototype.findLast` would read the same way but needs ES2023, past this
+ * package's ES2022 `lib`.
  */
 export function currentModel(state: AgentConversation): string | undefined {
-  const latest = state.messages.reduce<AgentStreamMessage | undefined>(
-    (newest, message) =>
-      message.role === "assistant" && (newest === undefined || message.at >= newest.at)
-        ? message
-        : newest,
-    undefined
-  );
-  return latest?.model;
+  for (let index = state.messages.length - 1; index >= 0; index -= 1) {
+    const message = state.messages[index];
+    if (message?.role === "assistant") return message.model;
+  }
+  return undefined;
 }
 
 /** Whether the session is mid-turn, which is what shows the composer a running thread. */

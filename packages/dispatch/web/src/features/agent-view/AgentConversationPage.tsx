@@ -131,7 +131,11 @@ export function AgentConversationPage(): ReactNode {
         </Link>
         <h1 className={`min-w-0 truncate text-lg font-semibold ${textPrimaryOnCanvas}`}>{label}</h1>
         {model === undefined ? null : (
-          <span className={pillClassName("label")} data-testid="agent-session-model">
+          <span
+            className={`${pillClassName("label")} max-w-56 min-w-0 truncate`}
+            data-testid="agent-session-model"
+            title={model}
+          >
             {model}
           </span>
         )}

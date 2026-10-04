@@ -409,4 +409,42 @@ describe("the model that produced an assistant turn", () => {
       "anthropic/claude-sonnet-5",
     ]);
   });
+
+  // An empty string still satisfies `typeof x === "string"`, so the type check alone would
+  // combine it into a malformed `/claude-opus-5` or `anthropic/`.
+  test("carries none when the host names an empty provider or an empty model", () => {
+    const { published, publisher } = harness();
+    publisher.noteViewer();
+    publisher.record(
+      SUBJECT,
+      { content: [], model: "claude-opus-5", provider: "", role: "assistant", timestamp: 50 },
+      false
+    );
+    publisher.record(
+      SUBJECT,
+      { content: [], model: "", provider: "anthropic", role: "assistant", timestamp: 60 },
+      false
+    );
+    expect(published.map((frame) => frame.kind === "message" && frame.message.model)).toEqual([
+      undefined,
+      undefined,
+    ]);
+  });
+
+  test("caps an oversized combined model before it leaves the session", () => {
+    const { published, publisher } = harness();
+    publisher.noteViewer();
+    const oversized = "x".repeat(AGENT_STREAM_LIMITS.modelChars);
+    publisher.record(
+      SUBJECT,
+      { content: [], model: oversized, provider: "anthropic", role: "assistant", timestamp: 50 },
+      false
+    );
+    const frame = published[0];
+    const model = frame?.kind === "message" ? frame.message.model : undefined;
+    expect(model).toBe(
+      `anthropic/${oversized}`.slice(0, AGENT_STREAM_LIMITS.modelChars) +
+        AGENT_STREAM_TRUNCATION_SUFFIX
+    );
+  });
 });
