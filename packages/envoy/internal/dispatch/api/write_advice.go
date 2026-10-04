@@ -27,6 +27,8 @@ type writeAdvice struct {
 	YourOpenAsks            []adviceAsk `json:"your_open_asks"`
 	// documentBlocks is set by a document write whose document reads; nil omits its fields.
 	*documentBlocks
+	// editBlocks is set by a document edit; nil omits its field.
+	*editBlocks
 }
 
 type adviceQueryError struct {
@@ -170,6 +172,13 @@ type unparsedOpeners struct {
 	Examples []string `json:"examples"`
 }
 
+// editBlocks is what a document edit's advice reports about the typed blocks it wrote: how many ask
+// blocks the edited document holds that the document before the edit did not
+// (docs.EditOutcome.AskBlocksAdded), as the server's parser reads them.
+type editBlocks struct {
+	DecisionBlocksAdded int `json:"decision_blocks_added"`
+}
+
 const (
 	// unparsedOpenerExamples is how many openings the advice quotes.
 	unparsedOpenerExamples = 3
@@ -293,8 +302,9 @@ func withAdvice(payload any, advice *writeAdvice) any {
 	return advisedResponse{payload: payload, advice: advice}
 }
 
-// withDocumentBlockAdvice is a project document write's response: its advice is only what it read
-// of the document's typed blocks, since a project document has no issue state to report.
-func withDocumentBlockAdvice(payload any, blocks *documentBlocks) any {
+// withDocumentBlockAdvice is a document write's count-only response: a project document has no
+// issue state to report, and an issue document keeps its count when the bounded issue-advice query
+// fails.
+func withDocumentBlockAdvice(payload any, blocks any) any {
 	return advisedResponse{payload: payload, advice: blocks}
 }
