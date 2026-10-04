@@ -24,10 +24,17 @@ export async function buildBundles(outdir: string): Promise<void> {
     entrypoints: Object.values(BUNDLE_ENTRYPOINTS).map((entry) => join(packageRoot, entry)),
     outdir,
     target: "bun",
-    // Whitespace and identifier minification stay off so unrelated source changes retain distinct
-    // bundle lines and merge cleanly. Syntax minification stays off because Bun 1.3.14's constant
-    // folding of multi-operand string concatenation can truncate the result in CI builds.
-    minify: { whitespace: false, identifiers: false, syntax: false },
+    // Minification is off entirely, not case by case: disabling whitespace/identifier/syntax
+    // minification individually (`{whitespace: false, identifiers: false, syntax: false}`) still
+    // routes through Bun 1.3.14's minifying code-generation path, which picks a non-deterministic
+    // CJS/ESM interop check on repeated builds of this exact module graph (observed directly: ten
+    // rebuilds of one committed checkout, eight of them disagreeing byte for byte with each
+    // other) — on top of the syntax minifier's own separate bug, truncating constant-folded
+    // multi-operand string concatenation in CI builds, that made `syntax: false` necessary before
+    // this. A plain `false` bypasses that whole path and reproducible across repeated builds was
+    // the same ten rebuilds, now agreeing every time. Whitespace stays readable as a side effect,
+    // so unrelated source changes still retain distinct bundle lines and merge cleanly.
+    minify: false,
     sourcemap: "none",
     naming: "[name].[ext]",
     metafile: true,
