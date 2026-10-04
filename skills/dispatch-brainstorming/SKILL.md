@@ -102,13 +102,13 @@ document, never its spec and never a repository file:
 dispatch_artifact({ issue, name: "plan.md", content })
 ```
 
-Uploading `plan.md` again writes its next version. `skill://writing-plans`'s content rules still
-apply in full — file structure, task right-sizing, bite-sized steps, no placeholders, the header,
-and its self-review — only where the plan lives changes: the issue's `plan.md`, never a repository
-file. Technical choices inside the approved design are made in the plan and need no question. A
-plan never changes a decision the human made in the spec: a change to one goes back to the spec as
-a decision block, with the evidence for it.
+Uploading `plan.md` again writes its next version. `writing-plans`'s content rules still apply in
+full — file structure, task right-sizing, bite-sized steps, no placeholders, the header, and its
+self-review — only where the plan lives changes: the issue's `plan.md`, never a repository file.
+Technical choices inside the approved design are made in the plan and need no question. A plan
+never changes a decision the human made in the spec: a change to one goes back to the spec as a
+decision block, with the evidence for it.
 
 Execution reads the plan the same way: `dispatch_doc_read({ issue, artifact: "plan.md" })` in place
-of opening a plan file, then follows `skill://executing-plans` or
-`skill://subagent-driven-development` as it would for a file on disk.
+of opening a plan file, then follows `executing-plans` or `subagent-driven-development` as it would
+for a file on disk.
