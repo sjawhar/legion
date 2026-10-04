@@ -54,8 +54,11 @@ type liveWrite struct {
 	// transaction's updates applied, brought up to date before each operation (forkLive).
 	clientID crdt.ClientID
 	fork     *crdt.Doc
-	// forkedFrom is the room document fork was last brought up to date from.
+	// forkedFrom is the room document fork was last brought up to date from, and forkSeq the room's
+	// credit sequence just before it was read for that: each author credited by then made a change
+	// the room held, which the fork took in (authors.go).
 	forkedFrom *crdt.Doc
+	forkSeq    uint64
 	updates    [][]byte
 	// tree and markdown are the document as this transaction's latest operation left it,
 	// rendered once by that operation (applyJoined) for the version its transaction may write.
@@ -66,8 +69,11 @@ type liveWrite struct {
 	// version write does not refresh the same tree's anchors a second time.
 	anchorsTree *pmdoc.Node
 	// credits are the authors of the transaction's content changes; actor made the latest.
-	credits map[string]model.Actor
-	actor   *model.Actor
+	// versioned says a version the transaction wrote holds every one of those changes so far and
+	// credits their authors (Ledger.recordVersion), so its commit does not credit them again.
+	credits   map[string]model.Actor
+	actor     *model.Actor
+	versioned bool
 	// loss records what this write's latest batch of operations inserted, so a merge with the
 	// room's concurrent changes can be told from a clean one (see lossCheck). A later operation
 	// of the same transaction that inserts nothing an operation claims - an accept's margin
@@ -86,9 +92,13 @@ type liveWrite struct {
 // liveWriteOrigin tags the room transaction that applies a committed live write, so the room's
 // update observer credits it to no one: Ledger.Commit credited it when its transaction
 // committed. It carries the write's persistence-suppression slot, which that observer finishes
-// (onLoadDocument). It must remain non-zero sized because ygo compares origins by interface
-// equality.
-type liveWriteOrigin struct{ slot *suppressSlot }
+// (onLoadDocument), and the write's actor, whom the observer records as the author of an ask
+// block the write introduced (observeAskBlocks). It must remain non-zero sized because ygo
+// compares origins by interface equality.
+type liveWriteOrigin struct {
+	slot  *suppressSlot
+	actor *model.Actor
+}
 
 // joinedLiveWrite is the calling transaction's open write to artifactID, if it has one.
 func joinedLiveWrite(ctx context.Context, artifactID string) *liveWrite {
@@ -164,6 +174,9 @@ func (s *Service) awaitLiveWriter(ctx context.Context, artifactID string) error 
 // may lack state the kept fork still holds (a browser update whose append failed), so the fork is
 // then rebuilt from the reloaded room and the transaction's writes.
 func (s *Service) forkLive(ctx context.Context, write *liveWrite) (*crdt.Doc, error) {
+	write.state.mu.Lock()
+	seq := write.state.creditSeq
+	write.state.mu.Unlock()
 	var gained []byte
 	var room *crdt.Doc
 	var incremental bool
@@ -187,7 +200,7 @@ func (s *Service) forkLive(ctx context.Context, write *liveWrite) (*crdt.Doc, er
 		write.dropRendering()
 		return nil, err
 	}
-	write.fork, write.forkedFrom = fork, room
+	write.fork, write.forkedFrom, write.forkSeq = fork, room, seq
 	return fork, nil
 }
 
@@ -321,13 +334,15 @@ func (s *Service) docView(ctx context.Context, artifactID string, read func(*crd
 
 // creditLiveWrite records whom a joined content change is credited to once its transaction
 // commits: its actor alone, as a service mutation that reaches the room directly is credited
-// (creditContentChange). A browser connected to the room made none of it.
+// (creditContentChange). A browser connected to the room made none of it. No version the
+// transaction wrote before holds this change.
 func (s *Service) creditLiveWrite(write *liveWrite, actor model.Actor) {
 	if write.credits == nil {
 		write.credits = make(map[string]model.Actor)
 	}
 	write.credits[actorKey(actor)] = actor
 	write.actor = new(actor)
+	write.versioned = false
 }
 
 // publishLiveWrite applies write's updates to the room one operation at a time, in the order
@@ -343,7 +358,7 @@ func (s *Service) creditLiveWrite(write *liveWrite, actor model.Actor) {
 func (s *Service) publishLiveWrite(write *liveWrite) {
 	defer s.finishLiveWrite(write)
 	for _, update := range write.updates {
-		err := s.publishLiveUpdate(write.artifactID, update)
+		err := s.publishLiveUpdate(write.artifactID, update, write.actor)
 		if err == nil {
 			continue
 		}
@@ -404,10 +419,10 @@ func (s *Service) recordPublishedLoss(write *liveWrite) {
 // bytes ygo's persistence observer is handed next (onLoadDocument), never after Apply returns. A
 // room whose persistence worker CloseRoom retired under this Apply hands the commit to ygo's
 // stranded persistence on this goroutine, which would otherwise wait on this slot for good.
-func (s *Service) publishLiveUpdate(room string, update []byte) error {
+func (s *Service) publishLiveUpdate(room string, update []byte, actor *model.Actor) error {
 	ctx := withOwnerVerified(context.Background())
 	slot := s.prepareSuppressedPersistence(room)
-	origin := &liveWriteOrigin{slot: slot}
+	origin := &liveWriteOrigin{slot: slot, actor: actor}
 	recorded, err := s.applyCaptured(ctx, room, origin, func(doc *crdt.Doc) error {
 		return crdt.ApplyUpdateV1(doc, update, origin)
 	})

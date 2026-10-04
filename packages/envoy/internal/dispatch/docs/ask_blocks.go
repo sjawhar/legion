@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"reflect"
 	"strings"
 	"time"
@@ -35,6 +36,9 @@ type settlementReconciliation struct {
 	repairs   []askRepair
 	events    []model.Event
 	retracted []model.Ask
+	// indexedAskBlocks are the blocks with a recorded author that this settlement indexed or
+	// found indexed, whose author the room forgets once it commits (consumeAskAuthors).
+	indexedAskBlocks []string
 }
 
 // askRepair is one server-owned attribute repair settlement made to the ask block carrying blockID
@@ -132,9 +136,9 @@ func (e *ErrInvalidAskBlock) Error() string { return e.Reason.Error() }
 func (e *ErrInvalidAskBlock) Unwrap() error { return e.Reason }
 
 // SettlementActor writes what a document decides on its own rather than any one person: the
-// retraction of an ask whose block left the document, and an approval request's move when the
-// version credits no writer or several. Crediting the room's last editor instead would put a
-// change nobody made in their name.
+// retraction of an ask whose block left the document, and a settlement derived from ambiguous
+// browser content with no known latest editor. A service write's new ask and an approval move name
+// the actor that introduced them instead.
 var SettlementActor = model.Actor{Kind: "system", ID: "document-settlement"}
 
 // SettlementRetractionReason opens the reason of every retraction settlement writes, followed by
@@ -156,13 +160,17 @@ func settlementRetracted(ask model.Ask) bool {
 		strings.HasPrefix(ask.Resolution.Reason, SettlementRetractionReason)
 }
 
+// reconcileAskBlocks indexes tree's ask blocks against their rows for a settlement whose authors and
+// ask-block sources are credit. A new block is authored by the update that introduced it
+// (askBlockSources.author); one whose update observer has not run is left for the settlement that
+// observer arms.
 func (s *Service) reconcileAskBlocks(
 	ctx context.Context,
 	tx pgx.Tx,
 	artifactID string,
 	owner artifactOwner,
 	tree *pmdoc.Node,
-	actor model.Actor,
+	credit settlementCredit,
 ) (settlementReconciliation, error) {
 	blocks, invalidBlocks, err := collectAskBlocksForSettlement(tree)
 	if err != nil {
@@ -173,7 +181,8 @@ func (s *Service) reconcileAskBlocks(
 		return settlementReconciliation{}, err
 	}
 
-	reconciled := settlementReconciliation{}
+	actor := credit.actor
+	var reconciled settlementReconciliation
 	for _, invalid := range invalidBlocks {
 		delete(rows, invalid.id)
 		if reconciled.repair(invalid.node, invalid.id, askInvalidAttribute(invalid.reason.Error())) {
@@ -191,9 +200,16 @@ func (s *Service) reconcileAskBlocks(
 		}
 	}
 	for _, block := range blocks {
+		if _, recorded := credit.askSources.authors[block.id]; recorded {
+			reconciled.indexedAskBlocks = append(reconciled.indexedAskBlocks, block.id)
+		}
 		ask, exists := rows[block.id]
 		if !exists {
-			ask, err = createAskBlock(ctx, tx, artifactID, owner, block, actor)
+			blockActor, known := credit.askSources.author(block.id, actor)
+			if !known {
+				continue
+			}
+			ask, err = createAskBlock(ctx, tx, artifactID, owner, block, blockActor)
 			if err != nil {
 				return settlementReconciliation{}, err
 			}
@@ -202,7 +218,7 @@ func (s *Service) reconcileAskBlocks(
 				return settlementReconciliation{}, fmt.Errorf("index new ask block: %w", err)
 			}
 			reconciled.events = append(reconciled.events, documentAskEvent(
-				owner, artifactID, "ask.opened", actor, model.NewAskEventPayload(ask, changes),
+				owner, artifactID, "ask.opened", blockActor, model.NewAskEventPayload(ask, changes),
 			))
 			reconciled.repair(block.node, block.id, askServerAttributes(ask))
 			continue
@@ -361,6 +377,147 @@ func askFingerprints(tree *pmdoc.Node, fingerprint func(*pmdoc.Node) (string, er
 		return true
 	})
 	return held, err
+}
+
+// askBlockIDs collects the id of every ask block tree holds.
+func askBlockIDs(tree *pmdoc.Node) map[string]struct{} {
+	ids := make(map[string]struct{})
+	walkAskBlocks(tree, func(id string) {
+		if id != "" {
+			ids[id] = struct{}{}
+		}
+	})
+	return ids
+}
+
+// askBlockOrder lists the id of every ask block tree holds in document order, "" for a block
+// with none.
+func askBlockOrder(tree *pmdoc.Node) []string {
+	var ids []string
+	walkAskBlocks(tree, func(id string) { ids = append(ids, id) })
+	return ids
+}
+
+// walkAskBlocks calls visit with the id of each ask block tree holds, in document order, wherever
+// it stands: in a blockquote, a list item or another typed block. It does not descend into text,
+// which holds no block.
+func walkAskBlocks(tree *pmdoc.Node, visit func(id string)) {
+	if tree == nil {
+		return
+	}
+	if tree.Type == "ask" {
+		id, _ := tree.Attrs[pmdoc.BlockIDAttr].(string)
+		visit(id)
+	}
+	for _, child := range tree.Children {
+		if child.Type != "text" {
+			walkAskBlocks(child, visit)
+		}
+	}
+}
+
+// stampedAsk is an ask block a block-id stamp gave a new id: previous, the id it had ("" for
+// none), minted, the one it has, and copied, whether another block still holds previous - a repeat
+// the stamp re-minted, a copy of the block that keeps the id.
+type stampedAsk struct {
+	previous, minted string
+	copied           bool
+}
+
+// stampedAskBlocks pairs the ask block ids of one tree before and after a block-id stamp, which
+// changes ids and nothing else, and returns each ask whose id the stamp changed.
+func stampedAskBlocks(before, after []string) []stampedAsk {
+	var held map[string]struct{}
+	var stamped []stampedAsk
+	for index, previous := range before {
+		if after[index] == previous {
+			continue
+		}
+		if held == nil {
+			held = make(map[string]struct{}, len(after))
+			for _, id := range after {
+				held[id] = struct{}{}
+			}
+		}
+		_, copied := held[previous]
+		stamped = append(stamped, stampedAsk{previous: previous, minted: after[index], copied: copied})
+	}
+	return stamped
+}
+
+// recordStampedAskBlocks records ask blocks whose ids a settlement's own stamp minted. The room's
+// update observer skips that stamp, so no update it renders introduces those ids: each is seen,
+// and keeps the author recorded for the id it replaced, unless it is a copy of the block that
+// keeps that id. The caller holds state.mu.
+func (state *roomState) recordStampedAskBlocks(stamped []stampedAsk) {
+	for _, ask := range stamped {
+		if state.askBlocks != nil {
+			state.askBlocks[ask.minted] = struct{}{}
+		}
+		if author, recorded := state.askAuthors[ask.previous]; recorded && !ask.copied {
+			state.askAuthors[ask.minted] = author
+		} else {
+			delete(state.askAuthors, ask.minted)
+		}
+	}
+}
+
+// observeAskBlocks records ids, the ask blocks the room holds after an update its observer
+// rendered, and author as the author of each block the update introduced: the update's one
+// source, or nil when it has none. It forgets the author of a block the room no longer holds. A
+// room whose earlier ask blocks are unknown - its load could not read the document - takes ids as
+// its baseline and records no author, since it cannot tell which blocks the update introduced.
+// The caller holds state.mu.
+func (state *roomState) observeAskBlocks(ids map[string]struct{}, author *model.Actor) {
+	for id := range state.askAuthors {
+		if _, held := ids[id]; !held {
+			delete(state.askAuthors, id)
+		}
+	}
+	if state.askBlocks != nil && author != nil {
+		for id := range ids {
+			if _, seen := state.askBlocks[id]; seen {
+				continue
+			}
+			if state.askAuthors == nil {
+				state.askAuthors = make(map[string]model.Actor)
+			}
+			state.askAuthors[id] = *author
+		}
+	}
+	state.askBlocks = ids
+}
+
+// askBlockSources is where the ask blocks a settlement indexes came from, copied from the room's
+// state once the settlement holds the tree it reconciles: observed, the ask blocks the room's
+// update observer has seen (nil when it cannot tell), and authors, the author of the update that
+// introduced each block not yet indexed.
+type askBlockSources struct {
+	observed map[string]struct{}
+	authors  map[string]model.Actor
+}
+
+// askSources copies the room's ask-block sources for a settlement. The caller holds state.mu.
+func (state *roomState) askSources() askBlockSources {
+	return askBlockSources{observed: maps.Clone(state.askBlocks), authors: maps.Clone(state.askAuthors)}
+}
+
+// author names who wrote the ask block carrying id, which no ask row indexes yet: the author of the
+// update that introduced it, as the update observer recorded it. ok is false for a block the
+// observer has not seen - its update is in the tree, but its observer has not run - which that
+// observer records, arming the settlement that indexes it. A block the observer saw without an
+// author, one the room held when it loaded or one an update with no source introduced, is
+// fallback's.
+func (sources askBlockSources) author(id string, fallback model.Actor) (model.Actor, bool) {
+	if actor, recorded := sources.authors[id]; recorded {
+		return actor, true
+	}
+	if sources.observed != nil {
+		if _, seen := sources.observed[id]; !seen {
+			return model.Actor{}, false
+		}
+	}
+	return fallback, true
 }
 
 // addedAskBlocks counts the readable ask blocks in after whose block id no readable ask block in

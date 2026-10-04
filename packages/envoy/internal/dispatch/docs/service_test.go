@@ -986,7 +986,7 @@ func pendingAuthors(service *Service, artifactID string) []model.Actor {
 	state := service.room(artifactID)
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	return actorSlice(state.pending)
+	return actorSlice(state.takeAuthors().authors)
 }
 
 // setHeadingID returns a live edit that gives every heading id, as the editor's heading plugin
@@ -1730,6 +1730,101 @@ func TestSettleAttributesServiceWrittenAskBlockToTheAPIActorWhilePeerConnected(t
 	}
 }
 
+// A service edit's ask block belongs to that service actor even when a browser edits elsewhere
+// before settlement. The service knows which write introduced the block; the browser's later
+// content is not its author (LEGION-503).
+func TestSettleAttributesAServiceWrittenAskBlockToItsWriterAfterBrowserEdits(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "before")
+	settleCurrentGeneration(t, service, artifactID)
+	bob := model.Actor{Kind: "user", ID: "bob"}
+	service.addConnection(artifactID, 1, bob)
+	agent := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
+
+	ctx := context.Background()
+	tx, err := service.store.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin agent edit: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	joined, ledger := service.Join(ctx, tx)
+	defer ledger.Discard()
+	if _, err := service.ApplyOps(joined, artifactID, []model.EditOp{{
+		Op: "insert", After: "end", Markdown: ":::ask{#agent-after-browser urgency=\"high\" multiple=\"false\"}\nWhich transport?\n:::\n",
+	}}, agent, nil); err != nil {
+		t.Fatalf("agent writes an ask block: %v", err)
+	}
+	if err := ledger.Commit(ctx); err != nil {
+		t.Fatalf("commit agent edit: %v", err)
+	}
+	editLiveTree(t, service, artifactID, appendBlocks(t, "Bob typed later.\n"))
+	settleCurrentGeneration(t, service, artifactID)
+
+	if author := blockAskAuthor(t, service, artifactID, "agent-after-browser"); author != agent {
+		t.Fatalf("service-written ask author = %#v, want %v", author, agent)
+	}
+	if actor := blockAskOpenedActor(t, service, artifactID, "agent-after-browser"); actor != agent {
+		t.Fatalf("ask.opened actor = %#v, want %v", actor, agent)
+	}
+	if !blockAskFollows(t, service, artifactID, "agent-after-browser", agent.ID) {
+		t.Fatalf("service-written ask does not follow its author %q", agent.ID)
+	}
+}
+
+// An upload's ask block belongs to its uploader even when a browser edits elsewhere before
+// settlement. The upload is a service write that introduced the block (LEGION-503).
+func TestSettleAttributesAnUploadedAskBlockToItsUploaderAfterBrowserEdits(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "before")
+	settleCurrentGeneration(t, service, artifactID)
+	bob := model.Actor{Kind: "user", ID: "bob"}
+	service.addConnection(artifactID, 1, bob)
+	alice := model.Actor{Kind: "user", ID: "alice"}
+	if _, err := service.ReplaceText(context.Background(), artifactID, "before\n\n:::ask{#upload-after-browser urgency=\"high\" multiple=\"false\"}\nWhich transport?\n:::\n", alice); err != nil {
+		t.Fatalf("upload the ask block: %v", err)
+	}
+	editLiveTree(t, service, artifactID, appendBlocks(t, "Bob typed later.\n"))
+	settleCurrentGeneration(t, service, artifactID)
+
+	if author := blockAskAuthor(t, service, artifactID, "upload-after-browser"); author != alice {
+		t.Fatalf("uploaded ask author = %#v, want %v", author, alice)
+	}
+	if actor := blockAskOpenedActor(t, service, artifactID, "upload-after-browser"); actor != alice {
+		t.Fatalf("ask.opened actor = %#v, want %v", actor, alice)
+	}
+}
+
+// A settlement attributes the block ask it indexes to the room's latest editor, whose change its
+// version credits, not to an author still pending from an earlier change: an author whose edits
+// came to nothing - typed and undone - stays pending past the settlement that found nothing to
+// version (LEGION-503), and sorts ahead of the ask's writer here.
+func TestSettleAttributesAnAskBlockToItsLatestEditorOverAnEarlierPendingAuthor(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "before")
+	settleCurrentGeneration(t, service, artifactID)
+	typed := model.Actor{Kind: "user", ID: "bob"}
+	connectionID := service.nextConnection.Add(1)
+	service.addConnection(artifactID, connectionID, typed)
+	editLiveTree(t, service, artifactID, replaceRun("before", "before, typed"))
+	editLiveTree(t, service, artifactID, replaceRun("before, typed", "before"))
+	settleCurrentGeneration(t, service, artifactID)
+	service.removeConnection(artifactID, connectionID)
+
+	writer := model.Actor{Kind: "user", ID: "carol"}
+	if _, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{{
+		Op: "insert", After: "end", Markdown: ":::ask{#carol-ask urgency=\"med\" multiple=\"false\"}\nShip it?\n:::\n",
+	}}, writer, nil); err != nil {
+		t.Fatalf("carol's edit: %v", err)
+	}
+	settleCurrentGeneration(t, service, artifactID)
+	if author := blockAskAuthor(t, service, artifactID, "carol-ask"); author != writer {
+		t.Fatalf("ask author = %#v, want %v, who wrote it", author, writer)
+	}
+}
+
 // snapshotAndCommitVersion versions the live text the way an anchored comment does, which
 // consumes the room's pending authors ahead of the next settlement.
 func snapshotAndCommitVersion(t *testing.T, service *Service, artifactID string, actor model.Actor) {
@@ -1798,6 +1893,40 @@ func blockAskAuthor(t *testing.T, service *Service, artifactID, blockID string) 
 		t.Fatalf("decode block ask author: %v", err)
 	}
 	return author
+}
+
+func blockAskOpenedActor(t *testing.T, service *Service, artifactID, blockID string) model.Actor {
+	t.Helper()
+	var raw []byte
+	if err := service.store.Pool.QueryRow(context.Background(), `
+		select e.actor
+		from events e
+		join asks a on e.payload->>'id' = a.id::text
+		where e.type = 'ask.opened' and a.block_artifact_id = $1 and a.block_id = $2
+	`, artifactID, blockID).Scan(&raw); err != nil {
+		t.Fatalf("read block ask %q opened actor: %v", blockID, err)
+	}
+	var actor model.Actor
+	if err := json.Unmarshal(raw, &actor); err != nil {
+		t.Fatalf("decode block ask %q opened actor: %v", blockID, err)
+	}
+	return actor
+}
+
+func blockAskFollows(t *testing.T, service *Service, artifactID, blockID, sessionID string) bool {
+	t.Helper()
+	var follows bool
+	if err := service.store.Pool.QueryRow(context.Background(), `
+		select exists(
+			select 1
+			from ask_followers f
+			join asks a on a.id = f.ask_id
+			where a.block_artifact_id = $1 and a.block_id = $2 and f.session_id = $3
+		)
+	`, artifactID, blockID, sessionID).Scan(&follows); err != nil {
+		t.Fatalf("read block ask %q followers: %v", blockID, err)
+	}
+	return follows
 }
 
 func TestSupersededSettleGenerationDoesNotWrite(t *testing.T) {
@@ -2427,7 +2556,7 @@ func (s *blockingFirstAppendStore) AppendUpdateWithClass(ctx context.Context, ro
 func (s *Service) recordActor(room string, actor model.Actor) {
 	state := s.room(room)
 	state.mu.Lock()
-	state.pending[actorKey(actor)] = actor
+	state.creditAuthor(actor)
 	state.lastActor = new(actor)
 	state.mu.Unlock()
 }

@@ -31,17 +31,13 @@ type Ledger struct {
 	events   []model.Event
 	// live holds, per document, the writes this transaction made to it; order is the order it
 	// first wrote them in.
-	live     map[string]*liveWrite
-	order    []string
-	versions []ledgerVersion
+	live  map[string]*liveWrite
+	order []string
+	// captures are the authors each version this transaction wrote credits (authorCapture).
+	captures []authorCapture
 	// rebuilds are the documents this transaction rebuilds (RebuildDocument), whose rooms refuse
 	// loads until it ends, committed or not.
 	rebuilds []string
-}
-
-type ledgerVersion struct {
-	artifactID string
-	version    model.Version
 }
 
 type ledgerContextKey struct{}
@@ -124,10 +120,10 @@ func (l *Ledger) commit(ctx context.Context) error {
 		return err
 	}
 	l.credit()
-	for _, written := range l.versions {
-		l.service.commitVersion(written.artifactID, written.version)
+	for _, capture := range l.captures {
+		capture.release()
 	}
-	l.versions = nil
+	l.captures = nil
 	return nil
 }
 
@@ -138,10 +134,7 @@ func (l *Ledger) Discard() {
 	for _, artifactID := range l.order {
 		l.service.finishLiveWrite(l.live[artifactID])
 	}
-	for _, written := range l.versions {
-		l.service.discardPendingVersion(written.artifactID, written.version)
-	}
-	l.versions = nil
+	l.captures = nil
 	l.endRebuilds()
 }
 
@@ -156,8 +149,32 @@ func (l *Ledger) endRebuilds() {
 	l.rebuilds = nil
 }
 
-func (l *Ledger) recordVersion(artifactID string, version model.Version) {
-	l.versions = append(l.versions, ledgerVersion{artifactID: artifactID, version: version})
+// WroteVersion records a version of artifactID that the caller wrote itself in this transaction,
+// outside the document service, over the transaction's write to the document - an upload, whose
+// version credits its uploader alone, to whom that write is credited. When the write changed the
+// document, Commit leaves the write out of the document's pending authors, since the version holds
+// and credits it, and clears every entry credited before the write last read the room
+// (liveWrite.forkSeq), whether the replacement removed that change or kept it: no later version
+// credits it. An entry credited after that read, for a change the write never read, stays pending
+// for the next version. An upload that changed nothing clears nothing, and a version of a document
+// the transaction seeded (SeedText) has no write to hold and no pending author to clear.
+func (l *Ledger) WroteVersion(artifactID string) {
+	write := l.liveWriteFor(artifactID)
+	if write == nil || len(write.updates) == 0 {
+		return
+	}
+	l.recordVersion(write.state.captureThrough(write.forkSeq, 0), write)
+}
+
+// recordVersion records a version this transaction wrote: capture, through which its commit
+// releases the room's pending entries, and write, the transaction's write to the document, every
+// change of which so far the version holds and credits, so that the commit does not credit it
+// again (credit).
+func (l *Ledger) recordVersion(capture authorCapture, write *liveWrite) {
+	l.captures = append(l.captures, capture)
+	if write != nil {
+		write.versioned = true
+	}
 }
 
 func (l *Ledger) liveWriteFor(artifactID string) *liveWrite {
@@ -190,8 +207,9 @@ func (l *Ledger) addLiveWrite(write *liveWrite) {
 }
 
 // credit credits each content change of a committed transaction to its room, for the room's
-// next version. It runs before the transaction's own versions are released, which clears the
-// authors those versions already name.
+// next version, unless a version the transaction wrote holds every change of the write and
+// credits its authors already (liveWrite.versioned). It runs before the transaction's own
+// versions are released.
 func (l *Ledger) credit() {
 	for _, artifactID := range l.order {
 		write := l.live[artifactID]
@@ -200,8 +218,10 @@ func (l *Ledger) credit() {
 		}
 		state := l.service.room(artifactID)
 		state.mu.Lock()
-		for key, actor := range write.credits {
-			state.pending[key] = actor
+		if !write.versioned {
+			for _, actor := range write.credits {
+				state.creditAuthor(actor)
+			}
 		}
 		state.lastActor = write.actor
 		state.mu.Unlock()

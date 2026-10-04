@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -1303,6 +1304,164 @@ func TestSuggestionAcceptClearsPendingAuthorBeforeNextVersion(t *testing.T) {
 	}](t, next)
 	if result.Version == nil || len(result.Version.Authors) != 1 || result.Version.Authors[0] != (model.Actor{Kind: "session", ID: "session-0123456789abcdef"}) {
 		t.Fatalf("next version authors = %#v, want only the next session editor", result.Version)
+	}
+}
+
+// An upload's version takes its author sequence at the upload write's room read, so a browser edit
+// made after that read stays pending until a later version holds and credits it (LEGION-503).
+func TestAnUploadKeepsTheCreditOfAnEditItsUploaderMakesWhileItWrites(t *testing.T) {
+	documentService, handler, database := browserDocumentService(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Upload timing", "First.\n\nSecond.\n")
+	alice := model.Actor{Kind: "user", ID: "alice"}
+	peer := connectBrowserPeer(t, documentService, issue.PrimaryArtifactID)
+	t.Cleanup(peer.close)
+
+	ctx := context.Background()
+	tx, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin upload transaction: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	joined, ledger := documentService.Join(ctx, tx)
+	defer ledger.Discard()
+	uploaded, err := documentService.ReplaceText(joined, issue.PrimaryArtifactID, "First.\n\nSecond, uploaded.\n", alice)
+	if err != nil {
+		t.Fatalf("replace the document with the upload: %v", err)
+	}
+	peer.appendParagraph(t, "Third, alice.")
+	peer.barrier(t)
+	var nextNumber int
+	if err := tx.QueryRow(ctx, `select coalesce(max(number), 0) + 1 from artifact_versions where artifact_id = $1`, issue.PrimaryArtifactID).Scan(&nextNumber); err != nil {
+		t.Fatalf("read next upload version number: %v", err)
+	}
+	if _, err := writeDocumentVersion(ctx, tx, issue.PrimaryArtifactID, nextNumber, uploaded, []model.Actor{alice}, nil); err != nil {
+		t.Fatalf("write the upload version: %v", err)
+	}
+	ledger.WroteVersion(issue.PrimaryArtifactID)
+	if err := ledger.Commit(ctx); err != nil {
+		t.Fatalf("commit upload transaction: %v", err)
+	}
+	peer.closeAndWait(t)
+	waitForArtifactVersion(t, handler, issue.PrimaryArtifactID, nextNumber+1)
+	version := decodeBody[model.Version](t, dispatchRequest(t, handler, http.MethodGet, fmt.Sprintf("/api/v1/artifacts/%s/versions/%d", issue.PrimaryArtifactID, nextNumber+1), nil, "alice"))
+	if len(version.Authors) != 1 || version.Authors[0] != alice {
+		t.Fatalf("version %d authors = %#v, want alice, whose browser edit it holds", nextNumber+1, version.Authors)
+	}
+}
+
+// An upload that changes the document clears every credit pending at its write's room read, so no
+// later version credits an edit the upload was written over, whether its replacement dropped that
+// edit or kept it. An upload that changes nothing clears nothing (LEGION-503).
+func TestAnUploadClearsPendingCreditOnlyWhenItChangesTheDocument(t *testing.T) {
+	session := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
+	alice := model.Actor{Kind: "user", ID: "alice"}
+	for _, test := range []struct {
+		name        string
+		replacement string
+		find        string
+		want        []model.Actor
+	}{
+		// Bob's replacement drops Alice's paragraph: no version may credit an edit none holds.
+		{name: "a replacement that drops her edit", replacement: "after\n", find: "after", want: []model.Actor{session}},
+		// Bob's replacement keeps Alice's paragraph and adds his own. It changed the document, so it
+		// clears every credit pending at its room read, hers included (Deep's probe C).
+		{name: "a replacement that keeps her edit", replacement: "before\n\nAlice wrote this.\n\nBob's own.\n", find: "before", want: []model.Actor{session}},
+		// Bob uploads the live text unchanged. His write changed nothing, so it clears nothing, and
+		// the next version credits Alice (Deep's probe D).
+		{name: "an unchanged re-upload", replacement: "before\n\nAlice wrote this.\n", find: "before", want: []model.Actor{session, alice}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			documentService, handler, _ := browserDocumentService(t)
+			issue := createInteractionIssue(t, handler, "TEST", "Overwritten author", "before")
+			path := "/api/v1/issues/" + issue.Key + "/artifacts"
+			upload := func(content string) {
+				t.Helper()
+				if response := dispatchRequest(t, handler, http.MethodPost, path, map[string]string{
+					"name": "notes.md", "content": content,
+				}, "bob"); response.Code != http.StatusCreated {
+					t.Fatalf("bob uploads %q: status=%d body=%s", content, response.Code, response.Body.String())
+				}
+			}
+			upload("before\n")
+			var notes model.Artifact
+			for _, artifact := range decodeBody[[]model.Artifact](t, dispatchRequest(t, handler, http.MethodGet, path, nil, "alice")) {
+				if artifact.Name == "notes.md" {
+					notes = artifact
+				}
+			}
+			if notes.ID == "" {
+				t.Fatal("uploaded document is missing")
+			}
+			browser := connectBrowserPeer(t, documentService, notes.ID)
+			t.Cleanup(browser.close)
+			browser.appendParagraph(t, "Alice wrote this.")
+			browser.barrier(t)
+			upload(test.replacement)
+
+			next := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+notes.ID+"/edits", map[string]any{
+				"ops":     []map[string]string{{"op": "replace", "find": test.find, "with": "next"}},
+				"summary": "Next version",
+				"actor":   sessionActor(),
+			})
+			if next.Code != http.StatusOK {
+				t.Fatalf("create next version: status=%d body=%s", next.Code, next.Body.String())
+			}
+			version := decodeBody[struct {
+				Version *model.Version `json:"version"`
+			}](t, next).Version
+			if version == nil || !slices.Equal(version.Authors, test.want) {
+				t.Fatalf("next version = %#v, want authors %v", version, test.want)
+			}
+		})
+	}
+}
+
+// An upload's version credits its uploader and holds the upload's write to the document, and the
+// uploader's browser edits it is written over, so the next version, a session's named edit,
+// credits that session alone (LEGION-503).
+func TestUploadClearsItsUploaderBeforeNextVersion(t *testing.T) {
+	documentService, handler, _ := browserDocumentService(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Uploaded author", "before")
+	path := "/api/v1/issues/" + issue.Key + "/artifacts"
+	upload := func(content string) {
+		t.Helper()
+		if response := dispatchRequest(t, handler, http.MethodPost, path, map[string]string{
+			"name": "notes.md", "content": content,
+		}, "alice"); response.Code != http.StatusCreated {
+			t.Fatalf("upload %q: status=%d body=%s", content, response.Code, response.Body.String())
+		}
+	}
+	upload("before\n")
+	listed := dispatchRequest(t, handler, http.MethodGet, path, nil, "alice")
+	var notes model.Artifact
+	for _, artifact := range decodeBody[[]model.Artifact](t, listed) {
+		if artifact.Name == "notes.md" {
+			notes = artifact
+		}
+	}
+	if notes.ID == "" {
+		t.Fatalf("uploaded document missing from %s", listed.Body.String())
+	}
+	// alice types in her browser before she uploads again: the room credits her with it.
+	browser := connectBrowserPeer(t, documentService, notes.ID)
+	t.Cleanup(browser.close)
+	browser.appendParagraph(t, "Typed in the browser.")
+	browser.barrier(t)
+	upload("after\n")
+
+	next := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+notes.ID+"/edits", map[string]any{
+		"ops":     []map[string]string{{"op": "replace", "find": "after", "with": "next"}},
+		"summary": "Next version",
+		"actor":   sessionActor(),
+	})
+	if next.Code != http.StatusOK {
+		t.Fatalf("create next version: status=%d body=%s", next.Code, next.Body.String())
+	}
+	result := decodeBody[struct {
+		Version *model.Version `json:"version"`
+	}](t, next)
+	if result.Version == nil || len(result.Version.Authors) != 1 || result.Version.Authors[0] != (model.Actor{Kind: "session", ID: "session-0123456789abcdef"}) {
+		t.Fatalf("next version = %#v, want one crediting only the next session editor", result.Version)
 	}
 }
 
