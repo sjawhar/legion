@@ -316,16 +316,21 @@ check "names it" "$(contains "$out" 'dist does not exist')"
 # body, branch name and the head the run checks (its base and head sha, and its one commit); a
 # stand-in `gh` answers the compare route for exactly that base...head with that commit (message,
 # author and committer) in the route's own JSON shape, so the real `.commits[] | .commit.message, …`
-# filter that feeds the required check runs for real, rather than a filter the stub fakes. The stub
-# also answers the pull request's own commits route, which reads whatever head the pull request has
-# by then: the same commit, until a case appends a later push's. A case rewrites `$work/compare`
-# (one JSON object per page, as `gh api --paginate` prints them) or `$work/pr-commits`, then calls
-# run_pr_text, which runs the script and sets `out` and `status`.
+# filter that feeds the required check runs for real, rather than a filter the stub fakes. It
+# matches that URL whole and refuses a call without --paginate, so losing either paging token
+# fails every case below instead of passing on a list GitHub cut short at 250 commits. The stub
+# also answers the pull request's own commits route, which reads whatever head the pull request
+# has by then: the same commit, until the mid-run-push case appends a later one that names a
+# private thing. A case rewrites `$work/compare` (one JSON object per page, as `gh api --paginate`
+# prints them) or `$work/pr-commits`, then calls run_pr_text, which runs the script and sets `out`
+# and `status`.
 mkdir -p "$work/bin"
 cat > "$work/bin/gh" <<'GH'
 #!/usr/bin/env bash
 case "$1 $2" in
-  "api repos/example/repo/compare/base-sha...event-head-sha"*) cat "$PR_TEXT_TEST_DIR/compare" ;;
+  "api repos/example/repo/compare/base-sha...event-head-sha?per_page=100")
+    [[ " $* " == *" --paginate "* ]] || { echo "compare route read without --paginate: $*" >&2; exit 3; }
+    cat "$PR_TEXT_TEST_DIR/compare" ;;
   "api repos/example/repo/pulls/7/commits") cat "$PR_TEXT_TEST_DIR/pr-commits" ;;
   *) echo "unexpected gh call: $*" >&2; exit 3 ;;
 esac
@@ -339,8 +344,8 @@ pr_commit() {
                committer: {name: "Dev", email: $committer_email}}}'
 }
 write_pr_text() {
-  local title=$1 body=$2 branch=${4:-fix/keep-the-order} commit
-  commit=$(pr_commit "$3" "${5:-}" "${6:-}")
+  local title=$1 body=$2 message=$3 branch=${4:-fix/keep-the-order} commit
+  commit=$(pr_commit "$message" "${5:-}" "${6:-}")
   jq -nc --argjson commit "$commit" '{total_commits: 1, commits: [$commit]}' > "$work/compare"
   jq -nc --argjson commit "$commit" '[$commit]' > "$work/pr-commits"
   printf '%s' "$body" > "$work/pr-body"
@@ -398,11 +403,21 @@ check "names the commits line" "$(contains "$out" 'commits:5: names the company'
 
 echo "case: the commits of the head the run checks, when a later push lands while it runs"
 write_pr_text "fix(dispatch): keep the inbox order" "Refs LEGION-7" "fix: keep the order"
-jq -c --argjson later "$(pr_commit "fix: the later push")" '. + [$later]' "$work/pr-commits" \
-  > "$work/pr-commits.next"
+later_commit=$(pr_commit "fix: a later push ($key-7)")
+jq -c --argjson later "$later_commit" '. + [$later]' "$work/pr-commits" > "$work/pr-commits.next"
 mv "$work/pr-commits.next" "$work/pr-commits"
 run_pr_text
 check "a pull request whose head moved on mid-run passes" "$(is "$status" 0)"
+
+# The same commit, this time on the head the run checks: the case above passes because the script
+# read that head, not because the later push's name is one the guard would have let through.
+jq -c --argjson later "$later_commit" '{total_commits: 2, commits: (.commits + [$later])}' \
+  "$work/compare" > "$work/compare.next"
+mv "$work/compare.next" "$work/compare"
+run_pr_text
+check "that same commit, on the run's own head, fails" "$(is "$status" 1)"
+check "names its line" "$(contains "$out" 'commits:6: names the private deployment repository')"
+check "does not print the key" "$(is "$(contains "$out" "$key")" false)"
 
 echo "case: a commit list the compare route cut short, and one spread over pages"
 write_pr_text "fix(dispatch): keep the inbox order" "Refs LEGION-7" "fix: keep the order"
@@ -421,6 +436,18 @@ run_pr_text
 check "a commit on the compare route's second page naming the company fails" "$(is "$status" 1)"
 check "names its line, counting the first page's commit" "$(contains "$out" 'commits:8: names the company')"
 check "counts both pages' commits as the whole list" "$(is "$(contains "$out" 'but listed')" false)"
+
+echo "case: a compare answer the script cannot check against a total"
+write_pr_text "fix(dispatch): keep the inbox order" "Refs LEGION-7" "fix: keep the order"
+jq -nc '{commits: []}' > "$work/compare"
+run_pr_text
+check "an answer carrying no total_commits fails" "$(is "$status" 1)"
+check "names the cause" "$(contains "$out" 'names no total_commits')"
+
+: > "$work/compare"
+run_pr_text
+check "an empty answer fails the same way" "$(is "$status" 1)"
+check "names the cause" "$(contains "$out" 'names no total_commits')"
 
 long_body=$(printf '%.0s–' {1..50000})
 run_pr_text "fix(dispatch): keep the inbox order" "$long_body" "fix: keep the order"
