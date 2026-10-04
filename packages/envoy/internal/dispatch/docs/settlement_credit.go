@@ -130,12 +130,15 @@ func pendingSettlementCredit(ctx context.Context, q Queryer, room string) (bool,
 }
 
 // upsertSettlementCredit merges credit into room's pending-settlement row: its pending authors join
-// the row's, a later credit for an actor replacing the earlier one, and its last actor replaces the
-// row's only when it names one. Every operand is parenthesized: PostgreSQL gives `->` and `||` the
-// same precedence. Both sides' pending is an object: every row this service writes holds one, and
-// settlementCredit.MarshalJSON writes one for a nil map. updateMarkedAt is true only for a newly
-// appended document update; recording authors after its transaction committed or while closing an
-// issue must not make an old row wait another resumption age.
+// the row's, a later credit for an actor replacing the earlier one. A credit naming a last actor or
+// pending authors sets the row's last actor to its own, none included: the room clears its last
+// actor for an edit no one actor can be credited with (creditContentChange), and that credit names
+// the edit's authors without one. An append with no credit keeps the row's. Every operand is
+// parenthesized: PostgreSQL gives `->` and `||` the same precedence. Both sides' pending is an
+// object: every row this service writes holds one, and settlementCredit.MarshalJSON writes one for a
+// nil map. updateMarkedAt is true only for a newly appended document update; recording authors after
+// its transaction committed or while closing an issue must not make an old row wait another
+// resumption age.
 func upsertSettlementCredit(ctx context.Context, tx pgx.Tx, room string, credit settlementCredit, updateMarkedAt bool) error {
 	encoded, err := json.Marshal(credit)
 	if err != nil {
@@ -148,7 +151,11 @@ func upsertSettlementCredit(ctx context.Context, tx pgx.Tx, room string, credit 
 				'pending',
 				(doc_settlements_pending.settlement_authors->'pending') || (excluded.settlement_authors->'pending'),
 				'last_actor',
-				coalesce(excluded.settlement_authors->'last_actor', doc_settlements_pending.settlement_authors->'last_actor')
+				coalesce(
+					excluded.settlement_authors->'last_actor',
+					case when (excluded.settlement_authors->'pending') = '{}'::jsonb
+						then doc_settlements_pending.settlement_authors->'last_actor' end
+				)
 			)),
 			marked_at = case when $3 then now() else doc_settlements_pending.marked_at end
 	`, room, string(encoded), updateMarkedAt); err != nil {

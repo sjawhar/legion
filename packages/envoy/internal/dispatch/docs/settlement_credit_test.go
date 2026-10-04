@@ -319,8 +319,9 @@ func TestSettlementCreditKeepsExistingPendingAcrossUncreditedAppend(t *testing.T
 }
 
 // Each append merges its credit into the document's pending-settlement row: pending authors
-// accumulate, a later credit for the same actor replaces the earlier one, and the latest last
-// actor wins while an append without one keeps the row's.
+// accumulate, a later credit for the same actor replaces the earlier one, and a credit naming
+// pending authors carries the room's last actor, none after an edit no one actor can be credited
+// with, while an append with no credit keeps the row's.
 func TestSettlementCreditMergesPendingAuthors(t *testing.T) {
 	alice := model.Actor{Kind: "session", ID: "alice"}
 	bob := model.Actor{Kind: "user", ID: "bob"}
@@ -340,6 +341,12 @@ func TestSettlementCreditMergesPendingAuthors(t *testing.T) {
 			existing: creditOf(&alice, alice, bob),
 			next:     creditOf(&carol, bobFromLaptop, carol),
 			want:     creditOf(&carol, alice, bobFromLaptop, carol),
+		},
+		{
+			name:     "existing then authors no one actor wrote",
+			existing: creditOf(&alice, alice),
+			next:     creditOf(nil, bob, carol),
+			want:     creditOf(nil, alice, bob, carol),
 		},
 	}
 	database := storetest.Open(t)
