@@ -1076,8 +1076,10 @@ func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, ac
 	if fork != nil {
 		state := s.room(room)
 		state.mu.Lock()
-		capture, authors = captureAuthors(state, joinedLiveWrite(ctx, room), actor)
-		state.mu.Unlock()
+		func() {
+			defer state.mu.Unlock()
+			capture, authors = captureAuthors(state, joinedLiveWrite(ctx, room), actor)
+		}()
 		if tree, err = treeOf(fork); err != nil {
 			return nil, "", versionPending{}, nil, err
 		}
