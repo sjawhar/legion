@@ -143,12 +143,12 @@ func (w *workflowRuntime) requiredFor(ctx context.Context, pr record.PullRequest
 		return fact, nil
 	}
 	fact.WorkflowsHead = classify.WorkflowHead(pr)
-	standings, err := requiredchecks.Workflows(ctx, github, fact.WorkflowsHead, set.Workflows)
+	runs, err := requiredchecks.Workflows(ctx, github, fact.WorkflowsHead, set.Workflows)
 	if err != nil {
 		return intake.RequiredChecks{}, fmt.Errorf("read the workflow runs on %s: %w", fact.WorkflowsHead, err)
 	}
-	for _, standing := range standings {
-		fact.Workflows = append(fact.Workflows, record.RequiredWorkflow{Path: standing.Name, Result: standing.Result})
+	for _, run := range runs {
+		fact.Workflows = append(fact.Workflows, record.RequiredWorkflow{Path: run.Path, Result: run.Result, Run: run.Run, Attempt: run.Attempt})
 	}
 	return fact, nil
 }

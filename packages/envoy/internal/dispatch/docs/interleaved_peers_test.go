@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/reearth/ygo/crdt"
+
+	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
 )
 
 // Two peers' updates reach the room's persistence in whatever order their read loops hand them
@@ -54,15 +56,15 @@ func TestARoomWhosePeersUpdatesAreStoredOutOfOrderSettlesBoth(t *testing.T) {
 	seedServiceText(t, service, artifactID, "before")
 	server := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
 	t.Cleanup(server.Close)
-	alpha := newDeepPeer(t, server.URL, artifactID)
-	beta := newDeepPeer(t, server.URL, artifactID)
-	first.Store(uint64(alpha.doc.ClientID()))
+	alpha := connectPeer(t, server.URL, artifactID)
+	beta := connectPeer(t, server.URL, artifactID)
+	first.Store(uint64(alpha.Doc.ClientID()))
 	// A peer holds the room's document once it has applied the room's sync step 2, which comes
 	// after the step 1 it answers, so each peer's answer reaches the room ahead of its keystroke
 	// and the second peer types against the room as it stood before the first peer's update.
 	seeded := service.srv.GetDoc(artifactID).StateVector()
-	holdsRoom := func(peer *deepPeer) bool {
-		has := peer.doc.StateVector()
+	holdsRoom := func(peer *docstest.Peer) bool {
+		has := peer.Doc.StateVector()
 		for client, clock := range seeded {
 			if has.Clock(client) < clock {
 				return false
@@ -89,17 +91,21 @@ func TestARoomWhosePeersUpdatesAreStoredOutOfOrderSettlesBoth(t *testing.T) {
 	}
 
 	holding.Store(true)
-	alpha.send(t, typeParagraph(alpha.doc, "alpha"))
+	if _, err := alpha.Send(typeParagraph(alpha.Doc, "alpha")); err != nil {
+		t.Fatalf("send the first peer's keystroke: %v", err)
+	}
 	select {
 	case <-held:
 	case <-time.After(10 * time.Second):
 		t.Fatal("the room did not apply the first peer's update")
 	}
-	beta.send(t, typeParagraph(beta.doc, "beta"))
+	if _, err := beta.Send(typeParagraph(beta.Doc, "beta")); err != nil {
+		t.Fatalf("send the second peer's keystroke: %v", err)
+	}
 	waitFor(t, 10*time.Second, "the second peer's update to be stored", func() bool {
-		return storedClock(beta.doc.ClientID()) > 0
+		return storedClock(beta.Doc.ClientID()) > 0
 	})
-	if storedClock(alpha.doc.ClientID()) != 0 {
+	if storedClock(alpha.Doc.ClientID()) != 0 {
 		t.Fatal("the first peer's update was stored while it was held")
 	}
 

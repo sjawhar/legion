@@ -1,0 +1,13 @@
+{
+  "threads": [
+    {
+      "url": "https://github.com/acme/widgets/pull/42#discussion_r1",
+      "resolved": "the Legion reviewer's acceptance of a bot's thread",
+      "newestBy": "legion-reviewer"
+    }
+  ],
+  "refused": {
+    "url": "https://github.com/acme/widgets/pull/42#discussion_r3",
+    "error": "GitHub: Resource not accessible by integration"
+  }
+}
