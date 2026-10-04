@@ -41,9 +41,11 @@ func TestTheReviewersRepositoryPermissionDecidesWhoMayEndARound(t *testing.T) {
 		number     int
 		permission string
 		// answered is the login GitHub's answer names; empty is the review's author.
-		answered  string
-		status    int
-		header    map[string]string
+		answered string
+		status   int
+		header   map[string]string
+		// body is GitHub's refusal; empty is "refused".
+		body      string
 		want      bool
 		wantErr   string
 		wantWait  time.Duration
@@ -64,6 +66,9 @@ func TestTheReviewersRepositoryPermissionDecidesWhoMayEndARound(t *testing.T) {
 			wantErr: "403", wantWait: 90 * time.Second, wantCalls: 1},
 		{name: "a 403 with retry-after", login: "a-writer", status: http.StatusForbidden, header: map[string]string{"Retry-After": "120"},
 			wantErr: "403", wantWait: 120 * time.Second, wantCalls: 1},
+		{name: "a 403 for a secondary rate limit named only by its message", login: "a-writer", status: http.StatusForbidden,
+			header: map[string]string{"X-RateLimit-Remaining": "4321"}, body: `{"message":"You have exceeded a secondary rate limit. Please wait a few minutes before you try again."}`,
+			wantErr: "403", wantWait: time.Minute, wantCalls: 1},
 		{name: "a 429 naming no wait", login: "a-writer", status: http.StatusTooManyRequests, wantErr: "429", wantWait: time.Minute, wantCalls: 1},
 		{name: "GitHub failing", login: "a-writer", status: http.StatusBadGateway, wantErr: "502", wantCalls: 1},
 		{name: "the review App itself", login: "legion-reviewer[bot]", wantCalls: 0},
@@ -80,7 +85,11 @@ func TestTheReviewersRepositoryPermissionDecidesWhoMayEndARound(t *testing.T) {
 					w.Header().Set(name, value)
 				}
 				if tc.status != 0 {
-					http.Error(w, "refused", tc.status)
+					body := tc.body
+					if body == "" {
+						body = "refused"
+					}
+					http.Error(w, body, tc.status)
 					return
 				}
 				answered := tc.answered
@@ -129,69 +138,93 @@ func TestTheReviewersRepositoryPermissionDecidesWhoMayEndARound(t *testing.T) {
 	}
 }
 
-// Any account can review a public repository's pull request, so the daemon asks GitHub about an
-// account once per reviewPermissionTTL, whatever case its login comes in, however many reviews it
-// submits, and asks again once that passes. A failed read stands for nothing: a rate limit is read
-// again, so the writer the limit hid still decides once it lifts.
+// Any account can review a public repository's pull request, so an account GitHub gives no write
+// access is asked about once per reviewPermissionTTL, whatever case its login comes in, however
+// many reviews it submits, and asked about again once that passes. Write access is never kept: a
+// writer reviews rarely, and a kept answer would let one whose access was just removed decide, and
+// would skip the check that GitHub's answer names the review's author. While GitHub's rate limit
+// stands, an account with no answer kept is answered with the wait left, with no call made against
+// a limited API; once the wait has passed, reads resume, so the writer the limit hid still decides.
 func TestAReviewersPermissionIsReadOncePerWindow(t *testing.T) {
 	pool := reviewPermissionPool(t)
-	var answers []int
+	var limitFirst bool
 	calls := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		status := http.StatusOK
-		if calls < len(answers) {
-			status = answers[calls]
-		}
 		calls++
-		if status == http.StatusForbidden {
-			w.Header().Set("Retry-After", "60")
-			http.Error(w, "rate limited", status)
+		if limitFirst && calls == 1 {
+			w.Header().Set("Retry-After", "1")
+			http.Error(w, "rate limited", http.StatusForbidden)
 			return
 		}
-		fmt.Fprint(w, `{"permission":"write","user":{"login":"a-writer"}}`)
+		login := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/repos/acme/widgets/collaborators/"), "/permission")
+		permission := "write"
+		if strings.Contains(login, "reader") {
+			permission = "read"
+		}
+		fmt.Fprintf(w, `{"permission":%q,"user":{"login":%q}}`, permission, login)
 	}))
 	defer server.Close()
 	review := func(author string) intake.PullRequestReview {
 		return intake.PullRequestReview{Repo: "acme/widgets", Number: 42, State: "approved", Author: author}
 	}
+	read := func(t *testing.T, w *workflowRuntime, author string, want bool) {
+		t.Helper()
+		canWrite, err := w.reviewerCanWrite(context.Background(), review(author))
+		if err != nil || canWrite != want {
+			t.Fatalf("%s's permission = %v, %v; want %v and no error", author, canWrite, err, want)
+		}
+	}
 
-	t.Run("within the window", func(t *testing.T) {
-		answers, calls = nil, 0
+	t.Run("no write access, within the window", func(t *testing.T) {
+		limitFirst, calls = false, 0
 		w := reviewPermissionRuntime(pool, server.URL, quietLogger())
-		for _, author := range []string{"a-writer", "a-writer", "A-Writer"} {
-			if canWrite, err := w.reviewerCanWrite(context.Background(), review(author)); err != nil || !canWrite {
-				t.Fatalf("%s's permission = %v, %v; want write access", author, canWrite, err)
-			}
+		for _, author := range []string{"a-reader", "a-reader", "A-Reader"} {
+			read(t, w, author, false)
 		}
 		if calls != 1 {
 			t.Fatalf("GitHub was asked %d times for three reviews in one window, want once", calls)
 		}
 	})
-	t.Run("after the window", func(t *testing.T) {
-		answers, calls = nil, 0
+	t.Run("no write access, after the window", func(t *testing.T) {
+		limitFirst, calls = false, 0
 		w := reviewPermissionRuntime(pool, server.URL, quietLogger())
 		w.permissionTTL = time.Millisecond
 		for range 2 {
-			if canWrite, err := w.reviewerCanWrite(context.Background(), review("a-writer")); err != nil || !canWrite {
-				t.Fatalf("a-writer's permission = %v, %v; want write access", canWrite, err)
-			}
+			read(t, w, "a-reader", false)
 			time.Sleep(2 * w.permissionTTL)
 		}
 		if calls != 2 {
 			t.Fatalf("GitHub was asked %d times for two reviews a window apart, want twice", calls)
 		}
 	})
-	t.Run("after a rate limit", func(t *testing.T) {
-		answers, calls = []int{http.StatusForbidden}, 0
+	t.Run("write access is read every time", func(t *testing.T) {
+		limitFirst, calls = false, 0
+		w := reviewPermissionRuntime(pool, server.URL, quietLogger())
+		for range 3 {
+			read(t, w, "a-writer", true)
+		}
+		if calls != 3 {
+			t.Fatalf("GitHub was asked %d times for three of a writer's reviews, want three: write access is never kept", calls)
+		}
+	})
+	t.Run("while the rate limit stands", func(t *testing.T) {
+		limitFirst, calls = true, 0
 		w := reviewPermissionRuntime(pool, server.URL, quietLogger())
 		if _, err := w.reviewerCanWrite(context.Background(), review("a-writer")); err == nil {
 			t.Fatal("a rate-limited read answered; want its error")
 		}
-		if canWrite, err := w.reviewerCanWrite(context.Background(), review("a-writer")); err != nil || !canWrite {
-			t.Fatalf("a-writer's permission once the limit lifted = %v, %v; want write access", canWrite, err)
+		_, err := w.reviewerCanWrite(context.Background(), review("another-writer"))
+		var later *intake.RetryLater
+		if !errors.As(err, &later) || later.After <= 0 {
+			t.Fatalf("a read while the limit stands = %v; want the wait left", err)
 		}
+		if calls != 1 {
+			t.Fatalf("GitHub was asked %d times while its limit stood, want once: the limit itself", calls)
+		}
+		time.Sleep(1100 * time.Millisecond)
+		read(t, w, "a-writer", true)
 		if calls != 2 {
-			t.Fatalf("GitHub was asked %d times, want twice: the limit stands for nothing", calls)
+			t.Fatalf("GitHub was asked %d times once the wait had passed, want twice", calls)
 		}
 	})
 }

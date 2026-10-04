@@ -188,9 +188,10 @@ These arrive as messages on the Dispatch issue, and the architect is told:
   for the decision. Only the review App or an account with write access to the repository decides a
   round, so an approval or request for changes from anyone else leaves it undecided too. The daemon
   reads the author's permission from GitHub before it applies the review: an account GitHub answers
-  `404` for, or a `403` that is not its rate limit, has no write access. Any other failed read is
-  retried, a rate limit once the wait GitHub names has passed, and an answer stands for five
-  minutes. The daemon logs each review that decides nothing as `workflow: a review decides nothing:
+  `404` for, or a `403` that is not its rate limit, has no write access, and stands so for five
+  minutes; write access is read again for every review. Any other failed read is retried, a rate
+  limit once the wait GitHub names has passed, and while that wait stands the daemon reads nothing
+  from GitHub. The daemon logs each review that decides nothing as `workflow: a review decides nothing:
   its author is neither the review App nor an account with write access to the repository`, with
   the author's login, and logs a permission it read as no write access with GitHub's own answer. A
   `403` that is not a rate limit is logged at error as `workflow: GitHub refuses the review App's

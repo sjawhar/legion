@@ -124,7 +124,8 @@ func (c Client) call(ctx context.Context, method, url string, body []byte, into 
 	}
 	if response.StatusCode < 200 || response.StatusCode > 299 {
 		path, _, _ := strings.Cut(strings.TrimPrefix(url, c.API), "?")
-		return "", &Answer{Method: method, Path: path, Status: response.StatusCode, Body: strings.TrimSpace(string(answer)), RateLimited: RateLimited(response), RetryAfter: retryAfter(response, time.Now())}
+		return "", &Answer{Method: method, Path: path, Status: response.StatusCode, Body: strings.TrimSpace(string(answer)),
+			RateLimited: RateLimited(response, answer), RetryAfter: retryAfter(response, answer, time.Now())}
 	}
 	if into == nil {
 		return nextPage(response.Header.Get("Link")), nil
@@ -132,20 +133,41 @@ func (c Client) call(ctx context.Context, method, url string, body []byte, into 
 	return nextPage(response.Header.Get("Link")), json.Unmarshal(answer, into)
 }
 
-// RateLimited says whether response is GitHub's rate limit: a 429, or a 403 carrying
-// x-ratelimit-remaining: 0 or a retry-after.
-func RateLimited(response *http.Response) bool {
-	return response.StatusCode == http.StatusTooManyRequests || response.StatusCode == http.StatusForbidden &&
-		(response.Header.Get("X-RateLimit-Remaining") == "0" || response.Header.Get("Retry-After") != "")
+// secondaryLimitMessages are what GitHub's secondary rate limit says in the body of the 403 it can
+// answer with instead of a 429: "You have exceeded a secondary rate limit", with the older wording
+// of the same limit, "You have triggered an abuse detection mechanism", beside it.
+var secondaryLimitMessages = []string{"secondary rate limit", "abuse detection mechanism"}
+
+// RateLimited says whether response, whose body is body, is GitHub's rate limit: a 429, or a 403
+// carrying x-ratelimit-remaining: 0 or a retry-after, or one whose body says it is the secondary
+// limit, which GitHub's REST documentation allows with neither header set. A caller with no body
+// read passes nil, and reads only the status and the headers.
+func RateLimited(response *http.Response, body []byte) bool {
+	if response.StatusCode == http.StatusTooManyRequests {
+		return true
+	}
+	if response.StatusCode != http.StatusForbidden {
+		return false
+	}
+	if response.Header.Get("X-RateLimit-Remaining") == "0" || response.Header.Get("Retry-After") != "" {
+		return true
+	}
+	message := strings.ToLower(string(body))
+	for _, named := range secondaryLimitMessages {
+		if strings.Contains(message, named) {
+			return true
+		}
+	}
+	return false
 }
 
 // retryAfter is how long GitHub asks a caller its rate limit answered to wait before calling again,
 // as its REST documentation's "Exceeding the rate limit" says: the retry-after header's seconds,
 // else, when x-ratelimit-remaining is 0, until the x-ratelimit-reset epoch second, else at least a
-// minute. A reset this host's clock already reads as past is waited the minute too. Zero for an
-// answer that is not a rate limit.
-func retryAfter(response *http.Response, now time.Time) time.Duration {
-	if !RateLimited(response) {
+// minute, which is what a secondary limit named by its message alone is waited. A reset this host's
+// clock already reads as past is waited the minute too. Zero for an answer that is not a rate limit.
+func retryAfter(response *http.Response, body []byte, now time.Time) time.Duration {
+	if !RateLimited(response, body) {
 		return 0
 	}
 	if seconds, err := strconv.Atoi(response.Header.Get("Retry-After")); err == nil && seconds > 0 {

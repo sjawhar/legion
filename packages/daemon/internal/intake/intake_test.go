@@ -1116,7 +1116,9 @@ func TestADecidingReviewCarriesItsAuthorsWriteAccessBeforeItIsApplied(t *testing
 // said no until its reset. A failure that names no wait is retried after NakDelay. Either way the
 // review is applied once its read passes.
 func TestARateLimitedPermissionReadWaitsTheTimeGitHubNames(t *testing.T) {
-	const rateLimitWait = 750 * time.Millisecond
+	// rateLimitWait is far longer than the 25 ms nak delay the other row is retried after, so a
+	// loaded runner's scheduling cannot make one row's wait read as the other's.
+	const rateLimitWait = 2 * time.Second
 	for _, tc := range []struct {
 		name    string
 		failure error

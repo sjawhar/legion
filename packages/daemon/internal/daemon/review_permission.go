@@ -18,24 +18,20 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
-// reviewPermissionTTL is how long a permission GitHub answered stands for its repository and login
-// before GitHub is asked again. Any account can review a public repository's pull request, and
-// every deciding review would otherwise cost a call on the review App's installation, whose hourly
-// limit the reviewer's panes share: within it an account costs one call, however many reviews it
-// submits. Its cost is a permission changed within it, read as it was: a writer whose access was
-// just removed can still decide a round, and an account just given write access, whose review was
-// read without it, decides nothing until it passes.
+// reviewPermissionTTL is how long an account GitHub gave no write access stands so for its
+// repository and login before GitHub is asked again. Any account can review a public repository's
+// pull request, and every deciding review would otherwise cost a call on the review App's
+// installation, whose hourly limit the reviewer's panes share: within the window an account costs
+// one call, however many reviews it submits. Its cost is an account just given write access, whose
+// review was read without it, deciding nothing until the window passes. Write access is never
+// kept: a writer reviews rarely, so keeping it would save almost nothing, and it would let a writer
+// whose access was just removed decide, and skip the check that GitHub's answer names the review's
+// author.
 const reviewPermissionTTL = 5 * time.Minute
 
-// permissionKey is one cached answer's repository and login, both lowercased, since GitHub matches
+// permissionKey is one kept answer's repository and login, both lowercased, since GitHub matches
 // either in any case.
 type permissionKey struct{ repository, login string }
-
-// permissionAnswer is one cached answer, standing until until.
-type permissionAnswer struct {
-	canWrite bool
-	until    time.Time
-}
 
 // reviewerCanWrite answers intake's ConsumerSpec.ReviewPermission: whether review's author has
 // write access or higher to its repository, which is what lets a review decide a review round. It
@@ -48,16 +44,19 @@ type permissionAnswer struct {
 //
 // GitHub is not asked about the review App's own reviews, which decide by its login alone
 // (workflow's decidesRound), nor about a review on a pull request the daemon does not record, which
-// the workflow drops; both are answered false. An answer stands for reviewPermissionTTL.
+// the workflow drops; both are answered false. An account answered no write access stands so for
+// reviewPermissionTTL; write access is never kept (reviewPermissionTTL's comment).
 //
 // An account GitHub does not know on the repository is answered `404`: no write access, logged,
 // and the review decides nothing. A `403` that is not GitHub's rate limit is no write access too,
 // but it says the review App's installation may not read collaborators at all, so no author but
 // the review App decides until that is fixed: it is logged at error, naming the installation. A
 // rate limit is returned as an intake.RetryLater naming the wait GitHub asks for, which intake
-// waits out before the review's delivery is tried again. Any other failure - a mint that failed, a
-// network error, a 5xx, the pull request's record unread - is returned, and intake retries the
-// delivery after its nak delay rather than applying it with a permission nobody read.
+// waits out before the review's delivery is tried again, and is held: while it stands, every
+// account with no answer kept is answered with the wait left and no call is made, since GitHub
+// warns that calling on through a limit can get an integration banned. Any other failure - a mint
+// that failed, a network error, a 5xx, the pull request's record unread - is returned, and intake
+// retries the delivery after its nak delay rather than applying it with a permission nobody read.
 func (w *workflowRuntime) reviewerCanWrite(ctx context.Context, review intake.PullRequestReview) (bool, error) {
 	if review.Author == w.reviewAppLogin {
 		return false, nil
@@ -78,14 +77,24 @@ func (w *workflowRuntime) reviewerCanWrite(ctx context.Context, review intake.Pu
 		return false, err
 	}
 	key := permissionKey{repository: strings.ToLower(repository.String()), login: strings.ToLower(review.Author)}
-	if canWrite, ok := w.cachedPermission(key); ok {
-		return canWrite, nil
+	if w.noWriteAccess(key) {
+		return false, nil
+	}
+	if left := w.rateLimitLeft(); left > 0 {
+		return false, &intake.RetryLater{After: left,
+			Err: fmt.Errorf("read %s's permission on %s: GitHub's rate limit stands for another %s, so this read was not made", review.Author, repository.String(), left)}
 	}
 	canWrite, err := w.readPermission(ctx, repository, review.Author)
 	if err != nil {
+		var later *intake.RetryLater
+		if errors.As(err, &later) {
+			w.holdRateLimit(later.After)
+		}
 		return false, err
 	}
-	w.cachePermission(key, canWrite)
+	if !canWrite {
+		w.keepNoWriteAccess(key)
+	}
 	return canWrite, nil
 }
 
@@ -135,20 +144,18 @@ func (w *workflowRuntime) readPermission(ctx context.Context, repository ghrepo.
 	return true, nil
 }
 
-// cachedPermission is the answer cached for key, if one still stands.
-func (w *workflowRuntime) cachedPermission(key permissionKey) (bool, bool) {
+// noWriteAccess says whether key is an account this repository gave no write access within the
+// window that still stands.
+func (w *workflowRuntime) noWriteAccess(key permissionKey) bool {
 	w.permissionsMu.Lock()
 	defer w.permissionsMu.Unlock()
-	answer, ok := w.permissions[key]
-	if !ok || !time.Now().Before(answer.until) {
-		return false, false
-	}
-	return answer.canWrite, true
+	return time.Now().Before(w.permissions[key])
 }
 
-// cachePermission keeps canWrite for key for the permission TTL, and drops every answer that no
-// longer stands, so the cache holds no more than the accounts that reviewed within one TTL.
-func (w *workflowRuntime) cachePermission(key permissionKey, canWrite bool) {
+// keepNoWriteAccess keeps key as an account with no write access for the permission TTL, and drops
+// every answer that no longer stands, so no more is held than the accounts that reviewed within one
+// window.
+func (w *workflowRuntime) keepNoWriteAccess(key permissionKey) {
 	ttl := w.permissionTTL
 	if ttl == 0 {
 		ttl = reviewPermissionTTL
@@ -157,12 +164,32 @@ func (w *workflowRuntime) cachePermission(key permissionKey, canWrite bool) {
 	w.permissionsMu.Lock()
 	defer w.permissionsMu.Unlock()
 	if w.permissions == nil {
-		w.permissions = map[permissionKey]permissionAnswer{}
+		w.permissions = map[permissionKey]time.Time{}
 	}
-	for cached, answer := range w.permissions {
-		if !now.Before(answer.until) {
+	for cached, until := range w.permissions {
+		if !now.Before(until) {
 			delete(w.permissions, cached)
 		}
 	}
-	w.permissions[key] = permissionAnswer{canWrite: canWrite, until: now.Add(ttl)}
+	w.permissions[key] = now.Add(ttl)
+}
+
+// rateLimitLeft is how long GitHub's last rate limit still asks to be left alone, zero when none
+// stands. GitHub's documentation warns that calling on while a limit stands can get an integration
+// banned, so no read is made within it.
+func (w *workflowRuntime) rateLimitLeft() time.Duration {
+	w.permissionsMu.Lock()
+	defer w.permissionsMu.Unlock()
+	return time.Until(w.limitedUntil)
+}
+
+// holdRateLimit records that GitHub's rate limit stands for another after, keeping the later of
+// this limit and one already held.
+func (w *workflowRuntime) holdRateLimit(after time.Duration) {
+	until := time.Now().Add(after)
+	w.permissionsMu.Lock()
+	defer w.permissionsMu.Unlock()
+	if until.After(w.limitedUntil) {
+		w.limitedUntil = until
+	}
 }

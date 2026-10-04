@@ -81,11 +81,14 @@ type workflowRuntime struct {
 	// review it submits decides a round by that login alone, so reviewerCanWrite asks GitHub
 	// nothing about it.
 	reviewAppLogin string
-	// permissions caches each permission reviewerCanWrite read from GitHub, by repository and
-	// login, for permissionTTL; zero, in production, is reviewPermissionTTL, and a test shortens it.
+	// permissions holds, by repository and login, until when reviewerCanWrite's read of GitHub
+	// stands as no write access; permissionTTL is how long one stands, zero, in production, being
+	// reviewPermissionTTL, and a test shortens it. limitedUntil is when GitHub's last rate limit
+	// stops asking to be left alone: while it stands, no read is made.
 	permissionsMu sync.Mutex
-	permissions   map[permissionKey]permissionAnswer
+	permissions   map[permissionKey]time.Time
 	permissionTTL time.Duration
+	limitedUntil  time.Time
 	// failed carries the first supervision terminal fact that could not be applied. serve stops
 	// the daemon with it: the claim's terminal state is durable, so the next boot's replay applies
 	// the fact the failed callback lost.
