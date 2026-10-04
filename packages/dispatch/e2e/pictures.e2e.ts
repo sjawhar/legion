@@ -1,4 +1,4 @@
-import { expect, type Locator, type Page, test } from "@playwright/test";
+import { expect, type Locator, type Page, type Response, test } from "@playwright/test";
 
 import { agentRow, setLiveSessions } from "./agents";
 import { createAsk, createIssue, createProject } from "./api";
@@ -26,14 +26,19 @@ async function expectDrawn(picture: Locator, src: string): Promise<void> {
     .toBeGreaterThan(0);
 }
 
-/** The server's successful answer to the next `POST` to `path`. */
+/** The server's answer to the next `POST` to `path`; a row checks it is a success with
+ *  `expectSucceeded`, so a refusal fails naming its status rather than timing out. */
 function posted(page: Page, path: string) {
   return page.waitForResponse(
     (response) =>
-      response.request().method() === "POST" &&
-      new URL(response.url()).pathname === path &&
-      response.ok()
+      response.request().method() === "POST" && new URL(response.url()).pathname === path
   );
+}
+
+async function expectSucceeded(answer: Promise<Response>): Promise<Response> {
+  const response = await answer;
+  expect(response.status(), `POST ${new URL(response.url()).pathname}`).toBeLessThan(300);
+  return response;
 }
 
 test("a picture pasted into an issue message shows inline in the conversation", async ({
@@ -51,24 +56,35 @@ test("a picture pasted into an issue message shows inline in the conversation", 
 
     const uploaded = posted(page, `/api/v1/issues/${issue.key}/artifacts`);
     await pastePicture(field, "shot.png");
-    await uploaded;
+    await expectSucceeded(uploaded);
     const syntax = `![shot.png](dispatch://${issue.key}/artifact/shot-png@v1)`;
     await expect(field).toHaveValue(`The broken layout: ${syntax}`);
 
     const sent = posted(page, `/api/v1/issues/${issue.key}/comments`);
     await field.press("Control+Enter");
-    expect((await sent).request().postDataJSON()).toMatchObject({
+    expect((await expectSucceeded(sent)).request().postDataJSON()).toMatchObject({
       body: `The broken layout: ${syntax}`,
     });
 
-    const picture = page
+    // A comment turn opens collapsed to its one-line preview, where the picture is a thumbnail
+    // beside its caption, inside the link to its page.
+    const link = page
       .locator("#issue-conversation-panel")
-      .getByRole("img", { name: "shot.png" });
-    await expectDrawn(picture, `/api/v1/issues/${issue.key}/artifacts/shot-png/versions/1`);
-    await expect(picture.locator("xpath=ancestor::a[1]")).toHaveAttribute(
-      "href",
-      `/issues/${issue.key}/artifacts/shot-png?v=1`
+      .getByRole("link", { name: "shot.png" })
+      .filter({ has: page.locator("img") });
+    await expect(link).toHaveAttribute("href", `/issues/${issue.key}/artifacts/shot-png?v=1`);
+    await expectDrawn(
+      link.locator("img"),
+      `/api/v1/issues/${issue.key}/artifacts/shot-png/versions/1`
     );
+
+    // The picture opens its own page, which shows it and its versions.
+    await link.click();
+    await expect(page).toHaveURL(`/issues/${issue.key}/artifacts/shot-png?v=1`);
+    await expect(page.getByRole("heading", { name: "shot.png" })).toBeVisible();
+    await expect(page.getByRole("img", { name: "shot.png version 1" })).toBeVisible();
+    await expect(page.getByRole("region", { name: "Versions for shot.png" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "Download version 1" }).first()).toBeVisible();
   } finally {
     await alice.close();
   }
@@ -91,13 +107,15 @@ test("a picture pasted into an ask's answer shows inline in the answer", async (
 
     const uploaded = posted(page, `/api/v1/issues/${issue.key}/artifacts`);
     await pastePicture(answer, "screen.png");
-    await uploaded;
+    await expectSucceeded(uploaded);
     const syntax = `![screen.png](dispatch://${issue.key}/artifact/screen-png@v1)`;
     await expect(answer).toHaveValue(syntax);
 
     const answered = posted(page, `/api/v1/asks/${ask.id}/answer`);
     await card.getByRole("button", { exact: true, name: "Answer" }).click();
-    expect((await answered).request().postDataJSON()).toMatchObject({ text: syntax });
+    expect((await expectSucceeded(answered)).request().postDataJSON()).toMatchObject({
+      text: syntax,
+    });
 
     // The answer is the ask's record: the issue's conversation shows it with the picture.
     await page.goto(`/issues/${issue.key}/conversation`);
@@ -126,19 +144,24 @@ test("a picture pasted into a direct message on the Agents page shows inline and
   try {
     const page = await alice.newPage();
     await page.goto("/agents");
+    // A session with no Dispatch activity yet is listed under its fold.
+    await page
+      .getByRole("region", { name: "Agents" })
+      .getByRole("button", { name: "No Dispatch activity (1)" })
+      .click();
     const row = agentRow(page, planner.session_id);
     await row.getByRole("button", { exact: true, name: "Planner" }).click();
     const field = row.getByRole("textbox", { name: "Comment" });
 
     const uploaded = posted(page, `/api/v1/agents/${planner.session_id}/artifacts`);
     await pastePicture(field, "shot.png");
-    await uploaded;
+    await expectSucceeded(uploaded);
     const syntax = `![shot.png](dispatch://agent/${planner.session_id}/artifact/shot-png@v1)`;
     await expect(field).toHaveValue(syntax);
 
     const sent = posted(page, `/api/v1/agents/${planner.session_id}/messages`);
     await field.press("Control+Enter");
-    expect((await sent).request().postDataJSON()).toMatchObject({ body: syntax });
+    expect((await expectSucceeded(sent)).request().postDataJSON()).toMatchObject({ body: syntax });
 
     const conversation = row.getByRole("list", { name: "Conversation with Planner" });
     const picture = conversation.getByRole("img", { name: "shot.png" });
