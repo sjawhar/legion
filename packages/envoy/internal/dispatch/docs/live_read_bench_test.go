@@ -109,11 +109,11 @@ func BenchmarkLiveDocumentRead(b *testing.B) {
 // browsers while reads of the room run beside it: none, one every 250 ms, or one after another,
 // each through a copy (snapshotDocument, as main read) or through readLive. ygo broadcasts a
 // peer's update only once the room's update observer has returned, so a keystroke's latency here
-// is its transaction on the live document and the observer's catch-up of the replica under the
-// replica's lock (onLoadDocument). The observer's render is left out, so what is measured is the
-// wait for the two locks a read can hold: the live document's, for a copy's encode or a
-// catch-up's, and the replica's, for a read's walk. 120 keystrokes 20 ms apart on a 524 KiB
-// document; each run reports the latencies' percentiles in milliseconds.
+// is its transaction on the live document and the observer's whole turn with the replica
+// (renderedReplica.observe): the catch-up under the replica's lock and the render
+// (renderDocumentForUpdate), which skips pmdoc.Read's copy since the tree it renders never
+// outlives the call. 120 keystrokes 20 ms apart on a 524 KiB document; each run reports the
+// latencies' percentiles in milliseconds.
 func BenchmarkKeystrokeBesideReads(b *testing.B) {
 	live := benchmarkLiveDocument(b, 524<<10)
 	texts := paragraphTexts(live)
@@ -179,11 +179,7 @@ func BenchmarkKeystrokeBesideReads(b *testing.B) {
 						time.Sleep(20 * time.Millisecond)
 						start := time.Now()
 						live.Transact(func(txn *crdt.Transaction) { texts[0].Insert(txn, 0, "y", nil) })
-						// The observer's turn (observe) without its render: its wait for the
-						// replica and its catch-up.
-						replica.lockForUpdate()
-						replica.catchUp("bench", live)
-						replica.mu.Unlock()
+						replica.observe("bench", live)
 						latencies = append(latencies, time.Since(start))
 					}
 					close(stop)
