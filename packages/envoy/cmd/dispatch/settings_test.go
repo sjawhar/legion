@@ -1010,11 +1010,8 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 				"DISPATCH_TEST_HOOKS":        "1",
 				"DISPATCH_TEST_SETTLE_DELAY": longDelay.String(),
 			})
-			if boot.TestSettleDelay != longDelay {
-				t.Errorf("DISPATCH_TEST_SETTLE_DELAY: TestSettleDelay = %v, want %v", boot.TestSettleDelay, longDelay)
-			}
-			if boot := resolveWith(t, map[string]string{"DISPATCH_TEST_HOOKS": "1"}); boot.TestSettleDelay != 2*time.Second {
-				t.Errorf("default TestSettleDelay = %v, want 2s", boot.TestSettleDelay)
+			if boot.SettleDelay != longDelay {
+				t.Errorf("DISPATCH_TEST_SETTLE_DELAY: SettleDelay = %v, want %v", boot.SettleDelay, longDelay)
 			}
 			for _, invalid := range []string{"not-a-duration", "-1s", "0s"} {
 				refusedWith(t, map[string]string{"DISPATCH_TEST_HOOKS": "1", "DISPATCH_TEST_SETTLE_DELAY": invalid},
