@@ -1,6 +1,6 @@
 import { afterAll, expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
 
@@ -92,6 +92,24 @@ function renderCard(node: ReactNode) {
   });
   const view = render(<QueryClientProvider client={queryClient}>{node}</QueryClientProvider>);
   return { queryClient, view };
+}
+
+/** The element a forward Tab reaches from `from`: the next enabled, unhidden focusable element in
+ *  document order (nothing these cards render sets a positive tabindex). */
+function nextTabStop(from: Element): HTMLElement | undefined {
+  const stops = Array.from(
+    document.querySelectorAll<HTMLElement>("a[href], button, input, select, textarea, [tabindex]")
+  ).filter(
+    (element) =>
+      element.tabIndex >= 0 && !element.matches(":disabled") && element.closest("[hidden]") === null
+  );
+  return stops[stops.indexOf(from as HTMLElement) + 1];
+}
+
+/** The element a control names in `aria-controls`. */
+function controlledBy(control: HTMLElement): HTMLElement | null {
+  const id = control.getAttribute("aria-controls");
+  return id === null ? null : document.getElementById(id);
 }
 
 test("AskCard links a non-primary block ask to its owning artifact", async () => {
@@ -1516,31 +1534,172 @@ test("a resolved ask keeps its question and options and carries a resolution bad
   }
 });
 
-test("a collapsed thread shows the reply count and expands to the thread on demand", async () => {
-  const input = ask();
-  const thread = async () => ({
-    ask: input,
-    edits: [],
-    followers: [],
-    replies: [reply({ body: "Any update?" }), reply({ body: "Soon.", id: "c2" })],
-  });
-  const { view } = renderCard(<AskCard ask={input} getAskThread={thread} thread="collapsed" />);
+test("AskCard shows the newest two replies, expands older replies, and puts a fresh reply first", async () => {
+  const input = answered(ask(), ["Ship"]);
+  let replies = [
+    reply({ body: "Oldest reply", created_at: "2026-09-09T00:01:00Z", id: "comment-1" }),
+    reply({ body: "Older reply", created_at: "2026-09-09T00:02:00Z", id: "comment-2" }),
+    reply({ body: "Middle reply", created_at: "2026-09-09T00:03:00Z", id: "comment-3" }),
+    reply({ body: "Newer reply", created_at: "2026-09-09T00:04:00Z", id: "comment-4" }),
+    reply({ body: "Newest reply", created_at: "2026-09-09T00:05:00Z", id: "comment-5" }),
+  ];
+  const thread = async () => ({ ask: input, edits: [], followers: [], replies });
+  const { view } = renderCard(
+    <AskCard
+      ask={input}
+      createReply={async () => {
+        const fresh = reply({
+          body: "Fresh reply",
+          created_at: "2026-09-09T00:06:00Z",
+          id: "comment-6",
+        });
+        replies = [...replies, fresh];
+        return fresh;
+      }}
+      getAskThread={thread}
+      thread="collapsed"
+    />
+  );
+
+  const shownReplyBodies = (container: HTMLElement) =>
+    Array.from(
+      container.querySelectorAll("li"),
+      (item) => item.querySelector(".dispatch-markdown")?.textContent
+    );
 
   try {
-    const trigger = await view.findByRole("button", { name: "2 replies" });
-    expect(trigger.getAttribute("aria-expanded")).toBe("false");
-    expect(view.queryByText("Any update?")).toBeNull();
+    const threadElement = await view.findByTestId("thread-ask-1");
+    await waitFor(() =>
+      expect(shownReplyBodies(threadElement)).toEqual(["Newest reply", "Newer reply"])
+    );
+    expect(view.queryByText("Middle reply")).toBeNull();
 
-    fireEvent.click(trigger);
-    await waitFor(() => expect(view.getByText("Any update?")).toBeTruthy());
-    expect(trigger.getAttribute("aria-expanded")).toBe("true");
-    expect(view.queryByLabelText("Reply")).toBeNull();
+    const showMore = view.getByRole("button", { name: "Show 3 more replies" });
+    expect(showMore.getAttribute("aria-expanded")).toBe("false");
+    expect(showMore.getAttribute("aria-controls")).not.toBeNull();
+    showMore.focus();
+    fireEvent.click(showMore);
+    await waitFor(() =>
+      expect(shownReplyBodies(threadElement)).toEqual([
+        "Newest reply",
+        "Newer reply",
+        "Middle reply",
+        "Older reply",
+        "Oldest reply",
+      ])
+    );
+    const showFewer = view.getByRole("button", { name: "Show fewer replies" });
+    expect(document.activeElement).toBe(showFewer);
+    expect(showFewer.getAttribute("aria-expanded")).toBe("true");
+    expect(controlledBy(showFewer)?.textContent).toContain("Middle reply");
+    fireEvent.click(showFewer);
+    await waitFor(() =>
+      expect(shownReplyBodies(threadElement)).toEqual(["Newest reply", "Newer reply"])
+    );
+
+    fireEvent.click(view.getByRole("button", { name: "Write a reply" }));
+    const replyField = view.getByLabelText("Reply");
+    fireEvent.change(replyField, { target: { value: "Fresh reply" } });
+    fireEvent.submit(replyField.closest("form") as HTMLFormElement);
+    await waitFor(() =>
+      expect(shownReplyBodies(threadElement)).toEqual(["Fresh reply", "Newest reply"])
+    );
   } finally {
     view.unmount();
   }
 });
 
-test("a collapsed thread with no replies offers Reply only on an answered ask, and a failed thread fetch offers a retry", async () => {
+test("a compact answered ask's Write a reply reveals its composer as the next keyboard stop", async () => {
+  const input = answered(ask(), ["Ship"]);
+  const { view } = renderCard(
+    <AskCard
+      ask={input}
+      getAskThread={async () => ({
+        ask: input,
+        edits: [],
+        followers: [],
+        replies: [reply({ body: "Earlier reply" })],
+      })}
+      thread="collapsed"
+    />
+  );
+
+  try {
+    await view.findByText("Earlier reply");
+    const replyToggle = view.getByRole("button", { name: "Write a reply" });
+    // Enter or Space on a native button activates it as a click; focus stays on the button.
+    replyToggle.focus();
+    fireEvent.click(replyToggle);
+    expect(replyToggle.getAttribute("aria-expanded")).toBe("true");
+    expect(document.activeElement).toBe(replyToggle);
+
+    const field = view.getByLabelText("Reply");
+    nextTabStop(replyToggle)?.focus();
+    expect(document.activeElement).toBe(field);
+    expect(controlledBy(replyToggle)?.contains(field)).toBe(true);
+    // The toggle and the form's submit button have distinct names.
+    expect(view.getAllByRole("button", { name: "Reply" })).toHaveLength(1);
+  } finally {
+    view.unmount();
+  }
+});
+
+test("a reply arriving while the older replies are shown lands first and keeps them shown", async () => {
+  const input = answered(ask(), ["Ship"]);
+  let replies = [
+    reply({ body: "Oldest reply", created_at: "2026-09-09T00:01:00Z", id: "comment-1" }),
+    reply({ body: "Middle reply", created_at: "2026-09-09T00:02:00Z", id: "comment-2" }),
+    reply({ body: "Newest reply", created_at: "2026-09-09T00:03:00Z", id: "comment-3" }),
+  ];
+  const { queryClient, view } = renderCard(
+    <AskCard
+      ask={input}
+      getAskThread={async () => ({ ask: input, edits: [], followers: [], replies })}
+      thread="collapsed"
+    />
+  );
+  const shownReplyBodies = (container: HTMLElement) =>
+    Array.from(
+      container.querySelectorAll("li"),
+      (item) => item.querySelector(".dispatch-markdown")?.textContent
+    );
+
+  try {
+    const threadElement = await view.findByTestId("thread-ask-1");
+    fireEvent.click(await view.findByRole("button", { name: "Show 1 more reply" }));
+    await waitFor(() =>
+      expect(shownReplyBodies(threadElement)).toEqual([
+        "Newest reply",
+        "Middle reply",
+        "Oldest reply",
+      ])
+    );
+
+    // A comment event invalidates the ask's thread, as the live stream does.
+    replies = [
+      ...replies,
+      reply({ body: "Arriving reply", created_at: "2026-09-09T00:04:00Z", id: "comment-4" }),
+    ];
+    await act(async () => {
+      await queryClient.invalidateQueries({ queryKey: ["ask-thread", input.id] });
+    });
+
+    await waitFor(() =>
+      expect(shownReplyBodies(threadElement)).toEqual([
+        "Arriving reply",
+        "Newest reply",
+        "Middle reply",
+        "Oldest reply",
+      ])
+    );
+    const showFewer = view.getByRole("button", { name: "Show fewer replies" });
+    expect(showFewer.getAttribute("aria-expanded")).toBe("true");
+  } finally {
+    view.unmount();
+  }
+});
+
+test("AskCard with no replies offers Write a reply only after an answer, and retries a failed thread fetch", async () => {
   const openInput = ask();
   const { view: open } = renderCard(
     <AskCard ask={openInput} getAskThread={emptyThread(openInput)} thread="collapsed" />
@@ -1571,10 +1730,10 @@ test("a collapsed thread with no replies offers Reply only on an answered ask, a
     const openCard = within(open.container);
     const answeredCard = within(answered.container);
     const failedCard = within(failed.container);
-    await answeredCard.findByRole("button", { name: "Reply" });
+    await answeredCard.findByRole("button", { name: "Write a reply" });
     // The open ask's only composer is the card's own Answer / Ask back row.
     await openCard.findByRole("button", { name: "Ask back" });
-    expect(openCard.queryByRole("button", { name: "Reply" })).toBeNull();
+    expect(openCard.queryByRole("button", { name: "Write a reply" })).toBeNull();
     const retry = await failedCard.findByRole("button", { name: "Replies unavailable — retry" });
     expect(retry.getAttribute("title")).toBe("boom");
 
@@ -1582,7 +1741,7 @@ test("a collapsed thread with no replies offers Reply only on an answered ask, a
     await waitFor(() =>
       expect(failedCard.queryByRole("button", { name: "Replies unavailable — retry" })).toBeNull()
     );
-    expect(failedCard.queryByRole("button", { name: "Reply" })).toBeNull();
+    expect(failedCard.queryByRole("button", { name: "Write a reply" })).toBeNull();
   } finally {
     open.unmount();
     answered.unmount();

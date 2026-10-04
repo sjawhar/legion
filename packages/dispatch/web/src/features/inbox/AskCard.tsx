@@ -269,7 +269,6 @@ export function AskCard({
         ask={currentAsk}
         createReply={reply}
         embedded={completed === null}
-        showResolution={false}
         thread={threadQuery}
       />
     );

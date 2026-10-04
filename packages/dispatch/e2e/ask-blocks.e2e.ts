@@ -259,12 +259,8 @@ test("a reader asks back from a decision block: the question threads under the b
     });
     await askBack.click();
 
-    // The clarification threads under the block, folded with its count so the spec stays
-    // readable; opening it shows the question. The decision itself is still open.
-    const disclosure = block.getByRole("button", { name: "1 reply" });
-    await expect(disclosure).toHaveAttribute("aria-expanded", "false");
+    // The clarification remains directly visible under the block while the decision stays open.
     await expect(hosted.getByLabel("Your answer")).toHaveValue("");
-    await disclosure.click();
     const thread = block.getByTestId(`thread-${blockAsk.id}`);
     await expect(thread).toContainText(questionLead);
     // The reply is typeset as the Inbox typesets it: a real list and a code box, not bare text.
@@ -565,7 +561,6 @@ test("decision blocks read as urgency-accented cards in the document and its ver
     await expect(answered.locator("form")).toHaveCount(0);
     // The exchange under the record is the card's own list, not document prose: no marker, no
     // indent, the card's spacing — and the reply's Markdown list keeps its markers.
-    await answered.getByRole("button", { name: "1 reply" }).click();
     const thread = answered.getByTestId(`thread-${naming.id}`);
     const replies = thread.locator("> ul");
     await expect(replies).toHaveCSS("list-style-type", "none");

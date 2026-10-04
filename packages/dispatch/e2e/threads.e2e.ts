@@ -126,22 +126,90 @@ test("an ask is a thread: replies before and after answering, then a live agent 
   await threadAfterAnswer.getByRole("button", { name: "Reply" }).click();
   await expect(threadAfterAnswer.getByText("Shipping now.")).toBeVisible();
 
-  // All three - the first reply, the answer, and the second reply - render
-  // under the question, and the two replies keep their chronological order.
+  // The newest reply is first.
   const replies = threadAfterAnswer.locator("li");
   await expect(replies).toHaveCount(2);
-  await expect(replies.nth(0)).toContainText("Any blockers first?");
-  await expect(replies.nth(1)).toContainText("Shipping now.");
+  await expect(replies.nth(0)).toContainText("Shipping now.");
+  await expect(replies.nth(1)).toContainText("Any blockers first?");
   await expect(margin.getByText(/Answered by/)).toBeVisible();
 
   // The asking session replies over the API (bearer auth, its own comment on
   // the ask). Alice's already-open page shows it live over SSE, no reload.
   await createComment(issue.key, { ask_id: ask.id, body: "Thanks, merging." }, bobSession);
   await expect(threadAfterAnswer.getByText("Thanks, merging.")).toBeVisible();
+  await expect(replies).toHaveCount(2);
+  await expect(replies.nth(0)).toContainText("Thanks, merging.");
+  await expect(replies.nth(1)).toContainText("Shipping now.");
+  await threadAfterAnswer.getByRole("button", { name: "Show 1 more reply" }).click();
   await expect(replies).toHaveCount(3);
-  await expect(replies.nth(2)).toContainText("Thanks, merging.");
+  await expect(replies.nth(2)).toContainText("Any blockers first?");
 
   await alice.close();
+});
+
+test("a reply typed right after answering in the margin survives the ask leaving Needs you", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: "Ship the change to production",
+    title: "Draft after answer",
+  });
+  const ask = await createAsk(
+    issue.key,
+    {
+      anchor: { artifact: "spec", quote: "production" },
+      options: [{ label: "Ship" }, { label: "Hold" }],
+      question: "Ship it?",
+    },
+    bobSession
+  );
+  await expect
+    .poll(async () =>
+      (await getIssueEvents(issue.key)).some((event) => event.type === "ask.opened")
+    )
+    .toBe(true);
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}`);
+    await page.getByRole("tab", { name: "Spec" }).click();
+    await setSheet(page, testInfo.project.name, true);
+    const margin = page.getByTestId("margin-sheet");
+    const needsYou = margin.getByRole("region", { name: "Needs you" });
+    const card = needsYou.getByTestId(`ask-${ask.id}`);
+    await card.getByRole("radio", { name: "Ship" }).check();
+
+    // Hold the margin's ask list after the answer so the reader is typing when it lands.
+    let releaseAskList = () => {};
+    const askListHeld = new Promise<void>((resolve) => {
+      releaseAskList = resolve;
+    });
+    let heldRequests = 0;
+    await page.route(
+      (url) =>
+        url.pathname === `/api/v1/issues/${issue.key}/asks` &&
+        url.searchParams.get("state") === "all",
+      async (route) => {
+        heldRequests += 1;
+        await askListHeld;
+        await route.continue();
+      }
+    );
+    await card.getByRole("button", { exact: true, name: "Answer" }).click();
+    await needsYou.getByRole("textbox", { name: "Reply" }).fill("Draft survives");
+    await expect.poll(() => heldRequests).toBeGreaterThan(0);
+    releaseAskList();
+
+    await expect(needsYou).toHaveCount(0);
+    const moved = margin.getByTestId(`thread-${ask.id}`).getByRole("textbox", { name: "Reply" });
+    await expect(moved).toHaveValue("Draft survives");
+    await expect(moved).toBeFocused();
+  } finally {
+    await alice.close();
+  }
 });
 
 test("a Conversation reply after an agent-authored reply targets the root without copying its anchor", async ({

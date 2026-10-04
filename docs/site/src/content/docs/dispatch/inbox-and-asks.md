@@ -105,6 +105,15 @@ replies.
 If you type a question and choose **Answer** with no option picked, Dispatch checks first. It
 offers **Ask back instead** and **Answer with it anyway**.
 
+### Reply thread
+
+Replies appear newest first. The two newest replies stay visible. When there are older replies,
+choose **Show N more replies** to reveal them below the newest pair; choose **Show fewer replies**
+to collapse the thread again. After an ask is answered, write a follow-up in **Reply**; in the
+Conversation tab and in document decisions, choose **Write a reply** first. A new reply appears at
+the top of the thread, and a reply you are still typing stays put when the ask moves to the
+answered list.
+
 ### Approvals
 
 An agent can ask you to approve a document at a specific version. The card reads
