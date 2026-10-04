@@ -181,26 +181,32 @@ These arrive as messages on the Dispatch issue, and the architect is told:
 
 - **`Issue reached review_round_cap=3.`** Three review rounds sent the change back. The architect
   decides what happens next, often with a question to you.
-- **`Pull request #<n> reached max_fix_attempts=3.`** A check the base branch requires stayed red
-  through three fix attempts.
+- **`Pull request #<n> reached max_fix_attempts=3.`** A check or workflow the base branch requires
+  stayed red through three fix attempts.
 - **A review round that no review decides.** Legion's reviewer must approve the head or request
   changes; a plain comment leaves the issue in `needs_review`, and the architect asks the reviewer
   for the decision.
 - **`READY` refused.** The merger's `READY` is refused until every check the base branch requires
-  has succeeded on the pull request's head, and while the design gate is closed. The refusal names
-  the head and the check, or the spec version that needs approval.
+  has succeeded on the pull request's head, and every workflow its rulesets require has a run on
+  the head that succeeded, and while the design gate is closed. The refusal names the head and the
+  check or workflow, or the spec version that needs approval.
 
-The pull request's state as the daemon sees it, its `checksVerdict` judged only by the checks the
-base branch requires:
+An issue back in `in_progress` after its `READY` had a required check or workflow turn red on the
+head while it awaited its merge: the daemon sent it back to the implementer and told the architect
+which checks, and the work comes back through testing, review and a new `READY`.
+
+The pull request's state as the daemon sees it, its `checksVerdict` judged only by the checks and
+workflows the base branch requires:
 
 ```sh
 legion state --config legion.yaml --json | jq '.issues["<KEY>"].pullRequest'
 ```
 
 No `checksVerdict` on a pull request whose checks have settled means the daemon has not read the
-base branch's required checks yet. Its log names each read GitHub refused, with the repository,
-the pull request and the HTTP status (`read the checks a pull request's base branch requires`);
-the daemon reads again every two minutes.
+base branch's required checks yet, or a required workflow's run on the head is still going, has
+not happened, or has not been read since the head settled. Its log names each read GitHub refused,
+with the repository, the pull request and the HTTP status (`read the checks a pull request's base
+branch requires`); the daemon reads again every two minutes.
 
 ## A status change did not stick
 

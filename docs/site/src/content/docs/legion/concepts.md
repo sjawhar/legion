@@ -72,12 +72,14 @@ comes back, with everything it knew, the next time its role is needed.
 | `testing` | tester | Exercises the change against the issue's acceptance criteria and reports `pass` or `fail`. | review App |
 | `reviewing` | reviewer | Reviews the pull request and submits an approval of the head, or changes requested. | review App |
 | `retro` | implementer | Writes down what the work taught, as notes in the repository and one message on the issue. | implement App |
-| `merging` | merger | Checks the approved head and the required checks, then sends `READY`. | implement App |
+| `merging` | merger | Checks the approved head and the required checks and workflows, then sends `READY`. | implement App |
 | `awaiting_merge` | none | Waits for a person to merge the pull request. | none |
 | `production_check` | implementer | After the merge, drives the change in production and records what it saw. | implement App |
 
 A failed test, red CI on the head, or a review that requests changes sends the issue back to
-`implementing`, and the change goes through the tester again before the reviewer sees it.
+`implementing`, and the change goes through the tester again before the reviewer sees it. Red CI
+on the head of an issue in `awaiting_merge` sends it back too: the work returns through testing,
+review and `READY`, since GitHub will not merge the head it was ready for.
 
 ## Admission and the `legion` label
 
@@ -123,23 +125,32 @@ Legion uses GitHub's own review mechanisms rather than labels:
 
 - The **reviewer** submits a GitHub review: an approval of the head by its commit, or changes
   requested. A plain comment decides nothing, and the architect is told the round is stuck.
-- **CI** on the pull request's head counts: red checks while testing or reviewing send the issue
-  back to the implementer, naming the failing checks. Only the checks the base branch requires
-  count, the same set the merger's `READY` checks (its rulesets' required status checks and its
-  branch protection's): CI is red when one of them failed. A required check that was cancelled, or
-  that the head's checks settled without, leaves the head with no verdict until a later settlement
-  decides it, since a settlement can come before an aggregator job is queued or just after a run
-  is cancelled. The check may never run again, and a head with no verdict never reaches `READY`,
-  so when that is the reviewer's own head and its approval is in, the architect is told the round
-  is stuck, naming the check. A failing check the base branch does not require, such as a lane
+- **CI** on the pull request's head counts: red checks while testing or reviewing, or once the
+  issue awaits its merge, send the issue back to the implementer, naming the failing checks. Only
+  what the base branch requires counts, the same set the merger's `READY` checks: its rulesets'
+  required status checks and required workflows, and its branch protection's required status
+  checks. CI is red when one of those checks failed, or when the latest pull-request run of a
+  required workflow on the head did not pass (it failed, was cancelled or timed out). A required
+  check that was cancelled, or that the head's checks settled without, leaves the head with no
+  verdict until a later settlement decides it, since a settlement can come before an aggregator job
+  is queued or just after a run is cancelled. The check may never run again, and a head with no
+  verdict never reaches `READY`, so when that is the reviewer's own head and its approval is in,
+  the architect is told the round is stuck, naming the check. A required workflow still running
+  leaves no verdict until the daemon's next read of its runs, and one with no run on the head is
+  named in the same stuck notice. A failing check the base branch does not require, such as a lane
   started by hand or an advisory review check, never makes CI red, and on a base branch that
-  requires no check nothing does. The daemon judges the check runs GitHub reports, so a required
-  check that only a commit status reports never reports to it: the head never reads green, and an
-  approved round is told stuck on it, where `READY` reads the status. A head that a push changing
-  only `.legion/` made carries the checks of the head before it. The daemon reads each open pull
-  request's required set with the implement App as it starts and every two minutes after; until a
-  read succeeds, no verdict stands for the head, and a read GitHub refuses is logged with the
-  repository and the HTTP status.
+  requires nothing nothing
+  does. The daemon judges the check runs GitHub reports, so a required check that only a commit
+  status reports never reports to it: the head never reads green, and an approved round is told
+  stuck on it, where `READY` reads the status. Legion matches a required workflow to a run by its
+  path and the repository that defines it, and a run belongs to the repository it ran for, so a
+  required workflow another repository defines (an organization ruleset) never matches a run: the
+  head never reads green, and `READY` is refused naming the workflow. A head that a push changing
+  only `.legion/` made carries the checks and workflow runs of the head before it.
+  The daemon reads each open pull request's required set with the implement App as it starts and
+  every two minutes after, with the required workflows' runs on the head; until a read succeeds,
+  no verdict stands for the head, and a read GitHub refuses is logged with the repository and the
+  HTTP status.
 - **Review threads** close one by one, and only once the thread's opener (or, for a thread a bot
   opened, Legion's reviewer) accepts the reply.
 - Two limits stop a loop: after `review_round_cap` review rounds (three by default), or once
@@ -149,7 +160,8 @@ Legion uses GitHub's own review mechanisms rather than labels:
 ## READY and the human merge
 
 When the reviewer has approved and retro is done, the merger checks that the pull request's head is
-the approved one (plus only retro's notes) and that every check the base branch requires has passed.
+the approved one (plus only retro's notes), that every check the base branch requires has passed,
+and that every workflow its rulesets require has a run on the head that succeeded.
 It then sends **READY**, which the daemon posts on the Dispatch issue as one message:
 
 ```text
