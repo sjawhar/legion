@@ -329,27 +329,9 @@ func TestPendingListShowsCreatedRecordThroughDispatch(t *testing.T) {
 	rig := newContractRig(t)
 	recordID := rig.createPendingAgentSecretRecord(t, "", "DEEL_API_KEY").RecordID
 
-	resp := dispatchRequest(t, rig.Dispatch, http.MethodGet, "/api/v1/credential-requests?approver=me", nil, contractApprover)
-	if resp.Code != http.StatusOK {
-		t.Fatalf("GET pending = %d: %s", resp.Code, resp.Body.String())
-	}
-	pending := decodeBody[struct {
-		Pending []struct {
-			RecordID string `json:"record_id"`
-			Kind     string `json:"kind"`
-		} `json:"pending"`
-	}](t, resp)
-	found := false
-	for _, p := range pending.Pending {
-		if p.RecordID == recordID {
-			found = true
-			if p.Kind != "agent_secret" {
-				t.Fatalf("pending entry kind = %q, want agent_secret", p.Kind)
-			}
-		}
-	}
-	if !found {
-		t.Fatalf("pending list %+v does not include %s", pending.Pending, recordID)
+	rows := rig.pendingFor(t, contractApprover)
+	if len(rows) != 1 || rows[0].RecordID != recordID || rows[0].Kind != "agent_secret" {
+		t.Fatalf("pending list = %+v, want the agent_secret record %s", rows, recordID)
 	}
 }
 
@@ -421,21 +403,9 @@ func TestGrantsListAndRevokeByApproverThroughDispatch(t *testing.T) {
 	}
 	grantID := *approved.GrantID
 
-	grantsResp := dispatchRequest(t, rig.Dispatch, http.MethodGet, "/api/v1/credential-grants?approver=me", nil, contractApprover)
-	grants := decodeBody[struct {
-		Grants []struct {
-			GrantID  string `json:"grant_id"`
-			Approver string `json:"approver"`
-		} `json:"grants"`
-	}](t, grantsResp)
-	found := false
-	for _, g := range grants.Grants {
-		if g.GrantID == grantID && g.Approver == contractApprover {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("grants list %+v does not include %s approved by %s", grants.Grants, grantID, contractApprover)
+	listed := rig.grantsOf(t, contractApprover)
+	if len(listed) != 1 || listed[0].GrantID != grantID || listed[0].Granted != "approval" || listed[0].Approver == nil || *listed[0].Approver != contractApprover {
+		t.Fatalf("grants list = %s, want the grant %s approved by %s", asJSON(t, listed), grantID, contractApprover)
 	}
 
 	revokePath := "/api/v1/credential-grants/" + grantID + "/revoke"
@@ -448,16 +418,8 @@ func TestGrantsListAndRevokeByApproverThroughDispatch(t *testing.T) {
 		t.Fatalf("revoke = %d: %s", revokeResp.Code, revokeResp.Body.String())
 	}
 
-	grantsAfterResp := dispatchRequest(t, rig.Dispatch, http.MethodGet, "/api/v1/credential-grants?approver=me", nil, contractApprover)
-	grantsAfter := decodeBody[struct {
-		Grants []struct {
-			GrantID string `json:"grant_id"`
-		} `json:"grants"`
-	}](t, grantsAfterResp)
-	for _, g := range grantsAfter.Grants {
-		if g.GrantID == grantID {
-			t.Fatalf("revoked grant %s still listed: %+v", grantID, grantsAfter.Grants)
-		}
+	if listed := rig.grantsOf(t, contractApprover); len(listed) != 0 {
+		t.Fatalf("grants after the revoke = %s, want none", asJSON(t, listed))
 	}
 }
 
@@ -496,19 +458,17 @@ func TestASharedSecretsRequestIsInEveryInboxAndAnyoneApprovesIt(t *testing.T) {
 		}
 	}
 	readResp := dispatchRequest(t, rig.Dispatch, http.MethodGet, "/api/v1/credential-requests/"+pending.RecordID, nil, contractOther)
-	readBody := readResp.Body.String()
 	if read := decodeBody[contractRecord](t, readResp); read.State != "pending" || read.Approver != record.AnyoneApprover {
-		t.Fatalf("record read = %s, want pending with approver %s", readBody, record.AnyoneApprover)
+		t.Fatalf("record read = %s, want pending with approver %s", readResp.Body.String(), record.AnyoneApprover)
 	}
 
 	resp := dispatchRequest(t, rig.Dispatch, http.MethodPost, "/api/v1/credential-requests/"+pending.RecordID+"/approve", map[string]any{}, contractOther)
-	approveBody := resp.Body.String()
 	approved := decodeBody[struct {
 		State   string  `json:"state"`
 		GrantID *string `json:"grant_id"`
 	}](t, resp)
 	if resp.Code != http.StatusOK || approved.State != "approved" || approved.GrantID == nil {
-		t.Fatalf("approve as %s = %d %s, want approved with a grant", contractOther, resp.Code, approveBody)
+		t.Fatalf("approve as %s = %d %s, want approved with a grant", contractOther, resp.Code, resp.Body.String())
 	}
 	var decidedBy string
 	if err := rig.brokerStore.Pool.QueryRow(context.Background(),
@@ -583,9 +543,8 @@ func TestAnAutomaticGrantIsListedRevokedAndThenAsksItsOwner(t *testing.T) {
 
 	revokePath := "/api/v1/credential-grants/" + grantID + "/revoke"
 	otherRevoke := dispatchRequest(t, rig.Dispatch, http.MethodPost, revokePath, map[string]any{}, contractOther)
-	otherBody := otherRevoke.Body.String()
 	if otherRevoke.Code != http.StatusForbidden || decodeBody[contractError](t, otherRevoke).Code != "NOT_APPROVER" {
-		t.Fatalf("revoke as %s = %d %s, want 403 NOT_APPROVER", contractOther, otherRevoke.Code, otherBody)
+		t.Fatalf("revoke as %s = %d %s, want 403 NOT_APPROVER", contractOther, otherRevoke.Code, otherRevoke.Body.String())
 	}
 	if resp := dispatchRequest(t, rig.Dispatch, http.MethodPost, revokePath, map[string]any{}, contractApprover); resp.Code != http.StatusOK {
 		t.Fatalf("revoke = %d: %s", resp.Code, resp.Body.String())
@@ -602,9 +561,8 @@ func TestAnAutomaticGrantIsListedRevokedAndThenAsksItsOwner(t *testing.T) {
 		t.Fatalf("the same session's next request = %s, want an approval request", asJSON(t, again))
 	}
 	readResp := dispatchRequest(t, rig.Dispatch, http.MethodGet, "/api/v1/credential-requests/"+*again.RecordID, nil, contractApprover)
-	readBody := readResp.Body.String()
 	if read := decodeBody[contractRecord](t, readResp); read.State != "pending" || read.Approver != contractApprover {
-		t.Fatalf("record read = %s, want pending with approver %s, the owner", readBody, contractApprover)
+		t.Fatalf("record read = %s, want pending with approver %s, the owner", readResp.Body.String(), contractApprover)
 	}
 	if rows := rig.pendingFor(t, contractApprover); len(rows) != 1 || rows[0].RecordID != *again.RecordID {
 		t.Fatalf("the owner's inbox = %+v, want the request %s", rows, *again.RecordID)
@@ -613,5 +571,48 @@ func TestAnAutomaticGrantIsListedRevokedAndThenAsksItsOwner(t *testing.T) {
 	elsewhere := rig.request(t, rig.newSession(t, contractApprover), "", "AUTO_TOKEN")
 	if elsewhere.State != "granted" || elsewhere.GrantID == nil {
 		t.Fatalf("another session's request = %s, want an automatic grant", asJSON(t, elsewhere))
+	}
+}
+
+// TestAnyoneApprovalCannotReleaseAPersonsWithheldSecret drives, through Dispatch's own routes, a
+// request that was pending when its session's operator withheld one of its names: the session's
+// {AUTO_TOKEN, SHARED_KEY} request waits on anyone, the operator revokes the session's automatic
+// AUTO_TOKEN grant from Live grants, and a second signed-in person, who owns nothing, is refused
+// 403 NOT_APPROVER when approving the request from their Inbox; the operator, AUTO_TOKEN's owner,
+// approves it and the session reads AUTO_TOKEN on that approval.
+func TestAnyoneApprovalCannotReleaseAPersonsWithheldSecret(t *testing.T) {
+	rig := newContractRig(t)
+	session := rig.newSession(t, contractApprover)
+	auto := rig.request(t, session, "", "AUTO_TOKEN")
+	if auto.State != "granted" || auto.GrantID == nil {
+		t.Fatalf("request = %s, want an automatic grant", asJSON(t, auto))
+	}
+	mixed := rig.request(t, session, "deploy", "AUTO_TOKEN", "SHARED_KEY")
+	if mixed.State != "pending" || mixed.RecordID == nil {
+		t.Fatalf("mixed request = %s, want pending", asJSON(t, mixed))
+	}
+	if rows := rig.pendingFor(t, contractOther); len(rows) != 1 || rows[0].RecordID != *mixed.RecordID {
+		t.Fatalf("%s's inbox = %+v, want the mixed request", contractOther, rows)
+	}
+	if resp := dispatchRequest(t, rig.Dispatch, http.MethodPost, "/api/v1/credential-grants/"+*auto.GrantID+"/revoke", map[string]any{}, contractApprover); resp.Code != http.StatusOK {
+		t.Fatalf("revoke = %d: %s", resp.Code, resp.Body.String())
+	}
+	if again := rig.request(t, session, "control", "AUTO_TOKEN"); again.State != "pending" {
+		t.Fatalf("control: the session's next AUTO_TOKEN request = %s, want pending (withheld)", asJSON(t, again))
+	}
+	approvePath := "/api/v1/credential-requests/" + *mixed.RecordID + "/approve"
+	resp := dispatchRequest(t, rig.Dispatch, http.MethodPost, approvePath, map[string]any{}, contractOther)
+	if resp.Code != http.StatusForbidden || decodeBody[contractError](t, resp).Code != "NOT_APPROVER" {
+		t.Fatalf("approve as %s after %s withheld AUTO_TOKEN = %d %s, want 403 NOT_APPROVER", contractOther, contractApprover, resp.Code, resp.Body.String())
+	}
+	owner := dispatchRequest(t, rig.Dispatch, http.MethodPost, approvePath, map[string]any{}, contractApprover)
+	approved := decodeBody[struct {
+		GrantID *string `json:"grant_id"`
+	}](t, owner)
+	if owner.Code != http.StatusOK || approved.GrantID == nil {
+		t.Fatalf("approve as %s = %d %s, want a grant", contractApprover, owner.Code, owner.Body.String())
+	}
+	if status, released := rig.values(t, session, *approved.GrantID); status != http.StatusOK || released["AUTO_TOKEN"] == "" {
+		t.Fatalf("values of the owner's approval = %d %v, want AUTO_TOKEN released", status, released)
 	}
 }

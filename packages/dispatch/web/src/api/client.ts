@@ -729,8 +729,9 @@ export class DispatchApiClient {
     );
   }
 
-  /** Revoke a grant as the signed-in viewer, its approver or its enrollment's operator; revoking an
-   *  automatic grant also makes that session ask before it gets those secrets again. */
+  /** Revoke a grant as the signed-in viewer, its approver or its enrollment's operator. The
+   *  operator's revoke of an automatic grant also ends that session's other automatic grants of
+   *  those secrets and makes it ask before it gets them again. */
   async revokeCredentialGrant(grantId: string): Promise<void> {
     await this.response(`/api/v1/credential-grants/${pathSegment(grantId)}/revoke`, {
       body: JSON.stringify({}),
