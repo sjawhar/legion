@@ -155,6 +155,10 @@ type Service struct {
 	// preloads holds, per room, the durable state a document socket's admission check decoded
 	// (*preloadedDocument), for the room load that socket makes next (takePreload).
 	preloads sync.Map
+	// replicas holds, for each resident room document, a weak pointer to the replica its update
+	// observer keeps (weak.Pointer[renderedReplica]), which the document's reads walk (readLive),
+	// keyed by a weak pointer to that document (keepReplica).
+	replicas sync.Map
 }
 
 type roomState struct {
@@ -167,9 +171,6 @@ type roomState struct {
 	// it indexes to nobody.
 	lastActor       *model.Actor
 	pendingVersions map[int]versionPending
-	// contentMarkdown is the live document's rendered markdown when the room's update observer
-	// last saw it change, nil until the room loads.
-	contentMarkdown *string
 	updateClasses   []documentUpdateClass
 	pendingUpdates  int
 	settle          *time.Timer
@@ -1119,11 +1120,11 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	// one, before the database work; reconciled is the tree the ask blocks are reconciled on, the
 	// stamp's when it stamped ids; versioned is the one the version is rendered from, read again
 	// after the repairs when the settlement wrote any. A browser's edit made in between is in a
-	// later one and not an earlier one. read and versioned are each taken from a copy under the
-	// document's lock (lockedTreeOf), and the stamp reads inside its own transaction: the room's
-	// peers and the service can write it while a walk of the live tree, which takes no lock, reads
-	// it, and a torn read would be versioned as the document.
-	read, err := lockedTreeOf(doc)
+	// later one and not an earlier one. read and versioned are each taken as of one moment under the
+	// document's lock (liveTree), and the stamp reads inside its own transaction: the room's peers
+	// and the service can write it while a walk of the live tree, which takes no lock, reads it, and
+	// a torn read would be versioned as the document.
+	read, err := s.liveTree(room, doc)
 	if err != nil {
 		if errors.Is(err, ErrDocSchema) {
 			slog.Error("dispatch: settle document outside Proof schema", "room", room, "error", err)
@@ -1277,7 +1278,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		// tree settlement reconciled before them: a peer's edit made since is in the room, its
 		// browsers and its stored updates, and a version rendered from the earlier tree would leave
 		// it out (LEGION-479).
-		versioned, err = lockedTreeOf(doc)
+		versioned, err = s.liveTree(room, doc)
 		if err != nil {
 			abandon(err)
 			return
@@ -1542,7 +1543,7 @@ func (s *Service) backfillBlockIDs(ctx context.Context, artifactID string) Block
 	// block's repeated id changes the `#id` its directive carries.
 	var stampedChanged bool
 	slot, update, err := s.applySuppressed(backfillCtx, artifactID, nil, func(doc *crdt.Doc, origin any) (bool, error) {
-		read, err := lockedTreeOf(doc)
+		read, err := s.liveTree(artifactID, doc)
 		if err != nil {
 			return false, err
 		}

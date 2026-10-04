@@ -510,6 +510,40 @@ jobs:
             out/pr-artifacts/legion-envoy-amd64.tar.gz
             out/pr-artifacts/legion-envoy-arm64.tar.gz
 
+  # The document service and the API that drives it, under the race detector. A read that walks a
+  # live document without its lock races the room's peers, which no ordinary run shows: the
+  # unit-test step above runs without -race (LEGION-499). Its own job beside envoy-go because -race
+  # runs these two packages several times slower, and with its own package deadline, since go
+  # test's ten-minute default is a whole package's.
+  envoy-go-race:
+    needs: changes
+    if: needs.changes.outputs.envoy == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: ci
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DISPATCH_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: packages/envoy/go.mod
+      - name: Race-test the document service and its API
+        run: go test -race -timeout 30m ./internal/dispatch/docs/ ./internal/dispatch/api/
+        working-directory: packages/envoy
+
   # The container smoke test, and the image it runs. Its own job, gated on envoy_image rather
   # than envoy: the image is built from the Dispatch SPA and the Bun workspace as well as the Go
   # sources, so a Dispatch-only change changes the image and must smoke it, while widening
