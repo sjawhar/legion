@@ -299,17 +299,18 @@ func routerFor(t *testing.T, boot bootConfig, built routes.AppContextOptions) ht
 func appContextFor(boot bootConfig, built routes.AppContextOptions) (*routes.AppContext, error) {
 	built.SigningKey = "signing-key"
 	if built.People == nil {
-		built.People = store.NewPgPeopleStore(nil)
+		built.People = store.NewPgPeopleStore(nil, built.SigningKey, nil)
 	}
 	built.Sessions = currentSessions{}
 	built.Identity = requestIdentityFor(boot, built.SigningKey, built.People, built.Sessions, built.SignIn)
 	return routes.BuildAppContext(appContextOptions(boot, built))
 }
 
-// peopleStore is a people store over a fresh test database, for a case whose requests record people.
+// peopleStore is a people store over a fresh test database, for a case whose requests record people,
+// sealing refresh tokens under the signing key appContextFor gives the router, as main does.
 func peopleStore(t *testing.T) auth.PeopleStore {
 	t.Helper()
-	return store.NewPgPeopleStore(storetest.Open(t).Pool)
+	return store.NewPgPeopleStore(storetest.Open(t).Pool, "signing-key", nil)
 }
 
 // currentSessions is a session store holding every login's session at generation 0, as a fresh
@@ -888,6 +889,79 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			if _, err := resolveBootConfig(devSignInEnvironment(map[string]string{"DISPATCH_SIGNING_KEY": "table-key"})); err == nil || !strings.Contains(err.Error(), "DISPATCH_SIGNING_KEY") {
 				t.Errorf("dev sign-in with a key: err = %v, want a refusal naming DISPATCH_SIGNING_KEY", err)
 			}
+			// The people store main builds (openPeople) seals under the key main signs cookies with:
+			// it opens a refresh token sealed under DISPATCH_SIGNING_KEY.
+			t.Run("people store", func(t *testing.T) {
+				database := storetest.Open(t)
+				if err := store.NewPgPeopleStore(database.Pool, "table-key", nil).SignIn(context.Background(), "alice@example.com", "refresh-sealed", time.Now()); err != nil {
+					t.Fatal(err)
+				}
+				people, key, err := openPeople(resolveWith(t, map[string]string{"DISPATCH_SIGNING_KEY": "table-key"}), t.TempDir(), database.Pool, nil)
+				if err != nil || key != "table-key" {
+					t.Fatalf("openPeople: key %q, %v; want table-key", key, err)
+				}
+				if membership, _, err := people.Membership(context.Background(), "alice@example.com"); err != nil || membership.RefreshToken != "refresh-sealed" {
+					t.Errorf("the people store main builds read %#v, %v; want the token sealed under DISPATCH_SIGNING_KEY", membership, err)
+				}
+			})
+			// The key the router's sign-in seals the pool's refresh token under (main hands it to the
+			// people store): the row holds the sealed form, and past the hour the membership check
+			// opens it and renews the sign-in with the pool. A people store under another key, which
+			// is what a rotated key leaves the stored rows to, opens none, even with the membership
+			// confirmed minutes ago: the person is asked to sign in again without the pool being
+			// asked, and the sign-in that follows works as before. The cookie's own key is the same in
+			// both routers here, so the refusal is the refresh token's.
+			t.Run("router", func(t *testing.T) {
+				pool := signInPool(t, "dispatch-client", "client-secret")
+				boot := resolveWith(t, map[string]string{"DISPATCH_SIGNIN_ISSUER": pool.URL()})
+				database := storetest.Open(t)
+				ageConfirmation := func() {
+					t.Helper()
+					if _, err := database.Pool.Exec(context.Background(), `update people set confirmed_at = now() - interval '2 hours' where confirmed_at is not null`); err != nil {
+						t.Fatal(err)
+					}
+				}
+				whoami := func(handler http.Handler, signedIn *httptest.ResponseRecorder) *httptest.ResponseRecorder {
+					request := httptest.NewRequest(http.MethodGet, "http://dispatch.test/auth/whoami", nil)
+					for _, cookie := range signedIn.Result().Cookies() {
+						if cookie.Name == "dsession" {
+							request.AddCookie(cookie)
+						}
+					}
+					response := httptest.NewRecorder()
+					handler.ServeHTTP(response, request)
+					return response
+				}
+				handler := signInRouter(t, boot, store.NewPgPeopleStore(database.Pool, "signing-key", nil))
+				member := poolSignIn(t, handler, pool, "dispatch-members")
+				if member.Code != http.StatusFound || !sessionCookieSet(member) {
+					t.Fatalf("sign-in: the callback answered %d %s, want a signed-in redirect", member.Code, member.Body.String())
+				}
+				var stored string
+				if err := database.Pool.QueryRow(context.Background(), `select refresh_token from people where email = 'alice@example.com'`).Scan(&stored); err != nil {
+					t.Fatal(err)
+				}
+				if !strings.HasPrefix(stored, "v1:") {
+					t.Errorf("the sign-in stored the refresh token as %q, want it sealed in the v1: format", stored)
+				}
+				ageConfirmation()
+				if response := whoami(handler, member); response.Code != http.StatusOK || pool.Refreshes() != 1 {
+					t.Errorf("past the hour: whoami answered %d %s after %d refreshes, want 200 after one refresh with the opened token", response.Code, response.Body.String(), pool.Refreshes())
+				}
+				// The refresh just confirmed the membership; the rotated store opens none of it all the same.
+				rotated := signInRouter(t, boot, store.NewPgPeopleStore(database.Pool, "rotated-signing-key", nil))
+				if response := whoami(rotated, member); response.Code != http.StatusUnauthorized || errorCode(response) != "NO_IDENTITY" || pool.Refreshes() != 1 {
+					t.Errorf("a refresh token sealed under another key: whoami answered %d %s after %d refreshes, want 401 NO_IDENTITY with the pool not asked", response.Code, response.Body.String(), pool.Refreshes())
+				}
+				again := poolSignIn(t, rotated, pool, "dispatch-members")
+				if again.Code != http.StatusFound || !sessionCookieSet(again) {
+					t.Fatalf("signing in again: the callback answered %d %s, want a signed-in redirect", again.Code, again.Body.String())
+				}
+				ageConfirmation()
+				if response := whoami(rotated, again); response.Code != http.StatusOK || pool.Refreshes() != 2 {
+					t.Errorf("signed in again, past the hour: whoami answered %d %s after %d refreshes, want 200 after a second refresh", response.Code, response.Body.String(), pool.Refreshes())
+				}
+			})
 		},
 		"DISPATCH_INSECURE_COOKIE": func(t *testing.T) {
 			// The flag as the router's cookies carry it: the state cookie GET /auth/start sets.

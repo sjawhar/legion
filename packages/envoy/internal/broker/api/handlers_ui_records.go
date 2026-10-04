@@ -55,7 +55,8 @@ type recordResponse struct {
 	Kind string `json:"kind"`
 	// "pending", or how it ended: "approved", "denied", "expired", "cancelled" or "revoked".
 	State string `json:"state"`
-	// The one login that may decide it.
+	// The one login that may decide it, or "anyone": any signed-in person may decide a request
+	// for a shared human-tier secret.
 	Approver string `json:"approver"`
 	// The session asking; null for a machine login.
 	Enrollment *recordEnrollmentResp `json:"enrollment"`
@@ -68,7 +69,8 @@ type recordResponse struct {
 	Reason string `json:"reason"`
 	// How long the grant or credential lasts once approved.
 	LifetimeSeconds int `json:"lifetime_seconds"`
-	// The SHA-256 of the rules that decided it needs approval.
+	// The version of the secret policy it was decided under (the SHA-256 of every agent secret's
+	// name, owner, tier and ARN); for a machine login, the version current when it was asked.
 	RulesVersion string `json:"rules_version"`
 	// When it expires undecided.
 	ExpiresAt time.Time `json:"expires_at"`
@@ -164,7 +166,7 @@ func (s *server) decideRecord(w http.ResponseWriter, r *http.Request, approve bo
 		writeInternal(w, "read credential request kind", err)
 		return
 	}
-	if kind == "launcher_credential" {
+	if kind == record.KindLauncherCredential {
 		s.decideMachineLogin(w, r, recordID, approve, body)
 		return
 	}

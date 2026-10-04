@@ -84,6 +84,17 @@
 
 ### Changed
 
+- Event-log payloads served by `GET /api/v1/issues/{key}/events`, `GET /api/v1/artifacts/{id}/events`
+  and the replay from `GET /api/v1/events` keep their stored numbers and PostgreSQL `jsonb` object
+  order: `9007199254740993` stays that integer, `1.00` keeps its trailing zeros, and object keys come
+  shorter first and, for keys of one length, in byte order. The JSON is compact, and Go's encoder
+  still writes `<`, `>`, `&`, U+2028 and U+2029 inside strings as `\u` escapes, as it did before.
+  Six ask payloads are decoded to add read-time fields and come back in Go's sorted-key, `float64`
+  form: `ask.opened`, `ask.anchor_refreshed`, `ask.answered`, `ask.resolved`, `ask.edited` and
+  `ask.handed_back`; `ask.follower_added` and `ask.follower_removed` keep the stored order. A live
+  event on `GET /api/v1/events` keeps its producer's field order. The dashboard, the agent Dispatch
+  tools and the Legion daemon read named fields from these payloads, and none compares payload bytes
+  or relies on Go's map ordering or `float64` rounding.
 - People sign in to Dispatch with Google Workspace through the shared sign-in pool (OpenID
   Connect authorization code against `DISPATCH_SIGNIN_ISSUER`, with `DISPATCH_SIGNIN_CLIENT_ID`,
   `DISPATCH_SIGNIN_CLIENT_SECRET` and `DISPATCH_SIGNIN_GROUP`, all four required by cookie
@@ -100,6 +111,30 @@
   only a pull request, an issue or a commit's check runs. `DISPATCH_ALLOWED_LOGINS` and
   `DISPATCH_APP_CLIENT_SECRET` are removed and refused at boot; GitHub OAuth sign-in, the per-user
   GitHub token table (`users`, dropped by `0068`) and the GraphQL proxy are gone.
+- Dispatch stores each person's sign-in pool refresh token sealed under a key derived from
+  `DISPATCH_SIGNING_KEY` (`people.refresh_token`, a `v1:` format; `cmd/dispatch/README.md`,
+  Identity). A stored value that does not open counts as no refresh token: each read logs
+  `dispatch: a stored refresh token did not open; the person signs in again` at WARN without the
+  value, and the person signs in again. Every boot retires each refresh token stored in plain
+  text, by `0068`'s release or by one of its tasks during a roll or after a rollback: it revokes
+  the token at the pool's discovered `revocation_endpoint`, then clears it; a sign-in that replaces
+  one retires it first. A token the boot cannot revoke stays for the next boot and is logged at
+  ERROR with the email and the error, never the token; a sign-in that cannot revoke the token it
+  replaces goes on and logs its own ERROR line, `dispatch: a sign-in replaced a refresh token the
+  pool did not revoke; sign this person out at the pool`. A redirect from the revocation endpoint
+  is a failure, never followed. The boot logs how many it retired and how many failed, and stops
+  after 30 seconds without holding up the start. A database backup holds no refresh token the
+  pool would accept only once a boot of this release has retired every plain-text token, and then
+  only for the tokens still in `people` when it ran: one `0068`'s release removed without revoking
+  (a sign-in that replaced it, or a logout) stays valid at the pool in any backup that holds it,
+  so delete every backup taken between `0068`'s deploy and the post-roll restart, or sign out at
+  the pool everyone whose `people.signed_in_at` is after `0068`'s deploy. After the last
+  earlier-release task is gone, restart Dispatch once, then check that boot logged `failed=0`, no
+  sign-in-replaced line appeared, and
+  `select count(*) from people where refresh_token is not null and refresh_token not like 'v1:%'`
+  answers `0` (`cmd/dispatch/README.md`). Rotating `DISPATCH_SIGNING_KEY` leaves Dispatch unable
+  to open any stored refresh token, so everyone signs in again, but revokes none at the pool:
+  after a key leak, sign people out at the pool.
 - A blank approval-request `summary` is refused (`400 SUMMARY_INPUT`) with text that asks for what
   the human is approving, rather than for what the version proposes that the human has not agreed
   to, and the advice in `409 APPROVAL_WAITS_ON_HUMAN` and in an approval ask's `409 ASK_KIND_FIXED`
@@ -243,6 +278,7 @@
   connection returned meanwhile, Dispatch exits without the connections waiting on it (`dispatch:
   exit with database connections still in use once the database stopped answering`). The compose
   file sets `stop_grace_period: 30s`.
+- A document's stored update log kept every byte any write had inserted, and every cold load of it built all of it: Dispatch merged the stored updates whole, and a merge keeps the content of deleted items. Five hundred 2,000-character replies to one anchored comment, each projecting the thread's margin record again, left 257 MB stored under a 3 KB document, and a cold one-word edit of it then took 1,842 MiB, past the 1,024 MiB task. A load now applies the stored updates one at a time to a document that collects garbage and returns what it holds, so it costs the live document and one update; and compaction, which runs as a room closes, as the server shuts down and daily, folds the whole log into that state rather than keeping the newest 500 updates beside a merge of the rest. An update a load's document parks for a dependency the log lacks is merged back into that state. A log the fold cannot apply, or a state that does not read back as the document that made it, is not used: the load merges the stored updates whole as before, and compaction leaves them as stored. After compaction, `doc_updates` and any backup of it hold no text a write deleted, so text deleted before a version captured it is gone (Sami's decision, LEGION-496). `doc_updates` is snapshotted once, and the snapshot kept 90 days, right before the first deploy that carries this.
 - A document edit that repairs an ask a browser left unreadable now reports it in
   `decision_blocks_added`, matching the open ask its next settlement creates. An edit keeps that
   count as count-only advice when the bounded issue-advice query fails (LEGION-470).

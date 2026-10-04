@@ -15,8 +15,9 @@ No broker yet? [Run the local stack](/legion/broker/guides/run-locally/) and log
 that page shows. It has no Dispatch: where step 2 says Dispatch, approve with
 `agent-secrets-devrelay`, as [approving without
 Dispatch](/legion/broker/guides/approve-a-request/#without-dispatch) shows. Every terminal output
-below is real, captured from that stack, whose rules grant `DEMO_READ_TOKEN` automatically and need
-`ada@example.com` to approve `DEMO_API_KEY`.
+below is real, captured from that stack, whose two secrets are `ada@example.com`'s: `DEMO_READ_TOKEN`
+at the agent tier, which her own sessions get without asking, and `DEMO_API_KEY` at the human tier,
+which she approves.
 
 ## 1. The agent asks
 
@@ -29,27 +30,27 @@ secret only for a session you would trust with the value itself.
 agent-secrets DEMO_API_KEY --reason "Deploy the example service" -- ./deploy.sh
 ```
 
-- `DEMO_API_KEY` is the secret's name in the broker's rules, and the name of the environment
-  variable the command gets it in. Name several to get several.
+- `DEMO_API_KEY` is the secret's name, and the name of the environment variable the command gets it
+  in. Name several to get several.
 - `--reason` is what the approver reads. Say what the command is for.
 - Everything after `--` is the command.
 
-When the rules grant a secret automatically, the command runs at once:
+When the secret's owner and tier grant it automatically, the command runs at once:
 
 ```console
 $ agent-secrets DEMO_READ_TOKEN -- printenv DEMO_READ_TOKEN
 demo-read-token-value
 ```
 
-When they need a person's approval, `agent-secrets` says so, with the request's id and where to
+When it needs a person's approval, `agent-secrets` says so, with the request's id and where to
 approve it (the request's Dispatch page when `AGENT_SECRETS_APPROVE_URL` names Dispatch's address,
 otherwise Credential requests in the Dispatch Inbox), and waits (up to 30 minutes; set `--wait` to
 a duration such as `5m` to change that) while the approver decides.
 
 ## 2. The approver decides in Dispatch
 
-The approver the rules name (here `ada@example.com`, the operator of the machine the agent runs on)
-finds the request at the top of their Dispatch **Inbox**, under **Credential requests**: a
+The approver (here `ada@example.com`, the secret's owner and the operator of the machine the agent
+runs on) finds the request at the top of their Dispatch **Inbox**, under **Credential requests**: a
 **Secret request** row naming `DEMO_API_KEY` and when it was asked. Opening it shows the request's
 page:
 
@@ -60,7 +61,7 @@ page:
 | Enrollment | The session's kind, runtime and operator: `host · example-host-build:2150654:335907311 · ada@example.com` |
 | Lifetime | How long a grant would last: 1 hour |
 | Requested, Expires | When it was asked, and when it [expires](/legion/broker/concepts/#approvals) undecided |
-| Rules version | The SHA-256 of the rules that decided it needs approval |
+| Policy version | The version of the secret policy it was decided under: the SHA-256 of every agent secret's name, owner, tier and ARN |
 | Approver | `ada@example.com` |
 | The agent's stated reason | Deploy the example service |
 
@@ -103,13 +104,13 @@ $ agent-secrets DEMO_API_KEY --reason "Deploy the example service" -- ./deploy.s
 agent-secrets: request 2375f92d-bab0-4123-a0cb-d139c98de73c was denied
 ```
 
-A request still undecided when `--wait` runs out exits 75 and runs nothing; a name the rules do not
-know is refused at once:
+A request still undecided when `--wait` runs out exits 75 and runs nothing; a name the broker does
+not serve is refused at once:
 
 ```console
 $ agent-secrets NO_SUCH_SECRET -- true
-agent-secrets: no rule names this secret (UNKNOWN_SECRET)
+agent-secrets: no agent secret has this name (UNKNOWN_SECRET)
 ```
 
 [Troubleshooting](/legion/broker/guides/troubleshooting/) lists every refusal and what to do about
-it, and [Concepts](/legion/broker/concepts/) explains sessions, rules and grants.
+it, and [Concepts](/legion/broker/concepts/) explains sessions, owner and tier, and grants.
