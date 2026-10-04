@@ -155,7 +155,8 @@ function judge(): void {
     const labels = pod.metadata?.labels ?? {};
     if (labels["legion.dev/probe"] || labels["legion.dev/e2e-control"]) continue;
     const statuses = pod.status?.containerStatuses ?? [];
-    if (!roles.every((role) => statuses.some((status) => status.name === role && status.ready))) continue;
+    if (!roles.every((role) => statuses.some((status) => status.name === role && status.ready)))
+      continue;
     const entry = pods.get(uid) ?? { name, words: new Set<string>() };
     for (const c of [...(pod.spec?.initContainers ?? []), ...(pod.spec?.containers ?? [])]) {
       for (const word of [
