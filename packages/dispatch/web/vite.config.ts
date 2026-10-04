@@ -1,11 +1,52 @@
 import { fileURLToPath } from "node:url";
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
-import { defineConfig } from "vite";
+import { defineConfig, type Plugin } from "vite";
+import {
+  type GeneratedCode,
+  packageRoot,
+  thirdPartyNotices,
+  viteBundleInputs,
+} from "../../../scripts/third-party-notices";
+
+const vite = packageRoot("vite", fileURLToPath(new URL(".", import.meta.url)));
+/**
+ * The code the build emits from no source file it records: Vite's own helpers (module preload,
+ * and the CommonJS interop of the @rollup/plugin-commonjs build Vite 5 carries inside it), and
+ * the wrappers that interop puts around a CommonJS module, whose own file the build records.
+ */
+const GENERATED_CODE: GeneratedCode[] = [
+  { id: /^\0vite\//, packages: [vite] },
+  { id: /^\0(commonjsHelpers\.js|commonjs-dynamic-modules)$/, packages: [vite] },
+  { id: /^\0\/.*\?commonjs-(module|exports)$/, packages: [] },
+];
+
+/**
+ * Writes dist/THIRD_PARTY_NOTICES.txt, which Dispatch serves at /THIRD_PARTY_NOTICES.txt as text:
+ * the license of every third-party package the build copies into dist.
+ */
+function thirdPartyNoticesFile(): Plugin {
+  let root = "";
+  return {
+    name: "third-party-notices",
+    apply: "build",
+    configResolved(config) {
+      root = config.root;
+    },
+    async generateBundle(_options, bundle) {
+      const inputs = await viteBundleInputs(this, bundle, root, GENERATED_CODE);
+      this.emitFile({
+        type: "asset",
+        fileName: "THIRD_PARTY_NOTICES.txt",
+        source: await thirdPartyNotices(inputs, root),
+      });
+    },
+  };
+}
 
 export default defineConfig({
   root: "web",
-  plugins: [react(), tailwindcss()],
+  plugins: [react(), tailwindcss(), thirdPartyNoticesFile()],
   define: {
     // Keep the entry chunk distinct across deployments, including no-source-change image rebuilds.
     __DISPATCH_BUILD__: JSON.stringify(

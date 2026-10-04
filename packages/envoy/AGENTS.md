@@ -2038,7 +2038,8 @@ backend auto-strips exactly one leading directory, so the installed tree still e
 `bin/agent-secrets`, `bin/agent-secrets-helper`, the layout its installer expects; a bare
 `bin/...` top level would itself be the directory mise strips. The release job builds them, once
 it has decided the tag, so it can stamp that tag into both, and attests the two tarballs; the
-build job builds only `legion-envoy-<arch>.tar.gz` (envoy-listener alone). This is the release a
-host installs both binaries from (through the operator's dotfiles, under the broker design's
-devbox-enrollment plan).
+build job builds only `legion-envoy-<arch>.tar.gz` (envoy-listener alone, with its
+`THIRD_PARTY_NOTICES`). Each `agent-secrets` tarball also holds `agent-secrets/THIRD_PARTY_NOTICES`,
+the licenses of the Go modules both binaries compile in. This is the release a host installs both
+binaries from (through the operator's dotfiles, under the broker design's devbox-enrollment plan).
 

@@ -24,6 +24,11 @@ on:
       - "docs/site/package.json"
       - ".dockerignore"
       - ".github/workflows/release-envoy-listener.yaml"
+      # The image's and the binaries' third-party notices, and the archives' target list.
+      - "scripts/third-party-notices.ts"
+      - "scripts/go-third-party-notices.sh"
+      - "scripts/assemble-third-party-notices.sh"
+      - ".github/go-release-targets.json"
   workflow_dispatch:
 
 # Every job declares its own permissions (build, docker, release below); nothing runs under this
@@ -34,7 +39,21 @@ permissions: {}
 
 jobs:
 
+  # The architectures the archives are built for: .github/go-release-targets.json, the list the
+  # pull request's notices check reads too.
+  targets:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      envoy: ${{ steps.read.outputs.envoy }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: read
+        run: echo "envoy=$(jq -c .envoy .github/go-release-targets.json)" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: targets
     runs-on: ubuntu-24.04
     # Checks out and uploads; nothing here writes to the repository or a registry.
     permissions:
@@ -42,7 +61,7 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        arch: [amd64, arm64]
+        arch: ${{ fromJSON(needs.targets.outputs.envoy) }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
@@ -55,11 +74,15 @@ jobs:
       - name: Generate Go contracts
         run: bun run gen:go
         working-directory: packages/contracts
+      # The archive holds envoy-listener and THIRD_PARTY_NOTICES, the license of every Go module the
+      # binary compiles in (scripts/go-third-party-notices.sh, run with the build's own GOOS and
+      # GOARCH), which fails the build when one cannot be determined.
       - name: Build envoy binary
         run: |
           mkdir -p out
           GOOS=linux GOARCH=${{ matrix.arch }} go build -buildvcs=false -o out/envoy-listener ./cmd/listener
-          tar czf legion-envoy-${{ matrix.arch }}.tar.gz -C out envoy-listener
+          GOOS=linux GOARCH=${{ matrix.arch }} ../../scripts/go-third-party-notices.sh out/THIRD_PARTY_NOTICES ./cmd/listener
+          tar czf legion-envoy-${{ matrix.arch }}.tar.gz -C out envoy-listener THIRD_PARTY_NOTICES
         working-directory: packages/envoy
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -299,7 +322,15 @@ jobs:
 
           CURRENT="${LATEST_TAG#legion-envoy-v}"
           CURRENT="${CURRENT%%-*}"
-          VERSION=$(.github/scripts/release-bump.sh "$CURRENT" "${LATEST_TAG}..HEAD" -- packages/envoy/ packages/contracts/)
+          # Every notices script changes an artifact this release publishes: the web app in the
+          # image, the Go archives, or the image assembly; and the target list decides the
+          # archives. They therefore take a patch release.
+          VERSION=$(.github/scripts/release-bump.sh "$CURRENT" "${LATEST_TAG}..HEAD" \
+            --patch-path scripts/third-party-notices.ts --patch-path scripts/go-third-party-notices.sh \
+            --patch-path scripts/assemble-third-party-notices.sh --patch-path .github/go-release-targets.json \
+            -- packages/envoy/ packages/contracts/ scripts/third-party-notices.ts \
+            scripts/go-third-party-notices.sh scripts/assemble-third-party-notices.sh \
+            .github/go-release-targets.json)
 
           if [ "$VERSION" = "empty" ]; then
             echo "should_release=false" >> "$GITHUB_OUTPUT"
@@ -386,7 +417,10 @@ jobs:
       # directory from an asset shaped like that, so the installed tree still ends
       # up bin/agent-secrets, bin/agent-secrets-helper; a bare bin/... top level
       # would itself be the one directory mise strips, flattening the binaries to
-      # the install root instead.
+      # the install root instead. agent-secrets/THIRD_PARTY_NOTICES, beside bin/, is
+      # the license of every Go module the two binaries compile in
+      # (scripts/go-third-party-notices.sh, run with the build's own environment),
+      # and fails the build when one cannot be determined.
       - name: Build agent-secrets binaries
         if: steps.publish.outputs.should_release == 'true'
         env:
@@ -394,13 +428,15 @@ jobs:
         run: |
           test -n "$TAG"
           mkdir -p ../../agent-secrets-assets
-          for arch in amd64 arm64; do
+          for arch in $(jq -r '.envoy[]' ../../.github/go-release-targets.json); do
             mkdir -p "out/$arch/agent-secrets/bin"
             for cmd in agent-secrets agent-secrets-helper; do
               CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build -buildvcs=false \
                 -ldflags "-X github.com/sjawhar/envoy/internal/buildversion.tag=$TAG" \
                 -o "out/$arch/agent-secrets/bin/$cmd" "./cmd/$cmd"
             done
+            CGO_ENABLED=0 GOOS=linux GOARCH="$arch" ../../scripts/go-third-party-notices.sh \
+              "out/$arch/agent-secrets/THIRD_PARTY_NOTICES" ./cmd/agent-secrets ./cmd/agent-secrets-helper
             tar czf "../../agent-secrets-assets/agent-secrets-$arch.tar.gz" -C "out/$arch" agent-secrets
           done
         working-directory: packages/envoy
@@ -414,7 +450,7 @@ jobs:
       - name: Generate checksums
         if: steps.publish.outputs.should_release == 'true'
         run: |
-          for dir in legion-envoy-amd64 legion-envoy-arm64 agent-secrets-assets; do
+          for dir in legion-envoy-* agent-secrets-assets; do
             (cd "$dir" && sha256sum -- * >> ../SHA256SUMS)
           done
       - name: Create or update GitHub release
@@ -425,16 +461,14 @@ jobs:
         run: |
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$TAG" --clobber \
-              ./legion-envoy-amd64/* \
-              ./legion-envoy-arm64/* \
+              ./legion-envoy-*/* \
               ./agent-secrets-assets/* \
               SHA256SUMS
           else
             gh release create "$TAG" \
               --title "$TAG" \
               --notes "Envoy listener release — Go binary + Docker image, plus agent-secrets and agent-secrets-helper host binaries." \
-              ./legion-envoy-amd64/* \
-              ./legion-envoy-arm64/* \
+              ./legion-envoy-*/* \
               ./agent-secrets-assets/* \
               SHA256SUMS
           fi

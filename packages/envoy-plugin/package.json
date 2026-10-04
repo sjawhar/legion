@@ -27,7 +27,7 @@
   ],
   "scripts": {
     "build": "bun build src/server.ts --root . --outdir dist --target bun --format esm --external '@opencode-ai/*'",
-    "prepack": "bun run build && rm -rf skills && cp -r ../../skills skills",
+    "prepack": "./scripts/prepack.sh",
     "typecheck": "bunx tsc --noEmit",
     "test": "bun test",
     "lint": "bunx biome check src/",

@@ -12,6 +12,9 @@
       "devDependencies": {
         "@biomejs/biome": "^2.3.14",
         "@types/bun": "latest",
+        "@types/spdx-expression-parse": "3.0.0",
+        "spdx-expression-parse": "3.0.1",
+        "spdx-license-list": "6.12.0",
         "typescript": "^5.3.0",
       },
     },
@@ -1156,6 +1159,8 @@
 
     "@types/sax": ["@types/sax@1.2.7", "", { "dependencies": { "@types/node": "*" } }, "sha512-rO73L89PJxeYM3s3pPPjiPgVVcymqU490g0YO5n5By0k2Erzj6tay/4lr1CHAAU4JyOWd1rpQ8bCf6cZfHU96A=="],
 
+    "@types/spdx-expression-parse": ["@types/spdx-expression-parse@3.0.0", "", {}, "sha512-gP/1Yag2V2sCH48AVa3c3TAPa9Hi0eT/2dhgr+CNDVGD71fveqVrWWYuBhGjS+uIFf1SJj645vaD7kaqznB53A=="],
+
     "@types/trusted-types": ["@types/trusted-types@2.0.7", "", {}, "sha512-ScaPdn1dQczgbl0QFTeTOmVHFULt394XJgOQNoyVhZ6r2vLnMLJfBPd53SB52T/3G36VI1/g2MZaX0cwDuXsfw=="],
 
     "@types/unist": ["@types/unist@3.0.3", "", {}, "sha512-ko/gIFJRv177XgZsZcBwnqJN5x/Gien8qNOn0D5bQU/zAzVf9Zt3BlcUiLqhV9y4ARk0GbT3tnUiPNgnTXzc/Q=="],
@@ -2217,6 +2222,14 @@
     "source-map-js": ["source-map-js@1.2.1", "", {}, "sha512-UXWMKhLOwVKb728IUtQPXxfYU+usdybtUrK/8uGE8CQMvrhOpwvzDBwj0QhSL7MQc7vIsISBG8VQ8+IDQxpfQA=="],
 
     "space-separated-tokens": ["space-separated-tokens@2.0.2", "", {}, "sha512-PEGlAwrG8yXGXRjW32fGbg66JAlOAwbObuqVoJpv/mRgoWDQfgH1wDPvtzWyUSNAXBGSk8h755YDbbcEy3SH2Q=="],
+
+    "spdx-exceptions": ["spdx-exceptions@2.5.0", "", {}, "sha512-PiU42r+xO4UbUS1buo3LPJkjlO7430Xn5SVAhdpzzsPHsjbYVflnnFdATgabnLude+Cqu25p6N+g2lw/PFsa4w=="],
+
+    "spdx-expression-parse": ["spdx-expression-parse@3.0.1", "", { "dependencies": { "spdx-exceptions": "^2.1.0", "spdx-license-ids": "^3.0.0" } }, "sha512-cbqHunsQWnJNE6KhVSMsMeH5H/L9EpymbzqTQ3uLwNCLZ1Q481oWaofqH7nO6V07xlXwY6PhQdQ2IedWx/ZK4Q=="],
+
+    "spdx-license-ids": ["spdx-license-ids@3.0.24", "", {}, "sha512-cLS9TtWkIQFyLkJ3/5aFQAOHOSKTlOs/7WDut/XPSdjom1fJhUdkepeJAKXa9Y05+FabHd0sti+Et559vDtkpQ=="],
+
+    "spdx-license-list": ["spdx-license-list@6.12.0", "", {}, "sha512-+nUYqm3aZMSHbjsthK+i/HHI2okTElCvqwUd4k8QcSk+FTGgjq+fsdFj2wZOaX6XmR2JdWhf/NeflNnvKOjcnQ=="],
 
     "starlight-auto-sidebar": ["starlight-auto-sidebar@0.4.1", "", { "dependencies": { "github-slugger": "^2.0.0" }, "peerDependencies": { "@astrojs/starlight": ">=0.39.0" } }, "sha512-dq/3NjJXxR19ke7LPZjC8PlDqPkEzg0G6QqE4pRMH3eI2EZFQiuafARWpP81ZIAY7tdr6lxscNWTvOu5WhaZwQ=="],
 

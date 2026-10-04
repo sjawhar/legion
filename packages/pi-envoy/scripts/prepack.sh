@@ -12,6 +12,11 @@ if ! jq -e '.omp.extensions == ["dist/envoy.js","dist/legion.js"]' package.json 
 fi
 # Both extensions ship: envoy.ts loads on every OMP session, legion.ts is
 # inert without LEGION_TREE/LEGION_ROLE/LEGION_CONTROLLER in the environment.
-bun build extensions/envoy.ts extensions/legion.ts --outdir dist --target bun --format esm --external @oh-my-pi/pi-coding-agent --external @oh-my-pi/pi-tui --external @oh-my-pi/pi-utils
+# dist/THIRD_PARTY_NOTICES carries the license of every package the bundles
+# inline, read from the build's metafile; it fails the pack when one has none.
+metafile="$(mktemp)"
+trap 'rm -f "$metafile"' EXIT
+bun build extensions/envoy.ts extensions/legion.ts --outdir dist --target bun --format esm --external @oh-my-pi/pi-coding-agent --external @oh-my-pi/pi-tui --external @oh-my-pi/pi-utils --metafile="$metafile"
+bun ../../scripts/third-party-notices.ts "$metafile" dist/THIRD_PARTY_NOTICES
 rm -rf dist/skills
 cp -r ../../skills dist/skills
