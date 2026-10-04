@@ -251,7 +251,7 @@ function createPi(options: { readonly bindEnvoy?: boolean } = {}): {
   const sentMessages: SentMessage[] = [];
   const entries: AppendedEntry[] = [];
   const title: HostTitle = { set: [] };
-  const activeTools = ["read", "task", "hub"];
+  const activeTools = ["read", "task", "wait"];
   const property = (): ZodNumberProperty => ({
     optional: property,
     nullable: property,
@@ -1189,7 +1189,7 @@ describe("Legion OMP extension", () => {
       sessionId: `ses_${role}_${issue}`,
     });
     const codeTools = ["edit", "write", "apply_patch"];
-    for (const toolName of [...codeTools, "task", "hub"]) {
+    for (const toolName of [...codeTools, "task", "wait"]) {
       const reason = codeTools.includes(toolName) ? CODE_TOOL_REFUSAL[role] : undefined;
       const result = await toolCall(
         { toolName, toolCallId: `call-${role}-${issue}-${toolName}`, input: {} },
@@ -1199,7 +1199,7 @@ describe("Legion OMP extension", () => {
       else expect(result).toEqual({ block: true, reason });
     }
   });
-  test("allows xd:// tool-device writes through the mutation gate but still blocks real file writes", async () => {
+  test("allows writes into Oh My Pi through the mutation gate but still blocks real file writes", async () => {
     const blockedReason = (role: LegionRole): string =>
       role === "merger"
         ? "the merger only verifies and reports"
@@ -1210,12 +1210,23 @@ describe("Legion OMP extension", () => {
     for (const role of ["architect", "reviewer", "merger"] as const) {
       const { toolCall, context } = await bootPane({ role, sessionId: `ses_${role}_xd` });
 
-      // A tool-device invocation (write to an `xd://` path, the scheme in any case, as Oh My Pi
-      // routes it) is a tool call, not a file mutation, and must pass for every gated role.
-      for (const path of ["xd://dispatch_ask", "XD://dispatch_doc_edit"]) {
+      // A write into Oh My Pi -- a tool device (`xd://`), a message to an agent of the process
+      // (`agent://`), job and service control (`proc://`) -- is a tool call, not a file mutation,
+      // and must pass for every gated role, the scheme in any case, as Oh My Pi routes it.
+      for (const path of [
+        "xd://dispatch_ask",
+        "XD://dispatch_doc_edit",
+        "agent://ReviewLens",
+        "proc://task-3/kill",
+        "Proc://web",
+      ]) {
         await expect(
           toolCall(
-            { toolName: "write", toolCallId: `call-${role}-xd-ok`, input: { path, content: "{}" } },
+            {
+              toolName: "write",
+              toolCallId: `call-${role}-omp-ok`,
+              input: { path, content: "{}" },
+            },
             context
           )
         ).resolves.toBeUndefined();
@@ -1409,10 +1420,10 @@ describe("Legion OMP extension", () => {
       ).resolves.toBeUndefined();
     }
   });
-  test("refuses eval code and hub input that mention jj with an operation-log rewrite, by the plain-text rule", async () => {
+  test("refuses eval code and a supervised service's stdin that mention jj with an operation-log rewrite, by the plain-text rule", async () => {
     const { toolCall, context } = await bootPane({
       role: "tester",
-      sessionId: "ses_tester_jj_eval_hub",
+      sessionId: "ses_tester_jj_eval_proc",
     });
     const refused: { readonly toolName: string; readonly input: Record<string, unknown> }[] = [
       {
@@ -1425,15 +1436,11 @@ describe("Legion OMP extension", () => {
       { toolName: "eval", input: { language: "js", code: `await Bun.$\`jj op restore \${id}\`` } },
       // An argv literal separates the words with `", "`; the rule allows any non-word run.
       { toolName: "eval", input: { language: "py", code: 'run(["jj", "op", "restore", op_id])' } },
-      {
-        toolName: "hub",
-        input: { op: "start", name: "x", application: "jj", args: ["-R", "/ws", "undo"] },
-      },
-      {
-        toolName: "hub",
-        input: { op: "start", name: "x", application: "bash", args: ["-c", "jj op restore 1"] },
-      },
-      { toolName: "hub", input: { op: "send", name: "shell", text: "jj undo" } },
+      // A supervised service starts as a `bash` command, tokenised like any other.
+      { toolName: "bash", input: { command: "bash -c 'jj op restore 1'", name: "x" } },
+      // Its stdin is a `write` to `proc://<id>`, the scheme in any case.
+      { toolName: "write", input: { path: "proc://shell", content: "jj undo" } },
+      { toolName: "write", input: { path: "PROC://shell", content: "jj -R /ws op restore 1" } },
     ];
     const allowed: { readonly toolName: string; readonly input: Record<string, unknown> }[] = [
       {
@@ -1441,12 +1448,11 @@ describe("Legion OMP extension", () => {
         input: { language: "py", code: 'run(["jj", "op", "log"]); run(["jj", "restore", "f"])' },
       },
       { toolName: "eval", input: { language: "py", code: 'print(read("jj-notes.md"))' } },
-      {
-        toolName: "hub",
-        input: { op: "start", name: "web", application: "bun", args: ["run", "dev"] },
-      },
-      { toolName: "hub", input: { op: "logs", name: "web" } },
-      { toolName: "hub", input: {} },
+      { toolName: "bash", input: { command: "bun run dev", name: "web" } },
+      { toolName: "write", input: { path: "proc://shell", content: "jj op log" } },
+      { toolName: "write", input: { path: "proc://web/kill" } },
+      // A file's content is not run, so the plain-text rule leaves it alone.
+      { toolName: "write", input: { path: "notes.md", content: "never run jj undo here" } },
     ];
     const allowedByMistake: string[] = [];
     for (const [index, call] of refused.entries()) {
@@ -1465,17 +1471,17 @@ describe("Legion OMP extension", () => {
     // Same message shape as the bash refusal, naming the tool and the words it found.
     const named = await toolCall(
       {
-        toolName: "hub",
+        toolName: "write",
         toolCallId: "call-jj-text-named",
-        input: { op: "start", name: "x", application: "jj", args: ["undo"] },
+        input: { path: "proc://shell", content: "jj undo" },
       },
       context
     );
-    for (const phrase of ["hub: jj undo", "every Legion issue workspace shares"]) {
+    for (const phrase of ["write: jj undo", "every Legion issue workspace shares"]) {
       expect(named).toEqual({ block: true, reason: expect.stringContaining(phrase) });
     }
   });
-  test("refuses `legion handoff complete` in a phase worker's bash, eval code, and hub input, and leaves the shell's write and read alone", async () => {
+  test("refuses `legion handoff complete` in a phase worker's bash, eval code, and service stdin, and leaves the shell's write and read alone", async () => {
     // The phase stall closes only on the tool's handoff_complete; a completion run from bash
     // would leave it open and draw a follow-up asking the worker to complete again. Writes and
     // reads leave no phase open, and stdin is the shell's route for a payload past argv's cap.
@@ -1499,13 +1505,8 @@ describe("Legion OMP extension", () => {
         },
       },
       {
-        toolName: "hub",
-        input: {
-          op: "start",
-          name: "x",
-          application: "legion",
-          args: ["handoff", "complete", "--summary", "done"],
-        },
+        toolName: "write",
+        input: { path: "proc://shell", content: "legion handoff complete --summary done" },
       },
     ];
     const allowed: { readonly toolName: string; readonly input: Record<string, unknown> }[] = [
@@ -1523,6 +1524,7 @@ describe("Legion OMP extension", () => {
       bash("cat packages/pi-envoy/src/legion/handoff-actions.ts"),
       bash('jj -R "$LEGION_WORKSPACE" split -m "implement: record handoff" .legion/implement.json'),
       { toolName: "eval", input: { language: "py", code: 'print(read(".legion/plan.json"))' } },
+      { toolName: "write", input: { path: "proc://shell", content: "legion handoff read" } },
     ];
     const mintsBefore = mints();
     const allowedByMistake: string[] = [];
@@ -1808,14 +1810,14 @@ describe("Legion OMP extension", () => {
       reason: expect.stringContaining("every Legion issue workspace shares"),
     });
   });
-  test("refuses a root architect's own eval or hub call that spells out an operation-log rewrite", async () => {
-    // Neither `eval` nor `hub` is in the architect's bash-only gate, so before the operation-log
-    // rule bound the root architect's pane, the architect's own (non-subagent) call reached
-    // neither gate and ran unrefused.
+  test("refuses a root architect's own eval or service stdin that spells out an operation-log rewrite", async () => {
+    // Neither `eval` nor a `write` to `proc://` is in the architect's bash-only gate (a `proc://`
+    // write passes the code-tool gate as job control), so the operation-log rule bound to the root
+    // architect's pane is what refuses the architect's own (non-subagent) call.
     const { toolCall, context } = await bootPane({
       role: "architect",
       issue: "REPO-42",
-      sessionId: "ses_root_architect_eval_hub",
+      sessionId: "ses_root_architect_eval_proc",
     });
     const evalResult = await toolCall(
       {
@@ -1829,15 +1831,15 @@ describe("Legion OMP extension", () => {
       block: true,
       reason: expect.stringContaining("every Legion issue workspace shares"),
     });
-    const hubResult = await toolCall(
+    const stdinResult = await toolCall(
       {
-        toolName: "hub",
-        toolCallId: "architect-hub-jj",
-        input: { op: "send", name: "shell", text: "jj undo" },
+        toolName: "write",
+        toolCallId: "architect-proc-jj",
+        input: { path: "proc://shell", content: "jj undo" },
       },
       context
     );
-    expect(hubResult).toEqual({
+    expect(stdinResult).toEqual({
       block: true,
       reason: expect.stringContaining("every Legion issue workspace shares"),
     });

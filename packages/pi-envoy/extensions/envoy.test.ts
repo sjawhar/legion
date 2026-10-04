@@ -94,10 +94,6 @@ type TestPi = {
     options: unknown
   ) => void;
   readonly sendUserMessage: (content: string, options?: unknown) => void;
-  readonly askEphemeral?: (input: {
-    readonly prompt: string;
-    readonly signal?: AbortSignal;
-  }) => Promise<{ readonly replyText: string }>;
   readonly appendEntry: PiApi["appendEntry"];
 };
 type Subscription = {
@@ -778,11 +774,10 @@ async function bootAskNudge(
       readonly signal?: AbortSignal;
     }) => Promise<{ readonly replyText: string }>;
     /**
-     * Where the host serves its side turn: `pi.askEphemeral` (the fork's releases before
-     * Oh My Pi 18.3, the default), the extension context's `runEphemeralTurn` (18.3 on), or
-     * nowhere, which is a host that cannot serve a Dispatch BTW either.
+     * Whether the host serves a side turn (the extension context's `runEphemeralTurn`; true by
+     * default). A host without one cannot serve a Dispatch BTW either.
      */
-    readonly sideTurn?: "askEphemeral" | "runEphemeralTurn" | "none";
+    readonly sideTurn?: boolean;
     /**
      * A fresh TUI, whose session id the host mints only after `session_start`: the extension's
      * own `sessionID` stays empty until the registration heartbeat heals the drift.
@@ -874,8 +869,7 @@ async function bootAskNudge(
     asked.push(input);
     return selfCheck === undefined ? Promise.resolve({ replyText: "WAITING" }) : selfCheck(input);
   };
-  const host = options.sideTurn ?? "askEphemeral";
-  envoyExtension(host === "askEphemeral" ? { ...fixture.pi, askEphemeral: answer } : fixture.pi);
+  envoyExtension(fixture.pi);
   // A fresh TUI has no session yet at `session_start`; the host mints the id before the first
   // turn, and the extension's own `sessionID` heals only on the next heartbeat.
   let live = options.lazySessionID === true ? "" : sessionID;
@@ -899,11 +893,11 @@ async function bootAskNudge(
       if (options.holdTimers === true) held.push(callback);
       else timers.push(Promise.resolve().then(callback));
     },
-    ...(host === "runEphemeralTurn"
-      ? {
+    ...(options.sideTurn === false
+      ? {}
+      : {
           runEphemeralTurn: ({ promptText, signal }) => answer({ prompt: promptText, signal }),
-        }
-      : {}),
+        }),
   };
   await fixture.handlers.get("session_start")?.({}, context);
   live = sessionID;
@@ -987,11 +981,11 @@ async function bootAskNudge(
 }
 
 /**
- * The same host with the run-end self-check available. Without a side turn the nudge has no
- * trigger at all, so neither lifecycle edge reads Dispatch.
+ * The same session on a host with the run-end self-check available. Without a side turn the nudge
+ * has no trigger at all, so neither lifecycle edge reads Dispatch.
  */
-function withSelfCheck(pi: TestPi): TestPi {
-  return { ...pi, askEphemeral: async () => ({ replyText: "PROCEEDING" }) };
+function withSelfCheck(context: SessionContext): SessionContext {
+  return { ...context, runEphemeralTurn: async () => ({ replyText: "PROCEEDING" }) };
 }
 
 describe("envoy OMP extension", () => {
@@ -1042,8 +1036,8 @@ describe("envoy OMP extension", () => {
     };
     const { default: envoyExtension } = await import("./envoy.ts?open-ask-summary");
     const fixture = createPi();
-    envoyExtension(withSelfCheck(fixture.pi));
-    const context = sessionContext("ses_reminder");
+    envoyExtension(fixture.pi);
+    const context = withSelfCheck(sessionContext("ses_reminder"));
     await fixture.handlers.get("session_start")?.({}, context);
     const beforeAgentStart = fixture.handlers.get("before_agent_start");
     if (beforeAgentStart === undefined) throw new Error("before_agent_start was not registered");
@@ -1065,14 +1059,14 @@ describe("envoy OMP extension", () => {
     };
     const { default: envoyExtension } = await import("./envoy.ts?open-ask-unavailable");
     const fixture = createPi();
-    envoyExtension(withSelfCheck(fixture.pi));
-    const context = {
+    envoyExtension(fixture.pi);
+    const context = withSelfCheck({
       ...sessionContext("ses_unknown"),
       ui: {
         ...sessionContext("ses_unknown").ui,
         notify: (message: string) => notifications.push(message),
       },
-    };
+    });
     await fixture.handlers.get("session_start")?.({}, context);
     const beforeAgentStart = fixture.handlers.get("before_agent_start");
     if (beforeAgentStart === undefined) throw new Error("before_agent_start was not registered");
@@ -1108,15 +1102,15 @@ describe("envoy OMP extension", () => {
     };
     const { default: envoyExtension } = await import("./envoy.ts?open-ask-availability-latch");
     const fixture = createPi();
-    envoyExtension(withSelfCheck(fixture.pi));
-    const context = {
+    envoyExtension(fixture.pi);
+    const context = withSelfCheck({
       ...sessionContext(),
       sessionManager: { ...topLevelSession, getSessionId: () => activeSessionID },
       ui: {
         ...sessionContext().ui,
         notify: (message: string) => notifications.push(message),
       },
-    };
+    });
     await fixture.handlers.get("session_start")?.({}, context);
     const beforeAgentStart = fixture.handlers.get("before_agent_start");
     if (beforeAgentStart === undefined) throw new Error("before_agent_start was not registered");
@@ -1173,40 +1167,21 @@ describe("envoy OMP extension", () => {
       "?author_session=ses_nudge_fires",
       "?author_session=ses_nudge_fires&since=2026-09-13T00%3A00%3A03Z",
     ]);
-    // One self-check per checked stop — the continuation's stop ran none — and each asks for
-    // the one word the steer hangs on.
+    // One self-check per checked stop — the continuation's stop ran none — each asking for the one
+    // word the steer hangs on, in the /btw wrapper (the host sends the prompt as given), with the
+    // extension's own abort signal.
     expect(session.asked.map((ask) => ask.prompt)).toEqual([
-      expect.stringContaining("WAITING or PROCEEDING"),
-      expect.stringContaining("WAITING or PROCEEDING"),
+      expect.stringMatching(/^<btw>\n[\s\S]*WAITING or PROCEEDING[\s\S]*\n<\/btw>$/),
+      expect.stringMatching(/^<btw>\n[\s\S]*WAITING or PROCEEDING[\s\S]*\n<\/btw>$/),
     ]);
     expect(session.asked[0]?.signal?.aborted).toBe(false);
     // The arming period lives in memory only: nothing about it reaches the transcript.
     expect(session.fixture.entries).toEqual([]);
   });
 
-  test("runs the self-check through the session context's runEphemeralTurn on an upstream host", async () => {
-    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-context");
-    const session = await bootAskNudge(envoyExtension, "ses_nudge_context", () => ({}), {
-      sideTurn: "runEphemeralTurn",
-    });
-
-    await session.userTurn();
-    await session.stop();
-
-    expect(session.fixture.deliveries).toMatchObject([
-      { customType: "dispatch-ask-reminder", options: { deliverAs: "steer", triggerTurn: true } },
-    ]);
-    // The self-check goes out in the /btw wrapper, with the extension's own abort signal.
-    expect(session.asked.map((ask) => ask.prompt)).toEqual([
-      expect.stringMatching(/^<btw>\n[\s\S]*WAITING or PROCEEDING[\s\S]*\n<\/btw>$/),
-    ]);
-    expect(session.asked[0]?.signal?.aborted).toBe(false);
-  });
-
   test("runs the stop-time check on the managed timer, after agent_end has returned", async () => {
     const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-after-handler");
     const session = await bootAskNudge(envoyExtension, "ses_nudge_after_handler", () => ({}), {
-      sideTurn: "runEphemeralTurn",
       holdTimers: true,
     });
 
@@ -1541,20 +1516,23 @@ describe("envoy OMP extension", () => {
       const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-subagent");
       const asked: string[] = [];
       const parent = createPi();
-      envoyExtension({ ...parent.pi, askEphemeral: async () => ({ replyText: "WAITING" }) });
+      envoyExtension(parent.pi);
       await parent.handlers.get("session_start")?.(
         {},
-        sessionWithTranscript("ses_parent", parentFile, [])
+        {
+          ...sessionWithTranscript("ses_parent", parentFile, []),
+          runEphemeralTurn: async () => ({ replyText: "WAITING" }),
+        }
       );
       const child = createPi();
-      envoyExtension({
-        ...child.pi,
-        askEphemeral: async () => {
+      envoyExtension(child.pi);
+      const childContext: SessionContext = {
+        ...sessionWithTranscript("ses_child", childFile, []),
+        runEphemeralTurn: async () => {
           asked.push("child");
           return { replyText: "WAITING" };
         },
-      });
-      const childContext = sessionWithTranscript("ses_child", childFile, []);
+      };
       await child.handlers.get("session_start")?.({}, childContext);
 
       await child.handlers.get("before_agent_start")?.({ prompt: "scout the repo" }, childContext);
@@ -1681,7 +1659,7 @@ describe("envoy OMP extension", () => {
     // The same OMP builds that cannot serve a Dispatch BTW: with no self-check there is no
     // trigger, so the session does not pay the arming round trip either.
     const session = await bootAskNudge(envoyExtension, "ses_nudge_no_ephemeral", () => ({}), {
-      sideTurn: "none",
+      sideTurn: false,
     });
 
     await session.userTurn();
@@ -4805,15 +4783,18 @@ describe("envoy OMP extension", () => {
     const fixture = createPi();
     const asked: string[] = [];
 
-    envoyExtension({
-      ...fixture.pi,
-      askEphemeral: async ({ prompt }) => {
-        calls.push("askEphemeral");
-        asked.push(prompt);
-        return { replyText: "Yes, ship it." };
-      },
-    });
-    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_target"));
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.(
+      {},
+      {
+        ...sessionContext("ses_target"),
+        runEphemeralTurn: async ({ promptText }) => {
+          calls.push("runEphemeralTurn");
+          asked.push(promptText);
+          return { replyText: "Yes, ship it." };
+        },
+      }
+    );
     const agent = natsState.controls.get("notifications.agent.ses_target");
     if (agent === undefined) throw new Error("agent subject was not subscribed");
     natsState.onPublish = (subject) => calls.push(`publish ${subject}`);
@@ -4833,7 +4814,8 @@ describe("envoy OMP extension", () => {
     );
     await replyPosted.promise;
 
-    expect(asked).toEqual(["Can this ship?"]);
+    // The host sends the prompt as given, so the question goes out in the /btw wrapper.
+    expect(asked).toEqual([expect.stringMatching(/^<btw>\n[\s\S]*\nCan this ship\?\n<\/btw>$/)]);
     expect(fixture.deliveries).toEqual([]);
     expect(replies).toEqual([
       {
@@ -4847,7 +4829,7 @@ describe("envoy OMP extension", () => {
     // reply inbox belongs to the server's PubAck, so no receipt is published —
     // the frame goes straight to the ephemeral question and the Dispatch reply.
     expect(calls).toEqual([
-      "askEphemeral",
+      "runEphemeralTurn",
       "fetch /api/v1/messages/11111111-1111-4111-8111-111111111111/reply",
     ]);
   });
@@ -4879,11 +4861,14 @@ describe("envoy OMP extension", () => {
     // Query-string isolation gives this stateful extension its own NATS subscription.
     const { default: envoyExtension } = await import("./envoy.ts?targeted-comment-btw");
     const fixture = createPi();
-    envoyExtension({
-      ...fixture.pi,
-      askEphemeral: async () => ({ replyText: "Comment reply." }),
-    });
-    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_delivery"));
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.(
+      {},
+      {
+        ...sessionContext("ses_delivery"),
+        runEphemeralTurn: async () => ({ replyText: "Comment reply." }),
+      }
+    );
     const agent = natsState.controls.get("notifications.agent.ses_delivery");
     if (agent === undefined) throw new Error("agent subject was not subscribed");
 
@@ -5326,13 +5311,16 @@ describe("envoy OMP extension", () => {
     };
     const { default: envoyExtension } = await import("./envoy.ts?targeted-btw-rejection");
     const fixture = createPi();
-    envoyExtension({
-      ...fixture.pi,
-      askEphemeral: async () => {
-        throw new Error("No active model on session");
-      },
-    });
-    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_delivery"));
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.(
+      {},
+      {
+        ...sessionContext("ses_delivery"),
+        runEphemeralTurn: async () => {
+          throw new Error("No active model on session");
+        },
+      }
+    );
     const agent = natsState.controls.get("notifications.agent.ses_delivery");
     if (agent === undefined) throw new Error("agent subject was not subscribed");
 
@@ -5370,15 +5358,18 @@ describe("envoy OMP extension", () => {
     const { default: envoyExtension } = await import("./envoy.ts?targeted-btw-retry");
     const fixture = createPi();
     let sideTurns = 0;
-    envoyExtension({
-      ...fixture.pi,
-      askEphemeral: async () => {
-        sideTurns += 1;
-        if (sideTurns === 1) throw new Error("No API key for provider: openai");
-        return { replyText: `Answer ${sideTurns}` };
-      },
-    });
-    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_delivery"));
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.(
+      {},
+      {
+        ...sessionContext("ses_delivery"),
+        runEphemeralTurn: async () => {
+          sideTurns += 1;
+          if (sideTurns === 1) throw new Error("No API key for provider: openai");
+          return { replyText: `Answer ${sideTurns}` };
+        },
+      }
+    );
     const agent = natsState.controls.get("notifications.agent.ses_delivery");
     if (agent === undefined) throw new Error("agent subject was not subscribed");
     const send = async (dedupeKey: string): Promise<void> => {
@@ -5400,99 +5391,6 @@ describe("envoy OMP extension", () => {
       { actor, attempt: 1, body: "Answer 2" },
       { actor, attempt: 1, body: "Answer 3" },
     ]);
-  });
-
-  test("answers a targeted BTW through the session context's runEphemeralTurn in the /btw prompt", async () => {
-    process.env.DISPATCH_URL = "http://dispatch.test";
-    process.env.DISPATCH_TOKEN = "dispatch-token";
-    const registrations: unknown[] = [];
-    const replies: unknown[] = [];
-    const posted = Promise.withResolvers<void>();
-    globalThis.fetch = async (input, init) => {
-      const path = new URL(input.toString()).pathname;
-      if (path === "/v1/interests/subscribe") {
-        registrations.push(JSON.parse(init?.body?.toString() ?? "{}"));
-      }
-      if (path === "/api/v1/messages/11111111-1111-4111-8111-111111111111/reply") {
-        replies.push(JSON.parse(init?.body?.toString() ?? "{}"));
-        posted.resolve();
-      }
-      return responseWithRegistration(input, init, {});
-    };
-    const { default: envoyExtension } = await import("./envoy.ts?targeted-btw-context");
-    const fixture = createPi();
-    const prompts: string[] = [];
-    // An upstream host: the side turn is on the extension context, and `pi.askEphemeral` does
-    // not exist.
-    envoyExtension(fixture.pi);
-    await fixture.handlers.get("session_start")?.(
-      {},
-      {
-        ...sessionContext("ses_delivery"),
-        runEphemeralTurn: async ({ promptText }) => {
-          prompts.push(promptText);
-          return { replyText: "Yes, ship it." };
-        },
-      }
-    );
-    const agent = natsState.controls.get("notifications.agent.ses_delivery");
-    if (agent === undefined) throw new Error("agent subject was not subscribed");
-
-    agent.push(targetedDispatchEnvelope("btw", "targeted-context"));
-    await posted.promise;
-
-    expect(registrations).toMatchObject([{ capabilities: ["aside", "btw", "steer"] }]);
-    // The host sends the prompt as given, so the question goes out in the /btw wrapper the
-    // older `pi.askEphemeral` added itself.
-    expect(prompts).toEqual([
-      expect.stringMatching(/^<btw>\n[\s\S]*\nDelivery btw targeted-context\n<\/btw>$/),
-    ]);
-    expect(replies).toEqual([
-      { actor: { id: "ses_delivery", kind: "session" }, attempt: 1, body: "Yes, ship it." },
-    ]);
-    expect(fixture.deliveries).toEqual([]);
-  });
-
-  test("prefers the session context's runEphemeralTurn over pi.askEphemeral", async () => {
-    process.env.DISPATCH_URL = "http://dispatch.test";
-    process.env.DISPATCH_TOKEN = "dispatch-token";
-    const posted = Promise.withResolvers<void>();
-    globalThis.fetch = async (input, init) => {
-      if (
-        new URL(input.toString()).pathname ===
-        "/api/v1/messages/11111111-1111-4111-8111-111111111111/reply"
-      ) {
-        posted.resolve();
-      }
-      return responseWithRegistration(input, init, {});
-    };
-    const { default: envoyExtension } = await import("./envoy.ts?targeted-btw-precedence");
-    const fixture = createPi();
-    const calls: string[] = [];
-    envoyExtension({
-      ...fixture.pi,
-      askEphemeral: async () => {
-        calls.push("askEphemeral");
-        return { replyText: "from askEphemeral" };
-      },
-    });
-    await fixture.handlers.get("session_start")?.(
-      {},
-      {
-        ...sessionContext("ses_delivery"),
-        runEphemeralTurn: async () => {
-          calls.push("runEphemeralTurn");
-          return { replyText: "from runEphemeralTurn" };
-        },
-      }
-    );
-    const agent = natsState.controls.get("notifications.agent.ses_delivery");
-    if (agent === undefined) throw new Error("agent subject was not subscribed");
-
-    agent.push(targetedDispatchEnvelope("btw", "targeted-precedence"));
-    await posted.promise;
-
-    expect(calls).toEqual(["runEphemeralTurn"]);
   });
 
   test("refuses a BTW that drains in during session_shutdown without starting a side turn", async () => {

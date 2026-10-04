@@ -608,17 +608,18 @@ func (g pluginGate) verifyAgentsCapability(ctx context.Context) error {
 // verifySessionStorage is the session-storage probe (verifySessionStorageSetting, boot-probes.ts),
 // which only the image runs: it proves the Oh My Pi build carries the `session.storage`
 // setting, so a deployment that sets OMP_SESSION_STORAGE=sql gets its sessions in its database
-// rather than a build that ignores the variable and silently keeps them on files. PI_TIMING=x
-// makes an interactive start print its timings and exit just before the TUI would open, with
-// stdin on /dev/null there is no piped prompt, and every `--no-*` flag keeps the profile's
-// plugins, sessions, and tools out of a run that only needs the setting's resolver, which runs
-// before that exit: a carrying build dies on the nonsense value first, naming the variable (a
-// pass); a clean exit is a build that accepted it, so predates the setting (refused); any other
-// failure is the launch dying before the resolver ran (transient).
+// rather than a build that ignores the variable and silently keeps them on files. Oh My Pi starts
+// in RPC mode with stdin on /dev/null, where it resolves the setting before it reads a command and
+// then exits 0 on the closed stdin without calling a model (an interactive start without a
+// terminal on stdin is refused, exit 2, before the resolver runs), and every `--no-*` flag keeps
+// the profile's plugins, sessions, and tools out of a run that only needs the setting's resolver:
+// a carrying build dies on the nonsense value first, naming the variable (a pass); a clean exit is
+// a build that accepted it, so predates the setting (refused); any other failure is the launch
+// dying before the resolver ran (transient).
 func (g pluginGate) verifySessionStorage(ctx context.Context) error {
 	launch := omplaunch.WithPrefix(g.prefix, g.invocation)
-	script := "export " + sessionStorageVariable + "=" + sessionStorageProbeValue + " PI_TIMING=x; exec " + launch +
-		" --no-session --no-extensions --no-skills --no-rules --no-lsp --no-tools </dev/null >/dev/null"
+	script := "export " + sessionStorageVariable + "=" + sessionStorageProbeValue + "; exec " + launch +
+		" --mode rpc --no-session --no-extensions --no-skills --no-rules --no-lsp --no-tools </dev/null >/dev/null"
 	return bootprobe.Run(ctx, "OMP session storage setting", g.retry, g.log, func(ctx context.Context) bootprobe.Outcome {
 		r, err := g.run(ctx, script)
 		if err != nil {
