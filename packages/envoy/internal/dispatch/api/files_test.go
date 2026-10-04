@@ -107,6 +107,29 @@ func TestUploadsGoToTheFileStoreAndAreServedFromIt(t *testing.T) {
 	}
 }
 
+// A file version's bytes never change, so its download says a browser may keep it for a year
+// without asking again, privately since the route is authenticated; a document version is the
+// document's JSON read and says nothing of the kind.
+func TestAFileVersionIsCachedForeverAndADocumentVersionIsNot(t *testing.T) {
+	handler, _, _ := newTestServer(t, testServerOptions{files: filestest.NewMemory()})
+	issue := fileIssue(t, handler)
+	if upload := multipartRequest(t, handler, "/api/v1/issues/"+issue+"/artifacts", map[string]string{"name": "shot.png"}, "shot.png", "image/png", []byte("png bytes"), "alice"); upload.Code != http.StatusCreated {
+		t.Fatalf("upload: status=%d body=%s", upload.Code, upload.Body.String())
+	}
+	for target, want := range map[string]string{
+		"/api/v1/issues/" + issue + "/artifacts/shot-png/versions/1": "private, max-age=31536000, immutable",
+		"/api/v1/issues/" + issue + "/artifacts/spec/versions/1":     "",
+	} {
+		response := dispatchRequest(t, handler, http.MethodGet, target, nil, "alice")
+		if response.Code != http.StatusOK {
+			t.Fatalf("GET %s: status=%d body=%s", target, response.Code, response.Body.String())
+		}
+		if got := response.Header().Get("Cache-Control"); got != want {
+			t.Errorf("GET %s: Cache-Control %q, want %q", target, got, want)
+		}
+	}
+}
+
 func TestAnUploadTheStoreRefusesLeavesNoVersionBehind(t *testing.T) {
 	memory := filestest.NewMemory()
 	memory.SetFailure(errors.New("bucket unreachable"))
