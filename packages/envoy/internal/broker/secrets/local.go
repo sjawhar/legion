@@ -23,7 +23,10 @@ import (
 type Local struct {
 	mu      sync.Mutex
 	secrets map[string]LocalSecret
-	aliases map[string][]string
+	// current is the version AWSCURRENT labels, by secret name: absent for a secret with no value.
+	current  map[string]string
+	versions int
+	aliases  map[string][]string
 }
 
 // LocalSecret is one secret a Local holds.
@@ -35,7 +38,10 @@ type LocalSecret struct {
 	KmsKeyID string `json:"kms_key_id"`
 	// Tags are its tags.
 	Tags map[string]string `json:"tags"`
-	// Value is its value.
+	// Value is its current value. Empty is a secret created without a value: as in Secrets
+	// Manager, it has no version, so it is listed with no staging labels and reading it answers
+	// ResourceNotFoundException. Holding a value it did not hold gives it a new version labelled
+	// AWSCURRENT, as PutSecretValue does.
 	Value string `json:"value"`
 }
 
@@ -51,9 +57,9 @@ func LocalARN(name string) string {
 
 // NewLocal holds secrets.
 func NewLocal(secrets ...LocalSecret) *Local {
-	l := &Local{secrets: map[string]LocalSecret{}, aliases: map[string][]string{}}
+	l := &Local{secrets: map[string]LocalSecret{}, current: map[string]string{}, aliases: map[string][]string{}}
 	for _, s := range secrets {
-		l.secrets[s.Name] = s
+		l.put(s)
 	}
 	return l
 }
@@ -92,11 +98,24 @@ func LocalFromFile(path string) (*Local, error) {
 	return NewLocal(f.Secrets...), nil
 }
 
-// Put adds secret, or replaces the one of its name.
+// Put adds secret, or replaces the one of its name: a new value is a new AWSCURRENT version, and
+// no value leaves the secret with none.
 func (l *Local) Put(secret LocalSecret) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.put(secret)
+}
+
+func (l *Local) put(secret LocalSecret) {
+	old, held := l.secrets[secret.Name]
 	l.secrets[secret.Name] = secret
+	switch {
+	case secret.Value == "":
+		delete(l.current, secret.Name)
+	case !held || old.Value != secret.Value:
+		l.versions++
+		l.current[secret.Name] = fmt.Sprintf("local-version-%d", l.versions)
+	}
 }
 
 // Delete removes the secret named name.
@@ -104,6 +123,7 @@ func (l *Local) Delete(name string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	delete(l.secrets, name)
+	delete(l.current, name)
 }
 
 // Alias points the KMS alias alias ("alias/<name>") at the key whose ARN is keyARN.
@@ -114,7 +134,8 @@ func (l *Local) Alias(keyARN, alias string) {
 }
 
 // ListSecrets answers every secret in one page, filtered as Secrets Manager filters by name: each
-// name filter value matches a name it prefixes, case-sensitively.
+// name filter value matches a name it prefixes, case-sensitively. Each entry's
+// SecretVersionsToStages names its AWSCURRENT version, and is empty for a secret with no value.
 func (l *Local) ListSecrets(_ context.Context, in *secretsmanager.ListSecretsInput, _ ...func(*secretsmanager.Options)) (*secretsmanager.ListSecretsOutput, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -129,6 +150,9 @@ func (l *Local) ListSecrets(_ context.Context, in *secretsmanager.ListSecretsInp
 		}
 		for k, v := range s.Tags {
 			entry.Tags = append(entry.Tags, types.Tag{Key: aws.String(k), Value: aws.String(v)})
+		}
+		if version, ok := l.current[s.Name]; ok {
+			entry.SecretVersionsToStages = map[string][]string{version: {"AWSCURRENT"}}
 		}
 		out.SecretList = append(out.SecretList, entry)
 	}
@@ -151,8 +175,8 @@ func matchesNameFilters(name string, filters []types.Filter) bool {
 	return true
 }
 
-// GetSecretValue answers the value of the secret SecretId names, by name or by LocalARN, and
-// ResourceNotFoundException for one it does not hold.
+// GetSecretValue answers the AWSCURRENT value of the secret SecretId names, by name or by
+// LocalARN, and ResourceNotFoundException for one it does not hold or that has no value.
 func (l *Local) GetSecretValue(_ context.Context, in *secretsmanager.GetSecretValueInput, _ ...func(*secretsmanager.Options)) (*secretsmanager.GetSecretValueOutput, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -161,7 +185,11 @@ func (l *Local) GetSecretValue(_ context.Context, in *secretsmanager.GetSecretVa
 	if !ok {
 		return nil, &types.ResourceNotFoundException{Message: aws.String("Secrets Manager can't find the specified secret.")}
 	}
-	return &secretsmanager.GetSecretValueOutput{Name: aws.String(s.Name), ARN: aws.String(LocalARN(s.Name)), SecretString: aws.String(s.Value)}, nil
+	version, ok := l.current[s.Name]
+	if !ok {
+		return nil, &types.ResourceNotFoundException{Message: aws.String("Secrets Manager can't find the specified secret value for staging label: AWSCURRENT")}
+	}
+	return &secretsmanager.GetSecretValueOutput{Name: aws.String(s.Name), ARN: aws.String(LocalARN(s.Name)), SecretString: aws.String(s.Value), VersionId: aws.String(version), VersionStages: []string{"AWSCURRENT"}}, nil
 }
 
 // ListAliases answers, in one page, the aliases Alias pointed at the key KeyId names by its ARN.

@@ -47,7 +47,8 @@ const machineLoginPendingTTL = 15 * time.Minute
 // Sweeper expires it. Unchanged from the pre-v9 poller's own hardcoded value.
 const agentSecretPendingTTL = 12 * time.Hour
 
-// policyRefresh is how often the broker rereads every agent secret's owner and tier tags.
+// policyRefresh is how often the broker rereads the namespace: every agent secret's owner and tier
+// tags, its key, and whether it has a current value.
 const policyRefresh = 5 * time.Minute
 
 func main() {
@@ -61,7 +62,8 @@ func main() {
 	fatal(err)
 	// BROKER_FAKE_SECRETS_FILE: for local development only, a JSON file standing in for Secrets
 	// Manager, {"secrets": [{"name", "kms_key_id", "tags", "value"}]}: the broker lists the agent
-	// secrets and reads their values from it instead of from AWS.
+	// secrets and reads their values from it instead of from AWS. A secret with no "value" is one
+	// created without a value, which the broker refuses as no-current-value.
 	fakeSecrets := os.Getenv("BROKER_FAKE_SECRETS_FILE")
 	fatal(refusePortZeroPublicURLInProduction(cfg.PublicURL, fakeSecrets))
 	st, err := store.Open(ctx, cfg.DatabaseURL)
