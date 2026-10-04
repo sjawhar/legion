@@ -2,7 +2,6 @@ package routes
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -10,7 +9,6 @@ import (
 	"net/url"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
@@ -19,27 +17,30 @@ import (
 // devSignInOrigin is the loopback dashboard origin the e2e harness serves on.
 const devSignInOrigin = "http://127.0.0.1:8777"
 
-// newDevSignInRouter builds a cookie-identity router with the dev sign-in route mounted, alice
-// on the allowlist and the shared e2e bearer configured.
+// newDevSignInRouter builds a cookie-identity router with the dev sign-in route mounted and the
+// shared e2e bearer configured, as cmd/dispatch builds it: no membership to confirm.
 func newDevSignInRouter(t *testing.T, serverURL string, sessions *memorySessionStore) http.Handler {
 	t.Helper()
-	allowed := map[string]struct{}{"alice": {}}
+	handler, _ := newDevSignInRouterWithPeople(t, serverURL, sessions)
+	return handler
+}
+
+func newDevSignInRouterWithPeople(t *testing.T, serverURL string, sessions *memorySessionStore) (http.Handler, *memoryPeopleStore) {
+	t.Helper()
+	people := newMemoryPeople()
 	ctx, err := BuildAppContext(AppContextOptions{
 		SigningKey: "signing-key",
-		Users:      &memoryUserStore{users: map[string]*auth.User{}},
+		People:     people,
 		Sessions:   sessions,
-		Identity: identity.CookieIdentity{
-			SigningKey: "signing-key", AllowedLogins: allowed, Sessions: sessions,
-		},
-		AllowedLogins: allowed,
-		AgentToken:    "e2e-token",
-		ServerURL:     serverURL,
-		DevSignIn:     true,
+		Identity:   identity.CookieIdentity{SigningKey: "signing-key", Sessions: sessions},
+		AgentToken: "e2e-token",
+		ServerURL:  serverURL,
+		DevSignIn:  true,
 	})
 	if err != nil {
 		t.Fatalf("build context: %v", err)
 	}
-	return New(ctx)
+	return New(ctx), people
 }
 
 // devSignInRequest is a request as a browser on this machine sends it to the dashboard origin.
@@ -84,17 +85,17 @@ func whoamiAs(t *testing.T, handler http.Handler, cookie *http.Cookie) *httptest
 	return response
 }
 
-func TestDevSignInIssuesTheSessionCookieForAnAllowedLogin(t *testing.T) {
+func TestDevSignInIssuesTheSessionCookieAndRecordsThePerson(t *testing.T) {
 	var logs bytes.Buffer
 	previous := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
 	t.Cleanup(func() { slog.SetDefault(previous) })
 
 	// A generation other than the first proves the cookie carries the store's, not a constant.
-	sessions := &memorySessionStore{generations: map[string]int64{"alice": 3}}
-	handler := newDevSignInRouter(t, devSignInOrigin, sessions)
+	sessions := &memorySessionStore{generations: map[string]int64{"alice@d.example": 3}}
+	handler, people := newDevSignInRouterWithPeople(t, devSignInOrigin, sessions)
 	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, devSignInRequest(t, devSignInOrigin+"/auth/_dev/signin?login=alice&next=/issues/CORE-1"))
+	handler.ServeHTTP(response, devSignInRequest(t, devSignInOrigin+"/auth/_dev/signin?login=alice@d.example&next=/issues/CORE-1"))
 
 	if response.Code != http.StatusFound || response.Header().Get("Location") != "/issues/CORE-1" {
 		t.Fatalf("sign-in: status %d Location %q body=%s, want 302 to /issues/CORE-1", response.Code, response.Header().Get("Location"), response.Body.String())
@@ -104,25 +105,27 @@ func TestDevSignInIssuesTheSessionCookieForAnAllowedLogin(t *testing.T) {
 		t.Fatalf("sign-in set no dsession cookie: %v", response.Header().Values("Set-Cookie"))
 	}
 	session, ok := auth.VerifySession(cookie.Value, "signing-key")
-	if !ok || session.Login != "alice" || session.Generation != 3 {
-		t.Fatalf("cookie session = %#v valid=%t, want alice at generation 3", session, ok)
+	if !ok || session.Login != "alice@d.example" || session.Generation != 3 {
+		t.Fatalf("cookie session = %#v valid=%t, want alice@d.example at generation 3", session, ok)
 	}
 	whoami := whoamiAs(t, handler, cookie)
-	if whoami.Code != http.StatusOK || strings.TrimSpace(whoami.Body.String()) != `{"kind":"user","login":"alice"}` {
+	if whoami.Code != http.StatusOK || strings.TrimSpace(whoami.Body.String()) != `{"kind":"user","login":"alice@d.example"}` {
 		t.Fatalf("whoami with the minted cookie: %d %s", whoami.Code, whoami.Body.String())
 	}
+	if _, found := people.get("alice@d.example"); !found {
+		t.Fatal("the dev sign-in did not record the person, so they could not be assigned")
+	}
 	logged := logs.String()
-	if !strings.Contains(logged, "level=WARN") || !strings.Contains(logged, "login=alice") || !strings.Contains(logged, "remote_addr=127.0.0.1:40000") {
-		t.Fatalf("the mint was not logged at WARN with its login and peer: %q", logged)
+	if !strings.Contains(logged, "level=WARN") || !strings.Contains(logged, "email=alice@d.example") || !strings.Contains(logged, "remote_addr=127.0.0.1:40000") {
+		t.Fatalf("the mint was not logged at WARN with its person and peer: %q", logged)
 	}
 }
 
-// The callback's own rule: the allowlist is checked lowercase and GitHub's spelling is minted,
-// which the e2e casing specs depend on.
-func TestDevSignInMintsTheSpellingRequested(t *testing.T) {
+// The dev sign-in names a person as the production identities do: trimmed and lowercased.
+func TestDevSignInMintsTheLowercasedEmail(t *testing.T) {
 	handler := newDevSignInRouter(t, devSignInOrigin, &memorySessionStore{generations: map[string]int64{}})
 	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, devSignInRequest(t, devSignInOrigin+"/auth/_dev/signin?login=Alice"))
+	handler.ServeHTTP(response, devSignInRequest(t, devSignInOrigin+"/auth/_dev/signin?login="+url.QueryEscape(" Alice@D.example ")))
 	if response.Code != http.StatusFound {
 		t.Fatalf("sign-in as Alice: %d %s", response.Code, response.Body.String())
 	}
@@ -131,24 +134,8 @@ func TestDevSignInMintsTheSpellingRequested(t *testing.T) {
 		t.Fatal("sign-in as Alice set no dsession cookie")
 	}
 	whoami := whoamiAs(t, handler, cookie)
-	if whoami.Code != http.StatusOK || strings.TrimSpace(whoami.Body.String()) != `{"kind":"user","login":"Alice"}` {
-		t.Fatalf("whoami: %d %s, want the spelling requested", whoami.Code, whoami.Body.String())
-	}
-}
-
-func TestDevSignInRefusesAnUnlistedLogin(t *testing.T) {
-	sessions := &memorySessionStore{generations: map[string]int64{}}
-	handler := newDevSignInRouter(t, devSignInOrigin, sessions)
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, devSignInRequest(t, devSignInOrigin+"/auth/_dev/signin?login=mallory"))
-	if response.Code != http.StatusForbidden || errorCodeOf(t, response) != "LOGIN_NOT_ALLOWED" {
-		t.Fatalf("unlisted login: %d %s, want 403 LOGIN_NOT_ALLOWED", response.Code, response.Body.String())
-	}
-	if setCookie := response.Header().Values("Set-Cookie"); len(setCookie) != 0 {
-		t.Fatalf("unlisted login got Set-Cookie %v", setCookie)
-	}
-	if _, found := sessions.generations["mallory"]; found {
-		t.Fatal("unlisted login got a session row")
+	if whoami.Code != http.StatusOK || strings.TrimSpace(whoami.Body.String()) != `{"kind":"user","login":"alice@d.example"}` {
+		t.Fatalf("whoami: %d %s, want the lowercased email", whoami.Code, whoami.Body.String())
 	}
 }
 
@@ -313,17 +300,13 @@ func TestDevSignInRouterRefusesAnotherHost(t *testing.T) {
 }
 
 func TestDevSignInIsNotMountedByDefault(t *testing.T) {
-	allowed := map[string]struct{}{"alice": {}}
 	sessions := &memorySessionStore{generations: map[string]int64{}}
 	ctx, err := BuildAppContext(AppContextOptions{
 		SigningKey: "signing-key",
-		Users:      &memoryUserStore{users: map[string]*auth.User{}},
+		People:     newMemoryPeople(),
 		Sessions:   sessions,
-		Identity: identity.CookieIdentity{
-			SigningKey: "signing-key", AllowedLogins: allowed, Sessions: sessions,
-		},
-		AllowedLogins: allowed,
-		ServerURL:     devSignInOrigin,
+		Identity:   identity.CookieIdentity{SigningKey: "signing-key", Sessions: sessions},
+		ServerURL:  devSignInOrigin,
 	})
 	if err != nil {
 		t.Fatalf("build context: %v", err)
@@ -350,7 +333,7 @@ func TestDevSignInIsNotMountedByDefault(t *testing.T) {
 func TestBuildAppContextDevSignInNeedsSessions(t *testing.T) {
 	_, err := BuildAppContext(AppContextOptions{
 		SigningKey: "signing-key",
-		Users:      &memoryUserStore{users: map[string]*auth.User{}},
+		People:     newMemoryPeople(),
 		Identity:   identity.HeaderIdentity{Header: "X-Dispatch-User"},
 		ServerURL:  devSignInOrigin,
 		DevSignIn:  true,
@@ -364,7 +347,7 @@ func TestBuildAppContextDevSignInRefusesAPublicOrigin(t *testing.T) {
 	build := func(serverURL string) error {
 		_, err := BuildAppContext(AppContextOptions{
 			SigningKey: "signing-key",
-			Users:      &memoryUserStore{users: map[string]*auth.User{}},
+			People:     newMemoryPeople(),
 			Sessions:   &memorySessionStore{generations: map[string]int64{}},
 			Identity:   identity.HeaderIdentity{Header: "X-Dispatch-User"},
 			ServerURL:  serverURL,
@@ -397,75 +380,5 @@ func TestBuildAppContextDevSignInRefusesAPublicOrigin(t *testing.T) {
 		if got, err := DevSignInOrigin(serverURL); err != nil || got != host {
 			t.Errorf("DevSignInOrigin(%q) = %q, %v; want %q", serverURL, got, err, host)
 		}
-	}
-}
-
-// readCountingUserStore counts reads of the stored GitHub token pairs.
-type readCountingUserStore struct {
-	*memoryUserStore
-	reads int
-}
-
-func (s *readCountingUserStore) Read(ctx context.Context, login string) (*auth.User, error) {
-	s.reads++
-	return s.memoryUserStore.Read(ctx, login)
-}
-
-// Any loopback client can mint any allowlisted login on a dev sign-in server, so a token pair a
-// GitHub sign-in stored, or one in a shared database, must never reach the GitHub proxy there.
-func TestDevSignInNeverUsesAStoredGitHubToken(t *testing.T) {
-	build := func(t *testing.T, devSignIn bool) (http.Handler, *readCountingUserStore) {
-		t.Helper()
-		users := &readCountingUserStore{memoryUserStore: &memoryUserStore{users: map[string]*auth.User{
-			"alice": {Login: "alice", Tokens: auth.Tokens{AccessToken: "access", AccessExpiresAt: time.Now().Add(time.Hour).UnixMilli()}},
-		}}}
-		allowed := map[string]struct{}{"alice": {}}
-		sessions := &memorySessionStore{generations: map[string]int64{"alice": 0}}
-		ctx, err := BuildAppContext(AppContextOptions{
-			SigningKey: "signing-key",
-			Users:      users,
-			Sessions:   sessions,
-			Identity: identity.CookieIdentity{
-				SigningKey: "signing-key", AllowedLogins: allowed, Sessions: sessions,
-			},
-			AllowedLogins: allowed,
-			ServerURL:     devSignInOrigin,
-			App:           &auth.AppConfig{ClientID: "client-id", ClientSecret: "client-secret"},
-			DevSignIn:     devSignIn,
-		})
-		if err != nil {
-			t.Fatalf("build context: %v", err)
-		}
-		ctx.HTTPClient = callbackHTTPClient{}
-		return New(ctx), users
-	}
-	proxy := func(handler http.Handler, cookie *http.Cookie) *httptest.ResponseRecorder {
-		request := devSignInRequest(t, devSignInOrigin+"/api/github/rest/user")
-		request.AddCookie(cookie)
-		response := httptest.NewRecorder()
-		handler.ServeHTTP(response, request)
-		return response
-	}
-
-	// Without the flag, alice's stored pair is what the proxy uses.
-	handler, users := build(t, false)
-	cookie, err := http.ParseSetCookie(auth.IssueSessionCookie("alice", 0, "signing-key", true))
-	if err != nil {
-		t.Fatalf("parse session cookie: %v", err)
-	}
-	if response := proxy(handler, cookie); response.Code != http.StatusOK || users.reads != 1 {
-		t.Fatalf("proxy without the flag: %d %s after %d reads, want 200 through the stored token", response.Code, response.Body.String(), users.reads)
-	}
-
-	// With it, the same row is never read.
-	handler, users = build(t, true)
-	signIn := httptest.NewRecorder()
-	handler.ServeHTTP(signIn, devSignInRequest(t, devSignInOrigin+"/auth/_dev/signin?login=alice"))
-	if cookie = sessionCookieOf(signIn); cookie == nil {
-		t.Fatalf("sign-in set no cookie: %d %s", signIn.Code, signIn.Body.String())
-	}
-	response := proxy(handler, cookie)
-	if response.Code != http.StatusServiceUnavailable || errorCodeOf(t, response) != "GITHUB_TOKEN_UNAVAILABLE" || users.reads != 0 {
-		t.Fatalf("proxy with the flag: %d %s after %d reads, want 503 GITHUB_TOKEN_UNAVAILABLE and no read", response.Code, response.Body.String(), users.reads)
 	}
 }

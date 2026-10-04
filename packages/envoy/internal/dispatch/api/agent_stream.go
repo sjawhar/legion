@@ -27,7 +27,6 @@ const (
 	// How often an attached viewer re-arms the session. Well inside the session's own watch
 	// window (AGENT_STREAM_WATCH_TTL_MS), so a live viewer never lets it lapse.
 	agentStreamWatchInterval = 10 * time.Second
-	agentStreamHeartbeat     = 15 * time.Second
 	// Frames held for a browser that is reading slower than the session is producing. Each frame
 	// is a whole-message snapshot, so when this fills the oldest is dropped: the newest snapshot
 	// of a message is the one that renders correctly, and an older one it supersedes is worth
@@ -129,7 +128,7 @@ func (s *server) streamAgentConversation(w http.ResponseWriter, r *http.Request)
 
 	watch := time.NewTicker(agentStreamWatchInterval)
 	defer watch.Stop()
-	heartbeat := time.NewTicker(agentStreamHeartbeat)
+	heartbeat := time.NewTicker(s.deps.StreamHeartbeat)
 	defer heartbeat.Stop()
 	shutdown := s.lifetime().Done()
 	for {
@@ -175,6 +174,10 @@ func (s *server) streamAgentConversation(w http.ResponseWriter, r *http.Request)
 			}
 			flusher.Flush()
 		case <-heartbeat.C:
+			// As the event stream does: a viewer whose session has ended stops watching.
+			if _, _, err := s.optionalActor(r); err != nil {
+				return
+			}
 			if _, err := fmt.Fprint(w, ": heartbeat\n\n"); err != nil {
 				return
 			}

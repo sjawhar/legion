@@ -109,7 +109,7 @@ disabled or unregistered plugin has a manifest and still fails the load probe.
 - The image ships both native variants (`baseline` and `modern`, ~180 MB each of a 373 MB image);
   OMP loads one at runtime. Whether the fork can be told to fetch only the variant the CPU needs is
   a question for the OMP fork, not for the Dockerfile.
-- `workflow_dispatch` accepts a `cli_version` input and, on `main`, tags the image with it without
-  checking that `cli` released that version in the same run. The `workflow_call` path from
+- `workflow_dispatch` accepts a `legion_version` input and, on `main`, tags the image with it without
+  checking that `legion` released that version in the same run. The `workflow_call` path from
   `release.yaml` is the only one that can guarantee that; treat the dispatch input as an
   operator-only override and leave it empty unless re-tagging an already-released version.

@@ -157,7 +157,7 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 	// thus queryable, in the narrow window between Subscribe and a catch-up query,
 	// but not yet drained from it).
 
-	heartbeat := time.NewTicker(15 * time.Second)
+	heartbeat := time.NewTicker(s.deps.StreamHeartbeat)
 	defer heartbeat.Stop()
 	shutdown := s.lifetime().Done()
 	for {
@@ -181,6 +181,11 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 			}
 			flusher.Flush()
 		case <-heartbeat.C:
+			// The caller is resolved again on every heartbeat, so a stream outlives its session
+			// (a logout, a membership the sign-in pool no longer confirms) by one beat at most.
+			if _, _, err := s.optionalActor(r); err != nil {
+				return
+			}
 			if _, err := fmt.Fprint(w, ": heartbeat\n\n"); err != nil {
 				return
 			}
