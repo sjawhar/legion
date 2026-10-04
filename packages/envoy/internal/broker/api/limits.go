@@ -28,6 +28,10 @@ var DefaultLauncherLimits = LauncherLimits{
 	PerOperator: ratelimit.Limit{Every: time.Minute, Burst: 5},
 }
 
+// DefaultRereadLimit bounds POST /v1/secrets/{name}/reread per source address: a person's write
+// burst passes; a flood cannot make the broker hammer DescribeSecret.
+var DefaultRereadLimit = ratelimit.Limit{Every: 2 * time.Second, Burst: 30}
+
 type launcherLimiter struct {
 	perAddress, perOperator *ratelimit.Keyed
 	retryAfter              time.Duration
@@ -46,17 +50,18 @@ func newLauncherLimiter(limits LauncherLimits, trustedProxyHeader string) *launc
 	}
 }
 
-// clientAddress resolves the address perAddress keys on. With no trusted proxy header configured
-// (the default, e.g. local/dev use or a broker reached directly) it is r.RemoteAddr exactly as
-// before. Behind a reverse proxy or load balancer (this broker's documented deployment shape:
-// "the shared internal ALB"), r.RemoteAddr as the broker sees it is the SAME address for every
-// real caller — the proxy's — which would otherwise collapse every legitimate operator into one
-// shared bucket a single caller can exhaust. Configuring the proxy's own forwarding header (e.g.
-// X-Forwarded-For) lets this read the last entry — the hop the trusted proxy itself appended —
-// rather than an earlier, client-supplied entry a caller could forge to pick its own bucket.
-func (l *launcherLimiter) clientAddress(r *http.Request) string {
-	if l.trustedProxyHeader != "" {
-		if raw := r.Header.Get(l.trustedProxyHeader); raw != "" {
+// clientAddress resolves the source address a per-address bucket keys on: the launcher limiter's
+// and the reread limiter's. With no trusted proxy header configured (the default, e.g. local/dev
+// use or a broker reached directly) it is r.RemoteAddr's host. Behind a reverse proxy or load
+// balancer (this broker's documented deployment shape: "the shared internal ALB"), r.RemoteAddr
+// as the broker sees it is the SAME address for every real caller — the proxy's — which would
+// otherwise collapse every legitimate caller into one shared bucket a single caller can exhaust.
+// Configuring the proxy's own forwarding header (e.g. X-Forwarded-For) lets this read the last
+// entry — the hop the trusted proxy itself appended — rather than an earlier, client-supplied
+// entry a caller could forge to pick its own bucket.
+func clientAddress(r *http.Request, trustedProxyHeader string) string {
+	if trustedProxyHeader != "" {
+		if raw := r.Header.Get(trustedProxyHeader); raw != "" {
 			hops := strings.Split(raw, ",")
 			if candidate := strings.TrimSpace(hops[len(hops)-1]); candidate != "" {
 				return candidate
@@ -80,11 +85,22 @@ func (l *launcherLimiter) clientAddress(r *http.Request) string {
 // route.
 func (l *launcherLimiter) refuse(w http.ResponseWriter, r *http.Request, operator string) bool {
 	now := time.Now()
-	address := l.clientAddress(r)
+	address := clientAddress(r, l.trustedProxyHeader)
 	if l.perAddress.AllowAt(address, now) && l.perOperator.AllowAt(operator, now) {
 		return false
 	}
 	w.Header().Set("Retry-After", strconv.Itoa(int(l.retryAfter.Seconds())))
 	writeError(w, http.StatusTooManyRequests, "RATE_LIMITED", "too many launcher credential requests; try again later")
+	return true
+}
+
+// refuseReread writes 429 RATE_LIMITED and reports true when r's source address has no reread
+// left in its bucket.
+func (s *server) refuseReread(w http.ResponseWriter, r *http.Request) bool {
+	if s.rereadLimiter.Allow(clientAddress(r, s.deps.TrustedProxyHeader)) {
+		return false
+	}
+	w.Header().Set("Retry-After", strconv.Itoa(int(s.rereadEvery.Seconds())))
+	writeError(w, http.StatusTooManyRequests, "RATE_LIMITED", "too many secret rereads; try again later")
 	return true
 }

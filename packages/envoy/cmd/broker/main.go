@@ -159,7 +159,8 @@ func main() {
 	mux := http.NewServeMux()
 	api.Register(mux, api.Deps{PublicURL: cfg.PublicURL, UIToken: cfg.UIToken,
 		Enroll: enr, Machine: reqMachine, MachineLogin: mach,
-		Proof:              &proof.Verifier{Skew: time.Duration(cfg.ProofSkewSeconds) * time.Second, Lookup: enr.Lookup, LookupLauncher: enr.AuthenticateLauncher, Replay: enr.Replay},
+		Proof:  &proof.Verifier{Skew: time.Duration(cfg.ProofSkewSeconds) * time.Second, Lookup: enr.Lookup, LookupLauncher: enr.AuthenticateLauncher, Replay: enr.Replay},
+		Policy: current, SecretsPrefix: cfg.SecretsPrefix, SecretsKMSKeyARN: cfg.SecretsKMSKeyARN,
 		TrustedProxyHeader: cfg.TrustedProxyHeader})
 	srv := &http.Server{
 		Handler:           withRequestDeadline(mux, requestDeadline),

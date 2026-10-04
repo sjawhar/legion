@@ -60,6 +60,13 @@ var ErrUnknownSecret = errors.New("no agent secret has this name")
 // RefusedMessage.
 const ReasonAbsent = "absent"
 
+// KeyARNParts answers the region and account of a key ARN ValidKeyARN accepts,
+// arn:aws:kms:<region>:<account>:key/<key id>: the region and account every agent secret lives in.
+func KeyARNParts(arn string) (region, account string) {
+	parts := strings.Split(arn, ":")
+	return parts[3], parts[4]
+}
+
 type ownerKind int
 
 const (

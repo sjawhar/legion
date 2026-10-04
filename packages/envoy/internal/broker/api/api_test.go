@@ -46,11 +46,13 @@ const (
 
 // testServer is a live broker HTTP server (real handlers, real Postgres) plus a direct handle to
 // its store — needed to seed fixtures (an enrollment, a launcher credential) the API itself has
-// no route to create directly — and the local OIDC issuer its pod verifier trusts, which mints the
+// no route to create directly — the secrets.Local standing in for Secrets Manager, which a test
+// writes to as a person would, and the local OIDC issuer its pod verifier trusts, which mints the
 // projected service-account tokens a pod enrollment presents.
 type testServer struct {
 	URL       string
 	Store     *store.Store
+	Secrets   *secrets.Local
 	podIssuer *oidctest.Issuer
 	podKey    *oidctest.Key
 }
@@ -65,6 +67,13 @@ const podAudience = "legion-broker-pod"
 // BROKER_K8S_OIDC_ISSUER is set, and mounts api.Register on an httptest.Server so every proof's
 // htu and every request object's aud have one real, consistent PublicURL to check against.
 func newTestServer(t *testing.T) *testServer {
+	t.Helper()
+	return newTestServerWith(t, func(*api.Deps) {})
+}
+
+// newTestServerWith is newTestServer with adjust applied to the api.Deps it registers, for a test
+// that needs one dependency wired otherwise, such as a tighter rate limit.
+func newTestServerWith(t *testing.T, adjust func(*api.Deps)) *testServer {
 	t.Helper()
 	st := storetest.Open(t)
 
@@ -101,13 +110,16 @@ func newTestServer(t *testing.T) *testServer {
 		Replay: enr.Replay,
 	}
 
-	api.Register(mux, api.Deps{
+	deps := api.Deps{
 		PublicURL: srv.URL, UIToken: testUIToken,
 		Enroll: enr, Machine: reqMachine, MachineLogin: mach,
-		Proof: &proof.Verifier{Skew: time.Minute, Lookup: enr.Lookup, LookupLauncher: enr.AuthenticateLauncher, Replay: enr.Replay},
-	})
+		Proof:  &proof.Verifier{Skew: time.Minute, Lookup: enr.Lookup, LookupLauncher: enr.AuthenticateLauncher, Replay: enr.Replay},
+		Policy: cur, SecretsPrefix: policytest.Prefix, SecretsKMSKeyARN: policytest.KeyARN,
+	}
+	adjust(&deps)
+	api.Register(mux, deps)
 
-	return &testServer{URL: srv.URL, Store: st, podIssuer: issuer, podKey: podKey}
+	return &testServer{URL: srv.URL, Store: st, Secrets: local, podIssuer: issuer, podKey: podKey}
 }
 
 // newSessionEnrollment inserts a live box enrollment (and its backing launcher_credentials row)

@@ -1887,7 +1887,10 @@ reads one name with `DescribeSecret` under the same rules and the same refusal l
 their read to their store, and each full reload that begins (its clock read before its listing is
 fetched) within five minutes of a name's reread (`listLag`, how far AWS documents `ListSecrets` may
 lag) reads that name again alone, so a lagging listing neither drops a secret the reread served nor
-brings back one it found gone.
+brings back one it found gone. The public `POST /v1/secrets/{name}/reread` (`rereadSecret`, which
+the CLI calls after every write) is `RefreshOne` over HTTP, answering `{name, served, reason}`, and
+the public `GET /v1/settings` answers the prefix, the key ARN and its region and account
+(`policy.KeyARNParts`).
 
 The client finds its session in `AGENT_SECRETS_KEY_DIR` (a box's or pod's `key.pem` and
 `enrollment`) or `AGENT_SECRETS_HELPER_SOCK` (a host session's helper), beside `AGENT_SECRETS_URL`.
@@ -1992,12 +1995,13 @@ set, and not itself required at startup), `BROKER_LEASE_SECONDS` (default 900, m
 (default 604800, max 2592000 — a minted launcher credential's own lifetime; past it the holder
 re-runs login, new key, new code, new human approval), `BROKER_SWEEP_SECONDS` (default 5, max 60 —
 `requests.Sweeper`'s tick interval, the poller's replacement), and `BROKER_TRUSTED_PROXY_HEADER`
-(optional; names a request header, e.g. `X-Forwarded-For`, the launcher-credential rate limiter's
-per-address bucket trusts for the caller's real address — its last comma-separated entry, the hop
-your own reverse proxy appended, never an earlier client-supplied one. Unset, the default, keys on
+(optional; names a request header, e.g. `X-Forwarded-For`, the launcher-credential and reread rate
+limiters' per-address buckets trust for the caller's real address (`clientAddress`) — its last
+comma-separated entry, the hop your own reverse proxy appended, never an earlier client-supplied
+one. Unset, the default, keys on
 `r.RemoteAddr` directly, correct only when the broker is reached without a proxy in front of it;
 behind one — this broker's documented production shape, the shared internal ALB — `r.RemoteAddr`
-is the proxy's own address for every caller, collapsing the per-address bucket into one shared by
+is the proxy's own address for every caller, collapsing each per-address bucket into one shared by
 everyone unless this variable is set). `BROKER_UI_TOKEN` and `BROKER_ENVOY_TOKEN` follow the
 broker's `_FILE` secret-loading convention: `<NAME>_FILE`, when set, names a file whose trimmed
 contents win over a bare `<NAME>` — with both set, the file wins silently, nothing is refused — and
@@ -2039,7 +2043,7 @@ literal that is not
 a documented `exit*` constant or another such function's result. The CLI reference is the built
 binaries' own `--help`, so every form must answer `-h` with exit 0.
 
-`internal/broker/api/routes_table.go`'s `routes()` is the one list of the broker's 21 HTTP routes —
+`internal/broker/api/routes_table.go`'s `routes()` is the one list of the broker's 23 HTTP routes —
 a new route is a new row there, never a bare `mux.HandleFunc` — and its own comment says the
 contract for every row is the broker's design overview. Each row's handler is
 wrapped by the adapter for its authentication (`public`, `launcherAuth`, `sessionAuth`, `uiAuth`),
@@ -2053,7 +2057,9 @@ credential is a 401 (`LAUNCHER_INVALID`, `PROOF_INVALID`, or `UI_INVALID`); a st
 answer while authenticating is a 503 naming it. Every 500 is logged with its cause
 (`writeInternal`), every JSON body is capped at 1 MiB with unknown fields refused (`readJSON`),
 non-UUID path ids are 400 naming the kind (`pathUUID`), a content-addressed record id is checked
-against its own lowercase-hex-sha256 shape rather than a UUID's (`pathRecordID`), and the
+against its own lowercase-hex-sha256 shape rather than a UUID's (`pathRecordID`), the
+unauthenticated `POST /v1/secrets/{name}/reread` is rate limited per source address
+(`DefaultRereadLimit`, `429 RATE_LIMITED` with `Retry-After`), and the
 unauthenticated `POST /v1/launcher-credentials` is rate limited per source address (see
 `BROKER_TRUSTED_PROXY_HEADER` above) and per named operator — the per-operator bucket keys on the
 request body's own `operator` field, so an attacker naming a specific victim operator repeatedly

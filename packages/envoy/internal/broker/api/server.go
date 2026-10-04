@@ -17,7 +17,9 @@ import (
 
 	"github.com/sjawhar/envoy/internal/broker/enroll"
 	"github.com/sjawhar/envoy/internal/broker/machine"
+	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/proof"
+	"github.com/sjawhar/envoy/internal/broker/ratelimit"
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/requests"
 )
@@ -31,18 +33,33 @@ type Deps struct {
 	Machine      *requests.Machine
 	MachineLogin *machine.Service
 	Proof        *proof.Verifier
+	// Policy is the live agent-secret policy, which POST /v1/secrets/{name}/reread rereads one
+	// name of (policy.Current.RefreshOne).
+	Policy *policy.Current
+	// SecretsPrefix is BROKER_SECRETS_PREFIX, the namespace GET /v1/settings answers.
+	SecretsPrefix string
+	// SecretsKMSKeyARN is BROKER_SECRETS_KMS_KEY_ARN, the agent-secrets key GET /v1/settings
+	// answers with its region and account.
+	SecretsKMSKeyARN string
 	// LauncherLimits bounds POST /v1/launcher-credentials; nil means DefaultLauncherLimits.
 	LauncherLimits *LauncherLimits
-	// TrustedProxyHeader names a request header (e.g. "X-Forwarded-For") the launcher-credential
-	// rate limiter's per-address bucket trusts for the real client address; empty means keying on
-	// r.RemoteAddr, correct only when the broker is reached directly rather than through a
-	// reverse proxy or load balancer. See limits.go's clientAddress.
+	// RereadLimit bounds POST /v1/secrets/{name}/reread per source address; nil means
+	// DefaultRereadLimit.
+	RereadLimit *ratelimit.Limit
+	// TrustedProxyHeader names a request header (e.g. "X-Forwarded-For") the rate limiters'
+	// per-address buckets trust for the real client address; empty means keying on r.RemoteAddr,
+	// correct only when the broker is reached directly rather than through a reverse proxy or load
+	// balancer. See limits.go's clientAddress.
 	TrustedProxyHeader string
 }
 
 type server struct {
 	deps            Deps
 	launcherLimiter *launcherLimiter
+	// rereadLimiter is RereadLimit applied per source address (clientAddress), and rereadEvery
+	// its refill interval, the Retry-After a refusal names.
+	rereadLimiter *ratelimit.Keyed
+	rereadEvery   time.Duration
 }
 
 func Register(mux *http.ServeMux, deps Deps) {
@@ -50,7 +67,16 @@ func Register(mux *http.ServeMux, deps Deps) {
 	if deps.LauncherLimits != nil {
 		limits = *deps.LauncherLimits
 	}
-	s := &server{deps: deps, launcherLimiter: newLauncherLimiter(limits, deps.TrustedProxyHeader)}
+	reread := DefaultRereadLimit
+	if deps.RereadLimit != nil {
+		reread = *deps.RereadLimit
+	}
+	s := &server{
+		deps:            deps,
+		launcherLimiter: newLauncherLimiter(limits, deps.TrustedProxyHeader),
+		rereadLimiter:   ratelimit.NewKeyed(reread),
+		rereadEvery:     reread.Every,
+	}
 	for _, route := range routes() {
 		mux.HandleFunc(route.Method+" "+route.Pattern, func(w http.ResponseWriter, r *http.Request) {
 			who, ok := s.authenticate(w, r, route.Handler.auth)

@@ -57,6 +57,9 @@ type Rig struct {
 	// OperatorFile field.
 	OperatorFile string
 	Store        *store.Store
+	// Secrets is the secrets.Local standing in for Secrets Manager, which a test writes to as a
+	// person would, before asking the broker to reread a secret.
+	Secrets *secrets.Local
 	// podIssuer and podKey back MintPodToken: a local OIDC issuer this Rig's own pod verifier
 	// (wired into its enroll.Service by NewRig) trusts, and the signing key MintPodToken mints
 	// under.
@@ -127,7 +130,8 @@ func NewRig(t *testing.T, options ...Option) *Rig {
 	api.Register(mux, api.Deps{
 		PublicURL: srv.URL, UIToken: uiToken,
 		Enroll: enr, Machine: reqMachine, MachineLogin: mach,
-		Proof: &proof.Verifier{Skew: time.Minute, Lookup: enr.Lookup, LookupLauncher: enr.AuthenticateLauncher, Replay: enr.Replay},
+		Proof:  &proof.Verifier{Skew: time.Minute, Lookup: enr.Lookup, LookupLauncher: enr.AuthenticateLauncher, Replay: enr.Replay},
+		Policy: cur, SecretsPrefix: policytest.Prefix, SecretsKMSKeyARN: policytest.KeyARN,
 	})
 
 	operatorFile := filepath.Join(t.TempDir(), "operator")
@@ -138,6 +142,7 @@ func NewRig(t *testing.T, options ...Option) *Rig {
 	return &Rig{
 		URL: srv.URL, Operator: operator, OperatorFile: operatorFile,
 		Store:     st,
+		Secrets:   local,
 		podIssuer: issuer, podKey: podKey,
 	}
 }
