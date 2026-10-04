@@ -44,7 +44,16 @@ const (
 	// ReasonNotOnAgentSecretsKey: the secret is encrypted with a key other than the agent-secrets
 	// key, the AWS-managed key included.
 	ReasonNotOnAgentSecretsKey = "not-on-agent-secrets-key"
+	// ReasonNoCurrentValue: no version of the secret carries the AWSCURRENT staging label, the one
+	// GetSecretValue reads: it was created without a value, or its only versions are pending or
+	// previous. A grant of it would release nothing, so it is refused before anyone approves it.
+	// Checked after every other reason, which each name something its owner must fix before a
+	// value would make it servable.
+	ReasonNoCurrentValue = "no-current-value"
 )
+
+// currentStage is the staging label GetSecretValue reads when it names no version.
+const currentStage = "AWSCURRENT"
 
 // slugPattern is a secret's name under the prefix: the lowercase form of an environment-variable
 // name, with each underscore a hyphen.
@@ -62,9 +71,9 @@ func ValidKeyARN(arn string) bool {
 }
 
 // Loader reads the policy from Secrets Manager: every secret whose name starts with Prefix, with
-// its owner and tier tags and the key it is encrypted with.
+// its owner and tier tags, the key it is encrypted with, and whether it has a current value.
 type Loader struct {
-	// Secrets lists the namespace's secrets with their tags and key.
+	// Secrets lists the namespace's secrets with their tags, key and version stages.
 	Secrets secretsmanager.ListSecretsAPIClient
 	// Aliases resolves the KMS aliases that point at KeyARN, read only when a secret names its key
 	// by an alias: Secrets Manager reports a secret's key in whatever form it was set with.
@@ -162,7 +171,21 @@ func (l Loader) secret(ctx context.Context, slug string, e smtypes.SecretListEnt
 	if !onKey {
 		return Secret{}, ReasonNotOnAgentSecretsKey, nil
 	}
+	if !hasCurrentVersion(e.SecretVersionsToStages) {
+		return Secret{}, ReasonNoCurrentValue, nil
+	}
 	return s, "", nil
+}
+
+// hasCurrentVersion reports whether a secret's listing, its SecretVersionsToStages, names a
+// version labelled AWSCURRENT.
+func hasCurrentVersion(versionsToStages map[string][]string) bool {
+	for _, stages := range versionsToStages {
+		if slices.Contains(stages, currentStage) {
+			return true
+		}
+	}
+	return false
 }
 
 // keyIdentifiers are the forms a secret's KmsKeyId may name the agent-secrets key in: its ARN, its
