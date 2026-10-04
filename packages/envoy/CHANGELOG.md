@@ -84,6 +84,17 @@
 
 ### Changed
 
+- Event-log payloads served by `GET /api/v1/issues/{key}/events`, `GET /api/v1/artifacts/{id}/events`
+  and the replay from `GET /api/v1/events` keep their stored numbers and PostgreSQL `jsonb` object
+  order: `9007199254740993` stays that integer, `1.00` keeps its trailing zeros, and object keys come
+  shorter first and, for keys of one length, in byte order. The JSON is compact, and Go's encoder
+  still writes `<`, `>`, `&`, U+2028 and U+2029 inside strings as `\u` escapes, as it did before.
+  Six ask payloads are decoded to add read-time fields and come back in Go's sorted-key, `float64`
+  form: `ask.opened`, `ask.anchor_refreshed`, `ask.answered`, `ask.resolved`, `ask.edited` and
+  `ask.handed_back`; `ask.follower_added` and `ask.follower_removed` keep the stored order. A live
+  event on `GET /api/v1/events` keeps its producer's field order. The dashboard, the agent Dispatch
+  tools and the Legion daemon read named fields from these payloads, and none compares payload bytes
+  or relies on Go's map ordering or `float64` rounding.
 - People sign in to Dispatch with Google Workspace through the shared sign-in pool (OpenID
   Connect authorization code against `DISPATCH_SIGNIN_ISSUER`, with `DISPATCH_SIGNIN_CLIENT_ID`,
   `DISPATCH_SIGNIN_CLIENT_SECRET` and `DISPATCH_SIGNIN_GROUP`, all four required by cookie
