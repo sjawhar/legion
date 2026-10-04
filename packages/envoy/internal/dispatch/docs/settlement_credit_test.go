@@ -393,12 +393,12 @@ func TestABrowserEditQueuedBehindAnOpenVersionIsNotCreditedAgainAfterAReopen(t *
 		t.Fatalf("apply the agent's edit: %v", err)
 	}
 
-	// Carol's direct write takes the room path a browser edit takes (creditContentChange), while
-	// the agent's transaction still holds the document's advisory lock, so her durable append -
-	// which the room's persistence worker drives asynchronously - queues behind it.
-	if _, err := service.ReplaceText(context.Background(), artifactID, "# Decision\n\nContext.\n\nCarol's paragraph.\n", carol); err != nil {
-		t.Fatalf("replace text as carol: %v", err)
-	}
+	// Carol, a connected browser, edits while the agent's transaction still holds the document's
+	// advisory lock, so her durable append - which the room's persistence worker drives
+	// asynchronously - queues behind it.
+	service.addConnection(artifactID, 1, carol)
+	replaceTextAsConnectedPeer(t, service, artifactID, "# Decision\n\nContext.\n\nCarol's paragraph.\n")
+	service.removeConnection(artifactID, 1)
 	if !service.hasDurableAppend(artifactID) {
 		t.Fatal("carol's durable append finished before the agent's transaction released the document lock")
 	}
@@ -429,7 +429,7 @@ func TestABrowserEditQueuedBehindAnOpenVersionIsNotCreditedAgainAfterAReopen(t *
 // replaceTextAsConnectedPeer applies a content replacement the way a browser's own edit does: via
 // ygo's Apply directly, with no service origin registered, so creditContentChange's browser
 // (sole/ambiguous) branch credits it from state.connected - the room path a real websocket peer's
-// edit takes - rather than through ReplaceText's service-mutation branch.
+// edit takes.
 func replaceTextAsConnectedPeer(t *testing.T, service *Service, artifactID, markdown string) {
 	t.Helper()
 	var applyErr error
@@ -456,14 +456,11 @@ func replaceTextAsConnectedPeer(t *testing.T, service *Service, artifactID, mark
 	}
 }
 
-// A real connected peer's edit (carol, via creditContentChange's sole branch) queued behind an
-// open version, followed by a second connected peer's edit (dave, sole branch again once carol
-// disconnects) while that version is still open, is credited only once: the service-mutation
-// branch's own fix (round 7) scoped its credit to its own actor; this is the sibling bug in the
-// browser branch, which round 7 left returning state.settlementCreditLocked() - the room's whole
-// accumulated state.pending, not state.connected - so dave's credit bundled carol's not-yet-
-// removed presence back into the durable row after the agent's version had already released her
-// (round-8 Deep's finding).
+// Two connected peers' edits around an open version are each credited once: carol's edit, which the
+// agent's version captured and releases, does not ride back in on dave's edit made while that
+// version is still open. A browser edit's credit names the peers connected for it
+// (state.connected), never the room's whole pending map, which still holds carol until the
+// version's commit takes her out of the room.
 func TestATwoPeerBrowserEditQueuedBehindAnOpenVersionIsNotCreditedAgainAfterAReopen(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour // no settlement runs between the edits

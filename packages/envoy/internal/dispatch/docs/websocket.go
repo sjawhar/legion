@@ -348,7 +348,7 @@ const ActorHeader = "X-Dispatch-Actor"
 
 func (s *Service) requestActor(r *http.Request) (model.Actor, error) {
 	if token, present := auth.BearerToken(r); present {
-		if !auth.MatchesSharedAgentToken(token, s.agentToken) {
+		if !auth.MatchesSharedAgentToken(r, token, s.agentTokens) {
 			return model.Actor{}, errors.New("invalid document bearer token")
 		}
 		var supplied model.Actor
@@ -569,44 +569,29 @@ func (s *Service) updateChangesMarkdown(room string, replica *crdt.Doc) bool {
 	return true
 }
 
-// creditContentChange credits an observed content change to its authors. A service mutation
-// (origin registered by serviceTransact) is its actor's alone, who joins `pending` and becomes
-// `lastActor`; a browser that was only connected while it happened is not credited. A committed
-// transaction's live write, which Ledger.Commit applies, was credited when the transaction
-// committed and is not credited again. Any other update is a browser edit by one of the peers,
-// which ygo applies while that peer's connection is registered. ygo does not say which connection
-// sent it, so every connected peer joins `pending`: when exactly one is connected it is the
-// latest edit source and replaces `lastActor`, and otherwise the edit cannot be pinned on a
-// single peer and no older actor may stand in for it.
+// creditContentChange credits an observed content change to its authors. A service repair (origin
+// registered by serviceTransact) is credited to no one; a browser that was only connected while it
+// happened is not credited either. A committed transaction's live write, which Ledger.Commit
+// applies, was credited when the transaction committed and is not credited again. Any other update
+// is a browser edit by one of the peers, which ygo applies while that peer's connection is
+// registered. ygo does not say which connection sent it, so every connected peer joins `pending`:
+// when exactly one is connected it is the latest edit source and replaces `lastActor`, and
+// otherwise the edit cannot be pinned on a single peer and no older actor may stand in for it.
 //
-// Both branches' returned credit names only the actor(s) this specific update touches - its own
-// actor for a service mutation, state.connected for a browser edit - never the room's whole
-// accumulated `state.pending`: that shared map can hold an author a concurrent version's
-// transaction has already released from the durable row but has not yet taken out of this room's
-// memory (Ledger.commit locks state.mu for its own version's artifacts, not for every artifact
-// any other credit event touches), and bundling that author into an unrelated, later-sequenced
-// credit would resurrect them past the sequence watermark that would otherwise have caught a
-// stale reuse of their own snapshot (upsertSettlementCredit). An earlier round of this fix scoped
-// only the service branch and left the browser branch returning state.settlementCreditLocked()
-// (the whole pending map), which still bundled a stale author through two real connected peers.
+// The returned credit names only the peers connected for this update, never the room's whole
+// accumulated `state.pending`: that map can hold an author a concurrent version's transaction has
+// already released from the durable row but not yet taken out of this room (Ledger.commit locks
+// state.mu only for its own versions' artifacts), and bundling that author into this later-sequenced
+// credit would put them back past the watermark that discards a stale credit (upsertSettlementCredit).
 func (s *Service) creditContentChange(room string, origin any) (settlementCredit, uint64) {
 	if _, published := origin.(*liveWriteOrigin); published {
 		return settlementCredit{}, 0
 	}
-	value, service := s.serviceOrigins.Load(origin)
+	if _, service := s.serviceOrigins.Load(origin); service {
+		return settlementCredit{}, 0
+	}
 	state := s.lockState(room)
 	defer s.unlockState(room, state)
-	if service {
-		actor, credited := value.(*model.Actor)
-		if !credited || actor == nil {
-			return settlementCredit{}, 0
-		}
-		state.pending[actorKey(*actor)] = *actor
-		state.lastActor = new(*actor)
-		state.unsettled = true
-		state.creditVersion++
-		return settlementCredit{Pending: map[string]model.Actor{settlementCreditKey(*actor): *actor}, LastActor: new(*actor)}, state.creditVersion
-	}
 	connected := make(map[string]model.Actor, len(state.connected))
 	var sole *model.Actor
 	ambiguous := false

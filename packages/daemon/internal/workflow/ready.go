@@ -28,6 +28,20 @@ func (e *Engine) ready(ctx context.Context, tx pgx.Tx, issue record.Issue, packe
 	return e.enqueue(ctx, tx, issue.Key, record.MergeQueuePublish{Role: e.cfg.MergeQueueRole, Packet: packet})
 }
 
+// withdrawReady tells the project's merge queue role, when it names one, that the READY ready
+// published for the issue no longer stands: the head's own CI turned red (reason, which names the
+// head and the red checks; classify.RedWithdrawsReady), so the issue left awaiting_merge for
+// implementing, GitHub will not merge the head, and a new READY follows once the work comes back
+// through testing and review. The Dispatch issue shows the same through its status, and the
+// architect through its checks-red notice.
+func (e *Engine) withdrawReady(ctx context.Context, tx pgx.Tx, issue record.Issue, pr *record.PullRequest, reason string) error {
+	if e.cfg.MergeQueueRole == "" {
+		return nil
+	}
+	packet := fmt.Sprintf("READY withdrawn for %s, pull request #%d: %s. Do not merge it: the issue is back in implementing, and a new READY will follow.", issue.Key, pr.Number, reason)
+	return e.enqueue(ctx, tx, issue.Key, record.MergeQueuePublish{Role: e.cfg.MergeQueueRole, Packet: packet})
+}
+
 // advancePendingReady advances every merger in the tree whose READY was refused while the gate was
 // closed, now that a human approved the gate's current version. That version may be later than
 // the one the refusal named: the READY stands until the gate reopens, whatever the human revised

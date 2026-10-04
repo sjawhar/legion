@@ -96,7 +96,7 @@ func workflowTransitionRequired(from phase.Phase, trigger TriggerKind) bool {
 	case TriggerReviewApproved, TriggerReviewRejected:
 		return from == phase.Reviewing
 	case TriggerChecksRed:
-		return from == phase.Testing || from == phase.Reviewing
+		return from == phase.Testing || from == phase.Reviewing || from == phase.AwaitingMerge
 	case TriggerRetroCompleted:
 		return from == phase.Retro
 	case TriggerReady:

@@ -14,8 +14,9 @@ its log, and you approve it as below.
 ## 1. Install and start the helper
 
 Each `legion-envoy-v*` GitHub release ships `agent-secrets-amd64.tar.gz` and
-`agent-secrets-arm64.tar.gz`, each holding `agent-secrets/bin/agent-secrets` and
-`agent-secrets/bin/agent-secrets-helper`. Put both on your `PATH`, write your Dispatch login to
+`agent-secrets-arm64.tar.gz`, each holding `agent-secrets/bin/agent-secrets`,
+`agent-secrets/bin/agent-secrets-helper` and their third-party licenses in
+`agent-secrets/THIRD_PARTY_NOTICES`. Put both binaries on your `PATH`, write your Dispatch login to
 the operator file, give the broker's address to the helper and to every agent you will start, and
 run the helper as yourself:
 
