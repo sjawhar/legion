@@ -3,11 +3,8 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 import { ApiError, api } from "../../api/client";
-import {
-  type ComposerAnchor,
-  type ComposerKind,
-  MentionComposer,
-} from "../conversation/MentionComposer";
+import type { ComposerAnchor, ComposerKind } from "../conversation/composer-model";
+import { MentionComposer } from "../conversation/MentionComposer";
 import { composerReferences } from "../refs/routes";
 import type { MarginOwner } from "./useMarginItems";
 

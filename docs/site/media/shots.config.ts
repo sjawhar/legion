@@ -102,8 +102,12 @@ const dispatch: ShotSet<DispatchWorkspace> = {
       theme: "light",
       ready: async (page) => {
         const agents = page.getByRole("region", { name: "Agents" });
+        // A folded section's rows stay mounted, hidden (packages/dispatch/AGENTS.md), so only the
+        // rows on screen are counted.
         await expect
-          .poll(async () => (await agents.locator("article h2").allTextContents()).sort())
+          .poll(async () =>
+            (await agents.locator("article:not([hidden]) h2").allTextContents()).sort()
+          )
           .toEqual(["Planner", "Reviewer", "Tester"]);
       },
       steps: async (page) => {

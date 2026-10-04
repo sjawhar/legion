@@ -138,7 +138,7 @@ func (b *Broker) Operator() string {
 }
 
 // launcherCredentialsRequest is POST /v1/launcher-credentials's exact request shape in the shared
-// broker contract (dispatch://AGENTC-393/artifact/plan-overview-md; handlers_launcher.go's
+// broker contract (handlers_launcher.go's
 // machineLoginBody): a signed request object under "request".
 type launcherCredentialsRequest struct {
 	Request string `json:"request"`

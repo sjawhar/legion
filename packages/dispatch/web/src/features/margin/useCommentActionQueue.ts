@@ -40,7 +40,8 @@ function actionFailure(id: string, error: Error): CommentActionFailure {
 interface CommentActionQueueOptions<TContext> {
   onError?(error: Error, input: CommentActionInput, context: TContext | undefined): void;
   onMutate?(input: CommentActionInput): TContext | Promise<TContext>;
-  onSuccess?(): void;
+  /** The server took `input`; the next queued action starts after this. */
+  onSuccess?(input: CommentActionInput): void;
 }
 
 function submitCommentAction({ id, kind }: CommentActionInput) {
@@ -69,7 +70,7 @@ export function useCommentActionQueue<TContext = undefined>({
     mutationFn: submitCommentAction,
     onError,
     onMutate,
-    onSettled: (_data, error) => {
+    onSettled: (_data, error, input) => {
       actionGuard.release();
       inFlight.current = undefined;
       if (error !== null) {
@@ -77,7 +78,7 @@ export function useCommentActionQueue<TContext = undefined>({
         syncQueuedIds();
         return;
       }
-      onSuccess?.();
+      onSuccess?.(input);
       const next = queued.current.entries().next();
       if (next.done) return;
       const [id, kind] = next.value;

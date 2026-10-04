@@ -88,7 +88,7 @@ const (
 // probed.
 var imageDigestRef = regexp.MustCompile(`^[^@\s]+@sha256:[0-9a-f]{64}$`)
 
-// AgentSecretsConfig is `runtime.kubernetes.agent_secrets` (AGENTC-393 Plan C): the broker's base
+// AgentSecretsConfig is `runtime.kubernetes.agent_secrets`: the broker's base
 // URL, the email of the person the daemon's own machine logins are approved by (the daemon runs its
 // own login at boot, on a background context, and logs the confirmation code once; no file ever
 // carries a launcher credential, since Login wins and holds it only in process memory), the

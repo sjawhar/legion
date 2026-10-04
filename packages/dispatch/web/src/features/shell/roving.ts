@@ -3,6 +3,14 @@ export function closestMatching(node: Element | null, selector: string): HTMLEle
   return node?.closest<HTMLElement>(selector) ?? null;
 }
 
+/** Whether focus has fallen to the document, where a control that is disabled or leaves the page
+ *  drops it. That is the only focus a page takes back on the reader's behalf: anywhere else, the
+ *  reader put it there. */
+export function focusOnDocument(): boolean {
+  const focused = document.activeElement;
+  return focused === null || focused === document.body;
+}
+
 /**
  * The element matching `selector` that holds keyboard focus *itself* - not one merely containing
  * a focused control. Every roving list asks this of its own rows: a key bound to the row acts
