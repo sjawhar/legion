@@ -665,18 +665,21 @@ func TestTheServingRunBackfillsForARelaunchingClaim(t *testing.T) {
 }
 
 // Every outbox kind the daemon writes is one the schema's check admits, on a fresh database and on
-// one that recorded every migration through 0020 except 0016, with a controller notice queued. 0016
-// (merge_queue_publish) and 0020 (controller_notice) would each redefine the check with the other's
-// kind missing, and a database past 0020 applies the lower 0016 late, where a check without
-// controller_notice would refuse the queued row and the upgrade: neither sets the list, 0021 does,
-// after both.
+// databases that applied a lower migration late. 0016 (merge_queue_publish) and 0020
+// (controller_notice) would each redefine the check with the other's kind missing, and a database
+// past 0020 applies the lower 0016 late, where a check without controller_notice would refuse the
+// queued row and the upgrade: neither sets the list, 0021 does, after both. In the same way
+// `issue_branch` (0030) and `issue_suspend` (0033) each come with a migration that rewrites the
+// check, and a database that ran 0031 onwards before 0029 and 0030 applies those two last, so a
+// queued close suspension must survive them and both kinds must stand at the end in either order.
 func TestTheOutboxCheckAdmitsEveryKindWhicheverOrderTheMigrationsRan(t *testing.T) {
 	all, err := migrations.All()
 	if err != nil {
 		t.Fatalf("read the embedded migrations: %v", err)
 	}
 	kinds := []record.OutboxKind{record.OutboxKindDispatchStatus, record.OutboxKindDispatchMessage, record.OutboxKindNotice, record.OutboxKindControllerNotice,
-		record.OutboxKindSupervise, record.OutboxKindGateSeed, record.OutboxKindLingerClose, record.OutboxKindWorkspaceRemove, record.OutboxKindMergeQueuePublish}
+		record.OutboxKindSupervise, record.OutboxKindGateSeed, record.OutboxKindLingerClose, record.OutboxKindWorkspaceRemove, record.OutboxKindMergeQueuePublish,
+		record.OutboxKindIssueSuspend, "issue_branch"}
 	insert := "insert into outbox (kind, issue, payload, attempts, next_at, last_error) values ($1, 'LEGION-208', '{}', 0, now(), '')"
 	for _, tc := range []struct {
 		name  string
@@ -684,6 +687,7 @@ func TestTheOutboxCheckAdmitsEveryKindWhicheverOrderTheMigrationsRan(t *testing.
 	}{
 		{"a fresh database", func(migrations.Migration) bool { return false }},
 		{"a database that ran 0020 before 0016", func(m migrations.Migration) bool { return m.Version <= 20 && m.Version != 16 }},
+		{"a database that ran 0031 onwards before 0029 and 0030", func(m migrations.Migration) bool { return m.Version <= 28 || m.Version >= 31 }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -696,11 +700,19 @@ func TestTheOutboxCheckAdmitsEveryKindWhicheverOrderTheMigrationsRan(t *testing.
 					t.Fatalf("apply %s: %v", migration.Name, err)
 				}
 			}
-			if version, err := store.SchemaVersion(ctx); err != nil {
+			version, err := store.SchemaVersion(ctx)
+			if err != nil {
 				t.Fatalf("read the schema version: %v", err)
-			} else if version >= 20 {
-				if _, err := store.pool.Exec(ctx, insert, string(record.OutboxKindControllerNotice)); err != nil {
-					t.Fatalf("queue a controller notice at schema %d: %v", version, err)
+			}
+			for _, queued := range []struct {
+				since int
+				kind  record.OutboxKind
+			}{{20, record.OutboxKindControllerNotice}, {33, record.OutboxKindIssueSuspend}} {
+				if version < queued.since {
+					continue
+				}
+				if _, err := store.pool.Exec(ctx, insert, string(queued.kind)); err != nil {
+					t.Fatalf("queue a %s row at schema %d: %v", queued.kind, version, err)
 				}
 			}
 			if _, err := store.Migrate(ctx); err != nil {
