@@ -167,6 +167,8 @@ func TestAnApprovalStandsForEveryHeadThatChangesNothingButTheHandoff(t *testing.
 		unsettled bool
 		// quiet is a round the architect is told nothing of: no review-stuck notice.
 		quiet bool
+		// told is what the round's one review-stuck notice names, when it has one.
+		told string
 	}{
 		{name: "approval, then the reviewer's handoff push", steps: []string{"approve head", "sync", "push handoff", "green", "complete"}, want: phase.Retro},
 		{name: "the reviewer's handoff push, then the approval", steps: []string{"sync", "push handoff", "green", "approve head", "complete"}, want: phase.Retro},
@@ -211,13 +213,15 @@ func TestAnApprovalStandsForEveryHeadThatChangesNothingButTheHandoff(t *testing.
 		// settlement stands for the handoff head that replaced it, whenever it arrives. A required
 		// check cancelled, whether in the handoff head's own run or in the code head's carried to it,
 		// is not red: a push or concurrency can cancel a run whose replacement has not shown yet, so
-		// a later settlement decides it, and until one lands the round waits and tells nobody.
-		{name: "the handoff head's own run cancelled after the code head's green", steps: []string{"green head", "approve head", "sync", "push handoff", "cancelled", "complete"}, want: phase.Reviewing, unsettled: true, quiet: true},
-		{name: "the handoff head's own run cancelled, then its rerun green", steps: []string{"green head", "approve head", "sync", "push handoff", "cancelled", "complete", "rerun green"}, want: phase.Retro, unsettled: true, quiet: true},
+		// a later settlement decides it. One cancelled in the code head's run waits for the handoff
+		// head's own run and tells nobody; one cancelled in the handoff head's own run may never run
+		// again, so the completed, approved round is told stuck once, naming it.
+		{name: "the handoff head's own run cancelled after the code head's green", steps: []string{"green head", "approve head", "sync", "push handoff", "cancelled", "complete"}, want: phase.Reviewing, unsettled: true, told: "ci (cancelled)"},
+		{name: "the handoff head's own run cancelled, then its rerun green", steps: []string{"green head", "approve head", "sync", "push handoff", "cancelled", "complete", "rerun green"}, want: phase.Retro, unsettled: true, told: "ci (cancelled)"},
 		{name: "a cancelled re-settlement of the code head after its green", steps: []string{"green head", "approve head", "sync", "push handoff", "cancelled head", "complete"}, want: phase.Reviewing, unsettled: true, quiet: true},
 		{name: "the code head's run cancelled by the reviewer's handoff push", steps: []string{"approve head", "sync", "push handoff", "cancelled head", "complete"}, want: phase.Reviewing, unsettled: true, quiet: true},
 		{name: "the code head's run cancelled by the reviewer's handoff push, then the handoff head's own green", steps: []string{"approve head", "sync", "push handoff", "cancelled head", "complete", "green"}, want: phase.Retro, unsettled: true, quiet: true},
-		{name: "the handoff head's own run cancelled before the code head's green", steps: []string{"approve head", "sync", "push handoff", "cancelled", "green head", "complete"}, want: phase.Reviewing, unsettled: true, quiet: true},
+		{name: "the handoff head's own run cancelled before the code head's green", steps: []string{"approve head", "sync", "push handoff", "cancelled", "green head", "complete"}, want: phase.Reviewing, unsettled: true, told: "ci (cancelled)"},
 		{name: "the code head's checks settle after the reviewer's handoff head", steps: []string{"approve head", "sync", "push handoff", "green head", "complete"}, want: phase.Retro, unsettled: true},
 		{name: "the code head's checks settle before the reviewer's handoff head, its push last", steps: []string{"green head", "approve head", "sync", "push handoff", "complete"}, want: phase.Retro, unsettled: true},
 		{name: "the code head's checks settle before the reviewer's handoff head, its push first", steps: []string{"green head", "approve head", "push handoff", "sync", "complete"}, want: phase.Retro, unsettled: true},
@@ -336,8 +340,12 @@ func TestAnApprovalStandsForEveryHeadThatChangesNothingButTheHandoff(t *testing.
 			if got := issuePhase(t, pool); got != tc.want {
 				t.Fatalf("the issue is in %s, want %s", got, tc.want)
 			}
-			if got := reviewStuckNotices(t, pool); tc.quiet && len(got) != 0 {
+			got := reviewStuckNotices(t, pool)
+			if tc.quiet && len(got) != 0 {
 				t.Fatalf("the architect was told the round was stuck: %+v, want nothing", got)
+			}
+			if tc.told != "" && (len(got) != 1 || !strings.Contains(got[0].Reason, tc.told)) {
+				t.Fatalf("review-stuck notices %+v, want one naming %q", got, tc.told)
 			}
 		})
 	}
@@ -602,7 +610,7 @@ func TestARetryOfAStuckRoundTellsTheReviewerWhy(t *testing.T) {
 // that restores reviewing sends the work back rather than reporting the round stuck.
 func TestARetryOfARoundWithARedCodeHeadSendsTheWorkBack(t *testing.T) {
 	pool := migratedPool(t)
-	seedReviewOf(t, pool, "c0ffee", "")
+	seedReviewRequiring(t, pool, "c0ffee", "", "lint")
 	apply := applyFacts(t, pool, testEngine(config.DesignGateRootIssues, nil))
 	for i, fact := range []intake.Fact{
 		intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", Summary: "reviewed", Commit: "review-1"},

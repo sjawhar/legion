@@ -43,12 +43,9 @@ func Judge(required []string, results map[string]string) []Standing {
 	return standings
 }
 
-// Failed and Cancelled are the results HeadChecks gives a check the settlement names as failed
-// and as cancelled (intake.PullRequestChecks).
-const (
-	Failed    = "failure"
-	Cancelled = "cancelled"
-)
+// Failed is the result HeadChecks gives a check the settlement names as failed
+// (intake.PullRequestChecks).
+const Failed = "failure"
 
 // HeadChecks is each check the pull request's base branch requires (Required), judged by the
 // settlement that stands for its head (settled), its own or one carried back from a head a
@@ -57,8 +54,9 @@ const (
 // can come before a required check is decided, since the listener settles a commit once every check
 // it has seen is terminal and the commit is quiet, which an aggregator job with needs: is not yet
 // queued for, and which a run that concurrency cancels has reached before its replacement shows;
-// the next settlement of the head decides it. READY reads the same check at merge and refuses it
-// cancelled or missing (Judge). ok is false when there is nothing to judge: no settlement stands
+// the next settlement of the head decides it. It may never report, and a head with no verdict never
+// reaches READY, so an approved round whose own head settles this way is told stuck, naming the
+// check (workflow's reviewRound). ok is false when there is nothing to judge: no settlement stands
 // for the head, or the required set was never read.
 func HeadChecks(pr record.PullRequest) (checks []Standing, ok bool) {
 	if !settled(pr) || pr.Required == nil {
@@ -68,15 +66,16 @@ func HeadChecks(pr record.PullRequest) (checks []Standing, ok bool) {
 	for _, run := range pr.CheckRuns {
 		results[run.Name] = Success
 	}
+	// A cancelled check waits for the head's next settlement, as a missing one does below.
 	for _, name := range pr.Cancelled {
-		results[name] = Cancelled
+		results[name] = Pending
 	}
 	for _, name := range pr.Failing {
 		results[name] = Failed
 	}
 	checks = Judge(pr.Required, results)
 	for i, check := range checks {
-		if check.Result == Cancelled || check.Result == Missing {
+		if check.Result == Missing {
 			checks[i].Result = Pending
 		}
 	}

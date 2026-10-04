@@ -101,9 +101,11 @@ func TestOnlyARedTheBaseBranchRequiresSendsTheWorkBack(t *testing.T) {
 // A settlement can come before a required check is decided: the listener settles a commit once
 // every check it has seen is terminal and the commit is quiet, which can be before an aggregator
 // job with needs: is queued, or just after concurrency cancelled a run of the same commit. So a
-// required check the head's own settlement names cancelled, or does not report, moves nothing and
-// tells nobody, and the head's next settlement decides it: passed, an approved round ends; failed,
-// the work goes back naming it.
+// required check the head's own settlement names cancelled, or does not report, moves nothing, and
+// the head's next settlement decides it: passed, an approved round ends; failed, the work goes back
+// naming it. The check may also never report, so an approved, completed round that such a
+// settlement leaves without a verdict is stuck: the architect is told once for the head, naming
+// the check, and a settlement that leaves it pending again tells nothing new.
 func TestARequiredCheckCancelledOrMissingWaitsForTheHeadsNextSettlement(t *testing.T) {
 	gateRun := func(id int64) record.AttemptRun { return record.AttemptRun{Name: requiredGate, ID: id} }
 	missing := intake.PullRequestChecks{CheckRuns: []record.AttemptRun{{Name: "lint", ID: 1}}, Failing: []string{}}
@@ -115,12 +117,14 @@ func TestARequiredCheckCancelledOrMissingWaitsForTheHeadsNextSettlement(t *testi
 		from          phase.Phase
 		status        string
 		first, second intake.PullRequestChecks
-		want          phase.Phase
+		// told is what the one review-stuck notice names; "" tells nothing.
+		told string
+		want phase.Phase
 	}{
-		{"missing, then passed, under an approved round", phase.Reviewing, "needs_review", missing, passed, phase.Retro},
-		{"cancelled, then passed, under an approved round", phase.Reviewing, "needs_review", cancelled, passed, phase.Retro},
-		{"missing, then failed, in testing", phase.Testing, "testing", missing, failed, phase.Implementing},
-		{"cancelled, then failed, in testing", phase.Testing, "testing", cancelled, failed, phase.Implementing},
+		{"missing, then passed, under an approved round", phase.Reviewing, "needs_review", missing, passed, "pr-checks-result (no result)", phase.Retro},
+		{"cancelled, then passed, under an approved round", phase.Reviewing, "needs_review", cancelled, passed, "pr-checks-result (cancelled)", phase.Retro},
+		{"missing, then failed, in testing", phase.Testing, "testing", missing, failed, "", phase.Implementing},
+		{"cancelled, then failed, in testing", phase.Testing, "testing", cancelled, failed, "", phase.Implementing},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
@@ -141,15 +145,22 @@ func TestARequiredCheckCancelledOrMissingWaitsForTheHeadsNextSettlement(t *testi
 				fact.Snapshot = fmt.Sprintf("settled-%d", generation)
 				applyRefusingNothing(t, pool, engine, fact)
 			}
+			// The same pending settlement twice: the second is newer (its generation) and stuck the
+			// same way at the same head.
 			settle(tc.first, 1)
+			settle(tc.first, 2)
 			if got := issuePhase(t, pool); got != tc.from {
-				t.Fatalf("after the first settlement the issue is in %s, want it left in %s", got, tc.from)
+				t.Fatalf("after the pending settlements the issue is in %s, want it left in %s", got, tc.from)
 			}
-			if got := noticeKinds(t, pool, "LEGION-208"); len(got) != 0 {
-				t.Fatalf("after the first settlement the architect was told %v, want nothing", got)
+			stuck := reviewStuckNotices(t, pool)
+			if tc.told == "" && len(noticeKinds(t, pool, "LEGION-208")) != 0 {
+				t.Fatalf("after the pending settlements the architect was told %v, want nothing", noticeKinds(t, pool, "LEGION-208"))
+			}
+			if tc.told != "" && (len(stuck) != 1 || stuck[0].Summary != byChecks || !strings.Contains(stuck[0].Reason, tc.told)) {
+				t.Fatalf("review-stuck notices %+v, want one, by a CI result, naming %q", stuck, tc.told)
 			}
 			assertOutboxCount(t, pool, "supervise", 0)
-			settle(tc.second, 2)
+			settle(tc.second, 3)
 			if got := issuePhase(t, pool); got != tc.want {
 				t.Fatalf("after the next settlement the issue is in %s, want %s", got, tc.want)
 			}

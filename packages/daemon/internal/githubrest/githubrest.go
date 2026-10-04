@@ -95,16 +95,19 @@ func (c Client) call(ctx context.Context, method, url string, body []byte, into 
 	}
 	if response.StatusCode < 200 || response.StatusCode > 299 {
 		path, _, _ := strings.Cut(strings.TrimPrefix(url, c.API), "?")
-		// GitHub answers a rate limit with a 429, or with a 403 carrying x-ratelimit-remaining: 0 or
-		// a retry-after, the rule appauth's transient reads token mints by.
-		rateLimited := response.StatusCode == http.StatusTooManyRequests || response.StatusCode == http.StatusForbidden &&
-			(response.Header.Get("X-RateLimit-Remaining") == "0" || response.Header.Get("Retry-After") != "")
-		return "", &Answer{Method: method, Path: path, Status: response.StatusCode, Body: strings.TrimSpace(string(answer)), RateLimited: rateLimited}
+		return "", &Answer{Method: method, Path: path, Status: response.StatusCode, Body: strings.TrimSpace(string(answer)), RateLimited: RateLimited(response)}
 	}
 	if into == nil {
 		return nextPage(response.Header.Get("Link")), nil
 	}
 	return nextPage(response.Header.Get("Link")), json.Unmarshal(answer, into)
+}
+
+// RateLimited says whether response is GitHub's rate limit: a 429, or a 403 carrying
+// x-ratelimit-remaining: 0 or a retry-after.
+func RateLimited(response *http.Response) bool {
+	return response.StatusCode == http.StatusTooManyRequests || response.StatusCode == http.StatusForbidden &&
+		(response.Header.Get("X-RateLimit-Remaining") == "0" || response.Header.Get("Retry-After") != "")
 }
 
 // nextPage is the URL a Link header names rel="next", "" when it names none.

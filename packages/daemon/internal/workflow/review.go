@@ -3,6 +3,7 @@ package workflow
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -250,6 +251,9 @@ const (
 	stuckApprovedRed
 	// stuckApprovedOtherCode: its approval is of a head whose code the current head may not carry.
 	stuckApprovedOtherCode
+	// stuckApprovedPending: its approval waits on a required check the reviewer's own head settled
+	// without a result for (cancelled, or not reported), which no later settlement may bring.
+	stuckApprovedPending
 )
 
 // round is reviewRound's account of a review round. A stuck round names its cause, the head it is
@@ -277,7 +281,10 @@ func (r round) stuckAs(other round) bool {
 // reviewer's pane gets one follow-up turn when a turn ends with its phase open (pi-envoy's
 // phase-stall check), and past that the issue stays in reviewing, as a tester's that never completes
 // stays in testing. A completed round that nothing on its way would end is stuck, its reason naming
-// the head, since the decision it needs is of the head.
+// the head, since the decision it needs is of the head. An approved round whose head's own
+// settlement left a required check pending is stuck too: the check may never report (a run nobody
+// reruns, a required workflow that does not run for the head, a check only a commit status
+// reports), and a later settlement that passes it still ends the round.
 func reviewRound(issue record.Issue, row record.PhaseRow, pr *record.PullRequest) round {
 	if issue.Phase != phase.Reviewing {
 		return round{}
@@ -313,8 +320,30 @@ func reviewRound(issue record.Issue, row record.PhaseRow, pr *record.PullRequest
 		return round{outcome: roundStuck, cause: stuckApprovedOtherCode, head: pr.HeadSHA,
 			reason: fmt.Sprintf("the reviewer approved %s on pull request #%d, which does not approve head %s: a push since may have changed code, so only an APPROVE of %s or a REQUEST_CHANGES ends the round",
 				row.Decision.Head, pr.Number, pr.HeadSHA, pr.HeadSHA)}
+	case verdict == "" && pr.CheckedHead == pr.HeadSHA && len(pendingAt(*pr)) > 0:
+		return round{outcome: roundStuck, cause: stuckApprovedPending, head: pr.HeadSHA,
+			reason: fmt.Sprintf("the reviewer approved %s on pull request #%d, but CI at %s settled with no passing result for %s; the approval stands, and the round ends when a later settlement of the head passes them",
+				row.Decision.Head, pr.Number, pr.HeadSHA, strings.Join(pendingAt(*pr), ", "))}
 	}
 	return round{}
+}
+
+// pendingAt names each required check the settlement standing for the pull request's head left
+// pending (classify.HeadChecks), as cancelled or as having no result, since neither is a failure to
+// open.
+func pendingAt(pr record.PullRequest) []string {
+	checks, _ := classify.HeadChecks(pr)
+	var pending []string
+	for _, check := range checks {
+		switch {
+		case check.Result != classify.Pending:
+		case slices.Contains(pr.Cancelled, check.Name):
+			pending = append(pending, check.Name+" (cancelled)")
+		default:
+			pending = append(pending, check.Name+" (no result)")
+		}
+	}
+	return pending
 }
 
 // settleRound acts on what issue's review round comes to (reviewRound, with row its reviewer's and
