@@ -117,7 +117,7 @@ test("the search box narrows by a word in the title, directory, machine, session
   }
 });
 
-test("the query survives a reload through the page's address, and Control+K focuses the box instead of opening the Dispatch-wide search dialog", async ({
+test("the query survives a reload through the page's address, / focuses the box instead of opening the Dispatch-wide search dialog, and Control+K still opens that dialog", async ({
   browser,
 }) => {
   await seed();
@@ -136,9 +136,13 @@ test("the query survives a reload through the page's address, and Control+K focu
     await expect(shownAgentRows(page).locator("h2")).toHaveText(["Scrum planning"]);
 
     await page.locator("body").focus();
-    await page.keyboard.press("Control+k");
+    await page.keyboard.press("/");
     await expect(page.getByRole("searchbox", { name: "Search agents" })).toBeFocused();
+    await expect(page.getByRole("searchbox", { name: "Search agents" })).toHaveValue("scrum");
     await expect(page.getByRole("dialog", { name: "Search" })).toHaveCount(0);
+    // The page's actions and Dispatch-wide hits stay one key away.
+    await page.keyboard.press("Control+k");
+    await expect(page.getByRole("dialog", { name: "Search" })).toBeVisible();
   } finally {
     await alice.close();
   }

@@ -104,15 +104,15 @@ export function useAgentsKeymap(
   };
   useKeymapScope("agents");
   useKeymap("agents", [
-    // Shadows the `global` scope's own `$mod+k`: elsewhere that opens the search dialog, but a
-    // session this page already lists is faster to find by typing here than by searching Dispatch
-    // at large. `when` answers `false` rather than finding nothing to focus - with no agents
-    // connected the filter bar does not render at all - so the key falls through to the global
-    // binding instead of doing nothing.
+    // Shadows the `global` scope's `/`, which elsewhere opens the search dialog on its hits alone:
+    // a session this page already lists is faster to find by typing here than by searching
+    // Dispatch at large, and `$mod+k` still opens the dialog with this page's actions and hits.
+    // `when` answers `false` rather than finding nothing to focus - with no agents connected the
+    // filter bar does not render at all - so the key falls through to the global binding instead
+    // of doing nothing.
     {
       id: "search",
-      inEditable: true,
-      keys: "$mod+k",
+      keys: "/",
       label: "Search agents",
       run: () => searchInputRef.current?.focus(),
       when: () => searchInputRef.current !== null,

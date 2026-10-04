@@ -2606,7 +2606,7 @@ test("the search box reads its query from the page's address and writes back to 
   }
 });
 
-test("$mod+K focuses the Agents search box instead of opening the Dispatch-wide search dialog", async () => {
+test("/ focuses the Agents search box instead of opening the Dispatch-wide search dialog", async () => {
   const page = renderAgents();
 
   try {
@@ -2614,7 +2614,7 @@ test("$mod+K focuses the Agents search box instead of opening the Dispatch-wide 
     const search = within(region).getByRole("searchbox", { name: "Search agents" });
     expect(search).not.toBe(document.activeElement);
 
-    fireEvent.keyDown(document.body, { ctrlKey: true, key: "k" });
+    fireEvent.keyDown(document.body, { key: "/" });
 
     expect(document.activeElement).toBe(search);
     expect(screen.queryByRole("dialog", { name: "Search" })).toBeNull();
