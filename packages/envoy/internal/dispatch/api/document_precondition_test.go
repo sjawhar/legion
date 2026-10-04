@@ -375,7 +375,7 @@ func TestDocumentPreconditionRejectsAnchorAddedAfterRead(t *testing.T) {
 }
 
 func TestDocumentEditPreconditionRejectsWriterAfterDurableAppendRace(t *testing.T) {
-	handler, database, service := preconditionTestHandler(t)
+	service, handler, database := browserDocumentService(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Precondition race", "before")
 	stale := readDocumentPrecondition(t, handler, issue.PrimaryArtifactID)
 
@@ -388,13 +388,10 @@ func TestDocumentEditPreconditionRejectsWriterAfterDurableAppendRace(t *testing.
 		t.Fatalf("lock document room: %v", err)
 	}
 
-	writerDone := make(chan error, 1)
-	go func() {
-		_, err := service.ApplyOps(context.Background(), issue.PrimaryArtifactID, []model.EditOp{{
-			Op: "replace", Find: "before", With: "writer",
-		}}, model.Actor{Kind: "user", ID: "alice"}, nil)
-		writerDone <- err
-	}()
+	// A browser's edit reaches the room at once, and its durable append waits for the room's
+	// lock: the one writer that does not first take the document's owner row, as every server
+	// write and the conditional edit below do.
+	writeBrowserDocument(t, service, issue.PrimaryArtifactID, "writer")
 	waitForDatabaseLocks(t, blocker, 1)
 
 	conditionalDone := make(chan *httptest.ResponseRecorder, 1)
@@ -407,9 +404,6 @@ func TestDocumentEditPreconditionRejectsWriterAfterDurableAppendRace(t *testing.
 	waitForDatabaseLocks(t, blocker, 2)
 	if err := blocker.Commit(context.Background()); err != nil {
 		t.Fatalf("release document lock: %v", err)
-	}
-	if err := <-writerDone; err != nil {
-		t.Fatalf("concurrent writer: %v", err)
 	}
 	response := awaitResponse(t, conditionalDone)
 	if response.Code != http.StatusConflict {

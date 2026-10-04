@@ -76,7 +76,7 @@ func askEventCounts(t *testing.T, handler http.Handler, issueKey, askID string) 
 
 func TestApprovalRequestOpensAnAskWhoseAnswerPinsAReviewToTheDocumentVersion(t *testing.T) {
 	var documentService *docs.Service
-	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
+	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})
 		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
 		return documentService
@@ -164,7 +164,7 @@ func TestApprovalRequestOpensAnAskWhoseAnswerPinsAReviewToTheDocumentVersion(t *
 	}
 
 	// A new version makes the approval stale; nothing is emitted for that.
-	if _, err := documentService.ReplaceText(context.Background(), issue.PrimaryArtifactID, "A revised spec", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+	if _, err := replaceDocumentText(database, documentService, issue.PrimaryArtifactID, "A revised spec", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("revise document: %v", err)
 	}
 	if named := dispatchRequest(t, handler, http.MethodPost,
@@ -409,7 +409,7 @@ func TestEditedLegacyTableCellPipeDocumentStalesApproval(t *testing.T) {
 	`, issue.PrimaryArtifactID, "| header |\n| :--- |\n| `one|two` |\n"); err != nil {
 		t.Fatalf("seed legacy canonical markdown: %v", err)
 	}
-	if _, err := documentService.ReplaceText(context.Background(), issue.PrimaryArtifactID, "| header |\n| :--- |\n| `one\\|three` |\n", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+	if _, err := replaceDocumentText(database, documentService, issue.PrimaryArtifactID, "| header |\n| :--- |\n| `one\\|three` |\n", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("edit legacy document: %v", err)
 	}
 	if named := dispatchRequest(t, handler, http.MethodPost,

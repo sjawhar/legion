@@ -19,7 +19,7 @@ type routeIndex struct {
 
 func TestRouteIndexListsEveryRouteSortedByPathThenMethod(t *testing.T) {
 	mux := http.NewServeMux()
-	Register(mux, Deps{AgentToken: "agent-token"})
+	Register(mux, Deps{AgentTokens: sharedAgentTokens(t, "agent-token")})
 
 	response := httptest.NewRecorder()
 	mux.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/v1", nil))
@@ -94,7 +94,7 @@ func TestWriteRouteIndexCarriesEveryRouteTheTableHas(t *testing.T) {
 	}
 
 	mux := http.NewServeMux()
-	Register(mux, Deps{AgentToken: "agent-token"})
+	Register(mux, Deps{AgentTokens: sharedAgentTokens(t, "agent-token")})
 	response := httptest.NewRecorder()
 	mux.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/v1", nil))
 	if served := response.Body.String(); served != output.String() {
