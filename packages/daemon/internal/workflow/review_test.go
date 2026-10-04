@@ -114,15 +114,24 @@ func seedReview(t *testing.T, pool *pgxpool.Pool, verdict string) {
 // check, ci, every settlement these tests apply names.
 func seedReviewOf(t *testing.T, pool *pgxpool.Pool, head, verdict string) {
 	t.Helper()
+	seedReviewRequiring(t, pool, head, verdict, "ci")
+}
+
+// seedReviewRequiring is seedReviewOf on a base branch that requires the checks named: a green
+// seeded settlement passed each of them, a red one failed the first.
+func seedReviewRequiring(t *testing.T, pool *pgxpool.Pool, head, verdict string, required ...string) {
+	t.Helper()
 	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root",
 		Phase: phase.Reviewing, Generation: 1, Status: "needs_review", Rank: "U"})
 	pr := record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
-		Number: 42, Branch: "legion/LEGION-208", HeadSHA: head, Verdict: verdict, Required: []string{"ci"}}
-	switch verdict {
-	case "green":
-		pr.CheckRuns = []record.AttemptRun{{Name: "ci", ID: 1}}
-	case "red":
-		pr.CheckRuns, pr.Failing = []record.AttemptRun{{Name: "ci", ID: 1}}, []string{"ci"}
+		Number: 42, Branch: "legion/LEGION-208", HeadSHA: head, Verdict: verdict, Required: required}
+	if verdict != "" {
+		for i, name := range required {
+			pr.CheckRuns = append(pr.CheckRuns, record.AttemptRun{Name: name, ID: int64(i + 1)})
+		}
+	}
+	if verdict == "red" {
+		pr.Failing = []string{required[0]}
 	}
 	seedPR(t, pool, pr)
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim"})
@@ -746,7 +755,9 @@ func TestARoundItsApprovalCannotEndTellsTheArchitect(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		verdict string
-		steps   []intake.Fact
+		// required is what the base branch requires: the checks the case's settlements judge by.
+		required []string
+		steps    []intake.Fact
 		// told is what the one notice's reason names, and by the fact that wrote it; empty, the
 		// architect is told nothing.
 		told []string
@@ -754,24 +765,24 @@ func TestARoundItsApprovalCannotEndTellsTheArchitect(t *testing.T) {
 		then intake.Fact
 		want phase.Phase
 	}{
-		{name: "CI settles red on the reviewer's handoff head after it completes, then fails other checks",
+		{name: "CI settles red on the reviewer's handoff head after it completes, then fails other checks", required: []string{"lint", "unit"},
 			steps: []intake.Fact{approve("head"), sync("head-2"), push("head", "head-2", handoff), complete,
 				settle("head-2", "red", 2, "lint"), settle("head-2", "red", 3, "lint", "unit"), settle("head-2", "red", 4, "unit")},
 			told: []string{"head-2", "lint"}, by: "a CI result", then: requestChanges, want: phase.Implementing},
-		{name: "a push since the approved head changed code", verdict: "green",
+		{name: "a push since the approved head changed code", verdict: "green", required: []string{"lint"},
 			steps: []intake.Fact{approve("head"), sync("head-2"), push("head", "head-2", code), settle("head-2", "green", 2), complete},
 			told:  []string{"head-2"}, by: "the reviewer's completion", then: approve("head-2"), want: phase.Retro},
-		{name: "the handoff push over a code push is classified after the completion", verdict: "green",
+		{name: "the handoff push over a code push is classified after the completion", verdict: "green", required: []string{"lint"},
 			steps: []intake.Fact{approve("head"), sync("head-2"), push("head", "head-2", code), settle("head-2", "green", 2), sync("head-3"), complete,
 				push("head-2", "head-3", handoff)},
 			told: []string{"head-3"}, by: "a push", then: approve("head-3"), want: phase.Retro},
-		{name: "the approved head's checks are still running",
+		{name: "the approved head's checks are still running", required: []string{"lint"},
 			steps: []intake.Fact{approve("head"), complete},
 			then:  settle("head", "green", 2), want: phase.Retro},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
-			seedReviewOf(t, pool, "head", tc.verdict)
+			seedReviewRequiring(t, pool, "head", tc.verdict, tc.required...)
 			apply := applyFacts(t, pool, testEngine(config.DesignGateRootIssues, nil))
 			for i, fact := range tc.steps {
 				if result := apply(fmt.Sprintf("step-%d", i), fact); result.Refusal != nil {
