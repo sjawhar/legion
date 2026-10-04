@@ -10,10 +10,8 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
-	"net/textproto"
 	"os"
 	"slices"
 	"strings"
@@ -25,6 +23,7 @@ import (
 	"github.com/reearth/ygo/persistence"
 
 	"github.com/sjawhar/envoy/internal/dispatch/agentstream"
+	"github.com/sjawhar/envoy/internal/dispatch/api/apitest"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
@@ -36,6 +35,16 @@ import (
 )
 
 func TestMain(m *testing.M) { os.Exit(storetest.Main(m)) }
+
+// sharedAgentTokens is a DISPATCH_AGENT_TOKEN setting parsed as the server parses it at boot.
+func sharedAgentTokens(t testing.TB, setting string) *auth.SharedAgentTokens {
+	t.Helper()
+	tokens, err := auth.ParseSharedAgentTokens(setting)
+	if err != nil {
+		t.Fatalf("ParseSharedAgentTokens(%q): %v", setting, err)
+	}
+	return tokens
+}
 
 // testServerOptions configure the server an API test drives.
 type testServerOptions struct {
@@ -133,7 +142,7 @@ func newTestServer(t *testing.T, options testServerOptions) (http.Handler, *stor
 	deps, err := NewDeps(DepsInput{
 		Store:            database,
 		Identity:         headerIdentity(database),
-		AgentToken:       "agent-token",
+		AgentTokens:      sharedAgentTokens(t, "agent-token"),
 		DefaultProject:   options.defaultProject,
 		ServerURL:        "https://dispatch.example",
 		Docs:             documentService,
@@ -244,30 +253,12 @@ func dispatchRequest(t *testing.T, handler http.Handler, method, target string, 
 
 func multipartRequest(t *testing.T, handler http.Handler, target string, fields map[string]string, filename, contentType string, content []byte, login string) *httptest.ResponseRecorder {
 	t.Helper()
-	var body bytes.Buffer
-	writer := multipart.NewWriter(&body)
-	for key, value := range fields {
-		if err := writer.WriteField(key, value); err != nil {
-			t.Fatalf("write multipart field: %v", err)
-		}
-	}
-	header := textproto.MIMEHeader{}
-	header.Set("Content-Disposition", `form-data; name="file"; filename="`+filename+`"`)
-	if contentType != "" {
-		header.Set("Content-Type", contentType)
-	}
-	part, err := writer.CreatePart(header)
+	body, bodyType, err := apitest.MultipartUpload(fields, filename, contentType, content)
 	if err != nil {
-		t.Fatalf("create multipart file part: %v", err)
+		t.Fatal(err)
 	}
-	if _, err := part.Write(content); err != nil {
-		t.Fatalf("write multipart file: %v", err)
-	}
-	if err := writer.Close(); err != nil {
-		t.Fatalf("finish multipart request: %v", err)
-	}
-	request := httptest.NewRequest(http.MethodPost, target, &body)
-	request.Header.Set("Content-Type", writer.FormDataContentType())
+	request := httptest.NewRequest(http.MethodPost, target, body)
+	request.Header.Set("Content-Type", bodyType)
 	if login != "" {
 		request.Header.Set("X-Dispatch-User", login)
 	}
@@ -1787,7 +1778,7 @@ func TestRevokedCookieIsRejectedAcrossDispatchSurfaces(t *testing.T) {
 	})
 	t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
 	deps, err := NewDeps(DepsInput{
-		Store: database, Identity: cookieIdentity, AgentToken: "agent-token",
+		Store: database, Identity: cookieIdentity, AgentTokens: sharedAgentTokens(t, "agent-token"),
 		Docs: documentService, Events: broker,
 	})
 	if err != nil {
@@ -2066,12 +2057,12 @@ func newTestHandlerWithBroker(t *testing.T) (http.Handler, *store.Store, *events
 	})
 	seedPeople(t, database, "alice", "bob")
 	deps, err := NewDeps(DepsInput{
-		Store:      database,
-		Identity:   headerIdentity(database),
-		AgentToken: "agent-token",
-		ServerURL:  "https://dispatch.example",
-		Docs:       documentService,
-		Events:     broker,
+		Store:       database,
+		Identity:    headerIdentity(database),
+		AgentTokens: sharedAgentTokens(t, "agent-token"),
+		ServerURL:   "https://dispatch.example",
+		Docs:        documentService,
+		Events:      broker,
 	})
 	if err != nil {
 		t.Fatalf("new API dependencies: %v", err)

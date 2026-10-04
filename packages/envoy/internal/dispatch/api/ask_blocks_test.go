@@ -23,7 +23,7 @@ func TestAnswerBlockAskWritesItsServerStateIntoTheDocument(t *testing.T) {
 		return documentService
 	})
 	issue := createInteractionIssue(t, handler, "TEST", "Answer typed ask", "Before\n")
-	if _, err := documentService.ReplaceText(context.Background(), issue.PrimaryArtifactID, ":::ask{#ask-1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nShip it?\n:::\n", model.Actor{Kind: "session", ID: "session-1"}); err != nil {
+	if _, err := replaceDocumentText(database, documentService, issue.PrimaryArtifactID, ":::ask{#ask-1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nShip it?\n:::\n", model.Actor{Kind: "session", ID: "session-1"}); err != nil {
 		t.Fatalf("write ask block: %v", err)
 	}
 	created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
@@ -398,7 +398,7 @@ func TestAskBlocksInUploadedSpecVersionAreIndexed(t *testing.T) {
 
 // A free-text ask block (no bullet list) must put `"options": []` on the wire - in the ask.opened
 // event and on the ask row - never JSON null: the SPA's Conversation tab reads options.length
-// and a null there takes the page down (AGENTC-150).
+// and a null there takes the page down.
 func TestOptionlessAskBlockCarriesEmptyOptionsNotNull(t *testing.T) {
 	var documentService *docs.Service
 	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
@@ -468,7 +468,7 @@ func awaitAskBlockEvent(t *testing.T, handler http.Handler, issueKey, eventType,
 
 // Settlement runs after the edit's own version has consumed the room's pending authors; the ask
 // it indexes must still be attributed to the session that wrote the block, or the asker can
-// never edit its own ask and nobody can tell who is asking (AGENTC-150).
+// never edit its own ask and nobody can tell who is asking.
 func TestBlockAskIndexedAfterEditKeepsTheWritingActor(t *testing.T) {
 	var documentService *docs.Service
 	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {

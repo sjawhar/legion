@@ -29,13 +29,13 @@ func newDevSignInRouterWithPeople(t *testing.T, serverURL string, sessions *memo
 	t.Helper()
 	people := newMemoryPeople()
 	ctx, err := BuildAppContext(AppContextOptions{
-		SigningKey: "signing-key",
-		People:     people,
-		Sessions:   sessions,
-		Identity:   identity.CookieIdentity{SigningKey: "signing-key", Sessions: sessions},
-		AgentToken: "e2e-token",
-		ServerURL:  serverURL,
-		DevSignIn:  true,
+		SigningKey:  "signing-key",
+		People:      people,
+		Sessions:    sessions,
+		Identity:    identity.CookieIdentity{SigningKey: "signing-key", Sessions: sessions},
+		AgentTokens: sharedAgentTokens(t, "e2e-token"),
+		ServerURL:   serverURL,
+		DevSignIn:   true,
 	})
 	if err != nil {
 		t.Fatalf("build context: %v", err)

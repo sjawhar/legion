@@ -216,14 +216,27 @@ opening a document or an agent's edit credits it nothing, so a reader whose edit
 the rendering carries causes no version and cannot stale an approval.
 A handler joins its document operations to its transaction with `Docs.Join`, which returns the
 transaction's ledger (`docs/ledger.go`), the only way to give a document operation a transaction:
-`SeedText` and `SnapshotVersion` take theirs from the ledger and refuse a context that was not
-joined. A joined operation never writes the room: it runs on the transaction's fork of the room's
-document (`docs/livewrite.go`), appends its update inside the transaction, and reads through the
-same fork. The handler ends the transaction with `ledger.Commit`, which records each settlement
-credit with the document content and takes each version's authors back out of that record,
-commits, credits the writes' actor to their rooms, releases the authors a version the transaction
-wrote named, then applies and broadcasts the updates, and last
-publishes the events its document operations appended, ahead of the handler's own; it defers
+every document write takes its transaction from the ledger and refuses a context that was not
+joined (`errUnjoined`): `SeedText`, a rebuild (`RebuildDocument`), the version writes, and every
+write that runs through `applyLive` (`docs/mutation.go`) - an upload's replacement, an edit batch,
+an accepted or rejected suggestion, an ask's edited text and its answer or resolution, a comment's
+anchor mark and its margin record - each of which `applyLive` also weighs by what it leaves
+(`docs/growth.go`). An answer the document has no room for is left out of its block, which records
+who answered and when, and kept on its ask. The server writes outside `applyLive` are a rebuild,
+settlement's repairs, the block-id backfill and the sweep of unrecorded marks. Of those, a rebuild
+and settlement's repairs carry caller text. A rebuild's supplied markdown is weighed as a new
+document's rendering is (`SeedText`), and its latest version, the server's own text, is restored
+whatever it weighs. Settlement's is the answer an ask keeps, written back into a block that returns
+to the document: settlement weighs each such answer and leaves out the ones the document has no
+room for (`withholdAnswers`). A joined
+operation never writes the room: it runs on the transaction's fork of the room's document
+(`docs/livewrite.go`), appends its update inside the transaction, and reads through the same fork.
+The handler ends the transaction with
+`ledger.Commit`, which records each settlement credit with the document content and takes each
+version's authors back out of that record, commits, credits the writes' actor to their rooms,
+releases the authors a version the transaction wrote named, then applies and broadcasts the
+updates, and last publishes the events its document operations appended, ahead of the handler's
+own; it defers
 `ledger.Discard`, so a transaction that does not commit leaves the room, every connected browser,
 every version and the durable document as they were.
 
@@ -381,10 +394,10 @@ forgets a state that holds nothing once its room has gone, so whatever ends last
 says a document's settlement is owed (`doc_settlements_pending`, migration 0063) also carries the
 authors that settlement needs (0069): a browser update records them in the update's own
 transaction, and a joined write records them in the transaction that commits its content, which
-also takes out the authors any version it wrote credited, as the room does once it commits. Every
-credit a browser or service-mutation update makes names only the actor(s) that specific update
-touches - never the room's whole accumulated `state.pending` - and carries the room's
-`creditVersion` as of that moment (`creditContentChange`'s returned `settlementCredit.CreditSeq`).
+also takes out the authors any version it wrote credited, as the room does once it commits. A
+browser update's credit names only the peers connected for it - never the room's whole accumulated
+`state.pending` - and carries the room's `creditVersion` as of that moment (`creditContentChange`'s
+returned sequence, `settlementCredit.CreditSeq`); a service repair is credited to no one.
 A version's release raises the row's `released_through` watermark to its own captured sequence
 and takes its authors out of the row; `upsertSettlementCredit` discards, rather than merges, a
 later credit whose own sequence is at or before that watermark, since everything in it was
@@ -1757,7 +1770,11 @@ code relies on: `Load` lists with `ListSecrets`' `name` filter, a case-sensitive
 `BROKER_SECRETS_PREFIX` and keeps only the names `strings.CutPrefix` finds under it, so a lister
 that answers more serves and logs nothing outside the namespace (`secrets.Local` filters as Secrets
 Manager does); a name under the prefix maps one-to-one to a request name (`slugPattern`); an alias
-on a secret's `KmsKeyId` is resolved through `kms:ListAliases` lazily, at most once per load; and
+on a secret's `KmsKeyId` is resolved through `kms:ListAliases` lazily, at most once per load;
+whether a secret has a value is read from the same listing's `SecretVersionsToStages` (a version
+labelled `AWSCURRENT`, the one `GetSecretValue` reads), with no call per secret, and checked after
+every other reason, so a secret refused for a tag or its key is logged for that (`secrets.Local`
+gives a secret created without a value no version, as Secrets Manager does); and
 an owner tag naming a service is refused as malformed while `Loader.Services` is empty, as
 `cmd/broker` leaves it. The two ERROR lines, `policy.RefusedMessage` with a `Reason*` constant and
 `policy.LoadFailedMessage`, are what the deployment's alarms filter on, so neither changes without
@@ -2204,7 +2221,8 @@ backend auto-strips exactly one leading directory, so the installed tree still e
 `bin/agent-secrets`, `bin/agent-secrets-helper`, the layout its installer expects; a bare
 `bin/...` top level would itself be the directory mise strips. The release job builds them, once
 it has decided the tag, so it can stamp that tag into both, and attests the two tarballs; the
-build job builds only `legion-envoy-<arch>.tar.gz` (envoy-listener alone). This is the release a
-host installs both binaries from (through the operator's dotfiles, under the broker design's
-devbox-enrollment plan).
+build job builds only `legion-envoy-<arch>.tar.gz` (envoy-listener alone, with its
+`THIRD_PARTY_NOTICES`). Each `agent-secrets` tarball also holds `agent-secrets/THIRD_PARTY_NOTICES`,
+the licenses of the Go modules both binaries compile in. This is the release a host installs both
+binaries from (through the operator's dotfiles, under the broker design's devbox-enrollment plan).
 

@@ -35,7 +35,9 @@ type LocalSecret struct {
 	KmsKeyID string `json:"kms_key_id"`
 	// Tags are its tags.
 	Tags map[string]string `json:"tags"`
-	// Value is its value.
+	// Value is its current value. Empty is a secret created without a value: as in Secrets
+	// Manager, it is listed with no version and reading it answers ResourceNotFoundException; one
+	// holding a value is listed with a version labelled AWSCURRENT.
 	Value string `json:"value"`
 }
 
@@ -114,7 +116,8 @@ func (l *Local) Alias(keyARN, alias string) {
 }
 
 // ListSecrets answers every secret in one page, filtered as Secrets Manager filters by name: each
-// name filter value matches a name it prefixes, case-sensitively.
+// name filter value matches a name it prefixes, case-sensitively. A secret holding a value is
+// listed with one version labelled AWSCURRENT, and one with no value with none.
 func (l *Local) ListSecrets(_ context.Context, in *secretsmanager.ListSecretsInput, _ ...func(*secretsmanager.Options)) (*secretsmanager.ListSecretsOutput, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -129,6 +132,9 @@ func (l *Local) ListSecrets(_ context.Context, in *secretsmanager.ListSecretsInp
 		}
 		for k, v := range s.Tags {
 			entry.Tags = append(entry.Tags, types.Tag{Key: aws.String(k), Value: aws.String(v)})
+		}
+		if s.Value != "" {
+			entry.SecretVersionsToStages = map[string][]string{"local-current": {"AWSCURRENT"}}
 		}
 		out.SecretList = append(out.SecretList, entry)
 	}
@@ -151,8 +157,8 @@ func matchesNameFilters(name string, filters []types.Filter) bool {
 	return true
 }
 
-// GetSecretValue answers the value of the secret SecretId names, by name or by LocalARN, and
-// ResourceNotFoundException for one it does not hold.
+// GetSecretValue answers the AWSCURRENT value of the secret SecretId names, by name or by
+// LocalARN, and ResourceNotFoundException for one it does not hold or that has no value.
 func (l *Local) GetSecretValue(_ context.Context, in *secretsmanager.GetSecretValueInput, _ ...func(*secretsmanager.Options)) (*secretsmanager.GetSecretValueOutput, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -160,6 +166,9 @@ func (l *Local) GetSecretValue(_ context.Context, in *secretsmanager.GetSecretVa
 	s, ok := l.secrets[strings.TrimPrefix(id, LocalARN(""))]
 	if !ok {
 		return nil, &types.ResourceNotFoundException{Message: aws.String("Secrets Manager can't find the specified secret.")}
+	}
+	if s.Value == "" {
+		return nil, &types.ResourceNotFoundException{Message: aws.String("Secrets Manager can't find the specified secret value for staging label: AWSCURRENT")}
 	}
 	return &secretsmanager.GetSecretValueOutput{Name: aws.String(s.Name), ARN: aws.String(LocalARN(s.Name)), SecretString: aws.String(s.Value)}, nil
 }

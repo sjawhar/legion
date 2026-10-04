@@ -139,7 +139,7 @@ func TestARolledBackWriteIsNoAuthorOfTheNextVersion(t *testing.T) {
 	ledger.Discard()
 
 	alice := model.Actor{Kind: "user", ID: "alice"}
-	if _, err := service.ReplaceText(ctx, artifactID, "after", alice); err != nil {
+	if _, err := joinedReplaceText(service, artifactID, "after", alice); err != nil {
 		t.Fatalf("replace text: %v", err)
 	}
 	version := waitForDocumentVersion(t, service.store, artifactID, 2)
@@ -197,7 +197,7 @@ func TestAJoinedWritesVersionNamesItsWriterNotAConnectedBrowser(t *testing.T) {
 
 	service.removeConnection(artifactID, connectionID)
 	later := model.Actor{Kind: "user", ID: "carol"}
-	if _, err := service.ReplaceText(ctx, artifactID, "after", later); err != nil {
+	if _, err := joinedReplaceText(service, artifactID, "after", later); err != nil {
 		t.Fatalf("replace text: %v", err)
 	}
 	settleCurrentGeneration(t, service, artifactID)

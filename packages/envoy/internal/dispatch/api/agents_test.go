@@ -21,10 +21,10 @@ func agentsHandler(t *testing.T, envoyURL string) http.Handler {
 func agentsHandlerWithStore(t *testing.T, envoyURL string, database *store.Store) http.Handler {
 	t.Helper()
 	deps := Deps{
-		Store:      database,
-		Identity:   headerIdentity(database),
-		AgentToken: "agent-token",
-		Envoy:      envoy.New(envoyURL),
+		Store:       database,
+		Identity:    headerIdentity(database),
+		AgentTokens: sharedAgentTokens(t, "agent-token"),
+		Envoy:       envoy.New(envoyURL),
 	}
 	mux := http.NewServeMux()
 	Register(mux, deps)

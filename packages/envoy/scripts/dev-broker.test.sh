@@ -9,7 +9,7 @@
 # entirely in the shell driver, never in the Go binaries it starts, so a stub proves the driver's
 # behavior without depending on cmd/agent-secrets-devrelay or cmd/broker compiling or running for
 # real). The broker stub logs "broker listening addr=127.0.0.1:<its own PID>" exactly like the
-# real cmd/broker does once it binds (AGENTC-833) — using its own PID as a stand-in for the
+# real cmd/broker does once it binds — using its own PID as a stand-in for the
 # kernel-assigned port a real Listen would report, since two concurrently running stub processes
 # always have distinct PIDs.
 #
@@ -20,7 +20,7 @@
 # each instance's own EXIT-trap cleanup drops exactly the database it created, before its process
 # ever exits; (d) each instance's exported AGENT_SECRETS_URL, and the address it curls for its own
 # readiness check, both name the exact port its own broker logged as bound — never a different,
-# stale, or script-precomputed value, the exact property that closes the AGENTC-833 race where a
+# stale, or script-precomputed value, the exact property that closes the race where a
 # port collision let a losing instance report "ready" while a different, already-running
 # instance's broker actually answered; and (e) the two concurrent instances bind two different
 # ports.
@@ -92,7 +92,7 @@ chmod +x "${fake_bin_dir}/psql"
 # --- Fake go: "go build -o <path> ./cmd/<pkg>" installs a stub executable at <path> instead of
 # compiling. The client stubs are never run by dev-broker.sh (it only prints their directory); the
 # broker stub logs a "broker listening addr=..." line exactly like the real cmd/broker does once
-# it binds (AGENTC-833) — using its own PID as a stand-in for the kernel-assigned port a real
+# it binds — using its own PID as a stand-in for the kernel-assigned port a real
 # Listen would report, since two concurrently running stub processes always have distinct PIDs —
 # and then stays alive as the backgrounded "server" process dev-broker.sh waits on and kills
 # during cleanup. ---
@@ -282,7 +282,7 @@ curl_calls1="${temporary_dir}/curl-calls-1"
 curl_calls2="${temporary_dir}/curl-calls-2"
 
 # Both instances start before either is waited on: this is the actual scenario
-# BROKER_LISTEN_ADDR=127.0.0.1:0 exists to make safe (AGENTC-833), not two sequential runs that
+# BROKER_LISTEN_ADDR=127.0.0.1:0 exists to make safe, not two sequential runs that
 # never actually contend for anything.
 run_instance 1 "$log1" "$docker_calls1" "$curl_calls1"
 run_instance 2 "$log2" "$docker_calls2" "$curl_calls2"
