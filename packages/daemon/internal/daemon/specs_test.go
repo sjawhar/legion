@@ -136,6 +136,22 @@ func TestAMergerIsToldTheReviewAppsLogin(t *testing.T) {
 			if got, want := strings.HasSuffix(spec.Prompt.Addressing, told), role == claim.RoleMerger; got != want || !want && strings.Contains(spec.Prompt.Addressing, "Review App:") {
 				t.Fatalf("addressing %q; want it to end with %q: %t", spec.Prompt.Addressing, told, want)
 			}
+			if role != claim.RoleMerger {
+				return
+			}
+			// The merger's prompt reads the sentence by its label, so the two cannot drift apart.
+			label, _, _ := strings.Cut(ReviewAppFragment("x"), ":")
+			var prompt strings.Builder
+			for _, path := range spec.Prompt.RolePromptPaths {
+				part, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatalf("read role prompt part %s: %v", path, err)
+				}
+				prompt.Write(part)
+			}
+			if want := "the `" + label + "` sentence after your addressing"; !strings.Contains(prompt.String(), want) {
+				t.Fatalf("the merger's composed prompt does not say %q, the label ReviewAppFragment writes", want)
+			}
 		})
 	}
 

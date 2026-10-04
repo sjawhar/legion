@@ -147,11 +147,15 @@ func pane() error {
 // systemPromptArgument composes the pane's role prompt as the daemon does (specs.SpawnSpec): the
 // role prompts snapshotted under the state directory, the role's parts, then its addressing. A
 // reviewer is told its project's review workflows after that, as a daemon whose project declares
-// none tells it, since the rig has no project configuration.
+// none tells it, since the rig has no project configuration. A tree architect and a merger are
+// refused: each is also told something the rig cannot stand in for.
 func systemPromptArgument(req paneRequest, token claim.Token) (string, error) {
 	role := claim.Role(req.Role)
 	if claim.IsTreeArchitect(role, req.Issue, req.Issue) {
 		return "", errors.New("a tree architect is also told its design gate policy, which the rig does not stand in for")
+	}
+	if role == claim.RoleMerger {
+		return "", errors.New("a merger is also told the review App's login, which the rig, holding no GitHub App, does not stand in for")
 	}
 	composer, err := prompts.New(req.StateDir)
 	if err != nil {
