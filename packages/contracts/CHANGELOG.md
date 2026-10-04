@@ -8,6 +8,8 @@
   `POST /api/v1/issues` and `PATCH /api/v1/issues/{key}` accept, generated into Go as
   `contracts.IssueTitleMax`; the dashboard's title fields take it as their `maxLength`
   (LEGION-505).
+- The `dispatch_doc_read` description says it reads an uploaded file's text at its latest or named
+  version, and describes a file that is not UTF-8 text.
 - `dispatch_request_approval`'s `summary` says only what the human is approving, with no commentary
   and no question, and an approval is requested only once the human has agreed to every point in
   the document (LEGION-475).
@@ -18,18 +20,29 @@
   to the human, at the version `approval.requested_version` names. `ask.edited` stays a rewording:
   a hand-back that changes no wording records only `ask.handed_back` and leaves `edited_at` as it
   was, and one with a new summary records `ask.edited` and then `ask.handed_back` (LEGION-470).
-- Added `AskEditEventPayload.quiet`: `true` on a version move of an approval request that already
-  waits on its agent, which carries `notify: false` and reaches no follower, as a human's unnamed
-  `artifact.version` does; only the move that takes the request from the human wakes anyone
+- Added `AskEditEventPayload.quiet`: `true` on a version move of an approval request that follows
+  an earlier move since the request was opened or last handed back (before this move, its
+  `requested_version` was already below the version it named; the payload's `approval.version` is
+  the version after the move, so the first move satisfies `requested_version < version` too and is
+  not quiet). A quiet move carries `notify: false` and reaches no follower, as a human's unnamed
+  `artifact.version` does; only the first move after an opening or a hand-back wakes anyone
   (LEGION-470).
 - Added `ArtifactApproval.waiting_on`, whose move an `awaiting` approval's request waits on, and
   `ApprovalRequestResponse`, the answer of `POST /api/v1/artifacts/{id}/approval-requests`
   (LEGION-470).
+- Added `WriteAdvice.decision_blocks_added`, on a document edit's advice: the ask blocks the edit
+  added, as the server's parser reads the edited document, so a block in a blockquote or a list
+  item counts and an opener quoted in code does not (LEGION-470).
 - `dispatch_request_approval`'s description and `summary` say an approval request carries nothing
   new: the summary says only what the human is approving, a later version leaves the request
   waiting on the agent until it hands the request back once the human has agreed to every point,
   and a call while the request already waits on the human hands nothing back, refusing a different
   summary (LEGION-470).
+- `dispatch_ask`'s description scopes it to a to-do or permission only a human can give, or a
+  decision with no document to live in: a question about the design an issue's document records is
+  a decision block in that document, at every phase and whether or not it was approved, and an ask
+  never carries an Approve option. `dispatch_message`'s description sends a design decision to a
+  decision block and a human to-do to `dispatch_ask` (LEGION-470).
 - `dispatch_request_approval` requires `summary`, the proposals in the document's latest version
   the human hasn't already agreed to (LEGION-387). `SPEC_SECTIONS` is removed: `dispatch_issue`'s
   `spec` and `dispatch_doc_edit` point at the dispatch skill's "Writing a spec" instead of listing

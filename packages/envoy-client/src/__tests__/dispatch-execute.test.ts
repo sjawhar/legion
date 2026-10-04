@@ -3366,6 +3366,125 @@ describe("executeDispatchTool", () => {
     ]);
   });
 
+  // Dispatch serves a file's content only as the bytes of one of its versions; its /text route
+  // refuses a file with 400 NOT_DOCUMENT, which every dispatch_doc_read of an uploaded .json, .yaml
+  // or .py file used to end in.
+  const fileIssue = {
+    key: "DSP-42",
+    primary_artifact_id: "artifact-42",
+    artifacts: [
+      {
+        id: "artifact-42",
+        slug: "spec",
+        name: "spec.md",
+        kind: "doc",
+        primary: true,
+        versions: [],
+      },
+      {
+        id: "file-7",
+        slug: "sweep-json",
+        name: "sweep.json",
+        kind: "file",
+        primary: false,
+        versions: [
+          { number: 1, mime: "application/json", size: 10 },
+          { number: 2, mime: "application/json", size: 17 },
+        ],
+      },
+      {
+        id: "image-8",
+        slug: "chart-png",
+        name: "chart.png",
+        kind: "image",
+        primary: false,
+        versions: [{ number: 1, mime: "image/png", size: 6 }],
+      },
+    ],
+    open_asks: [],
+  };
+  function fileServer(requests: string[]) {
+    return (async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      requests.push(target.pathname + target.search);
+      if (target.pathname === "/api/v1/issues/DSP-42") return response(fileIssue);
+      if (/^\/api\/v1\/artifacts\/(file-7|image-8)\/text$/.test(target.pathname)) {
+        return response({ code: "NOT_DOCUMENT", error: "artifact is not a document" }, 400);
+      }
+      const served: Record<string, [string, Uint8Array<ArrayBuffer>]> = {
+        "/api/v1/artifacts/file-7/versions/1": [
+          "application/json",
+          new TextEncoder().encode('{"rows":1}'),
+        ],
+        "/api/v1/artifacts/file-7/versions/2": [
+          "application/json",
+          new TextEncoder().encode('{"rows": [1, 2]}\n'),
+        ],
+        "/api/v1/artifacts/image-8/versions/1": [
+          "image/png",
+          new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a]),
+        ],
+      };
+      const file = served[target.pathname];
+      if (file !== undefined) {
+        return new Response(file[1], { status: 200, headers: { "Content-Type": file[0] } });
+      }
+      throw new Error(`unexpected request: ${target.pathname}`);
+    }) as typeof fetch;
+  }
+
+  test("dispatch_doc_read returns an uploaded file's text from its latest version or the one named", async () => {
+    const requests: string[] = [];
+    const read = (args: Record<string, unknown>) =>
+      executeDispatchTool({
+        tool: "dispatch_doc_read",
+        args,
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fileServer(requests),
+      });
+
+    expect(await read({ issue: "DSP-42", artifact: "sweep-json" })).toEqual({
+      text: 'File sweep.json: application/json, version 2, 17 bytes.\n\n{"rows": [1, 2]}\n',
+      details: { issue: "DSP-42" },
+    });
+    expect(await read({ ref: "dispatch://DSP-42/artifact/sweep-json@v1" })).toEqual({
+      text: 'File sweep.json: application/json, version 1 of 2, 10 bytes.\n\n{"rows":1}',
+      details: { issue: "DSP-42" },
+    });
+    expect(requests).toEqual([
+      "/api/v1/issues/DSP-42",
+      "/api/v1/artifacts/file-7/versions/2",
+      "/api/v1/issues/DSP-42",
+      "/api/v1/artifacts/file-7/versions/1",
+    ]);
+  });
+
+  test("dispatch_doc_read describes a binary upload instead of returning its bytes as text", async () => {
+    const requests: string[] = [];
+    const result = await executeDispatchTool({
+      tool: "dispatch_doc_read",
+      args: { issue: "DSP-42", artifact: "chart.png" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fileServer(requests),
+    });
+
+    expect(result).toEqual({
+      text:
+        "chart.png is an uploaded image/png file (version 1, 6 bytes) that is not UTF-8 text, so " +
+        "dispatch_doc_read cannot show it. GET /api/v1/artifacts/image-8/versions/1 serves its bytes.",
+      details: { issue: "DSP-42" },
+    });
+    expect(requests).toEqual(["/api/v1/issues/DSP-42", "/api/v1/artifacts/image-8/versions/1"]);
+  });
+
   test("dispatch_doc_read starts project document and mark reads before any response resolves", async () => {
     const document = deferred<Response>();
     const documentRequested = deferred<void>();

@@ -366,9 +366,9 @@ func payloadPreviousClaimSession(payload any) string {
 // session a human added), on the session's own topic. Unlike the route and author routes
 // this ignores Notify: an agent's reply on an ask must still reach the other followers,
 // who otherwise learn of it only by subscribing to the whole issue. A quiet ask.edited (a version
-// move of an approval request already waiting on its agent, model.AskEditEventPayload.Quiet)
-// reaches no follower. The event's own actor is skipped, and a topic the route already reached is
-// not published twice.
+// move of an approval request that an earlier version already moved since it was opened or last
+// handed back, model.AskEditEventPayload.Quiet) reaches no follower. The event's own actor is
+// skipped, and a topic the route already reached is not published twice.
 func publishFollowerRoutes(ctx context.Context, deps Deps, eventID int64, item contracts.Envelope, event model.Event, a *attempt) error {
 	var askID string
 	switch event.Type {

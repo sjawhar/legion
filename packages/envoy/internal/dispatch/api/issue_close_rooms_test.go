@@ -45,7 +45,7 @@ func TestClosingAnIssueClosesItsRoomsAfterTheClientHangsUp(t *testing.T) {
 		documentService = docs.New(docs.Deps{
 			Store: database,
 			Identity: identity.HeaderIdentity{
-				Header: "X-Dispatch-User", AllowedLogins: map[string]struct{}{"alice": {}},
+				Header: "X-Dispatch-User", People: store.NewPgPeopleStore(database.Pool),
 			},
 			Settle: time.Hour,
 		})

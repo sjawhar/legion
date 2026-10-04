@@ -190,7 +190,15 @@ export interface WriteAdvice {
   readonly issue_status?: IssueStatus;
   readonly session_writes_since_human?: number;
   readonly your_open_asks?: Array<{ id: string; question: string }>;
+  /** The ask blocks in the document an upload or issue creation stored, answered ones included. */
   readonly decision_blocks?: number;
+  /**
+   * A document edit's ask blocks the document before it did not hold, as the server's parser reads
+   * the edited document: one inserted or retyped into an ask counts wherever it lands, a blockquote
+   * or a list item included, and an opener quoted in code counts nothing. On every edit's advice;
+   * absent from a Dispatch server predating it.
+   */
+  readonly decision_blocks_added?: number;
   /**
    * The typed block openings (`:::ask{…}`) the written document holds as text rather than as
    * blocks, outside code: written inside a line, or escaped. `examples` quotes the first few with a
@@ -223,7 +231,7 @@ export interface Issue {
   readonly rank: string;
   readonly labels: string[];
   readonly parent: string | null;
-  /** Lowercase GitHub login of the human who answers this issue's asks; null when unassigned. */
+  /** Lowercase email of the person who answers this issue's asks; null when unassigned. */
   readonly assignee: string | null;
   /** The session or human working this issue, or null when nobody has claimed it. */
   readonly claim: IssueClaim | null;
@@ -760,10 +768,14 @@ export type AskEventPayload = Ask & ReferenceChangesPayload;
 export type AskEditEventPayload = AskEventPayload & {
   readonly previous: AskEditPrevious;
   readonly edited_by: Actor;
-  /** A version move of an approval request that already waits on its agent: it changes only the
-   *  version the request names, so its event, like a human's unnamed `artifact.version`, carries
-   *  `notify: false` and reaches no follower. Absent on every other edit, the move that takes the
-   *  request from the human included. */
+  /** A version move of an approval request that follows an earlier move since the request was
+   *  opened or last handed back: before this move, its `requested_version` was already below the
+   *  version it named. The payload's `approval.version` is the version after the move, so the
+   *  first move satisfies `requested_version < version` too and is not quiet. A quiet move changes
+   *  only the version the request names, so its event, like a human's unnamed `artifact.version`,
+   *  carries `notify: false` and reaches no follower. Absent on every other edit, the first move
+   *  after an opening or a hand-back included, even when a thread reply left the request waiting
+   *  on its agent. */
   readonly quiet?: true;
 };
 
@@ -1667,8 +1679,8 @@ export interface CreateIssueInput {
   readonly force?: boolean;
   readonly labels?: string[];
   readonly priority?: IssuePriority | null;
-  /** An allowlisted login; omitted, the server picks the creating human, the personal token's
-   *  owner, or the parent's assignee. */
+  /** The email of a person who has signed in; omitted, the server picks the creating person, the
+   *  personal token's owner, or the parent's assignee. */
   readonly assignee?: string;
   /** The issue's own component attachment; omitted, it inherits its parent's. */
   readonly components?: IssueComponentsInput;
@@ -1689,7 +1701,8 @@ export interface UpdateIssueInput {
   readonly priority?: IssuePriority | null;
   readonly route?: string | null;
   readonly external_links?: ExternalLink[];
-  /** An allowlisted login, or null to unassign; omitted leaves the assignee alone. */
+  /** The email of a person who has signed in, or null to unassign; omitted leaves the assignee
+   *  alone. */
   readonly assignee?: string | null;
   /** A parent issue key in the same project, or null to clear; omitted leaves it alone. */
   readonly parent?: string | null;
@@ -1699,7 +1712,7 @@ export interface UpdateIssueInput {
   readonly actor?: Actor;
 }
 
-/** One row of GET /api/v1/users: a login on the sign-in allowlist. */
+/** One row of GET /api/v1/users: a person who has signed in, `login` being their lowercase email. */
 export interface DispatchUser {
   readonly login: string;
 }
@@ -1708,9 +1721,9 @@ export interface ListUsersResponse {
   readonly users: DispatchUser[];
 }
 
-/** GET /api/v1/whoami: a human by display-cased login, or an agent with its personal token's
- *  owner (lowercase) — null under the shared token or a verified service token — and that
- *  service token's subject, null unless one authenticated the request. */
+/** GET /api/v1/whoami: a person by lowercase email (`login`), or an agent with its personal
+ *  token's owner (a lowercase email) — null under the shared token or a verified service token —
+ *  and that service token's subject, null unless one authenticated the request. */
 export type WhoamiResponse =
   | { readonly kind: "user"; readonly login: string }
   | { readonly kind: "agent"; readonly owner: string | null; readonly service: string | null };
