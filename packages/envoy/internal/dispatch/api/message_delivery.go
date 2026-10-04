@@ -66,8 +66,8 @@ const acceptFresh = `created_at >= now() - interval '1 minute'`
 
 // acceptByAuthor is the check that the person who asked for the attempt (its requested_by) is
 // the person who wrote message $1, so a message becomes a session's turn only on its author's own
-// Send or Aside, never on another person's retry of it. Logins are compared case-insensitively,
-// as a GitHub login and the sign-in allowlist (canonicalLogin) are.
+// Send or Aside, never on another person's retry of it. People are compared case-insensitively,
+// as canonicalLogin compares them: an email names one person however it is cased.
 const acceptByAuthor = `coalesce(
 	lower(requested_by ->> 'id') = (select lower(author ->> 'id') from messages where id = $1),
 	false)`
