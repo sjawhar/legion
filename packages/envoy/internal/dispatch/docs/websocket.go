@@ -421,8 +421,13 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	if err != nil {
 		return err
 	}
-	markdown, err := renderDocument(doc)
+	tree, err := treeOf(doc)
+	var markdown string
+	if err == nil {
+		markdown, err = documentMarkdown(tree)
+	}
 	var contentMarkdown *string
+	var askBlocks map[string]struct{}
 	switch {
 	case errors.Is(err, ErrDocOutsideSchema):
 		slog.Warn("dispatch: loaded document outside Proof schema; a replacement from markdown repairs it", "room", room, "error", err)
@@ -430,11 +435,19 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 		return err
 	default:
 		contentMarkdown = &markdown
+		askBlocks = askBlockIDs(tree)
 	}
 	state := s.room(room)
 	state.mu.Lock()
 	state.closed = !open
 	state.contentMarkdown = contentMarkdown
+	// The ask blocks the room loaded with are the baseline its update observer tells new ones by.
+	// They were not introduced by any update the observer sees, so none gains an author here.
+	if askBlocks == nil {
+		state.askBlocks = nil
+	} else {
+		state.observeAskBlocks(askBlocks, nil)
+	}
 	// The document owes a settlement no settlement committed: one a shutdown's budget cut short,
 	// or one a room failure dropped (failRoomLocked). Its timer lived in the process or the room
 	// that is gone, so this load settles once rather than waiting for an edit to arm one - unless
@@ -462,7 +475,7 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 		}
 		replica.mu.Lock()
 		replica.catchUp(room, doc)
-		contentChanged := s.updateChangesMarkdown(room, replica.doc)
+		contentChanged := s.updateChangesMarkdown(room, replica.doc, origin)
 		replica.mu.Unlock()
 		s.recordUpdateClass(room, update, contentChanged, true)
 		if contentChanged {
@@ -518,13 +531,21 @@ func (r *renderedReplica) catchUp(room string, live *crdt.Doc) {
 // updateChangesMarkdown reports whether the room's latest update changed its rendered markdown,
 // the only document content a version stores. It renders replica, the room's document as of that
 // update (renderedReplica). An update that changes only what no rendering carries - an anchor
-// mark, or a heading id or list item label the browser editor derives - is no content change.
-func (s *Service) updateChangesMarkdown(room string, replica *crdt.Doc) bool {
-	markdown, err := renderDocument(replica)
+// mark, or a heading id or list item label the browser editor derives - is no content change. In
+// the same critical section it records the ask blocks the replica holds and who introduced each
+// new one (observeAskBlocks): the observer renders each update in the order the replica took them,
+// so the room's record of its ask blocks moves forward only.
+func (s *Service) updateChangesMarkdown(room string, replica *crdt.Doc, origin any) bool {
+	tree, err := treeOf(replica)
+	var markdown string
+	if err == nil {
+		markdown, err = documentMarkdown(tree)
+	}
 	if err != nil {
 		state := s.room(room)
 		state.mu.Lock()
 		state.contentMarkdown = nil
+		state.askBlocks = nil
 		state.mu.Unlock()
 		if errors.Is(err, ErrDocOutsideSchema) {
 			slog.Warn("dispatch: updated document outside Proof schema", "room", room, "error", err)
@@ -533,6 +554,7 @@ func (s *Service) updateChangesMarkdown(room string, replica *crdt.Doc) bool {
 		}
 		return true
 	}
+	askBlocks := askBlockIDs(tree)
 	state := s.room(room)
 	state.mu.Lock()
 	defer state.mu.Unlock()
@@ -540,7 +562,33 @@ func (s *Service) updateChangesMarkdown(room string, replica *crdt.Doc) bool {
 		return false
 	}
 	state.contentMarkdown = &markdown
+	state.observeAskBlocks(askBlocks, s.updateAuthor(state, origin))
 	return true
+}
+
+// updateAuthor is the one source of an update the room's observer rendered, to whom an ask block
+// the update introduced is attributed: a committed transaction's actor, a service mutation's, or
+// the one person connected when a browser's update arrived. A browser's update while several people
+// are connected cannot be pinned on one, and names SettlementActor, as its settlement's events do.
+// An update with no source - no browser connected, or a write that recorded no actor - names no
+// one. The caller holds state.mu.
+func (s *Service) updateAuthor(state *roomState, origin any) *model.Actor {
+	if published, ok := origin.(*liveWriteOrigin); ok {
+		return published.actor
+	}
+	if value, service := s.serviceOrigins.Load(origin); service {
+		actor, _ := value.(*model.Actor)
+		return actor
+	}
+	var sole *model.Actor
+	for _, actor := range state.connected {
+		if sole == nil {
+			sole = new(actor)
+		} else if actorKey(actor) != actorKey(*sole) {
+			return new(SettlementActor)
+		}
+	}
+	return sole
 }
 
 // creditContentChange credits an observed content change to its authors. A service mutation
@@ -564,7 +612,6 @@ func (s *Service) creditContentChange(room string, origin any) {
 		if actor, credited := value.(*model.Actor); credited && actor != nil {
 			state.creditAuthor(*actor)
 			state.lastActor = new(*actor)
-			state.lastActorCredit = state.creditSeq
 		}
 		return
 	}
@@ -583,11 +630,6 @@ func (s *Service) creditContentChange(room string, origin any) {
 		sole = nil
 	}
 	state.lastActor = sole
-	if sole == nil {
-		state.lastActorCredit = 0
-	} else {
-		state.lastActorCredit = state.creditSeq
-	}
 }
 
 // addConnection registers a browser connected to room. It is credited only with browser edits

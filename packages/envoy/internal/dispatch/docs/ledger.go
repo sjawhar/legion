@@ -150,36 +150,26 @@ func (l *Ledger) endRebuilds() {
 }
 
 // WroteVersion records a version of artifactID that the caller wrote itself in this transaction,
-// outside the document service, over the transaction's write to the document - an upload, which
-// credits authors, its uploader, to whom that write is credited. Commit then leaves the write out
-// of the document's pending authors, since the version holds and credits it, and clears every
-// pending entry credited before the write last read the room (liveWrite.forkSeq): the replacement
-// overwrote those changes, so no later version may credit them. An entry credited after that read,
-// for a change the write never read, stays pending for the next version. A version of a document
-// the transaction seeded (SeedText) has no write to hold and no pending author to release.
-func (l *Ledger) WroteVersion(artifactID string, authors []model.Actor) {
+// outside the document service, over the transaction's write to the document - an upload, whose
+// version credits its uploader alone, to whom that write is credited. When the write changed the
+// document, Commit leaves the write out of the document's pending authors, since the version holds
+// and credits it, and clears every entry credited before the write last read the room
+// (liveWrite.forkSeq), whether the replacement removed that change or kept it: no later version
+// credits it. An entry credited after that read, for a change the write never read, stays pending
+// for the next version. An upload that changed nothing clears nothing, and a version of a document
+// the transaction seeded (SeedText) has no write to hold and no pending author to clear.
+func (l *Ledger) WroteVersion(artifactID string) {
 	write := l.liveWriteFor(artifactID)
-	if write == nil {
+	if write == nil || len(write.updates) == 0 {
 		return
 	}
-	state := write.state
-	state.mu.Lock()
-	capture := state.captureThrough(write.forkSeq, len(authors))
-	for key, pending := range state.pending {
-		if pending.seq <= write.forkSeq {
-			capture.supersede(key)
-		}
-	}
-	state.mu.Unlock()
-	for _, author := range authors {
-		capture.credit(author)
-	}
-	l.recordVersion(capture, write)
+	l.recordVersion(write.state.captureThrough(write.forkSeq, 0), write)
 }
 
-// recordVersion records a version this transaction wrote: capture, the authors whose entries its
-// commit releases, and write, the transaction's write to the document, every change of which so far
-// the version holds and credits, so that the commit does not credit it again (credit).
+// recordVersion records a version this transaction wrote: capture, through which its commit
+// releases the room's pending entries, and write, the transaction's write to the document, every
+// change of which so far the version holds and credits, so that the commit does not credit it
+// again (credit).
 func (l *Ledger) recordVersion(capture authorCapture, write *liveWrite) {
 	l.captures = append(l.captures, capture)
 	if write != nil {
@@ -223,21 +213,17 @@ func (l *Ledger) addLiveWrite(write *liveWrite) {
 func (l *Ledger) credit() {
 	for _, artifactID := range l.order {
 		write := l.live[artifactID]
-		if len(write.credits) == 0 && write.askBlocks == nil {
+		if len(write.credits) == 0 {
 			continue
 		}
 		state := l.service.room(artifactID)
 		state.mu.Lock()
-		state.trackCommittedAskBlocks(write)
-		if len(write.credits) > 0 {
-			if !write.versioned {
-				for _, actor := range write.credits {
-					state.creditAuthor(actor)
-				}
+		if !write.versioned {
+			for _, actor := range write.credits {
+				state.creditAuthor(actor)
 			}
-			state.lastActor = write.actor
-			state.lastActorCredit = state.creditSeq
 		}
+		state.lastActor = write.actor
 		state.mu.Unlock()
 	}
 }

@@ -334,16 +334,21 @@
   observer once the edit's transaction has released the document, and observers wait for each
   other's renders) was credited on no version: the edit's own settlement found the document
   versioned, wrote none, and released the author. Each pending author now carries the change it
-  credits, every version takes its authors before or with the tree read it records, a version's
-  commit releases only the entries it took, and a settlement that writes no version releases
-  nothing, so the next version credits such an author. That includes an author whose edits came to
-  nothing, typed and undone before a settlement. An upload's replacement clears every pending
-  credit it overwrote through the upload write's room read, while an edit credited after that read
-  stays pending for the next version. A service edit or upload records the actor that introduced
-  each new ask block until settlement indexes it, so a browser edit elsewhere cannot make that
-  browser the ask's author; a browser-created ask uses the latest known browser editor, an ambiguous
-  browser edit uses the document-settlement actor, and a browser ask that appeared after a
-  settlement took its author snapshot waits for its own settlement. Approval moves likewise name
+  credits, every version takes its authors no later than it reads the tree it records, a version's
+  commit releases only entries credited through that take, and a settlement that writes no
+  version releases nothing, so the next version credits such an author. That includes an author
+  whose edits came to nothing, typed and undone before a settlement. An upload that changes the
+  document clears every credit pending at its write's room read, whether its replacement removed
+  that edit or kept it, and its version credits its uploader alone; an edit credited after that
+  read stays pending for the next version, and an upload that changes nothing clears nothing. A new
+  ask is now attributed to the update that introduced its block, as the room's update observer
+  records it: a service edit's, an upload's or a committed transaction's actor, the one browser
+  connected when a browser's update arrived, or the document-settlement actor when several
+  people were connected. Before, a settlement named its own actor - the latest editor, or the
+  first pending author - so a browser edit elsewhere could take an agent's ask, and a block that
+  arrived while the settlement ran could take the name of an earlier editor. A block whose update
+  the observer has not rendered yet waits for the settlement that observer arms; a block the room
+  held when it loaded is still named as the settlement's other events are. Approval moves name
   the actor whose edit moved the version, even when it credits several authors, so a stale pending
   author does not make a human's move appear as the document settlement or suppress its
   notification.

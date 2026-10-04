@@ -236,11 +236,11 @@ func (s *Service) SeedText(ctx context.Context, artifactID, markdown string, act
 	}
 	// The seeding actor is the caller's own first version author (written directly by the
 	// caller, never through writeVersionTx), so it must not join `pending` - only the
-	// settlement that indexes the seeded ask blocks needs to know who wrote them. Recording it
+	// settlement that indexes the seeded ask blocks needs to know who wrote them, which the room's
+	// update observer never sees, since the seed reaches the room through its load. Recording it
 	// makes the document's room, so it waits for the seed to be written: a room leaves only when
 	// it is evicted, and a refused seed would hold one of the live-room slots for good.
-	s.recordLastActor(artifactID, actor)
-	s.trackAuthoredAskBlocks(ctx, artifactID, nil, tree, actor)
+	s.recordSeed(artifactID, tree, actor)
 	return canonical, nil
 }
 
@@ -253,7 +253,6 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 	}
 	var canonical string
 	var unchanged bool
-	var authoredBefore, authoredAfter *pmdoc.Node
 	err = s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) error {
 		fragment := doc.GetXmlFragment(fragmentName)
 		current, err := treeOf(doc)
@@ -339,7 +338,6 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 		if updateErr != nil {
 			return updateErr
 		}
-		authoredBefore, authoredAfter = current, target
 		return nil
 	})
 	if unchanged && errors.Is(err, websocket.ErrNoChanges) {
@@ -348,7 +346,6 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 	if err != nil {
 		return "", fmt.Errorf("replace live document: %w", err)
 	}
-	s.trackAuthoredAskBlocks(ctx, artifactID, authoredBefore, authoredAfter, actor)
 	return canonical, nil
 }
 
@@ -818,10 +815,9 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 		return EditOutcome{Token: token}, nil
 	}
 	var (
-		err                           error
-		outcome                       EditOutcome
-		snapshots                     []tableAnchorSnapshot
-		authoredBefore, authoredAfter *pmdoc.Node
+		err       error
+		outcome   EditOutcome
+		snapshots []tableAnchorSnapshot
 	)
 	if hasTableAnchorMutation(ops) {
 		snapshots, err = s.prevalidateLiveOperations(ctx, artifactID, ops)
@@ -878,9 +874,6 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 			mutationErr = recordInsertedText(ctx, artifactID, "", fragment, since, batch.writes, func() error {
 				return pmdoc.Update(transaction, fragment, next)
 			})
-			if mutationErr == nil {
-				authoredBefore, authoredAfter = tree, next
-			}
 		})
 		if mutationErr != nil {
 			return mutationErr
@@ -898,7 +891,6 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 		}
 		return EditOutcome{}, fmt.Errorf("apply live document operations: %w", err)
 	}
-	s.trackAuthoredAskBlocks(ctx, artifactID, authoredBefore, authoredAfter, actor)
 	return outcome, nil
 }
 
@@ -914,10 +906,7 @@ func (s *Service) applyOpsUnconditional(ctx context.Context, artifactID string, 
 		}
 		return EditOutcome{Token: token}, nil
 	}
-	var (
-		outcome                       EditOutcome
-		authoredBefore, authoredAfter *pmdoc.Node
-	)
+	var outcome EditOutcome
 	err := s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) error {
 		fragment := doc.GetXmlFragment(fragmentName)
 		since := authoredClock(ctx, artifactID, doc)
@@ -938,17 +927,13 @@ func (s *Service) applyOpsUnconditional(ctx context.Context, artifactID string, 
 		if outcome, err = batch.outcome(len(ops)); err != nil {
 			return err
 		}
-		recordErr := recordInsertedText(ctx, artifactID, "", fragment, since, batch.writes, func() error {
+		return recordInsertedText(ctx, artifactID, "", fragment, since, batch.writes, func() error {
 			var updateErr error
 			transact(func(transaction *crdt.Transaction) {
 				updateErr = pmdoc.Update(transaction, fragment, next)
 			})
 			return updateErr
 		})
-		if recordErr == nil {
-			authoredBefore, authoredAfter = tree, next
-		}
-		return recordErr
 	})
 	if err != nil {
 		if errors.Is(err, websocket.ErrNoChanges) {
@@ -959,7 +944,6 @@ func (s *Service) applyOpsUnconditional(ctx context.Context, artifactID string, 
 		}
 		return EditOutcome{}, fmt.Errorf("apply live document operations: %w", err)
 	}
-	s.trackAuthoredAskBlocks(ctx, artifactID, authoredBefore, authoredAfter, actor)
 	return outcome, nil
 }
 
@@ -1059,11 +1043,19 @@ func (s *Service) serviceTransact(transact func(func(*crdt.Transaction)), actor 
 	return wrapped, release
 }
 
-func (s *Service) recordLastActor(room string, actor model.Actor) {
+// recordSeed records a seeded document's actor as its latest editor and as the author of every ask
+// block the seed holds, all of which it introduced.
+func (s *Service) recordSeed(room string, tree *pmdoc.Node, actor model.Actor) {
+	askBlocks := askBlockIDs(tree)
 	state := s.room(room)
 	state.mu.Lock()
 	state.lastActor = new(actor)
-	state.lastActorCredit = 0
+	for id := range askBlocks {
+		if state.askAuthors == nil {
+			state.askAuthors = make(map[string]model.Actor, len(askBlocks))
+		}
+		state.askAuthors[id] = actor
+	}
 	state.mu.Unlock()
 }
 
@@ -1144,7 +1136,7 @@ func captureAuthors(state *roomState, write *liveWrite, actor *model.Actor) (aut
 	capture := state.takeAuthors()
 	if write != nil {
 		for key, credited := range write.credits {
-			capture.creditKey(key, credited)
+			capture.authors[key] = credited
 		}
 	}
 	if actor != nil {

@@ -74,11 +74,6 @@ type liveWrite struct {
 	credits   map[string]model.Actor
 	actor     *model.Actor
 	versioned bool
-	// askBlocks is the ask ids the write's latest tree holds, and authoredAskBlocks those this
-	// service write introduced. Ledger.commit moves the latter to roomState once the transaction
-	// commits, so settlement can author the new asks exactly.
-	askBlocks         map[string]struct{}
-	authoredAskBlocks map[string]model.Actor
 	// loss records what this write's latest batch of operations inserted, so a merge with the
 	// room's concurrent changes can be told from a clean one (see lossCheck). A later operation
 	// of the same transaction that inserts nothing an operation claims - an accept's margin
@@ -97,9 +92,13 @@ type liveWrite struct {
 // liveWriteOrigin tags the room transaction that applies a committed live write, so the room's
 // update observer credits it to no one: Ledger.Commit credited it when its transaction
 // committed. It carries the write's persistence-suppression slot, which that observer finishes
-// (onLoadDocument). It must remain non-zero sized because ygo compares origins by interface
-// equality.
-type liveWriteOrigin struct{ slot *suppressSlot }
+// (onLoadDocument), and the write's actor, whom the observer records as the author of an ask
+// block the write introduced (observeAskBlocks). It must remain non-zero sized because ygo
+// compares origins by interface equality.
+type liveWriteOrigin struct {
+	slot  *suppressSlot
+	actor *model.Actor
+}
 
 // joinedLiveWrite is the calling transaction's open write to artifactID, if it has one.
 func joinedLiveWrite(ctx context.Context, artifactID string) *liveWrite {
@@ -359,7 +358,7 @@ func (s *Service) creditLiveWrite(write *liveWrite, actor model.Actor) {
 func (s *Service) publishLiveWrite(write *liveWrite) {
 	defer s.finishLiveWrite(write)
 	for _, update := range write.updates {
-		err := s.publishLiveUpdate(write.artifactID, update)
+		err := s.publishLiveUpdate(write.artifactID, update, write.actor)
 		if err == nil {
 			continue
 		}
@@ -420,10 +419,10 @@ func (s *Service) recordPublishedLoss(write *liveWrite) {
 // bytes ygo's persistence observer is handed next (onLoadDocument), never after Apply returns. A
 // room whose persistence worker CloseRoom retired under this Apply hands the commit to ygo's
 // stranded persistence on this goroutine, which would otherwise wait on this slot for good.
-func (s *Service) publishLiveUpdate(room string, update []byte) error {
+func (s *Service) publishLiveUpdate(room string, update []byte, actor *model.Actor) error {
 	ctx := withOwnerVerified(context.Background())
 	slot := s.prepareSuppressedPersistence(room)
-	origin := &liveWriteOrigin{slot: slot}
+	origin := &liveWriteOrigin{slot: slot, actor: actor}
 	recorded, err := s.applyCaptured(ctx, room, origin, func(doc *crdt.Doc) error {
 		return crdt.ApplyUpdateV1(doc, update, origin)
 	})
