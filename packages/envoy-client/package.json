@@ -39,6 +39,11 @@
       "bun": "./src/dispatch-subscribe.ts",
       "default": "./dist/dispatch-subscribe.js"
     },
+    "./dispatch-pictures": {
+      "types": "./src/dispatch-pictures.ts",
+      "bun": "./src/dispatch-pictures.ts",
+      "default": "./dist/dispatch-pictures.js"
+    },
     "./dispatch-first": {
       "types": "./src/dispatch-first.ts",
       "bun": "./src/dispatch-first.ts",
@@ -76,7 +81,7 @@
     }
   },
   "scripts": {
-    "build": "bun build src/defaults.ts src/delivery.ts src/dispatch-config.ts src/dispatch-cwd.ts src/dispatch-execute.ts src/dispatch-first.ts src/dispatch-http.ts src/dispatch-subscribe.ts src/errors.ts src/machine.ts src/nats-auth.ts src/secret-file.ts src/tool-contract.ts src/transport.ts --outdir dist --target bun --format esm",
+    "build": "bun build src/defaults.ts src/delivery.ts src/dispatch-config.ts src/dispatch-cwd.ts src/dispatch-execute.ts src/dispatch-first.ts src/dispatch-http.ts src/dispatch-pictures.ts src/dispatch-subscribe.ts src/errors.ts src/machine.ts src/nats-auth.ts src/secret-file.ts src/tool-contract.ts src/transport.ts --outdir dist --target bun --format esm",
     "typecheck": "bunx tsc --noEmit",
     "test": "bun test",
     "lint": "bunx biome check src/ bin/"

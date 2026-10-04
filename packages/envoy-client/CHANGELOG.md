@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+### Added
+
+- Pictures in Dispatch (LEGION-541). `dispatch_message`, `dispatch_comment` and `dispatch_ask` take
+  `images`, local paths of PNG, JPEG, GIF or WebP files (by their bytes) of at most 25 MiB: each is
+  uploaded to the issue, the project document's project, or, for a reply to a direct message, the
+  session's own conversation (`DispatchClient.agentArtifact`, `POST /api/v1/agents/{session}/artifacts`),
+  and appended as one `![<file name>](dispatch://<owner>/artifact/<slug>@vN)` line after a blank
+  line. The lines count toward the body and question caps; a call over the cap is refused with the
+  count before any upload, and a bad file is refused naming its path. `DispatchToolResult.images`
+  carries pictures the model is shown: `dispatch_doc_read` of an image (a
+  `dispatch://agent/<session id>/artifact/<slug>@vN` reference included) returns it, and
+  `dispatch_read` returns the pictures the messages, asks and comments it shows embed, newest
+  first, at most 8 and 10 MiB per read, with a `Pictures:` section naming each and the rest; a
+  picture over 5 MiB or of another type is described. `readPictures`,
+  `@legion/envoy-client/dispatch-pictures` and `RenderInboundResult.pictures` serve the hosts'
+  deliveries.
+
 ### Changed
 
 - `dispatch_search` takes `offset` and says how far a page reaches: its first line reads

@@ -29,6 +29,7 @@ import { encode } from "@toon-format/toon";
 import { z } from "zod";
 import { askAnswerText, textHead } from "./ask-answer";
 import { dispatchChildRef, dispatchDocumentRef, dispatchIssueRef } from "./dispatch-owner";
+import { pictureAddresses } from "./dispatch-pictures";
 
 const KNOWN_SOURCES: Readonly<Record<string, unknown>> = EnvelopeSchema.shape.source.enum;
 const FOREIGN_SESSION_ID = /\b01a0[0-9a-f]{4}-[0-9a-f]{4}-7[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}\b/g;
@@ -355,7 +356,35 @@ export type RenderInboundResult = {
   readonly delivery?: DispatchDelivery;
   readonly rejectedDelivery?: DispatchDelivery;
   readonly malformedDelivery?: true;
+  /** The Dispatch addresses of the pictures the delivered message, comment, ask question, answer
+   *  or resolution reason embeds, in writing order; absent when it embeds none. */
+  readonly pictures?: readonly string[];
 };
+
+/** The pictures the text a Dispatch event brings embeds: a message's or comment's body, an opened
+ *  or reworded ask's question, an answer's typed text, a resolution's reason. */
+function eventPictures(event: DispatchEvent): string[] {
+  let text: string | null | undefined;
+  if (event.type.startsWith("message.") || event.type.startsWith("comment.")) {
+    const parsed = CommentPayloadSchema.safeParse(event.payload);
+    text = parsed.success ? parsed.data.body : undefined;
+  } else if (event.type.startsWith("ask.")) {
+    const parsed = (
+      event.type === "ask.edited" ? AskEditedPayloadSchema : AskPayloadSchema
+    ).safeParse(event.payload);
+    if (parsed.success) {
+      text =
+        event.type === "ask.answered"
+          ? parsed.data.answer?.text
+          : event.type === "ask.resolved"
+            ? parsed.data.resolution?.reason
+            : event.type === "ask.opened" || event.type === "ask.edited"
+              ? parsed.data.question
+              : undefined;
+    }
+  }
+  return typeof text === "string" ? pictureAddresses(text) : [];
+}
 
 export function senderLabel(envelope: DeliveryEnvelope): string {
   const sender = envelope.source_session ?? envelope.source ?? "unknown";
@@ -735,6 +764,7 @@ export function renderInbound(
   let delivery: DispatchDelivery | undefined;
   let rejectedDelivery: DispatchDelivery | undefined;
   let malformedDelivery = false;
+  let pictures: string[] = [];
   let inReplyTo = envelope.in_reply_to;
   // On an ask event the payload is the ask itself, whose author is another follower's
   // session when this session merely replied; naming it is not a spoof to flag.
@@ -874,6 +904,7 @@ export function renderInbound(
           ...(compactRecord ?? { payload: dispatchPayloadForReader(frame.event, sessionID) }),
         };
         dispatchActor = frame.event.actor;
+        pictures = eventPictures(frame.event);
       } else {
         dispatchEvent = frame.raw;
         rejectedDelivery = frame.rejectedDelivery;
@@ -979,5 +1010,6 @@ export function renderInbound(
     ...(delivery === undefined ? {} : { delivery }),
     ...(rejectedDelivery === undefined ? {} : { rejectedDelivery }),
     ...(malformedDelivery ? { malformedDelivery: true as const } : {}),
+    ...(pictures.length === 0 ? {} : { pictures }),
   };
 }
