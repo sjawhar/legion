@@ -4,6 +4,19 @@
 
 ### Changed
 
+- The architect and worker skills and the daemon's role prompts say what the daemon does: it
+  starts and orders every phase from its fixed workflow table (LEGION-223). Nothing tells an agent
+  to call `spawn_worker`, `release_wave` or `set_status`, which the `legion` tool no longer has.
+  `skill://legion-architect` releases children with `release_children`, signs off with `sign_off`,
+  sends re-filing, capacity and cross-tree conflicts to the controller's topic, and drops the wake
+  rows for notices the daemon never sends (`child-adopted`, `children-complete`, `worker-queued`,
+  `worker-started`, `worker-recovered`, `pr-review`). It says the daemon does not order the root's
+  tester after its children, so the parent's integration check is a final child released once the
+  others close; corrections after `pr-blocked` go through the worker holding the phase; and a
+  worker waiting on a missing surface is told to continue when that child closes. The worker skill,
+  the headless worker prompt and the implementer and tester prompts say the daemon, not the
+  architect, starts the next role, and that a worker is suspended when its phase ends, so a
+  finished role is not running to answer questions.
 - The root architect's post-approval spec-edit rule is canonical in
   `skill://legion-architect`, section 1 (LEGION-476). The root prompt and the worker skill point
   there. A planner records every design departure in the issue's `plan.md` document and in the
