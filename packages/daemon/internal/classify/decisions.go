@@ -30,27 +30,21 @@ func AdvancePullRequestHead(pr record.PullRequest, headSHA string) record.PullRe
 	return pr
 }
 
-// HeadVerdict is the CI verdict that stands for the pull request's current head: the recorded
-// settlement's, when it is the head's own or a head the current one replaced through pushes that
-// each changed only .legion/ and said which head they replaced (a handoff push can carry GitHub's
-// skip-checks trailer and start no CI of its own); otherwise none.
-func HeadVerdict(pr record.PullRequest) string {
-	if pr.CheckedHead == "" || !carriedBack(pr.Pushes, pr.HeadSHA, pr.CheckedHead) {
-		return ""
-	}
-	return pr.Verdict
+// settled says whether a CI settlement stands for the pull request's current head: one recorded
+// for the head itself, or for a head the current one replaced through pushes that each changed
+// only .legion/ and said which head they replaced (a handoff push can carry GitHub's skip-checks
+// trailer and start no CI of its own). A checked head is recorded only with a settlement
+// (SettlementFor, then ApplySettlement), and cleared with it (a new generation, migration 0028).
+func settled(pr record.PullRequest) bool {
+	return pr.CheckedHead != "" && carriedBack(pr.Pushes, pr.HeadSHA, pr.CheckedHead)
 }
 
-// SettlementFor says whether a CI settlement of candidate.Head, recording candidate.Verdict, may
-// stand for the pull request's current head, and returns the pull request ready to apply it. It may when head is the
-// current head, or a head the current one replaced through pushes that each changed only .legion/,
-// unless a recorded verdict already stands for the current head from a head nearer it on that
-// path, which outranks it.
+// SettlementFor says whether a CI settlement of candidate.Head may stand for the pull request's
+// current head, and returns the pull request ready to apply it. It may when head is the current
+// head, or a head the current one replaced through pushes that each changed only .legion/, unless
+// a settlement already stands for the current head from a head nearer it on that path, which
+// outranks it.
 // Every other settlement - an earlier code head's, a head a force push left - stands for nothing.
-// An absence of information never displaces information: a settlement that records no verdict
-// (its checks ended cancelled with none failed) is refused while a verdict stands, whichever head
-// it is for, since "some runs were cancelled" is not a result, and letting it overwrite one would
-// make the outcome depend on the order the two arrive in.
 // A settlement of a head other than the recorded one starts that head's fence afresh, since
 // check runs, generations and snapshots are each head's own.
 func SettlementFor(pr record.PullRequest, candidate SettlementCandidate) (record.PullRequest, bool) {
@@ -58,18 +52,15 @@ func SettlementFor(pr record.PullRequest, candidate SettlementCandidate) (record
 	if !carriedBack(pr.Pushes, pr.HeadSHA, head) {
 		return pr, false
 	}
-	if candidate.Verdict == "" && HeadVerdict(pr) != "" {
-		return pr, false
-	}
 	if head == pr.CheckedHead {
 		return pr, true
 	}
-	if head != pr.HeadSHA && HeadVerdict(pr) != "" && carriedBack(pr.Pushes, pr.CheckedHead, head) {
+	if head != pr.HeadSHA && settled(pr) && carriedBack(pr.Pushes, pr.CheckedHead, head) {
 		return pr, false
 	}
 	pr.CheckedHead = head
-	pr.Verdict = ""
 	pr.Failing = []string{}
+	pr.Cancelled = []string{}
 	pr.CheckRuns = nil
 	pr.Generation = 0
 	pr.Snapshot = ""
@@ -156,8 +147,8 @@ func ApplySettlement(pr record.PullRequest, candidate SettlementCandidate) (reco
 	pr.CheckRuns = mergeAttemptSets(pr.CheckRuns, candidate.CheckRuns)
 	pr.Generation = candidate.Generation
 	pr.Snapshot = candidate.Snapshot
-	pr.Verdict = outcome.Verdict
 	pr.Failing = append([]string(nil), outcome.Failing...)
+	pr.Cancelled = append([]string(nil), outcome.Cancelled...)
 	return pr, true
 }
 
@@ -280,10 +271,11 @@ func RedSendsBack(pr record.PullRequest) bool {
 	return true
 }
 
-// BlockFixAttempt marks and reports one exhausted fix-attempt count when the settlement just
-// applied is red, as the shipped reducer decides pr-blocked on ci-settled-red alone: a green head
-// at an exhausted count is the fix that worked. A zero BlockedAttempts means no count has been
-// reported, because fix attempts begin at one before they can exhaust a positive cap.
+// BlockFixAttempt marks and reports one exhausted fix-attempt count when the verdict that stands
+// for the head is red after a settlement or a new required set, as the shipped reducer decides
+// pr-blocked on ci-settled-red alone: a green head at an exhausted count is the fix that worked. A
+// zero BlockedAttempts means no count has been reported, because fix attempts begin at one before
+// they can exhaust a positive cap.
 func BlockFixAttempt(pr record.PullRequest, cap int) (record.PullRequest, bool) {
 	if cap <= 0 || HeadVerdict(pr) != "red" || pr.FixAttempts < cap || pr.BlockedAttempts == pr.FixAttempts {
 		return pr, false

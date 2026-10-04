@@ -46,12 +46,16 @@ takes this order: write, commit and push the handoff; submit the review of the h
 made, by its SHA; then complete. An approval waits for the CI verdict to settle green at that head
 before you submit it, since an approval stands only on green checks and GitHub can dismiss one
 once the head moves, and a verdict that settles red there makes the round's decision a request for
-changes naming the failing checks; a request for changes does not wait, since it stands whatever CI says and the
-issue leaves reviewing with it. A review of a head the handoff push then replaces names a head
-the pull request no longer has. A round that writes none (the final approval of the `.legion/`
-deletion head) reviews the head as it is. The daemon moves the issue once both are in —
-the decision GitHub reports and your completion, in either order — so a review posted without a
-completion leaves the issue in reviewing until you finish.
+changes naming the failing checks; a request for changes does not wait, since it stands whatever
+CI says and the issue leaves reviewing with it. The verdict is of the checks the base branch
+requires, the set READY checks: red when one of them failed, and never red for a check the base
+branch does not require. A required check that was cancelled, or that the head's checks settled
+without, leaves no verdict until a later settlement decides it, since a run can be cancelled or
+not yet queued when the head settles. A review of a head the handoff push
+then replaces names a head the pull request no longer has. A round that writes none (the final
+approval of the `.legion/` deletion head) reviews the head as it is. The daemon moves the issue
+once both are in — the decision GitHub reports and your completion, in either order — so a
+review posted without a completion leaves the issue in reviewing until you finish.
 
 ## Retro
 
@@ -86,7 +90,7 @@ completion leaves the issue in reviewing until you finish.
 ## After the human merge
 
 - **After a human merges, the implementer verifies in production.**
-  The architect sends the implementer back once the merge lands; the implementer watches the
+  The daemon starts the implementer again once the merge lands; the implementer watches the
   deploy slot that carries the merge to `production-apply` (or the equivalent publish step),
   drives the changed path in production through the user's own access path, and records the
   observation on the PR and the issue before the architect signs off. A staging pass is not

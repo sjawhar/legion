@@ -338,7 +338,7 @@ func TestAPanicWhileReadingIsAnInternalErrorNotARefusal(t *testing.T) {
 // one. Goldmark judges the lengths the runs were written with and pairs that `*` with the
 // closer, reading " see below" as emphasis alone.
 func TestParsePairsARunByTheLengthsItHasLeft(t *testing.T) {
-	nodes, err := ParseInline("***Note:****&#32;see below*")
+	nodes, err := ParseInline("***Note:****&#32;see below*", NewWriteBudget())
 	if err != nil {
 		t.Fatal(err)
 	}

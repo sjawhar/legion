@@ -14,7 +14,6 @@ import (
 	"github.com/reearth/ygo/persistence"
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
-	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
@@ -110,10 +109,8 @@ func newUploadRaceFixture(t *testing.T) *uploadRaceFixture {
 		service := docs.New(docs.Deps{
 			Store:       database,
 			Persistence: f.persistence,
-			Identity: identity.HeaderIdentity{
-				Header: "X-Dispatch-User", People: store.NewPgPeopleStore(database.Pool),
-			},
-			Settle: time.Hour,
+			Identity:    headerIdentity(database),
+			Settle:      time.Hour,
 		})
 		// Runs before the service shuts down: a failed assertion must not leave the upload
 		// held inside its transaction.

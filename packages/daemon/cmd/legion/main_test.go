@@ -30,7 +30,26 @@ func TestMain(m *testing.M) {
 	if os.Getenv(testMainEnv) == "1" {
 		main()
 	}
-	os.Exit(m.Run())
+	// Every test below starts isolated from the operator's own jj configuration — in particular
+	// fsmonitor.backend = "watchman" on this devbox: JJ_CONFIG names a file that does not exist,
+	// so jj falls back to its built-in defaults instead of reading ~/.jjconfig.toml, and no
+	// test-created repository ever registers a root with the operator's long-running watchman.
+	// watchman drops a root once its directory is deleted, so without this, the roots that pile
+	// up are the ones from a run this devbox's load killed before t.TempDir's cleanup ran. A test
+	// that sets its own JJ_CONFIG afterward (push_test.go's commit-trailer overlay, treeVolume's
+	// isolated one) still wins: os.Environ() is read fresh by every exec.Command.
+	configDir, err := os.MkdirTemp("", "legion-test-jj-config")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "TestMain:", err)
+		os.Exit(1)
+	}
+	if err := os.Setenv("JJ_CONFIG", filepath.Join(configDir, "no-user-config.toml")); err != nil {
+		fmt.Fprintln(os.Stderr, "TestMain:", err)
+		os.Exit(1)
+	}
+	code := m.Run()
+	os.RemoveAll(configDir)
+	os.Exit(code)
 }
 
 // legionState points the registry at a directory of this test's own, so nothing here reads or

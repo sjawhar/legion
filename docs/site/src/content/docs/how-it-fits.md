@@ -8,7 +8,7 @@ sidebar:
 Four components share the work. **Dispatch** holds the record: the issues, their documents, and
 every decision a person makes about them. **Legion** works the issues handed to it by running coding
 agents. The **Secrets Broker** gives those agents credentials, with a person's approval shown in
-Dispatch when the rules require one. **Envoy** carries events between them.
+Dispatch when the secret's owner and tier require one. **Envoy** carries events between them.
 
 ```mermaid
 flowchart TB
@@ -85,9 +85,10 @@ Sandbox pods in a Kubernetes cluster.
 
 An agent that needs a secret, such as a token for a service its task touches, asks the broker for
 it by name. The agent's session or pod first enrolls with the broker under a signing key of its own,
-so every request is signed by the session making it. The broker's rules then decide, per secret
-and per kind of requester, whether to grant the request automatically, send it to a named person
-for approval, or refuse it.
+so every request is signed by the session making it. Two tags on each secret, its owner and its
+tier, then decide whether to grant the request automatically (the owner's own sessions asking for
+an agent-tier secret), send it to a person for approval (its owner, or anyone for a shared
+human-tier secret), or refuse it.
 
 An approval request appears in that person's Dispatch Inbox, labelled as a secret request or a
 machine login, together with the reason the agent gave. The person approves or denies it there, and

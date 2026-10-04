@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/githubrest"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
@@ -50,13 +51,10 @@ type TransientError struct{ Err error }
 func (e *TransientError) Error() string { return e.Err.Error() }
 func (e *TransientError) Unwrap() error { return e.Err }
 
-// transient marks a response that is GitHub's trouble rather than an answer. GitHub answers a rate
-// limit with a 429, or with a 403 carrying `x-ratelimit-remaining: 0` or a `retry-after`.
+// transient marks a response that is GitHub's trouble rather than an answer: a 5xx, or a rate
+// limit (githubrest.RateLimited).
 func transient(response *http.Response, err error) error {
-	status := response.StatusCode
-	rateLimited := status == http.StatusForbidden &&
-		(response.Header.Get("X-RateLimit-Remaining") == "0" || response.Header.Get("Retry-After") != "")
-	if status >= http.StatusInternalServerError || status == http.StatusTooManyRequests || rateLimited {
+	if response.StatusCode >= http.StatusInternalServerError || githubrest.RateLimited(response) {
 		return &TransientError{Err: err}
 	}
 	return err

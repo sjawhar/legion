@@ -49,7 +49,7 @@ const repoLabelPrefix = "repo:"
 type Deps struct {
 	Store          *store.Store
 	Identity       identity.Identity
-	AgentToken     string
+	AgentTokens    *auth.SharedAgentTokens
 	DefaultProject string
 	ServerURL      string
 	Docs           docs.API
@@ -92,7 +92,7 @@ const defaultStreamHeartbeat = 15 * time.Second
 type DepsInput struct {
 	Store          *store.Store
 	Identity       identity.Identity
-	AgentToken     string
+	AgentTokens    *auth.SharedAgentTokens
 	DefaultProject string
 	ServerURL      string
 	EnvoyURL       string
@@ -135,11 +135,11 @@ func NewDeps(input DepsInput) (Deps, error) {
 	}
 	if input.Docs == nil {
 		input.Docs = docs.New(docs.Deps{
-			Store:      input.Store,
-			Events:     input.Events,
-			Identity:   input.Identity,
-			AgentToken: input.AgentToken,
-			ServerURL:  input.ServerURL,
+			Store:       input.Store,
+			Events:      input.Events,
+			Identity:    input.Identity,
+			AgentTokens: input.AgentTokens,
+			ServerURL:   input.ServerURL,
 		})
 	}
 	var envoyClient *envoy.Client
@@ -165,7 +165,7 @@ func NewDeps(input DepsInput) (Deps, error) {
 	return Deps{
 		Store:            input.Store,
 		Identity:         input.Identity,
-		AgentToken:       input.AgentToken,
+		AgentTokens:      input.AgentTokens,
 		DefaultProject:   defaultProject,
 		ServerURL:        strings.TrimSuffix(input.ServerURL, "/"),
 		Docs:             input.Docs,
@@ -449,9 +449,9 @@ func (s *server) writeHandlerError(w http.ResponseWriter, err error) {
 		writeError(w, "INVALID_MARKDOWN", http.StatusBadRequest, err.Error())
 		return
 	}
-	if errors.Is(err, docs.ErrDocumentTooLarge) {
+	if docs.IsTooLarge(err) {
 		writeError(w, "CAP_EXCEEDED", http.StatusRequestEntityTooLarge, err.Error())
-		slog.Warn("dispatch: API refused a document over the update item cap", "error", err)
+		slog.Warn("dispatch: API refused a document too large to store", "error", err)
 		return
 	}
 	// A tree outside the schema that the document holds answers 409 with its one message, the same
@@ -495,7 +495,7 @@ func (s *server) optionalActor(r *http.Request) (model.Actor, bool, error) {
 		if token == "" {
 			return model.Actor{}, false, errorf(http.StatusUnauthorized, "UNAUTHORIZED", "invalid bearer token")
 		}
-		if auth.MatchesSharedAgentToken(token, s.deps.AgentToken) {
+		if auth.MatchesSharedAgentToken(r, token, s.deps.AgentTokens) {
 			return model.Actor{}, false, nil
 		}
 		if s.deps.OIDC != nil && oidc.LooksLikeJWT(token) {

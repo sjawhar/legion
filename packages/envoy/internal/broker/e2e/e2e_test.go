@@ -1,15 +1,15 @@
-// e2e_test.go is the acceptance proof for the secrets broker (AGENTC-393): the whole
-// credential-request story driven as real HTTP against the mux built by api.Register, on a real
-// Postgres store and a fake Secrets Manager. Every step below drives HTTP; none calls a service
-// method directly (Machine.ApplyDecision and friends are exercised only through the routes that
-// wrap them). A human decision is a UI-route call naming the approver's login, the body Dispatch's
-// server sends on the human's behalf.
+// e2e_test.go is the acceptance proof for the secrets broker: the whole credential-request story
+// driven as real HTTP against the mux built by api.Register, on a real Postgres store and a fake
+// Secrets Manager. Every step below drives HTTP; none calls a service method directly
+// (Machine.ApplyDecision and friends are exercised only through the routes that wrap them). A
+// human decision is a UI-route call naming the approver's login, the body Dispatch's server sends
+// on the human's behalf.
 //
 // Unlike internal/broker/api/api_test.go's per-route unit coverage, this test's wiring mirrors
-// cmd/broker/main.go exactly: rules.NewCurrent reads a real file on disk through a real
-// rules.FileLoader and reloads it on a real ticker, so the reload step (8) rewrites that file on
-// disk and waits for the live ticker to pick it up rather than standing up a second
-// rules.Current to fake "a reload happened".
+// cmd/broker/main.go exactly: policy.NewCurrent runs a real policy.Loader over the fake Secrets
+// Manager and reloads it on a real ticker, so step 8 edits a secret's tags in that store and waits
+// for the live ticker to pick the edit up rather than standing up a second policy.Current to fake
+// "a reload happened".
 //
 // Step-to-subtest map:
 //
@@ -21,7 +21,11 @@
 //  5. revoke-by-approver kills the grant                                -> "5_..."
 //  6. forged grant row releases nothing                                -> "6_..."
 //  7. another login, or no UI bearer, decides nothing                   -> "7_..."
-//  8. a reload carrying the removed approvers: section is refused        -> "8_..."
+//  8. a secret whose owner tag is edited to no person is refused by the
+//     live reload, logged by name, and served again once fixed          -> "8_..."
+//  9. anyone signed in approves a shared human-tier secret              -> "9_..."
+//  10. another person's session asking for the operator's agent-tier
+//     secret waits for the operator's approval                          -> "10_..."
 package e2e
 
 import (
@@ -30,10 +34,10 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -43,10 +47,11 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/api"
 	"github.com/sjawhar/envoy/internal/broker/enroll"
 	"github.com/sjawhar/envoy/internal/broker/machine"
+	"github.com/sjawhar/envoy/internal/broker/policy"
+	"github.com/sjawhar/envoy/internal/broker/policy/policytest"
 	"github.com/sjawhar/envoy/internal/broker/proof"
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/requests"
-	"github.com/sjawhar/envoy/internal/broker/rules"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
 	"github.com/sjawhar/envoy/internal/broker/store"
 	"github.com/sjawhar/envoy/internal/broker/store/storetest"
@@ -54,13 +59,17 @@ import (
 
 const (
 	testUIToken = "test-ui-token-e2e-0123456789abcdef"
-	// testApprover operates the box every request below comes from, and so is every approval's
-	// approver (approver: operator) and the machine login's login_hint.
-	testApprover = "sjawhar"
+	// testApprover operates the box every request below comes from, owns every secret but the
+	// shared one, and so is every approval's approver but the shared one's; and the machine
+	// login's login_hint.
+	testApprover = "sami@example.com"
+	// otherPerson signs in to Dispatch too: they approve the shared secret, and their own machine
+	// asks for testApprover's agent-tier secret.
+	otherPerson = "ben@example.com"
 
-	// reloadInterval is rules.NewCurrent's own ticker period for this test: short enough that the
-	// reload step's bounded wait (reloadTimeout) sees the real reload path run several times
-	// without slowing the suite down.
+	// reloadInterval is policy.NewCurrent's own ticker period for this test: short enough that
+	// step 8's bounded wait (reloadTimeout) sees the real reload path run several times without
+	// slowing the suite down.
 	reloadInterval = 40 * time.Millisecond
 	reloadTimeout  = 5 * time.Second
 )
@@ -68,25 +77,24 @@ const (
 // --- harness ---
 
 // e2eServer is a live broker HTTP server (real handlers, real Postgres) wired exactly like
-// cmd/broker/main.go: a real rules.FileLoader over RulesPath, reloading on a real ticker. alarms
-// receives every reload the ticker refused, as main.go logs them.
+// cmd/broker/main.go: a real policy.Loader over Secrets, reloading on a real ticker. Log holds
+// everything the broker logged.
 type e2eServer struct {
-	URL       string
-	Store     *store.Store
-	RulesPath string
-	alarms    chan error
+	URL     string
+	Store   *store.Store
+	Secrets *secrets.Local
+	Log     fmt.Stringer
 }
 
-// newE2EServer writes the initial scratch rules file and wires the full service graph —
-// enroll.Service (+ ChainVerifier), requests.Machine, machine.Service, rules.NewCurrent — the same
-// way main.go does, minus the HTTP listener and signal handling (api.Register mounts on an
-// httptest.Server instead of a real net/http.Server, as api_test.go's newTestServer does).
+// newE2EServer holds e2eSecrets in a fake Secrets Manager and wires the full service graph —
+// enroll.Service (+ ChainVerifier), requests.Machine, machine.Service, policy.NewCurrent — the
+// same way main.go does, minus the HTTP listener and signal handling (api.Register mounts on an
+// httptest.Server instead of a real net/http.Server, as api_test.go's newTestServer does). The
+// broker logs through slog's default handler, as main.go's does, here into Log.
 func newE2EServer(t *testing.T) *e2eServer {
 	t.Helper()
 	st := storetest.Open(t)
-
-	rulesPath := t.TempDir() + "/rules.yaml"
-	writeRulesFile(t, rulesPath, rulesYAML)
+	logged := policytest.CaptureLog(t)
 
 	mux := http.NewServeMux()
 	srv := httptest.NewServer(mux)
@@ -95,30 +103,22 @@ func newE2EServer(t *testing.T) *e2eServer {
 	enr := &enroll.Service{Store: st, Lease: time.Hour}
 	enr.Chain = enroll.NewChainVerifier(st, srv.URL, time.Minute)
 
-	alarms := make(chan error, 64)
+	local := secrets.NewLocal(e2eSecrets...)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	current, err := rules.NewCurrent(ctx, rules.FileLoader{Path: rulesPath}, reloadInterval, func(e error) {
-		select {
-		case alarms <- e:
-		default:
-		}
-	})
+	current, err := policy.NewCurrent(ctx, policytest.Loader(local), reloadInterval)
 	if err != nil {
-		t.Fatalf("rules.NewCurrent: %v", err)
+		t.Fatalf("policy.NewCurrent: %v", err)
 	}
 
 	reqMachine := &requests.Machine{
-		Store: st, Rules: current, Secrets: secrets.Fake{
-			"example/agent-secrets/DEEL_API_KEY":   "deel-v1",
-			"example/agent-secrets/NOTION_API_KEY": "notion-v1",
-		},
+		Store: st, Policy: current, Secrets: secrets.AWS{Client: local},
 		MaxGrant: time.Hour, PendingTTL: 12 * time.Hour,
 		Audience: srv.URL, Skew: time.Minute, Replay: enr.Replay,
 	}
 	reqMachine.Chain = requests.NewChainVerifier(st, srv.URL, time.Minute)
 	mach := &machine.Service{
-		Store: st, Enroll: enr, Rules: current,
+		Store: st, Enroll: enr, Policy: current,
 		Audience: srv.URL, Skew: time.Minute, PendingTTL: 15 * time.Minute, CredentialLifetime: 7 * 24 * time.Hour,
 		Replay: enr.Replay,
 	}
@@ -129,66 +129,25 @@ func newE2EServer(t *testing.T) *e2eServer {
 		Proof: &proof.Verifier{Skew: time.Minute, Lookup: enr.Lookup, LookupLauncher: enr.AuthenticateLauncher, Replay: enr.Replay},
 	})
 
-	return &e2eServer{URL: srv.URL, Store: st, RulesPath: rulesPath, alarms: alarms}
+	return &e2eServer{URL: srv.URL, Store: st, Secrets: local, Log: logged}
 }
 
-// writeRulesFile writes content to path via a temp-file-then-rename, so rules.FileLoader (a plain
-// os.ReadFile) never observes a half-written file when the reload ticker fires mid-write.
-func writeRulesFile(t *testing.T, path, content string) {
-	t.Helper()
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(content), 0o600); err != nil {
-		t.Fatalf("write rules file: %v", err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		t.Fatalf("rename rules file into place: %v", err)
-	}
+// e2eSecrets are the fake Secrets Manager's secrets. Every one testApprover owns is human-tier but
+// AUTO_READ_TOKEN, so it needs their approval, and each approval-needing secret used across the
+// steps gets its own distinct name: requests.Machine.Create's reuseLiveGrant check reuses any
+// still-live grant for an exact name-set match against the same enrollment before ever evaluating
+// the policy, so two steps sharing one secret name would make a later "fresh pending request"
+// silently resolve to an earlier step's already-decided grant instead of creating the new record
+// the step means to test.
+var e2eSecrets = []secrets.LocalSecret{
+	policytest.Secret("DEEL_API_KEY", testApprover, policy.TierHuman, "deel-v1"),
+	policytest.Secret("SLACK_MCP_XOXP_TOKEN", testApprover, policy.TierHuman, "slack-v1"),
+	policytest.Secret("GITHUB_TOKEN", testApprover, policy.TierHuman, "github-v1"),
+	policytest.Secret("NOTION_API_KEY", testApprover, policy.TierHuman, "notion-v1"),
+	policytest.Secret("LINEAR_API_KEY", testApprover, policy.TierHuman, "linear-v1"),
+	policytest.Secret("SHARED_DEPLOY_KEY", policy.OwnerShared, policy.TierHuman, "shared-deploy-v1"),
+	policytest.Secret("AUTO_READ_TOKEN", testApprover, policy.TierAgent, "read-v1"),
 }
-
-// rulesYAML is the scratch rules file. Every agent_secret is approval-needing (approver:
-// operator), and each approval-needing secret used across the steps gets its own distinct name:
-// requests.Machine.Create's reuseLiveGrant check reuses any still-live grant for an exact
-// name-set match against the same enrollment before ever looking at the rules, so two steps
-// sharing one secret name would make a later "fresh pending request" silently resolve to an
-// earlier step's already-decided grant instead of creating the new record the step means to test.
-const rulesYAML = `version: 1
-secrets:
-  DEEL_API_KEY:
-    source: example/agent-secrets/DEEL_API_KEY
-    owner: sjawhar
-    delivery: inject
-    max_lifetime_seconds: 43200
-    requesters:
-      - {kind: box, operator: sjawhar, decision: approval, approver: operator}
-  SLACK_MCP_XOXP_TOKEN:
-    source: example/agent-secrets/SLACK_MCP_XOXP_TOKEN
-    owner: sjawhar
-    delivery: inject
-    max_lifetime_seconds: 43200
-    requesters:
-      - {kind: box, operator: sjawhar, decision: approval, approver: operator}
-  GITHUB_TOKEN:
-    source: example/agent-secrets/GITHUB_TOKEN
-    owner: sjawhar
-    delivery: inject
-    max_lifetime_seconds: 43200
-    requesters:
-      - {kind: box, operator: sjawhar, decision: approval, approver: operator}
-  NOTION_API_KEY:
-    source: example/agent-secrets/NOTION_API_KEY
-    owner: sjawhar
-    delivery: inject
-    max_lifetime_seconds: 43200
-    requesters:
-      - {kind: box, operator: sjawhar, decision: approval, approver: operator}
-  LINEAR_API_KEY:
-    source: example/agent-secrets/LINEAR_API_KEY
-    owner: sjawhar
-    delivery: inject
-    max_lifetime_seconds: 43200
-    requesters:
-      - {kind: box, operator: sjawhar, decision: approval, approver: operator}
-`
 
 // --- HTTP helpers ---
 
@@ -588,62 +547,169 @@ func TestEndToEnd(t *testing.T) {
 		}
 	})
 
-	// Step 8: a rules file still carrying the removed approvers: section is refused by the live
-	// reload ticker, naming the removal, and the previous rules stay in force. The refused file
-	// also drops LINEAR_API_KEY, so a fresh LINEAR_API_KEY request going pending (rather than
-	// 400 UNKNOWN_SECRET) shows the previous rules are still the live ones. The file is then put
-	// back so later reloads are clean again.
-	t.Run("8_ReloadWithApproversSectionIsRefused", func(t *testing.T) {
-		withoutLinear, _, found := strings.Cut(rulesYAML, "  LINEAR_API_KEY:")
-		if !found {
-			t.Fatal("rulesYAML has no LINEAR_API_KEY entry to drop")
+	// Step 8: an owner edits LINEAR_API_KEY's owner tag to a GitHub login, which names no person.
+	// The live reload refuses that one secret, logging its name and why in the line the
+	// deployment's alarm filters on, and a fresh request for it answers 400 UNKNOWN_SECRET while
+	// every other secret is still served; once the tag names a person again the next reload
+	// serves it again.
+	t.Run("8_MalformedOwnerTagIsRefusedByTheLiveReload", func(t *testing.T) {
+		linear := policytest.Secret("LINEAR_API_KEY", "sjawhar", policy.TierHuman, "linear-v1")
+		ts.Secrets.Put(linear)
+		refused := "ERROR agent secret policy refused name=" + policytest.ID("LINEAR_API_KEY") + " reason=owner-tag-malformed\n"
+		ts.awaitStatus(t, "LINEAR_API_KEY", http.StatusBadRequest, "UNKNOWN_SECRET")
+		if !strings.Contains(ts.Log.String(), refused) {
+			t.Fatalf("broker log has no line %q:\n%s", refused, ts.Log.String())
 		}
-		writeRulesFile(t, ts.RulesPath, withoutLinear+"approvers:\n  origin: https://dispatch.test\n  logins: {}\n")
-		deadline := time.After(reloadTimeout)
-	wait:
-		for {
-			select {
-			case err := <-ts.alarms:
-				if strings.Contains(err.Error(), "approvers: section is removed") {
-					break wait
-				}
-			case <-deadline:
-				t.Fatalf("no reload alarm naming the removed approvers: section within %s", reloadTimeout)
-			}
+		ts.createPending(t, sessionKey, enrollmentID, "e2e other secrets still served", "SLACK_MCP_XOXP_TOKEN")
+
+		ts.Secrets.Put(policytest.Secret("LINEAR_API_KEY", testApprover, policy.TierHuman, "linear-v1"))
+		ts.awaitStatus(t, "LINEAR_API_KEY", http.StatusOK, "")
+	})
+
+	// Step 9: a shared human-tier secret's request names "anyone" as its approver, reaches the
+	// pending list of a person who is neither its requester's operator nor anyone the policy names,
+	// is refused to the sentinel itself, and that person's approval releases its value.
+	t.Run("9_AnyoneSignedInApprovesASharedHumanTierSecret", func(t *testing.T) {
+		_, recordID := ts.createPending(t, sessionKey, enrollmentID, "e2e shared deploy", "SHARED_DEPLOY_KEY")
+		_, body := ts.ui(t, http.MethodGet, "/v1/credential-requests/"+recordID, nil)
+		if read := decode[wireRecord](t, body); read.Approver != record.AnyoneApprover {
+			t.Fatalf("shared record = %+v, want approver %q", read, record.AnyoneApprover)
 		}
-		ts.createPending(t, sessionKey, enrollmentID, "e2e rules kept", "LINEAR_API_KEY")
-		writeRulesFile(t, ts.RulesPath, rulesYAML)
+		ts.awaitPendingFor(t, otherPerson, recordID)
+
+		status, body := ts.ui(t, http.MethodPost, "/v1/credential-requests/"+recordID+"/approve",
+			map[string]any{"approver": record.AnyoneApprover})
+		if status != http.StatusForbidden || decode[wireError](t, body).Code != "NOT_APPROVER" {
+			t.Fatalf("approve as %q = %d %s, want 403 NOT_APPROVER", record.AnyoneApprover, status, body)
+		}
+		status, body = ts.ui(t, http.MethodPost, "/v1/credential-requests/"+recordID+"/approve",
+			map[string]any{"approver": otherPerson})
+		if status != http.StatusOK {
+			t.Fatalf("approve as %s = %d: %s", otherPerson, status, body)
+		}
+		granted := decode[struct {
+			GrantID *string `json:"grant_id"`
+		}](t, body)
+		ts.awaitValue(t, sessionKey, enrollmentID, *granted.GrantID, "SHARED_DEPLOY_KEY", "shared-deploy-v1")
+	})
+
+	// Step 10: otherPerson logs their own machine in and its session asks for testApprover's
+	// agent-tier AUTO_READ_TOKEN, which testApprover's own session gets at once: the request is an
+	// approval request to testApprover, the owner, never to otherPerson, and the owner's approval
+	// releases it.
+	t.Run("10_AnotherPersonsSessionAsksTheOwnerOfAnAgentTierSecret", func(t *testing.T) {
+		status, body := ts.session(t, sessionKey, enrollmentID, http.MethodPost, "/v1/requests",
+			map[string]any{"request": signAgentSecretRequest(t, sessionKey, ts.URL, "mine", "AUTO_READ_TOKEN"), "session_id": nil})
+		if status != http.StatusOK || decode[wireCreateRequestResponse](t, body).State != "granted" {
+			t.Fatalf("the owner's own session asking for AUTO_READ_TOKEN = %d %s, want granted at once", status, body)
+		}
+
+		otherEnrollment, otherKey := ts.loginAndEnroll(t, otherPerson, "e2e-ben")
+		_, recordID := ts.createPending(t, otherKey, otherEnrollment, "ben's agent needs it", "AUTO_READ_TOKEN")
+		_, body = ts.ui(t, http.MethodGet, "/v1/credential-requests/"+recordID, nil)
+		if read := decode[wireRecord](t, body); read.Approver != testApprover {
+			t.Fatalf("ben's request = %+v, want its approver to be the owner %s", read, testApprover)
+		}
+		ts.awaitPendingFor(t, testApprover, recordID)
+		status, body = ts.ui(t, http.MethodPost, "/v1/credential-requests/"+recordID+"/approve",
+			map[string]any{"approver": otherPerson})
+		if status != http.StatusForbidden || decode[wireError](t, body).Code != "NOT_APPROVER" {
+			t.Fatalf("approve as the requester's own operator = %d %s, want 403 NOT_APPROVER", status, body)
+		}
+		status, body = ts.ui(t, http.MethodPost, "/v1/credential-requests/"+recordID+"/approve",
+			map[string]any{"approver": testApprover})
+		if status != http.StatusOK {
+			t.Fatalf("approve as the owner = %d: %s", status, body)
+		}
+		granted := decode[struct {
+			GrantID *string `json:"grant_id"`
+		}](t, body)
+		ts.awaitValue(t, otherKey, otherEnrollment, *granted.GrantID, "AUTO_READ_TOKEN", "read-v1")
 	})
 }
 
-// TestRulesTestdataFixturesParse proves the v9-shaped fixtures under testdata/ are what the
-// broker accepts: no issue_assignee reference and no approvers: section remain, and rules.Parse
-// accepts the well-formed one while still refusing the ambiguous one.
-func TestRulesTestdataFixturesParse(t *testing.T) {
-	t.Run("rules.yaml parses", func(t *testing.T) {
-		data, err := os.ReadFile("testdata/rules.yaml")
-		if err != nil {
-			t.Fatalf("read testdata/rules.yaml: %v", err)
+// awaitStatus asks for name from a fresh session until the create route answers status (and, for
+// an error, code), failing after reloadTimeout: the reload ticker applies a tag edit on its next
+// tick.
+func (s *e2eServer) awaitStatus(t *testing.T, name string, status int, code string) {
+	t.Helper()
+	enrollmentID, key := s.loginAndEnroll(t, testApprover, "e2e-reload-"+uuid.NewString()[:8])
+	deadline := time.Now().Add(reloadTimeout)
+	for {
+		got, body := s.session(t, key, enrollmentID, http.MethodPost, "/v1/requests",
+			map[string]any{"request": signAgentSecretRequest(t, key, s.URL, "reload", name), "session_id": nil})
+		if got == status && (code == "" || decode[wireError](t, body).Code == code) {
+			return
 		}
-		set, err := rules.Parse(data)
-		if err != nil {
-			t.Fatalf("rules.Parse(testdata/rules.yaml) = %v, want success", err)
+		if time.Now().After(deadline) {
+			t.Fatalf("POST /v1/requests (%s) = %d %s; want %d %s within %s", name, got, body, status, code, reloadTimeout)
 		}
-		if _, ok := set.Secrets["DEEL_API_KEY"]; !ok {
-			t.Fatalf("parsed set is missing DEEL_API_KEY: %+v", set.Secrets)
+		time.Sleep(reloadInterval)
+	}
+}
+
+// awaitPendingFor fails t unless GET /v1/pending?approver=<person> lists recordID.
+func (s *e2eServer) awaitPendingFor(t *testing.T, person, recordID string) {
+	t.Helper()
+	status, body := s.ui(t, http.MethodGet, "/v1/pending?approver="+person, nil)
+	if status != http.StatusOK {
+		t.Fatalf("GET /v1/pending?approver=%s = %d: %s", person, status, body)
+	}
+	for _, p := range decode[struct {
+		Pending []wirePendingEntry `json:"pending"`
+	}](t, body).Pending {
+		if p.RecordID == recordID {
+			return
 		}
-	})
-	t.Run("rules_ambiguous.yaml is refused as ambiguous", func(t *testing.T) {
-		data, err := os.ReadFile("testdata/rules_ambiguous.yaml")
-		if err != nil {
-			t.Fatalf("read testdata/rules_ambiguous.yaml: %v", err)
-		}
-		_, err = rules.Parse(data)
-		if err == nil {
-			t.Fatal("rules.Parse(testdata/rules_ambiguous.yaml) succeeded, want an ambiguous-requester refusal")
-		}
-		if !strings.Contains(err.Error(), "ambiguous requester") {
-			t.Fatalf("error = %v, want it to mention \"ambiguous requester\"", err)
-		}
-	})
+	}
+	t.Fatalf("GET /v1/pending?approver=%s = %s, want record %s listed", person, body, recordID)
+}
+
+// awaitValue fails t unless the session's grant releases name's value.
+func (s *e2eServer) awaitValue(t *testing.T, key *ecdsa.PrivateKey, enrollmentID, grantID, name, value string) {
+	t.Helper()
+	status, body := s.session(t, key, enrollmentID, http.MethodPost, "/v1/grants/"+grantID+"/values", nil)
+	if status != http.StatusOK || decode[struct {
+		Values map[string]string `json:"values"`
+	}](t, body).Values[name] != value {
+		t.Fatalf("values of grant %s = %d %s, want %s=%s", grantID, status, body, name, value)
+	}
+}
+
+// loginAndEnroll logs a machine of person in (their own approval of their own machine login) and
+// enrolls a box session under it, as step 1 does for testApprover.
+func (s *e2eServer) loginAndEnroll(t *testing.T, person, host string) (string, *ecdsa.PrivateKey) {
+	t.Helper()
+	machineKey := newSigningKey(t)
+	status, body := s.req(t, http.MethodPost, "/v1/launcher-credentials", nil,
+		map[string]any{"request": signMachineLoginRequest(t, machineKey, s.URL, person, host)})
+	if status != http.StatusAccepted {
+		t.Fatalf("POST /v1/launcher-credentials (%s) = %d: %s", person, status, body)
+	}
+	code := decode[struct {
+		Code string `json:"code"`
+	}](t, body).Code
+	_, body = s.ui(t, http.MethodPost, "/v1/machine-logins/lookup", map[string]any{"code": code})
+	recordID := decode[wireRecord](t, body).RecordID
+	status, body = s.ui(t, http.MethodPost, "/v1/credential-requests/"+recordID+"/approve",
+		map[string]any{"approver": person, "code": code})
+	if status != http.StatusOK {
+		t.Fatalf("approve %s's machine login = %d: %s", person, status, body)
+	}
+	credentialID := *decode[struct {
+		CredentialID *string `json:"credential_id"`
+	}](t, body).CredentialID
+	sessionKey := newSigningKey(t)
+	thumbprint, err := proof.Thumbprint(&sessionKey.PublicKey)
+	if err != nil {
+		t.Fatalf("thumbprint: %v", err)
+	}
+	status, body = s.launcher(t, machineKey, credentialID, http.MethodPost, "/v1/enrollments",
+		map[string]any{"kind": "box", "runtime_id": host + "-box", "thumbprint": thumbprint})
+	if status != http.StatusCreated {
+		t.Fatalf("enroll %s's session = %d: %s", person, status, body)
+	}
+	return decode[struct {
+		EnrollmentID string `json:"enrollment_id"`
+	}](t, body).EnrollmentID, sessionKey
 }

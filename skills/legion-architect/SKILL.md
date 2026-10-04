@@ -14,25 +14,23 @@ separate coordinator to finish necessary work.
 
 - Use the `legion` tool for lifecycle writes. Its issue key is the Dispatch key
   (pattern `^[A-Z][A-Z0-9]*-[0-9]+$`, e.g. `LEGION-41`).
-- Use `legion({ op: "spawn_worker", issue, role, task })` for every Legion role spawn.
-  Message a known phase worker with `envoy_publish` to `notifications.role.` followed by
-  its encoded role token (the token `spawn_worker` returned for it); re-assign it by
-  calling `spawn_worker` again on the same existing role, which resumes the same process
-  instead of starting a fresh one. Phases on one issue are strictly sequential -- one role
-  is the issue's active phase at a time, and calling `spawn_worker` for a different role
-  while a phase is active supersedes that phase: the superseded worker's
-  `handoff_complete` is then refused, so finish (or deliberately abandon) one role
-  before assigning the next. Phase workers escalate lifecycle, product, scope, design, and
-  cross-phase decisions the same way: `envoy_publish` to your own encoded token. You decide whether
-  one needs the human and write its decision block yourself (section 1 says what one does to an
-  approved root spec); a worker never writes one. Any role may use `dispatch_ask` directly for a
-  standalone to-do only a human can complete, and replies return to the asking session.
-- The daemon spawns each role as its own process with the issue's context already in its
+- The daemon starts every Legion role itself and sequences each issue's phases from its fixed
+  workflow table: planner, implementer, tester, reviewer, retro (the implementer again), merger,
+  and, after a human merges, the implementer's production check. One role works an issue at a
+  time, and the handoff or event that ends its phase is what starts the next; you start,
+  re-assign and order no worker. Message a known phase worker with `envoy_publish` to
+  `notifications.role.` followed by its encoded role token. Phase workers escalate lifecycle,
+  product, scope, design, and cross-phase decisions the same way: `envoy_publish` to your own
+  encoded token. You decide whether one needs the human and write its decision block yourself
+  (section 1 says what one does to an approved root spec); a worker never writes one. Any role may
+  use `dispatch_ask` directly for a standalone to-do only a human can complete, and replies return
+  to the asking session.
+- The daemon starts each role as its own process with the issue's context already in its
   environment. Never hand-format a role token: the daemon encodes one as
   `legion-<project>-<key>-<role>` with the issue key lower-cased; for example, project `acme`,
-  issue `LEGION-41`, role `architect` encodes to `legion-acme-legion-41-architect`. Reuse a
-  token you already hold (your own, or one `spawn_worker` returned) or compute another with the
-  `roleToken` helper from `@legion/contracts` exactly the way the daemon does.
+  issue `LEGION-41`, role `architect` encodes to `legion-acme-legion-41-architect`. Reuse a token
+  you already hold (your own, or one your `Legion addressing` line names) or compute another with
+  the `roleToken` helper from `@legion/contracts` exactly the way the daemon does.
 - There is no label vocabulary. Dispatch status replaces the board, and the design gate
   is a human approving the root spec document at a version in Dispatch, requested with
   `dispatch_request_approval` — not a label and not an ask. Never attempt to apply a label.
@@ -54,11 +52,10 @@ criteria are proven on and the repository skill that drives it; if the repositor
 exercise a criterion end to end, building that path is a child issue of this tree.
 
 - **Existing children:** adopt them. Do not replace or re-decompose human-created work.
-  Put every adopted child into the initial wave. **You MUST call**
-  `legion({ op: "release_wave", issues: ["LEGION-41", "LEGION-42"] })`
-  **before any `spawn_worker` call for an adopted child.** Until release, the daemon
-  holds that child's role activity. Then spawn each child's daemon-managed sub-architect
-  owner.
+  Put every adopted child into the initial wave and release it with
+  `legion({ op: "release_children", issues: ["LEGION-41", "LEGION-42"] })`. Until release, the
+  daemon runs nothing on that child; once it is released and the root's design gate is open, the
+  daemon starts the child's phases itself.
 - **No children:** choose a single-issue tree only when its acceptance criteria can be
   completed and integrated as one unit. Otherwise create complete child issues with:
 
@@ -97,7 +94,7 @@ says `gates.design: root-issues`. When it says `gates.design: off`, write the sp
 to section 2 with no approval step at all: do not request approval, do not register a gate, and
 do not wait for `design-approved`. A sub-architect on a child issue has no policy line and never
 runs the gate either: the root approval covers the tree. When the gate is armed, run this exact
-sequence **before any Legion-role spawn**, including a sub-architect:
+sequence **before the tree's work starts**:
 
 ```text
 dispatch_doc_edit({ issue: "<root issue>", ... })   // extend the primary document in place
@@ -144,10 +141,10 @@ read covers a human who answers the question between your `dispatch_request_appr
 `register_gate` calls, so an approval is never lost to timing; you never approve anything
 yourself.
 
-Then park. Do not release a wave or spawn a Legion role until a later delivered wake shows
-`design-approved` on the root. On `design-changes-requested`, revise the spec (a new version of
-the primary document) as the human's reason asks, request approval again as above (the answer
-closed the last request, so this opens a new one), and stay parked.
+Then park. Do not release a wave until a later delivered wake shows `design-approved` on the root;
+the daemon starts no phase in the tree before then. On `design-changes-requested`, revise the spec
+(a new version of the primary document) as the human's reason asks, request approval again as
+above (the answer closed the last request, so this opens a new one), and stay parked.
 
 **After approval, the root spec changes only when what the tree delivers, or a decision a human
 settled, changes.** Approval is pinned to the spec version: any new version of the root spec closes
@@ -156,8 +153,8 @@ you). So edit an approved root spec only when its Summary, its Acceptance, the t
 decision a human settled in one of its decision blocks changes. Such a change is a point the human
 has not agreed to: put the problem behind it to them as its own decision block, with its evidence,
 at the end of the section it changes, and request approval again as above once they have answered
-it. Release no new wave and spawn no new role until the next `design-approved` arrives — work
-already in flight continues. Every merger's `READY` in the tree is refused until a human approves
+it. Release no new wave until the next `design-approved` arrives — work already in flight
+continues. Every merger's `READY` in the tree is refused until a human approves
 the latest version. A settled decision is the human's. A plan that would overturn one goes back to
 the planner with the decision kept, which asks the human nothing, unless the planner brings
 evidence the human did not weigh that would change the decision, such as a measurement showing the
@@ -175,83 +172,52 @@ child issue's spec is never gated: the root approval covers the tree.
 
 ## 2. Children in flight
 
-Release only the next useful wave, then give its owners their work. A release is an
-explicit lifecycle write:
+Release only the next useful wave. A release is an explicit lifecycle write:
 
 ```text
-legion({ op: "release_wave", issues: ["LEGION-41", "LEGION-42"] })
+legion({ op: "release_children", issues: ["LEGION-41", "LEGION-42"] })
 ```
 
-After release, spawn each relevant owner; for example:
+The daemon moves each released child to `todo` and, while the root's design gate is open, starts
+its phases itself from its fixed workflow table, each phase worker as its own process with the
+child's context already in its environment; it starts no sub-architect, and you start no worker.
+Park while children are in flight. On each child closure, re-scope open work, close obsolete work
+with a reason, and release the next wave only when it now makes sense. There is no inter-child
+dependency mechanism to encode.
 
-```text
-legion({
-  op: "spawn_worker",
-  issue: "LEGION-41",
-  role: "architect",
-  task: "Own this child through its lifecycle and report its evidence."
-})
-```
-
-The daemon spawns that sub-architect as its own process with the child's context already
-in its environment; a resume of an existing role continues the same process instead of
-starting a fresh one. Keep the returned session identifiers; retro and adjustment resume
-those same sessions through `spawn_worker` (a finished worker is retired after
-`worker_idle_retire_seconds` and comes back from its session file). Park while children are
-in flight. On each child closure, re-scope open work, close obsolete work with a reason, and
-release the next wave only when it now makes sense. There is no inter-child dependency
-mechanism to encode.
-
-Release admits nothing. A child never takes an admission slot or becomes a root tree of its
-own: the daemon ignores a child's `todo` while your tree is live, and this `spawn_worker` is
-what starts the child — the daemon writes its Dispatch status `in_progress` on the first
-sub-architect spawn while the child is at `todo`. A released child with no sub-architect stays
-at `todo` until you spawn one.
+Release admits nothing. A child never takes an admission slot or becomes a root tree of its own
+while your tree is live: it runs inside your tree from its release. A child you have not released
+stays out of the workflow.
 
 ## 3. Children complete
 
-Treat `children-complete` as the edge into the end-game, not as a reason to close the
-parent. Spawn the parent's `tester` role, scoped to the parent's own acceptance criteria
-and current `main` integration surface:
-
-```text
-legion({
-  op: "spawn_worker",
-  issue: "LEGION-40",
-  role: "tester",
-  task: "Verify this parent issue against its acceptance criteria on current main; return reproducible integration evidence."
-})
-```
-
-If that tester finds a failure, create and release a new corrective child wave, then
-return to children-in-flight. Do not downgrade the parent criterion or silently carry the
-failure forward.
+No notice marks the last child's close as the end-game: each closure arrives as its own
+`child-closed`, and none is a reason to close the parent. Today's daemon does not order the root's
+own phases after its children: when the design gate opens it starts every admitted issue of the
+tree, the root included, so the root's tester can run, and its pull request merge, before any
+child merges. To get parent integration evidence against current `main` after the last child
+merges, file the parent's integration check as a final child whose acceptance is every parent
+criterion proven on current `main`, release it with `release_children` only once every other
+child has closed, and sign off the root only after it closes. This holds until the redesign's
+integrating phase ships (dispatch://LEGION-223). When that check's tester fails, the daemon sends
+the child back to its implementer; a failure whose fix belongs in other work becomes a new
+corrective child wave you create and release, and the tree returns to children-in-flight. Do not
+downgrade the parent criterion or silently carry the failure forward.
 
 ## 4. Integration verification
 
-Read the tester's evidence, not merely a child PR's check status. The parent test
-is successful only when every parent acceptance criterion has evidence against current
-main. Route a failed criterion into a corrective child wave; route a passing result to
-review and the merge-gate sequence.
+Read the integration check's tester evidence (section 3), not merely a child PR's check status.
+The parent test is successful only when every parent acceptance criterion has evidence against
+current main. Route a failed criterion into a corrective child wave; a passing result goes on to
+review and the merge-gate sequence by the daemon's table.
 
 ## 5. Retro
 
-Retro is mandatory for every issue that passed review, before merge. Send the implementer
-back in through the daemon — `spawn_worker` on the implementer carrying the retro task. This
-resumes the same agent whether its pane is still live or the daemon has already retired it
-idle (a finished worker is retired after `worker_idle_retire_seconds`, default 600 s, and
-resumed from its session file on its next assignment). Never `envoy_publish` to a finished
-worker's role topic for this: a retired role has no live holder and the publish is rejected
-with 404.
-
-```text
-legion({
-  op: "spawn_worker",
-  issue: "LEGION-40",
-  role: "implementer",
-  task: "Load skill://legion-retro and run it now. Capture durable learnings and post the retro message on the Dispatch issue with dispatch_message; do not create a .legion handoff file."
-})
-```
+Retro is mandatory for every issue that passed review, before merge, and the daemon runs it: when
+the reviewer's approval ends the review round, it moves the issue to `retro` and starts the
+implementer on it, resuming the same agent from its session (a worker is suspended when its phase
+ends, never after an idle window). You start nothing for it. Never `envoy_publish` to a finished
+worker's role topic to start retro: a suspended role is not running to receive it.
 
 Wait for the implementer to report its durable retro result. Retro output is
 `docs/solutions/` plus one `dispatch_message` on the issue; it must not create a `.legion`
@@ -265,15 +231,13 @@ deferred. Make the sign-off comment explicit about that evidence. Sign-off also 
 implementer's production report: a `Production:` line that names what was driven, how, what was
 observed, and the merge commit — never a `pending` one, and never a staging pass.
 
-Preserve this order exactly:
+The daemon keeps this order from its fixed table; you start none of its steps:
 
 1. tester green and review cycles complete;
-2. on a clean review, `spawn_worker` the implementer once more to push only the `.legion/`
-   deletion, then the reviewer approves that head. The deletion must land before that approval, which is head-pinned. An implementer
-   completion advances the status only from `in_progress` to `testing`; this push, like retro
-   later, leaves the status where it is, so you set nothing by hand — on its `phase-finished`
-   wake, `spawn_worker` the reviewer to approve that head (a finished reviewer may already be
-   retired; `spawn_worker` resumes it);
+2. on a clean review, the reviewer approves the head by SHA, and the daemon moves the issue to
+   `retro`. Under this daemon no role pushes the `.legion/` deletion: the approved head still
+   carries `.legion/`, and the operator removes it from the default branch in a follow-up pull
+   request after the merge;
 3. retro commits its learnings under `docs/solutions/` on top of the approved head; that
    commit does not void the approval and never returns the tree to the tester or reviewer;
 4. the merger verifies the current head is the reviewer-approved head plus only commits that
@@ -282,10 +246,11 @@ Preserve this order exactly:
    on the Dispatch issue. When its `Legion addressing` line names the project's merge queue, it
    publishes the same packet there too. Legion never merges; a human merges under the repository's
    GitHub branch-protection and CODEOWNERS rules. If the merger reports a failed verification,
-   treat it like `pr-blocked`: fix through the phases, never bypass.
-5. a human merges; you then `spawn_worker` the **implementer** once more with the production-check
-   task. It drives the changed path in production through the user's own access path and records
-   what it saw on the pull request and on this issue. Close only after the implementer's production
+   treat it like `pr-blocked`: the merger holds the phase, so tell it to move the issue back with
+   `request_backward_move`, naming what failed; never bypass.
+5. a human merges; the daemon then starts the **implementer** once more, on the production check.
+   It drives the changed path in production through the user's own access path and records
+   what it saw on the pull request and on this issue. Sign off only after the implementer's production
    report exists. A defect it finds is a corrective child issue of this tree, not a note on a
    closed one; if the implementer cannot perform the deploy, it opens a `dispatch_ask` that starts
    with the production gap and why it matters, then names the required step, its risk, and
@@ -295,18 +260,23 @@ What returns the tree to review: a changed diff — a commit above the approved 
 touches anything outside `docs/solutions/`, or a conflict-resolution merge whose fingerprint
 (the unchanged-diff check, `skill://legion-worker/references/conflicts-and-rewrites.md`) differs from the approved head's. What does not: retro's
 `docs/solutions/` commit, and a merge forced by a GitHub-reported conflict whose fingerprint
-is unchanged. For that merge the order is: the implementer merges the bookmark forward with the
+is unchanged. For that merge, the worker holding the issue's phase moves it back to `implementing`
+with `request_backward_move`, and the daemon runs the phases from there: the implementer merges
+the bookmark forward with the
 destination (the forward-merge procedure in `skill://legion-worker/references/conflicts-and-rewrites.md` — `jj new legion/<KEY> <destination>`,
 never a rebase, since a rebase rewrites every descendant of the chain's fork point, including
 another tree's branch stacked on it), pushes it with the ordinary push procedure (a genuine
 fast-forward), and posts the before/after fingerprints; the tester re-runs the bare gates only;
 the reviewer confirms and approves the new head by SHA (or continues its round if it had not
-approved); the merger republishes READY. Retro does not re-run. This merge happens only when
-GitHub reports `CONFLICTING`
+approved); the daemon carries the issue on through retro to the merger, which republishes READY.
+This merge happens only when GitHub reports `CONFLICTING`
 (`legion gh -- pr view <n> --json mergeable,mergeStateStatus`); read that on every end-game
-wake — `pr-ready`, `pr-review`, `phase-finished`, `catchup-overseer` — because a `CONFLICTING`
-PR gets no CI and no wake announces it, and send the implementer to resolve it the moment you see
-it. Do not let the merger publish `READY` for an obsolete approval.
+wake — `pr-ready`, `phase-finished`, `catchup-overseer` — because a `CONFLICTING`
+PR gets no CI and no wake announces it. The moment you see it, tell the worker holding the issue's
+phase (`envoy_publish` to its role topic) to move the issue back to `implementing` with
+`request_backward_move`; in `awaiting_merge`, where no worker holds a phase, open a `dispatch_ask`
+naming the conflict for the human who merges. Do not let the merger publish `READY` for an
+obsolete approval.
 
 If a worker reports that `legion threads resolve` exited 1 naming a review thread GitHub refused
 to resolve, open a `dispatch_ask` that names the thread's URL and GitHub's message for a human to
@@ -317,16 +287,16 @@ close every accepted one.
 
 ## 7. Close
 
-After the merge result, the implementer's production report, and sign-off are recorded, post the
-sign-off and close this issue through the Legion write surface:
+After the merge result and the implementer's production report are recorded, post the sign-off and
+close this issue with `sign_off`, which writes `done`:
 
 ```text
 dispatch_comment({ issue: "LEGION-40", body: "<sign-off: scope, integration evidence, review, retro, merge, and the implementer's production report>" })
-legion({ op: "set_status", issue: "LEGION-40", status: "done" })
+legion({ op: "sign_off", issue: "LEGION-40" })
 ```
 
-Closing a child supplies the closure event to its parent. Do not close a parent until the
-entire end-game sequence has completed.
+Closing a child supplies the closure event (`child-closed`) to its parent. Do not close a parent
+until the entire end-game sequence has completed.
 
 ## Wake routing
 
@@ -339,31 +309,26 @@ active phase worker.
 
 | Wake | Procedure |
 | --- | --- |
-| `child-adopted` | Payload `{type:"child-adopted", child, remaining}`. A child is now in your tree — one created under this issue (by you or a human), or one a daemon upgrade moved back into your tree from a root tree of its own (LEGION-57). If Dispatch shows it released **and open** — `todo` through `retro`, never `done`; `remaining` counts exactly those — and `legion state` shows no `roles` entry with `issue` = the child and `role: "architect"`, `spawn_worker` its architect now. An unreleased child waits for its wave; a `done` child is finished and gets nothing, whatever stray tree of its own `legion state` may still show. |
-| `child-status` | Payload `{type:"child-status", child, from, to}`. Your child's Dispatch status changed. `to: "todo"` with no architect claim for the child (`legion state`) means it is released and unowned — your own `release_wave` echo, or a human's move — so `spawn_worker` its architect. `to: "backlog"` or `"icebox"` means the child was de-prioritised (a human's move, or your own `set_status`): a child has no tree of its own, so the daemon stops nothing on that move — tell its sub-architect (`envoy_publish` to its role topic) to finish the step in flight and park, or re-scope it; its finished workers idle-retire, and it resumes from its session on your next `spawn_worker` once the child is released again. Any other transition is information for re-scoping. |
-| `child-closed` | Read the child completion and remaining open children. Re-scope or close obsolete open work; release an appropriate next wave, or await `children-complete`. |
-| `children-complete` | Execute steps 3–4: parent integration verification; failures become a new child wave, success advances to review and retro. |
+| `child-status` | A child of your tree left the workflow or re-entered it; the notice's reason names the child and its new status. `todo` (a human's move, your `release_children`, or your `rerun_child`) means the child runs again under your tree from planning, and the daemon starts it; you start nothing. `backlog`, `icebox` or `triage` (a human's move, or your `park_child`) means the daemon has suspended the child's workers, and it advances no further until it is set back to `todo`. What the rest of the tree does is your decision. |
+| `child-closed` | Read the child completion and remaining open children. Re-scope or close obsolete open work; release an appropriate next wave with `release_children`. When a worker waits on this child for a missing surface (see `phase-finished`), tell it to continue with `envoy_publish` to its role topic. The last child's close is not the end-game (section 3). |
 | `child-reopened` | Treat the completion edge as reset. Reassess the reopened child and return the tree to children-in-flight; do not continue an already-started end-game. |
 | `design-approved` | Payload `{type:"design-approved"}`. A human approved the root spec document at its current version; the gate is open. Proceed to section 2. |
 | `design-changes-requested` | Payload `{type:"design-changes-requested", version, reason, author?}`. A human asked for changes to the root spec at `version`, for `reason`. Revise the spec as the reason asks and request approval again as section 1 says; stay parked; the gate is closed. |
-| `phase-finished` | Read the committed handoff for the finishing phase, then spawn the next phase's owner, or `spawn_worker` on the same role again to resume it with corrections if the handoff shows unresolved gaps. A `planner` notice that names a departure from the spec's design defers to section 1's full condition: the plan is the record and the next phase starts only when the approved Summary, Acceptance, scope and settled decisions still hold. A `reviewer` notice whose GitHub review is `CHANGES_REQUESTED` (the daemon returns the issue's Dispatch status to `in_progress` for this, on the reviewer's completion and again when you spawn the corrective implementer unless the daemon already knows the issue is `in_progress`) means `spawn_worker` the **implementer** again with the review findings — thread URLs and blocking items — as its task, then route back through tester and reviewer in order; never `spawn_worker` the reviewer directly off this wake and never proceed to retro on this verdict. A reviewer notice with an `APPROVED` review proceeds to retro (step 5). A `reviewer` notice after a conflict-forced rebase whose review body names an unchanged fingerprint is a confirmation, not a round: if retro already completed, `spawn_worker` the merger; otherwise resume the step you were on. An `implementer` notice that follows the merge is its production report: read the record on the pull request and the issue, then run step 7 — the issue is already at `retro`, the daemon writes no status for this completion, and you set `done` yourself. A `tester` notice whose handoff carries `implementerProof.verdict: "rejected"`, or a failure naming the production-like proof, goes back to the **implementer** with that finding — never forward to the reviewer, and never by supplying the proof from another role. A worker that reports no surface reaches the changed path gets a child issue in this tree (infrastructure, tooling, or a skill) and a resume once it lands; that report is never a reason to advance the phase. |
-| `worker-queued` | Payload `{type:"worker-queued", issue, role}`. This role's task is queued for promotion — either the deployment's worker cap is full, or the live worker acknowledged the task without starting a turn and the daemon is retrying it (counted; the worker is replaced after three such failures, still with the same task). Do not respawn or retry — wait for `worker-started`. `legion state` shows the queue (`workerAdmission.queue`: role token, issue, role, kind, and the time the task was first queued — never the task text); read it before re-sending. A `spawn_worker` identical to the queued task changes nothing and is not announced again. Different text replaces the queued task silently in the same FIFO slot and retains its original queue time. A `spawn_worker` that fails with "got no response in 3 attempts" was already retried by the plugin under one request id and may still have reached the daemon: read the queue and the role's claim in `legion state` before sending it again. |
-| `worker-started` | Payload `{type:"worker-started", issue, role}`. A previously queued role has been promoted and is now running. Treat it exactly as a normal spawn: resume tracking that role's live session. |
-| `worker-recovered` | Payload `{type:"worker-recovered", issue, role, fromRef, delivery?}`. The worker's tree volume was lost and the daemon replaced it from the committed handoff on `fromRef`. `delivery: "spawned"` means the current assignment was preserved on the new worker; do not resend it. `delivery: "queued"` means that preserved assignment awaits capacity; wait for `worker-started`. Without `delivery`, inspect `.legion/` and the active phase before deciding whether work needs a new assignment. |
+| `phase-finished` | The daemon has already moved the issue to its next phase by its fixed table and started that phase's role; you start nothing. Read the committed handoff for the finishing phase; if it shows unresolved gaps, tell the role now working the issue (`envoy_publish` to its role topic). A `planner` notice that names a departure from the spec's design defers to section 1's full condition: when the approved Summary, Acceptance, scope and settled decisions still hold, the plan is the record; otherwise change the root spec and request approval again as section 1 says. A `reviewer` notice whose GitHub review is `CHANGES_REQUESTED` needs nothing from you: the daemon has returned the issue to `implementing` (Dispatch `in_progress`) and started the **implementer**, whose correction goes through the tester and the reviewer again, never straight to retro. A `reviewer` notice with an `APPROVED` review means the daemon has started retro (step 5). An `implementer` notice for `production_check` is its production report: read the record on the pull request and the issue, then run step 7. A `tester` notice with `verdict: "fail"` — its handoff carries `implementerProof.verdict: "rejected"`, or a failure naming the production-like proof — has gone back to the **implementer** by the daemon's table; never supply the proof from another role. A worker that reports no surface reaches the changed path sends that report instead of completing its phase, so the daemon starts nothing more on that issue and the worker stays idle in its session, not suspended: file a child issue in this tree to build the surface (infrastructure, tooling, or a skill), and when that child's `child-closed` arrives, tell the waiting worker to continue with `envoy_publish` to its role topic. That report is never a reason to advance the phase. |
 | `pr-ready` | Verify the live PR head, green status, and review state. Continue the review/retro/merger order only for that current head. |
-| `pr-review` | Payload `{type:"pr-review", state, author, body}`. Delivered to whichever role is currently active for the issue, falling back to you when no worker phase is active. Follows the same verdict rule as a reviewer's `phase-finished`: `state: "changes_requested"` sends the implementer back in with the review findings, then tester, then reviewer — never the reviewer again and never retro; that `spawn_worker` returns the issue to `in_progress` on its own (the daemon writes it for a corrective implementer whenever the PR's latest recorded review is changes requested, a human's after approval included), so you set nothing by hand; `state: "approved"` proceeds toward retro (step 5) once the step 6 integration/merge-gate conditions are met. `state: "approved"` on a rebased head whose body names an unchanged fingerprint is that confirmation: proceed to retro if it has not run, otherwise to the merger — never to a second retro or test round. |
-| `pr-blocked` | Payload `{type:"pr-blocked", pr, attempts}`. `attempts` counts heads pushed onto a red verdict that changed something outside `.legion/` — handoff-only pushes (`.legion/` paths only) never count, a push by the review App (a planner's, tester's, reviewer's or architect's) never counts, and the head after a red the tester's red tests earned (a review-App push that changed a path outside `.legion/`, however many handoff-only pushes follow it) does not count either — so after the tester's handoff-only push onto the implementer's red, the implementer's next push does count; a push the daemon cannot classify (a listener without `changed_paths`, a list the listener stopped at 100 paths or 32,768 runes of text, a push listing no commits) does. Published once per exhausted count, not on every later red verdict for that count. Read the failed CI evidence and recovery attempts. Assign a focused implementer or corrective child, then return it through testing and review; do not treat the blocked PR as final. |
-| `pr-merged` | Payload `{type:"pr-merged", pr, mergeCommitSha}`. The PR merged because a human merged it under the repository's rules. `spawn_worker` the **implementer** with the production-check task naming that merge commit (it resumes the same agent; a retired role has no live holder, so never `envoy_publish` for this). Its `phase-finished` is what brings you to step 7: verify the record on the pull request and this issue first, then sign off naming it and set the issue `done`. A merge is not the close. |
-| `pr-closed-unmerged` | Decide from current scope whether to reopen the work, send a fresh implementer, or cancel it with a reason. Delegate the repository action to the responsible phase worker and keep ownership. |
+| `pr-blocked` | Payload `{type:"pr-blocked", pr, attempts}`. `attempts` counts heads pushed onto a red verdict that changed something outside `.legion/` — handoff-only pushes (`.legion/` paths only) never count, a push by the review App (a planner's, tester's, reviewer's or architect's) never counts, and the head after a red the tester's red tests earned (a review-App push that changed a path outside `.legion/`, however many handoff-only pushes follow it) does not count either — so after the tester's handoff-only push onto the implementer's red, the implementer's next push does count; a push the daemon cannot classify (a listener without `changed_paths`, a list the listener stopped at 100 paths or 32,768 runes of text, a push listing no commits) does. Published once per exhausted count, not on every later red verdict for that count. Read the failed CI evidence and recovery attempts. The notice moves nothing: the issue stays in its phase, and only the worker holding that phase is running; an earlier phase's worker is suspended. In `implementing`, give the implementer the failing checks (`envoy_publish` to its role topic). In any later phase a worker holds, tell that worker (`envoy_publish` to its role topic) to move the issue back to `implementing` with `request_backward_move`, naming the failing checks, and the daemon starts the implementer; or file a corrective child. In `awaiting_merge`, where no worker holds a phase and a backward move is refused, open a `dispatch_ask` naming the failing checks for the human who merges, as section 6 does for a conflict there. Do not treat the blocked PR as final. |
+| `pr-merged` | Payload `{kind:"pr-merged", reason}`. The PR merged, under the repository's rules, before the issue reached `awaiting_merge`. The workflow runs on and asks no one to merge it: the daemon starts the **implementer** on the production check once the issue gets there, and you start nothing. Its `phase-finished` for `production_check` is what brings you to step 7: verify the record on the pull request and this issue first, then sign off naming it with `sign_off`. A merge is not the close. |
+| `pr-closed-unmerged` | Decide from current scope whether the work is reopened, started over (`park_child` then `rerun_child`, for a child), or ended with a reason. Delegate the repository action to the responsible phase worker and keep ownership. |
 | `issue-comment` | Interpret the comment in the issue's design context. Reply in its thread (`dispatch_comment` with `reply_to`; under an open ask whose next move is yours, such as the approval request you must revise or hand back, `reply_to_ask` with `turn: "agent"`, since a default-turn reply hands that request back to the human and a corrected `summary` is then refused), then adjust the plan or relay it via `envoy_publish` to the responsible worker's role token; scope and product decisions remain with you. |
 | `catchup-overseer` | Verify its child counts and PR verdicts against current artifacts, then resume the applicable lifecycle step. This is a current-state snapshot, not a raw-event replay. A root architect uses `gates[LEGION_TREE].open`: `true` means the root spec is approved and section 2 may continue; `false`, or no `open` key, means section 1 still applies. A resumed sub-architect receives `overseerCatchup(state, LEGION_ISSUE)` for its own subtree: its `gates` intentionally omits the root gate because a child spec is never gated. Do not request or register a gate; resume at section 2. Handle each `phaseCompletions` entry exactly as a `phase-finished` wake, then compare `childCounts[LEGION_ISSUE].open` with `legion state` and Dispatch before deciding the next action. |
-| `worker-died` | Payload `{type:"worker-died", issue, role}`. Two causes, one verdict: the daemon retried this role's boot through `MAX_LAUNCH_FAILURES` attempts and could not confirm it, or the worker booted and acknowledged every prompt without ever starting a turn through `MAX_PROMPT_RETIRES` retire-and-relaunch cycles (LEGION-93) — never a raw-event replay or a silent revive. Your next `spawn_worker` for the role is the retry (one cold launch, three prompts, and `worker-died` again if the agent is still broken). Reassess the work and `spawn_worker` again for the role (it resumes the same agent via `--resume` if a session file survived) or reassign it if the failure looks environmental, not agent-specific. |
+| `worker-died` | Payload `{kind:"worker-died", role, phase}`. That role's claim failed: its launches or prompts ran out. For a phase worker the daemon holds the issue (phase `held`) and starts nothing more on it. Reassess the work, then decide with `retry_or_escalate`: `retry` when the failure looks agent-specific or transient, `escalate` to hand the held issue to the controller when it looks environmental. |
 | `reopened` | Reopen the root lifecycle: inspect the reason and current artifacts, reassess scope and children, and resume at the first applicable numbered step. |
 
 ## Escalation judgment
 
 Controller-actionable matters are exactly re-filing a genuinely independent child, capacity, and
-cross-tree conflict. Use the Legion escalation operation for those. Handle everything else in the
+cross-tree conflict. Report those to the controller with `envoy_publish` to the controller topic
+your `Legion addressing` line names. Handle everything else in the
 tree. A product, scope, or design decision that needs the human, yours or one a worker escalated,
 is a decision block you write (section 1 says what one does to the root spec's gate). A standalone
 human to-do may use `dispatch_ask`; workers may reach Sami directly with it the same way. Do not

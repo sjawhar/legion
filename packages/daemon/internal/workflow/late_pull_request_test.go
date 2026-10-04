@@ -27,8 +27,9 @@ type pullRequestView struct {
 	state                   record.PullRequestState
 }
 
-// afterEvents seeds a reviewing issue whose pull request is at head-c, green and whose reviewer
-// round is approved, with lateApplied as its clock. It applies facts and reads both records back.
+// afterEvents seeds a reviewing issue whose pull request is at head-c, green on a base branch that
+// requires no check, and whose reviewer round is approved, with lateApplied as its clock. It
+// applies facts and reads both records back.
 func afterEvents(t *testing.T, state record.PullRequestState, facts ...intake.Fact) pullRequestView {
 	t.Helper()
 	return pullRequestAt(t, appliedEvents(t, state, facts...))
@@ -41,8 +42,8 @@ func appliedEvents(t *testing.T, state record.PullRequestState, facts ...intake.
 	pool := migratedPool(t)
 	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Reviewing, Generation: 1, Status: "needs_review", Rank: "U"})
 	seedPR(t, pool, record.PullRequest{State: state, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208",
-		HeadSHA: "head-c", HeadUpdatedAt: lateApplied, Verdict: "green",
-		Failing: []string{}, CheckRuns: []record.AttemptRun{}})
+		HeadSHA: "head-c", HeadUpdatedAt: lateApplied, CheckedHead: "head-c",
+		Failing: []string{}, CheckRuns: []record.AttemptRun{}, Required: []string{}})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer,
 		Decision: &record.ReviewDecision{State: "approved", Head: "head-c"}})
 	for i, fact := range facts {
