@@ -784,8 +784,8 @@ func TestReconcileFillsRaisedCapInRankOrderAndIsIdempotent(t *testing.T) {
 	})
 	assertWaiting(t, pool, []string{"LEGION-C"})
 	firstEffects := effects(t, pool)
-	if len(firstEffects) != 4 {
-		t.Fatalf("effects after raised-cap reconcile = %#v, want two status and two supervise rows", firstEffects)
+	if len(firstEffects) != 6 {
+		t.Fatalf("effects after raised-cap reconcile = %#v, want two status, two issue_branch and two supervise rows", firstEffects)
 	}
 
 	reconcile(t, pool, admission, summaries)

@@ -281,9 +281,8 @@ func (e *Engine) ReenterChild(ctx context.Context, tx pgx.Tx, child record.Issue
 	return e.notice(ctx, tx, child.Key, ChildReenteredNotice(child.Key, root.Key))
 }
 
-// enterChild records a todo child under root's live tree, admitted at generation, queues the row
-// creating its branch (record.IssueBranch), which every start of the child queued after it waits
-// for, and starts its planning when the tree's gate is open.
+// enterChild records a todo child under root's live tree, admitted at generation, and starts its
+// planning when the tree's gate is open.
 func (e *Engine) enterChild(ctx context.Context, tx pgx.Tx, root record.Issue, fact intake.DispatchIssue, generation uint64) error {
 	parentKey := fact.Parent
 	child := record.Issue{Key: fact.Key, Tree: root.Tree, Project: root.Project, Title: fact.Title, Parent: &parentKey, Phase: phase.Admitted,
@@ -291,15 +290,12 @@ func (e *Engine) enterChild(ctx context.Context, tx pgx.Tx, root record.Issue, f
 	if err := e.store.PutIssue(ctx, tx, child); err != nil {
 		return err
 	}
-	if err := e.enqueue(ctx, tx, child.Key, record.IssueBranch{Generation: generation}); err != nil {
-		return err
-	}
 	gate, err := e.store.Gate(ctx, tx, root.Key)
 	if err != nil {
 		return err
 	}
 	if gate != nil && classify.DesignGateOpen(*gate) {
-		return e.transition(ctx, tx, child, TriggerGateOpened, "", record.PhaseRow{}, nil, "")
+		return e.gateOpened(ctx, tx, child)
 	}
 	return nil
 }
@@ -802,12 +798,24 @@ func (e *Engine) advanceAdmittedTree(ctx context.Context, tx pgx.Tx, root record
 	}
 	for _, issue := range members {
 		if issue.Phase == phase.Admitted {
-			if err := e.transition(ctx, tx, issue, TriggerGateOpened, "", record.PhaseRow{}, nil, ""); err != nil {
+			if err := e.gateOpened(ctx, tx, issue); err != nil {
 				return err
 			}
 		}
 	}
 	return nil
+}
+
+// gateOpened moves an admitted member of a tree whose gate is open into planning, behind a row
+// creating its branch (record.IssueBranch): its planner's start, the first worker start of every
+// member, waits for that row, so no planner's push is the one that creates the branch. A member
+// whose earlier row a linger dropped, or one admitted before the daemon queued such rows, gets its
+// row here.
+func (e *Engine) gateOpened(ctx context.Context, tx pgx.Tx, issue record.Issue) error {
+	if err := e.enqueue(ctx, tx, issue.Key, record.IssueBranch{Generation: issue.Generation}); err != nil {
+		return err
+	}
+	return e.transition(ctx, tx, issue, TriggerGateOpened, "", record.PhaseRow{}, nil, "")
 }
 
 // everyClaim enqueues op for every claim an issue can hold: its architect, which admission or the

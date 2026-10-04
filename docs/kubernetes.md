@@ -493,10 +493,7 @@ main container:
    the provisioning token ([Trust model](#trust-model-the-provisioning-token)).
 2. `workspace-init` provisions the tree volume's shared clone and the issue's jj workspace from the
    read-only feed. The workspace starts at the issue's branch, `legion/<KEY>`, which the daemon
-   created on GitHub at `main` as the implement App before the issue's first claim started (an
-   `issue_branch` row of its outbox, which every start of the issue queued after it waits for), so
-   no agent's push is the one that creates the branch: GitHub can refuse that push on a large
-   repository, where it takes one that moves the branch. A branch GitHub already has is kept.
+   created on GitHub at `main` before the issue's architect or planner started.
 3. `worker` runs `legion worker-shim --connect tcp://<bind>:<worker_stream_port>
    --boot-token-file …` with Oh My Pi under it.
 

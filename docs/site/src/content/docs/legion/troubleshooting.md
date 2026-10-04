@@ -96,16 +96,14 @@ Check, in order:
    ```
 
    `active` lists the running roots, `waiting` the ones in line, `cap` the slots (`admission_cap`).
-5. **Someone else holds it.** The architect's first act is to claim the issue in Dispatch. When a
-   person or another session already holds the claim, the architect starts nothing and asks the
-   holder, on the issue, to release it or take the issue back; the tree keeps its slot meanwhile.
-6. **GitHub refuses its branch.** Before the architect starts, the daemon creates the issue's
-   branch, `legion/<KEY>`, on GitHub at `main` as the implement App, so no agent's push is the one
-   that creates it (GitHub can refuse that push on a large repository). A branch GitHub already has
-   is kept as it is. While GitHub refuses the create, the architect does not start, and neither does
-   a child's planner whose branch is refused. The daemon retries the create, backing off to about a
-   minute, and logs each refusal as an error whose `msg` is `outbox row failed`, with `kind`
-   `issue_branch` and an `error` naming the repository, the ref, GitHub's status and its body:
+5. **GitHub refuses its branch.** Before the architect starts, the daemon creates the issue's
+   branch, `legion/<KEY>`, on GitHub at `main` as the implement App, and again before each tree
+   member's planner starts, so no agent's push is the one that creates it (GitHub can refuse that
+   push on a large repository). A branch GitHub already has is kept as it is. While GitHub refuses
+   the create, the architect or planner waiting for it does not start. The daemon retries the
+   create, backing off to about a minute, and logs each refusal as an error whose `msg` is
+   `outbox row failed`, with `kind` `issue_branch` and an `error` naming the repository, the ref,
+   GitHub's status and its body:
 
    ```text
    {"level":"ERROR","msg":"outbox row failed","row":81,"kind":"issue_branch","error":"create the branch of WIDGETS-12, which its roles' starts wait for: create refs/heads/legion/WIDGETS-12 on acme/widgets at <main's commit>: GitHub answered 403: {\"message\":\"Resource not accessible by integration\",…}"}
@@ -113,6 +111,9 @@ Check, in order:
 
    Fix what GitHub names, such as the implement App's permissions or a ruleset on `legion/*`
    branches. The next attempt then creates the branch, and the tree starts.
+6. **Someone else holds it.** The architect's first act is to claim the issue in Dispatch. When a
+   person or another session already holds the claim, the architect starts nothing and asks the
+   holder, on the issue, to release it or take the issue back; the tree keeps its slot meanwhile.
 
 ## A tree waits at the design gate
 

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
@@ -27,7 +28,7 @@ const bodyLimit = 4096
 func Create(ctx context.Context, client *http.Client, api, token string, repo ghrepo.Repository, branch, base string) error {
 	endpoint := strings.TrimRight(api, "/") + "/repos/" + repo.String() + "/git"
 	baseRef := "refs/heads/" + base
-	status, body, err := call(ctx, client, token, http.MethodGet, endpoint+"/ref/heads/"+base, nil)
+	status, body, err := call(ctx, client, token, http.MethodGet, endpoint+"/ref/heads/"+escapeRef(base), nil)
 	if err != nil {
 		return fmt.Errorf("read %s of %s: %w", baseRef, repo, err)
 	}
@@ -56,6 +57,15 @@ func Create(ctx context.Context, client *http.Client, api, token string, repo gh
 		return nil
 	}
 	return fmt.Errorf("create %s on %s at %s: GitHub answered %d: %s", ref, repo, head.Object.SHA, status, body)
+}
+
+// escapeRef escapes each segment of a ref name for a URL path, keeping the slashes between them.
+func escapeRef(name string) string {
+	segments := strings.Split(name, "/")
+	for i, segment := range segments {
+		segments[i] = url.PathEscape(segment)
+	}
+	return strings.Join(segments, "/")
 }
 
 // alreadyExists says whether a 422's body is GitHub's answer to a ref it already has. GitHub answers
