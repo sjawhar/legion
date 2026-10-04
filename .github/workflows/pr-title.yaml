@@ -9,6 +9,12 @@ on:
   pull_request:
     types: [opened, edited, reopened, synchronize]
 
+# A new push to a pull request cancels this workflow's still-running check for that pull
+# request; this workflow has no other trigger.
+concurrency:
+  group: pr-title-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 # The job clones the repository for check-pr-text.sh and reads the pull request's commits through
 # the API; it writes nothing.
 permissions: {}

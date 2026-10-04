@@ -11,6 +11,12 @@ on:
   pull_request:
     types: [opened, reopened, synchronize]
 
+# A new push to a pull request cancels that pull request's still-running checks here; a push to
+# main or a merge-queue run shares no group with any pull request and is never cancelled.
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 # Read-only: no job here writes to the repository, a registry or the API. The token clones and
 # downloads pinned tools; the `lint` job's own permissions block below additionally grants
 # `pull-requests: read`, the one job that reads a pull request's commits through the API
