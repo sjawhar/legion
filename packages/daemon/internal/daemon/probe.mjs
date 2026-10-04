@@ -68,7 +68,9 @@ async function resolve(variable, discover) {
 async function agentModels(agents, ctx) {
   try {
     const resolver = await import("@oh-my-pi/pi-coding-agent/config/model-resolver");
-    const { isAuthenticated, kNoAuth } = await import("@oh-my-pi/pi-coding-agent/config/model-registry");
+    const { isAuthenticated, kNoAuth } = await import(
+      "@oh-my-pi/pi-coding-agent/config/model-registry"
+    );
     const { settings } = await import("@oh-my-pi/pi-coding-agent/config/settings");
     const overrides = settings.get("task.agentModelOverrides") ?? {};
     const parent = settings.getModelRole("default");
@@ -79,7 +81,12 @@ async function agentModels(agents, ctx) {
       const result =
         patterns.length === 0
           ? {}
-          : await resolver.resolveModelOverrideWithAuthFallback(patterns, parent, ctx.modelRegistry, settings);
+          : await resolver.resolveModelOverrideWithAuthFallback(
+              patterns,
+              parent,
+              ctx.modelRegistry,
+              settings
+            );
       if (!result.model) {
         // A role alias no configured role expands stays an alias: the role is not configured.
         const left = patterns.length > 0 ? patterns : declared;
@@ -94,7 +101,8 @@ async function agentModels(agents, ctx) {
         return `${patterns.join(",")} has no working credentials, so Oh My Pi runs it on the parent's model ${model}`;
       }
       const key = await ctx.modelRegistry.getApiKey(result.model);
-      if (key !== kNoAuth && !isAuthenticated(key)) return `its model ${model} has no working credentials`;
+      if (key !== kNoAuth && !isAuthenticated(key))
+        return `its model ${model} has no working credentials`;
       return undefined;
     };
 
@@ -102,7 +110,9 @@ async function agentModels(agents, ctx) {
     for (const agent of agents) {
       const override = overrides[agent.name];
       const declared = resolver.normalizeModelPatternList(
-        resolver.resolveConfiguredModelPatterns(override, settings).length > 0 ? override : agent.model
+        resolver.resolveConfiguredModelPatterns(override, settings).length > 0
+          ? override
+          : agent.model
       );
       if (declared.length === 0) continue;
       const why = await problem(declared);
@@ -111,7 +121,9 @@ async function agentModels(agents, ctx) {
     process.stderr.write(
       unresolved.length === 0
         ? "LEGION_AGENT_MODELS=resolved\n"
-        : unresolved.map((entry) => `LEGION_AGENT_MODEL_UNRESOLVED=${JSON.stringify(entry)}\n`).join("")
+        : unresolved
+            .map((entry) => `LEGION_AGENT_MODEL_UNRESOLVED=${JSON.stringify(entry)}\n`)
+            .join("")
     );
   } catch (error) {
     process.stderr.write(`LEGION_AGENT_MODELS_UNRESOLVABLE=${firstLine(error)}\n`);

@@ -14,7 +14,8 @@ environment of the command it runs, and every request, decision and use is recor
 is the agent's choice and can read the value, so approve a secret only for a session you would
 trust with the value itself. The command keeps the value in its environment for as long as it runs;
 the grant's expiry or revocation stops the session from reading the value again, not a command that
-already has it, and a secret granted automatically is granted again at the session's next request.
+already has it, and once the session's own person revokes a grant it got without asking, that
+session asks before it gets those secrets again.
 
 ```sh
 agent-secrets DEMO_API_KEY --reason "Deploy the example service" -- ./deploy.sh

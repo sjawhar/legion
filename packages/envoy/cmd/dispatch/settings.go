@@ -40,7 +40,7 @@ var settings = []setting{
 	{Name: "DATABASE_URL", Required: "yes",
 		Description: "Postgres connection string. The server migrates the database before serving; `census`, `backfill-block-ids`, `backfill-anchor-blocks` and `rebuild-refs` read it too. A `pool_max_conns` parameter is refused."},
 	{Name: "DISPATCH_AGENT_TOKEN", Required: "yes",
-		Description: "Shared bearer token an agent may authenticate with; personal tokens minted in Settings are the usual agent credential."},
+		Description: "Shared bearer token an agent may authenticate with: one value, or several separated by whitespace while it rotates, the first the current one, all accepted. Personal tokens minted in Settings are the usual agent credential."},
 	{Name: "DISPATCH_IDENTITY", Default: "`cookie`", Required: "no",
 		Description: "How a browser request names its person: `cookie` (Google Workspace sign-in through the sign-in pool, then a signed session cookie) or `header:<Header-Name>` (tests and local harnesses only: the header names the person by email)."},
 	{Name: "DISPATCH_SIGNIN_ISSUER", Required: "when `DISPATCH_IDENTITY` is `cookie` and `DISPATCH_DEV_SIGNIN` is unset",

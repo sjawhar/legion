@@ -59,15 +59,15 @@ type contractRig struct {
 	cancel       context.CancelFunc
 }
 
-// newContractRig mounts a real broker (brokertest.NewRig) and serves this package's own Server
-// on a real unix socket, its Broker pointed at that real broker's URL and OperatorFile, both
-// logging to logBuf through one logger, as cmd/agent-secrets-helper wires them. Every
+// newContractRig mounts a real broker (brokertest.NewRig, with options) and serves this package's
+// own Server on a real unix socket, its Broker pointed at that real broker's URL and OperatorFile,
+// both logging to logBuf through one logger, as cmd/agent-secrets-helper wires them. Every
 // socket/registry/operator artifact lives under its own TempDir, never under $HOME — the caller
 // is expected to have set HOME to a separate, otherwise-untouched TempDir of its own so it can
 // later assert nothing wrote there.
-func newContractRig(t *testing.T) *contractRig {
+func newContractRig(t *testing.T, options ...brokertest.Option) *contractRig {
 	t.Helper()
-	broker := brokertest.NewRig(t)
+	broker := brokertest.NewRig(t, options...)
 	artifacts := t.TempDir()
 	logBuf := &syncBuffer{}
 	sessionsPath := filepath.Join(artifacts, "sessions.json")
@@ -379,5 +379,52 @@ func TestContractLoginStatusNamesWhenTheLauncherCredentialExpires(t *testing.T) 
 	status := cr.call(t, Request{Op: "login-status"})
 	if want := minted.UTC().Format(time.RFC3339); !status.OK || !status.CredentialHeld || status.CredentialExpiresAt != want {
 		t.Fatalf("login-status: %+v; want the credential held, expiring at %s", status, want)
+	}
+}
+
+// TestContractRevokingTheMachineLoginEndsItsSessionsAndTheHelperDropsIt: the person who approved
+// the machine login a running helper holds revokes it, as Dispatch's machine-login page does (the
+// broker's UI route). Nothing tells the helper, and nothing needs to: the revoke ends the helper's
+// session, so the session's next renew is refused; revoking that lapsed enrollment through the
+// launcher route is refused 401 LAUNCHER_INVALID, so the helper drops the credential, says at
+// ERROR that the broker refused it, and login-status reports no credential held.
+func TestContractRevokingTheMachineLoginEndsItsSessionsAndTheHelperDropsIt(t *testing.T) {
+	cr := newContractRig(t, brokertest.WithLease(3*time.Second))
+	b := cr.srv.Broker
+	code, err := b.Login(context.Background(), cr.srv.Hostname)
+	if err != nil {
+		t.Fatalf("Broker.Login: %v", err)
+	}
+	credentialID := cr.broker.DecideMachineLogin(t, code, true)
+	waitForIssued(t, b)
+	reg := cr.call(t, Request{Op: "register", WaitSeconds: 10})
+	if !reg.OK || reg.State != "enrolled" || reg.EnrollmentID == "" {
+		t.Fatalf("register: %+v, want the session enrolled", reg)
+	}
+
+	status, body := cr.broker.UI(t, http.MethodPost, "/v1/launcher-credentials/"+credentialID+"/revoke-by-approver",
+		map[string]any{"approver": cr.broker.Operator})
+	if status != http.StatusOK {
+		t.Fatalf("revoke the machine login = %d: %s", status, body)
+	}
+
+	refused := `level=ERROR msg="the broker refused the launcher credential (expired or revoked, or a proof it could not verify, such as clock skew or an AGENT_SECRETS_URL mismatch); cleared: no session can enroll until a human approves a new machine login (run: agent-secrets launcher login)" credential_id=` + credentialID + " code=LAUNCHER_INVALID"
+	deadline := time.Now().Add(15 * time.Second)
+	for !strings.Contains(cr.logBuf.String(), refused) {
+		if time.Now().After(deadline) {
+			t.Fatalf("the helper never logged its credential refused; log:\n%s", cr.logBuf.String())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	log := cr.logBuf.String()
+	if !strings.Contains(log, `msg="renew refused; revoking the lapsed enrollment before enrolling again"`) ||
+		!strings.Contains(log, "code=PROOF_INVALID enrollment_id="+reg.EnrollmentID) {
+		t.Fatalf("log:\n%s\nwant the session's renew refused PROOF_INVALID for %s", log, reg.EnrollmentID)
+	}
+	if status := cr.call(t, Request{Op: "login-status"}); !status.OK || status.CredentialHeld || !status.LoginRefused || status.CredentialDropped != dropRefused || status.LoginState != "expired" {
+		t.Fatalf("login-status after the revoke: %+v; want expired, refused by the broker, none held", status)
+	}
+	if sessions := cr.call(t, Request{Op: "sessions"}); !sessions.OK || len(sessions.Sessions) != 1 || sessions.Sessions[0].State != "enrolling" {
+		t.Fatalf("sessions after the revoke: %+v; want the one session, no longer enrolled", sessions)
 	}
 }

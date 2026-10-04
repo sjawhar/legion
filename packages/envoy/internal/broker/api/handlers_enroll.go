@@ -90,6 +90,9 @@ func (s *server) createEnrollment(w http.ResponseWriter, r *http.Request, cred e
 		PodToken:   derefOr(body.PodToken, ""),
 	})
 	switch {
+	case errors.Is(err, enroll.ErrUnauthenticated):
+		writeError(w, http.StatusUnauthorized, "LAUNCHER_INVALID", "the launcher credential is not valid")
+		return
 	case errors.Is(err, enroll.ErrInvalidSlot):
 		writeError(w, http.StatusBadRequest, "INVALID_SLOT", err.Error())
 		return
