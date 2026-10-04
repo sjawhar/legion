@@ -96,7 +96,11 @@ mock.module("@oh-my-pi/pi-coding-agent", () => ({
 const { default: envoyExtension } = await import("./envoy");
 const { resetLegionRoleClaimBridgeForTests } = await import("../src/legion/role-claim-bridge");
 const { resetLegionBootstrappedSessionForTests } = await import("../src/subagent-session");
-const { default: legionExtension, setLegionBootstrapExitForTests } = await import("./legion");
+const {
+  default: legionExtension,
+  setLegionBootstrapExitForTests,
+  CODE_TOOL_REFUSAL,
+} = await import("./legion");
 
 type RegisteredCommand = {
   readonly name: string;
@@ -887,22 +891,27 @@ describe("Legion OMP extension", () => {
       )
     ).resolves.toBeUndefined();
   });
-  test("refuses a subagent's operation-log rewrite and `legion handoff complete` in a phase-worker pane while its other calls stay ungated", async () => {
+  test.each([
+    ["implementer", "REPO-43"],
+    ["architect", "REPO-42"],
+  ] as const)("refuses a subagent's operation-log rewrite and `legion handoff complete` in the %s pane while its other calls stay ungated", async (role, issue) => {
     const { childFile } = await createSubagentTranscriptPaths();
     const pane = await bootPane({
-      role: "implementer",
-      sessionId: "ses_sub_worker_jj",
+      role,
+      issue,
+      sessionId: `ses_sub_${role}_jj`,
       sessionFile: childFile,
     });
     const { toolCall, context } = pane;
 
     // LEGION-45: the subagent's bash runs in the same pane, against the same shared operation
-    // log, as the phase worker that spawned it -- the one gate that binds a subagent.
+    // log, as the parent that spawned it (a root architect's included) -- the one gate that
+    // binds a subagent.
     await expect(
       toolCall(
         {
           toolName: "bash",
-          toolCallId: "call-sub-worker-jj-log",
+          toolCallId: `call-sub-${role}-jj-log`,
           input: { command: 'jj -R "$LEGION_WORKSPACE" undo' },
         },
         context
@@ -911,13 +920,14 @@ describe("Legion OMP extension", () => {
       block: true,
       reason: expect.stringContaining("every Legion issue workspace shares"),
     });
-    // A subagent has no legion tool, and a handoff from its bash would complete the worker's phase
-    // where the phase stall cannot see it.
+    // A subagent has no legion tool, and a handoff from its bash would complete the parent's
+    // phase where the phase stall cannot see it (a root architect has no phase to complete, but
+    // the rule binds its pane the same way).
     await expect(
       toolCall(
         {
           toolName: "bash",
-          toolCallId: "call-sub-worker-handoff",
+          toolCallId: `call-sub-${role}-handoff`,
           input: { command: "legion handoff complete --summary done" },
         },
         context
@@ -928,7 +938,7 @@ describe("Legion OMP extension", () => {
       toolCall(
         {
           toolName: "bash",
-          toolCallId: "call-sub-worker-legion-state",
+          toolCallId: `call-sub-${role}-legion-state`,
           input: { command: "legion state" },
         },
         context
@@ -1159,71 +1169,35 @@ describe("Legion OMP extension", () => {
     expect(await jjRepoConfig(workspace, "user.name")).toBe('user.name = "Sentinel Before Boot"');
     expect(await jjRepoConfig(workspace, "user.email")).toBe("");
   });
-  test("restricts phase-worker tool access per LEGION_ROLE", async () => {
-    const blockedReason = (role: LegionRole, toolName: string): string | undefined => {
-      if (role === "architect" && ["edit", "write", "apply_patch"].includes(toolName)) {
-        return "the architect delegates all code work to phase workers";
-      }
-      if (role === "architect" && toolName === "task") {
-        return "the architect delegates only through child issues and the daemon's phase workers; Legion runs one agent per process";
-      }
-      if (role === "reviewer" && ["edit", "write", "apply_patch"].includes(toolName)) {
-        return "the reviewer edits nothing except the final .legion/ cleanup commit via bash";
-      }
-      if (role === "merger" && ["edit", "write", "apply_patch", "task"].includes(toolName)) {
-        return "the merger only verifies and reports";
-      }
-      return undefined;
-    };
-    const roles: readonly LegionRole[] = [
-      "planner",
-      "implementer",
-      "tester",
-      "reviewer",
-      "merger",
-      "architect",
-    ];
-    const toolNames = ["edit", "write", "apply_patch", "task", "hub"];
-
-    for (const role of roles) {
-      const { toolCall, context } = await bootPane({ role, sessionId: `ses_${role}` });
-      for (const toolName of toolNames) {
-        const reason = blockedReason(role, toolName);
-        const result = await toolCall(
-          { toolName, toolCallId: `call-${role}-${toolName}`, input: {} },
-          context
-        );
-        if (reason === undefined) expect(result).toBeUndefined();
-        else expect(result).toEqual({ block: true, reason });
-      }
-    }
+  test("gates code-mutation tools for architect, merger, and reviewer only", () => {
+    expect(Object.keys(CODE_TOOL_REFUSAL).sort()).toEqual(["architect", "merger", "reviewer"]);
   });
-  test("blocks the architect's task tool but allows an implementer's, per the one-agent-per-process rule", async () => {
-    const { toolCall: architectToolCall, context: architectContext } = await bootPane({
-      role: "architect",
-      sessionId: "ses_architect_task",
+  // Every pane but the root architect's is on a child issue, a sub-architect's included; the root
+  // architect's issue is its tree's.
+  test.each([
+    ["planner", "REPO-43"],
+    ["implementer", "REPO-43"],
+    ["tester", "REPO-43"],
+    ["reviewer", "REPO-43"],
+    ["merger", "REPO-43"],
+    ["architect", "REPO-43"],
+    ["architect", "REPO-42"],
+  ] as const)("lets the %s on %s launch a `task` subagent and refuses code tools only where its role does", async (role, issue) => {
+    const { toolCall, context } = await bootPane({
+      role,
+      issue,
+      sessionId: `ses_${role}_${issue}`,
     });
-    await expect(
-      architectToolCall(
-        { toolName: "task", toolCallId: "call-architect-task", input: {} },
-        architectContext
-      )
-    ).resolves.toEqual({
-      block: true,
-      reason:
-        "the architect delegates only through child issues and the daemon's phase workers; Legion runs one agent per process",
-    });
-
-    const { toolCall: implementerToolCall, context: implementerContext } = await bootPane({
-      role: "implementer",
-      sessionId: "ses_implementer_task",
-    });
-    await expect(
-      implementerToolCall(
-        { toolName: "task", toolCallId: "call-implementer-task", input: {} },
-        implementerContext
-      )
-    ).resolves.toBeUndefined();
+    const codeTools = ["edit", "write", "apply_patch"];
+    for (const toolName of [...codeTools, "task", "hub"]) {
+      const reason = codeTools.includes(toolName) ? CODE_TOOL_REFUSAL[role] : undefined;
+      const result = await toolCall(
+        { toolName, toolCallId: `call-${role}-${issue}-${toolName}`, input: {} },
+        context
+      );
+      if (reason === undefined) expect(result).toBeUndefined();
+      else expect(result).toEqual({ block: true, reason });
+    }
   });
   test("allows xd:// tool-device writes through the mutation gate but still blocks real file writes", async () => {
     const blockedReason = (role: LegionRole): string =>
@@ -1414,9 +1388,11 @@ describe("Legion OMP extension", () => {
         },
         context
       );
-      // A sub-architect's pane classifies as a phase worker's, so the operation-log guard (judged
-      // from the environment, ahead of every role gate so that it also binds a subagent) answers
-      // before its blanket bash gate; the root architect's pane, by contrast, never reaches it.
+      // Every pane this loop boots classifies as a phase worker's, a sub-architect's "architect"
+      // case included (its issue REPO-43 differs from its tree REPO-42), so the operation-log
+      // guard (judged from the environment, ahead of every role gate) answers before any role
+      // gate. A root architect's pane gets the same guard; see "blocks code tools in a root
+      // architect session" for its precedence against the architect's own bash gate.
       expect(undo).toEqual({
         block: true,
         reason: expect.stringContaining("every Legion issue workspace shares"),
@@ -1819,8 +1795,9 @@ describe("Legion OMP extension", () => {
       block: true,
       reason: "the architect delegates all code work to phase workers",
     });
-    // LEGION-45: the root architect's blanket bash gate answers first; the phase-worker
-    // operation-log guard never reaches it (its behaviour is unchanged by that guard).
+    // LEGION-45: the root architect's pane carries the operation-log guard too (judged ahead of
+    // every role gate), so `jj undo` is refused by the shared-log reason, not the architect's
+    // bash gate.
     await expect(
       toolCall(
         { toolName: "bash", toolCallId: "architect-bash-jj", input: { command: "jj undo" } },
@@ -1828,7 +1805,41 @@ describe("Legion OMP extension", () => {
       )
     ).resolves.toEqual({
       block: true,
-      reason: "the architect delegates all code work to phase workers",
+      reason: expect.stringContaining("every Legion issue workspace shares"),
+    });
+  });
+  test("refuses a root architect's own eval or hub call that spells out an operation-log rewrite", async () => {
+    // Neither `eval` nor `hub` is in the architect's bash-only gate, so before the operation-log
+    // rule bound the root architect's pane, the architect's own (non-subagent) call reached
+    // neither gate and ran unrefused.
+    const { toolCall, context } = await bootPane({
+      role: "architect",
+      issue: "REPO-42",
+      sessionId: "ses_root_architect_eval_hub",
+    });
+    const evalResult = await toolCall(
+      {
+        toolName: "eval",
+        toolCallId: "architect-eval-jj",
+        input: { language: "py", code: 'run(["jj", "undo"])' },
+      },
+      context
+    );
+    expect(evalResult).toEqual({
+      block: true,
+      reason: expect.stringContaining("every Legion issue workspace shares"),
+    });
+    const hubResult = await toolCall(
+      {
+        toolName: "hub",
+        toolCallId: "architect-hub-jj",
+        input: { op: "send", name: "shell", text: "jj undo" },
+      },
+      context
+    );
+    expect(hubResult).toEqual({
+      block: true,
+      reason: expect.stringContaining("every Legion issue workspace shares"),
     });
   });
   test("admits a root architect's single `legion` bash command, `legion handoff read` included, except `legion handoff complete`", async () => {
