@@ -90,11 +90,13 @@ func TestGateRegistrationWithDesignGateOffStartsPlanningAndSeedsApprovalRead(t *
 	if err := rows.Err(); err != nil {
 		t.Fatalf("iterate outbox: %v", err)
 	}
-	if want := []string{"gate_seed", "notice", "supervise", "notice"}; !sameStrings(kinds, want) {
+	if want := []string{"gate_seed", "notice", "issue_branch", "supervise", "notice"}; !sameStrings(kinds, want) {
 		t.Fatalf("outbox kinds = %v, want %v", kinds, want)
 	}
 }
 
+// A child entering an open gate is recorded and its planning started in one fact, its planner's
+// start queued behind the row creating the child's branch, which the start waits for.
 func TestRegisteredOpenGateRecordsChildAndStartsPlanningInTheSameFact(t *testing.T) {
 	pool := migratedPool(t)
 	ctx := context.Background()
@@ -116,7 +118,15 @@ func TestRegisteredOpenGateRecordsChildAndStartsPlanningInTheSameFact(t *testing
 	if tree != "LEGION-208" || gotPhase != string(phase.Planning) {
 		t.Fatalf("child tree/phase = %q/%q, want LEGION-208/planning", tree, gotPhase)
 	}
-	assertOutboxKinds(t, pool, []string{"supervise", "notice"})
+	assertOutboxKinds(t, pool, []string{"issue_branch", "supervise", "notice"})
+	var branchIssue string
+	var generation int
+	if err := pool.QueryRow(ctx, "select issue, (payload->>'generation')::int from outbox where kind = 'issue_branch'").Scan(&branchIssue, &generation); err != nil {
+		t.Fatalf("read the branch row: %v", err)
+	}
+	if branchIssue != "LEGION-209" || generation != 4 {
+		t.Fatalf("branch row = %s at generation %d, want the child's at the generation it entered, 4", branchIssue, generation)
+	}
 }
 
 func TestRefusedReadyIsCommittedAndApprovalAdvancesWithoutSecondReady(t *testing.T) {

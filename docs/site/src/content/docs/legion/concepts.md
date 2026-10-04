@@ -22,7 +22,9 @@ section can use the words without stopping to explain them.
   never reads or writes a GitHub issue.
 - **GitHub** holds the code: one branch, `legion/<KEY>`, and one pull request per issue. Legion acts
   there through two GitHub Apps, so the account that reviews a change is never the one that wrote
-  it.
+  it. The daemon creates a root's branch at `main` when it admits the root, before its architect
+  starts, and a child's when the child starts planning in its tree, so no agent's push is the one
+  that creates a branch: GitHub can refuse that push on a large repository.
 
 ## The controller
 

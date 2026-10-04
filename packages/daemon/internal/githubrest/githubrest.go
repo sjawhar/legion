@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
@@ -49,33 +50,44 @@ func (c Client) Post(ctx context.Context, path string, body, into any) error {
 }
 
 // GetPages reads every page of the JSON array GitHub answers at path, a hundred items to a page,
-// following the Link header's rel="next" until GitHub names none.
+// following the Link header's rel="next" until GitHub names none. A next page on another scheme or
+// host than the REST base's is refused, so the token goes nowhere but the API it was configured for.
 func GetPages[T any](ctx context.Context, c Client, path string) ([]T, error) {
+	base, err := url.Parse(c.API)
+	if err != nil {
+		return nil, fmt.Errorf("parse the REST base %q: %w", c.API, err)
+	}
 	separator := "?"
 	if strings.Contains(path, "?") {
 		separator = "&"
 	}
 	var all []T
-	for url := c.API + path + separator + "per_page=100"; url != ""; {
+	for target := c.API + path + separator + "per_page=100"; target != ""; {
 		var page []T
-		next, err := c.call(ctx, http.MethodGet, url, nil, &page)
+		next, err := c.call(ctx, http.MethodGet, target, nil, &page)
 		if err != nil {
 			return nil, err
 		}
 		all = append(all, page...)
-		url = next
+		if next != "" {
+			nextURL, err := url.Parse(next)
+			if err != nil || nextURL.Scheme != base.Scheme || !strings.EqualFold(nextURL.Host, base.Host) {
+				return nil, fmt.Errorf("GET %s: GitHub's next page %q is not on %s://%s, the only origin sent the token", path, next, base.Scheme, base.Host)
+			}
+		}
+		target = next
 	}
 	return all, nil
 }
 
-// call sends method to url, with body as JSON when it is not nil, reads a 2xx answer into into
+// call sends method to target, with body as JSON when it is not nil, reads a 2xx answer into into
 // when into is not nil, and returns the next page's URL its Link header names, "" for none.
-func (c Client) call(ctx context.Context, method, url string, body []byte, into any) (string, error) {
+func (c Client) call(ctx context.Context, method, target string, body []byte, into any) (string, error) {
 	var payload io.Reader
 	if body != nil {
 		payload = bytes.NewReader(body)
 	}
-	request, err := http.NewRequestWithContext(ctx, method, url, payload)
+	request, err := http.NewRequestWithContext(ctx, method, target, payload)
 	if err != nil {
 		return "", err
 	}
@@ -94,13 +106,24 @@ func (c Client) call(ctx context.Context, method, url string, body []byte, into 
 		return "", err
 	}
 	if response.StatusCode < 200 || response.StatusCode > 299 {
-		path, _, _ := strings.Cut(strings.TrimPrefix(url, c.API), "?")
-		return "", &Answer{Method: method, Path: path, Status: response.StatusCode, Body: strings.TrimSpace(string(answer)), RateLimited: RateLimited(response)}
+		return "", &Answer{Method: method, Path: c.answerPath(request.URL), Status: response.StatusCode, Body: strings.TrimSpace(string(answer)), RateLimited: RateLimited(response)}
 	}
 	if into == nil {
 		return nextPage(response.Header.Get("Link")), nil
 	}
 	return nextPage(response.Header.Get("Link")), json.Unmarshal(answer, into)
+}
+
+// answerPath is the path an Answer names for target, its query left out: the path under the
+// repository's REST base, or GitHub's whole path for a URL outside it, such as a later page GitHub
+// names under /repositories/<id>/.
+func (c Client) answerPath(target *url.URL) string {
+	if base, err := url.Parse(c.API); err == nil {
+		if rest, found := strings.CutPrefix(target.Path, base.Path); found && (rest == "" || strings.HasPrefix(rest, "/")) {
+			return rest
+		}
+	}
+	return target.Path
 }
 
 // RateLimited says whether response is GitHub's rate limit: a 429, or a 403 carrying

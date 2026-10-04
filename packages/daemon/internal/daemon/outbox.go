@@ -16,7 +16,9 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
+	"github.com/sjawhar/legion/daemon/internal/ghbranch"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
+	"github.com/sjawhar/legion/daemon/internal/githubrest"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/notify"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -39,6 +41,10 @@ const (
 	// second rather than ten times.
 	outboxFailedTickWait = time.Second
 	messageReadSkew      = 5 * time.Second
+	// issueBranchTimeout bounds one issue_branch row's GitHub calls, its token's mint with them:
+	// the runner executes its rows one at a time, so a call GitHub never answers would stall every
+	// effect behind it.
+	issueBranchTimeout = 30 * time.Second
 	// pendingWaitWarnAttempts is when a row waiting on its claim's pending delivery is logged as a
 	// warning: past the backoff's climb to its cap, a wait of about two minutes, the turn it waits
 	// on is not ending on its own, and an operator should look.
@@ -65,6 +71,9 @@ type outbox struct {
 	now             func() time.Time
 	provision       func(context.Context, workspace.Request) (workspace.Workspace, error)
 	remove          func(context.Context, workspace.Workspace) error
+	// githubAPI is the GitHub REST root an issue_branch row creates its issue's branch under; empty,
+	// in production, is https://api.github.com, and a test points it at a stand-in.
+	githubAPI string
 }
 
 func newOutbox(pool *pgxpool.Pool, records record.Store, client dispatch.Client, publisher notify.Publisher, supervisor *supervisor, tokens appauth.Tokens, handlers []intake.Handler, project, dispatchProject, stateDir string, configured config.Project, tools map[string]string, log *slog.Logger) *outbox {
@@ -73,7 +82,8 @@ func newOutbox(pool *pgxpool.Pool, records record.Store, client dispatch.Client,
 	}
 	return &outbox{
 		pool: pool, records: records, dispatch: client, notices: publisher, supervisor: supervisor, tokens: tokens,
-		handlers: handlers, project: project, dispatchProject: dispatchProject, stateDir: stateDir, repo: configured.Repo, log: log, now: time.Now,
+		handlers: handlers, project: project, dispatchProject: dispatchProject, stateDir: stateDir, repo: configured.Repo,
+		log: log, now: time.Now,
 		// WarmCodegraphIndexInBackground runs here, never in provisionWorkspace: every outbox
 		// test injects its own `provision`, so only this production closure starts codegraph.
 		provision: func(ctx context.Context, request workspace.Request) (workspace.Workspace, error) {
@@ -244,6 +254,8 @@ func (r *outbox) execute(ctx context.Context, row record.OutboxRow) error {
 		return r.removeWorkspace(ctx, row, value)
 	case record.MergeQueuePublish:
 		return r.mergeQueue(ctx, row, value)
+	case record.IssueBranch:
+		return r.issueBranch(ctx, row, value)
 	default:
 		return fmt.Errorf("outbox row %d: no executor for %T", row.ID, payload)
 	}
@@ -653,6 +665,52 @@ func (r *outbox) linger(ctx context.Context, row record.OutboxRow, payload recor
 		return fmt.Errorf("apply linger expiration for %s: %w", row.Issue, err)
 	}
 	return nil
+}
+
+// issueBranch creates the issue's branch, legion/<KEY>, on GitHub at main, so no role's push is the
+// one that creates it: GitHub can refuse such a push on a large repository (its check for changed
+// workflow files, which it runs for an App without the workflows permission, times out on a new
+// ref), where it takes one that moves the branch. A branch GitHub already has is left where it is. A
+// start of the issue waits for this row (record.Store.ClaimDue), so a create GitHub refuses holds
+// back the issue's roles, each attempt logged with GitHub's answer, until one passes. A row of a
+// generation the issue has left, or of a tree that lingers, finishes without acting: the starts it
+// held back act on neither.
+func (r *outbox) issueBranch(ctx context.Context, row record.OutboxRow, payload record.IssueBranch) error {
+	issue, err := r.issue(ctx, row.Issue)
+	if err != nil {
+		return err
+	}
+	if payload.Generation != issue.Generation {
+		r.log.Info("outbox issue branch serves an earlier generation; finished without acting", "row", row.ID, "issue", issue.Key,
+			"generation", payload.Generation, "current", issue.Generation)
+		return nil
+	}
+	root, err := r.root(ctx, issue)
+	if err != nil {
+		return err
+	}
+	if root != nil && root.Lingers() {
+		r.log.Info("outbox issue branch of a member of a lingering tree; finished without acting", "row", row.ID, "issue", issue.Key, "tree", issue.Tree)
+		return nil
+	}
+	if err := r.createBranch(ctx, issue.Key); err != nil {
+		return fmt.Errorf("create the branch of %s, which its roles' starts wait for: %w", issue.Key, err)
+	}
+	return nil
+}
+
+// createBranch creates issue's branch on GitHub at main unless GitHub already has it, as the
+// implement App: the App of the roles that write an issue branch (appauth.AppRoleFor), and the one
+// workspace provisioning clones with.
+func (r *outbox) createBranch(ctx context.Context, issue string) error {
+	ctx, cancel := context.WithTimeout(ctx, issueBranchTimeout)
+	defer cancel()
+	lease, err := r.tokens.Token(ctx, appauth.Implement, r.repo.Owner())
+	if err != nil {
+		return fmt.Errorf("mint implement App token: %w", err)
+	}
+	github := githubrest.Client{Token: lease.Token, API: githubrest.RepositoryAPI(r.githubAPI, r.repo)}
+	return ghbranch.Create(ctx, github, r.repo, workspace.Bookmark(issue))
 }
 
 func (r *outbox) removeWorkspace(ctx context.Context, row record.OutboxRow, payload record.WorkspaceRemove) error {

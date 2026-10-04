@@ -27,6 +27,7 @@ const (
 	OutboxKindLingerClose       OutboxKind = "linger_close"
 	OutboxKindWorkspaceRemove   OutboxKind = "workspace_remove"
 	OutboxKindMergeQueuePublish OutboxKind = "merge_queue_publish"
+	OutboxKindIssueBranch       OutboxKind = "issue_branch"
 )
 
 // OutboxPayload is the sealed vocabulary of payloads a workflow may enqueue.
@@ -260,6 +261,18 @@ type MergeQueuePublish struct {
 
 func (MergeQueuePublish) OutboxKind() OutboxKind { return OutboxKindMergeQueuePublish }
 
+// IssueBranch creates the row's issue's branch, legion/<KEY>, on GitHub at main, where GitHub does
+// not have it yet, before any role of the issue starts: GitHub can refuse the push that creates a
+// branch of a large repository, where it takes a push that moves one. A start of the issue waits
+// while the row is unfinished (Store.ClaimDue).
+type IssueBranch struct {
+	// Generation is the issue generation the branch is created for. A row of an earlier generation,
+	// or of a tree that lingers, finishes without acting.
+	Generation uint64 `json:"generation"`
+}
+
+func (IssueBranch) OutboxKind() OutboxKind { return OutboxKindIssueBranch }
+
 // NewOutboxRow encodes one validated payload for durable delivery at nextAt.
 func NewOutboxRow(issue string, payload OutboxPayload, nextAt time.Time) (OutboxRow, error) {
 	if err := validateOutboxPayload(payload); err != nil {
@@ -346,6 +359,12 @@ func decodeOutboxJSON(row OutboxRow) (OutboxPayload, error) {
 			return nil, fmt.Errorf("decode outbox row %d: %w", row.ID, err)
 		}
 		payload = value
+	case OutboxKindIssueBranch:
+		value := IssueBranch{}
+		if err := decoder.Decode(&value); err != nil {
+			return nil, fmt.Errorf("decode outbox row %d: %w", row.ID, err)
+		}
+		payload = value
 	default:
 		return nil, fmt.Errorf("decode outbox row %d: unknown kind %q", row.ID, row.Kind)
 	}
@@ -379,7 +398,7 @@ func validateOutboxPayload(payload OutboxPayload) error {
 		if length := dispatch.MessageBodyLength(value.Reason); length > MessagePostLimit {
 			return fmt.Errorf("a status write's reason is %d characters, over the %d a message holds", length, MessagePostLimit)
 		}
-	case MessagePost, GateSeed, LingerClose:
+	case MessagePost, GateSeed, LingerClose, IssueBranch:
 	case WorkspaceRemove:
 		if value.Linger == 0 {
 			return fmt.Errorf("workspace removal requires the root generation of its linger")
