@@ -3720,12 +3720,19 @@ func TestRunSelfHealthMonitor_RetriesPastTransientFailures(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	var probeCalls int32
+	// The monitor keeps probing every interval after recovery, so the signal must never
+	// block: a plain buffered send stalls once an unread post-recovery tick has already
+	// filled the channel, wedging the monitor's goroutine inside probe() and leaving it
+	// unable to observe ctx.Done() after cancel().
 	recovered := make(chan struct{}, 1)
 	probe := func() error {
 		if atomic.AddInt32(&probeCalls, 1) <= 3 {
 			return errors.New("transient NATS timeout")
 		}
-		recovered <- struct{}{}
+		select {
+		case recovered <- struct{}{}:
+		default:
+		}
 		return nil
 	}
 	done := make(chan struct{})
