@@ -156,7 +156,7 @@ describe("DispatchClient", () => {
           href: "/issues/LEGION-2/spec?q=astrolabe",
         },
       ],
-      { limit: 5, offset: 10, took_ms: 12 }
+      { total: 1, reachable: 1, limit: 5, offset: 10, took_ms: 12 }
     );
     const { fetchImpl, requests } = fakeFetch([jsonResponse(body)]);
     const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
