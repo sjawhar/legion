@@ -13,7 +13,6 @@ on:
       - "skills/**"
       - ".github/workflows/docs.yaml"
       - ".github/scripts/check-private-names.sh"
-      - ".github/scripts/check-private-names.test.sh"
   pull_request:
     paths:
       - "docs/site/**"
@@ -21,7 +20,6 @@ on:
       - "skills/**"
       - ".github/workflows/docs.yaml"
       - ".github/scripts/check-private-names.sh"
-      - ".github/scripts/check-private-names.test.sh"
 
 concurrency:
   group: docs-${{ github.ref }}

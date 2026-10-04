@@ -31,6 +31,8 @@ repo_spaced="agent"" c"
 repo_en_dash="agent""–c"
 repo_nonbreaking_hyphen="agent""‑c"
 repo_percent_hyphen="agent""%2Dc"
+nbsp=$'\xc2\xa0'
+en_dash=$'\xe2\x80\x93'
 key="AGENT""C"
 company="traj""ectory"
 company_proper="T""rajectory"
@@ -39,6 +41,21 @@ internal="internal"
 private_host_suffix="private.example"
 example_host_suffix="example"
 vendored_nats="packages/claude-envoy/dist/envoy-channel.js"
+
+# assert_each_refused <fixture-prefix> <label> <array-name>: writes each line of the named array
+# into its own fixture, and checks the guard refuses it with that label at line 1.
+assert_each_refused() {
+  local prefix=$1 label=$2 index
+  local -n lines=$3
+  for index in "${!lines[@]}"; do
+    root=$(fixture "$prefix-$index")
+    printf '%s\n' "${lines[index]}" > "$root/docs/notes.md"
+    run_check "$root"
+    check "'${lines[index]}' fails" "$(is "$status" 1)"
+    check "'${lines[index]}' is named at its file and line" \
+      "$(contains "$out" "docs/notes.md:1: $label")"
+  done
+}
 
 # fixture <name>: a clean repository with one tracked file. Echoes its root.
 fixture() {
@@ -90,6 +107,8 @@ mentions=(
   "the $repo_percent_hyphen repository"
   "https://github.com/search?q=repo%3Aexample-org%2F$repo"
   "?q=the%20$repo_joined%20repo"
+  "the agent${nbsp}c repository"
+  "the agent""  c repository"
 )
 for index in "${!mentions[@]}"; do
   root=$(fixture "repo-$index")
@@ -110,15 +129,15 @@ mentions=(
   "${company_proper}${labs^}"
   "the $company_proper team"
   "($company_proper)"
+  "$company$en_dash$labs"
+  "$company%20$labs"
+  "$company$nbsp$labs"
+  "$company  $labs"
+  "see the ${company^^} docs"
+  "${company^^}_AWS_PROFILE=x"
+  "${company_proper}_API_KEY=x"
 )
-for index in "${!mentions[@]}"; do
-  root=$(fixture "company-$index")
-  printf '%s\n' "${mentions[index]}" > "$root/docs/notes.md"
-  run_check "$root"
-  check "'${mentions[index]}' fails" "$(is "$status" 1)"
-  check "'${mentions[index]}' is named at its file and line" \
-    "$(contains "$out" 'docs/notes.md:1: names the company')"
-done
+assert_each_refused company "names the company" mentions
 
 echo "case: a private internal host is refused, whatever its case"
 hosts=(
@@ -130,14 +149,7 @@ hosts=(
   "https://a.$internal.$example_host_suffix and https://b.${internal^^}.$private_host_suffix"
   "this.$internal.push(value)"
 )
-for index in "${!hosts[@]}"; do
-  root=$(fixture "host-$index")
-  printf '%s\n' "${hosts[index]}" > "$root/docs/notes.md"
-  run_check "$root"
-  check "'${hosts[index]}' fails" "$(is "$status" 1)"
-  check "'${hosts[index]}' is named at its file and line" \
-    "$(contains "$out" 'docs/notes.md:1: names a private internal host')"
-done
+assert_each_refused host "names a private internal host" hosts
 
 echo "case: a reserved example host passes, and the vendored NATS client's property in its own file"
 root=$(fixture public-host)
@@ -223,6 +235,21 @@ run_check "$root"
 check "a directory naming the company fails" "$(is "$status" 1)"
 check "does not print the directory's name" "$(is "$(contains "$out" "$company_proper")" false)"
 
+echo "case: a non-ASCII file name reaches the rules unquoted"
+root=$(fixture path-name-dash)
+printf 'clean text\n' > "$root/docs/$repo_en_dash.md"
+git -C "$root" add docs
+run_check "$root"
+check "a file named with a typographic dash between the halves fails" "$(is "$status" 1)"
+check "masks it" "$(contains "$out" 'docs/<name>')"
+
+root=$(fixture path-unicode)
+printf '%s\n' "$key-7" > "$root/docs/café.md"
+git -C "$root" add docs
+run_check "$root"
+check "a hit in a non-ASCII file fails" "$(is "$status" 1)"
+check "names the file as it is, unquoted" "$(contains "$out" '^::error file=docs/café.md,line=1::')"
+
 echo "case: lockfiles and binary files are skipped"
 root=$(fixture skipped)
 mkdir -p "$root/packages/x"
@@ -267,28 +294,52 @@ run_check "$root" dist
 check "exits 2" "$(is "$status" 2)"
 check "names it" "$(contains "$out" 'dist does not exist')"
 
-# run_pr_text <title> <body>: runs check-pr-text.sh as pr-title.yaml does, setting `out` and `status`.
+# run_pr_text <title> <body> <commit messages>: runs check-pr-text.sh as CI does: the title and
+# body come from a pull_request event payload, and the commit messages from a stand-in `gh` that
+# answers only this pull request's commits route. Sets `out` and `status`.
+mkdir -p "$work/bin"
+cat > "$work/bin/gh" <<'GH'
+#!/usr/bin/env bash
+[ "$1 $2" = "api repos/example/repo/pulls/7/commits" ] || { echo "unexpected gh call: $*" >&2; exit 3; }
+cat "$PR_TEXT_TEST_COMMITS"
+GH
+chmod +x "$work/bin/gh"
 run_pr_text() {
+  printf '%s' "$2" > "$work/pr-body"
+  printf '%s\n' "$3" > "$work/pr-commits"
+  jq -n --arg title "$1" --rawfile body "$work/pr-body" \
+    '{pull_request: {number: 7, title: $title, body: (if $body == "" then null else $body end)}}' \
+    > "$work/event.json"
   set +e
-  out=$(PR_TITLE=$1 PR_BODY=$2 "$pr_text_script" 2>&1)
+  out=$(GITHUB_EVENT_PATH="$work/event.json" GITHUB_REPOSITORY=example/repo \
+    PR_TEXT_TEST_COMMITS="$work/pr-commits" PATH="$work/bin:$PATH" "$pr_text_script" 2>&1)
   status=$?
   set -e
 }
 
-echo "case: a pull request's title and body, which become main's squash commit and release notes"
-run_pr_text "fix(dispatch): keep the inbox order" "Refs LEGION-7"
-check "a clean title and body pass" "$(is "$status" 0)"
+echo "case: a pull request's title, body and commit messages, which reach main and its release notes"
+run_pr_text "fix(dispatch): keep the inbox order" "Refs LEGION-7" "fix: keep the order"
+check "a clean title, body and commits pass" "$(is "$status" 0)"
 
-run_pr_text "fix(dispatch): keep the inbox order ($key-7)" "Refs LEGION-7"
+run_pr_text "fix(dispatch): keep the inbox order ($key-7)" "Refs LEGION-7" "fix: keep the order"
 check "a title naming a deployment issue key fails" "$(is "$status" 1)"
 check "names the title" "$(contains "$out" 'title:1: names the private deployment repository')"
 check "does not print the key" "$(is "$(contains "$out" "$key")" false)"
 
-run_pr_text "fix(dispatch): keep the inbox order" "$(printf 'Line one.\nAs %s Labs found.\n' "$company_proper")"
+run_pr_text "fix(dispatch): keep the inbox order" "$(printf 'Line one.\nAs %s Labs found.\n' "$company_proper")" "fix: keep the order"
 check "a body naming the company fails" "$(is "$status" 1)"
 check "names the body's line" "$(contains "$out" 'body:2: names the company')"
 
-run_pr_text "fix(dispatch): keep the inbox order" ""
+run_pr_text "fix(dispatch): keep the inbox order" "" "fix: keep the order"
 check "an empty body passes" "$(is "$status" 0)"
+
+run_pr_text "fix(dispatch): keep the inbox order" "Refs LEGION-7" \
+  "$(printf 'fix: keep the order\n\nCo-authored-by: A <a@%s%s.example>\n' "$company" "$labs")"
+check "a commit message naming the company fails" "$(is "$status" 1)"
+check "names the commit messages' line" "$(contains "$out" 'commits:3: names the company')"
+
+long_body=$(printf '%.0s–' {1..50000})
+run_pr_text "fix(dispatch): keep the inbox order" "$long_body" "fix: keep the order"
+check "a body larger than one environment variable may hold is read" "$(is "$status" 0)"
 
 summary "check-private-names.sh"
