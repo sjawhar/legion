@@ -483,7 +483,7 @@ test("live: a fresh page load opens the stream at the current head and stays wit
   // counts on every page (the sidebar's on desktop, the compact header's on phone), and
   // the credential requests waiting on the viewer, which the Needs-you badge counts beside
   // the inbox on every page.
-  // The header's assignee picker reads the sign-in allowlist only once the reader
+  // The header's assignee picker reads who has signed in only once the reader
   // reaches for it, so it is not in this count. The phone project (iphone) does not
   // fetch the sidebar while its drawer is closed, so it uses 14. Asserted exactly (not
   // a ceiling) so a panel that starts eagerly fetching before its tab is ever opened
