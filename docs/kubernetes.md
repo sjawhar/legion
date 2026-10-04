@@ -1268,15 +1268,15 @@ The daemon probes a pod by reading it and consulting the worker stream's live re
 - `Pending` otherwise → **alive**;
 - `Running`: judged through the recorded role's own container, never the whole pod — a neighbour
   role's container restart changes nothing here. No status at all for that container → **unknown**.
-  A connected role `legion launcher` is the container's current instance, so its report decides
-  next: a child generation matching the recorded one is **alive**, a child of another generation is
+  A connected role `legion launcher` reporting a child of the recorded generation is **alive**,
+  even when Kubernetes still shows the container's previous instance terminated for a moment after
+  a restart: that one answer is asked first, and it alone outranks the terminated status. Otherwise
+  a terminated role container → **dead (gone)**, its log tail quoted. Otherwise, with no launcher
+  connected → **unknown** (a booting or redialing launcher is not death; the boot watchdog
+  decides). Otherwise the connected launcher's remaining answers: a child of another generation is
   **dead (not the recorded process)**, a last-reported exit matching the recorded generation is
   **dead (gone)**, a last exit of another generation is again **dead (not the recorded process)**,
-  and no child ever reported is **dead (gone)**. Kubernetes can still show the previous container
-  instance as terminated briefly after a restart, so that stale state does not outrank the connected
-  launcher. With no launcher connected, a terminated role container → **dead (gone)**, its log tail
-  quoted; otherwise → **unknown** (a booting or redialing launcher is not death; the boot watchdog
-  decides);
+  and no child ever reported is **dead (gone)**;
 - phase `Unknown` → **unknown**;
 - the API read failed → **alive** if the pod's stream is registered (live proof), else **unknown**.
 
