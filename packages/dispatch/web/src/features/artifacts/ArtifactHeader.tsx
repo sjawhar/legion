@@ -104,8 +104,8 @@ export function ArtifactHeader({
               Project {artifact.project}
             </Link>
           ) : null}
-          <div className="flex min-w-0 items-center gap-1">
-            <h2 className={`truncate text-lg font-semibold ${textPrimaryOnSurface}`}>
+          <div className="flex min-w-0 items-start gap-1">
+            <h2 className={`min-w-0 break-words text-lg font-semibold ${textPrimaryOnSurface}`}>
               {artifact.name}
             </h2>
             <CopyRefButton route={documentRoute(artifact, version)} />

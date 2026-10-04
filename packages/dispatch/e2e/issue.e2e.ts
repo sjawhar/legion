@@ -1023,51 +1023,75 @@ test("issue header reassigns through the Assignee picker; a personal token's iss
   }
 });
 
-test("a clamped title shows two lines and no fragment of the third", async ({
+test("an issue's whole title wraps at every width, whether prose or one unbroken word", async ({
   browser,
 }, testInfo) => {
-  test.skip(testInfo.project.name !== "iphone", "the clamp only bites where the title wraps");
   await createProject({ key: "CORE", name: "Core" });
-  const issue = await createIssue({
-    project: "CORE",
-    title:
-      "Whole-app visual polish pass: information hierarchy and a coherent conversation across every document surface",
-  });
+  // Five repeats of a 50-character sentence, cut to exactly 200: the length the spec names.
+  const title200 = "Dispatch cuts off issue titles that are too long. ".repeat(5).slice(0, 200);
+  expect(title200).toHaveLength(200);
+  const prose = await createIssue({ project: "CORE", title: title200 });
+  // A single unbroken 100-character string: no space for the browser to break on, so wrapping
+  // depends on `break-words` rather than the ordinary word-wrap every other title gets for free.
+  const title100 = "supercalifragilisticexpialidocious".repeat(3).slice(0, 100);
+  expect(title100).toHaveLength(100);
+  expect(title100).not.toContain(" ");
+  const oneWord = await createIssue({ project: "CORE", title: title100 });
 
   const context = await asUser(browser, "alice");
   try {
     const page = await context.newPage();
-    await page.goto(`/issues/${issue.key}`);
-    const title = page.getByRole("heading", { level: 1 });
-    await expect(title).toBeVisible();
-    // How many lines of the title a reader can see: the line boxes that start above the bottom of
-    // whatever clips them. A clamped element with vertical padding clips below the line it cut, so
-    // the top of the third line was drawn inside that padding.
-    // Polled, not sampled once: the clamp is a layout the browser settles into, and a single
-    // immediate measurement caught the frame before it (1 run in 9 locally).
-    await expect
-      .poll(() =>
-        title.evaluate((element) => {
-          const text = element.firstChild?.firstChild ?? element.firstChild;
-          if (text === null || text === undefined) {
-            return -1;
+    for (const issue of [prose, oneWord]) {
+      await page.goto(`/issues/${issue.key}`);
+      const title = page.getByRole("heading", { level: 1 });
+      await expect(title).toHaveText(issue.title);
+      // Whole means nothing between the title and the document clips it: no clamp, ellipsis, or
+      // box shorter or narrower than the text it holds, at the width this project renders.
+      const clipped = await title.evaluate((element) => {
+        const clips: string[] = [];
+        // The clamp this bug reported lived on a span nested inside the heading, not the heading
+        // itself, so the walk starts at the deepest content node and climbs: that visits the span
+        // before the heading before its ancestors.
+        let deepest: Node = element;
+        while (deepest.firstChild !== null) {
+          deepest = deepest.firstChild;
+        }
+        for (
+          let node: Element | null = deepest.parentElement;
+          node !== null;
+          node = node.parentElement
+        ) {
+          const style = getComputedStyle(node);
+          if (style.webkitLineClamp !== "none" || style.textOverflow === "ellipsis") {
+            clips.push(
+              `${node.tagName}: line clamp ${style.webkitLineClamp}, ${style.textOverflow}`
+            );
           }
-          const range = document.createRange();
-          range.selectNodeContents(text);
-          let clip: Element | null = text.parentElement;
-          while (clip !== null && getComputedStyle(clip).overflowY === "visible") {
-            clip = clip.parentElement;
+          // A page taller than the viewport scrolls normally (`overflowY: visible` on `html`) -
+          // that is not a clip. Only an ancestor set to clip its own overflow, with content that
+          // no longer fits it, is the bug this guards: the line-clamp this issue reported.
+          if (
+            (style.overflowY !== "visible" && node.scrollHeight > node.clientHeight + 1) ||
+            (style.overflowX !== "visible" && node.scrollWidth > node.clientWidth + 1)
+          ) {
+            clips.push(
+              `${node.tagName}: ${node.scrollWidth}x${node.scrollHeight} in ${node.clientWidth}x${node.clientHeight}`
+            );
           }
-          if (clip === null) {
-            return -1;
-          }
-          const box = clip.getBoundingClientRect();
-          const bottom = box.bottom - Number.parseFloat(getComputedStyle(clip).borderBottomWidth);
-          return Array.from(range.getClientRects()).filter((rect) => rect.top < bottom - 0.5)
-            .length;
-        })
-      )
-      .toBe(2);
+        }
+        return clips;
+      });
+      expect(clipped).toEqual([]);
+      // The one unbroken word wraps rather than pushing the page wider than the viewport.
+      const widensPage = await page.evaluate(
+        () => document.documentElement.scrollWidth > window.innerWidth + 1
+      );
+      expect(widensPage).toBe(false);
+      await page.screenshot({
+        path: testInfo.outputPath(`issue-title-${issue.key}-whole.png`),
+        fullPage: true,
+      });
+    }
   } finally {
     await context.close();
   }
