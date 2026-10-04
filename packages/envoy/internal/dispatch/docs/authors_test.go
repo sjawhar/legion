@@ -27,7 +27,7 @@ func TestSettlementCreditsNoAuthorOfAnEditMadeAfterItsRead(t *testing.T) {
 	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
 	settleCurrentGeneration(t, service, artifactID)
 	alice := model.Actor{Kind: "user", ID: "alice"}
-	if _, err := service.ReplaceText(context.Background(), artifactID, "First, alice.\n\nSecond.\n", alice); err != nil {
+	if _, err := joinedReplaceText(service, artifactID, "First, alice.\n\nSecond.\n", alice); err != nil {
 		t.Fatalf("alice's edit: %v", err)
 	}
 	bob := model.Actor{Kind: "user", ID: "bob"}
@@ -71,7 +71,7 @@ func TestSettlementCreditsAnEditMadeBetweenItsAuthorsAndCopyOnTheNextVersion(t *
 	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
 	settleCurrentGeneration(t, service, artifactID)
 	alice := model.Actor{Kind: "user", ID: "alice"}
-	if _, err := service.ReplaceText(context.Background(), artifactID, "First, alice.\n\nSecond.\n", alice); err != nil {
+	if _, err := joinedReplaceText(service, artifactID, "First, alice.\n\nSecond.\n", alice); err != nil {
 		t.Fatalf("alice's edit: %v", err)
 	}
 	bob := model.Actor{Kind: "user", ID: "bob"}
@@ -101,7 +101,7 @@ func TestSettlementCreditsAnEditMadeBetweenItsAuthorsAndCopyOnTheNextVersion(t *
 		t.Fatalf("latest version = %d, want %d, which already holds bob's edit", latest, versioned)
 	}
 	carol := model.Actor{Kind: "user", ID: "carol"}
-	if _, err := service.ReplaceText(context.Background(), artifactID, both+"\nThird, carol.\n", carol); err != nil {
+	if _, err := joinedReplaceText(service, artifactID, both+"\nThird, carol.\n", carol); err != nil {
 		t.Fatalf("carol's edit: %v", err)
 	}
 	settleCurrentGeneration(t, service, artifactID)
@@ -165,9 +165,8 @@ func TestAnEditVersionedBeforeItsObserverCreditsItIsCreditedOnTheNextVersion(t *
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
 	settleCurrentGeneration(t, service, artifactID)
-	ctx := context.Background()
 	alice := model.Actor{Kind: "user", ID: "alice"}
-	if _, err := service.ReplaceText(ctx, artifactID, "First, alice.\n\nSecond.\n", alice); err != nil {
+	if _, err := joinedReplaceText(service, artifactID, "First, alice.\n\nSecond.\n", alice); err != nil {
 		t.Fatalf("alice's edit: %v", err)
 	}
 	bob := model.Actor{Kind: "user", ID: "bob"}
@@ -192,7 +191,7 @@ func TestAnEditVersionedBeforeItsObserverCreditsItIsCreditedOnTheNextVersion(t *
 	}
 
 	carol := model.Actor{Kind: "user", ID: "carol"}
-	if _, err := service.ReplaceText(ctx, artifactID, both+"\nThird, carol.\n", carol); err != nil {
+	if _, err := joinedReplaceText(service, artifactID, both+"\nThird, carol.\n", carol); err != nil {
 		t.Fatalf("carol's edit: %v", err)
 	}
 	settleCurrentGeneration(t, service, artifactID)
@@ -261,7 +260,7 @@ func TestANewAskIsAttributedToTheUpdateThatIntroducedIt(t *testing.T) {
 			// which would follow a person's question (Acceptance's agent test).
 			name: "an update two browsers could have sent after an agent's edit",
 			arrange: func(t *testing.T, service *Service, artifactID string) {
-				if _, err := service.ReplaceText(context.Background(), artifactID, "First, agent.\n\nSecond.\n", session); err != nil {
+				if _, err := joinedReplaceText(service, artifactID, "First, agent.\n\nSecond.\n", session); err != nil {
 					t.Fatalf("agent edit: %v", err)
 				}
 				service.addConnection(artifactID, 1, alice)
@@ -395,11 +394,11 @@ func holdObserver(t *testing.T, service *Service, artifactID string, hook *func(
 	}
 }
 
-// A service write (ReplaceText, never inside a transaction) lands and is held at its own update
-// observer - its mutation is in the room, but the room's rendered replica has not caught up to it
-// yet. A browser's edit then lands and is observed immediately: that observer's catch-up absorbs
-// the still-unobserved service write's change too, which a render keyed on whichever observer's
-// own origin happens to run first would misattribute to the browser (round 5's regression). Each
+// A service write (ReplaceText, distinct from ApplyOps below) is held at its own update observer -
+// its publish is in the room, but the room's rendered replica has not caught up to it yet. A
+// browser's edit then lands and is observed immediately: that observer's catch-up absorbs the
+// still-unobserved service write's change too, which a render keyed on whichever observer's own
+// origin happens to run first would misattribute to the browser (round 5's regression). Each
 // block still goes to its own author - the service write's actor from write-site registration
 // (registerAskAuthors), the browser's from the room's one connected peer - because attribution no
 // longer depends on which update's observer renders the merged catch-up (LEGION-503).
@@ -415,8 +414,10 @@ func TestAServiceWriteAndABrowserEditLandTogetherEachAskGoesToItsOwnAuthor(t *te
 	current := currentLiveMarkdown(t, service, artifactID)
 	agentAsk := "\n:::ask{#agent-ask urgency=\"high\" multiple=\"false\"}\nWhich database?\n:::\n"
 	release := holdObserver(t, service, artifactID, &service.beforeObserveUpdate, func() error {
-		_, err := service.ReplaceText(context.Background(), artifactID, current+agentAsk, session)
-		return err
+		return joinedWrite(service, func(ctx context.Context) error {
+			_, err := service.ReplaceText(ctx, artifactID, current+agentAsk, session)
+			return err
+		})
 	})
 	room := service.srv.GetDoc(artifactID)
 	_, update := peerEdit(t, room, appendBlocks(t, ":::ask{#bob-ask urgency=\"high\" multiple=\"false\"}\nWhich transport?\n:::\n"))
@@ -533,7 +534,7 @@ func TestApplyOpsOwnBlockIDRepairCarriesForwardTheRenamedBlocksAuthor(t *testing
 		":::ask{urgency=\"high\" multiple=\"false\"}\nWhich transport?\n:::\n", "x\x00"))
 	service.removeConnection(artifactID, 1)
 
-	if _, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{
+	if _, err := joinedApplyOps(service, artifactID, []model.EditOp{
 		{Op: "insert", After: "end", Markdown: "An agent's line."},
 	}, session, nil); err != nil {
 		t.Fatalf("agent edit: %v", err)

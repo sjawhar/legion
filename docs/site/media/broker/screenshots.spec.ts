@@ -55,8 +55,8 @@ test("the Dispatch pages a person approves broker requests on", async ({ browser
   await waitForOutput(request, printed.keyReached, "the command's output");
   await page.screenshot({ path: join(assets, "credential-request-approved.png") });
 
-  // The grant that approval made, naming its approver, under Settings' Live grants: live while
-  // the session that asked is open.
+  // The grant that approval made, approved by alice, under Settings' Live grants: live while the
+  // session that asked is open.
   await page.goto("/settings");
   const grants = dispatch.liveGrants(page);
   await expect(grants.getByText("DEMO_API_KEY")).toBeVisible();

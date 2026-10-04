@@ -7,9 +7,9 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/requests"
-	"github.com/sjawhar/envoy/internal/broker/rules"
 )
 
 // createRequestBody is POST /v1/requests's exact shape in the shared broker contract
@@ -35,7 +35,7 @@ type createRequestResponse struct {
 	RequestID string `json:"request_id"`
 	// "granted", "pending" (a person must decide it) or "denied".
 	State string `json:"state"`
-	// How the rules decided each name asked for.
+	// How the policy decided each name asked for.
 	Secrets []requests.SecretDecision `json:"secrets"`
 	// Once granted, the grant to read the values from; null otherwise.
 	GrantID *string `json:"grant_id"`
@@ -47,7 +47,7 @@ type createRequestResponse struct {
 
 // createRequest requests secrets for the proof-verified caller, never for an enrollment named in
 // the body: a session may only ever request secrets for itself. The request object itself (not
-// this handler) names the secrets, the reason, and — implicitly, via the rules — the approver.
+// this handler) names the secrets, the reason, and — implicitly, via the policy — the approver.
 func (s *server) createRequest(w http.ResponseWriter, r *http.Request, enrollmentID string) {
 	var body createRequestBody
 	if !readJSON(w, r, &body, "INVALID_REQUEST") {
@@ -61,7 +61,7 @@ func (s *server) createRequest(w http.ResponseWriter, r *http.Request, enrollmen
 	case errors.Is(err, requests.ErrMixedApprovers):
 		writeError(w, http.StatusBadRequest, "MIXED_APPROVERS", err.Error())
 		return
-	case errors.Is(err, rules.ErrUnknownSecret):
+	case errors.Is(err, policy.ErrUnknownSecret):
 		writeError(w, http.StatusBadRequest, "UNKNOWN_SECRET", err.Error())
 		return
 	case errors.Is(err, pgx.ErrNoRows):
@@ -105,7 +105,7 @@ type requestStatusResponse struct {
 	RecordID *string `json:"record_id"`
 	// When it left "pending"; null while pending.
 	DecidedAt *time.Time `json:"decided_at"`
-	// Who decided it and when; null while pending, when the rules decided it at once, and when it
+	// Who decided it and when; null while pending, when the policy decided it at once, and when it
 	// expired.
 	Decision *requestDecision `json:"decision"`
 }
@@ -114,8 +114,6 @@ type requestStatusResponse struct {
 type grantValuesResponse struct {
 	// When the grant expires; the session can read the values again until then.
 	ExpiresAt time.Time `json:"expires_at"`
-	// The granted names the broker releases no value for (delivery: proxy).
-	ProxyOnly []string `json:"proxy_only"`
 	// Each granted name's value, read fresh from the secret store.
 	Values map[string]string `json:"values"`
 }
@@ -180,7 +178,7 @@ func (s *server) grantValues(w http.ResponseWriter, r *http.Request, enrollmentI
 	if !ok {
 		return
 	}
-	values, proxyOnly, expires, err := s.deps.Machine.Values(r.Context(), id, enrollmentID)
+	values, expires, err := s.deps.Machine.Values(r.Context(), id, enrollmentID)
 	switch {
 	case errors.Is(err, requests.ErrNotYours):
 		writeError(w, http.StatusForbidden, "NOT_YOURS", err.Error())
@@ -201,10 +199,7 @@ func (s *server) grantValues(w http.ResponseWriter, r *http.Request, enrollmentI
 	if values == nil {
 		values = map[string]string{}
 	}
-	if proxyOnly == nil {
-		proxyOnly = []string{}
-	}
-	writeJSON(w, http.StatusOK, grantValuesResponse{ExpiresAt: expires, ProxyOnly: proxyOnly, Values: values})
+	writeJSON(w, http.StatusOK, grantValuesResponse{ExpiresAt: expires, Values: values})
 }
 
 // revokeGrant ends a grant for the session that holds it — session proof only, per the shared

@@ -2,9 +2,9 @@
 
 The scripts that make the secrets broker's screenshots and narrated walkthrough. Everything they
 show runs on one machine on example data: an empty Dispatch e2e workspace (whose signed-in human is
-`alice`), a broker on example rules whose one secret, `DEMO_API_KEY`, holds a made-up value, and an
-agent machine whose hostname is `example-host-build`. No credential, private hostname or
-production service is involved.
+`alice@example.com`), a broker whose one secret, `DEMO_API_KEY`, is hers at the human tier and
+holds a made-up value, and an agent machine whose hostname is `example-host-build`. No credential,
+private hostname or production service is involved.
 
 | File | What it is |
 | --- | --- |
@@ -25,10 +25,12 @@ DATABASE_URL=<url> bash docs/site/media/broker/rig.sh
 ```
 
 It builds the broker, `agent-secrets` and `agent-secrets-helper`; creates the broker's database
-beside `DATABASE_URL`'s and starts the broker on a local rules file and its development secrets
-file; starts the Dispatch e2e harness's three servers on `DATABASE_URL` with the server pointed at
-the broker (`packages/dispatch/e2e/run-server.sh`'s `DISPATCH_E2E_AGENT_SECRETS_URL`), and empties
-its database; and starts the agent machine, `agent-secrets-helper` for `alice` under the hostname
+beside `DATABASE_URL`'s and starts the broker on its development secrets file, which stands in for
+Secrets Manager and tags `DEMO_API_KEY` `owner=alice@example.com`, `tier=human`, with grants
+lasting an hour (`BROKER_MAX_GRANT_SECONDS=3600`); starts the Dispatch e2e harness's three servers
+on `DATABASE_URL` with the server pointed at the broker (`packages/dispatch/e2e/run-server.sh`'s
+`DISPATCH_E2E_AGENT_SECRETS_URL`), and empties its database; and starts the agent machine,
+`agent-secrets-helper` for `alice@example.com` under the hostname
 `example-host-build`, alone in a UTS namespace of its own, with the agent's shells on this
 machine. It prints the addresses, then waits; Ctrl-C stops everything it started and drops the
 broker's database.
@@ -62,9 +64,10 @@ DATABASE_URL="postgres:///dispatch?host=/tmp/pgsock" bash docs/site/media/broker
 it.
 
 Dispatch signs a person in with its session cookie, which the harness server mints at its dev
-sign-in route: open the sign-in address the rig prints, `<Dispatch>/auth/_dev/signin?login=alice`,
-in the browser (by `127.0.0.1`, never `localhost`, which the server refuses). Both specs sign in the
-same way, through the e2e harness's `signIn` (`packages/dispatch/e2e/users.ts`).
+sign-in route: open the sign-in address the rig prints,
+`<Dispatch>/auth/_dev/signin?login=alice@example.com`, in the browser (by `127.0.0.1`, never
+`localhost`, which the server refuses). Both specs sign in the same way, through the e2e harness's
+`signIn` (`packages/dispatch/e2e/users.ts`).
 
 From a shell on the agent machine (`agent-exec bash`, where `agent-exec` is the script the rig
 prints, and hands a command in `BROKER_RIG_AGENT_EXEC`), the flow the walkthrough shows is:

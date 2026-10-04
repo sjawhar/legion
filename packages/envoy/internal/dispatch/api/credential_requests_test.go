@@ -31,12 +31,12 @@ func newCredentialTestHandler(t *testing.T, brokerURL string) http.Handler {
 	t.Cleanup(func() { _ = documentService.Shutdown(t.Context()) })
 	seedPeople(t, database, "alice", "bob")
 	depsInput := DepsInput{
-		Store:      database,
-		Identity:   headerIdentity(database),
-		AgentToken: "agent-token",
-		ServerURL:  "https://dispatch.example",
-		Docs:       documentService,
-		Events:     events.NewBroker(),
+		Store:       database,
+		Identity:    headerIdentity(database),
+		AgentTokens: sharedAgentTokens(t, "agent-token"),
+		ServerURL:   "https://dispatch.example",
+		Docs:        documentService,
+		Events:      events.NewBroker(),
 	}
 	if brokerURL != "" {
 		depsInput.AgentSecretsURL = brokerURL
@@ -62,6 +62,8 @@ var featureOffRoutes = []struct {
 	{http.MethodPost, "/api/v1/credential-requests/machine-lookup"},
 	{http.MethodGet, "/api/v1/credential-grants"},
 	{http.MethodPost, "/api/v1/credential-grants/grant1/revoke"},
+	{http.MethodGet, "/api/v1/machine-logins"},
+	{http.MethodPost, "/api/v1/machine-logins/cred1/revoke"},
 }
 
 func TestCredentialRoutesAnswerFeatureOffWithNilClient(t *testing.T) {
@@ -218,6 +220,7 @@ func TestDecisionsNameTheCallerNeverTheBrowsersApprover(t *testing.T) {
 		{"/api/v1/credential-requests/rec1/deny", browserBody, `{"approver":"alice","code":"ABCD-1234"}`},
 		{"/api/v1/credential-requests/rec1/approve", nil, `{"approver":"alice"}`},
 		{"/api/v1/credential-grants/grant1/revoke", browserBody, `{"approver":"alice"}`},
+		{"/api/v1/machine-logins/cred1/revoke", browserBody, `{"approver":"alice"}`},
 	} {
 		t.Run(tc.path, func(t *testing.T) {
 			rig := newFakeBrokerRig(t)

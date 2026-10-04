@@ -625,7 +625,19 @@ func envGetter(values map[string]string) settingValues {
 	})
 }
 
-func TestMain(m *testing.M) { os.Exit(storetest.Main(m)) }
+// memoryTestServeEnv makes this test binary run main, so the memory tests (memory_test.go, built
+// under the `memory` tag) drive a real Dispatch process and read its own resident memory.
+const memoryTestServeEnv = "DISPATCH_MEMORY_TEST_SERVE"
+
+// TestMain runs the package's tests, or, run by a memory test with memoryTestServeEnv set, is that
+// test's Dispatch server.
+func TestMain(m *testing.M) {
+	if os.Getenv(memoryTestServeEnv) == "1" {
+		main()
+		os.Exit(0)
+	}
+	os.Exit(storetest.Main(m))
+}
 
 func TestSeedRepoProjectsAddsMissingRowsWithoutOverwritingSettings(t *testing.T) {
 	database := storetest.Open(t)

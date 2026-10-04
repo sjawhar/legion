@@ -77,8 +77,9 @@ func (s podSession) request(t *testing.T, ts *testServer, names ...string) wireC
 // tokens: two roles of one pod UID and a second generation of one role are three enrollments;
 // a same-slot retry is idempotent and a different key in that slot, a token for another pod, a
 // malformed slot and a slot off a pod are refused; a session cannot enroll itself; each slot's
-// record and grant name its slot; one slot's grant never releases to another; the pod rules still
-// match on the service account alone; and revoking one role leaves the other's grant live.
+// record and grant name its slot; one slot's grant never releases to another; the policy names no
+// service account, so a pod of any account is decided alike; and revoking one role leaves the
+// other's grant live.
 func TestRolesAndGenerationsOfOnePodEnrollRequestAndReleaseIndependently(t *testing.T) {
 	ts := newTestServer(t)
 	credentialID, launcherKey := ts.mintServiceLauncherCredential(t)
@@ -223,8 +224,9 @@ func TestRolesAndGenerationsOfOnePodEnrollRequestAndReleaseIndependently(t *test
 		}
 	}
 
-	// The pod rules match the verified service account, never the slot: every slot of a worker
-	// pod gets WORKER_TOKEN automatically, and the same slot of a pod of another account is denied.
+	// The policy follows owner and tier alone and names no pod or service account: every slot of a
+	// worker pod gets the shared agent-tier WORKER_TOKEN at once, and so does a pod of another
+	// account, whose request for DEEL_API_KEY waits for its owner as a worker's does.
 	for _, s := range []podSession{implementer, reviewer, sessions["implementer-g2"]} {
 		if created := s.request(t, ts, "WORKER_TOKEN"); created.State != "granted" {
 			t.Fatalf("WORKER_TOKEN as worker %s = %+v, want granted", s.slot, created)
@@ -237,10 +239,11 @@ func TestRolesAndGenerationsOfOnePodEnrollRequestAndReleaseIndependently(t *test
 		t.Fatalf("enroll a pod of another account = %d %s", status, body)
 	}
 	other := podSession{slot: "implementer-g1", enrollmentID: decode[wireEnrolled](t, body).EnrollmentID, key: otherKey}
-	for _, name := range []string{"WORKER_TOKEN", "DEEL_API_KEY"} {
-		if created := other.request(t, ts, name); created.State != "denied" {
-			t.Fatalf("%s as implementer-g1 of account legion:other = %+v, want denied", name, created)
-		}
+	if created := other.request(t, ts, "WORKER_TOKEN"); created.State != "granted" {
+		t.Fatalf("WORKER_TOKEN as implementer-g1 of account legion:other = %+v, want granted", created)
+	}
+	if created := other.request(t, ts, "DEEL_API_KEY"); created.State != "pending" || created.RecordID == nil {
+		t.Fatalf("DEEL_API_KEY as implementer-g1 of account legion:other = %+v, want pending on its owner", created)
 	}
 
 	status, body = ts.launcher(t, launcherKey, credentialID, http.MethodDelete, "/v1/enrollments/"+implementer.enrollmentID, nil)

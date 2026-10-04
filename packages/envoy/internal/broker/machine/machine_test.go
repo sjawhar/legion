@@ -3,7 +3,6 @@ package machine
 import (
 	"context"
 	"errors"
-	"os"
 	"regexp"
 	"testing"
 	"time"
@@ -14,9 +13,10 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/envoy/internal/broker/enroll"
+	"github.com/sjawhar/envoy/internal/broker/policy/policytest"
 	"github.com/sjawhar/envoy/internal/broker/proof"
 	"github.com/sjawhar/envoy/internal/broker/record"
-	"github.com/sjawhar/envoy/internal/broker/rules"
+	"github.com/sjawhar/envoy/internal/broker/secrets"
 	"github.com/sjawhar/envoy/internal/broker/store"
 	"github.com/sjawhar/envoy/internal/broker/store/storetest"
 )
@@ -34,9 +34,9 @@ var codePattern = regexp.MustCompile(`^[A-Z2-9]{4}-[A-Z2-9]{4}$`)
 
 // newFixture wires a Service against a fresh Postgres schema: a real enroll.Service wired with
 // its ChainVerifier (so AuthenticateLauncher's own issuance-chain re-verification is the genuine
-// thing, not a stub), and rules.Current loaded from a minimal valid rules file — a machine login's
-// own decision never consults the rules (it always requires approval), so the fixture needs only
-// a valid, versioned Set.
+// thing, not a stub), and the policy of an empty namespace — a machine login's own decision never
+// consults the secret policy (it always requires approval), so the fixture needs only a versioned
+// policy.
 func newFixture(t *testing.T) *Service {
 	t.Helper()
 	st := storetest.Open(t)
@@ -44,17 +44,8 @@ func newFixture(t *testing.T) *Service {
 	enr := &enroll.Service{Store: st, Lease: time.Hour}
 	enr.Chain = enroll.NewChainVerifier(st, testAudience, time.Minute)
 
-	rulesPath := t.TempDir() + "/rules.yaml"
-	if err := os.WriteFile(rulesPath, []byte("version: 1\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	cur, err := rules.NewCurrent(context.Background(), rules.FileLoader{Path: rulesPath}, time.Hour, func(error) {})
-	if err != nil {
-		t.Fatalf("rules.NewCurrent: %v", err)
-	}
-
 	return &Service{
-		Store: st, Enroll: enr, Rules: cur,
+		Store: st, Enroll: enr, Policy: policytest.Current(t, secrets.NewLocal()),
 		Audience: testAudience, Skew: time.Minute, PendingTTL: 10 * time.Minute, CredentialLifetime: 24 * time.Hour,
 		Replay: enr.Replay,
 	}
@@ -244,6 +235,55 @@ func TestLoginRefusesAReplayedRequestObject(t *testing.T) {
 	}
 	if _, _, err := svc.Login(ctx, compact); !errors.Is(err, record.ErrRequestInvalid) {
 		t.Fatalf("second Login with the same request object = %v, want record.ErrRequestInvalid (replayed jti)", err)
+	}
+}
+
+// TestLoginRefusesAnyoneAsItsOperator pins that a machine login names the one person who decides
+// it and whose machine it becomes: login_hint record.AnyoneApprover, the approver of a shared
+// secret's request, would let any signed-in person approve someone else's machine as their own,
+// so it is refused in any casing and opens no record.
+func TestLoginRefusesAnyoneAsItsOperator(t *testing.T) {
+	svc := newFixture(t)
+	ctx := context.Background()
+	for _, hint := range []string{record.AnyoneApprover, " Anyone "} {
+		if _, _, err := svc.Login(ctx, signMachineLogin(t, hint, "example-host-devbox", "")); !errors.Is(err, record.ErrRequestInvalid) {
+			t.Fatalf("Login(login_hint %q) = %v, want record.ErrRequestInvalid", hint, err)
+		}
+	}
+	var records int
+	if err := svc.Store.Pool.QueryRow(ctx, `select count(*) from credential_requests`).Scan(&records); err != nil || records != 0 {
+		t.Fatalf("credential_requests rows = %d, %v; want none", records, err)
+	}
+}
+
+// TestAMachineLoginNamingAnyoneIsDecidedByNoOne pins the other half: a machine login whose
+// approver is record.AnyoneApprover, which a binary from before Login refused that hint could
+// open, is decided by no login, so no signed-in person can approve another's machine as their own.
+func TestAMachineLoginNamingAnyoneIsDecidedByNoOne(t *testing.T) {
+	svc := newFixture(t)
+	ctx := context.Background()
+	const code = "ABCD-EFGH"
+	body := record.Body{
+		Request:         signMachineLogin(t, record.AnyoneApprover, "example-host-devbox", ""),
+		Approver:        record.AnyoneApprover,
+		Enrollment:      record.Enrollment{Kind: "-", RuntimeID: "-"},
+		LifetimeSeconds: int(svc.CredentialLifetime.Seconds()),
+		RulesVersion:    svc.Policy.Get().Version,
+		ExpiresAt:       time.Now().Add(svc.PendingTTL).UTC().Truncate(time.Second),
+		Code:            code,
+	}
+	if _, err := svc.Store.Pool.Exec(ctx, `insert into credential_requests (id, body, kind, approver, code, expires_at) values ($1,$2,'launcher_credential',$3,$4,$5)`,
+		body.ID(), body.Canonical(), body.Approver, code, body.ExpiresAt); err != nil {
+		t.Fatalf("insert the record an older binary opened: %v", err)
+	}
+	for _, login := range []string{"bob@example.com", record.AnyoneApprover} {
+		if _, _, err := svc.ApplyDecision(ctx, body.ID(), true, login, code); !errors.Is(err, record.ErrNotApprover) {
+			t.Fatalf("ApplyDecision(%q) = %v, want record.ErrNotApprover", login, err)
+		}
+	}
+	var credentials int
+	if err := svc.Store.Pool.QueryRow(ctx, `select count(*) from launcher_credentials`).Scan(&credentials); err != nil || credentials != 0 {
+		t.Fatalf("launcher_credentials rows = %d, %v; want none", credentials, err)
 	}
 }
 

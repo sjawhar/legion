@@ -6,9 +6,9 @@ sidebar:
 ---
 
 `packages/envoy/scripts/dev-broker.sh` creates a Postgres database of its own, builds the broker and
-its clients, writes example rules and fake secret values, and starts the broker on a free port. It
-needs Go, and a Postgres server: by default it starts one in Docker (a container named
-`dispatch-pg`, reused when it is there). Without Docker, run Postgres yourself and set
+its clients, writes a fake secrets file, which stands in for Secrets Manager, and starts the broker
+on a free port. It needs Go, and a Postgres server: by default it starts one in Docker (a container
+named `dispatch-pg`, reused when it is there). Without Docker, run Postgres yourself and set
 `DEV_BROKER_POSTGRES_URL` to `postgres://<user>@<host>:<port>/<database>`, for a role that may
 create databases; the script then creates and drops its database there with `psql`.
 
@@ -49,10 +49,11 @@ your current directory. Check that `type agent-secrets` names the workdir's `bin
 that puts its own directories first on `PATH` at every prompt runs an installed `agent-secrets`
 instead.
 
-The rules grant `DEMO_READ_TOKEN` automatically and need `ada@example.com` to approve
-`DEMO_API_KEY`, for a box or host session ([the kinds of
-session](/legion/broker/concepts/#sessions-and-enrollment)) whose operator is `ada@example.com`.
-Every command below runs in that second shell.
+The fake secrets file holds two secrets of `ada@example.com`'s, under the namespace
+`example/agent-secrets/` and on its example key: `DEMO_READ_TOKEN`, tagged `tier=agent`, which her
+own box or host sessions ([the kinds of session](/legion/broker/concepts/#sessions-and-enrollment))
+get without asking, and `DEMO_API_KEY`, tagged `tier=human`, which she approves. A grant lives an
+hour (`BROKER_MAX_GRANT_SECONDS=3600`). Every command below runs in that second shell.
 
 ## Run a helper and log it in
 
@@ -107,12 +108,12 @@ shows and `agent-secrets-devrelay` takes. `agent-secrets request NAME --json` pr
 1. In the first shell, press Ctrl-C: the script stops the broker, drops its database, and prints
    the workdir it kept.
 2. In the second shell, leave the registered session (`exit`), then stop the helper: `kill %1`.
-3. Remove the workdir, which holds the binaries, the rules, the fake secrets and the logs:
+3. Remove the workdir, which holds the binaries, the fake secrets and the logs:
    `rm -rf "$DEV_BROKER_DIR"`.
 
 ## What is real and what is not
 
-The broker, its database, its rules and every client are the real ones. Two things stand in for
+The broker, its database, its policy and every client are the real ones. Two things stand in for
 production: `agent-secrets-devrelay` plays Dispatch's server (it holds the UI token and names the
-approver itself), and the secret values come from the fake secrets file (`source=value` lines)
-instead of a secret store.
+approver itself), and the fake secrets file (`BROKER_FAKE_SECRETS_FILE`: each secret's name, key,
+tags and value, as JSON) plays Secrets Manager and KMS.

@@ -23,7 +23,7 @@ Everything else stays yours: the commits, every push, the pull request and its b
 
 ## Post-merge record
 
-After a human merges the pull request under the repository's GitHub branch-protection and CODEOWNERS requirements (and its GitHub merge queue only when the repository enables one), the architect sends you back one more time. Record the production check as the PR body's `Production:` line, a pull-request comment, and a `dispatch_message` on the issue; the architect signs off only once the record is real.
+After a human merges the pull request under the repository's GitHub branch-protection and CODEOWNERS requirements (and its GitHub merge queue only when the repository enables one), the daemon starts you one more time. Record the production check as the PR body's `Production:` line, a pull-request comment, and a `dispatch_message` on the issue; the architect signs off only once the record is real.
 
 ## Review threads
 

@@ -49,6 +49,12 @@ make_omp_home() {
     fi
     printf '%s = "%s/%s"\n' "${BASH_REMATCH[1]}" "$HOME" "${BASH_REMATCH[2]}" >>"$overlay"
   done <<<"$listing"
+  # The overlay is last in JJ_CONFIG, so this wins over whatever fsmonitor backend the operator's
+  # own config names (watchman, on a devbox that runs it): every jj the run's Oh My Pi processes
+  # and this script's own workspace_jj calls run with no watchman, so a run never leaves the
+  # operator's long-running watchman watching a workspace or clone this stage tore down. Signing
+  # and identity are untouched: nothing above pins fsmonitor.*, so this is a pure addition.
+  printf 'fsmonitor.backend = "none"\n' >>"$overlay"
   export JJ_CONFIG="$files:$overlay"
   # -T reads DIR/.omp/natives as the link's own name, never as a directory to put the link in: a
   # second call replaces the link (plain -s would write natives/natives into the operator's cache,

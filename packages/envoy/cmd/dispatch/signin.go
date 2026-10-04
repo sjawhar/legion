@@ -3,12 +3,19 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/oidc"
 )
+
+// plainRefreshTokenRetireTimeout bounds the boot's retirement of the refresh tokens people holds
+// in plain text, so a sign-in pool that does not answer delays the start by this much at most.
+const plainRefreshTokenRetireTimeout = 30 * time.Second
 
 // signInSettings are the four settings Google sign-in through the sign-in pool takes, all or none,
 // each with boot's value.
@@ -69,6 +76,36 @@ func discoverSignIn(ctx context.Context, boot bootConfig) (*oidc.CodeFlow, error
 		return nil, nil
 	}
 	return oidc.DiscoverCodeFlow(ctx, boot.SignInIssuer, boot.SignInClientID, boot.SignInClientSecret, oidc.DiscoveryTimeout)
+}
+
+// openPeople is the people store main serves boot with over pool, and the key session cookies are
+// signed with (sessionSigningKey): the store seals each refresh token under that same key, and
+// revokes a token stored in plain text at signIn's pool, nil when boot configures none.
+func openPeople(boot bootConfig, dataDir string, pool *store.Pool, signIn *oidc.CodeFlow) (*store.PgPeopleStore, string, error) {
+	signingKey, err := sessionSigningKey(boot, dataDir)
+	if err != nil {
+		return nil, "", err
+	}
+	var revoker store.RefreshTokenRevoker
+	if signIn != nil {
+		revoker = signIn
+	}
+	return store.NewPgPeopleStore(pool, signingKey, revoker), signingKey, nil
+}
+
+// retirePlainRefreshTokens is the boot's retirement of the refresh tokens people holds in plain
+// text (store.PgPeopleStore.RetirePlainRefreshTokens), bounded by timeout: a pool that does not
+// answer fails each token not yet revoked, and the start goes on. It logs the counts, never a
+// token; each token the pool did not revoke has its own ERROR line, and stays for the next boot.
+func retirePlainRefreshTokens(ctx context.Context, people *store.PgPeopleStore, timeout time.Duration) {
+	retireCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	retired, failed, err := people.RetirePlainRefreshTokens(retireCtx)
+	if err != nil {
+		slog.Error("dispatch: retire the refresh tokens stored in plain text", "retired", retired, "failed", failed, "error", err)
+		return
+	}
+	slog.Info("dispatch: retired the refresh tokens stored in plain text", "retired", retired, "failed", failed)
 }
 
 // requestIdentityFor is how a browser request names its person under boot: a header-identity
