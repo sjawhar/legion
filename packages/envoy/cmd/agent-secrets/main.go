@@ -471,7 +471,7 @@ func cmdKeygen(args []string, stdout, stderr io.Writer) int {
 // ---------------------------------------------------------------------------
 
 // cmdEnroll implements "enroll --helper --kind box --runtime-id <id> --thumbprint <tp>
-// [--session-id <id>]". --helper is required: the shared broker contract has no launcher bearer
+// [--session-id <id>]". --helper is required: the broker's HTTP API has no launcher bearer
 // token, so this CLI has no other way to enroll anything — the host's one launcher credential
 // lives only in agent-secrets-helper's memory (a human installs it with `agent-secrets launcher
 // login`), and only a box enrolls through this command at all (a host session enrolls itself
@@ -548,7 +548,7 @@ func cmdEnrollHelper(kind, runtimeID, thumbprint, sessionID string, stdout, stde
 }
 
 // cmdUnenroll implements "unenroll --helper --enrollment <id>". --helper is required for the
-// same reason cmdEnroll requires it: the shared broker contract has no launcher bearer token.
+// same reason cmdEnroll requires it: the broker's HTTP API has no launcher bearer token.
 func cmdUnenroll(args []string, stdout, stderr io.Writer) int {
 	flagArgs, positional := splitArgs(args, map[string]bool{"enrollment": true})
 	if len(positional) > 0 {

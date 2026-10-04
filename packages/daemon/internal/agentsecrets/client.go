@@ -75,9 +75,8 @@ type LoginState struct {
 
 // PodEnrollment is one pod generation's identity as the daemon knows it: the pod UID the runtime
 // recorded at spawn, the thumbprint and projected token the shim's hello carried, and the
-// agent's session id — "" before the agent registered, which the broker records as null. Per
-// the shared broker contract, the broker picks
-// a request's approver at request time; the enrollment carries no issue.
+// agent's session id — "" before the agent registered, which the broker records as null. The
+// broker picks a request's approver at request time; the enrollment carries no issue.
 type PodEnrollment struct {
 	PodUID, Thumbprint, PodToken, Session string
 }

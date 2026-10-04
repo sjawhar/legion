@@ -144,7 +144,7 @@ type launcherCredentialsRequest struct {
 	Request string `json:"request"`
 }
 
-// launcherCredentialsResponse is that route's exact response shape in the shared broker contract
+// launcherCredentialsResponse is that route's exact response shape
 // (handlers_launcher.go's machineLoginResponse): the opaque pending id and the human-facing
 // confirmation code under "code".
 type launcherCredentialsResponse struct {
@@ -376,7 +376,7 @@ func (b *Broker) readLoginStatus(ctx context.Context, pendingID string) (launche
 	return out, true
 }
 
-// enrollBody is POST /v1/enrollments's shape in the shared broker contract (the v8 "approver"
+// enrollBody is POST /v1/enrollments's shape (the v8 "approver"
 // field is gone: the broker's rules pick a request's approver, never the enrollment).
 type enrollBody struct {
 	Kind       string  `json:"kind"`

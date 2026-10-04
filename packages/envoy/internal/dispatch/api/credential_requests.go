@@ -1,5 +1,5 @@
 // credential_requests.go relays Dispatch's credential-request UI to the secrets broker
-// (the "UI routes" of the shared broker contract). Every handler does the same five things:
+// (its UI routes: https://sjawhar.github.io/legion/broker/reference/api/). Every handler does the same five things:
 // require a human caller, require the broker to be configured, resolve or read its input, call
 // the matching agentsecrets.Client method, and forward the broker's exact status and body — the
 // broker decides. The pending list alone answers null rather than 404 FEATURE_OFF without a broker.
