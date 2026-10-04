@@ -26,6 +26,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
 )
 
 const (
@@ -125,9 +126,11 @@ func (s *testSupervisor) Create(ctx context.Context, c supervise.Claim, roleProm
 	if m, ok := s.machines[c.Token]; ok {
 		return m, false, nil
 	}
-	if err := s.deps.Store.PutClaim(ctx, c); err != nil {
+	bound, err := s.deps.Store.AdmitClaim(ctx, c)
+	if err != nil {
 		return nil, false, err
 	}
+	c = bound
 	m, err := supervise.NewMachine(s.ctx, s.deps, c)
 	if err != nil {
 		return nil, false, err
@@ -215,7 +218,7 @@ func newHarness(t *testing.T) *harness {
 	readied := &[]supervise.Claim{}
 	server := NewServer("127.0.0.1", 8437, Options{
 		Supervisor: sup, BootTokens: tokens, Project: testProject, OperatorToken: testOperatorToken, Controller: st, Log: quiet,
-		Pool: st.Pool(), Record: record.NewStore(),
+		Pool: st.Pool(), Record: record.NewStore(), Releaser: rt,
 		ClaimReady: func(c supervise.Claim) { *readied = append(*readied, c) },
 	})
 	return &harness{t: t, ctx: ctx, store: st, runtime: rt, conns: conns, tokens: tokens, supervisor: sup, handler: server.Handler, readied: readied}
@@ -251,6 +254,16 @@ func (h *harness) operator(method, target string, body any) *httptest.ResponseRe
 	return h.request(method, target, body, http.Header{"Authorization": {"Bearer " + testOperatorToken}})
 }
 
+// treeCleanup is whether tree's cleanup was reserved, and whether it was confirmed.
+func (h *harness) treeCleanup(tree string) (started, confirmed bool) {
+	h.t.Helper()
+	if err := h.store.Pool().QueryRow(h.ctx, `select cleanup_started, cleanup_confirmed_at is not null from tree_lifecycles
+		where project = $1 and tree = $2`, testProject, tree).Scan(&started, &confirmed); err != nil {
+		h.t.Fatalf("read the lifecycle of %s: %v", tree, err)
+	}
+	return started, confirmed
+}
+
 // launch creates a claim the way the spawn route does and launches it, returning its token and
 // the boot token its launch minted.
 func (h *harness) launch(issue string, role claim.Role) (claim.Token, string) {
@@ -258,12 +271,16 @@ func (h *harness) launch(issue string, role claim.Role) (claim.Token, string) {
 	return h.launchIn(issue, issue, role)
 }
 
-// launchIn is launch for an issue of tree: a sub-architect or a worker on a child.
+// launchIn is launch for an issue of tree: a sub-architect or a worker on a child. The tree's
+// lifecycle is opened first, as the operator's root spawn or the workflow's admission opens it.
 func (h *harness) launchIn(tree, issue string, role claim.Role) (claim.Token, string) {
 	h.t.Helper()
 	token, err := claim.NewToken(testProject, issue, role)
 	if err != nil {
 		h.t.Fatalf("token: %v", err)
+	}
+	if _, err := h.store.OpenTreeLifecycle(h.ctx, testProject, tree, treelifecycle.AuthorityOperator); err != nil {
+		h.t.Fatalf("open the lifecycle of %s: %v", tree, err)
 	}
 	m, _, err := h.supervisor.Create(h.ctx, supervise.Claim{
 		Token: token, Project: testProject, Tree: tree, Issue: issue, Role: role, State: supervise.StateQueued,

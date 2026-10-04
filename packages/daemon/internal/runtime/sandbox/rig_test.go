@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -56,16 +55,16 @@ var (
 // enough that a wait the test expects to end never slows the suite.
 func testOptions() Options {
 	return Options{
-		Namespace:                     testNamespace,
-		Project:                       testProject,
-		SkipIssueResourceStoreForTest: true,
-		Image:                         testImage,
-		StorageClass:                  "gp2",
-		TreeVolume:                    resource.MustParse("20Gi"),
-		StreamURL:                     "tcp://192.0.2.250:13371",
-		DaemonURL:                     "http://192.0.2.250:13370",
-		EnvoyURL:                      "http://192.0.2.250:9020",
-		NATSURLs:                      []string{"nats://192.0.2.250:4222"},
+		Namespace:    testNamespace,
+		Project:      testProject,
+		Store:        newTreeStore(),
+		Image:        testImage,
+		StorageClass: "gp2",
+		TreeVolume:   resource.MustParse("20Gi"),
+		StreamURL:    "tcp://192.0.2.250:13371",
+		DaemonURL:    "http://192.0.2.250:13370",
+		EnvoyURL:     "http://192.0.2.250:9020",
+		NATSURLs:     []string{"nats://192.0.2.250:4222"},
 		Tools: Tools{
 			GH: "/usr/local/bin/gh", Git: "/usr/bin/git", JJ: "/usr/local/bin/jj", Legion: "/opt/legion/bin/legion",
 			AgentSecrets: "/opt/legion/bin/agent-secrets",
@@ -86,6 +85,37 @@ type staticTokens struct{}
 
 func (staticTokens) Token(_ context.Context, owner string) (string, error) {
 	return "ghs_provision_" + owner, nil
+}
+
+// treeStore is the runtime's durable state, in memory: every tree is live (its lifecycle open)
+// unless closed says its cleanup confirmed, and a tree recorded sessions only when sessions says
+// so.
+type treeStore struct {
+	mu               sync.Mutex
+	closed, sessions map[string]bool
+}
+
+func newTreeStore() *treeStore {
+	return &treeStore{closed: map[string]bool{}, sessions: map[string]bool{}}
+}
+
+func (s *treeStore) TreeHasSessions(_ context.Context, _, tree string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sessions[tree], nil
+}
+
+func (s *treeStore) TreeLive(_ context.Context, _, tree string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return !s.closed[tree], nil
+}
+
+// close records tree's cleanup as confirmed: what the tree left behind is then an orphan.
+func (s *treeStore) close(tree string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.closed[tree] = true
 }
 
 // testSpec is a launch of the claim on the tree, with its prompt files under dir.
@@ -154,6 +184,8 @@ type rig struct {
 	kube  *kubefake.Clientset
 	conns *fake.Conns
 	now   atomic.Pointer[time.Time]
+	// store is the runtime's in-memory durable state, unless an option handed it another.
+	store *treeStore
 
 	mu      sync.Mutex
 	actions []action
@@ -262,6 +294,7 @@ func newRig(t *testing.T, objects []k8sruntime.Object, options ...rigOption) *ri
 	for _, option := range options {
 		option(g, &opts)
 	}
+	g.store, _ = opts.Store.(*treeStore)
 	r, err := configure(opts)
 	if err != nil {
 		t.Fatal(err)
@@ -629,11 +662,10 @@ func (g *rig) connect(token claim.Token) {
 // issueLaunchers connects a fake launcher for every role of token's issue.
 func (g *rig) issueLaunchers(token claim.Token) {
 	g.t.Helper()
-	role, ok := roleContainer(token)
+	issue, _, ok := token.Cut()
 	if !ok {
 		g.t.Fatalf("%s names no role", token)
 	}
-	issue := strings.TrimSuffix(string(token), "-"+role)
 	for _, sibling := range claim.Roles {
 		g.launcher(claim.Token(issue + "-" + string(sibling)))
 	}
@@ -686,10 +718,11 @@ func claimLabels(_ claim.Role) map[string]string {
 
 // sandboxLocator is a recorded role process locator in one issue pod.
 func sandboxLocator(token claim.Token, uid string) runtime.Locator {
-	container, ok := roleContainer(token)
+	_, role, ok := token.Cut()
 	if !ok {
 		panic("test token has no role")
 	}
+	container := string(role)
 	return runtime.Locator{
 		Runtime:     runtime.RuntimeSandbox,
 		Claim:       token,

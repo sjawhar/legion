@@ -2,20 +2,82 @@ package sandbox
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
+	"net/url"
+	"os"
 	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
+	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
+	"github.com/sjawhar/legion/daemon/internal/wait"
 )
 
+// migratedStore is a migrated store on a database of its own: the daemon's authorization of an
+// issue's close, which SuspendIssue runs under its issue launch lock.
+func migratedStore(t *testing.T) *store.Store {
+	t.Helper()
+	dsn := os.Getenv("LEGION_TEST_PG_DSN")
+	if dsn == "" {
+		t.Skip("LEGION_TEST_PG_DSN is unset, so there is no Postgres to authorize the issue's close against")
+	}
+	ctx := context.Background()
+	base, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatalf("parse LEGION_TEST_PG_DSN: %v", err)
+	}
+	adminURL := *base
+	adminURL.Path = "/postgres"
+	admin, err := pgxpool.New(ctx, adminURL.String())
+	if err != nil {
+		t.Fatalf("connect to the admin database: %v", err)
+	}
+	t.Cleanup(admin.Close)
+	var suffix [8]byte
+	if _, err := rand.Read(suffix[:]); err != nil {
+		t.Fatal(err)
+	}
+	name := "legion_sandbox_test_" + hex.EncodeToString(suffix[:])
+	if _, err := admin.Exec(ctx, "create database "+name); err != nil {
+		t.Fatalf("create %s: %v", name, err)
+	}
+	t.Cleanup(func() {
+		if _, err := admin.Exec(context.Background(), "drop database "+name+" with (force)"); err != nil {
+			t.Errorf("drop %s: %v", name, err)
+		}
+	})
+	testURL := *base
+	testURL.Path = "/" + name
+	st, err := store.Open(ctx, testURL.String())
+	if err != nil {
+		t.Fatalf("open %s: %v", name, err)
+	}
+	t.Cleanup(st.Close)
+	if _, err := st.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	return st
+}
+
+// authorizeClose is the daemon's authorization of close, the store's check (store.IssueSuspension).
+func authorizeClose(st *store.Store, close store.IssueClose) func(context.Context) (bool, error) {
+	return func(ctx context.Context) (bool, error) {
+		return st.IssueSuspension(ctx, testProject, close, record.OutOfWorkflow)
+	}
+}
+
 func TestIssueSuspensionReadmissionResumesTheRetainedSession(t *testing.T) {
-	st := resourceStore(t)
+	st := migratedStore(t)
 	g := newRig(t, nil)
-	g.r.SetIssueResourceStore(st)
 	if _, err := st.OpenTreeLifecycle(g.ctx, testProject, testTree, treelifecycle.AuthorityWorkflow); err != nil {
 		t.Fatal(err)
 	}
@@ -30,15 +92,15 @@ func TestIssueSuspensionReadmissionResumesTheRetainedSession(t *testing.T) {
 	old := g.spawn(spec)
 	name := SandboxName(rootToken)
 	uid := g.sandbox(name).UID
-	key := runtime.IssueResourceKey{Issue: testTree, Tree: testTree, IssueGeneration: 1, TreeGeneration: 1, StopRow: 1}
+	authorize := authorizeClose(st, store.IssueClose{Issue: testTree, Tree: testTree, IssueGeneration: 1, TreeGeneration: 1, Row: 1})
 	stored := supervise.Claim{Token: rootToken, Project: testProject, Tree: testTree, TreeEpoch: 1, Issue: testTree, Role: claim.RoleArchitect,
 		Generation: 1, State: supervise.StateWorking, Locator: &old, Session: "retained-session", SessionFile: resumeSession}
 	if err := st.PutClaim(g.ctx, stored); err != nil {
 		t.Fatal(err)
 	}
-	// A stored role still working keeps the close pending, independently of runtime membership.
-	if err := g.r.SuspendIssue(g.ctx, key); err == nil || !strings.Contains(err.Error(), "stored claim") {
-		t.Fatalf("issue suspension with a remaining role process = %v", err)
+	// A stored role still working keeps the close a wait, independently of runtime membership.
+	if err := g.r.SuspendIssue(g.ctx, testTree, testTree, authorize); !errors.Is(err, wait.ErrWaiting) || !strings.Contains(err.Error(), "stored claim") {
+		t.Fatalf("issue suspension with a remaining role process = %v, want the stored claim's wait", err)
 	}
 	if g.sandbox(name).mode() != modeRunning {
 		t.Fatal("suspension stopped a role that still runs")
@@ -50,7 +112,7 @@ func TestIssueSuspensionReadmissionResumesTheRetainedSession(t *testing.T) {
 	if err := st.PutClaim(g.ctx, stored); err != nil {
 		t.Fatal(err)
 	}
-	if err := g.r.SuspendIssue(g.ctx, key); err != nil {
+	if err := g.r.SuspendIssue(g.ctx, testTree, testTree, authorize); err != nil {
 		t.Fatal(err)
 	}
 	if got := g.sandbox(name); got == nil || got.mode() != modeSuspended || got.UID != uid {
@@ -80,7 +142,7 @@ func TestIssueSuspensionReadmissionResumesTheRetainedSession(t *testing.T) {
 	if resumed != stored.SessionFile {
 		t.Fatalf("resumed session = %q, want %q", resumed, stored.SessionFile)
 	}
-	if err := g.r.SuspendIssue(context.Background(), key); err != nil {
+	if err := g.r.SuspendIssue(context.Background(), testTree, testTree, authorize); err != nil {
 		t.Fatalf("stale close: %v", err)
 	}
 	if obs, err := g.r.Probe(g.ctx, loc); err != nil || obs.Kind != runtime.Alive {
@@ -89,9 +151,8 @@ func TestIssueSuspensionReadmissionResumesTheRetainedSession(t *testing.T) {
 }
 
 func TestChildIssueSuspensionKeepsItsParentRunning(t *testing.T) {
-	st := resourceStore(t)
+	st := migratedStore(t)
 	g := newRig(t, nil)
-	g.r.SetIssueResourceStore(st)
 	if _, err := st.OpenTreeLifecycle(g.ctx, testProject, testTree, treelifecycle.AuthorityWorkflow); err != nil {
 		t.Fatal(err)
 	}
@@ -111,9 +172,9 @@ func TestChildIssueSuspensionKeepsItsParentRunning(t *testing.T) {
 	if err := g.r.Suspend(g.ctx, child); err != nil {
 		t.Fatal(err)
 	}
-	if err := g.r.SuspendIssue(g.ctx, runtime.IssueResourceKey{
-		Issue: childIssue, Tree: testTree, IssueGeneration: 2, TreeGeneration: 7, StopRow: 1,
-	}); err != nil {
+	if err := g.r.SuspendIssue(g.ctx, childIssue, testTree, authorizeClose(st, store.IssueClose{
+		Issue: childIssue, Tree: testTree, IssueGeneration: 2, TreeGeneration: 7, Row: 1,
+	})); err != nil {
 		t.Fatal(err)
 	}
 	if got := g.sandbox(SandboxName(childToken)); got == nil || got.mode() != modeSuspended {
