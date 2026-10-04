@@ -306,7 +306,7 @@ func newShutdownTestService(t *testing.T, database *store.Store, appends Version
 	t.Helper()
 	service := New(Deps{
 		Store: database, Persistence: appends, Events: events.NewBroker(),
-		Identity: identity.HeaderIdentity{Header: "X-Dispatch-User", People: store.NewPgPeopleStore(database.Pool)},
+		Identity: identity.HeaderIdentity{Header: "X-Dispatch-User", People: store.NewPgPeopleStore(database.Pool, "signing-key", nil)},
 		Settle:   time.Hour,
 	})
 	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
