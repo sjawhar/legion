@@ -129,7 +129,7 @@ func (h *memoryHarness) start(t *testing.T) *dispatchProcess {
 		"DATABASE_URL=" + h.database.Pool.Config().ConnString(),
 		"DISPATCH_AGENT_TOKEN=" + memoryTestToken,
 		"DISPATCH_IDENTITY=header:X-Dispatch-User",
-		"DISPATCH_ALLOWED_LOGINS=alice",
+		"DISPATCH_IDENTITY_HEADER_TRUSTED=1",
 		"DISPATCH_NATS_DISABLED=1",
 		"DISPATCH_LISTEN_HOST=127.0.0.1",
 		"DISPATCH_PORT=" + port,
