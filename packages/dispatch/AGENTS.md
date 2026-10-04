@@ -74,10 +74,12 @@ dependency in its body. For the image-pin comparison and `/healthz` deployment e
   with its own reply and its own send name beneath the tab's, which the thread view keeps mounted,
   hidden, across Back and another comment's thread until the reply is sent or cancelled; so a
   thread opened or left while a send is out leaves that send's composer, its draft and its refusal
-  where the reader finds them. A refusal the thread shows is the reader's to leave: Back and Escape
-  drop it, its draft with it - the card's reply's, and the thread composer's, whose reply ends with
-  it - and so does the thread composer's Cancel reply, as an inline reply's does
-  (`usePhoneThread`). A thread card's own inline reply lives in its thread, not the tab,
+  where the reader finds them. A refusal the thread shows is the reader's to leave: Back, Escape
+  and Collapse thread drop it, its draft with it - the card's reply's, and the thread composer's,
+  whose reply ends with it - and so does the thread composer's Cancel reply, as an inline reply's
+  does (`usePhoneThread`'s `leave` and `endReply`). The composer's refusal is its comment's: a
+  Reply on another comment while it holds one opens that comment's thread instead, where the
+  reader retries or drops it. A thread card's own inline reply lives in its thread, not the tab,
   so it names its send beneath theirs (`threadReplySendKey`): every Reply holds while it is out,
   and so does its thread - Collapse thread, and on a phone Back and Escape - until the server
   answers or the send's deadline passes. A comment's Reply that another composer answers - the
@@ -89,7 +91,9 @@ dependency in its body. For the image-pin comparison and `/healthz` deployment e
   (the tab owns which threads are open). Resolving a comment, or accepting or rejecting its
   suggestion, closes its thread once the server takes the action - never before, so a refusal
   leaves the thread and its reply as they were - and not at all while `Resolved` shows or the
-  thread's own reply is out. The viewport widening past the phone layout while a send
+  thread's own reply is out. On a phone that close only hides the thread view (`hide`), as above
+  the phone layout it only collapses the thread: a refusal the thread's replies hold stays, and so
+  does the comment they answer. The viewport widening past the phone layout while a send
   from the thread view is out leaves the view open, full-screen at any width, until Back. And a
   closed issue keeps its composers mounted (`closed` on `MentionComposer`): one shows itself only
   for a send of its own still out or that send's refusal, with Send refused and `Discard draft` in

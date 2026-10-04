@@ -9,7 +9,7 @@ import {
   resolveComment,
 } from "./api";
 import { resetDatabase } from "./seed";
-import { holdPosts, refusePosts } from "./sends";
+import { answeredPost, holdPosts, refusePosts } from "./sends";
 import { asUser } from "./users";
 
 // The phone layout on every project: on a phone a comment's thread opens full-screen over the
@@ -424,6 +424,83 @@ test("on a phone, Back and Escape from a thread reply's refusal drop its draft a
     await thread.getByRole("button", { exact: true, name: "Reply" }).click();
     await expect(field).toHaveValue("");
     await expect(refusal).toHaveCount(0);
+  } finally {
+    await alice.close();
+  }
+});
+
+// The reader's own Resolve closes the thread once the server takes it, and the thread's reply stays
+// theirs: its refusal, its draft and the comment it answers are there when the thread opens again.
+test("on a phone, the reader's own Resolve keeps a thread reply's refusal and its comment", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Resolved over a refused reply" });
+  const earlier = await createComment(issue.key, { body: "Earlier comment" });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.setViewportSize(phone);
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const thread = threadView(page);
+    const field = thread
+      .getByRole("form", { name: "Comment composer" })
+      .getByRole("textbox", { name: "Comment" });
+    const refusal = thread.getByText("Couldn't send — the server is down");
+    const refuse = await refusePosts(page, `**/api/v1/issues/${issue.key}/comments`);
+    refuse();
+    await commentTurn(page, earlier.id).getByRole("button", { exact: true, name: "Reply" }).click();
+    await field.fill("Refused, then resolved");
+    await thread.getByRole("button", { exact: true, name: "Send" }).click();
+    await expect(refusal).toBeVisible();
+
+    await thread.getByRole("button", { exact: true, name: "Resolve" }).click();
+    await expect(threadView(page)).toHaveCount(0);
+    await expect(commentTurn(page, earlier.id)).toBeVisible();
+    await openThread(page, earlier.id);
+    await expect(refusal).toBeVisible();
+    await expect(field).toHaveValue("Refused, then resolved");
+  } finally {
+    await alice.close();
+  }
+});
+
+// The thread composer's refusal is its comment's: left with Back while its send was out, it comes
+// back in that comment's thread when the reader replies to another comment, rather than under the
+// other comment's Reply.
+test("on a phone, a thread reply refused after Back comes back in its own thread on another Reply", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Refused after Back" });
+  const first = await createComment(issue.key, { body: "First comment" });
+  const second = await createComment(issue.key, { body: "Second comment" });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.setViewportSize(phone);
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const thread = threadView(page);
+    const field = thread
+      .getByRole("form", { name: "Comment composer" })
+      .getByRole("textbox", { name: "Comment" });
+    const refuse = await refusePosts(page, `**/api/v1/issues/${issue.key}/comments`);
+    await commentTurn(page, first.id).getByRole("button", { exact: true, name: "Reply" }).click();
+    await field.fill("Meant for the first");
+    await thread.getByRole("button", { exact: true, name: "Send" }).click();
+    await expect(field).toBeDisabled();
+    await leaveThread(page);
+    const refused = answeredPost(page, `/api/v1/issues/${issue.key}/comments`, 503);
+    refuse();
+    await refused;
+
+    await commentTurn(page, second.id).getByRole("button", { exact: true, name: "Reply" }).click();
+    await expect(thread.locator(`[data-turn="comment:${first.id}"]`)).toBeVisible();
+    await expect(thread.locator(`[data-turn="comment:${second.id}"]`)).toHaveCount(0);
+    await expect(thread.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expect(field).toHaveValue("Meant for the first");
   } finally {
     await alice.close();
   }

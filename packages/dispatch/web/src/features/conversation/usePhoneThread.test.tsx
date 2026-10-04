@@ -111,7 +111,7 @@ test("the card's own reply keeps the thread through a widening, and holds Back u
 
     view.rerender({ isPhoneViewport: false });
     expect(view.result.current.id).toBe("comment-1");
-    act(() => view.result.current.close());
+    act(() => view.result.current.leave());
     expect(view.result.current.id).toBe("comment-1");
 
     await answer();
@@ -121,7 +121,7 @@ test("the card's own reply keeps the thread through a widening, and holds Back u
     act(() => view.result.current.open("comment-1"));
     const lateAnswer = startSend(queryClient, pastDeadlineKey(cardReply));
     expect(view.result.current.cardReplySending).toBe(false);
-    act(() => view.result.current.close());
+    act(() => view.result.current.leave());
     expect(view.result.current.id).toBeUndefined();
     await lateAnswer();
   } finally {
@@ -141,7 +141,7 @@ test("the thread composer's send out through a widening reopens the thread it an
     expect(view.result.current.id).toBe("comment-1");
     expect(view.result.current.replyTo).toBe(reply);
     const answer = startSend(queryClient, view.result.current.composerKey);
-    act(() => view.result.current.close());
+    act(() => view.result.current.leave());
     expect(view.result.current.id).toBeUndefined();
     expect(view.result.current.holds("comment-1")).toBe(true);
 
@@ -151,7 +151,7 @@ test("the thread composer's send out through a widening reopens the thread it an
     await answer();
     act(() => view.result.current.endReply());
     expect(view.result.current.id).toBe("comment-1");
-    act(() => view.result.current.close());
+    act(() => view.result.current.leave());
     expect(view.result.current.id).toBeUndefined();
     expect(view.result.current.holds("comment-1")).toBe(false);
   } finally {
@@ -187,7 +187,7 @@ test("Back with the thread composer's refusal showing drops the refusal and ends
     });
     await refuseReply(queryClient, view.result.current.composerKey);
 
-    act(() => view.result.current.close());
+    act(() => view.result.current.leave());
     expect(view.result.current.id).toBeUndefined();
     expect(heldSends(queryClient).get(view.result.current.composerKey)).toBeUndefined();
     expect(view.result.current.replyTo).toBeNull();
@@ -209,7 +209,7 @@ test("Back from another thread keeps the thread composer's refusal for its own t
     await refuseReply(queryClient, view.result.current.composerKey);
 
     act(() => view.result.current.open("comment-2"));
-    act(() => view.result.current.close());
+    act(() => view.result.current.leave());
     expect(heldSends(queryClient).get(view.result.current.composerKey)?.status).toBe("refused");
     expect(view.result.current.replyTo).toBe(reply);
   } finally {

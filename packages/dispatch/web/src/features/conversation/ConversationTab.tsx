@@ -952,7 +952,7 @@ export function ConversationTab({
     [phone.id, shown]
   );
   const phoneThreadDialog = useDialog<HTMLElement>({
-    onClose: phone.close,
+    onClose: phone.leave,
     open: phoneThread !== undefined,
   });
   const commentActions = useCommentActionQueue({
@@ -966,13 +966,12 @@ export function ConversationTab({
       if (kind === "reopen" || showResolvedComments) return;
       if (queryClient.isMutating({ mutationKey: threadReplySendKey(sendKey, id) }) > 0) return;
       setThreadOpen(id, false);
-      if (phone.id === id) phone.close();
+      if (phone.id === id) phone.hide();
     },
   });
   const [ownSendCount, setOwnSendCount] = useState(0);
   // The docked composer's reply. A message's Reply answers here at every width, and so does a
-  // comment's above the phone layout. A send the composer holds still answers its reply when the
-  // tab mounts again, so the composer shows it there.
+  // comment's above the phone layout.
   const [replyTo, setReplyTo] = useHeldReplyTo(sendKey);
   const beginReply = (target: ReplyTarget): boolean => {
     if (sendingNow()) return false;
@@ -1542,7 +1541,7 @@ export function ConversationTab({
             <button
               className={`min-h-11 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-50 ${textPrimaryOnSurface}`}
               disabled={phone.cardReplySending}
-              onClick={phone.close}
+              onClick={phone.leave}
               type="button"
             >
               Back
@@ -1571,7 +1570,7 @@ export function ConversationTab({
                 isPhone
                 key={phoneThread.id}
                 onAction={(id, kind) => commentActions.mutateItem({ id, kind })}
-                onPhoneThreadToggle={phone.close}
+                onPhoneThreadToggle={phone.leave}
                 onRetryAction={commentActions.retryItem}
                 pendingAction={commentActions.pendingActionIds.has(phoneThread.event.payload.id)}
                 onPin={() =>

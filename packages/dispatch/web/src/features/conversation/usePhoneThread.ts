@@ -37,16 +37,21 @@ export interface PhoneThread {
   /** Whether the open thread's card has its own reply out: the view's Back holds for it. */
   readonly cardReplySending: boolean;
   readonly open: (commentId: string) => void;
-  /** Answers `target` in its thread, and says whether it did: a send the tab has out refuses it. */
+  /** Answers `target` in its thread, and says whether it did: a send the tab has out refuses it,
+   *  and a refusal the thread composer holds for another comment opens that comment's thread
+   *  instead, where the reader retries or drops it. */
   readonly beginReply: (target: ReplyTarget) => boolean;
   /** Ends the thread composer's reply, and the composer with it: a refusal it holds goes too, its
    *  draft with it, as an inline reply's Cancel reply drops one. */
   readonly endReply: () => void;
-  /** Back and Escape: refused while the open thread's card has its reply out, until the send's
-   *  deadline. Past it they leave the thread and the reply keeps its send; otherwise a refusal
-   *  the thread shows - the card's reply's, or the thread composer's, which ends its reply - goes
-   *  with the thread, its draft with it. */
-  readonly close: () => void;
+  /** The reader leaves the thread - Back, Escape, Collapse thread: refused while the open
+   *  thread's card has its reply out, until the send's deadline. Past it they leave and the reply
+   *  keeps its send; otherwise a refusal the thread shows - the card's reply's, or the thread
+   *  composer's, which ends its reply - goes with the thread, its draft with it. */
+  readonly leave: () => void;
+  /** Hides the thread once a decision on its comment lands, and leaves every send the store holds
+   *  where it is: a refused reply and the comment it answers stay, as above the phone layout. */
+  readonly hide: () => void;
 }
 
 export function usePhoneThread({
@@ -63,8 +68,6 @@ export function usePhoneThread({
   const store = useHeldSends();
   const [openId, setOpenId] = useState<string>();
   const composerKey = useMemo<MutationKey>(() => [...sendKey, "phone-thread"], [sendKey]);
-  // The thread composer's reply is its send's address: a send it has held - out, or refused -
-  // still answers that reply when the tab mounts again, so the composer shows it there.
   const [replyTo, setReplyTo] = useHeldReplyTo(composerKey);
   // Set when the viewport widened past the phone layout while a send from the view was out - its
   // card's own reply, or the thread composer's: the view stays open, full-screen at any width,
@@ -101,30 +104,39 @@ export function usePhoneThread({
     store.discard(composerKey);
     setReplyTo(null);
   };
+  const hide = () => {
+    setOpenId(undefined);
+    setOutlived(false);
+  };
   return {
     beginReply: (target) => {
       if (sendingNow()) return false;
+      const heldReply = store.get(composerKey)?.request.replyTo;
+      if (heldReply !== undefined && heldReply !== null && heldReply.id !== target.id) {
+        setReplyTo(heldReply);
+        setOpenId(heldReply.id);
+        return false;
+      }
       setReplyTo(target);
       setOpenId(target.id);
       return true;
     },
     cardReplySending,
-    close: () => {
-      if (cardReplySendingNow()) return;
-      // Back drops a refusal the thread shows, its draft with it: a send still out past the
-      // deadline stays held for the thread's return, and so does a thread composer's refusal
-      // while another comment's thread hides it.
-      if (openId !== undefined) {
-        store.discard(threadReplySendKey(sendKey, openId));
-        if (replyTo?.id === openId && store.get(composerKey)?.status === "refused") endReply();
-      }
-      setOpenId(undefined);
-      setOutlived(false);
-    },
     composerKey,
     endReply,
+    hide,
     holds,
     id: isPhoneViewport || outlived || cardReplySending || replySending ? openId : undefined,
+    leave: () => {
+      if (cardReplySendingNow()) return;
+      // A send still out past the deadline stays held for the thread's return, and so does a
+      // thread composer's refusal while another comment's thread hides it.
+      if (openId !== undefined) {
+        store.discard(threadReplySendKey(sendKey, openId));
+        if (replyTo?.id === openId && store.discard(composerKey)) setReplyTo(null);
+      }
+      hide();
+    },
     open: setOpenId,
     replyTo,
   };
