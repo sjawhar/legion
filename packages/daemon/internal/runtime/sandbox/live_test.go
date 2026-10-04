@@ -504,6 +504,9 @@ type liveRig struct {
 	obs  *observations
 	logs *logRecorder
 	log  *slog.Logger
+	// trees is the durable state every runtime of the run reads (Options.Store): every tree live
+	// until a check records its cleanup confirmed.
+	trees *treeStore
 
 	// The current runtime instance and its listener; stop ends both.
 	rt      *Runtime
@@ -580,7 +583,7 @@ func note(who, format string, args ...any) {
 func newLiveRig(t *testing.T, env liveEnv) *liveRig {
 	ctx, cancel := context.WithCancel(context.Background())
 	r := &liveRig{
-		t: t, env: env, ctx: ctx, cancel: cancel, reg: newRegistry(), obs: &observations{changed: make(chan struct{})},
+		t: t, env: env, ctx: ctx, cancel: cancel, reg: newRegistry(), obs: &observations{changed: make(chan struct{})}, trees: newTreeStore(),
 		enrollments: map[claim.Token]liveEnrollment{}, grants: map[claim.Token]string{},
 	}
 	fail := func(format string, args ...any) {
@@ -714,10 +717,10 @@ func (r *liveRig) startRuntime() error {
 			GH: "/usr/local/bin/gh", Git: "/usr/bin/git", JJ: "/usr/local/bin/jj", Legion: "/opt/legion/bin/legion",
 			AgentSecrets: "/opt/legion/bin/agent-secrets",
 		},
-		// Stage4a drives Runtime directly to prove Kubernetes mechanics. The daemon-only durable
-		// resource store is deliberately absent here; Stage4b drives it through the real outbox.
-		SkipIssueResourceStoreForTest: true,
-		Pod:                           r.pod, ProviderKeys: map[string]string{liveProviderKey: liveProvidersSecretKey},
+		// Stage4a drives Runtime directly to prove Kubernetes mechanics; the daemon's store is the
+		// in-memory one, which outlives each runtime as Postgres outlives a daemon restart.
+		Store: r.trees,
+		Pod:   r.pod, ProviderKeys: map[string]string{liveProviderKey: liveProvidersSecretKey},
 		Agent: stubAgent, BootTimeout: liveBootTimeout, BootIntervals: liveBootIntervals,
 		TerminationGrace: liveGrace, ProbeInterval: liveProbeInterval, AdoptTimeout: liveAdoptTimeout,
 		Tokens: r.tokens, Conns: ln, Log: r.log,

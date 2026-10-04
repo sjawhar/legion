@@ -702,10 +702,10 @@ func (r *liveRig) checkReAdopt() error {
 }
 
 // orphan-sweep: a Sandbox of the project that no claim records survives a sweep inside the grace;
-// past it, it survives while it is this runtime's own unreleased launch (a claim launched after
-// the daemon read the claims it sweeps with), and is deleted once a fresh runtime, which never
-// launched it, sweeps: what a crash between creating it and persisting its claim leaves. A
-// suspended claim's Sandbox survives every sweep.
+// past it, it survives while its tree's lifecycle is open (a claim launched after the daemon read
+// the claims it sweeps with), and is deleted once its tree's cleanup confirmed, by a fresh runtime
+// as by any: what a launch that reached the API after its tree's cleanup listed it leaves. A
+// suspended claim's Sandbox, of a live tree, survives every sweep.
 func (r *liveRig) checkOrphanSweep() error {
 	orphan, suspended := r.claim("orphan"), r.claim("second")
 	if err := r.ensureRunning(r.claim("root")); err != nil {
@@ -733,15 +733,16 @@ func (r *liveRig) checkOrphanSweep() error {
 		return err
 	}
 	if s, err := r.getSandbox(name); err != nil || s.DeletionTimestamp != nil {
-		return fmt.Errorf("the runtime's own unreleased launch %s did not survive a sweep past the grace: %v", name, err)
+		return fmt.Errorf("unrecorded %s of the live tree %s did not survive a sweep past the grace: %v", name, orphan.tree, err)
 	}
-	note("runtime", "sweep with grace 1s by the runtime that launched it: %s survives", name)
+	note("runtime", "sweep with grace 1s while its tree %s is live: %s survives", orphan.tree, name)
+	r.trees.close(orphan.tree)
 	r.stopRuntime()
 	restarted := time.Now()
 	if err := r.startRuntime(); err != nil {
 		return err
 	}
-	note("runtime", "listener and runtime replaced, as a crash before the claim was persisted would")
+	note("runtime", "tree %s's cleanup recorded confirmed; listener and runtime replaced", orphan.tree)
 	if err := r.rt.ReconcileOrphans(r.ctx, r.known(orphan), time.Second); err != nil {
 		return err
 	}

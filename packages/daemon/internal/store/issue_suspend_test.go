@@ -2,12 +2,14 @@ package store
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
-	"github.com/sjawhar/legion/daemon/internal/runtime"
+	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/wait"
 )
 
 func TestIssueSuspensionFencesReadmissionAndWaitsForAllStoredRoles(t *testing.T) {
@@ -27,11 +29,12 @@ func TestIssueSuspensionFencesReadmissionAndWaitsForAllStoredRoles(t *testing.T)
 		{name: "newer start already ran", state: supervise.StateWorking, start: 11},
 		{name: "newer start still queued", state: supervise.StateSuspended, change: `insert into outbox (id,kind,issue,payload,attempts,next_at,last_error) values (11,'supervise','LEGION-208','{"op":"start","tree":"LEGION-208","role":"architect","generation":1}',0,now(),'')`},
 		{name: "role stop still pending", state: supervise.StateSuspended, change: `insert into outbox (id,kind,issue,payload,attempts,next_at,last_error) values (9,'supervise','LEGION-208','{"op":"suspend","tree":"LEGION-208","role":"architect","generation":1}',0,now(),'')`, wantWait: "role stop effects"},
+		{name: "tree cleanup already reserved", state: supervise.StateSuspended, change: `update tree_lifecycles set cleanup_started = true where tree = 'LEGION-208'`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			st := migratedStore(t)
 			ctx := context.Background()
-			ensure(t, st, rootIssue, rootSandbox)
+			openLingeringTree(t, st)
 			c := supervise.Claim{Token: claim.Token("legion-legion-legion-208-architect"), Project: "legion", Tree: rootIssue, Issue: rootIssue,
 				Role: claim.RoleArchitect, TreeEpoch: 1, Generation: 1, State: tc.state, LastStartRow: tc.start}
 			if err := st.PutClaim(ctx, c); err != nil {
@@ -42,17 +45,28 @@ func TestIssueSuspensionFencesReadmissionAndWaitsForAllStoredRoles(t *testing.T)
 					t.Fatal(err)
 				}
 			}
-			_, act, err := st.IssueSuspension(ctx, "legion", runtime.IssueResourceKey{Issue: rootIssue, Tree: rootIssue, IssueGeneration: 1, TreeGeneration: 1, StopRow: 10})
+			reservedBefore := cleanupStarted(t, st)
+			act, err := st.IssueSuspension(ctx, "legion", IssueClose{Issue: rootIssue, Tree: rootIssue, IssueGeneration: 1, TreeGeneration: 1, Row: 10}, record.OutOfWorkflow)
 			if tc.wantWait != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.wantWait) || act {
-					t.Fatalf("suspension = %t, %v; want pending %q", act, err, tc.wantWait)
+				if !errors.Is(err, wait.ErrWaiting) || !strings.Contains(err.Error(), tc.wantWait) || act {
+					t.Fatalf("suspension = %t, %v; want the wait %q", act, err, tc.wantWait)
 				}
 			} else if err != nil || act != tc.wantAct {
 				t.Fatalf("suspension = %t, %v; want act %t", act, err, tc.wantAct)
 			}
-			if resources := resourcesOf(t, st, rootIssue); resources.CleanupStarted {
+			if !reservedBefore && cleanupStarted(t, st) {
 				t.Fatal("suspension reserved destructive cleanup")
 			}
 		})
 	}
+}
+
+func cleanupStarted(t *testing.T, st *Store) bool {
+	t.Helper()
+	var started bool
+	if err := st.Pool().QueryRow(context.Background(), `select cleanup_started from tree_lifecycles
+		where project = 'legion' and tree = $1`, rootIssue).Scan(&started); err != nil {
+		t.Fatal(err)
+	}
+	return started
 }
