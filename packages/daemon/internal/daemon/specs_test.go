@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -9,6 +10,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/prompts"
+	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
@@ -104,5 +106,50 @@ func TestAReviewerIsToldItsProjectsReviewWorkflows(t *testing.T) {
 				t.Fatalf("addressing %q; want it to end with %q", spec.Prompt.Addressing, tc.want)
 			}
 		})
+	}
+}
+
+// A merger is told after its addressing which login the reviewer's App posts as, the one account
+// whose approval its READY may name; no other claim is told it. A daemon that cannot read that
+// App's identity starts no merger rather than one with no way to tell the reviewer's review.
+func TestAMergerIsToldTheReviewAppsLogin(t *testing.T) {
+	composer, err := prompts.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("compose the shipped prompts: %v", err)
+	}
+	logins := map[claim.Role]string{claim.RoleReviewer: "acme-review[bot]", claim.RoleImplementer: "acme-implement[bot]", claim.RoleMerger: "acme-implement[bot]"}
+	identity := func(_ context.Context, role claim.Role) (runtime.GitIdentity, error) {
+		return runtime.GitIdentity{Name: logins[role], Email: logins[role] + "@users.noreply.github.com"}, nil
+	}
+	const told = " Review App: the reviewer posts as `acme-review[bot]`."
+	for _, role := range []claim.Role{claim.RoleMerger, claim.RoleReviewer, claim.RoleImplementer} {
+		t.Run(string(role), func(t *testing.T) {
+			token, err := claim.NewToken("s1", "S1-2", role)
+			if err != nil {
+				t.Fatal(err)
+			}
+			s := specs{stateDir: t.TempDir(), project: "s1", prompts: composer, identity: identity}
+			spec, err := s.SpawnSpec(context.Background(), supervise.Claim{Token: token, Issue: "S1-2", Tree: "S1-1", Role: role})
+			if err != nil {
+				t.Fatalf("SpawnSpec: %v", err)
+			}
+			if got, want := strings.HasSuffix(spec.Prompt.Addressing, told), role == claim.RoleMerger; got != want || !want && strings.Contains(spec.Prompt.Addressing, "Review App:") {
+				t.Fatalf("addressing %q; want it to end with %q: %t", spec.Prompt.Addressing, told, want)
+			}
+		})
+	}
+
+	token, err := claim.NewToken("s1", "S1-2", claim.RoleMerger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := specs{stateDir: t.TempDir(), project: "s1", prompts: composer, identity: func(_ context.Context, role claim.Role) (runtime.GitIdentity, error) {
+		if role == claim.RoleReviewer {
+			return runtime.GitIdentity{}, errors.New("github_app_not_installed")
+		}
+		return identity(context.Background(), role)
+	}}
+	if _, err := s.SpawnSpec(context.Background(), supervise.Claim{Token: token, Issue: "S1-2", Tree: "S1-1", Role: claim.RoleMerger}); err == nil || !strings.Contains(err.Error(), "the review App's login") {
+		t.Fatalf("SpawnSpec with no review App identity = %v, want a refusal naming the review App's login", err)
 	}
 }

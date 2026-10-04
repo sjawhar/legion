@@ -74,6 +74,13 @@ func (s specs) SpawnSpec(ctx context.Context, c supervise.Claim) (runtime.SpawnS
 			return runtime.SpawnSpec{}, fmt.Errorf("the git identity of %s: %w", c.Token, err)
 		}
 		env = id.Env()
+		if c.Role == claim.RoleMerger {
+			reviewer, err := s.identity(ctx, claim.RoleReviewer)
+			if err != nil {
+				return runtime.SpawnSpec{}, fmt.Errorf("the review App's login for %s: %w", c.Token, err)
+			}
+			addressing += " " + ReviewAppFragment(reviewer.Name)
+		}
 	}
 	spec := runtime.SpawnSpec{
 		Env:     env,
@@ -143,4 +150,12 @@ func ReviewWorkflowsFragment(workflows []string) string {
 		return "Review workflows: this project declares none (`review_workflows`)."
 	}
 	return "Review workflows: this project declares `" + strings.Join(workflows, "`, `") + "` (`review_workflows`)."
+}
+
+// ReviewAppFragment is the sentence a merger is told after its addressing: the login the reviewer's
+// App posts as, the same login gh-token names as `legionAppLogins.review`, by which the merger
+// finds the reviewer's approval among the pull request's reviews (prompts/roles/merger.md, step
+// 2). Nothing in a review body can stand in for it: any account can paste a footer.
+func ReviewAppFragment(login string) string {
+	return "Review App: the reviewer posts as `" + login + "`."
 }
