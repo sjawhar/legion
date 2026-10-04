@@ -41,18 +41,13 @@ export function AskThreadDisclosure({
   const replyCount = thread.data?.replies.length ?? 0;
   if (replyCount === 0 && ask.state !== "answered") return null;
 
-  // The composer follows the Reply control that reveals it, so the next Tab from the control
-  // lands in the field and a screen reader meets the expanded panel right after its button.
+  // The composer follows the control that reveals it, so the next Tab from the control lands in
+  // the field and a screen reader meets the expanded panel right after its button. The control is
+  // "Write a reply" so a screen reader can tell it from the form's own "Reply" submit button.
   return (
     <>
       {replyCount === 0 ? null : (
-        <AskThread
-          ask={ask}
-          createReply={createReply}
-          embedded={embedded}
-          showComposer={false}
-          thread={thread}
-        />
+        <AskThread ask={ask} embedded={embedded} showComposer={false} thread={thread} />
       )}
       {ask.state === "answered" ? (
         <>
@@ -63,7 +58,7 @@ export function AskThreadDisclosure({
             onClick={() => setComposerOpen((open) => !open)}
             type="button"
           >
-            Reply
+            Write a reply
           </button>
           {composerOpen ? (
             <div className="mt-2" id={composerId}>

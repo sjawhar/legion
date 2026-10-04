@@ -1,6 +1,6 @@
 import type { UseQueryResult } from "@tanstack/react-query";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { type FormEvent, type ReactNode, useId, useState } from "react";
+import { type FormEvent, type ReactNode, useId, useLayoutEffect, useRef, useState } from "react";
 
 import { api } from "../../api/client";
 import type { Ask, AskRead, Comment, CreateCommentInput } from "../../api/types";
@@ -27,6 +27,15 @@ type CreateReply = (issueKey: string, input: CreateCommentInput) => Promise<Comm
 
 const createReply: CreateReply = (issueKey, input) => api.createComment(issueKey, input);
 
+/** Unsent reply drafts, by ask id. A draft belongs to the ask, not to the card showing it: the
+ *  margin remounts an answered ask's card when its ask list moves it out of Needs you, often while
+ *  the reader is still typing. Sending the reply, or emptying the field, drops the draft. */
+const replyDrafts = new Map<string, string>();
+
+/** The caret of a focused reply field whose card unmounted in the current commit, by ask id. A
+ *  composer for the same ask that mounts in that commit takes the focus and the caret back. */
+const replyFocusHandoffs = new Map<string, { end: number; start: number }>();
+
 function AskReply({ comment }: { comment: Comment }): ReactNode {
   return (
     <li className={`rounded-lg p-2 text-sm ${surfaceMutedBg}`}>
@@ -46,7 +55,8 @@ export type AskThreadQuery = UseQueryResult<AskRead, Error>;
 
 /**
  * The reply form under an answered ask. It posts to the ask's issue, or to its document for a
- * project-document ask, then invalidates the shared thread so the reply shows first.
+ * project-document ask, then invalidates the shared thread so the reply shows first. Its draft and
+ * focus are keyed by the ask, so they survive the card remounting elsewhere.
  */
 export function AskReplyComposer({
   ask,
@@ -59,7 +69,32 @@ export function AskReplyComposer({
   // Each composer owns its field id so transient duplicate mounts during a responsive
   // transition cannot share an ask-id-derived id.
   const fieldId = `${useId()}-reply`;
-  const [body, setBody] = useState("");
+  const fieldRef = useRef<HTMLTextAreaElement>(null);
+  const [body, setBodyState] = useState(() => replyDrafts.get(ask.id) ?? "");
+  const setBody = (text: string) => {
+    setBodyState(text);
+    if (text === "") replyDrafts.delete(ask.id);
+    else replyDrafts.set(ask.id, text);
+  };
+  useLayoutEffect(() => {
+    const field = fieldRef.current;
+    if (field === null) return;
+    const caret = replyFocusHandoffs.get(ask.id);
+    if (caret !== undefined) {
+      replyFocusHandoffs.delete(ask.id);
+      field.focus();
+      field.setSelectionRange(caret.start, caret.end);
+    }
+    return () => {
+      // React runs this before it detaches the field, so a field being typed in is still focused.
+      if (document.activeElement !== field) return;
+      const handoff = { end: field.selectionEnd, start: field.selectionStart };
+      replyFocusHandoffs.set(ask.id, handoff);
+      queueMicrotask(() => {
+        if (replyFocusHandoffs.get(ask.id) === handoff) replyFocusHandoffs.delete(ask.id);
+      });
+    };
+  }, [ask.id]);
   const submit = useMutation({
     mutationFn: (text: string) => {
       if (ask.issue_key === null) {
@@ -95,6 +130,7 @@ export function AskReplyComposer({
           id={fieldId}
           onChange={(event) => setBody(event.target.value)}
           onKeyDown={(event) => submitOnModifiedEnter(event)}
+          ref={fieldRef}
           value={body}
         />
       </label>

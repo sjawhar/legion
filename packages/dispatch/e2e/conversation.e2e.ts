@@ -370,7 +370,7 @@ test("an agent's answer on a failed attempt is accepted and shown as the answer"
   }
 });
 
-test("a compact answered ask's Reply opens its composer as the next keyboard stop", async ({
+test("a compact answered ask's Write a reply opens its composer as the next keyboard stop", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -397,11 +397,15 @@ test("a compact answered ask's Reply opens its composer as the next keyboard sto
     const closedToggle = askTurn.getByRole("button", {
       exact: true,
       expanded: false,
-      name: "Reply",
+      name: "Write a reply",
     });
     await closedToggle.focus();
     await page.keyboard.press("Enter");
-    const openToggle = askTurn.getByRole("button", { exact: true, expanded: true, name: "Reply" });
+    const openToggle = askTurn.getByRole("button", {
+      exact: true,
+      expanded: true,
+      name: "Write a reply",
+    });
     await expect(openToggle).toBeFocused();
     await page.keyboard.press("Tab");
     const field = askTurn.getByRole("textbox", { name: "Reply" });

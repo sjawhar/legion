@@ -456,6 +456,75 @@ test("Margin clears an answered anchored ask from Needs you without an event str
   }
 });
 
+test("a reply typed right after answering in the margin survives the ask leaving Needs you", async () => {
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      mutations: { retry: false },
+      queries: { retry: false, staleTime: Number.POSITIVE_INFINITY },
+    },
+  });
+  const answeredAsk: Ask = {
+    ...anchoredAsk,
+    answer: { at: "2026-09-10T00:01:00Z", selected: ["Ship"], text: null, user: "alice" },
+    state: "answered",
+  };
+  queryClient.setQueryData(["issue", issue.key], issue);
+  queryClient.setQueryData(["inbox"], [anchoredAsk]);
+  queryClient.setQueryData(["asks", issue.key], [anchoredAsk]);
+  queryClient.setQueryData(["user-state"], {});
+  queryClient.setQueryData(["comments", issue.key], []);
+  const answerAsk = spyOn(api, "answerAsk").mockResolvedValue(answeredAsk);
+  const getAsk = spyOn(api, "getAsk").mockResolvedValue({
+    ask: anchoredAsk,
+    edits: [],
+    followers: [],
+    replies: [],
+  });
+  // The margin refetches its ask list after the answer; hold it until the reader is typing.
+  const heldAskLists: Array<(asks: Ask[]) => void> = [];
+  const listIssueAsks = spyOn(api, "listIssueAsks").mockImplementation(
+    () =>
+      new Promise<Ask[]>((resolve) => {
+        heldAskLists.push(resolve);
+      })
+  );
+  const view = render(
+    <MemoryRouter initialEntries={[buildIssuePath({ key: issue.key, kind: "issue" })]}>
+      <QueryClientProvider client={queryClient}>
+        <MarginProvider>
+          <Margin />
+        </MarginProvider>
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+
+  try {
+    const needsYou = await screen.findByRole("region", { name: "Needs you" });
+    fireEvent.click(await within(needsYou).findByRole("radio", { name: "Ship" }));
+    fireEvent.click(within(needsYou).getByRole("button", { name: "Answer" }));
+    const field = await within(needsYou).findByRole("textbox", { name: "Reply" });
+    field.focus();
+    fireEvent.change(field, { target: { value: "Draft survives" } });
+    await waitFor(() => expect(heldAskLists.length).toBeGreaterThan(0));
+
+    await act(async () => {
+      for (const release of heldAskLists) release([answeredAsk]);
+    });
+    await waitFor(() => expect(screen.queryByRole("region", { name: "Needs you" })).toBeNull());
+    const moved = screen.getByRole("textbox", { name: "Reply" }) as HTMLTextAreaElement;
+    // The card remounted in the answered list; the draft and the focus followed the ask.
+    expect(moved).not.toBe(field);
+    expect(moved.value).toBe("Draft survives");
+    expect(document.activeElement).toBe(moved);
+    fireEvent.change(moved, { target: { value: "" } });
+  } finally {
+    view.unmount();
+    answerAsk.mockRestore();
+    getAsk.mockRestore();
+    listIssueAsks.mockRestore();
+  }
+});
+
 test("Margin leaves an unanchored root out of document review", async () => {
   const queryClient = new QueryClient({
     defaultOptions: {

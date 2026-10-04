@@ -1,6 +1,6 @@
 import { afterAll, expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
 
@@ -1597,7 +1597,7 @@ test("AskCard shows the newest two replies, expands older replies, and puts a fr
       expect(shownReplyBodies(threadElement)).toEqual(["Newest reply", "Newer reply"])
     );
 
-    fireEvent.click(view.getByRole("button", { name: "Reply" }));
+    fireEvent.click(view.getByRole("button", { name: "Write a reply" }));
     const replyField = view.getByLabelText("Reply");
     fireEvent.change(replyField, { target: { value: "Fresh reply" } });
     fireEvent.submit(replyField.closest("form") as HTMLFormElement);
@@ -1609,7 +1609,7 @@ test("AskCard shows the newest two replies, expands older replies, and puts a fr
   }
 });
 
-test("a compact answered ask's Reply reveals its composer as the next keyboard stop", async () => {
+test("a compact answered ask's Write a reply reveals its composer as the next keyboard stop", async () => {
   const input = answered(ask(), ["Ship"]);
   const { view } = renderCard(
     <AskCard
@@ -1626,7 +1626,7 @@ test("a compact answered ask's Reply reveals its composer as the next keyboard s
 
   try {
     await view.findByText("Earlier reply");
-    const replyToggle = view.getByRole("button", { name: "Reply" });
+    const replyToggle = view.getByRole("button", { name: "Write a reply" });
     // Enter or Space on a native button activates it as a click; focus stays on the button.
     replyToggle.focus();
     fireEvent.click(replyToggle);
@@ -1637,6 +1637,8 @@ test("a compact answered ask's Reply reveals its composer as the next keyboard s
     nextTabStop(replyToggle)?.focus();
     expect(document.activeElement).toBe(field);
     expect(controlledBy(replyToggle)?.contains(field)).toBe(true);
+    // The toggle and the form's submit button have distinct names.
+    expect(view.getAllByRole("button", { name: "Reply" })).toHaveLength(1);
   } finally {
     view.unmount();
   }
@@ -1678,7 +1680,9 @@ test("a reply arriving while the older replies are shown lands first and keeps t
       ...replies,
       reply({ body: "Arriving reply", created_at: "2026-09-09T00:04:00Z", id: "comment-4" }),
     ];
-    await queryClient.invalidateQueries({ queryKey: ["ask-thread", input.id] });
+    await act(async () => {
+      await queryClient.invalidateQueries({ queryKey: ["ask-thread", input.id] });
+    });
 
     await waitFor(() =>
       expect(shownReplyBodies(threadElement)).toEqual([
@@ -1695,7 +1699,7 @@ test("a reply arriving while the older replies are shown lands first and keeps t
   }
 });
 
-test("AskCard with no replies offers Reply only after an answer, and retries a failed thread fetch", async () => {
+test("AskCard with no replies offers Write a reply only after an answer, and retries a failed thread fetch", async () => {
   const openInput = ask();
   const { view: open } = renderCard(
     <AskCard ask={openInput} getAskThread={emptyThread(openInput)} thread="collapsed" />
@@ -1726,10 +1730,10 @@ test("AskCard with no replies offers Reply only after an answer, and retries a f
     const openCard = within(open.container);
     const answeredCard = within(answered.container);
     const failedCard = within(failed.container);
-    await answeredCard.findByRole("button", { name: "Reply" });
+    await answeredCard.findByRole("button", { name: "Write a reply" });
     // The open ask's only composer is the card's own Answer / Ask back row.
     await openCard.findByRole("button", { name: "Ask back" });
-    expect(openCard.queryByRole("button", { name: "Reply" })).toBeNull();
+    expect(openCard.queryByRole("button", { name: "Write a reply" })).toBeNull();
     const retry = await failedCard.findByRole("button", { name: "Replies unavailable — retry" });
     expect(retry.getAttribute("title")).toBe("boom");
 
@@ -1737,7 +1741,7 @@ test("AskCard with no replies offers Reply only after an answer, and retries a f
     await waitFor(() =>
       expect(failedCard.queryByRole("button", { name: "Replies unavailable — retry" })).toBeNull()
     );
-    expect(failedCard.queryByRole("button", { name: "Reply" })).toBeNull();
+    expect(failedCard.queryByRole("button", { name: "Write a reply" })).toBeNull();
   } finally {
     open.unmount();
     answered.unmount();
