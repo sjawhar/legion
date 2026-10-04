@@ -9,14 +9,14 @@ import { useIssueAssignee } from "./useIssueAssignee";
 
 /**
  * The single assignee editor: shows who answers the issue's asks as a badge (their lowercase
- * login, or a muted "Unassigned" tag) and, on click, tap, Enter or Space, opens a native
- * `<select>` over the sign-in allowlist (`GET /users`) with Unassigned first — the same picker
- * on desktop and iPhone, laid invisibly over the badge exactly as `PriorityControl` does.
- * The allowlist is read only once the reader reaches for the control (pointer over it, a
+ * email, or a muted "Unassigned" tag) and, on click, tap, Enter or Space, opens a native
+ * `<select>` over everyone who has signed in (`GET /users`) with Unassigned first — the same
+ * picker on desktop and iPhone, laid invisibly over the badge exactly as `PriorityControl` does.
+ * The list is read only once the reader reaches for the control (pointer over it, a
  * touch on it, or focus) and then kept for the session: a fresh issue load makes no request
- * for it, and the badge never waits on it. Anyone on the allowlist may reassign. The write
+ * for it, and the badge never waits on it. Anyone signed in may reassign. The write
  * goes through `useIssueAssignee`, so the issue detail, the project lists and the inbox's
- * partitions update at once and roll back together; a refused login shows the server's
+ * partitions update at once and roll back together; a refused person shows the server's
  * reason. Like `PriorityControl`, the select stays enabled while a save is in flight - a
  * disabled control drops the focus it holds and leaves the tab order - and a pick made meanwhile
  * is queued behind the save. Labelled `Assignee of <KEY>`.
@@ -40,7 +40,7 @@ export function AssigneeControl({
   const want = () => setWanted(true);
   const write = useIssueAssignee(issueKey);
   const logins = (users.data ?? []).map((user) => user.login);
-  // A login the allowlist no longer carries still names who holds the issue; keep it selectable
+  // An assignee the list does not carry still names who holds the issue; keep it selectable
   // so the control never shows a value its options lack.
   const options = assignee === null || logins.includes(assignee) ? logins : [assignee, ...logins];
   const tone = assignee === null ? badgeLow : badgePrimary;

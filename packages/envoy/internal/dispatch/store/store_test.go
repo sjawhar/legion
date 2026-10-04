@@ -157,7 +157,7 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 	}
 
 	expectedTables := []string{
-		"users",
+		"people",
 		"projects",
 		"repo_projects",
 		"issues",
@@ -226,7 +226,7 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 	`, []string{"issues", "artifact_versions", "comments", "asks", "messages"})
 
 	expectedConstraints := []string{
-		"users_pkey",
+		"people_pkey",
 		"projects_pkey",
 		"projects_key_check",
 		"repo_projects_pkey",
