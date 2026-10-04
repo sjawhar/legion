@@ -360,24 +360,30 @@ holding the replica for its walk holds every other browser's copy of the keystro
 therefore only tries the lock, and
 reads a copy when another read holds it or an observer waits for it (`lockForUpdate`), so reads
 never queue behind each other or ahead of a waiting observer. `BenchmarkKeystrokeBesideReads`
-measures the wait: a keystroke's transaction and the observer's catch-up, without its render, 120
-keystrokes 20 ms apart on a 524 KiB document, beside reads. Two runs of each, keystroke latency p50
-/ p90 / p99 in ms, on the development machine (32 cores, load 72 to 98) and on half a processor
-(`GOMAXPROCS=1` under a 50% CPU quota, load 57 to 142):
+measures the wait: a keystroke's transaction and the observer's whole turn with the replica -
+the catch-up and the render (`renderedReplica.observe`, through `renderDocumentForUpdate` since
+the copy's removal), 120 keystrokes 20 ms apart on a 524 KiB document, beside reads. One run of
+each - the render's own cost, hundreds of ms a keystroke regardless of which read mechanism races
+beside it, put repeated sampling out of this pass's time budget - keystroke latency p50 / p90 /
+p99 in ms, on the development machine (32 cores, load 75 to 80) and on half a processor
+(`GOMAXPROCS=1` under a 50% CPU quota, production's allotment):
 
 | Reads beside the keystrokes | 32 cores, one every 250 ms | 32 cores, back to back | Half a processor, one every 250 ms | Half a processor, back to back |
 | --- | --- | --- | --- | --- |
-| none | 5.3-6.0 / 7-18 / 10-54 | | 5.1-7.0 / 7-18 / 15-56 | |
-| copies | 5.6-6.3 / 10-26 / 55-81 | 5.7-7.0 / 18-35 / 60-115 | 5.4-7.5 / 26-57 / 96-212 | 5.8-25 / 38-85 / 126-211 |
-| the replica, waited for | 5.8-6.0 / 72 / 113-152 | 140-151 / 184-224 / 263-312 | 5.7-7.1 / 55-105 / 383-387 | 317-342 / 689-694 / 748-805 |
-| the replica, tried (this design) | 6.3-6.5 / 28-36 / 117-171 | 6.3-7.0 / 25-52 / 193-201 | 5.7-6.3 / 79-94 / 335-410 | 6.5-7.4 / 72-94 / 403-580 |
-| a replica of the reads' own, tried | 5.6-5.7 / 10-12 / 24-32 | 5.5-5.8 / 10-11 / 24-35 | 5.9-7.4 / 22-30 / 82-90 | 7.7-7.8 / 50-60 / 121-122 |
+| none | 551.8 / 849.1 / 1120 | | 635.5 / 810.9 / 881.5 | |
+| copies | 634.5 / 940.3 / 1264 | 663.2 / 823.7 / 974.4 | 1205 / 1478 / 1676 | 1337 / 1547 / 1691 |
+| the replica, tried (this design) | 685.8 / 990.7 / 1469 | 705.7 / 1107 / 2015 | 1137 / 1437 / 1606 | 1368 / 1558 / 1692 |
 
-That is the trade this design takes: trying the replica keeps the median at the baseline, but a
-keystroke can still wait for the one read already walking it (about 100 ms on that document), so
-its 99th percentile is above where copies left it. A replica of the reads' own removes that wait
-and was rejected for its memory: a room read while resident would hold a second whole copy of its
-document until eviction, about 6.6 MiB of heap at 51 KiB, 63 MiB at 524 KiB and 123 MiB at 1 MiB,
+The render dominates every row now, on both designs: at half a processor the three keystroke
+counts are within one run's noise of each other, matching round 2's real-browser, end-to-end
+measurement of the same three modes (PR comment, not reproduced here). On 32 cores the replica
+still costs more at the tail than a copy does - about 50 ms at its median and 200 ms at p99
+reading every 250 ms, growing to about 1 s at p99 reading back to back - the same direction this
+design's trade-off has shown since round 1, now measured on top of the render's own cost rather
+than in isolation from it. A replica of the reads' own would remove that tail (measured early in
+this PR's history, before this benchmark counted the render, at `93a77af2`) and was rejected for
+its memory: a room read while resident would hold a second whole copy of its document until
+eviction, about 6.6 MiB of heap at 51 KiB, 63 MiB at 524 KiB and 123 MiB at 1 MiB,
 with nothing bounding how many rooms hold one. Copying the observer's rendered tree under the lock
 instead of walking the replica would hold it about 45 ms rather than about 105 ms at 524 KiB, but
 would keep that tree resident (about 22 MiB) and still need the replica for the loss check, which
