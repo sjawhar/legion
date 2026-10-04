@@ -62,6 +62,18 @@ jobs:
             exit 1
           fi
 
+      - name: Setup Bun
+        uses: ./.github/actions/setup-bun
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # Each package's `bun run lint` checks only its source directories. This is the command
+      # AGENTS.md documents, over the whole tree, so a fixture, config or test file that Biome
+      # would rewrite fails here instead of on the next person who runs it.
+      - name: Check the whole tree with Biome
+        run: bunx biome check .
+
 
   typecheck:
     runs-on: ubuntu-24.04
