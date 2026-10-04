@@ -145,7 +145,9 @@ func pane() error {
 }
 
 // systemPromptArgument composes the pane's role prompt as the daemon does (specs.SpawnSpec): the
-// role prompts snapshotted under the state directory, the role's parts, then its addressing.
+// role prompts snapshotted under the state directory, the role's parts, then its addressing. A
+// reviewer is told its project's review workflows after that, as a daemon whose project declares
+// none tells it, since the rig has no project configuration.
 func systemPromptArgument(req paneRequest, token claim.Token) (string, error) {
 	role := claim.Role(req.Role)
 	if claim.IsTreeArchitect(role, req.Issue, req.Issue) {
@@ -164,6 +166,9 @@ func systemPromptArgument(req paneRequest, token claim.Token) (string, error) {
 	})
 	if err != nil {
 		return "", err
+	}
+	if role == claim.RoleReviewer {
+		addressing += " " + daemon.ReviewWorkflowsFragment(nil)
 	}
 	return omplaunch.SystemPromptArgument(runtime.PromptParts{RolePromptPaths: parts.RolePromptPaths, Addressing: addressing}), nil
 }

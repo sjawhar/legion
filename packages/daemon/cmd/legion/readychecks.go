@@ -83,7 +83,7 @@ func readyChecks(ctx context.Context, workspace string, issue paneIssue, stdout 
 			return err
 		}
 	}
-	var workflows []classify.Standing
+	var workflows []requiredchecks.WorkflowRun
 	if len(required.Workflows) > 0 {
 		if workflows, err = requiredchecks.Workflows(ctx, github, pull.Head.SHA, required.Workflows); err != nil {
 			return err
@@ -114,11 +114,11 @@ func readyChecks(ctx context.Context, workspace string, issue paneIssue, stdout 
 			return err
 		}
 	}
-	for i, workflow := range workflows {
-		if defined := required.Workflows[i].RepositoryID; workflow.Result == classify.Missing && defined != pull.Base.Repo.ID {
-			return fmt.Errorf("the required workflow %q is defined in repository %d, not in pull request #%d's own (%d): Legion matches a workflow's runs only in the repository that defines it, so it found no run of it on head %s and cannot confirm it passed; tell the architect", workflow.Name, defined, number, pull.Base.Repo.ID, head)
+	for _, workflow := range workflows {
+		if workflow.Result == classify.Missing && workflow.RepositoryID != pull.Base.Repo.ID {
+			return fmt.Errorf("the required workflow %q is defined in repository %d, not in pull request #%d's own (%d): Legion matches a workflow's runs only in the repository that defines it, so it found no run of it on head %s and cannot confirm it passed; tell the architect", workflow.Path, workflow.RepositoryID, number, pull.Base.Repo.ID, head)
 		}
-		if err := refusal(workflow, "required workflow", "no run of"); err != nil {
+		if err := refusal(workflow.Standing(), "required workflow", "no run of"); err != nil {
 			return err
 		}
 	}
