@@ -172,9 +172,10 @@ const answerSkew = 10 * time.Second
 // decidesRound says whether review may decide a review round: the review App submitted it, or its
 // author has write access or higher to the repository, which intake read from GitHub before the
 // fact reached this transaction (intake.PullRequestReview.AuthorCanWrite). On a public repository
-// any account can review a pull request, so anyone else's review decides nothing, and so does one
-// whose permission could not be read. The review App is recognised by its login, since GitHub
-// gives an App's bot account no collaborator permission of its own.
+// any account can review a pull request, so anyone else's review decides nothing. GitHub's 404, or
+// a 403 that is not its rate limit, reads as no write access; any other failed read is retried
+// before the review reaches here. The review App is recognised by its login, since GitHub gives an
+// App's bot account no collaborator permission of its own, so the daemon never asks about it.
 func (e *Engine) decidesRound(review intake.PullRequestReview) bool {
 	return e.byReviewApp(review.Author) || review.AuthorCanWrite
 }
@@ -212,7 +213,7 @@ func (e *Engine) review(ctx context.Context, tx pgx.Tx, fact intake.PullRequestR
 	// either, so a comment written after a decision but delivered before it, or an outsider's
 	// review, cannot make the decision look old.
 	state := strings.ToLower(fact.State)
-	decides := state == "changes_requested" || state == "approved"
+	decides := fact.Decides()
 	if decides && !e.decidesRound(fact) {
 		e.logOnCommit(ctx, "workflow: a review decides nothing: its author is neither the review App nor an account with write access to the repository",
 			"issue", issue.Key, "pull_request", pr.Number, "author", fact.Author, "state", state)

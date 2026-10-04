@@ -987,105 +987,103 @@ func TestDecodeDispatchIssueNamesASessionActor(t *testing.T) {
 // is refused rather than read as none. A time that cannot be read is taken as none and reported,
 // since a review without one is still ordered, by its id.
 func TestDecodingCarriesThePushForcedMarkerAndTheReviewOrder(t *testing.T) {
+	withPayload := func(t *testing.T, name, subject string, set map[string]any) (decodedMessage, error) {
+		t.Helper()
+		var envelope map[string]any
+		if err := json.Unmarshal(capturedGitHubEnvelope(t, name), &envelope); err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		// The envelope carries its payload as JSON text.
+		var payload map[string]any
+		if err := json.Unmarshal([]byte(envelope["payload"].(string)), &payload); err != nil {
+			t.Fatalf("parse %s's payload: %v", name, err)
+		}
+		for key, value := range set {
+			payload[key] = value
+		}
+		text, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatalf("encode %s's payload: %v", name, err)
+		}
+		envelope["payload"] = string(text)
+		data, err := json.Marshal(envelope)
+		if err != nil {
+			t.Fatalf("encode %s: %v", name, err)
+		}
+		return decodeMessage(subject, "CAPTURE", capturedRepositories, data)
+	}
 	pushSubject := "notifications.github.sjawhar.legion.push.branch.legion/LEGION-208"
 	reviewSubject := "notifications.github.sjawhar.legion.pr.42.review"
 
 	for _, forced := range []string{"true", "false"} {
-		decoded, err := withPayload(t, "push.json", pushSubject, set(map[string]any{"forced": forced}))
+		decoded, err := withPayload(t, "push.json", pushSubject, map[string]any{"forced": forced})
 		if push, ok := decoded.Fact.(Push); err != nil || !ok || push.Forced == nil || *push.Forced != forced {
 			t.Fatalf("push with forced %q = %#v, %v", forced, decoded.Fact, err)
 		}
 	}
-	decoded, err := withPayload(t, "review.json", reviewSubject, set(map[string]any{"review_id": "5325101010",
-		"submitted_at": "2026-09-26T12:03:00+02:00"}))
+	decoded, err := withPayload(t, "review.json", reviewSubject, map[string]any{"review_id": "5325101010",
+		"submitted_at": "2026-09-26T12:03:00+02:00"})
 	submitted := time.Date(2026, 9, 26, 10, 3, 0, 0, time.UTC)
 	if review, ok := decoded.Fact.(PullRequestReview); err != nil || !ok || review.ID != 5325101010 ||
 		!review.SubmittedAt.Equal(submitted) || len(decoded.Unread) != 0 {
 		t.Fatalf("review with an id and a submission time = %#v, unread %q, %v", decoded.Fact, decoded.Unread, err)
 	}
-	if _, err := withPayload(t, "review.json", reviewSubject, set(map[string]any{"review_id": "not-a-number"})); err == nil {
+	if _, err := withPayload(t, "review.json", reviewSubject, map[string]any{"review_id": "not-a-number"}); err == nil {
 		t.Fatal("a review id that is not a number decoded")
 	}
 	for _, unreadable := range []any{"yesterday", 1.72735218e+09, true, map[string]any{"t": "2026-09-26T12:03:00Z"}} {
-		decoded, err = withPayload(t, "review.json", reviewSubject, set(map[string]any{"review_id": "5325101010", "submitted_at": unreadable}))
+		decoded, err = withPayload(t, "review.json", reviewSubject, map[string]any{"review_id": "5325101010", "submitted_at": unreadable})
 		if review, ok := decoded.Fact.(PullRequestReview); err != nil || !ok || review.ID != 5325101010 || !review.SubmittedAt.IsZero() ||
 			len(decoded.Unread) != 1 || !strings.Contains(decoded.Unread[0], "submitted_at") {
 			t.Fatalf("review with the time %#v = %#v, unread %q, %v; want it untimed and the field reported", unreadable, decoded.Fact, decoded.Unread, err)
 		}
 	}
 	for _, absent := range []any{nil, ""} {
-		decoded, err = withPayload(t, "review.json", reviewSubject, set(map[string]any{"review_id": "5325101010", "submitted_at": absent}))
+		decoded, err = withPayload(t, "review.json", reviewSubject, map[string]any{"review_id": "5325101010", "submitted_at": absent})
 		if review, ok := decoded.Fact.(PullRequestReview); err != nil || !ok || !review.SubmittedAt.IsZero() || len(decoded.Unread) != 0 {
 			t.Fatalf("review with the time %#v = %#v, unread %q, %v; want it untimed and nothing reported", absent, decoded.Fact, decoded.Unread, err)
 		}
 	}
 }
 
-// withPayload decodes the captured envelope named, with edit applied to its payload.
-func withPayload(t *testing.T, name, subject string, edit func(payload map[string]any)) (decodedMessage, error) {
-	t.Helper()
-	var envelope map[string]any
-	if err := json.Unmarshal(capturedGitHubEnvelope(t, name), &envelope); err != nil {
-		t.Fatalf("parse %s: %v", name, err)
-	}
-	// The envelope carries its payload as JSON text.
-	var payload map[string]any
-	if err := json.Unmarshal([]byte(envelope["payload"].(string)), &payload); err != nil {
-		t.Fatalf("parse %s's payload: %v", name, err)
-	}
-	edit(payload)
-	text, err := json.Marshal(payload)
-	if err != nil {
-		t.Fatalf("encode %s's payload: %v", name, err)
-	}
-	envelope["payload"] = string(text)
-	data, err := json.Marshal(envelope)
-	if err != nil {
-		t.Fatalf("encode %s: %v", name, err)
-	}
-	return decodeMessage(subject, "CAPTURE", capturedRepositories, data)
-}
-
-// set is the withPayload edit that writes each field given.
-func set(fields map[string]any) func(map[string]any) {
-	return func(payload map[string]any) {
-		for key, value := range fields {
-			payload[key] = value
-		}
-	}
-}
-
 // The workflow decides a review round inside a transaction and performs no I/O, so whether the
 // review's author may write to the repository is read before the fact is applied, and only for a
-// review whose state could decide a round: a comment costs no GitHub call. A read that fails is
-// returned, so the delivery is retried rather than applied with a permission nobody read, and a
-// daemon with no reader leaves every review's write access false.
+// review that decides a round and names its author: a comment costs no GitHub call, and neither
+// does a review the producer gave no author. A request for changes in GitHub's upper case is
+// looked up as the workflow counts it (PullRequestReview.Decides). A read that fails is returned,
+// so the delivery is retried rather than applied with a permission nobody read, and a daemon with
+// no reader leaves every review's write access false.
 func TestADecidingReviewCarriesItsAuthorsWriteAccessBeforeItIsApplied(t *testing.T) {
 	review := PullRequestReview{Repo: "acme/widgets", Number: 42, State: "approved", Author: "a-writer", CommitID: "head"}
-	asked := []string{}
+	var asked []string
 	answering := func(canWrite bool, err error) ConsumerSpec {
-		asked = nil
-		return ConsumerSpec{ReviewPermission: func(_ context.Context, repository ghrepo.Repository, login string) (bool, error) {
-			asked = append(asked, repository.String()+" "+login)
+		return ConsumerSpec{AckWait: time.Second, ReviewPermission: func(_ context.Context, review PullRequestReview) (bool, error) {
+			asked = append(asked, fmt.Sprintf("%s#%d %s", review.Repo, review.Number, review.Author))
 			return canWrite, err
 		}}
+	}
+	withAuthor := func(review PullRequestReview, author string) PullRequestReview {
+		review.Author = author
+		return review
 	}
 	for _, tc := range []struct {
 		name     string
 		fact     Fact
 		spec     ConsumerSpec
 		want     bool
-		wantErr  bool
 		wantAsks []string
 	}{
 		{name: "an approval by an account with write access", fact: review, spec: answering(true, nil), want: true,
-			wantAsks: []string{"acme/widgets a-writer"}},
+			wantAsks: []string{"acme/widgets#42 a-writer"}},
 		{name: "an approval by an account without it", fact: review, spec: answering(false, nil),
-			wantAsks: []string{"acme/widgets a-writer"}},
+			wantAsks: []string{"acme/widgets#42 a-writer"}},
 		{name: "a request for changes", fact: withState(review, "changes_requested"), spec: answering(true, nil), want: true,
-			wantAsks: []string{"acme/widgets a-writer"}},
+			wantAsks: []string{"acme/widgets#42 a-writer"}},
+		{name: "a request for changes in upper case", fact: withState(review, "CHANGES_REQUESTED"), spec: answering(true, nil), want: true,
+			wantAsks: []string{"acme/widgets#42 a-writer"}},
 		{name: "a comment, which decides nothing whoever writes it", fact: withState(review, "commented"), spec: answering(true, nil),
 			wantAsks: nil},
+		{name: "an approval with no author", fact: withAuthor(review, ""), spec: answering(true, nil), wantAsks: nil},
 		{name: "a daemon with no reader", fact: review, spec: ConsumerSpec{}, wantAsks: nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1109,6 +1107,58 @@ func TestADecidingReviewCarriesItsAuthorsWriteAccessBeforeItIsApplied(t *testing
 	other := PullRequestChecks{Repo: "acme/widgets", Number: 42}
 	if got, err := resolveReviewPermission(context.Background(), answering(true, nil), other); err != nil || !reflect.DeepEqual(got, Fact(other)) {
 		t.Fatalf("a fact that is not a review = %#v, %v; want it unchanged", got, err)
+	}
+}
+
+// A permission read GitHub answers with its rate limit names how long GitHub asks to be left alone
+// (RetryLater), and the review's delivery waits that long before it is read again, not the
+// consumer's nak delay: every review retried each NakDelay would keep calling an API that already
+// said no until its reset. A failure that names no wait is retried after NakDelay. Either way the
+// review is applied once its read passes.
+func TestARateLimitedPermissionReadWaitsTheTimeGitHubNames(t *testing.T) {
+	const rateLimitWait = 750 * time.Millisecond
+	for _, tc := range []struct {
+		name    string
+		failure error
+		limited bool
+	}{
+		{name: "a rate limit", failure: &RetryLater{After: rateLimitWait, Err: errors.New("GitHub answered 403: API rate limit exceeded")}, limited: true},
+		{name: "a 502", failure: errors.New("GitHub answered 502")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			createWrites(t, pool)
+			js, _ := testJetStream(t)
+			spec := consumerSpec(&lockedBuffer{})
+			var mu sync.Mutex
+			var asks []time.Time
+			spec.ReviewPermission = func(context.Context, PullRequestReview) (bool, error) {
+				mu.Lock()
+				defer mu.Unlock()
+				asks = append(asks, time.Now())
+				if len(asks) == 1 {
+					return false, tc.failure
+				}
+				return true, nil
+			}
+			stop := startConsume(t, js, spec, pool, writeHandler("applied", nil))
+			defer stop()
+
+			publish(t, js, "notifications.github.sjawhar.legion.pr.42.review", capturedGitHubEnvelope(t, "review.json"))
+			testwait.Eventually(t, "the review applied once its read passed", func() bool { return writeCount(t, pool) == 1 })
+			mu.Lock()
+			defer mu.Unlock()
+			if len(asks) != 2 {
+				t.Fatalf("the permission was read %d times, want twice", len(asks))
+			}
+			gap := asks[1].Sub(asks[0])
+			if tc.limited && gap < rateLimitWait {
+				t.Fatalf("the rate-limited read was made again after %s, want at least the %s GitHub named", gap, rateLimitWait)
+			}
+			if !tc.limited && (gap < spec.NakDelay || gap >= rateLimitWait) {
+				t.Fatalf("the failed read was made again after %s, want the %s nak delay", gap, spec.NakDelay)
+			}
+		})
 	}
 }
 

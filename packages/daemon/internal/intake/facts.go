@@ -4,6 +4,7 @@ package intake
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -141,14 +142,25 @@ type PullRequestReview struct {
 	Author      string
 	// AuthorCanWrite is whether Author has write access or higher to the repository, as GitHub's
 	// collaborator permission answers it (ConsumerSpec.ReviewPermission reads it before the fact is
-	// applied, since the workflow decides inside a transaction and performs no I/O). False for every
-	// review whose state decides nothing, which is never looked up, and for an author GitHub does
-	// not give write access.
+	// applied, since the workflow decides inside a transaction and performs no I/O). It is never
+	// looked up, and stays false, for a review that does not decide (Decides), one with no author,
+	// one on a pull request the daemon does not record, and one the review App submitted, which
+	// decides by its login alone (workflow's decidesRound). It is also false for an author GitHub
+	// does not give write access.
 	AuthorCanWrite bool
 	Body           string
 }
 
 func (PullRequestReview) isFact() {}
+
+// Decides says whether the review's state can decide a review round: an approval or a request for
+// changes, in whatever case its producer spelled it. A comment decides nothing, whoever writes it.
+// Intake reads the author's permission only for a review that decides, and the workflow lets only
+// such a review decide, so both ask this.
+func (r PullRequestReview) Decides() bool {
+	state := strings.ToLower(r.State)
+	return state == "approved" || state == "changes_requested"
+}
 
 // CheckRun is one latest-run identity in a checks settlement.
 type CheckRun = record.AttemptRun

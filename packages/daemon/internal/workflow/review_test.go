@@ -769,8 +769,9 @@ func TestARoundNoReviewDecidesTellsTheArchitect(t *testing.T) {
 // On a public repository any GitHub account can review a pull request, so a review decides a round
 // only when the review App submitted it or its author has write access or higher to the repository,
 // which intake reads from GitHub before the fact arrives (intake.PullRequestReview.AuthorCanWrite).
-// Anyone else's APPROVE or REQUEST_CHANGES decides nothing, as a COMMENT does, and so does one
-// whose permission could not be read: a round the reviewer completed undecided stays stuck, the
+// Anyone else's APPROVE or REQUEST_CHANGES decides nothing, as a COMMENT does, and so does one by
+// an author GitHub answers 404, or a 403 that is not its rate limit, for (intake retries every other
+// failed read before the review arrives): a round the reviewer completed undecided stays stuck, the
 // architect is told nothing more, and the review App's decision, submitted before the other review
 // but delivered after it, still ends the round. The review App's own reviews decide by its login:
 // GitHub gives its bot account no collaborator permission of its own.

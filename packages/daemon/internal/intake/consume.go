@@ -31,15 +31,29 @@ type ConsumerSpec struct {
 	AckWait      time.Duration
 	NakDelay     time.Duration
 	Logger       *slog.Logger
-	// ReviewPermission answers whether login has write access or higher to repository, which is
-	// what lets a review decide a review round (PullRequestReview.AuthorCanWrite). The workflow
-	// decides inside a transaction and performs no I/O, so the answer is read here, before the
-	// fact is applied, and only for a review whose state could decide one. An author GitHub gives
-	// no write access is false; a lookup that fails is an error, and the message is retried rather
-	// than applied with a permission nobody read. No resolver (a test, or a daemon without one)
-	// leaves every review's AuthorCanWrite false, so only the review App's own reviews decide.
-	ReviewPermission func(ctx context.Context, repository ghrepo.Repository, login string) (bool, error)
+	// ReviewPermission answers whether review's author has write access or higher to its
+	// repository, which is what lets a review decide a review round
+	// (PullRequestReview.AuthorCanWrite). The workflow decides inside a transaction and performs no
+	// I/O, so the answer is read here, before the fact is applied, only for a review that decides
+	// (PullRequestReview.Decides) and has an author, and within AckWait, so a read GitHub is slow to
+	// answer is cut and retried rather than outlasting the delivery it reads for. An author GitHub
+	// gives no write access is false; a lookup that fails is an error, and the message is retried,
+	// after NakDelay or the longer wait a RetryLater names, rather than applied with a permission
+	// nobody read. No resolver (a test, or a daemon without one) leaves every review's
+	// AuthorCanWrite false, so only the review App's own reviews decide.
+	ReviewPermission func(ctx context.Context, review PullRequestReview) (bool, error)
 }
+
+// RetryLater is an error ConsumerSpec.ReviewPermission returns when its read must not be made again
+// sooner than After, which GitHub names when it answers with its rate limit: the delivery is nacked
+// with a delay of After, or of NakDelay when that is longer.
+type RetryLater struct {
+	After time.Duration
+	Err   error
+}
+
+func (r *RetryLater) Error() string { return r.Err.Error() }
+func (r *RetryLater) Unwrap() error { return r.Err }
 
 // Consumers are this project's two durable JetStream consumers, created before intake runs so a
 // daemon whose stream is missing refuses to boot instead of booting with no intake.
@@ -188,8 +202,13 @@ func consumeMessage(ctx context.Context, message jetstream.Msg, spec ConsumerSpe
 	}
 	fact, err := resolveReviewPermission(ctx, spec, decoded.Fact)
 	if err != nil {
-		logMessage(spec.Logger, slog.LevelWarn, "read the reviewer's repository permission", message, "event_id", decoded.EventID, "error", err)
-		if nakErr := message.NakWithDelay(spec.NakDelay); nakErr != nil {
+		delay := spec.NakDelay
+		var later *RetryLater
+		if errors.As(err, &later) && later.After > delay {
+			delay = later.After
+		}
+		logMessage(spec.Logger, slog.LevelWarn, "read the reviewer's repository permission", message, "event_id", decoded.EventID, "retry_in", delay, "error", err)
+		if nakErr := message.NakWithDelay(delay); nakErr != nil {
 			logMessage(spec.Logger, slog.LevelError, "nak the reviewer's permission read", message, "event_id", decoded.EventID, "error", nakErr)
 		}
 		return
@@ -216,22 +235,17 @@ func consumeMessage(ctx context.Context, message jetstream.Msg, spec ConsumerSpe
 }
 
 // resolveReviewPermission fills a review's AuthorCanWrite from ConsumerSpec.ReviewPermission,
-// before the fact enters its transaction. Only a review whose state could decide a round - an
-// approval or a request for changes - is looked up: a comment decides nothing whoever writes it,
-// so it costs no GitHub call. Every other fact passes through untouched.
+// before the fact enters its transaction. Only a review that decides (PullRequestReview.Decides)
+// and names its author is looked up: a comment decides nothing whoever writes it, so it costs no
+// GitHub call. Every other fact passes through untouched.
 func resolveReviewPermission(ctx context.Context, spec ConsumerSpec, fact Fact) (Fact, error) {
 	review, ok := fact.(PullRequestReview)
-	if !ok || spec.ReviewPermission == nil || review.Author == "" {
+	if !ok || spec.ReviewPermission == nil || review.Author == "" || !review.Decides() {
 		return fact, nil
 	}
-	if review.State != "approved" && review.State != "changes_requested" {
-		return fact, nil
-	}
-	repository, err := ghrepo.Parse("the review's repository", review.Repo)
-	if err != nil {
-		return nil, err
-	}
-	canWrite, err := spec.ReviewPermission(ctx, repository, review.Author)
+	read, cancel := context.WithTimeout(ctx, spec.AckWait)
+	defer cancel()
+	canWrite, err := spec.ReviewPermission(read, review)
 	if err != nil {
 		return nil, err
 	}

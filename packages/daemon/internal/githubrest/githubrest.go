@@ -9,7 +9,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 )
@@ -122,7 +124,7 @@ func (c Client) call(ctx context.Context, method, url string, body []byte, into 
 	}
 	if response.StatusCode < 200 || response.StatusCode > 299 {
 		path, _, _ := strings.Cut(strings.TrimPrefix(url, c.API), "?")
-		return "", &Answer{Method: method, Path: path, Status: response.StatusCode, Body: strings.TrimSpace(string(answer)), RateLimited: RateLimited(response)}
+		return "", &Answer{Method: method, Path: path, Status: response.StatusCode, Body: strings.TrimSpace(string(answer)), RateLimited: RateLimited(response), RetryAfter: retryAfter(response, time.Now())}
 	}
 	if into == nil {
 		return nextPage(response.Header.Get("Link")), nil
@@ -135,6 +137,28 @@ func (c Client) call(ctx context.Context, method, url string, body []byte, into 
 func RateLimited(response *http.Response) bool {
 	return response.StatusCode == http.StatusTooManyRequests || response.StatusCode == http.StatusForbidden &&
 		(response.Header.Get("X-RateLimit-Remaining") == "0" || response.Header.Get("Retry-After") != "")
+}
+
+// retryAfter is how long GitHub asks a caller its rate limit answered to wait before calling again,
+// as its REST documentation's "Exceeding the rate limit" says: the retry-after header's seconds,
+// else, when x-ratelimit-remaining is 0, until the x-ratelimit-reset epoch second, else at least a
+// minute. A reset this host's clock already reads as past is waited the minute too. Zero for an
+// answer that is not a rate limit.
+func retryAfter(response *http.Response, now time.Time) time.Duration {
+	if !RateLimited(response) {
+		return 0
+	}
+	if seconds, err := strconv.Atoi(response.Header.Get("Retry-After")); err == nil && seconds > 0 {
+		return time.Duration(seconds) * time.Second
+	}
+	if response.Header.Get("X-RateLimit-Remaining") == "0" {
+		if reset, err := strconv.ParseInt(response.Header.Get("X-RateLimit-Reset"), 10, 64); err == nil {
+			if wait := time.Unix(reset, 0).Sub(now); wait > 0 {
+				return wait
+			}
+		}
+	}
+	return time.Minute
 }
 
 // nextPage is the URL a Link header names rel="next", "" when it names none.
@@ -150,13 +174,15 @@ func nextPage(link string) string {
 
 // Answer is a GitHub REST answer other than 2xx: the request's method and path (its query left
 // out), GitHub's HTTP status, the body GitHub sent with it, and whether it is a rate limit, which
-// every further call on the same token meets until the limit resets.
+// every further call on the same token meets until the limit resets, with how long GitHub asks the
+// caller to wait before its next call (retryAfter; zero when it is not one).
 type Answer struct {
 	Method      string
 	Path        string
 	Status      int
 	Body        string
 	RateLimited bool
+	RetryAfter  time.Duration
 }
 
 func (a *Answer) Error() string {
