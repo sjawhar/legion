@@ -1057,16 +1057,19 @@ func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, ac
 		state.mu.Unlock()
 		return write.tree, write.markdown, capture, authors, nil
 	}
-	// The room's state lock is held from the read to the authors it captures, so an author the
-	// update observer credits (creditContentChange, after the update is in the room) is captured
-	// only with that update's text. The room itself is read as of one moment under its document
-	// lock (liveTree), as a peer or service write holds that lock while it applies and a direct
-	// walk of the live tree takes none. The locks are taken in one order - the state lock, then the
-	// replica's, which a read only tries (readLive), then the document's - and nothing reverses
-	// it: the update observer releases the replica's lock before it takes the state lock
-	// (recordUpdateClass), and only a Yjs transaction's own function holds a document's lock, which
-	// takes neither. The read is taken inside the Apply that loads and holds the room, as docTree
-	// reads it: a room looked up again once that Apply returned can have been evicted in between.
+	// The room's state lock is held from taking the room as of one moment to the authors it
+	// captures, so an author the update observer credits (creditContentChange, after the update is
+	// in the room) is captured only with that update's text. The room is taken under its document
+	// lock (holdLive), as a peer or service write holds that lock while it applies and a direct
+	// walk of the live tree takes none: its replica brought up to date, which the capture holds
+	// until it has walked it, or a copy. The walk runs once the state lock is released, since every
+	// update observer takes that lock before ygo broadcasts its update (recordUpdateClass). The
+	// locks are taken in one order - the state lock, then the replica's, which the capture only
+	// tries, then the document's - and nothing reverses it: the update observer releases the
+	// replica's lock before it takes the state lock, and only a Yjs transaction's own function holds
+	// a document's lock, which takes neither. The room is taken inside the Apply that loads and
+	// holds it, as docTree reads it: a room looked up again once that Apply returned can have been
+	// evicted in between.
 	var tree *pmdoc.Node
 	var capture versionPending
 	var authors []model.Actor
@@ -1085,11 +1088,20 @@ func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, ac
 				s.afterReadWarm(room)
 			}
 			state := s.room(room)
-			state.mu.Lock()
-			defer state.mu.Unlock()
-			if tree, readErr = s.liveTree(room, live); readErr == nil {
-				capture, authors = captureAuthors(state, joinedLiveWrite(ctx, room), actor)
+			var doc *crdt.Doc
+			var release func()
+			func() {
+				state.mu.Lock()
+				defer state.mu.Unlock()
+				if doc, release, readErr = s.holdLive(room, live); readErr == nil {
+					capture, authors = captureAuthors(state, joinedLiveWrite(ctx, room), actor)
+				}
+			}()
+			if readErr != nil {
+				return
 			}
+			defer release()
+			tree, readErr = treeOf(doc)
 		})
 		if readErr != nil {
 			return nil, "", versionPending{}, nil, readErr

@@ -8,12 +8,8 @@ import (
 	"log/slog"
 	"net/http"
 	"path"
-	"runtime"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"time"
-	"weak"
 
 	"github.com/google/uuid"
 	gws "github.com/gorilla/websocket"
@@ -428,8 +424,8 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 		return err
 	}
 	// The room is still loading: ygo hands its document to no peer or caller until this hook
-	// returns (reearth/ygo v1.49.5, provider/websocket/server.go:1716-1804: loadRoom closes the
-	// room's ready barrier after it), so nothing writes the tree while this walks it.
+	// returns (sjawhar/ygo v1.50.1-sami.2, provider/websocket/server.go:1753-1842: loadRoom closes
+	// the room's ready barrier after it), so nothing writes the tree while this walks it.
 	markdown, err := renderDocument(doc)
 	var contentMarkdown *string
 	switch {
@@ -465,10 +461,7 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 			s.recordSuppressedCommit(repair.slot, update)
 			return
 		}
-		replica.lockForUpdate()
-		replica.catchUp(room, doc)
-		contentChanged := replica.updateChangesMarkdown(room)
-		replica.mu.Unlock()
+		contentChanged := replica.observe(room, doc)
 		s.recordUpdateClass(room, update, contentChanged, true)
 		if contentChanged {
 			s.creditContentChange(room, origin)
@@ -476,152 +469,6 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 		s.scheduleSettle(room)
 	})
 	return nil
-}
-
-// renderedReplica is the copy of a room's document its update observer renders and the room's
-// reads walk (readLive). ygo fires the observer after the transaction has released the document's
-// lock (reearth/ygo v1.49.5, crdt/doc.go:638-642), and a walk of the live tree takes no lock
-// (crdt/yxml.go:195-211), so a render or read of the live tree can walk it while another
-// transaction writes it: a torn walk reads a healthy document as one outside the schema, logs a
-// false WARN and counts the update as a content change. Only a holder of mu writes or walks the
-// replica, and it brings the replica up to date under the live document's lock first, so each walk
-// is of the room as of one moment.
-//
-// The update the observer is handed cannot stand in for that: observers of two transactions run
-// concurrently and in either order, and each update carries the room's whole delete set, so the
-// later update applied first deletes what the earlier one replaced while its own insertions wait
-// for the earlier one's - a tree no transaction left. Copying the whole room for every update would
-// encode and decode the whole document per keystroke. The room's first update copies it once, so a
-// room that is only read holds no replica.
-type renderedReplica struct {
-	mu sync.Mutex
-	// waiting counts the update observers waiting for mu (lockForUpdate).
-	waiting atomic.Int32
-	doc     *crdt.Doc
-	// markdown is the room's rendered markdown when the update observer last saw it change, or at
-	// the room's load before any update has; nil while the document is outside the schema.
-	markdown *string
-}
-
-// lockForUpdate takes mu for the update observer. A read only tries mu, and takes it only while
-// no observer waits for it, so the observer waits at most for the one read already walking the
-// replica: a read that took mu from under a waiting observer would make it wait for a second walk.
-func (r *renderedReplica) lockForUpdate() {
-	r.waiting.Add(1)
-	r.mu.Lock()
-	r.waiting.Add(-1)
-}
-
-// keepReplica makes the replica live's update observer keeps, starting from markdown, live's
-// rendering at its load, and lists it for live's reads (readLive) while live is resident. The
-// listing is keyed by live itself, weakly, and goes once live is collected: a reader holding an
-// evicted instance of the room reaches that instance's replica or none, never its successor's, and
-// an evicted room's replica, a whole copy of its document, goes with it.
-func (s *Service) keepReplica(live *crdt.Doc, markdown *string) *renderedReplica {
-	replica := &renderedReplica{markdown: markdown}
-	key := weak.Make(live)
-	s.replicas.Store(key, replica)
-	runtime.AddCleanup(live, func(key weak.Pointer[crdt.Doc]) { s.replicas.Delete(key) }, key)
-	return replica
-}
-
-// readLive runs read against live, a room's resident document, as of one moment: live's replica
-// brought up to date under live's document lock (renderedReplica), else a copy taken under that
-// lock (snapshotDocument) - while live has no replica, since the room has had no update since it
-// loaded, and whenever another holds the replica's lock or the update observer waits for it. A
-// read never waits for that lock: the update observer takes it for each peer update before ygo
-// broadcasts the update to the room's other browsers, so a read queued behind it would stall their
-// keystrokes for its walk, and every read queued behind that one too. It opens no transaction on
-// live, since ygo hands the room's
-// persistence an update for every transaction it commits, even one that only reads. The caller
-// must not hold live's document lock - be inside a Yjs transaction on it - since the catch-up and
-// the copy encode under that lock, and read must not keep doc past its return.
-func (s *Service) readLive(room string, live *crdt.Doc, read func(doc *crdt.Doc)) error {
-	if live == nil {
-		return errDocUnloaded
-	}
-	if listed, ok := s.replicas.Load(weak.Make(live)); ok && listed.(*renderedReplica).read(room, live, read) {
-		return nil
-	}
-	copied, err := snapshotDocument(live)
-	if err != nil {
-		return err
-	}
-	read(copied)
-	return nil
-}
-
-// liveTree is the tree of live, the document resident under room, as of one moment (readLive).
-func (s *Service) liveTree(room string, live *crdt.Doc) (*pmdoc.Node, error) {
-	var tree *pmdoc.Node
-	var treeErr error
-	if err := s.readLive(room, live, func(doc *crdt.Doc) { tree, treeErr = treeOf(doc) }); err != nil {
-		return nil, err
-	}
-	return tree, treeErr
-}
-
-// read runs read against the replica brought up to date with live, holding mu, and reports
-// whether it did: a replica another holds mu on (the update observer, or another read) or the
-// observer waits for (lockForUpdate), one the room's first update has not made yet, or one whose
-// copy failed, has nothing to read.
-func (r *renderedReplica) read(room string, live *crdt.Doc, read func(doc *crdt.Doc)) bool {
-	if r.waiting.Load() > 0 || !r.mu.TryLock() {
-		return false
-	}
-	defer r.mu.Unlock()
-	if r.doc == nil {
-		return false
-	}
-	r.catchUp(room, live)
-	if r.doc == nil {
-		return false
-	}
-	read(r.doc)
-	return true
-}
-
-// catchUp brings the replica up to date with live: what live gained since the replica's state
-// vector, encoded under live's lock, as forkLive brings a transaction's fork up to date. Without a
-// replica - the room's first update, or one after an update the replica could not take, which
-// leaves it in an unknown state - it copies live whole; a copy that fails leaves no replica, which
-// the next update copies again.
-func (r *renderedReplica) catchUp(room string, live *crdt.Doc) {
-	if r.doc != nil {
-		err := crdt.ApplyUpdateV1(r.doc, crdt.EncodeStateAsUpdateV1(live, r.doc.StateVector()), nil)
-		if err == nil {
-			return
-		}
-		slog.Error("dispatch: bring the document's rendered copy up to date; copying it again", "room", room, "error", err)
-	}
-	copied, err := snapshotDocument(live)
-	if err != nil {
-		slog.Error("dispatch: copy updated document for its update observer", "room", room, "error", err)
-	}
-	r.doc = copied
-}
-
-// updateChangesMarkdown reports whether the room's latest update changed its rendered markdown,
-// the only document content a version stores, and keeps the new rendering. It renders the
-// replica, the room's document as of that update, so its caller holds mu. An update that changes
-// only what no rendering carries - an anchor mark, or a heading id or list item label the browser
-// editor derives - is no content change.
-func (r *renderedReplica) updateChangesMarkdown(room string) bool {
-	markdown, err := renderDocument(r.doc)
-	if err != nil {
-		r.markdown = nil
-		if errors.Is(err, ErrDocOutsideSchema) {
-			slog.Warn("dispatch: updated document outside Proof schema", "room", room, "error", err)
-		} else {
-			slog.Error("dispatch: read updated document", "room", room, "error", err)
-		}
-		return true
-	}
-	if r.markdown != nil && *r.markdown == markdown {
-		return false
-	}
-	r.markdown = &markdown
-	return true
 }
 
 // creditContentChange credits an observed content change to its authors. A service mutation
