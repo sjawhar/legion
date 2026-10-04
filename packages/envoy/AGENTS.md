@@ -508,6 +508,34 @@ publish it runs inside, and the publish, its request and the document's writer s
 (`TestAPublishSurvivesItsRoomsWorkerRetiringUnderIt`, `TestAWriteSurvivesItsIssueClosingAsItPublishes`).
 A publish whose room `CloseRoom` removed has no peer left to broadcast to and returns.
 
+The service keeps a document's state (`docs.roomState`, `docs/roomstate.go`: its connected
+browsers, writer slot, settlement timer, pending authors) only while ygo holds
+a room for it, loaded or loading, or something on the document still holds the state; `unusedLocked`
+is the one list of those holders. Every lookup takes a state through `lockState` or
+`lockExistingState`, which never hand out a forgotten state, and ends with `unlockState`, which
+forgets a state that holds nothing once its room has gone, so whatever ends last - ygo's
+`OnUnloadDocument` when the room goes, or a holder's own end - releases it. The durable row that
+says a document's settlement is owed (`doc_settlements_pending`, migration 0063) also carries the
+authors that settlement needs (0070): a browser update records them in the update's own
+transaction, and a joined write records them in the transaction that commits its content, which
+also takes out the authors any version it wrote credited, as the room does once it commits. A
+browser update's credit names only the peers connected for it - never the room's whole accumulated
+`state.pending` - and carries the room's `creditVersion` as of that moment (`creditContentChange`'s
+returned sequence, `settlementCredit.CreditSeq`); a service repair is credited to no one.
+A version's release raises the row's `released_through` watermark to its own captured sequence
+and takes its authors out of the row; `upsertSettlementCredit` discards, rather than merges, a
+later credit whose own sequence is at or before that watermark, since everything in it was
+already visible to the release. `Ledger.commit` locks (`state.mu`) every artifact its own versions
+name from before the transaction commits through that version's in-memory release
+(`commitVersionLocked`), so no `creditContentChange`/`captureAuthors` call for that artifact can
+interleave between the durable release and the room forgetting the author (LEGION-513). Closing an
+issue writes every unsettled state into that row before it releases the state, so the reopened
+document's settlement credits the same version, ask and event authors even after a room release or
+restart. The document socket's cap of 1,000 rooms (`maxLiveRooms`, `canOpenRoom`) counts ygo's live
+rooms, never documents touched since the process started (LEGION-513). A room an `Apply` opened
+with no peer is idle-evicted only by a ygo whose `Apply` stamps the empty room idle (LEGION-484).
+`PgVersioned`'s per-room locks likewise live only while a caller holds or waits for one.
+
 The room's update observer (`updateChangesMarkdown`) renders a replica of the room, the one its
 reads walk, not the live tree, since ygo fires it after the transaction has
 released the document's lock and another write can be integrating meanwhile (`renderedReplica`). It

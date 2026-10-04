@@ -23,8 +23,8 @@ import (
 // holder releases the state through its own unlock, and ygo's OnUnloadDocument releases it when
 // the room is the last thing to go (releaseUnloadedRoom).
 //
-// What a release drops - the unrecorded marks' first sightings, the closed flag and rendered
-// markdown a load re-reads - is what a restart drops too.
+// What a release drops - the unrecorded marks' first sightings and the closed flag - is what a
+// restart drops too.
 type roomState struct {
 	mu        sync.Mutex
 	connected map[uint64]model.Actor
@@ -43,9 +43,6 @@ type roomState struct {
 	unsettled       bool
 	creditVersion   uint64
 	pendingVersions map[int]versionPending
-	// contentMarkdown is the live document's rendered markdown when the room's update observer
-	// last saw it change, nil until the room loads.
-	contentMarkdown *string
 	updateClasses   []documentUpdateClass
 	pendingUpdates  int
 	settle          *time.Timer

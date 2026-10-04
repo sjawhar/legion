@@ -4,14 +4,19 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"runtime"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/reearth/ygo/crdt"
 
+	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
@@ -375,8 +380,9 @@ func TestABrowserEditQueuedBehindAnOpenVersionIsNotCreditedAgainAfterAReopen(t *
 	service.settle = time.Hour // no settlement runs between the edits
 	ctx := context.Background()
 	seedServiceText(t, service, artifactID, "# Decision\n\nContext.\n")
+	httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
+	t.Cleanup(httpServer.Close)
 
-	carol := model.Actor{Kind: "session", ID: "carol-session"}
 	agent := model.Actor{Kind: "session", ID: "agent-session"}
 	delta := model.Actor{Kind: "session", ID: "delta-session"}
 
@@ -395,10 +401,10 @@ func TestABrowserEditQueuedBehindAnOpenVersionIsNotCreditedAgainAfterAReopen(t *
 
 	// Carol, a connected browser, edits while the agent's transaction still holds the document's
 	// advisory lock, so her durable append - which the room's persistence worker drives
-	// asynchronously - queues behind it.
-	service.addConnection(artifactID, 1, carol)
-	replaceTextAsConnectedPeer(t, service, artifactID, "# Decision\n\nContext.\n\nCarol's paragraph.\n")
-	service.removeConnection(artifactID, 1)
+	// asynchronously - queues behind it. She stays connected until the issue's close ends her
+	// connection, so no last-browser settlement runs before delta's version.
+	carol := connectBrowser(t, httpServer.URL, artifactID, "carol")
+	editAsBrowser(t, service, artifactID, carol, "# Decision\n\nContext.\n\nCarol's paragraph.\n")
 	if !service.hasDurableAppend(artifactID) {
 		t.Fatal("carol's durable append finished before the agent's transaction released the document lock")
 	}
@@ -426,34 +432,60 @@ func TestABrowserEditQueuedBehindAnOpenVersionIsNotCreditedAgainAfterAReopen(t *
 	}
 }
 
-// replaceTextAsConnectedPeer applies a content replacement the way a browser's own edit does: via
-// ygo's Apply directly, with no service origin registered, so creditContentChange's browser
-// (sole/ambiguous) branch credits it from state.connected - the room path a real websocket peer's
-// edit takes.
-func replaceTextAsConnectedPeer(t *testing.T, service *Service, artifactID, markdown string) {
+// connectBrowser connects login's browser to artifactID's room as the dashboard does - a websocket
+// at the schema version it presents - and returns once the browser holds the room's document. The
+// browser stays connected until the caller closes it or the room closes it. A room's last browser
+// leaving settles what the room is owed at once (settleLastPeer), so a test that needs credit left
+// pending keeps a browser connected until the issue's close, which stops that settlement first.
+func connectBrowser(t *testing.T, serverURL, artifactID, login string) *docstest.Peer {
 	t.Helper()
-	var applyErr error
-	if err := service.srv.Apply(context.Background(), artifactID, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
-		fragment := doc.GetXmlFragment(fragmentName)
-		current, err := treeOf(doc)
-		if err != nil {
-			applyErr = err
-			return
+	url := "ws" + strings.TrimPrefix(serverURL, "http") + "/ws/doc/" + artifactID +
+		"?schema_version=" + strconv.Itoa(pmdoc.SchemaVersion())
+	browser := docstest.Dial(t, url, http.Header{"X-Dispatch-User": []string{login}}, artifactID, crdt.New())
+	if err := browser.AskForDocument(); err != nil {
+		t.Fatalf("ask the room for its document: %v", err)
+	}
+	<-browser.Answers
+	return browser
+}
+
+// editAsBrowser replaces the document's text from browser's own copy and sends the room the update,
+// as a keystroke does: ygo applies it to the room in its own transaction, under the document's
+// lock - the path every browser edit takes. It returns once the room has recorded the edit's
+// durable append (creditContentChange and recordUpdateClass run in the update observer ygo calls
+// as it applies the update), whether or not that append has reached storage.
+func editAsBrowser(t *testing.T, service *Service, artifactID string, browser *docstest.Peer, markdown string) {
+	t.Helper()
+	before := service.room(artifactID).durableAppends.Load()
+	current, err := treeOf(browser.Doc)
+	if err != nil {
+		t.Fatalf("read the browser's copy of the document: %v", err)
+	}
+	target, err := parseReplacing(current, markdown)
+	if err != nil {
+		t.Fatalf("parse the browser's edit: %v", err)
+	}
+	fragment := browser.Doc.GetXmlFragment(fragmentName)
+	if _, err := browser.Send(func(txn *crdt.Transaction) {
+		if err := pmdoc.Update(txn, fragment, target); err != nil {
+			t.Errorf("apply the browser's edit: %v", err)
 		}
-		target, err := parseReplacing(current, markdown)
-		if err != nil {
-			applyErr = err
-			return
-		}
-		transact(func(transaction *crdt.Transaction) {
-			applyErr = pmdoc.Update(transaction, fragment, target)
-		})
 	}); err != nil {
-		t.Fatalf("apply connected-peer edit: %v", err)
+		t.Fatalf("send the browser's edit: %v", err)
 	}
-	if applyErr != nil {
-		t.Fatalf("apply connected-peer edit: %v", applyErr)
+	waitFor(t, 5*time.Second, "the room to record the browser's durable append", func() bool {
+		return service.room(artifactID).durableAppends.Load() > before
+	})
+}
+
+// connectedBrowsers is how many browsers the room has registered (state.connected).
+func connectedBrowsers(service *Service, artifactID string) int {
+	state := service.lockExistingState(artifactID)
+	if state == nil {
+		return 0
 	}
+	defer service.unlockState(artifactID, state)
+	return len(state.connected)
 }
 
 // Two connected peers' edits around an open version are each credited once: carol's edit, which the
@@ -466,15 +498,15 @@ func TestATwoPeerBrowserEditQueuedBehindAnOpenVersionIsNotCreditedAgainAfterAReo
 	service.settle = time.Hour // no settlement runs between the edits
 	ctx := context.Background()
 	seedServiceText(t, service, artifactID, "# Decision\n\nContext.\n")
+	httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
+	t.Cleanup(httpServer.Close)
 
-	carol := model.Actor{Kind: "session", ID: "carol-session"}
-	dave := model.Actor{Kind: "session", ID: "dave-session"}
+	dave := model.Actor{Kind: "user", ID: "dave"}
 	agent := model.Actor{Kind: "session", ID: "agent-session"}
 	delta := model.Actor{Kind: "session", ID: "delta-session"}
 
-	service.addConnection(artifactID, 1, carol)
-	replaceTextAsConnectedPeer(t, service, artifactID, "# Decision\n\nContext.\n\nCarol's paragraph.\n")
-	service.removeConnection(artifactID, 1)
+	carol := connectBrowser(t, httpServer.URL, artifactID, "carol")
+	editAsBrowser(t, service, artifactID, carol, "# Decision\n\nContext.\n\nCarol's paragraph.\n")
 
 	// Hold the document's advisory lock for the whole agent transaction, as ApplyOps does for a
 	// joined write, so a connected peer's durable append queues behind it.
@@ -496,10 +528,16 @@ func TestATwoPeerBrowserEditQueuedBehindAnOpenVersionIsNotCreditedAgainAfterAReo
 		t.Fatalf("agent's version authors = %+v, want at least the agent and carol", authors)
 	}
 
-	// Dave, now the sole connected peer, edits while the agent's transaction still holds the
-	// document's advisory lock, so his durable append queues behind it too.
-	service.addConnection(artifactID, 2, dave)
-	replaceTextAsConnectedPeer(t, service, artifactID, "# Decision\n\nContext.\n\nCarol's paragraph.\n\nDave's paragraph.\n")
+	// Dave connects, then carol leaves, so dave is the sole connected browser for his edit and
+	// carol's leaving is not the room's last (which would settle at once, settleLastPeer). Dave
+	// edits while the agent's transaction still holds the document's advisory lock, so his durable
+	// append queues behind it too; he stays connected until the issue's close ends his connection.
+	daveBrowser := connectBrowser(t, httpServer.URL, artifactID, "dave")
+	carol.Close()
+	waitFor(t, 5*time.Second, "the room to forget carol's connection", func() bool {
+		return connectedBrowsers(service, artifactID) == 1
+	})
+	editAsBrowser(t, service, artifactID, daveBrowser, "# Decision\n\nContext.\n\nCarol's paragraph.\n\nDave's paragraph.\n")
 	if !service.hasDurableAppend(artifactID) {
 		t.Fatal("dave's durable append finished before the agent's transaction released the document lock")
 	}
@@ -510,7 +548,6 @@ func TestATwoPeerBrowserEditQueuedBehindAnOpenVersionIsNotCreditedAgainAfterAReo
 
 	// Carol's and dave's queued appends can now take the lock the commit released.
 	waitForPersistedUpdates(t, service, artifactID, 3)
-	service.removeConnection(artifactID, 2)
 
 	closeTestIssue(t, service)
 	reopenTestIssue(t, service)
@@ -518,8 +555,9 @@ func TestATwoPeerBrowserEditQueuedBehindAnOpenVersionIsNotCreditedAgainAfterAReo
 
 	// Dave's own edit was never captured by any version before the close, so delta's version
 	// legitimately credits him too; the bug under test is carol riding back in, not dave's own
-	// still-pending credit.
-	want := []model.Actor{dave, delta}
+	// still-pending credit. The version's authors are sorted by actor key (actorSlice), so the
+	// session delta sorts ahead of the user dave.
+	want := []model.Actor{delta, dave}
 	if authors := latestVersionAuthors(t, service, artifactID); !reflect.DeepEqual(authors, want) {
 		t.Fatalf("the reopened document's next version credits %+v, want %+v (dave's own pending credit, not carol's)", authors, want)
 	}

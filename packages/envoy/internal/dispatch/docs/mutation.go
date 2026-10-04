@@ -1058,15 +1058,6 @@ func (s *Service) recordLastActor(room string, actor model.Actor) {
 	s.unlockState(room, state)
 }
 
-// captureAuthorsLocked is captureAuthors under the room's state lock, held for just that call: the
-// two callers of captureLiveTextAndAuthors that read a fork already caught up with the room both
-// need the lock for nothing else, so this is their one shared, panic-safe way to take it.
-func (s *Service) captureAuthorsLocked(state *roomState, write *liveWrite, actor *model.Actor) (versionPending, []model.Actor) {
-	state.mu.Lock()
-	defer state.mu.Unlock()
-	return captureAuthors(state, write, actor)
-}
-
 // captureLiveTextAndAuthors is the tree a version records and whom it credits. joinRead brings
 // the calling transaction's fork up to date with the room, which is where a browser change made
 // while the transaction's write was in flight merges with it - and where a write whose text that
@@ -1081,30 +1072,26 @@ func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, ac
 	}
 	if write := joinedLiveWrite(ctx, room); fork != nil && write != nil && write.tree != nil && write.fork == fork {
 		state := s.lockState(room)
+		capture, authors := captureAuthors(state, write, actor)
 		s.unlockState(room, state)
-		capture, authors := s.captureAuthorsLocked(state, write, actor)
 		return write.tree, write.markdown, capture, authors, nil
 	}
-	// The room's state lock is held from taking the room as of one moment to the authors it
-	// captures, so an author the update observer credits (creditContentChange, after the update is
-	// in the room) is captured only with that update's text. The room is taken under its document
-	// lock (holdLive), as a peer or service write holds that lock while it applies and a direct
-	// walk of the live tree takes none: its replica brought up to date, which the capture holds
-	// until it has walked it, or a copy. The walk runs once the state lock is released, since every
-	// update observer takes that lock before ygo broadcasts its update (recordUpdateClass). The
-	// locks are taken in one order - the state lock, then the replica's, which the capture only
-	// tries, then the document's - and nothing reverses it: the update observer releases the
-	// replica's lock before it takes the state lock, and only a Yjs transaction's own function holds
-	// a document's lock, which takes neither. The room is taken inside the Apply that loads and
-	// holds it, as docTree reads it: a room looked up again once that Apply returned can have been
-	// evicted in between.
+	// Each branch below takes the room's state lock only for captureAuthors's own read of it
+	// (state.pending, state.gen, state.creditVersion), then releases it before the tree read that
+	// follows: unlockState's releaseIfUnusedLocked cannot forget the state in that gap, since
+	// either a joined live write is still open here (state.liveWriter is set, so unusedLocked is
+	// false - the fork != nil branches below only run when joinRead found one) or ygo itself still
+	// holds the room for the Apply this read runs inside (releaseIfUnusedLocked's own first check).
+	// The room is taken under its document lock (holdLive) in the fork == nil branch, as a peer or
+	// service write holds that lock while it applies and a direct walk of the live tree takes none:
+	// its replica brought up to date, which the capture holds until it has walked it, or a copy.
 	var tree *pmdoc.Node
 	var capture versionPending
 	var authors []model.Actor
 	if fork != nil {
 		state := s.lockState(room)
+		capture, authors = captureAuthors(state, joinedLiveWrite(ctx, room), actor)
 		s.unlockState(room, state)
-		capture, authors = s.captureAuthorsLocked(state, joinedLiveWrite(ctx, room), actor)
 		if tree, err = treeOf(fork); err != nil {
 			return nil, "", versionPending{}, nil, err
 		}
@@ -1119,12 +1106,12 @@ func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, ac
 			var release func()
 			doc, release, readErr = s.holdLive(room, live)
 			if readErr != nil {
-				state.mu.Unlock()
+				s.unlockState(room, state)
 				return
 			}
 			defer release()
 			func() {
-				defer state.mu.Unlock()
+				defer s.unlockState(room, state)
 				capture, authors = captureAuthors(state, joinedLiveWrite(ctx, room), actor)
 			}()
 			tree, readErr = treeOf(doc)
