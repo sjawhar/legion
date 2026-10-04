@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { type FakeSession, openAgents, setLiveSessions, shownAgentRows } from "./agents";
+import { agentRow, type FakeSession, openAgents, setLiveSessions, shownAgentRows } from "./agents";
 import { createAsk, createComment, createIssue, createProject } from "./api";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
@@ -139,6 +139,64 @@ test("the query survives a reload through the page's address, and Control+K focu
     await page.keyboard.press("Control+k");
     await expect(page.getByRole("searchbox", { name: "Search agents" })).toBeFocused();
     await expect(page.getByRole("dialog", { name: "Search" })).toHaveCount(0);
+  } finally {
+    await alice.close();
+  }
+});
+
+// Unseen for 45 minutes, so it sits under the closed `Inactive` fold; the time is this spec's own,
+// evaluated when the worker reaches it.
+const stale: FakeSession = {
+  capabilities: ["aside"],
+  dir: "/workspaces/ledger",
+  last_seen: Date.now() - 45 * 60_000,
+  machine_id: "ledger-host",
+  roles: [],
+  session_id: "ledger-session",
+  title: "Ledger reconciler",
+};
+// Live but never heard from in Dispatch, so it sits under the closed `No Dispatch activity` fold.
+const silent: FakeSession = {
+  capabilities: ["aside"],
+  dir: "/workspaces/quiet",
+  machine_id: "quiet-host",
+  roles: [],
+  session_id: "quiet-session",
+  title: "Quiet watcher",
+};
+
+test("a search shows a matching session that only a closed fold holds, and clearing it folds the session away again", async ({
+  browser,
+}) => {
+  await seed();
+  await setLiveSessions([scrum, release, archivist, stale, silent]);
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await openAgents(page);
+    const titles = shownAgentRows(page).locator("h2");
+    const inactive = page.getByRole("button", { name: /^Inactive \(1/ });
+    const quiet = page.getByRole("button", { name: /^No Dispatch activity \(1/ });
+    // Both folds start closed, their sessions mounted and hidden.
+    await expect(inactive).toHaveAttribute("aria-expanded", "false");
+    await expect(agentRow(page, stale.session_id)).toHaveCount(1);
+    await expect(agentRow(page, stale.session_id)).toBeHidden();
+    await expect(titles).toHaveText(["Scrum planning", "Release notes", "Archivist"]);
+
+    const search = page.getByRole("searchbox", { name: "Search agents" });
+    await search.fill("ledger");
+    await expect(titles).toHaveText(["Ledger reconciler"]);
+    await expect(inactive).toHaveAttribute("aria-expanded", "true");
+    await search.fill("quiet-host");
+    await expect(titles).toHaveText(["Quiet watcher"]);
+
+    // Clearing hands the folds back closed, as the reader left them.
+    await search.fill("");
+    await expect(titles).toHaveText(["Scrum planning", "Release notes", "Archivist"]);
+    await expect(inactive).toHaveAttribute("aria-expanded", "false");
+    await expect(quiet).toHaveAttribute("aria-expanded", "false");
+    await expect(agentRow(page, stale.session_id)).toBeHidden();
   } finally {
     await alice.close();
   }

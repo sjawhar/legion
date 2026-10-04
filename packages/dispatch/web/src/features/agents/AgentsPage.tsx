@@ -1236,9 +1236,26 @@ export function AgentsPage(): ReactNode {
       return updated;
     });
   };
-  // Each fold is closed on every load and open only while this page stays mounted.
+  // Each fold is closed on every load and open only while this page stays mounted. A search opens
+  // both, since searching is how a reader finds a session they cannot see: while a query is
+  // present the folds read `searchFolds`, reset to open each time a search starts, and clearing
+  // the query hands them back to the reader's own state, untouched by the search.
   const [quietOpen, setQuietOpen] = useState(false);
   const [inactiveOpen, setInactiveOpen] = useState(false);
+  const searching = search.trim() !== "";
+  const [searchFolds, setSearchFolds] = useState({ inactive: true, quiet: true });
+  const [wasSearching, setWasSearching] = useState(searching);
+  if (searching !== wasSearching) {
+    setWasSearching(searching);
+    if (searching) setSearchFolds({ inactive: true, quiet: true });
+  }
+  const quietShown = searching ? searchFolds.quiet : quietOpen;
+  const inactiveShown = searching ? searchFolds.inactive : inactiveOpen;
+  const toggleFold = (fold: "inactive" | "quiet") => {
+    if (searching) setSearchFolds((open) => ({ ...open, [fold]: !open[fold] }));
+    else if (fold === "quiet") setQuietOpen((open) => !open);
+    else setInactiveOpen((open) => !open);
+  };
   const listRef = useRef<HTMLElement>(null);
   useAgentsKeymap(listRef, searchInputRef);
   // A layout effect, so the frame the move paints already has focus where the row went.
@@ -1285,24 +1302,24 @@ export function AgentsPage(): ReactNode {
     ...active.map(rowIn("active", true)),
     <FoldToggle
       agents={matchingQuiet}
-      expanded={quietOpen}
+      expanded={quietShown}
       fold="quiet"
       key="fold:quiet"
       label="No Dispatch activity"
-      onToggle={() => setQuietOpen((open) => !open)}
+      onToggle={() => toggleFold("quiet")}
       selected={selected}
     />,
-    ...quiet.map(rowIn("quiet", quietOpen)),
+    ...quiet.map(rowIn("quiet", quietShown)),
     <FoldToggle
       agents={matchingInactive}
-      expanded={inactiveOpen}
+      expanded={inactiveShown}
       fold="inactive"
       key="fold:inactive"
       label="Inactive"
-      onToggle={() => setInactiveOpen((open) => !open)}
+      onToggle={() => toggleFold("inactive")}
       selected={selected}
     />,
-    ...inactive.map(rowIn("inactive", inactiveOpen)),
+    ...inactive.map(rowIn("inactive", inactiveShown)),
   ];
 
   if (isPending) return <LoadingSkeleton label="Loading agents" />;
