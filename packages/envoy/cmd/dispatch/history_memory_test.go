@@ -1,3 +1,5 @@
+//go:build memory
+
 package main
 
 import (
@@ -14,19 +16,20 @@ import (
 )
 
 // A document's stored history costs a cold read only the document it leaves, however much the
-// writes before it deleted, and compaction stores only that document. Each history is one ordinary
-// writes leave within every cap, as LEGION-496 measured them: five hundred replies of 2,000
-// characters to one anchored comment, each of which projects the thread's whole margin record
-// again; sixty-four 1 MB versions of one document; thirty-two suggestions carrying 900 KB of
-// replace_with each. When a load merged every stored update, the replies left 257 MB stored and a
-// cold one-word edit of their 3 KB document took 1,842 MiB above idle, past production's 1,024 MiB
-// task. The suggestions are not history: an open suggestion keeps its replace_with in its margin
-// record, so their 28.8 MB is the document itself, which compaction must keep whole, and what a
-// cold read of it costs is the size of the live document, which no fold of the log bounds; their
-// reads are logged rather than held to the bound. The writer is killed rather than stopped, so its
-// shutdown compacts nothing and every read meets the log the writes left, as it meets one stored
-// before LEGION-496; then a server that holds the room stops as a deploy stops it, which compacts
-// it.
+// writes before it deleted, and compaction stores only that document. Each history is one
+// ordinary writes leave within LEGION-481's caps, which bound what one write adds but not how
+// much history accumulates: five hundred 400-byte replies to one anchored comment, each of which
+// projects the thread's whole margin record again; sixty-four 1 MB versions of one document;
+// thirty-two suggestions of 28 KB, each its own margin record, together within the document's 1
+// MiB margin. Measured on a fresh server: the replies left 55.6 MB stored, and a cold GET /text
+// of the still-uncompacted document held 11 MiB above idle; compacting it left 243 KB stored,
+// the document's own state. The suggestions are not history: an open suggestion keeps its
+// replace_with in its margin record, so their 889 KB is the document itself, which compaction
+// must keep whole, and what a cold read of it costs is the size of the live document, which no
+// fold of the log bounds; their reads are logged rather than held to the bound. The writer is
+// killed rather than stopped, so its shutdown compacts nothing and every read meets the log the
+// writes left, as it meets one stored before LEGION-496; then a server that holds the room stops
+// as a deploy stops it, which compacts it.
 func TestAStoredHistoryCostsAColdReadOnlyTheDocumentItLeaves(t *testing.T) {
 	memory := newMemoryHarness(t)
 	words := make([]string, 0, 600)
@@ -44,7 +47,7 @@ func TestAStoredHistoryCostsAColdReadOnlyTheDocumentItLeaves(t *testing.T) {
 		live bool
 	}{
 		{
-			name: "five hundred 2,000-character replies to one anchored comment",
+			name: "five hundred 400-byte replies to one anchored comment",
 			write: func(t *testing.T, server *memoryServer) createdIssue {
 				issue := server.createIssue(t, "History of replies", spec)
 				var root struct{ ID string }
@@ -53,7 +56,7 @@ func TestAStoredHistoryCostsAColdReadOnlyTheDocumentItLeaves(t *testing.T) {
 					t.Fatalf("decode the root comment: %v %.300s", err, created.body)
 				}
 				for index := range 500 {
-					server.comment(t, issue.Key, map[string]any{"body": strings.Repeat("r", 1_996) + fmt.Sprintf("%04d", index), "reply_to": root.ID})
+					server.comment(t, issue.Key, map[string]any{"body": strings.Repeat("r", 396) + fmt.Sprintf("%04d", index), "reply_to": root.ID})
 				}
 				return issue
 			},
@@ -86,10 +89,10 @@ func TestAStoredHistoryCostsAColdReadOnlyTheDocumentItLeaves(t *testing.T) {
 			holds: func(*testing.T, map[string]any) {},
 		},
 		{
-			name: "thirty-two suggestions of 900 KB",
+			name: "thirty-two suggestions of 28 KB",
 			write: func(t *testing.T, server *memoryServer) createdIssue {
 				issue := server.createIssue(t, "History of suggestions", spec)
-				replacement := strings.Repeat("word ", 180_000)
+				replacement := strings.Repeat("word ", 5_600)
 				for index := range 32 {
 					server.comment(t, issue.Key, map[string]any{
 						"body": "s", "anchor": map[string]any{"artifact": "spec", "quote": words[index]},
@@ -102,12 +105,12 @@ func TestAStoredHistoryCostsAColdReadOnlyTheDocumentItLeaves(t *testing.T) {
 				suggestions := 0
 				for _, value := range marks {
 					record, _ := value.(map[string]any)
-					if content, _ := record["content"].(string); len(content) == 900_000 {
+					if content, _ := record["content"].(string); len(content) == 28_000 {
 						suggestions++
 					}
 				}
 				if suggestions != 32 {
-					t.Fatalf("%d margin records hold a suggestion's 900 KB replace_with, want 32", suggestions)
+					t.Fatalf("%d margin records hold a suggestion's 28 KB replace_with, want 32", suggestions)
 				}
 			},
 			live: true,

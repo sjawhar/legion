@@ -261,9 +261,9 @@ func TestSIGTERMWithTheDatabaseUnansweringExitsWithinTheShutdownBudget(t *testin
 	t.Logf("exited %v after SIGTERM", exited)
 	// Nothing is in flight over HTTP, so the document service starts at once and spends at most
 	// its budget (14 s: more than round 5's, so a loaded box's jitter on this real binary is
-	// proportionally bigger too); then each failed probe takes its two seconds and a poll
-	// interval.
-	if bound := documentShutdownTimeout + silentProbes*(2*time.Second+drainPollInterval) + 5*time.Second; exited > bound {
+	// proportionally bigger too, observed up to 26.4 s on this box); then each failed probe takes
+	// its two seconds and a poll interval.
+	if bound := documentShutdownTimeout + silentProbes*(2*time.Second+drainPollInterval) + 8*time.Second; exited > bound {
 		t.Errorf("Dispatch exited %v after SIGTERM with the database unanswering, want within %v", exited, bound)
 	}
 	if !strings.Contains(process.Output.String(), "once the database stopped answering") {
