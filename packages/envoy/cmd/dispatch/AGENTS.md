@@ -100,6 +100,20 @@ bucket. `envoy-dispatch redeliver-webhooks --since <d> [--dry-run]` runs the sam
 over a chosen window without moving the cursor. The README's "Webhook redelivery" section has
 the rules: 4xx is never redelivered, bounded attempts, GitHub's rate limits, the log lines.
 
+With `DISPATCH_FILE_STORE_BUCKET` set, uploaded files' bytes live in that bucket
+(`internal/dispatch/files`, wired in `main.go`'s `openFileStore` and handed down as
+`api.Deps.Files`), under `files/sha256/<hash>`, so one file uploaded twice is stored once; a
+document's markdown stays in Postgres. `storeArtifact` writes the object before the row and the
+row holds no bytes; `getArtifactVersion` serves a row that still holds bytes from the row and
+any other from the bucket, committing its headers only once it has the bytes. Unset, the store is
+a nil interface and every upload stays in its row, which is the test harness and a laptop. The
+API tests inject `files.NewMemory()`; the store's own tests drive the real S3 client against a
+loopback stand-in that verifies the SHA-256 checksum every write carries. `envoy-dispatch
+backfill-files [--verify-only]` moves the rows uploaded before the bucket and reads them back;
+the README's "Moving uploaded files to the bucket" has its rules. `/healthz` reports the bucket
+as `files`. The bucket, its policies and the task role's grant live in the deployment repository
+(LEGION-520).
+
 Each document room has two shared Yjs types: the authoritative
 `Y.XmlFragment("prosemirror")` tree and `Y.Map("marks")`, the server-maintained
 projection of Postgres comment, ask, and suggestion records. Go renders canonical

@@ -22,6 +22,7 @@ below add only what a setting's one line cannot say.
 | `NATS_NKEY_SEED_FILE`, `NATS_NKEY_SEED` | The NATS nkey user Dispatch connects as: a file holding the seed (trimmed; wins), or the seed. A set but unusable value refuses startup naming the variable and path; neither set connects without a credential. |
 | `DISPATCH_TEST_HOOKS` | Set to `1` to mount test-only routes: `POST /api/v1/events/_test/disconnect` closes every open SSE connection; `POST /api/v1/artifacts/_test/quiesce` closes every live document and waits for settlements; and `POST /api/v1/artifacts/{id}/_test/outside-schema` writes the crafted malformed document e2e uses. Leave unset in every real deployment. |
 | `DISPATCH_DEV_SIGNIN` | Set to `1` to mount `GET /auth/_dev/signin?login=<email>&next=<path>`, which signs any person in by the email it names, with no sign-in pool, so a browser or test harness can be signed in to a local instance. Boot refuses it unless identity is `cookie`, no `DISPATCH_SIGNIN_*` setting is set, the listen address is a loopback IP literal, the dashboard origin (`DISPATCH_SERVER_URL` or `dispatch.serverUrl`) names `127.0.0.1`, `[::1]` or `localhost`, every `DATABASE_URL` host is loopback or a unix socket, `DISPATCH_SIGNING_KEY` is unset, `ENVOY_ALLOW_REMOTE_NATS=1` is not set while NATS is on, `DISPATCH_AGENT_SECRETS_URL`, when set, names a loopback host, `ENVOY_URL` names a loopback host, and a loaded GitHub App private key comes from `DISPATCH_APP_PEM_B64` with `DISPATCH_GITHUB_API_BASE` naming a loopback host, never from the `pem` in `app.json`, where a developer keeps the real App's key: a signed-in session can have the App probe and import any repository it is installed on, and read GitHub through the App's proxy. That key must be a throwaway, as `packages/dispatch/e2e/run-server.sh` generates one, since every App call hands a signed App JWT to whatever listens at that base. While it is on every request must carry the dashboard origin as its `Host` (else `421 HOST_MISMATCH`). The session cookie is signed with a key generated for that process alone, so it is worthless on any other server; what a signed-in session writes to the database is not. It can mint a `dsp_` personal agent token, and its sign-out advances the person's session generation, and every server on the same database honours those rows. Give a dev-sign-in server a database no other server uses: the loopback check makes that likely, not certain, since a loopback address can be a tunnel to another machine's database or a database a second local server also runs on. Any value other than `1` or unset is refused. |
+| `DISPATCH_FILE_STORE_BUCKET` | The bucket uploaded files (images, attachments; never a document's markdown) are stored in, under `files/sha256/<hash>`, so one file uploaded twice is stored once; reached through the AWS SDK's default credential chain, which on Fargate is the task role. The task role needs `s3:GetObject` and `s3:PutObject` on `files/*` and `s3:ListBucket` on the bucket (without `ListBucket`, S3 answers a missing object with 403, which Dispatch reads as a store failure). Set, every new upload writes its object before its row and the row holds no bytes; a store that refuses answers the upload 502 `FILE_STORE_UNAVAILABLE` and writes no version. The version route serves a row that still holds bytes from the row and every other from the bucket, sending its headers only once it has the bytes, so a bucket that fails answers 502, never a 200 cut short; a cleared row on a server with the setting unset answers 503. `/healthz` reports `files`: null when unset, else whether the bucket answered a two-second `HeadBucket`. Unset, every upload's bytes stay in Postgres as before, which is what the test harness and a laptop run. `envoy-dispatch backfill-files` moves the rows already in Postgres (below). |
 
 `DISPATCH_REPO_PROJECTS` optionally seeds repository-to-project settings at boot
 with comma-separated `owner/repo=KEY` entries. Existing dashboard mappings take
@@ -130,6 +131,27 @@ bus: unlike the server it neither creates nor updates `ENVOY_NOTIFICATIONS`, and
 NATS server that is not the machine it runs on, naming the URL. Run inside the Dispatch
 container it reaches that deployment's NATS with `ENVOY_ALLOW_REMOTE_NATS=1
 envoy-dispatch redeliver-webhooks …`.
+
+## Moving uploaded files to the bucket
+
+With `DISPATCH_FILE_STORE_BUCKET` set, new uploads go to the bucket and the files uploaded before
+it stay in their rows until `backfill-files` moves them. It walks every file version that still
+holds bytes, oldest first, one at a time: writes the object under the row's hash (a write S3
+verifies against that hash), reads it back and checks it, and only then clears the row's bytes,
+in one statement that re-checks the row still holds them. A run stopped anywhere leaves each row
+either done or untouched, so it can be run again at any time, and the server keeps serving a row
+until its bytes are cleared. `--verify-only` reads back every row already cleared, checks it
+against its hash and moves nothing; it exits 1 naming each row whose object is missing or wrong.
+Before the clear, rolling back is unsetting the setting: reads fall back to the rows. After it,
+the bytes are in the bucket alone, under its versioning.
+
+```bash
+envoy-dispatch backfill-files                 # move every row still holding bytes; prints each one and a total
+envoy-dispatch backfill-files --verify-only   # read back every moved row; exit 1 naming any that fails
+```
+
+It needs `DATABASE_URL` and `DISPATCH_FILE_STORE_BUCKET`, refuses a bucket it cannot `HeadBucket`
+before touching a row, and reads nothing else of the server's configuration.
 
 ## Identity
 
