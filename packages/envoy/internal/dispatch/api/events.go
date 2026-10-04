@@ -283,9 +283,7 @@ func (s *server) readEventRows(ctx context.Context, query string, arguments ...a
 		if err := json.Unmarshal(actor, &event.Actor); err != nil {
 			return nil, fmt.Errorf("decode event actor: %w", err)
 		}
-		if err := json.Unmarshal(payload, &event.Payload); err != nil {
-			return nil, fmt.Errorf("decode event payload: %w", err)
-		}
+		event.Payload = json.RawMessage(payload)
 		events = append(events, event)
 	}
 	if err := rows.Err(); err != nil {
@@ -294,34 +292,43 @@ func (s *server) readEventRows(ctx context.Context, query string, arguments ...a
 	if err := s.attachAskEventFields(ctx, events); err != nil {
 		return nil, err
 	}
-	if err := s.attachAskAnchorArtifacts(ctx, events); err != nil {
-		return nil, err
-	}
 	return events, nil
 }
 
+// decodedAskEventPayload is the ask payload that needs read-time fields added before it is written
+// to an event response. Other event payloads remain their database JSON.
+type decodedAskEventPayload struct {
+	event   *model.Event
+	payload map[string]any
+}
+
 // attachAskEventFields fills the ask fields an event payload cannot carry from the write that
-// appended it: the id of the event that opened the ask, and the ask's inbound backlink count.
-// Both are batched reads over the same ask rows, so the payloads are collected once.
+// appended it: the id of the event that opened the ask, its inbound backlink count, and its anchor
+// document. Ask payloads are decoded because those fields are added; every other payload passes
+// through as the database returned it.
 func (s *server) attachAskEventFields(ctx context.Context, events []model.Event) error {
 	asks := []model.Ask{}
-	payloads := []map[string]any{}
+	payloads := []decodedAskEventPayload{}
 	for index := range events {
 		switch events[index].Type {
 		case "ask.opened", "ask.anchor_refreshed", "ask.answered", "ask.resolved", "ask.edited", "ask.handed_back":
 		default:
 			continue
 		}
-		payload, ok := events[index].Payload.(map[string]any)
+		raw, ok := events[index].Payload.(json.RawMessage)
 		if !ok {
-			return fmt.Errorf("decode %s payload: expected object", events[index].Type)
+			return fmt.Errorf("decode %s payload: expected raw JSON", events[index].Type)
+		}
+		payload := map[string]any{}
+		if err := json.Unmarshal(raw, &payload); err != nil {
+			return fmt.Errorf("decode %s payload: %w", events[index].Type, err)
 		}
 		askID, ok := payload["id"].(string)
 		if !ok || askID == "" {
 			return fmt.Errorf("decode %s payload: ask id missing", events[index].Type)
 		}
 		asks = append(asks, model.Ask{ID: askID})
-		payloads = append(payloads, payload)
+		payloads = append(payloads, decodedAskEventPayload{event: &events[index], payload: payload})
 	}
 	askPointers := make([]*model.Ask, len(asks))
 	for index := range asks {
@@ -333,36 +340,38 @@ func (s *server) attachAskEventFields(ctx context.Context, events []model.Event)
 	if err := attachAskBacklinkCounts(ctx, s.deps.Store.Pool, askPointers); err != nil {
 		return err
 	}
-	for index, payload := range payloads {
-		payload["opened_event_id"] = *asks[index].OpenedEventID
-		payload[model.ReferencedByCountKey] = *asks[index].ReferencedByCount
+	for index := range payloads {
+		payloads[index].payload["opened_event_id"] = *asks[index].OpenedEventID
+		payloads[index].payload[model.ReferencedByCountKey] = *asks[index].ReferencedByCount
+	}
+	if err := s.attachAskAnchorArtifacts(ctx, payloads); err != nil {
+		return err
+	}
+	for _, payload := range payloads {
+		encoded, err := json.Marshal(payload.payload)
+		if err != nil {
+			return fmt.Errorf("encode %s payload: %w", payload.event.Type, err)
+		}
+		payload.event.Payload = json.RawMessage(encoded)
 	}
 	return nil
 }
 
-func (s *server) attachAskAnchorArtifacts(ctx context.Context, events []model.Event) error {
-	payloads := map[string][]map[string]any{}
-	for index := range events {
-		switch events[index].Type {
-		case "ask.opened", "ask.anchor_refreshed", "ask.answered", "ask.resolved", "ask.edited", "ask.handed_back":
-		default:
-			continue
-		}
-		payload, ok := events[index].Payload.(map[string]any)
-		if !ok {
-			return fmt.Errorf("decode %s payload: expected object", events[index].Type)
-		}
+func (s *server) attachAskAnchorArtifacts(ctx context.Context, eventPayloads []decodedAskEventPayload) error {
+	payloads := map[string][]decodedAskEventPayload{}
+	for _, eventPayload := range eventPayloads {
+		payload := eventPayload.payload
 		if payload["anchor"] == nil {
 			continue
 		}
 		if _, ok := payload["anchor"].(map[string]any); !ok {
-			return fmt.Errorf("decode %s payload: anchor must be an object", events[index].Type)
+			return fmt.Errorf("decode %s payload: anchor must be an object", eventPayload.event.Type)
 		}
 		askID, ok := payload["id"].(string)
 		if !ok || askID == "" {
-			return fmt.Errorf("decode %s payload: ask id missing", events[index].Type)
+			return fmt.Errorf("decode %s payload: ask id missing", eventPayload.event.Type)
 		}
-		payloads[askID] = append(payloads[askID], payload)
+		payloads[askID] = append(payloads[askID], eventPayload)
 	}
 	if len(payloads) == 0 {
 		return nil
@@ -403,10 +412,10 @@ func (s *server) attachAskAnchorArtifacts(ctx context.Context, events []model.Ev
 	}
 	for askID, asks := range payloads {
 		artifact, found := artifacts[askID]
-		for _, payload := range asks {
-			delete(payload, "anchor_artifact")
+		for _, ask := range asks {
+			delete(ask.payload, "anchor_artifact")
 			if found {
-				payload["anchor_artifact"] = artifact
+				ask.payload["anchor_artifact"] = artifact
 			}
 		}
 	}

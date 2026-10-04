@@ -87,7 +87,7 @@ func routes() []apiRoute {
 		{http.MethodPost, "/v1/enrollments/{id}/renew", sessionAuth((*server).renewEnrollment)},
 		// Describe the calling session's enrollment and its live grants.
 		{http.MethodGet, "/v1/enrollments/self", sessionAuth((*server).readSelf)},
-		// Request secrets: the rules grant or deny them at once, or a person must approve them.
+		// Request secrets: the policy grants or denies them at once, or a person must approve them.
 		{http.MethodPost, "/v1/requests", sessionAuth((*server).createRequest)},
 		// Read one of the calling session's requests.
 		{http.MethodGet, "/v1/requests/{id}", sessionAuth((*server).readRequest)},
@@ -107,9 +107,21 @@ func routes() []apiRoute {
 		{http.MethodPost, "/v1/credential-requests/{record}/deny", uiAuth((*server).denyRecord)},
 		// Find a pending machine login by the confirmation code its machine shows.
 		{http.MethodPost, "/v1/machine-logins/lookup", uiAuth((*server).lookupMachineLogin)},
-		// List the live grants the named person approved or operates.
+		// List the machine logins the named person approved, their own machines' and any
+		// service's, such as the Legion daemon's, that are not revoked and are unexpired or expired
+		// with a session still running.
+		{http.MethodGet, "/v1/launcher-credentials", uiAuth((*server).listLauncherCredentials)},
+		// End a machine login, expired or not, as the person who approved it: its launcher proofs
+		// stop authenticating and every session it enrolled, pods included, ends with its grants and
+		// pending requests.
+		{http.MethodPost, "/v1/launcher-credentials/{id}/revoke-by-approver", uiAuth((*server).revokeLauncherCredential)},
+		// List the live grants of the named person's sessions, automatic or approved, and those the
+		// person approved.
 		{http.MethodGet, "/v1/grants", uiAuth((*server).listGrantsForApprover)},
-		// End a grant as its approver or as its enrollment's operator.
+		// End a grant as its approver or as its enrollment's operator. The operator's revoke also
+		// withholds the secrets the grant's request got automatically from that session, even when
+		// the grant had already ended: its other grants that got them automatically end too, and it
+		// asks before it gets them again.
 		{http.MethodPost, "/v1/grants/{id}/revoke-by-approver", uiAuth((*server).revokeByApprover)},
 		// Report whether the broker can reach its database.
 		{http.MethodGet, "/healthz", public((*server).healthz)},

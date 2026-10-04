@@ -171,6 +171,35 @@ any other error, a panic (`pmdoc.ErrPanic`) among them, is `pmdoc`'s own and ans
 a browser edit makes is not checked, so its rendering can still fail to read back when it is
 uploaded again.
 
+A document's `doc_updates` rows are its Yjs updates in the order they were stored, and nothing
+reads one back alone: `PgVersioned.Load` and `MaterializeAt` apply them one at a time, oldest
+first, to one document that collects garbage and return that document's encoding (`stateThrough`),
+so a deleted item keeps its id and length and none of its content, and a load holds the live
+document and the one update it is applying, however much the stored updates inserted and later
+deleted (LEGION-496). Nothing reads deleted content back from the store: every document built from
+it is a `crdt.New`, which drops an item's content in the transaction that deletes it, the one that
+applies a load included; a version stores its own markdown in `artifact_versions`; and no route
+reads an update or a state before the head. What a load's document parks - an update whose
+dependency no stored update supplies, a delete of an item none holds - is merged back into the
+state, so the room that loads it parks it again until a peer sends what it waits on. A state is
+kept only when it reads back as the document that made it: decoded into a fresh document, it must
+make the same state vector. That catches a re-encoding that renumbers or drops a client's clocks,
+as at ygo `v1.49.6-sami.3`, whose decoder integrated the items after a skipped clock range;
+`v1.50.1-sami.2`'s decoder parks them instead. It does not catch a re-encoding that keeps every
+clock and moves text, such as a lost right origin, which
+`TestACompactedDocumentKeepsItsOrderThroughLaterUpdates` guards on each ygo bump. A state that
+reads back otherwise, or a log the fold's document cannot apply (one parking more than the pending
+queue below holds), is logged (`dispatch: a document's stored updates do not fold into a state that
+reads back as them`): the load serves the stored updates merged whole, which for a log the fold
+cannot apply is what `loadDocument` decodes and refuses as `ErrDocumentUnloadable`, offering the
+rebuild, and compaction leaves them as stored without building that merge.
+Compaction (`Compact`, which ygo runs as a room closes and as the server shuts down, and the outbox
+runs over every document every 24 hours, `CompactAll`) folds the whole log into one row holding
+that state (`compactKeep`), whose `content_changed` says whether any row it folded past the latest
+version's cursor changed content. A compacted `doc_updates`, and any backup of it taken later,
+therefore holds no text a write deleted: text deleted before a version captured it is gone (Sami's
+decision, LEGION-496).
+
 Each `doc_updates` row records `content_changed` - whether the update changed the document's
 rendered markdown, the only document content a version stores (`pmdoc.Render` of the tree before and
 after; the one measure the room's update observer, `updateChangesMarkdown`, a transactional live
@@ -333,12 +362,13 @@ evicted in between.
 
 Every decode of document bytes takes the pending queue `maxUpdateItems`, whose comment
 (`internal/dispatch/docs/persistence.go`) states the rule and its reason: whether the service builds
-the decoder (`newDocumentCopy`: the copy, a write's fork, every decode of the stored history, and
-the store's check of each update it appends) or ygo builds it for the service
-(`Server.MaxPendingItems`, set in `New`: the rooms, and ygo's check of each update the service
-broadcasts). In a room, which keeps what it parks across updates, the queue is also the most the
-room's peers can park, about ten times ygo's default. `TestTheStoreTakesOneBrowserUpdateItsRoomTook`
-and `TestASettlementStampsMoreBlocksThanYgosDefaultQueue` are updates ygo's default queue refuses,
+the decoder (`newDocumentCopy`: the copy, a write's fork, every decode of the stored history,
+including `stateThrough`'s fold and read-back, and the store's check of each update it appends) or
+ygo builds it for the service (`Server.MaxPendingItems`, set in `New`: the rooms, and ygo's check
+of each update the service broadcasts). In a room, which keeps what it parks across updates, the
+queue is also the most the room's peers can park, about ten times ygo's default.
+`TestTheStoreTakesOneBrowserUpdateItsRoomTook` and
+`TestASettlementStampsMoreBlocksThanYgosDefaultQueue` are updates ygo's default queue refuses,
 which fail the room; `TestDeletingADeeplyNestedLiveTreeNeedsNoStackPerLevel`,
 `TestACopyHoldsEveryItemOneClientWroteAheadOfItsParent` and
 `TestAStoredHistoryLoadsEveryItemOneClientWroteAheadOfItsParent` check that a document whose peer
@@ -1381,7 +1411,7 @@ canonical markdown.
 
 ## Security
 
-Dispatch treats an agent endpoint and bearer token as one trust-bound configuration: a repository `dispatch.serverUrl` can use only the token in that same repository file, while explicit environment configuration supplies both. The deployed server's `DISPATCH_SERVER_URL` is separate: it overrides the merged `dispatch.serverUrl`, must be an absolute `http` or `https` URL with no path, and is the exact sign-in callback origin (the sign-in pool's app client must list `<DISPATCH_SERVER_URL>/auth/callback`). `NATS_URLS` likewise overrides merged `natsUrls` for the server. People sign in with Google Workspace through the sign-in pool (`DISPATCH_SIGNIN_*`); a person is named by the email their pool username carries (`<provider>_<email>`, the provider one the ID token's `identities` names), never by the `email` claim, which a person can write. A sign-in the pool vouches for but Dispatch does not admit — a person outside `DISPATCH_SIGNIN_GROUP`, or a username that names nobody by email — is logged (`dispatch: sign-in refused username=<username> reason=<reason>`) and answered with a 403 HTML page naming the email and linking back to `/auth/start`, so an administrator can find who to add. Dispatch keeps the pool's refresh token server-side (`people.refresh_token`) and confirms a cookie's person with the pool at least hourly (`identity.Membership`); a refresh the pool refuses, or one whose ID token no longer puts the person in the group, ends every session they hold, which the API answers as 401. Browser sessions carry a server-side generation that logout advances, and unsafe cookie-authenticated requests must prove the configured same origin; bearer automation remains separate. JSON decoding is limited to 1 MiB, multipart uploads retain their explicit 26 MiB limit, and the GitHub proxy forwards no request body: it answers GET alone, for three read shapes, as the GitHub App. The event outbox retries each required issue, route, and author destination with exponential backoff, so a failed or poison delivery cannot be marked complete or starve later notifications. A destination NATS denies holds back none of the event's others; a connection or store failure ends the attempt at that destination, and the event is retried (`publish`). A core-NATS destination (a role lane) counts as published only once `bus.Client.PublishCoreTo` has shown the server accepted it, at the cost of one flush round trip (`bus.confirmPublished` holds how): one the server denies under Dispatch's grant (`bus.ErrPublishDenied`, naming the subject) or cannot be shown to have accepted is left unrecorded and retried, rather than recorded in `published_destinations` for a message nobody received. Each retry line (`dispatch outbox: publish event`) names the destination by label and target (`publish owner topic "<subject>"` for the event's own topic, `publish route "role:reviewer"` or `publish route "session:<id>"` for the issue's route, `publish author route to "<session>"`, `publish follower route to "<session>"`, `publish claim change to "<session>"`); a core denial, which only a `role:` route can be since the role lanes alone take core transport (`usesCoreTransport`), adds the subject and the server's violation. The listener's own core publishes (a role topic through `/v1/messages/publish`, a fanout exception) fail the same way, the API publish answering 500 with the violation. A destination NATS refuses (`bus.ErrRefused`: an event past the server's max payload, or a subject past NATS's limit or holding whitespace or an empty token, which an unbounded document slug or a bearer's session id such as `sess..x` can make) is refused the same way on every retry, so it is logged once (`dispatch outbox: destination refused`, naming the event and topic) and counted done, and the event goes on to its other destinations. The listener holds one line for both of the bearer kinds `/v1` accepts: the shared-token compare stays constant time and is skipped entirely when no shared token is configured, so no request authenticates against an empty one; a JWT-shaped bearer the verifier rejects is answered 401 and never falls back to the shared token or any other path; and the 401 is the same `unauthorized` in every case, so a rejected caller learns neither the reason class nor which credentials the listener is configured for.
+Dispatch treats an agent endpoint and bearer token as one trust-bound configuration: a repository `dispatch.serverUrl` can use only the token in that same repository file, while explicit environment configuration supplies both. The deployed server's `DISPATCH_SERVER_URL` is separate: it overrides the merged `dispatch.serverUrl`, must be an absolute `http` or `https` URL with no path, and is the exact sign-in callback origin (the sign-in pool's app client must list `<DISPATCH_SERVER_URL>/auth/callback`). `NATS_URLS` likewise overrides merged `natsUrls` for the server. People sign in with Google Workspace through the sign-in pool (`DISPATCH_SIGNIN_*`); a person is named by the email their pool username carries (`<provider>_<email>`, the provider one the ID token's `identities` names), never by the `email` claim, which a person can write. A sign-in the pool vouches for but Dispatch does not admit — a person outside `DISPATCH_SIGNIN_GROUP`, or a username that names nobody by email — is logged (`dispatch: sign-in refused username=<username> reason=<reason>`) and answered with a 403 HTML page naming the email and linking back to `/auth/start`, so an administrator can find who to add. Dispatch keeps the pool's refresh token server-side, sealed under a key derived from `DISPATCH_SIGNING_KEY` (`people.refresh_token`; the format is in `cmd/dispatch/README.md`, Identity); a stored value that does not open counts as none and the person signs in again. Every boot revokes each refresh token stored in plain text at the pool, then clears it, and a sign-in that replaces one revokes it first, so a database backup without the signing key holds no token the pool would accept only once a boot of this release has retired them all. Rotating the signing key leaves every stored token unopenable but revokes none at the pool: after a key leak, sign people out at the pool. It confirms a cookie's person with the pool at least hourly (`identity.Membership`); a refresh the pool refuses, or one whose ID token no longer puts the person in the group, ends every session they hold, which the API answers as 401. Browser sessions carry a server-side generation that logout advances, and unsafe cookie-authenticated requests must prove the configured same origin; bearer automation remains separate. JSON decoding is limited to 1 MiB, multipart uploads retain their explicit 26 MiB limit, and the GitHub proxy forwards no request body: it answers GET alone, for three read shapes, as the GitHub App. The event outbox retries each required issue, route, and author destination with exponential backoff, so a failed or poison delivery cannot be marked complete or starve later notifications. A destination NATS denies holds back none of the event's others; a connection or store failure ends the attempt at that destination, and the event is retried (`publish`). A core-NATS destination (a role lane) counts as published only once `bus.Client.PublishCoreTo` has shown the server accepted it, at the cost of one flush round trip (`bus.confirmPublished` holds how): one the server denies under Dispatch's grant (`bus.ErrPublishDenied`, naming the subject) or cannot be shown to have accepted is left unrecorded and retried, rather than recorded in `published_destinations` for a message nobody received. Each retry line (`dispatch outbox: publish event`) names the destination by label and target (`publish owner topic "<subject>"` for the event's own topic, `publish route "role:reviewer"` or `publish route "session:<id>"` for the issue's route, `publish author route to "<session>"`, `publish follower route to "<session>"`, `publish claim change to "<session>"`); a core denial, which only a `role:` route can be since the role lanes alone take core transport (`usesCoreTransport`), adds the subject and the server's violation. The listener's own core publishes (a role topic through `/v1/messages/publish`, a fanout exception) fail the same way, the API publish answering 500 with the violation. A destination NATS refuses (`bus.ErrRefused`: an event past the server's max payload, or a subject past NATS's limit or holding whitespace or an empty token, which an unbounded document slug or a bearer's session id such as `sess..x` can make) is refused the same way on every retry, so it is logged once (`dispatch outbox: destination refused`, naming the event and topic) and counted done, and the event goes on to its other destinations. The listener holds one line for both of the bearer kinds `/v1` accepts: the shared-token compare stays constant time and is skipped entirely when no shared token is configured, so no request authenticates against an empty one; a JWT-shaped bearer the verifier rejects is answered 401 and never falls back to the shared token or any other path; and the 401 is the same `unauthorized` in every case, so a rejected caller learns neither the reason class nor which credentials the listener is configured for.
 
 ## Operational notes
 
@@ -1690,8 +1720,9 @@ runtime, requests grants, polls a pending decision to completion, and either pri
 state (`self`, `status --json`) or `syscall.Exec`s a command with the granted values injected into
 its environment. The broker holds no Dispatch credential and opens no Dispatch ask anywhere. Every
 human decision — approving or denying a secret request, approving or denying a machine login,
-revoking a grant — reaches the broker's UI routes from Dispatch's server, carrying the UI bearer
-and the deciding person's Dispatch login, their email, in the body's `approver` field. The bearer
+revoking a grant, ending a machine login — reaches the broker's UI routes from Dispatch's server,
+carrying the UI bearer and the deciding person's Dispatch login, their email, in the body's
+`approver` field. The bearer
 vouches for that login: Dispatch fills it from its own signed-in session, never from the browser,
 and the broker checks it against the record's approver and records it on the decision event. The
 UI bearer is therefore an approval credential, and keeping it and Dispatch's identity closed to
@@ -1708,16 +1739,36 @@ authenticates the enrollment chooses the slot; a session's proof cannot enroll a
 while a pod's `runtime_id` stays the pod UID its token proves. Omitted or `""` is the runtime's
 one enrollment, every box's and host's. The same key
 in the same slot gets its live enrollment back (200), a different key in a live slot is `409
-ALREADY_ENROLLED`, and the rules never see the slot: every slot of a pod matches on its verified
-service account alone. Migration 0007 is forward-only: an older broker binary's conflict lookup
+ALREADY_ENROLLED`, and the policy never sees the slot or the service account: a pod is a requester
+with no operator. Migration 0007 is forward-only: an older broker binary's conflict lookup
 reads one live row per runtime id, unsafe once a pod holds two slots, so the binary is never rolled
-back past it once a slotted enrollment exists. `internal/broker/rules` evaluates
-`agent-secret-rules.yaml` policy per request (the broker's design overview is its contract; a
-file that still has an `approvers:` section is refused, naming the removal); `internal/broker/proof`
+back past it once a slotted enrollment exists. `internal/broker/policy` decides who may have which
+secret from the secret's own tags (below); `internal/broker/proof`
 authenticates a session's or a launcher's signed request against its live enrollment or
 credential; `internal/broker/machine` decides typed-code machine logins and mints the launcher
 credentials they approve; and `internal/broker/secrets` reads the granted value from AWS Secrets
-Manager, or a fake local file for development.
+Manager, or, for local development, from `secrets.Local`, an in-memory stand-in for the AWS calls.
+
+`internal/broker/policy` reads the policy from Secrets Manager itself (`policy.Loader`), and
+`Set.Evaluate` decides each requested name from the secret's `owner` and `tier` tags alone. What
+the tags mean, the evaluation table and whose session counts as an owner's own are the docs site's
+concepts page (`docs/site/src/content/docs/broker/concepts.md`, "Owner and tier"); the IAM the
+broker needs, its log lines and every refusal reason are the operate page beside it
+(`operate.md`); the refresh interval and `BROKER_FAKE_SECRETS_FILE`'s format are the generated
+configuration reference (the comments on `config.Config` and in `cmd/broker/main.go`). What the
+code relies on: `Load` lists with `ListSecrets`' `name` filter, a case-sensitive prefix match, on
+`BROKER_SECRETS_PREFIX` and keeps only the names `strings.CutPrefix` finds under it, so a lister
+that answers more serves and logs nothing outside the namespace (`secrets.Local` filters as Secrets
+Manager does); a name under the prefix maps one-to-one to a request name (`slugPattern`); an alias
+on a secret's `KmsKeyId` is resolved through `kms:ListAliases` lazily, at most once per load; and
+an owner tag naming a service is refused as malformed while `Loader.Services` is empty, as
+`cmd/broker` leaves it. The two ERROR lines, `policy.RefusedMessage` with a `Reason*` constant and
+`policy.LoadFailedMessage`, are what the deployment's alarms filter on, so neither changes without
+the alarm, and a failed reload keeps the last set. `Set.Version`, the SHA-256 of every served
+secret's name, owner, tier and ARN, is recorded on every request, and a live grant is re-checked
+only once it has moved (`stillAllowed`); the record line, the column and the API field that carry
+it keep the name `rules_version`, since records are content-addressed and stored bodies must still
+parse.
 
 The client finds its session in `AGENT_SECRETS_KEY_DIR` (a box's or pod's `key.pem` and
 `enrollment`) or `AGENT_SECRETS_HELPER_SOCK` (a host session's helper), beside `AGENT_SECRETS_URL`.
@@ -1811,13 +1862,14 @@ the placeholder, is refused naming both), `BROKER_PUBLIC_URL` (required; absolut
 the broker's own address, the request object's `aud` and the launcher proof's `htu`),
 `BROKER_UI_TOKEN[_FILE]` (required — the 32-byte bearer shared with exactly Dispatch's server; it
 proves the caller is Dispatch, and Dispatch vouches for the approving login each decision names),
-`BROKER_RULES_FILE` / `BROKER_RULES_S3_URI` (exactly one; the latter `s3://<bucket>/<key>`),
+`BROKER_SECRETS_PREFIX` (required; the namespace, a Secrets Manager name prefix ending in `/`),
+`BROKER_SECRETS_KMS_KEY_ARN` (required; the agent-secrets key's ARN, `arn:aws:kms:…:key/<id>`),
 `BROKER_K8S_OIDC_ISSUER` / `BROKER_K8S_OIDC_AUDIENCE` (set together or not at all),
 `BROKER_ENVOY_URL` (optional; turns on best-effort wake notifications to the requesting session
 through Envoy's `/v1/messages/send`, sent with `BROKER_ENVOY_TOKEN` — read only when the URL is
 set, and not itself required at startup), `BROKER_LEASE_SECONDS` (default 900, max 3600),
 `BROKER_PROOF_SKEW_SECONDS` (default 60, max 300), `BROKER_MAX_GRANT_SECONDS` (default 43200, max
-43200), `BROKER_RULES_RELOAD_SECONDS` (default 300, max 3600), `BROKER_LAUNCHER_CREDENTIAL_SECONDS`
+43200 — how long every grant lives, unless its session ends first), `BROKER_LAUNCHER_CREDENTIAL_SECONDS`
 (default 604800, max 2592000 — a minted launcher credential's own lifetime; past it the holder
 re-runs login, new key, new code, new human approval), `BROKER_SWEEP_SECONDS` (default 5, max 60 —
 `requests.Sweeper`'s tick interval, the poller's replacement), and `BROKER_TRUSTED_PROXY_HEADER`
@@ -1834,18 +1886,19 @@ a named-but-unreadable or empty file is a startup error naming the file, never a
 an unset value. `config.Load` refuses to start naming a stale removal still set in the
 environment — the removed `BROKER_DISPATCH_URL`, `BROKER_DISPATCH_TOKEN[_FILE]`,
 `BROKER_DISPATCH_PROJECT` and `BROKER_ASK_POLL_SECONDS` (the broker holds no Dispatch credential
-and asks/issues nothing), and `BROKER_UI_ORIGIN` (approval is by Dispatch login, so the broker
-checks no WebAuthn origin) — so a stale deployment fails loudly rather than silently running on
-configuration that means nothing any more. It also refuses: a missing required variable; a
-`BROKER_PUBLIC_URL` that isn't an absolute URL with no path; both or neither of
-`BROKER_RULES_FILE`/`BROKER_RULES_S3_URI` set; a `BROKER_RULES_S3_URI` without an `s3://` prefix;
-exactly one of `BROKER_K8S_OIDC_ISSUER`/`BROKER_K8S_OIDC_AUDIENCE` set; and a `_SECONDS` variable
-that isn't a whole number between the min and max its row of Load's `ints` table gives
-(non-numeric fails the same check as out of range). `cmd/broker/main.go` reads one thing
-`config.Load` does not: when `BROKER_RULES_FILE`
-selects local rules (rather than `BROKER_RULES_S3_URI`, which pairs with AWS Secrets Manager for
-secret values), it requires `BROKER_FAKE_SECRETS_FILE` and refuses to start without it — a
-local-dev-only path. The broker takes no flags, and refuses any flag it is given.
+and asks/issues nothing), `BROKER_UI_ORIGIN` (approval is by Dispatch login, so the broker
+checks no WebAuthn origin), and `BROKER_RULES_FILE`, `BROKER_RULES_S3_URI` and
+`BROKER_RULES_RELOAD_SECONDS` (each secret's own tags are the policy, so there is no rules file) —
+so a stale deployment fails loudly rather than silently running on configuration that means
+nothing any more. It also refuses: a missing required variable; a `BROKER_PUBLIC_URL` that isn't an
+absolute URL with no path; a `BROKER_SECRETS_PREFIX` that does not end in `/`, starts with one or
+holds white space; a `BROKER_SECRETS_KMS_KEY_ARN` that is not a key ARN (an alias can be pointed
+elsewhere, and a bare key id names no account); exactly one of
+`BROKER_K8S_OIDC_ISSUER`/`BROKER_K8S_OIDC_AUDIENCE` set; and a `_SECONDS` variable that isn't a
+whole number between the min and max its row of Load's `ints` table gives (non-numeric fails the
+same check as out of range). `cmd/broker/main.go` reads one thing `config.Load` does not:
+`BROKER_FAKE_SECRETS_FILE`, which makes the run a local one (above), the only kind that may set a
+`BROKER_PUBLIC_URL` on port 0. The broker takes no flags, and refuses any flag it is given.
 
 The docs site's broker reference pages are generated at site build from this source by
 `cmd/broker-refgen` (through `docs/site/generators/broker-reference.sh`), which fails the build on
@@ -1867,16 +1920,16 @@ literal that is not
 a documented `exit*` constant or another such function's result. The CLI reference is the built
 binaries' own `--help`, so every form must answer `-h` with exit 0.
 
-`internal/broker/api/routes_table.go`'s `routes()` is the one list of the broker's 19 HTTP routes —
+`internal/broker/api/routes_table.go`'s `routes()` is the one list of the broker's 21 HTTP routes —
 a new route is a new row there, never a bare `mux.HandleFunc` — and its own comment says the
 contract for every row is the broker's design overview. Each row's handler is
 wrapped by the adapter for its authentication (`public`, `launcherAuth`, `sessionAuth`, `uiAuth`),
 which fixes both the credential `server.authenticate` checks and the caller the handler receives (a
 launcher `enroll.Credential`, an enrollment id, or nothing at all for a UI route — the UI bearer
 proves the caller is Dispatch, so every UI handler takes its subject from the path or body: a
-decision or a revoke names the deciding human in `approver`, which Dispatch filled from its own
-session, and an empty one is `400 APPROVER_REQUIRED`), so a handler cannot be wired to the wrong
-kind of caller. A bad
+decision or a revoke names the deciding human in `approver`, and a list the person it lists for in
+`?approver=`, which Dispatch filled from its own session; an empty one is `400 APPROVER_REQUIRED`),
+so a handler cannot be wired to the wrong kind of caller. A bad
 credential is a 401 (`LAUNCHER_INVALID`, `PROOF_INVALID`, or `UI_INVALID`); a store that cannot
 answer while authenticating is a 503 naming it. Every 500 is logged with its cause
 (`writeInternal`), every JSON body is capped at 1 MiB with unknown fields refused (`readJSON`),
@@ -1892,7 +1945,8 @@ for the current, authoritative route list.
 `internal/broker/record` implements the credential-request record every human decision turns
 on: `Body.Canonical()` renders the contract's fixed `\n`-terminated line format (the request
 object verbatim, the approver, the enrollment's tab-separated kind, runtime id and operator, plus
-a pod's slot as a fourth field only when it has one, lifetime, rules version, expiry, and the
+a pod's slot as a fourth field only when it has one, lifetime, policy version (the `rules_version`
+line), expiry, and the
 machine-login code or `-`), `Body.ID()` is the lowercase-hex SHA-256 of that canonical form — the
 record's own content-addressed id, which a slotless record keeps byte for byte — and `ParseBody`
 is `Canonical`'s exact inverse, refusing any stored body that would not reproduce itself
@@ -1904,12 +1958,15 @@ equal to `BROKER_PUBLIC_URL`, `iat`/`exp` within skew and a 600-second cap, a `r
 400 runes with bidi/zero-width categories refused, and `authorization_details` either every entry
 `agent_secret` or exactly one `launcher_credential` entry naming a valid hostname and an optional
 `[a-z0-9-]{1,64}` service).
-`Body.ApproverLogin(login)` is the one approver comparison: a record's approver is resolved when
-the record is created (an approval rule's `login:<name>`, the requesting enrollment's operator for
-`approver: operator`, or a machine login's `login_hint`), and every decision and every chain
-re-check compares the canonical lowercase login against it, a decision recording the canonical
-login it returns. `record.ChainVerifier` (`chain.go`, built per record kind by
-`store.Store.ChainVerifier`, so a record of one kind never backs the other's credential) is
+`Body.ApproverLogin(kind, login)` (`record.MayDecide`) is the one approver comparison: a record's
+approver is resolved when the record is created (a secret's owner, `anyone` for a shared
+human-tier secret, or a machine login's `login_hint`, which is never `anyone`), and every decision
+and every chain re-check compares the canonical lowercase login against it, any login but `anyone`
+itself deciding an `agent_secret` record whose approver is `anyone`, no login deciding a machine
+login whose approver is `anyone` (one a binary from before `Login` refused that hint could have
+opened), and a decision recording the canonical login it returns. `record.ChainVerifier`
+(`chain.go`, built per record kind by `store.Store.ChainVerifier`, whose `Kind` also selects that
+rule, so a record of one kind never backs the other's credential) is
 what "every release re-verifies the whole chain" means in code: given a record id it re-fetches
 the stored body, confirms it still reproduces its own id, re-verifies the embedded request object
 as of the record's own creation time (not now — a request object's ~10-minute `exp` is long past
@@ -1926,50 +1983,95 @@ control, as it already was for grant rows.
 
 `internal/broker/requests.Machine` is the `agent_secret` request state machine. `Create` verifies
 the caller's signed request object (`iss` must be the requesting enrollment's own key, no
-`login_hint` — a session never names its own approver, only the rules do), first checks for a
+`login_hint` — a session never names its own approver, only the policy does), first checks for a
 still-live grant covering the exact same name set (`reuseLiveGrant`: no new request, no new record,
-as long as the current rules still allow it and the grant's whole chain still verifies), then
-evaluates the rules per name: any `deny` denies the whole request with no record written at all; a
-name no rule mentions at all aborts the whole call with `rules.ErrUnknownSecret` (`400
-UNKNOWN_SECRET`, per the broker's design overview) instead of being folded into an ordinary
-`deny` decision — no request row is written either, matching the "at record time" wording; a name
-needing approval that names a *different* approver than an already-approval-needing name in the
-same request is refused `400 MIXED_APPROVERS`; when every name is decided (`granted`/`denied`) with
-nothing pending, the request and, if granted, its grant are written with no record; a request
-needing approval writes the request row and a `credential_requests` record together, in one
-transaction serialized by an advisory lock keyed on the enrollment and the sorted name set, so an
-identical concurrent request coalesces onto the same record (`coalesced: true`) instead of writing
-a second one. Each of those write transactions first locks the requesting enrollment `for share`
-while it is live, before any request or grant row, so a request racing the sweep or a revoke
-writes nothing on an enrollment that ended after `Create` first read it (`401 PROOF_INVALID`, as
-for one that had ended before). A pending request leaves `pending` without a human only through
-`store.EndPendingRequests` (the session's cancel, the sweeper's expiry, an enrollment's end): one
-statement moves the request rows and writes each one's audit row and its record's terminal event.
+as long as the current policy still allows it and the grant's whole chain still verifies), then
+decides and writes in one transaction: it takes an advisory lock keyed on the enrollment and the
+sorted name set, then locks the requesting enrollment `for share` while it is live (that order;
+the reverse breaks `TestCreateWaitsOutTheSweepItRaces`), reads the names withheld from the session,
+and evaluates the policy per name for the session: any `deny` denies the whole request with no
+record written at all; a name the policy does not serve aborts the whole call with
+`policy.ErrUnknownSecret` (`400 UNKNOWN_SECRET`, per the broker's design overview) instead of being
+folded into an ordinary `deny` decision — no request row is written either, matching the "at record
+time" wording; a name needing approval that names a *different* approver than an
+already-approval-needing name in the same request is refused `400 MIXED_APPROVERS`; every grant
+lives `BROKER_MAX_GRANT_SECONDS`; when every name is decided (`granted`/`denied`) with nothing
+pending, the request and, if granted, its grant are written with no record; a request needing
+approval writes the request row and a `credential_requests` record together, and an identical
+concurrent request coalesces onto the same record (`coalesced: true`) instead of writing a second
+one. The enrollment lock, taken before any request or grant row, means a request racing the sweep
+or a revoke writes nothing on an enrollment that ended after `Create` first read it (`401
+PROOF_INVALID`, as for one that had ended before). A pending request leaves `pending` without a
+human only through `store.EndPendingRequests` (the session's cancel, the sweeper's expiry, an
+enrollment's end): one statement moves the request rows and writes each one's audit row and its
+record's terminal event.
 `ApplyDecision` decides a pending record on the deciding human's login — approve
 mints the grant while the requesting enrollment is still live, deny denies it — re-deriving the
 record's id, refusing any login but the record's approver whatever the record's state
-(`record.ErrNotApprover`, `403 NOT_APPROVER`), re-verifying its embedded request object, and
-writing the decision event (which records the deciding login), the request transition and the
-audit row in one transaction; a non-pending record, and one past its expiry that the sweeper has
-not yet expired, is `409 RECORD_TERMINAL` for its approver (a duplicate or late decision changes
-nothing) — but a record past its expiry, whether the sweeper has recorded it expired or not,
-answers with a message saying it expired before its approver acted (`requests.ErrExpired`), never
-that it was decided. An `agent_secret` record is pending while its request is: `GET /v1/pending`
-(`PendingForApprover`) lists it only then, and `GET /v1/credential-requests/{id}` (`ReadRecord`)
+(`record.ErrNotApprover`, `403 NOT_APPROVER`), and an approval by any login the current policy
+would not have approve one of the request's names (`currentPolicyAdmits`, the same error: once a
+shared human-tier secret is a person's, a request waiting on `anyone` is that person's alone to
+approve, and one waiting on a person for a secret another person must now approve is no one's; a
+denial releases nothing, so the record's approver may still deny either), re-verifying its
+embedded request object, and writing the decision event (which records the deciding login), the
+request transition and the audit row in one transaction; a non-pending record, and one past its
+expiry that the sweeper has not yet expired, is `409 RECORD_TERMINAL` for its approver (a
+duplicate or late decision changes nothing) — but a record past its expiry, whether the sweeper has
+recorded it expired or not, answers with a message saying it expired before its approver acted
+(`requests.ErrExpired`), never that it was decided. An `agent_secret` record is pending while its
+request is: `GET /v1/pending`
+(`PendingForApprover`, which lists `anyone` records for every approver) lists it only then, and
+`GET /v1/credential-requests/{id}` (`ReadRecord`)
 reads it as pending only then; a decided record's terminal event names the decision, and a request
 cancelled with no cancelled event on its record, the shape an ended enrollment's requests had
 before `endEnrollment` wrote one, reads as `cancelled` from its request row. A machine login is
 pending while it carries no terminal event. `Values` releases a
-live grant's inject-delivery values, re-checking the enrollment, the
-grant, its whole approval chain (`VerifyChain`), and — when the rules changed since the grant was
-decided — that the current rules still allow every granted name (`stillAllowed`: a name the rules no
-longer carry, deny, or now want approved that was granted automatically, all refuse); a name is
-released only when both its delivery frozen at grant time and its current delivery are `inject`,
-else withheld in `proxy_only`; a source missing from the secrets store is `404 SECRET_NOT_IN_STORE`.
+live grant's values, each read from the secret its request froze (the ARN), re-checking the
+enrollment, the grant, its whole approval chain (`VerifyChain`), and — when the policy version moved
+since the grant was decided — that the current policy still allows every granted name
+(`stillAllowed`: a name the policy no longer serves, denies, or now wants approved that was granted
+automatically, or that it now wants approved by someone the request's `decided_by` login is not,
+all refuse, so an approved grant outlives an owner change only while its approver may still
+approve the secret, or once the new tags give its session the secret without asking; a name
+withheld from the session that its request got automatically is judged as an approval by
+`decided_by`, since a live grant of it was approved after the withhold by someone the withheld name
+let approve it); a source missing from the secrets store is `404 SECRET_NOT_IN_STORE`.
+Migration 0009 defaults `request_secrets.delivery` to `inject`, which this broker neither writes nor
+reads, so a binary from before it can still be rolled back to.
 `RevokeGrant` lets a session end only its own grant (session proof); `RevokeByApprover` ends a grant
-on a human's Dispatch login, allowed only when that login is the grant's approver or its
-enrollment's operator (`mayRevoke`, else `403 NOT_APPROVER`); revoking an already-revoked grant is
-a no-op, writing no second audit row. Audit rows never carry secret values: `audit()` takes only
+on a human's Dispatch email, allowed only when that email is the grant's approver or its
+enrollment's operator (`mayRevoke`, which also answers whether it is the operator, else
+`403 NOT_APPROVER`). When the enrollment's operator revokes, `withhold` withholds
+from the grant's session every name its request got automatically (a `withheld_secrets` row per
+session and name, migration 0010) and, in the same statement, ends every other live grant of the
+session whose request got one of the newly withheld names automatically, each with a
+`grant.revoked` audit row of its own; the revoked grant's audit detail lists the newly withheld
+names under `withheld`, and each other ended grant's lists the withheld names it held. A name
+already withheld ends nothing, since its first withhold ended every grant that got it without
+asking and one approved since stands. The withhold is the session's, so the operator's revoke of a
+grant already revoked still runs it, recorded as one `grant.withheld` row when it withholds
+something new; any other revoke of an already-revoked grant, and an operator's that withholds
+nothing new, is a no-op, writing no second audit row. Another person's revoke (a grant's
+approver who is not the operator) ends that grant alone and withholds nothing, as does a session
+revoking its own grant. A withheld name is human tier to its session: `policy.Requester.Withheld`
+carries the session's withheld names, and `policy.Set.Evaluate` answers each as an approval request
+to the owner (`anyone` for a shared secret; a service's own secret is denied). Every path that
+evaluates for a session builds the requester with them: `Create`, `currentPolicyAdmits` (so a
+request that was pending when a name was withheld is that name's owner's to approve, and no one's
+while the policy does not serve the name or denies it, as it does once a service owns it: admitted
+then, the approval would release it once the name returned with its old tags, since that restores
+the request's policy version and `Values` runs `stillAllowed` only when the version moved) and
+`stillAllowed` on release and reuse. So the session asks before it gets the name again while every
+other session is unaffected.
+`RevokeByApprover` locks the session's row `for no key update`
+in the statement that reads the grant, before writing the grant, and `Create` and `ApplyDecision`
+read the withheld names after taking that row `for share`: a request deciding as the revoke runs
+is either written first, and then ended by the withhold if it got a withheld name, or decides with
+the name withheld. `GrantsForApprover` (`GET /v1/grants?approver=`) lists every live grant of the
+person's sessions, automatic ones included, and every grant the person approved, each answering
+`granted` (`automatic` or `approval`, derived once from whether the grant rests on a record) with a
+null `approver` and `record_id` for an automatic one. Audit rows never carry secret values:
+`audit()` takes only
 `kind`, `enrollment_id`, `request_id`, an optional
 `grant_id`, `actor` (`human:<login>`, `session:<enrollment id>`, `launcher:<credential id>`, or
 `broker`), and a non-secret JSON `detail`. The granted value itself is read fresh from
@@ -2004,6 +2106,41 @@ poll, `GET /v1/launcher-credentials/{pending}`) answers only the record's state 
 the minted credential's id and `expires_at` — no token is ever returned; the credential is usable
 only with proofs signed by the key the request object embedded. The broker has no renewal route:
 past `expires_at` the machine logs in again, with a new key, a new code and a new human approval.
+
+`GET /v1/launcher-credentials?approver=<email>` lists the machine logins a person approved that
+can still reach a secret (id, host, service, issued, expires, `expired`): every unrevoked one that
+is unexpired or still has a live enrollment, live as `Lookup` means it (not revoked, its lease not
+lapsed). A login's enrollments outlive its expiry, since `Renew` and `Lookup` never read the
+credential (each session renews with its own key), so an expired login stays listed,
+`expired: true`, until its last enrollment ends or its lease lapses, swept or not, and revoking
+every listed login ends every session the person's machines started.
+`POST /v1/launcher-credentials/{id}/revoke-by-approver` `{approver}` ends one, expired or not
+(`enroll.Service.RevokeCredential`). Both key on the approver of the `launcher_credential` record
+the credential was minted from (`credential_requests.approver`, joined through
+`launcher_credentials.record_id` and required to be of kind `launcher_credential`), never on the
+credential's `operator`: a service's credential (the Legion daemon's, `service` set) has no operator
+(`authorized` needs it null to enroll pods), and the person who approved it is the one accountable
+for it. For a person's own machine the two are the same person (`machine.Service.ApplyDecision`
+mints the operator from the approving login), so one rule covers both. Anyone but that approver is
+`403 NOT_APPROVER`; an unknown id, like a credential minted from no `launcher_credential` record
+(only `ApplyDecision` mints one, always from its record), is `404 NOT_FOUND`.
+In one transaction it sets the credential's `revoked_at`, so its launcher proofs stop
+authenticating, ends every enrollment the credential made through `endEnrollment` (a person's host
+sessions and boxes, or every pod a service's login enrolled: grants revoked, pending requests
+cancelled, actor `human:<email>`, an `enrollment.revoked` row each) and writes one
+`launcher_credential.revoked` audit row naming them, the host and any service; revoking it again
+changes nothing. It locks the credential's row before the enrollments', and `Create` holds that row
+`for share` while it inserts, so an enrollment whose launcher proof was verified just before a revoke
+either commits first and is ended by it, or finds the credential revoked and is
+`401 LAUNCHER_INVALID`; the credential lock also makes two concurrent revokes write one
+`launcher_credential.revoked` row, and the enrollments' `for update` makes a revoke racing a
+launcher's own `Revoke` of one enrollment end it once. Nothing tells the machine: its helper's next
+renewal of a session is refused `PROOF_INVALID`, revoking that lapsed enrollment is refused
+`LAUNCHER_INVALID`, and the helper drops the credential as for any refusal; a helper with no live
+session learns it at its next enrollment, and the Legion daemon at its next pod enrollment or
+unenrollment, after which it starts a new
+machine login. Dispatch's machine-login page lists and revokes the signed-in person's through these
+two routes.
 
 `internal/broker/enroll.Service.AuthenticateLauncher` is `proof.Verifier`'s `LookupLauncher` hook: a
 launcher proof's `lid` claim resolves a live, unexpired `launcher_credentials` row and then
