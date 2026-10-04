@@ -81,6 +81,7 @@ type Runtime struct {
 	tokens                                  ProvisionTokens
 	conns                                   runtime.Conns
 	launchers                               *launchers
+	launcherAuth                            launcherCredentials
 	now                                     func() time.Time
 	log                                     *slog.Logger
 
@@ -584,7 +585,7 @@ func (r *Runtime) Suspend(ctx context.Context, loc runtime.Locator) error {
 		r.forgetIf(loc)
 		return nil
 	}
-	if state, connected := r.launchers.state(loc.Claim); connected && (state.Child == nil || state.Child.Generation != loc.Sandbox.Generation) {
+	if state, connected := r.launchers.state(loc.Claim, loc.Sandbox.PodUID); connected && (state.Child == nil || state.Child.Generation != loc.Sandbox.Generation) {
 		r.forgetIf(loc)
 		return nil
 	}
@@ -594,7 +595,7 @@ func (r *Runtime) Suspend(ctx context.Context, loc runtime.Locator) error {
 	}
 	stopping, cancel := context.WithTimeout(ctx, r.bootTimeout+r.terminationGrace)
 	defer cancel()
-	if err := r.launchers.stop(stopping, loc.Claim, stop); err != nil {
+	if err := r.launchers.stop(stopping, loc.Claim, loc.Sandbox.PodUID, stop); err != nil {
 		return fmt.Errorf("suspend %s: %w", loc.Claim, err)
 	}
 	r.forgetIf(loc)
@@ -682,6 +683,7 @@ func (r *Runtime) CleanupIssue(ctx context.Context, project, issue, tree string,
 	if err := r.awaitSandboxDeleted(ctx, resource.Sandbox); err != nil {
 		return err
 	}
+	r.forgetLauncherCredentials(resource.Sandbox)
 	if root {
 		return resources.ConfirmRootCleanup(ctx, project, issue, tree, resource.CleanupGeneration, treeEpoch)
 	}

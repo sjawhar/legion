@@ -104,3 +104,24 @@ func TestEveryRolesPrivateVolumesMountInItsContainerAlone(t *testing.T) {
 		}
 	}
 }
+
+func TestRejectedLauncherHellosDoNotSpendKubernetesRequests(t *testing.T) {
+	g := newRig(t, nil)
+	loc := g.spawn(workerSpec(t))
+	accept := g.r.LauncherResolver()
+	g.kube.ClearActions()
+	for range 20 {
+		for _, name := range []string{loc.Sandbox.Name, "unknown-sandbox"} {
+			if handler, reason := accept(shimwire.LauncherHello{
+				Token: "wrong-token", Sandbox: name, Role: "tester", PodUID: loc.Sandbox.PodUID, LauncherID: "attacker",
+			}); handler != nil || reason == "" {
+				t.Fatal("unauthenticated launcher was accepted")
+			}
+		}
+	}
+	for _, action := range g.kube.Actions() {
+		if action.GetVerb() == "get" && action.GetResource().Resource == "secrets" {
+			t.Fatal("unauthenticated launcher hello issued a Kubernetes Secret GET")
+		}
+	}
+}

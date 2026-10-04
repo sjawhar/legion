@@ -182,3 +182,20 @@ func TestAClaimWhoseAgentRegisteredKeepsItsSession(t *testing.T) {
 		})
 	}
 }
+
+func TestFreshRoleReportsLossOfAnotherRolesTreeSessions(t *testing.T) {
+	h := newHarness(t)
+	var reported []Claim
+	h.deps.VolumeLost = func(c Claim) { reported = append(reported, c) }
+	h.start(h.store.load(h.token))
+	h.reach(StateLaunching)
+	h.goneWithWorkspaceLost(lostDetail)
+	if got := h.claim(); !got.WorkspaceLost || got.SessionFile != "" {
+		t.Fatalf("fresh sibling did not recover confirmed tree storage loss: %+v", got)
+	}
+	if len(reported) != 1 || reported[0].Tree != h.claim().Tree {
+		t.Fatalf("fresh sibling did not invalidate the tree's retained sessions: %+v", reported)
+	}
+	h.wantBudgets(Budgets{})
+	h.wantState(StateLaunching)
+}

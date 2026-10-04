@@ -443,9 +443,8 @@ func (g *rig) createPod(s *sandbox) {
 		pod.Spec.NodeName = "ip-192-0-2-7"
 		pod.Status = runningStatus()
 	}
-	// A new pod's role launchers are new processes: each one a test asked for connects afresh,
-	// with no child, replacing the previous pod's connection — before the pod is visible, so a
-	// launch that sees the pod finds its launcher.
+	// A new pod's role launchers are new processes, bound to its exact UID. The runtime waits
+	// for their first state instead of treating the previous pod's connection as current.
 	g.commandsMu.Lock()
 	var reconnect []claim.Token
 	for token := range g.wanted {
@@ -454,10 +453,10 @@ func (g *rig) createPod(s *sandbox) {
 		}
 	}
 	g.commandsMu.Unlock()
+	_ = g.kube.Tracker().Add(pod)
 	for _, token := range reconnect {
 		g.connect(token)
 	}
-	_ = g.kube.Tracker().Add(pod)
 }
 
 func runningStatus() corev1.PodStatus {
@@ -479,7 +478,11 @@ func runningStatus() corev1.PodStatus {
 // to drive: the observation mapping reads only the reported state.
 func (g *rig) reportLauncher(token claim.Token, state shimwire.LauncherState) {
 	g.t.Helper()
-	s := g.r.launchers.accept(token, shimwire.LauncherHello{LauncherID: "test-" + string(token)})
+	pod := g.pod(SandboxName(token))
+	if pod == nil {
+		g.t.Fatal("cannot report launcher state without its pod")
+	}
+	s := g.r.launchers.accept(token, shimwire.LauncherHello{LauncherID: "test-" + string(token), PodUID: string(pod.UID)})
 	s.mu.Lock()
 	s.state = state
 	close(s.ready)
@@ -563,7 +566,7 @@ func (g *rig) launcher(token claim.Token) {
 	g.r.launchers.mu.Lock()
 	_, exists := g.r.launchers.sessions[token]
 	g.r.launchers.mu.Unlock()
-	if exists {
+	if exists || g.pod(SandboxName(token)) == nil {
 		return
 	}
 	g.connect(token)
@@ -572,7 +575,8 @@ func (g *rig) launcher(token claim.Token) {
 // connect is one fake launcher process's connection for token, replacing any earlier one.
 func (g *rig) connect(token claim.Token) {
 	server, client := net.Pipe()
-	session := g.r.launchers.accept(token, shimwire.LauncherHello{LauncherID: "test-" + string(token)})
+	pod := g.pod(SandboxName(token))
+	session := g.r.launchers.accept(token, shimwire.LauncherHello{LauncherID: "test-" + string(token), PodUID: string(pod.UID)})
 	g.t.Cleanup(func() { _ = client.Close() })
 	go session.ServeLauncher(server, bufio.NewReader(server), shimwire.NewWriter(server))
 	go func() {

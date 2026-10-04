@@ -32,7 +32,7 @@ type view struct {
 // view reads the claim's Sandbox and pod from the stores. New synced both before it returned, and
 // they stay current while New's context lives and each informer's latest list or watch request
 // succeeded; while either's failed, the store holds what it last heard, so view refuses to answer
-// from it and evaluate answers Uncertain (row 1).
+// from it and evaluate answers Uncertain.
 func (r *Runtime) view(name string) (view, error) {
 	for _, f := range []*feed{&r.sandboxFeed, &r.podFeed} {
 		if err := f.check(); err != nil {
@@ -79,9 +79,9 @@ func (r *Runtime) evaluate(ctx context.Context, loc runtime.Locator) runtime.Obs
 		return observe(runtime.NotRecordedProcess, "pod %s is uid %s, not the recorded pod UID %s", name, v.pod.UID, loc.Sandbox.PodUID)
 	}
 	pod := v.pod
-	switch pod.Status.Phase {
-	case corev1.PodFailed, corev1.PodSucceeded:
-		detail, workspaceLost := r.ended(ctx, v, loc.Sandbox.Container)
+	initName, initExit := failedInit(pod)
+	if terminal(pod) || initExit != nil {
+		detail, workspaceLost := r.ended(ctx, v, loc.Sandbox.Container, initName, initExit)
 		ended := observe(runtime.Gone, "%s", detail)
 		ended.WorkspaceLost = workspaceLost
 		return ended
@@ -116,7 +116,7 @@ func (r *Runtime) evaluate(ctx context.Context, loc runtime.Locator) runtime.Obs
 		return observe(runtime.Gone, "pod %s (uid %s) role container %s terminated (%s, exit code %d); last lines:\n%s",
 			name, pod.UID, loc.Sandbox.Container, ended.Reason, ended.ExitCode, r.logTail(ctx, name, loc.Sandbox.Container))
 	}
-	state, connected := r.launchers.state(loc.Claim)
+	state, connected := r.launchers.state(loc.Claim, loc.Sandbox.PodUID)
 	if !connected {
 		return observe(runtime.Uncertain, "pod %s (uid %s) role launcher %s is disconnected", name, pod.UID, loc.Sandbox.Container)
 	}
@@ -137,8 +137,8 @@ func (r *Runtime) evaluate(ctx context.Context, loc runtime.Locator) runtime.Obs
 	}
 }
 
-// podAbsent is row 3's detail: the Sandbox's mode, its Suspended condition when current, and any
-// same-named pod the Sandbox does not own.
+// podAbsent describes the Sandbox mode, its current Suspended condition, and any same-named
+// pod the Sandbox does not own.
 func podAbsent(v view) string {
 	s := v.sandbox
 	detail := fmt.Sprintf("no pod of sandbox %s (operatingMode %s", s.Name, s.mode())
@@ -155,14 +155,11 @@ func podAbsent(v view) string {
 
 // ended is the terminal pod verdict. A failed init container applies to every role; otherwise the
 // locator's role container is the process that ended.
-func (r *Runtime) ended(ctx context.Context, v view, roleContainer string) (string, bool) {
+func (r *Runtime) ended(ctx context.Context, v view, roleContainer, initName string, initExit *corev1.ContainerStateTerminated) (string, bool) {
 	pod := v.pod
-	kind, container, state := "role", roleContainer, (*corev1.ContainerStateTerminated)(nil)
-	for _, status := range pod.Status.InitContainerStatuses {
-		if t := status.State.Terminated; t != nil && t.ExitCode != 0 {
-			kind, container, state = "init", status.Name, t
-			break
-		}
+	kind, container, state := "role", roleContainer, initExit
+	if initExit != nil {
+		kind, container = "init", initName
 	}
 	if state == nil {
 		if status := containerStatus(pod, roleContainer); status != nil {
@@ -185,6 +182,24 @@ func (r *Runtime) ended(ctx context.Context, v view, roleContainer string) (stri
 	}
 	fmt.Fprintf(&detail, "; last lines of %s:\n%s", container, r.logTail(ctx, pod.Name, container))
 	return detail.String(), workspaceLost
+}
+
+// failedInit includes a failed attempt the kubelet is restarting under restartPolicy Always.
+// A later successful termination wins over LastTerminationState.
+func failedInit(pod *corev1.Pod) (string, *corev1.ContainerStateTerminated) {
+	if pod == nil {
+		return "", nil
+	}
+	for _, status := range pod.Status.InitContainerStatuses {
+		ended := status.State.Terminated
+		if ended == nil {
+			ended = status.LastTerminationState.Terminated
+		}
+		if ended != nil && ended.ExitCode != 0 {
+			return status.Name, ended
+		}
+	}
+	return "", nil
 }
 
 func containerStatus(pod *corev1.Pod, name string) *corev1.ContainerStatus {

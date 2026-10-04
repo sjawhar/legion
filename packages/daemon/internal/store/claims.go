@@ -108,6 +108,18 @@ func (s *Store) Claims(ctx context.Context) ([]supervise.Claim, error) {
 	return claims, nil
 }
 
+// TreeHasSessions includes retained and retired roles: a new role may be the first to notice
+// that the shared volume holding another role's recorded session disappeared.
+func (s *Store) TreeHasSessions(ctx context.Context, project, tree string) (bool, error) {
+	var exists bool
+	err := s.pool.QueryRow(ctx, `select exists (select 1 from claims where project = $1 and tree = $2 and session_file <> '')`,
+		project, tree).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("read retained sessions of tree %s: %w", tree, err)
+	}
+	return exists, nil
+}
+
 // ClaimByBootTokenHash finds the claim whose current launch minted the boot token with this hash
 // — how a shim's hello and an agent's registration find the claim they belong to.
 func (s *Store) ClaimByBootTokenHash(ctx context.Context, hash []byte) (supervise.Claim, bool, error) {

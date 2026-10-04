@@ -27,9 +27,8 @@ import (
 const workspaceProvisionUsage = "legion workspace-init provision --issue <KEY> --repo <owner>/<repo> [--root /legion] --credential-helper <git helper> --feed <dir>"
 
 const (
-	// workspaceLostExitCode is the status that tells the runtime the tree volume itself was lost —
-	// neither the shared clone nor the recorded OMP session is on it — rather than that one launch
-	// failed.
+	// workspaceLostExitCode reports an expected tree volume with neither its shared clone nor
+	// any retained session. A single missing role transcript is the role launcher's refusal.
 	workspaceLostExitCode = 3
 	// lockWaitEnv bounds how long this init container waits for another pod's provisioning of the
 	// same repository. The daemon sets it on every pod from its own registration deadline, so the
@@ -156,31 +155,33 @@ func workspaceInit(ctx context.Context, issue, repo, root, credentialHelper, fee
 	}
 	cloneDir := located.Clone
 
+	if value, set := os.LookupEnv("LEGION_EXPECT_TREE_VOLUME"); set {
+		expected, err := strconv.ParseBool(value)
+		if err != nil {
+			return fmt.Errorf("LEGION_EXPECT_TREE_VOLUME must be a boolean: %w", err)
+		}
+		if expected {
+			cloned, err := pathPresent(cloneDir)
+			if err != nil {
+				return fmt.Errorf("stat the shared clone %s: %w", cloneDir, err)
+			}
+			if !cloned {
+				sessions, err := hasRetainedSession(filepath.Join(root, "sessions"))
+				if err != nil {
+					return err
+				}
+				if !sessions {
+					return volumeLostError(fmt.Sprintf("Tree volume for %s holds neither the clone (%s) nor retained sessions: the volume was lost", issue, cloneDir))
+				}
+			}
+		}
+	}
 	if err := workerbin.InstallGh(root); err != nil {
 		return err
 	}
 	for _, dir := range []string{"sessions", "gh"} {
 		if err := os.MkdirAll(filepath.Join(root, dir), 0o700); err != nil {
 			return fmt.Errorf("create %s: %w", filepath.Join(root, dir), err)
-		}
-	}
-	// A recorded session gone from the volume is a launch failure, never a silent fresh agent —
-	// which is what OMP does with a missing --resume path. Checked before the repository lock: a
-	// doomed pod must not hold the shared clone's lock while it fails.
-	if session, set := os.LookupEnv("LEGION_RESUME_SESSION_FILE"); set {
-		present, err := pathPresent(session)
-		if err != nil {
-			return fmt.Errorf("stat the recorded OMP session file %s: %w", session, err)
-		}
-		if !present {
-			cloned, err := pathPresent(cloneDir)
-			if err != nil {
-				return fmt.Errorf("stat the shared clone %s: %w", cloneDir, err)
-			}
-			if !cloned {
-				return volumeLostError(fmt.Sprintf("Tree volume for %s holds neither the clone (%s) nor the recorded OMP session file (%s): the volume was lost", issue, cloneDir, session))
-			}
-			return fmt.Errorf("Refusing to start %s fresh: recorded OMP session file is missing from the tree volume: %s", issue, session)
 		}
 	}
 
@@ -202,6 +203,27 @@ func workspaceInit(ctx context.Context, issue, repo, root, credentialHelper, fee
 		return writeRecoveryMarker(ctx, run, provisioned.Dir, fromRef)
 	}
 	return nil
+}
+
+func hasRetainedSession(dir string) (bool, error) {
+	found := false
+	err := filepath.WalkDir(dir, func(path string, entry fs.DirEntry, err error) error {
+		if errors.Is(err, fs.ErrNotExist) && path == dir {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if entry.Type().IsRegular() && strings.HasSuffix(entry.Name(), ".jsonl") {
+			found = true
+			return fs.SkipAll
+		}
+		return nil
+	})
+	if err != nil {
+		return false, fmt.Errorf("read retained sessions in %s: %w", dir, err)
+	}
+	return found, nil
 }
 
 // workspaceInitLockWait is LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS: a positive whole number of

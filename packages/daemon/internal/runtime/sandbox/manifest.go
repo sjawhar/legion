@@ -126,9 +126,10 @@ type launch struct {
 	isRoot bool
 	// prompt is the one --append-system-prompt value.
 	prompt string
-	// resumeFile is the recorded session in the main container's path, and initResumeFile the same
-	// file in the workspace-init container's; both "" for a Spawn.
-	resumeFile, initResumeFile string
+	// resumeFile is checked only by the role launcher; shared init checks tree storage, not a
+	// triggering role's transcript. Other stored sessions can also require an existing tree.
+	resumeFile       string
+	expectTreeVolume bool
 }
 
 // prepare checks spec and resolves everything a launch needs from it, reading the prompt files on
@@ -178,10 +179,11 @@ func (r *Runtime) prepare(spec runtime.SpawnSpec) (launch, error) {
 		root: root, isRoot: claim.IsTreeArchitect(spec.Role, spec.Issue, spec.Tree), prompt: prompt,
 	}
 	if spec.ResumeSessionFile != "" {
-		if l.initResumeFile, err = initSessionPath(spec.ResumeSessionFile); err != nil {
+		if err = validateSessionPath(spec.ResumeSessionFile); err != nil {
 			return launch{}, refuse("%v", err)
 		}
 		l.resumeFile = spec.ResumeSessionFile
+		l.expectTreeVolume = true
 	}
 	argv := l.agentArgv(r.agent)
 	for i, arg := range argv {
@@ -224,17 +226,14 @@ func systemPrompt(parts runtime.PromptParts) (string, error) {
 	return strings.Join(fragments, "\n\n"), nil
 }
 
-// initSessionPath is where the workspace-init container sees a main-container session file: the
-// volume's sessions directory is mounted at Oh My Pi's sessions directory in the main container and
-// sits under TreeRoot in the workspace-init container. A session anywhere else is not on the volume, so no pod
-// can resume it (initContainerSessionPath, k8s-manifests.ts).
-func initSessionPath(file string) (string, error) {
+// validateSessionPath keeps a recorded session on the volume every replacement pod mounts.
+func validateSessionPath(file string) error {
 	rest, ok := strings.CutPrefix(file, ompSessionsDir+"/")
 	if !ok || rest == "" || filepath.Clean(rest) != rest || strings.HasPrefix(rest, "../") {
-		return "", fmt.Errorf("recorded OMP session file %s is not under %s, the only directory a pod keeps sessions in; it cannot be resumed on this runtime",
+		return fmt.Errorf("recorded OMP session file %s is not under %s, the only directory a pod keeps sessions in; it cannot be resumed on this runtime",
 			file, ompSessionsDir)
 	}
-	return TreeRoot + "/" + SessionsSubPath + "/" + rest, nil
+	return nil
 }
 
 // agentArgv is the command the shim runs: the agent with no extension but the image's Legion
@@ -389,6 +388,7 @@ func (r *Runtime) launcherContainers(l launch, providersMounts []corev1.VolumeMo
 			Command: []string{
 				r.tools.Legion, "launcher", "--connect", r.streamURL, "--token-file", LauncherDir + "/" + LauncherTokenFile,
 				"--sandbox", l.name, "--role", string(role), "--private-dir", LauncherPrivateDir,
+				"--stop-grace", r.terminationGrace.String(),
 			},
 			Env:        slices.Clone(resolved),
 			WorkingDir: l.workspace,
@@ -591,19 +591,15 @@ func fetchEnvironment() []corev1.EnvVar {
 	}
 }
 
-// initEnvironment is `workspace-init provision`'s contract (research runtime §2.3). Its PATH is
-// the image's alone, naming no directory on the tree volume, so the git and jj it resolves from
-// PATH are never ones an agent put there; it carries no tool-path variables, and it is never
-// pointed at the provisioning token. A resume names the recorded session the command must find on
-// the volume, and a relaunch after the volume was lost names the ref the recreated workspace is
-// recovered from; both are workspace-init's alone, never the agent's.
+// initEnvironment gives shared provisioning its tree-wide storage expectation. It never carries
+// one role's session path: a missing transcript must not prevent sibling launchers from starting.
 func (r *Runtime) initEnvironment(l launch) []corev1.EnvVar {
 	env := []corev1.EnvVar{
 		{Name: "PATH", Value: imagePath},
 		{Name: "LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS", Value: strconv.FormatInt(r.initWaitSeconds(), 10)},
 	}
-	if l.initResumeFile != "" {
-		env = append(env, corev1.EnvVar{Name: "LEGION_RESUME_SESSION_FILE", Value: l.initResumeFile})
+	if l.expectTreeVolume {
+		env = append(env, corev1.EnvVar{Name: "LEGION_EXPECT_TREE_VOLUME", Value: "true"})
 	}
 	if l.spec.WorkspaceRecoveredFrom != "" {
 		env = append(env, corev1.EnvVar{Name: "LEGION_WORKSPACE_RECOVERED_FROM", Value: l.spec.WorkspaceRecoveredFrom})
