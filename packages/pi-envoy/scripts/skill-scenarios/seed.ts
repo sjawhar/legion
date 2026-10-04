@@ -13,16 +13,17 @@
 //   seed.ts capture <file> <run dir>       what the run left on the issue <file> names: the message,
 //                                          every ask and the whole event log, as score.ts reads
 //                                          them (message.json, asks.json, events.json in <run dir>)
-//   seed.ts brainstorm <file>              project TODO, pre-seeded with two unrelated issues about
-//                                          the same to-do CLI rig.sh's run_brainstorm writes into
-//                                          the agent's working directory; writes {project,
-//                                          preexisting} to <file>
+//   seed.ts brainstorm                     project TODO, the to-do CLI rig.sh's run_brainstorm
+//                                          writes into each agent's working directory, with two
+//                                          unrelated issues; once per batch, as `project` is
 //   seed.ts capture-brainstorm <file> <run dir>
-//                                          the one issue in <file>'s project the run did not seed
-//                                          (null when it opened none) and that issue's asks, as
-//                                          score.ts's brainstormSurface reads them
-//                                          (brainstorm.json in <run dir>)
-import { readFileSync, writeFileSync } from "node:fs";
+//                                          the issue <run dir>'s own transcript created (Dispatch's
+//                                          `Created <KEY>:` answer in a tool result; null when it
+//                                          created none) and that issue's asks, as score.ts's
+//                                          brainstormSurface reads them (brainstorm.json in
+//                                          <run dir>); <file> is unread, kept for dispatch_session's
+//                                          one capture call shape
+import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
 import {
@@ -33,13 +34,19 @@ import {
   getIssueEvents,
   getMessage,
   listIssueAsks,
-  listIssues,
 } from "../../../dispatch/e2e/api";
 
 /** What `ask-on-message` writes and `capture` reads. */
 const Fixture = z.object({ issue: z.string(), message: z.string() });
-/** What `brainstorm` writes and `capture-brainstorm` reads. */
-const BrainstormFixture = z.object({ project: z.string(), preexisting: z.array(z.string()) });
+/** One transcript line, as far as `capture-brainstorm` reads one: each tool result's text. */
+const TranscriptLine = z.looseObject({
+  message: z
+    .looseObject({
+      role: z.string().optional(),
+      content: z.array(z.looseObject({ text: z.string().optional() })).optional(),
+    })
+    .optional(),
+});
 /** The most events one `GET /api/v1/issues/{key}/events` page holds. */
 const EVENT_PAGE = 200;
 
@@ -183,57 +190,53 @@ if (command === "project") {
     writeFileSync(path.join(runDir, `${name}.json`), `${JSON.stringify(record)}\n`);
   }
   console.log(`captured ${issue}: ${records.asks.length} asks, ${events.length} events`);
-} else if (command === "brainstorm" && file !== undefined) {
-  // The to-do CLI's Dispatch project, pre-seeded with two issues unrelated to the prompt's
-  // feature (a crash already understood and a display tweak), exactly as rig.sh's own run leaves
-  // its working directory: a session that searches finds the project the way it finds a real
-  // repository's, never from its environment or the HTTP API.
-  await createProject({ key: "TODO", name: "to-do CLI" });
-  const crash = await createIssue(
-    {
-      project: "TODO",
-      force: true,
-      title: "todo.py done: a task number past the end of the list crashes",
-      spec: [
-        "## Problem",
-        "",
-        "`python todo.py done 9` on a list of three tasks raises IndexError and prints a",
-        "traceback instead of saying the task does not exist.",
-      ].join("\n"),
-    },
-    { as: "agent" }
-  );
-  const count = await createIssue(
-    {
-      project: "TODO",
-      force: true,
-      title: "todo.py list: show the task count under the list",
-      spec: [
-        "## Problem",
-        "",
-        "A long list gives no total; `list` should end with a line such as `3 tasks`.",
-      ].join("\n"),
-    },
-    { as: "agent" }
-  );
-  const fixture: z.infer<typeof BrainstormFixture> = {
-    project: "TODO",
-    preexisting: [crash.key, count.key],
-  };
-  writeFileSync(file, `${JSON.stringify(fixture)}\n`);
-  console.log(`seeded TODO, ${crash.key}, ${count.key}`);
-} else if (command === "capture-brainstorm" && file !== undefined && runDir !== undefined) {
-  const { project, preexisting } = BrainstormFixture.parse(JSON.parse(readFileSync(file, "utf8")));
-  const reader = { as: "agent" } as const;
-  const summaries = await listIssues(project, reader);
-  const created = summaries.filter((summary) => !preexisting.includes(summary.key));
-  const issue = created[0]?.key ?? null;
-  const asks = issue === null ? [] : await listIssueAsks(issue, reader);
+} else if (command === "brainstorm") {
+  // The to-do CLI's Dispatch project, the batch's only one, with two issues unrelated to the
+  // prompt's feature (a crash already understood and a display tweak). Each title names the "todo
+  // CLI" in plain words: Postgres's English parser reads `todo.py` and `to-do` as single lexemes, so
+  // a session's `dispatch_search` for "todo CLI" finds a title only where `todo` stands alone.
+  await createProject({ key: "TODO", name: "todo CLI" });
+  for (const [title, problem] of [
+    [
+      "The todo CLI's done command crashes on a task number past the end of the list",
+      "`python todo.py done 9` on a list of three tasks raises IndexError and prints a traceback instead of saying the task does not exist.",
+    ],
+    [
+      "The todo CLI's list command shows no task count",
+      "A long list gives no total; `list` should end with a line such as `3 tasks`.",
+    ],
+  ]) {
+    const issue = await createIssue(
+      { project: "TODO", force: true, title, spec: `## Problem\n\n${problem}` },
+      { as: "agent" }
+    );
+    console.log(`seeded ${issue.key}`);
+  }
+} else if (command === "capture-brainstorm" && runDir !== undefined) {
+  // The run's own issue, from its own transcript, never from the project: a batch's runs share the
+  // one project. Dispatch answers `Created <KEY>:` only when it creates the issue, whatever reached
+  // it (a `write` to the `xd://dispatch_issue` device, the same inside an `eval` cell, or the tool by
+  // name), as score.ts's CREATED reads it; a refused duplicate reads `Not created:`.
+  const sessions = path.join(runDir, "sessions");
+  const transcript = readdirSync(sessions).find((name) => name.endsWith(".jsonl"));
+  let issue: string | null = null;
+  for (const text of transcript
+    ? readFileSync(path.join(sessions, transcript), "utf8").split("\n")
+    : []) {
+    if (text.trim() === "" || issue !== null) continue;
+    const message = TranscriptLine.parse(JSON.parse(text)).message;
+    if (message?.role !== "toolResult") continue;
+    const created = /\bCreated ([A-Z][A-Z0-9]*-\d+):/.exec(
+      (message.content ?? []).map((part) => part.text ?? "").join("")
+    );
+    issue = created?.[1] ?? null;
+  }
+  const asks = issue === null ? [] : await listIssueAsks(issue, { as: "agent" });
   writeFileSync(path.join(runDir, "brainstorm.json"), `${JSON.stringify({ issue, asks })}\n`);
   console.log(`captured ${issue ?? "no new issue"}: ${asks.length} asks`);
 } else {
   console.error(
-    "usage: seed.ts project | ask-on-message <file> | measure-before-ask <file> | capture <file> <run dir> | brainstorm <file> | capture-brainstorm <file> <run dir>"
+    "usage: seed.ts project | ask-on-message <file> | measure-before-ask <file> | capture <file> <run dir> | brainstorm | capture-brainstorm <file> <run dir>"
   );
   process.exit(2);
 }

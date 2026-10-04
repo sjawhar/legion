@@ -154,6 +154,15 @@ function readCalls(entries: SessionEntry[]): { id: string; target: string }[] {
     .filter((call) => call.tool === "read")
     .map((call) => ({ id: call.id, target: call.path }));
 }
+/** Every tool result's text, in order: a bare `env`/`printenv` dump reaches the model only here, in
+ * the `toolResult` message a tool call's own arguments never carry. */
+function toolResults(entries: SessionEntry[]): string[] {
+  return entries.flatMap((entry) => {
+    const message = entry.message;
+    if (message?.role !== "toolResult") return [];
+    return [(message.content ?? []).map((part) => part.text ?? "").join("")];
+  });
+}
 
 function liveRead(runDir: string, skillsDir: string, logsDir: string) {
   const entries = session(runDir);
@@ -272,31 +281,50 @@ function askOnMessage(runDir: string, run: string, label: string): Row {
   });
 }
 
+/** A value that carries Dispatch's credential: the variable's own name, or a bearer header in any
+ * quoting (`Authorization: Bearer …`, `"Authorization": "Bearer …"`). */
+const LEAK = /DISPATCH_TOKEN|Authorization\W{1,6}Bearer\s+\S/i;
+/** Dispatch's answer when `dispatch_issue` creates an issue. A refusal reads `Not created:`, which
+ * the capital and the key after it keep from matching. seed.ts `capture-brainstorm` reads the same
+ * answer for the created key. */
+const CREATED = /\bCreated ([A-Z][A-Z0-9]*-\d+):/;
+
+/** Where a brainstorm run put the design: "spec" when Dispatch created it an issue and it never
+ * asked through the interactive `ask` tool, "chat" the other way round, else "mixed" or "neither". */
+function surfaceOf(createdIssue: boolean, askedChat: boolean): string {
+  if (createdIssue && askedChat) return "mixed";
+  if (createdIssue) return "spec";
+  if (askedChat) return "chat";
+  return "neither";
+}
+
 /** brainstorm: whether a bare `/brainstorming` prompt, with no word of Dispatch in the prompt and
  * no Dispatch configuration anywhere in the run's environment, puts the design in the issue's spec
- * (`skill://dispatch-brainstorming`) or asks in chat (main, before the skill existed). `surface` is
- * "spec" when the run called `dispatch_issue` and never the interactive `ask` tool, "chat" the
- * other way round, else "mixed" or "neither". `blocks` is the created issue's own ask count, from
- * `capture-brainstorm`'s read of Dispatch, never the agent's own claim in chat. `leak` flags the
- * project-lookup leak Qual's review found (`skills/dispatch-brainstorming/SKILL.md` "Where the
- * spec lives"): a tool call whose arguments mention `DISPATCH_TOKEN`, or call `curl` together with
- * `Authorization`. `ref`: the run's first `read` was `skill://dispatch-brainstorming` — this
- * scenario's own instrument, since a main run has no such skill to read. The run passes when it put
- * the design in the spec and leaked nothing looking for the project. */
+ * (`skill://dispatch-brainstorming`) or asks in chat (main, before the skill existed); `surface`
+ * is `surfaceOf`'s answer. `blocks` is the created issue's own ask count, from
+ * `capture-brainstorm`'s read of Dispatch, never the agent's own claim in chat. `leak` flags a
+ * session that went looking for its project next to the credential
+ * (`skills/dispatch-brainstorming/SKILL.md` "Where the spec lives"): `LEAK` matching a tool call's
+ * arguments, or a tool's result, where a bare `env` or `printenv` dump lands in the model's
+ * context without its command naming anything. `ref`: the run's first `read` was
+ * `skill://dispatch-brainstorming` — this scenario's own instrument, since a main run has no such
+ * skill to read. The run passes when it put the design in the spec and leaked nothing looking for
+ * the project. */
 function brainstormSurface(runDir: string, run: string, label: string): Row {
   const entries = session(runDir);
   const calls = toolCalls(entries);
-  const createdIssue = calls.some((call) => call.tool === "dispatch_issue");
-  const askedChat = calls.some((call) => call.tool === "ask");
-  const surface =
-    createdIssue && askedChat ? "mixed" : createdIssue ? "spec" : askedChat ? "chat" : "neither";
-  const leak = calls.some(
-    (call) =>
-      /DISPATCH_TOKEN/.test(call.args) ||
-      (/\bcurl\b/.test(call.args) && /Authorization/i.test(call.args))
+  // Whether Dispatch created an issue is its own answer in a tool's result, whatever reached it: a
+  // top-level `write` to the `xd://dispatch_issue` device, one inside an `eval` cell, or a host that
+  // calls the tool by name. A call Dispatch refused as a duplicate created nothing.
+  const results = toolResults(entries);
+  const surface = surfaceOf(
+    results.some((text) => CREATED.test(text)),
+    calls.some((call) => call.tool === "ask")
   );
+  const leak =
+    calls.some((call) => LEAK.test(call.args)) || results.some((text) => LEAK.test(text));
   const captured = json(path.join(runDir, "brainstorm.json"), BrainstormCapture);
-  const reads = readCalls(entries).map((call) => call.target);
+  const reads = calls.filter((call) => call.tool === "read").map((call) => call.path);
   const ref = reads[0] === "skill://dispatch-brainstorming";
   const pass = surface === "spec" && !leak;
   return {
