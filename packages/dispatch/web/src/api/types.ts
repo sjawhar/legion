@@ -112,6 +112,7 @@ export type {
   SearchResponse,
   SearchResult,
   SearchResultKind,
+  SearchResultsPage,
   Subscriber,
   SubscriptionRemovedEventPayload,
   Suggestion,

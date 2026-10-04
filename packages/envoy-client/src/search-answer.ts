@@ -24,13 +24,11 @@ function searchResultLine(result: SearchResult, baseUrl: string): string {
 }
 
 /**
- * The `dispatch_search` tool's text and details for one answer: every existing branch (a legacy
- * Dispatch that predates paging and omits `total`, the offset-past-end refusal, the cut line when
- * a kind's cap keeps some matches unreachable, and the next-offset line) unchanged, just moved out
- * of `dispatch-execute.ts`'s `case "dispatch_search"` so the wording lives in its own module, as
- * `ask-answer.ts` and `delivery.ts` already do for their own tools. `offset` is the offset the
- * caller requested (possibly undefined), used only for the legacy-Dispatch refusal message;
- * `search.offset` is the server's own answer.
+ * The `dispatch_search` tool's text and details for one answer: refuses a later page from a
+ * legacy Dispatch that predates paging and always answers its first page regardless of offset,
+ * names a kind's cap when it keeps some matches unreachable, and names the next offset when more
+ * remain. `offset` is the offset the caller requested (possibly undefined), used only for the
+ * legacy-Dispatch refusal message; `search.offset` is the server's own answer.
  */
 export function searchAnswer(
   search: SearchResponse,
@@ -60,11 +58,6 @@ export function searchAnswer(
     };
   }
   const { total, reachable, offset: pageOffset } = search;
-  if (reachable === undefined || pageOffset === undefined) {
-    // Every Dispatch that answers a total answers reachable and offset alongside it
-    // (packages/contracts/src/dispatch-api.ts's SearchResponse); the type just can't say so.
-    throw new Error("Dispatch answered a total without reachable or offset.");
-  }
   const end = pageOffset + count;
   const cut =
     reachable < total

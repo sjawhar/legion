@@ -1150,22 +1150,35 @@ export interface SearchResult {
   readonly href: string;
 }
 
-/** One page of `GET /api/v1/search`'s fused order, cut at `offset` and `limit`. `total`,
- * `reachable`, `limit`, and `offset` are absent from a Dispatch that predates search paging,
- * which always answers its first page regardless of any offset requested. */
-export interface SearchResponse {
-  readonly results: SearchResult[];
+/** The four paging fields a Dispatch that supports search paging always answers together. */
+export interface SearchResultsPage {
   /** Every match of every kind. */
-  readonly total?: number;
+  readonly total: number;
   /**
    * How many of `total` the pages can return: each kind lists only its best `SEARCH_KIND_DEPTH`
    * (`dispatch-tools.ts`), so an offset at or past this returns no results.
    */
-  readonly reachable?: number;
-  readonly limit?: number;
-  readonly offset?: number;
-  readonly took_ms: number;
+  readonly reachable: number;
+  readonly limit: number;
+  readonly offset: number;
 }
+
+/** One page of `GET /api/v1/search`'s fused order, cut at `offset` and `limit`. `total`,
+ * `reachable`, `limit`, and `offset` answer together or not at all: a Dispatch that predates
+ * search paging omits all four and always answers its first page regardless of any offset
+ * requested; one that supports it always answers all four together (`SearchResultsPage`). */
+export type SearchResponse = {
+  readonly results: SearchResult[];
+  readonly took_ms: number;
+} & (
+  | SearchResultsPage
+  | {
+      readonly total?: undefined;
+      readonly reachable?: undefined;
+      readonly limit?: undefined;
+      readonly offset?: undefined;
+    }
+);
 
 export interface DuplicateCandidate {
   readonly key: string;
