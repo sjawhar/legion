@@ -6,16 +6,20 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 	"github.com/google/uuid"
 
 	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/policy/policytest"
 	"github.com/sjawhar/envoy/internal/broker/proof"
+	"github.com/sjawhar/envoy/internal/broker/ratelimit"
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
 	"github.com/sjawhar/envoy/internal/broker/store"
@@ -118,14 +122,15 @@ func newFixture(t *testing.T) (m *Machine, enrollmentID string, requesterKey *ec
 	enrollmentID, requesterKey = newEnrollment(t, st, "box", "box-a-"+t.Name(), new(fixtureOperator), nil)
 
 	m = &Machine{
-		Store:      st,
-		Policy:     policytest.Current(t, local, fixtureService),
-		Secrets:    secrets.AWS{Client: local},
-		MaxGrant:   time.Hour,
-		PendingTTL: 12 * time.Hour,
-		Audience:   testAudience,
-		Skew:       time.Minute,
-		Replay:     replayer(st),
+		Store:       st,
+		Policy:      policytest.Current(t, local, fixtureService),
+		Secrets:     secrets.AWS{Client: local},
+		MaxGrant:    time.Hour,
+		PendingTTL:  12 * time.Hour,
+		Audience:    testAudience,
+		Skew:        time.Minute,
+		Replay:      replayer(st),
+		MissRereads: ratelimit.NewKeyed(DefaultMissRereads),
 	}
 	m.Chain = NewChainVerifier(st, testAudience, time.Minute)
 	return m, enrollmentID, requesterKey, fixtureOperator
@@ -360,6 +365,54 @@ func TestCreateRefusesAnUnknownSecretNameWithNoRecordWritten(t *testing.T) {
 	if err := m.Store.Pool.QueryRow(ctx, `select count(*) from requests where enrollment_id=$1`, enr).Scan(&count); err != nil || count != 0 {
 		t.Fatalf("requests rows for enrollment = %d, %v, want 0 (an unknown secret name aborts the whole Create call)", count, err)
 	}
+}
+
+// TestCreateServesASecretCreatedAfterTheLastReload pins the miss path: a request naming a secret
+// the policy's listing has not seen yet is served on its first request, not refused until the
+// five-minute reload.
+func TestCreateServesASecretCreatedAfterTheLastReload(t *testing.T) {
+	m, enr, key, _ := newFixture(t)
+	fixtureStore(m).Put(policytest.Secret("BRAND_NEW_KEY", fixtureOperator, policy.TierAgent, "v1"))
+	// No Policy.Refresh: the cached Set predates the Put, as production's does for up to 5 minutes.
+	req, err := m.Create(context.Background(), enr, signRequest(t, m, key, "need it", "BRAND_NEW_KEY"), "")
+	if err != nil || req.State != "granted" || req.GrantID == nil {
+		t.Fatalf("Create(BRAND_NEW_KEY) = %+v, %v; want an automatic grant via the miss-path reread", req, err)
+	}
+}
+
+// TestMissRereadsAreBoundedPerEnrollment pins the miss path's bound: a session inventing names
+// costs at most its enrollment's burst of DescribeSecret calls, and a miss past it is refused
+// without one.
+func TestMissRereadsAreBoundedPerEnrollment(t *testing.T) {
+	m, enr, key, _ := newFixture(t)
+	m.MissRereads = ratelimit.NewKeyed(ratelimit.Limit{Every: time.Hour, Burst: 2})
+	count := &countingDescriber{DescribeSecretAPIClient: fixtureStore(m)}
+	loader := policytest.Loader(fixtureStore(m), fixtureService) // the fixture's services, as newFixture registers them
+	loader.Describer = count
+	cur, err := policy.NewCurrent(t.Context(), loader, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Policy = cur
+	for i := range 3 {
+		if _, err := m.Create(context.Background(), enr, signRequest(t, m, key, "miss", fmt.Sprintf("NO_SUCH_KEY_%d", i)), ""); !errors.Is(err, policy.ErrUnknownSecret) {
+			t.Fatalf("miss %d: %v", i, err)
+		}
+	}
+	if got := count.calls.Load(); got != 2 {
+		t.Fatalf("DescribeSecret calls = %d, want 2 (the burst); the third miss must skip the reread", got)
+	}
+}
+
+// countingDescriber counts the DescribeSecret calls a policy reread makes.
+type countingDescriber struct {
+	policy.DescribeSecretAPIClient
+	calls atomic.Int64
+}
+
+func (c *countingDescriber) DescribeSecret(ctx context.Context, in *secretsmanager.DescribeSecretInput, opts ...func(*secretsmanager.Options)) (*secretsmanager.DescribeSecretOutput, error) {
+	c.calls.Add(1)
+	return c.DescribeSecretAPIClient.DescribeSecret(ctx, in, opts...)
 }
 
 func TestCoalescesIdenticalPendingAndReturnsTheFirstRecordID(t *testing.T) {

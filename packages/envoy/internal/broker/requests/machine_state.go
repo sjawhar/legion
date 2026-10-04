@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"slices"
 	"sort"
 	"time"
@@ -26,6 +27,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/broker/policy"
+	"github.com/sjawhar/envoy/internal/broker/ratelimit"
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
 	"github.com/sjawhar/envoy/internal/broker/store"
@@ -51,6 +53,10 @@ var (
 // jtiRetentionMargin is how long past a request object's expiry its jti is remembered, mirroring
 // proof.Verifier's own retention margin.
 const jtiRetentionMargin = time.Minute
+
+// DefaultMissRereads bounds the policy rereads one enrollment's unknown-name requests trigger:
+// a session inventing names costs at most Burst DescribeSecret calls, refilled one per Every.
+var DefaultMissRereads = ratelimit.Limit{Every: 10 * time.Second, Burst: 10}
 
 // SecretDecision is how the policy decided one name of a request.
 type SecretDecision struct {
@@ -97,6 +103,10 @@ type Machine struct {
 	// record.ChainVerifier machinery enroll.Service.AuthenticateLauncher uses for launcher
 	// credentials, built by NewChainVerifier against agent_secret records instead.
 	Chain *record.ChainVerifier
+	// MissRereads bounds, per enrollment, the single-name policy rereads Create makes for names the
+	// live policy does not serve (rereadMissing). Required: constructors set
+	// ratelimit.NewKeyed(DefaultMissRereads).
+	MissRereads *ratelimit.Keyed
 }
 
 // NewChainVerifier builds the record.ChainVerifier VerifyChain uses, scoped to agent_secret
@@ -129,8 +139,9 @@ func (e enrollmentRow) requester(ctx context.Context, q querier) (policy.Request
 
 // Create verifies the request object (record.VerifyRequestObject, jti replay through the Replay
 // seam), requires iss to be this enrollment's own key and no login_hint (session requests never
-// name their own approver — that's the policy's job), and hands back a live grant for exactly these
-// names when one may be reused (reuseLiveGrant). Otherwise it decides and writes the request in one
+// name their own approver — that's the policy's job), rereads each name the live policy does not
+// serve (rereadMissing), and hands back a live grant for exactly these names when one may be
+// reused (reuseLiveGrant). Otherwise it decides and writes the request in one
 // transaction: it takes the advisory lock that serializes identical requests from one enrollment
 // (lockIdenticalPending), then locks the enrollment live (lockLiveEnrollment), so no request or
 // grant lands on an enrollment that ended after Create first read it (such an enrollment is
@@ -169,7 +180,7 @@ func (m *Machine) Create(ctx context.Context, enrollmentID, compactRequest, sess
 		names[i] = d.Identifier
 	}
 
-	set := m.Policy.Get()
+	set := m.rereadMissing(ctx, enrollmentID, names, m.Policy.Get())
 	if existing, ok, err := m.reuseLiveGrant(ctx, enr, names, set); err != nil {
 		return Request{}, err
 	} else if ok {
@@ -232,6 +243,31 @@ func (m *Machine) Create(ctx context.Context, enrollmentID, compactRequest, sess
 		return Request{}, err
 	}
 	return req, tx.Commit(ctx)
+}
+
+// rereadMissing rereads each requested name the live set does not serve (the spec's miss path: a
+// secret created seconds ago is not in the listing yet), bounded per enrollment by MissRereads,
+// and answers the set to evaluate against. A failed reread logs LoadFailedMessage and the name
+// stays unknown — the caller sees UNKNOWN_SECRET exactly as before the miss path existed. It runs
+// before Create's transaction, so no Secrets Manager call holds a row lock. A name no secret can
+// carry (policy.ErrNameInvalid, a free-text identifier) stays unknown without a line.
+func (m *Machine) rereadMissing(ctx context.Context, enrollmentID string, names []string, set *policy.Set) *policy.Set {
+	for _, name := range names {
+		if _, ok := set.Secrets[name]; ok {
+			continue
+		}
+		if !m.MissRereads.Allow(enrollmentID) {
+			return set
+		}
+		if _, err := m.Policy.RefreshOne(ctx, name); err != nil {
+			if !errors.Is(err, policy.ErrNameInvalid) {
+				slog.Error(policy.LoadFailedMessage, "name", name, "error", err)
+			}
+			continue
+		}
+		set = m.Policy.Get()
+	}
+	return set
 }
 
 // evaluation is one pass of the policy over a request's names. approver is set when a name needs
