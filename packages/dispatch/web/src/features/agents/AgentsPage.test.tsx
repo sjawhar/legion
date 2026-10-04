@@ -685,6 +685,7 @@ const coreIssue: IssueSummary = {
   key: "CORE-1",
   last_seq: 0,
   open_asks: 0,
+  progress: { tasks: null, children: null },
   parent: null,
   priority: null,
   rank: "U",

@@ -390,6 +390,11 @@ func (s *server) storeArtifact(
 			s.writeHandlerError(w, err)
 			return
 		}
+		// The version row exists now, so the count names it (LEGION-542).
+		if err := docs.RecordTaskProgressMarkdown(r.Context(), tx, artifact.ID, documentMarkdown); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
 		documentChanges, err = s.replaceReferences(r.Context(), tx, "artifact", artifact.ID, documentMarkdown)
 		if err != nil {
 			s.writeHandlerError(w, err)
