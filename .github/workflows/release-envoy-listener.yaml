@@ -24,10 +24,11 @@ on:
       - "docs/site/package.json"
       - ".dockerignore"
       - ".github/workflows/release-envoy-listener.yaml"
-      # The image's and the binaries' third-party notices.
+      # The image's and the binaries' third-party notices, and the archives' target list.
       - "scripts/third-party-notices.ts"
       - "scripts/go-third-party-notices.sh"
       - "scripts/assemble-third-party-notices.sh"
+      - ".github/go-release-targets.json"
   workflow_dispatch:
 
 permissions:
@@ -38,7 +39,21 @@ permissions:
 
 jobs:
 
+  # The architectures the archives are built for: .github/go-release-targets.json, the list the
+  # pull request's notices check reads too.
+  targets:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      envoy: ${{ steps.read.outputs.envoy }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: read
+        run: echo "envoy=$(jq -c .envoy .github/go-release-targets.json)" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: targets
     runs-on: ubuntu-24.04
     # Checks out and uploads; nothing here writes to the repository or a registry.
     permissions:
@@ -46,7 +61,7 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        arch: [amd64, arm64]
+        arch: ${{ fromJSON(needs.targets.outputs.envoy) }}
     steps:
       - uses: actions/checkout@v5
       - uses: ./.github/actions/setup-bun
@@ -298,12 +313,14 @@ jobs:
           CURRENT="${LATEST_TAG#legion-envoy-v}"
           CURRENT="${CURRENT%%-*}"
           # Every notices script changes an artifact this release publishes: the web app in the
-          # image, the Go archives, or the image assembly. They therefore take a patch release.
+          # image, the Go archives, or the image assembly; and the target list decides the
+          # archives. They therefore take a patch release.
           VERSION=$(.github/scripts/release-bump.sh "$CURRENT" "${LATEST_TAG}..HEAD" \
             --patch-path scripts/third-party-notices.ts --patch-path scripts/go-third-party-notices.sh \
-            --patch-path scripts/assemble-third-party-notices.sh \
+            --patch-path scripts/assemble-third-party-notices.sh --patch-path .github/go-release-targets.json \
             -- packages/envoy/ packages/contracts/ scripts/third-party-notices.ts \
-            scripts/go-third-party-notices.sh scripts/assemble-third-party-notices.sh)
+            scripts/go-third-party-notices.sh scripts/assemble-third-party-notices.sh \
+            .github/go-release-targets.json)
 
           if [ "$VERSION" = "empty" ]; then
             echo "should_release=false" >> "$GITHUB_OUTPUT"
@@ -401,7 +418,7 @@ jobs:
         run: |
           test -n "$TAG"
           mkdir -p ../../agent-secrets-assets
-          for arch in amd64 arm64; do
+          for arch in $(jq -r '.envoy[]' ../../.github/go-release-targets.json); do
             mkdir -p "out/$arch/agent-secrets/bin"
             for cmd in agent-secrets agent-secrets-helper; do
               CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build -buildvcs=false \
@@ -423,7 +440,7 @@ jobs:
       - name: Generate checksums
         if: steps.publish.outputs.should_release == 'true'
         run: |
-          for dir in legion-envoy-amd64 legion-envoy-arm64 agent-secrets-assets; do
+          for dir in legion-envoy-* agent-secrets-assets; do
             (cd "$dir" && sha256sum -- * >> ../SHA256SUMS)
           done
       - name: Create or update GitHub release
@@ -434,16 +451,14 @@ jobs:
         run: |
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$TAG" --clobber \
-              ./legion-envoy-amd64/* \
-              ./legion-envoy-arm64/* \
+              ./legion-envoy-*/* \
               ./agent-secrets-assets/* \
               SHA256SUMS
           else
             gh release create "$TAG" \
               --title "$TAG" \
               --notes "Envoy listener release — Go binary + Docker image, plus agent-secrets and agent-secrets-helper host binaries." \
-              ./legion-envoy-amd64/* \
-              ./legion-envoy-arm64/* \
+              ./legion-envoy-*/* \
               ./agent-secrets-assets/* \
               SHA256SUMS
           fi

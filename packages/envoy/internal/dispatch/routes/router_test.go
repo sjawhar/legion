@@ -391,44 +391,6 @@ func TestStaticHandlerServesSpaShellForUnknownRoute(t *testing.T) {
 	}
 }
 
-func TestStaticHandlerServesNoticesAsPlainText(t *testing.T) {
-	webDist := t.TempDir()
-	if err := os.WriteFile(filepath.Join(webDist, "THIRD_PARTY_NOTICES.txt"), []byte("notices"), 0o600); err != nil {
-		t.Fatalf("write notices: %v", err)
-	}
-	handler, context := newTestRouter(t, &memoryUserStore{users: map[string]*auth.User{}}, nil)
-	context.WebDistDir = webDist
-
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/THIRD_PARTY_NOTICES.txt", nil))
-
-	if response.Code != http.StatusOK {
-		t.Fatalf("notices status: got %d, want %d", response.Code, http.StatusOK)
-	}
-	if contentType := response.Header().Get("Content-Type"); contentType != "text/plain; charset=utf-8" {
-		t.Fatalf("notices Content-Type: got %q, want text/plain; charset=utf-8", contentType)
-	}
-}
-
-func TestStaticHandlerServesExportedPNGsAsImages(t *testing.T) {
-	webDist := t.TempDir()
-	if err := os.WriteFile(filepath.Join(webDist, "agent.png"), []byte("png"), 0o600); err != nil {
-		t.Fatalf("write image: %v", err)
-	}
-	handler, context := newTestRouter(t, &memoryUserStore{users: map[string]*auth.User{}}, nil)
-	context.WebDistDir = webDist
-
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/agent.png", nil))
-
-	if response.Code != http.StatusOK {
-		t.Fatalf("image status: got %d, want %d", response.Code, http.StatusOK)
-	}
-	if contentType := response.Header().Get("Content-Type"); contentType != "image/png" {
-		t.Fatalf("image Content-Type: got %q, want image/png", contentType)
-	}
-}
-
 func TestStaticHandlerServesIndexAtRoot(t *testing.T) {
 	webDist := t.TempDir()
 	if err := os.WriteFile(filepath.Join(webDist, "index.html"), []byte("<!doctype html>"), 0o600); err != nil {
@@ -635,7 +597,8 @@ func TestStaticHandlerServesBuiltAssets(t *testing.T) {
 // deploy and asks for assets the server no longer has, so every HTML answer, the SPA fallback
 // included, makes the browser revalidate. Vite's hashed output never changes under its name, so
 // it may be kept for a year without asking. A missing asset's 404 must never carry that, or the
-// browser would keep the failure. Every other file keeps net/http's own answer.
+// browser would keep the failure. Every other file keeps net/http's own answer. A file the build
+// emits is served as its type, so a browser shows the notices text rather than downloading it.
 func TestStaticHandlerCacheControl(t *testing.T) {
 	webDist := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(webDist, "assets"), 0o700); err != nil {
@@ -644,8 +607,10 @@ func TestStaticHandlerCacheControl(t *testing.T) {
 	for name, body := range map[string]string{
 		"index.html":              "<!doctype html>",
 		"favicon.svg":             "<svg/>",
+		"THIRD_PARTY_NOTICES.txt": "notices",
 		"assets/index-abc123.js":  "console.log(1)",
 		"assets/index-abc123.css": "body{}",
+		"assets/agent-abc123.png": "png",
 	} {
 		if err := os.WriteFile(filepath.Join(webDist, name), []byte(body), 0o600); err != nil {
 			t.Fatalf("write %s: %v", name, err)
@@ -658,6 +623,8 @@ func TestStaticHandlerCacheControl(t *testing.T) {
 		path         string
 		status       int
 		cacheControl string
+		// Checked when set.
+		contentType string
 	}{
 		{path: "/", status: http.StatusOK, cacheControl: pageCacheControl},
 		{path: "/issues/CORE-1", status: http.StatusOK, cacheControl: pageCacheControl},
@@ -666,6 +633,8 @@ func TestStaticHandlerCacheControl(t *testing.T) {
 		{path: "/assets/index-abc123.css", status: http.StatusOK, cacheControl: assetCacheControl},
 		{path: "/assets/index-missing.js", status: http.StatusNotFound, cacheControl: ""},
 		{path: "/favicon.svg", status: http.StatusOK, cacheControl: ""},
+		{path: "/THIRD_PARTY_NOTICES.txt", status: http.StatusOK, cacheControl: "", contentType: "text/plain; charset=utf-8"},
+		{path: "/assets/agent-abc123.png", status: http.StatusOK, cacheControl: assetCacheControl, contentType: "image/png"},
 		{path: "/favicon.ico", status: http.StatusOK, cacheControl: ""},
 	} {
 		t.Run(tc.path, func(t *testing.T) {
@@ -676,6 +645,9 @@ func TestStaticHandlerCacheControl(t *testing.T) {
 			}
 			if got := response.Header().Values("Cache-Control"); strings.Join(got, ", ") != tc.cacheControl {
 				t.Fatalf("%s: Cache-Control %q, want %q", tc.path, got, tc.cacheControl)
+			}
+			if got := response.Header().Get("Content-Type"); tc.contentType != "" && got != tc.contentType {
+				t.Fatalf("%s: Content-Type %q, want %q", tc.path, got, tc.contentType)
 			}
 		})
 	}

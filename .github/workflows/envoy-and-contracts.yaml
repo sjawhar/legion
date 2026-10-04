@@ -27,15 +27,17 @@ on:
       - ".omp-pin"
       - ".github/actions/install-omp/**"
       # The envoy-smoke job builds packages/envoy/docker/Dockerfile, so this list owes every
-      # file that build reads: the six below are the ones the entries above do not already
-      # cover. .github/scripts/check-image-trigger-paths.sh fails the build when one is missing.
-      # The notices scripts also write what the packed plugins and binaries below ship.
+      # file that build reads: the six below before the target list are the ones the entries
+      # above do not already cover. .github/scripts/check-image-trigger-paths.sh fails the build
+      # when one is missing. The notices scripts also write what the packed plugins and binaries
+      # below ship, and the target list names the archives the envoy-go job packs.
       - ".github/workflows/envoy-and-contracts.yaml"
       - ".dockerignore"
       - "docs/site/package.json"
       - "scripts/third-party-notices.ts"
       - "scripts/go-third-party-notices.sh"
       - "scripts/assemble-third-party-notices.sh"
+      - ".github/go-release-targets.json"
   pull_request:
     paths:
       - "packages/envoy/**"
@@ -57,13 +59,14 @@ on:
       - "go.work.sum"
       - ".omp-pin"
       - ".github/actions/install-omp/**"
-      # Same six the push list owes, for the same build.
+      # Same entries the push list owes, for the same jobs.
       - ".github/workflows/envoy-and-contracts.yaml"
       - ".dockerignore"
       - "docs/site/package.json"
       - "scripts/third-party-notices.ts"
       - "scripts/go-third-party-notices.sh"
       - "scripts/assemble-third-party-notices.sh"
+      - ".github/go-release-targets.json"
   merge_group:
     types: [checks_requested]
 
@@ -109,8 +112,9 @@ jobs:
               # Its bun run gen:go step imports contracts' zod schemas.
               - 'package.json'
               - 'bun.lock'
-              # Its pack step writes each archive's notices.
+              # Its pack step writes each archive's notices, for each target the list names.
               - 'scripts/go-third-party-notices.sh'
+              - '.github/go-release-targets.json'
             # Every file packages/envoy/docker/Dockerfile builds from, so the envoy-smoke job
             # runs whenever the image it smokes changes. `envoy` is deliberately not widened to
             # this: that would run the whole Go suite on every Dispatch pull request.
@@ -319,12 +323,10 @@ jobs:
       - name: Test pi-envoy
         run: bun run test
         working-directory: packages/pi-envoy
-      - name: Build pi-envoy
-        run: bun run build
-        working-directory: packages/pi-envoy
-      # The release's pack (release.yaml's pi_envoy job): the manifest pointed at the bundles, then
-      # prepack.sh, which writes dist/THIRD_PARTY_NOTICES and fails the pack on a bundled package
-      # whose license cannot be determined; the listing shows the tarball ships it.
+      # The release's pack (release.yaml's pi_envoy job), which is also this job's build: the manifest
+      # pointed at the bundles, then prepack.sh, which bundles both extensions, writes
+      # dist/THIRD_PARTY_NOTICES and fails the pack on a bundled package whose license cannot be
+      # determined; the listing shows the tarball ships it.
       - name: Pack pi-envoy
         run: |
           jq '.omp.extensions = ["dist/envoy.js","dist/legion.js"]' package.json > "$RUNNER_TEMP/package.json"
@@ -517,7 +519,7 @@ jobs:
       # The release's archives (release-envoy-listener.yaml), THIRD_PARTY_NOTICES included.
       - name: Pack envoy binaries
         run: |
-          for arch in amd64 arm64; do
+          for arch in $(jq -r '.envoy[]' ../../.github/go-release-targets.json); do
             out="../../out/pr-artifacts/envoy-$arch"
             mkdir -p "$out"
             GOOS=linux GOARCH=$arch go build -buildvcs=false -o "$out/envoy-listener" ./cmd/listener

@@ -51,19 +51,30 @@ jobs:
             exit 1
           fi
 
+      # The notices step below builds go-licenses and loads every release binary's modules. It
+      # keeps them under a key of its own, apart from the one setup-go above leaves unsaved.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+            ~/.cache/legion
+          key: go-notices-${{ runner.os }}-${{ hashFiles('go.work.sum', 'packages/daemon/go.sum', 'packages/envoy/go.sum', 'scripts/go-third-party-notices.sh') }}
+
       # Every Go archive a release ships carries THIRD_PARTY_NOTICES, written at build time with
       # the build's own GOOS, GOARCH and CGO_ENABLED (release.yaml's legion job and
-      # release-envoy-listener.yaml). Writing them here for each of those builds fails the pull
-      # request that brings in a module whose license cannot be determined, before a release does.
+      # release-envoy-listener.yaml, whose targets .github/go-release-targets.json lists for all of
+      # them). Writing them here for each of those builds fails the pull request that brings in a
+      # module whose license cannot be determined, before a release does.
       - name: Check every Go release archive's third-party notices can be written
         run: |
           notices="$RUNNER_TEMP/notices"
           mkdir -p "$notices"
-          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+          for target in $(jq -r '.legion[]' .github/go-release-targets.json); do
             (cd packages/daemon && CGO_ENABLED=0 GOOS="${target%/*}" GOARCH="${target#*/}" \
               ../../scripts/go-third-party-notices.sh "$notices/legion-${target%/*}-${target#*/}" ./cmd/legion)
           done
-          for arch in amd64 arm64; do
+          for arch in $(jq -r '.envoy[]' .github/go-release-targets.json); do
             (cd packages/envoy && GOOS=linux GOARCH="$arch" \
               ../../scripts/go-third-party-notices.sh "$notices/legion-envoy-$arch" ./cmd/listener)
             (cd packages/envoy && CGO_ENABLED=0 GOOS=linux GOARCH="$arch" \
