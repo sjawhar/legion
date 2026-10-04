@@ -828,14 +828,12 @@ func (s *Service) sweepUnrecordedMarks(room string, tree *pmdoc.Node) {
 		}
 		seen[mark] = struct{}{}
 		if _, found := recordedRefs[mark]; found {
-			state := s.room(room)
-			state.mu.Lock()
+			state := s.lockState(room)
 			delete(state.unrecorded, mark)
-			state.mu.Unlock()
+			s.unlockState(room, state)
 			continue
 		}
-		state := s.room(room)
-		state.mu.Lock()
+		state := s.lockState(room)
 		firstSeen, found := state.unrecorded[mark]
 		if !found {
 			firstSeen = now
@@ -847,10 +845,9 @@ func (s *Service) sweepUnrecordedMarks(room string, tree *pmdoc.Node) {
 		} else if wait := s.unrecordedMarkTTL - age; next == 0 || wait < next {
 			next = wait
 		}
-		state.mu.Unlock()
+		s.unlockState(room, state)
 	}
-	state := s.room(room)
-	state.mu.Lock()
+	state := s.lockState(room)
 	for mark := range state.unrecorded {
 		if _, found := seen[mark]; !found {
 			delete(state.unrecorded, mark)
@@ -859,7 +856,7 @@ func (s *Service) sweepUnrecordedMarks(room string, tree *pmdoc.Node) {
 	if next > 0 {
 		s.scheduleSettleAfterLocked(room, state, next)
 	}
-	state.mu.Unlock()
+	s.unlockState(room, state)
 	if len(expired) == 0 {
 		return
 	}

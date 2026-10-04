@@ -241,10 +241,10 @@ func (s *Service) SeedText(ctx context.Context, artifactID, markdown string, act
 	}
 	// The seeding actor is the caller's own first version author (written directly by the
 	// caller, never through writeVersionTx), so it must not join `pending` - only the
-	// settlement that indexes the seeded ask blocks needs to know who wrote them. Recording it
-	// makes the document's room, so it waits for the seed to be written: a room leaves only when
-	// it is evicted, and a refused seed would hold one of the live-room slots for good.
-	s.recordLastActor(artifactID, actor)
+	// settlement that indexes the seeded ask blocks needs to know who wrote them. The ledger
+	// records it once the transaction commits (Ledger.credit), so a seed that never commits
+	// leaves the document no state.
+	ledgerFrom(ctx).seeded(artifactID, actor)
 	return canonical, nil
 }
 
@@ -579,9 +579,8 @@ func (s *Service) SnapshotVersion(ctx context.Context, artifactID string, actor 
 // commitVersion clears authors consumed by a version only after its enclosing transaction has
 // committed (Ledger.Commit).
 func (s *Service) commitVersion(artifactID string, version model.Version) {
-	state := s.room(artifactID)
-	state.mu.Lock()
-	defer state.mu.Unlock()
+	state := s.lockState(artifactID)
+	defer s.unlockState(artifactID, state)
 	capture, ok := state.pendingVersions[version.Number]
 	if !ok {
 		return
@@ -596,10 +595,9 @@ func (s *Service) commitVersion(artifactID string, version model.Version) {
 }
 
 func (s *Service) discardPendingVersion(room string, version model.Version) {
-	state := s.room(room)
-	state.mu.Lock()
+	state := s.lockState(room)
 	delete(state.pendingVersions, version.Number)
-	state.mu.Unlock()
+	s.unlockState(room, state)
 }
 
 // prevalidateLiveOperations performs database-backed table-anchor checks
@@ -1073,13 +1071,6 @@ func (s *Service) serviceTransact(transact func(func(*crdt.Transaction)), actor 
 	return wrapped, release
 }
 
-func (s *Service) recordLastActor(room string, actor model.Actor) {
-	state := s.room(room)
-	state.mu.Lock()
-	state.lastActor = new(actor)
-	state.mu.Unlock()
-}
-
 // captureLiveTextAndAuthors is the tree a version records and whom it credits. joinRead brings
 // the calling transaction's fork up to date with the room, which is where a browser change made
 // while the transaction's write was in flight merges with it - and where a write whose text that
@@ -1093,10 +1084,9 @@ func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, ac
 		return nil, "", versionPending{}, nil, err
 	}
 	if write := joinedLiveWrite(ctx, room); fork != nil && write != nil && write.tree != nil && write.fork == fork {
-		state := s.room(room)
-		state.mu.Lock()
+		state := s.lockState(room)
 		capture, authors := captureAuthors(state, write, actor)
-		state.mu.Unlock()
+		s.unlockState(room, state)
 		return write.tree, write.markdown, capture, authors, nil
 	}
 	// The room's state lock is held from the read to the authors it captures, so an author the
@@ -1112,19 +1102,17 @@ func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, ac
 	var capture versionPending
 	var authors []model.Actor
 	if doc != nil {
-		state := s.room(room)
-		state.mu.Lock()
+		state := s.lockState(room)
 		capture, authors = captureAuthors(state, joinedLiveWrite(ctx, room), actor)
-		state.mu.Unlock()
+		s.unlockState(room, state)
 	} else {
 		var copyErr error
 		err := s.srv.Apply(ctx, room, func(live *crdt.Doc, _ func(func(*crdt.Transaction))) {
 			if s.afterReadWarm != nil {
 				s.afterReadWarm(room)
 			}
-			state := s.room(room)
-			state.mu.Lock()
-			defer state.mu.Unlock()
+			state := s.lockState(room)
+			defer s.unlockState(room, state)
 			if doc, copyErr = snapshotDocument(live); copyErr == nil {
 				capture, authors = captureAuthors(state, joinedLiveWrite(ctx, room), actor)
 			}
@@ -1167,10 +1155,9 @@ func captureAuthors(state *roomState, write *liveWrite, actor *model.Actor) (ver
 }
 
 func (s *Service) rememberPendingVersion(room string, version model.Version, capture versionPending) {
-	state := s.room(room)
-	state.mu.Lock()
+	state := s.lockState(room)
 	state.pendingVersions[version.Number] = capture
-	state.mu.Unlock()
+	s.unlockState(room, state)
 }
 
 func latestVersion(ctx context.Context, tx pgx.Tx, artifactID string) (struct {

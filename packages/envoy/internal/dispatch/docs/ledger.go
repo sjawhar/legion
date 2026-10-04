@@ -34,6 +34,9 @@ type Ledger struct {
 	live     map[string]*liveWrite
 	order    []string
 	versions []ledgerVersion
+	// seeds holds, per document this transaction seeded (SeedText), the actor that wrote its first
+	// text, which credit records once the transaction has committed.
+	seeds map[string]model.Actor
 	// rebuilds are the documents this transaction rebuilds (RebuildDocument), whose rooms refuse
 	// loads until it ends, committed or not.
 	rebuilds []string
@@ -115,6 +118,12 @@ func (l *Ledger) publishEvents() {
 // commit is Commit up to the publish. Another transaction can run between the two, and tests
 // call them apart to hold that window open.
 func (l *Ledger) commit(ctx context.Context) error {
+	if err := l.recordSettlementCredit(ctx); err != nil {
+		_ = l.tx.Rollback(context.Background())
+		l.endRebuilds()
+		l.fail(err)
+		return err
+	}
 	err := l.tx.Commit(ctx)
 	// The transaction has ended whichever way the commit went, so a rebuild's room reads the
 	// history the commit left from here.
@@ -189,23 +198,66 @@ func (l *Ledger) addLiveWrite(write *liveWrite) {
 	l.order = append(l.order, write.artifactID)
 }
 
-// credit credits each content change of a committed transaction to its room, for the room's
-// next version. It runs before the transaction's own versions are released, which clears the
-// authors those versions already name.
-func (l *Ledger) credit() {
+// recordSettlementCredit adds each committed transaction's credit to the pending-settlement row in
+// the transaction that wrote the document, then takes out the authors each version it wrote
+// credited, as commitVersion takes them out of the room once the transaction commits. The durable
+// row therefore commits or rolls back with its content, before the request context can be canceled
+// after commit, and owes no author a version already credited.
+func (l *Ledger) recordSettlementCredit(ctx context.Context) error {
+	for artifactID, actor := range l.seeds {
+		if err := upsertSettlementCredit(ctx, l.tx, artifactID, settlementCreditFor(nil, &actor), false); err != nil {
+			return err
+		}
+	}
 	for _, artifactID := range l.order {
 		write := l.live[artifactID]
 		if len(write.credits) == 0 {
 			continue
 		}
-		state := l.service.room(artifactID)
-		state.mu.Lock()
+		if err := upsertSettlementCredit(ctx, l.tx, artifactID, settlementCreditFor(write.credits, write.actor), false); err != nil {
+			return err
+		}
+	}
+	for _, written := range l.versions {
+		if err := releaseSettlementCredit(ctx, l.tx, written.artifactID, written.version.Authors); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// credit mirrors committed settlement credit into each room before the transaction's versions
+// release their captured authors and before its live writes publish.
+func (l *Ledger) credit() {
+	for artifactID, actor := range l.seeds {
+		state := l.service.lockState(artifactID)
+		state.lastActor = new(actor)
+		state.unsettled = true
+		state.creditVersion++
+		l.service.unlockState(artifactID, state)
+	}
+	for _, artifactID := range l.order {
+		write := l.live[artifactID]
+		if len(write.credits) == 0 {
+			continue
+		}
+		state := l.service.lockState(artifactID)
 		for key, actor := range write.credits {
 			state.pending[key] = actor
 		}
 		state.lastActor = write.actor
-		state.mu.Unlock()
+		state.unsettled = true
+		state.creditVersion++
+		l.service.unlockState(artifactID, state)
 	}
+}
+
+// seeded records that this transaction seeded artifactID's first text as actor (SeedText).
+func (l *Ledger) seeded(artifactID string, actor model.Actor) {
+	if l.seeds == nil {
+		l.seeds = make(map[string]model.Actor)
+	}
+	l.seeds[artifactID] = actor
 }
 
 // publish applies the committed transaction's live writes to their rooms and broadcasts them.

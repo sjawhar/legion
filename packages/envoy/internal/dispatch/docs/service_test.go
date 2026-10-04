@@ -2423,13 +2423,23 @@ func (s *blockingFirstAppendStore) AppendUpdateWithClass(ctx context.Context, ro
 	return s.VersionedStore.(classifiedUpdateStore).AppendUpdateWithClass(ctx, room, update, contentChanged)
 }
 
-// recordActor makes actor a pending author of room's next version, and its latest editor.
+// room is the state the service holds for room now, created when it holds none, for a test to read
+// or arrange under its lock.
+func (s *Service) room(name string) *roomState {
+	state := s.lockState(name)
+	state.mu.Unlock()
+	return state
+}
+
+// recordActor makes actor a pending author of room's next version, and its latest editor, as the
+// room's update observer does (creditContentChange).
 func (s *Service) recordActor(room string, actor model.Actor) {
-	state := s.room(room)
-	state.mu.Lock()
+	state := s.lockState(room)
 	state.pending[actorKey(actor)] = actor
 	state.lastActor = new(actor)
-	state.mu.Unlock()
+	state.unsettled = true
+	state.creditVersion++
+	s.unlockState(room, state)
 }
 
 func seedServiceText(t *testing.T, service *Service, artifactID, markdown string) {
@@ -2627,17 +2637,6 @@ func deleteRun(text string) func(*pmdoc.Node) *pmdoc.Node {
 		visit(tree)
 		return tree
 	}
-}
-func waitForRoomClosed(t *testing.T, service *Service, artifactID string) {
-	t.Helper()
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		if service.roomClosed(artifactID) {
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	t.Fatal("document room did not close after issue event")
 }
 
 // waitForRoomFailure returns once the room has failed. failRoom evicts the failed room from a

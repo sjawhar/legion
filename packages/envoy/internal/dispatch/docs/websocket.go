@@ -61,9 +61,15 @@ type servicePersistenceAdapter struct {
 	store   VersionedStore
 	service *Service
 }
-
 type classifiedUpdateStore interface {
 	AppendUpdateWithClass(context.Context, string, []byte, bool) (persistence.Version, error)
+}
+
+// creditedUpdateStore atomically records an observed update's settlement credit with the durable
+// row that leaves its settlement owed. The wire value keeps test-only stores in other packages
+// able to wrap the method without exposing roomState's private credit representation.
+type creditedUpdateStore interface {
+	AppendUpdateWithSettlementCredit(context.Context, string, []byte, bool, []byte) (persistence.Version, error)
 }
 
 func (a *servicePersistenceAdapter) LoadDoc(room string) ([]byte, error) {
@@ -85,16 +91,24 @@ func (a *servicePersistenceAdapter) StoreUpdate(room string, update []byte) erro
 	if a.service.roomFailed(room) {
 		return nil
 	}
-	contentChanged, durable, found := a.service.consumeUpdateClass(room, update)
-	if found && durable {
+	class, found := a.service.consumeUpdateClass(room, update)
+	if found && class.durable {
 		defer a.service.finishDurableAppend(room)
 	}
 	if a.service.consumeSuppressedPersistence(room, update) || a.service.roomFailed(room) {
 		return nil
 	}
 	var err error
-	if store, ok := a.store.(classifiedUpdateStore); ok {
-		_, err = store.AppendUpdateWithClass(context.Background(), room, update, contentChanged)
+	creditStored := class.credit.empty()
+	if store, ok := a.store.(creditedUpdateStore); ok {
+		encodedCredit, encodeErr := json.Marshal(class.credit)
+		if encodeErr != nil {
+			return fmt.Errorf("encode document settlement authors: %w", encodeErr)
+		}
+		_, err = store.AppendUpdateWithSettlementCredit(context.Background(), room, update, class.contentChanged, encodedCredit)
+		creditStored = true
+	} else if store, ok := a.store.(classifiedUpdateStore); ok {
+		_, err = store.AppendUpdateWithClass(context.Background(), room, update, class.contentChanged)
 	} else {
 		_, err = a.store.AppendUpdate(context.Background(), room, update)
 	}
@@ -102,7 +116,10 @@ func (a *servicePersistenceAdapter) StoreUpdate(room string, update []byte) erro
 		a.service.failRoom(room, err)
 		return err
 	}
-	if found && durable && contentChanged {
+	if found && creditStored {
+		a.service.settlementCreditPersisted(room, class.creditVersion)
+	}
+	if found && class.durable && class.contentChanged {
 		a.service.scheduleSettleAfterAppend(room)
 	}
 	return nil
@@ -112,16 +129,24 @@ func (a *servicePersistenceAdapter) StoreUpdateContext(ctx context.Context, room
 	if a.service.roomFailed(room) {
 		return nil
 	}
-	contentChanged, durable, found := a.service.consumeUpdateClass(room, update)
-	if found && durable {
+	class, found := a.service.consumeUpdateClass(room, update)
+	if found && class.durable {
 		defer a.service.finishDurableAppend(room)
 	}
 	if a.service.consumeSuppressedPersistence(room, update) || a.service.roomFailed(room) {
 		return nil
 	}
 	var err error
-	if store, ok := a.store.(classifiedUpdateStore); ok {
-		_, err = store.AppendUpdateWithClass(ctx, room, update, contentChanged)
+	creditStored := class.credit.empty()
+	if store, ok := a.store.(creditedUpdateStore); ok {
+		encodedCredit, encodeErr := json.Marshal(class.credit)
+		if encodeErr != nil {
+			return fmt.Errorf("encode document settlement authors: %w", encodeErr)
+		}
+		_, err = store.AppendUpdateWithSettlementCredit(ctx, room, update, class.contentChanged, encodedCredit)
+		creditStored = true
+	} else if store, ok := a.store.(classifiedUpdateStore); ok {
+		_, err = store.AppendUpdateWithClass(ctx, room, update, class.contentChanged)
 	} else {
 		_, err = a.store.AppendUpdate(ctx, room, update)
 	}
@@ -129,7 +154,10 @@ func (a *servicePersistenceAdapter) StoreUpdateContext(ctx context.Context, room
 		a.service.failRoom(room, err)
 		return err
 	}
-	if found && durable && contentChanged {
+	if found && creditStored {
+		a.service.settlementCreditPersisted(room, class.creditVersion)
+	}
+	if found && class.durable && class.contentChanged {
 		a.service.scheduleSettleAfterAppend(room)
 	}
 	return nil
@@ -417,7 +445,7 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	if err != nil {
 		return err
 	}
-	owed, err := settlementPending(ctx, rooms, room)
+	owed, credit, err := pendingSettlementCredit(ctx, rooms, room)
 	if err != nil {
 		return err
 	}
@@ -431,19 +459,24 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	default:
 		contentMarkdown = &markdown
 	}
-	state := s.room(room)
-	state.mu.Lock()
+	// The room this load publishes holds the state it takes from here until ygo retires it
+	// (releaseIfUnusedLocked).
+	state := s.lockState(room)
 	state.closed = !open
 	state.contentMarkdown = contentMarkdown
 	// The document owes a settlement no settlement committed: one a shutdown's budget cut short,
 	// or one a room failure dropped (failRoomLocked). Its timer lived in the process or the room
-	// that is gone, so this load settles once rather than waiting for an edit to arm one - unless
-	// the load is a settlement's own warm-up, which settles it next. A room that failed again
-	// while this load ran leaves the row for its own replacement.
-	if state.failed == nil && owed && !state.settleWarming {
+	// that is gone, so an open room settles once rather than waiting for an edit to arm one - unless
+	// the load is a settlement's own warm-up, which settles it next. A closed room keeps the credit
+	// durable on its pending-settlement row; it settles only after its issue reopens. A room that
+	// failed again while this load ran leaves the row for its own replacement.
+	if owed && open {
+		state.mergeSettlementCreditLocked(credit)
+	}
+	if state.failed == nil && open && owed && !state.settleWarming {
 		s.scheduleSettleLocked(room, state)
 	}
-	state.mu.Unlock()
+	s.unlockState(room, state)
 	replica := &renderedReplica{}
 	doc.OnUpdate(func(update []byte, origin any) {
 		// A published write's update is already durable. Its suppression slot is finished here,
@@ -461,10 +494,11 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 		replica.catchUp(room, doc)
 		contentChanged := s.updateChangesMarkdown(room, replica.doc)
 		replica.mu.Unlock()
-		s.recordUpdateClass(room, update, contentChanged, true)
+		class := documentUpdateClass{contentChanged: contentChanged, durable: true}
 		if contentChanged {
-			s.creditContentChange(room, origin)
+			class.credit, class.creditVersion = s.creditContentChange(room, origin)
 		}
+		s.recordUpdateClass(room, update, class)
 		s.scheduleSettle(room)
 	})
 	return nil
@@ -516,10 +550,9 @@ func (r *renderedReplica) catchUp(room string, live *crdt.Doc) {
 func (s *Service) updateChangesMarkdown(room string, replica *crdt.Doc) bool {
 	markdown, err := renderDocument(replica)
 	if err != nil {
-		state := s.room(room)
-		state.mu.Lock()
+		state := s.lockState(room)
 		state.contentMarkdown = nil
-		state.mu.Unlock()
+		s.unlockState(room, state)
 		if errors.Is(err, ErrDocOutsideSchema) {
 			slog.Warn("dispatch: updated document outside Proof schema", "room", room, "error", err)
 		} else {
@@ -527,9 +560,8 @@ func (s *Service) updateChangesMarkdown(room string, replica *crdt.Doc) bool {
 		}
 		return true
 	}
-	state := s.room(room)
-	state.mu.Lock()
-	defer state.mu.Unlock()
+	state := s.lockState(room)
+	defer s.unlockState(room, state)
 	if state.contentMarkdown != nil && *state.contentMarkdown == markdown {
 		return false
 	}
@@ -546,20 +578,21 @@ func (s *Service) updateChangesMarkdown(room string, replica *crdt.Doc) bool {
 // connection sent it, so every connected peer joins `pending`: when exactly one is connected it is
 // the latest edit source and replaces `lastActor`, and otherwise the edit cannot be pinned on a
 // single peer and no older actor may stand in for it.
-func (s *Service) creditContentChange(room string, origin any) {
+func (s *Service) creditContentChange(room string, origin any) (settlementCredit, uint64) {
 	if _, published := origin.(*liveWriteOrigin); published {
-		return
+		return settlementCredit{}, 0
 	}
 	value, service := s.serviceOrigins.Load(origin)
-	state := s.room(room)
-	state.mu.Lock()
-	defer state.mu.Unlock()
+	state := s.lockState(room)
+	defer s.unlockState(room, state)
 	if service {
 		if actor, credited := value.(*model.Actor); credited && actor != nil {
 			state.pending[actorKey(*actor)] = *actor
 			state.lastActor = new(*actor)
+			state.unsettled = true
+			state.creditVersion++
 		}
-		return
+		return state.settlementCreditLocked(), state.creditVersion
 	}
 	var sole *model.Actor
 	ambiguous := false
@@ -576,33 +609,41 @@ func (s *Service) creditContentChange(room string, origin any) {
 		sole = nil
 	}
 	state.lastActor = sole
+	state.unsettled = true
+	state.creditVersion++
+	return state.settlementCreditLocked(), state.creditVersion
 }
 
 // addConnection registers a browser connected to room. It is credited only with browser edits
 // observed while it is connected (creditContentChange), never for connecting or for an agent's
 // edit.
 func (s *Service) addConnection(room string, id uint64, actor model.Actor) {
-	state := s.room(room)
-	state.mu.Lock()
+	state := s.lockState(room)
 	state.connected[id] = actor
-	state.mu.Unlock()
+	s.unlockState(room, state)
 }
 
+// removeConnection forgets a browser that left room, and with the last one, once ygo has retired
+// the room, the room's state (releaseIfUnusedLocked). A document without state has none to forget.
 func (s *Service) removeConnection(room string, id uint64) {
-	state := s.room(room)
-	state.mu.Lock()
+	state := s.lockExistingState(room)
+	if state == nil {
+		return
+	}
 	delete(state.connected, id)
-	state.mu.Unlock()
+	s.unlockState(room, state)
 }
 
 func (s *Service) settleLastPeer(_ context.Context, room string) {
-	state := s.room(room)
-	state.mu.Lock()
+	state := s.lockExistingState(room)
+	if state == nil {
+		return
+	}
 	if !s.stopSettleTimer(state.settle) {
-		state.mu.Unlock()
+		s.unlockState(room, state)
 		return
 	}
 	generation := state.gen
-	state.mu.Unlock()
+	s.unlockState(room, state)
 	s.settleRoom(room, generation)
 }

@@ -596,6 +596,14 @@ func (s *recordingVersionedStore) AppendUpdateWithClass(ctx context.Context, roo
 	return version, err
 }
 
+func (s *recordingVersionedStore) AppendUpdateWithSettlementCredit(ctx context.Context, room string, update []byte, contentChanged bool, credit []byte) (persistence.Version, error) {
+	version, err := s.PgVersioned.AppendUpdateWithSettlementCredit(ctx, room, update, contentChanged, credit)
+	if err == nil {
+		s.signal()
+	}
+	return version, err
+}
+
 func (s *recordingVersionedStore) AppendUpdate(ctx context.Context, room string, update []byte) (persistence.Version, error) {
 	version, err := s.PgVersioned.AppendUpdate(ctx, room, update)
 	if err == nil {

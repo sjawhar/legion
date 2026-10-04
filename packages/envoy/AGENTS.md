@@ -190,12 +190,13 @@ transaction's ledger (`docs/ledger.go`), the only way to give a document operati
 `SeedText` and `SnapshotVersion` take theirs from the ledger and refuse a context that was not
 joined. A joined operation never writes the room: it runs on the transaction's fork of the room's
 document (`docs/livewrite.go`), appends its update inside the transaction, and reads through the
-same fork. The handler ends the transaction with `ledger.Commit`, which commits, credits the
-writes' actor to their rooms, releases the authors a version the transaction wrote named, then
-applies and broadcasts the updates, and last publishes the events its document operations
-appended, ahead of the handler's own; it defers `ledger.Discard`, so a transaction that does not
-commit leaves the room, every connected browser, every version and the durable document as they
-were.
+same fork. The handler ends the transaction with `ledger.Commit`, which records each settlement
+credit with the document content and takes each version's authors back out of that record,
+commits, credits the writes' actor to their rooms, releases the authors a version the transaction
+wrote named, then applies and broadcasts the updates, and last
+publishes the events its document operations appended, ahead of the handler's own; it defers
+`ledger.Discard`, so a transaction that does not commit leaves the room, every connected browser,
+every version and the durable document as they were.
 
 While a transaction's write to a document is open it holds that room's writer slot, so another
 transaction's joined operation on the document waits for it to be published or discarded, and it
@@ -339,6 +340,24 @@ before ygo's persistence observer runs (`onLoadDocument`), so the stranded appen
 publish it runs inside, and the publish, its request and the document's writer slot are released
 (`TestAPublishSurvivesItsRoomsWorkerRetiringUnderIt`, `TestAWriteSurvivesItsIssueClosingAsItPublishes`).
 A publish whose room `CloseRoom` removed has no peer left to broadcast to and returns.
+
+The service keeps a document's state (`docs.roomState`, `docs/roomstate.go`: its connected
+browsers, writer slot, settlement timer, pending authors, rendered markdown) only while ygo holds
+a room for it, loaded or loading, or something on the document still holds the state; `unusedLocked`
+is the one list of those holders. Every lookup takes a state through `lockState` or
+`lockExistingState`, which never hand out a forgotten state, and ends with `unlockState`, which
+forgets a state that holds nothing once its room has gone, so whatever ends last - ygo's
+`OnUnloadDocument` when the room goes, or a holder's own end - releases it. The durable row that
+says a document's settlement is owed (`doc_settlements_pending`, migration 0063) also carries the
+authors that settlement needs (0069): a browser update records them in the update's own transaction,
+and a joined write records them in the transaction that commits its content, which also takes out
+the authors any version it wrote credited, as the room does once it commits. Closing an issue writes
+every unsettled state into that row before it releases the state, so the reopened document's
+settlement credits the same version, ask and event authors even after a room release or restart. The
+document socket's cap of 1,000 rooms (`maxLiveRooms`, `canOpenRoom`) counts ygo's live rooms, never
+documents touched since the process started (LEGION-513). A room an `Apply` opened with no peer is
+idle-evicted only by a ygo whose `Apply` stamps the empty room idle (LEGION-484). `PgVersioned`'s
+per-room locks likewise live only while a caller holds or waits for one.
 
 The room's update observer (`updateChangesMarkdown`) renders a replica of the room, not the live
 tree, since ygo fires it after the transaction has released the document's lock and another write
