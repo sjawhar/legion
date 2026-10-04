@@ -444,11 +444,12 @@ test("typing v in the strip's search input never toggles the view", async () => 
   }
 });
 
-test("the Lanes toggle lives in Board view only and persists through the URL, not per-login storage", async () => {
+test("the Lanes toggle lives in Board view only and persists per signed-in user", async () => {
   const viewKey = "dispatch.project.issue-view:alice";
+  const lanesKey = "dispatch.project.board-lanes:alice";
   window.localStorage.setItem(viewKey, "board");
 
-  const page = renderPage("/projects/CORE");
+  const first = renderPage("/projects/CORE", undefined, "alice");
   try {
     await screen.findByRole("heading", { name: "Core" });
     const toggle = await screen.findByRole("button", { name: "Show lanes" });
@@ -458,36 +459,38 @@ test("the Lanes toggle lives in Board view only and persists through the URL, no
     expect(screen.getByRole("button", { name: "Hide lanes" }).getAttribute("aria-pressed")).toBe(
       "true"
     );
-    expect(screen.getByTestId("location").textContent).toBe("/projects/CORE/issues?lanes=1");
-    // Not a per-login preference: nothing lands in localStorage for it.
-    expect(window.localStorage.getItem("dispatch.project.lanes:alice")).toBeNull();
+    expect(window.localStorage.getItem(lanesKey)).toBe("shown");
 
     fireEvent.click(screen.getByRole("button", { name: "List" }));
     expect(screen.queryByRole("button", { name: /lanes/i })).toBeNull();
-    // The URL param survives the view toggle even while its button is hidden.
-    expect(screen.getByTestId("location").textContent).toBe("/projects/CORE/issues?lanes=1");
-
-    fireEvent.click(screen.getByRole("button", { name: "Board" }));
-    fireEvent.click(screen.getByRole("button", { name: "Hide lanes" }));
-    expect(screen.getByRole("button", { name: "Show lanes" }).getAttribute("aria-pressed")).toBe(
-      "false"
-    );
-    expect(screen.getByTestId("location").textContent).toBe("/projects/CORE/issues");
   } finally {
-    page.restore();
-    window.localStorage.removeItem(viewKey);
+    first.restore();
   }
-});
 
-test("a shared ?lanes=1 link opens the board already grouped into swimlanes", async () => {
-  const page = renderPage("/projects/CORE/issues?lanes=1");
+  window.localStorage.setItem(viewKey, "board");
+  const second = renderPage("/projects/CORE", undefined, "alice");
   try {
     await screen.findByRole("heading", { name: "Core" });
-    fireEvent.click(screen.getByRole("button", { name: "Board" }));
     expect(
       (await screen.findByRole("button", { name: "Hide lanes" })).getAttribute("aria-pressed")
     ).toBe("true");
   } finally {
-    page.restore();
+    second.restore();
+  }
+
+  const bob = renderPage("/projects/CORE", undefined, "bob");
+  try {
+    window.localStorage.setItem("dispatch.project.issue-view:bob", "board");
+    await screen.findByRole("heading", { name: "Core" });
+    fireEvent.click(screen.getByRole("button", { name: "Board" }));
+    expect(
+      (await screen.findByRole("button", { name: "Show lanes" })).getAttribute("aria-pressed")
+    ).toBe("false");
+  } finally {
+    bob.restore();
+    window.localStorage.removeItem(viewKey);
+    window.localStorage.removeItem(lanesKey);
+    window.localStorage.removeItem("dispatch.project.issue-view:bob");
+    window.localStorage.removeItem("dispatch.project.board-lanes:bob");
   }
 });

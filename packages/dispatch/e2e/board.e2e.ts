@@ -873,7 +873,7 @@ test("a filtered drag names the visible neighbours and the hidden card interleav
   }
 });
 
-test("the board groups into priority swimlanes on a toggle, the choice lives in the URL, and dragging across lanes reassigns priority", async ({
+test("the board groups into priority swimlanes on a toggle that persists per signed-in user, and dragging across lanes reassigns priority", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -903,7 +903,6 @@ test("the board groups into priority swimlanes on a toggle, the choice lives in 
     }
 
     await lanesToggle.click();
-    await expect(page).toHaveURL(/[?&]lanes=1(&|$)/);
     await expect(page.getByRole("button", { name: "Hide lanes" })).toHaveAttribute(
       "aria-pressed",
       "true"
@@ -922,7 +921,7 @@ test("the board groups into priority swimlanes on a toggle, the choice lives in 
       noPriorityLane.getByRole("region", { name: "Todo" }).getByRole("article")
     ).toHaveText([/No priority card/]);
 
-    // The choice persists through the URL, not per-login storage: a reload keeps it.
+    // The choice persists per signed-in user, not the URL: a reload keeps it.
     await page.reload();
     await expect(page.getByRole("button", { name: "Hide lanes" })).toHaveAttribute(
       "aria-pressed",
@@ -959,7 +958,6 @@ test("the board groups into priority swimlanes on a toggle, the choice lives in 
     // Turning lanes off restores the flat board - the toggle state, not the data, decides the
     // layout.
     await page.getByRole("button", { name: "Hide lanes" }).click();
-    await expect(page).not.toHaveURL(/lanes=1/);
     await expect(page.getByRole("region", { name: "P0 lane" })).toHaveCount(0);
   } finally {
     await context.close();

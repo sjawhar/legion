@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 
-import { Link, Navigate, useLocation, useNavigate, useSearchParams } from "react-router-dom";
+import { Link, Navigate, useLocation, useNavigate } from "react-router-dom";
 
 import { api } from "../../api/client";
 import { projectsQuery } from "../../api/queries";
@@ -53,24 +53,11 @@ export function ProjectPage(): ReactNode {
     (stored) => stored === "shown",
     (shown) => (shown ? "shown" : "hidden")
   );
-  // Unlike the Icebox/Done toggle, the swimlane choice lives in the URL rather than per-login
-  // storage: a board grouped into priority lanes is a view worth linking to, not just recalling.
-  const [searchParams, setSearchParams] = useSearchParams();
-  const lanes = searchParams.get("lanes") === "1";
-  const setLanes = (next: boolean) => {
-    setSearchParams(
-      (current) => {
-        const nextParams = new URLSearchParams(current.toString());
-        if (next) {
-          nextParams.set("lanes", "1");
-        } else {
-          nextParams.delete("lanes");
-        }
-        return nextParams;
-      },
-      { replace: true }
-    );
-  };
+  const [lanes, setLanes] = useUserPreference(
+    "project.board-lanes",
+    (stored) => stored === "shown",
+    (shown) => (shown ? "shown" : "hidden")
+  );
   const route = parseProjectPath(location.pathname, location.search);
   const projectKey = route?.project;
   const inbox = useQuery({
