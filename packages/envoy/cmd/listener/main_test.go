@@ -3736,12 +3736,24 @@ func TestRunSelfHealthMonitor_RetriesPastTransientFailures(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	var probeCalls int32
-	recovered := make(chan struct{}, 1)
+	// runSelfHealthMonitor keeps ticking and calling probe every interval for as long as the
+	// monitor runs, including every tick after recovery while this test waits out its own
+	// assertions and calls cancel(). A buffered size-1 channel can only carry one unread send
+	// before a second one blocks: once the test has drained the first signal, the very next
+	// post-recovery tick refills the buffer, and the tick after that blocks the monitor's
+	// goroutine inside probe() forever, since nothing reads the channel again. That left the
+	// monitor unable to observe ctx.Done() after cancel(), failing "monitor did not stop after
+	// shutdown" under exactly the scheduling delay a loaded CI runner introduces between the
+	// test's channel read and its call to cancel() (seen on sjawhar/legion#1773's CI). Closing
+	// the channel once, instead of sending on it, makes every post-recovery probe's signal a
+	// non-blocking no-op regardless of how many extra ticks land before cancel() takes effect.
+	recovered := make(chan struct{})
+	var recoveredOnce sync.Once
 	probe := func() error {
 		if atomic.AddInt32(&probeCalls, 1) <= 3 {
 			return errors.New("transient NATS timeout")
 		}
-		recovered <- struct{}{}
+		recoveredOnce.Do(func() { close(recovered) })
 		return nil
 	}
 	done := make(chan struct{})
