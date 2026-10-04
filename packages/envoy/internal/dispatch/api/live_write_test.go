@@ -17,7 +17,6 @@ import (
 	"github.com/reearth/ygo/persistence"
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
-	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -289,10 +288,8 @@ func newHeldWriteFixture(t *testing.T, settle time.Duration, configure ...func(*
 		f.docs = docs.New(docs.Deps{
 			Store:       database,
 			Persistence: f.persistence,
-			Identity: identity.HeaderIdentity{
-				Header: "X-Dispatch-User", People: store.NewPgPeopleStore(database.Pool),
-			},
-			Settle: settle,
+			Identity:    headerIdentity(database),
+			Settle:      settle,
 		})
 		t.Cleanup(func() { _ = f.docs.Shutdown(context.Background()) })
 		f.failure = &postApplyFailureDocs{

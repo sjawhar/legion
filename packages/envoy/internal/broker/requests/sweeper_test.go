@@ -36,7 +36,7 @@ func TestSweeperTickExpiresPendingRequestsAndMachineLogins(t *testing.T) {
 
 	// A second enrollment's own overdue pending request, to pin that Wake fires once PER request
 	// leaving pending, not once per tick.
-	enr2, key2 := newEnrollment(t, m.Store, "box", "box-b-"+t.Name(), new("sjawhar"), nil)
+	enr2, key2 := newEnrollment(t, m.Store, "box", "box-b-"+t.Name(), new(fixtureOperator), nil)
 	overdue2, err := m.Create(ctx, enr2, signRequest(t, m, key2, "need it too", "DEEL_API_KEY"), "")
 	if err != nil || overdue2.State != "pending" {
 		t.Fatalf("Create(overdue2) = %+v, %v, want state pending", overdue2, err)
@@ -44,7 +44,7 @@ func TestSweeperTickExpiresPendingRequestsAndMachineLogins(t *testing.T) {
 
 	// A request still inside its deadline: must be left alone and never woken. A third,
 	// distinct enrollment avoids coalescing onto overdue's own pending row for the same secret.
-	enr3, key3 := newEnrollment(t, m.Store, "box", "box-c-"+t.Name(), new("sjawhar"), nil)
+	enr3, key3 := newEnrollment(t, m.Store, "box", "box-c-"+t.Name(), new(fixtureOperator), nil)
 	m.PendingTTL = time.Hour
 	fresh, err := m.Create(ctx, enr3, signRequest(t, m, key3, "not yet", "DEEL_API_KEY"), "")
 	if err != nil || fresh.State != "pending" {
@@ -54,8 +54,8 @@ func TestSweeperTickExpiresPendingRequestsAndMachineLogins(t *testing.T) {
 	// An overdue pending machine login, inserted directly (machine.Service's own Login flow is
 	// exercised by the machine package's own tests; this only needs a row ExpirePending sweeps).
 	loginRecordID := "login-" + t.Name()
-	if _, err := m.Store.Pool.Exec(ctx, `insert into credential_requests (id, body, kind, approver, expires_at) values ($1,'body','launcher_credential','sjawhar',$2)`,
-		loginRecordID, time.Now().Add(-time.Hour)); err != nil {
+	if _, err := m.Store.Pool.Exec(ctx, `insert into credential_requests (id, body, kind, approver, expires_at) values ($1,'body','launcher_credential',$2,$3)`,
+		loginRecordID, fixtureOperator, time.Now().Add(-time.Hour)); err != nil {
 		t.Fatalf("insert overdue machine login: %v", err)
 	}
 
@@ -128,7 +128,7 @@ func TestSweeperTickExpiresPendingRequestsAndMachineLogins(t *testing.T) {
 func TestSweeperEndsLapsedEnrollments(t *testing.T) {
 	m, gone, goneKey, approver := newFixture(t)
 	ctx := context.Background()
-	live, liveKey := newEnrollment(t, m.Store, "box", "box-live-"+t.Name(), new("sjawhar"), nil)
+	live, liveKey := newEnrollment(t, m.Store, "box", "box-live-"+t.Name(), new(fixtureOperator), nil)
 
 	type session struct{ grantID, pendingID, recordID string }
 	open := func(enr string, key *ecdsa.PrivateKey) session {

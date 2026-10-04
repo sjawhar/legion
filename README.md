@@ -64,12 +64,12 @@ for OpenCode, all built on `packages/envoy-client`.
 ### Secrets Broker
 
 Credentials an agent asks for and a person approves. An agent runs
-`agent-secrets NAME -- <command>`, and the broker's rules grant the request at once, refuse it, or
-send it to a named person, who approves or denies it in their Dispatch Inbox. The granted value
-reaches only the session that asked, in the environment of the command it runs, so an agent never
-holds a long-lived key. Each session signs its requests with a key of its own, and every request,
-decision and use is recorded. Legion enrolls every worker pod it starts on Kubernetes when its
-deployment names a broker.
+`agent-secrets NAME -- <command>`, and the secret's owner and tier tags grant the request at once,
+refuse it, or send it to a person, who approves or denies it in their Dispatch Inbox. The granted
+value reaches only the session that asked, in the environment of the command it runs, so an agent
+never holds a long-lived key. Each session signs its requests with a key of its own, and every
+request, decision and use is recorded. Legion enrolls every worker pod it starts on Kubernetes when
+its deployment names a broker.
 
 [The Secrets Broker's documentation](https://sjawhar.github.io/legion/broker/) ·
 [a walkthrough video of one request](https://sjawhar.github.io/legion/broker/walkthrough/)
@@ -127,9 +127,11 @@ bun run docs:dev
 
 ## Development
 
-You need Bun at the version `.bun-version` pins and Go at the version `go.work` names. `go.work`
-binds the two Go modules, `packages/daemon` and `packages/envoy`; the TypeScript packages and the
-documentation site are Bun workspaces of the root `package.json`.
+You need Bun at the version `.bun-version` pins and Go at the minimum version `go.work`
+names. The default `GOTOOLCHAIN=auto` downloads that toolchain when the installed Go is older;
+`GOTOOLCHAIN=local` refuses instead. `go.work` binds the two Go modules, `packages/daemon` and
+`packages/envoy`; the TypeScript packages and the documentation site are Bun workspaces of the
+root `package.json`.
 
 ```sh
 bun install                                          # every workspace

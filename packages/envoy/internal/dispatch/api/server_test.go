@@ -69,13 +69,13 @@ type testServerOptions struct {
 
 // headerIdentity is the test header identity that records each named person in the database.
 func headerIdentity(database *store.Store) identity.HeaderIdentity {
-	return identity.HeaderIdentity{Header: "X-Dispatch-User", People: store.NewPgPeopleStore(database.Pool)}
+	return identity.HeaderIdentity{Header: "X-Dispatch-User", People: store.NewPgPeopleStore(database.Pool, "signing-key", nil)}
 }
 
 // seedPeople records emails as people who have signed in: the assignee picker's options.
 func seedPeople(t *testing.T, database *store.Store, emails ...string) {
 	t.Helper()
-	people := store.NewPgPeopleStore(database.Pool)
+	people := store.NewPgPeopleStore(database.Pool, "signing-key", nil)
 	for _, email := range emails {
 		if err := people.Record(context.Background(), email); err != nil {
 			t.Fatalf("seed person %q: %v", email, err)

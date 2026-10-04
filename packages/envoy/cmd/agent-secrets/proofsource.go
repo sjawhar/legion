@@ -44,7 +44,7 @@ func (f *fileSigner) Sign(method, url string) (string, error) {
 func (f *fileSigner) SignRequestObject(audience string, names []string, reason string) (string, error) {
 	details := make([]record.AuthorizationDetail, len(names))
 	for i, name := range names {
-		details[i] = record.AuthorizationDetail{Type: "agent_secret", Identifier: name, Actions: []string{"inject"}}
+		details[i] = record.AuthorizationDetail{Type: record.KindAgentSecret, Identifier: name, Actions: []string{"inject"}}
 	}
 	return record.Sign(f.key, audience, details, reason, "", time.Now())
 }
