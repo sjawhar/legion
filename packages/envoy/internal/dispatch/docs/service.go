@@ -565,7 +565,7 @@ func New(deps Deps) *Service {
 
 // ShutdownDrainBudget bounds the part of Shutdown that waits on document work - each room's durable
 // appends landing, and the settlements owed - inside whatever deadline its caller
-// passes. It is sized within a second of the document service's own budget (cmd/dispatch's
+// passes. It is sized 5 s short of the document service's own budget (cmd/dispatch's
 // documentShutdownTimeout), so a burst of writes still landing when Shutdown begins - not only the
 // ones already queued - has room to finish: the live durableAppends counter waits for every append
 // a room's writer records, whenever Shutdown's scan found the room, not just the ones it already

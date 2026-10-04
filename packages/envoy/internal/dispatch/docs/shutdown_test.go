@@ -378,6 +378,9 @@ func newShutdownTestService(t *testing.T, database *store.Store, appends Version
 		Identity: identity.HeaderIdentity{Header: "X-Dispatch-User", People: store.NewPgPeopleStore(database.Pool, "signing-key", nil)},
 		Settle:   time.Hour,
 	})
+	// A test that already called Shutdown runs this one a second time; it logs its own
+	// "left to resume" line but does no second settlement attempt (settleRoomWithin's
+	// s.stopping guard returns it almost instantly), so it is a harmless no-op, not a race.
 	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
 	return service
 }
