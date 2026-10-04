@@ -1099,6 +1099,17 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 				}
 			})
 		},
+		"COHERE_API_KEY": func(t *testing.T) {
+			if boot := resolveWith(t, map[string]string{"COHERE_API_KEY": " test-cohere-key "}); boot.CohereAPIKey != "test-cohere-key" {
+				t.Errorf("CohereAPIKey = %q, want the trimmed value", boot.CohereAPIKey)
+			}
+			// Unset, meaning search is off: no Embedder reaches AppContextOptions, and search
+			// answers keyword-only (search_meaning_test.go's own package covers the handler's
+			// Degraded behavior; here the boundary is just that an empty key never builds one).
+			if boot := resolveWith(t, map[string]string{"COHERE_API_KEY": ""}); boot.CohereAPIKey != "" {
+				t.Errorf("CohereAPIKey = %q, want empty when unset", boot.CohereAPIKey)
+			}
+		},
 	}
 	for _, row := range settings {
 		test, ok := cases[row.Name]

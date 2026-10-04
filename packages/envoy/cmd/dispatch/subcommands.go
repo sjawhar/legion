@@ -11,6 +11,8 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/api"
 	"github.com/sjawhar/envoy/internal/dispatch/config"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/embed"
+	"github.com/sjawhar/envoy/internal/dispatch/embedqueue"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -37,6 +39,9 @@ var subcommands = []subcommand{
 	}},
 	{"redeliver-webhooks", func(ctx context.Context, args []string, env settingValues, stdout, _ io.Writer) int {
 		return redeliverWebhooks(ctx, args, env, stdout)
+	}},
+	{"backfill-embeddings", func(ctx context.Context, _ []string, env settingValues, stdout, _ io.Writer) int {
+		return backfillEmbeddings(ctx, env.get("DATABASE_URL"), env.get("COHERE_API_KEY"), stdout)
 	}},
 	{"census", func(ctx context.Context, _ []string, env settingValues, stdout, stderr io.Writer) int {
 		return census(ctx, env.get("DATABASE_URL"), stdout, stderr)
@@ -184,6 +189,34 @@ func rebuildRefs(ctx context.Context, databaseURL, serverURL string, out io.Writ
 		return 1
 	}
 	writeRebuildRefsReport(out, report)
+	return 0
+}
+
+// backfillEmbeddings enqueues and embeds meaning-search vectors for content this Dispatch was
+// already carrying before LEGION-549 (embedqueue.Backfill); a fresh write is covered by its own
+// table's trigger (0054_embeddings.up.sql) the moment COHERE_API_KEY is set, so this is a one-time
+// catch-up, not something the server runs itself. Resumable: rerunning it (after an interrupt, or
+// to pick up a kind this Dispatch grew after an earlier run finished) continues from each kind's
+// own checkpoint rather than rescanning rows it already enqueued.
+func backfillEmbeddings(ctx context.Context, databaseURL, cohereAPIKey string, out io.Writer) int {
+	database, ok := openMigrated(ctx, "backfill-embeddings", databaseURL, out)
+	if !ok {
+		return 1
+	}
+	defer database.Pool.Close()
+	if strings.TrimSpace(cohereAPIKey) == "" {
+		fmt.Fprintln(out, "backfill-embeddings: COHERE_API_KEY is required")
+		return 1
+	}
+	report, err := embedqueue.Backfill(ctx, embedqueue.Deps{Store: database, Embedder: embed.New(cohereAPIKey)}, out)
+	if err != nil {
+		fmt.Fprintf(out, "backfill-embeddings: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(out, "backfill-embeddings: done - enqueued=%v embedded=%d failed=%d\n", report.Enqueued, report.Embedded, report.Failed)
+	if report.Failed > 0 {
+		return 1
+	}
 	return 0
 }
 
