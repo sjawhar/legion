@@ -102,7 +102,8 @@ What each part is for:
 
 - **`project`** is the Dispatch project key, and it must also be a key of `projects`, which maps
   each Dispatch project the daemon runs to its GitHub repository. A project may name a
-  `merge_queue_role`, a role that receives a copy of every `READY`.
+  `merge_queue_role`, a role that receives a copy of every `READY`, and a notice withdrawing it
+  when the head's own CI turns red before the merge.
 - **`bind`**, **`daemon_url`**, **`envoy_url`**, **`dispatch_url`** and every **`nats_urls`** entry
   are handed to pods, so none of them may be a loopback or unspecified address.
 - **`github_apps`**: each App takes exactly one of `private_key` (the PEM itself),

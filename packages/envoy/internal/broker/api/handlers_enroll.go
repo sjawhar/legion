@@ -9,7 +9,7 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/requests"
 )
 
-// createEnrollmentBody is POST /v1/enrollments's body (the AGENTC-393 overview document's
+// createEnrollmentBody is POST /v1/enrollments's body (the shared broker contract's
 // enrollment route). It names no approver: the policy picks a request's approver at request time,
 // never at enrollment. slot is optional and pod-only: omitted or "" is the runtime's one
 // enrollment, and a slot names one of several independent enrollments of the same pod

@@ -64,7 +64,9 @@ func TestLoadServesEveryWellTaggedSecretOnTheKey(t *testing.T) {
 
 // TestLoadRefusesEachUnservableSecretByNameWithTheExactLine pins every reason a secret under the
 // prefix is refused, each logged as the one line the deployment's alarm filters on, while every
-// other secret is still served: one person's malformed tag never freezes anyone else's policy.
+// other secret is still served: one person's malformed tag never freezes anyone else's policy. A
+// secret with no value and a tag or key fault is logged for the fault, which a value alone would
+// not fix.
 func TestLoadRefusesEachUnservableSecretByNameWithTheExactLine(t *testing.T) {
 	refusals := map[string]struct {
 		secret secrets.LocalSecret
@@ -97,6 +99,15 @@ func TestLoadRefusesEachUnservableSecretByNameWithTheExactLine(t *testing.T) {
 		s.KmsKeyID = "arn:aws:kms:us-east-1:111122223333:key/another-key"
 	})
 	refuse("ANOTHER_KEYS_ALIAS", policy.ReasonNotOnAgentSecretsKey, func(s *secrets.LocalSecret) { s.KmsKeyID = "alias/someone-elses" })
+	refuse("NO_VALUE", policy.ReasonNoCurrentValue, func(s *secrets.LocalSecret) { s.Value = "" })
+	refuse("NO_TIER_NOR_VALUE", policy.ReasonTierTagMissing, func(s *secrets.LocalSecret) {
+		delete(s.Tags, policy.TagTier)
+		s.Value = ""
+	})
+	refuse("MANAGED_KEY_NO_VALUE", policy.ReasonNotOnAgentSecretsKey, func(s *secrets.LocalSecret) {
+		s.KmsKeyID = ""
+		s.Value = ""
+	})
 
 	store := secrets.NewLocal(policytest.Secret("WELL_TAGGED", owner, policy.TierAgent, "v"))
 	store.Alias("arn:aws:kms:us-east-1:111122223333:key/another-key", "alias/someone-elses")
@@ -157,21 +168,30 @@ func (n noAliases) ListAliases(context.Context, *kms.ListAliasesInput, ...func(*
 	return &kms.ListAliasesOutput{}, nil
 }
 
+// onlyCurrent is a listing's SecretVersionsToStages for a secret holding a value: one version,
+// labelled AWSCURRENT.
+var onlyCurrent = map[string][]string{"v1": {"AWSCURRENT"}}
+
+// listEntry is the ListSecrets entry for the secret named name (its whole Secrets Manager name),
+// shared, agent tier, on the agent-secrets key, with its ARN and its versions' stages.
+func listEntry(name, arn string, versionsToStages map[string][]string) smtypes.SecretListEntry {
+	return smtypes.SecretListEntry{
+		Name: aws.String(name), ARN: aws.String(arn), KmsKeyId: aws.String(policytest.KeyARN),
+		Tags: []smtypes.Tag{
+			{Key: aws.String(policy.TagOwner), Value: aws.String(policy.OwnerShared)},
+			{Key: aws.String(policy.TagTier), Value: aws.String(policy.TierAgent)},
+		},
+		SecretVersionsToStages: versionsToStages,
+	}
+}
+
 // TestLoadReadsEveryPageOfThePrefixOnly pins that the loader asks Secrets Manager for the
 // namespace prefix alone, reads every page, skips a name the lister answered outside the namespace
 // (here the prefix in upper case: the namespace is the prefix as written) without logging it as
 // refused (it is not in the namespace, and the alarm counts refusals), and never resolves aliases
 // nobody used.
 func TestLoadReadsEveryPageOfThePrefixOnly(t *testing.T) {
-	entry := func(name string) smtypes.SecretListEntry {
-		return smtypes.SecretListEntry{
-			Name: aws.String(name), ARN: aws.String("arn:" + name), KmsKeyId: aws.String(policytest.KeyARN),
-			Tags: []smtypes.Tag{
-				{Key: aws.String(policy.TagOwner), Value: aws.String(policy.OwnerShared)},
-				{Key: aws.String(policy.TagTier), Value: aws.String(policy.TierAgent)},
-			},
-		}
-	}
+	entry := func(name string) smtypes.SecretListEntry { return listEntry(name, "arn:"+name, onlyCurrent) }
 	sm := &pagedSecrets{entries: []smtypes.SecretListEntry{
 		entry(policytest.Prefix + "first"), entry(policytest.Prefix + "second"),
 		entry(strings.ToUpper(policytest.Prefix) + "third"), entry(policytest.Prefix + "fourth"),
@@ -196,6 +216,61 @@ func TestLoadReadsEveryPageOfThePrefixOnly(t *testing.T) {
 			t.Fatalf("ListSecrets filters = %+v, want name=%s alone", f, policytest.Prefix)
 		}
 	}
+}
+
+// TestLoadServesASecretOnlyWhileAVersionIsCurrent pins the value check on what ListSecrets reports,
+// with no call per secret: a secret is served when one of its versions carries AWSCURRENT, the
+// label GetSecretValue reads, mid-rotation included, and refused with no-current-value when none
+// does: created without a value, or holding only a pending or a previous version.
+func TestLoadServesASecretOnlyWhileAVersionIsCurrent(t *testing.T) {
+	entry := func(name string, versionsToStages map[string][]string) smtypes.SecretListEntry {
+		return listEntry(policytest.ID(name), "arn:"+name, versionsToStages)
+	}
+	sm := &pagedSecrets{entries: []smtypes.SecretListEntry{
+		entry("CURRENT", onlyCurrent),
+		entry("ROTATING", map[string][]string{"v1": {"AWSPREVIOUS"}, "v2": {"AWSCURRENT"}, "v3": {"AWSPENDING"}}),
+		entry("NEVER_GIVEN_A_VALUE", nil),
+		entry("NO_STAGES", map[string][]string{}),
+		entry("PENDING_ONLY", map[string][]string{"v1": {"AWSPENDING"}}),
+		entry("PREVIOUS_ONLY", map[string][]string{"v1": {"AWSPREVIOUS"}}),
+	}}
+	loader := policy.Loader{Secrets: sm, Aliases: noAliases{t}, Prefix: policytest.Prefix, KeyARN: policytest.KeyARN}
+	logged := policytest.CaptureLog(t)
+	set, err := loader.Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if _, current := set.Secrets["CURRENT"]; !current || len(set.Secrets) != 2 || set.Secrets["ROTATING"].Name != "ROTATING" {
+		t.Fatalf("served %+v, want CURRENT and ROTATING alone", set.Secrets)
+	}
+	want := refusedLine("NEVER_GIVEN_A_VALUE", policy.ReasonNoCurrentValue) +
+		refusedLine("NO_STAGES", policy.ReasonNoCurrentValue) +
+		refusedLine("PENDING_ONLY", policy.ReasonNoCurrentValue) +
+		refusedLine("PREVIOUS_ONLY", policy.ReasonNoCurrentValue)
+	if logged.String() != want {
+		t.Fatalf("logged:\n%s\nwant:\n%s", logged, want)
+	}
+}
+
+// TestReloadServesASecretOnceItIsGivenAValue pins that a secret created and tagged without a value
+// is left out of the live policy, and that the reload after its value is put serves it, with no
+// restart.
+func TestReloadServesASecretOnceItIsGivenAValue(t *testing.T) {
+	store := secrets.NewLocal(policytest.Secret("SEEDED_LATER", owner, policy.TierHuman, ""))
+	logged := policytest.CaptureLog(t)
+	cur, err := policy.NewCurrent(t.Context(), policytest.Loader(store), 10*time.Millisecond)
+	if err != nil {
+		t.Fatalf("NewCurrent: %v", err)
+	}
+	if _, served := cur.Get().Secrets["SEEDED_LATER"]; served {
+		t.Fatalf("served SEEDED_LATER before it had a value: %+v", cur.Get().Secrets)
+	}
+	if want := refusedLine("SEEDED_LATER", policy.ReasonNoCurrentValue); !strings.HasPrefix(logged.String(), want) {
+		t.Fatalf("logged:\n%s\nwant it to open with %q", logged, want)
+	}
+
+	store.Put(policytest.Secret("SEEDED_LATER", owner, policy.TierHuman, "seeded-v1"))
+	await(t, func() bool { return cur.Get().Secrets["SEEDED_LATER"].Name == "SEEDED_LATER" })
 }
 
 // failingSecrets fails ListSecrets once failing is set.
@@ -275,20 +350,11 @@ func TestVersionNamesThePolicyNotItsListingOrder(t *testing.T) {
 		}
 		return set.Version
 	}
-	entry := func(slug, arn string) smtypes.SecretListEntry {
-		return smtypes.SecretListEntry{
-			Name: aws.String(policytest.Prefix + slug), ARN: aws.String(arn), KmsKeyId: aws.String(policytest.KeyARN),
-			Tags: []smtypes.Tag{
-				{Key: aws.String(policy.TagOwner), Value: aws.String(policy.OwnerShared)},
-				{Key: aws.String(policy.TagTier), Value: aws.String(policy.TierAgent)},
-			},
-		}
-	}
-	first, second := entry("a-key", "arn:a-key-1"), entry("b-key", "arn:b-key-1")
+	first, second := listEntry(policytest.Prefix+"a-key", "arn:a-key-1", onlyCurrent), listEntry(policytest.Prefix+"b-key", "arn:b-key-1", onlyCurrent)
 	if listed(first, second) != listed(second, first) {
 		t.Fatal("the same secrets in another order gave another version")
 	}
-	if listed(first, entry("b-key", "arn:b-key-2")) == listed(first, second) {
+	if listed(first, listEntry(policytest.Prefix+"b-key", "arn:b-key-2", onlyCurrent)) == listed(first, second) {
 		t.Error("a secret created again under its name, with a new ARN, left the version unchanged")
 	}
 

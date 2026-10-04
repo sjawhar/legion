@@ -47,11 +47,12 @@ made, by its SHA; then complete. An approval waits for the CI verdict to settle 
 before you submit it, since an approval stands only on green checks and GitHub can dismiss one
 once the head moves, and a verdict that settles red there makes the round's decision a request for
 changes naming the failing checks; a request for changes does not wait, since it stands whatever
-CI says and the issue leaves reviewing with it. The verdict is of the checks the base branch
-requires, the set READY checks: red when one of them failed, and never red for a check the base
-branch does not require. A required check that was cancelled, or that the head's checks settled
-without, leaves no verdict until a later settlement decides it, since a run can be cancelled or
-not yet queued when the head settles. A review of a head the handoff push
+CI says and the issue leaves reviewing with it. The verdict is of the checks and workflows the
+base branch requires, the set READY checks: red when one of them failed, and never red for a check
+the base branch does not require. A required check that was cancelled, or that the head's checks
+settled without, leaves no verdict until a later settlement decides it, since a run can be
+cancelled or not yet queued when the head settles; a required workflow's run on the head that is
+still going or has not happened leaves none either. A review of a head the handoff push
 then replaces names a head the pull request no longer has. A round that writes none (the final
 approval of the `.legion/` deletion head) reviews the head as it is. The daemon moves the issue
 once both are in — the decision GitHub reports and your completion, in either order — so a

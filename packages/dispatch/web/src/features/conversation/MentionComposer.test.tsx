@@ -1,17 +1,15 @@
-import { expect, spyOn, test } from "bun:test";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { expect, jest, spyOn, test } from "bun:test";
+import { type MutationKey, QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { type ReactNode, useState } from "react";
 import { MemoryRouter } from "react-router-dom";
 
 import { ApiError, api } from "../../api/client";
 import type { Agent, Comment, Message } from "../../api/types";
-import {
-  type CarriedDraft,
-  type ComposerOwner,
-  MentionComposer,
-  reconcileMentions,
-} from "./MentionComposer";
+import { useSending } from "../../hooks/useSending";
+import type { ComposerOwner } from "./composer-model";
+import { MentionComposer, reconcileMentions } from "./MentionComposer";
+import { SEND_DEADLINE_MS } from "./send-request";
 
 const planner: Agent = {
   capabilities: ["btw"],
@@ -56,58 +54,68 @@ const createdComment: Comment = {
   turn: null,
 };
 
-function renderComposer(
-  options: {
-    agents?: readonly Agent[];
-    anchor?: { artifact: string; mark_id: string; quote: string };
-    carried?: CarriedDraft;
-    edit?: { body: string; id: string };
-    initialMentions?: readonly { target: string; title: string }[];
-    onCarry?: (draft: CarriedDraft) => void;
-    onCancelReply?: () => void;
-    onKindChange?: (kind: "ask" | "comment" | "suggestion") => string | undefined;
-    onSent?: () => void;
-    owner?: ComposerOwner;
-    replyTo?: {
-      author: string;
-      excerpt: string;
-      id: string;
-      parentKind?: "comment" | "message";
-      thread?: { delivery: "btw" | "steer"; target: string; title: string };
-      to?: string;
-    } | null;
-  } = {}
-) {
+interface ComposerOptions {
+  agents?: readonly Agent[];
+  anchor?: { artifact: string; mark_id: string; quote: string };
+  closed?: boolean;
+  edit?: { body: string; id: string };
+  kind?: "ask" | "comment" | "suggestion";
+  seedMentions?: readonly { target: string; title: string }[];
+  onCancelReply?: () => void;
+  onKindChange?: (kind: "ask" | "comment" | "suggestion") => string | undefined;
+  onSent?: () => void;
+  owner?: ComposerOwner;
+  replyTo?: {
+    author: string;
+    excerpt: string;
+    id: string;
+    parentKind?: "comment" | "message";
+    thread?: { delivery: "btw" | "steer"; target: string; title: string };
+    to?: string;
+  } | null;
+}
+
+/** Renders the composer, and hands back `rerender` for a host that changes its props on the live
+ *  instance - an Agents row's owner and seed when the reader picks an issue. */
+function renderComposer(options: ComposerOptions = {}) {
   const queryClient = new QueryClient({
     defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
   });
-  const view = render(
+  const composer = (props: ComposerOptions) => (
     <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
       <QueryClientProvider client={queryClient}>
         <MentionComposer
-          agents={options.agents}
-          anchor={options.anchor}
-          carried={options.carried}
-          edit={options.edit}
-          initialMentions={options.initialMentions}
-          onCancelReply={options.onCancelReply}
-          onCarry={options.onCarry}
+          agents={props.agents}
+          anchor={props.anchor}
+          closed={props.closed}
+          edit={props.edit}
+          kind={props.kind}
+          seedMentions={props.seedMentions}
+          onCancelReply={props.onCancelReply}
           onClose={() => {}}
-          onKindChange={options.onKindChange}
-          onSent={options.onSent ?? (() => {})}
-          owner={options.owner ?? { issueKey: "CORE-1", kind: "issue" }}
+          onKindChange={props.onKindChange}
+          onSent={props.onSent ?? (() => {})}
+          owner={props.owner ?? { issueKey: "CORE-1", kind: "issue" }}
           replyTo={
-            options.replyTo === null
+            props.replyTo === null
               ? null
-              : options.replyTo === undefined
+              : props.replyTo === undefined
                 ? undefined
-                : { ...options.replyTo, parentKind: options.replyTo.parentKind ?? "comment" }
+                : { ...props.replyTo, parentKind: props.replyTo.parentKind ?? "comment" }
           }
         />
       </QueryClientProvider>
     </MemoryRouter>
   );
-  return { queryClient, view };
+  const view = render(composer(options));
+  return { queryClient, rerender: (next: ComposerOptions) => view.rerender(composer(next)), view };
+}
+
+function holdControls(): HTMLFieldSetElement {
+  const controls = screen.getByRole("form", { name: "Comment composer" }).querySelector("fieldset");
+  if (!(controls instanceof HTMLFieldSetElement))
+    throw new Error("expected composer control fieldset");
+  return controls;
 }
 
 test("a comment without a surviving mention preserves /btw and omits delivery", async () => {
@@ -869,14 +877,14 @@ const createdMessage: Message = {
   target: null,
 };
 
-// The carry is the one branch these seven call sites share, so its four cases live here rather
-// than in one host's e2e: what a caller with no carry gets (every other surface), what a carry
-// with prose gets, what a carry that already holds this owner's mention gets, and where a
-// mention accepted afterwards lands. Each asserts the wire as well as the field: the body and
-// the accepted records disagreeing is exactly the defect these cover.
-test("no carry seeds the owner's mention and sends it", async () => {
+// The seed is the one branch these seven call sites share, so its cases live here rather than in
+// one host's e2e: what a mount seeds, what a draft entering a seeded channel gets, what a draft
+// that already holds the channel's mention gets, where a mention accepted afterwards lands, and
+// what leaves with a channel. Each asserts the wire as well as the field: the body and the
+// accepted records disagreeing is exactly the defect these cover.
+test("a mount seeds the owner's mention and sends it", async () => {
   const createComment = spyOn(api, "createComment").mockResolvedValue(createdComment);
-  const { view } = renderComposer({ initialMentions: [plannerMention] });
+  const { view } = renderComposer({ seedMentions: [plannerMention] });
 
   try {
     const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
@@ -897,19 +905,27 @@ test("no carry seeds the owner's mention and sends it", async () => {
   }
 });
 
-test("a carry without this owner's mention is seeded in front of it, records and all", async () => {
+/** Types `@` at the end of the field and accepts `title` from the suggestions, as a reader does. */
+async function acceptMention(field: HTMLTextAreaElement, title: string): Promise<void> {
+  fireEvent.change(field, { target: { value: `${field.value}@` } });
+  await screen.findByRole("listbox", { name: "Mention suggestions" });
+  fireEvent.click(screen.getByRole("option", { name: title }));
+}
+
+// An Agents row changes the composer's owner and seed when the reader picks an issue, and the
+// live draft takes the new seed in place, by the rules a mount applies. The records these start
+// from are accepted in an issue comment that seeds nothing, since a direct message offers none.
+test("a draft entering a channel that owes a mention is seeded in front of it, records and all", async () => {
   const createComment = spyOn(api, "createComment").mockResolvedValue(createdComment);
-  const { view } = renderComposer({
-    carried: {
-      body: "hello @Worker",
-      mentions: [{ end: 13, start: 6, target: "session:B", text: "Worker" }],
-    },
-    initialMentions: [plannerMention],
-  });
+  const { rerender, view } = renderComposer({ agents: [planner, worker] });
 
   try {
     const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
-    expect(field.value).toBe("@Planner hello @Worker");
+    fireEvent.change(field, { target: { value: "hello " } });
+    await acceptMention(field, "Worker");
+    await waitFor(() => expect(field.value).toBe("hello @Worker"));
+    rerender({ agents: [planner, worker], seedMentions: [plannerMention] });
+    await waitFor(() => expect(field.value).toBe("@Planner hello @Worker"));
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
 
     await waitFor(() =>
@@ -925,19 +941,18 @@ test("a carry without this owner's mention is seeded in front of it, records and
   }
 });
 
-test("a carry that already holds this owner's mention is not seeded twice, wherever it sits", async () => {
+test("a draft that already holds the channel's mention is not seeded twice, wherever it sits", async () => {
   const createComment = spyOn(api, "createComment").mockResolvedValue(createdComment);
-  const { view } = renderComposer({
-    carried: {
-      body: "y@Planner x",
-      mentions: [{ end: 9, start: 1, target: "session:A", text: "Planner" }],
-    },
-    initialMentions: [plannerMention],
-  });
+  const { rerender, view } = renderComposer({ agents: [planner, worker] });
 
   try {
     const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
-    expect(field.value).toBe("y@Planner x");
+    fireEvent.change(field, { target: { value: "y" } });
+    await acceptMention(field, "Planner");
+    await waitFor(() => expect(field.value).toBe("y@Planner"));
+    fireEvent.change(field, { target: { value: "y@Planner x" } });
+    rerender({ agents: [planner, worker], seedMentions: [plannerMention] });
+    await waitFor(() => expect(field.value).toBe("y@Planner x"));
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
 
     await waitFor(() =>
@@ -953,20 +968,18 @@ test("a carry that already holds this owner's mention is not seeded twice, where
   }
 });
 
-test("a mention accepted after a carry lands at its own offset", async () => {
+test("a mention accepted after a reseed lands at its own offset", async () => {
   const createComment = spyOn(api, "createComment").mockResolvedValue(createdComment);
-  const { view } = renderComposer({
-    agents: [planner, worker],
-    carried: { body: "hello", mentions: [] },
-    initialMentions: [plannerMention],
-  });
+  const direct = { kind: "session" as const, sessionId: "A" };
+  const { rerender, view } = renderComposer({ agents: [planner, worker], owner: direct });
 
   try {
     const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
-    expect(field.value).toBe("@Planner hello");
-    fireEvent.change(field, { target: { value: "@Planner hello @" } });
-    await screen.findByRole("listbox", { name: "Mention suggestions" });
-    fireEvent.click(screen.getByRole("option", { name: "Worker" }));
+    fireEvent.change(field, { target: { value: "hello" } });
+    rerender({ agents: [planner, worker], seedMentions: [plannerMention] });
+    await waitFor(() => expect(field.value).toBe("@Planner hello"));
+    fireEvent.change(field, { target: { value: "@Planner hello " } });
+    await acceptMention(field, "Worker");
     await waitFor(() => expect(field.value).toBe("@Planner hello @Worker"));
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
 
@@ -985,19 +998,15 @@ test("a mention accepted after a carry lands at its own offset", async () => {
 
 // A message this channel already addresses needs no mention of its own recipient: the record
 // proves the reader never touched the text the last channel seeded, so it goes with the channel.
-test("the owner's own untouched mention does not travel into a message addressed to it", async () => {
+test("the owner's own untouched mention leaves with the channel that seeded it", async () => {
   const createAgentMessage = spyOn(api, "createAgentMessage").mockResolvedValue(createdMessage);
-  const { view } = renderComposer({
-    carried: {
-      body: "@Planner hello",
-      mentions: [{ end: 8, start: 0, target: "session:A", text: "Planner" }],
-    },
-    owner: { kind: "session", sessionId: "A" },
-  });
+  const { rerender, view } = renderComposer({ seedMentions: [plannerMention] });
 
   try {
     const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
-    expect(field.value).toBe("hello");
+    fireEvent.change(field, { target: { value: "@Planner hello" } });
+    rerender({ owner: { kind: "session", sessionId: "A" } });
+    await waitFor(() => expect(field.value).toBe("hello"));
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
 
     await waitFor(() =>
@@ -1010,17 +1019,14 @@ test("the owner's own untouched mention does not travel into a message addressed
 });
 
 test("an owner mention the reader edited is their prose and stays", async () => {
-  const { view } = renderComposer({
-    carried: {
-      body: "@Plannr hello",
-      mentions: [{ end: 8, start: 0, target: "session:A", text: "Planner" }],
-    },
-    owner: { kind: "session", sessionId: "A" },
-  });
+  const { rerender, view } = renderComposer({ seedMentions: [plannerMention] });
 
   try {
+    const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
     // The span no longer reads `@Planner`, so it is no longer a record: it is what they typed.
-    expect(screen.getByLabelText<HTMLTextAreaElement>("Comment").value).toBe("@Plannr hello");
+    fireEvent.change(field, { target: { value: "@Plannr hello" } });
+    rerender({ owner: { kind: "session", sessionId: "A" } });
+    await waitFor(() => expect(field.value).toBe("@Plannr hello"));
   } finally {
     view.unmount();
   }
@@ -1028,13 +1034,10 @@ test("an owner mention the reader edited is their prose and stays", async () => 
 
 // "Discard draft?" means the draft is gone, in every host. Where `onClose` unmounts the composer
 // that was true by accident; on the Agents page it only moves focus, so the reset has to be the
-// composer's own - the same one a successful send runs, carry included.
-test("Discard clears the draft and its records, wherever the host takes focus", () => {
-  const carriedDrafts: CarriedDraft[] = [];
-  const { view } = renderComposer({
-    initialMentions: [plannerMention],
-    onCarry: (draft) => carriedDrafts.push(draft),
-  });
+// composer's own - the same one a successful send runs. What it leaves is what a mount shows: the
+// channel's own mention, seeded again, or the next message would not reach it.
+test("Discard clears the draft to what a mount shows, wherever the host takes focus", () => {
+  const { view } = renderComposer({ seedMentions: [plannerMention] });
 
   try {
     const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
@@ -1042,10 +1045,322 @@ test("Discard clears the draft and its records, wherever the host takes focus", 
     fireEvent.keyDown(field, { key: "Escape" });
     fireEvent.click(screen.getByRole("button", { name: "Discard" }));
 
-    expect(field.value).toBe("");
-    expect(carriedDrafts.at(-1)).toEqual({ body: "", mentions: [] });
+    expect(field.value).toBe("@Planner");
   } finally {
     view.unmount();
+  }
+});
+
+// A refusal is about the draft it turned down: Retry sends the draft as it stands, so it offers
+// only what Send would, and Discard, which drops the draft, drops the notice with it.
+test("a refused send's Retry asks what Send asks, and Discard takes the notice with the draft", async () => {
+  const createComment = spyOn(api, "createComment").mockRejectedValue(
+    new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" })
+  );
+  const { view } = renderComposer({ seedMentions: [plannerMention] });
+
+  try {
+    const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
+    fireEvent.change(field, { target: { value: "@Planner hello" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await screen.findByText("Couldn't send — the server is down");
+    expect(field.value).toBe("@Planner hello");
+    expect(screen.getByRole("button", { name: "Retry" })).toBeDefined();
+
+    // Nothing Send would send, so nothing Retry may: the button goes, the notice stays.
+    fireEvent.change(field, { target: { value: "" } });
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    expect(screen.getByText("Couldn't send — the server is down")).toBeDefined();
+
+    fireEvent.change(field, { target: { value: "@Planner hello" } });
+    fireEvent.keyDown(field, { key: "Escape" });
+    fireEvent.click(screen.getByRole("button", { name: "Discard" }));
+    expect(field.value).toBe("@Planner");
+    expect(screen.queryByText("Couldn't send — the server is down")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    expect(createComment).toHaveBeenCalledTimes(1);
+  } finally {
+    view.unmount();
+    createComment.mockRestore();
+  }
+});
+
+// A message on its way is the server's until it answers, so its draft is not the reader's to
+// discard: sending takes a `Discard draft?` already up with it, and Escape raises none while the
+// send is out - from a control that stays enabled then, such as a margin composer's Replacement.
+// The outcome then lands on the draft that was sent: a refusal hands it back with its notice.
+test("a send takes the Discard prompt with it and Escape raises none until the server answers", async () => {
+  const refused = Promise.withResolvers<Comment>();
+  const createComment = spyOn(api, "createComment").mockReturnValueOnce(refused.promise);
+  const { view } = renderComposer({ seedMentions: [plannerMention] });
+
+  try {
+    const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
+    fireEvent.change(field, { target: { value: "@Planner hello" } });
+    fireEvent.keyDown(field, { key: "Escape" });
+    expect(screen.getByRole("button", { name: "Discard" })).toBeDefined();
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(holdControls().disabled).toBe(true));
+    expect(screen.queryByRole("button", { name: "Discard" })).toBeNull();
+    fireEvent.keyDown(field, { key: "Escape" });
+    expect(screen.queryByRole("button", { name: "Discard" })).toBeNull();
+
+    refused.reject(new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" }));
+    await screen.findByText("Couldn't send — the server is down");
+    expect(field.value).toBe("@Planner hello");
+    expect(screen.getByRole("button", { name: "Retry" })).toBeDefined();
+    expect(screen.queryByRole("button", { name: "Discard" })).toBeNull();
+  } finally {
+    view.unmount();
+    createComment.mockRestore();
+  }
+});
+
+test("a send holds every suggestion control and a refusal restores the replacement it sent", async () => {
+  const refused = Promise.withResolvers<Comment>();
+  const createComment = spyOn(api, "createComment")
+    .mockReturnValueOnce(refused.promise)
+    .mockResolvedValueOnce(createdComment);
+  const { view } = renderComposer({
+    anchor: { artifact: "artifact-1", mark_id: "mark-1", quote: "brown" },
+    kind: "suggestion",
+  });
+
+  try {
+    const reason = screen.getByLabelText<HTMLTextAreaElement>("Reason");
+    const replacement = screen.getByLabelText<HTMLTextAreaElement>("Replacement");
+    fireEvent.change(reason, { target: { value: "why" } });
+    fireEvent.change(replacement, { target: { value: "quick" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    fireEvent.change(replacement, { target: { value: "quick edited while sending" } });
+
+    await waitFor(() => expect(holdControls().disabled).toBe(true));
+
+    refused.reject(new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" }));
+    await screen.findByText("Couldn't send — the server is down");
+    expect(replacement.value).toBe("quick");
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(createComment).toHaveBeenCalledTimes(2));
+    expect(createComment.mock.calls[1]).toEqual([
+      "CORE-1",
+      {
+        anchor: { artifact: "artifact-1", mark_id: "mark-1" },
+        body: "why",
+        suggestion: { replace_with: "quick" },
+      },
+    ]);
+  } finally {
+    view.unmount();
+    createComment.mockRestore();
+  }
+});
+
+test("an Escape in Send's task cannot offer Discard", async () => {
+  const refused = Promise.withResolvers<Comment>();
+  const createComment = spyOn(api, "createComment").mockReturnValueOnce(refused.promise);
+  const { view } = renderComposer({ seedMentions: [plannerMention] });
+
+  try {
+    const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
+    fireEvent.change(field, { target: { value: "@Planner hello" } });
+    act(() => {
+      fireEvent.click(screen.getByRole("button", { name: "Send" }));
+      fireEvent.keyDown(field, { key: "Escape" });
+    });
+
+    expect(screen.queryByRole("button", { name: "Discard" })).toBeNull();
+    refused.reject(new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" }));
+    await screen.findByText("Couldn't send — the server is down");
+    expect(field.value).toBe("@Planner hello");
+  } finally {
+    view.unmount();
+    createComment.mockRestore();
+  }
+});
+
+// A Ctrl+K that reaches the field before React disables it must not open a picker later: the send
+// has already taken that draft. Once a refusal returns it, a new Ctrl+K opens the picker normally.
+test("a reference picker request in Send's task is refused until the send answers", async () => {
+  const refused = Promise.withResolvers<Comment>();
+  const createComment = spyOn(api, "createComment").mockReturnValueOnce(refused.promise);
+  const getIssue = spyOn(api, "getIssue").mockResolvedValue({ project: "CORE" } as never);
+  const listIssues = spyOn(api, "listIssues").mockResolvedValue([
+    { key: "CORE-1", title: "Core issue" },
+  ] as never);
+  const { view } = renderComposer({ seedMentions: [plannerMention] });
+
+  try {
+    const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
+    fireEvent.change(field, { target: { value: "@Planner see" } });
+    // One act, so React renders nothing between Send and the key.
+    act(() => {
+      fireEvent.click(screen.getByRole("button", { name: "Send" }));
+      expect(holdControls().disabled).toBe(false);
+      fireEvent.keyDown(field, { ctrlKey: true, key: "k" });
+    });
+    await waitFor(() => expect(createComment).toHaveBeenCalledTimes(1));
+    expect(holdControls().disabled).toBe(true);
+    expect(screen.queryByRole("dialog", { name: "Reference picker" })).toBeNull();
+
+    refused.reject(new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" }));
+    await screen.findByText("Couldn't send — the server is down");
+    expect(field.value).toBe("@Planner see");
+    expect(screen.queryByRole("dialog", { name: "Reference picker" })).toBeNull();
+    fireEvent.keyDown(field, { ctrlKey: true, key: "k" });
+    fireEvent.click(await screen.findByRole("button", { name: "CORE-1: Core issue" }));
+    await waitFor(() => expect(field.value).toBe("@Planner see dispatch://CORE-1"));
+  } finally {
+    view.unmount();
+    createComment.mockRestore();
+    getIssue.mockRestore();
+    listIssues.mockRestore();
+  }
+});
+
+test("a Ctrl+K in Send's task cannot open a picker over a successful send", async () => {
+  const sent = Promise.withResolvers<Comment>();
+  const createComment = spyOn(api, "createComment").mockReturnValueOnce(sent.promise);
+  const { view } = renderComposer({ seedMentions: [plannerMention] });
+
+  try {
+    const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
+    fireEvent.change(field, { target: { value: "@Planner see" } });
+    act(() => {
+      fireEvent.click(screen.getByRole("button", { name: "Send" }));
+      fireEvent.keyDown(field, { ctrlKey: true, key: "k" });
+    });
+
+    await waitFor(() => expect(createComment).toHaveBeenCalledTimes(1));
+    sent.resolve(createdComment);
+    await waitFor(() => expect(field.value).toBe("@Planner"));
+    expect(screen.queryByRole("dialog", { name: "Reference picker" })).toBeNull();
+  } finally {
+    view.unmount();
+    createComment.mockRestore();
+  }
+});
+
+// The mention suggestions write into the draft too: a suggestion open when the message goes
+// would put a mention into a draft its refusal then replaces. Sending closes them.
+test("a send closes the mention suggestions open over its draft", async () => {
+  const refused = Promise.withResolvers<Comment>();
+  const createComment = spyOn(api, "createComment").mockReturnValueOnce(refused.promise);
+  const { view } = renderComposer({ agents: [planner, worker] });
+
+  try {
+    const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
+    fireEvent.change(field, { target: { selectionStart: 9, value: "hello @Pl" } });
+    await screen.findByRole("option", { name: "Planner" });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(holdControls().disabled).toBe(true));
+    expect(screen.queryByRole("listbox", { name: "Mention suggestions" })).toBeNull();
+
+    refused.reject(new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" }));
+    await screen.findByText("Couldn't send — the server is down");
+    expect(field.value).toBe("hello @Pl");
+  } finally {
+    view.unmount();
+    createComment.mockRestore();
+  }
+});
+
+// A reply is part of the message's address. The composer that started it holds that address until
+// the answer, so Cancel reply cannot rewrite a send while it is on the wire.
+test("a refused reply keeps the reply its send started with until the server answers", async () => {
+  const refused = Promise.withResolvers<Comment>();
+  const createComment = spyOn(api, "createComment")
+    .mockReturnValueOnce(refused.promise)
+    .mockResolvedValueOnce(createdComment);
+  let cancelled = 0;
+  const cancelReply = () => {
+    cancelled += 1;
+  };
+  const { view } = renderComposer({
+    onCancelReply: cancelReply,
+    replyTo: { author: "Bob", excerpt: "Earlier", id: "comment-0" },
+    seedMentions: [plannerMention],
+  });
+
+  try {
+    const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
+    fireEvent.change(field, { target: { value: "Reply body" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(createComment).toHaveBeenCalledTimes(1));
+    const cancel = screen.getByRole("button", { name: "Cancel reply" }) as HTMLButtonElement;
+    expect(holdControls().disabled).toBe(true);
+    fireEvent.click(cancel);
+    expect(cancelled).toBe(0);
+
+    refused.reject(new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" }));
+    await screen.findByText("Couldn't send — the server is down");
+    expect(field.value).toBe("Reply body");
+    fireEvent.click(cancel);
+    expect(cancelled).toBe(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(createComment).toHaveBeenCalledTimes(2));
+    expect(createComment.mock.calls[1]).toEqual([
+      "CORE-1",
+      { body: "Reply body", reply_to: "comment-0" },
+    ]);
+  } finally {
+    view.unmount();
+    createComment.mockRestore();
+  }
+});
+
+// A send is the request it started as. TanStack calls `mutationFn` only once `onMutate` has
+// resolved, with the options of the latest render, so a host that re-addresses the composer in
+// Send's own task - before React re-renders, with no guard of its own - changes only what the
+// composer shows next. Here the owner, the kind, the anchor and a reply into a message thread all
+// change at once, and the comment still goes as it was sent, to where it was sent.
+test("a host that re-addresses the composer in Send's task cannot re-address the send", async () => {
+  const refused = Promise.withResolvers<Comment>();
+  const createComment = spyOn(api, "createComment").mockReturnValueOnce(refused.promise);
+  const createMessage = spyOn(api, "createMessage").mockResolvedValue(createdMessage);
+  const createAgentMessage = spyOn(api, "createAgentMessage").mockResolvedValue(createdMessage);
+  const createAsk = spyOn(api, "createAsk").mockResolvedValue({} as never);
+  const { rerender, view } = renderComposer({
+    anchor: { artifact: "artifact-1", mark_id: "mark-1", quote: "brown" },
+  });
+
+  try {
+    const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
+    fireEvent.change(field, { target: { value: "Status please" } });
+    act(() => {
+      fireEvent.click(screen.getByRole("button", { name: "Send" }));
+      rerender({
+        anchor: { artifact: "artifact-2", mark_id: "mark-2", quote: "fox" },
+        kind: "ask",
+        owner: { kind: "session", sessionId: "A" },
+        replyTo: {
+          author: "Planner",
+          excerpt: "Can this ship?",
+          id: "message-0",
+          parentKind: "message",
+          thread: { delivery: "btw", target: "session:A", title: "Planner" },
+        },
+      });
+    });
+
+    await waitFor(() => expect(createComment).toHaveBeenCalledTimes(1));
+    expect(createComment.mock.calls[0]).toEqual([
+      "CORE-1",
+      { anchor: { artifact: "artifact-1", mark_id: "mark-1" }, body: "Status please" },
+    ]);
+    expect(createMessage).not.toHaveBeenCalled();
+    expect(createAgentMessage).not.toHaveBeenCalled();
+    expect(createAsk).not.toHaveBeenCalled();
+
+    refused.reject(new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" }));
+    await screen.findByText("Couldn't send — the server is down");
+    expect(field.value).toBe("Status please");
+  } finally {
+    view.unmount();
+    createComment.mockRestore();
+    createMessage.mockRestore();
+    createAgentMessage.mockRestore();
+    createAsk.mockRestore();
   }
 });
 
@@ -1122,5 +1437,299 @@ test("a refusal belongs to the mark it answered: a newer anchor leaves it behind
     expect(screen.queryByRole("status")).toBeNull();
   } finally {
     view.unmount();
+  }
+});
+
+const hostKey: MutationKey = ["conversation-composer", "CORE-1"];
+
+/** A host's two holds on the composer's send: a Reply's, which lasts until the server answers,
+ *  and a Back's, which lets go at the send's deadline. */
+function HostHolds(): ReactNode {
+  const reply = useSending(hostKey).sending;
+  const back = useSending(hostKey, { untilDeadline: true }).sending;
+  return (
+    <output data-testid="host-holds">{`Reply ${reply ? "held" : "free"}, Back ${back ? "held" : "free"}`}</output>
+  );
+}
+
+function renderHostedComposer() {
+  const queryClient = new QueryClient({
+    defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+  });
+  const invalidated = spyOn(queryClient, "invalidateQueries");
+  const view = render(
+    <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+      <QueryClientProvider client={queryClient}>
+        <HostHolds />
+        <MentionComposer
+          mutationKey={hostKey}
+          onClose={() => {}}
+          onSent={() => {}}
+          owner={{ issueKey: "CORE-1", kind: "issue" }}
+        />
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+  return { invalidated, view };
+}
+
+const stillSending =
+  "Still sending — the server has not answered in 30 seconds. The draft stays here until it does.";
+
+// Past its deadline a send is still the server's: a Retry would post it a second time. The
+// composer keeps the draft and the host keeps its Reply, and only the host's Back lets go, so a
+// request the server never answers cannot keep the reader in front of it.
+test("a send the server answers at 35 s posts once: the deadline offers no Retry, and the answer lands", async () => {
+  const answer = Promise.withResolvers<Comment>();
+  const createComment = spyOn(api, "createComment").mockReturnValueOnce(answer.promise);
+  jest.useFakeTimers();
+  const { invalidated, view } = renderHostedComposer();
+  const holds = () => screen.getByTestId("host-holds").textContent;
+
+  try {
+    const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
+    fireEvent.change(field, { target: { value: "Slow but sure" } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    });
+    expect(holds()).toBe("Reply held, Back held");
+
+    await act(async () => {
+      jest.advanceTimersByTime(SEND_DEADLINE_MS);
+    });
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    expect(screen.getByText(stillSending)).toBeTruthy();
+    expect(field.value).toBe("Slow but sure");
+    expect(holdControls().disabled).toBe(true);
+    expect(holds()).toBe("Reply held, Back free");
+    // Ctrl+Enter is Send's other way in, and the send is still out.
+    fireEvent.keyDown(field, { ctrlKey: true, key: "Enter" });
+
+    await act(async () => {
+      jest.advanceTimersByTime(5_000);
+      answer.resolve(createdComment);
+    });
+    expect(createComment).toHaveBeenCalledTimes(1);
+    expect(field.value).toBe("");
+    expect(screen.queryByText(stillSending)).toBeNull();
+    expect(holds()).toBe("Reply free, Back free");
+    const refreshed = invalidated.mock.calls.map(([filters]) => JSON.stringify(filters?.queryKey));
+    expect(refreshed).toContain(JSON.stringify(["comments", "CORE-1"]));
+    expect(refreshed).toContain(JSON.stringify(["events", "CORE-1"]));
+  } finally {
+    jest.useRealTimers();
+    view.unmount();
+    createComment.mockRestore();
+  }
+});
+
+// The answer that follows a deadline is the send's outcome whatever it is: a refusal hands the
+// draft back with Retry, as one inside the deadline does.
+test("a refusal after the deadline hands the draft back with Retry", async () => {
+  const answer = Promise.withResolvers<Comment>();
+  const createComment = spyOn(api, "createComment").mockReturnValueOnce(answer.promise);
+  jest.useFakeTimers();
+  const { view } = renderHostedComposer();
+
+  try {
+    const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
+    fireEvent.change(field, { target: { value: "Refused late" } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    });
+    await act(async () => {
+      jest.advanceTimersByTime(SEND_DEADLINE_MS);
+    });
+    expect(screen.getByText(stillSending)).toBeTruthy();
+
+    await act(async () => {
+      answer.reject(new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" }));
+    });
+    expect(screen.getByText("Couldn't send — the server is down")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
+    expect(screen.queryByText(stillSending)).toBeNull();
+    expect(field.value).toBe("Refused late");
+    expect(holdControls().disabled).toBe(false);
+    expect(screen.getByTestId("host-holds").textContent).toBe("Reply free, Back free");
+  } finally {
+    jest.useRealTimers();
+    view.unmount();
+    createComment.mockRestore();
+  }
+});
+
+// A closed owner takes no send. Its composer stays mounted for a send it still has out and for
+// that send's refusal - Send refused, Discard draft in place of Retry - and shows nothing else.
+test("a closed composer shows only a send of its own still out, then its refusal with Discard", async () => {
+  const refused = Promise.withResolvers<Comment>();
+  const createComment = spyOn(api, "createComment").mockReturnValueOnce(refused.promise);
+  const { rerender, view } = renderComposer();
+
+  try {
+    rerender({ closed: true });
+    expect(screen.queryByRole("form", { name: "Comment composer" })).toBeNull();
+    rerender({});
+
+    const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
+    fireEvent.change(field, { target: { value: "Closing under me" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(createComment).toHaveBeenCalledTimes(1));
+    rerender({ closed: true });
+    expect(screen.getByRole("form", { name: "Comment composer" })).toBeTruthy();
+    expect(holdControls().disabled).toBe(true);
+
+    refused.reject(new ApiError(409, { code: "ISSUE_CLOSED", error: "issue is closed" }));
+    await screen.findByText("Couldn't send — issue is closed");
+    expect(screen.getByLabelText<HTMLTextAreaElement>("Comment").value).toBe("Closing under me");
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    const send = screen.getByRole("button", { name: "Send" });
+    expect(send.getAttribute("aria-disabled")).toBe("true");
+    expect(send.getAttribute("title")).toBe("This issue is closed. Reopen it to send.");
+
+    fireEvent.click(screen.getByRole("button", { name: "Discard draft" }));
+    expect(screen.queryByRole("form", { name: "Comment composer" })).toBeNull();
+  } finally {
+    view.unmount();
+    createComment.mockRestore();
+  }
+});
+
+// An upload carries its target from the paste that starts it: a host that re-addresses the
+// composer in the paste's own task - before React re-renders - moves where the next upload goes,
+// never this one, and the reference it appends names where the file went.
+test("a pick in the paste's own task cannot move the upload", async () => {
+  const uploadArtifact = spyOn(api, "uploadArtifact").mockResolvedValue({
+    artifact: { slug: "notes-md" } as never,
+    version: {} as never,
+  });
+  const { rerender, view } = renderComposer();
+
+  try {
+    const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
+    const file = new File(["# Notes"], "notes.md", { type: "text/markdown" });
+    act(() => {
+      fireEvent.paste(field, { clipboardData: { files: [file] } });
+      rerender({ owner: { issueKey: "CORE-2", kind: "issue" } });
+    });
+
+    await waitFor(() => expect(uploadArtifact).toHaveBeenCalledTimes(1));
+    expect(uploadArtifact.mock.calls[0]?.[0]).toEqual({ issue: "CORE-1" });
+    await waitFor(() => expect(field.value).toBe("dispatch://CORE-1/artifact/notes-md"));
+  } finally {
+    view.unmount();
+    uploadArtifact.mockRestore();
+  }
+});
+
+const threadReplyKey: MutationKey = ["conversation-composer", "CORE-1", "thread-card", "root"];
+
+/** A host that takes its reply composer off the page and puts it back, as a thread collapsing and
+ *  opening again does: the composer unmounts and a new one mounts under the same send name. */
+function renderRemountedReply() {
+  const queryClient = new QueryClient({
+    defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+  });
+  const invalidated = spyOn(queryClient, "invalidateQueries");
+  function Host(): ReactNode {
+    const [shown, setShown] = useState(true);
+    return (
+      <>
+        <button onClick={() => setShown((current) => !current)} type="button">
+          {shown ? "Collapse thread" : "Expand thread"}
+        </button>
+        {shown ? (
+          <MentionComposer
+            inline
+            mutationKey={threadReplyKey}
+            onClose={() => {}}
+            onSent={() => {}}
+            owner={{ issueKey: "CORE-1", kind: "issue" }}
+            replyTo={{ author: "", excerpt: "", id: "root", parentKind: "comment" }}
+          />
+        ) : null}
+      </>
+    );
+  }
+  const view = render(
+    <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+      <QueryClientProvider client={queryClient}>
+        <Host />
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+  const toggle = () =>
+    fireEvent.click(screen.getByRole("button", { name: /^(Collapse|Expand) thread$/ }));
+  return { invalidated, toggle, view };
+}
+
+// A composer holds its send whatever unmounts it: one that mounts under the name of a send still
+// out shows that send, held, and one that mounts after the send was refused shows the draft it
+// sent beside the refusal, whose Retry sends it to the same reply.
+test("a reply composer mounted again while its send is out holds it, and then shows its refusal", async () => {
+  const refused = Promise.withResolvers<Comment>();
+  const createComment = spyOn(api, "createComment")
+    .mockReturnValueOnce(refused.promise)
+    .mockResolvedValueOnce(createdComment);
+  const { toggle, view } = renderRemountedReply();
+
+  try {
+    fireEvent.change(screen.getByLabelText("Reply"), { target: { value: "Out of view" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(createComment).toHaveBeenCalledTimes(1));
+    toggle();
+    toggle();
+    expect(screen.getByLabelText<HTMLTextAreaElement>("Reply").value).toBe("Out of view");
+    expect(holdControls().disabled).toBe(true);
+
+    toggle();
+    await act(async () => {
+      refused.reject(new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" }));
+      await refused.promise.catch(() => {});
+    });
+    toggle();
+    expect(screen.getByText("Couldn't send — the server is down")).toBeTruthy();
+    expect(screen.getByLabelText<HTMLTextAreaElement>("Reply").value).toBe("Out of view");
+    expect(holdControls().disabled).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(createComment).toHaveBeenCalledTimes(2));
+    expect(createComment.mock.calls[1]).toEqual([
+      "CORE-1",
+      { body: "Out of view", reply_to: "root" },
+    ]);
+    await waitFor(() => expect(screen.getByLabelText<HTMLTextAreaElement>("Reply").value).toBe(""));
+    expect(screen.queryByText("Couldn't send — the server is down")).toBeNull();
+  } finally {
+    view.unmount();
+    createComment.mockRestore();
+  }
+});
+
+// A send that lands while its composer is off the page has landed: what it wrote is refreshed,
+// and the composer that mounts next starts empty, holding nothing.
+test("a reply that lands while its composer is unmounted refreshes the thread and leaves nothing held", async () => {
+  const answer = Promise.withResolvers<Comment>();
+  const createComment = spyOn(api, "createComment").mockReturnValueOnce(answer.promise);
+  const { invalidated, toggle, view } = renderRemountedReply();
+
+  try {
+    fireEvent.change(screen.getByLabelText("Reply"), { target: { value: "Landed out of view" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(createComment).toHaveBeenCalledTimes(1));
+    toggle();
+    await act(async () => {
+      answer.resolve(createdComment);
+      await answer.promise;
+    });
+    const refreshed = invalidated.mock.calls.map(([filters]) => JSON.stringify(filters?.queryKey));
+    expect(refreshed).toContain(JSON.stringify(["comments", "CORE-1"]));
+
+    toggle();
+    expect(screen.getByLabelText<HTMLTextAreaElement>("Reply").value).toBe("");
+    expect(holdControls().disabled).toBe(false);
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+  } finally {
+    view.unmount();
+    createComment.mockRestore();
   }
 });

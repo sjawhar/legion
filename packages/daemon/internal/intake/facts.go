@@ -164,14 +164,18 @@ type PullRequestChecks struct {
 
 func (PullRequestChecks) isFact() {}
 
-// RequiredChecks is the checks a pull request's base branch requires, as the daemon read them from
-// GitHub with its implement App's installation token (requiredchecks.Required): never decoded from
-// an event, applied as a synthetic fact by the daemon's own read of each open pull request
-// (workflowRuntime.watchRequiredChecks). An empty Names is a base that requires no check.
+// RequiredChecks is what a pull request's base branch requires, as the daemon read it from GitHub
+// with its implement App's installation token (requiredchecks.Required): never decoded from an
+// event, applied as a synthetic fact by the daemon's own read of each open pull request
+// (workflowRuntime.watchRequiredChecks). Names is the required checks, an empty Names a base that
+// requires none. Workflows is each workflow its rulesets require, with its latest run's result on
+// WorkflowsHead (requiredchecks.Workflows); both are empty when the base requires no workflow.
 type RequiredChecks struct {
-	Repo   string
-	Number int
-	Names  []string
+	Repo          string
+	Number        int
+	Names         []string
+	Workflows     []record.RequiredWorkflow
+	WorkflowsHead string
 }
 
 func (RequiredChecks) isFact() {}
