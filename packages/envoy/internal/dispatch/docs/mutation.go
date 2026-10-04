@@ -1076,6 +1076,15 @@ func (s *Service) recordLastActor(room string, actor model.Actor) {
 	state.mu.Unlock()
 }
 
+// captureAuthorsLocked is captureAuthors under the room's state lock, held for just that call:
+// the two callers of captureLiveTextAndAuthors that read a fork already caught up with the room
+// both need the lock for nothing else, so this is their one shared, panic-safe way to take it.
+func (s *Service) captureAuthorsLocked(state *roomState, write *liveWrite, actor *model.Actor) (versionPending, []model.Actor) {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	return captureAuthors(state, write, actor)
+}
+
 // captureLiveTextAndAuthors is the tree a version records and whom it credits. joinRead brings
 // the calling transaction's fork up to date with the room, which is where a browser change made
 // while the transaction's write was in flight merges with it - and where a write whose text that
@@ -1090,9 +1099,7 @@ func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, ac
 	}
 	if write := joinedLiveWrite(ctx, room); fork != nil && write != nil && write.tree != nil && write.fork == fork {
 		state := s.room(room)
-		state.mu.Lock()
-		capture, authors := captureAuthors(state, write, actor)
-		state.mu.Unlock()
+		capture, authors := s.captureAuthorsLocked(state, write, actor)
 		return write.tree, write.markdown, capture, authors, nil
 	}
 	// The room's state lock is held from taking the room as of one moment to the authors it
@@ -1113,11 +1120,7 @@ func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, ac
 	var authors []model.Actor
 	if fork != nil {
 		state := s.room(room)
-		state.mu.Lock()
-		func() {
-			defer state.mu.Unlock()
-			capture, authors = captureAuthors(state, joinedLiveWrite(ctx, room), actor)
-		}()
+		capture, authors = s.captureAuthorsLocked(state, joinedLiveWrite(ctx, room), actor)
 		if tree, err = treeOf(fork); err != nil {
 			return nil, "", versionPending{}, nil, err
 		}
