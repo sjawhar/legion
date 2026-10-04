@@ -137,7 +137,7 @@ Triage ──┬──► Icebox ──► Backlog ──► Todo ──► In P
 ```
 
 **Phase roles:** architect → plan → implement → test → review → merge
-**Retro:** runs after the reviewer approves the cleaned head and before the merger publishes `READY`.
+**Retro:** runs after the reviewer approves the head and before the merger completes with its `READY` packet.
 **Production check:** after the merge lands, the implementer — the agent that developed the change — drives it in production and records that on the pull request and the issue; the architect signs off only then.
 
 Statuses above are native Dispatch issue statuses, not GitHub labels — the daemon writes
@@ -175,8 +175,9 @@ reason. `gates.design: off` is the only way past the gate without a human review
 operator approve command; with `off` the root architect is told so in its system prompt and adds
 no approval step. Whether a human must
 approve a pull request before it merges is the repository's own branch-protection or CODEOWNERS
-rule: Legion neither reads nor writes it. The merger posts `READY` on the Dispatch issue and, when
-the project's `projects.<KEY>.merge_queue_role` names one, publishes it to that role; a human merges
+rule: Legion neither reads nor writes it. The merger sends its `READY` packet with its completion;
+the daemon posts it on the Dispatch issue and, when the project's `projects.<KEY>.merge_queue_role`
+names one, publishes it to that role; a human merges
 under the repository's code-owner rule. When the head's own CI turns red before the merge, the
 daemon sends the issue back to `implementing`, posts the READY's withdrawal on the Dispatch issue,
 and publishes it to that role.
