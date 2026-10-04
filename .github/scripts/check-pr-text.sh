@@ -40,9 +40,9 @@ jq -r '.pull_request.head.ref' "$event" | tr -d '\000' > "$text/branch"
 # it creates, printing one JSON object per page, each repeating total_commits.
 gh api "repos/$repository/compare/$base...$head?per_page=100" --paginate > "$compare_json"
 total_commits=$(jq -s '.[0].total_commits // empty' "$compare_json")
-if [ -z "$total_commits" ]; then
-  echo "::error::the compare route's answer for $base...$head names no total_commits, so the" \
-    "commit list cannot be checked against it" >&2
+if ! [[ $total_commits =~ ^[0-9]+$ ]]; then
+  echo "::error::the compare route's answer for $base...$head names no whole-number" \
+    "total_commits, so the commit list cannot be checked against it" >&2
   exit 1
 fi
 listed_commits=$(jq -s '[.[].commits[]] | length' "$compare_json")

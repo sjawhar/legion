@@ -442,12 +442,23 @@ write_pr_text "fix(dispatch): keep the inbox order" "Refs LEGION-7" "fix: keep t
 jq -nc '{commits: []}' > "$work/compare"
 run_pr_text
 check "an answer carrying no total_commits fails" "$(is "$status" 1)"
-check "names the cause" "$(contains "$out" 'names no total_commits')"
+check "names the cause" "$(contains "$out" 'total_commits, so the commit list cannot be checked')"
 
 : > "$work/compare"
 run_pr_text
 check "an empty answer fails the same way" "$(is "$status" 1)"
-check "names the cause" "$(contains "$out" 'names no total_commits')"
+check "names the cause" "$(contains "$out" 'total_commits, so the commit list cannot be checked')"
+
+# A total of the wrong type, with fewer commits listed than it claims: `[`'s integer test would
+# fail inside the guard's `if`, where set -e does not apply, and skip the guard.
+for total in '"300"' 300.5; do
+  write_pr_text "fix(dispatch): keep the inbox order" "Refs LEGION-7" "fix: keep the order"
+  jq -c --argjson total "$total" '.total_commits = $total' "$work/compare" > "$work/compare.next"
+  mv "$work/compare.next" "$work/compare"
+  run_pr_text
+  check "a total_commits of $total fails" "$(is "$status" 1)"
+  check "names the cause" "$(contains "$out" 'total_commits, so the commit list cannot be checked')"
+done
 
 long_body=$(printf '%.0s–' {1..50000})
 run_pr_text "fix(dispatch): keep the inbox order" "$long_body" "fix: keep the order"
