@@ -86,7 +86,7 @@ func TestWebhookRedelivery_TheSweepRecoversFailedDeliveriesThroughTheListener(t 
 	if err != nil {
 		t.Fatalf("open redelivery state: %v", err)
 	}
-	client, err := githubapp.New(&auth.AppConfig{ClientID: "Iv1.integration", ClientSecret: "secret", PEM: pemText}, github.URL())
+	client, err := githubapp.New(&auth.AppConfig{ClientID: "Iv1.integration", PEM: pemText}, github.URL())
 	if err != nil {
 		t.Fatalf("App client: %v", err)
 	}

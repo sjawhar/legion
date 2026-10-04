@@ -21,7 +21,6 @@ services:
       DISPATCH_LISTEN_HOST: ${DISPATCH_LISTEN_HOST:-127.0.0.1}
       DISPATCH_PORT: ${DISPATCH_PORT:-8766}
       DISPATCH_APP_CLIENT_ID: ${DISPATCH_APP_CLIENT_ID:-}
-      DISPATCH_APP_CLIENT_SECRET: ${DISPATCH_APP_CLIENT_SECRET:-}
       DISPATCH_AGENT_TOKEN: ${DISPATCH_AGENT_TOKEN:?set DISPATCH_AGENT_TOKEN}
       DISPATCH_SERVER_URL: ${DISPATCH_SERVER_URL:?set DISPATCH_SERVER_URL (the browser origin)}
       NATS_URLS: ${NATS_URLS:?set NATS_URLS}
@@ -29,7 +28,12 @@ services:
       # than this host's. Every connect refuses a NATS that is not the machine's own without this
       # (packages/envoy/internal/bus/reach.go).
       ENVOY_ALLOW_REMOTE_NATS: "1"
-      DISPATCH_ALLOWED_LOGINS: ${DISPATCH_ALLOWED_LOGINS:?set DISPATCH_ALLOWED_LOGINS}
+      DISPATCH_SIGNIN_ISSUER: ${DISPATCH_SIGNIN_ISSUER:-}
+      DISPATCH_SIGNIN_CLIENT_ID: ${DISPATCH_SIGNIN_CLIENT_ID:-}
+      DISPATCH_SIGNIN_CLIENT_SECRET: ${DISPATCH_SIGNIN_CLIENT_SECRET:-}
+      DISPATCH_SIGNIN_GROUP: ${DISPATCH_SIGNIN_GROUP:-}
+      # Production uses cookie identity. header:<name> is only for test/local harnesses and
+      # requires DISPATCH_IDENTITY_HEADER_TRUSTED=1; it never shares a deployment with sign-in.
       DISPATCH_IDENTITY: ${DISPATCH_IDENTITY:-cookie}
       DISPATCH_IDENTITY_HEADER_TRUSTED: ${DISPATCH_IDENTITY_HEADER_TRUSTED:-}
       DISPATCH_NATS_DISABLED: ${DISPATCH_NATS_DISABLED:-}
@@ -46,6 +50,7 @@ services:
     volumes:
       # Signing key and optional app.json credentials.
       - dispatch-data:/home/envoy/.local/share/dispatch
+
 
 volumes:
   dispatch-data:

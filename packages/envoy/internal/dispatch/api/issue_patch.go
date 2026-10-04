@@ -71,7 +71,7 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	assignee, assigneeProvided, err := s.parseIssueAssignee(input.Assignee)
+	assignee, assigneeProvided, err := s.parseIssueAssignee(r.Context(), input.Assignee)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return

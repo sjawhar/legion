@@ -46,8 +46,8 @@ Two consequences for the built artifact under `pull_request`:
 - Concurrency should key on the PR, not the ref: `group: ${{ github.event.pull_request.number ||
   github.ref }}` serialises two pushes to one PR and leaves other events on the ref key.
 
-Same-repo `pull_request` runs receive the workflow's declared `permissions` (here `contents`,
-`packages`, `id-token: write`); a fork PR would get a read-only token. Say which you rely on.
+Same-repo `pull_request` runs receive the workflow's declared `permissions` (here `contents: read`
+and `packages: write`); a fork PR would get a read-only token. Say which you rely on.
 
 ## Fix
 
@@ -69,9 +69,12 @@ is the post-merge path, never the pre-merge one.
 ## Reusable-workflow caller permissions and secrets
 
 When `release.yaml` calls `worker-image.yaml` with `uses:`, the **caller job's** permissions must
-cover everything the callee declares — job-level `permissions:` on the calling job replace the
-workflow-level set for that job, so put the full set there (`contents: write`, `packages: write`,
-`id-token: write`) rather than widening the top-level block for every job in the file.
+cover every scope the callee declares — job-level `permissions:` on the calling job replace the
+workflow-level set for that job, so put the callee's set there (`worker-image.yaml`'s own
+`permissions:` block, not a copy of its scopes) rather than widening the top-level block for every
+job in the file. The step that appends the worker image reference to the legion release needs
+`contents: write`, so it runs in `release.yaml`'s own `worker_image_release_note` job; the called
+workflow, which also builds PR-authored code on `pull_request`, never gets that scope.
 
 `secrets: inherit` is not needed when the callee reads only `secrets.GITHUB_TOKEN`: a called
 workflow receives `GITHUB_TOKEN` automatically. `inherit` hands the callee every repository secret
@@ -81,7 +84,7 @@ Declare `secrets:` explicitly or omit it.
 ## Rerun the failed jobs, not the run
 
 The remedy text for a failed image build must say `gh run rerun <run-id> --failed`. A whole-run
-rerun of a `release.yaml` invocation re-executes the `cli` job at the same commit, which now sees
-its own `cli-vX` tag, computes an empty bump range, skips, and hands the image job an empty
-`cli_version` — the retried image publishes `sha-` only, with no version tag and no release-body
+rerun of a `release.yaml` invocation re-executes the `legion` job at the same commit, which now sees
+its own `legion-vX` tag, computes an empty bump range, skips, and hands the image job an empty
+`legion_version` — the retried image publishes `sha-` only, with no version tag and no release-body
 append. `--failed` keeps the succeeded jobs' recorded outputs.
