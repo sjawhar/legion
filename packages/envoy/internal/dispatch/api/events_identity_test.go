@@ -183,7 +183,7 @@ func TestDocumentSocketClosesOnceItsPersonNoLongerResolves(t *testing.T) {
 			end(t, rig)
 			ended := time.Now()
 			select {
-			case <-peer.readerDone:
+			case <-peer.connection().Ended:
 				t.Logf("the document socket closed %s after the session ended (heartbeat %s)", time.Since(ended).Round(time.Millisecond), heartbeat)
 			case <-time.After(heartbeat + time.Second):
 				t.Fatalf("the document socket stayed open %s after its person's session ended", time.Since(ended).Round(time.Millisecond))
