@@ -69,10 +69,12 @@ func BenchmarkLiveDocumentRead(b *testing.B) {
 							typeOneCharacter(b, live)
 							b.StartTimer()
 						}
-						var readErr error
-						if !replica.read("bench", live, func(doc *crdt.Doc) { _, readErr = read.read(doc) }) {
+						doc := replica.hold("bench", live)
+						if doc == nil {
 							b.Fatal("the replica has nothing to read")
 						}
+						_, readErr := read.read(doc)
+						replica.mu.Unlock()
 						if readErr != nil {
 							b.Fatal(readErr)
 						}
@@ -156,9 +158,7 @@ func BenchmarkKeystrokeBesideReads(b *testing.B) {
 			b.Run(name, func(b *testing.B) {
 				service := &Service{}
 				replica := service.keepReplica(live, nil)
-				replica.mu.Lock()
-				replica.catchUp("bench", live)
-				replica.mu.Unlock()
+				replica.observe("bench", live)
 				for b.Loop() {
 					stop := make(chan struct{})
 					var reading sync.WaitGroup
@@ -179,6 +179,8 @@ func BenchmarkKeystrokeBesideReads(b *testing.B) {
 						time.Sleep(20 * time.Millisecond)
 						start := time.Now()
 						live.Transact(func(txn *crdt.Transaction) { texts[0].Insert(txn, 0, "y", nil) })
+						// The observer's turn (observe) without its render: its wait for the
+						// replica and its catch-up.
 						replica.lockForUpdate()
 						replica.catchUp("bench", live)
 						replica.mu.Unlock()

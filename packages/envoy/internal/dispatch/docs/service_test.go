@@ -2570,13 +2570,14 @@ func editLiveTree(t *testing.T, service *Service, artifactID string, edit func(*
 	}
 }
 
-// liveTree reads the resident tree under the room lock.
+// liveTree reads the resident room as of one moment under its document lock (Service.liveTree),
+// inside the Apply that loads and holds the room.
 func liveTree(t *testing.T, service *Service, artifactID string) *pmdoc.Node {
 	t.Helper()
 	var tree *pmdoc.Node
 	err := service.srv.Apply(context.Background(), artifactID, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
 		var readErr error
-		tree, readErr = pmdoc.Read(doc.GetXmlFragment(fragmentName))
+		tree, readErr = service.liveTree(artifactID, doc)
 		if readErr != nil {
 			t.Errorf("read live tree: %v", readErr)
 		}

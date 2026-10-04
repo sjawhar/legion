@@ -516,8 +516,9 @@ func TestTheUpdateObserverNeverRendersAWriteHalfWay(t *testing.T) {
 }
 
 // A room's reads walk the replica its update observer keeps (readLive), and the replica goes with
-// the room: it holds a whole copy of the room's document, so a listing that outlived the room would
-// keep that copy for every room the server has ever evicted.
+// the room, in the collection that takes the room's document: it holds a whole copy of the
+// document, so a listing that held it past the room would keep that copy for a collection more
+// for every room the server evicts, and one that outlived the room would keep it for good.
 func TestAnEvictedRoomsReplicaGoesWithIt(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
@@ -529,28 +530,47 @@ func TestAnEvictedRoomsReplicaGoesWithIt(t *testing.T) {
 	}, model.Actor{Kind: "user", ID: "bob"}); err != nil {
 		t.Fatal(err)
 	}
-	// The listing's key holds the room's document weakly, as the listing does.
-	key := weak.Make(service.srv.GetDoc(artifactID))
-	listed, ok := service.replicas.Load(key)
-	if !ok {
-		t.Fatal("the written room lists no replica")
-	}
-	replica := listed.(*renderedReplica)
-	replica.mu.Lock()
-	held := replica.doc != nil
-	replica.mu.Unlock()
-	if !held {
-		t.Fatal("the written room's replica holds no copy")
-	}
+	key, replica := listedReplica(t, service, artifactID)
 
 	if err := service.Evict(ctx, artifactID); err != nil {
 		t.Fatal(err)
 	}
-	waitFor(t, 30*time.Second, "the evicted room's replica to go", func() bool {
+	waitFor(t, 30*time.Second, "the evicted room's document to be collected", func() bool {
 		runtime.GC()
+		return key.Value() == nil
+	})
+	if replica.Value() != nil {
+		t.Fatal("the collection that took the evicted room's document kept its replica")
+	}
+	waitFor(t, 30*time.Second, "the evicted room's listing to go", func() bool {
 		_, listed := service.replicas.Load(key)
 		return !listed
 	})
+}
+
+// listedReplica is the resident room's document and the replica listed for its reads, each held
+// weakly, as the listing holds them, once the replica has checked that it holds a copy.
+func listedReplica(t *testing.T, service *Service, artifactID string) (weak.Pointer[crdt.Doc], weak.Pointer[renderedReplica]) {
+	t.Helper()
+	live := service.srv.GetDoc(artifactID)
+	key := weak.Make(live)
+	listed, ok := service.replicas.Load(key)
+	if !ok {
+		t.Fatal("the written room lists no replica")
+	}
+	replica := listed.(weak.Pointer[renderedReplica])
+	resident := replica.Value()
+	if resident == nil {
+		t.Fatal("the written room's replica went while the room is resident")
+	}
+	waitFor(t, 10*time.Second, "the written room's replica to hold a copy", func() bool {
+		if resident.hold(artifactID, live) == nil {
+			return false
+		}
+		resident.mu.Unlock()
+		return true
+	})
+	return key, replica
 }
 
 // A tree a read of a resident room returns is its reader's to change. The read walks the replica
