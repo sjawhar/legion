@@ -3,7 +3,7 @@
 Part of `skill://legion-worker`. Read it when you reply to, accept, or resolve a review thread,
 or run `legion threads resolve`: the implementer after every push that answers a review, the
 merger before READY, and the reviewer, who answers threads on every re-review and runs the command
-only when a required workflow is red on a bot's findings.
+only when a review workflow the project declares is red on a bot's findings.
 Every path it cites is in sjawhar/legion.
 
 - **Threads are dispositioned individually, never resolved in bulk.** Every open review
@@ -85,8 +85,9 @@ Every path it cites is in sjawhar/legion.
   opener's (read the newest comments with `gh api graphql`, never from the PR body). Another
   opener's thread that a person resolved with GitHub's button, with no `Accepted:`, gates nothing:
   neither `legion threads resolve` nor the merge queue's gate counts a resolved thread. Resolution
-  is the pull request author's App's, so your approval never waits on it, except when a workflow
-  the base branch requires is red on its findings: such a workflow passes on a re-run only once
-  its threads are resolved, so you run `legion threads resolve` (the daemon resolves the bot
-  threads you accepted) and re-run the failed run before you approve, as your role prompt says.
+  is the pull request author's App's, so your approval never waits on it, except when a review
+  workflow the project declares (`projects.<KEY>.review_workflows`) is red on its findings: such a
+  workflow passes on a re-run only once its threads are resolved, so you run `legion threads
+  resolve` (the daemon resolves the bot threads you accepted) and re-run the failed run before you
+  approve, as your role prompt says.
   The merger resolves accepted threads that remain open before publishing READY.

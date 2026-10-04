@@ -46,12 +46,14 @@ takes this order: write, commit and push the handoff; submit the review of the h
 made, by its SHA; then complete. An approval waits for the CI verdict to settle green at that head
 before you submit it, since an approval stands only on green checks and GitHub can dismiss one
 once the head moves, and a verdict that settles red there makes the round's decision a request for
-changes naming the failing checks, unless only a required workflow is red on its own findings: then
-you answer its threads, have them resolved with `legion threads resolve` and re-run the failed run,
-as your role prompt says, and approve once it passes. A request for changes does not wait, since
-it stands whatever CI says and the issue leaves reviewing with it. The verdict is of the checks and
-workflows the base branch requires, the set READY checks: red when one of them failed, and never
-red for a check the base branch does not require. A required check that was cancelled, or that the head's checks
+changes naming the failing checks, unless only review workflows the project declares
+(`projects.<KEY>.review_workflows`) are red on their own findings: then you answer their threads,
+have them resolved with `legion threads resolve` and re-run the failed run, as your role prompt
+says, and approve once it passes. Any other red required workflow is a failing check like any
+other. A request for changes does not wait, since it stands whatever CI says and the issue leaves
+reviewing with it. The verdict is of the checks and workflows the base branch requires, the set
+READY checks: red when one of them failed, and never red for a check the base branch does not
+require. A required check that was cancelled, or that the head's checks
 settled without, leaves no verdict until a later settlement decides it, since a run can be
 cancelled or not yet queued when the head settles; a required workflow's run on the head that is
 still going or has not happened leaves none either. A review of a head the handoff push

@@ -12,31 +12,29 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
-// ready tells the human the pull request is ready to merge. The packet is the merger's READY
-// completion's summary — its first line `READY #<n> at <sha> (approved at <sha>) for <KEY>
-// (<url>)`, then the diff summary and the gate facts (the shared merger prompt's step 4) — posted
-// verbatim on the Dispatch issue and, when the project names a merge queue role, published to it.
-// The daemon posts it, not the merger, so the READY is told exactly when the issue reaches
-// awaiting_merge: on the completion itself, or on the approval that opens a gate that refused it.
+// ready tells the human the pull request is ready to merge (tellReadyAudience). The packet is the
+// merger's READY completion's summary — its first line `READY #<n> at <sha> (approved at <sha>)
+// for <KEY> (<url>)`, then the diff summary and the gate facts (the shared merger prompt's step 4)
+// — told verbatim. The daemon tells it, not the merger, so the READY is told exactly when the issue
+// reaches awaiting_merge: on the completion itself, or on the approval that opens a gate that
+// refused it.
 func (e *Engine) ready(ctx context.Context, tx pgx.Tx, issue record.Issue, packet string) error {
-	if err := e.enqueue(ctx, tx, issue.Key, record.MessagePost{Body: packet}); err != nil {
-		return err
-	}
-	if e.cfg.MergeQueueRole == "" {
-		return nil
-	}
-	return e.enqueue(ctx, tx, issue.Key, record.MergeQueuePublish{Role: e.cfg.MergeQueueRole, Packet: packet})
+	return e.tellReadyAudience(ctx, tx, issue, packet)
 }
 
-// withdrawReady tells whoever ready told that the READY it posted for the issue no longer stands:
-// the head's own CI turned red (reason, which names the head and the red checks;
+// withdrawReady tells the READY's audience (tellReadyAudience) that the READY no longer stands: the
+// head's own CI turned red (reason, which names the head and the red checks;
 // classify.RedWithdrawsReady), so the issue left awaiting_merge for implementing, GitHub will not
 // merge the head, and a new READY follows once the work comes back through testing and review. The
-// withdrawal goes where the READY went: posted on the Dispatch issue under it, and published to the
-// project's merge queue role when it names one. The architect hears it through its checks-red
-// notice.
+// architect hears it through its checks-red notice.
 func (e *Engine) withdrawReady(ctx context.Context, tx pgx.Tx, issue record.Issue, pr *record.PullRequest, reason string) error {
-	packet := fmt.Sprintf("READY withdrawn for %s, pull request #%d: %s. Do not merge it: the issue is back in implementing, and a new READY will follow.", issue.Key, pr.Number, reason)
+	return e.tellReadyAudience(ctx, tx, issue, fmt.Sprintf("READY withdrawn for %s, pull request #%d: %s. Do not merge it: the issue is back in implementing, and a new READY will follow.", issue.Key, pr.Number, reason))
+}
+
+// tellReadyAudience tells packet to everyone a READY goes to: posted on the Dispatch issue, and
+// published to the project's merge queue role when it names one. A READY and its withdrawal both
+// go through it, so a withdrawal reaches whoever the READY reached.
+func (e *Engine) tellReadyAudience(ctx context.Context, tx pgx.Tx, issue record.Issue, packet string) error {
 	if err := e.enqueue(ctx, tx, issue.Key, record.MessagePost{Body: packet}); err != nil {
 		return err
 	}

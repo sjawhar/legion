@@ -342,6 +342,10 @@ func TestTask310RouteGoldens(t *testing.T) {
 		{URL: "https://github.com/acme/widgets/pull/42#discussion_r1", Resolved: reviewthreads.ReviewersAcceptanceOfABot, NewestBy: "legion-reviewer"},
 		{URL: "https://github.com/acme/widgets/pull/42#discussion_r2", LeftOpen: "not its opener's or the Legion reviewer's acceptance", NewestBy: "legion-implementer"},
 	}})
+	golden(t, "threads-resolve-refused.json", ThreadsResolveResponse{
+		Threads: []reviewthreads.Outcome{{URL: "https://github.com/acme/widgets/pull/42#discussion_r1", Resolved: reviewthreads.ReviewersAcceptanceOfABot, NewestBy: "legion-reviewer"}},
+		Refused: &ThreadRefusal{URL: "https://github.com/acme/widgets/pull/42#discussion_r3", Error: "GitHub: Resource not accessible by integration"},
+	})
 	golden(t, "handoff-complete.json", HandoffCompleteResponse{})
 	golden(t, "issue-status.json", IssueStatusResponse{})
 	golden(t, "gate-register.json", GateRegisterResponse{})

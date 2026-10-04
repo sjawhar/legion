@@ -103,18 +103,35 @@ func Required(ctx context.Context, github githubrest.Client, base string) (Set, 
 	return set, nil
 }
 
-// Workflows is how each required workflow's run stands on sha, in order, named by its path: the
-// latest run (the highest id; a re-run keeps its run's id and reports its newest attempt) that a
-// pull_request or pull_request_target event started for that file of that repository. A run that
-// ended success, neutral or skipped is classify.Success, as GitHub counts a check run for a
-// required check; one still queued or running is classify.Pending; one that ended any other way is
-// red with its conclusion (failure, cancelled, timed_out, action_required, startup_failure); and a
-// workflow the head has no such run of is classify.Missing. A run lives in the repository it ran
-// for, so a workflow another repository defines never matches one, and is Missing. It reads the
-// head's runs whatever workflows names, so a caller with no workflow required does not call it.
-func Workflows(ctx context.Context, github githubrest.Client, sha string, workflows []Workflow) ([]classify.Standing, error) {
+// WorkflowRun is how one required workflow (Workflow) stands on a head: its latest run's Result, as
+// classify judges a check's, and which run that is, its id (Run) and attempt (Attempt), both zero
+// when the head has no run of it. A re-run keeps its run's id and raises its attempt.
+type WorkflowRun struct {
+	Workflow
+	Result  string
+	Run     int64
+	Attempt int
+}
+
+// Standing is the run's result as classify judges a required check's, named by the workflow's path.
+func (r WorkflowRun) Standing() classify.Standing {
+	return classify.Standing{Name: r.Path, Result: r.Result}
+}
+
+// Workflows is how each required workflow's run stands on sha, one WorkflowRun for each workflow in
+// workflows, in order: the latest run (the highest id; a re-run keeps its run's id and reports its
+// newest attempt) that a pull_request or pull_request_target event started for that file of that
+// repository. A run that ended success, neutral or skipped is classify.Success, as GitHub counts a
+// check run for a required check; one still queued or running is classify.Pending; one that ended
+// any other way is red with its conclusion (failure, cancelled, timed_out, action_required,
+// startup_failure); and a workflow the head has no such run of is classify.Missing. A run lives in
+// the repository it ran for, so a workflow another repository defines never matches one, and is
+// Missing. It reads the head's runs whatever workflows names, so a caller with no workflow required
+// does not call it.
+func Workflows(ctx context.Context, github githubrest.Client, sha string, workflows []Workflow) ([]WorkflowRun, error) {
 	type run struct {
 		ID         int64  `json:"id"`
+		Attempt    int    `json:"run_attempt"`
 		Path       string `json:"path"`
 		Event      string `json:"event"`
 		Status     string `json:"status"`
@@ -127,7 +144,7 @@ func Workflows(ctx context.Context, github githubrest.Client, sha string, workfl
 	if err != nil {
 		return nil, err
 	}
-	standings := make([]classify.Standing, 0, len(workflows))
+	standings := make([]WorkflowRun, 0, len(workflows))
 	for _, workflow := range workflows {
 		var latest *run
 		for i, candidate := range runs {
@@ -136,11 +153,11 @@ func Workflows(ctx context.Context, github githubrest.Client, sha string, workfl
 				latest = &runs[i]
 			}
 		}
-		result := classify.Missing
+		standing := WorkflowRun{Workflow: workflow, Result: classify.Missing}
 		if latest != nil {
-			result = classify.RunResult(latest.Status, latest.Conclusion)
+			standing.Result, standing.Run, standing.Attempt = classify.RunResult(latest.Status, latest.Conclusion), latest.ID, latest.Attempt
 		}
-		standings = append(standings, classify.Standing{Name: workflow.Path, Result: result})
+		standings = append(standings, standing)
 	}
 	return standings, nil
 }

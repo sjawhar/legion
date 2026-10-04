@@ -84,8 +84,15 @@ const Cancelled = "cancelled"
 // push), and the head's own settlement and run decide it. ok is false when there is nothing to
 // judge: no settlement stands for the head, or the required set was never read.
 func HeadChecks(pr record.PullRequest) (checks []Standing, ok bool) {
+	checks, workflows, ok := headStandings(pr)
+	return append(checks, workflows...), ok
+}
+
+// headStandings is HeadChecks in its two halves: each required check's standing, judged by the
+// settlement, and each required workflow's, judged by its latest run.
+func headStandings(pr record.PullRequest) (checks, workflows []Standing, ok bool) {
 	if !settled(pr) || pr.Required == nil {
-		return nil, false
+		return nil, nil, false
 	}
 	results := make(map[string]string, len(pr.CheckRuns)+len(pr.Failing)+len(pr.Cancelled))
 	for _, run := range pr.CheckRuns {
@@ -98,15 +105,15 @@ func HeadChecks(pr record.PullRequest) (checks []Standing, ok bool) {
 	for _, name := range pr.Failing {
 		results[name] = Failed
 	}
-	checks = Judge(pr.Required, results)
+	workflows = make([]Standing, 0, len(pr.Workflows))
 	for _, workflow := range pr.Workflows {
 		result := workflow.Result
 		if pr.WorkflowsHead != pr.CheckedHead || (result == Cancelled && pr.WorkflowsHead != pr.HeadSHA) {
 			result = Pending
 		}
-		checks = append(checks, Standing{Name: workflow.Path, Result: result})
+		workflows = append(workflows, Standing{Name: workflow.Path, Result: result})
 	}
-	return checks, true
+	return Judge(pr.Required, results), workflows, true
 }
 
 // WorkflowHead is the head whose workflow runs stand for the pull request's head: the head the
@@ -145,24 +152,51 @@ func HeadVerdict(pr record.PullRequest) string {
 
 // RedOnlyByWorkflows says whether CI is red at the pull request's head only because a workflow its
 // base branch requires failed there: no required check is red (each passed, is pending or has no
-// result), and at least one required workflow's run is red (HeadChecks, which lists the required
-// checks before the workflows). Such a red is a required workflow's verdict on the head, which a
-// review workflow gives on its findings, and in testing and reviewing it is the reviewer's round's
-// to decide (RedSendsBack).
+// result), and at least one required workflow's run is red (HeadChecks). Its result is as old as
+// the daemon's last read of the runs, so in awaiting_merge only such a read withdraws a READY on it
+// (workflow's decideChecks).
 func RedOnlyByWorkflows(pr record.PullRequest) bool {
-	standings, ok := HeadChecks(pr)
+	return redOnlyByWorkflows(pr, func(string) bool { return true })
+}
+
+// RedOnlyByReviewWorkflows says whether CI is red at the pull request's head only because review
+// workflows failed there: no required check is red (each passed, is pending or has no result), at
+// least one required workflow's run is red, and every red one is a workflow the project declares as
+// a review workflow (reviewWorkflows, its `review_workflows` paths). Such a workflow fails on its
+// own findings, which the reviewer adjudicates, so in testing and reviewing its red is the
+// reviewer's round's to decide (RedSendsBack). A red required workflow the project does not so
+// declare is a failing check like any other. With no review workflow declared, it is never true.
+func RedOnlyByReviewWorkflows(pr record.PullRequest, reviewWorkflows []string) bool {
+	return redOnlyByWorkflows(pr, func(path string) bool {
+		for _, review := range reviewWorkflows {
+			if review == path {
+				return true
+			}
+		}
+		return false
+	})
+}
+
+// redOnlyByWorkflows says whether no required check is red at the pull request's head, at least
+// one required workflow is, and counts holds for each red workflow's path.
+func redOnlyByWorkflows(pr record.PullRequest, counts func(path string) bool) bool {
+	checks, workflows, ok := headStandings(pr)
 	if !ok {
 		return false
 	}
-	workflowRed := false
-	for i, standing := range standings {
-		if !standing.Red() {
-			continue
-		}
-		if i < len(pr.Required) {
+	for _, check := range checks {
+		if check.Red() {
 			return false
 		}
-		workflowRed = true
 	}
-	return workflowRed
+	red := false
+	for _, workflow := range workflows {
+		if workflow.Red() {
+			if !counts(workflow.Name) {
+				return false
+			}
+			red = true
+		}
+	}
+	return red
 }

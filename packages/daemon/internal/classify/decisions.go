@@ -251,20 +251,22 @@ func carriedBack(pushes []record.ClassifiedPush, head, earlier string) bool {
 }
 
 // RedSendsBack says whether the verdict that stands for the pull request's head (HeadVerdict) sends
-// an issue in testing or reviewing back to implementing: it is red, a required check is among what
-// made it so, the review App did not plan it (its failing tests), and the head was not reached by a
-// push that carries an approval across (carriesApproval). Such a push changed only .legion/, so the
-// head's code is that of the head it replaced, and a red there is either that code's second run or
-// the code head's own, carried to the handoff head (SettlementFor). The round in progress decides
-// it, since the reviewer waits for the settled verdict at its own handoff head; acting on it would
-// stop a reviewer mid-round and spend a fix attempt with no code changed. A head whose push is not
-// recorded yet is read as one that may change code. A red that only required workflows make
-// (RedOnlyByWorkflows) goes to the reviewer's round too, at any head: a review workflow that fails
-// on its findings stays red on a finding the implementer cannot make go away, since only the Legion
-// reviewer's Accepted: closes a bot's thread, so sending it back would spend fix attempts on a
-// verdict only the reviewer can answer.
-func RedSendsBack(pr record.PullRequest) bool {
-	if HeadVerdict(pr) != "red" || pr.PlannedRed || RedOnlyByWorkflows(pr) {
+// an issue in testing or reviewing back to implementing: it is red, not only by the review
+// workflows the project declares (RedOnlyByReviewWorkflows, reviewWorkflows), the review App did
+// not plan it (its failing tests), and the head was not reached by a push that carries an approval
+// across (carriesApproval). Such a push changed only .legion/, so the head's code is that of the
+// head it replaced, and a red there is either that code's second run or the code head's own,
+// carried to the handoff head (SettlementFor). The round in progress decides it, since the reviewer
+// waits for the settled verdict at its own handoff head; acting on it would stop a reviewer
+// mid-round and spend a fix attempt with no code changed. A head whose push is not recorded yet is
+// read as one that may change code. A red that only declared review workflows make goes to the
+// reviewer's round too, at any head: such a workflow fails on its findings and stays red on a
+// finding the implementer cannot make go away, since only the Legion reviewer's Accepted: closes a
+// bot's thread, so sending it back would spend fix attempts on a verdict only the reviewer can
+// answer. Any other red required workflow is a failing check like any other, and sends the work
+// back.
+func RedSendsBack(pr record.PullRequest, reviewWorkflows []string) bool {
+	if HeadVerdict(pr) != "red" || pr.PlannedRed || RedOnlyByReviewWorkflows(pr, reviewWorkflows) {
 		return false
 	}
 	for _, p := range pr.Pushes {
@@ -275,17 +277,20 @@ func RedSendsBack(pr record.PullRequest) bool {
 	return true
 }
 
-// RedWithdrawsReady says whether the verdict that stands for the pull request's head sends an
-// issue in awaiting_merge back to implementing, withdrawing its READY: the pull request is open,
-// and CI is red at the head by its own settlement and its own workflow runs (HeadVerdict, with the
-// settlement of the head itself). The merger's READY found the head's own checks and runs green on
-// GitHub, which is what GitHub merges by, so a red carried to it from the head a .legion/-only push
-// replaced (SettlementFor) contradicts that and sends nothing back; the head's own red - a required
-// check failing on a rerun, a newly required one, a required workflow re-run red - keeps GitHub
-// from merging it. Unlike RedSendsBack in testing and reviewing, a head a .legion/-only push
-// reached is no exception: every worker is suspended in awaiting_merge and no round is open to
-// decide its red, so only the implementer can change it. PlannedRed is a red the tester's own tests
-// planned for the review round, and READY found the head green since, so it is not read.
+// RedWithdrawsReady says whether the verdict that stands for the pull request's head is red against
+// a READY, in awaiting_merge: the pull request is open, and CI is red at the head by its own
+// settlement and its own workflow runs (HeadVerdict, with the settlement of the head itself). The
+// merger's READY found the head's own checks and runs green on GitHub, which is what GitHub merges
+// by, so a red carried to it from the head a .legion/-only push replaced (SettlementFor) contradicts
+// that and sends nothing back; the head's own red - a required check failing on a rerun, a newly
+// required one, a required workflow re-run red - keeps GitHub from merging it. Unlike RedSendsBack
+// in testing and reviewing, a head a .legion/-only push reached is no exception, and neither is a
+// red only review workflows make: every worker is suspended in awaiting_merge and no round is open
+// to decide its red, so only the implementer can change it. PlannedRed is a red the tester's own
+// tests planned for the review round, and READY found the head green since, so it is not read. The
+// caller decides when such a red is read: a red only required workflows make (RedOnlyByWorkflows)
+// withdraws the READY on a read of their runs, never on a CI settlement, which reads no run and
+// would judge them by a read up to one pass old (workflow's decideChecks).
 func RedWithdrawsReady(pr record.PullRequest) bool {
 	return pr.State == record.PullRequestOpen && pr.CheckedHead == pr.HeadSHA && HeadVerdict(pr) == "red"
 }

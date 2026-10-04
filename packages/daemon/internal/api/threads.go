@@ -24,9 +24,18 @@ type ThreadsResolveRequest struct {
 	Number  int    `json:"number"`
 }
 
-// ThreadsResolveResponse is each unresolved review thread's outcome, in GitHub's order.
+// ThreadsResolveResponse is each unresolved review thread's outcome, in GitHub's order. When GitHub
+// refused to resolve a thread the rule closes, Refused names it and why, and Threads holds the
+// outcomes before it, the threads already resolved among them: the run stopped there.
 type ThreadsResolveResponse struct {
 	Threads []reviewthreads.Outcome `json:"threads"`
+	Refused *ThreadRefusal          `json:"refused,omitempty"`
+}
+
+// ThreadRefusal is the thread GitHub refused to resolve, and GitHub's message.
+type ThreadRefusal struct {
+	URL   string `json:"url"`
+	Error string `json:"error"`
 }
 
 // resolveThreads resolves, for the reviewer, each review thread on its issue's pull request that a
@@ -40,7 +49,9 @@ type ThreadsResolveResponse struct {
 // merger's own `legion threads resolve` close those on their opener's Accepted:), and nothing whose
 // newest comment is anything but that acceptance. Only the reviewer's grant may call it, for its
 // issue's pull request alone, and the implement App's token never leaves the daemon. Each
-// resolution is logged with the thread and whose acceptance closed it.
+// resolution is logged with the thread and whose acceptance closed it. A thread GitHub refuses to
+// resolve stops the run, and the answer names it beside the outcomes before it, so the reviewer
+// sees the threads already resolved; a read that fails before any write answers 502.
 func (s *server) resolveThreads(w http.ResponseWriter, r *http.Request) {
 	var req ThreadsResolveRequest
 	if !readBody(w, r, &req) || !requireFailureFields(w, field{"grantId", req.GrantID}, field{"repo", req.Repo}) {
@@ -96,12 +107,12 @@ func (s *server) resolveThreads(w http.ResponseWriter, r *http.Request) {
 				"thread", outcome.URL, "by", string(outcome.Resolved))
 		}
 	}
+	var refused *reviewthreads.Refused
+	if errors.As(err, &refused) {
+		writeJSON(w, http.StatusOK, ThreadsResolveResponse{Threads: outcomes, Refused: &ThreadRefusal{URL: refused.URL, Error: refused.Err.Error()}})
+		return
+	}
 	if err != nil {
-		var refused *reviewthreads.Refused
-		if errors.As(err, &refused) {
-			writeFailure(w, http.StatusBadGateway, "RESOLVE_REFUSED", err.Error())
-			return
-		}
 		writeFailure(w, http.StatusBadGateway, "THREADS_READ_FAILED", err.Error())
 		return
 	}

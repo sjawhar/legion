@@ -41,10 +41,11 @@ type reviewThread struct {
 
 // threadsGitHub is GitHub's GraphQL holding threads on whichever pull request it is asked for. It
 // records the bearer of every call, each pull request a threads query names, and the id of each
-// thread a resolveReviewThread names.
+// thread a resolveReviewThread resolved; it refuses to resolve each thread refuse names.
 type threadsGitHub struct {
 	url      string
 	mu       sync.Mutex
+	refuse   map[string]bool
 	bearers  []string
 	queried  []string
 	resolved []string
@@ -66,7 +67,12 @@ func newThreadsGitHub(t *testing.T, threads ...reviewThread) *threadsGitHub {
 		defer g.mu.Unlock()
 		g.bearers = append(g.bearers, r.Header.Get("Authorization"))
 		if strings.Contains(request.Query, "resolveReviewThread") {
-			g.resolved = append(g.resolved, request.Variables["threadId"].(string))
+			id := request.Variables["threadId"].(string)
+			if g.refuse[id] {
+				_, _ = io.WriteString(w, `{"errors":[{"message":"Resource not accessible by integration"}]}`)
+				return
+			}
+			g.resolved = append(g.resolved, id)
 			_, _ = io.WriteString(w, `{"data":{"resolveReviewThread":{"thread":{"isResolved":true}}}}`)
 			return
 		}
@@ -167,6 +173,37 @@ func TestTheDaemonResolvesForTheReviewerOnlyTheBotThreadsItAccepted(t *testing.T
 	if line := log.String(); !strings.Contains(line, "thread=https://github.com/acme/widgets/pull/42#bot-accepted") ||
 		!strings.Contains(line, `by="the Legion reviewer's acceptance of a bot's thread"`) || strings.Contains(line, "bot-still-open") {
 		t.Fatalf("log %q, want the one resolution with its thread and whose acceptance closed it", line)
+	}
+}
+
+// GitHub refusing to resolve a thread stops the run, and the answer names the refused thread beside
+// the outcomes before it, the thread already resolved among them, so the reviewer sees what the
+// daemon did; the threads after it are neither resolved nor named.
+func TestADaemonResolveGitHubRefusesKeepsTheThreadsAlreadyResolved(t *testing.T) {
+	github := newThreadsGitHub(t,
+		reviewThread{"first", "Bot", "claude", "Bot", "legion-reviewer", "Accepted: not a defect"},
+		reviewThread{"second", "Bot", "claude", "Bot", "legion-reviewer", "Accepted: fixed in abc123"},
+		reviewThread{"third", "Bot", "claude", "Bot", "legion-reviewer", "Accepted: fine"},
+	)
+	github.refuse = map[string]bool{"second": true}
+	var log bytes.Buffer
+	h := newThreadsHarness(t, github, &log)
+	reviewer := newLiveClaim(t, h, "LEGION-208", claim.RoleReviewer)
+	recorder := h.request(http.MethodPost, "/legion/v1/threads/resolve", ThreadsResolveRequest{GrantID: reviewer.grant(t), Repo: "acme/widgets", Number: 42}, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("threads resolve = %d: %s", recorder.Code, recorder.Body)
+	}
+	var answer ThreadsResolveResponse
+	decodeInto(t, recorder, &answer)
+	want := ThreadsResolveResponse{
+		Threads: []reviewthreads.Outcome{{URL: "https://github.com/acme/widgets/pull/42#first", Resolved: reviewthreads.ReviewersAcceptanceOfABot, NewestBy: "legion-reviewer"}},
+		Refused: &ThreadRefusal{URL: "https://github.com/acme/widgets/pull/42#second", Error: "GitHub: Resource not accessible by integration"},
+	}
+	if !slices.Equal(answer.Threads, want.Threads) || answer.Refused == nil || *answer.Refused != *want.Refused {
+		t.Fatalf("answer %+v (refused %+v), want %+v (refused %+v)", answer, answer.Refused, want, want.Refused)
+	}
+	if !slices.Equal(github.resolved, []string{"first"}) {
+		t.Fatalf("GitHub resolved %v, want the first thread alone", github.resolved)
 	}
 }
 

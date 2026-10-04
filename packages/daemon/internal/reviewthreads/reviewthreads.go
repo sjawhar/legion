@@ -1,9 +1,9 @@
 // Package reviewthreads is Legion's one rule for which unresolved review thread an acceptance
-// closes, and the GitHub GraphQL reads and writes that apply it. `legion threads resolve` applies
-// it as the App of the role running it (or the caller's own gh), and the daemon's
-// POST /legion/v1/threads/resolve applies its bot-thread half as the implement App for the
-// reviewer, whom GitHub refuses a resolve on the implementer's pull request: one rule, so the two
-// cannot drift.
+// closes, and the GitHub GraphQL reads and writes that apply it. `legion threads resolve` applies it
+// as the App of the role running it (or, with --gh, as the caller's own gh), except in the
+// reviewer's pane, where it asks the daemon: GitHub refuses the review App a resolve on the
+// implementer's pull request, so the daemon's POST /legion/v1/threads/resolve applies the rule's
+// bot-thread half for the reviewer, as the implement App. One rule, so the two cannot drift.
 package reviewthreads
 
 import (

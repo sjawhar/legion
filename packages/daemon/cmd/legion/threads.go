@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"os/exec"
 	"strconv"
@@ -104,46 +103,31 @@ func runResolveThreads(ctx context.Context, args []string, stdout, stderr io.Wri
 // resolveThroughDaemon is `legion threads resolve` in the reviewer's pane: the daemon resolves, as
 // the implement App, each thread on the pull request of the issue the pane's grant is for that a
 // bot outside Legion's role Apps opened and whose newest submitted comment is the reviewer's own
-// Accepted: (POST /legion/v1/threads/resolve), and answers each unresolved thread's outcome. The
-// reviewer never holds the implement App's token.
+// Accepted: (POST /legion/v1/threads/resolve), and answers each unresolved thread's outcome, and
+// the thread GitHub refused to resolve when it refused one, which fails the command after the
+// outcomes before it, as the command's own path prints them. The reviewer never holds the
+// implement App's token.
 func resolveThroughDaemon(ctx context.Context, repository ghrepo.Repository, number int, stdout, stderr io.Writer) int {
 	grant, err := grantFromEnvironment()
 	if err != nil {
 		fmt.Fprintf(stderr, "legion threads resolve: %v\n", err)
 		return 1
 	}
-	body, err := json.Marshal(api.ThreadsResolveRequest{GrantID: grant, Repo: repository.String(), Number: number})
-	if err != nil {
-		fmt.Fprintf(stderr, "legion threads resolve: %v\n", err)
-		return 1
-	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, daemonURL()+"/legion/v1/threads/resolve", bytes.NewReader(body))
-	if err != nil {
-		fmt.Fprintf(stderr, "legion threads resolve: %v\n", err)
-		return 1
-	}
-	request.Header.Set("Content-Type", "application/json")
-	response, err := http.DefaultClient.Do(request)
+	response, err := postDaemon(ctx, "/legion/v1/threads/resolve", api.ThreadsResolveRequest{GrantID: grant, Repo: repository.String(), Number: number})
 	if err != nil {
 		fmt.Fprintf(stderr, "legion threads resolve: %v\n", err)
 		return 1
 	}
 	defer response.Body.Close()
-	answer, err := io.ReadAll(response.Body)
-	if err != nil {
-		fmt.Fprintf(stderr, "legion threads resolve: read the daemon's answer: %v\n", err)
-		return 1
-	}
-	if response.StatusCode != http.StatusOK {
-		fmt.Fprintf(stderr, "legion threads resolve: daemon returned %d: %s\n", response.StatusCode, strings.TrimSpace(string(answer)))
-		return 1
-	}
-	var resolved api.ThreadsResolveResponse
-	if err := json.Unmarshal(answer, &resolved); err != nil {
+	var answer api.ThreadsResolveResponse
+	if err := json.NewDecoder(response.Body).Decode(&answer); err != nil {
 		fmt.Fprintf(stderr, "legion threads resolve: daemon returned an invalid answer: %v\n", err)
 		return 1
 	}
-	return printOutcomes(resolved.Threads, nil, stdout, stderr)
+	if refused := answer.Refused; refused != nil {
+		err = &reviewthreads.Refused{URL: refused.URL, Err: errors.New(refused.Error)}
+	}
+	return printOutcomes(answer.Threads, err, stdout, stderr)
 }
 
 // printOutcomes prints each thread's outcome, or that there was no unresolved thread, and err,

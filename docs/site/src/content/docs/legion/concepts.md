@@ -77,16 +77,20 @@ comes back, with everything it knew, the next time its role is needed.
 | `production_check` | implementer | After the merge, drives the change in production and records what it saw. | implement App |
 
 A failed test, red CI on the head, or a review that requests changes sends the issue back to
-`implementing`, and the change goes through the tester again before the reviewer sees it. A red
-that only a required workflow makes, with every required check passing, is the exception before
-the merge: such a workflow can be a review bot that fails while any thread it opened stands, which
-the implementer cannot answer, so the reviewer's round decides it. The reviewer answers each of the
-bot's threads (accepting it with a reason, or requesting changes), has the daemon resolve the ones
-it accepted, and re-runs the failed run; the round ends once the head reads green. Red CI on the
-head of an issue in `awaiting_merge` sends it back too, when the head's own checks or required
-workflow runs are red: the work returns through testing, review and `READY`, since GitHub will not
-merge the head it was ready for, and the issue, and the project's merge-queue role when one is
-set, are told the `READY` is withdrawn.
+`implementing`, and the change goes through the tester again before the reviewer sees it. In
+testing and review, a red that only review workflows make is the exception, with every required
+check passing or still undecided: a project can declare, in `projects.<KEY>.review_workflows`, the
+required workflows that review the code, such as a review bot that fails while any thread it
+opened stands, which the implementer cannot answer, so the reviewer's round decides it. The
+reviewer answers each of the bot's threads (accepting it with a reason, or requesting changes), has
+the daemon resolve the ones it accepted, and re-runs the failed run; its approval of the head ends
+the round once the head reads green. Any other red required workflow, a test or lint workflow, sends
+the issue back as a red required check does, and so does every red required workflow when the
+project declares none. Red CI on the head of an issue in `awaiting_merge` sends it back too, when
+the head's own checks or required workflow runs are red, review workflows included: the work
+returns through testing, review and `READY`, since GitHub will not merge the head it was ready for,
+and the issue, and the project's merge-queue role when one is set, are told the `READY` is
+withdrawn.
 
 ## Admission and the `legion` label
 

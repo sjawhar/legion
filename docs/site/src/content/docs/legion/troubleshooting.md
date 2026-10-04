@@ -197,10 +197,12 @@ architect which checks, and posted on the issue, and told the project's `merge_q
 is set, that the `READY` is withdrawn; the work comes back through testing, review and a new
 `READY`.
 
-An issue that stays in `needs_review` while a required review workflow is red: only that workflow
-is red, so the reviewer is adjudicating its findings, resolving the threads it accepted and
-re-running the failed run. If the re-run stays red after that, the architect asks you to decide,
-naming the pull request, the head and the workflow.
+An issue that stays in `needs_review` while a review workflow the project declares
+(`projects.<KEY>.review_workflows`) is red: only declared review workflows are red, so the reviewer
+is adjudicating their findings, resolving the threads it accepted and re-running the failed run. If
+the re-run stays red after that, the architect asks you to decide, naming the pull request, the
+head and the workflow. A red required workflow the project does not declare sends the issue back to
+the implementer instead, as a red required check does.
 
 The pull request's state as the daemon sees it, its `checksVerdict` judged only by the checks and
 workflows the base branch requires:

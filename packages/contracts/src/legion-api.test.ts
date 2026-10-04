@@ -51,6 +51,7 @@ const schemas: Record<string, z.ZodType> = {
   "git-credential.json": LegionGitCredentialResponse,
   "provisioning-credential.json": LegionGitHubTokenResponse,
   "threads-resolve.json": LegionThreadsResolveResponse,
+  "threads-resolve-refused.json": LegionThreadsResolveResponse,
   "handoff-complete.json": LegionEmptyResponse,
   "issue-status.json": LegionEmptyResponse,
   "gate-register.json": LegionEmptyResponse,
@@ -80,6 +81,21 @@ test("every Go-written fixture parses through the strict schema", () => {
     expect(schema, `${name} has no schema in legion-api.test.ts`).toBeDefined();
     const parsed = schema?.safeParse(fixture(name));
     expect(parsed?.error?.issues ?? [], `${name} failed the schema`).toEqual([]);
+  }
+});
+
+test("a thread's outcome is resolved or left open, never both or neither", () => {
+  const url = "https://github.com/acme/widgets/pull/42#discussion_r1";
+  for (const outcome of [
+    { url },
+    { url, newestBy: "legion-reviewer" },
+    {
+      url,
+      resolved: "the Legion reviewer's acceptance of a bot's thread",
+      leftOpen: "not an acceptance",
+    },
+  ]) {
+    expect(LegionThreadsResolveResponse.safeParse({ threads: [outcome] }).success).toBe(false);
   }
 });
 
