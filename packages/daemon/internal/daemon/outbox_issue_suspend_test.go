@@ -147,9 +147,6 @@ func TestIssueCloseSuspendsSandboxAfterRestartUntilLingerCleanup(t *testing.T) {
 		t.Fatal(err)
 	}
 	name := "legion-legion-legion-208"
-	if err := st.EnsureIssueResources(ctx, "legion", issue.Key, issue.Tree, name, 1); err != nil {
-		t.Fatal(err)
-	}
 	api := &issueSandboxAPI{object: map[string]any{
 		"apiVersion": "agents.x-k8s.io/v1beta1", "kind": "Sandbox",
 		"metadata": map[string]any{"name": name, "namespace": "legion", "uid": "sandbox-uid", "resourceVersion": "1", "labels": map[string]any{"legion.dev/project": "legion", "legion.dev/tree": issue.Tree, "legion.dev/issue": issue.Key}},
@@ -167,7 +164,7 @@ func TestIssueCloseSuspendsSandboxAfterRestartUntilLingerCleanup(t *testing.T) {
 		}
 		t.Cleanup(reopened.Close)
 		rt, err := sandbox.New(runtimeCtx, &rest.Config{Host: server.URL}, sandbox.Options{
-			Namespace: "legion", Project: "legion", Image: "ghcr.io/example/worker@sha256:" + strings.Repeat("a", 64),
+			Namespace: "legion", Project: "legion", Store: reopened, Image: "ghcr.io/example/worker@sha256:" + strings.Repeat("a", 64),
 			StorageClass: "standard", TreeVolume: resource.MustParse("1Gi"), StreamURL: "tcp://127.0.0.1:13371",
 			Tools:       sandbox.Tools{GH: "/usr/bin/gh", Git: "/usr/bin/git", JJ: "/usr/bin/jj", Legion: "/opt/legion/bin/legion", AgentSecrets: "/opt/legion/bin/agent-secrets"},
 			BootTimeout: time.Second, BootIntervals: 2, TerminationGrace: time.Second, ProbeInterval: time.Hour, AdoptTimeout: time.Second,
@@ -176,7 +173,6 @@ func TestIssueCloseSuspendsSandboxAfterRestartUntilLingerCleanup(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		rt.SetIssueResourceStore(reopened)
 		sup := newSupervisor(runtimeCtx, nil, "legion", t.TempDir(), quietLogger())
 		sup.deps.Runtime = rt
 		t.Cleanup(sup.stop)
@@ -233,9 +229,8 @@ func TestIssueCloseSuspendsSandboxAfterRestartUntilLingerCleanup(t *testing.T) {
 	if err != nil || len(claims) != 1 || claims[0].Session != "saved-planner" || claims[0].SessionFile != "/legion/sessions/planner.jsonl" {
 		t.Fatalf("close lost retained session: %+v, %v", claims, err)
 	}
-	resources, found, err := st.IssueResources(ctx, "legion", issue.Key)
-	if err != nil || !found || resources.CleanupStarted {
-		t.Fatalf("close started deletion: %+v, %t, %v", resources, found, err)
+	if live, err := st.TreeLive(ctx, "legion", issue.Tree); err != nil || !live {
+		t.Fatalf("close started tree cleanup: live=%t, err=%v", live, err)
 	}
 	stored.State = supervise.StateRetired
 	if err := st.PutClaim(ctx, stored); err != nil {

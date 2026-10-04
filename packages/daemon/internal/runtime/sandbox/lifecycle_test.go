@@ -1,14 +1,12 @@
 package sandbox
 
 import (
-	"errors"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
-	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -129,8 +127,8 @@ func TestSuspendWithAStaleLocator(t *testing.T) {
 }
 
 // Release is claim-scoped. It stops at most the role process and MUST NOT delete, suspend or
-// otherwise change its issue Sandbox, even when this runtime sees no sibling role: durable
-// IssueResources owns issue cleanup after a complete store fence and the close/start ordering.
+// otherwise change its issue Sandbox, even when this runtime sees no sibling role: the tree's
+// reserved cleanup (store.CleanupReservedTree, then CleanupTree) alone deletes issue Sandboxes.
 func TestReleaseNeverDeletesTheIssueSandbox(t *testing.T) {
 	name := SandboxName(workerToken)
 	for label, locate := range map[string]func(runtime.Locator) *runtime.Locator{
@@ -194,33 +192,11 @@ func TestReleaseRefusesALocatorOfAnotherClaim(t *testing.T) {
 	}
 }
 
-// Claim release has no issue-Sandbox delete path. A durable IssueResources cleanup effect owns
-// that delete after a complete persisted sibling-claim and close/start fence; the runtime release
-// must succeed even when deleting a Sandbox would fail.
-func TestReleaseNeverAttemptsIssueSandboxCleanup(t *testing.T) {
-	g := newRig(t, nil)
-	loc := g.spawn(workerSpec(t))
-	deletes := 0
-	g.dyn.PrependReactor("delete", "sandboxes", func(k8stesting.Action) (bool, k8sruntime.Object, error) {
-		deletes++
-		return true, nil, errors.New("claim release must not delete an issue Sandbox")
-	})
-	if err := g.r.Release(g.ctx, runtime.Known{Claim: workerToken, Locator: &loc}); err != nil {
-		t.Fatal(err)
-	}
-	if deletes != 0 {
-		t.Fatalf("claim release attempted %d issue Sandbox deletes", deletes)
-	}
-	if g.sandbox(SandboxName(workerToken)) == nil {
-		t.Fatal("claim release removed its issue Sandbox")
-	}
-}
-
 // The daemon reads its claims before it sweeps, and a retry after boot sweeps at a grace of 0
-// while it launches claims, so a claim launched after that read is missing from known. Its
-// Sandbox is this runtime's own launch, not what a crash left: the sweep keeps it, whether the
-// launch has finished or is still waiting for its pod.
-func TestTheOrphanSweepKeepsWhatThisRuntimeLaunchedSinceTheClaimsWereRead(t *testing.T) {
+// while it launches claims, so a claim launched after that read is missing from known. Its tree's
+// lifecycle is open, as its launch's own lifecycle check required: the sweep keeps its Sandbox,
+// whether the launch has finished or is still waiting for its pod.
+func TestTheOrphanSweepKeepsTheSandboxesOfALiveTreeUnknownClaimsLaunched(t *testing.T) {
 	g := newRig(t, nil)
 	var known []runtime.Known // read before either launch
 	g.spawn(workerSpec(t))
@@ -288,6 +264,8 @@ func TestALaunchBegunDuringAnOrphansDeleteWaitsForIt(t *testing.T) {
 		sandboxObject(t, leftover, "uid-sandbox-leftover", modeSuspended, claimLabels(claim.RoleTester)),
 	}, withSandboxHooks(hooks))
 	g.launcher(workerToken)
+	// The leftover's tree had its cleanup confirmed; the launch is its re-admission's.
+	g.store.close(testTree)
 	armed.Store(true)
 	if err := g.r.ReconcileOrphans(g.ctx, nil, 0); err != nil {
 		t.Fatal(err)
@@ -303,39 +281,47 @@ func TestALaunchBegunDuringAnOrphansDeleteWaitsForIt(t *testing.T) {
 	}
 }
 
-// The sweep deletes the project's Sandboxes that belong to no known claim, only past the grace;
-// a known claim's Sandbox survives with or without a locator — a suspended claim holds its
-// session there, and a root the tree volume (N3) — and so does the image probe's, which is no
-// claim's and is the probe's own to delete (#1266).
-func TestTheOrphanSweepDeletesOnlyUnknownSandboxesPastTheGrace(t *testing.T) {
+// The sweep deletes the project's Sandboxes of a tree whose cleanup confirmed (or that has no
+// lifecycle), only past the grace. A Sandbox of a live tree survives whatever claims are known,
+// with or without a locator: a suspended role holds its session there, a root the tree volume (N3),
+// and a claim launched after the daemon read its claims is missing from known. The image probe's
+// Sandbox is no claim's and is the probe's own to delete (#1266), and one whose labels name no
+// issue and tree is kept and reported: what cannot be told apart from a live tree's is never
+// deleted.
+func TestTheOrphanSweepDeletesOnlySandboxesOfClosedTreesPastTheGrace(t *testing.T) {
 	orphan := claim.Token("legion-legion-legion-9-planner")
 	probe := "legion-probe-legion-1d10089a0000"
+	unlabelled := "legion-legion-legion-77"
 	g := newRig(t, []k8sruntime.Object{
-		sandboxObject(t, SandboxName(orphan), "uid-sandbox-orphan", modeSuspended, claimLabels(claim.RoleTester)),
+		sandboxObject(t, SandboxName(orphan), "uid-sandbox-orphan", modeSuspended,
+			map[string]string{labelProject: testProject, labelTree: "LEGION-9", labelIssue: "LEGION-9"}),
 		sandboxObject(t, SandboxName(rootToken), "uid-sandbox-root", modeSuspended, claimLabels(claim.RoleArchitect)),
 		sandboxObject(t, probe, "uid-sandbox-probe", modeRunning, map[string]string{labelProject: testProject, labelProbe: "image"}),
+		sandboxObject(t, unlabelled, "uid-sandbox-unlabelled", modeSuspended, map[string]string{labelProject: testProject}),
 	})
-	known := []runtime.Known{{Claim: rootToken}}
+	g.store.close("LEGION-9")
 	created := g.sandbox(SandboxName(orphan)).CreationTimestamp.Time
 	g.now.Store(new(created.Add(time.Minute)))
-	if err := g.r.ReconcileOrphans(g.ctx, known, 2*time.Minute); err != nil {
+	if err := g.r.ReconcileOrphans(g.ctx, nil, 2*time.Minute); err != nil {
 		t.Fatal(err)
 	}
 	if g.sandbox(SandboxName(orphan)) == nil {
 		t.Fatal("an orphan inside the grace was deleted")
 	}
 	g.now.Store(new(created.Add(3 * time.Minute)))
-	if err := g.r.ReconcileOrphans(g.ctx, known, 2*time.Minute); err != nil {
-		t.Fatal(err)
+	if err := g.r.ReconcileOrphans(g.ctx, nil, 2*time.Minute); err == nil || !strings.Contains(err.Error(), unlabelled) {
+		t.Fatalf("sweep past the grace = %v, want the unlabelled Sandbox %s reported", err, unlabelled)
 	}
 	if g.sandbox(SandboxName(orphan)) != nil {
-		t.Fatal("an orphan past the grace survived")
+		t.Fatal("an orphan of a closed tree past the grace survived")
 	}
 	if g.sandbox(SandboxName(rootToken)) == nil {
-		t.Fatal("the suspended root's sandbox, and with it the tree volume, was deleted")
+		t.Fatal("the live tree's root Sandbox, and with it the tree volume, was deleted though no claim of it was known")
 	}
-	if g.sandbox(probe) == nil {
-		t.Fatal("the image probe's sandbox was swept as an orphan")
+	for _, kept := range []string{probe, unlabelled} {
+		if g.sandbox(kept) == nil {
+			t.Fatalf("Sandbox %s was swept as an orphan", kept)
+		}
 	}
 }
 

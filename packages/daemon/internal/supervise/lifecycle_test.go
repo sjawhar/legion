@@ -7,27 +7,8 @@ import (
 	"testing"
 
 	"github.com/sjawhar/legion/daemon/internal/runtime"
-	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
 )
-
-// lifecycleRuntime is the fake runtime with the durable tree-lifecycle capability, so the machine
-// binds and checks epochs as it does over the Sandbox runtime. The cleanup methods are not reached.
-type lifecycleRuntime struct{ *fake.Runtime }
-
-func (lifecycleRuntime) ReserveWorkflowTreeCleanup(context.Context, string, string, uint64) (uint64, bool, error) {
-	return 0, false, errors.New("not reached")
-}
-
-func (lifecycleRuntime) ReserveOperatorTreeCleanup(context.Context, string, string) (uint64, bool, error) {
-	return 0, false, errors.New("not reached")
-}
-
-func (lifecycleRuntime) CleanupTree(context.Context, string, string, uint64) error {
-	return errors.New("not reached")
-}
-
-var errReserved = errors.New("tree cleanup is reserved")
 
 // epochStore is the in-memory store over one tree lifecycle: AdmitClaim binds the open epoch or
 // refuses a reserved cleanup, and CheckLaunch refuses a reserved or stale epoch, as the Postgres
@@ -40,7 +21,7 @@ type epochStore struct {
 
 func (s *epochStore) AdmitClaim(ctx context.Context, c Claim) (Claim, error) {
 	if s.reserved {
-		return Claim{}, errReserved
+		return Claim{}, treelifecycle.ErrCleanupReserved
 	}
 	c.TreeEpoch = s.epoch
 	return c, s.memStore.PutClaim(ctx, c)
@@ -48,7 +29,7 @@ func (s *epochStore) AdmitClaim(ctx context.Context, c Claim) (Claim, error) {
 
 func (s *epochStore) CheckLaunch(_ context.Context, c Claim) error {
 	if s.reserved {
-		return errReserved
+		return treelifecycle.ErrCleanupReserved
 	}
 	if c.TreeEpoch != s.epoch {
 		return fmt.Errorf("bound epoch %d is stale; current is %d", c.TreeEpoch, s.epoch)
@@ -60,7 +41,7 @@ func lifecycleHarness(t *testing.T, store *epochStore, c Claim) *harness {
 	t.Helper()
 	h := newBareHarness(t)
 	store.memStore = h.store
-	h.deps.Runtime, h.deps.Store = lifecycleRuntime{h.rt}, store
+	h.deps.Store = store
 	h.token = c.Token
 	if err := h.store.PutClaim(h.ctx, c); err != nil {
 		t.Fatal(err)
@@ -96,7 +77,7 @@ func TestARevivedClaimBindsTheTreesOpenEpochBeforeItLaunches(t *testing.T) {
 func TestARevivalDuringAReservedCleanupLaunchesNothingAndChargesNoBudget(t *testing.T) {
 	store := &epochStore{epoch: 1, reserved: true}
 	h := lifecycleHarness(t, store, retiredOfEpoch(1))
-	if err := h.handle(RequestRetry{Claim: h.token}); !errors.Is(err, errReserved) {
+	if err := h.handle(RequestRetry{Claim: h.token}); !errors.Is(err, treelifecycle.ErrCleanupReserved) {
 		t.Fatalf("retry during a reserved cleanup = %v, want the reservation's wait", err)
 	}
 	if calls := len(h.rt.CallsOf("Resume")) + len(h.rt.CallsOf("Spawn")); calls != 0 {
@@ -118,31 +99,9 @@ func TestADeathDuringAReservedCleanupRelaunchesNothingAndChargesNoBudget(t *test
 	h.reach(StateReady)
 	store.reserved = true
 	gone := RuntimeObservation{Observation: runtime.Observation{Locator: h.locator(), Kind: runtime.Gone, At: h.clock.Now()}}
-	if err := h.handle(gone); !errors.Is(err, errReserved) {
+	if err := h.handle(gone); !errors.Is(err, treelifecycle.ErrCleanupReserved) {
 		t.Fatalf("death during a reserved cleanup = %v, want the reservation's wait", err)
 	}
 	h.wantCalls("Resume", 0)
 	h.wantBudgets(Budgets{})
-}
-
-// The reservation can commit after the machine's own check passed and before the runtime's
-// resource recheck. That refusal from the runtime is the same uncharged wait: one start attempt,
-// no launch failure, no retry loop spending the budget until the claim fails, and a claim brought
-// back from rest rests again.
-func TestARuntimeRecheckMeetingAReservationIsAnUnchargedWait(t *testing.T) {
-	store := &epochStore{epoch: 2}
-	h := lifecycleHarness(t, store, retiredOfEpoch(1))
-	refusal := fmt.Errorf("launch: record its durable issue resources: %w", treelifecycle.ErrCleanupReserved)
-	h.rt.ScriptResume(fake.SpawnResult{Err: refusal})
-	h.rt.ScriptSpawn(fake.SpawnResult{Err: refusal})
-	if err := h.handle(RequestRetry{Claim: h.token}); !errors.Is(err, treelifecycle.ErrCleanupReserved) {
-		t.Fatalf("retry refused by the runtime's recheck = %v, want the reservation's wait", err)
-	}
-	if calls := len(h.rt.CallsOf("Resume")) + len(h.rt.CallsOf("Spawn")); calls != 1 {
-		t.Fatalf("runtime starts = %d, want exactly the one refused attempt", calls)
-	}
-	stored := h.store.load(h.token)
-	if stored.Budgets.LaunchFailures != 0 || stored.State != StateRetired {
-		t.Fatalf("stored claim = %s with %d launch failures, want retired with none", stored.State, stored.Budgets.LaunchFailures)
-	}
 }

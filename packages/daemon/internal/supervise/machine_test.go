@@ -36,10 +36,14 @@ func TestSpawnPersistsTheBootTokenHashBeforeItLaunches(t *testing.T) {
 	if spec.ResumeSessionFile != "" || spec.Env["LEGION_ISSUE"] != "LEGION-209" {
 		t.Errorf("spawned %+v, want a fresh launch with the specs' environment", spec)
 	}
+	// The launch's first write follows the claim's admission (Store.AdmitClaim), which binds its
+	// tree epoch before anything launches. The history also holds the harness's own write, made
+	// before onPut was set.
 	history := h.store.history()
-	first := history[1]
-	if first.State != StateLaunching || first.Locator != nil || !bytes.Equal(first.BootTokenHash, c.BootTokenHash) || spawnsAtPut[0] != 0 {
-		t.Errorf("first write %+v after %d spawns, want the launch's boot token hash before any spawn", first, spawnsAtPut[0])
+	first := slices.IndexFunc(history, func(c Claim) bool { return c.State == StateLaunching })
+	before := len(history) - len(spawnsAtPut)
+	if first < before || history[first].Locator != nil || !bytes.Equal(history[first].BootTokenHash, c.BootTokenHash) || spawnsAtPut[first-before] != 0 {
+		t.Errorf("writes %+v (spawns at each %v), want the launch's first to carry its boot token hash before any spawn", history, spawnsAtPut)
 	}
 	if last := history[len(history)-1]; last.Locator == nil || *last.Locator != h.locator() {
 		t.Errorf("last write %+v, want the spawned locator", last)

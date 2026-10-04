@@ -85,8 +85,8 @@ func TestEveryExchangedFrameRoundTripsItsWireLine(t *testing.T) {
 		{"launcher_hello_ack", `{"type":"launcher_hello_ack"}`, LauncherHelloAck{}},
 		{
 			"launcher_state",
-			`{"type":"launcher_state","child":{"generation":7,"pid":42},"lastExit":{"generation":6,"code":143,"signal":"terminated","workspaceLost":true}}`,
-			LauncherState{Child: &LauncherChild{Generation: 7, PID: 42}, LastExit: &LauncherExit{Generation: 6, Code: 143, Signal: "terminated", WorkspaceLost: true}},
+			`{"type":"launcher_state","child":{"generation":7,"pid":42},"lastExit":{"generation":6,"code":143,"signal":"terminated"}}`,
+			LauncherState{Child: &LauncherChild{Generation: 7, PID: 42}, LastExit: &LauncherExit{Generation: 6, Code: 143, Signal: "terminated"}},
 		},
 		{
 			"launcher_start",
