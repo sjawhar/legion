@@ -35,8 +35,7 @@ Every path it cites is in sjawhar/legion.
   your own `gh`; where no `legion` command is installed, use `gh api graphql` with the session's
   GitHub credential and the fallback below.
   In a Legion pane, the **implementer** runs the command after every push that answers a review
-  (the corrective push, and the final `.legion/` deletion push where the daemon has one) and
-  before its `handoff_complete`, and pastes its output, stamped with the head it just pushed, into
+  and before its `handoff_complete`, and pastes its output, stamped with the head it just pushed, into
   the `Threads` section. The output is then recorded against the head the reviewer will read, and
   nothing reads thread state before the implementer's completion. The command resolves each
   unresolved thread whose newest submitted comment is the opener's own `Accepted:` reply. On a
@@ -80,8 +79,8 @@ Every path it cites is in sjawhar/legion.
 
   Re-read `reviewThreads` and confirm that thread's `isResolved` is true. In either route, report
   a refused resolution to the architect, which opens an ask for a human to resolve the thread by
-  hand — never skip it silently. The merger runs the command once more before publishing READY
-  and does not publish while any `left open` line remains. That run is where every accepted
+  hand — never skip it silently. The merger runs the command once more before its READY
+  completion and does not complete while any `left open` line remains. That run is where every accepted
   thread's resolution is guaranteed, since the merge queue's gate counts the unresolved threads at
   the head. Acceptances posted after the implementer's last run are resolved here.
 
@@ -99,4 +98,4 @@ Every path it cites is in sjawhar/legion.
   workflow passes on a re-run only once its threads are resolved, so you run `legion threads
   resolve` (the daemon resolves the bot threads you accepted) and re-run the failed run before you
   approve, as your role prompt says.
-  The merger resolves accepted threads that remain open before publishing READY.
+  The merger resolves accepted threads that remain open before its READY completion.

@@ -1204,7 +1204,7 @@ describe("Legion OMP extension", () => {
       role === "merger"
         ? "the merger only verifies and reports"
         : role === "reviewer"
-          ? "the reviewer edits nothing except the final .legion/ cleanup commit via bash"
+          ? "the reviewer edits no code; its only commits are its review handoffs, made via bash"
           : "the architect delegates all code work to phase workers";
     const passedByMistake: string[] = [];
 
@@ -2965,7 +2965,7 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
         }
       );
 
-      // Sami types /new into the pane.
+      // The operator types /new into the pane.
       pane.switchTo("ses_pane_second", "/tmp/second.jsonl");
       await controller.handlers.get("session_switch")?.({ reason: "new" }, pane.context);
       expect(controller.holder()).toBe("ses_pane_second");

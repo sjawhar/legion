@@ -7,24 +7,20 @@ Autonomous development swarm using Oh My Pi agents. Root processes own issue tre
 Legion's issue lifecycle lives entirely on native Dispatch (triage → done); the daemon never
 creates, reads, or writes a GitHub issue. It derives role and gate state from Dispatch issue
 events plus GitHub PR/CI artifacts, records root-process session locators, and publishes only the
-verdict changes each role needs. Root processes run in tmux; phase workers are headless
-`omp --mode rpc` processes the daemon spawns directly, one tmux pane per worker, bridged through
-`legion worker-shim`. The TypeScript daemon refuses `runtime: kubernetes`; the Go coordinator
-(`packages/daemon`) runs each of those processes as one Agent Sandbox of the published worker
-image in a cluster (`docs/kubernetes.md`), and `scripts/e2e/stage4a-sandbox-runtime.sh` is that
-runtime's live proof.
+verdict changes each role needs. The daemon (`packages/daemon`, Go) runs every root architect and
+phase worker as a headless `omp --mode rpc` process bridged through `legion worker-shim`: one pane
+of its private tmux server per process under `runtime: tmux`, or one Agent Sandbox of the
+published worker image per process under `runtime: kubernetes` (`docs/kubernetes.md`;
+`scripts/e2e/stage4a-sandbox-runtime.sh` is that runtime's live proof).
 
-- **TypeScript daemon** — webhook intake, reducers, durable `LegionState`, root-process lifecycle,
-  credential grants, resync, and recovery.
+- **Daemon** — Dispatch and GitHub intake, the fixed workflow table, the durable issue record in
+  Postgres, admission, process supervision under either runtime, credential grants, and recovery.
 - **OMP extension** — injects the Legion tool and event delivery into active OMP sessions and
-  provisions issue workspaces. Phase workers (planner/implementer/tester/reviewer/merger, and
-  sub-architects for child issues) are headless `omp --mode rpc` processes the daemon spawns
-  directly, one tmux pane per worker, bridged through `legion worker-shim`; the daemon enforces
-  recursion limits when spawning them. The controller is an interactive OMP terminal session in
-  the daemon's private tmux server (no `--mode rpc`, no shim); reach it with
-  `tmux -L legion-<project> select-window -t <window id> \; attach -t legion-<project>`, the
-  window id being `controllerLocator.tmuxWindowId` in `legion state --json` (every window opens
-  detached, so a bare `attach` lands on whichever window is current).
+  provisions issue workspaces. The daemon starts every phase worker
+  (planner/implementer/tester/reviewer/merger) itself, from its fixed workflow table; a
+  sub-architect for a child issue runs only when the operator starts one. The controller is an
+  interactive OMP session the operator starts on their own machine with `legion controller start`
+  (no `--mode rpc`, no shim); the daemon launches none.
 - **Skills** — guide the architect and sequential phase workers. Durable `.legion/<phase>.json`
   handoffs are the recovery source of truth.
 
@@ -63,8 +59,8 @@ legion handoff complete --summary <text>  # Report phase completion to the tree'
 legion worker-shim --socket <path> -- <omp argv…>  # Bridges a headless phase-worker OMP process to the daemon over a unix socket (daemon-spawned, not run by hand)
 legion worker-shim --connect tcp://<host>:<port> --boot-token-file <path> [--provider-env-dir <dir>] [--pod-safety] [--agent-secrets-key-dir <dir> --pod-token-file <path> --agent-secrets-bin <path>] -- <omp argv…>  # Same bridge, reverse-dialed: the shim dials the daemon's worker stream listener and authenticates with its boot token; --provider-env-dir exports each mounted secret file as NAME=contents into the OMP child's environment only (skipping a NAME the pod already consumes through a NAME_FILE pointer, e.g. DISPATCH_TOKEN; and refusing to start — exit 1 naming the key and its file, Oh My Pi never spawned — when a key's name is already a variable of the shim's own environment, since the export would override it silently (LEGION-186)); the shim also answers the daemon's `adopt-working-copy` frame by running the shared `jj metaedit --update-author` in its workspace; the Go shim, with `--pod-safety` (the Sandbox runtime passes it; a tmux pane never does), starts Oh My Pi on Legion's pod baseline (`packages/daemon/internal/podsafety`), which names no model, provider or route: an overlay written to `LEGION_STATE_DIR` and named first in `PI_CONFIG_FILES`, so the operator's overlay outranks it and both outrank a repository's `.omp/config.yml`, holding remote compaction, memory backends, image URLs and dev auto-QA off, and `OTEL_SDK_DISABLED=true`, `PI_AUTO_QA=0`, `PI_CONFIG_DIR=.omp` and `OMP_SESSION_STORAGE=file` each set only when the pod leaves it unset (the runtime refuses the last two in an operator's pod, since they place the sessions a resume reads); a pod's model route is the operator's (`runtime.kubernetes.pod` and `provider_keys`, docs/kubernetes.md "Operator configuration"); the Sandbox runtime's three flags for a pod enrolled with the secrets broker (runtime.kubernetes.agent_secrets): the shim runs agent-secrets keygen there before its hello, sends the key's thumbprint and the projected token in hello2, keeps the enrollment id the daemon hands back, and runs agent-secrets renew; a tmux pane never gets them (Kubernetes runtime; daemon-spawned)
 legion workspace-init --issue <KEY> --repo <owner>/<repo> [--root /legion] --credential-helper <git helper>  # Kubernetes pod init container: shared clone + jj workspace on the tree volume with the mounted repository token (LEGION_PROVISION_TOKEN_FILE), under a per-repository flock held for the process lifetime (contended wait bound: LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS, set by the daemon from its boot deadline; 900 s when unset); when the pod resumes a session, exits non-zero if LEGION_RESUME_SESSION_FILE is missing from the volume (a launch failure, never a fresh agent)
-legion controller start --config <controller.yaml> [--daemon-url <url>]  # runtime: kubernetes — the operator starts the interactive controller on their own machine: reads the strict operator-side file (deploy/kubernetes/daemon/controller.yaml.example), refuses an operator token file others can read, fetches the controller secret from POST /legion/v1/controller/secret with that token as a bearer, launches Oh My Pi in the foreground with the shared controller environment, exits with its code
-cd packages/daemon && go build ./cmd/legion   # The Go coordinator (LEGION-208, stage 3 of 7; not the shipped daemon): version|start|stop|state|legions|status|restart|worker-shim|model-token|claims|gh|credential|handoff|threads|push|probe-image|workspace-init|controller, its own $XDG_STATE_HOME/legion/legions.json registry, its own Postgres schema; its `workspace-init` is a Sandbox pod's two init containers — `workspace-init fetch --repo <owner>/<repo> --feed <dir>` clones from GitHub into the pod's feed and is the only process holding the provisioning token (LEGION_PROVISION_TOKEN_FILE), `workspace-init provision --issue <KEY> --repo <owner>/<repo> [--root /legion] --credential-helper <git helper> --feed <dir>` does the TypeScript command's tree-volume work above from the feed without it (docs/kubernetes.md "Trust model: the provisioning token"); its `controller start` keeps the contract of the TypeScript command above (a Go `controller start` resolves `omp_invocation` as the Go daemon does, with no pinned default, refuses before its one daemon call, by launching the operator's Oh My Pi as the controller will run, a pi-legion-envoy it does not load or loads speaking another daemon API contract; that call names the contract, and the daemon refuses another with 409, naming both, before it mints a capability, so a `legion` and a daemon of different releases never revoke the running controller; and its controller registers on `/legion/v1/claims/register`, which refuses another contract naming both); `legion start --check-config` validates a file without running its key commands; `legion status <issue> <status> --operator-token-file <file> [--config|--port]` sets a status from an operator shell over the operator bearer, whose file `legion status` and `legion claims` refuse when its group or others can read it, as `controller start` does
+legion controller start --config <controller.yaml> [--daemon-url <url>]  # either runtime — the operator starts the interactive controller on their own machine: reads the strict operator-side file (deploy/kubernetes/daemon/controller.yaml.example), refuses an operator token file others can read, fetches the controller secret from POST /legion/v1/controller/secret with that token as a bearer, launches Oh My Pi in the foreground with the shared controller environment, exits with its code
+cd packages/daemon && go build ./cmd/legion   # The Legion daemon and CLI (LEGION-208): version|start|stop|state|legions|status|restart|worker-shim|model-token|claims|gh|credential|handoff|threads|push|probe-image|workspace-init|controller, its own $XDG_STATE_HOME/legion/legions.json registry, its own Postgres schema; its `workspace-init` is a Sandbox pod's two init containers — `workspace-init fetch --repo <owner>/<repo> --feed <dir>` clones from GitHub into the pod's feed and is the only process holding the provisioning token (LEGION_PROVISION_TOKEN_FILE), `workspace-init provision --issue <KEY> --repo <owner>/<repo> [--root /legion] --credential-helper <git helper> --feed <dir>` does the tree-volume work of the command above from the feed without it (docs/kubernetes.md "Trust model: the provisioning token"); its `controller start` keeps the contract of the command above (a Go `controller start` resolves `omp_invocation` as the Go daemon does, with no pinned default, refuses before its one daemon call, by launching the operator's Oh My Pi as the controller will run, a pi-legion-envoy it does not load or loads speaking another daemon API contract; that call names the contract, and the daemon refuses another with 409, naming both, before it mints a capability, so a `legion` and a daemon of different releases never revoke the running controller; and its controller registers on `/legion/v1/claims/register`, which refuses another contract naming both); `legion start --check-config` validates a file without running its key commands; `legion status <issue> <status> --operator-token-file <file> [--config|--port]` sets a status from an operator shell over the operator bearer, whose file `legion status` and `legion claims` refuse when its group or others can read it, as `controller start` does
 bash scripts/e2e/stage1-skeleton.sh    # Stage 1's live proof: the Go daemon boots on a real Postgres, serves GET /legion/v1/state, restarts against the same store, and refuses an unreachable Postgres by host (scripts/e2e/README.md)
 LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic bash scripts/e2e/stage2-tmux-supervision.sh   # Stage 2's live proof, devbox only: real Oh My Pi panes with the branch plugin under the Go daemon's private tmux server, against a real Envoy listener and NATS — register, role claim, delivery once, resume, suspend, the registration deadline, re-adoption across a restart, the orphan sweep (scripts/e2e/README.md)
 LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic SMOKE_UPSTREAM_NATS=nats://envoy-nats.<tailnet>.ts.net:4222 bash scripts/e2e/stage3-devbox-workflow.sh      # Stage 3's devbox-only live proof: real OMP panes drive a scratch Dispatch issue through the Go workflow, the design gate, review rounds, ordinary human merge, production check, restart, held worker, pending status write, and pane credentials against sjawhar/legion-smoke (scripts/e2e/README.md)
@@ -137,7 +133,7 @@ Triage ──┬──► Icebox ──► Backlog ──► Todo ──► In P
 ```
 
 **Phase roles:** architect → plan → implement → test → review → merge
-**Retro:** runs after the reviewer approves the cleaned head and before the merger publishes `READY`.
+**Retro:** runs after the reviewer approves the head and before the merger completes with its `READY` packet.
 **Production check:** after the merge lands, the implementer — the agent that developed the change — drives it in production and records that on the pull request and the issue; the architect signs off only then.
 
 Statuses above are native Dispatch issue statuses, not GitHub labels — the daemon writes
@@ -159,8 +155,7 @@ child whose tree is not live is an orphan, admitted as a root of its own, so it 
 any root does. Taking the label off a waiting root drops it from the waiting line, as a status that
 leaves `todo` does; taking it off a root already admitted does not stop its tree. The mark is a
 label rather than the issue's `route` because Dispatch publishes every event of a routed issue to
-the route's topic, where a label only marks the issue; it carries no workflow state, and the
-TypeScript daemon does not read it.
+the route's topic, where a label only marks the issue; it carries no workflow state.
 
 **Gate:** the design gate, when armed (`gates.design: root-issues` in `legion.yaml`, the default),
 is a human approving the root issue's spec document at a version in Dispatch: once the spec's
@@ -175,8 +170,9 @@ reason. `gates.design: off` is the only way past the gate without a human review
 operator approve command; with `off` the root architect is told so in its system prompt and adds
 no approval step. Whether a human must
 approve a pull request before it merges is the repository's own branch-protection or CODEOWNERS
-rule: Legion neither reads nor writes it. The merger posts `READY` on the Dispatch issue and, when
-the project's `projects.<KEY>.merge_queue_role` names one, publishes it to that role; a human merges
+rule: Legion neither reads nor writes it. The merger sends its `READY` packet with its completion;
+the daemon posts it on the Dispatch issue and, when the project's `projects.<KEY>.merge_queue_role`
+names one, publishes it to that role; a human merges
 under the repository's code-owner rule. When the head's own CI turns red before the merge, the
 daemon sends the issue back to `implementing`, posts the READY's withdrawal on the Dispatch issue,
 and publishes it to that role.

@@ -16,6 +16,13 @@
 
 ### Changed
 
+- Each Legion role gets one set of instructions (LEGION-414). The skills and role prompts drop the
+  steps the daemon no longer runs: no role pushes a `.legion/` deletion, the reviewer approves the
+  clean head that still carries `.legion/`, the merger hands its READY packet to the daemon, which
+  posts it, and every push is `legion push`. A sub-architect ends with `sign_off` rather than a
+  phase completion the daemon refuses, a `gates.design: off` root still registers its spec, and
+  the controller skill names only the wakes the daemon sends. The `legion` tool's description says
+  the merger's `summary` is its READY packet and that the daemon accepts no architect's completion.
 - The `dispatch`, `legion-architect`, `legion-controller` and `legion-retro` skills, and the
   dispatch issues reference, name no one by first name: every literal `Sami` reference becomes
   `the human` or `the operator`, matching each file's own existing convention for the person an

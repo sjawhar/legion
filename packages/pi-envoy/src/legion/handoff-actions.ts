@@ -43,13 +43,15 @@ export function handoffSchemaFields(z: PiZod): Readonly<Record<string, unknown>>
 
 /** The handoff actions' part of the tool description. */
 export const HANDOFF_DESCRIPTION =
-  "Handoff actions (phase workers and sub-architects): handoff_write writes this phase's handoff " +
+  "Handoff actions (phase workers; the daemon accepts a completion only from the role working " +
+  "the issue's current phase, never from an architect): handoff_write writes this phase's handoff " +
   "(`phase`, and `data`: the phase-specific fields as a JSON object, never the schemaVersion, " +
   "phase and completed the command writes itself) to `.legion/<phase>.json` in " +
   "the issue workspace; handoff_read returns the handoffs (every phase, or `phase`); " +
   "handoff_complete reports this phase complete to the daemon (`summary`: two sentences for the " +
-  "architect; `verdict` pass|fail when your role's instructions require one; `ready: true` for " +
-  "the merger's READY; no `phase` is needed, and one other than your own is refused). Each " +
+  "architect, or the merger's READY packet; `verdict` pass|fail when your role's instructions " +
+  "require one; `ready: true` for the merger's READY; no `phase` is needed, and one other than " +
+  "your own is refused). Each " +
   "returns the command's output; a failed action changed nothing. What a later phase needs goes " +
   "in your handoff; a question for another live role goes to its role topic with envoy_publish.";
 
