@@ -1,11 +1,12 @@
 import type { UseQueryResult } from "@tanstack/react-query";
-import { useIsMutating, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, type ReactNode, useId, useState } from "react";
 
 import { api } from "../../api/client";
 import type { Ask, AskRead, Comment, CreateCommentInput } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
 import { submitOnModifiedEnter } from "../../hooks/submitOnModifiedEnter";
+import { useSending } from "../../hooks/useSending";
 import {
   borderDefault,
   borderStrong,
@@ -66,7 +67,7 @@ export function AskReplyComposer({
   // Keyed by the ask, so the send outlives the composer that started it and any composer for the
   // ask sees it in flight.
   const mutationKey = ["ask-reply", ask.id];
-  const sending = useIsMutating({ mutationKey }) > 0;
+  const { sending } = useSending(mutationKey);
   const submit = useMutation({
     mutationKey,
     mutationFn: (text: string) => {
