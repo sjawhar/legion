@@ -15,6 +15,8 @@ function issue(overrides: Partial<IssueSummary> = {}): IssueSummary {
     rank: "U",
     labels: [],
     parent: null,
+    blocked_by: [],
+    primary_artifact_id: "artifact-1",
     assignee: null,
     claim: null,
     components: { mode: "inherit", ids: [], unknown: [], reason: null, inherited_from: null },

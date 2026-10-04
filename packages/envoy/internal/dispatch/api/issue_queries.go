@@ -49,7 +49,10 @@ var listPinnedIssuesQuery = issueSummaryHead + `
 const issueClaimColumns = `i.claimed_by, i.claimed_at`
 
 const issueSummaryHead = `
-	select i.key, i.title, i.status, i.priority, i.rank, i.labels, i.parent_key, i.assignee, i.route, i.updated_at, i.last_seq,
+	select i.key, i.title, i.status, i.priority, i.rank, i.labels, i.parent_key,
+	       coalesce((select array_agg(l.target_key order by l.target_key) from issue_links l where l.issue_key = i.key and l.kind = 'blocked_by'), '{}'),
+	       i.assignee, i.route, i.updated_at, i.last_seq,
+	       coalesce((select a.id::text from artifacts a where a.issue_key = i.key and a.is_primary), ''),
 	       ` + issueClaimColumns + `,
 	       count(a.id) filter (where i.closed_at is null),
 	       ` + issueComponentsColumns + `
@@ -239,7 +242,7 @@ func (s *server) scanIssueSummaries(ctx context.Context, listQuery string, argum
 		var issue model.IssueSummary
 		var components componentsScan
 		var claim claimScan
-		targets := []any{&issue.Key, &issue.Title, &issue.Status, &issue.Priority, &issue.Rank, &issue.Labels, &issue.Parent, &issue.Assignee, &issue.Route, &issue.UpdatedAt, &issue.LastSeq}
+		targets := []any{&issue.Key, &issue.Title, &issue.Status, &issue.Priority, &issue.Rank, &issue.Labels, &issue.Parent, &issue.BlockedBy, &issue.Assignee, &issue.Route, &issue.UpdatedAt, &issue.LastSeq, &issue.PrimaryArtifactID}
 		targets = append(targets, claim.targets()...)
 		targets = append(targets, &issue.OpenAsks)
 		if err := rows.Scan(append(targets, components.targets()...)...); err != nil {
@@ -343,13 +346,14 @@ func (s *server) loadIssue(ctx context.Context, q queryer, key string) (model.Is
 	var claim claimScan
 	targets := []any{
 		&issue.Key, &issue.Project, &issue.Number, &issue.Title, &issue.Status, &issue.Priority, &issue.Rank, &issue.Labels,
-		&issue.Parent, &issue.Assignee, &issue.Route, &createdBy, &issue.CreatedAt, &issue.UpdatedAt, &issue.ClosedAt,
+		&issue.Parent, &issue.BlockedBy, &issue.Assignee, &issue.Route, &createdBy, &issue.CreatedAt, &issue.UpdatedAt, &issue.ClosedAt,
 		&issue.PrimaryArtifactID, &issue.LastSeq,
 	}
 	targets = append(targets, claim.targets()...)
 	if err := q.QueryRow(ctx, `
-		select i.key, i.project_key, i.number, i.title, i.status, i.priority, i.rank, i.labels, i.parent_key, i.assignee, i.route,
-		       i.created_by, i.created_at, i.updated_at, i.closed_at,
+		select i.key, i.project_key, i.number, i.title, i.status, i.priority, i.rank, i.labels, i.parent_key,
+		       coalesce((select array_agg(l.target_key order by l.target_key) from issue_links l where l.issue_key = i.key and l.kind = 'blocked_by'), '{}'),
+		       i.assignee, i.route, i.created_by, i.created_at, i.updated_at, i.closed_at,
 		       coalesce((select a.id::text from artifacts a where a.issue_key = i.key and a.is_primary), ''),
 		       i.last_seq, `+issueClaimColumns+`,
 		       `+issueComponentsColumns+`

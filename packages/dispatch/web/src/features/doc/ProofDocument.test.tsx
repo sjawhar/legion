@@ -138,6 +138,7 @@ test("ProofDocument opens a hover card for a dispatch:// link in the live editor
     last_seq: 1,
     number: 1,
     parent: null,
+    blocked_by: [],
     assignee: null,
     claim: null,
     components: { mode: "inherit", ids: [], unknown: [], reason: null, inherited_from: null },

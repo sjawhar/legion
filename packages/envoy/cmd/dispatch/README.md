@@ -368,6 +368,13 @@ it stays valid at the pool until it expires in any backup that holds it. So if a
 was taken between `0068`'s deploy and the post-roll restart, either delete those backups or sign
 out at the pool everyone whose `people.signed_in_at` is after `0068`'s deploy.
 
+Migration `0069_issue_links` creates `issue_links`, the issues each issue waits on through
+`blocked_by`, and its target index, and re-states the `graph_edges` view with the `blocked_by` arm.
+The table's two foreign keys take `SHARE ROW EXCLUSIVE` on `issues` for the migration's short
+transaction, so an issue write waits behind it while an issue read does not, and re-stating the
+view holds `graph_edges` `ACCESS EXCLUSIVE`, so a reference read waits too. It touches no row; its
+census answers `0`.
+
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a
 migration record or schema change only when an existing artifact has no owning issue. On success

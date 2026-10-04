@@ -4,11 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/sjawhar/envoy/internal/contracts"
 )
 
 // parseIssueParent decodes the tri-state `parent` field of an issue PATCH. Absent →
@@ -41,33 +44,109 @@ const parentDepthCap = 32
 
 var parentDepthCapSQL = strconv.Itoa(parentDepthCap)
 
-// lockIssueAndParent locks the issue and its proposed parent `for no key update` in key order —
-// serializing the pairwise A→B / B→A reparent race (deadlock detection breaks a crossed
-// order) — then validates the reparent: the parent must exist (400 PARENT_INPUT), differ
-// from the issue, share its project (400 PARENT_INPUT), and not be a descendant of the
-// issue (409 PARENT_INPUT naming the cycle path). A concurrent reparent of an unlocked
-// ancestor can still race the walk; the depth-capped reads keep terminating regardless.
-func lockIssueAndParent(ctx context.Context, tx pgx.Tx, key, parent string) error {
-	if parent == key {
-		return errorf(http.StatusBadRequest, "PARENT_INPUT", "an issue cannot be its own parent")
+func normalizeIssueBlockers(targets []string) ([]string, error) {
+	if len(targets) > contracts.MaxIssueBlockers {
+		return nil, countExceededError("BLOCKED_BY_INPUT", "blocked_by", len(targets), contracts.MaxIssueBlockers)
 	}
-	first, second := key, parent
-	if parent < key {
-		first, second = parent, key
+	slices.Sort(targets)
+	return slices.Compact(targets), nil
+}
+
+// lockProjectIssueDependencies serializes blocker and parent changes before any row or rank
+// lock. The two-key namespace is separate from Dispatch's one-key rank, document and event locks.
+func lockProjectIssueDependencies(ctx context.Context, tx pgx.Tx, project string) error {
+	if _, err := tx.Exec(ctx, `
+		select pg_advisory_xact_lock(hashtext('dispatch-issue-dependencies'), hashtext($1))
+	`, project); err != nil {
+		return fmt.Errorf("lock project issue dependencies: %w", err)
 	}
-	projects := map[string]string{}
-	for _, lockKey := range []string{first, second} {
-		var project string
-		err := tx.QueryRow(ctx, `select project_key from issues where key = $1 for no key update`, lockKey).Scan(&project)
-		if errors.Is(err, pgx.ErrNoRows) && lockKey == parent {
-			return errorf(http.StatusBadRequest, "PARENT_INPUT", "parent issue %s not found", parent)
+	return nil
+}
+
+// lockIssueRows locks the named issue rows `for no key update` in key order, the order
+// LockOwners takes event owners. A PATCH locks every row it names through one call
+// (lockPatchRows), so two writes naming the same rows queue one behind the other instead of each
+// holding one row while waiting for the other. It sorts keys in place. A key with no row is
+// skipped; the caller's own read of that key refuses it.
+func lockIssueRows(ctx context.Context, q queryer, keys ...string) error {
+	slices.Sort(keys)
+	for index, key := range keys {
+		if index > 0 && key == keys[index-1] {
+			continue
+		}
+		err := q.QueryRow(ctx, `select key from issues where key = $1 for no key update`, key).Scan(new(string))
+		if errors.Is(err, pgx.ErrNoRows) {
+			continue
 		}
 		if err != nil {
 			return err
 		}
-		projects[lockKey] = project
 	}
-	if projects[parent] != projects[key] {
+	return nil
+}
+
+// parentLockAttempts bounds how many times lockPatchRows reads the issue's parent and locks it:
+// the first, and one redo for a parent a concurrent reparent changed in between.
+const parentLockAttempts = 2
+
+// lockPatchRows locks every issue row a PATCH names in one key order (lockIssueRows): the issue,
+// the rows in named (its proposed parent and its rank neighbours) and, with withParent, its
+// current parent, which a status change and a reparent append events to. The current parent can
+// only be read before the lock, and a concurrent reparent of the issue, which holds the issue's
+// row, can change it in between, so it is read again under the lock. A parent that moved releases
+// every lock this attempt took (a savepoint) and the attempt starts over with the parent that
+// stands, so no row is ever locked out of key order. A parent that moves at every attempt is
+// 409 PARENT_CONTENDED, with nothing applied.
+func lockPatchRows(ctx context.Context, tx pgx.Tx, key string, withParent bool, named ...string) error {
+	keys := make([]string, 0, len(named)+2)
+	if !withParent {
+		return lockIssueRows(ctx, tx, append(append(keys, key), named...)...)
+	}
+	for range parentLockAttempts {
+		var parent *string
+		if err := tx.QueryRow(ctx, `select parent_key from issues where key = $1`, key).Scan(&parent); err != nil {
+			return err
+		}
+		keys = append(append(keys[:0], key), named...)
+		if parent != nil {
+			keys = append(keys, *parent)
+		}
+		attempt, err := tx.Begin(ctx)
+		if err != nil {
+			return err
+		}
+		if err := lockIssueRows(ctx, attempt, keys...); err != nil {
+			return err
+		}
+		var locked *string
+		if err := attempt.QueryRow(ctx, `select parent_key from issues where key = $1`, key).Scan(&locked); err != nil {
+			return err
+		}
+		if stringPointersEqual(parent, locked) {
+			return attempt.Commit(ctx)
+		}
+		if err := attempt.Rollback(ctx); err != nil {
+			return err
+		}
+	}
+	return errorf(http.StatusConflict, "PARENT_CONTENDED",
+		"%s's parent changed at each of %d attempts while this request waited to lock it, so nothing was applied: read the issue and retry", key, parentLockAttempts)
+}
+
+// validateIssueParent reads the ancestor chain while the project's dependency lock is held.
+func validateIssueParent(ctx context.Context, tx pgx.Tx, key, project, parent string) error {
+	if parent == key {
+		return errorf(http.StatusBadRequest, "PARENT_INPUT", "an issue cannot be its own parent")
+	}
+	var parentProject string
+	err := tx.QueryRow(ctx, `select project_key from issues where key = $1`, parent).Scan(&parentProject)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return errorf(http.StatusBadRequest, "PARENT_INPUT", "parent issue %s not found", parent)
+	}
+	if err != nil {
+		return err
+	}
+	if parentProject != project {
 		return errorf(http.StatusBadRequest, "PARENT_INPUT", "parent must be in the same project")
 	}
 	rows, err := tx.Query(ctx, `
@@ -97,6 +176,111 @@ func lockIssueAndParent(ctx context.Context, tx pgx.Tx, key, parent string) erro
 		}
 	}
 	return rows.Err()
+}
+
+// waitNode is one half of an issue in the dependency graph. An issue starts after its blocked_by
+// targets are done and after its parent starts; it is done after it starts and after its children
+// are done. Splitting the two halves lets sibling dependencies stand while still refusing a child
+// that waits on its parent, or a parent that waits on its descendant.
+type waitNode struct {
+	key  string
+	done bool
+}
+
+// assertParentLeavesNoDependencyCycle checks a parent link already written in tx. The link adds
+// two waits: the parent's done waits on the child's done, and the child's start waits on the
+// parent's start.
+func assertParentLeavesNoDependencyCycle(ctx context.Context, tx pgx.Tx, child, parent string) error {
+	if err := assertNoWaitPath(ctx, tx, []waitNode{{key: child, done: true}}, waitNode{key: parent, done: true}); err != nil {
+		return err
+	}
+	return assertNoWaitPath(ctx, tx, []waitNode{{key: parent}}, waitNode{key: child})
+}
+
+// writeBlockedBy validates and replaces the normalized same-project target list.
+func writeBlockedBy(ctx context.Context, tx pgx.Tx, issue, project string, targets []string) error {
+	for _, target := range targets {
+		var targetProject string
+		err := tx.QueryRow(ctx, `select project_key from issues where key = $1`, target).Scan(&targetProject)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return errorf(http.StatusBadRequest, "BLOCKED_BY_INPUT", "blocked_by issue %s not found", target)
+		}
+		if err != nil {
+			return err
+		}
+		if targetProject != project {
+			return errorf(http.StatusBadRequest, "BLOCKED_BY_OUTSIDE_PROJECT", "blocked_by issue %s must be in the same project", target)
+		}
+	}
+	from := make([]waitNode, len(targets))
+	for index, target := range targets {
+		from[index] = waitNode{key: target, done: true}
+	}
+	if err := assertNoWaitPath(ctx, tx, from, waitNode{key: issue}); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `delete from issue_links where issue_key = $1 and kind = 'blocked_by'`, issue); err != nil {
+		return err
+	}
+	if len(targets) == 0 {
+		return nil
+	}
+	_, err := tx.Exec(ctx, `
+		insert into issue_links (issue_key, kind, target_key)
+		select $1, 'blocked_by', target_key from unnest($2::text[]) as target_key
+	`, issue, targets)
+	return err
+}
+
+// assertNoWaitPath refuses a wait whose head reaches its tail, stopping at parentDepthCap.
+// The caller serializes blocker and parent changes, so traversal needs only plain reads.
+func assertNoWaitPath(ctx context.Context, tx pgx.Tx, from []waitNode, goal waitNode) error {
+	seen := map[waitNode]bool{}
+	frontier := from
+	for depth := 0; len(frontier) > 0; depth++ {
+		if depth > parentDepthCap {
+			return errorf(http.StatusConflict, "DEPENDENCY_CYCLE", "the dependency graph is deeper than %d links", parentDepthCap)
+		}
+		var starts, dones []string
+		for _, node := range frontier {
+			halves := []waitNode{node, {key: node.key}}
+			if !node.done {
+				halves = halves[:1]
+			}
+			for _, half := range halves {
+				if half == goal {
+					return errorf(http.StatusConflict, "DEPENDENCY_CYCLE", "%s would wait on itself through blocked_by and parent links", goal.key)
+				}
+				if seen[half] {
+					continue
+				}
+				seen[half] = true
+				if half.done {
+					dones = append(dones, half.key)
+				} else {
+					starts = append(starts, half.key)
+				}
+			}
+		}
+		rows, err := tx.Query(ctx, `
+			select parent_key, false from issues where key = any($1) and parent_key is not null
+			union
+			select target_key, true from issue_links where issue_key = any($1) and kind = 'blocked_by'
+			union
+			select key, true from issues where parent_key = any($2)
+		`, starts, dones)
+		if err != nil {
+			return err
+		}
+		frontier, err = pgx.CollectRows(rows, func(row pgx.CollectableRow) (waitNode, error) {
+			var node waitNode
+			return node, row.Scan(&node.key, &node.done)
+		})
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func stringPointersEqual(left, right *string) bool {

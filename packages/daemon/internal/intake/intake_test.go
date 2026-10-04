@@ -261,6 +261,28 @@ func TestCapturedIssueUpdatedEnvelopeDecodes(t *testing.T) {
 	}
 }
 
+// Dispatch can add issue payload fields before a deployed daemon consumes them: the old decoder
+// must keep accepting those events until its matching workflow change rolls out.
+func TestIssueEventIgnoresUnconsumedBlockedByFields(t *testing.T) {
+	original := string(capturedIssueCreatedEnvelope(t))
+	widened := strings.Replace(original, `\"labels\":[]`, `\"blocked_by\":[\"CAPTURE-3\"],\"priority\":1,\"labels\":[]`, 1)
+	if widened == original {
+		t.Fatal("captured issue.created fixture has no empty labels field to widen")
+	}
+	subject := "notifications.dispatch.issue.CAPTURE-4.issue.created"
+	want, err := decodeMessage(subject, "CAPTURE", capturedRepositories, []byte(original))
+	if err != nil {
+		t.Fatalf("decode captured issue.created: %v", err)
+	}
+	got, err := decodeMessage(subject, "CAPTURE", capturedRepositories, []byte(widened))
+	if err != nil {
+		t.Fatalf("decode issue.created with additive fields: %v", err)
+	}
+	if !reflect.DeepEqual(got.Fact, want.Fact) {
+		t.Fatalf("widened fact = %#v, want %#v", got.Fact, want.Fact)
+	}
+}
+
 // An issue event's labels say whether it is handed to Legion; decodeDispatchFact resolves that
 // once, into HandedOver, matching the label in any case among any others, never carrying the raw
 // list itself.

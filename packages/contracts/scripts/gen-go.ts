@@ -8,6 +8,7 @@ import {
   DOCUMENT_SCHEMA_CLOSE_CODE,
   DOCUMENT_SCHEMA_CLOSE_REASON,
   MAX_BROADCAST_RECIPIENTS,
+  MAX_ISSUE_BLOCKERS,
   MAX_ISSUE_PAGE_LIMIT,
   RECEIPT_TIMEOUT_CAUSE,
 } from "../src/dispatch-api";
@@ -111,6 +112,10 @@ const SearchQueryMax = ${SEARCH_QUERY_MAX}
 // SearchQueryHint follows a refusal over SearchQueryMax, saying what to send instead. Generated
 // from SEARCH_QUERY_HINT in packages/contracts so the server and the tool word it once.
 const SearchQueryHint = ${JSON.stringify(SEARCH_QUERY_HINT)}
+
+// MaxIssueBlockers bounds blocked_by input before deduplication. Generated from
+// MAX_ISSUE_BLOCKERS in packages/contracts so the server and tool schemas share the limit.
+const MaxIssueBlockers = ${MAX_ISSUE_BLOCKERS}
 
 // MaxIssuePageLimit is the most issues one page of GET /api/v1/issues holds, and
 // DefaultIssuePageLimit the page size when a caller pages with offset alone. Generated from

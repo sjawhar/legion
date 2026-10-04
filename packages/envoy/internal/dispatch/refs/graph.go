@@ -13,7 +13,7 @@ import (
 )
 
 // Kinds is every edge type graph_edges emits.
-var Kinds = []string{"mentions", "child_of", "attached_to", "anchored_to", "owned_by", "replies_to", "followed_by", "part_of", "depends_on", "affects"}
+var Kinds = []string{"mentions", "child_of", "blocked_by", "attached_to", "anchored_to", "owned_by", "replies_to", "followed_by", "part_of", "depends_on", "affects"}
 
 // KnownKind reports whether kind is an edge type graph_edges emits.
 func KnownKind(kind string) bool {
