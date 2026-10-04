@@ -343,11 +343,6 @@ export interface PiApi {
    * tool batch. The host queues the send, so the prompt's `message_start` comes after this returns.
    */
   readonly sendUserMessage: (content: string, options?: { readonly deliverAs: "aside" }) => void;
-  /**
-   * The fork's side turn before Oh My Pi 18.3: the same call as `SessionContext.runEphemeralTurn`,
-   * with the question wrapped in the /btw prompt by the host.
-   */
-  readonly askEphemeral?: SideTurn;
   /** Persist extension state in the session transcript; never sent to the model. */
   readonly appendEntry: <T = unknown>(customType: string, data?: T) => void;
   /**

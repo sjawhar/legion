@@ -325,9 +325,11 @@ changes that.
 
 What still works, and what to do:
 
-- **The `eval` tool and file tools are unaffected.** Probe the port from `eval` (`socket.connect(("127.0.0.1", 13370))`)
-  or start a supervised watcher through `hub` that polls the port and prints a marker when it opens, then `hub wait` on
-  that marker. Do not spin in a foreground loop.
+- **The `eval` tool and file tools are unaffected.** Probe the port from `eval`
+  (`socket.connect(("127.0.0.1", 13370))`) between other work. A watcher started from the shell does
+  not help: a supervised service starts as a `bash` call (with `name`), and an `async` job is a
+  `bash` call too, so the hook mints a grant from the daemon for each and it fails like any other
+  bash call until the daemon is back. Do not spin in a foreground loop.
 - **The `legion` tool's `handoff_write` needs no daemon** (it writes `.legion/<phase>.json` under the workspace and
   mints nothing), and neither does a local `jj` commit. During the outage commit the handoff through an `eval`
   subprocess carrying the pane's exact environment, read from `/proc/<omp-pid>/environ` of this session's own `omp`

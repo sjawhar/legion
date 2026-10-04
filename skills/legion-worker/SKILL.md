@@ -62,11 +62,11 @@ workflow table. You may still use ordinary `task` subagents for your own phase w
 is a Legion role.
 Escalate a product, scope, design, cross-phase, or lifecycle decision to the owning architect with
 `envoy_publish` to its role topic (`notifications.role.` followed by its encoded token, see
-above), carrying the verified facts and the decision needed. `hub` only reaches subagents
-inside your own process, not the architect's separate one. Never write a decision block into a
-spec yourself: the architect decides whether the human must answer it and writes the block, since
-a new version of an approved root spec closes the tree's design gate. A standalone to-do only a
-human can do is a `dispatch_ask`, and its replies return to your own session.
+above), carrying the verified facts and the decision needed. A `write` to `agent://` only reaches
+agents inside your own process, not the architect's separate one. Never write a decision block
+into a spec yourself: the architect decides whether the human must answer it and writes the block,
+since a new version of an approved root spec closes the tree's design gate. A standalone to-do
+only a human can do is a `dispatch_ask`, and its replies return to your own session.
 
 Because the same agent is always resumed for its phase, you may receive more than one
 assignment across your lifetime: once the daemon ends your phase it suspends you, and when a later
@@ -152,9 +152,10 @@ new work.
 clone, so they all share one operation log: `jj undo`, `jj abandon`, and
 `jj op restore|revert|abandon|undo` rewrite it for every tree at once. The extension refuses them in every
 phase-worker pane before they run — a `bash` command in any position of a pipeline or `&&`
-chain, with or without `-R`, judged on the whole argument list; `eval` code; and a `hub`
-process start — from your own tool calls and from any `task` subagent you spawn (it runs in
-your pane, against the same log), and a `bash` command whose quoted text merely mentions `jj`
+chain, with or without `-R`, judged on the whole argument list (a supervised service's start
+included); `eval` code; and stdin written to a service (a `write` to `proc://<id>`) — from your
+own tool calls and from any `task` subagent you spawn (it runs in your pane, against the same
+log), and a `bash` command whose quoted text merely mentions `jj`
 with one of those words (a heredoc, an echo, a commit message) is refused too: write such text
 with the `write` tool or say "operation-log rollback" instead. `jj restore <paths>`,
 `jj op log`, and `jj op show` stay allowed. Recover forward only: a new commit
