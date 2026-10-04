@@ -145,6 +145,18 @@ lowercase email:
   the person's membership with it at least hourly: a refresh the pool refuses,
   or one whose ID token no longer puts them in the group, ends every session
   they hold. Logout ends Dispatch's session only, not the pool's.
+
+  The refresh token is stored sealed (`people.refresh_token`): AES-256-GCM
+  under a key derived from `DISPATCH_SIGNING_KEY` with HKDF and a fixed purpose
+  label, bound to the person's email, in a format whose `v1:` prefix names its
+  version. A database backup without the signing key therefore holds no token
+  the pool would accept. A stored value that does not open (sealed under another
+  signing key, moved from another person's row, or in any other format) counts
+  as no refresh token: Dispatch forgets it with its confirmation, logs
+  `msg="dispatch: a stored refresh token did not open; the person signs in again"`
+  once at WARN with the email and never the value, and the person's next request answers
+  `401 NO_IDENTITY` until they sign in again. Rotating `DISPATCH_SIGNING_KEY`
+  therefore drops every stored refresh token as well as every session cookie.
 - `header:<Header-Name>` is for tests and local harnesses only, never for a
   production Dispatch deployment. It accepts a header value, lowercases it and
   records the person. The harness must set `DISPATCH_IDENTITY_HEADER_TRUSTED=1`;
@@ -303,6 +315,21 @@ expected for this release: no code reads those rows once it ships. The deployer 
 is `select count(*) from users` and that the report ends `census: REFUSED (1 reason)`, so 0068's
 count is its only refusal, and then rolls the release. Any other reason (a lock holder, a long
 transaction, a table over the limit) still stops the deploy.
+
+Migration `0069_people_clear_plain_refresh_tokens` forgets every refresh token `people` holds in
+plain text, with the confirmation the table pairs it with, keeping the person: Dispatch now stores
+each refresh token sealed (Identity, above), every sealed value begins `v1:`, and a plain one cannot
+be sealed in SQL. A sealed value is left as it is, so applying it again changes nothing. It locks
+`people` alone, `ROW EXCLUSIVE` for the update. Each person who signed in through the pool before
+the release signs in again once: their next request answers `401 NO_IDENTITY`. Its census counts
+the plain-text tokens it forgets, so wherever anyone signed in since `0068` deployed it answers
+non-zero and the pre-deploy census refuses:
+`REFUSED 0069_people_clear_plain_refresh_tokens.up.sql: its census counts <n> (0069_people_clear_plain_refresh_tokens.census.sql)`.
+That refusal is expected for this release, as `0068`'s was for its own. The deployer checks that
+`<n>` is `select count(*) from people where refresh_token is not null and refresh_token not like
+'v1:%'` and that the report ends `census: REFUSED (1 reason)`, then rolls the release. The census
+reads `people`, which `0068` creates, so `0068` must have deployed in an earlier release: a release
+carrying both refuses on a census naming a table the database does not have yet.
 
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a

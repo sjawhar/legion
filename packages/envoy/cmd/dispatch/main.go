@@ -211,7 +211,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	people := store.NewPgPeopleStore(database.Pool)
+	people := store.NewPgPeopleStore(database.Pool, signingKey)
 	sessions := store.NewPgSessionStore(database.Pool)
 
 	signIn, err := discoverSignIn(ctx, boot)
