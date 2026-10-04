@@ -23,7 +23,7 @@
 //                                          brainstormSurface reads them (brainstorm.json in
 //                                          <run dir>); <file> is unread, kept for dispatch_session's
 //                                          one capture call shape
-import { readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
 import {
@@ -35,18 +35,10 @@ import {
   getMessage,
   listIssueAsks,
 } from "../../../dispatch/e2e/api";
+import { CREATED, session, toolResults } from "./transcript";
 
 /** What `ask-on-message` writes and `capture` reads. */
 const Fixture = z.object({ issue: z.string(), message: z.string() });
-/** One transcript line, as far as `capture-brainstorm` reads one: each tool result's text. */
-const TranscriptLine = z.looseObject({
-  message: z
-    .looseObject({
-      role: z.string().optional(),
-      content: z.array(z.looseObject({ text: z.string().optional() })).optional(),
-    })
-    .optional(),
-});
 /** The most events one `GET /api/v1/issues/{key}/events` page holds. */
 const EVENT_PAGE = 200;
 
@@ -214,22 +206,15 @@ if (command === "project") {
   }
 } else if (command === "capture-brainstorm" && runDir !== undefined) {
   // The run's own issue, from its own transcript, never from the project: a batch's runs share the
-  // one project. Dispatch answers `Created <KEY>:` only when it creates the issue, whatever reached
-  // it (a `write` to the `xd://dispatch_issue` device, the same inside an `eval` cell, or the tool by
-  // name), as score.ts's CREATED reads it; a refused duplicate reads `Not created:`.
-  const sessions = path.join(runDir, "sessions");
-  const transcript = readdirSync(sessions).find((name) => name.endsWith(".jsonl"));
+  // one project. Dispatch answers `Created <KEY>:` only when it creates the issue, whatever
+  // reached it (score.ts's CREATED); a refused duplicate reads `Not created:`.
   let issue: string | null = null;
-  for (const text of transcript
-    ? readFileSync(path.join(sessions, transcript), "utf8").split("\n")
-    : []) {
-    if (text.trim() === "" || issue !== null) continue;
-    const message = TranscriptLine.parse(JSON.parse(text)).message;
-    if (message?.role !== "toolResult") continue;
-    const created = /\bCreated ([A-Z][A-Z0-9]*-\d+):/.exec(
-      (message.content ?? []).map((part) => part.text ?? "").join("")
-    );
-    issue = created?.[1] ?? null;
+  for (const text of toolResults(session(runDir))) {
+    const match = CREATED.exec(text);
+    if (match?.[1] !== undefined) {
+      issue = match[1];
+      break;
+    }
   }
   const asks = issue === null ? [] : await listIssueAsks(issue, { as: "agent" });
   writeFileSync(path.join(runDir, "brainstorm.json"), `${JSON.stringify({ issue, asks })}\n`);

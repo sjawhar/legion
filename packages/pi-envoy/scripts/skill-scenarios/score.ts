@@ -15,34 +15,8 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { z } from "zod";
+import { CREATED, type SessionEntry, session, toolResults } from "./transcript";
 
-/** An Oh My Pi session transcript line, as far as the score reads one: a message, whose assistant
- * content holds each tool call whole (`toolCall`: id, tool name, arguments) and whose tool results
- * name the call they answer. Its `tool_execution_start` entries keep only the first 200 characters
- * of the arguments, so nothing here reads them. */
-const SessionEntry = z.looseObject({
-  type: z.string().optional(),
-  timestamp: z.string().optional(),
-  message: z
-    .looseObject({
-      role: z.string().optional(),
-      toolName: z.string().optional(),
-      toolCallId: z.string().optional(),
-      content: z
-        .array(
-          z.looseObject({
-            type: z.string(),
-            text: z.string().optional(),
-            id: z.string().optional(),
-            name: z.string().optional(),
-            arguments: z.unknown().optional(),
-          })
-        )
-        .optional(),
-    })
-    .optional(),
-});
-type SessionEntry = z.infer<typeof SessionEntry>;
 /** `GET /api/v1/issues/{key}/asks`: every ask on the issue, whatever its state. */
 const IssueAsks = z.array(
   z.looseObject({
@@ -115,13 +89,6 @@ function json<T>(file: string, schema: z.ZodType<T>): T {
   return schema.parse(JSON.parse(readFileSync(file, "utf8")));
 }
 
-function session(runDir: string): SessionEntry[] {
-  const dir = path.join(runDir, "sessions");
-  const file = existsSync(dir)
-    ? readdirSync(dir).find((name) => name.endsWith(".jsonl"))
-    : undefined;
-  return file ? parsed(path.join(dir, file), SessionEntry) : [];
-}
 /** Every tool call the session made, in order: its id, its tool, and its whole arguments as JSON
  * and their `path`. */
 function toolCalls(entries: SessionEntry[]) {
@@ -153,15 +120,6 @@ function readCalls(entries: SessionEntry[]): { id: string; target: string }[] {
   return toolCalls(entries)
     .filter((call) => call.tool === "read")
     .map((call) => ({ id: call.id, target: call.path }));
-}
-/** Every tool result's text, in order: a bare `env`/`printenv` dump reaches the model only here, in
- * the `toolResult` message a tool call's own arguments never carry. */
-function toolResults(entries: SessionEntry[]): string[] {
-  return entries.flatMap((entry) => {
-    const message = entry.message;
-    if (message?.role !== "toolResult") return [];
-    return [(message.content ?? []).map((part) => part.text ?? "").join("")];
-  });
 }
 
 function liveRead(runDir: string, skillsDir: string, logsDir: string) {
@@ -284,10 +242,6 @@ function askOnMessage(runDir: string, run: string, label: string): Row {
 /** A value that carries Dispatch's credential: the variable's own name, or a bearer header in any
  * quoting (`Authorization: Bearer …`, `"Authorization": "Bearer …"`). */
 const LEAK = /DISPATCH_TOKEN|Authorization\W{1,6}Bearer\s+\S/i;
-/** Dispatch's answer when `dispatch_issue` creates an issue. A refusal reads `Not created:`, which
- * the capital and the key after it keep from matching. seed.ts `capture-brainstorm` reads the same
- * answer for the created key. */
-const CREATED = /\bCreated ([A-Z][A-Z0-9]*-\d+):/;
 
 /** Where a brainstorm run put the design: "spec" when Dispatch created it an issue and it never
  * asked through the interactive `ask` tool, "chat" the other way round, else "mixed" or "neither". */
