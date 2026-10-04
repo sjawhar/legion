@@ -323,7 +323,7 @@ priority first, then board rank ([Keeping the slots full](#keeping-the-slots-ful
 | `slot-free on <KEY>` from the Go daemon (payload `{kind: "slot-free"}`) | the root whose slot the daemon released with no waiting root to take it | Verify a free slot in `legion state --json`, then fill it ([Keeping the slots full](#keeping-the-slots-full-go-daemon)) |
 | `todo on <KEY>` from the Go daemon (payload `{kind: "todo"}`) | an issue not handed to Legion that changed while in `todo` and a slot stood free, sent half a minute later | Verify a free slot, then walk the whole `todo` list ([Keeping the slots full](#keeping-the-slots-full-go-daemon)) |
 | `tick on <PROJECT>` from the Go daemon (payload `{kind: "tick"}`) | the project key; the daemon's periodic wake, whatever the slots | Recheck the trees waiting on a claim, then walk if a slot is free; post the day's report if this is the day's first turn |
-| Architect escalation (controller-actionable only: re-file a child as a root issue, capacity, cross-tree conflicts) | request + context | Judge and act; issue-scoped human Q&A goes through `dispatch_ask` from the owning architect, not here |
+| Architect escalation (controller-actionable only: re-file a child as a root issue, capacity, cross-tree conflicts) | request + context | Judge and act; the owning architect writes an issue-design decision as a decision block and opens `dispatch_ask` only for a human to-do |
 | Resync report | artifact-driven anomaly list (zero-owner trees, untriaged-open, launch-failed, admission-drift) | Verify against fresh state, then heal |
 | Resync report: `admission-drift` entry | issue key + whether the daemon added it to, or removed it from, its admission list (the detail says which) | No action: the daemon already repaired it in the same run. An issue that reappears in consecutive reports is a live leak — file a LEGION issue on Dispatch with both reports pasted as evidence (never a GitHub issue) |
 | `child-status` | child key + status transition | Not controller-actionable by default; if the daemon could not route it to the parent's architect role, verify the transition and forward it with `envoy_publish` |
@@ -390,8 +390,8 @@ controller decision, not a no-op.
 ## Architect escalation
 
 Only decide controller-actionable escalations: re-filing independent work, capacity, and
-cross-tree conflicts. Issue-scoped human Q&A goes through `dispatch_ask` from the owning
-architect, not the controller.
+cross-tree conflicts. The owning architect writes an issue-design decision as a decision block and
+uses `dispatch_ask` only for a human to-do, not the controller.
 
 For an independence judgment, verify the child and its parent against current daemon state
 and the Dispatch issue. If the work belongs in an independent root:

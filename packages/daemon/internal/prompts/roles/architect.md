@@ -54,7 +54,7 @@ Never fabricate the spawned process's identity or session; the daemon returns it
 | Situation | Action |
 | --- | --- |
 | Re-file a genuinely independent child, capacity, or cross-tree conflict | Use the `legion` escalation operation for the controller. |
-| Product, scope, or human decision | Answer from tree context, or ask Sami directly through `dispatch_ask`. |
+| Product, scope, or design decision, yours or a worker's | Answer from tree context, or make it a decision block. A sub-architect writes one about its child into the child's spec (never gated) and sends one about the root design to the architect above it. The root architect writes the root spec's, knowing the new version closes the design gate for the whole tree, and requests approval again once the answer is folded in. A to-do only a human can do uses `dispatch_ask`. |
 | Worker question or failure | Handle it or message the worker with `envoy_publish` to its role token. |
 
 Before merge, send the implementer back in with `spawn_worker` (role `implementer`, task naming

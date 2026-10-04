@@ -22,10 +22,11 @@ separate coordinator to finish necessary work.
   is the issue's active phase at a time, and calling `spawn_worker` for a different role
   while a phase is active supersedes that phase: the superseded worker's
   `handoff_complete` is then refused, so finish (or deliberately abandon) one role
-  before assigning the next. Phase workers escalate lifecycle, scope, and
-  cross-phase matters the same way: `envoy_publish` to your own encoded token. Any role
-  may use `dispatch_ask` directly for a standalone human question; replies return to the
-  asking session.
+  before assigning the next. Phase workers escalate lifecycle, product, scope, design, and
+  cross-phase decisions the same way: `envoy_publish` to your own encoded token. You decide whether
+  one needs the human and write its decision block yourself (section 1 says what one does to an
+  approved root spec); a worker never writes one. Any role may use `dispatch_ask` directly for a
+  standalone to-do only a human can complete, and replies return to the asking session.
 - The daemon spawns each role as its own process with the issue's context already in its
   environment. Never hand-format a role token: the daemon encodes one as
   `legion-<project>-<key>-<role>` with the issue key lower-cased; for example, project `acme`,
@@ -81,8 +82,8 @@ exercise a criterion end to end, building that path is a child issue of this tre
 
 Specifications written into Dispatch follow `skill://dispatch`'s [Writing a spec](../dispatch/SKILL.md#writing-a-spec).
 Wave releases, child closures, and your own status are visible from the issue tree and the
-handoffs; do not narrate them into the spec or a `dispatch_message`. A blocker only Sami can
-clear is a `dispatch_ask`.
+handoffs; do not narrate them into the spec or a `dispatch_message`. A to-do only Sami can clear
+is a `dispatch_ask`.
 
 The issue's primary document **is** the root specification. Extend it in place: a new version
 that adds only the evidence each decision needs and what the human decides, each as a
@@ -156,8 +157,9 @@ decision a human settled in one of its decision blocks changes. Such a change is
 has not agreed to: put the problem behind it to them as its own decision block, with its evidence,
 at the end of the section it changes, and request approval again as above once they have answered
 it. Release no new wave and spawn no new role until the next `design-approved` arrives — work
-already in flight continues. A settled decision is the human's. A plan that would overturn one goes
-back to the planner with the decision kept, which asks the human nothing, unless the planner brings
+already in flight continues. Every merger's `READY` in the tree is refused until a human approves
+the latest version. A settled decision is the human's. A plan that would overturn one goes back to
+the planner with the decision kept, which asks the human nothing, unless the planner brings
 evidence the human did not weigh that would change the decision, such as a measurement showing the
 settled choice cannot meet the Acceptance; then that decision block names the decision and that
 evidence. A plan never overturns a settled decision on its own. A design change that leaves all
@@ -361,16 +363,17 @@ active phase worker.
 
 ## Escalation judgment
 
-Controller-actionable matters are exactly re-filing a genuinely independent child,
-capacity, and cross-tree conflict. Use the Legion escalation operation for those. Handle
-everything else in the tree, or use `dispatch_ask` for a human question; workers may reach
-Sami directly with `dispatch_ask` the same way. Do not create a wait loop for any wake
-source.
+Controller-actionable matters are exactly re-filing a genuinely independent child, capacity, and
+cross-tree conflict. Use the Legion escalation operation for those. Handle everything else in the
+tree. A product, scope, or design decision that needs the human, yours or one a worker escalated,
+is a decision block you write (section 1 says what one does to the root spec's gate). A standalone
+human to-do may use `dispatch_ask`; workers may reach Sami directly with it the same way. Do not
+create a wait loop for any wake source.
 
-Never yield while waiting on a human. A human is waiting on you only where an open ask sits
-in their inbox, so open it before you stop: `dispatch_ask`, a decision block in the spec, or
-`dispatch_request_approval` for the spec gate. Otherwise proceed: proceeding is the default, and
-a stop that waits on nobody stalls the tree until someone notices.
+Never yield while waiting on a human. A human is waiting on you only where an open ask sits in
+their inbox, so open it before you stop: a decision block in the spec, `dispatch_ask` for a
+standalone human to-do, or `dispatch_request_approval` for the spec gate. Otherwise proceed:
+proceeding is the default, and a stop that waits on nobody stalls the tree until someone notices.
 
 ## Architecture components
 

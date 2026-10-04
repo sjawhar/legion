@@ -82,9 +82,36 @@
   in "Before you ask" gate 1, "Writing a spec" and "When you need a human". A contract between two
   lanes is settled by those two lanes over Envoy, and nobody audits or retracts another session's
   asks.
+- Design questions stay in the spec (LEGION-470). The `dispatch` skill and the `dispatch_ask` and
+  `dispatch_message` descriptions put a decision about a document's design in a decision block in
+  that document, at every phase and whether or not it was approved; `dispatch_ask` is for a to-do
+  or permission only a human can give. Legion phase workers send a product, scope or design
+  decision to their architect, which writes the block (`legion-worker`, the headless role text); a
+  new version of an approved root spec closes the design gate, so the root architect requests
+  approval again once the answer is folded in (`legion-architect`, the architect role texts).
+- `dispatch_request_approval`'s description says the request is handed back once per revision,
+  when the revision is complete, never after each edit, that `Approve` and `Request changes` close
+  it, and that a new version of a Legion root spec closes its armed design gate (LEGION-470).
+- The run-end nudge offers a decision block in the document a question concerns, or `dispatch_ask`
+  for a to-do. A `dispatch_doc_edit` whose result reports a decision block the edit added
+  (`advice.decision_blocks_added`) spends the nudge's check, as `dispatch_ask` does, and so does a
+  `dispatch_issue` or `dispatch_artifact` whose stored document the server counted a decision block
+  in (answered blocks too, so a re-upload of a document whose blocks are all answered spends it).
+  Both counts are the Dispatch server's own reading of the document, so an example of the syntax in
+  code leaves the check owed wherever it is fenced or indented, and a block in a blockquote or a
+  list item spends it; the extension reads no markdown itself. An edit result from a server that
+  does not report the count spends nothing.
 
 ### Fixed
 
+- The run-end nudge no longer counts a tool-device `write` to a Dispatch device (`xd://dispatch_*`)
+  as work. Oh My Pi reports the tool such a `write` ran first, and that report alone spends or owes
+  the check; before, the `write` counted as work, so a `dispatch_ask` or a decision block made
+  through a device re-armed the check it had just spent, and every Dispatch call made that way owed
+  a new one. A help write (`?`) to a Dispatch device runs nothing and spends nothing (LEGION-470).
+- An architect, reviewer or merger may write to a tool device with the scheme in any case
+  (`XD://dispatch_doc_edit`), as Oh My Pi routes it; the mutation gate refused it as a file write
+  (LEGION-470).
 - A controller now displays its project token in canonical uppercase
   (`Legion controller · PROJ`), rather than the lowercase token the Go daemon carries in
   `LEGION_PROJECT` (LEGION-480).
@@ -213,11 +240,23 @@
 - The Legion extension refuses `legion handoff complete` outside the `legion` tool in a phase-worker pane (a sub-architect's included, and any `task` subagent's) and in a root architect's: a `bash` command in any position of a chain, `eval` code, and a `hub` process start, by the same tokenised and plain-text rules as the jj operation-log guard. A completion run from the shell never reached the phase stall, which then asked the worker to complete again. `legion handoff write` and `read` stay open to the shell. The tool's `handoff_write` sends its payload on stdin, so a handoff over the 128 KiB cap on one argv string no longer fails with E2BIG; the Go CLI's `legion handoff write` reads stdin when `--data` is omitted, as the TypeScript CLI does. The tool carries no message action: a question for another live role goes to its role topic with `envoy_publish` (LEGION-208 4b.15b).
 - The Legion extension refuses `jj undo`, `jj abandon`, and `jj op restore|revert|abandon|undo` in every phase-worker pane before they run — a `bash` command in any position of a pipeline or `&&` chain, with or without `-R`, judged on each `jj` invocation's whole argument list (so `jj --repository <path> undo` and `jj operation restore` count); `eval` code; and a `hub` process start, both by a plain-text rule (the text mentions `jj` with one of the words) — from the worker's own tool calls and from any `task` subagent it spawns, the one gate that binds a subagent (it runs in the same pane, against the same log). Every Legion issue workspace is a `jj workspace` of one clone, so those commands rewrite the operation log for every tree at once (LEGION-45: on 2026-09-12 one worker's `jj undo` rewrote nine of another tree's commits). `jj restore <paths>`, `jj op log`, and `jj op show` stay allowed; the refusal names the command, says the log is shared, and gives the recovery rule. The root architect and controller panes are unaffected.
 - Added the nine native Dispatch tools and automatic subscriptions to each mutation result's issue topic.
-- Reviewer, implementer, and merger role prompts (and the `legion-worker` skill) name the three thread reply forms — `Accepted: fixed in <commit> — <one line>`, `Accepted: not a defect — <reason>`, `Still open: <what remains>` — and `legion threads resolve --pr <n> --repo <owner>/<repo>`, which the implementer runs before every push that answers a review and the merger before READY to resolve the threads the reviewer accepted (the review App cannot; LEGION-34).
+- Reviewer, implementer, and merger role prompts (and the `legion-worker` skill) name the three thread reply forms — `Accepted: fixed in <commit> — <one line>`, `Accepted: not a defect — <reason>`, `Still open: <what remains>` — and `legion threads resolve --pr <n> --repo <owner>/<repo>`, which the implementer runs after every push that answers a review and the merger before READY to resolve the threads the reviewer accepted (the review App cannot; LEGION-34).
 - The implementer's core role prompt says its reply on a review thread names what changed (`Fixed in <commit>: <one line>` or `Declined: <reason>`) and never begins with `Accepted:`. `legion threads resolve` resolves a thread whose newest reply is an `Accepted:` from the opener's account, so when the implementer and the reviewer post as one account, an implementer's `Accepted:` closed a thread the reviewer never answered (LEGION-208 4b.15b). It also says to write nothing further on a thread its opener has answered `Accepted:`, since a later reply becomes the newest comment and leaves the thread open.
 
 ### Changed
 
+- The reviewer approves once each thread it opened, and each thread a bot opened that is none of
+  Legion's role Apps, has its own `Accepted:` as the newest submitted comment, resolved or not, and every
+  other unresolved thread its opener's (LEGION-316). Only the pull request's author's App resolves
+  a thread. An acceptance posted after the implementer's last run is resolved by the merger,
+  which starts only after the approval, so approval never waits on `isResolved`. A thread someone
+  else opened and a person resolved with GitHub's button, with
+  no `Accepted:`, blocks nothing, since neither `legion threads resolve` nor the merge queue's gate
+  counts a resolved thread. A bot's finding the reviewer cannot accept becomes its own, and it
+  requests changes, so no bot thread reaches the merger unanswered. The implementer runs
+  `legion threads resolve` after the push that answers a review and before its completion, so the
+  output it pastes into the PR body describes the head it pushed; the merger's run before READY
+  resolves any accepted thread still open (LEGION-386).
 - A person's direct Send or Aside from Dispatch's Agents page arrives as that person's own user
   turn, as if typed at the terminal, instead of an Envoy card with a `reply_with` hint
   (LEGION-394). The extension asks Dispatch, with its own bearer, to accept the frame's attempt
