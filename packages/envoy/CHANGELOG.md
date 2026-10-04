@@ -464,11 +464,11 @@
   that edit or kept it, and its version credits its uploader alone; an edit credited after that
   read stays pending for the next version, and an upload that changes nothing clears nothing. A new
   ask is attributed to whoever introduced its block: a service edit's, an upload's or a committed
-  transaction's own before/after trees name the ids it adds. A non-joined write registers them once
-  its own update has actually landed; a write joined to a transaction registers them only at
-  commit, never before - discarding the transaction leaves no trace, so a later, separately
+  transaction's own before/after trees name the ids it adds, staged on the write and registered
+  into the room's bookkeeping only once the write commits, never before - discarding the
+  transaction, or refusing the write for any other reason, leaves no trace, so a later, separately
   committed write of the same author-chosen literal id is never outranked by one that never reached
-  the room. Either way registration happens before the update can reach any observer, rather than
+  the room. Registration happens before the update can reach any observer, rather than
   whichever update's observer happens to render a merged catch-up first; an id no write registered
   this way is a browser's, named for the one browser connected when its update arrived, or the
   document-settlement actor when several were. A settlement's or the block-id backfill's own id

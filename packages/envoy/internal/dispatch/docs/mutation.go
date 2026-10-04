@@ -83,6 +83,10 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 			// it too; keeping the two lines that abandon a fork together is what covers an
 			// operation that recorded the rendering and then failed to version.
 			write.dropRendering()
+			// A stamp this failed operation ran (stampAskBlockIDs, registerStampedAskBlocks)
+			// staged its renamed ids and any carried-forward authors on these before refusal -
+			// a later operation of the same transaction must not inherit them as its own.
+			write.addedAskBlockIDs, write.renamedAskBlockIDs, write.carriedAskAuthors = nil, nil, nil
 		}
 	}()
 	// The tree the operation starts from. One outside the Proof schema - the reader refuses it, or
@@ -180,9 +184,10 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 	if contentChanged {
 		s.creditLiveWrite(write, actor)
 		added := addedAskBlockIDs(before, tree)
-		for id := range write.renamedAskBlockIDs {
-			delete(added, id)
-		}
+		maps.DeleteFunc(added, func(id string, _ struct{}) bool {
+			_, excluded := write.renamedAskBlockIDs[id]
+			return excluded
+		})
 		if len(added) > 0 {
 			if write.addedAskBlockIDs == nil {
 				write.addedAskBlockIDs = make(map[string]struct{}, len(added))
@@ -352,9 +357,6 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 				} else if updateErr != nil {
 					return
 				}
-			}
-			if _, joined := txFromContext(ctx); !joined {
-				s.registerUnjoinedAskAuthors(artifactID, addedAskBlockIDs(current, target), actor)
 			}
 		})
 		if updateErr != nil {
@@ -959,14 +961,7 @@ func (s *Service) applyOpsUnconditional(ctx context.Context, artifactID string, 
 				if updateErr = pmdoc.Update(transaction, fragment, next); updateErr != nil {
 					return
 				}
-				renamed := s.registerStampedAskBlocks(ctx, artifactID, stamped)
-				if _, joined := txFromContext(ctx); !joined {
-					added := addedAskBlockIDs(tree, next)
-					for id := range renamed {
-						delete(added, id)
-					}
-					s.registerUnjoinedAskAuthors(artifactID, added, actor)
-				}
+				s.registerStampedAskBlocks(ctx, artifactID, stamped)
 			})
 			return updateErr
 		})
@@ -1124,21 +1119,6 @@ func (s *Service) recordSeed(room string, tree *pmdoc.Node, actor model.Actor) {
 	state.mu.Unlock()
 }
 
-// registerUnjoinedAskAuthors credits actor as the author of every id in ids this non-joined
-// write introduces, computed from its own before/after trees at the write site (ApplyOps,
-// ReplaceText), after the write has actually landed in the live document - a write joined to a
-// transaction registers its own ids at commit instead (Ledger.credit), since only then is it
-// certain to reach the room (LEGION-503).
-func (s *Service) registerUnjoinedAskAuthors(room string, ids map[string]struct{}, actor model.Actor) {
-	if len(ids) == 0 {
-		return
-	}
-	state := s.room(room)
-	state.mu.Lock()
-	state.registerAskAuthors(ids, actor)
-	state.mu.Unlock()
-}
-
 // stampAskBlockIDs stamps tree's block ids (EnsureBlockIDs) and returns each ask whose id it
 // renamed, pairing the tree's ask-block order before and after. It runs eagerly, since the stamp
 // must happen before the edit's own operations read tree's ids, but registering the rename into
@@ -1155,33 +1135,41 @@ func stampAskBlockIDs(tree *pmdoc.Node) []stampedAsk {
 	return stampedAskBlocks(before, askBlockOrder(tree))
 }
 
-// registerStampedAskBlocks carries forward the author recorded for each renamed ask block's
-// previous id (carryForwardRenamedAskAuthors) - the same rule a settlement's or the backfill's
-// own suppressed stamp applies, so an edit elsewhere in the document cannot take credit for a
-// browser's re-minted ask id - and reports every id the stamp renamed, which the caller, and, when
-// this write is joined to a transaction, applyJoined's own before/after diff (via the write's own
-// renamedAskBlockIDs), excludes from "this write added this id": a rename is never a genuinely
-// new block, whether or not an author could be carried forward for it (LEGION-503). Call only once
-// the write that ran the stamp (stampAskBlockIDs) is certain to reach the room.
-func (s *Service) registerStampedAskBlocks(ctx context.Context, room string, stamped []stampedAsk) map[string]struct{} {
+// registerStampedAskBlocks stages, on the write's own liveWrite (joinedLiveWrite - every caller
+// is joined, applyLive refuses otherwise before the mutate closure this always runs inside ever
+// starts), every id the stamp (stampAskBlockIDs) renamed - for applyLive's own before/after diff
+// to exclude, via write.renamedAskBlockIDs - and the author carried forward for each one that has
+// a recorded author to carry (carriedAskAuthors, the same rule a settlement's or the backfill's
+// own suppressed stamp applies), via write.carriedAskAuthors. Neither is written into the room's
+// own bookkeeping here: Ledger.credit registers both only once the write they belong to actually
+// commits, the same point it already registers write.addedAskBlockIDs, since a write refused
+// after this call returns (growth, a later validation failure) must not leave the room holding a
+// trace of it (LEGION-503). Call once stampAskBlockIDs has run.
+func (s *Service) registerStampedAskBlocks(ctx context.Context, room string, stamped []stampedAsk) {
 	if len(stamped) == 0 {
-		return nil
+		return
 	}
-	state := s.room(room)
-	state.mu.Lock()
-	state.carryForwardRenamedAskAuthors(stamped)
-	state.mu.Unlock()
+	write := joinedLiveWrite(ctx, room)
 	renamed := make(map[string]struct{}, len(stamped))
 	for _, ask := range stamped {
 		renamed[ask.minted] = struct{}{}
 	}
-	if write := joinedLiveWrite(ctx, room); write != nil {
-		if write.renamedAskBlockIDs == nil {
-			write.renamedAskBlockIDs = make(map[string]struct{}, len(renamed))
-		}
-		maps.Copy(write.renamedAskBlockIDs, renamed)
+	if write.renamedAskBlockIDs == nil {
+		write.renamedAskBlockIDs = make(map[string]struct{}, len(renamed))
 	}
-	return renamed
+	maps.Copy(write.renamedAskBlockIDs, renamed)
+
+	state := s.room(room)
+	state.mu.Lock()
+	carried := state.carriedAskAuthors(stamped)
+	state.mu.Unlock()
+	if len(carried) == 0 {
+		return
+	}
+	if write.carriedAskAuthors == nil {
+		write.carriedAskAuthors = make(map[string]model.Actor, len(carried))
+	}
+	maps.Copy(write.carriedAskAuthors, carried)
 }
 
 // captureLiveTextAndAuthors is the tree a version records and whom it credits, taken no later than

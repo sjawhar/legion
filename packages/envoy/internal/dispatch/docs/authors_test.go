@@ -3,7 +3,9 @@ package docs
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -519,7 +521,7 @@ func askAuthorByQuestion(t *testing.T, service *Service, artifactID, question st
 // ApplyOps's own block-id repair (EnsureBlockIDs, stamping the tree before it applies the edit's
 // own operations) can rename an existing, unrelated browser block whose id Postgres cannot store -
 // one an agent's edit elsewhere in the document never touches - and carries forward the author
-// recorded for the id it replaces (carryForwardStampedAskAuthors), the same rule a settlement's or
+// recorded for the id it replaces (registerCarriedAskAuthors), the same rule a settlement's or
 // the backfill's own stamp applies, instead of crediting the renamed block to the edit's own actor
 // (LEGION-503).
 func TestApplyOpsOwnBlockIDRepairCarriesForwardTheRenamedBlocksAuthor(t *testing.T) {
@@ -547,7 +549,7 @@ func TestApplyOpsOwnBlockIDRepairCarriesForwardTheRenamedBlocksAuthor(t *testing
 
 // ApplyOps's conditional branch (a precondition given) is always joined - never reachable without
 // one (ApplyOps refuses a precondition outside a transaction) - so it relies entirely on
-// applyJoined's own generic before/after diff, deferred to Ledger.credit at commit, rather than an
+// applyLive's own generic before/after diff, deferred to Ledger.credit at commit, rather than an
 // inline registerAskAuthors call of its own: a new ask block a conditional edit introduces still
 // goes to its own actor, not to whichever update's observer happens to render the commit's publish
 // first (LEGION-503).
@@ -583,14 +585,7 @@ func TestAConditionalEditIntroducesAnAskCreditedToItsAuthor(t *testing.T) {
 	}
 }
 
-// appendDuplicateIDBlock appends a block holding the same literal id an existing one carries, so
-// EnsureBlockIDs's repair re-mints the second occurrence as a copy.
-func appendDuplicateIDBlock(t *testing.T, markdown, id string) func(*pmdoc.Node) *pmdoc.Node {
-	t.Helper()
-	return appendBlockWithCraftedID(t, markdown, id)
-}
-
-// A joined write's own before/after diff (applyJoined) only registers its ask ids at commit
+// A joined write's own before/after diff (applyLive) only registers its ask ids at commit
 // (Ledger.credit) - after Discard, none of it ever reaches the room. registerAskAuthors's
 // first-registration-wins rule must not let a discarded write's registration outrank a later,
 // legitimate commit of the same author-chosen literal id (LEGION-503).
@@ -650,7 +645,8 @@ func TestRecordStampedAskBlocksKeepsACopiedRenamesPreviousIDLive(t *testing.T) {
 	editAsPeer(t, service, artifactID, appendBlockWithCraftedID(t,
 		":::ask{urgency=\"high\" multiple=\"false\"}\nFirst question?\n:::\n", "first"))
 	settleCurrentGeneration(t, service, artifactID)
-	editAsPeer(t, service, artifactID, appendDuplicateIDBlock(t,
+	// This reuses "first"'s literal id on purpose, to produce a copy EnsureBlockIDs's repair re-mints.
+	editAsPeer(t, service, artifactID, appendBlockWithCraftedID(t,
 		":::ask{urgency=\"high\" multiple=\"false\"}\nDuplicate question?\n:::\n", "first"))
 	settleCurrentGeneration(t, service, artifactID)
 
@@ -676,4 +672,40 @@ func holdPeerEdit(t *testing.T, service *Service, artifactID string, hook *func(
 	return holdObserver(t, service, artifactID, hook, func() error {
 		return crdt.ApplyUpdateV1(room, update, "peer")
 	})
+}
+
+// A joined edit's own id-repair stamp stages a renamed block's carried-forward author on the
+// write (registerStampedAskBlocks), not directly into the room's pendingAskAuthors, because the
+// same write can still be refused after the stamp runs and before it commits - refuseGrowth checks
+// what the write leaves only after mutate returns (applyLive) - and a refused write must not leave
+// the room holding a trace of it. Bob's browser leaves an ask block holding an id EnsureBlockIDs
+// must repair live and unrepaired; an agent's edit large enough to trip refuseGrowth is refused,
+// and the room's pendingAskAuthors must hold nothing afterward for any id the refused edit's own
+// stamp renamed (LEGION-503).
+func TestARefusedGrowthDoesNotLeaveACarriedAskAuthorPending(t *testing.T) {
+	bob := model.Actor{Kind: "user", ID: "bob"}
+	session := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
+	settleCurrentGeneration(t, service, artifactID)
+	service.addConnection(artifactID, 1, bob)
+	editAsPeer(t, service, artifactID, appendBlockWithCraftedID(t,
+		":::ask{urgency=\"high\" multiple=\"false\"}\nWhich transport?\n:::\n", "x\x00"))
+
+	huge := strings.Repeat("word ", 1_100_000/5) + "\n"
+	_, err := joinedApplyOps(service, artifactID, []model.EditOp{
+		{Op: "insert", After: "end", Markdown: huge},
+	}, session, nil)
+	if !errors.Is(err, ErrDocumentTooLarge) {
+		t.Fatalf("agent edit error = %v, want ErrDocumentTooLarge", err)
+	}
+
+	state := service.room(artifactID)
+	state.mu.Lock()
+	leaked := len(state.pendingAskAuthors)
+	state.mu.Unlock()
+	if leaked != 0 {
+		t.Errorf("pendingAskAuthors holds %d entr(y/ies) after a refused write, want none: the refused edit's own id-repair stamp must not have registered its carried author", leaked)
+	}
 }

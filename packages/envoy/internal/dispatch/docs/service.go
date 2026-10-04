@@ -188,7 +188,7 @@ type roomState struct {
 	// of the update that introduced each one no settlement has indexed yet (observeAskBlocks).
 	// pendingAskAuthors credits a committed transaction's write or a service mutation with the ask
 	// ids it introduces, registered at the write site before the update can reach any observer
-	// (registerAskAuthors, carryForwardRenamedAskAuthors); observeAskBlocks consumes each entry
+	// (registerAskAuthors, registerCarriedAskAuthors); observeAskBlocks consumes each entry
 	// into askAuthors the first time it sees the id and never prunes one it has not consumed, so
 	// attribution survives however many updates land before an observer finally renders the id
 	// (LEGION-503).

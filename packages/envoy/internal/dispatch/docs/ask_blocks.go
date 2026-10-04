@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"maps"
 	"reflect"
 	"strings"
@@ -519,9 +518,8 @@ func (state *roomState) recordStampedAskBlocks(stamped []stampedAsk) {
 // to include it: the room's update observer consumes each entry here the first time it sees the
 // id (observeAskBlocks), and never prunes one it has not consumed, so attribution survives however
 // many other updates land first (LEGION-503). It never overwrites an id a more specific
-// registration already gave an author - a stamp's own carry-forward
-// (carryForwardRenamedAskAuthors), which runs first within the same write. The caller holds
-// state.mu.
+// registration already gave an author - a stamp's own carry-forward (registerCarriedAskAuthors),
+// which the caller registers first within the same write. The caller holds state.mu.
 func (state *roomState) registerAskAuthors(ids map[string]struct{}, actor model.Actor) {
 	for id := range ids {
 		if _, registered := state.pendingAskAuthors[id]; registered {
@@ -534,29 +532,50 @@ func (state *roomState) registerAskAuthors(ids map[string]struct{}, actor model.
 	}
 }
 
-// carryForwardRenamedAskAuthors registers the author recorded for each renamed ask block's
-// previous id as the pending author of its minted one, for a stamp whose own update the room's
-// observer renders normally - ApplyOps's own id repair - unlike a settlement's or the backfill's
-// suppressed stamp (recordStampedAskBlocks), which marks the minted id seen itself since the room's
-// own observer does not reach that specific suppressed update directly. A rename with no author to
-// carry forward registers nothing, leaving the block to the observer's own fallback when it runs.
-// The caller holds state.mu.
-func (state *roomState) carryForwardRenamedAskAuthors(stamped []stampedAsk) {
+// carriedAskAuthors is the author recorded for each renamed ask block's previous id that has one,
+// for a stamp's rename list: the same rule a settlement's or the backfill's own suppressed stamp
+// applies, so an edit elsewhere in the document cannot take credit for a browser's re-minted ask
+// id. A rename with no author to carry, or one that is a copy of the block that keeps its
+// previous id, has none here, and falls to the observer's own fallback instead. This only reads
+// state.askAuthors; it does not write state.pendingAskAuthors, since the write whose stamp
+// produced stamped might still be refused after this call returns (growth, a later validation
+// failure), and a refused write must not leave the room holding a trace of it (LEGION-503) - the
+// caller stages the result on its own liveWrite and registers it only once the write is certain to
+// land (registerCarriedAskAuthors, at commit). The caller holds state.mu.
+func (state *roomState) carriedAskAuthors(stamped []stampedAsk) map[string]model.Actor {
+	var carried map[string]model.Actor
 	for _, ask := range stamped {
 		author, recorded := state.askAuthors[ask.previous]
 		if !recorded || ask.copied {
 			continue
 		}
-		if state.pendingAskAuthors == nil {
-			state.pendingAskAuthors = make(map[string]model.Actor, len(stamped))
+		if carried == nil {
+			carried = make(map[string]model.Actor, len(stamped))
 		}
-		state.pendingAskAuthors[ask.minted] = author
+		carried[ask.minted] = author
+	}
+	return carried
+}
+
+// registerCarriedAskAuthors credits each id in authors (carriedAskAuthors's result, staged on a
+// write's own liveWrite until the write is certain to land) with its carried-forward author, the
+// same first-registration-wins rule registerAskAuthors applies for an id a write's own
+// before/after diff introduces. The caller holds state.mu.
+func (state *roomState) registerCarriedAskAuthors(authors map[string]model.Actor) {
+	for id, author := range authors {
+		if _, registered := state.pendingAskAuthors[id]; registered {
+			continue
+		}
+		if state.pendingAskAuthors == nil {
+			state.pendingAskAuthors = make(map[string]model.Actor, len(authors))
+		}
+		state.pendingAskAuthors[id] = author
 	}
 }
 
 // observeAskBlocks records ids, the ask blocks the room holds after an update its observer
 // rendered, and attributes each one not already recorded: first to whichever write registered it
-// (registerAskAuthors, carryForwardRenamedAskAuthors, recordStampedAskBlocks - consumed here the
+// (registerAskAuthors, registerCarriedAskAuthors, recordStampedAskBlocks - consumed here the
 // first time its id is seen in a render, seen or newly seen, and never pruned otherwise, since no
 // render order can tell which write introduced a block another update's catch-up happens to
 // include first, or guarantee a straddling render has not wiped the room's own record that it was
@@ -958,166 +977,6 @@ func setAskServerAttributes(node *pmdoc.Node, ask model.Ask, withholdAnswer bool
 		}
 	}
 	return changed, answered
-}
-
-// askServerState is an ask block's server attributes (askServerAttributeNames) as it holds them.
-type askServerState [len(askServerAttributeNames)]struct {
-	value   any
-	present bool
-}
-
-func readAskServerState(node *pmdoc.Node) askServerState {
-	var state askServerState
-	for index, name := range askServerAttributeNames {
-		state[index].value, state[index].present = node.Attrs[name]
-	}
-	return state
-}
-
-// restore gives node back the server attributes state holds.
-func (state askServerState) restore(node *pmdoc.Node) {
-	for index, name := range askServerAttributeNames {
-		if state[index].present {
-			node.Attrs[name] = state[index].value
-		} else {
-			delete(node.Attrs, name)
-		}
-	}
-}
-
-// serverRewrite is an ask block whose server attributes settlement repaired to agree with its ask:
-// the attributes as settlement found them, whether the repair wrote an answer, the index of the
-// repair in the reconciliation's repairs, and the index in its events of the block.repaired the
-// repair emitted, or -1 for a new ask's block, whose repair emits none.
-type serverRewrite struct {
-	node   *pmdoc.Node
-	ask    model.Ask
-	found  askServerState
-	answer bool
-	repair int
-	event  int
-}
-
-// withholdAnswers keeps out of the document each answer settlement wrote back into its block that
-// the document has no room for: one that would leave it past what one upload may hold and bigger
-// than before, the document's rendering as settlement read it (weigh, which weighs a caller's write
-// the same way). An answer is stored on its ask as well as in its block, and a block that leaves
-// the document and returns gets its answer back from the ask, so a returning block is the answer's
-// text arriving without the answer route that weighs it: twenty-four answers of 900 KB, each
-// weighed against a document their deleted blocks had left small, came back in one 1,540-byte edit
-// as a 21.6 MB document. Where the answers do not all fit, every one is left out, and each is
-// given back in document order while the document still has room for it (returnAnswersWithRoom).
-// A block whose answer stays out is repaired without it, so it still says who answered and when,
-// and the ask keeps the answer; a later settlement of a document with room for it writes it back.
-// A repair that then changes nothing is dropped with its block.repaired. A document that does not
-// render cannot be weighed, so its answers all stay out, and the settlement that renders it next
-// fails as it would have.
-func (r *settlementReconciliation) withholdAnswers(artifactID string, tree *pmdoc.Node, before string) {
-	var answered []int
-	for index, rewrite := range r.rewrites {
-		if rewrite.answer {
-			answered = append(answered, index)
-		}
-	}
-	if len(answered) == 0 {
-		return
-	}
-	after, err := renderTree(tree)
-	rendered := err == nil
-	if rendered {
-		if err = weighRendering(before, after); err == nil {
-			return
-		}
-	}
-	// changes says whether each block repaired without its answer still changes from what
-	// settlement found.
-	changes := make(map[int]bool, len(answered))
-	for _, index := range answered {
-		rewrite := r.rewrites[index]
-		rewrite.found.restore(rewrite.node)
-		changes[index], _ = setAskServerAttributes(rewrite.node, rewrite.ask, true)
-	}
-	returned := map[int]bool{}
-	if rendered {
-		returned = r.returnAnswersWithRoom(tree, before, answered)
-	}
-	slog.Warn("dispatch: settlement withholds restored answers from their blocks", "room", artifactID,
-		"withheld", len(answered)-len(returned), "answers", len(answered), "reason", err)
-	droppedRepairs, droppedEvents := map[int]bool{}, map[int]bool{}
-	for _, index := range answered {
-		rewrite := r.rewrites[index]
-		switch {
-		case returned[index]:
-		case changes[index]:
-			r.repairs[rewrite.repair].set = askServerAttributes(rewrite.ask, true)
-		default:
-			droppedRepairs[rewrite.repair] = true
-			if rewrite.event >= 0 {
-				droppedEvents[rewrite.event] = true
-			}
-		}
-	}
-	r.repairs = without(r.repairs, droppedRepairs)
-	r.events = without(r.events, droppedEvents)
-}
-
-// returnAnswersWithRoom gives back, in document order, the answer of each rewrite answered names
-// (r.rewrites), all of them left out of tree, while the document still has room for it, and
-// reports which it gave back. An answer lengthens its block's directive line, which carries every
-// attribute quoted, and makes no element, so the document's rendering grows by what the block's own
-// rendering does: the document is rendered once, without them, and each answer is weighed by its
-// block alone.
-func (r *settlementReconciliation) returnAnswersWithRoom(tree *pmdoc.Node, before string, answered []int) map[int]bool {
-	returned := map[int]bool{}
-	left, err := renderTree(tree)
-	if err != nil {
-		return returned
-	}
-	document, was := renderingOf(left), renderingOf(before)
-	for _, index := range answered {
-		rewrite := &r.rewrites[index]
-		grown, err := rewrite.withAnswer(document)
-		if err == nil {
-			err = weigh(was, grown)
-		}
-		if err != nil {
-			setAskServerAttributes(rewrite.node, rewrite.ask, true)
-			continue
-		}
-		document = grown
-		returned[index] = true
-	}
-	return returned
-}
-
-// withAnswer gives the rewrite's block, its answer left out, the answer back, and is document grown
-// by what that adds to the block's own rendering.
-func (rewrite *serverRewrite) withAnswer(document rendering) (rendering, error) {
-	alone := &pmdoc.Node{Type: "doc", Children: []*pmdoc.Node{rewrite.node}}
-	withheld, err := renderTree(alone)
-	setAskServerAttributes(rewrite.node, rewrite.ask, false)
-	if err != nil {
-		return rendering{}, err
-	}
-	answered, err := renderTree(alone)
-	if err != nil {
-		return rendering{}, err
-	}
-	return document.longer(len(answered) - len(withheld)), nil
-}
-
-// without is items but those at the indexes dropped names, in their order, in items' own array.
-func without[T any](items []T, dropped map[int]bool) []T {
-	if len(dropped) == 0 {
-		return items
-	}
-	kept := items[:0]
-	for index, item := range items {
-		if !dropped[index] {
-			kept = append(kept, item)
-		}
-	}
-	return kept
 }
 
 func askServerAttributeEqual(got, want any) bool {

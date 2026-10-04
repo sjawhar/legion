@@ -72,18 +72,31 @@ type liveWrite struct {
 	// versioned says a version the transaction wrote holds every one of those changes so far and
 	// credits their authors (Ledger.recordVersion), so its commit does not credit them again.
 	// addedAskBlockIDs is every ask block id a readable operation of this transaction introduced,
-	// over its own before/after trees (applyJoined), credited to actor at commit (Ledger.credit,
+	// over its own before/after trees (applyLive), credited to actor at commit (Ledger.credit,
 	// registerAskAuthors) rather than guessed from whichever update's observer happens to render
 	// this write's publish first (LEGION-503). renamedAskBlockIDs is every id one of those
 	// operations' own block-id repair re-minted (registerStampedAskBlocks), excluded from
 	// addedAskBlockIDs: a rename is never a genuinely new block, whether or not an author could be
 	// carried forward for it, and must not be claimed for this write's actor just because
-	// applyJoined's own before/after diff cannot otherwise tell a rename from an insertion.
+	// applyLive's own before/after diff cannot otherwise tell a rename from an insertion.
+	// carriedAskAuthors is the author carried forward (registerStampedAskBlocks,
+	// roomState.carriedAskAuthors) for each id in renamedAskBlockIDs that has one, credited at
+	// commit the same way (Ledger.credit, roomState.registerCarriedAskAuthors) rather than
+	// written into the room's own bookkeeping as soon as the stamp runs: a write refused after the
+	// stamp but before commit (growth, a later validation failure) must not leave the room
+	// holding a trace of it. applyLive's own defer clears all three maps whenever its one
+	// operation changed the fork but was never recorded - the same guard that drops the fork's
+	// rendering - so a growth-refused edit's own stamp never reaches Ledger.credit. That defer
+	// runs per applyLive call, so it does not distinguish this call's own stamp from an earlier,
+	// already-recorded call's on the same liveWrite; no production caller invokes ApplyOps or
+	// ReplaceText more than once per Join (every api/ call site joins once per request), so two
+	// calls never share one liveWrite today, and a future one that did would need its own guard.
 	credits            map[string]model.Actor
 	actor              *model.Actor
 	versioned          bool
 	addedAskBlockIDs   map[string]struct{}
 	renamedAskBlockIDs map[string]struct{}
+	carriedAskAuthors  map[string]model.Actor
 	// loss records what this write's latest batch of operations inserted, so a merge with the
 	// room's concurrent changes can be told from a clean one (see lossCheck). A later operation
 	// of the same transaction that inserts nothing an operation claims - an accept's margin
