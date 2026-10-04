@@ -5,7 +5,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/classify"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
@@ -55,7 +58,7 @@ func TestARedVerdictInTestingOrReviewingSendsTheTreeBackToImplementing(t *testin
 			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root",
 				Phase: tc.from, Generation: 1, Status: tc.status, Rank: "U"})
 			pr := record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
-				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", PlannedRed: tc.planned}
+				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", PlannedRed: tc.planned, Required: []string{"python-cli-tests / test (pytest)"}}
 			if tc.handoffHead {
 				pr.Pushes = []record.ClassifiedPush{{SHA: "head", Before: "code", HandoffOnly: true}}
 			}
@@ -74,7 +77,7 @@ func TestARedVerdictInTestingOrReviewingSendsTheTreeBackToImplementing(t *testin
 				settles = "head"
 			}
 			if result, err := intake.ApplyFact(context.Background(), pool, "github", "red", intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42,
-				HeadSHA: settles, CheckRuns: []record.AttemptRun{{Name: "pytest", ID: 7}}, Generation: 1, Snapshot: "red-head", Verdict: "red",
+				HeadSHA: settles, CheckRuns: []record.AttemptRun{{Name: "pytest", ID: 7}}, Generation: 1, Snapshot: "red-head",
 				Failing: []string{"python-cli-tests / test (pytest)"}}, engine); err != nil || result.Refusal != nil {
 				t.Fatalf("apply the red verdict = %+v, %v", result.Refusal, err)
 			}
@@ -87,12 +90,16 @@ func TestARedVerdictInTestingOrReviewingSendsTheTreeBackToImplementing(t *testin
 				}
 				assertOutboxCount(t, pool, "supervise", 0)
 				if tc.settles != "" {
-					var verdict, checked string
-					if err := pool.QueryRow(context.Background(), "select verdict, checked_head from pull_requests where number = 42").Scan(&verdict, &checked); err != nil {
-						t.Fatalf("read the pull request's verdict: %v", err)
-					}
-					if verdict != "red" || checked != tc.settles {
-						t.Fatalf("verdict %q of %q, want the carried red of %q", verdict, checked, tc.settles)
+					var verdict string
+					seedRecord(t, pool, func(tx pgx.Tx) error {
+						pr, err := record.NewStore().PullRequest(t.Context(), tx, "LEGION-208")
+						if err == nil {
+							verdict = classify.HeadVerdict(*pr) + " of " + pr.CheckedHead
+						}
+						return err
+					})
+					if want := "red of " + tc.settles; verdict != want {
+						t.Fatalf("the head's verdict is %q, want the carried %q", verdict, want)
 					}
 				}
 				return
