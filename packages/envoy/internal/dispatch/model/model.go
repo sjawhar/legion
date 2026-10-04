@@ -146,6 +146,27 @@ type IssueClaimEventPayload struct {
 	Reason   string      `json:"reason"`
 }
 
+// ProgressCount is done of total: the task items of a spec, or the direct children of an issue.
+// Done is at most Total.
+type ProgressCount struct {
+	Done  int `json:"done"`
+	Total int `json:"total"`
+}
+
+// IssueProgress is an issue's progress as GitHub counts an issue's: Tasks the task-list items
+// (`- [ ]` / `- [x]`, nested lists included) of its primary document as its latest version
+// renders, nil when that document has none (or has not been counted yet, which the background
+// count after a deploy closes); Children its direct children (every status, icebox included),
+// done being `status = 'done'`, nil when it has none. Tasks is read from the counts a version
+// write stores on the issue (tasks_done, tasks_total); Children is computed from the children's
+// statuses on every read. It sits on every issue of the read, the list and the pinned list, and
+// never on an event payload, which is why it is a field of IssueSummary and of the read response
+// rather than of Issue.
+type IssueProgress struct {
+	Tasks    *ProgressCount `json:"tasks"`
+	Children *ProgressCount `json:"children"`
+}
+
 // Issue is the complete native issue record.
 type Issue struct {
 	Key               string          `json:"key"`
@@ -204,9 +225,10 @@ type IssueSummary struct {
 	Components IssueComponents `json:"components"`
 	Route      *string         `json:"route"`
 	IssueRouteReach
-	UpdatedAt time.Time `json:"updated_at"`
-	LastSeq   int       `json:"last_seq"`
-	OpenAsks  int       `json:"open_asks"`
+	UpdatedAt time.Time     `json:"updated_at"`
+	LastSeq   int           `json:"last_seq"`
+	OpenAsks  int           `json:"open_asks"`
+	Progress  IssueProgress `json:"progress"`
 }
 
 // IssueSummaryPage is one page of GET /api/v1/issues?limit=&offset=: the issues at [offset,

@@ -198,15 +198,19 @@ type PullRequest struct {
 
 // RequiredWorkflow is one workflow the base branch requires, named by its path, and the result of
 // its latest run on a head as the daemon read it (requiredchecks.Workflows): success, pending,
-// missing (the head has no run of it), or the conclusion it failed with.
+// missing (the head has no run of it), or the conclusion it failed with. Run and Attempt are that
+// run's id and attempt, both zero when the head has no run of it: a re-run keeps its run's id and
+// raises its attempt, so a re-run that ends as the run did before is still a new read.
 type RequiredWorkflow struct {
-	Path   string `json:"path"`
-	Result string `json:"result"`
+	Path    string `json:"path"`
+	Result  string `json:"result"`
+	Run     int64  `json:"run,omitempty"`
+	Attempt int    `json:"attempt,omitempty"`
 }
 
 // RequiredReadUnchanged says whether a read of what the base branch requires is what pr records:
-// names is its required check set, and workflows its required workflows' run results, read at
-// head. Nil Required is a set never read, never the same as a read one, even an empty one.
+// names is its required check set, and workflows its required workflows' runs and their results,
+// read at head. Nil Required is a set never read, never the same as a read one, even an empty one.
 func (pr PullRequest) RequiredReadUnchanged(names []string, workflows []RequiredWorkflow, head string) bool {
 	return pr.Required != nil && slices.Equal(pr.Required, names) && slices.Equal(pr.Workflows, workflows) && pr.WorkflowsHead == head
 }

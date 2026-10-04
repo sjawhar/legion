@@ -410,6 +410,11 @@ func (s *server) storeArtifact(
 		// The version credits the uploader alone, and holds the upload's write to the document,
 		// which clears the credit of every edit that write read when it changed the document.
 		ledger.WroteVersion(artifact.ID)
+		// The version row exists now, so the count names it (LEGION-542).
+		if err := docs.RecordTaskProgressMarkdown(r.Context(), tx, artifact.ID, documentMarkdown); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
 		documentChanges, err = s.replaceReferences(r.Context(), tx, "artifact", artifact.ID, documentMarkdown)
 		if err != nil {
 			s.writeHandlerError(w, err)
