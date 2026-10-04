@@ -122,15 +122,17 @@ jobs:
       - name: Build and push
         id: build
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        env:
+          # The default job summary echoes the build's full metadata — the provenance predicate,
+          # the pull_request event payload (title and body included) among it — to this public
+          # log regardless of the provenance: false input below, which only stops the
+          # attestation attaching to the pushed image.
+          DOCKER_BUILD_SUMMARY: "false"
         with:
           context: .
           file: packages/daemon/docker/worker.Dockerfile
           # The OMP fork release ships linux-x64 (and darwin-arm64) only.
           platforms: linux/amd64
-          # provenance: false — the default provenance attestation embeds the build's full
-          # invocation, which on a pull_request event includes this workflow's job context (the
-          # PR title and body reach the job log through it too); this repository is public, so
-          # neither goes to a public log or a public ghcr attestation.
           provenance: false
           push: true
           cache-from: type=gha

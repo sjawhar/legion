@@ -127,13 +127,16 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - id: build
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        env:
+          # The default job summary echoes the build's full metadata — the provenance predicate,
+          # this job's GitHub Actions event context among it — to this public log regardless of
+          # the provenance: false input below, which only stops the attestation attaching to the
+          # pushed image.
+          DOCKER_BUILD_SUMMARY: "false"
         with:
           context: .
           file: packages/envoy/docker/Dockerfile
           platforms: linux/amd64,linux/arm64
-          # provenance: false — the default provenance attestation embeds the build's full
-          # invocation, including this job's GitHub Actions event context; this repository is
-          # public, so none of it belongs in a public ghcr attestation.
           provenance: false
           push: true
           cache-from: type=gha
