@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sort"
+	"slices"
 
 	"github.com/jackc/pgx/v5"
 
@@ -148,15 +148,11 @@ func (l *Ledger) commit(ctx context.Context) error {
 		return err
 	}
 	artifactIDs := make([]string, 0, len(l.versions))
-	seen := make(map[string]struct{}, len(l.versions))
 	for _, written := range l.versions {
-		if _, ok := seen[written.artifactID]; ok {
-			continue
-		}
-		seen[written.artifactID] = struct{}{}
 		artifactIDs = append(artifactIDs, written.artifactID)
 	}
-	sort.Strings(artifactIDs)
+	slices.Sort(artifactIDs)
+	artifactIDs = slices.Compact(artifactIDs)
 	locked := make(map[string]*roomState, len(artifactIDs))
 	for _, artifactID := range artifactIDs {
 		locked[artifactID] = l.service.lockState(artifactID)
@@ -352,11 +348,12 @@ func (l *Ledger) creditLocked(locked map[string]*roomState) {
 	}
 }
 
-// commitVersionLocked is commitVersion given a state the caller already holds locked (state.mu):
-// Ledger.commit locks every version's artifact before it commits and calls this, still holding
-// it, right after, so the room's pending map loses a version's authors no later than the
-// transaction that released them from the durable row - the two critical sections, this lock and
-// the document's advisory lock the same commit held, start and end together.
+// commitVersionLocked takes a version's captured authors out of its artifact's room, given a state
+// the caller already holds locked (state.mu): Ledger.commit locks every version's artifact before
+// it commits and calls this, still holding it, right after, so the room's pending map loses a
+// version's authors no later than the transaction that released them from the durable row - the
+// two critical sections, this lock and the document's advisory lock the same commit held, start
+// and end together.
 func commitVersionLocked(state *roomState, version model.Version) {
 	capture, ok := state.pendingVersions[version.Number]
 	if !ok {

@@ -404,13 +404,13 @@ later credit whose own sequence is at or before that watermark, since everything
 already visible to the release. `Ledger.commit` locks (`state.mu`) every artifact its own versions
 name from before the transaction commits through that version's in-memory release
 (`commitVersionLocked`), so no `creditContentChange`/`captureAuthors` call for that artifact can
-interleave between the durable release and the room forgetting the author (LEGION-513). Closing
-an issue writes every unsettled state into that row before it releases the state, so the reopened document's
-settlement credits the same version, ask and event authors even after a room release or restart. The
-document socket's cap of 1,000 rooms (`maxLiveRooms`, `canOpenRoom`) counts ygo's live rooms, never
-documents touched since the process started (LEGION-513). A room an `Apply` opened with no peer is
-idle-evicted only by a ygo whose `Apply` stamps the empty room idle (LEGION-484). `PgVersioned`'s
-per-room locks likewise live only while a caller holds or waits for one.
+interleave between the durable release and the room forgetting the author (LEGION-513). Closing an
+issue writes every unsettled state into that row before it releases the state, so the reopened
+document's settlement credits the same version, ask and event authors even after a room release or
+restart. The document socket's cap of 1,000 rooms (`maxLiveRooms`, `canOpenRoom`) counts ygo's live
+rooms, never documents touched since the process started (LEGION-513). A room an `Apply` opened
+with no peer is idle-evicted only by a ygo whose `Apply` stamps the empty room idle (LEGION-484).
+`PgVersioned`'s per-room locks likewise live only while a caller holds or waits for one.
 
 The room's update observer (`updateChangesMarkdown`) renders a replica of the room, not the live
 tree, since ygo fires it after the transaction has released the document's lock and another write
