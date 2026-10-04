@@ -396,8 +396,8 @@
   closes, as the server shuts down, and daily, folding every update into the document's state
   (LEGION-496), so repeated uploads of a version or replies to one comment, whose margin record
   each reply rewrites whole, cost a load only for as long as a room stays open between those -
-  the same 500 replies of 2,000 characters that left 257 MB stored and a one-word edit holding
-  1,842 MiB before LEGION-496 compact to the document's own state now.
+  the same scenario that left 257 MB stored under 500 replies of 2,000 characters, with a
+  one-word edit holding 1,842 MiB, before LEGION-496 now compacts to the document's own state.
 - Document settlement no longer undoes an edit a browser or an agent makes while it settles
   (LEGION-479). Settlement wrote its repairs (the block ids it stamps, an ask block's server-owned
   attributes it restores) as the tree it had read before its database work, so an edit made in
