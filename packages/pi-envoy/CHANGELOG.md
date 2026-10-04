@@ -16,6 +16,13 @@
 
 ### Changed
 
+- The `dispatch`, `legion-architect`, `legion-controller` and `legion-retro` skills, and the
+  dispatch issues reference, name no one by first name: every literal `Sami` reference becomes
+  `the human` or `the operator`, matching each file's own existing convention for the person an
+  agent asks for a decision or finds at the controller's tmux pane, and the two provenance-quoted
+  rulings keep their rule stated plainly, with the quote and attribution dropped. The shipped
+  skill reaches every installed user of this package, not only its author.
+
 - The architect and worker skills and the daemon's role prompts say what the daemon does: it
   starts and orders every phase from its fixed workflow table (LEGION-223). Nothing tells an agent
   to call `spawn_worker`, `release_wave` or `set_status`, which the `legion` tool no longer has.
@@ -140,6 +147,18 @@
   subagent check asks the host's agent roster first, which needs no publish; where the roster
   gives no opinion and the publish fails, it answers from the transcript on disk, logs a warning,
   and asks again at the next check instead of keeping the failure.
+- Every Legion role may launch `task` subagents (LEGION-551). The `tool_call` hook refused the
+  `task` tool to a root architect, a sub-architect and the merger; a subagent shares its parent's
+  identity and claims no role, so nothing it does clashes with its parent's claim. The architect
+  keeps its `edit`, `write`, `apply_patch` and general `bash` refusals and the merger its `edit`,
+  `write` and `apply_patch` refusals. Both architect role prompts say an architect may dispatch
+  subagents, for example to measure or investigate before the design gate opens, and the
+  interactive mechanics fragment no longer tells a coordinator's subagent to dispatch none of its
+  own. A root architect's pane now carries the operation-log rule its subagent's `bash` was
+  missing: every issue workspace, a root architect's included, is a jj workspace of one shared
+  clone, so `jj undo`/`jj op restore`/`jj abandon` there would rewrite other trees' commits too.
+  The same rule now also refuses the root architect's own `eval` and `hub` calls that spell out a
+  rewrite, which were never gated by the architect's `bash`-only rule.
 
 ### Added
 

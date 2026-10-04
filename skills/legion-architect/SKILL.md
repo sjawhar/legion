@@ -79,7 +79,7 @@ exercise a criterion end to end, building that path is a child issue of this tre
 
 Specifications written into Dispatch follow `skill://dispatch`'s [Writing a spec](../dispatch/SKILL.md#writing-a-spec).
 Wave releases, child closures, and your own status are visible from the issue tree and the
-handoffs; do not narrate them into the spec or a `dispatch_message`. A to-do only Sami can clear
+handoffs; do not narrate them into the spec or a `dispatch_message`. A to-do only a human can clear
 is a `dispatch_ask`.
 
 The issue's primary document **is** the root specification. Extend it in place: a new version
@@ -285,6 +285,13 @@ is open. That is the one review-thread step a human takes: the review App cannot
 on a pull request the implementer opened, and the implementer's and merger's runs of the command
 close every accepted one.
 
+If a reviewer reports that `legion threads resolve` exited 1 counting threads that hold the
+implement App's pending draft (the daemon counts them and never names them), tell the worker
+holding the issue's phase (`envoy_publish` to its role topic) to move the issue back to
+`implementing` with `request_backward_move`, naming the count, so the implementer submits or
+discards its pending review; its own run of the command names those threads `left open … an
+unsubmitted draft in a pending review`. Open no ask for it: the implementer clears it.
+
 ## 7. Close
 
 After the merge result and the implementer's production report are recorded, post the sign-off and
@@ -331,7 +338,7 @@ cross-tree conflict. Report those to the controller with `envoy_publish` to the 
 your `Legion addressing` line names. Handle everything else in the
 tree. A product, scope, or design decision that needs the human, yours or one a worker escalated,
 is a decision block you write (section 1 says what one does to the root spec's gate). A standalone
-human to-do may use `dispatch_ask`; workers may reach Sami directly with it the same way. Do not
+human to-do may use `dispatch_ask`; workers may reach the human directly with it the same way. Do not
 create a wait loop for any wake source.
 
 Never yield while waiting on a human. A human is waiting on you only where an open ask sits in

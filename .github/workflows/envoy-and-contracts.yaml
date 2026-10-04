@@ -70,6 +70,13 @@ on:
   merge_group:
     types: [checks_requested]
 
+# A new push to a pull request cancels that pull request's still-running checks here; outside
+# pull_request the key is github.sha, not github.ref, so a busy runner pool never drops a
+# main push's or merge-queue entry's run (why: this PR's description).
+concurrency:
+  group: envoy-and-contracts-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 # Read-only: no job here writes to the repository, a registry or the API. The token clones,
 # downloads pinned tools, and, where a job calls dorny/paths-filter, reads the pull request's
 # file list, which this public repository serves without `pull-requests: read`.
@@ -418,6 +425,29 @@ jobs:
           grep -rl dl.google.com /etc/apt/sources.list.d | xargs -r sudo rm -f
           bunx playwright install --with-deps chromium webkit firefox
         working-directory: packages/dispatch
+      - name: Start an S3-compatible server for uploaded files
+        # The browser suite runs the server with DISPATCH_FILE_STORE_BUCKET set (e2e/run-server.sh
+        # reads DISPATCH_E2E_FILE_STORE_ENDPOINT), so every upload and download the dashboard makes
+        # goes through the file store, as production's does. Same image as the Go tests
+        # (internal/tests3), read from its declaration; the bucket is created by an anonymous PUT.
+        run: |
+          image=$(sed -n 's/^const Image = "\(.*\)"$/\1/p' ../envoy/internal/tests3/seaweedfs.go)
+          [ -n "$image" ] || { echo "::error::no const Image in packages/envoy/internal/tests3/seaweedfs.go"; exit 1; }
+          for attempt in 1 2 3; do
+            docker pull "$image" && break
+            [ "$attempt" -lt 3 ] || exit 1
+            sleep 10
+          done
+          docker run -d --name dispatch-e2e-files -p 127.0.0.1:18333:8333 "$image" server -s3 -dir=/data -ip=0.0.0.0 -s3.port=8333
+          for attempt in $(seq 1 60); do
+            curl -sf -o /dev/null http://127.0.0.1:18333/ && break
+            [ "$attempt" -lt 60 ] || { docker logs dispatch-e2e-files; exit 1; }
+            sleep 1
+          done
+          curl -sf -X PUT -o /dev/null http://127.0.0.1:18333/dispatch-e2e-files
+          echo "DISPATCH_E2E_FILE_STORE_ENDPOINT=http://127.0.0.1:18333" >> "$GITHUB_ENV"
+          echo "DISPATCH_E2E_FILE_STORE_BUCKET=dispatch-e2e-files" >> "$GITHUB_ENV"
+        working-directory: packages/dispatch
       - name: Browser-test dispatch dashboard
         # `bun run e2e` builds the SPA itself, which would rebuild it a second time in this job.
         # Calling Playwright directly reuses the "Build dispatch dashboard" step's dist above and
@@ -517,10 +547,14 @@ jobs:
         run: |
           nats_image=$(sed -n 's/^const Image = "\(.*\)"$/\1/p' internal/testnats/nats.go)
           [ -n "$nats_image" ] || { echo "::error::no const Image in internal/testnats/nats.go"; exit 1; }
-          for attempt in 1 2 3; do
-            docker pull "$nats_image" && break
-            [ "$attempt" -lt 3 ] || exit 1
-            sleep 10
+          s3_image=$(sed -n 's/^const Image = "\(.*\)"$/\1/p' internal/tests3/seaweedfs.go)
+          [ -n "$s3_image" ] || { echo "::error::no const Image in internal/tests3/seaweedfs.go"; exit 1; }
+          for image in "$nats_image" "$s3_image"; do
+            for attempt in 1 2 3; do
+              docker pull "$image" && break
+              [ "$attempt" -lt 3 ] || exit 1
+              sleep 10
+            done
           done
         working-directory: packages/envoy
       - name: Unit test envoy Go package
