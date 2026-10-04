@@ -2,7 +2,9 @@ package pmdoc
 
 import (
 	"fmt"
+	"maps"
 	"regexp"
+	"slices"
 )
 
 // TaskProgress is a document's task-list items counted: Total every list item that carries a
@@ -53,8 +55,7 @@ func LeadingTaskCheckbox(markdown string) (checked, found bool, width int) {
 // first paragraph: the one the renderer writes the checkbox before. A paragraph anywhere else in
 // an item, a plain list item and a paragraph outside a list are not.
 func TaskItemAt(doc *Node, position int) bool {
-	path, ok := taskItemPathAt(doc, position)
-	return ok && path != nil
+	return taskItemPathAt(doc, position) != nil
 }
 
 // SetTaskChecked returns a copy of doc with the checkbox of the task item whose first paragraph's
@@ -62,18 +63,14 @@ func TaskItemAt(doc *Node, position int) bool {
 // with a checkbox is ticking the item (docs: replacementMarkdown), the way one carrying a heading
 // marker through `find` renames the heading.
 func SetTaskChecked(doc *Node, position int, checked bool) (*Node, error) {
-	path, ok := taskItemPathAt(doc, position)
-	if !ok {
+	path := taskItemPathAt(doc, position)
+	if path == nil {
 		return nil, fmt.Errorf("%w: task item at position %d", ErrTargetNotFound, position)
 	}
 	out := cloneNode(doc)
 	item := nodeAtPath(out, path)
-	attrs := make(Attrs, len(item.Attrs)+1)
-	for name, value := range item.Attrs {
-		attrs[name] = value
-	}
-	attrs["checked"] = checked
-	item.Attrs = attrs
+	item.Attrs = maps.Clone(item.Attrs)
+	item.Attrs["checked"] = checked
 	if err := out.Validate(); err != nil {
 		return nil, err
 	}
@@ -81,27 +78,21 @@ func SetTaskChecked(doc *Node, position int, checked bool) (*Node, error) {
 }
 
 // taskItemPathAt is the path of the task item whose first paragraph's text begins at position,
-// and false when no task item's does.
-func taskItemPathAt(doc *Node, position int) ([]int, bool) {
+// and nil when no task item's does.
+func taskItemPathAt(doc *Node, position int) []int {
 	var item []int
-	found := false
 	walk(doc, func(node *Node, path []int, pos, _ int) bool {
 		if node.Type != "paragraph" || pos+1 != position {
 			return true
 		}
-		if len(path) < 1 || path[len(path)-1] != 0 {
+		if path[len(path)-1] != 0 {
 			return false
 		}
 		parent := nodeAtPath(doc, path[:len(path)-1])
-		if parent.Type != "list_item" {
-			return false
+		if _, task := parent.Attrs["checked"].(bool); parent.Type == "list_item" && task {
+			item = slices.Clone(path[:len(path)-1])
 		}
-		if _, task := parent.Attrs["checked"].(bool); !task {
-			return false
-		}
-		item = append([]int(nil), path[:len(path)-1]...)
-		found = true
 		return false
 	})
-	return item, found
+	return item
 }

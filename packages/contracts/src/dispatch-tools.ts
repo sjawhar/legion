@@ -771,7 +771,7 @@ export const dispatchToolSpecs = [
               with: z
                 .string()
                 .describe(
-                  "Replacement text for replace: inside a code block, the code's literal text as sent (line breaks at its end do not survive a read); text that would read as block syntax at a line start, such as '---' over a paragraph, is stored escaped and reads back as those characters, so a rule is added with insert beside the paragraph; elsewhere parsed as inline markdown within the matched block; a marker of a different kind from the block's own is literal text, one of the same kind is refused unless it is a heading rename (where a level named by find is what lets with change it), a backslash escape keeps prose that merely looks like a marker, a block marker after a hard line break is refused because replace cannot open a new block, and any non-empty value that renders to no text is refused - only an empty value deletes the match. A CR LF or a lone carriage return in it is written as a line feed."
+                  "Replacement text for replace: inside a code block, the code's literal text as sent (line breaks at its end do not survive a read); text that would read as block syntax at a line start, such as '---' over a paragraph, is stored escaped and reads back as those characters, so a rule is added with insert beside the paragraph; elsewhere parsed as inline markdown within the matched block; a marker of a different kind from the block's own is literal text, one of the same kind is refused unless it is a heading rename (where a level named by find is what lets with change it), a backslash escape keeps prose that merely looks like a marker, a leading '[x] ' or '[ ] ' over a task item's text matched from its start sets the item's checkbox, a block marker after a hard line break is refused because replace cannot open a new block, and any non-empty value that renders to no text is refused - only an empty value deletes the match. A CR LF or a lone carriage return in it is written as a line feed."
                 )
                 .optional(),
               occurrence: z
@@ -787,7 +787,7 @@ export const dispatchToolSpecs = [
               after: z
                 .string()
                 .describe(
-                  "Replacement text for replace: inside a code block, the code's literal text as sent (line breaks at its end do not survive a read); text that would read as block syntax at a line start, such as '---' over a paragraph, is stored escaped and reads back as those characters, so a rule is added with insert beside the paragraph; elsewhere parsed as inline markdown within the matched block; a marker of a different kind from the block's own is literal text, one of the same kind is refused unless it is a heading rename (where a level named by find is what lets with change it), a backslash escape keeps prose that merely looks like a marker, a leading '[x] ' or '[ ] ' over a task item's text matched from its start sets the item's checkbox, a block marker after a hard line break is refused because replace cannot open a new block, and any non-empty value that renders to no text is refused - only an empty value deletes the match. A CR LF or a lone carriage return in it is written as a line feed."
+                  'Insert or move after this anchor: a quote of the neighbouring block\'s text, or one of "start", "end", "heading:<exact heading text>", "block:<id>".'
                 )
                 .optional(),
               before: z

@@ -35,7 +35,7 @@ func RecordTaskProgress(ctx context.Context, tx pgx.Tx, artifactID string, tree 
 const taskProgressBackfillBatch = 50
 
 // RunTaskProgressBackfill counts the primary document of every issue whose task counts were never
-// recorded (both columns null, as migration 0074 leaves every row) and stores them, in batches, so
+// recorded (both columns null, as migration 0069 leaves every row) and stores them, in batches, so
 // an issue nobody has edited since the deploy shows its progress too and a null `tasks` on the API
 // always means the spec holds no task list. Each issue's latest version markdown is parsed as the
 // stored rendering it is (pmdoc.ParseRendering); an issue whose spec does not parse is logged and
