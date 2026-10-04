@@ -262,6 +262,54 @@ func TestResumeAfterAFailedPod(t *testing.T) {
 	}
 }
 
+// Stage 4b's finished-idle-planner-death: `kill 1` in a role container ends that role's launcher,
+// the kubelet restarts the container under restartPolicy Always, and the new launcher connects
+// before the pod status drops the killed instance's terminated state. The replacement generation
+// is judged by its own launcher, not by that stale status: reading it as dead reported every
+// relaunch Gone the moment it started, until the claim's launch budget ran out and the resident
+// role never came back.
+func TestAReplacementGenerationOutlivesTheKilledInstancesTerminatedStatus(t *testing.T) {
+	g := newRig(t, nil)
+	name := SandboxName(workerToken)
+	killed := g.spawn(workerSpec(t))
+
+	// The kill: the launcher's connection ends with its container, and the kubelet records the exit.
+	g.r.launchers.mu.Lock()
+	session := g.r.launchers.sessions[workerToken]
+	g.r.launchers.mu.Unlock()
+	session.close()
+	g.update(g.pod(name), func(p *corev1.Pod) {
+		for i := range p.Status.ContainerStatuses {
+			if p.Status.ContainerStatuses[i].Name == workerContainer {
+				p.Status.ContainerStatuses[i] = terminated(workerContainer, 0, "Completed")
+			}
+		}
+	})
+	g.eventually("the store to see the killed role container", func() bool {
+		status := containerStatus(g.r.storedPod(name), workerContainer)
+		return status != nil && status.State.Terminated != nil
+	})
+	if obs, err := g.r.Probe(g.ctx, killed); err != nil || obs.Kind != runtime.Gone {
+		t.Fatalf("the killed generation is %s, want gone: %v", obs.Kind, err)
+	}
+
+	// The restarted container's launcher connects while the pod still carries that terminated state.
+	g.connect(workerToken)
+	spec := workerSpec(t)
+	spec.Generation, spec.BootToken, spec.ResumeSessionFile = 2, "boot-g2", resumeSession
+	fresh, err := g.r.Resume(g.ctx, &killed, spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fresh.Sandbox.PodUID != killed.Sandbox.PodUID || fresh.Sandbox.Generation != 2 {
+		t.Fatalf("the replacement is %+v, want generation 2 in the issue pod %s", fresh.Sandbox, killed.Sandbox.PodUID)
+	}
+	obs, err := g.r.Probe(g.ctx, fresh)
+	if err != nil || obs.Kind != runtime.Alive {
+		t.Fatalf("the replacement generation is %s (%s), want alive: %v", obs.Kind, obs.Detail, err)
+	}
+}
+
 // The Secrets hold a launch's credentials when the issue Sandbox is set Running, so no launcher
 // starts on a missing Secret, and the one-generation boot token travels only in the launcher's
 // start command, never in a Secret. A later generation of the role in the same pod sets nothing

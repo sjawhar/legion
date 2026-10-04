@@ -213,10 +213,21 @@ func TestTheMappingRowByRowInPrecedence(t *testing.T) {
 			want:     runtime.Gone, detail: []string{"reports generation 1 exited (code 143, signal terminated)"},
 		},
 		{
-			row:      "8 the role container terminated in a running pod",
+			row:     "8 the role container terminated with no launcher connected",
+			objects: withPod(modeRunning, nil, recorded, sandboxUID, withStatus(workerContainer, corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 137, Reason: "OOMKilled"}})),
+			want:    runtime.Gone, detail: []string{"role container tester terminated (OOMKilled, exit code 137)"},
+		},
+		{
+			row:      "8 a terminated role container outranks a launcher reporting another generation",
 			objects:  withPod(modeRunning, nil, recorded, sandboxUID, withStatus(workerContainer, corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 137, Reason: "OOMKilled"}})),
-			launcher: alive,
+			launcher: &shimwire.LauncherState{Child: &shimwire.LauncherChild{Generation: 2, PID: 43}},
 			want:     runtime.Gone, detail: []string{"role container tester terminated (OOMKilled, exit code 137)"},
+		},
+		{
+			row:      "8 a restarted launcher's recorded child outranks its previous container instance's terminated status",
+			objects:  withPod(modeRunning, nil, recorded, sandboxUID, withStatus(workerContainer, corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0, Reason: "Completed"}})),
+			launcher: alive,
+			want:     runtime.Alive, detail: []string{"role container tester runs generation 1"},
 		},
 		{
 			row: "8 a pod being deleted is alive until it is gone",

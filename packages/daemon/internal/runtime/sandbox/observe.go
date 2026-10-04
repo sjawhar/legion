@@ -112,17 +112,21 @@ func (r *Runtime) evaluate(ctx context.Context, loc runtime.Locator) runtime.Obs
 	if status == nil {
 		return observe(runtime.Uncertain, "pod %s (uid %s) Running has no status for role container %s", name, pod.UID, loc.Sandbox.Container)
 	}
+	// A connected launcher running the recorded generation is the role container's current
+	// instance. The pod status can still show the previous instance terminated for a moment after
+	// Kubernetes restarts the container.
+	state, connected := r.launchers.state(loc.Claim, loc.Sandbox.PodUID)
+	if connected && state.Child != nil && state.Child.Generation == loc.Sandbox.Generation {
+		return observe(runtime.Alive, "pod %s (uid %s) role container %s runs generation %d", name, pod.UID, loc.Sandbox.Container, state.Child.Generation)
+	}
 	if ended := status.State.Terminated; ended != nil {
 		return observe(runtime.Gone, "pod %s (uid %s) role container %s terminated (%s, exit code %d); last lines:\n%s",
 			name, pod.UID, loc.Sandbox.Container, ended.Reason, ended.ExitCode, r.logTail(ctx, name, loc.Sandbox.Container))
 	}
-	state, connected := r.launchers.state(loc.Claim, loc.Sandbox.PodUID)
 	if !connected {
 		return observe(runtime.Uncertain, "pod %s (uid %s) role launcher %s is disconnected", name, pod.UID, loc.Sandbox.Container)
 	}
 	switch {
-	case state.Child != nil && state.Child.Generation == loc.Sandbox.Generation:
-		return observe(runtime.Alive, "pod %s (uid %s) role container %s runs generation %d", name, pod.UID, loc.Sandbox.Container, state.Child.Generation)
 	case state.Child != nil:
 		return observe(runtime.NotRecordedProcess, "pod %s (uid %s) role container %s runs generation %d, not the recorded %d",
 			name, pod.UID, loc.Sandbox.Container, state.Child.Generation, loc.Sandbox.Generation)
