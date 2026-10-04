@@ -203,7 +203,7 @@ const legionControllerLocator = z.strictObject({
 });
 
 /** `api.AgentSecretsLoginView` — the daemon's own agent-secrets machine login's current status
- * (runtime.kubernetes.agent_secrets, AGENTC-393 Plan C): `state` is one of "none" (no login has
+ * (runtime.kubernetes.agent_secrets): `state` is one of "none" (no login has
  * ever been started), "pending", "issued", "denied", or "expired"; `code` is the confirmation
  * code shown on the Dispatch credential page for a pending login, "" otherwise. */
 const legionAgentSecretsLoginView = z.strictObject({

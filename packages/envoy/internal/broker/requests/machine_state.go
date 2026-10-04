@@ -9,7 +9,7 @@
 // fields. The record is decided by its approver's Dispatch login, which Dispatch's server sends on
 // the UI routes and the UI bearer vouches for, and every release of a grant it produced
 // re-verifies the whole chain — record hash, requester signature, one approval by the record's
-// approver — so a row written by anyone but the broker releases nothing (AGENTC-393).
+// approver — so a row written by anyone but the broker releases nothing.
 package requests
 
 import (

@@ -108,8 +108,7 @@ jobs:
           filters: |
             # The Go `legion` the legion job releases and worker.Dockerfile's go stage compiles: its
             # module, which embeds the role prompts, and the modules go.work binds it to
-            # (packages/envoy is also copied whole into the image for the agent-secrets binary it
-            # builds, AGENTC-393).
+            # (packages/envoy is also copied whole into the image for the agent-secrets binary it builds).
             legion:
               - 'packages/daemon/**'
               - 'go.work'

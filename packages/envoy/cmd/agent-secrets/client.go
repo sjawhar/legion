@@ -1,12 +1,12 @@
 // packages/envoy/cmd/agent-secrets/client.go
 //
-// client is agent-secrets's own thin HTTP client for the broker routes it needs, as the shared
-// broker contract (dispatch://AGENTC-393/artifact/plan-overview-md) defines them. Session routes
+// client is agent-secrets's own thin HTTP client for the broker routes it needs, as the broker's
+// HTTP API reference (https://sjawhar.github.io/legion/broker/reference/api/) defines them. Session routes
 // — everything but enrollment issuance/revocation and launcher-credential issuance — are signed
 // per call through a Signer (proofsource.go: an agent box or pod's own key, or a host session's
 // agent-secrets-helper), producing exactly the Proof header internal/broker/proof.Verifier
 // expects. CreateRequest additionally needs a signed credential-request object (record.Sign)
-// embedded in its body, since the shared broker contract carries authorization_details and
+// embedded in its body, since the broker carries authorization_details and
 // reason inside that signed object rather than as plain top-level JSON fields; building it is
 // also a Signer responsibility (Signer.SignRequestObject), since a host session's key never
 // leaves agent-secrets-helper.
@@ -123,7 +123,7 @@ type RequestResult struct {
 	Coalesced bool             `json:"coalesced,omitempty"`
 }
 
-// createRequestBody is POST /v1/requests's exact shape in the shared broker contract: a signed
+// createRequestBody is POST /v1/requests's exact shape in the broker's HTTP API: a signed
 // request object plus an optional, unsigned session_id (wake-only). The v8 top-level
 // "secrets"/"reason"/"issue" fields are gone — they live inside the signed request object instead.
 type createRequestBody struct {

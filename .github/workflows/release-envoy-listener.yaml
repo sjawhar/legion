@@ -369,7 +369,7 @@ jobs:
         with:
           go-version-file: packages/envoy/go.mod
       # agent-secrets (packages/envoy/cmd/agent-secrets) and the host helper
-      # (packages/envoy/cmd/agent-secrets-helper, AGENTC-393/AGENTC-834): the same
+      # (packages/envoy/cmd/agent-secrets-helper): the same
       # legion-envoy-v* release also ships these for a host to install with mise's
       # github backend, in the layout its installer expects — bin/agent-secrets,
       # bin/agent-secrets-helper. They are built here, after the release tag is decided

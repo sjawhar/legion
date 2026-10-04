@@ -61,7 +61,7 @@ ARG AWS_CLI_SHA256=cd40c7d1f41b3a4964e77a65377e480d71fe6ebc96bbbb64eb2239d69af6f
 # apt packages carry no version pin (hadolint DL3008, ignored at each `apt-get install`): Debian's
 # archive serves only a suite's current version of a package, so a pinned version stops resolving at
 # the suite's next update. The base image's suite is the pin.
-# CodeGraph CLI (research report AGENTC-1305 §7) and the Oh My Pi tool that wraps it, pinned to the
+# CodeGraph CLI and the Oh My Pi tool that wraps it, pinned to the
 # versions the devbox runs (`@colbymchenry/codegraph --version`, `omp/plugins/package.json`).
 ARG CODEGRAPH_VERSION=1.5.0
 ARG PI_CODEGRAPH_VERSION=0.1.1
@@ -312,7 +312,7 @@ RUN set -eu; \
 # links the commit), so a new commit rebuilds only the layers from here down, never the probe layer and
 # its natives.
 COPY --from=go /out/legion /opt/legion/bin/legion
-# agent-secrets (packages/envoy/cmd/agent-secrets, AGENTC-393): the pod's secrets client — the shim
+# agent-secrets (packages/envoy/cmd/agent-secrets): the pod's secrets client — the shim
 # runs `keygen` before its hello and `renew` after its enrollment, and the agent's tools call it
 # from PATH, which /opt/legion/bin leads in the image and in every worker container (the PATH
 # mainEnvironment sets in packages/daemon/internal/runtime/sandbox/manifest.go). The daemon's

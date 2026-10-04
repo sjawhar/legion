@@ -1,4 +1,4 @@
-// Package rules parses agent-secret-rules.yaml (see the AGENTC-393 overview contract) and answers
+// Package rules parses agent-secret-rules.yaml (packages/envoy/AGENTS.md describes it) and answers
 // "what happens when this requester asks for this secret". Unknown keys, incomplete rules,
 // entries no requester could ever satisfy, and two requester entries that match the same caller
 // are refused at parse time, so a second entry can never silently remove an approval requirement
@@ -31,7 +31,7 @@ type file struct {
 	Version int                   `yaml:"version"`
 	Secrets map[string]secretRule `yaml:"secrets"`
 	// Approvers is decoded only to refuse it: the section held WebAuthn approver keys, which
-	// approval by Dispatch login removed (AGENTC-393). A yaml.Node takes any content, so the
+	// approval by Dispatch login removed. A yaml.Node takes any content, so the
 	// refusal below names the removal whatever the section holds; its Kind is zero only when the
 	// file has no approvers key at all.
 	Approvers yaml.Node `yaml:"approvers"`
@@ -123,7 +123,7 @@ func Parse(data []byte) (*Set, error) {
 		return nil, fmt.Errorf("rules: version must be 1, got %d", f.Version)
 	}
 	if f.Approvers.Kind != 0 {
-		return nil, errors.New("rules: the approvers: section is removed; approval is by Dispatch login and the broker keeps no approver keys, so delete the section (AGENTC-393)")
+		return nil, errors.New("rules: the approvers: section is removed; approval is by Dispatch login and the broker keeps no approver keys, so delete the section")
 	}
 	sum := sha256.Sum256(data)
 	set := &Set{Version: hex.EncodeToString(sum[:]), Secrets: map[string]Secret{}}

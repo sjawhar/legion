@@ -29,7 +29,7 @@ var (
 		// too.
 		`agent="`,
 	}
-	repoSpecific = []string{"Inspect", "inspect_ai", "inspect_", "Hawk", "middleman", "Taiga", "agent-c", "trajectory"}
+	repoSpecific = []string{"Inspect", "inspect_ai", "inspect_", "Hawk", "middleman", "Taiga"}
 )
 
 func coreFiles() []string {

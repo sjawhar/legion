@@ -128,8 +128,7 @@ func waitForIssued(t *testing.T, b *Broker) {
 	t.Fatalf("login never reached issued: %+v", b.LoginStatus())
 }
 
-// --- wire-shape mirrors of the shared broker contract
-// (dispatch://AGENTC-393/artifact/plan-overview-md), for decoding the real broker's responses ---
+// --- wire-shape mirrors of the broker's HTTP API, for decoding the real broker's responses ---
 
 type contractSelfResponse struct {
 	EnrollmentID string `json:"enrollment_id"`

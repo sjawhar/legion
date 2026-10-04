@@ -231,8 +231,7 @@ func decode[T any](t *testing.T, body []byte) T {
 	return v
 }
 
-// --- wire-shape mirrors of the shared broker contract
-// (dispatch://AGENTC-393/artifact/plan-overview-md), for decoding response bodies ---
+// --- wire-shape mirrors of the broker's HTTP API, for decoding response bodies ---
 
 type wireError struct {
 	Code  string `json:"code"`
@@ -792,9 +791,8 @@ func TestCreateRequestWithProofTypJWSIs400(t *testing.T) {
 	}
 }
 
-// TestCreateRequestWithUnknownSecretNameIs400UnknownSecret pins the shared broker contract's
-// "identifier must name a rule's secret (else 400 UNKNOWN_SECRET at record time)"
-// (dispatch://AGENTC-393/artifact/plan-overview-md) over real HTTP: a request naming
+// TestCreateRequestWithUnknownSecretNameIs400UnknownSecret pins that an identifier must name a
+// rule's secret, else 400 UNKNOWN_SECRET at record time, over real HTTP: a request naming
 // a secret no rule mentions is refused, not folded into an ordinary deny decision.
 func TestCreateRequestWithUnknownSecretNameIs400UnknownSecret(t *testing.T) {
 	ts := newTestServer(t)

@@ -33,7 +33,7 @@ const (
 	TypeAdoptWorkingCopyResult = "adopt-working-copy-result"
 	TypeRPCChunk               = "rpc_chunk"
 	// hello2 is the hello every shim sends since DaemonAPIVersion 8: the boot token and, under a
-	// runtime that enrolls pods with the secrets broker (AGENTC-393), the pod's key thumbprint and
+	// runtime that enrolls pods with the secrets broker, the pod's key thumbprint and
 	// projected token. A daemon that predates it decodes it as Raw and refuses "malformed hello";
 	// this daemon refuses the v1 hello by name (internal/stream).
 	TypeHello2                       = "hello2"

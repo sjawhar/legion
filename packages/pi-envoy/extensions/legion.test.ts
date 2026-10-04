@@ -3596,20 +3596,20 @@ describe("a Legion session's title", () => {
   });
 
   test("a controller titles its lowercased project token with the canonical project spelling", async () => {
-    // `legion controller start` gives the plugin LEGION_PROJECT=agentc from controller.yaml's
-    // project: AGENTC; Dispatch and Envoy must show the project as AGENTC.
+    // `legion controller start` gives the plugin LEGION_PROJECT=acme from controller.yaml's
+    // project: ACME; Dispatch and Envoy must show the project as ACME.
     const controller = await launchedController({
-      sessionId: "ses_agentc_controller_title",
-      project: "agentc",
+      sessionId: "ses_acme_controller_title",
+      project: "acme",
     });
     await controller.handlers.get("session_start")?.(
       {},
-      controller.context("ses_agentc_controller_title")
+      controller.context("ses_acme_controller_title")
     );
 
-    expect(controller.title.set).toEqual(["Legion controller · AGENTC"]);
+    expect(controller.title.set).toEqual(["Legion controller · ACME"]);
     expect(registrationBeforeClaim(controller.requests, controller.token)).toMatchObject({
-      title: "Legion controller · AGENTC",
+      title: "Legion controller · ACME",
     });
   });
 

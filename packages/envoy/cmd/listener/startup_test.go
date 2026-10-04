@@ -543,7 +543,7 @@ func do(t *testing.T, request *http.Request) (int, string) {
 // arrive as JSON records with this machine's id. internal/bus's lines, and the stdlib log
 // package's, must stay in Go's text format: the deployed CloudWatch metric filters for publish
 // failures, webhook refusals and dropped stream subjects are space-delimited patterns anchored on
-// that format's date and time prefix (agent-c meta/infra/pulumi/components/envoy/listener.py), so
+// that format's date and time prefix (defined in the deployment repository's listener infrastructure), so
 // routing them into the JSON handler with slog.SetDefault stops three alarms without failing
 // anything. This test holds both halves, so reintroducing that SetDefault reds it. The listener
 // mounts the GitHub route, so all three caches warm up.

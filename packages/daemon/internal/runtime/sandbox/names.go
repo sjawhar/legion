@@ -30,7 +30,7 @@ const (
 
 // AgentSecretsKeyDir is the memory-backed directory the pod's agent-secrets key and enrollment id
 // live in, and AgentSecretsTokenDir where its projected token for the broker's audience is
-// mounted, as AgentSecretsTokenFile (AGENTC-393). Both are the worker container's alone.
+// mounted, as AgentSecretsTokenFile. Both are the worker container's alone.
 const (
 	AgentSecretsKeyDir    = "/var/run/legion/agent-secrets"
 	AgentSecretsTokenDir  = "/var/run/legion/agent-secrets-token"

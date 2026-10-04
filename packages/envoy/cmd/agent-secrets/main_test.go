@@ -73,8 +73,7 @@ func (c *brokerCounters) holdPendingPolls(gate chan struct{}) {
 	c.pendingPoll = gate
 }
 
-// fakeBroker serves just enough of the shared broker contract
-// (dispatch://AGENTC-393/artifact/plan-overview-md) for the exec-form and --json
+// fakeBroker serves just enough of the broker's HTTP API for the exec-form and --json
 // tests: POST /v1/requests decodes the signed request object CreateRequest posts (verifying it
 // with record.VerifyRequestObject against the fake's own URL as audience — a real, non-stubbed
 // check, since the wire shape under test IS that signed object) and routes on its first
@@ -811,7 +810,7 @@ func TestSelfJSONPrintsExactlyOneContractObjectNamingTheIssuedEnrollment(t *test
 	}
 }
 
-// TestRequestSignsARequestObject pins the shared broker contract's request shape: POST /v1/requests
+// TestRequestSignsARequestObject pins the broker's request shape: POST /v1/requests
 // posts a signed request object (record.Sign, via Signer.SignRequestObject) instead of plain
 // top-level "secrets"/"reason"/"issue" fields. The fake broker asserts the body is exactly
 // {"request": <jws>, "session_id": null}, verifies the JWS with record.VerifyRequestObject
@@ -973,7 +972,7 @@ func TestLauncherLoginExitsOneOnDenied(t *testing.T) {
 }
 
 // TestLauncherLoginStatusExitsZeroOnlyWhileACredentialIsHeld pins login-status's read-only,
-// single-shot contract (AGENTC-834): it prints a bare state on stdout and its exit code is a
+// single-shot contract: it prints a bare state on stdout and its exit code is a
 // liveness probe — 0, printing "issued", while the helper holds a launcher credential, and 1 for
 // every login state with none, "none" when login was never run (empty LoginState) — with a single
 // helper call, never login's mint-a-fresh-key-and-poll side effect. A re-login still pending or

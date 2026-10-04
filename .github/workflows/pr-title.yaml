@@ -9,19 +9,34 @@ on:
   pull_request:
     types: [opened, edited, reopened, synchronize]
 
-# The job reads the title from the event payload and calls no API.
+# The job clones the repository for check-pr-text.sh and reads the pull request's commits through
+# the API; it writes nothing.
 permissions: {}
 
 jobs:
   pr-title:
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: read
     steps:
-      - name: Require a conventional PR title
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      # The title, body and commit messages are as public as the tree (check-pr-text.sh says
+      # where each lands). The required lint job checks them at every push; this step checks an
+      # edit. Both steps read the event payload rather than an `env:` block, which the runner
+      # prints in the job log.
+      - name: Check the title, body and commit messages name nothing private
         env:
-          TITLE: ${{ github.event.pull_request.title }}
+          GH_TOKEN: ${{ github.token }}
+        run: .github/scripts/check-pr-text.sh
+
+      - name: Require a conventional PR title
         run: |
-          if printf '%s\n' "$TITLE" | grep -qE '^[a-z]+(\([^)]+\))?!?: .+'; then
-            echo "PR title is conventional: $TITLE"
+          if jq -r '.pull_request.title' "$GITHUB_EVENT_PATH" | grep -qE '^[a-z]+(\([^)]+\))?!?: .+'; then
+            echo "PR title is conventional"
           else
             echo "::error::PR title must be a conventional commit subject (type(scope): summary). Squash merges use the PR title as the commit subject, and the release workflows version from conventional subjects — a non-conventional title makes the release pipelines rely on the squash body alone."
             exit 1

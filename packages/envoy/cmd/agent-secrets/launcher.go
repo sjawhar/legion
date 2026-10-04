@@ -91,7 +91,7 @@ func cmdLauncherLogin(args []string, stdout, stderr io.Writer) int {
 // already issued (Broker.Login only short-circuits a login that is still *pending*, per its own
 // doc comment). Its exit code is a liveness probe scripts can use directly, the same distinction
 // the doctor and installer checks in ~/.dotfiles need and, before this verb existed, had no
-// side-effect-free way to make (AGENTC-834): 0 while the helper holds a launcher credential, which
+// side-effect-free way to make: 0 while the helper holds a launcher credential, which
 // prints "issued"; 1 while it holds none, printing the state the helper reports ("pending",
 // "denied", "expired", or "none" when no login has run). A re-login that was denied, expired
 // unapproved or is still pending leaves the credential an earlier login installed in place, and

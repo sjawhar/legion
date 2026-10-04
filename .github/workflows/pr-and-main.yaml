@@ -20,6 +20,10 @@ permissions:
 jobs:
   lint:
     runs-on: ubuntu-24.04
+    # The pull request text step also reads the pull request's commits through the API.
+    permissions:
+      contents: read
+      pull-requests: read
 
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -42,6 +46,19 @@ jobs:
 
       - name: Check every remote action is pinned to a commit SHA
         run: .github/scripts/check-action-pins.sh
+
+      - name: Check no file names the private deployment repository, company, or internal host
+        run: .github/scripts/check-private-names.sh
+
+      # A pull request's title, body and commit messages reach main's squash commit, the
+      # generated release notes and GitHub's pages, so this required job checks them at every
+      # push. pr-title.yaml checks them again when the pull request is edited. A push to main or a
+      # merge-queue run carries no pull request.
+      - name: Check the pull request's title, body and commit messages name nothing private
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: .github/scripts/check-pr-text.sh
 
       # No Go cache here: gofmt needs none, and this job, which ends first, would save a nearly
       # empty one under the key the typecheck and test jobs share (the daemon's go.sum), where the
@@ -131,6 +148,9 @@ jobs:
 
       - name: Test the action pin check
         run: .github/scripts/check-action-pins.test.sh
+
+      - name: Test the private-name check
+        run: .github/scripts/check-private-names.test.sh
 
       - name: Test the live proofs' libraries (the GitHub ingress bridge, the proof human's check, the model gateway key command, the design-gate verdict)
         run: bun test scripts/e2e/lib

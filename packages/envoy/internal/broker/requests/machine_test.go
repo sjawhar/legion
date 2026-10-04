@@ -365,9 +365,8 @@ func TestDenyOpensNoRecord(t *testing.T) {
 	}
 }
 
-// TestCreateRefusesAnUnknownSecretNameWithNoRecordWritten pins the shared broker contract's
-// "identifier must name a rule's secret (else 400 UNKNOWN_SECRET at record time)"
-// (dispatch://AGENTC-393/artifact/plan-overview-md): a request naming a secret no
+// TestCreateRefusesAnUnknownSecretNameWithNoRecordWritten pins that an identifier must name a
+// rule's secret, else 400 UNKNOWN_SECRET at record time: a request naming a secret no
 // rule mentions at all aborts the whole Create call with rules.ErrUnknownSecret rather than
 // folding silently into an ordinary "deny" decision, and writes no request row at all.
 func TestCreateRefusesAnUnknownSecretNameWithNoRecordWritten(t *testing.T) {
