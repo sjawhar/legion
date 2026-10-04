@@ -14,7 +14,7 @@ import (
 // A KV watcher's ordered consumer reports nats.ErrConsumerNotActive only while its connection is
 // not connected - connected, nats.go resets the consumer instead - and every consumer Envoy runs
 // with idle heartbeats is such a watcher. The report restates a disconnect the bus has already
-// logged, once per watcher: six ERROR lines in one NATS gap of the agent-c pin rehearsal. It is a
+// logged, once per watcher: six ERROR lines in one NATS gap of a deployment pin rehearsal. It is a
 // WARN; so is "consumer not found" as a drain's delete reports it, the bare sentinel, whatever the
 // connection's state (drain_async_error_test.go drives the real drain). Every other async error
 // stays an ERROR (LEGION-278), "consumer not found" included when it is wrapped, as an ordered
