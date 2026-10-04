@@ -104,10 +104,18 @@ jobs:
       # publish is amd64 and arm64.
       - name: Build the listener image the smoke test runs against
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        env:
+          # This build never pushes, and this workflow has no pull_request trigger (push to main
+          # and workflow_dispatch only), so neither an attestation nor an event payload can leak
+          # today. Hardened anyway, identically to the publish step below and to
+          # worker-image.yaml, against a future change reopening either.
+          BUILDX_METADATA_PROVENANCE: disabled
+          DOCKER_BUILD_SUMMARY: "false"
         with:
           context: .
           file: packages/envoy/docker/Dockerfile
           load: true
+          provenance: false
           build-args: |
             LEGION_COMMIT=${{ github.sha }}
           tags: ${{ env.ENVOY_SMOKE_IMAGE }}

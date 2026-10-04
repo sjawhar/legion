@@ -28,7 +28,7 @@ jobs:
       # where each lands). The required lint job checks them at every push; this step checks an
       # edit. Both steps read the event payload rather than an `env:` block, which the runner
       # prints in the job log.
-      - name: Check the title, body and commit messages name nothing private
+      - name: Check the title, body, branch name and commits name nothing private
         env:
           GH_TOKEN: ${{ github.token }}
         run: .github/scripts/check-pr-text.sh

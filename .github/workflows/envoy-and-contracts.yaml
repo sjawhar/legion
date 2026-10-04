@@ -571,10 +571,20 @@ jobs:
       # store, which the default `docker` driver reads.
       - name: Build the listener image the smoke test runs against
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        env:
+          # This build never pushes, and its Metadata log is confirmed empty of both an
+          # attestation and this job's pull_request payload today (no docker/setup-buildx-action
+          # here means no docker-container builder, so buildx never captures the CI event into the
+          # provenance predicate in the first place). Hardened anyway, so a future change that adds
+          # one (for cache, say) can't reopen either leak; worker-image.yaml's identical block is
+          # the confirmed-necessary case.
+          BUILDX_METADATA_PROVENANCE: disabled
+          DOCKER_BUILD_SUMMARY: "false"
         with:
           context: .
           file: packages/envoy/docker/Dockerfile
           load: true
+          provenance: false
           tags: ${{ env.ENVOY_SMOKE_IMAGE }}
       # 5m bounds only what the test does: pull NATS, start both containers behind the test's
       # own 60 s health wait, and assert. This job has measured 1.82 s, 3.16 s and 1.88 s (the

@@ -55,7 +55,7 @@ jobs:
       # generated release notes and GitHub's pages, so this required job checks them at every
       # push. pr-title.yaml checks them again when the pull request is edited. A push to main or a
       # merge-queue run carries no pull request.
-      - name: Check the pull request's title, body and commit messages name nothing private
+      - name: Check the pull request's title, body, branch name and commits name nothing private
         if: github.event_name == 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}

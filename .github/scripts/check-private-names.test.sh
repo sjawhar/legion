@@ -309,12 +309,15 @@ run_check "$root" dist
 check "exits 2" "$(is "$status" 2)"
 check "names it" "$(contains "$out" 'dist does not exist')"
 
-# run_pr_text <title> <body> <commit message> [branch] [author email] [committer email]: runs
-# check-pr-text.sh as CI does: the title, body and branch name come from a pull_request event
-# payload, and one commit (message, author and committer) from a stand-in `gh` that answers only
-# this pull request's commits route — with the route's own JSON shape, so the real
-# `.[] | .commit.message, .commit.author.email, …` filter that feeds the required check runs for
-# real, rather than a filter the stub fakes. Sets `out` and `status`.
+# run_pr_text <title> <body> <commit message> [branch] [author email] [committer email]
+# [expected commits]: runs check-pr-text.sh as CI does: the title, body and branch name come from
+# a pull_request event payload, and one commit (message, author and committer) from a stand-in
+# `gh` that answers only this pull request's commits route — with the route's own JSON shape, so
+# the real `.[] | .commit.message, .commit.author.email, …` filter that feeds the required check
+# runs for real, rather than a filter the stub fakes. `expected commits` becomes the payload's
+# `pull_request.commits` (omitted, so `// 0`, by default); the stub's commits array always holds
+# exactly one commit, so a value other than 1 exercises the commits-route-cap mismatch. Sets `out`
+# and `status`.
 mkdir -p "$work/bin"
 cat > "$work/bin/gh" <<'GH'
 #!/usr/bin/env bash
@@ -325,15 +328,18 @@ chmod +x "$work/bin/gh"
 run_pr_text() {
   local title=$1 body=$2 commit_message=$3 branch=${4:-fix/keep-the-order}
   local author_email=${5:-dev@example.com} committer_email=${6:-dev@example.com}
+  local expected_commits=${7:-}
   printf '%s' "$body" > "$work/pr-body"
   jq -n --arg msg "$commit_message" --arg author_email "$author_email" \
     --arg committer_email "$committer_email" \
     '[{commit: {message: $msg, author: {name: "Dev", email: $author_email},
                 committer: {name: "Dev", email: $committer_email}}}]' \
     > "$work/pr-commits"
-  jq -n --arg title "$title" --arg branch "$branch" --rawfile body "$work/pr-body" \
+  jq -n --arg title "$title" --arg branch "$branch" --arg commits "$expected_commits" \
+    --rawfile body "$work/pr-body" \
     '{pull_request: {number: 7, title: $title, head: {ref: $branch},
-                      body: (if $body == "" then null else $body end)}}' \
+                      body: (if $body == "" then null else $body end),
+                      commits: (if $commits == "" then null else ($commits | tonumber) end)}}' \
     > "$work/event.json"
   set +e
   out=$(GITHUB_EVENT_PATH="$work/event.json" GITHUB_REPOSITORY=example/repo \
@@ -378,6 +384,15 @@ run_pr_text "fix(dispatch): keep the inbox order" "Refs LEGION-7" "fix: keep the
   "dev@example.com" "a@$company$labs.example"
 check "a commit's committer email naming the company fails, with a clean message and author" "$(is "$status" 1)"
 check "names the commits line" "$(contains "$out" 'commits:5: names the company')"
+
+run_pr_text "fix(dispatch): keep the inbox order" "Refs LEGION-7" "fix: keep the order" "fix/keep-the-order" \
+  "dev@example.com" "dev@example.com" 1
+check "a commit count matching the commits route's own count passes" "$(is "$status" 0)"
+
+run_pr_text "fix(dispatch): keep the inbox order" "Refs LEGION-7" "fix: keep the order" "fix/keep-the-order" \
+  "dev@example.com" "dev@example.com" 300
+check "a commit count past the commits route's actual count fails loudly" "$(is "$status" 1)"
+check "names both counts" "$(contains "$out" 'pull request reports 300 commits but the commits route returned 1')"
 
 long_body=$(printf '%.0s–' {1..50000})
 run_pr_text "fix(dispatch): keep the inbox order" "$long_body" "fix: keep the order"
