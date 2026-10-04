@@ -123,10 +123,15 @@ jobs:
         id: build
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         env:
-          # The default job summary echoes the build's full metadata — the provenance predicate,
-          # the pull_request event payload (title and body included) among it — to this public
-          # log regardless of the provenance: false input below, which only stops the
-          # attestation attaching to the pushed image.
+          # provenance: false below only stops the attestation attaching to the pushed image: the
+          # action unconditionally logs buildx's own --metadata-file content (`##[group]Metadata`),
+          # whose buildx.build.provenance key still carries this job's full GitHub Actions event
+          # context (the triggering pull_request's title and body included) at its "min" default,
+          # confirmed live in run 37187574912 even with provenance: false and DOCKER_BUILD_SUMMARY
+          # unset. BUILDX_METADATA_PROVENANCE=disabled drops that key from the metadata file
+          # entirely; DOCKER_BUILD_SUMMARY=false additionally drops the separate build-summary
+          # artifact and page.
+          BUILDX_METADATA_PROVENANCE: disabled
           DOCKER_BUILD_SUMMARY: "false"
         with:
           context: .
