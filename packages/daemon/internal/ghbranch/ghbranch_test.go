@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
+	"github.com/sjawhar/legion/daemon/internal/githubrest"
 )
 
 const mainCommit = "c0ffee0123456789abcdef0123456789abcdef01"
@@ -65,17 +66,17 @@ func TestCreateMakesTheBranchAtMainOrLeavesTheOneGitHubHas(t *testing.T) {
 		{name: "refused", status: http.StatusForbidden,
 			body: `{"message":"Resource not accessible by integration","status":"403"}`,
 			want: `create refs/heads/legion/WIDGETS-12 on acme/widgets at ` + mainCommit +
-				`: GitHub answered 403: {"message":"Resource not accessible by integration","status":"403"}`},
+				`: GitHub answered POST /git/refs with 403: {"message":"Resource not accessible by integration","status":"403"}`},
 		{name: "another 422", status: http.StatusUnprocessableEntity,
 			body: `{"message":"Reference update failed","status":"422"}`,
 			want: `create refs/heads/legion/WIDGETS-12 on acme/widgets at ` + mainCommit +
-				`: GitHub answered 422: {"message":"Reference update failed","status":"422"}`},
+				`: GitHub answered POST /git/refs with 422: {"message":"Reference update failed","status":"422"}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			g := &github{create: func() (int, string) { return tc.status, tc.body }}
 			api := g.serve(t)
 
-			err := Create(context.Background(), http.DefaultClient, api, "installation-token", ghrepo.MustParse("acme/widgets"), "legion/WIDGETS-12", "main")
+			err := Create(context.Background(), widgets(api), ghrepo.MustParse("acme/widgets"), "legion/WIDGETS-12")
 
 			if got := errorText(err); got != tc.want {
 				t.Fatalf("Create error = %q, want %q", got, tc.want)
@@ -104,11 +105,16 @@ func TestCreateRefusesARepositoryWhoseMainItCannotRead(t *testing.T) {
 	}))
 	t.Cleanup(server.Close)
 
-	err := Create(context.Background(), http.DefaultClient, server.URL, "installation-token", ghrepo.MustParse("acme/widgets"), "legion/WIDGETS-12", "main")
+	err := Create(context.Background(), widgets(server.URL), ghrepo.MustParse("acme/widgets"), "legion/WIDGETS-12")
 
-	if want := `read refs/heads/main of acme/widgets: GitHub answered 404: {"message":"Not Found","status":"404"}`; errorText(err) != want {
+	if want := `read refs/heads/main of acme/widgets: GitHub answered GET /git/ref/heads/main with 404: {"message":"Not Found","status":"404"}`; errorText(err) != want {
 		t.Fatalf("Create error = %q, want %q", errorText(err), want)
 	}
+}
+
+// widgets is acme/widgets's REST API under api, called with the installation token.
+func widgets(api string) githubrest.Client {
+	return githubrest.Client{Token: "installation-token", API: githubrest.RepositoryAPI(api, ghrepo.MustParse("acme/widgets"))}
 }
 
 func errorText(err error) string {

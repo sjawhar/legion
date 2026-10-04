@@ -1,4 +1,4 @@
--- 0028_issue_branch_kind.up.sql — the outbox kind that creates an issue's branch on GitHub before
+-- 0029_issue_branch_kind.up.sql — the outbox kind that creates an issue's branch on GitHub before
 -- any role of the issue starts (issue_branch), beside every kind 0021 admits.
 --
 -- The check is one list, so the migration that sets it names every kind.

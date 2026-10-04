@@ -128,7 +128,7 @@ func newBranchAdmission(t *testing.T, answer func() (int, string)) (*branchAdmis
 	runner := &outbox{
 		dispatchProject: "LEGION",
 		pool:            pool, records: records, supervisor: sup, tokens: roleTokens{}, project: "legion", stateDir: t.TempDir(),
-		repo: ghrepo.MustParse("acme/widgets"), github: github.url,
+		repo: ghrepo.MustParse("acme/widgets"), githubAPI: github.url,
 		dispatch: &outboxDispatch{issue: dispatch.Issue{Key: "LEGION-208", Status: "todo"}}, notices: &outboxPublisher{}, handlers: []intake.Handler{engine, admission},
 		now: func() time.Time { return clock }, log: slog.New(slog.NewJSONHandler(&logs, nil)),
 		provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
@@ -202,7 +202,7 @@ func TestARefusedBranchCreateHoldsTheArchitectBackUntilACreatePasses(t *testing.
 		t.Fatalf("GitHub saw %d creates, want one per run", got)
 	}
 	want := "create the branch of LEGION-208, which its roles' starts wait for: create refs/heads/legion/LEGION-208 on acme/widgets at " +
-		branchMainCommit + `: GitHub answered 403: {"message":"Resource not accessible by integration","status":"403"}`
+		branchMainCommit + `: GitHub answered POST /git/refs with 403: {"message":"Resource not accessible by integration","status":"403"}`
 	var lastError string
 	var attempts int
 	if err := admitted.runner.pool.QueryRow(context.Background(), "select last_error, attempts from outbox where kind = 'issue_branch'").Scan(&lastError, &attempts); err != nil {
@@ -242,7 +242,7 @@ func TestAnIssueBranchRowOfALeftRunFinishesWithoutACreate(t *testing.T) {
 	records := record.NewStore()
 	github := newBranchGitHub(t, nil, branchRefused)
 	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, tokens: roleTokens{}, project: "legion",
-		repo: ghrepo.MustParse("acme/widgets"), github: github.url}
+		repo: ghrepo.MustParse("acme/widgets"), githubAPI: github.url}
 	until := time.Now().Add(time.Hour)
 	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Admitted,
 		Generation: 2, Status: "in_progress", Rank: "U"})

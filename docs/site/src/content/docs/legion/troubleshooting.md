@@ -106,7 +106,7 @@ Check, in order:
    GitHub's status and its body:
 
    ```text
-   {"level":"ERROR","msg":"outbox row failed","row":81,"kind":"issue_branch","error":"create the branch of WIDGETS-12, which its roles' starts wait for: create refs/heads/legion/WIDGETS-12 on acme/widgets at <main's commit>: GitHub answered 403: {\"message\":\"Resource not accessible by integration\",…}"}
+   {"level":"ERROR","msg":"outbox row failed","row":81,"kind":"issue_branch","error":"create the branch of WIDGETS-12, which its roles' starts wait for: create refs/heads/legion/WIDGETS-12 on acme/widgets at <main's commit>: GitHub answered POST /git/refs with 403: {\"message\":\"Resource not accessible by integration\",…}"}
    ```
 
    Fix what GitHub names, such as the implement App's permissions or a ruleset on `legion/*`

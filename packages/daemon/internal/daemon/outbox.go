@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"path/filepath"
 	"strings"
 	"time"
@@ -19,6 +18,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/ghbranch"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
+	"github.com/sjawhar/legion/daemon/internal/githubrest"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/notify"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -71,8 +71,9 @@ type outbox struct {
 	now             func() time.Time
 	provision       func(context.Context, workspace.Request) (workspace.Workspace, error)
 	remove          func(context.Context, workspace.Workspace) error
-	// github is GitHub's REST API, which an issue_branch row creates its issue's branch through.
-	github string
+	// githubAPI is the GitHub REST root an issue_branch row creates its issue's branch under; empty,
+	// in production, is https://api.github.com, and a test points it at a stand-in.
+	githubAPI string
 }
 
 func newOutbox(pool *pgxpool.Pool, records record.Store, client dispatch.Client, publisher notify.Publisher, supervisor *supervisor, tokens appauth.Tokens, handlers []intake.Handler, project, dispatchProject, stateDir string, configured config.Project, tools map[string]string, log *slog.Logger) *outbox {
@@ -81,7 +82,7 @@ func newOutbox(pool *pgxpool.Pool, records record.Store, client dispatch.Client,
 	}
 	return &outbox{
 		pool: pool, records: records, dispatch: client, notices: publisher, supervisor: supervisor, tokens: tokens,
-		handlers: handlers, project: project, dispatchProject: dispatchProject, stateDir: stateDir, repo: configured.Repo, github: ghbranch.API,
+		handlers: handlers, project: project, dispatchProject: dispatchProject, stateDir: stateDir, repo: configured.Repo,
 		log: log, now: time.Now,
 		// WarmCodegraphIndexInBackground runs here, never in provisionWorkspace: every outbox
 		// test injects its own `provision`, so only this production closure starts codegraph.
@@ -708,7 +709,8 @@ func (r *outbox) createBranch(ctx context.Context, issue string) error {
 	if err != nil {
 		return fmt.Errorf("mint implement App token: %w", err)
 	}
-	return ghbranch.Create(ctx, http.DefaultClient, r.github, lease.Token, r.repo, workspace.Bookmark(issue), "main")
+	github := githubrest.Client{Token: lease.Token, API: githubrest.RepositoryAPI(r.githubAPI, r.repo)}
+	return ghbranch.Create(ctx, github, r.repo, workspace.Bookmark(issue))
 }
 
 func (r *outbox) removeWorkspace(ctx context.Context, row record.OutboxRow, payload record.WorkspaceRemove) error {
