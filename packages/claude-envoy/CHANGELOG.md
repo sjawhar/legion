@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.6.4]
+
+### Added
+
+- The plugin ships a fourth skill, `claude-envoy:dispatch-brainstorming` (LEGION-475): in a session
+  with Dispatch, a design conversation runs in its issue's spec, each question a decision block
+  and nothing asked in chat, approval is requested once with nothing new in it, and the plan is the
+  issue's `plan.md` document, never a repository file. It replaces superpowers' `brainstorming` and
+  `writing-plans` in such a session. The `dispatch-first` skill the hook injects sends every design
+  conversation and plan to it, and the `dispatch` skill's brainstorming reference is gone, its
+  process now in the new skill.
+
 ## [0.6.3]
 
 ### Changed
