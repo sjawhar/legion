@@ -26,7 +26,10 @@ function formatLifetime(seconds: number): string {
   return `${seconds} second${seconds === 1 ? "" : "s"}`;
 }
 
-/** One label and value; the value wraps inside its grid cell, so a 64-hex rules version or a long
+/** The approver a request names when any signed-in person may decide it: a shared secret's. */
+const ANYONE_APPROVER = "anyone";
+
+/** One label and value; the value wraps inside its grid cell, so a 64-hex policy version or a long
  *  host name never runs into the fact beside it or widens a narrow page. */
 function Fact({ children, label }: { children: ReactNode; label: string }): ReactNode {
   return (
@@ -66,8 +69,10 @@ export function CredentialRecordFacts({ record }: { record: CredentialRecord }):
         <Fact label="Expires">
           <Timestamp at={record.expires_at} />
         </Fact>
-        <Fact label="Rules version">{record.rules_version}</Fact>
-        <Fact label="Approver">{record.approver}</Fact>
+        <Fact label="Policy version">{record.rules_version}</Fact>
+        <Fact label="Approver">
+          {record.approver === ANYONE_APPROVER ? "Anyone signed in to Dispatch" : record.approver}
+        </Fact>
       </dl>
       {record.reason === "" ? null : (
         <div>

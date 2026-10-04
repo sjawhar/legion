@@ -212,11 +212,13 @@ all read it, so a request one of them counts is one the section lists.
 
 `CredentialRecordPage.tsx` (`/credentials/:recordId`) and `MachineLoginPage.tsx`
 (`/credentials/machine`) share `CredentialRecordFacts.tsx` (kind, identifiers, enrollment,
-a pod enrollment's worker slot when it has one, lifetime, requested/expiry timestamps, rules
-version, approver, then the agent's reason) and `CredentialDecisionButtons.tsx` (the Approve/Deny
+a pod enrollment's worker slot when it has one, lifetime, requested/expiry timestamps, policy
+version, approver - the broker's `anyone`, a shared secret's, reads "Anyone signed in to
+Dispatch" - then the agent's reason) and `CredentialDecisionButtons.tsx` (the Approve/Deny
 pair, shown whenever the record is `pending`). The broker's `enrollment.slot` (`implementer-g3`,
 null without one) is what tells the requests of two roles in one pod apart, since they share the
-pod's kind and runtime id.
+pod's kind and runtime id. A request waiting on `anyone` is in every signed-in person's pending
+list, since the broker lists it for every approver, and any of them decides it the same way.
 The reason renders inside a `<blockquote>` as **plain text only** — no Markdown pipeline, no
 linkification, `white-space: pre-wrap` — since it is the agent's own words, not reviewed content;
 a pending machine-kind record adds the sentence "Approving lets `<host>` start agent sessions as
@@ -231,11 +233,15 @@ recorded decision and no buttons, on the record page and on the machine page ali
 machine page looked the login up already decided or decided it itself; every broker error
 surfaces verbatim through `ApiError`'s message, never reworded.
 
-`GrantsSection.tsx` renders on `/settings` only where the pending list is not `null`: the live
-approval-granted grants the viewer approved, and those on enrollments the viewer operates whoever
-approved them (`grants.ts`'s `credentialGrantsQuery`, `?approver=me`). Each row names its approver
-(the broker's `approver` field), a pod enrollment's slot under its enrollment, and has a Revoke
-button that POSTs `{}` to `/api/v1/credential-grants/{id}/revoke`.
+`GrantsSection.tsx` renders on `/settings` only where the pending list is not `null`: every live
+grant of a session the viewer operates, automatic or approved by anyone, and every grant the viewer
+approved (`grants.ts`'s `credentialGrantsQuery`, `?approver=me`). Each row names how it was
+granted (the broker's `granted`: "Automatically", or "Approved by" its `approver`; `CredentialGrant`
+is a union on `granted`, so an automatic grant has a null approver and record and an approved one
+has both), a pod enrollment's slot under its enrollment, and has a Revoke button that POSTs `{}` to
+`/api/v1/credential-grants/{id}/revoke`. Only its operator sees an automatic grant, and revoking
+one makes that session ask before it gets those secrets again: its other automatic grants of them
+end with it.
 
 `packages/envoy/internal/dispatch/agentsecrets/client.go` is Dispatch's server-side client for the
 broker's UI-bearer API (`DISPATCH_AGENT_SECRETS_URL`/`DISPATCH_AGENT_SECRETS_TOKEN[_FILE]`,
@@ -265,7 +271,11 @@ failure is `503 AGENT_SECRETS_UNAVAILABLE`. `credential_requests_test.go` pins t
 against a fake broker, and `internal/dispatch/api/contract_test.go` round-trips a real broker
 (`brokerapi.Register` with real services on `BROKER_TEST_DATABASE_URL`): another login refused
 `403 NOT_APPROVER` even when its browser body names the approver, the approver's click accepted
-whatever login its body names, and the value released.
+whatever login its body names, and the value released; a shared secret's request in two people's
+lists and approved by the second; an automatic grant listed as automatic, revoked, and the same
+session's next request for it waiting on its owner while another session still gets it at once;
+and, once the operator has withheld AUTO_TOKEN, another person's approval of the session's request
+that was waiting on anyone for it refused `403 NOT_APPROVER` and the operator's accepted.
 
 ## Dark mode
 

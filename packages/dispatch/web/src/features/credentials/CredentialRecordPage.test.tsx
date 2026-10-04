@@ -83,6 +83,25 @@ test("Approve is one plain POST for the record, with no body", async () => {
   }
 });
 
+// A shared secret's request waits on anyone signed in, which the broker names with the word
+// `anyone`; the page says so in words, and the viewer, whoever they are, gets the decision buttons.
+test("a request any signed-in person may decide says so and offers its buttons", async () => {
+  const getCredentialRecord = spyOn(api, "getCredentialRecord").mockResolvedValue(
+    secretRecord({ approver: "anyone" })
+  );
+
+  try {
+    renderPage();
+
+    expect(await screen.findByText("Anyone signed in to Dispatch")).toBeDefined();
+    expect(screen.queryByText("anyone")).toBeNull();
+    expect(screen.getByRole("button", { name: "Approve" })).toBeDefined();
+  } finally {
+    cleanup();
+    getCredentialRecord.mockRestore();
+  }
+});
+
 test("a machine-kind record renders the machine sentence, links to the machine page, and shows no Approve button", async () => {
   const record = secretRecord({
     identifiers: ["worker-7.example.com"],

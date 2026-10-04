@@ -332,7 +332,7 @@ func assertRefusal(t *testing.T, request string, status int, body []byte, code, 
 func decodeBody[T any](t *testing.T, response *httptest.ResponseRecorder) T {
 	t.Helper()
 	var value T
-	if err := json.NewDecoder(response.Body).Decode(&value); err != nil {
+	if err := json.Unmarshal(response.Body.Bytes(), &value); err != nil {
 		t.Fatalf("decode response body %q: %v", response.Body.String(), err)
 	}
 	return value

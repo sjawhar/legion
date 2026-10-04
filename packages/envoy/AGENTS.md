@@ -1923,23 +1923,25 @@ the caller's signed request object (`iss` must be the requesting enrollment's ow
 `login_hint` — a session never names its own approver, only the policy does), first checks for a
 still-live grant covering the exact same name set (`reuseLiveGrant`: no new request, no new record,
 as long as the current policy still allows it and the grant's whole chain still verifies), then
-evaluates the policy per name: any `deny` denies the whole request with no record written at all; a
-name the policy does not serve aborts the whole call with `policy.ErrUnknownSecret` (`400
-UNKNOWN_SECRET`, per the broker's design overview) instead of being folded into an ordinary
-`deny` decision — no request row is written either, matching the "at record time" wording; a name
-needing approval that names a *different* approver than an already-approval-needing name in the
-same request is refused `400 MIXED_APPROVERS`; every grant lives `BROKER_MAX_GRANT_SECONDS`; when
-every name is decided (`granted`/`denied`) with
-nothing pending, the request and, if granted, its grant are written with no record; a request
-needing approval writes the request row and a `credential_requests` record together, in one
-transaction serialized by an advisory lock keyed on the enrollment and the sorted name set, so an
-identical concurrent request coalesces onto the same record (`coalesced: true`) instead of writing
-a second one. Each of those write transactions first locks the requesting enrollment `for share`
-while it is live, before any request or grant row, so a request racing the sweep or a revoke
-writes nothing on an enrollment that ended after `Create` first read it (`401 PROOF_INVALID`, as
-for one that had ended before). A pending request leaves `pending` without a human only through
-`store.EndPendingRequests` (the session's cancel, the sweeper's expiry, an enrollment's end): one
-statement moves the request rows and writes each one's audit row and its record's terminal event.
+decides and writes in one transaction: it takes an advisory lock keyed on the enrollment and the
+sorted name set, then locks the requesting enrollment `for share` while it is live (that order;
+the reverse breaks `TestCreateWaitsOutTheSweepItRaces`), reads the names withheld from the session,
+and evaluates the policy per name for the session: any `deny` denies the whole request with no
+record written at all; a name the policy does not serve aborts the whole call with
+`policy.ErrUnknownSecret` (`400 UNKNOWN_SECRET`, per the broker's design overview) instead of being
+folded into an ordinary `deny` decision — no request row is written either, matching the "at record
+time" wording; a name needing approval that names a *different* approver than an
+already-approval-needing name in the same request is refused `400 MIXED_APPROVERS`; every grant
+lives `BROKER_MAX_GRANT_SECONDS`; when every name is decided (`granted`/`denied`) with nothing
+pending, the request and, if granted, its grant are written with no record; a request needing
+approval writes the request row and a `credential_requests` record together, and an identical
+concurrent request coalesces onto the same record (`coalesced: true`) instead of writing a second
+one. The enrollment lock, taken before any request or grant row, means a request racing the sweep
+or a revoke writes nothing on an enrollment that ended after `Create` first read it (`401
+PROOF_INVALID`, as for one that had ended before). A pending request leaves `pending` without a
+human only through `store.EndPendingRequests` (the session's cancel, the sweeper's expiry, an
+enrollment's end): one statement moves the request rows and writes each one's audit row and its
+record's terminal event.
 `ApplyDecision` decides a pending record on the deciding human's login — approve
 mints the grant while the requesting enrollment is still live, deny denies it — re-deriving the
 record's id, refusing any login but the record's approver whatever the record's state
@@ -1967,14 +1969,46 @@ since the grant was decided — that the current policy still allows every grant
 (`stillAllowed`: a name the policy no longer serves, denies, or now wants approved that was granted
 automatically, or that it now wants approved by someone the request's `decided_by` login is not,
 all refuse, so an approved grant outlives an owner change only while its approver may still
-approve the secret, or once the new tags give its session the secret without asking); a source
-missing from the secrets store is `404 SECRET_NOT_IN_STORE`.
+approve the secret, or once the new tags give its session the secret without asking; a name
+withheld from the session that its request got automatically is judged as an approval by
+`decided_by`, since a live grant of it was approved after the withhold by someone the withheld name
+let approve it); a source missing from the secrets store is `404 SECRET_NOT_IN_STORE`.
 Migration 0009 defaults `request_secrets.delivery` to `inject`, which this broker neither writes nor
 reads, so a binary from before it can still be rolled back to.
 `RevokeGrant` lets a session end only its own grant (session proof); `RevokeByApprover` ends a grant
-on a human's Dispatch login, allowed only when that login is the grant's approver or its
-enrollment's operator (`mayRevoke`, else `403 NOT_APPROVER`); revoking an already-revoked grant is
-a no-op, writing no second audit row. Audit rows never carry secret values: `audit()` takes only
+on a human's Dispatch email, allowed only when that email is the grant's approver or its
+enrollment's operator (`mayRevoke`, which also answers whether it is the operator, else
+`403 NOT_APPROVER`). When the enrollment's operator revokes, `withhold` withholds
+from the grant's session every name its request got automatically (a `withheld_secrets` row per
+session and name, migration 0010) and, in the same statement, ends every other live grant of the
+session whose request got one of the newly withheld names automatically, each with a
+`grant.revoked` audit row of its own; the revoked grant's audit detail lists the newly withheld
+names under `withheld`, and each other ended grant's lists the withheld names it held. A name
+already withheld ends nothing, since its first withhold ended every grant that got it without
+asking and one approved since stands. The withhold is the session's, so the operator's revoke of a
+grant already revoked still runs it, recorded as one `grant.withheld` row when it withholds
+something new; any other revoke of an already-revoked grant, and an operator's that withholds
+nothing new, is a no-op, writing no second audit row. Another person's revoke (a grant's
+approver who is not the operator) ends that grant alone and withholds nothing, as does a session
+revoking its own grant. A withheld name is human tier to its session: `policy.Requester.Withheld`
+carries the session's withheld names, and `policy.Set.Evaluate` answers each as an approval request
+to the owner (`anyone` for a shared secret; a service's own secret is denied). Every path that
+evaluates for a session builds the requester with them: `Create`, `currentPolicyAdmits` (so a
+request that was pending when a name was withheld is that name's owner's to approve, and no one's
+while the policy does not serve the name or denies it, as it does once a service owns it: admitted
+then, the approval would release it once the name returned with its old tags, since that restores
+the request's policy version and `Values` runs `stillAllowed` only when the version moved) and
+`stillAllowed` on release and reuse. So the session asks before it gets the name again while every
+other session is unaffected.
+`RevokeByApprover` locks the session's row `for no key update`
+in the statement that reads the grant, before writing the grant, and `Create` and `ApplyDecision`
+read the withheld names after taking that row `for share`: a request deciding as the revoke runs
+is either written first, and then ended by the withhold if it got a withheld name, or decides with
+the name withheld. `GrantsForApprover` (`GET /v1/grants?approver=`) lists every live grant of the
+person's sessions, automatic ones included, and every grant the person approved, each answering
+`granted` (`automatic` or `approval`, derived once from whether the grant rests on a record) with a
+null `approver` and `record_id` for an automatic one. Audit rows never carry secret values:
+`audit()` takes only
 `kind`, `enrollment_id`, `request_id`, an optional
 `grant_id`, `actor` (`human:<login>`, `session:<enrollment id>`, `launcher:<credential id>`, or
 `broker`), and a non-secret JSON `detail`. The granted value itself is read fresh from

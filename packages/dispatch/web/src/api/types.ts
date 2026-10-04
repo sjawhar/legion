@@ -188,17 +188,31 @@ export interface CredentialDenial {
  *  the launcher credential it made, and a denial is `{state: "denied"}` alone. */
 export type CredentialDecisionResponse = CredentialApproval | CredentialDenial;
 
-/** A live grant on `GET /api/v1/credential-grants?approver=me`: one the viewer approved, or one on
- *  an enrollment the viewer operates, which `approver` may name as another login. */
-export interface CredentialGrant {
+interface CredentialGrantFields {
   grant_id: string;
-  record_id: string;
   enrollment: CredentialEnrollment;
   names: string[];
-  approver: string;
   expires_at: string;
   created_at: string;
 }
+/** A grant the policy gave a session the viewer operates without asking: no one approved it, so it
+ *  has no approver and rests on no record. */
+export interface AutomaticCredentialGrant extends CredentialGrantFields {
+  granted: "automatic";
+  approver: null;
+  record_id: null;
+}
+/** A grant someone approved: `approver` names the login that did (another person's, on a session
+ *  the viewer operates), and `record_id` the record the approval rests on. */
+export interface ApprovedCredentialGrant extends CredentialGrantFields {
+  granted: "approval";
+  approver: string;
+  record_id: string;
+}
+/** A live grant on `GET /api/v1/credential-grants?approver=me`: one on a session the viewer
+ *  operates, given automatically or approved by anyone, or one the viewer approved on anyone's
+ *  session. */
+export type CredentialGrant = AutomaticCredentialGrant | ApprovedCredentialGrant;
 export interface CredentialGrantsResponse {
   grants: CredentialGrant[];
 }

@@ -10,21 +10,27 @@ that holds it: ending a session revokes every grant it held and cancels every re
 pending. Ending a grant stops the session reading its values again; a command already running with
 a value keeps it.
 
-Revoking a grant ends a session's access only to a secret someone must approve: the session's next
-request for it waits for that approval again. A grant given automatically comes straight back: the
-same session's next request for that secret is granted at once, under a new grant. To end access to
-an automatic secret, [change its tags](#end-access-to-an-automatic-secret).
+Revoking a grant in Dispatch ends it at once. A grant someone approved is asked for again from its
+approver at the session's next request. When you revoke a grant your own session got without
+asking, you **withhold** its secrets from that session: the session's other grants that got them
+without asking end with it, and its next request for them is sent to their owner for approval (to
+anyone signed in, for a shared secret) instead of being granted at once, so the session asks before
+it gets them again; your other sessions still get them at once. The withhold is the session's, not
+the grant's, so it holds even when the grant had already ended by the time you clicked **Revoke**
+(the session revoked it itself, or it expired, after the page loaded). Only the session's own
+person withholds: a person who revokes a grant they approved on someone else's session ends that
+grant alone. To end every session's access to a secret,
+[change its tags](#end-every-sessions-access-to-a-secret).
 
 ## Revoke a grant in Dispatch
 
-Dispatch's **Settings** page lists your **Live grants**: the live grants you approved, and those on
-sessions you operate, each with its enrollment, names, approver, and when it was created and
-expires. Click **Revoke** to end one at once; the session's next read of it is refused
-`GRANT_NOT_LIVE`. The broker allows it when you are the grant's approver or its session's operator,
-and refuses anyone else `NOT_APPROVER`. A grant given automatically has no approver and is
-not in that list. Its operator can revoke it through the same broker route, with the grant id the
-session's `agent-secrets self` prints, but that does not end access: the session's next request for
-the secret is granted again at once.
+Dispatch's **Settings** page lists your **Live grants**: every live grant of a session you operate,
+whether it was granted automatically or approved by someone, and every grant you approved on
+anyone's session. Each row names its enrollment, its secrets, how it was **Granted**
+(**Automatically**, or **Approved by** an email), and when it was created and expires. Click
+**Revoke** to end one at once; the session's next read of it is refused `GRANT_NOT_LIVE`. The
+broker allows it when you are the grant's approver or its session's operator, and refuses anyone
+else `NOT_APPROVER`.
 
 ```console
 $ curl -s -X POST -H "Authorization: Bearer $AGENT_SECRETS_UI_TOKEN" -d '{"approver":"ada@example.com"}' "$AGENT_SECRETS_URL/v1/grants/<grant id>/revoke-by-approver"
@@ -37,7 +43,8 @@ yourself.)
 
 ## Revoke a grant from its session
 
-A session can end any of its own grants, by the grant id `agent-secrets self` lists:
+A session can end any of its own grants, by the grant id `agent-secrets self` lists. A session
+ending its own grant withholds nothing: its next request is decided as before.
 
 ```console
 $ agent-secrets revoke b51e58bc-3b7b-4144-a2ed-5821f232d612
@@ -49,7 +56,7 @@ operator: ada@example.com
 lease_expires_at: 2026-10-03T03:36:40Z
 ```
 
-## End access to an automatic secret
+## End every session's access to a secret
 
 Retag the secret in Secrets Manager so its sessions no longer get it automatically: set its `tier`
 to `human`, so every request for it needs a person's approval, or give it another `owner`, so the
@@ -57,7 +64,8 @@ sessions that had it are no longer the owner's own. Deleting the secret, or movi
 `BROKER_SECRETS_PREFIX`, ends access altogether. Once the broker rereads the namespace, at most five
 minutes later, it refuses each read of a grant given automatically under the old tags with
 `GRANT_NOT_LIVE`, and the session's next request for the secret waits for a person's approval. The
-change applies to every session that got the secret automatically, not to one session.
+change applies to every session that got the secret automatically, where revoking a grant of your
+own session in Dispatch withholds it from that session alone.
 
 ## Cancel a pending request
 

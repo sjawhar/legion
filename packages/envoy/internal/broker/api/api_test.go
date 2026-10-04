@@ -279,10 +279,11 @@ type wirePendingEntry struct {
 
 type wireApproverGrant struct {
 	GrantID    string             `json:"grant_id"`
+	Granted    string             `json:"granted"`
 	RecordID   *string            `json:"record_id"`
 	Enrollment wireEnrollmentInfo `json:"enrollment"`
 	Names      []string           `json:"names"`
-	Approver   string             `json:"approver"`
+	Approver   *string            `json:"approver"`
 	ExpiresAt  time.Time          `json:"expires_at"`
 	CreatedAt  time.Time          `json:"created_at"`
 }
@@ -716,8 +717,9 @@ func TestAgentSecretRequestLifecycle(t *testing.T) {
 	if listed == nil {
 		t.Fatalf("GET /v1/grants = %+v, want grant %s listed", grantList, grantID)
 	}
-	if len(listed.Names) != 1 || listed.Names[0] != "DEEL_API_KEY" || listed.Approver != testApprover || listed.Enrollment.Slot != nil {
-		t.Fatalf("listed grant = %+v, want names [DEEL_API_KEY] approved by %s on an enrollment with no slot", listed, testApprover)
+	if len(listed.Names) != 1 || listed.Names[0] != "DEEL_API_KEY" || listed.Granted != "approval" || listed.Approver == nil || *listed.Approver != testApprover ||
+		listed.RecordID == nil || *listed.RecordID != recordID || listed.Enrollment.Slot != nil {
+		t.Fatalf("listed grant = %+v, want names [DEEL_API_KEY] granted on approval by %s, resting on record %s, on an enrollment with no slot", listed, testApprover, recordID)
 	}
 
 	// Revoking by approver takes the grant's approver or its enrollment's operator (both

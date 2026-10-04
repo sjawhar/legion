@@ -30,7 +30,7 @@ it, and the login on the machine returns. `agent-secrets launcher login-status` 
 login at any time: it prints `issued` while the machine holds one, and says when that login
 expires. The broker does not renew it, so before then a person must approve a new machine login.
 
-![The machine login page with a code looked up: a machine login for example-host-build, approver alice, with Approve and Deny buttons](/legion/media/broker/machine-login.png)
+![The machine login page with a code looked up: a machine login for example-host-build, approver alice@example.com, with Approve and Deny buttons](/legion/media/broker/machine-login.png)
 
 ## 2. Start a session
 
@@ -59,7 +59,7 @@ The request is at the top of alice's Inbox, under **Credential requests**, and c
 Its page shows what was asked for, by which session, for how long, who may approve it, and the
 agent's stated reason.
 
-![A credential request for DEMO_API_KEY: the enrollment on example-host-build, a one-hour lifetime, approver alice, the agent's stated reason, and Approve and Deny buttons](/legion/media/broker/credential-request.png)
+![A credential request for DEMO_API_KEY: the enrollment on example-host-build, a one-hour lifetime, approver alice@example.com, the agent's stated reason, and Approve and Deny buttons](/legion/media/broker/credential-request.png)
 
 She approves it, and the page records the decision.
 
@@ -75,11 +75,11 @@ request.
 
 ## 6. The live grant
 
-**Settings** lists the live grants alice approved, and those on sessions she operates, each with
-its session, its approver and when it expires. **Revoke** ends a grant at once; a command already
-running keeps the value it was given.
+**Settings** lists the live grants of alice's sessions, whether granted automatically or approved,
+and those she approved on anyone's session, each with its session, how it was granted and when it
+expires. **Revoke** ends a grant at once; a command already running keeps the value it was given.
 
-![Live grants in Settings: the example-host-build enrollment holding DEMO_API_KEY, approver alice, with a Revoke button](/legion/media/broker/live-grants.png)
+![Live grants in Settings: the example-host-build enrollment holding DEMO_API_KEY, approved by alice@example.com, with a Revoke button](/legion/media/broker/live-grants.png)
 
 The rig that recorded the video and the screenshots, and the scripts that record them again, are in
 [`docs/site/media/broker/`](https://github.com/sjawhar/legion/tree/main/docs/site/media/broker).

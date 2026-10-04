@@ -1,6 +1,6 @@
-// handlers_ui_grants.go: GET /v1/grants, POST /v1/grants/{id}/revoke-by-approver — the approver's
-// own live-grant list and human revocation route. Part of the UI routes (uiAuth) Dispatch's
-// server relays to on behalf of the browser.
+// handlers_ui_grants.go: GET /v1/grants, POST /v1/grants/{id}/revoke-by-approver — a person's own
+// live-grant list and human revocation route. Part of the UI routes (uiAuth) Dispatch's server
+// relays to on behalf of the browser.
 package api
 
 import (
@@ -13,20 +13,21 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/requests"
 )
 
-// approverGrantResp is one grant in GET /v1/grants?approver=<login>. Approver is the login that
-// approved it: the list also holds grants on enrollments the login operates that another login
-// approved.
+// approverGrantResp is one grant in GET /v1/grants?approver=<login>: a grant on a session the login
+// operates, automatic or approved by anyone, or a grant the login approved on anyone's session.
 type approverGrantResp struct {
 	// The grant's id, which the revoke route takes.
 	GrantID string `json:"grant_id"`
-	// The credential-request record its approval rests on.
+	// How the session got it: "automatic" (the policy gave it without asking) or "approval".
+	Granted string `json:"granted"`
+	// The credential-request record its approval rests on; null for an automatic grant.
 	RecordID *string `json:"record_id"`
 	// The session holding it.
 	Enrollment recordEnrollmentResp `json:"enrollment"`
 	// The secrets it covers.
 	Names []string `json:"names"`
-	// The login that approved it.
-	Approver string `json:"approver"`
+	// The person who approved it; null for an automatic grant.
+	Approver *string `json:"approver"`
 	// When it expires.
 	ExpiresAt time.Time `json:"expires_at"`
 	// When it was granted.
@@ -35,7 +36,7 @@ type approverGrantResp struct {
 
 // approverGrantsResponse is GET /v1/grants's answer.
 type approverGrantsResponse struct {
-	// The live grants the named person approved, and those on sessions they operate.
+	// The live grants of the named person's sessions, and those the person approved, newest first.
 	Grants []approverGrantResp `json:"grants"`
 }
 
@@ -56,8 +57,8 @@ func (s *server) listGrantsForApprover(w http.ResponseWriter, r *http.Request) {
 			names = []string{}
 		}
 		out[i] = approverGrantResp{
-			GrantID: g.GrantID, RecordID: g.RecordID, Enrollment: enrollmentResp(g.Enrollment),
-			Names: names, Approver: g.Approver, ExpiresAt: g.ExpiresAt, CreatedAt: g.CreatedAt,
+			GrantID: g.GrantID, Granted: g.Granted, RecordID: g.RecordID, Enrollment: enrollmentResp(g.Enrollment),
+			Names: names, Approver: strPtr(g.Approver), ExpiresAt: g.ExpiresAt, CreatedAt: g.CreatedAt,
 		}
 	}
 	writeJSON(w, http.StatusOK, approverGrantsResponse{Grants: out})
@@ -72,7 +73,9 @@ type revokeByApproverBody struct {
 
 // revokeByApprover ends a grant on a human's Dispatch login: the login must be the grant's
 // approver or its enrollment's operator (requests.Machine.RevokeByApprover's own mayRevoke
-// check).
+// check). When the operator revokes a grant the session got without asking, its secrets are
+// withheld from that session, even when the grant had already ended: its other grants that got
+// them without asking end too, and its later requests for them ask their owner.
 func (s *server) revokeByApprover(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathUUID(w, r, "id", "GRANT_ID_INPUT", "grant")
 	if !ok {
