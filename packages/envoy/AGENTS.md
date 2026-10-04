@@ -134,6 +134,24 @@ count again. Then Dispatch exits without the connections waiting on it (`dispatc
 database connections still in use once the database stopped answering`), and the database rolls
 back what they held open; with nothing in flight over HTTP that is about 21 s after the signal.
 
+An issue's task counts (`issues.tasks_done`, `tasks_total`, `tasks_version`, added by the
+`issue_task_progress` migration; LEGION-542) are the `- [ ]` / `- [x]` items of its primary
+document as its latest version renders (`pmdoc.CountTasks`, which skips an item emptied of its
+text, since the renderer writes one as a plain `- `), and the number of the version they were
+counted from. Every version write records them in its own transaction (`docs.RecordTaskProgress`
+from `writeVersionTx`; issue creation and an upload call `docs.RecordTaskProgressMarkdown` after
+they insert their version row, so the count names it). The row the API reads
+(`model.IssueProgress`, on `IssueSummary` and the issue read, never on an event payload) can lag
+its document - every row the migration found, any the task a deploy replaces versions while both
+run (its code records no count), a row another writer held - so `cmd/dispatch` runs
+`docs.Service.RunTaskProgressReconciliation`, which at start and every five minutes
+(`TaskProgressReconcileInterval`) counts again every issue whose `tasks_version` is not its
+document's greatest `artifact_versions.number` (`taskProgressDrift`), in batches of 50 under
+`for no key update … skip locked`: a full batch with drift left goes straight to the next, and a
+short or failed one is retried a bounded number of times in the pass; so a stale or missing count
+lasts at most that interval, and `tasks: null` on the API means a spec with no task list (total
+0) or one still inside that window.
+
 A write never puts one block id on two blocks. `EnsureBlockIDs` keeps a repeated id for the first
 holder in document order, and ask rows and anchors are keyed on block ids, so a block written ahead
 of an answered ask under its id would take the ask's row and answer, and the question would come

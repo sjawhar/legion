@@ -35,6 +35,7 @@ function issue(overrides: Partial<IssueSummary> = {}): IssueSummary {
     labels: [],
     last_seq: 0,
     open_asks: 0,
+    progress: { tasks: null, children: null },
     parent: null,
     assignee: null,
     claim: null,
