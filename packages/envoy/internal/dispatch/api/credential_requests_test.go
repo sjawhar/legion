@@ -35,7 +35,7 @@ func newCredentialTestHandler(t *testing.T, brokerURL string) http.Handler {
 		Store:         database,
 		Identity:      identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: allowed},
 		AllowedLogins: allowed,
-		AgentToken:    "agent-token",
+		AgentTokens:   sharedAgentTokens("agent-token"),
 		ServerURL:     "https://dispatch.example",
 		Docs:          documentService,
 		Events:        events.NewBroker(),

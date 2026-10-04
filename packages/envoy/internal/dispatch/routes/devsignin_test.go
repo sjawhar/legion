@@ -32,7 +32,7 @@ func newDevSignInRouter(t *testing.T, serverURL string, sessions *memorySessionS
 			SigningKey: "signing-key", AllowedLogins: allowed, Sessions: sessions,
 		},
 		AllowedLogins: allowed,
-		AgentToken:    "e2e-token",
+		AgentTokens:   sharedAgentTokens(t, "e2e-token"),
 		ServerURL:     serverURL,
 		DevSignIn:     true,
 	})

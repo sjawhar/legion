@@ -33,7 +33,7 @@ func newInteractionHandler(t *testing.T, makeDocs func(*store.Store) docs.API) (
 		Store:         database,
 		Identity:      identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: allowed},
 		AllowedLogins: allowed,
-		AgentToken:    "agent-token",
+		AgentTokens:   sharedAgentTokens("agent-token"),
 		Docs:          docsAPI,
 		ServerURL:     "https://dispatch.example",
 	})

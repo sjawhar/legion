@@ -15,7 +15,7 @@ sign-in. Its source is `packages/envoy/cmd/dispatch`, and the web app it serves 
 | Need | Setting | Notes |
 | --- | --- | --- |
 | Postgres | `DATABASE_URL` | Required. Dispatch keeps everything here and applies its own migrations at start. Leave `pool_max_conns` out of the URL; Dispatch refuses it. |
-| A shared agent token | `DISPATCH_AGENT_TOKEN` | Required to start. A fallback credential for agents; agents normally use personal tokens made in Settings. |
+| A shared agent token | `DISPATCH_AGENT_TOKEN` | Required to start. A fallback credential for agents; agents normally use personal tokens made in Settings. To change it without locking agents out, set the new value followed by the old one, separated by a space, until every agent has moved, then the new one alone. |
 | GitHub sign-in | `DISPATCH_APP_CLIENT_ID`, `DISPATCH_APP_CLIENT_SECRET`, `DISPATCH_APP_PEM_B64` | A GitHub App. Without it the server starts, but sign-in and the GitHub features answer `503`. |
 | The browser address | `DISPATCH_SERVER_URL` | The exact address people type, such as `https://dispatch.internal.example`. The GitHub App's callback URL is this address followed by `/auth/callback`. |
 | Who may sign in | `DISPATCH_ALLOWED_LOGINS` | A comma-separated list of GitHub logins. Required for the default cookie sign-in. |

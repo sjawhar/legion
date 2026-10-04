@@ -21,6 +21,16 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
 )
 
+// sharedAgentTokens is a DISPATCH_AGENT_TOKEN setting parsed as the server parses it at boot.
+func sharedAgentTokens(t *testing.T, setting string) *auth.SharedAgentTokens {
+	t.Helper()
+	tokens, err := auth.ParseSharedAgentTokens(setting)
+	if err != nil {
+		t.Fatalf("ParseSharedAgentTokens(%q): %v", setting, err)
+	}
+	return tokens
+}
+
 type memoryUserStore struct {
 	users map[string]*auth.User
 }
@@ -942,7 +952,7 @@ func TestCookieAuthenticatedUnsafeRequestsRequireSameOrigin(t *testing.T) {
 				Sessions:      sessions,
 			},
 			AllowedLogins: allowed,
-			AgentToken:    "agent-token",
+			AgentTokens:   sharedAgentTokens(t, "agent-token"),
 			ServerURL:     "https://dispatch.example",
 		})
 		if err != nil {

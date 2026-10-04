@@ -144,7 +144,7 @@ The Dispatch service reads its public browser origin and NATS URLs from
 | `ENVOY_ALLOW_REMOTE_NATS` | yes, for a shared NATS | Set to `1` to reach a NATS that is not this host's own. The server owns the `ENVOY_NOTIFICATIONS` stream, so every start reconciles it; without this the start refuses a non-loopback NATS, naming the URL. `compose/dispatch.compose.yml` sets it. |
 | `NATS_NKEY_SEED_FILE` | no | A file holding the NATS nkey user seed this process connects as (trimmed); wins over `NATS_NKEY_SEED`. A set but empty, missing, unreadable, blank or non-user-seed value refuses startup naming the variable and path. Neither set connects without a credential. |
 | `NATS_NKEY_SEED` | no | The NATS nkey user seed itself, when `NATS_NKEY_SEED_FILE` is unset. |
-| `DISPATCH_AGENT_TOKEN` | yes | Shared devbox fallback bearer token; per-person tokens minted in Dispatch Settings are preferred for individual agents. |
+| `DISPATCH_AGENT_TOKEN` | yes | Shared devbox fallback bearer token; per-person tokens minted in Dispatch Settings are preferred for individual agents. To rotate it, set the new value followed by the old one, separated by a space or a line feed, move every consumer, then set the new value alone (`cmd/dispatch/README.md`). |
 | `DISPATCH_ALLOWED_LOGINS` | human identity | Cookie identity requires it at startup; header identity accepts only included logins. |
 | `DISPATCH_LISTEN_HOST` | no | Defaults to `127.0.0.1`; for direct tailnet access, set it to `$(tailscale ip -4)`, never `0.0.0.0`. |
 | `DISPATCH_PORT` | no | Defaults to `8766`; the healthcheck follows it. |

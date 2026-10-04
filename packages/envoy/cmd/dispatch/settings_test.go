@@ -15,6 +15,7 @@ import (
 	"go/parser"
 	"go/token"
 	"io/fs"
+	"log/slog"
 	"maps"
 	"net/http"
 	"net/http/httptest"
@@ -26,9 +27,13 @@ import (
 	"strings"
 	"testing"
 
+	gws "github.com/gorilla/websocket"
+
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/config"
+	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/routes"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -411,25 +416,33 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			}
 		},
 		"DISPATCH_AGENT_TOKEN": func(t *testing.T) {
-			if boot := resolveWith(t, map[string]string{"DISPATCH_AGENT_TOKEN": " table-token "}); boot.AgentToken != "table-token" {
-				t.Errorf("AgentToken = %q", boot.AgentToken)
-			}
-			refusedWith(t, map[string]string{"DISPATCH_AGENT_TOKEN": ""}, "DISPATCH_AGENT_TOKEN")
-			// The bearer the router takes as the shared token: any other is looked up as a
-			// personal token, which the store does not hold.
-			t.Run("router", func(t *testing.T) {
-				request := httptest.NewRequest(http.MethodGet, "/api/v1/whoami", nil)
-				request.Header.Set("Authorization", "Bearer table-token")
-				response := httptest.NewRecorder()
-				routerFor(t, resolveWith(t, map[string]string{"DISPATCH_AGENT_TOKEN": "table-token"}), routes.AppContextOptions{Store: storetest.Open(t)}).ServeHTTP(response, request)
-				var caller struct {
-					Kind  string  `json:"kind"`
-					Owner *string `json:"owner"`
+			refusedWith(t, map[string]string{"DISPATCH_AGENT_TOKEN": ""}, "DISPATCH_AGENT_TOKEN required")
+			refusedWith(t, map[string]string{"DISPATCH_AGENT_TOKEN": " \n "}, "DISPATCH_AGENT_TOKEN required")
+			// A refusal names the entry by its position and never by its value: the boot log
+			// carries it.
+			for setting, naming := range map[string]string{
+				"new-token  old-token":          "DISPATCH_AGENT_TOKEN entry 2 of 3 is empty",
+				"new-token\r\nold-token":        "DISPATCH_AGENT_TOKEN entry 2 of 3 is empty",
+				"new-token old-token new-token": "DISPATCH_AGENT_TOKEN entry 3 of 3 repeats entry 1",
+			} {
+				_, err := resolveBootConfig(bootEnvironment(map[string]string{"DISPATCH_AGENT_TOKEN": setting}))
+				if err == nil || !strings.Contains(err.Error(), naming) || strings.Contains(err.Error(), "new-token") || strings.Contains(err.Error(), "old-token") {
+					t.Errorf("DISPATCH_AGENT_TOKEN=%q: err = %v, want a refusal naming %q and no value", setting, err, naming)
 				}
-				if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &caller) != nil || caller.Kind != "agent" || caller.Owner != nil {
-					t.Errorf("DISPATCH_AGENT_TOKEN=table-token: GET /api/v1/whoami with that bearer answered %d %s, want 200 naming the shared token (an agent with no owner)", response.Code, response.Body.String())
+			}
+			// One value is the shared token as it always was, the whitespace around it trimmed:
+			// the router takes that bearer as the shared token, and looks any other up as a
+			// personal token, which the store does not hold.
+			t.Run("one value", func(t *testing.T) {
+				handler := routerFor(t, resolveWith(t, map[string]string{"DISPATCH_AGENT_TOKEN": " table-token "}), routes.AppContextOptions{Store: storetest.Open(t)})
+				if response := whoamiAs(handler, "table-token", ""); !answersSharedToken(response) {
+					t.Errorf("DISPATCH_AGENT_TOKEN=' table-token ': GET /api/v1/whoami with table-token answered %d %s, want 200 naming the shared token (an agent with no owner)", response.Code, response.Body.String())
+				}
+				if response := whoamiAs(handler, "other-token", ""); response.Code != http.StatusUnauthorized {
+					t.Errorf("DISPATCH_AGENT_TOKEN=' table-token ': GET /api/v1/whoami with other-token answered %d %s, want 401", response.Code, response.Body.String())
 				}
 			})
+			t.Run("several values", sharedAgentTokenListReachesTheAPIAndTheDocumentWebsocket)
 		},
 		"DISPATCH_IDENTITY": func(t *testing.T) {
 			if boot := resolveWith(t, map[string]string{"DISPATCH_IDENTITY": "header:X-Dispatch-User"}); boot.IdentityHeader != "X-Dispatch-User" {
@@ -853,5 +866,134 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 	}
 	for name := range cases {
 		t.Errorf("a case for %s, which the settings table does not list", name)
+	}
+}
+
+// whoamiAs is GET /api/v1/whoami from handler with token as the bearer, from behind a load
+// balancer that saw the caller at the end of forwardedFor when it is not empty.
+func whoamiAs(handler http.Handler, token, forwardedFor string) *httptest.ResponseRecorder {
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/whoami", nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+	if forwardedFor != "" {
+		request.Header.Set("X-Forwarded-For", forwardedFor)
+	}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	return response
+}
+
+// answersSharedToken reports whether a whoami response names the shared token: an agent with no
+// owner.
+func answersSharedToken(response *httptest.ResponseRecorder) bool {
+	var caller struct {
+		Kind  string  `json:"kind"`
+		Owner *string `json:"owner"`
+	}
+	return response.Code == http.StatusOK && json.Unmarshal(response.Body.Bytes(), &caller) == nil &&
+		caller.Kind == "agent" && caller.Owner == nil
+}
+
+// With DISPATCH_AGENT_TOKEN holding several values, the server main builds from the setting
+// accepts every one on the HTTP API and on the document websocket, and refuses on both a value the
+// setting does not list. A request that authenticates with a value after the first is logged once
+// per address and User-Agent, with the load balancer's address and never a token.
+func sharedAgentTokenListReachesTheAPIAndTheDocumentWebsocket(t *testing.T) {
+	var logged bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logged, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	previousTokenLines := func() []map[string]any {
+		t.Helper()
+		var lines []map[string]any
+		for _, line := range strings.Split(logged.String(), "\n") {
+			var decoded map[string]any
+			if json.Unmarshal([]byte(line), &decoded) == nil && decoded["msg"] == "dispatch: request authenticated with a previous shared agent token" {
+				lines = append(lines, decoded)
+			}
+		}
+		return lines
+	}
+
+	boot := resolveWith(t, map[string]string{"DISPATCH_AGENT_TOKEN": "new-token\nold-token"})
+	database := storetest.Open(t)
+	broker := events.NewBroker()
+	documentService := newDocumentService(boot, docs.Deps{Store: database, Events: broker})
+	t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+	handler := routerFor(t, boot, routes.AppContextOptions{Store: database, Docs: documentService, Events: broker})
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+
+	project := signedIn(t, httptest.NewRequest(http.MethodPost, "/api/v1/projects", strings.NewReader(`{"key":"TOKENS","name":"Tokens"}`)), "alice")
+	project.Header.Set("Content-Type", "application/json")
+	project.Header.Set("Sec-Fetch-Site", "same-origin")
+	created := httptest.NewRecorder()
+	handler.ServeHTTP(created, project)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create project: %d %s", created.Code, created.Body.String())
+	}
+	issueRequest := httptest.NewRequest(http.MethodPost, "/api/v1/issues", strings.NewReader(
+		`{"project":"TOKENS","title":"Shared tokens","spec":"before\n","actor":{"kind":"session","id":"session-0123456789abcdef"}}`))
+	issueRequest.Header.Set("Content-Type", "application/json")
+	issueRequest.Header.Set("Authorization", "Bearer new-token")
+	created = httptest.NewRecorder()
+	handler.ServeHTTP(created, issueRequest)
+	var issue struct {
+		PrimaryArtifactID string `json:"primary_artifact_id"`
+	}
+	if created.Code != http.StatusCreated || json.Unmarshal(created.Body.Bytes(), &issue) != nil || issue.PrimaryArtifactID == "" {
+		t.Fatalf("create an issue with the first value: %d %s", created.Code, created.Body.String())
+	}
+	documentPath := "/ws/doc/" + issue.PrimaryArtifactID
+	dial := func(token, forwardedFor string) (*http.Response, error) {
+		t.Helper()
+		connection, response, err := gws.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http")+documentPath, http.Header{
+			"Authorization":    {"Bearer " + token},
+			"X-Dispatch-Actor": {`{"kind":"session","id":"session-0123456789abcdef"}`},
+			"X-Forwarded-For":  {forwardedFor},
+		})
+		if connection != nil {
+			_ = connection.Close()
+		}
+		return response, err
+	}
+
+	for _, token := range []string{"new-token", "old-token"} {
+		if response := whoamiAs(handler, token, "198.51.100.9, 203.0.113.7"); !answersSharedToken(response) {
+			t.Errorf("GET /api/v1/whoami with %s answered %d %s, want 200 naming the shared token", token, response.Code, response.Body.String())
+		}
+		if response, err := dial(token, "203.0.113.8"); err != nil {
+			t.Errorf("the document websocket refused %s: response=%v err=%v", token, response, err)
+		}
+	}
+	if response := whoamiAs(handler, "third-token", "203.0.113.7"); response.Code != http.StatusUnauthorized {
+		t.Errorf("GET /api/v1/whoami with a value the setting does not list answered %d %s, want 401", response.Code, response.Body.String())
+	}
+	if response, err := dial("third-token", "203.0.113.8"); err == nil || response == nil || response.StatusCode != http.StatusUnauthorized {
+		t.Errorf("the document websocket with a value the setting does not list: response=%v err=%v, want a refused handshake (401)", response, err)
+	}
+
+	// Again within the window from the same callers: nothing more is logged.
+	whoamiAs(handler, "old-token", "203.0.113.7")
+	if response, err := dial("old-token", "203.0.113.8"); err != nil {
+		t.Errorf("the document websocket refused old-token a second time: response=%v err=%v", response, err)
+	}
+	lines := previousTokenLines()
+	if len(lines) != 2 {
+		t.Fatalf("previous-token log lines = %v, want one for the API caller and one for the websocket caller", lines)
+	}
+	for index, want := range []map[string]any{
+		{"entry": float64(2), "address": "203.0.113.7", "path": "/api/v1/whoami"},
+		{"entry": float64(2), "address": "203.0.113.8", "path": documentPath},
+	} {
+		for key, value := range want {
+			if lines[index][key] != value {
+				t.Errorf("previous-token log line %d %s = %v, want %v (line %v)", index+1, key, lines[index][key], value, lines[index])
+			}
+		}
+	}
+	for _, token := range []string{"new-token", "old-token", "third-token"} {
+		if strings.Contains(logged.String(), token) {
+			t.Errorf("the log holds the token %q", token)
+		}
 	}
 }

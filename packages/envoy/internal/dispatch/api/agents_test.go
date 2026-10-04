@@ -27,8 +27,8 @@ func agentsHandlerWithStore(t *testing.T, envoyURL string, database *store.Store
 			Header:        "X-Dispatch-User",
 			AllowedLogins: map[string]struct{}{"alice": {}},
 		},
-		AgentToken: "agent-token",
-		Envoy:      envoy.New(envoyURL),
+		AgentTokens: sharedAgentTokens("agent-token"),
+		Envoy:       envoy.New(envoyURL),
 	}
 	mux := http.NewServeMux()
 	Register(mux, deps)
