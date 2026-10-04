@@ -33,9 +33,10 @@ func AdvancePullRequestHead(pr record.PullRequest, headSHA string) record.PullRe
 // settled says whether a CI settlement stands for the pull request's current head: one recorded
 // for the head itself, or for a head the current one replaced through pushes that each changed
 // only .legion/ and said which head they replaced (a handoff push can carry GitHub's skip-checks
-// trailer and start no CI of its own).
+// trailer and start no CI of its own). A checked head is recorded only with a settlement
+// (SettlementFor, then ApplySettlement), and cleared with it (a new generation, migration 0028).
 func settled(pr record.PullRequest) bool {
-	return pr.CheckedHead != "" && pr.Verdict != "" && carriedBack(pr.Pushes, pr.HeadSHA, pr.CheckedHead)
+	return pr.CheckedHead != "" && carriedBack(pr.Pushes, pr.HeadSHA, pr.CheckedHead)
 }
 
 // SettlementFor says whether a CI settlement of candidate.Head may stand for the pull request's
@@ -58,8 +59,8 @@ func SettlementFor(pr record.PullRequest, candidate SettlementCandidate) (record
 		return pr, false
 	}
 	pr.CheckedHead = head
-	pr.Verdict = ""
 	pr.Failing = []string{}
+	pr.Cancelled = []string{}
 	pr.CheckRuns = nil
 	pr.Generation = 0
 	pr.Snapshot = ""
@@ -146,8 +147,8 @@ func ApplySettlement(pr record.PullRequest, candidate SettlementCandidate) (reco
 	pr.CheckRuns = mergeAttemptSets(pr.CheckRuns, candidate.CheckRuns)
 	pr.Generation = candidate.Generation
 	pr.Snapshot = candidate.Snapshot
-	pr.Verdict = outcome.Verdict
 	pr.Failing = append([]string(nil), outcome.Failing...)
+	pr.Cancelled = append([]string(nil), outcome.Cancelled...)
 	return pr, true
 }
 

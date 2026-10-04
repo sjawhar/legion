@@ -131,9 +131,11 @@ Legion uses GitHub's own review mechanisms rather than labels:
   started by hand or an advisory review check, never makes CI red, and on a base branch that
   requires no check nothing does. The daemon judges the check runs GitHub reports, so a required
   check that only a commit status reports reads as no result to it, where `READY` reads the status.
-  The daemon reads each open pull request's required set with the implement App as it starts and
-  every two minutes after; until a read succeeds, no verdict stands for the head, and a read GitHub
-  refuses is logged with the repository and the HTTP status.
+  A head that a push changing only `.legion/` made carries the checks of the head before it: a
+  failure there counts, but a cancellation or a missing result waits for the head's own CI, since
+  a push can cancel the run before it. The daemon reads each open pull request's required set with
+  the implement App as it starts and every two minutes after; until a read succeeds, no verdict
+  stands for the head, and a read GitHub refuses is logged with the repository and the HTTP status.
 - **Review threads** close one by one, and only once the thread's opener (or, for a thread a bot
   opened, Legion's reviewer) accepts the reply.
 - Two limits stop a loop: after `review_round_cap` review rounds (three by default), or once

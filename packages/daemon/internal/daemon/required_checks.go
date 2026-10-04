@@ -4,13 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
+	"github.com/sjawhar/legion/daemon/internal/githubrest"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/requiredchecks"
@@ -20,10 +20,11 @@ import (
 // checks after its first pass. GitHub tells an App of a ruleset or branch-protection change only by
 // webhooks (repository_ruleset, branch_protection_rule) the Envoy listener does not carry to the
 // daemon, so reading again is how the daemon notices one: a change reaches the verdict within one
-// interval. A pass reads each open pull request once and each base branch twice, on the implement
-// App's installation, whose hourly limit every pane's gh shares; two minutes keeps that to about
-// thirty reads an hour per pull request and gives a newly opened pull request its set well before
-// its first CI settles.
+// interval. A pass reads each open pull request once and each base branch at least twice (its
+// rulesets, a page per hundred rules, and its protection), on the implement App's installation,
+// whose hourly limit every pane's gh shares: about ninety reads an hour for a pull request on a base
+// of its own, thirty for each more on the same base. Two minutes also gives a newly opened pull
+// request its set well before its first CI settles.
 const requiredChecksInterval = 2 * time.Minute
 
 // requiredChecksRead bounds one pull request's reads in a pass: its base branch, then that branch's
@@ -36,12 +37,8 @@ const requiredChecksRead = 30 * time.Second
 // recorded before the daemon read sets at all - has no checks verdict until it runs, and the round
 // a red the base branch never required left stuck is decided by it, with no new push.
 func (w *workflowRuntime) watchRequiredChecks(ctx context.Context) {
-	interval := w.requiredInterval
-	if interval <= 0 {
-		interval = requiredChecksInterval
-	}
 	w.readRequiredChecks(ctx)
-	ticker := time.NewTicker(interval)
+	ticker := time.NewTicker(requiredChecksInterval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -81,14 +78,14 @@ func (w *workflowRuntime) readRequiredChecks(ctx context.Context) {
 				return
 			}
 			attributes := []any{"repo", pr.Repo, "pullRequest", pr.Number, "error", err}
-			var answer *requiredchecks.Answer
+			var answer *githubrest.Answer
 			if errors.As(err, &answer) {
 				attributes = append(attributes, "status", answer.Status)
 			}
 			w.log.Error("read the checks a pull request's base branch requires; its checks verdict stays as the set last read decides it, and undecided when none was", attributes...)
 			continue
 		}
-		if pr.Required != nil && slices.Equal(pr.Required, names) {
+		if pr.RequiresExactly(names) {
 			continue
 		}
 		eventID := fmt.Sprintf("required-checks:%s:%s:%s#%d:%d", w.dispatchProject, w.bootID, pr.Repo, pr.Number, time.Now().UnixNano())
@@ -112,7 +109,7 @@ func (w *workflowRuntime) requiredFor(ctx context.Context, pr record.PullRequest
 	if err != nil {
 		return nil, fmt.Errorf("mint the implement App token for %s: %w", repository.Owner(), err)
 	}
-	github := requiredchecks.GitHub{Token: lease.Token, API: requiredchecks.RepositoryAPI(w.githubAPI, repository)}
+	github := githubrest.Client{Token: lease.Token, API: githubrest.RepositoryAPI(w.githubAPI, repository)}
 	var pull struct {
 		Base struct {
 			Ref string `json:"ref"`

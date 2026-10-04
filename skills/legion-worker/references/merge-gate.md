@@ -49,7 +49,9 @@ once the head moves, and a verdict that settles red there makes the round's deci
 changes naming the failing checks; a request for changes does not wait, since it stands whatever
 CI says and the issue leaves reviewing with it. The verdict is of the checks the base branch
 requires, the set READY checks: red when one of them failed, was cancelled or reported no result,
-and never red for a check the base branch does not require. A review of a head the handoff push
+and never red for a check the base branch does not require. Before your handoff head's own CI
+settles, a required check cancelled or missing in the code head's settlement leaves no verdict
+rather than a red, since your push can cancel that run. A review of a head the handoff push
 then replaces names a head the pull request no longer has. A round that writes none (the final
 approval of the `.legion/` deletion head) reviews the head as it is. The daemon moves the issue
 once both are in — the decision GitHub reports and your completion, in either order — so a

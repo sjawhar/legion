@@ -36,15 +36,15 @@ type SettlementCandidate struct {
 	CheckRuns  []record.AttemptRun `json:"checkRuns"`
 	Generation int64               `json:"generation"`
 	Snapshot   string              `json:"snapshot"`
-	Verdict    string              `json:"verdict"`
 	Failing    []string            `json:"failing"`
+	Cancelled  []string            `json:"cancelled"`
 }
 
 // CiOutcome is the effective result of a partial listener settlement combined with the stored
-// failures it omits.
+// failures and cancellations it omits.
 type CiOutcome struct {
-	Verdict string   `json:"verdict"`
-	Failing []string `json:"failing"`
+	Failing   []string `json:"failing"`
+	Cancelled []string `json:"cancelled"`
 }
 
 // ClassifySettlement decides whether a listener settlement may update the stored CI fence.
@@ -74,25 +74,27 @@ func ClassifySettlement(pr record.PullRequest, in SettlementCandidate) Settlemen
 	return SettlementNewer
 }
 
-// EffectiveOutcome preserves failures omitted by an incomplete listener observation.
+// EffectiveOutcome preserves the failures and cancellations an incomplete listener observation
+// omits: a check the stored settlement names failing or cancelled that the new one does not report
+// at all stays as it was.
 func EffectiveOutcome(pr record.PullRequest, in SettlementCandidate) CiOutcome {
-	reported := make(map[string]struct{}, len(in.CheckRuns)+len(in.Failing))
+	reported := make(map[string]struct{}, len(in.CheckRuns)+len(in.Failing)+len(in.Cancelled))
 	for _, run := range in.CheckRuns {
 		reported[run.Name] = struct{}{}
 	}
-	for _, name := range in.Failing {
-		reported[name] = struct{}{}
-	}
-
-	failing := make([]string, 0, len(in.Failing)+len(pr.Failing))
-	failing = append(failing, in.Failing...)
-	for _, name := range pr.Failing {
-		if _, found := reported[name]; !found {
-			failing = append(failing, name)
+	for _, names := range [][]string{in.Failing, in.Cancelled} {
+		for _, name := range names {
+			reported[name] = struct{}{}
 		}
 	}
-	if len(failing) != 0 {
-		return CiOutcome{Verdict: "red", Failing: failing}
+	kept := func(incoming, stored []string) []string {
+		names := append(make([]string, 0, len(incoming)+len(stored)), incoming...)
+		for _, name := range stored {
+			if _, found := reported[name]; !found {
+				names = append(names, name)
+			}
+		}
+		return names
 	}
-	return CiOutcome{Verdict: in.Verdict, Failing: []string{}}
+	return CiOutcome{Failing: kept(in.Failing, pr.Failing), Cancelled: kept(in.Cancelled, pr.Cancelled)}
 }

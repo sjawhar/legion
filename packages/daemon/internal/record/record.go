@@ -4,6 +4,7 @@ package record
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -152,13 +153,15 @@ type PullRequest struct {
 	// reopened, synchronize or closed; one with no clock never lowers it): an older one is a late
 	// redelivery and changes nothing (classify.LateLifecycle).
 	HeadUpdatedAt time.Time
-	// CheckedHead is the head whose CI settlement Verdict, Failing, CheckRuns, Generation and
-	// Snapshot record: the current head, or a head the current one replaced through pushes that
-	// changed only .legion/ (a handoff push starts no CI of its own, so the code head's settlement
-	// is the head's), or an earlier head whose settlement no longer counts (classify.HeadVerdict).
-	CheckedHead     string
-	Verdict         string
+	// CheckedHead is the head whose CI settlement Failing, Cancelled, CheckRuns, Generation and
+	// Snapshot record, empty while none is recorded: the current head, or a head the current one
+	// replaced through pushes that changed only .legion/ (a handoff push starts no CI of its own,
+	// so the code head's settlement is the head's), or an earlier head whose settlement no longer
+	// counts. What the settlement comes to is the required set's to say (classify.HeadVerdict).
+	CheckedHead string
+	// Failing and Cancelled are the checks the settlement names as failed and as cancelled.
 	Failing         []string
+	Cancelled       []string
 	FixAttempts     int
 	BlockedAttempts int
 	CheckRuns       []AttemptRun
@@ -185,6 +188,12 @@ type PullRequest struct {
 	// is open; a new generation deletes one that is not.
 	ReviewSeen ReviewOrder
 	State      PullRequestState
+}
+
+// RequiresExactly says whether names is the required set recorded: a set was read, and it is
+// names. Nil Required is a set never read, never the same as a read one, even an empty one.
+func (pr PullRequest) RequiresExactly(names []string) bool {
+	return pr.Required != nil && slices.Equal(pr.Required, names)
 }
 
 // PullRequestState is whether a pull request is open, merged, or closed unmerged.

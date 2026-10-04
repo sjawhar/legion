@@ -201,22 +201,22 @@ func replayFixture(function string, input json.RawMessage) ([]byte, error) {
 		return canonicalJSON(CompareAttemptSets(decoded.Stored, decoded.Incoming))
 	case "classifySettlement":
 		var decoded struct {
-			PR       fixturePullRequest  `json:"pr"`
-			Incoming SettlementCandidate `json:"incoming"`
+			PR       fixturePullRequest `json:"pr"`
+			Incoming fixtureCandidate   `json:"incoming"`
 		}
 		if err := decodeFixture(input, &decoded); err != nil {
 			return nil, err
 		}
-		return canonicalJSON(ClassifySettlement(decoded.PR.record(), decoded.Incoming))
+		return canonicalJSON(ClassifySettlement(decoded.PR.record(), decoded.Incoming.candidate()))
 	case "effectiveOutcome":
 		var decoded struct {
-			PR       fixturePullRequest  `json:"pr"`
-			Incoming SettlementCandidate `json:"incoming"`
+			PR       fixturePullRequest `json:"pr"`
+			Incoming fixtureCandidate   `json:"incoming"`
 		}
 		if err := decodeFixture(input, &decoded); err != nil {
 			return nil, err
 		}
-		return canonicalOutcome(EffectiveOutcome(decoded.PR.record(), decoded.Incoming))
+		return canonicalOutcome(EffectiveOutcome(decoded.PR.record(), decoded.Incoming.candidate()))
 	case "classifyPush":
 		var decoded PushPayload
 		if err := decodeFixture(input, &decoded); err != nil {
@@ -287,7 +287,7 @@ func replayGitHubDecision(input json.RawMessage) ([]byte, error) {
 			HandoffOnly: classification.HandoffOnly, Unknown: classification.Unknown,
 			ByReviewApp: login != "" && stringValue(payload, "pusher") == login})
 	case "checks":
-		candidate := SettlementCandidate{CheckRuns: attemptRuns(payload), Generation: int64(numberValue(payload, "generation")), Snapshot: stringValue(payload, "snapshot"), Verdict: stringValue(payload, "verdict"), Failing: stringSlice(payload, "failing")}
+		candidate := SettlementCandidate{CheckRuns: attemptRuns(payload), Generation: int64(numberValue(payload, "generation")), Snapshot: stringValue(payload, "snapshot"), Failing: stringSlice(payload, "failing")}
 		if settled, applied := ApplySettlement(pr, candidate); applied {
 			pr, _ = BlockFixAttempt(settled, 3)
 		}
@@ -313,8 +313,17 @@ func replayGitHubDecision(input json.RawMessage) ([]byte, error) {
 	return canonicalJSON(result)
 }
 
+// keptFixtureOutput is the part of a record's output the Go classifier answers for: the shipped
+// reducers' fix-attempt counts and gate, and of an effective outcome its failing checks, since the
+// Go classifier keeps no settlement verdict of its own (the base branch's required checks decide,
+// HeadVerdict).
 func keptFixtureOutput(function string, raw json.RawMessage) ([]byte, error) {
-	if function != "reduceDispatchEvent" && function != "reduceGithubEvent" {
+	keys := map[string][]string{
+		"reduceDispatchEvent": {"fixAttempts", "blockedAttempts", "gate"},
+		"reduceGithubEvent":   {"fixAttempts", "blockedAttempts", "gate"},
+		"effectiveOutcome":    {"failing"},
+	}[function]
+	if keys == nil {
 		return canonicalRecordJSON(raw)
 	}
 	var output map[string]json.RawMessage
@@ -322,7 +331,7 @@ func keptFixtureOutput(function string, raw json.RawMessage) ([]byte, error) {
 		return nil, err
 	}
 	kept := map[string]json.RawMessage{}
-	for _, key := range []string{"fixAttempts", "blockedAttempts", "gate"} {
+	for _, key := range keys {
 		if value, found := output[key]; found {
 			kept[key] = value
 		}
@@ -355,11 +364,21 @@ func canonicalJSON(value any) ([]byte, error) {
 }
 
 func canonicalOutcome(outcome CiOutcome) ([]byte, error) {
-	verdict := any(outcome.Verdict)
-	if outcome.Verdict == "" {
-		verdict = nil
-	}
-	return canonicalJSON(map[string]any{"verdict": verdict, "failing": outcome.Failing})
+	return canonicalJSON(map[string]any{"failing": outcome.Failing})
+}
+
+// fixtureCandidate is a record's settlement candidate as the shipped daemon wrote it, with the
+// verdict it derived from the same settlement, which the Go classifier keeps none of.
+type fixtureCandidate struct {
+	CheckRuns  []record.AttemptRun `json:"checkRuns"`
+	Generation int64               `json:"generation"`
+	Snapshot   string              `json:"snapshot"`
+	Verdict    string              `json:"verdict"`
+	Failing    []string            `json:"failing"`
+}
+
+func (c fixtureCandidate) candidate() SettlementCandidate {
+	return SettlementCandidate{CheckRuns: c.CheckRuns, Generation: c.Generation, Snapshot: c.Snapshot, Failing: c.Failing}
 }
 
 type fixturePullRequest struct {
@@ -409,11 +428,16 @@ func (fixture fixturePullRequest) record() record.PullRequest {
 	if fixture.PendingPush != nil {
 		pushes = []record.ClassifiedPush{*fixture.PendingPush}
 	}
-	// The shipped state's verdict is always its head's: a new head cleared it. The shipped daemon
-	// judged every check its settlement named, so the replay's base branch requires each check the
-	// state names failing: a red state is then red under the required set (HeadVerdict) too.
-	return record.PullRequest{Issue: fixture.Key, Repo: fixture.Repo, Number: fixture.Number, Branch: fixture.Branch, HeadSHA: fixture.HeadSHA, CheckedHead: fixture.HeadSHA,
-		HeadUpdatedAt: timestampJSON(fixture.HeadUpdatedAt), Verdict: fixture.Verdict, Failing: append([]string{}, fixture.Failing...),
+	// The shipped state's verdict is always its head's (a new head cleared it), and a state that
+	// records one has settled, so its head is the checked head. The shipped daemon judged every
+	// check its settlement named, so the replay's base branch requires each check the state names
+	// failing: a red state is then red under the required set (HeadVerdict) too.
+	checkedHead := ""
+	if fixture.Verdict != "" {
+		checkedHead = fixture.HeadSHA
+	}
+	return record.PullRequest{Issue: fixture.Key, Repo: fixture.Repo, Number: fixture.Number, Branch: fixture.Branch, HeadSHA: fixture.HeadSHA, CheckedHead: checkedHead,
+		HeadUpdatedAt: timestampJSON(fixture.HeadUpdatedAt), Failing: append([]string{}, fixture.Failing...),
 		FixAttempts: fixture.FixAttempts, BlockedAttempts: blocked, CheckRuns: checkRuns, Generation: generation, Snapshot: snapshot,
 		Pushes: pushes, HeadCounted: headCounted, PlannedRed: fixture.PlannedRed, Required: append([]string{}, fixture.Failing...)}
 }

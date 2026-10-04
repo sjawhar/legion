@@ -3,7 +3,6 @@ package workflow
 import (
 	"context"
 	"fmt"
-	"slices"
 	"strings"
 	"time"
 
@@ -28,7 +27,7 @@ func (e *Engine) checks(ctx context.Context, tx pgx.Tx, fact intake.PullRequestC
 	// A handoff push can start no CI of its own (GitHub's skip-checks trailer), so the settlement
 	// that stands for the head can be of the code head it replaced, arriving after it. A
 	// settlement is for the commit it names, never the head by default.
-	candidate := classify.SettlementCandidate{Head: fact.HeadSHA, CheckRuns: fact.CheckRuns, Generation: fact.Generation, Snapshot: fact.Snapshot, Verdict: fact.Verdict, Failing: fact.Failing}
+	candidate := classify.SettlementCandidate{Head: fact.HeadSHA, CheckRuns: fact.CheckRuns, Generation: fact.Generation, Snapshot: fact.Snapshot, Failing: fact.Failing, Cancelled: fact.Cancelled}
 	var stands bool
 	if *pr, stands = classify.SettlementFor(*pr, candidate); !stands {
 		return intake.Result{}, nil
@@ -49,7 +48,7 @@ func (e *Engine) checks(ctx context.Context, tx pgx.Tx, fact intake.PullRequestC
 // recorded changes nothing.
 func (e *Engine) requiredChecks(ctx context.Context, tx pgx.Tx, fact intake.RequiredChecks) (intake.Result, error) {
 	pr, err := e.pullRequest(ctx, tx, fact.Repo, fact.Number)
-	if err != nil || pr == nil || (pr.Required != nil && slices.Equal(pr.Required, fact.Names)) {
+	if err != nil || pr == nil || pr.RequiresExactly(fact.Names) {
 		return intake.Result{}, err
 	}
 	prior := *pr
@@ -109,8 +108,8 @@ func (e *Engine) decideChecks(ctx context.Context, tx pgx.Tx, pr *record.PullReq
 }
 
 // redAt is what the red verdict standing for the pull request's head says: the head, and each check
-// the base branch requires that is red there (classify.HeadChecks), one that reported no result
-// at all marked so, since it has no run to open.
+// the base branch requires that is red there (classify.HeadChecks), one that was cancelled or
+// reported no result at all marked so, since neither is a failure to open.
 func redAt(pr record.PullRequest) string {
 	checks, _ := classify.HeadChecks(pr)
 	var red []string
@@ -118,6 +117,8 @@ func redAt(pr record.PullRequest) string {
 		switch {
 		case check.Result == classify.Missing:
 			red = append(red, check.Name+" (no result)")
+		case check.Result == classify.Cancelled:
+			red = append(red, check.Name+" (cancelled)")
 		case check.Red():
 			red = append(red, check.Name)
 		}

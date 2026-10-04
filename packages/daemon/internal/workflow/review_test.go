@@ -109,29 +109,30 @@ func seedReview(t *testing.T, pool *pgxpool.Pool, verdict string) {
 	seedReviewOf(t, pool, "head", verdict)
 }
 
-// seedReviewOf seeds LEGION-208 in reviewing, its pull request's head at head with verdict
-// settled on it, and its reviewer's round not yet completed. The base branch requires the one
-// check, ci, every settlement these tests apply names.
+// seedReviewOf seeds LEGION-208 in reviewing, its pull request's head at head with the settlement
+// verdict names on it ("green", "red", or "" for none yet), and its reviewer's round not yet
+// completed. The base branch requires the one check, ci, every settlement these tests apply names.
 func seedReviewOf(t *testing.T, pool *pgxpool.Pool, head, verdict string) {
 	t.Helper()
 	seedReviewRequiring(t, pool, head, verdict, "ci")
 }
 
-// seedReviewRequiring is seedReviewOf on a base branch that requires the checks named: a green
-// seeded settlement passed each of them, a red one failed the first.
+// seedReviewRequiring is seedReviewOf on a base branch that requires the checks named: the head's
+// own settlement, when verdict names one, ran each of them, and in a red one each failed.
 func seedReviewRequiring(t *testing.T, pool *pgxpool.Pool, head, verdict string, required ...string) {
 	t.Helper()
 	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root",
 		Phase: phase.Reviewing, Generation: 1, Status: "needs_review", Rank: "U"})
 	pr := record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
-		Number: 42, Branch: "legion/LEGION-208", HeadSHA: head, Verdict: verdict, Required: required}
+		Number: 42, Branch: "legion/LEGION-208", HeadSHA: head, Required: required}
 	if verdict != "" {
+		pr.CheckedHead = head
 		for i, name := range required {
 			pr.CheckRuns = append(pr.CheckRuns, record.AttemptRun{Name: name, ID: int64(i + 1)})
 		}
 	}
 	if verdict == "red" {
-		pr.Failing = []string{required[0]}
+		pr.Failing = append([]string{}, required...)
 	}
 	seedPR(t, pool, pr)
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim"})
@@ -164,6 +165,8 @@ func TestAnApprovalStandsForEveryHeadThatChangesNothingButTheHandoff(t *testing.
 		want  phase.Phase
 		// unsettled seeds the approved head with its checks still running, rather than green.
 		unsettled bool
+		// quiet is a round the architect is told nothing of: no review-stuck notice.
+		quiet bool
 	}{
 		{name: "approval, then the reviewer's handoff push", steps: []string{"approve head", "sync", "push handoff", "green", "complete"}, want: phase.Retro},
 		{name: "the reviewer's handoff push, then the approval", steps: []string{"sync", "push handoff", "green", "approve head", "complete"}, want: phase.Retro},
@@ -206,11 +209,15 @@ func TestAnApprovalStandsForEveryHeadThatChangesNothingButTheHandoff(t *testing.
 		{name: "a code push delivered after the branch was reset to the approved head, then the reviewer's handoff push", steps: []string{"approve head", "sync", "sync head-3", "push code", "push handoff forced from=head-3 head", "sync head", "green head", "complete", "push handoff from=head head-4", "sync head-4", "green head-4"}, want: phase.Retro},
 		// A handoff push can carry GitHub's skip-checks trailer and start no CI, so the code head's
 		// settlement stands for the handoff head that replaced it, whenever it arrives. A required
-		// check that ended cancelled is red, as READY refuses it: the handoff head's own cancelled
-		// run, a cancelled re-settlement of the code head, or the handoff head's cancelled run that
-		// outranks the code head's later green, each leaves the approved round to the reviewer.
+		// check cancelled in the handoff head's own run is red, as READY refuses it, and leaves the
+		// approved round to the reviewer. One cancelled in the code head's run carried to the
+		// handoff head is not: the reviewer's own full-CI push is what cancels it where a required
+		// workflow cancels in progress, so the handoff head's own settlement decides, and until it
+		// lands the round waits and tells nobody.
 		{name: "the handoff head's own run cancelled after the code head's green", steps: []string{"green head", "approve head", "sync", "push handoff", "cancelled", "complete"}, want: phase.Reviewing, unsettled: true},
-		{name: "a cancelled re-settlement of the code head after its green", steps: []string{"green head", "approve head", "sync", "push handoff", "cancelled head", "complete"}, want: phase.Reviewing, unsettled: true},
+		{name: "a cancelled re-settlement of the code head after its green", steps: []string{"green head", "approve head", "sync", "push handoff", "cancelled head", "complete"}, want: phase.Reviewing, unsettled: true, quiet: true},
+		{name: "the code head's run cancelled by the reviewer's handoff push", steps: []string{"approve head", "sync", "push handoff", "cancelled head", "complete"}, want: phase.Reviewing, unsettled: true, quiet: true},
+		{name: "the code head's run cancelled by the reviewer's handoff push, then the handoff head's own green", steps: []string{"approve head", "sync", "push handoff", "cancelled head", "complete", "green"}, want: phase.Retro, unsettled: true, quiet: true},
 		{name: "the handoff head's own run cancelled before the code head's green", steps: []string{"approve head", "sync", "push handoff", "cancelled", "green head", "complete"}, want: phase.Reviewing, unsettled: true},
 		{name: "the code head's checks settle after the reviewer's handoff head", steps: []string{"approve head", "sync", "push handoff", "green head", "complete"}, want: phase.Retro, unsettled: true},
 		{name: "the code head's checks settle before the reviewer's handoff head, its push last", steps: []string{"green head", "approve head", "sync", "push handoff", "complete"}, want: phase.Retro, unsettled: true},
@@ -306,15 +313,14 @@ func TestAnApprovalStandsForEveryHeadThatChangesNothingButTheHandoff(t *testing.
 						ChangedPaths: &paths, Truncated: marker, Forced: forcedMarker, Pusher: "legion-reviewer[bot]"}
 				case "green":
 					fact = intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: head,
-						CheckRuns: []record.AttemptRun{{Name: "ci", ID: 2}}, Generation: 2, Snapshot: "green-" + head, Verdict: "green", Failing: []string{}}
+						CheckRuns: []record.AttemptRun{{Name: "ci", ID: 2}}, Generation: 2, Snapshot: "green-" + head, Failing: []string{}}
 				case "red":
 					fact = intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: head,
-						CheckRuns: []record.AttemptRun{{Name: "ci", ID: 3}}, Generation: 2, Snapshot: "red-" + head, Verdict: "red", Failing: []string{"ci"}}
+						CheckRuns: []record.AttemptRun{{Name: "ci", ID: 3}}, Generation: 2, Snapshot: "red-" + head, Failing: []string{"ci"}}
 				case "cancelled":
-					// Every check ended cancelled and none failed: the listener's cancelled group,
-					// which the settlement names failing (intake.PullRequestChecks).
+					// Every check ended cancelled and none failed: the listener's cancelled group.
 					fact = intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: head,
-						CheckRuns: []record.AttemptRun{{Name: "ci", ID: 4}}, Generation: 3, Snapshot: "cancelled-" + head, Verdict: "red", Failing: []string{"ci"}}
+						CheckRuns: []record.AttemptRun{{Name: "ci", ID: 4}}, Generation: 3, Snapshot: "cancelled-" + head, Failing: []string{}, Cancelled: []string{"ci"}}
 				case "complete":
 					fact = intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim",
 						Summary: "reviewed", Commit: "review-1"}
@@ -326,6 +332,9 @@ func TestAnApprovalStandsForEveryHeadThatChangesNothingButTheHandoff(t *testing.
 			}
 			if got := issuePhase(t, pool); got != tc.want {
 				t.Fatalf("the issue is in %s, want %s", got, tc.want)
+			}
+			if got := reviewStuckNotices(t, pool); tc.quiet && len(got) != 0 {
+				t.Fatalf("the architect was told the round was stuck: %+v, want nothing", got)
 			}
 		})
 	}
@@ -484,7 +493,7 @@ func TestAReopenedPullRequestKeepsItsNewestReview(t *testing.T) {
 		intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, ID: 12, State: "approved", CommitID: "head", Body: "approved"},
 		intake.PullRequestOpened{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head"},
 		intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: "head", CheckRuns: []record.AttemptRun{{Name: "ci", ID: 3}},
-			Generation: 3, Snapshot: "green-again", Verdict: "green", Failing: []string{}},
+			Generation: 3, Snapshot: "green-again", Failing: []string{}},
 		intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, ID: 11, State: "changes_requested", CommitID: "head", Body: "redelivered"},
 		intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", Summary: "reviewed", Commit: "review-1"},
 	} {
@@ -596,7 +605,7 @@ func TestARetryOfARoundWithARedCodeHeadSendsTheWorkBack(t *testing.T) {
 		intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", Summary: "reviewed", Commit: "review-1"},
 		intake.ClaimFailed{Issue: "LEGION-208", Role: claim.RoleReviewer},
 		intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: "c0ffee", CheckRuns: []record.AttemptRun{{Name: "lint", ID: 1}},
-			Generation: 1, Snapshot: "red-c0ffee", Verdict: "red", Failing: []string{"lint"}},
+			Generation: 1, Snapshot: "red-c0ffee", Failing: []string{"lint"}},
 		intake.RetryOrEscalate{Issue: "LEGION-208", Decision: intake.RetryDecision},
 	} {
 		if result := apply(fmt.Sprintf("red-%d", i), fact); result.Refusal != nil {
@@ -749,7 +758,7 @@ func TestARoundItsApprovalCannotEndTellsTheArchitect(t *testing.T) {
 	}
 	settle := func(head, verdict string, generation int64, failing ...string) intake.Fact {
 		return intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: head, CheckRuns: []record.AttemptRun{{Name: "lint", ID: generation}},
-			Generation: generation, Snapshot: fmt.Sprintf("%s-%s-%d", verdict, head, generation), Verdict: verdict, Failing: append([]string{}, failing...)}
+			Generation: generation, Snapshot: fmt.Sprintf("%s-%s-%d", verdict, head, generation), Failing: append([]string{}, failing...)}
 	}
 	const handoff, code = ".legion/review.json", ".legion/review.json\nsrc/widget.go"
 	for _, tc := range []struct {

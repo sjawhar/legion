@@ -8,45 +8,52 @@ import (
 )
 
 // Only a check the base branch requires decides whether CI is red at a head, under the rule READY
-// refuses by: failed or cancelled (the settlement's failing names) or missing from a settled head is
-// red, a pending check is not red yet, and nothing decides while the required set is unread.
+// refuses by: failed, cancelled or missing from the head's own settlement is red, a pending check
+// is not red yet, and nothing decides while the required set is unread. A settlement carried back
+// across a .legion/-only push still predicts a failure, but a cancellation or a gap there is the
+// run's, not the code's, so it is pending until the head's own settlement decides it.
 func TestHeadVerdictJudgesOnlyTheChecksTheBaseBranchRequires(t *testing.T) {
-	// The live shape: the repository's one required gate passed, and two workflow_dispatch lanes
-	// and an advisory review check failed beside it.
-	settled := record.PullRequest{HeadSHA: "code", CheckedHead: "code", Verdict: "red",
-		CheckRuns: []record.AttemptRun{{Name: "pr-checks-result", ID: 1}, {Name: "dev-apply / dev-chain-tripwire", ID: 2}, {Name: "review", ID: 3}},
-		Failing:   []string{"dev-apply / dev-chain-tripwire", "dev-apply / staging-e2e / staging-e2e", "review"}}
+	// The live shape: the repository's one required gate passed, two workflow_dispatch lanes and an
+	// advisory review check failed beside it, and an image build was cancelled.
+	settled := record.PullRequest{HeadSHA: "code", CheckedHead: "code",
+		CheckRuns: []record.AttemptRun{{Name: "pr-checks-result", ID: 1}, {Name: "dev-apply / dev-chain-tripwire", ID: 2}, {Name: "review", ID: 3}, {Name: "build-image", ID: 4}},
+		Failing:   []string{"dev-apply / dev-chain-tripwire", "dev-apply / staging-e2e / staging-e2e", "review"},
+		Cancelled: []string{"build-image"}}
+	carried := func(pr record.PullRequest) record.PullRequest {
+		pr.HeadSHA = "handoff"
+		pr.Pushes = []record.ClassifiedPush{{SHA: "handoff", Before: "code", HandoffOnly: true}}
+		return pr
+	}
+	requiring := func(names ...string) func(record.PullRequest) record.PullRequest {
+		return func(pr record.PullRequest) record.PullRequest {
+			pr.Required = append([]string{}, names...)
+			return pr
+		}
+	}
 	for _, tc := range []struct {
 		name     string
 		pr       func(record.PullRequest) record.PullRequest
 		verdict  string
 		standing []Standing
 	}{
-		{"reds the base branch does not require", func(pr record.PullRequest) record.PullRequest {
-			pr.Required = []string{"pr-checks-result"}
-			return pr
-		}, "green", []Standing{{"pr-checks-result", Success}}},
-		{"a required check that failed or was cancelled", func(pr record.PullRequest) record.PullRequest {
-			pr.Required = []string{"pr-checks-result", "review"}
-			return pr
-		}, "red", []Standing{{"pr-checks-result", Success}, {"review", failed}}},
-		{"a required check the settled head reports no result for", func(pr record.PullRequest) record.PullRequest {
-			pr.Required = []string{"lint", "pr-checks-result"}
-			return pr
-		}, "red", []Standing{{"lint", Missing}, {"pr-checks-result", Success}}},
-		{"a base branch that requires no check", func(pr record.PullRequest) record.PullRequest {
-			pr.Required = []string{}
-			return pr
-		}, "green", []Standing{}},
-		{"a required set never read", func(pr record.PullRequest) record.PullRequest {
-			return pr
-		}, "", nil},
+		{"reds the base branch does not require", requiring("pr-checks-result"), "green", []Standing{{"pr-checks-result", Success}}},
+		{"a required check that failed", requiring("pr-checks-result", "review"), "red", []Standing{{"pr-checks-result", Success}, {"review", Failed}}},
+		{"a required check cancelled in the head's own run", requiring("build-image", "pr-checks-result"), "red", []Standing{{"build-image", Cancelled}, {"pr-checks-result", Success}}},
+		{"a required check the settled head reports no result for", requiring("lint", "pr-checks-result"), "red", []Standing{{"lint", Missing}, {"pr-checks-result", Success}}},
+		{"a base branch that requires no check", requiring(), "green", []Standing{}},
+		{"a required set never read", func(pr record.PullRequest) record.PullRequest { return pr }, "", nil},
 		{"the code head's settlement carried to the handoff head that replaced it", func(pr record.PullRequest) record.PullRequest {
-			pr.Required = []string{"pr-checks-result"}
-			pr.HeadSHA = "handoff"
-			pr.Pushes = []record.ClassifiedPush{{SHA: "handoff", Before: "code", HandoffOnly: true}}
-			return pr
+			return carried(requiring("pr-checks-result")(pr))
 		}, "green", []Standing{{"pr-checks-result", Success}}},
+		{"a failure carried to the handoff head", func(pr record.PullRequest) record.PullRequest {
+			return carried(requiring("review")(pr))
+		}, "red", []Standing{{"review", Failed}}},
+		{"a cancellation carried to the handoff head", func(pr record.PullRequest) record.PullRequest {
+			return carried(requiring("build-image", "pr-checks-result")(pr))
+		}, "", []Standing{{"build-image", Pending}, {"pr-checks-result", Success}}},
+		{"a gap carried to the handoff head", func(pr record.PullRequest) record.PullRequest {
+			return carried(requiring("lint", "pr-checks-result")(pr))
+		}, "", []Standing{{"lint", Pending}, {"pr-checks-result", Success}}},
 		{"a head a push that may change code made, which no settlement stands for yet", func(pr record.PullRequest) record.PullRequest {
 			pr.Required = []string{"pr-checks-result"}
 			pr.HeadSHA = "fix"

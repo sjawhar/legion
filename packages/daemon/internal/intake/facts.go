@@ -147,11 +147,10 @@ func (PullRequestReview) isFact() {}
 // CheckRun is one latest-run identity in a checks settlement.
 type CheckRun = record.AttemptRun
 
-// PullRequestChecks is Envoy's settled checks observation. Failing is every check the settlement
-// names as not passed: failed (any failing conclusion) or cancelled, since a required check that
-// was cancelled keeps the head from merging as a failed one does. Verdict is "red" when it names
-// any and "green" otherwise; which of them is red for the workflow is the base branch's required
-// set's to say (classify.HeadVerdict).
+// PullRequestChecks is Envoy's settled checks observation: the latest run of each check, and the
+// checks the settlement names as failed (any failing conclusion) and as cancelled, kept apart since
+// a cancellation is a property of the run - a later push can cancel it - where a failure is of the
+// code. What they come to is the base branch's required set's to say (classify.HeadVerdict).
 type PullRequestChecks struct {
 	Repo       string
 	Number     int
@@ -159,8 +158,8 @@ type PullRequestChecks struct {
 	CheckRuns  []record.AttemptRun
 	Generation int64
 	Snapshot   string
-	Verdict    string
 	Failing    []string
+	Cancelled  []string
 }
 
 func (PullRequestChecks) isFact() {}

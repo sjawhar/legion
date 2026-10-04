@@ -11,6 +11,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/classify"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
+	"github.com/sjawhar/legion/daemon/internal/githubrest"
 	"github.com/sjawhar/legion/daemon/internal/requiredchecks"
 )
 
@@ -47,7 +48,7 @@ func readyChecks(ctx context.Context, workspace string, issue paneIssue, stdout 
 	if err := json.NewDecoder(response.Body).Decode(&credential); err != nil || credential.Token == "" {
 		return fmt.Errorf("the daemon returned no GitHub token")
 	}
-	github := requiredchecks.GitHub{Token: credential.Token, API: requiredchecks.RepositoryAPI(os.Getenv("LEGION_GITHUB_API_URL"), repository)}
+	github := githubrest.Client{Token: credential.Token, API: githubrest.RepositoryAPI(os.Getenv("LEGION_GITHUB_API_URL"), repository)}
 	var pull struct {
 		Head struct {
 			SHA string `json:"sha"`
@@ -115,7 +116,7 @@ func workspaceRepository(workspace string) (ghrepo.Repository, error) {
 // headCheckResults is each check and commit status reported on sha, by name: success, pending, or
 // the failing conclusion or state (classify.Judge's results). A check run that ended neutral or
 // skipped counts as a success, as GitHub counts it for a required check.
-func headCheckResults(ctx context.Context, github requiredchecks.GitHub, sha string) (map[string]string, error) {
+func headCheckResults(ctx context.Context, github githubrest.Client, sha string) (map[string]string, error) {
 	results := map[string]string{}
 	for page := 1; ; page++ {
 		var runs struct {
