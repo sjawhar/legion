@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Added
+
+- A `dispatch-brainstorming` skill ships beside `dispatch` and `dispatch-first` (LEGION-475). In a
+  session with Dispatch it replaces superpowers' `brainstorming` and `writing-plans`: the design
+  conversation runs in the issue's spec, the first version holds only established facts and every
+  ready question as a decision block, each answer is folded in, approval is requested once with
+  nothing new in it, and the plan is the issue's `plan.md` document, never a repository file. The
+  `dispatch-first` skill every session with Dispatch carries sends each design conversation and plan
+  to it, even when the user invokes superpowers' `brainstorming` by name, and the `dispatch` skill's
+  "Design changes are brainstormed here" points at it. The `dispatch` skill's brainstorming
+  reference (`references/brainstorming.md`) is gone; its process is in the new skill.
+
 ### Changed
 
 - The root architect's post-approval spec-edit rule is canonical in
