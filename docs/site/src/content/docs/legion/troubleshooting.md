@@ -192,8 +192,9 @@ These arrive as messages on the Dispatch issue, and the architect is told:
   check or workflow, or the spec version that needs approval.
 
 An issue back in `in_progress` after its `READY` had a required check or workflow turn red on the
-head while it awaited its merge: the daemon sent it back to the implementer and told the architect
-which checks, and the work comes back through testing, review and a new `READY`.
+head itself while it awaited its merge: the daemon sent it back to the implementer, told the
+architect which checks, and told the project's `merge_queue_role`, when one is set, that the
+`READY` is withdrawn; the work comes back through testing, review and a new `READY`.
 
 The pull request's state as the daemon sees it, its `checksVerdict` judged only by the checks and
 workflows the base branch requires:
