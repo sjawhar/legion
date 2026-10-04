@@ -126,7 +126,7 @@ reorder it the way [Issue reads](#board-rank-priority-and-assignee-on-a-read) de
 
 ## Board rank, priority, and assignee on a read
 
-Issue reads include `rank`, the server-owned ordering key used by project boards; reorder through `PATCH /api/v1/issues/{key}` with `{"rank": {"before": "<key>", "after": "<key>"}}`, either neighbor optional and both in the issue's project. A bearer caller also names its own session in that body, `"actor": {"kind": "session", "id": "<your session id>"}`, or the server refuses with `ACTOR_KIND`. They also include nullable coarse priority (`P0` highest through `P3` lowest) and `assignee`: the lowercase GitHub login of the human who answers the issue's asks, or `null` when nobody holds it. `dispatch_read` of an issue prints it as `Assignee: <login>` or `Assignee: unassigned`.
+Issue reads include `rank`, the server-owned ordering key used by project boards; reorder through `PATCH /api/v1/issues/{key}` with `{"rank": {"before": "<key>", "after": "<key>"}}`, either neighbor optional and both in the issue's project. A bearer caller also names its own session in that body, `"actor": {"kind": "session", "id": "<your session id>"}`, or the server refuses with `ACTOR_KIND`. They also include nullable coarse priority (`P0` highest through `P3` lowest) and `assignee`: the lowercase email of the person who answers the issue's asks, or `null` when nobody holds it. `dispatch_read` of an issue prints it as `Assignee: <email>` or `Assignee: unassigned`.
 
 ## Reading a project's backlog
 

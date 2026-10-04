@@ -24,8 +24,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
-
-	"github.com/sjawhar/envoy/internal/dispatch/auth"
 )
 
 // fakeAssetStore answers from assets, or with err, and records every key it is asked for.
@@ -119,7 +117,7 @@ func TestStaticHandlerRetainedAssets(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			handler, context := newTestRouter(t, &memoryUserStore{users: map[string]*auth.User{}}, nil)
+			handler, context := newTestRouter(t)
 			context.WebDistDir = webDist
 			if tc.store != nil {
 				context.AssetStore = tc.store
@@ -361,7 +359,7 @@ func (c slowClient) Write(p []byte) (int, error) {
 // same file served from the local build.
 func TestStaticHandlerDeliversAWholeRetainedAssetToASlowClient(t *testing.T) {
 	body := bytes.Repeat([]byte("/"), 1<<20)
-	handler, context := newTestRouter(t, &memoryUserStore{users: map[string]*auth.User{}}, nil)
+	handler, context := newTestRouter(t)
 	context.WebDistDir = t.TempDir()
 	context.AssetStore = &s3AssetStore{client: streamingS3{body: body, stallAfter: -1}, bucket: "retained"}
 
@@ -378,7 +376,7 @@ func TestStaticHandlerDeliversAWholeRetainedAssetToASlowClient(t *testing.T) {
 // A store that stops sending part-way through an object is a store failure, answered before any
 // header is committed: never a 200 carrying a year's immutable caching and a truncated body.
 func TestStaticHandlerAnswers502ForARetainedAssetThatStallsMidBody(t *testing.T) {
-	handler, context := newTestRouter(t, &memoryUserStore{users: map[string]*auth.User{}}, nil)
+	handler, context := newTestRouter(t)
 	context.WebDistDir = t.TempDir()
 	context.AssetStore = &s3AssetStore{client: streamingS3{body: bytes.Repeat([]byte("/"), 64), stallAfter: 12}, bucket: "retained"}
 
@@ -401,7 +399,7 @@ func TestStaticHandlerLogsARetainedAssetStoreFailure(t *testing.T) {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
 	t.Cleanup(func() { slog.SetDefault(previous) })
 
-	handler, context := newTestRouter(t, &memoryUserStore{users: map[string]*auth.User{}}, nil)
+	handler, context := newTestRouter(t)
 	context.WebDistDir = t.TempDir()
 	context.AssetStore = &fakeAssetStore{err: errors.New("object store unavailable")}
 
@@ -497,7 +495,7 @@ func TestStaticHandlerCapsRetainedBytesHeldAtOnce(t *testing.T) {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
 	t.Cleanup(func() { slog.SetDefault(previous) })
 
-	handler, context := newTestRouter(t, &memoryUserStore{users: map[string]*auth.User{}}, nil)
+	handler, context := newTestRouter(t)
 	context.WebDistDir = t.TempDir()
 	store := &countingStore{object: bytes.Repeat([]byte("/"), int(maxRetainedAssetSize))}
 	context.AssetStore = store
@@ -538,7 +536,7 @@ func TestStaticHandlerCapsRetainedBytesHeldAtOnce(t *testing.T) {
 
 // A client that goes away mid-response gives its bytes back, so the next request is served.
 func TestStaticHandlerReleasesRetainedBytesWhenAClientGoesAway(t *testing.T) {
-	handler, context := newTestRouter(t, &memoryUserStore{users: map[string]*auth.User{}}, nil)
+	handler, context := newTestRouter(t)
 	context.WebDistDir = t.TempDir()
 	store := &countingStore{object: bytes.Repeat([]byte("/"), int(maxRetainedAssetSize))}
 	context.AssetStore = store
@@ -562,7 +560,7 @@ func TestStaticHandlerReleasesRetainedBytesWhenAClientGoesAway(t *testing.T) {
 
 // A failed read gives back what it reserved: more failures than the cap holds objects, then a hit.
 func TestStaticHandlerReleasesRetainedBytesWhenTheStoreFails(t *testing.T) {
-	handler, context := newTestRouter(t, &memoryUserStore{users: map[string]*auth.User{}}, nil)
+	handler, context := newTestRouter(t)
 	context.WebDistDir = t.TempDir()
 	failing := &fakeAssetStore{err: errors.New("object store unavailable")}
 	context.AssetStore = failing

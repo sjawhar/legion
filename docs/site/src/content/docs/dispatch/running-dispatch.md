@@ -5,7 +5,7 @@ sidebar:
   order: 7
 ---
 
-Dispatch is one Go program. It serves the web app, the HTTP API, live documents, and GitHub
+Dispatch is one Go program. It serves the web app, the HTTP API, live documents, and Google
 sign-in. Its source is `packages/envoy/cmd/dispatch`, and the web app it serves is built from
 `packages/dispatch`. The container image `ghcr.io/sjawhar/legion/envoy` carries it as
 `/usr/local/bin/envoy-dispatch`.
@@ -16,9 +16,9 @@ sign-in. Its source is `packages/envoy/cmd/dispatch`, and the web app it serves 
 | --- | --- | --- |
 | Postgres | `DATABASE_URL` | Required. Dispatch keeps everything here and applies its own migrations at start. Leave `pool_max_conns` out of the URL; Dispatch refuses it. |
 | A shared agent token | `DISPATCH_AGENT_TOKEN` | Required to start. A fallback credential for agents; agents normally use personal tokens made in Settings. |
-| GitHub sign-in | `DISPATCH_APP_CLIENT_ID`, `DISPATCH_APP_CLIENT_SECRET`, `DISPATCH_APP_PEM_B64` | A GitHub App. Without it the server starts, but sign-in and the GitHub features answer `503`. |
-| The browser address | `DISPATCH_SERVER_URL` | The exact address people type, such as `https://dispatch.internal.example`. The GitHub App's callback URL is this address followed by `/auth/callback`. |
-| Who may sign in | `DISPATCH_ALLOWED_LOGINS` | A comma-separated list of GitHub logins. Required for the default cookie sign-in. |
+| Google sign-in | `DISPATCH_SIGNIN_ISSUER`, `DISPATCH_SIGNIN_CLIENT_ID`, `DISPATCH_SIGNIN_CLIENT_SECRET`, `DISPATCH_SIGNIN_GROUP` | The OpenID Connect sign-in pool people sign in to with Google Workspace, Dispatch's app client in it and that client's secret, and the pool group a person must be in. Required for the default cookie sign-in, all four together. |
+| The browser address | `DISPATCH_SERVER_URL` | The exact address people type, such as `https://dispatch.internal.example`. The sign-in pool's app client lists this address followed by `/auth/callback` as a callback URL. |
+| The GitHub App | `DISPATCH_APP_CLIENT_ID`, `DISPATCH_APP_PEM_B64` | Without it the server starts, but the web app's GitHub reads answer `503` and architecture sources cannot be saved. |
 | A stable session key | `DISPATCH_SIGNING_KEY` | Signs sign-in cookies. When unset, Dispatch creates one under `~/.local/share/dispatch`; keep that directory on a volume, or every restart signs everyone out. |
 | An Envoy listener | `ENVOY_URL` | Where the Agents page finds live agent sessions. Defaults to `http://127.0.0.1:9020`. |
 | NATS | `NATS_URLS`, `NATS_NKEY_SEED_FILE` | Where Dispatch publishes its events for agents. The Agents page's live view also needs it. Dispatch refuses a NATS server on another machine unless `ENVOY_ALLOW_REMOTE_NATS=1`. Set `DISPATCH_NATS_DISABLED=1` to run without it. |
@@ -29,9 +29,11 @@ server, is in [Configuration](/legion/dispatch/reference/configuration/).
 When neither `NATS_URLS` nor `DISPATCH_NATS_DISABLED=1` is set, Dispatch reads the NATS address
 from `~/.config/opencode/envoy.json`, the file agents use, so set one of them explicitly.
 
-People sign in with the GitHub App by default. To sign people in through a reverse proxy that
-already knows who they are, set `DISPATCH_IDENTITY=header:<Header-Name>`. Serve Dispatch over
-HTTPS. `DISPATCH_INSECURE_COOKIE=1` is only for trying it over plain HTTP on your own machine.
+People sign in with Google Workspace through the sign-in pool by default, and Dispatch names each
+person by their lowercase email. `DISPATCH_IDENTITY=header:<Header-Name>` names people by a request
+header instead; it is for tests and local harnesses only, needs `DISPATCH_IDENTITY_HEADER_TRUSTED=1`,
+and refuses every `DISPATCH_SIGNIN_*` setting. Serve Dispatch over HTTPS.
+`DISPATCH_INSECURE_COOKIE=1` is only for trying it over plain HTTP on your own machine.
 
 ## Running it on your machine
 
@@ -56,7 +58,7 @@ From a checkout of this repository, with Docker, Bun, and Go installed:
    ```sh
    DATABASE_URL='postgres://postgres:dispatch@127.0.0.1:55432/dispatch?sslmode=disable' \
    DISPATCH_AGENT_TOKEN='<a long random string>' \
-   DISPATCH_ALLOWED_LOGINS='<your GitHub login>' \
+   DISPATCH_DEV_SIGNIN=1 \
    DISPATCH_SERVER_URL=http://127.0.0.1:8766 \
    DISPATCH_LISTEN_HOST=127.0.0.1 \
    DISPATCH_INSECURE_COOKIE=1 \
@@ -66,15 +68,15 @@ From a checkout of this repository, with Docker, Bun, and Go installed:
    ```
 
    `DISPATCH_WEB_DIST` is where the web app was built. `DISPATCH_NATS_DISABLED=1` keeps this run off
-   any message bus.
+   any message bus. `DISPATCH_DEV_SIGNIN=1` lets you sign in without a sign-in pool.
 
-4. Open `http://127.0.0.1:8766`. To sign in with GitHub, add your GitHub App's three settings to
-   step 3.
+4. Open `http://127.0.0.1:8766/auth/_dev/signin?login=<your email>`. It signs in anyone by the email
+   it names, with no sign-in pool. Dispatch accepts it only on your own machine, with every address
+   in the setup on that machine, and that server needs a database of its own.
 
-To look around without a GitHub App, add `DISPATCH_DEV_SIGNIN=1` to step 3, then open
-`http://127.0.0.1:8766/auth/_dev/signin?login=<your GitHub login>`. It signs in any login on the
-allowlist without GitHub. Dispatch accepts it only on your own machine, with every address in the
-setup on that machine, and that server needs a database of its own.
+To sign in through a real sign-in pool instead, replace `DISPATCH_DEV_SIGNIN=1` in step 3 with the
+four `DISPATCH_SIGNIN_*` settings, and list `http://127.0.0.1:8766/auth/callback` as a callback URL
+of the pool's app client.
 
 ## First steps after it starts
 

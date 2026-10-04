@@ -106,7 +106,7 @@ func newHarness(t *testing.T) *harness {
 	webhook := githubapptest.NewWebhook(t, &key.PublicKey, clientID, nil)
 	c := &clock{now: time.Now().UTC().Truncate(time.Second)}
 	webhook.SetClock(c.Now)
-	client, err := githubapp.New(&auth.AppConfig{ClientID: clientID, ClientSecret: "secret", PEM: pemText}, webhook.URL())
+	client, err := githubapp.New(&auth.AppConfig{ClientID: clientID, PEM: pemText}, webhook.URL())
 	if err != nil {
 		t.Fatalf("App client: %v", err)
 	}

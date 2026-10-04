@@ -2,7 +2,7 @@
 //
 // The App itself is created once at github.com/settings/apps/new (see
 // packages/envoy/cmd/dispatch/README.md for the setup checklist). The
-// resulting client_id, client_secret, and private key (PEM)
+// resulting client ID and private key (PEM)
 // are written by hand into ~/.local/share/dispatch/app.json — dispatch only
 // reads this file, never creates or modifies it.
 package auth
@@ -17,17 +17,17 @@ import (
 	"strconv"
 )
 
-// AppConfig is the persisted Envoy App credentials.
+// AppConfig is the persisted Envoy App credentials. The client ID names the App in its JWT and
+// the private key signs it; Dispatch signs nobody in through the App, so it holds no client secret.
 type AppConfig struct {
-	ID           int64    `json:"id,omitempty"`
-	Slug         string   `json:"slug,omitempty"`
-	Name         string   `json:"name,omitempty"`
-	HTMLURL      string   `json:"htmlUrl,omitempty"`
-	ClientID     string   `json:"clientId"`
-	ClientSecret string   `json:"clientSecret"`
-	PEM          string   `json:"pem,omitempty"`
-	OwnerLogin   string   `json:"ownerLogin,omitempty"`
-	Permissions  AppPerms `json:"permissions,omitempty"`
+	ID          int64    `json:"id,omitempty"`
+	Slug        string   `json:"slug,omitempty"`
+	Name        string   `json:"name,omitempty"`
+	HTMLURL     string   `json:"htmlUrl,omitempty"`
+	ClientID    string   `json:"clientId"`
+	PEM         string   `json:"pem,omitempty"`
+	OwnerLogin  string   `json:"ownerLogin,omitempty"`
+	Permissions AppPerms `json:"permissions,omitempty"`
 }
 
 // AppPerms mirrors the GitHub Apps permissions object. We surface only the
@@ -55,8 +55,8 @@ func ReadApp(path string) (*AppConfig, error) {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
-	if cfg.ClientID == "" || cfg.ClientSecret == "" {
-		return nil, fmt.Errorf("%s missing required fields (clientId, clientSecret)", path)
+	if cfg.ClientID == "" {
+		return nil, fmt.Errorf("%s missing required field clientId", path)
 	}
 	return &cfg, nil
 }
@@ -68,7 +68,6 @@ func ReadApp(path string) (*AppConfig, error) {
 // Required:
 //
 //	DISPATCH_APP_CLIENT_ID
-//	DISPATCH_APP_CLIENT_SECRET
 //
 // Optional:
 //
@@ -87,10 +86,7 @@ func LoadAppFromEnv(getenv func(string) string) (*AppConfig, error) {
 	if clientID == "" {
 		return nil, nil
 	}
-	clientSecret := getenv("DISPATCH_APP_CLIENT_SECRET")
-	if clientSecret == "" {
-		return nil, fmt.Errorf("DISPATCH_APP_CLIENT_ID set but DISPATCH_APP_CLIENT_SECRET missing")
-	}
+
 	pem := ""
 	if b64 := getenv("DISPATCH_APP_PEM_B64"); b64 != "" {
 		decoded, err := base64.StdEncoding.DecodeString(b64)
@@ -108,11 +104,10 @@ func LoadAppFromEnv(getenv func(string) string) (*AppConfig, error) {
 		appID = n
 	}
 	return &AppConfig{
-		ID:           appID,
-		Slug:         getenv("DISPATCH_APP_SLUG"),
-		Name:         getenv("DISPATCH_APP_NAME"),
-		ClientID:     clientID,
-		ClientSecret: clientSecret,
-		PEM:          pem,
+		ID:       appID,
+		Slug:     getenv("DISPATCH_APP_SLUG"),
+		Name:     getenv("DISPATCH_APP_NAME"),
+		ClientID: clientID,
+		PEM:      pem,
 	}, nil
 }
