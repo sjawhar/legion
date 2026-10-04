@@ -37,6 +37,16 @@ import (
 
 func TestMain(m *testing.M) { os.Exit(storetest.Main(m)) }
 
+// sharedAgentTokens is a DISPATCH_AGENT_TOKEN setting parsed as the server parses it at boot.
+func sharedAgentTokens(t testing.TB, setting string) *auth.SharedAgentTokens {
+	t.Helper()
+	tokens, err := auth.ParseSharedAgentTokens(setting)
+	if err != nil {
+		t.Fatalf("ParseSharedAgentTokens(%q): %v", setting, err)
+	}
+	return tokens
+}
+
 // testServerOptions configure the server an API test drives.
 type testServerOptions struct {
 	defaultProject string
@@ -133,7 +143,7 @@ func newTestServer(t *testing.T, options testServerOptions) (http.Handler, *stor
 	deps, err := NewDeps(DepsInput{
 		Store:            database,
 		Identity:         headerIdentity(database),
-		AgentToken:       "agent-token",
+		AgentTokens:      sharedAgentTokens(t, "agent-token"),
 		DefaultProject:   options.defaultProject,
 		ServerURL:        "https://dispatch.example",
 		Docs:             documentService,
@@ -1764,7 +1774,7 @@ func TestRevokedCookieIsRejectedAcrossDispatchSurfaces(t *testing.T) {
 	})
 	t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
 	deps, err := NewDeps(DepsInput{
-		Store: database, Identity: cookieIdentity, AgentToken: "agent-token",
+		Store: database, Identity: cookieIdentity, AgentTokens: sharedAgentTokens(t, "agent-token"),
 		Docs: documentService, Events: broker,
 	})
 	if err != nil {
@@ -2043,12 +2053,12 @@ func newTestHandlerWithBroker(t *testing.T) (http.Handler, *store.Store, *events
 	})
 	seedPeople(t, database, "alice", "bob")
 	deps, err := NewDeps(DepsInput{
-		Store:      database,
-		Identity:   headerIdentity(database),
-		AgentToken: "agent-token",
-		ServerURL:  "https://dispatch.example",
-		Docs:       documentService,
-		Events:     broker,
+		Store:       database,
+		Identity:    headerIdentity(database),
+		AgentTokens: sharedAgentTokens(t, "agent-token"),
+		ServerURL:   "https://dispatch.example",
+		Docs:        documentService,
+		Events:      broker,
 	})
 	if err != nil {
 		t.Fatalf("new API dependencies: %v", err)

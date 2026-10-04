@@ -320,7 +320,7 @@ const ActorHeader = "X-Dispatch-Actor"
 
 func (s *Service) requestActor(r *http.Request) (model.Actor, error) {
 	if token, present := auth.BearerToken(r); present {
-		if !auth.MatchesSharedAgentToken(token, s.agentToken) {
+		if !auth.MatchesSharedAgentToken(r, token, s.agentTokens) {
 			return model.Actor{}, errors.New("invalid document bearer token")
 		}
 		var supplied model.Actor

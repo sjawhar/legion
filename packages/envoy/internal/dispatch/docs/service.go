@@ -17,6 +17,7 @@ import (
 	"github.com/reearth/ygo/persistence"
 	"github.com/reearth/ygo/provider/websocket"
 
+	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
@@ -49,7 +50,7 @@ type Deps struct {
 	Persistence       VersionedStore
 	Events            *events.Broker
 	Identity          identity.Identity
-	AgentToken        string
+	AgentTokens       *auth.SharedAgentTokens
 	ServerURL         string
 	Settle            time.Duration
 	MarkWait          time.Duration
@@ -76,7 +77,7 @@ type Service struct {
 	persistence       VersionedStore
 	events            *events.Broker
 	identity          identity.Identity
-	agentToken        string
+	agentTokens       *auth.SharedAgentTokens
 	serverURL         string
 	settle            time.Duration
 	markWait          time.Duration
@@ -510,7 +511,7 @@ func New(deps Deps) *Service {
 		persistence:       persist,
 		events:            deps.Events,
 		identity:          deps.Identity,
-		agentToken:        deps.AgentToken,
+		agentTokens:       deps.AgentTokens,
 		serverURL:         strings.TrimSuffix(deps.ServerURL, "/"),
 		settle:            settle,
 		markWait:          markWait,
