@@ -230,8 +230,8 @@ Beside the records, the broker keeps an append-only `audit` table with one row p
 a session reads a grant, naming the secrets released), `grant.revoked` (naming, under
 `withheld`, the secrets an operator's revoke withheld from the session, and, on each other grant of
 the session that revoke ended, the withheld secrets that grant held) and `grant.withheld` (an
-operator's revoke of a grant that had already ended, naming under `withheld` the secrets it
-withheld from the session). Each row names its actor:
+operator's revoke of a grant already revoked, naming under `withheld` the secrets it withheld from
+the session). Each row names its actor:
 `human:<email>`, `session:<enrollment id>`, `launcher:<credential id>` or `broker`. No record, event
 or audit row ever holds a secret value. [Operating the broker](/legion/broker/operate/#the-audit-record)
 shows how to read them.

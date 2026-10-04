@@ -1971,7 +1971,7 @@ session whose request got one of the newly withheld names automatically, each wi
 names under `withheld`, and each other ended grant's lists the withheld names it held. A name
 already withheld ends nothing, since its first withhold ended every grant that got it without
 asking and one approved since stands. The withhold is the session's, so the operator's revoke of a
-grant that had already ended still runs it, recorded as one `grant.withheld` row when it withholds
+grant already revoked still runs it, recorded as one `grant.withheld` row when it withholds
 something new; any other revoke of an already-revoked grant, and an operator's that withholds
 nothing new, is a no-op, writing no second audit row. Another person's revoke (a grant's
 approver who is not the operator) ends that grant alone and withholds nothing, as does a session
