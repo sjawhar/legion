@@ -31,13 +31,17 @@ type Ledger struct {
 	events   []model.Event
 	// live holds, per document, the writes this transaction made to it; order is the order it
 	// first wrote them in.
-	live  map[string]*liveWrite
-	order []string
-	// captures are the authors each version this transaction wrote credits (authorCapture).
-	captures []authorCapture
+	live     map[string]*liveWrite
+	order    []string
+	versions []ledgerVersion
 	// rebuilds are the documents this transaction rebuilds (RebuildDocument), whose rooms refuse
 	// loads until it ends, committed or not.
 	rebuilds []string
+}
+
+type ledgerVersion struct {
+	artifactID string
+	version    model.Version
 }
 
 type ledgerContextKey struct{}
@@ -120,10 +124,10 @@ func (l *Ledger) commit(ctx context.Context) error {
 		return err
 	}
 	l.credit()
-	for _, capture := range l.captures {
-		capture.release()
+	for _, written := range l.versions {
+		l.service.commitVersion(written.artifactID, written.version)
 	}
-	l.captures = nil
+	l.versions = nil
 	return nil
 }
 
@@ -134,7 +138,10 @@ func (l *Ledger) Discard() {
 	for _, artifactID := range l.order {
 		l.service.finishLiveWrite(l.live[artifactID])
 	}
-	l.captures = nil
+	for _, written := range l.versions {
+		l.service.discardPendingVersion(written.artifactID, written.version)
+	}
+	l.versions = nil
 	l.endRebuilds()
 }
 
@@ -149,32 +156,31 @@ func (l *Ledger) endRebuilds() {
 	l.rebuilds = nil
 }
 
-// WroteVersion records a version of artifactID that the caller wrote itself in this transaction,
-// outside the document service, over the transaction's write to the document - an upload, whose
-// version credits its uploader alone, to whom that write is credited. When the write changed the
-// document, Commit leaves the write out of the document's pending authors, since the version holds
-// and credits it, and clears every entry credited before the write last read the room
-// (liveWrite.forkSeq), whether the replacement removed that change or kept it: no later version
-// credits it. An entry credited after that read, for a change the write never read, stays pending
-// for the next version. An upload that changed nothing clears nothing, and a version of a document
-// the transaction seeded (SeedText) has no write to hold and no pending author to clear.
-func (l *Ledger) WroteVersion(artifactID string) {
+// recordVersion records a version this transaction wrote, which its commit releases
+// (commitVersion). The version holds every change the transaction's write to the document has
+// made so far and credits their authors, so the commit does not credit them again (credit) unless
+// the write changes the document after it (creditLiveWrite).
+func (l *Ledger) recordVersion(artifactID string, version model.Version) {
+	l.versions = append(l.versions, ledgerVersion{artifactID: artifactID, version: version})
+	if write := l.liveWriteFor(artifactID); write != nil {
+		write.versioned = true
+	}
+}
+
+// WroteVersion records version, of artifactID, which the caller wrote itself in this transaction,
+// outside the document service, over the transaction's own write to the document - an upload,
+// whose version credits its uploader alone. Once this transaction commits, it clears every author
+// credited no later than the write's last read of the room (liveWrite.forkSeq), whether its
+// replacement removed that edit or kept it; an edit credited after that read stays pending for
+// the next version (commitVersion). An upload that changed nothing has no write to hold and
+// nothing to clear.
+func (l *Ledger) WroteVersion(artifactID string, version model.Version) {
 	write := l.liveWriteFor(artifactID)
 	if write == nil || len(write.updates) == 0 {
 		return
 	}
-	l.recordVersion(write.state.captureThrough(write.forkSeq, 0), write)
-}
-
-// recordVersion records a version this transaction wrote: capture, through which its commit
-// releases the room's pending entries, and write, the transaction's write to the document, every
-// change of which so far the version holds and credits, so that the commit does not credit it
-// again (credit).
-func (l *Ledger) recordVersion(capture authorCapture, write *liveWrite) {
-	l.captures = append(l.captures, capture)
-	if write != nil {
-		write.versioned = true
-	}
+	l.service.rememberPendingVersion(artifactID, version, versionPending{through: write.forkSeq})
+	l.recordVersion(artifactID, version)
 }
 
 func (l *Ledger) liveWriteFor(artifactID string) *liveWrite {
@@ -207,13 +213,12 @@ func (l *Ledger) addLiveWrite(write *liveWrite) {
 }
 
 // credit credits each content change of a committed transaction to its room, for the room's
-// next version, unless a version the transaction wrote holds every change of the write and
-// credits its authors already (liveWrite.versioned). It also registers the ask ids the write
-// introduced to its actor (registerAskAuthors) and the author carried forward for each one a
-// stamp of the write's own renamed (registerCarriedAskAuthors), before this commit's own publish
-// can reach any observer, so attribution does not depend on whichever update's observer ends up
-// rendering the publish first (LEGION-503). It runs before the transaction's own versions are
-// released.
+// next version. It also registers the ask ids the write introduced to its actor
+// (registerAskAuthors) and the author carried forward for each one a stamp of the write's own
+// renamed (registerCarriedAskAuthors), before this commit's own publish can reach any observer,
+// so attribution does not depend on whichever update's observer ends up rendering the publish
+// first (LEGION-503). It runs before the transaction's own versions are released, which clears
+// the authors those versions already name.
 func (l *Ledger) credit() {
 	for _, artifactID := range l.order {
 		write := l.live[artifactID]
@@ -223,8 +228,9 @@ func (l *Ledger) credit() {
 		state := l.service.room(artifactID)
 		state.mu.Lock()
 		if !write.versioned {
-			for _, actor := range write.credits {
-				state.creditAuthor(actor)
+			for key, actor := range write.credits {
+				state.creditSeq++
+				state.pending[key] = pendingAuthor{actor: actor, seq: state.creditSeq}
 			}
 		}
 		state.lastActor = write.actor

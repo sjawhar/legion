@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"weak"
 
 	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/provider/websocket"
@@ -54,10 +55,11 @@ type liveWrite struct {
 	// transaction's updates applied, brought up to date before each operation (forkLive).
 	clientID crdt.ClientID
 	fork     *crdt.Doc
-	// forkedFrom is the room document fork was last brought up to date from, and forkSeq the room's
-	// credit sequence just before it was read for that: each author credited by then made a change
-	// the room held, which the fork took in (authors.go).
-	forkedFrom *crdt.Doc
+	// forkedFrom is the room document fork was last brought up to date from, held weakly: a
+	// write open across a room's eviction must not be what keeps its document resident past it.
+	// forkSeq is the room's credit sequence just before it was read for that: each author
+	// credited by then made a change the room held, which the fork took in (Ledger.WroteVersion).
+	forkedFrom weak.Pointer[crdt.Doc]
 	forkSeq    uint64
 	updates    [][]byte
 	// tree and markdown are the document as this transaction's latest operation left it,
@@ -204,7 +206,7 @@ func (s *Service) forkLive(ctx context.Context, write *liveWrite) (*crdt.Doc, er
 	var incremental bool
 	err := s.srv.Apply(ctx, write.artifactID, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
 		room = doc
-		incremental = write.fork != nil && doc == write.forkedFrom
+		incremental = write.fork != nil && doc == write.forkedFrom.Value()
 		var since crdt.StateVector
 		if incremental {
 			since = write.fork.StateVector()
@@ -218,11 +220,11 @@ func (s *Service) forkLive(ctx context.Context, write *liveWrite) (*crdt.Doc, er
 	if err != nil {
 		// A fork an update failed to reach is in an unknown state, and so is the rendering taken
 		// from it: the next operation rebuilds both.
-		write.fork, write.forkedFrom = nil, nil
+		write.fork, write.forkedFrom = nil, weak.Pointer[crdt.Doc]{}
 		write.dropRendering()
 		return nil, err
 	}
-	write.fork, write.forkedFrom, write.forkSeq = fork, room, seq
+	write.fork, write.forkedFrom, write.forkSeq = fork, weak.Make(room), seq
 	return fork, nil
 }
 
@@ -326,38 +328,34 @@ func (s *Service) joinRead(ctx context.Context, artifactID string) (*crdt.Doc, e
 	return nil, nil
 }
 
-// docView runs read against the document the caller sees: the transaction's fork when there is
-// one (joinRead), otherwise a copy of the live room, which it loads, taken under the room's lock
-// (snapshotDocument): the room's peers and the service write it while read walks it.
-func (s *Service) docView(ctx context.Context, artifactID string, read func(*crdt.Doc)) error {
+// docTree is the tree of the document the caller sees: the transaction's fork's when there is one
+// (joinRead), otherwise the live room's, which it loads, read as of one moment (liveTree): the
+// room's peers and the service write the room while a walk reads it.
+func (s *Service) docTree(ctx context.Context, artifactID string) (*pmdoc.Node, error) {
 	fork, err := s.joinRead(ctx, artifactID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if fork != nil {
-		read(fork)
-		return nil
+		return treeOf(fork)
 	}
-	var copyErr error
+	var tree *pmdoc.Node
+	var treeErr error
 	err = s.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
-		var snapshot *crdt.Doc
-		if snapshot, copyErr = snapshotDocument(doc); copyErr == nil {
-			read(snapshot)
-		}
+		tree, treeErr = s.liveTree(artifactID, doc)
 	})
-	if copyErr != nil {
-		return copyErr
+	if treeErr != nil {
+		return nil, treeErr
 	}
-	if errors.Is(err, websocket.ErrNoChanges) {
-		return nil
+	if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
+		return nil, err
 	}
-	return err
+	return tree, nil
 }
 
 // creditLiveWrite records whom a joined content change is credited to once its transaction
 // commits: its actor alone, as a service mutation that reaches the room directly is credited
-// (creditContentChange). A browser connected to the room made none of it. No version the
-// transaction wrote before holds this change.
+// (creditContentChange). A browser connected to the room made none of it.
 func (s *Service) creditLiveWrite(write *liveWrite, actor model.Actor) {
 	if write.credits == nil {
 		write.credits = make(map[string]model.Actor)
@@ -410,7 +408,11 @@ func (s *Service) publishLiveWrite(write *liveWrite) {
 //
 // The read is a point-in-time statement, as the spec says it must be: srv.Apply holds no room
 // lock across its callback, so a deletion landing after it is not reported, and a deletion
-// landing before it is. It is deliberately taken without a Yjs transaction of its own: an empty
+// landing before it is. That point is the room as of one moment under its document lock
+// (readLive), since the room's peers write it while the check walks it, and the walk
+// (pmdoc.AuthoredTextRuns) takes no lock. The room's update observer has already brought its
+// replica up to date with this write, so the check reads the write's own blocks rather than a copy
+// of the whole document. It is deliberately taken without a Yjs transaction of its own: an empty
 // transaction still fires the room's update observers, so it would put an empty update through
 // ygo's persistence worker - a durable doc_updates row - on every edit.
 func (s *Service) recordPublishedLoss(write *liveWrite) {
@@ -418,13 +420,20 @@ func (s *Service) recordPublishedLoss(write *liveWrite) {
 		write.lost, write.lostVerdict = nil, true
 		return
 	}
-	doc := s.srv.GetDoc(write.artifactID)
-	if doc == nil {
+	live := s.srv.GetDoc(write.artifactID)
+	if live == nil {
 		return
 	}
-	lost, err := write.loss.lost(doc)
-	if err != nil {
-		slog.Warn("dispatch: read a published write's text back from its room", "room", write.artifactID, "error", err)
+	var lost []int
+	var lossErr error
+	if err := s.readLive(write.artifactID, live, func(doc *crdt.Doc) {
+		lost, lossErr = write.loss.lost(doc)
+	}); err != nil {
+		slog.Warn("dispatch: copy a published write's room to read its text back", "room", write.artifactID, "error", err)
+		return
+	}
+	if lossErr != nil {
+		slog.Warn("dispatch: read a published write's text back from its room", "room", write.artifactID, "error", lossErr)
 		return
 	}
 	write.lost, write.lostVerdict = lost, true

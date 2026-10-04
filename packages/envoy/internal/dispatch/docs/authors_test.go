@@ -346,7 +346,7 @@ func TestAnAskInTheRoomBeforeASettlementsTakeKeepsItsAuthor(t *testing.T) {
 // through the room's own (possibly stale) contentMarkdown bookkeeping.
 func currentLiveMarkdown(t *testing.T, service *Service, artifactID string) string {
 	t.Helper()
-	tree, err := lockedTreeOf(service.srv.GetDoc(artifactID))
+	tree, err := service.liveTree(artifactID, service.srv.GetDoc(artifactID))
 	if err != nil {
 		t.Fatalf("read live tree: %v", err)
 	}

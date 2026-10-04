@@ -992,7 +992,11 @@ func pendingAuthors(service *Service, artifactID string) []model.Actor {
 	state := service.room(artifactID)
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	return actorSlice(state.takeAuthors().authors)
+	authors := make(map[string]model.Actor, len(state.pending))
+	for key, entry := range state.pending {
+		authors[key] = entry.actor
+	}
+	return actorSlice(authors)
 }
 
 // setHeadingID returns a live edit that gives every heading id, as the editor's heading plugin
@@ -1365,7 +1369,7 @@ func TestBackfillStampsClosedIssueDocument(t *testing.T) {
 }
 
 // A closed issue's document stays readable: GET /blocks reads it as GET /text does
-// (readDocument), rather than asking the room, whose inject gate refuses a closed issue, and
+// (readTree), rather than asking the room, whose inject gate refuses a closed issue, and
 // failing the room over that refusal.
 func TestAClosedIssuesDocumentReadsItsBlocksWithoutFailingItsRoom(t *testing.T) {
 	database := storetest.Open(t)
@@ -2557,7 +2561,8 @@ func (s *blockingFirstAppendStore) AppendUpdateWithClass(ctx context.Context, ro
 func (s *Service) recordActor(room string, actor model.Actor) {
 	state := s.room(room)
 	state.mu.Lock()
-	state.creditAuthor(actor)
+	state.creditSeq++
+	state.pending[actorKey(actor)] = pendingAuthor{actor: actor, seq: state.creditSeq}
 	state.lastActor = new(actor)
 	state.mu.Unlock()
 }
@@ -2787,13 +2792,14 @@ func browserReplaceText(t *testing.T, service *Service, artifactID, markdown str
 	editLiveTree(t, service, artifactID, func(*pmdoc.Node) *pmdoc.Node { return written })
 }
 
-// liveTree reads the resident tree under the room lock.
+// liveTree reads the resident room as of one moment under its document lock (Service.liveTree),
+// inside the Apply that loads and holds the room.
 func liveTree(t *testing.T, service *Service, artifactID string) *pmdoc.Node {
 	t.Helper()
 	var tree *pmdoc.Node
 	err := service.srv.Apply(context.Background(), artifactID, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
 		var readErr error
-		tree, readErr = pmdoc.Read(doc.GetXmlFragment(fragmentName))
+		tree, readErr = service.liveTree(artifactID, doc)
 		if readErr != nil {
 			t.Errorf("read live tree: %v", readErr)
 		}

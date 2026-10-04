@@ -158,9 +158,9 @@ func (e *ErrInvalidAskBlock) Error() string { return e.Reason.Error() }
 func (e *ErrInvalidAskBlock) Unwrap() error { return e.Reason }
 
 // SettlementActor writes what a document decides on its own rather than any one person: the
-// retraction of an ask whose block left the document, and a settlement derived from ambiguous
-// browser content with no known latest editor. A service write's new ask and an approval move name
-// the actor that introduced them instead.
+// retraction of an ask whose block left the document, and an approval request's move when the
+// version credits no writer or several. Crediting the room's last editor instead would put a
+// change nobody made in their name.
 var SettlementActor = model.Actor{Kind: "system", ID: "document-settlement"}
 
 // SettlementRetractionReason opens the reason of every retraction settlement writes, followed by
