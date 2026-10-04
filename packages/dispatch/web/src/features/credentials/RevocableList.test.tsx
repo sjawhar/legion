@@ -8,13 +8,16 @@ import { GrantsSection } from "./GrantsSection";
 import { MachineLoginsSection } from "./MachineLoginsSection";
 
 /** One section rendered through `RevocableList`, with its one listed row stubbed and its revoke
- *  call replaced by `revoke`. */
+ *  call replaced by `revoke`; `clearList` makes the list answer no rows from then on, and `empty`
+ *  is what the section shows then. */
 interface Section {
+  empty: string;
   heading: string;
   refusal: string;
   rowId: string;
   section: () => ReactNode;
   stub: (revoke: (id: string) => Promise<void>) => {
+    clearList: () => void;
     revokeCalls: () => unknown[][];
     restore: () => void;
   };
@@ -22,6 +25,7 @@ interface Section {
 
 const sections: Section[] = [
   {
+    empty: "No live grants.",
     heading: "Live grants",
     refusal: "only the grant's approver or its enrollment's operator may revoke it",
     rowId: "grant-1",
@@ -48,6 +52,7 @@ const sections: Section[] = [
       });
       const spy = spyOn(api, "revokeCredentialGrant").mockImplementation(revoke);
       return {
+        clearList: () => list.mockResolvedValue({ grants: [] }),
         restore: () => {
           list.mockRestore();
           spy.mockRestore();
@@ -57,6 +62,7 @@ const sections: Section[] = [
     },
   },
   {
+    empty: "No live machine logins.",
     heading: "Your machine logins",
     refusal: "only the person who approved the machine login may revoke it",
     rowId: "cred-devbox",
@@ -76,6 +82,7 @@ const sections: Section[] = [
       });
       const spy = spyOn(api, "revokeMachineLogin").mockImplementation(revoke);
       return {
+        clearList: () => list.mockResolvedValue({ credentials: [] }),
         restore: () => {
           list.mockRestore();
           spy.mockRestore();
@@ -156,6 +163,23 @@ for (const section of sections) {
     try {
       fireEvent.click(await renderSection(section));
       expect(await screen.findByText(section.refusal)).toBeDefined();
+    } finally {
+      cleanup();
+      confirm.mockRestore();
+      stubs.restore();
+    }
+  });
+
+  test(`${section.heading}: a revoke refreshes the list, so the revoked row leaves it`, async () => {
+    // The revoke answers as the broker would: once it succeeds, the list no longer holds the row.
+    const stubs = section.stub(async () => stubs.clearList());
+    const confirm = spyOn(window, "confirm").mockReturnValue(true);
+    try {
+      fireEvent.click(await renderSection(section));
+      const region = within(screen.getByRole("region", { name: section.heading }));
+      expect(await region.findByText(section.empty)).toBeDefined();
+      expect(region.queryByRole("button", { name: "Revoke" })).toBeNull();
+      expect(stubs.revokeCalls()).toEqual([[section.rowId]]);
     } finally {
       cleanup();
       confirm.mockRestore();
