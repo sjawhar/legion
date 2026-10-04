@@ -438,9 +438,11 @@ func TestThreadsResolveWithoutAGrantNamesGh(t *testing.T) {
 // In the reviewer's pane the command asks the daemon to resolve, since GitHub refuses the review App
 // a resolve on the implementer's pull request: it sends the pane's grant and the pull request it
 // was given, prints each outcome the daemon answers as the command always prints it, and redeems
-// no token of its own. A refusal from the daemon fails the command with the daemon's words, and a
-// thread GitHub refused the daemon fails it after the outcomes before it, as the command's own path
-// prints them.
+// no token of its own. It prints the count of threads the daemon withheld, those holding the
+// implementer's pending draft, and fails when that count is all the daemon answered, so a reviewer
+// shown no thread does not read it as done. A refusal from the daemon fails the command with the
+// daemon's words, and a thread GitHub refused the daemon fails it after the outcomes before it, as
+// the command's own path prints them.
 func TestThreadsResolveInTheReviewersPaneAsksTheDaemon(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -452,11 +454,16 @@ func TestThreadsResolveInTheReviewersPaneAsksTheDaemon(t *testing.T) {
 	}{
 		{"the daemon resolves", http.StatusOK,
 			`{"threads":[{"url":"https://github.test/thread/bot","resolved":"the Legion reviewer's acceptance of a bot's thread","newestBy":"legion-reviewer"},` +
-				`{"url":"https://github.test/thread/own","leftOpen":"not an acceptance","newestBy":"legion-implementer"}]}`, 0,
+				`{"url":"https://github.test/thread/own","leftOpen":"not an acceptance","newestBy":"legion-implementer"}],"withheld":0}`, 0,
 			"resolved https://github.test/thread/bot — the Legion reviewer's acceptance of a bot's thread\nleft open https://github.test/thread/own — newest reply by legion-implementer is not an acceptance\n", ""},
-		{"no thread is unresolved", http.StatusOK, `{"threads":[]}`, 0, "no unresolved threads\n", ""},
+		{"no thread is unresolved", http.StatusOK, `{"threads":[],"withheld":0}`, 0, "no unresolved threads\n", ""},
+		{"the daemon resolves beside a thread it withheld", http.StatusOK,
+			`{"threads":[{"url":"https://github.test/thread/bot","resolved":"the Legion reviewer's acceptance of a bot's thread","newestBy":"legion-reviewer"}],"withheld":1}`, 0,
+			"resolved https://github.test/thread/bot — the Legion reviewer's acceptance of a bot's thread\n1 unresolved thread holds an implementer's pending draft and was not examined\n", ""},
+		{"every unresolved thread is withheld", http.StatusOK, `{"threads":[],"withheld":2}`, 1,
+			"2 unresolved threads hold an implementer's pending draft and were not examined\n", ""},
 		{"GitHub refuses a thread after one resolved", http.StatusOK,
-			`{"threads":[{"url":"https://github.test/thread/bot","resolved":"the Legion reviewer's acceptance of a bot's thread","newestBy":"legion-reviewer"}],` +
+			`{"threads":[{"url":"https://github.test/thread/bot","resolved":"the Legion reviewer's acceptance of a bot's thread","newestBy":"legion-reviewer"}],"withheld":0,` +
 				`"refused":{"url":"https://github.test/thread/second","error":"GitHub: Resource not accessible by integration"}}`, 1,
 			"resolved https://github.test/thread/bot — the Legion reviewer's acceptance of a bot's thread\n",
 			"legion threads resolve: resolveReviewThread failed for https://github.test/thread/second: GitHub: Resource not accessible by integration\n"},

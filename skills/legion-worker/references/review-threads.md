@@ -19,8 +19,15 @@ Every path it cites is in sjawhar/legion.
   GitHub Apps"). In the reviewer's pane (`LEGION_ROLE=reviewer`), `legion threads resolve` asks
   the daemon instead (`POST /legion/v1/threads/resolve`), which resolves as the implementer's App
   only the threads a bot outside Legion's role Apps opened whose newest submitted comment is the
-  reviewer's `Accepted:`, on the pull request of the reviewer's own issue, and prints the same
-  lines; the reviewer never holds the implementer's token.
+  reviewer's `Accepted:`, on the pull request of the reviewer's own issue. It answers each
+  thread's outcome, which the command prints as the same lines, except a thread whose newest
+  comment is a draft in the implementer's pending review: GitHub shows that draft only to the
+  implementer's App, as which the daemon reads, so the daemon answers only how many such threads
+  there are (`withheld`), never their URL or author. The command prints that count when it is not
+  zero (`<n> unresolved threads hold an implementer's pending draft and were not examined`) and
+  exits 1 when the count is all the daemon answered, so `no unresolved threads` means there are
+  none. Those threads wait on the implementer submitting its pending review: report them to the
+  architect. The reviewer never holds the implementer's token.
   When `LEGION_GRANT_FILE` or `LEGION_GRANT` is set, use `legion threads resolve --pr <number> --repo <owner>/<repo>`.
   When neither is set, add `--gh` to that command, which applies the fallback's rule below through
   your own `gh`; where no `legion` command is installed, use `gh api graphql` with the session's

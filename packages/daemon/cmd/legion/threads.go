@@ -97,16 +97,16 @@ func runResolveThreads(ctx context.Context, args []string, stdout, stderr io.Wri
 	outcomes, err := reviewthreads.Resolve(ctx, call, repository, number, func(thread reviewthreads.Thread) (reviewthreads.Acceptance, string) {
 		return reviewthreads.Resolution(thread, apps)
 	})
-	return printOutcomes(outcomes, err, stdout, stderr)
+	return printOutcomes(outcomes, 0, err, stdout, stderr)
 }
 
 // resolveThroughDaemon is `legion threads resolve` in the reviewer's pane: the daemon resolves, as
 // the implement App, each thread on the pull request of the issue the pane's grant is for that a
 // bot outside Legion's role Apps opened and whose newest submitted comment is the reviewer's own
-// Accepted: (POST /legion/v1/threads/resolve), and answers each unresolved thread's outcome, and
-// the thread GitHub refused to resolve when it refused one, which fails the command after the
-// outcomes before it, as the command's own path prints them. The reviewer never holds the
-// implement App's token.
+// Accepted: (POST /legion/v1/threads/resolve), and answers each unresolved thread's outcome but for
+// the threads holding the implement App's pending draft, which it only counts, and the thread
+// GitHub refused to resolve when it refused one, which fails the command after the outcomes before
+// it, as the command's own path prints them. The reviewer never holds the implement App's token.
 func resolveThroughDaemon(ctx context.Context, repository ghrepo.Repository, number int, stdout, stderr io.Writer) int {
 	grant, err := grantFromEnvironment()
 	if err != nil {
@@ -127,20 +127,30 @@ func resolveThroughDaemon(ctx context.Context, repository ghrepo.Repository, num
 	if refused := answer.Refused; refused != nil {
 		err = &reviewthreads.Refused{URL: refused.URL, Err: errors.New(refused.Error)}
 	}
-	return printOutcomes(answer.Threads, err, stdout, stderr)
+	return printOutcomes(answer.Threads, answer.Withheld, err, stdout, stderr)
 }
 
-// printOutcomes prints each thread's outcome, or that there was no unresolved thread, and err,
-// which fails the command.
-func printOutcomes(outcomes []reviewthreads.Outcome, err error, stdout, stderr io.Writer) int {
+// printOutcomes prints each thread's outcome, then the count of threads withheld as holding the
+// implementer's pending draft, or that there was no unresolved thread, and err, which fails the
+// command. Withheld threads alone fail it too: the caller was shown no thread, which is not done.
+func printOutcomes(outcomes []reviewthreads.Outcome, withheld int, err error, stdout, stderr io.Writer) int {
 	for _, outcome := range outcomes {
 		fmt.Fprintln(stdout, outcome)
+	}
+	switch {
+	case withheld == 1:
+		fmt.Fprintln(stdout, "1 unresolved thread holds an implementer's pending draft and was not examined")
+	case withheld > 1:
+		fmt.Fprintf(stdout, "%d unresolved threads hold an implementer's pending draft and were not examined\n", withheld)
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, "legion threads resolve: %v\n", err)
 		return 1
 	}
 	if len(outcomes) == 0 {
+		if withheld > 0 {
+			return 1
+		}
 		fmt.Fprintln(stdout, "no unresolved threads")
 	}
 	return 0
