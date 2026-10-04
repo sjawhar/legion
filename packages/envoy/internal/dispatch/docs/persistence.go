@@ -239,6 +239,20 @@ func clearSettlementPending(ctx context.Context, tx pgx.Tx, room string) error {
 	return nil
 }
 
+// settlementPending reports whether room owes a settlement, without reading which authors it owes
+// (pendingSettlementCredit, which also decodes the row's credit, serves a caller that needs that
+// too). Shutdown's drain uses this to skip settling a document that already has none owed, rather
+// than spending its budget repeating work a settlement already finished.
+func settlementPending(ctx context.Context, q Queryer, room string) (bool, error) {
+	var pending bool
+	if err := q.QueryRow(ctx, `
+		select exists(select 1 from doc_settlements_pending where artifact_id = $1)
+	`, room).Scan(&pending); err != nil {
+		return false, fmt.Errorf("read the document's pending settlement: %w", err)
+	}
+	return pending, nil
+}
+
 // ListVersions returns persisted incremental update metadata newest-first.
 func (p *PgVersioned) ListVersions(ctx context.Context, room string) ([]persistence.VersionMeta, error) {
 	if err := ctx.Err(); err != nil {
