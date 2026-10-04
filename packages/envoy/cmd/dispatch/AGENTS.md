@@ -1,7 +1,8 @@
 # Dispatch HTTP Server (Go)
 
-`cmd/dispatch` serves the Dispatch dashboard, native API, document rooms, GitHub
-OAuth, and the GitHub REST/GraphQL proxy.
+`cmd/dispatch` serves the Dispatch dashboard, native API, document rooms, Google
+sign-in through the sign-in pool, and the read-only GitHub proxy the web app's
+GitHub reads go through as the GitHub App.
 
 ## Startup and persistence
 
@@ -12,7 +13,7 @@ carrying `pool_max_conns` is refused at open rather than silently overridden —
 applies embedded migrations from `internal/dispatch/store/migrations` (refusing
 the whole set, applying nothing, when `pgmigrate.Load` refuses it, and bounding
 every migration's lock waits at `pgmigrate.LockTimeout`; README "Database
-migrations"), then starts HTTP serving. The Postgres store contains users,
+migrations"), then starts HTTP serving. The Postgres store contains people,
 native issues, artifacts, document updates, and the event outbox.
 `envoy-dispatch census` (`cmd/dispatch/census.go`, `store.Census` over
 `pgmigrate.Census`) is a deployment's pre-deploy census of the migrations the
@@ -35,7 +36,9 @@ of `os` or `syscall`, whose bare `Getenv` it could not tell from a local
 function; `TestEverySettingReachesItsReader` fails until the row has a case that
 hands it to its reader. `envoy-dispatch settings` prints the table, and the docs
 site's configuration reference (`docs/site/generators/dispatch-config.ts`) is
-generated from it.
+generated from it. A variable a release stopped reading leaves the table for
+`removedSettings`, beside it, with what replaced it: the table reads it too, and
+`resolveBootConfig` refuses to start while it is set (`refuseRemovedSettings`).
 
 `dispatchHandler` mounts the one `GET /healthz` the process serves on its own
 mux, above the dashboard router, and the probe reads the database through
@@ -76,8 +79,8 @@ to, and refuses one that is not this machine's unless `ENVOY_ALLOW_REMOTE_NATS=1
 says the run means it (every deployment sets it). A present
 `DISPATCH_SERVER_URL` overrides merged `dispatch.serverUrl`; it must be an
 absolute `http` or `https` URL with no path, and is the exact browser origin
-used for GitHub OAuth. It must equal the URL humans type into the browser, with
-`<DISPATCH_SERVER_URL>/auth/callback` registered on the GitHub App. Host
+used for sign-in. It must equal the URL humans type into the browser, with
+`<DISPATCH_SERVER_URL>/auth/callback` listed on the sign-in pool's app client. Host
 adapters can override their configured Dispatch base URL with `DISPATCH_URL`.
 `DISPATCH_TEST_HOOKS=1` mounts test-only routes — unset in every real deployment. `POST
 /api/v1/events/_test/disconnect` closes every open SSE connection, as if the server had restarted;
@@ -120,21 +123,42 @@ dashboard-URL mentions are recognised only against it.
 ## Identity
 
 `internal/dispatch/identity` is the human identity boundary. Handlers resolve
-users through `Identity.Login` and write identity errors with
-`identity.WriteError`.
+people through `Identity.Login`, which names a person by lowercase email, and
+write identity errors with `identity.WriteError`.
 
-- `DISPATCH_IDENTITY=cookie` is the default. Cookie identity requires
-  `DISPATCH_ALLOWED_LOGINS`; GitHub OAuth accepts only those logins before
-  storing a token pair and issuing a cookie.
-- `DISPATCH_IDENTITY=header:<Header-Name>` accepts only allowlisted logins from
-  a trusted proxy header. When GitHub OAuth credentials are configured, it also
-  requires `DISPATCH_IDENTITY_HEADER_TRUSTED=1`.
-- `DISPATCH_DEV_SIGNIN=1` mounts `GET /auth/_dev/signin?login=<login>&next=<path>`
+- `DISPATCH_IDENTITY=cookie` is the default. Cookie identity signs people in
+  with Google Workspace through the shared sign-in pool (OpenID Connect
+  authorization code, `internal/oidc/codeflow.go`) and requires all four of
+  `DISPATCH_SIGNIN_ISSUER`, `DISPATCH_SIGNIN_CLIENT_ID`,
+  `DISPATCH_SIGNIN_CLIENT_SECRET` and `DISPATCH_SIGNIN_GROUP`; setting some of
+  them is refused naming the missing ones, and the authorization and token
+  endpoints come from the issuer's discovery document, read at boot under
+  `oidc.DiscoveryTimeout`. Those boot checks, the discovery and the request
+  identity main builds live in `cmd/dispatch/signin.go`. The callback names
+  the person by the email in the pool username (`<provider>_<email>`, the
+  provider one the ID token's `identities` names; `identity.Person`), never by
+  the `email` claim, which a person can write, and signs in only a member of
+  `DISPATCH_SIGNIN_GROUP` (`cognito:groups`); anyone else gets a 403 page
+  naming them. It records the person in `people` with the pool's refresh
+  token, and `identity.Membership` renews that sign-in at least hourly: a
+  refresh the pool refuses, or one whose ID token no longer puts the person in
+  the group, advances their session generation and forgets the token, ending
+  every session they hold.
+- `DISPATCH_IDENTITY=header:<Header-Name>` is for tests and local harnesses
+  only, never for a production Dispatch deployment. It accepts the named
+  header's value lowercased and records it in `people`; it requires
+  `DISPATCH_IDENTITY_HEADER_TRUSTED=1` and refuses any `DISPATCH_SIGNIN_*`
+  setting, so it cannot share a deployment with Google sign-in.
+- `DISPATCH_ALLOWED_LOGINS` and `DISPATCH_APP_CLIENT_SECRET` are refused at
+  boot as removed settings (`removedSettings`), naming what replaced them.
+- `DISPATCH_DEV_SIGNIN=1` mounts `GET /auth/_dev/signin?login=<email>&next=<path>`
   (`routes/devsignin.go`, which holds everything that can mint a cookie without
-  GitHub), which issues the cookie identity's own session cookie for an
-  allowlisted login through the callback's `issueSession`, with no GitHub
-  exchange. `devSignInFence` (`cmd/dispatch/main.go`, run by
-  `resolveBootConfig`) refuses it unless identity is cookie, the host of
+  the sign-in pool), which records the lowercased person and issues the cookie
+  identity's own session cookie through the callback's `issueSession`, with no
+  pool exchange and no group check. `devSignInFence` (`cmd/dispatch/main.go`,
+  run by `resolveBootConfig`) refuses it unless identity is cookie, every
+  `DISPATCH_SIGNIN_*` setting is unset (a loopback server holds no sign-in
+  client secret, and has no membership to confirm), the host of
   `boot.ListenAddr` (the one address `main` binds) is a loopback IP literal
   (`routes.LoopbackHostPort`, which the route's peer check also uses), every
   `DATABASE_URL` host `pgx.ParseConfig` finds is loopback or a unix socket
@@ -151,17 +175,12 @@ users through `Identity.Login` and write identity errors with
   host. A key from `app.json`, where a developer keeps the real App's key, is
   refused whatever the base, naming the file: a signed-in session can save an
   architecture source, which has the App probe and import the repository the
-  caller names. The loopback check is on the host, not on what listens there,
-  and every App call hands a signed App JWT to whatever owns that port, so the
-  environment's key must be a throwaway, as `packages/dispatch/e2e/run-server.sh`
-  generates one per run. The key is the credential that acts (`githubapp.New`
-  builds no client without it, and the App JWT names the client ID), so the App
-  ID is not fenced. This fence leaves the OAuth client pair alone too: an
-  exchange needs a code GitHub issues after a person signs in there, and the
-  pair's token refresh (`ProxyConfig.refresh`, `internal/dispatch/githubapi/proxy.go`)
-  needs a stored token pair, which only `requireUser`'s dev sign-in check
-  (`routes/router.go`) keeps from being read under the flag. A change to that
-  check unfences the pair.
+  caller names, and can read GitHub through the App's proxy. The loopback check
+  is on the host, not on what listens there, and every App call hands a signed
+  App JWT to whatever owns that port, so the environment's key must be a
+  throwaway, as `packages/dispatch/e2e/run-server.sh` generates one per run. The
+  key is the credential that acts (`githubapp.New` builds no client without it,
+  and the App JWT names the client ID), so the App ID is not fenced.
   `routes.BuildAppContext` also refuses a dashboard origin that is not
   loopback and stores the origin's host in the unexported `devSignInHost`, the
   only switch `New` reads, so no caller can mount the route without that check.
@@ -169,14 +188,14 @@ users through `Identity.Login` and write identity errors with
   `auth.NewSigningKey`, generated per process and never the data-dir file, so a
   cookie it mints dies with the process. While it is on, the whole router
   answers a request whose `Host` is not the dashboard origin's
-  `421 HOST_MISMATCH` (`requireHost`), the route serves only a loopback peer
-  with no forwarding header and logs every mint at WARN, and `requireUser`
-  answers `503 GITHUB_TOKEN_UNAVAILABLE` before it reads a stored token pair.
+  `421 HOST_MISMATCH` (`requireHost`), and the route serves only a loopback peer
+  with no forwarding header and logs every mint at WARN.
   The key bounds the cookie only: a `dsp_` token a dev session mints, and the
   session and token rows its sign-out changes, are rows every server on the
   same database acts on, so a dev-sign-in server needs a database of its own.
-- GitHub OAuth credentials come from `DISPATCH_APP_CLIENT_ID` and
-  `DISPATCH_APP_CLIENT_SECRET`, or the Dispatch app credentials file.
+- The GitHub App (`DISPATCH_APP_CLIENT_ID` and `DISPATCH_APP_PEM_B64`, or the
+  Dispatch app credentials file) signs nobody in; Dispatch uses it for webhooks,
+  architecture sources and the web app's GitHub reads.
 - Agents normally authenticate as a `session` actor with a personal `dsp_` token
   minted by a human in Settings, sent as `Authorization: Bearer <token>`.
   `DISPATCH_AGENT_TOKEN` is the shared devbox fallback; its callers have no
@@ -203,8 +222,15 @@ users through `Identity.Login` and write identity errors with
   exactly as it copies `owner`, and a request body naming one is ignored.
   Unset, the branch does not exist and bearer handling is unchanged.
 
-The GitHub proxy needs the resolved user's stored GitHub token. Without one it
-returns `503 GITHUB_TOKEN_UNAVAILABLE`.
+The GitHub proxy (`/api/github/rest/...`, `internal/dispatch/githubapi`) reads as the GitHub App
+installation that covers the repository, for a signed-in person, GET only and only three paths: a
+pull request (`repos/{o}/{r}/pulls/{n}`), an issue (`repos/{o}/{r}/issues/{n}`) and a commit's
+check runs (`repos/{o}/{r}/commits/{sha}/check-runs`), the only reads the web app makes. Every
+person shares the one App credential, which can read far more of a repository than the web app
+shows, so the proxy forwards nothing else: another method is `405 METHOD_NOT_ALLOWED`, another path
+`404 GITHUB_PATH_REFUSED`, and a repository the App is not installed on, or a deployment with no
+App key, `503 GITHUB_TOKEN_UNAVAILABLE`.
+
 ## Routes
 
 The `/api/v1` routes are one table, `api/routes_table.go` (`routes()`): `Register` mounts it and
@@ -230,13 +256,12 @@ the table says human only.
 | Path | Method | Access | Purpose |
 | --- | --- | --- | --- |
 | `/api/v1` | GET | public | List every `/api/v1` route with method, auth, and purpose. |
-| `/auth/start` | GET | public | Start GitHub OAuth. |
-| `/auth/callback` | GET | OAuth state | Exchange an allowlisted GitHub login's token pair. |
-| `/auth/logout` | POST | identity | Remove the resolved user's tokens. |
-| `/auth/whoami` | GET | identity | Return the resolved human identity. |
-| `/auth/_dev/signin` | GET | public, `DISPATCH_DEV_SIGNIN=1` only; loopback peer, no forwarding header | Issue an allowlisted login's session cookie with no GitHub exchange and redirect to the sanitized `next`; `400 DEV_SIGNIN_INPUT`, `403 LOGIN_NOT_ALLOWED`, `403 DEV_SIGNIN_FORBIDDEN`. Not mounted otherwise. |
-| `/api/github/rest/...` | any | identity | Proxy GitHub REST with the user's token. |
-| `/api/github/graphql` | POST | identity | Proxy GitHub GraphQL with the user's token. |
+| `/auth/start` | GET | public | Start Google sign-in through the sign-in pool; `503 SIGNIN_UNCONFIGURED` on a server with no `DISPATCH_SIGNIN_*`. |
+| `/auth/callback` | GET | sign-in state | Exchange the pool's code, name the person by the email in their username, sign in a member of `DISPATCH_SIGNIN_GROUP` (a 403 page naming anyone else), record them in `people` with the refresh token, and issue the session cookie. |
+| `/auth/logout` | POST | identity | Advance the person's session generation, forget their refresh token, and clear the cookie. Local only: the pool's own session is left alone. |
+| `/auth/whoami` | GET | identity | Return the resolved person, `{kind: "user", login}` with `login` their lowercase email. |
+| `/auth/_dev/signin` | GET | public, `DISPATCH_DEV_SIGNIN=1` only; loopback peer, no forwarding header | Record the lowercased person `login` names and issue their session cookie with no pool exchange, then redirect to the sanitized `next`; `400 DEV_SIGNIN_INPUT`, `403 DEV_SIGNIN_FORBIDDEN`. Not mounted otherwise. |
+| `/api/github/rest/...` | GET | identity | Read a pull request, an issue or a commit's check runs from GitHub as the GitHub App (above). |
 | `/healthz` | GET | public | Report that the process serves, Postgres answers within two seconds on the health pool, and NATS is connected where configured, plus `commit` (the build's legion commit, or `null`) and `schema_version` (the highest applied migration, or `null` when the database did not answer). |
 | `/api/v1/projects` | GET, POST | POST human only | List projects (including `open_asks`) or create one. |
 | `/api/v1/projects/{key}/artifacts` | GET, POST | user or bearer | List non-primary artifacts in a project (`?unlinked=true` selects unlinked ones) or create an unlinked project artifact. An ask block whose body breaks its content rule (`paragraph+ bullet_list?`: one or more paragraphs, then at most one bullet list, last) is `400 INVALID_ASK_BLOCK`; a new version is held to it only for the asks it writes or changes. A markdown document over 1 MiB, or any file over 25 MiB, is `413 CAP_EXCEEDED`, and so is a document whose formatting is more items than one document update can store (1,048,576), naming the count. |
@@ -248,16 +273,16 @@ the table says human only.
 | `/api/v1/projects/{key}/architecture` | GET | user or bearer | The component tree with the work attached: `source`, `totals` (`issues_done`/`issues_total` over every filed issue, `unassigned`, `not_architectural`, `components_without_work` over non-external components, `retired_links`), one row per component (`done`/`total` count the distinct issues whose effective set names it or any component it contains, parents and icebox included, each once; `own_*` only those naming it itself; `issues` say how each qualified: `direct` > `inherited` > `contained` with `via`), and the `unassigned`, `not_architectural` (with `reason`, `inherited_from`), and `retired_links` lists. `404 SOURCE_NOT_FOUND` without a source. |
 | `/api/v1/me/agent-tokens` | GET, POST | human only | List personal token metadata or mint a personal agent token. |
 | `/api/v1/me/agent-tokens/{id}` | DELETE | human only | Revoke a personal agent token. |
-| `/api/v1/users` | GET | human only | The sign-in allowlist as `{users: [{login}]}`, sorted lowercase: the assignee picker's options (pure config, no DB). |
-| `/api/v1/whoami` | GET | user or bearer | Who the server takes the caller for: `{kind: "user", login}` for a human, `{kind: "agent", owner, service}` for a bearer (`owner` is the personal token's lowercase login, null under the shared token; `service` is a verified service-account token's Kubernetes subject, null for every other bearer). |
+| `/api/v1/users` | GET | human only | Everyone who has signed in (`people`), as `{users: [{login}]}` sorted by email: the assignee picker's options. |
+| `/api/v1/whoami` | GET | user or bearer | Who the server takes the caller for: `{kind: "user", login}` for a person (`login` their lowercase email), `{kind: "agent", owner, service}` for a bearer (`owner` is the personal token's owner by lowercase email, null under the shared token; `service` is a verified service-account token's Kubernetes subject, null for every other bearer). |
 | `/api/v1/issues` | GET, POST | POST human or bearer | List or create native issues. The listing is every matching issue as an array, or, with `limit` (1–250) or `offset` (0 or more; alone it pages 50), one page `{issues, total, limit, offset}` cut after every filter, `total` counting the issues they match; a repeated, blank, non-integer or out-of-range value, or `cursor`, is `400 INVALID_QUERY` naming the parameter. Creation without a `spec`, or with a blank one, gives an empty primary document at version 1. Creation refuses a title that near-duplicates an issue in the project with `409 POSSIBLE_DUPLICATE` and candidates unless `force` is true; external references skip the check. A spec whose ask block breaks its content rule (`paragraph+ bullet_list?`: one or more paragraphs, then at most one bullet list, last) is `400 INVALID_ASK_BLOCK`. |
 | `/api/v1/search?q=&project=&limit=` | GET | user or bearer | Full-text search over issue titles, latest document text, comments, asks, and messages; ranked results contain `<mark>` snippets and SPA `href`s. `limit` is 1–50 (default 20); an under-two-character query returns `400 INVALID_QUERY`, while a stop-word-only query returns `200` with no results; a query over `contracts.SearchQueryMax` (1,000) UTF-16 units, counted after trimming, returns `400 CAP_EXCEEDED` before anything runs, a project that is not a project key returns `400 INVALID_PROJECT` (an empty one searches every project), and an invalid limit returns `400 INVALID_LIMIT`. Both ride in the URL; `packages/contracts/AGENTS.md` "Search limits" owns what keeps it under the load balancer's limit. |
-| `/api/v1/issues/{key}` | GET, PATCH | PATCH human or bearer | Read or update an issue. `assignee` (an allowlisted login, lowercased; `null` clears; absent leaves it) may be set by any caller; an unlisted login is `400 ASSIGNEE_NOT_ALLOWED`. `components` is the issue's own architecture attachment: `null` or `{mode: "inherit"}` deletes it (the issue takes its nearest ancestor's again), `{mode: "explicit", ids}` names bare component ids of the issue's project (`400 COMPONENTS_INPUT` for an unknown, retired, external, or other-project id), `{mode: "none", reason}` declares the issue not architectural; it is the one field besides `rank` a closed issue accepts without reopening. Every issue read carries the effective `components` (`mode`, `ids`, `unknown` for retired ids, `reason`, `inherited_from`), resolved up the parent chain in the same query. |
+| `/api/v1/issues/{key}` | GET, PATCH | PATCH human or bearer | Read or update an issue. `assignee` (the email of a person who has signed in, lowercased; `null` clears; absent leaves it) may be set by any caller; an email nobody has signed in with is `400 ASSIGNEE_NOT_ALLOWED`. `components` is the issue's own architecture attachment: `null` or `{mode: "inherit"}` deletes it (the issue takes its nearest ancestor's again), `{mode: "explicit", ids}` names bare component ids of the issue's project (`400 COMPONENTS_INPUT` for an unknown, retired, external, or other-project id), `{mode: "none", reason}` declares the issue not architectural; it is the one field besides `rank` a closed issue accepts without reopening. Every issue read carries the effective `components` (`mode`, `ids`, `unknown` for retired ids, `reason`, `inherited_from`), resolved up the parent chain in the same query. |
 | `/api/v1/issues/resolve` | GET | user or bearer | Resolve an external issue reference to its native key. |
 | `/api/v1/issues/{key}/events` | GET | user or bearer | Read events by forward cursor, descending page, or exact IDs. |
 | `/api/v1/issues/{key}/references` | GET | user or bearer | Read the eight-hop artifact reference closure; matching `If-None-Match` returns `304`. |
 | `/api/v1/references?to=\|from=&kind=&since=` | GET | user or bearer | Edges of one node in the reference graph, newest first, cross-project. Exactly one of `to` (backlinks) or `from` (links), each a `dispatch://` reference; `kind` is a csv of `mentions`, `child_of`, `attached_to`, `anchored_to`, `owned_by`, `replies_to`, `followed_by`, `part_of`, `depends_on`, `affects`; `since=<events.id>` keeps mentions introduced after it and excludes structural edges. Each edge carries the other `node` (`kind`, `id`, `issue_key`, `project`, `ref`; no `ref` for sessions; a `component` node is `<project>/<id>` with ref `dispatch://<PROJECT>/component/<id>`, and one a re-import retired is omitted with its edges), an `excerpt` (the containing block, with `block_id`, for a document mention; the node's text head otherwise), `created_at`, and `source_seq`. `400 INVALID_REFERENCE` / `INVALID_KIND` / `INVALID_SINCE`; `404` when the node does not exist. |
-| `/api/v1/inbox?project=&assignee=` | GET | human only | List open asks, newest first. `assignee=me\|unassigned\|<login>` keeps asks on issues held by the caller, by nobody (project-document asks included), or by that login (`400 ASSIGNEE_NOT_ALLOWED` when unlisted). |
+| `/api/v1/inbox?project=&assignee=` | GET | human only | List open asks, newest first. `assignee=me\|unassigned\|<email>` keeps asks on issues held by the caller, by nobody (project-document asks included), or by that person (`400 ASSIGNEE_NOT_ALLOWED` when nobody has signed in with that email). |
 | `/api/v1/agents` | GET | user or bearer | List live Envoy sessions with their `capabilities`, newest first, so a session can pick a target that advertises the delivery mode it wants. `api/agents.go` proxies the listener through `internal/dispatch/envoy`; unavailable listener responses are `503 ENVOY_UNAVAILABLE`. |
 | `/api/v1/issues/{key}/asks` | POST | user or bearer | Create an ask. |
 | `/api/v1/issues/{key}/asks?state=` | GET | user or bearer | List an issue's asks, open and/or answered (`state`: `all` default, `open`, or `answered`). |
@@ -285,7 +310,7 @@ the table says human only.
 | `/api/v1/artifacts/{id}/versions/{n}` | GET | user or bearer | Read a document version or download a blob. `{id}` must be a UUID. |
 | `/api/v1/artifacts/{id}/versions` | POST | user or bearer | Create a named live-document version. `{id}` must be a UUID. |
 | `/api/v1/artifacts/{id}/edits` | POST | user or bearer | Apply document edit operations. `{id}` must be a UUID. An edit is `400 INVALID_ASK_BLOCK` when an ask it writes or changes breaks its content rule (`paragraph+ bullet_list?`) or holds what settlement cannot read; an ask it carries through unchanged is not its to refuse. A change a concurrent browser deletion removes before the version is rendered is `409 EDIT_LOST_TO_CONCURRENT_CHANGE` and writes nothing; one removed after it answers `200` with `lost_ops`. |
-| `/api/v1/artifacts/{id}/approval-requests` | POST | user or bearer | Ask a human to approve a document's latest settled version. The question is `Approve <name> (version <N>)?` followed by the optional `summary` (blank is `400 SUMMARY_INPUT`; past the ask cap at the longest version a request can reach, ten digits, is `400 CAP_EXCEEDED` naming `summary`). One open approval row follows every document version in place, rewording its question and emitting `ask.edited`; while its `requested_version` is below the new version it waits on the agent. Only the move that takes it from the human notifies; a later move while it already waits on the agent is `quiet: true`, `notify: false`, and reaches no follower. Calling this route again while the row waits on the agent - moved, or a thread reply newer than its last hand-back holds the turn - hands it back to the human: a summary that changes its question rewords it first (`ask.edited`; an omitted summary keeps its prior one), then `requested_version` becomes the latest version and `ask.handed_back` is emitted, leaving `edited_at` as it was. While the row waits on the human, the same summary or none is a repeat that answers `200` with no event, and a different one is `409 APPROVAL_WAITS_ON_HUMAN` and changes nothing, since it would rewrite the card the human is reading. It answers `201` when it wrote anything, with the document's `approval` as the call left it (`waiting_on` while awaiting). |
+| `/api/v1/artifacts/{id}/approval-requests` | POST | user or bearer | Ask a human to approve a document's latest settled version. The question is `Approve <name> (version <N>)?` followed by the optional `summary` (blank is `400 SUMMARY_INPUT`; past the ask cap at the longest version a request can reach, ten digits, is `400 CAP_EXCEEDED` naming `summary`). One open approval row follows every document version in place, rewording its question and emitting `ask.edited`; while its `requested_version` is below the new version it waits on the agent. Only the first move since the request was opened or handed back notifies, even when a thread reply had already left it waiting on the agent; a later move, while `requested_version` is already below the version it named, is `quiet: true`, `notify: false`, and reaches no follower. Calling this route again while the row waits on the agent - moved, or a thread reply newer than its last hand-back holds the turn - hands it back to the human: a summary that changes its question rewords it first (`ask.edited`; an omitted summary keeps its prior one), then `requested_version` becomes the latest version and `ask.handed_back` is emitted, leaving `edited_at` as it was. While the row waits on the human, the same summary or none is a repeat that answers `200` with no event, and a different one is `409 APPROVAL_WAITS_ON_HUMAN` and changes nothing, since it would rewrite the card the human is reading. It answers `201` when it wrote anything, with the document's `approval` as the call left it (`waiting_on` while awaiting). |
 | `/api/v1/artifacts/{id}/asks?state=` | GET, POST | user or bearer | List or create asks on an unlinked document. |
 | `/api/v1/artifacts/{id}/comments` | GET, POST | user or bearer | List or create comments and suggestions on an unlinked document. |
 | `/api/v1/artifacts/{id}/events` | GET | user or bearer | Read an unlinked document's events. |
@@ -307,7 +332,7 @@ the table says human only.
 | `/api/v1/events` | GET | identity | Stream durable events with SSE. Omitting `since` (a cold client) subscribes before resolving the current head internally, so no separate request can race it. |
 | `/api/v1/artifacts/_test/quiesce` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Close every live document and wait for the settlements in flight; not mounted otherwise. |
 | `/api/v1/events/_test/disconnect` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Close every open SSE connection; not mounted otherwise. |
-| `/ws/doc/{room}` | GET | user or bearer | Join the Hocuspocus document room. A room whose stored tree is outside the Proof schema admits no connection, a provider's reconnect included: the upgrade completes and closes with code `4409` (reason `DOC_SCHEMA`; `DOCUMENT_SCHEMA_CLOSE_CODE` and `DOCUMENT_SCHEMA_CLOSE_REASON` in `packages/contracts`) before any sync, and the dashboard reads that close as the repair state. The check reads a copy of a resident room taken under its lock, as `/text` reads it, so a healthy room under writes is never refused. |
+| `/ws/doc/{room}` | GET | user or bearer | Join the Hocuspocus document room. A room whose stored tree is outside the Proof schema admits no connection, a provider's reconnect included: the upgrade completes and closes with code `4409` (reason `DOC_SCHEMA`; `DOCUMENT_SCHEMA_CLOSE_CODE` and `DOCUMENT_SCHEMA_CLOSE_REASON` in `packages/contracts`) before any sync, and the dashboard reads that close as the repair state. The check reads a copy of a resident room taken under its lock, as `/text` reads it, so a healthy room under writes is never refused. An open socket resolves its caller again on every 15 s heartbeat, as `/api/v1/events` does, and closes once they no longer resolve (a sign-out, a membership the sign-in pool no longer confirms), so their editor stops receiving and sending the document's edits. |
 
 ## Dispatch topics
 

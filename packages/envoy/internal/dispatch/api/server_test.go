@@ -9,11 +9,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"net/textproto"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -66,6 +68,21 @@ type testServerOptions struct {
 	agentStream agentstream.Source
 }
 
+// headerIdentity is the test header identity that records each named person in the database.
+func headerIdentity(database *store.Store) identity.HeaderIdentity {
+	return identity.HeaderIdentity{Header: "X-Dispatch-User", People: store.NewPgPeopleStore(database.Pool)}
+}
+
+// seedPeople records emails as people who have signed in: the assignee picker's options.
+func seedPeople(t *testing.T, database *store.Store, emails ...string) {
+	t.Helper()
+	people := store.NewPgPeopleStore(database.Pool)
+	for _, email := range emails {
+		if err := people.Record(context.Background(), email); err != nil {
+			t.Fatalf("seed person %q: %v", email, err)
+		}
+	}
+}
 func newTestHandler(t *testing.T) http.Handler {
 	t.Helper()
 	handler, _, _ := newTestServer(t, testServerOptions{})
@@ -112,11 +129,10 @@ func newTestServer(t *testing.T, options testServerOptions) (http.Handler, *stor
 			t.Errorf("shutdown document service: %v", err)
 		}
 	})
-	allowed := map[string]struct{}{"alice": {}, "bob": {}}
+	seedPeople(t, database, "alice", "bob")
 	deps, err := NewDeps(DepsInput{
 		Store:            database,
-		Identity:         identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: allowed},
-		AllowedLogins:    allowed,
+		Identity:         headerIdentity(database),
 		AgentToken:       "agent-token",
 		DefaultProject:   options.defaultProject,
 		ServerURL:        "https://dispatch.example",
@@ -260,6 +276,59 @@ func multipartRequest(t *testing.T, handler http.Handler, target string, fields 
 	return response
 }
 
+// databaseFingerprint hashes every row of every table, so a test can tell a request wrote nothing
+// anywhere: no row inserted, updated or deleted.
+func databaseFingerprint(t *testing.T, database *store.Store) map[string]string {
+	t.Helper()
+	ctx := context.Background()
+	rows, err := database.Pool.Query(ctx, `select tablename from pg_tables where schemaname = 'public'`)
+	if err != nil {
+		t.Fatalf("list tables: %v", err)
+	}
+	tables, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		t.Fatalf("read table names: %v", err)
+	}
+	if len(tables) == 0 {
+		t.Fatal("the schema has no tables; a fingerprint of it proves nothing")
+	}
+	fingerprint := make(map[string]string, len(tables))
+	for _, table := range tables {
+		var digest string
+		if err := database.Pool.QueryRow(ctx, fmt.Sprintf(
+			`select count(*) || ':' || coalesce(md5(string_agg(t::text, ',' order by t::text)), '') from %s t`,
+			pgx.Identifier{table}.Sanitize(),
+		)).Scan(&digest); err != nil {
+			t.Fatalf("fingerprint %s: %v", table, err)
+		}
+		fingerprint[table] = digest
+	}
+	return fingerprint
+}
+
+// assertUnchanged fails for each table whose rows differ between two fingerprints of one database.
+func assertUnchanged(t *testing.T, request string, before, after map[string]string) {
+	t.Helper()
+	for _, table := range slices.Sorted(maps.Keys(after)) {
+		if before[table] != after[table] {
+			t.Errorf("%s changed table %s", request, table)
+		}
+	}
+}
+
+// assertRefusal checks an answer is 400 with code and an error naming field first.
+func assertRefusal(t *testing.T, request string, status int, body []byte, code, field string) {
+	t.Helper()
+	var refusal struct {
+		Code  string `json:"code"`
+		Error string `json:"error"`
+	}
+	_ = json.Unmarshal(body, &refusal)
+	if status != http.StatusBadRequest || refusal.Code != code || !strings.HasPrefix(refusal.Error, field+" holds a ") {
+		t.Errorf("%s = %d %s %q, want 400 %s naming %s", request, status, refusal.Code, refusal.Error, code, field)
+	}
+}
+
 func decodeBody[T any](t *testing.T, response *httptest.ResponseRecorder) T {
 	t.Helper()
 	var value T
@@ -383,13 +452,11 @@ func TestDocumentTextReportsUnavailableService(t *testing.T) {
 		Events:      broker,
 	})
 	t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
-	allowed := map[string]struct{}{"alice": {}}
 	deps, err := NewDeps(DepsInput{
-		Store:         database,
-		Identity:      identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: allowed},
-		AllowedLogins: allowed,
-		Docs:          documentService,
-		Events:        broker,
+		Store:    database,
+		Identity: headerIdentity(database),
+		Docs:     documentService,
+		Events:   broker,
 	})
 	if err != nil {
 		t.Fatalf("new API dependencies: %v", err)
@@ -1712,16 +1779,15 @@ func TestIssueDocumentCreationIndexesDispatchReferences(t *testing.T) {
 
 func TestRevokedCookieIsRejectedAcrossDispatchSurfaces(t *testing.T) {
 	database := storetest.Open(t)
-	allowed := map[string]struct{}{"alice": {}}
 	sessions := store.NewPgSessionStore(database.Pool)
-	cookieIdentity := identity.CookieIdentity{SigningKey: "signing-key", AllowedLogins: allowed, Sessions: sessions}
+	cookieIdentity := identity.CookieIdentity{SigningKey: "signing-key", Sessions: sessions}
 	broker := events.NewBroker()
 	documentService := docs.New(docs.Deps{
 		Store: database, Events: broker, Identity: cookieIdentity, Settle: time.Hour,
 	})
 	t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
 	deps, err := NewDeps(DepsInput{
-		Store: database, Identity: cookieIdentity, AllowedLogins: allowed, AgentToken: "agent-token",
+		Store: database, Identity: cookieIdentity, AgentToken: "agent-token",
 		Docs: documentService, Events: broker,
 	})
 	if err != nil {
@@ -1729,11 +1795,11 @@ func TestRevokedCookieIsRejectedAcrossDispatchSurfaces(t *testing.T) {
 	}
 	handler := http.NewServeMux()
 	Register(handler, deps)
-	generation, err := sessions.EnsureSession(context.Background(), "alice")
+	generation, err := sessions.EnsureSession(context.Background(), "alice@d.example")
 	if err != nil {
 		t.Fatalf("establish alice's session: %v", err)
 	}
-	cookie, err := http.ParseSetCookie(auth.IssueSessionCookie("alice", generation, "signing-key", true))
+	cookie, err := http.ParseSetCookie(auth.IssueSessionCookie("alice@d.example", generation, "signing-key", true))
 	if err != nil {
 		t.Fatalf("parse session cookie: %v", err)
 	}
@@ -1770,10 +1836,12 @@ func TestRevokedCookieIsRejectedAcrossDispatchSurfaces(t *testing.T) {
 		PrimaryArtifactID string `json:"primary_artifact_id"`
 	}](t, created)
 
-	delete(allowed, "alice")
+	if err := sessions.RevokeSessions(context.Background(), "alice@d.example"); err != nil {
+		t.Fatalf("revoke alice's sessions: %v", err)
+	}
 	for _, target := range []string{"/api/v1/issues/" + issue.Key, "/api/v1/events"} {
 		response := request(http.MethodGet, target, nil)
-		if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), `"code":"LOGIN_NOT_ALLOWED"`) {
+		if response.Code != http.StatusUnauthorized || !strings.Contains(response.Body.String(), `"code":"NO_IDENTITY"`) {
 			t.Fatalf("revoked cookie %s: status=%d body=%s", target, response.Code, response.Body.String())
 		}
 	}
@@ -1996,15 +2064,14 @@ func newTestHandlerWithBroker(t *testing.T) (http.Handler, *store.Store, *events
 			t.Errorf("shutdown document service: %v", err)
 		}
 	})
-	allowed := map[string]struct{}{"alice": {}, "bob": {}}
+	seedPeople(t, database, "alice", "bob")
 	deps, err := NewDeps(DepsInput{
-		Store:         database,
-		Identity:      identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: allowed},
-		AllowedLogins: allowed,
-		AgentToken:    "agent-token",
-		ServerURL:     "https://dispatch.example",
-		Docs:          documentService,
-		Events:        broker,
+		Store:      database,
+		Identity:   headerIdentity(database),
+		AgentToken: "agent-token",
+		ServerURL:  "https://dispatch.example",
+		Docs:       documentService,
+		Events:     broker,
 	})
 	if err != nil {
 		t.Fatalf("new API dependencies: %v", err)
