@@ -749,6 +749,12 @@ function PaletteDialog({
             <p className={`shrink-0 px-3 py-3 text-sm ${textMutedOnSurface}`}>
               No results for &quot;{searchText}&quot;
             </p>
+          ) : search.data !== undefined && search.data.total > results.length ? (
+            // The palette lists one page, so a query matching more says so rather than looking
+            // complete.
+            <p className={`shrink-0 px-3 py-2 text-xs ${textMutedOnSurface}`}>
+              Showing the best {results.length} of {search.data.total} matches
+            </p>
           ) : null}
           {/* The palette is a keyboard surface and never said so: the keys that drive it sit
               at its foot, quieter than any hit above them - and only where there is a pointer

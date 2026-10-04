@@ -260,10 +260,17 @@ type SearchResult struct {
 	Href     string          `json:"href"`
 }
 
-// SearchResponse is the ranked global search result set.
+// SearchResponse is one page of the fused search result list.
 type SearchResponse struct {
 	Results []SearchResult `json:"results"`
-	TookMS  int64          `json:"took_ms"`
+	// Total counts every match of every kind. Reachable is how many of them the pages can return,
+	// since each kind lists only its best contracts.SearchKindDepth; an offset at or past it
+	// returns no results.
+	Total     int   `json:"total"`
+	Reachable int   `json:"reachable"`
+	Limit     int   `json:"limit"`
+	Offset    int   `json:"offset"`
+	TookMS    int64 `json:"took_ms"`
 }
 
 // DuplicateCandidate is a potential duplicate issue proposed before creation.

@@ -11,7 +11,7 @@ import {
   MAX_ISSUE_PAGE_LIMIT,
   RECEIPT_TIMEOUT_CAUSE,
 } from "../src/dispatch-api";
-import { SEARCH_QUERY_HINT, SEARCH_QUERY_MAX } from "../src/dispatch-tools";
+import { SEARCH_KIND_DEPTH, SEARCH_QUERY_HINT, SEARCH_QUERY_MAX } from "../src/dispatch-tools";
 import { MINTED_DEDUPE_KEY_PATTERN } from "../src/envelope";
 import { SUBJECT_SEGMENT_REPLACED } from "../src/subject";
 
@@ -111,6 +111,12 @@ const SearchQueryMax = ${SEARCH_QUERY_MAX}
 // SearchQueryHint follows a refusal over SearchQueryMax, saying what to send instead. Generated
 // from SEARCH_QUERY_HINT in packages/contracts so the server and the tool word it once.
 const SearchQueryHint = ${JSON.stringify(SEARCH_QUERY_HINT)}
+
+// SearchKindDepth is how many of its best matches each kind of content lists before
+// GET /api/v1/search merges the kinds; a kind's later matches count in the total and no offset
+// returns them. Generated from SEARCH_KIND_DEPTH in packages/contracts so the server's cut and the
+// dispatch_search tool's account of it cannot drift apart.
+const SearchKindDepth = ${SEARCH_KIND_DEPTH}
 
 // MaxIssuePageLimit is the most issues one page of GET /api/v1/issues holds, and
 // DefaultIssuePageLimit the page size when a caller pages with offset alone. Generated from

@@ -166,15 +166,20 @@ follow [Writing a spec](#writing-a-spec).
 you plan, start a design document, file an issue, ask, post a finding or start work, and what to
 do with each hit. What it leaves out:
 ```ts
-dispatch_search({ query, project?, limit? })
+dispatch_search({ query, project?, limit?, offset? })
 ```
-Websearch syntax applies: `"merge queue"`, `-daemon`, `OR`. It returns the best `limit` hits (20
-by default, 50 at most) across issues, documents, comments, asks, and messages. A query over
-1,000 characters is refused before it is sent: search with the few words `skill://dispatch-first`
-describes, never a pasted passage. Issue-owned hit lines start with the issue key; standalone
-project-document hit lines start with `dispatch://PROJECT/artifact/<slug>`, followed by the
-absolute link. Cite the hit you build on (`dispatch://KEY` or the document reference), or state
-"no prior issue" in the spec.
+Websearch syntax applies: `"merge queue"`, `-daemon`, `OR`. Each kind of content (issues,
+documents, asks, comments, messages) is ranked on its own, and the lists are merged so the page
+takes each kind's best in turn: the top holds the best issue, document, ask, comment and message,
+in that order, rather than a run of long documents. An issue key searched alone lists that issue
+first. A page holds `limit` hits (20 by default, 50 at most); the first line names how many match
+(`showing 1-20 of 312`), and while more can be reached the last line names the next `offset`.
+Each kind lists at most its best 100, so when the result says the rest cannot be paged to, narrow
+the query or name a `project`. A query over 1,000 characters is refused before it is sent: search
+with the few words `skill://dispatch-first` describes, never a pasted passage. Issue-owned hit
+lines start with the issue key; standalone project-document hit lines start with
+`dispatch://PROJECT/artifact/<slug>`, followed by the absolute link. Cite the hit you build on
+(`dispatch://KEY` or the document reference), or state "no prior issue" in the spec.
 
 `dispatch_issue` refuses a title that near-duplicates an issue in the same project and returns the candidates (`POSSIBLE_DUPLICATE`).
 Read them; reference the existing issue, or repeat the call with `force: true` when it is genuinely new work.

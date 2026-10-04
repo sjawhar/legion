@@ -163,6 +163,12 @@ const SearchQueryMax = 1000
 // from SEARCH_QUERY_HINT in packages/contracts so the server and the tool word it once.
 const SearchQueryHint = "search with a short phrase of a few words, not a passage"
 
+// SearchKindDepth is how many of its best matches each kind of content lists before
+// GET /api/v1/search merges the kinds; a kind's later matches count in the total and no offset
+// returns them. Generated from SEARCH_KIND_DEPTH in packages/contracts so the server's cut and the
+// dispatch_search tool's account of it cannot drift apart.
+const SearchKindDepth = 100
+
 // MaxIssuePageLimit is the most issues one page of GET /api/v1/issues holds, and
 // DefaultIssuePageLimit the page size when a caller pages with offset alone. Generated from
 // MAX_ISSUE_PAGE_LIMIT and DEFAULT_ISSUE_PAGE_LIMIT in packages/contracts so the server's bounds
