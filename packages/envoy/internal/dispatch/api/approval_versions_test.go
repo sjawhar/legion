@@ -591,7 +591,7 @@ func TestANewVersionMovesTheOpenApprovalAsk(t *testing.T) {
 		doc := &document{broker: events.NewBroker()}
 		doc.handler, doc.database = newInteractionHandler(t, func(database *store.Store) docs.API {
 			doc.documentService = docs.New(docs.Deps{
-				Store: database, Events: doc.broker, Settle: settle, AgentToken: "agent-token",
+				Store: database, Events: doc.broker, Settle: settle, AgentTokens: sharedAgentTokens(t, "agent-token"),
 				Identity: headerIdentity(database),
 			})
 			t.Cleanup(func() { _ = doc.documentService.Shutdown(context.Background()) })
