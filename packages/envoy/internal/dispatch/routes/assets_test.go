@@ -373,9 +373,11 @@ func TestStaticHandlerDeliversAWholeRetainedAssetToASlowClient(t *testing.T) {
 	}
 }
 
-// A store that stops sending part-way through an object is a store failure, answered before any
-// header is committed: never a 200 carrying a year's immutable caching and a truncated body.
-func TestStaticHandlerAnswers502ForARetainedAssetThatStallsMidBody(t *testing.T) {
+// A store that stops sending part-way through an object until the shared fetch bound runs out is
+// the same refusal the memory cap gives, 503, not a 502 store failure: the store was never shown
+// to be broken, only asked too late to answer, and the client still never gets a 200 carrying a
+// year's immutable caching over a truncated body.
+func TestStaticHandlerAnswers503ForARetainedAssetThatStallsPastTheFetchBound(t *testing.T) {
 	handler, context := newTestRouter(t)
 	context.WebDistDir = t.TempDir()
 	context.AssetStore = &s3AssetStore{client: streamingS3{body: bytes.Repeat([]byte("/"), 64), stallAfter: 12}, bucket: "retained"}
@@ -383,11 +385,14 @@ func TestStaticHandlerAnswers502ForARetainedAssetThatStallsMidBody(t *testing.T)
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/assets/previous-build.js", nil))
 
-	if recorder.Code != http.StatusBadGateway {
-		t.Fatalf("stalled store: status %d with %d body bytes, want 502", recorder.Code, recorder.Body.Len())
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("stalled store: status %d with %d body bytes, want 503", recorder.Code, recorder.Body.Len())
 	}
-	if got := recorder.Header().Get("Cache-Control"); got != "" {
-		t.Fatalf("stalled store: Cache-Control %q, want none", got)
+	if got := recorder.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("stalled store: Cache-Control %q, want no-store", got)
+	}
+	if got := recorder.Header().Get("Retry-After"); got != "1" {
+		t.Fatalf("stalled store: Retry-After %q, want 1", got)
 	}
 }
 
@@ -641,4 +646,105 @@ func TestStaticHandlerHoldsOnlyEachRetainedObjectsSize(t *testing.T) {
 	context.AssetStore = &countingStore{object: bytes.Repeat([]byte("/"), size)}
 
 	stallRetainedReaders(t, handler, readers)
+}
+
+// A fetch that runs out of the shared three-second bound before the store answers — most often
+// because most of it was already spent waiting for memory-cap room, leaving the store call only
+// milliseconds to finish — is the same 503 the cap's own refusal gives, not a 502 store failure:
+// the store was never actually unhealthy, only asked too late to answer in time.
+func TestStaticHandlerAnswers503WhenTheFetchRunsOutOfTheSharedBound(t *testing.T) {
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	handler, context := newTestRouter(t)
+	context.WebDistDir = t.TempDir()
+	context.AssetStore = latentStore{delay: retainedAssetFetchTimeout + time.Second, object: []byte("late")}
+
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/assets/late-joiner.js", nil))
+
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("fetch past the shared bound: status %d with %d body bytes, want 503", recorder.Code, recorder.Body.Len())
+	}
+	if got := recorder.Header().Get("Cache-Control"); got != "no-store" {
+		t.Errorf("fetch past the shared bound: Cache-Control %q, want no-store", got)
+	}
+	if got := recorder.Header().Get("Retry-After"); got != "1" {
+		t.Errorf("fetch past the shared bound: Retry-After %q, want 1", got)
+	}
+	var warnings, errorRecords int
+	for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+		var record struct {
+			Level string `json:"level"`
+			Key   string `json:"key"`
+		}
+		if json.Unmarshal([]byte(line), &record) != nil || record.Key != "assets/late-joiner.js" {
+			continue
+		}
+		switch record.Level {
+		case "WARN":
+			warnings++
+		case "ERROR":
+			errorRecords++
+		}
+	}
+	if warnings != 1 {
+		t.Errorf("fetch past the shared bound: %d WARN records naming the key, want 1; log %q", warnings, logs.String())
+	}
+	if errorRecords != 0 {
+		t.Errorf("fetch past the shared bound: %d ERROR records naming the key, want 0; log %q", errorRecords, logs.String())
+	}
+}
+
+// neverWrittenResponseWriter fails the test the moment anything is written to it: a canceled
+// request has nobody left to answer, so the handler must never call WriteHeader or Write.
+type neverWrittenResponseWriter struct {
+	t      *testing.T
+	header http.Header
+}
+
+func (w *neverWrittenResponseWriter) Header() http.Header { return w.header }
+
+func (w *neverWrittenResponseWriter) WriteHeader(status int) {
+	w.t.Fatalf("client gone while queued: WriteHeader(%d) called, want no response", status)
+}
+
+func (w *neverWrittenResponseWriter) Write(p []byte) (int, error) {
+	w.t.Fatalf("client gone while queued: Write(%q) called, want no response", p)
+	return 0, nil
+}
+
+// A client that disconnects while its request is still queued for memory-cap room is not a cap
+// refusal: the cap can be entirely empty, there is nobody left to answer, and the handler writes
+// nothing and logs no WARN (the cap-refusal line would otherwise double as a false capacity alarm
+// on every ordinary aborted page load).
+func TestStaticHandlerWritesNoResponseWhenTheClientCancelsWhileQueuedForTheMemoryCap(t *testing.T) {
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	handler, appContext := newTestRouter(t)
+	appContext.WebDistDir = t.TempDir()
+	appContext.AssetStore = &fakeAssetStore{}
+
+	req := httptest.NewRequest(http.MethodGet, "/assets/aborted.js", nil).WithContext(canceled)
+	handler.ServeHTTP(&neverWrittenResponseWriter{t: t, header: http.Header{}}, req)
+
+	for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+		if line == "" {
+			continue
+		}
+		var record struct {
+			Level string `json:"level"`
+		}
+		if json.Unmarshal([]byte(line), &record) == nil && record.Level == "WARN" {
+			t.Fatalf("client gone while queued: a WARN was logged, want none; log %q", logs.String())
+		}
+	}
 }

@@ -452,22 +452,28 @@ func isRetainedAssetPath(normalized string) bool {
 // serveRetainedAsset answers a local asset miss from the retained-asset store. The whole object is
 // read under retainedAssetFetchTimeout before anything is written, so a slow, failed or short read
 // is an uncached 502 and never a 200 carrying the immutable header; the browser's download of the
-// bytes read is not bounded by that timeout.
+// bytes read is not bounded by that timeout. A read that instead runs out of that shared bound
+// (errors.Is(err, context.DeadlineExceeded), most often because most of it was already spent
+// waiting for memory-cap room) is answered the same way the cap's own refusal is, a 503, not a 502
+// store failure: the store was never actually unhealthy, only asked too late to answer in time.
 //
 // An object stays in memory until its client has read it, so the bytes held at once are capped at
 // maxRetainedBytesHeld. Before asking the store a request reserves the most one object can hold,
 // waiting within the same bound for earlier requests to give theirs back, so a burst of a stale
 // tab's chunks is served in turn and a request that cannot reserve in time is a 503 that asks the
-// store nothing. Once the object is read the request keeps only its size until its response is
-// written or its client goes away.
+// store nothing. A request whose context ends because its client went away while still queued for
+// that room logs nothing more than a debug line and writes no response, since the cap was never
+// the reason and nobody is left to answer. Once the object is read the request keeps only its size
+// until its response is written or its client goes away.
 func (r *router) serveRetainedAsset(w http.ResponseWriter, req *http.Request, key string) {
 	ctx, cancel := context.WithTimeout(req.Context(), retainedAssetFetchTimeout)
 	defer cancel()
 	if err := r.retainedHeld.Acquire(ctx, maxRetainedAssetSize); err != nil {
-		slog.Warn("dispatch: retained asset refused at the memory cap", "key", key, "cap_bytes", maxRetainedBytesHeld)
-		w.Header().Set("Cache-Control", "no-store")
-		w.Header().Set("Retry-After", "1")
-		writeError(w, http.StatusServiceUnavailable, "retained assets are at their memory cap; retry")
+		if errors.Is(err, context.Canceled) {
+			slog.Debug("dispatch: retained asset request canceled while queued for the memory cap", "key", key)
+			return
+		}
+		refuseRetainedAssetAtCap(w, key)
 		return
 	}
 	held := maxRetainedAssetSize
@@ -477,6 +483,10 @@ func (r *router) serveRetainedAsset(w http.ResponseWriter, req *http.Request, ke
 	asset, err := r.ctx.AssetStore.GetAsset(ctx, key)
 	if errors.Is(err, ErrAssetNotFound) {
 		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		refuseRetainedAssetAtCap(w, key)
 		return
 	}
 	if err != nil {
@@ -490,6 +500,17 @@ func (r *router) serveRetainedAsset(w http.ResponseWriter, req *http.Request, ke
 	w.Header().Set("Cache-Control", assetCacheControl)
 	w.Header().Set("Content-Type", contentType(key))
 	http.ServeContent(w, req, key, time.Time{}, bytes.NewReader(asset))
+}
+
+// refuseRetainedAssetAtCap answers the shared 503 a request past its fetch bound gets, whether the
+// bound ran out waiting for memory-cap room or inside the store call itself: both are the same
+// "try again shortly" condition from the client's side, never a store failure to alarm an operator
+// over.
+func refuseRetainedAssetAtCap(w http.ResponseWriter, key string) {
+	slog.Warn("dispatch: retained asset refused at the memory cap", "key", key, "cap_bytes", maxRetainedBytesHeld)
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Retry-After", "1")
+	writeError(w, http.StatusServiceUnavailable, "retained assets are at their memory cap; retry")
 }
 
 // isBrowserRoute reports whether an unmatched, non-static path should fall
