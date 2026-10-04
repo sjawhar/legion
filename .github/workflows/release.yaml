@@ -31,9 +31,10 @@ on:
       - ".github/workflows/worker-image.yaml"
   workflow_dispatch:
 
-permissions:
-  contents: write
-  id-token: write
+# Every job declares its own permissions (changes, legion, worker_image, worker_image_release_note,
+# envoy_plugin, pi_envoy below); nothing runs under this workflow-level default, so it stays empty
+# rather than becoming an unreviewed grant to a job added later with no block of its own.
+permissions: {}
 
 concurrency:
   group: release-${{ github.ref }}
@@ -42,8 +43,7 @@ concurrency:
 jobs:
   changes:
     runs-on: ubuntu-24.04
-    # Job-level permissions replace the workflow's: the checkout, and the run list the base step
-    # reads.
+    # contents: read is for the checkout; actions: read is for the run list the base step reads.
     permissions:
       contents: read
       actions: read
@@ -54,9 +54,10 @@ jobs:
       worker_image: ${{ steps.filter.outputs.worker_image }}
     steps:
       # Full history, for the base step's ancestry check.
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           fetch-depth: 0
+          persist-credentials: false
       # The filters compare against the commit the last successful run of this workflow on main
       # checked out, not against the push's own before-sha. GitHub keeps one pending run per
       # concurrency group and cancels it when a newer push queues behind it, and a run can fail
@@ -99,7 +100,7 @@ jobs:
           fi
           echo "Changes since $sha"
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
-      - uses: dorny/paths-filter@v3
+      - uses: dorny/paths-filter@0e4a8c6effa4802afeda77dc8d303f8176d7dfad # v3.0.4
         id: filter
         if: github.event_name != 'workflow_dispatch'
         with:
@@ -159,8 +160,9 @@ jobs:
       github.ref == 'refs/heads/main' &&
       (needs.changes.outputs.legion == 'true' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-24.04
-    # The workflow's own grants, plus the attestations API for the archives' provenance below
-    # (id-token is already one of them: it is the Sigstore signing certificate's OIDC token).
+    # contents: write creates the GitHub release (`gh release create`, below); id-token and
+    # attestations: write are for the archives' provenance attestation (id-token is the Sigstore
+    # signing certificate's OIDC token). The tag push uses the deploy key, not either scope.
     permissions:
       contents: write
       id-token: write
@@ -169,7 +171,7 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       release_tag: ${{ steps.version.outputs.release_tag }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ssh-key: ${{ secrets.DEPLOY_KEY }}
           fetch-depth: 0
@@ -211,7 +213,7 @@ jobs:
             echo "skip=false"
           } >> "$GITHUB_OUTPUT"
           echo "Bumping $PREV_TAG -> legion-v${VERSION}"
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         if: steps.version.outputs.skip != 'true'
         with:
           go-version-file: packages/daemon/go.mod
@@ -250,7 +252,7 @@ jobs:
       # legion-<os>-<arch>.tar.gz --repo sjawhar/legion` checks a downloaded asset against this
       # workflow run rather than against SHA256SUMS, which sits in the same mutable release. The
       # release below uploads these exact files.
-      - uses: actions/attest-build-provenance@v4
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         if: steps.version.outputs.skip != 'true'
         with:
           subject-path: assets/legion-*.tar.gz
@@ -291,27 +293,58 @@ jobs:
     uses: ./.github/workflows/worker-image.yaml
     # No `secrets:`: the called workflow reads only GITHUB_TOKEN, which it receives automatically;
     # `inherit` would hand DEPLOY_KEY and every other repository secret to a job that runs a
-    # PR-authored Dockerfile. Job-level permissions replace the top-level set for this job and must
-    # cover everything the called workflow declares (packages: write is for the ghcr.io push).
+    # PR-authored Dockerfile. This job's permissions must cover every scope worker-image.yaml's own
+    # `permissions:` block declares. The release note, the one step needing contents: write, is
+    # worker_image_release_note below.
     permissions:
-      contents: write
+      contents: read
       packages: write
     with:
       legion_version: ${{ needs.legion.outputs.version }}
-      release_tag: ${{ needs.legion.outputs.release_tag }}
+
+  worker_image_release_note:
+    needs: [legion, worker_image]
+    if: needs.worker_image.result == 'success' && needs.legion.outputs.release_tag != ''
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write # gh release edit
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      REF: ${{ needs.worker_image.outputs.ref }}
+      RELEASE_TAG: ${{ needs.legion.outputs.release_tag }}
+    steps:
+      - name: Append the worker image reference to the legion release
+        run: |
+          test -n "$REF"
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json body -q .body > body.md
+          if grep -qF "$REF" body.md; then
+            echo "Release $RELEASE_TAG already lists $REF"
+            exit 0
+          fi
+          # shellcheck disable=SC2016 # literal Markdown backticks, no expansion wanted
+          printf '\n\n## Worker image\n\n`%s`\n' "$REF" >> body.md
+          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --notes-file body.md
 
   envoy_plugin:
     needs: changes
     if: needs.changes.outputs.envoy_plugin == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
+    # contents: write creates the GitHub release (`gh release create`, below); id-token: write is
+    # the OIDC token npm trusted publishing exchanges for the publish credential (the registry
+    # records `trustedPublisher: github` for this package; no NPM_TOKEN is set) and that also signs
+    # provenance (`npm publish --provenance`). The tag push and version-bump commit use the deploy
+    # key, not either scope.
+    permissions:
+      contents: write
+      id-token: write
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ssh-key: ${{ secrets.DEPLOY_KEY }}
           fetch-depth: 0
 
       - uses: ./.github/actions/setup-bun
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
@@ -409,14 +442,22 @@ jobs:
       always() && (needs.envoy_plugin.result == 'success' || needs.envoy_plugin.result == 'skipped') &&
       (needs.changes.outputs.pi_envoy == 'true' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-24.04
+    # contents: write creates the GitHub release (`gh release create`, below); id-token: write is
+    # the OIDC token npm trusted publishing exchanges for the publish credential (the registry
+    # records `trustedPublisher: github` for this package; no NPM_TOKEN is set) and that also signs
+    # provenance (`npm publish --provenance`). The tag push and version-bump commit use the deploy
+    # key, not either scope.
+    permissions:
+      contents: write
+      id-token: write
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ssh-key: ${{ secrets.DEPLOY_KEY }}
           fetch-depth: 0
 
       - uses: ./.github/actions/setup-bun
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
