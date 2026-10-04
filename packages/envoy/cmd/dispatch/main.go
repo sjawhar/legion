@@ -42,7 +42,6 @@ const (
 	defaultListenPort = "8766"
 	// defaultEnvoyURL is the Envoy listener when ENVOY_URL is unset: this machine's.
 	defaultEnvoyURL   = "http://127.0.0.1:9020"
-	shutdownTimout    = 5 * time.Second
 	readHeaderTimeout = 10 * time.Second
 	idleTimeout       = 2 * time.Minute
 )
@@ -69,6 +68,9 @@ type bootConfig struct {
 	SignInGroup        string
 	NATSDisabled       bool
 	TestHooksEnabled   bool
+	// SettleDelay is how long a document waits after a live change before it settles, zero for the
+	// document service's own default; only DISPATCH_TEST_SETTLE_DELAY, under the test hooks, sets it.
+	SettleDelay time.Duration
 	// OIDCIssuer and OIDCAudience configure verification of projected
 	// service-account tokens. Both set or neither; empty means no verifier.
 	OIDCIssuer   string
@@ -184,7 +186,6 @@ func main() {
 		slog.Error("dispatch: open database", "error", err)
 		os.Exit(1)
 	}
-	defer database.Pool.Close()
 	if err := database.Migrate(ctx); err != nil {
 		slog.Error("dispatch: migrate database", "error", err)
 		os.Exit(1)
@@ -234,6 +235,7 @@ func main() {
 		Identity:   requestIdentity,
 		AgentToken: boot.AgentToken,
 		ServerURL:  serverURL,
+		Settle:     boot.SettleDelay,
 	})
 
 	serviceTokens, err := oidc.Discover(ctx, boot.OIDCIssuer, boot.OIDCAudience, oidc.DiscoveryTimeout)
@@ -307,30 +309,9 @@ func main() {
 		slog.Error("dispatch: listen", "addr", boot.ListenAddr, "error", err)
 		os.Exit(1)
 	}
-	serveErr := make(chan error, 1)
-	go func() {
-		slog.Info("dispatch: listening", "addr", boot.ListenAddr)
-		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			serveErr <- err
-			cancel()
-		}
-	}()
-
-	<-ctx.Done()
-	slog.Info("dispatch: shutting down")
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), shutdownTimout)
-	defer shutdownCancel()
-	if err := server.Shutdown(shutdownCtx); err != nil {
-		slog.Warn("dispatch: shutdown", "error", err)
-	}
-	if err := documentService.Shutdown(shutdownCtx); err != nil {
-		slog.Warn("dispatch: shutdown document service", "error", err)
-	}
-	select {
-	case err := <-serveErr:
+	if err := serveUntilStopped(ctx, cancel, server, listener, boot.ListenAddr, documentService, database.Pool); err != nil {
 		slog.Error("dispatch: serve", "error", err)
 		os.Exit(1)
-	default:
 	}
 }
 
@@ -457,6 +438,16 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 		return bootConfig{}, err
 	}
 	boot.ListenAddr = listenAddr
+	if raw := strings.TrimSpace(env.get("DISPATCH_TEST_SETTLE_DELAY")); raw != "" {
+		if !boot.TestHooksEnabled {
+			return bootConfig{}, errors.New("DISPATCH_TEST_HOOKS=1 required with DISPATCH_TEST_SETTLE_DELAY")
+		}
+		delay, err := time.ParseDuration(raw)
+		if err != nil || delay <= 0 {
+			return bootConfig{}, fmt.Errorf("DISPATCH_TEST_SETTLE_DELAY=%q (expected a positive Go duration)", raw)
+		}
+		boot.SettleDelay = delay
+	}
 	identityMode := strings.TrimSpace(env.get("DISPATCH_IDENTITY"))
 	if err := checkSignInSettings(boot, identityMode); err != nil {
 		return bootConfig{}, err

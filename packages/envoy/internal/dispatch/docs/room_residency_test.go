@@ -579,8 +579,8 @@ func TestAPublishSurvivesItsRoomsWorkerRetiringUnderIt(t *testing.T) {
 			service.failRoom(artifactID, errors.New("test: room failed"))
 			return service.awaitRoomRecovery(context.Background(), artifactID)
 		}},
-		// Shutdown closes a room with a connected editor first (CloseRoom), then waits on the paused
-		// write's durable append, which this test holds, until its budget ends.
+		// Shutdown waits on the paused write's durable append, which this test holds, until its
+		// budget ends, then closes the room with a connected editor (CloseRoom) under the publish.
 		{"Shutdown with a connected editor", true, func(service *Service, _ string) error {
 			ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 			defer cancel()

@@ -13,7 +13,6 @@ import (
 	"testing"
 	"time"
 
-	gws "github.com/gorilla/websocket"
 	"github.com/reearth/ygo/crdt"
 	ygsync "github.com/reearth/ygo/sync"
 
@@ -60,12 +59,9 @@ type syncedPeer struct {
 	artifactID string
 	doc        *crdt.Doc
 
-	mu         sync.Mutex
-	connection *gws.Conn
-	socketID   string
-	readerDone chan struct{}
-	// answers carries the content of each sync step 2 the room sends, once read has applied it.
-	answers chan []byte
+	mu       sync.Mutex
+	conn     *docstest.Peer
+	socketID string
 }
 
 // connectBrowserPeer connects alice's browser to artifactID's room, through a document server of
@@ -88,65 +84,44 @@ func (p *syncedPeer) connect(t *testing.T) {
 	socketID := strconv.FormatInt(p.sockets.next.Add(1), 10)
 	headers := p.headers.Clone()
 	headers.Set(socketHeader, socketID)
-	connection, response, err := gws.DefaultDialer.Dial(p.wsURL+"?schema_version="+strconv.Itoa(pmdoc.SchemaVersion()), headers)
-	if err != nil {
-		t.Fatalf("connect browser peer: response=%#v err=%v", response, err)
-	}
+	conn := docstest.Dial(t, p.wsURL+"?schema_version="+strconv.Itoa(pmdoc.SchemaVersion()), headers, p.artifactID, p.doc)
 	p.mu.Lock()
-	p.connection = connection
+	p.conn = conn
 	p.socketID = socketID
-	p.readerDone = make(chan struct{})
-	p.answers = make(chan []byte, 16)
-	readerDone, answers := p.readerDone, p.answers
 	p.mu.Unlock()
-	go p.read(connection, readerDone, answers)
 	p.barrier(t)
 }
 
-// read applies every sync frame the room sends. It answers the room's sync step 1 with the
-// updates the room lacks, and hands barrier the content of each sync step 2 it applies.
-func (p *syncedPeer) read(connection *gws.Conn, done chan<- struct{}, answers chan<- []byte) {
-	defer close(done)
-	docstest.Drain(connection, p.doc, func(syncMessage []byte) error {
-		return p.write(connection, syncMessage)
-	}, func(content []byte) {
-		select {
-		case answers <- content:
-		default:
-		}
-	})
-}
-
-func (p *syncedPeer) write(connection *gws.Conn, syncMessage []byte) error {
-	return docstest.WriteFrame(&p.mu, connection, p.artifactID, syncMessage)
+func (p *syncedPeer) connection() *docstest.Peer {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.conn
 }
 
 // barrier returns once the room holds everything the peer sent and has answered a request sent
-// now. It drops the answers already queued, then asks for the room's whole state (a sync step 1
-// naming no state) until an answer holds the peer's document. The room answers one connection in
-// order, and each answer is applied to the peer before barrier sees it, so the peer then holds
-// everything the room sent before that answer. The document check covers a sync step 2 that was
-// already on its way when barrier drained: another peer's that the room relays can arrive after
-// the request and predate an update this peer sent just before it.
+// now. It drops the answers already queued, then asks for the room's whole state until an answer
+// holds the peer's document. The room answers one connection in order, and each answer is applied
+// to the peer before barrier sees it, so the peer then holds everything the room sent before that
+// answer. The document check covers a sync step 2 that was already on its way when barrier
+// drained: another peer's that the room relays can arrive after the request and predate an update
+// this peer sent just before it.
 func (p *syncedPeer) barrier(t *testing.T) {
 	t.Helper()
-	p.mu.Lock()
-	connection, answers, done := p.connection, p.answers, p.readerDone
-	p.mu.Unlock()
-	for len(answers) > 0 {
-		<-answers
+	conn := p.connection()
+	for len(conn.Answers) > 0 {
+		<-conn.Answers
 	}
 	deadline := time.After(5 * time.Second)
 	for {
-		if err := p.write(connection, ygsync.EncodeSyncStep1(crdt.New())); err != nil {
+		if err := conn.AskForDocument(); err != nil {
 			t.Fatalf("send browser peer sync step 1: %v", err)
 		}
 		select {
-		case state := <-answers:
+		case state := <-conn.Answers:
 			if p.roomHolds(t, state) {
 				return
 			}
-		case <-done:
+		case <-conn.Ended:
 			t.Fatal("browser peer connection closed before the room answered its sync")
 		case <-deadline:
 			t.Fatal("the room never answered with a state holding everything the browser peer sent")
@@ -194,14 +169,9 @@ func (p *syncedPeer) closeAndWait(t *testing.T) {
 }
 
 func (p *syncedPeer) close() {
-	p.mu.Lock()
-	connection, done := p.connection, p.readerDone
-	p.mu.Unlock()
-	if connection == nil {
-		return
+	if conn := p.connection(); conn != nil {
+		conn.Close()
 	}
-	_ = connection.Close()
-	<-done
 }
 
 // edit runs change on the peer's document tree in one local transaction and sends the update it
@@ -233,10 +203,7 @@ func (p *syncedPeer) transact(t *testing.T, change func(*crdt.Transaction, *crdt
 	if changeErr != nil || update == nil {
 		t.Fatalf("browser peer edit: update=%d bytes err=%v", len(update), changeErr)
 	}
-	p.mu.Lock()
-	connection := p.connection
-	p.mu.Unlock()
-	if err := p.write(connection, ygsync.EncodeUpdate(update)); err != nil {
+	if err := p.connection().Write(ygsync.EncodeUpdate(update)); err != nil {
 		t.Fatalf("send browser peer update: %v", err)
 	}
 }

@@ -262,6 +262,31 @@ func (p *Pool) Config() *pgxpool.Config { return p.pool.Config() }
 // Stat reports the pool's current connection counts.
 func (p *Pool) Stat() *pgxpool.Stat { return p.pool.Stat() }
 
+// ConnectionUse is how many connections of the shared and document-rooms pools are in use, and
+// how many those two pools have taken back since they opened, whether returned or discarded. The
+// health probe's pool is left out: it is how a caller asks whether the database answers.
+type ConnectionUse struct {
+	InUse    int32
+	Returned int64
+}
+
+// Use reports the shared and document-rooms pools' ConnectionUse.
+func (p *Pool) Use() ConnectionUse {
+	p.mu.Lock()
+	rooms := p.rooms
+	p.mu.Unlock()
+	var use ConnectionUse
+	for _, pool := range []*pgxpool.Pool{p.pool, rooms} {
+		if pool == nil {
+			continue
+		}
+		stat := pool.Stat()
+		use.InUse += stat.AcquiredConns()
+		use.Returned += stat.AcquireCount() - int64(stat.AcquiredConns())
+	}
+	return use
+}
+
 func (p *Pool) guard(ctx context.Context) error {
 	if !holdsConnection(ctx) {
 		return nil

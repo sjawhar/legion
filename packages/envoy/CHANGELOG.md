@@ -221,6 +221,28 @@
 - A Markdown document now nests at most 100 blocks, and a document tree with a node more than 1,000 levels below the document, or an attribute value nesting more than 100 arrays and objects, is outside the Proof schema (LEGION-465). The bounds sit where every read serves the tree: past about 5,000 levels the document token is JSON that `encoding/json` will not write from Go 1.27 or read in any version, and `GET /blocks`, which hashes each block's subtree apart, does work growing with the square of the depth. A live tree past either tree bound is treated as any other tree outside the schema: settlement writes no version, its reads and edits answer `409 DOC_SCHEMA` naming the repair, the document websocket refuses it, and an upload of replacement markdown repairs it (LEGION-469). A textblock's inline markdown nests at most 100 marks inside one another - emphasis, strong, strikethrough, links, images and code - and deeper content is refused naming the line. An accepted suggestion whose own markdown nests within 100 blocks but lands deep enough that the document would nest past them is refused as `400 INVALID_OP` on `replace_with`, naming how many blocks the result nests (LEGION-465).
 
 ### Fixed
+- A deploy with someone on the Dispatch dashboard no longer spends the whole shutdown waiting and
+  then leaves the documents it owed unsettled (LEGION-501). An open event stream or agent
+  conversation stream never went idle, so `http.Server.Shutdown` held for its full 5 s, and the
+  document service then shut down on that expired deadline and logged `document settlement
+  unconfirmed at shutdown`. Both streams now end at SIGTERM, which the dashboard reconnects from,
+  so HTTP shutdown waits only for the requests in flight. Those requests drain first, with no
+  deadline of their own; the document service starts once they are done, or 15 s after the signal
+  with some still running, and gets 10 s of its own, so it finishes 5 s inside the 30 s stop timeout
+  ECS and the compose file give Dispatch. Each loaded document drains, reads what it owes and
+  settles in a worker of its own, so a document whose update is slow to store, or whose editor
+  keeps typing, leaves only its own settlement to the next process. A spec with its tab open is
+  settled while its room is still loaded, and its editors are disconnected only after that, so the
+  edit they made is versioned before the process exits instead of when someone next opens the spec;
+  a settlement that has to write into the room (stamping a block id, restoring an ask block's state)
+  is still left to the next process, now with a WARN rather than an ERROR. The database pool closes
+  once every request has answered, with nothing but the runtime's kill bounding that wait while the
+  database answers, so a write waiting on a lock commits and is answered if it finishes before the
+  kill. A database that has stopped answering no longer holds the process until its runtime kills
+  it: once the document service has finished and three health probes in a row have failed with no
+  connection returned meanwhile, Dispatch exits without the connections waiting on it (`dispatch:
+  exit with database connections still in use once the database stopped answering`). The compose
+  file sets `stop_grace_period: 30s`.
 - A document edit that repairs an ask a browser left unreadable now reports it in
   `decision_blocks_added`, matching the open ask its next settlement creates. An edit keeps that
   count as count-only advice when the bounded issue-advice query fails (LEGION-470).
