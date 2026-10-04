@@ -2,6 +2,7 @@ package policy
 
 import (
 	"errors"
+	"fmt"
 	"regexp"
 	"strings"
 )
@@ -9,8 +10,12 @@ import (
 // namePattern is the name a session asks for: the uppercase form of slugPattern (load.go).
 var namePattern = regexp.MustCompile(`^[A-Z][A-Z0-9]*(_[A-Z0-9]+)*$`)
 
-// ErrNameInvalid is a name no secret under the prefix can carry, so no lookup is made for it.
-var ErrNameInvalid = errors.New("not an agent secret name: uppercase letters, digits and single underscores, starting with a letter")
+// ErrNameInvalid is a name no secret under the prefix can carry, so no lookup is made for it. Each
+// refusal wraps it with the rule the name breaks.
+var ErrNameInvalid = errors.New("not an agent secret name")
+
+// errNamePattern is ErrNameInvalid for a name not of namePattern's form.
+var errNamePattern = fmt.Errorf("%w: uppercase letters, digits and single underscores, starting with a letter", ErrNameInvalid)
 
 // SlugToName is the name a session asks for the secret whose name under the prefix is slug:
 // uppercased, each hyphen an underscore (deel-api-key is DEEL_API_KEY).
@@ -22,7 +27,7 @@ func SlugToName(slug string) string {
 // not uppercase letters, digits and single underscores starting with a letter is ErrNameInvalid.
 func NameToSlug(name string) (string, error) {
 	if !namePattern.MatchString(name) {
-		return "", ErrNameInvalid
+		return "", errNamePattern
 	}
 	return slugOf(name), nil
 }

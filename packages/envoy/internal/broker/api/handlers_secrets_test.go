@@ -3,6 +3,7 @@ package api_test
 import (
 	"io"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -57,6 +58,11 @@ func TestRereadServesANewSecretAndDropsADeletedOne(t *testing.T) {
 	}
 	if status, body = ts.req(t, http.MethodPost, "/v1/secrets/not_a_name/reread", nil, nil); status != http.StatusBadRequest || decode[wireError](t, body).Code != "SECRET_NAME_INVALID" {
 		t.Fatalf("malformed name: %d %s, want 400 SECRET_NAME_INVALID", status, body)
+	}
+	// A name whose Secrets Manager name would pass the 512-character limit names no secret.
+	tooLong := "A" + strings.Repeat("B", 512-len(policytest.Prefix))
+	if status, body = ts.req(t, http.MethodPost, "/v1/secrets/"+tooLong+"/reread", nil, nil); status != http.StatusBadRequest || decode[wireError](t, body).Code != "SECRET_NAME_INVALID" {
+		t.Fatalf("over-long name: %d %s, want 400 SECRET_NAME_INVALID", status, body)
 	}
 }
 

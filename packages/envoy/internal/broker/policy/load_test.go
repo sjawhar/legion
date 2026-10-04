@@ -464,3 +464,23 @@ func TestLoadOneAnswersOneNameByLoadsRules(t *testing.T) {
 		t.Fatalf("Load served a secret scheduled for deletion (%v): %+v", err, set.Secrets)
 	}
 }
+
+// TestLoadOneMakesNoCallForAnIDPastSecretsManagersNameLimit pins the 512-character limit on a
+// secret's name: a request name whose id under the prefix is exactly that long is described as any
+// other, and one a character longer is ErrNameInvalid with no DescribeSecret made, since Secrets
+// Manager refuses a longer SecretId as invalid input rather than answering it not found.
+func TestLoadOneMakesNoCallForAnIDPastSecretsManagersNameLimit(t *testing.T) {
+	store := secrets.NewLocal()
+	count := &countingDescriber{DescribeSecretAPIClient: store}
+	loader := policytest.Loader(store)
+	loader.Describer = count
+	ctx := context.Background()
+
+	atLimit := "A" + strings.Repeat("B", 512-len(policytest.Prefix)-1)
+	if lk, err := loader.LoadOne(ctx, atLimit); err != nil || lk.Served || lk.Reason != policy.ReasonAbsent || count.calls.Load() != 1 {
+		t.Fatalf("LoadOne(a name whose id is 512 characters) = %+v, %v after %d DescribeSecret calls; want absent after one", lk, err, count.calls.Load())
+	}
+	if lk, err := loader.LoadOne(ctx, atLimit+"C"); !errors.Is(err, policy.ErrNameInvalid) || count.calls.Load() != 1 {
+		t.Fatalf("LoadOne(a name whose id is 513 characters) = %+v, %v after %d DescribeSecret calls; want ErrNameInvalid with no further call", lk, err, count.calls.Load())
+	}
+}

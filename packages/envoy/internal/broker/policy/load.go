@@ -144,16 +144,37 @@ type Lookup struct {
 	Reason string
 }
 
+// maxSecretNameLength is the longest name Secrets Manager gives a secret. DescribeSecret answers a
+// longer SecretId as invalid input (ValidationException, or InvalidParameterException once it is
+// long enough), not as a secret it does not hold, so LoadOne would take it for a failed read; a
+// name under the prefix past it can name no secret, and LoadOne refuses it before any call.
+const maxSecretNameLength = 512
+
+// secretName is the one place that answers whether name can name a secret under the prefix: its
+// slug and its whole Secrets Manager name when it can, and ErrNameInvalid when it is not of
+// namePattern's form or makes a name past maxSecretNameLength. Secrets Manager names are ASCII,
+// so the length counts bytes.
+func (l Loader) secretName(name string) (slug, id string, err error) {
+	slug, err = NameToSlug(name)
+	if err != nil {
+		return "", "", err
+	}
+	id = l.Prefix + slug
+	if len(id) > maxSecretNameLength {
+		return "", "", fmt.Errorf("%w: under the prefix it makes a %d-character secret name, past Secrets Manager's %d-character limit", ErrNameInvalid, len(id), maxSecretNameLength)
+	}
+	return slug, id, nil
+}
+
 // LoadOne reads the one secret a session asks for as name, by the rules Load applies to each
-// secret it lists, logging the same RefusedMessage line when it refuses it. A name that is not a
-// valid secret name is ErrNameInvalid, with no call made; a failed Secrets Manager or KMS call is
+// secret it lists, logging the same RefusedMessage line when it refuses it. A name no secret can
+// carry (secretName) is ErrNameInvalid, with no call made; a failed Secrets Manager or KMS call is
 // an error.
 func (l Loader) LoadOne(ctx context.Context, name string) (Lookup, error) {
-	slug, err := NameToSlug(name)
+	slug, id, err := l.secretName(name)
 	if err != nil {
 		return Lookup{}, err
 	}
-	id := l.Prefix + slug
 	out, err := l.Describer.DescribeSecret(ctx, &secretsmanager.DescribeSecretInput{SecretId: aws.String(id)})
 	var notFound *smtypes.ResourceNotFoundException
 	switch {
