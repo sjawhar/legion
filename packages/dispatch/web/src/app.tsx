@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { lazy, type ReactNode, type RefObject, Suspense, useEffect, useRef, useState } from "react";
 import { Link, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 
-import { api, isForbidden, isUnauthorized } from "./api/client";
+import { api, isUnauthorized } from "./api/client";
 import { useConnectionState } from "./api/live";
 import { userAgentStateQuery, whoAmIQuery } from "./api/queries";
 import { useEventStream } from "./api/sse";
@@ -190,18 +190,8 @@ function SignInPage(): ReactNode {
         className={`mt-8 inline-flex rounded-lg px-4 py-2 font-semibold ${primaryButtonBg} ${primaryButtonHoverBg}`}
         href="/auth/start"
       >
-        Sign in with GitHub
+        Sign in with Google
       </a>
-    </ShellMessagePage>
-  );
-}
-
-function ForbiddenPage(): ReactNode {
-  return (
-    <ShellMessagePage title="This GitHub account isn't allowed here.">
-      <p className={`mt-3 ${textSecondaryOnSurface}`}>
-        Ask a Dispatch admin to add your account, then sign in again.
-      </p>
     </ShellMessagePage>
   );
 }
@@ -679,9 +669,6 @@ export function AuthGate(): ReactNode {
   // session expired or was revoked — otherwise a revoked user keeps the authenticated shell.
   if (whoAmI.isError && isUnauthorized(whoAmI.error)) {
     return <SignInPage />;
-  }
-  if (whoAmI.isError && isForbidden(whoAmI.error)) {
-    return <ForbiddenPage />;
   }
   if (whoAmI.data !== undefined) {
     return <AuthenticatedApp user={whoAmI.data} />;

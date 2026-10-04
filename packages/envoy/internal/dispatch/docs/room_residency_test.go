@@ -534,7 +534,7 @@ func newRetiringRoomService(t *testing.T) (*Service, *store.Store) {
 	service := New(Deps{
 		Store:     database,
 		Events:    events.NewBroker(),
-		Identity:  identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: map[string]struct{}{"alice": {}}},
+		Identity:  identity.HeaderIdentity{Header: "X-Dispatch-User", People: store.NewPgPeopleStore(database.Pool)},
 		ServerURL: "https://dispatch.example",
 		Settle:    time.Hour,
 	})
@@ -565,8 +565,8 @@ func TestAPublishSurvivesItsRoomsWorkerRetiringUnderIt(t *testing.T) {
 		retire func(service *Service, artifactID string) error
 	}{
 		{"control: nothing closes the room", false, func(*Service, string) error { return nil }},
-		{"CloseRoom closes the room", false, func(service *Service, artifactID string) error {
-			return service.srv.CloseRoom(artifactID, true)
+		{"ygo's CloseRoom closes the room", false, func(service *Service, artifactID string) error {
+			return service.srv.Server.CloseRoom(artifactID, true)
 		}},
 		{"SetIssueClosed closes the room", false, func(service *Service, _ string) error {
 			service.SetIssueClosed(context.Background(), "DOC-1", true)

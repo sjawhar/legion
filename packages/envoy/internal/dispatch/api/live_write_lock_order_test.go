@@ -111,7 +111,7 @@ func newUploadRaceFixture(t *testing.T) *uploadRaceFixture {
 			Store:       database,
 			Persistence: f.persistence,
 			Identity: identity.HeaderIdentity{
-				Header: "X-Dispatch-User", AllowedLogins: map[string]struct{}{"alice": {}},
+				Header: "X-Dispatch-User", People: store.NewPgPeopleStore(database.Pool),
 			},
 			Settle: time.Hour,
 		})
