@@ -113,13 +113,17 @@
   pool did not revoke; sign this person out at the pool`. A redirect from the revocation endpoint
   is a failure, never followed. The boot logs how many it retired and how many failed, and stops
   after 30 seconds without holding up the start. A database backup holds no refresh token the
-  pool would accept only once a boot of this release has retired every plain-text token; after the
-  last earlier-release task is gone, restart Dispatch once, then check that boot logged
-  `failed=0`, no sign-in-replaced line appeared, and
+  pool would accept only once a boot of this release has retired every plain-text token, and then
+  only for the tokens still in `people` when it ran: one `0068`'s release removed without revoking
+  (a sign-in that replaced it, or a logout) stays valid at the pool in any backup that holds it,
+  so delete every backup taken between `0068`'s deploy and the post-roll restart, or sign out at
+  the pool everyone whose `people.signed_in_at` is after `0068`'s deploy. After the last
+  earlier-release task is gone, restart Dispatch once, then check that boot logged `failed=0`, no
+  sign-in-replaced line appeared, and
   `select count(*) from people where refresh_token is not null and refresh_token not like 'v1:%'`
-  answers `0` (`cmd/dispatch/README.md`). Rotating `DISPATCH_SIGNING_KEY` leaves Dispatch unable to open any stored refresh
-  token, so everyone signs in again, but revokes none at the pool: after a key leak, sign people
-  out at the pool.
+  answers `0` (`cmd/dispatch/README.md`). Rotating `DISPATCH_SIGNING_KEY` leaves Dispatch unable
+  to open any stored refresh token, so everyone signs in again, but revokes none at the pool:
+  after a key leak, sign people out at the pool.
 - A blank approval-request `summary` is refused (`400 SUMMARY_INPUT`) with text that asks for what
   the human is approving, rather than for what the version proposes that the human has not agreed
   to, and the advice in `409 APPROVAL_WAITS_ON_HUMAN` and in an approval ask's `409 ASK_KIND_FIXED`

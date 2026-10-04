@@ -179,9 +179,12 @@ lowercase email:
   `msg="dispatch: retired the refresh tokens stored in plain text" retired=<n> failed=<n>`.
 
   A database backup therefore holds no refresh token the pool would accept only
-  once a boot of this release has retired every plain-text token: a backup taken
-  before then holds the plain-text tokens of its day, which stop working when
-  the pool revokes them. Rotating `DISPATCH_SIGNING_KEY` leaves Dispatch unable
+  once a boot of this release has retired every plain-text token, and then only
+  for the tokens still in `people` when it ran: those stop working when the
+  pool revokes them. A plain-text token `0068`'s release removed without
+  revoking (a sign-in that replaced it, or a logout that cleared it) stays
+  valid at the pool until it expires, in any backup that holds it (Database
+  migrations, below). Rotating `DISPATCH_SIGNING_KEY` leaves Dispatch unable
   to open any stored refresh token, so each person signs in again, but it
   revokes none at the pool: whoever holds a backup and the old key can still
   redeem them until they expire, so after a key leak, sign each person out at
@@ -357,6 +360,12 @@ answers `0`. A boot line with `failed=<n>` above zero names each token it could 
 ERROR line; the next boot tries again, and signing that person out at the pool ends it at once. A
 non-zero count with no such line is a token a task of the earlier release wrote after the last
 boot, which another restart retires.
+
+The boot revokes only the plain-text tokens still in `people`. Under `0068`'s release a sign-in
+that replaced a person's token, or a logout that cleared it, removed it without revoking it, and
+it stays valid at the pool until it expires in any backup that holds it. So if any database backup
+was taken between `0068`'s deploy and the post-roll restart, either delete those backups or sign
+out at the pool everyone whose `people.signed_in_at` is after `0068`'s deploy.
 
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a
