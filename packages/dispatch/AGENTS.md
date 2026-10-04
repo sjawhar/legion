@@ -212,16 +212,23 @@ all read it, so a request one of them counts is one the section lists.
 
 `CredentialRecordPage.tsx` (`/credentials/:recordId`) and `MachineLoginPage.tsx`
 (`/credentials/machine`) share `CredentialRecordFacts.tsx` (kind, identifiers, enrollment,
-a pod enrollment's worker slot when it has one, lifetime, requested/expiry timestamps, rules
-version, approver, then the agent's reason) and `CredentialDecisionButtons.tsx` (the Approve/Deny
+a pod enrollment's worker slot when it has one, lifetime, requested/expiry timestamps, policy
+version, approver - the broker's `anyone`, a shared secret's, reads "Anyone signed in to
+Dispatch" - then the agent's reason) and `CredentialDecisionButtons.tsx` (the Approve/Deny
 pair, shown whenever the record is `pending`). The broker's `enrollment.slot` (`implementer-g3`,
 null without one) is what tells the requests of two roles in one pod apart, since they share the
-pod's kind and runtime id.
+pod's kind and runtime id. A request waiting on `anyone` is in every signed-in person's pending
+list, since the broker lists it for every approver, and any of them decides it the same way.
 The reason renders inside a `<blockquote>` as **plain text only** — no Markdown pipeline, no
 linkification, `white-space: pre-wrap` — since it is the agent's own words, not reviewed content;
 a pending machine-kind record adds the sentence "Approving lets `<host>` start agent sessions as
-you." verbatim; the record page renders no buttons at all for a machine record, pointing instead at
-the machine page, whose code-entry lookup is the only way to decide it. A decision is one plain
+you." verbatim, or, for a service's login (the record's `service` set, the Legion daemon's),
+"Approving lets `<service> on <host>` start worker pods as `<service>`, not as you: no secret of
+yours reaches its pods unless you approve the request for it."; an approval made on the machine
+page reads "Approved. `<host>` can start agent sessions as you." or "Approved. `<service> on
+<host>` can start worker pods as `<service>`."; the record page renders no buttons at all for a
+machine record, pointing instead at the machine page, whose code-entry lookup is the only way to
+decide it. A decision is one plain
 POST: a plain record's approve and deny send no body, and a machine record's approve and deny both
 send `{code}`, the code the viewer typed for that lookup (the broker requires it on either
 decision). The page never says who decides: Dispatch's server names the signed-in viewer (below),
@@ -231,11 +238,35 @@ recorded decision and no buttons, on the record page and on the machine page ali
 machine page looked the login up already decided or decided it itself; every broker error
 surfaces verbatim through `ApiError`'s message, never reworded.
 
-`GrantsSection.tsx` renders on `/settings` only where the pending list is not `null`: the live
-approval-granted grants the viewer approved, and those on enrollments the viewer operates whoever
-approved them (`grants.ts`'s `credentialGrantsQuery`, `?approver=me`). Each row names its approver
-(the broker's `approver` field), a pod enrollment's slot under its enrollment, and has a Revoke
-button that POSTs `{}` to `/api/v1/credential-grants/{id}/revoke`.
+`RevocableList.tsx` is the revocable table both lists below render through, as
+`CredentialDecisionButtons.tsx` is the decision pair both record pages share: each section hands it
+its query (narrowed to the rows with `select`), its columns, its revoke call, an optional
+`window.confirm` question and what to invalidate on success. It owns the loading, failed and empty
+states and the one revoke in flight: every Revoke button is disabled while a revoke is pending, a
+`useSubmitGuard` ref drops a second press that lands before that re-render, and a refused revoke's
+broker message (a `403 NOT_APPROVER` among them) shows under the table, never silently.
+
+`GrantsSection.tsx` renders on `/settings` only where the pending list is not `null`: every live
+grant of a session the viewer operates, automatic or approved by anyone, and every grant the viewer
+approved (`grants.ts`'s `credentialGrantsQuery`, `?approver=me`). Each row names how it was
+granted (the broker's `granted`: "Automatically", or "Approved by" its `approver`; `CredentialGrant`
+is a union on `granted`, so an automatic grant has a null approver and record and an approved one
+has both), a pod enrollment's slot under its enrollment, and has a Revoke button that POSTs `{}` to
+`/api/v1/credential-grants/{id}/revoke`. Only its operator sees an automatic grant, and revoking
+one makes that session ask before it gets those secrets again: its other automatic grants of them
+end with it.
+
+`MachineLoginsSection.tsx` renders under the code entry on `/credentials/machine`: the machine
+logins the viewer approved that can still reach a secret (`GET /api/v1/machine-logins`,
+`machineLogins.ts`'s `machineLoginsQuery`, which an approval on the page also invalidates), one row
+per login with its machine (the host, or `<service> on <host>` for a service's login such as the
+Legion daemon's), when it was issued and when it expires, and a Revoke button that asks
+`window.confirm` first and then POSTs `{}` to `/api/v1/machine-logins/{id}/revoke`. A login's
+sessions outlive its expiry, so the broker also lists an expired login while one of its sessions
+runs (`expired: true`), and its row reads `expired, sessions still running` under the machine. The
+confirm for a service's login says every session it started, its worker pods included, ends and the
+service needs a new login approval. Revoking ends the login and every session it enrolled, so it
+also invalidates the Live grants list.
 
 `packages/envoy/internal/dispatch/agentsecrets/client.go` is Dispatch's server-side client for the
 broker's UI-bearer API (`DISPATCH_AGENT_SECRETS_URL`/`DISPATCH_AGENT_SECRETS_TOKEN[_FILE]`,
@@ -247,15 +278,17 @@ the approving human from the request body on that bearer's word, so Dispatch bui
 body itself. `Approve` and `Deny` take an `agentsecrets.Decision{Approver, Code}`, where `Approver`
 is always `canonicalLogin` of the `requireHuman` caller and `Code` is the only field read from the
 browser's body; any other field the browser sends, an `approver` among them, is dropped.
-`RevokeByApprover` sends only the caller's canonical login. Cookie-authenticated unsafe requests
+`RevokeByApprover`, `MachineLogins` and `RevokeMachineLogin` send only the caller's canonical login
+as the approver. Cookie-authenticated unsafe requests
 must be same-origin (`enforceCookieOrigin` in `packages/envoy/internal/dispatch/routes/router.go`),
 so another site cannot send a decision from a signed-in human's browser.
-`packages/envoy/internal/dispatch/api/credential_requests.go` mounts the seven `human`-auth proxy
+`packages/envoy/internal/dispatch/api/credential_requests.go` mounts the nine `human`-auth proxy
 rows every page above calls:
 `GET /api/v1/credential-requests`, `GET /api/v1/credential-requests/{id}`,
 `POST /api/v1/credential-requests/{id}/approve|deny`,
-`POST /api/v1/credential-requests/machine-lookup`, `GET /api/v1/credential-grants`, and
-`POST /api/v1/credential-grants/{id}/revoke`. Every handler requires a human caller first, then a
+`POST /api/v1/credential-requests/machine-lookup`, `GET /api/v1/credential-grants`,
+`POST /api/v1/credential-grants/{id}/revoke`, `GET /api/v1/machine-logins` and
+`POST /api/v1/machine-logins/{id}/revoke`. Every handler requires a human caller first, then a
 configured client (`404 FEATURE_OFF` on a nil one), except the pending list, which answers `null`
 without a broker once its input is checked; the two `?approver=` routes accept only the
 literal string `"me"` (`400 APPROVER_ME_ONLY` otherwise) and resolve it to the caller's own
@@ -265,7 +298,15 @@ failure is `503 AGENT_SECRETS_UNAVAILABLE`. `credential_requests_test.go` pins t
 against a fake broker, and `internal/dispatch/api/contract_test.go` round-trips a real broker
 (`brokerapi.Register` with real services on `BROKER_TEST_DATABASE_URL`): another login refused
 `403 NOT_APPROVER` even when its browser body names the approver, the approver's click accepted
-whatever login its body names, and the value released.
+whatever login its body names, and the value released; a shared secret's request in two people's
+lists and approved by the second; an automatic grant listed as automatic, revoked, and the same
+session's next request for it waiting on its owner while another session still gets it at once;
+once the operator has withheld AUTO_TOKEN, another person's approval of the session's request that
+was waiting on anyone for it refused `403 NOT_APPROVER` and the operator's accepted; a machine login
+listed for the person who approved it alone, another person's revoke refused `403 NOT_APPROVER`
+whatever their body names, and the approver's revoke ending the session it enrolled and its
+launcher proofs; and a service's login listed with its service for its approver alone, and
+revocable by them alone.
 
 ## Dark mode
 

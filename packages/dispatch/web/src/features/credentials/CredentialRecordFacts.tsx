@@ -8,6 +8,7 @@ import {
   textPrimaryOnCanvas,
 } from "../../theme/classes";
 import { Timestamp } from "../refs/Timestamp";
+import { machineName } from "./machineLogins";
 
 const LIFETIME_UNITS: ReadonlyArray<{ seconds: number; unit: string }> = [
   { seconds: 86400, unit: "day" },
@@ -26,7 +27,10 @@ function formatLifetime(seconds: number): string {
   return `${seconds} second${seconds === 1 ? "" : "s"}`;
 }
 
-/** One label and value; the value wraps inside its grid cell, so a 64-hex rules version or a long
+/** The approver a request names when any signed-in person may decide it: a shared secret's. */
+const ANYONE_APPROVER = "anyone";
+
+/** One label and value; the value wraps inside its grid cell, so a 64-hex policy version or a long
  *  host name never runs into the fact beside it or widens a narrow page. */
 function Fact({ children, label }: { children: ReactNode; label: string }): ReactNode {
   return (
@@ -41,9 +45,11 @@ function Fact({ children, label }: { children: ReactNode; label: string }): Reac
  * The broker's facts about a credential record, then the agent's stated reason as plain text
  * (no markdown pipeline - a `<blockquote>` with `whitespace-pre-wrap` renders it verbatim), then,
  * for a pending machine (`launcher_credential`) record, the sentence explaining what approving it
- * grants. A pod enrollment's slot (`implementer-g3`) is its own fact, since several slots of one
- * pod share the same enrollment line. Shared by `CredentialRecordPage` and `MachineLoginPage`,
- * which both show this same layout before their own (page-specific) decision/action controls.
+ * grants: a person's machine starts agent sessions as them, while a service's login (the Legion
+ * daemon's) starts worker pods as the service, never as the person approving it. A pod
+ * enrollment's slot (`implementer-g3`) is its own fact, since several slots of one pod share the
+ * same enrollment line. Shared by `CredentialRecordPage` and `MachineLoginPage`, which both show
+ * this same layout before their own (page-specific) decision/action controls.
  */
 export function CredentialRecordFacts({ record }: { record: CredentialRecord }): ReactNode {
   return (
@@ -66,8 +72,10 @@ export function CredentialRecordFacts({ record }: { record: CredentialRecord }):
         <Fact label="Expires">
           <Timestamp at={record.expires_at} />
         </Fact>
-        <Fact label="Rules version">{record.rules_version}</Fact>
-        <Fact label="Approver">{record.approver}</Fact>
+        <Fact label="Policy version">{record.rules_version}</Fact>
+        <Fact label="Approver">
+          {record.approver === ANYONE_APPROVER ? "Anyone signed in to Dispatch" : record.approver}
+        </Fact>
       </dl>
       {record.reason === "" ? null : (
         <div>
@@ -83,7 +91,11 @@ export function CredentialRecordFacts({ record }: { record: CredentialRecord }):
       )}
       {record.kind === "launcher_credential" && record.state === "pending" ? (
         <p className={`text-sm font-medium ${textPrimaryOnCanvas}`}>
-          Approving lets {record.identifiers[0]} start agent sessions as you.
+          {`Approving lets ${machineName({ host: record.identifiers[0], service: record.service })} start ${
+            record.service
+              ? `worker pods as ${record.service}, not as you: no secret of yours reaches its pods unless you approve the request for it`
+              : "agent sessions as you"
+          }.`}
         </p>
       ) : null}
     </div>
