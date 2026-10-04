@@ -4,17 +4,19 @@
 # code comments, tests, fixtures or file names, since the published site renders text from all of
 # them. This check fails on any text line or file path naming one:
 #
-#   1. the deployment repository — "agent", then "c", with nothing, a "-" or "_", a space, a
-#      typographic dash or a percent-encoded byte between them — in any case, standing as a token
-#      of its own: no letter or digit on either side, and a percent-encoded byte before it counts
-#      as a separator too. That is the repository's name, its Dispatch project key and every issue
-#      key under it, and the name inside a session id between underscores, but not a camelCase or
-#      snake_case identifier that merely starts with those letters (agentCursor, AgentConversation,
-#      subagentContext, AGENT_COMPOSER_SELECTOR, agent-composer);
-#   2. the company — its two words joined or split by one "-", "_", " " or ".", in any case (its
-#      hostnames included), and its first word capitalized, as a whole word, which is the
-#      company's proper noun wherever it stands, at the start of a sentence or a heading too. The
-#      lowercase English word names nothing and passes;
+#   1. the deployment repository — "agent", then "c", with nothing or one separator between them,
+#      in any case, standing as a token of its own: no letter or digit on either side, and a
+#      percent-encoded byte before it counts as a separator too. A separator is a "-" or "_", a
+#      run of spaces or no-break spaces, a typographic dash, or a percent-encoded byte. That is the
+#      repository's name, its Dispatch project key and every issue key under it, and the name
+#      inside a session id between underscores, but not a camelCase or snake_case identifier that
+#      merely starts with those letters (agentCursor, AgentConversation, subagentContext,
+#      AGENT_COMPOSER_SELECTOR, agent-composer);
+#   2. the company — its two words joined, or split by one separator or a ".", in any case (its
+#      hostnames included); and its first word capitalized or in capitals, as a whole word or
+#      before a "_", which is the company's proper noun or a constant named after it wherever it
+#      stands, at the start of a sentence or a heading too. The lowercase English word names nothing
+#      and passes;
 #   3. a private host below `.internal.`, in any case. A reserved example host (`<name>` then
 #      `.internal.example`, optionally `.com`, `.net` or `.org`) passes, and so does the NATS
 #      client's own `this` property of that name in the one bundle that vendors it
@@ -24,9 +26,10 @@
 # included, plus every untracked file git does not ignore, so a new file is caught before it is
 # added. With arguments it scans each named directory or file instead, tracked or not; docs.yaml
 # passes it the built site (docs/site/dist), whose generated reference pages and copied media
-# captions exist only after the build, and check-pr-text.sh a pull request's title and body. The
-# first two rules also read every file's path, directories included. Binary files are skipped, and
-# so are lockfiles (bun.lock, go.sum, go.work.sum), whose integrity hashes are random text. Every
+# captions exist only after the build, and check-pr-text.sh a pull request's title, body and commit
+# messages. The first two rules also read every file's path, directories included, as git and find
+# print it unquoted. Binary files are skipped, and so are lockfiles (bun.lock, go.sum, go.work.sum),
+# whose integrity hashes are random text. Every
 # hit is printed as its file and line, never its text, and a path component a rule matches is
 # printed as <name>, so the log does not repeat the name; the only non-zero exits are named hits
 # (1) and a target or search that failed (2).
@@ -36,7 +39,8 @@
 #
 # Run from anywhere: .github/scripts/check-private-names.sh [path...]
 # CI runs it over the repository in the lint job of pr-and-main.yaml, over the built site in
-# docs.yaml, over a pull request's title and body in pr-title.yaml (check-pr-text.sh), and its tests
+# docs.yaml, over a pull request's title, body and commit messages through check-pr-text.sh (the
+# required lint job at each push, and pr-title.yaml when the pull request is edited), and its tests
 # in pr-and-main.yaml's test job.
 set -euo pipefail
 
@@ -44,9 +48,16 @@ cd "$(dirname "$0")/../.."
 
 encoded_byte='%[[:xdigit:]]{2}'
 dashes='‐|‑|‒|–|—|―|−|﹘|﹣|－'
-repository_rule="(^|[^[:alnum:]]|$encoded_byte)agent([-_ ]|$encoded_byte|$dashes)?c([^[:alnum:]]|\$)"
-company_rule='t''rajectory[-_ .]?labs'
-proper_noun_rule='(^|[^[:alnum:]_])T''rajectory([^[:alnum:]_]|$)'
+no_break_space=$'\xc2\xa0'
+figure_space=$'\xe2\x80\x87'
+narrow_no_break_space=$'\xe2\x80\xaf'
+spaces="( |$no_break_space|$figure_space|$narrow_no_break_space)+"
+# One separator between the two parts of a name: a hyphen or underscore, a run of spaces or
+# no-break spaces, a typographic dash pasted from a document, or a percent-encoded byte.
+separator="[-_]|$spaces|$encoded_byte|$dashes"
+repository_rule="(^|[^[:alnum:]]|$encoded_byte)agent($separator)?c([^[:alnum:]]|\$)"
+company_rule="t""rajectory($separator|[.])?labs"
+proper_noun_rule="(^|[^[:alnum:]_])(T""rajectory|T""RAJECTORY)([^[:alnum:]]|\$)"
 private_host_rule='[[:alnum:]-]+[.]internal[.][[:alnum:].-]+'
 # Whole matches of the host rule that name no private host: a reserved example host (a trailing
 # full stop is the sentence's), and the NATS client's property in the bundle that vendors it.
@@ -74,20 +85,20 @@ paths=$(mktemp)
 trap 'rm -f "$matches" "$hits" "$paths"' EXIT
 
 if [ ${#targets[@]} -eq 0 ]; then
-  git ls-files --cached --others --exclude-standard | sort -u > "$paths"
+  git -c core.quotePath=false ls-files --cached --others --exclude-standard | sort -u > "$paths"
   scanned="$(wc -l < "$paths") files in the repository"
 else
   find "${targets[@]}" > "$paths"
-  scanned="$(find "${targets[@]}" -type f | wc -l) files under ${targets[*]}"
+  files=0
+  while IFS= read -r path; do
+    if [ -f "$path" ] && [ ! -L "$path" ]; then files=$((files + 1)); fi
+  done < "$paths"
+  scanned="$files files under ${targets[*]}"
 fi
 
 # names <text>: whether one of the first two rules matches text.
 names() {
-  local found=1
-  shopt -s nocasematch
-  if [[ $1 =~ $repository_rule || $1 =~ $company_rule ]]; then found=0; fi
-  shopt -u nocasematch
-  [ "$found" -eq 0 ] || [[ $1 =~ $proper_noun_rule ]]
+  [[ ${1,,} =~ $repository_rule || ${1,,} =~ $company_rule || $1 =~ $proper_noun_rule ]]
 }
 
 # mask <path>: path with each component the first two rules match replaced by <name>.
@@ -122,9 +133,10 @@ search() {
     local excludes=()
     for lockfile in "${lockfiles[@]}"; do excludes+=(":(exclude,glob)**/$lockfile"); done
     # --untracked adds the files git has not been told about, but skips a tracked file under an
-    # ignored path, which the plain pass reads.
-    run git grep -n -o -I --untracked -E "$@" -e "$rule" -- . "${excludes[@]}"
-    run git grep -n -o -I -E "$@" -e "$rule" -- . "${excludes[@]}"
+    # ignored path, which the plain pass reads. core.quotePath=false prints a non-ASCII path as it
+    # is, so the annotation names a real file.
+    run git -c core.quotePath=false grep -n -o -I --untracked -E "$@" -e "$rule" -- . "${excludes[@]}"
+    run git -c core.quotePath=false grep -n -o -I -E "$@" -e "$rule" -- . "${excludes[@]}"
   else
     local excludes=()
     for lockfile in "${lockfiles[@]}"; do excludes+=("--exclude=$lockfile"); done
@@ -172,9 +184,12 @@ if [ -s "$hits" ]; then
   echo "check-private-names: $(wc -l < "$hits") finding(s) ($scanned). This repository is public, so:"
   echo "  - for the deployment repository write \"the deployment repository\" or <deployment repo>, and"
   echo "    use a neutral project key such as ACME in a fixture or example;"
-  echo "  - for the company write \"the company\". Its capitalized first word is the company's name"
-  echo "    wherever it stands, at the start of a sentence or a heading too, so reword that sentence;"
-  echo "  - for a host write a reserved example host such as <name>.internal.example;"
+  echo "  - for the company write \"the company\". Its first word capitalized or in capitals is the"
+  echo "    company's name wherever it stands, at the start of a sentence or a heading or before a \"_\""
+  echo "    too, so reword that sentence or rename that constant;"
+  echo "  - for a host write a reserved example host such as <name>.internal.example. Code that only"
+  echo "    looks like one, such as a field chain <value>.internal.<field> or a module file named"
+  echo "    that way, is refused too: rename it, or reach the field through a variable;"
   echo "  - for a file or directory whose path is reported with <name> in it, rename it."
   exit 1
 fi
