@@ -146,14 +146,7 @@ func headCheckResults(ctx context.Context, github githubrest.Client, sha string)
 			return nil, err
 		}
 		for _, run := range runs.CheckRuns {
-			switch {
-			case run.Status != "completed":
-				results[run.Name] = classify.Pending
-			case run.Conclusion == "success" || run.Conclusion == "neutral" || run.Conclusion == "skipped":
-				results[run.Name] = classify.Success
-			default:
-				results[run.Name] = run.Conclusion
-			}
+			results[run.Name] = classify.RunResult(run.Status, run.Conclusion)
 		}
 		if len(runs.CheckRuns) == 0 || page*100 >= runs.TotalCount {
 			break

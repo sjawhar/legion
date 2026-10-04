@@ -25,6 +25,20 @@ func (s Standing) Red() bool {
 	return s.Result != Success && s.Result != Pending
 }
 
+// RunResult is what Judge reads for one check run or workflow run: Pending until it completes,
+// Success when it ended success, neutral or skipped, as GitHub counts it for a required check, and
+// otherwise the conclusion it failed with.
+func RunResult(status, conclusion string) string {
+	switch {
+	case status != "completed":
+		return Pending
+	case conclusion == "success" || conclusion == "neutral" || conclusion == "skipped":
+		return Success
+	default:
+		return conclusion
+	}
+}
+
 // Judge is Legion's one rule for whether CI is red at a head: each name in required - the checks
 // the base branch requires (requiredchecks.Required) - in order, with its result in results (a
 // check's name to Success, Pending, or what it failed with), and a required check results does not

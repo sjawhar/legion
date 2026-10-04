@@ -150,14 +150,8 @@ func Workflows(ctx context.Context, github githubrest.Client, sha string, workfl
 			}
 		}
 		result := classify.Missing
-		switch {
-		case latest == nil:
-		case latest.Status != "completed":
-			result = classify.Pending
-		case latest.Conclusion == "success" || latest.Conclusion == "neutral" || latest.Conclusion == "skipped":
-			result = classify.Success
-		default:
-			result = latest.Conclusion
+		if latest != nil {
+			result = classify.RunResult(latest.Status, latest.Conclusion)
 		}
 		standings = append(standings, classify.Standing{Name: workflow.Path, Result: result})
 	}
