@@ -44,3 +44,27 @@ func TestPostSendsJSONAndAnswersWithTheStatus(t *testing.T) {
 		t.Fatalf("Post of a taken ref = %v, want an *Answer for POST /git/refs with 422", err)
 	}
 }
+
+// A list GitHub answers as an object's field is read from that field, and an answer without it is
+// an error naming the field, never an empty list a caller would read as nothing required or run.
+func TestGetListPagesRefusesAnAnswerWithoutTheField(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/repos/acme/widgets/actions/runs" {
+			w.Write([]byte(`{"total_count":1,"workflow_runs":[{"id":37}]}`))
+			return
+		}
+		w.Write([]byte(`{"total_count":0,"message":"no list here"}`))
+	}))
+	defer server.Close()
+	client := Client{Token: "token", API: server.URL + "/repos/acme/widgets"}
+	type run struct {
+		ID int `json:"id"`
+	}
+	if runs, err := GetListPages[run](context.Background(), client, "/actions/runs", "workflow_runs"); err != nil || len(runs) != 1 || runs[0].ID != 37 {
+		t.Fatalf("GetListPages = %+v, %v; want the one run read from workflow_runs", runs, err)
+	}
+	runs, err := GetListPages[run](context.Background(), client, "/commits/head/check-runs", "check_runs")
+	if err == nil || runs != nil || err.Error() != `GitHub answered GET /commits/head/check-runs with no "check_runs" list` {
+		t.Fatalf("GetListPages of an answer without the field = %+v, %v; want an error naming check_runs", runs, err)
+	}
+}
