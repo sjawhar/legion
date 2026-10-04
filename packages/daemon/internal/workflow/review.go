@@ -301,6 +301,12 @@ func reviewRound(issue record.Issue, row record.PhaseRow, pr *record.PullRequest
 		return round{}
 	}
 	verdict := classify.HeadVerdict(*pr)
+	// pending names the required checks the head's own settlement left without a result, when they
+	// are all that keeps it from a verdict.
+	var pending []string
+	if verdict == "" && pr.CheckedHead == pr.HeadSHA {
+		pending = pendingAt(*pr)
+	}
 	switch {
 	case completed && decided == "approved" && verdict == "green" && classify.ApprovalStands(*pr, row.Decision.Head):
 		return round{outcome: roundApproved}
@@ -316,14 +322,14 @@ func reviewRound(issue record.Issue, row record.PhaseRow, pr *record.PullRequest
 		return round{outcome: roundStuck, cause: stuckApprovedRed, head: pr.HeadSHA,
 			reason: fmt.Sprintf("the reviewer approved %s on pull request #%d, but %s; a red at the reviewer's own head is its round's to decide, with a REQUEST_CHANGES naming the failing checks",
 				row.Decision.Head, pr.Number, redAt(*pr))}
-	case verdict == "green" && !classify.CodeOnItsWay(*pr):
+	case (verdict == "green" || len(pending) > 0) && !classify.ApprovalStands(*pr, row.Decision.Head) && !classify.CodeOnItsWay(*pr):
 		return round{outcome: roundStuck, cause: stuckApprovedOtherCode, head: pr.HeadSHA,
 			reason: fmt.Sprintf("the reviewer approved %s on pull request #%d, which does not approve head %s: a push since may have changed code, so only an APPROVE of %s or a REQUEST_CHANGES ends the round",
 				row.Decision.Head, pr.Number, pr.HeadSHA, pr.HeadSHA)}
-	case verdict == "" && pr.CheckedHead == pr.HeadSHA && len(pendingAt(*pr)) > 0:
+	case len(pending) > 0 && classify.ApprovalStands(*pr, row.Decision.Head):
 		return round{outcome: roundStuck, cause: stuckApprovedPending, head: pr.HeadSHA,
 			reason: fmt.Sprintf("the reviewer approved %s on pull request #%d, but CI at %s settled with no passing result for %s; the approval stands, and the round ends when a later settlement of the head passes them",
-				row.Decision.Head, pr.Number, pr.HeadSHA, strings.Join(pendingAt(*pr), ", "))}
+				row.Decision.Head, pr.Number, pr.HeadSHA, strings.Join(pending, ", "))}
 	}
 	return round{}
 }

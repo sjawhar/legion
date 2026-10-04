@@ -222,6 +222,10 @@ func TestAnApprovalStandsForEveryHeadThatChangesNothingButTheHandoff(t *testing.
 		{name: "the code head's run cancelled by the reviewer's handoff push", steps: []string{"approve head", "sync", "push handoff", "cancelled head", "complete"}, want: phase.Reviewing, unsettled: true, quiet: true},
 		{name: "the code head's run cancelled by the reviewer's handoff push, then the handoff head's own green", steps: []string{"approve head", "sync", "push handoff", "cancelled head", "complete", "green"}, want: phase.Retro, unsettled: true, quiet: true},
 		{name: "the handoff head's own run cancelled before the code head's green", steps: []string{"approve head", "sync", "push handoff", "cancelled", "green head", "complete"}, want: phase.Reviewing, unsettled: true, told: "ci (cancelled)"},
+		// A code push since the approval leaves it standing for nothing, whatever the new head's
+		// own settlement left pending: the round is told once that the approval does not approve the
+		// head, never that it stands, and the head's later green tells nothing more.
+		{name: "an approval, a code push, then the new head's own pending settlement and its green", steps: []string{"approve head", "sync", "push code", "cancelled", "complete", "rerun green"}, want: phase.Reviewing, unsettled: true, told: "does not approve head head-2"},
 		{name: "the code head's checks settle after the reviewer's handoff head", steps: []string{"approve head", "sync", "push handoff", "green head", "complete"}, want: phase.Retro, unsettled: true},
 		{name: "the code head's checks settle before the reviewer's handoff head, its push last", steps: []string{"green head", "approve head", "sync", "push handoff", "complete"}, want: phase.Retro, unsettled: true},
 		{name: "the code head's checks settle before the reviewer's handoff head, its push first", steps: []string{"green head", "approve head", "push handoff", "sync", "complete"}, want: phase.Retro, unsettled: true},
