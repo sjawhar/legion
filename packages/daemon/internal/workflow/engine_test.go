@@ -341,7 +341,7 @@ func TestReviewRoundCapPostsOneMessageAndNoticeForTheThirdRound(t *testing.T) {
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Rounds: 2})
 	engine := testEngine(config.DesignGateRootIssues, nil)
 
-	if _, err := intake.ApplyFact(ctx, pool, "github", "changes-requested", intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "changes_requested", CommitID: "head", HeadSHA: "head"}, engine, admissionStub{}); err != nil {
+	if _, err := intake.ApplyFact(ctx, pool, "github", "changes-requested", intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "changes_requested", CommitID: "head", HeadSHA: "head", Author: testReviewApp}, engine, admissionStub{}); err != nil {
 		t.Fatalf("ApplyFact review: %v", err)
 	}
 	assertOutboxKinds(t, pool, []string{"dispatch_message", "notice", "dispatch_status", "supervise", "supervise", "notice"})
@@ -563,7 +563,7 @@ func TestRemainingForwardRowsApplyThroughIntake(t *testing.T) {
 				seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", CheckedHead: "head", Failing: []string{}, Required: []string{}})
 			},
 			fact: func() intake.Fact {
-				return intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "approved", CommitID: "head", HeadSHA: "head"}
+				return intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "approved", CommitID: "head", HeadSHA: "head", Author: testReviewApp}
 			},
 			wantPhase: phase.Retro, wantStatus: "retro", wantOutbox: []string{"dispatch_status", "supervise", "supervise", "notice"},
 		},
@@ -733,11 +733,15 @@ func seedRecord(t *testing.T, pool *pgxpool.Pool, put func(pgx.Tx) error) {
 	}
 }
 
+// testReviewApp is the review App's bot login the test engines configure: a review it submits
+// decides a round.
+const testReviewApp = "legion-reviewer[bot]"
+
 // testEngine is the engine the workflow tests drive, under the design gate policy given and
 // logging to log (the default logger when nil).
 func testEngine(policy config.DesignGate, log *slog.Logger) *Engine {
 	return New(record.NewStore(), Config{
-		Project: "LEGION", DesignGate: policy, ReviewRoundCap: 3, MaxFixAttempts: 3, Linger: time.Hour,
+		Project: "LEGION", DesignGate: policy, ReviewRoundCap: 3, MaxFixAttempts: 3, Linger: time.Hour, ReviewAppLogin: testReviewApp,
 		Clock: func() time.Time { return time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC) },
 	}, log)
 }

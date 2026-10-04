@@ -169,6 +169,20 @@ const reviewWorkflowsToAdjudicate = "; only declared review workflows are red, s
 // changes (stuckAs).
 const answerSkew = 10 * time.Second
 
+// maintainers are the author_association values GitHub gives a maintainer of the repository: its
+// owner, a member of the organization that owns it, and a collaborator invited to it.
+var maintainers = []string{"OWNER", "MEMBER", "COLLABORATOR"}
+
+// decidesRound says whether review may decide a review round: the review App submitted it, or
+// GitHub names its author a maintainer of the repository. On a public repository any account can
+// review a pull request, so anyone else's review - and one whose listener carried no
+// author_association - decides nothing. GitHub reports a GitHub App's review with the association
+// its bot account has, CONTRIBUTOR once it has commits in the repository, so the review App is
+// recognised by its login.
+func (e *Engine) decidesRound(review intake.PullRequestReview) bool {
+	return e.byReviewApp(review.Author) || slices.Contains(maintainers, review.AuthorAssociation)
+}
+
 // reviewersAnswer says whether fact is the reviewer's answer to a round it completed undecided: a
 // review the review App submitted, with a body - GitHub records a reply on a review thread as a
 // review with no body - more than answerSkew after the completion was applied. A review submitted
@@ -197,10 +211,18 @@ func (e *Engine) review(ctx context.Context, tx pgx.Tx, fact intake.PullRequestR
 	if e.reviewersAnswer(fact, reviewer) {
 		before, by = round{}, byAnswer
 	}
-	// Only changes_requested and approved decide anything; a comment orders nothing either, so a
-	// comment written after a decision but delivered before it cannot make the decision look old.
+	// Only changes_requested and approved decide anything, and only from the review App or a
+	// maintainer of the repository (decidesRound). Any other review orders nothing either, so a
+	// comment written after a decision but delivered before it, or an outsider's review, cannot make
+	// the decision look old.
 	state := strings.ToLower(fact.State)
-	if state != "changes_requested" && state != "approved" {
+	decides := state == "changes_requested" || state == "approved"
+	if decides && !e.decidesRound(fact) {
+		e.logOnCommit(ctx, "workflow: a review decides nothing: its author is neither the review App nor a maintainer of the repository",
+			"issue", issue.Key, "pull_request", pr.Number, "author", fact.Author, "author_association", fact.AuthorAssociation, "state", state)
+		decides = false
+	}
+	if !decides {
 		_, err := e.settleRound(ctx, tx, *issue, reviewer, pr, before, by)
 		return intake.Result{}, err
 	}
@@ -279,7 +301,7 @@ type stuckCause int
 
 const (
 	// stuckUndecided: no review decided it. A COMMENT decides nothing, and neither does a review in
-	// any state but approved or changes_requested.
+	// any state but approved or changes_requested, nor one decidesRound does not count.
 	stuckUndecided stuckCause = iota + 1
 	// stuckApprovedRed: its approval stands on CI red at the reviewer's own head.
 	stuckApprovedRed
@@ -366,7 +388,7 @@ func (e *Engine) reviewRound(issue record.Issue, row record.PhaseRow, pr *record
 		return round{}
 	case decided == "":
 		return round{outcome: roundStuck, cause: stuckUndecided, head: pr.HeadSHA,
-			reason: fmt.Sprintf("the reviewer completed its round on pull request #%d with no review that decides it: only an APPROVE of head %s or a REQUEST_CHANGES ends the round, and a COMMENT decides nothing",
+			reason: fmt.Sprintf("the reviewer completed its round on pull request #%d with no review that decides it: only an APPROVE of head %s or a REQUEST_CHANGES, from the review App or a maintainer of the repository, ends the round, and a COMMENT decides nothing",
 				pr.Number, pr.HeadSHA)}
 	case verdict == "red" && !reviewRed:
 		return round{outcome: roundStuck, cause: stuckApprovedRed, head: pr.HeadSHA,

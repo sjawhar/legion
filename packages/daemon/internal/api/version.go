@@ -30,4 +30,7 @@ package api
 // pane or pod carries the variable that chose between two daemons' clients. `POST
 // /legion/v1/controller/secret` takes the contract `legion controller start` held the controller's
 // plugin to (`pluginContract`) and refuses another before it mints.
-const DaemonAPIVersion = 12
+//
+// 13: LEGION-558 -- reviewDecisionHead on GET /legion/v1/state's pull request view, the head the
+// review round's decision names.
+const DaemonAPIVersion = 13

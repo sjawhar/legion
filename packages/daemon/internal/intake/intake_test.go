@@ -216,7 +216,7 @@ func TestDecodeCapturedProducerEnvelopes(t *testing.T) {
 			name:    "pull request review",
 			subject: "notifications.github.sjawhar.legion.pr.42.review",
 			file:    "github/review.json",
-			want:    PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "approved", CommitID: "head-captured", HeadSHA: "head-captured", Author: "reviewer", Body: "Captured review"},
+			want:    PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "approved", CommitID: "head-captured", HeadSHA: "head-captured", Author: "reviewer", AuthorAssociation: "COLLABORATOR", Body: "Captured review"},
 		},
 		{
 			name:    "checks settlement",
@@ -1043,5 +1043,32 @@ func TestDecodingCarriesThePushForcedMarkerAndTheReviewOrder(t *testing.T) {
 		if review, ok := decoded.Fact.(PullRequestReview); err != nil || !ok || !review.SubmittedAt.IsZero() || len(decoded.Unread) != 0 {
 			t.Fatalf("review with the time %#v = %#v, unread %q, %v; want it untimed and nothing reported", absent, decoded.Fact, decoded.Unread, err)
 		}
+	}
+}
+
+// A listener that predates author_association carries none, and its review then names no
+// association, which no rule reads as a maintainer's (the workflow's decidesRound).
+func TestAReviewFromAListenerThatPredatesAuthorAssociationNamesNone(t *testing.T) {
+	var envelope map[string]any
+	if err := json.Unmarshal(capturedGitHubEnvelope(t, "review.json"), &envelope); err != nil {
+		t.Fatalf("parse review.json: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(envelope["payload"].(string)), &payload); err != nil {
+		t.Fatalf("parse review.json's payload: %v", err)
+	}
+	delete(payload, "author_association")
+	text, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("encode the payload: %v", err)
+	}
+	envelope["payload"] = string(text)
+	data, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatalf("encode the envelope: %v", err)
+	}
+	decoded, err := decodeMessage("notifications.github.sjawhar.legion.pr.42.review", "CAPTURE", capturedRepositories, data)
+	if review, ok := decoded.Fact.(PullRequestReview); err != nil || !ok || review.AuthorAssociation != "" || len(decoded.Unread) != 0 {
+		t.Fatalf("the review decoded to %#v, unread %q, %v; want it with no association and nothing reported", decoded.Fact, decoded.Unread, err)
 	}
 }

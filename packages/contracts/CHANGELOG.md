@@ -4,6 +4,9 @@
 
 ### Changed
 
+- Added `PullRequestView.reviewDecisionHead`, the head the review round's decision names, so the
+  merger can read the approved head from the daemon (daemon API contract 13, LEGION-558). The
+  GitHub review envelope fixture carries `author_association`.
 - The `dispatch_doc_read` description says it reads an uploaded file's text at its latest or named
   version, and describes a file that is not UTF-8 text.
 - `dispatch_request_approval`'s `summary` says only what the human is approving, with no commentary

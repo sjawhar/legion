@@ -4,6 +4,7 @@
   "payload": {
     "action": "submitted",
     "author": "sjawhar",
+    "author_association": "MEMBER",
     "body": "Looks good, ship it.",
     "commit_id": "992c2a2249d47a1a2a6b2f3e4c5d6e7f8091a2b3",
     "head_sha": "992c2a2249d47a1a2a6b2f3e4c5d6e7f8091a2b3",

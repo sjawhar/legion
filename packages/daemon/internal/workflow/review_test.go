@@ -43,7 +43,7 @@ func TestAReviewEndsWhenTheReviewerCompletesIt(t *testing.T) {
 			review := func() {
 				t.Helper()
 				if _, err := intake.ApplyFact(ctx, pool, "github", "review", intake.PullRequestReview{
-					Repo: "sjawhar/legion", Number: 42, State: tc.decision, CommitID: "head", Body: "the review"}, engine); err != nil {
+					Repo: "sjawhar/legion", Number: 42, State: tc.decision, CommitID: "head", Author: testReviewApp, Body: "the review"}, engine); err != nil {
 					t.Fatalf("apply the review: %v", err)
 				}
 			}
@@ -92,7 +92,7 @@ func TestAnApprovalWaitsForGreenChecksAfterTheReviewerCompletes(t *testing.T) {
 	seedReview(t, pool, "")
 	engine := testEngine(config.DesignGateRootIssues, nil)
 	if _, err := intake.ApplyFact(ctx, pool, "github", "review", intake.PullRequestReview{
-		Repo: "sjawhar/legion", Number: 42, State: "approved", CommitID: "head"}, engine); err != nil {
+		Repo: "sjawhar/legion", Number: 42, State: "approved", CommitID: "head", Author: testReviewApp}, engine); err != nil {
 		t.Fatalf("apply the review: %v", err)
 	}
 	if result, err := intake.ApplyFact(ctx, pool, "api", "reviewer-handoff", intake.HandoffComplete{Generation: 1,
@@ -157,7 +157,9 @@ func issuePhase(t *testing.T, pool *pgxpool.Pool) phase.Phase {
 // say whether it did - carries no approval across. Deciding reviews are ordered by when they were
 // submitted, then by GitHub's review id, so the newest one submitted decides; a review without a
 // submission time is ordered by id against any other. A pull request recorded before the daemon
-// kept its pushes has none, so only an approval of its current head stands.
+// kept its pushes has none, so only an approval of its current head stands. Only the review App's
+// and a maintainer's reviews decide anything: an outsider's approval neither overrides the
+// reviewer's request for changes nor, delivered first, makes it look old.
 func TestAnApprovalStandsForEveryHeadThatChangesNothingButTheHandoff(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -201,7 +203,12 @@ func TestAnApprovalStandsForEveryHeadThatChangesNothingButTheHandoff(t *testing.
 		{name: "a request for changes written after the approval, delivered after", steps: []string{"approve head id=11", "cr head id=12", "complete"}, want: phase.Implementing},
 		{name: "a comment written after a request for changes, delivered first", steps: []string{"comment id=12", "cr head id=11", "complete"}, want: phase.Implementing},
 		{name: "a comment written after an approval, delivered first", steps: []string{"comment id=12", "approve head id=11", "complete"}, want: phase.Retro},
-		{name: "an approval written after the request for changes", steps: []string{"cr head id=11", "approve head id=12", "complete"}, want: phase.Retro},
+		{name: "the reviewer's approval written after its request for changes", steps: []string{"cr head id=11", "approve head id=12", "complete"}, want: phase.Retro},
+		{name: "an outsider's approval written after the reviewer's request for changes", steps: []string{"cr head id=11", "approve head id=12 by=outsider", "complete"}, want: phase.Implementing},
+		{name: "an outsider's approval written after the reviewer's request for changes, delivered first", steps: []string{"approve head id=12 by=outsider", "cr head id=11", "complete"}, want: phase.Implementing},
+		{name: "an outsider's approval the only review of the round", steps: []string{"approve head id=12 by=outsider", "complete"}, want: phase.Reviewing, told: "no review that decides it"},
+		{name: "a collaborator's request for changes written after the reviewer's approval", steps: []string{"approve head id=11", "cr head id=12 by=collaborator", "complete"}, want: phase.Implementing},
+		{name: "a collaborator's approval written after the reviewer's request for changes", steps: []string{"cr head id=11", "approve head id=12 by=collaborator", "complete"}, want: phase.Retro},
 		{name: "a draft's request for changes submitted after a one-step approval", steps: []string{"approve head id=101 at=2", "cr head id=100 at=3", "complete"}, want: phase.Implementing},
 		{name: "a draft's request for changes submitted after a one-step approval, delivered first", steps: []string{"cr head id=100 at=3", "approve head id=101 at=2", "complete"}, want: phase.Implementing},
 		{name: "a draft's approval submitted after a request for changes", steps: []string{"cr head id=101 at=2", "approve head id=100 at=3", "complete"}, want: phase.Retro},
@@ -252,10 +259,12 @@ func TestAnApprovalStandsForEveryHeadThatChangesNothingButTheHandoff(t *testing.
 			before := map[string]string{"head-2": "head", "head-3": "head-2", "head-x": "older", "head-l": "head"}
 			for i, step := range tc.steps {
 				// A step is its name, then optional words: a head it names (head, head-2, ...), a
-				// review id (id=N), a review's submission time (at=N, minutes past noon), the head a
-				// push replaced when the map below does not say (from=H), "forced" for a push that
-				// rewrote history, and "unmarked" for a push whose listener did not say.
-				head, id, forced, from := "head-2", int64(0), "false", ""
+				// review id (id=N), a review's submission time (at=N, minutes past noon), a review's
+				// author when it is not the review App (by=outsider, an account with no association
+				// with the repository, or by=collaborator), the head a push replaced when the map below
+				// does not say (from=H), "forced" for a push that rewrote history, and "unmarked" for a
+				// push whose listener did not say.
+				head, id, forced, from, by := "head-2", int64(0), "false", "", ""
 				var submitted time.Time
 				var name []string
 				for _, word := range strings.Fields(step) {
@@ -269,6 +278,8 @@ func TestAnApprovalStandsForEveryHeadThatChangesNothingButTheHandoff(t *testing.
 						submitted = time.Date(2026, 9, 26, 12, minutes, 0, 0, time.UTC)
 					case strings.HasPrefix(word, "from="):
 						from = strings.TrimPrefix(word, "from=")
+					case strings.HasPrefix(word, "by="):
+						by = strings.TrimPrefix(word, "by=")
 					case word == "forced":
 						forced = "true"
 					case word == "unmarked":
@@ -288,8 +299,16 @@ func TestAnApprovalStandsForEveryHeadThatChangesNothingButTheHandoff(t *testing.
 					if step == "cr" {
 						state = "changes_requested"
 					}
+					// The review App's reviews carry CONTRIBUTOR, as GitHub reports them.
+					author, association := testReviewApp, "CONTRIBUTOR"
+					switch by {
+					case "outsider":
+						author, association = "a-stranger", "NONE"
+					case "collaborator":
+						author, association = "a-maintainer", "COLLABORATOR"
+					}
 					fact = intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, ID: id, SubmittedAt: submitted, State: state,
-						CommitID: commit, Body: step}
+						CommitID: commit, Author: author, AuthorAssociation: association, Body: step}
 				case "sync":
 					fact = intake.PullRequestSynchronized{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: head}
 				case "comment":
@@ -364,7 +383,7 @@ func TestACommentLeavesTheRoundsRequestForChanges(t *testing.T) {
 	seedReview(t, pool, "")
 	engine := testEngine(config.DesignGateRootIssues, nil)
 	for i, fact := range []intake.Fact{
-		intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "changes_requested", CommitID: "head", Body: "rename the widget"},
+		intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "changes_requested", CommitID: "head", Author: testReviewApp, Body: "rename the widget"},
 		intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "commented", CommitID: "head", Body: "one more thought"},
 		intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", Summary: "reviewed", Commit: "review-1"},
 	} {
@@ -393,7 +412,7 @@ func TestAReviewFromAnEarlierRoundDeliveredAgainRecordsNothing(t *testing.T) {
 	ctx := context.Background()
 	seedReview(t, pool, "green")
 	engine := testEngine(config.DesignGateRootIssues, nil)
-	requestChanges := intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, ID: 10, State: "changes_requested", CommitID: "head", Body: "round 1"}
+	requestChanges := intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, ID: 10, State: "changes_requested", CommitID: "head", Author: testReviewApp, Body: "round 1"}
 	for i, fact := range []intake.Fact{
 		requestChanges,
 		intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", Summary: "reviewed", Commit: "review-1"},
@@ -401,7 +420,7 @@ func TestAReviewFromAnEarlierRoundDeliveredAgainRecordsNothing(t *testing.T) {
 		intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleTester, Claim: "test-claim", Summary: "tested", Verdict: "pass", Commit: "test-2"},
 		requestChanges,
 		intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", Summary: "reviewed", Commit: "review-2"},
-		intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, ID: 11, State: "approved", CommitID: "head", Body: "round 2"},
+		intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, ID: 11, State: "approved", CommitID: "head", Author: testReviewApp, Body: "round 2"},
 	} {
 		if result, err := intake.ApplyFact(ctx, pool, "test", fmt.Sprintf("step-%d", i), fact, engine); err != nil || result.Refusal != nil {
 			t.Fatalf("step %d = %+v, %v", i, result.Refusal, err)
@@ -435,7 +454,7 @@ func TestAReviewOutsideReviewingRecordsNoRound(t *testing.T) {
 		return n
 	}
 	for i, fact := range []intake.Fact{
-		intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, ID: 11, State: "approved", CommitID: "head"},
+		intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, ID: 11, State: "approved", CommitID: "head", Author: testReviewApp},
 		intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", Summary: "reviewed", Commit: "review-1"},
 	} {
 		if result, err := intake.ApplyFact(ctx, pool, "test", fmt.Sprintf("step-%d", i), fact, engine); err != nil || result.Refusal != nil {
@@ -447,7 +466,7 @@ func TestAReviewOutsideReviewingRecordsNoRound(t *testing.T) {
 	}
 	before := rounds()
 	if _, err := intake.ApplyFact(ctx, pool, "test", "late", intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, ID: 12,
-		State: "changes_requested", CommitID: "head", Body: "too late"}, engine); err != nil {
+		State: "changes_requested", CommitID: "head", Author: testReviewApp, Body: "too late"}, engine); err != nil {
 		t.Fatalf("apply the late review: %v", err)
 	}
 	if got := issuePhase(t, pool); got != phase.Retro {
@@ -476,7 +495,7 @@ func TestAReviewWhileHeldFromReviewingDecidesTheRound(t *testing.T) {
 			engine := testEngine(config.DesignGateRootIssues, nil)
 			for i, fact := range []intake.Fact{
 				intake.ClaimFailed{Issue: "LEGION-208", Role: claim.RoleReviewer},
-				intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, ID: 11, State: tc.state, CommitID: "head", Body: "the review"},
+				intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, ID: 11, State: tc.state, CommitID: "head", Author: testReviewApp, Body: "the review"},
 				intake.RetryOrEscalate{Issue: "LEGION-208", Decision: intake.RetryDecision},
 				intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", Summary: "reviewed", Commit: "review-1"},
 			} {
@@ -505,11 +524,11 @@ func TestAReopenedPullRequestKeepsItsNewestReview(t *testing.T) {
 	seedReview(t, pool, "green")
 	engine := testEngine(config.DesignGateRootIssues, nil)
 	for i, fact := range []intake.Fact{
-		intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, ID: 12, State: "approved", CommitID: "head", Body: "approved"},
+		intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, ID: 12, State: "approved", CommitID: "head", Author: testReviewApp, Body: "approved"},
 		intake.PullRequestOpened{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head"},
 		intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: "head", CheckRuns: []record.AttemptRun{{Name: "ci", ID: 3}},
 			Generation: 3, Snapshot: "green-again", Failing: []string{}},
-		intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, ID: 11, State: "changes_requested", CommitID: "head", Body: "redelivered"},
+		intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, ID: 11, State: "changes_requested", CommitID: "head", Author: testReviewApp, Body: "redelivered"},
 		intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", Summary: "reviewed", Commit: "review-1"},
 	} {
 		result, err := intake.ApplyFact(ctx, pool, "test", fmt.Sprintf("reopen-%d", i), fact, engine)
@@ -543,7 +562,7 @@ func TestARetryEndsARoundWhoseReviewerCompletedBeforeTheHold(t *testing.T) {
 			for i, fact := range []intake.Fact{
 				intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", Summary: "reviewed", Commit: "review-1"},
 				intake.ClaimFailed{Issue: "LEGION-208", Role: claim.RoleReviewer},
-				intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, ID: 11, State: tc.state, CommitID: "head", Body: "the review"},
+				intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, ID: 11, State: tc.state, CommitID: "head", Author: testReviewApp, Body: "the review"},
 				intake.RetryOrEscalate{Issue: "LEGION-208", Decision: intake.RetryDecision},
 			} {
 				result, err := intake.ApplyFact(ctx, pool, "test", fmt.Sprintf("early-%d", i), fact, engine)
@@ -648,11 +667,9 @@ func TestARetryOfARoundWithARedCodeHeadSendsTheWorkBack(t *testing.T) {
 func TestALateDeliveredApprovalEndsAStuckRound(t *testing.T) {
 	pool := migratedPool(t)
 	seedReviewOf(t, pool, "c0ffee", "green")
-	engine := testEngine(config.DesignGateRootIssues, nil)
-	engine.cfg.ReviewAppLogin = "legion-reviewer[bot]"
-	apply := applyFacts(t, pool, engine)
+	apply := applyFacts(t, pool, testEngine(config.DesignGateRootIssues, nil))
 	apply("complete", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", Summary: "reviewed", Commit: "review-1"})
-	apply("approve", intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "approved", CommitID: "c0ffee", Author: "legion-reviewer[bot]",
+	apply("approve", intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "approved", CommitID: "c0ffee", Author: testReviewApp,
 		Body: "ship it", SubmittedAt: time.Date(2026, 9, 22, 23, 59, 0, 0, time.UTC)})
 	if got := issuePhase(t, pool); got != phase.Retro {
 		t.Fatalf("the issue is in %s, want retro", got)
@@ -671,7 +688,6 @@ func TestALateDeliveredApprovalEndsAStuckRound(t *testing.T) {
 // nothing about the round. A review that arrives before the reviewer completes tells nobody: the
 // completion is still to come. A deciding review from the same round still ends it, as always.
 func TestARoundNoReviewDecidesTellsTheArchitect(t *testing.T) {
-	const reviewApp = "legion-reviewer[bot]"
 	// testEngine's clock applies the completion at midnight; GitHub stamps each review's submission,
 	// and answerSkew bounds how far the two clocks can disagree.
 	early, late := time.Date(2026, 9, 22, 23, 59, 0, 0, time.UTC), time.Date(2026, 9, 23, 0, 0, 30, 0, time.UTC)
@@ -686,15 +702,15 @@ func TestARoundNoReviewDecidesTellsTheArchitect(t *testing.T) {
 	}{
 		{name: "a COMMENT, then the reviewer completes", before: []string{"commented"}, told: 1, decision: "approved", want: phase.Retro},
 		{name: "no review at all", told: 1, decision: "approved", want: phase.Retro},
-		{name: "the reviewer completes, then its COMMENT submitted after the completion", after: []intake.PullRequestReview{{State: "commented", Author: reviewApp, Body: "one more thought", SubmittedAt: late}},
+		{name: "the reviewer completes, then its COMMENT submitted after the completion", after: []intake.PullRequestReview{{State: "commented", Author: testReviewApp, Body: "one more thought", SubmittedAt: late}},
 			told: 2, decision: "changes_requested", want: phase.Implementing},
-		{name: "the reviewer completes, then its COMMENT submitted before the completion, delivered after", after: []intake.PullRequestReview{{State: "commented", Author: reviewApp, Body: "one more thought", SubmittedAt: early}},
+		{name: "the reviewer completes, then its COMMENT submitted before the completion, delivered after", after: []intake.PullRequestReview{{State: "commented", Author: testReviewApp, Body: "one more thought", SubmittedAt: early}},
 			told: 1, decision: "changes_requested", want: phase.Implementing},
-		{name: "the reviewer completes, then its COMMENT with no submission time", after: []intake.PullRequestReview{{State: "commented", Author: reviewApp, Body: "one more thought"}},
+		{name: "the reviewer completes, then its COMMENT with no submission time", after: []intake.PullRequestReview{{State: "commented", Author: testReviewApp, Body: "one more thought"}},
 			told: 1, decision: "approved", want: phase.Retro},
-		{name: "the reviewer completes, then its COMMENT submitted within the clocks' skew of the completion", after: []intake.PullRequestReview{{State: "commented", Author: reviewApp, Body: "one more thought", SubmittedAt: withinSkew}},
+		{name: "the reviewer completes, then its COMMENT submitted within the clocks' skew of the completion", after: []intake.PullRequestReview{{State: "commented", Author: testReviewApp, Body: "one more thought", SubmittedAt: withinSkew}},
 			told: 1, decision: "approved", want: phase.Retro},
-		{name: "the reviewer completes, then its reply on a review thread", after: []intake.PullRequestReview{{State: "commented", Author: reviewApp, SubmittedAt: late}},
+		{name: "the reviewer completes, then its reply on a review thread", after: []intake.PullRequestReview{{State: "commented", Author: testReviewApp, SubmittedAt: late}},
 			told: 1, decision: "approved", want: phase.Retro},
 		{name: "the reviewer completes, then another account's COMMENT", after: []intake.PullRequestReview{{State: "commented", Author: "a-human", Body: "a thought", SubmittedAt: late}},
 			told: 1, decision: "approved", want: phase.Retro},
@@ -702,16 +718,14 @@ func TestARoundNoReviewDecidesTellsTheArchitect(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
 			seedReviewOf(t, pool, "c0ffee", "green")
-			engine := testEngine(config.DesignGateRootIssues, nil)
-			engine.cfg.ReviewAppLogin = reviewApp
-			apply := applyFacts(t, pool, engine)
+			apply := applyFacts(t, pool, testEngine(config.DesignGateRootIssues, nil))
 			review := func(id string, review intake.PullRequestReview) {
 				t.Helper()
 				review.Repo, review.Number, review.CommitID = "sjawhar/legion", 42, "c0ffee"
 				apply(id, review)
 			}
 			for i, state := range tc.before {
-				review(fmt.Sprintf("before-%d", i), intake.PullRequestReview{State: state, Author: reviewApp, Body: "the " + state + " review"})
+				review(fmt.Sprintf("before-%d", i), intake.PullRequestReview{State: state, Author: testReviewApp, Body: "the " + state + " review"})
 				if got := reviewStuckNotices(t, pool); len(got) != 0 {
 					t.Fatalf("a %s review before the reviewer completed told the architect %+v, want nothing", state, got)
 				}
@@ -739,12 +753,68 @@ func TestARoundNoReviewDecidesTellsTheArchitect(t *testing.T) {
 			if told[0].Summary != "the reviewer's completion" || len(told) == 2 && told[1].Summary != "the reviewer's review" {
 				t.Fatalf("notices %+v, want the first written by the reviewer's completion and any second by its review", told)
 			}
-			review("decides", intake.PullRequestReview{State: tc.decision, Author: reviewApp, Body: "the decision", SubmittedAt: late})
+			review("decides", intake.PullRequestReview{State: tc.decision, Author: testReviewApp, Body: "the decision", SubmittedAt: late})
 			if got := issuePhase(t, pool); got != tc.want {
 				t.Fatalf("after the %s review the issue is in %s, want %s", tc.decision, got, tc.want)
 			}
 			if got := reviewStuckNotices(t, pool); len(got) != tc.told {
 				t.Fatalf("the deciding review told the architect again: %+v", got)
+			}
+		})
+	}
+}
+
+// On a public repository any GitHub account can review a pull request, so a review decides a round
+// only when the review App submitted it or GitHub's author_association names its author a
+// maintainer of the repository: its owner, a member of the organization that owns it, or a
+// collaborator. Anyone else's APPROVE or REQUEST_CHANGES decides nothing, as a COMMENT does, and so
+// does a review from a listener that predates author_association: a round the reviewer completed
+// undecided stays stuck, the architect is told nothing more, and the review App's decision,
+// submitted before the other review but delivered after it, still ends the round. GitHub reports
+// the review App's own reviews as CONTRIBUTOR, so its login is what counts them.
+func TestOnlyTheReviewAppOrAMaintainersReviewDecidesARound(t *testing.T) {
+	submitted := time.Date(2026, 9, 23, 0, 1, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name, author, association, state string
+		want                             phase.Phase
+	}{
+		{name: "the review App's approval", author: testReviewApp, association: "CONTRIBUTOR", state: "approved", want: phase.Retro},
+		{name: "the review App's request for changes", author: testReviewApp, association: "CONTRIBUTOR", state: "changes_requested", want: phase.Implementing},
+		{name: "the owner's approval", author: "the-owner", association: "OWNER", state: "approved", want: phase.Retro},
+		{name: "an organization member's approval", author: "a-member", association: "MEMBER", state: "approved", want: phase.Retro},
+		{name: "a collaborator's request for changes", author: "a-collaborator", association: "COLLABORATOR", state: "changes_requested", want: phase.Implementing},
+		{name: "an outsider's approval", author: "a-stranger", association: "NONE", state: "approved", want: phase.Reviewing},
+		{name: "an outsider's request for changes", author: "a-stranger", association: "NONE", state: "changes_requested", want: phase.Reviewing},
+		{name: "a contributor's approval", author: "a-contributor", association: "CONTRIBUTOR", state: "approved", want: phase.Reviewing},
+		{name: "a first-time contributor's approval", author: "a-newcomer", association: "FIRST_TIME_CONTRIBUTOR", state: "approved", want: phase.Reviewing},
+		{name: "a first-timer's approval", author: "a-first-timer", association: "FIRST_TIMER", state: "approved", want: phase.Reviewing},
+		{name: "a mannequin's approval", author: "a-mannequin", association: "MANNEQUIN", state: "approved", want: phase.Reviewing},
+		{name: "another App's approval", author: "another-app[bot]", association: "CONTRIBUTOR", state: "approved", want: phase.Reviewing},
+		{name: "the owner's approval from a listener that predates author_association", author: "the-owner", state: "approved", want: phase.Reviewing},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			seedReviewOf(t, pool, "c0ffee", "green")
+			apply := applyFacts(t, pool, testEngine(config.DesignGateRootIssues, nil))
+			apply("complete", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", Summary: "reviewed", Commit: "review-1"})
+			if got := reviewStuckNotices(t, pool); len(got) != 1 {
+				t.Fatalf("the reviewer's completion told the architect %d times (%+v), want once", len(got), got)
+			}
+			apply("review", intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, ID: 8, SubmittedAt: submitted.Add(time.Minute), State: tc.state,
+				CommitID: "c0ffee", Author: tc.author, AuthorAssociation: tc.association, Body: "the review"})
+			if got := issuePhase(t, pool); got != tc.want {
+				t.Fatalf("after the review the issue is in %s, want %s", got, tc.want)
+			}
+			if tc.want != phase.Reviewing {
+				return
+			}
+			if got := reviewStuckNotices(t, pool); len(got) != 1 {
+				t.Fatalf("a review that decides nothing told the architect again: %+v", got)
+			}
+			apply("the reviewer's decision", intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, ID: 7, SubmittedAt: submitted, State: "approved",
+				CommitID: "c0ffee", Author: testReviewApp, AuthorAssociation: "CONTRIBUTOR", Body: "the decision"})
+			if got := issuePhase(t, pool); got != phase.Retro {
+				t.Fatalf("after the review App's approval the issue is in %s, want retro", got)
 			}
 		})
 	}
@@ -759,9 +829,9 @@ func TestARoundNoReviewDecidesTellsTheArchitect(t *testing.T) {
 // are still running waits for them and tells nobody.
 func TestARoundItsApprovalCannotEndTellsTheArchitect(t *testing.T) {
 	approve := func(head string) intake.Fact {
-		return intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "approved", CommitID: head, Body: "approved"}
+		return intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "approved", CommitID: head, Author: testReviewApp, Body: "approved"}
 	}
-	requestChanges := intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "changes_requested", CommitID: "head-2", Body: "fix the checks"}
+	requestChanges := intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "changes_requested", CommitID: "head-2", Author: testReviewApp, Body: "fix the checks"}
 	complete := intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", Summary: "reviewed", Commit: "review-1"}
 	sync := func(head string) intake.Fact {
 		return intake.PullRequestSynchronized{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: head}

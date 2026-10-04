@@ -16,6 +16,12 @@
 
 ### Changed
 
+- `legion.daemonApiVersion` is 13. Contract 13 adds `reviewDecisionHead` to the pull request on
+  `GET /legion/v1/state`, the head the review round's decision names, so the `legion` tool's
+  `read_record` shows the approved head beside `reviewDecision` (LEGION-558). A daemon at 13
+  refuses an earlier release, and a daemon at 12 refuses this one: install it together with a Go
+  `legion` built from the same commit.
+
 - The `dispatch`, `legion-architect`, `legion-controller` and `legion-retro` skills, and the
   dispatch issues reference, name no one by first name: every literal `Sami` reference becomes
   `the human` or `the operator`, matching each file's own existing convention for the person an

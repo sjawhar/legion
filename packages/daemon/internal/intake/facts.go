@@ -139,7 +139,10 @@ type PullRequestReview struct {
 	CommitID    string
 	HeadSHA     string
 	Author      string
-	Body        string
+	// AuthorAssociation is GitHub's author_association for Author on the repository (OWNER,
+	// MEMBER, COLLABORATOR, CONTRIBUTOR, NONE, ...), empty when the listener did not carry it.
+	AuthorAssociation string
+	Body              string
 }
 
 func (PullRequestReview) isFact() {}
