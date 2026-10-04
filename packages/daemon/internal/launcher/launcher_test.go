@@ -54,6 +54,7 @@ type rig struct {
 	cancel   context.CancelFunc
 	result   chan error
 	hello    shimwire.LauncherHello
+	latest   shimwire.LauncherState
 }
 
 func newRig(t *testing.T) *rig {
@@ -120,6 +121,9 @@ func (g *rig) next() shimwire.Frame {
 	frame, err := shimwire.Decode(line)
 	if err != nil {
 		g.t.Fatal(err)
+	}
+	if state, ok := frame.(shimwire.LauncherState); ok {
+		g.latest = state
 	}
 	return frame
 }
