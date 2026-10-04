@@ -199,10 +199,19 @@ write identity errors with `identity.WriteError`.
 - Agents normally authenticate as a `session` actor with a personal `dsp_` token
   minted by a human in Settings, sent as `Authorization: Bearer <token>`.
   `DISPATCH_AGENT_TOKEN` is the shared devbox fallback; its callers have no
-  owner attribution. The API and the document websocket (`/ws/doc/{room}`)
-  read the bearer with one helper, `auth.BearerToken`, and compare it with one
-  constant-time helper, `auth.MatchesSharedAgentToken`. Bearer callers cannot
-  act as users.
+  owner attribution. It holds one value or several separated by whitespace, so
+  the token can rotate with an overlap, and `resolveBootConfig` parses it once
+  (`auth.ParseSharedAgentTokens`, which refuses an empty or repeated entry by
+  position) into the one `*auth.SharedAgentTokens` that `appContextOptions`
+  hands the router and `newDocumentService` hands the document service, so the
+  settings tests drive both from the variable. The API and the document
+  websocket (`/ws/doc/{room}`) read the bearer with one helper,
+  `auth.BearerToken`, and compare it with one helper,
+  `auth.MatchesSharedAgentToken`, which compares it with every value in
+  constant time and logs a match on a value after the first once per
+  `X-Forwarded-For` address and User-Agent every 10 minutes
+  (`cmd/dispatch/README.md` names the line's fields). Bearer callers cannot act
+  as users.
 - `DISPATCH_OIDC_ISSUER` + `DISPATCH_OIDC_AUDIENCE` (both or neither; half the
   pair refuses to boot naming the missing one) make a Kubernetes pod's projected
   service-account token a third bearer credential. `resolveBootConfig` only

@@ -27,8 +27,8 @@ func agentsHandlerWithStore(t *testing.T, envoyURL string, database *store.Store
 			Header: "X-Dispatch-User",
 			People: store.NewPgPeopleStore(database.Pool),
 		},
-		AgentToken: "agent-token",
-		Envoy:      envoy.New(envoyURL),
+		AgentTokens: sharedAgentTokens(t, "agent-token"),
+		Envoy:       envoy.New(envoyURL),
 	}
 	mux := http.NewServeMux()
 	Register(mux, deps)

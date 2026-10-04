@@ -31,12 +31,12 @@ func newCredentialTestHandler(t *testing.T, brokerURL string) http.Handler {
 	t.Cleanup(func() { _ = documentService.Shutdown(t.Context()) })
 	seedPeople(t, database, "alice", "bob")
 	depsInput := DepsInput{
-		Store:      database,
-		Identity:   headerIdentity(database),
-		AgentToken: "agent-token",
-		ServerURL:  "https://dispatch.example",
-		Docs:       documentService,
-		Events:     events.NewBroker(),
+		Store:       database,
+		Identity:    headerIdentity(database),
+		AgentTokens: sharedAgentTokens(t, "agent-token"),
+		ServerURL:   "https://dispatch.example",
+		Docs:        documentService,
+		Events:      events.NewBroker(),
 	}
 	if brokerURL != "" {
 		depsInput.AgentSecretsURL = brokerURL
