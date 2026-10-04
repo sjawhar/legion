@@ -1,7 +1,7 @@
 import { type QueryClient, queryOptions, useQuery } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 
-import { api } from "../../api/client";
+import { api, artifactVersionPath } from "../../api/client";
 import { primarySpec } from "../../api/issue-cache";
 import type {
   Artifact,
@@ -26,6 +26,7 @@ import {
   type DispatchReferenceRoute,
   isProjectRoute,
   parseDispatchReference,
+  referencedArtifact,
   referenceSpans,
   referenceTargetKind,
 } from "./routes";
@@ -42,6 +43,9 @@ interface GitHubIssue {
 export interface ReferenceTarget {
   readonly title: string | undefined;
   readonly description: string | undefined;
+  /** The bytes route of the picture a reference to an image artifact names - the version it pins,
+   *  else the latest - for a thumbnail beside the title; undefined for anything else. */
+  readonly picture: string | undefined;
 }
 
 export function excerpt(markdown: string | null | undefined, max = 160): string | undefined {
@@ -83,6 +87,13 @@ const projectArtifactQuery = (project: string | undefined, slug: string | undefi
   queryOptions({
     queryKey: ["project", project, "artifacts", slug],
     queryFn: () => api.getProjectArtifact(project ?? "", slug ?? ""),
+  });
+
+/** An artifact of an agent's conversation, by its session and slug. */
+export const agentArtifactQuery = (session: string | undefined, slug: string | undefined) =>
+  queryOptions({
+    queryKey: ["agent-artifacts", session, slug],
+    queryFn: () => api.getAgentArtifact(session ?? "", slug ?? ""),
   });
 
 /** A document's live text, or one immutable version of it when the reference pins a version. */
@@ -127,6 +138,10 @@ export interface ReferenceData {
  * for an issue reference — the issue's primary spec text, which only the card's issue view reads
  * (`useReferenceTarget` never fetches it). Every key comes from the query builders above. */
 export function prefetchReference(queryClient: QueryClient, route: DispatchReferenceRoute): void {
+  if (route.kind === "agent-artifact") {
+    void queryClient.prefetchQuery(agentArtifactQuery(route.session, route.slug));
+    return;
+  }
   if (route.kind === "message") {
     void queryClient.prefetchQuery(messageQuery(route.key, route.id));
     return;
@@ -167,11 +182,17 @@ export function prefetchReference(queryClient: QueryClient, route: DispatchRefer
 }
 
 export function useReferenceData(route: DispatchReferenceRoute | undefined): ReferenceData {
-  const issueKey = route === undefined || isProjectRoute(route) ? undefined : route.key;
+  const issueKey =
+    route === undefined || route.kind === "agent-artifact" || isProjectRoute(route)
+      ? undefined
+      : route.key;
   const document = route?.kind === "document" ? route : undefined;
+  const agentArtifact = route?.kind === "agent-artifact" ? route : undefined;
   const message = route?.kind === "message" ? route : undefined;
   const version =
-    route?.kind === "artifact" || route?.kind === "document" ? route.version : undefined;
+    route?.kind === "artifact" || route?.kind === "document" || route?.kind === "agent-artifact"
+      ? route.version
+      : undefined;
   const askId =
     route?.kind === "ask"
       ? route.id
@@ -196,12 +217,18 @@ export function useReferenceData(route: DispatchReferenceRoute | undefined): Ref
     ...projectArtifactQuery(document?.project, document?.slug),
     enabled: document !== undefined,
   });
+  const sessionArtifact = useQuery({
+    ...agentArtifactQuery(agentArtifact?.session, agentArtifact?.slug),
+    enabled: agentArtifact !== undefined,
+  });
   const artifact =
-    document === undefined
-      ? issue.data?.artifacts.find(
-          (candidate) => route?.kind === "artifact" && candidate.slug === route.slug
-        )
-      : projectArtifact.data;
+    document !== undefined
+      ? projectArtifact.data
+      : agentArtifact !== undefined
+        ? sessionArtifact.data
+        : issue.data?.artifacts.find(
+            (candidate) => route?.kind === "artifact" && candidate.slug === route.slug
+          );
   const text = useQuery({
     ...artifactTextQuery(artifact?.id, version),
     enabled: artifact?.kind === "doc",
@@ -248,8 +275,15 @@ export function useReferenceTarget(route: DispatchReferenceRoute | undefined): R
         ? undefined
         : firstLine(message.message.body)
       : (excerpt(markdown) ?? (artifact === undefined ? issue?.status : undefined));
+  const named = route === undefined ? undefined : referencedArtifact(route);
+  const pictureVersion =
+    named?.version ?? artifact?.versions.reduce((latest, item) => Math.max(latest, item.number), 0);
+  const picture =
+    named === undefined || artifact?.kind !== "image" || !pictureVersion
+      ? undefined
+      : artifactVersionPath(named.owner, named.slug, pictureVersion);
 
-  return { title, description };
+  return { title, description, picture };
 }
 
 function DispatchUnfurl({ reference }: { reference: ComposerReference }): ReactNode {

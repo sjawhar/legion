@@ -263,7 +263,7 @@ function AgentExchangeReply({
       author={author}
       body={
         <div className={textPrimaryOnCanvas}>
-          <MarkdownBody markdown={reply.body} variant="inline" />
+          <MarkdownBody markdown={reply.body} />
         </div>
       }
       delivery={
@@ -344,7 +344,7 @@ function AgentTargetedMessage({
             <Timestamp at={read.message.created_at} />
           </p>
           <div className={textPrimaryOnCanvas}>
-            <MarkdownBody markdown={read.message.body} variant="inline" />
+            <MarkdownBody markdown={read.message.body} />
           </div>
         </>
       }

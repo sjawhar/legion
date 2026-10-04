@@ -1621,6 +1621,66 @@ test("a pick in the paste's own task cannot move the upload", async () => {
   }
 });
 
+/** The server's answer to an upload of `name` as `slug`, at `version`. */
+function uploaded(slug: string, name: string, version: number) {
+  return {
+    artifact: { kind: "image", name, slug } as never,
+    version: { number: version } as never,
+  };
+}
+
+// A pasted picture is part of what is sent: the composer writes the image syntax at the version
+// the upload made, so the message shows the picture inline. Any other file stays a reference
+// (the test above).
+test("a pasted picture is written as an inline picture of its version", async () => {
+  const uploadArtifact = spyOn(api, "uploadArtifact").mockResolvedValue(
+    uploaded("shot-png", "shot.png", 3)
+  );
+  const { view } = renderComposer();
+
+  try {
+    const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
+    fireEvent.change(field, { target: { value: "Look" } });
+    const file = new File([new Uint8Array([137, 80, 78, 71])], "shot.png", { type: "image/png" });
+    fireEvent.paste(field, { clipboardData: { files: [file] } });
+
+    await waitFor(() =>
+      expect(field.value).toBe("Look ![shot.png](dispatch://CORE-1/artifact/shot-png@v3)")
+    );
+    expect(uploadArtifact.mock.calls[0]?.[0]).toEqual({ issue: "CORE-1" });
+  } finally {
+    view.unmount();
+    uploadArtifact.mockRestore();
+  }
+});
+
+// A direct message on the Agents page belongs to no issue: its pictures belong to the agent's
+// conversation, and are addressed under the agent's session.
+test("a picture dropped into a direct message uploads to the agent's conversation", async () => {
+  const uploadArtifact = spyOn(api, "uploadArtifact").mockResolvedValue(
+    uploaded("face-png", "face [1].png", 1)
+  );
+  const { view } = renderComposer({ agents: [], owner: { kind: "session", sessionId: "ses-1" } });
+
+  try {
+    const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
+    const file = new File([new Uint8Array([137, 80, 78, 71])], "face [1].png", {
+      type: "image/png",
+    });
+    fireEvent.drop(field, { dataTransfer: { files: [file] } });
+
+    await waitFor(() => expect(uploadArtifact).toHaveBeenCalledTimes(1));
+    expect(uploadArtifact.mock.calls[0]?.[0]).toEqual({ session: "ses-1" });
+    // A bracket in the file name would end the caption, so it is escaped.
+    await waitFor(() =>
+      expect(field.value).toBe("![face \\[1\\].png](dispatch://agent/ses-1/artifact/face-png@v1)")
+    );
+  } finally {
+    view.unmount();
+    uploadArtifact.mockRestore();
+  }
+});
+
 const threadReplyKey: MutationKey = ["conversation-composer", "CORE-1", "thread-card", "root"];
 
 /** A host that takes its reply composer off the page and puts it back, as a thread collapsing and

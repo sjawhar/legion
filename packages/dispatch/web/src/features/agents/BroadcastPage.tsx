@@ -145,7 +145,7 @@ function BroadcastRecipientRow({
             <Timestamp at={reply.created_at} />
           </p>
           <div className={textPrimaryOnCanvas}>
-            <MarkdownBody markdown={reply.body} variant="inline" />
+            <MarkdownBody markdown={reply.body} />
           </div>
         </div>
       ))}

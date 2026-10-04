@@ -1,5 +1,6 @@
 import { type ReactNode, useState } from "react";
 
+import type { ArtifactOwner } from "../../api/client";
 import type { Ask, Comment, CreateCommentInput } from "../../api/types";
 import { linkHoverText, linkText } from "../../theme/classes";
 import { AskThread, type AskThreadQuery } from "./AskThread";
@@ -9,6 +10,8 @@ interface AskThreadDisclosureProps {
   thread: AskThreadQuery;
   createReply?: (issueKey: string, input: CreateCommentInput) => Promise<Comment>;
   embedded?: boolean;
+  /** Where a file pasted or dropped into the reply goes (`AskThread`). */
+  uploadOwner?: ArtifactOwner;
 }
 
 export function AskThreadDisclosure({
@@ -16,6 +19,7 @@ export function AskThreadDisclosure({
   thread,
   createReply,
   embedded = false,
+  uploadOwner,
 }: AskThreadDisclosureProps): ReactNode {
   const [open, setOpen] = useState(false);
 
@@ -63,6 +67,7 @@ export function AskThreadDisclosure({
             embedded={embedded}
             showResolution={false}
             thread={thread}
+            uploadOwner={uploadOwner}
           />
         </div>
       ) : null}

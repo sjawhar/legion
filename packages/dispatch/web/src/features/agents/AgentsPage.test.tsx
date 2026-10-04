@@ -1173,7 +1173,7 @@ test("Agents shows only the newest exchange and folds the rest behind Show N old
     await waitFor(() =>
       expect(
         within(conversation)
-          .getAllByText(/question$/, { selector: ".dispatch-markdown" })
+          .getAllByText(/question$/, { selector: ".dispatch-markdown p" })
           .map((node) => node.textContent)
       ).toEqual(["Third question", "Second question", "First question"])
     );

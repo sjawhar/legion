@@ -1,10 +1,16 @@
 import type { HeadlessProofEditor } from "@legion/proof-editor/headless";
-import { DOMSerializer, type Node as ProseMirrorNode } from "prosemirror-model";
+import type { Node as ProseMirrorNode } from "prosemirror-model";
 import { type ReactNode, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 import type { BlockSchema } from "../../api/types";
 import { loadBlockSchema } from "../doc/schema";
+import {
+  collectPictureAnchors,
+  DispatchPicture,
+  type PictureAnchor,
+  pictureSerializer,
+} from "./DispatchPicture";
 import {
   collectReferenceAnchors,
   linkifyDispatchRefs,
@@ -101,6 +107,8 @@ const markdownClassName =
 /** The anchor list of a body with no references: one shared value, so re-rendering such a body
  *  leaves the state untouched instead of committing a fresh empty array each time. */
 const NO_ANCHORS: readonly ReferenceAnchor[] = [];
+/** The same, for a body with no Dispatch pictures. */
+const NO_PICTURES: readonly PictureAnchor[] = [];
 
 /**
  * Renders Markdown text through Proof's own parser and schema, so every question, answer,
@@ -115,6 +123,11 @@ const NO_ANCHORS: readonly ReferenceAnchor[] = [];
  * overrides Tailwind Typography's fixed palette, heading scale, and font size) so a heading
  * inside, say, an ask question reads as bold text at the card's own size rather than a
  * page-size h1, and a resolution reason inline in a `text-xs` line stays that size.
+ *
+ * A picture whose address is a Dispatch artifact at a version (`![shot.png](dispatch://…@v1)`,
+ * what a pasted picture is written as) shows through `DispatchPicture`: at the column's width,
+ * capped in height, in `block`; as a thumbnail beside its caption in `inline`. A picture on
+ * another website renders as Proof renders it.
  *
  * Once the schema and Proof's headless engine are loaded (the first body on the page loads
  * them), a body renders synchronously in the layout phase of the commit that mounts it, so a
@@ -138,6 +151,7 @@ export function MarkdownBody({
   const blockRoot = useRef<HTMLDivElement>(null);
   const inlineRoot = useRef<HTMLSpanElement>(null);
   const [referenceAnchors, setReferenceAnchors] = useState<readonly ReferenceAnchor[]>(NO_ANCHORS);
+  const [pictureAnchors, setPictureAnchors] = useState<readonly PictureAnchor[]>(NO_PICTURES);
   const [isFallback, setIsFallback] = useState(false);
 
   useLayoutEffect(() => {
@@ -159,7 +173,7 @@ export function MarkdownBody({
         setIsFallback(true);
         root.replaceChildren(document.createTextNode(markdown));
       } else {
-        const serializer = DOMSerializer.fromSchema(proof.schema);
+        const serializer = pictureSerializer(proof.schema);
         if (variant === "inline") {
           const flattened = flattenInline(parsed);
           root.replaceChildren();
@@ -187,6 +201,8 @@ export function MarkdownBody({
       linkifyDispatchRefs(root);
       const anchors = collectReferenceAnchors(root);
       setReferenceAnchors(anchors.length === 0 ? NO_ANCHORS : anchors);
+      const pictures = collectPictureAnchors(root);
+      setPictureAnchors(pictures.length === 0 ? NO_PICTURES : pictures);
       onRenderedRef.current?.();
     };
     setIsFallback(false);
@@ -218,9 +234,18 @@ export function MarkdownBody({
     };
   }, [markdown, variant]);
 
-  const portals = referenceAnchors.map(({ anchor, key, route }) =>
-    createPortal(<RefLink route={route} />, anchor, key)
-  );
+  const portals = [
+    ...referenceAnchors.map(({ anchor, key, route }) =>
+      createPortal(<RefLink route={route} />, anchor, key)
+    ),
+    ...pictureAnchors.map(({ anchor, caption, key, route }) =>
+      createPortal(
+        <DispatchPicture caption={caption} route={route} variant={variant} />,
+        anchor,
+        key
+      )
+    ),
+  ];
 
   return variant === "inline" ? (
     <span

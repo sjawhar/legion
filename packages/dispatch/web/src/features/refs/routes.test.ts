@@ -5,14 +5,18 @@ import {
   buildInboxPath,
   buildIssuePath,
   buildProjectPath,
+  buildReferencePath,
   documentItemPath,
   documentRoute,
   issueTabForRoute,
   itemRoute,
+  parseAgentArtifactPath,
   parseDispatchReference,
   parseInboxSearch,
   parseIssuePath,
   parseProjectPath,
+  referenceRouteFromHref,
+  referenceTargetKind,
   routeHasMargin,
   routeProjectOf,
 } from "./routes";
@@ -278,6 +282,80 @@ test("maps dispatch project artifact references onto the document path and back"
   );
   expect(buildDispatchReference(route)).toBe(
     "dispatch://CORE/artifact/design-notes@v3/comment/note-1"
+  );
+});
+
+test("an agent conversation's artifact round-trips through its reference, its page and a dashboard link", () => {
+  const pinned = {
+    kind: "agent-artifact" as const,
+    session: "ses-1",
+    slug: "shot-png",
+    version: 2,
+  };
+  expect(parseDispatchReference("dispatch://agent/ses-1/artifact/shot-png@v2")).toEqual(pinned);
+  expect(buildDispatchReference(pinned)).toBe("dispatch://agent/ses-1/artifact/shot-png@v2");
+  expect(buildReferencePath(pinned)).toBe("/agents/ses-1/artifacts/shot-png?v=2");
+  expect(parseAgentArtifactPath("/agents/ses-1/artifacts/shot-png", "?v=2")).toEqual(pinned);
+  expect(
+    referenceRouteFromHref(
+      "https://dispatch.test/agents/ses-1/artifacts/shot-png?v=2",
+      "https://dispatch.test"
+    )
+  ).toEqual(pinned);
+  expect(referenceTargetKind(pinned)).toBe("document");
+
+  const latest = { kind: "agent-artifact" as const, session: "ses-1", slug: "shot-png" };
+  expect(parseDispatchReference("dispatch://agent/ses-1/artifact/shot-png")).toEqual(latest);
+  expect(buildDispatchReference(latest)).toBe("dispatch://agent/ses-1/artifact/shot-png");
+  expect(buildReferencePath(latest)).toBe("/agents/ses-1/artifacts/shot-png");
+
+  // A reference names the session as written; its page path encodes it, and reading the page
+  // decodes it back to the same id.
+  const written = parseDispatchReference("dispatch://agent/ses%2F1/artifact/shot-png");
+  expect(written).toEqual({ kind: "agent-artifact", session: "ses%2F1", slug: "shot-png" });
+  if (written === undefined) throw new Error("the written id did not parse");
+  expect(buildReferencePath(written)).toBe("/agents/ses%252F1/artifacts/shot-png");
+  expect(parseAgentArtifactPath("/agents/ses%252F1/artifacts/shot-png")).toEqual({
+    kind: "agent-artifact",
+    session: "ses%2F1",
+    slug: "shot-png",
+  });
+});
+
+test("an agent artifact names a session that holds no slash, query, fragment or space", () => {
+  for (const reference of [
+    "dispatch://agent/a/b/artifact/shot-png",
+    "dispatch://agent/a#b/artifact/shot-png",
+    "dispatch://agent/a?b/artifact/shot-png",
+    "dispatch://agent/a\u00a0b/artifact/shot-png",
+    "dispatch://agent/a\ufeffb/artifact/shot-png",
+    "dispatch://agent//artifact/shot-png",
+    "dispatch://agent/ses-1/artifact/Shot-png",
+    "dispatch://agent/ses-1/artifact/shot-png@v0",
+    "dispatch://agent/ses-1",
+  ]) {
+    expect(parseDispatchReference(reference)).toBeUndefined();
+  }
+  for (const path of ["/agents/a%2Fb/artifacts/shot-png", "/agents/a%20b/artifacts/shot-png"]) {
+    expect(parseAgentArtifactPath(path)).toBeUndefined();
+  }
+  expect(parseAgentArtifactPath("/agents/ses-1/artifacts/shot-png", "?v=0")).toBeUndefined();
+});
+
+test("an artifact of an agent's conversation is referenced under its session", () => {
+  const picture = {
+    issue_key: null,
+    kind: "image" as const,
+    primary: false,
+    project: "",
+    session_id: "ses-1",
+    slug: "shot-png",
+  };
+  expect(buildDispatchReference(documentRoute(picture))).toBe(
+    "dispatch://agent/ses-1/artifact/shot-png"
+  );
+  expect(buildDispatchReference(documentRoute(picture, 3))).toBe(
+    "dispatch://agent/ses-1/artifact/shot-png@v3"
   );
 });
 

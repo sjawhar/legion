@@ -1,8 +1,15 @@
 import type { UseQueryResult } from "@tanstack/react-query";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { type FormEvent, type ReactNode, useId, useState } from "react";
+import {
+  type Dispatch,
+  type FormEvent,
+  type ReactNode,
+  type SetStateAction,
+  useId,
+  useState,
+} from "react";
 
-import { api } from "../../api/client";
+import { type ArtifactOwner, api } from "../../api/client";
 import type { Ask, AskRead, AskResolution, Comment, CreateCommentInput } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
 import { submitOnModifiedEnter } from "../../hooks/submitOnModifiedEnter";
@@ -18,6 +25,7 @@ import {
   textSecondaryOnSurface,
   textSecondaryOnSurfaceMuted,
 } from "../../theme/classes";
+import { appendToDraft, DraftUploadStatus, useDraftUpload } from "../artifacts/ArtifactUpload";
 import { actorLabel, describeAskResolutionActor } from "../refs/actor";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { Timestamp } from "../refs/Timestamp";
@@ -38,7 +46,7 @@ export type AskThreadQuery = UseQueryResult<AskRead, Error>;
 interface UseAskThreadResult {
   replies: Comment[];
   body: string;
-  setBody: (value: string) => void;
+  setBody: Dispatch<SetStateAction<string>>;
   submitReply: (event: FormEvent<HTMLFormElement>) => void;
   isPending: boolean;
   isError: boolean;
@@ -102,6 +110,9 @@ export interface AskThreadProps {
   showResolution?: boolean;
   /** A thread inside an open ask card inherits the card's compact flow. */
   embedded?: boolean;
+  /** Where a file pasted or dropped into the reply goes: the ask's issue, or its document's
+   *  project. Without one the field takes a paste as text. */
+  uploadOwner?: ArtifactOwner;
 }
 
 /**
@@ -116,6 +127,7 @@ export function AskThread({
   createReply: reply = createReply,
   showResolution = true,
   embedded = false,
+  uploadOwner,
 }: AskThreadProps): ReactNode {
   // Each AskThread instance owns its reply field label so transient duplicate
   // mounts during a responsive transition cannot share an ask-id-derived id.
@@ -126,6 +138,8 @@ export function AskThread({
     thread
   );
   const resolution = resolvedInfo(ask);
+  const upload = useDraftUpload((text) => setBody((current) => appendToDraft(current, text)));
+  const uploading = upload.pending > 0;
 
   return (
     <section
@@ -167,13 +181,21 @@ export function AskThread({
               disabled={isPending}
               id={replyFieldId}
               onChange={(event) => setBody(event.target.value)}
-              onKeyDown={(event) => submitOnModifiedEnter(event)}
+              onDrop={
+                uploadOwner === undefined ? undefined : (event) => upload.drop(event, uploadOwner)
+              }
+              // A reply sent while a picture is still uploading would go without it.
+              onKeyDown={(event) => (uploading ? undefined : submitOnModifiedEnter(event))}
+              onPaste={
+                uploadOwner === undefined ? undefined : (event) => upload.paste(event, uploadOwner)
+              }
               value={body}
             />
           </label>
+          <DraftUploadStatus upload={upload} />
           <button
             className={`self-start rounded-lg border px-3 py-1.5 text-sm font-medium ${borderStrong} ${textSecondaryOnSurface} ${enabledCardHoverBorder} disabled:cursor-not-allowed disabled:opacity-50`}
-            disabled={body.trim() === "" || isPending}
+            disabled={body.trim() === "" || isPending || uploading}
             type="submit"
           >
             {isPending ? "Replying…" : "Reply"}
