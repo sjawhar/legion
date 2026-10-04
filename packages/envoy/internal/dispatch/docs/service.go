@@ -182,15 +182,16 @@ type roomState struct {
 	// the change it credits; creditSeq numbers those changes, the latest last (see authors.go).
 	pending   map[string]pendingAuthor
 	creditSeq uint64
-	// authoredAskBlocks associates an unindexed ask block with the service write that introduced
-	// it. Settlement uses that actor for the new ask and ask.opened event, then removes it.
-	authoredAskBlocks map[string]model.Actor
+	// askBlocks are the ask blocks the room's document held when its update observer last
+	// rendered it, or when it loaded; nil when neither could read it. askAuthors names the author
+	// of the update that introduced each one no settlement has indexed yet (observeAskBlocks).
+	askBlocks  map[string]struct{}
+	askAuthors map[string]model.Actor
 	// lastActor is the most recent edit's source: the actor of a service mutation, or the sole
 	// connected peer of a browser edit. A settlement uses it for derived events and approval moves
 	// when its version credits that actor or credits nobody; ambiguous browser edits use
 	// SettlementActor instead.
-	lastActor       *model.Actor
-	lastActorCredit uint64
+	lastActor *model.Actor
 	// contentMarkdown is the live document's rendered markdown when the room's update observer
 	// last saw it change, nil until the room loads.
 	contentMarkdown *string
@@ -992,24 +993,19 @@ func stampBlockIDs(doc *crdt.Doc, origin any) (*pmdoc.Node, int, error) {
 }
 
 // settlementCredit is whom a settlement's version credits, taken before the tree it records:
-// capture, its authors in order, actor, whom its derived events name, and the service actors of
-// new ask blocks it can index from that tree.
+// capture, its authors in order, and actor, whom its derived events name. askSources, copied once
+// the settlement holds the tree it reconciles, names who introduced each new ask block in it.
 type settlementCredit struct {
-	capture           authorCapture
-	authors           []model.Actor
-	actor             model.Actor
-	authoredAskBlocks map[string]model.Actor
-	// afterCopyActor credited a browser update after this settlement took its actor. Reconciliation
-	// defers an unknown new ask block rather than assigning it the pre-copy actor.
-	afterCopyActor *model.Actor
+	capture    authorCapture
+	authors    []model.Actor
+	actor      model.Actor
+	askSources askBlockSources
 }
 
 // readSettlementTree takes the authors a settlement's version credits before it copies doc. An
 // update observer credits a change only once the room holds it, so every author taken made a change
-// the copy holds; one credited after the take stays pending (authors.go). It notices a later known
-// browser actor after the copy, so reconciliation defers an ask block the earlier actor cannot
-// name. Holding state.mu across the copy would block the update observer that credits and broadcasts
-// every peer's keystroke.
+// the copy holds; one credited after the take stays pending (authors.go). Holding state.mu across
+// the copy would block the update observer that credits and broadcasts every peer's keystroke.
 func readSettlementTree(state *roomState, doc *crdt.Doc, room string, afterTake func(room string)) (*pmdoc.Node, settlementCredit, error) {
 	state.mu.Lock()
 	credit := settlementAuthors(state)
@@ -1018,30 +1014,15 @@ func readSettlementTree(state *roomState, doc *crdt.Doc, room string, afterTake 
 		afterTake(room)
 	}
 	tree, err := lockedTreeOf(doc)
-	if err != nil {
-		return nil, settlementCredit{}, err
-	}
-	state.mu.Lock()
-	if state.lastActor != nil && state.lastActorCredit > credit.capture.through {
-		credit.afterCopyActor = new(*state.lastActor)
-	}
-	state.mu.Unlock()
-	return tree, credit, nil
+	return tree, credit, err
 }
 
 // settlementAuthors takes state's pending authors, which a settlement's version credits, and names
 // the actor its derived events carry: the latest editor when the version credits them or credits no
-// one, otherwise SettlementActor. A service write's exact source for a new ask block is captured
-// separately (authoredAskBlocks). The caller holds state.mu.
+// one, otherwise SettlementActor. The caller holds state.mu.
 func settlementAuthors(state *roomState) settlementCredit {
 	capture := state.takeAuthors()
 	credit := settlementCredit{capture: capture, authors: actorSlice(capture.authors)}
-	if len(state.authoredAskBlocks) > 0 {
-		credit.authoredAskBlocks = make(map[string]model.Actor, len(state.authoredAskBlocks))
-		for id, actor := range state.authoredAskBlocks {
-			credit.authoredAskBlocks[id] = actor
-		}
-	}
 	if latest := state.lastActor; latest != nil {
 		if capture.has(*latest) || len(credit.authors) == 0 {
 			credit.actor = *latest
@@ -1052,16 +1033,16 @@ func settlementAuthors(state *roomState) settlementCredit {
 	return credit
 }
 
-// consumeAuthoredAskBlocks drops the source records a committed settlement inspected. The caller
-// invokes it only after the transaction that created or reconciled their asks has committed.
-func (credit settlementCredit) consumeAuthoredAskBlocks(blockIDs []string) {
+// consumeAskAuthors forgets the recorded author of each block a committed settlement indexed or
+// found indexed: its ask row names the author from then on.
+func (credit settlementCredit) consumeAskAuthors(blockIDs []string) {
 	if len(blockIDs) == 0 {
 		return
 	}
 	state := credit.capture.state
 	state.mu.Lock()
 	for _, blockID := range blockIDs {
-		delete(state.authoredAskBlocks, blockID)
+		delete(state.askAuthors, blockID)
 	}
 	state.mu.Unlock()
 }
@@ -1317,8 +1298,12 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		finishSlots()
 		return
 	}
+	// The ask blocks' sources are read now, after the tree they are reconciled on: an update in that
+	// tree whose observer has already run has recorded who introduced its blocks, and one whose
+	// observer has not left its blocks unseen, for the settlement that observer arms (askBlockSources).
+	credit.askSources = state.askSources()
 	state.mu.Unlock()
-	reconciliation, err := s.reconcileAskBlocks(ctx, tx, room, owner, reconciled, credit.actor, credit.authoredAskBlocks, credit.afterCopyActor)
+	reconciliation, err := s.reconcileAskBlocks(ctx, tx, room, owner, reconciled, credit)
 	if err != nil {
 		abandon(err)
 		return
@@ -1485,7 +1470,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		abandon(fmt.Errorf("commit document settlement: %w", err))
 		return
 	}
-	credit.consumeAuthoredAskBlocks(reconciliation.authoredAskBlocks)
+	credit.consumeAskAuthors(reconciliation.indexedAskBlocks)
 	finishSlots()
 	state.mu.Lock()
 	if state.gen == generation {

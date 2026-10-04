@@ -406,8 +406,9 @@ func (s *server) storeArtifact(
 			s.writeHandlerError(w, err)
 			return
 		}
-		// The version credits the uploader alone, and holds the upload's write to the document.
-		ledger.WroteVersion(artifact.ID, []model.Actor{actor})
+		// The version credits the uploader alone, and holds the upload's write to the document,
+		// which clears the credit of every edit that write read when it changed the document.
+		ledger.WroteVersion(artifact.ID)
 		documentChanges, err = s.replaceReferences(r.Context(), tx, "artifact", artifact.ID, documentMarkdown)
 		if err != nil {
 			s.writeHandlerError(w, err)

@@ -2558,7 +2558,6 @@ func (s *Service) recordActor(room string, actor model.Actor) {
 	state.mu.Lock()
 	state.creditAuthor(actor)
 	state.lastActor = new(actor)
-	state.lastActorCredit = state.creditSeq
 	state.mu.Unlock()
 }
 

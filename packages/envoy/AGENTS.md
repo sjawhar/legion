@@ -60,16 +60,18 @@ settlement that wrote into the room renders its version from the document as it 
 repairs (`readSettlementTree`), so a peer's edit made since its read is in that version too. The
 settlement takes its authors under the room's state lock before it copies that tree, so an edit
 credited after the take stays pending for the next version that holds it. Every version takes its
-authors no later than it reads the tree it records - a settlement and a version read straight from
-the room before their copy; a transaction's version before its fork reads the room; an upload as of
-its write's last read of the room (`liveWrite.forkSeq`) - and its commit releases only the pending
-authors' entries it took (`docs/authors.go`). An author who edits again after a version took its
-authors stays pending for the second edit, as does one whose edit the version's tree holds while
-its update observer, which ygo runs only once the edit's transaction has released the document, had
-not yet credited it. That edit's own settlement writes no version and releases nothing, and the
-next version credits them (LEGION-503). An upload, whose route writes its version itself, records
-what that version credits (`Ledger.WroteVersion`), clears every pending edit its replacement
-overwrote, and leaves only edits credited after the write's room read for the next version.
+authors' credit sequence no later than it reads the tree it records - a settlement and a version
+read straight from the room before their copy; a transaction's version before its fork reads the
+room; an upload as of its write's last read of the room (`liveWrite.forkSeq`) - and its commit
+releases every pending entry credited through that sequence (`docs/authors.go`). An author who
+edits again after a version took its authors stays pending for the second edit, as does one whose
+edit the version's tree holds while its update observer, which ygo runs only once the edit's
+transaction has released the document, had not yet credited it. That edit's own settlement writes
+no version and releases nothing, and the next version credits them (LEGION-503). An upload, whose
+route writes its version itself, records it (`Ledger.WroteVersion`): when its write changed the
+document, it clears every credit pending at the write's room read, whether its replacement removed
+that edit or kept it, and its version credits the uploader alone; an edit credited after that read
+stays pending for the next version. An upload that changed nothing clears nothing.
 A settlement that wrote into the room commits what it wrote even when the document moved after its
 read, since the room and its browsers hold it; one that wrote nothing leaves a moved document to
 the settlement the move scheduled. A repair is written only into the document the settlement read
@@ -92,13 +94,16 @@ document. Every write path that changes a document queues that closer once its t
 a live edit (`POST /api/v1/artifacts/{id}/edits`), an uploaded document version
 (`POST /api/v1/issues/{key}/artifacts`, `POST /api/v1/projects/{key}/artifacts`), and a spec seeded
 at issue creation, so ask blocks written by any of them become asks without waiting for a later live
-change. The closer attributes a new ask and its `ask.opened` event to the service write that
-introduced its block (`roomState.authoredAskBlocks`), or to the room's latest known editor for a
-browser-created block. A browser block that appears after the settlement's author take is left for
-the update's own settlement, which attributes it from that update. Its other derived events,
-including an approval request's move, name that same latest editor when known; ambiguous browser
-edits name `SettlementActor`. A free-text ask block (no bullet list) carries `options: []` on the
-wire, never JSON null.
+change. The closer attributes a new ask and its `ask.opened` event to the author of the update
+that introduced its block, as the room's update observer recorded it when it rendered that update
+(`observeAskBlocks`): a service write's or a committed transaction's actor, the one browser
+connected when a browser's update arrived, or `SettlementActor` for a browser's update while
+several people are connected. A seeded spec's blocks are its creator's. A block in the tree whose
+update the observer has not rendered yet waits for the settlement that observer arms. A block the
+room held when it loaded, which no update the observer saw introduced, is attributed as the
+settlement's other events are. Those name the room's latest editor when the version credits them,
+including an approval request's move; ambiguous browser edits name `SettlementActor`. A free-text
+ask block (no bullet list) carries `options: []` on the wire, never JSON null.
 
 The closer's timer lives in memory, so the database says which documents still owe it: every
 durable document update writes the document's `doc_settlements_pending` row in its own transaction

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -1336,7 +1337,7 @@ func TestAnUploadKeepsTheCreditOfAnEditItsUploaderMakesWhileItWrites(t *testing.
 	if _, err := writeDocumentVersion(ctx, tx, issue.PrimaryArtifactID, nextNumber, uploaded, []model.Actor{alice}, nil); err != nil {
 		t.Fatalf("write the upload version: %v", err)
 	}
-	ledger.WroteVersion(issue.PrimaryArtifactID, []model.Actor{alice})
+	ledger.WroteVersion(issue.PrimaryArtifactID)
 	if err := ledger.Commit(ctx); err != nil {
 		t.Fatalf("commit upload transaction: %v", err)
 	}
@@ -1348,49 +1349,70 @@ func TestAnUploadKeepsTheCreditOfAnEditItsUploaderMakesWhileItWrites(t *testing.
 	}
 }
 
-// An upload replacing another browser author's pending edit consumes that edit's credit: the
-// upload version does not hold the edit, so no later version may credit it (LEGION-503).
-func TestUploadClearsAnotherAuthorItsReplacementOverwrites(t *testing.T) {
-	documentService, handler, _ := browserDocumentService(t)
-	issue := createInteractionIssue(t, handler, "TEST", "Overwritten author", "before")
-	path := "/api/v1/issues/" + issue.Key + "/artifacts"
-	upload := func(login, content string) {
-		t.Helper()
-		if response := dispatchRequest(t, handler, http.MethodPost, path, map[string]string{
-			"name": "notes.md", "content": content,
-		}, login); response.Code != http.StatusCreated {
-			t.Fatalf("%s uploads %q: status=%d body=%s", login, content, response.Code, response.Body.String())
-		}
-	}
-	upload("bob", "before\n")
-	var notes model.Artifact
-	for _, artifact := range decodeBody[[]model.Artifact](t, dispatchRequest(t, handler, http.MethodGet, path, nil, "alice")) {
-		if artifact.Name == "notes.md" {
-			notes = artifact
-		}
-	}
-	if notes.ID == "" {
-		t.Fatal("uploaded document is missing")
-	}
-	browser := connectBrowserPeer(t, documentService, notes.ID)
-	t.Cleanup(browser.close)
-	browser.appendParagraph(t, "Alice wrote this.")
-	browser.barrier(t)
-	upload("bob", "after\n")
+// An upload that changes the document clears every credit pending at its write's room read, so no
+// later version credits an edit the upload was written over, whether its replacement dropped that
+// edit or kept it. An upload that changes nothing clears nothing (LEGION-503).
+func TestAnUploadClearsPendingCreditOnlyWhenItChangesTheDocument(t *testing.T) {
+	session := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
+	alice := model.Actor{Kind: "user", ID: "alice"}
+	for _, test := range []struct {
+		name        string
+		replacement string
+		find        string
+		want        []model.Actor
+	}{
+		// Bob's replacement drops Alice's paragraph: no version may credit an edit none holds.
+		{name: "a replacement that drops her edit", replacement: "after\n", find: "after", want: []model.Actor{session}},
+		// Bob's replacement keeps Alice's paragraph and adds his own. It changed the document, so it
+		// clears every credit pending at its room read, hers included (Deep's probe C).
+		{name: "a replacement that keeps her edit", replacement: "before\n\nAlice wrote this.\n\nBob's own.\n", find: "before", want: []model.Actor{session}},
+		// Bob uploads the live text unchanged. His write changed nothing, so it clears nothing, and
+		// the next version credits Alice (Deep's probe D).
+		{name: "an unchanged re-upload", replacement: "before\n\nAlice wrote this.\n", find: "before", want: []model.Actor{session, alice}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			documentService, handler, _ := browserDocumentService(t)
+			issue := createInteractionIssue(t, handler, "TEST", "Overwritten author", "before")
+			path := "/api/v1/issues/" + issue.Key + "/artifacts"
+			upload := func(content string) {
+				t.Helper()
+				if response := dispatchRequest(t, handler, http.MethodPost, path, map[string]string{
+					"name": "notes.md", "content": content,
+				}, "bob"); response.Code != http.StatusCreated {
+					t.Fatalf("bob uploads %q: status=%d body=%s", content, response.Code, response.Body.String())
+				}
+			}
+			upload("before\n")
+			var notes model.Artifact
+			for _, artifact := range decodeBody[[]model.Artifact](t, dispatchRequest(t, handler, http.MethodGet, path, nil, "alice")) {
+				if artifact.Name == "notes.md" {
+					notes = artifact
+				}
+			}
+			if notes.ID == "" {
+				t.Fatal("uploaded document is missing")
+			}
+			browser := connectBrowserPeer(t, documentService, notes.ID)
+			t.Cleanup(browser.close)
+			browser.appendParagraph(t, "Alice wrote this.")
+			browser.barrier(t)
+			upload(test.replacement)
 
-	next := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+notes.ID+"/edits", map[string]any{
-		"ops":     []map[string]string{{"op": "replace", "find": "after", "with": "next"}},
-		"summary": "Next version",
-		"actor":   sessionActor(),
-	})
-	if next.Code != http.StatusOK {
-		t.Fatalf("create next version: status=%d body=%s", next.Code, next.Body.String())
-	}
-	version := decodeBody[struct {
-		Version *model.Version `json:"version"`
-	}](t, next).Version
-	if version == nil || len(version.Authors) != 1 || version.Authors[0] != (model.Actor{Kind: "session", ID: "session-0123456789abcdef"}) {
-		t.Fatalf("next version = %#v, want only the session editor: Bob's upload overwrote Alice's pending edit", version)
+			next := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+notes.ID+"/edits", map[string]any{
+				"ops":     []map[string]string{{"op": "replace", "find": test.find, "with": "next"}},
+				"summary": "Next version",
+				"actor":   sessionActor(),
+			})
+			if next.Code != http.StatusOK {
+				t.Fatalf("create next version: status=%d body=%s", next.Code, next.Body.String())
+			}
+			version := decodeBody[struct {
+				Version *model.Version `json:"version"`
+			}](t, next).Version
+			if version == nil || !slices.Equal(version.Authors, test.want) {
+				t.Fatalf("next version = %#v, want authors %v", version, test.want)
+			}
+		})
 	}
 }
 
