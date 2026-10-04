@@ -184,7 +184,7 @@ type PullRequest struct {
 	// Workflows is each workflow the base branch's rulesets require to succeed, read with Required,
 	// and the result of its latest run on WorkflowsHead, the head the daemon read the runs of; empty
 	// when the base requires no workflow, and WorkflowsHead then too. A result stands only for the
-	// head whose settlement is recorded (classify.HeadChecks).
+	// head whose settlement is recorded (classify.HeadChecks). A reopen keeps both, with Required.
 	Workflows     []RequiredWorkflow
 	WorkflowsHead string
 	// ReviewSeen is the newest deciding review (changes requested or approved) GitHub reported for
@@ -204,10 +204,10 @@ type RequiredWorkflow struct {
 	Result string `json:"result"`
 }
 
-// RequiresExactly says whether a read of the base branch's requirements says what is recorded:
-// names is the required set, and workflows, read at head, the required workflows' results. Nil
-// Required is a set never read, never the same as a read one, even an empty one.
-func (pr PullRequest) RequiresExactly(names []string, workflows []RequiredWorkflow, head string) bool {
+// RequiredReadUnchanged says whether a read of what the base branch requires is what pr records:
+// names is its required check set, and workflows its required workflows' run results, read at
+// head. Nil Required is a set never read, never the same as a read one, even an empty one.
+func (pr PullRequest) RequiredReadUnchanged(names []string, workflows []RequiredWorkflow, head string) bool {
 	return pr.Required != nil && slices.Equal(pr.Required, names) && slices.Equal(pr.Workflows, workflows) && pr.WorkflowsHead == head
 }
 

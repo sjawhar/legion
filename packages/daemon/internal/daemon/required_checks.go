@@ -96,7 +96,7 @@ func (w *workflowRuntime) readRequiredChecks(ctx context.Context) {
 			w.log.Error("read the checks a pull request's base branch requires; its checks verdict stays as the set last read decides it, and undecided when none was", attributes...)
 			continue
 		}
-		if pr.RequiresExactly(fact.Names, fact.Workflows, fact.WorkflowsHead) {
+		if pr.RequiredReadUnchanged(fact.Names, fact.Workflows, fact.WorkflowsHead) {
 			continue
 		}
 		eventID := fmt.Sprintf("required-checks:%s:%s:%s#%d:%d", w.dispatchProject, w.bootID, pr.Repo, pr.Number, time.Now().UnixNano())

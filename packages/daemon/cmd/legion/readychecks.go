@@ -25,8 +25,11 @@ var githubRemote = regexp.MustCompile(`^(?:https://github\.com/|git@github\.com:
 // the rule the workflow's checks verdict judges by too (classify.Judge). A head reports none of
 // them when its push skipped CI when it should not have (legion push's rule), or when the pull
 // request conflicts with its base, since GitHub starts no pull_request run for a pull request it
-// cannot merge; it is refused here, naming the head, the check or workflow and which of the two
-// GitHub shows, rather than left for GitHub to block the human merge.
+// cannot merge; it is refused here, naming the head, the check or workflow, and the conflict once
+// GitHub shows it, rather than left for GitHub to block the human merge. A required workflow
+// another repository defines (an organization ruleset can require one) never matches a run here,
+// since a run is matched in the repository that defines the workflow and belongs to the one it ran
+// for; its refusal names that repository instead.
 //
 // A base branch that requires nothing has nothing to refuse, and READY is published. It says so
 // on stdout rather than reading like a head whose every required check was read and passed: a
@@ -55,7 +58,10 @@ func readyChecks(ctx context.Context, workspace string, issue paneIssue, stdout 
 			SHA string `json:"sha"`
 		} `json:"head"`
 		Base struct {
-			Ref string `json:"ref"`
+			Ref  string `json:"ref"`
+			Repo struct {
+				ID int64 `json:"id"`
+			} `json:"repo"`
 		} `json:"base"`
 		// MergeableState is "dirty" while the pull request conflicts with its base.
 		MergeableState string `json:"mergeable_state"`
@@ -77,32 +83,43 @@ func readyChecks(ctx context.Context, workspace string, issue paneIssue, stdout 
 			return err
 		}
 	}
-	workflows, err := requiredchecks.Workflows(ctx, github, pull.Head.SHA, required.Workflows)
-	if err != nil {
-		return err
+	var workflows []classify.Standing
+	if len(required.Workflows) > 0 {
+		if workflows, err = requiredchecks.Workflows(ctx, github, pull.Head.SHA, required.Workflows); err != nil {
+			return err
+		}
 	}
 	head := pull.Head.SHA
 	if len(head) > 12 {
 		head = head[:12]
 	}
-	for _, judged := range []struct {
-		standings     []classify.Standing
-		what, missing string
-	}{
-		{classify.Judge(required.Checks, results), "required check", "no result for"},
-		{workflows, "required workflow", "no run of"},
-	} {
-		for _, check := range judged.standings {
-			switch name := check.Name; {
-			case check.Result == classify.Missing && pull.MergeableState == "dirty":
-				return fmt.Errorf("head %s of pull request #%d has %s the %s %q: the pull request conflicts with %s, and GitHub starts no pull_request CI for a pull request it cannot merge; tell the architect", head, issue.PullRequest.Number, judged.missing, judged.what, name, pull.Base.Ref)
-			case check.Result == classify.Missing:
-				return fmt.Errorf("head %s of pull request #%d has %s the %s %q: its push may have skipped CI when it should not have; tell the architect", head, issue.PullRequest.Number, judged.missing, judged.what, name)
-			case check.Result == classify.Pending:
-				return fmt.Errorf("the %s %q is still running on head %s of pull request #%d: wait for it to finish", judged.what, name, head, issue.PullRequest.Number)
-			case check.Red():
-				return fmt.Errorf("the %s %q ended %s on head %s of pull request #%d", judged.what, name, check.Result, head, issue.PullRequest.Number)
-			}
+	number := issue.PullRequest.Number
+	// refusal is READY's refusal for one required check or workflow's standing on the head, nil when
+	// it succeeded there.
+	refusal := func(check classify.Standing, what, missing string) error {
+		switch name := check.Name; {
+		case check.Result == classify.Missing && pull.MergeableState == "dirty":
+			return fmt.Errorf("head %s of pull request #%d has %s the %s %q: the pull request conflicts with %s, and GitHub starts no pull_request CI for a pull request it cannot merge; tell the architect", head, number, missing, what, name, pull.Base.Ref)
+		case check.Result == classify.Missing:
+			return fmt.Errorf("head %s of pull request #%d has %s the %s %q: its push may have skipped CI when it should not have, or the pull request conflicts with %s and GitHub started no pull_request CI for it; tell the architect", head, number, missing, what, name, pull.Base.Ref)
+		case check.Result == classify.Pending:
+			return fmt.Errorf("the %s %q is still running on head %s of pull request #%d: wait for it to finish", what, name, head, number)
+		case check.Red():
+			return fmt.Errorf("the %s %q ended %s on head %s of pull request #%d", what, name, check.Result, head, number)
+		}
+		return nil
+	}
+	for _, check := range classify.Judge(required.Checks, results) {
+		if err := refusal(check, "required check", "no result for"); err != nil {
+			return err
+		}
+	}
+	for i, workflow := range workflows {
+		if defined := required.Workflows[i].RepositoryID; workflow.Result == classify.Missing && defined != pull.Base.Repo.ID {
+			return fmt.Errorf("the required workflow %q is defined in repository %d, not in pull request #%d's own (%d): Legion matches a workflow's runs only in the repository that defines it, so it found no run of it on head %s and cannot confirm it passed; tell the architect", workflow.Name, defined, number, pull.Base.Repo.ID, head)
+		}
+		if err := refusal(workflow, "required workflow", "no run of"); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -132,25 +149,18 @@ func workspaceRepository(workspace string) (ghrepo.Repository, error) {
 // the failing conclusion or state (classify.Judge's results). A check run that ended neutral or
 // skipped counts as a success, as GitHub counts it for a required check.
 func headCheckResults(ctx context.Context, github githubrest.Client, sha string) (map[string]string, error) {
+	type run struct {
+		Name       string `json:"name"`
+		Status     string `json:"status"`
+		Conclusion string `json:"conclusion"`
+	}
+	runs, err := githubrest.GetListPages[run](ctx, github, "/commits/"+sha+"/check-runs", "check_runs")
+	if err != nil {
+		return nil, err
+	}
 	results := map[string]string{}
-	for page := 1; ; page++ {
-		var runs struct {
-			TotalCount int `json:"total_count"`
-			CheckRuns  []struct {
-				Name       string `json:"name"`
-				Status     string `json:"status"`
-				Conclusion string `json:"conclusion"`
-			} `json:"check_runs"`
-		}
-		if err := github.Get(ctx, fmt.Sprintf("/commits/%s/check-runs?per_page=100&page=%d", sha, page), &runs); err != nil {
-			return nil, err
-		}
-		for _, run := range runs.CheckRuns {
-			results[run.Name] = classify.RunResult(run.Status, run.Conclusion)
-		}
-		if len(runs.CheckRuns) == 0 || page*100 >= runs.TotalCount {
-			break
-		}
+	for _, run := range runs {
+		results[run.Name] = classify.RunResult(run.Status, run.Conclusion)
 	}
 	var combined struct {
 		Statuses []struct {

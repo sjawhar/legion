@@ -89,13 +89,14 @@ func TestRequiredReadsARulesetsRequiredWorkflowsBesideItsChecks(t *testing.T) {
 // A required workflow stands as its latest run on the head that a pull request event started: a
 // rerun after a failure is what GitHub judges, a run a push started is not the pull request's, a
 // run of the same path in another repository is another workflow, and a workflow with no such run
-// is missing. The runs come a hundred to a page, and a run on the second page counts.
+// is missing. The runs come a hundred to a page, GitHub naming the next page in the Link header as
+// it does for this list, and a run on the second page counts.
 func TestWorkflowsJudgesEachRequiredWorkflowByItsLatestPullRequestRun(t *testing.T) {
 	run := func(id int, path, event, status, conclusion string, repository int) string {
 		return fmt.Sprintf(`{"id":%d,"path":%q,"event":%q,"status":%q,"conclusion":%s,"repository":{"id":%d}}`, id, path, event, status, conclusion, repository)
 	}
 	pages := map[string][]string{
-		"1": {
+		"": {
 			run(10, ".github/workflows/review.yml", "pull_request", "completed", `"failure"`, 4242),
 			run(11, ".github/workflows/review.yml", "push", "completed", `"failure"`, 4242),
 			run(12, ".github/workflows/lint.yml", "pull_request", "completed", `"failure"`, 4242),
@@ -112,7 +113,11 @@ func TestWorkflowsJudgesEachRequiredWorkflowByItsLatestPullRequestRun(t *testing
 			http.NotFound(w, r)
 			return
 		}
-		fmt.Fprintf(w, `{"total_count":105,"workflow_runs":[%s]}`, strings.Join(pages[r.URL.Query().Get("page")], ","))
+		page := r.URL.Query().Get("page")
+		if page == "" {
+			w.Header().Set("Link", fmt.Sprintf(`<http://%s/repos/acme/widgets/actions/runs?head_sha=head&per_page=100&page=2>; rel="next", <http://%s/repos/acme/widgets/actions/runs?head_sha=head&per_page=100&page=2>; rel="last"`, r.Host, r.Host))
+		}
+		fmt.Fprintf(w, `{"total_count":105,"workflow_runs":[%s]}`, strings.Join(pages[page], ","))
 	}))
 	defer server.Close()
 	workflows := []Workflow{

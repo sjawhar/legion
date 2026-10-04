@@ -110,8 +110,8 @@ func Required(ctx context.Context, github githubrest.Client, base string) (Set, 
 // required check; one still queued or running is classify.Pending; one that ended any other way is
 // red with its conclusion (failure, cancelled, timed_out, action_required, startup_failure); and a
 // workflow the head has no such run of is classify.Missing. A run lives in the repository it ran
-// for, so a workflow another repository defines never matches one, and is Missing. With no
-// workflow required it reads nothing.
+// for, so a workflow another repository defines never matches one, and is Missing. It reads the
+// head's runs whatever workflows names, so a caller with no workflow required does not call it.
 func Workflows(ctx context.Context, github githubrest.Client, sha string, workflows []Workflow) ([]classify.Standing, error) {
 	type run struct {
 		ID         int64  `json:"id"`
@@ -123,24 +123,11 @@ func Workflows(ctx context.Context, github githubrest.Client, sha string, workfl
 			ID int64 `json:"id"`
 		} `json:"repository"`
 	}
+	runs, err := githubrest.GetListPages[run](ctx, github, "/actions/runs?head_sha="+url.QueryEscape(sha), "workflow_runs")
+	if err != nil {
+		return nil, err
+	}
 	standings := make([]classify.Standing, 0, len(workflows))
-	if len(workflows) == 0 {
-		return standings, nil
-	}
-	var runs []run
-	for page := 1; ; page++ {
-		var answer struct {
-			TotalCount   int   `json:"total_count"`
-			WorkflowRuns []run `json:"workflow_runs"`
-		}
-		if err := github.Get(ctx, fmt.Sprintf("/actions/runs?head_sha=%s&per_page=100&page=%d", url.QueryEscape(sha), page), &answer); err != nil {
-			return nil, err
-		}
-		runs = append(runs, answer.WorkflowRuns...)
-		if len(answer.WorkflowRuns) == 0 || page*100 >= answer.TotalCount {
-			break
-		}
-	}
 	for _, workflow := range workflows {
 		var latest *run
 		for i, candidate := range runs {
