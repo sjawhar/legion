@@ -651,19 +651,26 @@ func TestStaticHandlerHoldsOnlyEachRetainedObjectsSize(t *testing.T) {
 // A fetch that runs out of the shared three-second bound before the store answers — most often
 // because most of it was already spent waiting for memory-cap room, leaving the store call only
 // milliseconds to finish — is the same 503 the cap's own refusal gives, not a 502 store failure:
-// the store was never actually unhealthy, only asked too late to answer in time.
+// the store was never actually unhealthy, only asked too late to answer in time. The request's own
+// context carries a deadline shorter than retainedAssetFetchTimeout, standing in for a bound that
+// ran out mostly waiting on the memory cap, so the fetch's shared ctx expires in milliseconds
+// rather than the full three seconds.
 func TestStaticHandlerAnswers503WhenTheFetchRunsOutOfTheSharedBound(t *testing.T) {
+	shortBound, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
 	var logs bytes.Buffer
 	previous := slog.Default()
 	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
 	t.Cleanup(func() { slog.SetDefault(previous) })
 
-	handler, context := newTestRouter(t)
-	context.WebDistDir = t.TempDir()
-	context.AssetStore = latentStore{delay: retainedAssetFetchTimeout + time.Second, object: []byte("late")}
+	handler, appContext := newTestRouter(t)
+	appContext.WebDistDir = t.TempDir()
+	appContext.AssetStore = latentStore{delay: time.Second, object: []byte("late")}
 
 	recorder := httptest.NewRecorder()
-	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/assets/late-joiner.js", nil))
+	req := httptest.NewRequest(http.MethodGet, "/assets/late-joiner.js", nil).WithContext(shortBound)
+	handler.ServeHTTP(recorder, req)
 
 	if recorder.Code != http.StatusServiceUnavailable {
 		t.Fatalf("fetch past the shared bound: status %d with %d body bytes, want 503", recorder.Code, recorder.Body.Len())
