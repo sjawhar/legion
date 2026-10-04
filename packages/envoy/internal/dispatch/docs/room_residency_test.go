@@ -581,7 +581,7 @@ func TestAPublishSurvivesItsRoomsWorkerRetiringUnderIt(t *testing.T) {
 		// Shutdown waits on the paused write's durable append, which this test holds, until its
 		// budget ends, then closes the room with a connected editor (CloseRoom) under the publish.
 		{"Shutdown with a connected editor", true, func(service *Service, _ string) error {
-			ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), ShutdownDrainBudget+11*time.Second)
 			defer cancel()
 			_ = service.Shutdown(ctx)
 			return nil
