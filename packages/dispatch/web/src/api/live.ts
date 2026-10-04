@@ -47,7 +47,7 @@ export function reconnectDelayMs(attempt: number): number {
 /**
  * Thrown by `readEventStream` when the connection request itself fails (as opposed to
  * a mid-stream network drop, which resolves the promise normally via `done`). Callers
- * distinguish `status` 401/403 (the session is gone — stop retrying, prompt sign-in)
+ * distinguish `status` 401 (the session is gone — stop retrying, prompt sign-in)
  * from everything else (transient — keep backing off and retrying).
  */
 export class EventStreamHttpError extends Error {

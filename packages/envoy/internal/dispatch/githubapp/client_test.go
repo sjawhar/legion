@@ -289,7 +289,7 @@ func newTestClient(t *testing.T, fake *fakeGitHub) *Client {
 	fake.clientID = "Iv1.testclient"
 	server := httptest.NewServer(fake.handler())
 	t.Cleanup(server.Close)
-	client, err := New(&auth.AppConfig{ClientID: "Iv1.testclient", ClientSecret: "secret", PEM: pemText}, server.URL)
+	client, err := New(&auth.AppConfig{ClientID: "Iv1.testclient", PEM: pemText}, server.URL)
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
@@ -297,6 +297,52 @@ func newTestClient(t *testing.T, fake *fakeGitHub) *Client {
 		t.Fatal("new client: got nil for a configured app")
 	}
 	return client
+}
+
+func TestReadRejectsAResponseLargerThanTheLimit(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, strings.Repeat("x", responseLimit+1))
+	}))
+	t.Cleanup(server.Close)
+	_, pemText := testKeyPEM(t)
+	client, err := New(&auth.AppConfig{ClientID: "Iv1.testclient", PEM: pemText}, server.URL)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	body, status, header, err := client.Read(context.Background(), "installation-token", "/repos/acme/web/pulls/7")
+	if err == nil || !strings.Contains(err.Error(), "GET "+server.URL+"/repos/acme/web/pulls/7: ") ||
+		!strings.Contains(err.Error(), "1048576-byte limit") {
+		t.Fatalf("Read: err = %v, want a response-limit error naming the method and path", err)
+	}
+	var tooLarge *ResponseTooLargeError
+	if !errors.As(err, &tooLarge) || tooLarge.Limit != responseLimit {
+		t.Fatalf("Read: err = %v, want a *ResponseTooLargeError with limit %d", err, responseLimit)
+	}
+	if body != nil || status != 0 || header != nil {
+		t.Fatalf("Read: body=%d status=%d header=%v, want no truncated response", len(body), status, header)
+	}
+}
+
+func TestReadAcceptsAResponseAtTheLimit(t *testing.T) {
+	want := strings.Repeat("x", responseLimit)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, want)
+	}))
+	t.Cleanup(server.Close)
+	_, pemText := testKeyPEM(t)
+	client, err := New(&auth.AppConfig{ClientID: "Iv1.testclient", PEM: pemText}, server.URL)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	body, status, _, err := client.Read(context.Background(), "installation-token", "/repos/acme/web/pulls/7")
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if status != http.StatusOK || string(body) != want {
+		t.Fatalf("Read: status=%d body length=%d, want 200 and %d bytes", status, len(body), len(want))
+	}
 }
 
 func TestCheckSourceVerifiesJWTAndResolvesInstallation(t *testing.T) {
@@ -401,7 +447,7 @@ func TestNilClientAnswersErrNoAppKey(t *testing.T) {
 	if err != nil || client != nil {
 		t.Fatalf("New(nil): got (%v, %v), want (nil, nil)", client, err)
 	}
-	client, err = New(&auth.AppConfig{ClientID: "Iv1.x", ClientSecret: "s"}, "")
+	client, err = New(&auth.AppConfig{ClientID: "Iv1.x"}, "")
 	if err != nil || client != nil {
 		t.Fatalf("New(no PEM): got (%v, %v), want (nil, nil)", client, err)
 	}
@@ -411,7 +457,7 @@ func TestNilClientAnswersErrNoAppKey(t *testing.T) {
 }
 
 func TestNewRejectsMalformedKey(t *testing.T) {
-	if _, err := New(&auth.AppConfig{ClientID: "Iv1.x", ClientSecret: "s", PEM: "not a key"}, ""); err == nil {
+	if _, err := New(&auth.AppConfig{ClientID: "Iv1.x", PEM: "not a key"}, ""); err == nil {
 		t.Fatal("malformed PEM accepted")
 	}
 }

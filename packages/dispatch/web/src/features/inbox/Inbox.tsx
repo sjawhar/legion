@@ -179,7 +179,7 @@ function InboxItem({
   /** Timestamp of the Inbox snapshot that supplied this row's initial thread. */
   threadUpdatedAt: number;
   section: InboxSection;
-  /** The signed-in lowercase login; "Assign to me" writes it. */
+  /** The signed-in person's lowercase email; "Assign to me" writes it. */
   viewer: string;
 }): ReactNode {
   const owner = askIssueKey(ask);
@@ -375,10 +375,9 @@ export function Inbox(): ReactNode {
   // The credential requests the Inbox lists above its asks: the section, the banner and the empty
   // state all read this one answer.
   const credentials = useCredentialRequests();
-  // `/auth/whoami` echoes GitHub's casing; issues carry the lowercase login.
-  const login = whoAmI.data?.login;
-  const viewer = login?.toLowerCase();
-  // The URL wins, then the login's remembered choice, then Mine (the first-time default).
+  // `/auth/whoami` names the person by lowercase email, the form issue assignees carry.
+  const viewer = whoAmI.data?.login;
+  // The URL wins, then the viewer's remembered choice, then Mine (the first-time default).
   const [rememberedView, setRememberedView] = useUserPreference<InboxView>(
     "inbox.view",
     (stored) => (stored === "everyone" ? "everyone" : "mine"),

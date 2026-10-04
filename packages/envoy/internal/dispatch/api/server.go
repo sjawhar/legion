@@ -47,19 +47,16 @@ const repoLabelPrefix = "repo:"
 
 // Deps are the API's application dependencies.
 type Deps struct {
-	Store    *store.Store
-	Identity identity.Identity
-	// AllowedLogins is the lowercase sign-in allowlist (DISPATCH_ALLOWED_LOGINS): the humans an
-	// issue may be assigned to, and the option list GET /users returns.
-	AllowedLogins  map[string]struct{}
+	Store          *store.Store
+	Identity       identity.Identity
 	AgentToken     string
 	DefaultProject string
 	ServerURL      string
 	Docs           docs.API
 	Envoy          *envoy.Client
 	Events         *events.Broker
-	// GitHub calls the GitHub App API for architecture-source access checks;
-	// nil is the "no app credentials yet" state and answers ErrNoAppKey.
+	// GitHub calls the GitHub App API for architecture-source access checks and the web app's
+	// GitHub reads; nil is the "no app credentials yet" state and answers ErrNoAppKey.
 	GitHub *githubapp.Client
 	// Architecture imports a project's architecture model from its configured
 	// source; the ticker, the Refresh route, and the sync tool share it so one
@@ -84,13 +81,19 @@ type Deps struct {
 	// test gets.
 	Lifetime         context.Context
 	TestHooksEnabled bool
+	// StreamHeartbeat is how often a server-sent event stream writes a heartbeat and resolves
+	// its caller again, and a document socket resolves its caller again (whileCallerResolves),
+	// each closing once the caller no longer resolves.
+	StreamHeartbeat time.Duration
 }
+
+// defaultStreamHeartbeat is StreamHeartbeat when DepsInput leaves it zero.
+const defaultStreamHeartbeat = 15 * time.Second
 
 // DepsInput contains raw boot values used to construct API dependencies.
 type DepsInput struct {
 	Store          *store.Store
 	Identity       identity.Identity
-	AllowedLogins  map[string]struct{}
 	AgentToken     string
 	DefaultProject string
 	ServerURL      string
@@ -117,6 +120,10 @@ type DepsInput struct {
 	AgentSecretsURL   string
 	AgentSecretsToken string
 	TestHooksEnabled  bool
+	// StreamHeartbeat replaces the heartbeat of the event streams and the document socket
+	// (Deps.StreamHeartbeat). Zero keeps fifteen seconds; a test proving a connection closes
+	// sets a short one.
+	StreamHeartbeat time.Duration
 }
 
 // NewDeps parses boot configuration once and returns API dependencies.
@@ -153,10 +160,13 @@ func NewDeps(input DepsInput) (Deps, error) {
 	if url := strings.TrimSpace(input.AgentSecretsURL); url != "" {
 		agentSecretsClient = agentsecrets.New(url, input.AgentSecretsToken)
 	}
+	heartbeat := input.StreamHeartbeat
+	if heartbeat == 0 {
+		heartbeat = defaultStreamHeartbeat
+	}
 	return Deps{
 		Store:            input.Store,
 		Identity:         input.Identity,
-		AllowedLogins:    input.AllowedLogins,
 		AgentToken:       input.AgentToken,
 		DefaultProject:   defaultProject,
 		ServerURL:        strings.TrimSuffix(input.ServerURL, "/"),
@@ -170,6 +180,7 @@ func NewDeps(input DepsInput) (Deps, error) {
 		AgentSecrets:     agentSecretsClient,
 		Lifetime:         input.Lifetime,
 		TestHooksEnabled: input.TestHooksEnabled,
+		StreamHeartbeat:  heartbeat,
 	}, nil
 }
 
@@ -233,13 +244,43 @@ func Register(mux *http.ServeMux, deps Deps) {
 		ServeHTTP(http.ResponseWriter, *http.Request)
 	}); ok {
 		const pattern = "/ws/doc/{room}"
-		mux.Handle("GET "+pattern, trackTransactions(s.refuseUnstorableParameters(pattern, s.refuseUnstorableActor(websocket.ServeHTTP))))
+		mux.Handle("GET "+pattern, s.whileCallerResolves(trackTransactions(s.refuseUnstorableParameters(pattern, s.refuseUnstorableActor(websocket.ServeHTTP)))))
 	}
 }
 
 func trackTransactions(handler http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		handler(w, r.WithContext(store.WithTransactionTracking(r.Context())))
+	}
+}
+
+// whileCallerResolves serves a connection that outlives its request, the document websocket, only
+// while its caller resolves: on every StreamHeartbeat it resolves the caller again, as the event
+// streams do, and once the caller no longer resolves (a logout, a membership the sign-in pool no
+// longer confirms) it cancels the connection's context, on which the document server closes the
+// socket. The check runs beside the handler, which holds pooled connections of its own while it
+// admits the socket, so it marks a context of its own for the pool (store.ErrNestedAcquire).
+func (s *server) whileCallerResolves(handler http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx, closeConnection := context.WithCancel(r.Context())
+		defer closeConnection()
+		check := r.WithContext(store.WithTransactionTracking(ctx))
+		go func() {
+			heartbeat := time.NewTicker(s.deps.StreamHeartbeat)
+			defer heartbeat.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-heartbeat.C:
+					if _, _, err := s.optionalActor(check); err != nil {
+						closeConnection()
+						return
+					}
+				}
+			}
+		}()
+		handler(w, r.WithContext(ctx))
 	}
 }
 
@@ -529,7 +570,7 @@ func bearerSessionActor(authenticated model.Actor, supplied *model.Actor) (model
 }
 
 func (s *server) writeAuthenticationError(w http.ResponseWriter, err error) {
-	if errors.Is(err, identity.ErrNoIdentity) || errors.Is(err, identity.ErrLoginNotAllowed) {
+	if errors.Is(err, identity.ErrNoIdentity) {
 		identity.WriteError(w, err)
 		return
 	}

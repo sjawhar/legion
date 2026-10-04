@@ -1,5 +1,5 @@
-// Command dispatch serves the Dispatch dashboard, GitHub OAuth flow, and
-// per-user GitHub REST and GraphQL proxy.
+// Command dispatch serves the Dispatch dashboard and API, signs people in with Google Workspace
+// through the sign-in pool, and reads GitHub for the web app as the GitHub App.
 package main
 
 import (
@@ -29,7 +29,6 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/config"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
-	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/outbox"
 	"github.com/sjawhar/envoy/internal/dispatch/redeliver"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
@@ -54,19 +53,24 @@ const (
 var buildCommit string
 
 type bootConfig struct {
-	DatabaseURL      string
-	AgentToken       string
-	RepoProjects     string
-	DefaultProject   string
-	EnvoyURL         string
-	GitHubAPIBase    string
-	IdentityHeader   string
-	AllowedLogins    map[string]struct{}
-	NATSDisabled     bool
-	TestHooksEnabled bool
-	// TestSettleDelay is the document closer delay test processes use. It is the normal default
-	// unless DISPATCH_TEST_SETTLE_DELAY overrides it with the test hooks mounted.
-	TestSettleDelay time.Duration
+	DatabaseURL    string
+	AgentToken     string
+	RepoProjects   string
+	DefaultProject string
+	EnvoyURL       string
+	GitHubAPIBase  string
+	IdentityHeader string
+	// SignInIssuer, SignInClientID, SignInClientSecret and SignInGroup configure Google sign-in
+	// through the sign-in pool (DISPATCH_SIGNIN_*): all four or none; empty means no sign-in.
+	SignInIssuer       string
+	SignInClientID     string
+	SignInClientSecret string
+	SignInGroup        string
+	NATSDisabled       bool
+	TestHooksEnabled   bool
+	// SettleDelay is how long a document waits after a live change before it settles, zero for the
+	// document service's own default; only DISPATCH_TEST_SETTLE_DELAY, under the test hooks, sets it.
+	SettleDelay time.Duration
 	// OIDCIssuer and OIDCAudience configure verification of projected
 	// service-account tokens. Both set or neither; empty means no verifier.
 	OIDCIssuer   string
@@ -137,7 +141,7 @@ func main() {
 		slog.Info("dispatch: loaded github app", "slug", appCfg.Slug, "client_id", appCfg.ClientID, "source", appSource.String())
 	}
 	if boot.DevSignIn {
-		slog.Warn("dispatch: dev sign-in mounted: any allowlisted login signs in at /auth/_dev/signin without GitHub; cookies are valid on this process only", "origin", serverURL)
+		slog.Warn("dispatch: dev sign-in mounted: any email signs in at /auth/_dev/signin without the sign-in pool; cookies are valid on this process only", "origin", serverURL)
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -208,23 +212,21 @@ func main() {
 		os.Exit(1)
 	}
 
-	users := store.NewPgUserStore(database.Pool)
+	people := store.NewPgPeopleStore(database.Pool)
 	sessions := store.NewPgSessionStore(database.Pool)
 
-	var requestIdentity identity.Identity
-	if boot.IdentityHeader == "" {
-		requestIdentity = identity.CookieIdentity{
-			SigningKey:    signingKey,
-			AllowedLogins: boot.AllowedLogins,
-			Sessions:      sessions,
-		}
-	} else {
-		slog.Warn("dispatch: trusting request identity header", "header", boot.IdentityHeader)
-		requestIdentity = identity.HeaderIdentity{
-			Header:        boot.IdentityHeader,
-			AllowedLogins: boot.AllowedLogins,
-		}
+	signIn, err := discoverSignIn(ctx, boot)
+	if err != nil {
+		slog.Error("dispatch: discover the sign-in issuer", "error", err)
+		os.Exit(1)
 	}
+	if signIn != nil {
+		slog.Info("dispatch: signing people in through the sign-in pool", "issuer", boot.SignInIssuer, "client_id", boot.SignInClientID, "group", boot.SignInGroup)
+	}
+	if boot.IdentityHeader != "" {
+		slog.Warn("dispatch: using test/local header identity", "header", boot.IdentityHeader)
+	}
+	requestIdentity := requestIdentityFor(boot, signingKey, people, sessions, signIn)
 
 	broker := events.NewBroker()
 	documentService := docs.New(docs.Deps{
@@ -233,7 +235,7 @@ func main() {
 		Identity:   requestIdentity,
 		AgentToken: boot.AgentToken,
 		ServerURL:  serverURL,
-		Settle:     boot.TestSettleDelay,
+		Settle:     boot.SettleDelay,
 	})
 
 	serviceTokens, err := oidc.Discover(ctx, boot.OIDCIssuer, boot.OIDCAudience, oidc.DiscoveryTimeout)
@@ -248,9 +250,10 @@ func main() {
 	appCtx, err := routes.BuildAppContext(appContextOptions(boot, routes.AppContextOptions{
 		SigningKey:  signingKey,
 		WebDistDir:  webDistDir,
-		Users:       users,
+		People:      people,
 		Sessions:    sessions,
 		Identity:    requestIdentity,
+		SignIn:      signIn,
 		Store:       database,
 		ServerURL:   serverURL,
 		Docs:        documentService,
@@ -416,21 +419,27 @@ func loadAppCredentials(env settingValues, dataDir string) (*auth.AppConfig, app
 // reach their readers from env instead, through the table's lookup: the GitHub App credentials
 // (loadAppCredentials), the envoy.json overrides (loadEnvoyConfig) and NATS's reach and nkey (the
 // bus connects). A new setting goes wherever its reader takes it, and always into the table.
+// A variable a release removed (removedSettings) refuses startup before anything else is read.
 func resolveBootConfig(env settingValues) (bootConfig, error) {
+	if err := refuseRemovedSettings(env); err != nil {
+		return bootConfig{}, err
+	}
 	boot := bootConfig{
-		DatabaseURL:      strings.TrimSpace(env.get("DATABASE_URL")),
-		AgentToken:       strings.TrimSpace(env.get("DISPATCH_AGENT_TOKEN")),
-		RepoProjects:     strings.TrimSpace(env.get("DISPATCH_REPO_PROJECTS")),
-		DefaultProject:   strings.TrimSpace(env.get("DISPATCH_DEFAULT_PROJECT")),
-		GitHubAPIBase:    strings.TrimSpace(env.get("DISPATCH_GITHUB_API_BASE")),
-		AllowedLogins:    parseAllowedLogins(env.get("DISPATCH_ALLOWED_LOGINS")),
-		NATSDisabled:     env.get("DISPATCH_NATS_DISABLED") == "1",
-		TestHooksEnabled: env.get("DISPATCH_TEST_HOOKS") == "1",
-		TestSettleDelay:  docs.DefaultSettleDelay,
-		WebDist:          env.get("DISPATCH_WEB_DIST"),
-		SigningKey:       env.get("DISPATCH_SIGNING_KEY"),
-		InsecureCookie:   env.get("DISPATCH_INSECURE_COOKIE") != "",
-		EnvoyToken:       env.get("ENVOY_TOKEN"),
+		DatabaseURL:        strings.TrimSpace(env.get("DATABASE_URL")),
+		AgentToken:         strings.TrimSpace(env.get("DISPATCH_AGENT_TOKEN")),
+		RepoProjects:       strings.TrimSpace(env.get("DISPATCH_REPO_PROJECTS")),
+		DefaultProject:     strings.TrimSpace(env.get("DISPATCH_DEFAULT_PROJECT")),
+		GitHubAPIBase:      strings.TrimSpace(env.get("DISPATCH_GITHUB_API_BASE")),
+		SignInIssuer:       strings.TrimSpace(env.get("DISPATCH_SIGNIN_ISSUER")),
+		SignInClientID:     strings.TrimSpace(env.get("DISPATCH_SIGNIN_CLIENT_ID")),
+		SignInClientSecret: strings.TrimSpace(env.get("DISPATCH_SIGNIN_CLIENT_SECRET")),
+		SignInGroup:        strings.TrimSpace(env.get("DISPATCH_SIGNIN_GROUP")),
+		NATSDisabled:       env.get("DISPATCH_NATS_DISABLED") == "1",
+		TestHooksEnabled:   env.get("DISPATCH_TEST_HOOKS") == "1",
+		WebDist:            env.get("DISPATCH_WEB_DIST"),
+		SigningKey:         env.get("DISPATCH_SIGNING_KEY"),
+		InsecureCookie:     env.get("DISPATCH_INSECURE_COOKIE") != "",
+		EnvoyToken:         env.get("ENVOY_TOKEN"),
 	}
 	if boot.DatabaseURL == "" {
 		return bootConfig{}, errors.New("DATABASE_URL required")
@@ -451,21 +460,33 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 		if err != nil || delay <= 0 {
 			return bootConfig{}, fmt.Errorf("DISPATCH_TEST_SETTLE_DELAY=%q (expected a positive Go duration)", raw)
 		}
-		boot.TestSettleDelay = delay
+		boot.SettleDelay = delay
+	}
+	identityMode := strings.TrimSpace(env.get("DISPATCH_IDENTITY"))
+	if err := checkSignInSettings(boot, identityMode); err != nil {
+		return bootConfig{}, err
+	}
+	var devSignIn bool
+	switch flag := env.get("DISPATCH_DEV_SIGNIN"); flag {
+	case "":
+	case "1":
+		devSignIn = true
+	default:
+		return bootConfig{}, fmt.Errorf("DISPATCH_DEV_SIGNIN=%q (expected 1 or unset)", flag)
 	}
 
-	switch mode := strings.TrimSpace(env.get("DISPATCH_IDENTITY")); {
+	switch mode := identityMode; {
 	case mode == "" || mode == "cookie":
-		if len(boot.AllowedLogins) == 0 {
-			return bootConfig{}, errors.New("DISPATCH_ALLOWED_LOGINS required in cookie identity mode")
+		if err := requireCookieSignIn(boot, devSignIn); err != nil {
+			return bootConfig{}, err
 		}
 	case strings.HasPrefix(mode, "header:"):
 		boot.IdentityHeader = strings.TrimSpace(strings.TrimPrefix(mode, "header:"))
 		if boot.IdentityHeader == "" {
 			return bootConfig{}, errors.New("DISPATCH_IDENTITY header name required")
 		}
-		if env.get("DISPATCH_APP_CLIENT_ID") != "" && env.get("DISPATCH_IDENTITY_HEADER_TRUSTED") != "1" {
-			return bootConfig{}, errors.New("DISPATCH_IDENTITY_HEADER_TRUSTED=1 required with OAuth and header identity")
+		if env.get("DISPATCH_IDENTITY_HEADER_TRUSTED") != "1" {
+			return bootConfig{}, errors.New("DISPATCH_IDENTITY_HEADER_TRUSTED=1 required: header identity is only for tests and local harnesses")
 		}
 	default:
 		return bootConfig{}, fmt.Errorf("DISPATCH_IDENTITY=%q (expected cookie or header:<Header-Name>)", mode)
@@ -505,27 +526,26 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 		}
 	}
 
-	switch flag := env.get("DISPATCH_DEV_SIGNIN"); flag {
-	case "":
-	case "1":
+	if devSignIn {
 		if err := devSignInFence(boot, env); err != nil {
 			return bootConfig{}, err
 		}
 		boot.DevSignIn = true
-	default:
-		return bootConfig{}, fmt.Errorf("DISPATCH_DEV_SIGNIN=%q (expected 1 or unset)", flag)
 	}
 	return boot, nil
 }
 
 // devSignInFence is the dev sign-in fence over the environment; devSignInLoadedFence covers what
-// main loads after it. With the flag any loopback client signs in as any allowlisted login, so the
+// main loads after it. With the flag any loopback client signs in as any person it names, so the
 // process must listen, keep its data and reach the services that act on a human's word (NATS, the
 // secrets broker, the Envoy listener that delivers mentions and messages, GitHub as the App) on
 // this machine alone, and sign its cookies with a key no other process holds.
 func devSignInFence(boot bootConfig, env settingValues) error {
 	if boot.IdentityHeader != "" {
 		return errors.New("DISPATCH_DEV_SIGNIN=1 mints session cookies, so DISPATCH_IDENTITY must be cookie")
+	}
+	if boot.SignInIssuer != "" {
+		return errors.New("DISPATCH_DEV_SIGNIN=1 signs people in without the sign-in pool, so DISPATCH_SIGNIN_* must be unset: a loopback server holds no sign-in client secret")
 	}
 	if !routes.LoopbackHostPort(boot.ListenAddr) {
 		return fmt.Errorf("DISPATCH_DEV_SIGNIN=1 is for a loopback server only: DISPATCH_LISTEN_HOST=%q (listen address %q) must be 127.0.0.1 or [::1]", env.get("DISPATCH_LISTEN_HOST"), boot.ListenAddr)
@@ -552,7 +572,7 @@ func devSignInFence(boot bootConfig, env settingValues) error {
 
 // devSignInLoadedFence is the dev sign-in fence over what main loads after the environment: the
 // dashboard origin from envoy.json, and the GitHub App from the environment or the data dir's
-// app.json. With the flag a loopback client acts as an allowlisted human, and a human can make the
+// app.json. With the flag a loopback client acts as any person it names, and a person can make the
 // App act: saving an architecture source has the App probe and import the repository the caller
 // names. The private key is the credential that acts (githubapp.New builds no client without it,
 // the App JWT names the client ID, and nothing sends the numeric App ID), so:
@@ -572,7 +592,7 @@ func devSignInLoadedFence(boot bootConfig, serverURL string, app *auth.AppConfig
 		return nil
 	}
 	if source.Path != "" {
-		return fmt.Errorf("DISPATCH_DEV_SIGNIN=1 refuses the App private key in %s, whatever DISPATCH_GITHUB_API_BASE names: that file is where the real App's key is kept, and with the flag any loopback client can have the App sign calls. Pass a throwaway App in the environment instead (DISPATCH_APP_CLIENT_ID, DISPATCH_APP_CLIENT_SECRET and a generated DISPATCH_APP_PEM_B64, which take precedence over app.json), with DISPATCH_GITHUB_API_BASE naming a GitHub fake on a loopback host, as packages/dispatch/e2e/run-server.sh does", source.Path)
+		return fmt.Errorf("DISPATCH_DEV_SIGNIN=1 refuses the App private key in %s, whatever DISPATCH_GITHUB_API_BASE names: that file is where the real App's key is kept, and with the flag any loopback client can have the App sign calls. Pass a throwaway App in the environment instead (DISPATCH_APP_CLIENT_ID and a generated DISPATCH_APP_PEM_B64, which take precedence over app.json), with DISPATCH_GITHUB_API_BASE naming a GitHub fake on a loopback host, as packages/dispatch/e2e/run-server.sh does", source.Path)
 	}
 	if !routes.LoopbackURL(boot.GitHubAPIBase) {
 		return fmt.Errorf("DISPATCH_DEV_SIGNIN=1 lets the App private key (DISPATCH_APP_PEM_B64) sign calls only to a loopback host: DISPATCH_GITHUB_API_BASE=%q (empty is https://api.github.com) must name 127.0.0.1, [::1] or localhost. Use a throwaway key: every App call hands a signed App JWT to whatever listens there", boot.GitHubAPIBase)
@@ -600,25 +620,6 @@ func loopbackDatabase(databaseURL string) error {
 	return nil
 }
 
-// agentSecretsToken resolves the secrets broker's UI bearer, reading
-// DISPATCH_AGENT_SECRETS_TOKEN_FILE (trimmed contents) ahead of
-// DISPATCH_AGENT_SECRETS_TOKEN; a set-but-unreadable or blank file is an error naming both,
-// never a silent fallback to the bare variable.
-func agentSecretsToken(env settingValues) (string, error) {
-	if path := strings.TrimSpace(env.get("DISPATCH_AGENT_SECRETS_TOKEN_FILE")); path != "" {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return "", fmt.Errorf("DISPATCH_AGENT_SECRETS_TOKEN_FILE names %s, which could not be read: %w", path, err)
-		}
-		value := strings.TrimSpace(string(data))
-		if value == "" {
-			return "", fmt.Errorf("DISPATCH_AGENT_SECRETS_TOKEN_FILE names %s, which is empty", path)
-		}
-		return value, nil
-	}
-	return strings.TrimSpace(env.get("DISPATCH_AGENT_SECRETS_TOKEN")), nil
-}
-
 // sessionSigningKey is the key session cookies are signed with: one generated for this process
 // under dev sign-in, otherwise DISPATCH_SIGNING_KEY when it is set (a deployment's, from its
 // secrets manager), otherwise the data dir's signing-key file, created on first start (a local
@@ -638,7 +639,7 @@ func sessionSigningKey(boot bootConfig, dataDir string) (string, error) {
 // configuration, with every setting the router takes from boot filled in. The settings tests build
 // the router through it, so dropping any hand-off here fails a case.
 func appContextOptions(boot bootConfig, built routes.AppContextOptions) routes.AppContextOptions {
-	built.AllowedLogins = boot.AllowedLogins
+	built.SignInGroup = boot.SignInGroup
 	built.AgentToken = boot.AgentToken
 	built.DefaultProject = boot.DefaultProject
 	built.InsecureCookie = boot.InsecureCookie
@@ -694,18 +695,6 @@ func seedRepoProjects(ctx context.Context, database *store.Store, raw string) er
 		}
 	}
 	return nil
-}
-
-// parseAllowedLogins lower-cases every entry: GitHub logins are case-insensitive, and the
-// login GitHub returns at sign-in carries the user's display casing.
-func parseAllowedLogins(raw string) map[string]struct{} {
-	logins := map[string]struct{}{}
-	for _, login := range strings.Split(raw, ",") {
-		if login = strings.ToLower(strings.TrimSpace(login)); login != "" {
-			logins[login] = struct{}{}
-		}
-	}
-	return logins
 }
 
 func parsePositiveInt(raw string) (int, error) {
