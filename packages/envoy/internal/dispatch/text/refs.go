@@ -48,14 +48,27 @@ func IsComponentID(value string) bool {
 	return componentIDPattern.MatchString(value)
 }
 
+// IsSessionID reports whether value can own an artifact: an Envoy session id as the Agents page
+// shows it, which a reference carries as written. It is not empty and holds no `/`, `?` or `#`,
+// no whitespace or control character, and none of the characters that end a reference in text
+// (referenceEnd), so every owner the API accepts is one a reference can name.
+func IsSessionID(value string) bool {
+	return value != "" && !strings.ContainsFunc(value, func(r rune) bool {
+		return strings.ContainsRune(`/?#<>"'`+"`"+`[]|`, r) || r == '\ufeff' ||
+			unicode.IsSpace(r) || unicode.Is(unicode.Z, r) || unicode.IsControl(r)
+	})
+}
+
 // Ref is a parsed Dispatch target. ID is the issue key for issue references,
 // an artifact slug for artifacts, the item identifier for asks and comments, and
 // the component id for components. Project is set instead of IssueKey for
-// unlinked project-document references and for components.
+// unlinked project-document references and for components, and Session instead of
+// both for an artifact an agent's conversation owns (`agent/<session id>/artifact/<slug>`).
 type Ref struct {
 	Kind     string
 	IssueKey string
 	Project  string
+	Session  string
 	ID       string
 }
 
@@ -130,8 +143,9 @@ func trimReference(raw string) string {
 }
 
 // parseDispatch reads a `dispatch://` reference, without its scheme, by the grammar the dashboard's
-// `parseDispatchReference` reads: a slug as written, an `@v` version, and an item id decoded as
-// `itemSegment` decodes it. A reference holding a control character names nothing.
+// `parseDispatchReference` reads: a slug as written, an `@v` version, an agent's session id as
+// written, and an item id decoded as `itemSegment` decodes it. A reference holding a control
+// character names nothing.
 func parseDispatch(value string) (Ref, bool) {
 	if hasControl(value) {
 		return Ref{}, false
@@ -157,6 +171,9 @@ func parseDispatch(value string) (Ref, bool) {
 			}
 		}
 		return Ref{}, false
+	}
+	if key == "agent" {
+		return parseAgentArtifact(tail)
 	}
 	if !projectKeyPattern.MatchString(key) || !found {
 		return Ref{}, false
@@ -185,6 +202,21 @@ func parseDispatch(value string) (Ref, bool) {
 		}
 	}
 	return Ref{}, false
+}
+
+// parseAgentArtifact reads what follows `agent/` in a reference: `<session id>/artifact/<slug>`
+// with an optional `@v` version, the one thing an agent's conversation owns.
+func parseAgentArtifact(tail string) (Ref, bool) {
+	session, rest, _ := strings.Cut(tail, "/")
+	artifact, ok := strings.CutPrefix(rest, "artifact/")
+	if !ok || !IsSessionID(session) {
+		return Ref{}, false
+	}
+	slug, ok := parseArtifactSlug(artifact)
+	if !ok {
+		return Ref{}, false
+	}
+	return Ref{Kind: "artifact", Session: session, ID: slug}, true
 }
 
 // parseArtifactSlug reads a slug as a reference writes it, whole, with an optional `@v` version.
@@ -277,6 +309,9 @@ func parseServer(raw string, base *url.URL) (Ref, bool) {
 		}
 		return Ref{}, false
 	}
+	if len(parts) == 4 && parts[0] == "agents" && parts[2] == "artifacts" {
+		return agentArtifactPage(parts[1], parts[3], query)
+	}
 	if len(parts) != 4 || parts[0] != "projects" || parts[2] != "documents" ||
 		!projectKeyPattern.MatchString(parts[1]) {
 		return Ref{}, false
@@ -289,6 +324,28 @@ func parseServer(raw string, base *url.URL) (Ref, bool) {
 		return Ref{}, false
 	}
 	return documentItem(Ref{Kind: "artifact", Project: parts[1], ID: slug}, query)
+}
+
+// agentArtifactPage reads the dashboard page of an artifact an agent's conversation owns,
+// `/agents/<session id>/artifacts/<slug>[?v=N]`: both segments decoded as the browser encoded
+// them, the session id then held to IsSessionID. The conversation owns no comment or ask, so a
+// `?comment=` or `?ask=` there, which Dispatch never emits, names nothing.
+func agentArtifactPage(sessionSegment, slugSegment string, query url.Values) (Ref, bool) {
+	session, err := url.PathUnescape(sessionSegment)
+	if err != nil || !IsSessionID(session) {
+		return Ref{}, false
+	}
+	slug, err := url.PathUnescape(slugSegment)
+	if err != nil || !artifactSlugPattern.MatchString(slug) {
+		return Ref{}, false
+	}
+	if version := query.Get("v"); version != "" && !versionPattern.MatchString(version) {
+		return Ref{}, false
+	}
+	if query.Has("comment") || query.Has("ask") {
+		return Ref{}, false
+	}
+	return Ref{Kind: "artifact", Session: session, ID: slug}, true
 }
 
 // documentItem is the one link rule every Dispatch URL parser applies: `?comment=` or `?ask=` on a

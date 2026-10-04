@@ -1,10 +1,11 @@
 // Package refs indexes Dispatch links and reads the reference graph. Mentions are derived from
 // source text into refs; structural relations stay in the columns that own them and the
 // graph_edges view unions both into one typed edge relation. Artifact targets use ref_key
-// (`<issue-or-project>/<slug>`) so issue and project documents share one address; artifact
-// sources are the artifact uuid. Closure returns at most eight hops and marks the result
-// truncated when it finds a ninth. References whose target is absent stay stored but are absent
-// from closures and referenced-by results.
+// (`<issue-or-project>/<slug>`, or `agent/<session id>/<slug>` for an agent's conversation) so
+// every owner's documents and files share one address; artifact sources are the artifact uuid.
+// Closure returns at most eight hops and marks the result truncated when it finds a ninth.
+// References whose target is absent stay stored but are absent from closures and referenced-by
+// results.
 package refs
 
 import (
@@ -31,6 +32,9 @@ type Queryer interface {
 func ToID(ref text.Ref) string {
 	switch ref.Kind {
 	case "artifact":
+		if ref.Session != "" {
+			return "agent/" + ref.Session + "/" + ref.ID
+		}
 		key := ref.IssueKey
 		if key == "" {
 			key = ref.Project
