@@ -285,6 +285,13 @@ is open. That is the one review-thread step a human takes: the review App cannot
 on a pull request the implementer opened, and the implementer's and merger's runs of the command
 close every accepted one.
 
+If a reviewer reports that `legion threads resolve` exited 1 counting threads that hold the
+implement App's pending draft (the daemon counts them and never names them), tell the worker
+holding the issue's phase (`envoy_publish` to its role topic) to move the issue back to
+`implementing` with `request_backward_move`, naming the count, so the implementer submits or
+discards its pending review; its own run of the command names those threads `left open … an
+unsubmitted draft in a pending review`. Open no ask for it: the implementer clears it.
+
 ## 7. Close
 
 After the merge result and the implementer's production report are recorded, post the sign-off and
