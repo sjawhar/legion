@@ -352,8 +352,9 @@ in a running pod is a new child of its launcher. A pod is replaced after it dies
 made by this runtime, or when a closed issue is re-admitted after suspension
 (`packages/daemon/internal/runtime/sandbox`).
 
-Releasing a role ends only its process. The issue owns its Sandbox, its role Secrets and, for a
-root, the tree PVC, recorded in the daemon's store (`issue_resources`) before any role of it starts.
+Releasing a role ends only its process. The issue owns its Sandbox, its role Secrets, its `-boot`
+Secret and, for a root, the tree PVC; each Sandbox carries the tree's `legion.dev/tree` label, which
+is how the tree's cleanup finds them.
 Each tree also has one durable lifecycle record (`tree_lifecycles`, keyed by the normalized project
 token and the tree): an epoch that is open, cleanup-reserved, or cleanup-confirmed, and the
 authority that opened it. Workflow admission opens a root's epoch in the fact that gives it its
@@ -376,20 +377,22 @@ launch lock orders a concurrent resume after any suspension already in flight.
 Linger expiry reserves its tree only while the root still lingers at the close's generation, so
 a re-admission that committed first fences it; an operator close reserves after it authenticated
 the root close. Either reservation comes before the census, which then reads every stored claim of
-the tree, including one that persisted before the reservation but has not admitted resources yet,
-and deletes nothing until all of them retired. A reservation that is not confirmed resumes on the
+the tree, including one that persisted before the reservation but has not launched yet, and
+deletes nothing until all of them retired. A reservation that is not confirmed resumes on the
 next attempt, even after a re-admission, and stays the new start's wait until API confirmation:
 every close row of the tree, however stale its generation or the linger it closed, still retires
-its claim and drives that cleanup before the checks that finish a stale close apply. A launch whose
-resource recheck meets a reservation committed after its own check is refused at once, with the
-same uncharged wait, rather than held toward the boot deadline. Every lifecycle step takes the
-global serializer before any lifecycle or resource row.
+its claim and drives that cleanup before the checks that finish a stale close apply. A launch
+checks its tree's epoch again just before it records `launching` and calls the runtime, so a
+reservation committed after the claim bound refuses it there, with the same uncharged wait. Every
+lifecycle step takes the global serializer before it reads the lifecycle row.
 
-A child issue's Sandbox is deleted and its absence confirmed through the API. A root is cleaned
-last: its cleanup begins only when every child record is confirmed, then refuses new children and
-requires the API to list no child Sandbox of the tree. The root Sandbox delete carries its UID and
-resourceVersion plus `foreground` propagation. Agent Sandbox v1.0.3 creates the root tree PVC with
-that Sandbox as its controller owner and `blockOwnerDeletion: true`; foreground deletion keeps the
+Once every claim of the tree has retired, the runtime deletes the tree's Sandboxes, found by
+listing them from the API by the tree's label: each child issue's Sandbox first, each awaited
+until the API no longer has it, and the listing read again until it holds none; only then the
+root's. The root Sandbox delete carries its UID and resourceVersion plus `foreground` propagation,
+and a delete the API refuses because the Sandbox changed since the listing lists again after a
+short wait. Agent Sandbox v1.0.3 creates the root tree PVC with that Sandbox as its controller
+owner and `blockOwnerDeletion: true`; foreground deletion keeps the
 owner visible until Kubernetes garbage collection deletes that blocking dependent. The restricted
 daemon has no PVC API verb, so it confirms the root Sandbox is NotFound before confirming the
 durable cleanup; it does not read or delete a PVC. The live runtime proof must observe the actual
@@ -398,17 +401,13 @@ labels or a generic garbage-collection rule.
 
 An operator-created tree has no workflow record: its stored operator authority, not a zero or
 sentinel generation, selects the operator cleanup entry point, which then applies the same
-child-first/root-last cleanup without manufacturing a workflow issue. A tree closed before its
-first resource record confirms its reservation without deleting anything.
+child-first/root-last cleanup without manufacturing a workflow issue. A tree closed before any of
+its Sandboxes was created lists none and confirms its reservation without deleting anything.
 
 Before the daemon opens its store, so before any schema write, image probe or reconcile, it checks
 that Agent Sandbox is installed and refuses a namespace that still holds a per-claim Sandbox of the
 layout before issue pods, naming it; once the store opens and before it migrates, it refuses a
-claim that still records such a Sandbox. After it migrates and before it installs the issue-pod
-layout marker, it refuses an outbox tree close of its project that could never run, naming each
-row: one the outbox's strict decode refuses, or whose linger (the root generation the close
-expires) is beyond the store's largest generation. No daemon writes one, and such a row would fail
-on every attempt. Migrate or remove those first. The daemon runs on a host
+claim that still records such a Sandbox. The daemon runs on a host
 its pods can reach and serves the worker stream they dial. The controller is
 `legion controller start` on the operator's machine
 ([Operator-launched controller](#operator-launched-controller)).
@@ -578,9 +577,9 @@ tester, reviewer, merger), named for its role:
 
 The tree volume is the root Sandbox's `volumeClaimTemplates` entry, and each issue's Sandbox
 references that claim by name. Every role container mounts it at `/legion`, and again at Oh My Pi's
-sessions directory through a `subPath`, so a session survives its pod. Each role's Secret is
-projected twice: its boot half into that role's own container, read-only, and the provisioning half
-into `workspace-fetch` alone. The operator's volumes and mounts join every role container's, and the
+sessions directory through a `subPath`, so a session survives its pod. Each role's Secret holds only
+that role's launcher token, projected read-only into the role's own container; the issue's `-boot`
+Secret holds the provisioning token, projected into `workspace-fetch` alone. The operator's volumes and mounts join every role container's, and the
 providers Secret's configured keys when there are any, with its `NATS_NKEY_SEED` key when the daemon
 has a NATS nkey seed. Each role's private and state directories, `/tmp` and the XDG config home are
 in-memory, one set per role so no role's launcher or state collides with a sibling's.

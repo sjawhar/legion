@@ -19,8 +19,9 @@ import (
 // every child pod mounts and garbage collection deletes the volume with it. The restricted daemon
 // identity has no PVC verb, so the root Sandbox's absence after a foreground delete is the API's
 // confirmation that the volume is gone. Each delete is fenced to the listed object's UID and
-// resourceVersion, and one the object changed since (a status write) lists again; a Sandbox already
-// gone is gone, so a retry after a failure finishes the rest.
+// resourceVersion, and one the object changed since (a status write) lists again after a recheck
+// interval, so a controller writing status through a foreground delete does not spin the census; a
+// Sandbox already gone is gone, so a retry after a failure finishes the rest.
 func (r *Runtime) CleanupTree(ctx context.Context, tree string) error {
 	for {
 		root, children, err := r.treeSandboxes(ctx, tree)
@@ -35,9 +36,16 @@ func (r *Runtime) CleanupTree(ctx context.Context, tree string) error {
 			next = []*unstructured.Unstructured{root}
 		}
 		for _, object := range next {
-			if err := r.deleteSandbox(ctx, object, object == root); apierrors.IsConflict(err) {
+			err := r.deleteSandbox(ctx, object, object == root)
+			if apierrors.IsConflict(err) {
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(recheckInterval):
+				}
 				break
-			} else if err != nil {
+			}
+			if err != nil {
 				return err
 			}
 		}

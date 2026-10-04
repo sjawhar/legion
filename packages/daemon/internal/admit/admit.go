@@ -623,7 +623,7 @@ func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bo
 			}
 		}
 		if candidate.Key == candidate.Tree {
-			// Claims, issue resources and the runtime key a tree by the normalized project token,
+			// Claims, tree lifecycles and the runtime key a tree by the normalized project token,
 			// not the Dispatch project key the issue record carries.
 			project, err := claim.ProjectToken(a.project)
 			if err != nil {
