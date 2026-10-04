@@ -39,12 +39,7 @@ func applyRefusingNothing(t *testing.T, pool *pgxpool.Pool, engine *Engine, fact
 // implementerTask is the task the implementer was last started with, "" when it was not started.
 func implementerTask(t *testing.T, pool *pgxpool.Pool) string {
 	t.Helper()
-	var task string
-	if err := pool.QueryRow(context.Background(), `select coalesce(max(payload->>'task'), '') from outbox
-		where kind = 'supervise' and payload->>'op' = 'start' and payload->>'role' = 'implementer'`).Scan(&task); err != nil {
-		t.Fatalf("read the implementer's start: %v", err)
-	}
-	return task
+	return startTask(t, pool, claim.RoleImplementer)
 }
 
 // Only a check the base branch requires makes CI red at a head: a red beside a passing required
