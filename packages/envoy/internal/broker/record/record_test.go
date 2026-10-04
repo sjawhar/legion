@@ -56,7 +56,7 @@ func TestVerifyRequestObjectAcceptsItsOwnSignAndRefusesTheProofTyp(t *testing.T)
 	now := time.Now()
 	compact, err := Sign(key, "https://secrets.test", []AuthorizationDetail{
 		{Type: "agent_secret", Identifier: "DEEL_API_KEY", Actions: []string{"inject"}},
-	}, "deel sync for AGENTC-1", "", now)
+	}, "deel sync for ACME-1", "", now)
 	if err != nil {
 		t.Fatal(err)
 	}
