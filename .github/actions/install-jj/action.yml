@@ -6,9 +6,40 @@ description: >-
   XDG_CONFIG_HOME, as a pod's init container has, and a shim looks its version up in the mise
   configuration under it ("No version is set for shim: jj"). mise stays at ~/.local/bin/mise, on
   PATH for later steps. Needs the repository checked out.
+
+  mise itself installs from its GitHub release tarball, checked against the `ARG MISE_SHA256` the
+  Dockerfile pins next to `ARG MISE_VERSION` before anything extracts or runs it — not mise.run's
+  `curl | sh`, which runs the installer unverified. That step reads no token. Bumping mise is one
+  edit, in the Dockerfile: both this action and the worker image's own `tools` stage read the same
+  pair.
 runs:
   using: composite
   steps:
+    - name: Install mise
+      shell: bash
+      run: |
+        set -euo pipefail
+        dockerfile=packages/daemon/docker/worker.Dockerfile
+        mise_version=$(sed -n 's/^ARG MISE_VERSION=//p' "$dockerfile")
+        mise_sha256=$(sed -n 's/^ARG MISE_SHA256=//p' "$dockerfile")
+        if [ -z "$mise_version" ] || [ -z "$mise_sha256" ]; then
+          echo "$dockerfile names no ARG MISE_VERSION or ARG MISE_SHA256" >&2
+          exit 1
+        fi
+        dir="$RUNNER_TEMP/mise-install"
+        mkdir -p "$dir"
+        archive="mise-${mise_version}-linux-x64.tar.gz"
+        curl -fsSLo "$dir/$archive" \
+          "https://github.com/jdx/mise/releases/download/${mise_version}/${archive}"
+        printf '%s  %s\n' "$mise_sha256" "$dir/$archive" > "$dir/SHA256SUMS"
+        sha256sum --check --strict "$dir/SHA256SUMS"
+        tar -xzf "$dir/$archive" -C "$dir"
+        mkdir -p "$HOME/.local/bin"
+        install -m 0755 "$dir/mise/bin/mise" "$HOME/.local/bin/mise"
+        rm -rf "$dir"
+        echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+        "$HOME/.local/bin/mise" --version
+
     - name: Install the worker image's jj
       shell: bash
       env:
@@ -17,14 +48,10 @@ runs:
         set -euo pipefail
         dockerfile=packages/daemon/docker/worker.Dockerfile
         jj_tool=$(sed -n 's/^ARG JJ_TOOL=//p' "$dockerfile")
-        MISE_VERSION=$(sed -n 's/^ARG MISE_VERSION=//p' "$dockerfile")
-        if [ -z "$jj_tool" ] || [ -z "$MISE_VERSION" ]; then
-          echo "$dockerfile names no ARG JJ_TOOL or ARG MISE_VERSION" >&2
+        if [ -z "$jj_tool" ]; then
+          echo "$dockerfile names no ARG JJ_TOOL" >&2
           exit 1
         fi
-        export MISE_VERSION
-        curl -fsSL https://mise.run | sh
-        echo "$HOME/.local/bin" >> "$GITHUB_PATH"
         install -m 0755 "$("$HOME/.local/bin/mise" x "$jj_tool" -- sh -c 'command -v jj')" "$HOME/.local/bin/jj"
         echo "$jj_tool: $HOME/.local/bin/jj"
         "$HOME/.local/bin/jj" --version

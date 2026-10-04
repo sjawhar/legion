@@ -57,21 +57,22 @@ Once ready, your assignment arrives as the first prompt in your session — you 
 it. Read the current issue and its acceptance criteria before changing the workspace. Work
 only on this phase's artifact.
 
-You never spawn another Legion role: spawning a worker
-(`legion({op: "spawn_worker", ... })`) is architect-only. You may still use ordinary `task`
-subagents for your own phase work; none of them is a Legion role.
-Escalate a product, scope, cross-phase, or lifecycle decision to the owning architect with
+You never start another Legion role: the daemon starts every phase worker itself, from its fixed
+workflow table. You may still use ordinary `task` subagents for your own phase work; none of them
+is a Legion role.
+Escalate a product, scope, design, cross-phase, or lifecycle decision to the owning architect with
 `envoy_publish` to its role topic (`notifications.role.` followed by its encoded token, see
 above), carrying the verified facts and the decision needed. `hub` only reaches subagents
-inside your own process, not the architect's separate one. For a durable question that needs
-Sami directly, you may use `dispatch_ask` yourself; replies return to your own
-session.
+inside your own process, not the architect's separate one. Never write a decision block into a
+spec yourself: the architect decides whether the human must answer it and writes the block, since
+a new version of an approved root spec closes the tree's design gate. A standalone to-do only a
+human can do is a `dispatch_ask`, and its replies return to your own session.
 
 Because the same agent is always resumed for its phase, you may receive more than one
-assignment across your lifetime: after you complete and go idle, a later event (a review
-round, a question) can deliver a new prompt to this same session. Treat it as a
-continuation — re-read the current issue and your own prior handoff, since time has
-passed — never as a fresh identity.
+assignment across your lifetime: once the daemon ends your phase it suspends you, and when a later
+event (a review round, a red check) starts your role again it resumes this same session with a new
+prompt. Treat it as a continuation — re-read the current issue and your own prior handoff, since
+time has passed — never as a fresh identity.
 
 ## Deployment instructions
 
@@ -92,10 +93,9 @@ implementer's production check after the merge
 Reach any live role on this issue the same way you reach the architect: `envoy_publish` to
 `notifications.role.` followed by that role's encoded token. Use it when you need context an
 earlier phase has that its handoff doesn't cover — ask the planner why a constraint was
-scoped that way, ask the implementer what a commit actually did. A role that finished its
-phase stays idle in its pane for the daemon's idle-retire window and answers; once retired (no
-live holder, a publish is rejected 404), read its committed handoff or ask the architect to
-`spawn_worker` it.
+scoped that way, ask the implementer what a commit actually did. The daemon suspends a role when
+its phase ends, so a role that finished is not running to answer you: read its committed handoff
+instead.
 
 ## Workspace and handoff precedence
 
@@ -111,8 +111,8 @@ Never rely on the inherited cwd. Every later repository shell command **MUST** b
 native filesystem tool paths **MUST** be absolute under that workspace. Do not create an
 isolated worktree, change the workspace topology, or mix another issue's work into it.
 Concurrent issues have disjoint workspaces; only the currently active phase mutates this
-one. After you complete and go idle, treat `$LEGION_WORKSPACE` as read-only: you are kept
-alive to answer questions, not to keep editing. Do not create new commits, run
+one. After you complete, treat `$LEGION_WORKSPACE` as read-only: a finished role is not running to
+answer questions or to keep editing. Do not create new commits, run
 `jj -R "$LEGION_WORKSPACE" new`, or touch tracked files once your own handoff is committed
 (and, for the implementer, pushed) — a code change belongs to whichever phase is active now.
 
@@ -165,7 +165,7 @@ other tree paused.
 
 ## Phase work
 
-Specifications written into Dispatch follow `skill://dispatch`'s [Writing a spec](../dispatch/SKILL.md#writing-a-spec).
+Specifications written into Dispatch follow `skill://dispatch`'s [Writing a spec](../dispatch/SKILL.md#writing-a-spec), except that a phase worker writes no decision block: it sends an open product, scope or design decision to its architect, which writes the block.
 
 Follow the repository's normal engineering workflow and the assigned issue's acceptance
 criteria. Your phase's own charter and the predecessor handoffs you read define the phase
@@ -303,8 +303,8 @@ line), the full definition of a proof, what the tester verifies, and the simplif
 
 - **Review threads** are disposed of one by one, never in bulk, and only an `Accepted:` from the
   thread's opener (or, on a bot's thread, from the Legion reviewer) closes one. The implementer
-  runs `legion threads resolve` before every push that answers a review, and the merger before
-  READY: `skill://legion-worker/references/review-threads.md`.
+  runs `legion threads resolve` after every push that answers a review, before its completion,
+  and the merger before READY: `skill://legion-worker/references/review-threads.md`.
 - **No deferrals.** A finding that changes
   behaviour, hides an error, or breaks a gate is fixed in this pull request; naming, duplication,
   or wording cleanup is batched into the one `Fast-follow:` line instead of iterating per push.
@@ -472,22 +472,20 @@ do:
 Quote the answer verbatim in what you tell the architect: with the run and phase it names, the
 difference between "my work is lost" and "my work belongs to the previous run" is visible.
 
-**Stay in this session afterward.** Your process does not exit when your phase completes;
-it goes idle in its pane, and after `worker_idle_retire_seconds` (default 600 s) idle with no
-active phase the daemon retires it — your next assignment resumes this same session from its
-session file, so it is still you. Other roles on this issue may reach you through Envoy with
-questions about the work you did — answer them, reading `$LEGION_WORKSPACE` and your own
-committed handoff as needed, without mutating anything (see Workspace and handoff
-precedence above). You will also be the one resumed, with a new prompt in this same
-session, if this phase's work needs to run again.
+**Stay in this session afterward.** Your process does not exit on its own when your phase
+completes: the daemon suspends it when it ends your phase, at the end of your turn, so a finished
+role is not running to answer questions. When the daemon starts your role again it resumes this
+same session from its session file, with a new prompt, so it is still you: you are the one resumed
+if this phase's work needs to run again. Re-read `$LEGION_WORKSPACE` and your own committed handoff
+then, without mutating anything until the new prompt asks for it (see Workspace and handoff
+precedence above).
 
-When blocked on lifecycle, scope, or cross-phase matters, `envoy_publish` the owning
-architect a concise message: issue, phase, verified observation, what you tried, and the
-decision required. Reach for `dispatch_ask` yourself only for a standalone human question
-outside that coordination.
+When blocked on a product, scope, design, lifecycle, or cross-phase decision, `envoy_publish` the
+owning architect a concise message: issue, phase, verified observation, what you tried, and the
+decision required.
 
-Never yield while blocked on a decision someone else owns. Before you stop, make the block
-visible where its owner will see it: a lifecycle, scope, or cross-phase decision goes to the
-owning architect as above, and a standalone human question goes in `dispatch_ask`. Otherwise
-proceed: proceeding is the default, and a phase that stops silently holds its issue until
-someone notices.
+Never yield while blocked on a decision someone else owns. Before you stop, make the block visible
+where its owner will see it: a product, scope, design, lifecycle, or cross-phase decision goes to
+the owning architect as above, and a standalone human to-do goes in `dispatch_ask`. Otherwise
+proceed: proceeding is the default, and a phase that stops silently holds its issue until someone
+notices.

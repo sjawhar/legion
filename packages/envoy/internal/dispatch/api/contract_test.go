@@ -38,7 +38,6 @@ import (
 	brokerstoretest "github.com/sjawhar/envoy/internal/broker/store/storetest"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
-	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
@@ -112,10 +111,10 @@ secrets:
 		Store: dispatchDB, Events: events.NewBroker(), ServerURL: "https://dispatch.example", Settle: 20 * time.Millisecond,
 	})
 	t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
-	allowed := map[string]struct{}{contractApprover: {}, contractOther: {}}
+	seedPeople(t, dispatchDB, contractApprover, contractOther)
 	deps, err := NewDeps(DepsInput{
-		Store: dispatchDB, Identity: identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: allowed},
-		AllowedLogins: allowed, ServerURL: "https://dispatch.example", Docs: documentService, Events: events.NewBroker(),
+		Store: dispatchDB, Identity: headerIdentity(dispatchDB),
+		ServerURL: "https://dispatch.example", Docs: documentService, Events: events.NewBroker(),
 		AgentSecretsURL: brokerServer.URL, AgentSecretsToken: contractUIToken,
 	})
 	if err != nil {

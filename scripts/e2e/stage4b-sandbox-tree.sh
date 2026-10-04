@@ -9,7 +9,8 @@
 # Requirement 12 asks for.
 #
 # Three roots are set todo under admission_cap 2. Tree 1 runs the whole workflow with real agents to
-# `done`, lingers, and closes. Tree 2 runs through its planner beside tree 1's implementer, on its own
+# `done`, through one changes-requested review round whose thread the reviewer opens, lingers, and
+# closes. Tree 2 runs through its planner beside tree 1's implementer, on its own
 # node, carrying the repository-configuration fixture, and is then moved to backlog. Tree 3 is
 # admitted when tree 2 leaves the line, supplies the held phase the controller checkpoint needs, and
 # is taken out from an operator shell. Tree 4 is admitted once tree 3 has left, supplies a planner
@@ -343,6 +344,19 @@ record_pair() {
   printf '%s\n' "$(basename "$pair_session" .jsonl)" >"$evidence/review-pair/session-stem"
   pair_recorded=1
 }
+# reviewer_decision CHANGES writes `approve` to $work/review-decision once legion-reviewer[bot] has
+# approved the pull request's head, or `changes` once it has posted CHANGES reviews requesting
+# changes, and fails while it has done neither. The wait's own poll records what it saw, so a head
+# that moves after the approval (retro's commit) cannot change the answer.
+reviewer_decision() {
+  if reviewer_approved_head; then
+    echo approve >"$work/review-decision"
+  elif reviewer_requested_changes "$1"; then
+    echo changes >"$work/review-decision"
+  else
+    return 1
+  fi
+}
 claim_session_file() {
   "$work/legion" claims list --json --config "$work/legion.yaml" --operator-token-file "$work/operator-token" |
     jq -er --arg issue "$1" --arg role "$2" \
@@ -519,7 +533,28 @@ create_providers_secret() {
   rm -f "$seed_file"
   note "[operator] Secret $providers_secret: NATS_NKEY_SEED from the operator's seed, label legion.dev/project=$run_label"
 }
+# ports_free fails naming the holder when anything listens on the daemon's API or worker-stream
+# port.
+ports_free() {
+  local port
+  for port in "$port_daemon" "$port_worker_stream"; do
+    [ -z "$(ss -Hltn "sport = :$port")" ] || fail "port $port is taken on the devbox: $(ss -Hltnp "sport = :$port")"
+  done
+}
+# ports_ours fails naming the holder unless the run's daemon listens on both ports: a /healthz
+# answer says only that something on $host:$port_daemon answers.
+ports_ours() {
+  local port holder
+  for port in "$port_daemon" "$port_worker_stream"; do
+    holder=$(ss -Hltnp "sport = :$port")
+    [[ $holder == *"pid=$daemon_pid,"* ]] ||
+      fail "port $port is held by another process, not the run's daemon (pid $daemon_pid): ${holder:-nothing listens}"
+  done
+}
 start_daemon() {
+  # Prerequisites found both ports free, minutes before this boot; a process that took one since
+  # would answer /healthz in the run's daemon's place.
+  ports_free
   env -u GH_PUBLIC_REPO_PAT -u LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 -u GH_AGENT_APP_PRIVATE_KEY_B64 \
     -u GH_REVIEW_APP_PRIVATE_KEY_B64 "$work/legion" start --config "$work/legion.yaml" >>"$daemon_log" 2>&1 9>&- 7>&- &
   daemon_pid=$!
@@ -528,10 +563,17 @@ start_daemon() {
   until_true 900 "the Go daemon to boot and answer /healthz" daemon_answers_or_exited
   timeout_hook=
   kill -0 "$daemon_pid" 2>/dev/null || fail "the Go daemon exited before it answered /healthz: $(tail -3 "$daemon_log" | cut -c1-300 | tr '\n' ' ')"
+  ports_ours
 }
 daemon_answers_or_exited() { ! kill -0 "$daemon_pid" 2>/dev/null || curl -fsS "http://$host:$port_daemon/healthz"; }
 report_boot() { note "the daemon log's tail: $(tail -5 "$daemon_log" | cut -c1-300)"; }
 log_lines() { jq -R -c --arg m "$1" 'fromjson? | select(.msg == $m)' "$daemon_log"; }
+# left_planning ISSUE prints when and for what ISSUE first left planning, from the daemon's log, and
+# fails when it has not.
+left_planning() {
+  log_lines "workflow: phase changed" |
+    jq -s -e -c --arg issue "$1" 'map(select(.issue == $issue and .from == "planning")) | first // empty | {time, to}'
+}
 
 # ---- the pod watch (checkpoint pod-watch) ---------------------------------------------------------
 
@@ -1387,9 +1429,7 @@ mkdir -p "$(dirname "$lock")"
 exec 9>"$lock"
 flock -n 9 || fail "another Stage 4b run holds $lock: one run at a time"
 refuse_leftovers legion-e2e4b
-for port in "$port_daemon" "$port_worker_stream"; do
-  [ -z "$(ss -Hltn "sport = :$port")" ] || fail "port $port is taken on the devbox: $(ss -Hltnp "sport = :$port")"
-done
+ports_free
 imds=$(curl -sf -m 5 -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 60') ||
   fail "instance metadata is unreachable; the daemon binds the devbox's private address, read from it"
 host=$(curl -sf -m 5 -H "X-aws-ec2-metadata-token: $imds" http://169.254.169.254/latest/meta-data/local-ipv4) || fail "instance metadata has no local-ipv4"
@@ -1639,7 +1679,7 @@ gate_open() {
 # (lib/design-gate-verdict.jq): its approval request at the approved version carries a summary after
 # "Approve <name> (version N)?", a human answered at least one of the spec's decision blocks, and no
 # approval request it made on the spec named a version holding one open or came before a human
-# answered one.
+# answered one raised before the human's turn on that request.
 drive_gated_spec() {
   local issue=$1 artifact approved asks events version verdict request early blocks requested_versions
   local -a requested=()
@@ -1672,7 +1712,7 @@ drive_gated_spec() {
   [ "$early" = "[]" ] || fail "$issue: approval was requested before the spec's decision blocks were settled: $early"
   blocks=$(jq .blocks <<<"$verdict")
   [ "$blocks" -gt 0 ] || fail "$issue: a human answered none of the spec's decision blocks, so its open choice was never settled as one ($evidence/$issue-asks.json)"
-  note "$issue: a human answered $blocks of the spec's decision blocks, and every approval hand-back came after those answers on a version with none open"
+  note "$issue: a human answered $blocks of the spec's decision blocks, and no approval hand-back named a version with one open or came before the answer to one raised before the human's turn on it"
   note "$issue: the approval request at version $approved asked: $request"
   wait_for_phase "$issue" planning
 }
@@ -1696,7 +1736,15 @@ wait_for_worker "$tree1" planner
 send_agent "$tree1" planner "Stage 4b proof planning operation: write the required .legion/plan.json handoff for the one-file smoke change, then call the legion tool's handoff_complete with a concise summary. Do not start another role."
 wait_for_phase "$tree1" implementing 900
 wait_for_worker "$tree1" implementer
-wait_for_worker "$tree2" planner
+# Tree 2's planner holds for the driver, which has sent it nothing yet, and the checkpoints below
+# read its live pod. A planner that took the daemon's task line as its go-ahead has planned and been
+# suspended by now, so it never reads as live: name that rather than time out on its registration.
+tree2_planner_live_or_gone() { issue_worker_live "$tree2" planner || left_planning "$tree2" >/dev/null; }
+until_true 300 "planner worker on $tree2 to register" tree2_planner_live_or_gone
+if left=$(left_planning "$tree2"); then
+  fail "tree 2's planner did not hold for the driver's instruction: $tree2 left planning on its own ($left) before the driver sent it anything"
+fi
+assert_claim_endpoints "$tree2" planner
 node_of_tree() { op get pods -l "legion.dev/project=$run_label,legion.dev/tree=$1" -o jsonpath='{range .items[*]}{.spec.nodeName}{"\n"}{end}' | sort -u; }
 at=$(date -u +%FT%TZ)
 nodes1=$(node_of_tree "$tree1")
@@ -1787,12 +1835,12 @@ wait_for_worker "$tree1" reviewer
 # The daemon leaves the issue in reviewing and tells the architect, naming the head. The proof's
 # instructions hold every agent until a targeted message gives its next operation, so the driver
 # then tells the architect only to handle that notice as its role says, naming no topic, head or
-# decision: the architect takes those from the notice, asks the reviewer for the decision over
-# Envoy, and the reviewer's approval ends the round. The proof asks the reviewer nothing more, and
-# counts only messages the architect sent after the reviewer's completion. An architect acting on
+# decision: the architect takes those from the notice and asks the reviewer for the decision over
+# Envoy. The requested correction then starts another implementer/tester/reviewer cycle.
+# The proof counts only messages the architect sent after the reviewer's completion. An architect acting on
 # the notice unprompted, as it must where no driver holds it, is not what this checkpoint proves
 # (LEGION-413).
-send_agent "$tree1" reviewer "Stage 4b proof review operation: review pull request #$pr_number in $repo as your role requires, running the deep and code-quality review passes your instructions name as task subagents. This round deliberately proves what the daemon does with a round no review decides: submit your review as legion-reviewer[bot] as a COMMENT review, never APPROVE or REQUEST_CHANGES, take the round's other steps in the order your role gives, and complete the reviewer handoff. Submit no other review until you are asked for the round's decision; when you are, your decision is APPROVE."
+send_agent "$tree1" reviewer "Stage 4b proof review operation: review pull request #$pr_number in $repo as your role requires, running the deep and code-quality review passes your instructions name as task subagents. This round deliberately proves what the daemon does with a round no review decides: submit your review as legion-reviewer[bot] as a COMMENT review with no inline comment, never APPROVE or REQUEST_CHANGES, take the round's other steps in the order your role gives, and complete the reviewer handoff. Submit no other review until you are asked for the round's decision; when you are, your decision is REQUEST_CHANGES with exactly one inline comment, on the last line of $smoke_file, asking for the line \`$(round_line 1)\` to be appended below the lines already there. The spec permits that correction. Your completion is already recorded: submit that decision on the completed handoff's head without writing another handoff or calling handoff_complete again. This exact smoke instruction takes precedence over your own review."
 pair_session=$(claim_session_file "$tree1" reviewer) || fail "the reviewer on $tree1 has no session file"
 until_true 1800 "the reviewer's two thermonuclear dispatches to reach an outcome" pair_settled
 record_pair || fail "the reviewer's session and its review pair could not be recorded"
@@ -1829,15 +1877,63 @@ architect_asked() { [ "$(architect_messages "$tree1" reviewer)" -gt "$asked_befo
 until_true 900 "$tree1's architect, sent the review-stuck operation, to ask the reviewer for the round's decision" architect_asked
 notice_line "$tree1" reviewer "notifications.role.$(claim_token "$tree1" architect)" | tail -n +"$((asked_before + 1))" >"$evidence/architect-ask.jsonl"
 [ "$asked_unprompted" -le "$asked_before" ] || note "the architect asked the reviewer before the driver's message"
-until_true 1800 "legion-reviewer[bot] approval of pull request #$pr_number at its head" reviewer_approved_head
-note "the architect asked the reviewer over Envoy (kept in $evidence/architect-ask.jsonl), and the reviewer's approval of the head ended the round"
+until_true 1800 "legion-reviewer[bot]'s round 1 decision on pull request #$pr_number" reviewer_decision 1
+[ "$(<"$work/review-decision")" = changes ] || fail "the reviewer approved pull request #$pr_number in round 1, which the proof asked to request changes"
+wait_for_phase "$tree1" implementing 1200
+assert_handoff_committer "$tree1" reviewer reviewing 1
+assert_review_of_own_handoff "$tree1" 1 CHANGES_REQUESTED
+thread_id=$(reviewer_thread 2>"$work/reviewer-thread.err") ||
+  fail "the reviewer's round 1 review did not leave one thread of its own: $(cat "$work/reviewer-thread.err")"
+note "the reviewer's round 1 review opened one thread, $thread_id"
+wait_for_worker "$tree1" implementer
+send_agent "$tree1" implementer "Stage 4b proof correction round 1: make the correction the review names (append the line \`$(round_line 1)\` to $smoke_file), push it to pull request #$pr_number, answer the review's thread as your role says, write the implementation handoff, then call the legion tool's handoff_complete: a push alone does not finish this round."
+wait_for_phase "$tree1" testing 1200
+until_true 120 "round 1's correction on pull request #$pr_number" round_correction_pushed 1
+assert_round_handoff "$tree1" 1
+assert_handoff_committer "$tree1" implementer implementing 1
+review_thread "$thread_id" >"$evidence/review-thread-after-correction.json" ||
+  fail "read the reviewer's thread $thread_id after the correction round"
+note "after the correction round the reviewer's thread reads isResolved $(jq -r .isResolved "$evidence/review-thread-after-correction.json"), newest comment by $(jq -r '[.comments[] | select(.state == "SUBMITTED")] | last | .author' "$evidence/review-thread-after-correction.json")"
+wait_for_worker "$tree1" tester
+send_agent "$tree1" tester "Stage 4b proof retest round 1: verify the correction on pull request #$pr_number, write the tester handoff with verdict pass, and complete the phase."
+wait_for_phase "$tree1" reviewing 1200
+assert_handoff_committer "$tree1" tester testing 1
+wait_for_worker "$tree1" reviewer
+# The re-review's decision is the reviewer's own: the proof names the head, never the verdict.
+send_agent "$tree1" reviewer "Stage 4b proof re-review: review pull request #$pr_number in $repo as your role requires, the thread your round 1 review opened included. The decision is yours; take the round's steps in the order your role gives, and complete the reviewer handoff."
+until_true 1800 "legion-reviewer[bot]'s re-review decision on pull request #$pr_number" reviewer_decision 2
+# Read the thread at once: nothing resolves it between the approval and the merger's run.
+decision=$(<"$work/review-decision")
+review_thread "$thread_id" >"$evidence/review-thread-at-approval.json" ||
+  fail "read the reviewer's thread $thread_id when its re-review decision landed"
+[ "$decision" = approve ] ||
+  fail "the reviewer requested changes again on its re-review of pull request #$pr_number; its thread then read $(jq -c . "$evidence/review-thread-at-approval.json")"
+note "the reviewer approved pull request #$pr_number at its head; its thread then read isResolved $(jq -r .isResolved "$evidence/review-thread-at-approval.json")"
 until_true 900 "$tree1 to leave reviewing for retro" issue_phase_in "$tree1" retro merging
 if issue_phase "$tree1" retro >/dev/null; then
   wait_for_worker "$tree1" implementer
   send_agent "$tree1" implementer "Stage 4b proof retro: write the required retro handoff for pull request #$pr_number and complete the phase. Do not change the approved implementation."
 fi
 wait_for_phase "$tree1" merging 1800
-note "$tree1 moved planner → implementer → tester → reviewer → retro → merging with real agents; $repo#$pr_number changes $smoke_file"
+note "$tree1 moved planner → implementer → tester → reviewer (changes requested) → implementer → tester → reviewer (approved) → retro → merging with real agents; $repo#$pr_number changes $smoke_file"
+pass
+
+begin review-thread
+# The reviewer approved without waiting for its thread to resolve (LEGION-316): when the approval
+# landed, the thread it opened in round 1 carried its own Accepted: as the newest submitted comment
+# and still read isResolved false, since only the pull request author's App resolves it and the
+# implementer's last run came before the acceptance. tree-moved recorded the thread then.
+thread_accepted_unresolved "$evidence/review-thread-at-approval.json" ||
+  fail "when the reviewer approved, its thread $thread_id read $(jq -c . "$evidence/review-thread-at-approval.json"), want isResolved false and its newest submitted comment the reviewer's Accepted:"
+# Controls: the same record resolved (an approval that waited for the resolution), and with the
+# implementer's reply as its newest comment (an approval before the reviewer accepted), both fail.
+jq '.isResolved = true' "$evidence/review-thread-at-approval.json" >"$evidence/review-thread-resolved-negative.json"
+expect_failure review-thread-resolved-at-approval thread_accepted_unresolved "$evidence/review-thread-resolved-negative.json"
+jq '.comments += [{author: "legion-implementer", body: "Fixed in 0000000: the line is appended.", state: "SUBMITTED"}]' \
+  "$evidence/review-thread-at-approval.json" >"$evidence/review-thread-unaccepted-negative.json"
+expect_failure review-thread-not-accepted thread_accepted_unresolved "$evidence/review-thread-unaccepted-negative.json"
+thread_accepted_unresolved "$evidence/review-thread-at-approval.json" || fail "the thread record failed its own check after its controls"
+note "the reviewer's thread $thread_id read isResolved false with its Accepted: newest when the approval landed: $(jq -r '[.comments[] | select(.state == "SUBMITTED")] | last | .body | split("\n")[0]' "$evidence/review-thread-at-approval.json")"
 pass
 
 begin completion-closed
@@ -2364,6 +2460,27 @@ begin "done"
 wait_for_worker "$tree1" merger
 send_agent "$tree1" merger "Stage 4b proof READY operation: verify pull request #$pr_number is ready to merge and call the legion tool's handoff_complete with ready true."
 wait_for_phase "$tree1" awaiting_merge 900
+# READY is posted with no review thread left unresolved at the head: the merger's legion threads
+# resolve, the run the reviewer's approval leaves the last round's acceptances to, closed the
+# reviewer's thread, and nothing else is open for the queue's unresolved-thread gate to count.
+ready_packet() {
+  dispatch_events "$tree1" | jq -er --arg ready "READY #$pr_number at " \
+    '[.[] | select(.type == "message.created" and (.payload.body | startswith($ready))) | .payload.body] | last | select(. != null)'
+}
+until_true 300 "the daemon's READY packet for pull request #$pr_number on $tree1" ready_packet
+ready_packet >"$evidence/ready-packet.txt"
+ready_head=$(timeout 60 gh api "repos/$repo/pulls/$pr_number" --jq .head.sha) || fail "read pull request #$pr_number's head"
+ready_sha=$(sed -n '1s/^READY #[0-9]* at \([0-9a-f]\{7,40\}\) .*/\1/p' "$evidence/ready-packet.txt")
+[ -n "$ready_sha" ] && [ "${ready_head#"$ready_sha"}" != "$ready_head" ] ||
+  fail "the READY packet's first line names '${ready_sha:-no sha}', not pull request #$pr_number's head $ready_head: $(head -1 "$evidence/ready-packet.txt")"
+review_threads >"$evidence/review-threads-at-ready.json" || fail "read pull request #$pr_number's review threads at READY"
+threads_all_resolved "$evidence/review-threads-at-ready.json" "$thread_id" ||
+  fail "READY was posted at $ready_head with review threads unresolved: $(jq -c '[.[] | select(.isResolved | not) | {id, newest: ([.comments[] | select(.state == "SUBMITTED")] | last | .author)}]' "$evidence/review-threads-at-ready.json"), or without the reviewer's thread $thread_id"
+# Control: the same record with the reviewer's thread unresolved fails.
+jq --arg id "$thread_id" 'map(if .id == $id then .isResolved = false else . end)' \
+  "$evidence/review-threads-at-ready.json" >"$evidence/review-threads-unresolved-negative.json"
+expect_failure unresolved-thread-at-ready threads_all_resolved "$evidence/review-threads-unresolved-negative.json" "$thread_id"
+note "READY #$pr_number was posted at $ready_head with $(jq length "$evidence/review-threads-at-ready.json") review threads, 0 unresolved, the reviewer's $thread_id resolved"
 # The hold is an open descriptor (hold_smoke_main): start no background child before
 # release_smoke_main below, or it inherits the descriptor and holds the smoke main past this run's
 # window. `9>&- 7>&-` does not close it: its number is allocated at runtime, not fixed.
