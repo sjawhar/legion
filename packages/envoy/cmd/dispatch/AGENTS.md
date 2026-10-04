@@ -120,6 +120,12 @@ text (surviving edges keep their provenance, orphan sources are deleted), and pr
 reads `DATABASE_URL` and the envoy config's `dispatch.server_url`, refusing an empty URL because
 dashboard-URL mentions are recognised only against it.
 
+Document mention edges store the first containing block's id and markdown excerpt, and the
+reference route reads them without loading citing document rooms. A row with `excerpt_ready`
+false falls back to the live document; the server's boot-time background pass
+(`docs.BackfillReferenceExcerpts`, 100 documents per pass) and `envoy-dispatch
+backfill-reference-excerpts` fill those rows.
+
 ## Identity
 
 `internal/dispatch/identity` is the human identity boundary. Handlers resolve

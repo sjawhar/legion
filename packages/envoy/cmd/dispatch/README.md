@@ -471,6 +471,18 @@ provenance, edges of deleted sources are removed) and prints
 `dispatch.server_url` from the envoy config the same way the server does and refuses an empty
 value: dashboard-URL mentions are recognised only against it, so an empty URL would drop them all.
 
+Document mentions also store their first containing block's id and canonical markdown excerpt, so
+backlink reads do not load every citing document. At boot the server fills rows that predate this
+in the background, at most 100 documents per pass; until a row is filled, its excerpt is read from
+the live document as before. To run the same pass on demand, for example after `rebuild-refs`:
+
+```bash
+DATABASE_URL=postgres://... envoy-dispatch backfill-reference-excerpts
+```
+
+The command stamps missing document block IDs, stores each pending document edge's excerpt, and
+prints `<artifact-id> references=N` per document.
+
 ## Search
 
 Migration 0010 added stored generated `search` columns. Migrations `0057`–`0061` made them

@@ -370,14 +370,27 @@ func (s *server) storeArtifact(
 	var documentChanges model.ReferenceChanges
 	var movedEvents []model.Event
 	if kind == "doc" {
+		var excerptBlocks []model.ArtifactBlock
 		if created {
-			documentMarkdown, err = s.deps.Docs.SeedText(documentCtx, artifact.ID, string(input.content), actor)
+			documentMarkdown, excerptBlocks, err = s.deps.Docs.SeedTextWithBlocks(
+				documentCtx,
+				artifact.ID,
+				string(input.content),
+				actor,
+			)
 		} else {
 			documentMarkdown, err = s.deps.Docs.ReplaceText(documentCtx, artifact.ID, string(input.content), actor)
 		}
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
+		}
+		if !created {
+			_, excerptBlocks, err = s.deps.Docs.TextWithBlocks(documentCtx, artifact.ID)
+			if err != nil {
+				s.writeHandlerError(w, err)
+				return
+			}
 		}
 		if err := tx.QueryRow(r.Context(), `
 			insert into artifact_versions (artifact_id, number, markdown, authors, named, summary, doc_update_version)
@@ -389,7 +402,14 @@ func (s *server) storeArtifact(
 			s.writeHandlerError(w, err)
 			return
 		}
-		documentChanges, err = s.replaceReferences(r.Context(), tx, "artifact", artifact.ID, documentMarkdown)
+		documentChanges, err = refs.ReplaceDocumentCounted(
+			r.Context(),
+			tx,
+			artifact.ID,
+			documentMarkdown,
+			excerptBlocks,
+			s.deps.ServerURL,
+		)
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return

@@ -729,6 +729,21 @@ func TestRebuildRefsRefusesWithoutServerURL(t *testing.T) {
 	}
 }
 
+func TestBackfillReferenceExcerptsRefusesWithoutRequiredConfiguration(t *testing.T) {
+	var output bytes.Buffer
+	if code := backfillReferenceExcerpts(context.Background(), "postgres://unused", "  ", &output); code != 1 {
+		t.Fatalf("backfill-reference-excerpts without server URL exited %d, want 1", code)
+	}
+	if !strings.Contains(output.String(), "dispatch.server_url is required") {
+		t.Fatalf("backfill-reference-excerpts refusal = %q", output.String())
+	}
+	output.Reset()
+	if code := backfillReferenceExcerpts(context.Background(), "", "https://dispatch.example", &output); code != 1 ||
+		!strings.Contains(output.String(), "DATABASE_URL is required") {
+		t.Fatalf("backfill-reference-excerpts without DATABASE_URL: code=%d output=%q", code, output.String())
+	}
+}
+
 // An argument envoy-dispatch does not know is refused, never served: the server migrates the
 // database at boot, so `envoy-dispatch census` on an image that predates the subcommand would
 // otherwise apply the very migrations the census was to inspect.

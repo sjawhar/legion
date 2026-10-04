@@ -278,6 +278,30 @@ func main() {
 	// A settlement a shutdown cut short, here or in the task this one replaces, runs without
 	// anyone opening its document.
 	go documentService.RunSettlementResumption(ctx)
+	go func() {
+		for {
+			reports, err := documentService.BackfillReferenceExcerpts(ctx)
+			if err != nil {
+				if ctx.Err() == nil {
+					slog.Error("dispatch: backfill reference excerpts", "error", err)
+				}
+				return
+			}
+			for _, report := range reports {
+				if report.Err != nil {
+					slog.Warn("dispatch: reference excerpt backfill skipped document", "artifact_id", report.ArtifactID, "error", report.Err)
+				}
+			}
+			if len(reports) < docs.ReferenceExcerptBackfillBatch {
+				return
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(time.Second):
+			}
+		}
+	}()
 
 	sweeper, err := webhookSweeper(natsClient, appCfg, boot.GitHubAPIBase)
 	if err != nil {
@@ -809,6 +833,9 @@ var subcommands = []subcommand{
 	{"backfill-anchor-blocks", func(ctx context.Context, _ []string, env settingValues, stdout, _ io.Writer) int {
 		return backfillAnchorBlocks(ctx, env.get("DATABASE_URL"), stdout)
 	}},
+	{"backfill-reference-excerpts", func(ctx context.Context, _ []string, env settingValues, stdout, _ io.Writer) int {
+		return backfillReferenceExcerpts(ctx, env.get("DATABASE_URL"), loadServerURL(env), stdout)
+	}},
 	{"rebuild-refs", func(ctx context.Context, _ []string, env settingValues, stdout, _ io.Writer) int {
 		return rebuildRefs(ctx, env.get("DATABASE_URL"), loadServerURL(env), stdout)
 	}},
@@ -919,6 +946,48 @@ func backfillAnchorBlocks(ctx context.Context, databaseURL string, out io.Writer
 		return 1
 	}
 	writeAnchorBlockBackfillReport(out, result)
+	return 0
+}
+
+func backfillReferenceExcerpts(ctx context.Context, databaseURL, serverURL string, out io.Writer) int {
+	if strings.TrimSpace(databaseURL) == "" {
+		fmt.Fprintln(out, "backfill-reference-excerpts: DATABASE_URL is required")
+		return 1
+	}
+	if strings.TrimSpace(serverURL) == "" {
+		fmt.Fprintln(out, "backfill-reference-excerpts: dispatch.server_url is required to recognise dashboard URLs")
+		return 1
+	}
+	database, ok := openMigrated(ctx, "backfill-reference-excerpts", databaseURL, out)
+	if !ok {
+		return 1
+	}
+	defer database.Pool.Close()
+	service := docs.New(docs.Deps{Store: database, Events: events.NewBroker(), ServerURL: serverURL})
+	defer service.Shutdown(context.Background())
+	blockIDs, err := service.BackfillBlockIDs(ctx)
+	if err != nil {
+		fmt.Fprintf(out, "backfill-reference-excerpts: stamp document blocks: %v\n", err)
+		return 1
+	}
+	for _, report := range blockIDs {
+		if report.Err != nil {
+			fmt.Fprintf(out, "backfill-reference-excerpts: stamp document %s: %v\n", report.ArtifactID, report.Err)
+			return 1
+		}
+	}
+	reports, err := service.BackfillReferenceExcerpts(ctx)
+	if err != nil {
+		fmt.Fprintf(out, "backfill-reference-excerpts: %v\n", err)
+		return 1
+	}
+	for _, report := range reports {
+		if report.Err != nil {
+			fmt.Fprintf(out, "backfill-reference-excerpts: document %s: %v\n", report.ArtifactID, report.Err)
+			return 1
+		}
+		fmt.Fprintf(out, "%s references=%d\n", report.ArtifactID, report.References)
+	}
 	return 0
 }
 

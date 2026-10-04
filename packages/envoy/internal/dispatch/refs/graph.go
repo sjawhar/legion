@@ -87,17 +87,20 @@ type resolvedEdge struct {
 }
 
 type edgeRow struct {
-	kind      string
-	otherKind string
-	otherID   string
-	createdAt time.Time
-	sourceSeq *int64
+	kind           string
+	otherKind      string
+	otherID        string
+	createdAt      time.Time
+	sourceSeq      *int64
+	excerptBlockID string
+	excerptText    string
+	excerptReady   bool
 }
 
 // Edges reads a node's edges from graph_edges, newest first, with the other end of each
 // resolved to a node and an excerpt of its text. An edge whose other end no longer exists is
-// omitted. Document mentions carry the source's name as excerpt; the API replaces it with the
-// containing block.
+// omitted. Incoming document mentions replace the source-name fallback with their stored
+// containing-block excerpt.
 func Edges(ctx context.Context, q Queryer, query Query) ([]model.GraphEdge, error) {
 	resolved, err := resolveEdges(ctx, q, query)
 	if err != nil {
@@ -138,6 +141,14 @@ func resolveEdges(ctx context.Context, q Queryer, query Query) ([]resolvedEdge, 
 		if node.text != "" {
 			edge.Excerpt = &model.GraphExcerpt{Text: text.HeadRunes(node.text, excerptRunes)}
 		}
+		if query.Direction == "in" && row.kind == "mentions" && row.otherKind == "artifact" &&
+			!row.excerptReady {
+			edge.ExcerptPending = true
+		}
+		if query.Direction == "in" && row.kind == "mentions" && row.otherKind == "artifact" &&
+			row.excerptReady && row.excerptText != "" {
+			edge.Excerpt = &model.GraphExcerpt{BlockID: row.excerptBlockID, Text: row.excerptText}
+		}
 		edges = append(edges, edge)
 	}
 	return edges, nil
@@ -148,9 +159,13 @@ func readEdgeRows(ctx context.Context, q Queryer, query Query) ([]edgeRow, error
 	args := []any{query.Kind, query.ID}
 	switch query.Direction {
 	case "in":
-		sql.WriteString(`select kind, from_kind, from_id, created_at, source_seq from graph_edges where to_kind = $1 and to_id = $2`)
+		sql.WriteString(`select kind, from_kind, from_id, created_at, source_seq,
+			excerpt_block_id, excerpt_text, excerpt_ready
+			from graph_edges where to_kind = $1 and to_id = $2`)
 	case "out":
-		sql.WriteString(`select kind, to_kind, to_id, created_at, source_seq from graph_edges where from_kind = $1 and from_id = $2`)
+		sql.WriteString(`select kind, to_kind, to_id, created_at, source_seq,
+			excerpt_block_id, excerpt_text, excerpt_ready
+			from graph_edges where from_kind = $1 and from_id = $2`)
 	default:
 		return nil, fmt.Errorf("reference direction %q must be in or out", query.Direction)
 	}
@@ -175,7 +190,16 @@ func readEdgeRows(ctx context.Context, q Queryer, query Query) ([]edgeRow, error
 	edges := []edgeRow{}
 	for rows.Next() {
 		var row edgeRow
-		if err := rows.Scan(&row.kind, &row.otherKind, &row.otherID, &row.createdAt, &row.sourceSeq); err != nil {
+		if err := rows.Scan(
+			&row.kind,
+			&row.otherKind,
+			&row.otherID,
+			&row.createdAt,
+			&row.sourceSeq,
+			&row.excerptBlockID,
+			&row.excerptText,
+			&row.excerptReady,
+		); err != nil {
 			return nil, fmt.Errorf("scan graph edge: %w", err)
 		}
 		edges = append(edges, row)

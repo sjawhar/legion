@@ -1073,12 +1073,13 @@ type GraphExcerpt struct {
 // the other end, Direction is "in" for edges pointing at the queried node and "out" for edges
 // it writes. SourceSeq is the events.id that introduced a mention; nil for structural edges.
 type GraphEdge struct {
-	Kind      string        `json:"kind"`
-	Direction string        `json:"direction"`
-	Node      GraphNode     `json:"node"`
-	Excerpt   *GraphExcerpt `json:"excerpt,omitempty"`
-	CreatedAt time.Time     `json:"created_at"`
-	SourceSeq *int64        `json:"source_seq"`
+	Kind           string        `json:"kind"`
+	Direction      string        `json:"direction"`
+	Node           GraphNode     `json:"node"`
+	Excerpt        *GraphExcerpt `json:"excerpt,omitempty"`
+	ExcerptPending bool          `json:"-"`
+	CreatedAt      time.Time     `json:"created_at"`
+	SourceSeq      *int64        `json:"source_seq"`
 }
 
 // GraphReferences is the read of one node's edges, newest first.

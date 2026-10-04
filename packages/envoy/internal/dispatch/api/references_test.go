@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -57,6 +59,16 @@ func issueReferencesRequest(t *testing.T, handler http.Handler, issueKey, etag s
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	return response
+}
+
+type noTextWithBlocksDocs struct {
+	docs.API
+	called bool
+}
+
+func (d *noTextWithBlocksDocs) TextWithBlocks(context.Context, string) (string, []model.ArtifactBlock, error) {
+	d.called = true
+	return "", nil, errors.New("reference reads must not render documents")
 }
 
 func TestIssueReferencesClosureDepthViaAndETag(t *testing.T) {
@@ -301,6 +313,63 @@ func TestReferencesReadBacklinksAcrossProjectsWithProvenance(t *testing.T) {
 		if response.Code != tc.status || !strings.Contains(response.Body.String(), `"code":"`+tc.code+`"`) {
 			t.Errorf("%s: status=%d body=%s; want %d %s", name, response.Code, response.Body.String(), tc.status, tc.code)
 		}
+	}
+}
+
+func TestReferencesReadDocumentExcerptsFromStoredData(t *testing.T) {
+	handler, _, deps := newTestServer(t, testServerOptions{})
+	createReferenceAPIProject(t, handler, "CORE")
+	createReferenceAPIProject(t, handler, "OPS")
+	target := createReferenceAPIIssue(t, handler, "CORE")
+	source := createProjectDocument(t, handler, "OPS", "Source notes",
+		"Opening context.\n\nThis source cites dispatch://"+target.Key+".\n")
+
+	if _, err := deps.Store.Pool.Exec(context.Background(), `
+		update refs set excerpt_ready = false
+		where from_kind = 'artifact' and from_id = $1
+	`, source.ID); err != nil {
+		t.Fatalf("mark source excerpt unprepared: %v", err)
+	}
+	fallbackFound := false
+	for _, edge := range graphEdges(t, handler, url.Values{"to": {"dispatch://" + target.Key}}).Edges {
+		if edge.Kind != "mentions" || edge.Node.ID != source.ID {
+			continue
+		}
+		if edge.Excerpt == nil || edge.Excerpt.BlockID == "" ||
+			edge.Excerpt.Text != "This source cites dispatch://"+target.Key+"." {
+			t.Fatalf("unprepared document mention excerpt = %#v", edge.Excerpt)
+		}
+		fallbackFound = true
+		break
+	}
+	if !fallbackFound {
+		t.Fatal("unprepared document mention was absent")
+	}
+	if _, err := deps.Store.Pool.Exec(context.Background(), `
+		update refs set excerpt_ready = true
+		where from_kind = 'artifact' and from_id = $1
+	`, source.ID); err != nil {
+		t.Fatalf("restore stored excerpt: %v", err)
+	}
+
+	wrappedDocs := &noTextWithBlocksDocs{API: deps.Docs}
+	deps.Docs = wrappedDocs
+	storedDataHandler := http.NewServeMux()
+	Register(storedDataHandler, deps)
+
+	incoming := graphEdges(t, storedDataHandler, url.Values{"to": {"dispatch://" + target.Key}})
+	var excerpt *model.GraphExcerpt
+	for _, edge := range incoming.Edges {
+		if edge.Kind == "mentions" && edge.Node.ID == source.ID {
+			excerpt = edge.Excerpt
+			break
+		}
+	}
+	if excerpt == nil || excerpt.BlockID == "" || excerpt.Text != "This source cites dispatch://"+target.Key+"." {
+		t.Fatalf("stored document mention excerpt = %#v", excerpt)
+	}
+	if wrappedDocs.called {
+		t.Fatal("GET /api/v1/references rendered a citing document")
 	}
 }
 
