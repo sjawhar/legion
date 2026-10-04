@@ -4,12 +4,19 @@ import type { IssueProgress, ProgressCount } from "../../api/types";
 import { pillClassName } from "../../components/Pill";
 import { progressBarFill, surfaceMutedStrongBg, textSecondaryOnSurface } from "../../theme/classes";
 
-/** What a count means, for the chip's `title`. */
+/** The noun a count is written with: `1/1 task`, `3/7 tasks`, `0/1 child`, `2/5 children`. */
+function countNoun(total: number, noun: "tasks" | "children"): string {
+  if (total === 1) return noun === "tasks" ? "task" : "child";
+  return noun;
+}
+
+/** What a count means, for the chip's `title`: plain text, since a title renders no markdown. */
 function countTitle(count: ProgressCount, noun: "tasks" | "children"): string {
+  const one = count.total === 1;
   const what =
     noun === "tasks"
-      ? "task-list items in the spec (`- [ ]` and `- [x]`, nested lists included) are checked"
-      : "child issues are done";
+      ? `task-list item${one ? "" : "s"} in the spec (- [ ] and - [x], nested lists included) ${one ? "is" : "are"} checked`
+      : `child issue${one ? "" : "s"} ${one ? "is" : "are"} done`;
   return `${count.done} of ${count.total} ${what}.`;
 }
 
@@ -54,7 +61,7 @@ export function ProgressChips({
                 style={{ width: `${count.total === 0 ? 0 : (100 * count.done) / count.total}%` }}
               />
             </span>
-            <span className="whitespace-nowrap">{`${count.done}/${count.total} ${noun}`}</span>
+            <span className="whitespace-nowrap">{`${count.done}/${count.total} ${countNoun(count.total, noun)}`}</span>
           </span>
         ) : (
           <span
@@ -63,7 +70,7 @@ export function ProgressChips({
             key={noun}
             title={countTitle(count, noun)}
           >
-            {`${count.done}/${count.total} ${noun}`}
+            {`${count.done}/${count.total} ${countNoun(count.total, noun)}`}
           </span>
         )
       )}
