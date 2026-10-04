@@ -987,61 +987,70 @@ func TestDecodeDispatchIssueNamesASessionActor(t *testing.T) {
 // is refused rather than read as none. A time that cannot be read is taken as none and reported,
 // since a review without one is still ordered, by its id.
 func TestDecodingCarriesThePushForcedMarkerAndTheReviewOrder(t *testing.T) {
-	withPayload := func(t *testing.T, name, subject string, set map[string]any) (decodedMessage, error) {
-		t.Helper()
-		var envelope map[string]any
-		if err := json.Unmarshal(capturedGitHubEnvelope(t, name), &envelope); err != nil {
-			t.Fatalf("parse %s: %v", name, err)
-		}
-		// The envelope carries its payload as JSON text.
-		var payload map[string]any
-		if err := json.Unmarshal([]byte(envelope["payload"].(string)), &payload); err != nil {
-			t.Fatalf("parse %s's payload: %v", name, err)
-		}
-		for key, value := range set {
-			payload[key] = value
-		}
-		text, err := json.Marshal(payload)
-		if err != nil {
-			t.Fatalf("encode %s's payload: %v", name, err)
-		}
-		envelope["payload"] = string(text)
-		data, err := json.Marshal(envelope)
-		if err != nil {
-			t.Fatalf("encode %s: %v", name, err)
-		}
-		return decodeMessage(subject, "CAPTURE", capturedRepositories, data)
-	}
 	pushSubject := "notifications.github.sjawhar.legion.push.branch.legion/LEGION-208"
 	reviewSubject := "notifications.github.sjawhar.legion.pr.42.review"
 
 	for _, forced := range []string{"true", "false"} {
-		decoded, err := withPayload(t, "push.json", pushSubject, map[string]any{"forced": forced})
+		decoded, err := withPayload(t, "push.json", pushSubject, set(map[string]any{"forced": forced}))
 		if push, ok := decoded.Fact.(Push); err != nil || !ok || push.Forced == nil || *push.Forced != forced {
 			t.Fatalf("push with forced %q = %#v, %v", forced, decoded.Fact, err)
 		}
 	}
-	decoded, err := withPayload(t, "review.json", reviewSubject, map[string]any{"review_id": "5325101010",
-		"submitted_at": "2026-09-26T12:03:00+02:00"})
+	decoded, err := withPayload(t, "review.json", reviewSubject, set(map[string]any{"review_id": "5325101010",
+		"submitted_at": "2026-09-26T12:03:00+02:00"}))
 	submitted := time.Date(2026, 9, 26, 10, 3, 0, 0, time.UTC)
 	if review, ok := decoded.Fact.(PullRequestReview); err != nil || !ok || review.ID != 5325101010 ||
 		!review.SubmittedAt.Equal(submitted) || len(decoded.Unread) != 0 {
 		t.Fatalf("review with an id and a submission time = %#v, unread %q, %v", decoded.Fact, decoded.Unread, err)
 	}
-	if _, err := withPayload(t, "review.json", reviewSubject, map[string]any{"review_id": "not-a-number"}); err == nil {
+	if _, err := withPayload(t, "review.json", reviewSubject, set(map[string]any{"review_id": "not-a-number"})); err == nil {
 		t.Fatal("a review id that is not a number decoded")
 	}
 	for _, unreadable := range []any{"yesterday", 1.72735218e+09, true, map[string]any{"t": "2026-09-26T12:03:00Z"}} {
-		decoded, err = withPayload(t, "review.json", reviewSubject, map[string]any{"review_id": "5325101010", "submitted_at": unreadable})
+		decoded, err = withPayload(t, "review.json", reviewSubject, set(map[string]any{"review_id": "5325101010", "submitted_at": unreadable}))
 		if review, ok := decoded.Fact.(PullRequestReview); err != nil || !ok || review.ID != 5325101010 || !review.SubmittedAt.IsZero() ||
 			len(decoded.Unread) != 1 || !strings.Contains(decoded.Unread[0], "submitted_at") {
 			t.Fatalf("review with the time %#v = %#v, unread %q, %v; want it untimed and the field reported", unreadable, decoded.Fact, decoded.Unread, err)
 		}
 	}
 	for _, absent := range []any{nil, ""} {
-		decoded, err = withPayload(t, "review.json", reviewSubject, map[string]any{"review_id": "5325101010", "submitted_at": absent})
+		decoded, err = withPayload(t, "review.json", reviewSubject, set(map[string]any{"review_id": "5325101010", "submitted_at": absent}))
 		if review, ok := decoded.Fact.(PullRequestReview); err != nil || !ok || !review.SubmittedAt.IsZero() || len(decoded.Unread) != 0 {
 			t.Fatalf("review with the time %#v = %#v, unread %q, %v; want it untimed and nothing reported", absent, decoded.Fact, decoded.Unread, err)
+		}
+	}
+}
+
+// withPayload decodes the captured envelope named, with edit applied to its payload.
+func withPayload(t *testing.T, name, subject string, edit func(payload map[string]any)) (decodedMessage, error) {
+	t.Helper()
+	var envelope map[string]any
+	if err := json.Unmarshal(capturedGitHubEnvelope(t, name), &envelope); err != nil {
+		t.Fatalf("parse %s: %v", name, err)
+	}
+	// The envelope carries its payload as JSON text.
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(envelope["payload"].(string)), &payload); err != nil {
+		t.Fatalf("parse %s's payload: %v", name, err)
+	}
+	edit(payload)
+	text, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("encode %s's payload: %v", name, err)
+	}
+	envelope["payload"] = string(text)
+	data, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatalf("encode %s: %v", name, err)
+	}
+	return decodeMessage(subject, "CAPTURE", capturedRepositories, data)
+}
+
+// set is the withPayload edit that writes each field given.
+func set(fields map[string]any) func(map[string]any) {
+	return func(payload map[string]any) {
+		for key, value := range fields {
+			payload[key] = value
 		}
 	}
 }
@@ -1049,25 +1058,8 @@ func TestDecodingCarriesThePushForcedMarkerAndTheReviewOrder(t *testing.T) {
 // A listener that predates author_association carries none, and its review then names no
 // association, which no rule reads as a maintainer's (the workflow's decidesRound).
 func TestAReviewFromAListenerThatPredatesAuthorAssociationNamesNone(t *testing.T) {
-	var envelope map[string]any
-	if err := json.Unmarshal(capturedGitHubEnvelope(t, "review.json"), &envelope); err != nil {
-		t.Fatalf("parse review.json: %v", err)
-	}
-	var payload map[string]any
-	if err := json.Unmarshal([]byte(envelope["payload"].(string)), &payload); err != nil {
-		t.Fatalf("parse review.json's payload: %v", err)
-	}
-	delete(payload, "author_association")
-	text, err := json.Marshal(payload)
-	if err != nil {
-		t.Fatalf("encode the payload: %v", err)
-	}
-	envelope["payload"] = string(text)
-	data, err := json.Marshal(envelope)
-	if err != nil {
-		t.Fatalf("encode the envelope: %v", err)
-	}
-	decoded, err := decodeMessage("notifications.github.sjawhar.legion.pr.42.review", "CAPTURE", capturedRepositories, data)
+	decoded, err := withPayload(t, "review.json", "notifications.github.sjawhar.legion.pr.42.review",
+		func(payload map[string]any) { delete(payload, "author_association") })
 	if review, ok := decoded.Fact.(PullRequestReview); err != nil || !ok || review.AuthorAssociation != "" || len(decoded.Unread) != 0 {
 		t.Fatalf("the review decoded to %#v, unread %q, %v; want it with no association and nothing reported", decoded.Fact, decoded.Unread, err)
 	}

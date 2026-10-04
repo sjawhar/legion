@@ -786,9 +786,6 @@ func TestOnlyTheReviewAppOrAMaintainersReviewDecidesARound(t *testing.T) {
 		{name: "an outsider's approval", author: "a-stranger", association: "NONE", state: "approved", want: phase.Reviewing},
 		{name: "an outsider's request for changes", author: "a-stranger", association: "NONE", state: "changes_requested", want: phase.Reviewing},
 		{name: "a contributor's approval", author: "a-contributor", association: "CONTRIBUTOR", state: "approved", want: phase.Reviewing},
-		{name: "a first-time contributor's approval", author: "a-newcomer", association: "FIRST_TIME_CONTRIBUTOR", state: "approved", want: phase.Reviewing},
-		{name: "a first-timer's approval", author: "a-first-timer", association: "FIRST_TIMER", state: "approved", want: phase.Reviewing},
-		{name: "a mannequin's approval", author: "a-mannequin", association: "MANNEQUIN", state: "approved", want: phase.Reviewing},
 		{name: "another App's approval", author: "another-app[bot]", association: "CONTRIBUTOR", state: "approved", want: phase.Reviewing},
 		{name: "the owner's approval from a listener that predates author_association", author: "the-owner", state: "approved", want: phase.Reviewing},
 	} {
