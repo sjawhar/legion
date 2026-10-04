@@ -12,6 +12,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
 )
 
 const architectToken = claim.Token("legion-legion-legion-208-architect")
@@ -434,6 +435,24 @@ func TestOperatorSpawnsWaitForTheirTreesReservedCleanup(t *testing.T) {
 	var stored int
 	if err := h.store.Pool().QueryRow(h.ctx, `select count(*) from claims where token = 'legion-legion-legion-209-implementer'`).Scan(&stored); err != nil || stored != 0 {
 		t.Fatalf("the refused worker left %d claim rows (err %v)", stored, err)
+	}
+}
+
+// Only a reserved cleanup is the wait a 409 names. A root the operator cannot open for another
+// reason, here a tree whose lifecycle the workflow holds, is that failure, not "waiting for durable
+// cleanup": nothing the operator waits on would ever let it through.
+func TestOperatorSpawnOfATreeTheWorkflowHoldsIsNotAWaitForCleanup(t *testing.T) {
+	h := newHarness(t)
+	if _, err := h.store.OpenTreeLifecycle(h.ctx, testProject, "LEGION-208", treelifecycle.AuthorityWorkflow); err != nil {
+		t.Fatal(err)
+	}
+	recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
+	if recorder.Code != http.StatusInternalServerError || strings.Contains(recorder.Body.String(), "waiting for durable cleanup") ||
+		!strings.Contains(recorder.Body.String(), "current authority is workflow") {
+		t.Fatalf("operator root spawn of a workflow tree = %d %s, want 500 naming the workflow's authority", recorder.Code, recorder.Body)
+	}
+	if spawns := h.runtime.CallsOf("Spawn"); len(spawns) != 0 {
+		t.Fatalf("spawns = %d, want none", len(spawns))
 	}
 }
 

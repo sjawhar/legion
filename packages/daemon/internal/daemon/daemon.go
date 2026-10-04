@@ -813,6 +813,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		GitHubOwner:       githubOwner(cfg),
 		Grants:            grants,
 		Releaser:          s.supervisor.deps.Runtime,
+		Trees:             st,
 		ClaimReady:        claimReady,
 	})
 
