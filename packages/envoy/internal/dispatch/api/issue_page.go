@@ -1,9 +1,9 @@
 package api
 
 import (
+	"math"
 	"net/http"
 	"net/url"
-	"strconv"
 
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
@@ -29,17 +29,15 @@ func parseIssuePage(query url.Values) (*issuePage, error) {
 		return nil, nil
 	}
 	page := &issuePage{limit: contracts.DefaultIssuePageLimit}
-	if values, ok := query["limit"]; ok {
-		limit, err := strconv.Atoi(values[0])
-		if len(values) != 1 || err != nil || limit < 1 || limit > contracts.MaxIssuePageLimit {
+	if limit, present, valid := parseQueryInt(query, "limit", 1, contracts.MaxIssuePageLimit); present {
+		if !valid {
 			return nil, errorf(http.StatusBadRequest, "INVALID_QUERY",
 				"limit must be one integer from 1 to %d", contracts.MaxIssuePageLimit)
 		}
 		page.limit = limit
 	}
-	if values, ok := query["offset"]; ok {
-		offset, err := strconv.Atoi(values[0])
-		if len(values) != 1 || err != nil || offset < 0 {
+	if offset, present, valid := parseQueryInt(query, "offset", 0, math.MaxInt); present {
+		if !valid {
 			return nil, errorf(http.StatusBadRequest, "INVALID_QUERY", "offset must be one non-negative integer")
 		}
 		page.offset = offset

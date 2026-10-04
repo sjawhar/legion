@@ -11,7 +11,9 @@ import (
 	"log/slog"
 	"mime"
 	"net/http"
+	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -292,6 +294,23 @@ func (e *apiError) Error() string { return e.message }
 
 func errorf(status int, code, format string, args ...any) *apiError {
 	return &apiError{status: status, code: code, message: fmt.Sprintf(format, args...)}
+}
+
+// parseQueryInt reads one query parameter as an integer within [min, max]. present is false
+// when the caller did not supply the parameter at all; a parameter repeated, not an integer, or
+// outside the bound is present with valid false. issue_page.go's parseIssuePage and search.go's
+// handler each format their own code and message around a false valid, since the two routes
+// disagree on them.
+func parseQueryInt(query url.Values, field string, min, max int) (value int, present, valid bool) {
+	values, ok := query[field]
+	if !ok {
+		return 0, false, false
+	}
+	parsed, err := strconv.Atoi(values[0])
+	if len(values) != 1 || err != nil || parsed < min || parsed > max {
+		return 0, true, false
+	}
+	return parsed, true, true
 }
 
 // The codes writeHandlerError answers a document it cannot read or serve and an unclassified
