@@ -18,11 +18,17 @@ import (
 const stopGrace = 30 * time.Second
 
 // documentShutdownTimeout is the document service's own budget: docs.Service.Shutdown spends up to
-// its drain budget settling the documents owed - sized within a second of this whole budget so a
-// burst of writes still landing when shutdown begins has room to finish, not only the ones queued
-// before it began - and needs only what is left to finish what that budget cut short and read back
-// which settlements committed.
-const documentShutdownTimeout = docs.ShutdownDrainBudget + 1*time.Second
+// its drain budget waiting for durable appends and running settlements, sized so a burst of writes
+// still landing when shutdown begins has room to finish, not only the ones already queued - and
+// keeps a 5 s reserve past it. That reserve is not just time to read back which settlements
+// committed: docs.Service.Shutdown's own wait for its per-room workers (service.go's waitGroup)
+// runs under this whole timeout, not the drain budget alone, because a settlement the budget cut
+// short may still be mid-render or mid-commit, which no context interrupts once the database has
+// taken the query. service_test.go's own measured example - a 1 MiB document's settlement took
+// 4.5 s at load 90 against a 5 s budget, a 3.4 s overrun past it - is what the reserve is sized to
+// outlast; a worker still running once this whole timeout ends makes Shutdown return the
+// settlements-unconfirmed error instead of reading back what committed.
+const documentShutdownTimeout = docs.ShutdownDrainBudget + 5*time.Second
 
 // httpDrainBeforeDocuments is how long the document service waits for the requests in flight to
 // finish before it settles the documents owed with requests still running, so that its budget ends
@@ -38,8 +44,8 @@ const httpDrainBeforeDocuments = stopGrace - 5*time.Second - documentShutdownTim
 const silentProbes = 3
 
 // drainPollInterval is how often the last phase asks whether the requests in flight and the
-// connections in use are done, and how often it retries the health probe that asks whether the
-// database still answers.
+// connections in use are done, and how often waitUntilIdle's loop pauses between the health
+// probes it runs every pass.
 const drainPollInterval = 250 * time.Millisecond
 
 // serveUntilStopped serves on listener until ctx ends, then stops Dispatch (shutdown). It returns

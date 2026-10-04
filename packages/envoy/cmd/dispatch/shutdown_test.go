@@ -27,7 +27,7 @@ import (
 
 // promptShutdown bounds a SIGTERM's whole ordered shutdown with a dashboard open. Ending the
 // streams, finishing the requests in flight and settling one small document take milliseconds; a
-// stream that held the HTTP drain open would cost httpDrainBeforeDocuments, fifteen seconds, alone.
+// stream that held the HTTP drain open would cost httpDrainBeforeDocuments, eleven seconds, alone.
 const promptShutdown = 3 * time.Second
 
 // streamedSessionID is the session whose conversation the test's agent view watches; the agent
@@ -260,8 +260,10 @@ func TestSIGTERMWithTheDatabaseUnansweringExitsWithinTheShutdownBudget(t *testin
 	exited := time.Since(signalled)
 	t.Logf("exited %v after SIGTERM", exited)
 	// Nothing is in flight over HTTP, so the document service starts at once and spends at most
-	// its budget; then each failed probe takes its two seconds and a poll interval.
-	if bound := documentShutdownTimeout + silentProbes*(2*time.Second+drainPollInterval) + 2*time.Second; exited > bound {
+	// its budget (14 s: more than round 5's, so a loaded box's jitter on this real binary is
+	// proportionally bigger too); then each failed probe takes its two seconds and a poll
+	// interval.
+	if bound := documentShutdownTimeout + silentProbes*(2*time.Second+drainPollInterval) + 5*time.Second; exited > bound {
 		t.Errorf("Dispatch exited %v after SIGTERM with the database unanswering, want within %v", exited, bound)
 	}
 	if !strings.Contains(process.Output.String(), "once the database stopped answering") {

@@ -263,10 +263,13 @@
   document service then shut down on that expired deadline and logged `document settlement
   unconfirmed at shutdown`. Both streams now end at SIGTERM, which the dashboard reconnects from,
   so HTTP shutdown waits only for the requests in flight. Those requests drain first, with no
-  deadline of their own; the document service starts once they are done, or 15 s after the signal
-  with some still running, and gets 10 s of its own, so it finishes 5 s inside the 30 s stop timeout
+  deadline of their own; the document service starts once they are done, or 11 s after the signal
+  with some still running, and gets 14 s of its own, so it finishes 5 s inside the 30 s stop timeout
   ECS and the compose file give Dispatch. Each loaded document drains, reads what it owes and
-  settles in a worker of its own, so a document whose update is slow to store, or whose editor
+  settles in a worker of its own within 9 s of that budget, so a burst of writes still landing
+  after the worker started is waited for too, not only the ones already queued, and a settlement
+  still committing once that 9 s ends keeps the remaining 5 s to finish rather than ending in an
+  unconfirmed error: a document whose update is slow to store, or whose editor
   keeps typing, leaves only its own settlement to the next process. A spec with its tab open is
   settled while its room is still loaded, and its editors are disconnected only after that, so the
   edit they made is versioned before the process exits instead of when someone next opens the spec;
