@@ -43909,7 +43909,7 @@ class StdioServerTransport {
 // src/envoy-channel-server.ts
 var import_nats2 = __toESM(require_mod4(), 1);
 // package.json
-var version2 = "0.6.3";
+var version2 = "0.6.4";
 
 // src/channel-forwarder.ts
 var DeliveryIdentity = DedupeIdentitySchema.extend({
