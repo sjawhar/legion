@@ -31,7 +31,11 @@ var _ Store = (*S3)(nil)
 // NewS3 stores files in bucket with the AWS SDK's default credential chain. Loading the
 // configuration reads only the environment and the shared config files; credentials are fetched
 // on the first request. A configuration that names no region is refused here: the SDK accepts it
-// and then fails every call, which would show only on the first upload.
+// and then fails every call, which would show only on the first upload. The bucket is addressed
+// in the request path (`<endpoint>/<bucket>/<key>`), which AWS serves and every S3-compatible
+// server takes; the SDK's default, the bucket as a host label, needs a wildcard DNS name in
+// front of an endpoint named by AWS_ENDPOINT_URL_S3, which a test container or a loopback
+// stand-in has none of.
 func NewS3(ctx context.Context, bucket string) (*S3, error) {
 	cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithLogger(logging.LoggerFunc(logSDK)))
 	if err != nil {
@@ -40,7 +44,7 @@ func NewS3(ctx context.Context, bucket string) (*S3, error) {
 	if cfg.Region == "" {
 		return nil, errors.New("the file store needs an AWS region: set AWS_REGION, or a region in the shared AWS config")
 	}
-	return &S3{client: s3.NewFromConfig(cfg), bucket: bucket}, nil
+	return &S3{client: s3.NewFromConfig(cfg, func(o *s3.Options) { o.UsePathStyle = true }), bucket: bucket}, nil
 }
 
 // logSDK hands the AWS SDK's log lines to slog, so they are structured like Dispatch's own and its

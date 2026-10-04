@@ -94,7 +94,7 @@ func (f *S3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.requests = append(f.requests, r.Method+" "+r.URL.Path)
-	// Path style, /<bucket>/<key>: what the SDK sends to an endpoint whose host is an IP address.
+	// Path style, /<bucket>/<key>: how files.NewS3 addresses the bucket (UsePathStyle).
 	bucket, key, _ := strings.Cut(strings.TrimPrefix(r.URL.Path, "/"), "/")
 	if bucket != f.bucket {
 		writeS3Error(w, http.StatusNotFound, "NoSuchBucket", "The specified bucket does not exist")
