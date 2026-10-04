@@ -245,10 +245,28 @@ to the SPA shell. Every page the static handler serves (`index.html` and that fa
 `Cache-Control: no-cache` and an `ETag` of its bytes, never a `Last-Modified` (`servePage` in
 `routes/router.go`): a browser revalidates it before running it, gets a 304 only for the page this
 server holds, and gets this server's page in place of any other, since the servers behind one load
-balancer can hold different builds whose file times say nothing about which is newer (a rollback
-serves the older file). A file under `/assets`, Vite's content-hashed output, carries
-`public, max-age=31536000, immutable`; any other file (the favicon) carries none, and a missing
-asset's 404 carries none either.
+balancer can hold different builds whose pages' file times say nothing about which is newer (a
+rollback serves the older file). A file under `/assets`, Vite's content-hashed output, carries
+`public, max-age=31536000, immutable`. With `DISPATCH_ASSET_STORE_BUCKET` set, a local miss below an
+asset root (`isRetainedAssetPath`) asks the bucket for the same key through the AWS SDK default
+credential chain (`routes/assets.go`). `AssetStore.GetAsset` returns the whole object as bytes, read
+within three seconds and refused over 8 MiB or when its body is not the length S3 declared; only
+then does `serveRetainedAsset` set the immutable header and write it through `http.ServeContent`,
+so a slow, failed or short read is a 502 with no cache header, and the browser's download is not
+held to the three seconds. A `NoSuchKey` is a 404 without caching. S3 answers one only to a role
+that also holds `s3:ListBucket` on the bucket and otherwise answers 403, a 502 like any store
+failure. Every 502 logs `dispatch: retained asset store failed` at ERROR with the key and the
+error, and the SDK's own log lines go through slog, its debug lines below the default level. An
+object is read into one buffer of its declared size, and it stays in memory until its client has
+read it while the server sets no write timeout, so the router's `retainedHeld` semaphore caps the
+bytes held at once at `maxRetainedBytesHeld` (64 MiB). A request reserves 8 MiB before it asks
+the store, waiting within its three seconds for earlier requests to give theirs back, so a stale
+tab's burst of chunks is served in turn; it keeps only its object's size once it is read, and gives
+that back when its response is written, its client goes away or the read fails. A request that
+cannot reserve in time is a 503 with `Cache-Control: no-store` and `Retry-After: 1`, logs
+`dispatch: retained asset refused at the memory cap` at WARN with its key, and asks the store
+nothing. It never reads a page or another path from the bucket. Unset, the setting leaves every
+local asset miss a 404. Any other file (the favicon) carries no cache header.
 
 Every `/api/v1` route accepts an authenticated user or an agent bearer unless
 the table says human only.

@@ -22,10 +22,13 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 	"unicode"
+
+	"golang.org/x/sync/semaphore"
 
 	"github.com/sjawhar/envoy/internal/dispatch/agentstream"
 	"github.com/sjawhar/envoy/internal/dispatch/api"
@@ -45,6 +48,7 @@ import (
 type AppContext struct {
 	SigningKey     string
 	WebDistDir     string
+	AssetStore     AssetStore
 	Sessions       auth.SessionStore
 	People         auth.PeopleStore
 	Identity       identity.Identity
@@ -73,6 +77,7 @@ type AppContext struct {
 type AppContextOptions struct {
 	SigningKey     string
 	WebDistDir     string
+	AssetStore     AssetStore
 	Sessions       auth.SessionStore
 	People         auth.PeopleStore
 	Identity       identity.Identity
@@ -156,6 +161,7 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 	return &AppContext{
 		SigningKey:     opts.SigningKey,
 		WebDistDir:     opts.WebDistDir,
+		AssetStore:     opts.AssetStore,
 		Sessions:       opts.Sessions,
 		People:         opts.People,
 		Identity:       opts.Identity,
@@ -189,6 +195,9 @@ type router struct {
 	ctx           *AppContext
 	pendingMu     sync.Mutex
 	pendingStates map[string]pendingState
+	// retainedHeld counts the bytes of retained objects held by responses in flight, up to
+	// maxRetainedBytesHeld (serveRetainedAsset).
+	retainedHeld *semaphore.Weighted
 }
 
 type pendingState struct {
@@ -199,7 +208,7 @@ type pendingState struct {
 
 // New returns an http.Handler that serves all dispatch routes.
 func New(ctx *AppContext) http.Handler {
-	r := &router{ctx: ctx, pendingStates: make(map[string]pendingState)}
+	r := &router{ctx: ctx, pendingStates: make(map[string]pendingState), retainedHeld: semaphore.NewWeighted(maxRetainedBytesHeld)}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /auth/start", r.authStart)
 	mux.HandleFunc("GET /auth/callback", r.authCallback)
@@ -423,11 +432,64 @@ func (r *router) staticHandler(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusInternalServerError, "stat failed")
 		return
 	}
+	if isRetainedAssetPath(normalized) && r.ctx.AssetStore != nil {
+		r.serveRetainedAsset(w, req, strings.TrimPrefix(normalized, "/"))
+		return
+	}
 	if !isBrowserRoute(normalized) {
 		writeError(w, http.StatusNotFound, "not found")
 		return
 	}
 	servePage(w, req, filepath.Join(r.ctx.WebDistDir, "index.html"))
+}
+
+// isRetainedAssetPath reports whether normalized names a file below an asset root: the only paths
+// the retained-asset store is asked for, never a page or an asset root itself.
+func isRetainedAssetPath(normalized string) bool {
+	return isReservedPath(normalized, assetRoots) && !slices.Contains(assetRoots, normalized)
+}
+
+// serveRetainedAsset answers a local asset miss from the retained-asset store. The whole object is
+// read under retainedAssetFetchTimeout before anything is written, so a slow, failed or short read
+// is an uncached 502 and never a 200 carrying the immutable header; the browser's download of the
+// bytes read is not bounded by that timeout.
+//
+// An object stays in memory until its client has read it, so the bytes held at once are capped at
+// maxRetainedBytesHeld. Before asking the store a request reserves the most one object can hold,
+// waiting within the same bound for earlier requests to give theirs back, so a burst of a stale
+// tab's chunks is served in turn and a request that cannot reserve in time is a 503 that asks the
+// store nothing. Once the object is read the request keeps only its size until its response is
+// written or its client goes away.
+func (r *router) serveRetainedAsset(w http.ResponseWriter, req *http.Request, key string) {
+	ctx, cancel := context.WithTimeout(req.Context(), retainedAssetFetchTimeout)
+	defer cancel()
+	if err := r.retainedHeld.Acquire(ctx, maxRetainedAssetSize); err != nil {
+		slog.Warn("dispatch: retained asset refused at the memory cap", "key", key, "cap_bytes", maxRetainedBytesHeld)
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Retry-After", "1")
+		writeError(w, http.StatusServiceUnavailable, "retained assets are at their memory cap; retry")
+		return
+	}
+	held := maxRetainedAssetSize
+	// Release reads held when the handler returns: the object's size once it is read.
+	defer func() { r.retainedHeld.Release(held) }()
+
+	asset, err := r.ctx.AssetStore.GetAsset(ctx, key)
+	if errors.Is(err, ErrAssetNotFound) {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if err != nil {
+		slog.Error("dispatch: retained asset store failed", "key", key, "error", err)
+		writeError(w, http.StatusBadGateway, "retained asset store unavailable")
+		return
+	}
+	r.retainedHeld.Release(held - int64(len(asset)))
+	held = int64(len(asset))
+
+	w.Header().Set("Cache-Control", assetCacheControl)
+	w.Header().Set("Content-Type", contentType(key))
+	http.ServeContent(w, req, key, time.Time{}, bytes.NewReader(asset))
 }
 
 // isBrowserRoute reports whether an unmatched, non-static path should fall

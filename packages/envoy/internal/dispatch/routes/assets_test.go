@@ -1,0 +1,644 @@
+package routes
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"slices"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/smithy-go"
+)
+
+// fakeAssetStore answers from assets, or with err, and records every key it is asked for.
+type fakeAssetStore struct {
+	assets map[string]string
+	err    error
+	keys   []string
+}
+
+func (s *fakeAssetStore) GetAsset(_ context.Context, key string) ([]byte, error) {
+	s.keys = append(s.keys, key)
+	if s.err != nil {
+		return nil, s.err
+	}
+	asset, ok := s.assets[key]
+	if !ok {
+		return nil, ErrAssetNotFound
+	}
+	return []byte(asset), nil
+}
+
+// A local miss under /assets/ is answered from the retained-asset store, and nothing else is: a
+// local file wins, pages and other paths never consult it, and without a store every asset miss is
+// the plain 404 it was before. Only a retained hit carries the immutable header.
+func TestStaticHandlerRetainedAssets(t *testing.T) {
+	const retained = "console.log('previous build')"
+	for _, tc := range []struct {
+		name         string
+		method       string
+		path         string
+		store        *fakeAssetStore // nil: DISPATCH_ASSET_STORE_BUCKET unset
+		status       int
+		body         string
+		cacheControl string
+		contentType  string
+		keys         []string
+	}{
+		{
+			name: "retained hit", path: "/assets/previous-build.js",
+			store:  &fakeAssetStore{assets: map[string]string{"assets/previous-build.js": retained}},
+			status: http.StatusOK, body: retained, cacheControl: assetCacheControl,
+			contentType: "text/javascript; charset=utf-8", keys: []string{"assets/previous-build.js"},
+		},
+		{
+			name: "retained hit by HEAD", method: http.MethodHead, path: "/assets/previous-build.js",
+			store:  &fakeAssetStore{assets: map[string]string{"assets/previous-build.js": retained}},
+			status: http.StatusOK, cacheControl: assetCacheControl,
+			contentType: "text/javascript; charset=utf-8", keys: []string{"assets/previous-build.js"},
+		},
+		{
+			name: "local file wins", path: "/assets/current.js",
+			store:  &fakeAssetStore{assets: map[string]string{"assets/current.js": "retained"}},
+			status: http.StatusOK, body: "current", cacheControl: assetCacheControl,
+		},
+		{
+			name: "absent object", path: "/assets/never-retained.js", store: &fakeAssetStore{},
+			status: http.StatusNotFound, keys: []string{"assets/never-retained.js"},
+		},
+		{
+			name: "store failure", path: "/assets/previous-build.js",
+			store:  &fakeAssetStore{err: errors.New("object store unavailable")},
+			status: http.StatusBadGateway, keys: []string{"assets/previous-build.js"},
+		},
+		{
+			name: "setting unset", path: "/assets/previous-build.js",
+			status: http.StatusNotFound,
+		},
+		{
+			name: "non-asset file", path: "/previous-build.js",
+			store:  &fakeAssetStore{assets: map[string]string{"previous-build.js": retained}},
+			status: http.StatusNotFound,
+		},
+		{
+			name: "asset root itself", path: "/assets",
+			store:  &fakeAssetStore{assets: map[string]string{"assets": retained}},
+			status: http.StatusNotFound,
+		},
+		{
+			name: "page", path: "/issues/CORE-1",
+			store:  &fakeAssetStore{assets: map[string]string{"issues/CORE-1": retained}},
+			status: http.StatusOK, body: "<!doctype html>", cacheControl: pageCacheControl,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			webDist := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(webDist, "assets"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			for name, body := range map[string]string{"index.html": "<!doctype html>", "assets/current.js": "current"} {
+				if err := os.WriteFile(filepath.Join(webDist, name), []byte(body), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			handler, context := newTestRouter(t)
+			context.WebDistDir = webDist
+			if tc.store != nil {
+				context.AssetStore = tc.store
+			}
+			server := httptest.NewServer(handler)
+			defer server.Close()
+
+			method := tc.method
+			if method == "" {
+				method = http.MethodGet
+			}
+			request, err := http.NewRequest(method, server.URL+tc.path, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			response, err := server.Client().Do(request)
+			if err != nil {
+				t.Fatalf("%s %s: %v", method, tc.path, err)
+			}
+			defer response.Body.Close()
+			body, err := io.ReadAll(response.Body)
+			if err != nil {
+				t.Fatalf("read %s: %v", tc.path, err)
+			}
+
+			if response.StatusCode != tc.status || (tc.body != "" && string(body) != tc.body) {
+				t.Fatalf("%s %s: status %d body %q, want %d %q", method, tc.path, response.StatusCode, body, tc.status, tc.body)
+			}
+			if got := response.Header.Get("Cache-Control"); got != tc.cacheControl {
+				t.Errorf("Cache-Control %q, want %q", got, tc.cacheControl)
+			}
+			if tc.contentType != "" {
+				if got := response.Header.Get("Content-Type"); got != tc.contentType {
+					t.Errorf("Content-Type %q, want %q", got, tc.contentType)
+				}
+			}
+			if method == http.MethodHead {
+				if len(body) != 0 || response.Header.Get("Content-Length") != strconv.Itoa(len(retained)) {
+					t.Errorf("HEAD: %d body bytes, Content-Length %q, want none and %d", len(body), response.Header.Get("Content-Length"), len(retained))
+				}
+			}
+			var keys []string
+			if tc.store != nil {
+				keys = tc.store.keys
+			}
+			if !slices.Equal(keys, tc.keys) {
+				t.Errorf("store asked for %q, want %q", keys, tc.keys)
+			}
+		})
+	}
+}
+
+// trackedBody is an S3 object body that records whether it was read and closed.
+type trackedBody struct {
+	io.Reader
+	read, closed bool
+}
+
+func (b *trackedBody) Read(p []byte) (int, error) {
+	b.read = true
+	return b.Reader.Read(p)
+}
+
+func (b *trackedBody) Close() error {
+	b.closed = true
+	return nil
+}
+
+// stubS3 answers GetObject with output or err and records the request.
+type stubS3 struct {
+	output *s3.GetObjectOutput
+	err    error
+	input  *s3.GetObjectInput
+}
+
+func (s *stubS3) GetObject(_ context.Context, in *s3.GetObjectInput, _ ...func(*s3.Options)) (*s3.GetObjectOutput, error) {
+	s.input = in
+	return s.output, s.err
+}
+
+// The S3 adapter decides between a missing asset (404) and a failing store (502), and is the one
+// place an object becomes bytes: it reads the whole object or refuses it.
+func TestS3AssetStoreGetAsset(t *testing.T) {
+	// The SDK wraps every API error in an operation error, as these do.
+	operationError := func(err error) error {
+		return &smithy.OperationError{ServiceID: "S3", OperationName: "GetObject", Err: err}
+	}
+	object := func(body string, length *int64) (*s3.GetObjectOutput, *trackedBody) {
+		tracked := &trackedBody{Reader: strings.NewReader(body)}
+		return &s3.GetObjectOutput{Body: tracked, ContentLength: length}, tracked
+	}
+	for _, tc := range []struct {
+		name string
+		// output builds the stub's answer; tracked is its body, nil when it has none.
+		output   func() (*s3.GetObjectOutput, *trackedBody)
+		err      error
+		want     string
+		notFound bool
+		failure  bool
+		unread   bool
+	}{
+		{
+			name:   "object",
+			output: func() (*s3.GetObjectOutput, *trackedBody) { return object("chunk", aws.Int64(5)) },
+			want:   "chunk",
+		},
+		{name: "missing key", err: operationError(&types.NoSuchKey{}), notFound: true},
+		{
+			// Without s3:ListBucket, S3 answers a missing key this way: a store failure, never 404.
+			name: "access denied", err: operationError(&smithy.GenericAPIError{Code: "AccessDenied"}), failure: true,
+		},
+		{
+			name: "no body",
+			output: func() (*s3.GetObjectOutput, *trackedBody) {
+				return &s3.GetObjectOutput{ContentLength: aws.Int64(5)}, nil
+			},
+			failure: true,
+		},
+		{
+			name:    "no content length",
+			output:  func() (*s3.GetObjectOutput, *trackedBody) { return object("chunk", nil) },
+			failure: true,
+		},
+		{
+			name:    "over the limit",
+			output:  func() (*s3.GetObjectOutput, *trackedBody) { return object("chunk", aws.Int64(maxRetainedAssetSize+1)) },
+			failure: true, unread: true,
+		},
+		{
+			name:    "body shorter than declared",
+			output:  func() (*s3.GetObjectOutput, *trackedBody) { return object("chu", aws.Int64(5)) },
+			failure: true,
+		},
+		{
+			name:    "body longer than declared",
+			output:  func() (*s3.GetObjectOutput, *trackedBody) { return object("chunk!", aws.Int64(5)) },
+			failure: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stub := &stubS3{err: tc.err}
+			var tracked *trackedBody
+			if tc.output != nil {
+				stub.output, tracked = tc.output()
+			}
+			store := &s3AssetStore{client: stub, bucket: "retained"}
+
+			data, err := store.GetAsset(context.Background(), "assets/chunk.js")
+
+			if aws.ToString(stub.input.Bucket) != "retained" || aws.ToString(stub.input.Key) != "assets/chunk.js" {
+				t.Errorf("GetObject asked for %s/%s, want retained/assets/chunk.js", aws.ToString(stub.input.Bucket), aws.ToString(stub.input.Key))
+			}
+			switch {
+			case tc.notFound:
+				if !errors.Is(err, ErrAssetNotFound) {
+					t.Fatalf("err = %v, want ErrAssetNotFound", err)
+				}
+			case tc.failure:
+				if err == nil || errors.Is(err, ErrAssetNotFound) {
+					t.Fatalf("data %q, err = %v, want a store failure", data, err)
+				}
+			default:
+				if err != nil || string(data) != tc.want {
+					t.Fatalf("data %q, err = %v, want %q", data, err, tc.want)
+				}
+				// The byte budget counts len(data), so the object must hold no more than that.
+				if cap(data) != len(data) {
+					t.Errorf("a %d-byte object holds %d bytes", len(data), cap(data))
+				}
+			}
+			if tracked != nil {
+				if !tracked.closed {
+					t.Error("the object body was left open")
+				}
+				if tc.unread && tracked.read {
+					t.Error("an object over the limit was read")
+				}
+			}
+		})
+	}
+}
+
+// streamingBody reads as the S3 SDK's response body does: once the context of the GetObject call
+// ends, a read fails with that context's error. With stallAfter >= 0 it delivers that many bytes
+// and then waits on the context, as a store that stops sending mid-object does.
+type streamingBody struct {
+	ctx        context.Context
+	body       io.Reader
+	stallAfter int
+	delivered  int
+}
+
+func (b *streamingBody) Read(p []byte) (int, error) {
+	if err := b.ctx.Err(); err != nil {
+		return 0, err
+	}
+	if b.stallAfter >= 0 {
+		if b.delivered >= b.stallAfter {
+			<-b.ctx.Done()
+			return 0, b.ctx.Err()
+		}
+		if remaining := b.stallAfter - b.delivered; len(p) > remaining {
+			p = p[:remaining]
+		}
+	}
+	n, err := b.body.Read(p)
+	b.delivered += n
+	return n, err
+}
+
+func (b *streamingBody) Close() error { return nil }
+
+// streamingS3 answers GetObject at once, with a body that reads as streamingBody does.
+type streamingS3 struct {
+	body       []byte
+	stallAfter int
+}
+
+func (s streamingS3) GetObject(ctx context.Context, _ *s3.GetObjectInput, _ ...func(*s3.Options)) (*s3.GetObjectOutput, error) {
+	return &s3.GetObjectOutput{
+		Body:          &streamingBody{ctx: ctx, body: bytes.NewReader(s.body), stallAfter: s.stallAfter},
+		ContentLength: aws.Int64(int64(len(s.body))),
+	}, nil
+}
+
+// slowClient is a browser on a slow link: each write it is sent waits before it lands.
+type slowClient struct {
+	*httptest.ResponseRecorder
+	delay time.Duration
+}
+
+func (c slowClient) Write(p []byte) (int, error) {
+	time.Sleep(c.delay)
+	return c.ResponseRecorder.Write(p)
+}
+
+// The fetch bound is the store's, not the browser's: a client that takes longer than the bound to
+// receive a retained asset the store answered at once still receives all of it, as it would the
+// same file served from the local build.
+func TestStaticHandlerDeliversAWholeRetainedAssetToASlowClient(t *testing.T) {
+	body := bytes.Repeat([]byte("/"), 1<<20)
+	handler, context := newTestRouter(t)
+	context.WebDistDir = t.TempDir()
+	context.AssetStore = &s3AssetStore{client: streamingS3{body: body, stallAfter: -1}, bucket: "retained"}
+
+	recorder := httptest.NewRecorder()
+	// 32 KiB copies at 120 ms each take about 3.8 s for 1 MiB, past the store's 3 s bound.
+	handler.ServeHTTP(slowClient{ResponseRecorder: recorder, delay: 120 * time.Millisecond},
+		httptest.NewRequest(http.MethodGet, "/assets/previous-build.js", nil))
+
+	if recorder.Code != http.StatusOK || recorder.Body.Len() != len(body) {
+		t.Fatalf("slow client: status %d, received %d of %d bytes", recorder.Code, recorder.Body.Len(), len(body))
+	}
+}
+
+// A store that stops sending part-way through an object is a store failure, answered before any
+// header is committed: never a 200 carrying a year's immutable caching and a truncated body.
+func TestStaticHandlerAnswers502ForARetainedAssetThatStallsMidBody(t *testing.T) {
+	handler, context := newTestRouter(t)
+	context.WebDistDir = t.TempDir()
+	context.AssetStore = &s3AssetStore{client: streamingS3{body: bytes.Repeat([]byte("/"), 64), stallAfter: 12}, bucket: "retained"}
+
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/assets/previous-build.js", nil))
+
+	if recorder.Code != http.StatusBadGateway {
+		t.Fatalf("stalled store: status %d with %d body bytes, want 502", recorder.Code, recorder.Body.Len())
+	}
+	if got := recorder.Header().Get("Cache-Control"); got != "" {
+		t.Fatalf("stalled store: Cache-Control %q, want none", got)
+	}
+}
+
+// A failing store is otherwise invisible from inside the task: the browser fails the chunk as it
+// would a 404. Each failure leaves one ERROR record naming the key and the store's error.
+func TestStaticHandlerLogsARetainedAssetStoreFailure(t *testing.T) {
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	handler, context := newTestRouter(t)
+	context.WebDistDir = t.TempDir()
+	context.AssetStore = &fakeAssetStore{err: errors.New("object store unavailable")}
+
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/assets/previous-build.js", nil))
+
+	if recorder.Code != http.StatusBadGateway {
+		t.Fatalf("store failure: status %d, want 502", recorder.Code)
+	}
+	var failures int
+	for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+		var record struct {
+			Level string `json:"level"`
+			Key   string `json:"key"`
+			Error string `json:"error"`
+		}
+		if json.Unmarshal([]byte(line), &record) == nil && record.Level == "ERROR" &&
+			record.Key == "assets/previous-build.js" && strings.Contains(record.Error, "object store unavailable") {
+			failures++
+		}
+	}
+	if failures != 1 {
+		t.Fatalf("store failure: %d ERROR records naming the key and the error, want 1; log %q", failures, logs.String())
+	}
+}
+
+// countingStore answers every key with one shared object and counts the calls.
+type countingStore struct {
+	object []byte
+	calls  atomic.Int32
+}
+
+func (s *countingStore) GetAsset(context.Context, string) ([]byte, error) {
+	s.calls.Add(1)
+	return s.object, nil
+}
+
+// stalledClient is a browser that stops reading: its first write blocks until the client goes
+// away, and then fails, as a write to a closed connection does.
+type stalledClient struct {
+	header  http.Header
+	status  int
+	writing chan struct{} // closed at the first write
+	gone    chan struct{} // closed when the client goes away
+	served  chan struct{} // closed when the handler returns
+	once    sync.Once
+}
+
+func (c *stalledClient) Header() http.Header    { return c.header }
+func (c *stalledClient) WriteHeader(status int) { c.status = status }
+func (c *stalledClient) Write([]byte) (int, error) {
+	c.once.Do(func() { close(c.writing) })
+	<-c.gone
+	return 0, errors.New("client went away")
+}
+
+// stallRetainedReaders starts n clients that each get a retained asset and stop reading it,
+// one at a time, and returns once all n are writing. Each goes away when the test ends.
+func stallRetainedReaders(t *testing.T, handler http.Handler, n int) []*stalledClient {
+	t.Helper()
+	clients := make([]*stalledClient, n)
+	for i := range clients {
+		client := &stalledClient{header: http.Header{}, writing: make(chan struct{}), gone: make(chan struct{}), served: make(chan struct{})}
+		clients[i] = client
+		go func() {
+			defer close(client.served)
+			handler.ServeHTTP(client, httptest.NewRequest(http.MethodGet, fmt.Sprintf("/assets/stalled-%d.js", i), nil))
+		}()
+		<-client.writing
+		if client.status != http.StatusOK {
+			t.Fatalf("stalled reader %d: status %d, want 200", i, client.status)
+		}
+	}
+	t.Cleanup(func() {
+		for _, client := range clients {
+			select {
+			case <-client.gone:
+			default:
+				close(client.gone)
+			}
+			<-client.served
+		}
+	})
+	return clients
+}
+
+// A retained object stays in memory until its client has read it, and nothing bounds how long a
+// client takes, so the bytes held at once are capped. A request that finds no room before its
+// fetch bound runs out is refused without asking the store: 503, not kept, retried after a second.
+func TestStaticHandlerCapsRetainedBytesHeldAtOnce(t *testing.T) {
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	handler, context := newTestRouter(t)
+	context.WebDistDir = t.TempDir()
+	store := &countingStore{object: bytes.Repeat([]byte("/"), int(maxRetainedAssetSize))}
+	context.AssetStore = store
+	stallRetainedReaders(t, handler, int(maxRetainedBytesHeld/maxRetainedAssetSize))
+
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/assets/one-more.js", nil))
+
+	if held := int64(store.calls.Load()) * maxRetainedAssetSize; held > maxRetainedBytesHeld {
+		t.Errorf("the store handed out %d bytes still held, past the %d-byte cap", held, maxRetainedBytesHeld)
+	}
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("past the cap: status %d with %d body bytes, want 503", recorder.Code, recorder.Body.Len())
+	}
+	if got := store.calls.Load(); got != int32(maxRetainedBytesHeld/maxRetainedAssetSize) {
+		t.Errorf("past the cap: the store was asked %d times, want %d (no call for the refused request)", got, maxRetainedBytesHeld/maxRetainedAssetSize)
+	}
+	if got := recorder.Header().Get("Cache-Control"); got != "no-store" {
+		t.Errorf("past the cap: Cache-Control %q, want no-store", got)
+	}
+	if got := recorder.Header().Get("Retry-After"); got != "1" {
+		t.Errorf("past the cap: Retry-After %q, want 1", got)
+	}
+	var warnings int
+	for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+		var record struct {
+			Level string `json:"level"`
+			Key   string `json:"key"`
+		}
+		if json.Unmarshal([]byte(line), &record) == nil && record.Level == "WARN" && record.Key == "assets/one-more.js" {
+			warnings++
+		}
+	}
+	if warnings != 1 {
+		t.Errorf("past the cap: %d WARN records naming the key, want 1; log %q", warnings, logs.String())
+	}
+}
+
+// A client that goes away mid-response gives its bytes back, so the next request is served.
+func TestStaticHandlerReleasesRetainedBytesWhenAClientGoesAway(t *testing.T) {
+	handler, context := newTestRouter(t)
+	context.WebDistDir = t.TempDir()
+	store := &countingStore{object: bytes.Repeat([]byte("/"), int(maxRetainedAssetSize))}
+	context.AssetStore = store
+	clients := stallRetainedReaders(t, handler, int(maxRetainedBytesHeld/maxRetainedAssetSize))
+
+	full := httptest.NewRecorder()
+	handler.ServeHTTP(full, httptest.NewRequest(http.MethodGet, "/assets/while-full.js", nil))
+	if full.Code != http.StatusServiceUnavailable {
+		t.Fatalf("at the cap: status %d, want 503", full.Code)
+	}
+
+	close(clients[0].gone)
+	<-clients[0].served
+
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/assets/after.js", nil))
+	if recorder.Code != http.StatusOK || int64(recorder.Body.Len()) != maxRetainedAssetSize {
+		t.Fatalf("after a client went away: status %d with %d body bytes, want 200 with %d", recorder.Code, recorder.Body.Len(), maxRetainedAssetSize)
+	}
+}
+
+// A failed read gives back what it reserved: more failures than the cap holds objects, then a hit.
+func TestStaticHandlerReleasesRetainedBytesWhenTheStoreFails(t *testing.T) {
+	handler, context := newTestRouter(t)
+	context.WebDistDir = t.TempDir()
+	failing := &fakeAssetStore{err: errors.New("object store unavailable")}
+	context.AssetStore = failing
+	for i := range int(maxRetainedBytesHeld/maxRetainedAssetSize) + 1 {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, fmt.Sprintf("/assets/failing-%d.js", i), nil))
+		if recorder.Code != http.StatusBadGateway {
+			t.Fatalf("failure %d: status %d, want 502", i, recorder.Code)
+		}
+	}
+
+	context.AssetStore = &fakeAssetStore{assets: map[string]string{"assets/after.js": "after"}}
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/assets/after.js", nil))
+	if recorder.Code != http.StatusOK || recorder.Body.String() != "after" {
+		t.Fatalf("after the store failed: status %d body %q, want 200 \"after\"", recorder.Code, recorder.Body.String())
+	}
+}
+
+// latentStore answers like S3 does from across a network: each object arrives after a short delay.
+type latentStore struct {
+	delay  time.Duration
+	object []byte
+}
+
+func (s latentStore) GetAsset(ctx context.Context, _ string) ([]byte, error) {
+	select {
+	case <-time.After(s.delay):
+		return s.object, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// A stale tab opening a route asks for every chunk the route imports at once (the dashboard's
+// issue page imports eight), and another tab can be doing the same. Small chunks hold almost
+// nothing of the memory cap, so a burst of them is served rather than refused.
+func TestStaticHandlerServesABurstOfSmallRetainedAssets(t *testing.T) {
+	handler, context := newTestRouter(t)
+	context.WebDistDir = t.TempDir()
+	context.AssetStore = latentStore{delay: 50 * time.Millisecond, object: []byte("console.log('previous build')")}
+
+	const burst = 16
+	codes := make([]int, burst)
+	var wg sync.WaitGroup
+	for i := range burst {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, fmt.Sprintf("/assets/chunk-%d.js", i), nil))
+			codes[i] = recorder.Code
+		}()
+	}
+	wg.Wait()
+
+	refused := 0
+	for _, code := range codes {
+		if code != http.StatusOK {
+			refused++
+		}
+	}
+	if refused != 0 {
+		t.Fatalf("a burst of %d small retained assets: %d not served (statuses %v), want all 200", burst, refused, codes)
+	}
+}
+
+// A request keeps only its object's size once it is read, so stalled readers of real chunk sizes
+// share the cap rather than each holding the most one object can be: 32 stalled readers of the
+// dashboard's largest chunk, 1,747,955 bytes, fit under the cap, and every one is served.
+func TestStaticHandlerHoldsOnlyEachRetainedObjectsSize(t *testing.T) {
+	handler, context := newTestRouter(t)
+	context.WebDistDir = t.TempDir()
+	const size, readers = 1747955, 32
+	if size*readers > maxRetainedBytesHeld {
+		t.Fatalf("%d readers of %d bytes exceed the %d-byte cap; the test needs them to fit", readers, size, maxRetainedBytesHeld)
+	}
+	context.AssetStore = &countingStore{object: bytes.Repeat([]byte("/"), size)}
+
+	stallRetainedReaders(t, handler, readers)
+}
