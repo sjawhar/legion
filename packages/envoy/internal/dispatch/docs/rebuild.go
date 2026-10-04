@@ -97,7 +97,7 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 		return RebuildReport{}, VersionResult{}, err
 	}
 	if markdown != nil {
-		if _, err := weighRendering("", canonical); err != nil {
+		if err := weighRendering("", canonical); err != nil {
 			return RebuildReport{}, VersionResult{}, err
 		}
 	}

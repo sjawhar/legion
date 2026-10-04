@@ -147,7 +147,7 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 	if err == nil {
 		contentChanged, weighedFrom = !unchanged, before
 	}
-	if err := refuseGrowth(growth{before: beforeMarkdown, after: markdown, unchanged: unchanged, margin: margin, anchors: anchorWatch{before: weighedFrom, after: tree}, serverState: func() bool {
+	if err := refuseGrowth(growth{fork: fork, before: beforeMarkdown, after: markdown, unchanged: unchanged, margin: margin, anchors: anchorWatch{before: weighedFrom, after: tree}, serverState: func() bool {
 		return weighedFrom != nil && tree.EqualOutsideServerState(weighedFrom)
 	}}); err != nil {
 		return err
@@ -237,7 +237,7 @@ func (s *Service) SeedText(ctx context.Context, artifactID, markdown string, act
 	if err != nil {
 		return "", err
 	}
-	if _, err := weighRendering("", canonical); err != nil {
+	if err := weighRendering("", canonical); err != nil {
 		return "", err
 	}
 	update, err := encodeDocumentTree(tree)

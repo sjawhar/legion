@@ -26,6 +26,8 @@ import (
 //   - its margin, the comment and suggestion records a browser shows beside the document, which
 //     every load builds though no rendering carries them (marginWatch).
 //   - the actor ids its anchor marks carry, which no rendering carries either (anchorWatch).
+//   - the live state it leaves, whose complete update ygo must still decode within its
+//     1,048,576-struct cap (refuseUndecodable).
 //
 // A write that leaves the document no bigger and no heavier than it was passes, so a document
 // already past the bound - stored before it, or grown by browser edits, which no server write
@@ -44,6 +46,9 @@ import (
 
 // growth is what one write leaves a document, as refuseGrowth weighs it.
 type growth struct {
+	// fork is the transaction's copy of the live document the write leaves, which
+	// refuseUndecodable checks.
+	fork *crdt.Doc
 	// before and after are the document's renderings before the write and after it, and unchanged
 	// whether they are the same.
 	before, after string
@@ -63,7 +68,8 @@ type growth struct {
 // refuseGrowth is the refusal of the write g describes, or nil. Its rendering is weighed by
 // weighRendering. A rendering the write left as it was - an anchor mark, a margin record, an
 // attribute no rendering carries - is not measured again, and one that changed only the server's
-// state of a typed block (serverState) is taken whatever the measures say of it.
+// state of a typed block (serverState) is taken whatever the measures say of it. Every write is
+// still refused when the live state it leaves could not be decoded.
 func refuseGrowth(g growth) error {
 	if err := g.margin.refusal(); err != nil {
 		return err
@@ -71,16 +77,17 @@ func refuseGrowth(g growth) error {
 	if err := g.anchors.refusal(); err != nil {
 		return err
 	}
-	if g.unchanged || g.serverState() {
-		return nil
+	if !g.unchanged && !g.serverState() {
+		if err := weighRendering(g.before, g.after); err != nil {
+			return err
+		}
 	}
-	_, err := weighRendering(g.before, g.after)
-	return err
+	return refuseUndecodable(g.fork)
 }
 
 // weighRendering is the refusal of after, a document's rendering once a write has run, against
 // before, its rendering until then (weigh).
-func weighRendering(before, after string) (grew func() bool, err error) {
+func weighRendering(before, after string) error {
 	return weigh(renderingOf(before), renderingOf(after))
 }
 
@@ -110,20 +117,19 @@ func (r rendering) longer(n int) rendering {
 
 // weigh is the refusal of after against before: after is refused past either of an upload's
 // limits when it is bigger than before by that measure - longer than before past
-// pmdoc.MaxDocumentBytes, heavier than before past pmdoc.MaxDocumentElements. Otherwise it gives
-// grew, which reports whether after is bigger than before by either measure. A rendering refused by
-// its bytes is not parsed, and before is measured only when a refusal or grew turns on its elements.
-func weigh(before, after rendering) (grew func() bool, err error) {
+// pmdoc.MaxDocumentBytes, heavier than before past pmdoc.MaxDocumentElements. A rendering refused by
+// its bytes is not parsed, and before is measured only when a refusal turns on its elements.
+func weigh(before, after rendering) error {
 	if after.bytes > pmdoc.MaxDocumentBytes && after.bytes > before.bytes {
-		return nil, fmt.Errorf("%w: a markdown document is at most %s (%d bytes), and this change would make the document's markdown %d bytes (it was %d); shorten the change, or split the document",
+		return fmt.Errorf("%w: a markdown document is at most %s (%d bytes), and this change would make the document's markdown %d bytes (it was %d); shorten the change, or split the document",
 			ErrDocumentTooLarge, binarySize(pmdoc.MaxDocumentBytes), pmdoc.MaxDocumentBytes, after.bytes, before.bytes)
 	}
 	size := after.size()
 	if size.TooHeavy() && heavier(before.size(), size) {
-		return nil, fmt.Errorf("%w: this change would make the document's markdown make %s elements, past the %d one document may hold (it made %s); shorten the change, or split the document",
+		return fmt.Errorf("%w: this change would make the document's markdown make %s elements, past the %d one document may hold (it made %s); shorten the change, or split the document",
 			ErrDocumentTooLarge, elements(size), pmdoc.MaxDocumentElements, elements(before.size()))
 	}
-	return func() bool { return after.bytes > before.bytes || heavier(before.size(), size) }, nil
+	return nil
 }
 
 // maxMarginBytes is the most text a document's margin may hold: the records of every comment and
@@ -312,4 +318,25 @@ func elements(size pmdoc.DocumentSize) string {
 		return fmt.Sprint(size.Elements)
 	}
 	return fmt.Sprintf("more than %d", pmdoc.MaxDocumentElements)
+}
+
+// refuseUndecodable is the refusal of a write that leaves fork, its transaction's copy of the live
+// document, a state ygo could not decode as one update, or nil. ygo decodes at most maxUpdateItems
+// structs in one update, and each struct takes at least one clock tick, so a state whose clocks sum
+// to no more than that is not decoded. A state past the cap is refused whether or not the write
+// grew the document: storing it would leave every read unable to load it.
+func refuseUndecodable(fork *crdt.Doc) error {
+	var clocks uint64
+	for _, clock := range fork.StateVector() {
+		clocks += clock
+	}
+	if clocks <= maxUpdateItems {
+		return nil
+	}
+	state := crdt.EncodeStateAsUpdateV1(fork, nil)
+	if err := crdt.ApplyUpdateV1(newDocumentCopy(), state, nil); err != nil {
+		return fmt.Errorf("%w: this change would leave the document's live state past the %d items ygo decodes in one update; shorten the change, or split the document",
+			ErrDocumentTooLarge, maxUpdateItems)
+	}
+	return nil
 }

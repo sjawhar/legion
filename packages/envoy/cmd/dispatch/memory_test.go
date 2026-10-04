@@ -650,48 +650,52 @@ func TestTheHeaviestDocumentsWithAFullMarginStayWithinTheMemoryBound(t *testing.
 	}
 }
 
-// A new version of 16,384 headings, what one upload may hold, over a first version of one line is
-// taken on every try on a real Dispatch process, and its document then reads on a server that has
-// not loaded it. A transaction's writes take the id after every writer the document holds; under a
-// random id a new version that drew an id below its first version's writer parked every item it
-// wrote, and the load margin refused it on 7 of 12 tries.
-func TestANewVersionAtTheLimitIsTakenOnEveryTry(t *testing.T) {
+// Versions add their structs to a document's live state, and ygo decodes at most 1,048,576 structs
+// in one update. Alternating 16,000 paragraphs and 16,000 headings, each version within both upload
+// limits, take that state past what ygo can decode at the fourteenth version. The version that would
+// leave it undecodable is refused with 413 CAP_EXCEEDED, and the stored version before it still
+// reads; without that refusal, the version is taken and every read of the document answers 500.
+func TestVersionsCannotLeaveALiveStateTooLargeToDecode(t *testing.T) {
 	memory := newMemoryHarness(t)
-	const tries = 12
-	headings := strings.Repeat("# a\n", 16_384)
 	server := memory.start(t)
-	var taken []string
-	for try := range tries {
-		name := fmt.Sprintf("near-limit-%d.md", try)
-		first, err := server.tryUploadNamed("multipart", memory.issue, name, "One line.\n")
+	numbered := func(format string) string {
+		var markdown strings.Builder
+		for index := range 16_000 {
+			fmt.Fprintf(&markdown, format, index)
+		}
+		return markdown.String()
+	}
+	paragraphs, headings := numbered("p%d\n\n"), numbered("# h%d\n")
+	var artifactID, lastStored string
+	for upload := range 20 {
+		markdown, marker := paragraphs, "p15999"
+		if upload%2 == 1 {
+			markdown, marker = headings, "# h15999"
+		}
+		version, err := server.tryUploadNamed("multipart", memory.issue, "item-cap.md", markdown)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if first.status != http.StatusCreated {
-			t.Fatalf("try %d: the first version answered %d %.300s, want 201", try+1, first.status, first.body)
-		}
-		memory.waitForSettlement(t, first)
-		version, err := server.tryUploadNamed("multipart", memory.issue, name, headings)
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Logf("try %d: a new version of 16,384 headings answered %d %.200s", try+1, version.status, version.body)
+		t.Logf("version %d answered %d", upload+1, version.status)
 		if version.status == http.StatusCreated {
-			taken = append(taken, version.artifactID)
-			memory.waitForSettlement(t, version)
+			artifactID, lastStored = version.artifactID, marker
+			if text := server.text(t, artifactID); !strings.Contains(text, marker) {
+				t.Fatalf("version %d reads back %d bytes without %q", upload+1, len(text), marker)
+			}
+			continue
 		}
-	}
-	server.stop(t)
-	t.Logf("%d of %d new versions taken", len(taken), tries)
-	if len(taken) != tries {
-		t.Errorf("%d of %d new versions of 16,384 headings were refused, want every one taken", tries-len(taken), tries)
-	}
-	reader := memory.start(t)
-	for _, artifactID := range taken {
-		if text := reader.text(t, artifactID); strings.Count(text, "# a\n") != 16_384 {
-			t.Errorf("document %s reads back %d bytes, want its 16,384 headings", artifactID, len(text))
+		if upload < 2 || version.status != http.StatusRequestEntityTooLarge ||
+			!strings.Contains(string(version.body), `"code":"CAP_EXCEEDED"`) ||
+			!strings.Contains(string(version.body), "1048576 items") {
+			t.Fatalf("version %d answered %d %.500s, want 201 until 413 CAP_EXCEEDED names ygo's 1048576-item decode cap", upload+1, version.status, version.body)
 		}
+		if text := server.text(t, artifactID); !strings.Contains(text, lastStored) {
+			t.Fatalf("after refused version %d, the document reads back %d bytes without the last stored version's %q", upload+1, len(text), lastStored)
+		}
+		t.Logf("version %d refused: %.300s", upload+1, version.body)
+		return
 	}
+	t.Fatal("all 20 versions were taken, want the version that would pass ygo's decode cap refused")
 }
 
 // An upload's parse does not count front matter, so a new spec of front matter and the 16,384

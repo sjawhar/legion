@@ -770,7 +770,7 @@ func (r *settlementReconciliation) withholdAnswers(artifactID string, tree *pmdo
 	after, err := renderTree(tree)
 	rendered := err == nil
 	if rendered {
-		if _, err = weighRendering(before, after); err == nil {
+		if err = weighRendering(before, after); err == nil {
 			return
 		}
 	}
@@ -823,7 +823,7 @@ func (r *settlementReconciliation) returnAnswersWithRoom(tree *pmdoc.Node, befor
 		rewrite := &r.rewrites[index]
 		grown, err := rewrite.withAnswer(document)
 		if err == nil {
-			_, err = weigh(was, grown)
+			err = weigh(was, grown)
 		}
 		if err != nil {
 			setAskServerAttributes(rewrite.node, rewrite.ask, true)

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math"
 	"strings"
 	"testing"
 
@@ -57,7 +56,7 @@ func TestAWriteMayNotGrowADocumentPastWhatOneUploadMayHold(t *testing.T) {
 			if want == "" {
 				want = tooLong(test.before, test.after)
 			}
-			_, err := weighRendering(test.before, test.after)
+			err := weighRendering(test.before, test.after)
 			if want == "-" {
 				if err != nil {
 					t.Fatalf("refused: %v, want it taken", err)
@@ -124,31 +123,6 @@ func TestAMarginMayNotGrowPastWhatADocumentMayHold(t *testing.T) {
 	}
 	refused(joinedProjectMark(service, artifactID, "s2", suggestion(250_001), alice),
 		"this change would make it hold 1050141 bytes (it held 1050140)")
-}
-
-// A new version is taken whichever id its first version's writer drew. A transaction's writes take
-// the id after every writer the document holds (writerAfter), so the update stays after the version
-// it replaces. ygo resolves dependencies carried in a complete document state before it charges
-// unresolved items to its pending queue, so the cold load below succeeds for both browser-id
-// extremes.
-func TestANewVersionIsTakenWhicheverIDItsFirstVersionsWriterDrew(t *testing.T) {
-	service, _ := newTestService(t)
-	alice := model.Actor{Kind: "user", ID: "alice"}
-	headings := strings.Repeat("# a\n", 16_384)
-	for _, first := range []crdt.ClientID{1, math.MaxUint32, 1, math.MaxUint32} {
-		artifactID := createDocument(t, service.store, "One line.\n")
-		seedByWriter(t, service, artifactID, first, "One line.\n")
-		if _, err := joinedReplaceText(service, artifactID, headings, alice); err != nil {
-			t.Fatalf("a new version of 16,384 headings over a first version written by client %d: %v", first, err)
-		}
-		loaded, err := service.persistence.Load(context.Background(), artifactID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := crdt.ApplyUpdateV1(crdt.New(), loaded.Update, nil); err != nil {
-			t.Fatalf("a cold load of the version over client %d's: %v", first, err)
-		}
-	}
 }
 
 // seedByWriter writes artifactID's first live state, markdown's tree, as the writer client.

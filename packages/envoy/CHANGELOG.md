@@ -317,9 +317,11 @@
   bound's own, opening `document too large to store`, on every route. A spec, a new document or the
   markdown a rebuild is given (`POST /api/v1/artifacts/{id}/rebuild`) whose stored markdown (its
   rendering, which can run longer than what was sent) is past either limit is refused the same way,
-  where a rebuild from the latest version restores it whatever it weighs. Each transaction's writes
-  take the id after every writer the document holds, so server updates follow the state they build
-  on. A document's margin - the record of every comment and suggestion it has had, which every load
+  where a rebuild from the latest version restores it whatever it weighs. A write is also refused
+  when the live state it leaves would be past the 1,048,576 structs ygo decodes in one update:
+  fourteen alternating versions of 16,000 paragraphs and 16,000 headings, each within both upload
+  limits, otherwise left a document every read answered 500. A document's margin - the record of
+  every comment and suggestion it has had, which every load
   builds though no rendering carries it - is weighed too: one record (a comment's body and replies,
   a suggestion's replacement) holds at most 256 KiB of text and the margin 1 MiB, and a comment,
   suggestion, reply or edit that would leave either past its bound and bigger is `413
