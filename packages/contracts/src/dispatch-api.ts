@@ -231,7 +231,7 @@ export interface Issue {
   readonly rank: string;
   readonly labels: string[];
   readonly parent: string | null;
-  /** Lowercase GitHub login of the human who answers this issue's asks; null when unassigned. */
+  /** Lowercase email of the person who answers this issue's asks; null when unassigned. */
   readonly assignee: string | null;
   /** The session or human working this issue, or null when nobody has claimed it. */
   readonly claim: IssueClaim | null;
@@ -1668,8 +1668,8 @@ export interface CreateIssueInput {
   readonly force?: boolean;
   readonly labels?: string[];
   readonly priority?: IssuePriority | null;
-  /** An allowlisted login; omitted, the server picks the creating human, the personal token's
-   *  owner, or the parent's assignee. */
+  /** The email of a person who has signed in; omitted, the server picks the creating person, the
+   *  personal token's owner, or the parent's assignee. */
   readonly assignee?: string;
   /** The issue's own component attachment; omitted, it inherits its parent's. */
   readonly components?: IssueComponentsInput;
@@ -1690,7 +1690,8 @@ export interface UpdateIssueInput {
   readonly priority?: IssuePriority | null;
   readonly route?: string | null;
   readonly external_links?: ExternalLink[];
-  /** An allowlisted login, or null to unassign; omitted leaves the assignee alone. */
+  /** The email of a person who has signed in, or null to unassign; omitted leaves the assignee
+   *  alone. */
   readonly assignee?: string | null;
   /** A parent issue key in the same project, or null to clear; omitted leaves it alone. */
   readonly parent?: string | null;
@@ -1700,7 +1701,7 @@ export interface UpdateIssueInput {
   readonly actor?: Actor;
 }
 
-/** One row of GET /api/v1/users: a login on the sign-in allowlist. */
+/** One row of GET /api/v1/users: a person who has signed in, `login` being their lowercase email. */
 export interface DispatchUser {
   readonly login: string;
 }
@@ -1709,9 +1710,9 @@ export interface ListUsersResponse {
   readonly users: DispatchUser[];
 }
 
-/** GET /api/v1/whoami: a human by display-cased login, or an agent with its personal token's
- *  owner (lowercase) — null under the shared token or a verified service token — and that
- *  service token's subject, null unless one authenticated the request. */
+/** GET /api/v1/whoami: a person by lowercase email (`login`), or an agent with its personal
+ *  token's owner (a lowercase email) — null under the shared token or a verified service token —
+ *  and that service token's subject, null unless one authenticated the request. */
 export type WhoamiResponse =
   | { readonly kind: "user"; readonly login: string }
   | { readonly kind: "agent"; readonly owner: string | null; readonly service: string | null };

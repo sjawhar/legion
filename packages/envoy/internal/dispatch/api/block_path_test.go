@@ -16,7 +16,6 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
-	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -362,13 +361,11 @@ func readingServer(t *testing.T, database *store.Store, persist docs.VersionedSt
 	if wrap != nil {
 		service = wrap(documents)
 	}
-	allowed := map[string]struct{}{"alice": {}}
 	deps, err := NewDeps(DepsInput{
-		Store:         database,
-		Identity:      identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: allowed},
-		AllowedLogins: allowed,
-		Docs:          service,
-		Events:        broker,
+		Store:    database,
+		Identity: headerIdentity(database),
+		Docs:     service,
+		Events:   broker,
 	})
 	if err != nil {
 		t.Fatalf("new API dependencies: %v", err)
