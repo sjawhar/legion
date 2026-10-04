@@ -357,10 +357,13 @@ const LegionThreadOutcome = z.union([
   }),
 ]);
 /** `api.ThreadsResolveResponse`, the body of `POST /legion/v1/threads/resolve`: each unresolved
- * thread's outcome, in GitHub's order, and, when GitHub refused to resolve a thread, that thread
- * and GitHub's message (`refused`), the outcomes before it being all that ran. */
+ * thread's outcome, in GitHub's order, but for the threads whose newest comment is a draft in the
+ * implement App's pending review, which `withheld` counts without naming; and, when GitHub refused
+ * to resolve a thread, that thread and GitHub's message (`refused`), the outcomes and the count
+ * before it being all that ran. */
 export const LegionThreadsResolveResponse = z.strictObject({
   threads: z.array(LegionThreadOutcome),
+  withheld: z.number().int().nonnegative(),
   refused: z.strictObject({ url: nonEmptyString, error: nonEmptyString }).optional(),
 });
 
