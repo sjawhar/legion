@@ -1,23 +1,29 @@
-import { readFile, stat } from "node:fs/promises";
-import { createRequire } from "node:module";
-import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig, type Plugin } from "vite";
-import { thirdPartyNotices } from "../../../scripts/third-party-notices";
+import {
+  type GeneratedCode,
+  packageRoot,
+  thirdPartyNotices,
+  viteBundleInputs,
+} from "../../../scripts/third-party-notices";
 
-/** Tailwind's `@plugin` and `@config`: JavaScript it runs while compiling a stylesheet, whose
- *  output lands in the CSS although the package never enters the module graph. */
-const TAILWIND_JS_DIRECTIVE = /@(?:plugin|config)\s+["']([^"']+)["']/g;
+const vite = packageRoot("vite", fileURLToPath(new URL(".", import.meta.url)));
+/**
+ * The code the build emits from no source file it records: Vite's own helpers (module preload,
+ * and the CommonJS interop of the @rollup/plugin-commonjs build Vite 5 carries inside it), and
+ * the wrappers that interop puts around a CommonJS module, whose own file the build records.
+ */
+const GENERATED_CODE: GeneratedCode[] = [
+  { id: /^\0vite\//, packages: [vite] },
+  { id: /^\0(commonjsHelpers\.js|commonjs-dynamic-modules)$/, packages: [vite] },
+  { id: /^\0\/.*\?commonjs-(module|exports)$/, packages: [] },
+];
 
 /**
  * Writes dist/THIRD_PARTY_NOTICES.txt, which Dispatch serves at /THIRD_PARTY_NOTICES.txt as text:
- * the license of every third-party package the build copies into dist. Its inputs are the modules
- * the chunks render (tree-shaken modules are left out), the source file of every emitted asset, the
- * files a plugin read that are no module at all (the stylesheets a CSS `@import` pulls in), and the
- * packages a stylesheet names to Tailwind as plugins. Virtual modules (`\0` ids) are not files, and
- * a `?query` suffix names the file before it.
+ * the license of every third-party package the build copies into dist.
  */
 function thirdPartyNoticesFile(): Plugin {
   let root = "";
@@ -28,28 +34,7 @@ function thirdPartyNoticesFile(): Plugin {
       root = config.root;
     },
     async generateBundle(_options, bundle) {
-      const file = (id: string) => resolve(root, id.replace(/\?.*$/, ""));
-      const notVirtual = (id: string) => !id.startsWith("\0");
-      const inputs = new Set<string>();
-      for (const output of Object.values(bundle)) {
-        const ids =
-          output.type === "chunk" ? Object.keys(output.modules) : output.originalFileNames;
-        for (const id of ids.filter(notVirtual)) inputs.add(file(id));
-      }
-      const modules = new Set([...this.getModuleIds()].filter(notVirtual).map(file));
-      for (const id of this.getWatchFiles().filter(notVirtual)) {
-        // A watch entry may also be a directory or a glob Tailwind scans for class names.
-        const path = file(id);
-        if (!modules.has(path) && (await stat(path).catch(() => null))?.isFile()) inputs.add(path);
-      }
-      for (const input of [...inputs].filter((path) => path.endsWith(".css"))) {
-        const resolveFrom = createRequire(input).resolve;
-        for (const [, specifier] of (await readFile(input, "utf8")).matchAll(
-          TAILWIND_JS_DIRECTIVE
-        )) {
-          inputs.add(resolveFrom(specifier));
-        }
-      }
+      const inputs = await viteBundleInputs(this, bundle, root, GENERATED_CODE);
       this.emitFile({
         type: "asset",
         fileName: "THIRD_PARTY_NOTICES.txt",
