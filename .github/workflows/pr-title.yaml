@@ -23,3 +23,13 @@ jobs:
             echo "::error::PR title must be a conventional commit subject (type(scope): summary). Squash merges use the PR title as the commit subject, and the release workflows version from conventional subjects — a non-conventional title makes the release pipelines rely on the squash body alone."
             exit 1
           fi
+
+      # The title becomes main's squash subject and a line of the generated release notes, and the
+      # body can reach the squash message, so both are as public as the tree. The title and body
+      # reach the script as environment variables, never as shell text.
+      - uses: actions/checkout@v5
+      - name: Check the title and body name nothing private
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: .github/scripts/check-pr-text.sh
