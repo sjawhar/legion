@@ -212,8 +212,7 @@ func decode[T any](t *testing.T, body []byte) T {
 	return v
 }
 
-// --- wire-shape mirrors of the shared broker contract
-// (dispatch://AGENTC-393/artifact/plan-overview-md), for decoding response bodies ---
+// --- wire-shape mirrors of the shared broker contract, for decoding response bodies ---
 
 type wireError struct {
 	Code  string `json:"code"`

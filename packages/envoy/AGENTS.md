@@ -1757,7 +1757,11 @@ code relies on: `Load` lists with `ListSecrets`' `name` filter, a case-sensitive
 `BROKER_SECRETS_PREFIX` and keeps only the names `strings.CutPrefix` finds under it, so a lister
 that answers more serves and logs nothing outside the namespace (`secrets.Local` filters as Secrets
 Manager does); a name under the prefix maps one-to-one to a request name (`slugPattern`); an alias
-on a secret's `KmsKeyId` is resolved through `kms:ListAliases` lazily, at most once per load; and
+on a secret's `KmsKeyId` is resolved through `kms:ListAliases` lazily, at most once per load;
+whether a secret has a value is read from the same listing's `SecretVersionsToStages` (a version
+labelled `AWSCURRENT`, the one `GetSecretValue` reads), with no call per secret, and checked after
+every other reason, so a secret refused for a tag or its key is logged for that (`secrets.Local`
+gives a secret created without a value no version, as Secrets Manager does); and
 an owner tag naming a service is refused as malformed while `Loader.Services` is empty, as
 `cmd/broker` leaves it. The two ERROR lines, `policy.RefusedMessage` with a `Reason*` constant and
 `policy.LoadFailedMessage`, are what the deployment's alarms filter on, so neither changes without
