@@ -93,7 +93,8 @@ test("an Agents row send refused while the reader is on the Inbox is there on th
 });
 
 // At a desktop width a comment's Reply answers the same docked composer and send name a
-// message's Reply answers at every width (`ConversationTab.tsx:1402,1422,1456`): a refusal it
+// message's Reply answers at every width (`ConversationTab.tsx`'s `TargetedMessageTurn`,
+// `MessageTurn` and `CommentTurn` each wire their own `onReply` prop to it): a refusal it
 // holds for one comment or message must redirect a later Reply onto it, not be silently
 // overwritten, the same way the phone thread composer already redirects a Reply on another
 // comment (`redirectedReplyTarget` in `held-sends.ts`, read by both `beginReply`s).

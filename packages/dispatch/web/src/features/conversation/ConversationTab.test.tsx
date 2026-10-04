@@ -1192,9 +1192,9 @@ test("on a phone, another comment's Reply opens the thread whose reply was refus
 });
 
 // At a desktop width a comment's Reply answers the same docked composer and send name the phone
-// thread composer uses on a phone (`ConversationTab.tsx:1456`), so the same hazard applies: a
-// refusal the composer holds for one comment must redirect, not be silently overwritten, when
-// the reader taps Reply on a different one.
+// thread composer uses on a phone (`CommentTurn`'s `onReply` prop in `ConversationTab.tsx`), so
+// the same hazard applies: a refusal the composer holds for one comment must redirect, not be
+// silently overwritten, when the reader taps Reply on a different one.
 test("at a desktop width, another comment's Reply redirects onto the one whose refusal it holds", async () => {
   const a = commentEvent(1, "comment-a", "Comment A");
   const b = commentEvent(2, "comment-b", "Comment B");
@@ -1238,9 +1238,9 @@ test("at a desktop width, another comment's Reply redirects onto the one whose r
   }
 });
 
-// A message's Reply answers the same docked composer at every width (`ConversationTab.tsx:1422`,
-// unconditional - not gated on phone viewport the way a comment's is), so the hazard, and the
-// redirect that closes it, hold here too.
+// A message's Reply answers the same docked composer at every width (`MessageTurn`'s `onReply`
+// prop in `ConversationTab.tsx`, unconditional - not gated on phone viewport the way a
+// comment's is), so the hazard, and the redirect that closes it, hold here too.
 test("another message's Reply redirects onto the one whose refusal the docked composer holds", async () => {
   const originalGetIssueEvents = api.getIssueEvents;
   const originalListAgents = api.listAgents;
