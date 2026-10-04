@@ -84,7 +84,12 @@ import {
   receiptAnsweredWithError,
   withGuidance,
 } from "./delivery";
-import { useHeldReplyTo, useHeldSendsUnder } from "./held-sends";
+import {
+  redirectedReplyTarget,
+  useHeldReplyTo,
+  useHeldSends,
+  useHeldSendsUnder,
+} from "./held-sends";
 import { MentionComposer } from "./MentionComposer";
 import { ReplyButton } from "./ReplyButton";
 import { firstLine, ReplyQuote, replyQuoteText } from "./ReplyQuote";
@@ -833,6 +838,7 @@ export function ConversationTab({
   // whatever unmounts its composer; this decides what the reader sees.
   const sendKey = useMemo<MutationKey>(() => ["conversation-composer", issueKey], [issueKey]);
   const { sending: composerSending, sendingNow } = useSending(sendKey);
+  const store = useHeldSends();
   // Comments whose card's own reply the store holds, out or refused.
   const heldCardReplies = useHeldSendsUnder(threadRepliesSendKey(sendKey));
   const [failedOps, setFailedOps] = useState<FailedStateOperations>();
@@ -971,12 +977,15 @@ export function ConversationTab({
   });
   const [ownSendCount, setOwnSendCount] = useState(0);
   // The docked composer's reply. A message's Reply answers here at every width, and so does a
-  // comment's above the phone layout.
+  // comment's above the phone layout - the same shared composer and send name
+  // (`redirectedReplyTarget`'s doc comment explains why a Reply elsewhere while it holds a
+  // refusal redirects onto that comment or message instead of overwriting its draft).
   const [replyTo, setReplyTo] = useHeldReplyTo(sendKey);
   const beginReply = (target: ReplyTarget): boolean => {
     if (sendingNow()) return false;
-    setReplyTo(target);
-    return true;
+    const reply = redirectedReplyTarget(store, sendKey, target);
+    setReplyTo(reply);
+    return reply.id === target.id;
   };
   const phoneReplyTargetsThread =
     phoneThread !== undefined && phone.replyTo?.id === phoneThread.event.payload.id;

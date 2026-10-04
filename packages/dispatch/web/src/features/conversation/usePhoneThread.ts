@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { useSending } from "../../hooks/useSending";
 import type { ReplyTarget } from "./composer-model";
-import { useHeldReplyTo, useHeldSends } from "./held-sends";
+import { redirectedReplyTarget, useHeldReplyTo, useHeldSends } from "./held-sends";
 
 /** The name every comment thread card's own reply send in a tab sits beneath. */
 export function threadRepliesSendKey(sendKey: MutationKey): MutationKey {
@@ -111,15 +111,10 @@ export function usePhoneThread({
   return {
     beginReply: (target) => {
       if (sendingNow()) return false;
-      const heldReply = store.get(composerKey)?.request.replyTo;
-      if (heldReply !== undefined && heldReply !== null && heldReply.id !== target.id) {
-        setReplyTo(heldReply);
-        setOpenId(heldReply.id);
-        return false;
-      }
-      setReplyTo(target);
-      setOpenId(target.id);
-      return true;
+      const reply = redirectedReplyTarget(store, composerKey, target);
+      setReplyTo(reply);
+      setOpenId(reply.id);
+      return reply.id === target.id;
     },
     cardReplySending,
     composerKey,

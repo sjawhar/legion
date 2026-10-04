@@ -5,9 +5,17 @@ import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
 import { ApiError, api } from "../../api/client";
 import { prependEventToLog } from "../../api/sse";
-import type { Actor, Artifact, Comment, Event, UserIssueState, UserState } from "../../api/types";
+import type {
+  Actor,
+  Artifact,
+  Comment,
+  Event,
+  Message,
+  UserIssueState,
+  UserState,
+} from "../../api/types";
+import { stubMatchMedia } from "../margin/margin-fixture";
 import { KeymapProvider } from "../shell/KeymapProvider";
-import { PHONE_VIEWPORT_QUERY } from "../shell/useDialog";
 import { ConversationTab } from "./ConversationTab";
 import { answeredWithErrorGuidance, safeRetryGuidance } from "./delivery";
 
@@ -968,24 +976,6 @@ test("with resolved comments shown, a Resolve that lands keeps its thread open",
   }
 });
 
-/** Stubs the viewport as a phone's (`PHONE_VIEWPORT_QUERY`); the call returned puts it back. */
-function phoneViewport(): () => void {
-  const original = window.matchMedia;
-  window.matchMedia = ((query: string) => ({
-    addEventListener: () => {},
-    addListener: () => {},
-    dispatchEvent: () => false,
-    matches: query === PHONE_VIEWPORT_QUERY,
-    media: query,
-    onchange: null,
-    removeEventListener: () => {},
-    removeListener: () => {},
-  })) as unknown as typeof window.matchMedia;
-  return () => {
-    window.matchMedia = original;
-  };
-}
-
 /** A tab whose one comment the reader resolves: `land` lets the server take the Resolve, after
  *  which the events read lists the comment resolved, and `refuse` refuses the reply sent. */
 function ownResolveOverAReply() {
@@ -1049,7 +1039,7 @@ const refusedText = "Couldn't send — the server is down";
 // reader's: the refusal it holds, and the comment that reply answers, outlive the reader's own
 // Resolve on a phone as they do at a desktop width.
 test("on a phone, the reader's own Resolve keeps the thread composer's refused reply and its comment", async () => {
-  const restoreViewport = phoneViewport();
+  const restoreViewport = stubMatchMedia(true);
   const resolve = ownResolveOverAReply();
 
   try {
@@ -1083,7 +1073,7 @@ test("on a phone, the reader's own Resolve keeps the thread composer's refused r
 // The same, with the reply refused while the Resolve is still out: the decision lands on a thread
 // that already shows the refusal.
 test("on a phone, a thread reply refused while the reader's Resolve is out outlives the Resolve", async () => {
-  const restoreViewport = phoneViewport();
+  const restoreViewport = stubMatchMedia(true);
   const resolve = ownResolveOverAReply();
 
   try {
@@ -1118,7 +1108,7 @@ test("on a phone, a thread reply refused while the reader's Resolve is out outli
 // closes the thread and keeps the reply's refusal for the thread's return.
 for (const width of ["phone", "desktop"] as const) {
   test(`at a ${width} width, the reader's own Resolve keeps the card's refused reply and its comment`, async () => {
-    const restoreViewport = width === "phone" ? phoneViewport() : () => {};
+    const restoreViewport = width === "phone" ? stubMatchMedia(true) : () => {};
     const resolve = ownResolveOverAReply();
 
     try {
@@ -1153,7 +1143,7 @@ for (const width of ["phone", "desktop"] as const) {
 // back in that comment's thread: another comment's Reply opens it there, rather than readdressing
 // the composer, and its draft, to the other comment.
 test("on a phone, another comment's Reply opens the thread whose reply was refused after Back", async () => {
-  const restoreViewport = phoneViewport();
+  const restoreViewport = stubMatchMedia(true);
   const a = commentEvent(1, "comment-a", "Comment A");
   const b = commentEvent(2, "comment-b", "Comment B");
   const reply = Promise.withResolvers<Comment>();
@@ -1198,6 +1188,104 @@ test("on a phone, another comment's Reply opens the thread whose reply was refus
     listAgents.mockRestore();
     createComment.mockRestore();
     restoreViewport();
+  }
+});
+
+// At a desktop width a comment's Reply answers the same docked composer and send name the phone
+// thread composer uses on a phone (`ConversationTab.tsx:1456`), so the same hazard applies: a
+// refusal the composer holds for one comment must redirect, not be silently overwritten, when
+// the reader taps Reply on a different one.
+test("at a desktop width, another comment's Reply redirects onto the one whose refusal it holds", async () => {
+  const a = commentEvent(1, "comment-a", "Comment A");
+  const b = commentEvent(2, "comment-b", "Comment B");
+  const reply = Promise.withResolvers<Comment>();
+  const getIssueEvents = spyOn(api, "getIssueEvents").mockImplementation(async () => [b, a]);
+  const listAgents = spyOn(api, "listAgents").mockImplementation(async () => []);
+  const createComment = spyOn(api, "createComment").mockImplementation(() => reply.promise);
+  const queryClient = newQueryClient();
+  const view = render(tab({ "CORE-1": issueState() }, true, queryClient));
+  const turn = (id: string) => {
+    const element = view.container.querySelector<HTMLElement>(`[data-turn="comment:${id}"]`);
+    if (element === null) throw new Error(`expected ${id}'s turn`);
+    return element;
+  };
+
+  try {
+    await screen.findByText("Comment A");
+    fireEvent.click(within(turn("comment-a")).getByRole("button", { name: "Reply" }));
+    const composer = screen.getByRole("form", { name: "Comment composer" });
+    const field = within(composer).getByRole<HTMLTextAreaElement>("textbox", { name: "Comment" });
+    fireEvent.change(field, { target: { value: "Reply meant for A" } });
+    fireEvent.click(within(composer).getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(createComment).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      reply.reject(new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" }));
+      await reply.promise.catch(() => {});
+    });
+    await within(composer).findByText(refusedText);
+
+    fireEvent.click(within(turn("comment-b")).getByRole("button", { name: "Reply" }));
+    expect(within(composer).getByText(/Comment A/)).toBeTruthy();
+    expect(within(composer).queryByText(/Comment B/)).toBeNull();
+    expect(within(composer).getByText(refusedText)).toBeTruthy();
+    expect(field.value).toBe("Reply meant for A");
+    expect(createComment).toHaveBeenCalledTimes(1);
+  } finally {
+    view.unmount();
+    getIssueEvents.mockRestore();
+    listAgents.mockRestore();
+    createComment.mockRestore();
+  }
+});
+
+// A message's Reply answers the same docked composer at every width (`ConversationTab.tsx:1422`,
+// unconditional - not gated on phone viewport the way a comment's is), so the hazard, and the
+// redirect that closes it, hold here too.
+test("another message's Reply redirects onto the one whose refusal the docked composer holds", async () => {
+  const originalGetIssueEvents = api.getIssueEvents;
+  const originalListAgents = api.listAgents;
+  const reply = Promise.withResolvers<Message>();
+  const createMessage = spyOn(api, "createMessage").mockImplementation(() => reply.promise);
+  const queryClient = newQueryClient();
+  let unmount: (() => void) | undefined;
+
+  try {
+    const a = message(1, "Message A");
+    const b = message(2, "Message B");
+    api.getIssueEvents = async () => [b, a];
+    api.listAgents = async () => [];
+    const view = render(tab({ "CORE-1": issueState() }, true, queryClient));
+    unmount = view.unmount;
+    const turn = (id: number) => {
+      const element = view.container.querySelector<HTMLElement>(`[data-turn="message:${id}"]`);
+      if (element === null) throw new Error(`expected message ${id}'s turn`);
+      return element;
+    };
+
+    await screen.findByText("Message A");
+    fireEvent.click(within(turn(1)).getByRole("button", { name: "Reply" }));
+    const composer = screen.getByRole("form", { name: "Comment composer" });
+    const field = within(composer).getByRole<HTMLTextAreaElement>("textbox", { name: "Comment" });
+    fireEvent.change(field, { target: { value: "Reply meant for A" } });
+    fireEvent.click(within(composer).getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(createMessage).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      reply.reject(new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" }));
+      await reply.promise.catch(() => {});
+    });
+    await within(composer).findByText(refusedText);
+
+    fireEvent.click(within(turn(2)).getByRole("button", { name: "Reply" }));
+    expect(within(composer).getByText(/Message A/)).toBeTruthy();
+    expect(within(composer).queryByText(/Message B/)).toBeNull();
+    expect(within(composer).getByText(refusedText)).toBeTruthy();
+    expect(field.value).toBe("Reply meant for A");
+    expect(createMessage).toHaveBeenCalledTimes(1);
+  } finally {
+    unmount?.();
+    createMessage.mockRestore();
+    api.getIssueEvents = originalGetIssueEvents;
+    api.listAgents = originalListAgents;
   }
 });
 

@@ -77,8 +77,13 @@ dependency in its body. For the image-pin comparison and `/healthz` deployment e
   where the reader finds them. A refusal the thread shows is the reader's to leave: Back, Escape
   and Collapse thread drop it, its draft with it - the card's reply's, and the thread composer's,
   whose reply ends with it - and so does the thread composer's Cancel reply, as an inline reply's
-  does (`usePhoneThread`'s `leave` and `endReply`). The composer's refusal is its comment's: a
-  Reply on another comment while it holds one opens that comment's thread instead, where the
+  does (`usePhoneThread`'s `leave` and `endReply`). A composer's refusal is its own target's, not
+  whatever Reply is tapped next: every held send under one name - the docked composer's, which
+  every message's Reply answers at every width and every comment's above the phone layout, and the
+  phone thread composer's, which every comment's Reply answers on a phone - redirects a later
+  Reply for a different comment or message onto the target it already holds
+  (`redirectedReplyTarget` in `held-sends.ts`, read by both `beginReply`s) instead of silently
+  overwriting its draft; on a phone that redirect also opens the held comment's thread, where the
   reader retries or drops it. A thread card's own inline reply lives in its thread, not the tab,
   so it names its send beneath theirs (`threadReplySendKey`): every Reply holds while it is out,
   and so does its thread - Collapse thread, and on a phone Back and Escape - until the server

@@ -92,6 +92,54 @@ test("an Agents row send refused while the reader is on the Inbox is there on th
   }
 });
 
+// At a desktop width a comment's Reply answers the same docked composer and send name a
+// message's Reply answers at every width (`ConversationTab.tsx:1402,1422,1456`): a refusal it
+// holds for one comment or message must redirect a later Reply onto it, not be silently
+// overwritten, the same way the phone thread composer already redirects a Reply on another
+// comment (`redirectedReplyTarget` in `held-sends.ts`, read by both `beginReply`s).
+test("a docked Reply on a different comment redirects onto the one whose refusal it holds", async ({
+  browser,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name === "iphone",
+    "a phone's comment Reply opens its own thread, covered by the thread-composer redirect row"
+  );
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Two comments, one docked composer" });
+  const a = await createComment(issue.key, { body: "Comment A" });
+  const b = await createComment(issue.key, { body: "Comment B" });
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const composer = page.getByRole("form", { name: "Comment composer" }).last();
+    const field = composer.getByLabel("Comment");
+    const refuse = await refusePosts(page, `**/api/v1/issues/${issue.key}/comments`);
+    await page
+      .locator(`[data-turn="comment:${a.id}"]`)
+      .getByRole("button", { name: "Reply" })
+      .click();
+    await field.fill("Reply meant for A");
+    await composer.getByRole("button", { exact: true, name: "Send" }).click();
+    await expect(field).toBeDisabled();
+    const refused = answeredPost(page, `/api/v1/issues/${issue.key}/comments`, 503);
+    refuse();
+    await refused;
+    await expect(composer.getByText(refusedText)).toBeVisible();
+
+    await page
+      .locator(`[data-turn="comment:${b.id}"]`)
+      .getByRole("button", { name: "Reply" })
+      .click();
+    await expect(composer.getByText(/Comment A/)).toBeVisible();
+    await expect(composer.getByText(/Comment B/)).toHaveCount(0);
+    await expect(composer.getByText(refusedText)).toBeVisible();
+    await expect(field).toHaveValue("Reply meant for A");
+  } finally {
+    await alice.close();
+  }
+});
+
 // Past the send's deadline Collapse thread, and on a phone the thread's Back, let the reader leave
 // a thread whose own reply is still out. The reply's composer goes with the thread it is in; the
 // send does not, and the thread opened again has its draft and refusal.

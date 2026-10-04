@@ -252,6 +252,25 @@ export class HeldSends {
   }
 }
 
+/** The reply target a composer named `mutationKey` must show for a Reply tap on `target`: the
+ *  comment or message a refusal is already held there, when one is and it names a different id,
+ *  so the reader's Reply elsewhere redirects onto it instead of silently overwriting its draft -
+ *  the docked composer's and the phone thread composer's `beginReply` both read this, since
+ *  `composerKey` and `sendKey` are both plain `MutationKey`s read the same way; `target` itself
+ *  otherwise. The caller's own `sendingNow` guard must run first and refuse the tap while a send
+ *  under `mutationKey` is out: an entry this reads can then only be `"refused"` or absent, never
+ *  `"sending"`/`"late"`. */
+export function redirectedReplyTarget(
+  store: HeldSends,
+  mutationKey: MutationKey,
+  target: ReplyTarget
+): ReplyTarget {
+  const heldReply = store.get(mutationKey)?.request.replyTo;
+  return heldReply !== undefined && heldReply !== null && heldReply.id !== target.id
+    ? heldReply
+    : target;
+}
+
 const stores = new WeakMap<QueryClient, HeldSends>();
 
 /** The held sends that live with `client`: one store per app, as there is one client. */
