@@ -24,6 +24,7 @@ import {
   replyToMessageDelivery,
 } from "./api";
 import { recordClipboard } from "./clipboard";
+import { holdFirstRequest } from "./editor";
 import { resetDatabase, setCreatedAt } from "./seed";
 import { asUser } from "./users";
 
@@ -1652,20 +1653,16 @@ test("a session that registers under the filter after select-all is not swept in
 });
 
 // A request for the agents that never reaches the server - a dropped connection, as a busy box
-// drops one - is retried as every other read is, so the page loads rather than saying it could not
-// load agents until its next poll, 15 s later.
+// drops one - is retried, so the page loads rather than saying it could not load agents until its
+// next poll, 15 s later.
 test("the Agents page loads through one dropped request for its agents", async ({ browser }) => {
   await setLiveSessions([planner]);
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
-    let dropped = 0;
-    await page.route("**/api/v1/agents", async (route) => {
-      if (dropped > 0) return route.fallback();
-      dropped += 1;
-      return route.abort("connectionreset");
-    });
+    const first = await holdFirstRequest(page, /\/api\/v1\/agents$/u);
     await page.goto("/agents");
+    await (await first.held).abort("connectionreset");
     // Well inside the page's 15 s poll, which would bring the list back without a retry.
     await expect(page.getByRole("heading", { level: 1, name: "Agents" })).toBeVisible({
       timeout: 10_000,
@@ -1673,7 +1670,6 @@ test("the Agents page loads through one dropped request for its agents", async (
     // The session has no Dispatch activity, so its row is listed under that fold, hidden.
     await expect(agentRow(page, planner.session_id)).toHaveCount(1);
     await expect(page.getByText(/^Could not (load|refresh) agents/)).toHaveCount(0);
-    expect(dropped).toBe(1);
   } finally {
     await alice.close();
   }

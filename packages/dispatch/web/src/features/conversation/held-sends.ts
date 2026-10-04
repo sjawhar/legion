@@ -84,6 +84,8 @@ function refreshAfter(client: QueryClient, { anchor, owner }: SentRequest): void
   }
 }
 
+const NO_HELD_SENDS: readonly HeldSend[] = Object.freeze([]);
+
 /**
  * The app's held sends, one per send name, beside its `QueryClient` (`heldSends`): above the
  * router, so no route change, collapse or unmount below it drops one. An entry leaves when its
@@ -95,8 +97,8 @@ function refreshAfter(client: QueryClient, { anchor, owner }: SentRequest): void
 export class HeldSends {
   readonly #client: QueryClient;
   readonly #entries = new Map<string, HeldSend>();
-  /** `under`'s answers, by the prefix's hash, each dropped when a send beneath its prefix
-   *  changes. */
+  /** `under`'s answers that hold a send, by the prefix's hash, each dropped when a send beneath
+   *  its prefix changes. */
   readonly #under = new Map<
     string,
     { readonly prefix: MutationKey; readonly sends: readonly HeldSend[] }
@@ -121,6 +123,8 @@ export class HeldSends {
     const sends = [...this.#entries.values()].filter((held) =>
       partialMatchKey(held.mutationKey, prefix)
     );
+    // An empty answer is the one shared array, so a prefix nothing is sent under holds no entry.
+    if (sends.length === 0) return NO_HELD_SENDS;
     this.#under.set(prefixId, { prefix, sends });
     return sends;
   }
@@ -185,14 +189,16 @@ export class HeldSends {
     return true;
   }
 
-  /** Drops the refused send under `mutationKey`, its draft and refusal with it. A send still out
-   *  is not the reader's to drop: it stays until the server answers. */
-  discard(mutationKey: MutationKey): void {
+  /** Drops the refused send under `mutationKey`, its draft and refusal with it, and says whether
+   *  there was one. A send still out is not the reader's to drop: it stays until the server
+   *  answers. */
+  discard(mutationKey: MutationKey): boolean {
     const id = hashKey(mutationKey);
     const held = this.#entries.get(id);
-    if (held?.status !== "refused") return;
+    if (held?.status !== "refused") return false;
     this.#set(id, undefined);
     this.#emit({ kind: "discarded", send: held });
+    return true;
   }
 
   /** Keeps what the reader wrote over a refusal, as its composer unmounts. */

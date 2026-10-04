@@ -17,8 +17,6 @@ export function useAgents(
   refetch: () => Promise<unknown>;
   titles: ReadonlyMap<string, string>;
 } {
-  // It retries as every read does (`main.tsx`): a dropped connection or a 5xx is tried twice more
-  // before the Agents page says it could not load agents.
   const { data, error, isError, isPending, refetch } = useQuery({
     enabled,
     queryFn: () => api.listAgents(),

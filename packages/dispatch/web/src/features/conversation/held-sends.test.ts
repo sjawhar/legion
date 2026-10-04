@@ -1,5 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
-import { hashKey, type MutationKey, QueryClient } from "@tanstack/react-query";
+import { type MutationKey, QueryClient } from "@tanstack/react-query";
+import { waitFor } from "@testing-library/react";
 
 import { ApiError, api } from "../../api/client";
 import type { Comment } from "../../api/types";
@@ -18,20 +19,10 @@ const request: SentRequest = {
 
 const refusal = new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" });
 
-/** Resolves once the store tells what became of the send under `mutationKey`. */
-function outcomeOf(store: HeldSends, mutationKey: MutationKey): Promise<void> {
-  const { promise, resolve } = Promise.withResolvers<void>();
-  const stop = store.onOutcome(({ send }) => {
-    if (hashKey(send.mutationKey) !== hashKey(mutationKey)) return;
-    stop();
-    resolve();
-  });
-  return promise;
-}
-
 // `under` is what `useHeldSendsUnder` hands React as its snapshot, so the array for a prefix is
-// the same one until a send beneath that prefix changes - a send elsewhere re-renders nothing that
-// watches it - and a new one as soon as one beneath it does, or the watcher shows a stale send.
+// the same one until a send beneath that prefix changes - empty included, where a new array per
+// read would re-render its watcher for ever - and a new one as soon as one beneath it does, or the
+// watcher shows a stale send.
 test("the held sends under a prefix are one array until a send beneath it changes", async () => {
   const cardReply = Promise.withResolvers<Comment>();
   const docked = Promise.withResolvers<Comment>();
@@ -46,6 +37,7 @@ test("the held sends under a prefix are one array until a send beneath it change
   try {
     const empty = store.under(prefix);
     expect(empty).toEqual([]);
+    expect(store.under(prefix)).toBe(empty);
 
     store.send(cardKey, request);
     const sending = store.under(prefix);
@@ -53,19 +45,17 @@ test("the held sends under a prefix are one array until a send beneath it change
 
     store.send(dockedKey, request);
     expect(store.under(prefix)).toBe(sending);
-    const dockedRefused = outcomeOf(store, dockedKey);
     docked.reject(refusal);
-    await dockedRefused;
-    expect(store.get(dockedKey)?.status).toBe("refused");
+    await waitFor(() => expect(store.get(dockedKey)?.status).toBe("refused"));
     expect(store.under(prefix)).toBe(sending);
 
-    const cardRefused = outcomeOf(store, cardKey);
     cardReply.reject(refusal);
-    await cardRefused;
+    await waitFor(() => expect(store.get(cardKey)?.status).toBe("refused"));
     expect(store.under(prefix).map((held) => held.status)).toEqual(["refused"]);
 
-    store.discard(cardKey);
-    expect(store.under(prefix)).toEqual([]);
+    expect(store.discard(cardKey)).toBe(true);
+    expect(store.under(prefix)).toBe(empty);
+    expect(store.discard(cardKey)).toBe(false);
   } finally {
     createComment.mockRestore();
   }
