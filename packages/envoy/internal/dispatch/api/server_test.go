@@ -9,11 +9,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"net/textproto"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -258,6 +260,59 @@ func multipartRequest(t *testing.T, handler http.Handler, target string, fields 
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	return response
+}
+
+// databaseFingerprint hashes every row of every table, so a test can tell a request wrote nothing
+// anywhere: no row inserted, updated or deleted.
+func databaseFingerprint(t *testing.T, database *store.Store) map[string]string {
+	t.Helper()
+	ctx := context.Background()
+	rows, err := database.Pool.Query(ctx, `select tablename from pg_tables where schemaname = 'public'`)
+	if err != nil {
+		t.Fatalf("list tables: %v", err)
+	}
+	tables, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		t.Fatalf("read table names: %v", err)
+	}
+	if len(tables) == 0 {
+		t.Fatal("the schema has no tables; a fingerprint of it proves nothing")
+	}
+	fingerprint := make(map[string]string, len(tables))
+	for _, table := range tables {
+		var digest string
+		if err := database.Pool.QueryRow(ctx, fmt.Sprintf(
+			`select count(*) || ':' || coalesce(md5(string_agg(t::text, ',' order by t::text)), '') from %s t`,
+			pgx.Identifier{table}.Sanitize(),
+		)).Scan(&digest); err != nil {
+			t.Fatalf("fingerprint %s: %v", table, err)
+		}
+		fingerprint[table] = digest
+	}
+	return fingerprint
+}
+
+// assertUnchanged fails for each table whose rows differ between two fingerprints of one database.
+func assertUnchanged(t *testing.T, request string, before, after map[string]string) {
+	t.Helper()
+	for _, table := range slices.Sorted(maps.Keys(after)) {
+		if before[table] != after[table] {
+			t.Errorf("%s changed table %s", request, table)
+		}
+	}
+}
+
+// assertRefusal checks an answer is 400 with code and an error naming field first.
+func assertRefusal(t *testing.T, request string, status int, body []byte, code, field string) {
+	t.Helper()
+	var refusal struct {
+		Code  string `json:"code"`
+		Error string `json:"error"`
+	}
+	_ = json.Unmarshal(body, &refusal)
+	if status != http.StatusBadRequest || refusal.Code != code || !strings.HasPrefix(refusal.Error, field+" holds a ") {
+		t.Errorf("%s = %d %s %q, want 400 %s naming %s", request, status, refusal.Code, refusal.Error, code, field)
+	}
 }
 
 func decodeBody[T any](t *testing.T, response *httptest.ResponseRecorder) T {

@@ -14068,6 +14068,7 @@ var ISSUE_REFERENCE = "An issue is a native KEY or external owner/repo#n referen
 var OWNER_REFERENCE = "Exactly one of issue and project is required. An issue is a native KEY or external owner/repo#n reference; a project is a project key such as CORE and addresses an unlinked project document named by artifact.";
 var ASK_QUESTION_CONTRACT = "The question carries the problem the reader recognises and why it matters now, what constrains " + "the answer, and the recommendation with its reason. It asks how to solve the problem or which " + "outcome is wanted; never enumerate choices in the question.";
 var ASK_OPTIONS_CONTRACT = "Options carry the genuinely different approaches. Each option has a label, and its description " + "says what that approach costs.";
+var HUMAN_AGREED_TO_DOCUMENT = "the human has agreed to every point in the document";
 function documentOwnerValidation(requireArtifact, alwaysRequireArtifact = false) {
   return {
     check: (value) => {
@@ -14229,7 +14230,7 @@ var dispatchToolSpecs = [
         }
       ]
     },
-    description: "Open a durable, answerable decision on an issue or project document. Do not use it for a " + "status update or discussion; use dispatch_message instead. " + ASK_QUESTION_CONTRACT + " " + ASK_OPTIONS_CONTRACT + " For an action only a human can perform, state what it changes and risks as constraints. " + "Anything you are blocked on a human for, including a credential or grant to renew, an " + "approval, or a decision, is an ask, never a message. " + "Anchor a document question, thread reply_to/reply_to_ask, or cite a dispatch:// " + `reference \u2014 it must be answerable from its own text and anchor alone, never "see above". ` + `A quote anchor is pinned to its block. Question is at most ${ASK_QUESTION_MAX} characters ` + `and has at most 8 options. ${OWNER_REFERENCE}`,
+    description: "Open a to-do or permission only a human can give, or a decision that has no document to " + "live in. A question about the design an issue's document records is not this tool: write " + "it into that document as a decision block (dispatch_doc_edit inserting an ask block at the " + "end of the section it concerns), at every phase, approved spec or not; the block reaches " + "the Inbox and its answer lands next to its context. Never give an ask an Approve option: a " + "document is approved through dispatch_request_approval. Do not use this tool for a status " + "update or discussion; use dispatch_message instead. " + ASK_QUESTION_CONTRACT + " " + ASK_OPTIONS_CONTRACT + " For an action only a human can perform, state what it changes and risks as constraints. " + "Anything that requires a human to do, including a credential or grant renewal, is an ask, " + "never a message. " + "Anchor a to-do about a document passage, thread reply_to/reply_to_ask, or cite a dispatch:// " + `reference \u2014 it must be answerable from its own text and anchor alone, never "see above". ` + `A quote anchor is pinned to its block. Question is at most ${ASK_QUESTION_MAX} characters ` + `and has at most 8 options. ${OWNER_REFERENCE}`,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE).optional(),
       project: z2.string().describe("Project key owning the document.").optional(),
@@ -14360,7 +14361,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_message",
     example: { issue: "DSP-1", body: "Implementation started." },
-    description: "Post a note humans must read now: a reply to a human's message or a deliverable that landed. A blocker only a human can " + "clear is an ask (dispatch_ask), so it lands in their inbox. Never progress or status updates - Dispatch is a high-signal " + "record, not a log. Not a decision (dispatch_ask) or document feedback (dispatch_comment). To answer a human's direct message to this session - " + "one sent from the Agents page, which names no issue - pass that message's bare id as in_reply_to and no issue; " + "the reply lands in that conversation. Another call with the same in_reply_to and new text posts a follow-up, " + "threaded under this session's first reply; the same text again posts nothing. dispatch_read({message}) reads " + "that conversation back. Every other message names its issue. " + `Body is at most 2,000 characters. ${ISSUE_REFERENCE}`,
+    description: "Post a note humans must read now: a reply to a human's message or a deliverable that landed. A to-do only a human can " + "complete is an ask (dispatch_ask), so it reaches their inbox. Never progress or status updates - Dispatch is a high-signal " + "record, not a log. Not a design decision (write it as a decision block in the document) or document feedback (dispatch_comment). " + "To answer a human's direct message to this session - one sent from the Agents page, which names no issue - pass that message's bare id as " + "in_reply_to and no issue; the reply lands in that conversation. Another call with the same in_reply_to and new text posts a follow-up, " + "threaded under this session's first reply; the same text again posts nothing. dispatch_read({message}) reads " + "that conversation back. Every other message names its issue. " + `Body is at most 2,000 characters. ${ISSUE_REFERENCE}`,
     arguments: (z2) => ({
       issue: z2.string().describe(`${ISSUE_REFERENCE} Omit it only when in_reply_to answers a human's direct message to this session.`).optional(),
       body: z2.string({ max: 2000 }).describe("Update text, at most 2,000 characters."),
@@ -14409,7 +14410,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_doc_read",
     example: { issue: "DSP-1" },
-    description: "Read a live document or a named document version. Do not use it for issue status, asks, or events; " + "use dispatch_read instead. Supply ref, issue, or project plus artifact; issue plus an omitted artifact reads the primary document. " + "A live read returns its document token for an optional dispatch_doc_edit precondition; use /blocks for per-block tokens. " + OWNER_REFERENCE,
+    description: "Read a live document or a named document version, or the text of an uploaded file at its latest or named version. " + "Do not use it for issue status, asks, or events; " + "use dispatch_read instead. Supply ref, issue, or project plus artifact; issue plus an omitted artifact reads the primary document. " + "A live read returns its document token for an optional dispatch_doc_edit precondition; use /blocks for per-block tokens. " + "A file that is not UTF-8 text is described, with the route that serves its bytes. " + OWNER_REFERENCE,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE).optional(),
       project: z2.string().describe("Project key owning the document.").optional(),
@@ -14422,12 +14423,12 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_request_approval",
     example: { issue: "DSP-1", summary: "A live sync replaces the nightly export." },
-    description: "Ask a human to approve a document at its current version. Opens an approval ask (Approve / " + "Request changes) in the human's Inbox whose question names the document and version, " + "followed by the summary; the answer pins a review to that version and arrives as " + "artifact.approved or artifact.changes_requested. A later version carries the same open " + "request forward and leaves it waiting on you; once the revision is complete and the human " + "has agreed to every point in it, call this again to hand that request back. The request " + "carries nothing new. A call while it already waits on the human hands nothing back: the " + "same summary changes nothing, and a different one is refused, since it would rewrite the " + "card the human is reading. " + "Refused, with nothing sent, while the document holds an open decision block, even when a " + "human asked for approval: the refusal names each block; ask the human to answer or waive " + "it first. " + OWNER_REFERENCE,
+    description: "Ask a human to approve a document at its current version. Opens an approval ask (Approve / " + "Request changes) in the human's Inbox whose question names the document and version, " + "followed by the summary; the answer pins a review to that version and arrives as " + "artifact.approved or artifact.changes_requested. An open request follows the document: a " + "later version moves it to that version and leaves it waiting on you, as a human's reply in " + "its thread does. Only the first move since the request was opened or handed back sends an " + "event, and never to the session whose version made it; dispatch_doc_read shows whom it " + "waits on. Once the revision is complete and " + HUMAN_AGREED_TO_DOCUMENT + ", call this again to hand that same Inbox row back. The request carries nothing new. A " + "call while it already waits on the human hands nothing back: the same summary changes " + "nothing, and a different one is refused, since it would rewrite the card the human is " + "reading. Approve and Request changes each close the request, so the next call opens a new " + "one. Call it once per revision, when the revision is complete, never after each edit. An " + "approval goes stale when the document changes after it: request approval again once that " + "revision is complete and " + HUMAN_AGREED_TO_DOCUMENT + ". A new version of a Legion root spec closes its armed design gate until a human approves " + "it. " + "Refused, with nothing sent, while the document holds an open decision block, even when a " + "human asked for approval: the refusal names each block; ask the human to answer or waive " + "it first. " + OWNER_REFERENCE,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE).optional(),
       project: z2.string().describe("Project key owning the document.").optional(),
       artifact: z2.string().describe("Project document artifact id, slug, or filename; primary document by default for an issue.").optional(),
-      summary: z2.string({ min: 1 }).describe("What the human is approving, in one to three sentences, and nothing else: no commentary on itself or the conversation, and no question. Request approval only once the human has agreed to every point in the document.")
+      summary: z2.string({ min: 1 }).describe(`What the human is approving, in one to three sentences, and nothing else: no commentary on itself or the conversation, and no question. Request approval only once ${HUMAN_AGREED_TO_DOCUMENT}.`)
     }),
     validation: documentOwnerValidation(true)
   },
@@ -15051,6 +15052,20 @@ class DispatchClient {
   }
   async docRead(id, version2) {
     return version2 === undefined ? this.#json("GET", ["api", "v1", "artifacts", id, "text"]) : this.#json("GET", ["api", "v1", "artifacts", id, "versions", String(version2)]);
+  }
+  async fileVersion(id, version2) {
+    const url2 = this.#url(["api", "v1", "artifacts", id, "versions", String(version2)]);
+    const response = await this.fetchImpl(url2, {
+      method: "GET",
+      headers: { Accept: "*/*", Authorization: `Bearer ${this.token}` },
+      signal: this.#signal
+    });
+    if (!response.ok)
+      return this.#response("GET", url2, response);
+    return {
+      mime: response.headers.get("Content-Type") ?? "application/octet-stream",
+      bytes: new Uint8Array(await response.arrayBuffer())
+    };
   }
   async artifactBlocks(id) {
     return this.#json("GET", ["api", "v1", "artifacts", id, "blocks"]);
@@ -16334,6 +16349,30 @@ async function blockAsks(client, resolved, state) {
   const asks = await (resolved.issue === undefined ? client.getArtifactAsks(resolved.artifact.id, state) : client.listIssueAsks(resolved.issue.key, state));
   return asks.filter((ask) => typeof ask.block_id === "string" && ask.block_artifact?.id === resolved.artifact.id);
 }
+async function readUploadedFile(client, resolved, requested) {
+  const { artifact } = resolved;
+  const latest = Math.max(0, ...artifact.versions.map((version2) => version2.number));
+  const number4 = requested ?? latest;
+  const file2 = await client.fileVersion(artifact.id, number4);
+  const of = number4 === latest ? "" : ` of ${latest}`;
+  const size = `${file2.bytes.length.toLocaleString("en-US")} bytes`;
+  const details = resolved.owner.kind === "project" ? { project: artifact.project, document: documentLabel(artifact.project, artifact.slug) } : { issue: resolved.issue?.key };
+  let text;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(file2.bytes);
+  } catch {
+    return {
+      text: `${artifact.name} is an uploaded ${file2.mime} file (version ${number4}${of}, ${size}) that is not ` + `UTF-8 text, so dispatch_doc_read cannot show it. GET /api/v1/artifacts/${artifact.id}/versions/${number4} serves its bytes.`,
+      details
+    };
+  }
+  return {
+    text: `File ${artifact.name}: ${file2.mime}, version ${number4}${of}, ${size}.
+
+${text}`,
+    details
+  };
+}
 async function refuseOpenDecisionBlocks(client, tool, resolved) {
   const artifact = resolved.artifact;
   const latest = artifact.approval?.latest_version;
@@ -17031,6 +17070,9 @@ ${followsAsk(askOwner)}`,
       const artifactReference = optionalString(args, "artifact") ?? (ownerArguments.ref?.kind === "spec" || ownerArguments.ref?.kind === "artifact" ? ownerArguments.ref.id : undefined);
       const resolved = await resolveDocument(documentOwner(), artifactReference);
       const version2 = optionalNumber(args, "version") ?? ownerArguments.ref?.version;
+      if (resolved.artifact.kind === "file" || resolved.artifact.kind === "image") {
+        return readUploadedFile(client, resolved, version2);
+      }
       const documentPromise = client.docRead(resolved.artifact.id, version2);
       const marksPromise = openArtifactMarks(client, resolved);
       const marksResultPromise = marksPromise.then((value) => ({ status: "fulfilled", value }), (reason) => ({ status: "rejected", reason }));
