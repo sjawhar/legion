@@ -187,15 +187,16 @@ export function useReferenceData(route: DispatchReferenceRoute | undefined): Ref
 /**
  * Every query behind a resolved reference title, shared by the Unfurl card and the inline
  * `RefLink` markdown/document rendering so both draw from one fetch path. An ask or comment
- * (whether issue-scoped or nested under a project document's `item`) resolves to its own
- * question/first line rather than the owning issue's title; everything else falls back to the
- * artifact name (a document reference) or the issue title. A title drawn from text its author
- * wrote (the question, the comment) is that Markdown projected to plain words and cut
+ * (whether issue-scoped or nested under a project document's `item`) resolves to its own text
+ * rather than the owning issue's title or document; everything else falls back to the artifact
+ * name (a document reference) or the issue title. A title drawn from text its author wrote (the
+ * question, the comment) is that Markdown projected to plain words and cut
  * (`useMarkdownHeadline`): a link's text can hold no formatting, so a `**Blocking:**` question
  * titles its link `Blocking: …`, never `**Blocking:** …`. The description is the target's own
  * Markdown, for the caller to render formatted: a message's body, a document's text, and an
  * ask's or comment's text where the title had to cut it (a title that holds the whole text
- * needs no second copy under it); an issue with no document falls back to its status.
+ * needs no second copy under it); an issue with no document falls back to its status. An ask or
+ * comment never borrows its issue's status or its document's text, while it loads or after.
  */
 export function useReferenceTarget(route: DispatchReferenceRoute | undefined): ReferenceTarget {
   const { artifact, ask, comment, issue, markdown, message } = useReferenceData(route);
@@ -203,26 +204,22 @@ export function useReferenceTarget(route: DispatchReferenceRoute | undefined): R
   const authored =
     kind === "ask" ? ask?.ask.question : kind === "comment" ? comment?.comment.body : undefined;
   const headline = useMarkdownHeadline(authored, TITLE_HEADLINE_MAX);
-  const title =
-    kind === "message"
-      ? message === undefined
-        ? undefined
-        : `${message.message.author.kind} ${message.message.author.id}`
-      : kind === "ask" || kind === "comment"
-        ? headline
-        : (artifact?.name ?? issue?.title);
-  const description =
-    kind === "message"
-      ? message?.message.body
-      : authored !== undefined
-        ? headline?.endsWith("…") === true
-          ? authored
-          : undefined
-        : markdown !== undefined && markdown.trim() !== ""
-          ? markdown
-          : artifact === undefined
-            ? issue?.status
-            : undefined;
 
-  return { title, description };
+  if (kind === "message") {
+    return {
+      title:
+        message === undefined
+          ? undefined
+          : `${message.message.author.kind} ${message.message.author.id}`,
+      description: message?.message.body,
+    };
+  }
+  if (kind === "ask" || kind === "comment") {
+    return { title: headline?.text, description: headline?.cut === true ? authored : undefined };
+  }
+  const text = markdown !== undefined && markdown.trim() !== "" ? markdown : undefined;
+  return {
+    title: artifact?.name ?? issue?.title,
+    description: text ?? (artifact === undefined ? issue?.status : undefined),
+  };
 }

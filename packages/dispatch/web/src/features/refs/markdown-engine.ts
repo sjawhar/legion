@@ -4,6 +4,7 @@ import { useLayoutEffect, useState } from "react";
 
 import type { BlockSchema } from "../../api/types";
 import { loadBlockSchema } from "../doc/schema";
+import { parseDispatchReference, referenceSpans, shortForm } from "./routes";
 
 /**
  * The one headless Proof engine every Markdown-bearing surface parses with - `MarkdownBody` for a
@@ -93,75 +94,67 @@ export function parseMarkdownOrUndefined(
   }
 }
 
-/** The first textblock's own inline content (marks intact), plus the flattened plain text of
- * every textblock after it, joined with a single space - see `flattenInline`. */
-export interface InlineContent {
-  head: ProseMirrorNode;
-  extra: string;
+/** `.dispatch-markdown` in styles.css overrides Tailwind Typography's fixed palette, heading
+ * scale and font size, so a rendered body takes the surrounding text's size and colour. */
+export const markdownClassName =
+  "dispatch-markdown prose prose-sm prose-slate break-words dark:prose-invert";
+
+/** Text outside code with every `dispatch://` reference written as its short form
+ *  (`dispatch://CORE-1/ask/a1` reads `CORE-1 ask`), as a rendered body's link reads until its
+ *  title resolves; a reference in code stays as its author wrote it, as it does in a body. */
+function shortenReferences(text: string): string {
+  let shortened = "";
+  let cursor = 0;
+  for (const { start, value } of referenceSpans(text, "dispatch://")) {
+    const route = parseDispatchReference(value);
+    if (route !== undefined) {
+      shortened += `${text.slice(cursor, start)}${shortForm(route)}`;
+      cursor = start + value.length;
+    }
+  }
+  return shortened + text.slice(cursor);
 }
 
-/** A textblock's own text, skipping any code span or code block content — used only for the
- * "extra" (non-first) textblocks `flattenInline` yields, which flatten to plain text and so
- * would otherwise re-expose a code span's `dispatch://` ref as linkifiable bare text once its
- * `code` mark is gone. The first textblock keeps its marks (serialized, not flattened), so its
- * own code spans stay real `<code>` elements and need no such filtering. */
-function plainTextExcludingCode(node: ProseMirrorNode): string {
+/** The words a parsed document renders, on one line: text as it reads (references shortened),
+ *  raw inline HTML as the literal characters a body shows for it, and every block boundary,
+ *  hard break or other leaf a space. */
+function plainWords(doc: ProseMirrorNode): string {
   const parts: string[] = [];
-  node.descendants((child) => {
-    if (child.type.name === "code_block") {
-      return false;
-    }
-    if (child.isText) {
-      const hasCode = child.marks.some((mark) => mark.type.name === "inlineCode");
-      if (!hasCode) {
-        parts.push(child.text ?? "");
-      }
+  doc.descendants((node, _position, parent) => {
+    if (node.isText) {
+      const code =
+        parent?.type.spec.code === true || node.marks.some((mark) => mark.type.spec.code === true);
+      parts.push(code ? (node.text ?? "") : shortenReferences(node.text ?? ""));
+    } else if (node.isBlock || node.isLeaf) {
+      parts.push(node.type.name === "html" ? String(node.attrs.value ?? "") : " ");
     }
     return true;
   });
   return parts.join("");
 }
 
-/** A parsed document collapsed onto one line: the first textblock's inline content verbatim
- * (marks intact) and every later textblock's plain text after it, space-joined, so a list or a
- * multi-paragraph body renders as one run of inline content instead of nesting a `<ul>` or a
- * second `<p>` inside a span. `undefined` for a document with no text at all. */
-export function flattenInline(root: ProseMirrorNode): InlineContent | undefined {
-  let head: ProseMirrorNode | undefined;
-  const extra: string[] = [];
-  root.descendants((node) => {
-    if (!node.isTextblock) {
-      return true;
-    }
-    if (head === undefined) {
-      head = node;
-    } else {
-      const text = plainTextExcludingCode(node).trim();
-      if (text !== "") {
-        extra.push(text);
-      }
-    }
-    return false;
-  });
-  return head === undefined ? undefined : { extra: extra.join(" "), head };
+/** A headline and whether it had to be cut to fit. */
+export interface MarkdownHeadline {
+  readonly text: string;
+  readonly cut: boolean;
 }
-
-/** `.dispatch-markdown` in styles.css overrides Tailwind Typography's fixed palette, heading
- * scale and font size, so a rendered body takes the surrounding text's size and colour. */
-export const markdownClassName =
-  "dispatch-markdown prose prose-sm prose-slate break-words dark:prose-invert";
 
 /**
  * Markdown projected to one line of plain text and cut to `max` characters, for a place that can
- * hold only a string: a reference link's text, a card's title. Formatting goes (a link's own
- * styling is the formatting there) but no syntax stays: `**Blocking:** the deploy` reads
- * `Blocking: the deploy`, a code span keeps its words, and the cut happens on the projected
- * text, so it never splits a mark. Blocks and hard breaks become single spaces. `undefined`
- * until the engine has answered (one pre-paint commit once it is loaded) and for an `undefined`
- * source; the literal source, cut the same way, when the engine cannot load.
+ * hold only a string: a reference link's text, a card's title, a hover tooltip. Formatting goes
+ * (a link's own styling is the formatting there) but no syntax stays: `**Blocking:** the deploy`
+ * reads `Blocking: the deploy`, a code span keeps its words, a `dispatch://` reference reads as
+ * its short form, and the cut happens on the projected text, so it never splits a mark (nor a
+ * character outside the Basic Multilingual Plane). Blocks and hard breaks become single spaces.
+ * `cut` says whether the text was cut, which an ellipsis the author typed cannot fake.
+ * `undefined` until the engine has answered (one pre-paint commit once it is loaded) and for an
+ * `undefined` source; the literal source, cut the same way, when the engine cannot load.
  */
-export function useMarkdownHeadline(markdown: string | undefined, max: number): string | undefined {
-  const [headline, setHeadline] = useState<string>();
+export function useMarkdownHeadline(
+  markdown: string | undefined,
+  max: number
+): MarkdownHeadline | undefined {
+  const [headline, setHeadline] = useState<MarkdownHeadline>();
   useLayoutEffect(() => {
     if (markdown === undefined) {
       setHeadline(undefined);
@@ -169,12 +162,14 @@ export function useMarkdownHeadline(markdown: string | undefined, max: number): 
     }
     return renderWithHeadlessProof((proof) => {
       const parsed = proof === undefined ? undefined : parseMarkdownOrUndefined(proof, markdown);
-      const text = (
-        parsed === undefined ? markdown : parsed.textBetween(0, parsed.content.size, " ", " ")
-      )
-        .replace(/\s+/g, " ")
-        .trim();
-      setHeadline(text.length > max ? `${text.slice(0, max)}…` : text);
+      const characters = Array.from(
+        (parsed === undefined ? markdown : plainWords(parsed)).replace(/\s+/g, " ").trim()
+      );
+      const cut = characters.length > max;
+      setHeadline({
+        cut,
+        text: cut ? `${characters.slice(0, max).join("")}…` : characters.join(""),
+      });
     });
   }, [markdown, max]);
   return headline;

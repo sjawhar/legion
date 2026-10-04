@@ -13,7 +13,6 @@ const quoteClasses = `flex min-w-0 max-w-full items-center border-l-2 pl-2 text-
  *  Markdown and renders as such, bold and code and references formatted, cut to the quote's
  *  one line after rendering. Without a loaded parent the author is unknown and the quote says
  *  so. With `to` it links to the parent's turn. */
-
 export function ReplyQuote({
   author,
   className = "",

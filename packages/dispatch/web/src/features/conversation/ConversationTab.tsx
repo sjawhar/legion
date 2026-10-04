@@ -54,6 +54,7 @@ import { ThreadCard } from "../margin/ThreadCard";
 import { type CommentActionFailure, useCommentActionQueue } from "../margin/useCommentActionQueue";
 import type { Thread as CommentThread } from "../margin/useMarginItems";
 import { CopyRefButton } from "../refs/CopyRefButton";
+import { balanceCutMarkdown } from "../refs/markdown-fragment";
 import { buildIssuePath, documentItemPath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 import { PHONE_VIEWPORT_QUERY, useDialog, useMediaQuery } from "../shell/useDialog";
@@ -258,8 +259,12 @@ function ConversationReply({
       }
       quote={{
         author: parent === undefined ? undefined : resolveAuthor(parent.author, titles).label,
+        // Without the parent loaded, the server's 160-rune cut of it stands in; a mark the cut
+        // opened is dropped so it reads as words, not as its syntax.
         excerpt:
-          parent === undefined ? (reply.event.payload.reply_body ?? "") : parent.event.payload.body,
+          parent === undefined
+            ? balanceCutMarkdown(reply.event.payload.reply_body ?? "")
+            : parent.event.payload.body,
         to:
           parentId === null || parentId === undefined
             ? undefined
@@ -379,7 +384,11 @@ function MessageTurn({
             <ReplyQuote
               author={undefined}
               className="mb-1"
-              excerpt={item.kind === "message" ? (item.event.payload.reply_body ?? "") : ""}
+              excerpt={
+                item.kind === "message"
+                  ? balanceCutMarkdown(item.event.payload.reply_body ?? "")
+                  : ""
+              }
               to={buildIssuePath({ id: replyTo, key: issueKey, kind: "message" })}
             />
           )}

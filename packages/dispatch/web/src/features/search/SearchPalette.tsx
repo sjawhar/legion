@@ -37,6 +37,7 @@ import {
 } from "../../theme/classes";
 import { statusText } from "../project/board-model";
 import { MarkdownPreview } from "../refs/MarkdownPreview";
+import { balanceCutMarkdown } from "../refs/markdown-fragment";
 import { referenceTriggerProps } from "../refs/RefPreview";
 import {
   buildProjectPath,
@@ -196,8 +197,11 @@ function ResultOption({
   // The server marks the matched words in the snippet's source text. The snippet renders as
   // Markdown (the text someone wrote, with its bold and code and references), which cannot
   // carry those marks through the parse, so the preview puts them back on the rendered text.
+  // The server's snippet is 24 words around the match, cut from the middle of a body, so a mark
+  // can be open at either end; the stray delimiter goes before the parse, or it would read as
+  // its characters. The hits are matched by their words, so the display text can change.
   const segments = snippetSegments(result.snippet);
-  const snippet = segments.map((segment) => segment.text).join("");
+  const snippet = balanceCutMarkdown(segments.map((segment) => segment.text).join(""));
   const hits = segments.flatMap((segment) => (segment.mark ? [segment.text] : []));
 
   return (

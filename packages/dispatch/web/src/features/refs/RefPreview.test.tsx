@@ -1,11 +1,11 @@
 import { afterEach, expect, jest, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { type ReactNode, useEffect, useRef } from "react";
 import { Link, MemoryRouter } from "react-router-dom";
 
 import { api } from "../../api/client";
-import type { IssueDetails } from "../../api/types";
+import type { AskRead, IssueDetails } from "../../api/types";
 import { closeRefPreview, RefPreviewHost, referenceTriggerProps } from "./RefPreview";
 import { REF_PREVIEW_CLOSE_DELAY_MS, REF_PREVIEW_OPEN_DELAY_MS } from "./ref-preview-timing";
 
@@ -530,6 +530,64 @@ test("anchors React did not render are triggers too, and a card closes when its 
     expect(screen.queryByRole("tooltip")).toBeNull();
   } finally {
     view.unmount();
+    getIssue.mockRestore();
+  }
+});
+
+// LEGION-540. An ask's question is Markdown its author wrote, and the card's heading shows it
+// formatted: bold as bold and a list's items on the heading's line, never `**` or `-`.
+test("an ask's card heads with its question formatted, not its source", async () => {
+  const getIssue = mockIssues();
+  const askRead: AskRead = {
+    ask: {
+      anchor: null,
+      answer: null,
+      author: { id: "alice", kind: "user" },
+      created_at: "2026-09-09T00:00:00Z",
+      edited_at: null,
+      id: "ask-1",
+      issue_key: "CORE-1",
+      kind: "question",
+      multiple: false,
+      opened_event_id: 1,
+      options: [],
+      question: "**Ship** on Friday?\n\n- `main` is green\n- review is in",
+      state: "open",
+      urgency: "med",
+    },
+    edits: [],
+    followers: [],
+    replies: [],
+  };
+  const getAsk = spyOn(api, "getAsk").mockResolvedValue(askRead);
+  jest.useFakeTimers();
+  const view = render(
+    <Harness>
+      <Link
+        to="/issues/CORE-1/asks/ask-1"
+        {...referenceTriggerProps({ id: "ask-1", key: "CORE-1", kind: "ask" })}
+      >
+        the ask
+      </Link>
+    </Harness>
+  );
+  try {
+    fireEvent.pointerOver(screen.getByRole("link", { name: "the ask" }), { pointerType: "mouse" });
+    act(() => {
+      jest.advanceTimersByTime(REF_PREVIEW_OPEN_DELAY_MS);
+    });
+    const card = screen.getByRole("tooltip");
+    jest.useRealTimers();
+    await waitFor(() => expect(card.querySelector("strong")?.textContent).toBe("Ship"));
+    expect(card.querySelector("code")?.textContent).toBe("main");
+    expect(card.textContent).toContain("Ship on Friday?");
+    expect(card.textContent).toContain("review is in");
+    expect(card.textContent).not.toContain("**");
+    expect(card.textContent).not.toContain("- review");
+    expect(card.querySelector("ul, li")).toBeNull();
+  } finally {
+    view.unmount();
+    getAsk.mockRestore();
     getIssue.mockRestore();
   }
 });

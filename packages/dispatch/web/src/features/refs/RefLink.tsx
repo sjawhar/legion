@@ -1,49 +1,25 @@
 import type { ReactNode } from "react";
+
 import { useReferenceTarget } from "./reference-target";
 import {
   buildDispatchReference,
   buildReferencePath,
   type DispatchReferenceRoute,
-  isProjectRoute,
   parseDispatchReference,
   referenceRouteFromHref,
   referenceSpans,
+  shortForm,
 } from "./routes";
 
 export interface ReferenceAnchor {
-  readonly anchor: HTMLAnchorElement;
+  /** The element the `RefLink` portal renders into: the `<a>` itself, or whatever a surface put
+   *  in its place (`MarkdownPreview` keeps no link inside the link it sits in). */
+  readonly anchor: HTMLElement;
   readonly key: string;
   readonly route: DispatchReferenceRoute;
-}
-
-/** The ref's compact fallback text, shown until `useReferenceTarget` resolves a title (or if
- * resolution never finds one, e.g. a deleted ask). Mirrors `buildDispatchReference`'s shape
- * without the `dispatch://` scheme, so it reads like a second, shorter reference. */
-export function shortForm(route: DispatchReferenceRoute): string {
-  if (isProjectRoute(route)) {
-    const base = `${route.project}/${route.slug}`;
-    return route.item === undefined ? base : `${base} ${route.item.kind}`;
-  }
-  switch (route.kind) {
-    case "issue":
-      return route.key;
-    case "spec":
-      return `${route.key} spec`;
-    case "conversation":
-      return `${route.key} log`;
-    case "children":
-      return `${route.key} children`;
-    case "artifacts":
-      return `${route.key} artifacts`;
-    case "artifact":
-      return `${route.key} ${route.slug}`;
-    case "ask":
-      return `${route.key} ask`;
-    case "comment":
-      return `${route.key} comment`;
-    case "message":
-      return `${route.key} message`;
-  }
+  /** The words the anchor showed before they were cleared for the portal: a bare reference's
+   *  `dispatch://…`, or the text a Markdown link gave it. */
+  readonly text: string;
 }
 
 /** Portal content for an inline reference anchor: the resolved title once
@@ -146,8 +122,9 @@ export function collectReferenceAnchors(
     anchor.setAttribute("href", buildReferencePath(route));
     const reference = buildDispatchReference(route);
     anchor.setAttribute("data-dispatch-ref", reference);
+    const text = anchor.textContent ?? "";
     anchor.replaceChildren();
-    targets.push({ anchor, key: `${reference}:${index}`, route });
+    targets.push({ anchor, key: `${reference}:${index}`, route, text });
     index += 1;
   }
   return targets;

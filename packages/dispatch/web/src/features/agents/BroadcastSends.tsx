@@ -274,7 +274,7 @@ export function BroadcastSends({
                 className={`min-w-0 flex-1 ${textMutedOnSurface}`}
                 lines={1}
                 markdown={row.send.input.body}
-                title={row.send.input.body}
+                fullTitle
               />
               {row.status === "failed" ? (
                 <>

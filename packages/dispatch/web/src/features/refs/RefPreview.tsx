@@ -17,7 +17,6 @@ import {
 import { type IssueStatus, statusLabel } from "../project/board-model";
 import { actorLabel } from "./actor";
 import { MarkdownPreview } from "./MarkdownPreview";
-import { shortForm } from "./RefLink";
 import { REF_PREVIEW_CLOSE_DELAY_MS, REF_PREVIEW_OPEN_DELAY_MS } from "./ref-preview-timing";
 import { artifactTextQuery, prefetchReference, useReferenceData } from "./reference-target";
 import {
@@ -27,6 +26,7 @@ import {
   isProjectRoute,
   parseDispatchReference,
   referenceTargetKind,
+  shortForm,
 } from "./routes";
 
 const CARD_ID = "ref-preview";
@@ -234,10 +234,7 @@ function Heading({ children }: { children: ReactNode }): ReactNode {
   return <span className={`block font-semibold ${linkText}`}>{children}</span>;
 }
 
-/** The card's body: three rendered lines of what the target says, formatted, then cut. A
- *  reference inside it renders as a link in the card's own link, which is fine for a tooltip
- *  (the whole card follows the outer link; `tabIndex={-1}` keeps the inner ones out of the
- *  tab order the way the outer one is). */
+/** The card's body: three rendered lines of what the target says, formatted, then cut. */
 function Body({ markdown }: { markdown: string }): ReactNode {
   return (
     <MarkdownPreview className={`mt-1 ${textSecondaryOnSurface}`} lines={3} markdown={markdown} />

@@ -375,3 +375,43 @@ test("Unfurl reads a GitHub link trailed by a long closing run in one pass", () 
     view.unmount();
   }
 });
+
+// LEGION-540. A GitHub issue's body is Markdown its author wrote: the card renders it formatted
+// and cut to its lines after rendering, never the raw source with its `**`, backticks and `-`.
+test("Unfurl renders a GitHub issue's body formatted, on one run of text, with no syntax", async () => {
+  const githubRest = spyOn(api, "githubRest").mockResolvedValue(
+    new Response(
+      JSON.stringify({
+        body: "## Steps\n\n**Crash** on `start` after [upgrading](https://example.com/notes)\n\n- open it\n- wait",
+        title: "Crash on start",
+      }),
+      { headers: { "Content-Type": "application/json" } }
+    )
+  );
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const view = render(
+    <QueryClientProvider client={queryClient}>
+      <Unfurl body="See https://github.com/owner/repository/issues/4" />
+    </QueryClientProvider>
+  );
+
+  try {
+    await within(view.container).findByText("Crash on start");
+    const body = await waitFor(() => {
+      const found = view.container.querySelector<HTMLElement>("[data-markdown-preview]");
+      if (found === null || found.querySelector("strong") === null) {
+        throw new Error("the issue body has not rendered");
+      }
+      return found;
+    });
+    expect(body.querySelector("strong")?.textContent).toBe("Crash");
+    expect(body.querySelector("code")?.textContent).toBe("start");
+    expect(body.textContent?.replace(/\s+/g, " ").trim()).toBe(
+      "Steps Crash on start after upgrading open it wait"
+    );
+    expect(body.querySelector("h2, ul, li, p")).toBeNull();
+  } finally {
+    githubRest.mockRestore();
+    view.unmount();
+  }
+});

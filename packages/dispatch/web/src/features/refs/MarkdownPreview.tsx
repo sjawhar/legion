@@ -1,24 +1,16 @@
-import type { HeadlessProofEditor } from "@legion/proof-editor/headless";
-import { DOMSerializer } from "prosemirror-model";
-import { type ReactNode, useLayoutEffect, useRef, useState } from "react";
-import { createPortal } from "react-dom";
+import { type ReactNode, useCallback, useRef } from "react";
 
+import { markdownClassName, useMarkdownHeadline } from "./markdown-engine";
 import {
-  markdownClassName,
-  parseMarkdownOrUndefined,
-  renderWithHeadlessProof,
-} from "./markdown-engine";
-import {
-  collectReferenceAnchors,
-  linkifyDispatchRefs,
-  type ReferenceAnchor,
-  RefLink,
-} from "./RefLink";
-
-const NO_ANCHORS: readonly ReferenceAnchor[] = [];
+  type DecorateMarkdown,
+  type PaintMarkdown,
+  useRenderedMarkdown,
+} from "./useRenderedMarkdown";
 
 /** How many rendered lines a preview shows before the browser cuts it. Tailwind's `line-clamp-N`
- *  utilities are literal class names here so its scanner emits each rule. */
+ *  utilities are literal class names here so its scanner emits each rule. Each sets the
+ *  `display` the clamp needs, so the root carries no `display` utility of its own: `.block` is
+ *  emitted after them in the same layer and would win, and nothing would clamp. */
 const CLAMP_CLASS: Record<1 | 2 | 3, string> = {
   1: "line-clamp-1",
   2: "line-clamp-2",
@@ -26,19 +18,125 @@ const CLAMP_CLASS: Record<1 | 2 | 3, string> = {
 };
 
 /**
- * Wraps every occurrence of each `phrase` in root's rendered text in a `<mark>`, for a search
- * hit: the server marks the words that matched in the snippet's source, the snippet then
- * renders as Markdown (which cannot carry the marks through), and this puts them back on the
- * rendered text. Each text node is searched on its own (a phrase never spans two nodes, which
- * the server's whole-word highlights do not either), case-insensitively, with the first-found
- * longest phrase winning where two overlap. Text already inside a link keeps its link; a
- * `<mark>` inside an `<a>` is fine.
+ * Every textblock's inline content, marks intact, on one line: a heading's words, then the
+ * paragraph's bold and code and links, then each list item, space-separated. (Not
+ * `MarkdownBody`'s inline flattening, whose later blocks are plain text: a preview whose first
+ * block is a heading would lose the formatting of everything after it.) A code block's text goes
+ * inside a `<code>`, so it reads as code and `linkifyDispatchRefs` leaves it alone.
  */
-function markPhrases(root: HTMLElement, phrases: readonly string[], className: string): void {
-  const wanted = phrases.map((phrase) => phrase.toLowerCase()).filter((phrase) => phrase !== "");
-  if (wanted.length === 0) {
-    return;
+const paintOneLine: PaintMarkdown = (element, parsed, serializer) => {
+  element.replaceChildren();
+  let first = true;
+  parsed.descendants((node) => {
+    if (!node.isTextblock) {
+      return true;
+    }
+    if (node.content.size === 0) {
+      return false;
+    }
+    if (!first) {
+      element.appendChild(document.createTextNode(" "));
+    }
+    first = false;
+    const content = serializer.serializeFragment(node.content);
+    if (node.type.spec.code === true) {
+      const code = document.createElement("code");
+      code.appendChild(content);
+      element.appendChild(code);
+    } else {
+      element.appendChild(content);
+    }
+    return false;
+  });
+  // A hard break inside a paragraph would start a second visual line inside a one-line
+  // preview; the preview is one run of text, so it reads as a space.
+  for (const br of element.querySelectorAll("br")) {
+    br.replaceWith(document.createTextNode(" "));
   }
+};
+
+/** A letter, digit or combining mark: what the server's text-search parser reads as part of a
+ *  word. An underscore or a hyphen is not (`foo_bar` and `CORE-1` are two words each to it). */
+const WORD_CHARACTER = /[\p{L}\p{M}\p{N}]/u;
+
+function isWordCharacter(character: string | undefined): boolean {
+  return character !== undefined && WORD_CHARACTER.test(character);
+}
+
+/** One search hit, matched case-insensitively and only as a whole word where it has a word's
+ *  edge: the server marks whole lexemes (`port`, never the `port` in `support`), and a hit that
+ *  starts or ends with punctuation (`-1` of `CORE-1`) is bounded only on its word side. */
+interface Phrase {
+  readonly pattern: RegExp;
+  readonly boundedStart: boolean;
+  readonly boundedEnd: boolean;
+}
+
+function phrasesOf(highlight: readonly string[]): Phrase[] {
+  return highlight.flatMap((raw) => {
+    const phrase = raw.trim();
+    if (phrase === "") {
+      return [];
+    }
+    // `u` keeps every index on the source text itself; lower-casing first would not, since a
+    // character such as `İ` lower-cases to two code units and every slice after it would drift.
+    const escaped = phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return [
+      {
+        boundedEnd: isWordCharacter(Array.from(phrase).at(-1)),
+        boundedStart: isWordCharacter(Array.from(phrase)[0]),
+        pattern: new RegExp(escaped, "giu"),
+      },
+    ];
+  });
+}
+
+/** Where the first whole-word occurrence of any phrase in `text` at or after `from` is: the
+ *  earliest, and of two starting together the longer. `undefined` when none occurs. */
+function nextPhrase(
+  text: string,
+  phrases: readonly Phrase[],
+  from: number
+): { at: number; length: number } | undefined {
+  let best: { at: number; length: number } | undefined;
+  for (const { boundedEnd, boundedStart, pattern } of phrases) {
+    pattern.lastIndex = from;
+    for (let match = pattern.exec(text); match !== null; match = pattern.exec(text)) {
+      const at = match.index;
+      const end = at + match[0].length;
+      const startsWord = !boundedStart || !isWordCharacter(text[at - 1]);
+      const endsWord = !boundedEnd || !isWordCharacter(text[end]);
+      if (startsWord && endsWord) {
+        if (
+          best === undefined ||
+          at < best.at ||
+          (at === best.at && match[0].length > best.length)
+        ) {
+          best = { at, length: match[0].length };
+        }
+        break;
+      }
+      pattern.lastIndex = at + 1;
+    }
+  }
+  return best;
+}
+
+function markElement(className: string): HTMLElement {
+  const mark = document.createElement("mark");
+  mark.className = className;
+  return mark;
+}
+
+/**
+ * Wraps every whole-word occurrence of each phrase in root's rendered text in a `<mark>`, for a
+ * search hit: the server marks the words that matched in the snippet's source, the snippet then
+ * renders as Markdown (which cannot carry the marks through), and this puts them back on the
+ * rendered text. Each text node is searched on its own (the server marks one lexeme at a time,
+ * so a hit never spans a formatting boundary), with the first-found longest phrase winning where
+ * two overlap.
+ */
+function markPhrases(root: HTMLElement, phrases: readonly Phrase[], className: string): void {
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
   const nodes: Text[] = [];
   for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
@@ -48,36 +146,48 @@ function markPhrases(root: HTMLElement, phrases: readonly string[], className: s
   }
   for (const node of nodes) {
     const text = node.data;
-    const lower = text.toLowerCase();
     const fragment = document.createDocumentFragment();
     let cursor = 0;
-    let replaced = false;
-    while (cursor < text.length) {
-      let at = -1;
-      let length = 0;
-      for (const phrase of wanted) {
-        const found = lower.indexOf(phrase, cursor);
-        if (found !== -1 && (at === -1 || found < at || (found === at && phrase.length > length))) {
-          at = found;
-          length = phrase.length;
-        }
-      }
-      if (at === -1) {
-        break;
-      }
-      fragment.appendChild(document.createTextNode(text.slice(cursor, at)));
-      const mark = document.createElement("mark");
-      mark.className = className;
-      mark.textContent = text.slice(at, at + length);
+    for (let hit = nextPhrase(text, phrases, 0); hit !== undefined; ) {
+      fragment.appendChild(document.createTextNode(text.slice(cursor, hit.at)));
+      const mark = markElement(className);
+      mark.textContent = text.slice(hit.at, hit.at + hit.length);
       fragment.appendChild(mark);
-      cursor = at + length;
-      replaced = true;
+      cursor = hit.at + hit.length;
+      hit = nextPhrase(text, phrases, cursor);
     }
-    if (replaced) {
+    // A node with no hit is left as it is: `cursor` only moves past a mark.
+    if (cursor > 0) {
       fragment.appendChild(document.createTextNode(text.slice(cursor)));
       node.replaceWith(fragment);
     }
   }
+}
+
+/**
+ * Every link in the preview as inert, link-styled text. Each surface a preview sits in is
+ * already one control - a link (a reply quote, an unfurl card, a hover card, a Broadcasts row),
+ * a search option or a margin card's toggle - so a link inside it is a link in a link: a click
+ * on it would follow the inner link and the outer control at once, and it would be a second tab
+ * stop inside a tooltip. The words, their formatting and a reference's `data-dispatch-ref` (its
+ * hover card) stay; the host is the one thing a click or a key press follows. Answers each
+ * replaced link's span, so a reference's portal can follow its words into it.
+ */
+function inertLinks(root: HTMLElement): Map<HTMLElement, HTMLElement> {
+  const replaced = new Map<HTMLElement, HTMLElement>();
+  for (const link of root.querySelectorAll("a")) {
+    const span = document.createElement("span");
+    for (const { name, value } of link.attributes) {
+      if (name !== "href" && name !== "rel" && name !== "target") {
+        span.setAttribute(name, value);
+      }
+    }
+    span.setAttribute("data-markdown-link", "");
+    span.append(...link.childNodes);
+    link.replaceWith(span);
+    replaced.set(link, span);
+  }
+  return replaced;
 }
 
 /**
@@ -91,26 +201,31 @@ function markPhrases(root: HTMLElement, phrases: readonly string[], className: s
  * an ellipsis where it overflows, never a stray `**`. The source itself is never truncated
  * before the parse, which would do exactly that.
  *
+ * Every surface a preview sits in is one control already, so its links and references read as
+ * links but are not ones (`inertLinks`): the host is what a click follows.
+ *
  * `lines` is the clamp (`1` is `truncate`-like but keeps the inline markup; `2` and `3` wrap
- * then clamp). `className` styles the block it renders as, which is `display: -webkit-box`
- * once clamped, so a parent that needs a flex item passes `min-w-0` there as it would for any
- * block. `highlight` names phrases to wrap in a `<mark>` of `highlightClassName` once rendered
- * (a search hit's matched words; see `markPhrases`). `onRendered` fires after each parse lands,
- * for a caller that measures the result. Until the engine has answered (one pre-paint commit
- * once it is loaded on the page) the element is empty; when the engine cannot load, the
- * literal source renders as text with `data-markdown-fallback`, as `MarkdownBody` does.
+ * then clamp). `className` styles the element, whose `display` is the clamp's own, so a parent
+ * that needs a flex item passes `min-w-0` there as it would for any block. `highlight` names
+ * phrases to wrap in a `<mark>` of `highlightClassName` once rendered (a search hit's matched
+ * words; see `markPhrases`); a reference whose source holds one is marked whole, since its
+ * words are replaced by its title. Until the engine has answered (one pre-paint commit once it
+ * is loaded on the page) the element is empty; when the engine cannot load, the literal source
+ * renders as text with `data-markdown-fallback`, as `MarkdownBody` does.
  */
 export function MarkdownPreview({
   className = "",
+  fullTitle = false,
   highlight,
   highlightClassName = "",
   lead,
   lines,
   markdown,
-  onRendered,
-  title,
 }: {
   className?: string;
+  /** Whether a pointer reader sees the whole text on hover, for a surface whose text is long
+   *  enough to be cut: its plain words, as `TruncatedText`'s `title` offers, never its source. */
+  fullTitle?: boolean;
   highlight?: readonly string[];
   highlightClassName?: string;
   /** The app's own words before the text, plain and never parsed: a reply quote's
@@ -118,92 +233,58 @@ export function MarkdownPreview({
   lead?: string;
   lines: 1 | 2 | 3;
   markdown: string;
-  onRendered?: () => void;
-  /** What a pointer reader sees on hover, for a surface whose text is long enough to be cut:
-   *  the full source, as `TruncatedText` offers. */
-  title?: string;
 }): ReactNode {
-  const onRenderedRef = useRef(onRendered);
-  onRenderedRef.current = onRendered;
   const root = useRef<HTMLSpanElement>(null);
-  const [referenceAnchors, setReferenceAnchors] = useState<readonly ReferenceAnchor[]>(NO_ANCHORS);
-  const [isFallback, setIsFallback] = useState(false);
-  // The effect keys on the phrases' joined text, so a caller handing a fresh array each render
-  // with the same phrases does not re-parse the body.
+  // Keyed on the phrases' joined text, so a caller handing a fresh array each render with the
+  // same phrases does not re-parse the body. Postgres text holds no NUL, so none is in a phrase.
   const highlightKey = highlight?.join("\u0000");
-
-  useLayoutEffect(() => {
-    const element = root.current;
-    const render = (proof: HeadlessProofEditor | undefined) => {
-      if (element === null) {
-        throw new Error("MarkdownPreview's root is unavailable.");
+  const decorate = useCallback<DecorateMarkdown>(
+    (element, anchors) => {
+      const replaced = inertLinks(element);
+      const phrases = highlightKey === undefined ? [] : phrasesOf(highlightKey.split("\u0000"));
+      if (phrases.length > 0) {
+        markPhrases(element, phrases, highlightClassName);
       }
-      const parsed = proof === undefined ? undefined : parseMarkdownOrUndefined(proof, markdown);
-      if (proof === undefined || parsed === undefined) {
-        setIsFallback(true);
-        element.replaceChildren(document.createTextNode(markdown));
-      } else {
-        // Every textblock's inline content, marks intact, on one line: a heading's words, then
-        // the paragraph's bold and code and links, then each list item, space-separated. (Not
-        // `flattenInline`, whose later blocks are plain text: a preview whose first block is a
-        // heading would lose the formatting of everything after it.) A code block's text goes
-        // inside a `<code>`, so it reads as code and `linkifyDispatchRefs` leaves it alone.
-        const serializer = DOMSerializer.fromSchema(proof.schema);
-        element.replaceChildren();
-        let first = true;
-        parsed.descendants((node) => {
-          if (!node.isTextblock) {
-            return true;
-          }
-          if (node.content.size === 0) {
-            return false;
-          }
-          if (!first) {
-            element.appendChild(document.createTextNode(" "));
-          }
-          first = false;
-          const content = serializer.serializeFragment(node.content);
-          if (node.type.spec.code === true) {
-            const code = document.createElement("code");
-            code.appendChild(content);
-            element.appendChild(code);
-          } else {
-            element.appendChild(content);
-          }
-          return false;
-        });
-        // A hard break inside a paragraph would start a second visual line inside a one-line
-        // preview; the preview is one run of text, so it reads as a space.
-        for (const br of element.querySelectorAll("br")) {
-          br.replaceWith(document.createTextNode(" "));
+      const inert = anchors.map((reference) => {
+        const span = replaced.get(reference.anchor);
+        if (span === undefined) {
+          throw new Error("A reference anchor is not a link of the preview it was found in.");
         }
-      }
-      linkifyDispatchRefs(element);
-      const anchors = collectReferenceAnchors(element);
-      if (highlightKey !== undefined) {
-        markPhrases(element, highlightKey.split("\u0000"), highlightClassName);
-      }
+        // The reference's words (`dispatch://CORE-1`, or a link's own text) are gone by now,
+        // replaced by its title once that resolves; a hit the server found in them marks the
+        // whole reference.
+        if (phrases.length > 0 && nextPhrase(reference.text, phrases, 0) !== undefined) {
+          const mark = markElement(highlightClassName);
+          span.replaceWith(mark);
+          mark.appendChild(span);
+        }
+        return { ...reference, anchor: span };
+      });
       if (lead !== undefined && lead !== "") {
         element.prepend(document.createTextNode(lead));
       }
-      setReferenceAnchors(anchors.length === 0 ? NO_ANCHORS : anchors);
-      onRenderedRef.current?.();
-    };
-    setIsFallback(false);
-    return renderWithHeadlessProof(render);
-  }, [highlightClassName, highlightKey, lead, markdown]);
+      return inert;
+    },
+    [highlightClassName, highlightKey, lead]
+  );
+  const { isFallback, portals } = useRenderedMarkdown(
+    root,
+    markdown,
+    paintOneLine,
+    decorate,
+    undefined
+  );
+  const title = useMarkdownHeadline(fullTitle ? markdown : undefined, Number.POSITIVE_INFINITY);
 
   return (
     <span
-      className={`block ${CLAMP_CLASS[lines]} ${markdownClassName} ${className}`}
+      className={`${CLAMP_CLASS[lines]} ${markdownClassName} max-w-none ${className}`}
       data-markdown-fallback={isFallback || undefined}
       data-markdown-preview=""
       ref={root}
-      title={title}
+      title={title?.text}
     >
-      {referenceAnchors.map(({ anchor, key, route }) =>
-        createPortal(<RefLink route={route} />, anchor, key)
-      )}
+      {portals}
     </span>
   );
 }

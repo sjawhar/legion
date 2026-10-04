@@ -95,25 +95,26 @@ const Reasoning: ReasoningMessagePartComponent = ({ text }) => (
 function UserMessage(): ReactNode {
   // A message someone other than the viewer sent the session, stored or taken as its own turn
   // (AgentRuntimeThread names them): it sits on the session's side of the thread with its author,
-  // never styled as the viewer's own.
+  // never styled as the viewer's own. Both are text a person or an agent wrote (a broadcast, a
+  // targeted message, a reply), so both render as Markdown, as the session's own turns do.
   const author = useAuiState((state) => readDispatchMarks(state.message.metadata.custom).author);
   if (author !== undefined) {
     return (
       <div
-        className={`mt-4 max-w-[80%] rounded-xl border px-3 py-2 text-sm whitespace-pre-wrap ${borderDefault} ${textPrimaryOnCanvas}`}
+        className={`mt-4 max-w-[80%] rounded-xl border px-3 py-2 text-sm ${borderDefault} ${textPrimaryOnCanvas}`}
         data-testid="agent-message-other"
       >
         <p className={`mb-1 text-xs font-semibold ${textSecondaryOnCanvas}`}>{author}</p>
-        <MessagePrimitive.Parts />
+        <MessagePrimitive.Parts components={{ Text: MarkdownText }} />
       </div>
     );
   }
   return (
     <div className="mt-4 flex justify-end" data-testid="agent-message-user">
       <div
-        className={`max-w-[80%] rounded-xl px-3 py-2 text-sm whitespace-pre-wrap ${surfaceMutedBg} ${textPrimaryOnCanvas}`}
+        className={`max-w-[80%] rounded-xl px-3 py-2 text-sm ${surfaceMutedBg} ${textPrimaryOnCanvas}`}
       >
-        <MessagePrimitive.Parts />
+        <MessagePrimitive.Parts components={{ Text: MarkdownText }} />
       </div>
     </div>
   );
@@ -166,10 +167,12 @@ export function AgentThread({
     <ThreadPrimitive.Root className="flex min-h-0 flex-1 flex-col">
       <ErrorBoundary region="this conversation" resetKey={resetKey}>
         {/* `mt-3`: the scroller clips a turn at its top edge, and without a gap that clipped
-            line sat against the page's note above it and read as overlapping text. */}
+            line sat against the page's note above it and read as overlapping text. `pl-1`
+            matches `pr-1` for the same reason on the left: a turn's numbered list hangs its
+            marker outside the list's content box, and the scroller clipped its first digit. */}
         <ThreadPrimitive.Viewport
           autoScroll
-          className="mt-3 min-h-0 flex-1 overflow-y-auto pr-1"
+          className="mt-3 min-h-0 flex-1 overflow-y-auto pr-1 pl-1"
           data-testid="agent-thread"
         >
           <ThreadPrimitive.Empty>

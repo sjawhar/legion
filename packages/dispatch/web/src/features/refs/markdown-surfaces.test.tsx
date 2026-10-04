@@ -19,6 +19,7 @@ import type {
   SearchResult,
 } from "../../api/types";
 import { AgentThread } from "../agent-view/AgentThread";
+import { dispatchMetadata } from "../agent-view/dispatch-marks";
 import { BroadcastsPage } from "../agents/BroadcastsPage";
 import { ReplyQuote } from "../conversation/ReplyQuote";
 import { ThreadCard } from "../margin/ThreadCard";
@@ -46,10 +47,6 @@ const RENDERED = /Heading\s+Bold then code and a link to Design decision\.?\s+fi
 /** The characters a raw-text surface leaks. The bare reference is listed by its scheme, so a
  *  surface that showed `dispatch://CORE-1` unresolved fails too. */
 const LITERAL_SYNTAX = ["##", "**", "`", "[link](", "- first", "dispatch://"];
-
-/** `LITERAL_SYNTAX` without the reference: a plain-text title cannot hold a link, so it keeps
- *  the reference as the words its author wrote. */
-const LITERAL_MARKUP = LITERAL_SYNTAX.filter((syntax) => syntax !== "dispatch://");
 
 const issue: IssueDetails = {
   route_status: null,
@@ -135,13 +132,29 @@ function expectNoSyntax(element: HTMLElement): void {
   }
   expect(element.querySelector("strong")?.textContent).toBe("Bold");
   expect(element.querySelector("code")?.textContent).toBe("code");
+}
+
+/** A full body: its link is a real one. */
+function expectBody(element: HTMLElement): void {
+  expectNoSyntax(element);
   expect(element.querySelector("a[href='https://example.com/docs']")).not.toBeNull();
 }
 
-/** A one-line preview: the fixture's words in order with no syntax and nothing nested. */
+/** A one-line preview: the fixture's words in order with no syntax and nothing nested. Every
+ *  surface a preview sits in is one control, so its links read as links (the reference keeps its
+ *  hover card) and none is a link of its own. */
 function expectFormatted(element: HTMLElement): void {
   expectNoSyntax(element);
   expect(element.textContent ?? "").toMatch(RENDERED);
+  expect(element.querySelector("a")).toBeNull();
+  const links = Array.from(element.querySelectorAll("[data-markdown-link]"), (link) => ({
+    reference: link.getAttribute("data-dispatch-ref"),
+    text: link.textContent,
+  }));
+  expect(links).toEqual([
+    { reference: null, text: "link" },
+    { reference: "dispatch://CORE-1", text: "Design decision" },
+  ]);
 }
 
 /** A clamped preview never nests a block inside its one line. */
@@ -180,12 +193,58 @@ test("the agent transcript renders assistant and reasoning text as Markdown", as
     await waitFor(() => expect(turn.textContent).toContain("Design decision"));
     // Both parts are full bodies, not previews: the heading and list render as blocks (so the
     // text runs together where blocks meet), and nothing of the syntax survives.
-    expectNoSyntax(reasoning);
+    expectBody(reasoning);
     expect(turn.querySelectorAll("h2")).toHaveLength(2);
     expect(turn.querySelectorAll("ul")).toHaveLength(2);
     expect(turn.textContent).toContain("Bold then code and a link to Design decision.");
     for (const syntax of LITERAL_SYNTAX) {
       expect(turn.textContent).not.toContain(syntax);
+    }
+  } finally {
+    view.unmount();
+    getIssue.mockRestore();
+  }
+});
+
+test("the agent transcript renders the viewer's turn, another sender's turn and a Dispatch reply as Markdown", async () => {
+  const getIssue = spyOn(api, "getIssue").mockResolvedValue(issue);
+  const messages: ThreadMessageLike[] = [
+    {
+      content: [{ text: FIXTURE, type: "text" }],
+      createdAt: new Date("2026-09-10T00:00:00Z"),
+      id: "u1",
+      role: "user",
+    },
+    {
+      content: [{ text: FIXTURE, type: "text" }],
+      createdAt: new Date("2026-09-10T00:00:01Z"),
+      id: "u2",
+      metadata: dispatchMetadata({ author: "Planner" }),
+      role: "user",
+    },
+    {
+      content: [{ text: FIXTURE, type: "text" }],
+      createdAt: new Date("2026-09-10T00:00:02Z"),
+      id: "a1",
+      metadata: dispatchMetadata({ dispatch: true }),
+      role: "assistant",
+      status: { reason: "stop", type: "complete" },
+    },
+  ];
+  const view = render(
+    <Providers>
+      <Transcript messages={messages} />
+    </Providers>
+  );
+  try {
+    for (const testId of ["agent-message-user", "agent-message-other", "agent-dispatch-reply"]) {
+      const turn = await within(view.container).findByTestId(testId);
+      await waitFor(() => expect(turn.textContent).toContain("Design decision"));
+      expect(turn.querySelectorAll("h2")).toHaveLength(1);
+      expect(turn.querySelectorAll("ul > li")).toHaveLength(2);
+      for (const syntax of LITERAL_SYNTAX) {
+        expect(turn.textContent).not.toContain(syntax);
+      }
     }
   } finally {
     view.unmount();
@@ -258,7 +317,12 @@ test("the reference hover card renders a comment's body and an ask's question fo
 });
 
 test("the unfurl card under a bare reference renders the target's text formatted and its title without syntax", async () => {
-  const getComment = spyOn(api, "getComment").mockResolvedValue(commentRead);
+  // Long enough that the title has to cut it, so the card shows the whole text under the title.
+  const long = `${FIXTURE}\n- and a third item, which runs the title past its cut`;
+  const getComment = spyOn(api, "getComment").mockResolvedValue({
+    comment: { ...comment, body: long },
+    replies: [],
+  });
   const getIssue = spyOn(api, "getIssue").mockResolvedValue(issue);
   const view = render(
     <Providers>
@@ -266,7 +330,7 @@ test("the unfurl card under a bare reference renders the target's text formatted
     </Providers>
   );
   try {
-    // The card is a link holding links (the body's own); the outer one holds the title.
+    // The card is the one link; the body's own links and references inside it are inert text.
     const card = await within(view.container).findByRole("link", { name: /^Heading Bold/ });
     await waitFor(() => expect(card.textContent).toContain("Design decision"));
     const body = card.querySelector<HTMLElement>("[data-markdown-preview]");
@@ -275,10 +339,11 @@ test("the unfurl card under a bare reference renders the target's text formatted
     expectOneLine(body);
     // The card's title is the comment's words as plain text, cut to a title's length: a link's
     // text can hold no formatting or nested link, so the markup is dropped and the reference
-    // stays as its author wrote it.
+    // reads as its short form, as a body's reference link does before its title resolves.
     const title = card.firstElementChild?.textContent ?? "";
-    expect(title).toContain("Heading Bold then code and a link to dispatch://CORE-1.");
-    for (const syntax of LITERAL_MARKUP) {
+    expect(title).toStartWith("Heading Bold then code and a link to CORE-1. first second");
+    expect(title).toEndWith("…");
+    for (const syntax of LITERAL_SYNTAX) {
       expect(title).not.toContain(syntax);
     }
   } finally {
