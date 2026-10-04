@@ -117,9 +117,9 @@ function isSingleLegionCommand(command: unknown): boolean {
 
 // Every Legion issue workspace is a `jj workspace` of one shared clone, so they all share one
 // operation log: `jj undo`, `jj abandon`, and `jj op restore|revert|abandon|undo` rewrite it for
-// every tree at once (LEGION-45). The tool_call hook refuses them in every phase-worker pane.
-// `restore`/`revert` are operation-log commands only under `op`/`operation`; `jj restore <paths>`
-// is file-level and stays allowed.
+// every tree at once (LEGION-45). The tool_call hook refuses them in every tree pane
+// (`TREE_PANE_RULES`). `restore`/`revert` are operation-log commands only under `op`/`operation`;
+// `jj restore <paths>` is file-level and stays allowed.
 const JJ_LOG_REWRITE_WORDS = ["undo", "abandon"];
 const JJ_OP_WORDS = ["op", "operation"];
 const JJ_OP_LOG_REWRITE_WORDS = ["restore", "revert"];
@@ -501,15 +501,15 @@ export default function legionExtension(pi: PiApi): void {
     if (await checkSubagentSession(context)) return undefined;
     const sessionID = context.sessionManager.getSessionId();
     const active = claimSession.capability(sessionID);
-    // A `write` to an `xd://<tool>` path is OMP's tool-device invocation convention (e.g. the
-    // Dispatch tools), not a file mutation. Short-circuit it out of the mutation gate below so the
-    // architect/reviewer/merger role checks apply only to real file writes.
     const codeToolRefusal = active === undefined ? undefined : CODE_TOOL_REFUSAL[active.role];
     const mutatesCode =
       CODE_MUTATION_TOOLS.includes(toolCall.toolName) ||
       (active?.role === "architect" &&
         toolCall.toolName === "bash" &&
         !isSingleLegionCommand(toolCall.input.command));
+    // A `write` to an `xd://<tool>` path is OMP's tool-device invocation convention (e.g. the
+    // Dispatch tools), not a file mutation. Short-circuit it out of the mutation gate so the
+    // architect/reviewer/merger role checks apply only to real file writes.
     if (codeToolRefusal !== undefined && mutatesCode && !isToolDeviceInvocation(toolCall)) {
       return { block: true, reason: codeToolRefusal };
     }

@@ -894,7 +894,7 @@ describe("Legion OMP extension", () => {
   test.each([
     ["implementer", "REPO-43"],
     ["architect", "REPO-42"],
-  ] as const)("refuses a subagent's operation-log rewrite and `legion handoff complete` in a %s pane while its other calls stay ungated", async (role, issue) => {
+  ] as const)("refuses a subagent's operation-log rewrite and `legion handoff complete` in the %s pane while its other calls stay ungated", async (role, issue) => {
     const { childFile } = await createSubagentTranscriptPaths();
     const pane = await bootPane({
       role,
@@ -1168,6 +1168,9 @@ describe("Legion OMP extension", () => {
 
     expect(await jjRepoConfig(workspace, "user.name")).toBe('user.name = "Sentinel Before Boot"');
     expect(await jjRepoConfig(workspace, "user.email")).toBe("");
+  });
+  test("gates code-mutation tools for architect, merger, and reviewer only", () => {
+    expect(Object.keys(CODE_TOOL_REFUSAL).sort()).toEqual(["architect", "merger", "reviewer"]);
   });
   // Every pane but the root architect's is on a child issue, a sub-architect's included; the root
   // architect's issue is its tree's.
