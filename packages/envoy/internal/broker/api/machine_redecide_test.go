@@ -19,7 +19,7 @@ import (
 func TestApprovingADecidedMachineLoginAgainIsRecordTerminal(t *testing.T) {
 	ts := newTestServer(t)
 	machineKey := newSigningKey(t)
-	compact := signMachineLoginRequest(t, machineKey, ts.URL, "sjawhar", "example-host-devbox")
+	compact := signMachineLoginRequest(t, machineKey, ts.URL, testApprover, "example-host-devbox")
 	_, body := ts.req(t, http.MethodPost, "/v1/launcher-credentials", nil, map[string]any{"request": compact})
 	login := decode[struct {
 		PendingID string `json:"pending_id"`
@@ -58,7 +58,7 @@ func TestApprovingADecidedMachineLoginAgainIsRecordTerminal(t *testing.T) {
 func TestConcurrentApprovesOfAMachineLoginDecideItOnce(t *testing.T) {
 	ts := newTestServer(t)
 	machineKey := newSigningKey(t)
-	compact := signMachineLoginRequest(t, machineKey, ts.URL, "sjawhar", "example-host-devbox")
+	compact := signMachineLoginRequest(t, machineKey, ts.URL, testApprover, "example-host-devbox")
 	_, body := ts.req(t, http.MethodPost, "/v1/launcher-credentials", nil, map[string]any{"request": compact})
 	login := decode[struct {
 		Code string `json:"code"`
@@ -134,7 +134,7 @@ func TestApprovingASecondLoginOnAKeyWithALiveCredentialIsKeyHoldsLiveCredential(
 	ts := newTestServer(t)
 	machineKey := newSigningKey(t)
 	lookUp := func() (recordID, code string) {
-		compact := signMachineLoginRequest(t, machineKey, ts.URL, "sjawhar", "example-host-devbox")
+		compact := signMachineLoginRequest(t, machineKey, ts.URL, testApprover, "example-host-devbox")
 		_, body := ts.req(t, http.MethodPost, "/v1/launcher-credentials", nil, map[string]any{"request": compact})
 		login := decode[struct {
 			Code string `json:"code"`
