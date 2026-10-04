@@ -30,7 +30,7 @@ func TestRebuildArtifactRouteIsHumanOnlyAndRefusesADocumentThatLoads(t *testing.
 		Artifact model.Artifact `json:"artifact"`
 	}](t, created).Artifact
 	documentService := deps.Docs.(*docs.Service)
-	if _, err := documentService.ReplaceText(context.Background(), artifact.ID, "unsettled\n", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+	if _, err := replaceDocumentText(database, documentService, artifact.ID, "unsettled\n", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("write unsettled document update: %v", err)
 	}
 	if err := documentService.Evict(context.Background(), artifact.ID); err != nil {

@@ -277,6 +277,89 @@
   default, so a browser update of more than 100,000 items written against blocks the document
   already held failed the room and lost the edit; that check now takes the same queue
   (LEGION-469).
+- A markdown write of any shape at the 1 MiB cap no longer takes Dispatch down. One 1 MiB upload of
+  `)_` held about a gigabyte while it was saved, which killed the 1,024 MiB production task
+  (LEGION-481): every element the markdown makes costs memory in the parse, the read-back, the
+  render and the live document. A caller's markdown - a spec, an uploaded document or version,
+  an edit batch's inserts and replaces, the `find` of an edit and the quote of a comment or ask -
+  may now make at most 65,536 elements, weighed as `cmd/dispatch/README.md`'s Element weights
+  lists; past that a write is `413 CAP_EXCEEDED`, refused while goldmark parses, naming the line
+  where the markdown passes the limit or, where the parse stopped first, the line it stopped reading
+  at, and listing the weights; a quote is matched by its text alone. Every
+  node the document holds other than a text is an element carrying attributes and costs about what
+  two inline nodes do, so each weighs at least two: weighed as one, the heaviest document of
+  `<b>a</b>` spans the limit admitted held 213 to 261 MiB to store, of `![](u)` images 327 to 383 MiB
+  (and up to 1,044 MiB for four cold reads at once), and of `[^a]` footnote references 262 to
+  316 MiB, past the 256 MiB a request may hold; the empty paragraph an empty list item, quote,
+  footnote definition or typed block is read as holding weighed nothing, and the heaviest document
+  of them held 220 to 236 MiB. An escape - a backslash before punctuation, or a character
+  reference, in text outside a code span - makes no node in goldmark's tree, but the document holds
+  the character it spells bare, every rendering spells it again, and the renderer reads it back as
+  the delimiter or link opener it would be unescaped: a mebibyte of `\~a`, `)\_`, `\)\_` or `\[a`
+  weighed four elements and allocated 330 to 720 MiB to parse and 260 to 620 MiB to render, and the
+  stored `\)\_` held 256 MiB to read cold and 973 MiB for four reads at once. Every markdown file of
+  4 KiB or more among this repository's 618 weighs 1.5 to 379 elements a kibibyte, so prose passes
+  to the 1 MiB cap and the densest of them, a comparison matrix, to about 173 KiB; smaller files run
+  denser, up to 1,421 a kibibyte for a 147-byte test fixture of empty list items. A paragraph of
+  link reference definitions, which goldmark took time quadratic in its lines to read (a mebibyte of
+  them took a minute to refuse), is read only as far as its first 1,024 lines.
+- A write may no longer grow a stored document past what one upload may hold, measured as an
+  upload is measured. Thirty-two 900 KB inserts of prose, each within both limits, grew one document
+  to 29.5 MB, on which a one-word edit then held a gigabyte; a few dozen thousand headings' worth
+  left one the server could not load (500 on the next write, 503 on every read); and thirty-two
+  edits of an ask's options (`PATCH /api/v1/asks/{id}`) grew one to 28.8 MB, on which a one-word
+  edit was killed at the production task's 1,024 MiB. Every write a
+  caller makes - an upload, an edit batch, an accepted or rejected suggestion, an ask's edited text,
+  its answer (`POST /api/v1/asks/{id}/answer`) or resolution, a comment's anchor mark and its margin
+  record - runs in a transaction it must join (an unjoined one is refused), and is weighed by the
+  markdown it leaves the document storing (what `GET .../text` answers), with an upload's own
+  measures: it is `413 CAP_EXCEEDED` when that is longer than 1 MiB and longer than the document's
+  was, or makes more than 65,536 elements and more than the document's did, counted as an upload's
+  parse counts them (front matter apart, and a table whose short rows would take more padding than
+  one write may add counted as past the limit: a 101-column header over 200 one-cell rows measured
+  407 elements, the paragraph the parse leaves of it, where written whole it weighs 82,111). One
+  that keeps or lowers both passes, so an over-limit document can still be trimmed or split, and any
+  document a write leaves can be uploaded again from its own text. An ask's state and who answered
+  it and when are the server's, not text a caller writes, so the asks of an over-limit document can
+  still be answered and resolved. An answer's words and the options it chooses, whose labels are the
+  asker's text, are weighed: where the document has no room for them, the ask takes the whole answer
+  and its block is written without it, saying who answered and when, where one choice of a
+  1,000,000-character option took a 1 MB document to 8 MB. An ask's
+  edited question and options are weighed before they are made into markdown - an element for each
+  backslash, `*`, `_`, `~`, backtick, `[`, `]` and `<`, which the markdown escapes or reads as
+  syntax, and two for each line feed - and that markdown is parsed on the edit's element budget, so
+  text past the 65,536 elements one write may make is `413 CAP_EXCEEDED` before it is rendered,
+  where an option description of 400 KB of `)_` used to be taken. Each refusal's message is the
+  bound's own, opening `document too large to store`, on every route. A spec, a new document or the
+  markdown a rebuild is given (`POST /api/v1/artifacts/{id}/rebuild`) whose stored markdown (its
+  rendering, which can run longer than what was sent) is past either limit is refused the same way,
+  where a rebuild from the latest version restores it whatever it weighs. A write is also refused
+  when the live state it leaves would be past the 1,048,576 structs ygo decodes in one update:
+  fourteen alternating versions of 16,000 paragraphs and 16,000 headings, each within both upload
+  limits, otherwise left a document every read answered 500. A document's margin - the record of
+  every comment and suggestion it has had, which every load
+  builds though no rendering carries it - is weighed too: one record (a comment's body and replies,
+  a suggestion's replacement) holds at most 256 KiB of text and the margin 1 MiB, and a comment,
+  suggestion, reply or edit that would leave either past its bound and bigger is `413
+  CAP_EXCEEDED`, naming the bound and both sizes; a status change (accept, reject, resolve) is not
+  text a caller writes and passes. Thirty-two open suggestions of 900 KB took one cold websocket
+  load to 296 MiB, and sixty-four four cold reads at once to 1,223 MiB. The marks a document's
+  comments, suggestions and asks hold on its text carry at most 1 MiB of ids and authors, which no
+  rendering carries either: an anchored comment, suggestion or ask that would leave them past it and
+  carrying more is `413 CAP_EXCEEDED`, where thirty asks anchored by a session whose id was 200 KB
+  left a 210-byte rendering over six megabytes of live document. An answer is stored on its ask as
+  well as in its block, and settlement writes it back into a block that returns to the document:
+  that is weighed the same way, each returning answer on its own in document order, and an answer
+  that would leave the document past either limit and bigger stays on its ask alone, its block
+  restored to its state and who answered, until the document has room for it. Twenty-four answers
+  of 900 KB returned by one 1,540-byte edit had left a 21.6 MB document whose cold text read held
+  368 MiB.
+  Browser edits over the websocket are applied before any check and are not bounded by
+  this (LEGION-487). Nor is a document's stored history: every update a write appends is kept with
+  the content later writes delete, and a cold load builds all of it, so repeated uploads of a
+  version or replies to one comment, whose margin record each reply rewrites whole, still grow what
+  a load costs (500 replies of 2,000 characters left 257 MB stored and a one-word edit holding
+  1,842 MiB) until LEGION-496 folds that history.
 - Document settlement no longer undoes an edit a browser or an agent makes while it settles
   (LEGION-479). Settlement wrote its repairs (the block ids it stamps, an ask block's server-owned
   attributes it restores) as the tree it had read before its database work, so an edit made in

@@ -385,9 +385,7 @@ func TestShutdownBoundsPeerCloseDuringLockedAppend(t *testing.T) {
 	if _, err := locker.Exec(context.Background(), `select pg_advisory_xact_lock(hashtext($1))`, artifactID); err != nil {
 		t.Fatalf("lock document append: %v", err)
 	}
-	if _, err := service.ReplaceText(context.Background(), artifactID, "after", model.Actor{Kind: "user", ID: "alice"}); err != nil {
-		t.Fatalf("write delayed document: %v", err)
-	}
+	editLiveTree(t, service, artifactID, replaceRun("before", "after"))
 	if !service.hasDurableAppend(artifactID) {
 		t.Fatal("durable append finished while its advisory lock was held")
 	}
@@ -429,9 +427,7 @@ func TestAppendFailureClosesDocumentConnectionAndReloadsRoom(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = connection.Close() })
 
-	if _, err := service.ReplaceText(context.Background(), artifactID, "after", model.Actor{Kind: "user", ID: "alice"}); err != nil {
-		t.Fatalf("replace text before persistence failure: %v", err)
-	}
+	editLiveTree(t, service, artifactID, replaceRun("before", "after"))
 	connection.SetReadDeadline(time.Now().Add(time.Second))
 	for {
 		if _, _, err := connection.ReadMessage(); err != nil {

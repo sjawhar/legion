@@ -336,7 +336,7 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 		// sent.
 		with := pmdoc.LineFeeds(replaceWith)
 		// The replacement's markdown and the tables its splice cuts are this accept's to pad.
-		budget := pmdoc.NewTablePaddingBudget()
+		budget := pmdoc.NewWriteBudget()
 		at, _ := pmdoc.ContainingTextblock(tree, range_.From)
 		code := at.Node.Type == "code_block"
 		var replacement *pmdoc.Node
@@ -872,7 +872,7 @@ func (s *Service) sweepUnrecordedMarks(room string, tree *pmdoc.Node) {
 func (s *Service) unmarkExpired(room string, expired []pmdoc.MarkRef) error {
 	var sweepErr error
 	err := s.srv.Apply(context.Background(), room, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
-		transact, release := s.serviceTransact(transact, nil)
+		transact, release := s.serviceTransact(transact)
 		defer release()
 		fragment := doc.GetXmlFragment(fragmentName)
 		// The tree is read inside the transaction that unmarks it, under the document's lock: a

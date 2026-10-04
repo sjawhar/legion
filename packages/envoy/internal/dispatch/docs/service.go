@@ -1135,7 +1135,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 
 	// What the document renders before its closure runs. The closure's own update is classified
 	// against it (closureChangedMarkdown), as a transactional live write classifies its own
-	// (applyJoined): a `doc_updates` row says whether the update changed the rendered markdown,
+	// (applyLive): a `doc_updates` row says whether the update changed the rendered markdown,
 	// and a repair that renders the document exactly as it was changed none. A row that claimed
 	// otherwise would sit past every later version's cursor, since no version follows it to move
 	// the cursor, and the first settlement after a renderer change would version a document
@@ -1233,7 +1233,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	}
 	pending, authors, eventActor := settlementAuthors(state)
 	state.mu.Unlock()
-	reconciliation, err := s.reconcileAskBlocks(ctx, tx, room, owner, reconciled, eventActor)
+	reconciliation, err := s.reconcileAskBlocks(ctx, tx, room, owner, reconciled, beforeMarkdown, eventActor)
 	if err != nil {
 		abandon(err)
 		return

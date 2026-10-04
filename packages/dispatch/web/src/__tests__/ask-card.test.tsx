@@ -852,15 +852,30 @@ test("an approval-kind ask submits Approve with an optional note", async () => {
 });
 
 // A refusal of what the answer says, or of the ask it answers, is refused again however often it
-// is sent, so the card says why and offers no Retry; anything else may pass on a retry.
+// is sent, so the card says why and offers no Retry; anything else may pass on a retry. A
+// CAP_EXCEEDED answer means even its server state would leave the document past what the server
+// can decode, and the card shows the server's reason.
 for (const refusal of [
   {
     code: "ASK_CLOSED",
     error: "ask is already answered",
     message: "This ask was already answered",
+    status: 409,
   },
-  { code: "ASK_RESOLVED", error: "ask is already resolved", message: "This ask was closed" },
-  { code: "ASK_EDITED", error: "question changed", message: "the question changed" },
+  {
+    code: "ASK_RESOLVED",
+    error: "ask is already resolved",
+    message: "This ask was closed",
+    status: 409,
+  },
+  { code: "ASK_EDITED", error: "question changed", message: "the question changed", status: 409 },
+  {
+    code: "CAP_EXCEEDED",
+    error:
+      "document too large to store: this change would leave the document's live state past the 1048576 items ygo decodes in one update; shorten the change, or split the document",
+    message: "past the 1048576 items ygo decodes",
+    status: 413,
+  },
 ]) {
   test(`an answer refused with ${refusal.code} says so and offers no Retry`, async () => {
     let calls = 0;
@@ -870,7 +885,7 @@ for (const refusal of [
         ask={input}
         answerAsk={async () => {
           calls++;
-          throw new ApiError(409, { code: refusal.code, error: refusal.error });
+          throw new ApiError(refusal.status, { code: refusal.code, error: refusal.error });
         }}
         getAskThread={emptyThread(input)}
       />

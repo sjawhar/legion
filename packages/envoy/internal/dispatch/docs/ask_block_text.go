@@ -96,7 +96,7 @@ func (s *Service) SetAskBlockText(
 		wroteBody := askBlockBodyChanges(current, edit)
 		var next *pmdoc.Node
 		if wroteBody {
-			children, err := askBlockChildren(current, edit)
+			children, err := askBlockChildren(current, edit, pmdoc.NewWriteBudget())
 			if err != nil {
 				return err
 			}
@@ -132,7 +132,7 @@ func (s *Service) SetAskBlockText(
 		if errors.As(err, &unrepresentable) {
 			return AskBlockText{}, err
 		}
-		return AskBlockText{}, fmt.Errorf("write ask block text: %w", err)
+		return AskBlockText{}, wrapUnlessTooLarge(err, "write ask block text")
 	}
 	// stored is set by the closure, which applyLive runs before it can return nil or
 	// ErrNoChanges; a nil here would mean it never ran, which must not read as an empty ask.
@@ -154,8 +154,9 @@ func askBlockBodyChanges(current askBlock, edit AskBlockEdit) bool {
 // askBlockChildren is the block's children after edit: the parts it names rebuilt, the parts it
 // does not left exactly as they are. A rebuilt part is the children the markdown pipeline
 // produces, not hand-built nodes, so a bullet list carries the list attributes every other
-// document write gives it.
-func askBlockChildren(current askBlock, edit AskBlockEdit) ([]*pmdoc.Node, error) {
+// document write gives it. The text the edit writes is caller text, so it is weighed on budget,
+// the write's, before it is rendered and as it is parsed back (parsedBlockBody).
+func askBlockChildren(current askBlock, edit AskBlockEdit, budget *pmdoc.WriteBudget) ([]*pmdoc.Node, error) {
 	paragraphs := []*pmdoc.Node{}
 	var list *pmdoc.Node
 	for _, child := range current.node.Children {
@@ -177,7 +178,11 @@ func askBlockChildren(current askBlock, edit AskBlockEdit) ([]*pmdoc.Node, error
 	}
 
 	if edit.Question != nil {
-		rebuilt, refusal, err := parsedBlockBody(questionParagraphs(normalizeAskQuestion(*edit.Question)))
+		question := normalizeAskQuestion(*edit.Question)
+		if err := budget.RefusePlainText(question); err != nil {
+			return nil, err
+		}
+		rebuilt, refusal, err := parsedBlockBody(questionParagraphs(question), budget)
 		if err != nil {
 			return nil, err
 		}
@@ -202,7 +207,14 @@ func askBlockChildren(current askBlock, edit AskBlockEdit) ([]*pmdoc.Node, error
 		options := normalizeAskOptions(*edit.Options)
 		list = nil
 		if len(options) > 0 {
-			rebuilt, refusal, err := parsedBlockBody([]*pmdoc.Node{optionList(options)})
+			texts := make([]string, 0, 2*len(options))
+			for _, option := range options {
+				texts = append(texts, option.Label, option.Description)
+			}
+			if err := budget.RefusePlainText(texts...); err != nil {
+				return nil, err
+			}
+			rebuilt, refusal, err := parsedBlockBody([]*pmdoc.Node{optionList(options)}, budget)
 			if err != nil {
 				return nil, err
 			}
@@ -226,12 +238,14 @@ func askBlockChildren(current askBlock, edit AskBlockEdit) ([]*pmdoc.Node, error
 	return children, nil
 }
 
-// parsedBlockBody is what the document's own markdown pipeline makes of nodes: rendering escapes
-// the text so it reads back literally, and parsing supplies the attributes and block ids a
-// hand-built node has no business inventing. refusal is why the text cannot be held, when the
-// renderer or the parser refuses it (ErrDocSchema, pmdoc.ErrSchema); any other error, a panic
-// (pmdoc.ErrPanic) among them, is pmdoc's bug rather than a reason, and is err.
-func parsedBlockBody(nodes []*pmdoc.Node) (parsed []*pmdoc.Node, refusal string, err error) {
+// parsedBlockBody is what the document's own markdown pipeline makes of nodes, which hold text as
+// a caller wrote it: rendering escapes the text so it reads back literally, and parsing supplies
+// the attributes and block ids a hand-built node has no business inventing. The rendering is parsed
+// on budget, the caller write's, which has weighed the text already (pmdoc.WriteBudget.
+// RefusePlainText). refusal is why the text cannot be held, when the renderer or the parser
+// refuses it (ErrDocSchema, pmdoc.ErrSchema); any other error - a refusal of its size, or a panic
+// (pmdoc.ErrPanic), which is pmdoc's bug rather than a reason - is err.
+func parsedBlockBody(nodes []*pmdoc.Node, budget *pmdoc.WriteBudget) (parsed []*pmdoc.Node, refusal string, err error) {
 	markdown, err := renderTree(&pmdoc.Node{Type: "doc", Children: nodes})
 	if err != nil && !errors.Is(err, ErrDocSchema) {
 		return nil, "", err
@@ -239,7 +253,7 @@ func parsedBlockBody(nodes []*pmdoc.Node) (parsed []*pmdoc.Node, refusal string,
 	if err != nil {
 		return nil, "the text cannot be written as document markdown: " + err.Error(), nil
 	}
-	doc, err := pmdoc.ParseRendering(markdown)
+	doc, err := pmdoc.ParseFragment(markdown, false, budget)
 	if err != nil && !errors.Is(err, pmdoc.ErrSchema) {
 		return nil, "", err
 	}

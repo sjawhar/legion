@@ -29,23 +29,88 @@ func segmentsText(segments *gmtext.Segments, source []byte) string {
 	return text.String()
 }
 
-// parse parses source. unclosedFrontmatter says source opens a document with a front-matter opener
-// no later line closes, after which no container opens at the document's level
-// (frontmatterAttempt).
-func (reader markdownReader) parse(source []byte, unclosedFrontmatter bool, budget *TablePaddingBudget) (ast.Node, error) {
-	pc := parser.NewContext()
-	if unclosedFrontmatter {
-		pc.Set(unclosedFrontmatterKey, true)
-	}
-	pc.Set(tablePaddingBudgetKey, budget)
-	root, err := parseSource(reader.md.Parser(), source, pc)
+// origin is where a parsed source stands in what the caller wrote: line is the number its first
+// line has there, which a refusal names its line from, and server is how many bytes it opens with
+// that the server wrote ahead of the caller's text (parseTableRows's header), which charge the
+// write's elements nothing.
+type origin struct{ line, server int }
+
+// fromStart is the origin of a source that is the caller's from its first byte.
+var fromStart = origin{line: 1}
+
+// parse parses source, which stands at at in what the caller wrote. unclosedFrontmatter says
+// source opens a document with a front-matter opener no later line closes, after which no container
+// opens at the document's level (frontmatterAttempt). Its tables' short rows are padded, and its
+// elements counted, on budget.
+func (reader markdownReader) parse(source []byte, unclosedFrontmatter bool, budget *WriteBudget, at origin) (ast.Node, error) {
+	root, count, pc, err := reader.read(source, unclosedFrontmatter, budget, at.server)
 	if err != nil {
 		return nil, err
+	}
+	count.weigh(root, source)
+	if refusal := count.refusal(source, at.line); refusal != nil {
+		return nil, refusal
 	}
 	if err, _ := pc.Get(tablePaddingErrorKey).(error); err != nil {
 		return nil, err
 	}
 	return root, nil
+}
+
+// read is goldmark's tree of source, its tables padded and its elements counted on budget, the
+// source's first server bytes the server's (origin), with the count and the parser context it
+// kept, or the refusal of markdown nested past either of parseSource's bounds, before anything else
+// refuses it.
+func (reader markdownReader) read(source []byte, unclosedFrontmatter bool, budget *WriteBudget, server int) (ast.Node, *parseCount, parser.Context, error) {
+	pc := parser.NewContext()
+	if unclosedFrontmatter {
+		pc.Set(unclosedFrontmatterKey, true)
+	}
+	pc.Set(writeBudgetKey, budget)
+	count := budget.elements.countParse(pc, server)
+	root, err := parseSource(reader.md.Parser(), source, pc)
+	return root, count, pc, err
+}
+
+// maxReferenceLines is how many of a paragraph's lines goldmark's link reference definition
+// transformer reads (linkReferenceDefinitions).
+const maxReferenceLines = 1_024
+
+// linkReferenceDefinitions is goldmark's link reference definition transformer reading no more of a
+// paragraph than its first maxReferenceLines lines. Goldmark takes each definition it parses out of
+// the paragraph's lines by copying every line after it (parser/link_ref.go:41-50 at v1.8.6), so a
+// paragraph of n definitions costs n² line copies: a mebibyte of `[a]: b` lines took a minute to
+// refuse. Every document holding a definition is refused at the first one in document order
+// (convertedBlocks), which those first lines hold, so the paragraph's later lines stay its text and
+// the refusal is the one a whole read makes.
+type linkReferenceDefinitions struct{ parser.ParagraphTransformer }
+
+func (t linkReferenceDefinitions) Transform(node *ast.Paragraph, reader gmtext.Reader, pc parser.Context) {
+	lines := node.Lines()
+	if lines.Len() <= maxReferenceLines {
+		t.ParagraphTransformer.Transform(node, reader, pc)
+		return
+	}
+	parent, next := node.Parent(), node.NextSibling()
+	rest := lines.Sliced(maxReferenceLines, lines.Len())
+	head := gmtext.NewSegments()
+	head.AppendAll(lines.Sliced(0, maxReferenceLines))
+	node.SetLines(head)
+	t.ParagraphTransformer.Transform(node, reader, pc)
+	if node.Parent() == nil {
+		// Every line it read was a definition, and goldmark took the paragraph out: the rest is a
+		// paragraph of its own where that one stood.
+		node = ast.NewParagraph()
+		node.SetLines(gmtext.NewSegments())
+		if next != nil {
+			parent.InsertBefore(parent, next, node)
+		} else {
+			parent.AppendChild(parent, node)
+		}
+	}
+	kept := node.Lines()
+	kept.AppendAll(rest)
+	node.SetLines(kept)
 }
 
 // unclosedFrontmatterKey marks the parse of a document that opens with a front-matter opener no

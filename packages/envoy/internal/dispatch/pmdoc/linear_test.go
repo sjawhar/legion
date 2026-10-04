@@ -11,12 +11,14 @@ import (
 // before LEGION-465. Each bound is at least ten times the time measured after the fix on a
 // development machine (parse: `a_` 0.3 s, `a_b*` 2 s, `a~b_` 1 s per MiB; render of 4 MiB: `[a`
 // 1.4 s, `a_b&` 0.4 s, `<a` 1.3 s, `[^a` 1.0 s) and well under the time before it (parse of 1 MiB
-// of `a_`: about 4 minutes; of `a_b*`: 12 minutes; render of 4 MiB of `[a`: minutes).
+// of `a_`: about 4 minutes; of `a_b*`: 12 minutes; render of 4 MiB of `[a`: minutes). A caller's
+// write of a mebibyte of these is refused for the elements it makes (MaxDocumentElements), so the
+// parse here is a read-back's, which counts none and reads all of it.
 func TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText(t *testing.T) {
 	for _, shape := range []string{"a_", "a_b*", "a~b_"} {
 		markdown := strings.Repeat(shape, (1<<20)/len(shape))
 		started := time.Now()
-		if _, err := Parse(markdown); err != nil {
+		if _, err := ParseRendering(markdown); err != nil {
 			t.Fatalf("parse 1 MiB of %q: %v", shape, err)
 		}
 		if elapsed := time.Since(started); elapsed > 30*time.Second {
@@ -85,13 +87,14 @@ func TestRenderIsLinearOnRunsFootnoteLabelsAndLineFeeds(t *testing.T) {
 // rows parsed in 35 ms and 256 KiB in 6.8 s, and 1 MiB took 2 min 9 s. unescapeTablePipes,
 // which replaced it, parsed 16 KiB in 19 ms, 256 KiB in 0.6-0.8 s and 1 MiB in 2.0-2.4 s there. No
 // wall-clock bound holds on every runner, so the parse is timed at growing sizes and its growth
-// bounded (growsLinearly).
+// bounded (growsLinearly). A caller's write of a table that size passes the element limit and is
+// refused, so it is read as a rendering is, whose parse no element limit stops.
 func TestParseIsLinearInATableOfEscapedPipes(t *testing.T) {
 	const header, row = "| a |\n| --- |\n", "`\\|`\n"
 	growsLinearly(t, "parsing a table of `\\|` cells", []int{16 << 10, 256 << 10, 1 << 20}, func(size int) time.Duration {
 		markdown := header + strings.Repeat(row, (size-len(header))/len(row))
 		started := time.Now()
-		if _, err := Parse(markdown); err != nil {
+		if _, err := ParseRendering(markdown); err != nil {
 			t.Fatalf("parse %d bytes of `\\|` rows: %v", size, err)
 		}
 		return time.Since(started)

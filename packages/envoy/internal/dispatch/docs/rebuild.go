@@ -28,12 +28,17 @@ type RebuildReport struct {
 //
 // Every refusal comes before the first write: a room resident in this server, a history that
 // loads, a closed issue (for supplied markdown, which changes the document), and markdown that is
-// not a Proof document or drops an open ask block. Supplied markdown that differs from the latest
-// version is a document change, so the same transaction writes its version, which moves the open
-// approval request to it (writeVersionTx, MoveApprovalAsk); the VersionResult is what the caller's
-// artifact.version event names. A failure anywhere rolls the whole rebuild back with the
-// transaction. The room refuses loads until that transaction ends (Ledger.holdRebuild): a load
-// before the commit would read the old history, and a second rebuild would preflight against it.
+// not a Proof document or drops an open ask block. Supplied markdown is caller text: it is parsed
+// as an upload is, and its rendering is weighed as a new document's is (SeedText). The latest
+// version is the server's own rendering of the document, read back as every stored rendering is
+// (pmdoc.ParseRendering), so a document whose version is past what one write may make - stored
+// before that bound, or grown past it by browser edits - still rebuilds. Supplied markdown that
+// differs from the latest version is a document change, so the same transaction writes its
+// version, which moves the open approval request to it (writeVersionTx, MoveApprovalAsk); the
+// VersionResult is what the caller's artifact.version event names. A failure anywhere rolls the
+// whole rebuild back with the transaction. The room refuses loads until that transaction ends
+// (Ledger.holdRebuild): a load before the commit would read the old history, and a second rebuild
+// would preflight against it.
 func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdown *string, actor model.Actor) (RebuildReport, VersionResult, error) {
 	tx, joined := txFromContext(ctx)
 	if !joined {
@@ -69,14 +74,15 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 	if err != nil {
 		return RebuildReport{}, VersionResult{}, err
 	}
-	source := latest.markdown
-	if markdown != nil {
+	var tree *pmdoc.Node
+	if markdown == nil {
+		tree, err = uploadedInput(pmdoc.ParseRendering(latest.markdown))
+	} else {
 		if !open {
 			return RebuildReport{}, VersionResult{}, ErrIssueClosed
 		}
-		source = *markdown
+		tree, err = parseInput(*markdown)
 	}
-	tree, err := parseInput(source)
 	if err != nil {
 		return RebuildReport{}, VersionResult{}, err
 	}
@@ -89,6 +95,11 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 	canonical, err := renderTree(tree)
 	if err != nil {
 		return RebuildReport{}, VersionResult{}, err
+	}
+	if markdown != nil {
+		if err := weighRendering("", canonical); err != nil {
+			return RebuildReport{}, VersionResult{}, err
+		}
 	}
 	seed, err := encodeDocumentTree(tree)
 	if err != nil {

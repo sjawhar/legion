@@ -187,15 +187,27 @@ opening a document or an agent's edit credits it nothing, so a reader whose edit
 the rendering carries causes no version and cannot stale an approval.
 A handler joins its document operations to its transaction with `Docs.Join`, which returns the
 transaction's ledger (`docs/ledger.go`), the only way to give a document operation a transaction:
-`SeedText` and `SnapshotVersion` take theirs from the ledger and refuse a context that was not
-joined. A joined operation never writes the room: it runs on the transaction's fork of the room's
-document (`docs/livewrite.go`), appends its update inside the transaction, and reads through the
-same fork. The handler ends the transaction with `ledger.Commit`, which commits, credits the
-writes' actor to their rooms, releases the authors a version the transaction wrote named, then
-applies and broadcasts the updates, and last publishes the events its document operations
-appended, ahead of the handler's own; it defers `ledger.Discard`, so a transaction that does not
-commit leaves the room, every connected browser, every version and the durable document as they
-were.
+every document write takes its transaction from the ledger and refuses a context that was not
+joined (`errUnjoined`): `SeedText`, a rebuild (`RebuildDocument`), the version writes, and every
+write that runs through `applyLive` (`docs/mutation.go`) - an upload's replacement, an edit batch,
+an accepted or rejected suggestion, an ask's edited text and its answer or resolution, a comment's
+anchor mark and its margin record - each of which `applyLive` also weighs by what it leaves
+(`docs/growth.go`). An answer the document has no room for is left out of its block, which records
+who answered and when, and kept on its ask. The server writes outside `applyLive` are a rebuild,
+settlement's repairs, the block-id backfill and the sweep of unrecorded marks. Of those, a rebuild
+and settlement's repairs carry caller text. A rebuild's supplied markdown is weighed as a new
+document's rendering is (`SeedText`), and its latest version, the server's own text, is restored
+whatever it weighs. Settlement's is the answer an ask keeps, written back into a block that returns
+to the document: settlement weighs each such answer and leaves out the ones the document has no
+room for (`withholdAnswers`). A joined
+operation never writes the room: it runs on the transaction's fork of the room's document
+(`docs/livewrite.go`), appends its update inside the transaction, and reads through the same fork.
+The handler ends the transaction with
+`ledger.Commit`, which commits, credits the writes' actor to their rooms, releases the authors a
+version the transaction wrote named, then applies and broadcasts the updates, and last publishes
+the events its document operations appended, ahead of the handler's own; it defers
+`ledger.Discard`, so a transaction that does not commit leaves the room, every connected browser,
+every version and the durable document as they were.
 
 While a transaction's write to a document is open it holds that room's writer slot, so another
 transaction's joined operation on the document waits for it to be published or discarded, and it

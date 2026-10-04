@@ -53,7 +53,7 @@ func TestStoredTreeOutsideSchemaIsRepairedByReplacementAfterRestart(t *testing.T
 	if _, err := second.Text(context.Background(), artifactID); !errors.Is(err, ErrDocOutsideSchema) {
 		t.Fatalf("read crafted tree after restart: %v, want ErrDocOutsideSchema", err)
 	}
-	if _, err := second.ReplaceText(context.Background(), artifactID, "repaired\n", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+	if _, err := joinedReplaceText(second, artifactID, "repaired\n", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("replace unreadable document after restart: %v", err)
 	}
 	if text, err := second.Text(context.Background(), artifactID); err != nil || text != "repaired\n" {
@@ -100,12 +100,12 @@ func TestSchemaRepairKeepsOpenAskBlocks(t *testing.T) {
 			t.Errorf("shutdown second service: %v", err)
 		}
 	})
-	_, err := second.ReplaceText(context.Background(), artifactID, "replacement without the ask\n", model.Actor{Kind: "user", ID: "alice"})
+	_, err := joinedReplaceText(second, artifactID, "replacement without the ask\n", model.Actor{Kind: "user", ID: "alice"})
 	var invalid *ErrInvalidAskBlock
 	if !errors.As(err, &invalid) || !strings.Contains(err.Error(), "keep") {
 		t.Fatalf("replacement dropping the open ask: %v, want ErrInvalidAskBlock naming keep", err)
 	}
-	if _, err := second.ReplaceText(context.Background(), artifactID, ask+"\nRepaired.\n", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+	if _, err := joinedReplaceText(second, artifactID, ask+"\nRepaired.\n", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("replacement retaining the open ask: %v", err)
 	}
 	var state string
@@ -143,7 +143,7 @@ func TestSchemaRepairRefusesAnAskBlockTheContentRuleRefuses(t *testing.T) {
 			if test.unreadable {
 				writeSchemaInvalidElement(t, service, artifactID)
 			}
-			_, err := service.ReplaceText(context.Background(), artifactID, broken, model.Actor{Kind: "user", ID: "alice"})
+			_, err := joinedReplaceText(service, artifactID, broken, model.Actor{Kind: "user", ID: "alice"})
 			var invalid *ErrInvalidAskBlock
 			if !errors.As(err, &invalid) {
 				t.Fatalf("replace with an ask block holding only a list: %v, want ErrInvalidAskBlock", err)

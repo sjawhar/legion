@@ -99,7 +99,7 @@ func TestAHealthyRoomUnderWritesIsNeverRefused(t *testing.T) {
 				return
 			default:
 			}
-			canonical, err := service.ReplaceText(context.Background(), artifactID, bodies[round%len(bodies)], alice)
+			canonical, err := joinedReplaceText(service, artifactID, bodies[round%len(bodies)], alice)
 			if err != nil {
 				result.err = fmt.Errorf("write round %d: %w", round, err)
 				written <- result
@@ -327,7 +327,7 @@ func TestARoomOnlyTheAPITouchesLeavesWithinTheIdleTimeout(t *testing.T) {
 		})
 	}
 
-	written, err := service.ReplaceText(ctx, artifactID, "Edited by an agent.\n", agent)
+	written, err := joinedReplaceText(service, artifactID, "Edited by an agent.\n", agent)
 	if err != nil {
 		t.Fatalf("agent edit: %v", err)
 	}
@@ -466,7 +466,7 @@ func TestTheUpdateObserverNeverRendersAWriteHalfWay(t *testing.T) {
 	go func() {
 		defer writers.Done()
 		for round := 0; time.Now().Before(deadline); round++ {
-			if err := service.ProjectMark(ctx, artifactID, fmt.Sprintf("projection-%d", round), MarkRecord{
+			if err := joinedProjectMark(service, artifactID, fmt.Sprintf("projection-%d", round), MarkRecord{
 				Kind: "comment", By: "user:bob", CreatedAt: time.Now().UTC().Format(time.RFC3339Nano), Text: "note",
 			}, bob); err != nil {
 				failures <- fmt.Errorf("projection %d: %w", round, err)

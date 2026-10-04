@@ -10,7 +10,6 @@ import (
 	"github.com/reearth/ygo/provider/websocket"
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
-	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
 
@@ -59,38 +58,18 @@ func TestSettlementSkipsATreeOverTheDepthBound(t *testing.T) {
 	}
 }
 
-// A service write that marks or unmarks reads the live document and then walks it again inside its
-// transaction, and a peer's update can land between the two. A walk that then meets a tree past
-// the depth bound refuses it as the document outside the schema (ErrDocSchema, which the API
-// serves as DOC_SCHEMA), as every read of that tree does, rather than as an internal error:
-// marking a quote, rejecting a suggestion by removing its mark, and the sweep of unrecorded marks.
+// The sweep of unrecorded marks reads the live document and then walks it again inside its
+// transaction on the room, and a peer's update can land between the two. A walk that then meets a
+// tree past the depth bound refuses it as the document outside the schema (ErrDocSchema), as every
+// read of that tree does, rather than as an internal error. Every other write that marks or unmarks
+// runs on its transaction's fork of the room (applyLive), which no peer's update reaches.
 func TestMarkWalksTellATreeDeepenedSinceTheirReadAsOutsideTheSchema(t *testing.T) {
 	ctx := context.Background()
-	bob := model.Actor{Kind: "user", ID: "bob"}
 	for _, test := range []struct {
 		name  string
 		setUp func(t *testing.T, service *Service, artifactID string)
 		write func(service *Service, artifactID string) error
 	}{
-		{
-			name:  "marking a quote",
-			setUp: func(*testing.T, *Service, string) {},
-			write: func(service *Service, artifactID string) error {
-				_, err := service.MarkQuote(ctx, artifactID, MarkSpec{Kind: MarkComment, ID: "c1", By: bob}, "brown", nil)
-				return err
-			},
-		},
-		{
-			name: "rejecting a suggestion",
-			setUp: func(t *testing.T, service *Service, artifactID string) {
-				if _, err := service.MarkQuote(ctx, artifactID, MarkSpec{Kind: MarkSuggestion, ID: "rep", By: bob}, "brown", nil); err != nil {
-					t.Fatalf("suggest: %v", err)
-				}
-			},
-			write: func(service *Service, artifactID string) error {
-				return service.RejectSuggestion(ctx, artifactID, "rep", bob)
-			},
-		},
 		{
 			name: "sweeping an unrecorded mark",
 			setUp: func(t *testing.T, service *Service, artifactID string) {

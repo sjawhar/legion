@@ -510,6 +510,38 @@ jobs:
             out/pr-artifacts/legion-envoy-amd64.tar.gz
             out/pr-artifacts/legion-envoy-arm64.tar.gz
 
+  # The real-process memory tests (packages/envoy/cmd/dispatch/memory_test.go, LEGION-481): each
+  # row starts a Dispatch server, drives it over HTTP and the document websocket and reads its
+  # resident memory from /proc, and together they run past go test's default ten-minute deadline,
+  # which took envoy-go red at 600 s (run 37116639565). They build only under the `memory` tag, so
+  # envoy-go's unit run leaves them out and this job runs them with a deadline of its own.
+  dispatch-memory:
+    needs: changes
+    if: needs.changes.outputs.envoy == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: ci
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DISPATCH_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: packages/envoy/go.mod
+      - name: Memory tests of the Dispatch server
+        run: go test -tags memory -count=1 -timeout 60m -v ./cmd/dispatch
+        working-directory: packages/envoy
+
   # The container smoke test, and the image it runs. Its own job, gated on envoy_image rather
   # than envoy: the image is built from the Dispatch SPA and the Bun workspace as well as the Go
   # sources, so a Dispatch-only change changes the image and must smoke it, while widening
