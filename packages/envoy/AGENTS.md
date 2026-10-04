@@ -1884,9 +1884,10 @@ name, which orders `A0` and `A_B` the other way), for a full load and a single-n
 an unchanged namespace keeps its version (`TestGoldenDigest` pins the bytes). `Loader.LoadOne`
 reads one name with `DescribeSecret` under the same rules and the same refusal line, and
 `Current.RefreshOne` merges it into the live set; `Refresh` and `RefreshOne` hold one lock from
-their read to their store, and for five minutes after a name's reread (`listLag`, how far AWS
-documents `ListSecrets` may lag) each full reload reads that name again alone, so a lagging listing
-neither drops a secret the reread served nor brings back one it found gone.
+their read to their store, and each full reload that begins (its clock read before its listing is
+fetched) within five minutes of a name's reread (`listLag`, how far AWS documents `ListSecrets` may
+lag) reads that name again alone, so a lagging listing neither drops a secret the reread served nor
+brings back one it found gone.
 
 The client finds its session in `AGENT_SECRETS_KEY_DIR` (a box's or pod's `key.pem` and
 `enrollment`) or `AGENT_SECRETS_HELPER_SOCK` (a host session's helper), beside `AGENT_SECRETS_URL`.

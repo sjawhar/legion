@@ -92,3 +92,60 @@ func TestRecentNamesExpireAfterListLag(t *testing.T) {
 		t.Fatal("a full reload listLag after the reread still kept NEW_KEY over the listing")
 	}
 }
+
+// slowLister answers a frozen page, then runs fetched: a reload whose listing is fetched at one
+// time and whose Load returns at a later one.
+type slowLister struct {
+	page    *secretsmanager.ListSecretsOutput
+	fetched func()
+}
+
+func (s *slowLister) ListSecrets(context.Context, *secretsmanager.ListSecretsInput, ...func(*secretsmanager.Options)) (*secretsmanager.ListSecretsOutput, error) {
+	if s.fetched != nil {
+		s.fetched()
+	}
+	return s.page, nil
+}
+
+// TestARefreshStraddlingListLagStillRereadsTheName pins that the window is measured from when the
+// listing was fetched: a reload whose lagging listing was read inside listLag of a reread, but
+// whose Load returns after it ran out, still rereads that name rather than trusting the listing.
+func TestARefreshStraddlingListLagStillRereadsTheName(t *testing.T) {
+	store := secrets.NewLocal(policytest.Secret("OLD_KEY", "ada@example.com", policy.TierAgent, "v1"))
+	stale, err := store.ListSecrets(context.Background(), &secretsmanager.ListSecretsInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lister := &slowLister{page: stale} // lists OLD_KEY and never NEW_KEY
+	loader := policytest.Loader(store)
+	loader.Secrets = lister
+	cur, err := policy.NewCurrent(t.Context(), loader, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reread := time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC)
+	now := reread
+	policy.SetNow(cur, func() time.Time { return now })
+	store.Put(policytest.Secret("NEW_KEY", "ada@example.com", policy.TierAgent, "v1"))
+	if lk, _ := cur.RefreshOne(context.Background(), "NEW_KEY"); !lk.Served {
+		t.Fatal("reread must serve NEW_KEY")
+	}
+	store.Delete(policytest.ID("OLD_KEY"))
+	if lk, _ := cur.RefreshOne(context.Background(), "OLD_KEY"); lk.Served {
+		t.Fatal("reread must drop OLD_KEY")
+	}
+
+	// The listing is fetched inside listLag of the rereads, and Load returns after it ran out.
+	now = reread.Add(policy.ListLag - time.Second)
+	lister.fetched = func() { now = reread.Add(policy.ListLag + time.Second) }
+	if err := cur.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	set := cur.Get()
+	if _, ok := set.Secrets["NEW_KEY"]; !ok {
+		t.Fatal("a reload whose listing predates listLag's end dropped NEW_KEY")
+	}
+	if _, ok := set.Secrets["OLD_KEY"]; ok {
+		t.Fatal("a reload whose listing predates listLag's end resurrected deleted OLD_KEY")
+	}
+}

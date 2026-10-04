@@ -53,11 +53,15 @@ func NewCurrent(ctx context.Context, loader Loader, every time.Duration) (*Curre
 }
 
 // Refresh loads the policy now and, when the load succeeds, makes it the live one. A name
-// RefreshOne reread within listLag is read again alone and kept as that read finds it, since the
-// full listing may not show the change yet; any failed read fails the refresh.
+// RefreshOne reread within listLag of the moment this reload began - before its listing was
+// fetched - is read again alone and kept as that read finds it, since the full listing may not
+// show the change yet; any failed read fails the refresh.
 func (c *Current) Refresh(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	// The window is measured from before the listing is fetched: a listing read inside it may lag
+	// a reread however long Load takes to return.
+	now := c.now()
 	set, err := c.loader.Load(ctx)
 	if err != nil {
 		return err
@@ -66,7 +70,6 @@ func (c *Current) Refresh(ctx context.Context) error {
 		c.set.Store(set)
 		return nil
 	}
-	now := c.now()
 	for name, at := range c.recent {
 		if now.Sub(at) > listLag {
 			delete(c.recent, name)
