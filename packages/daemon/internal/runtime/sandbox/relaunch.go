@@ -182,6 +182,13 @@ func (r *Runtime) suspendFailedLaunch(ctx context.Context, token claim.Token, s 
 // template the Running patch replaces before any pod exists. One being deleted is waited out
 // first, bounded by the boot timeout; one by the claim's name that is not this project's is a
 // refusal.
+//
+// A Sandbox is made for its issue's tree (its tree label, and the tree volume template a root's
+// carries), and an issue's key, so its Sandbox's name, outlives a move to another tree: a child of
+// a closed tree re-admitted as a root of its own finds the Sandbox its old tree suspended, which
+// mounts the old root's volume and carries no volume of its own. Such a Sandbox, once Suspended,
+// is deleted and made again for this launch's tree; one that still runs roles of the old tree is a
+// refusal, since replacing it would end them.
 func (r *Runtime) ensureSandbox(ctx context.Context, l launch) (*sandbox, error) {
 	deadline := time.Now().Add(r.bootTimeout)
 	for {
@@ -215,7 +222,19 @@ func (r *Runtime) ensureSandbox(ctx context.Context, l launch) (*sandbox, error)
 			return nil, fmt.Errorf("sandbox %s exists but is not project %s's (%s=%q)", l.name, r.project, labelProject, s.Labels[labelProject])
 		}
 		if s.DeletionTimestamp == nil {
-			return s, nil
+			if s.Labels[labelTree] == labelValue(l.spec.Tree) && (!l.isRoot || len(s.Spec.VolumeClaimTemplates) > 0) {
+				return s, nil
+			}
+			if s.mode() != modeSuspended {
+				return nil, fmt.Errorf("sandbox %s, made for tree %s, does not fit this launch of tree %s and still runs roles; it is replaced once they stop",
+					l.name, s.Labels[labelTree], labelValue(l.spec.Tree))
+			}
+			r.log.Info("sandbox runtime: replacing a sandbox made for another tree or without its tree volume", "sandbox", l.name, "uid", s.UID,
+				"tree", s.Labels[labelTree], "for", labelValue(l.spec.Tree))
+			if err := r.deleteSandbox(ctx, u, false); err != nil && !apierrors.IsConflict(err) {
+				return nil, err
+			}
+			continue
 		}
 		r.log.Info("sandbox runtime: waiting out a sandbox being deleted", "sandbox", l.name, "uid", s.UID)
 		gone := func() (bool, error) {

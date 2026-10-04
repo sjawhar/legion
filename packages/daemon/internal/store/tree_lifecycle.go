@@ -137,10 +137,14 @@ func (s *Store) ReserveOperatorTreeCleanup(ctx context.Context, project, tree st
 // pendingTreeClaims names every stored claim of the tree that has not retired, as token:state.
 // Read after the tree's cleanup reservation committed, it is the tree's complete runnable
 // population: no later claim can bind to the reserved epoch, and a claim that won before the
-// reservation is already stored, whether or not its process launched yet.
+// reservation is already stored, whether or not its process launched yet. A claim whose issue has
+// since moved to another tree (a child re-admitted as a root of its own) and that runs nothing is
+// not the tree's: its new tree re-points it before it starts again (supervise.Machine.Retree), and
+// waiting on it would hold this tree's cleanup for as long as the new tree leaves it idle.
 func pendingTreeClaims(ctx context.Context, tx pgx.Tx, project, tree string) ([]string, error) {
-	rows, err := tx.Query(ctx, `select token, state from claims where project = $1 and tree = $2 and state <> 'retired'
-		order by token`, project, tree)
+	rows, err := tx.Query(ctx, `select c.token, c.state from claims c where c.project = $1 and c.tree = $2 and c.state <> 'retired'
+		and not (c.state in ('queued', 'suspended', 'failed') and exists (select 1 from issues i where i.key = c.issue and i.tree <> $2))
+		order by c.token`, project, tree)
 	if err != nil {
 		return nil, fmt.Errorf("census claims of tree %s: %w", tree, err)
 	}

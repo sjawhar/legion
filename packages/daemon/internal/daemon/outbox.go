@@ -498,6 +498,14 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 				return fmt.Errorf("create claim %s: %w", token, err)
 			}
 		}
+		// A child of a closed tree re-admitted as a root of its own keeps its roles' claims, which
+		// still name the tree it left; each is re-pointed before it starts here, so it binds this
+		// tree's lifecycle and launches in this tree's resources.
+		if machine.Claim().Tree != issue.Tree {
+			if err := r.supervisor.retree(ctx, token, machine, issue.Tree); err != nil {
+				return err
+			}
+		}
 		// The claim remembers the newest start run against it, so a stop written before this one
 		// is finished rather than acted on however late it arrives (see "suspend" below). A claim
 		// this row created has no older stop to fence, and recording it here rather than only for

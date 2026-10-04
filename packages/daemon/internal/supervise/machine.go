@@ -466,6 +466,25 @@ func (m *Machine) StartedBy(ctx context.Context, row int64) error {
 	return m.persist(ctx)
 }
 
+// Retree re-points a claim to tree, the tree its issue belongs to now: a child of a closed tree
+// re-admitted as a root of its own keeps its roles' claims, which still name the tree it left. The
+// claim drops its old tree's epoch, so its next start binds the new tree's lifecycle and launches
+// in the new tree's resources. Only a claim that runs nothing is re-pointed; one whose process
+// still runs in the old tree is a wait (wait.ErrWaiting) until its old tree's stop lands.
+func (m *Machine) Retree(ctx context.Context, tree string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.claim.Tree == tree {
+		return nil
+	}
+	if !slices.Contains([]ClaimState{StateQueued, StateSuspended, StateFailed, StateRetired}, m.claim.State) {
+		return wait.Errorf("re-point claim %s from tree %s to %s: it is %s there", m.claim.Token, m.claim.Tree, tree, m.claim.State)
+	}
+	m.log.Info("supervise: the claim's issue moved to another tree", "claim", m.claim.Token, "from", m.claim.Tree, "to", tree)
+	m.claim.Tree, m.claim.TreeEpoch = tree, 0
+	return m.persist(ctx)
+}
+
 // ServingRun is the issue generation of the run whose task this claim's worker took, and 0 for a
 // claim that has taken none. It is the daemon's whole answer to which run a completion belongs to:
 // a completion names no run, the pane cannot say it (LEGION_GENERATION is the claim's launch

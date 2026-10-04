@@ -374,12 +374,7 @@ func (r *Runtime) podTemplate(l launch, colocate bool) podTemplate {
 // command, while values the kubelet must resolve (the downward API, the operator's secret refs)
 // are set on every container.
 func (r *Runtime) launcherContainers(l launch, providersMounts []corev1.VolumeMount) []corev1.Container {
-	var resolved []corev1.EnvVar
-	for _, entry := range r.mainEnvironment(l, "!"+r.tools.Legion+" credential") {
-		if entry.ValueFrom != nil {
-			resolved = append(resolved, entry)
-		}
-	}
+	resolved, _ := r.launchEnvironment(l)
 	containers := make([]corev1.Container, 0, len(claim.Roles))
 	for _, role := range claim.Roles {
 		containers = append(containers, corev1.Container{
@@ -678,6 +673,23 @@ func (r *Runtime) mainEnvironment(l launch, credentialHelper string) []corev1.En
 		add(name+"_FILE", generationDir(l.spec.Generation)+"/"+name)
 	}
 	return append(env, r.providersPointers()...)
+}
+
+// launchEnvironment is mainEnvironment, with the pod's credential helper, split into its two
+// carriers: the variables the kubelet resolves (the downward API, the operator's Secret
+// references), set on every role container, and the plain NAME=value pairs the launcher's start
+// command carries to each generation's child.
+func (r *Runtime) launchEnvironment(l launch) ([]corev1.EnvVar, []string) {
+	var resolved []corev1.EnvVar
+	var plain []string
+	for _, entry := range r.mainEnvironment(l, "!"+r.tools.Legion+" credential") {
+		if entry.ValueFrom != nil {
+			resolved = append(resolved, entry)
+		} else {
+			plain = append(plain, entry.Name+"="+entry.Value)
+		}
+	}
+	return resolved, plain
 }
 
 // podPath is a main container's PATH: worker-bin, then the directory of the `legion` every
