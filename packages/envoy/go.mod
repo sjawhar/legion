@@ -101,9 +101,13 @@ require (
 	google.golang.org/protobuf v1.36.11 // indirect
 )
 
-// ygo's delete of a live element recursed over its nested children, so the stack an ordinary
-// delete needs grew with the tree's nesting - a tree an authenticated peer grows through any
-// number of small websocket updates - and past the goroutine's stack it is a fatal error no
-// recover sees. The fork makes that cascade iterative and carries the transactional GC fix; both
-// are in the upstream pull request this pin is waiting on.
-replace github.com/reearth/ygo => github.com/sjawhar/ygo v1.49.6-sami.3
+// The sjawhar/ygo fork carries ygo fixes Dispatch depends on while each waits in its own upstream
+// pull request (reearth/ygo #257, #260, #262, #263, #266, #267, #268, #269): an iterative delete
+// cascade and nested reads, so the stack a delete or read needs does not grow with a tree a peer
+// nested; the transactional GC range search; a merged update's skip parks the items after it
+// rather than dropping the update that fills the gap; a whole document state resolves its own
+// dependencies before the pending cap; items merge only when their right origins match, so a
+// re-encoded document keeps its text order; BroadcastUpdate validates under the server's
+// MaxPendingItems; the bundled stores keep a large incremental update; and Apply stamps a room
+// with no peer idle when it returns, so the idle sweep evicts a room only the API touched.
+replace github.com/reearth/ygo => github.com/sjawhar/ygo v1.50.1-sami.2

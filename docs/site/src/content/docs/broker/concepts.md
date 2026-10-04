@@ -188,10 +188,12 @@ or for a shared agent-tier secret its session's operator withheld from it, names
 broker records the email of whoever did. A withheld secret is its owner's to approve for that
 session even in a request that was already waiting when the operator withheld it: a request that
 waited on anyone for a shared human-tier secret and the operator's own withheld secret is then the
-operator's alone to approve, and anyone else's approval is refused `NOT_APPROVER`. The approval it
-gets lasts as any approval does (below): a change to another secret's tags does not end it, nor
-does the operator's later revoke of another grant, unless that revoke withholds another secret the
-request got without asking.
+operator's alone to approve, and anyone else's approval is refused `NOT_APPROVER`. While the
+withheld secret is out of the broker's policy (deleted, or its tags refused), no one may approve
+such a request, since the secret's owner cannot be read; it waits until the secret is back, or
+expires. The approval it gets lasts as any approval does (below): a change to another secret's
+tags does not end it, nor does the operator's later revoke of another grant, unless that revoke
+withholds another secret the request got without asking.
 
 An approval belongs to the person who gave it, so a change to a secret's tags reaches what was
 approved before it wherever the new tags want the secret approved for that session:
@@ -211,8 +213,9 @@ approved before it wherever the new tags want the secret approved for that sessi
   waiting on a person for a secret another person must now approve can be approved by no one. One
   waiting on a person stays that person's when the secret becomes shared, or when the new tags give
   its session the secret without asking. A denial releases nothing, so the approver a request waits
-  on can still deny it, which takes it off the pending list; otherwise it expires, or its session
-  cancels it (`agent-secrets cancel`) and asks again.
+  on can still deny it, which takes it off the pending list: for a request waiting on anyone, any
+  signed-in person may deny it. Otherwise it expires, or its session cancels it
+  (`agent-secrets cancel`) and asks again.
 
 A record is decided once. A second click, a concurrent one, or one after the record expired gets
 `RECORD_TERMINAL`. A pending request nobody decides expires after 12 hours, a fixed time rather than
