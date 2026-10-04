@@ -74,8 +74,8 @@ type revokeByApproverBody struct {
 // revokeByApprover ends a grant on a human's Dispatch login: the login must be the grant's
 // approver or its enrollment's operator (requests.Machine.RevokeByApprover's own mayRevoke
 // check). When the operator revokes a grant the session got without asking, its secrets are
-// withheld from that session: its other grants that got them without asking end too, and its
-// later requests for them ask their owner.
+// withheld from that session, even when the grant had already ended: its other grants that got
+// them without asking end too, and its later requests for them ask their owner.
 func (s *server) revokeByApprover(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathUUID(w, r, "id", "GRANT_ID_INPUT", "grant")
 	if !ok {

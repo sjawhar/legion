@@ -1954,19 +1954,26 @@ since the grant was decided — that the current policy still allows every grant
 (`stillAllowed`: a name the policy no longer serves, denies, or now wants approved that was granted
 automatically, or that it now wants approved by someone the request's `decided_by` login is not,
 all refuse, so an approved grant outlives an owner change only while its approver may still
-approve the secret, or once the new tags give its session the secret without asking); a source
-missing from the secrets store is `404 SECRET_NOT_IN_STORE`.
+approve the secret, or once the new tags give its session the secret without asking; a name
+withheld from the session that its request got automatically is judged as an approval by
+`decided_by`, since a live grant of it was approved after the withhold by someone the withheld name
+let approve it); a source missing from the secrets store is `404 SECRET_NOT_IN_STORE`.
 Migration 0009 defaults `request_secrets.delivery` to `inject`, which this broker neither writes nor
 reads, so a binary from before it can still be rolled back to.
 `RevokeGrant` lets a session end only its own grant (session proof); `RevokeByApprover` ends a grant
 on a human's Dispatch email, allowed only when that email is the grant's approver or its
-enrollment's operator (`mayRevoke`, else `403 NOT_APPROVER`); revoking an already-revoked grant is
-a no-op, writing no second audit row. When the enrollment's operator revokes, `withhold` withholds
+enrollment's operator (`mayRevoke`, which also answers whether it is the operator, else
+`403 NOT_APPROVER`). When the enrollment's operator revokes, `withhold` withholds
 from the grant's session every name its request got automatically (a `withheld_secrets` row per
 session and name, migration 0010) and, in the same statement, ends every other live grant of the
-session whose request got one of those names automatically, each with a `grant.revoked` audit row
-of its own; the revoked grant's audit detail lists the newly withheld names under `withheld`, and
-each other ended grant's lists the withheld names it held. Another person's revoke (a grant's
+session whose request got one of the newly withheld names automatically, each with a
+`grant.revoked` audit row of its own; the revoked grant's audit detail lists the newly withheld
+names under `withheld`, and each other ended grant's lists the withheld names it held. A name
+already withheld ends nothing, since its first withhold ended every grant that got it without
+asking and one approved since stands. The withhold is the session's, so the operator's revoke of a
+grant that had already ended still runs it, recorded as one `grant.withheld` row when it withholds
+something new; any other revoke of an already-revoked grant, and an operator's that withholds
+nothing new, is a no-op, writing no second audit row. Another person's revoke (a grant's
 approver who is not the operator) ends that grant alone and withholds nothing, as does a session
 revoking its own grant. A withheld name is human tier to its session: `policy.Requester.Withheld`
 carries the session's withheld names, and `policy.Set.Evaluate` answers each as an approval request

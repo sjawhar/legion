@@ -615,13 +615,17 @@ func (m *Machine) RevokeGrant(ctx context.Context, grantID, enrollmentID string)
 // approver or its enrollment's operator (mayRevoke). When the operator revokes, every name the
 // grant's request got automatically is withheld from the grant's session from then on, and every
 // other live grant of the session that got one of those names automatically ends with it
-// (withhold), so the session asks before it gets the name again (Create). Another person's revoke
-// (an approver's of the grant) ends the grant alone and withholds nothing: the session is not
-// theirs. It locks the session's row in the statement that reads the grant, before it writes the
-// grant: the order every writer that locks both takes them in, and the one lock Create and
-// ApplyDecision read the withheld names under, so a request deciding on the session as this runs
-// either is written first, and then ended here if it got a withheld name, or decides with the
-// name withheld. Revoking an already-revoked grant succeeds and changes nothing.
+// (withhold), so the session asks before it gets the name again (Create). The withhold belongs to
+// the session rather than the grant, so the operator's revoke of a grant that had already ended
+// (its session revoked it, or it expired, after the operator's Live grants list was loaded)
+// withholds the same names, recorded as a grant.withheld audit row rather than a second
+// grant.revoked. Another person's revoke (an approver's of the grant) ends the grant alone and
+// withholds nothing: the session is not theirs. It locks the session's row in the statement that
+// reads the grant, before it writes the grant: the order every writer that locks both takes them
+// in, and the one lock Create and ApplyDecision read the withheld names under, so a request
+// deciding on the session as this runs either is written first, and then ended here if it got a
+// withheld name, or decides with the name withheld. A revoke that ends nothing and withholds
+// nothing new succeeds and changes nothing.
 func (m *Machine) RevokeByApprover(ctx context.Context, grantID, login string) error {
 	tx, err := m.Store.Pool.Begin(ctx)
 	if err != nil {
@@ -634,7 +638,8 @@ func (m *Machine) RevokeByApprover(ctx context.Context, grantID, login string) e
 		from grants g join enrollments e on e.id=g.enrollment_id where g.id=$1 for no key update of e`, grantID).Scan(&session, &requestID, &approver, &operator); err != nil {
 		return err
 	}
-	if !mayRevoke(login, approver, operator) {
+	allowed, asOperator := mayRevoke(login, approver, operator)
+	if !allowed {
 		return ErrNotApprover
 	}
 	actor := "human:" + record.CanonicalLogin(login)
@@ -642,11 +647,9 @@ func (m *Machine) RevokeByApprover(ctx context.Context, grantID, login string) e
 	if err != nil {
 		return err
 	}
-	if tag.RowsAffected() == 0 {
-		return nil
-	}
+	ended := tag.RowsAffected() > 0
 	detail := auditDetail{}
-	if operator != nil && record.CanonicalLogin(*operator) == record.CanonicalLogin(login) {
+	if asOperator {
 		withheld, err := withhold(ctx, tx, session, requestID, actor)
 		if err != nil {
 			return err
@@ -655,7 +658,14 @@ func (m *Machine) RevokeByApprover(ctx context.Context, grantID, login string) e
 			detail["withheld"] = withheld
 		}
 	}
-	if err := audit(ctx, tx, "grant.revoked", session, requestID, &grantID, actor, detail); err != nil {
+	kind := "grant.revoked"
+	if !ended {
+		if len(detail) == 0 {
+			return nil
+		}
+		kind = "grant.withheld"
+	}
+	if err := audit(ctx, tx, kind, session, requestID, &grantID, actor, detail); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -663,9 +673,12 @@ func (m *Machine) RevokeByApprover(ctx context.Context, grantID, login string) e
 
 // withhold withholds from enrollmentID every name request requestID, whose grant its operator just
 // revoked, got automatically, and in the same statement ends every other live grant of the session
-// whose request got one of those names automatically, each with a grant.revoked audit row by actor
-// naming those of its names under "withheld". So no grant the session holds goes on releasing a
-// withheld name without someone having approved it there. It answers the names it had not withheld
+// whose request got one of the names it newly withholds automatically, each with a grant.revoked
+// audit row by actor naming those of its names under "withheld". So no grant the session holds
+// goes on releasing a withheld name without someone having approved it there. A name already
+// withheld ends nothing: its first withhold ended every grant that got it without asking, and a
+// grant whose request got it automatically since then was approved by someone the withheld name
+// let approve it (currentPolicyAdmits), which stands. It answers the names it had not withheld
 // before.
 func withhold(ctx context.Context, tx pgx.Tx, enrollmentID, requestID, actor string) ([]string, error) {
 	rows, err := tx.Query(ctx, `with names as (
@@ -677,12 +690,12 @@ func withhold(ctx context.Context, tx pgx.Tx, enrollmentID, requestID, actor str
 		), ended as (
 			update grants g set revoked_at=now(), revoked_by=$3
 			where g.enrollment_id=$1 and g.revoked_at is null and g.expires_at > now()
-			and exists (select 1 from request_secrets a where a.request_id=g.request_id and a.decision=$4 and a.name in (select name from names))
+			and exists (select 1 from request_secrets a where a.request_id=g.request_id and a.decision=$4 and a.name in (select name from withheld))
 			returning g.id, g.request_id
 		), audited as (
 			insert into audit (kind, enrollment_id, request_id, grant_id, actor, detail)
 			select 'grant.revoked', $1, e.request_id, e.id, $3, jsonb_build_object('withheld', (select jsonb_agg(a.name order by a.name)
-				from request_secrets a where a.request_id=e.request_id and a.decision=$4 and a.name in (select name from names)))
+				from request_secrets a where a.request_id=e.request_id and a.decision=$4 and a.name in (select name from withheld)))
 			from ended e
 		)
 		select name from withheld order by name`, enrollmentID, requestID, actor, policy.Automatic)
@@ -692,19 +705,20 @@ func withhold(ctx context.Context, tx pgx.Tx, enrollmentID, requestID, actor str
 	return pgx.CollectRows(rows, pgx.RowTo[string])
 }
 
-// mayRevoke reports whether the (already-canonical) login is the grant's approver or its
-// enrollment's operator.
-func mayRevoke(login string, approver, operator *string) bool {
+// mayRevoke answers whether login may revoke a grant, and whether as its enrollment's operator,
+// whose revoke withholds (RevokeByApprover), rather than as its approver. The operator is checked
+// first, so an operator who also approved the grant revokes it as the operator.
+func mayRevoke(login string, approver, operator *string) (allowed, asOperator bool) {
 	login = record.CanonicalLogin(login)
-	if login == "" {
-		return false
+	switch {
+	case login == "":
+		return false, false
+	case operator != nil && record.CanonicalLogin(*operator) == login:
+		return true, true
+	case approver != nil && record.CanonicalLogin(*approver) == login:
+		return true, false
 	}
-	for _, allowed := range []*string{approver, operator} {
-		if allowed != nil && record.CanonicalLogin(*allowed) == login {
-			return true
-		}
-	}
-	return false
+	return false, false
 }
 
 // enrollment reads a live enrollment (not revoked, lease not lapsed); pgx.ErrNoRows otherwise.
