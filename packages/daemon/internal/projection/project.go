@@ -89,10 +89,10 @@ func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, cla
 		if err != nil {
 			return api.State{}, err
 		}
-		var decision record.ReviewDecision
+		reviewDecision := ""
 		for _, item := range phases {
 			if item.Role == claim.RoleReviewer && item.Decision != nil {
-				decision = *item.Decision
+				reviewDecision = item.Decision.State
 			}
 			claimView, live := claimViews[item.Claim]
 			if !live {
@@ -115,12 +115,11 @@ func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, cla
 		}
 		if pr != nil {
 			view.PullRequest = &api.PullRequestView{
-				Number:             pr.Number,
-				Head:               pr.HeadSHA,
-				ChecksVerdict:      classify.HeadVerdict(*pr),
-				ReviewDecision:     decision.State,
-				ReviewDecisionHead: decision.Head,
-				FixAttempts:        pr.FixAttempts,
+				Number:         pr.Number,
+				Head:           pr.HeadSHA,
+				ChecksVerdict:  classify.HeadVerdict(*pr),
+				ReviewDecision: reviewDecision,
+				FixAttempts:    pr.FixAttempts,
 			}
 		}
 

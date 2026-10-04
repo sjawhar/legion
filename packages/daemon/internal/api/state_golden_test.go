@@ -90,12 +90,11 @@ func populatedState() State {
 					},
 				},
 				PullRequest: &PullRequestView{
-					Number:             1247,
-					Head:               "5b3d9e2c8f1a47d06b2e5c9f3a8d1e4b7c0f6a29",
-					ChecksVerdict:      "pending",
-					ReviewDecision:     "changes_requested",
-					ReviewDecisionHead: "8e1f4a7c2d5b09e36f1a4c7d0b3e6f9a2c5d8e1b",
-					FixAttempts:        1,
+					Number:         1247,
+					Head:           "5b3d9e2c8f1a47d06b2e5c9f3a8d1e4b7c0f6a29",
+					ChecksVerdict:  "pending",
+					ReviewDecision: "changes_requested",
+					FixAttempts:    1,
 				},
 				DesignGate: &GateView{
 					ArtifactID:      "d2f1c6b4-8e07-4a53-9c1d-6b8f2e5a7093",

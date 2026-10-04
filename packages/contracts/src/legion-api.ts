@@ -118,14 +118,12 @@ const legionPhaseView = z.strictObject({
  * when the reviewer completes. It shows from the review that decided it until the next round
  * opens or a new generation clears it, so a request for changes stays through implementing and
  * testing, and an approval through retro and every phase after it; absent until a review in a
- * round decides. Only a review by the review App or a maintainer of the repository decides.
- * `reviewDecisionHead` is the head that decision names, the commit an approval approves. */
+ * round decides. */
 const legionPullRequestView = z.strictObject({
   number: z.number().int().positive(),
   head: nonEmptyString,
   checksVerdict: nonEmptyString.optional(),
   reviewDecision: nonEmptyString.optional(),
-  reviewDecisionHead: nonEmptyString.optional(),
   fixAttempts: z.number().int().nonnegative(),
 });
 

@@ -127,21 +127,20 @@ func TestProjectShowsLaunchUncertainClaimsWithoutALocator(t *testing.T) {
 
 // The pull request's review decision on the state route is the latest review round's, the one the
 // workflow ends the round on when the reviewer completes - whether or not the reviewer's pane is
-// running - with the head that decision names, which the reviewer's own handoff push leaves behind
-// the pull request's head; no decision or head shows before a review in a round decides.
+// running - and no decision shows before a review in a round decides.
 func TestProjectShowsTheReviewRoundsDecisionOnThePullRequest(t *testing.T) {
 	store := projectionStore{
 		issues: []record.Issue{
-			{Key: "LEGION-208", Tree: "LEGION-208", Status: "retro", Phase: phase.Retro},
+			{Key: "LEGION-208", Tree: "LEGION-208", Status: "needs_review", Phase: phase.Reviewing},
 			{Key: "LEGION-209", Tree: "LEGION-209", Status: "needs_review", Phase: phase.Reviewing},
 		},
 		phases: map[string][]record.PhaseRow{
 			"LEGION-208": {{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "gone-reviewer",
-				Decision: &record.ReviewDecision{State: "approved", Body: "ship it", Head: "approved-head"}}},
+				Decision: &record.ReviewDecision{State: "changes_requested", Body: "rename it", Head: "head"}}},
 			"LEGION-209": {{Issue: "LEGION-209", Role: claim.RoleReviewer, Claim: "gone-reviewer"}},
 		},
 		pullRequests: map[string]*record.PullRequest{
-			"LEGION-208": {Issue: "LEGION-208", Number: 42, HeadSHA: "handoff-head"},
+			"LEGION-208": {Issue: "LEGION-208", Number: 42, HeadSHA: "head-2"},
 			"LEGION-209": {Issue: "LEGION-209", Number: 43, HeadSHA: "head"},
 		},
 	}
@@ -149,10 +148,10 @@ func TestProjectShowsTheReviewRoundsDecisionOnThePullRequest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Project: %v", err)
 	}
-	if pr := got.Issues["LEGION-208"].PullRequest; pr == nil || pr.ReviewDecision != "approved" || pr.ReviewDecisionHead != "approved-head" {
-		t.Fatalf("LEGION-208's pull request = %+v, want the round's approval of approved-head", pr)
+	if pr := got.Issues["LEGION-208"].PullRequest; pr == nil || pr.ReviewDecision != "changes_requested" {
+		t.Fatalf("LEGION-208's pull request = %+v, want the round's changes_requested", pr)
 	}
-	if pr := got.Issues["LEGION-209"].PullRequest; pr == nil || pr.ReviewDecision != "" || pr.ReviewDecisionHead != "" {
-		t.Fatalf("LEGION-209's pull request = %+v, want no decision and no head before one is made", pr)
+	if pr := got.Issues["LEGION-209"].PullRequest; pr == nil || pr.ReviewDecision != "" {
+		t.Fatalf("LEGION-209's pull request = %+v, want no decision before one is made", pr)
 	}
 }

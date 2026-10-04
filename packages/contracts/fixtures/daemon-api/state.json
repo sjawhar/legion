@@ -75,7 +75,6 @@
         "head": "5b3d9e2c8f1a47d06b2e5c9f3a8d1e4b7c0f6a29",
         "checksVerdict": "pending",
         "reviewDecision": "changes_requested",
-        "reviewDecisionHead": "8e1f4a7c2d5b09e36f1a4c7d0b3e6f9a2c5d8e1b",
         "fixAttempts": 1
       },
       "designGate": {

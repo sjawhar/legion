@@ -171,16 +171,13 @@ type PhaseView struct {
 // the workflow ends the round on when the reviewer completes. It shows from the review that
 // decided it until the next round opens or a new generation clears it, so a request for changes
 // stays through implementing and testing, and an approval through retro and every phase after
-// it; absent until a review in a round decides. Only a review by the review App or a maintainer of
-// the repository decides. ReviewDecisionHead is the head that decision names, the commit an
-// approval approves.
+// it; absent until a review in a round decides.
 type PullRequestView struct {
-	Number             int    `json:"number"`
-	Head               string `json:"head"`
-	ChecksVerdict      string `json:"checksVerdict,omitempty"`
-	ReviewDecision     string `json:"reviewDecision,omitempty"`
-	ReviewDecisionHead string `json:"reviewDecisionHead,omitempty"`
-	FixAttempts        int    `json:"fixAttempts"`
+	Number         int    `json:"number"`
+	Head           string `json:"head"`
+	ChecksVerdict  string `json:"checksVerdict,omitempty"`
+	ReviewDecision string `json:"reviewDecision,omitempty"`
+	FixAttempts    int    `json:"fixAttempts"`
 }
 
 // GateView is the design gate: the spec document, the version Dispatch currently holds, and the
