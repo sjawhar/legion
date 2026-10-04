@@ -3400,9 +3400,10 @@ describe("envoy OMP extension", () => {
       const url = new URL(input.toString());
       requests.push({ url, init });
       if (url.pathname !== "/api/v1/search") throw new Error(`unexpected request: ${url.pathname}`);
-      return new Response(JSON.stringify({ results, took_ms: 7 }), {
-        headers: { "Content-Type": "application/json" },
-      });
+      return new Response(
+        JSON.stringify({ results, total: 1, reachable: 1, limit: 20, offset: 0, took_ms: 7 }),
+        { headers: { "Content-Type": "application/json" } }
+      );
     };
     const { default: envoyExtension } = await import("./envoy.ts?native-dispatch-search");
     const fixture = createPi();
@@ -3431,7 +3432,14 @@ describe("envoy OMP extension", () => {
       },
     ]);
     expect(result.isError).toBeUndefined();
-    expect(result.details).toEqual({ query: "astrolabe", results });
+    expect(result.details).toEqual({
+      query: "astrolabe",
+      results,
+      total: 1,
+      reachable: 1,
+      offset: 0,
+      limit: 20,
+    });
     expect(result.details).not.toHaveProperty("topic");
   });
   test("does not register Dispatch tools and reports the missing token once at session start", async () => {
