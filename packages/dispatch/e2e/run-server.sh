@@ -58,16 +58,16 @@ done
 
 # Architecture-source access checks run against the fake GitHub listener with
 # throwaway App credentials: a fresh RSA key per run (nothing secret to
-# commit), and a dummy client secret because LoadAppFromEnv requires one
-# whenever the client id is set. Identity is the production cookie: the server
-# mints it at its dev sign-in route (DISPATCH_DEV_SIGNIN=1) with a signing key it
-# generates for this process alone, so no key is passed and nothing reaches the
-# caller's persistent data dir; DISPATCH_INSECURE_COOKIE=1 keeps the cookie
-# usable over plain HTTP in every engine. DISPATCH_SERVER_URL stays
+# commit) beside a fake client id. Identity is the production cookie: the server
+# mints it for the email a test names at its dev sign-in route
+# (DISPATCH_DEV_SIGNIN=1) with a signing key it generates for this process
+# alone, so no key is passed and nothing reaches the caller's persistent data
+# dir; DISPATCH_INSECURE_COOKIE=1 keeps the cookie usable over plain HTTP in
+# every engine. DISPATCH_SERVER_URL stays
 # http://127.0.0.1:$e2e_port: it is the origin the CSRF guard compares writes
 # against, the only Host the router serves under the flag, and the Playwright
 # config's baseURL. The flag also refuses a DATABASE_URL whose host is not
-# loopback or a unix socket.
+# loopback or a unix socket, and any DISPATCH_SIGNIN_* setting.
 app_pem_b64="$(openssl genrsa 2048 2>/dev/null | base64 -w0)"
 
 cd "$(dirname "$0")/../../envoy"
@@ -83,9 +83,7 @@ exec env \
   "${broker_env[@]}" \
   DATABASE_URL="$database_url" \
   DISPATCH_AGENT_TOKEN=e2e-token \
-  DISPATCH_ALLOWED_LOGINS=alice,bob \
   DISPATCH_APP_CLIENT_ID=Iv1.e2efake \
-  DISPATCH_APP_CLIENT_SECRET=e2e-dummy-secret \
   DISPATCH_APP_PEM_B64="$app_pem_b64" \
   DISPATCH_DEV_SIGNIN=1 \
   DISPATCH_GITHUB_API_BASE="http://127.0.0.1:$fake_github_port" \
