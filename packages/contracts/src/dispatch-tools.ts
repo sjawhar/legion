@@ -1,8 +1,4 @@
-import {
-  DEFAULT_ISSUE_PAGE_LIMIT,
-  MAX_ISSUE_BLOCKERS,
-  MAX_ISSUE_PAGE_LIMIT,
-} from "./dispatch-api";
+import { DEFAULT_ISSUE_PAGE_LIMIT, MAX_ISSUE_BLOCKERS, MAX_ISSUE_PAGE_LIMIT } from "./dispatch-api";
 import type { SchemaApi, SchemaNode, ToolArgumentsShape } from "./tool-schema";
 
 export interface DispatchToolSpec {
