@@ -882,7 +882,7 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 	if unchanged == nil {
 		unchanged = []int{}
 	}
-	WriteJSON(w, http.StatusOK, withAdvice(map[string]any{
+	responsePayload := map[string]any{
 		"applied":       edit.Applied,
 		"version":       version,
 		"changed":       edit.Changed,
@@ -894,7 +894,17 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 		// holds a tree too deep to read - which is not the same statement as the empty list.
 		"lost_ops": lostOps(ledger, artifact.ID),
 		"token":    edit.Token,
-	}, advice))
+	}
+	// The ask blocks the edit added, read from the documents the batch was applied to: whether an
+	// operation's markdown makes a block depends on where it lands and on the parser's reading of
+	// code and containers, which a caller's own reading of that markdown would only approximate.
+	blocks := &editBlocks{DecisionBlocksAdded: edit.AskBlocksAdded}
+	if artifact.IssueKey == nil || advice == nil {
+		WriteJSON(w, http.StatusOK, withDocumentBlockAdvice(responsePayload, blocks))
+		return
+	}
+	advice.editBlocks = blocks
+	WriteJSON(w, http.StatusOK, withAdvice(responsePayload, advice))
 }
 
 // lostOps is the edit response's lost_ops: the operations the live document did not hold after

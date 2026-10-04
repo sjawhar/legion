@@ -9,9 +9,15 @@ on:
   pull_request:
     types: [opened, edited, reopened, synchronize]
 
+# The job clones the repository for check-pr-text.sh and reads the title from the event payload;
+# it writes nothing.
+permissions: {}
+
 jobs:
   pr-title:
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
     steps:
       - name: Require a conventional PR title
         env:
@@ -27,7 +33,9 @@ jobs:
       # The title becomes main's squash subject and a line of the generated release notes, and the
       # body can reach the squash message, so both are as public as the tree. The title and body
       # reach the script as environment variables, never as shell text.
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
       - name: Check the title and body name nothing private
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}

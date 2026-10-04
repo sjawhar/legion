@@ -1236,18 +1236,16 @@ describe("Legion OMP extension", () => {
     for (const role of ["architect", "reviewer", "merger"] as const) {
       const { toolCall, context } = await bootPane({ role, sessionId: `ses_${role}_xd` });
 
-      // A tool-device invocation (write to an `xd://` path) is a tool call, not a file
-      // mutation, and must pass for every gated role.
-      await expect(
-        toolCall(
-          {
-            toolName: "write",
-            toolCallId: `call-${role}-xd-ok`,
-            input: { path: "xd://dispatch_ask", content: "{}" },
-          },
-          context
-        )
-      ).resolves.toBeUndefined();
+      // A tool-device invocation (write to an `xd://` path, the scheme in any case, as Oh My Pi
+      // routes it) is a tool call, not a file mutation, and must pass for every gated role.
+      for (const path of ["xd://dispatch_ask", "XD://dispatch_doc_edit"]) {
+        await expect(
+          toolCall(
+            { toolName: "write", toolCallId: `call-${role}-xd-ok`, input: { path, content: "{}" } },
+            context
+          )
+        ).resolves.toBeUndefined();
+      }
 
       // A real filesystem write is still blocked.
       await expect(

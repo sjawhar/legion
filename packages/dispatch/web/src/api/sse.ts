@@ -802,7 +802,7 @@ export function useEventStream({
       controller = null;
       anAttemptEnded = true;
       if (!current.signal.aborted && error instanceof EventStreamHttpError) {
-        if (error.status === 401 || error.status === 403) {
+        if (error.status === 401) {
           setConnectionState("signed-out");
           queryClient.invalidateQueries({ queryKey: ["whoami"] });
           removeListeners();
