@@ -126,7 +126,7 @@ test("over an issue page the drawer opens from the header, keeps its page, and E
 
 test("`i` toggles the drawer, is listed in ?, and is not offered on the Inbox page itself", async ({
   browser,
-}) => {
+}, testInfo) => {
   await seedAsk("Is the shortcut listed?");
   const context = await asUser(browser, "alice");
   const page = await context.newPage();
@@ -136,6 +136,7 @@ test("`i` toggles the drawer, is listed in ?, and is not offered on the Inbox pa
     await page.locator("body").focus();
     await page.keyboard.press("i");
     await expect(drawer(page)).toBeVisible();
+    await attachShot(page, testInfo, "inbox-drawer-over-agents-list");
     await page.getByRole("button", { name: "Close" }).click();
     await expect(drawer(page)).toHaveCount(0);
 
