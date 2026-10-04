@@ -66,13 +66,14 @@ const PackageIdentity = z.object({ name: z.string().min(1), version: z.string().
 /** npm's deprecated license object, also the entry of its older `licenses` array. */
 const LicenseObject = z.object({ type: z.string() });
 /**
- * The license fields of a manifest, in every shape npm defines: `license` as a string or the
- * deprecated `{ type, url }` object, or the older `licenses` array of those objects (format@0.2.2
+ * The license fields of a manifest, in every shape npm defines: `license` as a string, the
+ * deprecated `{ type, url }` object, `null` (some tooling writes this for "none declared", the
+ * same as the field being absent), or the older `licenses` array of those objects (format@0.2.2
  * still uses it), whose entries offer a choice of licenses. Any other shape is refused.
  * `repository` and `homepage` only point at the source, so a shape this does not read drops them.
  */
 const PackageLicense = z.object({
-  license: z.union([z.string(), LicenseObject]).optional(),
+  license: z.union([z.string(), LicenseObject]).nullable().optional(),
   licenses: z.array(LicenseObject).min(1).optional(),
   repository: z
     .union([z.string(), z.object({ url: z.string() })])
@@ -85,6 +86,29 @@ const PackageLicense = z.object({
 function licenseLeaves(expression: parseSpdxExpression.Info): parseSpdxExpression.LicenseInfo[] {
   if ("license" in expression) return [expression];
   return [...licenseLeaves(expression.left), ...licenseLeaves(expression.right)];
+}
+
+/**
+ * The SPDX License List's standard text for every leaf of a parsed license expression, required
+ * when the package ships no license file of its own: a `LicenseRef-`/`DocumentRef-` leaf, or any
+ * id the list doesn't carry, or one with an exception (`WITH`), still leaves nothing to ship, so
+ * it throws, naming the package.
+ */
+function standardTextsFor(
+  expression: parseSpdxExpression.Info,
+  license: string,
+  label: string
+): { id: string; text: string }[] {
+  return licenseLeaves(expression).map((leaf) => {
+    const text = spdxLicenses[leaf.license]?.licenseText;
+    if ("exception" in leaf || text === undefined) {
+      throw new Error(
+        `${label} declares ${license}, whose terms are not on the SPDX License List, and ` +
+          "ships no license file; find its terms before bundling it"
+      );
+    }
+    return { id: leaf.license, text: text.trim() };
+  });
 }
 
 async function readPackage(root: string): Promise<BundledPackage> {
@@ -141,16 +165,7 @@ async function readPackage(root: string): Promise<BundledPackage> {
       );
     }
     if (licenseNames.length === 0) {
-      for (const leaf of licenseLeaves(expression)) {
-        const text = spdxLicenses[leaf.license]?.licenseText;
-        if ("exception" in leaf || text === undefined) {
-          throw new Error(
-            `${label} declares ${license}, whose terms are not on the SPDX License List, and ` +
-              "ships no license file; find its terms before bundling it"
-          );
-        }
-        standardTexts.push({ id: leaf.license, text: text.trim() });
-      }
+      standardTexts.push(...standardTextsFor(expression, license, label));
     }
   }
   // Where a recipient gets the package's source, which a copyleft license such as EPL-2.0 (elkjs, in
@@ -228,6 +243,15 @@ export function packageRoot(name: string, from: string): string {
 export interface GeneratedCode {
   id: RegExp;
   packages: string[];
+}
+
+/**
+ * Vite's own runtime helper (its module-preload shim), generated code every Vite-based build
+ * emits with no source file recording it. Every Vite build needs this exact entry alongside its
+ * own bundler-specific ones (Dispatch's SPA, the docs site's Astro build).
+ */
+export function viteRuntimeGeneratedCode(viteRoot: string): GeneratedCode {
+  return { id: /^\0vite\//, packages: [viteRoot] };
 }
 
 /** What `viteBundleInputs` reads from a Vite build: its plugin context and its output bundle. */

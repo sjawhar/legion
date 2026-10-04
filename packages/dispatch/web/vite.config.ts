@@ -7,6 +7,7 @@ import {
   packageRoot,
   thirdPartyNotices,
   viteBundleInputs,
+  viteRuntimeGeneratedCode,
 } from "../../../scripts/third-party-notices";
 
 const vite = packageRoot("vite", fileURLToPath(new URL(".", import.meta.url)));
@@ -16,7 +17,7 @@ const vite = packageRoot("vite", fileURLToPath(new URL(".", import.meta.url)));
  * the wrappers that interop puts around a CommonJS module, whose own file the build records.
  */
 const GENERATED_CODE: GeneratedCode[] = [
-  { id: /^\0vite\//, packages: [vite] },
+  viteRuntimeGeneratedCode(vite),
   { id: /^\0(commonjsHelpers\.js|commonjs-dynamic-modules)$/, packages: [vite] },
   { id: /^\0\/.*\?commonjs-(module|exports)$/, packages: [] },
 ];

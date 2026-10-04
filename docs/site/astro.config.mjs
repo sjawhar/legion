@@ -11,6 +11,7 @@ import {
   thirdPartyNotices as notices,
   packageRoot,
   viteBundleInputs,
+  viteRuntimeGeneratedCode,
 } from "../../scripts/third-party-notices.ts";
 
 // A section's sidebar: its written pages, ordered by `sidebar.order` and then by slug, followed by
@@ -51,7 +52,7 @@ function thirdPartyNotices() {
     { id: /^astro:scripts\/page\.js$/, packages: [astro, packageRoot("astro-mermaid", site)] },
     { id: /^\0virtual:astro:/, packages: [astro] },
     { id: /^\0virtual:starlight\//, packages: [starlightRoot] },
-    { id: /^\0vite\//, packages: [vite] },
+    viteRuntimeGeneratedCode(vite),
     { id: /^\0rolldown\/runtime\.js$/, packages: [packageRoot("rolldown", vite)] },
     {
       id: /^_astro\/ec\.[^/]+\.(js|css)$/,

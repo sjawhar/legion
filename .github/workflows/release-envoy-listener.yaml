@@ -40,7 +40,10 @@ permissions: {}
 jobs:
 
   # The architectures the archives are built for: .github/go-release-targets.json, the list the
-  # pull request's notices check reads too.
+  # pull request's notices check reads too. A full checkout to read one tracked file is more than
+  # this job needs, but it's what every other job in this workflow (and the wider CI config) does
+  # regardless of how much of the tree it touches; a sparse or shallow checkout here alone would
+  # be the inconsistency.
   targets:
     runs-on: ubuntu-24.04
     permissions:

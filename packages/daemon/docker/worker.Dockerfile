@@ -253,6 +253,11 @@ ARG UV_VERSION
 ARG AWS_CLI_VERSION
 ARG CODEGRAPH_VERSION
 COPY --from=plugin /out/codegraph-node-version /in/codegraph-node-version
+# The twelve reads below (ten LICENSE/NOTICE fetches, two Cargo.lock HEAD checks) are independent
+# of each other and left sequential rather than backgrounded: this whole RUN is the cached layer
+# the stage comment above describes (a source change, not a pin bump, reuses it, so it rebuilds
+# rarely), and running unauthenticated GitHub raw-content requests in parallel risks tripping its
+# secondary rate limit for a build-time saving that doesn't matter on a layer this cold.
 RUN set -eu; \
     omp_pin="$(cat /omp-pin)"; omp_repo="${omp_pin#github:}"; omp_repo="${omp_repo%@*}"; \
     omp_tag="v${omp_pin##*@}"; \
@@ -261,7 +266,8 @@ RUN set -eu; \
     codegraph_node_tag="$(cat /in/codegraph-node-version)"; \
     printf 'omp_repo=%s\nomp_tag=%s\njj_repo=%s\njj_tag=%s\ngh_tag=%s\ncodegraph_node_tag=%s\n' \
       "$omp_repo" "$omp_tag" "$jj_repo" "$jj_tag" "$gh_tag" "$codegraph_node_tag" > /in/tags.env; \
-    fetch() { curl -fsSL "https://raw.githubusercontent.com/$1/$2/$3" -o "/in/$4"; }; \
+    gh_raw_url() { printf 'https://raw.githubusercontent.com/%s/%s/%s' "$1" "$2" "$3"; }; \
+    fetch() { curl -fsSL "$(gh_raw_url "$1" "$2" "$3")" -o "/in/$4"; }; \
     fetch oven-sh/bun "bun-v${BUN_VERSION}" LICENSE.md bun-LICENSE.md; \
     fetch "$omp_repo" "$omp_tag" LICENSE omp-LICENSE; \
     fetch "$omp_repo" "$omp_tag" THIRD-PARTY-NOTICES.txt omp-THIRD-PARTY-NOTICES.txt; \
@@ -273,7 +279,7 @@ RUN set -eu; \
     fetch colbymchenry/codegraph "v${CODEGRAPH_VERSION}" LICENSE codegraph-LICENSE; \
     fetch nodejs/node "$codegraph_node_tag" LICENSE codegraph-node-LICENSE; \
     crates() { \
-      curl -fsSIo /dev/null "https://raw.githubusercontent.com/$1/$2/Cargo.lock"; \
+      curl -fsSIo /dev/null "$(gh_raw_url "$1" "$2" Cargo.lock)"; \
       printf '%s links Rust crates whose license texts its release does not ship. They are the packages listed in\nhttps://github.com/%s/blob/%s/Cargo.lock, the lockfile of the release this image installs; the\nlicense of each is published with it on crates.io.\n' "$3" "$1" "$2" > "/in/$4"; \
     }; \
     crates "$jj_repo" "$jj_tag" jj jj-crates; \

@@ -148,9 +148,10 @@ site's [contributing page](https://sjawhar.github.io/legion/contributing/) cover
 Apache License 2.0; see [LICENSE](LICENSE). Code copied from other projects keeps its own license in
 a `LICENSE` file beside it.
 
-Every artifact a release ships carries the licenses of the third-party code in it, written at build
-time from what the build included, and the build fails when a dependency's license cannot be
-determined:
+Every artifact this repository ships — each release, and the documentation site, which `docs.yaml`
+deploys on every push to `main` rather than on a release — carries the licenses of the third-party
+code in it, written at build time from what the build included, and the build fails when a
+dependency's license cannot be determined:
 
 | Artifact | Notices |
 | --- | --- |

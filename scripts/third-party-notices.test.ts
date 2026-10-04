@@ -16,11 +16,11 @@ afterEach(async () => {
 async function bundledPackage(manifest: object, files: Record<string, string> = {}) {
   const root = await mkdtemp(join(tmpdir(), "third-party-notices-"));
   scratchDirectories.push(root);
-  const packageRoot = join(root, "node_modules", "pkg");
-  await mkdir(packageRoot, { recursive: true });
-  await writeFile(join(packageRoot, "package.json"), JSON.stringify(manifest));
-  await writeFile(join(packageRoot, "index.js"), "export {}\n");
-  for (const [name, text] of Object.entries(files)) await writeFile(join(packageRoot, name), text);
+  const pkgDir = join(root, "node_modules", "pkg");
+  await mkdir(pkgDir, { recursive: true });
+  await writeFile(join(pkgDir, "package.json"), JSON.stringify(manifest));
+  await writeFile(join(pkgDir, "index.js"), "export {}\n");
+  for (const [name, text] of Object.entries(files)) await writeFile(join(pkgDir, name), text);
   return { root, input: join("node_modules", "pkg", "index.js") };
 }
 
@@ -65,4 +65,32 @@ test("carries the declared license's text for a package that ships no license fi
   expect(await thirdPartyNotices([input], root)).toContain(
     'THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND'
   );
+});
+
+test("treats a null license the same as nothing declared, when a license file ships", async () => {
+  const { root, input } = await bundledPackage(
+    { name: "pkg", version: "1.0.0", license: null },
+    { LICENSE: "MIT License\n" }
+  );
+  expect(await thirdPartyNotices([input], root)).toContain(
+    "License: (not declared in package.json)"
+  );
+});
+
+test("reads the legacy `licenses` array as a declared license", async () => {
+  const { root, input } = await bundledPackage({
+    name: "pkg",
+    version: "1.0.0",
+    licenses: [{ type: "MIT" }],
+  });
+  expect(await thirdPartyNotices([input], root)).toContain("License: MIT");
+});
+
+test("reads the deprecated `{ type }` license object as a declared license", async () => {
+  const { root, input } = await bundledPackage({
+    name: "pkg",
+    version: "1.0.0",
+    license: { type: "ISC" },
+  });
+  expect(await thirdPartyNotices([input], root)).toContain("License: ISC");
 });
