@@ -38,11 +38,15 @@ import (
 // the block (SetBlockAttributes, withholdAnswers), and the ask keeps it. Of the other writes that
 // do not run through applyLive, a rebuild weighs the markdown a caller supplies as SeedText weighs
 // a new document's, and restores a latest version whatever it weighs, since that is the server's
-// own text (RebuildDocument); the block-id backfill and the sweep of unrecorded marks add no
-// caller text. What the bound weighs is the document a write leaves, not the history its store
-// keeps: every update stays stored with the content later writes delete, and a cold load builds
-// all of it, so repeated versions and a comment's margin record, which each reply rewrites whole,
-// still grow what a load costs (LEGION-496).
+// own text (RebuildDocument); the block-id backfill (stampBlockIDs) and the sweep of unrecorded
+// marks (unmarkExpired) add no caller text, and settlement's own repair of a returning answer
+// (withholdAnswers, returnAnswersWithRoom) is weighed for size the same way a caller's answer is.
+// None of these three calls refuseGrowth, so none reaches refuseUndecodable either: a document
+// already past the decode cap still accepts them, unrefused. What the bound weighs is the
+// document a write leaves, not the history its store keeps: every update stays stored with the
+// content later writes delete, and a cold load builds all of it, so repeated versions and a
+// comment's margin record, which each reply rewrites whole, still grow what a load costs
+// (LEGION-496).
 
 // growth is what one write leaves a document, as refuseGrowth weighs it.
 type growth struct {

@@ -763,8 +763,10 @@ var _ persistence.VersionedPersistence = (*PgVersioned)(nil)
 // does not export. TestUploadRefusesADocumentTooLargeToStore (api) holds the two together: a
 // document encoding to more than this is refused by ygo and answered as CAP_EXCEEDED with the count.
 // No single upload reaches it: the heaviest document pmdoc's element limit admits encodes to about
-// 131,000 items. Repeated versions can take a live state to it, so every joined write decodes its
-// state before appending once its clocks pass this cap (refuseUndecodable, growth.go).
+// 131,000 items. Repeated versions can take a live state to it, so every joined write (applyLive)
+// decodes its state before appending once its clocks pass this cap (refuseUndecodable, growth.go)
+// - not settlement's own repairs, which write outside applyLive and never reach it (growth.go's
+// own doc comment names the three).
 //
 // It is also the pending queue every decode of document bytes takes, whether the service builds
 // the decoder (newDocumentCopy) or ygo builds it for the service (Server.MaxPendingItems: the
