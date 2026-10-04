@@ -87,6 +87,20 @@
 
 ### Changed
 
+- `GET /api/v1/search` ranks each kind of content (issues, documents, asks, comments, messages) on
+  a list of its own and merges the lists by reciprocal rank fusion (each hit scores 1/(60 + its
+  position in its list), which is now its `rank`), so a page takes each kind's best in turn where
+  it used to fill with long documents that repeat the query's words. Hits that score alike are
+  ordered issue, document, ask, comment, message, and an issue whose key is the whole query heads
+  the issue list (LEGION-386). The answer carries `total` (every match), `reachable` (the hits the
+  pages can return, each kind's best `contracts.SearchKindDepth`, 100), `limit` and `offset`, and
+  takes `offset` (0 or more; anything else is `400 INVALID_OFFSET`), so a query with more matches
+  than one page says so and the rest can be paged to (LEGION-382).
+  `TestSearchLatencyOnCorpus` no longer fails at an absolute 100 ms: production's `took_ms` already
+  exceeds it, so `scripts/search-latency-compare.sh` runs it from a base checkout and this one on
+  the same corpus copy and fails a median p95 more than 10% above the base's. `scripts/corpus-copy.sh`
+  restores the newest nightly dump into a local Postgres, and `scripts/search-smoke.sh` prints any
+  build's top hits for a list of queries.
 - Event-log payloads served by `GET /api/v1/issues/{key}/events`, `GET /api/v1/artifacts/{id}/events`
   and the replay from `GET /api/v1/events` keep their stored numbers and PostgreSQL `jsonb` object
   order: `9007199254740993` stays that integer, `1.00` keeps its trailing zeros, and object keys come
