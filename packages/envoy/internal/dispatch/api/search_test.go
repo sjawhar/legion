@@ -606,16 +606,21 @@ func TestSearchReturnsEmptyResultsForStopWordOnlyQueries(t *testing.T) {
 	}
 }
 
+// A repeated limit or offset is refused rather than silently taking the first value, the same
+// rule GET /api/v1/issues already applies (shared via parseQueryInt in server.go): a caller that
+// sent two values almost certainly meant one of them, and guessing which is worse than saying so.
 func TestSearchRejectsInvalidQueries(t *testing.T) {
 	handler := newTestHandler(t)
 	cases := map[string]string{
-		"q=a":                   "INVALID_QUERY",
-		"":                      "INVALID_QUERY",
-		"q=astrolabe&limit=0":   "INVALID_LIMIT",
-		"q=astrolabe&limit=51":  "INVALID_LIMIT",
-		"q=astrolabe&limit=x":   "INVALID_LIMIT",
-		"q=astrolabe&offset=-1": "INVALID_OFFSET",
-		"q=astrolabe&offset=x":  "INVALID_OFFSET",
+		"q=a":                           "INVALID_QUERY",
+		"":                              "INVALID_QUERY",
+		"q=astrolabe&limit=0":           "INVALID_LIMIT",
+		"q=astrolabe&limit=51":          "INVALID_LIMIT",
+		"q=astrolabe&limit=x":           "INVALID_LIMIT",
+		"q=astrolabe&limit=5&limit=10":  "INVALID_LIMIT",
+		"q=astrolabe&offset=-1":         "INVALID_OFFSET",
+		"q=astrolabe&offset=x":          "INVALID_OFFSET",
+		"q=astrolabe&offset=0&offset=1": "INVALID_OFFSET",
 	}
 	for query, code := range cases {
 		t.Run(query, func(t *testing.T) {

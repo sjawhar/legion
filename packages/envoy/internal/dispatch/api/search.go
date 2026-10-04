@@ -99,7 +99,7 @@ ranked as (
 legs as (
   select * from ranked where pos <= $7
 ),
-fused as (select kind, id, 1.0 / ($8 + pos) as score from legs),
+fused as (select kind, id, 1.0 / ($8 + pos) as score from legs), -- (kind, id) is unique per row today (each kind's own PK or key); a list that stops being unique here would silently multiply rows instead of summing their score.
 totals as (
   select (select coalesce(sum(matches), 0) from (select max(matches) as matches from legs group by kind) each_kind) as total,
          (select count(*) from fused) as reachable
@@ -121,10 +121,13 @@ select t.total, t.reachable, r.kind, case when r.owner_artifact_id is null then 
          q.tsq, $5) as headline
   from totals t cross join q
   left join (page r left join artifacts ar on ar.id = r.artifact_id) on true
+  -- Mirrors the kind arms in kinds above (issue/document/comment/ask/message -> table and
+  -- text column); the two must stay in sync. issue reuses r.issue_title, already carried from
+  -- the same issues row by kinds, rather than re-reading it.
   left join lateral (
     select case r.kind
-      when 'issue' then (select i.title from issues i where i.key = r.id)
-      when 'document' then (select v.markdown from artifact_versions v where v.artifact_id = r.artifact_id order by v.number desc limit 1)
+      when 'issue' then r.issue_title
+      when 'document' then (select v.markdown from artifact_versions v where v.artifact_id = r.artifact_id order by v.number desc limit 1) -- re-resolves the latest version kinds already found once; accepted, bounded by the page size
       when 'comment' then (select c.body from comments c where c.id = r.id::uuid)
       when 'ask' then (select k.question || ' ' || coalesce(k.options::text, '') || ' ' || coalesce(k.answer->>'text', '') from asks k where k.id = r.id::uuid)
       when 'message' then (select m.body from messages m where m.id = r.id::uuid)
