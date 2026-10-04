@@ -64,6 +64,15 @@ const (
 	blobResponseLimit = 2 << 20
 )
 
+// ResponseTooLargeError reports a response that did not fit inside a caller's configured limit.
+type ResponseTooLargeError struct {
+	Limit int64
+}
+
+func (err *ResponseTooLargeError) Error() string {
+	return fmt.Sprintf("GitHub response body exceeds the %d-byte limit", err.Limit)
+}
+
 const defaultBase = "https://api.github.com"
 
 // tokenExpirySlack retires a cached installation token this long before
@@ -101,6 +110,8 @@ type Client struct {
 
 	mu     sync.Mutex
 	tokens map[int64]cachedToken
+	// repositories maps "owner/repo" to the installation that covers it, for RepositoryToken.
+	repositories map[string]int64
 }
 
 // New builds a client from the loaded App credentials. It returns (nil, nil)
@@ -120,12 +131,13 @@ func New(app *auth.AppConfig, base string) (*Client, error) {
 		base = defaultBase
 	}
 	return &Client{
-		app:    *app,
-		key:    key,
-		base:   strings.TrimSuffix(base, "/"),
-		http:   &http.Client{Timeout: 10 * time.Second},
-		now:    time.Now,
-		tokens: map[int64]cachedToken{},
+		app:          *app,
+		key:          key,
+		base:         strings.TrimSuffix(base, "/"),
+		http:         &http.Client{Timeout: 10 * time.Second},
+		now:          time.Now,
+		tokens:       map[int64]cachedToken{},
+		repositories: map[string]int64{},
 	}, nil
 }
 
@@ -176,6 +188,17 @@ func (c *Client) appJWT() (string, error) {
 // its Contents permission. A GitHub 404 is ErrNoInstallation; a missing or
 // "none" Contents permission is ErrNoContentsRead.
 func (c *Client) Installation(ctx context.Context, owner, repo string) (Installation, error) {
+	installation, err := c.installation(ctx, owner, repo)
+	if err != nil {
+		return Installation{}, err
+	}
+	if installation.Permissions.Contents != "read" && installation.Permissions.Contents != "write" {
+		return Installation{}, fmt.Errorf("%w on %s/%s", ErrNoContentsRead, owner, repo)
+	}
+	return installation, nil
+}
+
+func (c *Client) installation(ctx context.Context, owner, repo string) (Installation, error) {
 	if c == nil {
 		return Installation{}, ErrNoAppKey
 	}
@@ -202,10 +225,47 @@ func (c *Client) Installation(ctx context.Context, owner, repo string) (Installa
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return Installation{}, fmt.Errorf("decode installation: %w", err)
 	}
-	if payload.Permissions.Contents != "read" && payload.Permissions.Contents != "write" {
-		return Installation{}, fmt.Errorf("%w on %s/%s", ErrNoContentsRead, owner, repo)
-	}
 	return Installation{ID: payload.ID, AppSlug: payload.AppSlug, Permissions: payload.Permissions}, nil
+}
+
+// RepositoryToken returns an installation token of the installation covering owner/repo. The
+// installation a repository resolves to is remembered; a token that cannot be minted for it
+// forgets it, so an App moved between installations is looked up again.
+func (c *Client) RepositoryToken(ctx context.Context, owner, repo string) (string, error) {
+	if c == nil {
+		return "", ErrNoAppKey
+	}
+	name := owner + "/" + repo
+	c.mu.Lock()
+	installationID, known := c.repositories[name]
+	c.mu.Unlock()
+	if !known {
+		installation, err := c.installation(ctx, owner, repo)
+		if err != nil {
+			return "", err
+		}
+		installationID = installation.ID
+		c.mu.Lock()
+		c.repositories[name] = installationID
+		c.mu.Unlock()
+	}
+	token, err := c.Token(ctx, installationID)
+	if err != nil {
+		c.mu.Lock()
+		delete(c.repositories, name)
+		c.mu.Unlock()
+		return "", err
+	}
+	return token, nil
+}
+
+// Read performs GET path (an API path with its query, under the API origin) with an
+// installation token, returning GitHub's complete answer when it fits within the response limit.
+func (c *Client) Read(ctx context.Context, token, path string) ([]byte, int, http.Header, error) {
+	if c == nil {
+		return nil, 0, nil, ErrNoAppKey
+	}
+	return c.request(ctx, http.MethodGet, c.base+path, "Bearer "+token, responseLimit)
 }
 
 // Token returns an installation access token, minting one only when the
@@ -284,7 +344,7 @@ func (c *Client) doLimited(ctx context.Context, method, target, authorization st
 	return body, status, err
 }
 
-// request performs one API call and returns its body (read up to limit), status and headers.
+// request performs one API call and returns its complete body when it fits within limit, status and headers.
 func (c *Client) request(ctx context.Context, method, target, authorization string, limit int64) ([]byte, int, http.Header, error) {
 	request, err := http.NewRequestWithContext(ctx, method, target, nil)
 	if err != nil {
@@ -297,9 +357,12 @@ func (c *Client) request(ctx context.Context, method, target, authorization stri
 		return nil, 0, nil, fmt.Errorf("%s %s: %w", method, target, err)
 	}
 	defer response.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(response.Body, limit))
+	body, err := io.ReadAll(io.LimitReader(response.Body, limit+1))
 	if err != nil {
 		return nil, 0, nil, fmt.Errorf("read %s %s response: %w", method, target, err)
+	}
+	if int64(len(body)) > limit {
+		return nil, 0, nil, fmt.Errorf("%s %s: %w", method, target, &ResponseTooLargeError{Limit: limit})
 	}
 	return body, response.StatusCode, response.Header, nil
 }
