@@ -623,7 +623,6 @@ sweep (`api.RunSuggestionOutcomeSweep`, every `SuggestionSweepInterval`) advance
 to `acted_on` (the suggested item was cited from the source, or the suggested issue was updated
 directly) or `overridden` (the source got further activity instead) — a count of how often the
 suggestion was right, without refusing anything on its strength.
-
 A ranking or latency change is measured on a restored copy of the production corpus:
 `packages/envoy/scripts/corpus-copy.sh` restores one, `search-smoke.sh` prints what a searcher
 sees for a list of queries from any build, and `search-latency-compare.sh` runs
