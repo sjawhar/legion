@@ -33,11 +33,12 @@
 ARG BUN_VERSION=1.3.14
 ARG MISE_VERSION=v2026.8.12
 # SHA-256 of the tools stage's linux-x64 archive (the image builds linux/amd64 only; `install-jj`'s
-# mise step reads this pair from here too). Taken from mise's GPG-signed SHASUMS256.asc, not the
-# unsigned SHASUMS256.txt: `gpg --verify SHASUMS256.asc` against release key
-# 24853EC9F655CE80B48E6C3A8B81C9D17413A06D (published at https://mise.jdx.dev/gpg-key.pub, and at
-# keys.openpgp.org by the same fingerprint) must report a good signature before this hash is taken
-# from the verified file.
+# mise step reads this pair from here too). Take the hash from the output of
+# `gpg --decrypt SHASUMS256.asc` — never by grepping the `.asc` file itself: a forged line added
+# outside its signed block does not stop `gpg --verify` from reporting a good signature, but
+# `gpg --decrypt`'s stdout is exactly the signed text, nothing else. Take the hash only once that
+# command reports a good signature from release key 24853EC9F655CE80B48E6C3A8B81C9D17413A06D
+# (published at https://mise.jdx.dev/gpg-key.pub, and at keys.openpgp.org by the same fingerprint).
 ARG MISE_SHA256=0c782233b97745fd3ed317ba3acbfd7d256e6268470373757f0cc48d57bb87e6
 # Sami's jj fork: what the dogfood daemon runs on the devbox; same 0.45 line as the jj-lib inside OMP.
 ARG JJ_TOOL=github:sjawhar/jj@0.45.1-sami.20260910-043938
