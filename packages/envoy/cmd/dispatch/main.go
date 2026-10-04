@@ -289,6 +289,8 @@ func main() {
 	// A settlement a shutdown cut short, here or in the task this one replaces, runs without
 	// anyone opening its document.
 	go documentService.RunSettlementResumption(ctx)
+	// LEGION-550: resolves write_suggestions outcomes off the write path, on its own schedule.
+	go api.RunSuggestionOutcomeSweep(ctx, database.Pool, api.SuggestionSweepInterval)
 
 	sweeper, err := webhookSweeper(natsClient, appCfg, boot.GitHubAPIBase)
 	if err != nil {

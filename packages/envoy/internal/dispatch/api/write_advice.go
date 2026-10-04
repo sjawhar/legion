@@ -29,6 +29,9 @@ type writeAdvice struct {
 	*documentBlocks
 	// editBlocks is set by a document edit; nil omits its field.
 	*editBlocks
+	// Suggestions is LEGION-550's write-time feedback, set only on an issue or ask creation;
+	// nil (omitted) everywhere else.
+	Suggestions *model.Suggestions `json:"suggestions,omitempty"`
 }
 
 type adviceQueryError struct {

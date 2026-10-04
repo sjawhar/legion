@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -273,6 +274,23 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 		return
 	}
 	s.publish(events...)
+	// LEGION-550: an ask on an unlinked project document has no issue to search within or to
+	// resolve outcome activity against, so it is out of scope; owner.IssueKey != nil is exactly
+	// the case writeAdvice above already requires.
+	if advice != nil && owner.IssueKey != nil {
+		var project string
+		if err := s.deps.Store.Pool.QueryRow(r.Context(),
+			`select project_key from issues where key = $1`, *owner.IssueKey,
+		).Scan(&project); err != nil {
+			slog.Warn("dispatch: write suggestions omitted", "route", "POST /api/v1/issues/{key}/asks", "error", err)
+		} else {
+			suggestions := s.computeSuggestions(r.Context(), project, ask.Question, "ask", ask.ID, "")
+			advice.Suggestions = suggestions
+			s.persistSuggestions(r.Context(), suggestionSource{
+				kind: "ask", issueKey: *owner.IssueKey, askID: ask.ID, actor: actor,
+			}, suggestions)
+		}
+	}
 	WriteJSON(w, http.StatusCreated, withAdvice(ask, advice))
 }
 

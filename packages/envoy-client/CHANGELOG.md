@@ -4,6 +4,13 @@
 
 ### Changed
 
+- `dispatch_issue` and `dispatch_ask` append LEGION-550's write-time feedback to their result,
+  from the new `WriteAdvice.suggestions`: up to three related items found by search (`Possibly
+  related, found by search:`, each with its status or owner and a link), and, for an ask, any
+  already-answered ask that may settle the same question (`A past decision may already answer
+  this: …, answered by <who> on <when>`). A slow or down search never blocks or delays the write;
+  `suggestions.missing` renders as `Related-item search was skipped: <reason>.` instead.
+
 - `dispatch_search` takes `offset` and says how far a page reaches: its first line reads
   `20 results for "merge queue" (showing 1-20 of 1328, 78 ms)` when the query matches more than the
   page, a line says when some matches cannot be paged to (each kind lists only its best 100) and to
