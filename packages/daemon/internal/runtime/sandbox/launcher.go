@@ -332,13 +332,7 @@ func launcherCommand(l launch, r *Runtime) shimwire.LauncherStart {
 	if r.agentSecrets != nil {
 		shim = append(shim, "--agent-secrets-key-dir", AgentSecretsKeyDir, "--pod-token-file", AgentSecretsTokenDir+"/"+AgentSecretsTokenFile, "--agent-secrets-bin", r.tools.AgentSecrets)
 	}
-	env := r.mainEnvironment(l, "!"+r.tools.Legion+" credential")
-	values := make([]string, 0, len(env)+1)
-	for _, entry := range env {
-		if entry.ValueFrom == nil {
-			values = append(values, entry.Name+"="+entry.Value)
-		}
-	}
+	_, values := r.launchEnvironment(l)
 	values = append(values, bootTokenKey+"_FILE="+dir+"/"+bootTokenKey)
 	files := maps.Clone(l.secrets)
 	if files == nil {

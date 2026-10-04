@@ -170,6 +170,39 @@ func TestSpawnOverAnExistingSandbox(t *testing.T) {
 	})
 }
 
+// A child of a closed tree re-admitted as a root of its own keeps its key, so its Sandbox's name:
+// the Sandbox its old tree suspended mounts the old root's volume and has none of its own. The
+// orphan root's launch replaces that Sandbox with one of its own tree, carrying the tree volume.
+// One still running roles of the old tree is refused and left as it is.
+func TestAnOrphanRootReplacesTheSandboxItsOldTreeLeft(t *testing.T) {
+	orphan := claim.Token("legion-legion-legion-209-architect")
+	name := SandboxName(orphan)
+	oldTree := map[string]string{labelProject: testProject, labelTree: labelValue(testTree), labelIssue: labelValue("LEGION-209")}
+	orphanSpec := func(t *testing.T) runtime.SpawnSpec {
+		spec := testSpec(t, orphan, claim.RoleArchitect, "LEGION-209")
+		spec.Tree = "LEGION-209"
+		return spec
+	}
+	t.Run("suspended by its old tree", func(t *testing.T) {
+		g := newRig(t, []k8sruntime.Object{sandboxObject(t, name, "uid-sandbox-old-tree", modeSuspended, oldTree)})
+		g.spawn(orphanSpec(t))
+		s := g.sandbox(name)
+		if s == nil || s.UID == "uid-sandbox-old-tree" || s.Labels[labelTree] != labelValue("LEGION-209") || len(s.Spec.VolumeClaimTemplates) == 0 {
+			t.Fatalf("orphan root's Sandbox = %+v, want a new one of tree LEGION-209 with the tree volume", s)
+		}
+	})
+	t.Run("still running its old tree's roles", func(t *testing.T) {
+		g := newRig(t, []k8sruntime.Object{sandboxObject(t, name, "uid-sandbox-old-tree", modeRunning, oldTree)})
+		g.launcher(orphan)
+		if _, err := g.r.Spawn(g.ctx, orphanSpec(t)); err == nil || !strings.Contains(err.Error(), "still runs roles") {
+			t.Fatalf("orphan root's launch over a running Sandbox of its old tree = %v, want the refusal", err)
+		}
+		if s := g.sandbox(name); s == nil || s.UID != "uid-sandbox-old-tree" {
+			t.Fatalf("the old tree's running Sandbox = %+v, want it left as it was", s)
+		}
+	})
+}
+
 // The death path's Resume over a Failed issue pod, which the controller keeps under Running:
 // suspend, wait the pod out, rewrite the Secrets, run (B1). The role's launcher in the new pod is
 // told the new generation's boot token and resumes the recorded session, and the init container is
