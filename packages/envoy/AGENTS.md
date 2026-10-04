@@ -140,7 +140,7 @@ document's latest version, and the number of that version. A writer holding the 
 it (`pmdoc.CountTasks`); one holding the stored markdown counts that alone
 (`pmdoc.CountTasksMarkdown`: goldmark's tree before the Proof schema's refusals, so a spec holding a
 table row wider than its header, an html block or an unknown typed block is still counted, where
-reading it as a document reports nothing - the first production run did so for three issues).
+reading it as a document reports nothing).
 Both skip an item emptied of its text, since the renderer writes one as a plain `- `, and both read
 front matter as Parse does, so they agree on every document both can read. Every version write
 records the count in its own transaction (`docs.RecordTaskProgress` from `writeVersionTx`; issue

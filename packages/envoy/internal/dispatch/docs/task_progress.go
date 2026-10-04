@@ -205,10 +205,9 @@ func (s *Service) reconcileTaskProgressBatch(
 	for _, issue := range batch {
 		var progress pmdoc.TaskProgress
 		if issue.markdown != "" {
-			// The markdown is read for its task items alone: a spec holding a table the Proof
-			// schema refuses (a row wider than its header) still has its checkboxes counted, where
-			// reading it as a document would report no progress at all - the first deploy did so
-			// for three issues. Only markdown the reader cannot read at all is counted as none.
+			// The markdown is read for its task items alone, so a spec the Proof schema refuses
+			// elsewhere (a table row wider than its header) is still counted, and only markdown
+			// the reader cannot read at all is counted as none.
 			counted, err := pmdoc.CountTasksMarkdown(issue.markdown)
 			if err != nil {
 				slog.Warn("dispatch: issue task progress reconciliation cannot read the spec; counting none",
