@@ -76,7 +76,9 @@
               "--role",
               "architect",
               "--private-dir",
-              "/var/run/legion/private"
+              "/var/run/legion/private",
+              "--stop-grace",
+              "30s"
             ],
             "env": [
               {
@@ -145,7 +147,9 @@
               "--role",
               "planner",
               "--private-dir",
-              "/var/run/legion/private"
+              "/var/run/legion/private",
+              "--stop-grace",
+              "30s"
             ],
             "env": [
               {
@@ -214,7 +218,9 @@
               "--role",
               "implementer",
               "--private-dir",
-              "/var/run/legion/private"
+              "/var/run/legion/private",
+              "--stop-grace",
+              "30s"
             ],
             "env": [
               {
@@ -283,7 +289,9 @@
               "--role",
               "tester",
               "--private-dir",
-              "/var/run/legion/private"
+              "/var/run/legion/private",
+              "--stop-grace",
+              "30s"
             ],
             "env": [
               {
@@ -360,7 +368,9 @@
               "--role",
               "reviewer",
               "--private-dir",
-              "/var/run/legion/private"
+              "/var/run/legion/private",
+              "--stop-grace",
+              "30s"
             ],
             "env": [
               {
@@ -429,7 +439,9 @@
               "--role",
               "merger",
               "--private-dir",
-              "/var/run/legion/private"
+              "/var/run/legion/private",
+              "--stop-grace",
+              "30s"
             ],
             "env": [
               {
@@ -577,8 +589,8 @@
                 "value": "480"
               },
               {
-                "name": "LEGION_RESUME_SESSION_FILE",
-                "value": "/legion/sessions/--legion-workspaces-sjawhar-legion-smoke-legion-208--/2026-09-23T12-00-00-000Z_0198.jsonl"
+                "name": "LEGION_EXPECT_TREE_VOLUME",
+                "value": "true"
               },
               {
                 "name": "XDG_CONFIG_HOME",

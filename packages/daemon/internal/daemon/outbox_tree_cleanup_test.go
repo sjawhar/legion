@@ -68,7 +68,7 @@ func TestAReservedTreeCloseFinishesItsCleanupAfterReadmission(t *testing.T) {
 			t.Cleanup(sup.stop)
 			runner := &outbox{log: quietLogger(),
 				dispatchProject: "LEGION",
-				pool:            pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"),
+				pool:            pool, records: records, supervisor: sup, trees: st, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"),
 				provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
 					return workspace.Workspace{Dir: t.TempDir(), Bookmark: "legion/LEGION-208"}, nil
 				},
