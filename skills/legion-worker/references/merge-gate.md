@@ -16,8 +16,8 @@ and `skill://legion-worker/references/conflicts-and-rewrites.md`), and any other
 
 - The reviewer verifies the `CI`, `Threads`, and `E2E` facts against GitHub directly —
   never from a handoff — then runs `task(agent="thermonuclear-deep-review")` and
-  `task(agent="thermonuclear-code-quality")` once at that head — the head the implementer's
-  simplify pass left final — and records the verdict.
+  `task(agent="thermonuclear-code-quality")` once at that head — the head the round reviews —
+  and records the verdict.
   Approval is refused while either `E2E (implementer)` or `E2E (tester)` is missing: `REQUEST_CHANGES` naming the missing line.
   Skip the `Thermo` line entirely on a docs-only PR. Submit **one review per round** —
   `REQUEST_CHANGES` when any correctness finding stands, otherwise `APPROVE` of the head you
