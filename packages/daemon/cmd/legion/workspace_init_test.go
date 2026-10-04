@@ -67,7 +67,6 @@ type treeVolume struct {
 
 func newTreeVolume(t *testing.T) *treeVolume {
 	t.Helper()
-	isolateJJFromTheOperatorsConfig(t)
 	realJJ, err := exec.LookPath("jj")
 	if err != nil {
 		t.Fatalf("workspace-init's tests drive a real jj: %v", err)

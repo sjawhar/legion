@@ -519,25 +519,10 @@ func TestHandoffCompleteSendsNoGeneration(t *testing.T) {
 	}
 }
 
-// isolateJJFromTheOperatorsConfig points JJ_CONFIG at a file that does not exist, so every jj
-// invocation after this call sees jj's built-in defaults (fsmonitor "none") instead of the
-// operator's own ~/.jjconfig.toml — on a devbox that turns fsmonitor on, every test-created repo
-// would otherwise register a root with the operator's long-running watchman, which never removes
-// it once the test's temp directory is gone. jj treats a missing JJ_CONFIG entry as empty, and
-// JJ_CONFIG, once set, is consulted instead of the default ~/.jjconfig.toml/XDG locations, so this
-// is the one place that needs to isolate; t.Setenv makes every later os.Environ()-derived command
-// in this test, including one that overrides JJ_CONFIG again for its own reason (push_test.go's
-// commit-trailer overlay), see it.
-func isolateJJFromTheOperatorsConfig(t *testing.T) {
-	t.Helper()
-	t.Setenv("JJ_CONFIG", filepath.Join(t.TempDir(), "no-user-config.toml"))
-}
-
 // handoffRepo is a real colocated jj repository standing in for a pane workspace. It returns the
 // workspace and the absolute jj a pane is told as LEGION_JJ_PATH.
 func handoffRepo(t *testing.T) (string, string) {
 	t.Helper()
-	isolateJJFromTheOperatorsConfig(t)
 	jj, err := exec.LookPath("jj")
 	if err != nil {
 		t.Fatalf("jj is required: %v", err)
