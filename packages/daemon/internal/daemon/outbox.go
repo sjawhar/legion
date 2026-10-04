@@ -392,7 +392,7 @@ func (r *outbox) mergeQueue(ctx context.Context, row record.OutboxRow, payload r
 		return r.message(ctx, row, record.MessagePost{Body: fmt.Sprintf("merge queue role %s had no live holder at %s", payload.Role, r.now().UTC().Format(time.RFC3339))})
 	}
 	if err != nil {
-		return fmt.Errorf("publish READY for %s to merge queue role %s: %w", row.Issue, payload.Role, err)
+		return fmt.Errorf("publish %s's READY packet or its withdrawal to merge queue role %s: %w", row.Issue, payload.Role, err)
 	}
 	return nil
 }
