@@ -9,40 +9,14 @@
 //   score.ts runs <runs dir> [<scenario>]
 //     One row per run, then counts per scenario and label, and a legend saying what each count
 //     is. Each scenario's rule is on the function that scores it: askOnMessage,
-//     measureBeforeAsk, testerProof. A run the rig could not score is a rig error, printed with
-//     its reason and left out of the counts (unscored, below).
+//     measureBeforeAsk, testerProof, brainstormSurface. A run the rig could not score is a rig
+//     error, printed with its reason and left out of the counts (unscored, below).
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { z } from "zod";
+import { CREATED, type SessionEntry, session, toolResults } from "./transcript";
 
-/** An Oh My Pi session transcript line, as far as the score reads one: a message, whose assistant
- * content holds each tool call whole (`toolCall`: id, tool name, arguments) and whose tool results
- * name the call they answer. Its `tool_execution_start` entries keep only the first 200 characters
- * of the arguments, so nothing here reads them. */
-const SessionEntry = z.looseObject({
-  type: z.string().optional(),
-  timestamp: z.string().optional(),
-  message: z
-    .looseObject({
-      role: z.string().optional(),
-      toolName: z.string().optional(),
-      toolCallId: z.string().optional(),
-      content: z
-        .array(
-          z.looseObject({
-            type: z.string(),
-            text: z.string().optional(),
-            id: z.string().optional(),
-            name: z.string().optional(),
-            arguments: z.unknown().optional(),
-          })
-        )
-        .optional(),
-    })
-    .optional(),
-});
-type SessionEntry = z.infer<typeof SessionEntry>;
 /** `GET /api/v1/issues/{key}/asks`: every ask on the issue, whatever its state. */
 const IssueAsks = z.array(
   z.looseObject({
@@ -52,6 +26,13 @@ const IssueAsks = z.array(
       .nullish(),
   })
 );
+/** `capture-brainstorm`'s output: the one issue the run created in its project (null when it
+ *  opened none, which scores the same as any other failure to put the design in the spec), and
+ *  that issue's asks. */
+const BrainstormCapture = z.looseObject({
+  issue: z.string().nullable(),
+  asks: z.array(z.looseObject({})),
+});
 /** `GET /api/v1/issues/{key}/events`, every page `seed.ts capture` read, joined: a bare array. */
 const IssueEvents = z.array(
   z.looseObject({
@@ -108,13 +89,6 @@ function json<T>(file: string, schema: z.ZodType<T>): T {
   return schema.parse(JSON.parse(readFileSync(file, "utf8")));
 }
 
-function session(runDir: string): SessionEntry[] {
-  const dir = path.join(runDir, "sessions");
-  const file = existsSync(dir)
-    ? readdirSync(dir).find((name) => name.endsWith(".jsonl"))
-    : undefined;
-  return file ? parsed(path.join(dir, file), SessionEntry) : [];
-}
 /** Every tool call the session made, in order: its id, its tool, and its whole arguments as JSON
  * and their `path`. */
 function toolCalls(entries: SessionEntry[]) {
@@ -263,6 +237,58 @@ function askOnMessage(runDir: string, run: string, label: string): Row {
       notes: `carried=${carried.length}[${carried.join(",")}] pointer=${JSON.stringify(pointer ?? null)}`,
     };
   });
+}
+
+/** A value that carries Dispatch's credential: the variable's own name, or a bearer header in any
+ * quoting (`Authorization: Bearer …`, `"Authorization": "Bearer …"`). */
+const LEAK = /DISPATCH_TOKEN|Authorization\W{1,6}Bearer\s+\S/i;
+
+/** Where a brainstorm run put the design: "spec" when Dispatch created it an issue and it never
+ * asked through the interactive `ask` tool, "chat" the other way round, else "mixed" or "neither". */
+function surfaceOf(createdIssue: boolean, askedChat: boolean): string {
+  if (createdIssue && askedChat) return "mixed";
+  if (createdIssue) return "spec";
+  if (askedChat) return "chat";
+  return "neither";
+}
+
+/** brainstorm: whether a bare `/brainstorming` prompt, with no word of Dispatch in the prompt and
+ * no Dispatch configuration anywhere in the run's environment, puts the design in the issue's spec
+ * (`skill://dispatch-brainstorming`) or asks in chat (main, before the skill existed); `surface`
+ * is `surfaceOf`'s answer. `blocks` is the created issue's own ask count, from
+ * `capture-brainstorm`'s read of Dispatch, never the agent's own claim in chat. `leak` flags a
+ * session that went looking for its project next to the credential
+ * (`skills/dispatch-brainstorming/SKILL.md` "Where the spec lives"): `LEAK` matching a tool call's
+ * arguments, or a tool's result, where a bare `env` or `printenv` dump lands in the model's
+ * context without its command naming anything. `ref`: the run's first `read` was
+ * `skill://dispatch-brainstorming` — this scenario's own instrument, since a main run has no such
+ * skill to read. The run passes when it put the design in the spec and leaked nothing looking for
+ * the project. */
+function brainstormSurface(runDir: string, run: string, label: string): Row {
+  const entries = session(runDir);
+  const calls = toolCalls(entries);
+  // Whether Dispatch created an issue is its own answer in a tool's result, whatever reached it: a
+  // top-level `write` to the `xd://dispatch_issue` device, one inside an `eval` cell, or a host that
+  // calls the tool by name. A call Dispatch refused as a duplicate created nothing.
+  const results = toolResults(entries);
+  const surface = surfaceOf(
+    results.some((text) => CREATED.test(text)),
+    calls.some((call) => call.tool === "ask")
+  );
+  const leak =
+    calls.some((call) => LEAK.test(call.args)) || results.some((text) => LEAK.test(text));
+  const captured = json(path.join(runDir, "brainstorm.json"), BrainstormCapture);
+  const reads = calls.filter((call) => call.tool === "read").map((call) => call.path);
+  const ref = reads[0] === "skill://dispatch-brainstorming";
+  const pass = surface === "spec" && !leak;
+  return {
+    run,
+    scenario: "brainstorm",
+    label,
+    pass,
+    ref,
+    notes: `surface=${surface} issue=${captured.issue ?? "none"} blocks=${captured.asks.length} leak=${leak} reads=[${reads.join(",")}]`,
+  };
 }
 
 /** measure-before-ask: gate 2 of the dispatch skill's "Before you ask" (skills/dispatch/SKILL.md).
@@ -454,7 +480,8 @@ function testerProof(runDir: string, run: string, label: string, heads: string[]
  *     call, which scripts/e2e/lib/model-gateway-unserved.sh reads, is a better signal this rig does
  *     not set up;
  *   - it compared the wrong text: a tool call's arguments name the other label's checkout, or a
- *     skill file (a path to skills/dispatch, skills/dispatch-first or skills/legion-worker)
+ *     skill file (a path to skills/dispatch, skills/dispatch-first, skills/dispatch-brainstorming
+ *     or skills/legion-worker)
  *     anywhere but its own run directory (its HOME is there) or its label's profile or checkout.
  *     An agent reads the whole filesystem, and `legion` on its PATH resolves into the checkout
  *     rig.sh runs from.
@@ -472,7 +499,7 @@ function unscored(runDir: string, label: string, labels: Map<string, string>): s
       if (other !== label && call.args.includes(checkout))
         return `a ${call.tool} call names ${other}'s checkout: ${call.args.slice(0, 200)}`;
     for (const [skillPath] of call.args.matchAll(
-      /[^\s"'`=:;|&<>()]*skills\/(?:dispatch-first|dispatch|legion-worker)\b/g
+      /[^\s"'`=:;|&<>()]*skills\/(?:dispatch-first|dispatch-brainstorming|dispatch|legion-worker)\b/g
     ))
       if (!allowed.some((dir) => skillPath.startsWith(dir)))
         return `a ${call.tool} call names a skill outside ${label}'s own: ${skillPath}`;
@@ -504,6 +531,7 @@ function scoreRuns(runsDir: string, only: string | undefined) {
     "ask-on-message": askOnMessage,
     "measure-before-ask": measureBeforeAsk,
     "tester-proof": (dir, run, label) => testerProof(dir, run, label, heads),
+    brainstorm: brainstormSurface,
   };
   const name = new RegExp(`^(${Object.keys(scorers).join("|")})-(.+)-(\\d+)$`);
   for (const run of existsSync(runsDir) ? readdirSync(runsDir).sort() : []) {
@@ -546,7 +574,9 @@ function scoreRuns(runsDir: string, only: string | undefined) {
       "",
       "pass       tester-proof: the four conditions on testerProof. ask-on-message and",
       "           measure-before-ask: their automatic flags clear (askOnMessage, measureBeforeAsk),",
-      "           which point a person at the asks to read and do not check a recommendation",
+      "           which point a person at the asks to read and do not check a recommendation.",
+      "           brainstorm: the design went to the issue's spec and nothing leaked the project",
+      "           lookup (brainstormSurface); a person still reads notes for unagreed points",
       "pass+ref   passed, and the agent read the file the rule is in",
       "rig errors runs the rig could not score (unscored), left out of both counts",
       "ran=false  a tester-proof run the bun stand-in saw no greet.ts run in: read its transcript",

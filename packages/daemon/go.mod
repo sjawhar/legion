@@ -1,6 +1,6 @@
 module github.com/sjawhar/legion/daemon
 
-go 1.26.1
+go 1.26.8
 
 require (
 	github.com/aws/aws-sdk-go-v2 v1.47.1

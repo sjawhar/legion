@@ -41,7 +41,7 @@ type API interface {
 	ProjectMark(ctx context.Context, artifactID, markID string, record MarkRecord, actor model.Actor) error
 	Join(ctx context.Context, tx pgx.Tx) (context.Context, *Ledger)
 	NamedVersion(ctx context.Context, artifactID, summary string, actor model.Actor) (VersionResult, error)
-	CompactAll(ctx context.Context, keep int) error
+	CompactAll(ctx context.Context) error
 	Quiesce(ctx context.Context) error
 }
 

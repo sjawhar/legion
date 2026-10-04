@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"errors"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/broker/enroll"
 	"github.com/sjawhar/envoy/internal/broker/machine"
+	"github.com/sjawhar/envoy/internal/broker/store/storetest"
 )
 
 type wakeCall struct {
@@ -281,30 +283,8 @@ func TestCreateWaitsOutTheSweepItRaces(t *testing.T) {
 		return conn
 	}
 	watch := connect()
-	// waitBlockedBy waits until a backend waits on a lock holder holds and returns its pid; what
-	// finishing (done) before it ever waits fails the test.
-	waitBlockedBy := func(holder int32, done <-chan struct{}, what string) int32 {
-		t.Helper()
-		for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); {
-			var waiter int32
-			err := watch.QueryRow(ctx, `select pid from pg_stat_activity where $1 = any(pg_blocking_pids(pid))`, holder).Scan(&waiter)
-			if err == nil {
-				return waiter
-			}
-			if !errors.Is(err, pgx.ErrNoRows) {
-				t.Fatalf("watch the locks: %v", err)
-			}
-			select {
-			case <-done:
-				t.Fatalf("%s finished without waiting on the lock", what)
-			case <-time.After(5 * time.Millisecond):
-			}
-		}
-		t.Fatalf("%s never waited on the lock", what)
-		return 0
-	}
 
-	// Create's write transaction begins and waits on the advisory lock createPending takes first.
+	// Create's write transaction begins and waits on the advisory lock it takes first.
 	advisory := connect()
 	holdAdvisory, err := advisory.Begin(ctx)
 	if err != nil {
@@ -326,7 +306,7 @@ func TestCreateWaitsOutTheSweepItRaces(t *testing.T) {
 		defer close(createDone)
 		created, createErr = m.Create(ctx, enr, signed, "")
 	}()
-	createPID := waitBlockedBy(int32(advisory.PgConn().PID()), createDone, "Create")
+	createPID := storetest.AwaitLockWaiters(t, watch, holdAdvisory, 1)[0]
 
 	// The lease lapses; the sweep locks the enrollment, marks it ended, and waits on the grant row
 	// held here.
@@ -350,14 +330,14 @@ func TestCreateWaitsOutTheSweepItRaces(t *testing.T) {
 		defer close(sweepDone)
 		ended, sweepErr = (&enroll.Service{Store: m.Store}).EndLapsed(ctx)
 	}()
-	sweepPID := waitBlockedBy(int32(grantHolder.PgConn().PID()), sweepDone, "the sweep")
+	sweepPID := storetest.AwaitLockWaiters(t, watch, holdGrant, 1)[0]
 
 	// Create's write goes on and reaches the enrollment the sweep holds; then the sweep commits.
 	if err := holdAdvisory.Rollback(ctx); err != nil {
 		t.Fatalf("release the advisory lock: %v", err)
 	}
-	if waiter := waitBlockedBy(sweepPID, createDone, "Create's write"); waiter != createPID {
-		t.Fatalf("backend %d waits on the sweep; want Create's, %d", waiter, createPID)
+	if waiting := storetest.AwaitLockWaiters(t, watch, holdGrant, 2); len(waiting) != 2 || !slices.Contains(waiting, sweepPID) || !slices.Contains(waiting, createPID) {
+		t.Fatalf("backends %v wait behind the grant row; want the sweep's %d and, behind it, Create's %d", waiting, sweepPID, createPID)
 	}
 	if err := holdGrant.Rollback(ctx); err != nil {
 		t.Fatalf("release the grant row: %v", err)

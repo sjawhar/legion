@@ -87,7 +87,7 @@ func documentBlock(doc *Node, target Range, caller string) (index, start, end in
 // InsertTableRows inserts a pipe-table row fragment beside the row containing target, its rows
 // padded to the table's width on budget, the caller write's. It reports inserted=false when target
 // is outside a table or markdown is not exclusively table rows.
-func InsertTableRows(doc *Node, target Range, markdown string, after bool, budget *TablePaddingBudget) (*Node, bool, error) {
+func InsertTableRows(doc *Node, target Range, markdown string, after bool, budget *WriteBudget) (*Node, bool, error) {
 	if doc == nil || doc.Type != "doc" {
 		return nil, false, fmt.Errorf("%w: InsertTableRows wants a document", ErrSchema)
 	}
@@ -116,10 +116,15 @@ func InsertTableRows(doc *Node, target Range, markdown string, after bool, budge
 
 	table := nodeAtPath(doc, tablePath)
 	width := len(table.Children[0].Children)
-	rows, supported, err := parseTableRows(markdown, width, budget)
+	// The rows are parsed on a copy of the budget, which is spent only when they are inserted:
+	// markdown that is not rows alone goes to the block path, which parses it again on budget,
+	// and the elements and padding it costs are charged once.
+	trial := *budget
+	rows, supported, err := parseTableRows(markdown, width, &trial)
 	if err != nil || !supported {
 		return nil, supported, err
 	}
+	*budget = trial
 	rows = normalizeTableRows(rows, table.Children[0], width)
 
 	out := cloneNode(doc)
@@ -454,7 +459,7 @@ func joinAcrossBoundary(doc *Node, selection spliceSelection, r Range, with *Nod
 func buildMergedTextblock(doc *Node, selection spliceSelection, r Range, with *Node) (*Node, bool, error) {
 	left := nodeAtPath(doc, selection.first.path)
 	right := nodeAtPath(doc, selection.last.path)
-	if left.Type == right.Type && !nodeAttrsEqual(left.Attrs, right.Attrs, false) {
+	if left.Type == right.Type && !attrsEqualButBlockID(left.Attrs, right.Attrs) {
 		return nil, false, nil
 	}
 	prefix, err := inlineRange(left, selection.first.pos, selection.first.pos+1, r.From)

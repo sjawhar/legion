@@ -107,7 +107,7 @@ Each open ask card (`features/inbox/`) keeps the full clarification exchange dir
 `AskCard` has `full` and `compact` variants, and both render the ask's fixed options as the same `AskChoiceRow` radio / checkbox rows (`features/inbox/AskOptionRow.tsx`, shared with `AskOptionList`): the options `<fieldset>` and the label/description column are both `min-w-0` (a fieldset's UA default is `min-inline-size: min-content`, so without it one unbroken identifier widens the whole fieldset past the card), and `MarkdownBody`'s `break-words` then folds the word, so a long label wraps inside a 280 px margin or a phone sheet instead of running past the card. The Inbox uses the full variant, whose free-text field and Answer / Ask back row are always shown. The Conversation timeline, the margin, the responsive review sheet, and the decision blocks of a live document (`AskCard`'s `frame="block"`, below) use the compact variant, which folds that field and row behind **Add a note or answer in your own words**, shows a lone Answer button under the rows once an option is picked, and opens the disclosure itself when the pick needs words (Other, or an option requiring a reason). The Conversation timeline is on that list because the margin already shows an issue's open ask in full beside the document: a second full composer in the timeline is the same question, options and answer controls twice on one screen, and the timeline is the record (LEGION-67). When the picked option needs text (`Request changes` on an approval), the field is labelled `Reason (required)` and takes focus (in the compact variant, again each time the disclosure reopens), and the disabled Answer button carries an `Add a reason to send <option>` helper and `title` until a reason is typed.
 Every non-block `AskCard` with a quote anchor names its anchor document as a link above the cached quote; an anchor block adds the document's `#b-<blockId>` fragment, so Inbox, margin, review sheet, and Conversation readers have the question's context in place.
 
-Each answer includes the nullable `edited_at` revision the human reviewed. On an `ASK_EDITED` response, the card reloads the latest question, keeps the draft text, clears its selected option, and requires explicit reconfirmation, so the next answer is to the new wording and carries its revision. `useAskAnswerForm` decides what a failed answer shows (`answerFailure`), and the card renders one `QueryError`: a refusal the same answer is refused with again - `ASK_CLOSED` (answered elsewhere), `ASK_RESOLVED` (closed or retracted), and `ASK_EDITED` - says why and offers no Retry; any other failure says "Could not save your answer." with a Retry.
+Each answer includes the nullable `edited_at` revision the human reviewed. On an `ASK_EDITED` response, the card reloads the latest question, keeps the draft text, clears its selected option, and requires explicit reconfirmation, so the next answer is to the new wording and carries its revision. `useAskAnswerForm` decides what a failed answer shows (`answerFailure`), and the card renders one `QueryError`: a refusal the same answer is refused with again - `ASK_CLOSED` (answered elsewhere), `ASK_RESOLVED` (closed or retracted), `ASK_EDITED`, and `CAP_EXCEEDED` (even the answer's server state would leave the document's live state past what the server can decode; the card shows the server's reason) - says why and offers no Retry; any other failure says "Could not save your answer." with a Retry.
 
 The Inbox partitions open asks by whose turn it is — the server's `waiting_on` on every open ask (`human` → `Waiting on you`, `agent` → `Waiting on agents`; `waitingOnYou` in `features/inbox/BlockedOnYou.tsx`), never by who replied last. A moved approval request is `agent` while its `requested_version` is below its document version; a hand-back (`ask.handed_back`, which refreshes the Inbox like any `ask.*` event and leaves the question's `edited_at` and edit history alone) then returns the same request to `human` until a reply newer than the one it answered takes the turn. After that, an agent's progress note (a reply posted with `turn: "agent"`) leaves its ask under `Waiting on agents` while a human's reply always moves the ask there. The server's order (priority first with unset last, then whose turn, then recency) is preserved within each partition — so the Mine view's `Unassigned` band, which spans both turns, lists a P0 ask an agent is working on above a P2 ask waiting on the viewer; the `Blocked on you: N items, oldest 6h` banner finds the oldest waiting ask or credential request. No row appears in more than one partition. Each open ask card carries a status line, `Waiting on you` or `Waiting on <agent>` (`askTurnLabel` in `features/inbox/ask-turn.ts`: the agent whose progress note is the newest reply, else the asker), and an Inbox row whose turn is the human's shows a `<agent> replied` chip when an agent spoke last. With `?agent=<session id>` the Inbox shows only that agent's asks (and only those waiting on the viewer with `section=needs-you`) under a clearable `Asks from <title> · clear` chip, taking the title from the live agent list when Envoy still has the session and from the asks' author label otherwise. The sidebar Inbox entry and compact top bar report the `waitingOnYou` rows plus every pending credential request (below) as `Needs you N`, through `needsYou` beside `waitingOnYou`, the one rule the banner's count and its oldest read too; each issue header applies the ask predicate to its own open asks — `GET /issues/{key}` carries `waiting_on` and `last_reply` on every `open_asks` row exactly as the inbox does — and shows `Waiting on you (N)` or `Waiting on agents (N)` immediately, at every width. A response whose open asks carry no `waiting_on` (an older server) shows no indicator rather than a wrong one. The reply composer for a session author is not in the SPA: humans reply from the card, and a human's reply is always `turn: agent`, so the SPA offers no turn control.
 
@@ -214,16 +214,23 @@ all read it, so a request one of them counts is one the section lists.
 
 `CredentialRecordPage.tsx` (`/credentials/:recordId`) and `MachineLoginPage.tsx`
 (`/credentials/machine`) share `CredentialRecordFacts.tsx` (kind, identifiers, enrollment,
-a pod enrollment's worker slot when it has one, lifetime, requested/expiry timestamps, rules
-version, approver, then the agent's reason) and `CredentialDecisionButtons.tsx` (the Approve/Deny
+a pod enrollment's worker slot when it has one, lifetime, requested/expiry timestamps, policy
+version, approver - the broker's `anyone`, a shared secret's, reads "Anyone signed in to
+Dispatch" - then the agent's reason) and `CredentialDecisionButtons.tsx` (the Approve/Deny
 pair, shown whenever the record is `pending`). The broker's `enrollment.slot` (`implementer-g3`,
 null without one) is what tells the requests of two roles in one pod apart, since they share the
-pod's kind and runtime id.
+pod's kind and runtime id. A request waiting on `anyone` is in every signed-in person's pending
+list, since the broker lists it for every approver, and any of them decides it the same way.
 The reason renders inside a `<blockquote>` as **plain text only** — no Markdown pipeline, no
 linkification, `white-space: pre-wrap` — since it is the agent's own words, not reviewed content;
 a pending machine-kind record adds the sentence "Approving lets `<host>` start agent sessions as
-you." verbatim; the record page renders no buttons at all for a machine record, pointing instead at
-the machine page, whose code-entry lookup is the only way to decide it. A decision is one plain
+you." verbatim, or, for a service's login (the record's `service` set, the Legion daemon's),
+"Approving lets `<service> on <host>` start worker pods as `<service>`, not as you: no secret of
+yours reaches its pods unless you approve the request for it."; an approval made on the machine
+page reads "Approved. `<host>` can start agent sessions as you." or "Approved. `<service> on
+<host>` can start worker pods as `<service>`."; the record page renders no buttons at all for a
+machine record, pointing instead at the machine page, whose code-entry lookup is the only way to
+decide it. A decision is one plain
 POST: a plain record's approve and deny send no body, and a machine record's approve and deny both
 send `{code}`, the code the viewer typed for that lookup (the broker requires it on either
 decision). The page never says who decides: Dispatch's server names the signed-in viewer (below),
@@ -233,11 +240,35 @@ recorded decision and no buttons, on the record page and on the machine page ali
 machine page looked the login up already decided or decided it itself; every broker error
 surfaces verbatim through `ApiError`'s message, never reworded.
 
-`GrantsSection.tsx` renders on `/settings` only where the pending list is not `null`: the live
-approval-granted grants the viewer approved, and those on enrollments the viewer operates whoever
-approved them (`grants.ts`'s `credentialGrantsQuery`, `?approver=me`). Each row names its approver
-(the broker's `approver` field), a pod enrollment's slot under its enrollment, and has a Revoke
-button that POSTs `{}` to `/api/v1/credential-grants/{id}/revoke`.
+`RevocableList.tsx` is the revocable table both lists below render through, as
+`CredentialDecisionButtons.tsx` is the decision pair both record pages share: each section hands it
+its query (narrowed to the rows with `select`), its columns, its revoke call, an optional
+`window.confirm` question and what to invalidate on success. It owns the loading, failed and empty
+states and the one revoke in flight: every Revoke button is disabled while a revoke is pending, a
+`useSubmitGuard` ref drops a second press that lands before that re-render, and a refused revoke's
+broker message (a `403 NOT_APPROVER` among them) shows under the table, never silently.
+
+`GrantsSection.tsx` renders on `/settings` only where the pending list is not `null`: every live
+grant of a session the viewer operates, automatic or approved by anyone, and every grant the viewer
+approved (`grants.ts`'s `credentialGrantsQuery`, `?approver=me`). Each row names how it was
+granted (the broker's `granted`: "Automatically", or "Approved by" its `approver`; `CredentialGrant`
+is a union on `granted`, so an automatic grant has a null approver and record and an approved one
+has both), a pod enrollment's slot under its enrollment, and has a Revoke button that POSTs `{}` to
+`/api/v1/credential-grants/{id}/revoke`. Only its operator sees an automatic grant, and revoking
+one makes that session ask before it gets those secrets again: its other automatic grants of them
+end with it.
+
+`MachineLoginsSection.tsx` renders under the code entry on `/credentials/machine`: the machine
+logins the viewer approved that can still reach a secret (`GET /api/v1/machine-logins`,
+`machineLogins.ts`'s `machineLoginsQuery`, which an approval on the page also invalidates), one row
+per login with its machine (the host, or `<service> on <host>` for a service's login such as the
+Legion daemon's), when it was issued and when it expires, and a Revoke button that asks
+`window.confirm` first and then POSTs `{}` to `/api/v1/machine-logins/{id}/revoke`. A login's
+sessions outlive its expiry, so the broker also lists an expired login while one of its sessions
+runs (`expired: true`), and its row reads `expired, sessions still running` under the machine. The
+confirm for a service's login says every session it started, its worker pods included, ends and the
+service needs a new login approval. Revoking ends the login and every session it enrolled, so it
+also invalidates the Live grants list.
 
 `packages/envoy/internal/dispatch/agentsecrets/client.go` is Dispatch's server-side client for the
 broker's UI-bearer API (`DISPATCH_AGENT_SECRETS_URL`/`DISPATCH_AGENT_SECRETS_TOKEN[_FILE]`,
@@ -249,15 +280,17 @@ the approving human from the request body on that bearer's word, so Dispatch bui
 body itself. `Approve` and `Deny` take an `agentsecrets.Decision{Approver, Code}`, where `Approver`
 is always `canonicalLogin` of the `requireHuman` caller and `Code` is the only field read from the
 browser's body; any other field the browser sends, an `approver` among them, is dropped.
-`RevokeByApprover` sends only the caller's canonical login. Cookie-authenticated unsafe requests
+`RevokeByApprover`, `MachineLogins` and `RevokeMachineLogin` send only the caller's canonical login
+as the approver. Cookie-authenticated unsafe requests
 must be same-origin (`enforceCookieOrigin` in `packages/envoy/internal/dispatch/routes/router.go`),
 so another site cannot send a decision from a signed-in human's browser.
-`packages/envoy/internal/dispatch/api/credential_requests.go` mounts the seven `human`-auth proxy
+`packages/envoy/internal/dispatch/api/credential_requests.go` mounts the nine `human`-auth proxy
 rows every page above calls:
 `GET /api/v1/credential-requests`, `GET /api/v1/credential-requests/{id}`,
 `POST /api/v1/credential-requests/{id}/approve|deny`,
-`POST /api/v1/credential-requests/machine-lookup`, `GET /api/v1/credential-grants`, and
-`POST /api/v1/credential-grants/{id}/revoke`. Every handler requires a human caller first, then a
+`POST /api/v1/credential-requests/machine-lookup`, `GET /api/v1/credential-grants`,
+`POST /api/v1/credential-grants/{id}/revoke`, `GET /api/v1/machine-logins` and
+`POST /api/v1/machine-logins/{id}/revoke`. Every handler requires a human caller first, then a
 configured client (`404 FEATURE_OFF` on a nil one), except the pending list, which answers `null`
 without a broker once its input is checked; the two `?approver=` routes accept only the
 literal string `"me"` (`400 APPROVER_ME_ONLY` otherwise) and resolve it to the caller's own
@@ -267,7 +300,15 @@ failure is `503 AGENT_SECRETS_UNAVAILABLE`. `credential_requests_test.go` pins t
 against a fake broker, and `internal/dispatch/api/contract_test.go` round-trips a real broker
 (`brokerapi.Register` with real services on `BROKER_TEST_DATABASE_URL`): another login refused
 `403 NOT_APPROVER` even when its browser body names the approver, the approver's click accepted
-whatever login its body names, and the value released.
+whatever login its body names, and the value released; a shared secret's request in two people's
+lists and approved by the second; an automatic grant listed as automatic, revoked, and the same
+session's next request for it waiting on its owner while another session still gets it at once;
+once the operator has withheld AUTO_TOKEN, another person's approval of the session's request that
+was waiting on anyone for it refused `403 NOT_APPROVER` and the operator's accepted; a machine login
+listed for the person who approved it alone, another person's revoke refused `403 NOT_APPROVER`
+whatever their body names, and the approver's revoke ending the session it enrolled and its
+launcher proofs; and a service's login listed with its service for its approver alone, and
+revocable by them alone.
 
 ## Dark mode
 

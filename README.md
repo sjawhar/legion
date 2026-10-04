@@ -127,13 +127,16 @@ bun run docs:dev
 
 ## Development
 
-You need Bun at the version `.bun-version` pins and Go at the version `go.work` names. `go.work`
-binds the two Go modules, `packages/daemon` and `packages/envoy`; the TypeScript packages and the
-documentation site are Bun workspaces of the root `package.json`.
+You need Bun at the version `.bun-version` pins and Go at the minimum version `go.work`
+names. The default `GOTOOLCHAIN=auto` downloads that toolchain when the installed Go is older;
+`GOTOOLCHAIN=local` refuses instead. `go.work` binds the two Go modules, `packages/daemon` and
+`packages/envoy`; the TypeScript packages and the documentation site are Bun workspaces of the
+root `package.json`.
 
 ```sh
 bun install                                          # every workspace
-cd packages/<package> && bun run lint && bun run typecheck && bun run test
+bunx biome check .                                   # what CI's required lint job runs; `<package>/` for one package
+cd packages/<package> && bun run typecheck && bun run test
 go -C packages/daemon test ./...                     # the Legion daemon
 go -C packages/envoy test ./...                      # Envoy, Dispatch's server and the Secrets Broker
 ```
@@ -147,3 +150,24 @@ site's [contributing page](https://sjawhar.github.io/legion/contributing/) cover
 
 Apache License 2.0; see [LICENSE](LICENSE). Code copied from other projects keeps its own license in
 a `LICENSE` file beside it.
+
+Every artifact this repository ships — each release, and the documentation site, which `docs.yaml`
+deploys on every push to `main` rather than on a release — carries the licenses of the third-party
+code in it, written at build time from what the build included, and the build fails when a
+dependency's license cannot be determined:
+
+| Artifact | Notices |
+| --- | --- |
+| `@sjawhar/pi-legion-envoy`, `@sjawhar/opencode-legion-envoy` (npm) | `dist/THIRD_PARTY_NOTICES` in the package |
+| `packages/claude-envoy` (committed bundle) | `packages/claude-envoy/dist/THIRD_PARTY_NOTICES` |
+| Dispatch web app | `THIRD_PARTY_NOTICES.txt` beside the bundle, served at `/THIRD_PARTY_NOTICES.txt` |
+| Documentation site (GitHub Pages) | [`THIRD_PARTY_NOTICES.txt`](https://sjawhar.github.io/legion/THIRD_PARTY_NOTICES.txt) |
+| `ghcr.io/sjawhar/legion/envoy`, `ghcr.io/sjawhar/legion-worker` images | `/usr/share/doc/legion/THIRD_PARTY_NOTICES` |
+| `legion-<os>-<arch>.tar.gz` (`legion-v*` releases) | `legion-<os>-<arch>/THIRD_PARTY_NOTICES` |
+| `legion-envoy-<arch>.tar.gz`, `agent-secrets-<arch>.tar.gz` (`legion-envoy-v*` releases) | `THIRD_PARTY_NOTICES`, `agent-secrets/THIRD_PARTY_NOTICES` |
+
+`scripts/third-party-notices.ts` writes the JavaScript bundles' notices from the bundler's module
+list, `scripts/go-third-party-notices.sh` the Go programs' with go-licenses, and each image assembles
+its file with `scripts/assemble-third-party-notices.sh`. A package that ships no license file gets
+its declared license's standard text from the SPDX License List; one whose terms the build cannot
+find fails it.
