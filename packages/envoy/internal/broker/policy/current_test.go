@@ -2,6 +2,7 @@ package policy_test
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -148,4 +149,41 @@ func TestARefreshStraddlingListLagStillRereadsTheName(t *testing.T) {
 	if _, ok := set.Secrets["OLD_KEY"]; ok {
 		t.Fatal("a reload whose listing predates listLag's end resurrected deleted OLD_KEY")
 	}
+}
+
+// TestARereadOfANameThatExistsNowhereCostsNoReload pins that a reread finding absent a name the
+// live policy did not serve is not kept for the next reload: anyone may ask for a reread, so
+// otherwise every name a caller invents would cost each reload in the next listLag one more
+// DescribeSecret under the writer lock. TestRefreshKeepsWhatARecentRereadSettled pins the other
+// side: a served name a reread finds gone is still kept, so a lagging listing cannot bring it back.
+func TestARereadOfANameThatExistsNowhereCostsNoReload(t *testing.T) {
+	store := secrets.NewLocal(policytest.Secret("OLD_KEY", "ada@example.com", policy.TierAgent, "v1"))
+	count := &countingDescriber{DescribeSecretAPIClient: store}
+	loader := policytest.Loader(store)
+	loader.Describer = count
+	cur, err := policy.NewCurrent(t.Context(), loader, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lk, err := cur.RefreshOne(context.Background(), "NO_SUCH_KEY"); err != nil || lk.Served || lk.Reason != policy.ReasonAbsent {
+		t.Fatalf("RefreshOne(NO_SUCH_KEY) = %+v, %v; want absent", lk, err)
+	}
+	before := count.calls.Load()
+	if err := cur.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := count.calls.Load() - before; got != 0 {
+		t.Fatalf("the reload after a reread of a name that exists nowhere made %d DescribeSecret calls; want 0", got)
+	}
+}
+
+// countingDescriber counts the DescribeSecret calls a reread or a reload makes.
+type countingDescriber struct {
+	policy.DescribeSecretAPIClient
+	calls atomic.Int64
+}
+
+func (c *countingDescriber) DescribeSecret(ctx context.Context, in *secretsmanager.DescribeSecretInput, opts ...func(*secretsmanager.Options)) (*secretsmanager.DescribeSecretOutput, error) {
+	c.calls.Add(1)
+	return c.DescribeSecretAPIClient.DescribeSecret(ctx, in, opts...)
 }

@@ -88,7 +88,11 @@ func (c *Current) Refresh(ctx context.Context) error {
 // RefreshOne rereads name alone (Loader.LoadOne) and merges the answer into the live policy: a
 // served secret replaces or adds name, and a refused or absent one takes name out. Every other
 // name stays as the live policy had it. A failed read leaves the live policy as it was. Refresh
-// keeps the answer for listLag.
+// keeps the answer for listLag, except an absent answer for a name the live policy did not serve:
+// that changed nothing, and anyone may ask for a reread, so keeping it would let invented names
+// each cost every reload in the next listLag a DescribeSecret under mu. A served name found absent
+// is kept, so a lagging listing cannot bring back a deleted secret; a secret created and deleted
+// before any read served it can still show from a lagging listing until listLag has passed.
 func (c *Current) RefreshOne(ctx context.Context, name string) (Lookup, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -96,7 +100,11 @@ func (c *Current) RefreshOne(ctx context.Context, name string) (Lookup, error) {
 	if err != nil {
 		return Lookup{}, err
 	}
-	secrets := maps.Clone(c.set.Load().Secrets)
+	live := c.set.Load().Secrets
+	if _, served := live[name]; !served && lk.Reason == ReasonAbsent {
+		return lk, nil
+	}
+	secrets := maps.Clone(live)
 	merge(secrets, name, lk)
 	c.set.Store(NewSet(secrets))
 	c.recent[name] = c.now()
