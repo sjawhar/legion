@@ -438,7 +438,13 @@ export interface ArchitectureTreeRetired extends ArchitectureTreeIssueRef {
 export interface Artifact {
   readonly id: string;
   readonly issue_key: string | null;
+  /** `""` for an artifact an agent's conversation owns. */
   readonly project: string;
+  /** The Envoy session whose conversation on the Agents page owns the artifact (a picture a person
+   *  or the agent sent there), with `issue_key` null and `project` empty; null for an issue's or a
+   *  project's artifact. Absent from a Dispatch older than conversation-owned artifacts. */
+  readonly session_id?: string | null;
+  /** `<issue key or project key>/<slug>`, or `agent/<session id>/<slug>` for a conversation's. */
   readonly ref_key?: string;
   readonly slug: string;
   readonly name: string;

@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- `images` on `dispatch_message`, `dispatch_comment` and `dispatch_ask`, and `DISPATCH_BODY_MAX`;
+  `Artifact.session_id` (optional: a Dispatch older than conversation-owned artifacts omits it) for
+  an upload an agent's conversation owns; `dispatch_doc_read` and `dispatch_read` describe the
+  pictures they return; the reference table pins `dispatch://agent/<session id>/artifact/<slug>`
+  and the picture syntax (LEGION-541).
+
 ### Changed
 
 - `SearchResponse` carries `total`, `reachable`, `limit` and `offset`, and `dispatch_search` takes
