@@ -1097,8 +1097,10 @@ func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, ac
 				return
 			}
 			defer release()
-			capture, authors = captureAuthors(state, joinedLiveWrite(ctx, room), actor)
-			state.mu.Unlock()
+			func() {
+				defer state.mu.Unlock()
+				capture, authors = captureAuthors(state, joinedLiveWrite(ctx, room), actor)
+			}()
 			tree, readErr = treeOf(doc)
 		})
 		if readErr != nil {
