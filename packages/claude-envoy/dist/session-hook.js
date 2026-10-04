@@ -15256,14 +15256,20 @@ function searchAnswer(search, query, offset, configUrl) {
   const lines = results.map((result) => searchResultLine(result, configUrl));
   const noun = count === 1 ? "result" : "results";
   const noResults = `No results for "${query}".`;
+  const degraded = search.degraded === "embedder_unavailable" ? "Searched by keyword only: meaning search was unavailable for this request." : undefined;
   if (typeof search.total !== "number") {
     if (offset !== undefined && offset > 0) {
       throw new Error(`Dispatch answered without a total: it predates search paging and ignored offset ${offset}, so this would be its first page again.`);
     }
     return {
-      text: count === 0 ? noResults : [`${count} ${noun} for "${query}" (${search.took_ms} ms)`, ...lines].join(`
+      text: count === 0 ? [noResults, ...degraded === undefined ? [] : [degraded]].join(`
+`) : [
+        `${count} ${noun} for "${query}" (${search.took_ms} ms)`,
+        ...degraded === undefined ? [] : [degraded],
+        ...lines
+      ].join(`
 `),
-      details: { query, results }
+      details: { query, results, ...degraded === undefined ? {} : { degraded: search.degraded } }
     };
   }
   const { total, reachable, offset: pageOffset } = search;
@@ -15275,12 +15281,15 @@ function searchAnswer(search, query, offset, configUrl) {
     total,
     reachable,
     offset: pageOffset,
-    limit: search.limit
+    limit: search.limit,
+    ...degraded === undefined ? {} : { degraded: search.degraded }
   };
   if (count === 0) {
     return {
-      text: total === 0 ? noResults : [
+      text: total === 0 ? [noResults, ...degraded === undefined ? [] : [degraded]].join(`
+`) : [
         `No results for "${query}" at offset ${pageOffset}: it matches ${total}, and the pages reach the first ${reachable}.`,
+        ...degraded === undefined ? [] : [degraded],
         ...cut === undefined ? [] : [cut]
       ].join(`
 `),
@@ -15291,6 +15300,7 @@ function searchAnswer(search, query, offset, configUrl) {
   return {
     text: [
       `${count} ${noun} for "${query}" (${showing}${search.took_ms} ms)`,
+      ...degraded === undefined ? [] : [degraded],
       ...cut === undefined ? [] : [cut],
       ...lines,
       ...end < reachable ? [`Next page: offset ${end}.`] : []
