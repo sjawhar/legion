@@ -1145,23 +1145,25 @@ export interface SearchResult {
   readonly artifact?: SearchArtifactRef;
   readonly id: string;
   readonly snippet: string;
-  /** The hit's fused score: the sum of 1/(60 + its position) over the lists that ranked it. */
+  /** The hit's fused score: 1/(60 + its position in its kind's ranked list). */
   readonly rank: number;
   readonly href: string;
 }
 
-/** One page of `GET /api/v1/search`'s fused order, cut at `offset` and `limit`. */
+/** One page of `GET /api/v1/search`'s fused order, cut at `offset` and `limit`. `total`,
+ * `reachable`, `limit`, and `offset` are absent from a Dispatch that predates search paging,
+ * which always answers its first page regardless of any offset requested. */
 export interface SearchResponse {
   readonly results: SearchResult[];
   /** Every match of every kind. */
-  readonly total: number;
+  readonly total?: number;
   /**
    * How many of `total` the pages can return: each kind lists only its best `SEARCH_KIND_DEPTH`
    * (`dispatch-tools.ts`), so an offset at or past this returns no results.
    */
-  readonly reachable: number;
-  readonly limit: number;
-  readonly offset: number;
+  readonly reachable?: number;
+  readonly limit?: number;
+  readonly offset?: number;
   readonly took_ms: number;
 }
 

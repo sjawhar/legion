@@ -749,7 +749,7 @@ function PaletteDialog({
             <p className={`shrink-0 px-3 py-3 text-sm ${textMutedOnSurface}`}>
               No results for &quot;{searchText}&quot;
             </p>
-          ) : search.data !== undefined && search.data.total > results.length ? (
+          ) : search.data?.total !== undefined && search.data.total > results.length ? (
             // The palette lists one page, so a query matching more says so rather than looking
             // complete.
             <p className={`shrink-0 px-3 py-2 text-xs ${textMutedOnSurface}`}>

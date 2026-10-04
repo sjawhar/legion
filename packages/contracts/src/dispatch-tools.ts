@@ -1006,7 +1006,9 @@ export const dispatchToolSpecs = [
       "Each kind of content is ranked on its own and the lists are merged, so the top holds the best " +
       "issue, document, ask, comment and message; an issue key searched alone lists that issue first. " +
       `The answer names how many results match; offset pages through them, and each kind lists at most its best ${SEARCH_KIND_DEPTH}, ` +
-      "so narrow the query or name a project to reach the rest.",
+      "so narrow the query or name a project to reach the rest. Paging is exact only while the " +
+      "corpus holds still: content added, changed, or removed between two offsets can shift rows " +
+      "across a page boundary, so one hit can come back twice and another never.",
     arguments: (z) => ({
       query: z
         .string({

@@ -8,6 +8,8 @@ import {
   dispatchToolSpecs,
   type IssueComponents,
   SEARCH_QUERY_MAX,
+  type SearchResponse,
+  type SearchResult,
   type TablePosition,
   zodSchemaApi,
 } from "@legion/contracts";
@@ -28,6 +30,23 @@ function response(body: unknown, status = 200): Response {
     status,
     headers: { "Content-Type": "application/json" },
   });
+}
+/** A `dispatch_search` response body for one page of `hits`: paging fields default to a single
+ * complete page (`total`/`reachable` equal to the hit count, `limit` 20, `offset` 0), overridable
+ * for a test that exercises paging. */
+function fakeSearchResponse(
+  hits: readonly SearchResult[],
+  overrides: Partial<Omit<SearchResponse, "results">> = {}
+): SearchResponse {
+  return {
+    results: hits as SearchResult[],
+    total: hits.length,
+    reachable: hits.length,
+    limit: 20,
+    offset: 0,
+    took_ms: 0,
+    ...overrides,
+  };
 }
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
@@ -1148,7 +1167,7 @@ describe("executeDispatchTool", () => {
   });
 
   test("dispatch_search renders results with absolute links", async () => {
-    const results = [
+    const results: SearchResult[] = [
       {
         kind: "document",
         owner: { kind: "issue", key: "LEGION-2", title: "Astrolabe", status: "triage" },
@@ -1188,7 +1207,7 @@ describe("executeDispatchTool", () => {
       requests.push(target.pathname + target.search);
       if (target.pathname !== "/api/v1/search")
         throw new Error(`unexpected request: ${target.pathname}`);
-      return response({ results, total: 3, reachable: 3, limit: 20, offset: 0, took_ms: 12 });
+      return response(fakeSearchResponse(results, { took_ms: 12 }));
     };
 
     const result = await executeDispatchTool({
@@ -1223,7 +1242,7 @@ describe("executeDispatchTool", () => {
   });
 
   test("dispatch_search names the page, the next offset and the rows no offset reaches", async () => {
-    const hit = (id: string) => ({
+    const hit = (id: string): SearchResult => ({
       kind: "comment",
       owner: { kind: "issue", key: "LEGION-2", title: "Astrolabe", status: "triage" },
       id,
@@ -1233,15 +1252,14 @@ describe("executeDispatchTool", () => {
     });
     const requests: string[] = [];
     const answers = [
-      {
-        results: [hit("c-21"), hit("c-22")],
+      fakeSearchResponse([hit("c-21"), hit("c-22")], {
         total: 250,
         reachable: 120,
         limit: 2,
         offset: 20,
         took_ms: 9,
-      },
-      { results: [], total: 250, reachable: 120, limit: 2, offset: 120, took_ms: 4 },
+      }),
+      fakeSearchResponse([], { total: 250, reachable: 120, limit: 2, offset: 120, took_ms: 4 }),
     ];
     const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
       const target = new URL(String(url));
@@ -1308,7 +1326,7 @@ describe("executeDispatchTool", () => {
     const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
       const target = new URL(String(url));
       requests.push(target.pathname + target.search);
-      return response({ results: [], total: 0, reachable: 0, limit: 20, offset: 0, took_ms: 0 });
+      return response(fakeSearchResponse([]));
     };
 
     const result = await executeDispatchTool({
