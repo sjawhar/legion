@@ -6,10 +6,10 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/cmdtest"
 	"github.com/sjawhar/envoy/internal/store"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
@@ -23,7 +23,7 @@ import (
 // consumer is gone either way (LEGION-278). Every ERROR line fails the test.
 func TestListenerFollowsTheInterestRegistryAcrossNATSRestarts(t *testing.T) {
 	ctr, uri := testnats.StartRestartable(t)
-	listener := startListenerProcess(t, buildListener(t), uri, "restart-test")
+	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), uri, "restart-test")
 	listener.waitHealthy(t)
 
 	for restart := 1; restart <= 3; restart++ {
@@ -32,9 +32,9 @@ func TestListenerFollowsTheInterestRegistryAcrossNATSRestarts(t *testing.T) {
 			t.Fatalf("restart %d: start NATS again: %v", restart, err)
 		}
 		deadline := time.Now().Add(30 * time.Second)
-		for strings.Count(listener.output.String(), "envoy nats reconnected") < restart {
+		for strings.Count(listener.Output.String(), "envoy nats reconnected") < restart {
 			if time.Now().After(deadline) {
-				t.Fatalf("restart %d: the listener never reconnected:\n%s", restart, listener.output.String())
+				t.Fatalf("restart %d: the listener never reconnected:\n%s", restart, listener.Output.String())
 			}
 			time.Sleep(100 * time.Millisecond)
 		}
@@ -59,14 +59,12 @@ func TestListenerFollowsTheInterestRegistryAcrossNATSRestarts(t *testing.T) {
 		}
 	}
 
-	if err := listener.cmd.Process.Signal(syscall.SIGTERM); err != nil {
-		t.Fatalf("SIGTERM: %v", err)
+	listener.Terminate(t)
+	listener.WaitExit(t, "SIGTERM")
+	if !strings.Contains(listener.Output.String(), "envoy-listener shutdown complete") {
+		t.Fatalf("the listener did not finish its ordered shutdown:\n%s", listener.Output.String())
 	}
-	listener.waitExit(t, "SIGTERM")
-	if !strings.Contains(listener.output.String(), "envoy-listener shutdown complete") {
-		t.Fatalf("the listener did not finish its ordered shutdown:\n%s", listener.output.String())
-	}
-	for _, line := range strings.Split(listener.output.String(), "\n") {
+	for _, line := range strings.Split(listener.Output.String(), "\n") {
 		if errorLine.MatchString(line) {
 			t.Fatalf("NATS restarts and the shutdown after them logged an error: %s", line)
 		}

@@ -64,6 +64,7 @@ import { GitHubLink } from "./GitHubLink";
 import { IssueComponentsLine } from "./IssueComponentsLine";
 import { IssueLabels } from "./IssueLabels";
 import { PriorityEditor } from "./PriorityControl";
+import { ProgressChips } from "./ProgressChips";
 import { stateForIssue } from "./pins";
 import { UnreachableRouteMarker } from "./RouteReach";
 import { SubscribedAgents } from "./SubscribedAgents";
@@ -430,6 +431,9 @@ export function IssueHeader({
             disabled={isClosed || updateIssue.isPending}
             issueKey={issue.key}
           />
+          {/* Progress is state about how far the work has got, like the status and the claim,
+              so it sits in this wrapping row with them; the metadata rail below clips. */}
+          <ProgressChips bar progress={issue.progress} />
           {documentArtifact === undefined ? null : (
             <ApprovalChip
               artifact={documentArtifact}

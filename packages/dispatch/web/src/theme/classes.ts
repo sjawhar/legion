@@ -701,6 +701,10 @@ export const referencePillBorder = "border-sky-300";
  * contrast check applies. */
 export const newDividerLine = "bg-sky-200 dark:bg-sky-900";
 
+/** An issue's progress bar: a 6px-tall decorative fill on `surfaceMutedStrongBg`'s track, so no
+ * contrast check applies; the link accent, so it reads as the page's one accent colour. */
+export const progressBarFill = "bg-sky-600 dark:bg-sky-400";
+
 // ---------------------------------------------------------------------------------------------
 // Sizing-agnostic composites the components import directly
 // ---------------------------------------------------------------------------------------------

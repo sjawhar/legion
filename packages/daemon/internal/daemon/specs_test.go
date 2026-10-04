@@ -70,3 +70,39 @@ func TestARootArchitectIsToldTheDesignGatePolicyAndWhatItAsks(t *testing.T) {
 		}
 	}
 }
+
+// A reviewer is told after its addressing which required workflows its project declares as review
+// workflows, or that it declares none: the reviewer adjudicates a red only those make, and
+// requests changes on any other red required workflow. No other claim is told them.
+func TestAReviewerIsToldItsProjectsReviewWorkflows(t *testing.T) {
+	composer, err := prompts.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("compose the shipped prompts: %v", err)
+	}
+	for _, tc := range []struct {
+		name     string
+		role     claim.Role
+		declared []string
+		want     string
+	}{
+		{"a reviewer, two declared", claim.RoleReviewer, []string{".github/workflows/review.yml", ".github/workflows/bot.yml"},
+			" Review workflows: this project declares `.github/workflows/review.yml`, `.github/workflows/bot.yml` (`review_workflows`)."},
+		{"a reviewer, none declared", claim.RoleReviewer, nil, " Review workflows: this project declares none (`review_workflows`)."},
+		{"a tester", claim.RoleTester, []string{".github/workflows/review.yml"}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			token, err := claim.NewToken("s1", "S1-2", tc.role)
+			if err != nil {
+				t.Fatal(err)
+			}
+			s := specs{stateDir: t.TempDir(), project: "s1", prompts: composer, reviewWorkflows: tc.declared}
+			spec, err := s.SpawnSpec(context.Background(), supervise.Claim{Token: token, Issue: "S1-2", Tree: "S1-1", Role: tc.role})
+			if err != nil {
+				t.Fatalf("SpawnSpec: %v", err)
+			}
+			if told := strings.Contains(spec.Prompt.Addressing, "Review workflows:"); told != (tc.want != "") || !strings.HasSuffix(spec.Prompt.Addressing, tc.want) {
+				t.Fatalf("addressing %q; want it to end with %q", spec.Prompt.Addressing, tc.want)
+			}
+		})
+	}
+}

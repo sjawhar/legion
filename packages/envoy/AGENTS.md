@@ -91,16 +91,66 @@ arms the settlement of each document whose row is a minute old and whose issue i
 (`resumeOwedSettlements`), so a document nobody opens settles too. It runs on an interval because a
 rolling deploy stops the old task after the new one has started. A closed issue's rooms arm none
 until it reopens. `docs.Service.Shutdown` runs the settlement of each loaded room whose document has
-that row, and no other, inside its 5 s drain budget (`shutdownDrainBudget`, within the caller's
-deadline: `cmd/dispatch` gives HTTP shutdown and document shutdown one 5 s context between them,
-`shutdownTimout`); a settled document's repeat would spend the budget for nothing. It cancels the
-database work of any settlement the budget cuts short so its transaction rolls back, and logs for
-each document that owed one whether it settled or was left to resume (`dispatch: document settled
-before shutdown`, `dispatch: document settlement left to resume after shutdown` with
-`shutdown_budget_ended`). A settlement cut short is not an error; a caller's deadline
-that passes before Shutdown can read that back is, and its error names the documents that owed
-one. A 1 MiB `a_b*` document's settlement took 4.5-6.8 s at load 90-170 on the development
-machine, past that budget.
+that row, and no other, inside its 9 s drain budget (`docs.ShutdownDrainBudget`, within the
+caller's deadline); a settled document's repeat would spend the budget for nothing. Each loaded
+room has a worker of its own that waits for the room's durable appends to land, then reads whether
+the room's document owes a settlement, settles it if so, and closes its editors: a room whose
+append is slow to store, or whose editor keeps sending updates, spends only its own share of the
+budget, leaves only its own settlement to resume, and makes Shutdown return its drain error. A
+room with an editor connected (a spec tab holds the
+document's websocket) is settled while it is still loaded, and its editors are closed only once that
+settlement has returned: ygo's `CloseRoom` evicts the room as it closes them, and a settlement does
+not load a room during shutdown, so closing the room first would leave its settlement to the next
+process. An edit an editor makes while its room settles is left to the next process the same way,
+and so is a settlement that has to write into its room (stamping block ids, or restoring an ask
+block's server-owned attributes): Shutdown refuses every write into the rooms it is closing, and
+such a settlement logs `dispatch: skip shutdown document settlement that has to write into its
+room` at WARN. A settlement the last browser's leaving started (`settleLastPeer`) is joined like a
+timer's. Shutdown cancels the database work of any settlement the budget cuts short so its
+transaction rolls back, and logs for each document that owed one whether it settled or was left to
+resume (`dispatch: document settled before shutdown`, `dispatch: document settlement left to resume
+after shutdown` with `shutdown_budget_ended`). A settlement cut short is not an error; a caller's
+deadline that passes before Shutdown can read that back is, and its error names the documents that
+owed one. A 1 MiB `a_b*` document's settlement took 4.5-6.8 s at load 90-170 on the development
+machine, inside the 9 s drain budget, though a slower load or a bigger burst could still leave it
+to resume.
+
+`cmd/dispatch/shutdown.go` orders the process's shutdown inside `stopGrace` (30 s: ECS's default
+stop timeout, which Dispatch's task definition leaves unset, and `stop_grace_period` in
+`deploy/compose/dispatch.compose.yml`). Every open event stream ends at the signal through
+`api.Deps.Lifetime`, so HTTP shutdown waits only for the requests in flight, and it waits for them
+first, with no deadline of its own. The document service starts when they are done, or 11 s after
+the signal with some still running (`httpDrainBeforeDocuments`, `dispatch: settle documents with
+requests still in flight`), and gets `documentShutdownTimeout`, 5 s more than its drain budget
+(14 s total - the reserve outlasting a settlement still committing when the budget ends, not only
+reading back what did), so it is done 5 s before the runtime's kill. The database pool closes once
+every request has answered and no connection of the shared or document-rooms pool is in use.
+While the database answers, nothing but the runtime's kill bounds that wait, as with the deferred
+close of the pool this replaced: a write still waiting on a lock commits and is answered if it
+finishes before the kill. The database has stopped answering once three health probes in a row
+(`silentProbes`, each `store.Pool.Healthy`'s two seconds) have failed with no connection of those
+two pools taken back while they ran; a probe that answers, or a connection taken back, starts the
+count again. Then Dispatch exits without the connections waiting on it (`dispatch: exit with
+database connections still in use once the database stopped answering`), and the database rolls
+back what they held open; with nothing in flight over HTTP that is about 21 s after the signal.
+
+An issue's task counts (`issues.tasks_done`, `tasks_total`, `tasks_version`, added by the
+`issue_task_progress` migration; LEGION-542) are the `- [ ]` / `- [x]` items of its primary
+document as its latest version renders (`pmdoc.CountTasks`, which skips an item emptied of its
+text, since the renderer writes one as a plain `- `), and the number of the version they were
+counted from. Every version write records them in its own transaction (`docs.RecordTaskProgress`
+from `writeVersionTx`; issue creation and an upload call `docs.RecordTaskProgressMarkdown` after
+they insert their version row, so the count names it). The row the API reads
+(`model.IssueProgress`, on `IssueSummary` and the issue read, never on an event payload) can lag
+its document - every row the migration found, any the task a deploy replaces versions while both
+run (its code records no count), a row another writer held - so `cmd/dispatch` runs
+`docs.Service.RunTaskProgressReconciliation`, which at start and every five minutes
+(`TaskProgressReconcileInterval`) counts again every issue whose `tasks_version` is not its
+document's greatest `artifact_versions.number` (`taskProgressDrift`), in batches of 50 under
+`for no key update … skip locked`: a full batch with drift left goes straight to the next, and a
+short or failed one is retried a bounded number of times in the pass; so a stale or missing count
+lasts at most that interval, and `tasks: null` on the API means a spec with no task list (total
+0) or one still inside that window.
 
 A write never puts one block id on two blocks. `EnsureBlockIDs` keeps a repeated id for the first
 holder in document order, and ask rows and anchors are keyed on block ids, so a block written ahead
