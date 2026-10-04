@@ -9,9 +9,7 @@ import (
 // Read converts the live Yjs tree the browser editor writes into a Node tree. The tree is the
 // caller's own: it shares no map or slice with the document it was read from (ownedValue).
 func Read(frag *crdt.YXmlFragment) (*Node, error) {
-	return readDocument(frag, func(text *crdt.YXmlText) ([]crdt.Delta, error) {
-		return text.ToDelta(), nil
-	}, true)
+	return readDocument(frag, yTextDeltaLive, true)
 }
 
 // ReadForRendering is Read without ownedValue's copy: for a caller that renders the tree and
@@ -19,9 +17,12 @@ func Read(frag *crdt.YXmlFragment) (*Node, error) {
 // nothing retains the tree afterward to alias a later reader or a write that lands once the lock
 // is released.
 func ReadForRendering(frag *crdt.YXmlFragment) (*Node, error) {
-	return readDocument(frag, func(text *crdt.YXmlText) ([]crdt.Delta, error) {
-		return text.ToDelta(), nil
-	}, false)
+	return readDocument(frag, yTextDeltaLive, false)
+}
+
+// yTextDeltaLive is text's delta outside any transaction, as Read and ReadForRendering walk it.
+func yTextDeltaLive(text *crdt.YXmlText) ([]crdt.Delta, error) {
+	return text.ToDelta(), nil
 }
 
 // ReadInTransaction reads a live tree while the caller's Yjs transaction holds
