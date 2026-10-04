@@ -11,7 +11,7 @@ import (
 )
 
 // A text whose whole search vector would pass Postgres's limit on one tsvector is written, and
-// indexed by the words that open it, in every table search reads (LEGION-505). Before 0069 its
+// indexed by the words that open it, in every table search reads (LEGION-505). Before 0071 its
 // write failed with `string is too long for tsvector`, so a document holding such text could
 // never version, and an issue titled with it, or an ask, comment or message holding it, was never
 // stored. An issue's key is indexed whole whatever its title holds.

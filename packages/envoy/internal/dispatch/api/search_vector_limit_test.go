@@ -13,7 +13,7 @@ import (
 
 // A document whose whole search vector would pass Postgres's limit on one tsvector is versioned by
 // the edit that writes its text and by an upload of it, and is found by the words that open it
-// (LEGION-505). Before 0069 each version write failed with `string is too long for tsvector` and
+// (LEGION-505). Before 0071 each version write failed with `string is too long for tsvector` and
 // answered 500. The text is 1,000 paragraphs, 2,000 elements, so the vector is what fails, not the
 // document's own bounds. Settlement's own version write is the docs package's
 // TestSettlementVersionsADocumentPastTheSearchVectorLimit.
