@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -265,6 +266,130 @@ func TestSearchRanksTitleHitsAboveBodyHits(t *testing.T) {
 	}
 }
 
+// createSearchIssue files another issue in a project that already exists, past the duplicate-title
+// check, and returns its key.
+func createSearchIssue(t *testing.T, handler http.Handler, project, title, spec string) string {
+	t.Helper()
+	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]any{
+		"project": project, "title": title, "spec": spec, "force": true,
+	}, "alice")
+	if response.Code != http.StatusCreated {
+		t.Fatalf("create issue: status=%d body=%s", response.Code, response.Body.String())
+	}
+	return decodeBody[model.Issue](t, response).Key
+}
+
+// Each kind of content is ranked on its own list and the lists are merged by reciprocal rank
+// fusion, so a term every kind holds lists one row of each kind before a second of any, and rows
+// that score alike are ordered issue, document, ask, comment, message.
+func TestSearchFusesKindsRoundRobin(t *testing.T) {
+	handler := newTestHandler(t)
+	const spec = "The astrolabe measures altitude.\n"
+	keys := []string{
+		createInteractionIssue(t, handler, "SRCH", "Astrolabe survey", spec).Key,
+		createSearchIssue(t, handler, "SRCH", "Astrolabe survey", spec),
+	}
+	for _, key := range keys {
+		for path, body := range map[string]map[string]any{
+			"comments": {"body": "The astrolabe needs a new rete."},
+			"asks":     {"question": "Which astrolabe do we keep?", "options": []map[string]string{{"label": "Brass"}}},
+			"messages": {"body": "Astrolabe calibrated."},
+		} {
+			response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+key+"/"+path, body, "alice")
+			if response.Code != http.StatusCreated {
+				t.Fatalf("create %s: status=%d body=%s", path, response.Code, response.Body.String())
+			}
+		}
+	}
+
+	body := searchResponse(t, handler, "q=astrolabe")
+	kinds := make([]string, 0, len(body.Results))
+	for _, result := range body.Results {
+		kinds = append(kinds, result.Kind)
+	}
+	want := []string{"issue", "document", "ask", "comment", "message", "issue", "document", "ask", "comment", "message"}
+	if !slices.Equal(kinds, want) {
+		t.Fatalf("kinds = %v, want %v", kinds, want)
+	}
+	if body.Total != 10 || body.Reachable != 10 {
+		t.Fatalf("total=%d reachable=%d, want 10 and 10", body.Total, body.Reachable)
+	}
+}
+
+// An issue's key searched alone lists that issue first, though ts_rank_cd scores the key no
+// higher than the title of an issue created after it that cites it.
+func TestSearchListsAnIssueFirstForItsOwnKey(t *testing.T) {
+	handler := newTestHandler(t)
+	cited := createInteractionIssue(t, handler, "SRCH", "Navigation instruments", "")
+	citing := createSearchIssue(t, handler, "SRCH", cited.Key+" follow-up", "")
+
+	for _, query := range []string{cited.Key, strings.ToLower(cited.Key)} {
+		t.Run(query, func(t *testing.T) {
+			body := searchResponse(t, handler, url.Values{"q": {query}}.Encode())
+			if len(body.Results) != 2 {
+				t.Fatalf("results = %#v, want the cited and the citing issue", body.Results)
+			}
+			if body.Results[0].ID != cited.Key || body.Results[1].ID != citing {
+				t.Fatalf("results = %s then %s, want %s first", body.Results[0].ID, body.Results[1].ID, cited.Key)
+			}
+		})
+	}
+}
+
+// Each kind lists only its best contracts.SearchKindDepth matches: total counts every match and
+// reachable the rows the pages can return. Consecutive offsets walk those rows in one order, and
+// an offset past them answers no rows with the same counts.
+func TestSearchPagesTheFusedOrderAndCountsEveryMatch(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "SRCH", "Navigation", "")
+	for i := range contracts.SearchKindDepth + 1 {
+		response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/messages", map[string]any{
+			"body": fmt.Sprintf("Sextant reading %d.", i),
+		}, "alice")
+		if response.Code != http.StatusCreated {
+			t.Fatalf("create message %d: status=%d body=%s", i, response.Code, response.Body.String())
+		}
+	}
+
+	page := func(offset int) model.SearchResponse {
+		t.Helper()
+		body := searchResponse(t, handler, fmt.Sprintf("q=sextant&limit=50&offset=%d", offset))
+		if body.Total != contracts.SearchKindDepth+1 || body.Reachable != contracts.SearchKindDepth ||
+			body.Limit != 50 || body.Offset != offset {
+			t.Fatalf("offset %d: total=%d reachable=%d limit=%d offset=%d, want %d, %d, 50, %d",
+				offset, body.Total, body.Reachable, body.Limit, body.Offset,
+				contracts.SearchKindDepth+1, contracts.SearchKindDepth, offset)
+		}
+		return body
+	}
+	ids := func(results []model.SearchResult) []string {
+		out := make([]string, 0, len(results))
+		for _, result := range results {
+			out = append(out, result.ID)
+		}
+		return out
+	}
+
+	first, overlapping, second := page(0), page(25), page(50)
+	if len(first.Results) != 50 || len(second.Results) != 50 {
+		t.Fatalf("pages hold %d and %d results, want 50 each", len(first.Results), len(second.Results))
+	}
+	if !slices.Equal(ids(overlapping.Results[:25]), ids(first.Results[25:])) ||
+		!slices.Equal(ids(overlapping.Results[25:]), ids(second.Results[:25])) {
+		t.Fatal("offset 25 does not continue the order offsets 0 and 50 walk")
+	}
+	seen := map[string]bool{}
+	for _, id := range append(ids(first.Results), ids(second.Results)...) {
+		if seen[id] {
+			t.Fatalf("message %s is on both pages", id)
+		}
+		seen[id] = true
+	}
+	if past := page(contracts.SearchKindDepth); len(past.Results) != 0 {
+		t.Fatalf("offset %d results = %#v, want none", contracts.SearchKindDepth, past.Results)
+	}
+}
+
 func TestSearchFiltersByProjectAndHonoursLimit(t *testing.T) {
 	handler := newTestHandler(t)
 	first := createInteractionIssue(t, handler, "SRCH", "Astrolabe", "An astrolabe measures altitude.")
@@ -484,11 +609,13 @@ func TestSearchReturnsEmptyResultsForStopWordOnlyQueries(t *testing.T) {
 func TestSearchRejectsInvalidQueries(t *testing.T) {
 	handler := newTestHandler(t)
 	cases := map[string]string{
-		"q=a":                  "INVALID_QUERY",
-		"":                     "INVALID_QUERY",
-		"q=astrolabe&limit=0":  "INVALID_LIMIT",
-		"q=astrolabe&limit=51": "INVALID_LIMIT",
-		"q=astrolabe&limit=x":  "INVALID_LIMIT",
+		"q=a":                   "INVALID_QUERY",
+		"":                      "INVALID_QUERY",
+		"q=astrolabe&limit=0":   "INVALID_LIMIT",
+		"q=astrolabe&limit=51":  "INVALID_LIMIT",
+		"q=astrolabe&limit=x":   "INVALID_LIMIT",
+		"q=astrolabe&offset=-1": "INVALID_OFFSET",
+		"q=astrolabe&offset=x":  "INVALID_OFFSET",
 	}
 	for query, code := range cases {
 		t.Run(query, func(t *testing.T) {

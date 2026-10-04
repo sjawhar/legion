@@ -182,16 +182,24 @@ export const ASK_QUESTION_MAX = 800;
 
 /**
  * Longest `dispatch_search` query (`GET /api/v1/search`'s `q`, trimmed), in UTF-16 units. The
- * query rides in the URL beside `project` and `limit`, so this refusal and `project`'s key rule
- * are what keep the tool's URL under the load balancer's limit; `packages/contracts/AGENTS.md`
- * "Search limits" owns that budget. Generated into Go as `contracts.SearchQueryMax`, which the
- * server enforces.
+ * query rides in the URL beside `project`, `limit` and `offset`, so this refusal and `project`'s
+ * key rule are what keep the tool's URL under the load balancer's limit;
+ * `packages/contracts/AGENTS.md` "Search limits" owns that budget. Generated into Go as
+ * `contracts.SearchQueryMax`, which the server enforces.
  */
 export const SEARCH_QUERY_MAX = 1000;
 
 /** What a refusal over `SEARCH_QUERY_MAX` tells the caller to send instead; generated into Go
  *  as `contracts.SearchQueryHint`, so the tool and the server word it once. */
 export const SEARCH_QUERY_HINT = "search with a short phrase of a few words, not a passage";
+
+/**
+ * How many of its best matches each kind of content (issues, documents, asks, comments and
+ * messages) lists before `GET /api/v1/search` merges the kinds into one order. A kind's later
+ * matches count in the answer's `total` and no offset returns them. Generated into Go as
+ * `contracts.SearchKindDepth`, where the server cuts each kind's list.
+ */
+export const SEARCH_KIND_DEPTH = 100;
 
 /** A whole project key, as the Dispatch server creates them (`projectKeyPattern`, and the
  *  `projects.key` check constraint). */
@@ -994,7 +1002,11 @@ export const dispatchToolSpecs = [
     description:
       "Search every issue, document, comment, ask, and message for a keyword or phrase and get deep links. " +
       "Use it before creating an issue or a design document, and to find where a word was written. " +
-      'Websearch syntax: "quoted phrase", -excluded, OR.',
+      'Websearch syntax: "quoted phrase", -excluded, OR. ' +
+      "Each kind of content is ranked on its own and the lists are merged, so the top holds the best " +
+      "issue, document, ask, comment and message; an issue key searched alone lists that issue first. " +
+      `The answer names how many results match; offset pages through them, and each kind lists at most its best ${SEARCH_KIND_DEPTH}, ` +
+      "so narrow the query or name a project to reach the rest.",
     arguments: (z) => ({
       query: z
         .string({
@@ -1007,6 +1019,10 @@ export const dispatchToolSpecs = [
       limit: z
         .number({ int: true, min: 1, max: 50 })
         .describe("Maximum results, 1-50; default 20.")
+        .optional(),
+      offset: z
+        .number({ int: true, min: 0 })
+        .describe("Results to skip before the page; nonnegative integer; default 0.")
         .optional(),
     }),
     // An empty project searches every project, as the server reads it.

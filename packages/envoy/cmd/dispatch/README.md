@@ -457,22 +457,27 @@ limited to 1,000 characters. Search covers issue titles, the latest settled docu
 comments, asks (questions and free-text answers), and messages. Live document text takes up to
 the 2 s settle delay to appear in search results.
 
+Each kind of content is ranked on a list of its own, by `ts_rank_cd`, then recency, then id, and
+the five lists are merged by reciprocal rank fusion: a hit at position p of its list scores
+1/(60 + p), which is its `rank`. The page therefore takes each kind's best in turn, the best issue,
+document, ask, comment and message first, rather than a run of long documents that repeat the
+query's words. Hits that score alike are ordered issue, document, ask, comment, message, then by
+recency and id, so the order is total and consecutive `offset`s walk it once while the corpus holds
+still. An issue whose key is the whole query heads the issue list. Each list keeps its best
+`contracts.SearchKindDepth` (100) hits: the answer's `total` counts every match of every kind, and
+`reachable` the hits the pages can return, so an `offset` at or past `reachable` answers no hits
+with both counts.
+
 Search snippets are escaped text with only server-inserted `<mark>` elements around matches. Native
 issue creation rejects a title that near-duplicates an existing issue in the same project with
 `409 POSSIBLE_DUPLICATE` and up to five candidates; `force` bypasses that check, and external
 references skip it.
 
-To measure search latency against a restored corpus copy, run:
-
-```sh
-DISPATCH_ADMIN_URL='postgres://postgres:dispatch@127.0.0.1:55432/postgres?sslmode=disable' \
-  bash packages/envoy/scripts/restore-dispatch-dump.sh ~/dispatch.dump dispatch_search_bench
-DISPATCH_BENCH_DATABASE_URL='postgres://postgres:dispatch@127.0.0.1:55432/dispatch_search_bench?sslmode=disable' \
-  go test ./internal/dispatch/api/ -run TestSearchLatencyOnCorpus -count=1 -v
-```
-
-The restore script replaces only the named scratch database. Set `DISPATCH_ADMIN_URL` to point at
-the Postgres `postgres` database for a non-default local port.
+A ranking or latency change is measured on a restored copy of the production corpus:
+`packages/envoy/scripts/corpus-copy.sh` restores one, `search-smoke.sh` prints what a searcher
+sees for a list of queries from any build, and `search-latency-compare.sh` runs
+`TestSearchLatencyOnCorpus` from a base checkout and this one alternately and gates on the
+difference (`packages/envoy/scripts/README.md`, "Measuring search on a copy of the corpus").
 
 ## Routes
 
@@ -514,7 +519,7 @@ browser keeps no page from another build.
 | `/api/v1/users` | GET | cookie or trusted header (human only) | The sign-in allowlist as `{users: [{login}]}`, sorted lowercase — the assignee picker's options. |
 | `/api/v1/whoami` | GET | cookie, trusted header, or bearer | Who the server takes the caller for: `{kind: "user", login}` for a human, `{kind: "agent", owner, service}` for a bearer (`owner` is a personal token's lowercase login, null for the shared token; `service` is a verified service-account token's Kubernetes subject, null for every other bearer). |
 | `/api/v1/issues?project=&status=&parent=&priority=&updated_since=&route_status=&limit=&offset=` | GET | cookie, trusted header, or bearer | List issue summaries: every matching issue as an array, or, with `limit` (1–250) or `offset` (0 or more; alone it pages 50), one page `{issues, total, limit, offset}` cut after every filter, `total` counting the issues they match. A repeated, blank, non-integer or out-of-range `limit` or `offset`, or any `cursor`, is `400 INVALID_QUERY` naming the parameter. The order is status, rank, creation time and key, so consecutive offsets cover the listing once while it does not change between reads; an issue that enters or leaves what the filters match, or whose status or rank changes, between two reads shifts rows across a page boundary, so one issue is served twice and another never. Only the unpaged array is an exact set in one read. Filters are optional; `updated_since` is RFC3339 and inclusive, matching issue changes and later issue events. `priority` repeats (`priority=0&priority=1`), each value `0`–`3` or `none` for an issue with no priority; any other value is `400 INVALID_PRIORITY`. `route_status` (`live`, `no_holder` or `unknown`; anything else is `400 INVALID_ROUTE_STATUS`) keeps the open issues whose route is in that state, whatever their priority; `live` or `no_holder` is `503 ENVOY_UNAVAILABLE` when the listener does not answer. Summaries contain `key`, `title`, `status`, `priority`, `parent`, `assignee`, `route`, `route_status`, `route_holder`, `updated_at`, `last_seq`, and `open_asks`. Every issue read (this list, `?pinned=true`, and `GET /api/v1/issues/{key}`) resolves `route_status` from one listener `GET /v1/sessions` per request, stored nowhere: `live` (a live session holds the role, or the session is live; `route_holder` names it), `no_holder` (nobody live holds the role, or the session is not live), `unknown` (the listener did not answer), or null with no route. |
-| `/api/v1/search?q=&project=&limit=` | GET | cookie, trusted header, or bearer | Full-text search over issue titles, latest document text, comments, asks, and messages; ranked results with `<mark>` snippets and SPA `href`s; `limit` 1–50 (default 20). An under-two-character query returns `400 INVALID_QUERY`; a stop-word-only query returns `200` with no results; `400 CAP_EXCEEDED` over 1,000 characters (`contracts.SearchQueryMax`, UTF-16 units after trimming), since the query rides in the URL; `400 INVALID_PROJECT` for a project that is not a project key (none searches every project); `400 INVALID_LIMIT`. |
+| `/api/v1/search?q=&project=&limit=&offset=` | GET | cookie, trusted header, or bearer | Full-text search over issue titles, latest document text, comments, asks, and messages; each kind ranked on its own and merged by reciprocal rank fusion (above), with `<mark>` snippets and SPA `href`s. One page `{results, total, reachable, limit, offset, took_ms}`: `limit` 1–50 (default 20), `offset` 0 or more (default 0), `total` every match, `reachable` the hits the pages can return (each kind's best 100). An under-two-character query returns `400 INVALID_QUERY`; a stop-word-only query returns `200` with no results; `400 CAP_EXCEEDED` over 1,000 characters (`contracts.SearchQueryMax`, UTF-16 units after trimming), since the query rides in the URL; `400 INVALID_PROJECT` for a project that is not a project key (none searches every project); `400 INVALID_LIMIT`; `400 INVALID_OFFSET`. |
 | `/api/v1/issues/{key}/references` | GET | cookie, trusted header, or bearer | Read the issue's eight-hop artifact reference closure. An `If-None-Match` value equal to the response ETag returns `304`. |
 | `/api/v1/references?to=\|from=&kind=&since=` | GET | cookie, trusted header, or bearer | Edges of one node in the reference graph, newest first and cross-project: exactly one of `to` (backlinks) or `from` (links), each a `dispatch://` reference; `kind` filters a csv of edge kinds; `since=<events.id>` keeps mentions introduced after it (structural edges excluded). Each edge carries the other `node`, an `excerpt` (the containing block for a document mention), `created_at`, and `source_seq`. `400 INVALID_REFERENCE` / `INVALID_KIND` / `INVALID_SINCE`; `404` for a node that does not exist. |
 | `/api/v1/issues` | POST | cookie, trusted header, or bearer | Create an issue and its primary document. Omitting or leaving `spec` blank gives an empty primary document at version 1. Refuses a title that near-duplicates an issue in the project with `409 POSSIBLE_DUPLICATE` and candidates unless `force` is true; external references skip the check. A spec whose ask block breaks its content rule (`paragraph+ bullet_list?`: one or more paragraphs, then at most one bullet list, last) is `400 INVALID_ASK_BLOCK`. |
