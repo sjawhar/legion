@@ -309,3 +309,53 @@ describe("stage 4b's verdict line", () => {
     });
   }
 });
+
+// The tree-separation checkpoint reads whether tree 2's planner held from on_tree's exit status
+// (`if left=$(on_tree "$tree2" left_planning "$tree2")`), so the wrapper must give back the
+// command's status and not its own capacity_subject restore, which would report every tree as one
+// that left planning, with an empty reason.
+describe("stage 4b's tree-2 planner hold", () => {
+  const phaseChanged = (issue: string, from: string, to: string, time: string) => ({
+    time,
+    level: "INFO",
+    msg: "workflow: phase changed",
+    issue,
+    tree: issue,
+    from,
+    to,
+  });
+  // holdVerdict is what the checkpoint concludes from a daemon log holding LINES.
+  const holdVerdict = (lines: object[]) => {
+    const log = join(dir, `daemon-${++runs}.log`);
+    writeFileSync(log, `${lines.map((line) => JSON.stringify(line)).join("\n")}\n`);
+    const result = Bun.spawnSync([
+      "bash",
+      "-c",
+      `set -Eeuo pipefail
+daemon_log=${JSON.stringify(log)} capacity_subject=
+${fn("log_lines")}
+${fn("left_planning")}
+${fn("on_subject")}
+${fn("on_tree")}
+if left=$(on_tree T2 left_planning T2); then echo "left planning ($left)"; else echo held; fi
+`,
+    ]);
+    expect(result.exitCode).toBe(0);
+    return result.stdout.toString().trim();
+  };
+
+  test("is held for a planner the daemon never took out of planning", () => {
+    expect(holdVerdict([phaseChanged("T2", "admitted", "planning", "2026-10-04T18:47:12Z")])).toBe(
+      "held"
+    );
+  });
+
+  test("names the daemon's own line for a planner that left planning", () => {
+    expect(
+      holdVerdict([
+        phaseChanged("T2", "admitted", "planning", "2026-10-04T18:47:12Z"),
+        phaseChanged("T2", "planning", "implementing", "2026-10-04T19:02:06Z"),
+      ])
+    ).toBe('left planning ({"time":"2026-10-04T19:02:06Z","to":"implementing"})');
+  });
+});

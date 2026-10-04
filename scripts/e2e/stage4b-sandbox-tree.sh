@@ -308,13 +308,16 @@ limit_pending() {
 capacity_subject=
 # on_subject SELECTOR CMD... runs CMD, a wait (until_true, or a helper that waits) whose progress
 # needs the run's pods matching SELECTOR placed, with SELECTOR as the subject limit_pending_blocked
-# asks about if it times out. on_tree TREE CMD... is the same for TREE's pods.
+# asks about if it times out. on_tree TREE CMD... is the same for TREE's pods. CMD's own exit status
+# is the wrapper's, since a check reads its verdict from it (the tree-2 planner hold).
 on_subject() {
-  local previous=$capacity_subject
+  local previous=$capacity_subject status
   capacity_subject=$1
   shift
   "$@"
+  status=$?
   capacity_subject=$previous
+  return "$status"
 }
 on_tree() {
   local tree=$1
