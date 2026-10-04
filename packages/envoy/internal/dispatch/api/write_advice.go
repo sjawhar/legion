@@ -34,6 +34,13 @@ type writeAdvice struct {
 	Suggestions *model.Suggestions `json:"suggestions,omitempty"`
 }
 
+// suggestionsOnlyAdvice is the advice of a write with no issue state to report: an ask on an
+// unlinked project document, which has no issue status, no writes-since-human count and no
+// issue-scoped open-ask list, but does get LEGION-550's suggestions.
+type suggestionsOnlyAdvice struct {
+	Suggestions *model.Suggestions `json:"suggestions"`
+}
+
 type adviceQueryError struct {
 	query string
 	err   error

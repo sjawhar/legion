@@ -564,15 +564,20 @@ issue creation rejects a title that near-duplicates an existing issue in the sam
 `409 POSSIBLE_DUPLICATE` and up to five candidates; `force` bypasses that check, and external
 references skip it.
 
-`POST /api/v1/issues` and `POST /api/v1/issues/{key}/asks` also return, under `advice.suggestions`
-and never blocking or slowing the write past `writeSuggestionTimeout` (300ms), the three fused
-search hits most like what was just filed (`related`) and, when an already-answered ask settles
-the same question, that decision with who answered and when (`decision`); `missing` says why
-search did not answer in time instead of listing anything (LEGION-550). Every suggestion offered
-is recorded in `write_suggestions`, whose `outcome` the daemon's outcome sweep
-(`api.RunSuggestionOutcomeSweep`, every `SuggestionSweepInterval`) advances from `ignored` to
-`acted_on` (the suggested item was cited from the source issue, or updated directly) or
-`overridden` (the source issue got further activity instead) — a count of how often the
+`POST /api/v1/issues`, `POST /api/v1/issues/{key}/asks` and `POST /api/v1/artifacts/{id}/asks`
+also return, under `advice.suggestions` and never blocking or slowing the write past
+`writeSuggestionTimeout` (300ms), the three fused search hits most like what was just filed
+(`related`) and, when an already-answered ask settles the same question, that decision with who
+answered and when (`decision`); `missing` says why search did not answer in time instead of
+listing anything (LEGION-550). The search is scoped to the write's own project, and leaves out
+everything its owner holds — the new issue and its spec, or the issue or project document an ask
+sits on and everything inside it — so nothing is ever suggested that the writer already has.
+A hit on an issue that is `done` ranks below every hit on an open owner, since keyword search
+otherwise puts an issue already closed as a duplicate above the open issue it was closed into.
+Every suggestion offered is recorded in `write_suggestions`, whose `outcome` the daemon's outcome
+sweep (`api.RunSuggestionOutcomeSweep`, every `SuggestionSweepInterval`) advances from `ignored`
+to `acted_on` (the suggested item was cited from the source, or the suggested issue was updated
+directly) or `overridden` (the source got further activity instead) — a count of how often the
 suggestion was right, without refusing anything on its strength.
 
 A ranking or latency change is measured on a restored copy of the production corpus:

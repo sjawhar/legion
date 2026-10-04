@@ -119,7 +119,7 @@ func (s *server) routes() []apiRoute {
 		{http.MethodPatch, "/api/v1/comments/{id}", authHuman, "Edit a comment's body.", s.editComment},
 		{http.MethodPost, "/api/v1/comments/{id}/reject", authHuman, "Reject a suggestion.", s.rejectComment},
 		{http.MethodGet, "/api/v1/artifacts/{id}/asks", authAny, "List a document's asks.", s.listArtifactAsks},
-		{http.MethodPost, "/api/v1/artifacts/{id}/asks", authAny, "Open an ask on a document.", s.createArtifactAsk},
+		{http.MethodPost, "/api/v1/artifacts/{id}/asks", authAny, "Open an ask on a document. The response's advice.suggestions names any already-answered ask that may settle the same question, searched within the document's project, without ever blocking or slowing the write.", s.createArtifactAsk},
 		{http.MethodGet, "/api/v1/artifacts/{id}/comments", authAny, "List a document's comments.", s.listArtifactComments},
 		{http.MethodPost, "/api/v1/artifacts/{id}/comments", authAny, "Comment on a document or one of its quotes.", s.createArtifactComment},
 		{http.MethodGet, "/api/v1/artifacts/{id}/events", authAny, "Page a document's event log.", s.listArtifactEvents},

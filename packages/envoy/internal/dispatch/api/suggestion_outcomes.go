@@ -36,22 +36,25 @@ const SuggestionSweepInterval = time.Minute
 // indexes a body, so no separate instrumentation of those write paths is needed here.
 const suggestionActedOnByCitation = `
 with pending as (
-  select id, source_issue_key, suggested_kind, suggested_id, created_at
+  select id, source_issue_key, source_artifact_id, suggested_kind, suggested_id, created_at
     from write_suggestions
    where outcome = 'ignored'
 )
 update write_suggestions ws
    set outcome = 'acted_on', outcome_at = now(),
-       outcome_detail = 'cited from a ' || c.from_kind || ' on the source issue'
+       outcome_detail = 'cited from a ' || c.from_kind || ' on the source'
   from pending p
   join lateral (
     select r.from_kind
       from refs r
      where r.to_kind = p.suggested_kind and r.to_id = p.suggested_id and r.created_at > p.created_at
        and (
-         (r.from_kind = 'artifact' and exists(select 1 from artifacts a where a.id::text = r.from_id and a.issue_key = p.source_issue_key))
-         or (r.from_kind = 'ask' and exists(select 1 from asks k where k.id::text = r.from_id and k.issue_key = p.source_issue_key))
-         or (r.from_kind = 'comment' and exists(select 1 from comments c2 where c2.id::text = r.from_id and c2.issue_key = p.source_issue_key))
+         (r.from_kind = 'artifact' and exists(select 1 from artifacts a where a.id::text = r.from_id
+            and (a.issue_key = p.source_issue_key or a.id = p.source_artifact_id)))
+         or (r.from_kind = 'ask' and exists(select 1 from asks k where k.id::text = r.from_id
+            and (k.issue_key = p.source_issue_key or k.artifact_id = p.source_artifact_id)))
+         or (r.from_kind = 'comment' and exists(select 1 from comments c2 where c2.id::text = r.from_id
+            and (c2.issue_key = p.source_issue_key or c2.artifact_id = p.source_artifact_id)))
          or (r.from_kind = 'message' and exists(select 1 from messages m where m.id::text = r.from_id and m.issue_key = p.source_issue_key))
        )
      limit 1
@@ -73,14 +76,19 @@ update write_suggestions ws
    set outcome = 'acted_on', outcome_at = now(),
        outcome_detail = 'the suggested issue was updated directly'
   from pending p
+  -- A lateral with LIMIT, not a bare EXISTS: the planner flattens an EXISTS here into a semi
+  -- join and hashes the whole events table (measured on a seeded copy: a sequential scan of
+  -- 1,000,000 rows, 784 ms, where this shape is single-digit ms), since its estimate follows
+  -- events' size rather than the handful of pending rows the join actually probes with.
+  join lateral (
+    select 1 from events e
+     where e.issue_key = p.suggested_issue_key
+       and e.created_at > p.created_at
+       and e.actor ->> 'kind' = p.actor_kind
+       and e.actor ->> 'id' = p.actor_id
+     limit 1
+  ) touched on true
  where ws.id = p.id
-   and exists (
-     select 1 from events e
-      where e.issue_key = p.suggested_issue_key
-        and e.created_at > p.created_at
-        and e.actor ->> 'kind' = p.actor_kind
-        and e.actor ->> 'id' = p.actor_id
-   )
 `
 
 // suggestionOverridden marks 'overridden' every suggestion still pending after both acted_on
@@ -91,22 +99,28 @@ update write_suggestions ws
 // satisfies "created_at > ws.created_at" on its own.
 const suggestionOverridden = `
 with pending as (
-  select id, source_issue_key, actor_kind, actor_id, created_at
+  select id, source_issue_key, source_artifact_id, actor_kind, actor_id, created_at
     from write_suggestions
    where outcome = 'ignored'
 )
 update write_suggestions ws
    set outcome = 'overridden', outcome_at = now(),
-       outcome_detail = 'further activity on the source issue did not address the suggestion'
+       outcome_detail = 'further activity on the source did not address the suggestion'
   from pending p
  where ws.id = p.id
-   and exists (
+   and (exists (
      select 1 from events e
       where e.issue_key = p.source_issue_key
         and e.created_at > p.created_at
         and e.actor ->> 'kind' = p.actor_kind
         and e.actor ->> 'id' = p.actor_id
-   )
+   ) or exists (
+     select 1 from events e
+      where e.artifact_id = p.source_artifact_id
+        and e.created_at > p.created_at
+        and e.actor ->> 'kind' = p.actor_kind
+        and e.actor ->> 'id' = p.actor_id
+   ))
 `
 
 // sweepSuggestionOutcomes runs one pass of all three resolution rules, in the order that lets

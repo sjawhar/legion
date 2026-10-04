@@ -1,8 +1,10 @@
 package api
 
 import (
+	"cmp"
 	"context"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 
@@ -55,14 +57,39 @@ func suggestionQuery(text string) string {
 }
 
 // suggestionSource identifies what a set of suggestions was offered for: a newly created issue,
-// or a newly created ask inside one (an ask on an unlinked project document has no issue to
-// resolve activity against and is out of scope for now — computeSuggestionsForIssue is never
-// called for one).
+// or a newly created ask on an issue or on an unlinked project document. Exactly one of issueKey
+// and artifactID is set.
 type suggestionSource struct {
-	kind     string // "issue" or "ask"
-	issueKey string
-	askID    string // empty for an issue source
-	actor    model.Actor
+	kind       string // "issue" or "ask"
+	issueKey   string
+	artifactID string // an ask on an unlinked project document
+	askID      string // empty for an issue source
+	actor      model.Actor
+}
+
+// owns reports whether result is the source itself or anything its owner holds: the new issue, or
+// the issue or project document the new ask sits on, and everything inside that owner (its spec,
+// its other asks, comments and messages). Each is the best match for the source's own words, so
+// suggesting one says nothing, and acting on it (a reply on the ask's own issue) must never count
+// as acting on a suggestion.
+func (source suggestionSource) owns(result model.SearchResult) bool {
+	if source.askID != "" && result.Kind == "ask" && result.ID == source.askID {
+		return true
+	}
+	if source.issueKey != "" {
+		return (result.Kind == "issue" && result.ID == source.issueKey) ||
+			(result.Owner.Kind == "issue" && result.Owner.Key == source.issueKey)
+	}
+	return (result.Kind == "document" && result.ID == source.artifactID) ||
+		(result.Owner.Kind == "document" && result.Owner.ArtifactID == source.artifactID)
+}
+
+// closedOwner reports whether result belongs to an issue that is done. Keyword search ranks an
+// issue already closed as a duplicate above the open issue it was closed into whenever its words
+// are closer to the new filing's, which they often are (a duplicate restates the bug the way the
+// next duplicate will); the open issue is the one an agent can act on.
+func closedOwner(result model.SearchResult) bool {
+	return result.Owner.Kind == "issue" && result.Owner.Status == "done"
 }
 
 // computeSuggestions runs LEGION-550's write-time feedback over project: the fused search
@@ -72,15 +99,12 @@ type suggestionSource struct {
 // the create route already refuses, or an ask with a blank question) returns nil rather than
 // searching for nothing.
 //
-// excludeKind/excludeID keep the just-written row itself out of its own suggestions, since the
-// transaction that created it already made it the newest, best-scoring match for its own words.
-// excludeIssueKey, set only for an issue creation, additionally excludes every other item the
-// new issue owns (its own seeded spec foremost): an issue's primary document is written and
-// indexed in the same transaction as the issue, so without this a new issue's own spec is
-// "related" to the issue it is the spec of. An ask's own question is never also stored as a
-// document, so ask creation passes "" here.
+// Everything source owns is left out (suggestionSource.owns). Related takes the best
+// suggestionRelatedCount of the rest with every hit on an open owner ahead of every hit on a done
+// issue, keeping the search's order within each; Decision is the first answered ask in that same
+// order.
 func (s *server) computeSuggestions(
-	ctx context.Context, project, text, excludeKind, excludeID, excludeIssueKey string,
+	ctx context.Context, project, text string, source suggestionSource,
 ) *model.Suggestions {
 	searchText := suggestionQuery(text)
 	if searchText == "" {
@@ -98,26 +122,26 @@ func (s *server) computeSuggestions(
 		return &model.Suggestions{Missing: reason}
 	}
 
-	suggestions := &model.Suggestions{Related: []model.WriteSuggestion{}}
+	var candidates []model.SearchResult
 	var askIDs []string
 	for _, result := range response.Results {
-		if result.Kind == excludeKind && result.ID == excludeID {
+		if source.owns(result) {
 			continue
 		}
-		if excludeIssueKey != "" &&
-			((result.Kind == "issue" && result.ID == excludeIssueKey) ||
-				(result.Owner.Kind == "issue" && result.Owner.Key == excludeIssueKey)) {
-			continue
-		}
-		if len(suggestions.Related) < suggestionRelatedCount {
-			suggestions.Related = append(suggestions.Related, suggestionFromResult(result))
-		}
+		candidates = append(candidates, result)
 		if result.Kind == "ask" {
 			askIDs = append(askIDs, result.ID)
 		}
 	}
+	slices.SortStableFunc(candidates, func(a, b model.SearchResult) int {
+		return cmp.Compare(boolRank(closedOwner(a)), boolRank(closedOwner(b)))
+	})
+	suggestions := &model.Suggestions{Related: []model.WriteSuggestion{}}
+	for _, result := range candidates[:min(len(candidates), suggestionRelatedCount)] {
+		suggestions.Related = append(suggestions.Related, suggestionFromResult(result))
+	}
 	if len(askIDs) > 0 {
-		decision, err := s.firstAnsweredAsk(ctx, askIDs, response.Results)
+		decision, err := s.firstAnsweredAsk(ctx, askIDs, candidates)
 		if err != nil {
 			slog.Warn("dispatch: decision suggestion omitted", "error", err)
 		} else {
@@ -125,6 +149,13 @@ func (s *server) computeSuggestions(
 		}
 	}
 	return suggestions
+}
+
+func boolRank(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 func suggestionFromResult(result model.SearchResult) model.WriteSuggestion {
@@ -218,19 +249,21 @@ func (s *server) persistSuggestions(ctx context.Context, source suggestionSource
 	if suggestions.Decision != nil {
 		rows = append(rows, row{role: "decision", rank: 0, item: *suggestions.Decision})
 	}
-	for _, r := range rows {
-		var askID any
-		if source.askID != "" {
-			askID = source.askID
+	nullable := func(value string) any {
+		if value == "" {
+			return nil
 		}
+		return value
+	}
+	for _, r := range rows {
 		if _, err := s.deps.Store.Pool.Exec(ctx, `
 			insert into write_suggestions
-				(source_kind, source_issue_key, source_ask_id, actor_kind, actor_id, role, rank,
-				 suggested_kind, suggested_id, suggested_issue_key)
-			values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+				(source_kind, source_issue_key, source_artifact_id, source_ask_id, actor_kind, actor_id,
+				 role, rank, suggested_kind, suggested_id, suggested_issue_key)
+			values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		`,
-			source.kind, source.issueKey, askID, source.actor.Kind, source.actor.ID, r.role, r.rank,
-			r.item.Kind, r.item.ID, suggestedIssueKey(r.item),
+			source.kind, nullable(source.issueKey), nullable(source.artifactID), nullable(source.askID),
+			source.actor.Kind, source.actor.ID, r.role, r.rank, r.item.Kind, r.item.ID, suggestedIssueKey(r.item),
 		); err != nil {
 			slog.Warn("dispatch: write suggestion not recorded", "error", err)
 		}

@@ -4,16 +4,21 @@
 
 ### Added
 
-- `POST /api/v1/issues` and `POST /api/v1/issues/{key}/asks` now return `advice.suggestions`: the
-  three fused search hits (sjawhar/legion#1764) most like what was just filed, and, for an ask,
-  any already-answered ask that settles the same question, with who answered and when. Search
-  runs after the write has already committed, bounded by `writeSuggestionTimeout` (300ms), so a
-  slow or down search never holds up or refuses a write; `suggestions.missing` says why instead.
-  Every offered suggestion is recorded in a new `write_suggestions` table, whose `outcome` the new
-  `api.RunSuggestionOutcomeSweep` background loop (every `SuggestionSweepInterval`, 2s) advances
-  from `ignored` to `acted_on` (the suggested item was cited from the source issue, or updated
-  directly) or `overridden` (the source issue instead got further activity), so how often the
-  suggestion was right can be counted later (LEGION-550).
+- `POST /api/v1/issues`, `POST /api/v1/issues/{key}/asks` and `POST /api/v1/artifacts/{id}/asks`
+  now return `advice.suggestions`: the three fused search hits (sjawhar/legion#1764) most like
+  what was just filed, and, for an ask, any already-answered ask that settles the same question,
+  with who answered and when. Search runs after the write has already committed, scoped to the
+  write's own project and bounded by `writeSuggestionTimeout` (300ms), so a slow or down search
+  never holds up or refuses a write; `suggestions.missing` says why instead. Everything the
+  write's owner holds is left out (the new issue and its spec; the issue or project document an
+  ask sits on and everything inside it), and a hit on an issue that is `done` ranks below every
+  hit on an open owner, so an issue already closed as a duplicate never displaces the open issue
+  it was closed into. Every offered suggestion is recorded in a new `write_suggestions` table,
+  whose `outcome` the new `api.RunSuggestionOutcomeSweep` background loop (every
+  `SuggestionSweepInterval`, a minute) advances from `ignored` to `acted_on` (the suggested item
+  was cited from the source, or the suggested issue was updated directly) or `overridden` (the
+  source instead got further activity), so how often the suggestion was right can be counted
+  later (LEGION-550).
 - `DISPATCH_ASSET_STORE_BUCKET` lets Dispatch serve a missing, content-hashed `/assets/*` file from the same key (`assets/<file>`) in a retained-assets bucket, so a tab left open across a deploy keeps loading its build's chunks. Dispatch reads the whole object, at most 8 MiB, within three seconds before it answers, keeps the immutable cache contract on a hit, and never serves a page or non-asset path from the bucket. An absent object is still a 404; any other store failure, a short body or an object over the limit included, is a 502 with no cache header, logged at ERROR with its key. At most 64 MiB of retained objects are held at once, since a client that stops reading keeps its object in memory: a request waits within its three seconds for room, so a stale tab's burst of chunks is served in turn, and one that cannot get room in time, or whose admitted fetch then runs out of that same bound before the bucket answers, is a 503 with `Cache-Control: no-store` and `Retry-After: 1`, logged at WARN with its key — the shared bound expiring is never presented as a store failure, since the store was only asked too late to answer in time — and a room refusal asks the bucket nothing. A client that disconnects while still queued for room logs no more than a debug line and gets no response. The task role needs `s3:GetObject` on `assets/*` and `s3:ListBucket` on the bucket, without which S3 answers a missing key with 403 and Dispatch with 502. Leaving the setting unset preserves local-only static serving.
 - `DISPATCH_AGENT_TOKEN` takes several values separated by whitespace, the first the current one, so the shared agent token can rotate with an overlap: the HTTP API and the document websocket accept every value, comparing a bearer with each in constant time. Startup refuses an empty entry (two whitespace characters in a row) or a repeated one, naming its position and never its value; one value behaves as before. A request that authenticates with a value after the first logs `dispatch: request authenticated with a previous shared agent token` at WARN, with the value's position, the rightmost `X-Forwarded-For` address (the connection's own without one), the User-Agent and the path, at most once per address and User-Agent every 10 minutes (LEGION-538).
 - `envoy-dispatch settings` prints every Dispatch setting the server and its subcommands read, one row each with its `_FILE` form, default, whether it is required and a one-line description, from one table (`cmd/dispatch/settings.go`) that is now the only place Dispatch's own code reads its environment; the docs site's Dispatch configuration reference is generated from it. The libraries Dispatch links still read their own variables (`HOME`, libpq's `PG*`, Go's proxy, certificate and runtime variables), which the table does not list. Every setting resolves as before, the `envoy.json` overrides and `_FILE` forms included; the readers that used to call `os.Getenv` themselves (the dashboard directory, the GitHub App credentials, the signing key and insecure-cookie flag, the `envoy.json` overrides, the Envoy listener token, and NATS's reach and nkey) are handed their value from the table.

@@ -6,17 +6,21 @@
 -- One row per suggested item (up to suggestionRelatedCount "related" rows plus at most one
 -- "decision" row) offered on one write. outcome starts 'ignored' and is advanced in place by
 -- the outcome sweep (api.RunSuggestionOutcomeSweep): to 'acted_on' when a later write cites the
--- suggested item from the source issue, or writes directly to the suggested issue, by the same
--- actor; to 'overridden' when the source issue instead gets further activity from that actor
--- with neither signal. A row that never sees either stays 'ignored', which also carries "nobody
--- has reacted yet" for a suggestion too recent to judge.
+-- suggested item from the source (the issue, or the project document an ask sits on), or writes
+-- directly to the suggested issue, by the same actor; to 'overridden' when the source instead
+-- gets further activity from that actor with neither signal. A row that never sees either stays
+-- 'ignored', which also carries "nobody has reacted yet" for a suggestion too recent to judge.
 create table write_suggestions (
   id uuid primary key default gen_random_uuid(),
   created_at timestamptz not null default now(),
   source_kind text not null check (source_kind in ('issue', 'ask')),
-  source_issue_key text not null references issues(key) on delete cascade,
+  -- Where the source lives: its issue, or for an ask on an unlinked project document, that document.
+  source_issue_key text references issues(key) on delete cascade,
+  source_artifact_id uuid references artifacts(id) on delete cascade,
+  check (num_nonnulls(source_issue_key, source_artifact_id) = 1),
   source_ask_id uuid references asks(id) on delete cascade,
   check ((source_kind = 'ask') = (source_ask_id is not null)),
+  check (source_kind = 'ask' or source_issue_key is not null),
   actor_kind text not null,
   actor_id text not null,
   role text not null check (role in ('related', 'decision')),

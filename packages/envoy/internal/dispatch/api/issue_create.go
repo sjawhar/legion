@@ -355,9 +355,10 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 	// already rare and logged, and losing suggestions alongside it is an accepted trade (see the
 	// PR's hardening ledger).
 	if advice != nil {
-		suggestions := s.computeSuggestions(r.Context(), input.Project, input.Title+"\n"+markdown, "issue", key, key)
+		source := suggestionSource{kind: "issue", issueKey: key, actor: actor}
+		suggestions := s.computeSuggestions(r.Context(), input.Project, input.Title+"\n"+markdown, source)
 		advice.Suggestions = suggestions
-		s.persistSuggestions(r.Context(), suggestionSource{kind: "issue", issueKey: key, actor: actor}, suggestions)
+		s.persistSuggestions(r.Context(), source, suggestions)
 	}
 	WriteJSON(w, http.StatusCreated, withAdvice(issue, advice))
 }

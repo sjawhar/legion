@@ -173,12 +173,120 @@ func TestComputeSuggestionsReportsMissingWhenSearchTimesOut(t *testing.T) {
 	defer cancel()
 	<-expired.Done()
 
-	suggestions := srv.computeSuggestions(expired, "ANY", "a title that would otherwise search", "issue", "ANY-1", "ANY-1")
+	suggestions := srv.computeSuggestions(expired, "ANY", "a title that would otherwise search",
+		suggestionSource{kind: "issue", issueKey: "ANY-1"})
 	if suggestions == nil || suggestions.Missing == "" {
 		t.Fatalf("suggestions = %+v, want Missing set when the search context is already done", suggestions)
 	}
 	if len(suggestions.Related) != 0 || suggestions.Decision != nil {
 		t.Fatalf("suggestions = %+v, want nothing related or decided when search could not run", suggestions)
+	}
+}
+
+func createSuggestionIssue(t *testing.T, handler http.Handler, body map[string]any) string {
+	t.Helper()
+	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", body, "alice")
+	if response.Code != http.StatusCreated {
+		t.Fatalf("create issue %v: status=%d body=%s", body["title"], response.Code, response.Body.String())
+	}
+	return decodeBody[testIssueWithSuggestions](t, response).Key
+}
+
+func relatedIndex(related []testSuggestionItem, issueKey string) int {
+	for i, item := range related {
+		if item.Kind == "issue" && item.ID == issueKey {
+			return i
+		}
+	}
+	return -1
+}
+
+// TestCreateIssueSuggestsTheOpenSurvivorAboveAClosedDuplicate is the live run's case: an issue
+// already closed as a duplicate shares the new issue's exact title, so keyword search ranks it
+// above the open issue it was closed into. The open issue is the one to act on, so it comes first.
+func TestCreateIssueSuggestsTheOpenSurvivorAboveAClosedDuplicate(t *testing.T) {
+	handler := newTestHandler(t)
+	createSuggestionProject(t, handler, "SURV")
+	survivor := createSuggestionIssue(t, handler, map[string]any{
+		"project": "SURV", "title": "CSV export hangs for billing accounts with many invoices",
+	})
+	const restated = "Billing account page export to CSV never completes above fifty thousand invoices"
+	closed := createSuggestionIssue(t, handler, map[string]any{"project": "SURV", "title": restated, "force": true})
+	if response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+closed, map[string]any{"status": "done"}, "alice"); response.Code != http.StatusOK {
+		t.Fatalf("close %s: status=%d body=%s", closed, response.Code, response.Body.String())
+	}
+
+	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]any{
+		"project": "SURV", "title": restated, "force": true,
+	}, "alice")
+	created := decodeBody[testIssueWithSuggestions](t, response)
+	if created.Advice == nil || created.Advice.Suggestions == nil {
+		t.Fatalf("advice.suggestions missing: %s", response.Body.String())
+	}
+	related := created.Advice.Suggestions.Related
+	open, done := relatedIndex(related, survivor), relatedIndex(related, closed)
+	if open < 0 || (done >= 0 && done < open) {
+		t.Fatalf("related = %+v, want the open %s ahead of the closed %s", related, survivor, closed)
+	}
+}
+
+// TestCreateAskExcludesItsOwnIssue: an ask's own issue, and everything it owns, is never among the
+// ask's suggestions, so a reply on that issue can never be counted as acting on one.
+func TestCreateAskExcludesItsOwnIssue(t *testing.T) {
+	handler := newTestHandler(t)
+	createSuggestionProject(t, handler, "OWN")
+	own := createSuggestionIssue(t, handler, map[string]any{
+		"project": "OWN", "title": "Choose a transport for the billing service public API",
+		"spec": "The billing service public API needs a transport: REST or GraphQL.",
+	})
+	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+own+"/asks", map[string]any{
+		"question": "Should the billing service public API use REST or GraphQL?",
+	}, "alice")
+	if response.Code != http.StatusCreated {
+		t.Fatalf("open ask: status=%d body=%s", response.Code, response.Body.String())
+	}
+	created := decodeBody[testAskWithSuggestions](t, response)
+	if created.Advice == nil || created.Advice.Suggestions == nil {
+		t.Fatalf("advice.suggestions missing: %s", response.Body.String())
+	}
+	for _, item := range created.Advice.Suggestions.Related {
+		if item.ID == own || item.Owner.Key == own {
+			t.Fatalf("related = %+v, want nothing owned by the ask's own issue %s", created.Advice.Suggestions.Related, own)
+		}
+	}
+}
+
+// TestCreateAskOnProjectDocumentSuggests: an ask on an unlinked project document gets suggestions
+// too, searched within that document's project.
+func TestCreateAskOnProjectDocumentSuggests(t *testing.T) {
+	handler := newTestHandler(t)
+	createSuggestionProject(t, handler, "PDOC")
+	match := createSuggestionIssue(t, handler, map[string]any{
+		"project": "PDOC", "title": "Pick a transport for the billing service public API",
+	})
+	uploaded := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects/PDOC/artifacts", map[string]any{
+		"name": "roadmap.md", "content": "# Roadmap\n\nPlanning notes.\n",
+	}, "alice")
+	if uploaded.Code != http.StatusCreated && uploaded.Code != http.StatusOK {
+		t.Fatalf("upload project document: status=%d body=%s", uploaded.Code, uploaded.Body.String())
+	}
+	document := decodeBody[struct {
+		Artifact struct {
+			ID string `json:"id"`
+		} `json:"artifact"`
+	}](t, uploaded)
+	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+document.Artifact.ID+"/asks", map[string]any{
+		"question": "Should the billing service public API use REST or GraphQL?",
+	}, "alice")
+	if response.Code != http.StatusCreated {
+		t.Fatalf("open document ask: status=%d body=%s", response.Code, response.Body.String())
+	}
+	created := decodeBody[testAskWithSuggestions](t, response)
+	if created.Advice == nil || created.Advice.Suggestions == nil {
+		t.Fatalf("advice.suggestions missing on a project-document ask: %s", response.Body.String())
+	}
+	if relatedIndex(created.Advice.Suggestions.Related, match) < 0 {
+		t.Fatalf("related = %+v, want %s from the document's project", created.Advice.Suggestions.Related, match)
 	}
 }
 

@@ -274,21 +274,31 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 		return
 	}
 	s.publish(events...)
-	// LEGION-550: an ask on an unlinked project document has no issue to search within or to
-	// resolve outcome activity against, so it is out of scope; owner.IssueKey != nil is exactly
-	// the case writeAdvice above already requires.
-	if advice != nil && owner.IssueKey != nil {
-		var project string
-		if err := s.deps.Store.Pool.QueryRow(r.Context(),
-			`select project_key from issues where key = $1`, *owner.IssueKey,
-		).Scan(&project); err != nil {
-			slog.Warn("dispatch: write suggestions omitted", "route", "POST /api/v1/issues/{key}/asks", "error", err)
-		} else {
-			suggestions := s.computeSuggestions(r.Context(), project, ask.Question, "ask", ask.ID, "")
+	// LEGION-550. An ask on an issue searches that issue's project; one on an unlinked project
+	// document searches the document's. The document case has no issue state to report, so its
+	// advice carries the suggestions alone (writeAdvice above is issue-only).
+	source := suggestionSource{kind: "ask", askID: ask.ID, actor: actor}
+	var project string
+	var projectErr error
+	if owner.IssueKey != nil {
+		source.issueKey = *owner.IssueKey
+		projectErr = s.deps.Store.Pool.QueryRow(r.Context(),
+			`select project_key from issues where key = $1`, *owner.IssueKey).Scan(&project)
+	} else if owner.ArtifactID != nil {
+		source.artifactID = *owner.ArtifactID
+		projectErr = s.deps.Store.Pool.QueryRow(r.Context(),
+			`select project_key from artifacts where id = $1`, *owner.ArtifactID).Scan(&project)
+	}
+	if projectErr != nil {
+		slog.Warn("dispatch: write suggestions omitted", "route", "POST ask", "error", projectErr)
+	} else if project != "" {
+		suggestions := s.computeSuggestions(r.Context(), project, ask.Question, source)
+		s.persistSuggestions(r.Context(), source, suggestions)
+		if advice != nil {
 			advice.Suggestions = suggestions
-			s.persistSuggestions(r.Context(), suggestionSource{
-				kind: "ask", issueKey: *owner.IssueKey, askID: ask.ID, actor: actor,
-			}, suggestions)
+		} else if suggestions != nil {
+			WriteJSON(w, http.StatusCreated, withDocumentBlockAdvice(ask, suggestionsOnlyAdvice{Suggestions: suggestions}))
+			return
 		}
 	}
 	WriteJSON(w, http.StatusCreated, withAdvice(ask, advice))
