@@ -1,8 +1,8 @@
-import { DOMSerializer, type Node as ProseMirrorNode } from "prosemirror-model";
+import type { DOMSerializer, Node as ProseMirrorNode } from "prosemirror-model";
 import { type ReactNode, type RefObject, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
-import { parseMarkdownOrUndefined, renderWithHeadlessProof } from "./markdown-engine";
+import { renderWithEngine, type SoftBreaks } from "./markdown-engine";
 import {
   collectReferenceAnchors,
   linkifyDispatchRefs,
@@ -39,7 +39,7 @@ export type DecorateMarkdown = (
 
 /**
  * What every Markdown-bearing element does once mounted, in the layout phase of the commit
- * (`renderWithHeadlessProof`, which says why that phase): the source is parsed and handed to
+ * (`renderWithEngine`, which says why that phase): the source is parsed and handed to
  * `paint`, or, without an engine or a parse, written into the element as literal text with
  * `isFallback` set. A dispatch:// reference stays literal text to Markdown (it isn't a scheme GFM
  * autolinks), so bare refs then get wrapped into real links; a same-origin dashboard URL is
@@ -51,14 +51,15 @@ export type DecorateMarkdown = (
  * anchors the portals mount into, so it may replace an anchor's element. `onRendered` fires after
  * each render lands; the newest callback is the one called, and a new callback alone re-renders
  * nothing. `paint` and `decorate` are dependencies: a caller passes a module-level function or
- * memoises one on what it reads.
+ * memoises one on what it reads. `softBreaks` picks the engine (`SoftBreaks`).
  */
 export function useRenderedMarkdown(
   root: RefObject<HTMLElement | null>,
   markdown: string,
   paint: PaintMarkdown,
   decorate: DecorateMarkdown | undefined,
-  onRendered: (() => void) | undefined
+  onRendered: (() => void) | undefined,
+  softBreaks: SoftBreaks = "space"
 ): RenderedMarkdown {
   const onRenderedRef = useRef(onRendered);
   onRenderedRef.current = onRendered;
@@ -71,21 +72,21 @@ export function useRenderedMarkdown(
       throw new Error("The Markdown element is unavailable.");
     }
     setIsFallback(false);
-    return renderWithHeadlessProof((proof) => {
-      const parsed = proof === undefined ? undefined : parseMarkdownOrUndefined(proof, markdown);
-      if (proof === undefined || parsed === undefined) {
+    return renderWithEngine((engine) => {
+      const parsed = engine?.parse(markdown);
+      if (engine === undefined || parsed === undefined) {
         setIsFallback(true);
         element.replaceChildren(document.createTextNode(markdown));
       } else {
-        paint(element, parsed, DOMSerializer.fromSchema(proof.schema));
+        paint(element, parsed, engine.serializer);
       }
       linkifyDispatchRefs(element);
       const found = collectReferenceAnchors(element);
       const anchors = decorate === undefined ? found : decorate(element, found);
       setReferenceAnchors(anchors.length === 0 ? NO_ANCHORS : anchors);
       onRenderedRef.current?.();
-    });
-  }, [decorate, markdown, paint, root]);
+    }, softBreaks);
+  }, [decorate, markdown, paint, root, softBreaks]);
 
   return {
     isFallback,

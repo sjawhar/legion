@@ -28,6 +28,13 @@ interface GitHubIssue {
   title?: string;
 }
 
+/** The card's body: two rendered lines of what the target says, formatted, then cut. */
+function Body({ markdown }: { markdown: string }): ReactNode {
+  return (
+    <MarkdownPreview className={`mt-1 ${textSecondaryOnSurface}`} lines={2} markdown={markdown} />
+  );
+}
+
 function DispatchUnfurl({ reference }: { reference: ComposerReference }): ReactNode {
   const route = parseDispatchReference(reference.reference);
   const { title, description } = useReferenceTarget(route);
@@ -38,13 +45,7 @@ function DispatchUnfurl({ reference }: { reference: ComposerReference }): ReactN
       href={reference.href}
     >
       <span className={`block font-medium ${linkText}`}>{title ?? reference.reference}</span>
-      {description === undefined ? null : (
-        <MarkdownPreview
-          className={`mt-1 ${textSecondaryOnSurface}`}
-          lines={2}
-          markdown={description}
-        />
-      )}
+      {description === undefined ? null : <Body markdown={description} />}
     </a>
   );
 }
@@ -78,11 +79,7 @@ function GitHubUnfurl({ href, path }: { href: string; path: string }): ReactNode
       {issue.data?.body === undefined ||
       issue.data.body === null ||
       issue.data.body.trim() === "" ? null : (
-        <MarkdownPreview
-          className={`mt-1 ${textSecondaryOnSurface}`}
-          lines={2}
-          markdown={issue.data.body}
-        />
+        <Body markdown={issue.data.body} />
       )}
     </a>
   );

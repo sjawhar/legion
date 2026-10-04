@@ -6,6 +6,7 @@ import { Link, MemoryRouter, Route, Routes } from "react-router-dom";
 
 import { api } from "../../api/client";
 import type { AskRead, IssueDetails } from "../../api/types";
+import { MarkdownBody } from "./MarkdownBody";
 import { MarkdownPreview } from "./MarkdownPreview";
 import { useMarkdownHeadline } from "./markdown-engine";
 import { Unfurl } from "./Unfurl";
@@ -97,6 +98,42 @@ test("a preview's clamp is its own display: no display utility that outranks lin
     }
   } finally {
     view.unmount();
+  }
+});
+
+// LEGION-540 round 2 (the reviewer's gap): right-to-left text. Nothing in the pipeline reorders
+// characters (the browser's bidi algorithm runs on the rendered text, as on any HTML), but no
+// test said so. Hebrew and Arabic with a bold span, a code span and a reference, in a clamped
+// preview and in a full body: every character stays in its source order, the marks land on the
+// words the author marked, and no syntax survives.
+test("right-to-left text keeps its characters in order, its marks on the words marked, and no syntax", async () => {
+  const getIssue = spyOn(api, "getIssue").mockResolvedValue(issue);
+  const source = "שלום **עולם**, ראה `kubectl get pods` ו-dispatch://CORE-1. مرحبا *بالعالم*";
+  const view = render(
+    <Providers>
+      <MarkdownPreview lines={1} markdown={source} />
+      <MarkdownBody markdown={source} />
+    </Providers>
+  );
+  try {
+    const clamped = preview(view.container);
+    const body = view.container.querySelector<HTMLElement>(
+      ".dispatch-markdown:not([data-markdown-preview])"
+    );
+    if (body === null) throw new Error("no MarkdownBody rendered");
+    for (const element of [clamped, body]) {
+      await waitFor(() => expect(element.textContent).toContain("Design decision"));
+      expect(element.textContent).toBe(
+        "שלום עולם, ראה kubectl get pods ו-Design decision. مرحبا بالعالم"
+      );
+      expect(element.querySelector("strong")?.textContent).toBe("עולם");
+      expect(element.querySelector("em")?.textContent).toBe("بالعالم");
+      expect(element.querySelector("code")?.textContent).toBe("kubectl get pods");
+      expect(element.getAttribute("data-markdown-fallback")).toBeNull();
+    }
+  } finally {
+    view.unmount();
+    getIssue.mockRestore();
   }
 });
 

@@ -297,6 +297,43 @@ test("a streaming assistant turn formats what has closed and shows the rest as i
   }
 });
 
+// LEGION-540 round 2. A model's turn is prose the model wrote with single newlines between
+// short lines ("First, check the config.\nThen, verify the credentials."), not hard-wrapped
+// Markdown; the document editor's parser reads a single newline as a soft break and joins the
+// lines with a space, which read as one run-on line on the live view. A turn keeps its line
+// breaks; a list or a paragraph separated by a blank line still formats as a block.
+test("a transcript turn keeps single newlines as line breaks and still formats blocks", async () => {
+  const prose = "First, check the config file.\nThen, verify the credentials.\nFinally, run it.";
+  const messages: ThreadMessageLike[] = [
+    {
+      content: [{ text: `${prose}\n\n1. one\n2. two\n\n**done**`, type: "text" }],
+      createdAt: new Date("2026-09-10T00:00:00Z"),
+      id: "a1",
+      role: "assistant",
+      status: { reason: "stop", type: "complete" },
+    },
+  ];
+  const view = render(
+    <Providers>
+      <Transcript messages={messages} />
+    </Providers>
+  );
+  try {
+    const turn = await within(view.container).findByTestId("agent-message-assistant");
+    await waitFor(() => expect(turn.querySelector("strong")?.textContent).toBe("done"));
+    const first = turn.querySelector("p");
+    if (first === null) throw new Error("the turn rendered no paragraph");
+    expect(first.querySelectorAll("br")).toHaveLength(2);
+    expect(first.textContent).toBe(prose.replace(/\n/g, ""));
+    expect(Array.from(turn.querySelectorAll("ol > li"), (li) => li.textContent)).toEqual([
+      "one",
+      "two",
+    ]);
+  } finally {
+    view.unmount();
+  }
+});
+
 test("the reference hover card renders a comment's body and an ask's question formatted", async () => {
   const getComment = spyOn(api, "getComment").mockResolvedValue(commentRead);
   const getIssue = spyOn(api, "getIssue").mockResolvedValue(issue);

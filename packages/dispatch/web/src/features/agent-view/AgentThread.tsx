@@ -29,6 +29,7 @@ import {
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { ErrorBoundary } from "../shell/ErrorBoundary";
 import { readDispatchMarks } from "./dispatch-marks";
+import { useFrameCoalesced } from "./useFrameCoalesced";
 
 /**
  * The session's conversation, rendered with assistant-ui's primitives (MIT) over Dispatch's own
@@ -82,13 +83,21 @@ const ToolCall: ToolCallMessagePartComponent = ({ toolName, argsText, result, is
 
 /** A text part of a turn the session wrote, rendered as Markdown - re-parsed as each streamed
  *  delta lands, so a heading or a list formats the moment its syntax closes; until then the
- *  partial syntax reads as the literal characters, at the surrounding text's size. A module
- *  constant, as `Reasoning` is: a component minted per render would remount every part. */
-const MarkdownText: TextMessagePartComponent = ({ text }) => <MarkdownBody markdown={text} />;
+ *  partial syntax reads as the literal characters, at the surrounding text's size. A single
+ *  newline is a line break here (`softBreaks="line"`): a model's prose puts its lines on lines
+ *  rather than hard-wrapping a paragraph, and the document reading (one paragraph, joined by
+ *  spaces) made `First, check the config.\nThen, verify the credentials.` one run-on line. Each
+ *  re-parse reads the whole turn so far (about 3.6 ms per KB), so the text is read once per
+ *  animation frame (`useFrameCoalesced`): the publisher sends at most ten snapshots a second,
+ *  and a frame is the most anyone can see anyway. A module constant, as `Reasoning` is: a
+ *  component minted per render would remount every part. */
+const MarkdownText: TextMessagePartComponent = ({ text }) => (
+  <MarkdownBody markdown={useFrameCoalesced(text)} softBreaks="line" />
+);
 
 const Reasoning: ReasoningMessagePartComponent = ({ text }) => (
   <div className={`my-1 text-xs italic ${textMutedOnCanvas}`} data-testid="agent-reasoning">
-    <MarkdownBody markdown={text} />
+    <MarkdownBody markdown={useFrameCoalesced(text)} softBreaks="line" />
   </div>
 );
 

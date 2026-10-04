@@ -56,7 +56,7 @@ import { ThreadCard } from "../margin/ThreadCard";
 import { type CommentActionFailure, useCommentActionQueue } from "../margin/useCommentActionQueue";
 import type { Thread as CommentThread } from "../margin/useMarginItems";
 import { CopyRefButton } from "../refs/CopyRefButton";
-import { balanceCutMarkdown } from "../refs/markdown-fragment";
+import { replyPreviewMarkdown } from "../refs/markdown-fragment";
 import { buildIssuePath, documentItemPath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 import { PHONE_VIEWPORT_QUERY, useDialog, useMediaQuery } from "../shell/useDialog";
@@ -275,7 +275,7 @@ function ConversationReply({
         // opened is dropped so it reads as words, not as its syntax.
         excerpt:
           parent === undefined
-            ? balanceCutMarkdown(reply.event.payload.reply_body ?? "")
+            ? replyPreviewMarkdown(reply.event.payload.reply_body)
             : parent.event.payload.body,
         to:
           parentId === null || parentId === undefined
@@ -403,9 +403,7 @@ function MessageTurn({
               author={undefined}
               className="mb-1"
               excerpt={
-                item.kind === "message"
-                  ? balanceCutMarkdown(item.event.payload.reply_body ?? "")
-                  : ""
+                item.kind === "message" ? replyPreviewMarkdown(item.event.payload.reply_body) : ""
               }
               to={buildIssuePath({ id: replyTo, key: issueKey, kind: "message" })}
             />

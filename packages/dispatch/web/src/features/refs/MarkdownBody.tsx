@@ -1,7 +1,7 @@
 import type { Node as ProseMirrorNode } from "prosemirror-model";
 import { type ReactNode, useRef } from "react";
 
-import { markdownClassName } from "./markdown-engine";
+import { markdownClassName, type SoftBreaks } from "./markdown-engine";
 import { type PaintMarkdown, useRenderedMarkdown } from "./useRenderedMarkdown";
 
 /** The first textblock's own inline content (marks intact), plus the flattened plain text of
@@ -102,10 +102,15 @@ const paintBlock: PaintMarkdown = (element, parsed, serializer) => {
 export function MarkdownBody({
   markdown,
   onRendered,
+  softBreaks = "space",
   variant = "block",
 }: {
   markdown: string;
   onRendered?: () => void;
+  /** What a single newline inside a paragraph becomes: `"space"` for a document (hard-wrapped
+   *  Markdown is one paragraph), `"line"` for text whose author meant its lines as lines, such
+   *  as a model's streamed turn (`SoftBreaks`). */
+  softBreaks?: SoftBreaks;
   variant?: "block" | "inline";
 }): ReactNode {
   // One ref per tag, since a `<div>` and a `<span>` type their refs differently.
@@ -117,7 +122,8 @@ export function MarkdownBody({
     markdown,
     inline ? paintInline : paintBlock,
     undefined,
-    onRendered
+    onRendered,
+    softBreaks
   );
 
   return inline ? (

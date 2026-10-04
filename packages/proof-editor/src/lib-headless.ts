@@ -37,7 +37,8 @@ import { frontmatterSchema } from 'proof-sdk-upstream/src/editor/schema/frontmat
 import { proofMarkPlugins } from 'proof-sdk-upstream/src/editor/schema/proof-marks.js';
 import { remarkProofMarks, proofMarkHandler } from 'proof-sdk-upstream/src/formats/remark-proof-marks.js';
 import { dispatchMarkPlugins, remarkDispatchMarks, dispatchMarkHandler } from './dispatch-marks.js';
-import { remarkSoftBreakAsSpace } from './dispatch-soft-breaks.js';
+import { remarkResolveReferenceLinks } from './dispatch-reference-links.js';
+import { remarkSoftBreakAsLine, remarkSoftBreakAsSpace } from './dispatch-soft-breaks.js';
 import { remarkContainerDirectives } from './lib-remark-directive-plugin.js';
 
 export interface HeadlessProofEditor {
@@ -53,6 +54,15 @@ export interface HeadlessProofOptions {
   blockId?: BlockIdGenerator;
   /** Typed block schema fetched from the document service before construction. */
   blockSchema?: BlockSchema;
+  /**
+   * What a single newline inside a paragraph (a CommonMark soft break) becomes. `'space'`, the
+   * default, is what a document means by it: agents hard-wrap Markdown at a column, and the
+   * lines are one paragraph (`remarkSoftBreakAsSpace`). `'line'` keeps it as a line break, for
+   * text whose author meant the lines as lines: a model's streamed turn in the live view, where
+   * `First, check the config.\nThen, verify the credentials.` is two lines, and joining them
+   * reads as the one run-on line the document default would make of it.
+   */
+  softBreaks?: 'space' | 'line';
 }
 
 export async function createHeadlessProof(options: HeadlessProofOptions = {}): Promise<HeadlessProofEditor> {
@@ -112,7 +122,11 @@ export async function createHeadlessProof(options: HeadlessProofOptions = {}): P
     .use(remarkContainerDirectives)
     .use(remarkProofMarks)
     .use(remarkDispatchMarks)
-    .use(remarkSoftBreakAsSpace);
+    .use(remarkResolveReferenceLinks);
+  // remark leaves a soft break as a "\n" inside its text node; the policy either joins the
+  // lines with a space or splits them around a `break` node, which the commonmark preset's
+  // hardbreak parser takes.
+  parseProcessor.use(options.softBreaks === 'line' ? remarkSoftBreakAsLine : remarkSoftBreakAsSpace);
   if (options.blockSchema) parseProcessor.use(remarkTypedBlocks, options.blockSchema);
   const parse = ParserState.create(schema as never, parseProcessor as never) as unknown as (
     markdown: string,

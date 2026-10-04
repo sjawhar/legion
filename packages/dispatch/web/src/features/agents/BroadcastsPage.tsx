@@ -80,6 +80,7 @@ export function BroadcastsPage(): ReactNode {
                 </p>
                 <MarkdownPreview
                   className={`mt-1 self-stretch text-sm ${textPrimaryOnCanvas}`}
+                  fullTitle
                   lines={1}
                   markdown={sent.body}
                 />

@@ -19,6 +19,18 @@ await test('a CommonMark soft break imports as a single text node with a space',
   );
 });
 
+await test("with softBreaks 'line', a soft break imports as a hardbreak node between the lines", async () => {
+  const { parseMarkdown } = await createHeadlessProof({ softBreaks: 'line' });
+  const doc = parseMarkdown('First line\nsecond line\n\nNext paragraph').toJSON();
+  const paragraph = doc.content[0];
+  assert(paragraph.type === 'paragraph', 'Expected a paragraph first');
+  const types = paragraph.content.map((node: { type: string }) => node.type);
+  assert(types.join(',') === 'text,hardbreak,text', `Expected text/hardbreak/text, got ${JSON.stringify(types)}`);
+  assert(paragraph.content[0].text === 'First line', `Expected the first line kept, got ${JSON.stringify(paragraph.content[0].text)}`);
+  assert(paragraph.content[2].text === 'second line', `Expected the second line kept, got ${JSON.stringify(paragraph.content[2].text)}`);
+  assert(doc.content.length === 2 && doc.content[1].type === 'paragraph', 'Expected the blank line to still start a new paragraph');
+});
+
 await test('a fenced code block keeps its literal newlines', async () => {
   const { parseMarkdown } = await createHeadlessProof();
   const doc = parseMarkdown('```\nline one\nline two\n```').toJSON();
