@@ -930,7 +930,7 @@ test("the inbox defaults to Mine with an Unassigned band, Assign to me takes a r
     session
   );
 
-  // GitHub's spelling of a login is what `/auth/whoami` echoes; issues carry the lowercase login.
+  // Whatever casing reaches the identity header, Dispatch names the person by its lowercase form.
   const alice = await asUser(browser, "Alice");
   const bob = await asUser(browser, "bob");
   const alicePage = await alice.newPage();

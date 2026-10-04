@@ -222,7 +222,7 @@ start_dispatch() {
     offset=$(log_size dispatch)
     DATABASE_URL="postgres://$pg_user:$pg_password@127.0.0.1:$port_pg/$dispatch_db?sslmode=disable" \
       DISPATCH_AGENT_TOKEN="$dispatch_token" ENVOY_TOKEN="$envoy_token" HOME="$work/dispatch-home" \
-      DISPATCH_IDENTITY=header:X-Dispatch-User DISPATCH_ALLOWED_LOGINS=smoke \
+      DISPATCH_IDENTITY=header:X-Dispatch-User DISPATCH_IDENTITY_HEADER_TRUSTED=1 \
       DISPATCH_LISTEN_HOST=127.0.0.1 DISPATCH_PORT="$port_dispatch" \
       DISPATCH_SERVER_URL="http://127.0.0.1:$port_dispatch" NATS_URLS="nats://127.0.0.1:$port_nats" \
       ENVOY_URL="http://127.0.0.1:$port_listener" \
