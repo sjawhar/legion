@@ -21,7 +21,13 @@ import {
 } from "../../theme/classes";
 import { totalUnreadReplies, unreadRepliesLabel } from "../agents/unread";
 import { useNeedsYouCount } from "../inbox/BlockedOnYou";
-import { buildIssuePath, buildProjectPath, parseIssuePath, parseProjectPath } from "../refs/routes";
+import {
+  buildIssuePath,
+  buildProjectPath,
+  parseIssuePath,
+  parseProjectPath,
+  routeIsInbox,
+} from "../refs/routes";
 
 /** One rail entry: a key, its title, and the open-ask count when there is one. */
 function RailRow({
@@ -137,7 +143,7 @@ export function Sidebar({
             )}
           </Link>
           {/* The Inbox page is the Inbox already, so there is nothing to peek at from it. */}
-          {onOpenInboxDrawer === undefined || location.pathname === "/" ? null : (
+          {onOpenInboxDrawer === undefined || routeIsInbox(location.pathname) ? null : (
             <button
               aria-label="Peek at the inbox without leaving this page"
               className={`mt-1 shrink-0 rounded px-2 py-1.5 text-sm font-medium ${railSecondaryText} ${railHoverBg} ${railHoverText}`}

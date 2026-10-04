@@ -6,6 +6,7 @@ import { MemoryRouter } from "react-router-dom";
 import { commentDeliveryFields } from "../../__tests__/comment-fixture";
 import { ApiError, api } from "../../api/client";
 import type { Comment, CredentialPendingRow, InboxRow, Issue } from "../../api/types";
+import type { InboxView } from "../refs/routes";
 import { userPreferenceStorageKey } from "../shell/userPreference";
 import { Inbox } from "./Inbox";
 
@@ -1273,6 +1274,44 @@ test("Everyone shows every open ask and is remembered for the login; ?view= wins
     expect(screen.getByRole("button", { name: "Mine" }).getAttribute("aria-pressed")).toBe("true");
   } finally {
     fromUrl.unmount();
+    getAsk.mockRestore();
+    getInbox.mockRestore();
+  }
+});
+
+test("a caller supplying onViewChange (the Inbox drawer) keeps the toggle local: the real page's remembered view is untouched", async () => {
+  const mine = issueAsk({ id: "ask-mine" });
+  const bobs = issueAsk({
+    id: "ask-bob",
+    issue: { assignee: "bob", key: "CORE-2", title: "Bob's issue" },
+    issue_key: "CORE-2",
+    question: "Bob's question?",
+  });
+  const rows = [mine, bobs];
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue(rows);
+  const getAsk = mockAskReads(rows);
+  const queryClient = new QueryClient({
+    defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+  });
+  const changes: InboxView[] = [];
+  const view = render(
+    <MemoryRouter>
+      <QueryClientProvider client={queryClient}>
+        <Inbox
+          filter={{ view: "mine" }}
+          keymapScope="dialog"
+          onViewChange={(next) => changes.push(next)}
+        />
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+  try {
+    await screen.findByText("Which approach?");
+    fireEvent.click(screen.getByRole("button", { name: "Everyone" }));
+    expect(changes).toEqual(["everyone"]);
+    expect(window.localStorage.getItem(userPreferenceStorageKey("alice", "inbox.view"))).toBeNull();
+  } finally {
+    view.unmount();
     getAsk.mockRestore();
     getInbox.mockRestore();
   }

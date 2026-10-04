@@ -22,6 +22,7 @@ import {
   parseProjectPath,
   routeFillsViewport,
   routeHasMargin,
+  routeIsInbox,
   routeProjectOf,
 } from "./features/refs/routes";
 import { SearchButton } from "./features/search/SearchButton";
@@ -292,7 +293,7 @@ function NavigationContents({
       <Sidebar
         onHide={compact ? undefined : onHideSidebar}
         onNavigate={onClose}
-        onOpenInboxDrawer={onOpenInboxDrawer}
+        onOpenInboxDrawer={compact ? undefined : onOpenInboxDrawer}
         user={user}
       />
       {/* Identity is chrome: who you are and how to leave are read once, while the navigation
@@ -444,7 +445,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
       run: () => setInboxDrawerOpen((open) => !open),
       // The Inbox page already shows everything the drawer would, so a peek over itself is
       // never offered; `g i` still gets the reader there from anywhere else.
-      when: () => location.pathname !== "/",
+      when: () => !routeIsInbox(location.pathname),
     },
     {
       id: "toggle-sidebar",
@@ -505,6 +506,17 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
     />
   );
 
+  // On the Inbox page the compact header's badge stays plain text: the page is the Inbox
+  // already, so there's nothing for it to open.
+  const needsYouBadge =
+    needsYouCount === 0 ? null : (
+      <span
+        className={`rounded-full px-2 py-1 text-xs font-semibold ${railNeedsYouBadgeBg} ${railNeedsYouBadgeText}`}
+      >
+        Needs you {needsYouCount}
+      </span>
+    );
+
   return (
     <MarginProvider>
       <div
@@ -548,16 +560,9 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
               <Link className="text-lg font-semibold" to="/">
                 Dispatch
               </Link>
-              {/* On the Inbox page the count stays the plain badge: the page is the Inbox, so
-                  there is nothing to open. Everywhere else it opens the Inbox drawer. */}
-              {location.pathname === "/" ? (
-                needsYouCount === 0 ? null : (
-                  <span
-                    className={`rounded-full px-2 py-1 text-xs font-semibold ${railNeedsYouBadgeBg} ${railNeedsYouBadgeText}`}
-                  >
-                    Needs you {needsYouCount}
-                  </span>
-                )
+              {/* Everywhere but the Inbox page, the same badge also opens the Inbox drawer. */}
+              {routeIsInbox(location.pathname) ? (
+                needsYouBadge
               ) : (
                 <button
                   aria-label={
