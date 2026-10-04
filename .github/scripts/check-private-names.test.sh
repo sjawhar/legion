@@ -134,6 +134,7 @@ mentions=(
 assert_each_refused repo "names the private deployment repository" mentions 2
 
 echo "case: every spelling of the company is refused"
+# shellcheck disable=SC2034 # read by name through assert_each_refused's nameref
 mentions=(
   "$company_proper Labs"
   "$company-$labs-example/repo"
@@ -155,6 +156,7 @@ mentions=(
 assert_each_refused company "names the company" mentions
 
 echo "case: a private internal host is refused, whatever its case"
+# shellcheck disable=SC2034 # read by name through assert_each_refused's nameref
 hosts=(
   "https://listener.$internal.$private_host_suffix"
   "https://listener.${internal^^}.$private_host_suffix"
@@ -309,41 +311,50 @@ run_check "$root" dist
 check "exits 2" "$(is "$status" 2)"
 check "names it" "$(contains "$out" 'dist does not exist')"
 
-# run_pr_text <title> <body> <commit message> [branch] [author email] [committer email]
-# [expected commits]: runs check-pr-text.sh as CI does: the title, body and branch name come from
-# a pull_request event payload, and one commit (message, author and committer) from a stand-in
-# `gh` that answers only this pull request's commits route — with the route's own JSON shape, so
-# the real `.[] | .commit.message, .commit.author.email, …` filter that feeds the required check
-# runs for real, rather than a filter the stub fakes. `expected commits` becomes the payload's
-# `pull_request.commits` (omitted, so `// 0`, by default); the stub's commits array always holds
-# exactly one commit, so a value other than 1 exercises the commits-route-cap mismatch. Sets `out`
-# and `status`.
+# write_pr_text <title> <body> <commit message> [branch] [author email] [committer email]: writes
+# the fixture check-pr-text.sh reads as CI runs it. A pull_request event payload carries the title,
+# body, branch name and the head the run checks (its base and head sha, and its one commit); a
+# stand-in `gh` answers the compare route for exactly that base...head with that commit (message,
+# author and committer) in the route's own JSON shape, so the real `.commits[] | .commit.message, …`
+# filter that feeds the required check runs for real, rather than a filter the stub fakes. The stub
+# also answers the pull request's own commits route, which reads whatever head the pull request has
+# by then: the same commit, until a case appends a later push's. A case rewrites `$work/compare`
+# (one JSON object per page, as `gh api --paginate` prints them) or `$work/pr-commits`, then calls
+# run_pr_text, which runs the script and sets `out` and `status`.
 mkdir -p "$work/bin"
 cat > "$work/bin/gh" <<'GH'
 #!/usr/bin/env bash
-[ "$1 $2" = "api repos/example/repo/pulls/7/commits" ] || { echo "unexpected gh call: $*" >&2; exit 3; }
-cat "$PR_TEXT_TEST_COMMITS"
+case "$1 $2" in
+  "api repos/example/repo/compare/base-sha...event-head-sha"*) cat "$PR_TEXT_TEST_DIR/compare" ;;
+  "api repos/example/repo/pulls/7/commits") cat "$PR_TEXT_TEST_DIR/pr-commits" ;;
+  *) echo "unexpected gh call: $*" >&2; exit 3 ;;
+esac
 GH
 chmod +x "$work/bin/gh"
-run_pr_text() {
-  local title=$1 body=$2 commit_message=$3 branch=${4:-fix/keep-the-order}
-  local author_email=${5:-dev@example.com} committer_email=${6:-dev@example.com}
-  local expected_commits=${7:-}
+# pr_commit <message> [author email] [committer email]: one commit as both routes list it.
+pr_commit() {
+  jq -nc --arg msg "$1" --arg author_email "${2:-dev@example.com}" \
+    --arg committer_email "${3:-dev@example.com}" \
+    '{commit: {message: $msg, author: {name: "Dev", email: $author_email},
+               committer: {name: "Dev", email: $committer_email}}}'
+}
+write_pr_text() {
+  local title=$1 body=$2 branch=${4:-fix/keep-the-order} commit
+  commit=$(pr_commit "$3" "${5:-}" "${6:-}")
+  jq -nc --argjson commit "$commit" '{total_commits: 1, commits: [$commit]}' > "$work/compare"
+  jq -nc --argjson commit "$commit" '[$commit]' > "$work/pr-commits"
   printf '%s' "$body" > "$work/pr-body"
-  jq -n --arg msg "$commit_message" --arg author_email "$author_email" \
-    --arg committer_email "$committer_email" \
-    '[{commit: {message: $msg, author: {name: "Dev", email: $author_email},
-                committer: {name: "Dev", email: $committer_email}}}]' \
-    > "$work/pr-commits"
-  jq -n --arg title "$title" --arg branch "$branch" --arg commits "$expected_commits" \
-    --rawfile body "$work/pr-body" \
-    '{pull_request: {number: 7, title: $title, head: {ref: $branch},
-                      body: (if $body == "" then null else $body end),
-                      commits: (if $commits == "" then null else ($commits | tonumber) end)}}' \
+  jq -n --arg title "$title" --arg branch "$branch" --rawfile body "$work/pr-body" \
+    '{pull_request: {number: 7, title: $title, commits: 1,
+                      head: {ref: $branch, sha: "event-head-sha"}, base: {sha: "base-sha"},
+                      body: (if $body == "" then null else $body end)}}' \
     > "$work/event.json"
+}
+run_pr_text() {
+  if [ $# -gt 0 ]; then write_pr_text "$@"; fi
   set +e
   out=$(GITHUB_EVENT_PATH="$work/event.json" GITHUB_REPOSITORY=example/repo \
-    PR_TEXT_TEST_COMMITS="$work/pr-commits" PATH="$work/bin:$PATH" "$pr_text_script" 2>&1)
+    PR_TEXT_TEST_DIR="$work" PATH="$work/bin:$PATH" "$pr_text_script" 2>&1)
   status=$?
   set -e
 }
@@ -385,14 +396,31 @@ run_pr_text "fix(dispatch): keep the inbox order" "Refs LEGION-7" "fix: keep the
 check "a commit's committer email naming the company fails, with a clean message and author" "$(is "$status" 1)"
 check "names the commits line" "$(contains "$out" 'commits:5: names the company')"
 
-run_pr_text "fix(dispatch): keep the inbox order" "Refs LEGION-7" "fix: keep the order" "fix/keep-the-order" \
-  "dev@example.com" "dev@example.com" 1
-check "a commit count matching the commits route's own count passes" "$(is "$status" 0)"
+echo "case: the commits of the head the run checks, when a later push lands while it runs"
+write_pr_text "fix(dispatch): keep the inbox order" "Refs LEGION-7" "fix: keep the order"
+jq -c --argjson later "$(pr_commit "fix: the later push")" '. + [$later]' "$work/pr-commits" \
+  > "$work/pr-commits.next"
+mv "$work/pr-commits.next" "$work/pr-commits"
+run_pr_text
+check "a pull request whose head moved on mid-run passes" "$(is "$status" 0)"
 
-run_pr_text "fix(dispatch): keep the inbox order" "Refs LEGION-7" "fix: keep the order" "fix/keep-the-order" \
-  "dev@example.com" "dev@example.com" 300
-check "a commit count past the commits route's actual count fails loudly" "$(is "$status" 1)"
-check "names both counts" "$(contains "$out" 'pull request reports 300 commits but the commits route returned 1')"
+echo "case: a commit list the compare route cut short, and one spread over pages"
+write_pr_text "fix(dispatch): keep the inbox order" "Refs LEGION-7" "fix: keep the order"
+jq -c '.total_commits = 300' "$work/compare" > "$work/compare.next"
+mv "$work/compare.next" "$work/compare"
+run_pr_text
+check "a list shorter than the route's own total fails loudly" "$(is "$status" 1)"
+check "names both counts" "$(contains "$out" 'reports 300 commits .* but listed 1')"
+
+write_pr_text "fix(dispatch): keep the inbox order" "Refs LEGION-7" "fix: keep the order"
+second_commit=$(pr_commit "$(printf 'fix: keep the order\n\nCo-authored-by: A <a@%s%s.example>\n' "$company" "$labs")")
+jq -c '.total_commits = 2' "$work/compare" > "$work/compare.next"
+jq -nc --argjson second "$second_commit" '{total_commits: 2, commits: [$second]}' >> "$work/compare.next"
+mv "$work/compare.next" "$work/compare"
+run_pr_text
+check "a commit on the compare route's second page naming the company fails" "$(is "$status" 1)"
+check "names its line, counting the first page's commit" "$(contains "$out" 'commits:8: names the company')"
+check "counts both pages' commits as the whole list" "$(is "$(contains "$out" 'but listed')" false)"
 
 long_body=$(printf '%.0s–' {1..50000})
 run_pr_text "fix(dispatch): keep the inbox order" "$long_body" "fix: keep the order"
