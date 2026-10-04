@@ -15267,9 +15267,6 @@ function searchAnswer(search, query, offset, configUrl) {
     };
   }
   const { total, reachable, offset: pageOffset } = search;
-  if (reachable === undefined || pageOffset === undefined) {
-    throw new Error("Dispatch answered a total without reachable or offset.");
-  }
   const end = pageOffset + count;
   const cut = reachable < total ? `Each kind lists only its best ${SEARCH_KIND_DEPTH} matches, so ${reachable} of the ${total} can be paged to; narrow the query or name a project to reach the rest.` : undefined;
   const details = {

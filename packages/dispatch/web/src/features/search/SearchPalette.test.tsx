@@ -6,7 +6,7 @@ import { type ReactNode, useState } from "react";
 import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
 
 import { api } from "../../api/client";
-import type { SearchResponse, SearchResult } from "../../api/types";
+import type { SearchResponse, SearchResult, SearchResultsPage } from "../../api/types";
 import { KeymapProvider } from "../shell/KeymapProvider";
 import { appKeymap } from "../shell/keymap";
 import { SearchButton } from "./SearchButton";
@@ -42,7 +42,7 @@ const results: SearchResult[] = [
 ];
 
 /** The server's answer when these hits are every match: one page holding the whole list. */
-function searchAnswer(hits: SearchResult[]): SearchResponse {
+function searchAnswer(hits: SearchResult[]): SearchResponse & SearchResultsPage {
   return {
     limit: 20,
     offset: 0,
