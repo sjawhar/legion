@@ -2,8 +2,11 @@ package oidc
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -145,6 +148,79 @@ func TestCodeFlowRefreshReadsThePersonsCurrentClaims(t *testing.T) {
 	issuer.RevokeGrants()
 	if _, err := flow.Refresh(context.Background(), session.RefreshToken); err == nil {
 		t.Fatal("Refresh with a revoked refresh token succeeded")
+	}
+}
+
+// Revoke sends the refresh token to the revocation endpoint the issuer's discovery names, as the
+// client, and the issuer ends it: the next refresh with it is refused.
+func TestCodeFlowRevokeEndsTheRefreshToken(t *testing.T) {
+	issuer, flow := newCodeFlowFor(t)
+	issuer.SignInAs(personClaims("dispatch-members"))
+	code, _ := issuer.Authorize(t, flow.AuthURL(flowRedirect, "state-1", "nonce-1"))
+	session, err := flow.Exchange(context.Background(), flowRedirect, code, "nonce-1")
+	if err != nil {
+		t.Fatalf("Exchange: %v", err)
+	}
+	if err := flow.Revoke(context.Background(), session.RefreshToken); err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+	if got := issuer.RevocationRequests(); !reflect.DeepEqual(got, []string{session.RefreshToken}) {
+		t.Errorf("the revocation endpoint was sent %q, want the refresh token once", got)
+	}
+	if _, err := flow.Refresh(context.Background(), session.RefreshToken); err == nil {
+		t.Fatal("Refresh with the revoked refresh token succeeded")
+	}
+}
+
+// A revocation the issuer does not accept is an error naming its HTTP status and the OAuth error
+// code its body names, if any, and never the token.
+func TestCodeFlowRevokeReportsTheIssuersRefusalWithoutTheToken(t *testing.T) {
+	for _, refusal := range []struct {
+		status int
+		code   string
+		want   string
+	}{{http.StatusBadRequest, "invalid_request", "HTTP 400 invalid_request"}, {http.StatusServiceUnavailable, "", "HTTP 503"}} {
+		issuer, flow := newCodeFlowFor(t)
+		issuer.FailRevocation(refusal.status, refusal.code)
+		token := "plain-refresh-token-" + refusal.code
+		err := flow.Revoke(context.Background(), token)
+		if err == nil || !strings.Contains(err.Error(), refusal.want) || strings.Contains(err.Error(), token) {
+			t.Errorf("Revoke against an issuer answering %d %q: err = %v, want one naming %s and not the token", refusal.status, refusal.code, err, refusal.want)
+		}
+	}
+}
+
+// A revocation endpoint that redirects is answered as a refusal, never followed: following a 307
+// would re-send the token to the redirect's target.
+func TestCodeFlowRevokeDoesNotFollowARedirect(t *testing.T) {
+	var received atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { received.Add(1) }))
+	t.Cleanup(target.Close)
+	issuer, flow := newCodeFlowFor(t)
+	issuer.RedirectRevocation(target.URL + "/elsewhere")
+	if err := flow.Revoke(context.Background(), "plain-refresh-token"); err == nil || !strings.Contains(err.Error(), "HTTP 307") {
+		t.Errorf("Revoke against a redirecting endpoint: err = %v, want one naming HTTP 307", err)
+	}
+	if n := received.Load(); n != 0 {
+		t.Errorf("the redirect's target received %d requests, want none", n)
+	}
+}
+
+// An issuer whose discovery names no revocation endpoint cannot revoke: Revoke says so, and no
+// endpoint is guessed.
+func TestCodeFlowRevokeFailsAgainstAnIssuerWithNoRevocationEndpoint(t *testing.T) {
+	issuer := oidctest.New(t)
+	issuer.EnableCodeFlow(issuer.PublishKey(t, "signing-key"), flowClientID, flowClientSecret)
+	issuer.OmitRevocationEndpoint()
+	flow, err := NewCodeFlow(context.Background(), issuer.URL(), flowClientID, flowClientSecret)
+	if err != nil {
+		t.Fatalf("NewCodeFlow: %v", err)
+	}
+	if err := flow.Revoke(context.Background(), "plain-refresh-token"); err == nil || !strings.Contains(err.Error(), "revocation_endpoint") {
+		t.Fatalf("Revoke against an issuer with no revocation endpoint: err = %v, want one naming revocation_endpoint", err)
+	}
+	if got := issuer.RevocationRequests(); len(got) != 0 {
+		t.Errorf("the issuer's /revoke was sent %q, want nothing", got)
 	}
 }
 
