@@ -20,18 +20,17 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/kms"
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 
 	"github.com/sjawhar/envoy/internal/broker/api"
 	"github.com/sjawhar/envoy/internal/broker/config"
 	"github.com/sjawhar/envoy/internal/broker/enroll"
 	"github.com/sjawhar/envoy/internal/broker/machine"
+	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/proof"
 	"github.com/sjawhar/envoy/internal/broker/requests"
-	"github.com/sjawhar/envoy/internal/broker/rules"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
 	"github.com/sjawhar/envoy/internal/broker/store"
 	"github.com/sjawhar/envoy/internal/broker/wake"
@@ -39,13 +38,17 @@ import (
 )
 
 // machineLoginPendingTTL bounds how long a typed-code machine login waits for a human to decide
-// it before the Sweeper expires it. Not a BROKER_* config knob: 15 minutes comfortably covers the
-// "look at the terminal, type the code" UX the confirmation-code flow is built around.
+// it before the Sweeper expires it. Not a BROKER_* config knob (the shared broker contract's
+// Configuration deltas name none for it): 15 minutes comfortably covers the "look at the
+// terminal, type the code" UX the confirmation-code flow is built around.
 const machineLoginPendingTTL = 15 * time.Minute
 
 // agentSecretPendingTTL bounds how long an agent_secret request waits for approval before the
 // Sweeper expires it. Unchanged from the pre-v9 poller's own hardcoded value.
 const agentSecretPendingTTL = 12 * time.Hour
+
+// policyRefresh is how often the broker rereads every agent secret's owner and tier tags.
+const policyRefresh = 5 * time.Minute
 
 func main() {
 	// The broker takes no flags; parsing refuses any flag given rather than ignoring it.
@@ -56,30 +59,25 @@ func main() {
 
 	cfg, err := config.Load(os.Getenv)
 	fatal(err)
-	fatal(refusePortZeroPublicURLInProduction(cfg.PublicURL, cfg.RulesS3URI))
+	// BROKER_FAKE_SECRETS_FILE: for local development only, a JSON file standing in for Secrets
+	// Manager, {"secrets": [{"name", "kms_key_id", "tags", "value"}]}: the broker lists the agent
+	// secrets and reads their values from it instead of from AWS.
+	fakeSecrets := os.Getenv("BROKER_FAKE_SECRETS_FILE")
+	fatal(refusePortZeroPublicURLInProduction(cfg.PublicURL, fakeSecrets))
 	st, err := store.Open(ctx, cfg.DatabaseURL)
 	fatal(err)
 	fatal(st.Migrate(ctx))
-	var loader rules.Loader = rules.FileLoader{Path: cfg.RulesFile}
-	var awsCfg aws.Config
-	if cfg.RulesS3URI != "" {
-		awsCfg, err = awsconfig.LoadDefaultConfig(ctx)
+	loader := policy.Loader{Prefix: cfg.SecretsPrefix, KeyARN: cfg.SecretsKMSKeyARN}
+	var reader secrets.Reader
+	if fakeSecrets != "" {
+		local, err := secrets.LocalFromFile(fakeSecrets)
 		fatal(err)
-		bucket, key, err := rules.ParseS3URI(cfg.RulesS3URI)
-		fatal(err)
-		loader = rules.S3Loader{Client: s3.NewFromConfig(awsCfg), Bucket: bucket, Key: key}
-	}
-	// BROKER_FAKE_SECRETS_FILE: for local development only, a file of source=value lines the
-	// broker reads secret values from when BROKER_RULES_FILE selects local rules, and then
-	// required.
-	var reader secrets.Reader = secrets.Fake{}
-	if cfg.RulesS3URI != "" {
-		reader = secrets.AWS{Client: secretsmanager.NewFromConfig(awsCfg)}
-	} else if path := os.Getenv("BROKER_FAKE_SECRETS_FILE"); path != "" {
-		reader, err = secrets.FakeFromFile(path)
-		fatal(err)
+		loader.Secrets, loader.Aliases, reader = local, local, secrets.AWS{Client: local}
 	} else {
-		fatal(errors.New("BROKER_RULES_FILE needs BROKER_FAKE_SECRETS_FILE for local runs; production uses BROKER_RULES_S3_URI and Secrets Manager"))
+		awsCfg, err := awsconfig.LoadDefaultConfig(ctx)
+		fatal(err)
+		sm := secretsmanager.NewFromConfig(awsCfg)
+		loader.Secrets, loader.Aliases, reader = sm, kms.NewFromConfig(awsCfg), secrets.AWS{Client: sm}
 	}
 	var pod enroll.PodVerifier
 	// Discovery is bounded: an issuer that accepts the connection and never answers refuses the
@@ -90,12 +88,11 @@ func main() {
 		pod = enroll.K8sPodVerifier{Verifier: verifier}
 	}
 
-	current, err := rules.NewCurrent(ctx, loader, time.Duration(cfg.RulesReloadSeconds)*time.Second,
-		func(e error) { slog.Error("rules reload refused; previous rules kept", "error", e) })
+	current, err := policy.NewCurrent(ctx, loader, policyRefresh)
 	fatal(err)
 
 	// Bind now, synchronously, right after every guard that can still refuse to
-	// boot has already run (config, the port-0 public-URL guard, migrations, the first rules
+	// boot has already run (config, the port-0 public-URL guard, migrations, the first policy
 	// load) — the only way any caller, dev-broker.sh included, can learn which process holds an
 	// address is the log line below, printed only once this exact Listen call has already
 	// succeeded. With a shared fixed
@@ -113,8 +110,8 @@ func main() {
 	// the real bound address before anything checks a request's audience against it. Every
 	// audience-consuming construct below (enr.Chain included) is built after this point, so none
 	// ever sees the stale placeholder. refusePortZeroPublicURLInProduction (the dev-vs-production
-	// gate) already refused this above, right after config.Load — before st.Migrate, any S3 read,
-	// and this Listen call — so reaching here means it's safe to apply.
+	// gate) already refused this above, right after config.Load — before st.Migrate, any AWS
+	// call, and this Listen call — so reaching here means it's safe to apply.
 	if u, urlErr := url.Parse(cfg.PublicURL); urlErr == nil && u.Port() == "0" {
 		cfg.PublicURL = "http://" + listener.Addr().String()
 	}
@@ -123,13 +120,13 @@ func main() {
 	enr := &enroll.Service{Store: st, Lease: time.Duration(cfg.LeaseSeconds) * time.Second, Pod: pod}
 	enr.Chain = enroll.NewChainVerifier(st, cfg.PublicURL, time.Duration(cfg.ProofSkewSeconds)*time.Second)
 	reqMachine := &requests.Machine{
-		Store: st, Rules: current, Secrets: reader,
+		Store: st, Policy: current, Secrets: reader,
 		MaxGrant: time.Duration(cfg.MaxGrantSeconds) * time.Second, PendingTTL: agentSecretPendingTTL,
 		Audience: cfg.PublicURL, Skew: time.Duration(cfg.ProofSkewSeconds) * time.Second, Replay: enr.Replay,
 	}
 	reqMachine.Chain = requests.NewChainVerifier(st, cfg.PublicURL, time.Duration(cfg.ProofSkewSeconds)*time.Second)
 	mach := &machine.Service{
-		Store: st, Enroll: enr, Rules: current,
+		Store: st, Enroll: enr, Policy: current,
 		Audience: cfg.PublicURL, Skew: time.Duration(cfg.ProofSkewSeconds) * time.Second,
 		PendingTTL: machineLoginPendingTTL, CredentialLifetime: time.Duration(cfg.LauncherCredentialSeconds) * time.Second,
 		Replay: enr.Replay,
@@ -206,17 +203,16 @@ func fatal(err error) {
 }
 
 // refusePortZeroPublicURLInProduction refuses a BROKER_PUBLIC_URL whose port is literally "0"
-// whenever BROKER_RULES_S3_URI names a production rules source: port 0 is never dialable, so it
-// can only be dev-broker.sh's own
-// "derive my public URL from whatever address I actually bind" convention (BROKER_PUBLIC_URL
-// mirrors BROKER_LISTEN_ADDR=127.0.0.1:0). A stray literal ":0" reaching a real deployment must
-// fail loudly at boot, never silently reinterpret the broker's own public identity as its
-// internal bind address. Extracted from main so a test can drive it directly instead of through
-// fatal, which calls os.Exit.
-func refusePortZeroPublicURLInProduction(publicURL, rulesS3URI string) error {
+// unless BROKER_FAKE_SECRETS_FILE makes this a local run: port 0 is never dialable, so it can only
+// be dev-broker.sh's own "derive my public URL from whatever address I actually bind" convention
+// (BROKER_PUBLIC_URL mirrors BROKER_LISTEN_ADDR=127.0.0.1:0). A stray literal ":0" reaching a real
+// deployment must fail loudly at boot, never silently reinterpret the broker's own public
+// identity as its internal bind address. Extracted from main so a test can drive it directly
+// instead of through fatal, which calls os.Exit.
+func refusePortZeroPublicURLInProduction(publicURL, fakeSecretsFile string) error {
 	u, err := url.Parse(publicURL)
-	if err != nil || u.Port() != "0" || rulesS3URI == "" {
+	if err != nil || u.Port() != "0" || fakeSecretsFile != "" {
 		return nil
 	}
-	return fmt.Errorf("BROKER_PUBLIC_URL %q: port 0 is never dialable in production (BROKER_RULES_S3_URI is set); only a local run may use it as dev-broker.sh's derive-from-bind convention", publicURL)
+	return fmt.Errorf("BROKER_PUBLIC_URL %q: port 0 is never dialable in production (BROKER_FAKE_SECRETS_FILE is unset); only a local run may use it as dev-broker.sh's derive-from-bind convention", publicURL)
 }

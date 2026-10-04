@@ -302,6 +302,71 @@ func TestChainVerifierHoldsASlotlessAndASlottedRecordToTheirOwnBytes(t *testing.
 	}
 }
 
+// TestAnyoneApproverAdmitsEveryLoginButItself pins the approver AnyoneApprover against a person's:
+// an agent_secret record naming anyone is decided by any login, never by the sentinel itself or an
+// empty login, and its chain verifies over whichever login approved it; a record naming a person
+// is decided by that person alone, the sentinel included; and a record of any other kind naming
+// anyone (a machine login, which an older binary could open, or a kind not spelled exactly
+// agent_secret) is decided by no login, and a machine login's chain verifies over none.
+func TestAnyoneApproverAdmitsEveryLoginButItself(t *testing.T) {
+	key, _ := proof.NewKey()
+	now := time.Now()
+	compact, err := Sign(key, "https://secrets.test", secretDetail(), "shared", "", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shared := podBody(compact)
+	shared.Approver = AnyoneApprover
+	owned := podBody(compact)
+	owned.Approver = "sami@example.com"
+	for _, c := range []struct {
+		kind  string
+		body  Body
+		login string
+		want  string
+	}{
+		{KindAgentSecret, shared, " Bob@Example.com ", "bob@example.com"},
+		{KindAgentSecret, shared, "sami@example.com", "sami@example.com"},
+		{KindAgentSecret, shared, AnyoneApprover, ""},
+		{KindAgentSecret, shared, " ANYONE ", ""},
+		{KindAgentSecret, shared, "  ", ""},
+		{KindAgentSecret, owned, "Sami@Example.com", "sami@example.com"},
+		{KindAgentSecret, owned, "bob@example.com", ""},
+		{KindAgentSecret, owned, AnyoneApprover, ""},
+		{KindLauncherCredential, shared, "bob@example.com", ""},
+		{KindLauncherCredential, shared, AnyoneApprover, ""},
+		{"", shared, "bob@example.com", ""},
+		{"Agent_Secret", shared, "bob@example.com", ""},
+		{KindLauncherCredential, owned, "Sami@Example.com", "sami@example.com"},
+	} {
+		got, err := c.body.ApproverLogin(c.kind, c.login)
+		if c.want == "" && !errors.Is(err, ErrNotApprover) || c.want != "" && (err != nil || got != c.want) {
+			t.Errorf("ApproverLogin(%s, approver %q, login %q) = %q, %v; want %q", c.kind, c.body.Approver, c.login, got, err, c.want)
+		}
+	}
+	for _, c := range []struct {
+		kind, decider string
+		verifies      bool
+	}{
+		{KindAgentSecret, "bob@example.com", true},
+		{KindAgentSecret, AnyoneApprover, false},
+		{KindLauncherCredential, "bob@example.com", false},
+	} {
+		verifier := &ChainVerifier{
+			Kind: c.kind, Audience: "https://secrets.test", Skew: time.Minute,
+			FetchRecord: func(context.Context, string) (string, time.Time, bool, error) {
+				return shared.Canonical(), now, true, nil
+			},
+			FetchDecisions: func(context.Context, string) ([]TerminalEvent, error) {
+				return []TerminalEvent{{Event: "approved", Login: c.decider}}, nil
+			},
+		}
+		if _, err := verifier.Verify(context.Background(), shared.ID()); (err == nil) != c.verifies {
+			t.Errorf("Verify(%s record naming anyone, approved by %q) = %v, want verified %v", c.kind, c.decider, err, c.verifies)
+		}
+	}
+}
+
 func TestForgedSignatureFailsForRequestObject(t *testing.T) {
 	attackerKey, err := proof.NewKey()
 	if err != nil {

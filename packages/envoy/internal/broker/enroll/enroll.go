@@ -123,7 +123,7 @@ func (s *Service) MintLauncherCredentialTx(ctx context.Context, tx pgx.Tx, opera
 // NewChainVerifier builds the record.ChainVerifier AuthenticateLauncher's issuance-chain
 // re-verification uses, scoped to launcher_credential records.
 func NewChainVerifier(st *store.Store, audience string, skew time.Duration) *record.ChainVerifier {
-	return st.ChainVerifier("launcher_credential", audience, skew)
+	return st.ChainVerifier(record.KindLauncherCredential, audience, skew)
 }
 
 // AuthenticateLauncher answers proof.Verifier's LookupLauncher hook directly: given a launcher
