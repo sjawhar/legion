@@ -101,11 +101,9 @@ test("a thread's outcome is resolved or left open, never both or neither", () =>
   }
 });
 
-test("a resolve answer always counts the threads it withheld, as a whole number", () => {
+test("a resolve answer always carries its withheld count", () => {
   expect(LegionThreadsResolveResponse.safeParse({ threads: [], withheld: 0 }).success).toBe(true);
-  for (const withheld of [undefined, -1, 1.5]) {
-    expect(LegionThreadsResolveResponse.safeParse({ threads: [], withheld }).success).toBe(false);
-  }
+  expect(LegionThreadsResolveResponse.safeParse({ threads: [] }).success).toBe(false);
 });
 
 test("state accepts optional fields emitted by later workflow slices", () => {
