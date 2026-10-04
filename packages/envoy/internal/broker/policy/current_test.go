@@ -292,3 +292,60 @@ func TestARereadOfANameNoSecretCanCarryWaitsOnNoReload(t *testing.T) {
 		}
 	}
 }
+
+// TestARereadWaitsForTheWriterLockOnlyWhileItsCallerDoes pins that RefreshOne's wait for the lock
+// a reload holds ends with its caller's context: one already done returns its error without
+// waiting, and one whose deadline passes while it waits returns then.
+func TestARereadWaitsForTheWriterLockOnlyWhileItsCallerDoes(t *testing.T) {
+	cur := heldCurrent(t)
+	done, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := rereadWithin(t, cur, done, "NEW_KEY"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("RefreshOne with its context done = %v, want context.Canceled", err)
+	}
+	expiring, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if err := rereadWithin(t, cur, expiring, "NEW_KEY"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("RefreshOne whose deadline passed while it waited = %v, want context.DeadlineExceeded", err)
+	}
+}
+
+// hangingLister answers page until hang is set, and from then on waits for its context to end and
+// answers its error, as the SDK does: a Secrets Manager that has stopped answering.
+type hangingLister struct {
+	page *secretsmanager.ListSecretsOutput
+	hang atomic.Bool
+}
+
+func (h *hangingLister) ListSecrets(ctx context.Context, _ *secretsmanager.ListSecretsInput, _ ...func(*secretsmanager.Options)) (*secretsmanager.ListSecretsOutput, error) {
+	if h.hang.Load() {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	return h.page, nil
+}
+
+// TestAReloadGivesUpWithinItsInterval pins that a periodic reload whose Secrets Manager stops
+// answering fails once its interval has passed, logging LoadFailedMessage, rather than holding the
+// writer lock every reread waits on for as long as the process lives.
+func TestAReloadGivesUpWithinItsInterval(t *testing.T) {
+	store := secrets.NewLocal()
+	page, err := store.ListSecrets(context.Background(), &secretsmanager.ListSecretsInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lister := &hangingLister{page: page}
+	loader := policytest.Loader(store)
+	loader.Secrets = lister
+	logged := policytest.CaptureLog(t)
+	cur, err := policy.NewCurrent(t.Context(), loader, 50*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lister.hang.Store(true)
+	await(t, func() bool { return strings.Contains(logged.String(), policy.LoadFailedMessage) })
+	lister.hang.Store(false)
+	if err := rereadWithin(t, cur, context.Background(), "NEW_KEY"); err != nil {
+		t.Fatalf("RefreshOne after the hung reload gave up = %v", err)
+	}
+}

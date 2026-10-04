@@ -4,7 +4,6 @@ import (
 	"context"
 	"log/slog"
 	"maps"
-	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -20,18 +19,21 @@ const listLag = 5 * time.Minute
 type Current struct {
 	loader Loader
 	set    atomic.Pointer[Set]
-	// mu is held by every writer, Refresh and RefreshOne, from its read of Secrets Manager to its
-	// Store, so neither stores a set built on one the other has since replaced. It guards recent.
-	mu sync.Mutex
+	// mu is the writer lock, held by every writer, Refresh and RefreshOne, from its read of Secrets
+	// Manager to its Store, so neither stores a set built on one the other has since replaced. It
+	// guards recent. It is a one-slot channel so a writer waiting for it gives up when its context
+	// ends (lock).
+	mu chan struct{}
 	// recent is when RefreshOne last reread each name, until listLag has passed.
 	recent map[string]time.Time
 	now    func() time.Time
 }
 
 // NewCurrent loads the policy once, failing when that load fails, and then reloads it every
-// interval until ctx ends.
+// interval until ctx ends, each reload given that interval before it fails, so one stuck on a
+// Secrets Manager that does not answer holds the writer lock no longer.
 func NewCurrent(ctx context.Context, loader Loader, every time.Duration) (*Current, error) {
-	c := &Current{loader: loader, recent: map[string]time.Time{}, now: time.Now}
+	c := &Current{loader: loader, mu: make(chan struct{}, 1), recent: map[string]time.Time{}, now: time.Now}
 	if err := c.Refresh(ctx); err != nil {
 		return nil, err
 	}
@@ -43,7 +45,10 @@ func NewCurrent(ctx context.Context, loader Loader, every time.Duration) (*Curre
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				if err := c.Refresh(ctx); err != nil {
+				reload, cancel := context.WithTimeout(ctx, every)
+				err := c.Refresh(reload)
+				cancel()
+				if err != nil {
 					slog.Error(LoadFailedMessage, "error", err)
 				}
 			}
@@ -52,13 +57,31 @@ func NewCurrent(ctx context.Context, loader Loader, every time.Duration) (*Curre
 	return c, nil
 }
 
+// lock takes the writer lock, or answers ctx's error, holding nothing, once ctx has ended first.
+func (c *Current) lock(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	select {
+	case c.mu <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// unlock releases the writer lock lock took.
+func (c *Current) unlock() { <-c.mu }
+
 // Refresh loads the policy now and, when the load succeeds, makes it the live one. A name
 // RefreshOne reread within listLag of the moment this reload began - before its listing was
 // fetched - is read again alone and kept as that read finds it, since the full listing may not
 // show the change yet; any failed read fails the refresh.
 func (c *Current) Refresh(ctx context.Context) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	if err := c.lock(ctx); err != nil {
+		return err
+	}
+	defer c.unlock()
 	// The window is measured from before the listing is fetched: a listing read inside it may lag
 	// a reread however long Load takes to return.
 	now := c.now()
@@ -104,8 +127,10 @@ func (c *Current) RefreshOne(ctx context.Context, name string) (Lookup, error) {
 	if err := c.CheckName(name); err != nil {
 		return Lookup{}, err
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	if err := c.lock(ctx); err != nil {
+		return Lookup{}, err
+	}
+	defer c.unlock()
 	lk, err := c.loader.LoadOne(ctx, name)
 	if err != nil {
 		return Lookup{}, err
