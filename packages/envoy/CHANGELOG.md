@@ -100,6 +100,17 @@
   only a pull request, an issue or a commit's check runs. `DISPATCH_ALLOWED_LOGINS` and
   `DISPATCH_APP_CLIENT_SECRET` are removed and refused at boot; GitHub OAuth sign-in, the per-user
   GitHub token table (`users`, dropped by `0068`) and the GraphQL proxy are gone.
+- Dispatch stores each person's sign-in pool refresh token sealed (`people.refresh_token`):
+  AES-256-GCM under a key derived from `DISPATCH_SIGNING_KEY` with HKDF and a fixed purpose label,
+  the person's email as additional data, in a `v1:`-prefixed format. A database backup without the
+  signing key no longer holds a refresh token the pool would accept. A stored value that does not
+  open (another signing key, another person's row, any other format) counts as no refresh token:
+  Dispatch forgets it, logs `dispatch: a stored refresh token did not open; the person signs in
+  again` once at WARN without the value, and the person signs in again. Migration `0069` forgets
+  the refresh tokens stored in plain text, so everyone who signed in through the pool before this
+  release signs in again once after it deploys; its census counts those tokens, and the pre-deploy
+  census refuses for that count alone, as `0068`'s did for its own. Rotating `DISPATCH_SIGNING_KEY`
+  now drops every stored refresh token as well as every session.
 - A blank approval-request `summary` is refused (`400 SUMMARY_INPUT`) with text that asks for what
   the human is approving, rather than for what the version proposes that the human has not agreed
   to, and the advice in `409 APPROVAL_WAITS_ON_HUMAN` and in an approval ask's `409 ASK_KIND_FIXED`
