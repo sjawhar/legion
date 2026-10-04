@@ -691,10 +691,9 @@ gives that configuration nothing to take. Run no command in it that holds a toke
 
 ### Tree sizing: one tree per node
 
-The pool's floor, not the pod, decides node size. Legion pods carry no instance-size selector and
-no resource requests. The `legion` NodePool's `karpenter.k8s.aws/instance-cpu Gt 3` and
-`karpenter.k8s.aws/instance-memory Gt 65535` requirements make Karpenter launch the cheapest type
-with at least 4 vCPU and 64 GiB.
+The pool's floor, not the pod, decides node size. Legion pods carry no
+`karpenter.k8s.aws/instance-cpu` selector and no resource requests. The `legion` NodePool's
+`karpenter.k8s.aws/instance-cpu Gt 3` requirement makes Karpenter launch the cheapest 4-vCPU type.
 
 Every tree pod carries two rules:
 - a required pod affinity to the pods of its own tree, since the volume attaches to one node;
@@ -704,15 +703,10 @@ Every tree pod carries two rules:
 So concurrent trees never share a node. Requests stay unset because under required colocation the
 first pod placed decides the node, and a request on a later pod would strand it.
 
-**The bound.** A tree pod's anti-affinity names no project, since a second tree of any project
-would overrun a node sized for one. It has no `namespaceSelector` either, so it applies only within
-the pod's own namespace. One tree per node therefore holds across every project whose daemon shares
-the `legion` pool only while all of them run their trees in the same namespace (`legion` today);
-a daemon in another namespace could place a tree on a node another namespace's tree holds. Under
-that condition, the pool's limits divided by the node size its floor sets cap the trees running at
-once across all projects together. With the floor at `instance-memory Gt 65535` (64 GiB) and
-`limits.memory: 256Gi`, that is four. An `admission_cap` (summed over the daemons sharing the pool)
-above that admits trees whose pods stay Pending until a node frees.
+**The bound.** The pool's `limits.cpu: 64`, with one tree per 4-vCPU node, caps concurrently running
+trees at **16**. The TypeScript production configuration runs `admission_cap: 29`. Stage 7's cutover
+raises the `legion` NodePool's `limits.cpu` to at least `4 × admission_cap`; until
+then an `admission_cap` above 16 admits trees whose pods cannot schedule.
 
 ### Trust model: the provisioning token
 
@@ -964,14 +958,11 @@ issue's pod (every role container of it alike) and the image probe's.
   refused at load.
 - **Settings order.** Oh My Pi reads `PI_CONFIG_FILES` in order, each overlay outranking the ones
   before it and all of them outranking a repository's `.omp/config.yml`. Legion writes the pod
-  baseline's overlay (remote compaction, memory backends, image URLs and dev auto-QA off; Python
-  eval off) and names it first, ahead of the operator's, so the operator's overlay outranks it.
-  The worker image supplies no Oh My Pi Python kernel: JavaScript eval stays enabled by OMP's
-  default, while an operator whose image supplies a compatible kernel may set `eval.py: true`.
-  The baseline also sets `OTEL_SDK_DISABLED=true` and `PI_AUTO_QA=0` unless the pod sets them, and
-  keeps the operator's value when it does. It sets `PI_CONFIG_DIR=.omp` and
-  `OMP_SESSION_STORAGE=file`, which an operator's pod may not set, since they decide where Oh My
-  Pi keeps the session a resume reads.
+  baseline's overlay (remote compaction, memory backends, image URLs and dev auto-QA off) and names
+  it first, ahead of the operator's, so the operator's overlay outranks it. The baseline also sets
+  `OTEL_SDK_DISABLED=true` and `PI_AUTO_QA=0` unless the pod sets them, and keeps the operator's value
+  when it does. It sets `PI_CONFIG_DIR=.omp` and `OMP_SESSION_STORAGE=file`, which an operator's pod
+  may not set, since they decide where Oh My Pi keeps the session a resume reads.
 - **Model roles.** Legion's shipped agents dispatch by role alias: `oracle` and the planner's
   `plan-gap-analyst` as `@oracle`; both review agents and the planner's `plan-reviewer` as
   `@review`; and `deep-worker`, which writes the implementer's code, as `@deep`. The boot gate
