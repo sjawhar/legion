@@ -5,6 +5,9 @@ import (
 	"maps"
 	"regexp"
 	"slices"
+
+	"github.com/yuin/goldmark/ast"
+	extensionast "github.com/yuin/goldmark/extension/ast"
 )
 
 // TaskProgress is a document's task-list items counted: Total every list item that carries a
@@ -12,6 +15,56 @@ import (
 type TaskProgress struct {
 	Done  int
 	Total int
+}
+
+// CountTasksMarkdown is CountTasks of a stored rendering read as markdown alone: the task items
+// goldmark's tree holds, counted before the Proof schema's refusals (refuseBlocks, Validate) and
+// without converting the tree. A document the schema refuses - a table row holding text past
+// its table's width, an html block, an unsupported directive - still has its checkboxes read
+// exactly as Parse would read them, since the task-list extension sets each item's checkbox on
+// the goldmark tree and conversion only copies it (parseListItem). So the reconciliation counts a
+// spec whose table the browser editor cannot hold rather than reporting no progress for it, which
+// three production specs did on the first deploy (LEGION-542). The one refusal kept is the
+// reader's own: markdown nested past its bounds or over its element budget is not read at all,
+// and is the error. A task item emptied of its text is skipped as CountTasks skips it, so the two
+// agree on every document both can read.
+func CountTasksMarkdown(markdown string) (TaskProgress, error) {
+	source := []byte(LineFeeds(markdown))
+	_, rest, _ := parseFrontmatterBlock(source)
+	source = source[rest:]
+	root, _, _, err := blockReader.read(source, false, readBackBudget(), 0)
+	if err != nil {
+		return TaskProgress{}, err
+	}
+	var progress TaskProgress
+	err = ast.Walk(root, func(node ast.Node, entering bool) (ast.WalkStatus, error) {
+		if !entering {
+			return ast.WalkContinue, nil
+		}
+		item, ok := node.(*ast.ListItem)
+		if !ok {
+			return ast.WalkContinue, nil
+		}
+		first := item.FirstChild()
+		if first == nil {
+			return ast.WalkContinue, nil
+		}
+		checkbox, ok := first.FirstChild().(*extensionast.TaskCheckBox)
+		if !ok {
+			return ast.WalkContinue, nil
+		}
+		// The checkbox is the paragraph's first inline; an item whose paragraph holds nothing
+		// else is the empty item CountTasks skips, which the renderer writes as a plain `- `.
+		if checkbox.NextSibling() == nil && first.NextSibling() == nil {
+			return ast.WalkContinue, nil
+		}
+		progress.Total++
+		if checkbox.IsChecked {
+			progress.Done++
+		}
+		return ast.WalkContinue, nil
+	})
+	return progress, err
 }
 
 // CountTasks counts the document's task items as its rendering carries them, nested lists and

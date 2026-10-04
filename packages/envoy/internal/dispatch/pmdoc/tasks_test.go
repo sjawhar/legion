@@ -1,6 +1,9 @@
 package pmdoc
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestCountTasks(t *testing.T) {
 	for _, test := range []struct {
@@ -51,5 +54,68 @@ func TestCountTasksSkipsAnEmptyTaskItem(t *testing.T) {
 	}
 	if got := CountTasks(back); got != (TaskProgress{Done: 0, Total: 1}) {
 		t.Fatalf("CountTasks of the rendering %q = %+v, want 0/1", markdown, got)
+	}
+}
+
+// A stored version whose table the Proof schema refuses still has its task items counted. The
+// shape is LEGION-130's stored spec on the first deploy: a code span holding bare pipes in a row
+// of a two-column table, which goldmark reads as six cells, so ParseRendering refuses the whole
+// document (markWideRows) and the reconciliation reported no progress at all for it; LEGION-36
+// and LEGION-179 failed the same way with three and five cells.
+func TestCountTasksMarkdownCountsPastATableTheSchemaRefuses(t *testing.T) {
+	const markdown = "## Requirements\n\n" +
+		"| Requirement | Where it comes from |\n" +
+		"| :--- | :--- |\n" +
+		"| `describePhaseHandoffProblems` renders a missing `phase` as `phase: expected one of architect|plan|implement|test|review`. | Reviewer item 4. |\n" +
+		"| `HANDOFF_SCHEMA_VERSION` stays 1. | LEGION-53 spec. |\n\n" +
+		"## Tasks\n\n" +
+		"- [x] Scope: map the server\n" +
+		"- [ ] Implement: count items\n" +
+		"  - [x] nested done\n" +
+		"- [ ] Deliver\n"
+	if _, err := ParseRendering(markdown); err == nil {
+		t.Fatal("ParseRendering accepted the wide row; the test no longer stands for a refused document")
+	} else if !strings.Contains(err.Error(), "a table row holding 6 cells where its table has 2") {
+		t.Fatalf("ParseRendering refused for another reason: %v", err)
+	}
+	got, err := CountTasksMarkdown(markdown)
+	if err != nil {
+		t.Fatalf("CountTasksMarkdown: %v", err)
+	}
+	if got != (TaskProgress{Done: 2, Total: 4}) {
+		t.Fatalf("CountTasksMarkdown = %+v, want 2/4", got)
+	}
+}
+
+// On every document both can read, CountTasksMarkdown agrees with CountTasks of the parsed tree,
+// the empty item and front matter included; markdown the reader cannot read at all is the error.
+func TestCountTasksMarkdownAgreesWithCountTasks(t *testing.T) {
+	for _, markdown := range []string{
+		"A paragraph.\n",
+		"- one\n- two\n",
+		"- [ ] one\n- [x] two\n- [X] three\n",
+		"- [ ] parent\n  - [x] child\n  - [ ] child\n    - [x] grandchild\n",
+		"1. [x] one\n2. [ ] two\n",
+		":::callout{#c1 kind=\"note\" title=\"T\"}\n- [x] inside\n- [ ] inside\n:::\n\n- [ ] outside\n",
+		"> - [x] quoted\n",
+		"```\n- [ ] not a task\n```\n\n- [x] real\n",
+		"- [x](https://example.com) link\n",
+		"---\ntitle: Spec\n---\n\n- [x] after front matter\n- [ ] two\n",
+		"- [ ] \n- [x] real\n",
+	} {
+		doc, err := ParseRendering(markdown)
+		if err != nil {
+			t.Fatalf("ParseRendering(%q): %v", markdown, err)
+		}
+		fromMarkdown, err := CountTasksMarkdown(markdown)
+		if err != nil {
+			t.Fatalf("CountTasksMarkdown(%q): %v", markdown, err)
+		}
+		if fromTree := CountTasks(doc); fromMarkdown != fromTree {
+			t.Fatalf("CountTasksMarkdown(%q) = %+v, CountTasks = %+v", markdown, fromMarkdown, fromTree)
+		}
+	}
+	if _, err := CountTasksMarkdown(strings.Repeat("> ", 200) + "- [x] deep\n"); err == nil {
+		t.Fatal("CountTasksMarkdown read markdown nested past the reader's bound")
 	}
 }
