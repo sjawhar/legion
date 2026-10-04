@@ -694,8 +694,9 @@ func sameLocator(a, b runtime.Locator) bool {
 		(a.Sandbox == nil) == (b.Sandbox == nil) && (a.Sandbox == nil || *a.Sandbox == *b.Sandbox)
 }
 
-// startRuntime binds a fresh listener on the devbox's private address and builds a fresh runtime
-// on it, as a daemon boot does, with an Observe feeding the run's observation record.
+// startRuntime binds a fresh listener on the devbox's private address, builds a fresh runtime on
+// it and registers the runtime's launcher acceptor, as a daemon boot does (sandboxRuntime), with an
+// Observe feeding the run's observation record.
 func (r *liveRig) startRuntime() error {
 	if r.tokens.apps == nil {
 		if err := r.resolveApp(); err != nil {
@@ -733,6 +734,7 @@ func (r *liveRig) startRuntime() error {
 		stop()
 		return err
 	}
+	ln.SetLauncherResolver(rt.LauncherResolver())
 	observe, err := rt.Observe(ctx)
 	if err != nil {
 		stop()
