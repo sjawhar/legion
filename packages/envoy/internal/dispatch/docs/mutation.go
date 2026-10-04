@@ -24,6 +24,9 @@ import (
 type versionPending struct {
 	generation uint64
 	authors    map[string]model.Actor
+	// creditSeq is the room's creditVersion when this capture read state.pending, the point a
+	// later credit must be at or before to count as already captured here (releaseSettlementCredit).
+	creditSeq uint64
 }
 
 type versionWrite struct {
@@ -574,24 +577,6 @@ func (s *Service) SnapshotVersion(ctx context.Context, artifactID string, actor 
 		return VersionResult{}, err
 	}
 	return VersionResult{Version: result.version, Wrote: true, Changes: result.changes}, nil
-}
-
-// commitVersion clears authors consumed by a version only after its enclosing transaction has
-// committed (Ledger.Commit).
-func (s *Service) commitVersion(artifactID string, version model.Version) {
-	state := s.lockState(artifactID)
-	defer s.unlockState(artifactID, state)
-	capture, ok := state.pendingVersions[version.Number]
-	if !ok {
-		return
-	}
-	delete(state.pendingVersions, version.Number)
-	if state.gen != capture.generation {
-		return
-	}
-	for key := range capture.authors {
-		delete(state.pending, key)
-	}
 }
 
 func (s *Service) discardPendingVersion(room string, version model.Version) {
@@ -1150,7 +1135,7 @@ func captureAuthors(state *roomState, write *liveWrite, actor *model.Actor) (ver
 	if actor != nil {
 		authors[actorKey(*actor)] = *actor
 	}
-	capture := versionPending{generation: state.gen, authors: authors}
+	capture := versionPending{generation: state.gen, authors: authors, creditSeq: state.creditVersion}
 	return capture, actorSlice(authors)
 }
 
@@ -1260,7 +1245,7 @@ func (s *Service) writeVersionTx(ctx context.Context, tx pgx.Tx, artifactID, mar
 	if write.capture != nil {
 		s.rememberPendingVersion(artifactID, version, *write.capture)
 		if ledger := ledgerFrom(ctx); ledger != nil && ledger.tx == tx {
-			ledger.recordVersion(artifactID, version)
+			ledger.recordVersion(artifactID, version, write.capture.creditSeq)
 		}
 	}
 	return versionWriteResult{version: version, changes: changes}, nil

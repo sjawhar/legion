@@ -121,6 +121,64 @@ func TestCloseAfterSettlementDoesNotRecreatePendingSettlementFromConsumedLastAct
 	}
 }
 
+// A pending-settlement row whose pending authors are JSON null, as an append that carried no credit
+// could store, still lets its document load and settle, crediting the row's last actor.
+func TestADocumentLoadsAPendingSettlementRowWithNullPendingAuthors(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour // the seed's own settlement never runs
+	ctx := context.Background()
+	seedServiceText(t, service, artifactID, ":::ask{#null-pending-ask urgency=\"med\" multiple=\"false\"}\nWho asked?\n:::\n")
+	writer := model.Actor{Kind: "session", ID: "null-pending-writer"}
+	if _, err := service.store.Pool.Exec(ctx, `
+		update doc_settlements_pending
+		set settlement_authors = jsonb_build_object('pending', null, 'last_actor', $2::jsonb)
+		where artifact_id = $1
+	`, artifactID, writer); err != nil {
+		t.Fatalf("store the pending-settlement row: %v", err)
+	}
+	service.settle = 20 * time.Millisecond
+	if err := service.warmLiveDocument(ctx, artifactID); err != nil {
+		t.Fatalf("load the document: %v", err)
+	}
+	var author model.Actor
+	waitFor(t, 30*time.Second, "the loaded document's settlement to index its ask", func() bool {
+		return service.store.Pool.QueryRow(ctx, `
+			select author from asks where block_artifact_id = $1 and block_id = 'null-pending-ask'
+		`, artifactID).Scan(&author) == nil
+	})
+	if author != writer {
+		t.Fatalf("the ask settled from a row with null pending authors is %+v's, want %+v's", author, writer)
+	}
+}
+
+// A version written while the document's pending-settlement row holds a stored null pending - the
+// same defensive shape an append that carried no credit, or a hand-written row, could leave -
+// still commits: releaseSettlementCredit must guard the scalar the same way upsertSettlementCredit
+// does, or the whole transaction rolls back on "cannot delete from scalar".
+func TestANamedVersionReleasesAuthorsOverANullPendingRow(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	ctx := context.Background()
+	seedServiceText(t, service, artifactID, "# Decision\n\nContext.\n")
+	if _, err := service.store.Pool.Exec(ctx, `
+		update doc_settlements_pending
+		set settlement_authors = jsonb_build_object('pending', null, 'last_actor', $2::jsonb)
+		where artifact_id = $1
+	`, artifactID, model.Actor{Kind: "session", ID: "earlier-writer"}); err != nil {
+		t.Fatalf("store a null-pending settlement row: %v", err)
+	}
+	writer := model.Actor{Kind: "session", ID: "versioned-writer"}
+	writeThroughLedger(t, service, artifactID, writer, "Versioned writer's paragraph.\n", withNamedVersion)
+
+	if authors := latestVersionAuthors(t, service, artifactID); !reflect.DeepEqual(authors, []model.Actor{writer}) {
+		t.Fatalf("version written over a null-pending row credits %+v, want %+v alone", authors, writer)
+	}
+	credit := readSettlementCredit(t, service.store, artifactID)
+	if len(credit.Pending) != 0 {
+		t.Fatalf("pending settlement credit after a version released a null-pending row = %+v, want empty", credit.Pending)
+	}
+}
+
 // Two sessions that each write a document inside the settle delay are both credited on the version
 // a later process settles, when the process that took their writes ended without settling them.
 func TestTwoCreditedWritersBothSurviveACrashRestart(t *testing.T) {
@@ -302,6 +360,70 @@ func TestAVersionedAuthorIsNotCreditedAgainAfterACrashRestart(t *testing.T) {
 	waitForAskAuthor(t, restarted, artifactID, asking)
 }
 
+// A browser edit the room observes while an API edit's own version is still open is credited only
+// once. The version's capture already read carol from the room's pending authors (she is in
+// `state.pending` as soon as the room observes her edit, before her own durable append runs), and
+// its release takes her back out of the durable row; carol's own durable append - queued behind
+// the version's transaction, which holds the document's advisory lock for its whole duration - must
+// not then replay the stale pending snapshot it captured before the release ran. Reproduces the
+// round-6 regression: without the release-sequence watermark, the reopened document's next version
+// credited carol again alongside delta.
+func TestABrowserEditQueuedBehindAnOpenVersionIsNotCreditedAgainAfterAReopen(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour // no settlement runs between the edits
+	ctx := context.Background()
+	seedServiceText(t, service, artifactID, "# Decision\n\nContext.\n")
+
+	carol := model.Actor{Kind: "session", ID: "carol-session"}
+	agent := model.Actor{Kind: "session", ID: "agent-session"}
+	delta := model.Actor{Kind: "session", ID: "delta-session"}
+
+	// Hold the document's advisory lock for the whole agent transaction, as ApplyOps does for a
+	// joined write (lockDocumentRoom), so carol's durable append queues behind it.
+	tx, err := service.store.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the agent's transaction: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	joined, ledger := service.Join(ctx, tx)
+	defer ledger.Discard()
+	if _, err := service.ApplyOps(joined, artifactID, []model.EditOp{{Op: "insert", After: "end", Markdown: "Agent's paragraph.\n"}}, agent, nil); err != nil {
+		t.Fatalf("apply the agent's edit: %v", err)
+	}
+
+	// Carol's direct write takes the room path a browser edit takes (creditContentChange), while
+	// the agent's transaction still holds the document's advisory lock, so her durable append -
+	// which the room's persistence worker drives asynchronously - queues behind it.
+	if _, err := service.ReplaceText(context.Background(), artifactID, "# Decision\n\nContext.\n\nCarol's paragraph.\n", carol); err != nil {
+		t.Fatalf("replace text as carol: %v", err)
+	}
+	if !service.hasDurableAppend(artifactID) {
+		t.Fatal("carol's durable append finished before the agent's transaction released the document lock")
+	}
+
+	result, err := service.SnapshotVersion(joined, artifactID, agent)
+	if err != nil {
+		t.Fatalf("snapshot the agent's version: %v", err)
+	}
+	if authors := result.Version.Authors; len(authors) < 2 {
+		t.Fatalf("agent's version authors = %+v, want at least the agent and carol", authors)
+	}
+	if err := ledger.Commit(ctx); err != nil {
+		t.Fatalf("commit the agent's transaction: %v", err)
+	}
+
+	// Carol's queued append can now take the lock the commit released.
+	waitForPersistedUpdates(t, service, artifactID, 2)
+
+	closeTestIssue(t, service)
+	reopenTestIssue(t, service)
+	writeThroughLedger(t, service, artifactID, delta, "Delta's paragraph.\n", withSnapshotVersion)
+
+	if authors := latestVersionAuthors(t, service, artifactID); !reflect.DeepEqual(authors, []model.Actor{delta}) {
+		t.Fatalf("the reopened document's next version credits %+v, want %+v alone", authors, delta)
+	}
+}
+
 // A document update that carries no credit, such as a browser change that renders nothing new,
 // keeps every pending author already recorded for the document's settlement.
 func TestSettlementCreditKeepsExistingPendingAcrossUncreditedAppend(t *testing.T) {
@@ -309,8 +431,8 @@ func TestSettlementCreditKeepsExistingPendingAcrossUncreditedAppend(t *testing.T
 	artifactID := createDocuments(t, database, 1)[0]
 	writer := model.Actor{Kind: "session", ID: "credited-writer"}
 
-	appendSettlementCredit(t, database, artifactID, creditOf(&writer, writer))
-	appendSettlementCredit(t, database, artifactID, settlementCredit{})
+	appendSettlementCredit(t, database, artifactID, creditOf(&writer, writer), 0)
+	appendSettlementCredit(t, database, artifactID, settlementCredit{}, 0)
 
 	credit := readSettlementCredit(t, database, artifactID)
 	if _, kept := credit.Pending[settlementCreditKey(writer)]; !kept {
@@ -330,8 +452,11 @@ func TestSettlementCreditMergesPendingAuthors(t *testing.T) {
 	cases := []struct {
 		name     string
 		existing settlementCredit
-		next     settlementCredit
-		want     settlementCredit
+		// storedAuthors, when set, replaces what the existing append stored, as a row written by
+		// another build - or a null pending an uncredited append could leave - can hold.
+		storedAuthors string
+		next          settlementCredit
+		want          settlementCredit
 	}{
 		{name: "empty then empty", want: creditOf(nil)},
 		{name: "existing then none", existing: creditOf(&alice, alice, bob), want: creditOf(&alice, alice, bob)},
@@ -348,14 +473,27 @@ func TestSettlementCreditMergesPendingAuthors(t *testing.T) {
 			next:     creditOf(nil, bob, carol),
 			want:     creditOf(nil, alice, bob, carol),
 		},
+		{
+			name:          "a stored null pending then new",
+			storedAuthors: `{"pending": null, "last_actor": {"kind": "session", "id": "alice"}}`,
+			next:          creditOf(&carol, carol),
+			want:          creditOf(&carol, carol),
+		},
 	}
 	database := storetest.Open(t)
 	artifactIDs := createDocuments(t, database, len(cases))
 	for index, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
 			artifactID := artifactIDs[index]
-			appendSettlementCredit(t, database, artifactID, test.existing)
-			appendSettlementCredit(t, database, artifactID, test.next)
+			appendSettlementCredit(t, database, artifactID, test.existing, 0)
+			if test.storedAuthors != "" {
+				if _, err := database.Pool.Exec(context.Background(), `
+					update doc_settlements_pending set settlement_authors = $2::jsonb where artifact_id = $1
+				`, artifactID, test.storedAuthors); err != nil {
+					t.Fatalf("store the existing settlement authors: %v", err)
+				}
+			}
+			appendSettlementCredit(t, database, artifactID, test.next, 0)
 
 			got := readSettlementCredit(t, database, artifactID)
 			if !maps.EqualFunc(got.Pending, test.want.Pending, func(a, b model.Actor) bool { return reflect.DeepEqual(a, b) }) ||
@@ -375,8 +513,10 @@ func creditOf(lastActor *model.Actor, pending ...model.Actor) settlementCredit {
 	return settlementCreditFor(authors, lastActor)
 }
 
-// appendSettlementCredit records credit as a document update's own transaction does.
-func appendSettlementCredit(t *testing.T, database *store.Store, artifactID string, credit settlementCredit) {
+// appendSettlementCredit records credit as a document update's own transaction does. sequence is
+// the room's creditVersion the credit was captured at (0 when the test does not exercise the
+// release-gating watermark).
+func appendSettlementCredit(t *testing.T, database *store.Store, artifactID string, credit settlementCredit, sequence uint64) {
 	t.Helper()
 	ctx := context.Background()
 	tx, err := database.Pool.Begin(ctx)
@@ -384,7 +524,7 @@ func appendSettlementCredit(t *testing.T, database *store.Store, artifactID stri
 		t.Fatalf("begin the append: %v", err)
 	}
 	defer tx.Rollback(ctx)
-	if err := markSettlementPending(ctx, tx, artifactID, credit); err != nil {
+	if err := markSettlementPending(ctx, tx, artifactID, credit, sequence); err != nil {
 		t.Fatalf("record the append's settlement credit: %v", err)
 	}
 	if err := tx.Commit(ctx); err != nil {

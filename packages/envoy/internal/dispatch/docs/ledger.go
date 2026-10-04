@@ -45,6 +45,9 @@ type Ledger struct {
 type ledgerVersion struct {
 	artifactID string
 	version    model.Version
+	// creditSeq is the room's creditVersion as of this version's author capture
+	// (captureAuthors), the point recordSettlementCredit's release must record as consumed.
+	creditSeq uint64
 }
 
 type ledgerContextKey struct{}
@@ -117,6 +120,18 @@ func (l *Ledger) publishEvents() {
 
 // commit is Commit up to the publish. Another transaction can run between the two, and tests
 // call them apart to hold that window open.
+//
+// Every artifact a version in this transaction names is locked (state.mu) before the commit and
+// held through that version's own in-memory release (commitVersionLocked): an append queued
+// behind the document's advisory lock, which this commit also holds until it returns, can take
+// that lock the instant this commit drops it. Without this, such an append could run
+// creditContentChange between the durable release (inside this transaction, before commit) and
+// commitVersion (today, after it) and read the room's pending as it stood before the release,
+// bundling an author this version already credited into its own snapshot - which the durable
+// release's sequence watermark cannot catch, since that snapshot's own sequence is genuinely
+// newer. Locking state.mu for the same span closes that window: no creditContentChange or
+// captureAuthors call for this artifact can run until this whole commit, release included, has
+// finished.
 func (l *Ledger) commit(ctx context.Context) error {
 	if err := l.recordSettlementCredit(ctx); err != nil {
 		_ = l.tx.Rollback(context.Background())
@@ -124,17 +139,29 @@ func (l *Ledger) commit(ctx context.Context) error {
 		l.fail(err)
 		return err
 	}
+	locked := make(map[string]*roomState, len(l.versions))
+	for _, written := range l.versions {
+		if _, ok := locked[written.artifactID]; !ok {
+			locked[written.artifactID] = l.service.lockState(written.artifactID)
+		}
+	}
 	err := l.tx.Commit(ctx)
 	// The transaction has ended whichever way the commit went, so a rebuild's room reads the
 	// history the commit left from here.
 	l.endRebuilds()
 	if err != nil {
+		for artifactID, state := range locked {
+			l.service.unlockState(artifactID, state)
+		}
 		l.fail(err)
 		return err
 	}
-	l.credit()
+	l.creditLocked(locked)
 	for _, written := range l.versions {
-		l.service.commitVersion(written.artifactID, written.version)
+		commitVersionLocked(locked[written.artifactID], written.version)
+	}
+	for artifactID, state := range locked {
+		l.service.unlockState(artifactID, state)
 	}
 	l.versions = nil
 	return nil
@@ -165,8 +192,8 @@ func (l *Ledger) endRebuilds() {
 	l.rebuilds = nil
 }
 
-func (l *Ledger) recordVersion(artifactID string, version model.Version) {
-	l.versions = append(l.versions, ledgerVersion{artifactID: artifactID, version: version})
+func (l *Ledger) recordVersion(artifactID string, version model.Version, creditSeq uint64) {
+	l.versions = append(l.versions, ledgerVersion{artifactID: artifactID, version: version, creditSeq: creditSeq})
 }
 
 func (l *Ledger) liveWriteFor(artifactID string) *liveWrite {
@@ -202,10 +229,26 @@ func (l *Ledger) addLiveWrite(write *liveWrite) {
 // the transaction that wrote the document, then takes out the authors each version it wrote
 // credited, as commitVersion takes them out of the room once the transaction commits. The durable
 // row therefore commits or rolls back with its content, before the request context can be canceled
-// after commit, and owes no author a version already credited.
+// after commit, and owes no author a version already credited. An author the same transaction's
+// own version immediately releases is never upserted at all: the version already records it
+// durably, so paying an upsert the release loop below would undo is wasted work.
 func (l *Ledger) recordSettlementCredit(ctx context.Context) error {
+	released := make(map[string]map[string]struct{}, len(l.versions))
+	for _, written := range l.versions {
+		keys := released[written.artifactID]
+		if keys == nil {
+			keys = make(map[string]struct{}, len(written.version.Authors))
+			released[written.artifactID] = keys
+		}
+		for _, actor := range written.version.Authors {
+			keys[actorKey(actor)] = struct{}{}
+		}
+	}
 	for artifactID, actor := range l.seeds {
-		if err := upsertSettlementCredit(ctx, l.tx, artifactID, settlementCreditFor(nil, &actor), false); err != nil {
+		if _, consumed := released[artifactID][actorKey(actor)]; consumed {
+			continue
+		}
+		if err := upsertSettlementCredit(ctx, l.tx, artifactID, settlementCreditFor(nil, &actor), false, 0); err != nil {
 			return err
 		}
 	}
@@ -214,41 +257,91 @@ func (l *Ledger) recordSettlementCredit(ctx context.Context) error {
 		if len(write.credits) == 0 {
 			continue
 		}
-		if err := upsertSettlementCredit(ctx, l.tx, artifactID, settlementCreditFor(write.credits, write.actor), false); err != nil {
+		consumed := released[artifactID]
+		pending := write.credits
+		if len(consumed) > 0 {
+			pending = make(map[string]model.Actor, len(write.credits))
+			for key, credited := range write.credits {
+				if _, done := consumed[key]; !done {
+					pending[key] = credited
+				}
+			}
+		}
+		lastActor := write.actor
+		if lastActor != nil {
+			if _, done := consumed[actorKey(*lastActor)]; done {
+				lastActor = nil
+			}
+		}
+		if len(pending) == 0 && lastActor == nil {
+			continue
+		}
+		if err := upsertSettlementCredit(ctx, l.tx, artifactID, settlementCreditFor(pending, lastActor), false, 0); err != nil {
 			return err
 		}
 	}
 	for _, written := range l.versions {
-		if err := releaseSettlementCredit(ctx, l.tx, written.artifactID, written.version.Authors); err != nil {
+		if err := releaseSettlementCredit(ctx, l.tx, written.artifactID, written.version.Authors, written.creditSeq); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// credit mirrors committed settlement credit into each room before the transaction's versions
-// release their captured authors and before its live writes publish.
-func (l *Ledger) credit() {
+// creditLocked mirrors committed settlement credit into each room before the transaction's
+// versions release their captured authors and before its live writes publish. locked holds the
+// states commit already locked for this transaction's own versions, keyed by artifact id; an
+// artifact this loop touches that is not among them is locked and unlocked here as before.
+func (l *Ledger) creditLocked(locked map[string]*roomState) {
 	for artifactID, actor := range l.seeds {
-		state := l.service.lockState(artifactID)
+		state, preLocked := locked[artifactID]
+		if !preLocked {
+			state = l.service.lockState(artifactID)
+		}
 		state.lastActor = new(actor)
 		state.unsettled = true
 		state.creditVersion++
-		l.service.unlockState(artifactID, state)
+		if !preLocked {
+			l.service.unlockState(artifactID, state)
+		}
 	}
 	for _, artifactID := range l.order {
 		write := l.live[artifactID]
 		if len(write.credits) == 0 {
 			continue
 		}
-		state := l.service.lockState(artifactID)
+		state, preLocked := locked[artifactID]
+		if !preLocked {
+			state = l.service.lockState(artifactID)
+		}
 		for key, actor := range write.credits {
 			state.pending[key] = actor
 		}
 		state.lastActor = write.actor
 		state.unsettled = true
 		state.creditVersion++
-		l.service.unlockState(artifactID, state)
+		if !preLocked {
+			l.service.unlockState(artifactID, state)
+		}
+	}
+}
+
+// commitVersionLocked is commitVersion given a state the caller already holds locked (state.mu):
+// Ledger.commit locks every version's artifact before it commits and calls this, still holding
+// it, right after, so the room's pending map loses a version's authors no later than the
+// transaction that released them from the durable row - the two critical sections, this lock and
+// the document's advisory lock the same commit held, start and end together.
+func commitVersionLocked(state *roomState, version model.Version) {
+	capture, ok := state.pendingVersions[version.Number]
+	if !ok {
+		return
+	}
+	delete(state.pendingVersions, version.Number)
+	if state.gen != capture.generation {
+		return
+	}
+	for key := range capture.authors {
+		delete(state.pending, key)
 	}
 }
 
