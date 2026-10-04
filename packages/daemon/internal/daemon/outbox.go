@@ -71,18 +71,18 @@ type outbox struct {
 	now             func() time.Time
 	provision       func(context.Context, workspace.Request) (workspace.Workspace, error)
 	remove          func(context.Context, workspace.Workspace) error
-	// githubAPI is the GitHub REST root an issue_branch row creates its issue's branch under; empty,
-	// in production, is https://api.github.com, and a test points it at a stand-in.
+	// githubAPI is the GitHub REST root an issue_branch row creates its issue's branch under: the
+	// workflow's (workflowRuntime.githubAPI), which empty, in production, is https://api.github.com.
 	githubAPI string
 }
 
-func newOutbox(pool *pgxpool.Pool, records record.Store, client dispatch.Client, publisher notify.Publisher, supervisor *supervisor, tokens appauth.Tokens, handlers []intake.Handler, project, dispatchProject, stateDir string, configured config.Project, tools map[string]string, log *slog.Logger) *outbox {
+func newOutbox(pool *pgxpool.Pool, records record.Store, client dispatch.Client, publisher notify.Publisher, supervisor *supervisor, tokens appauth.Tokens, handlers []intake.Handler, project, dispatchProject, stateDir string, configured config.Project, githubAPI string, tools map[string]string, log *slog.Logger) *outbox {
 	if log == nil {
 		log = slog.Default()
 	}
 	return &outbox{
 		pool: pool, records: records, dispatch: client, notices: publisher, supervisor: supervisor, tokens: tokens,
-		handlers: handlers, project: project, dispatchProject: dispatchProject, stateDir: stateDir, repo: configured.Repo,
+		handlers: handlers, project: project, dispatchProject: dispatchProject, stateDir: stateDir, repo: configured.Repo, githubAPI: githubAPI,
 		log: log, now: time.Now,
 		// WarmCodegraphIndexInBackground runs here, never in provisionWorkspace: every outbox
 		// test injects its own `provision`, so only this production closure starts codegraph.

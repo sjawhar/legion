@@ -109,12 +109,14 @@ func TestAnotherProjectsIssuesAreNotThisDaemonsToAdmit(t *testing.T) {
 	}))
 	t.Cleanup(dispatchServer.Close)
 	cfg.DispatchURL = dispatchServer.URL
+	github := newBranchGitHub(t, nil, branchCreated)
 	runCtx, cancel := context.WithCancel(ctx)
 	done := make(chan error, 1)
 	go func() {
 		done <- run(runCtx, cfg, quietLogger(), overrides{
 			listen:  heldListen,
 			runtime: fakeRuntime(fake.NewRuntime(), &built{}).runtime, clock: stillClock{}, workflowTokens: &workflowTokenRecorder{},
+			githubAPI: github.url,
 		})
 	}()
 	t.Cleanup(func() {

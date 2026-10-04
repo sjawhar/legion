@@ -90,6 +90,10 @@ type overrides struct {
 	// workflowTokens replaces the GitHub App token manager in a workflow integration test. The
 	// production daemon always mints through appauth.New.
 	workflowTokens appauth.Tokens
+	// githubAPI is the GitHub REST root a workflow integration test points the workflow at (its
+	// required-checks reads and its issue branches' creates); empty, in production, is
+	// https://api.github.com.
+	githubAPI string
 	// listen opens the API listener; nil is net.Listen.
 	listen func(network, address string) (net.Listener, error)
 }
@@ -153,7 +157,7 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 	}
 	// The App mint waits out GitHub's transient failures, which the boot budget does not bound, as
 	// it does not bound the plugin gate or the image probe: the work after it has a budget of its own.
-	workflow, err := openWorkflow(ctx, cfg, st, plan.project, log, o.workflowTokens)
+	workflow, err := openWorkflow(ctx, cfg, st, plan.project, log, o.workflowTokens, o.githubAPI)
 	if err != nil {
 		st.Close()
 		if ctx.Err() != nil {

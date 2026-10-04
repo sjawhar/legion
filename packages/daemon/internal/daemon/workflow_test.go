@@ -55,7 +55,7 @@ func TestOpenWorkflowRefusesAReviewLoginItCannotTellFromTheImplementers(t *testi
 		"no review login":        {appauth.Implement: "legion-implementer[bot]"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, err := openWorkflow(context.Background(), cfg, nil, "project-id", log, tokens)
+			_, err := openWorkflow(context.Background(), cfg, nil, "project-id", log, tokens, "")
 			if err == nil || !strings.Contains(err.Error(), "the workflow needs two different Apps") {
 				t.Fatalf("openWorkflow = %v, want the two-Apps refusal", err)
 			}

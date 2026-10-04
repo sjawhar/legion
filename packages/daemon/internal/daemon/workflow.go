@@ -74,7 +74,8 @@ type workflowRuntime struct {
 	// means the production defaults. A test shortens both to bound how long the warning takes to
 	// observe.
 	holdWarnAfter, holdWarnEvery time.Duration
-	// githubAPI is the GitHub REST root watchRequiredChecks reads under; empty, in production, is
+	// githubAPI is the GitHub REST root the workflow calls: watchRequiredChecks reads under it, and
+	// the outbox's issue_branch rows create branches under it. Empty, in production, is
 	// https://api.github.com, and a test points it at a stand-in.
 	githubAPI string
 	// failed carries the first supervision terminal fact that could not be applied. serve stops
@@ -142,7 +143,7 @@ func mintAtBoot(ctx context.Context, tokens appauth.Tokens, owner string, log *s
 	return logins[appauth.Review], nil
 }
 
-func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, projectID string, log *slog.Logger, suppliedTokens appauth.Tokens) (*workflowRuntime, error) {
+func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, projectID string, log *slog.Logger, suppliedTokens appauth.Tokens, githubAPI string) (*workflowRuntime, error) {
 	if cfg.DispatchURL == "" {
 		return nil, nil
 	}
@@ -169,7 +170,7 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 		handlers: []intake.Handler{engine, admission}, tokens: tokens, owner: owner,
 		grants: credential.New(nil), project: project, projectID: projectID, dispatchProject: cfg.Project, stateDir: cfg.StateDir, log: log,
 		failed: make(chan error, 1), readied: map[claim.Token]bool{}, readyWake: make(chan struct{}, 1),
-		controllerWake: cfg.ControllerWakeInterval,
+		controllerWake: cfg.ControllerWakeInterval, githubAPI: githubAPI,
 	}, nil
 }
 
@@ -329,7 +330,7 @@ func (w *workflowRuntime) identity(ctx context.Context, role claim.Role) (runtim
 func (w *workflowRuntime) attach(supervision *supervision) {
 	w.log.Info("legion workflow boot stage", "stage", "outbox")
 	w.outbox = newOutbox(w.pool, w.records, w.dispatch, notify.New(supervision.cfg.EnvoyURL, supervision.plan.secrets["ENVOY_TOKEN"]), supervision.supervisor,
-		w.tokens, w.handlers, w.projectID, w.dispatchProject, w.stateDir, w.project, supervision.plan.tools, w.log)
+		w.tokens, w.handlers, w.projectID, w.dispatchProject, w.stateDir, w.project, w.githubAPI, supervision.plan.tools, w.log)
 	supervision.supervisor.OnTerminal(w.terminal)
 }
 
