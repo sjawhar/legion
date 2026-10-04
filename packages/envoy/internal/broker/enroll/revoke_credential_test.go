@@ -215,6 +215,45 @@ func TestOnlyTheApproverRevokesAMachineLogin(t *testing.T) {
 	}
 }
 
+// TestAnExpiredLoginLeavesTheListOnceItsLastSessionEnds: an expired login stays listed only while
+// a session it enrolled is live as Lookup means it, unrevoked with its lease unlapsed. One whose
+// session its launcher ended before the login expired is not listed, and one whose session's lease
+// has lapsed is not listed either, before the sweep ends that session: it renews no more.
+func TestAnExpiredLoginLeavesTheListOnceItsLastSessionEnds(t *testing.T) {
+	svc := newService(t)
+	ctx := context.Background()
+	devbox := mintApprovedCredential(t, svc, "ada@example.com", nil, "devbox")
+	laptop := mintApprovedCredential(t, svc, "ada@example.com", nil, "laptop")
+	ended, err := svc.Create(ctx, devbox, Enrollment{Kind: "host", RuntimeID: "host-devbox", Thumbprint: "tp-devbox"})
+	if err != nil {
+		t.Fatalf("Create(the devbox's session): %v", err)
+	}
+	lapsing, err := svc.Create(ctx, laptop, Enrollment{Kind: "host", RuntimeID: "host-laptop", Thumbprint: "tp-laptop"})
+	if err != nil {
+		t.Fatalf("Create(the laptop's session): %v", err)
+	}
+	if err := svc.Revoke(ctx, devbox, ended.ID.String(), "launcher:"+devbox.ID.String()); err != nil {
+		t.Fatalf("Revoke(the devbox's session) by its launcher: %v", err)
+	}
+	if _, err := svc.Store.Pool.Exec(ctx, `update launcher_credentials set expires_at = now() - interval '1 minute' where id = any($1)`, []uuid.UUID{devbox.ID, laptop.ID}); err != nil {
+		t.Fatalf("expire both logins: %v", err)
+	}
+	if got := liveCredentialIDs(t, svc, "ada@example.com"); !slices.Equal(got, []uuid.UUID{laptop.ID}) {
+		t.Fatalf("LiveCredentials(ada) once both logins expired = %v, want the laptop's (%s) alone, whose session runs; the devbox's (%s) has none left", got, laptop.ID, devbox.ID)
+	}
+
+	if _, err := svc.Store.Pool.Exec(ctx, `update enrollments set lease_expires_at = now() - interval '1 second' where id = $1`, lapsing.ID); err != nil {
+		t.Fatalf("lapse the laptop's session: %v", err)
+	}
+	var unswept bool
+	if err := svc.Store.Pool.QueryRow(ctx, `select revoked_at is null from enrollments where id = $1`, lapsing.ID).Scan(&unswept); err != nil || !unswept {
+		t.Fatalf("the laptop's lapsed session unswept = %v (%v), want true: no sweep has run", unswept, err)
+	}
+	if got := liveCredentialIDs(t, svc, "ada@example.com"); len(got) != 0 {
+		t.Fatalf("LiveCredentials(ada) once the laptop's session lapsed, before the sweep = %v, want none", got)
+	}
+}
+
 // TestAnApproverRevokesAServiceLoginAndEveryPodItEnrolled: a service's login, which has no
 // operator, is listed for the person who approved it and revoked by them alone, and revoking it
 // ends every pod it enrolled — each pod's grants revoked and pending requests cancelled in the

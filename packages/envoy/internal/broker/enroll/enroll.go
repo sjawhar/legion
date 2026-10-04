@@ -45,7 +45,7 @@ type Credential struct {
 
 // LiveCredential is one of the machine logins a person approved, as their machine-login page lists
 // it: a launcher credential minted by their approval and not revoked, either unexpired or still
-// holding a session it enrolled that has not ended.
+// holding a live session it enrolled (Lookup's live: not revoked, its lease not lapsed).
 type LiveCredential struct {
 	ID   uuid.UUID
 	Host string
@@ -56,7 +56,7 @@ type LiveCredential struct {
 	ExpiresAt time.Time
 	// Expired is true once ExpiresAt has passed: the login enrolls no more sessions, but the ones
 	// it enrolled renew with their own keys and still run, so it stays listed until they end or
-	// it is revoked.
+	// lapse, or it is revoked.
 	Expired bool
 }
 
@@ -499,18 +499,19 @@ func (s *Service) Revoke(ctx context.Context, cred Credential, id, by string) er
 
 // LiveCredentials lists the machine logins approver approved that can still reach a secret, newest
 // first: every unrevoked launcher credential minted from a launcher_credential record whose
-// approver is that person, while it is unexpired or a session it enrolled has not ended. A login's
-// sessions outlive its expiry, since each renews with its own key (Renew never reads the
-// credential), so an expired login stays listed, Expired set, until its last session ends: revoking
-// every listed login ends every session the person's machines started. That covers a person's own
-// machines (whose operator is their approver, machine.Service.ApplyDecision) and a service's login,
-// such as the Legion daemon's, which has no operator and is listed for the person who approved it,
-// with its Service set.
+// approver is that person, while it is unexpired or a session it enrolled is live as Lookup means
+// it: not revoked, its lease not lapsed. A login's sessions outlive its expiry, since each renews
+// with its own key (Renew never reads the credential), so an expired login stays listed, Expired
+// set, until its last session ends or lapses (a lapsed session renews no more, swept or not):
+// revoking every listed login ends every session the person's machines started. That covers a
+// person's own machines (whose operator is their approver, machine.Service.ApplyDecision) and a
+// service's login, such as the Legion daemon's, which has no operator and is listed for the person
+// who approved it, with its Service set.
 func (s *Service) LiveCredentials(ctx context.Context, approver string) ([]LiveCredential, error) {
 	rows, err := s.Store.Pool.Query(ctx, `select c.id, c.host, c.service, c.created_at, c.expires_at, c.expires_at <= now() from launcher_credentials c
 		join credential_requests r on r.id = c.record_id and r.kind = 'launcher_credential'
 		where r.approver = $1 and c.revoked_at is null
-			and (c.expires_at > now() or exists (select 1 from enrollments e where e.launcher_credential_id = c.id and e.revoked_at is null))
+			and (c.expires_at > now() or exists (select 1 from enrollments e where e.launcher_credential_id = c.id and e.revoked_at is null and e.lease_expires_at > now()))
 		order by c.created_at desc, c.id`, record.CanonicalLogin(approver))
 	if err != nil {
 		return nil, err

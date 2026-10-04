@@ -2028,10 +2028,11 @@ past `expires_at` the machine logs in again, with a new key, a new code and a ne
 
 `GET /v1/launcher-credentials?approver=<email>` lists the machine logins a person approved that
 can still reach a secret (id, host, service, issued, expires, `expired`): every unrevoked one that
-is unexpired or still has an enrollment that has not ended. A login's enrollments outlive its
-expiry, since `Renew` and `Lookup` never read the credential (each session renews with its own
-key), so an expired login stays listed, `expired: true`, until its last enrollment ends, and
-revoking every listed login ends every session the person's machines started.
+is unexpired or still has a live enrollment, live as `Lookup` means it (not revoked, its lease not
+lapsed). A login's enrollments outlive its expiry, since `Renew` and `Lookup` never read the
+credential (each session renews with its own key), so an expired login stays listed,
+`expired: true`, until its last enrollment ends or its lease lapses, swept or not, and revoking
+every listed login ends every session the person's machines started.
 `POST /v1/launcher-credentials/{id}/revoke-by-approver` `{approver}` ends one, expired or not
 (`enroll.Service.RevokeCredential`). Both key on the approver of the `launcher_credential` record
 the credential was minted from (`credential_requests.approver`, joined through
