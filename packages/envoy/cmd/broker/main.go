@@ -1,7 +1,7 @@
-// Command broker is the AGENTC-393 secrets broker: it enrolls agent sessions and pods, decides
+// Command broker is the secrets broker: it enrolls agent sessions and pods, decides
 // their secret requests by policy or an approver's Dispatch login over a signed credential-request
-// record, and releases granted values. Per the shared broker contract
-// (dispatch://AGENTC-393/artifact/plan-overview-md), the broker holds no Dispatch credential —
+// record, and releases granted values. Its HTTP API is documented at
+// https://sjawhar.github.io/legion/broker/reference/api/. The broker holds no Dispatch credential —
 // Dispatch's server calls the broker's UI routes with the deciding human's login, and the broker
 // never opens a Dispatch ask.
 package main
@@ -47,7 +47,8 @@ const machineLoginPendingTTL = 15 * time.Minute
 // Sweeper expires it. Unchanged from the pre-v9 poller's own hardcoded value.
 const agentSecretPendingTTL = 12 * time.Hour
 
-// policyRefresh is how often the broker rereads every agent secret's owner and tier tags.
+// policyRefresh is how often the broker rereads the namespace: every agent secret's owner and tier
+// tags, its key, and whether it has a current value.
 const policyRefresh = 5 * time.Minute
 
 func main() {
@@ -61,7 +62,8 @@ func main() {
 	fatal(err)
 	// BROKER_FAKE_SECRETS_FILE: for local development only, a JSON file standing in for Secrets
 	// Manager, {"secrets": [{"name", "kms_key_id", "tags", "value"}]}: the broker lists the agent
-	// secrets and reads their values from it instead of from AWS.
+	// secrets and reads their values from it instead of from AWS. A secret with no "value" is one
+	// created without a value, which the broker refuses as no-current-value.
 	fakeSecrets := os.Getenv("BROKER_FAKE_SECRETS_FILE")
 	fatal(refusePortZeroPublicURLInProduction(cfg.PublicURL, fakeSecrets))
 	st, err := store.Open(ctx, cfg.DatabaseURL)
@@ -91,7 +93,7 @@ func main() {
 	current, err := policy.NewCurrent(ctx, loader, policyRefresh)
 	fatal(err)
 
-	// AGENTC-833: bind now, synchronously, right after every guard that can still refuse to
+	// Bind now, synchronously, right after every guard that can still refuse to
 	// boot has already run (config, the port-0 public-URL guard, migrations, the first policy
 	// load) — the only way any caller, dev-broker.sh included, can learn which process holds an
 	// address is the log line below, printed only once this exact Listen call has already
