@@ -39,6 +39,9 @@ var (
 	ErrCleanupReserved = wait.New("tree cleanup is reserved")
 	ErrLifecycleAbsent = errors.New("tree lifecycle is absent")
 	ErrLifecycleClosed = errors.New("tree cleanup is confirmed")
+	// ErrAuthorityHeld is an open lifecycle of the other authority: a workflow root whose key names
+	// a tree the operator opened, or the reverse. It refuses only that tree.
+	ErrAuthorityHeld = errors.New("tree lifecycle is open under another authority")
 )
 
 // Serialize is the same global fact serializer intake.ApplyFact uses. Facts promote other trees
@@ -113,7 +116,7 @@ func Open(ctx context.Context, tx pgx.Tx, project, tree string, authority Author
 		return lifecycle, nil
 	}
 	if lifecycle.Authority != authority {
-		return Lifecycle{}, fmt.Errorf("open tree lifecycle %s as %s: current authority is %s", tree, authority, lifecycle.Authority)
+		return Lifecycle{}, fmt.Errorf("open tree lifecycle %s as %s: %w: current authority is %s", tree, authority, ErrAuthorityHeld, lifecycle.Authority)
 	}
 	return lifecycle, nil
 }

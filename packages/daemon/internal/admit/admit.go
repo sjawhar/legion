@@ -634,6 +634,12 @@ func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bo
 					a.log.Info("admission waits for tree cleanup", "issue", candidate.Key, "tree", candidate.Tree)
 					continue
 				}
+				// The operator opened a tree under this root's key: this root waits until that tree's
+				// cleanup confirms, and the roots behind it are admitted meanwhile.
+				if errors.Is(err, treelifecycle.ErrAuthorityHeld) {
+					a.log.Warn("admission waits for its tree's other authority", "issue", candidate.Key, "tree", candidate.Tree, "error", err)
+					continue
+				}
 				return admitted, fmt.Errorf("open admission lifecycle of %s: %w", candidate.Key, err)
 			}
 		}
