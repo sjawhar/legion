@@ -519,8 +519,9 @@ func (m *Machine) ApplyDecision(ctx context.Context, recordID string, approve bo
 // secret), whoever the record waits on. A denial releases nothing, so ApplyDecision does
 // not ask. A name the current policy grants at once, denies or no longer serves names no
 // approver, so it leaves the approval to the record's approver; Values refuses a grant of the last
-// two at its first read. A withheld name the policy no longer serves is refused instead: only its
-// owner may approve it for the session, and no owner can be read while it is out of the policy.
+// two at its first read. A withheld name the policy denies or no longer serves is refused instead:
+// only its owner may approve it for the session, and no owner can be read while it is out of the
+// policy, nor approves it while a service owns it (the one way the policy denies a withheld name).
 // Admitted, such an approval would release the name once it returns with the tags it had, since
 // that brings back the policy version the request was made under and Values re-checks the grant
 // (stillAllowed) only when the version has moved.
@@ -540,6 +541,9 @@ func (m *Machine) currentPolicyAdmits(ctx context.Context, tx pgx.Tx, requestID 
 		}
 		if err != nil {
 			return err
+		}
+		if d.Outcome == policy.Deny && slices.Contains(requester.Withheld, g.name) {
+			return fmt.Errorf("%w: %s is withheld from this session and the current policy denies it, so no one may approve it now", record.ErrNotApprover, g.name)
 		}
 		if d.Outcome == policy.Approval && !record.MayDecide(record.KindAgentSecret, d.Approver, login) {
 			return fmt.Errorf("%w: the current policy has %s approve %s", record.ErrNotApprover, d.Approver, g.name)

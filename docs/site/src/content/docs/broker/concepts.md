@@ -177,12 +177,13 @@ or for a shared agent-tier secret its session's operator withheld from it, names
 broker records the email of whoever did. A withheld secret is its owner's to approve for that
 session even in a request that was already waiting when the operator withheld it: a request that
 waited on anyone for a shared human-tier secret and the operator's own withheld secret is then the
-operator's alone to approve, and anyone else's approval is refused `NOT_APPROVER`. While the
-withheld secret is out of the broker's policy (deleted, or its tags refused), no one may approve
-such a request, since the secret's owner cannot be read; it waits until the secret is back, or
-expires. The approval it gets lasts as any approval does (below): a change to another secret's
-tags does not end it, nor does the operator's later revoke of another grant, unless that revoke
-withholds another secret the request got without asking.
+operator's alone to approve, and anyone else's approval is refused `NOT_APPROVER`. While the broker
+does not serve the withheld secret to that session, no one may approve such a request: not while
+the secret is out of the broker's policy (deleted, or its tags refused), since its owner cannot be
+read, nor while it is a service's, since no person approves a service's secret. It waits until the
+secret is a person's or shared again, or expires. The approval it gets lasts as any approval does
+(below): a change to another secret's tags does not end it, nor does the operator's later revoke of
+another grant, unless that revoke withholds another secret the request got without asking.
 
 An approval belongs to the person who gave it, so a change to a secret's tags reaches what was
 approved before it wherever the new tags want the secret approved for that session:

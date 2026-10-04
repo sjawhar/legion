@@ -48,7 +48,7 @@ The broker refuses a decision that cannot stand, and Dispatch shows its message 
 
 | Message | Why |
 | --- | --- |
-| `only the record's approver may decide it` (`NOT_APPROVER`) | You are not the approver this request names, or you approved it after the secret's tags named someone else to approve it ([what an owner change does](/legion/broker/concepts/#approvals)), or after the session's operator withheld one of its secrets, which only that secret's owner may then approve, and no one while the broker does not serve that secret; you can still deny a request that names you. A request whose approver is `anyone` is refused to the login `anyone`. |
+| `only the record's approver may decide it` (`NOT_APPROVER`) | You are not the approver this request names, or you approved it after the secret's tags named someone else to approve it ([what an owner change does](/legion/broker/concepts/#approvals)), or after the session's operator withheld one of its secrets, which only that secret's owner may then approve, and no one while the broker does not serve that secret to that session (it is out of the policy, or a service's); you can still deny a request that names you. A request whose approver is `anyone` is refused to the login `anyone`. |
 | `request is already decided` (`RECORD_TERMINAL`) | Someone, or another tab, decided it first, or the agent's session ended and withdrew it. |
 | `request expired before its approver acted on it` (`RECORD_TERMINAL`) | It waited past its expiry. The agent asks again if it still needs the secret. |
 | `this grant's approval chain no longer verifies` (`GRANT_CHAIN_INVALID`) | The stored request no longer matches its own signature; nothing was granted. Tell whoever runs the broker. |
