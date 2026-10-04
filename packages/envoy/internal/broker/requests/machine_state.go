@@ -180,7 +180,10 @@ func (m *Machine) Create(ctx context.Context, enrollmentID, compactRequest, sess
 		names[i] = d.Identifier
 	}
 
-	set := m.rereadMissing(ctx, enrollmentID, names, m.Policy.Get())
+	set, err := m.rereadMissing(ctx, enrollmentID, names, m.Policy.Get())
+	if err != nil {
+		return Request{}, err
+	}
 	if existing, ok, err := m.reuseLiveGrant(ctx, enr, names, set); err != nil {
 		return Request{}, err
 	} else if ok {
@@ -248,18 +251,24 @@ func (m *Machine) Create(ctx context.Context, enrollmentID, compactRequest, sess
 // rereadMissing rereads each requested name the live set does not serve (the spec's miss path: a
 // secret created seconds ago is not in the listing yet), bounded per enrollment by MissRereads,
 // and answers the set to evaluate against. A failed reread logs LoadFailedMessage and the name
-// stays unknown — the caller sees UNKNOWN_SECRET exactly as before the miss path existed. It runs
-// before Create's transaction, so no Secrets Manager call holds a row lock. A name no secret can
-// carry (policy.ErrNameInvalid, a free-text identifier) stays unknown without a line.
-func (m *Machine) rereadMissing(ctx context.Context, enrollmentID string, names []string, set *policy.Set) *policy.Set {
+// stays unknown — the caller sees UNKNOWN_SECRET exactly as before the miss path existed. A reread
+// that fails once ctx has ended (the caller went away, or its deadline passed) is the request's
+// failure, not Secrets Manager's: it logs nothing and answers ctx's error, so the alarm on
+// LoadFailedMessage never counts a client that left. It runs before Create's transaction, so no
+// Secrets Manager call holds a row lock. A name no secret can carry (policy.ErrNameInvalid, a
+// free-text identifier) stays unknown without a line.
+func (m *Machine) rereadMissing(ctx context.Context, enrollmentID string, names []string, set *policy.Set) (*policy.Set, error) {
 	for _, name := range names {
 		if _, ok := set.Secrets[name]; ok {
 			continue
 		}
 		if !m.MissRereads.Allow(enrollmentID) {
-			return set
+			return set, nil
 		}
 		if _, err := m.Policy.RefreshOne(ctx, name); err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, ctxErr
+			}
 			if !errors.Is(err, policy.ErrNameInvalid) {
 				slog.Error(policy.LoadFailedMessage, "name", name, "error", err)
 			}
@@ -267,7 +276,7 @@ func (m *Machine) rereadMissing(ctx context.Context, enrollmentID string, names 
 		}
 		set = m.Policy.Get()
 	}
-	return set
+	return set, nil
 }
 
 // evaluation is one pass of the policy over a request's names. approver is set when a name needs

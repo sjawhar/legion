@@ -415,6 +415,45 @@ func (c *countingDescriber) DescribeSecret(ctx context.Context, in *secretsmanag
 	return c.DescribeSecretAPIClient.DescribeSecret(ctx, in, opts...)
 }
 
+// TestARereadItsCallerAbandonedRaisesNoAlarm pins that a miss-path reread cut short by its own
+// request's end is that request's failure, not Secrets Manager's: the broker logs no
+// LoadFailedMessage, the line the policy alarm filters on, and answers the request with its
+// context's error, writing no request and so no grant.
+func TestARereadItsCallerAbandonedRaisesNoAlarm(t *testing.T) {
+	m, enr, key, _ := newFixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	loader := policytest.Loader(fixtureStore(m), fixtureService)
+	loader.Describer = abandoningDescriber{cancel: cancel}
+	cur, err := policy.NewCurrent(t.Context(), loader, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Policy = cur
+	fixtureStore(m).Put(policytest.Secret("BRAND_NEW_KEY", fixtureOperator, policy.TierAgent, "v1"))
+	logged := policytest.CaptureLog(t)
+	req, err := m.Create(ctx, enr, signRequest(t, m, key, "need it", "BRAND_NEW_KEY"), "")
+	if !errors.Is(err, context.Canceled) || req.GrantID != nil {
+		t.Fatalf("Create whose request ended during the reread = %+v, %v; want context.Canceled and no grant", req, err)
+	}
+	if strings.Contains(logged.String(), policy.LoadFailedMessage) {
+		t.Fatalf("an abandoned reread logged the alarm's line:\n%s", logged.String())
+	}
+	var written int
+	if err := m.Store.Pool.QueryRow(context.Background(), `select count(*) from requests where enrollment_id=$1`, enr).Scan(&written); err != nil || written != 0 {
+		t.Fatalf("requests rows for the enrollment = %d, %v; want 0", written, err)
+	}
+}
+
+// abandoningDescriber is a client that goes away while the reread's DescribeSecret is in flight:
+// it ends the request's context and fails as the AWS SDK does once its context has ended.
+type abandoningDescriber struct{ cancel context.CancelFunc }
+
+func (d abandoningDescriber) DescribeSecret(ctx context.Context, _ *secretsmanager.DescribeSecretInput, _ ...func(*secretsmanager.Options)) (*secretsmanager.DescribeSecretOutput, error) {
+	d.cancel()
+	return nil, fmt.Errorf("operation error Secrets Manager: DescribeSecret, %w", ctx.Err())
+}
+
 func TestCoalescesIdenticalPendingAndReturnsTheFirstRecordID(t *testing.T) {
 	m, enr, key, _ := newFixture(t)
 	ctx := context.Background()
