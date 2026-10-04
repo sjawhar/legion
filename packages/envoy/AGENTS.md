@@ -379,10 +379,20 @@ is the one list of those holders. Every lookup takes a state through `lockState`
 forgets a state that holds nothing once its room has gone, so whatever ends last - ygo's
 `OnUnloadDocument` when the room goes, or a holder's own end - releases it. The durable row that
 says a document's settlement is owed (`doc_settlements_pending`, migration 0063) also carries the
-authors that settlement needs (0069): a browser update records them in the update's own transaction,
-and a joined write records them in the transaction that commits its content, which also takes out
-the authors any version it wrote credited, as the room does once it commits. Closing an issue writes
-every unsettled state into that row before it releases the state, so the reopened document's
+authors that settlement needs (0069): a browser update records them in the update's own
+transaction, and a joined write records them in the transaction that commits its content, which
+also takes out the authors any version it wrote credited, as the room does once it commits. Every
+credit a browser or service-mutation update makes names only the actor(s) that specific update
+touches - never the room's whole accumulated `state.pending` - and carries the room's
+`creditVersion` as of that moment (`creditContentChange`'s returned `settlementCredit.CreditSeq`).
+A version's release raises the row's `released_through` watermark to its own captured sequence
+and takes its authors out of the row; `upsertSettlementCredit` discards, rather than merges, a
+later credit whose own sequence is at or before that watermark, since everything in it was
+already visible to the release. `Ledger.commit` locks (`state.mu`) every artifact its own versions
+name from before the transaction commits through that version's in-memory release
+(`commitVersionLocked`), so no `creditContentChange`/`captureAuthors` call for that artifact can
+interleave between the durable release and the room forgetting the author (LEGION-513). Closing
+an issue writes every unsettled state into that row before it releases the state, so the reopened document's
 settlement credits the same version, ask and event authors even after a room release or restart. The
 document socket's cap of 1,000 rooms (`maxLiveRooms`, `canOpenRoom`) counts ygo's live rooms, never
 documents touched since the process started (LEGION-513). A room an `Apply` opened with no peer is
