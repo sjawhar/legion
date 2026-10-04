@@ -19,6 +19,7 @@ import (
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/cistore"
+	"github.com/sjawhar/envoy/internal/cmdtest"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dedupe"
 	"github.com/sjawhar/envoy/internal/id"
@@ -1930,10 +1931,10 @@ func TestARefusedDurableStopsTheListenerAtOnce(t *testing.T) {
 		t.Fatalf("add a durable with a heartbeat: %v", err)
 	}
 
-	listener := startListenerProcess(t, buildListener(t), client.Conn.ConnectedUrl(), "refused-durable-startup", githubWebhookEnv...)
-	listener.waitExit(t, "meeting a refused durable")
-	output := listener.output
-	if code := listener.cmd.ProcessState.ExitCode(); code != 1 {
+	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), client.Conn.ConnectedUrl(), "refused-durable-startup", githubWebhookEnv...)
+	listener.WaitExit(t, "meeting a refused durable")
+	output := listener.Output
+	if code := listener.Cmd.ProcessState.ExitCode(); code != 1 {
 		t.Fatalf("exit code = %d, want 1:\n%s", code, output.String())
 	}
 	if strings.Contains(output.String(), "subscribe failed, retrying") {
@@ -3301,27 +3302,10 @@ type listenerDeliveryHarness struct {
 	handler     natsgo.MsgHandler
 	coreHandler natsgo.MsgHandler
 	// logs captures every listener log line the harness's delivery handlers write.
-	logs *lockedBuffer
+	logs *cmdtest.LockedBuffer
 	// config is the handler configuration the harness built; a test copies it,
 	// overrides one seam (forwardRole), and builds its own handler from the copy.
 	config listenerDeliveryHandlerConfig
-}
-
-type lockedBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
-
-func (b *lockedBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.Write(p)
-}
-
-func (b *lockedBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.String()
 }
 
 func newListenerDeliveryHarness(t *testing.T, transport http.RoundTripper) listenerDeliveryHarness {
@@ -3348,7 +3332,7 @@ func newListenerDeliveryHarness(t *testing.T, transport http.RoundTripper) liste
 		deliverer.HTTPClient = &http.Client{Transport: transport}
 	}
 	met := metrics.New()
-	logs := &lockedBuffer{}
+	logs := &cmdtest.LockedBuffer{}
 	t.Cleanup(func() {
 		if t.Failed() {
 			t.Logf("listener log:\n%s", logs.String())
@@ -3736,12 +3720,19 @@ func TestRunSelfHealthMonitor_RetriesPastTransientFailures(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	var probeCalls int32
+	// The monitor keeps probing every interval after recovery, so the signal must never
+	// block: a plain buffered send stalls once an unread post-recovery tick has already
+	// filled the channel, wedging the monitor's goroutine inside probe() and leaving it
+	// unable to observe ctx.Done() after cancel().
 	recovered := make(chan struct{}, 1)
 	probe := func() error {
 		if atomic.AddInt32(&probeCalls, 1) <= 3 {
 			return errors.New("transient NATS timeout")
 		}
-		recovered <- struct{}{}
+		select {
+		case recovered <- struct{}{}:
+		default:
+		}
 		return nil
 	}
 	done := make(chan struct{})

@@ -7,7 +7,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -197,28 +196,12 @@ func runHandoffComplete(ctx context.Context, args []string, stdout, stderr io.Wr
 		fmt.Fprintf(stderr, "legion handoff complete: %v\n", err)
 		return 1
 	}
-	body, err := json.Marshal(map[string]any{"grantId": grant, "summary": *summary, "verdict": *verdict, "ready": *ready, "commit": commit})
+	response, err := postDaemon(ctx, "/legion/v1/handoff/complete", map[string]any{"grantId": grant, "summary": *summary, "verdict": *verdict, "ready": *ready, "commit": commit})
 	if err != nil {
 		fmt.Fprintf(stderr, "legion handoff complete: %v\n", err)
 		return 1
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, daemonURL()+"/legion/v1/handoff/complete", strings.NewReader(string(body)))
-	if err != nil {
-		fmt.Fprintf(stderr, "legion handoff complete: %v\n", err)
-		return 1
-	}
-	request.Header.Set("Content-Type", "application/json")
-	response, err := http.DefaultClient.Do(request)
-	if err != nil {
-		fmt.Fprintf(stderr, "legion handoff complete: %v\n", err)
-		return 1
-	}
-	defer response.Body.Close()
-	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		answer, _ := io.ReadAll(response.Body)
-		fmt.Fprintf(stderr, "legion handoff complete: daemon returned %d: %s\n", response.StatusCode, strings.TrimSpace(string(answer)))
-		return 1
-	}
+	response.Body.Close()
 	fmt.Fprintln(stdout, "[handoff] Reported phase completion")
 	return 0
 }

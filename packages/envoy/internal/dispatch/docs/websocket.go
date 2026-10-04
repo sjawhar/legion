@@ -634,16 +634,21 @@ func (s *Service) removeConnection(room string, id uint64) {
 	s.unlockState(room, state)
 }
 
+// settleLastPeer runs the settlement a room's last browser leaving owes now rather than when its
+// timer fires. It takes over the timer's settleWG count, so Shutdown joins it as it would the
+// timer's settlement: Shutdown reports which documents settled, and stops ygo, only once it has
+// returned.
 func (s *Service) settleLastPeer(_ context.Context, room string) {
 	state := s.lockExistingState(room)
 	if state == nil {
 		return
 	}
-	if !s.stopSettleTimer(state.settle) {
+	if !s.takeSettleTimer(state.settle) {
 		s.unlockState(room, state)
 		return
 	}
 	generation := state.gen
 	s.unlockState(room, state)
+	defer s.settleWG.Done()
 	s.settleRoom(room, generation)
 }
