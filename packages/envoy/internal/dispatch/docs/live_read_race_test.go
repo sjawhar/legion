@@ -104,9 +104,10 @@ func TestReadsOfALiveDocumentRunBesideItsPeers(t *testing.T) {
 	// A version's capture reads the room inside the Apply that holds it, between a transaction's
 	// database work and the version's, so a run counts as overlapping only when the first peer's
 	// update reached the room after the capture held the room (afterReadWarm), and its document
-	// leads with a longer run of rules, as settlement's does. The capture holds the room's state
-	// lock across its read, which the update observer of a peer's update takes next, so each peer
-	// lands at most one update in a capture's walk: a second peer types beside the first.
+	// leads with a longer run of rules, as settlement's does. A capture that walks the room's
+	// replica holds the replica's lock across the walk, which the update observer of a peer's
+	// update takes next, so each peer lands at most one update in that walk: a second peer types
+	// beside the first.
 	t.Run("version capture", func(t *testing.T) {
 		service, artifactID, serverURL := newPeeredService(t, rules(2_000)+seeded)
 		// The hook is set before the peers type, as settlement's are.
@@ -227,17 +228,23 @@ func TestReadsOfALiveDocumentRunBesideItsPeers(t *testing.T) {
 	})
 }
 
-// overlapping runs read until overlapsWanted runs have met a peer's update. The peer keeps
-// typing until the test ends, so the evidence arrives at the speed the loaded machine permits;
-// the test's own context is the bound when it cannot.
+// overlapping runs read until overlapsWanted runs have met a peer's update. A peer that keeps
+// typing brings that evidence at whatever speed the loaded machine allows, so no fixed time bounds
+// it. The loop ends with the test's failure once the test has failed, which is how a typing peer
+// whose send failed reports it (typeIntoDocument), and once the test binary's deadline is within
+// overlapMargin, so a room that stopped taking the peer's updates fails the subtest by name rather
+// than in the binary's timeout panic.
 func overlapping(t *testing.T, read func() bool) {
 	t.Helper()
+	deadline, bounded := t.Deadline()
+	deadline = deadline.Add(-overlapMargin)
 	runs := 0
 	for overlapped := 0; overlapped < overlapsWanted; runs++ {
-		select {
-		case <-t.Context().Done():
-			t.Fatalf("%d of %d runs overlapped a peer's update before the test ended, want %d", overlapped, runs, overlapsWanted)
-		default:
+		if t.Failed() {
+			t.Fatalf("%d of %d runs overlapped a peer's update before the test failed, want %d", overlapped, runs, overlapsWanted)
+		}
+		if bounded && time.Now().After(deadline) {
+			t.Fatalf("%d of %d runs overlapped a peer's update with %s left before the test binary's deadline, want %d", overlapped, runs, overlapMargin, overlapsWanted)
 		}
 		if read() {
 			overlapped++
@@ -246,7 +253,13 @@ func overlapping(t *testing.T, read func() bool) {
 	t.Logf("%d runs, %d of them beside a peer's update", runs, overlapsWanted)
 }
 
-const overlapsWanted = 50
+const (
+	overlapsWanted = 50
+	// overlapMargin is what overlapping leaves of the test binary's deadline: time for the
+	// subtest's typing peers to stop and their room to drain, which typeIntoDocument's cleanup
+	// waits up to 30 s for at each step, so the failure is reported before the timeout panics.
+	overlapMargin = 90 * time.Second
+)
 
 // peerApplied is how much of peer's typing the room has applied: its clock for the peer.
 func peerApplied(service *Service, artifactID string, peer crdt.ClientID) uint64 {
