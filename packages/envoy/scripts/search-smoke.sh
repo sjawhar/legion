@@ -56,7 +56,7 @@ env HOME="${workdir}/home" \
   DATABASE_URL="$DATABASE_URL" \
   DISPATCH_AGENT_TOKEN=search-smoke-not-a-credential \
   DISPATCH_IDENTITY=header:X-Dispatch-User \
-  DISPATCH_ALLOWED_LOGINS=smoke \
+  DISPATCH_IDENTITY_HEADER_TRUSTED=1 \
   DISPATCH_NATS_DISABLED=1 \
   DISPATCH_LISTEN_HOST=127.0.0.1 \
   DISPATCH_PORT="$port" \
@@ -79,7 +79,7 @@ curl -fsS "${base}/healthz" >/dev/null
 
 while IFS= read -r query || [[ -n "$query" ]]; do
   [[ -z "$query" || "$query" == \#* ]] && continue
-  answer="$(curl -fsS -G -H 'X-Dispatch-User: smoke' "${base}/api/v1/search" \
+  answer="$(curl -fsS -G -H 'X-Dispatch-User: smoke@example.test' "${base}/api/v1/search" \
     --data-urlencode "q=${query}" --data-urlencode "limit=${limit}" --data-urlencode "offset=${offset}")"
   # An answer from a server that predates totals prints "-" for them.
   jq -r --arg query "$query" --argjson offset "$offset" '

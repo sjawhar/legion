@@ -11,7 +11,6 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
-	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
@@ -82,15 +81,13 @@ func newCorpusSearchHandler(t *testing.T, databaseURL string) http.Handler {
 			t.Errorf("shutdown document service: %v", err)
 		}
 	})
-	allowed := map[string]struct{}{"alice": {}}
 	deps, err := NewDeps(DepsInput{
-		Store:         database,
-		Identity:      identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: allowed},
-		AllowedLogins: allowed,
-		AgentToken:    "agent-token",
-		ServerURL:     "https://dispatch.example",
-		Docs:          documentService,
-		Events:        broker,
+		Store:      database,
+		Identity:   headerIdentity(database),
+		AgentToken: "agent-token",
+		ServerURL:  "https://dispatch.example",
+		Docs:       documentService,
+		Events:     broker,
 	})
 	if err != nil {
 		t.Fatalf("create corpus API dependencies: %v", err)
