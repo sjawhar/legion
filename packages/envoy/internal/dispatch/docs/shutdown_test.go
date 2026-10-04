@@ -63,72 +63,6 @@ func TestShutdownSettlesARoomWithAnEditorConnectedBeforeClosingIt(t *testing.T) 
 	}
 }
 
-// An editor whose next update always reaches its room before the last one is stored - a client
-// typing faster than its appends land - leaves that room an append outstanding for as long as it
-// types. Shutdown waits only for the appends queued before it began, so the room it types into is
-// left to resume and every other room's owed settlement still runs.
-func TestAnEditorThatNeverStopsTypingHoldsNoOtherRoomsSettlementAtShutdown(t *testing.T) {
-	database := storetest.Open(t)
-	quiet := createIssueDocument(t, database, 1, "quiet")
-	typed := createIssueDocument(t, database, 2, "typed")
-	keyboard := &typist{room: typed, recorded: make(chan chan struct{}, 1)}
-	service := newShutdownTestService(t, database, &typingStore{VersionedStore: NewPgVersioned(database), typist: keyboard})
-	keyboard.service = service
-	keyboard.observeRecording(service)
-	seedServiceText(t, service, quiet, "quiet")
-	settleCurrentGeneration(t, service, quiet)
-	seedServiceText(t, service, typed, "typed")
-	settleCurrentGeneration(t, service, typed)
-	editLiveTree(t, service, quiet, replaceRun("quiet", "quiet, edited"))
-	waitForSettlementOwed(t, service, quiet)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if err := service.waitForDurableAppends(ctx, quiet); err != nil {
-		t.Fatalf("wait for the quiet document's edit to be stored: %v", err)
-	}
-	defer keyboard.stop()
-	keyboard.start(t)
-
-	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancelShutdown()
-	shutdown := make(chan error, 1)
-	go func() { shutdown <- service.Shutdown(shutdownCtx) }()
-	// The typist stops once the quiet document is versioned or Shutdown has returned: while it
-	// types, ygo's own shutdown waits on the commits it keeps making.
-	deadline := time.After(10 * time.Second)
-	var shutdownErr error
-	returned := false
-wait:
-	for {
-		select {
-		case shutdownErr = <-shutdown:
-			returned = true
-			break wait
-		case <-deadline:
-			break wait
-		case <-time.After(10 * time.Millisecond):
-			if number, _, _ := latestDocumentVersion(t, database, quiet); number == 2 {
-				break wait
-			}
-		}
-	}
-	keystrokes := keyboard.stop()
-	if !returned {
-		shutdownErr = <-shutdown
-	}
-	t.Logf("the typist made %d keystrokes; Shutdown returned %v", keystrokes, shutdownErr)
-	if number, markdown, _ := latestDocumentVersion(t, database, quiet); number != 2 || markdown != "quiet, edited\n" {
-		t.Errorf("the quiet document's latest version is %d holding %q, want version 2 holding %q: an editor typing in another room held its settlement",
-			number, markdown, "quiet, edited\n")
-	}
-	if owed, err := settlementPending(context.Background(), database.Pool, quiet); err != nil || owed {
-		t.Errorf("the quiet document still owes its settlement (%v) after the shutdown that ran it", err)
-	}
-	if shutdownErr != nil {
-		t.Errorf("shutdown with an editor typing = %v, want nil", shutdownErr)
-	}
-}
-
 // A browser leaving a room settles what it was owed at once (settleLastPeer), on ygo's disconnect
 // goroutine, in place of the timer it stops. Shutdown joins that settlement as it joins a timer's:
 // it reports which documents settled, and stops ygo, only once the settlement has returned, and the
@@ -300,13 +234,13 @@ func TestShutdownLeavesASettlementThatMustWriteIntoItsRoomToResume(t *testing.T)
 }
 
 // newShutdownTestService is a document service whose settlements wait an hour, so a test's
-// Shutdown is the one that runs them, and whose browsers sign in as alice. appends, when set,
-// stands in for the store's own document persistence.
+// Shutdown is the one that runs them, and whose browsers name their person in X-Dispatch-User.
+// appends, when set, stands in for the store's own document persistence.
 func newShutdownTestService(t *testing.T, database *store.Store, appends VersionedStore) *Service {
 	t.Helper()
 	service := New(Deps{
 		Store: database, Persistence: appends, Events: events.NewBroker(),
-		Identity: identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: map[string]struct{}{"alice": {}}},
+		Identity: identity.HeaderIdentity{Header: "X-Dispatch-User", People: store.NewPgPeopleStore(database.Pool)},
 		Settle:   time.Hour,
 	})
 	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
@@ -395,133 +329,6 @@ func latestDocumentVersion(t *testing.T, database *store.Store, artifactID strin
 		t.Fatalf("decode the latest version's authors: %v", err)
 	}
 	return number, markdown, actors
-}
-
-// typist types into one room as a browser whose next keystroke always reaches the room before its
-// last one is stored: while it types, each of the room's appends waits for the room to record the
-// next keystroke before it lands (typingStore), so the room always has one outstanding.
-type typist struct {
-	room    string
-	service *Service
-	typing  atomic.Bool
-	count   atomic.Int64
-	// recorded carries the channel the next keystroke closes once the room's update observers have
-	// recorded it.
-	recorded chan chan struct{}
-	// mu holds the typist's own copy of the document while a keystroke edits it.
-	mu  sync.Mutex
-	doc *crdt.Doc
-}
-
-// observeRecording registers, on the typist's room as it loads, an observer behind the service's
-// own and ahead of ygo's persistence observer, which reports each keystroke the room has recorded.
-func (p *typist) observeRecording(service *Service) {
-	load := service.srv.OnLoadDocument
-	service.srv.OnLoadDocument = func(ctx context.Context, room string, doc *crdt.Doc) error {
-		if err := load(ctx, room, doc); err != nil {
-			return err
-		}
-		if room == p.room {
-			doc.OnUpdate(func(_ []byte, origin any) {
-				if origin != "typist" {
-					return
-				}
-				select {
-				case recorded := <-p.recorded:
-					close(recorded)
-				default:
-				}
-			})
-		}
-		return nil
-	}
-}
-
-// start types the first keystroke and returns once a few have been stored.
-func (p *typist) start(t *testing.T) {
-	t.Helper()
-	room := p.service.srv.GetDoc(p.room)
-	if room == nil {
-		t.Fatal("the typist's room is not loaded")
-	}
-	p.doc = crdt.New()
-	if err := crdt.ApplyUpdateV1(p.doc, crdt.EncodeStateAsUpdateV1(room, nil), nil); err != nil {
-		t.Fatalf("copy the typist's room: %v", err)
-	}
-	p.typing.Store(true)
-	if err := p.keystroke(); err != nil {
-		t.Fatalf("the typist's first keystroke: %v", err)
-	}
-	waitFor(t, 10*time.Second, "the typist's keystrokes to be stored", func() bool { return p.count.Load() >= 5 })
-}
-
-// next types the next keystroke while the typist types, and returns once the room has recorded it.
-func (p *typist) next() {
-	if !p.typing.Load() {
-		return
-	}
-	recorded := make(chan struct{})
-	p.recorded <- recorded
-	go func() { _ = p.keystroke() }()
-	select {
-	case <-recorded:
-	case <-time.After(time.Second):
-		// A keystroke the room did not take; the chain of appends ends with it.
-		select {
-		case <-p.recorded:
-		default:
-		}
-	}
-}
-
-// keystroke appends a character to the first paragraph in the typist's copy and applies the change
-// to the room as a browser's update.
-func (p *typist) keystroke() error {
-	room := p.service.srv.GetDoc(p.room)
-	if room == nil {
-		return errors.New("the typist's room is not loaded")
-	}
-	p.mu.Lock()
-	synced := p.doc.StateVector()
-	fragment := p.doc.GetXmlFragment(fragmentName)
-	var editErr error
-	p.doc.Transact(func(txn *crdt.Transaction) {
-		tree, err := pmdoc.ReadInTransaction(txn, fragment)
-		if err != nil {
-			editErr = err
-			return
-		}
-		runs := tree.Children[0].Children
-		runs[len(runs)-1].Text += "."
-		editErr = pmdoc.Update(txn, fragment, tree)
-	})
-	update := crdt.EncodeStateAsUpdateV1(p.doc, synced)
-	p.mu.Unlock()
-	if editErr != nil {
-		return editErr
-	}
-	p.count.Add(1)
-	return crdt.ApplyUpdateV1(room, update, "typist")
-}
-
-// stop ends the typing and reports how many keystrokes were made.
-func (p *typist) stop() int64 {
-	p.typing.Store(false)
-	return p.count.Load()
-}
-
-// typingStore stores a document's updates as the store does, but holds each of the typist's room's
-// appends until the typist's next keystroke is in the room.
-type typingStore struct {
-	VersionedStore
-	typist *typist
-}
-
-func (s *typingStore) AppendUpdateWithClass(ctx context.Context, room string, update []byte, contentChanged bool) (persistence.Version, error) {
-	if room == s.typist.room {
-		s.typist.next()
-	}
-	return s.VersionedStore.(classifiedUpdateStore).AppendUpdateWithClass(ctx, room, update, contentChanged)
 }
 
 // heldStore stores a document's updates as the store does, but holds the held room's next append,
