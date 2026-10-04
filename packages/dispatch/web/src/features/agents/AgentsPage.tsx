@@ -10,7 +10,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { Link, useSearchParams } from "react-router-dom";
+import { Link } from "react-router-dom";
 
 import { api } from "../../api/client";
 import { agentMessagesQuery, inboxQuery, userAgentStateQuery } from "../../api/queries";
@@ -69,6 +69,13 @@ import { closestMatching, focusOnDocument } from "../shell/roving";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { useUserPreference } from "../shell/userPreference";
 import { AgentMessageComposer, type AgentReply, agentSendKey } from "./AgentMessageComposer";
+import {
+  type AgentFilters,
+  filterOptions,
+  matchesFilters,
+  sessionIssueKeys,
+  useAgentSearch,
+} from "./agent-search";
 import { deliveryAttempts } from "./attempts";
 import { type BroadcastSend, BroadcastSends, useBroadcastQueue } from "./BroadcastSends";
 import { useBroadcastComposition } from "./broadcast-composition";
@@ -816,63 +823,6 @@ function FoldToggle({
   );
 }
 
-/**
- * What narrows the agent list, mirroring the `envoy broadcast` script's own selectors: one
- * machine, one role, and a free-text search. An empty field matches everything.
- */
-export interface AgentFilters {
-  readonly machine: string;
-  readonly role: string;
-  readonly search: string;
-}
-
-export const NO_AGENT_FILTERS: AgentFilters = { machine: "", role: "", search: "" };
-
-/** Every word `search` names, lowercased; an empty query has none. */
-function searchWords(search: string): readonly string[] {
-  return search
-    .trim()
-    .toLowerCase()
-    .split(/\s+/)
-    .filter((word) => word !== "");
-}
-
-/** The text a session's search words match against: its title, directory, machine, session id,
- *  and the key of every issue one of its asks names - once, lowercased, so a session with no
- *  issue asks still matches on the other four. */
-function searchHaystack(agent: Agent, issueKeys: readonly string[]): string {
-  return [agent.title, agent.dir, agent.machine_id, agent.session_id, ...issueKeys]
-    .join(" ")
-    .toLowerCase();
-}
-
-/** `issueKeys` is every issue key an open ask by this session names (`AgentsPage`'s
- *  `issueKeysBySession`), the free-text search's only field beyond what `Agent` itself carries. */
-export function matchesFilters(
-  agent: Agent,
-  filters: AgentFilters,
-  issueKeys: readonly string[]
-): boolean {
-  const words = searchWords(filters.search);
-  return (
-    (filters.machine === "" || agent.machine_id === filters.machine) &&
-    (filters.role === "" || agent.roles.includes(filters.role)) &&
-    (words.length === 0 || words.every((word) => searchHaystack(agent, issueKeys).includes(word)))
-  );
-}
-
-/** The machines and roles the live sessions actually occupy: a filter can only offer what is
- *  there, so a stale option can never hide every agent. */
-function filterOptions(agents: readonly Agent[]): { machines: string[]; roles: string[] } {
-  const machines = new Set<string>();
-  const roles = new Set<string>();
-  for (const agent of agents) {
-    if (agent.machine_id !== "") machines.add(agent.machine_id);
-    for (const role of agent.roles) roles.add(role);
-  }
-  return { machines: [...machines].sort(), roles: [...roles].sort() };
-}
-
 function AgentFilterBar({
   agents,
   filters,
@@ -921,7 +871,7 @@ function AgentFilterBar({
         aria-label="Search agents"
         className={`${field} min-w-0 flex-1 basis-64`}
         onChange={(event) => onFilters({ ...filters, search: event.target.value })}
-        placeholder="Title, directory, machine, session or issue"
+        placeholder="Title, directory, machine, session or open issue"
         ref={searchInputRef}
         type="search"
         value={filters.search}
@@ -1132,40 +1082,12 @@ export function AgentsPage(): ReactNode {
     }
     return counts;
   }, [inbox.data]);
-  // Every issue key an open ask by each session names, for the search box's "issue key" field:
-  // every ask the viewer can see, not only the ones waiting on them, so a session searches by an
-  // issue it has answered as readily as one still open on it.
-  const issueKeysBySession = useMemo(() => {
-    const keys = new Map<string, Set<string>>();
-    for (const ask of inbox.data ?? []) {
-      if (ask.author.kind !== "session" || ask.issue_key === null) continue;
-      const forSession = keys.get(ask.author.id) ?? new Set<string>();
-      forSession.add(ask.issue_key);
-      keys.set(ask.author.id, forSession);
-    }
-    return new Map([...keys].map(([session, forSession]) => [session, [...forSession]]));
-  }, [inbox.data]);
-  // The free-text query is the one filter field the page's address carries, so a reload or a
-  // shared link keeps it; `machine` and `role` stay plain state, as they were before this box.
-  const [searchParams, setSearchParams] = useSearchParams();
-  const search = searchParams.get("q") ?? "";
-  const setSearch = useCallback(
-    (next: string) => {
-      setSearchParams(
-        (current) => {
-          const params = new URLSearchParams(current.toString());
-          if (next === "") {
-            params.delete("q");
-          } else {
-            params.set("q", next);
-          }
-          return params;
-        },
-        { replace: true }
-      );
-    },
-    [setSearchParams]
-  );
+  // Every issue key an OPEN ask by each session names (`sessionIssueKeys`), for the search box's
+  // "issue key" field.
+  const issueKeysBySession = useMemo(() => sessionIssueKeys(inbox.data ?? []), [inbox.data]);
+  // The free-text query is the page's own `?q=`; `machine` and `role` stay plain state, as they
+  // were before this box.
+  const [search, setSearch] = useAgentSearch();
   const [fieldFilters, setFieldFilters] = useState<Omit<AgentFilters, "search">>({
     machine: "",
     role: "",

@@ -17,7 +17,8 @@ import type {
   UserAgentStates,
 } from "../../api/types";
 import { AuthGate } from "../../app";
-import { matchesFilters, orderAgents, partitionAgents } from "./AgentsPage";
+import { orderAgents, partitionAgents } from "./AgentsPage";
+import { matchesFilters } from "./agent-search";
 import { broadcastPlan, broadcastSendState, composedBroadcast } from "./broadcast-plan";
 
 // Delivery attempts are dated relative to the run: the dashboard only offers a
@@ -2618,6 +2619,22 @@ test("/ focuses the Agents search box instead of opening the Dispatch-wide searc
 
     expect(document.activeElement).toBe(search);
     expect(screen.queryByRole("dialog", { name: "Search" })).toBeNull();
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+test("/ falls through to the Dispatch-wide search dialog when no agents are connected, since no box is there to focus", async () => {
+  const page = renderAgents({ listedAgents: [] });
+
+  try {
+    await screen.findByText("No agents are connected.");
+    expect(screen.queryByRole("searchbox", { name: "Search agents" })).toBeNull();
+
+    fireEvent.keyDown(document.body, { key: "/" });
+
+    expect(screen.getByRole("dialog", { name: "Search" })).toBeTruthy();
   } finally {
     page.view.unmount();
     page.restore();
