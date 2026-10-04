@@ -20,7 +20,16 @@ Every path it cites is in sjawhar/legion.
   the daemon instead (`POST /legion/v1/threads/resolve`), which resolves as the implementer's App
   only the threads a bot outside Legion's role Apps opened whose newest submitted comment is the
   reviewer's `Accepted:`, on the pull request of the reviewer's own issue, and prints the same
-  lines; the reviewer never holds the implementer's token.
+  lines; the reviewer never holds the implementer's token. A thread whose newest comment is a
+  draft in the implement App's pending review (the implementer's or the merger's: GitHub shows it
+  to that App alone, as which the daemon reads) is left open and never named: the command prints
+  only how many there are (`<n> unresolved threads hold the implement App's pending draft and
+  were left open`) and exits 1, as it does on a refusal. Report that count to the architect before
+  you spend your one re-run of the failed workflow; the architect sends the issue back so the
+  implementer submits or discards its pending review. Once the review is submitted, the
+  implementer's reply is the thread's newest comment, which leaves it open: answer the thread
+  again, then run the command again. Once the review is discarded, your `Accepted:` is the newest
+  comment again, and running the command again closes the thread.
   When `LEGION_GRANT_FILE` or `LEGION_GRANT` is set, use `legion threads resolve --pr <number> --repo <owner>/<repo>`.
   When neither is set, add `--gh` to that command, which applies the fallback's rule below through
   your own `gh`; where no `legion` command is installed, use `gh api graphql` with the session's
@@ -70,8 +79,8 @@ Every path it cites is in sjawhar/legion.
 
   Re-read `reviewThreads` and confirm that thread's `isResolved` is true. In either route, report
   a refused resolution to the architect, which opens an ask for a human to resolve the thread by
-  hand — never skip it silently. The merger runs the command once more before publishing READY
-  and does not publish while any `left open` line remains. That run is where every accepted
+  hand — never skip it silently. The merger runs the command once more before its READY
+  completion and does not complete while any `left open` line remains. That run is where every accepted
   thread's resolution is guaranteed, since the merge queue's gate counts the unresolved threads at
   the head. Acceptances posted after the implementer's last run are resolved here.
 
@@ -89,4 +98,4 @@ Every path it cites is in sjawhar/legion.
   workflow passes on a re-run only once its threads are resolved, so you run `legion threads
   resolve` (the daemon resolves the bot threads you accepted) and re-run the failed run before you
   approve, as your role prompt says.
-  The merger resolves accepted threads that remain open before publishing READY.
+  The merger resolves accepted threads that remain open before its READY completion.

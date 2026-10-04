@@ -66,7 +66,7 @@ repos/{owner}/{repo}/pulls/{number} --jq .body`, edit, then `--method PATCH ... 
 `Not proven / risk` copies every claim recorded as unproven before READY — the tester's
 `failures`, the reviewer's own review, any proof-check comment already on the pull request —
 word for word, and `none` is a finding while one stands. The merger quotes `Outcome` and
-`Not proven / risk` from the body at the published head in the READY packet
+`Not proven / risk` from the body at the head its READY packet names
 (*The READY packet* in `skill://legion-worker/references/merge-gate.md`); a stale `Outcome` that no
 longer describes the diff is a finding against the implementer, not a line the merger rewrites.
 

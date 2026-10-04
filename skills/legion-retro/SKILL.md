@@ -30,9 +30,8 @@ retrospective's durable output.
    repository's GitHub branch-protection and CODEOWNERS requirements; GitHub's merge queue
    participates only when the repository enables it.
 5. After that merge, the implementer — not the reviewer or merger — verifies the change in production
-   and records it on the PR and the issue (Sami, 2026-09-13, verbatim:
-   "the agent that developed it should be responsible for testing in production"). The
-   architect's sign-off waits for that record.
+   and records it on the PR and the issue: the agent that developed it is responsible for testing
+   in production. The architect's sign-off waits for that record.
    The record is the pull request's `Production:` line, one pull-request comment, and a
    `dispatch_message` on the issue, each naming what was driven, how, what was observed, and the
    merge commit. A defect the production check finds becomes a corrective child issue of the same tree,
@@ -43,8 +42,8 @@ changes only `docs/solutions/` does not void it, and the tree goes from retro to
 never back to the tester or reviewer. A conflict-forced rebase after retro moves these documents
 with the branch; retro does not re-run.
 
-Do not start retro before step 2, skip it because the change seems mechanical, or publish `READY`
-before step 3. The design gate is not a substitute for review and retro.
+Do not start retro before step 2 or skip it because the change seems mechanical; the merger's
+`READY` comes only after step 3. The design gate is not a substitute for review and retro.
 
 ## Two perspectives
 

@@ -292,7 +292,7 @@ priority first, then board rank ([Keeping the slots full](#keeping-the-slots-ful
   it before handling every other wake.
 - **One wake = one turn.** Handle exactly the wake's implication, then end the turn. Never
   poll, idle-loop, or wait for another event. Two additions, after any direct user message: every
-  turn under the Go daemon first rechecks the [trees waiting on a root
+  turn first rechecks the [trees waiting on a root
   claim](#trees-waiting-on-a-root-claim-go-daemon), and your first turn of each UTC day, whatever
   woke you, also posts the day's report ([Daily report](#daily-report-go-daemon)).
 - **Wakes are advisory.** Before any side effect, verify the current daemon state and the
@@ -340,8 +340,8 @@ priority first, then board rank ([Keeping the slots full](#keeping-the-slots-ful
    ```
 
    (or `icebox` for longer-term deferral). Dispatch status is the durable record; there is no
-   other marker to maintain, beyond the Go daemon's `legion` label, which parking leaves in
-   place. Under the Go daemon a root never waits for capacity in `backlog`: in `todo` the
+   other marker to maintain, beyond the `legion` label, which parking leaves in
+   place. A root never waits for capacity in `backlog`: in `todo` the
    daemon's admission queue holds it (`admission.waiting`), so park only a root that should not
    run now. Do not triage a system-created child as a root issue.
 4. When you post a triage note (a `dispatch_comment` on the issue saying what you decided and
@@ -357,7 +357,7 @@ priority first, then board rank ([Keeping the slots full](#keeping-the-slots-ful
 
 ## Backlog eligibility
 
-Under the Go daemon nothing reconsiders `backlog` or `icebox` on its own: [Keeping the slots
+Nothing reconsiders `backlog` or `icebox` on its own: [Keeping the slots
 full](#keeping-the-slots-full-go-daemon) takes only `todo` issues, since an issue that waits on a
 deploy or a decision belongs in `backlog` (`skill://dispatch`, "Choosing what to work on"). A
 handed-over root waits for a slot in `todo`, where the daemon's
@@ -375,7 +375,7 @@ For an independence judgment, verify the child and its parent against current da
 and the Dispatch issue. If the work belongs in an independent root:
 
 1. File a **fresh root issue** with `dispatch_issue({ project, title, spec })` (no `parent`;
-   under the Go daemon add `labels: ["legion"]`, without which it is never admitted).
+   add `labels: ["legion"]`, without which it is never admitted).
    `project` is the issue key's prefix before `-<n>` (e.g. `LEGSMOKE-3` → `LEGSMOKE`): the
    project key exactly as `legion.yaml` writes it, which `legion state --json` shows as
    `daemon.project`. It is not the lowercase project token in role names such as

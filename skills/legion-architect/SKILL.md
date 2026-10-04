@@ -268,22 +268,29 @@ never a rebase, since a rebase rewrites every descendant of the chain's fork poi
 another tree's branch stacked on it), pushes it with the ordinary push procedure (a genuine
 fast-forward), and posts the before/after fingerprints; the tester re-runs the bare gates only;
 the reviewer confirms and approves the new head by SHA (or continues its round if it had not
-approved); the daemon carries the issue on through retro to the merger, which republishes READY.
+approved); the daemon carries the issue on through retro to the merger, whose new READY packet the daemon posts.
 This merge happens only when GitHub reports `CONFLICTING`
 (`legion gh -- pr view <n> --json mergeable,mergeStateStatus`); read that on every end-game
 wake — `phase-finished`, `catch-up`, `checks-red`, `review-stuck` — because a `CONFLICTING`
 PR gets no CI and no wake announces it. The moment you see it, tell the worker holding the issue's
 phase (`envoy_publish` to its role topic) to move the issue back to `implementing` with
 `request_backward_move`; in `awaiting_merge`, where no worker holds a phase, open a `dispatch_ask`
-naming the conflict for the human who merges. Do not let the merger publish `READY` for an
+naming the conflict for the human who merges. Do not let the merger send a READY packet for an
 obsolete approval.
 
 If a worker reports that `legion threads resolve` exited 1 naming a review thread GitHub refused
 to resolve, open a `dispatch_ask` that names the thread's URL and GitHub's message for a human to
-resolve it by hand, with options for resolved / could not; the merger does not publish while it
+resolve it by hand, with options for resolved / could not; the merger does not complete while it
 is open. That is the one review-thread step a human takes: the review App cannot resolve a thread
 on a pull request the implementer opened, and the implementer's and merger's runs of the command
 close every accepted one.
+
+If a reviewer reports that `legion threads resolve` exited 1 counting threads that hold the
+implement App's pending draft (the daemon counts them and never names them), tell the worker
+holding the issue's phase (`envoy_publish` to its role topic) to move the issue back to
+`implementing` with `request_backward_move`, naming the count, so the implementer submits or
+discards its pending review; its own run of the command names those threads `left open … an
+unsubmitted draft in a pending review`. Open no ask for it: the implementer clears it.
 
 ## 7. Close
 
@@ -327,7 +334,7 @@ cross-tree conflict. Report those to the controller with `envoy_publish` to the 
 your `Legion addressing` line names. Handle everything else in the
 tree. A product, scope, or design decision that needs the human, yours or one a worker escalated,
 is a decision block you write (section 1 says what one does to the root spec's gate). A standalone
-human to-do may use `dispatch_ask`; workers may reach a human directly with it the same way. Do not
+human to-do may use `dispatch_ask`; workers may reach the human directly with it the same way. Do not
 create a wait loop for any wake source.
 
 Never yield while waiting on a human. A human is waiting on you only where an open ask sits in

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import path from "node:path";
+import type { LegionRole } from "@legion/contracts";
 import type { LegionGrant } from "@legion/contracts/legion-api";
 import { activeDispatchConfig } from "@legion/envoy-client/dispatch-config";
 import { resolveIssueDocumentId } from "@legion/envoy-client/dispatch-execute";
@@ -116,9 +117,9 @@ function isSingleLegionCommand(command: unknown): boolean {
 
 // Every Legion issue workspace is a `jj workspace` of one shared clone, so they all share one
 // operation log: `jj undo`, `jj abandon`, and `jj op restore|revert|abandon|undo` rewrite it for
-// every tree at once (LEGION-45). The tool_call hook refuses them in every phase-worker pane.
-// `restore`/`revert` are operation-log commands only under `op`/`operation`; `jj restore <paths>`
-// is file-level and stays allowed.
+// every tree at once (LEGION-45). The tool_call hook refuses them in every tree pane
+// (`TREE_PANE_RULES`). `restore`/`revert` are operation-log commands only under `op`/`operation`;
+// `jj restore <paths>` is file-level and stays allowed.
 const JJ_LOG_REWRITE_WORDS = ["undo", "abandon"];
 const JJ_OP_WORDS = ["op", "operation"];
 const JJ_OP_LOG_REWRITE_WORDS = ["restore", "revert"];
@@ -279,12 +280,16 @@ const LEGION_HANDOFF_COMPLETE: PaneRule = {
     "reads as the command: pass it in a file.",
 };
 
-/** The rules each kind of Legion pane is held to, ahead of every role gate. Every issue workspace
- * shares one jj operation log, so the operation-log rule binds every phase-worker pane (a
- * sub-architect's included); the root architect's bash is already one `legion` command. */
+/** The rules a pane in an issue workspace is held to, ahead of every role gate, so that they bind
+ * a `task` subagent too: it runs in that pane, against that workspace. Every issue workspace is a
+ * jj workspace of one clone, sharing its operation log, and every tree pane -- a phase worker's, a
+ * sub-architect's, a root architect's -- has one. */
+const TREE_PANE_RULES: readonly PaneRule[] = [JJ_LOG_REWRITE, LEGION_HANDOFF_COMPLETE];
+
+/** The rules each kind of Legion pane is held to. The controller has no issue workspace. */
 const PANE_RULES: Readonly<Partial<Record<LegionSessionKind["kind"], readonly PaneRule[]>>> = {
-  "phase-worker": [JJ_LOG_REWRITE, LEGION_HANDOFF_COMPLETE],
-  "root-architect": [LEGION_HANDOFF_COMPLETE],
+  "phase-worker": TREE_PANE_RULES,
+  "root-architect": TREE_PANE_RULES,
 };
 
 /** The first thing in a `bash` command that `rule` refuses, named for the refusal, or undefined.
@@ -344,13 +349,19 @@ function paneRuleRefusal(toolCall: ToolCallEvent, rules: readonly PaneRule[]): s
 // OMP's own plugin registry.
 const LEGION_LOADED_MARKER = Symbol.for("legion.pi-envoy.legion-loaded");
 
-/** Code-mutation tools blocked for an architect session (root or sub-architect) and a reviewer
- * (whose only sanctioned mutation is the final `.legion/` cleanup commit, made via `bash`).
- * `write` here means a real filesystem write; see `isToolDeviceInvocation` for the `xd://`
- * tool-device carve-out. */
+/** Code-mutation tools, blocked for each role `CODE_TOOL_REFUSAL` names. `write` here means a real
+ * filesystem write; see `isToolDeviceInvocation` for the `xd://` tool-device carve-out. `task` is
+ * deliberately absent: every Legion role may launch `task` subagents. */
 const CODE_MUTATION_TOOLS = ["edit", "write", "apply_patch"];
-/** The merger verifies and reports only: no code mutation, and no further Legion spawns. */
-const MERGER_BLOCKED_TOOLS = [...CODE_MUTATION_TOOLS, "task"];
+
+/** Why each gated role is refused a code-mutation tool. A role absent here mutates code freely;
+ * `architect` covers a root architect and a sub-architect alike, and is the one role whose `bash`
+ * is held to the same refusal (every command but a single `legion` one). */
+export const CODE_TOOL_REFUSAL: Readonly<Partial<Record<LegionRole, string>>> = {
+  architect: "the architect delegates all code work to phase workers",
+  reviewer: "the reviewer edits nothing except the final .legion/ cleanup commit via bash",
+  merger: "the merger only verifies and reports",
+};
 
 /** An `xd://` URL, its scheme in any case. */
 const TOOL_DEVICE_URL = /^xd:\/\//iu;
@@ -484,53 +495,23 @@ export default function legionExtension(pi: PiApi): void {
     paneRules ??= PANE_RULES[classifySession(process.env).kind] ?? [];
     const refusal = paneRuleRefusal(toolCall, paneRules);
     if (refusal !== undefined) return { block: true, reason: refusal };
-    // No other gate applies to a subagent's own tool calls: the parent session's gate, running
-    // in the parent's own module instance, already governs the parent's `task` call that spawned
-    // it (see the architect `task` block below and isSubagentSession).
+    // No other gate applies to a subagent's own tool calls: the role gates below bind the session
+    // that holds the claim, and a subagent shares its parent's identity and claims no role (see
+    // isSubagentSession). Every role may launch one with `task`.
     if (await checkSubagentSession(context)) return undefined;
     const sessionID = context.sessionManager.getSessionId();
     const active = claimSession.capability(sessionID);
+    const codeToolRefusal = active === undefined ? undefined : CODE_TOOL_REFUSAL[active.role];
+    const mutatesCode =
+      CODE_MUTATION_TOOLS.includes(toolCall.toolName) ||
+      (active?.role === "architect" &&
+        toolCall.toolName === "bash" &&
+        !isSingleLegionCommand(toolCall.input.command));
     // A `write` to an `xd://<tool>` path is OMP's tool-device invocation convention (e.g. the
-    // Dispatch tools), not a file mutation. Short-circuit it out of every mutation gate
-    // below so the architect/reviewer/merger role checks apply only to real file writes.
-    const isToolDevice = isToolDeviceInvocation(toolCall);
-    // `role === "architect"` covers a root architect and a sub-architect alike: both delegate all
-    // code work to phase workers.
-    if (
-      active?.role === "architect" &&
-      !isToolDevice &&
-      (CODE_MUTATION_TOOLS.includes(toolCall.toolName) ||
-        (toolCall.toolName === "bash" && !isSingleLegionCommand(toolCall.input.command)))
-    ) {
-      return { block: true, reason: "the architect delegates all code work to phase workers" };
-    }
-    // The architect's work reaches other agents only as child issues and the phase workers the
-    // daemon runs: Legion runs one agent per process, and an in-process `task` subagent would
-    // inherit the architect's Legion environment and clash with its own daemon-registered role
-    // (see isSubagentSession).
-    if (active?.role === "architect" && toolCall.toolName === "task") {
-      return {
-        block: true,
-        reason:
-          "the architect delegates only through child issues and the daemon's phase workers; Legion runs one agent per process",
-      };
-    }
-    if (
-      active?.role === "reviewer" &&
-      !isToolDevice &&
-      CODE_MUTATION_TOOLS.includes(toolCall.toolName)
-    ) {
-      return {
-        block: true,
-        reason: "the reviewer edits nothing except the final .legion/ cleanup commit via bash",
-      };
-    }
-    if (
-      active?.role === "merger" &&
-      !isToolDevice &&
-      MERGER_BLOCKED_TOOLS.includes(toolCall.toolName)
-    ) {
-      return { block: true, reason: "the merger only verifies and reports" };
+    // Dispatch tools), not a file mutation. Short-circuit it out of the mutation gate so the
+    // architect/reviewer/merger role checks apply only to real file writes.
+    if (codeToolRefusal !== undefined && mutatesCode && !isToolDeviceInvocation(toolCall)) {
+      return { block: true, reason: codeToolRefusal };
     }
     if (!needsGrant(toolCall)) return undefined;
     // The shared wrapper mints through the caller's client, then writes the grant to the pane's

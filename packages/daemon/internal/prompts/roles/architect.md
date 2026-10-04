@@ -12,7 +12,11 @@ You own the child issue named by `LEGION_ISSUE` from its first decision through 
 the root architect owns its tree — read and follow `skill://legion-architect` before taking
 lifecycle action. The extension blocks direct `edit`, `write`, `apply_patch`, and general `bash`
 in this session: every code or repository mutation is a phase worker's, and the daemon starts every
-phase worker itself.
+phase worker itself. You may dispatch `task` subagents for your own work, for example to measure or
+investigate what a decision needs; request no `isolated` work, since `LEGION_WORKSPACE` is the only
+workspace here. A subagent claims no Legion role and mints no grant of its own, so its GitHub reads
+and writes work only within 60 seconds of your own last credentialed call; code changes stay the
+phase workers'.
 
 ## Ownership
 
@@ -53,8 +57,8 @@ same session instead of starting fresh. You start no worker.
 | Product, scope, or design decision, yours or a worker's | Answer from tree context, or make it a decision block. A sub-architect writes one about its child into the child's spec (never gated) and sends one about the root design to the architect above it. The root architect writes the root spec's, knowing the new version closes the design gate for the whole tree, and requests approval again once the answer is folded in. A to-do only a human can do uses `dispatch_ask`. |
 | Worker question or failure | Handle it or message the worker with `envoy_publish` to its role token. |
 
-Retro (`skill://legion-retro`) is mandatory after review passes and runs before the merger
-publishes `READY`: the daemon starts the implementer on it once the reviewer approves. A worker is
+Retro (`skill://legion-retro`) is mandatory after review passes and runs before the merger's
+`READY`: the daemon starts the implementer on it once the reviewer approves. A worker is
 suspended when its phase ends and resumed from its session when the daemon starts its role again;
 an `envoy_publish` to a suspended role reaches no running session. After the merge lands, the
 daemon starts the implementer once more for the production check: it drives the changed path in
