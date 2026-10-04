@@ -136,11 +136,11 @@ export function dropTarget(
 
 /**
  * Shared splice-and-rank logic for `moveIssue` and `moveIssueToLane`: groups `issues` by status,
- * places `key` at `insertionIndex` of the cell `cellPredicate` admits within the `targetStatus`
- * column, and returns the optimistic list plus the neighbours for `rank`. `isNoOp` is the
- * caller's own answer to "would the active card stay exactly where it already is" - `moveIssue`
- * asks about status alone, `moveIssueToLane` about status and priority together - and this
- * returns `undefined` instead of a result when it is.
+ * places `active` at `insertionIndex` of the cell `cellPredicate` admits within the
+ * `targetStatus` column, and returns the optimistic list plus the neighbours for `rank`.
+ * `isNoOp` is the caller's own answer to "would the active card stay exactly where it already
+ * is" - `moveIssue` asks about status alone, `moveIssueToLane` about status and priority
+ * together - and this returns `undefined` instead of a result when it is.
  */
 function placeInColumn(
   issues: readonly IssueSummary[],
