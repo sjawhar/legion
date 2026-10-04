@@ -309,23 +309,9 @@ func main() {
 		slog.Error("dispatch: listen", "addr", boot.ListenAddr, "error", err)
 		os.Exit(1)
 	}
-	serveErr := make(chan error, 1)
-	go func() {
-		slog.Info("dispatch: listening", "addr", boot.ListenAddr)
-		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			serveErr <- err
-			cancel()
-		}
-	}()
-
-	<-ctx.Done()
-	slog.Info("dispatch: shutting down")
-	shutdown(server, documentService, database.Pool)
-	select {
-	case err := <-serveErr:
+	if err := serveUntilStopped(ctx, cancel, server, listener, boot.ListenAddr, documentService, database.Pool); err != nil {
 		slog.Error("dispatch: serve", "error", err)
 		os.Exit(1)
-	default:
 	}
 }
 

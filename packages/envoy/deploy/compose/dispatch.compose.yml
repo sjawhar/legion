@@ -7,10 +7,12 @@ services:
     network_mode: host
     entrypoint: ["/usr/local/bin/envoy-dispatch"]
     restart: unless-stopped
-    # A SIGTERM runs Dispatch's ordered shutdown inside 25 s: the requests in flight drain first,
-    # the document service settles what is owed within 10 s of its own (starting by 15 s at the
-    # latest), and the database pool closes once every request has answered, or at once when the
-    # database has stopped answering. Docker's 10 s default would SIGKILL it partway.
+    # A SIGTERM runs Dispatch's ordered shutdown: the requests in flight drain first, the document
+    # service settles what is owed within 10 s of its own (starting 15 s after the signal at the
+    # latest), and the database pool closes once every request has answered. A write still waiting
+    # when this period ends is killed with the process, as Docker's 10 s default would kill the
+    # document service partway. Once the document service has finished, Dispatch exits without
+    # waiting on a database that three 2 s health probes in a row find silent.
     stop_grace_period: 30s
     healthcheck:
       test: ["CMD", "curl", "-f", "http://${DISPATCH_LISTEN_HOST:-127.0.0.1}:${DISPATCH_PORT:-8766}/healthz"]

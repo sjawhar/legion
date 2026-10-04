@@ -106,12 +106,14 @@ func TestSIGTERMWhileARequestHoldsHTTPShutdownStillSettlesTheOwedDocument(t *tes
 	process.checkSettledAtShutdown(t, database, artifactID)
 }
 
-// A write in flight at SIGTERM can wait on a lock past the HTTP drain's share of the budget and the
-// document service's run, here a title change behind another writer that holds the issue for
-// seventeen seconds after the signal. The database is answering, so Dispatch keeps the request's
-// connection open until the write commits and its answer is sent, and only then closes the pool.
+// A write in flight at SIGTERM can wait on a lock past the HTTP drain's share, the document
+// service's budget and the point a fixed shutdown bound would end it, here a title change behind
+// another writer that holds the issue for 27 seconds after the signal, 3 s inside the runtime's
+// kill. The database is answering, so Dispatch keeps the request's connection open until the write
+// commits and its answer is sent, and only then closes the pool, as the deferred close of the pool
+// before this shutdown order did.
 func TestSIGTERMWhileAWriteWaitsOnALockCommitsItAndAnswersBeforeExit(t *testing.T) {
-	const lockHeldAfterSIGTERM = 17 * time.Second
+	const lockHeldAfterSIGTERM = 27 * time.Second
 	database := storetest.Open(t)
 	process := startDispatchProcess(t, database.Pool.Config().ConnString())
 	process.waitHealthy(t)
@@ -183,19 +185,14 @@ func lockIssue(t *testing.T, database *store.Store, key string) pgx.Tx {
 	return holder
 }
 
-// renameIssue changes the issue's title as alice and returns the status Dispatch answered.
+// renameIssue changes the issue's title as the test's login and returns the status Dispatch
+// answered. It reports failures rather than ending the test, so a goroutine can call it.
 func (p *dispatchProcess) renameIssue(key, title string) (int, error) {
 	body, err := json.Marshal(map[string]string{"title": title})
 	if err != nil {
 		return 0, err
 	}
-	request, err := http.NewRequest(http.MethodPatch, p.url("/api/v1/issues/"+key), strings.NewReader(string(body)))
-	if err != nil {
-		return 0, err
-	}
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("X-Dispatch-User", dispatchTestLogin)
-	response, err := http.DefaultClient.Do(request)
+	response, err := p.send(http.MethodPatch, "/api/v1/issues/"+key, string(body))
 	if err != nil {
 		return 0, err
 	}
@@ -244,8 +241,9 @@ func TestSIGTERMWithAnEditorConnectedSettlesItsDocumentBeforeExit(t *testing.T) 
 
 // A database that stops answering - a failover, a partition - holds every connection waiting on it,
 // and closing the pool waits for every connection in use. Once the document service has stopped,
-// Dispatch gives up on them as soon as its health probe finds the database silent, so it exits well
-// inside a runtime's grace period instead of spending the rest of its budget or being killed.
+// Dispatch gives up on them when silentProbes health probes in a row have failed with no
+// connection taken back meanwhile, so it exits well inside a runtime's grace period instead of
+// being killed.
 func TestSIGTERMWithTheDatabaseUnansweringExitsWithinTheShutdownBudget(t *testing.T) {
 	database := storetest.Open(t)
 	relay := startDatabaseRelay(t, database.Pool.Config().ConnString())
@@ -261,9 +259,9 @@ func TestSIGTERMWithTheDatabaseUnansweringExitsWithinTheShutdownBudget(t *testin
 	process.WaitExit(t, "SIGTERM with the database unanswering")
 	exited := time.Since(signalled)
 	t.Logf("exited %v after SIGTERM", exited)
-	// Nothing is in flight over HTTP, so the document service starts at once; then one health
-	// probe, bounded at two seconds, finds the database silent.
-	if bound := documentShutdownTimeout + 5*time.Second; exited > bound {
+	// Nothing is in flight over HTTP, so the document service starts at once and spends at most
+	// its budget; then each failed probe takes its two seconds and a poll interval.
+	if bound := documentShutdownTimeout + silentProbes*(2*time.Second+drainPollInterval) + 2*time.Second; exited > bound {
 		t.Errorf("Dispatch exited %v after SIGTERM with the database unanswering, want within %v", exited, bound)
 	}
 	if !strings.Contains(process.Output.String(), "once the database stopped answering") {
@@ -402,7 +400,7 @@ func (p *dispatchProcess) checkSettledAtShutdown(t *testing.T, database *store.S
 	}
 }
 
-// dispatchTestLogin is the allowlisted login the test calls the server as, through header identity.
+// dispatchTestLogin is the person the test calls the server as, through header identity.
 const dispatchTestLogin = "alice"
 
 // dispatchProcess is a Dispatch binary a test started, serving on port.
@@ -432,7 +430,7 @@ func startDispatchProcessWithSettleDelay(t *testing.T, databaseURL string, settl
 		"DATABASE_URL=" + databaseURL,
 		"DISPATCH_AGENT_TOKEN=shutdown-test-token",
 		"DISPATCH_IDENTITY=header:X-Dispatch-User",
-		"DISPATCH_ALLOWED_LOGINS=" + dispatchTestLogin,
+		"DISPATCH_IDENTITY_HEADER_TRUSTED=1",
 		"DISPATCH_NATS_DISABLED=1",
 		"DISPATCH_LISTEN_HOST=127.0.0.1",
 		"DISPATCH_PORT=" + strconv.Itoa(port),
@@ -486,13 +484,7 @@ func (p *dispatchProcess) waitPromptExit(t *testing.T, signalled time.Time) {
 // call sends body as the test's login and requires status, returning the response body.
 func (p *dispatchProcess) call(t *testing.T, method, path, body string, status int) []byte {
 	t.Helper()
-	request, err := http.NewRequest(method, p.url(path), strings.NewReader(body))
-	if err != nil {
-		t.Fatalf("%s %s: %v", method, path, err)
-	}
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("X-Dispatch-User", dispatchTestLogin)
-	response, err := http.DefaultClient.Do(request)
+	response, err := p.send(method, path, body)
 	if err != nil {
 		t.Fatalf("%s %s: %v", method, path, err)
 	}
@@ -502,6 +494,17 @@ func (p *dispatchProcess) call(t *testing.T, method, path, body string, status i
 		t.Fatalf("%s %s: status %d, want %d: %s", method, path, response.StatusCode, status, answer)
 	}
 	return answer
+}
+
+// send sends body to path as the test's login.
+func (p *dispatchProcess) send(method, path, body string) (*http.Response, error) {
+	request, err := http.NewRequest(method, p.url(path), strings.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Dispatch-User", dispatchTestLogin)
+	return http.DefaultClient.Do(request)
 }
 
 // createIssue creates a project and an issue whose spec is one word, returning the issue's key and
