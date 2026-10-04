@@ -16,6 +16,14 @@
 
 ### Changed
 
+- Each Legion role gets one set of instructions (LEGION-414). The skills and role prompts drop the
+  steps the daemon no longer runs: no role pushes a `.legion/` deletion, the reviewer approves the
+  clean head that still carries `.legion/`, the merger hands its READY packet to the daemon, which
+  posts it, and every push is `legion push`. A sub-architect ends with `sign_off` rather than a
+  phase completion the daemon refuses, a `gates.design: off` root still registers its spec, and
+  the controller skill names only the wakes the daemon sends. The `legion` tool's description says
+  the merger's `summary` is its READY packet and that the daemon accepts no architect's completion.
+
 - The architect and worker skills and the daemon's role prompts say what the daemon does: it
   starts and orders every phase from its fixed workflow table (LEGION-223). Nothing tells an agent
   to call `spawn_worker`, `release_wave` or `set_status`, which the `legion` tool no longer has.

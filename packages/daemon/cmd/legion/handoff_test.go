@@ -784,14 +784,9 @@ func TestHandoffTakesPhaseWordsForPhasesAndRolesForRoles(t *testing.T) {
 	}
 }
 
-// The end game every clean review round ends in (skills/legion-worker/references/merge-gate.md: the reviewer
-// approves only a head that carries no .legion/, and the implementer pushes the .legion/
-// deletion): once the branch head has deleted .legion/, the implementer and the tester report
-// completion without recreating it (skills/legion-worker/SKILL.md's completion gate: once .legion/ is gone, "a
-// later rebase, bare-gate re-check, confirmation, retro, or the post-merge production check writes
-// no .legion/<phase>.json, commits no handoff, and reports with `handoff_complete` alone";
-// internal/prompts/roles/implementer.md and tester.md say the same). The commit that deleted the
-// handoff is the last commit on the branch that changed it, and the completion reports it.
+// A branch head that deleted .legion/ still completes: the implementer and the tester report
+// completion without recreating it. The commit that deleted the handoff is the last commit on the
+// branch that changed it, and the completion reports it.
 func TestHandoffCompleteAfterTheLegionDeletionRecreatesNothing(t *testing.T) {
 	for _, tc := range []struct {
 		role, verdict string

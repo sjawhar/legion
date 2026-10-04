@@ -1,6 +1,6 @@
 ---
 name: legion-controller
-description: Use when handling Legion controller wakes for root-issue triage, keeping the admission slots full from `todo` issues, the daily report, architect escalation, resync healing, or human interaction.
+description: Use when handling Legion controller wakes for root-issue triage, keeping the admission slots full from `todo` issues, the daily report, architect escalation, or human interaction.
 ---
 
 # Legion Controller
@@ -12,73 +12,63 @@ architect.
 
 ## Start and claim the controller role
 
-The Legion extension claims `legion-<project>-controller` and registers controller readiness
-with the daemon during session startup. Do not handle a wake unless that startup succeeded.
+The Legion extension registers this session with the daemon as the controller and claims
+`legion-<project>-controller` during session startup. Do not handle a wake unless that startup
+succeeded.
 
-The daemon runs the controller as an interactive OMP terminal session in its private tmux
-server (the pane runs plain `omp`, not `--mode rpc`, and no `legion worker-shim`; Sami reaches
-it with `tmux -L legion-<project> select-window -t <window id> \; attach -t legion-<project>`,
-the window id being `controllerLocator.tmuxWindowId` in `legion state --json` — every window
-opens detached, so a bare `attach` lands on whichever window is current). Sami may attach and
-type into this session at any time. The pane carries no GitHub credential: its GitHub token
-variables are emptied, and both `legion gh -- <args>` and `legion threads resolve` are refused.
-The controller reads Dispatch and applies its controller capability with `legion status <KEY>
-<status>`; it never reads GitHub or merges a pull request.
+The session carries no GitHub credential: its GitHub token variables are emptied, and both
+`legion gh -- <args>` and `legion threads resolve` are refused. The controller reads Dispatch and
+applies its controller capability with `legion status <KEY> <status>`; it never reads GitHub or
+merges a pull request.
 
 For an interactive takeover from a hand-started OMP session, start OMP with
 `LEGION_CONTROLLER_SECRET` (or `LEGION_CONTROLLER_SECRET_FILE`, a path to a file holding it),
-`LEGION_DAEMON_URL`, `LEGION_STATE_DIR` (the daemon's state directory), and `LEGION_GRANT_FILE`
+`LEGION_DAEMON_URL`, `LEGION_PROJECT` (the daemon's project), `LEGION_STATE_DIR`, and `LEGION_GRANT_FILE`
 (an absolute path to a file only you can read, under a 0700 directory; the extension writes
 each command's grant there and every `bash` call is blocked without it) in its environment. Do
-not set `LEGION_CONTROLLER=1` — that marker is the daemon pane's own, and a session carrying it
-claims at startup and reports its transcript as the pane's. Then run:
+not set `LEGION_CONTROLLER=1` — that marker is `legion controller start`'s own, and a session
+carrying it claims at startup. Then run:
 
 ```text
 /legion-claim-controller
 ```
 
-The command resolves the project from daemon state, claims the Envoy role for the current
-session, and posts readiness before controller commands can act. From then on this session's
+The command checks that `LEGION_PROJECT` is the daemon's project, registers this session with the
+daemon, and claims the Envoy role for it before controller commands can act. From then on this session's
 shell commands are wrapped with a controller grant, but the grant holds no GitHub credential;
 `legion status <KEY> <status>` works through the controller secret in this session's environment
 (`LEGION_CONTROLLER_SECRET` or its `_FILE`), not the grant — if it fails, that is the variable to check.
-The takeover moves the role
-and the daemon's recorded session id to this session; it never replaces the transcript the
-daemon recorded for its own pane, so a later respawn of that pane resumes the pane's own
-conversation, not yours. Never pass a secret as a command argument or copy it into a transcript.
-The claim is kept alive automatically afterwards: the Envoy registration heartbeat re-asserts it
-and re-posts readiness whenever the listener loses sight of this session, so
-`/legion-claim-controller` is the manual override, not a routine step after a listener restart.
+The takeover moves the role and the daemon's recorded session id to this session. Never pass a
+secret as a command argument or copy it into a transcript. The Envoy registration heartbeat keeps
+the role afterwards, so `/legion-claim-controller` is the manual override, not a routine step after
+a listener restart.
 
-Two limits of a takeover session. It caches the controller secret it started with: after the
-daemon respawns its own pane the secret rotates, every `bash` call in the takeover session then
-fails with a 403 from the grant mint, and the fix is to start a fresh OMP with the new secret,
-not to retry. And the role does not follow `/new` or `/fork` in a takeover session — without
+Two limits of a takeover session. It caches the controller secret it started with: the next
+`legion controller start` mints a new secret, every `bash` call in the takeover session then fails
+with a 403 from the grant mint, and the fix is to start a fresh OMP with the new secret, not to
+retry. And the role does not follow `/new` or `/fork` in a takeover session — without
 `LEGION_CONTROLLER=1` the new session is not a Legion session to the extension — so after either
 command run `/legion-claim-controller` again.
 
-This handshake lets the daemon redeliver held controller work. It does not turn the controller
-into a state holder: daemon state and the Dispatch project remain authoritative.
+The daemon holds nothing for a controller: daemon state and the Dispatch project remain
+authoritative, and the start procedure below reads what happened while no controller ran.
 
 ### Started by the operator
 
-When the daemon cannot open a terminal for you — the Go daemon, under either runtime, since it
-launches no controller — nobody launched your
-pane: the operator ran `legion controller start --config controller.yaml [--daemon-url <url>]` on
+The daemon launches no controller, under either runtime: the operator ran
+`legion controller start --config controller.yaml [--daemon-url <url>]` on
 their own machine, and you are that foreground OMP session. The command fetched a fresh controller
 secret from the daemon with the operator's token, wrote it to a 0600 file under `LEGION_STATE_DIR`
 (`~/.local/state/legion/<project>-controller` by default) beside the `gh` shim and the `legion`
-launcher, and started you with `LEGION_CONTROLLER=1` and the same environment a tmux controller pane
-carries, so nothing changes in how you handle wakes. The extension registers on
-`/legion/v1/claims/register` with the
+launcher, and started you with `LEGION_CONTROLLER=1` and the controller's environment. The
+extension registers on `/legion/v1/claims/register` with the
 secret, claims the role, then subscribes to `notifications.legion.<project>.controller`, where the
-Go daemon publishes the rows marked from the Go daemon in the wake routing table. The daemon records
+daemon publishes the rows marked from the Go daemon in the wake routing table. The daemon records
 you as `controllerLocator: {runtime, external: true, sessionId, registeredAt}`, `runtime` being the
-daemon's own (`kubernetes`, or `tmux` under the Go daemon). The TypeScript daemon reads your
-liveness from the Envoy role registry (the holder of
-`legion-<project>-controller` and its `last_seen`), not from a pane: keep the session running.
+daemon's own (`kubernetes` or `tmux`). The daemon reads your liveness from the Envoy role registry
+(the holder of `legion-<project>-controller` and its `last_seen`): keep the session running.
 Exiting it leaves the project without a controller until the operator runs the command again —
-the TypeScript daemon logs `controller not registered; run legion controller start` once per
+the daemon logs `controller not registered; run legion controller start` once per
 boot-timeout interval and launches nothing itself. `legion state` and `legion status <KEY>
 <status>` work here over `LEGION_DAEMON_URL`. A second `legion controller start` replaces you: it
 mints a new secret, so your grants stop working and the role moves to the new session.
@@ -214,7 +204,7 @@ leans on `External links:`, and the label row is the one that never depends on h
 | It has any child | `dispatch_read({ ref: "dispatch://<KEY>/children" })` lists any child, open or `done`. It is an umbrella, and a finished umbrella is still no leaf. That also skips an issue whose only child is done, which is accepted. Its open children are candidates themselves, each in its own place in the order. |
 | An ancestor is Legion's | Follow `Links:` up through each `child_of` parent, reading each one, and skip when any ancestor carries the `legion` label or is recorded under `issues` in `legion state --json`, whatever its status: a Legion tree, running or parked, owns its children. An ancestor's claim or route does not skip the issue: a coordinator holding an umbrella files `todo` leaves for others to pick up, and the claim on the issue itself is what keeps two sessions off the same work. A `child_of` under `Referenced by:` is a child of this issue, not its parent. |
 | Someone is designing it | `Open asks:` lists any ask, a `Spec approval: awaiting …` line shows the spec waits on a human, or `Events:` show an `artifact.version` or an `ask.opened` from the last seven days: a session or a person is shaping it even when nobody claims or routes it. |
-| Legion ran it without the label now on it | `legion state --json` records it under `issues`, whatever its status, or `Events:` show a status write by `session legion-daemon:<PROJECT>`, the daemon's actor on every `legion status` (yours included) and on its own `in_progress` at admission. That covers a root a person took the label off, and one that ran before the daemon required the label and never had it. Name each one you skip for this in your summary. The walk never sends a root Legion already ran back into Legion: a person does that with the label and `todo`, and you do it only when a wake below says to (`worker-died`, closed-tree activity). |
+| Legion ran it without the label now on it | `legion state --json` records it under `issues`, whatever its status, or `Events:` show a status write by `session legion-daemon:<PROJECT>`, the daemon's actor on every `legion status` (yours included) and on its own `in_progress` at admission. That covers a root a person took the label off, and one that ran before the daemon required the label and never had it. Name each one you skip for this in your summary. The walk never sends a root Legion already ran back into Legion: a person does that with the label and `todo`, and you do it only when a wake below says to (`worker-died`). |
 | A running session or a person claims it | `Claimed by:` names anyone and does not end `· not running`. `· liveness unknown` counts as claimed: the agent registry could not be read, so nothing says the holder stopped. A claim ending `· not running` has lapsed, and the issue is free. |
 | Its route reaches a running session | `Route:` names a route with nothing after it, or with `(held by …)`. `(nobody holds it right now)` and `(that session is not running right now)` reach nobody; `(the Envoy listener did not answer, …)` counts as reaching someone. `Route: none` is free. |
 | A pull request is linked or named | `External links:` lists a pull request (kind `github_pr`, or a URL ending `/pull/<n>`), or a comment or message among `Events:` names one. You cannot read GitHub, so an open, merged, or closed pull request all count. A person who wants Legion on it anyway hands it over themselves: the label, then `todo`. |
@@ -318,21 +308,14 @@ priority first, then board rank ([Keeping the slots full](#keeping-the-slots-ful
 
 | Wake | Content | Controller action |
 |---|---|---|
-| New issue created in the Dispatch project (`issue.created`, status `triage`; under the TypeScript daemon resync heals misses, under the Go daemon the boot step above does). From the Go daemon: `triage on <KEY>` (payload `{kind: "triage"}`) on the controller topic, for an unrecorded root carrying the `legion` label only ("Issues handed to Legion" above) | issue key + triage context (incl. pre-existing children) | Triage: `legion status <KEY> todo` to admit, or set `backlog`/`icebox` to park |
-| Backlog eligibility (TypeScript daemon) | slot freed / priority change | Reconsider parked items and move the eligible root to `todo` |
+| New issue created in the Dispatch project, status `triage`: `triage on <KEY>` (payload `{kind: "triage"}`) on the controller topic, for an unrecorded root carrying the `legion` label only ("Issues handed to Legion" above); the start procedure above catches one sent while no controller ran | issue key + triage context (incl. pre-existing children) | Triage: `legion status <KEY> todo` to admit, or set `backlog`/`icebox` to park |
 | `slot-free on <KEY>` from the Go daemon (payload `{kind: "slot-free"}`) | the root whose slot the daemon released with no waiting root to take it | Verify a free slot in `legion state --json`, then fill it ([Keeping the slots full](#keeping-the-slots-full-go-daemon)) |
 | `todo on <KEY>` from the Go daemon (payload `{kind: "todo"}`) | an issue not handed to Legion that changed while in `todo` and a slot stood free, sent half a minute later | Verify a free slot, then walk the whole `todo` list ([Keeping the slots full](#keeping-the-slots-full-go-daemon)) |
 | `tick on <PROJECT>` from the Go daemon (payload `{kind: "tick"}`) | the project key; the daemon's periodic wake, whatever the slots | Recheck the trees waiting on a claim, then walk if a slot is free; post the day's report if this is the day's first turn |
 | Architect escalation (controller-actionable only: re-file a child as a root issue, capacity, cross-tree conflicts) | request + context | Judge and act; the owning architect writes an issue-design decision as a decision block and opens `dispatch_ask` only for a human to-do |
-| Resync report | artifact-driven anomaly list (zero-owner trees, untriaged-open, launch-failed, admission-drift) | Verify against fresh state, then heal |
-| Resync report: `admission-drift` entry | issue key + whether the daemon added it to, or removed it from, its admission list (the detail says which) | No action: the daemon already repaired it in the same run. An issue that reappears in consecutive reports is a live leak — file a LEGION issue on Dispatch with both reports pasted as evidence (never a GitHub issue) |
-| `child-status` | child key + status transition | Not controller-actionable by default; if the daemon could not route it to the parent's architect role, verify the transition and forward it with `envoy_publish` |
 | Mention | Slack/GitHub PR @mention text | Answer, or route to the owning issue's architect role |
-| READY packet seen on a Dispatch issue (via issue subscription) | READY line + gate facts | No action: a human merges; the merger has already notified the queue role if the project has one |
-| `worker-recovered` (role `architect`) from the daemon | issue, fromRef | A root architect's tree volume was lost; it restarted as a new session. Verify the tree is active in `legion state` and that the architect posts its next step on the issue within one resync interval; otherwise treat it as an anomaly. |
 | `held on <KEY>` from the Go daemon (payload `{kind: "held", phase, role?, reason?}`) | the held issue, the phase it left, and the role whose claim failed, or `reason: "escalated"` | Verify the hold in `legion state` (the issue's phase is `held`). Without `reason`, a phase worker's launches or prompts ran out and the tree's architect decides retry or escalate: no action. With `reason: "escalated"` (on the record, `issues.<KEY>.holdReason` is `escalated`), the architect sent it to you: handle it as an architect escalation below. Parking the tree is `legion status <root> backlog`; setting the root back to `todo` later re-admits it as a new generation, which starts again from its architect |
 | `worker-died on <KEY>` from the Go daemon with `role: "architect"` | the tree root whose architect's claim failed, and the phase the root was in | The tree's architect ran out of launches or prompts and the daemon relaunches nothing; every other notice of the tree goes to that architect, so nobody inside the tree can act. Verify in `legion state` (`issues.<KEY>.architect.state` is `failed`); if the root's phase is `done`, the tree is already parked: no action. Otherwise re-admit the tree (`legion status <root> backlog`, then `todo`: a new generation, whose architect starts again with fresh budgets) or leave it parked and say why on the issue |
-| Closed-tree activity (comment, review, CI on a closed tree) | issue, root, event summary | Read the artifact; if work should resume, `legion status <root> todo`; otherwise no action — the event is not held or redelivered |
 | Direct user message | — | Always first |
 
 ## New issue triage
@@ -380,12 +363,7 @@ deploy or a decision belongs in `backlog` (`skill://dispatch`, "Choosing what to
 handed-over root waits for a slot in `todo`, where the daemon's
 admission queue holds it (`admission.waiting`), so a park means "should not run now", and a
 parked root keeps its `legion` label. A parked issue runs again when a person sets it to `todo`,
-or when a wake tells you to re-admit it (`worker-died`, closed-tree activity).
-
-Under the TypeScript daemon, when a slot frees or priority changes, use `legion state --json` and
-the current Dispatch issue to reconsider parked roots. Admit the selected root with
-`legion status <KEY> todo`. Moving an item to or from `backlog`/`icebox` is a deliberate
-controller decision, not a no-op.
+or when a wake tells you to re-admit it (`worker-died`).
 
 ## Architect escalation
 
@@ -410,17 +388,6 @@ and the Dispatch issue. If the work belongs in an independent root:
 Never promote a child in place. Resolve capacity and cross-tree conflicts from verified
 state, routing design decisions back to the owning architect when they are not controller
 judgments.
-
-## Resync report
-
-Treat a resync report as an anomaly list, not an instruction. For every zero-owner tree,
-untriaged-open, or launch-failed issue it names, verify `legion state --json` and the
-current Dispatch issue first. Then heal the verified condition: admit an eligible root, move
-an issue back to its intended status, or use the applicable daemon control path. Do not act
-on stale entries until their source artifact explains the anomaly. An `admission-drift` entry
-needs no healing — the daemon added the tree back to (or removed it from) its admission list in
-the same run; verify only that the same issue does not recur in the next report, and file a
-LEGION issue with both reports if it does.
 
 ## Mentions
 

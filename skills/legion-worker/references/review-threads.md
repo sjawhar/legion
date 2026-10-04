@@ -26,8 +26,7 @@ Every path it cites is in sjawhar/legion.
   your own `gh`; where no `legion` command is installed, use `gh api graphql` with the session's
   GitHub credential and the fallback below.
   In a Legion pane, the **implementer** runs the command after every push that answers a review
-  (the corrective push, and the final `.legion/` deletion push where the daemon has one) and
-  before its `handoff_complete`, and pastes its output, stamped with the head it just pushed, into
+  and before its `handoff_complete`, and pastes its output, stamped with the head it just pushed, into
   the `Threads` section. The output is then recorded against the head the reviewer will read, and
   nothing reads thread state before the implementer's completion. The command resolves each
   unresolved thread whose newest submitted comment is the opener's own `Accepted:` reply. On a

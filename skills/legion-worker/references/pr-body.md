@@ -95,8 +95,8 @@ and the tester's proof below are both this proof.
   the implementer's command or drives the same surface independently, and records the verdict in
   `.legion/test.json` as `implementerProof` (`{verdict, how}`).
   A test handoff whose predecessor carried no proof is a test failure, not a gap for the tester to fill:
-  record it in `failures` with `implementerProof.verdict: "rejected"`, complete the phase, and let
-  the architect return the issue to the implementer — the agent that developed the change owns
+  record it in `failures` with `implementerProof.verdict: "rejected"`, complete the phase with
+  `verdict: "fail"`, and the daemon returns the issue to the implementer — the agent that developed the change owns
   proving it (`handoff_write` for phase `test` refuses a rejected verdict, or `failed > 0`,
   with no recorded failure). Otherwise, add your own proof before completing — a proof as defined
   above — as the `E2E (tester)` line and the `proof` array `handoff_write` for
