@@ -4,11 +4,14 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { MemoryRouter } from "react-router-dom";
 
 import { api } from "../../api/client";
-import type { MachineLogin } from "../../api/types";
+import type { CredentialGrant, MachineLogin } from "../../api/types";
+import { GrantsSection } from "./GrantsSection";
 import { MachineLoginPage } from "./MachineLoginPage";
+import { MachineLoginsSection } from "./MachineLoginsSection";
 
 const devbox: MachineLogin = {
   credential_id: "cred-devbox",
+  expired: false,
   expires_at: "2026-10-10T12:00:00Z",
   host: "devbox.example.com",
   issued_at: "2026-10-03T12:00:00Z",
@@ -16,6 +19,7 @@ const devbox: MachineLogin = {
 };
 const laptop: MachineLogin = {
   credential_id: "cred-laptop",
+  expired: false,
   expires_at: "2026-10-09T08:00:00Z",
   host: "laptop.example.com",
   issued_at: "2026-10-02T08:00:00Z",
@@ -23,10 +27,20 @@ const laptop: MachineLogin = {
 };
 const daemon: MachineLogin = {
   credential_id: "cred-daemon",
+  expired: false,
   expires_at: "2026-10-10T09:00:00Z",
   host: "cluster.example.com",
   issued_at: "2026-10-03T09:00:00Z",
   service: "legion-daemon",
+};
+/** The devbox's previous login: expired, but a box it started still renews with its own key. */
+const stale: MachineLogin = {
+  credential_id: "cred-stale",
+  expired: true,
+  expires_at: "2026-10-03T11:00:00Z",
+  host: "devbox.example.com",
+  issued_at: "2026-09-26T11:00:00Z",
+  service: null,
 };
 
 function renderPage() {
@@ -40,6 +54,88 @@ function renderPage() {
   );
 }
 
+test("an expired login whose sessions still run is listed and marked so, and Revoke ends it", async () => {
+  let live = [devbox, stale];
+  const getMachineLogins = spyOn(api, "getMachineLogins").mockImplementation(async () => ({
+    credentials: live,
+  }));
+  const revokeMachineLogin = spyOn(api, "revokeMachineLogin").mockImplementation(async (id) => {
+    live = live.filter((login) => login.credential_id !== id);
+  });
+  const confirm = spyOn(window, "confirm").mockReturnValue(true);
+
+  try {
+    renderPage();
+    const section = within(await screen.findByRole("region", { name: "Your machine logins" }));
+    const marked = await section.findByText("expired, sessions still running");
+    const staleRow = marked.closest("tr") as HTMLElement;
+    expect(within(staleRow).getByText("devbox.example.com")).toBeDefined();
+    expect(section.getAllByText("expired, sessions still running")).toHaveLength(1);
+
+    fireEvent.click(within(staleRow).getByRole("button", { name: "Revoke" }));
+    await waitFor(() => expect(revokeMachineLogin).toHaveBeenCalledWith("cred-stale"));
+    await waitFor(() => expect(section.queryByText("expired, sessions still running")).toBeNull());
+    expect(section.getByText("devbox.example.com")).toBeDefined();
+  } finally {
+    cleanup();
+    confirm.mockRestore();
+    getMachineLogins.mockRestore();
+    revokeMachineLogin.mockRestore();
+  }
+});
+
+// A machine login's revoke ends every session it enrolled and with them their grants, so a page
+// showing Live grants beside the machine logins drops those grants without a reload.
+test("revoking a machine login refreshes Live grants", async () => {
+  let logins = [devbox];
+  const grant: CredentialGrant = {
+    approver: null,
+    created_at: "2026-10-03T12:05:00Z",
+    enrollment: { kind: "box", operator: "ada@example.com", runtime_id: "box-1", slot: null },
+    expires_at: "2026-10-03T13:05:00Z",
+    grant_id: "grant-1",
+    granted: "automatic",
+    names: ["WORKER_TOKEN"],
+    record_id: null,
+  };
+  let grants = [grant];
+  const getMachineLogins = spyOn(api, "getMachineLogins").mockImplementation(async () => ({
+    credentials: logins,
+  }));
+  const getCredentialGrants = spyOn(api, "getCredentialGrants").mockImplementation(async () => ({
+    grants,
+  }));
+  const revokeMachineLogin = spyOn(api, "revokeMachineLogin").mockImplementation(async () => {
+    logins = [];
+    grants = [];
+  });
+  const confirm = spyOn(window, "confirm").mockReturnValue(true);
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+
+  try {
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MachineLoginsSection />
+        <GrantsSection />
+      </QueryClientProvider>
+    );
+    const liveGrants = within(await screen.findByRole("region", { name: "Live grants" }));
+    expect(await liveGrants.findByText("WORKER_TOKEN")).toBeDefined();
+    const section = within(screen.getByRole("region", { name: "Your machine logins" }));
+
+    fireEvent.click(await section.findByRole("button", { name: "Revoke" }));
+    await waitFor(() => expect(revokeMachineLogin).toHaveBeenCalledWith("cred-devbox"));
+    expect(await liveGrants.findByText("No live grants.")).toBeDefined();
+    expect(liveGrants.queryByText("WORKER_TOKEN")).toBeNull();
+  } finally {
+    cleanup();
+    confirm.mockRestore();
+    getMachineLogins.mockRestore();
+    getCredentialGrants.mockRestore();
+    revokeMachineLogin.mockRestore();
+  }
+});
+
 test("the machine-login page lists the viewer's machine logins, and Revoke ends the one confirmed", async () => {
   let live = [devbox, laptop];
   const getMachineLogins = spyOn(api, "getMachineLogins").mockImplementation(async () => ({
@@ -48,13 +144,7 @@ test("the machine-login page lists the viewer's machine logins, and Revoke ends 
   const revokeMachineLogin = spyOn(api, "revokeMachineLogin").mockImplementation(async (id) => {
     live = live.filter((login) => login.credential_id !== id);
   });
-  const originalConfirm = window.confirm;
-  const asked: string[] = [];
-  let answer = false;
-  window.confirm = (message?: string) => {
-    asked.push(message ?? "");
-    return answer;
-  };
+  const confirm = spyOn(window, "confirm").mockReturnValue(false);
 
   try {
     renderPage();
@@ -64,8 +154,10 @@ test("the machine-login page lists the viewer's machine logins, and Revoke ends 
     expect(section.getByText("laptop.example.com")).toBeDefined();
 
     fireEvent.click(within(devboxRow as HTMLElement).getByRole("button", { name: "Revoke" }));
-    expect(asked).toEqual([
-      "Revoke the machine login for devbox.example.com? Every agent session it started loses its secrets at once, and the machine needs a new login.",
+    expect(confirm.mock.calls).toEqual([
+      [
+        "Revoke the machine login for devbox.example.com? Every agent session it started loses its secrets at once, and the machine needs a new login.",
+      ],
     ]);
     // A mutation calls its function a few microtasks after the click; a timer runs after them all.
     const settled = Promise.withResolvers<void>();
@@ -73,7 +165,7 @@ test("the machine-login page lists the viewer's machine logins, and Revoke ends 
     await settled.promise;
     expect(revokeMachineLogin).not.toHaveBeenCalled();
 
-    answer = true;
+    confirm.mockReturnValue(true);
     fireEvent.click(within(devboxRow as HTMLElement).getByRole("button", { name: "Revoke" }));
     await waitFor(() => expect(revokeMachineLogin).toHaveBeenCalledWith("cred-devbox"));
     await waitFor(() => expect(section.queryByText("devbox.example.com")).toBeNull());
@@ -81,7 +173,7 @@ test("the machine-login page lists the viewer's machine logins, and Revoke ends 
     expect(revokeMachineLogin).toHaveBeenCalledTimes(1);
   } finally {
     cleanup();
-    window.confirm = originalConfirm;
+    confirm.mockRestore();
     getMachineLogins.mockRestore();
     revokeMachineLogin.mockRestore();
   }
@@ -95,12 +187,7 @@ test("a service's login the viewer approved is listed by its service, and its Re
   const revokeMachineLogin = spyOn(api, "revokeMachineLogin").mockImplementation(async (id) => {
     live = live.filter((login) => login.credential_id !== id);
   });
-  const originalConfirm = window.confirm;
-  const asked: string[] = [];
-  window.confirm = (message?: string) => {
-    asked.push(message ?? "");
-    return true;
-  };
+  const confirm = spyOn(window, "confirm").mockReturnValue(true);
 
   try {
     renderPage();
@@ -112,8 +199,10 @@ test("a service's login the viewer approved is listed by its service, and its Re
     expect(section.getByText("devbox.example.com")).toBeDefined();
 
     fireEvent.click(within(daemonRow as HTMLElement).getByRole("button", { name: "Revoke" }));
-    expect(asked).toEqual([
-      "Revoke the legion-daemon login on cluster.example.com? Every session it started, its worker pods included, ends at once, and legion-daemon needs a new login approval before it starts any more.",
+    expect(confirm.mock.calls).toEqual([
+      [
+        "Revoke the legion-daemon login on cluster.example.com? Every session it started, its worker pods included, ends at once, and legion-daemon needs a new login approval before it starts any more.",
+      ],
     ]);
     await waitFor(() => expect(revokeMachineLogin).toHaveBeenCalledWith("cred-daemon"));
     await waitFor(() =>
@@ -122,7 +211,7 @@ test("a service's login the viewer approved is listed by its service, and its Re
     expect(section.getByText("devbox.example.com")).toBeDefined();
   } finally {
     cleanup();
-    window.confirm = originalConfirm;
+    confirm.mockRestore();
     getMachineLogins.mockRestore();
     revokeMachineLogin.mockRestore();
   }

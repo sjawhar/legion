@@ -222,8 +222,13 @@ list, since the broker lists it for every approver, and any of them decides it t
 The reason renders inside a `<blockquote>` as **plain text only** — no Markdown pipeline, no
 linkification, `white-space: pre-wrap` — since it is the agent's own words, not reviewed content;
 a pending machine-kind record adds the sentence "Approving lets `<host>` start agent sessions as
-you." verbatim; the record page renders no buttons at all for a machine record, pointing instead at
-the machine page, whose code-entry lookup is the only way to decide it. A decision is one plain
+you." verbatim, or, for a service's login (the record's `service` set, the Legion daemon's),
+"Approving lets `<service> on <host>` start worker pods as `<service>`, not as you: no secret of
+yours reaches its pods unless you approve the request for it."; an approval made on the machine
+page reads "Approved. `<host>` can start agent sessions as you." or "Approved. `<service> on
+<host>` can start worker pods as `<service>`."; the record page renders no buttons at all for a
+machine record, pointing instead at the machine page, whose code-entry lookup is the only way to
+decide it. A decision is one plain
 POST: a plain record's approve and deny send no body, and a machine record's approve and deny both
 send `{code}`, the code the viewer typed for that lookup (the broker requires it on either
 decision). The page never says who decides: Dispatch's server names the signed-in viewer (below),
@@ -233,6 +238,14 @@ recorded decision and no buttons, on the record page and on the machine page ali
 machine page looked the login up already decided or decided it itself; every broker error
 surfaces verbatim through `ApiError`'s message, never reworded.
 
+`RevocableList.tsx` is the revocable table both lists below render through, as
+`CredentialDecisionButtons.tsx` is the decision pair both record pages share: each section hands it
+its query (narrowed to the rows with `select`), its columns, its revoke call, an optional
+`window.confirm` question and what to invalidate on success. It owns the loading, failed and empty
+states and the one revoke in flight: every Revoke button is disabled while a revoke is pending, a
+`useSubmitGuard` ref drops a second press that lands before that re-render, and a refused revoke's
+broker message (a `403 NOT_APPROVER` among them) shows under the table, never silently.
+
 `GrantsSection.tsx` renders on `/settings` only where the pending list is not `null`: every live
 grant of a session the viewer operates, automatic or approved by anyone, and every grant the viewer
 approved (`grants.ts`'s `credentialGrantsQuery`, `?approver=me`). Each row names how it was
@@ -241,14 +254,17 @@ enrollment's slot under its enrollment, and has a Revoke button that POSTs `{}` 
 `/api/v1/credential-grants/{id}/revoke`; revoking an automatic grant makes that session ask before
 it gets those secrets again.
 
-`MachineLoginsSection.tsx` renders under the code entry on `/credentials/machine`: the live machine
-logins the viewer approved (`GET /api/v1/machine-logins`, query key `machineLoginsQueryKey`, which an
-approval on the page also invalidates), one row per login with its machine (the host, or
-`<service> on <host>` for a service's login such as the Legion daemon's), when it was issued and
-when it expires, and a Revoke button that asks `window.confirm` first and then POSTs `{}` to
-`/api/v1/machine-logins/{id}/revoke`. The confirm for a service's login says every session it
-started, its worker pods included, ends and the service needs a new login approval. Revoking ends
-the login and every session it enrolled, so it also invalidates the Live grants list.
+`MachineLoginsSection.tsx` renders under the code entry on `/credentials/machine`: the machine
+logins the viewer approved that can still reach a secret (`GET /api/v1/machine-logins`,
+`machineLogins.ts`'s `machineLoginsQuery`, which an approval on the page also invalidates), one row
+per login with its machine (the host, or `<service> on <host>` for a service's login such as the
+Legion daemon's), when it was issued and when it expires, and a Revoke button that asks
+`window.confirm` first and then POSTs `{}` to `/api/v1/machine-logins/{id}/revoke`. A login's
+sessions outlive its expiry, so the broker also lists an expired login while one of its sessions
+runs (`expired: true`), and its row reads `expired, sessions still running` under the machine. The
+confirm for a service's login says every session it started, its worker pods included, ends and the
+service needs a new login approval. Revoking ends the login and every session it enrolled, so it
+also invalidates the Live grants list.
 
 `packages/envoy/internal/dispatch/agentsecrets/client.go` is Dispatch's server-side client for the
 broker's UI-bearer API (`DISPATCH_AGENT_SECRETS_URL`/`DISPATCH_AGENT_SECRETS_TOKEN[_FILE]`,

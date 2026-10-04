@@ -206,9 +206,9 @@ export interface CredentialGrantsResponse {
   grants: CredentialGrant[];
 }
 
-/** One of the live machine logins the viewer approved on `GET /api/v1/machine-logins`: the
- *  launcher credential it minted, for one of the viewer's machines or for a service, neither
- *  revoked nor expired. */
+/** One of the machine logins the viewer approved on `GET /api/v1/machine-logins`: the launcher
+ *  credential it minted, for one of the viewer's machines or for a service, not revoked, and
+ *  either unexpired or expired with a session it started still running. */
 export interface MachineLogin {
   credential_id: string;
   host: string;
@@ -217,6 +217,9 @@ export interface MachineLogin {
   service: string | null;
   issued_at: string;
   expires_at: string;
+  /** True once `expires_at` has passed: the login starts no more sessions, but sessions it
+   *  started renew with their own keys and still run until they end or it is revoked. */
+  expired: boolean;
 }
 export interface MachineLoginsResponse {
   credentials: MachineLogin[];
