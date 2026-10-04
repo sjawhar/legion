@@ -546,9 +546,7 @@ export function buildDispatchReference(route: DispatchReferenceRoute): string {
  *  version (`@vN`), a form the bare `spec` route cannot carry, so a versioned primary document is
  *  referenced as `artifact/<slug>@vN`. */
 export function documentRoute(
-  artifact: Pick<Artifact, "issue_key" | "kind" | "primary" | "project" | "slug"> & {
-    readonly session_id?: string | null;
-  },
+  artifact: Pick<Artifact, "issue_key" | "kind" | "primary" | "project" | "session_id" | "slug">,
   version?: number
 ): DispatchReferenceRoute {
   if (artifact.session_id !== undefined && artifact.session_id !== null) {
