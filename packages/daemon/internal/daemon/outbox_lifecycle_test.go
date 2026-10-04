@@ -63,7 +63,7 @@ func TestAnEarlierGenerationsSuperviseRowNeverActsOnTheNextGeneration(t *testing
 	client := &outboxDispatch{issue: dispatch.Issue{Key: root.Key, Status: "todo"}}
 	runner := &outbox{
 		dispatchProject: "LEGION",
-		pool:            pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"),
+		pool:            pool, records: records, supervisor: sup, trees: outboxTreeStore(t, pool, root.Key), tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"),
 		dispatch: client, notices: &outboxPublisher{}, handlers: handlers, log: quietLogger(), now: time.Now,
 		provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
 			return workspace.Workspace{}, nil
@@ -183,7 +183,7 @@ func TestAPhaseCompletionLeavesTheWorkerResidentUntilItsIssueCloses(t *testing.T
 	clock := time.Now()
 	runner := &outbox{
 		dispatchProject: "LEGION",
-		pool:            pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"),
+		pool:            pool, records: records, supervisor: sup, trees: outboxTreeStore(t, pool, issue.Tree), tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"),
 		dispatch: &outboxDispatch{issue: dispatch.Issue{Key: issue.Key, Status: "in_progress"}}, notices: &outboxPublisher{},
 		handlers: []intake.Handler{engine}, now: func() time.Time { return clock }, log: quietLogger(),
 		provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
@@ -356,7 +356,7 @@ func TestAnIssuesCloseWaitsForTheWorkersTurnToEnd(t *testing.T) {
 	clock := time.Now()
 	runner := &outbox{
 		dispatchProject: "LEGION",
-		pool:            pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"),
+		pool:            pool, records: records, supervisor: sup, trees: outboxTreeStore(t, pool, issue.Tree), tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"),
 		dispatch: &outboxDispatch{issue: dispatch.Issue{Key: issue.Key, Status: "done"}}, notices: &outboxPublisher{},
 		handlers: []intake.Handler{engine}, now: func() time.Time { return clock }, log: quietLogger(),
 	}
@@ -461,7 +461,7 @@ func TestACIRedSendBackInterruptsTheTestersTurnBeforeTheImplementerStarts(t *tes
 	clock := time.Now()
 	runner := &outbox{
 		dispatchProject: "LEGION",
-		pool:            pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"),
+		pool:            pool, records: records, supervisor: sup, trees: outboxTreeStore(t, pool, issue.Tree), tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"),
 		dispatch: &outboxDispatch{issue: dispatch.Issue{Key: issue.Key, Status: "testing"}}, notices: &outboxPublisher{},
 		handlers: []intake.Handler{engine}, now: func() time.Time { return clock }, log: quietLogger(),
 	}
@@ -795,7 +795,7 @@ func TestASameRoleBackwardMoveNeverStopsTheWorkerInItsNewPhase(t *testing.T) {
 	engine := workflow.New(records, workflow.Config{Project: "legion"}, quietLogger())
 	runner := &outbox{
 		dispatchProject: "LEGION",
-		pool:            pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"),
+		pool:            pool, records: records, supervisor: sup, trees: outboxTreeStore(t, pool, issue.Tree), tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"),
 		dispatch: &outboxDispatch{issue: dispatch.Issue{Key: issue.Key, Status: "retro"}}, notices: &outboxPublisher{}, handlers: []intake.Handler{engine},
 		log: quietLogger(), now: func() time.Time { return clock },
 		provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
@@ -921,7 +921,7 @@ func TestAStopSupersededByANewerStartNeverActs(t *testing.T) {
 	conn := fake.NewConn()
 	sup.deps.Conns.(*fake.Conns).Register(token, conn)
 	now := time.Now().UTC()
-	runner := &outbox{pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, project: "legion", log: quietLogger(), now: func() time.Time { return now }}
+	runner := &outbox{pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, trees: outboxTreeStore(t, pool, issue.Tree), project: "legion", log: quietLogger(), now: func() time.Time { return now }}
 
 	// The re-entry's stop, refused by the runtime for as long as it likes, and then the start of
 	// the run that replaces it.
@@ -1020,7 +1020,7 @@ func TestARootLeavingTheWorkflowSuspendsEveryWorkerOfItsTree(t *testing.T) {
 	}
 	rootWorker, childWorker := ready(root.Key), ready(child.Key)
 	engine := workflow.New(records, workflow.Config{Project: "legion"}, quietLogger())
-	runner := &outbox{pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, project: "legion", log: quietLogger(), now: time.Now,
+	runner := &outbox{pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, trees: outboxTreeStore(t, pool, root.Key), project: "legion", log: quietLogger(), now: time.Now,
 		dispatch: &outboxDispatch{issue: dispatch.Issue{Key: root.Key, Status: "backlog"}}, notices: &outboxPublisher{}, handlers: []intake.Handler{engine}}
 
 	if _, err := intake.ApplyFact(ctx, pool, "dispatch", "ev-backlog", intake.DispatchIssue{Key: root.Key, Seq: 6, Type: "issue.updated", Status: "backlog", Title: root.Title, Rank: "U"}, engine); err != nil {

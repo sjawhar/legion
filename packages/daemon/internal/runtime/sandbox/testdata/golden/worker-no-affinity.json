@@ -63,7 +63,9 @@
               "--role",
               "architect",
               "--private-dir",
-              "/var/run/legion/private"
+              "/var/run/legion/private",
+              "--stop-grace",
+              "30s"
             ],
             "env": [
               {
@@ -132,7 +134,9 @@
               "--role",
               "planner",
               "--private-dir",
-              "/var/run/legion/private"
+              "/var/run/legion/private",
+              "--stop-grace",
+              "30s"
             ],
             "env": [
               {
@@ -201,7 +205,9 @@
               "--role",
               "implementer",
               "--private-dir",
-              "/var/run/legion/private"
+              "/var/run/legion/private",
+              "--stop-grace",
+              "30s"
             ],
             "env": [
               {
@@ -270,7 +276,9 @@
               "--role",
               "tester",
               "--private-dir",
-              "/var/run/legion/private"
+              "/var/run/legion/private",
+              "--stop-grace",
+              "30s"
             ],
             "env": [
               {
@@ -347,7 +355,9 @@
               "--role",
               "reviewer",
               "--private-dir",
-              "/var/run/legion/private"
+              "/var/run/legion/private",
+              "--stop-grace",
+              "30s"
             ],
             "env": [
               {
@@ -416,7 +426,9 @@
               "--role",
               "merger",
               "--private-dir",
-              "/var/run/legion/private"
+              "/var/run/legion/private",
+              "--stop-grace",
+              "30s"
             ],
             "env": [
               {

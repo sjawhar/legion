@@ -25,8 +25,10 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
+	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/testwait"
+	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
 	"github.com/sjawhar/legion/daemon/internal/workflow"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
@@ -362,7 +364,7 @@ func TestOutboxSuperviseStartsResumesSuspendsStopsAndDeduplicatesDelivery(t *tes
 	provisioned := 0
 	runner := &outbox{log: quietLogger(),
 		dispatchProject: "LEGION",
-		pool:            pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"),
+		pool:            pool, records: records, supervisor: sup, trees: outboxTreeStore(t, pool, issue.Tree), tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"),
 		provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
 			provisioned++
 			return workspace.Workspace{Dir: t.TempDir(), Bookmark: "legion/LEGION-208"}, nil
@@ -715,7 +717,7 @@ func TestALingerExpiryRowAfterReadmissionActsOnNothing(t *testing.T) {
 	putOutboxIssue(t, pool, records, issue)
 	sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
 	removals := 0
-	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"),
+	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, trees: outboxTreeStore(t, pool, issue.Tree), tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"),
 		provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
 			return workspace.Workspace{Dir: t.TempDir(), Bookmark: "legion/LEGION-208"}, nil
 		},
@@ -769,7 +771,7 @@ func TestAnEarlierLingersRowsActOnNothingInALaterLinger(t *testing.T) {
 		t.Fatal(err)
 	}
 	removals := 0
-	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"),
+	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, trees: outboxTreeStore(t, pool, root.Key), tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"),
 		remove: func(context.Context, workspace.Workspace) error { removals++; return nil },
 	}
 	closeOf := func(linger uint64) record.OutboxRow {
@@ -798,9 +800,11 @@ func TestAnEarlierLingersRowsActOnNothingInALaterLinger(t *testing.T) {
 }
 
 // A linger's workspace removal waits until the close has retired every claim of the issue. A
-// worker whose release the runtime refused still runs in that workspace, and if the tree is
-// re-admitted before its close lands, it goes on there: the removal then finishes without acting,
-// so no worker is left on a removed workspace.
+// worker whose release the runtime refused still runs in that workspace. The close reserved the
+// tree's cleanup before its release failed, so the tree's re-admission waits for that cleanup: the
+// removal of the ended linger then finishes without acting, and the retried close retires the
+// worker and confirms the cleanup, after which the tree's next run relaunches the retired worker
+// and provisions its workspace again.
 func TestAWorkspaceIsRemovedOnlyOnceTheCloseRetiredEveryClaim(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
@@ -825,7 +829,8 @@ func TestAWorkspaceIsRemovedOnlyOnceTheCloseRetiredEveryClaim(t *testing.T) {
 	}
 	rt.FailReleaseOf(token, errors.New("the pane did not exit"))
 	removals := 0
-	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"),
+	trees := outboxTreeStore(t, pool, root.Key)
+	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, trees: trees, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"),
 		remove: func(context.Context, workspace.Workspace) error { removals++; return nil },
 	}
 	closeRow := mustOutboxRow(t, child.Key, record.SuperviseRequest{Op: "tree_close", Tree: root.Key, Role: claim.RoleTester, Generation: 1, Linger: 3}, time.Now())
@@ -839,14 +844,21 @@ func TestAWorkspaceIsRemovedOnlyOnceTheCloseRetiredEveryClaim(t *testing.T) {
 	}
 	root.Generation, root.Phase, root.Status, root.LingerUntil = 4, phase.Admitted, "in_progress", nil
 	putOutboxIssue(t, pool, records, root)
-	rt.FailReleaseOf(token, nil)
-	for _, row := range []record.OutboxRow{removal, closeRow} {
-		if err := runner.execute(ctx, row); err != nil {
-			t.Fatalf("the ended linger's %s row after re-admission = %v, want it finished without acting", row.Kind, err)
-		}
+	if _, err := trees.OpenTreeLifecycle(ctx, "legion", root.Key, treelifecycle.AuthorityWorkflow); !errors.Is(err, treelifecycle.ErrCleanupReserved) {
+		t.Fatalf("re-admission while the close's cleanup is reserved = %v, want the reservation's wait", err)
 	}
-	if got := machine.Claim().State; got != supervise.StateLaunching || removals != 0 {
-		t.Fatalf("after re-admission: tester %s, %d removals; want it still launching in its workspace", got, removals)
+	if err := runner.execute(ctx, removal); err != nil || removals != 0 {
+		t.Fatalf("the ended linger's removal = %v after %d removals, want it finished without acting", err, removals)
+	}
+	rt.FailReleaseOf(token, nil)
+	if err := runner.execute(ctx, closeRow); err != nil {
+		t.Fatalf("the reserved close retried after re-admission: %v", err)
+	}
+	if got := machine.Claim().State; got != supervise.StateRetired {
+		t.Fatalf("tester after the reserved close's retry = %s, want retired", got)
+	}
+	if opened, err := trees.OpenTreeLifecycle(ctx, "legion", root.Key, treelifecycle.AuthorityWorkflow); err != nil || opened.Epoch != 2 {
+		t.Fatalf("re-admission once the cleanup confirmed = %+v, %v; want the tree's epoch 2", opened, err)
 	}
 }
 
@@ -1305,6 +1317,25 @@ func putOutboxIssue(t *testing.T, pool *pgxpool.Pool, records record.Store, issu
 	}
 }
 
+// outboxTreeStore is the daemon's store on pool, the outbox's tree barrier as production wires it
+// (newOutbox's trees), with each root's tree lifecycle opened as admission opens it: every workflow
+// tree the daemon runs was admitted, and a close of a tree that never was is an error.
+func outboxTreeStore(t *testing.T, pool *pgxpool.Pool, roots ...string) *store.Store {
+	t.Helper()
+	ctx := context.Background()
+	st, err := store.Open(ctx, pool.Config().ConnString())
+	if err != nil {
+		t.Fatalf("open the store: %v", err)
+	}
+	t.Cleanup(st.Close)
+	for _, root := range roots {
+		if _, err := st.OpenTreeLifecycle(ctx, "legion", root, treelifecycle.AuthorityWorkflow); err != nil {
+			t.Fatalf("admit the tree of %s: %v", root, err)
+		}
+	}
+	return st
+}
+
 type outboxPublisher struct {
 	mu      sync.Mutex
 	publish []outboxPublish
@@ -1468,7 +1499,7 @@ func TestAClosedTreeSetBackToTodoRelaunchesItsArchitect(t *testing.T) {
 	admission := admit.New(records, engine, 2, "legion", quietLogger())
 	runner := &outbox{
 		dispatchProject: "LEGION",
-		pool:            pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"),
+		pool:            pool, records: records, supervisor: sup, trees: outboxTreeStore(t, pool, root.Key), tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"),
 		dispatch: &outboxDispatch{issue: dispatch.Issue{Key: root.Key, Status: "todo"}}, handlers: []intake.Handler{engine, admission},
 		now: func() time.Time { return time.Now().Add(time.Hour) }, log: quietLogger(),
 		provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
@@ -1541,7 +1572,7 @@ func TestAnEarlierGenerationsWorkspaceRemovalLeavesTheReadmittedTreesWorkspace(t
 	removals, busy := 0, true
 	runner := &outbox{
 		dispatchProject: "LEGION",
-		pool:            pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"),
+		pool:            pool, records: records, supervisor: sup, trees: outboxTreeStore(t, pool, root.Key), tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"),
 		dispatch: &outboxDispatch{issue: dispatch.Issue{Key: root.Key, Status: "todo"}}, handlers: []intake.Handler{engine, admission},
 		now: func() time.Time { return clock }, log: quietLogger(),
 		provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
@@ -1606,7 +1637,7 @@ func TestARuntimeThatProvisionsInItsPodsLeavesTheHostWithoutWorkspaces(t *testin
 	provisions, removals := 0, 0
 	runner := &outbox{
 		dispatchProject: "LEGION",
-		pool:            pool, records: records, supervisor: sup, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"), log: quietLogger(),
+		pool:            pool, records: records, supervisor: sup, trees: outboxTreeStore(t, pool, issue.Tree), project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"), log: quietLogger(),
 		provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
 			provisions++
 			return workspace.Workspace{}, nil

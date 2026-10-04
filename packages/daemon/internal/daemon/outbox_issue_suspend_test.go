@@ -181,7 +181,7 @@ func TestIssueCloseSuspendsSandboxAfterRestartUntilLingerCleanup(t *testing.T) {
 	sup, stopRuntime := newSupervisorRuntime()
 	clock := time.Now()
 	engine := workflow.New(records, workflow.Config{Project: "legion", Linger: time.Hour}, quietLogger())
-	runner := &outbox{pool: pool, records: records, project: "legion", dispatchProject: "LEGION", supervisor: sup,
+	runner := &outbox{pool: pool, records: records, project: "legion", dispatchProject: "LEGION", supervisor: sup, trees: st,
 		dispatch: &outboxDispatch{issue: dispatch.Issue{Key: issue.Key, Status: "done"}}, notices: &outboxPublisher{},
 		handlers: []intake.Handler{engine}, log: quietLogger(), now: func() time.Time { return clock },
 	}
