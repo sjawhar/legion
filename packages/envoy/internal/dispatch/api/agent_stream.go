@@ -130,9 +130,14 @@ func (s *server) streamAgentConversation(w http.ResponseWriter, r *http.Request)
 	defer watch.Stop()
 	heartbeat := time.NewTicker(s.deps.StreamHeartbeat)
 	defer heartbeat.Stop()
+	shutdown := s.lifetime().Done()
 	for {
 		select {
 		case <-r.Context().Done():
+			return
+		case <-shutdown:
+			// The server is shutting down: as streamEvents does, end the stream rather than hold
+			// http.Server.Shutdown open. The reconnect rebuilds from the session's own replay.
 			return
 		case <-overflow:
 			// The viewer fell behind far enough to lose a frame. Draining what is buffered

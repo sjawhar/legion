@@ -7,6 +7,15 @@ services:
     network_mode: host
     entrypoint: ["/usr/local/bin/envoy-dispatch"]
     restart: unless-stopped
+    # A SIGTERM runs Dispatch's ordered shutdown: the requests in flight drain first, the document
+    # service settles what is owed within 14 s of its own (starting 11 s after the signal at the
+    # latest), and the database pool then closes once every request has answered. While the
+    # database still answers, nothing but this stop_grace_period bounds the pool's close, so a
+    # write still waiting on a lock commits and is answered whenever it finishes, up to that
+    # bound; only once stop_grace_period itself runs out is the process killed with it still open.
+    # Three 2 s health probes in a row finding the database silent close the pool early instead of
+    # waiting for stop_grace_period, and Dispatch exits without the connections still using it.
+    stop_grace_period: 30s
     healthcheck:
       test: ["CMD", "curl", "-f", "http://${DISPATCH_LISTEN_HOST:-127.0.0.1}:${DISPATCH_PORT:-8766}/healthz"]
       interval: 10s
