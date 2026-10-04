@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 
 	"github.com/jackc/pgx/v5"
 
@@ -126,12 +127,19 @@ func (l *Ledger) publishEvents() {
 // behind the document's advisory lock, which this commit also holds until it returns, can take
 // that lock the instant this commit drops it. Without this, such an append could run
 // creditContentChange between the durable release (inside this transaction, before commit) and
-// commitVersion (today, after it) and read the room's pending as it stood before the release,
-// bundling an author this version already credited into its own snapshot - which the durable
-// release's sequence watermark cannot catch, since that snapshot's own sequence is genuinely
-// newer. Locking state.mu for the same span closes that window: no creditContentChange or
-// captureAuthors call for this artifact can run until this whole commit, release included, has
-// finished.
+// commitVersionLocked (today, after it) and read the room's pending as it stood before the
+// release, bundling an author this version already credited into its own snapshot - which the
+// durable release's sequence watermark cannot catch, since that snapshot's own sequence is
+// genuinely newer. Locking state.mu for the same span closes that window: no creditContentChange
+// or captureAuthors call for this artifact can run until this whole commit, release included,
+// has finished.
+//
+// l.versions names at most one artifact per transaction in every production and test path today
+// (every writeVersionTx caller passes one artifactID; confirmed by reading each), so this loop's
+// one entry never contends with itself. Artifact ids are still locked in sorted order, not
+// insertion order, so a future caller that does join two artifacts' versions into one
+// transaction cannot deadlock against another such transaction locking the same two artifacts in
+// the opposite order.
 func (l *Ledger) commit(ctx context.Context) error {
 	if err := l.recordSettlementCredit(ctx); err != nil {
 		_ = l.tx.Rollback(context.Background())
@@ -139,11 +147,19 @@ func (l *Ledger) commit(ctx context.Context) error {
 		l.fail(err)
 		return err
 	}
-	locked := make(map[string]*roomState, len(l.versions))
+	artifactIDs := make([]string, 0, len(l.versions))
+	seen := make(map[string]struct{}, len(l.versions))
 	for _, written := range l.versions {
-		if _, ok := locked[written.artifactID]; !ok {
-			locked[written.artifactID] = l.service.lockState(written.artifactID)
+		if _, ok := seen[written.artifactID]; ok {
+			continue
 		}
+		seen[written.artifactID] = struct{}{}
+		artifactIDs = append(artifactIDs, written.artifactID)
+	}
+	sort.Strings(artifactIDs)
+	locked := make(map[string]*roomState, len(artifactIDs))
+	for _, artifactID := range artifactIDs {
+		locked[artifactID] = l.service.lockState(artifactID)
 	}
 	err := l.tx.Commit(ctx)
 	// The transaction has ended whichever way the commit went, so a rebuild's room reads the
@@ -227,11 +243,14 @@ func (l *Ledger) addLiveWrite(write *liveWrite) {
 
 // recordSettlementCredit adds each committed transaction's credit to the pending-settlement row in
 // the transaction that wrote the document, then takes out the authors each version it wrote
-// credited, as commitVersion takes them out of the room once the transaction commits. The durable
-// row therefore commits or rolls back with its content, before the request context can be canceled
-// after commit, and owes no author a version already credited. An author the same transaction's
-// own version immediately releases is never upserted at all: the version already records it
-// durably, so paying an upsert the release loop below would undo is wasted work.
+// credited, as commitVersionLocked takes them out of the room once the transaction commits. The
+// durable row therefore commits or rolls back with its content, before the request context can be
+// canceled after commit, and owes no author a version already credited. An author the same
+// transaction's own version immediately releases is never upserted at all: the version already
+// records it durably, so paying an upsert the release loop below would undo is wasted work. Every
+// upsert here leaves CreditSeq at its zero value: this transaction's own credit and its own
+// version's release are already ordered by the same transaction, so neither needs the watermark
+// gate a concurrent reader's stale credit does (upsertSettlementCredit).
 func (l *Ledger) recordSettlementCredit(ctx context.Context) error {
 	released := make(map[string]map[string]struct{}, len(l.versions))
 	for _, written := range l.versions {
@@ -248,7 +267,7 @@ func (l *Ledger) recordSettlementCredit(ctx context.Context) error {
 		if _, consumed := released[artifactID][actorKey(actor)]; consumed {
 			continue
 		}
-		if err := upsertSettlementCredit(ctx, l.tx, artifactID, settlementCreditFor(nil, &actor), false, 0); err != nil {
+		if err := upsertSettlementCredit(ctx, l.tx, artifactID, settlementCreditFor(nil, &actor), false); err != nil {
 			return err
 		}
 	}
@@ -276,7 +295,7 @@ func (l *Ledger) recordSettlementCredit(ctx context.Context) error {
 		if len(pending) == 0 && lastActor == nil {
 			continue
 		}
-		if err := upsertSettlementCredit(ctx, l.tx, artifactID, settlementCreditFor(pending, lastActor), false, 0); err != nil {
+		if err := upsertSettlementCredit(ctx, l.tx, artifactID, settlementCreditFor(pending, lastActor), false); err != nil {
 			return err
 		}
 	}
@@ -288,41 +307,48 @@ func (l *Ledger) recordSettlementCredit(ctx context.Context) error {
 	return nil
 }
 
+// withState runs fn against artifactID's state: the one commit already locked, if artifactID is
+// among locked, or a freshly locked-and-released one otherwise. creditLocked's two loops both
+// need this branching, since only the artifacts this transaction's own versions name are
+// pre-locked (Ledger.commit) - an artifact with credit but no version in this transaction has no
+// race to guard and is locked only for the duration of fn.
+func (l *Ledger) withState(locked map[string]*roomState, artifactID string, fn func(*roomState)) {
+	state, preLocked := locked[artifactID]
+	if !preLocked {
+		state = l.service.lockState(artifactID)
+	}
+	fn(state)
+	if !preLocked {
+		l.service.unlockState(artifactID, state)
+	}
+}
+
 // creditLocked mirrors committed settlement credit into each room before the transaction's
 // versions release their captured authors and before its live writes publish. locked holds the
 // states commit already locked for this transaction's own versions, keyed by artifact id; an
-// artifact this loop touches that is not among them is locked and unlocked here as before.
+// artifact this loop touches that is not among them is locked and unlocked here as before
+// (withState).
 func (l *Ledger) creditLocked(locked map[string]*roomState) {
 	for artifactID, actor := range l.seeds {
-		state, preLocked := locked[artifactID]
-		if !preLocked {
-			state = l.service.lockState(artifactID)
-		}
-		state.lastActor = new(actor)
-		state.unsettled = true
-		state.creditVersion++
-		if !preLocked {
-			l.service.unlockState(artifactID, state)
-		}
+		l.withState(locked, artifactID, func(state *roomState) {
+			state.lastActor = new(actor)
+			state.unsettled = true
+			state.creditVersion++
+		})
 	}
 	for _, artifactID := range l.order {
 		write := l.live[artifactID]
 		if len(write.credits) == 0 {
 			continue
 		}
-		state, preLocked := locked[artifactID]
-		if !preLocked {
-			state = l.service.lockState(artifactID)
-		}
-		for key, actor := range write.credits {
-			state.pending[key] = actor
-		}
-		state.lastActor = write.actor
-		state.unsettled = true
-		state.creditVersion++
-		if !preLocked {
-			l.service.unlockState(artifactID, state)
-		}
+		l.withState(locked, artifactID, func(state *roomState) {
+			for key, actor := range write.credits {
+				state.pending[key] = actor
+			}
+			state.lastActor = write.actor
+			state.unsettled = true
+			state.creditVersion++
+		})
 	}
 }
 

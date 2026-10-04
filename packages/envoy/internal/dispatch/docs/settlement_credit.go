@@ -16,10 +16,17 @@ import (
 // so an update can merge them in PostgreSQL with JSONB's object concatenation. LastActor is the
 // latest edit source used by ask reconciliation and events when no version is written. It lives
 // beside the pending settlement so closing a document's issue, a room release or a restart cannot
-// lose its attribution before that settlement commits.
+// lose its attribution before that settlement commits. CreditSeq is the room's creditVersion when
+// this credit was captured (creditContentChange); it never reaches storage (json:"-") - it rides
+// along only as far as upsertSettlementCredit's own gate check, which discards a credit whose
+// CreditSeq is at or before the row's released_through watermark (a version's release already
+// consumed everything visible as of that point). Its zero value means "not subject to the
+// watermark": recordSettlementCredit's own upserts never set it, since a write's own credit and
+// its own version's release are already ordered by the same transaction.
 type settlementCredit struct {
 	Pending   map[string]model.Actor `json:"pending"`
 	LastActor *model.Actor           `json:"last_actor,omitempty"`
+	CreditSeq uint64                 `json:"-"`
 }
 
 // MarshalJSON writes Pending as an object even when it is nil, so every encoded credit carries
@@ -72,7 +79,7 @@ func (state *roomState) mergeSettlementCreditLocked(credit settlementCredit) {
 // persistSettlementCredit records credit beside the document's pending-settlement row. It holds
 // the same advisory lock that orders document updates and settlements, so an update cannot be
 // appended or settled between reading the row's authors and replacing their merged value.
-func (s *Service) persistSettlementCredit(ctx context.Context, room string, credit settlementCredit, sequence uint64) error {
+func (s *Service) persistSettlementCredit(ctx context.Context, room string, credit settlementCredit, creditSeq uint64) error {
 	if credit.empty() {
 		return nil
 	}
@@ -84,7 +91,8 @@ func (s *Service) persistSettlementCredit(ctx context.Context, room string, cred
 	if err := lockDocumentRoom(ctx, tx, room); err != nil {
 		return err
 	}
-	if err := upsertSettlementCredit(ctx, tx, room, credit, false, sequence); err != nil {
+	credit.CreditSeq = creditSeq
+	if err := upsertSettlementCredit(ctx, tx, room, credit, false); err != nil {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -140,14 +148,15 @@ func pendingSettlementCredit(ctx context.Context, q Queryer, room string) (bool,
 // is true only for a newly appended document update; recording authors after its transaction
 // committed or while closing an issue must not make an old row wait another resumption age.
 //
-// sequence is the room's creditVersion when credit was captured (0 for a credit this same
-// transaction's own version will immediately release, which never races a concurrent reader - see
-// Ledger.recordSettlementCredit). A credit captured at or before the row's released_through
-// watermark - set by a version's release (releaseSettlementCredit) that ran while this write's own
-// durable append waited behind the document's advisory lock - is strictly older than what that
-// release already consumed from the room's pending, so merging it would resurrect an author a
-// version already credited; the row is left exactly as it stood instead.
-func upsertSettlementCredit(ctx context.Context, tx pgx.Tx, room string, credit settlementCredit, updateMarkedAt bool, sequence uint64) error {
+// CreditSeq (settlementCredit's own field) is the room's creditVersion when credit was captured
+// (0 for a credit this same transaction's own version will immediately release, which never
+// races a concurrent reader - see Ledger.recordSettlementCredit). A credit captured at or before
+// the row's released_through watermark - set by a version's release (releaseSettlementCredit)
+// that ran while this write's own durable append waited behind the document's advisory lock - is
+// strictly older than what that release already consumed from the room's pending, so merging it
+// would resurrect an author a version already credited; the row is left exactly as it stood
+// instead.
+func upsertSettlementCredit(ctx context.Context, tx pgx.Tx, room string, credit settlementCredit, updateMarkedAt bool) error {
 	encoded, err := json.Marshal(credit)
 	if err != nil {
 		return fmt.Errorf("encode the document's pending settlement authors: %w", err)
@@ -176,7 +185,7 @@ func upsertSettlementCredit(ctx context.Context, tx pgx.Tx, room string, credit 
 				))
 			end,
 			marked_at = case when $4 then now() else doc_settlements_pending.marked_at end
-	`, room, string(encoded), int64(sequence), updateMarkedAt); err != nil {
+	`, room, string(encoded), int64(credit.CreditSeq), updateMarkedAt); err != nil {
 		return fmt.Errorf("record the document's pending settlement: %w", err)
 	}
 	return nil
@@ -185,12 +194,12 @@ func upsertSettlementCredit(ctx context.Context, tx pgx.Tx, room string, credit 
 // releaseSettlementCredit takes the authors a version credited out of room's pending-settlement
 // row, in the transaction that wrote the version. The row's last actor stays: ask reconciliation
 // reads it once no pending author remains. It also raises the row's released_through watermark to
-// sequence, the room's creditVersion when the version captured its authors from state.pending
+// creditSeq, the room's creditVersion when the version captured its authors from state.pending
 // (captureAuthors): a credit captured at or before that point is already accounted for by this
 // version, so a later upsertSettlementCredit call carrying it - an append that was queued behind
 // this same transaction's advisory lock when the version ran - discards it instead of resurrecting
 // an author this version already credited durably.
-func releaseSettlementCredit(ctx context.Context, tx pgx.Tx, room string, authors []model.Actor, sequence uint64) error {
+func releaseSettlementCredit(ctx context.Context, tx pgx.Tx, room string, authors []model.Actor, creditSeq uint64) error {
 	if len(authors) == 0 {
 		return nil
 	}
@@ -215,7 +224,7 @@ func releaseSettlementCredit(ctx context.Context, tx pgx.Tx, room string, author
 				'{released_through}',
 				to_jsonb(greatest(coalesce((doc_settlements_pending.settlement_authors->>'released_through')::bigint, 0), $3::bigint))
 			)
-	`, room, keys, int64(sequence)); err != nil {
+	`, room, keys, int64(creditSeq)); err != nil {
 		return fmt.Errorf("release the version's authors from the document's pending settlement: %w", err)
 	}
 	return nil

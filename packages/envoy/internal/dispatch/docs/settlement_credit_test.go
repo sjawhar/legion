@@ -10,9 +10,11 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/reearth/ygo/crdt"
 
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
@@ -424,6 +426,108 @@ func TestABrowserEditQueuedBehindAnOpenVersionIsNotCreditedAgainAfterAReopen(t *
 	}
 }
 
+// replaceTextAsConnectedPeer applies a content replacement the way a browser's own edit does: via
+// ygo's Apply directly, with no service origin registered, so creditContentChange's browser
+// (sole/ambiguous) branch credits it from state.connected - the room path a real websocket peer's
+// edit takes - rather than through ReplaceText's service-mutation branch.
+func replaceTextAsConnectedPeer(t *testing.T, service *Service, artifactID, markdown string) {
+	t.Helper()
+	var applyErr error
+	if err := service.srv.Apply(context.Background(), artifactID, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+		fragment := doc.GetXmlFragment(fragmentName)
+		current, err := treeOf(doc)
+		if err != nil {
+			applyErr = err
+			return
+		}
+		target, err := parseReplacing(current, markdown)
+		if err != nil {
+			applyErr = err
+			return
+		}
+		transact(func(transaction *crdt.Transaction) {
+			applyErr = pmdoc.Update(transaction, fragment, target)
+		})
+	}); err != nil {
+		t.Fatalf("apply connected-peer edit: %v", err)
+	}
+	if applyErr != nil {
+		t.Fatalf("apply connected-peer edit: %v", applyErr)
+	}
+}
+
+// A real connected peer's edit (carol, via creditContentChange's sole branch) queued behind an
+// open version, followed by a second connected peer's edit (dave, sole branch again once carol
+// disconnects) while that version is still open, is credited only once: the service-mutation
+// branch's own fix (round 7) scoped its credit to its own actor; this is the sibling bug in the
+// browser branch, which round 7 left returning state.settlementCreditLocked() - the room's whole
+// accumulated state.pending, not state.connected - so dave's credit bundled carol's not-yet-
+// removed presence back into the durable row after the agent's version had already released her
+// (round-8 Deep's finding).
+func TestATwoPeerBrowserEditQueuedBehindAnOpenVersionIsNotCreditedAgainAfterAReopen(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour // no settlement runs between the edits
+	ctx := context.Background()
+	seedServiceText(t, service, artifactID, "# Decision\n\nContext.\n")
+
+	carol := model.Actor{Kind: "session", ID: "carol-session"}
+	dave := model.Actor{Kind: "session", ID: "dave-session"}
+	agent := model.Actor{Kind: "session", ID: "agent-session"}
+	delta := model.Actor{Kind: "session", ID: "delta-session"}
+
+	service.addConnection(artifactID, 1, carol)
+	replaceTextAsConnectedPeer(t, service, artifactID, "# Decision\n\nContext.\n\nCarol's paragraph.\n")
+	service.removeConnection(artifactID, 1)
+
+	// Hold the document's advisory lock for the whole agent transaction, as ApplyOps does for a
+	// joined write, so a connected peer's durable append queues behind it.
+	tx, err := service.store.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the agent's transaction: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	joined, ledger := service.Join(ctx, tx)
+	defer ledger.Discard()
+	if _, err := service.ApplyOps(joined, artifactID, []model.EditOp{{Op: "insert", After: "end", Markdown: "Agent's paragraph.\n"}}, agent, nil); err != nil {
+		t.Fatalf("apply the agent's edit: %v", err)
+	}
+	result, err := service.SnapshotVersion(joined, artifactID, agent)
+	if err != nil {
+		t.Fatalf("snapshot the agent's version: %v", err)
+	}
+	if authors := result.Version.Authors; len(authors) < 2 {
+		t.Fatalf("agent's version authors = %+v, want at least the agent and carol", authors)
+	}
+
+	// Dave, now the sole connected peer, edits while the agent's transaction still holds the
+	// document's advisory lock, so his durable append queues behind it too.
+	service.addConnection(artifactID, 2, dave)
+	replaceTextAsConnectedPeer(t, service, artifactID, "# Decision\n\nContext.\n\nCarol's paragraph.\n\nDave's paragraph.\n")
+	if !service.hasDurableAppend(artifactID) {
+		t.Fatal("dave's durable append finished before the agent's transaction released the document lock")
+	}
+
+	if err := ledger.Commit(ctx); err != nil {
+		t.Fatalf("commit the agent's transaction: %v", err)
+	}
+
+	// Carol's and dave's queued appends can now take the lock the commit released.
+	waitForPersistedUpdates(t, service, artifactID, 3)
+	service.removeConnection(artifactID, 2)
+
+	closeTestIssue(t, service)
+	reopenTestIssue(t, service)
+	writeThroughLedger(t, service, artifactID, delta, "Delta's paragraph.\n", withSnapshotVersion)
+
+	// Dave's own edit was never captured by any version before the close, so delta's version
+	// legitimately credits him too; the bug under test is carol riding back in, not dave's own
+	// still-pending credit.
+	want := []model.Actor{dave, delta}
+	if authors := latestVersionAuthors(t, service, artifactID); !reflect.DeepEqual(authors, want) {
+		t.Fatalf("the reopened document's next version credits %+v, want %+v (dave's own pending credit, not carol's)", authors, want)
+	}
+}
+
 // A document update that carries no credit, such as a browser change that renders nothing new,
 // keeps every pending author already recorded for the document's settlement.
 func TestSettlementCreditKeepsExistingPendingAcrossUncreditedAppend(t *testing.T) {
@@ -513,10 +617,10 @@ func creditOf(lastActor *model.Actor, pending ...model.Actor) settlementCredit {
 	return settlementCreditFor(authors, lastActor)
 }
 
-// appendSettlementCredit records credit as a document update's own transaction does. sequence is
+// appendSettlementCredit records credit as a document update's own transaction does. creditSeq is
 // the room's creditVersion the credit was captured at (0 when the test does not exercise the
 // release-gating watermark).
-func appendSettlementCredit(t *testing.T, database *store.Store, artifactID string, credit settlementCredit, sequence uint64) {
+func appendSettlementCredit(t *testing.T, database *store.Store, artifactID string, credit settlementCredit, creditSeq uint64) {
 	t.Helper()
 	ctx := context.Background()
 	tx, err := database.Pool.Begin(ctx)
@@ -524,7 +628,8 @@ func appendSettlementCredit(t *testing.T, database *store.Store, artifactID stri
 		t.Fatalf("begin the append: %v", err)
 	}
 	defer tx.Rollback(ctx)
-	if err := markSettlementPending(ctx, tx, artifactID, credit, sequence); err != nil {
+	credit.CreditSeq = creditSeq
+	if err := markSettlementPending(ctx, tx, artifactID, credit); err != nil {
 		t.Fatalf("record the append's settlement credit: %v", err)
 	}
 	if err := tx.Commit(ctx); err != nil {

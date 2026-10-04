@@ -264,7 +264,15 @@
   migration `0069`): an API edit writes them in the transaction that writes its content and takes
   out the authors any version it wrote credited, so closing the issue, releasing the room or
   restarting the service no longer drops who wrote the version, ask or event the settlement
-  produces, nor credits an author again whose own edit's version already did (LEGION-513).
+  produces, nor credits an author again whose own edit's version already did. A version's release
+  now also raises the row's `released_through` watermark to the room's `creditVersion` as of its
+  own author capture, and every credit this room makes - browser or service-mutation - names only
+  the actor(s) that specific update touches, carries that same `creditVersion`, and is discarded
+  by the row instead of merged once it is at or before the watermark: a browser edit queued behind
+  an already-committed version's release, or a second edit arriving while that version's commit is
+  still in flight (`Ledger.commit` now holds each credited artifact's room state locked across the
+  commit and its in-memory release), can no longer bundle an already-credited author back into a
+  later, unrelated credit (LEGION-513).
 - A document's stored update log kept every byte any write had inserted, and every cold load of it built all of it: Dispatch merged the stored updates whole, and a merge keeps the content of deleted items. Five hundred 2,000-character replies to one anchored comment, each projecting the thread's margin record again, left 257 MB stored under a 3 KB document, and a cold one-word edit of it then took 1,842 MiB, past the 1,024 MiB task. A load now applies the stored updates one at a time to a document that collects garbage and returns what it holds, so it costs the live document and one update; and compaction, which runs as a room closes, as the server shuts down and daily, folds the whole log into that state rather than keeping the newest 500 updates beside a merge of the rest. An update a load's document parks for a dependency the log lacks is merged back into that state. A log the fold cannot apply, or a state that does not read back as the document that made it, is not used: the load merges the stored updates whole as before, and compaction leaves them as stored. After compaction, `doc_updates` and any backup of it hold no text a write deleted, so text deleted before a version captured it is gone (Sami's decision, LEGION-496). `doc_updates` is snapshotted once, and the snapshot kept 90 days, right before the first deploy that carries this.
 - A document edit that repairs an ask a browser left unreadable now reports it in
   `decision_blocks_added`, matching the open ask its next settlement creates. An edit keeps that
