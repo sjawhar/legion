@@ -543,12 +543,7 @@ type streamEnd struct {
 // ends, reporting when and how on the returned channel.
 func (p *dispatchProcess) openStream(t *testing.T, path string) <-chan streamEnd {
 	t.Helper()
-	request, err := http.NewRequest(http.MethodGet, p.url(path), nil)
-	if err != nil {
-		t.Fatalf("open %s: %v", path, err)
-	}
-	request.Header.Set("X-Dispatch-User", dispatchTestLogin)
-	response, err := http.DefaultClient.Do(request)
+	response, err := p.send(http.MethodGet, path, "")
 	if err != nil {
 		t.Fatalf("open %s: %v", path, err)
 	}
