@@ -48,7 +48,7 @@ printf 'fetching %s\n' "$newest" >&2
 aws s3 cp --only-show-errors "s3://${bucket}/dispatch/${newest}" "$dump"
 
 if ! docker container inspect "$container" >/dev/null 2>&1; then
-  docker run -d --name "$container" -e POSTGRES_PASSWORD=dispatch -p "127.0.0.1:${port}:5432" postgres:16 >/dev/null
+  docker run -d --name "$container" -e POSTGRES_PASSWORD=dispatch -p "127.0.0.1:${port}:5432" pgvector/pgvector:pg16 >/dev/null
 else
   docker start "$container" >/dev/null
 fi
