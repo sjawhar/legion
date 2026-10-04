@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"testing"
 	"time"
@@ -278,6 +279,96 @@ func TestComputeAndPersistSuggestionsRespectsDeadlineUnderLock(t *testing.T) {
 	}
 	if suggestions == nil {
 		t.Fatalf("suggestions = nil, want a result (Missing or otherwise) even when the decision lookup is blocked")
+	}
+}
+
+// TestComputeAndPersistSuggestionsRespectsDeadlineWhenProjectLookupIsLocked: round 3's fix bounded
+// the search and the decision lookup, but asks.go's own project-key lookup still ran before the
+// call, on the request's unbounded context — a reviewer measured it blocking ~2s behind an
+// ACCESS EXCLUSIVE lock on `issues`. computeAndPersistSuggestions now resolves the project
+// itself, under the same deadline, when the caller passes "".
+func TestComputeAndPersistSuggestionsRespectsDeadlineWhenProjectLookupIsLocked(t *testing.T) {
+	handler, _, deps := newTestServer(t, testServerOptions{})
+	srv := directServer(deps)
+	createSuggestionProject(t, handler, "LOCKEDPROJ")
+	issue := createSuggestionIssue(t, handler, map[string]any{
+		"project": "LOCKEDPROJ", "title": "Should the service use REST or GraphQL?",
+	})
+
+	lockTx, err := srv.deps.Store.Pool.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("begin lock tx: %v", err)
+	}
+	defer func() { _ = lockTx.Rollback(context.Background()) }()
+	if _, err := lockTx.Exec(context.Background(), "lock table issues in access exclusive mode"); err != nil {
+		t.Fatalf("lock issues: %v", err)
+	}
+
+	source := suggestionSource{kind: "ask", issueKey: issue, askID: "locked-project-probe", actor: model.Actor{Kind: "user", ID: "alice"}}
+	started := time.Now()
+	suggestions := srv.computeAndPersistSuggestions(context.Background(), "", "Should the service use REST or GraphQL for its public API?", source)
+	elapsed := time.Since(started)
+
+	const bound = writeSuggestionTimeout + 500*time.Millisecond
+	if elapsed > bound {
+		t.Fatalf("computeAndPersistSuggestions took %s with issues locked, want at or near %s, well under the lock's own hold time", elapsed, writeSuggestionTimeout)
+	}
+	if suggestions == nil || suggestions.Missing == "" {
+		t.Fatalf("suggestions = %+v, want Missing set when the project lookup is blocked", suggestions)
+	}
+}
+
+// TestCreateAskOnIssueKeepsSuggestionsWhenWriteAdviceFails: an issue-owned ask whose write-advice
+// query itself fails must not drop the suggestions that were separately computed and persisted —
+// advice == nil means either "document owner" or "the advice query failed", and only the first
+// has no suggestions to offer.
+func TestCreateAskOnIssueKeepsSuggestionsWhenWriteAdviceFails(t *testing.T) {
+	handler, database := newFailingAdviceHandler(t, "session_writes_since_human")
+	createAdviceProject(t, handler, "ADVFAIL")
+	decisionSpec := ""
+	decisionIssue := createAdviceIssue(t, handler, "ADVFAIL", "Choose a transport for the billing service", &decisionSpec)
+	decisionAsk := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+decisionIssue.Key+"/asks", map[string]any{
+		"question": "Should the billing service public API use REST or GraphQL?",
+	}, "alice")
+	decisionAskID := decodeBody[testAskWithSuggestions](t, decisionAsk).ID
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+decisionAskID+"/answer", map[string]any{
+		"text": "REST.", "expected_edited_at": nil,
+	}, "alice"); response.Code != http.StatusOK {
+		t.Fatalf("answer decision ask: status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	targetSpec := ""
+	target := createAdviceIssue(t, handler, "ADVFAIL", "Pick a transport for the notifications service", &targetSpec)
+	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+target.Key+"/asks", map[string]any{
+		"question": "Should the billing service public API use REST or GraphQL?",
+	}, "alice")
+	if response.Code != http.StatusCreated {
+		t.Fatalf("open ask with failed write-advice: status=%d body=%s", response.Code, response.Body.String())
+	}
+	var body map[string]json.RawMessage
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	adviceRaw, ok := body["advice"]
+	if !ok {
+		t.Fatalf("response has no advice at all, want suggestions-only advice despite the failed write-advice query: %s", response.Body.String())
+	}
+	var advice testAdvisedSuggestions
+	if err := json.Unmarshal(adviceRaw, &advice); err != nil {
+		t.Fatalf("decode advice: %v", err)
+	}
+	if advice.Suggestions == nil || advice.Suggestions.Decision == nil || advice.Suggestions.Decision.ID != decisionAskID {
+		t.Fatalf("advice.suggestions = %+v, want the decision ask %s despite the failed write-advice query", advice.Suggestions, decisionAskID)
+	}
+	created := decodeBody[testAskWithSuggestions](t, response)
+	var persisted int
+	if err := database.Pool.QueryRow(context.Background(), `
+		select count(*) from write_suggestions where source_ask_id = $1
+	`, created.ID).Scan(&persisted); err != nil {
+		t.Fatalf("count persisted suggestions: %v", err)
+	}
+	if persisted == 0 {
+		t.Fatalf("write_suggestions has no rows for the new ask despite computing a decision")
 	}
 }
 

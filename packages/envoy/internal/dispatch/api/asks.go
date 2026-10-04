@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -274,36 +273,24 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 		return
 	}
 	s.publish(events...)
-	// LEGION-550. An ask on an issue searches that issue's project and its suggestions ride the
-	// issue's own advice; one on an unlinked project document searches the document's and has no
-	// issue state to report, so its advice carries the suggestions alone. The branch is
-	// owner.IssueKey != nil, not advice != nil: advice is nil both for a document owner and for
-	// an issue owner whose write-advice query itself failed (writeAdvice swallows that), and
-	// conflating the two would silently drop an issue-owned ask's suggestions whenever advice
-	// happened to fail for an unrelated reason.
+	// LEGION-550. An ask on an issue searches that issue's project and, normally, rides its
+	// suggestions on the issue's own advice; one on an unlinked project document searches the
+	// document's and has no issue state to report, so its advice carries the suggestions alone.
+	// computeAndPersistSuggestions resolves the project itself (empty here) under its own
+	// deadline, so that lookup can no longer block this response past writeSuggestionTimeout the
+	// way it did when it ran here, before the call, on the request's unbounded context.
 	source := suggestionSource{kind: "ask", askID: ask.ID, actor: actor}
-	var project string
-	var projectErr error
 	if owner.IssueKey != nil {
 		source.issueKey = *owner.IssueKey
-		projectErr = s.deps.Store.Pool.QueryRow(r.Context(),
-			`select project_key from issues where key = $1`, *owner.IssueKey).Scan(&project)
 	} else if owner.ArtifactID != nil {
 		source.artifactID = *owner.ArtifactID
-		projectErr = s.deps.Store.Pool.QueryRow(r.Context(),
-			`select project_key from artifacts where id = $1`, *owner.ArtifactID).Scan(&project)
 	}
-	var suggestions *model.Suggestions
-	if projectErr != nil {
-		slog.Warn("dispatch: write suggestions omitted", "route", "POST ask", "error", projectErr)
-		suggestions = &model.Suggestions{Missing: "the project behind it could not be resolved"}
-	} else if project != "" {
-		suggestions = s.computeAndPersistSuggestions(r.Context(), project, ask.Question, source)
-	}
-	if owner.IssueKey != nil {
-		if advice != nil {
-			advice.Suggestions = suggestions
-		}
+	suggestions := s.computeAndPersistSuggestions(r.Context(), "", ask.Question, source)
+	// advice is nil both for a document owner and for an issue owner whose write-advice query
+	// itself failed (writeAdvice swallows that); either way, suggestions already computed and
+	// persisted ride along as suggestionsOnlyAdvice rather than being dropped on the floor.
+	if advice != nil {
+		advice.Suggestions = suggestions
 		WriteJSON(w, http.StatusCreated, withAdvice(ask, advice))
 		return
 	}

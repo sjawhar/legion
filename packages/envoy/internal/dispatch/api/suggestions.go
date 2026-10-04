@@ -94,16 +94,21 @@ func closedOwner(result model.SearchResult) bool {
 	return result.Owner.Kind == "issue" && result.Owner.Status == "done"
 }
 
-// computeAndPersistSuggestions runs LEGION-550's write-time feedback — the fused search
-// (sjawhar/legion#1764), the decision lookup, and persisting every row the sweep later reads —
-// all under one writeSuggestionTimeout deadline derived once here, so nothing downstream of the
-// write's own commit can hold the response past that single bound. Earlier rounds bounded only
-// the search call and left the decision lookup and the persistence inserts on the request's
-// unbounded context; a reviewer measured the decision lookup alone blocking ~1.2s behind a table
-// lock. It never returns an error: a slow or failed search is reported as Suggestions.Missing
-// instead, since nothing here may hold or fail a write that already committed. A blank text (an
-// issue filed with no title, which the create route already refuses, or an ask with a blank
-// question) returns nil rather than searching for nothing.
+// computeAndPersistSuggestions runs LEGION-550's write-time feedback — resolving project when
+// the caller does not already know it, the fused search (sjawhar/legion#1764), the decision
+// lookup, and persisting every row the sweep later reads — all under one writeSuggestionTimeout
+// deadline derived once here, so nothing downstream of the write's own commit can hold the
+// response past that single bound. Two earlier rounds each bounded one more step and left
+// another on the request's unbounded context: round 2 bounded the search and missed the decision
+// lookup (measured blocking ~1.2s behind a table lock); this round folds the ask route's
+// project-key lookup in too (measured blocking ~2s behind a lock on `issues`), since it ran
+// between the write's commit and this call on the same unbounded context. project is empty for
+// an ask, whose owning issue or project document `source` already names; an issue creation
+// already knows its project and passes it directly, needing no lookup. It never returns an
+// error: a slow or failed search, or a slow or failed project lookup, is reported as
+// Suggestions.Missing instead, since nothing here may hold or fail a write that already
+// committed. A blank text (an issue filed with no title, which the create route already refuses,
+// or an ask with a blank question) returns nil rather than searching for nothing.
 func (s *server) computeAndPersistSuggestions(
 	ctx context.Context, project, text string, source suggestionSource,
 ) *model.Suggestions {
@@ -113,9 +118,37 @@ func (s *server) computeAndPersistSuggestions(
 	}
 	bounded, cancel := context.WithTimeout(ctx, writeSuggestionTimeout)
 	defer cancel()
+	if project == "" {
+		resolved, err := s.resolveSuggestionProject(bounded, source)
+		if err != nil {
+			reason := "the project behind it could not be resolved"
+			if bounded.Err() != nil {
+				reason = "the project lookup behind it did not answer within " + writeSuggestionTimeout.String()
+			}
+			slog.Warn("dispatch: write suggestions omitted", "error", err)
+			return &model.Suggestions{Missing: reason}
+		}
+		project = resolved
+	}
 	suggestions := s.computeSuggestions(bounded, project, searchText, source)
 	s.persistSuggestions(bounded, source, suggestions)
 	return suggestions
+}
+
+// resolveSuggestionProject reads the project a source's own owner belongs to, on ctx: the same
+// bounded deadline computeAndPersistSuggestions derives for everything else, so this lookup can
+// no longer block a write past that bound the way it did when it ran before computing suggestions
+// at all, on the request's own unbounded context.
+func (s *server) resolveSuggestionProject(ctx context.Context, source suggestionSource) (string, error) {
+	var project string
+	var err error
+	switch {
+	case source.issueKey != "":
+		err = s.deps.Store.Pool.QueryRow(ctx, `select project_key from issues where key = $1`, source.issueKey).Scan(&project)
+	case source.artifactID != "":
+		err = s.deps.Store.Pool.QueryRow(ctx, `select project_key from artifacts where id = $1`, source.artifactID).Scan(&project)
+	}
+	return project, err
 }
 
 // computeSuggestions runs the fused search and the decision lookup under ctx, which the caller
