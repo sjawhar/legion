@@ -10,7 +10,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/launcher"
 )
 
-const launcherUsage = "usage: legion launcher --connect tcp://host:port --token-file <path> --sandbox <name> --role <role> [--pod-uid <uid>] --private-dir <dir>"
+const launcherUsage = "usage: legion launcher --connect tcp://host:port --token-file <path> --sandbox <name> --role <role> [--pod-uid <uid>] --private-dir <dir> [--stop-grace <duration>]"
 
 // runLauncher is PID 1 in one role container of an issue pod. It has no workflow policy: it only
 // authenticates to the daemon and starts or stops its own worker-shim child on daemon commands.
@@ -22,6 +22,7 @@ func runLauncher(ctx context.Context, args []string, stdout, stderr io.Writer) i
 	role := flags.String("role", "", "the role container this launcher owns")
 	podUID := flags.String("pod-uid", os.Getenv("POD_UID"), "the current Kubernetes pod UID (POD_UID by default)")
 	privateDir := flags.String("private-dir", "", "the role container's own memory-backed directory for each generation's credentials")
+	stopGrace := flags.Duration("stop-grace", 0, "container shutdown grace (30s when unset)")
 	if code, ok := parseFlags(flags, args); !ok {
 		return code
 	}
@@ -36,7 +37,7 @@ func runLauncher(ctx context.Context, args []string, stdout, stderr io.Writer) i
 	}
 	if err := launcher.Run(ctx, launcher.Config{
 		Connect: *connect, Token: strings.TrimSpace(string(token)), Sandbox: *sandbox, Role: *role,
-		PodUID: *podUID, PrivateDir: *privateDir, Stdout: stdout, Stderr: stderr,
+		PodUID: *podUID, PrivateDir: *privateDir, StopGrace: *stopGrace, Stdout: stdout, Stderr: stderr,
 	}); err != nil && ctx.Err() == nil {
 		fmt.Fprintln(stderr, err)
 		return 1
