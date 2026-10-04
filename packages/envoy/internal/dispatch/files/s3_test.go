@@ -108,18 +108,35 @@ func TestS3RefusesAnObjectPastTheSizeLimit(t *testing.T) {
 }
 
 // An object whose bytes are not what its key says (a corrupted or replaced object) reads with an
-// error before its end, through the real client, so no caller can copy it to a client whole.
+// error before its end, through the real client, and the reader hands out fewer bytes than the
+// object holds before it says so: a caller copying it to a client with a Content-Length leaves
+// that client short, which every HTTP client reports, rather than whole with the wrong bytes.
 func TestS3RefusesABodyThatDoesNotHashToItsKey(t *testing.T) {
 	store, fake := s3Store(t, testBucket)
-	sha := files.SHA256([]byte("what the key says"))
-	fake.SetObject(files.Key(sha), "text/plain", []byte("what is stored"))
-	object, err := store.Get(context.Background(), sha)
-	if err != nil {
-		t.Fatalf("Get: %v", err)
-	}
-	defer object.Body.Close()
-	if _, err := io.ReadAll(object.Body); err == nil || !strings.Contains(err.Error(), "reads back as") {
-		t.Fatalf("reading a corrupted object: %v, want a hash mismatch", err)
+	same := bytes.Repeat([]byte("x"), 200_000)
+	sha := files.SHA256(same)
+	tampered := append(bytes.Repeat([]byte("x"), 199_999), 'y') // the same length, other bytes
+	fake.SetObject(files.Key(sha), "text/plain", tampered)
+	for _, chunk := range []int{1, 4096, 1 << 20} {
+		object, err := store.Get(context.Background(), sha)
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		var delivered int64
+		var readErr error
+		buffer := make([]byte, chunk)
+		for readErr == nil {
+			n, err := object.Body.Read(buffer)
+			delivered += int64(n)
+			readErr = err
+		}
+		_ = object.Body.Close()
+		if !strings.Contains(readErr.Error(), "reads back as") {
+			t.Fatalf("reading a tampered object in %d-byte reads: %v, want a hash mismatch", chunk, readErr)
+		}
+		if delivered >= int64(len(tampered)) {
+			t.Fatalf("reading a tampered object in %d-byte reads handed out %d of %d bytes before refusing; want fewer", chunk, delivered, len(tampered))
+		}
 	}
 }
 

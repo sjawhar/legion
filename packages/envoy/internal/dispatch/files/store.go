@@ -72,43 +72,69 @@ func SHA256(body []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// VerifyingReader hashes what it passes through and refuses to end on a body that does not hash
+// VerifyingReader hashes what it passes through and refuses to deliver a body that does not hash
 // to the hash it was opened under, or whose length is not the declared size: the reader every
-// Store's Get wraps its body in, so a caller that copies the body to its end has read the bytes
-// the row names and no others.
+// Store's Get wraps its body in. It always holds back part of what it has read until it has seen
+// the body's end and checked it, so a caller copying it to a response can never have written the
+// last byte of a bad object before the check fails: the client is left short, which every HTTP
+// client reports, rather than handed a complete body of the wrong bytes under the right hash.
 type VerifyingReader struct {
-	body     io.ReadCloser
-	sha      string
-	size     int64
-	read     int64
-	hash     hash.Hash
-	verified bool
+	body   io.ReadCloser
+	sha    string
+	size   int64
+	read   int64
+	hash   hash.Hash
+	buffer []byte
+	// held is what has been read and hashed but not yet handed out; eof says the body ended and
+	// held is its verified tail.
+	held []byte
+	eof  bool
+	err  error
 }
 
 // NewVerifyingReader wraps body, size bytes long, which must hash to sha.
 func NewVerifyingReader(body io.ReadCloser, sha string, size int64) *VerifyingReader {
-	return &VerifyingReader{body: body, sha: sha, size: size, hash: sha256.New()}
+	return &VerifyingReader{body: body, sha: sha, size: size, hash: sha256.New(), buffer: make([]byte, 32<<10)}
 }
 
 func (r *VerifyingReader) Read(p []byte) (int, error) {
-	n, err := r.body.Read(p)
-	if n > 0 {
-		r.read += int64(n)
-		if r.read > r.size {
-			return n, fmt.Errorf("object %s: body is longer than the %d bytes declared", r.sha, r.size)
-		}
-		_, _ = r.hash.Write(p[:n])
+	if r.err != nil {
+		return 0, r.err
 	}
-	if errors.Is(err, io.EOF) {
-		if r.read != r.size {
-			return n, fmt.Errorf("object %s: body ended after %d of %d bytes", r.sha, r.read, r.size)
+	// Read until more is held than the caller takes, so at least a byte stays back, or the
+	// body's end is known and the whole of it checked.
+	for !r.eof && len(r.held) <= len(p) {
+		n, err := r.body.Read(r.buffer)
+		if n > 0 {
+			r.read += int64(n)
+			if r.read > r.size {
+				r.err = fmt.Errorf("object %s: body is longer than the %d bytes declared", r.sha, r.size)
+				return 0, r.err
+			}
+			_, _ = r.hash.Write(r.buffer[:n])
+			r.held = append(r.held, r.buffer[:n]...)
 		}
-		if got := hex.EncodeToString(r.hash.Sum(nil)); got != r.sha {
-			return n, fmt.Errorf("object %s reads back as %s (%d bytes)", r.sha, got, r.read)
+		if errors.Is(err, io.EOF) {
+			r.eof = true
+			if r.read != r.size {
+				r.err = fmt.Errorf("object %s: body ended after %d of %d bytes", r.sha, r.read, r.size)
+				return 0, r.err
+			}
+			if got := hex.EncodeToString(r.hash.Sum(nil)); got != r.sha {
+				r.err = fmt.Errorf("object %s reads back as %s (%d bytes)", r.sha, got, r.read)
+				return 0, r.err
+			}
+		} else if err != nil {
+			r.err = err
+			return 0, err
 		}
-		r.verified = true
 	}
-	return n, err
+	n := copy(p, r.held)
+	r.held = r.held[n:]
+	if r.eof && len(r.held) == 0 {
+		return n, io.EOF
+	}
+	return n, nil
 }
 
 func (r *VerifyingReader) Close() error {

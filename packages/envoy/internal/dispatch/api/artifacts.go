@@ -678,9 +678,10 @@ func (s *server) getArtifactVersion(w http.ResponseWriter, r *http.Request) {
 	}
 	var content []byte
 	var contentType, sha *string
+	var size *int64
 	if err := s.deps.Store.Pool.QueryRow(r.Context(), `
-		select content, mime, sha256 from artifact_versions where artifact_id = $1 and number = $2
-	`, artifact.ID, number).Scan(&content, &contentType, &sha); err != nil {
+		select content, mime, sha256, size from artifact_versions where artifact_id = $1 and number = $2
+	`, artifact.ID, number).Scan(&content, &contentType, &sha, &size); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -728,6 +729,15 @@ func (s *server) getArtifactVersion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer object.Body.Close()
+	// The row's recorded size is the file's length; an object of another length is not the file,
+	// however it got there, and is refused before a header is written. The body's reader checks
+	// the hash as the bytes go and holds the last of them back until it has, so a wrong body
+	// leaves the client short of Content-Length rather than whole.
+	if size != nil && object.Size != *size {
+		slog.Error("dispatch: a file version's object is not the size the row records", "artifact", artifact.ID, "version", number, "sha256", *sha, "row_size", *size, "object_size", object.Size)
+		writeError(w, "FILE_MISSING", http.StatusInternalServerError, "this file's bytes cannot be found")
+		return
+	}
 	headers(object.Size)
 	if _, err := io.Copy(w, object.Body); err != nil {
 		if r.Context().Err() != nil {

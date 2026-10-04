@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -279,5 +280,57 @@ func TestAnUploadHoldsNoIssueLockWhileTheStoreWrites(t *testing.T) {
 	release()
 	if response := <-uploaded; response.Code != http.StatusCreated {
 		t.Fatalf("upload: status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+// tampered is a store whose object under one hash reads back as other bytes of the same length,
+// as a replaced or corrupted object in the bucket would, and passes every other call on.
+type tampered struct {
+	files.Store
+	sha   string
+	bytes []byte
+}
+
+func (s tampered) Get(ctx context.Context, sha string) (*files.Object, error) {
+	if sha != s.sha {
+		return s.Store.Get(ctx, sha)
+	}
+	size := int64(len(s.bytes))
+	return &files.Object{Body: files.NewVerifyingReader(io.NopCloser(bytes.NewReader(s.bytes)), sha, size), Size: size}, nil
+}
+
+// A version whose object no longer holds the row's bytes is never delivered as a whole file: the
+// response is cut short of its Content-Length, which a client reports. Over a real connection,
+// since the cut is the connection's.
+func TestATamperedObjectIsNotDeliveredWhole(t *testing.T) {
+	original := bytes.Repeat([]byte("o"), 300_000)
+	replaced := append(bytes.Repeat([]byte("o"), 299_999), 'x')
+	store := tampered{Store: filestest.NewMemory(), sha: files.SHA256(original), bytes: replaced}
+	handler, _, _ := newTestServer(t, testServerOptions{files: store})
+	issue := fileIssue(t, handler)
+	response := multipartRequest(t, handler, "/api/v1/issues/"+issue+"/artifacts", map[string]string{"name": "shot.bin"}, "shot.bin", "application/octet-stream", original, "alice")
+	if response.Code != http.StatusCreated {
+		t.Fatalf("upload: status=%d body=%s", response.Code, response.Body.String())
+	}
+	version := decodeBody[uploaded](t, response)
+
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	request, err := http.NewRequest(http.MethodGet, server.URL+"/api/v1/artifacts/"+version.Artifact.ID+"/versions/1", nil)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	request.Header.Set("X-Dispatch-User", "alice")
+	served, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer served.Body.Close()
+	if served.StatusCode != http.StatusOK || served.ContentLength != int64(len(original)) {
+		t.Fatalf("status %d, Content-Length %d, want 200 and %d: the object opened, so the headers went out", served.StatusCode, served.ContentLength, len(original))
+	}
+	got, err := io.ReadAll(served.Body)
+	if err == nil || int64(len(got)) >= int64(len(original)) {
+		t.Fatalf("the client read %d of %d bytes with error %v; want fewer bytes and a read error", len(got), len(original), err)
 	}
 }
