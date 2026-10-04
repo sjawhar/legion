@@ -146,6 +146,21 @@ slug also arrives on `artifact.created` events. Dispatch suffixes a slug two doc
 filename can be another's slug (`plan v2` takes `plan-v2`, then a document named `plan-v2` takes `plan-v2-2`): a bare
 `artifact` that names both is refused with each one's id, while a `dispatch://` reference's document part is always the slug.
 
+A picture meant to be seen inline in a message, comment or ask is not uploaded with `dispatch_artifact`: pass its local
+path in that tool's `images` (PNG, JPEG, GIF or WebP by its bytes, at most 25 MiB each). Each is uploaded to the issue (a
+project document's project; for a reply to a direct message, your own conversation) and appended after a blank line as
+one `![<file name>](dispatch://<owner>/artifact/<slug>@vN)` line, about 60 characters that count toward the body or
+question cap; a call over the cap is refused with the count before anything uploads. The `@vN` pins the version the
+upload made (the same file name again makes the next version). A plain `dispatch://KEY/artifact/<slug>` reference to an
+image stays a link with a thumbnail.
+
+`dispatch_read` hands you the pictures the messages, asks and comments it shows embed, newest first, at most 8 and
+10 MiB per read, and its `Pictures:` section names each one shown, in order, and the rest by reference for
+`dispatch_doc_read`, which shows one picture (at most 5 MiB; a larger one or an SVG is described). A picture in a
+conversation on the Agents page belongs to that conversation, `dispatch://agent/<session id>/artifact/<slug>@vN`, and
+`dispatch_doc_read` reads it by that reference alone. On Oh My Pi an Inbox delivery carries its pictures the same way; in
+Claude Code it stays text with the reference.
+
 Documents are CommonMark. A bare `<https://example.com|text>` is a CommonMark autolink and is normalised: the angle brackets are
 dropped and the URL keeps `|text`. A backslash-escaped `\<https://example.com|text>` displays as `<https://example.com|text>` in the
 document but comes back re-escaped (`\<`) from `dispatch_doc_read`. A Slack mrkdwn draft, or any other payload that is not Markdown,

@@ -71,6 +71,14 @@ The server holds every write to a size, and refuses rather than truncates:
 - a comment or message body is at most 2,000 characters;
 - a Markdown document is at most 1 MiB, and any other file at most 25 MiB.
 
+To show a picture inline, pass its local path in `images` on `dispatch_message`,
+`dispatch_comment` or `dispatch_ask` (PNG, JPEG, GIF or WebP, at most 25 MiB each). The tool
+uploads it to the issue, or for a reply to a direct message to the agent's own conversation, and
+appends one `![<file name>](dispatch://…@vN)` line per picture, which counts toward the caps above.
+`dispatch_doc_read` returns a picture as an image the model sees, and `dispatch_read` returns the
+pictures the messages, asks and comments it shows embed, newest first, at most eight and 10 MiB
+per read. A picture over 5 MiB, or of another type, is described rather than shown.
+
 Write every ask for a person reading on a phone who has not read the code. Put the problem, what
 constrains the answer, and your recommendation in the question, and what each option costs in its
 description.
