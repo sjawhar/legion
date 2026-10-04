@@ -282,6 +282,31 @@
 - A Markdown document now nests at most 100 blocks, and a document tree with a node more than 1,000 levels below the document, or an attribute value nesting more than 100 arrays and objects, is outside the Proof schema (LEGION-465). The bounds sit where every read serves the tree: past about 5,000 levels the document token is JSON that `encoding/json` will not write from Go 1.27 or read in any version, and `GET /blocks`, which hashes each block's subtree apart, does work growing with the square of the depth. A live tree past either tree bound is treated as any other tree outside the schema: settlement writes no version, its reads and edits answer `409 DOC_SCHEMA` naming the repair, the document websocket refuses it, and an upload of replacement markdown repairs it (LEGION-469). A textblock's inline markdown nests at most 100 marks inside one another - emphasis, strong, strikethrough, links, images and code - and deeper content is refused naming the line. An accepted suggestion whose own markdown nests within 100 blocks but lands deep enough that the document would nest past them is refused as `400 INVALID_OP` on `replace_with`, naming how many blocks the result nests (LEGION-465).
 
 ### Fixed
+- A deploy with someone on the Dispatch dashboard no longer spends the whole shutdown waiting and
+  then leaves the documents it owed unsettled (LEGION-501). An open event stream or agent
+  conversation stream never went idle, so `http.Server.Shutdown` held for its full 5 s, and the
+  document service then shut down on that expired deadline and logged `document settlement
+  unconfirmed at shutdown`. Both streams now end at SIGTERM, which the dashboard reconnects from,
+  so HTTP shutdown waits only for the requests in flight. Those requests drain first, with no
+  deadline of their own; the document service starts once they are done, or 11 s after the signal
+  with some still running, and gets 14 s of its own, so it finishes 5 s inside the 30 s stop timeout
+  ECS and the compose file give Dispatch. Each loaded document drains, reads what it owes and
+  settles in a worker of its own within 9 s of that budget, so a burst of writes still landing
+  after the worker started is waited for too, not only the ones already queued, and a settlement
+  still committing once that 9 s ends keeps the remaining 5 s to finish rather than ending in an
+  unconfirmed error: a document whose update is slow to store, or whose editor
+  keeps typing, leaves only its own settlement to the next process. A spec with its tab open is
+  settled while its room is still loaded, and its editors are disconnected only after that, so the
+  edit they made is versioned before the process exits instead of when someone next opens the spec;
+  a settlement that has to write into the room (stamping a block id, restoring an ask block's state)
+  is still left to the next process, now with a WARN rather than an ERROR. The database pool closes
+  once every request has answered, with nothing but the runtime's kill bounding that wait while the
+  database answers, so a write waiting on a lock commits and is answered if it finishes before the
+  kill. A database that has stopped answering no longer holds the process until its runtime kills
+  it: once the document service has finished and three health probes in a row have failed with no
+  connection returned meanwhile, Dispatch exits without the connections waiting on it (`dispatch:
+  exit with database connections still in use once the database stopped answering`). The compose
+  file sets `stop_grace_period: 30s`.
 - A document's stored update log kept every byte any write had inserted, and every cold load of it built all of it: Dispatch merged the stored updates whole, and a merge keeps the content of deleted items. Five hundred 2,000-character replies to one anchored comment, each projecting the thread's margin record again, left 257 MB stored under a 3 KB document, and a cold one-word edit of it then took 1,842 MiB, past the 1,024 MiB task. A load now applies the stored updates one at a time to a document that collects garbage and returns what it holds, so it costs the live document and one update; and compaction, which runs as a room closes, as the server shuts down and daily, folds the whole log into that state rather than keeping the newest 500 updates beside a merge of the rest. An update a load's document parks for a dependency the log lacks is merged back into that state. A log the fold cannot apply, or a state that does not read back as the document that made it, is not used: the load merges the stored updates whole as before, and compaction leaves them as stored. After compaction, `doc_updates` and any backup of it hold no text a write deleted, so text deleted before a version captured it is gone (Sami's decision, LEGION-496). `doc_updates` is snapshotted once, and the snapshot kept 90 days, right before the first deploy that carries this.
 - A document edit that repairs an ask a browser left unreadable now reports it in
   `decision_blocks_added`, matching the open ask its next settlement creates. An edit keeps that

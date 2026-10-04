@@ -11,6 +11,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/config"
 )
 
@@ -24,7 +25,7 @@ type githubTokenResponse struct {
 	// LegionAppLogins is each Legion role App's login, keyed by its App role ("implement",
 	// "review"), which gh-token names beside the caller's; absent when the daemon could not read
 	// every one.
-	LegionAppLogins map[string]string `json:"legionAppLogins"`
+	LegionAppLogins map[appauth.AppRole]string `json:"legionAppLogins"`
 }
 
 // errNoGrant is grantFromEnvironment's refusal when neither the pane's grant file pointer nor the
@@ -55,12 +56,20 @@ func daemonURL() string {
 	return "http://127.0.0.1:" + port
 }
 
+// redeemGrant redeems the pane's grant at the daemon's route (postDaemon).
 func redeemGrant(ctx context.Context, route string) (*http.Response, error) {
 	grant, err := grantFromEnvironment()
 	if err != nil {
 		return nil, err
 	}
-	body, err := json.Marshal(grantCredentialRequest{GrantID: grant})
+	return postDaemon(ctx, route, grantCredentialRequest{GrantID: grant})
+}
+
+// postDaemon POSTs payload, as JSON, to the daemon's route, and returns the daemon's answer, whose
+// body the caller closes. An answer outside 2xx is an error naming the status and the daemon's own
+// words.
+func postDaemon(ctx context.Context, route string, payload any) (*http.Response, error) {
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
 	}
@@ -75,8 +84,11 @@ func redeemGrant(ctx context.Context, route string) (*http.Response, error) {
 	}
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
 		defer response.Body.Close()
-		body, _ := io.ReadAll(response.Body)
-		return nil, fmt.Errorf("daemon returned %d: %s", response.StatusCode, strings.TrimSpace(string(body)))
+		answer, err := io.ReadAll(response.Body)
+		if err != nil {
+			return nil, fmt.Errorf("daemon returned %d, and reading its answer failed: %w", response.StatusCode, err)
+		}
+		return nil, fmt.Errorf("daemon returned %d: %s", response.StatusCode, strings.TrimSpace(string(answer)))
 	}
 	return response, nil
 }

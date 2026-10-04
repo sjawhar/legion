@@ -1,6 +1,7 @@
-// Package storetest gives each Postgres-backed Dispatch test its own fully migrated database. It is
-// an ordinary package rather than a _test.go file so every package whose tests need a Dispatch
-// database can import it; Go cannot share test-only code across packages.
+// Package storetest gives each Postgres-backed Dispatch test its own fully migrated database, and
+// waits for backends to queue behind a lock a test holds (WaitForLockWaiters). It is an ordinary
+// package rather than a _test.go file so every package whose tests need a Dispatch database can
+// import it; Go cannot share test-only code across packages.
 //
 // Open clones each database from a template this test process migrates once. Running every
 // migration, each in its own committed transaction, is most of the Postgres work a test would
