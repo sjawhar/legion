@@ -289,9 +289,10 @@ func main() {
 	// A settlement a shutdown cut short, here or in the task this one replaces, runs without
 	// anyone opening its document.
 	go documentService.RunSettlementResumption(ctx)
-	// Issues whose spec's task count is not their latest version's - every row migration 0069
-	// found, and any the task this one replaces versions while both run - are counted again, at
-	// start and on an interval, so their progress shows without anyone editing them (LEGION-542).
+	// Issues whose spec's task count is not their latest version's - every row the migration that
+	// added the count columns found, and any the task this one replaces versions while both run -
+	// are counted again, at start and on an interval, so their progress shows without anyone
+	// editing them (LEGION-542).
 	go documentService.RunTaskProgressReconciliation(ctx)
 
 	sweeper, err := webhookSweeper(natsClient, appCfg, boot.GitHubAPIBase)

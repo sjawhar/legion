@@ -51,7 +51,7 @@ func RecordTaskProgressMarkdown(ctx context.Context, tx pgx.Tx, artifactID, mark
 }
 
 // taskProgressDrift is the issues whose stored task count is not the count of their primary
-// document's latest version: never counted (every row migration 0069 found), or versioned by a
+// document's latest version: never counted (every row the migration that added these columns found), or versioned by a
 // server that wrote no count (the task a deploy replaces, until it stops), or whose latest version
 // was written while the row was locked by another writer. The latest version is the greatest
 // artifact_versions.number of the primary document; an issue with no version row has 0, which a

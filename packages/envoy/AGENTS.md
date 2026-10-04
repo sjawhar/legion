@@ -102,7 +102,7 @@ that passes before Shutdown can read that back is, and its error names the docum
 one. A 1 MiB `a_b*` document's settlement took 4.5-6.8 s at load 90-170 on the development
 machine, past that budget.
 
-An issue's task counts (`issues.tasks_done`, `tasks_total`, `tasks_version`, migration 0069;
+An issue's task counts (`issues.tasks_done`, `tasks_total`, `tasks_version`, added by the `issue_task_progress` migration;
 LEGION-542) are the `- [ ]` / `- [x]` items of its primary document as its latest version renders
 (`pmdoc.CountTasks`, which skips an item emptied of its text, since the renderer writes one as a
 plain `- `), and the number of the version they were counted from. Every version write records
