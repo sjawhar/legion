@@ -99,6 +99,45 @@ func admin(t testing.TB, databaseURL, statement string) {
 	}
 }
 
+// Querier is what AwaitLockWaiters polls through: a pool, or a connection of its own when the
+// pool's connections may all be waiting.
+type Querier interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+// AwaitLockWaiters waits until n backends wait on a lock behind holder's backend and answers their
+// pids, failing t after ten seconds. A backend counts when it waits on a lock (wait_event_type
+// 'Lock') that holder's backend holds, or that a backend already counted holds or is ahead of it
+// in the queue for: a second waiter for one row waits on the first waiter's tuple lock, and
+// pg_blocking_pids names only that first waiter, never the holder. Waiters behind other holders,
+// in other tests on the same server, never count.
+func AwaitLockWaiters(t testing.TB, q Querier, holder pgx.Tx, n int) []uint32 {
+	t.Helper()
+	ctx := context.Background()
+	pid := holder.Conn().PgConn().PID()
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		var waiting []int32
+		if err := q.QueryRow(ctx, `with recursive waiting(pid) as (
+				select pid from pg_stat_activity where wait_event_type = 'Lock' and $1 = any(pg_blocking_pids(pid))
+				union
+				select a.pid from pg_stat_activity a, waiting w where a.wait_event_type = 'Lock' and w.pid = any(pg_blocking_pids(a.pid))
+			)
+			select coalesce(array_agg(pid order by pid), '{}') from waiting`, int32(pid)).Scan(&waiting); err != nil {
+			t.Fatalf("read the backends waiting behind %d: %v", pid, err)
+		}
+		if len(waiting) >= n {
+			pids := make([]uint32, len(waiting))
+			for i, w := range waiting {
+				pids[i] = uint32(w)
+			}
+			return pids
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%d backends waited on a lock behind %d, want %d", len(waiting), pid, n)
+		}
+	}
+}
+
 // Exec is a tamper that runs statements as a writer other than the broker would: $1 is the
 // record id wherever a statement names it, and an update must change exactly one row.
 func Exec(statements ...string) func(t testing.TB, st *store.Store, recordID string) {
