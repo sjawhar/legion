@@ -8,6 +8,7 @@ event intake, process lifecycle, credentials, and role delivery.
 | --- | --- | --- |
 | `ce-simplify-code/` | the implementer, once per pull request | the behaviour-preserving simplify pass before the reviewer's final pass (Legion's copy of the MIT-licensed Compound Engineering skill; `LICENSE` beside it) |
 | `dispatch/` | every role, and any session writing to Dispatch | specs, asks, comments, artifacts, and messages on native Dispatch |
+| `dispatch-brainstorming/` | any session with Dispatch that starts a design conversation or writes a plan, as `dispatch-first` directs | the design conversation in the issue's spec, turn by turn to one approval, and the plan as the issue's `plan.md`; in a session with Dispatch it replaces superpowers' `brainstorming` and `writing-plans` |
 | `dispatch-first/` | every session with Dispatch configured, injected by each host plugin on every request (Oh My Pi), on every `SessionStart` (startup, resume, clear, compact, fork) and `SubagentStart` (Claude Code), or as an instruction file (OpenCode) | searching Dispatch before acting, extending the existing issue, citing decisions, closing duplicates; kept under 60 lines and 6,000 characters |
 | `envoy/` | every role | subscriptions, agent-to-agent messages, and topic formats |
 | `legion-architect/` | root and sub-architects | tree ownership, decomposition, waves, gates, integration, sign-off |
