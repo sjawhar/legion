@@ -260,12 +260,13 @@ error, and the SDK's own log lines go through slog, its debug lines below the de
 object is read into one buffer of its declared size, and it stays in memory until its client has
 read it while the server sets no write timeout, so the router's `retainedHeld` semaphore caps the
 bytes held at once at `maxRetainedBytesHeld` (64 MiB). A request reserves 8 MiB before it asks
-the store, keeps only its object's size once it is read, and gives that back when its response is
-written, its client goes away or the read fails; a request that cannot reserve is a 503 with
-`Cache-Control: no-store` and `Retry-After: 1`, logs `dispatch: retained asset refused at the
-memory cap` at WARN with its key, and asks the store nothing. It never reads a page or another
-path from the bucket. Unset, the setting leaves every local asset miss a 404. Any other file (the
-favicon) carries no cache header.
+the store, waiting within its three seconds for earlier requests to give theirs back, so a stale
+tab's burst of chunks is served in turn; it keeps only its object's size once it is read, and gives
+that back when its response is written, its client goes away or the read fails. A request that
+cannot reserve in time is a 503 with `Cache-Control: no-store` and `Retry-After: 1`, logs
+`dispatch: retained asset refused at the memory cap` at WARN with its key, and asks the store
+nothing. It never reads a page or another path from the bucket. Unset, the setting leaves every
+local asset miss a 404. Any other file (the favicon) carries no cache header.
 
 Every `/api/v1` route accepts an authenticated user or an agent bearer unless
 the table says human only.

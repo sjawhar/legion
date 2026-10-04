@@ -487,8 +487,8 @@ func stallRetainedReaders(t *testing.T, handler http.Handler, n int) []*stalledC
 }
 
 // A retained object stays in memory until its client has read it, and nothing bounds how long a
-// client takes, so the bytes held at once are capped. A request that would pass the cap is
-// refused before the store is asked: 503, not kept, retried after a second.
+// client takes, so the bytes held at once are capped. A request that finds no room before its
+// fetch bound runs out is refused without asking the store: 503, not kept, retried after a second.
 func TestStaticHandlerCapsRetainedBytesHeldAtOnce(t *testing.T) {
 	var logs bytes.Buffer
 	previous := slog.Default()
@@ -578,4 +578,67 @@ func TestStaticHandlerReleasesRetainedBytesWhenTheStoreFails(t *testing.T) {
 	if recorder.Code != http.StatusOK || recorder.Body.String() != "after" {
 		t.Fatalf("after the store failed: status %d body %q, want 200 \"after\"", recorder.Code, recorder.Body.String())
 	}
+}
+
+// latentStore answers like S3 does from across a network: each object arrives after a short delay.
+type latentStore struct {
+	delay  time.Duration
+	object []byte
+}
+
+func (s latentStore) GetAsset(ctx context.Context, _ string) ([]byte, error) {
+	select {
+	case <-time.After(s.delay):
+		return s.object, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// A stale tab opening a route asks for every chunk the route imports at once (the dashboard's
+// issue page imports eight), and another tab can be doing the same. Small chunks hold almost
+// nothing of the memory cap, so a burst of them is served rather than refused.
+func TestStaticHandlerServesABurstOfSmallRetainedAssets(t *testing.T) {
+	handler, context := newTestRouter(t)
+	context.WebDistDir = t.TempDir()
+	context.AssetStore = latentStore{delay: 50 * time.Millisecond, object: []byte("console.log('previous build')")}
+
+	const burst = 16
+	codes := make([]int, burst)
+	var wg sync.WaitGroup
+	for i := range burst {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, fmt.Sprintf("/assets/chunk-%d.js", i), nil))
+			codes[i] = recorder.Code
+		}()
+	}
+	wg.Wait()
+
+	refused := 0
+	for _, code := range codes {
+		if code != http.StatusOK {
+			refused++
+		}
+	}
+	if refused != 0 {
+		t.Fatalf("a burst of %d small retained assets: %d not served (statuses %v), want all 200", burst, refused, codes)
+	}
+}
+
+// A request keeps only its object's size once it is read, so stalled readers of real chunk sizes
+// share the cap rather than each holding the most one object can be: 32 stalled readers of the
+// dashboard's largest chunk, 1,747,955 bytes, fit under the cap, and every one is served.
+func TestStaticHandlerHoldsOnlyEachRetainedObjectsSize(t *testing.T) {
+	handler, context := newTestRouter(t)
+	context.WebDistDir = t.TempDir()
+	const size, readers = 1747955, 32
+	if size*readers > maxRetainedBytesHeld {
+		t.Fatalf("%d readers of %d bytes exceed the %d-byte cap; the test needs them to fit", readers, size, maxRetainedBytesHeld)
+	}
+	context.AssetStore = &countingStore{object: bytes.Repeat([]byte("/"), size)}
+
+	stallRetainedReaders(t, handler, readers)
 }

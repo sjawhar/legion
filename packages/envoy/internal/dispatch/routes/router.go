@@ -456,10 +456,14 @@ func isRetainedAssetPath(normalized string) bool {
 //
 // An object stays in memory until its client has read it, so the bytes held at once are capped at
 // maxRetainedBytesHeld. Before asking the store a request reserves the most one object can hold,
-// so a request past the cap asks it nothing; once the object is read it keeps the object's size
-// until its response is written or its client goes away.
+// waiting within the same bound for earlier requests to give theirs back, so a burst of a stale
+// tab's chunks is served in turn and a request that cannot reserve in time is a 503 that asks the
+// store nothing. Once the object is read the request keeps only its size until its response is
+// written or its client goes away.
 func (r *router) serveRetainedAsset(w http.ResponseWriter, req *http.Request, key string) {
-	if !r.retainedHeld.TryAcquire(maxRetainedAssetSize) {
+	ctx, cancel := context.WithTimeout(req.Context(), retainedAssetFetchTimeout)
+	defer cancel()
+	if err := r.retainedHeld.Acquire(ctx, maxRetainedAssetSize); err != nil {
 		slog.Warn("dispatch: retained asset refused at the memory cap", "key", key, "cap_bytes", maxRetainedBytesHeld)
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Retry-After", "1")
@@ -467,11 +471,10 @@ func (r *router) serveRetainedAsset(w http.ResponseWriter, req *http.Request, ke
 		return
 	}
 	held := maxRetainedAssetSize
+	// Release reads held when the handler returns: the object's size once it is read.
 	defer func() { r.retainedHeld.Release(held) }()
 
-	ctx, cancel := context.WithTimeout(req.Context(), retainedAssetFetchTimeout)
 	asset, err := r.ctx.AssetStore.GetAsset(ctx, key)
-	cancel()
 	if errors.Is(err, ErrAssetNotFound) {
 		writeError(w, http.StatusNotFound, "not found")
 		return
