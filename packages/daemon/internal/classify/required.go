@@ -51,17 +51,15 @@ const (
 )
 
 // HeadChecks is each check the pull request's base branch requires (Required), judged by the
-// settlement that stands for its head (settled) under the rule READY refuses by (Judge): a check
-// the settlement names as failed failed, one it names as cancelled was cancelled, one it reports
-// otherwise passed, and one it does not report at all is missing, since the listener settles a
-// commit only once every check suite it started has completed. ok is false when there is nothing
-// to judge: no settlement stands for the head, or the required set was never read.
-//
-// A settlement carried back from a head a .legion/-only push replaced (CheckedHead is not the
-// head) predicts a failure soundly, since the code is the same, but not a cancellation or a gap: a
-// push cancels the run before it where a required workflow cancels in progress, and the reviewer's
-// own approval push is a full-CI push. So a required check the carried settlement names cancelled,
-// or does not report, is Pending: the head's own settlement decides it.
+// settlement that stands for its head (settled), its own or one carried back from a head a
+// .legion/-only push replaced. A check the settlement names as failed failed, and one it reports
+// otherwise passed. One it names as cancelled, or does not report at all, is Pending: a settlement
+// can come before a required check is decided, since the listener settles a commit once every check
+// it has seen is terminal and the commit is quiet, which an aggregator job with needs: is not yet
+// queued for, and which a run that concurrency cancels has reached before its replacement shows;
+// the next settlement of the head decides it. READY reads the same check at merge and refuses it
+// cancelled or missing (Judge). ok is false when there is nothing to judge: no settlement stands
+// for the head, or the required set was never read.
 func HeadChecks(pr record.PullRequest) (checks []Standing, ok bool) {
 	if !settled(pr) || pr.Required == nil {
 		return nil, false
@@ -77,21 +75,19 @@ func HeadChecks(pr record.PullRequest) (checks []Standing, ok bool) {
 		results[name] = Failed
 	}
 	checks = Judge(pr.Required, results)
-	if pr.CheckedHead != pr.HeadSHA {
-		for i, check := range checks {
-			if check.Result == Cancelled || check.Result == Missing {
-				checks[i].Result = Pending
-			}
+	for i, check := range checks {
+		if check.Result == Cancelled || check.Result == Missing {
+			checks[i].Result = Pending
 		}
 	}
 	return checks, true
 }
 
 // HeadVerdict is the CI verdict that stands for the pull request's current head: "red" when a check
-// its base branch requires is red there (HeadChecks), "green" when every one passed, and none when
-// HeadChecks has nothing to judge or a required check is still pending. A check the base branch
-// does not require never makes a head red, whatever it settled, and a base that requires no check
-// has nothing red, as READY then has nothing to refuse.
+// its base branch requires failed there (HeadChecks), "green" when every one passed, and none when
+// HeadChecks has nothing to judge or a required check is pending. A check the base branch does not
+// require never makes a head red, whatever it settled, and a base that requires no check has
+// nothing red, as READY then has nothing to refuse.
 func HeadVerdict(pr record.PullRequest) string {
 	checks, ok := HeadChecks(pr)
 	if !ok {

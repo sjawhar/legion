@@ -57,7 +57,8 @@ func (w *workflowRuntime) watchRequiredChecks(ctx context.Context) {
 // head's verdict again (workflow's requiredChecks). A read that fails is logged with the
 // repository, the pull request and GitHub's HTTP status, and changes nothing: the pull request
 // keeps the set last read, and one never read keeps no checks verdict, neither red nor green, until
-// a later pass reads it.
+// a later pass reads it. A rate-limit answer ends the pass there, since every read after it on the
+// same installation meets the same limit, and the panes share it; the next pass starts over.
 func (w *workflowRuntime) readRequiredChecks(ctx context.Context) {
 	var open []record.PullRequest
 	if err := pgx.BeginFunc(ctx, w.pool, func(tx pgx.Tx) error {
@@ -81,6 +82,10 @@ func (w *workflowRuntime) readRequiredChecks(ctx context.Context) {
 			var answer *githubrest.Answer
 			if errors.As(err, &answer) {
 				attributes = append(attributes, "status", answer.Status)
+			}
+			if answer != nil && answer.RateLimited {
+				w.log.Error("read the checks a pull request's base branch requires: GitHub's rate limit; this pass reads no more pull requests, and every unread one's checks verdict stays as the set last read decides it", attributes...)
+				return
 			}
 			w.log.Error("read the checks a pull request's base branch requires; its checks verdict stays as the set last read decides it, and undecided when none was", attributes...)
 			continue

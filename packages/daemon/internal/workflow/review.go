@@ -108,18 +108,12 @@ func (e *Engine) decideChecks(ctx context.Context, tx pgx.Tx, pr *record.PullReq
 }
 
 // redAt is what the red verdict standing for the pull request's head says: the head, and each check
-// the base branch requires that is red there (classify.HeadChecks), one that was cancelled or
-// reported no result at all marked so, since neither is a failure to open.
+// the base branch requires that failed there (classify.HeadChecks).
 func redAt(pr record.PullRequest) string {
 	checks, _ := classify.HeadChecks(pr)
 	var red []string
 	for _, check := range checks {
-		switch {
-		case check.Result == classify.Missing:
-			red = append(red, check.Name+" (no result)")
-		case check.Result == classify.Cancelled:
-			red = append(red, check.Name+" (cancelled)")
-		case check.Red():
+		if check.Red() {
 			red = append(red, check.Name)
 		}
 	}

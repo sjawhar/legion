@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -44,31 +45,24 @@ func implementerTask(t *testing.T, pool *pgxpool.Pool) string {
 	return task
 }
 
-// Only a check the base branch requires makes CI red at a head, under the rule READY refuses by: a
-// red beside a passing required gate sends nothing back from testing or reviewing, a required
-// check that failed does and names only itself, and a required check the head's own settlement
-// reports no result for, or names cancelled, is red too, named as such since neither has a failure
-// to open.
+// Only a check the base branch requires makes CI red at a head: a red beside a passing required
+// gate sends nothing back from testing or reviewing, and a required check that failed does and
+// names only itself.
 func TestOnlyARedTheBaseBranchRequiresSendsTheWorkBack(t *testing.T) {
 	for _, tc := range []struct {
-		name      string
-		from      phase.Phase
-		status    string
-		required  []string
-		failing   []string
-		cancelled []string
-		runs      []record.AttemptRun
+		name     string
+		from     phase.Phase
+		status   string
+		required []string
+		failing  []string
+		runs     []record.AttemptRun
 		// red is what the implementer's task and the checks-red notice say; "" sends nothing back.
 		red string
 	}{
-		{"reds beside the required gate, in testing", phase.Testing, "testing", []string{requiredGate}, redsBesideTheGate, nil, runsBesideTheGate, ""},
-		{"reds beside the required gate, in reviewing", phase.Reviewing, "needs_review", []string{requiredGate}, redsBesideTheGate, nil, runsBesideTheGate, ""},
-		{"the required gate failed beside them", phase.Testing, "testing", []string{requiredGate}, append([]string{requiredGate}, redsBesideTheGate...), nil, runsBesideTheGate,
+		{"reds beside the required gate, in testing", phase.Testing, "testing", []string{requiredGate}, redsBesideTheGate, runsBesideTheGate, ""},
+		{"reds beside the required gate, in reviewing", phase.Reviewing, "needs_review", []string{requiredGate}, redsBesideTheGate, runsBesideTheGate, ""},
+		{"the required gate failed beside them", phase.Testing, "testing", []string{requiredGate}, append([]string{requiredGate}, redsBesideTheGate...), runsBesideTheGate,
 			"CI is red at head: pr-checks-result"},
-		{"a required check the settled head reports no result for", phase.Testing, "testing", []string{"lint", requiredGate}, []string{}, nil, []record.AttemptRun{{Name: requiredGate, ID: 1}},
-			"CI is red at head: lint (no result)"},
-		{"a required check cancelled in the head's own run", phase.Testing, "testing", []string{requiredGate}, []string{}, []string{requiredGate}, []record.AttemptRun{{Name: requiredGate, ID: 1}},
-			"CI is red at head: pr-checks-result (cancelled)"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
@@ -79,7 +73,7 @@ func TestOnlyARedTheBaseBranchRequiresSendsTheWorkBack(t *testing.T) {
 			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
 			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim"})
 			applyRefusingNothing(t, pool, testEngine(config.DesignGateRootIssues, nil), intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42,
-				HeadSHA: "head", CheckRuns: tc.runs, Generation: 1, Snapshot: "settled", Failing: tc.failing, Cancelled: tc.cancelled})
+				HeadSHA: "head", CheckRuns: tc.runs, Generation: 1, Snapshot: "settled", Failing: tc.failing})
 			if tc.red == "" {
 				if got := issuePhase(t, pool); got != tc.from {
 					t.Fatalf("the issue is in %s, want it left in %s", got, tc.from)
@@ -99,6 +93,68 @@ func TestOnlyARedTheBaseBranchRequiresSendsTheWorkBack(t *testing.T) {
 			}
 			if task := implementerTask(t, pool); !strings.Contains(task, tc.red) || !strings.HasSuffix(reason, tc.red) {
 				t.Fatalf("task %q and notice %q; want both to end %q, naming no check the base branch does not require", task, reason, tc.red)
+			}
+		})
+	}
+}
+
+// A settlement can come before a required check is decided: the listener settles a commit once
+// every check it has seen is terminal and the commit is quiet, which can be before an aggregator
+// job with needs: is queued, or just after concurrency cancelled a run of the same commit. So a
+// required check the head's own settlement names cancelled, or does not report, moves nothing and
+// tells nobody, and the head's next settlement decides it: passed, an approved round ends; failed,
+// the work goes back naming it.
+func TestARequiredCheckCancelledOrMissingWaitsForTheHeadsNextSettlement(t *testing.T) {
+	gateRun := func(id int64) record.AttemptRun { return record.AttemptRun{Name: requiredGate, ID: id} }
+	missing := intake.PullRequestChecks{CheckRuns: []record.AttemptRun{{Name: "lint", ID: 1}}, Failing: []string{}}
+	cancelled := intake.PullRequestChecks{CheckRuns: []record.AttemptRun{gateRun(1)}, Failing: []string{}, Cancelled: []string{requiredGate}}
+	passed := intake.PullRequestChecks{CheckRuns: []record.AttemptRun{{Name: "lint", ID: 1}, gateRun(2)}, Failing: []string{}}
+	failed := intake.PullRequestChecks{CheckRuns: []record.AttemptRun{{Name: "lint", ID: 1}, gateRun(2)}, Failing: []string{requiredGate}}
+	for _, tc := range []struct {
+		name          string
+		from          phase.Phase
+		status        string
+		first, second intake.PullRequestChecks
+		want          phase.Phase
+	}{
+		{"missing, then passed, under an approved round", phase.Reviewing, "needs_review", missing, passed, phase.Retro},
+		{"cancelled, then passed, under an approved round", phase.Reviewing, "needs_review", cancelled, passed, phase.Retro},
+		{"missing, then failed, in testing", phase.Testing, "testing", missing, failed, phase.Implementing},
+		{"cancelled, then failed, in testing", phase.Testing, "testing", cancelled, failed, phase.Implementing},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			engine := testEngine(config.DesignGateRootIssues, nil)
+			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root",
+				Phase: tc.from, Generation: 1, Status: tc.status, Rank: "U"})
+			seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
+				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", Required: []string{requiredGate}})
+			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
+			reviewer := record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim"}
+			if tc.from == phase.Reviewing {
+				reviewer.HandoffCommit, reviewer.Summary = "head", "approved"
+				reviewer.Decision = &record.ReviewDecision{State: "approved", Body: "looks right", Head: "head"}
+			}
+			seedPhase(t, pool, reviewer)
+			settle := func(fact intake.PullRequestChecks, generation int64) {
+				fact.Repo, fact.Number, fact.HeadSHA, fact.Generation = "sjawhar/legion", 42, "head", generation
+				fact.Snapshot = fmt.Sprintf("settled-%d", generation)
+				applyRefusingNothing(t, pool, engine, fact)
+			}
+			settle(tc.first, 1)
+			if got := issuePhase(t, pool); got != tc.from {
+				t.Fatalf("after the first settlement the issue is in %s, want it left in %s", got, tc.from)
+			}
+			if got := noticeKinds(t, pool, "LEGION-208"); len(got) != 0 {
+				t.Fatalf("after the first settlement the architect was told %v, want nothing", got)
+			}
+			assertOutboxCount(t, pool, "supervise", 0)
+			settle(tc.second, 2)
+			if got := issuePhase(t, pool); got != tc.want {
+				t.Fatalf("after the next settlement the issue is in %s, want %s", got, tc.want)
+			}
+			if task := implementerTask(t, pool); tc.want == phase.Implementing && !strings.Contains(task, "CI is red at head: pr-checks-result") {
+				t.Fatalf("the implementer's task %q does not name the failed required check", task)
 			}
 		})
 	}

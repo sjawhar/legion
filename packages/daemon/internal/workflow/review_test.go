@@ -209,16 +209,15 @@ func TestAnApprovalStandsForEveryHeadThatChangesNothingButTheHandoff(t *testing.
 		{name: "a code push delivered after the branch was reset to the approved head, then the reviewer's handoff push", steps: []string{"approve head", "sync", "sync head-3", "push code", "push handoff forced from=head-3 head", "sync head", "green head", "complete", "push handoff from=head head-4", "sync head-4", "green head-4"}, want: phase.Retro},
 		// A handoff push can carry GitHub's skip-checks trailer and start no CI, so the code head's
 		// settlement stands for the handoff head that replaced it, whenever it arrives. A required
-		// check cancelled in the handoff head's own run is red, as READY refuses it, and leaves the
-		// approved round to the reviewer. One cancelled in the code head's run carried to the
-		// handoff head is not: the reviewer's own full-CI push is what cancels it where a required
-		// workflow cancels in progress, so the handoff head's own settlement decides, and until it
-		// lands the round waits and tells nobody.
-		{name: "the handoff head's own run cancelled after the code head's green", steps: []string{"green head", "approve head", "sync", "push handoff", "cancelled", "complete"}, want: phase.Reviewing, unsettled: true},
+		// check cancelled, whether in the handoff head's own run or in the code head's carried to it,
+		// is not red: a push or concurrency can cancel a run whose replacement has not shown yet, so
+		// a later settlement decides it, and until one lands the round waits and tells nobody.
+		{name: "the handoff head's own run cancelled after the code head's green", steps: []string{"green head", "approve head", "sync", "push handoff", "cancelled", "complete"}, want: phase.Reviewing, unsettled: true, quiet: true},
+		{name: "the handoff head's own run cancelled, then its rerun green", steps: []string{"green head", "approve head", "sync", "push handoff", "cancelled", "complete", "rerun green"}, want: phase.Retro, unsettled: true, quiet: true},
 		{name: "a cancelled re-settlement of the code head after its green", steps: []string{"green head", "approve head", "sync", "push handoff", "cancelled head", "complete"}, want: phase.Reviewing, unsettled: true, quiet: true},
 		{name: "the code head's run cancelled by the reviewer's handoff push", steps: []string{"approve head", "sync", "push handoff", "cancelled head", "complete"}, want: phase.Reviewing, unsettled: true, quiet: true},
 		{name: "the code head's run cancelled by the reviewer's handoff push, then the handoff head's own green", steps: []string{"approve head", "sync", "push handoff", "cancelled head", "complete", "green"}, want: phase.Retro, unsettled: true, quiet: true},
-		{name: "the handoff head's own run cancelled before the code head's green", steps: []string{"approve head", "sync", "push handoff", "cancelled", "green head", "complete"}, want: phase.Reviewing, unsettled: true},
+		{name: "the handoff head's own run cancelled before the code head's green", steps: []string{"approve head", "sync", "push handoff", "cancelled", "green head", "complete"}, want: phase.Reviewing, unsettled: true, quiet: true},
 		{name: "the code head's checks settle after the reviewer's handoff head", steps: []string{"approve head", "sync", "push handoff", "green head", "complete"}, want: phase.Retro, unsettled: true},
 		{name: "the code head's checks settle before the reviewer's handoff head, its push last", steps: []string{"green head", "approve head", "sync", "push handoff", "complete"}, want: phase.Retro, unsettled: true},
 		{name: "the code head's checks settle before the reviewer's handoff head, its push first", steps: []string{"green head", "approve head", "push handoff", "sync", "complete"}, want: phase.Retro, unsettled: true},
@@ -321,6 +320,10 @@ func TestAnApprovalStandsForEveryHeadThatChangesNothingButTheHandoff(t *testing.
 					// Every check ended cancelled and none failed: the listener's cancelled group.
 					fact = intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: head,
 						CheckRuns: []record.AttemptRun{{Name: "ci", ID: 4}}, Generation: 3, Snapshot: "cancelled-" + head, Failing: []string{}, Cancelled: []string{"ci"}}
+				case "rerun green":
+					// The run concurrency cancelled, run again and passed.
+					fact = intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: head,
+						CheckRuns: []record.AttemptRun{{Name: "ci", ID: 5}}, Generation: 4, Snapshot: "rerun-green-" + head, Failing: []string{}}
 				case "complete":
 					fact = intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim",
 						Summary: "reviewed", Commit: "review-1"}

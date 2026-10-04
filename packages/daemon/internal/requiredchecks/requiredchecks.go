@@ -9,6 +9,7 @@ package requiredchecks
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"slices"
@@ -20,7 +21,9 @@ import (
 // Required is every check name base requires: the required status checks of the rulesets that
 // apply to it, every page of them, and of its branch protection, sorted and each once. A
 // repository whose plan has no rulesets has none of the first (rulesetsUnavailable). An empty
-// answer is a base that requires no check.
+// answer is a base that requires no check. A branch GitHub calls protected but answers with no
+// protection summary is an error rather than a branch that requires nothing, so a reader never
+// fails open on an answer it cannot read.
 func Required(ctx context.Context, github githubrest.Client, base string) ([]string, error) {
 	// A branch name's slashes stay path segments, as GitHub's branch routes take them.
 	branch := strings.ReplaceAll(url.PathEscape(base), "%2F", "/")
@@ -36,8 +39,9 @@ func Required(ctx context.Context, github githubrest.Client, base string) ([]str
 	if err != nil && !rulesetsUnavailable(err) {
 		return nil, err
 	}
-	var protected struct {
-		Protection struct {
+	var branchAnswer struct {
+		Protected  bool `json:"protected"`
+		Protection *struct {
 			RequiredStatusChecks struct {
 				Contexts []string `json:"contexts"`
 				Checks   []struct {
@@ -46,8 +50,11 @@ func Required(ctx context.Context, github githubrest.Client, base string) ([]str
 			} `json:"required_status_checks"`
 		} `json:"protection"`
 	}
-	if err := github.Get(ctx, "/branches/"+branch, &protected); err != nil {
+	if err := github.Get(ctx, "/branches/"+branch, &branchAnswer); err != nil {
 		return nil, err
+	}
+	if branchAnswer.Protected && branchAnswer.Protection == nil {
+		return nil, fmt.Errorf("GitHub calls %s protected but answered GET /branches/%s with no protection summary", base, branch)
 	}
 	names := []string{}
 	for _, rule := range rules {
@@ -58,9 +65,11 @@ func Required(ctx context.Context, github githubrest.Client, base string) ([]str
 			names = append(names, check.Context)
 		}
 	}
-	names = append(names, protected.Protection.RequiredStatusChecks.Contexts...)
-	for _, check := range protected.Protection.RequiredStatusChecks.Checks {
-		names = append(names, check.Context)
+	if protection := branchAnswer.Protection; protection != nil {
+		names = append(names, protection.RequiredStatusChecks.Contexts...)
+		for _, check := range protection.RequiredStatusChecks.Checks {
+			names = append(names, check.Context)
+		}
 	}
 	slices.Sort(names)
 	return slices.Compact(names), nil

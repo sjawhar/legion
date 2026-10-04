@@ -7,11 +7,11 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
-// Only a check the base branch requires decides whether CI is red at a head, under the rule READY
-// refuses by: failed, cancelled or missing from the head's own settlement is red, a pending check
-// is not red yet, and nothing decides while the required set is unread. A settlement carried back
-// across a .legion/-only push still predicts a failure, but a cancellation or a gap there is the
-// run's, not the code's, so it is pending until the head's own settlement decides it.
+// Only a check the base branch requires decides whether CI is red at a head: one the settlement
+// names failed is red, and one it names cancelled or does not report is pending, since a settlement
+// can come before a required check is decided, so the head has no verdict until a later settlement
+// decides it; nothing decides while the required set is unread. A settlement carried back across a
+// .legion/-only push reads the same.
 func TestHeadVerdictJudgesOnlyTheChecksTheBaseBranchRequires(t *testing.T) {
 	// The live shape: the repository's one required gate passed, two workflow_dispatch lanes and an
 	// advisory review check failed beside it, and an image build was cancelled.
@@ -38,8 +38,9 @@ func TestHeadVerdictJudgesOnlyTheChecksTheBaseBranchRequires(t *testing.T) {
 	}{
 		{"reds the base branch does not require", requiring("pr-checks-result"), "green", []Standing{{"pr-checks-result", Success}}},
 		{"a required check that failed", requiring("pr-checks-result", "review"), "red", []Standing{{"pr-checks-result", Success}, {"review", Failed}}},
-		{"a required check cancelled in the head's own run", requiring("build-image", "pr-checks-result"), "red", []Standing{{"build-image", Cancelled}, {"pr-checks-result", Success}}},
-		{"a required check the settled head reports no result for", requiring("lint", "pr-checks-result"), "red", []Standing{{"lint", Missing}, {"pr-checks-result", Success}}},
+		{"a required check cancelled in the head's own run", requiring("build-image", "pr-checks-result"), "", []Standing{{"build-image", Pending}, {"pr-checks-result", Success}}},
+		{"a required check the head's own settlement reports no result for", requiring("lint", "pr-checks-result"), "", []Standing{{"lint", Pending}, {"pr-checks-result", Success}}},
+		{"a failed required check beside a missing one", requiring("lint", "review"), "red", []Standing{{"lint", Pending}, {"review", Failed}}},
 		{"a base branch that requires no check", requiring(), "green", []Standing{}},
 		{"a required set never read", func(pr record.PullRequest) record.PullRequest { return pr }, "", nil},
 		{"the code head's settlement carried to the handoff head that replaced it", func(pr record.PullRequest) record.PullRequest {

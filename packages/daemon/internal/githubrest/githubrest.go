@@ -1,6 +1,5 @@
-// Package githubrest calls one repository's GitHub REST API with an installation token: the
-// client the merger's READY, the daemon's required-checks read and every other daemon call to
-// GitHub's REST API share.
+// Package githubrest is READY's and the daemon's client for one repository's GitHub REST API,
+// called with an installation token. appauth mints those tokens with its own client.
 package githubrest
 
 import (
@@ -96,7 +95,11 @@ func (c Client) call(ctx context.Context, method, url string, body []byte, into 
 	}
 	if response.StatusCode < 200 || response.StatusCode > 299 {
 		path, _, _ := strings.Cut(strings.TrimPrefix(url, c.API), "?")
-		return "", &Answer{Method: method, Path: path, Status: response.StatusCode, Body: strings.TrimSpace(string(answer))}
+		// GitHub answers a rate limit with a 429, or with a 403 carrying x-ratelimit-remaining: 0 or
+		// a retry-after, the rule appauth's transient reads token mints by.
+		rateLimited := response.StatusCode == http.StatusTooManyRequests || response.StatusCode == http.StatusForbidden &&
+			(response.Header.Get("X-RateLimit-Remaining") == "0" || response.Header.Get("Retry-After") != "")
+		return "", &Answer{Method: method, Path: path, Status: response.StatusCode, Body: strings.TrimSpace(string(answer)), RateLimited: rateLimited}
 	}
 	if into == nil {
 		return nextPage(response.Header.Get("Link")), nil
@@ -116,12 +119,14 @@ func nextPage(link string) string {
 }
 
 // Answer is a GitHub REST answer other than 2xx: the request's method and path (its query left
-// out), GitHub's HTTP status, and the body GitHub sent with it.
+// out), GitHub's HTTP status, the body GitHub sent with it, and whether it is a rate limit, which
+// every further call on the same token meets until the limit resets.
 type Answer struct {
-	Method string
-	Path   string
-	Status int
-	Body   string
+	Method      string
+	Path        string
+	Status      int
+	Body        string
+	RateLimited bool
 }
 
 func (a *Answer) Error() string {

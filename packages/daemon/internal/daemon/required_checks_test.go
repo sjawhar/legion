@@ -154,3 +154,50 @@ func TestAnUnreadableRulesetLeavesTheRoundUndecided(t *testing.T) {
 		t.Fatalf("after the next pass read the set the issue is in %s, want retro", got)
 	}
 }
+
+// A rate-limit answer ends the pass: every further read on the installation meets the same limit,
+// and the panes share it, so the pass reads no other pull request until the next one. Any other
+// refusal skips only the pull request it answered. The stand-in refuses every read; two open pull
+// requests are recorded.
+func TestARateLimitAnswerEndsTheRequiredChecksPass(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		status  int
+		headers map[string]string
+		reads   int64
+	}{
+		{"429", http.StatusTooManyRequests, nil, 1},
+		{"403 out of rate limit", http.StatusForbidden, map[string]string{"X-RateLimit-Remaining": "0"}, 1},
+		{"403 with retry-after", http.StatusForbidden, map[string]string{"Retry-After": "60"}, 1},
+		{"403 that is not a rate limit", http.StatusForbidden, map[string]string{"X-RateLimit-Remaining": "4999"}, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := isolatedOutboxPool(t)
+			seedStuckRound(t, pool)
+			if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
+				records := record.NewStore()
+				if err := records.PutIssue(context.Background(), tx, record.Issue{Key: "CAPTURE-2", Tree: "CAPTURE-2", Project: "CAPTURE", Title: "second",
+					Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "V"}); err != nil {
+					return err
+				}
+				return records.PutPullRequest(context.Background(), tx, record.PullRequest{State: record.PullRequestOpen, Issue: "CAPTURE-2",
+					Repo: "acme/widgets", Number: 87, Branch: "legion/CAPTURE-2", HeadSHA: "second"})
+			}); err != nil {
+				t.Fatalf("seed a second open pull request: %v", err)
+			}
+			var reads atomic.Int64
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				reads.Add(1)
+				for name, value := range tc.headers {
+					w.Header().Set(name, value)
+				}
+				http.Error(w, `{"message":"refused"}`, tc.status)
+			}))
+			defer server.Close()
+			requiredRuntime(pool, server.URL, quietLogger()).readRequiredChecks(context.Background())
+			if got := reads.Load(); got != tc.reads {
+				t.Fatalf("the pass read GitHub %d times, want %d", got, tc.reads)
+			}
+		})
+	}
+}

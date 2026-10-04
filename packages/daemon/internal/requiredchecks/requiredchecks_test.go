@@ -38,3 +38,24 @@ func TestRequiredReadsEveryPageOfTheBranchsRules(t *testing.T) {
 		t.Fatalf("Required = %#v, %v; want the rule on page 2, pr-checks-result", required, err)
 	}
 }
+
+// A branch GitHub calls protected, answered with no protection summary, is a read that failed, not
+// a branch that requires nothing: reading it as none would fail open, and the workflow would judge
+// the head with no required check at all.
+func TestRequiredRefusesAProtectedBranchWithNoProtectionSummary(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/acme/widgets/rules/branches/main":
+			w.Write([]byte(`[]`))
+		case "/repos/acme/widgets/branches/main":
+			w.Write([]byte(`{"name":"main","protected":true}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	required, err := Required(context.Background(), githubrest.Client{Token: "token", API: server.URL + "/repos/acme/widgets"}, "main")
+	if err == nil || !strings.Contains(err.Error(), "no protection summary") {
+		t.Fatalf("Required = %#v, %v; want an error naming the missing protection summary", required, err)
+	}
+}
