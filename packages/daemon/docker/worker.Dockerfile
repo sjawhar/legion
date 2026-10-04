@@ -78,11 +78,13 @@ ARG CODEGRAPH_VERSION
 # *bundled* Node 24 runtime sitting beside it — fully self-contained, no system node required
 # anywhere — so this copies that platform package alone, as `/opt/codegraph` in the runtime stage.
 # Installed before any application-source COPY: it depends on nothing this checkout builds, so a
-# source change to the plugin this stage packs never invalidates this layer.
+# source change to the plugin this stage packs never invalidates this layer. The bundled Node's
+# version goes to /out/codegraph-node-version, for the notices stage to fetch that release's LICENSE.
 RUN mkdir -p /out \
     && bun add -g "@colbymchenry/codegraph@${CODEGRAPH_VERSION}" \
     && cp -a /root/.bun/install/global/node_modules/@colbymchenry/codegraph-linux-x64 /out/codegraph \
-    && /out/codegraph/bin/codegraph --version
+    && /out/codegraph/bin/codegraph --version \
+    && /out/codegraph/node --version > /out/codegraph-node-version
 COPY package.json bun.lock ./
 COPY patches patches
 COPY packages/contracts/package.json packages/contracts/package.json
@@ -149,14 +151,14 @@ RUN --mount=type=secret,id=github_token \
 # workflow builds; it is linked in so `legion version` names it, and the build refuses without it.
 FROM golang:${GO_VERSION}-alpine AS go
 WORKDIR /src
+# The notices stage's Go part: go-licenses (pinned in go-third-party-notices.sh) is built in a layer of
+# its own, before the module files, so neither a source change nor a dependency bump rebuilds it.
+COPY scripts/go-third-party-notices.sh /usr/local/bin/
+RUN go-third-party-notices.sh --install
 COPY go.work go.work.sum ./
 COPY packages/daemon/go.mod packages/daemon/go.sum packages/daemon/
 COPY packages/envoy/go.mod packages/envoy/go.sum packages/envoy/
 RUN go mod download
-# The notices stage's Go part: go-licenses (pinned in go-third-party-notices.sh) is built in a layer of
-# its own, so a source change reuses it.
-COPY scripts/go-third-party-notices.sh /usr/local/bin/
-RUN go-third-party-notices.sh --install
 COPY packages/daemon packages/daemon
 COPY packages/envoy packages/envoy
 WORKDIR /src/packages/daemon
@@ -221,7 +223,10 @@ RUN set -eu; \
 # files beside them. What this checkout builds carries notices generated from what the build included
 # (the go stage's, the packed plugin's); a prebuilt tool carries the license files its distribution
 # ships (Node's LICENSE, the AWS CLI's THIRD_PARTY_LICENSES) and those its source repository holds at
-# the pinned release, fetched here. A missing or empty one fails the build.
+# the pinned release, fetched here. jj and uv link Rust crates whose license texts neither release
+# ships, so their sections name the Cargo.lock that lists those crates. A missing or empty file fails
+# the build. The fetches depend only on the pins, so they come first, in a layer a source change
+# reuses; the assembly reads the other stages' outputs after them.
 FROM tools AS notices
 ARG BUN_VERSION
 ARG JJ_TOOL
@@ -229,16 +234,15 @@ ARG GH_TOOL
 ARG UV_VERSION
 ARG AWS_CLI_VERSION
 ARG CODEGRAPH_VERSION
-COPY scripts/assemble-third-party-notices.sh /usr/local/bin/
-COPY --from=go /out/go-notices /in/go-notices
-COPY --from=plugin /out/pi-legion-envoy/dist/THIRD_PARTY_NOTICES /in/plugin-notices
-COPY --from=toolchain /opt/node/LICENSE /in/node-LICENSE
-COPY --from=toolchain /out/licenses/aws-cli-THIRD_PARTY_LICENSES /in/aws-cli-THIRD_PARTY_LICENSES
-RUN set -eu; mkdir -p /out; \
+COPY --from=plugin /out/codegraph-node-version /in/codegraph-node-version
+RUN set -eu; \
     omp_pin="$(cat /omp-pin)"; omp_repo="${omp_pin#github:}"; omp_repo="${omp_repo%@*}"; \
     omp_tag="v${omp_pin##*@}"; \
     jj_repo="${JJ_TOOL#github:}"; jj_repo="${jj_repo%@*}"; jj_tag="v${JJ_TOOL##*@}"; \
     gh_tag="v${GH_TOOL#gh@}"; \
+    codegraph_node_tag="$(cat /in/codegraph-node-version)"; \
+    printf 'omp_repo=%s\nomp_tag=%s\njj_repo=%s\njj_tag=%s\ngh_tag=%s\ncodegraph_node_tag=%s\n' \
+      "$omp_repo" "$omp_tag" "$jj_repo" "$jj_tag" "$gh_tag" "$codegraph_node_tag" > /in/tags.env; \
     fetch() { curl -fsSL "https://raw.githubusercontent.com/$1/$2/$3" -o "/in/$4"; }; \
     fetch oven-sh/bun "bun-v${BUN_VERSION}" LICENSE.md bun-LICENSE.md; \
     fetch "$omp_repo" "$omp_tag" LICENSE omp-LICENSE; \
@@ -249,6 +253,19 @@ RUN set -eu; mkdir -p /out; \
     fetch astral-sh/uv "$UV_VERSION" LICENSE-MIT uv-LICENSE-MIT; \
     fetch aws/aws-cli "$AWS_CLI_VERSION" LICENSE.txt aws-cli-LICENSE.txt; \
     fetch colbymchenry/codegraph "v${CODEGRAPH_VERSION}" LICENSE codegraph-LICENSE; \
+    fetch nodejs/node "$codegraph_node_tag" LICENSE codegraph-node-LICENSE; \
+    crates() { \
+      curl -fsSIo /dev/null "https://raw.githubusercontent.com/$1/$2/Cargo.lock"; \
+      printf '%s links Rust crates whose license texts its release does not ship. They are the packages listed in\nhttps://github.com/%s/blob/%s/Cargo.lock, the lockfile of the release this image installs; the\nlicense of each is published with it on crates.io.\n' "$3" "$1" "$2" > "/in/$4"; \
+    }; \
+    crates "$jj_repo" "$jj_tag" jj jj-crates; \
+    crates astral-sh/uv "$UV_VERSION" uv uv-crates
+COPY scripts/assemble-third-party-notices.sh /usr/local/bin/
+COPY --from=go /out/go-notices /in/go-notices
+COPY --from=plugin /out/pi-legion-envoy/dist/THIRD_PARTY_NOTICES /in/plugin-notices
+COPY --from=toolchain /opt/node/LICENSE /in/node-LICENSE
+COPY --from=toolchain /out/licenses/aws-cli-THIRD_PARTY_LICENSES /in/aws-cli-THIRD_PARTY_LICENSES
+RUN set -eu; mkdir -p /out; . /in/tags.env; \
     assemble-third-party-notices.sh /out/THIRD_PARTY_NOTICES \
       "Third-party software in the Legion worker image, with the license of each piece. Legion's own code is under the Apache License 2.0. The Debian packages the image installs carry their terms in /usr/share/doc/<package>/copyright. npm packages installed unmodified carry their own license files beside them: the CodeGraph plugin and its dependencies under /home/legion/.omp/profiles/legion/plugins/node_modules, and the CodeGraph CLI's dependencies under /opt/codegraph/lib/node_modules." \
       "Go modules compiled into /opt/legion/bin/legion and /opt/legion/bin/agent-secrets" /in/go-notices \
@@ -257,10 +274,13 @@ RUN set -eu; mkdir -p /out; \
       "Oh My Pi, /opt/omp and the native modules it fetched into /home/legion/.omp/natives: LICENSE of github.com/${omp_repo} at ${omp_tag}" /in/omp-LICENSE \
       "Oh My Pi: THIRD-PARTY-NOTICES.txt of github.com/${omp_repo} at ${omp_tag}" /in/omp-THIRD-PARTY-NOTICES.txt \
       "jj, /usr/local/bin/jj: LICENSE of github.com/${jj_repo} at ${jj_tag}" /in/jj-LICENSE \
+      "jj: the Rust crates it links" /in/jj-crates \
       "GitHub CLI, /usr/local/bin/gh: LICENSE of github.com/cli/cli at ${gh_tag}" /in/gh-LICENSE \
       "uv and uvx, /usr/local/bin/uv and uvx: LICENSE-APACHE of github.com/astral-sh/uv at ${UV_VERSION} (uv is offered under Apache-2.0 or MIT)" /in/uv-LICENSE-APACHE \
       "uv: LICENSE-MIT of github.com/astral-sh/uv at ${UV_VERSION}" /in/uv-LICENSE-MIT \
+      "uv: the Rust crates it links" /in/uv-crates \
       "Node.js, /opt/node (with npm and corepack): the LICENSE its release archive ships" /in/node-LICENSE \
+      "Node.js ${codegraph_node_tag}, /opt/codegraph/node (the runtime the CodeGraph CLI bundles): LICENSE of github.com/nodejs/node at ${codegraph_node_tag}" /in/codegraph-node-LICENSE \
       "AWS CLI v2, /opt/aws-cli: LICENSE.txt of github.com/aws/aws-cli at ${AWS_CLI_VERSION}" /in/aws-cli-LICENSE.txt \
       "AWS CLI v2: the THIRD_PARTY_LICENSES its installer archive ships" /in/aws-cli-THIRD_PARTY_LICENSES \
       "CodeGraph CLI, /opt/codegraph: LICENSE of github.com/colbymchenry/codegraph at v${CODEGRAPH_VERSION}" /in/codegraph-LICENSE

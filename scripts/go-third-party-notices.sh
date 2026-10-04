@@ -24,9 +24,9 @@ if [ "${1-}" != --install ] && [ "$#" -lt 2 ]; then
 fi
 
 # The toolchain's own go, never a wrapper on PATH: a version manager's shim can rewrite GOBIN.
-go_cmd="$(go env GOROOT)/bin/go"
+goroot="$(go env GOROOT)"
+go_cmd="$goroot/bin/go"
 go_version="$("$go_cmd" env GOVERSION)"
-goroot="$("$go_cmd" env GOROOT)"
 
 # go-licenses runs on this machine whatever GOOS the packages target, so it is built for the host
 # (empty GOOS and GOARCH), outside any module, once per version and toolchain.
@@ -41,6 +41,8 @@ if [ "$1" = --install ]; then
 fi
 out=$1
 shift
+# Package paths hold no whitespace, so the list splits back into them.
+packages="$*"
 
 scratch="$(mktemp -d)"
 trap 'rm -rf "$scratch"' EXIT
@@ -65,18 +67,37 @@ if ! "$tool" report "$@" --template "$scratch/report.tmpl" >"$scratch/report.tsv
   exit 1
 fi
 
-# One row per module, the licenses its license file holds joined, sorted by module.
+# Each replaced module the packages compile in, and what replaces it: `go.mod`'s `replace` makes the
+# build take a module's source from another path (a fork), so that path, not the module's own, is
+# where its source is.
+# shellcheck disable=SC2086
+"$go_cmd" list -deps -f '{{with .Module}}{{with .Replace}}{{$.Module.Path}}{{"\t"}}{{.Path}}{{with .Version}}@{{.}}{{end}}{{end}}{{end}}' $packages |
+  awk 'NF' | LC_ALL=C sort -u >"$scratch/replacements.tsv"
+
+# One row per module, the licenses its license file holds joined, and the replacement of the
+# module it belongs to (the longest replaced module path that is it or a parent of it), sorted by
+# module.
 awk -F "$tab" -v OFS="$tab" '
+  FILENAME == ARGV[1] { replacement[$1] = $2; next }
   !($1 in path) { order[++n] = $1; version[$1] = $2; path[$1] = $4; licenses[$1] = $3; next }
   { licenses[$1] = licenses[$1] ", " $3 }
-  END { for (i = 1; i <= n; i++) print order[i], version[order[i]], licenses[order[i]], path[order[i]] }
-' "$scratch/report.tsv" | LC_ALL=C sort >"$scratch/modules.tsv"
+  END {
+    for (i = 1; i <= n; i++) {
+      name = order[i]; best = ""
+      for (module in replacement) {
+        if ((name == module || index(name, module "/") == 1) && length(module) > length(best)) best = module
+      }
+      print name, version[name], licenses[name], path[name], (best == "" ? "" : replacement[best] " (replaces " best ")")
+    }
+  }
+' "$scratch/replacements.tsv" "$scratch/report.tsv" | LC_ALL=C sort >"$scratch/modules.tsv"
 
 rule="$(printf '%080d' 0 | tr 0 =)"
 # A module's license file, then each NOTICE file beside it, which Apache-2.0 requires passing on,
-# each without its leading and trailing blank lines.
+# each without its leading and trailing blank lines. A replaced module names its source's path.
 section() {
   printf '\n%s\n\n%s\nLicense: %s\n' "$rule" "$1" "$2"
+  if [ -n "${4-}" ]; then printf 'Source: %s\n' "$4"; fi
   for file in "$3" "$(dirname "$3")/NOTICE" "$(dirname "$3")/NOTICE.txt" "$(dirname "$3")/NOTICE.md"; do
     [ -f "$file" ] || continue
     printf '\n--- %s ---\n\n' "$(basename "$file")"
@@ -86,10 +107,11 @@ section() {
 
 {
   echo "Third-party software compiled into the Go programs these notices ship with, with each module's license."
-  echo "Each module's source is published at the version shown under its module path."
+  echo "Each module's source is published at the version shown under its module path, or, where a"
+  echo "Source line names a replacement, under that path instead."
   section "Go standard library and runtime $go_version" "BSD-3-Clause" "$goroot/LICENSE"
-  while IFS="$tab" read -r name version licenses path; do
-    section "$name@$version" "$licenses" "$path"
+  while IFS="$tab" read -r name version licenses path replaced; do
+    section "$name@$version" "$licenses" "$path" "$replaced"
   done <"$scratch/modules.tsv"
 } >"$scratch/notices"
 

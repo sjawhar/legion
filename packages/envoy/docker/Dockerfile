@@ -39,12 +39,13 @@ FROM golang:1.26-alpine AS build
 
 WORKDIR /src
 
-COPY packages/envoy/go.mod packages/envoy/go.sum ./
-RUN go mod download
 # The image's third-party notices: go-licenses (pinned in go-third-party-notices.sh) is built in a
-# layer of its own, so a source change reuses it.
+# layer of its own, before the module files, so neither a source change nor a dependency bump
+# rebuilds it.
 COPY scripts/go-third-party-notices.sh scripts/assemble-third-party-notices.sh /usr/local/bin/
 RUN go-third-party-notices.sh --install
+COPY packages/envoy/go.mod packages/envoy/go.sum ./
+RUN go mod download
 
 COPY packages/envoy/cmd ./cmd
 COPY packages/envoy/internal ./internal
