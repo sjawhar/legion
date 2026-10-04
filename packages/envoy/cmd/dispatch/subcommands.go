@@ -12,6 +12,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/config"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
+	"github.com/sjawhar/envoy/internal/dispatch/files"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
@@ -40,6 +41,9 @@ var subcommands = []subcommand{
 	}},
 	{"census", func(ctx context.Context, _ []string, env settingValues, stdout, stderr io.Writer) int {
 		return census(ctx, env.get("DATABASE_URL"), stdout, stderr)
+	}},
+	{"backfill-files", func(ctx context.Context, args []string, env settingValues, stdout, _ io.Writer) int {
+		return backfillFiles(ctx, args, env.get("DATABASE_URL"), strings.TrimSpace(env.get("DISPATCH_FILE_STORE_BUCKET")), stdout)
 	}},
 	{"settings", func(_ context.Context, _ []string, _ settingValues, stdout, stderr io.Writer) int {
 		if err := writeSettings(stdout); err != nil {
@@ -142,6 +146,58 @@ func backfillAnchorBlocks(ctx context.Context, databaseURL string, out io.Writer
 		return 1
 	}
 	writeAnchorBlockBackfillReport(out, result)
+	return 0
+}
+
+// backfillFiles moves every uploaded file's bytes from Postgres into the bucket
+// DISPATCH_FILE_STORE_BUCKET names (files.BackfillRows), or with --verify-only reads back every file
+// already moved and checks it against its row's hash, moving nothing (files.VerifyRows). Either
+// pass can be run again at any time; the server keeps serving a row until its bytes are cleared.
+func backfillFiles(ctx context.Context, args []string, databaseURL, bucket string, out io.Writer) int {
+	verifyOnly := false
+	for _, arg := range args {
+		if arg != "--verify-only" {
+			fmt.Fprintf(out, "backfill-files: unknown argument %q; the one argument is --verify-only\n", arg)
+			return 2
+		}
+		verifyOnly = true
+	}
+	if bucket == "" {
+		fmt.Fprintln(out, "backfill-files: DISPATCH_FILE_STORE_BUCKET is required")
+		return 1
+	}
+	database, ok := openMigrated(ctx, "backfill-files", databaseURL, out)
+	if !ok {
+		return 1
+	}
+	defer database.Pool.Close()
+	store, err := files.NewS3(ctx, bucket)
+	if err != nil {
+		fmt.Fprintf(out, "backfill-files: %v\n", err)
+		return 1
+	}
+	if err := store.Healthy(ctx); err != nil {
+		fmt.Fprintf(out, "backfill-files: the bucket is not reachable: %v\n", err)
+		return 1
+	}
+	if verifyOnly {
+		report, err := files.VerifyRows(ctx, database.Pool, store, out)
+		if err != nil {
+			fmt.Fprintf(out, "backfill-files: verify: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(out, "backfill-files: verified=%d failed=%d\n", report.Checked, len(report.Failed))
+		if len(report.Failed) > 0 {
+			return 1
+		}
+		return 0
+	}
+	report, err := files.BackfillRows(ctx, database.Pool, store, out)
+	fmt.Fprintf(out, "backfill-files: moved=%d bytes=%d\n", report.Moved, report.Bytes)
+	if err != nil {
+		fmt.Fprintf(out, "backfill-files: stopped: %v\n", err)
+		return 1
+	}
 	return 0
 }
 

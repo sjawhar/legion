@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"mime"
 	"mime/multipart"
 	"net/http"
@@ -397,11 +398,23 @@ func (s *server) storeArtifact(
 		}
 	} else {
 		size := len(input.content)
+		// With a store, the object goes first: a store that refuses leaves no row behind, and a
+		// row insert that then fails leaves an object no row names, which a later upload of the
+		// same bytes reuses. The row records the hash the object is keyed by and no bytes.
+		content := input.content
+		if s.deps.Files != nil {
+			if err := s.deps.Files.Put(r.Context(), sha, input.contentType, input.content); err != nil {
+				slog.Error("dispatch: store an uploaded file", "sha256", sha, "size", size, "error", err)
+				writeError(w, "FILE_STORE_UNAVAILABLE", http.StatusBadGateway, "the file store did not accept the upload")
+				return
+			}
+			content = nil
+		}
 		if err := tx.QueryRow(r.Context(), `
 			insert into artifact_versions (artifact_id, number, content, mime, size, sha256, authors, named, summary)
 			values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 			returning number, named, summary, authors, created_at, size, mime, sha256
-		`, artifact.ID, nextNumber, input.content, input.contentType, size, sha, authors, input.summary != "", summaryValue).Scan(
+		`, artifact.ID, nextNumber, content, input.contentType, size, sha, authors, input.summary != "", summaryValue).Scan(
 			&version.Number, &version.Named, &version.Summary, &versionAuthors, &version.CreatedAt,
 			&version.Size, &version.MIME, &version.SHA256,
 		); err != nil {
@@ -661,6 +674,22 @@ func (s *server) getArtifactVersion(w http.ResponseWriter, r *http.Request) {
 	`, artifact.ID, number).Scan(&content, &contentType, &sha); err != nil {
 		s.writeHandlerError(w, err)
 		return
+	}
+	// A row holding bytes is served from the row, whatever store is configured; a row the
+	// backfill cleared names its object by hash. The headers wait for the bytes, so a store that
+	// fails answers 502 and never a 200 cut short.
+	if content == nil {
+		if s.deps.Files == nil {
+			slog.Error("dispatch: a file version holds no bytes and no file store is configured", "artifact", artifact.ID, "version", number, "sha256", sha)
+			writeError(w, "FILE_STORE_UNAVAILABLE", http.StatusServiceUnavailable, "this file's bytes are in a store this server is not configured to read")
+			return
+		}
+		content, err = s.deps.Files.Get(r.Context(), sha)
+		if err != nil {
+			slog.Error("dispatch: read a file version from the file store", "artifact", artifact.ID, "version", number, "sha256", sha, "error", err)
+			writeError(w, "FILE_STORE_UNAVAILABLE", http.StatusBadGateway, "the file store did not return this file")
+			return
+		}
 	}
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("ETag", sha)

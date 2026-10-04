@@ -101,6 +101,8 @@ var settings = []setting{
 		Description: "Bearer token Dispatch sends the secrets broker."},
 	{Name: "DISPATCH_WEB_DIST", Default: "the `packages/dispatch/web/dist` directory found from the binary's location", Required: "no",
 		Description: "Directory of the built dashboard the server serves."},
+	{Name: "DISPATCH_FILE_STORE_BUCKET", Required: "no",
+		Description: "Bucket uploaded files (images, attachments) are stored in, keyed by their SHA-256, through the AWS SDK's default credential chain. Unset, every upload's bytes stay in Postgres, as before the bucket existed."},
 	{Name: "DISPATCH_DEV_SIGNIN", Required: "no",
 		Description: "Set to `1` on a loopback-only local server to sign anyone in by email at `/auth/_dev/signin` without the sign-in pool; refused alongside any `DISPATCH_SIGNIN_*` setting."},
 	{Name: "DISPATCH_TEST_HOOKS", Required: "no",

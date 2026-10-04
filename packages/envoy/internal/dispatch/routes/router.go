@@ -33,6 +33,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
+	"github.com/sjawhar/envoy/internal/dispatch/files"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapi"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -97,7 +98,10 @@ type AppContextOptions struct {
 	// client; empty URL means the feature is off. See api.DepsInput.
 	AgentSecretsURL   string
 	AgentSecretsToken string
-	TestHooksEnabled  bool
+	// Files is the uploaded-file store main built from DISPATCH_FILE_STORE_BUCKET; nil keeps
+	// files in Postgres. See api.DepsInput.
+	Files            files.Store
+	TestHooksEnabled bool
 	// DevSignIn mounts GET /auth/_dev/signin, which issues the session cookie for any person
 	// named with no sign-in pool exchange, and makes the whole router refuse a request whose Host
 	// is not the dashboard origin. cmd/dispatch sets it from DISPATCH_DEV_SIGNIN behind its boot
@@ -147,6 +151,7 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 		Lifetime:          opts.Lifetime,
 		AgentSecretsURL:   opts.AgentSecretsURL,
 		AgentSecretsToken: opts.AgentSecretsToken,
+		Files:             opts.Files,
 		TestHooksEnabled:  opts.TestHooksEnabled,
 	})
 	if err != nil {
