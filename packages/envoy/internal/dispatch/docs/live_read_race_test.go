@@ -307,8 +307,8 @@ var typists sync.Map
 // resident, the peer's client id.
 func typeIntoDocument(t *testing.T, service *Service, serverURL, artifactID string, gap time.Duration) crdt.ClientID {
 	t.Helper()
-	peer := newDeepPeer(t, serverURL, artifactID)
-	fragment := peer.doc.GetXmlFragment(fragmentName)
+	peer := connectPeer(t, serverURL, artifactID)
+	fragment := peer.Doc.GetXmlFragment(fragmentName)
 	stopped := make(chan struct{})
 	first := make(chan struct{})
 	var wrote sync.Once
@@ -344,16 +344,16 @@ func typeIntoDocument(t *testing.T, service *Service, serverURL, artifactID stri
 					return
 				default:
 				}
-				update := docstest.Transact(peer.doc, change)
+				update := docstest.Transact(peer.Doc, change)
 				if update == nil {
 					continue
 				}
-				if err := peer.sendFrame(ygsync.EncodeUpdate(update)); err != nil {
+				if err := peer.Write(ygsync.EncodeUpdate(update)); err != nil {
 					t.Errorf("send peer update: %v", err)
 					return
 				}
 				wrote.Do(func() { close(first) })
-				keepUp(service, artifactID, peer.doc, stopped)
+				keepUp(service, artifactID, peer.Doc, stopped)
 				time.Sleep(rand.N(gap))
 			}
 		}
@@ -365,8 +365,8 @@ func typeIntoDocument(t *testing.T, service *Service, serverURL, artifactID stri
 	t.Cleanup(func() {
 		close(stopped)
 		done.Wait()
-		client := peer.doc.ClientID()
-		sent := peer.doc.StateVector().Clock(client)
+		client := peer.Doc.ClientID()
+		sent := peer.Doc.StateVector().Clock(client)
 		waitFor(t, 30*time.Second, "the room to apply the peer's last update", func() bool {
 			room := service.srv.GetDoc(artifactID)
 			return room == nil || room.StateVector().Clock(client) >= sent
@@ -395,7 +395,7 @@ func typeIntoDocument(t *testing.T, service *Service, serverURL, artifactID stri
 	waitFor(t, 10*time.Second, "the room to load", func() bool {
 		return service.srv.GetDoc(artifactID) != nil
 	})
-	return peer.doc.ClientID()
+	return peer.Doc.ClientID()
 }
 
 // A typing peer runs at most typingLead clocks of its own ahead of what the room has applied, and
