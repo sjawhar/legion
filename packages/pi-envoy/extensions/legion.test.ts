@@ -1180,10 +1180,9 @@ describe("Legion OMP extension", () => {
       issue,
       sessionId: `ses_${role}_${issue}`,
     });
-    for (const toolName of ["edit", "write", "apply_patch", "task", "hub"]) {
-      const reason = ["edit", "write", "apply_patch"].includes(toolName)
-        ? codeToolRefusal[role]
-        : undefined;
+    const codeTools = ["edit", "write", "apply_patch"];
+    for (const toolName of [...codeTools, "task", "hub"]) {
+      const reason = codeTools.includes(toolName) ? codeToolRefusal[role] : undefined;
       const result = await toolCall(
         { toolName, toolCallId: `call-${role}-${issue}-${toolName}`, input: {} },
         context

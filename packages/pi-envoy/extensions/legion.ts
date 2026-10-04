@@ -347,7 +347,7 @@ const LEGION_LOADED_MARKER = Symbol.for("legion.pi-envoy.legion-loaded");
 /** Code-mutation tools blocked for an architect session (root or sub-architect), a reviewer
  * (whose only sanctioned mutation is the final `.legion/` cleanup commit, made via `bash`), and the
  * merger (which only verifies and reports). `write` here means a real filesystem write; see
- * `isToolDeviceInvocation` for the `xd://` tool-device carve-out. No role's list holds `task`:
+ * `isToolDeviceInvocation` for the `xd://` tool-device carve-out. `task` is deliberately absent:
  * every Legion role may launch `task` subagents. */
 const CODE_MUTATION_TOOLS = ["edit", "write", "apply_patch"];
 
