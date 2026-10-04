@@ -36,7 +36,7 @@ func TestAStoredHistoryCostsAColdReadOnlyTheDocumentItLeaves(t *testing.T) {
 	spec := "Before sentinel.\n\n" + strings.Join(words, " ") + "\n"
 	for _, history := range []struct {
 		name  string
-		write func(t *testing.T, server *dispatchProcess) createdIssue
+		write func(t *testing.T, server *memoryServer) createdIssue
 		// holds reports what the compacted document should still hold beyond its text.
 		holds func(t *testing.T, marks map[string]any)
 		// live is a history whose stored bytes are the live document's, so a cold read is held to
@@ -45,7 +45,7 @@ func TestAStoredHistoryCostsAColdReadOnlyTheDocumentItLeaves(t *testing.T) {
 	}{
 		{
 			name: "five hundred 2,000-character replies to one anchored comment",
-			write: func(t *testing.T, server *dispatchProcess) createdIssue {
+			write: func(t *testing.T, server *memoryServer) createdIssue {
 				issue := server.createIssue(t, "History of replies", spec)
 				var root struct{ ID string }
 				created := server.comment(t, issue.Key, map[string]any{"body": "root", "anchor": map[string]any{"artifact": "spec", "quote": words[0]}})
@@ -69,7 +69,7 @@ func TestAStoredHistoryCostsAColdReadOnlyTheDocumentItLeaves(t *testing.T) {
 		},
 		{
 			name: "sixty-four 1 MB versions of one document",
-			write: func(t *testing.T, server *dispatchProcess) createdIssue {
+			write: func(t *testing.T, server *memoryServer) createdIssue {
 				issue := server.createIssue(t, "History of versions", "Before sentinel.\n")
 				for index := range 64 {
 					markdown := "Before sentinel.\n\n" + strings.Repeat(fmt.Sprintf("v%03d ", index), 1_000_000/5)
@@ -87,7 +87,7 @@ func TestAStoredHistoryCostsAColdReadOnlyTheDocumentItLeaves(t *testing.T) {
 		},
 		{
 			name: "thirty-two suggestions of 900 KB",
-			write: func(t *testing.T, server *dispatchProcess) createdIssue {
+			write: func(t *testing.T, server *memoryServer) createdIssue {
 				issue := server.createIssue(t, "History of suggestions", spec)
 				replacement := strings.Repeat("word ", 180_000)
 				for index := range 32 {
@@ -123,11 +123,11 @@ func TestAStoredHistoryCostsAColdReadOnlyTheDocumentItLeaves(t *testing.T) {
 
 			for _, read := range []struct {
 				name string
-				run  func(t *testing.T, server *dispatchProcess)
+				run  func(t *testing.T, server *memoryServer)
 			}{
-				{"GET /text", func(t *testing.T, server *dispatchProcess) { server.text(t, artifactID) }},
-				{"a websocket load", func(t *testing.T, server *dispatchProcess) { server.loadOverWebsocket(t, artifactID) }},
-				{"a one-word edit", func(t *testing.T, server *dispatchProcess) {
+				{"GET /text", func(t *testing.T, server *memoryServer) { server.text(t, artifactID) }},
+				{"a websocket load", func(t *testing.T, server *memoryServer) { server.loadOverWebsocket(t, artifactID) }},
+				{"a one-word edit", func(t *testing.T, server *memoryServer) {
 					if answer := server.edit(t, artifactID, map[string]any{"op": "replace", "find": "sentinel", "with": "marker"}); answer.status != http.StatusOK {
 						t.Fatalf("edit: status %d body %.300s", answer.status, answer.body)
 					}
@@ -167,7 +167,7 @@ func TestAStoredHistoryCostsAColdReadOnlyTheDocumentItLeaves(t *testing.T) {
 }
 
 // comment posts a comment on the issue as alice, and requires it stored.
-func (p *dispatchProcess) comment(t *testing.T, issue string, body map[string]any) response {
+func (p *memoryServer) comment(t *testing.T, issue string, body map[string]any) response {
 	t.Helper()
 	encoded, err := json.Marshal(body)
 	if err != nil {
@@ -181,7 +181,7 @@ func (p *dispatchProcess) comment(t *testing.T, issue string, body map[string]an
 }
 
 // kill ends the server at once, as a crash does: its shutdown runs nothing, so it compacts no room.
-func (p *dispatchProcess) kill(t *testing.T) {
+func (p *memoryServer) kill(t *testing.T) {
 	t.Helper()
 	select {
 	case <-p.exited:
