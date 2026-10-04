@@ -4,6 +4,12 @@
 
 ### Changed
 
+- `SearchResponse` carries `total`, `reachable`, `limit` and `offset`, and `dispatch_search` takes
+  `offset`; its description says each kind of content is ranked on its own and the lists merged,
+  that an issue key searched alone lists that issue first, and that each kind lists at most its
+  best `SEARCH_KIND_DEPTH` (LEGION-386, LEGION-382).
+- Added `SEARCH_KIND_DEPTH` (100), how many of its best matches each kind lists before
+  `GET /api/v1/search` merges the kinds, generated into Go as `contracts.SearchKindDepth`.
 - The `dispatch_doc_read` description says it reads an uploaded file's text at its latest or named
   version, and describes a file that is not UTF-8 text.
 - `dispatch_request_approval`'s `summary` says only what the human is approving, with no commentary
@@ -60,8 +66,10 @@
 - `LegionThreadsResolveRequest` and `LegionThreadsResolveResponse`, the body and the answer of the
   Legion daemon's `POST /legion/v1/threads/resolve`, which the reviewer pane's `legion threads
   resolve` calls: the grant and the pull request it names, then each unresolved review thread's
-  outcome, exactly one of `resolved` (on whose acceptance) or `leftOpen` (why), and `refused`, the
-  thread GitHub refused to resolve and its message, when one stopped the run (LEGION-544).
+  outcome, exactly one of `resolved` (on whose acceptance) or `leftOpen` (why), `withheld`, the
+  count of threads whose newest comment is a draft in the implement App's pending review, which the
+  answer never names, and `refused`, the thread GitHub refused to resolve and its message, when one
+  stopped the run (LEGION-544).
 - `ArtifactRebuildReport`, the answer of `POST /api/v1/artifacts/{id}/rebuild`: what the rebuild
   removed, the head it wrote, the validation error the history failed with, and `source_version`,
   the version the rebuilt document holds (its latest saved version, or the version supplied

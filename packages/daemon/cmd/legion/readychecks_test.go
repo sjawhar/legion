@@ -216,3 +216,27 @@ func TestHandoffCompleteReadyOnARepositoryWhosePlanHasNoRulesets(t *testing.T) {
 		})
 	}
 }
+
+// A pull_request concurrency group cancels an earlier, still-queued run once a newer push's run
+// for the same head's workflow starts (a `pull_request` `edited`/`synchronize` re-trigger after a
+// concurrency-group cancellation, LEGION's own pr-title.yaml among them): GitHub's check-runs API
+// documents no ordering for the list, unlike the combined-status endpoint, so the cancelled run
+// can list after the later run that actually succeeded. READY must still see the later run's
+// success rather than the cancelled run a naive "last one wins" read would keep.
+func TestHandoffCompleteReadyKeepsTheNewestCheckRunWhenGitHubListsAnOlderCancelledDuplicateLast(t *testing.T) {
+	workspace := t.TempDir()
+	t.Setenv("LEGION_ROLE", "merger")
+	t.Setenv("LEGION_JJ_PATH", fakeHandoffJJ(t, "beef"))
+	bodies := handoffDaemon(t, phase.Merging)
+	// id 5 (the later run, success) listed before id 2 (the earlier run a concurrency-group
+	// cancellation superseded) - the one ordering a "keep whichever is last" read gets wrong.
+	readyGitHub(t,
+		`{"id":5,"name":"ci","status":"completed","conclusion":"success"},`+
+			`{"id":2,"name":"ci","status":"completed","conclusion":"cancelled"}`,
+		`{"context":"legacy","state":"success"}`, "clean")
+	var out, errb bytes.Buffer
+	code := run(context.Background(), []string{"legion", "handoff", "complete", "--workspace", workspace, "--summary", "gate facts hold", "--ready"}, &out, &errb)
+	if code != 0 || len(*bodies) != 1 {
+		t.Fatalf("READY = %d, daemon read %v, stderr %q; want it posted since the newest \"ci\" run (id 5) succeeded", code, *bodies, errb.String())
+	}
+}

@@ -9,13 +9,12 @@ project's architecture model, or list or audit a project's backlog.
 When you finish an issue, or are told to work on the next thing, take the top ready issue of the
 whole backlog, across every project: status `todo`, highest priority first, then board rank. There
 are no areas: a standing role, a product owner and a lane each take the top issue like everyone
-else (Sami's ruling). `todo` means ready: specced, unblocked, and waiting on neither a deploy nor a
+else. `todo` means ready: specced, unblocked, and waiting on neither a deploy nor a
 decision. An issue that waits on one belongs in `backlog`, with what it waits on said on the issue.
 
 Hold at most three issues in flight (`in_progress`, `testing`, `needs_review` or `retro`), of any
-kind (Sami's ruling). The limit is per agent and has nothing to do with the week's priorities
-(Sami, correcting a reading that tied the two together): the priorities decide only what you pull
-next. Past three:
+kind. The limit is per agent and has nothing to do with the week's priorities: the priorities
+decide only what you pull next. Past three:
 push any unfinished work, say where in one comment on the issue, move it to `backlog` and clear
 its route. Each issue counts on its own; a child does not ride under its parent's slot.
 In-flight issues with no owner at all go
@@ -27,7 +26,7 @@ writes on the root of a tree Legion is running is set back and the tree's archit
 it; only a person in the dashboard, or `legion status`, stops that tree. On an issue under one, a
 status that takes it out of the flow parks that issue and stops its workers.
 
-One agent keeps the backlog's order against those priorities, with Sami, as he ruled. Setting an
+One agent keeps the backlog's order against those priorities. Setting an
 issue's priority stays yours ([Priority is yours to set](#priority-is-yours-to-set)); reordering
 the board does not.
 When the top of the backlog looks wrong, or a priority's next step is not yet a ready issue,
@@ -118,7 +117,7 @@ when work has started.
 Priority is the coarse bucket a backlog is read by: `0` is P0, the highest, through `3`, P3, the
 lowest, and `null` clears it. Agents set it (`dispatch://LEGION/artifact/issue-status-conventions-md`)
 — on creation, and on a grooming pass over issues that have none — and say what you set and why;
-Sami overrides anything he disagrees with from the dashboard. A closed
+the human overrides anything they disagree with from the dashboard. A closed
 issue takes only `rank`, `components`, and a reopening `status` (any status but `done`);
 everything else, `priority` included, waits for the reopen (`409 ISSUE_CLOSED`). So reopen it
 first, then set the priority — the two cannot go in one call. `rank` itself is not a tool field:
@@ -193,6 +192,16 @@ The audit finds four shapes:
 
 Run the audit as a step of a coordinator's loop, at each checkpoint, not as a habit: these shapes
 are found by running the check, not by noticing them.
+
+## Search paging
+
+`skill://dispatch` sends you here when a `dispatch_search` page is not enough: more hits remain,
+or a kind runs out before the page does.
+
+A page holds `limit` hits (20 by default, 50 at most); the first line names how many match
+(`showing 1-20 of 312`), and, while more can be reached, the last line names the next `offset`.
+Each kind lists at most its best 100, so when the result says the rest cannot be paged to, narrow
+the query or name a `project`.
 
 ## Syncing a project's architecture model
 
