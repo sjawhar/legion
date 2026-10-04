@@ -562,27 +562,31 @@ subscription never delivers).
 
 ### Anatomy of a Sandbox pod
 
-Each object of a claim carries `legion.dev/project`, `legion.dev/tree`, `legion.dev/issue` and
-`legion.dev/role` (`names.go`). The pod template (`manifest.go`) has two init containers and one
-main container:
+Each Sandbox carries `legion.dev/project`, `legion.dev/tree` and `legion.dev/issue` (`names.go`):
+one Sandbox per issue, shared by every role that works it. The pod template (`manifest.go`) has
+two init containers and one container per role (`claim.Roles`: architect, planner, implementer,
+tester, reviewer, merger), named for its role:
 
 1. `workspace-fetch` clones the repository into the pod's feed. It is the only process that holds
    the provisioning token ([Trust model](#trust-model-the-provisioning-token)).
 2. `workspace-init` provisions the tree volume's shared clone and the issue's jj workspace from the
    read-only feed.
-3. `worker` runs `legion worker-shim --connect tcp://<bind>:<worker_stream_port>
-   --boot-token-file …` with Oh My Pi under it.
+3. Each role container runs `legion launcher --connect tcp://<bind>:<worker_stream_port>
+   --token-file … --sandbox <name> --role <role> --private-dir …`: PID 1 of that role, starting and
+   stopping the role's `legion worker-shim` (Oh My Pi) child on the daemon's command, never a worker
+   process of its own.
 
-The tree volume is the root Sandbox's `volumeClaimTemplates` entry, and each worker Sandbox
-references that claim by name. The main container mounts it at `/legion`, and again at Oh My Pi's
-sessions directory through a `subPath`, so a session survives its pod. The claim's Secret is
-projected twice: its boot half into the worker, read-only, and its provisioning half into
-`workspace-fetch` alone. The operator's volumes and mounts join the worker's, and the providers
-Secret's configured keys when there are any, with its `NATS_NKEY_SEED` key when the daemon has a
-NATS nkey seed. State, `/tmp` and the XDG config home are in-memory.
+The tree volume is the root Sandbox's `volumeClaimTemplates` entry, and each issue's Sandbox
+references that claim by name. Every role container mounts it at `/legion`, and again at Oh My Pi's
+sessions directory through a `subPath`, so a session survives its pod. Each role's Secret is
+projected twice: its boot half into that role's own container, read-only, and the provisioning half
+into `workspace-fetch` alone. The operator's volumes and mounts join every role container's, and the
+providers Secret's configured keys when there are any, with its `NATS_NKEY_SEED` key when the daemon
+has a NATS nkey seed. Each role's private and state directories, `/tmp` and the XDG config home are
+in-memory, one set per role so no role's launcher or state collides with a sibling's.
 
-The worker is told `UV_PYTHON_INSTALL_DIR=/legion/uv/python/<issue>` (the issue key as a DNS label),
-`UV_CACHE_DIR=/legion/uv/cache` and `UV_LINK_MODE=copy`. uv keeps the Pythons it installs and its cache
+Every role container is told `UV_PYTHON_INSTALL_DIR=/legion/uv/python/<issue>` (the issue key as a
+DNS label), `UV_CACHE_DIR=/legion/uv/cache` and `UV_LINK_MODE=copy`. uv keeps the Pythons it installs and its cache
 on the tree volume beside the workspaces, so a project's `.venv`, which links to its interpreter there,
 runs as it is in every later pod of the issue, and every pod of the tree reuses the packages an earlier
 pod downloaded. uv's own file locks stop at the pod (a gVisor pod's lock reaches no other pod), so two
@@ -896,7 +900,7 @@ Four prerequisites and caveats the configuration cannot check for you:
 
 The Go coordinator's. Legion holds no model, provider or route. Everything a pod's Oh My Pi needs to
 reach a model is the operator's, and the daemon hands the same pieces to every pod it runs: each
-claim's pod and the image probe's.
+issue's pod (every role container of it alike) and the image probe's.
 
 - **`runtime.kubernetes.pod`** has four keys. `env` is variables set in the agent's container.
   `volumes` are each one `secret`, `config_map`, or `projected` source; a projected
@@ -1172,13 +1176,20 @@ the daemon, and relaunch every live root, worker, and controller. The boot log i
 each line naming an older or unrecorded `pi-legion-envoy` process identifies one process to relaunch.
 ### Volume retention
 
-Node loss reattaches the EBS volume and resumes the same OMP session. Volume loss is a whole-tree
-event: the root's exit first preserves its session record, then the next resync probes that dead,
-open tree and attempts its normal resume. A new PVC cannot contain the recorded session, so
-`workspace-init` exits 3. The daemon records `workspaceLost` and stamps every root or worker claim
-that already existed. Its replacement starts fresh from the committed issue bookmark until its own
-fresh session registers, even after the root rebuilt the shared clone; a role first created later
-uses the ordinary fresh-worker path.
+Node loss reattaches the EBS volume to a replacement node and the pod resumes where it left off.
+Volume loss — a PVC that lost the shared clone and every claim's retained session, as a fresh EBS
+volume after node loss can — is detected through the shared `workspace-init` init container, which
+every role's launcher waits behind: it expects the tree's clone (`LEGION_EXPECT_TREE_VOLUME`) once
+the launching claim resumes a session or any stored claim of the tree recorded one, and exits 3 only
+once both the clone and every retained session are gone. Under `restartPolicy: Always` a failed init
+container never turns the pod `Failed`; the kubelet leaves it `Pending` in `Init:Error` or
+`Init:CrashLoopBackOff` and keeps retrying it forever on its own. The runtime does not wait for a
+phase that will not come: `evaluate` reads the init container's current or last-terminated state as
+**Gone**, with `WorkspaceLost` true for workspace-init's exit 3, and `relaunch` replaces the
+init-failed pod outright (delete, then recreate) instead of waiting on its launchers. The daemon
+stamps every claim of the tree that already existed `workspaceLost`; each one's replacement starts
+fresh from the committed issue bookmark until its own fresh session registers, even after the new
+pod rebuilt the shared clone; a role first created later uses the ordinary fresh-worker path.
 A pre-loss worker is never downgraded to an ordinary missing-session failure. Its prompt begins: `Your workspace was recreated from
 `legion/<KEY>` because the tree's volume was lost. Anything you had not committed and pushed is
 gone. Re-read .legion and your last handoff, and reconcile before continuing.`
@@ -1224,7 +1235,11 @@ A 403 fails the spawn (or stop) naming the verb and resource, e.g. `create secre
 
 The daemon probes a pod by reading it and consulting the worker stream's live registrations:
 
-- pod not found → **dead (gone)**;
+- the Sandbox itself not found (deleted, or never created) → **dead (gone)**, distinct from a
+  present Sandbox with no pod;
+- pod not found (the Sandbox is present, with no pod of its own) → **dead (gone)**, naming the
+  Sandbox's operating mode, its `Suspended` condition if any, and any same-named pod that is not
+  this Sandbox's (a stranger holding the name);
 - pod present but its uid is not the recorded one → **dead (not the recorded process)**; the stop that
   follows refuses to delete it (the delete carries the recorded uid as a precondition, and Kubernetes
   answers 409), so a stranger wearing a reused name is never destroyed;
@@ -1241,13 +1256,28 @@ The daemon probes a pod by reading it and consulting the worker stream's live re
   container to the deadline plus one more interval (default 480 s), and `workspace-init` passes it to
   `flock --timeout`, so the init container never gives up on a wait the daemon would still tolerate,
   whatever the deployment configures (a manual `legion workspace-init` without the variable waits 900 s);
-- `Pending` with the init container **terminated non-zero** → **dead (gone)**, its log tail quoted
-  (`restartPolicy: Never` turns the pod `Failed` moments later);
+- the init container **terminated non-zero** (its current state, or `LastTerminationState` once the
+  kubelet has already restarted it) → **dead (gone)**, its log tail quoted, `WorkspaceLost` set when
+  it is `workspace-init` exiting 3; under `restartPolicy: Always` the pod never turns `Failed` for
+  this — the kubelet leaves it `Pending` in `Init:Error`/`Init:CrashLoopBackOff` and keeps retrying
+  the container itself — so the daemon reads the failed attempt directly instead of waiting for a
+  phase that will not come, and `relaunch` replaces the pod outright rather than waiting on its
+  launchers;
 - otherwise `Pending` for longer than `worker_boot_timeout_seconds` (unscheduled, image pull, volume
   mount) → **dead (gone)**, with the pod's events quoted; the boot watchdog's existing path retires it
   and its stop deletes the pod;
-- otherwise `Pending`, or `Running` — registered stream or not (a booting or redialing shim is not
-  death; the boot watchdog decides) → **alive**;
+- the Sandbox's `Ready` condition reports `MultiplePods` or `ReconcilerError` → **unknown**: the
+  Sandbox controller itself cannot resolve the pod it owns, so nothing here can either;
+- `Pending` otherwise → **alive**;
+- `Running`: judged through the recorded role's own container, never the whole pod — a neighbour
+  role's container restart changes nothing here. No status at all for that container → **unknown**;
+  terminated → **dead (gone)**, its log tail quoted; otherwise the role's `legion launcher` must be
+  connected on the worker stream or the verdict is **unknown** (a booting or redialing launcher is
+  not death; the boot watchdog decides); once connected, its reported child generation matching the
+  recorded one is **alive**, a child of another generation is **dead (not the recorded process)**,
+  its last-reported exit matching the recorded generation is **dead (gone)**, a last exit of another
+  generation is again **dead (not the recorded process)**, and no child ever reported is
+  **dead (gone)**;
 - phase `Unknown` → **unknown**;
 - the API read failed → **alive** if the pod's stream is registered (live proof), else **unknown**.
 
