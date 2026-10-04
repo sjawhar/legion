@@ -144,7 +144,7 @@ export function dropTarget(
  */
 function placeInColumn(
   issues: readonly IssueSummary[],
-  key: string,
+  active: IssueSummary,
   targetStatus: IssueStatus,
   insertionIndex: number,
   cellPredicate: (issue: IssueSummary) => boolean,
@@ -152,11 +152,7 @@ function placeInColumn(
   isNoOp: (active: IssueSummary) => boolean,
   isVisible: (issue: IssueSummary) => boolean
 ): { issues: IssueSummary[]; rank: { before?: string; after?: string } } | undefined {
-  const active = issues.find((issue) => issue.key === key);
-  if (active === undefined) {
-    return undefined;
-  }
-  const columns = groupIssuesByStatus(issues.filter((issue) => issue.key !== key));
+  const columns = groupIssuesByStatus(issues.filter((issue) => issue.key !== active.key));
   const target = columns.find((column) => column.status === targetStatus);
   if (target === undefined) {
     return undefined;
@@ -204,7 +200,7 @@ export function moveIssue(
   }
   const placed = placeInColumn(
     issues,
-    key,
+    active,
     targetStatus,
     insertionIndex,
     () => true,
@@ -353,7 +349,7 @@ export function moveIssueToLane(
   }
   const placed = placeInColumn(
     issues,
-    key,
+    active,
     targetStatus,
     insertionIndex,
     (issue) => issue.priority === targetLane,
