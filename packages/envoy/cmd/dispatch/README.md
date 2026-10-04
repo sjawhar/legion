@@ -304,6 +304,26 @@ is `select count(*) from users` and that the report ends `census: REFUSED (1 rea
 count is its only refusal, and then rolls the release. Any other reason (a lock holder, a long
 transaction, a table over the limit) still stops the deploy.
 
+Migration `0071_search_vector_bound` creates `search_vector` and replaces the bodies of four
+search triggers' functions (documents, comments, asks and messages) so that each builds its vector
+with it ([Search](#search)). Replacing a function locks no table, and for every text whose vector
+fits, which is every row already stored, the new functions build the vector the old ones did, so
+it re-indexes nothing; its census answers `0`.
+
+Migrations `0072_issues_title_lexemes` and `0073_issues_title_lexemes_backfill` store each issue
+title's lexemes, which the duplicate-title check reads ([Search](#search)). `0072` adds
+`issues.title_lexemes` with the constant default `{}`, a catalog change that rewrites no row, so it
+holds `issues` `ACCESS EXCLUSIVE` for milliseconds (3 ms on 2,905 issues with production's titles),
+creates `title_lexemes(title)`, the one definition of a title's lexemes, and has the issues trigger
+build `search` with `search_vector` and fill the column on every insert and every retitle. `0073`
+fills it on every issue stored before, under `issues` `EXCLUSIVE` taken before it writes a row: a
+read does not wait, while every write of an issue's row, and of a row that references an issue,
+waits until it commits (0.58 s on those issues at load 85). The update alone locked each issue's
+row in the order rows lie on disk, which a reparent, locking its two issues in key order, could
+cross: on 60,000 issues the two deadlocked (`40P01`) in each of two runs, and with the table lock
+the reparent waited for the migration and committed. Neither refuses a row; both censuses answer
+`0`.
+
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a
 migration record or schema change only when an existing artifact has no owning issue. On success
@@ -483,10 +503,27 @@ limited to 1,000 characters. Search covers issue titles, the latest settled docu
 comments, asks (questions and free-text answers), and messages. Live document text takes up to
 the 2 s settle delay to appear in search results.
 
+Every trigger builds its vector with `search_vector` (0071; the issues trigger's from 0072).
+Postgres holds at most 1,048,575 bytes of lexemes and positions in one vector. Prose stays far
+below that, since its words repeat, but text of words no two alike passes it well inside a
+document's 1 MiB: about 700 KB of `w000001 w000002 …`, or 475 KB of UUIDs. `search_vector` indexes a
+text whole when its vector fits, and otherwise the longest of its first half, quarter, eighth, …
+that fits, cut between two words, so such a document, comment, ask or message is found by the whole
+words in that opening part and not by the words after it; a text with no whitespace before the cut
+is found by none of its own. An issue's key is always indexed whole.
+
 Search snippets are escaped text with only server-inserted `<mark>` elements around matches. Native
 issue creation rejects a title that near-duplicates an existing issue in the same project with
 `409 POSSIBLE_DUPLICATE` and up to five candidates; `force` bypasses that check, and external
-references skip it.
+references skip it. An issue title is at most 1,000 characters (`contracts.IssueTitleMax`, UTF-16
+units after trimming), on creation and on a retitle, and a longer one is `400 CAP_EXCEEDED` before
+the duplicate check runs. The check compares the new title's lexemes with those of every other
+title in the project, read from `issues.title_lexemes`, which the issues trigger fills with
+`title_lexemes(title)` (0072), the function the check calls for the new title, so a creation parses
+one title; a candidate's snippet marks the words its title shares with the new one, and the
+`POSSIBLE_DUPLICATE` message quotes a candidate's whole title. The cap bounds what one stored title
+adds to every later creation in its project, and how long that message can be: beside 2,000 stored
+titles at the cap, a check takes 56–95 ms, where parsing every title as it ran took 2.1–7.6 s.
 
 To measure search latency against a restored corpus copy, run:
 
@@ -542,10 +579,11 @@ Dispatch uses cookie identity through the sign-in pool.
 | `/api/v1/users` | GET | cookie or trusted header (human only) | Everyone who has signed in, as `{users: [{login}]}` sorted by email — the assignee picker's options. |
 | `/api/v1/whoami` | GET | cookie, trusted header, or bearer | Who the server takes the caller for: `{kind: "user", login}` for a person (`login` their lowercase email), `{kind: "agent", owner, service}` for a bearer (`owner` is a personal token's owner by lowercase email, null for the shared token; `service` is a verified service-account token's Kubernetes subject, null for every other bearer). |
 | `/api/v1/issues?project=&status=&parent=&priority=&updated_since=&route_status=&limit=&offset=` | GET | cookie, trusted header, or bearer | List issue summaries: every matching issue as an array, or, with `limit` (1–250) or `offset` (0 or more; alone it pages 50), one page `{issues, total, limit, offset}` cut after every filter, `total` counting the issues they match. A repeated, blank, non-integer or out-of-range `limit` or `offset`, or any `cursor`, is `400 INVALID_QUERY` naming the parameter. The order is status, rank, creation time and key, so consecutive offsets cover the listing once while it does not change between reads; an issue that enters or leaves what the filters match, or whose status or rank changes, between two reads shifts rows across a page boundary, so one issue is served twice and another never. Only the unpaged array is an exact set in one read. Filters are optional; `updated_since` is RFC3339 and inclusive, matching issue changes and later issue events. `priority` repeats (`priority=0&priority=1`), each value `0`–`3` or `none` for an issue with no priority; any other value is `400 INVALID_PRIORITY`. `route_status` (`live`, `no_holder` or `unknown`; anything else is `400 INVALID_ROUTE_STATUS`) keeps the open issues whose route is in that state, whatever their priority; `live` or `no_holder` is `503 ENVOY_UNAVAILABLE` when the listener does not answer. Summaries contain `key`, `title`, `status`, `priority`, `parent`, `assignee`, `route`, `route_status`, `route_holder`, `updated_at`, `last_seq`, and `open_asks`. Every issue read (this list, `?pinned=true`, and `GET /api/v1/issues/{key}`) resolves `route_status` from one listener `GET /v1/sessions` per request, stored nowhere: `live` (a live session holds the role, or the session is live; `route_holder` names it), `no_holder` (nobody live holds the role, or the session is not live), `unknown` (the listener did not answer), or null with no route. |
-| `/api/v1/search?q=&project=&limit=` | GET | cookie, trusted header, or bearer | Full-text search over issue titles, latest document text, comments, asks, and messages; ranked results with `<mark>` snippets and SPA `href`s; `limit` 1–50 (default 20). An under-two-character query returns `400 INVALID_QUERY`; a stop-word-only query returns `200` with no results; `400 CAP_EXCEEDED` over 1,000 characters (`contracts.SearchQueryMax`, UTF-16 units after trimming), since the query rides in the URL; `400 INVALID_PROJECT` for a project that is not a project key (none searches every project); `400 INVALID_LIMIT`. |
+| `/api/v1/search?q=&project=&limit=` | GET | cookie, trusted header, or bearer | Full-text search over issue titles, latest document text, comments, asks, and messages; ranked results with `<mark>` snippets and SPA `href`s; `limit` 1–50 (default 20). An under-two-character query returns `400 INVALID_QUERY`; a stop-word-only query returns `200` with no results; `400 CAP_EXCEEDED` over 1,000 characters (`contracts.SearchQueryMax`, UTF-16 units after trimming), since the query rides in the URL; `400 INVALID_PROJECT` for a project that is not a project key (none searches every project); `400 INVALID_LIMIT`. A text whose search vector would pass Postgres's limit on one vector is found by the words in its opening part only ([Search](#search)). |
 | `/api/v1/issues/{key}/references` | GET | cookie, trusted header, or bearer | Read the issue's eight-hop artifact reference closure. An `If-None-Match` value equal to the response ETag returns `304`. |
 | `/api/v1/references?to=\|from=&kind=&since=` | GET | cookie, trusted header, or bearer | Edges of one node in the reference graph, newest first and cross-project: exactly one of `to` (backlinks) or `from` (links), each a `dispatch://` reference; `kind` filters a csv of edge kinds; `since=<events.id>` keeps mentions introduced after it (structural edges excluded). Each edge carries the other `node`, an `excerpt` (the containing block for a document mention), `created_at`, and `source_seq`. `400 INVALID_REFERENCE` / `INVALID_KIND` / `INVALID_SINCE`; `404` for a node that does not exist. |
-| `/api/v1/issues` | POST | cookie, trusted header, or bearer | Create an issue and its primary document. Omitting or leaving `spec` blank gives an empty primary document at version 1. Refuses a title that near-duplicates an issue in the project with `409 POSSIBLE_DUPLICATE` and candidates unless `force` is true; external references skip the check. A spec whose ask block breaks its content rule (`paragraph+ bullet_list?`: one or more paragraphs, then at most one bullet list, last) is `400 INVALID_ASK_BLOCK`. |
+| `/api/v1/issues` | POST | cookie, trusted header, or bearer | Create an issue and its primary document. Omitting or leaving `spec` blank gives an empty primary document at version 1. A title over 1,000 characters (`contracts.IssueTitleMax`, UTF-16 units after trimming) is `400 CAP_EXCEEDED` before the duplicate check. Refuses a title that near-duplicates an issue in the project with `409 POSSIBLE_DUPLICATE` and candidates unless `force` is true; external references skip the check. A spec whose ask block breaks its content rule (`paragraph+ bullet_list?`: one or more paragraphs, then at most one bullet list, last) is `400 INVALID_ASK_BLOCK`. |
+| `/api/v1/issues/{key}` | PATCH | cookie, trusted header, or bearer | Update an issue's `title`, `status`, `priority`, `labels`, `route`, `external_links`, `parent`, `rank`, `assignee` or `components`; `AGENTS.md` gives each field's rules. A title is trimmed, and one over 1,000 characters is `400 CAP_EXCEEDED`, as on creation. |
 | `/api/v1/issues/{key}/asks` | POST | cookie, trusted header, or bearer | Create an optionally anchored ask. An anchor is exactly `{artifact, quote, occurrence?}` for a server-written quote mark or `{artifact, mark_id}` for a mark already written by a browser. |
 | `/api/v1/issues/{key}/asks?state=` | GET | cookie, trusted header, or bearer | List an issue's asks, open and/or answered (`state`: `all` default, `open`, or `answered`). |
 | `/api/v1/asks/{id}` | GET | cookie, trusted header, or bearer | Read an ask and its reply thread. |

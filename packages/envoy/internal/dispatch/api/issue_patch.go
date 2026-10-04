@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
@@ -35,9 +36,16 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if input.Title != nil && strings.TrimSpace(*input.Title) == "" {
-		writeError(w, "INVALID_ISSUE", http.StatusBadRequest, "title must not be blank")
-		return
+	if input.Title != nil {
+		*input.Title = strings.TrimSpace(*input.Title)
+		if *input.Title == "" {
+			writeError(w, "INVALID_ISSUE", http.StatusBadRequest, "title must not be blank")
+			return
+		}
+		if length := len16(*input.Title); length > contracts.IssueTitleMax {
+			capExceeded(w, "title", length, contracts.IssueTitleMax)
+			return
+		}
 	}
 	status := ""
 	if input.Status != nil {
@@ -151,7 +159,7 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		sets = append(sets, column+" = $"+strconv.Itoa(len(args)))
 	}
 	if input.Title != nil {
-		set("title", strings.TrimSpace(*input.Title))
+		set("title", *input.Title)
 	}
 	if input.Status != nil {
 		args = append(args, status)

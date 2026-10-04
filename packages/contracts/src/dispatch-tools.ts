@@ -1,4 +1,4 @@
-import { DEFAULT_ISSUE_PAGE_LIMIT, MAX_ISSUE_PAGE_LIMIT } from "./dispatch-api";
+import { DEFAULT_ISSUE_PAGE_LIMIT, ISSUE_TITLE_MAX, MAX_ISSUE_PAGE_LIMIT } from "./dispatch-api";
 import type { SchemaApi, SchemaNode, ToolArgumentsShape } from "./tool-schema";
 
 export interface DispatchToolSpec {
@@ -239,7 +239,9 @@ export const dispatchToolSpecs = [
       `Do not use it when an existing issue already covers the work; read or update that issue instead. ${ISSUE_REFERENCE}`,
     arguments: (z) => ({
       project: z.string().describe("Project key for the new issue."),
-      title: z.string().describe("Concise issue title."),
+      title: z
+        .string({ max: ISSUE_TITLE_MAX })
+        .describe("Concise issue title, at most 1,000 characters."),
       parent: z.string().describe("Optional parent issue.").optional(),
       external: z.string().describe("Optional external issue reference.").optional(),
       force: z
@@ -301,7 +303,10 @@ export const dispatchToolSpecs = [
           "Required with status done, and only with it: why the issue is closing, at most 2,000 characters. Posted on the issue as a message before it closes."
         )
         .optional(),
-      title: z.string({ min: 1 }).describe("Replacement title.").optional(),
+      title: z
+        .string({ min: 1, max: ISSUE_TITLE_MAX })
+        .describe("Replacement title, at most 1,000 characters.")
+        .optional(),
       labels: z
         .array(z.string({ min: 1, max: 40 }), { max: 20 })
         .describe(

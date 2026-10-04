@@ -11,29 +11,30 @@ import (
 	"time"
 )
 
-// Saving a document or an issue title takes time linear in a pathological run over the tested
-// ladder sizes (LEGION-465). Before the fix Postgres's search indexing read a run of `a_` or `q_`
-// in quadratic time, and pmdoc parsed `a_b*` in nearly quadratic time. On one loaded machine,
-// before the fix and after it at the same moment, 64 KiB of `a_` saved in 46 s and 0.3 s, 128 KiB
-// of `a_b*` in 33 s and 1.3-2.1 s, an issue titled with 32 KiB of `q_` in 12 s and 0.06-0.17 s,
-// and the duplicate check against a 16 KiB title took 18-21 s and 0.12-0.31 s. Times after the
-// fix follow the runner's load, so no wall-clock bound holds on every runner; each save is timed
-// at growing sizes instead, and its growth is bounded (growsLinearly).
+// Saving a document takes time linear in a pathological run over the tested ladder sizes
+// (LEGION-465). Before the fix Postgres's search indexing read a run of `a_` or `q_` in quadratic
+// time, and pmdoc parsed `a_b*` in nearly quadratic time. On one loaded machine, before the fix
+// and after it at the same moment, 64 KiB of `a_` saved in 46 s and 0.3 s, 128 KiB of `a_b*` in
+// 33 s and 1.3-2.1 s, an issue titled with 32 KiB of `q_` in 12 s and 0.06-0.17 s, and the
+// duplicate check against a 16 KiB title took 18-21 s and 0.12-0.31 s. Times after the fix follow
+// the runner's load, so no wall-clock bound holds on every runner; each save is timed at growing
+// sizes instead, and its growth is bounded (growsLinearly).
 //
 // A ladder's first size is small enough that the request's own cost is most of its time, about
 // the same before the fix and after (1 KiB of `a_`: 39-48 ms before, 51-61 ms after); its second
 // is where the code before the fix is many times slower, so that code fails the first step by
-// several times the bound. The duplicate check's own cost is about 2 ms, which the title's
-// passes at a few hundred bytes, so its ladder starts at 64 B. The `)_` ladder deliberately stops
-// at 256 KiB: `)_` documents up to 1,048,574 bytes are accepted, while exactly 1 MiB reaches the
-// 1,048,576-item cap (TestUploadRefusesADocumentTooLargeToStore). A cap-sized `)_` save costs
-// about 1.1 GB of memory, so LEGION-481 measures it in a dedicated RSS harness instead. A title
-// has no cap of its own, and 512 KiB stands for the request's 1 MiB. `)_` saved in linear time
-// before the fix too and is held to the same growth.
+// several times the bound. The `)_` ladder deliberately stops at 256 KiB: `)_` documents up to
+// 1,048,574 bytes are accepted, while exactly 1 MiB reaches the 1,048,576-item cap
+// (TestUploadRefusesADocumentTooLargeToStore). A cap-sized `)_` save costs about 1.1 GB of memory,
+// so LEGION-481 measures it in a dedicated RSS harness instead. `)_` saved in linear time before
+// the fix too and is held to the same growth.
 //
-// Comment and message text is capped at 2,000 characters and an ask question at 800. Their
-// removed timings measured a 2,000-character `a_` comment at 51 ms before the fix and 56 ms after,
-// so their 5 s limit could only catch the settlement wait.
+// Comment and message text is capped at 2,000 characters, an ask question at 800 and an issue title
+// at 1,000 (contracts.IssueTitleMax), too short for a ladder to tell the code before the fix from
+// the code after it: their removed timings measured a 2,000-character `a_` comment at 51 ms before
+// the fix and 56 ms after. The title's ladders, and the duplicate check's against a stored title,
+// went with the title cap (TestIssueTitlesAreCappedOnCreateAndRetitle). Every one of these texts
+// is indexed through the search_text the document ladders time.
 //
 // Settlement is held off. A document's settlement holds its issue's row while it renders, so a
 // save timed while one ran would count the wait for it; and the test server's shutdown, which
@@ -67,49 +68,6 @@ func TestSavingAPathologicalBodyIsBounded(t *testing.T) {
 			})
 		})
 	}
-	// Creating an issue reads titles through the parser three ways: the duplicate check's
-	// to_tsvector over the new title and every title in the project, its ts_headline over each
-	// near-duplicate's title, and the issues trigger. Every title gets a project of its own, so
-	// no save reads the titles the ones before it stored; the duplicate check reads one stored
-	// title, whose word `q` makes it the near-duplicate its headline is drawn from.
-	projects := 0
-	project := func(t *testing.T) string {
-		t.Helper()
-		projects++
-		key := fmt.Sprintf("T%d", projects)
-		if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{"key": key, "name": key}, "alice"); response.Code != http.StatusCreated {
-			t.Fatalf("create project %s: status=%d body=%.200s", key, response.Code, response.Body.String())
-		}
-		return key
-	}
-	titled := func(t *testing.T, key string, size int) time.Duration {
-		t.Helper()
-		started := time.Now()
-		created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]any{"project": key, "title": strings.Repeat("q_", size/2)}, "alice")
-		elapsed := time.Since(started)
-		if created.Code != http.StatusCreated {
-			t.Fatalf("issue titled with %s of `q_`: status=%d body=%.200s", sizeText(size), created.Code, created.Body.String())
-		}
-		return elapsed
-	}
-	t.Run("issue title", func(t *testing.T) {
-		growsLinearly(t, "creating an issue titled with `q_`", []int{512, 32 << 10, 512 << 10}, func(size int) time.Duration {
-			return titled(t, project(t), size)
-		})
-	})
-	t.Run("duplicate check", func(t *testing.T) {
-		growsLinearly(t, "the duplicate check against a title of `q_`", []int{64, 16 << 10, 512 << 10}, func(size int) time.Duration {
-			key := project(t)
-			titled(t, key, size)
-			started := time.Now()
-			duplicate := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]any{"project": key, "title": "q"}, "alice")
-			elapsed := time.Since(started)
-			if duplicate.Code != http.StatusConflict || !strings.Contains(duplicate.Body.String(), `"code":"POSSIBLE_DUPLICATE"`) {
-				t.Fatalf("issue titled with a word of a %s title run: status=%d body=%.200s, want 409 POSSIBLE_DUPLICATE", sizeText(size), duplicate.Code, duplicate.Body.String())
-			}
-			return elapsed
-		})
-	})
 }
 
 // TestGrowsLinearlyRejectsQuadraticFinalRung proves the final-rung bound stays anchored to the

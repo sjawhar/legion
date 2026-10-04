@@ -170,6 +170,11 @@ const SearchQueryHint = "search with a short phrase of a few words, not a passag
 const MaxIssuePageLimit = 250
 const DefaultIssuePageLimit = 50
 
+// IssueTitleMax is the longest issue title, in UTF-16 units, that POST /api/v1/issues and
+// PATCH /api/v1/issues/{key} accept. Generated from ISSUE_TITLE_MAX in packages/contracts so the
+// server's refusal and the dashboard's title fields cannot drift apart.
+const IssueTitleMax = 1000
+
 // DocumentSchemaCloseCode and DocumentSchemaCloseReason close a document websocket whose room is
 // outside the Proof schema, before any sync. Generated from DOCUMENT_SCHEMA_CLOSE_CODE and
 // DOCUMENT_SCHEMA_CLOSE_REASON in packages/contracts so the server's close and the dashboard's

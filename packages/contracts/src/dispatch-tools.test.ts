@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { z } from "zod";
+import { ISSUE_TITLE_MAX } from "./dispatch-api";
 import {
   dispatchToolSchema,
   dispatchToolSpecs,
@@ -225,6 +226,21 @@ describe("dispatchToolSpecs", () => {
     expect(over.error?.issues.map((issue) => issue.message)).toEqual([
       `is 1 characters over the ${SEARCH_QUERY_MAX}-character limit (${SEARCH_QUERY_MAX + 1}/${SEARCH_QUERY_MAX}); search with a short phrase of a few words, not a passage`,
     ]);
+  });
+
+  test("issue tools accept a title at 1,000 characters and refuse one over", () => {
+    for (const [tool, args] of [
+      ["dispatch_issue", { project: "DSP" }],
+      ["dispatch_issue_update", { issue: "DSP-1" }],
+    ] as const) {
+      const schema = schemaFor(tool);
+
+      expect(schema.safeParse({ ...args, title: "x".repeat(1000) }).success).toBe(true);
+      const over = schema.safeParse({ ...args, title: "x".repeat(1001) });
+      expect(over.error?.issues.map((issue) => issue.message)).toEqual([
+        `is 1 characters over the ${ISSUE_TITLE_MAX}-character limit (1001/${ISSUE_TITLE_MAX})`,
+      ]);
+    }
   });
 
   test("dispatch_search takes a project key or none, and refuses anything else by name", () => {

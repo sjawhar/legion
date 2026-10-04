@@ -4,6 +4,10 @@
 
 ### Changed
 
+- Added `ISSUE_TITLE_MAX` (1,000), the longest issue title in UTF-16 units that
+  `POST /api/v1/issues` and `PATCH /api/v1/issues/{key}` accept, generated into Go as
+  `contracts.IssueTitleMax`; the dashboard's title fields take it as their `maxLength`
+  (LEGION-505).
 - The `dispatch_doc_read` description says it reads an uploaded file's text at its latest or named
   version, and describes a file that is not UTF-8 text.
 - `dispatch_request_approval`'s `summary` says only what the human is approving, with no commentary

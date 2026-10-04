@@ -677,6 +677,32 @@ test("IssuePage retries an unchanged failed title draft", async () => {
   }
 });
 
+test("IssuePage renders the server's reason when a title save is refused, with no Retry", async () => {
+  const { patchIssue, restore } = stubIssueApi();
+  const refusal = "title is 1 characters over the 1000-character limit (1001/1000)";
+  patchIssue.mockImplementationOnce(() =>
+    Promise.reject(new ApiError(400, { code: "CAP_EXCEEDED", error: refusal }))
+  );
+  const { unmount } = renderIssuePage();
+
+  try {
+    const title = await openTitleEditor();
+    fireEvent.change(title, { target: { value: "Renamed" } });
+    fireEvent.blur(title);
+    await waitFor(() =>
+      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { title: "Renamed" })
+    );
+
+    await screen.findByText(refusal);
+    expect(screen.queryByText("Could not update this issue.")).toBeNull();
+    // Dispatch refuses the same title every time, so nothing offers to send it again.
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+  } finally {
+    unmount();
+    restore();
+  }
+});
+
 test("IssuePage retries an unchanged failed route draft", async () => {
   const { patchIssue, restore } = stubIssueApi();
   const failedSave = Promise.withResolvers<Issue>();
