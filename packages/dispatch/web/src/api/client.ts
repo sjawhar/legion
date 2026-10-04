@@ -48,6 +48,7 @@ import type {
   IssueReferences,
   IssueSummary,
   ListUsersResponse,
+  MachineLoginsResponse,
   Message,
   MessageDelivery,
   MessageRead,
@@ -677,9 +678,9 @@ export class DispatchApiClient {
     return this.response(`/api/github/rest/${path.replace(/^\/+/, "")}`, init);
   }
 
-  /** `GET /api/v1/credential-requests?approver=me`: every request waiting on the viewer, as
-   *  the Inbox's credential-requests section lists them, or `null` when this Dispatch has no
-   *  secrets broker. */
+  /** `GET /api/v1/credential-requests?approver=me`: every request the viewer may decide - the
+   *  ones naming the viewer, and the ones any signed-in person may decide - as the Inbox's
+   *  credential-requests section lists them, or `null` when this Dispatch has no secrets broker. */
   getCredentialPending(): Promise<CredentialPendingResponse | null> {
     return this.json<CredentialPendingResponse | null>(
       pathWithQuery("/api/v1/credential-requests", { approver: "me" })
@@ -721,16 +722,35 @@ export class DispatchApiClient {
     return this.post<CredentialRecord>("/api/v1/credential-requests/machine-lookup", { code });
   }
 
-  /** `GET /api/v1/credential-grants?approver=me`: every grant the viewer approved or operates. */
+  /** `GET /api/v1/credential-grants?approver=me`: every live grant of the viewer's sessions,
+   *  automatic or approved, and every grant the viewer approved. */
   getCredentialGrants(): Promise<CredentialGrantsResponse> {
     return this.json<CredentialGrantsResponse>(
       pathWithQuery("/api/v1/credential-grants", { approver: "me" })
     );
   }
 
-  /** Revoke a grant as the signed-in viewer, its approver or its enrollment's operator. */
+  /** Revoke a grant as the signed-in viewer, its approver or its enrollment's operator. The
+   *  operator's revoke of an automatic grant also ends that session's other automatic grants of
+   *  those secrets and makes it ask before it gets them again. */
   async revokeCredentialGrant(grantId: string): Promise<void> {
     await this.response(`/api/v1/credential-grants/${pathSegment(grantId)}/revoke`, {
+      body: JSON.stringify({}),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    });
+  }
+
+  /** `GET /api/v1/machine-logins`: the machine logins the viewer approved, their own machines'
+   *  and any service's, that are unexpired or expired with a session still running. */
+  getMachineLogins(): Promise<MachineLoginsResponse> {
+    return this.json<MachineLoginsResponse>("/api/v1/machine-logins");
+  }
+
+  /** Revoke a machine login the viewer approved, expired or not: Dispatch names the viewer as the
+   *  person revoking, and every session the login enrolled ends with it. */
+  async revokeMachineLogin(credentialId: string): Promise<void> {
+    await this.response(`/api/v1/machine-logins/${pathSegment(credentialId)}/revoke`, {
       body: JSON.stringify({}),
       headers: { "Content-Type": "application/json" },
       method: "POST",

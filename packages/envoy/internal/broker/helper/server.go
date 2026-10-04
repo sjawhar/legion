@@ -262,8 +262,7 @@ func (s *Server) sign(peer *Peer, pid int, method, url string) Response {
 }
 
 // signRequest builds and signs a credential-request object naming one agent_secret
-// authorization_detail per requested name (in the shared broker contract,
-// dispatch://AGENTC-393/artifact/plan-overview-md, POST /v1/requests embeds this signed object
+// authorization_detail per requested name (POST /v1/requests embeds this signed object
 // rather than carrying "secrets"/"reason" as plain fields), for a pid resolveDescendant
 // ties to a registered session. The audience is always s.Broker.URL, never a value the peer
 // supplies: a request object's aud claim must be the broker's own public URL for the broker to
@@ -283,7 +282,7 @@ func (s *Server) signRequest(peer *Peer, pid int, names []string, reason string)
 	}
 	details := make([]record.AuthorizationDetail, len(names))
 	for i, name := range names {
-		details[i] = record.AuthorizationDetail{Type: "agent_secret", Identifier: name, Actions: []string{"inject"}}
+		details[i] = record.AuthorizationDetail{Type: record.KindAgentSecret, Identifier: name, Actions: []string{"inject"}}
 	}
 	compact, err := record.Sign(sess.Key, s.Broker.URL, details, reason, "", time.Now())
 	if err != nil {

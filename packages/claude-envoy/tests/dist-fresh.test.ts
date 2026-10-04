@@ -120,7 +120,9 @@ test("the dependency guard ignores comments and detects external module specifie
       path: "/tmp/node_modules/static-export.js",
     },
   ]
-  const matches = await findExternalDependencySpecifiers(specifiers.map(({ source }) => source).join("\n"))
+  const matches = await findExternalDependencySpecifiers(
+    specifiers.map(({ source }) => source).join("\n"),
+  )
   for (const { path } of specifiers) expect(matches).toContain(path)
 })
 
@@ -131,8 +133,7 @@ test("the dependency guard detects calls after comment-like strings", async () =
       path: "/tmp/node_modules/https.js",
     },
     {
-      source:
-        'const opener = "/*"; require("/tmp/node_modules/block.js"); const closer = "*/"',
+      source: 'const opener = "/*"; require("/tmp/node_modules/block.js"); const closer = "*/"',
       path: "/tmp/node_modules/block.js",
     },
     {
@@ -150,7 +151,7 @@ test("the dependency guard detects calls after comment-like strings", async () =
 })
 
 test("the dependency guard rejects nonliteral module specifiers", async () => {
-  const source = 'require(path); import.meta.require(path); import(path)'
+  const source = "require(path); import.meta.require(path); import(path)"
   expect(await findExternalDependencySpecifiers(source)).toEqual([
     "<non-literal require()>",
     "<non-literal import.meta.require()>",
@@ -159,7 +160,8 @@ test("the dependency guard rejects nonliteral module specifiers", async () => {
 })
 
 test("the dependency guard permits runtime builtin module specifiers", async () => {
-  const source = 'require("fs"); import("fs/promises"); import("node:fs"); import("bun:ffi"); require("bun")'
+  const source =
+    'require("fs"); import("fs/promises"); import("node:fs"); import("bun:ffi"); require("bun")'
   expect(await findExternalDependencySpecifiers(source)).toEqual([])
 })
 
@@ -172,10 +174,15 @@ test("the dependency guard rejects nonbuiltin literal module specifiers", async 
     },
     { source: 'require("zod")', path: "zod" },
     { source: 'import("./local.js")', path: "./local.js" },
-    { source: 'export { value } from "/tmp/node_modules/entry.js"', path: "/tmp/node_modules/entry.js" },
+    {
+      source: 'export { value } from "/tmp/node_modules/entry.js"',
+      path: "/tmp/node_modules/entry.js",
+    },
     { source: 'import("https://example.test/module.js")', path: "https://example.test/module.js" },
   ]
-  const matches = await findExternalDependencySpecifiers(specifiers.map(({ source }) => source).join("\n"))
+  const matches = await findExternalDependencySpecifiers(
+    specifiers.map(({ source }) => source).join("\n"),
+  )
   for (const { path } of specifiers) expect(matches).toContain(path)
 })
 

@@ -3,17 +3,16 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
-	"net/http"
-	"net/url"
 	"os"
 	"regexp"
-	"slices"
 	"strings"
 
+	"github.com/sjawhar/legion/daemon/internal/classify"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
+	"github.com/sjawhar/legion/daemon/internal/githubrest"
+	"github.com/sjawhar/legion/daemon/internal/requiredchecks"
 )
 
 // githubRemote is a GitHub repository's clone URL as a workspace's origin names it.
@@ -21,13 +20,18 @@ var githubRemote = regexp.MustCompile(`^(?:https://github\.com/|git@github\.com:
 
 // readyChecks refuses a READY whose head GitHub will not merge for its checks: every check the
 // base branch requires - its rulesets' required status checks and its branch protection's - must
-// have succeeded on the pull request's head. A head reports none of them when its push skipped CI
-// when it should not have (legion push's rule), or when the pull request conflicts with its base,
-// since GitHub starts no pull_request run for a pull request it cannot merge; it is refused here,
-// naming the head, the check and which of the two GitHub shows, rather than left for GitHub to
-// block the human merge.
+// have succeeded on the pull request's head, and every workflow its rulesets require must have a
+// run for the head that succeeded (requiredchecks.Required, requiredchecks.Workflows), judged by
+// the rule the workflow's checks verdict judges by too (classify.Judge). A head reports none of
+// them when its push skipped CI when it should not have (legion push's rule), or when the pull
+// request conflicts with its base, since GitHub starts no pull_request run for a pull request it
+// cannot merge; it is refused here, naming the head, the check or workflow, and the conflict once
+// GitHub shows it, rather than left for GitHub to block the human merge. A required workflow
+// another repository defines (an organization ruleset can require one) never matches a run here,
+// since a run is matched in the repository that defines the workflow and belongs to the one it ran
+// for; its refusal names that repository instead.
 //
-// A base branch that requires no check has nothing to refuse, and READY is published. It says so
+// A base branch that requires nothing has nothing to refuse, and READY is published. It says so
 // on stdout rather than reading like a head whose every required check was read and passed: a
 // private repository on the free plan can define no ruleset, so this is the ordinary state of the
 // smoke sandbox, and a merger there has no check-based gate on the head at all.
@@ -48,46 +52,74 @@ func readyChecks(ctx context.Context, workspace string, issue paneIssue, stdout 
 	if err := json.NewDecoder(response.Body).Decode(&credential); err != nil || credential.Token == "" {
 		return fmt.Errorf("the daemon returned no GitHub token")
 	}
-	github := githubREST{token: credential.Token, base: repositoryAPI(repository)}
+	github := githubrest.Client{Token: credential.Token, API: githubrest.RepositoryAPI(os.Getenv("LEGION_GITHUB_API_URL"), repository)}
 	var pull struct {
 		Head struct {
 			SHA string `json:"sha"`
 		} `json:"head"`
 		Base struct {
-			Ref string `json:"ref"`
+			Ref  string `json:"ref"`
+			Repo struct {
+				ID int64 `json:"id"`
+			} `json:"repo"`
 		} `json:"base"`
 		// MergeableState is "dirty" while the pull request conflicts with its base.
 		MergeableState string `json:"mergeable_state"`
 	}
-	if err := github.get(ctx, fmt.Sprintf("/pulls/%d", issue.PullRequest.Number), &pull); err != nil {
+	if err := github.Get(ctx, fmt.Sprintf("/pulls/%d", issue.PullRequest.Number), &pull); err != nil {
 		return err
 	}
-	required, err := requiredChecks(ctx, github, pull.Base.Ref)
+	required, err := requiredchecks.Required(ctx, github, pull.Base.Ref)
 	if err != nil {
 		return err
 	}
-	if len(required) == 0 {
+	if len(required.Checks) == 0 && len(required.Workflows) == 0 {
 		fmt.Fprintf(stdout, "[handoff] no check is required on %q of %s, so READY was published without reading the head's checks\n", pull.Base.Ref, repository)
 		return nil
 	}
-	results, err := headCheckResults(ctx, github, pull.Head.SHA)
-	if err != nil {
-		return err
+	var results map[string]string
+	if len(required.Checks) > 0 {
+		if results, err = headCheckResults(ctx, github, pull.Head.SHA); err != nil {
+			return err
+		}
+	}
+	var workflows []classify.Standing
+	if len(required.Workflows) > 0 {
+		if workflows, err = requiredchecks.Workflows(ctx, github, pull.Head.SHA, required.Workflows); err != nil {
+			return err
+		}
 	}
 	head := pull.Head.SHA
 	if len(head) > 12 {
 		head = head[:12]
 	}
-	for _, name := range required {
-		switch result, reported := results[name]; {
-		case !reported && pull.MergeableState == "dirty":
-			return fmt.Errorf("head %s of pull request #%d has no result for the required check %q: the pull request conflicts with %s, and GitHub starts no pull_request CI for a pull request it cannot merge; tell the architect", head, issue.PullRequest.Number, name, pull.Base.Ref)
-		case !reported:
-			return fmt.Errorf("head %s of pull request #%d has no result for the required check %q: its push may have skipped CI when it should not have; tell the architect", head, issue.PullRequest.Number, name)
-		case result == "pending":
-			return fmt.Errorf("the required check %q is still running on head %s of pull request #%d: wait for it to finish", name, head, issue.PullRequest.Number)
-		case result != "success":
-			return fmt.Errorf("the required check %q ended %s on head %s of pull request #%d", name, result, head, issue.PullRequest.Number)
+	number := issue.PullRequest.Number
+	// refusal is READY's refusal for one required check or workflow's standing on the head, nil when
+	// it succeeded there.
+	refusal := func(check classify.Standing, what, missing string) error {
+		switch name := check.Name; {
+		case check.Result == classify.Missing && pull.MergeableState == "dirty":
+			return fmt.Errorf("head %s of pull request #%d has %s the %s %q: the pull request conflicts with %s, and GitHub starts no pull_request CI for a pull request it cannot merge; tell the architect", head, number, missing, what, name, pull.Base.Ref)
+		case check.Result == classify.Missing:
+			return fmt.Errorf("head %s of pull request #%d has %s the %s %q: its push may have skipped CI when it should not have, or the pull request conflicts with %s and GitHub started no pull_request CI for it; tell the architect", head, number, missing, what, name, pull.Base.Ref)
+		case check.Result == classify.Pending:
+			return fmt.Errorf("the %s %q is still running on head %s of pull request #%d: wait for it to finish", what, name, head, number)
+		case check.Red():
+			return fmt.Errorf("the %s %q ended %s on head %s of pull request #%d", what, name, check.Result, head, number)
+		}
+		return nil
+	}
+	for _, check := range classify.Judge(required.Checks, results) {
+		if err := refusal(check, "required check", "no result for"); err != nil {
+			return err
+		}
+	}
+	for i, workflow := range workflows {
+		if defined := required.Workflows[i].RepositoryID; workflow.Result == classify.Missing && defined != pull.Base.Repo.ID {
+			return fmt.Errorf("the required workflow %q is defined in repository %d, not in pull request #%d's own (%d): Legion matches a workflow's runs only in the repository that defines it, so it found no run of it on head %s and cannot confirm it passed; tell the architect", workflow.Name, defined, number, pull.Base.Repo.ID, head)
+		}
+		if err := refusal(workflow, "required workflow", "no run of"); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -113,83 +145,22 @@ func workspaceRepository(workspace string) (ghrepo.Repository, error) {
 	return ghrepo.Repository{}, fmt.Errorf("the workspace has no origin remote")
 }
 
-// requiredChecks is every check name base requires: the required status checks of the rulesets
-// that apply to it, and of its branch protection. A repository whose plan has no rulesets has none
-// of the first (rulesetsUnavailable).
-func requiredChecks(ctx context.Context, github githubREST, base string) ([]string, error) {
-	// A branch name's slashes stay path segments, as GitHub's branch routes take them.
-	branch := strings.ReplaceAll(url.PathEscape(base), "%2F", "/")
-	var rules []struct {
-		Type       string `json:"type"`
-		Parameters struct {
-			RequiredStatusChecks []struct {
-				Context string `json:"context"`
-			} `json:"required_status_checks"`
-		} `json:"parameters"`
+// headCheckResults is each check and commit status reported on sha, by name: success, pending, or
+// the failing conclusion or state (classify.Judge's results). A check run that ended neutral or
+// skipped counts as a success, as GitHub counts it for a required check.
+func headCheckResults(ctx context.Context, github githubrest.Client, sha string) (map[string]string, error) {
+	type run struct {
+		Name       string `json:"name"`
+		Status     string `json:"status"`
+		Conclusion string `json:"conclusion"`
 	}
-	if err := github.get(ctx, "/rules/branches/"+branch, &rules); err != nil && !rulesetsUnavailable(err) {
+	runs, err := githubrest.GetListPages[run](ctx, github, "/commits/"+sha+"/check-runs", "check_runs")
+	if err != nil {
 		return nil, err
 	}
-	var protected struct {
-		Protection struct {
-			RequiredStatusChecks struct {
-				Contexts []string `json:"contexts"`
-				Checks   []struct {
-					Context string `json:"context"`
-				} `json:"checks"`
-			} `json:"required_status_checks"`
-		} `json:"protection"`
-	}
-	if err := github.get(ctx, "/branches/"+branch, &protected); err != nil {
-		return nil, err
-	}
-	var names []string
-	for _, rule := range rules {
-		if rule.Type != "required_status_checks" {
-			continue
-		}
-		for _, check := range rule.Parameters.RequiredStatusChecks {
-			names = append(names, check.Context)
-		}
-	}
-	names = append(names, protected.Protection.RequiredStatusChecks.Contexts...)
-	for _, check := range protected.Protection.RequiredStatusChecks.Checks {
-		names = append(names, check.Context)
-	}
-	slices.Sort(names)
-	return slices.Compact(names), nil
-}
-
-// headCheckResults is each check and commit status reported on sha, by name: "success", "pending",
-// or the failing conclusion or state. A check run that ended neutral or skipped counts as a
-// success, as GitHub counts it for a required check.
-func headCheckResults(ctx context.Context, github githubREST, sha string) (map[string]string, error) {
 	results := map[string]string{}
-	for page := 1; ; page++ {
-		var runs struct {
-			TotalCount int `json:"total_count"`
-			CheckRuns  []struct {
-				Name       string `json:"name"`
-				Status     string `json:"status"`
-				Conclusion string `json:"conclusion"`
-			} `json:"check_runs"`
-		}
-		if err := github.get(ctx, fmt.Sprintf("/commits/%s/check-runs?per_page=100&page=%d", sha, page), &runs); err != nil {
-			return nil, err
-		}
-		for _, run := range runs.CheckRuns {
-			switch {
-			case run.Status != "completed":
-				results[run.Name] = "pending"
-			case run.Conclusion == "success" || run.Conclusion == "neutral" || run.Conclusion == "skipped":
-				results[run.Name] = "success"
-			default:
-				results[run.Name] = run.Conclusion
-			}
-		}
-		if len(runs.CheckRuns) == 0 || page*100 >= runs.TotalCount {
-			break
-		}
+	for _, run := range runs {
+		results[run.Name] = classify.RunResult(run.Status, run.Conclusion)
 	}
 	var combined struct {
 		Statuses []struct {
@@ -197,65 +168,11 @@ func headCheckResults(ctx context.Context, github githubREST, sha string) (map[s
 			State   string `json:"state"`
 		} `json:"statuses"`
 	}
-	if err := github.get(ctx, fmt.Sprintf("/commits/%s/status?per_page=100", sha), &combined); err != nil {
+	if err := github.Get(ctx, fmt.Sprintf("/commits/%s/status?per_page=100", sha), &combined); err != nil {
 		return nil, err
 	}
 	for _, status := range combined.Statuses {
 		results[status.Context] = status.State
 	}
 	return results, nil
-}
-
-// repositoryAPI is the REST base of a repository: LEGION_GITHUB_API_URL (tests), else api.github.com.
-func repositoryAPI(repository ghrepo.Repository) string {
-	endpoint := os.Getenv("LEGION_GITHUB_API_URL")
-	if endpoint == "" {
-		endpoint = "https://api.github.com"
-	}
-	return strings.TrimRight(endpoint, "/") + "/repos/" + repository.String()
-}
-
-// githubREST reads one repository's GitHub REST API with an installation token.
-type githubREST struct{ token, base string }
-
-func (g githubREST) get(ctx context.Context, path string, into any) error {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, g.base+path, nil)
-	if err != nil {
-		return err
-	}
-	request.Header.Set("Authorization", "Bearer "+g.token)
-	request.Header.Set("Accept", "application/vnd.github+json")
-	response, err := http.DefaultClient.Do(request)
-	if err != nil {
-		return err
-	}
-	defer response.Body.Close()
-	body, err := io.ReadAll(response.Body)
-	if err != nil {
-		return err
-	}
-	if response.StatusCode != http.StatusOK {
-		return githubAnswer{path: path, status: response.StatusCode, body: strings.TrimSpace(string(body))}
-	}
-	return json.Unmarshal(body, into)
-}
-
-// githubAnswer is a GitHub REST answer other than 200.
-type githubAnswer struct {
-	path   string
-	status int
-	body   string
-}
-
-func (a githubAnswer) Error() string {
-	return fmt.Sprintf("GitHub answered GET %s with %d: %s", a.path, a.status, a.body)
-}
-
-// rulesetsUnavailable is GitHub's answer to the rulesets read of a private repository whose plan
-// has no rulesets: 403, its message ending "make this repository public to enable this feature"
-// (docs/solutions/legion/controller-gate-2-required-checks-live-reads.md, observed on
-// sjawhar/legion-smoke). Such a repository can define no ruleset, so no ruleset requires a check.
-func rulesetsUnavailable(err error) bool {
-	var answer githubAnswer
-	return errors.As(err, &answer) && answer.status == http.StatusForbidden && strings.Contains(answer.body, "make this repository public to enable this feature")
 }

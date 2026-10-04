@@ -193,8 +193,8 @@ func providersSecrets(cfg config.Config, lookup func(string) (string, bool)) []s
 	return nil
 }
 
-// newSecretsLogin is the daemon's agent-secrets machine login as the machines' Enroller
-// (AGENTC-393 Plan C): constructs the client from runtime.kubernetes.agent_secrets and starts its
+// newSecretsLogin is the daemon's agent-secrets machine login as the machines' Enroller:
+// constructs the client from runtime.kubernetes.agent_secrets and starts its
 // machine login on a background context at boot, logging the confirmation code exactly once —
 // pod enrollment is held until a human approves it on the Dispatch credential page. The client
 // itself is returned too, read-only, so the state route can show the login's current status

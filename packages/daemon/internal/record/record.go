@@ -4,6 +4,7 @@ package record
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -152,13 +153,15 @@ type PullRequest struct {
 	// reopened, synchronize or closed; one with no clock never lowers it): an older one is a late
 	// redelivery and changes nothing (classify.LateLifecycle).
 	HeadUpdatedAt time.Time
-	// CheckedHead is the head whose CI settlement Verdict, Failing, CheckRuns, Generation and
-	// Snapshot record: the current head, or a head the current one replaced through pushes that
-	// changed only .legion/ (a handoff push starts no CI of its own, so the code head's settlement
-	// is the head's), or an earlier head whose settlement no longer counts (classify.HeadVerdict).
-	CheckedHead     string
-	Verdict         string
+	// CheckedHead is the head whose CI settlement Failing, Cancelled, CheckRuns, Generation and
+	// Snapshot record, empty while none is recorded: the current head, or a head the current one
+	// replaced through pushes that changed only .legion/ (a handoff push starts no CI of its own,
+	// so the code head's settlement is the head's), or an earlier head whose settlement no longer
+	// counts. What the settlement comes to is the required set's to say (classify.HeadVerdict).
+	CheckedHead string
+	// Failing and Cancelled are the checks the settlement names as failed and as cancelled.
 	Failing         []string
+	Cancelled       []string
 	FixAttempts     int
 	BlockedAttempts int
 	CheckRuns       []AttemptRun
@@ -172,6 +175,18 @@ type PullRequest struct {
 	// PlannedRed is whether the newest head that changed a path outside .legion/ was the review
 	// App's (the tester's red tests): a red on it is planned, so the next head is not a fix attempt.
 	PlannedRed bool
+	// Required is the checks the pull request's base branch requires (its rulesets' required status
+	// checks and its branch protection's), as the daemon last read them from GitHub
+	// (intake.RequiredChecks). Only a required check or workflow decides the checks verdict
+	// (classify.HeadVerdict), so nil, a set never read, decides none; an empty set, with no
+	// required workflow, is a base that requires nothing, where nothing is red.
+	Required []string
+	// Workflows is each workflow the base branch's rulesets require to succeed, read with Required,
+	// and the result of its latest run on WorkflowsHead, the head the daemon read the runs of; empty
+	// when the base requires no workflow, and WorkflowsHead then too. A result stands only for the
+	// head whose settlement is recorded (classify.HeadChecks). A reopen keeps both, with Required.
+	Workflows     []RequiredWorkflow
+	WorkflowsHead string
 	// ReviewSeen is the newest deciding review (changes requested or approved) GitHub reported for
 	// the pull request: a deciding review not after it was submitted before one already processed,
 	// and records nothing. A comment decides nothing and leaves it as it is. It lasts as long as the
@@ -179,6 +194,21 @@ type PullRequest struct {
 	// is open; a new generation deletes one that is not.
 	ReviewSeen ReviewOrder
 	State      PullRequestState
+}
+
+// RequiredWorkflow is one workflow the base branch requires, named by its path, and the result of
+// its latest run on a head as the daemon read it (requiredchecks.Workflows): success, pending,
+// missing (the head has no run of it), or the conclusion it failed with.
+type RequiredWorkflow struct {
+	Path   string `json:"path"`
+	Result string `json:"result"`
+}
+
+// RequiredReadUnchanged says whether a read of what the base branch requires is what pr records:
+// names is its required check set, and workflows its required workflows' run results, read at
+// head. Nil Required is a set never read, never the same as a read one, even an empty one.
+func (pr PullRequest) RequiredReadUnchanged(names []string, workflows []RequiredWorkflow, head string) bool {
+	return pr.Required != nil && slices.Equal(pr.Required, names) && slices.Equal(pr.Workflows, workflows) && pr.WorkflowsHead == head
 }
 
 // PullRequestState is whether a pull request is open, merged, or closed unmerged.
@@ -232,6 +262,8 @@ type Store interface {
 	PullRequest(ctx context.Context, tx pgx.Tx, issue string) (*PullRequest, error)
 	PullRequestByBranch(ctx context.Context, tx pgx.Tx, repo, branch string) (*PullRequest, error)
 	PullRequestByNumber(ctx context.Context, tx pgx.Tx, repo string, number int) (*PullRequest, error)
+	// OpenPullRequests is every open pull request of the Dispatch project key project's issues.
+	OpenPullRequests(ctx context.Context, tx pgx.Tx, project string) ([]PullRequest, error)
 	PutPullRequest(ctx context.Context, tx pgx.Tx, pr PullRequest) error
 	// SessionClaimsTree says whether the agent session holds a claim in the tree.
 	SessionClaimsTree(ctx context.Context, tx pgx.Tx, tree, session string) (bool, error)

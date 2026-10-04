@@ -35,7 +35,10 @@ Apps' permissions are exactly what Legion's agents can do on GitHub:
 | **implement** (implementer, merger) | contents, pull requests, issues, actions, statuses, workflows, repository projects, organization projects | checks, metadata, packages |
 
 The implement App cannot create a check run, and a review never comes from the App that wrote the
-change. `gh api /apps/<app slug> --jq .permissions` shows what an App holds.
+change. `gh api /apps/<app slug> --jq .permissions` shows what an App holds. The daemon itself reads
+GitHub with the implement App too: every two minutes it reads each open pull request's base branch
+and the checks that branch requires (its rulesets and its branch protection), the set the merger's
+`READY` checks, since only those decide whether CI is red at a head.
 
 ## The cluster
 
@@ -99,7 +102,8 @@ What each part is for:
 
 - **`project`** is the Dispatch project key, and it must also be a key of `projects`, which maps
   each Dispatch project the daemon runs to its GitHub repository. A project may name a
-  `merge_queue_role`, a role that receives a copy of every `READY`.
+  `merge_queue_role`, a role that receives a copy of every `READY`, and a notice withdrawing it
+  when the head's own CI turns red before the merge.
 - **`bind`**, **`daemon_url`**, **`envoy_url`**, **`dispatch_url`** and every **`nats_urls`** entry
   are handed to pods, so none of them may be a loopback or unspecified address.
 - **`github_apps`**: each App takes exactly one of `private_key` (the PEM itself),
