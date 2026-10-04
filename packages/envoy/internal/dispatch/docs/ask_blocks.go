@@ -379,27 +379,87 @@ func askFingerprints(tree *pmdoc.Node, fingerprint func(*pmdoc.Node) (string, er
 	return held, err
 }
 
-// askBlockIDs collects the id of every ask block tree holds, wherever it stands: in a blockquote,
-// a list item or another typed block. It does not descend into text, which holds no block.
+// askBlockIDs collects the id of every ask block tree holds.
 func askBlockIDs(tree *pmdoc.Node) map[string]struct{} {
 	ids := make(map[string]struct{})
-	var visit func(node *pmdoc.Node)
-	visit = func(node *pmdoc.Node) {
-		if node.Type == "ask" {
-			if id, _ := node.Attrs[pmdoc.BlockIDAttr].(string); id != "" {
-				ids[id] = struct{}{}
-			}
+	walkAskBlocks(tree, func(id string) {
+		if id != "" {
+			ids[id] = struct{}{}
 		}
-		for _, child := range node.Children {
-			if child.Type != "text" {
-				visit(child)
-			}
-		}
-	}
-	if tree != nil {
-		visit(tree)
-	}
+	})
 	return ids
+}
+
+// askBlockOrder lists the id of every ask block tree holds in document order, "" for a block
+// with none.
+func askBlockOrder(tree *pmdoc.Node) []string {
+	var ids []string
+	walkAskBlocks(tree, func(id string) { ids = append(ids, id) })
+	return ids
+}
+
+// walkAskBlocks calls visit with the id of each ask block tree holds, in document order, wherever
+// it stands: in a blockquote, a list item or another typed block. It does not descend into text,
+// which holds no block.
+func walkAskBlocks(tree *pmdoc.Node, visit func(id string)) {
+	if tree == nil {
+		return
+	}
+	if tree.Type == "ask" {
+		id, _ := tree.Attrs[pmdoc.BlockIDAttr].(string)
+		visit(id)
+	}
+	for _, child := range tree.Children {
+		if child.Type != "text" {
+			walkAskBlocks(child, visit)
+		}
+	}
+}
+
+// stampedAsk is an ask block a block-id stamp gave a new id: previous, the id it had ("" for
+// none), minted, the one it has, and copied, whether another block still holds previous - a repeat
+// the stamp re-minted, a copy of the block that keeps the id.
+type stampedAsk struct {
+	previous, minted string
+	copied           bool
+}
+
+// stampedAskBlocks pairs the ask block ids of one tree before and after a block-id stamp, which
+// changes ids and nothing else, and returns each ask whose id the stamp changed.
+func stampedAskBlocks(before, after []string) []stampedAsk {
+	var held map[string]struct{}
+	var stamped []stampedAsk
+	for index, previous := range before {
+		if after[index] == previous {
+			continue
+		}
+		if held == nil {
+			held = make(map[string]struct{}, len(after))
+			for _, id := range after {
+				held[id] = struct{}{}
+			}
+		}
+		_, copied := held[previous]
+		stamped = append(stamped, stampedAsk{previous: previous, minted: after[index], copied: copied})
+	}
+	return stamped
+}
+
+// recordStampedAskBlocks records ask blocks whose ids a settlement's own stamp minted. The room's
+// update observer skips that stamp, so no update it renders introduces those ids: each is seen,
+// and keeps the author recorded for the id it replaced, unless it is a copy of the block that
+// keeps that id. The caller holds state.mu.
+func (state *roomState) recordStampedAskBlocks(stamped []stampedAsk) {
+	for _, ask := range stamped {
+		if state.askBlocks != nil {
+			state.askBlocks[ask.minted] = struct{}{}
+		}
+		if author, recorded := state.askAuthors[ask.previous]; recorded && !ask.copied {
+			state.askAuthors[ask.minted] = author
+		} else {
+			delete(state.askAuthors, ask.minted)
+		}
+	}
 }
 
 // observeAskBlocks records ids, the ask blocks the room holds after an update its observer
