@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, type Page, test } from "@playwright/test";
 
 import { baseUrl, createIssue, createProject, sessionCookieName } from "./api";
 import { holdFirstRequest } from "./editor";
@@ -27,7 +27,7 @@ test("a transient whoami failure shows a retry banner and keeps the app, not the
 
   await expect(page.getByText("Couldn't reach Dispatch.")).toBeVisible();
   await expect(page.getByRole("button", { name: "Retry" })).toBeVisible();
-  await expect(page.getByRole("link", { name: "Sign in with GitHub" })).toHaveCount(0);
+  await expect(page.getByRole("link", { name: "Sign in with Google" })).toHaveCount(0);
 
   await page.unroute("**/auth/whoami");
   await page.getByRole("button", { name: "Retry" }).click();
@@ -62,7 +62,7 @@ test("signing out revokes the session on the server and returns to the sign-in p
   expect((await whoami()).status).toBe(200);
 
   await page.getByRole("button", { name: "Sign out" }).click();
-  await expect(page.getByRole("link", { name: "Sign in with GitHub" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Sign in with Google" })).toBeVisible();
 
   // /auth/logout clears the browser's cookie, which alone would make the next whoami 401. The
   // check that cannot pass for that reason: a copy of the cookie the browser held, replayed after
@@ -154,6 +154,232 @@ test("a chunk that fails after a Download link was followed reloads the page", a
 
     await held.abort();
     await expect.poll(() => loads).toBe(2);
+  } finally {
+    await context.close();
+  }
+});
+
+/** The entry chunk the page at `/` names: the module script Vite writes into index.html. */
+async function entryChunkPath(): Promise<string> {
+  const html = await (await fetch(new URL("/", baseUrl))).text();
+  const entry = /<script\b[^>]*\btype="module"[^>]*\bsrc="([^"]+)"/u.exec(html)?.[1];
+  if (entry === undefined) {
+    throw new Error(`the page names no module script: ${html}`);
+  }
+  return new URL(entry, baseUrl).pathname;
+}
+
+/**
+ * Answers the page's entry chunk 404, as a server whose deployment never built it does, whenever
+ * `missing` says so for that request (numbered from 1; it may hold the request until it answers),
+ * and counts the page's document loads and entry requests.
+ */
+async function missEntryChunk(
+  page: Page,
+  missing: (request: number) => boolean | Promise<boolean>
+) {
+  const entry = await entryChunkPath();
+  const counts = { documents: 0, entryRequests: 0 };
+  page.on("request", (request) => {
+    if (request.isNavigationRequest() && request.frame() === page.mainFrame()) {
+      counts.documents += 1;
+    }
+  });
+  await page.route(
+    (url) => url.pathname === entry,
+    async (route) => {
+      counts.entryRequests += 1;
+      if (!(await missing(counts.entryRequests))) {
+        await route.continue();
+        return;
+      }
+      await route.fulfill({
+        body: JSON.stringify({ error: "not found" }),
+        contentType: "application/json",
+        status: 404,
+      });
+    }
+  );
+  return counts;
+}
+
+// During a rolling deploy the load balancer can send a page's HTML to one server and its entry
+// chunk to another that never built it. Nothing of the app has run, so only the page itself can
+// recover: it reloads, and the next load asks for both again.
+test("a page whose entry chunk is missing once reloads and renders the app", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium", "the recovery does not depend on the layout");
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  const counts = await missEntryChunk(page, (request) => request === 1);
+
+  try {
+    await page.goto("/", { waitUntil: "commit" });
+    await expect(page.getByText("Signed in as alice")).toBeVisible();
+    expect(counts).toEqual({ documents: 2, entryRequests: 2 });
+  } finally {
+    await context.close();
+  }
+});
+
+// The entry's reload is the session's one reload, so a page whose entry chunk never loads reloads
+// once and then stays blank rather than reloading for ever.
+test("a page whose entry chunk is missing on every load reloads once and stops", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium", "the recovery does not depend on the layout");
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  const counts = await missEntryChunk(page, () => true);
+
+  try {
+    await page.goto("/", { waitUntil: "commit" });
+    await expect.poll(() => counts.entryRequests).toBe(2);
+    // Long enough for a reload the second miss started to have asked for the page again.
+    await page.waitForTimeout(1_000);
+    expect(counts).toEqual({ documents: 2, entryRequests: 2 });
+    await expect(page.locator("#root")).toBeEmpty();
+  } finally {
+    await context.close();
+  }
+});
+
+// One budget for the whole session: a page chunk's failure that already reloaded the page leaves
+// none for the entry chunk, so the two recoveries cannot hand the page back and forth.
+test("a missing entry chunk after a page chunk spent the session's reload stays", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium", "the recovery does not depend on the layout");
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Unreachable page" });
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  await page.route(/\/assets\/IssuePage-[^/]+\.js$/u, (route) => route.abort());
+  let entryMissing = false;
+  const counts = await missEntryChunk(page, () => entryMissing);
+
+  try {
+    await page.goto(`/issues/${issue.key}`, { waitUntil: "commit" });
+    // The issue page's code failed, reloaded the page once, and failed again.
+    await expect.poll(() => ({ ...counts })).toEqual({ documents: 2, entryRequests: 2 });
+    await expect(page.getByTestId("error-boundary")).toBeVisible();
+
+    entryMissing = true;
+    await page.reload({ waitUntil: "commit" });
+    await expect.poll(() => counts.entryRequests).toBe(3);
+    // Long enough for a reload the miss started to have asked for the page again.
+    await page.waitForTimeout(1_000);
+    expect(counts).toEqual({ documents: 3, entryRequests: 3 });
+    await expect(page.locator("#root")).toBeEmpty();
+  } finally {
+    await context.close();
+  }
+});
+
+// A failed download while the browser is offline is an outage, not a replaced deployment, and a
+// reload would swap the blank page for the browser's offline page.
+test("a page whose entry chunk fails while the browser is offline does not reload", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium", "the recovery does not depend on the layout");
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  await page.addInitScript(() => {
+    Object.defineProperty(Navigator.prototype, "onLine", { configurable: true, get: () => false });
+  });
+  const counts = await missEntryChunk(page, () => true);
+
+  try {
+    await page.goto("/", { waitUntil: "commit" });
+    await expect.poll(() => counts.entryRequests).toBeGreaterThan(0);
+    // Long enough for a reload the miss started to have asked for the page again.
+    await page.waitForTimeout(1_000);
+    expect(counts).toEqual({ documents: 1, entryRequests: 1 });
+  } finally {
+    await context.close();
+  }
+});
+
+// WebKit and Firefox cancel the downloads still in flight when the reader navigates away, and a
+// cancelled entry chunk fails like a missing one; a reload then would replace the reader's
+// navigation. The page counts as left from `beforeunload`, or from `pagehide` in a browser that
+// fires no `beforeunload` (iOS Safari), until it is shown again.
+for (const leaving of ["beforeunload", "pagehide"]) {
+  test(`a page whose entry chunk fails after ${leaving} stays until it is shown again`, async ({
+    browser,
+  }, testInfo) => {
+    test.skip(testInfo.project.name !== "chromium", "the recovery does not depend on the layout");
+    const context = await asUser(browser, "alice");
+    const page = await context.newPage();
+    const requested = Promise.withResolvers<void>();
+    const released = Promise.withResolvers<void>();
+    const counts = await missEntryChunk(page, async (request) => {
+      if (request > 1) {
+        return false;
+      }
+      requested.resolve();
+      await released.promise;
+      return true;
+    });
+
+    try {
+      await page.goto("/", { waitUntil: "commit" });
+      await requested.promise;
+      await page.evaluate((type) => window.dispatchEvent(new Event(type)), leaving);
+      released.resolve();
+      // Long enough for a reload the miss started to have asked for the page again.
+      await page.waitForTimeout(1_000);
+      expect(counts).toEqual({ documents: 1, entryRequests: 1 });
+
+      // Shown again (a back/forward-cache restore fires `pageshow`), the page's next failed build
+      // script reloads it.
+      await page.evaluate(() => {
+        window.dispatchEvent(new Event("pageshow"));
+        const script = document.createElement("script");
+        script.src = "/assets/index-missing.js";
+        document.head.append(script);
+      });
+      await expect(page.getByText("Signed in as alice")).toBeVisible();
+      expect(counts).toEqual({ documents: 2, entryRequests: 2 });
+    } finally {
+      await context.close();
+    }
+  });
+}
+
+// The recovery is for this build's own scripts. A script another origin serves (a browser
+// extension's, or a third party's) is not this build's, whatever its path, so its failure to load
+// neither reloads a page the reader is using nor spends the session's one reload.
+test("a script from another origin that fails under an /assets/ path leaves the page alone", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium", "the recovery does not depend on the layout");
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  await page.route("https://extension.invalid/**", (route) => route.abort());
+  const counts = await missEntryChunk(page, () => false);
+
+  try {
+    await page.goto("/");
+    await expect(page.getByText("Signed in as alice")).toBeVisible();
+    await page
+      .evaluate(
+        () =>
+          new Promise<void>((resolve) => {
+            const script = document.createElement("script");
+            script.src = "https://extension.invalid/assets/inject.js";
+            script.addEventListener("error", () => resolve());
+            document.head.append(script);
+          })
+      )
+      .catch(() => undefined);
+    // Long enough for a reload the failure started to have asked for the page again.
+    await page.waitForTimeout(1_000);
+    expect(counts).toEqual({ documents: 1, entryRequests: 1 });
+    expect(
+      await page.evaluate(() => window.sessionStorage.getItem("dispatch.reloaded-for-chunk"))
+    ).toBeNull();
   } finally {
     await context.close();
   }

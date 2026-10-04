@@ -1,15 +1,18 @@
 // Package routes assembles the Dispatch HTTP server routes.
 //
-// Authenticated humans identify through either a signed cookie or a trusted
-// proxy header. GitHub OAuth stores each allowed user's refreshable token pair
-// so the GitHub REST and GraphQL proxy can act on their behalf.
+// Authenticated people use a signed cookie issued when they sign in with Google Workspace through
+// the sign-in pool. Test and local harnesses can inject header identity. The web app's GitHub reads
+// go to GitHub as the GitHub App.
 package routes
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"html"
@@ -42,21 +45,22 @@ import (
 type AppContext struct {
 	SigningKey     string
 	WebDistDir     string
-	Users          auth.UserStore
 	Sessions       auth.SessionStore
+	People         auth.PeopleStore
 	Identity       identity.Identity
-	AllowedLogins  map[string]struct{}
 	Store          *store.Store
 	AgentToken     string
 	DefaultProject string
 	ServerURL      string
+	// SignIn is the sign-in pool's authorization code flow and SignInGroup the group a person
+	// must be in to sign in; a nil SignIn is a test/local header-identity or dev sign-in server,
+	// whose /auth/start and /auth/callback answer 503.
+	SignIn      *oidc.CodeFlow
+	SignInGroup string
 	// InsecureCookie drops the Secure attribute from every cookie the router sets, for browsers
 	// reaching Dispatch over plain http (cmd/dispatch: DISPATCH_INSECURE_COOKIE).
 	InsecureCookie bool
-	HTTPClient     auth.HTTPClient
 	apiDeps        api.Deps
-	app            *auth.AppConfig // nil ⇒ not configured
-	appMu          sync.RWMutex
 	// devSignInHost is the dashboard origin's host:port when the dev sign-in route is mounted,
 	// and empty otherwise. Only BuildAppContext sets it, from DevSignInOrigin, so no caller can
 	// turn the route on without the origin check.
@@ -69,10 +73,11 @@ type AppContext struct {
 type AppContextOptions struct {
 	SigningKey     string
 	WebDistDir     string
-	Users          auth.UserStore
 	Sessions       auth.SessionStore
+	People         auth.PeopleStore
 	Identity       identity.Identity
-	AllowedLogins  map[string]struct{}
+	SignIn         *oidc.CodeFlow
+	SignInGroup    string
 	Store          *store.Store
 	AgentToken     string
 	DefaultProject string
@@ -94,9 +99,9 @@ type AppContextOptions struct {
 	AgentSecretsURL   string
 	AgentSecretsToken string
 	TestHooksEnabled  bool
-	// DevSignIn mounts GET /auth/_dev/signin, which issues the session cookie for an allowlisted
-	// login with no GitHub exchange, and makes the whole router refuse a request whose Host is
-	// not the dashboard origin. cmd/dispatch sets it from DISPATCH_DEV_SIGNIN behind its boot
+	// DevSignIn mounts GET /auth/_dev/signin, which issues the session cookie for any person
+	// named with no sign-in pool exchange, and makes the whole router refuse a request whose Host
+	// is not the dashboard origin. cmd/dispatch sets it from DISPATCH_DEV_SIGNIN behind its boot
 	// fence; BuildAppContext refuses it for a non-loopback ServerURL.
 	DevSignIn bool
 }
@@ -106,8 +111,11 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 	if opts.SigningKey == "" {
 		return nil, fmt.Errorf("BuildAppContext: SigningKey required")
 	}
-	if opts.Users == nil {
-		return nil, fmt.Errorf("BuildAppContext: Users store required")
+	if opts.People == nil {
+		return nil, fmt.Errorf("BuildAppContext: People store required")
+	}
+	if opts.SignIn != nil && opts.SignInGroup == "" {
+		return nil, fmt.Errorf("BuildAppContext: SignIn requires a SignInGroup")
 	}
 	if opts.Identity == nil {
 		return nil, fmt.Errorf("BuildAppContext: Identity required")
@@ -126,7 +134,6 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 	apiDeps, err := api.NewDeps(api.DepsInput{
 		Store:             opts.Store,
 		Identity:          opts.Identity,
-		AllowedLogins:     opts.AllowedLogins,
 		AgentToken:        opts.AgentToken,
 		DefaultProject:    opts.DefaultProject,
 		ServerURL:         opts.ServerURL,
@@ -149,27 +156,19 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 	return &AppContext{
 		SigningKey:     opts.SigningKey,
 		WebDistDir:     opts.WebDistDir,
-		Users:          opts.Users,
 		Sessions:       opts.Sessions,
+		People:         opts.People,
 		Identity:       opts.Identity,
-		AllowedLogins:  opts.AllowedLogins,
 		Store:          opts.Store,
 		AgentToken:     opts.AgentToken,
 		DefaultProject: opts.DefaultProject,
 		ServerURL:      strings.TrimSuffix(opts.ServerURL, "/"),
+		SignIn:         opts.SignIn,
+		SignInGroup:    opts.SignInGroup,
 		InsecureCookie: opts.InsecureCookie,
 		devSignInHost:  devSignInHost,
 		apiDeps:        apiDeps,
-		app:            opts.App,
 	}, nil
-}
-
-// App returns the loaded Envoy App credentials, or nil if app.json is missing
-// or malformed. Callers must handle nil explicitly (503).
-func (ctx *AppContext) App() *auth.AppConfig {
-	ctx.appMu.RLock()
-	defer ctx.appMu.RUnlock()
-	return ctx.app
 }
 
 // Architecture is the shared architecture importer the HTTP routes use, so the
@@ -206,8 +205,7 @@ func New(ctx *AppContext) http.Handler {
 	mux.HandleFunc("GET /auth/callback", r.authCallback)
 	mux.HandleFunc("POST /auth/logout", r.authLogout)
 	mux.HandleFunc("GET /auth/whoami", r.authWhoami)
-	mux.HandleFunc("/api/github/rest/", r.apiGithubRest)
-	mux.HandleFunc("/api/github/graphql", r.apiGithubGraphql)
+	mux.HandleFunc(githubapi.Prefix, r.apiGithubRest)
 	api.Register(mux, r.ctx.apiDeps)
 	mux.HandleFunc("/", r.staticHandler)
 	if ctx.devSignInHost == "" {
@@ -220,9 +218,8 @@ func New(ctx *AppContext) http.Handler {
 // ───── auth ─────────────────────────────────────────────────────────────────
 
 func (r *router) authStart(w http.ResponseWriter, req *http.Request) {
-	app := r.ctx.App()
-	if app == nil {
-		writeError(w, http.StatusServiceUnavailable, "Envoy App not configured — set DISPATCH_APP_CLIENT_ID/_SECRET/_PEM_B64 (env) or write ~/.local/share/dispatch/app.json")
+	if r.ctx.SignIn == nil {
+		signInUnconfigured(w)
 		return
 	}
 	state, err := randomToken()
@@ -241,15 +238,16 @@ func (r *router) authStart(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	http.SetCookie(w, oauthStateCookieFor(nonce, oauthStateMaxAge, !r.ctx.InsecureCookie))
-	redirectURI := callbackURL(r.ctx.ServerURL, req)
-	target := auth.BuildAuthorizeURL(app.ClientID, redirectURI, state)
-	http.Redirect(w, req, target, http.StatusFound)
+	http.Redirect(w, req, r.ctx.SignIn.AuthURL(callbackURL(r.ctx.ServerURL, req), state, nonce), http.StatusFound)
 }
 
+// authCallback completes a sign-in the sign-in pool redirected back: it exchanges the code for
+// the person's ID token, names them by the email their Google Workspace username carries, and
+// signs in only a member of SignInGroup, keeping the pool's refresh token to confirm that
+// membership hourly.
 func (r *router) authCallback(w http.ResponseWriter, req *http.Request) {
-	app := r.ctx.App()
-	if app == nil {
-		writeError(w, http.StatusServiceUnavailable, "Envoy App not configured — set DISPATCH_APP_CLIENT_ID/_SECRET/_PEM_B64 (env) or write ~/.local/share/dispatch/app.json")
+	if r.ctx.SignIn == nil {
+		signInUnconfigured(w)
 		return
 	}
 	code, state, err := auth.ParseCallback(req)
@@ -268,113 +266,80 @@ func (r *router) authCallback(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid or expired state — start over at /auth/start")
 		return
 	}
-	tokens, err := auth.ExchangeCode(req.Context(), app.ClientID, app.ClientSecret, code, callbackURL(r.ctx.ServerURL, req), r.ctx.HTTPClient)
+	session, err := r.ctx.SignIn.Exchange(req.Context(), callbackURL(r.ctx.ServerURL, req), code, pending.nonce)
 	if err != nil {
-		slog.Warn("dispatch: oauth code exchange failed", "error", err)
-		writeError(w, http.StatusBadGateway, "code exchange failed: "+err.Error())
+		slog.Warn("dispatch: sign-in code exchange failed", "error", err)
+		writeError(w, http.StatusBadGateway, "sign-in failed: "+err.Error())
 		return
 	}
-	if _, allowed := r.ctx.AllowedLogins[strings.ToLower(tokens.GithubLogin)]; !allowed {
-		slog.Warn("dispatch: login not allowed", "login", tokens.GithubLogin)
-		writeLoginRefusedPage(w, tokens.GithubLogin)
+	email, err := identity.Person(session.Claims, r.ctx.SignInGroup)
+	if err != nil {
+		slog.Warn("dispatch: sign-in refused", "username", session.Claims.Username, "reason", err)
+		writeSignInRefusedPage(w, email, err)
 		return
 	}
-	user := &auth.User{Login: tokens.GithubLogin, Tokens: *tokens}
-	if err := r.ctx.Users.Write(req.Context(), user); err != nil {
-		slog.Error("dispatch: persist user failed", "login", user.Login, "error", err)
-		writeError(w, http.StatusInternalServerError, "persist user")
+	if err := r.ctx.People.SignIn(req.Context(), email, session.RefreshToken, time.Now()); err != nil {
+		slog.Error("dispatch: record sign-in failed", "email", email, "error", err)
+		writeError(w, http.StatusInternalServerError, "record sign-in")
 		return
 	}
-	if !r.issueSession(w, req, user.Login) {
+	if !r.issueSession(w, req, email) {
 		return
 	}
 	http.Redirect(w, req, pending.next, http.StatusFound)
 }
 
-// issueSession ensures login's session generation and sets the session cookie a sign-in issues,
-// answering 500 when the generation cannot be recorded. authCallback and authDevSignIn both mint
-// through it, so a local dev sign-in carries exactly the cookie a GitHub sign-in does.
-func (r *router) issueSession(w http.ResponseWriter, req *http.Request, login string) bool {
+// issueSession ensures the person's session generation and sets the session cookie a sign-in
+// issues, answering 500 when the generation cannot be recorded. authCallback and authDevSignIn
+// both mint through it, so a local dev sign-in carries exactly the cookie a pool sign-in does.
+func (r *router) issueSession(w http.ResponseWriter, req *http.Request, email string) bool {
 	generation := int64(0)
 	if r.ctx.Sessions != nil {
 		var err error
-		generation, err = r.ctx.Sessions.EnsureSession(req.Context(), login)
+		generation, err = r.ctx.Sessions.EnsureSession(req.Context(), email)
 		if err != nil {
-			slog.Error("dispatch: ensure session generation failed", "login", login, "error", err)
+			slog.Error("dispatch: ensure session generation failed", "email", email, "error", err)
 			writeError(w, http.StatusInternalServerError, "session generation")
 			return false
 		}
 	}
-	w.Header().Add("Set-Cookie", auth.IssueSessionCookie(login, generation, r.ctx.SigningKey, !r.ctx.InsecureCookie))
+	w.Header().Add("Set-Cookie", auth.IssueSessionCookie(email, generation, r.ctx.SigningKey, !r.ctx.InsecureCookie))
 	return true
 }
 
 func (r *router) authLogout(w http.ResponseWriter, req *http.Request) {
-	login, ok := r.login(w, req)
+	email, ok := r.login(w, req)
 	if !ok {
 		return
 	}
 	if r.ctx.Sessions != nil {
-		if err := r.ctx.Sessions.RevokeSessions(req.Context(), login); err != nil {
-			slog.Warn("dispatch: revoke sessions failed", "login", login, "error", err)
+		if err := r.ctx.Sessions.RevokeSessions(req.Context(), email); err != nil {
+			slog.Warn("dispatch: revoke sessions failed", "email", email, "error", err)
 			writeError(w, http.StatusInternalServerError, "revoke session")
 			return
 		}
 	}
-	if err := r.ctx.Users.Remove(req.Context(), login); err != nil {
-		slog.Warn("dispatch: remove user failed", "login", login, "error", err)
+	if err := r.ctx.People.End(req.Context(), email); err != nil {
+		slog.Warn("dispatch: forget the sign-in's refresh token failed", "email", email, "error", err)
 	}
 	w.Header().Set("Set-Cookie", auth.ClearSessionCookie(!r.ctx.InsecureCookie))
 	api.WriteJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 func (r *router) authWhoami(w http.ResponseWriter, req *http.Request) {
-	login, ok := r.login(w, req)
+	email, ok := r.login(w, req)
 	if !ok {
 		return
 	}
-	api.WriteJSON(w, http.StatusOK, map[string]any{"kind": "user", "login": login})
+	api.WriteJSON(w, http.StatusOK, map[string]any{"kind": "user", "login": email})
 }
 
+// apiGithubRest serves the web app's GitHub reads to a person, as the GitHub App.
 func (r *router) apiGithubRest(w http.ResponseWriter, req *http.Request) {
-	cfg, ok := r.buildProxyConfig(w, req)
-	if !ok {
+	if _, ok := r.login(w, req); !ok {
 		return
 	}
-	githubapi.ProxyREST(w, req, cfg)
-}
-
-func (r *router) apiGithubGraphql(w http.ResponseWriter, req *http.Request) {
-	cfg, ok := r.buildProxyConfig(w, req)
-	if !ok {
-		return
-	}
-	githubapi.ProxyGraphQL(w, req, cfg)
-}
-
-// requireUser resolves the request identity to its stored GitHub token pair.
-func (r *router) requireUser(w http.ResponseWriter, req *http.Request) *auth.User {
-	login, ok := r.login(w, req)
-	if !ok {
-		return nil
-	}
-	if r.ctx.devSignInHost != "" {
-		// Any loopback client can mint any allowlisted login here, so no stored token pair is
-		// used: one a GitHub sign-in stored, or one in a database another server shares.
-		writeCodeError(w, http.StatusServiceUnavailable, "github token unavailable: a dev sign-in server never uses a stored GitHub token", "GITHUB_TOKEN_UNAVAILABLE")
-		return nil
-	}
-	user, err := r.ctx.Users.Read(req.Context(), login)
-	if err != nil {
-		slog.Warn("dispatch: read user failed", "login", login, "error", err)
-		writeError(w, http.StatusInternalServerError, "read user")
-		return nil
-	}
-	if user == nil {
-		writeCodeError(w, http.StatusServiceUnavailable, "github token unavailable", "GITHUB_TOKEN_UNAVAILABLE")
-		return nil
-	}
-	return user
+	githubapi.ProxyREST(w, req, r.ctx.apiDeps.GitHub)
 }
 
 func (r *router) login(w http.ResponseWriter, req *http.Request) (string, bool) {
@@ -386,31 +351,8 @@ func (r *router) login(w http.ResponseWriter, req *http.Request) (string, bool) 
 	return login, true
 }
 
-func (r *router) buildProxyConfig(w http.ResponseWriter, req *http.Request) (*githubapi.ProxyConfig, bool) {
-	user := r.requireUser(w, req)
-	if user == nil {
-		return nil, false
-	}
-	return r.proxyConfigForUser(w, user)
-}
-
-// proxyConfigForUser builds a GitHub proxy config from an already-resolved
-// user. Returns false (writing 503) when the Envoy App credentials are absent,
-// since no per-user GitHub call can be authorized without them.
-func (r *router) proxyConfigForUser(w http.ResponseWriter, user *auth.User) (*githubapi.ProxyConfig, bool) {
-	app := r.ctx.App()
-	if app == nil {
-		writeError(w, http.StatusServiceUnavailable, "Envoy App not configured — set DISPATCH_APP_CLIENT_ID/_SECRET/_PEM_B64 (env) or write ~/.local/share/dispatch/app.json")
-		return nil, false
-	}
-	return &githubapi.ProxyConfig{
-		Tokens:       &user.Tokens,
-		Users:        r.ctx.Users,
-		Login:        user.Login,
-		ClientID:     app.ClientID,
-		ClientSecret: app.ClientSecret,
-		HTTPClient:   r.ctx.HTTPClient,
-	}, true
+func signInUnconfigured(w http.ResponseWriter) {
+	writeCodeError(w, http.StatusServiceUnavailable, "Google sign-in is not configured on this server (DISPATCH_SIGNIN_ISSUER, DISPATCH_SIGNIN_CLIENT_ID, DISPATCH_SIGNIN_CLIENT_SECRET, DISPATCH_SIGNIN_GROUP)", "SIGNIN_UNCONFIGURED")
 }
 
 // ───── static ───────────────────────────────────────────────────────────────
@@ -420,6 +362,19 @@ func (r *router) proxyConfigForUser(w http.ResponseWriter, user *auth.User) (*gi
 // reserved because it is the API path typed without its "/api" prefix — an API client's mistake
 // that must be answered as one.
 var serverRoots = []string{"/api", "/v1", "/auth", "/ws", "/healthz"}
+
+// assetRoots hold Vite's content-hashed build output: a file there never changes under its name,
+// because a changed file is written under a new one.
+var assetRoots = []string{"/assets"}
+
+const (
+	// pageCacheControl makes a browser revalidate a page before it runs it. A page names the
+	// hashed assets of the build that wrote it, and one kept by heuristic freshness from a
+	// Last-Modified would, after a deploy, ask for assets the server no longer has.
+	pageCacheControl = "no-cache"
+	// assetCacheControl lets a browser keep a hashed asset for a year without asking.
+	assetCacheControl = "public, max-age=31536000, immutable"
+)
 
 func (r *router) staticHandler(w http.ResponseWriter, req *http.Request) {
 	requestedPath := req.URL.Path
@@ -452,6 +407,15 @@ func (r *router) staticHandler(w http.ResponseWriter, req *http.Request) {
 	candidate := filepath.Join(r.ctx.WebDistDir, normalized)
 	info, err := os.Stat(candidate)
 	if err == nil && !info.IsDir() {
+		if filepath.Ext(candidate) == ".html" {
+			servePage(w, req, candidate)
+			return
+		}
+		if isReservedPath(normalized, assetRoots) {
+			// A 304 keeps it, and net/http drops it from an error it answers instead (a file
+			// removed after its stat), so a failure is never kept for an asset's year.
+			w.Header().Set("Cache-Control", assetCacheControl)
+		}
 		serveFile(w, req, candidate)
 		return
 	}
@@ -463,12 +427,7 @@ func (r *router) staticHandler(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusNotFound, "not found")
 		return
 	}
-	indexPath := filepath.Join(r.ctx.WebDistDir, "index.html")
-	if _, err := os.Stat(indexPath); err != nil {
-		writeError(w, http.StatusNotFound, "dashboard build not found")
-		return
-	}
-	serveFile(w, req, indexPath)
+	servePage(w, req, filepath.Join(r.ctx.WebDistDir, "index.html"))
 }
 
 // isBrowserRoute reports whether an unmatched, non-static path should fall
@@ -477,7 +436,7 @@ func (r *router) staticHandler(w http.ResponseWriter, req *http.Request) {
 // anything that looks like a missing static asset must stay a real 404
 // instead, so asset clients never get an HTML body where they expected a file.
 func isBrowserRoute(normalized string) bool {
-	if isReservedPath(normalized, []string{"/assets"}) {
+	if isReservedPath(normalized, assetRoots) {
 		return false
 	}
 	// Issue routes carry user-controlled segments (artifact slugs, ask/comment
@@ -499,6 +458,29 @@ func isReservedPath(normalized string, roots []string) bool {
 		}
 	}
 	return false
+}
+
+// servePage serves an HTML page that the browser must revalidate, validated by its content and
+// never by its modification time. The servers behind one load balancer can hold different builds
+// whose pages' times say nothing about which build wrote them (a rollback serves the older file),
+// so a revalidation answered by If-Modified-Since could keep one build's page in front of another
+// build's assets. The page carries an ETag of its bytes and no Last-Modified, so a browser holding
+// another build's page, or one cached before this, gets the page this server has.
+func servePage(w http.ResponseWriter, req *http.Request, path string) {
+	page, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		writeError(w, http.StatusNotFound, "dashboard build not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "read failed")
+		return
+	}
+	sum := sha256.Sum256(page)
+	w.Header().Set("Content-Type", contentType(path))
+	w.Header().Set("Cache-Control", pageCacheControl)
+	w.Header().Set("ETag", `"`+hex.EncodeToString(sum[:16])+`"`)
+	http.ServeContent(w, req, path, time.Time{}, bytes.NewReader(page))
 }
 
 func serveFile(w http.ResponseWriter, req *http.Request, path string) {
@@ -635,23 +617,25 @@ func writeCodeError(w http.ResponseWriter, status int, message, code string) {
 	api.WriteJSON(w, status, map[string]string{"error": message, "code": code})
 }
 
-// writeLoginRefusedPage answers the OAuth callback — a top-level browser
-// navigation from GitHub, so JSON would be unreadable there — for a login
-// GitHub vouched for but the allowlist does not. The page names the login so
-// the person knows what to ask an operator to add.
-func writeLoginRefusedPage(w http.ResponseWriter, login string) {
-	escaped := html.EscapeString(login)
+// writeSignInRefusedPage answers the sign-in callback, a top-level browser navigation back from
+// the sign-in pool where JSON would be unreadable, for a person the pool vouched for but Dispatch
+// does not admit: one outside the group, named by email, or a sign-in that names nobody by email.
+func writeSignInRefusedPage(w http.ResponseWriter, email string, reason error) {
+	message := "This sign-in does not name a person by a Google Workspace email. Sign in with your Google Workspace account."
+	if errors.Is(reason, identity.ErrNotMember) {
+		message = html.EscapeString(email) + " is not in the group that may use Dispatch. Ask an administrator to add you, then sign in again."
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusForbidden)
 	fmt.Fprintf(w, `<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><title>Dispatch: %s is not on the allowlist</title></head>
+<html lang="en"><head><meta charset="utf-8"><title>Dispatch: sign-in refused</title></head>
 <body style="font-family:system-ui,sans-serif;max-width:40rem;margin:4rem auto;padding:0 1rem">
-<h1>Not on the allowlist</h1>
-<p>%s is not on the Dispatch allowlist. Ask an operator to add your GitHub login.</p>
+<h1>Sign-in refused</h1>
+<p>%s</p>
 <p><a href="/auth/start">Sign in with a different account</a></p>
 </body></html>
-`, escaped, escaped)
+`, message)
 }
 
 func randomToken() (string, error) {

@@ -2,10 +2,12 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"mime"
 	"net/http"
@@ -45,19 +47,16 @@ const repoLabelPrefix = "repo:"
 
 // Deps are the API's application dependencies.
 type Deps struct {
-	Store    *store.Store
-	Identity identity.Identity
-	// AllowedLogins is the lowercase sign-in allowlist (DISPATCH_ALLOWED_LOGINS): the humans an
-	// issue may be assigned to, and the option list GET /users returns.
-	AllowedLogins  map[string]struct{}
+	Store          *store.Store
+	Identity       identity.Identity
 	AgentToken     string
 	DefaultProject string
 	ServerURL      string
 	Docs           docs.API
 	Envoy          *envoy.Client
 	Events         *events.Broker
-	// GitHub calls the GitHub App API for architecture-source access checks;
-	// nil is the "no app credentials yet" state and answers ErrNoAppKey.
+	// GitHub calls the GitHub App API for architecture-source access checks and the web app's
+	// GitHub reads; nil is the "no app credentials yet" state and answers ErrNoAppKey.
 	GitHub *githubapp.Client
 	// Architecture imports a project's architecture model from its configured
 	// source; the ticker, the Refresh route, and the sync tool share it so one
@@ -80,13 +79,19 @@ type Deps struct {
 	// is what a test gets.
 	Lifetime         context.Context
 	TestHooksEnabled bool
+	// StreamHeartbeat is how often a server-sent event stream writes a heartbeat and resolves
+	// its caller again, and a document socket resolves its caller again (whileCallerResolves),
+	// each closing once the caller no longer resolves.
+	StreamHeartbeat time.Duration
 }
+
+// defaultStreamHeartbeat is StreamHeartbeat when DepsInput leaves it zero.
+const defaultStreamHeartbeat = 15 * time.Second
 
 // DepsInput contains raw boot values used to construct API dependencies.
 type DepsInput struct {
 	Store          *store.Store
 	Identity       identity.Identity
-	AllowedLogins  map[string]struct{}
 	AgentToken     string
 	DefaultProject string
 	ServerURL      string
@@ -113,6 +118,10 @@ type DepsInput struct {
 	AgentSecretsURL   string
 	AgentSecretsToken string
 	TestHooksEnabled  bool
+	// StreamHeartbeat replaces the heartbeat of the event streams and the document socket
+	// (Deps.StreamHeartbeat). Zero keeps fifteen seconds; a test proving a connection closes
+	// sets a short one.
+	StreamHeartbeat time.Duration
 }
 
 // NewDeps parses boot configuration once and returns API dependencies.
@@ -149,10 +158,13 @@ func NewDeps(input DepsInput) (Deps, error) {
 	if url := strings.TrimSpace(input.AgentSecretsURL); url != "" {
 		agentSecretsClient = agentsecrets.New(url, input.AgentSecretsToken)
 	}
+	heartbeat := input.StreamHeartbeat
+	if heartbeat == 0 {
+		heartbeat = defaultStreamHeartbeat
+	}
 	return Deps{
 		Store:            input.Store,
 		Identity:         input.Identity,
-		AllowedLogins:    input.AllowedLogins,
 		AgentToken:       input.AgentToken,
 		DefaultProject:   defaultProject,
 		ServerURL:        strings.TrimSuffix(input.ServerURL, "/"),
@@ -166,6 +178,7 @@ func NewDeps(input DepsInput) (Deps, error) {
 		AgentSecrets:     agentSecretsClient,
 		Lifetime:         input.Lifetime,
 		TestHooksEnabled: input.TestHooksEnabled,
+		StreamHeartbeat:  heartbeat,
 	}, nil
 }
 
@@ -214,23 +227,58 @@ type queryer interface {
 // already holds one of its transactions (store.ErrNestedAcquire): one caller, one connection is
 // what keeps the pool from deadlocking, and a handler that breaks it fails here instead of in
 // production.
+//
+// Every route refuses a path or query parameter holding U+0000 or a byte that is not UTF-8 before
+// its handler runs (refuseUnstorableParameters), as decodeJSON refuses a U+0000 in a body, and the
+// document websocket refuses one in the actor its bearer names (refuseUnstorableActor).
 func Register(mux *http.ServeMux, deps Deps) {
 	s := &server{deps: deps}
 	routes := s.routes()
 	s.routeIndex = routeIndexEntries(routes)
 	for _, route := range routes {
-		mux.HandleFunc(route.Method+" "+route.Pattern, trackTransactions(route.Handler))
+		mux.HandleFunc(route.Method+" "+route.Pattern, trackTransactions(s.refuseUnstorableParameters(route.Pattern, route.Handler)))
 	}
 	if websocket, ok := deps.Docs.(interface {
 		ServeHTTP(http.ResponseWriter, *http.Request)
 	}); ok {
-		mux.Handle("GET /ws/doc/{room}", trackTransactions(websocket.ServeHTTP))
+		const pattern = "/ws/doc/{room}"
+		mux.Handle("GET "+pattern, s.whileCallerResolves(trackTransactions(s.refuseUnstorableParameters(pattern, s.refuseUnstorableActor(websocket.ServeHTTP)))))
 	}
 }
 
 func trackTransactions(handler http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		handler(w, r.WithContext(store.WithTransactionTracking(r.Context())))
+	}
+}
+
+// whileCallerResolves serves a connection that outlives its request, the document websocket, only
+// while its caller resolves: on every StreamHeartbeat it resolves the caller again, as the event
+// streams do, and once the caller no longer resolves (a logout, a membership the sign-in pool no
+// longer confirms) it cancels the connection's context, on which the document server closes the
+// socket. The check runs beside the handler, which holds pooled connections of its own while it
+// admits the socket, so it marks a context of its own for the pool (store.ErrNestedAcquire).
+func (s *server) whileCallerResolves(handler http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx, closeConnection := context.WithCancel(r.Context())
+		defer closeConnection()
+		check := r.WithContext(store.WithTransactionTracking(ctx))
+		go func() {
+			heartbeat := time.NewTicker(s.deps.StreamHeartbeat)
+			defer heartbeat.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-heartbeat.C:
+					if _, _, err := s.optionalActor(check); err != nil {
+						closeConnection()
+						return
+					}
+				}
+			}
+		}()
+		handler(w, r.WithContext(ctx))
 	}
 }
 
@@ -520,7 +568,7 @@ func bearerSessionActor(authenticated model.Actor, supplied *model.Actor) (model
 }
 
 func (s *server) writeAuthenticationError(w http.ResponseWriter, err error) {
-	if errors.Is(err, identity.ErrNoIdentity) || errors.Is(err, identity.ErrLoginNotAllowed) {
+	if errors.Is(err, identity.ErrNoIdentity) {
 		identity.WriteError(w, err)
 		return
 	}
@@ -609,13 +657,17 @@ func (maxBytesDiscarder) Header() http.Header             { return nil }
 func (maxBytesDiscarder) Write(value []byte) (int, error) { return len(value), nil }
 func (maxBytesDiscarder) WriteHeader(int)                 {}
 
+// decodeJSON decodes r's body, one JSON value of at most maxJSONRequestBytes, into value, which
+// declares every member the body may carry. A string the body holds anywhere that carries U+0000
+// is refused, naming where it stands (unstorableJSON).
 func decodeJSON(r *http.Request, value any) error {
 	contentType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil || (contentType != "application/json" && !strings.HasSuffix(contentType, "+json")) {
 		return errorf(http.StatusUnsupportedMediaType, "JSON_CONTENT_TYPE", "JSON mutations require Content-Type application/json")
 	}
 	r.Body = http.MaxBytesReader(maxBytesDiscarder{}, r.Body, maxJSONRequestBytes)
-	decoder := json.NewDecoder(r.Body)
+	var read bytes.Buffer
+	decoder := json.NewDecoder(io.TeeReader(r.Body, &read))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(value); err != nil {
 		var maxBytes *http.MaxBytesError
@@ -626,6 +678,9 @@ func decodeJSON(r *http.Request, value any) error {
 	}
 	if decoder.More() {
 		return errorf(http.StatusBadRequest, "INVALID_JSON", "request body must contain one JSON value")
+	}
+	if refusal := unstorableJSON("", read.Bytes()); refusal != nil {
+		return refusal
 	}
 	return nil
 }
