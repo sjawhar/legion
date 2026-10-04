@@ -11,10 +11,15 @@ on:
   pull_request:
     types: [opened, reopened, synchronize]
 
-# A new push to a pull request cancels that pull request's still-running checks here; a push to
-# main or a merge-queue run shares no group with any pull request and is never cancelled.
+# A new push to a pull request cancels that pull request's still-running checks here. Outside
+# pull_request the group key is github.sha, distinct for every push to main and every
+# merge-queue entry, so those runs never share a group with each other or a pull request: GitHub
+# cancels a group's previously *queued* run whenever a newer one joins, regardless of
+# cancel-in-progress (https://docs.github.com/en/actions/concepts/workflows-and-actions/concurrency,
+# "only one run can be pending in a concurrency group"), so keying push/merge_group on github.ref
+# (constant per branch/queue) would silently drop a commit's CI under a backed-up runner pool.
 concurrency:
-  group: tests-${{ github.ref }}
+  group: tests-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Read-only: no job here writes to the repository, a registry or the API. The token clones and
