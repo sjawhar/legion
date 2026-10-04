@@ -20,7 +20,16 @@ Every path it cites is in sjawhar/legion.
   the daemon instead (`POST /legion/v1/threads/resolve`), which resolves as the implementer's App
   only the threads a bot outside Legion's role Apps opened whose newest submitted comment is the
   reviewer's `Accepted:`, on the pull request of the reviewer's own issue, and prints the same
-  lines; the reviewer never holds the implementer's token.
+  lines; the reviewer never holds the implementer's token. A thread whose newest comment is a
+  draft in the implement App's pending review (the implementer's or the merger's: GitHub shows it
+  to that App alone, as which the daemon reads) is left open and never named: the command prints
+  only how many there are (`<n> unresolved threads hold the implement App's pending draft and
+  were left open`) and exits 1, as it does on a refusal. Report that count to the architect before
+  you spend your one re-run of the failed workflow; the architect sends the issue back so the
+  implementer submits or discards its pending review. Once the review is submitted, the
+  implementer's reply is the thread's newest comment, which leaves it open: answer the thread
+  again, then run the command again. Once the review is discarded, your `Accepted:` is the newest
+  comment again, and running the command again closes the thread.
   When `LEGION_GRANT_FILE` or `LEGION_GRANT` is set, use `legion threads resolve --pr <number> --repo <owner>/<repo>`.
   When neither is set, add `--gh` to that command, which applies the fallback's rule below through
   your own `gh`; where no `legion` command is installed, use `gh api graphql` with the session's
