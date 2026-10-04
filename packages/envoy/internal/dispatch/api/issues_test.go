@@ -1469,6 +1469,98 @@ func TestReparentIgnoresUnrelatedGrandchildRowActivity(t *testing.T) {
 	}
 }
 
+// A status write locks its issue and then its parent. Reparenting that issue's sibling under it
+// must not hold the shared parent while it waits for the new parent's row: the status write would
+// hold that row and wait for the shared parent, and Postgres would abort one of them.
+func TestReparentUnderSiblingDoesNotDeadlockWithItsStatusWrite(t *testing.T) {
+	handler, database, _ := newTestServer(t, testServerOptions{settle: time.Hour})
+	keys := createListedIssues(t, handler, "CORE", 3)
+	parent, moving, sibling := keys[0], keys[1], keys[2]
+	if _, err := database.Pool.Exec(context.Background(), `
+		update issues set parent_key = $1 where key = any($2::text[])
+	`, parent, []string{moving, sibling}); err != nil {
+		t.Fatal(err)
+	}
+	gate, err := database.Pool.Begin(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer gate.Rollback(context.Background())
+	if _, err := gate.Exec(context.Background(), `select key from issues where key = $1 for no key update`, parent); err != nil {
+		t.Fatal(err)
+	}
+	responses := make(chan *httptest.ResponseRecorder, 2)
+	go func() {
+		responses <- dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+moving, map[string]string{"parent": sibling}, "alice")
+	}()
+	waitForDatabaseLocks(t, gate, 1)
+	go func() {
+		responses <- dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+sibling, map[string]string{"status": "todo"}, "alice")
+	}()
+	waitForDatabaseLocks(t, gate, 2)
+	if err := gate.Commit(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if response := awaitResponse(t, responses); response.Code != http.StatusOK {
+			t.Errorf("reparent beside a status write on the new parent: %d %s", response.Code, response.Body.String())
+		}
+	}
+	if issue := decodeBody[model.Issue](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+moving, nil, "alice")); issue.Parent == nil || *issue.Parent != sibling {
+		t.Fatalf("reparent did not persist: %v", issue.Parent)
+	}
+	if issue := decodeBody[model.Issue](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+sibling, nil, "alice")); issue.Status != "todo" {
+		t.Fatalf("status write did not persist: %s", issue.Status)
+	}
+}
+
+// A board move locks its rank neighbours in turn. Reparenting the later neighbour under the
+// earlier one must take both rows in key order before it writes, so it queues behind the move or
+// the move queues behind it, rather than each holding one neighbour while waiting on the other.
+func TestReparentDoesNotDeadlockWithBoardMoveBetweenItsEnds(t *testing.T) {
+	handler, database, _ := newTestServer(t, testServerOptions{settle: time.Hour})
+	keys := createListedIssues(t, handler, "CORE", 3)
+	moving, parent, child := keys[0], keys[1], keys[2]
+	gate, err := database.Pool.Begin(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer gate.Rollback(context.Background())
+	if _, err := gate.Exec(context.Background(), `select key from issues where key = $1 for no key update`, child); err != nil {
+		t.Fatal(err)
+	}
+	responses := make(chan *httptest.ResponseRecorder, 2)
+	go func() {
+		responses <- dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+child, map[string]string{"parent": parent}, "alice")
+	}()
+	waitForDatabaseLocks(t, gate, 1)
+	go func() {
+		responses <- dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+moving, map[string]any{
+			"rank": map[string]string{"after": parent, "before": child},
+		}, "alice")
+	}()
+	waitForDatabaseLocks(t, gate, 2)
+	if err := gate.Commit(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if response := awaitResponse(t, responses); response.Code != http.StatusOK {
+			t.Errorf("reparent beside a board move between its ends: %d %s", response.Code, response.Body.String())
+		}
+	}
+	issues := map[string]model.Issue{}
+	for _, key := range keys {
+		issues[key] = decodeBody[model.Issue](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+key, nil, "alice"))
+	}
+	if got := issues[child].Parent; got == nil || *got != parent {
+		t.Fatalf("reparent did not persist: %v", got)
+	}
+	if !(issues[parent].Rank < issues[moving].Rank && issues[moving].Rank < issues[child].Rank) {
+		t.Fatalf("board move did not land between its neighbours: %q < %q < %q",
+			issues[parent].Rank, issues[moving].Rank, issues[child].Rank)
+	}
+}
+
 func TestChildCreateWithoutBlockersDoesNotWaitOnParentRow(t *testing.T) {
 	handler, database, _ := newTestServer(t, testServerOptions{settle: time.Hour})
 	parent := createListedIssues(t, handler, "CORE", 1)[0]

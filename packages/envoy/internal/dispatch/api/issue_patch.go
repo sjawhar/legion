@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -126,9 +127,25 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if err := tx.QueryRow(r.Context(), `select key from issues where key = $1 for no key update`, key).Scan(new(string)); err != nil {
-		s.writeHandlerError(w, err)
-		return
+	// A reparent locks the issue and its proposed parent in key order, the order LockOwners takes
+	// them, before it reads either: a status write on the new parent, or a board move naming both
+	// as rank neighbours, then queues behind the reparent instead of each holding a row the other
+	// waits for. The old parent is left to LockOwners, since holding it here would cross a status
+	// write on a sibling the same way. Validation and the dependency walk below stay plain reads.
+	rowLocks := []string{key}
+	if parentProvided && parent != nil && *parent != key {
+		rowLocks = append(rowLocks, *parent)
+		slices.Sort(rowLocks)
+	}
+	for _, lockKey := range rowLocks {
+		err := tx.QueryRow(r.Context(), `select key from issues where key = $1 for no key update`, lockKey).Scan(new(string))
+		if lockKey != key && errors.Is(err, pgx.ErrNoRows) {
+			continue // validateIssueParent refuses a missing parent
+		}
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
 	}
 	before, err := s.loadIssue(r.Context(), tx, key)
 	if err != nil {
