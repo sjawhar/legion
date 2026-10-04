@@ -96,6 +96,16 @@ func prepareSandbox(cfg config.Config, o overrides, reads sandboxReads, p *plan)
 		}
 		return sandbox.CensusLegacyIssueSandboxes(ctx, reads.client, reads.opts.Namespace, reads.opts.Project)
 	}
+	p.claimsCheck = func(ctx context.Context, st *store.Store) error {
+		legacy, err := st.HasLegacySandboxClaims(ctx, p.project)
+		if err != nil {
+			return err
+		}
+		if legacy {
+			return fmt.Errorf("refuse the Kubernetes runtime before any schema write: project %s still has legacy per-claim Sandbox locators", p.project)
+		}
+		return nil
+	}
 	p.probe = func(ctx context.Context, rt runtime.Runtime) error {
 		sandboxed, ok := rt.(*sandbox.Runtime)
 		if !ok {

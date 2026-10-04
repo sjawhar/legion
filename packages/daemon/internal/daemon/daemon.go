@@ -152,15 +152,10 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 	if err != nil {
 		return err
 	}
-	if cfg.Runtime.Name == "kubernetes" {
-		legacy, err := st.HasLegacySandboxClaims(boot, plan.project)
-		if err != nil {
+	if plan.claimsCheck != nil {
+		if err := plan.claimsCheck(boot, st); err != nil {
 			st.Close()
 			return err
-		}
-		if legacy {
-			st.Close()
-			return fmt.Errorf("refuse the Kubernetes runtime before any schema write: project %s still has legacy per-claim Sandbox locators", plan.project)
 		}
 	}
 	applied, err := st.Migrate(boot)
@@ -358,8 +353,12 @@ type plan struct {
 	// install check, then the census of per-claim Sandboxes (sandbox.CensusLegacyIssueSandboxes).
 	// Nil under tmux, and for a replaced runtime.
 	clusterCheck func(ctx context.Context) error
-	clock        supervise.Clock
-	orphanSweep  time.Duration
+	// claimsCheck is the Kubernetes runtime's refusal once the store has opened, before it
+	// migrates: no stored claim may still carry a per-claim Sandbox locator of the layout before
+	// issue pods (store.HasLegacySandboxClaims). Nil under tmux, and for a replaced runtime.
+	claimsCheck func(ctx context.Context, st *store.Store) error
+	clock       supervise.Clock
+	orphanSweep time.Duration
 	// secretsEnroller is the daemon's agent-secrets machine login as the machines' Enroller
 	// (newSecretsLogin); nil when the deployment enrolls no pod.
 	secretsEnroller supervise.Enroller
