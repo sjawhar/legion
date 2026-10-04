@@ -404,6 +404,13 @@ sentinel generation, selects the operator cleanup entry point, which then applie
 child-first/root-last cleanup without manufacturing a workflow issue. A tree closed before any of
 its Sandboxes was created lists none and confirms its reservation without deleting anything.
 
+A child of a closed tree re-admitted as a root of its own keeps its key, so its claims and its
+Sandbox's name. Its old tree's cleanup does not wait on a claim of it that runs nothing; each of
+its claims is re-pointed to its new tree before its first start there, and binds that tree's epoch;
+and its root launch replaces the Sandbox its old tree suspended (old tree label, no tree volume)
+with one of its own tree. A Sandbox of the old tree that still runs roles is not replaced: the
+launch is refused until they stop.
+
 Before the daemon opens its store, so before any schema write, image probe or reconcile, it checks
 that Agent Sandbox is installed and refuses a namespace that still holds a per-claim Sandbox of the
 layout before issue pods, naming it; once the store opens and before it migrates, it refuses a
