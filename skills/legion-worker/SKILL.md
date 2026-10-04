@@ -57,9 +57,9 @@ Once ready, your assignment arrives as the first prompt in your session — you 
 it. Read the current issue and its acceptance criteria before changing the workspace. Work
 only on this phase's artifact.
 
-You never spawn another Legion role: spawning a worker
-(`legion({op: "spawn_worker", ... })`) is architect-only. You may still use ordinary `task`
-subagents for your own phase work; none of them is a Legion role.
+You never start another Legion role: the daemon starts every phase worker itself, from its fixed
+workflow table. You may still use ordinary `task` subagents for your own phase work; none of them
+is a Legion role.
 Escalate a product, scope, design, cross-phase, or lifecycle decision to the owning architect with
 `envoy_publish` to its role topic (`notifications.role.` followed by its encoded token, see
 above), carrying the verified facts and the decision needed. `hub` only reaches subagents
@@ -93,10 +93,9 @@ implementer's production check after the merge
 Reach any live role on this issue the same way you reach the architect: `envoy_publish` to
 `notifications.role.` followed by that role's encoded token. Use it when you need context an
 earlier phase has that its handoff doesn't cover — ask the planner why a constraint was
-scoped that way, ask the implementer what a commit actually did. A role that finished its
-phase stays idle in its pane for the daemon's idle-retire window and answers; once retired (no
-live holder, a publish is rejected 404), read its committed handoff or ask the architect to
-`spawn_worker` it.
+scoped that way, ask the implementer what a commit actually did. The daemon suspends a role when
+its phase ends, so a role that finished is not running to answer you: read its committed handoff
+instead.
 
 ## Workspace and handoff precedence
 
@@ -473,14 +472,13 @@ do:
 Quote the answer verbatim in what you tell the architect: with the run and phase it names, the
 difference between "my work is lost" and "my work belongs to the previous run" is visible.
 
-**Stay in this session afterward.** Your process does not exit when your phase completes;
-it goes idle in its pane, and after `worker_idle_retire_seconds` (default 600 s) idle with no
-active phase the daemon retires it — your next assignment resumes this same session from its
-session file, so it is still you. Other roles on this issue may reach you through Envoy with
-questions about the work you did — answer them, reading `$LEGION_WORKSPACE` and your own
-committed handoff as needed, without mutating anything (see Workspace and handoff
-precedence above). You will also be the one resumed, with a new prompt in this same
-session, if this phase's work needs to run again.
+**Stay in this session afterward.** Your process does not exit on its own when your phase
+completes: the daemon suspends it when its phase ends, and when it starts your role again it
+resumes this same session from its session file, so it is still you. Until then, other roles on
+this issue may reach you through Envoy with questions about the work you did — answer them,
+reading `$LEGION_WORKSPACE` and your own committed handoff as needed, without mutating anything
+(see Workspace and handoff precedence above). You will also be the one resumed, with a new prompt
+in this same session, if this phase's work needs to run again.
 
 When blocked on a product, scope, design, lifecycle, or cross-phase decision, `envoy_publish` the
 owning architect a concise message: issue, phase, verified observation, what you tried, and the
