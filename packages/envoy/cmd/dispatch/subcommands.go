@@ -151,18 +151,26 @@ func backfillAnchorBlocks(ctx context.Context, databaseURL string, out io.Writer
 }
 
 // backfillFiles moves every uploaded file's bytes from Postgres into the bucket
-// DISPATCH_FILE_STORE_BUCKET names (files.BackfillRows), or with --verify-only reads back every file
-// already moved and checks it against its row's hash, moving nothing (files.VerifyRows). Either
-// pass can be run again at any time; the server keeps serving a row until its bytes are cleared.
+// DISPATCH_FILE_STORE_BUCKET names (files.BackfillRows); with --verify-only it reads back every
+// file already moved and checks it against its row's hash, moving nothing (files.VerifyRows); with
+// --restore, the rollback, it writes every moved file's bytes back into its row from the bucket
+// (files.RestoreRows). Each pass names the rows it could not do and goes on past them, exits 1
+// when any failed, and can be run again at any time; the server serves a row from its bytes
+// whenever it holds them.
 func backfillFiles(ctx context.Context, args []string, databaseURL, bucket string, out io.Writer) int {
 	flags := flag.NewFlagSet("backfill-files", flag.ContinueOnError)
 	flags.SetOutput(out)
 	verifyOnly := flags.Bool("verify-only", false, "read back every file already moved and check it against its row's hash, moving nothing")
+	restore := flags.Bool("restore", false, "write every moved file's bytes back into its row from the bucket: the rollback")
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
 	if flags.NArg() > 0 {
-		fmt.Fprintf(out, "backfill-files: unexpected argument %q; the one flag is --verify-only\n", flags.Arg(0))
+		fmt.Fprintf(out, "backfill-files: unexpected argument %q; the flags are --verify-only and --restore\n", flags.Arg(0))
+		return 2
+	}
+	if *verifyOnly && *restore {
+		fmt.Fprintln(out, "backfill-files: --verify-only and --restore cannot both be set")
 		return 2
 	}
 	if bucket == "" {
@@ -183,22 +191,20 @@ func backfillFiles(ctx context.Context, args []string, databaseURL, bucket strin
 		fmt.Fprintf(out, "backfill-files: the bucket is not reachable: %v\n", err)
 		return 1
 	}
-	if *verifyOnly {
-		report, err := files.VerifyRows(ctx, database.Pool, fileStore, out)
-		if err != nil {
-			fmt.Fprintf(out, "backfill-files: verify: %v\n", err)
-			return 1
-		}
-		fmt.Fprintf(out, "backfill-files: verified=%d failed=%d\n", report.Checked, len(report.Failed))
-		if len(report.Failed) > 0 {
-			return 1
-		}
-		return 0
+	pass, verb := files.BackfillRows, "moved"
+	switch {
+	case *verifyOnly:
+		pass, verb = files.VerifyRows, "verified"
+	case *restore:
+		pass, verb = files.RestoreRows, "restored"
 	}
-	report, err := files.BackfillRows(ctx, database.Pool, fileStore, out)
-	fmt.Fprintf(out, "backfill-files: moved=%d bytes=%d\n", report.Moved, report.Bytes)
+	report, err := pass(ctx, database.Pool, fileStore, out)
+	fmt.Fprintf(out, "backfill-files: %s=%d bytes=%d failed=%d\n", verb, report.Done, report.Bytes, len(report.Failed))
 	if err != nil {
 		fmt.Fprintf(out, "backfill-files: stopped: %v\n", err)
+		return 1
+	}
+	if len(report.Failed) > 0 {
 		return 1
 	}
 	return 0

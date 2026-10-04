@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 
@@ -58,12 +59,14 @@ func TestS3StoresAFileOnceByItsHashAndReadsItBack(t *testing.T) {
 		}
 	}
 
-	got, err := store.Get(ctx, sha)
+	object, err := store.Get(ctx, sha)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if !bytes.Equal(got, body) {
-		t.Fatalf("Get read %d bytes, want %d identical bytes", len(got), len(body))
+	got, err := io.ReadAll(object.Body)
+	_ = object.Body.Close()
+	if err != nil || object.Size != int64(len(body)) || !bytes.Equal(got, body) {
+		t.Fatalf("Get read %d bytes (size %d, %v), want %d identical bytes", len(got), object.Size, err, len(body))
 	}
 	if err := store.Healthy(ctx); err != nil {
 		t.Errorf("Healthy: %v", err)
@@ -101,6 +104,22 @@ func TestS3RefusesAnObjectPastTheSizeLimit(t *testing.T) {
 	}
 	if err := store.Put(context.Background(), sha, "application/octet-stream", make([]byte, files.MaxObjectSize+1)); err == nil {
 		t.Fatal("Put accepted an oversize body")
+	}
+}
+
+// An object whose bytes are not what its key says (a corrupted or replaced object) reads with an
+// error before its end, through the real client, so no caller can copy it to a client whole.
+func TestS3RefusesABodyThatDoesNotHashToItsKey(t *testing.T) {
+	store, fake := s3Store(t, testBucket)
+	sha := files.SHA256([]byte("what the key says"))
+	fake.SetObject(files.Key(sha), "text/plain", []byte("what is stored"))
+	object, err := store.Get(context.Background(), sha)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	defer object.Body.Close()
+	if _, err := io.ReadAll(object.Body); err == nil || !strings.Contains(err.Error(), "reads back as") {
+		t.Fatalf("reading a corrupted object: %v, want a hash mismatch", err)
 	}
 }
 

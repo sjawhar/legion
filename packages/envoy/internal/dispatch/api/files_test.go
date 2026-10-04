@@ -161,7 +161,7 @@ func TestARowStillHoldingItsBytesIsServedFromTheRow(t *testing.T) {
 	}
 }
 
-func TestAClearedRowWhoseObjectIsMissingAnswers502(t *testing.T) {
+func TestAClearedRowIsAnsweredByWhatTheStoreSays(t *testing.T) {
 	memory := filestest.NewMemory()
 	handler, database, _ := newTestServer(t, testServerOptions{files: memory})
 	issue := fileIssue(t, handler)
@@ -170,14 +170,25 @@ func TestAClearedRowWhoseObjectIsMissingAnswers502(t *testing.T) {
 		t.Fatalf("upload: status=%d body=%s", response.Code, response.Body.String())
 	}
 	version := decodeBody[uploaded](t, response)
-	memory.Delete(version.Version.SHA256)
+	route := "/api/v1/artifacts/" + version.Artifact.ID + "/versions/1"
 
-	served := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+version.Artifact.ID+"/versions/1", nil, "alice")
+	// The store cannot be reached: an outage a retry may mend, 502.
+	memory.SetFailure(errors.New("bucket unreachable"))
+	served := dispatchRequest(t, handler, http.MethodGet, route, nil, "alice")
 	if served.Code != http.StatusBadGateway || responseCode(t, served) != "FILE_STORE_UNAVAILABLE" {
-		t.Fatalf("serve a version whose object is gone: status=%d body=%s, want 502 FILE_STORE_UNAVAILABLE", served.Code, served.Body.String())
+		t.Fatalf("serve a version while the store is down: status=%d body=%s, want 502 FILE_STORE_UNAVAILABLE", served.Code, served.Body.String())
 	}
 	if served.Header().Get("Content-Disposition") != "" || served.Header().Get("ETag") != "" {
 		t.Fatalf("a failed read sent the success headers: %v", served.Header())
+	}
+
+	// The store answers but holds no object under the row's hash: data a retry never brings
+	// back, named as such, 500.
+	memory.SetFailure(nil)
+	memory.Delete(version.Version.SHA256)
+	missing := dispatchRequest(t, handler, http.MethodGet, route, nil, "alice")
+	if missing.Code != http.StatusInternalServerError || responseCode(t, missing) != "FILE_MISSING" {
+		t.Fatalf("serve a version whose object is gone: status=%d body=%s, want 500 FILE_MISSING", missing.Code, missing.Body.String())
 	}
 
 	// Without a store at all, a cleared row is a configuration the server names: 503.

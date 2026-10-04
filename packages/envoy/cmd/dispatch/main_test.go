@@ -378,31 +378,33 @@ func TestDispatchHandlerReportsDisconnectedNATS(t *testing.T) {
 }
 
 // /healthz reports the file store beside the database and NATS: null where no bucket is
-// configured, true where the bucket answers, and false (with the whole probe 503) where it
-// does not, so a wrong grant shows on the health page and not only as failed uploads.
+// configured, true where the bucket answers, and false where it does not, so a wrong grant shows
+// on the health page and not only as failed uploads. The bucket never decides `ok`: the load
+// balancer would replace the one task, taking documents and asks down with the files.
 func TestDispatchHandlerReportsTheFileStore(t *testing.T) {
+	database := storetest.Open(t)
 	probe := func(store files.Store) (int, map[string]any) {
 		t.Helper()
 		response := httptest.NewRecorder()
-		dispatchHandler(http.NewServeMux(), nil, nil, store, "").ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+		dispatchHandler(http.NewServeMux(), database, nil, store, "").ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 		var health map[string]any
 		if err := json.NewDecoder(response.Body).Decode(&health); err != nil {
 			t.Fatalf("decode health response: %v", err)
 		}
 		return response.Code, health
 	}
-	if _, health := probe(nil); health["files"] != nil {
-		t.Fatalf("healthz files with no store = %#v, want null", health["files"])
+	if status, health := probe(nil); health["files"] != nil || status != http.StatusOK {
+		t.Fatalf("healthz with no store: status %d, files %#v, want 200 and null", status, health["files"])
 	}
 	reachable := filestest.NewMemory()
-	if _, health := probe(reachable); health["files"] != true {
-		t.Fatalf("healthz files with a reachable store = %#v, want true", health["files"])
+	if status, health := probe(reachable); health["files"] != true || status != http.StatusOK {
+		t.Fatalf("healthz with a reachable store: status %d, files %#v, want 200 and true", status, health["files"])
 	}
 	unreachable := filestest.NewMemory()
 	unreachable.SetFailure(errors.New("bucket unreachable"))
 	status, health := probe(unreachable)
-	if health["files"] != false || status != http.StatusServiceUnavailable {
-		t.Fatalf("healthz with an unreachable store: status %d, files %#v, want 503 and false", status, health["files"])
+	if health["files"] != false || health["ok"] != true || status != http.StatusOK {
+		t.Fatalf("healthz with an unreachable store: status %d, ok %#v, files %#v, want 200 ok with files false", status, health["ok"], health["files"])
 	}
 }
 
@@ -1301,18 +1303,34 @@ func TestBackfillFilesExitsNonZeroUntilEveryFileReadsBackFromTheBucket(t *testin
 	if _, stored, held := fake.Object(key); !held || !bytes.Equal(stored, body) {
 		t.Fatalf("the bucket holds %d bytes under %s (held %t), want the file", len(stored), key, held)
 	}
-	if code, out := run(bucket, "--verify-only"); code != 0 || !strings.Contains(out, "verified=1 failed=0") {
+	if code, out := run(bucket, "--verify-only"); code != 0 || !strings.Contains(out, "verified=1 bytes=0 failed=0") {
 		t.Fatalf("backfill-files --verify-only: exit %d, want 0 with the one file verified:\n%s", code, out)
+	}
+	if code, out := run(bucket, "--verify-only", "--restore"); code != 2 {
+		t.Fatalf("backfill-files --verify-only --restore: exit %d, want 2:\n%s", code, out)
+	}
+
+	// The rollback writes the bytes back from the bucket; a backfill moves them out again.
+	if code, out := run(bucket, "--restore"); code != 0 || !strings.Contains(out, "restored=1") || !rowHoldsBytes(1) {
+		t.Fatalf("backfill-files --restore: exit %d, row holds bytes %t, want exit 0 with the row filled:\n%s", code, rowHoldsBytes(1), out)
+	}
+	if code, out := run(bucket); code != 0 || rowHoldsBytes(1) {
+		t.Fatalf("backfill-files after a restore: exit %d, row holds bytes %t, want exit 0 with the row cleared again:\n%s", code, rowHoldsBytes(1), out)
 	}
 
 	fake.DeleteObject(key)
 	if code, out := run(bucket, "--verify-only"); code != 1 || !strings.Contains(out, "failed=1") {
 		t.Fatalf("backfill-files --verify-only with the object gone: exit %d, want 1 naming the failure:\n%s", code, out)
 	}
+	if code, out := run(bucket, "--restore"); code != 1 || !strings.Contains(out, "FAILED version") || rowHoldsBytes(1) {
+		t.Fatalf("backfill-files --restore with the object gone: exit %d, row holds bytes %t, want exit 1 with the row left empty:\n%s", code, rowHoldsBytes(1), out)
+	}
 
-	// A row whose bytes do not match its hash stops the run, which says so in its exit code.
+	// A row whose bytes do not match its hash is named and passed over: exit 1, the row untouched,
+	// and every other row still moved.
 	addVersion(2, []byte("other bytes"), files.SHA256(body))
-	if code, out := run(bucket); code != 1 || !strings.Contains(out, "stopped") || !rowHoldsBytes(2) {
-		t.Fatalf("backfill-files over a row it cannot move: exit %d, row holds bytes %t, want exit 1 with the row untouched:\n%s", code, rowHoldsBytes(2), out)
+	addVersion(3, []byte("sound bytes"), files.SHA256([]byte("sound bytes")))
+	if code, out := run(bucket); code != 1 || !strings.Contains(out, "FAILED version") || !rowHoldsBytes(2) || rowHoldsBytes(3) {
+		t.Fatalf("backfill-files over a row it cannot move: exit %d, corrupt row holds bytes %t, sound row holds bytes %t, want exit 1 with the corrupt row untouched and the sound row moved:\n%s", code, rowHoldsBytes(2), rowHoldsBytes(3), out)
 	}
 }

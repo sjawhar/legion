@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // Querier is the slice of a database pool the backfill runs on: what *store.Pool offers, named
@@ -16,60 +18,146 @@ type Querier interface {
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+	// Acquire takes one connection the caller holds until it releases it: where a pass keeps
+	// its advisory lock, which Postgres scopes to the session that took it.
+	Acquire(ctx context.Context) (*pgxpool.Conn, error)
 }
 
-// BackfillReport counts what one BackfillRows pass did.
-type BackfillReport struct {
-	// Moved is the rows whose bytes now live in the store alone.
-	Moved int
-	// Bytes is the size of those rows' files, summed.
+// backfillLock is the advisory lock one pass of BackfillRows or RestoreRows holds for its run, so
+// two passes started together (a one-off task run twice) do not both move or restore the same
+// rows in lockstep. Session-scoped, so a pass that dies releases it with its connection.
+const backfillLock = 0x4c45_4749_4f4e_3532 // "LEGION52"
+
+// ErrAnotherPassRunning is the refusal when the advisory lock is held by another run.
+var ErrAnotherPassRunning = errors.New("another backfill-files pass holds the lock; wait for it to finish")
+
+// acquire takes backfillLock on a connection of pool it holds for the pass, or answers
+// ErrAnotherPassRunning. The lock is the session's, so it lives on that one connection, which the
+// returned release unlocks and gives back.
+func acquire(ctx context.Context, pool Querier) (func(), error) {
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("take a connection for the backfill lock: %w", err)
+	}
+	var held bool
+	if err := conn.QueryRow(ctx, `select pg_try_advisory_lock($1)`, backfillLock).Scan(&held); err != nil {
+		conn.Release()
+		return nil, fmt.Errorf("take the backfill lock: %w", err)
+	}
+	if !held {
+		conn.Release()
+		return nil, ErrAnotherPassRunning
+	}
+	return func() {
+		_, _ = conn.Exec(context.Background(), `select pg_advisory_unlock($1)`, backfillLock)
+		conn.Release()
+	}, nil
+}
+
+// fileVersion is one row of artifact_versions the passes walk: a file's version, never a
+// document's.
+type fileVersion struct {
+	id        string
+	createdAt time.Time
+	// sha is nil where the row records no hash, which no upload has ever written but the schema
+	// allows; a pass names such a row rather than scanning it into a string and naming nothing.
+	sha  *string
+	mime string
+}
+
+// nextVersion is the oldest file version after (createdAt, id) matching where, with its bytes when
+// withBytes. Keyset paging, so a row a pass fails on is passed over on the next step rather than
+// returned again by `limit 1` for the rest of the run.
+func nextVersion(ctx context.Context, pool Querier, after *fileVersion, where string, withBytes bool) (*fileVersion, []byte, error) {
+	content := "null::bytea"
+	if withBytes {
+		content = "v.content"
+	}
+	var afterAt time.Time
+	var afterID string
+	if after != nil {
+		afterAt, afterID = after.createdAt, after.id
+	}
+	row := pool.QueryRow(ctx, `
+		select v.id::text, v.created_at, v.sha256, coalesce(v.mime, 'application/octet-stream'), `+content+`
+		from artifact_versions v
+		join artifacts a on a.id = v.artifact_id
+		where a.kind <> 'doc' and (`+where+`) and (v.created_at, v.id::text) > ($1, $2)
+		order by v.created_at, v.id
+		limit 1
+	`, afterAt, afterID)
+	var version fileVersion
+	var body []byte
+	err := row.Scan(&version.id, &version.createdAt, &version.sha, &version.mime, &body)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil, nil
+	}
+	if err != nil {
+		return nil, nil, fmt.Errorf("read the next file version: %w", err)
+	}
+	return &version, body, nil
+}
+
+// PassReport counts what one pass did and names each row it could not do.
+type PassReport struct {
+	// Done is the rows the pass moved, restored or verified.
+	Done int
+	// Bytes is the size of those rows' files, summed; VerifyRows reads none and leaves it zero.
 	Bytes int64
+	// Failed names each row the pass could not finish, with its error. The pass goes on past it.
+	Failed []string
+}
+
+func (r *PassReport) fail(out io.Writer, id string, err error) {
+	r.Failed = append(r.Failed, fmt.Sprintf("version %s: %v", id, err))
+	fmt.Fprintf(out, "FAILED version %s: %v\n", id, err)
 }
 
 // BackfillRows moves every file version that still holds its bytes in Postgres into store, oldest
-// first, one row at a time (moveRow). A run stopped anywhere leaves each row either done or
-// untouched, so the next run picks up where it stopped; the server keeps serving a row from its
-// bytes until they are cleared. Progress is written to out as it goes; a store or database
-// failure stops the pass with that row's error.
-func BackfillRows(ctx context.Context, pool Querier, store Store, out io.Writer) (BackfillReport, error) {
-	var report BackfillReport
+// first, one row at a time (moveRow): it writes the object, reads it back against the hash, and
+// only then clears the row, in one update that clears only a row still holding them. A row it
+// cannot move (a store failure, a row whose bytes do not hash to its hash) is named in the report
+// and passed over, so one bad row does not hold every newer one; a run stopped anywhere leaves
+// each row either done or untouched, and the next run picks up what is left. The server keeps
+// serving a row from its bytes until they are cleared. A database failure, or a cancelled context,
+// stops the pass with that error.
+func BackfillRows(ctx context.Context, pool Querier, store Store, out io.Writer) (PassReport, error) {
+	release, err := acquire(ctx, pool)
+	if err != nil {
+		return PassReport{}, err
+	}
+	defer release()
+	var report PassReport
+	var cursor *fileVersion
 	for {
-		// sha256 and mime are nullable in the schema though every upload writes them. A row without
-		// a type is stored under the upload route's own default (the object's type is advisory:
-		// the version route serves the row's); a row without a hash stops the pass naming it,
-		// where a scan into a string would stop it naming no row.
-		var id, mime string
-		var sha *string
-		var body []byte
-		err := pool.QueryRow(ctx, `
-			select v.id::text, v.sha256, coalesce(v.mime, 'application/octet-stream'), v.content
-			from artifact_versions v
-			join artifacts a on a.id = v.artifact_id
-			where a.kind <> 'doc' and v.content is not null
-			order by v.created_at, v.id
-			limit 1
-		`).Scan(&id, &sha, &mime, &body)
-		if errors.Is(err, pgx.ErrNoRows) {
+		version, body, err := nextVersion(ctx, pool, cursor, "v.content is not null", true)
+		if err != nil {
+			return report, err
+		}
+		if version == nil {
 			return report, nil
 		}
-		if err != nil {
-			return report, fmt.Errorf("read the next version holding bytes: %w", err)
-		}
-		if sha == nil {
-			return report, fmt.Errorf("version %s: the row records no sha256 to store its bytes under", id)
-		}
-		cleared, err := moveRow(ctx, pool, store, id, *sha, mime, body)
-		if err != nil {
-			return report, fmt.Errorf("version %s: %w", id, err)
-		}
-		if !cleared {
-			// Another run cleared it between the read and the update; the object is in the store
-			// either way, and nothing here counts it twice.
+		cursor = version
+		if version.sha == nil {
+			report.fail(out, version.id, errors.New("the row records no sha256 to store its bytes under"))
 			continue
 		}
-		report.Moved++
+		cleared, err := moveRow(ctx, pool, store, version.id, *version.sha, version.mime, body)
+		if err != nil {
+			if ctx.Err() != nil {
+				return report, ctx.Err()
+			}
+			report.fail(out, version.id, err)
+			continue
+		}
+		if !cleared {
+			// Cleared between the read and the update; the object is in the store either way, and
+			// nothing here counts it twice.
+			continue
+		}
+		report.Done++
 		report.Bytes += int64(len(body))
-		fmt.Fprintf(out, "moved version %s (%s, %d bytes)\n", id, *sha, len(body))
+		fmt.Fprintf(out, "moved version %s (%s, %d bytes)\n", version.id, *version.sha, len(body))
 	}
 }
 
@@ -93,18 +181,54 @@ func moveRow(ctx context.Context, pool Querier, store Store, id, sha, mime strin
 	return tag.RowsAffected() > 0, nil
 }
 
-// VerifyReport counts what one VerifyRows pass found.
-type VerifyReport struct {
-	// Checked is the rows whose object read back with the recorded hash.
-	Checked int
-	// Failed names each row whose object is missing or reads back wrong, with its error.
-	Failed []string
+// RestoreRows is the rollback: it reads every file version whose bytes have left Postgres back
+// from store, verified against the row's hash, and writes the bytes into the row, in one update
+// that fills only a row still empty. Once it has run, a server with no store configured, or an
+// image from before the store existed, serves every file from its row again; the objects stay in
+// the bucket, and a later BackfillRows moves the rows out once more. A row whose object is missing
+// or wrong is named and passed over.
+func RestoreRows(ctx context.Context, pool Querier, store Store, out io.Writer) (PassReport, error) {
+	release, err := acquire(ctx, pool)
+	if err != nil {
+		return PassReport{}, err
+	}
+	defer release()
+	var report PassReport
+	var cursor *fileVersion
+	for {
+		version, _, err := nextVersion(ctx, pool, cursor, "v.content is null and v.sha256 is not null", false)
+		if err != nil {
+			return report, err
+		}
+		if version == nil {
+			return report, nil
+		}
+		cursor = version
+		body, err := ReadAll(ctx, store, *version.sha)
+		if err != nil {
+			if ctx.Err() != nil {
+				return report, ctx.Err()
+			}
+			report.fail(out, version.id, err)
+			continue
+		}
+		tag, err := pool.Exec(ctx, `update artifact_versions set content = $2 where id = $1 and content is null`, version.id, body)
+		if err != nil {
+			return report, fmt.Errorf("version %s: write bytes back: %w", version.id, err)
+		}
+		if tag.RowsAffected() == 0 {
+			continue
+		}
+		report.Done++
+		report.Bytes += int64(len(body))
+		fmt.Fprintf(out, "restored version %s (%s, %d bytes)\n", version.id, *version.sha, len(body))
+	}
 }
 
 // VerifyRows reads back every file version whose bytes have left Postgres and checks each object
 // against the row's hash, changing nothing. A row still holding its bytes is not checked here;
 // BackfillRows checks it when it moves it.
-func VerifyRows(ctx context.Context, pool Querier, store Store, out io.Writer) (VerifyReport, error) {
+func VerifyRows(ctx context.Context, pool Querier, store Store, out io.Writer) (PassReport, error) {
 	rows, err := pool.Query(ctx, `
 		select v.id::text, v.sha256
 		from artifact_versions v
@@ -113,7 +237,7 @@ func VerifyRows(ctx context.Context, pool Querier, store Store, out io.Writer) (
 		order by v.created_at, v.id
 	`)
 	if err != nil {
-		return VerifyReport{}, fmt.Errorf("list the versions to verify: %w", err)
+		return PassReport{}, fmt.Errorf("list the versions to verify: %w", err)
 	}
 	// Collected before any object is read, so no connection is held while the store answers.
 	type version struct{ id, sha string }
@@ -122,19 +246,18 @@ func VerifyRows(ctx context.Context, pool Querier, store Store, out io.Writer) (
 		return v, row.Scan(&v.id, &v.sha)
 	})
 	if err != nil {
-		return VerifyReport{}, fmt.Errorf("list the versions to verify: %w", err)
+		return PassReport{}, fmt.Errorf("list the versions to verify: %w", err)
 	}
-	var report VerifyReport
+	var report PassReport
 	for _, r := range pending {
 		if err := Verify(ctx, store, r.sha); err != nil {
 			if ctx.Err() != nil {
 				return report, ctx.Err()
 			}
-			report.Failed = append(report.Failed, fmt.Sprintf("version %s: %v", r.id, err))
-			fmt.Fprintf(out, "FAILED version %s: %v\n", r.id, err)
+			report.fail(out, r.id, err)
 			continue
 		}
-		report.Checked++
+		report.Done++
 	}
 	return report, nil
 }

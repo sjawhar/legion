@@ -5,8 +5,10 @@
 package filestest
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"sync"
 
 	"github.com/sjawhar/envoy/internal/dispatch/files"
@@ -60,8 +62,10 @@ func (m *Memory) Put(_ context.Context, sha, mime string, body []byte) error {
 	return nil
 }
 
-// Get returns a copy of the object under sha, or an error files.ErrNotFound matches.
-func (m *Memory) Get(_ context.Context, sha string) ([]byte, error) {
+// Get opens a copy of the object under sha, or answers an error files.ErrNotFound matches. The
+// body is verified as it is read, as the bucket's is, so a test that alters a stored object
+// (SetObject) sees the read fail before its end.
+func (m *Memory) Get(_ context.Context, sha string) (*files.Object, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.failure != nil {
@@ -71,7 +75,9 @@ func (m *Memory) Get(_ context.Context, sha string) ([]byte, error) {
 	if !held {
 		return nil, fmt.Errorf("get file %s: %w", sha, files.ErrNotFound)
 	}
-	return append([]byte(nil), object.body...), nil
+	body := append([]byte(nil), object.body...)
+	size := int64(len(body))
+	return &files.Object{Body: files.NewVerifyingReader(io.NopCloser(bytes.NewReader(body)), sha, size), Size: size}, nil
 }
 
 // Healthy answers the failure SetFailure set, or nil.

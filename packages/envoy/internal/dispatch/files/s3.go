@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"mime"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -18,10 +19,6 @@ import (
 	"github.com/aws/smithy-go"
 	"github.com/aws/smithy-go/logging"
 )
-
-// healthTimeout bounds the bucket probe /healthz runs, as the database probe is bounded: a probe
-// that answers late is as bad as one that never answers.
-const healthTimeout = 2 * time.Second
 
 // S3 is a Store over one bucket.
 type S3 struct {
@@ -33,11 +30,15 @@ var _ Store = (*S3)(nil)
 
 // NewS3 stores files in bucket with the AWS SDK's default credential chain. Loading the
 // configuration reads only the environment and the shared config files; credentials are fetched
-// on the first request.
+// on the first request. A configuration that names no region is refused here: the SDK accepts it
+// and then fails every call, which would show only on the first upload.
 func NewS3(ctx context.Context, bucket string) (*S3, error) {
 	cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithLogger(logging.LoggerFunc(logSDK)))
 	if err != nil {
 		return nil, fmt.Errorf("load AWS configuration for the file store: %w", err)
+	}
+	if cfg.Region == "" {
+		return nil, errors.New("the file store needs an AWS region: set AWS_REGION, or a region in the shared AWS config")
 	}
 	return &S3{client: s3.NewFromConfig(cfg), bucket: bucket}, nil
 }
@@ -52,13 +53,23 @@ func logSDK(classification logging.Classification, format string, v ...any) {
 	slog.Log(context.Background(), level, "dispatch: aws sdk", "message", fmt.Sprintf(format, v...))
 }
 
-// Put writes body under its hash unless the bucket already holds it. The write carries the hash
-// as the object's SHA-256 checksum, so S3 refuses a body that does not match it rather than
-// storing it under a key that lies about its content.
+// Put writes body under its hash unless the bucket already holds it, within WriteTimeout. The
+// write carries the hash as the object's SHA-256 checksum, so S3 refuses a body that does not
+// match it rather than storing it under a key that lies about its content. The object's content
+// type is the media type alone (the row keeps the type the client sent, parameters and all, and
+// the version route serves the row's), since S3 is stricter than Postgres about what a header
+// may hold.
 func (s *S3) Put(ctx context.Context, sha, mime string, body []byte) error {
 	if len(body) > MaxObjectSize {
 		return fmt.Errorf("put file %s: %d bytes, limit %d", sha, len(body), MaxObjectSize)
 	}
+	// The key is the body's hash; a body that does not hash to it is refused here, before any
+	// call, since not every S3-compatible server checks the checksum header S3 does.
+	if got := SHA256(body); got != sha {
+		return fmt.Errorf("put file %s: the body hashes to %s", sha, got)
+	}
+	ctx, cancel := context.WithTimeout(ctx, WriteTimeout)
+	defer cancel()
 	key := Key(sha)
 	switch _, err := s.client.HeadObject(ctx, &s3.HeadObjectInput{Bucket: aws.String(s.bucket), Key: aws.String(key)}); {
 	case err == nil:
@@ -75,7 +86,7 @@ func (s *S3) Put(ctx context.Context, sha, mime string, body []byte) error {
 		Key:               aws.String(key),
 		Body:              bytes.NewReader(body),
 		ContentLength:     aws.Int64(int64(len(body))),
-		ContentType:       aws.String(mime),
+		ContentType:       aws.String(mediaType(mime)),
 		ChecksumAlgorithm: types.ChecksumAlgorithmSha256,
 		ChecksumSHA256:    aws.String(base64.StdEncoding.EncodeToString(raw)),
 	})
@@ -85,39 +96,70 @@ func (s *S3) Put(ctx context.Context, sha, mime string, body []byte) error {
 	return nil
 }
 
-// Get reads the whole object under sha into one buffer of its declared size, at most
-// MaxObjectSize, so a request holds the file's bytes and no more.
-func (s *S3) Get(ctx context.Context, sha string) ([]byte, error) {
-	object, err := s.client.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(s.bucket), Key: aws.String(Key(sha))})
+// mediaType is the media type of a Content-Type value, or application/octet-stream when the
+// value does not parse as one.
+func mediaType(contentType string) string {
+	parsed, _, err := mime.ParseMediaType(contentType)
+	if err != nil || parsed == "" {
+		return "application/octet-stream"
+	}
+	return parsed
+}
+
+// Get opens the object under sha. The call that fetches its headers is bounded by OpenTimeout;
+// the body is read at the caller's pace and bounded by ctx alone, and closing it ends the
+// request. The body is verified as it is read (VerifyingReader), on top of the SDK's own check of
+// the stored checksum, so a body that reaches its end hashed to sha.
+func (s *S3) Get(ctx context.Context, sha string) (*Object, error) {
+	// The timer bounds the open alone: it is stopped once the headers are in, so the body's
+	// transfer is not cut at OpenTimeout, and the context is cancelled when the body is closed.
+	ctx, cancel := context.WithCancel(ctx)
+	timer := time.AfterFunc(OpenTimeout, cancel)
+	object, err := s.client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket:       aws.String(s.bucket),
+		Key:          aws.String(Key(sha)),
+		ChecksumMode: types.ChecksumModeEnabled,
+	})
+	timer.Stop()
 	if err != nil {
+		cancel()
 		if isNotFound(err) {
 			return nil, fmt.Errorf("get file %s: %w", sha, ErrNotFound)
 		}
 		return nil, fmt.Errorf("get file %s: %w", sha, err)
 	}
 	if object.Body == nil {
+		cancel()
 		return nil, fmt.Errorf("get file %s: no body", sha)
 	}
-	defer object.Body.Close()
 	if object.ContentLength == nil {
+		_ = object.Body.Close()
+		cancel()
 		return nil, fmt.Errorf("get file %s: no content length", sha)
 	}
 	size := *object.ContentLength
 	if size < 0 || size > MaxObjectSize {
+		_ = object.Body.Close()
+		cancel()
 		return nil, fmt.Errorf("get file %s: %d bytes, limit %d", sha, size, MaxObjectSize)
 	}
-	data := make([]byte, size)
-	if _, err := io.ReadFull(object.Body, data); err != nil {
-		return nil, fmt.Errorf("read file %s, %d bytes declared: %w", sha, size, err)
-	}
-	var extra [1]byte
-	switch _, err := io.ReadFull(object.Body, extra[:]); {
-	case err == nil:
-		return nil, fmt.Errorf("read file %s: body is longer than the %d bytes declared", sha, size)
-	case !errors.Is(err, io.EOF):
-		return nil, fmt.Errorf("read file %s: %w", sha, err)
-	}
-	return data, nil
+	return &Object{
+		Body: NewVerifyingReader(&cancelOnClose{ReadCloser: object.Body, cancel: cancel}, sha, size),
+		Size: size,
+	}, nil
+}
+
+// cancelOnClose cancels a body's request context when the body is closed, so a caller that stops
+// reading early releases the connection.
+type cancelOnClose struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (c *cancelOnClose) Close() error {
+	err := c.ReadCloser.Close()
+	c.cancel()
+	return err
 }
 
 // Healthy asks the bucket for its own metadata, within healthTimeout: a wrong name, a wrong

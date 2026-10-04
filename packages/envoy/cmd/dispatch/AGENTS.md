@@ -103,17 +103,22 @@ the rules: 4xx is never redelivered, bounded attempts, GitHub's rate limits, the
 With `DISPATCH_FILE_STORE_BUCKET` set, uploaded files' bytes live in that bucket under
 `files/sha256/<hash>` (`internal/dispatch/files`; `main.go`'s `openFileStore` builds the store
 and hands it down as `api.Deps.Files`), one object however often the file is uploaded; a
-document's markdown stays in Postgres. `storeArtifact` writes the object before the row, and the
-row holds no bytes; `getArtifactVersion` serves a row still holding bytes from the row and any
-other from the bucket, sending its headers only once it has the bytes. Unset, `Deps.Files` is a
-nil interface and every upload stays in its row, as the test harness and a laptop run. The API
-tests inject `filestest.NewMemory()` (`internal/dispatch/files/filestest`); the store's own tests
-and `backfill-files`'s exit-code test open the store with `files.NewS3` against
-`filestest.ServeS3`, a loopback bucket the AWS SDK reaches through its own `AWS_*` environment,
-which verifies the SHA-256 checksum each write carries. `envoy-dispatch backfill-files [--verify-only]` moves the rows uploaded before the
-bucket; the README's "Moving uploaded files to the bucket" has its rules and the task role's
-grant. `/healthz` reports the bucket as `files`. The bucket and its policies live in the
-deployment repository (LEGION-520).
+document's markdown stays in Postgres. `storeArtifact` writes the object before it opens its
+transaction, so no issue lock or pooled connection waits on the bucket, and the row holds no
+bytes; `getArtifactVersion` serves a row still holding bytes from the row and any other from the
+bucket, streaming the body through `files.VerifyingReader` once the object has opened, and
+aborting the response (`http.ErrAbortHandler`) on a body that fails or hashes wrong mid-stream.
+Unset, `Deps.Files` is a nil interface and every upload stays in its row, as the test harness
+and a laptop run. The API tests inject `filestest.NewMemory()`
+(`internal/dispatch/files/filestest`); the store's own tests and `backfill-files`'s exit-code
+test open the store with `files.NewS3` against `filestest.ServeS3`, a loopback bucket the AWS
+SDK reaches through its own `AWS_*` environment, and once against an S3-compatible server in a
+container (`internal/tests3`, SeaweedFS, which CI pre-pulls as it does the NATS image).
+`envoy-dispatch backfill-files [--verify-only | --restore]` moves the rows uploaded before the
+bucket, checks them, or writes them back (the rollback); the README's "Moving uploaded files to
+the bucket" has its rules and the task role's grant. `/healthz` reports the bucket as `files`
+and never fails on it. The bucket and its policies live in the deployment repository
+(LEGION-520).
 
 Each document room has two shared Yjs types: the authoritative
 `Y.XmlFragment("prosemirror")` tree and `Y.Map("marks")`, the server-maintained

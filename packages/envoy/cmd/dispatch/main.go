@@ -760,12 +760,18 @@ func dispatchHandler(handler http.Handler, database *store.Store, natsClient *bu
 }
 
 // healthzHandler answers the probe: the process is serving, Postgres is reachable on the
-// health pool's own connection, NATS is connected where it is configured, and the file store's
-// bucket answers where one is configured. Nothing here waits on the shared pool, and each probe
-// bounds its own wait (store.healthProbeTimeout, files.healthTimeout), which records why a probe
-// that answers late is as bad as one that never answers. The database and file-store probes run
-// side by side: each takes up to two seconds, and one after the other they would take four, past
-// the three-second prober (the compose healthcheck and the deploy script).
+// health pool's own connection, and NATS is connected where it is configured. Nothing here
+// waits on the shared pool, and each probe bounds its own wait (store.healthProbeTimeout,
+// files.healthTimeout), which records why a probe that answers late is as bad as one that never
+// answers. The database and file-store probes run side by side: each takes up to two seconds,
+// and one after the other they would take four, past the three-second prober (the compose
+// healthcheck and the deploy script).
+//
+// Where a file store is configured, `files` reports whether its bucket answered, and that is
+// all it does: it never decides `ok`. The load balancer replaces a task whose probe fails, and
+// production runs one, so a bucket outage, a slow HeadBucket or a grant someone changed would
+// take documents, asks and comments down with the files. A deploy check that wants the bucket
+// asserts `files: true` itself.
 //
 // Beside those it reports what is deployed: `commit`, the legion commit the binary was built
 // from (null when the build did not stamp one), and `schema_version`, the highest migration
@@ -814,7 +820,7 @@ func healthzHandler(database *store.Store, natsClient *bus.Client, fileStore fil
 			natsOK = &connected
 		}
 		<-filesProbed
-		ok := databaseOK && (natsOK == nil || *natsOK) && (filesOK == nil || *filesOK)
+		ok := databaseOK && (natsOK == nil || *natsOK)
 		status := http.StatusOK
 		if !ok {
 			status = http.StatusServiceUnavailable

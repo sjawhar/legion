@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -676,36 +677,73 @@ func (s *server) getArtifactVersion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var content []byte
-	var contentType string
-	var sha string
+	var contentType, sha *string
 	if err := s.deps.Store.Pool.QueryRow(r.Context(), `
 		select content, mime, sha256 from artifact_versions where artifact_id = $1 and number = $2
 	`, artifact.ID, number).Scan(&content, &contentType, &sha); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	// A row holding bytes is served from the row, whatever store is configured; a row the
-	// backfill cleared names its object by hash. The headers wait for the bytes, so a store that
-	// fails answers 502 and never a 200 cut short.
-	if content == nil {
-		if s.deps.Files == nil {
-			slog.Error("dispatch: a file version holds no bytes and no file store is configured", "artifact", artifact.ID, "version", number, "sha256", sha)
-			writeError(w, "FILE_STORE_UNAVAILABLE", http.StatusServiceUnavailable, "this file's bytes are in a store this server is not configured to read")
-			return
+	headers := func(length int64) {
+		w.Header().Set("Content-Type", cmp.Or(deref(contentType), "application/octet-stream"))
+		if sha != nil {
+			w.Header().Set("ETag", *sha)
 		}
-		content, err = s.deps.Files.Get(r.Context(), sha)
-		if err != nil {
-			slog.Error("dispatch: read a file version from the file store", "artifact", artifact.ID, "version", number, "sha256", sha, "error", err)
-			writeError(w, "FILE_STORE_UNAVAILABLE", http.StatusBadGateway, "the file store did not return this file")
-			return
-		}
+		w.Header().Set("Content-Disposition", "attachment")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Content-Length", strconv.FormatInt(length, 10))
+		w.WriteHeader(http.StatusOK)
 	}
-	w.Header().Set("Content-Type", contentType)
-	w.Header().Set("ETag", sha)
-	w.Header().Set("Content-Disposition", "attachment")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(content)
+	// A row holding bytes is served from the row, whatever store is configured.
+	if content != nil {
+		headers(int64(len(content)))
+		_, _ = w.Write(content)
+		return
+	}
+	// A row the backfill cleared, or that an upload wrote with a store, names its object by hash.
+	// The headers wait for the object to open, so a store that fails answers 502 and never a 200
+	// cut short; a body that fails after that, or does not hash to the row's hash, aborts the
+	// response mid-stream rather than ending it as if whole.
+	if s.deps.Files == nil {
+		slog.Error("dispatch: a file version holds no bytes and no file store is configured", "artifact", artifact.ID, "version", number, "sha256", deref(sha))
+		writeError(w, "FILE_STORE_UNAVAILABLE", http.StatusServiceUnavailable, "this file's bytes are in a store this server is not configured to read")
+		return
+	}
+	if sha == nil {
+		slog.Error("dispatch: a file version holds no bytes and records no hash to read them by", "artifact", artifact.ID, "version", number)
+		writeError(w, "FILE_MISSING", http.StatusInternalServerError, "this file's bytes cannot be found")
+		return
+	}
+	object, err := s.deps.Files.Get(r.Context(), *sha)
+	if err != nil {
+		if errors.Is(err, files.ErrNotFound) {
+			// The row names an object the bucket does not hold: not an outage a retry mends, a
+			// restore from the bucket's versioning.
+			slog.Error("dispatch: a file version's object is missing from the file store", "artifact", artifact.ID, "version", number, "sha256", *sha, "error", err)
+			writeError(w, "FILE_MISSING", http.StatusInternalServerError, "this file's bytes cannot be found")
+			return
+		}
+		slog.Error("dispatch: read a file version from the file store", "artifact", artifact.ID, "version", number, "sha256", *sha, "error", err)
+		writeError(w, "FILE_STORE_UNAVAILABLE", http.StatusBadGateway, "the file store did not return this file")
+		return
+	}
+	defer object.Body.Close()
+	headers(object.Size)
+	if _, err := io.Copy(w, object.Body); err != nil {
+		if r.Context().Err() != nil {
+			return // The client went away; nothing to tell it.
+		}
+		slog.Error("dispatch: stream a file version from the file store", "artifact", artifact.ID, "version", number, "sha256", *sha, "error", err)
+		panic(http.ErrAbortHandler)
+	}
+}
+
+// deref is the string a nullable column holds, or "".
+func deref(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
 }
 
 // commitArtifactVersionEvent appends the artifact.version event of a version the transaction wrote

@@ -22,7 +22,7 @@ below add only what a setting's one line cannot say.
 | `NATS_NKEY_SEED_FILE`, `NATS_NKEY_SEED` | The NATS nkey user Dispatch connects as: a file holding the seed (trimmed; wins), or the seed. A set but unusable value refuses startup naming the variable and path; neither set connects without a credential. |
 | `DISPATCH_TEST_HOOKS` | Set to `1` to mount test-only routes: `POST /api/v1/events/_test/disconnect` closes every open SSE connection; `POST /api/v1/artifacts/_test/quiesce` closes every live document and waits for settlements; and `POST /api/v1/artifacts/{id}/_test/outside-schema` writes the crafted malformed document e2e uses. Leave unset in every real deployment. |
 | `DISPATCH_DEV_SIGNIN` | Set to `1` to mount `GET /auth/_dev/signin?login=<email>&next=<path>`, which signs any person in by the email it names, with no sign-in pool, so a browser or test harness can be signed in to a local instance. Boot refuses it unless identity is `cookie`, no `DISPATCH_SIGNIN_*` setting is set, the listen address is a loopback IP literal, the dashboard origin (`DISPATCH_SERVER_URL` or `dispatch.serverUrl`) names `127.0.0.1`, `[::1]` or `localhost`, every `DATABASE_URL` host is loopback or a unix socket, `DISPATCH_SIGNING_KEY` is unset, `ENVOY_ALLOW_REMOTE_NATS=1` is not set while NATS is on, `DISPATCH_AGENT_SECRETS_URL`, when set, names a loopback host, `ENVOY_URL` names a loopback host, and a loaded GitHub App private key comes from `DISPATCH_APP_PEM_B64` with `DISPATCH_GITHUB_API_BASE` naming a loopback host, never from the `pem` in `app.json`, where a developer keeps the real App's key: a signed-in session can have the App probe and import any repository it is installed on, and read GitHub through the App's proxy. That key must be a throwaway, as `packages/dispatch/e2e/run-server.sh` generates one, since every App call hands a signed App JWT to whatever listens at that base. While it is on every request must carry the dashboard origin as its `Host` (else `421 HOST_MISMATCH`). The session cookie is signed with a key generated for that process alone, so it is worthless on any other server; what a signed-in session writes to the database is not. It can mint a `dsp_` personal agent token, and its sign-out advances the person's session generation, and every server on the same database honours those rows. Give a dev-sign-in server a database no other server uses: the loopback check makes that likely, not certain, since a loopback address can be a tunnel to another machine's database or a database a second local server also runs on. Any value other than `1` or unset is refused. |
-| `DISPATCH_FILE_STORE_BUCKET` | Files are stored under `files/sha256/<hash>`, one object however often a file is uploaded; a document's markdown never leaves Postgres. The credential chain on Fargate is the task role, which needs `s3:GetObject` and `s3:PutObject` on `files/*` and `s3:ListBucket` on the bucket: without `ListBucket`, S3 answers a missing object 403, which Dispatch reads as a store failure. An upload writes its object before its row, so a store that refuses answers 502 `FILE_STORE_UNAVAILABLE` and writes no version. The version route serves a row still holding bytes from the row and any other from the bucket, sending its headers only once it has the bytes: a bucket that fails answers 502, never a 200 cut short, and a cleared row on a server with the setting unset answers 503. `/healthz` reports `files`: null when unset, else whether the bucket answered a two-second `HeadBucket`. `envoy-dispatch backfill-files` moves the rows uploaded before the bucket ("Moving uploaded files to the bucket", below). |
+| `DISPATCH_FILE_STORE_BUCKET` | Files are stored under `files/sha256/<hash>`, one object however often a file is uploaded; a document's markdown never leaves Postgres. The credential chain on Fargate is the task role, which needs `s3:GetObject` and `s3:PutObject` on `files/*` and `s3:ListBucket` on the bucket: without `ListBucket`, S3 answers a missing object 403, which Dispatch reads as a store failure. The SDK must also find a region (`AWS_REGION`, or the shared config); without one the boot is refused. An upload writes its object before its row and before any lock or connection is taken, within 30 seconds, so a store that refuses answers 502 `FILE_STORE_UNAVAILABLE` and writes no version. The version route serves a row still holding bytes from the row and any other from the bucket: it opens the object within 30 seconds, sends its headers and `Content-Length` only then, and streams the body at the client's pace, checking it against the row's hash as it goes; a bucket that does not answer is 502, a row whose object the bucket does not hold is 500 `FILE_MISSING` (a restore from the bucket's versioning, not a retry), a cleared row on a server with the setting unset is 503, and a body that fails or hashes wrong mid-stream is cut off rather than ended as if whole. `/healthz` reports `files`: null when unset, else whether the bucket answered a two-second `HeadBucket`; it never decides `ok`, since a bucket outage must not take the one task, and with it documents and asks, down. `envoy-dispatch backfill-files` moves the rows uploaded before the bucket, and `--restore` is the rollback ("Moving uploaded files to the bucket", below). |
 
 `DISPATCH_REPO_PROJECTS` optionally seeds repository-to-project settings at boot
 with comma-separated `owner/repo=KEY` entries. Existing dashboard mappings take
@@ -136,23 +136,42 @@ envoy-dispatch redeliver-webhooks …`.
 
 With `DISPATCH_FILE_STORE_BUCKET` set, new uploads go to the bucket; the files uploaded before it
 stay in their rows until `backfill-files` moves them, oldest first, one row at a time: it writes
-the object under the row's hash (a write S3 verifies against that hash), reads it back and checks
-it, and only then clears the row's bytes, in one statement that clears only a row still holding
-them. A run stopped anywhere leaves each row done or untouched, so it can be run again at any
-time, and the server serves each row until its bytes are cleared. `--verify-only` reads back every
-cleared row against its hash, moves nothing, and exits 1 naming each row whose object is missing or
-wrong. Unsetting the setting is not a rollback: a server without it serves a row still holding
+the object under the row's hash (a write S3 verifies against that hash, and the store refuses
+before any call when the bytes do not hash to it), reads it back and checks it, and only then
+clears the row's bytes, in one statement that clears only a row still holding them. A row it
+cannot move (a store failure, bytes that do not hash to the row's hash, a row with no hash) is
+printed as `FAILED version <id>` and passed over, so one bad row holds up no other; the run exits 1
+when any row failed, and can be run again at any time, since each row is done or untouched and the
+server serves a row until its bytes are cleared. Two runs at once are refused by an advisory lock
+(`another backfill-files pass holds the lock`). `--verify-only` reads back every cleared row
+against its hash, moves nothing, and exits 1 naming each row whose object is missing or wrong.
+
+`--restore` is the rollback, at any point before or after the clear: it reads every cleared row's
+object back, verified against the row's hash, and writes the bytes into the row again, so a server
+with the setting unset, or an image from before the store existed, serves every file from its row.
+The objects stay in the bucket, and a later `backfill-files` moves the rows out once more. Unsetting
+the setting without a restore is not a rollback: a server without it serves a row still holding
 bytes and answers `503 FILE_STORE_UNAVAILABLE` for every row written while the bucket was set, an
-upload's as much as a cleared one's. Once a row is cleared its bytes are in the bucket alone, under
-its versioning.
+upload's as much as a cleared one's; and an image from before the store serves a cleared row as an
+empty `200` under the file's own `ETag`, which a browser then caches. Restore first, then roll back.
 
 ```bash
-envoy-dispatch backfill-files                 # move every row still holding bytes; prints each one and a total
+envoy-dispatch backfill-files                 # move every row still holding bytes; prints each one and a total; exit 1 if any failed
 envoy-dispatch backfill-files --verify-only   # read back every moved row; exit 1 naming any that fails
+envoy-dispatch backfill-files --restore       # the rollback: write every moved row's bytes back from the bucket
 ```
 
 It needs `DATABASE_URL` and `DISPATCH_FILE_STORE_BUCKET`, refuses a bucket it cannot `HeadBucket`
-before touching a row, and reads nothing else of the server's configuration.
+before touching a row, and reads nothing else of the server's configuration. Clearing a row's
+bytes leaves dead tuples behind: the table shrinks on disk only after `VACUUM FULL` or
+`pg_repack`, while the nightly dump shrinks at once; measure the dump, or vacuum first.
+
+To run a local server against a bucket of your own, point the SDK at an S3-compatible server with
+`AWS_ENDPOINT_URL_S3=http://127.0.0.1:<port>` (an IP literal: with `localhost` the SDK addresses
+the bucket as a subdomain, which does not resolve), `AWS_REGION`, static `AWS_ACCESS_KEY_ID` and
+`AWS_SECRET_ACCESS_KEY`, and `AWS_EC2_METADATA_DISABLED=true`. The Go tests start one
+(`internal/tests3`, SeaweedFS in a container, since MinIO's image left Docker Hub) and create the
+bucket with an anonymous `PUT /<bucket>`.
 
 ## Identity
 
