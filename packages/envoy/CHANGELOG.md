@@ -341,17 +341,23 @@
   document clears every credit pending at its write's room read, whether its replacement removed
   that edit or kept it, and its version credits its uploader alone; an edit credited after that
   read stays pending for the next version, and an upload that changes nothing clears nothing. A new
-  ask is now attributed to the update that introduced its block, as the room's update observer
-  records it: a service edit's, an upload's or a committed transaction's actor, the one browser
-  connected when a browser's update arrived, or the document-settlement actor when several
-  people were connected. Before, a settlement named its own actor - the latest editor, or the
-  first pending author - so a browser edit elsewhere could take an agent's ask, and a block that
-  arrived while the settlement ran could take the name of an earlier editor. A block whose update
-  the observer has not rendered yet waits for the settlement that observer arms; a block the room
-  held when it loaded is still named as the settlement's other events are. Approval moves name
-  the actor whose edit moved the version, even when it credits several authors, so a stale pending
-  author does not make a human's move appear as the document settlement or suppress its
-  notification.
+  ask is attributed to whoever introduced its block: a service edit's, an upload's or a committed
+  transaction's actor, registered from its own before/after trees before its update can reach any
+  observer, rather than whichever update's observer happens to render a merged catch-up first; an
+  id no write registered this way is a browser's, named for the one browser connected when its
+  update arrived, or the document-settlement actor when several were. A settlement's or the
+  block-id backfill's own id repair, and an edit's repair of an existing, unrelated block, each
+  carry forward the author recorded for the id a rename replaces, unless it is a copy of the block
+  that keeps that id; a rename whose own update's observer had not yet recorded an author is named
+  after the settlement's own actor instead. Before, a settlement named its own actor - the latest
+  editor, or the first pending author - so a browser edit elsewhere could take an agent's ask, and
+  a block that arrived while the settlement ran could take the name of an earlier editor; later,
+  two updates landing while one's own observer renders a catch-up that includes both still let
+  whichever ran first claim both blocks. A block whose update the observer has not rendered yet
+  waits for the settlement that observer arms; a block the room held when it loaded is still named
+  as the settlement's other events are. Approval moves name the actor whose edit moved the
+  version, even when it credits several authors, so a stale pending author does not make a human's
+  move appear as the document settlement or suppress its notification.
 - A GitHub App response over 1 MiB now fails whole instead of returning a truncated body. The
   dashboard proxy answers `502 GITHUB_UPSTREAM` and names the 1 MiB limit.
 - Saving a document, comment, ask, or message with a long run of underscore-joined characters

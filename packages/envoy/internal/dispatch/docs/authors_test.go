@@ -2,6 +2,7 @@ package docs
 
 import (
 	"context"
+	"encoding/json"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -337,6 +338,209 @@ func TestAnAskInTheRoomBeforeASettlementsTakeKeepsItsAuthor(t *testing.T) {
 	}
 	if actor := blockAskOpenedActor(t, service, artifactID, "alice-ask"); actor != alice {
 		t.Fatalf("ask.opened actor = %#v, want %v", actor, alice)
+	}
+}
+
+// currentLiveMarkdown is the room's live document as rendered right now, read directly rather than
+// through the room's own (possibly stale) contentMarkdown bookkeeping.
+func currentLiveMarkdown(t *testing.T, service *Service, artifactID string) string {
+	t.Helper()
+	tree, err := lockedTreeOf(service.srv.GetDoc(artifactID))
+	if err != nil {
+		t.Fatalf("read live tree: %v", err)
+	}
+	markdown, err := documentMarkdown(tree)
+	if err != nil {
+		t.Fatalf("render live tree: %v", err)
+	}
+	return markdown
+}
+
+// holdNextObserver runs write on a goroutine of its own and returns once its mutation has reached
+// the room - and its update observer has reached beforeObserveUpdate, held there - so write is in
+// the live document but not yet reflected in the room's rendered replica or its ask-block
+// bookkeeping. release lets the held observer go on and returns once write has finished.
+func holdNextObserver(t *testing.T, service *Service, artifactID string, write func() error) (release func()) {
+	t.Helper()
+	held := make(chan struct{})
+	proceed := make(chan struct{})
+	let := sync.OnceFunc(func() { close(proceed) })
+	t.Cleanup(let)
+	var holding atomic.Bool
+	holding.Store(true)
+	service.beforeObserveUpdate = func(name string) {
+		if name == artifactID && holding.CompareAndSwap(true, false) {
+			close(held)
+			<-proceed
+		}
+	}
+	done := make(chan error, 1)
+	go func() { done <- write() }()
+	select {
+	case <-held:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the held write never reached its observer hook")
+	}
+	return func() {
+		t.Helper()
+		let()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("held write: %v", err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("the held write never finished applying")
+		}
+	}
+}
+
+// A service write (ReplaceText, never inside a transaction) lands and is held at its own update
+// observer - its mutation is in the room, but the room's rendered replica has not caught up to it
+// yet. A browser's edit then lands and is observed immediately: that observer's catch-up absorbs
+// the still-unobserved service write's change too, which a render keyed on whichever observer's
+// own origin happens to run first would misattribute to the browser (round 5's regression). Each
+// block still goes to its own author - the service write's actor from write-site registration
+// (registerAskAuthors), the browser's from the room's one connected peer - because attribution no
+// longer depends on which update's observer renders the merged catch-up (LEGION-503).
+func TestAServiceWriteAndABrowserEditLandTogetherEachAskGoesToItsOwnAuthor(t *testing.T) {
+	bob := model.Actor{Kind: "user", ID: "bob"}
+	session := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
+	settleCurrentGeneration(t, service, artifactID)
+	service.addConnection(artifactID, 1, bob)
+
+	current := currentLiveMarkdown(t, service, artifactID)
+	agentAsk := "\n:::ask{#agent-ask urgency=\"high\" multiple=\"false\"}\nWhich database?\n:::\n"
+	release := holdNextObserver(t, service, artifactID, func() error {
+		_, err := service.ReplaceText(context.Background(), artifactID, current+agentAsk, session)
+		return err
+	})
+	room := service.srv.GetDoc(artifactID)
+	_, update := peerEdit(t, room, appendBlocks(t, ":::ask{#bob-ask urgency=\"high\" multiple=\"false\"}\nWhich transport?\n:::\n"))
+	if err := crdt.ApplyUpdateV1(room, update, "peer"); err != nil {
+		t.Fatalf("apply bob's edit: %v", err)
+	}
+	release()
+	settleCurrentGeneration(t, service, artifactID)
+	settleCurrentGeneration(t, service, artifactID)
+	if author := blockAskAuthor(t, service, artifactID, "bob-ask"); author != bob {
+		t.Errorf("bob-ask author = %#v, want %v", author, bob)
+	}
+	if author := blockAskAuthor(t, service, artifactID, "agent-ask"); author != session {
+		t.Errorf("agent-ask author = %#v, want %v", author, session)
+	}
+}
+
+// As above, but the service write is a committed transaction's live write, published with
+// liveWriteOrigin (the API-shaped case LEGION-503 reports): an agent's own ask was attributed to a
+// concurrently editing browser user, and the agent never followed its own question.
+func TestAPublishedAgentWriteAndABrowserEditLandTogetherEachAskGoesToItsOwnAuthor(t *testing.T) {
+	bob := model.Actor{Kind: "user", ID: "bob"}
+	session := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
+	settleCurrentGeneration(t, service, artifactID)
+	service.addConnection(artifactID, 1, bob)
+
+	current := currentLiveMarkdown(t, service, artifactID)
+	agentAsk := "\n:::ask{#agent-ask urgency=\"high\" multiple=\"false\"}\nWhich database?\n:::\n"
+	tx, err := service.store.Pool.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(context.Background())
+	joined, ledger := service.Join(context.Background(), tx)
+	defer ledger.Discard()
+	if _, err := service.ReplaceText(joined, artifactID, current+agentAsk, session); err != nil {
+		t.Fatalf("agent joined edit: %v", err)
+	}
+	release := holdNextObserver(t, service, artifactID, func() error {
+		return ledger.Commit(context.Background())
+	})
+	room := service.srv.GetDoc(artifactID)
+	_, update := peerEdit(t, room, appendBlocks(t, ":::ask{#bob-ask urgency=\"high\" multiple=\"false\"}\nWhich transport?\n:::\n"))
+	if err := crdt.ApplyUpdateV1(room, update, "peer"); err != nil {
+		t.Fatalf("apply bob's edit: %v", err)
+	}
+	release()
+	settleCurrentGeneration(t, service, artifactID)
+	settleCurrentGeneration(t, service, artifactID)
+	if author := blockAskAuthor(t, service, artifactID, "bob-ask"); author != bob {
+		t.Errorf("bob-ask author = %#v, want %v", author, bob)
+	}
+	if author := blockAskAuthor(t, service, artifactID, "agent-ask"); author != session {
+		t.Errorf("agent-ask author = %#v, want %v", author, session)
+	}
+	if !blockAskFollows(t, service, artifactID, "agent-ask", session.ID) {
+		t.Errorf("session does not follow its own ask")
+	}
+}
+
+// appendBlockWithCraftedID returns a live edit that appends the block markdown parses, like
+// appendBlocks, but with its block id overwritten to id - a value the browser editor itself would
+// never produce (one a hand-built client sent, or one Postgres cannot store), for a test of the
+// id-repair path rather than the browser editor's own stamping.
+func appendBlockWithCraftedID(t *testing.T, markdown, id string) func(*pmdoc.Node) *pmdoc.Node {
+	t.Helper()
+	parsed, err := pmdoc.Parse(markdown)
+	if err != nil {
+		t.Fatalf("parse appended block: %v", err)
+	}
+	pmdoc.EnsureBlockIDs(parsed)
+	parsed.Children[len(parsed.Children)-1].Attrs[pmdoc.BlockIDAttr] = id
+	return func(tree *pmdoc.Node) *pmdoc.Node {
+		tree.Children = append(tree.Children, parsed.Children...)
+		return tree
+	}
+}
+
+// askAuthorByQuestion is the author asks records for the one open ask whose question is question,
+// for a test that cannot know a repaired block's minted id ahead of time.
+func askAuthorByQuestion(t *testing.T, service *Service, artifactID, question string) model.Actor {
+	t.Helper()
+	var raw []byte
+	if err := service.store.Pool.QueryRow(context.Background(), `
+		select author from asks where block_artifact_id = $1 and question = $2
+	`, artifactID, question).Scan(&raw); err != nil {
+		t.Fatalf("read ask %q author: %v", question, err)
+	}
+	var author model.Actor
+	if err := json.Unmarshal(raw, &author); err != nil {
+		t.Fatalf("decode ask author: %v", err)
+	}
+	return author
+}
+
+// ApplyOps's own block-id repair (EnsureBlockIDs, stamping the tree before it applies the edit's
+// own operations) can rename an existing, unrelated browser block whose id Postgres cannot store -
+// one an agent's edit elsewhere in the document never touches - and carries forward the author
+// recorded for the id it replaces (carryForwardStampedAskAuthors), the same rule a settlement's or
+// the backfill's own stamp applies, instead of crediting the renamed block to the edit's own actor
+// (LEGION-503).
+func TestApplyOpsOwnBlockIDRepairCarriesForwardTheRenamedBlocksAuthor(t *testing.T) {
+	bob := model.Actor{Kind: "user", ID: "bob"}
+	session := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
+	settleCurrentGeneration(t, service, artifactID)
+	service.addConnection(artifactID, 1, bob)
+	editAsPeer(t, service, artifactID, appendBlockWithCraftedID(t,
+		":::ask{urgency=\"high\" multiple=\"false\"}\nWhich transport?\n:::\n", "x\x00"))
+	service.removeConnection(artifactID, 1)
+
+	if _, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{
+		{Op: "insert", After: "end", Markdown: "An agent's line."},
+	}, session, nil); err != nil {
+		t.Fatalf("agent edit: %v", err)
+	}
+	settleCurrentGeneration(t, service, artifactID)
+	if author := askAuthorByQuestion(t, service, artifactID, "Which transport?"); author != bob {
+		t.Errorf("renamed ask author = %#v, want %v, the browser who wrote it before the agent's unrelated edit repaired its id", author, bob)
 	}
 }
 

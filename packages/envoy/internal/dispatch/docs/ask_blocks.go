@@ -379,14 +379,23 @@ func askFingerprints(tree *pmdoc.Node, fingerprint func(*pmdoc.Node) (string, er
 	return held, err
 }
 
-// askBlockIDs collects the id of every ask block tree holds.
+// askBlockIDs collects the id of every ask block tree holds. It never returns nil: a document
+// with none still returns an empty map, which askBlockSources.author reads as "no block is
+// unindexed" rather than as an unknown baseline (askBlockSources.observed).
 func askBlockIDs(tree *pmdoc.Node) map[string]struct{} {
-	ids := make(map[string]struct{})
+	var ids map[string]struct{}
 	walkAskBlocks(tree, func(id string) {
-		if id != "" {
-			ids[id] = struct{}{}
+		if id == "" {
+			return
 		}
+		if ids == nil {
+			ids = make(map[string]struct{})
+		}
+		ids[id] = struct{}{}
 	})
+	if ids == nil {
+		return map[string]struct{}{}
+	}
 	return ids
 }
 
@@ -446,13 +455,16 @@ func stampedAskBlocks(before, after []string) []stampedAsk {
 }
 
 // recordStampedAskBlocks records ask blocks whose ids a settlement's own stamp minted. The room's
-// update observer skips that stamp, so no update it renders introduces those ids: each is seen,
-// and keeps the author recorded for the id it replaced, unless it is a copy of the block that
-// keeps that id. The caller holds state.mu.
+// update observer skips that stamp, so no update it renders introduces those ids: each is marked
+// seen, and keeps the author recorded for the id it replaced, unless it is a copy of the block
+// that keeps that id. The id it replaced is forgotten from the room's held blocks too, so a later
+// typed block that reuses that literal id - author-controlled text, unlike a minted one - is seen
+// as new rather than mistaken for the one this stamp just retired. The caller holds state.mu.
 func (state *roomState) recordStampedAskBlocks(stamped []stampedAsk) {
 	for _, ask := range stamped {
 		if state.askBlocks != nil {
 			state.askBlocks[ask.minted] = struct{}{}
+			delete(state.askBlocks, ask.previous)
 		}
 		if author, recorded := state.askAuthors[ask.previous]; recorded && !ask.copied {
 			state.askAuthors[ask.minted] = author
@@ -462,21 +474,81 @@ func (state *roomState) recordStampedAskBlocks(stamped []stampedAsk) {
 	}
 }
 
+// registerAskAuthors credits actor as the author of every id in ids a committed transaction's
+// write or a service mutation introduces, computed from its own before/after trees at the write
+// site rather than guessed from whichever update's observer later renders a catch-up that happens
+// to include it: the room's update observer consumes each entry here the first time it sees the
+// id (observeAskBlocks), and never prunes one it has not consumed, so attribution survives however
+// many other updates land first (LEGION-503). It never overwrites an id a more specific
+// registration already gave an author - a stamp's own carry-forward
+// (carryForwardRenamedAskAuthors), which runs first within the same write. The caller holds
+// state.mu.
+func (state *roomState) registerAskAuthors(ids map[string]struct{}, actor model.Actor) {
+	for id := range ids {
+		if _, registered := state.pendingAskAuthors[id]; registered {
+			continue
+		}
+		if state.pendingAskAuthors == nil {
+			state.pendingAskAuthors = make(map[string]model.Actor, len(ids))
+		}
+		state.pendingAskAuthors[id] = actor
+	}
+}
+
+// carryForwardRenamedAskAuthors registers the author recorded for each renamed ask block's
+// previous id as the pending author of its minted one, for a stamp whose own update the room's
+// observer renders normally - ApplyOps's own id repair - unlike a settlement's or the backfill's
+// suppressed stamp (recordStampedAskBlocks), which marks the minted id seen itself because no
+// observer ever will. Marking it seen here instead would race a concurrent, unrelated update's own
+// render, which replaces state.askBlocks wholesale: the normal observer that renders this stamp's
+// own update marks it seen when it runs, and pendingAskAuthors survives until then because
+// registerAskAuthors's caller never prunes it (LEGION-503). A rename with no author to carry
+// forward registers nothing, leaving the block to the observer's own fallback when it runs. The
+// caller holds state.mu.
+func (state *roomState) carryForwardRenamedAskAuthors(stamped []stampedAsk) {
+	for _, ask := range stamped {
+		author, recorded := state.askAuthors[ask.previous]
+		if !recorded || ask.copied {
+			continue
+		}
+		if state.pendingAskAuthors == nil {
+			state.pendingAskAuthors = make(map[string]model.Actor, len(stamped))
+		}
+		state.pendingAskAuthors[ask.minted] = author
+	}
+}
+
 // observeAskBlocks records ids, the ask blocks the room holds after an update its observer
-// rendered, and author as the author of each block the update introduced: the update's one
-// source, or nil when it has none. It forgets the author of a block the room no longer holds. A
-// room whose earlier ask blocks are unknown - its load could not read the document - takes ids as
-// its baseline and records no author, since it cannot tell which blocks the update introduced.
-// The caller holds state.mu.
+// rendered, and attributes each one not already recorded: first to whichever write registered it
+// (registerAskAuthors, carryForwardRenamedAskAuthors - consumed here the first time its id is
+// seen, and never pruned, since no render order can tell which write introduced a block another
+// update's catch-up happens to include first), otherwise to author, the room's one connected
+// browser or SettlementActor when several are, nil for none - an id no write registered can only
+// have come from a browser, whichever update's own observer ends up being the one to see it
+// (LEGION-503). It forgets the author of a block the room no longer holds. A room whose earlier
+// ask blocks are unknown - its load could not read the document - takes ids as its baseline and
+// records no author at all, since it cannot tell which blocks are new; its caller passes author as
+// nil for the same reason on a fresh load. The caller holds state.mu.
 func (state *roomState) observeAskBlocks(ids map[string]struct{}, author *model.Actor) {
 	for id := range state.askAuthors {
 		if _, held := ids[id]; !held {
 			delete(state.askAuthors, id)
 		}
 	}
-	if state.askBlocks != nil && author != nil {
+	if state.askBlocks != nil {
 		for id := range ids {
 			if _, seen := state.askBlocks[id]; seen {
+				continue
+			}
+			if registered, pending := state.pendingAskAuthors[id]; pending {
+				delete(state.pendingAskAuthors, id)
+				if state.askAuthors == nil {
+					state.askAuthors = make(map[string]model.Actor)
+				}
+				state.askAuthors[id] = registered
+				continue
+			}
+			if author == nil {
 				continue
 			}
 			if state.askAuthors == nil {
@@ -502,12 +574,15 @@ func (state *roomState) askSources() askBlockSources {
 	return askBlockSources{observed: maps.Clone(state.askBlocks), authors: maps.Clone(state.askAuthors)}
 }
 
-// author names who wrote the ask block carrying id, which no ask row indexes yet: the author of the
-// update that introduced it, as the update observer recorded it. ok is false for a block the
-// observer has not seen - its update is in the tree, but its observer has not run - which that
-// observer records, arming the settlement that indexes it. A block the observer saw without an
-// author, one the room held when it loaded or one an update with no source introduced, is
-// fallback's.
+// author names who wrote the ask block carrying id, which no ask row indexes yet: the author of
+// the update that introduced it, as the update observer recorded it, or, for a block a settlement's
+// own id-repair renamed, the author carried forward from the id it replaced
+// (recordStampedAskBlocks). ok is false for a block the observer has not seen - its update is in
+// the tree, but its observer has not run - which that observer records, arming the settlement that
+// indexes it. A block the observer saw without an author - one the room held when it loaded, one
+// an update with no source introduced, or one a stamp renamed while its own update's observer was
+// still behind, so no author was there to carry forward - is fallback's, named after the
+// settlement's own actor rather than its original editor.
 func (sources askBlockSources) author(id string, fallback model.Actor) (model.Actor, bool) {
 	if actor, recorded := sources.authors[id]; recorded {
 		return actor, true
@@ -520,12 +595,13 @@ func (sources askBlockSources) author(id string, fallback model.Actor) (model.Ac
 	return fallback, true
 }
 
-// addedAskBlocks counts the readable ask blocks in after whose block id no readable ask block in
-// before carries: one an edit inserted, retyped another block into, or repaired after a browser left
-// it unreadable, wherever it lands - a blockquote, a list item - as the parser reads it, so an opener
-// quoted in code adds none. One the edit moved, reworded or left alone keeps its id and counts
-// nothing.
-func addedAskBlocks(before, after *pmdoc.Node) int {
+// addedAskBlockIDs is the id of every readable ask block in after that before does not hold: one
+// an edit inserted, retyped another block into, or repaired after a browser left it unreadable,
+// wherever it lands - a blockquote, a list item - as the parser reads it, so an opener quoted in
+// code adds none. One the edit moved, reworded or left alone keeps its id and is not among them. A
+// nil before - a write with no readable starting tree, a repair - holds nothing, so every readable
+// ask in after counts.
+func addedAskBlockIDs(before, after *pmdoc.Node) map[string]struct{} {
 	held := map[string]struct{}{}
 	pmdoc.Walk(before, func(node *pmdoc.Node) bool {
 		if node.Type == "ask" {
@@ -536,19 +612,28 @@ func addedAskBlocks(before, after *pmdoc.Node) int {
 		}
 		return true
 	})
-	added := 0
+	added := map[string]struct{}{}
 	pmdoc.Walk(after, func(node *pmdoc.Node) bool {
 		if node.Type == "ask" {
 			if _, err := parseAskBlock(node); err == nil {
 				id, _ := node.Attrs[pmdoc.BlockIDAttr].(string)
 				if _, kept := held[id]; !kept {
-					added++
+					added[id] = struct{}{}
 				}
 			}
 		}
 		return true
 	})
 	return added
+}
+
+// addedAskBlocks counts the readable ask blocks in after whose block id no readable ask block in
+// before carries: one an edit inserted, retyped another block into, or repaired after a browser left
+// it unreadable, wherever it lands - a blockquote, a list item - as the parser reads it, so an opener
+// quoted in code adds none. One the edit moved, reworded or left alone keeps its id and counts
+// nothing.
+func addedAskBlocks(before, after *pmdoc.Node) int {
+	return len(addedAskBlockIDs(before, after))
 }
 
 // newAskMarkdown is what an uploaded version can say of an ask, for one refuseChangedAsks call: its

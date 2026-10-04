@@ -475,7 +475,7 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 		}
 		replica.mu.Lock()
 		replica.catchUp(room, doc)
-		contentChanged := s.updateChangesMarkdown(room, replica.doc, origin)
+		contentChanged := s.updateChangesMarkdown(room, replica.doc)
 		replica.mu.Unlock()
 		s.recordUpdateClass(room, update, contentChanged, true)
 		if contentChanged {
@@ -534,8 +534,10 @@ func (r *renderedReplica) catchUp(room string, live *crdt.Doc) {
 // mark, or a heading id or list item label the browser editor derives - is no content change. In
 // the same critical section it records the ask blocks the replica holds and who introduced each
 // new one (observeAskBlocks): the observer renders each update in the order the replica took them,
-// so the room's record of its ask blocks moves forward only.
-func (s *Service) updateChangesMarkdown(room string, replica *crdt.Doc, origin any) bool {
+// so the room's record of its ask blocks moves forward only. The tree walk that lists those ask
+// blocks runs only once the cheap markdown comparison shows a real change, and always outside
+// state.mu: the no-op path, the common one, pays for neither.
+func (s *Service) updateChangesMarkdown(room string, replica *crdt.Doc) bool {
 	tree, err := treeOf(replica)
 	var markdown string
 	if err == nil {
@@ -554,41 +556,45 @@ func (s *Service) updateChangesMarkdown(room string, replica *crdt.Doc, origin a
 		}
 		return true
 	}
-	askBlocks := askBlockIDs(tree)
 	state := s.room(room)
+	state.mu.Lock()
+	noOp := state.contentMarkdown != nil && *state.contentMarkdown == markdown
+	state.mu.Unlock()
+	if noOp {
+		return false
+	}
+	askBlocks := askBlockIDs(tree)
 	state.mu.Lock()
 	defer state.mu.Unlock()
 	if state.contentMarkdown != nil && *state.contentMarkdown == markdown {
 		return false
 	}
 	state.contentMarkdown = &markdown
-	state.observeAskBlocks(askBlocks, s.updateAuthor(state, origin))
+	var author *model.Actor
+	if sole, ambiguous := soleConnectedActor(state.connected); ambiguous {
+		author = new(SettlementActor)
+	} else {
+		author = sole
+	}
+	state.observeAskBlocks(askBlocks, author)
 	return true
 }
 
-// updateAuthor is the one source of an update the room's observer rendered, to whom an ask block
-// the update introduced is attributed: a committed transaction's actor, a service mutation's, or
-// the one person connected when a browser's update arrived. A browser's update while several people
-// are connected cannot be pinned on one, and names SettlementActor, as its settlement's events do.
-// An update with no source - no browser connected, or a write that recorded no actor - names no
-// one. The caller holds state.mu.
-func (s *Service) updateAuthor(state *roomState, origin any) *model.Actor {
-	if published, ok := origin.(*liveWriteOrigin); ok {
-		return published.actor
-	}
-	if value, service := s.serviceOrigins.Load(origin); service {
-		actor, _ := value.(*model.Actor)
-		return actor
-	}
-	var sole *model.Actor
-	for _, actor := range state.connected {
+// soleConnectedActor is the one actor connected to a room, and whether more than one distinct
+// actor is: an update made while exactly one of them is connected can be pinned on that actor; one
+// made while several are cannot be pinned on any single one of them.
+func soleConnectedActor(connected map[uint64]model.Actor) (sole *model.Actor, ambiguous bool) {
+	for _, actor := range connected {
 		if sole == nil {
 			sole = new(actor)
 		} else if actorKey(actor) != actorKey(*sole) {
-			return new(SettlementActor)
+			ambiguous = true
 		}
 	}
-	return sole
+	if ambiguous {
+		sole = nil
+	}
+	return sole, ambiguous
 }
 
 // creditContentChange credits an observed content change to its authors. A service mutation
@@ -615,20 +621,10 @@ func (s *Service) creditContentChange(room string, origin any) {
 		}
 		return
 	}
-	var sole *model.Actor
-	ambiguous := false
 	for _, actor := range state.connected {
-		key := actorKey(actor)
 		state.creditAuthor(actor)
-		if sole == nil {
-			sole = new(actor)
-		} else if key != actorKey(*sole) {
-			ambiguous = true
-		}
 	}
-	if ambiguous {
-		sole = nil
-	}
+	sole, _ := soleConnectedActor(state.connected)
 	state.lastActor = sole
 }
 
