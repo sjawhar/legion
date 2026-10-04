@@ -2,6 +2,8 @@ package policy_test
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -186,4 +188,61 @@ type countingDescriber struct {
 func (c *countingDescriber) DescribeSecret(ctx context.Context, in *secretsmanager.DescribeSecretInput, opts ...func(*secretsmanager.Options)) (*secretsmanager.DescribeSecretOutput, error) {
 	c.calls.Add(1)
 	return c.DescribeSecretAPIClient.DescribeSecret(ctx, in, opts...)
+}
+
+// heldCurrent loads an empty namespace's policy and starts a reload whose listing waits until the
+// test ends, returning once that reload holds the writer lock: a reload stuck on a slow Secrets
+// Manager.
+func heldCurrent(t *testing.T) *policy.Current {
+	t.Helper()
+	store := secrets.NewLocal()
+	page, err := store.ListSecrets(context.Background(), &secretsmanager.ListSecretsInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lister := &slowLister{page: page}
+	loader := policytest.Loader(store)
+	loader.Secrets = lister
+	cur, err := policy.NewCurrent(t.Context(), loader, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listing, release := make(chan struct{}), make(chan struct{})
+	lister.fetched = func() { close(listing); <-release }
+	refreshed := make(chan error, 1)
+	go func() { refreshed <- cur.Refresh(context.Background()) }()
+	<-listing
+	t.Cleanup(func() { close(release); <-refreshed })
+	return cur
+}
+
+// rereadWithin runs RefreshOne(ctx, name) and answers its error, failing t when it has not
+// returned within a second: long enough for any answer that waits on nothing, far shorter than a
+// held reload.
+func rereadWithin(t *testing.T, cur *policy.Current, ctx context.Context, name string) error {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() {
+		_, err := cur.RefreshOne(ctx, name)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(time.Second):
+		t.Fatalf("RefreshOne(%s) waited on the writer lock a reload holds", name)
+		return nil
+	}
+}
+
+// TestARereadOfANameNoSecretCanCarryWaitsOnNoReload pins that RefreshOne refuses such a name
+// before it takes the writer lock: free text, or a name past Secrets Manager's name limit, is
+// answered ErrNameInvalid at once while a reload holds the lock.
+func TestARereadOfANameNoSecretCanCarryWaitsOnNoReload(t *testing.T) {
+	cur := heldCurrent(t)
+	for _, name := range []string{"not a secret name", "A" + strings.Repeat("B", 512-len(policytest.Prefix))} {
+		if err := rereadWithin(t, cur, context.Background(), name); !errors.Is(err, policy.ErrNameInvalid) {
+			t.Fatalf("RefreshOne(%.20s...) = %v, want ErrNameInvalid", name, err)
+		}
+	}
 }

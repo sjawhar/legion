@@ -404,6 +404,25 @@ func TestMissRereadsAreBoundedPerEnrollment(t *testing.T) {
 	}
 }
 
+// TestANameNoSecretCanCarrySpendsNoMissReread pins that a requested name no secret can carry -
+// free text, or one past Secrets Manager's name limit - is refused before it costs the
+// enrollment a miss-path token: after a request naming only such names, a secret created since
+// the last reload is still served by the enrollment's one reread.
+func TestANameNoSecretCanCarrySpendsNoMissReread(t *testing.T) {
+	m, enr, key, _ := newFixture(t)
+	m.MissRereads = ratelimit.NewKeyed(ratelimit.Limit{Every: time.Hour, Burst: 1})
+	ctx := context.Background()
+	tooLong := "A" + strings.Repeat("B", 512-len(policytest.Prefix))
+	if _, err := m.Create(ctx, enr, signRequest(t, m, key, "free text", "not a secret name", tooLong), ""); !errors.Is(err, policy.ErrUnknownSecret) {
+		t.Fatalf("Create(names no secret can carry) = %v, want policy.ErrUnknownSecret", err)
+	}
+	fixtureStore(m).Put(policytest.Secret("BRAND_NEW_KEY", fixtureOperator, policy.TierAgent, "v1"))
+	req, err := m.Create(ctx, enr, signRequest(t, m, key, "need it", "BRAND_NEW_KEY"), "")
+	if err != nil || req.State != "granted" {
+		t.Fatalf("Create(BRAND_NEW_KEY) after the invalid names = %+v, %v; want granted through the reread they must not have spent", req, err)
+	}
+}
+
 // countingDescriber counts the DescribeSecret calls a policy reread makes.
 type countingDescriber struct {
 	policy.DescribeSecretAPIClient

@@ -94,6 +94,9 @@ func (c *Current) Refresh(ctx context.Context) error {
 // is kept, so a lagging listing cannot bring back a deleted secret; a secret created and deleted
 // before any read served it can still show from a lagging listing until listLag has passed.
 func (c *Current) RefreshOne(ctx context.Context, name string) (Lookup, error) {
+	if err := c.CheckName(name); err != nil {
+		return Lookup{}, err
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	lk, err := c.loader.LoadOne(ctx, name)
@@ -109,6 +112,14 @@ func (c *Current) RefreshOne(ctx context.Context, name string) (Lookup, error) {
 	c.set.Store(NewSet(secrets))
 	c.recent[name] = c.now()
 	return lk, nil
+}
+
+// CheckName answers ErrNameInvalid for a name no secret under the prefix can carry (free text, or
+// one whose Secrets Manager name would pass its length limit) and nil for any other, by the rule
+// LoadOne applies, so a caller refuses such a name before it waits on mu or spends a reread.
+func (c *Current) CheckName(name string) error {
+	_, _, err := c.loader.secretName(name)
+	return err
 }
 
 // merge sets name in secrets as lk found it: the served secret, or no entry.

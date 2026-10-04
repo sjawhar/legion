@@ -250,16 +250,20 @@ func (m *Machine) Create(ctx context.Context, enrollmentID, compactRequest, sess
 
 // rereadMissing rereads each requested name the live set does not serve (the spec's miss path: a
 // secret created seconds ago is not in the listing yet), bounded per enrollment by MissRereads,
-// and answers the set to evaluate against. A failed reread logs LoadFailedMessage and the name
-// stays unknown — the caller sees UNKNOWN_SECRET exactly as before the miss path existed. A reread
-// that fails once ctx has ended (the caller went away, or its deadline passed) is the request's
-// failure, not Secrets Manager's: it logs nothing and answers ctx's error, so the alarm on
-// LoadFailedMessage never counts a client that left. It runs before Create's transaction, so no
-// Secrets Manager call holds a row lock. A name no secret can carry (policy.ErrNameInvalid, a
-// free-text identifier) stays unknown without a line.
+// and answers the set to evaluate against. A name no secret can carry (policy.Current.CheckName:
+// a free-text identifier, or one past Secrets Manager's name limit) stays unknown before it costs
+// a token or a line. A failed reread logs LoadFailedMessage and the name stays unknown — the
+// caller sees UNKNOWN_SECRET exactly as before the miss path existed. A reread that fails once ctx
+// has ended (the caller went away, or its deadline passed) is the request's failure, not Secrets
+// Manager's: it logs nothing and answers ctx's error, so the alarm on LoadFailedMessage never
+// counts a client that left. It runs before Create's transaction, so no Secrets Manager call
+// holds a row lock.
 func (m *Machine) rereadMissing(ctx context.Context, enrollmentID string, names []string, set *policy.Set) (*policy.Set, error) {
 	for _, name := range names {
 		if _, ok := set.Secrets[name]; ok {
+			continue
+		}
+		if m.Policy.CheckName(name) != nil {
 			continue
 		}
 		if !m.MissRereads.Allow(enrollmentID) {
@@ -269,9 +273,7 @@ func (m *Machine) rereadMissing(ctx context.Context, enrollmentID string, names 
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return nil, ctxErr
 			}
-			if !errors.Is(err, policy.ErrNameInvalid) {
-				slog.Error(policy.LoadFailedMessage, "name", name, "error", err)
-			}
+			slog.Error(policy.LoadFailedMessage, "name", name, "error", err)
 			continue
 		}
 		set = m.Policy.Get()
