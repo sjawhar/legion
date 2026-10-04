@@ -93,6 +93,8 @@ func (e *Engine) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake
 		return e.push(ctx, tx, fact)
 	case intake.PullRequestChecks:
 		return e.checks(ctx, tx, fact)
+	case intake.RequiredChecks:
+		return e.requiredChecks(ctx, tx, fact)
 	case intake.PullRequestReview:
 		return e.review(ctx, tx, fact)
 	case intake.PullRequestMerged:
@@ -404,8 +406,9 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 // pullRequestOpened records the pull request a branch opened, and a reopen is the same pull
 // request: its fix and blocked attempts are what bound the review rounds, so they are carried
 // over rather than rebuilt at zero, which made closing and reopening a way to buy a fresh cap, and
-// so is its newest review, which orders every review it will have. A new generation deletes a
-// pull request that is not open, and all three with it.
+// so is its newest review, which orders every review it will have, and the checks its base branch
+// requires, as last read. A new generation deletes a pull request that is not open, and all of
+// them with it.
 func (e *Engine) pullRequestOpened(ctx context.Context, tx pgx.Tx, fact intake.PullRequestOpened) (intake.Result, error) {
 	issue, err := e.issueForBranch(ctx, tx, fact.Branch)
 	if err != nil || issue == nil {
@@ -434,7 +437,7 @@ func (e *Engine) pullRequestOpened(ctx context.Context, tx pgx.Tx, fact intake.P
 		if !fact.Reopened || recorded.State == record.PullRequestMerged {
 			return intake.Result{}, nil
 		}
-		pr.FixAttempts, pr.BlockedAttempts, pr.ReviewSeen = recorded.FixAttempts, recorded.BlockedAttempts, recorded.ReviewSeen
+		pr.FixAttempts, pr.BlockedAttempts, pr.ReviewSeen, pr.Required = recorded.FixAttempts, recorded.BlockedAttempts, recorded.ReviewSeen, recorded.Required
 		pr.HeadUpdatedAt = classify.LatestClock(recorded.HeadUpdatedAt, fact.UpdatedAt)
 	}
 	if err := e.store.PutPullRequest(ctx, tx, pr); err != nil {

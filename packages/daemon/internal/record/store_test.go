@@ -139,10 +139,12 @@ func TestStoreRoundTripsEveryRecord(t *testing.T) {
 	pr := PullRequest{
 		Issue: issue.Key, Repo: "sjawhar/legion", Number: 1243, Branch: "legion/LEGION-208",
 		HeadSHA: "b1c2d3", HeadUpdatedAt: updatedAt,
-		Verdict: "failing", Failing: []string{"unit"},
+		Failing: []string{"unit"}, Cancelled: []string{"e2e"}, CheckedHead: "b1c2d3",
 		FixAttempts: 2, BlockedAttempts: 1,
 		CheckRuns: []AttemptRun{{Name: "unit", ID: 91}, {Name: "lint", ID: 92}}, Generation: 4,
 		Snapshot: "snapshot-4", Pushes: pushes, HeadCounted: "b1c2d3", PlannedRed: true, State: PullRequestMerged,
+		// A base that requires no check reads back as such, never as a set that was not read.
+		Required: []string{},
 	}
 	phase := PhaseRow{Issue: issue.Key, Role: claim.RoleImplementer, Claim: "legion-208-implementer", HandoffCommit: "aabbcc", Rounds: 2, Verdict: "pass"}
 	gate := DesignGate{Issue: issue.Key, ArtifactID: "artifact-208", LatestVersion: 7, ApprovedVersion: &approved}
@@ -275,12 +277,13 @@ func TestAWriteThatEndsAHoldEndsItsReasonWhateverWritesIt(t *testing.T) {
 func samePullRequest(got, want PullRequest) bool {
 	return got.Issue == want.Issue && got.Repo == want.Repo && got.Number == want.Number &&
 		got.Branch == want.Branch && got.HeadSHA == want.HeadSHA && got.HeadUpdatedAt.Equal(want.HeadUpdatedAt) &&
-		got.Verdict == want.Verdict && reflect.DeepEqual(got.Failing, want.Failing) &&
+		got.CheckedHead == want.CheckedHead && reflect.DeepEqual(got.Failing, want.Failing) &&
+		reflect.DeepEqual(append([]string{}, got.Cancelled...), append([]string{}, want.Cancelled...)) &&
 		got.FixAttempts == want.FixAttempts &&
 		got.BlockedAttempts == want.BlockedAttempts && reflect.DeepEqual(got.CheckRuns, want.CheckRuns) &&
 		got.Generation == want.Generation && got.Snapshot == want.Snapshot &&
 		reflect.DeepEqual(got.Pushes, want.Pushes) && got.HeadCounted == want.HeadCounted &&
-		got.PlannedRed == want.PlannedRed
+		got.PlannedRed == want.PlannedRed && reflect.DeepEqual(got.Required, want.Required)
 }
 
 // A new generation keeps an open pull request but none of the old generation's fix-attempt
@@ -294,7 +297,7 @@ func TestClearGenerationResetsAnOpenPullRequestsFixAttemptAccounting(t *testing.
 	pr := PullRequest{
 		Issue: issue.Key, Repo: "sjawhar/legion", Number: 1359, Branch: "legion/LEGION-285",
 		HeadSHA: "red-tests", HeadUpdatedAt: time.Date(2026, 9, 25, 21, 0, 0, 0, time.UTC),
-		Verdict: "red", Failing: []string{"test"}, CheckRuns: []AttemptRun{},
+		CheckedHead: "red-tests", Failing: []string{"test"}, CheckRuns: []AttemptRun{},
 		FixAttempts: 2, BlockedAttempts: 2, HeadCounted: "red-tests", PlannedRed: true, State: PullRequestOpen,
 	}
 	inTx(t, st, func(tx pgx.Tx) {
@@ -613,7 +616,7 @@ func TestRecordMigrationCreatesTheRequiredColumns(t *testing.T) {
 	want := map[string][]string{
 		"issues":           {"key", "tree", "project", "title", "parent", "phase", "generation", "status", "rank", "handed_over", "linger_until", "held_from", "last_dispatch_seq", "ready_pending_version", "hold_reason", "dispatch_status"},
 		"phases":           {"issue", "role", "claim", "handoff_commit", "rounds", "verdict", "summary", "last_handoff", "decision", "completed_at"},
-		"pull_requests":    {"issue", "repo", "number", "branch", "head_sha", "head_updated_at", "verdict", "failing", "fix_attempts", "blocked_attempts", "check_runs", "generation", "snapshot", "pushes", "head_counted", "planned_red", "review_seen", "review_seen_at", "state", "checked_head"},
+		"pull_requests":    {"issue", "repo", "number", "branch", "head_sha", "head_updated_at", "failing", "cancelled", "fix_attempts", "blocked_attempts", "check_runs", "generation", "snapshot", "pushes", "head_counted", "planned_red", "review_seen", "review_seen_at", "state", "checked_head", "required"},
 		"design_gates":     {"issue", "artifact_id", "latest_version", "approved_version"},
 		"slots":            {"issue", "index", "admitted_at"},
 		"processed_events": {"source", "event_id", "processed_at"},
@@ -705,7 +708,9 @@ func TestReviewOrderMigrationCarriesTheReviewersMarkToThePullRequest(t *testing.
 
 // Migration 0024 records whose settlement a pull request's verdict is. A row recorded before it
 // held its own head's settlement, since a new head cleared the verdict, so its checked head is its
-// head: a verdict recorded before the upgrade keeps standing for the head it settled.
+// head: a settlement recorded before the upgrade keeps standing for the head it settled. Migration
+// 0028 then keeps a checked head only where a verdict was recorded, since a checked head now means
+// a settlement stands: a row 0024 gave its own head with nothing settled has none.
 func TestCheckedHeadMigrationKeepsARecordedVerdictStandingForItsHead(t *testing.T) {
 	ctx := context.Background()
 	st := emptyStore(t)
@@ -734,6 +739,13 @@ func TestCheckedHeadMigrationKeepsARecordedVerdictStandingForItsHead(t *testing.
 				reconciled, pushes, head_counted, planned_red, state)
 				values ('LEGION-208', 'sjawhar/legion', 42, 'legion/LEGION-208', 'head', now(), 'webhook', 'green', '[]', '[]',
 				0, 0, '[{"name": "ci", "id": 7}]', 1, 'green-head', false, '[]', '', false, 'open')`,
+			`insert into issues (key, tree, project, title, phase, generation, status, rank, last_dispatch_seq)
+				values ('LEGION-209', 'LEGION-209', 'LEGION', 'unsettled', 'testing', 1, 'testing', 'U', 0)`,
+			`insert into pull_requests (issue, repo, number, branch, head_sha, head_updated_at, head_updated_at_source,
+				verdict, failing, failing_statuses, fix_attempts, blocked_attempts, check_runs, generation, snapshot,
+				reconciled, pushes, head_counted, planned_red, state)
+				values ('LEGION-209', 'sjawhar/legion', 43, 'legion/LEGION-209', 'fresh', now(), 'webhook', '', '[]', '[]',
+				0, 0, '[]', 0, '', false, '[]', '', false, 'open')`,
 		} {
 			_, err := tx.Exec(ctx, statement)
 			must(t, err)
@@ -745,8 +757,13 @@ func TestCheckedHeadMigrationKeepsARecordedVerdictStandingForItsHead(t *testing.
 	inTx(t, st, func(tx pgx.Tx) {
 		pr, err := NewStore().PullRequest(ctx, tx, "LEGION-208")
 		must(t, err)
-		if pr == nil || pr.CheckedHead != "head" || pr.Verdict != "green" {
-			t.Fatalf("pull request after 0024 = %+v, want checked head \"head\" with its green verdict", pr)
+		if pr == nil || pr.CheckedHead != "head" || len(pr.CheckRuns) != 1 || pr.Required != nil {
+			t.Fatalf("pull request after 0028 = %+v, want checked head \"head\" with its settlement, and no required set read", pr)
+		}
+		unsettled, err := NewStore().PullRequest(ctx, tx, "LEGION-209")
+		must(t, err)
+		if unsettled == nil || unsettled.CheckedHead != "" {
+			t.Fatalf("never-settled pull request after 0028 = %+v, want no checked head", unsettled)
 		}
 	})
 }
