@@ -63,14 +63,31 @@ type Rig struct {
 	podKey    *oidctest.Key
 }
 
+// Option changes how NewRig wires its broker.
+type Option func(*rigConfig)
+
+type rigConfig struct {
+	lease time.Duration
+}
+
+// WithLease sets the enrollment lease the broker grants, an hour by default, for a test whose
+// launcher must renew a session within it.
+func WithLease(lease time.Duration) Option {
+	return func(c *rigConfig) { c.lease = lease }
+}
+
 // NewRig holds two secrets the person ada@example.com owns: TEST_SECRET, human-tier, which a
 // request from any session makes an approval request to her, and TEST_AUTO_SECRET, agent-tier,
 // which her own sessions get at once. It wires a real pod verifier (a local OIDC issuer trusted by
 // an enroll.K8sPodVerifier, mirroring cmd/broker/main.go's own wiring), and mounts api.Register on
 // an httptest.Server — wired exactly as cmd/broker/main.go and api_test.go's newTestServer wire
 // it. It skips t when BROKER_TEST_DATABASE_URL is unset (storetest.Open's own contract).
-func NewRig(t *testing.T) *Rig {
+func NewRig(t *testing.T, options ...Option) *Rig {
 	t.Helper()
+	config := rigConfig{lease: time.Hour}
+	for _, option := range options {
+		option(&config)
+	}
 	st := storetest.Open(t)
 	operator := "ada@example.com"
 	local := secrets.NewLocal(
@@ -90,7 +107,7 @@ func NewRig(t *testing.T) *Rig {
 		t.Fatalf("oidc.New: %v", err)
 	}
 
-	enr := &enroll.Service{Store: st, Lease: time.Hour, Pod: enroll.K8sPodVerifier{Verifier: podVerifier}}
+	enr := &enroll.Service{Store: st, Lease: config.lease, Pod: enroll.K8sPodVerifier{Verifier: podVerifier}}
 	enr.Chain = enroll.NewChainVerifier(st, srv.URL, time.Minute)
 
 	reqMachine := &requests.Machine{
