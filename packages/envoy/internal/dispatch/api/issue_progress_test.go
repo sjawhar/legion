@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -254,4 +255,56 @@ func TestIssueProgressReconciliationCountsDriftedIssues(t *testing.T) {
 	}
 	deps.Docs.(*docs.Service).ReconcileTaskProgress(runCtx)
 	wantCount(t, "uncounted after a second pass", progressOf(t, handler, uncounted.Key).Tasks, 2, 3)
+}
+
+// A pass drains a backlog wider than one batch: the first start after the deploy finds every
+// issue uncounted, and more than taskProgressBatch of them must not wait five minutes per fifty.
+func TestIssueProgressReconciliationDrainsMoreThanOneBatch(t *testing.T) {
+	handler, database, deps := newTestServer(t, testServerOptions{})
+	ctx := context.Background()
+	// 60 issues with a one-item task list; a batch is 50, so one pass needs two batches. Created
+	// through the API so each has a real primary document and version; the counts are then
+	// cleared to stand for the rows the migration found.
+	const issues = 60
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
+		"key": "MANY", "name": "Many project",
+	}, "alice"); response.Code != http.StatusCreated {
+		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
+	}
+	keys := make([]string, 0, issues)
+	for index := range issues {
+		response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
+			"project": "MANY", "title": fmt.Sprintf("Issue %d", index), "spec": "- [x] one\n- [ ] two\n",
+		}, "alice")
+		if response.Code != http.StatusCreated {
+			t.Fatalf("create issue %d: status=%d body=%s", index, response.Code, response.Body.String())
+		}
+		keys = append(keys, decodeBody[struct {
+			Key string `json:"key"`
+		}](t, response).Key)
+	}
+	if _, err := database.Pool.Exec(ctx, `update issues set tasks_done = null, tasks_total = null, tasks_version = null where project_key = 'MANY'`); err != nil {
+		t.Fatalf("clear counts: %v", err)
+	}
+	var drifted int
+	if err := database.Pool.QueryRow(ctx, `select count(*) from issues where project_key = 'MANY' and tasks_version is null`).Scan(&drifted); err != nil {
+		t.Fatalf("count cleared rows: %v", err)
+	}
+	if drifted != issues {
+		t.Fatalf("cleared rows = %d, want %d", drifted, issues)
+	}
+
+	runCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	deps.Docs.(*docs.Service).ReconcileTaskProgress(runCtx)
+
+	var remaining int
+	if err := database.Pool.QueryRow(ctx, `select count(*) from issues where project_key = 'MANY' and tasks_version is null`).Scan(&remaining); err != nil {
+		t.Fatalf("count remaining: %v", err)
+	}
+	if remaining != 0 {
+		t.Fatalf("uncounted issues after one pass = %d of %d, want 0: a full batch must not end the pass", remaining, issues)
+	}
+	wantCount(t, "first issue", progressOf(t, handler, keys[0]).Tasks, 1, 2)
+	wantCount(t, "last issue", progressOf(t, handler, keys[issues-1]).Tasks, 1, 2)
 }

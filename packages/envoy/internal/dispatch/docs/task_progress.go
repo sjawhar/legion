@@ -19,9 +19,8 @@ import (
 // a document, and a count that names an older version than the document's latest is one the
 // reconciliation (RunTaskProgressReconciliation) takes again (LEGION-542). It runs in the
 // transaction that writes the version, so the counts and the version commit together; a project
-// document or a non-primary artifact owns no issue row and records nothing. A row already holding
-// these values is not written. The caller holds the issue's owner row already (lockArtifactOwner,
-// requireOpenOwner), so this update waits on nothing.
+// document or a non-primary artifact owns no issue row and records nothing. The caller holds the
+// issue's owner row already (lockArtifactOwner, requireOpenOwner), so this update waits on nothing.
 func RecordTaskProgress(ctx context.Context, tx pgx.Tx, artifactID string, tree *pmdoc.Node) error {
 	progress := pmdoc.CountTasks(tree)
 	if _, err := tx.Exec(ctx, `
@@ -29,8 +28,6 @@ func RecordTaskProgress(ctx context.Context, tx pgx.Tx, artifactID string, tree 
 		set tasks_done = $2, tasks_total = $3,
 		    tasks_version = (select coalesce(max(number), 0) from artifact_versions where artifact_id = $1)
 		where i.key = (select issue_key from artifacts where id = $1 and is_primary)
-		  and (i.tasks_done, i.tasks_total, i.tasks_version) is distinct from
-		      ($2::int, $3::int, (select coalesce(max(number), 0) from artifact_versions where artifact_id = $1))
 	`, artifactID, progress.Done, progress.Total); err != nil {
 		return fmt.Errorf("record issue task progress: %w", err)
 	}
@@ -50,19 +47,23 @@ func RecordTaskProgressMarkdown(ctx context.Context, tx pgx.Tx, artifactID, mark
 	return RecordTaskProgress(ctx, tx, artifactID, tree)
 }
 
+// latestPrimaryVersion is the number of the latest version of issue i's primary document, in a
+// query whose `from issues i` is in scope: the greatest artifact_versions.number of that document,
+// or 0 for an issue whose document has no version row, which a count taken from no version
+// matches. The reconciliation's drift predicate and its batch both read it, so the two never
+// disagree on which version a count names.
+const latestPrimaryVersion = `(
+	select coalesce(max(v.number), 0)
+	from artifacts a join artifact_versions v on v.artifact_id = a.id
+	where a.issue_key = i.key and a.is_primary
+)`
+
 // taskProgressDrift is the issues whose stored task count is not the count of their primary
-// document's latest version: never counted (every row the migration that added these columns found), or versioned by a
-// server that wrote no count (the task a deploy replaces, until it stops), or whose latest version
-// was written while the row was locked by another writer. The latest version is the greatest
-// artifact_versions.number of the primary document; an issue with no version row has 0, which a
-// count taken from no version matches. The row's own lock is taken only by the batch that writes
-// it, so the predicate reads nothing it would wait on.
-const taskProgressDrift = `
-	i.tasks_version is distinct from (
-		select coalesce(max(v.number), 0)
-		from artifacts a join artifact_versions v on v.artifact_id = a.id
-		where a.issue_key = i.key and a.is_primary
-	)`
+// document's latest version: never counted (every row the migration that added these columns
+// found), versioned by a server that wrote no count (the task a deploy replaces, until it stops),
+// or whose latest version was written while the row was locked by another writer. The row's own
+// lock is taken only by the batch that writes it, so the predicate reads nothing it would wait on.
+const taskProgressDrift = `i.tasks_version is distinct from ` + latestPrimaryVersion
 
 // taskProgressBatch is how many issues one reconciliation transaction counts; between batches the
 // pool is free for requests.
@@ -80,11 +81,11 @@ const TaskProgressReconcileInterval = 5 * time.Minute
 // TaskProgressReconcileInterval until ctx ends, so an issue nobody has edited since the deploy
 // shows its progress, an issue the old task versioned during the deploy is counted again, and a
 // null `tasks` on the API means the spec holds no task list for longer than that interval only
-// while a row stays locked. Each pass runs until a batch finds no drift it can lock; a batch that
-// fails is logged and the pass retried after a short wait, a bounded number of times, so one bad
-// batch ends the pass and not the loop. Each issue's latest version markdown is parsed as the
-// stored rendering it is (pmdoc.ParseRendering); an issue whose spec does not parse is logged and
-// counted as holding none, so one broken document does not hold the rest back.
+// while a row stays locked. Each pass runs until no drift it can lock remains; a batch that fails,
+// or that was short because rows were locked, is retried after a short wait, a bounded number of
+// times, so one bad batch ends the pass and not the loop. Each issue's latest version markdown is
+// parsed as the stored rendering it is (pmdoc.ParseRendering); an issue whose spec does not parse
+// is logged and counted as holding none, so one broken document does not hold the rest back.
 func (s *Service) RunTaskProgressReconciliation(ctx context.Context) {
 	for {
 		s.ReconcileTaskProgress(ctx)
@@ -97,17 +98,23 @@ func (s *Service) RunTaskProgressReconciliation(ctx context.Context) {
 }
 
 // taskProgressPassRetries is how many failed or short batches one reconciliation pass retries
-// before leaving the rest to the next pass.
-const taskProgressPassRetries = 5
+// before leaving the rest to the next pass, and taskProgressRetryBackoffStep the wait before the
+// first retry, multiplied by the retry's number.
+const (
+	taskProgressPassRetries      = 5
+	taskProgressRetryBackoffStep = 200 * time.Millisecond
+)
 
-// ReconcileTaskProgress runs one reconciliation pass: batches until none finds drift it can lock.
-// A batch that errs, or that was short because rows were locked, is retried after a backoff, up to
-// taskProgressPassRetries times in the pass; drift still left is the next pass's.
+// ReconcileTaskProgress runs one reconciliation pass: batches until no drift it can lock remains.
+// A full batch with drift left goes straight to the next batch, as a backfill of more than one
+// batch does. A batch that errs, or that was short because the rows left were locked, is retried
+// after a backoff, up to taskProgressPassRetries times in the pass; drift still left is the next
+// pass's.
 func (s *Service) ReconcileTaskProgress(ctx context.Context) {
 	ctx = store.WithTransactionTracking(ctx)
 	counted, retries := 0, 0
 	for ctx.Err() == nil {
-		n, skipped, err := s.reconcileTaskProgressBatch(ctx)
+		n, remaining, err := s.reconcileTaskProgressBatch(ctx)
 		if err != nil {
 			if ctx.Err() != nil {
 				return
@@ -115,18 +122,22 @@ func (s *Service) ReconcileTaskProgress(ctx context.Context) {
 			slog.Error("dispatch: reconcile issue task progress", "error", err)
 		}
 		counted += n
-		if err == nil && !skipped {
+		if err == nil && !remaining {
 			break
+		}
+		if err == nil && n == taskProgressBatch {
+			continue
 		}
 		retries++
 		if retries > taskProgressPassRetries {
-			slog.Warn("dispatch: issue task progress reconciliation left drift to the next pass", "counted", counted)
+			slog.Warn("dispatch: issue task progress reconciliation left drift to the next pass",
+				"counted", counted)
 			break
 		}
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(time.Duration(retries) * 200 * time.Millisecond):
+		case <-time.After(time.Duration(retries) * taskProgressRetryBackoffStep):
 		}
 	}
 	if counted > 0 {
@@ -135,11 +146,13 @@ func (s *Service) ReconcileTaskProgress(ctx context.Context) {
 }
 
 // reconcileTaskProgressBatch counts one batch of drifted issues in one transaction and returns how
-// many it counted and whether drift remained that it could not lock. Each issue row is locked `for
-// no key update skip locked` - the level every owner-row writer takes (lockArtifactOwner), enough
-// for three non-key columns - so a concurrent writer holding the row is left alone: a version write
-// records its own count, and any other writer leaves the row's drift to the next batch.
-func (s *Service) reconcileTaskProgressBatch(ctx context.Context) (counted int, skipped bool, err error) {
+// many it counted and whether drift remained past them. Each issue row is locked `for no key
+// update skip locked` - the level every owner-row writer takes (lockArtifactOwner), enough for
+// three non-key columns - so a concurrent writer holding the row is left alone: a version write
+// records its own count, and any other writer leaves the row's drift to a later batch.
+func (s *Service) reconcileTaskProgressBatch(
+	ctx context.Context,
+) (counted int, remaining bool, err error) {
 	tx, err := s.store.Pool.Begin(ctx)
 	if err != nil {
 		return 0, false, fmt.Errorf("begin task progress reconciliation: %w", err)
@@ -152,11 +165,7 @@ func (s *Service) reconcileTaskProgressBatch(ctx context.Context) (counted int, 
 		         where a.issue_key = i.key and a.is_primary and v.markdown is not null
 		         order by v.number desc limit 1
 		       ), ''),
-		       (
-		         select coalesce(max(v.number), 0)
-		         from artifacts a join artifact_versions v on v.artifact_id = a.id
-		         where a.issue_key = i.key and a.is_primary
-		       )
+		       `+latestPrimaryVersion+`
 		from issues i
 		where `+taskProgressDrift+`
 		order by i.key
@@ -189,7 +198,8 @@ func (s *Service) reconcileTaskProgressBatch(ctx context.Context) (counted int, 
 		if issue.markdown != "" {
 			tree, err := pmdoc.ParseRendering(issue.markdown)
 			if err != nil {
-				slog.Warn("dispatch: issue task progress reconciliation cannot parse the spec; counting none", "issue", issue.key, "error", err)
+				slog.Warn("dispatch: issue task progress reconciliation cannot parse the spec; counting none",
+					"issue", issue.key, "error", err)
 			} else {
 				progress = pmdoc.CountTasks(tree)
 			}
@@ -200,9 +210,9 @@ func (s *Service) reconcileTaskProgressBatch(ctx context.Context) (counted int, 
 			return 0, false, fmt.Errorf("record issue %s task progress: %w", issue.key, err)
 		}
 	}
-	// Drift this batch could not lock is still there once it commits; the pass asks again. Read
-	// before the commit so the rows this batch wrote are not counted as drift.
-	var remaining bool
+	// Drift past this batch - rows the limit left, or rows another writer holds - is still there
+	// once it commits; the pass asks again. Read before the commit so the rows this batch wrote are
+	// not counted as drift.
 	if err := tx.QueryRow(ctx, `
 		select exists(select 1 from issues i where `+taskProgressDrift+` and i.key <> all($1::text[]))
 	`, keysOf(batch, func(issue drifted) string { return issue.key })).Scan(&remaining); err != nil {
@@ -214,7 +224,7 @@ func (s *Service) reconcileTaskProgressBatch(ctx context.Context) (counted int, 
 		}
 		return 0, false, fmt.Errorf("commit task progress reconciliation: %w", err)
 	}
-	return len(batch), remaining && len(batch) < taskProgressBatch, nil
+	return len(batch), remaining, nil
 }
 
 func keysOf[T any](items []T, key func(T) string) []string {
