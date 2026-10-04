@@ -18,8 +18,10 @@ export function useAgentSearch(): readonly [string, (next: string) => void] {
   return useCappedSearchParam("q");
 }
 
-/** Every word `search` names, lowercased; an empty query has none. */
-function searchWords(search: string): readonly string[] {
+/** Every word `search` names, lowercased; an empty query has none. The page splits this once per
+ *  render (`AgentsPage`'s `words`) rather than once per agent, since every row's `matchesFilters`
+ *  call would otherwise re-split the one query it shares. */
+export function searchWords(search: string): readonly string[] {
   return search.trim().toLowerCase().split(/\s+/).filter(Boolean);
 }
 
@@ -34,16 +36,18 @@ function searchHaystack(agent: Agent, issueKeys: readonly string[]): string {
     .toLowerCase();
 }
 
-/** `issueKeys` is every issue key an open ask by this session names (`sessionIssueKeys`, below),
- *  the free-text search's only field beyond what `Agent` itself carries. */
+/** `words` is `searchWords(filters.search)`, split once by the caller rather than once per agent
+ *  (the page's `matches` closure runs this for every row). `issueKeys` is every issue key an open
+ *  ask by this session names (`sessionIssueKeys`, below), the free-text search's only field
+ *  beyond what `Agent` itself carries. */
 export function matchesFilters(
   agent: Agent,
-  filters: AgentFilters,
+  filters: Pick<AgentFilters, "machine" | "role">,
+  words: readonly string[],
   issueKeys: readonly string[]
 ): boolean {
   if (filters.machine !== "" && agent.machine_id !== filters.machine) return false;
   if (filters.role !== "" && !agent.roles.includes(filters.role)) return false;
-  const words = searchWords(filters.search);
   if (words.length === 0) return true;
   const haystack = searchHaystack(agent, issueKeys);
   return words.every((word) => haystack.includes(word));

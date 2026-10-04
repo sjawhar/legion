@@ -18,7 +18,7 @@ import type {
 } from "../../api/types";
 import { AuthGate } from "../../app";
 import { orderAgents, partitionAgents } from "./AgentsPage";
-import { matchesFilters } from "./agent-search";
+import { matchesFilters, searchWords } from "./agent-search";
 import { broadcastPlan, broadcastSendState, composedBroadcast } from "./broadcast-plan";
 
 // Delivery attempts are dated relative to the run: the dashboard only offers a
@@ -467,7 +467,7 @@ test("matchesFilters keeps a session whose title, directory, machine, session id
     title: "Beta",
   });
   const matches = (agent: Agent, search: string, issueKeys: readonly string[] = []) =>
-    matchesFilters(agent, { machine: "", role: "", search }, issueKeys);
+    matchesFilters(agent, { machine: "", role: "" }, searchWords(search), issueKeys);
 
   // One word, found in the title alone.
   expect(matches(alpha, "scrum")).toBe(true);
@@ -496,14 +496,14 @@ test("matchesFilters narrows by machine and role exactly, free text besides", ()
     title: "Planner",
   });
   expect(
-    matchesFilters(planner, { machine: "build-host", role: "planner", search: "planner" }, [])
+    matchesFilters(planner, { machine: "build-host", role: "planner" }, searchWords("planner"), [])
   ).toBe(true);
   expect(
-    matchesFilters(planner, { machine: "other-host", role: "planner", search: "planner" }, [])
+    matchesFilters(planner, { machine: "other-host", role: "planner" }, searchWords("planner"), [])
   ).toBe(false);
-  expect(matchesFilters(planner, { machine: "build-host", role: "reviewer", search: "" }, [])).toBe(
-    false
-  );
+  expect(
+    matchesFilters(planner, { machine: "build-host", role: "reviewer" }, searchWords(""), [])
+  ).toBe(false);
 });
 
 test("Agents orders who needs you before Dispatch recency before liveness, folds silent sessions, and keeps a re-poll stable", async () => {

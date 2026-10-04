@@ -1,4 +1,5 @@
 import { DELIVERY_CAPABILITIES } from "@legion/contracts";
+import { SEARCH_QUERY_MAX } from "@legion/contracts/dispatch-tools";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   type ReactNode,
@@ -73,6 +74,7 @@ import {
   type AgentFilters,
   filterOptions,
   matchesFilters,
+  searchWords,
   sessionIssueKeys,
   useAgentSearch,
 } from "./agent-search";
@@ -870,9 +872,11 @@ function AgentFilterBar({
       <input
         aria-label="Search agents"
         className={`${field} min-w-0 flex-1 basis-64`}
+        maxLength={SEARCH_QUERY_MAX}
         onChange={(event) => onFilters({ ...filters, search: event.target.value })}
         placeholder="Title, directory, machine, session or open issue"
         ref={searchInputRef}
+        title={`At most ${SEARCH_QUERY_MAX} characters`}
         type="search"
         value={filters.search}
       />
@@ -1123,8 +1127,9 @@ export function AgentsPage(): ReactNode {
     needsYouBySession,
     Date.now()
   );
+  const words = searchWords(filters.search);
   const matches = (agent: Agent) =>
-    matchesFilters(agent, filters, issueKeysBySession.get(agent.session_id) ?? []);
+    matchesFilters(agent, filters, words, issueKeysBySession.get(agent.session_id) ?? []);
   // The rows the filters match, in the order the page shows them - the open list, then each fold.
   // Select-all ticks this set in order and the composer names the selection in tick order, so a
   // set ordered any other way (the registry's own, say) would name the recipients in an order the
