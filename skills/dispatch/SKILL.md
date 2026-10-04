@@ -26,7 +26,6 @@ after `skill://dispatch/` is relative to this skill's base directory.
 | call `dispatch_doc_edit`: rewrite a paragraph, insert or move a block, change a table's cells, rows or columns | [Editing a document](skill://dispatch/references/document-edits.md) |
 | write a typed block (an `:::ask`, a callout), comment on or suggest a change to a document, upload an artifact, or retry after `DOC_SERVICE_UNAVAILABLE` | [Documents](skill://dispatch/references/documents.md) |
 | choose your next issue, claim one, move its status or priority, reorder a board, or audit a project's backlog | [Working an issue](skill://dispatch/references/issues.md) |
-| start or answer a design conversation in a spec: each turn, a comment that settles a question, coming to terms, a worked example | [Brainstorming in the spec](skill://dispatch/references/brainstorming.md) |
 | find who answers an ask, edit, retract or resolve one, reply with the turn, or follow a thread | [Asks after they open](skill://dispatch/references/asks.md) |
 | catch up after a restart, trace what cites a node, or write a `dispatch://` reference | [Reading back](skill://dispatch/references/reading.md) |
 | answer a BTW, Aside or Steer frame, or a message from the Agents page | [Targeted and direct messages](skill://dispatch/references/messages.md) |
@@ -36,17 +35,9 @@ after `skill://dispatch/` is relative to this skill's base directory.
 ## Design changes are brainstormed here
 
 When a session has Dispatch, a design change needing the human's choices is brainstormed in its
-issue's spec, not chat or a repository design document. The first version holds only established
-facts and every ready question, each a decision block at the end of the section that sets it up; a
-question waits only when it depends on an answer still open. Each next version replies in each
-human comment's thread (`dispatch_comment` with `reply_to`; under an open ask whose next move is
-yours, such as an approval request you must revise or hand back, `reply_to_ask` with
-`turn: "agent"`, since a default-turn reply hands it back to the human), folds the answers into the
-surrounding text while their decision blocks stay, in the human's words (or the option they chose)
-with the date, and adds the questions they open. Approval is requested at the end, not after each
-section, when nothing in the spec is new to the human. Before you write a spec's first version, and
-again before each next turn, read [Brainstorming in the spec](skill://dispatch/references/brainstorming.md):
-each step, and a worked example.
+issue's spec, not chat or a repository design document, and its plan is the issue's `plan.md`
+document. `skill://dispatch-brainstorming` holds the process: read it before a spec's first
+version, before each next turn, and before you write a plan.
 
 ## Writing for the human
 
@@ -89,11 +80,14 @@ a new version that keeps the human's own text, never a second "spec" artifact be
 
 - **Each open question is a decision block**, shaped and placed as [Decision blocks](#decision-blocks)
   says. Because it is an ask, it reaches the human's Inbox, and the answer lands next to its context.
-- **A settled point records the human's own words and the date**, quoted, so no reader mistakes
+- **A settled point records the person's own words and the date**, quoted, so no reader mistakes
   it for your inference; an answer that is only a chosen option is recorded in the form
-  `Sami chose "Commit author" on the question below (2026-10-02)`. A point you inferred says so,
-  with the reasoning. One carried in from another document keeps its provenance: an agent's
-  inference there is marked one here, or stays out until the human raises it.
+  `<name> chose "Commit author" on the question below (<date>)`, naming them from `dispatch_whoami`
+  or the conversation, or "the person" when the token names no owner — never a name you were not
+  given. A point you inferred says so, with the reasoning; during a live brainstorming
+  conversation, `skill://dispatch-brainstorming` is stricter and keeps an inference out of the spec
+  until the human has agreed to it. One carried in from another document keeps its provenance: an
+  agent's inference there is marked one here, or stays out until the human raises it.
 - **Sections follow the topic.** No heading is required and none has a fixed place; name each
   section for what it discusses.
 - **A changed point is rewritten, not appended to.** When an answer or a new fact changes the

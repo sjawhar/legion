@@ -484,17 +484,12 @@ func (s *Service) creditContentChange(room string, origin any) {
 	if _, published := origin.(*liveWriteOrigin); published {
 		return
 	}
-	value, service := s.serviceOrigins.Load(origin)
+	if _, service := s.serviceOrigins.Load(origin); service {
+		return
+	}
 	state := s.room(room)
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	if service {
-		if actor, credited := value.(*model.Actor); credited && actor != nil {
-			state.pending[actorKey(*actor)] = *actor
-			state.lastActor = new(*actor)
-		}
-		return
-	}
 	var sole *model.Actor
 	ambiguous := false
 	for _, actor := range state.connected {
