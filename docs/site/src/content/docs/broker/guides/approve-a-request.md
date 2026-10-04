@@ -7,9 +7,10 @@ sidebar:
 
 When an agent asks for a secret a person must approve, that person decides it in Dispatch. Only the
 approver the request names can decide it: the secret's owner, for a person's secret, or anyone
-signed in to Dispatch, for a shared human-tier secret, whose requests show the approver `anyone`
-and wait in every person's Inbox. [Concepts](/legion/broker/concepts/#owner-and-tier-who-may-have-which-secret)
-explains which requests need whom.
+signed in to Dispatch, for a shared secret. A shared secret's request waits in every person's Inbox
+at once, and the first person to decide it decides it for everyone: it then leaves every Inbox.
+[Concepts](/legion/broker/concepts/#owner-and-tier-who-may-have-which-secret) explains which
+requests need whom.
 
 ## Find it
 
@@ -29,8 +30,9 @@ Opening a **Secret request** shows the broker's record of it:
 - **Lifetime**: how long the grant would last from the moment you approve.
 - **Requested** and **Expires**: when it was made, and when it
   [expires](/legion/broker/concepts/#approvals) if nobody decides it.
-- **Rules version**: the version of the secret policy the request was decided under.
-- **Approver**: who may decide it: an email, or `anyone`.
+- **Policy version**: the version of the secret policy the request was decided under.
+- **Approver**: who may decide it: an email, or **Anyone signed in to Dispatch** for a shared
+  secret.
 - **The agent's stated reason**: the `--reason` the agent gave, shown as plain text.
 
 Approve only what the reason and the session justify. The agent's command is waiting; a denial runs
@@ -38,15 +40,15 @@ nothing.
 
 ## Decide it
 
-Click **Approve** or **Deny**. Dispatch sends the broker your decision with the login you are
-signed in as, and the broker records it on the request's record: the agent's waiting command runs,
-or exits 77.
+Click **Approve** or **Deny**. Dispatch sends the broker your decision with the email you are
+signed in as, and the broker records it on the request's record, so a shared secret's record names
+whoever decided it: the agent's waiting command runs, or exits 77.
 
 The broker refuses a decision that cannot stand, and Dispatch shows its message under the buttons:
 
 | Message | Why |
 | --- | --- |
-| `only the record's approver may decide it` (`NOT_APPROVER`) | You are not the approver this request names, or you approved it after the secret's tags named someone else to approve it ([what an owner change does](/legion/broker/concepts/#approvals)); you can still deny a request that names you. A request whose approver is `anyone` is refused to the login `anyone`. |
+| `only the record's approver may decide it` (`NOT_APPROVER`) | You are not the approver this request names, or you approved it after the secret's tags named someone else to approve it ([what an owner change does](/legion/broker/concepts/#approvals)), or after the session's operator withheld one of its secrets, which only that secret's owner may then approve, and no one while the broker does not serve that secret to that session (it is out of the policy, or a service's); you can still deny a request that names you. A request whose approver is `anyone` is refused to the login `anyone`. |
 | `request is already decided` (`RECORD_TERMINAL`) | Someone, or another tab, decided it first, or the agent's session ended and withdrew it. |
 | `request expired before its approver acted on it` (`RECORD_TERMINAL`) | It waited past its expiry. The agent asks again if it still needs the secret. |
 | `this grant's approval chain no longer verifies` (`GRANT_CHAIN_INVALID`) | The stored request no longer matches its own signature; nothing was granted. Tell whoever runs the broker. |
