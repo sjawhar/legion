@@ -195,11 +195,9 @@ legion({
 
 The daemon spawns that sub-architect as its own process with the child's context already
 in its environment; a resume of an existing role continues the same process instead of
-starting a fresh one. Keep the returned session identifiers; retro and adjustment resume
-those same sessions through `spawn_worker` (under the TypeScript daemon a finished worker is
-retired after `worker_idle_retire_seconds` and comes back from its session file; the Go daemon
-keeps every role live until its issue closes). Park while children are
-in flight. On each child closure, re-scope open work, close obsolete work with a reason, and
+starting a fresh one. Keep the returned session identifiers; retro and adjustment reuse
+those same sessions through `spawn_worker`. Every started role stays live until its issue closes.
+Park while children are in flight. On each child closure, re-scope open work, close obsolete work with a reason, and
 release the next wave only when it now makes sense. There is no inter-child dependency
 mechanism to encode.
 
@@ -238,12 +236,9 @@ review and the merge-gate sequence.
 ## 5. Retro
 
 Retro is mandatory for every issue that passed review, before merge. Send the implementer
-back in through the daemon — `spawn_worker` on the implementer carrying the retro task. This
-resumes the same agent whether its pane is still live or the daemon has already retired it
-idle (under the TypeScript daemon a finished worker is retired after `worker_idle_retire_seconds`,
-default 600 s, and resumed from its session file on its next assignment). Never `envoy_publish`
-to a finished worker's role topic for this: a retired role has no live holder and the publish is
-rejected with 404.
+back in through the daemon: `spawn_worker` on the implementer carrying the retro task. This
+assigns the work to the same agent. Use the daemon's assignment rather than a plain Envoy
+question so the daemon records which role owns the task.
 
 ```text
 legion({
@@ -273,8 +268,7 @@ Preserve this order exactly:
    deletion, then the reviewer approves that head. The deletion must land before that approval, which is head-pinned. An implementer
    completion advances the status only from `in_progress` to `testing`; this push, like retro
    later, leaves the status where it is, so you set nothing by hand — on its `phase-finished`
-   wake, `spawn_worker` the reviewer to approve that head (a finished reviewer may already be
-   retired; `spawn_worker` resumes it);
+   wake, `spawn_worker` the reviewer to approve that head in its existing session;
 3. retro commits its learnings under `docs/solutions/` on top of the approved head; that
    commit does not void the approval and never returns the tree to the tester or reviewer;
 4. the merger verifies the current head is the reviewer-approved head plus only commits that
