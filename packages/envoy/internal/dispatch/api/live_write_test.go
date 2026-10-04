@@ -290,7 +290,7 @@ func newHeldWriteFixture(t *testing.T, settle time.Duration, configure ...func(*
 			Store:       database,
 			Persistence: f.persistence,
 			Identity: identity.HeaderIdentity{
-				Header: "X-Dispatch-User", AllowedLogins: map[string]struct{}{"alice": {}},
+				Header: "X-Dispatch-User", People: store.NewPgPeopleStore(database.Pool),
 			},
 			Settle: settle,
 		})

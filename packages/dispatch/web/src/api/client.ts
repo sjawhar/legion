@@ -115,13 +115,6 @@ export function isUnauthorized(error: unknown): boolean {
   return error instanceof ApiError && error.status === 401;
 }
 
-// A 403 with this code means the signed-in GitHub account is not on the allowlist — a
-// distinct outcome from "not signed in" (401) or a transient failure, and one no amount
-// of retrying resolves.
-export function isForbidden(error: unknown): boolean {
-  return error instanceof ApiError && error.status === 403 && error.code === "LOGIN_NOT_ALLOWED";
-}
-
 // The architecture TREE read answers this 404 for a project with no source — definitive like an
 // auth outcome, since retrying changes nothing. The source read itself answers `null` instead:
 // the question it asks has "no source" as an ordinary answer, and a 404 made every reader of an
@@ -150,15 +143,14 @@ export function isDocumentUnloadable(error: unknown): boolean {
   return error instanceof ApiError && error.status === 409 && error.code === "DOCUMENT_UNLOADABLE";
 }
 
-// The retry policy every query in the app shares: an auth outcome (401/403), a missing
-// architecture source, an unconfigured credential broker, a stored document outside Proof's
-// schema, or a stored history that cannot load is definitive and retrying it changes nothing; any
-// other failure (dropped connection, 5xx) is worth a couple of automatic attempts before surfacing
-// a Retry affordance to the user.
+// The retry policy every query in the app shares: an auth outcome (401), a missing architecture
+// source, an unconfigured credential broker, a stored document outside Proof's schema, or a
+// stored history that cannot load is definitive and retrying it changes nothing; any other failure
+// (dropped connection, 5xx) is worth a couple of automatic attempts before surfacing a Retry
+// affordance to the user.
 export function isRetryableQueryError(error: unknown): boolean {
   return (
     !isUnauthorized(error) &&
-    !isForbidden(error) &&
     !isSourceNotFound(error) &&
     !isCredentialFeatureOff(error) &&
     !isDocumentSchemaError(error) &&
@@ -348,7 +340,7 @@ export class DispatchApiClient {
     );
   }
 
-  /** The sign-in allowlist, sorted: the assignee picker's options. */
+  /** Everyone who has signed in, sorted by email: the assignee picker's options. */
   async listUsers(): Promise<DispatchUser[]> {
     return (await this.json<ListUsersResponse>("/api/v1/users")).users;
   }
@@ -683,10 +675,6 @@ export class DispatchApiClient {
 
   async githubRest(path: string, init: RequestInit = {}): Promise<Response> {
     return this.response(`/api/github/rest/${path.replace(/^\/+/, "")}`, init);
-  }
-
-  githubGraphql<T>(query: string, variables?: Record<string, unknown>): Promise<T> {
-    return this.post<T>("/api/github/graphql", { query, variables });
   }
 
   /** `GET /api/v1/credential-requests?approver=me`: every request waiting on the viewer, as

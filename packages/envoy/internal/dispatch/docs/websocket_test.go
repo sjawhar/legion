@@ -17,6 +17,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
@@ -175,7 +176,7 @@ func TestLoadFailureMakesDocumentServiceUnavailable(t *testing.T) {
 		Store:       database,
 		Persistence: failingVersionedStore{VersionedStore: NewPgVersioned(database), loadErr: errors.New("load failed")},
 		Events:      events.NewBroker(),
-		Identity:    identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: map[string]struct{}{"alice": {}}},
+		Identity:    identity.HeaderIdentity{Header: "X-Dispatch-User", People: store.NewPgPeopleStore(database.Pool)},
 	})
 	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
 
@@ -204,7 +205,7 @@ func TestCorruptLoadRefusesTheSocketAndReadsAsUnloadable(t *testing.T) {
 		Store:       database,
 		Persistence: failingVersionedStore{VersionedStore: NewPgVersioned(database), loadUpdate: []byte{0xff}},
 		Events:      events.NewBroker(),
-		Identity:    identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: map[string]struct{}{"alice": {}}},
+		Identity:    identity.HeaderIdentity{Header: "X-Dispatch-User", People: store.NewPgPeopleStore(database.Pool)},
 	})
 	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
 
@@ -321,7 +322,7 @@ func TestShutdownClosesDocumentPeersBeforeDrain(t *testing.T) {
 	artifactID := createDocument(t, database, "before")
 	service := New(Deps{
 		Store: database, Events: events.NewBroker(),
-		Identity: identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: map[string]struct{}{"alice": {}}},
+		Identity: identity.HeaderIdentity{Header: "X-Dispatch-User", People: store.NewPgPeopleStore(database.Pool)},
 	})
 	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
 	seedServiceText(t, service, artifactID, "before")
@@ -361,7 +362,7 @@ func TestShutdownBoundsPeerCloseDuringLockedAppend(t *testing.T) {
 	artifactID := createDocument(t, database, "before")
 	service := New(Deps{
 		Store: database, Events: events.NewBroker(),
-		Identity: identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: map[string]struct{}{"alice": {}}},
+		Identity: identity.HeaderIdentity{Header: "X-Dispatch-User", People: store.NewPgPeopleStore(database.Pool)},
 		Settle:   time.Hour,
 	})
 	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
@@ -411,7 +412,7 @@ func TestAppendFailureClosesDocumentConnectionAndReloadsRoom(t *testing.T) {
 		Store:       database,
 		Persistence: failingVersionedStore{VersionedStore: NewPgVersioned(database), appendErr: errors.New("append failed")},
 		Events:      events.NewBroker(),
-		Identity:    identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: map[string]struct{}{"alice": {}}},
+		Identity:    identity.HeaderIdentity{Header: "X-Dispatch-User", People: store.NewPgPeopleStore(database.Pool)},
 		Settle:      time.Hour,
 	})
 	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
@@ -447,7 +448,7 @@ func TestFailedRoomEvictsAndReloadsOnNextAccess(t *testing.T) {
 		Store:       database,
 		Persistence: &failingOnceVersionedStore{VersionedStore: NewPgVersioned(database)},
 		Events:      events.NewBroker(),
-		Identity:    identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: map[string]struct{}{"alice": {}}},
+		Identity:    identity.HeaderIdentity{Header: "X-Dispatch-User", People: store.NewPgPeopleStore(database.Pool)},
 	})
 	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
 	seedServiceText(t, service, artifactID, "before")
@@ -481,7 +482,7 @@ func TestDocumentBearerCannotForgeVerifiedServiceSubject(t *testing.T) {
 	service := New(Deps{
 		Store:      database,
 		Events:     events.NewBroker(),
-		Identity:   identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: map[string]struct{}{"alice": {}}},
+		Identity:   identity.HeaderIdentity{Header: "X-Dispatch-User", People: store.NewPgPeopleStore(database.Pool)},
 		AgentToken: "doc-agent-token",
 		ServerURL:  "https://dispatch.example",
 		Settle:     20 * time.Millisecond,
