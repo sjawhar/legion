@@ -679,6 +679,8 @@ test("Agents keeps selected-issue sends on the issue message route", async () =>
         last_seq: 0,
         open_asks: 0,
         parent: null,
+        blocked_by: [],
+        primary_artifact_id: "artifact-1",
         assignee: null,
         claim: null,
         components: { mode: "inherit", ids: [], unknown: [], reason: null, inherited_from: null },

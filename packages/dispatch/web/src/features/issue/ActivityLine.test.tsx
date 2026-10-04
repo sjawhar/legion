@@ -52,6 +52,7 @@ const issue: IssueDetails = {
   number: 52,
   open_asks: [],
   parent: null,
+  blocked_by: [],
   primary_artifact_id: "artifact-1",
   priority: null,
   project: "OPS",

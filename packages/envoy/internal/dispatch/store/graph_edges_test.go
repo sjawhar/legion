@@ -29,6 +29,7 @@ func TestGraphEdgesUnionsMentionsWithEveryStructuralRelation(t *testing.T) {
 		with p as (insert into projects (key, name) values ('CORE', 'Core') returning key),
 		parent as (insert into issues (key, project_key, number, title, created_by, rank) values ('CORE-1', 'CORE', 1, 'Parent', '{"kind":"user","id":"alice"}', 'A') returning key),
 		child as (insert into issues (key, project_key, number, title, created_by, rank, parent_key) select 'CORE-2', 'CORE', 2, 'Child', '{"kind":"user","id":"alice"}', 'B', key from parent returning key),
+		blocker as (insert into issue_links (issue_key, kind, target_key) values ('CORE-2', 'blocked_by', 'CORE-1') returning issue_key),
 		spec as (insert into artifacts (issue_key, project_key, slug, name, kind, is_primary, created_by) values ('CORE-1', 'CORE', 'spec', 'spec.md', 'doc', true, '{"kind":"user","id":"alice"}') returning id, ref_key),
 		pdoc as (insert into artifacts (project_key, slug, name, kind, created_by) values ('CORE', 'notes', 'Notes', 'doc', '{"kind":"user","id":"alice"}') returning id, ref_key),
 		block_ask as (insert into asks (issue_key, author, question, block_id, block_artifact_id) select 'CORE-1', '{"kind":"user","id":"alice"}', 'block?', 'b1', id from spec returning id),
@@ -47,7 +48,7 @@ func TestGraphEdgesUnionsMentionsWithEveryStructuralRelation(t *testing.T) {
 		member as (insert into issue_component_members (issue_key, project_key, component_id) select issue_key, 'CORE', 'web' from attachment returning issue_key)
 		select spec.id::text, pdoc.id::text, block_ask.id::text, anchored_ask.id::text, project_ask.id::text, plain_ask.id::text,
 		       anchored_comment.id::text, project_comment.id::text, reply.id::text, ask_reply.id::text, message.id::text, message_reply.id::text
-		from spec, pdoc, block_ask, anchored_ask, project_ask, plain_ask, anchored_comment, project_comment, reply, ask_reply, message, message_reply, follower, mention, member
+		from spec, pdoc, block_ask, anchored_ask, project_ask, plain_ask, anchored_comment, project_comment, reply, ask_reply, message, message_reply, follower, mention, blocker, member
 	`).Scan(&ids.Spec, &ids.ProjectDoc, &ids.BlockAsk, &ids.AnchoredAsk, &ids.ProjectAsk, &ids.PlainAsk, &ids.AnchoredComment, &ids.ProjectComment, &ids.Reply, &ids.AskReply, &ids.Message, &ids.MessageReply); err != nil {
 		t.Fatalf("seed graph: %v", err)
 	}
@@ -71,6 +72,7 @@ func TestGraphEdgesUnionsMentionsWithEveryStructuralRelation(t *testing.T) {
 	want := []graphEdgeRow{
 		{"message", ids.Message, "mentions", "issue", "CORE-2", true},
 		{"issue", "CORE-2", "child_of", "issue", "CORE-1", false},
+		{"issue", "CORE-2", "blocked_by", "issue", "CORE-1", false},
 		{"artifact", ids.Spec, "attached_to", "issue", "CORE-1", false},
 		{"ask", ids.BlockAsk, "anchored_to", "artifact", "CORE-1/spec", false},
 		{"ask", ids.AnchoredAsk, "anchored_to", "artifact", "CORE-1/spec", false},
@@ -100,7 +102,7 @@ func TestGraphEdgesUnionsMentionsWithEveryStructuralRelation(t *testing.T) {
 		"from issue":   `select * from graph_edges where from_kind = 'issue' and from_id = 'CORE-2'`,
 	} {
 		plan := explainWithoutSeqScan(t, store, query)
-		for _, table := range []string{"refs", "artifacts", "asks", "comments", "messages", "issues", "ask_followers", "issue_component_members", "issue_components"} {
+		for _, table := range []string{"refs", "artifacts", "asks", "comments", "messages", "issues", "issue_links", "ask_followers", "issue_component_members", "issue_components"} {
 			if strings.Contains(plan, "Seq Scan on "+table) {
 				t.Errorf("%s: plan scans %s sequentially:\n%s", name, table, plan)
 			}
