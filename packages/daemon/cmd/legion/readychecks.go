@@ -83,7 +83,7 @@ func readyChecks(ctx context.Context, workspace string, issue paneIssue, stdout 
 			return err
 		}
 	}
-	var workflows []classify.Standing
+	var workflows []requiredchecks.WorkflowRun
 	if len(required.Workflows) > 0 {
 		if workflows, err = requiredchecks.Workflows(ctx, github, pull.Head.SHA, required.Workflows); err != nil {
 			return err
@@ -114,11 +114,11 @@ func readyChecks(ctx context.Context, workspace string, issue paneIssue, stdout 
 			return err
 		}
 	}
-	for i, workflow := range workflows {
-		if defined := required.Workflows[i].RepositoryID; workflow.Result == classify.Missing && defined != pull.Base.Repo.ID {
-			return fmt.Errorf("the required workflow %q is defined in repository %d, not in pull request #%d's own (%d): Legion matches a workflow's runs only in the repository that defines it, so it found no run of it on head %s and cannot confirm it passed; tell the architect", workflow.Name, defined, number, pull.Base.Repo.ID, head)
+	for _, workflow := range workflows {
+		if workflow.Result == classify.Missing && workflow.RepositoryID != pull.Base.Repo.ID {
+			return fmt.Errorf("the required workflow %q is defined in repository %d, not in pull request #%d's own (%d): Legion matches a workflow's runs only in the repository that defines it, so it found no run of it on head %s and cannot confirm it passed; tell the architect", workflow.Path, workflow.RepositoryID, number, pull.Base.Repo.ID, head)
 		}
-		if err := refusal(workflow, "required workflow", "no run of"); err != nil {
+		if err := refusal(workflow.Standing(), "required workflow", "no run of"); err != nil {
 			return err
 		}
 	}
@@ -150,6 +150,7 @@ func workspaceRepository(workspace string) (ghrepo.Repository, error) {
 // skipped counts as a success, as GitHub counts it for a required check.
 func headCheckResults(ctx context.Context, github githubrest.Client, sha string) (map[string]string, error) {
 	type run struct {
+		ID         int64  `json:"id"`
 		Name       string `json:"name"`
 		Status     string `json:"status"`
 		Conclusion string `json:"conclusion"`
@@ -159,7 +160,19 @@ func headCheckResults(ctx context.Context, github githubrest.Client, sha string)
 		return nil, err
 	}
 	results := map[string]string{}
+	// GitHub documents no ordering for this list (unlike the combined-status endpoint below,
+	// whose docs guarantee "the most recent status for each context"), and a cancelled run
+	// superseded by a concurrency group's newer run can list after the newer run's own success
+	// (pr-title.yaml's `edited` re-trigger after a concurrency-group cancellation is one way this
+	// happens). Keeping whichever run a name is seen last in the list would then let a cancelled
+	// run overwrite a later success. Check run IDs are assigned at creation and never reused, so
+	// the highest ID per name is always its most recent run, regardless of list order.
+	latestID := map[string]int64{}
 	for _, run := range runs {
+		if prevID, seen := latestID[run.Name]; seen && prevID >= run.ID {
+			continue
+		}
+		latestID[run.Name] = run.ID
 		results[run.Name] = classify.RunResult(run.Status, run.Conclusion)
 	}
 	var combined struct {

@@ -24,7 +24,11 @@ envoy_token_file: ./envoy-token
 nats_urls: [nats://nats.example.com:4222]
 
 projects:
-  WIDGETS: { repo: acme/widgets }      # each Dispatch project the daemon runs, and its repository
+  WIDGETS:                             # each Dispatch project the daemon runs, and its repository
+    repo: acme/widgets
+    # review_workflows:                # opt-in: required workflows that review the code and fail on
+    #   - .github/workflows/review.yml #   their own findings; in testing and review a red only they
+    #                                  #   make goes to the reviewer, not back to the implementer
 gates:
   design: root-issues                  # a person approves each root's spec (the default); or off
 github_apps:
