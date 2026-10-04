@@ -109,6 +109,8 @@ var settings = []setting{
 		Description: "Set to `1` to mount the end-to-end tests' hook routes; never in a real deployment."},
 	{Name: "COHERE_API_KEY", Required: "no",
 		Description: "The company's Cohere key: embeds a write's text after commit and a search request's query, for meaning search (LEGION-549). Unset, search answers keyword-only and says so, and `backfill-embeddings` refuses to run."},
+	{Name: "DISPATCH_TEST_SETTLE_DELAY", Default: "`2s`", Required: "no",
+		Description: "Document settlement delay for an end-to-end test process; a positive Go duration. Set only with `DISPATCH_TEST_HOOKS=1`."},
 }
 
 // removedSettings are the variables a release stopped reading, each with what replaced it. None is
