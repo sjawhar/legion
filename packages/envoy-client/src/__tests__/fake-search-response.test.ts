@@ -1,13 +1,27 @@
 import { describe, expect, test } from "bun:test";
+import type { SearchResult } from "@legion/contracts";
 import { fakeSearchResponse } from "./fake-search-response";
+
+function hit(id: string): SearchResult {
+  return {
+    kind: "document",
+    owner: { key: "LEGION-2", kind: "issue", title: "Astrolabe", status: "triage" },
+    artifact: { slug: "spec", name: "spec.md" },
+    id,
+    snippet: "<mark>astrolabe</mark>",
+    rank: 1,
+    href: `/issues/LEGION-2/spec?q=astrolabe#${id}`,
+  };
+}
 
 describe("fakeSearchResponse", () => {
   test("defaults to a single complete page sized to the hits", () => {
-    const response = fakeSearchResponse([]);
+    const hits = [hit("artifact-1"), hit("artifact-2")];
+    const response = fakeSearchResponse(hits);
     expect(response).toEqual({
-      results: [],
-      total: 0,
-      reachable: 0,
+      results: hits,
+      total: 2,
+      reachable: 2,
       limit: 20,
       offset: 0,
       took_ms: 0,
@@ -15,14 +29,22 @@ describe("fakeSearchResponse", () => {
   });
 
   test("accepts all four paging fields together", () => {
-    const response = fakeSearchResponse([], {
+    const hits = [hit("artifact-1")];
+    const response = fakeSearchResponse(hits, {
       total: 250,
       reachable: 120,
       limit: 2,
       offset: 10,
       took_ms: 4,
     });
-    expect(response).toMatchObject({ total: 250, reachable: 120, limit: 2, offset: 10 });
+    expect(response).toEqual({
+      results: hits,
+      total: 250,
+      reachable: 120,
+      limit: 2,
+      offset: 10,
+      took_ms: 4,
+    });
   });
 
   test("accepts all four paging fields explicitly undefined, the legacy pre-paging shape", () => {
