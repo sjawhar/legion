@@ -37,7 +37,7 @@ var _ Store = (*S3)(nil)
 // front of an endpoint named by AWS_ENDPOINT_URL_S3, which a test container or a loopback
 // stand-in has none of.
 func NewS3(ctx context.Context, bucket string) (*S3, error) {
-	cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithLogger(logging.LoggerFunc(logSDK)))
+	cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithLogger(logging.LoggerFunc(LogSDK)))
 	if err != nil {
 		return nil, fmt.Errorf("load AWS configuration for the file store: %w", err)
 	}
@@ -47,9 +47,10 @@ func NewS3(ctx context.Context, bucket string) (*S3, error) {
 	return &S3{client: s3.NewFromConfig(cfg, func(o *s3.Options) { o.UsePathStyle = true }), bucket: bucket}, nil
 }
 
-// logSDK hands the AWS SDK's log lines to slog, so they are structured like Dispatch's own and its
-// debug lines stay below slog's default level.
-func logSDK(classification logging.Classification, format string, v ...any) {
+// LogSDK hands the AWS SDK's log lines to slog, so they are structured like Dispatch's own and its
+// debug lines stay below slog's default level. Every AWS client Dispatch builds (this store, the
+// retained-asset store in routes) loads its configuration with it, so the SDK logs one way.
+func LogSDK(classification logging.Classification, format string, v ...any) {
 	level := slog.LevelDebug
 	if classification == logging.Warn {
 		level = slog.LevelWarn

@@ -91,6 +91,8 @@ type bootConfig struct {
 	// WebDist is DISPATCH_WEB_DIST: the dashboard directory to serve, or empty to find it from
 	// the binary (defaultWebDistDir).
 	WebDist string
+	// AssetStoreBucket is DISPATCH_ASSET_STORE_BUCKET. Empty preserves local-only asset serving.
+	AssetStoreBucket string
 	// SigningKey is DISPATCH_SIGNING_KEY: the session cookie key, or empty to keep one in the
 	// data dir (sessionSigningKey).
 	SigningKey string
@@ -218,6 +220,14 @@ func main() {
 	if fileStore != nil {
 		slog.Info("dispatch: storing uploaded files in a bucket", "bucket", boot.FileStoreBucket)
 	}
+	var assetStore routes.AssetStore
+	if boot.AssetStoreBucket != "" {
+		assetStore, err = routes.NewS3AssetStore(ctx, boot.AssetStoreBucket)
+		if err != nil {
+			slog.Error("dispatch: configure retained asset store", "error", err)
+			os.Exit(1)
+		}
+	}
 
 	signIn, err := discoverSignIn(ctx, boot)
 	if err != nil {
@@ -261,6 +271,7 @@ func main() {
 	appCtx, err := routes.BuildAppContext(appContextOptions(boot, routes.AppContextOptions{
 		SigningKey:  signingKey,
 		WebDistDir:  webDistDir,
+		AssetStore:  assetStore,
 		People:      people,
 		Sessions:    sessions,
 		Identity:    requestIdentity,
@@ -456,6 +467,7 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 		TestHooksEnabled:   env.get("DISPATCH_TEST_HOOKS") == "1",
 		WebDist:            env.get("DISPATCH_WEB_DIST"),
 		FileStoreBucket:    strings.TrimSpace(env.get("DISPATCH_FILE_STORE_BUCKET")),
+		AssetStoreBucket:   strings.TrimSpace(env.get("DISPATCH_ASSET_STORE_BUCKET")),
 		SigningKey:         env.get("DISPATCH_SIGNING_KEY"),
 		InsecureCookie:     env.get("DISPATCH_INSECURE_COOKIE") != "",
 		EnvoyToken:         env.get("ENVOY_TOKEN"),
