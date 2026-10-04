@@ -144,15 +144,15 @@ write identity errors with `identity.WriteError`.
   refresh the pool refuses, or one whose ID token no longer puts the person in
   the group, advances their session generation and forgets the token, ending
   every session they hold. `store.PgPeopleStore` seals that token at rest
-  (`store/refresh_token_seal.go`): AES-256-GCM under a key derived from the
-  session signing key with HKDF and a fixed purpose label, the email as
-  additional data, stored as `v1:` and base64url. Main hands the people store
-  the same key it signs cookies with. A stored value that does not open is no
-  refresh token: the store's `Membership` read forgets it and its confirmation
-  and logs once without the value, so the person's next request is refused and
-  they sign in again; a new signing key therefore drops every stored refresh
-  token with every cookie. Migration `0069` forgets the plain-text tokens stored
-  before sealing.
+  (`store/refresh_token_seal.go`; the format is in the README's Identity
+  section) under a key derived from the session signing key, which main hands
+  it with the cookie key (`openPeople`, `signin.go`). A stored value that does
+  not open is no refresh token: `Membership` answers none and logs, writing
+  nothing. Every boot retires each token stored in plain text
+  (`retirePlainRefreshTokens`, `PgPeopleStore.RetirePlainRefreshTokens`):
+  revoke at the pool (`oidc.CodeFlow.Revoke`), then compare-and-clear;
+  `SignIn` retires the plain-text token it replaces through the same
+  `retire`. A sealed value is never sent to the pool.
 - `DISPATCH_IDENTITY=header:<Header-Name>` is for tests and local harnesses
   only, never for a production Dispatch deployment. It accepts the named
   header's value lowercased and records it in `people`; it requires

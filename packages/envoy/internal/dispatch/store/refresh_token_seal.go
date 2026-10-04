@@ -12,8 +12,9 @@ import (
 )
 
 // sealedRefreshTokenPrefix leads every refresh token people.refresh_token holds sealed: the
-// format's version, so a value in any other form (a token stored in plain text before migration
-// 0069, or a later format) is told apart instead of tried. Migration 0069 matches it in SQL.
+// format's version, so a value in any other form (a token stored in plain text by the release before
+// sealing, or a later format) is told apart instead of tried. RetirePlainRefreshTokens matches it in
+// SQL.
 const sealedRefreshTokenPrefix = "v1:"
 
 // refreshTokenKeyInfo is the HKDF info the refresh-token key is derived with: its one purpose, so
@@ -51,16 +52,13 @@ func (s refreshTokenSeal) seal(email, token string) string {
 	return sealedRefreshTokenPrefix + base64.RawURLEncoding.EncodeToString(s.aead.Seal(nil, nil, []byte(token), []byte(email)))
 }
 
-// errRefreshTokenFormat is a stored value without the sealed format's prefix.
-var errRefreshTokenFormat = errors.New("the stored value is not in the sealed format " + sealedRefreshTokenPrefix)
-
 // open returns the refresh token sealed holds for email. Its error never carries the value: a value
 // in another format, one that does not decode, and one sealed under another key or for another
 // person each fail with a fixed message.
 func (s refreshTokenSeal) open(email, sealed string) (string, error) {
 	encoded, ok := strings.CutPrefix(sealed, sealedRefreshTokenPrefix)
 	if !ok {
-		return "", errRefreshTokenFormat
+		return "", errors.New("the stored value is not in the sealed format " + sealedRefreshTokenPrefix)
 	}
 	ciphertext, err := base64.RawURLEncoding.DecodeString(encoded)
 	if err != nil {

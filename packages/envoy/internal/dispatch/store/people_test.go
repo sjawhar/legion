@@ -3,14 +3,15 @@ package store
 import (
 	"bytes"
 	"context"
-	"errors"
 	"log/slog"
+	"net/http"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/sjawhar/envoy/internal/pgmigrate"
+	"github.com/sjawhar/envoy/internal/oidc"
+	"github.com/sjawhar/envoy/internal/oidc/oidctest"
 )
 
 func TestPgPeopleStoreKeepsEachPersonsMembership(t *testing.T) {
@@ -19,7 +20,7 @@ func TestPgPeopleStoreKeepsEachPersonsMembership(t *testing.T) {
 	if err := database.Migrate(ctx); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	people := NewPgPeopleStore(database.Pool, "signing-key")
+	people := NewPgPeopleStore(database.Pool, "signing-key", nil)
 	email := "person-" + randomDatabaseSuffix(t) + "@d.example"
 
 	if _, found, err := people.Membership(ctx, email); err != nil || found {
@@ -64,7 +65,7 @@ func TestPeopleTableRefusesAnEmailThatIsNotLowercase(t *testing.T) {
 	if err := database.Migrate(ctx); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	people := NewPgPeopleStore(database.Pool, "signing-key")
+	people := NewPgPeopleStore(database.Pool, "signing-key", nil)
 	for _, email := range []string{"Sami@d.example", ""} {
 		if err := people.Record(ctx, email); err == nil {
 			t.Errorf("Record(%q) was accepted", email)
@@ -93,6 +94,50 @@ func captureLogs(t *testing.T) *bytes.Buffer {
 	return &logs
 }
 
+// revokingPool is a sign-in pool on this machine with Dispatch's app client and the revocation
+// endpoint its discovery names, and the code flow a people store revokes through, as main hands it
+// the one it discovers.
+func revokingPool(t *testing.T) (*oidctest.Issuer, *oidc.CodeFlow) {
+	t.Helper()
+	pool := oidctest.New(t)
+	pool.EnableCodeFlow(pool.PublishKey(t, "pool-key"), "dispatch-client", "client-secret")
+	flow, err := oidc.NewCodeFlow(context.Background(), pool.URL(), "dispatch-client", "client-secret")
+	if err != nil {
+		t.Fatalf("discover the sign-in pool: %v", err)
+	}
+	return pool, flow
+}
+
+// storePlainRefreshToken stores token for email in plain text with the statement the release
+// before sealing signs a person in with, as a task of that release still does during a roll or
+// after a rollback.
+func storePlainRefreshToken(t *testing.T, database *Store, email, token string) {
+	t.Helper()
+	if _, err := database.Pool.Exec(context.Background(), `
+		insert into people (email, refresh_token, confirmed_at) values ($1, $2, $3)
+		on conflict (email) do update
+		set signed_in_at = now(), refresh_token = excluded.refresh_token, confirmed_at = excluded.confirmed_at
+	`, email, token, time.Now()); err != nil {
+		t.Fatalf("store the refresh token of %s in plain text: %v", email, err)
+	}
+}
+
+// migratedEmptyStore is a database of the test's own at the current schema, so a sweep of people
+// meets only the rows the test writes.
+func migratedEmptyStore(t *testing.T) *Store {
+	t.Helper()
+	database := openEmptyTestStore(t)
+	if err := database.Migrate(context.Background()); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	return database
+}
+
+// retireLines counts the lines logging a refresh token the pool did not revoke.
+func retireLines(logs *bytes.Buffer) int {
+	return strings.Count(logs.String(), "the sign-in pool did not revoke a refresh token stored in plain text")
+}
+
 // The row a backup copies never holds the refresh token: a sign-in and a confirmation each store it
 // sealed under the signing key, in the versioned format, and only a store under that key opens it.
 func TestPgPeopleStoreSealsTheRefreshTokenAtRest(t *testing.T) {
@@ -101,7 +146,7 @@ func TestPgPeopleStoreSealsTheRefreshTokenAtRest(t *testing.T) {
 	if err := database.Migrate(ctx); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	people := NewPgPeopleStore(database.Pool, "signing-key")
+	people := NewPgPeopleStore(database.Pool, "signing-key", nil)
 	email := "sealed-" + randomDatabaseSuffix(t) + "@d.example"
 	confirmed := time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC)
 	for _, write := range []struct {
@@ -131,24 +176,26 @@ func TestPgPeopleStoreSealsTheRefreshTokenAtRest(t *testing.T) {
 
 // A refresh token that does not open is no refresh token: one sealed under another signing key (the
 // key rotated), one sealed for another person (a value moved between rows), and one stored in plain
-// text before Dispatch sealed them. The read forgets it with its confirmation, so the person signs
-// in again, and logs that once, naming the person and never the value; the person's next sign-in
-// is kept.
+// text. Each read answers none, so the person signs in again, and logs that, naming the person and
+// never the value; the read writes nothing and asks the pool nothing. The person's next sign-in
+// replaces the value, revoking one in plain text first; a sealed value is never sent to the pool.
 func TestPgPeopleStoreReadsARefreshTokenThatDoesNotOpenAsNone(t *testing.T) {
 	ctx := context.Background()
 	database := openTestStore(t)
 	if err := database.Migrate(ctx); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	people := NewPgPeopleStore(database.Pool, "signing-key")
 	confirmed := time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC)
-	for name, store := range map[string]func(t *testing.T, email, token string){
-		"sealed under another signing key": func(t *testing.T, email, token string) {
-			if err := NewPgPeopleStore(database.Pool, "rotated-signing-key").SignIn(ctx, email, token, confirmed); err != nil {
+	for name, unopened := range map[string]struct {
+		store   func(t *testing.T, people *PgPeopleStore, email, token string)
+		revoked bool
+	}{
+		"sealed under another signing key": {store: func(t *testing.T, _ *PgPeopleStore, email, token string) {
+			if err := NewPgPeopleStore(database.Pool, "rotated-signing-key", nil).SignIn(ctx, email, token, confirmed); err != nil {
 				t.Fatal(err)
 			}
-		},
-		"sealed for another person": func(t *testing.T, email, token string) {
+		}},
+		"sealed for another person": {store: func(t *testing.T, people *PgPeopleStore, email, token string) {
 			other := "other-" + email
 			if err := people.SignIn(ctx, other, token, confirmed); err != nil {
 				t.Fatal(err)
@@ -156,17 +203,17 @@ func TestPgPeopleStoreReadsARefreshTokenThatDoesNotOpenAsNone(t *testing.T) {
 			if _, err := database.Pool.Exec(ctx, `insert into people (email, refresh_token, confirmed_at) select $1, refresh_token, confirmed_at from people where email = $2`, email, other); err != nil {
 				t.Fatal(err)
 			}
-		},
-		"stored in plain text": func(t *testing.T, email, token string) {
-			if _, err := database.Pool.Exec(ctx, `insert into people (email, refresh_token, confirmed_at) values ($1, $2, $3)`, email, token, confirmed); err != nil {
-				t.Fatal(err)
-			}
-		},
+		}},
+		"stored in plain text": {store: func(t *testing.T, _ *PgPeopleStore, email, token string) {
+			storePlainRefreshToken(t, database, email, token)
+		}, revoked: true},
 	} {
 		t.Run(name, func(t *testing.T) {
+			pool, flow := revokingPool(t)
+			people := NewPgPeopleStore(database.Pool, "signing-key", flow)
 			email := "unopened-" + randomDatabaseSuffix(t) + "@d.example"
 			token := "refresh-" + randomDatabaseSuffix(t)
-			store(t, email, token)
+			unopened.store(t, people, email, token)
 			stored := storedRefreshToken(t, database, email)
 			if stored == nil {
 				t.Fatal("the row holds no refresh token to read")
@@ -178,12 +225,15 @@ func TestPgPeopleStoreReadsARefreshTokenThatDoesNotOpenAsNone(t *testing.T) {
 					t.Fatalf("read %d: membership = %#v found=%t err=%v, want the person with no refresh token or confirmation", read, membership, found, err)
 				}
 			}
-			if kept := storedRefreshToken(t, database, email); kept != nil {
-				t.Errorf("the row still holds %q, want the value forgotten", *kept)
+			if kept := storedRefreshToken(t, database, email); kept == nil || *kept != *stored {
+				t.Errorf("the row holds %v after the reads, want the value the reads found, unchanged", kept)
+			}
+			if got := pool.RevocationRequests(); len(got) != 0 {
+				t.Errorf("the reads sent %q to the sign-in pool, want nothing", got)
 			}
 			out := logs.String()
-			if count := strings.Count(out, "a stored refresh token did not open"); count != 1 || !strings.Contains(out, email) {
-				t.Errorf("logged %d lines naming the unopened token, want one naming %s:\n%s", count, email, out)
+			if count := strings.Count(out, "a stored refresh token did not open"); count != 2 || !strings.Contains(out, email) {
+				t.Errorf("logged %d lines naming the unopened token, want one per read naming %s:\n%s", count, email, out)
 			}
 			if strings.Contains(out, token) || strings.Contains(out, *stored) {
 				t.Errorf("the log carries the stored value:\n%s", out)
@@ -194,127 +244,172 @@ func TestPgPeopleStoreReadsARefreshTokenThatDoesNotOpenAsNone(t *testing.T) {
 			if membership, _, err := people.Membership(ctx, email); err != nil || membership.RefreshToken != "refresh-again" {
 				t.Errorf("membership after signing in again = %#v err=%v, want refresh-again", membership, err)
 			}
+			var want []string
+			if unopened.revoked {
+				want = []string{token}
+			}
+			if got := pool.RevocationRequests(); !reflect.DeepEqual(got, want) {
+				t.Errorf("signing in again sent %q to the sign-in pool, want %q", got, want)
+			}
 		})
 	}
 }
 
-// A read that found a value that does not open forgets it only while the row still holds it: a
-// sign-in recorded between the read and the forgetting keeps its own refresh token, and nothing is
-// logged for it.
-func TestPgPeopleStoreKeepsASignInRecordedAfterTheUnopenedRead(t *testing.T) {
+// A boot retires every refresh token people holds in plain text: it revokes each at the sign-in
+// pool, then forgets it with its confirmation, keeping the person. A sealed token is never sent to
+// the pool and stays, as does a person holding none, and a second boot finds nothing to do.
+func TestRetirePlainRefreshTokensRevokesEachThenForgetsIt(t *testing.T) {
+	ctx := context.Background()
+	database := migratedEmptyStore(t)
+	pool, flow := revokingPool(t)
+	people := NewPgPeopleStore(database.Pool, "signing-key", flow)
+	storePlainRefreshToken(t, database, "plain-1@d.example", "plain-token-1")
+	storePlainRefreshToken(t, database, "plain-2@d.example", "plain-token-2")
+	if err := people.SignIn(ctx, "sealed@d.example", "sealed-token", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	sealed := storedRefreshToken(t, database, "sealed@d.example")
+	if err := people.Record(ctx, "recorded@d.example"); err != nil {
+		t.Fatal(err)
+	}
+
+	logs := captureLogs(t)
+	retired, failed, err := people.RetirePlainRefreshTokens(ctx)
+	if err != nil || retired != 2 || failed != 0 {
+		t.Fatalf("RetirePlainRefreshTokens = %d retired, %d failed, %v; want 2, 0", retired, failed, err)
+	}
+	if got, want := pool.RevocationRequests(), []string{"plain-token-1", "plain-token-2"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("the sign-in pool was sent %q to revoke, want %q: each plain token once, nothing sealed", got, want)
+	}
+	for _, email := range []string{"plain-1@d.example", "plain-2@d.example", "recorded@d.example"} {
+		membership, found, err := people.Membership(ctx, email)
+		if err != nil || !found || membership.RefreshToken != "" || !membership.ConfirmedAt.IsZero() {
+			t.Errorf("%s after the boot = %#v found=%t err=%v, want the person kept with no refresh token or confirmation", email, membership, found, err)
+		}
+	}
+	if kept := storedRefreshToken(t, database, "sealed@d.example"); kept == nil || *kept != *sealed {
+		t.Errorf("the sealed row holds %v after the boot, want its sealed value unchanged", kept)
+	}
+	if membership, _, err := people.Membership(ctx, "sealed@d.example"); err != nil || membership.RefreshToken != "sealed-token" {
+		t.Errorf("the sealed sign-in after the boot = %#v err=%v, want sealed-token", membership, err)
+	}
+	if strings.Contains(logs.String(), "plain-token") {
+		t.Errorf("the log carries a token:\n%s", logs.String())
+	}
+
+	if retired, failed, err := people.RetirePlainRefreshTokens(ctx); err != nil || retired != 0 || failed != 0 {
+		t.Errorf("a second boot = %d retired, %d failed, %v; want nothing to do", retired, failed, err)
+	}
+	if got := pool.RevocationRequests(); len(got) != 2 {
+		t.Errorf("after a second boot the sign-in pool was sent %q, want nothing more", got)
+	}
+}
+
+// A token the sign-in pool does not revoke stays in its row, for the next boot to try again: the
+// boot logs one ERROR naming the person and the pool's HTTP status, never the value, and counts
+// it. The next boot the pool answers retires it.
+func TestRetirePlainRefreshTokensLeavesATokenThePoolDidNotRevoke(t *testing.T) {
+	ctx := context.Background()
+	database := migratedEmptyStore(t)
+	pool, flow := revokingPool(t)
+	people := NewPgPeopleStore(database.Pool, "signing-key", flow)
+	email := "plain@d.example"
+	storePlainRefreshToken(t, database, email, "plain-token")
+	pool.FailRevocation(http.StatusServiceUnavailable, "")
+
+	logs := captureLogs(t)
+	if retired, failed, err := people.RetirePlainRefreshTokens(ctx); err != nil || retired != 0 || failed != 1 {
+		t.Fatalf("a boot the pool refuses = %d retired, %d failed, %v; want 0, 1", retired, failed, err)
+	}
+	if kept := storedRefreshToken(t, database, email); kept == nil || *kept != "plain-token" {
+		t.Fatalf("the row holds %v after a revocation the pool refused, want the token kept for the next attempt", kept)
+	}
+	out := logs.String()
+	if retireLines(logs) != 1 || !strings.Contains(out, "level=ERROR") || !strings.Contains(out, "email="+email) || !strings.Contains(out, "status=503") {
+		t.Errorf("logged, want one ERROR naming %s and status=503:\n%s", email, out)
+	}
+	if strings.Contains(out, "plain-token") {
+		t.Errorf("the log carries the token:\n%s", out)
+	}
+
+	pool.FailRevocation(0, "")
+	if retired, failed, err := people.RetirePlainRefreshTokens(ctx); err != nil || retired != 1 || failed != 0 {
+		t.Fatalf("the next boot = %d retired, %d failed, %v; want 1, 0", retired, failed, err)
+	}
+	if kept := storedRefreshToken(t, database, email); kept != nil {
+		t.Errorf("the row holds %q after the pool revoked it, want it forgotten", *kept)
+	}
+}
+
+// The retirement runs at every boot, not once: a token a task of the earlier release stores in
+// plain text after this release booted (during the roll, or after a rollback) is retired at the
+// next boot.
+func TestRetirePlainRefreshTokensRetiresATokenStoredAfterTheLastBoot(t *testing.T) {
+	ctx := context.Background()
+	database := openEmptyTestStore(t)
+	pool, flow := revokingPool(t)
+	people := NewPgPeopleStore(database.Pool, "signing-key", flow)
+	boot := func() (retired, failed int) {
+		t.Helper()
+		if err := database.Migrate(ctx); err != nil {
+			t.Fatalf("migrate: %v", err)
+		}
+		retired, failed, err := people.RetirePlainRefreshTokens(ctx)
+		if err != nil {
+			t.Fatalf("RetirePlainRefreshTokens: %v", err)
+		}
+		return retired, failed
+	}
+	if retired, failed := boot(); retired != 0 || failed != 0 {
+		t.Fatalf("the first boot = %d retired, %d failed, want nothing to do", retired, failed)
+	}
+	email := "rolled-back@d.example"
+	storePlainRefreshToken(t, database, email, "stored-after-the-boot")
+	if retired, failed := boot(); retired != 1 || failed != 0 {
+		t.Errorf("the next boot = %d retired, %d failed, want 1, 0", retired, failed)
+	}
+	if kept := storedRefreshToken(t, database, email); kept != nil {
+		t.Errorf("after the next boot the row holds %q, want it forgotten", *kept)
+	}
+	if got := pool.RevocationRequests(); !reflect.DeepEqual(got, []string{"stored-after-the-boot"}) {
+		t.Errorf("the sign-in pool was sent %q, want the token stored after the first boot", got)
+	}
+}
+
+// A sign-in replaces the refresh token a row holds; one in plain text is retired first, so the
+// replacement never forgets a token the pool still accepts without revoking it. When the pool does
+// not revoke it, the sign-in logs that, naming the person and the status and never the value, and
+// proceeds: the person just signed in at the pool.
+func TestPgPeopleStoreSignInRetiresThePlainTokenItReplaces(t *testing.T) {
 	ctx := context.Background()
 	database := openTestStore(t)
 	if err := database.Migrate(ctx); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	people := NewPgPeopleStore(database.Pool, "signing-key")
-	email := "raced-" + randomDatabaseSuffix(t) + "@d.example"
-	if err := people.SignIn(ctx, email, "refresh-new", time.Now()); err != nil {
-		t.Fatal(err)
-	}
-	logs := captureLogs(t)
-	if err := people.forgetUnopened(ctx, email, "v1:the-value-the-read-found", errors.New("did not open")); err != nil {
-		t.Fatal(err)
-	}
-	if membership, _, err := people.Membership(ctx, email); err != nil || membership.RefreshToken != "refresh-new" {
-		t.Errorf("membership = %#v err=%v, want the later sign-in's refresh-new", membership, err)
-	}
-	if logs.Len() != 0 {
-		t.Errorf("logged for a row that kept its sign-in:\n%s", logs.String())
-	}
-}
-
-// Migration 0069 forgets every refresh token stored in plain text before Dispatch sealed them, with
-// its confirmation, and keeps the person; a sealed token and a person holding none are left as they
-// are, so applying it again changes nothing. Its census, taken before it applies, counts exactly the
-// tokens it forgets, so the deploy that carries it is refused for that count alone.
-func TestMigration0069ForgetsPlainTextRefreshTokens(t *testing.T) {
-	ctx := context.Background()
-	database := openEmptyTestStore(t)
-	migrateThrough(t, database, 68)
-	people := NewPgPeopleStore(database.Pool, "signing-key")
-	confirmed := time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC)
-	if _, err := database.Pool.Exec(ctx, `insert into people (email, refresh_token, confirmed_at) values
-		('plain-1@d.example', 'eyJjdHkiOiJKV1QiLCJlbmMiOiJBMjU2R0NNIn0.plain-1', $1),
-		('plain-2@d.example', 'plain-2', $1)`, confirmed); err != nil {
-		t.Fatal(err)
-	}
-	if err := people.SignIn(ctx, "sealed@d.example", "refresh-sealed", confirmed); err != nil {
-		t.Fatal(err)
-	}
-	if err := people.Record(ctx, "recorded@d.example"); err != nil {
-		t.Fatal(err)
-	}
-	sealed := *storedRefreshToken(t, database, "sealed@d.example")
-
-	report, err := census(ctx, database.Pool.Config().ConnString(), migrationsThrough(t, 69), pgmigrate.CensusOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := refusals(report); len(report.Pending) != 1 || report.Pending[0].Count == nil || *report.Pending[0].Count != 2 ||
-		len(got) != 1 || !strings.Contains(got[0], "0069_people_clear_plain_refresh_tokens.up.sql: its census counts 2") {
-		t.Fatalf("census before 0069, refusals %v:\n%s\nwant 0069's census alone, counting the 2 plain-text tokens", got, reportText(report))
-	}
-
-	type row struct {
-		Email        string
-		RefreshToken *string
-		ConfirmedAt  *time.Time
-	}
-	rows := func() []row {
-		t.Helper()
-		result, err := database.Pool.Query(ctx, `select email, refresh_token, confirmed_at from people order by email`)
-		if err != nil {
-			t.Fatal(err)
+	for _, status := range []int{0, http.StatusBadRequest} {
+		pool, flow := revokingPool(t)
+		people := NewPgPeopleStore(database.Pool, "signing-key", flow)
+		email := "replaced-" + randomDatabaseSuffix(t) + "@d.example"
+		plain := "plain-" + randomDatabaseSuffix(t)
+		storePlainRefreshToken(t, database, email, plain)
+		pool.FailRevocation(status, "invalid_request")
+		logs := captureLogs(t)
+		if err := people.SignIn(ctx, email, "refresh-fresh", time.Now()); err != nil {
+			t.Fatalf("pool answering %d: sign in: %v", status, err)
 		}
-		defer result.Close()
-		var out []row
-		for result.Next() {
-			var r row
-			if err := result.Scan(&r.Email, &r.RefreshToken, &r.ConfirmedAt); err != nil {
-				t.Fatal(err)
-			}
-			out = append(out, r)
+		if got := pool.RevocationRequests(); !reflect.DeepEqual(got, []string{plain}) {
+			t.Errorf("pool answering %d: the sign-in sent %q to revoke, want the plain token it replaces", status, got)
 		}
-		if err := result.Err(); err != nil {
-			t.Fatal(err)
+		if membership, _, err := people.Membership(ctx, email); err != nil || membership.RefreshToken != "refresh-fresh" {
+			t.Errorf("pool answering %d: membership = %#v err=%v, want the new sign-in's refresh-fresh", status, membership, err)
 		}
-		return out
-	}
-	migrateThrough(t, database, 69)
-	after := rows()
-	sealedAt := confirmed
-	want := []row{
-		{Email: "plain-1@d.example"},
-		{Email: "plain-2@d.example"},
-		{Email: "recorded@d.example"},
-		{Email: "sealed@d.example", RefreshToken: &sealed, ConfirmedAt: &sealedAt},
-	}
-	if len(after) != len(want) {
-		t.Fatalf("people after 0069 = %+v, want %+v", after, want)
-	}
-	for i := range want {
-		if after[i].Email != want[i].Email || !reflect.DeepEqual(after[i].RefreshToken, want[i].RefreshToken) ||
-			(after[i].ConfirmedAt == nil) != (want[i].ConfirmedAt == nil) || (after[i].ConfirmedAt != nil && !after[i].ConfirmedAt.Equal(*want[i].ConfirmedAt)) {
-			t.Errorf("person %d after 0069 = %+v, want %+v", i, after[i], want[i])
+		out := logs.String()
+		if wantLines := map[bool]int{true: 0, false: 1}[status == 0]; retireLines(logs) != wantLines ||
+			(wantLines == 1 && (!strings.Contains(out, "email="+email) || !strings.Contains(out, "status=400"))) {
+			t.Errorf("pool answering %d: logged, want %d ERROR lines naming %s and the status:\n%s", status, wantLines, email, out)
 		}
-	}
-	if membership, _, err := people.Membership(ctx, "sealed@d.example"); err != nil || membership.RefreshToken != "refresh-sealed" {
-		t.Errorf("the sealed sign-in after 0069 = %#v err=%v, want refresh-sealed", membership, err)
-	}
-
-	migrations, err := pgmigrate.Load(migrationFiles, "migrations")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, migration := range migrations {
-		if migration.Version == 69 {
-			if _, err := database.Pool.Exec(ctx, migration.SQL); err != nil {
-				t.Fatalf("apply 0069 again: %v", err)
-			}
+		if strings.Contains(out, plain) {
+			t.Errorf("pool answering %d: the log carries the token:\n%s", status, out)
 		}
-	}
-	if again := rows(); !reflect.DeepEqual(again, after) {
-		t.Errorf("people after applying 0069 again = %+v, want unchanged %+v", again, after)
 	}
 }

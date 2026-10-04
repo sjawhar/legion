@@ -252,7 +252,7 @@ func newDocumentSocketRig(t *testing.T, heartbeat time.Duration) *documentSocket
 	}
 
 	database := storetest.Open(t)
-	rig.people = store.NewPgPeopleStore(database.Pool, "signing-key")
+	rig.people = store.NewPgPeopleStore(database.Pool, "signing-key", nil)
 	rig.sessions = store.NewPgSessionStore(database.Pool)
 	if err := rig.people.SignIn(ctx, rig.email, signIn.RefreshToken, time.Now()); err != nil {
 		t.Fatalf("record the sign-in: %v", err)

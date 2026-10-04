@@ -299,7 +299,7 @@ func routerFor(t *testing.T, boot bootConfig, built routes.AppContextOptions) ht
 func appContextFor(boot bootConfig, built routes.AppContextOptions) (*routes.AppContext, error) {
 	built.SigningKey = "signing-key"
 	if built.People == nil {
-		built.People = store.NewPgPeopleStore(nil, built.SigningKey)
+		built.People = store.NewPgPeopleStore(nil, built.SigningKey, nil)
 	}
 	built.Sessions = currentSessions{}
 	built.Identity = requestIdentityFor(boot, built.SigningKey, built.People, built.Sessions, built.SignIn)
@@ -310,7 +310,7 @@ func appContextFor(boot bootConfig, built routes.AppContextOptions) (*routes.App
 // sealing refresh tokens under the signing key appContextFor gives the router, as main does.
 func peopleStore(t *testing.T) auth.PeopleStore {
 	t.Helper()
-	return store.NewPgPeopleStore(storetest.Open(t).Pool, "signing-key")
+	return store.NewPgPeopleStore(storetest.Open(t).Pool, "signing-key", nil)
 }
 
 // currentSessions is a session store holding every login's session at generation 0, as a fresh
@@ -889,6 +889,21 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			if _, err := resolveBootConfig(devSignInEnvironment(map[string]string{"DISPATCH_SIGNING_KEY": "table-key"})); err == nil || !strings.Contains(err.Error(), "DISPATCH_SIGNING_KEY") {
 				t.Errorf("dev sign-in with a key: err = %v, want a refusal naming DISPATCH_SIGNING_KEY", err)
 			}
+			// The people store main builds (openPeople) seals under the key main signs cookies with:
+			// it opens a refresh token sealed under DISPATCH_SIGNING_KEY.
+			t.Run("people store", func(t *testing.T) {
+				database := storetest.Open(t)
+				if err := store.NewPgPeopleStore(database.Pool, "table-key", nil).SignIn(context.Background(), "alice@example.com", "refresh-sealed", time.Now()); err != nil {
+					t.Fatal(err)
+				}
+				people, key, err := openPeople(resolveWith(t, map[string]string{"DISPATCH_SIGNING_KEY": "table-key"}), t.TempDir(), database.Pool, nil)
+				if err != nil || key != "table-key" {
+					t.Fatalf("openPeople: key %q, %v; want table-key", key, err)
+				}
+				if membership, _, err := people.Membership(context.Background(), "alice@example.com"); err != nil || membership.RefreshToken != "refresh-sealed" {
+					t.Errorf("the people store main builds read %#v, %v; want the token sealed under DISPATCH_SIGNING_KEY", membership, err)
+				}
+			})
 			// The key the router's sign-in seals the pool's refresh token under (main hands it to the
 			// people store): the row holds the sealed form, and past the hour the membership check
 			// opens it and renews the sign-in with the pool. A people store under another key, which
@@ -917,7 +932,7 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 					handler.ServeHTTP(response, request)
 					return response
 				}
-				handler := signInRouter(t, boot, store.NewPgPeopleStore(database.Pool, "signing-key"))
+				handler := signInRouter(t, boot, store.NewPgPeopleStore(database.Pool, "signing-key", nil))
 				member := poolSignIn(t, handler, pool, "dispatch-members")
 				if member.Code != http.StatusFound || !sessionCookieSet(member) {
 					t.Fatalf("sign-in: the callback answered %d %s, want a signed-in redirect", member.Code, member.Body.String())
@@ -933,8 +948,8 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 				if response := whoami(handler, member); response.Code != http.StatusOK || pool.Refreshes() != 1 {
 					t.Errorf("past the hour: whoami answered %d %s after %d refreshes, want 200 after one refresh with the opened token", response.Code, response.Body.String(), pool.Refreshes())
 				}
-				// The refresh just confirmed the membership; the rotated store forgets it all the same.
-				rotated := signInRouter(t, boot, store.NewPgPeopleStore(database.Pool, "rotated-signing-key"))
+				// The refresh just confirmed the membership; the rotated store opens none of it all the same.
+				rotated := signInRouter(t, boot, store.NewPgPeopleStore(database.Pool, "rotated-signing-key", nil))
 				if response := whoami(rotated, member); response.Code != http.StatusUnauthorized || errorCode(response) != "NO_IDENTITY" || pool.Refreshes() != 1 {
 					t.Errorf("a refresh token sealed under another key: whoami answered %d %s after %d refreshes, want 401 NO_IDENTITY with the pool not asked", response.Code, response.Body.String(), pool.Refreshes())
 				}

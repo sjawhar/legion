@@ -88,7 +88,7 @@ var settings = []setting{
 	{Name: "DISPATCH_GITHUB_API_BASE", Default: "`https://api.github.com`", Required: "no",
 		Description: "GitHub API origin the App calls; tests point it at a fake. `redeliver-webhooks` reads it too."},
 	{Name: "DISPATCH_SIGNING_KEY", Default: "a key kept in `~/.local/share/dispatch/signing-key`, created on first start", Required: "no",
-		Description: "HMAC key that signs session cookies, and the secret the key sealing each stored refresh token (AES-256-GCM) is derived from with HKDF; changing it signs everyone out and opens none of the refresh tokens sealed under the old key, so each person signs in again."},
+		Description: "HMAC key that signs session cookies and seals the refresh tokens Dispatch stores; changing it signs everyone out."},
 	{Name: "DISPATCH_INSECURE_COOKIE", Required: "no",
 		Description: "Any value drops the `Secure` attribute from Dispatch's cookies, for browsers that reach it over plain http."},
 	{Name: "DISPATCH_OIDC_ISSUER", Required: "when `DISPATCH_OIDC_AUDIENCE` is set",

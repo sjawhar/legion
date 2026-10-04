@@ -205,15 +205,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	signingKey, err := sessionSigningKey(boot, dataDir)
-	if err != nil {
-		slog.Error("dispatch: load signing key", "error", err)
-		os.Exit(1)
-	}
-
-	people := store.NewPgPeopleStore(database.Pool, signingKey)
-	sessions := store.NewPgSessionStore(database.Pool)
-
 	signIn, err := discoverSignIn(ctx, boot)
 	if err != nil {
 		slog.Error("dispatch: discover the sign-in issuer", "error", err)
@@ -222,6 +213,15 @@ func main() {
 	if signIn != nil {
 		slog.Info("dispatch: signing people in through the sign-in pool", "issuer", boot.SignInIssuer, "client_id", boot.SignInClientID, "group", boot.SignInGroup)
 	}
+
+	people, signingKey, err := openPeople(boot, dataDir, database.Pool, signIn)
+	if err != nil {
+		slog.Error("dispatch: load signing key", "error", err)
+		os.Exit(1)
+	}
+	retirePlainRefreshTokens(ctx, people, plainRefreshTokenRetireTimeout)
+	sessions := store.NewPgSessionStore(database.Pool)
+
 	if boot.IdentityHeader != "" {
 		slog.Warn("dispatch: using test/local header identity", "header", boot.IdentityHeader)
 	}

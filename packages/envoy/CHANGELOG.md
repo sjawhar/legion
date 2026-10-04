@@ -100,17 +100,22 @@
   only a pull request, an issue or a commit's check runs. `DISPATCH_ALLOWED_LOGINS` and
   `DISPATCH_APP_CLIENT_SECRET` are removed and refused at boot; GitHub OAuth sign-in, the per-user
   GitHub token table (`users`, dropped by `0068`) and the GraphQL proxy are gone.
-- Dispatch stores each person's sign-in pool refresh token sealed (`people.refresh_token`):
-  AES-256-GCM under a key derived from `DISPATCH_SIGNING_KEY` with HKDF and a fixed purpose label,
-  the person's email as additional data, in a `v1:`-prefixed format. A database backup without the
-  signing key no longer holds a refresh token the pool would accept. A stored value that does not
-  open (another signing key, another person's row, any other format) counts as no refresh token:
-  Dispatch forgets it, logs `dispatch: a stored refresh token did not open; the person signs in
-  again` once at WARN without the value, and the person signs in again. Migration `0069` forgets
-  the refresh tokens stored in plain text, so everyone who signed in through the pool before this
-  release signs in again once after it deploys; its census counts those tokens, and the pre-deploy
-  census refuses for that count alone, as `0068`'s did for its own. Rotating `DISPATCH_SIGNING_KEY`
-  now drops every stored refresh token as well as every session.
+- Dispatch stores each person's sign-in pool refresh token sealed under a key derived from
+  `DISPATCH_SIGNING_KEY` (`people.refresh_token`, a `v1:` format; `cmd/dispatch/README.md`,
+  Identity). A stored value that does not open counts as no refresh token: each read logs
+  `dispatch: a stored refresh token did not open; the person signs in again` at WARN without the
+  value, and the person signs in again. Every boot retires each refresh token stored in plain
+  text, by `0068`'s release or by one of its tasks during a roll or after a rollback: it revokes
+  the token at the pool's discovered `revocation_endpoint`, then clears it; a sign-in that replaces
+  one retires it first. A token the pool does not revoke stays for the next boot and is logged at
+  ERROR with the email and the pool's HTTP status, never the token; the boot logs how many it
+  retired and how many failed, and stops after 30 seconds without holding up the start. A
+  database backup holds no refresh token the pool would accept only once a boot of this release
+  has retired every plain-text token; after the roll,
+  `select count(*) from people where refresh_token is not null and refresh_token not like 'v1:%'`
+  answers `0`. Rotating `DISPATCH_SIGNING_KEY` leaves Dispatch unable to open any stored refresh
+  token, so everyone signs in again, but revokes none at the pool: after a key leak, sign people
+  out at the pool.
 - A blank approval-request `summary` is refused (`400 SUMMARY_INPUT`) with text that asks for what
   the human is approving, rather than for what the version proposes that the human has not agreed
   to, and the advice in `409 APPROVAL_WAITS_ON_HUMAN` and in an approval ask's `409 ASK_KIND_FIXED`

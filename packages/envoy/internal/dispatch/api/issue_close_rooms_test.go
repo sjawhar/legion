@@ -15,7 +15,6 @@ import (
 	gws "github.com/gorilla/websocket"
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
-	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
@@ -43,11 +42,9 @@ func TestClosingAnIssueClosesItsRoomsAfterTheClientHangsUp(t *testing.T) {
 	t.Cleanup(cancel)
 	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService = docs.New(docs.Deps{
-			Store: database,
-			Identity: identity.HeaderIdentity{
-				Header: "X-Dispatch-User", People: store.NewPgPeopleStore(database.Pool, "signing-key"),
-			},
-			Settle: time.Hour,
+			Store:    database,
+			Identity: headerIdentity(database),
+			Settle:   time.Hour,
 		})
 		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
 		return &hangUpDocs{API: documentService, cancel: cancel}
