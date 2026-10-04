@@ -13,6 +13,16 @@
 //   seed.ts capture <file> <run dir>       what the run left on the issue <file> names: the message,
 //                                          every ask and the whole event log, as score.ts reads
 //                                          them (message.json, asks.json, events.json in <run dir>)
+//   seed.ts brainstorm                     project TODO, the to-do CLI rig.sh's run_brainstorm
+//                                          writes into each agent's working directory, with two
+//                                          unrelated issues; once per batch, as `project` is
+//   seed.ts capture-brainstorm <file> <run dir>
+//                                          the issue <run dir>'s own transcript created (Dispatch's
+//                                          `Created <KEY>:` answer in a tool result; null when it
+//                                          created none) and that issue's asks, as score.ts's
+//                                          brainstormSurface reads them (brainstorm.json in
+//                                          <run dir>); <file> is unread, kept for dispatch_session's
+//                                          one capture call shape
 import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
@@ -25,6 +35,7 @@ import {
   getMessage,
   listIssueAsks,
 } from "../../../dispatch/e2e/api";
+import { CREATED, session, toolResults } from "./transcript";
 
 /** What `ask-on-message` writes and `capture` reads. */
 const Fixture = z.object({ issue: z.string(), message: z.string() });
@@ -171,9 +182,46 @@ if (command === "project") {
     writeFileSync(path.join(runDir, `${name}.json`), `${JSON.stringify(record)}\n`);
   }
   console.log(`captured ${issue}: ${records.asks.length} asks, ${events.length} events`);
+} else if (command === "brainstorm") {
+  // The to-do CLI's Dispatch project, the batch's only one, with two issues unrelated to the
+  // prompt's feature (a crash already understood and a display tweak). Each title names the "todo
+  // CLI" in plain words: Postgres's English parser reads `todo.py` and `to-do` as single lexemes, so
+  // a session's `dispatch_search` for "todo CLI" finds a title only where `todo` stands alone.
+  await createProject({ key: "TODO", name: "todo CLI" });
+  for (const [title, problem] of [
+    [
+      "The todo CLI's done command crashes on a task number past the end of the list",
+      "`python todo.py done 9` on a list of three tasks raises IndexError and prints a traceback instead of saying the task does not exist.",
+    ],
+    [
+      "The todo CLI's list command shows no task count",
+      "A long list gives no total; `list` should end with a line such as `3 tasks`.",
+    ],
+  ]) {
+    const issue = await createIssue(
+      { project: "TODO", force: true, title, spec: `## Problem\n\n${problem}` },
+      { as: "agent" }
+    );
+    console.log(`seeded ${issue.key}`);
+  }
+} else if (command === "capture-brainstorm" && runDir !== undefined) {
+  // The run's own issue, from its own transcript, never from the project: a batch's runs share the
+  // one project. Dispatch answers `Created <KEY>:` only when it creates the issue, whatever
+  // reached it (score.ts's CREATED); a refused duplicate reads `Not created:`.
+  let issue: string | null = null;
+  for (const text of toolResults(session(runDir))) {
+    const match = CREATED.exec(text);
+    if (match?.[1] !== undefined) {
+      issue = match[1];
+      break;
+    }
+  }
+  const asks = issue === null ? [] : await listIssueAsks(issue, { as: "agent" });
+  writeFileSync(path.join(runDir, "brainstorm.json"), `${JSON.stringify({ issue, asks })}\n`);
+  console.log(`captured ${issue ?? "no new issue"}: ${asks.length} asks`);
 } else {
   console.error(
-    "usage: seed.ts project | ask-on-message <file> | measure-before-ask <file> | capture <file> <run dir>"
+    "usage: seed.ts project | ask-on-message <file> | measure-before-ask <file> | capture <file> <run dir> | brainstorm | capture-brainstorm <file> <run dir>"
   );
   process.exit(2);
 }

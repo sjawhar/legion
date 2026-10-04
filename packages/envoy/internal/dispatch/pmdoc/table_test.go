@@ -286,7 +286,7 @@ func TestUnescapeTablePipesLeavesTheTreeGoldmarksTransformerDoes(t *testing.T) {
 	read := func(source []byte) (ast.Node, gmtext.Reader, parser.Context) {
 		reader := gmtext.NewReader(source)
 		pc := parser.NewContext()
-		pc.Set(tablePaddingBudgetKey, NewTablePaddingBudget())
+		pc.Set(writeBudgetKey, NewWriteBudget())
 		return blockReader.md.Parser().Parse(reader, parser.WithContext(pc)), reader, pc
 	}
 	tables, unescaped := 0, 0
