@@ -39,7 +39,7 @@ confirmation or a new round, as the fingerprint decides (*The reviewer*, below, 
   nothing restarts. Different: a new round — thermo again, one review.
 - Answer every thread you opened, and every thread a bot opened that is none of Legion's role
   Apps, as `skill://legion-worker/references/review-threads.md` says; the same reference says
-  when every thread is settled enough to approve.
+  when every thread is settled enough to approve, and resolving one never gates your approval.
 
 A reviewer's phase ends with its completion, not with its review. A round that writes a handoff
 takes this order: write, commit and push the handoff; submit the review of the head that push

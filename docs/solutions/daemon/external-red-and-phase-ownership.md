@@ -98,10 +98,11 @@ round:
   implementer's next push carries it (check `jj log` that it is an ancestor before building on it);
 - the reviewer answers each thread it opened with one of `Accepted: fixed in <commit> — <one line>`,
   `Accepted: not a defect — <reason>`, or `Still open: <what remains>`, and the **implementer**
-  runs `legion threads resolve --pr <number> --repo <owner>/<repo>` (LEGION-34) before its next
-  push: it resolves every unresolved thread whose newest comment is the opener's own submitted
-  `Accepted:` reply (since LEGION-208, also a thread a bot outside Legion's role Apps opened once
-  the Legion reviewer's `Accepted:` is its newest comment), one `resolveReviewThread` per thread,
+  runs `legion threads resolve --pr <number> --repo <owner>/<repo>` (LEGION-34) after its next
+  push, before its completion: it resolves every unresolved thread whose newest comment is the
+  opener's own submitted `Accepted:` reply (since LEGION-208, also a thread a bot outside Legion's
+  role Apps opened once the Legion reviewer's `Accepted:` is its newest comment), one
+  `resolveReviewThread` per thread,
   prints `resolved <url> — <whose acceptance>` /
   `left open <url> — newest reply by <login> is not an acceptance` (or `… is an unsubmitted draft
   in a pending review`, for a newest comment still in a pending review), and exits 1 naming the

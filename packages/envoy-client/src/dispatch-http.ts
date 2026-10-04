@@ -52,6 +52,12 @@ import { textHead } from "./ask-answer";
 
 export type { DispatchServiceErrorShape } from "@legion/contracts";
 
+/** The stored bytes of one version of an uploaded file, and the MIME type Dispatch serves them as. */
+export interface ArtifactFileVersion {
+  readonly mime: string;
+  readonly bytes: Uint8Array;
+}
+
 export class DispatchServiceError extends Error {
   override readonly name = "DispatchServiceError";
   /**
@@ -679,6 +685,22 @@ export class DispatchClient {
     return version === undefined
       ? this.#json("GET", ["api", "v1", "artifacts", id, "text"])
       : this.#json("GET", ["api", "v1", "artifacts", id, "versions", String(version)]);
+  }
+
+  /** One version of an uploaded file as Dispatch stores it: `GET /artifacts/{id}/versions/{n}`
+   * answers a file with its bytes under its own MIME type, never a JSON envelope. */
+  async fileVersion(id: string, version: number): Promise<ArtifactFileVersion> {
+    const url = this.#url(["api", "v1", "artifacts", id, "versions", String(version)]);
+    const response = await this.fetchImpl(url, {
+      method: "GET",
+      headers: { Accept: "*/*", Authorization: `Bearer ${this.token}` },
+      signal: this.#signal,
+    });
+    if (!response.ok) return this.#response<never>("GET", url, response);
+    return {
+      mime: response.headers.get("Content-Type") ?? "application/octet-stream",
+      bytes: new Uint8Array(await response.arrayBuffer()),
+    };
   }
 
   async artifactBlocks(id: string): Promise<ArtifactBlock[]> {

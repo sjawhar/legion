@@ -33,7 +33,7 @@ func newTestService(t *testing.T) (*Service, string) {
 	service := New(Deps{
 		Store:     database,
 		Events:    events.NewBroker(),
-		Identity:  identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: map[string]struct{}{"alice": {}}},
+		Identity:  identity.HeaderIdentity{Header: "X-Dispatch-User", People: store.NewPgPeopleStore(database.Pool)},
 		ServerURL: "https://dispatch.example",
 		Settle:    20 * time.Millisecond,
 	})
@@ -43,6 +43,57 @@ func newTestService(t *testing.T) (*Service, string) {
 		}
 	})
 	return service, artifactID
+}
+func TestRepairingAnUnreadableAskBlockCountsTheAskItOpens(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, ":::ask{#ttl urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich cache TTL?\n\n- Short: 60 seconds\n- Long: one hour\n:::\n")
+	// A browser leaves the first option without a label: settlement flags the block invalid.
+	editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+		tree.Children[0].Children[1].Children[0].Children[0].Children = []*pmdoc.Node{{Type: "text", Text: ": 60 seconds"}}
+		return tree
+	})
+	settleCurrentGeneration(t, service, artifactID)
+	outcome, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{
+		{Op: "replace", Find: ": 60 seconds", With: "Short: 60 seconds"},
+	}, model.Actor{Kind: "session", ID: "session-0123456789abcdef"}, nil)
+	if err != nil {
+		t.Fatalf("repair edit: %v", err)
+	}
+	settleCurrentGeneration(t, service, artifactID)
+	var open int
+	if err := service.store.Pool.QueryRow(context.Background(),
+		`select count(*) from asks where block_artifact_id = $1 and state = 'open'`, artifactID).Scan(&open); err != nil {
+		t.Fatal(err)
+	}
+	if open != 1 || outcome.AskBlocksAdded != open {
+		t.Fatalf("repair opened %d ask(s), reported %d", open, outcome.AskBlocksAdded)
+	}
+}
+func TestEditingBesideAnUnreadableAskBlockAddsNoAsk(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, ":::ask{#ttl urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich cache TTL?\n\n- Short: 60 seconds\n- Long: one hour\n:::\n")
+	editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+		tree.Children[0].Children[1].Children[0].Children[0].Children = []*pmdoc.Node{{Type: "text", Text: ": 60 seconds"}}
+		return tree
+	})
+	settleCurrentGeneration(t, service, artifactID)
+	outcome, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{
+		{Op: "insert", After: "end", Markdown: "A plain revision."},
+	}, model.Actor{Kind: "session", ID: "session-0123456789abcdef"}, nil)
+	if err != nil {
+		t.Fatalf("edit beside unreadable ask: %v", err)
+	}
+	settleCurrentGeneration(t, service, artifactID)
+	var open int
+	if err := service.store.Pool.QueryRow(context.Background(),
+		`select count(*) from asks where block_artifact_id = $1 and state = 'open'`, artifactID).Scan(&open); err != nil {
+		t.Fatal(err)
+	}
+	if open != 0 || outcome.AskBlocksAdded != open {
+		t.Fatalf("edit beside unreadable ask opened %d ask(s), reported %d", open, outcome.AskBlocksAdded)
+	}
 }
 
 func TestSettlementIndexesRetractsAndRestoresTypedAskBlocks(t *testing.T) {
