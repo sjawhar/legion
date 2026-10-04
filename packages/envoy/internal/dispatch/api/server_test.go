@@ -10,10 +10,8 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
-	"net/textproto"
 	"os"
 	"slices"
 	"strings"
@@ -25,9 +23,11 @@ import (
 	"github.com/reearth/ygo/persistence"
 
 	"github.com/sjawhar/envoy/internal/dispatch/agentstream"
+	"github.com/sjawhar/envoy/internal/dispatch/api/apitest"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
+	"github.com/sjawhar/envoy/internal/dispatch/files"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -36,6 +36,16 @@ import (
 )
 
 func TestMain(m *testing.M) { os.Exit(storetest.Main(m)) }
+
+// sharedAgentTokens is a DISPATCH_AGENT_TOKEN setting parsed as the server parses it at boot.
+func sharedAgentTokens(t testing.TB, setting string) *auth.SharedAgentTokens {
+	t.Helper()
+	tokens, err := auth.ParseSharedAgentTokens(setting)
+	if err != nil {
+		t.Fatalf("ParseSharedAgentTokens(%q): %v", setting, err)
+	}
+	return tokens
+}
 
 // testServerOptions configure the server an API test drives.
 type testServerOptions struct {
@@ -66,6 +76,9 @@ type testServerOptions struct {
 	// agentStream is the live agent conversation relay; nil is the deployment with no NATS,
 	// where the viewer route answers 503.
 	agentStream agentstream.Source
+	// files is the uploaded-file store; nil keeps every upload's bytes in Postgres, as a
+	// deployment with no bucket does.
+	files files.Store
 }
 
 // headerIdentity is the test header identity that records each named person in the database.
@@ -133,7 +146,7 @@ func newTestServer(t *testing.T, options testServerOptions) (http.Handler, *stor
 	deps, err := NewDeps(DepsInput{
 		Store:            database,
 		Identity:         headerIdentity(database),
-		AgentToken:       "agent-token",
+		AgentTokens:      sharedAgentTokens(t, "agent-token"),
 		DefaultProject:   options.defaultProject,
 		ServerURL:        "https://dispatch.example",
 		Docs:             documentService,
@@ -145,6 +158,7 @@ func newTestServer(t *testing.T, options testServerOptions) (http.Handler, *stor
 		EnvoyTimeout:     options.envoyTimeout,
 		OIDC:             options.oidc,
 		AgentStream:      options.agentStream,
+		Files:            options.files,
 	})
 	if err != nil {
 		t.Fatalf("new API dependencies: %v", err)
@@ -161,36 +175,13 @@ func directServer(deps Deps) *server {
 	return &server{deps: deps}
 }
 
-// waitForDatabaseLocks waits until want backends are queued behind a lock that holder's
-// transaction owns, directly or behind an earlier waiter (a second row-lock waiter is
-// blocked by the first, which holds the tuple lock). It polls through holder's own
-// connection: the handlers under test drain the shared pool while they wait on that
-// lock, and a poll that needed a pool connection of its own would deadlock with them
-// once the pool is exhausted. It reads pg_locks, not pg_stat_activity, whose view is
-// frozen for the rest of a transaction once read.
+// waitForDatabaseLocks waits up to 2 s for want backends to queue behind a lock that holder's
+// transaction owns (storetest.WaitForLockWaiters), and fails the test when they never do.
 func waitForDatabaseLocks(t *testing.T, holder pgx.Tx, want int) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		var count int
-		if err := holder.QueryRow(context.Background(), `
-			with recursive waiting(pid) as (
-				select pid from pg_locks
-				where not granted and pg_backend_pid() = any(pg_blocking_pids(pid))
-				union
-				select blocked.pid from pg_locks blocked, waiting
-				where not blocked.granted and waiting.pid = any(pg_blocking_pids(blocked.pid))
-			)
-			select count(*) from waiting
-		`).Scan(&count); err != nil {
-			t.Fatalf("inspect database locks: %v", err)
-		}
-		if count >= want {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
+	if queued := storetest.WaitForLockWaiters(t, holder, want, 2*time.Second); queued < want {
+		t.Fatalf("waiting database locks: wanted at least %d operations queued behind the held lock, saw %d", want, queued)
 	}
-	t.Fatalf("waiting database locks: wanted at least %d operations queued behind the held lock", want)
 }
 
 func awaitResponse(t *testing.T, responses <-chan *httptest.ResponseRecorder) *httptest.ResponseRecorder {
@@ -244,30 +235,12 @@ func dispatchRequest(t *testing.T, handler http.Handler, method, target string, 
 
 func multipartRequest(t *testing.T, handler http.Handler, target string, fields map[string]string, filename, contentType string, content []byte, login string) *httptest.ResponseRecorder {
 	t.Helper()
-	var body bytes.Buffer
-	writer := multipart.NewWriter(&body)
-	for key, value := range fields {
-		if err := writer.WriteField(key, value); err != nil {
-			t.Fatalf("write multipart field: %v", err)
-		}
-	}
-	header := textproto.MIMEHeader{}
-	header.Set("Content-Disposition", `form-data; name="file"; filename="`+filename+`"`)
-	if contentType != "" {
-		header.Set("Content-Type", contentType)
-	}
-	part, err := writer.CreatePart(header)
+	body, bodyType, err := apitest.MultipartUpload(fields, filename, contentType, content)
 	if err != nil {
-		t.Fatalf("create multipart file part: %v", err)
+		t.Fatal(err)
 	}
-	if _, err := part.Write(content); err != nil {
-		t.Fatalf("write multipart file: %v", err)
-	}
-	if err := writer.Close(); err != nil {
-		t.Fatalf("finish multipart request: %v", err)
-	}
-	request := httptest.NewRequest(http.MethodPost, target, &body)
-	request.Header.Set("Content-Type", writer.FormDataContentType())
+	request := httptest.NewRequest(http.MethodPost, target, body)
+	request.Header.Set("Content-Type", bodyType)
 	if login != "" {
 		request.Header.Set("X-Dispatch-User", login)
 	}
@@ -332,7 +305,7 @@ func assertRefusal(t *testing.T, request string, status int, body []byte, code, 
 func decodeBody[T any](t *testing.T, response *httptest.ResponseRecorder) T {
 	t.Helper()
 	var value T
-	if err := json.NewDecoder(response.Body).Decode(&value); err != nil {
+	if err := json.Unmarshal(response.Body.Bytes(), &value); err != nil {
 		t.Fatalf("decode response body %q: %v", response.Body.String(), err)
 	}
 	return value
@@ -1787,7 +1760,7 @@ func TestRevokedCookieIsRejectedAcrossDispatchSurfaces(t *testing.T) {
 	})
 	t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
 	deps, err := NewDeps(DepsInput{
-		Store: database, Identity: cookieIdentity, AgentToken: "agent-token",
+		Store: database, Identity: cookieIdentity, AgentTokens: sharedAgentTokens(t, "agent-token"),
 		Docs: documentService, Events: broker,
 	})
 	if err != nil {
@@ -2066,12 +2039,12 @@ func newTestHandlerWithBroker(t *testing.T) (http.Handler, *store.Store, *events
 	})
 	seedPeople(t, database, "alice", "bob")
 	deps, err := NewDeps(DepsInput{
-		Store:      database,
-		Identity:   headerIdentity(database),
-		AgentToken: "agent-token",
-		ServerURL:  "https://dispatch.example",
-		Docs:       documentService,
-		Events:     broker,
+		Store:       database,
+		Identity:    headerIdentity(database),
+		AgentTokens: sharedAgentTokens(t, "agent-token"),
+		ServerURL:   "https://dispatch.example",
+		Docs:        documentService,
+		Events:      broker,
 	})
 	if err != nil {
 		t.Fatalf("new API dependencies: %v", err)

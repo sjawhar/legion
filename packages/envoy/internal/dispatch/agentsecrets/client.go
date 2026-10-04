@@ -1,6 +1,6 @@
 // Package agentsecrets relays Dispatch's credential-request UI to the secrets broker's
-// UI-bearer API (the shared broker contract, dispatch://AGENTC-393/artifact/plan-overview-md,
-// Authentication item 3). Reads and the machine-login lookup carry and return
+// UI-bearer API (its UI routes: https://sjawhar.github.io/legion/broker/reference/api/). Reads and the machine-login
+// lookup carry and return
 // json.RawMessage, so a broker read-shape change never requires a Dispatch code change. Every
 // decision (approve, deny, revoke) instead carries a Decision Dispatch builds itself: its
 // approver is the login Dispatch's own session resolved, which the UI bearer vouches for to the
@@ -160,7 +160,8 @@ func (c *Client) MachineLookup(ctx context.Context, body json.RawMessage) (json.
 	return c.do(ctx, http.MethodPost, "/v1/machine-logins/lookup", body)
 }
 
-// Grants lists the credential grants the named approver issued.
+// Grants lists the live grants of the named person's sessions, automatic or approved, and the
+// grants the person approved on anyone's session.
 func (c *Client) Grants(ctx context.Context, approver string) (json.RawMessage, error) {
 	query := url.Values{"approver": {approver}}
 	return c.do(ctx, http.MethodGet, "/v1/grants?"+query.Encode(), nil)
@@ -174,4 +175,21 @@ func (c *Client) RevokeByApprover(ctx context.Context, grantID, approver string)
 		return nil, err
 	}
 	return c.do(ctx, http.MethodPost, "/v1/grants/"+url.PathEscape(grantID)+"/revoke-by-approver", body)
+}
+
+// MachineLogins lists the machine logins the named person approved that can still reach a secret:
+// their own machines' and any service's, unexpired or expired with a session still running.
+func (c *Client) MachineLogins(ctx context.Context, approver string) (json.RawMessage, error) {
+	query := url.Values{"approver": {approver}}
+	return c.do(ctx, http.MethodGet, "/v1/launcher-credentials?"+query.Encode(), nil)
+}
+
+// RevokeMachineLogin relays a person's revoke of a machine login; the broker refuses anyone but
+// the person who approved it.
+func (c *Client) RevokeMachineLogin(ctx context.Context, credentialID, approver string) (json.RawMessage, error) {
+	body, err := Decision{Approver: approver}.body()
+	if err != nil {
+		return nil, err
+	}
+	return c.do(ctx, http.MethodPost, "/v1/launcher-credentials/"+url.PathEscape(credentialID)+"/revoke-by-approver", body)
 }

@@ -33,7 +33,7 @@ events to the right session.
 | Topic matching         | `internal/routing/match.go`               | wildcard matching                                  |
 | Envelope normalization | `internal/contracts/*.go`                 | generated contract + source-specific normalization |
 | Native Dispatch workspace | `cmd/dispatch/`, `internal/dispatch/` | HTTP API, Postgres store, documents, and event outbox |
-| Dispatch settings | `cmd/dispatch/settings.go` | the one table of every Dispatch setting envoy-dispatch reads (the libraries it links read `HOME`, libpq's `PG*` and Go's own variables themselves); `envoy-dispatch settings` prints it, and a test fails on any other environment read under `cmd/dispatch` or `internal/dispatch` |
+| Dispatch settings | `cmd/dispatch/settings.go` | the one table of every Dispatch setting envoy-dispatch reads (the libraries it links read `HOME`, libpq's `PG*`, the AWS SDK's `AWS_*` and Go's own variables themselves); `envoy-dispatch settings` prints it, and a test fails on any other environment read under `cmd/dispatch` or `internal/dispatch` |
 | Migration runners' shared rules | `internal/pgmigrate/` | Dispatch's and the secrets broker's runners: the set loader that refuses a set before anything applies (`Load`), the lock bound on every migration (`LockTimeout`), the watch that names the lock a timed-out migration wanted, and the pre-deploy census of pending migrations (`Census`, and `CensusTables`, its one reading of what a migration locks; the `<version>_<name>.census.sql` a migration declares; `envoy-dispatch census`) |
 | GitHub webhook redelivery | `internal/dispatch/redeliver/`, `cmd/dispatch/redeliver.go` | Dispatch's sweep of the App webhook's failed deliveries; `internal/dispatch/githubapp/githubapptest` fakes GitHub's delivery API |
 | Document tree (Proof schema) | `internal/dispatch/pmdoc/` | render/parse/diff of Proof documents; fixtures from the fork's headless engine |
@@ -57,7 +57,7 @@ update. A repair reports whether its transaction wrote anything; one that wrote 
 committed that transaction, and ygo hands the worker an update for it too (the document's delete
 set), so its slot is finished with that update and the worker takes it rather than storing it. A
 settlement that wrote into the room renders its version from the document as it stands after the
-repairs (`lockedTreeOf`), so a peer's edit made since its read is in that version too, and credits
+repairs (`liveTree`), so a peer's edit made since its read is in that version too, and credits
 that edit's author, whose own settlement then writes no version. It takes the authors with that
 tree, so an edit made while the version renders is credited on the version its own settlement
 writes, not on this one. A settlement that wrote into the room commits what it wrote even when the
@@ -91,16 +91,66 @@ arms the settlement of each document whose row is a minute old and whose issue i
 (`resumeOwedSettlements`), so a document nobody opens settles too. It runs on an interval because a
 rolling deploy stops the old task after the new one has started. A closed issue's rooms arm none
 until it reopens. `docs.Service.Shutdown` runs the settlement of each loaded room whose document has
-that row, and no other, inside its 5 s drain budget (`shutdownDrainBudget`, within the caller's
-deadline: `cmd/dispatch` gives HTTP shutdown and document shutdown one 5 s context between them,
-`shutdownTimout`); a settled document's repeat would spend the budget for nothing. It cancels the
-database work of any settlement the budget cuts short so its transaction rolls back, and logs for
-each document that owed one whether it settled or was left to resume (`dispatch: document settled
-before shutdown`, `dispatch: document settlement left to resume after shutdown` with
-`shutdown_budget_ended`). A settlement cut short is not an error; a caller's deadline
-that passes before Shutdown can read that back is, and its error names the documents that owed
-one. A 1 MiB `a_b*` document's settlement took 4.5-6.8 s at load 90-170 on the development
-machine, past that budget.
+that row, and no other, inside its 9 s drain budget (`docs.ShutdownDrainBudget`, within the
+caller's deadline); a settled document's repeat would spend the budget for nothing. Each loaded
+room has a worker of its own that waits for the room's durable appends to land, then reads whether
+the room's document owes a settlement, settles it if so, and closes its editors: a room whose
+append is slow to store, or whose editor keeps sending updates, spends only its own share of the
+budget, leaves only its own settlement to resume, and makes Shutdown return its drain error. A
+room with an editor connected (a spec tab holds the
+document's websocket) is settled while it is still loaded, and its editors are closed only once that
+settlement has returned: ygo's `CloseRoom` evicts the room as it closes them, and a settlement does
+not load a room during shutdown, so closing the room first would leave its settlement to the next
+process. An edit an editor makes while its room settles is left to the next process the same way,
+and so is a settlement that has to write into its room (stamping block ids, or restoring an ask
+block's server-owned attributes): Shutdown refuses every write into the rooms it is closing, and
+such a settlement logs `dispatch: skip shutdown document settlement that has to write into its
+room` at WARN. A settlement the last browser's leaving started (`settleLastPeer`) is joined like a
+timer's. Shutdown cancels the database work of any settlement the budget cuts short so its
+transaction rolls back, and logs for each document that owed one whether it settled or was left to
+resume (`dispatch: document settled before shutdown`, `dispatch: document settlement left to resume
+after shutdown` with `shutdown_budget_ended`). A settlement cut short is not an error; a caller's
+deadline that passes before Shutdown can read that back is, and its error names the documents that
+owed one. A 1 MiB `a_b*` document's settlement took 4.5-6.8 s at load 90-170 on the development
+machine, inside the 9 s drain budget, though a slower load or a bigger burst could still leave it
+to resume.
+
+`cmd/dispatch/shutdown.go` orders the process's shutdown inside `stopGrace` (30 s: ECS's default
+stop timeout, which Dispatch's task definition leaves unset, and `stop_grace_period` in
+`deploy/compose/dispatch.compose.yml`). Every open event stream ends at the signal through
+`api.Deps.Lifetime`, so HTTP shutdown waits only for the requests in flight, and it waits for them
+first, with no deadline of its own. The document service starts when they are done, or 11 s after
+the signal with some still running (`httpDrainBeforeDocuments`, `dispatch: settle documents with
+requests still in flight`), and gets `documentShutdownTimeout`, 5 s more than its drain budget
+(14 s total - the reserve outlasting a settlement still committing when the budget ends, not only
+reading back what did), so it is done 5 s before the runtime's kill. The database pool closes once
+every request has answered and no connection of the shared or document-rooms pool is in use.
+While the database answers, nothing but the runtime's kill bounds that wait, as with the deferred
+close of the pool this replaced: a write still waiting on a lock commits and is answered if it
+finishes before the kill. The database has stopped answering once three health probes in a row
+(`silentProbes`, each `store.Pool.Healthy`'s two seconds) have failed with no connection of those
+two pools taken back while they ran; a probe that answers, or a connection taken back, starts the
+count again. Then Dispatch exits without the connections waiting on it (`dispatch: exit with
+database connections still in use once the database stopped answering`), and the database rolls
+back what they held open; with nothing in flight over HTTP that is about 21 s after the signal.
+
+An issue's task counts (`issues.tasks_done`, `tasks_total`, `tasks_version`, added by the
+`issue_task_progress` migration; LEGION-542) are the `- [ ]` / `- [x]` items of its primary
+document as its latest version renders (`pmdoc.CountTasks`, which skips an item emptied of its
+text, since the renderer writes one as a plain `- `), and the number of the version they were
+counted from. Every version write records them in its own transaction (`docs.RecordTaskProgress`
+from `writeVersionTx`; issue creation and an upload call `docs.RecordTaskProgressMarkdown` after
+they insert their version row, so the count names it). The row the API reads
+(`model.IssueProgress`, on `IssueSummary` and the issue read, never on an event payload) can lag
+its document - every row the migration found, any the task a deploy replaces versions while both
+run (its code records no count), a row another writer held - so `cmd/dispatch` runs
+`docs.Service.RunTaskProgressReconciliation`, which at start and every five minutes
+(`TaskProgressReconcileInterval`) counts again every issue whose `tasks_version` is not its
+document's greatest `artifact_versions.number` (`taskProgressDrift`), in batches of 50 under
+`for no key update … skip locked`: a full batch with drift left goes straight to the next, and a
+short or failed one is retried a bounded number of times in the pass; so a stale or missing count
+lasts at most that interval, and `tasks: null` on the API means a spec with no task list (total
+0) or one still inside that window.
 
 A write never puts one block id on two blocks. `EnsureBlockIDs` keeps a repeated id for the first
 holder in document order, and ask rows and anchors are keyed on block ids, so a block written ahead
@@ -138,6 +188,35 @@ accept's, a replace's and an ask edit's checks - only a refusal (`pmdoc.ErrSchem
 any other error, a panic (`pmdoc.ErrPanic`) among them, is `pmdoc`'s own and answers `500`. A tree
 a browser edit makes is not checked, so its rendering can still fail to read back when it is
 uploaded again.
+
+A document's `doc_updates` rows are its Yjs updates in the order they were stored, and nothing
+reads one back alone: `PgVersioned.Load` and `MaterializeAt` apply them one at a time, oldest
+first, to one document that collects garbage and return that document's encoding (`stateThrough`),
+so a deleted item keeps its id and length and none of its content, and a load holds the live
+document and the one update it is applying, however much the stored updates inserted and later
+deleted (LEGION-496). Nothing reads deleted content back from the store: every document built from
+it is a `crdt.New`, which drops an item's content in the transaction that deletes it, the one that
+applies a load included; a version stores its own markdown in `artifact_versions`; and no route
+reads an update or a state before the head. What a load's document parks - an update whose
+dependency no stored update supplies, a delete of an item none holds - is merged back into the
+state, so the room that loads it parks it again until a peer sends what it waits on. A state is
+kept only when it reads back as the document that made it: decoded into a fresh document, it must
+make the same state vector. That catches a re-encoding that renumbers or drops a client's clocks,
+as at ygo `v1.49.6-sami.3`, whose decoder integrated the items after a skipped clock range;
+`v1.50.1-sami.2`'s decoder parks them instead. It does not catch a re-encoding that keeps every
+clock and moves text, such as a lost right origin, which
+`TestACompactedDocumentKeepsItsOrderThroughLaterUpdates` guards on each ygo bump. A state that
+reads back otherwise, or a log the fold's document cannot apply (one parking more than the pending
+queue below holds), is logged (`dispatch: a document's stored updates do not fold into a state that
+reads back as them`): the load serves the stored updates merged whole, which for a log the fold
+cannot apply is what `loadDocument` decodes and refuses as `ErrDocumentUnloadable`, offering the
+rebuild, and compaction leaves them as stored without building that merge.
+Compaction (`Compact`, which ygo runs as a room closes and as the server shuts down, and the outbox
+runs over every document every 24 hours, `CompactAll`) folds the whole log into one row holding
+that state (`compactKeep`), whose `content_changed` says whether any row it folded past the latest
+version's cursor changed content. A compacted `doc_updates`, and any backup of it taken later,
+therefore holds no text a write deleted: text deleted before a version captured it is gone (Sami's
+decision, LEGION-496).
 
 Each `doc_updates` row records `content_changed` - whether the update changed the document's
 rendered markdown, the only document content a version stores (`pmdoc.Render` of the tree before and
@@ -187,15 +266,27 @@ opening a document or an agent's edit credits it nothing, so a reader whose edit
 the rendering carries causes no version and cannot stale an approval.
 A handler joins its document operations to its transaction with `Docs.Join`, which returns the
 transaction's ledger (`docs/ledger.go`), the only way to give a document operation a transaction:
-`SeedText` and `SnapshotVersion` take theirs from the ledger and refuse a context that was not
-joined. A joined operation never writes the room: it runs on the transaction's fork of the room's
-document (`docs/livewrite.go`), appends its update inside the transaction, and reads through the
-same fork. The handler ends the transaction with `ledger.Commit`, which commits, credits the
-writes' actor to their rooms, releases the authors a version the transaction wrote named, then
-applies and broadcasts the updates, and last publishes the events its document operations
-appended, ahead of the handler's own; it defers `ledger.Discard`, so a transaction that does not
-commit leaves the room, every connected browser, every version and the durable document as they
-were.
+every document write takes its transaction from the ledger and refuses a context that was not
+joined (`errUnjoined`): `SeedText`, a rebuild (`RebuildDocument`), the version writes, and every
+write that runs through `applyLive` (`docs/mutation.go`) - an upload's replacement, an edit batch,
+an accepted or rejected suggestion, an ask's edited text and its answer or resolution, a comment's
+anchor mark and its margin record - each of which `applyLive` also weighs by what it leaves
+(`docs/growth.go`). An answer the document has no room for is left out of its block, which records
+who answered and when, and kept on its ask. The server writes outside `applyLive` are a rebuild,
+settlement's repairs, the block-id backfill and the sweep of unrecorded marks. Of those, a rebuild
+and settlement's repairs carry caller text. A rebuild's supplied markdown is weighed as a new
+document's rendering is (`SeedText`), and its latest version, the server's own text, is restored
+whatever it weighs. Settlement's is the answer an ask keeps, written back into a block that returns
+to the document: settlement weighs each such answer and leaves out the ones the document has no
+room for (`withholdAnswers`). A joined
+operation never writes the room: it runs on the transaction's fork of the room's document
+(`docs/livewrite.go`), appends its update inside the transaction, and reads through the same fork.
+The handler ends the transaction with
+`ledger.Commit`, which commits, credits the writes' actor to their rooms, releases the authors a
+version the transaction wrote named, then applies and broadcasts the updates, and last publishes
+the events its document operations appended, ahead of the handler's own; it defers
+`ledger.Discard`, so a transaction that does not commit leaves the room, every connected browser,
+every version and the durable document as they were.
 
 While a transaction's write to a document is open it holds that room's writer slot, so another
 transaction's joined operation on the document waits for it to be published or discarded, and it
@@ -246,7 +337,7 @@ are two unsynchronised reads, in both directions; `token` is the concurrency pri
 the block when it creates a quote or browser-mark anchor; `envoy-dispatch backfill-anchor-blocks`
 fills legacy anchors only when their cached quote has one current match.
 `GET /api/v1/artifacts/{id}/blocks/{block_id}` places any one block (`pmdoc.BlockPathOf`, over
-the document `readDocument` serves): its path of `{type, id, index}` from the top-level block
+the tree `readTree` serves): its path of `{type, id, index}` from the top-level block
 down, and for a table block, row or cell a `table` naming the table's id, the row's child index
 (0 is the header row), the cell's child index in its row (the indexes `delete_row` and
 `delete_column` take, so a spanning cell counts once), the text of the header cell drawn above
@@ -281,32 +372,106 @@ writer's `context.Canceled` in its cause. Nor does that read wait for a failed r
 (`docs.WithoutRecoveryWait`): it is `DOC_SERVICE_UNAVAILABLE` at once, where `GET /text`,
 `GET /blocks` and the block route wait.
 
-A read of a resident room reads a copy taken under its document lock (`snapshotDocument`,
-`crdt.EncodeStateAsUpdateV1`), never the live tree: `GET /text` and the document websocket's
-admission check (`loadDocument`), a version's capture (`captureLiveTextAndAuthors`), a read
-outside any transaction (`docView`), and settlement's reads of the room (`settleRoomWithin`'s first
-read and its version's, and the block-id backfill's read, through `lockedTreeOf`), so a torn read is
-never versioned as the document; a repair reads the tree inside the transaction that writes it
-(`rewriteLive`), and the unrecorded-mark sweep (`sweepUnrecordedMarks`) inside the transaction that
-unmarks it. A walk of the live tree takes no lock (reearth/ygo v1.49.5, `crdt/yxml.go`) while every
-peer update and service write holds that lock as it applies, so the walk can read a write halfway
-through as a tree outside the schema and answer a healthy document 409 with the repair. A version's
-capture holds the room's state lock across the copy and the authors it captures, so an author the
-update observer credits is captured only with that update's text; the order - state lock, then
-document lock - is never reversed, since only a Yjs transaction's own function holds a document's
-lock and none takes a room's state lock. A read that may load its room (a version's capture,
-`docView`, `VerifyMark`'s subscription) takes what it reads inside the `Server.Apply` that loads
-and holds the room: a room looked up again with `GetDoc` once that Apply returned can have been
-evicted in between.
+A read of a resident room outside a write never walks the live tree. It reads the room as of one
+moment under its document lock (`readLive`): the replica the room's update observer keeps
+(`renderedReplica`, below), brought up to date under that lock with what the room gained since, or a
+copy taken under the lock (`snapshotDocument`, `crdt.EncodeStateAsUpdateV1`) while the room has no
+replica - no update has reached it since it loaded - or another holds the replica or the observer
+waits for it.
+`GET /text`, `GET /blocks`, the block route and the document websocket's admission check
+(`loadTree`), a read outside any transaction (`docTree`), a published write's loss check
+(`recordPublishedLoss`), a version's capture (`captureLiveTextAndAuthors`) and settlement's reads of
+the room (`settleRoomWithin`'s first read and its version's, and the block-id backfill's read,
+through `liveTree`) read it so, so a torn read is never versioned as the document; a repair reads
+the tree inside the transaction that writes it (`rewriteLive`), and the unrecorded-mark sweep
+(`sweepUnrecordedMarks`) inside the transaction that unmarks it. A room's load reads the live tree
+before ygo hands the room to anyone (`onLoadDocument`). A write reads its transaction's fork, with
+no exception: every operation that changes the document - `ReplaceText`, `MarkQuote`,
+`SetBlockAttributes` and the rest of `applyLive`'s callers - takes it from a transaction its caller
+joined first (`Docs.Join`), and refuses one that didn't (`errUnjoined`). Main's own
+`applyLive`/`applyJoined` fold (#1693) removed the unjoined branch this used to carve out as a
+tests-only exception, which walked the room's own live document directly inside `Server.Apply`,
+holding no lock across its callback, and so could read a peer's write halfway through as a tree
+outside the schema; every write now reads through its own transaction's fork instead, which is
+always a consistent copy no peer's concurrent write can tear. A tree a read returns shares no map
+or slice with the
+document it was read from
+(`pmdoc.Read` copies each mark's attributes and every list or object an attribute holds), so a
+reader that edits its tree changes nothing a later read of the replica meets
+(`TestEditingALiveReadsTreeChangesNoLaterRead`).
+
+A read takes up to three locks, in one order: the room's state lock, which only a version's capture
+holds, while it takes the room as of one moment and the authors it captures, so an author the
+update observer credits is captured only with that update's text; then the replica's, which a read
+only tries; then the live document's, for the catch-up's or the copy's encode. The capture takes the
+room through `holdLive`, which keeps the replica's lock, when it reads the replica, until the
+capture has walked it, and walks it once it has released the state lock, which every update
+observer takes before ygo broadcasts its update (`recordUpdateClass`). Nothing takes the locks in
+another order: the update observer keeps the rendering it compares the next one with in the
+replica, so it takes the state lock only once it has released the replica; only a Yjs
+transaction's own function holds a document's lock, and it takes neither of the others. So the
+caller of `readLive` or `holdLive` may hold the room's state lock, and must not hold the live
+document's lock - run inside a Yjs transaction on it - since the catch-up and the copy encode under
+that lock. A read that may load its room (a version's capture, `docTree`, `VerifyMark`'s
+subscription) takes what it reads inside the `Server.Apply` that loads and holds the room: a room
+looked up again with `GetDoc` once that Apply returned can have been evicted in between.
+
+The replica's lock is the one a room's browsers wait on. The update observer takes it for every peer
+update (`renderedReplica.observe`), and ygo broadcasts the update to the room's other browsers only
+once the observer has returned (sjawhar/ygo v1.50.1-sami.2, `provider/websocket/peer.go`), so a read
+holding the replica for its walk holds every other browser's copy of the keystroke. A read
+therefore only tries the lock, and
+reads a copy when another read holds it or an observer waits for it (`lockForUpdate`), so reads
+never queue behind each other or ahead of a waiting observer. `BenchmarkKeystrokeBesideReads`
+measures the wait: a keystroke's transaction and the observer's whole turn with the replica -
+the catch-up and the render (`renderedReplica.observe`, through `renderDocumentForUpdate` since
+the copy's removal), 120 keystrokes 20 ms apart on a 524 KiB document, beside reads. One run of
+each - the render's own cost, hundreds of ms a keystroke regardless of which read mechanism races
+beside it, put repeated sampling out of this pass's time budget - keystroke latency p50 / p90 /
+p99 in ms, on the development machine (32 cores, load 75 to 80) and on half a processor
+(`GOMAXPROCS=1` under a 50% CPU quota, production's allotment):
+
+| Reads beside the keystrokes | 32 cores, one every 250 ms | 32 cores, back to back | Half a processor, one every 250 ms | Half a processor, back to back |
+| --- | --- | --- | --- | --- |
+| none | 551.8 / 849.1 / 1120 | | 635.5 / 810.9 / 881.5 | |
+| copies | 634.5 / 940.3 / 1264 | 663.2 / 823.7 / 974.4 | 1205 / 1478 / 1676 | 1337 / 1547 / 1691 |
+| the replica, tried (this design) | 685.8 / 990.7 / 1469 | 705.7 / 1107 / 2015 | 1137 / 1437 / 1606 | 1368 / 1558 / 1692 |
+
+The render dominates every row now, on both designs: at half a processor the three keystroke
+counts are within one run's noise of each other, matching round 2's real-browser, end-to-end
+measurement of the same three modes (PR comment, not reproduced here). On 32 cores the replica
+still costs more at the tail than a copy does - about 50 ms at its median and 200 ms at p99
+reading every 250 ms, growing to about 1 s at p99 reading back to back - the same direction this
+design's trade-off has shown since round 1, now measured on top of the render's own cost rather
+than in isolation from it. A replica of the reads' own would remove that tail (measured early in
+this PR's history, before this benchmark counted the render, at `93a77af2`) and was rejected for
+its memory: a room read while resident would hold a second whole copy of its document until
+eviction, about 6.6 MiB of heap at 51 KiB, 63 MiB at 524 KiB and 123 MiB at 1 MiB,
+with nothing bounding how many rooms hold one. Copying the observer's rendered tree under the lock
+instead of walking the replica would hold it about 45 ms rather than about 105 ms at 524 KiB, but
+would keep that tree resident (about 22 MiB) and still need the replica for the loss check, which
+walks the document itself. A read's own cost (`BenchmarkLiveDocumentRead`, the development machine
+at load about 40): a 524 KiB document's tree read took about 68 ms walking the live tree, 283 ms
+through a copy and 86 ms through the replica (77 ms with a keystroke to catch up), and its render
+about 181, 391 and 194 ms. The replica is listed for its document's reads (`Service.replicas`),
+the document and the replica each held weakly there; the update observer, which the document
+holds, is the replica's one strong holder, so the replica is collected with an evicted document,
+in the same collection, and the listing goes once the document is collected (`keepReplica`,
+`TestAnEvictedRoomsReplicaGoesWithIt`). A reader holding an evicted instance of a room reaches that
+instance's replica or none, never its successor's. `TestReadsOfALiveDocumentRunBesideItsPeers` runs
+each of these reads while a websocket peer types, until 50 of its runs have overlapped one of the
+peer's updates, and CI's `envoy-go-race` job runs the `docs` and `api` packages under `-race`, which
+reports a walk of the live tree beside a write; the unit tests' own step runs without it.
 
 Every decode of document bytes takes the pending queue `maxUpdateItems`, whose comment
 (`internal/dispatch/docs/persistence.go`) states the rule and its reason: whether the service builds
-the decoder (`newDocumentCopy`: the copy, a write's fork, every decode of the stored history, and
-the store's check of each update it appends) or ygo builds it for the service
-(`Server.MaxPendingItems`, set in `New`: the rooms, and ygo's check of each update the service
-broadcasts). In a room, which keeps what it parks across updates, the queue is also the most the
-room's peers can park, about ten times ygo's default. `TestTheStoreTakesOneBrowserUpdateItsRoomTook`
-and `TestASettlementStampsMoreBlocksThanYgosDefaultQueue` are updates ygo's default queue refuses,
+the decoder (`newDocumentCopy`: the copy, a write's fork, every decode of the stored history,
+including `stateThrough`'s fold and read-back, and the store's check of each update it appends) or
+ygo builds it for the service (`Server.MaxPendingItems`, set in `New`: the rooms, and ygo's check
+of each update the service broadcasts). In a room, which keeps what it parks across updates, the
+queue is also the most the room's peers can park, about ten times ygo's default.
+`TestTheStoreTakesOneBrowserUpdateItsRoomTook` and
+`TestASettlementStampsMoreBlocksThanYgosDefaultQueue` are updates ygo's default queue refuses,
 which fail the room; `TestDeletingADeeplyNestedLiveTreeNeedsNoStackPerLevel`,
 `TestACopyHoldsEveryItemOneClientWroteAheadOfItsParent` and
 `TestAStoredHistoryLoadsEveryItemOneClientWroteAheadOfItsParent` check that a document whose peer
@@ -316,10 +481,11 @@ of a block the server wrote, is copied, read, opened and kept from a rebuild who
 A room whose last peer leaves, or that only the service's `Server.Apply` touches - an agent's
 edit, a read outside any transaction - stays resident until it has been idle for a minute
 (`roomIdleTimeout`), when ygo's idle sweeper evicts it. ygo's default, eager eviction, evicts a room
-the moment its last peer leaves even while a `Server.Apply` is inside its callback on it (reearth/ygo
-v1.49.5, `provider/websocket/peer.go` checks only the peers): the callback's write then lands on the
-evicted room and reaches the store only through its retiring persistence worker, while the next
-access has already loaded the store without it and serves, and takes, the next write on a document
+the moment its last peer leaves even while a `Server.Apply` is inside its callback on it
+(sjawhar/ygo v1.50.1-sami.2, `provider/websocket/peer.go` checks only the peers): the callback's
+write then lands on the evicted room and reaches the store only through its retiring persistence
+worker, while the next access has already loaded the store without it and serves, and takes, the
+next write on a document
 missing the first. Two such writes, each a diff of the same document, merge into a document neither
 wrote, and into one holding no block at all once each kept a block the other replaced: the
 healthy-room probe met it as a socket closed with `DOC_SCHEMA`. The idle sweeper evicts a room only
@@ -340,15 +506,18 @@ publish it runs inside, and the publish, its request and the document's writer s
 (`TestAPublishSurvivesItsRoomsWorkerRetiringUnderIt`, `TestAWriteSurvivesItsIssueClosingAsItPublishes`).
 A publish whose room `CloseRoom` removed has no peer left to broadcast to and returns.
 
-The room's update observer (`updateChangesMarkdown`) renders a replica of the room, not the live
-tree, since ygo fires it after the transaction has released the document's lock and another write
-can be integrating meanwhile (`renderedReplica`). The replica is copied from the room on its first
-update and then brought up to date under the room's lock with what the room gained since its state
-vector, as `forkLive` brings a fork up to date. The update the observer is handed cannot stand in:
-two transactions' observers run concurrently in either order, and each update carries the room's
-whole delete set. On a 1 MiB document a catch-up after one typed character took about 8 ms where the
-render took about 160 ms and a whole copy about 420 ms, and the replica holds about 80 MiB of heap
-while its room is resident.
+The room's update observer (`updateChangesMarkdown`) renders a replica of the room, the one its
+reads walk, not the live tree, since ygo fires it after the transaction has
+released the document's lock and another write can be integrating meanwhile (`renderedReplica`). It
+keeps the rendering it compares the next one with in that replica (`renderedReplica.markdown`), so
+each instance of a room compares with its own, and it takes the room's state lock only once it has
+released the replica. The replica is copied from the room on its first update and then brought up
+to date under the room's lock with what the room gained since its state vector, as `forkLive`
+brings a fork up to date. The update the observer is handed cannot stand in: two transactions'
+observers run concurrently in either order, and each update carries the room's whole delete set.
+On a 1 MiB document a catch-up after one typed character took about 8 ms where the render took
+about 160 ms and a whole copy about 420 ms, and the replica holds a whole copy's heap (above) while
+its room is resident.
 
 Document edits (`POST /api/v1/artifacts/{id}/edits`, `docs/edits.go` `applyOperation`) are
 `replace`, `delete`, `insert`, `retype`, `move`, `delete_row`, and `delete_column`. Inside a code
@@ -1658,8 +1827,9 @@ runtime, requests grants, polls a pending decision to completion, and either pri
 state (`self`, `status --json`) or `syscall.Exec`s a command with the granted values injected into
 its environment. The broker holds no Dispatch credential and opens no Dispatch ask anywhere. Every
 human decision — approving or denying a secret request, approving or denying a machine login,
-revoking a grant — reaches the broker's UI routes from Dispatch's server, carrying the UI bearer
-and the deciding person's Dispatch login, their email, in the body's `approver` field. The bearer
+revoking a grant, ending a machine login — reaches the broker's UI routes from Dispatch's server,
+carrying the UI bearer and the deciding person's Dispatch login, their email, in the body's
+`approver` field. The bearer
 vouches for that login: Dispatch fills it from its own signed-in session, never from the browser,
 and the broker checks it against the record's approver and records it on the decision event. The
 UI bearer is therefore an approval credential, and keeping it and Dispatch's identity closed to
@@ -1697,7 +1867,11 @@ code relies on: `Load` lists with `ListSecrets`' `name` filter, a case-sensitive
 `BROKER_SECRETS_PREFIX` and keeps only the names `strings.CutPrefix` finds under it, so a lister
 that answers more serves and logs nothing outside the namespace (`secrets.Local` filters as Secrets
 Manager does); a name under the prefix maps one-to-one to a request name (`slugPattern`); an alias
-on a secret's `KmsKeyId` is resolved through `kms:ListAliases` lazily, at most once per load; and
+on a secret's `KmsKeyId` is resolved through `kms:ListAliases` lazily, at most once per load;
+whether a secret has a value is read from the same listing's `SecretVersionsToStages` (a version
+labelled `AWSCURRENT`, the one `GetSecretValue` reads), with no call per secret, and checked after
+every other reason, so a secret refused for a tag or its key is logged for that (`secrets.Local`
+gives a secret created without a value no version, as Secrets Manager does); and
 an owner tag naming a service is refused as malformed while `Loader.Services` is empty, as
 `cmd/broker` leaves it. The two ERROR lines, `policy.RefusedMessage` with a `Reason*` constant and
 `policy.LoadFailedMessage`, are what the deployment's alarms filter on, so neither changes without
@@ -1857,16 +2031,16 @@ literal that is not
 a documented `exit*` constant or another such function's result. The CLI reference is the built
 binaries' own `--help`, so every form must answer `-h` with exit 0.
 
-`internal/broker/api/routes_table.go`'s `routes()` is the one list of the broker's 19 HTTP routes —
+`internal/broker/api/routes_table.go`'s `routes()` is the one list of the broker's 21 HTTP routes —
 a new route is a new row there, never a bare `mux.HandleFunc` — and its own comment says the
 contract for every row is the broker's design overview. Each row's handler is
 wrapped by the adapter for its authentication (`public`, `launcherAuth`, `sessionAuth`, `uiAuth`),
 which fixes both the credential `server.authenticate` checks and the caller the handler receives (a
 launcher `enroll.Credential`, an enrollment id, or nothing at all for a UI route — the UI bearer
 proves the caller is Dispatch, so every UI handler takes its subject from the path or body: a
-decision or a revoke names the deciding human in `approver`, which Dispatch filled from its own
-session, and an empty one is `400 APPROVER_REQUIRED`), so a handler cannot be wired to the wrong
-kind of caller. A bad
+decision or a revoke names the deciding human in `approver`, and a list the person it lists for in
+`?approver=`, which Dispatch filled from its own session; an empty one is `400 APPROVER_REQUIRED`),
+so a handler cannot be wired to the wrong kind of caller. A bad
 credential is a 401 (`LAUNCHER_INVALID`, `PROOF_INVALID`, or `UI_INVALID`); a store that cannot
 answer while authenticating is a 503 naming it. Every 500 is logged with its cause
 (`writeInternal`), every JSON body is capped at 1 MiB with unknown fields refused (`readJSON`),
@@ -1923,23 +2097,25 @@ the caller's signed request object (`iss` must be the requesting enrollment's ow
 `login_hint` — a session never names its own approver, only the policy does), first checks for a
 still-live grant covering the exact same name set (`reuseLiveGrant`: no new request, no new record,
 as long as the current policy still allows it and the grant's whole chain still verifies), then
-evaluates the policy per name: any `deny` denies the whole request with no record written at all; a
-name the policy does not serve aborts the whole call with `policy.ErrUnknownSecret` (`400
-UNKNOWN_SECRET`, per the broker's design overview) instead of being folded into an ordinary
-`deny` decision — no request row is written either, matching the "at record time" wording; a name
-needing approval that names a *different* approver than an already-approval-needing name in the
-same request is refused `400 MIXED_APPROVERS`; every grant lives `BROKER_MAX_GRANT_SECONDS`; when
-every name is decided (`granted`/`denied`) with
-nothing pending, the request and, if granted, its grant are written with no record; a request
-needing approval writes the request row and a `credential_requests` record together, in one
-transaction serialized by an advisory lock keyed on the enrollment and the sorted name set, so an
-identical concurrent request coalesces onto the same record (`coalesced: true`) instead of writing
-a second one. Each of those write transactions first locks the requesting enrollment `for share`
-while it is live, before any request or grant row, so a request racing the sweep or a revoke
-writes nothing on an enrollment that ended after `Create` first read it (`401 PROOF_INVALID`, as
-for one that had ended before). A pending request leaves `pending` without a human only through
-`store.EndPendingRequests` (the session's cancel, the sweeper's expiry, an enrollment's end): one
-statement moves the request rows and writes each one's audit row and its record's terminal event.
+decides and writes in one transaction: it takes an advisory lock keyed on the enrollment and the
+sorted name set, then locks the requesting enrollment `for share` while it is live (that order;
+the reverse breaks `TestCreateWaitsOutTheSweepItRaces`), reads the names withheld from the session,
+and evaluates the policy per name for the session: any `deny` denies the whole request with no
+record written at all; a name the policy does not serve aborts the whole call with
+`policy.ErrUnknownSecret` (`400 UNKNOWN_SECRET`, per the broker's design overview) instead of being
+folded into an ordinary `deny` decision — no request row is written either, matching the "at record
+time" wording; a name needing approval that names a *different* approver than an
+already-approval-needing name in the same request is refused `400 MIXED_APPROVERS`; every grant
+lives `BROKER_MAX_GRANT_SECONDS`; when every name is decided (`granted`/`denied`) with nothing
+pending, the request and, if granted, its grant are written with no record; a request needing
+approval writes the request row and a `credential_requests` record together, and an identical
+concurrent request coalesces onto the same record (`coalesced: true`) instead of writing a second
+one. The enrollment lock, taken before any request or grant row, means a request racing the sweep
+or a revoke writes nothing on an enrollment that ended after `Create` first read it (`401
+PROOF_INVALID`, as for one that had ended before). A pending request leaves `pending` without a
+human only through `store.EndPendingRequests` (the session's cancel, the sweeper's expiry, an
+enrollment's end): one statement moves the request rows and writes each one's audit row and its
+record's terminal event.
 `ApplyDecision` decides a pending record on the deciding human's login — approve
 mints the grant while the requesting enrollment is still live, deny denies it — re-deriving the
 record's id, refusing any login but the record's approver whatever the record's state
@@ -1967,14 +2143,46 @@ since the grant was decided — that the current policy still allows every grant
 (`stillAllowed`: a name the policy no longer serves, denies, or now wants approved that was granted
 automatically, or that it now wants approved by someone the request's `decided_by` login is not,
 all refuse, so an approved grant outlives an owner change only while its approver may still
-approve the secret, or once the new tags give its session the secret without asking); a source
-missing from the secrets store is `404 SECRET_NOT_IN_STORE`.
+approve the secret, or once the new tags give its session the secret without asking; a name
+withheld from the session that its request got automatically is judged as an approval by
+`decided_by`, since a live grant of it was approved after the withhold by someone the withheld name
+let approve it); a source missing from the secrets store is `404 SECRET_NOT_IN_STORE`.
 Migration 0009 defaults `request_secrets.delivery` to `inject`, which this broker neither writes nor
 reads, so a binary from before it can still be rolled back to.
 `RevokeGrant` lets a session end only its own grant (session proof); `RevokeByApprover` ends a grant
-on a human's Dispatch login, allowed only when that login is the grant's approver or its
-enrollment's operator (`mayRevoke`, else `403 NOT_APPROVER`); revoking an already-revoked grant is
-a no-op, writing no second audit row. Audit rows never carry secret values: `audit()` takes only
+on a human's Dispatch email, allowed only when that email is the grant's approver or its
+enrollment's operator (`mayRevoke`, which also answers whether it is the operator, else
+`403 NOT_APPROVER`). When the enrollment's operator revokes, `withhold` withholds
+from the grant's session every name its request got automatically (a `withheld_secrets` row per
+session and name, migration 0010) and, in the same statement, ends every other live grant of the
+session whose request got one of the newly withheld names automatically, each with a
+`grant.revoked` audit row of its own; the revoked grant's audit detail lists the newly withheld
+names under `withheld`, and each other ended grant's lists the withheld names it held. A name
+already withheld ends nothing, since its first withhold ended every grant that got it without
+asking and one approved since stands. The withhold is the session's, so the operator's revoke of a
+grant already revoked still runs it, recorded as one `grant.withheld` row when it withholds
+something new; any other revoke of an already-revoked grant, and an operator's that withholds
+nothing new, is a no-op, writing no second audit row. Another person's revoke (a grant's
+approver who is not the operator) ends that grant alone and withholds nothing, as does a session
+revoking its own grant. A withheld name is human tier to its session: `policy.Requester.Withheld`
+carries the session's withheld names, and `policy.Set.Evaluate` answers each as an approval request
+to the owner (`anyone` for a shared secret; a service's own secret is denied). Every path that
+evaluates for a session builds the requester with them: `Create`, `currentPolicyAdmits` (so a
+request that was pending when a name was withheld is that name's owner's to approve, and no one's
+while the policy does not serve the name or denies it, as it does once a service owns it: admitted
+then, the approval would release it once the name returned with its old tags, since that restores
+the request's policy version and `Values` runs `stillAllowed` only when the version moved) and
+`stillAllowed` on release and reuse. So the session asks before it gets the name again while every
+other session is unaffected.
+`RevokeByApprover` locks the session's row `for no key update`
+in the statement that reads the grant, before writing the grant, and `Create` and `ApplyDecision`
+read the withheld names after taking that row `for share`: a request deciding as the revoke runs
+is either written first, and then ended by the withhold if it got a withheld name, or decides with
+the name withheld. `GrantsForApprover` (`GET /v1/grants?approver=`) lists every live grant of the
+person's sessions, automatic ones included, and every grant the person approved, each answering
+`granted` (`automatic` or `approval`, derived once from whether the grant rests on a record) with a
+null `approver` and `record_id` for an automatic one. Audit rows never carry secret values:
+`audit()` takes only
 `kind`, `enrollment_id`, `request_id`, an optional
 `grant_id`, `actor` (`human:<login>`, `session:<enrollment id>`, `launcher:<credential id>`, or
 `broker`), and a non-secret JSON `detail`. The granted value itself is read fresh from
@@ -2009,6 +2217,41 @@ poll, `GET /v1/launcher-credentials/{pending}`) answers only the record's state 
 the minted credential's id and `expires_at` — no token is ever returned; the credential is usable
 only with proofs signed by the key the request object embedded. The broker has no renewal route:
 past `expires_at` the machine logs in again, with a new key, a new code and a new human approval.
+
+`GET /v1/launcher-credentials?approver=<email>` lists the machine logins a person approved that
+can still reach a secret (id, host, service, issued, expires, `expired`): every unrevoked one that
+is unexpired or still has a live enrollment, live as `Lookup` means it (not revoked, its lease not
+lapsed). A login's enrollments outlive its expiry, since `Renew` and `Lookup` never read the
+credential (each session renews with its own key), so an expired login stays listed,
+`expired: true`, until its last enrollment ends or its lease lapses, swept or not, and revoking
+every listed login ends every session the person's machines started.
+`POST /v1/launcher-credentials/{id}/revoke-by-approver` `{approver}` ends one, expired or not
+(`enroll.Service.RevokeCredential`). Both key on the approver of the `launcher_credential` record
+the credential was minted from (`credential_requests.approver`, joined through
+`launcher_credentials.record_id` and required to be of kind `launcher_credential`), never on the
+credential's `operator`: a service's credential (the Legion daemon's, `service` set) has no operator
+(`authorized` needs it null to enroll pods), and the person who approved it is the one accountable
+for it. For a person's own machine the two are the same person (`machine.Service.ApplyDecision`
+mints the operator from the approving login), so one rule covers both. Anyone but that approver is
+`403 NOT_APPROVER`; an unknown id, like a credential minted from no `launcher_credential` record
+(only `ApplyDecision` mints one, always from its record), is `404 NOT_FOUND`.
+In one transaction it sets the credential's `revoked_at`, so its launcher proofs stop
+authenticating, ends every enrollment the credential made through `endEnrollment` (a person's host
+sessions and boxes, or every pod a service's login enrolled: grants revoked, pending requests
+cancelled, actor `human:<email>`, an `enrollment.revoked` row each) and writes one
+`launcher_credential.revoked` audit row naming them, the host and any service; revoking it again
+changes nothing. It locks the credential's row before the enrollments', and `Create` holds that row
+`for share` while it inserts, so an enrollment whose launcher proof was verified just before a revoke
+either commits first and is ended by it, or finds the credential revoked and is
+`401 LAUNCHER_INVALID`; the credential lock also makes two concurrent revokes write one
+`launcher_credential.revoked` row, and the enrollments' `for update` makes a revoke racing a
+launcher's own `Revoke` of one enrollment end it once. Nothing tells the machine: its helper's next
+renewal of a session is refused `PROOF_INVALID`, revoking that lapsed enrollment is refused
+`LAUNCHER_INVALID`, and the helper drops the credential as for any refusal; a helper with no live
+session learns it at its next enrollment, and the Legion daemon at its next pod enrollment or
+unenrollment, after which it starts a new
+machine login. Dispatch's machine-login page lists and revokes the signed-in person's through these
+two routes.
 
 `internal/broker/enroll.Service.AuthenticateLauncher` is `proof.Verifier`'s `LookupLauncher` hook: a
 launcher proof's `lid` claim resolves a live, unexpired `launcher_credentials` row and then
@@ -2075,7 +2318,8 @@ backend auto-strips exactly one leading directory, so the installed tree still e
 `bin/agent-secrets`, `bin/agent-secrets-helper`, the layout its installer expects; a bare
 `bin/...` top level would itself be the directory mise strips. The release job builds them, once
 it has decided the tag, so it can stamp that tag into both, and attests the two tarballs; the
-build job builds only `legion-envoy-<arch>.tar.gz` (envoy-listener alone). This is the release a
-host installs both binaries from (through the operator's dotfiles, under the broker design's
-devbox-enrollment plan).
+build job builds only `legion-envoy-<arch>.tar.gz` (envoy-listener alone, with its
+`THIRD_PARTY_NOTICES`). Each `agent-secrets` tarball also holds `agent-secrets/THIRD_PARTY_NOTICES`,
+the licenses of the Go modules both binaries compile in. This is the release a host installs both
+binaries from (through the operator's dotfiles, under the broker design's devbox-enrollment plan).
 

@@ -51,6 +51,19 @@ func (c Client) Post(ctx context.Context, path string, body, into any) error {
 // GetPages reads every page of the JSON array GitHub answers at path, a hundred items to a page,
 // following the Link header's rel="next" until GitHub names none.
 func GetPages[T any](ctx context.Context, c Client, path string) ([]T, error) {
+	return getPages[T](ctx, c, path, "")
+}
+
+// GetListPages reads every page of the list GitHub answers at path as the field of a JSON object,
+// as its check-run and workflow-run lists answer ({"total_count": n, "check_runs": [...]}), paged as
+// GetPages pages an array. An answer without the field is an error, never an empty list.
+func GetListPages[T any](ctx context.Context, c Client, path, field string) ([]T, error) {
+	return getPages[T](ctx, c, path, field)
+}
+
+// getPages is GetPages, reading each page's items from the field of the object it answers when
+// field is not empty.
+func getPages[T any](ctx context.Context, c Client, path, field string) ([]T, error) {
 	separator := "?"
 	if strings.Contains(path, "?") {
 		separator = "&"
@@ -58,9 +71,23 @@ func GetPages[T any](ctx context.Context, c Client, path string) ([]T, error) {
 	var all []T
 	for url := c.API + path + separator + "per_page=100"; url != ""; {
 		var page []T
-		next, err := c.call(ctx, http.MethodGet, url, nil, &page)
+		var object map[string]json.RawMessage
+		var into any = &page
+		if field != "" {
+			into = &object
+		}
+		next, err := c.call(ctx, http.MethodGet, url, nil, into)
 		if err != nil {
 			return nil, err
+		}
+		if field != "" {
+			list, ok := object[field]
+			if !ok {
+				return nil, fmt.Errorf("GitHub answered GET %s with no %q list", path, field)
+			}
+			if err := json.Unmarshal(list, &page); err != nil {
+				return nil, fmt.Errorf("decode the %q list GitHub answered GET %s with: %w", field, path, err)
+			}
 		}
 		all = append(all, page...)
 		url = next

@@ -21,7 +21,8 @@ import (
 
 // Config supplies the project-scoped workflow limits and the clock used only to stamp durable
 // outbox deadlines. Zero limits take their shipped defaults. MergeQueueRole is the project's
-// `merge_queue_role`, the role the merger's READY is published to; empty, it is posted only.
+// `merge_queue_role`, the role the merger's READY is published to, and its withdrawal when the
+// head's own CI turns red before the merge; empty, the READY is posted only.
 type Config struct {
 	Project        string
 	DesignGate     config.DesignGate
@@ -29,7 +30,12 @@ type Config struct {
 	MaxFixAttempts int
 	Linger         time.Duration
 	MergeQueueRole string
-	Clock          func() time.Time
+	// ReviewWorkflows is the project's `review_workflows`: the paths of the required workflows it
+	// declares as review workflows, which fail on their own findings. A red that only they make is
+	// the reviewer's round's to decide in testing and reviewing (classify.RedOnlyByReviewWorkflows);
+	// any other red required workflow sends the work back. Empty declares none.
+	ReviewWorkflows []string
+	Clock           func() time.Time
 	// ReviewAppLogin is the review App's bot login (<slug>[bot]) from its boot token lease. A push
 	// by it is never a fix attempt, and a red on its red tests is planned; a review it submits can be
 	// the reviewer's answer to a round it left undecided (reviewersAnswer). Empty matches no one.
@@ -362,7 +368,13 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 			return intake.Result{}, e.transition(ctx, tx, *issue, TriggerTesterFailed, "", row, pr, "")
 		}
 		if fact.Verdict == "pass" {
-			return intake.Result{}, e.transition(ctx, tx, *issue, TriggerTesterPassed, "", row, pr, "")
+			// A red only declared review workflows make stayed with the round (classify.RedSendsBack),
+			// so the reviewer it now starts is told it, and what the round owes it.
+			reason := ""
+			if pr != nil && classify.RedOnlyByReviewWorkflows(*pr, e.cfg.ReviewWorkflows) {
+				reason = redAt(*pr) + reviewWorkflowsToAdjudicate
+			}
+			return intake.Result{}, e.transition(ctx, tx, *issue, TriggerTesterPassed, "", row, pr, reason)
 		}
 	case phase.Reviewing:
 		_, err := e.settleRound(ctx, tx, *issue, row, pr, round{}, byCompletion)
@@ -406,9 +418,11 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 // pullRequestOpened records the pull request a branch opened, and a reopen is the same pull
 // request: its fix and blocked attempts are what bound the review rounds, so they are carried
 // over rather than rebuilt at zero, which made closing and reopening a way to buy a fresh cap, and
-// so is its newest review, which orders every review it will have, and the checks its base branch
-// requires, as last read. A new generation deletes a pull request that is not open, and all of
-// them with it.
+// so is its newest review, which orders every review it will have, and what its base branch
+// requires - its required checks, and its required workflows with their runs at the head they were
+// read at - as last read, so the reopened head's first settlement is judged by all of it
+// (classify.HeadChecks). A new generation deletes a pull request that is not open, and all of them
+// with it.
 func (e *Engine) pullRequestOpened(ctx context.Context, tx pgx.Tx, fact intake.PullRequestOpened) (intake.Result, error) {
 	issue, err := e.issueForBranch(ctx, tx, fact.Branch)
 	if err != nil || issue == nil {
@@ -437,7 +451,8 @@ func (e *Engine) pullRequestOpened(ctx context.Context, tx pgx.Tx, fact intake.P
 		if !fact.Reopened || recorded.State == record.PullRequestMerged {
 			return intake.Result{}, nil
 		}
-		pr.FixAttempts, pr.BlockedAttempts, pr.ReviewSeen, pr.Required = recorded.FixAttempts, recorded.BlockedAttempts, recorded.ReviewSeen, recorded.Required
+		pr.FixAttempts, pr.BlockedAttempts, pr.ReviewSeen = recorded.FixAttempts, recorded.BlockedAttempts, recorded.ReviewSeen
+		pr.Required, pr.Workflows, pr.WorkflowsHead = recorded.Required, recorded.Workflows, recorded.WorkflowsHead
 		pr.HeadUpdatedAt = classify.LatestClock(recorded.HeadUpdatedAt, fact.UpdatedAt)
 	}
 	if err := e.store.PutPullRequest(ctx, tx, pr); err != nil {
@@ -503,7 +518,7 @@ func (e *Engine) push(ctx context.Context, tx pgx.Tx, fact intake.Push) (intake.
 	if err != nil {
 		return intake.Result{}, err
 	}
-	_, err = e.settleRound(ctx, tx, *issue, reviewer, pr, reviewRound(*issue, reviewer, &prior), byPush)
+	_, err = e.settleRound(ctx, tx, *issue, reviewer, pr, e.reviewRound(*issue, reviewer, &prior), byPush)
 	return intake.Result{}, err
 }
 
@@ -657,7 +672,7 @@ func (e *Engine) retryOrEscalate(ctx context.Context, tx pgx.Tx, fact intake.Ret
 			return intake.Result{}, err
 		}
 		// The retry tells nothing of a stuck round: passed as its own before, it is stuck the same way.
-		r := reviewRound(*issue, reviewer, pr)
+		r := e.reviewRound(*issue, reviewer, pr)
 		if moved, err := e.settleRound(ctx, tx, *issue, reviewer, pr, r, ""); err != nil || moved {
 			return intake.Result{}, err
 		}
@@ -758,6 +773,9 @@ func (e *Engine) transition(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 	}
 	if err := e.notice(ctx, tx, issue.Key, noticeFor(trigger, from, handoff, reason)); err != nil {
 		return err
+	}
+	if from == phase.AwaitingMerge && trigger == TriggerChecksRed {
+		return e.withdrawReady(ctx, tx, issue, pr, reason)
 	}
 	if row.To == phase.AwaitingMerge {
 		// A pull request that merged before the issue reached awaiting_merge leaves nothing to merge:

@@ -203,7 +203,7 @@ const legionControllerLocator = z.strictObject({
 });
 
 /** `api.AgentSecretsLoginView` — the daemon's own agent-secrets machine login's current status
- * (runtime.kubernetes.agent_secrets, AGENTC-393 Plan C): `state` is one of "none" (no login has
+ * (runtime.kubernetes.agent_secrets): `state` is one of "none" (no login has
  * ever been started), "pending", "issued", "denied", or "expired"; `code` is the confirmation
  * code shown on the Dispatch credential page for a pending login, "" otherwise. */
 const legionAgentSecretsLoginView = z.strictObject({
@@ -332,6 +332,39 @@ export const LegionGitHubTokenResponse = z.strictObject({
 export const LegionGitCredentialResponse = z.strictObject({
   username: z.literal("x-access-token"),
   password: nonEmptyString,
+});
+
+/** `api.ThreadsResolveRequest`, the reviewer pane's `legion threads resolve`: its grant, and the
+ * pull request it names, which must be its issue's. */
+export const LegionThreadsResolveRequest = z.strictObject({
+  grantId: nonEmptyString,
+  repo: nonEmptyString,
+  number: z.number().int().positive(),
+});
+/** `reviewthreads.Outcome`: an unresolved review thread the daemon resolved for the reviewer, on
+ * whose acceptance (`resolved`), or left open and why (`leftOpen`) — exactly one of the two — with
+ * its newest comment's author. */
+const LegionThreadOutcome = z.union([
+  z.strictObject({
+    url: nonEmptyString,
+    resolved: nonEmptyString,
+    newestBy: nonEmptyString.optional(),
+  }),
+  z.strictObject({
+    url: nonEmptyString,
+    leftOpen: nonEmptyString,
+    newestBy: nonEmptyString.optional(),
+  }),
+]);
+/** `api.ThreadsResolveResponse`, the body of `POST /legion/v1/threads/resolve`: each unresolved
+ * thread's outcome, in GitHub's order, but for the threads whose newest comment is a draft in the
+ * implement App's pending review, which `withheld` counts without naming; and, when GitHub refused
+ * to resolve a thread, that thread and GitHub's message (`refused`), the outcomes and the count
+ * before it being all that ran. */
+export const LegionThreadsResolveResponse = z.strictObject({
+  threads: z.array(LegionThreadOutcome),
+  withheld: z.number().int().nonnegative(),
+  refused: z.strictObject({ url: nonEmptyString, error: nonEmptyString }).optional(),
 });
 
 /** Every completed fact route returns an intentional empty JSON object, never an unconstrained body. */

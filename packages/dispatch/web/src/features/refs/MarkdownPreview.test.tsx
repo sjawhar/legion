@@ -29,6 +29,7 @@ const issue: IssueDetails = {
   last_seq: 1,
   number: 1,
   open_asks: [],
+  progress: { tasks: null, children: null },
   parent: null,
   assignee: null,
   claim: null,

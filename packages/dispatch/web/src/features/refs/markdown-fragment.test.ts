@@ -6,9 +6,9 @@ import { balanceCutMarkdown } from "./markdown-fragment";
 // MaxFragments=1`) run on legion540-pg, and from `reply_body`'s 160-rune head.
 
 test("a search snippet cut after a bold span opened loses the stray delimiter, not the words", () => {
-  expect(balanceCutMarkdown("stop the staging deploy before the cut and report back** eleven")).toBe(
-    "stop the staging deploy before the cut and report back eleven"
-  );
+  expect(
+    balanceCutMarkdown("stop the staging deploy before the cut and report back** eleven")
+  ).toBe("stop the staging deploy before the cut and report back eleven");
   expect(balanceCutMarkdown("twenty anchor** after the mark, then `code")).toBe(
     "twenty anchor after the mark, then code"
   );

@@ -69,10 +69,9 @@ type apiRoute struct {
 }
 
 // routes is the one list of the broker's routes; a new route is a new row here, never a bare
-// mux.HandleFunc. The contract for every row is the shared broker contract
-// (dispatch://AGENTC-393/artifact/plan-overview-md). The comment above each row says what the
-// route does; the broker's generated HTTP reference (cmd/broker-refgen) prints it and
-// refuses a row without one.
+// mux.HandleFunc. The comment above each row says what the route does; the broker's generated
+// HTTP reference (cmd/broker-refgen, published at
+// https://sjawhar.github.io/legion/broker/reference/api/) prints it and refuses a row without one.
 func routes() []apiRoute {
 	return []apiRoute{
 		// Enroll a box's, host session's or pod's signing key under the caller's machine credential.
@@ -107,9 +106,21 @@ func routes() []apiRoute {
 		{http.MethodPost, "/v1/credential-requests/{record}/deny", uiAuth((*server).denyRecord)},
 		// Find a pending machine login by the confirmation code its machine shows.
 		{http.MethodPost, "/v1/machine-logins/lookup", uiAuth((*server).lookupMachineLogin)},
-		// List the live grants the named person approved or operates.
+		// List the machine logins the named person approved, their own machines' and any
+		// service's, such as the Legion daemon's, that are not revoked and are unexpired or expired
+		// with a session still running.
+		{http.MethodGet, "/v1/launcher-credentials", uiAuth((*server).listLauncherCredentials)},
+		// End a machine login, expired or not, as the person who approved it: its launcher proofs
+		// stop authenticating and every session it enrolled, pods included, ends with its grants and
+		// pending requests.
+		{http.MethodPost, "/v1/launcher-credentials/{id}/revoke-by-approver", uiAuth((*server).revokeLauncherCredential)},
+		// List the live grants of the named person's sessions, automatic or approved, and those the
+		// person approved.
 		{http.MethodGet, "/v1/grants", uiAuth((*server).listGrantsForApprover)},
-		// End a grant as its approver or as its enrollment's operator.
+		// End a grant as its approver or as its enrollment's operator. The operator's revoke also
+		// withholds the secrets the grant's request got automatically from that session, even when
+		// the grant had already ended: its other grants that got them automatically end too, and it
+		// asks before it gets them again.
 		{http.MethodPost, "/v1/grants/{id}/revoke-by-approver", uiAuth((*server).revokeByApprover)},
 		// Report whether the broker can reach its database.
 		{http.MethodGet, "/healthz", public((*server).healthz)},

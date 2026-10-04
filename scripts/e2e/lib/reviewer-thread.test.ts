@@ -22,11 +22,7 @@ const bin = join(dir, "bin");
 mkdirSync(bin);
 // The stub answers every `gh api graphql …` call with the fixture GH_GRAPHQL_FIXTURE names,
 // whatever variables or query text the call carries: review_threads reads only the response body.
-writeFileSync(
-  join(bin, "gh"),
-  '#!/bin/sh\ncat "$GH_GRAPHQL_FIXTURE"\n',
-  { mode: 0o755 }
-);
+writeFileSync(join(bin, "gh"), '#!/bin/sh\ncat "$GH_GRAPHQL_FIXTURE"\n', { mode: 0o755 });
 
 // threadsFixture writes a reviewThreads GraphQL page: THREADS is an array of
 // { author, state, reviewState } for each thread's one comment.

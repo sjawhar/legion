@@ -47,7 +47,7 @@ func TestEventStreamClosesOnceItsPersonNoLongerResolves(t *testing.T) {
 	t.Cleanup(func() { _ = documents.Shutdown(context.Background()) })
 	person := &endableIdentity{}
 	deps, err := NewDeps(DepsInput{
-		Store: database, Identity: person, AgentToken: "agent-token", Docs: documents, Events: broker,
+		Store: database, Identity: person, AgentTokens: sharedAgentTokens(t, "agent-token"), Docs: documents, Events: broker,
 		StreamHeartbeat: 20 * time.Millisecond,
 	})
 	if err != nil {
@@ -96,7 +96,7 @@ func TestAgentStreamClosesOnceItsViewerNoLongerResolves(t *testing.T) {
 	t.Cleanup(func() { _ = documents.Shutdown(context.Background()) })
 	person := &endableIdentity{}
 	deps, err := NewDeps(DepsInput{
-		Store: database, Identity: person, AgentToken: "agent-token", Docs: documents, Events: broker,
+		Store: database, Identity: person, AgentTokens: sharedAgentTokens(t, "agent-token"), Docs: documents, Events: broker,
 		AgentStream: agentstream.NewMemory(), StreamHeartbeat: 20 * time.Millisecond,
 	})
 	if err != nil {
@@ -183,7 +183,7 @@ func TestDocumentSocketClosesOnceItsPersonNoLongerResolves(t *testing.T) {
 			end(t, rig)
 			ended := time.Now()
 			select {
-			case <-peer.readerDone:
+			case <-peer.connection().Ended:
 				t.Logf("the document socket closed %s after the session ended (heartbeat %s)", time.Since(ended).Round(time.Millisecond), heartbeat)
 			case <-time.After(heartbeat + time.Second):
 				t.Fatalf("the document socket stayed open %s after its person's session ended", time.Since(ended).Round(time.Millisecond))
@@ -194,7 +194,7 @@ func TestDocumentSocketClosesOnceItsPersonNoLongerResolves(t *testing.T) {
 
 			// The document goes on without them: an edit after the close reaches the room and not
 			// their editor, and their editor cannot reconnect.
-			if _, err := rig.documents.ReplaceText(context.Background(), rig.artifactID, "written after the session ended", model.Actor{Kind: "user", ID: "bob@d.example"}); err != nil {
+			if _, err := replaceDocumentText(rig.database, rig.documents, rig.artifactID, "written after the session ended", model.Actor{Kind: "user", ID: "bob@d.example"}); err != nil {
 				t.Fatalf("edit the document after the close: %v", err)
 			}
 			if text, err := rig.documents.Text(context.Background(), rig.artifactID); err != nil || !strings.Contains(text, "written after the session ended") {
@@ -215,6 +215,7 @@ func TestDocumentSocketClosesOnceItsPersonNoLongerResolves(t *testing.T) {
 // documentSocketRig is the server main serves a person signed in through a sign-in pool: cookie
 // identity confirming membership with the pool, and the API and document socket Register mounts.
 type documentSocketRig struct {
+	database   *store.Store
 	pool       *oidctest.Issuer
 	people     *store.PgPeopleStore
 	sessions   *store.PgSessionStore
@@ -252,6 +253,7 @@ func newDocumentSocketRig(t *testing.T, heartbeat time.Duration) *documentSocket
 	}
 
 	database := storetest.Open(t)
+	rig.database = database
 	rig.people = store.NewPgPeopleStore(database.Pool, "signing-key", nil)
 	rig.sessions = store.NewPgSessionStore(database.Pool)
 	if err := rig.people.SignIn(ctx, rig.email, signIn.RefreshToken, time.Now()); err != nil {
@@ -272,7 +274,7 @@ func newDocumentSocketRig(t *testing.T, heartbeat time.Duration) *documentSocket
 	rig.documents = docs.New(docs.Deps{Store: database, Events: broker, Identity: person, Settle: time.Hour})
 	t.Cleanup(func() { _ = rig.documents.Shutdown(context.Background()) })
 	deps, err := NewDeps(DepsInput{
-		Store: database, Identity: person, AgentToken: "agent-token", Docs: rig.documents, Events: broker,
+		Store: database, Identity: person, AgentTokens: sharedAgentTokens(t, "agent-token"), Docs: rig.documents, Events: broker,
 		StreamHeartbeat: heartbeat,
 	})
 	if err != nil {

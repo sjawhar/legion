@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -13,11 +14,22 @@ import (
 	gws "github.com/gorilla/websocket"
 	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/encoding"
+	"github.com/sjawhar/envoy/internal/dispatch/auth"
+	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
+
+// connectPeer connects alice's browser to artifactID's room through the document server at
+// serverURL, at the schema version the dashboard presents, so the room takes its edits.
+func connectPeer(t *testing.T, serverURL, artifactID string) *docstest.Peer {
+	t.Helper()
+	url := "ws" + strings.TrimPrefix(serverURL, "http") + "/ws/doc/" + artifactID +
+		"?schema_version=" + strconv.Itoa(pmdoc.SchemaVersion())
+	return docstest.Dial(t, url, http.Header{"X-Dispatch-User": []string{"alice"}}, artifactID, crdt.New())
+}
 
 func TestIssueCloseClosesOpenDocumentConnection(t *testing.T) {
 	service, artifactID := newTestService(t)
@@ -232,7 +244,7 @@ func TestASocketsPreloadIsServedOnlyWhileTheHistoryHasNotMoved(t *testing.T) {
 	adapter := &servicePersistenceAdapter{store: service.persistence, service: service}
 	preload := func(t *testing.T) []byte {
 		t.Helper()
-		_, loaded, err := service.loadDocument(context.Background(), artifactID)
+		_, loaded, err := service.loadTree(context.Background(), artifactID)
 		if err != nil || loaded == nil || len(loaded.Update) == 0 {
 			t.Fatalf("load cold document: loaded=%v err=%v, want its durable history", loaded, err)
 		}
@@ -315,7 +327,7 @@ func TestDocumentSocketRefusesARoomOutsideTheSchema(t *testing.T) {
 	}
 }
 
-func TestShutdownClosesDocumentPeersBeforeDrain(t *testing.T) {
+func TestShutdownClosesDocumentPeers(t *testing.T) {
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "before")
 	service := New(Deps{
@@ -355,7 +367,9 @@ func TestShutdownClosesDocumentPeersBeforeDrain(t *testing.T) {
 	}
 }
 
-func TestShutdownBoundsPeerCloseDuringLockedAppend(t *testing.T) {
+// Shutdown returns at its caller's deadline while an editor is connected and a durable append waits
+// on a lock, and the append still reaches the store once the lock is released.
+func TestShutdownReturnsAtItsDeadlineWithAnEditorConnectedAndAnAppendLocked(t *testing.T) {
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "before")
 	service := New(Deps{
@@ -383,16 +397,14 @@ func TestShutdownBoundsPeerCloseDuringLockedAppend(t *testing.T) {
 	if _, err := locker.Exec(context.Background(), `select pg_advisory_xact_lock(hashtext($1))`, artifactID); err != nil {
 		t.Fatalf("lock document append: %v", err)
 	}
-	if _, err := service.ReplaceText(context.Background(), artifactID, "after", model.Actor{Kind: "user", ID: "alice"}); err != nil {
-		t.Fatalf("write delayed document: %v", err)
-	}
+	editLiveTree(t, service, artifactID, replaceRun("before", "after"))
 	if !service.hasDurableAppend(artifactID) {
 		t.Fatal("durable append finished while its advisory lock was held")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
 	defer cancel()
 	if err := service.Shutdown(ctx); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("shutdown with peer and append lock = %v, want deadline exceeded", err)
+		t.Fatalf("shutdown with an editor connected and an append locked = %v, want deadline exceeded", err)
 	}
 	if err := locker.Commit(context.Background()); err != nil {
 		t.Fatalf("release append lock: %v", err)
@@ -401,7 +413,7 @@ func TestShutdownBoundsPeerCloseDuringLockedAppend(t *testing.T) {
 	reloaded := New(Deps{Store: database, Events: events.NewBroker(), Settle: time.Hour})
 	defer reloaded.Shutdown(context.Background())
 	if got, err := reloaded.Text(context.Background(), artifactID); err != nil || got != "after\n" {
-		t.Fatalf("text after peer-bounded shutdown = %q (%v), want after", got, err)
+		t.Fatalf("text after the shutdown the locked append outlasted = %q (%v), want after", got, err)
 	}
 }
 
@@ -427,9 +439,7 @@ func TestAppendFailureClosesDocumentConnectionAndReloadsRoom(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = connection.Close() })
 
-	if _, err := service.ReplaceText(context.Background(), artifactID, "after", model.Actor{Kind: "user", ID: "alice"}); err != nil {
-		t.Fatalf("replace text before persistence failure: %v", err)
-	}
+	editLiveTree(t, service, artifactID, replaceRun("before", "after"))
 	connection.SetReadDeadline(time.Now().Add(time.Second))
 	for {
 		if _, _, err := connection.ReadMessage(); err != nil {
@@ -482,12 +492,12 @@ func TestDocumentBearerCannotForgeVerifiedServiceSubject(t *testing.T) {
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "# First")
 	service := New(Deps{
-		Store:      database,
-		Events:     events.NewBroker(),
-		Identity:   headerIdentity(database),
-		AgentToken: "doc-agent-token",
-		ServerURL:  "https://dispatch.example",
-		Settle:     20 * time.Millisecond,
+		Store:       database,
+		Events:      events.NewBroker(),
+		Identity:    headerIdentity(database),
+		AgentTokens: sharedAgentTokens(t, "doc-agent-token"),
+		ServerURL:   "https://dispatch.example",
+		Settle:      20 * time.Millisecond,
 	})
 	t.Cleanup(func() {
 		if err := service.Shutdown(context.Background()); err != nil {
@@ -544,16 +554,29 @@ func TestDocumentBearerCannotForgeVerifiedServiceSubject(t *testing.T) {
 	}
 }
 
-// The document websocket takes a bearer's session actor only when the bearer is the shared agent
-// token; one byte off, the same actor is refused.
+// sharedAgentTokens is a DISPATCH_AGENT_TOKEN setting parsed as the server parses it at boot.
+func sharedAgentTokens(t *testing.T, setting string) *auth.SharedAgentTokens {
+	t.Helper()
+	tokens, err := auth.ParseSharedAgentTokens(setting)
+	if err != nil {
+		t.Fatalf("ParseSharedAgentTokens(%q): %v", setting, err)
+	}
+	return tokens
+}
+
+// The document websocket takes a bearer's session actor only when the bearer is one of the shared
+// agent token's values; one byte off, or a value the setting does not list, the same actor is
+// refused.
 func TestDocumentBearerMustBeTheSharedToken(t *testing.T) {
-	service := &Service{agentToken: "doc-agent-token"}
+	service := &Service{agentTokens: sharedAgentTokens(t, "doc-agent-token old-doc-token")}
 	for _, test := range []struct {
 		authorization string
 		admitted      bool
 	}{
 		{authorization: "Bearer doc-agent-token", admitted: true},
+		{authorization: "Bearer old-doc-token", admitted: true},
 		{authorization: "Bearer doc-agent-tokem", admitted: false},
+		{authorization: "Bearer other-doc-token", admitted: false},
 	} {
 		request := httptest.NewRequest(http.MethodGet, "/ws/doc/room", nil)
 		request.Header.Set("Authorization", test.authorization)

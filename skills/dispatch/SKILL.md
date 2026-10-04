@@ -1,6 +1,6 @@
 ---
 name: dispatch
-description: "Use before posting a message, a status update, or a periodic status update; before asking a question that references another message, artifact, or eval; before asking a design question or brainstorming a change; and when asking Sami a question, updating the spec, commenting on a document, attaching an artifact, or calling a dispatch_* tool."
+description: "Use before posting a message, a status update, or a periodic status update; before asking a question that references another message, artifact, or eval; before asking a design question or brainstorming a change; and when asking the human a question, updating the spec, commenting on a document, attaching an artifact, or calling a dispatch_* tool."
 ---
 
 # Dispatch
@@ -26,7 +26,6 @@ after `skill://dispatch/` is relative to this skill's base directory.
 | call `dispatch_doc_edit`: rewrite a paragraph, insert or move a block, change a table's cells, rows or columns | [Editing a document](skill://dispatch/references/document-edits.md) |
 | write a typed block (an `:::ask`, a callout), comment on or suggest a change to a document, upload an artifact, or retry after `DOC_SERVICE_UNAVAILABLE` | [Documents](skill://dispatch/references/documents.md) |
 | choose your next issue, claim one, move its status or priority, reorder a board, or audit a project's backlog | [Working an issue](skill://dispatch/references/issues.md) |
-| start or answer a design conversation in a spec: each turn, a comment that settles a question, coming to terms, a worked example | [Brainstorming in the spec](skill://dispatch/references/brainstorming.md) |
 | find who answers an ask, edit, retract or resolve one, reply with the turn, or follow a thread | [Asks after they open](skill://dispatch/references/asks.md) |
 | catch up after a restart, trace what cites a node, or write a `dispatch://` reference | [Reading back](skill://dispatch/references/reading.md) |
 | answer a BTW, Aside or Steer frame, or a message from the Agents page | [Targeted and direct messages](skill://dispatch/references/messages.md) |
@@ -36,17 +35,9 @@ after `skill://dispatch/` is relative to this skill's base directory.
 ## Design changes are brainstormed here
 
 When a session has Dispatch, a design change needing the human's choices is brainstormed in its
-issue's spec, not chat or a repository design document. The first version holds only established
-facts and every ready question, each a decision block at the end of the section that sets it up; a
-question waits only when it depends on an answer still open. Each next version replies in each
-human comment's thread (`dispatch_comment` with `reply_to`; under an open ask whose next move is
-yours, such as an approval request you must revise or hand back, `reply_to_ask` with
-`turn: "agent"`, since a default-turn reply hands it back to the human), folds the answers into the
-surrounding text while their decision blocks stay, in the human's words (or the option they chose)
-with the date, and adds the questions they open. Approval is requested at the end, not after each
-section, when nothing in the spec is new to the human. Before you write a spec's first version, and
-again before each next turn, read [Brainstorming in the spec](skill://dispatch/references/brainstorming.md):
-each step, and a worked example.
+issue's spec, not chat or a repository design document, and its plan is the issue's `plan.md`
+document. `skill://dispatch-brainstorming` holds the process: read it before a spec's first
+version, before each next turn, and before you write a plan.
 
 ## Writing for the human
 
@@ -75,7 +66,7 @@ not share this session's vocabulary, and is often on a phone. Write for that per
   has a human subject, even on a sentence you already simplified; a lead naming what a change does
   inside a system leaves the reader nothing to act on. Where the judgment rule below applies, the
   judgment leads and this rule shapes the sentence under it.
-- Before posting, test it: could Sami, reading only this text on his phone, know what he is being
+- Before posting, test it: could the human, reading only this text on their phone, know what they are being
   told or asked? If not, rewrite it. Length is not the problem; density is.
 - When an ask or message communicates a judgment, lead with that judgment in one sentence and put the mechanism underneath it. Do not make the reader ask a second time whether the result is a win. This shapes communication only when a judgment exists; it does not pre-decide an open question or remove its genuine options.
 - When a Dispatch message states a root cause, include the reproducing command or test in that same message. Without it, label the diagnosis a hypothesis; a diagnosis still in progress may say so plainly. This boundary applies to causal claims, not to reporting that an investigation has started.
@@ -89,11 +80,14 @@ a new version that keeps the human's own text, never a second "spec" artifact be
 
 - **Each open question is a decision block**, shaped and placed as [Decision blocks](#decision-blocks)
   says. Because it is an ask, it reaches the human's Inbox, and the answer lands next to its context.
-- **A settled point records the human's own words and the date**, quoted, so no reader mistakes
+- **A settled point records the person's own words and the date**, quoted, so no reader mistakes
   it for your inference; an answer that is only a chosen option is recorded in the form
-  `Sami chose "Commit author" on the question below (2026-10-02)`. A point you inferred says so,
-  with the reasoning. One carried in from another document keeps its provenance: an agent's
-  inference there is marked one here, or stays out until the human raises it.
+  `<name> chose "Commit author" on the question below (<date>)`, naming them from `dispatch_whoami`
+  or the conversation, or "the person" when the token names no owner — never a name you were not
+  given. A point you inferred says so, with the reasoning; during a live brainstorming
+  conversation, `skill://dispatch-brainstorming` is stricter and keeps an inference out of the spec
+  until the human has agreed to it. One carried in from another document keeps its provenance: an
+  agent's inference there is marked one here, or stays out until the human raises it.
 - **Sections follow the topic.** No heading is required and none has a fixed place; name each
   section for what it discusses.
 - **A changed point is rewritten, not appended to.** When an answer or a new fact changes the
@@ -234,7 +228,7 @@ Every `dispatch_ask` passes four gates first:
    internals are your lane's to decide where the work happens, in the plan or the code, not in the
    spec. A contract between two lanes is settled by those two lanes over Envoy, and you open no ask
    for it. A halt condition (a change to IAM, deletion or exposure of production data, anything
-   that reaches a customer) passes this gate: it is your own `dispatch_ask` to Sami on your own
+   that reaches a customer) passes this gate: it is your own `dispatch_ask` to the human on your own
    issue.
 2. **Is there genuine uncertainty, and have you measured what you can?** If there is none, it is
    a plan you execute. The one legitimate ask without uncertainty is permission for an action
@@ -329,7 +323,7 @@ they must read to decide belongs in the spec in the first place — see [Artifac
 
 Before saying you are waiting for human input, call `dispatch_open_asks`. With no arguments it lists this session's active asks across open issues and project documents, including whether the human or agent owes the next reply. With `dispatch_open_asks({ project })` it lists every open ask in that project — on its issues and on its documents, whoever authored them — which is how you see what a whole project is waiting on rather than just your own asks.
 
-**Unsettled product shape needs a decision before implementation.** When a page, navigation entry, table key, customer-scoping rule, or persisted sidecar would set product shape that Sami has not already settled, write a decision block in the document that records the work before the first implementation commit; in a Legion tree the architect writes it, and a phase worker sends the decision to its architect. A lane's schema decision or a contract two lanes agree does not settle product shape. This does not turn a user-specified decision or routine implementation into an approval request. A control or behaviour the human asked for in words is settled by those words, together with every choice inside it that his words do not make (where it sits, its defaults, its options): build it without a block, as gate 4 of [Before you ask](#before-you-ask) says. This rule covers only product shape outside what he asked for, and its block comes before the commit that sets that shape.
+**Unsettled product shape needs a decision before implementation.** When a page, navigation entry, table key, customer-scoping rule, or persisted sidecar would set product shape that the human has not already settled, write a decision block in the document that records the work before the first implementation commit; in a Legion tree the architect writes it, and a phase worker sends the decision to its architect. A lane's schema decision or a contract two lanes agree does not settle product shape. This does not turn a user-specified decision or routine implementation into an approval request. A control or behaviour the human asked for in words is settled by those words, together with every choice inside it that his words do not make (where it sits, its defaults, …
 
 **Anything you are blocked on a human for is visible in Dispatch.** An agent waits on a human only
 through an open ask. A to-do, permission, credential or grant renewal, setting only they can
@@ -365,7 +359,7 @@ Use `mode: "none"` with a concrete reason only when the work is genuinely non-ar
 ## Close what you opened
 
 An ask you opened is yours until it is answered or you resolve it. When the answer arrives some
-other way — Sami said it live, a later comment settled it, or the question became moot because the
+other way — the human said it live, a later comment settled it, or the question became moot because the
 design moved — resolve it yourself with `dispatch_resolve_ask` in the same turn you learn that.
 Never leave it for the human to clear.
 

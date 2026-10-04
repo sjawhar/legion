@@ -68,7 +68,7 @@ func TestNonZeroPortPublicURLIsFineInProduction(t *testing.T) {
 func TestMainRefusesPortZeroPublicURLInProduction(t *testing.T) {
 	binPath := filepath.Join(t.TempDir(), "broker")
 	build := exec.Command("go", "build", "-o", binPath, ".")
-	build.Env = append(os.Environ(), "GOTOOLCHAIN=go1.26.1")
+	build.Env = append(os.Environ(), "GOTOOLCHAIN=go1.26.8")
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("go build ./cmd/broker: %v\n%s", err, out)
 	}
@@ -97,7 +97,7 @@ func TestMainRefusesPortZeroPublicURLInProduction(t *testing.T) {
 // contains a space, so slog's TextHandler (which quotes only values that do) never quotes it.
 var addrLogPattern = regexp.MustCompile(`addr=(\S+)`)
 
-// waitForBoundAddress scans the broker's stderr for its "broker listening" log line — the AGENTC-833
+// waitForBoundAddress scans the broker's stderr for its "broker listening" log line — the bind
 // fix's whole point: a real bind is reported once, synchronously, only after Listen has already
 // succeeded — and returns the addr it names. Fails the test if the process exits or 10s pass
 // without that line ever appearing.
@@ -131,7 +131,7 @@ func waitForBoundAddress(t *testing.T, stderr io.Reader) string {
 }
 
 // TestMainLogsRealBoundAddress drives the REAL compiled binary with BROKER_LISTEN_ADDR=127.0.0.1:0
-// (dev-broker.sh's own setting after the AGENTC-833 fix) and BROKER_PUBLIC_URL=http://127.0.0.1:0
+// (dev-broker.sh's own setting after the bind fix) and BROKER_PUBLIC_URL=http://127.0.0.1:0
 // (dev-broker.sh's "derive my public URL from whatever I actually bind" convention, see
 // cmd/broker/main.go's own comment beside its url.Parse check). It asserts the "broker listening"
 // log line names a real, nonzero port on 127.0.0.1 — never the configured placeholder — and then
@@ -148,7 +148,7 @@ func TestMainLogsRealBoundAddress(t *testing.T) {
 
 	binPath := filepath.Join(t.TempDir(), "broker")
 	build := exec.Command("go", "build", "-o", binPath, ".")
-	build.Env = append(os.Environ(), "GOTOOLCHAIN=go1.26.1")
+	build.Env = append(os.Environ(), "GOTOOLCHAIN=go1.26.8")
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("go build ./cmd/broker: %v\n%s", err, out)
 	}

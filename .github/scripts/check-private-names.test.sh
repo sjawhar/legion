@@ -1,0 +1,474 @@
+#!/usr/bin/env bash
+# Tests for `check-private-names.sh` and `check-pr-text.sh`: every spelling the guard refuses, the
+# identifiers and the English word it must pass, what it skips, its two modes (the repository, and
+# named paths such as the built site), file names, and a pull request's title, body, branch name
+# and commits (message, author and committer).
+#
+# Each case builds a miniature git repository under a temporary directory and symlinks the real
+# script into it, so the script under test is the file CI runs: it resolves its root from its own
+# path, which the symlink puts at the fixture root. The names it hunts are assembled from pieces
+# below, so this file holds none of them and the check scans it like any other. Every case names
+# itself by an index or a neutral label, never the assembled form, since `check`'s PASS/FAIL line
+# is this script's own stdout — the CI log; the last case runs the guard over that captured log.
+#
+# Run from anywhere: .github/scripts/check-private-names.test.sh
+# CI runs it in the Tests workflow (pr-and-main.yaml, job test).
+set -euo pipefail
+shopt -s inherit_errexit
+
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+check_script="$script_dir/check-private-names.sh"
+pr_text_script="$script_dir/check-pr-text.sh"
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+
+# Every case's stdout below (echoed "case:" lines and `check`'s PASS/FAIL lines) is this script's
+# own output — the Tests job's log — so it is also teed to self_log and, as the last case, scanned
+# with the guard itself: a future case that prints an assembled form turns red here, in the suite,
+# before it ever reaches a real job log. `exec 3>&1 4>&2` keeps the real terminal fds reachable so
+# the redirection can be undone before reading the file: a process substitution's write end must
+# close (and its process be waited on) before its output is guaranteed to be flushed to disk.
+self_log="$work/suite-output.log"
+exec 3>&1 4>&2
+exec > >(tee "$self_log") 2>&1
+tee_pid=$!
+
+# shellcheck source=.github/scripts/test-lib.sh
+source "$script_dir/test-lib.sh"
+
+command -v git > /dev/null || { echo "  FAIL: git is required" >&2; exit 1; }
+
+repo="agent""-c"
+repo_snake="agent""_c"
+repo_joined="agent""c"
+repo_spaced="agent"" c"
+repo_en_dash="agent""–c"
+repo_nonbreaking_hyphen="agent""‑c"
+repo_percent_hyphen="agent""%2Dc"
+nbsp=$'\xc2\xa0'
+en_dash=$'\xe2\x80\x93'
+key="AGENT""C"
+company="traj""ectory"
+company_proper="T""rajectory"
+labs="labs"
+internal="internal"
+private_host_suffix="private.example"
+example_host_suffix="example"
+vendored_nats="packages/claude-envoy/dist/envoy-channel.js"
+
+# assert_each_refused <fixture-prefix> <label> <array-name> [line]: writes each line of the named
+# array into its own fixture, on the given line (1 by default; 2 is preceded by a filler line), and
+# checks the guard refuses it with that label there. Each case is named by its index, never the
+# assembled form.
+assert_each_refused() {
+  local prefix=$1 label=$2 index
+  local -n lines=$3
+  local line=${4:-1}
+  for index in "${!lines[@]}"; do
+    root=$(fixture "$prefix-$index")
+    if [ "$line" = 2 ]; then
+      printf 'line one\n%s\n' "${lines[index]}" > "$root/docs/notes.md"
+    else
+      printf '%s\n' "${lines[index]}" > "$root/docs/notes.md"
+    fi
+    run_check "$root"
+    check "$prefix-$index fails" "$(is "$status" 1)"
+    check "$prefix-$index is named at its file and line" \
+      "$(contains "$out" "docs/notes.md:$line: $label")"
+  done
+}
+
+# fixture <name>: a clean repository with one tracked file. Echoes its root.
+fixture() {
+  local root="$work/$1"
+  if [ -e "$root" ]; then
+    echo "  FAIL: the fixture name '$1' is already taken by an earlier case" >&2
+    return 1
+  fi
+  mkdir -p "$root/.github/scripts" "$root/docs"
+  ln -s "$check_script" "$root/.github/scripts/check-private-names.sh"
+  printf '# Notes\n\nNothing private here.\n' > "$root/docs/notes.md"
+  git -C "$root" init -q
+  git -C "$root" add docs/notes.md
+  echo "$root"
+}
+
+# run_check <root> [path...]: sets `out` to the combined output and `status` to the exit code.
+run_check() {
+  local root=$1
+  shift
+  set +e
+  out=$(cd "$root" && .github/scripts/check-private-names.sh "$@" 2>&1)
+  status=$?
+  set -e
+}
+
+echo "case: a clean repository"
+root=$(fixture clean)
+run_check "$root"
+check "exits 0" "$(is "$status" 0)"
+
+echo "case: every spelling of the deployment repository and its project key is refused"
+mentions=(
+  "the $repo repository"
+  "see $repo's README"
+  "${repo}#20006"
+  "$repo_snake as a constant"
+  "the $repo_joined checkout"
+  "Agent""-C, capitalized"
+  "issue $key-393"
+  "dispatch://$key-1/ask/1"
+  "project: \"$key\""
+  "LEGION_PROJECT=$repo_joined"
+  "ses_${repo_joined}_controller_title"
+  "${key}_TOKEN"
+  "the $repo_spaced repository"
+  "the $repo_en_dash repository"
+  "the $repo_nonbreaking_hyphen repository"
+  "the $repo_percent_hyphen repository"
+  "https://github.com/search?q=repo%3Aexample-org%2F$repo"
+  "?q=the%20$repo_joined%20repo"
+  "the agent${nbsp}c repository"
+  "the agent""  c repository"
+)
+assert_each_refused repo "names the private deployment repository" mentions 2
+
+echo "case: every spelling of the company is refused"
+# shellcheck disable=SC2034 # read by name through assert_each_refused's nameref
+mentions=(
+  "$company_proper Labs"
+  "$company-$labs-example/repo"
+  "${company}_$labs"
+  "https://dispatch.internal.$company$labs.com/"
+  "$company.$labs"
+  "${company_proper}${labs^}"
+  "the $company_proper team"
+  "($company_proper)"
+  "$company$en_dash$labs"
+  "$company%20$labs"
+  "$company$nbsp$labs"
+  "$company  $labs"
+  "see the ${company^^} docs"
+  "${company^^}_AWS_PROFILE=x"
+  "${company_proper}_API_KEY=x"
+  "MY_${company^^}_KEY=x"
+)
+assert_each_refused company "names the company" mentions
+
+echo "case: a private internal host is refused, whatever its case"
+# shellcheck disable=SC2034 # read by name through assert_each_refused's nameref
+hosts=(
+  "https://listener.$internal.$private_host_suffix"
+  "https://listener.${internal^^}.$private_host_suffix"
+  "https://listener.${internal^}.$private_host_suffix"
+  "https://listener.$internal.${example_host_suffix}corp.net"
+  "https://listener.$internal.$example_host_suffix.$private_host_suffix"
+  "https://a.$internal.$example_host_suffix and https://b.${internal^^}.$private_host_suffix"
+  "this.$internal.push(value)"
+)
+assert_each_refused host "names a private internal host" hosts
+
+echo "case: a reserved example host passes, and the vendored NATS client's property in its own file"
+root=$(fixture public-host)
+printf 'https://listener.%s.%s\n' "$internal" "$example_host_suffix" > "$root/docs/notes.md"
+printf 'nats://nats.%s.%s.com:4222\n' "$internal" "$example_host_suffix" >> "$root/docs/notes.md"
+printf 'Point it at api.%s.%s.\n' "$internal" "$example_host_suffix" >> "$root/docs/notes.md"
+mkdir -p "$root/$(dirname "$vendored_nats")"
+printf '        this.%s.push(sv);\n' "$internal" > "$root/$vendored_nats"
+git -C "$root" add "$vendored_nats"
+run_check "$root"
+check "exits 0" "$(is "$status" 0)"
+
+echo "case: identifiers that merely start with those letters, and the English word, pass"
+root=$(fixture lookalikes)
+{
+  printf 'agentCursor AgentConversationPage subagentContext agentCount agentCalls agentCard\n'
+  printf 'leaveAgentComposer AGENT_COMPOSER_SELECTOR agent-composer agent-cursor agent-card agent-credentials\n'
+  printf 'agent cards, an agent class, the agents C and D\n'
+  printf 'The models may take a different %s in tool calling; %s, plotted. %sPlot.\n' \
+    "$company" "$company" "$company_proper"
+} > "$root/docs/notes.md"
+run_check "$root"
+check "exits 0" "$(is "$status" 0)"
+
+echo "case: the log names the file and line, never the text"
+root=$(fixture quiet)
+printf 'the %s repository\n' "$repo" > "$root/docs/notes.md"
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "annotates the file and line for GitHub" \
+  "$(contains "$out" '^::error file=docs/notes.md,line=1::docs/notes.md:1:')"
+check "does not repeat the name" "$(is "$(contains "$out" "$repo")" false)"
+check "counts the findings" "$(contains "$out" '^check-private-names: 1 finding(s)')"
+
+echo "case: a line naming both is reported once"
+root=$(fixture both)
+printf '%s, by %s Labs\n' "$repo" "$company_proper" > "$root/docs/notes.md"
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "one finding counted" "$(contains "$out" '^check-private-names: 1 finding(s)')"
+
+echo "case: a file git has not been told about still counts; an ignored one does not"
+root=$(fixture untracked)
+printf '%s\n' "$key-7" > "$root/docs/new.md"
+run_check "$root"
+check "an untracked file fails" "$(is "$status" 1)"
+check "names it" "$(contains "$out" 'docs/new.md:1:')"
+
+root=$(fixture ignored)
+printf 'dist/\n' > "$root/.gitignore"
+git -C "$root" add .gitignore
+mkdir -p "$root/dist"
+printf '%s\n' "$key-7" > "$root/dist/page.html"
+run_check "$root"
+check "an ignored file passes the repository scan" "$(is "$status" 0)"
+
+echo "case: a file git tracks under an ignored path still counts"
+root=$(fixture tracked-ignored)
+printf 'notes/\n' > "$root/.gitignore"
+git -C "$root" add .gitignore
+mkdir -p "$root/notes"
+printf '%s\n' "$key-7" > "$root/notes/report.md"
+git -C "$root" add -f notes/report.md
+run_check "$root"
+check "a tracked file under an ignored path fails" "$(is "$status" 1)"
+check "names it" "$(contains "$out" 'notes/report.md:1:')"
+
+echo "case: a name in a file's path is refused, and the log does not print it"
+root=$(fixture path-name)
+mkdir -p "$root/docs/notes"
+printf 'clean text\n' > "$root/docs/notes/$key-7-runbook.md"
+git -C "$root" add docs/notes
+run_check "$root"
+check "a tracked path naming the project key fails" "$(is "$status" 1)"
+check "names the directory it is in" "$(contains "$out" 'docs/notes/<name>')"
+check "does not print the name" "$(is "$(contains "$out" "$key")" false)"
+
+root=$(fixture path-name-dir)
+mkdir -p "$root/docs/${company_proper}"
+printf 'clean text\n' > "$root/docs/${company_proper}/notes.md"
+git -C "$root" add docs
+run_check "$root"
+check "a directory naming the company fails" "$(is "$status" 1)"
+check "does not print the directory's name" "$(is "$(contains "$out" "$company_proper")" false)"
+
+echo "case: a non-ASCII file name reaches the rules unquoted"
+root=$(fixture path-name-dash)
+printf 'clean text\n' > "$root/docs/$repo_en_dash.md"
+git -C "$root" add docs
+run_check "$root"
+check "a file named with a typographic dash between the halves fails" "$(is "$status" 1)"
+check "masks it" "$(contains "$out" 'docs/<name>')"
+
+root=$(fixture path-unicode)
+printf '%s\n' "$key-7" > "$root/docs/café.md"
+git -C "$root" add docs
+run_check "$root"
+check "a hit in a non-ASCII file fails" "$(is "$status" 1)"
+check "names the file as it is, unquoted" "$(contains "$out" '^::error file=docs/café.md,line=1::')"
+
+echo "case: lockfiles and binary files are skipped"
+root=$(fixture skipped)
+mkdir -p "$root/packages/x"
+printf '"%s": "sha512-%s"\n' "$repo" "$key" > "$root/bun.lock"
+printf 'example.com/%s v1 h1:x\n' "$repo" > "$root/packages/x/go.sum"
+printf '%s\0binary\n' "$repo" > "$root/docs/image.bin"
+git -C "$root" add bun.lock packages/x/go.sum docs/image.bin
+run_check "$root"
+check "exits 0" "$(is "$status" 0)"
+
+echo "case: named paths are scanned instead of the repository, ignored or not"
+root=$(fixture paths)
+printf 'dist/\n' > "$root/.gitignore"
+mkdir -p "$root/dist/reference"
+printf '<p>clean</p>\n' > "$root/dist/index.html"
+run_check "$root" dist
+check "a clean built tree passes" "$(is "$status" 0)"
+check "says what it scanned" "$(contains "$out" '(1 files under dist)')"
+
+printf '<pre>{"project": "%s"}</pre>\n' "$key" > "$root/dist/reference/tools.html"
+printf 'WEBVTT\n\n00:00.000 --> 00:01.000\n%s Labs\n' "$company_proper" > "$root/dist/captions.vtt"
+run_check "$root" dist
+check "a built page and a caption naming them fail" "$(is "$status" 1)"
+check "names the page" "$(contains "$out" 'dist/reference/tools.html:1: names the private deployment repository')"
+check "names the caption" "$(contains "$out" 'dist/captions.vtt:4: names the company')"
+
+printf '%s\n' "$key-7" > "$root/docs/notes.md"
+rm "$root/dist/reference/tools.html" "$root/dist/captions.vtt"
+run_check "$root" dist
+check "a named path is all that is scanned" "$(is "$status" 0)"
+
+echo "case: a single named file is reported under its own name"
+root=$(fixture single-file)
+printf 'line one\n%s\n' "$key-7" > "$root/body.md"
+run_check "$root" body.md
+check "fails" "$(is "$status" 1)"
+check "names the file and line" "$(contains "$out" '^::error file=body.md,line=2::body.md:2: names the private deployment repository')"
+
+echo "case: a named path that does not exist"
+root=$(fixture missing)
+run_check "$root" dist
+check "exits 2" "$(is "$status" 2)"
+check "names it" "$(contains "$out" 'dist does not exist')"
+
+# write_pr_text <title> <body> <commit message> [branch] [author email] [committer email]: writes
+# the fixture check-pr-text.sh reads as CI runs it. A pull_request event payload carries the title,
+# body, branch name and the head the run checks (its base and head sha, and its one commit); a
+# stand-in `gh` answers the compare route for exactly that base...head with that commit (message,
+# author and committer) in the route's own JSON shape, so the real `.commits[] | .commit.message, …`
+# filter that feeds the required check runs for real, rather than a filter the stub fakes. It
+# matches that URL whole and refuses a call without --paginate, so losing either paging token
+# fails every case below instead of passing on a list GitHub cut short at 250 commits. The stub
+# also answers the pull request's own commits route, which reads whatever head the pull request
+# has by then: the same commit, until the mid-run-push case appends a later one that names a
+# private thing. A case rewrites `$work/compare` (one JSON object per page, as `gh api --paginate`
+# prints them) or `$work/pr-commits`, then calls run_pr_text, which runs the script and sets `out`
+# and `status`.
+mkdir -p "$work/bin"
+cat > "$work/bin/gh" <<'GH'
+#!/usr/bin/env bash
+case "$1 $2" in
+  "api repos/example/repo/compare/base-sha...event-head-sha?per_page=100")
+    [[ " $* " == *" --paginate "* ]] || { echo "compare route read without --paginate: $*" >&2; exit 3; }
+    cat "$PR_TEXT_TEST_DIR/compare" ;;
+  "api repos/example/repo/pulls/7/commits") cat "$PR_TEXT_TEST_DIR/pr-commits" ;;
+  *) echo "unexpected gh call: $*" >&2; exit 3 ;;
+esac
+GH
+chmod +x "$work/bin/gh"
+# pr_commit <message> [author email] [committer email]: one commit as both routes list it.
+pr_commit() {
+  jq -nc --arg msg "$1" --arg author_email "${2:-dev@example.com}" \
+    --arg committer_email "${3:-dev@example.com}" \
+    '{commit: {message: $msg, author: {name: "Dev", email: $author_email},
+               committer: {name: "Dev", email: $committer_email}}}'
+}
+write_pr_text() {
+  local title=$1 body=$2 message=$3 branch=${4:-fix/keep-the-order} commit
+  commit=$(pr_commit "$message" "${5:-}" "${6:-}")
+  jq -nc --argjson commit "$commit" '{total_commits: 1, commits: [$commit]}' > "$work/compare"
+  jq -nc --argjson commit "$commit" '[$commit]' > "$work/pr-commits"
+  printf '%s' "$body" > "$work/pr-body"
+  jq -n --arg title "$title" --arg branch "$branch" --rawfile body "$work/pr-body" \
+    '{pull_request: {number: 7, title: $title, commits: 1,
+                      head: {ref: $branch, sha: "event-head-sha"}, base: {sha: "base-sha"},
+                      body: (if $body == "" then null else $body end)}}' \
+    > "$work/event.json"
+}
+run_pr_text() {
+  if [ $# -gt 0 ]; then write_pr_text "$@"; fi
+  set +e
+  out=$(GITHUB_EVENT_PATH="$work/event.json" GITHUB_REPOSITORY=example/repo \
+    PR_TEXT_TEST_DIR="$work" PATH="$work/bin:$PATH" "$pr_text_script" 2>&1)
+  status=$?
+  set -e
+}
+
+echo "case: a pull request's title, body, branch name and commits, which reach main and its release notes"
+run_pr_text "fix(dispatch): keep the inbox order" "Refs LEGION-7" "fix: keep the order"
+check "a clean title, body and commits pass" "$(is "$status" 0)"
+
+run_pr_text "fix(dispatch): keep the inbox order ($key-7)" "Refs LEGION-7" "fix: keep the order"
+check "a title naming a deployment issue key fails" "$(is "$status" 1)"
+check "names the title" "$(contains "$out" 'title:1: names the private deployment repository')"
+check "does not print the key" "$(is "$(contains "$out" "$key")" false)"
+
+run_pr_text "fix(dispatch): keep the inbox order" "$(printf 'Line one.\nAs %s Labs found.\n' "$company_proper")" "fix: keep the order"
+check "a body naming the company fails" "$(is "$status" 1)"
+check "names the body's line" "$(contains "$out" 'body:2: names the company')"
+
+run_pr_text "fix(dispatch): keep the inbox order" "" "fix: keep the order"
+check "an empty body passes" "$(is "$status" 0)"
+
+run_pr_text "fix(dispatch): keep the inbox order" "Refs LEGION-7" "fix: keep the order" "fix/$key-7"
+check "a branch naming a deployment issue key fails" "$(is "$status" 1)"
+check "names the branch" "$(contains "$out" 'branch:1: names the private deployment repository')"
+check "does not print the key" "$(is "$(contains "$out" "$key")" false)"
+
+run_pr_text "fix(dispatch): keep the inbox order" "Refs LEGION-7" \
+  "$(printf 'fix: keep the order\n\nCo-authored-by: A <a@%s%s.example>\n' "$company" "$labs")"
+check "a commit message naming the company fails" "$(is "$status" 1)"
+check "names the commit messages' line" "$(contains "$out" 'commits:3: names the company')"
+
+run_pr_text "fix(dispatch): keep the inbox order" "Refs LEGION-7" "fix: keep the order" "fix/keep-the-order" \
+  "a@$company$labs.example"
+check "a commit's author email naming the company fails, with a clean message" "$(is "$status" 1)"
+check "names the commits line" "$(contains "$out" 'commits:3: names the company')"
+check "does not print the domain" "$(is "$(contains "$out" "$company$labs")" false)"
+
+run_pr_text "fix(dispatch): keep the inbox order" "Refs LEGION-7" "fix: keep the order" "fix/keep-the-order" \
+  "dev@example.com" "a@$company$labs.example"
+check "a commit's committer email naming the company fails, with a clean message and author" "$(is "$status" 1)"
+check "names the commits line" "$(contains "$out" 'commits:5: names the company')"
+
+echo "case: the commits of the head the run checks, when a later push lands while it runs"
+write_pr_text "fix(dispatch): keep the inbox order" "Refs LEGION-7" "fix: keep the order"
+later_commit=$(pr_commit "fix: a later push ($key-7)")
+jq -c --argjson later "$later_commit" '. + [$later]' "$work/pr-commits" > "$work/pr-commits.next"
+mv "$work/pr-commits.next" "$work/pr-commits"
+run_pr_text
+check "a pull request whose head moved on mid-run passes" "$(is "$status" 0)"
+
+# The same commit, this time on the head the run checks: the case above passes because the script
+# read that head, not because the later push's name is one the guard would have let through.
+jq -c --argjson later "$later_commit" '{total_commits: 2, commits: (.commits + [$later])}' \
+  "$work/compare" > "$work/compare.next"
+mv "$work/compare.next" "$work/compare"
+run_pr_text
+check "that same commit, on the run's own head, fails" "$(is "$status" 1)"
+check "names its line" "$(contains "$out" 'commits:6: names the private deployment repository')"
+check "does not print the key" "$(is "$(contains "$out" "$key")" false)"
+
+echo "case: a commit list the compare route cut short, and one spread over pages"
+write_pr_text "fix(dispatch): keep the inbox order" "Refs LEGION-7" "fix: keep the order"
+jq -c '.total_commits = 300' "$work/compare" > "$work/compare.next"
+mv "$work/compare.next" "$work/compare"
+run_pr_text
+check "a list shorter than the route's own total fails loudly" "$(is "$status" 1)"
+check "names both counts" "$(contains "$out" 'reports 300 commits .* but listed 1')"
+
+write_pr_text "fix(dispatch): keep the inbox order" "Refs LEGION-7" "fix: keep the order"
+second_commit=$(pr_commit "$(printf 'fix: keep the order\n\nCo-authored-by: A <a@%s%s.example>\n' "$company" "$labs")")
+jq -c '.total_commits = 2' "$work/compare" > "$work/compare.next"
+jq -nc --argjson second "$second_commit" '{total_commits: 2, commits: [$second]}' >> "$work/compare.next"
+mv "$work/compare.next" "$work/compare"
+run_pr_text
+check "a commit on the compare route's second page naming the company fails" "$(is "$status" 1)"
+check "names its line, counting the first page's commit" "$(contains "$out" 'commits:8: names the company')"
+check "counts both pages' commits as the whole list" "$(is "$(contains "$out" 'but listed')" false)"
+
+echo "case: a compare answer the script cannot check against a total"
+write_pr_text "fix(dispatch): keep the inbox order" "Refs LEGION-7" "fix: keep the order"
+jq -nc '{commits: []}' > "$work/compare"
+run_pr_text
+check "an answer carrying no total_commits fails" "$(is "$status" 1)"
+check "names the cause" "$(contains "$out" 'total_commits, so the commit list cannot be checked')"
+
+: > "$work/compare"
+run_pr_text
+check "an empty answer fails the same way" "$(is "$status" 1)"
+check "names the cause" "$(contains "$out" 'total_commits, so the commit list cannot be checked')"
+
+# A total of the wrong type, with fewer commits listed than it claims: `[`'s integer test would
+# fail inside the guard's `if`, where set -e does not apply, and skip the guard.
+for total in '"300"' 300.5; do
+  write_pr_text "fix(dispatch): keep the inbox order" "Refs LEGION-7" "fix: keep the order"
+  jq -c --argjson total "$total" '.total_commits = $total' "$work/compare" > "$work/compare.next"
+  mv "$work/compare.next" "$work/compare"
+  run_pr_text
+  check "a total_commits of $total fails" "$(is "$status" 1)"
+  check "names the cause" "$(contains "$out" 'total_commits, so the commit list cannot be checked')"
+done
+
+long_body=$(printf '%.0s–' {1..50000})
+run_pr_text "fix(dispatch): keep the inbox order" "$long_body" "fix: keep the order"
+check "a body larger than one environment variable may hold is read" "$(is "$status" 0)"
+
+echo "case: the suite's own output never names a private thing"
+exec 1>&3 2>&4
+wait "$tee_pid" 2> /dev/null || true
+suite_status=0
+"$check_script" "$self_log" > /dev/null 2>&1 || suite_status=$?
+check "the suite's own PASS/FAIL log passes the guard" "$(is "$suite_status" 0)"
+
+summary "check-private-names.sh"

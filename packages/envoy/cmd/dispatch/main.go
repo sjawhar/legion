@@ -28,6 +28,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/config"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
+	"github.com/sjawhar/envoy/internal/dispatch/files"
 	"github.com/sjawhar/envoy/internal/dispatch/outbox"
 	"github.com/sjawhar/envoy/internal/dispatch/redeliver"
 	"github.com/sjawhar/envoy/internal/dispatch/routes"
@@ -40,7 +41,6 @@ const (
 	defaultListenPort = "8766"
 	// defaultEnvoyURL is the Envoy listener when ENVOY_URL is unset: this machine's.
 	defaultEnvoyURL   = "http://127.0.0.1:9020"
-	shutdownTimout    = 5 * time.Second
 	readHeaderTimeout = 10 * time.Second
 	idleTimeout       = 2 * time.Minute
 )
@@ -52,8 +52,10 @@ const (
 var buildCommit string
 
 type bootConfig struct {
-	DatabaseURL    string
-	AgentToken     string
+	DatabaseURL string
+	// AgentTokens is DISPATCH_AGENT_TOKEN parsed: every value the API and the document websocket
+	// accept as the shared agent token, the first the current one.
+	AgentTokens    *auth.SharedAgentTokens
 	RepoProjects   string
 	DefaultProject string
 	EnvoyURL       string
@@ -67,6 +69,9 @@ type bootConfig struct {
 	SignInGroup        string
 	NATSDisabled       bool
 	TestHooksEnabled   bool
+	// SettleDelay is how long a document waits after a live change before it settles, zero for the
+	// document service's own default; only DISPATCH_TEST_SETTLE_DELAY, under the test hooks, sets it.
+	SettleDelay time.Duration
 	// OIDCIssuer and OIDCAudience configure verification of projected
 	// service-account tokens. Both set or neither; empty means no verifier.
 	OIDCIssuer   string
@@ -76,6 +81,9 @@ type bootConfig struct {
 	// (required when AgentSecretsURL is set).
 	AgentSecretsURL   string
 	AgentSecretsToken string
+	// FileStoreBucket is DISPATCH_FILE_STORE_BUCKET: the bucket uploaded files are stored in.
+	// Empty keeps them in Postgres.
+	FileStoreBucket string
 	// ListenAddr is the address the server binds, from DISPATCH_LISTEN_HOST and DISPATCH_PORT
 	// (listenAddress). The dev sign-in fence checks this value, so what it checks is what binds.
 	ListenAddr string
@@ -85,6 +93,8 @@ type bootConfig struct {
 	// WebDist is DISPATCH_WEB_DIST: the dashboard directory to serve, or empty to find it from
 	// the binary (defaultWebDistDir).
 	WebDist string
+	// AssetStoreBucket is DISPATCH_ASSET_STORE_BUCKET. Empty preserves local-only asset serving.
+	AssetStoreBucket string
 	// SigningKey is DISPATCH_SIGNING_KEY: the session cookie key, or empty to keep one in the
 	// data dir (sessionSigningKey).
 	SigningKey string
@@ -182,7 +192,6 @@ func main() {
 		slog.Error("dispatch: open database", "error", err)
 		os.Exit(1)
 	}
-	defer database.Pool.Close()
 	if err := database.Migrate(ctx); err != nil {
 		slog.Error("dispatch: migrate database", "error", err)
 		os.Exit(1)
@@ -201,6 +210,24 @@ func main() {
 	if err != nil {
 		slog.Error("dispatch: resolve web dist dir", "error", err)
 		os.Exit(1)
+	}
+
+	// The store's construction reads no network: credentials come with the first request.
+	fileStore, err := openFileStore(ctx, boot)
+	if err != nil {
+		slog.Error("dispatch: configure the file store", "error", err)
+		os.Exit(1)
+	}
+	if fileStore != nil {
+		slog.Info("dispatch: storing uploaded files in a bucket", "bucket", boot.FileStoreBucket)
+	}
+	var assetStore routes.AssetStore
+	if boot.AssetStoreBucket != "" {
+		assetStore, err = routes.NewS3AssetStore(ctx, boot.AssetStoreBucket)
+		if err != nil {
+			slog.Error("dispatch: configure retained asset store", "error", err)
+			os.Exit(1)
+		}
 	}
 
 	signIn, err := discoverSignIn(ctx, boot)
@@ -226,12 +253,12 @@ func main() {
 	requestIdentity := requestIdentityFor(boot, signingKey, people, sessions, signIn)
 
 	broker := events.NewBroker()
-	documentService := docs.New(docs.Deps{
-		Store:      database,
-		Events:     broker,
-		Identity:   requestIdentity,
-		AgentToken: boot.AgentToken,
-		ServerURL:  serverURL,
+	documentService := newDocumentService(boot, docs.Deps{
+		Store:     database,
+		Events:    broker,
+		Identity:  requestIdentity,
+		ServerURL: serverURL,
+		Settle:    boot.SettleDelay,
 	})
 
 	serviceTokens, err := oidc.Discover(ctx, boot.OIDCIssuer, boot.OIDCAudience, oidc.DiscoveryTimeout)
@@ -246,6 +273,7 @@ func main() {
 	appCtx, err := routes.BuildAppContext(appContextOptions(boot, routes.AppContextOptions{
 		SigningKey:  signingKey,
 		WebDistDir:  webDistDir,
+		AssetStore:  assetStore,
 		People:      people,
 		Sessions:    sessions,
 		Identity:    requestIdentity,
@@ -257,6 +285,7 @@ func main() {
 		App:         appCfg,
 		OIDC:        serviceTokens,
 		AgentStream: agentStream,
+		Files:       fileStore,
 		Lifetime:    ctx,
 	}))
 
@@ -276,6 +305,11 @@ func main() {
 	// A settlement a shutdown cut short, here or in the task this one replaces, runs without
 	// anyone opening its document.
 	go documentService.RunSettlementResumption(ctx)
+	// Issues whose spec's task count is not their latest version's - every row the migration that
+	// added the count columns found, and any the task this one replaces versions while both run -
+	// are counted again, at start and on an interval, so their progress shows without anyone
+	// editing them (LEGION-542).
+	go documentService.RunTaskProgressReconciliation(ctx)
 
 	sweeper, err := webhookSweeper(natsClient, appCfg, boot.GitHubAPIBase)
 	if err != nil {
@@ -291,7 +325,7 @@ func main() {
 
 	go architecture.Run(ctx, appCtx.Architecture())
 
-	handler := dispatchHandler(routes.New(appCtx), database, natsClient, buildCommit)
+	handler := dispatchHandler(routes.New(appCtx), database, natsClient, fileStore, buildCommit)
 	server := &http.Server{
 		Handler:           handler,
 		ReadHeaderTimeout: readHeaderTimeout,
@@ -305,30 +339,9 @@ func main() {
 		slog.Error("dispatch: listen", "addr", boot.ListenAddr, "error", err)
 		os.Exit(1)
 	}
-	serveErr := make(chan error, 1)
-	go func() {
-		slog.Info("dispatch: listening", "addr", boot.ListenAddr)
-		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			serveErr <- err
-			cancel()
-		}
-	}()
-
-	<-ctx.Done()
-	slog.Info("dispatch: shutting down")
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), shutdownTimout)
-	defer shutdownCancel()
-	if err := server.Shutdown(shutdownCtx); err != nil {
-		slog.Warn("dispatch: shutdown", "error", err)
-	}
-	if err := documentService.Shutdown(shutdownCtx); err != nil {
-		slog.Warn("dispatch: shutdown document service", "error", err)
-	}
-	select {
-	case err := <-serveErr:
+	if err := serveUntilStopped(ctx, cancel, server, listener, boot.ListenAddr, documentService, database.Pool); err != nil {
 		slog.Error("dispatch: serve", "error", err)
 		os.Exit(1)
-	default:
 	}
 }
 
@@ -429,7 +442,6 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 	}
 	boot := bootConfig{
 		DatabaseURL:        strings.TrimSpace(env.get("DATABASE_URL")),
-		AgentToken:         strings.TrimSpace(env.get("DISPATCH_AGENT_TOKEN")),
 		RepoProjects:       strings.TrimSpace(env.get("DISPATCH_REPO_PROJECTS")),
 		DefaultProject:     strings.TrimSpace(env.get("DISPATCH_DEFAULT_PROJECT")),
 		GitHubAPIBase:      strings.TrimSpace(env.get("DISPATCH_GITHUB_API_BASE")),
@@ -440,6 +452,8 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 		NATSDisabled:       env.get("DISPATCH_NATS_DISABLED") == "1",
 		TestHooksEnabled:   env.get("DISPATCH_TEST_HOOKS") == "1",
 		WebDist:            env.get("DISPATCH_WEB_DIST"),
+		FileStoreBucket:    strings.TrimSpace(env.get("DISPATCH_FILE_STORE_BUCKET")),
+		AssetStoreBucket:   strings.TrimSpace(env.get("DISPATCH_ASSET_STORE_BUCKET")),
 		SigningKey:         env.get("DISPATCH_SIGNING_KEY"),
 		InsecureCookie:     env.get("DISPATCH_INSECURE_COOKIE") != "",
 		EnvoyToken:         env.get("ENVOY_TOKEN"),
@@ -447,14 +461,30 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 	if boot.DatabaseURL == "" {
 		return bootConfig{}, errors.New("DATABASE_URL required")
 	}
-	if boot.AgentToken == "" {
+	agentTokens := env.get("DISPATCH_AGENT_TOKEN")
+	if strings.TrimSpace(agentTokens) == "" {
 		return bootConfig{}, errors.New("DISPATCH_AGENT_TOKEN required")
 	}
+	tokens, err := auth.ParseSharedAgentTokens(agentTokens)
+	if err != nil {
+		return bootConfig{}, fmt.Errorf("DISPATCH_AGENT_TOKEN %w", err)
+	}
+	boot.AgentTokens = tokens
 	listenAddr, err := listenAddress(env)
 	if err != nil {
 		return bootConfig{}, err
 	}
 	boot.ListenAddr = listenAddr
+	if raw := strings.TrimSpace(env.get("DISPATCH_TEST_SETTLE_DELAY")); raw != "" {
+		if !boot.TestHooksEnabled {
+			return bootConfig{}, errors.New("DISPATCH_TEST_HOOKS=1 required with DISPATCH_TEST_SETTLE_DELAY")
+		}
+		delay, err := time.ParseDuration(raw)
+		if err != nil || delay <= 0 {
+			return bootConfig{}, fmt.Errorf("DISPATCH_TEST_SETTLE_DELAY=%q (expected a positive Go duration)", raw)
+		}
+		boot.SettleDelay = delay
+	}
 	identityMode := strings.TrimSpace(env.get("DISPATCH_IDENTITY"))
 	if err := checkSignInSettings(boot, identityMode); err != nil {
 		return bootConfig{}, err
@@ -628,12 +658,21 @@ func sessionSigningKey(boot bootConfig, dataDir string) (string, error) {
 	return auth.LoadOrCreateSigningKey(filepath.Join(dataDir, "signing-key"))
 }
 
+// newDocumentService is the document service main serves the document websocket and the API's
+// documents from: built, what main made from the rest of the configuration, with every setting the
+// service takes from boot filled in. The settings tests build it through here, as they build the
+// router through appContextOptions, so dropping a hand-off here fails a case.
+func newDocumentService(boot bootConfig, built docs.Deps) *docs.Service {
+	built.AgentTokens = boot.AgentTokens
+	return docs.New(built)
+}
+
 // appContextOptions is what main hands routes.BuildAppContext: built, what main made from the
 // configuration, with every setting the router takes from boot filled in. The settings tests build
 // the router through it, so dropping any hand-off here fails a case.
 func appContextOptions(boot bootConfig, built routes.AppContextOptions) routes.AppContextOptions {
 	built.SignInGroup = boot.SignInGroup
-	built.AgentToken = boot.AgentToken
+	built.AgentTokens = boot.AgentTokens
 	built.DefaultProject = boot.DefaultProject
 	built.InsecureCookie = boot.InsecureCookie
 	built.EnvoyURL = boot.EnvoyURL
@@ -704,32 +743,70 @@ func parsePositiveInt(raw string) (int, error) {
 	return n, nil
 }
 
+// openFileStore is the uploaded-file store boot names, or nil when DISPATCH_FILE_STORE_BUCKET is
+// unset, which keeps every file in Postgres. A nil interface, never a typed nil, so every caller's
+// nil check reads the setting: NewS3's (*S3)(nil) on failure is not passed through as a Store.
+func openFileStore(ctx context.Context, boot bootConfig) (files.Store, error) {
+	if boot.FileStoreBucket == "" {
+		return nil, nil
+	}
+	bucketStore, err := files.NewS3(ctx, boot.FileStoreBucket)
+	if err != nil {
+		return nil, err
+	}
+	return bucketStore, nil
+}
+
 // dispatchHandler mounts the one /healthz the process serves above every dashboard and API
 // route, so the probe is answered whatever the router is doing. Go's ServeMux prefers the
 // longer pattern, so "GET /healthz" wins over the router's "/".
-func dispatchHandler(handler http.Handler, database *store.Store, natsClient *bus.Client, commit string) http.Handler {
+func dispatchHandler(handler http.Handler, database *store.Store, natsClient *bus.Client, fileStore files.Store, commit string) http.Handler {
 	mux := http.NewServeMux()
-	mux.Handle("GET /healthz", healthzHandler(database, natsClient, commit))
+	mux.Handle("GET /healthz", healthzHandler(database, natsClient, fileStore, commit))
 	mux.Handle("/", handler)
 	return mux
 }
 
 // healthzHandler answers the probe: the process is serving, Postgres is reachable on the
 // health pool's own connection, and NATS is connected where it is configured. Nothing here
-// waits on the shared pool, and Healthy bounds its own wait at store.healthProbeTimeout, which
-// records why a probe that answers late is as bad as one that never answers.
+// waits on the shared pool, and each probe bounds its own wait (store.healthProbeTimeout,
+// files.healthTimeout), which records why a probe that answers late is as bad as one that never
+// answers. The database and file-store probes run side by side: each takes up to two seconds,
+// and one after the other they would take four, past the three-second prober (the compose
+// healthcheck and the deploy script).
+//
+// Where a file store is configured, `files` reports whether its bucket answered, and that is
+// all it does: it never decides `ok`. The load balancer replaces a task whose probe fails, and
+// production runs one, so a bucket outage, a slow HeadBucket or a grant someone changed would
+// take documents, asks and comments down with the files. A deploy check that wants the bucket
+// asserts `files: true` itself.
 //
 // Beside those it reports what is deployed: `commit`, the legion commit the binary was built
 // from (null when the build did not stamp one), and `schema_version`, the highest migration
 // the database has applied, read by the same probe (null when the database did not answer).
 // A deploy check compares the two with the commit its image pin names and that commit's
 // migrations, so neither is ever filled with a guess.
-func healthzHandler(database *store.Store, natsClient *bus.Client, commit string) http.HandlerFunc {
+func healthzHandler(database *store.Store, natsClient *bus.Client, fileStore files.Store, commit string) http.HandlerFunc {
 	var reportedCommit *string
 	if commit != "" {
 		reportedCommit = &commit
 	}
 	return func(w http.ResponseWriter, req *http.Request) {
+		var filesOK *bool
+		filesProbed := make(chan struct{})
+		if fileStore != nil {
+			go func() {
+				defer close(filesProbed)
+				reachable := true
+				if err := fileStore.Healthy(req.Context()); err != nil {
+					slog.Warn("dispatch: file store probe failed", "error", err)
+					reachable = false
+				}
+				filesOK = &reachable
+			}()
+		} else {
+			close(filesProbed)
+		}
 		databaseOK := database != nil && database.Pool != nil
 		var schemaVersion *int
 		if databaseOK {
@@ -750,6 +827,7 @@ func healthzHandler(database *store.Store, natsClient *bus.Client, commit string
 			connected := natsClient.Connected()
 			natsOK = &connected
 		}
+		<-filesProbed
 		ok := databaseOK && (natsOK == nil || *natsOK)
 		status := http.StatusOK
 		if !ok {
@@ -761,9 +839,10 @@ func healthzHandler(database *store.Store, natsClient *bus.Client, commit string
 			OK            bool    `json:"ok"`
 			DB            bool    `json:"db"`
 			NATS          *bool   `json:"nats"`
+			Files         *bool   `json:"files"`
 			Commit        *string `json:"commit"`
 			SchemaVersion *int    `json:"schema_version"`
-		}{OK: ok, DB: databaseOK, NATS: natsOK, Commit: reportedCommit, SchemaVersion: schemaVersion})
+		}{OK: ok, DB: databaseOK, NATS: natsOK, Files: filesOK, Commit: reportedCommit, SchemaVersion: schemaVersion})
 	}
 }
 

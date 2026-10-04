@@ -15,7 +15,7 @@ sign-in. Its source is `packages/envoy/cmd/dispatch`, and the web app it serves 
 | Need | Setting | Notes |
 | --- | --- | --- |
 | Postgres | `DATABASE_URL` | Required. Dispatch keeps everything here and applies its own migrations at start. Leave `pool_max_conns` out of the URL; Dispatch refuses it. |
-| A shared agent token | `DISPATCH_AGENT_TOKEN` | Required to start. A fallback credential for agents; agents normally use personal tokens made in Settings. |
+| A shared agent token | `DISPATCH_AGENT_TOKEN` | Required to start. A fallback credential for agents; agents normally use personal tokens made in Settings. To change it without locking agents out, set the new value followed by the old one, separated by a space, until every agent has moved, then the new one alone. |
 | Google sign-in | `DISPATCH_SIGNIN_ISSUER`, `DISPATCH_SIGNIN_CLIENT_ID`, `DISPATCH_SIGNIN_CLIENT_SECRET`, `DISPATCH_SIGNIN_GROUP` | The OpenID Connect sign-in pool people sign in to with Google Workspace, Dispatch's app client in it and that client's secret, and the pool group a person must be in. Required for the default cookie sign-in, all four together. |
 | The browser address | `DISPATCH_SERVER_URL` | The exact address people type, such as `https://dispatch.internal.example`. The sign-in pool's app client lists this address followed by `/auth/callback` as a callback URL. |
 | The GitHub App | `DISPATCH_APP_CLIENT_ID`, `DISPATCH_APP_PEM_B64` | Without it the server starts, but the web app's GitHub reads answer `503` and architecture sources cannot be saved. |
@@ -95,12 +95,16 @@ Sign in, then open **Settings**:
 `GET /healthz` needs no credential. It answers `200` when the server is healthy:
 
 ```json
-{"ok":true,"db":true,"nats":null,"commit":null,"schema_version":63}
+{"ok":true,"db":true,"nats":null,"files":null,"commit":null,"schema_version":63}
 ```
 
 - `db` is whether Postgres answered within two seconds. When it does not, the answer is `503` with
   `db: false`.
 - `nats` is whether NATS is connected, or `null` when NATS is turned off.
+- `files` is whether the file store's bucket (`DISPATCH_FILE_STORE_BUCKET`) answered within two
+  seconds, or `null` when no bucket is set. It never decides `ok` or the status: a bucket that
+  stops answering is `200` with `files: false`, so an outage of the bucket fails uploads and
+  downloads and nothing else; a check that wants the bucket asserts `files: true` itself.
 - `commit` is the source commit the image was built from, or `null` in a build that was not
   stamped.
 - `schema_version` is the newest database migration applied.

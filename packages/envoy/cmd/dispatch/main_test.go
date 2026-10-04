@@ -21,6 +21,8 @@ import (
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/files"
+	"github.com/sjawhar/envoy/internal/dispatch/files/filestest"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
@@ -348,7 +350,7 @@ func TestResolveBootConfigRequiresBothOIDCVariables(t *testing.T) {
 }
 
 func TestDispatchHandlerReportsDisabledNATS(t *testing.T) {
-	handler := dispatchHandler(http.NewServeMux(), nil, nil, "")
+	handler := dispatchHandler(http.NewServeMux(), nil, nil, nil, "")
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 
@@ -362,7 +364,7 @@ func TestDispatchHandlerReportsDisabledNATS(t *testing.T) {
 }
 
 func TestDispatchHandlerReportsDisconnectedNATS(t *testing.T) {
-	handler := dispatchHandler(http.NewServeMux(), nil, &bus.Client{}, "")
+	handler := dispatchHandler(http.NewServeMux(), nil, &bus.Client{}, nil, "")
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 
@@ -375,6 +377,37 @@ func TestDispatchHandlerReportsDisconnectedNATS(t *testing.T) {
 	}
 }
 
+// /healthz reports the file store beside the database and NATS: null where no bucket is
+// configured, true where the bucket answers, and false where it does not, so a wrong grant shows
+// on the health page and not only as failed uploads. The bucket never decides `ok`: the load
+// balancer would replace the one task, taking documents and asks down with the files.
+func TestDispatchHandlerReportsTheFileStore(t *testing.T) {
+	database := storetest.Open(t)
+	probe := func(store files.Store) (int, map[string]any) {
+		t.Helper()
+		response := httptest.NewRecorder()
+		dispatchHandler(http.NewServeMux(), database, nil, store, "").ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+		var health map[string]any
+		if err := json.NewDecoder(response.Body).Decode(&health); err != nil {
+			t.Fatalf("decode health response: %v", err)
+		}
+		return response.Code, health
+	}
+	if status, health := probe(nil); health["files"] != nil || status != http.StatusOK {
+		t.Fatalf("healthz with no store: status %d, files %#v, want 200 and null", status, health["files"])
+	}
+	reachable := filestest.NewMemory()
+	if status, health := probe(reachable); health["files"] != true || status != http.StatusOK {
+		t.Fatalf("healthz with a reachable store: status %d, files %#v, want 200 and true", status, health["files"])
+	}
+	unreachable := filestest.NewMemory()
+	unreachable.SetFailure(errors.New("bucket unreachable"))
+	status, health := probe(unreachable)
+	if health["files"] != false || health["ok"] != true || status != http.StatusOK {
+		t.Fatalf("healthz with an unreachable store: status %d, ok %#v, files %#v, want 200 ok with files false", status, health["ok"], health["files"])
+	}
+}
+
 // /healthz names what is deployed, for a deploy check to compare with what was meant to be:
 // the commit the image build stamped, and the highest migration the database has applied. The
 // schema version is the database's, read per probe, never the binary's own list: a row a later
@@ -383,7 +416,7 @@ func TestDispatchHandlerReportsDisconnectedNATS(t *testing.T) {
 func TestHealthzReportsTheBuildCommitAndTheAppliedSchemaVersion(t *testing.T) {
 	database := storetest.Open(t)
 	const commit = "0123456789abcdef0123456789abcdef01234567"
-	handler := dispatchHandler(http.NewServeMux(), database, nil, commit)
+	handler := dispatchHandler(http.NewServeMux(), database, nil, nil, commit)
 	probe := func() map[string]any {
 		t.Helper()
 		response := httptest.NewRecorder()
@@ -418,7 +451,7 @@ func TestHealthzReportsTheBuildCommitAndTheAppliedSchemaVersion(t *testing.T) {
 // A binary the image build did not stamp says so: null, never an empty string or a guess.
 func TestHealthzReportsAnUnstampedCommitAsNull(t *testing.T) {
 	response := httptest.NewRecorder()
-	dispatchHandler(http.NewServeMux(), nil, nil, "").ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	dispatchHandler(http.NewServeMux(), nil, nil, nil, "").ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 	var health map[string]any
 	if err := json.NewDecoder(response.Body).Decode(&health); err != nil {
 		t.Fatalf("decode health response: %v", err)
@@ -467,7 +500,7 @@ func TestHealthzAnswersWhileEveryPooledConnectionIsHeld(t *testing.T) {
 		defer connection.Release()
 	}
 
-	server := httptest.NewServer(dispatchHandler(http.NewServeMux(), database, nil, ""))
+	server := httptest.NewServer(dispatchHandler(http.NewServeMux(), database, nil, nil, ""))
 	defer server.Close()
 	client := &http.Client{Timeout: 3 * time.Second}
 	started := time.Now()
@@ -518,7 +551,7 @@ func TestHealthzAnswersWhilePostgresStopsAnswering(t *testing.T) {
 		database.Pool.Close()
 	})
 
-	server := httptest.NewServer(dispatchHandler(http.NewServeMux(), database, nil, ""))
+	server := httptest.NewServer(dispatchHandler(http.NewServeMux(), database, nil, nil, ""))
 	defer server.Close()
 	// The shared pool's own round trip is the control: the link works right up to the outage.
 	if _, err := database.Pool.Exec(context.Background(), "select 1"); err != nil {
@@ -542,6 +575,59 @@ func TestHealthzAnswersWhilePostgresStopsAnswering(t *testing.T) {
 	}
 	if response.StatusCode != http.StatusServiceUnavailable || health["db"] != false || health["schema_version"] != nil {
 		t.Fatalf("health probe with Postgres unreachable = %d %#v, want 503 with db false and no schema version",
+			response.StatusCode, health)
+	}
+}
+
+// unansweringBucket is a file store whose bucket never answers its probe: Healthy waits out the
+// two seconds files.S3 bounds its HeadBucket by, as a hung HeadBucket does.
+type unansweringBucket struct{ *filestest.Memory }
+
+func (unansweringBucket) Healthy(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+// /healthz still answers inside the tightest prober's three seconds when Postgres and the
+// file store's bucket both stop answering. Each probe is bounded at two seconds on its own, so
+// run one after the other they took four, and the compose healthcheck and the deploy script
+// read that silence as a dead process; run side by side they take two.
+func TestHealthzAnswersWhilePostgresAndTheBucketBothStopAnswering(t *testing.T) {
+	migrated := storetest.Open(t)
+	dsn, err := url.Parse(migrated.Pool.Config().ConnString())
+	if err != nil {
+		t.Fatalf("parse the test database URL: %v", err)
+	}
+	var blackholed atomic.Bool
+	dsn.Host = blackholePostgres(t, dsn.Host, &blackholed)
+	database, err := store.Open(context.Background(), dsn.String())
+	if err != nil {
+		t.Fatalf("open the store through the proxy: %v", err)
+	}
+	t.Cleanup(func() {
+		blackholed.Store(false)
+		database.Pool.Close()
+	})
+	bucket := unansweringBucket{filestest.NewMemory()}
+	server := httptest.NewServer(dispatchHandler(http.NewServeMux(), database, nil, bucket, ""))
+	defer server.Close()
+
+	client := &http.Client{Timeout: 3 * time.Second}
+	blackholed.Store(true)
+	started := time.Now()
+	response, err := client.Get(server.URL + "/healthz")
+	if err != nil {
+		t.Fatalf("health probe with Postgres and the bucket unreachable: %v (after %s)", err, time.Since(started))
+	}
+	defer response.Body.Close()
+	var health map[string]any
+	if err := json.NewDecoder(response.Body).Decode(&health); err != nil {
+		t.Fatalf("decode health response: %v", err)
+	}
+	if response.StatusCode != http.StatusServiceUnavailable || health["db"] != false || health["files"] != false {
+		t.Fatalf("health probe with Postgres and the bucket unreachable = %d %#v, want 503 with db and files false",
 			response.StatusCode, health)
 	}
 }
@@ -625,7 +711,19 @@ func envGetter(values map[string]string) settingValues {
 	})
 }
 
-func TestMain(m *testing.M) { os.Exit(storetest.Main(m)) }
+// memoryTestServeEnv makes this test binary run main, so the memory tests (memory_test.go, built
+// under the `memory` tag) drive a real Dispatch process and read its own resident memory.
+const memoryTestServeEnv = "DISPATCH_MEMORY_TEST_SERVE"
+
+// TestMain runs the package's tests, or, run by a memory test with memoryTestServeEnv set, is that
+// test's Dispatch server.
+func TestMain(m *testing.M) {
+	if os.Getenv(memoryTestServeEnv) == "1" {
+		main()
+		os.Exit(0)
+	}
+	os.Exit(storetest.Main(m))
+}
 
 func TestSeedRepoProjectsAddsMissingRowsWithoutOverwritingSettings(t *testing.T) {
 	database := storetest.Open(t)
@@ -1142,5 +1240,97 @@ func TestListenAddressJoinsAnIPv6LoopbackHost(t *testing.T) {
 		if got, err := listenAddress(envGetter(map[string]string{"DISPATCH_LISTEN_HOST": "127.0.0.1", "DISPATCH_PORT": port})); err == nil || !strings.Contains(err.Error(), "DISPATCH_PORT") {
 			t.Errorf("port %q: listenAddress = %q, %v; want a refusal naming DISPATCH_PORT", port, got, err)
 		}
+	}
+}
+
+// envoy-dispatch backfill-files moves every file row's bytes into the bucket and exits 0, and
+// exits 1 when it stops short; --verify-only exits 0 while every moved file reads back and 1 once
+// one does not. Those exit codes are what an operator's script reads before it trusts that the
+// rows' bytes are safe to have cleared.
+func TestBackfillFilesExitsNonZeroUntilEveryFileReadsBackFromTheBucket(t *testing.T) {
+	database := storetest.Open(t)
+	const bucket = "example-files-bucket"
+	fake := filestest.ServeS3(t, bucket)
+	ctx := context.Background()
+	body := []byte("an uploaded file")
+	key := files.Key(files.SHA256(body))
+	for _, statement := range []string{
+		`insert into projects (key, name) values ('FILES', 'Files')`,
+		`insert into issues (key, project_key, number, title, status, created_by, rank) values ('FILES-1', 'FILES', 1, 'Issue', 'todo', '{"kind":"user","id":"alice"}', 'U')`,
+		`insert into artifacts (issue_key, project_key, slug, name, kind, created_by) values ('FILES-1', 'FILES', 'notes-bin', 'notes.bin', 'file', '{"kind":"user","id":"alice"}')`,
+	} {
+		if _, err := database.Pool.Exec(ctx, statement); err != nil {
+			t.Fatalf("seed %q: %v", statement, err)
+		}
+	}
+	addVersion := func(number int, content []byte, sha string) {
+		t.Helper()
+		if _, err := database.Pool.Exec(ctx, `
+			insert into artifact_versions (artifact_id, number, content, mime, size, sha256)
+			select id, $1, $2, 'application/octet-stream', $3, $4 from artifacts where slug = 'notes-bin'
+		`, number, content, len(content), sha); err != nil {
+			t.Fatalf("seed version %d: %v", number, err)
+		}
+	}
+	addVersion(1, body, files.SHA256(body))
+	rowHoldsBytes := func(number int) bool {
+		t.Helper()
+		var held bool
+		if err := database.Pool.QueryRow(ctx, `select content is not null from artifact_versions where number = $1`, number).Scan(&held); err != nil {
+			t.Fatalf("read version %d: %v", number, err)
+		}
+		return held
+	}
+	run := func(bucket string, args ...string) (int, string) {
+		t.Helper()
+		env := envGetter(map[string]string{"DATABASE_URL": database.Pool.Config().ConnString(), "DISPATCH_FILE_STORE_BUCKET": bucket})
+		var stdout, stderr bytes.Buffer
+		code := runSubcommand(ctx, append([]string{"backfill-files"}, args...), env, &stdout, &stderr)
+		return code, stdout.String() + stderr.String()
+	}
+
+	if code, out := run(bucket, "--verify-everything"); code != 2 {
+		t.Fatalf("backfill-files --verify-everything: exit %d, want 2:\n%s", code, out)
+	}
+	// A bucket that does not answer stops the run before any row is touched.
+	if code, out := run("example-missing-bucket"); code != 1 || !strings.Contains(out, "not reachable") || !rowHoldsBytes(1) {
+		t.Fatalf("backfill-files against a missing bucket: exit %d, row holds bytes %t, want exit 1 with the row untouched:\n%s", code, rowHoldsBytes(1), out)
+	}
+
+	if code, out := run(bucket); code != 0 || rowHoldsBytes(1) {
+		t.Fatalf("backfill-files: exit %d, row holds bytes %t, want exit 0 with the row cleared:\n%s", code, rowHoldsBytes(1), out)
+	}
+	if _, stored, held := fake.Object(key); !held || !bytes.Equal(stored, body) {
+		t.Fatalf("the bucket holds %d bytes under %s (held %t), want the file", len(stored), key, held)
+	}
+	if code, out := run(bucket, "--verify-only"); code != 0 || !strings.Contains(out, "verified=1 bytes=0 failed=0") {
+		t.Fatalf("backfill-files --verify-only: exit %d, want 0 with the one file verified:\n%s", code, out)
+	}
+	if code, out := run(bucket, "--verify-only", "--restore"); code != 2 {
+		t.Fatalf("backfill-files --verify-only --restore: exit %d, want 2:\n%s", code, out)
+	}
+
+	// The rollback writes the bytes back from the bucket; a backfill moves them out again.
+	if code, out := run(bucket, "--restore"); code != 0 || !strings.Contains(out, "restored=1") || !rowHoldsBytes(1) {
+		t.Fatalf("backfill-files --restore: exit %d, row holds bytes %t, want exit 0 with the row filled:\n%s", code, rowHoldsBytes(1), out)
+	}
+	if code, out := run(bucket); code != 0 || rowHoldsBytes(1) {
+		t.Fatalf("backfill-files after a restore: exit %d, row holds bytes %t, want exit 0 with the row cleared again:\n%s", code, rowHoldsBytes(1), out)
+	}
+
+	fake.DeleteObject(key)
+	if code, out := run(bucket, "--verify-only"); code != 1 || !strings.Contains(out, "failed=1") {
+		t.Fatalf("backfill-files --verify-only with the object gone: exit %d, want 1 naming the failure:\n%s", code, out)
+	}
+	if code, out := run(bucket, "--restore"); code != 1 || !strings.Contains(out, "FAILED version") || rowHoldsBytes(1) {
+		t.Fatalf("backfill-files --restore with the object gone: exit %d, row holds bytes %t, want exit 1 with the row left empty:\n%s", code, rowHoldsBytes(1), out)
+	}
+
+	// A row whose bytes do not match its hash is named and passed over: exit 1, the row untouched,
+	// and every other row still moved.
+	addVersion(2, []byte("other bytes"), files.SHA256(body))
+	addVersion(3, []byte("sound bytes"), files.SHA256([]byte("sound bytes")))
+	if code, out := run(bucket); code != 1 || !strings.Contains(out, "FAILED version") || !rowHoldsBytes(2) || rowHoldsBytes(3) {
+		t.Fatalf("backfill-files over a row it cannot move: exit %d, corrupt row holds bytes %t, sound row holds bytes %t, want exit 1 with the corrupt row untouched and the sound row moved:\n%s", code, rowHoldsBytes(2), rowHoldsBytes(3), out)
 	}
 }
