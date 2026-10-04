@@ -15,6 +15,7 @@ import type {
   InboxRow,
 } from "../api/types";
 import { AskCard } from "../features/inbox/AskCard";
+import { AskReplyComposer } from "../features/inbox/AskThread";
 import { Inbox } from "../features/inbox/Inbox";
 import { commentDeliveryFields } from "./comment-fixture";
 
@@ -110,6 +111,14 @@ function nextTabStop(from: Element): HTMLElement | undefined {
 function controlledBy(control: HTMLElement): HTMLElement | null {
   const id = control.getAttribute("aria-controls");
   return id === null ? null : document.getElementById(id);
+}
+
+/** The reply bodies a thread shows, in the order it shows them. */
+function shownReplyBodies(container: HTMLElement): (string | null | undefined)[] {
+  return Array.from(
+    container.querySelectorAll("li"),
+    (item) => item.querySelector(".dispatch-markdown")?.textContent
+  );
 }
 
 test("AskCard links a non-primary block ask to its owning artifact", async () => {
@@ -1576,12 +1585,6 @@ test("AskCard shows the newest two replies, expands older replies, and puts a fr
     />
   );
 
-  const shownReplyBodies = (container: HTMLElement) =>
-    Array.from(
-      container.querySelectorAll("li"),
-      (item) => item.querySelector(".dispatch-markdown")?.textContent
-    );
-
   try {
     const threadElement = await view.findByTestId("thread-ask-1");
     await waitFor(() =>
@@ -1673,11 +1676,6 @@ test("a reply arriving while the older replies are shown lands first and keeps t
       thread="collapsed"
     />
   );
-  const shownReplyBodies = (container: HTMLElement) =>
-    Array.from(
-      container.querySelectorAll("li"),
-      (item) => item.querySelector(".dispatch-markdown")?.textContent
-    );
 
   try {
     const threadElement = await view.findByTestId("thread-ask-1");
@@ -1761,6 +1759,83 @@ test("AskCard with no replies offers Write a reply only after an answer, and ret
     open.unmount();
     answered.unmount();
     failed.unmount();
+  }
+});
+
+test("a reply composer remounted while its send is out shows the draft disabled and posts once", async () => {
+  const input = answered(ask(), []);
+  const sent = Promise.withResolvers<Comment>();
+  const bodies: string[] = [];
+  const createReply = async (_issueKey: string, body: CreateCommentInput) => {
+    bodies.push(body.body);
+    return sent.promise;
+  };
+  const queryClient = new QueryClient({
+    defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+  });
+  const composer = () => (
+    <QueryClientProvider client={queryClient}>
+      <AskReplyComposer ask={input} createReply={createReply} />
+    </QueryClientProvider>
+  );
+  const first = render(composer());
+  fireEvent.change(first.getByRole("textbox", { name: "Reply" }), { target: { value: "hello" } });
+  fireEvent.click(first.getByRole("button", { name: "Reply" }));
+  await waitFor(() => expect(bodies).toEqual(["hello"]));
+  first.unmount();
+
+  // Write a reply closed and reopened, or a margin tab switch, mid-send.
+  const second = render(composer());
+  try {
+    const field = second.getByRole("textbox", { name: "Reply" }) as HTMLTextAreaElement;
+    expect(field.value).toBe("hello");
+    expect(field.disabled).toBe(true);
+    const send = second.getByRole("button", { name: /^Repl/ }) as HTMLButtonElement;
+    expect(send.disabled).toBe(true);
+    fireEvent.click(send);
+
+    await act(async () => sent.resolve(reply({ body: "hello" })));
+    await waitFor(() => expect(field.value).toBe(""));
+    expect(field.disabled).toBe(false);
+    expect(bodies).toEqual(["hello"]);
+  } finally {
+    second.unmount();
+  }
+});
+
+test("two reply composers for one ask share its draft and its send", async () => {
+  const input = answered(ask(), []);
+  const sent = Promise.withResolvers<Comment>();
+  const bodies: string[] = [];
+  const createReply = async (_issueKey: string, body: CreateCommentInput) => {
+    bodies.push(body.body);
+    return sent.promise;
+  };
+  // The margin's inline composer and a Conversation or decision-block composer, on one page.
+  const { view } = renderCard(
+    <>
+      <AskReplyComposer ask={input} createReply={createReply} />
+      <AskReplyComposer ask={input} createReply={createReply} />
+    </>
+  );
+  try {
+    const [margin, block] = view.getAllByRole("textbox", {
+      name: "Reply",
+    }) as HTMLTextAreaElement[];
+    fireEvent.change(margin, { target: { value: "One draft" } });
+    expect(block.value).toBe("One draft");
+
+    fireEvent.click(view.getAllByRole("button", { name: "Reply" })[1]);
+    await waitFor(() => expect(bodies).toEqual(["One draft"]));
+    expect(margin.disabled).toBe(true);
+    expect(block.disabled).toBe(true);
+
+    await act(async () => sent.resolve(reply({ body: "One draft" })));
+    await waitFor(() => expect(margin.value).toBe(""));
+    expect(block.value).toBe("");
+    expect(bodies).toEqual(["One draft"]);
+  } finally {
+    view.unmount();
   }
 });
 

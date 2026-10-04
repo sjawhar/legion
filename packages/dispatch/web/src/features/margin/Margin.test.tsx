@@ -535,7 +535,6 @@ test("a reply typed into an answered ask's thread survives leaving the Comments 
     // A fresh field - the tab switch really remounted the card - still carries the draft.
     expect(moved).not.toBe(field);
     expect(moved.value).toBe("Draft survives");
-    fireEvent.change(moved, { target: { value: "" } });
   } finally {
     view.unmount();
     answerAsk.mockRestore();

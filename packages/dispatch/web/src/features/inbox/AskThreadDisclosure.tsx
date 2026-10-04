@@ -1,13 +1,13 @@
 import { type ReactNode, useId, useState } from "react";
 
-import type { Ask, Comment, CreateCommentInput } from "../../api/types";
+import type { Ask } from "../../api/types";
 import { linkHoverText, linkText } from "../../theme/classes";
-import { AskReplyComposer, AskThread, type AskThreadQuery } from "./AskThread";
+import { AskReplyComposer, AskThread, type AskThreadQuery, type CreateReply } from "./AskThread";
 
 interface AskThreadDisclosureProps {
   ask: Ask;
   thread: AskThreadQuery;
-  createReply?: (issueKey: string, input: CreateCommentInput) => Promise<Comment>;
+  createReply?: CreateReply;
   embedded?: boolean;
 }
 

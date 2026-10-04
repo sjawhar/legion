@@ -1,5 +1,5 @@
 import type { UseQueryResult } from "@tanstack/react-query";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useIsMutating, useMutation, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, type ReactNode, useId, useState } from "react";
 
 import { api } from "../../api/client";
@@ -22,16 +22,11 @@ import {
 import { actorLabel } from "../refs/actor";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { Timestamp } from "../refs/Timestamp";
+import { clearReplyDraft, useReplyDraft } from "./reply-drafts";
 
-type CreateReply = (issueKey: string, input: CreateCommentInput) => Promise<Comment>;
+export type CreateReply = (issueKey: string, input: CreateCommentInput) => Promise<Comment>;
 
 const createReply: CreateReply = (issueKey, input) => api.createComment(issueKey, input);
-
-/** Unsent reply drafts, by ask id. A draft belongs to the ask, not to the card showing it: a
- *  composer that unmounts while the reader is typing (switching margin tabs away and back, for
- *  instance) picks its draft back up when it remounts. Sending the reply, or emptying the field,
- *  drops the draft. */
-const replyDrafts = new Map<string, string>();
 
 function AskReply({ comment }: { comment: Comment }): ReactNode {
   return (
@@ -53,7 +48,8 @@ export type AskThreadQuery = UseQueryResult<AskRead, Error>;
 /**
  * The reply form under an answered ask. It posts to the ask's issue, or to its document for a
  * project-document ask, then invalidates the shared thread so the reply shows first. Its draft is
- * keyed by the ask, so an unsent reply survives the composer unmounting and remounting elsewhere.
+ * the ask's (`reply-drafts.ts`), and its send is the ask's too: while any composer's reply to this
+ * ask is out, every composer for it, including one mounted since, shows the draft disabled.
  */
 export function AskReplyComposer({
   ask,
@@ -66,13 +62,13 @@ export function AskReplyComposer({
   // Each composer owns its field id so transient duplicate mounts during a responsive
   // transition cannot share an ask-id-derived id.
   const fieldId = `${useId()}-reply`;
-  const [body, setBodyState] = useState(() => replyDrafts.get(ask.id) ?? "");
-  const setBody = (text: string) => {
-    setBodyState(text);
-    if (text === "") replyDrafts.delete(ask.id);
-    else replyDrafts.set(ask.id, text);
-  };
+  const [body, setBody] = useReplyDraft(ask.id);
+  // Keyed by the ask, so the send outlives the composer that started it and any composer for the
+  // ask sees it in flight.
+  const mutationKey = ["ask-reply", ask.id];
+  const sending = useIsMutating({ mutationKey }) > 0;
   const submit = useMutation({
+    mutationKey,
     mutationFn: (text: string) => {
       if (ask.issue_key === null) {
         if (ask.artifact_id === null || ask.artifact_id === undefined) {
@@ -82,8 +78,8 @@ export function AskReplyComposer({
       }
       return reply(ask.issue_key, { ask_id: ask.id, body: text });
     },
-    onSuccess: () => {
-      setBody("");
+    onSuccess: (_comment, text) => {
+      clearReplyDraft(ask.id, text);
       void queryClient.invalidateQueries({ queryKey: ["ask-thread", ask.id] });
     },
   });
@@ -91,7 +87,7 @@ export function AskReplyComposer({
   const submitReply = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const text = body.trim();
-    if (text === "" || submit.isPending) {
+    if (text === "" || sending) {
       return;
     }
     submit.mutate(text);
@@ -103,7 +99,7 @@ export function AskReplyComposer({
         Reply
         <textarea
           className={`mt-1 block w-full rounded-lg px-3 py-2 font-normal outline-none ${inputClasses(true)}`}
-          disabled={submit.isPending}
+          disabled={sending}
           id={fieldId}
           onChange={(event) => setBody(event.target.value)}
           onKeyDown={(event) => submitOnModifiedEnter(event)}
@@ -112,10 +108,10 @@ export function AskReplyComposer({
       </label>
       <button
         className={`self-start rounded-lg border px-3 py-1.5 text-sm font-medium ${borderStrong} ${textSecondaryOnSurface} ${enabledCardHoverBorder} disabled:cursor-not-allowed disabled:opacity-50`}
-        disabled={body.trim() === "" || submit.isPending}
+        disabled={body.trim() === "" || sending}
         type="submit"
       >
-        {submit.isPending ? "Replying…" : "Reply"}
+        {sending ? "Replying…" : "Reply"}
       </button>
       {submit.isError ? (
         <QueryError
@@ -137,7 +133,8 @@ export interface AskThreadProps {
   /** The shared ask-thread query AskCard owns; this component never requests thread data itself. */
   thread: AskThreadQuery;
   createReply?: CreateReply;
-  /** Compact cards render the answered-ask composer themselves, after their Reply control. */
+  /** False where the caller renders the answered-ask composer itself: a collapsed thread
+   *  (Conversation, decision blocks) puts it after its own Write a reply control. */
   showComposer?: boolean;
   /** A thread inside an open ask card inherits the card's compact flow. */
   embedded?: boolean;

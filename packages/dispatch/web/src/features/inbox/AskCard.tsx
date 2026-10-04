@@ -57,6 +57,7 @@ import { AskThread } from "./AskThread";
 import { AskThreadDisclosure } from "./AskThreadDisclosure";
 import { askTurnLabel } from "./ask-turn";
 import { URGENCY_LABELS } from "./ask-urgency";
+import { clearReplyDraft } from "./reply-drafts";
 import { useAskAnswerForm } from "./useAskAnswerForm";
 
 const answerAsk = (id: string, input: AnswerAskInput): Promise<Ask> => api.answerAsk(id, input);
@@ -234,6 +235,11 @@ export function AskCard({
   // stale prop passed to this instance: `completed` renders before an invalidated `ask` prop
   // round-trips down from the parent.
   const currentAsk = completed ?? displayedAsk;
+  // A resolved ask takes no more replies, so an unsent one has nowhere to go.
+  const resolved = displayedAsk.state === "resolved" || currentAsk.state === "resolved";
+  useEffect(() => {
+    if (resolved) clearReplyDraft(displayedAsk.id);
+  }, [displayedAsk.id, resolved]);
   // The count comes from `displayedAsk`, never from `completed`: answering an ask does not move
   // a backlink count, and the answer response is the one ask shape that carries no count.
   const referencedByCount = displayedAsk.referenced_by_count ?? 0;
