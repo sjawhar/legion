@@ -322,10 +322,13 @@ const NON_FILE_WRITE_URL = /^(xd|agent|proc):\/\//iu;
 /** The 4-hex tag that may end a `read` header, `#XXXX`. */
 const READ_HEADER_TAG = /#[0-9A-Fa-f]{4}$/u;
 
-/** The target a `write` path names, as Oh My Pi's `write` tool reads it before it routes
- * (`unwrapHashlineHeaderPath`): a pasted `read` header, `[path]` or `[path#XXXX]`, names `path`
- * (a valid tag lets `path` hold a `#` of its own); any other shape is left as written. */
-function writeTarget(path: string): string {
+/** A `conflict://` URL behind a prefix, `<prefix>:conflict://N`; the last `:conflict://` wins. */
+const PREFIXED_CONFLICT_URL = /^(.+):(conflict:\/\/.+)$/u;
+
+/** The path a pasted `read` header names (`unwrapHashlineHeaderPath`): `[path]` or `[path#XXXX]`
+ * names `path` (a valid tag lets `path` hold a `#` of its own); any other shape is left as
+ * written. */
+function unwrapReadHeader(path: string): string {
   const trimmed = path.trimEnd();
   if (trimmed.length < 2 || !trimmed.startsWith("[") || !trimmed.endsWith("]")) return path;
   const inner = trimmed.slice(1, -1);
@@ -333,6 +336,14 @@ function writeTarget(path: string): string {
   const target = tag === null ? inner : inner.slice(0, tag.index);
   if (target.length === 0 || (tag === null && target.includes("#"))) return path;
   return target;
+}
+
+/** The target a `write` path names, as Oh My Pi's `write` tool reads it before it routes: the
+ * path inside a pasted `read` header, and then the `conflict://` URL alone when a prefix stands
+ * before it (`recoverConflictUriPrefix`), which writes a workspace file whatever the prefix. */
+function writeTarget(path: string): string {
+  const unwrapped = unwrapReadHeader(path);
+  return PREFIXED_CONFLICT_URL.exec(unwrapped)?.[2] ?? unwrapped;
 }
 
 /** The scheme, lowercased, of a `write` into Oh My Pi rather than to a file, or undefined. */

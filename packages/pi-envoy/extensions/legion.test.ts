@@ -1206,6 +1206,7 @@ describe("Legion OMP extension", () => {
         : role === "reviewer"
           ? "the reviewer edits nothing except the final .legion/ cleanup commit via bash"
           : "the architect delegates all code work to phase workers";
+    const passedByMistake: string[] = [];
 
     for (const role of ["architect", "reviewer", "merger"] as const) {
       const { toolCall, context } = await bootPane({ role, sessionId: `ses_${role}_xd` });
@@ -1234,18 +1235,24 @@ describe("Legion OMP extension", () => {
         ).resolves.toBeUndefined();
       }
 
-      // A real filesystem write is still blocked, in the `read` header wrapper too.
-      for (const path of ["/tmp/whatever.ts", "[/tmp/whatever.ts#ABCD]"]) {
-        await expect(
-          toolCall(
-            {
-              toolName: "write",
-              toolCallId: `call-${role}-fs`,
-              input: { path, content: "x" },
-            },
-            context
-          )
-        ).resolves.toEqual({ block: true, reason: blockedReason(role) });
+      // A file write is still blocked: a real path, in the `read` header wrapper too, and a
+      // `conflict://` write (it splices its content into a workspace file), bare or behind the
+      // prefix Oh My Pi strips from `<prefix>:conflict://N` before it routes.
+      for (const path of [
+        "/tmp/whatever.ts",
+        "[/tmp/whatever.ts#ABCD]",
+        "conflict://1",
+        "agent://x:conflict://1",
+        "[proc://shell:conflict://2#ABCD]",
+        "XD://y:conflict://3",
+      ]) {
+        const result = await toolCall(
+          { toolName: "write", toolCallId: `call-${role}-fs`, input: { path, content: "x" } },
+          context
+        );
+        if (!Bun.deepEquals(result, { block: true, reason: blockedReason(role) })) {
+          passedByMistake.push(`${role} ${path} -> ${JSON.stringify(result)}`);
+        }
       }
 
       // A malformed/missing `path` never qualifies as a tool-device invocation: it is still
@@ -1260,6 +1267,7 @@ describe("Legion OMP extension", () => {
         toolCall({ toolName: "write", toolCallId: `call-${role}-no-path`, input: {} }, context)
       ).resolves.toEqual({ block: true, reason: blockedReason(role) });
     }
+    expect(passedByMistake).toEqual([]);
   });
   test("refuses a phase worker's bash command that would rewrite the shared jj operation log", async () => {
     const { toolCall, context, requests } = await bootPane({
