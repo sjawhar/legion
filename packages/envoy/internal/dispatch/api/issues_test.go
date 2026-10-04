@@ -1176,7 +1176,7 @@ func TestIssueBlockedByRoundTrip(t *testing.T) {
 // or any issue wait on itself. One sibling may wait on another, and blockers never cross a
 // Dispatch project boundary.
 func TestIssueBlockedByRefusesDependencyCycles(t *testing.T) {
-	handler, _, _ := newTestServer(t, testServerOptions{settle: time.Hour})
+	handler := newTestHandler(t)
 	for _, project := range []string{"CORE", "SIDE"} {
 		if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
 			"key": project, "name": project,
@@ -1369,7 +1369,7 @@ func TestIssueBlockedByCountLimitOnCreateAndPatch(t *testing.T) {
 	}
 }
 
-func TestIssueBlockedByIndirectLockConflictIsRetryable(t *testing.T) {
+func TestIssueBlockedByIgnoresIndirectRowActivity(t *testing.T) {
 	handler, database, _ := newTestServer(t, testServerOptions{settle: time.Hour})
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
 		"key": "CORE", "name": "Core",
@@ -1405,18 +1405,248 @@ func TestIssueBlockedByIndirectLockConflictIsRetryable(t *testing.T) {
 		responses <- dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+keys[0], body, "alice")
 	}()
 	response := awaitResponse(t, responses)
-	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), `"code":"DEPENDENCY_CONFLICT"`) {
-		t.Fatalf("busy indirect target: %d %s, want retryable 409", response.Code, response.Body.String())
+	if response.Code != http.StatusOK || !slices.Equal(decodeBody[model.Issue](t, response).BlockedBy, []string{keys[1]}) {
+		t.Fatalf("busy indirect target must not block the dependency write: %d %s", response.Code, response.Body.String())
 	}
-	if err := gate.Rollback(context.Background()); err != nil {
+}
+
+func TestStatusPatchRacingReparentUsesCommittedParent(t *testing.T) {
+	handler, database, _ := newTestServer(t, testServerOptions{settle: time.Hour})
+	keys := createListedIssues(t, handler, "CORE", 3)
+	gate, err := database.Pool.Begin(context.Background())
+	if err != nil {
 		t.Fatal(err)
 	}
-	read := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+keys[0], nil, "alice")
-	if read.Code != http.StatusOK || len(decodeBody[model.Issue](t, read).BlockedBy) != 0 {
-		t.Fatalf("refused write must roll back: %d %s", read.Code, read.Body.String())
+	defer gate.Rollback(context.Background())
+	if _, err := gate.Exec(context.Background(), `update issues set parent_key = $1 where key = $2`, keys[1], keys[2]); err != nil {
+		t.Fatal(err)
 	}
-	retried := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+keys[0], body, "alice")
-	if retried.Code != http.StatusOK || !slices.Equal(decodeBody[model.Issue](t, retried).BlockedBy, []string{keys[1]}) {
-		t.Fatalf("retry after lock release: %d %s", retried.Code, retried.Body.String())
+	responses := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		responses <- dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+keys[2], map[string]string{"status": "todo"}, "alice")
+	}()
+	waitForDatabaseLocks(t, gate, 1)
+	if err := gate.Commit(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	response := awaitResponse(t, responses)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status after reparent: %d %s", response.Code, response.Body.String())
+	}
+	issue := decodeBody[model.Issue](t, response)
+	if issue.Status != "todo" || issue.Parent == nil || *issue.Parent != keys[1] {
+		t.Fatalf("status write lost the committed parent: %+v", issue)
+	}
+}
+
+func TestReparentIgnoresUnrelatedGrandchildRowActivity(t *testing.T) {
+	handler, database, _ := newTestServer(t, testServerOptions{settle: time.Hour})
+	keys := createListedIssues(t, handler, "CORE", 4)
+	if _, err := database.Pool.Exec(context.Background(), `update issues set parent_key = $1 where key = $2`, keys[3], keys[0]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Pool.Exec(context.Background(), `update issues set parent_key = $1 where key = $2`, keys[0], keys[1]); err != nil {
+		t.Fatal(err)
+	}
+	gate, err := database.Pool.Begin(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer gate.Rollback(context.Background())
+	if _, err := gate.Exec(context.Background(), `select key from issues where key = $1 for no key update`, keys[1]); err != nil {
+		t.Fatal(err)
+	}
+	responses := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		responses <- dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+keys[0], map[string]string{"parent": keys[2]}, "alice")
+	}()
+	response := awaitResponse(t, responses)
+	if response.Code != http.StatusOK {
+		t.Fatalf("reparent with a busy descendant: %d %s", response.Code, response.Body.String())
+	}
+	if parent := decodeBody[model.Issue](t, response).Parent; parent == nil || *parent != keys[2] {
+		t.Fatalf("reparent did not persist: %v", parent)
+	}
+}
+
+func TestChildCreateWithoutBlockersDoesNotWaitOnParentRow(t *testing.T) {
+	handler, database, _ := newTestServer(t, testServerOptions{settle: time.Hour})
+	parent := createListedIssues(t, handler, "CORE", 1)[0]
+	gate, err := database.Pool.Begin(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer gate.Rollback(context.Background())
+	if _, err := gate.Exec(context.Background(), `select key from issues where key = $1 for no key update`, parent); err != nil {
+		t.Fatal(err)
+	}
+	responses := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		responses <- dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]any{
+			"project": "CORE", "title": "Child while parent is busy", "parent": parent, "force": true,
+		}, "alice")
+	}()
+	response := awaitResponse(t, responses)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("child with a busy parent: %d %s", response.Code, response.Body.String())
+	}
+	if actual := decodeBody[model.Issue](t, response).Parent; actual == nil || *actual != parent {
+		t.Fatalf("created parent = %v, want %s", actual, parent)
+	}
+}
+
+func TestConcurrentThreeWayDependenciesDoNotCommitCycle(t *testing.T) {
+	handler := newTestHandler(t)
+	keys := createListedIssues(t, handler, "CORE", 3)
+	for round := range 20 {
+		for _, key := range keys {
+			response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+key, map[string]any{"blocked_by": []string{}}, "alice")
+			if response.Code != http.StatusOK {
+				t.Fatalf("clear round %d: %d %s", round, response.Code, response.Body.String())
+			}
+		}
+		start := make(chan struct{})
+		responses := make(chan *httptest.ResponseRecorder, 3)
+		for index, key := range keys {
+			go func() {
+				<-start
+				responses <- dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+key, map[string]any{
+					"blocked_by": []string{keys[(index+1)%3]},
+				}, "alice")
+			}()
+		}
+		close(start)
+		successes, refused := 0, 0
+		for range 3 {
+			response := awaitResponse(t, responses)
+			switch {
+			case response.Code == http.StatusOK:
+				successes++
+			case response.Code == http.StatusConflict && strings.Contains(response.Body.String(), `"code":"DEPENDENCY_CYCLE"`):
+				refused++
+			default:
+				t.Fatalf("ring round %d: %d %s", round, response.Code, response.Body.String())
+			}
+		}
+		edges := 0
+		for index, key := range keys {
+			response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+key, nil, "alice")
+			if response.Code != http.StatusOK {
+				t.Fatalf("read ring: %d %s", response.Code, response.Body.String())
+			}
+			targets := decodeBody[model.Issue](t, response).BlockedBy
+			if slices.Equal(targets, []string{keys[(index+1)%3]}) {
+				edges++
+			} else if len(targets) != 0 {
+				t.Fatalf("unexpected ring edge: %s -> %v", key, targets)
+			}
+		}
+		if successes != 2 || refused != 1 || edges != 2 {
+			t.Fatalf("ring round %d: successes=%d refusals=%d committed edges=%d", round, successes, refused, edges)
+		}
+	}
+}
+
+func TestBoardMoveStatusAndDependencyWriteDoNotDeadlock(t *testing.T) {
+	handler, database, _ := newTestServer(t, testServerOptions{settle: time.Hour})
+	keys := createListedIssues(t, handler, "CORE", 12)
+	anchor, parent, moving, dependent, neighbor := keys[1], keys[2], keys[3], keys[4], keys[11]
+	if _, err := database.Pool.Exec(context.Background(), `
+		update issues set parent_key = $1 where key = any($2::text[])
+	`, parent, []string{moving, neighbor}); err != nil {
+		t.Fatal(err)
+	}
+	gate, err := database.Pool.Begin(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer gate.Rollback(context.Background())
+	if _, err := gate.Exec(context.Background(), `select key from issues where key = $1 for no key update`, anchor); err != nil {
+		t.Fatal(err)
+	}
+	moves := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		moves <- dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+moving, map[string]any{
+			"rank": map[string]string{"after": anchor, "before": neighbor}, "status": "todo",
+		}, "alice")
+	}()
+	waitForDatabaseLocks(t, gate, 1)
+	others := make(chan *httptest.ResponseRecorder, 2)
+	go func() {
+		others <- dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+neighbor, map[string]string{"status": "todo"}, "alice")
+	}()
+	go func() {
+		others <- dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+dependent, map[string]any{"blocked_by": []string{neighbor}}, "alice")
+	}()
+	for range 2 {
+		response := awaitResponse(t, others)
+		if response.Code != http.StatusOK {
+			t.Fatalf("write beside a waiting board move: %d %s", response.Code, response.Body.String())
+		}
+	}
+	if err := gate.Commit(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	response := awaitResponse(t, moves)
+	if response.Code != http.StatusOK || decodeBody[model.Issue](t, response).Status != "todo" {
+		t.Fatalf("board move: %d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestDependencyWaitDoesNotHoldIssueRankOrNumberLocks(t *testing.T) {
+	handler, database, _ := newTestServer(t, testServerOptions{settle: time.Hour})
+	keys := createListedIssues(t, handler, "CORE", 3)
+	other := createListedIssues(t, handler, "SIDE", 2)
+	gate, err := database.Pool.Begin(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer gate.Rollback(context.Background())
+	if err := lockProjectIssueDependencies(context.Background(), gate, "CORE"); err != nil {
+		t.Fatal(err)
+	}
+	waiting := make(chan *httptest.ResponseRecorder, 2)
+	go func() {
+		waiting <- dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+keys[0], map[string]any{
+			"blocked_by": []string{keys[1]}, "rank": map[string]string{"after": keys[1]},
+		}, "alice")
+	}()
+	go func() {
+		waiting <- dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]any{
+			"project": "CORE", "title": "Waiting dependent", "blocked_by": []string{keys[1]}, "force": true,
+		}, "alice")
+	}()
+	waitForDatabaseLocks(t, gate, 2)
+	for _, write := range []struct {
+		method string
+		path   string
+		body   map[string]any
+		status int
+	}{
+		{http.MethodPatch, "/api/v1/issues/" + keys[0], map[string]any{"status": "todo"}, http.StatusOK},
+		{http.MethodPatch, "/api/v1/issues/" + keys[2], map[string]any{"rank": map[string]string{"after": keys[1]}}, http.StatusOK},
+		{http.MethodPost, "/api/v1/issues", map[string]any{"project": "CORE", "title": "Independent root", "force": true}, http.StatusCreated},
+		{http.MethodPatch, "/api/v1/issues/" + other[0], map[string]any{"blocked_by": []string{other[1]}}, http.StatusOK},
+	} {
+		responses := make(chan *httptest.ResponseRecorder, 1)
+		go func() {
+			responses <- dispatchRequest(t, handler, write.method, write.path, write.body, "alice")
+		}()
+		response := awaitResponse(t, responses)
+		if response.Code != write.status {
+			t.Fatalf("unrelated write during dependency wait: %s %s: %d %s", write.method, write.path, response.Code, response.Body.String())
+		}
+	}
+	if err := gate.Commit(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		response := awaitResponse(t, waiting)
+		if response.Code != http.StatusOK && response.Code != http.StatusCreated {
+			t.Fatalf("dependency write after release: %d %s", response.Code, response.Body.String())
+		}
+		if got := decodeBody[model.Issue](t, response).BlockedBy; !slices.Equal(got, []string{keys[1]}) {
+			t.Fatalf("dependency write lost its target: %v", got)
+		}
 	}
 }

@@ -189,6 +189,32 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
+	if len(blockers) > 0 {
+		if err := lockProjectIssueDependencies(r.Context(), tx, input.Project); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+	}
+	var parentAssignee *string
+	if parentKey != "" {
+		var parentProject string
+		err := tx.QueryRow(r.Context(), `select project_key, assignee from issues where key = $1`, parentKey).Scan(&parentProject, &parentAssignee)
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, "PARENT_INPUT", http.StatusBadRequest, fmt.Sprintf("parent issue %s not found", parentKey))
+			return
+		}
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		if parentProject != input.Project {
+			writeError(w, "PARENT_INPUT", http.StatusBadRequest, "parent must be in the same project")
+			return
+		}
+	}
+	if !assigneeProvided {
+		assignee = defaultAssignee(actor, parentAssignee)
+	}
 
 	var number int
 	if err := tx.QueryRow(r.Context(), `
@@ -215,30 +241,6 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := lockIssueLinkRows(r.Context(), tx, key, parentKey, blockers); err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	var parentAssignee *string
-	if parentKey != "" {
-		var parentProject string
-		err := tx.QueryRow(r.Context(), `select project_key, assignee from issues where key = $1`, parentKey).Scan(&parentProject, &parentAssignee)
-		if errors.Is(err, pgx.ErrNoRows) {
-			writeError(w, "PARENT_INPUT", http.StatusBadRequest, fmt.Sprintf("parent issue %s not found", parentKey))
-			return
-		}
-		if err != nil {
-			s.writeHandlerError(w, err)
-			return
-		}
-		if parentProject != input.Project {
-			writeError(w, "PARENT_INPUT", http.StatusBadRequest, "parent must be in the same project")
-			return
-		}
-	}
-	if !assigneeProvided {
-		assignee = defaultAssignee(actor, parentAssignee)
-	}
 	lastRank, err := lastProjectRank(r.Context(), tx, input.Project, "")
 	if err != nil {
 		s.writeHandlerError(w, err)

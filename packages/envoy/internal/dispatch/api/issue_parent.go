@@ -4,13 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"slices"
 	"strconv"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/sjawhar/envoy/internal/contracts"
 )
 
@@ -52,53 +52,18 @@ func normalizeIssueBlockers(targets []string) ([]string, error) {
 	return slices.Compact(targets), nil
 }
 
-// lockIssueLinkRows takes the source, all targets, and both parents in one key order before
-// any mutation or traversal. A create's source is not visible yet, so it locks the existing
-// targets before inserting that private row. The current parent is also an event owner.
-func lockIssueLinkRows(ctx context.Context, tx pgx.Tx, key, parent string, targets []string) error {
-	keys := make([]string, 0, len(targets)+2)
-	keys = append(keys, key)
-	keys = append(keys, targets...)
-	if parent != "" {
-		keys = append(keys, parent)
-	}
-	rows, err := tx.Query(ctx, `
-		select key, case when key = $1 then parent_key end
-		from issues
-		where key = any($2::text[])
-		   or key = (select parent_key from issues where key = $1)
-		order by key for no key update
-	`, key, keys)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	locked := make([]string, 0, len(keys)+1)
-	var currentParent *string
-	for rows.Next() {
-		var lockedKey string
-		var rowParent *string
-		if err := rows.Scan(&lockedKey, &rowParent); err != nil {
-			return err
-		}
-		locked = append(locked, lockedKey)
-		if lockedKey == key {
-			currentParent = rowParent
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	// A source changed while this statement waited for its lock: the old snapshot may not
-	// have selected the parent its updated row names. Retry rather than lock it out of order.
-	if currentParent != nil && !slices.Contains(locked, *currentParent) {
-		return errorf(http.StatusConflict, "DEPENDENCY_CONFLICT", "issue parent changed concurrently; retry the request")
+// lockProjectIssueDependencies serializes blocker and parent changes before any row or rank
+// lock. The two-key namespace is separate from Dispatch's one-key rank, document and event locks.
+func lockProjectIssueDependencies(ctx context.Context, tx pgx.Tx, project string) error {
+	if _, err := tx.Exec(ctx, `
+		select pg_advisory_xact_lock(hashtext('dispatch-issue-dependencies'), hashtext($1))
+	`, project); err != nil {
+		return fmt.Errorf("lock project issue dependencies: %w", err)
 	}
 	return nil
 }
 
-// validateIssueParent checks the proposed parent after lockIssueLinkRows has locked both rows.
-// A concurrent change to a more distant ancestor can still race the bounded ancestor walk.
+// validateIssueParent reads the ancestor chain while the project's dependency lock is held.
 func validateIssueParent(ctx context.Context, tx pgx.Tx, key, project, parent string) error {
 	if parent == key {
 		return errorf(http.StatusBadRequest, "PARENT_INPUT", "an issue cannot be its own parent")
@@ -162,8 +127,7 @@ func assertParentLeavesNoDependencyCycle(ctx context.Context, tx pgx.Tx, child, 
 	return assertNoWaitPath(ctx, tx, []waitNode{{key: parent}}, waitNode{key: child})
 }
 
-// writeBlockedBy replaces the normalized targets whose rows lockIssueLinkRows already locked.
-// Every target must be in the issue's project, and no target may make the issue wait on itself.
+// writeBlockedBy validates and replaces the normalized same-project target list.
 func writeBlockedBy(ctx context.Context, tx pgx.Tx, issue, project string, targets []string) error {
 	for _, target := range targets {
 		var targetProject string
@@ -198,9 +162,8 @@ func writeBlockedBy(ctx context.Context, tx pgx.Tx, issue, project string, targe
 	return err
 }
 
-// assertNoWaitPath refuses a new wait whose head reaches its tail, stopping at parentDepthCap.
-// Rows beyond the initial lock set are locked without waiting: a competing graph write may own
-// an earlier key, so contention must ask for a retry rather than invert the initial lock order.
+// assertNoWaitPath refuses a wait whose head reaches its tail, stopping at parentDepthCap.
+// The caller serializes blocker and parent changes, so traversal needs only plain reads.
 func assertNoWaitPath(ctx context.Context, tx pgx.Tx, from []waitNode, goal waitNode) error {
 	seen := map[waitNode]bool{}
 	frontier := from
@@ -208,7 +171,7 @@ func assertNoWaitPath(ctx context.Context, tx pgx.Tx, from []waitNode, goal wait
 		if depth > parentDepthCap {
 			return errorf(http.StatusConflict, "DEPENDENCY_CYCLE", "the dependency graph is deeper than %d links", parentDepthCap)
 		}
-		var keys, starts, dones []string
+		var starts, dones []string
 		for _, node := range frontier {
 			halves := []waitNode{node, {key: node.key}}
 			if !node.done {
@@ -222,22 +185,12 @@ func assertNoWaitPath(ctx context.Context, tx pgx.Tx, from []waitNode, goal wait
 					continue
 				}
 				seen[half] = true
-				keys = append(keys, half.key)
 				if half.done {
 					dones = append(dones, half.key)
 				} else {
 					starts = append(starts, half.key)
 				}
 			}
-		}
-		slices.Sort(keys)
-		keys = slices.Compact(keys)
-		if _, err := tx.Exec(ctx, `select key from issues where key = any($1) order by key for no key update nowait`, keys); err != nil {
-			var pgErr *pgconn.PgError
-			if errors.As(err, &pgErr) && pgErr.Code == "55P03" {
-				return errorf(http.StatusConflict, "DEPENDENCY_CONFLICT", "dependency graph is being updated concurrently; retry the request")
-			}
-			return err
 		}
 		rows, err := tx.Query(ctx, `
 			select parent_key, false from issues where key = any($1) and parent_key is not null

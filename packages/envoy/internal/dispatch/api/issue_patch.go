@@ -105,23 +105,28 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 	defer tx.Rollback(r.Context())
 
 	key := r.PathValue("key")
-	if input.Rank != nil {
+	dependencyWrite := input.BlockedBy != nil || parentProvided
+	if dependencyWrite || input.Rank != nil {
 		var project string
 		if err := tx.QueryRow(r.Context(), `select project_key from issues where key = $1`, key).Scan(&project); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
-		if err := lockProjectRankAllocation(r.Context(), tx, project); err != nil {
-			s.writeHandlerError(w, err)
-			return
+		if dependencyWrite {
+			if err := lockProjectIssueDependencies(r.Context(), tx, project); err != nil {
+				s.writeHandlerError(w, err)
+				return
+			}
+		}
+		if input.Rank != nil {
+			if err := lockProjectRankAllocation(r.Context(), tx, project); err != nil {
+				s.writeHandlerError(w, err)
+				return
+			}
 		}
 	}
 
-	parentKey := ""
-	if parent != nil {
-		parentKey = *parent
-	}
-	if err := lockIssueLinkRows(r.Context(), tx, key, parentKey, blockers); err != nil {
+	if err := tx.QueryRow(r.Context(), `select key from issues where key = $1 for no key update`, key).Scan(new(string)); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
