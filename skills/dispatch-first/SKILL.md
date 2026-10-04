@@ -41,10 +41,14 @@ parent's children and the issue's `Components:` line show where the rest of that
   facts, the options and your recommendation in it, and link what you cite (`dispatch://…`)
   instead of writing "see above" or "my earlier message".
 
+## Design in the spec
+
+A design conversation with a person, or the implementation plan that follows one, uses
+`skill://dispatch-brainstorming`: read it before your first design question on a change, the spec,
+or that plan. It replaces superpowers' `brainstorming` and `writing-plans` here, even when the user
+invokes one by name. A Legion architect's own issue spec follows `skill://legion-architect`.
+
 ## Load the full skill before you write
 
-- **Before your first design question on a change, and before you write or change a spec, read
-  `skill://dispatch`,** including its "Writing a spec" section: a design change is brainstormed in
-  its issue's spec, not in chat, even when the brainstorming skill says otherwise.
-- Before any other write to Dispatch (an ask, a message, a comment, a document edit, a status
-  change, a claim), load `skill://dispatch` unless you already have in this session.
+Before any write to Dispatch (an ask, a message, a comment, a document edit, a status change, a
+claim), load `skill://dispatch` unless you already have in this session.
