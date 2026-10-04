@@ -5,10 +5,9 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
-	"golang.org/x/time/rate"
+	"github.com/sjawhar/envoy/internal/broker/ratelimit"
 )
 
 // LauncherLimits bounds POST /v1/launcher-credentials, the one route an unauthenticated caller
@@ -17,58 +16,20 @@ import (
 // verifying and recording machine-login requests, and a flood naming one operator cannot bury
 // that operator's pending machine logins.
 type LauncherLimits struct {
-	PerAddress  Limit
-	PerOperator Limit
-}
-
-// Limit is a token bucket: Burst requests at once, refilled at one every Every.
-type Limit struct {
-	Every time.Duration
-	Burst int
+	PerAddress  ratelimit.Limit
+	PerOperator ratelimit.Limit
 }
 
 // DefaultLauncherLimits allows a burst of ten requests per source address and five per operator,
 // refilled at two a minute and one a minute: generous for a person logging in a few launchers,
 // useless for a flood.
 var DefaultLauncherLimits = LauncherLimits{
-	PerAddress:  Limit{Every: 30 * time.Second, Burst: 10},
-	PerOperator: Limit{Every: time.Minute, Burst: 5},
-}
-
-// maxBuckets bounds a keyedLimiter's memory: past it, full buckets (indistinguishable from fresh
-// ones) are dropped.
-const maxBuckets = 10000
-
-type keyedLimiter struct {
-	limit   Limit
-	mu      sync.Mutex
-	buckets map[string]*rate.Limiter
-}
-
-func newKeyedLimiter(limit Limit) *keyedLimiter {
-	return &keyedLimiter{limit: limit, buckets: map[string]*rate.Limiter{}}
-}
-
-func (k *keyedLimiter) allow(key string, now time.Time) bool {
-	k.mu.Lock()
-	defer k.mu.Unlock()
-	bucket, ok := k.buckets[key]
-	if !ok {
-		if len(k.buckets) >= maxBuckets {
-			for other, b := range k.buckets {
-				if b.TokensAt(now) >= float64(k.limit.Burst) {
-					delete(k.buckets, other)
-				}
-			}
-		}
-		bucket = rate.NewLimiter(rate.Every(k.limit.Every), k.limit.Burst)
-		k.buckets[key] = bucket
-	}
-	return bucket.AllowN(now, 1)
+	PerAddress:  ratelimit.Limit{Every: 30 * time.Second, Burst: 10},
+	PerOperator: ratelimit.Limit{Every: time.Minute, Burst: 5},
 }
 
 type launcherLimiter struct {
-	perAddress, perOperator *keyedLimiter
+	perAddress, perOperator *ratelimit.Keyed
 	retryAfter              time.Duration
 	// trustedProxyHeader is BROKER_TRUSTED_PROXY_HEADER: empty means every caller reaches the
 	// broker directly, so perAddress keys on r.RemoteAddr. Set only behind a trusted reverse
@@ -78,8 +39,8 @@ type launcherLimiter struct {
 
 func newLauncherLimiter(limits LauncherLimits, trustedProxyHeader string) *launcherLimiter {
 	return &launcherLimiter{
-		perAddress:         newKeyedLimiter(limits.PerAddress),
-		perOperator:        newKeyedLimiter(limits.PerOperator),
+		perAddress:         ratelimit.NewKeyed(limits.PerAddress),
+		perOperator:        ratelimit.NewKeyed(limits.PerOperator),
 		retryAfter:         max(limits.PerAddress.Every, limits.PerOperator.Every),
 		trustedProxyHeader: trustedProxyHeader,
 	}
@@ -120,7 +81,7 @@ func (l *launcherLimiter) clientAddress(r *http.Request) string {
 func (l *launcherLimiter) refuse(w http.ResponseWriter, r *http.Request, operator string) bool {
 	now := time.Now()
 	address := l.clientAddress(r)
-	if l.perAddress.allow(address, now) && l.perOperator.allow(operator, now) {
+	if l.perAddress.AllowAt(address, now) && l.perOperator.AllowAt(operator, now) {
 		return false
 	}
 	w.Header().Set("Retry-After", strconv.Itoa(int(l.retryAfter.Seconds())))

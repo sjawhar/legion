@@ -1,8 +1,9 @@
 // Package policy decides who may have an agent secret from two tags on the secret itself in AWS
 // Secrets Manager: owner (shared, a person's email, or a registered service) and tier (agent or
 // human). Loader reads every secret under the namespace prefix into a Set, refusing by name each one
-// whose tags or key the policy cannot serve; Current keeps the latest Set and rereads it on a
-// ticker; Set.Evaluate answers one requester's ask for one name.
+// whose tags or key the policy cannot serve, or reads one name alone (LoadOne); Current keeps the
+// latest Set, rereads it on a ticker, and merges a single name's reread into it (RefreshOne);
+// Set.Evaluate answers one requester's ask for one name.
 //
 // Who may ask follows from owner and tier alone:
 //
@@ -18,8 +19,12 @@
 package policy
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"slices"
+	"strings"
 
 	"github.com/sjawhar/envoy/internal/broker/record"
 )
@@ -49,6 +54,11 @@ const (
 // ErrUnknownSecret is a name no secret the policy serves carries: none exists under the namespace
 // prefix, or the one that does was refused.
 var ErrUnknownSecret = errors.New("no agent secret has this name")
+
+// ReasonAbsent is LoadOne's answer for a name no secret carries: none exists under the prefix, or
+// the one that does is scheduled for deletion. It is not a refusal, so it is never logged as
+// RefusedMessage.
+const ReasonAbsent = "absent"
 
 type ownerKind int
 
@@ -81,13 +91,36 @@ func (secret Secret) approver() string {
 	return secret.Owner
 }
 
-// Set is the policy as one load read it.
+// Set is the policy as one load read it, or as a single name's reread left it (NewSet builds both).
 type Set struct {
 	// Version is the SHA-256 of every served secret's name, owner, tier and ARN: equal versions are
 	// equal policies. A request records the version it was decided under, so a live grant is
 	// re-evaluated only once the policy changed.
 	Version string
 	Secrets map[string]Secret
+}
+
+// NewSet builds the one Set shape both Load and the single-name merges produce, keeping secrets
+// (keyed by Name) as its Secrets: Version is the SHA-256 over "<Name>\t<Owner>\t<Tier>\t<ARN>\n"
+// per served secret, ascending by the secret's Secrets Manager name (the slug) — the exact order
+// and bytes Load wrote before NewSet existed, so deployed digests do not shift. (Sorting by the
+// uppercased Name would NOT be equivalent: '-' is 0x2D, '_' is 0x5F, so "a-b" < "a0" as slugs but
+// "A0" < "A_B" as Names.)
+func NewSet(secrets map[string]Secret) *Set {
+	type bySlug struct {
+		slug   string
+		secret Secret
+	}
+	served := make([]bySlug, 0, len(secrets))
+	for _, s := range secrets {
+		served = append(served, bySlug{slug: slugOf(s.Name), secret: s})
+	}
+	slices.SortFunc(served, func(a, b bySlug) int { return strings.Compare(a.slug, b.slug) })
+	digest := sha256.New()
+	for _, s := range served {
+		fmt.Fprintf(digest, "%s\t%s\t%s\t%s\n", s.secret.Name, s.secret.Owner, s.secret.Tier, s.secret.ARN)
+	}
+	return &Set{Version: hex.EncodeToString(digest.Sum(nil)), Secrets: secrets}
 }
 
 // Requester is an enrolled session or pod as the policy sees it.

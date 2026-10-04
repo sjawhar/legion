@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/kms"
@@ -17,9 +18,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager/types"
 )
 
-// Local stands in, in memory, for the AWS calls the broker makes: Secrets Manager's ListSecrets
-// and GetSecretValue, and KMS's ListAliases. BROKER_FAKE_SECRETS_FILE loads one for local
-// development (LocalFromFile), and tests build one with NewLocal.
+// Local stands in, in memory, for the AWS calls the broker makes: Secrets Manager's ListSecrets,
+// DescribeSecret and GetSecretValue, and KMS's ListAliases. BROKER_FAKE_SECRETS_FILE loads one for
+// local development (LocalFromFile), and tests build one with NewLocal.
 type Local struct {
 	mu      sync.Mutex
 	secrets map[string]LocalSecret
@@ -39,6 +40,9 @@ type LocalSecret struct {
 	// Manager, it is listed with no version and reading it answers ResourceNotFoundException; one
 	// holding a value is listed with a version labelled AWSCURRENT.
 	Value string `json:"value"`
+	// DeletedAt, when set, is when the secret is scheduled to be deleted: as in Secrets Manager,
+	// ListSecrets leaves it out and DescribeSecret answers it with that DeletedDate.
+	DeletedAt *time.Time `json:"deleted_at,omitempty"`
 }
 
 // localFile is BROKER_FAKE_SECRETS_FILE's shape.
@@ -117,28 +121,62 @@ func (l *Local) Alias(keyARN, alias string) {
 
 // ListSecrets answers every secret in one page, filtered as Secrets Manager filters by name: each
 // name filter value matches a name it prefixes, case-sensitively. A secret holding a value is
-// listed with one version labelled AWSCURRENT, and one with no value with none.
+// listed with one version labelled AWSCURRENT, and one with no value with none. A secret scheduled
+// for deletion is left out, as Secrets Manager leaves it out by default.
 func (l *Local) ListSecrets(_ context.Context, in *secretsmanager.ListSecretsInput, _ ...func(*secretsmanager.Options)) (*secretsmanager.ListSecretsOutput, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	out := &secretsmanager.ListSecretsOutput{}
 	for _, s := range l.secrets {
-		if !matchesNameFilters(s.Name, in.Filters) {
+		if s.DeletedAt != nil || !matchesNameFilters(s.Name, in.Filters) {
 			continue
 		}
-		entry := types.SecretListEntry{Name: aws.String(s.Name), ARN: aws.String(LocalARN(s.Name))}
-		if s.KmsKeyID != "" {
-			entry.KmsKeyId = aws.String(s.KmsKeyID)
-		}
-		for k, v := range s.Tags {
-			entry.Tags = append(entry.Tags, types.Tag{Key: aws.String(k), Value: aws.String(v)})
-		}
-		if s.Value != "" {
-			entry.SecretVersionsToStages = map[string][]string{"local-current": {"AWSCURRENT"}}
-		}
-		out.SecretList = append(out.SecretList, entry)
+		out.SecretList = append(out.SecretList, types.SecretListEntry{
+			Name: aws.String(s.Name), ARN: aws.String(LocalARN(s.Name)), KmsKeyId: s.kmsKeyID(),
+			Tags: s.awsTags(), SecretVersionsToStages: s.versionsToStages(),
+		})
 	}
 	return out, nil
+}
+
+// DescribeSecret answers the secret SecretId names, by name or by LocalARN, with the tags, key and
+// version stages ListSecrets lists it with, and DeletedDate while it is scheduled for deletion;
+// ResourceNotFoundException for one it does not hold.
+func (l *Local) DescribeSecret(_ context.Context, in *secretsmanager.DescribeSecretInput, _ ...func(*secretsmanager.Options)) (*secretsmanager.DescribeSecretOutput, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	s, ok := l.secrets[strings.TrimPrefix(aws.ToString(in.SecretId), LocalARN(""))]
+	if !ok {
+		return nil, &types.ResourceNotFoundException{Message: aws.String("Secrets Manager can't find the specified secret.")}
+	}
+	return &secretsmanager.DescribeSecretOutput{
+		Name: aws.String(s.Name), ARN: aws.String(LocalARN(s.Name)), KmsKeyId: s.kmsKeyID(),
+		Tags: s.awsTags(), VersionIdsToStages: s.versionsToStages(), DeletedDate: s.DeletedAt,
+	}, nil
+}
+
+// kmsKeyID is s's KmsKeyId as Secrets Manager reports it: absent for the AWS-managed key.
+func (s LocalSecret) kmsKeyID() *string {
+	if s.KmsKeyID == "" {
+		return nil
+	}
+	return aws.String(s.KmsKeyID)
+}
+
+func (s LocalSecret) awsTags() []types.Tag {
+	tags := make([]types.Tag, 0, len(s.Tags))
+	for k, v := range s.Tags {
+		tags = append(tags, types.Tag{Key: aws.String(k), Value: aws.String(v)})
+	}
+	return tags
+}
+
+// versionsToStages is one version labelled AWSCURRENT for a secret holding a value, none otherwise.
+func (s LocalSecret) versionsToStages() map[string][]string {
+	if s.Value == "" {
+		return nil
+	}
+	return map[string][]string{"local-current": {"AWSCURRENT"}}
 }
 
 func matchesNameFilters(name string, filters []types.Filter) bool {
