@@ -116,6 +116,9 @@ function AssistantMessage(): ReactNode {
   const fromDispatch = useAuiState(
     (state) => readDispatchMarks(state.message.metadata.custom).dispatch === true
   );
+  // The provider/model that produced this streamed turn (LEGION-548): absent for a reply sent
+  // through Dispatch, and for a turn whose publishing host reported none.
+  const model = useAuiState((state) => readDispatchMarks(state.message.metadata.custom).model);
   if (fromDispatch) {
     return (
       <div
@@ -132,6 +135,11 @@ function AssistantMessage(): ReactNode {
       className={`mt-4 text-sm whitespace-pre-wrap ${textPrimaryOnCanvas}`}
       data-testid="agent-message-assistant"
     >
+      {model === undefined ? null : (
+        <p className={`mb-1 text-xs ${textMutedOnCanvas}`} data-testid="agent-message-model">
+          {model}
+        </p>
+      )}
       <MessagePrimitive.Parts components={{ Reasoning, tools: { Fallback: ToolCall } }} />
     </div>
   );

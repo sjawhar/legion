@@ -4,6 +4,7 @@ import type { AgentStreamFrame } from "@legion/contracts";
 
 import {
   applyFrames,
+  currentModel,
   dispatchTurns,
   EMPTY_CONVERSATION,
   isRunning,
@@ -15,11 +16,19 @@ function message(
   id: string,
   at: number,
   text: string,
-  streaming: boolean
+  streaming: boolean,
+  model?: string
 ): AgentStreamFrame {
   return {
     kind: "message",
-    message: { at, id, parts: [{ text, type: "text" }], role: "assistant", streaming },
+    message: {
+      at,
+      id,
+      parts: [{ text, type: "text" }],
+      role: "assistant",
+      streaming,
+      ...(model === undefined ? {} : { model }),
+    },
     seq,
     v: 1,
   };
@@ -197,5 +206,73 @@ describe("a user message a person's Dispatch message became", () => {
       "u30",
       "a40",
     ]);
+  });
+});
+
+// The provider/model that produced an assistant turn (LEGION-548): validated like any other
+// field a publisher any client can write might get wrong, carried to the renderer through
+// assistant-ui's metadata channel, and read back for the live view's header.
+describe("the model that produced an assistant turn", () => {
+  test("isRenderableFrame refuses a non-string model", () => {
+    const bad = {
+      kind: "message",
+      message: { at: 10, id: "a10", model: 7, parts: [], role: "assistant", streaming: false },
+      seq: 1,
+      v: 1,
+    } as unknown as AgentStreamFrame;
+    expect(applyFrames(EMPTY_CONVERSATION, [bad]).messages).toEqual([]);
+  });
+
+  test("toThreadMessages carries it in metadata.custom for the renderer to read back", () => {
+    const state = applyFrames(EMPTY_CONVERSATION, [
+      message(1, "a50", 50, "Hello", false, "anthropic/claude-opus-5"),
+    ]);
+    expect(toThreadMessages(state)[0]?.metadata?.custom).toEqual({
+      model: "anthropic/claude-opus-5",
+    });
+  });
+
+  test("a turn with none carries no metadata at all", () => {
+    const state = applyFrames(EMPTY_CONVERSATION, [message(1, "a50", 50, "Hello", false)]);
+    expect(toThreadMessages(state)[0]?.metadata).toBeUndefined();
+  });
+
+  test("currentModel is the most recent assistant turn's own report, whatever it is", () => {
+    const sessionSwitchedModel = applyFrames(EMPTY_CONVERSATION, [
+      message(1, "a10", 10, "first", false, "anthropic/claude-opus-5"),
+      message(2, "a20", 20, "second", false, "anthropic/claude-sonnet-5"),
+    ]);
+    expect(currentModel(sessionSwitchedModel)).toBe("anthropic/claude-sonnet-5");
+
+    // The newest turn reported none: shown as nothing, not as the older turn's model, which
+    // could already be stale by the time anyone reads it.
+    const latestSilent = applyFrames(EMPTY_CONVERSATION, [
+      message(1, "a10", 10, "first", false, "anthropic/claude-opus-5"),
+      message(2, "a20", 20, "second", false),
+    ]);
+    expect(currentModel(latestSilent)).toBeUndefined();
+
+    // A user turn after the last assistant reply never resets what the header shows.
+    const userAfter = applyFrames(EMPTY_CONVERSATION, [
+      message(1, "a10", 10, "first", false, "anthropic/claude-opus-5"),
+      {
+        kind: "message",
+        message: {
+          at: 20,
+          id: "u20",
+          parts: [{ text: "go on", type: "text" }],
+          role: "user",
+          streaming: false,
+        },
+        seq: 2,
+        v: 1,
+      },
+    ]);
+    expect(currentModel(userAfter)).toBe("anthropic/claude-opus-5");
+  });
+
+  test("a session whose client never reports one has nothing to show", () => {
+    const state = applyFrames(EMPTY_CONVERSATION, [message(1, "a10", 10, "first", false)]);
+    expect(currentModel(state)).toBeUndefined();
   });
 });

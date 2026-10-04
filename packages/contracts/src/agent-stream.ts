@@ -87,6 +87,13 @@ export interface AgentStreamMessage {
    * not match carries none (`packages/pi-envoy/AGENTS.md` says which).
    */
   readonly dispatchMessageId?: string;
+  /**
+   * `provider/model` that produced this assistant turn (e.g. `anthropic/claude-opus-5`), read off
+   * the host's own assistant message (LEGION-548). Absent on a user message, and on an assistant
+   * message whose publishing host carries no model identity it can report (an adapter with no
+   * access to it, or a build older than this field).
+   */
+  readonly model?: string;
 }
 
 export interface AgentStreamToolResult {

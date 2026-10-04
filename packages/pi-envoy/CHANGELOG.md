@@ -4,6 +4,11 @@
 
 ### Added
 
+- The live agent conversation stream names the `provider/model` that produced each assistant turn
+  (LEGION-548), read off the host's own assistant message: the Dispatch live view shows it next to
+  the session's title and on the turn itself, and it switches within one turn of `/model`. Absent
+  for a client whose assistant message carries no model identity.
+
 - A `dispatch-brainstorming` skill ships beside `dispatch` and `dispatch-first` (LEGION-475). In a
   session with Dispatch it replaces superpowers' `brainstorming` and `writing-plans`: the design
   conversation runs in the issue's spec, the first version holds only established facts and every
