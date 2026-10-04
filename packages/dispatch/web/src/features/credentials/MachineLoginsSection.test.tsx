@@ -201,7 +201,7 @@ test("a service's login the viewer approved is listed by its service, and its Re
     fireEvent.click(within(daemonRow as HTMLElement).getByRole("button", { name: "Revoke" }));
     expect(confirm.mock.calls).toEqual([
       [
-        "Revoke the legion-daemon login on cluster.example.com? Every session it started, its worker pods included, ends at once, and legion-daemon needs a new login approval before it starts any more.",
+        "Revoke the machine login for legion-daemon on cluster.example.com? Every session it started, its worker pods included, ends at once, and legion-daemon needs a new login approval before it starts any more.",
       ],
     ]);
     await waitFor(() => expect(revokeMachineLogin).toHaveBeenCalledWith("cred-daemon"));

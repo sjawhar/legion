@@ -8,6 +8,7 @@ import {
   textPrimaryOnCanvas,
 } from "../../theme/classes";
 import { Timestamp } from "../refs/Timestamp";
+import { machineName } from "./machineLogins";
 
 const LIFETIME_UNITS: ReadonlyArray<{ seconds: number; unit: string }> = [
   { seconds: 86400, unit: "day" },
@@ -90,9 +91,11 @@ export function CredentialRecordFacts({ record }: { record: CredentialRecord }):
       )}
       {record.kind === "launcher_credential" && record.state === "pending" ? (
         <p className={`text-sm font-medium ${textPrimaryOnCanvas}`}>
-          {record.service
-            ? `Approving lets ${record.service} on ${record.identifiers[0]} start worker pods as ${record.service}, not as you: no secret of yours reaches its pods unless you approve the request for it.`
-            : `Approving lets ${record.identifiers[0]} start agent sessions as you.`}
+          {`Approving lets ${machineName({ host: record.identifiers[0], service: record.service })} start ${
+            record.service
+              ? `worker pods as ${record.service}, not as you: no secret of yours reaches its pods unless you approve the request for it`
+              : "agent sessions as you"
+          }.`}
         </p>
       ) : null}
     </div>

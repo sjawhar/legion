@@ -6,14 +6,14 @@ import type { MachineLogin } from "../../api/types";
 import { textSecondaryOnSurface } from "../../theme/classes";
 import { Timestamp } from "../refs/Timestamp";
 import { credentialGrantsQuery } from "./grants";
-import { machineLoginsQuery } from "./machineLogins";
+import { machineLoginsQuery, machineName } from "./machineLogins";
 import { type RevocableColumn, RevocableList } from "./RevocableList";
 
 const columns: readonly RevocableColumn<MachineLogin>[] = [
   {
     cell: (login) => (
       <>
-        {login.service ? `${login.service} on ${login.host}` : login.host}
+        {machineName(login)}
         {login.expired ? (
           <span className={`block text-xs font-normal ${textSecondaryOnSurface}`}>
             expired, sessions still running
@@ -47,9 +47,11 @@ export function MachineLoginsSection(): ReactNode {
       className="pt-4"
       columns={columns}
       confirm={(login) =>
-        login.service
-          ? `Revoke the ${login.service} login on ${login.host}? Every session it started, its worker pods included, ends at once, and ${login.service} needs a new login approval before it starts any more.`
-          : `Revoke the machine login for ${login.host}? Every agent session it started loses its secrets at once, and the machine needs a new login.`
+        `Revoke the machine login for ${machineName(login)}? ${
+          login.service
+            ? `Every session it started, its worker pods included, ends at once, and ${login.service} needs a new login approval before it starts any more.`
+            : "Every agent session it started loses its secrets at once, and the machine needs a new login."
+        }`
       }
       description="Every machine logged in as you, and every service whose login you allowed, while its login is unexpired or a session it started still runs: a session outlives its login's expiry. Revoking one ends it now: it starts no more sessions, and every session it started loses its secrets."
       empty="No live machine logins."

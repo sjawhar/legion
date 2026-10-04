@@ -10,3 +10,9 @@ export const machineLoginsQuery = () =>
     queryKey: ["machine-logins"],
     queryFn: () => api.getMachineLogins(),
   });
+
+/** A machine login's machine as every credentials page names it: its host, or `<service> on
+ *  <host>` for a service's login (the Legion daemon's). */
+export function machineName({ host, service }: { host: string; service: string | null }): string {
+  return service ? `${service} on ${host}` : host;
+}
