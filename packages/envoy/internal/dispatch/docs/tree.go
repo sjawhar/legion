@@ -247,14 +247,10 @@ func snapshotDocument(doc *crdt.Doc) (*crdt.Doc, error) {
 }
 
 // newDocumentCopy is a document to decode a document's state into: a snapshot or a write's fork of
-// a room this server holds, the document's stored history (loadDocument, validateUpdate) and the
-// fold of its stored updates and read-back (stateThrough), or one update the store appends
+// a room this server holds, the document's stored history (loadDocument, validateUpdate, and the
+// fold of its stored updates and its read-back, stateThrough), or one update the store appends
 // (appendUpdate, AppendUpdateTx), decoded alone. Its pending queue is maxUpdateItems, the queue
-// every decode of document bytes takes (see maxUpdateItems), so every item of one update leaning on
-// one outside it parks. ygo's decoder parks each later item of a client behind one whose parent it
-// cannot place yet and refuses the whole update once its default queue is full; no update ygo
-// decodes carries more than maxUpdateItems items, so a queue that long holds every item one update
-// can park.
+// every decode of document bytes takes (see maxUpdateItems).
 func newDocumentCopy(options ...crdt.DocOption) *crdt.Doc {
 	return crdt.New(append(options, crdt.WithMaxPendingItems(maxUpdateItems))...)
 }

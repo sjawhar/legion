@@ -429,6 +429,24 @@ func TestALogTheFoldCannotApplyIsLoadedMergedAndKept(t *testing.T) {
 	}
 }
 
+// The read-back check passes a state whose clocks are the ones the document that made it held, and
+// names a client whose clock differs: one the state holds short of the document's clock or not at
+// all, and one the state holds that the document did not.
+func TestAStateReadsBackOtherwiseWhenItsClocksDiffer(t *testing.T) {
+	writer := crdt.New(crdt.WithClientID(7))
+	text := writer.GetText("t")
+	writer.Transact(func(txn *crdt.Transaction) { text.Insert(txn, 0, "abc", nil) })
+	state := crdt.EncodeStateAsUpdateV1(writer, nil)
+	if err := readsBackOtherwise(state, crdt.StateVector{7: 3}); err != nil {
+		t.Fatalf("a state read back at the clocks that made it: %v", err)
+	}
+	for _, made := range []crdt.StateVector{{7: 4}, {7: 3, 8: 1}, {}} {
+		if err := readsBackOtherwise(state, made); err == nil {
+			t.Errorf("a state made at %v that reads back at {7:3}: no error, want the client that differs", made)
+		}
+	}
+}
+
 func base64Rows(t *testing.T, encoded ...string) [][]byte {
 	t.Helper()
 	rows := make([][]byte, len(encoded))
