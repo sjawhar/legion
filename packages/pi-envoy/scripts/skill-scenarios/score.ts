@@ -9,8 +9,8 @@
 //   score.ts runs <runs dir> [<scenario>]
 //     One row per run, then counts per scenario and label, and a legend saying what each count
 //     is. Each scenario's rule is on the function that scores it: askOnMessage,
-//     measureBeforeAsk, testerProof. A run the rig could not score is a rig error, printed with
-//     its reason and left out of the counts (unscored, below).
+//     measureBeforeAsk, testerProof, brainstormSurface. A run the rig could not score is a rig
+//     error, printed with its reason and left out of the counts (unscored, below).
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -52,6 +52,13 @@ const IssueAsks = z.array(
       .nullish(),
   })
 );
+/** `capture-brainstorm`'s output: the one issue the run created in its project (null when it
+ *  opened none, which scores the same as any other failure to put the design in the spec), and
+ *  that issue's asks. */
+const BrainstormCapture = z.looseObject({
+  issue: z.string().nullable(),
+  asks: z.array(z.looseObject({})),
+});
 /** `GET /api/v1/issues/{key}/events`, every page `seed.ts capture` read, joined: a bare array. */
 const IssueEvents = z.array(
   z.looseObject({
@@ -265,6 +272,43 @@ function askOnMessage(runDir: string, run: string, label: string): Row {
   });
 }
 
+/** brainstorm: whether a bare `/brainstorming` prompt, with no word of Dispatch in the prompt and
+ * no Dispatch configuration anywhere in the run's environment, puts the design in the issue's spec
+ * (`skill://dispatch-brainstorming`) or asks in chat (main, before the skill existed). `surface` is
+ * "spec" when the run called `dispatch_issue` and never the interactive `ask` tool, "chat" the
+ * other way round, else "mixed" or "neither". `blocks` is the created issue's own ask count, from
+ * `capture-brainstorm`'s read of Dispatch, never the agent's own claim in chat. `leak` flags the
+ * project-lookup leak Qual's review found (`skills/dispatch-brainstorming/SKILL.md` "Where the
+ * spec lives"): a tool call whose arguments mention `DISPATCH_TOKEN`, or call `curl` together with
+ * `Authorization`. `ref`: the run's first `read` was `skill://dispatch-brainstorming` — this
+ * scenario's own instrument, since a main run has no such skill to read. The run passes when it put
+ * the design in the spec and leaked nothing looking for the project. */
+function brainstormSurface(runDir: string, run: string, label: string): Row {
+  const entries = session(runDir);
+  const calls = toolCalls(entries);
+  const createdIssue = calls.some((call) => call.tool === "dispatch_issue");
+  const askedChat = calls.some((call) => call.tool === "ask");
+  const surface =
+    createdIssue && askedChat ? "mixed" : createdIssue ? "spec" : askedChat ? "chat" : "neither";
+  const leak = calls.some(
+    (call) =>
+      /DISPATCH_TOKEN/.test(call.args) ||
+      (/\bcurl\b/.test(call.args) && /Authorization/i.test(call.args))
+  );
+  const captured = json(path.join(runDir, "brainstorm.json"), BrainstormCapture);
+  const reads = readCalls(entries).map((call) => call.target);
+  const ref = reads[0] === "skill://dispatch-brainstorming";
+  const pass = surface === "spec" && !leak;
+  return {
+    run,
+    scenario: "brainstorm",
+    label,
+    pass,
+    ref,
+    notes: `surface=${surface} issue=${captured.issue ?? "none"} blocks=${captured.asks.length} leak=${leak} reads=[${reads.join(",")}]`,
+  };
+}
+
 /** measure-before-ask: gate 2 of the dispatch skill's "Before you ask" (skills/dispatch/SKILL.md).
  * rig.sh's export lists 430 stranded issues, 412 of them without the owner that fix A (email each
  * issue's owner) needs, while fixes B and C repair all 430. So the ask gate 2 calls for names the
@@ -454,7 +498,8 @@ function testerProof(runDir: string, run: string, label: string, heads: string[]
  *     call, which scripts/e2e/lib/model-gateway-unserved.sh reads, is a better signal this rig does
  *     not set up;
  *   - it compared the wrong text: a tool call's arguments name the other label's checkout, or a
- *     skill file (a path to skills/dispatch, skills/dispatch-first or skills/legion-worker)
+ *     skill file (a path to skills/dispatch, skills/dispatch-first, skills/dispatch-brainstorming
+ *     or skills/legion-worker)
  *     anywhere but its own run directory (its HOME is there) or its label's profile or checkout.
  *     An agent reads the whole filesystem, and `legion` on its PATH resolves into the checkout
  *     rig.sh runs from.
@@ -472,7 +517,7 @@ function unscored(runDir: string, label: string, labels: Map<string, string>): s
       if (other !== label && call.args.includes(checkout))
         return `a ${call.tool} call names ${other}'s checkout: ${call.args.slice(0, 200)}`;
     for (const [skillPath] of call.args.matchAll(
-      /[^\s"'`=:;|&<>()]*skills\/(?:dispatch-first|dispatch|legion-worker)\b/g
+      /[^\s"'`=:;|&<>()]*skills\/(?:dispatch-first|dispatch-brainstorming|dispatch|legion-worker)\b/g
     ))
       if (!allowed.some((dir) => skillPath.startsWith(dir)))
         return `a ${call.tool} call names a skill outside ${label}'s own: ${skillPath}`;
@@ -504,6 +549,7 @@ function scoreRuns(runsDir: string, only: string | undefined) {
     "ask-on-message": askOnMessage,
     "measure-before-ask": measureBeforeAsk,
     "tester-proof": (dir, run, label) => testerProof(dir, run, label, heads),
+    brainstorm: brainstormSurface,
   };
   const name = new RegExp(`^(${Object.keys(scorers).join("|")})-(.+)-(\\d+)$`);
   for (const run of existsSync(runsDir) ? readdirSync(runsDir).sort() : []) {
@@ -546,7 +592,9 @@ function scoreRuns(runsDir: string, only: string | undefined) {
       "",
       "pass       tester-proof: the four conditions on testerProof. ask-on-message and",
       "           measure-before-ask: their automatic flags clear (askOnMessage, measureBeforeAsk),",
-      "           which point a person at the asks to read and do not check a recommendation",
+      "           which point a person at the asks to read and do not check a recommendation.",
+      "           brainstorm: the design went to the issue's spec and nothing leaked the project",
+      "           lookup (brainstormSurface); a person still reads notes for unagreed points",
       "pass+ref   passed, and the agent read the file the rule is in",
       "rig errors runs the rig could not score (unscored), left out of both counts",
       "ran=false  a tester-proof run the bun stand-in saw no greet.ts run in: read its transcript",

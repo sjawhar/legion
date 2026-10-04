@@ -13,6 +13,15 @@
 //   seed.ts capture <file> <run dir>       what the run left on the issue <file> names: the message,
 //                                          every ask and the whole event log, as score.ts reads
 //                                          them (message.json, asks.json, events.json in <run dir>)
+//   seed.ts brainstorm <file>              project TODO, pre-seeded with two unrelated issues about
+//                                          the same to-do CLI rig.sh's run_brainstorm writes into
+//                                          the agent's working directory; writes {project,
+//                                          preexisting} to <file>
+//   seed.ts capture-brainstorm <file> <run dir>
+//                                          the one issue in <file>'s project the run did not seed
+//                                          (null when it opened none) and that issue's asks, as
+//                                          score.ts's brainstormSurface reads them
+//                                          (brainstorm.json in <run dir>)
 import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
@@ -24,10 +33,13 @@ import {
   getIssueEvents,
   getMessage,
   listIssueAsks,
+  listIssues,
 } from "../../../dispatch/e2e/api";
 
 /** What `ask-on-message` writes and `capture` reads. */
 const Fixture = z.object({ issue: z.string(), message: z.string() });
+/** What `brainstorm` writes and `capture-brainstorm` reads. */
+const BrainstormFixture = z.object({ project: z.string(), preexisting: z.array(z.string()) });
 /** The most events one `GET /api/v1/issues/{key}/events` page holds. */
 const EVENT_PAGE = 200;
 
@@ -171,9 +183,57 @@ if (command === "project") {
     writeFileSync(path.join(runDir, `${name}.json`), `${JSON.stringify(record)}\n`);
   }
   console.log(`captured ${issue}: ${records.asks.length} asks, ${events.length} events`);
+} else if (command === "brainstorm" && file !== undefined) {
+  // The to-do CLI's Dispatch project, pre-seeded with two issues unrelated to the prompt's
+  // feature (a crash already understood and a display tweak), exactly as rig.sh's own run leaves
+  // its working directory: a session that searches finds the project the way it finds a real
+  // repository's, never from its environment or the HTTP API.
+  await createProject({ key: "TODO", name: "to-do CLI" });
+  const crash = await createIssue(
+    {
+      project: "TODO",
+      force: true,
+      title: "todo.py done: a task number past the end of the list crashes",
+      spec: [
+        "## Problem",
+        "",
+        "`python todo.py done 9` on a list of three tasks raises IndexError and prints a",
+        "traceback instead of saying the task does not exist.",
+      ].join("\n"),
+    },
+    { as: "agent" }
+  );
+  const count = await createIssue(
+    {
+      project: "TODO",
+      force: true,
+      title: "todo.py list: show the task count under the list",
+      spec: [
+        "## Problem",
+        "",
+        "A long list gives no total; `list` should end with a line such as `3 tasks`.",
+      ].join("\n"),
+    },
+    { as: "agent" }
+  );
+  const fixture: z.infer<typeof BrainstormFixture> = {
+    project: "TODO",
+    preexisting: [crash.key, count.key],
+  };
+  writeFileSync(file, `${JSON.stringify(fixture)}\n`);
+  console.log(`seeded TODO, ${crash.key}, ${count.key}`);
+} else if (command === "capture-brainstorm" && file !== undefined && runDir !== undefined) {
+  const { project, preexisting } = BrainstormFixture.parse(JSON.parse(readFileSync(file, "utf8")));
+  const reader = { as: "agent" } as const;
+  const summaries = await listIssues(project, reader);
+  const created = summaries.filter((summary) => !preexisting.includes(summary.key));
+  const issue = created[0]?.key ?? null;
+  const asks = issue === null ? [] : await listIssueAsks(issue, reader);
+  writeFileSync(path.join(runDir, "brainstorm.json"), `${JSON.stringify({ issue, asks })}\n`);
+  console.log(`captured ${issue ?? "no new issue"}: ${asks.length} asks`);
 } else {
   console.error(
-    "usage: seed.ts project | ask-on-message <file> | measure-before-ask <file> | capture <file> <run dir>"
+    "usage: seed.ts project | ask-on-message <file> | measure-before-ask <file> | capture <file> <run dir> | brainstorm <file> | capture-brainstorm <file> <run dir>"
   );
   process.exit(2);
 }

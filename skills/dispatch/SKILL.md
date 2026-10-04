@@ -80,11 +80,14 @@ a new version that keeps the human's own text, never a second "spec" artifact be
 
 - **Each open question is a decision block**, shaped and placed as [Decision blocks](#decision-blocks)
   says. Because it is an ask, it reaches the human's Inbox, and the answer lands next to its context.
-- **A settled point records the human's own words and the date**, quoted, so no reader mistakes
+- **A settled point records the person's own words and the date**, quoted, so no reader mistakes
   it for your inference; an answer that is only a chosen option is recorded in the form
-  `Sami chose "Commit author" on the question below (2026-10-02)`. A point you inferred says so,
-  with the reasoning. One carried in from another document keeps its provenance: an agent's
-  inference there is marked one here, or stays out until the human raises it.
+  `<name> chose "Commit author" on the question below (<date>)`, naming them from `dispatch_whoami`
+  or the conversation, or "the person" when the token names no owner — never a name you were not
+  given. A point you inferred says so, with the reasoning; during a live brainstorming
+  conversation, `skill://dispatch-brainstorming` is stricter and keeps an inference out of the spec
+  until the human has agreed to it. One carried in from another document keeps its provenance: an
+  agent's inference there is marked one here, or stays out until the human raises it.
 - **Sections follow the topic.** No heading is required and none has a fixed place; name each
   section for what it discusses.
 - **A changed point is rewritten, not appended to.** When an answer or a new fact changes the

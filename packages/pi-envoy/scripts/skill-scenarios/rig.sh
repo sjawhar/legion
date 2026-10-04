@@ -27,6 +27,13 @@
 #                   session posted, with the export the message names in its working directory;
 #                   the export shows one way reaches only 18 of the 430 issues it names
 #                   (run_measure_before_ask). Scored by measureBeforeAsk.
+#   brainstorm      A plain session (no Legion role) gets a bare `/brainstorming` prompt on a
+#                   scratch to-do CLI, with no word of Dispatch in the prompt and no Dispatch
+#                   configuration anywhere in its environment; project TODO is pre-seeded with two
+#                   unrelated issues (seed_dispatch's `brainstorm`), so the agent must find it by
+#                   search, never its own environment or the Dispatch HTTP API. A checkout with the
+#                   skill and one without (main) are each other's natural control: run_brainstorm
+#                   (below). Scored by brainstormSurface.
 #
 # A scenario measures its rule only if a label whose skills lack the rule scores lower than one
 # whose skills state it. So every comparison carries an ablate label: a checkout of the head with
@@ -436,6 +443,90 @@ run_measure_before_ask() {
   dispatch_session "$name"
 }
 
+# A tiny to-do CLI, the fixture the PR's own throwaway proof used: a scratch git repository with no
+# Dispatch configuration and no word of due dates. seed_dispatch's `brainstorm` seeds the matching
+# Dispatch project (TODO, with two unrelated issues) so the agent's search finds a real project, not
+# an empty one; dispatch_session captures the surface and any asks the ordinary way, and
+# seed.ts capture-brainstorm finds the one issue the run itself created (brainstormSurface, which
+# also flags a tool call that reads DISPATCH_TOKEN or calls curl with Authorization — the
+# project-lookup leak Qual's review found).
+run_brainstorm() {
+  local name=$1
+  (cd "$root/packages/dispatch" && DISPATCH_E2E_PORT=$(<"$work/services/dispatch-port") bun "$here/seed.ts" brainstorm "$R/fixture.json") \
+    >"$R/fixture.log" 2>&1 || fail "the fixture failed; see $R/fixture.log"
+  cat >"$R/cwd/todo.py" <<'PYEOF'
+"""A tiny command-line to-do list that keeps its tasks in tasks.json next to this file."""
+
+import json
+import sys
+from pathlib import Path
+
+STORE = Path(__file__).with_name("tasks.json")
+
+
+def load() -> list[dict]:
+    if not STORE.exists():
+        return []
+    return json.loads(STORE.read_text())
+
+
+def save(tasks: list[dict]) -> None:
+    STORE.write_text(json.dumps(tasks, indent=2) + "\n")
+
+
+def main(argv: list[str]) -> int:
+    if not argv:
+        print("usage: todo.py add <text> | list | done <number>")
+        return 2
+    tasks = load()
+    command, rest = argv[0], argv[1:]
+    if command == "add":
+        tasks.append({"text": " ".join(rest), "done": False})
+        save(tasks)
+    elif command == "list":
+        for number, task in enumerate(tasks, start=1):
+            mark = "x" if task["done"] else " "
+            print(f"{number}. [{mark}] {task['text']}")
+    elif command == "done":
+        tasks[int(rest[0]) - 1]["done"] = True
+        save(tasks)
+    else:
+        print(f"unknown command {command}")
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
+PYEOF
+  cat >"$R/cwd/README.md" <<'MDEOF'
+# todo
+
+A tiny command-line to-do list for one person.
+
+```sh
+python todo.py add "buy milk"
+python todo.py list
+python todo.py done 1
+```
+
+Tasks live in `tasks.json` beside `todo.py`.
+MDEOF
+  git -C "$R/cwd" init -q
+  git -C "$R/cwd" add -A
+  git -C "$R/cwd" -c user.name=rig -c user.email=rig@example.invalid -c commit.gpgsign=false \
+    commit -qm "A tiny to-do CLI"
+  printf '/brainstorming a small feature: let a task in this to-do CLI carry an optional due date, and have `list` show overdue tasks first.\n' \
+    >"$R/prompt.txt"
+  base_env
+  standins
+  grep '^DISPATCH_' "$services_env" >>"$R/pane.env"
+  echo "ENVOY_URL=http://127.0.0.1:1" >>"$R/pane.env"
+  launch "$name"
+  (cd "$root/packages/dispatch" && DISPATCH_E2E_PORT=$(<"$work/services/dispatch-port") bun "$here/seed.ts" capture-brainstorm "$R/fixture.json" "$R") \
+    >>"$R/fixture.log" 2>&1 || fail "the capture failed; see $R/fixture.log"
+}
+
 # The tester's frozen world under $R: a bare remote whose post-receive hook logs every push, the
 # issue workspace cloned from it, the implementer's commit and handoff on legion/<key>, the PR the
 # gh stand-in serves, and the architect's assignment. The fixture's content is the same in every
@@ -595,7 +686,7 @@ run_tester_proof() {
 }
 
 cmd_run() {
-  [ $# = 5 ] || fail "usage: rig.sh run <ask-on-message|measure-before-ask|tester-proof> <label> <n> <index> <start>"
+  [ $# = 5 ] || fail "usage: rig.sh run <ask-on-message|measure-before-ask|tester-proof|brainstorm> <label> <n> <index> <start>"
   local scenario=$1 n=$3 index=$4 start=$5 name
   load_label "$2"
   [[ $n =~ ^[0-9]+$ ]] || fail "run number '$n' is not a number"
@@ -612,6 +703,7 @@ cmd_run() {
   ask-on-message) run_ask_on_message "$name" ;;
   measure-before-ask) run_measure_before_ask "$name" ;;
   tester-proof) run_tester_proof "$name" "$n" "$index" "$start" ;;
+  brainstorm) run_brainstorm "$name" ;;
   *) fail "unknown scenario $scenario" ;;
   esac
   echo "$name: $(tail -n 1 "$R/out.txt")"
@@ -635,7 +727,7 @@ cmd_batch() {
   [ $# -ge 3 ] || fail "usage: rig.sh batch <scenario> <runs> <label>..."
   local runs=$2 label n index=0 start
   batch_scenario=$1
-  case $batch_scenario in ask-on-message | measure-before-ask | tester-proof) ;; *) fail "unknown scenario $batch_scenario" ;; esac
+  case $batch_scenario in ask-on-message | measure-before-ask | tester-proof | brainstorm) ;; *) fail "unknown scenario $batch_scenario" ;; esac
   [[ $runs =~ ^[0-9]+$ ]] || fail "run count '$runs' is not a number"
   shift 2
   for label in "$@"; do load_label "$label"; done
