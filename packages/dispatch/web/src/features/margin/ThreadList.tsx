@@ -1,5 +1,6 @@
 import { type ReactNode, useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
 
+import { marginReplySendKey } from "./margin-context";
 import { ThreadCard } from "./ThreadCard";
 import type { CommentActionFailure } from "./useCommentActionQueue";
 import {
@@ -201,6 +202,7 @@ export function ThreadList({
       owner={owner}
       selected={selectedItemId === thread.key}
       pendingAction={pendingActionIds.has(thread.key)}
+      replyMutationKey={marginReplySendKey(thread.key)}
       thread={thread}
       viewerLogin={viewerLogin}
     />

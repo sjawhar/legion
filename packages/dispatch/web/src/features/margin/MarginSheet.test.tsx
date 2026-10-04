@@ -26,7 +26,6 @@ test("an issue margin offers Comments and Pinned, Comments first", () => {
         actions: {
           closeComposer: () => {},
           onAction: () => {},
-          onComposerSaved: () => {},
           onComposerKindChange: () => undefined,
           onEdit: async () => undefined,
           onRetryAction: () => {},
@@ -79,6 +78,7 @@ test("an issue margin offers Comments and Pinned, Comments first", () => {
         sheet: {
           closeThread: () => {},
           expanded: false,
+          replySending: false,
           thread: undefined,
           toggle: () => {},
         },
@@ -117,7 +117,6 @@ test("a document owner shows the Comments tab and comment composer only", () => 
           actions: {
             closeComposer: () => {},
             onAction: () => {},
-            onComposerSaved: () => {},
             onComposerKindChange: () => undefined,
             onEdit: async () => undefined,
             onRetryAction: () => {},
@@ -129,7 +128,13 @@ test("a document owner shows the Comments tab and comment composer only", () => 
             onToggleThread: () => {},
             onEditingChange: () => {},
           },
-          composer: { anchor: undefined, kind: "comment" },
+          composer: {
+            anchor: { artifact: specArtifact.id, mark_id: "mark-1", quote: "selected" },
+            kind: "comment",
+            owner: { artifactId: specArtifact.id, kind: "artifact", project: "CORE" },
+            seq: 1,
+            turnedAway: false,
+          },
           items: {
             actionFailure: undefined,
             answeredAsksPending: false,
@@ -174,7 +179,13 @@ test("a document owner shows the Comments tab and comment composer only", () => 
             selectedItemId: undefined,
             showResolved: false,
           },
-          sheet: { closeThread: () => {}, expanded: true, thread: undefined, toggle: () => {} },
+          sheet: {
+            closeThread: () => {},
+            expanded: true,
+            replySending: false,
+            thread: undefined,
+            toggle: () => {},
+          },
           filter: { blockId: undefined, clear: () => {} },
           tab: { set: () => {}, value: "comments" },
         }}
@@ -244,7 +255,6 @@ test("MarginSheet shows the selected phone thread in a full-height view with a B
             actions: {
               closeComposer: () => {},
               onAction: () => {},
-              onComposerSaved: () => {},
               onComposerKindChange: () => undefined,
               onEdit: async () => undefined,
               onRetryAction: () => {},
@@ -305,6 +315,7 @@ test("MarginSheet shows the selected phone thread in a full-height view with a B
                 closed = true;
               },
               expanded: true,
+              replySending: false,
               thread: {
                 anchor: root.anchor,
                 key: root.id,
@@ -392,7 +403,6 @@ test("the standalone document phone sheet shows each suggestion's diff and Accep
               onAction: (id, action) => {
                 actions.push([id, action]);
               },
-              onComposerSaved: () => {},
               onComposerKindChange: () => undefined,
               onEdit: async () => undefined,
               onRetryAction: () => {},
@@ -461,6 +471,7 @@ test("the standalone document phone sheet shows each suggestion's diff and Accep
             sheet: {
               closeThread: () => {},
               expanded: true,
+              replySending: false,
               thread: undefined,
               toggle: () => {},
             },

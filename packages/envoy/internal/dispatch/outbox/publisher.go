@@ -29,7 +29,6 @@ const (
 	retryMaxDelay       = 5 * time.Minute
 	deadLetterAttempts  = 10
 	compactInterval     = 24 * time.Hour
-	compactKeep         = 500
 	documentTopicPrefix = "notifications.dispatch.document."
 	// maxCommentThreadDepth bounds the reply_to walk in loadRootCommentAuthor so a
 	// malformed cycle (comments.reply_to has no acyclicity constraint) cannot spin the
@@ -81,7 +80,7 @@ func Run(ctx context.Context, deps Deps) {
 		case <-retry.C:
 			scan(ctx, deps)
 		case <-compact.C:
-			if err := deps.Docs.CompactAll(ctx, compactKeep); err != nil {
+			if err := deps.Docs.CompactAll(ctx); err != nil {
 				slog.Error("dispatch outbox: compact documents", "error", err)
 			}
 		}

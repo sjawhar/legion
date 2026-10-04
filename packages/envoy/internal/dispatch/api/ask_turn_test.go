@@ -460,7 +460,7 @@ func TestAReplyThatWaitedForTheOwnerRowIsTheNewest(t *testing.T) {
 
 func TestCommentOnMovedApprovalAskReportsItsDerivedWaitingOn(t *testing.T) {
 	var documentService *docs.Service
-	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
+	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})
 		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
 		return documentService
@@ -477,10 +477,9 @@ func TestCommentOnMovedApprovalAskReportsItsDerivedWaitingOn(t *testing.T) {
 			ID string `json:"id"`
 		} `json:"ask"`
 	}](t, requested).Ask.ID
-	if _, err := documentService.ReplaceText(
-		context.Background(), issue.PrimaryArtifactID, "A revised spec",
-		model.Actor{Kind: "session", ID: sessionActor()["id"].(string)},
-	); err != nil {
+	if _, err := replaceDocumentText(database, documentService,
+		issue.PrimaryArtifactID, "A revised spec",
+		model.Actor{Kind: "session", ID: sessionActor()["id"].(string)}); err != nil {
 		t.Fatalf("revise document: %v", err)
 	}
 	if named := dispatchRequest(t, handler, http.MethodPost,

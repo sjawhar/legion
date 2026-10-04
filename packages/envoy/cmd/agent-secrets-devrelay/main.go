@@ -1,5 +1,5 @@
 // Command agent-secrets-devrelay is the local dev stack's stand-in for Dispatch's
-// credential-request relay, so the AGENTC-393 credential-request broker
+// credential-request relay, so the credential-request broker
 // (packages/envoy/cmd/broker) can be decided by hand without a Dispatch deployment: it calls the
 // broker's UI routes with the UI bearer token and the approving human's login, the same request
 // Dispatch's server sends when a signed-in human clicks Approve or Deny.
@@ -212,7 +212,7 @@ func cmdDecide(approve bool, args []string, stdout, stderr io.Writer) int {
 
 // cmdMachineApprove resolves a pending machine login by its typed code, as Dispatch's
 // machine-login page does, then decides that record with the same code: the code is the only
-// thing that selects a machine login (ruling 13).
+// thing that selects a machine login.
 func cmdMachineApprove(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("agent-secrets-devrelay machine-approve", flag.ContinueOnError)
 	fs.SetOutput(stderr)

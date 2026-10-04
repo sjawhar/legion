@@ -9,7 +9,6 @@ import (
 	"testing"
 
 	"github.com/sjawhar/envoy/internal/dispatch/envoy"
-	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
@@ -22,13 +21,10 @@ func agentsHandler(t *testing.T, envoyURL string) http.Handler {
 func agentsHandlerWithStore(t *testing.T, envoyURL string, database *store.Store) http.Handler {
 	t.Helper()
 	deps := Deps{
-		Store: database,
-		Identity: identity.HeaderIdentity{
-			Header: "X-Dispatch-User",
-			People: store.NewPgPeopleStore(database.Pool),
-		},
-		AgentToken: "agent-token",
-		Envoy:      envoy.New(envoyURL),
+		Store:       database,
+		Identity:    headerIdentity(database),
+		AgentTokens: sharedAgentTokens(t, "agent-token"),
+		Envoy:       envoy.New(envoyURL),
 	}
 	mux := http.NewServeMux()
 	Register(mux, deps)

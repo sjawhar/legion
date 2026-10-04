@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -60,66 +61,121 @@ func TestAWSReadWrapsGenericErrorInsteadOfMappingToErrNotFound(t *testing.T) {
 	}
 }
 
-func TestFakeReadReturnsErrNotFoundForMissingName(t *testing.T) {
-	f := Fake{"present": "shh"}
-	_, err := f.Read(context.Background(), "missing")
-	if !errors.Is(err, ErrNotFound) {
-		t.Fatalf("expected ErrNotFound, got %v", err)
-	}
-}
-
-func TestFakeReadReturnsValueForPresentName(t *testing.T) {
-	f := Fake{"present": "shh"}
-	v, err := f.Read(context.Background(), "present")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if v != "shh" {
-		t.Fatalf("Read returned an unexpected value: got %q", strings.ReplaceAll(v, "shh", "[REDACTED]"))
-	}
-}
-
-func TestFakeFromFileParsesNameValueLinesSkippingCommentsAndBlanks(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "secrets.env")
-	content := "# a comment\n\nDEEL_API_KEY=deel-v1\nAUTO_TOKEN=auto-v1\n"
+// TestLocalFromFileServesTheFileAsSecretsManagerWould pins the development file's shape: each
+// secret is listed under its name with its tags, key and version stages, filtered by name prefix as
+// Secrets Manager filters, case-sensitively, and read by name or by the ARN the listing gave it. A
+// secret the file gives no value is one created without a value: listed with no version, its read
+// is ErrNotFound, until a value is put, which gives it an AWSCURRENT version.
+func TestLocalFromFileServesTheFileAsSecretsManagerWould(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "secrets.json")
+	content := `{"secrets": [
+		{"name": "dev/agent-secrets/demo-key", "kms_key_id": "alias/dev", "tags": {"owner": "shared", "tier": "agent"}, "value": "demo-v1"},
+		{"name": "dev/agent-secrets/unseeded-key", "kms_key_id": "alias/dev", "tags": {"owner": "shared", "tier": "agent"}},
+		{"name": "other/demo-key", "kms_key_id": "", "tags": {}, "value": "other-v1"}
+	]}`
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatalf("write fixture: %v", err)
 	}
-	fake, err := FakeFromFile(path)
+	local, err := LocalFromFile(path)
 	if err != nil {
-		t.Fatalf("FakeFromFile: %v", err)
+		t.Fatalf("LocalFromFile: %v", err)
 	}
-	if len(fake) != 2 || fake["DEEL_API_KEY"] != "deel-v1" || fake["AUTO_TOKEN"] != "auto-v1" {
-		t.Fatalf("fake has %d entries (want 2); DEEL_API_KEY matches = %v, AUTO_TOKEN matches = %v", len(fake), fake["DEEL_API_KEY"] == "deel-v1", fake["AUTO_TOKEN"] == "auto-v1")
+	ctx := context.Background()
+	listByPrefix := func(prefix string) []types.SecretListEntry {
+		listed, err := local.ListSecrets(ctx, &secretsmanager.ListSecretsInput{
+			Filters: []types.Filter{{Key: types.FilterNameStringTypeName, Values: []string{prefix}}},
+		})
+		if err != nil {
+			t.Fatalf("ListSecrets(%s): %v", prefix, err)
+		}
+		return listed.SecretList
+	}
+	if listed := listByPrefix("DEV/agent-secrets/"); len(listed) != 0 {
+		t.Fatalf("ListSecrets(DEV/agent-secrets/) = %+v; want nothing, as Secrets Manager's name filter is case-sensitive", listed)
+	}
+	listed := listByPrefix("dev/agent-secrets/demo-key")
+	if len(listed) != 1 {
+		t.Fatalf("ListSecrets(dev/agent-secrets/demo-key) = %+v; want only dev/agent-secrets/demo-key", listed)
+	}
+	entry := listed[0]
+	if aws.ToString(entry.Name) != "dev/agent-secrets/demo-key" || aws.ToString(entry.KmsKeyId) != "alias/dev" || len(entry.Tags) != 2 {
+		t.Fatalf("listed entry = %+v, want its name, key and two tags", entry)
+	}
+	if stages := currentStages(entry); stages != 1 {
+		t.Fatalf("demo-key lists %d AWSCURRENT versions in %v; want one", stages, entry.SecretVersionsToStages)
+	}
+	if listed := listByPrefix("dev/agent-secrets/"); len(listed) != 2 {
+		t.Fatalf("ListSecrets(dev/agent-secrets/) = %+v; want demo-key and unseeded-key", listed)
+	}
+	for _, id := range []string{"dev/agent-secrets/demo-key", aws.ToString(entry.ARN)} {
+		v, err := AWS{Client: local}.Read(ctx, id)
+		if err != nil || v != "demo-v1" {
+			t.Fatalf("Read(%s) = %v, want the value", id, err)
+		}
+	}
+	if _, err := (AWS{Client: local}).Read(ctx, "dev/agent-secrets/missing"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Read(missing) = %v, want ErrNotFound", err)
+	}
+
+	unseeded := listByPrefix("dev/agent-secrets/unseeded-key")
+	if len(unseeded) != 1 || len(unseeded[0].SecretVersionsToStages) != 0 {
+		t.Fatalf("ListSecrets(unseeded-key) = %+v; want it listed with no version", unseeded)
+	}
+	if _, err := (AWS{Client: local}).Read(ctx, "dev/agent-secrets/unseeded-key"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Read(unseeded-key) = %v, want ErrNotFound", err)
+	}
+	local.Put(LocalSecret{Name: "dev/agent-secrets/unseeded-key", KmsKeyID: "alias/dev", Tags: map[string]string{"owner": "shared", "tier": "agent"}, Value: "seeded-v1"})
+	if seeded := listByPrefix("dev/agent-secrets/unseeded-key"); len(seeded) != 1 || currentStages(seeded[0]) != 1 {
+		t.Fatalf("ListSecrets(unseeded-key) after its value was put = %+v; want one AWSCURRENT version", seeded)
+	}
+	if v, err := (AWS{Client: local}).Read(ctx, "dev/agent-secrets/unseeded-key"); err != nil || v != "seeded-v1" {
+		t.Fatalf("Read(unseeded-key) after its value was put = %q, %v; want seeded-v1", v, err)
 	}
 }
 
-func TestFakeFromFileRejectsMissingFile(t *testing.T) {
-	_, err := FakeFromFile(filepath.Join(t.TempDir(), "missing.env"))
+// currentStages counts the versions entry's SecretVersionsToStages labels AWSCURRENT.
+func currentStages(entry types.SecretListEntry) int {
+	n := 0
+	for _, stages := range entry.SecretVersionsToStages {
+		if slices.Contains(stages, "AWSCURRENT") {
+			n++
+		}
+	}
+	return n
+}
+
+func TestLocalFromFileRejectsMissingFile(t *testing.T) {
+	_, err := LocalFromFile(filepath.Join(t.TempDir(), "missing.json"))
 	if err == nil {
 		t.Fatal("expected an error for a missing file")
 	}
 }
 
-// TestFakeFromFileRejectsLineWithNoEquals is also the regression for the review's Important
-// finding: a malformed line's own content — which could itself be or contain a secret value —
-// must never appear in the error, only the path and the line number.
-func TestFakeFromFileRejectsLineWithNoEquals(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "secrets.env")
+// TestLocalFromFileNeverQuotesTheFile pins that a file that does not parse is refused naming the
+// path and where it failed, never its content, which could itself be or contain a secret value.
+func TestLocalFromFileNeverQuotesTheFile(t *testing.T) {
 	const sensitive = "sk-should-never-appear-in-any-error-message"
-	if err := os.WriteFile(path, []byte(sensitive+"\n"), 0o600); err != nil {
-		t.Fatalf("write fixture: %v", err)
-	}
-	_, err := FakeFromFile(path)
-	if err == nil {
-		t.Fatal("expected an error for a malformed line")
-	}
-	if !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), "1") {
-		t.Fatalf("error %q should name the path and line number", strings.ReplaceAll(err.Error(), sensitive, "[REDACTED]"))
-	}
-	if strings.Contains(err.Error(), sensitive) {
-		t.Fatalf("error %q must never quote the malformed line's own content", strings.ReplaceAll(err.Error(), sensitive, "[REDACTED]"))
+	for name, content := range map[string]string{
+		"not JSON":                  sensitive + "\n",
+		"a value of the wrong type": `{"secrets": [{"name": "x", "value": 7}]} ` + sensitive,
+		"an unknown field":          `{"secrets": [{"name": "x", "secret_value": "` + sensitive + `"}]}`,
+		"truncated":                 `{"secrets": [{"name": "x", "value": "` + sensitive,
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "secrets.json")
+			if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+				t.Fatalf("write fixture: %v", err)
+			}
+			_, err := LocalFromFile(path)
+			if err == nil {
+				t.Fatal("expected an error for a file that does not parse")
+			}
+			if !strings.Contains(err.Error(), path) {
+				t.Fatalf("error %q should name the path", strings.ReplaceAll(err.Error(), sensitive, "[REDACTED]"))
+			}
+			if strings.Contains(err.Error(), sensitive) {
+				t.Fatalf("error %q must never quote the file's content", strings.ReplaceAll(err.Error(), sensitive, "[REDACTED]"))
+			}
+		})
 	}
 }

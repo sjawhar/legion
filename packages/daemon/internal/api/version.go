@@ -14,10 +14,10 @@ package api
 // commit; `packages/contracts/fixtures/daemon-api/version.json`, written by this package's golden
 // test and read by the plugin's, holds the two together.
 //
-// 8: AGENTC-393 -- AGENT_SECRETS_URL and AGENT_SECRETS_KEY_DIR on an enrolled pod's worker
+// 8: secrets broker enrollment -- AGENT_SECRETS_URL and AGENT_SECRETS_KEY_DIR on an enrolled pod's worker
 // container, and the shim's hello2.
 //
-// 9: AGENTC-393 Plan C -- the daemon's own agent-secrets machine login state
+// 9: secrets broker machine login -- the daemon's own agent-secrets machine login state
 // (agentSecretsLogin) on GET /legion/v1/state.
 //
 // 10: LEGION-208 -- POST /legion/v1/roots/close, the Go legion tool's close_root.
