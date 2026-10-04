@@ -281,13 +281,17 @@ func (e *Engine) ReenterChild(ctx context.Context, tx pgx.Tx, child record.Issue
 	return e.notice(ctx, tx, child.Key, ChildReenteredNotice(child.Key, root.Key))
 }
 
-// enterChild records a todo child under root's live tree, admitted at generation, and starts its
-// planning when the tree's gate is open.
+// enterChild records a todo child under root's live tree, admitted at generation, queues the row
+// creating its branch (record.IssueBranch), which every start of the child queued after it waits
+// for, and starts its planning when the tree's gate is open.
 func (e *Engine) enterChild(ctx context.Context, tx pgx.Tx, root record.Issue, fact intake.DispatchIssue, generation uint64) error {
 	parentKey := fact.Parent
 	child := record.Issue{Key: fact.Key, Tree: root.Tree, Project: root.Project, Title: fact.Title, Parent: &parentKey, Phase: phase.Admitted,
 		Generation: generation, Status: fact.Status, Rank: fact.Rank, HandedOver: fact.HandedOver, LastDispatchSeq: fact.Seq, DispatchStatus: fact.Status}
 	if err := e.store.PutIssue(ctx, tx, child); err != nil {
+		return err
+	}
+	if err := e.enqueue(ctx, tx, child.Key, record.IssueBranch{Generation: generation}); err != nil {
 		return err
 	}
 	gate, err := e.store.Gate(ctx, tx, root.Key)

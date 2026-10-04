@@ -430,6 +430,55 @@ func TestTheOutboxIsEachProjectsOwn(t *testing.T) {
 	})
 }
 
+// A start of an issue's role waits while an older issue_branch row of the issue is unfinished, so no
+// role starts before its branch exists on GitHub. Nothing else waits on it: a suspend of the same
+// issue, a start queued before the row, and another issue's start are each due.
+func TestAStartWaitsForItsIssuesBranch(t *testing.T) {
+	ctx := context.Background()
+	st := migratedStore(t)
+	records := NewStore()
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	enqueue := func(tx pgx.Tx, issue string, payload OutboxPayload) {
+		row, err := NewOutboxRow(issue, payload, now)
+		must(t, err)
+		must(t, records.Enqueue(ctx, tx, row))
+	}
+	start := SuperviseRequest{Op: "start", Tree: "LEGION-208", Role: claim.RoleArchitect, Generation: 1}
+	inTx(t, st, func(tx pgx.Tx) {
+		enqueue(tx, "LEGION-208", start)
+		enqueue(tx, "LEGION-208", IssueBranch{Generation: 1})
+		enqueue(tx, "LEGION-208", start)
+		enqueue(tx, "LEGION-208", SuperviseRequest{Op: "suspend", Tree: "LEGION-208", Role: claim.RolePlanner, Generation: 1})
+		enqueue(tx, "LEGION-209", SuperviseRequest{Op: "start", Tree: "LEGION-209", Role: claim.RoleArchitect, Generation: 1})
+	})
+	// claimed is every row due at at, in claim order, each finished once claimed.
+	claimed := func(at time.Time) []string {
+		var keys []string
+		inTx(t, st, func(tx pgx.Tx) {
+			rows, err := records.ClaimDue(ctx, tx, "LEGION", at, 10, time.Minute)
+			must(t, err)
+			for _, row := range rows {
+				payload, err := DecodeOutboxPayload(row)
+				must(t, err)
+				key := string(row.Kind) + ":" + row.Issue
+				if request, ok := payload.(SuperviseRequest); ok {
+					key += ":" + string(request.Op)
+				}
+				keys = append(keys, key)
+				must(t, records.FinishOutbox(ctx, tx, row.ID, row.LeaseToken))
+			}
+		})
+		return keys
+	}
+
+	if got, want := claimed(now), []string{"supervise:LEGION-208:start", "issue_branch:LEGION-208", "supervise:LEGION-208:suspend", "supervise:LEGION-209:start"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("claimed with the branch unfinished = %v, want %v", got, want)
+	}
+	if got, want := claimed(now.Add(2*time.Minute)), []string{"supervise:LEGION-208:start"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("claimed once the branch finished = %v, want the start that waited for it alone", got)
+	}
+}
+
 // A status write the outbox failed and pushed back is still unwritten, so it stays listed through its
 // backoff; a finished one is deleted and gone, and a row of another kind is never listed. The list
 // runs oldest first, the order ClaimDue writes an issue's statuses in, so a newer write queued
