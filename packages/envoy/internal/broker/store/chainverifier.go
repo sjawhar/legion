@@ -11,12 +11,13 @@ import (
 )
 
 // ChainVerifier builds the record.ChainVerifier that re-verifies records of one kind
-// ('agent_secret' for requests.Machine's grants, 'launcher_credential' for
+// (record.KindAgentSecret for requests.Machine's grants, record.KindLauncherCredential for
 // enroll.Service.AuthenticateLauncher) straight from this store: FetchRecord finds a record only
 // of that kind, so a record of one kind never backs the other's credential, and FetchDecisions
 // reads every terminal decision event the record carries, oldest first.
 func (s *Store) ChainVerifier(kind, audience string, skew time.Duration) *record.ChainVerifier {
 	return &record.ChainVerifier{
+		Kind:     kind,
 		Audience: audience,
 		Skew:     skew,
 		FetchRecord: func(ctx context.Context, recordID string) (string, time.Time, bool, error) {

@@ -18,6 +18,7 @@ below add only what a setting's one line cannot say.
 | Variable | Purpose |
 | --- | --- |
 | `DATABASE_URL` | Postgres connection string. Dispatch applies embedded migrations before serving. The pool size is fixed in code (`store.sharedPoolSize`), so a connection string carrying `pool_max_conns` is refused at startup; remove the parameter. |
+| `DISPATCH_AGENT_TOKEN` | One value, or several separated by whitespace, so the shared token can rotate with an overlap: write the new value followed by the old one, move every consumer to the new one, then write the new value alone. The first is the current value; the API and the document websocket accept every value, comparing a bearer with each in constant time. Whitespace at either end is ignored; startup refuses an empty entry (two whitespace characters in a row, a CR LF among them) or a repeated one, naming its position, never its value. A request that authenticates with a value after the first logs one WARN line, `dispatch: request authenticated with a previous shared agent token`, with `entry` (the value's position), `address` (the rightmost `X-Forwarded-For` entry, which is the load balancer's view of the caller, or the connection's own address without one), `user_agent` and `path`, at most once per address and User-Agent every 10 minutes, and never a token. Each field keeps its first 256 bytes, and the server remembers up to 10,000 callers; one past that is logged on each request. Callers that share an address and User-Agent share a line, so the log says whether a value on its way out is still in use, not who uses it. |
 | `NATS_NKEY_SEED_FILE`, `NATS_NKEY_SEED` | The NATS nkey user Dispatch connects as: a file holding the seed (trimmed; wins), or the seed. A set but unusable value refuses startup naming the variable and path; neither set connects without a credential. |
 | `DISPATCH_TEST_HOOKS` | Set to `1` to mount test-only routes: `POST /api/v1/events/_test/disconnect` closes every open SSE connection; `POST /api/v1/artifacts/_test/quiesce` closes every live document and waits for settlements; and `POST /api/v1/artifacts/{id}/_test/outside-schema` writes the crafted malformed document e2e uses. Leave unset in every real deployment. |
 | `DISPATCH_DEV_SIGNIN` | Set to `1` to mount `GET /auth/_dev/signin?login=<email>&next=<path>`, which signs any person in by the email it names, with no sign-in pool, so a browser or test harness can be signed in to a local instance. Boot refuses it unless identity is `cookie`, no `DISPATCH_SIGNIN_*` setting is set, the listen address is a loopback IP literal, the dashboard origin (`DISPATCH_SERVER_URL` or `dispatch.serverUrl`) names `127.0.0.1`, `[::1]` or `localhost`, every `DATABASE_URL` host is loopback or a unix socket, `DISPATCH_SIGNING_KEY` is unset, `ENVOY_ALLOW_REMOTE_NATS=1` is not set while NATS is on, `DISPATCH_AGENT_SECRETS_URL`, when set, names a loopback host, `ENVOY_URL` names a loopback host, and a loaded GitHub App private key comes from `DISPATCH_APP_PEM_B64` with `DISPATCH_GITHUB_API_BASE` naming a loopback host, never from the `pem` in `app.json`, where a developer keeps the real App's key: a signed-in session can have the App probe and import any repository it is installed on, and read GitHub through the App's proxy. That key must be a throwaway, as `packages/dispatch/e2e/run-server.sh` generates one, since every App call hands a signed App JWT to whatever listens at that base. While it is on every request must carry the dashboard origin as its `Host` (else `421 HOST_MISMATCH`). The session cookie is signed with a key generated for that process alone, so it is worthless on any other server; what a signed-in session writes to the database is not. It can mint a `dsp_` personal agent token, and its sign-out advances the person's session generation, and every server on the same database honours those rows. Give a dev-sign-in server a database no other server uses: the loopback check makes that likely, not certain, since a loopback address can be a tunnel to another machine's database or a database a second local server also runs on. Any value other than `1` or unset is refused. |
@@ -145,6 +146,50 @@ lowercase email:
   the person's membership with it at least hourly: a refresh the pool refuses,
   or one whose ID token no longer puts them in the group, ends every session
   they hold. Logout ends Dispatch's session only, not the pool's.
+
+  The refresh token is stored sealed (`people.refresh_token`): AES-256-GCM
+  under a key derived from `DISPATCH_SIGNING_KEY` with HKDF and a fixed purpose
+  label, bound to the person's email, in a format whose `v1:` prefix names its
+  version. A stored value that does not open (sealed under another signing key,
+  moved from another person's row, or in plain text) counts as no refresh token:
+  each read of it logs
+  `msg="dispatch: a stored refresh token did not open; the person signs in again"`
+  at WARN with the email and never the value, and writes nothing; the person's
+  request answers `401 NO_IDENTITY`, and their next sign-in replaces the value.
+
+  A refresh token stored in plain text (by the release before sealing, or by a
+  task of it still serving during a roll or after a rollback) can be redeemed by
+  anyone holding a copy of the row and the app client's secret until it expires,
+  and forgetting it does not end it, so Dispatch retires it: at every boot, after
+  migrations, it revokes each plain-text token at the pool's revocation endpoint
+  (the `revocation_endpoint` the issuer's discovery document names) as the app
+  client, then clears it and its confirmation while the row still holds that
+  value. A sign-in that replaces a plain-text token retires it the same way
+  first. A sealed value is never sent to the pool, and a redirect from the
+  revocation endpoint is a failure, never followed. A token the boot cannot
+  revoke stays in its row for the next boot and logs
+  `msg="dispatch: the sign-in pool did not revoke a refresh token stored in plain text"`
+  at ERROR with the email and the error (the pool's HTTP status, when it
+  answered), never the token. A sign-in that cannot revoke the token it
+  replaces goes on, since the person just signed in at the pool, and logs
+  `msg="dispatch: a sign-in replaced a refresh token the pool did not revoke; sign this person out at the pool"`
+  at ERROR with the email and the error: no later boot will see that token, so
+  signing the person out at the pool is the only way to end it. The boot's
+  retirement stops after 30 seconds, failing each token it has not revoked, and
+  the start goes on; it logs
+  `msg="dispatch: retired the refresh tokens stored in plain text" retired=<n> failed=<n>`.
+
+  A database backup therefore holds no refresh token the pool would accept only
+  once a boot of this release has retired every plain-text token, and then only
+  for the tokens still in `people` when it ran: those stop working when the
+  pool revokes them. A plain-text token `0068`'s release removed without
+  revoking (a sign-in that replaced it, or a logout that cleared it) stays
+  valid at the pool until it expires, in any backup that holds it (Database
+  migrations, below). Rotating `DISPATCH_SIGNING_KEY` leaves Dispatch unable
+  to open any stored refresh token, so each person signs in again, but it
+  revokes none at the pool: whoever holds a backup and the old key can still
+  redeem them until they expire, so after a key leak, sign each person out at
+  the pool.
 - `header:<Header-Name>` is for tests and local harnesses only, never for a
   production Dispatch deployment. It accepts a header value, lowercases it and
   records the person. The harness must set `DISPATCH_IDENTITY_HEADER_TRUSTED=1`;
@@ -303,6 +348,25 @@ expected for this release: no code reads those rows once it ships. The deployer 
 is `select count(*) from users` and that the report ends `census: REFUSED (1 reason)`, so 0068's
 count is its only refusal, and then rolls the release. Any other reason (a lock holder, a long
 transaction, a table over the limit) still stops the deploy.
+
+No migration retires the refresh tokens that `0068`'s release stored in plain text: every boot does
+(Identity, above), since a task of that release can write one during the roll, or after a
+rollback, once every migration has run, and a token written after a boot waits for the next one.
+So once the last task of the earlier release is gone, the deployer restarts Dispatch once and then
+checks three things: that boot logged `failed=0`; no
+`a sign-in replaced a refresh token the pool did not revoke` line has appeared since the roll began
+(each one names a person to sign out at the pool); and
+`select count(*) from people where refresh_token is not null and refresh_token not like 'v1:%'`
+answers `0`. A boot line with `failed=<n>` above zero names each token it could not revoke in an
+ERROR line; the next boot tries again, and signing that person out at the pool ends it at once. A
+non-zero count with no such line is a token a task of the earlier release wrote after the last
+boot, which another restart retires.
+
+The boot revokes only the plain-text tokens still in `people`. Under `0068`'s release a sign-in
+that replaced a person's token, or a logout that cleared it, removed it without revoking it, and
+it stays valid at the pool until it expires in any backup that holds it. So if any database backup
+was taken between `0068`'s deploy and the post-roll restart, either delete those backups or sign
+out at the pool everyone whose `people.signed_in_at` is after `0068`'s deploy.
 
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a

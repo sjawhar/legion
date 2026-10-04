@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # packages/envoy/scripts/dev-broker.sh
 #
-# AGENTC-393 Task 12: the local dev surface a human can drive without AWS or Dispatch. Boots
-# Postgres (dev-postgres.sh, made idempotent here since that script has no guard of its own),
-# builds the broker and its three clients (agent-secrets, agent-secrets-helper and
-# agent-secrets-devrelay), writes a scratch rules file (DEMO_READ_TOKEN, granted automatically, and
-# DEMO_API_KEY, which APPROVER_LOGIN approves, each for a box or host session APPROVER_LOGIN
-# operates) and a fake secrets file, then starts cmd/broker against them. Prints the exports a
-# second shell needs to drive the clients against it: devrelay stands in for Dispatch's
-# credential-request relay, sending the broker's UI routes the UI bearer and the approving human's
-# login, as Dispatch does when a signed-in human clicks Approve.
+# The local dev surface a human can drive without AWS or Dispatch. Boots Postgres
+# (dev-postgres.sh, made idempotent here since that script has no guard of its own), builds the
+# broker and its three clients (agent-secrets, agent-secrets-helper and agent-secrets-devrelay),
+# writes a fake secrets file standing in for Secrets Manager (DEMO_READ_TOKEN, tagged
+# owner=APPROVER_LOGIN tier=agent, so APPROVER_LOGIN's sessions get it without asking, and
+# DEMO_API_KEY, tagged tier=human, which APPROVER_LOGIN approves), then starts cmd/broker against
+# it. Prints the exports a second shell needs to drive the clients against it: devrelay stands in
+# for Dispatch's credential-request relay, sending the broker's UI routes the UI bearer and the
+# approving human's login, as Dispatch does when a signed-in human clicks Approve.
 #
 # Each invocation creates and drops its own isolated Postgres database (named from this run's own
 # WORK_DIR, below) and binds an OS-assigned ephemeral port (BROKER_LISTEN_ADDR=127.0.0.1:0), so two
@@ -17,7 +17,7 @@
 # requests or grants. The database lives in the shared dispatch-pg container, which this script
 # starts in Docker when it is not running, or, with DEV_BROKER_POSTGRES_URL set
 # (postgres://<user>@<host>:<port>/<database>, a role that may create databases), on that server
-# through psql, with no Docker at all. cmd/broker (AGENTC-833) binds before it reports anything and
+# through psql, with no Docker at all. cmd/broker binds before it reports anything and
 # logs the address it actually bound; this script waits for that line and reads the real port from
 # it, so a curl success can only ever mean this instance's own broker answered.
 #
@@ -55,8 +55,11 @@ POSTGRES_QUERY="${BASH_REMATCH[3]:-}"
 WORK_DIR="$(mktemp -d /tmp/agent-secrets-dev.XXXXXX)"
 BIN_DIR="$WORK_DIR/bin"
 BROKER_BIN="$BIN_DIR/broker"
-RULES_FILE="$WORK_DIR/agent-secret-rules.yaml"
-FAKE_SECRETS_FILE="$WORK_DIR/fake-secrets.env"
+FAKE_SECRETS_FILE="$WORK_DIR/fake-secrets.json"
+# The namespace and the agent-secrets key the fake secrets sit under; the key is an example ARN in
+# AWS's documentation account, and nothing here calls AWS.
+SECRETS_PREFIX="example/agent-secrets/"
+SECRETS_KMS_KEY_ARN="arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab"
 BROKER_LOG="$WORK_DIR/broker.log"
 OPERATOR_FILE="$WORK_DIR/operator"
 # This instance's own database, named from WORK_DIR's mktemp-generated random suffix (already
@@ -140,34 +143,18 @@ DISPLAY_URL="$(printf '%s' "$POSTGRES_URL" | sed -E 's#^(postgres(ql)?://[^:/@?]
 echo "dev-broker: building broker, agent-secrets, agent-secrets-helper and agent-secrets-devrelay..." >&2
 mkdir -p "$BIN_DIR"
 for cmd in broker agent-secrets agent-secrets-helper agent-secrets-devrelay; do
-  ( cd "$ENVOY_DIR" && GOTOOLCHAIN=go1.26.1 go build -o "$BIN_DIR/$cmd" "./cmd/$cmd" )
+  ( cd "$ENVOY_DIR" && GOTOOLCHAIN=go1.26.8 go build -o "$BIN_DIR/$cmd" "./cmd/$cmd" )
 done
 
-# --- Scratch rules file: one automatic secret, one approval-required secret. ---
-cat > "$RULES_FILE" <<EOF
-version: 1
-secrets:
-  DEMO_READ_TOKEN:
-    source: example/agent-secrets/DEMO_READ_TOKEN
-    owner: ${APPROVER_LOGIN}
-    delivery: inject
-    max_lifetime_seconds: 3600
-    requesters:
-      - {kind: box, operator: ${APPROVER_LOGIN}, decision: automatic}
-      - {kind: host, operator: ${APPROVER_LOGIN}, decision: automatic}
-  DEMO_API_KEY:
-    source: example/agent-secrets/DEMO_API_KEY
-    owner: ${APPROVER_LOGIN}
-    delivery: inject
-    max_lifetime_seconds: 3600
-    requesters:
-      - {kind: box, operator: ${APPROVER_LOGIN}, decision: approval, approver: operator}
-      - {kind: host, operator: ${APPROVER_LOGIN}, decision: approval, approver: operator}
-EOF
-
+# --- Fake Secrets Manager: one agent-tier secret its owner's sessions get without asking, one
+# human-tier secret its owner approves. ---
 cat > "$FAKE_SECRETS_FILE" <<EOF
-example/agent-secrets/DEMO_READ_TOKEN=demo-read-token-value
-example/agent-secrets/DEMO_API_KEY=demo-api-key-value
+{"secrets": [
+  {"name": "${SECRETS_PREFIX}demo-read-token", "kms_key_id": "${SECRETS_KMS_KEY_ARN}",
+   "tags": {"owner": "${APPROVER_LOGIN}", "tier": "agent"}, "value": "demo-read-token-value"},
+  {"name": "${SECRETS_PREFIX}demo-api-key", "kms_key_id": "${SECRETS_KMS_KEY_ARN}",
+   "tags": {"owner": "${APPROVER_LOGIN}", "tier": "human"}, "value": "demo-api-key-value"}
+]}
 EOF
 chmod 600 "$FAKE_SECRETS_FILE"
 echo "$APPROVER_LOGIN" >"$OPERATOR_FILE"
@@ -181,8 +168,10 @@ echo "dev-broker: starting broker..." >&2
 BROKER_DATABASE_URL="$POSTGRES_URL" \
 BROKER_PUBLIC_URL="$PUBLIC_URL" \
 BROKER_UI_TOKEN="$UI_TOKEN" \
-BROKER_RULES_FILE="$RULES_FILE" \
+BROKER_SECRETS_PREFIX="$SECRETS_PREFIX" \
+BROKER_SECRETS_KMS_KEY_ARN="$SECRETS_KMS_KEY_ARN" \
 BROKER_FAKE_SECRETS_FILE="$FAKE_SECRETS_FILE" \
+BROKER_MAX_GRANT_SECONDS=3600 \
 BROKER_LISTEN_ADDR="$LISTEN_ADDR" \
 "$BROKER_BIN" > >(tee -a "$BROKER_LOG" >&2) 2>&1 &
 BROKER_PID=$!
@@ -197,7 +186,7 @@ die_if_broker_exited() {
   fi
 }
 
-# --- Wait for the broker's own "broker listening" log line (AGENTC-833): only once Listen has
+# --- Wait for the broker's own "broker listening" log line: only once Listen has
 # actually succeeded does the broker report an address, so this can only ever name this
 # instance's own listener, never a different, already-running one. ---
 BOUND_ADDR=""
@@ -247,13 +236,13 @@ dev-broker: ready.
   export PATH=$BIN_DIR:\$PATH
 
   binaries:            $BIN_DIR  (broker, agent-secrets, agent-secrets-helper, agent-secrets-devrelay)
-  fake secrets file:   $FAKE_SECRETS_FILE  (source -> value, for confirming a released grant)
-  rules file:          $RULES_FILE
+  fake secrets file:   $FAKE_SECRETS_FILE  (each secret's tags and value, for confirming a released grant)
   approver login:      $APPROVER_LOGIN (devrelay approve/deny --login \$AGENT_SECRETS_APPROVER decides as this human)
   database:            $DISPLAY_URL  (this instance's own; created and dropped by this script)
 
-  One automatic secret (DEMO_READ_TOKEN) and one approval-required secret (DEMO_API_KEY,
-  approver: $APPROVER_LOGIN) are configured for a box or host session $APPROVER_LOGIN operates.
+  One agent-tier secret (DEMO_READ_TOKEN, granted without asking) and one human-tier secret
+  (DEMO_API_KEY, approver: $APPROVER_LOGIN), both owned by $APPROVER_LOGIN, whose box or host
+  sessions ask for them.
   Drive it with agent-secrets, agent-secrets-helper and agent-secrets-devrelay in another shell;
   press Ctrl-C here to stop the broker.
 EOF

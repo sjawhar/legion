@@ -41,29 +41,25 @@ Verifying LEGION-46 from the repository root with the two commands the root `AGE
   A green exit that verified nothing.
 
 Root cause: `bunx <bin>` uses the package installed at the current directory when one provides
-that bin, and otherwise fetches from npm by name. The repository root's `package.json` has no
-`typescript` or `@biomejs/biome` dependency (they are `packages/daemon` devDependencies, and Bun's
-workspace install left no `node_modules/.bin` at the root), so from the root both names resolve
-to the registry: `tsc` through `bunx`'s well-known-bin alias to latest `typescript`, `biome` to
+that bin, and otherwise fetches from npm by name. The repository root's `package.json` then had
+no `typescript` or `@biomejs/biome` dependency (both were `packages/daemon` devDependencies, and
+Bun's workspace install left no `node_modules/.bin` at the root), so from the root both names
+resolved to the registry: `tsc` through `bunx`'s well-known-bin alias to latest `typescript`, `biome` to
 the squatting `biome` package. `Resolving dependencies … Saved lockfile` in the output is the
 tell — that lockfile is `bunx`'s own cache, not the repository's `bun.lock`, so `jj status`
 shows nothing.
 
 ## The rule
 
-Run lint and typecheck **from `packages/daemon`**, which is what CI does
-(`working-directory: packages/daemon` in `.github/workflows/pr-and-main.yaml`) and what the
-package scripts encode (`bun run lint`, `bun run typecheck`). Equivalent from anywhere:
-
-```sh
-cd -- "$LEGION_WORKSPACE/packages/daemon" && node_modules/.bin/tsc --noEmit
-cd -- "$LEGION_WORKSPACE" && packages/daemon/node_modules/.bin/biome check <files>
-```
+The root `package.json` pins `@biomejs/biome` and `typescript` as devDependencies, so after
+`bun install`, `bunx biome` and `bunx tsc` resolve to the pinned tools from the root or from any
+package directory. CI's required `lint` job runs `bunx biome check .` from the root. A package's
+`bun run lint` checks only the paths its recipe names.
 
 Before trusting either tool's verdict, confirm the version is the pinned one
-(`node_modules/.bin/tsc --version` → 5.9.x; `node_modules/.bin/biome --version` → 2.4.x). Any
-`Resolving dependencies` line before a lint or typecheck means the tool was just downloaded,
-which means it is not the one CI runs.
+(`bunx tsc --version` → 5.9.x; `bunx biome --version` → 2.4.x). Any `Resolving dependencies`
+line before a lint or typecheck means the tool was just downloaded, which means it is not the one
+CI runs.
 
 ## Why it matters for a handoff
 

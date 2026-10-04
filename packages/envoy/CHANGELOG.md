@@ -4,6 +4,7 @@
 
 ### Added
 
+- `DISPATCH_AGENT_TOKEN` takes several values separated by whitespace, the first the current one, so the shared agent token can rotate with an overlap: the HTTP API and the document websocket accept every value, comparing a bearer with each in constant time. Startup refuses an empty entry (two whitespace characters in a row) or a repeated one, naming its position and never its value; one value behaves as before. A request that authenticates with a value after the first logs `dispatch: request authenticated with a previous shared agent token` at WARN, with the value's position, the rightmost `X-Forwarded-For` address (the connection's own without one), the User-Agent and the path, at most once per address and User-Agent every 10 minutes (LEGION-538).
 - `envoy-dispatch settings` prints every Dispatch setting the server and its subcommands read, one row each with its `_FILE` form, default, whether it is required and a one-line description, from one table (`cmd/dispatch/settings.go`) that is now the only place Dispatch's own code reads its environment; the docs site's Dispatch configuration reference is generated from it. The libraries Dispatch links still read their own variables (`HOME`, libpq's `PG*`, Go's proxy, certificate and runtime variables), which the table does not list. Every setting resolves as before, the `envoy.json` overrides and `_FILE` forms included; the readers that used to call `os.Getenv` themselves (the dashboard directory, the GitHub App credentials, the signing key and insecure-cookie flag, the `envoy.json` overrides, the Envoy listener token, and NATS's reach and nkey) are handed their value from the table.
 - `envoy-dispatch routes` prints the route table `GET /api/v1` serves, read without a database or a listener; the docs site's Dispatch HTTP API reference is generated from it.
 - `envoy-dispatch census`: the pre-deploy census of the migrations a database has not recorded (the runner's own rule), for a deployment to run before it rolls the service. It prints, for each pending migration, the tables it locks above ACCESS SHARE with size, row count and the sessions holding locks on them (pid, role, application, state and transaction age, "not visible" where Postgres hides one, or "autovacuum worker"; never query text), the transactions open longer than a minute or of an age it cannot see, and the count the migration's own `<version>_<name>.census.sql` answers. Those tables are the ones its statements name (an aliased `update` and a foreign key's referenced table among them; none in a comment, a string literal or the body of a function the migration defines), the table behind an index it drops or alters, and every table a foreign key reaches from rows it writes (a cascade, or a check that a row is still referenced), read from `pg_constraint` and from the keys earlier pending migrations add, inside a `DO` block too, and checked for holders and readability but not counted. It refuses (exit 1) a census that counts rows; a table a migration names above 1 GiB, which it does not count; a lock on a touched table held by a transaction older than a minute, or by one whose age Postgres hides from the census's role (granting that role `pg_read_all_stats` lets it read the age) or does not record (`track_activities` off), but not by an autovacuum, which Postgres cancels for the migration, unless it is anti-wraparound, or may be (its activity hidden or untracked, its table past its freeze age), or `deadlock_timeout` is not shorter than the lock timeout; a touched table it cannot read within the five-second lock timeout or the statement timeout; a census that fails, a name the database lacks included, even behind an earlier pending migration that may create it; and a database that records no version yet holds tables. A fresh database, one recording no version and holding no table, passes with `census: fresh database, nothing to check`. A failure names the file and the SQLSTATE, and Postgres's message only when it points into the census's own text, so no row value reaches a log. The census exits 2 when it cannot be taken (a connection whose `search_path` names no schema that exists among the causes), and writes nothing: one read-only transaction, the census statement sent through the extended protocol whatever the connection string asks. `pgmigrate.Load` refuses a census that is not one select, that holds a Unicode escape (`U&'…'`, `U&"…"`), or that names `pg_terminate_backend`, `pg_cancel_backend`, `pg_sleep`, an advisory-lock function (`pg_try_advisory_*` included) or a function that runs a query given as text (`query_to_xml` and its kin, `ts_stat`, `ts_rewrite`), bare or quoted and in any case, anywhere outside its comments and string literals, which it finds as Postgres 16's lexer does; the census runs with `standard_conforming_strings` on, so Postgres reads its literals the same way. Every migration from `censusRequiredFrom` (56, `internal/dispatch/store/store_test.go`) declares a census; 0053, 0054 and 0055 carry worked examples. Each store's tests hold the census's reading of every migration to the locks it really takes, run every shipped census at the schema just before its migration, and require a census that reads what a migration from `censusRequiredFrom` on creates, renames or gives a new type to name that migration, since a release carrying both refuses every deploy. An unknown `envoy-dispatch` subcommand now exits 2 instead of serving, which migrated the database (LEGION-459).
@@ -84,6 +85,17 @@
 
 ### Changed
 
+- Event-log payloads served by `GET /api/v1/issues/{key}/events`, `GET /api/v1/artifacts/{id}/events`
+  and the replay from `GET /api/v1/events` keep their stored numbers and PostgreSQL `jsonb` object
+  order: `9007199254740993` stays that integer, `1.00` keeps its trailing zeros, and object keys come
+  shorter first and, for keys of one length, in byte order. The JSON is compact, and Go's encoder
+  still writes `<`, `>`, `&`, U+2028 and U+2029 inside strings as `\u` escapes, as it did before.
+  Six ask payloads are decoded to add read-time fields and come back in Go's sorted-key, `float64`
+  form: `ask.opened`, `ask.anchor_refreshed`, `ask.answered`, `ask.resolved`, `ask.edited` and
+  `ask.handed_back`; `ask.follower_added` and `ask.follower_removed` keep the stored order. A live
+  event on `GET /api/v1/events` keeps its producer's field order. The dashboard, the agent Dispatch
+  tools and the Legion daemon read named fields from these payloads, and none compares payload bytes
+  or relies on Go's map ordering or `float64` rounding.
 - People sign in to Dispatch with Google Workspace through the shared sign-in pool (OpenID
   Connect authorization code against `DISPATCH_SIGNIN_ISSUER`, with `DISPATCH_SIGNIN_CLIENT_ID`,
   `DISPATCH_SIGNIN_CLIENT_SECRET` and `DISPATCH_SIGNIN_GROUP`, all four required by cookie
@@ -100,6 +112,30 @@
   only a pull request, an issue or a commit's check runs. `DISPATCH_ALLOWED_LOGINS` and
   `DISPATCH_APP_CLIENT_SECRET` are removed and refused at boot; GitHub OAuth sign-in, the per-user
   GitHub token table (`users`, dropped by `0068`) and the GraphQL proxy are gone.
+- Dispatch stores each person's sign-in pool refresh token sealed under a key derived from
+  `DISPATCH_SIGNING_KEY` (`people.refresh_token`, a `v1:` format; `cmd/dispatch/README.md`,
+  Identity). A stored value that does not open counts as no refresh token: each read logs
+  `dispatch: a stored refresh token did not open; the person signs in again` at WARN without the
+  value, and the person signs in again. Every boot retires each refresh token stored in plain
+  text, by `0068`'s release or by one of its tasks during a roll or after a rollback: it revokes
+  the token at the pool's discovered `revocation_endpoint`, then clears it; a sign-in that replaces
+  one retires it first. A token the boot cannot revoke stays for the next boot and is logged at
+  ERROR with the email and the error, never the token; a sign-in that cannot revoke the token it
+  replaces goes on and logs its own ERROR line, `dispatch: a sign-in replaced a refresh token the
+  pool did not revoke; sign this person out at the pool`. A redirect from the revocation endpoint
+  is a failure, never followed. The boot logs how many it retired and how many failed, and stops
+  after 30 seconds without holding up the start. A database backup holds no refresh token the
+  pool would accept only once a boot of this release has retired every plain-text token, and then
+  only for the tokens still in `people` when it ran: one `0068`'s release removed without revoking
+  (a sign-in that replaced it, or a logout) stays valid at the pool in any backup that holds it,
+  so delete every backup taken between `0068`'s deploy and the post-roll restart, or sign out at
+  the pool everyone whose `people.signed_in_at` is after `0068`'s deploy. After the last
+  earlier-release task is gone, restart Dispatch once, then check that boot logged `failed=0`, no
+  sign-in-replaced line appeared, and
+  `select count(*) from people where refresh_token is not null and refresh_token not like 'v1:%'`
+  answers `0` (`cmd/dispatch/README.md`). Rotating `DISPATCH_SIGNING_KEY` leaves Dispatch unable
+  to open any stored refresh token, so everyone signs in again, but revokes none at the pool:
+  after a key leak, sign people out at the pool.
 - A blank approval-request `summary` is refused (`400 SUMMARY_INPUT`) with text that asks for what
   the human is approving, rather than for what the version proposes that the human has not agreed
   to, and the advice in `409 APPROVAL_WAITS_ON_HUMAN` and in an approval ask's `409 ASK_KIND_FIXED`
@@ -221,6 +257,7 @@
 - A Markdown document now nests at most 100 blocks, and a document tree with a node more than 1,000 levels below the document, or an attribute value nesting more than 100 arrays and objects, is outside the Proof schema (LEGION-465). The bounds sit where every read serves the tree: past about 5,000 levels the document token is JSON that `encoding/json` will not write from Go 1.27 or read in any version, and `GET /blocks`, which hashes each block's subtree apart, does work growing with the square of the depth. A live tree past either tree bound is treated as any other tree outside the schema: settlement writes no version, its reads and edits answer `409 DOC_SCHEMA` naming the repair, the document websocket refuses it, and an upload of replacement markdown repairs it (LEGION-469). A textblock's inline markdown nests at most 100 marks inside one another - emphasis, strong, strikethrough, links, images and code - and deeper content is refused naming the line. An accepted suggestion whose own markdown nests within 100 blocks but lands deep enough that the document would nest past them is refused as `400 INVALID_OP` on `replace_with`, naming how many blocks the result nests (LEGION-465).
 
 ### Fixed
+- A document's stored update log kept every byte any write had inserted, and every cold load of it built all of it: Dispatch merged the stored updates whole, and a merge keeps the content of deleted items. Five hundred 2,000-character replies to one anchored comment, each projecting the thread's margin record again, left 257 MB stored under a 3 KB document, and a cold one-word edit of it then took 1,842 MiB, past the 1,024 MiB task. A load now applies the stored updates one at a time to a document that collects garbage and returns what it holds, so it costs the live document and one update; and compaction, which runs as a room closes, as the server shuts down and daily, folds the whole log into that state rather than keeping the newest 500 updates beside a merge of the rest. An update a load's document parks for a dependency the log lacks is merged back into that state. A log the fold cannot apply, or a state that does not read back as the document that made it, is not used: the load merges the stored updates whole as before, and compaction leaves them as stored. After compaction, `doc_updates` and any backup of it hold no text a write deleted, so text deleted before a version captured it is gone (Sami's decision, LEGION-496). `doc_updates` is snapshotted once, and the snapshot kept 90 days, right before the first deploy that carries this.
 - A document edit that repairs an ask a browser left unreadable now reports it in
   `decision_blocks_added`, matching the open ask its next settlement creates. An edit keeps that
   count as count-only advice when the bounded issue-advice query fails (LEGION-470).

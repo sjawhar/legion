@@ -41,7 +41,7 @@ runtime's live proof.
 
 ```bash
 bun install                   # Setup
-bunx biome check <package>/   # Lint (the root pins @biomejs/biome so bunx resolves the real Biome; each package's `bun run lint` is the CI recipe)
+bunx biome check <package>/   # Lint (the root pins @biomejs/biome so bunx resolves the real Biome; CI's required `lint` job runs `bunx biome check .`, and a package's `bun run lint` checks only the paths its recipe names)
 bunx tsc --noEmit             # Type check
 bun test                      # Test
 ```
