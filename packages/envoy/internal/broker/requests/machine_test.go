@@ -454,6 +454,45 @@ func (d abandoningDescriber) DescribeSecret(ctx context.Context, _ *secretsmanag
 	return nil, fmt.Errorf("operation error Secrets Manager: DescribeSecret, %w", ctx.Err())
 }
 
+// TestAnOrdinaryRereadFailureRaisesThePolicyAlarm pins the other half of that rule: a reread
+// Secrets Manager itself fails, while the request is still live, logs LoadFailedMessage once,
+// naming the requested secret, and the name stays unknown with no request written.
+func TestAnOrdinaryRereadFailureRaisesThePolicyAlarm(t *testing.T) {
+	m, enr, key, _ := newFixture(t)
+	loader := policytest.Loader(fixtureStore(m), fixtureService)
+	loader.Describer = failingDescriber{err: errors.New("throttled")}
+	cur, err := policy.NewCurrent(t.Context(), loader, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Policy = cur
+	fixtureStore(m).Put(policytest.Secret("BRAND_NEW_KEY", fixtureOperator, policy.TierAgent, "v1"))
+	logged := policytest.CaptureLog(t)
+	if _, err := m.Create(context.Background(), enr, signRequest(t, m, key, "need it", "BRAND_NEW_KEY"), ""); !errors.Is(err, policy.ErrUnknownSecret) {
+		t.Fatalf("Create whose reread Secrets Manager failed = %v; want policy.ErrUnknownSecret", err)
+	}
+	var alarms []string
+	for _, line := range strings.Split(logged.String(), "\n") {
+		if strings.Contains(line, policy.LoadFailedMessage) {
+			alarms = append(alarms, line)
+		}
+	}
+	if len(alarms) != 1 || !strings.Contains(alarms[0], "name=BRAND_NEW_KEY") {
+		t.Fatalf("alarm lines = %q; want exactly one naming BRAND_NEW_KEY\n%s", alarms, logged.String())
+	}
+	var written int
+	if err := m.Store.Pool.QueryRow(context.Background(), `select count(*) from requests where enrollment_id=$1`, enr).Scan(&written); err != nil || written != 0 {
+		t.Fatalf("requests rows for the enrollment = %d, %v; want 0", written, err)
+	}
+}
+
+// failingDescriber is a Secrets Manager that answers every DescribeSecret with err.
+type failingDescriber struct{ err error }
+
+func (d failingDescriber) DescribeSecret(context.Context, *secretsmanager.DescribeSecretInput, ...func(*secretsmanager.Options)) (*secretsmanager.DescribeSecretOutput, error) {
+	return nil, d.err
+}
+
 func TestCoalescesIdenticalPendingAndReturnsTheFirstRecordID(t *testing.T) {
 	m, enr, key, _ := newFixture(t)
 	ctx := context.Background()
