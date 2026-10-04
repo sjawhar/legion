@@ -103,9 +103,9 @@ func TestComposeOrdersSharedRolePartsBeforeTheGoDaemonParts(t *testing.T) {
 }
 
 // The planner this daemon composes runs the gap analyst before it drafts and the plan reviewer
-// after (LEGION-421). Only the shared headless residue dispatches them: the core is also composed
-// with the interactive fragment, whose subagent dispatches nothing, and the Go daemon's own parts
-// leave the checks to the shared text.
+// after (LEGION-421). Only the shared headless residue names them: the core is also composed with
+// the interactive fragment, whose session no load probe checks a named agent for, and the Go
+// daemon's own parts leave the checks to the shared text.
 func TestTheComposedPlannerDispatchesItsPlanChecksFromTheHeadlessResidue(t *testing.T) {
 	stateDir := t.TempDir()
 	composer, err := New(stateDir)

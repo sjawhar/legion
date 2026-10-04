@@ -145,7 +145,9 @@
   identity and claims no role, so nothing it does clashes with its parent's claim. The architect
   keeps its `edit`, `write`, `apply_patch` and general `bash` refusals and the merger its `edit`,
   `write` and `apply_patch` refusals. Both architect role prompts say an architect may dispatch
-  subagents, for example to measure or investigate before the design gate opens.
+  subagents, for example to measure or investigate before the design gate opens, and the
+  interactive mechanics fragment no longer tells a coordinator's subagent to dispatch none of its
+  own.
 
 ### Added
 
