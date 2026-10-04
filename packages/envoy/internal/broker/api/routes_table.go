@@ -107,6 +107,14 @@ func routes() []apiRoute {
 		{http.MethodPost, "/v1/credential-requests/{record}/deny", uiAuth((*server).denyRecord)},
 		// Find a pending machine login by the confirmation code its machine shows.
 		{http.MethodPost, "/v1/machine-logins/lookup", uiAuth((*server).lookupMachineLogin)},
+		// List the machine logins the named person approved, their own machines' and any
+		// service's, such as the Legion daemon's, that are not revoked and are unexpired or expired
+		// with a session still running.
+		{http.MethodGet, "/v1/launcher-credentials", uiAuth((*server).listLauncherCredentials)},
+		// End a machine login, expired or not, as the person who approved it: its launcher proofs
+		// stop authenticating and every session it enrolled, pods included, ends with its grants and
+		// pending requests.
+		{http.MethodPost, "/v1/launcher-credentials/{id}/revoke-by-approver", uiAuth((*server).revokeLauncherCredential)},
 		// List the live grants of the named person's sessions, automatic or approved, and those the
 		// person approved.
 		{http.MethodGet, "/v1/grants", uiAuth((*server).listGrantsForApprover)},

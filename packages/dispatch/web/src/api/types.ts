@@ -216,3 +216,22 @@ export type CredentialGrant = AutomaticCredentialGrant | ApprovedCredentialGrant
 export interface CredentialGrantsResponse {
   grants: CredentialGrant[];
 }
+
+/** One of the machine logins the viewer approved on `GET /api/v1/machine-logins`: the launcher
+ *  credential it minted, for one of the viewer's machines or for a service, not revoked, and
+ *  either unexpired or expired with a session it started still running. */
+export interface MachineLogin {
+  credential_id: string;
+  host: string;
+  /** The service a service's login is for (`legion-daemon`), whose sessions are its worker pods;
+   *  null for the viewer's own machine. */
+  service: string | null;
+  issued_at: string;
+  expires_at: string;
+  /** True once `expires_at` has passed: the login starts no more sessions, but sessions it
+   *  started renew with their own keys and still run until they end or it is revoked. */
+  expired: boolean;
+}
+export interface MachineLoginsResponse {
+  credentials: MachineLogin[];
+}

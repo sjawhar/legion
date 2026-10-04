@@ -1658,8 +1658,9 @@ runtime, requests grants, polls a pending decision to completion, and either pri
 state (`self`, `status --json`) or `syscall.Exec`s a command with the granted values injected into
 its environment. The broker holds no Dispatch credential and opens no Dispatch ask anywhere. Every
 human decision — approving or denying a secret request, approving or denying a machine login,
-revoking a grant — reaches the broker's UI routes from Dispatch's server, carrying the UI bearer
-and the deciding person's Dispatch login, their email, in the body's `approver` field. The bearer
+revoking a grant, ending a machine login — reaches the broker's UI routes from Dispatch's server,
+carrying the UI bearer and the deciding person's Dispatch login, their email, in the body's
+`approver` field. The bearer
 vouches for that login: Dispatch fills it from its own signed-in session, never from the browser,
 and the broker checks it against the record's approver and records it on the decision event. The
 UI bearer is therefore an approval credential, and keeping it and Dispatch's identity closed to
@@ -1857,16 +1858,16 @@ literal that is not
 a documented `exit*` constant or another such function's result. The CLI reference is the built
 binaries' own `--help`, so every form must answer `-h` with exit 0.
 
-`internal/broker/api/routes_table.go`'s `routes()` is the one list of the broker's 19 HTTP routes —
+`internal/broker/api/routes_table.go`'s `routes()` is the one list of the broker's 21 HTTP routes —
 a new route is a new row there, never a bare `mux.HandleFunc` — and its own comment says the
 contract for every row is the broker's design overview. Each row's handler is
 wrapped by the adapter for its authentication (`public`, `launcherAuth`, `sessionAuth`, `uiAuth`),
 which fixes both the credential `server.authenticate` checks and the caller the handler receives (a
 launcher `enroll.Credential`, an enrollment id, or nothing at all for a UI route — the UI bearer
 proves the caller is Dispatch, so every UI handler takes its subject from the path or body: a
-decision or a revoke names the deciding human in `approver`, which Dispatch filled from its own
-session, and an empty one is `400 APPROVER_REQUIRED`), so a handler cannot be wired to the wrong
-kind of caller. A bad
+decision or a revoke names the deciding human in `approver`, and a list the person it lists for in
+`?approver=`, which Dispatch filled from its own session; an empty one is `400 APPROVER_REQUIRED`),
+so a handler cannot be wired to the wrong kind of caller. A bad
 credential is a 401 (`LAUNCHER_INVALID`, `PROOF_INVALID`, or `UI_INVALID`); a store that cannot
 answer while authenticating is a 503 naming it. Every 500 is logged with its cause
 (`writeInternal`), every JSON body is capped at 1 MiB with unknown fields refused (`readJSON`),
@@ -2042,6 +2043,41 @@ poll, `GET /v1/launcher-credentials/{pending}`) answers only the record's state 
 the minted credential's id and `expires_at` — no token is ever returned; the credential is usable
 only with proofs signed by the key the request object embedded. The broker has no renewal route:
 past `expires_at` the machine logs in again, with a new key, a new code and a new human approval.
+
+`GET /v1/launcher-credentials?approver=<email>` lists the machine logins a person approved that
+can still reach a secret (id, host, service, issued, expires, `expired`): every unrevoked one that
+is unexpired or still has a live enrollment, live as `Lookup` means it (not revoked, its lease not
+lapsed). A login's enrollments outlive its expiry, since `Renew` and `Lookup` never read the
+credential (each session renews with its own key), so an expired login stays listed,
+`expired: true`, until its last enrollment ends or its lease lapses, swept or not, and revoking
+every listed login ends every session the person's machines started.
+`POST /v1/launcher-credentials/{id}/revoke-by-approver` `{approver}` ends one, expired or not
+(`enroll.Service.RevokeCredential`). Both key on the approver of the `launcher_credential` record
+the credential was minted from (`credential_requests.approver`, joined through
+`launcher_credentials.record_id` and required to be of kind `launcher_credential`), never on the
+credential's `operator`: a service's credential (the Legion daemon's, `service` set) has no operator
+(`authorized` needs it null to enroll pods), and the person who approved it is the one accountable
+for it. For a person's own machine the two are the same person (`machine.Service.ApplyDecision`
+mints the operator from the approving login), so one rule covers both. Anyone but that approver is
+`403 NOT_APPROVER`; an unknown id, like a credential minted from no `launcher_credential` record
+(only `ApplyDecision` mints one, always from its record), is `404 NOT_FOUND`.
+In one transaction it sets the credential's `revoked_at`, so its launcher proofs stop
+authenticating, ends every enrollment the credential made through `endEnrollment` (a person's host
+sessions and boxes, or every pod a service's login enrolled: grants revoked, pending requests
+cancelled, actor `human:<email>`, an `enrollment.revoked` row each) and writes one
+`launcher_credential.revoked` audit row naming them, the host and any service; revoking it again
+changes nothing. It locks the credential's row before the enrollments', and `Create` holds that row
+`for share` while it inserts, so an enrollment whose launcher proof was verified just before a revoke
+either commits first and is ended by it, or finds the credential revoked and is
+`401 LAUNCHER_INVALID`; the credential lock also makes two concurrent revokes write one
+`launcher_credential.revoked` row, and the enrollments' `for update` makes a revoke racing a
+launcher's own `Revoke` of one enrollment end it once. Nothing tells the machine: its helper's next
+renewal of a session is refused `PROOF_INVALID`, revoking that lapsed enrollment is refused
+`LAUNCHER_INVALID`, and the helper drops the credential as for any refusal; a helper with no live
+session learns it at its next enrollment, and the Legion daemon at its next pod enrollment or
+unenrollment, after which it starts a new
+machine login. Dispatch's machine-login page lists and revokes the signed-in person's through these
+two routes.
 
 `internal/broker/enroll.Service.AuthenticateLauncher` is `proof.Verifier`'s `LookupLauncher` hook: a
 launcher proof's `lid` claim resolves a live, unexpired `launcher_credentials` row and then

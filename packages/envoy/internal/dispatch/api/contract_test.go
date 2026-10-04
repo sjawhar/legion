@@ -335,55 +335,12 @@ func TestPendingListShowsCreatedRecordThroughDispatch(t *testing.T) {
 	}
 }
 
-// TestMachineLoginLookupAndApproveThroughDispatch drives the typed-code machine flow: a machine's
-// signed login request produces a code; Dispatch's lookup route resolves it to the record (ruling
-// 13's one selector); approving through Dispatch with the same code mints a launcher credential,
-// and without the code the broker refuses CODE_REQUIRED.
+// TestMachineLoginLookupAndApproveThroughDispatch drives the typed-code machine flow
+// (approveMachineLogin): a machine's signed login request produces a code; Dispatch's lookup route
+// resolves it to the record (ruling 13's one selector); approving through Dispatch with the same
+// code mints a launcher credential, and without the code the broker refuses CODE_REQUIRED.
 func TestMachineLoginLookupAndApproveThroughDispatch(t *testing.T) {
-	rig := newContractRig(t)
-	machineKey := contractSigningKey(t)
-	compact, err := record.Sign(machineKey, rig.BrokerURL,
-		[]record.AuthorizationDetail{{Type: "launcher_credential", Identifier: "contract-test-host"}}, "", contractApprover, time.Now())
-	if err != nil {
-		t.Fatalf("record.Sign: %v", err)
-	}
-	status, body := rig.brokerReq(t, http.MethodPost, "/v1/launcher-credentials", nil, map[string]any{"request": compact})
-	if status != http.StatusAccepted && status != http.StatusOK {
-		t.Fatalf("POST /v1/launcher-credentials = %d: %s", status, body)
-	}
-	created := struct {
-		Code string `json:"code"`
-	}{}
-	if err := json.Unmarshal(body, &created); err != nil || created.Code == "" {
-		t.Fatalf("decode machine login response: %v (body: %s)", err, body)
-	}
-
-	lookupResp := dispatchRequest(t, rig.Dispatch, http.MethodPost, "/api/v1/credential-requests/machine-lookup",
-		map[string]any{"code": created.Code}, contractApprover)
-	if lookupResp.Code != http.StatusOK {
-		t.Fatalf("machine-lookup = %d: %s", lookupResp.Code, lookupResp.Body.String())
-	}
-	looked := decodeBody[contractRecord](t, lookupResp)
-	if looked.Kind != "launcher_credential" || looked.State != "pending" {
-		t.Fatalf("machine-lookup = %+v, want a pending launcher_credential record", looked)
-	}
-
-	approvePath := "/api/v1/credential-requests/" + looked.RecordID + "/approve"
-	noCode := dispatchRequest(t, rig.Dispatch, http.MethodPost, approvePath, map[string]any{}, contractApprover)
-	if noCode.Code != http.StatusBadRequest || decodeBody[contractError](t, noCode).Code != "CODE_REQUIRED" {
-		t.Fatalf("machine approve without its code = %d %s, want 400 CODE_REQUIRED", noCode.Code, noCode.Body.String())
-	}
-	approveResp := dispatchRequest(t, rig.Dispatch, http.MethodPost, approvePath, map[string]any{"code": created.Code}, contractApprover)
-	if approveResp.Code != http.StatusOK {
-		t.Fatalf("machine approve = %d: %s", approveResp.Code, approveResp.Body.String())
-	}
-	approved := decodeBody[struct {
-		State        string  `json:"state"`
-		CredentialID *string `json:"credential_id"`
-	}](t, approveResp)
-	if approved.State != "approved" || approved.CredentialID == nil || *approved.CredentialID == "" {
-		t.Fatalf("machine approve response = %+v, want state=approved with a credential_id", approved)
-	}
+	newContractRig(t).approveMachineLogin(t, contractApprover, "", "contract-test-host")
 }
 
 // TestGrantsListAndRevokeByApproverThroughDispatch approves a request to mint a grant, lists it
@@ -571,6 +528,187 @@ func TestAnAutomaticGrantIsListedRevokedAndThenAsksItsOwner(t *testing.T) {
 	elsewhere := rig.request(t, rig.newSession(t, contractApprover), "", "AUTO_TOKEN")
 	if elsewhere.State != "granted" || elsewhere.GrantID == nil {
 		t.Fatalf("another session's request = %s, want an automatic grant", asJSON(t, elsewhere))
+	}
+}
+
+// approveMachineLogin logs a machine in as a person does: the machine posts its signed login,
+// naming approver to approve it, straight to the broker; approver looks its code up through
+// Dispatch (ruling 13's one selector), which answers the pending launcher_credential record; an
+// approval without the code is refused CODE_REQUIRED; and approver's approval with the same code
+// mints a launcher credential. service names the service a service's login is for (the Legion
+// daemon's is legion-daemon), "" for approver's own machine. It returns the launcher credential the
+// approval minted and the machine's key.
+func (rig *contractRig) approveMachineLogin(t *testing.T, approver, service, host string) (string, *ecdsa.PrivateKey) {
+	t.Helper()
+	machineKey := contractSigningKey(t)
+	compact, err := record.Sign(machineKey, rig.BrokerURL,
+		[]record.AuthorizationDetail{{Type: "launcher_credential", Identifier: host, Service: service}}, "", approver, time.Now())
+	if err != nil {
+		t.Fatalf("record.Sign: %v", err)
+	}
+	status, body := rig.brokerReq(t, http.MethodPost, "/v1/launcher-credentials", nil, map[string]any{"request": compact})
+	var created struct {
+		Code string `json:"code"`
+	}
+	if err := json.Unmarshal(body, &created); status != http.StatusAccepted || err != nil || created.Code == "" {
+		t.Fatalf("POST /v1/launcher-credentials = %d %s (%v), want a code", status, body, err)
+	}
+	lookupResp := dispatchRequest(t, rig.Dispatch, http.MethodPost, "/api/v1/credential-requests/machine-lookup",
+		map[string]any{"code": created.Code}, approver)
+	if lookupResp.Code != http.StatusOK {
+		t.Fatalf("machine-lookup = %d: %s", lookupResp.Code, lookupResp.Body.String())
+	}
+	looked := decodeBody[contractRecord](t, lookupResp)
+	if looked.Kind != "launcher_credential" || looked.State != "pending" {
+		t.Fatalf("machine-lookup = %+v, want a pending launcher_credential record", looked)
+	}
+	approvePath := "/api/v1/credential-requests/" + looked.RecordID + "/approve"
+	noCode := dispatchRequest(t, rig.Dispatch, http.MethodPost, approvePath, map[string]any{}, approver)
+	if noCode.Code != http.StatusBadRequest || decodeBody[contractError](t, noCode).Code != "CODE_REQUIRED" {
+		t.Fatalf("machine approve without its code = %d %s, want 400 CODE_REQUIRED", noCode.Code, noCode.Body.String())
+	}
+	approveResp := dispatchRequest(t, rig.Dispatch, http.MethodPost, approvePath, map[string]any{"code": created.Code}, approver)
+	approved := decodeBody[struct {
+		State        string  `json:"state"`
+		CredentialID *string `json:"credential_id"`
+	}](t, approveResp)
+	if approveResp.Code != http.StatusOK || approved.State != "approved" || approved.CredentialID == nil || *approved.CredentialID == "" {
+		t.Fatalf("approve the machine login = %d %s, want state=approved with a credential_id", approveResp.Code, approveResp.Body.String())
+	}
+	return *approved.CredentialID, machineKey
+}
+
+// enrollWithLauncher enrolls a box under credentialID straight on the broker, as the machine's
+// launcher does with a launcher proof signed by machineKey, and answers the status, body and box.
+func (rig *contractRig) enrollWithLauncher(t *testing.T, machineKey *ecdsa.PrivateKey, credentialID, runtimeID string) (int, []byte, contractSession) {
+	t.Helper()
+	key := contractSigningKey(t)
+	thumbprint, err := proof.Thumbprint(&key.PublicKey)
+	if err != nil {
+		t.Fatalf("thumbprint: %v", err)
+	}
+	p, err := proof.SignLauncher(machineKey, credentialID, http.MethodPost, rig.BrokerURL+"/v1/enrollments", time.Now())
+	if err != nil {
+		t.Fatalf("proof.SignLauncher: %v", err)
+	}
+	status, body := rig.brokerReq(t, http.MethodPost, "/v1/enrollments", map[string]string{"Proof": p},
+		map[string]any{"kind": "box", "runtime_id": runtimeID, "thumbprint": thumbprint})
+	var enrolled struct {
+		EnrollmentID string `json:"enrollment_id"`
+	}
+	_ = json.Unmarshal(body, &enrolled)
+	return status, body, contractSession{EnrollmentID: enrolled.EnrollmentID, Key: key}
+}
+
+// contractMachineLogin is one row of Dispatch's machine-login list.
+type contractMachineLogin struct {
+	CredentialID string    `json:"credential_id"`
+	Host         string    `json:"host"`
+	Service      *string   `json:"service"`
+	IssuedAt     time.Time `json:"issued_at"`
+	ExpiresAt    time.Time `json:"expires_at"`
+}
+
+// machineLoginsOf reads login's machine logins through Dispatch.
+func (rig *contractRig) machineLoginsOf(t *testing.T, login string) []contractMachineLogin {
+	t.Helper()
+	resp := dispatchRequest(t, rig.Dispatch, http.MethodGet, "/api/v1/machine-logins", nil, login)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("GET machine logins as %s = %d: %s", login, resp.Code, resp.Body.String())
+	}
+	return decodeBody[struct {
+		Credentials []contractMachineLogin `json:"credentials"`
+	}](t, resp).Credentials
+}
+
+// TestAPersonRevokesTheirMachineLoginThroughDispatch drives the machine-login page's routes against
+// the real broker: the person who approved their machine's login sees it listed, and nobody else
+// does; another person's revoke is refused whatever their browser's body names; the person's own
+// revoke ends it, and with it the session the machine enrolled, whose grant then releases nothing
+// and whose machine enrolls no one more.
+func TestAPersonRevokesTheirMachineLoginThroughDispatch(t *testing.T) {
+	rig := newContractRig(t)
+	credentialID, machineKey := rig.approveMachineLogin(t, contractApprover, "", "contract-test-host")
+	status, body, session := rig.enrollWithLauncher(t, machineKey, credentialID, "box-"+t.Name())
+	if status != http.StatusCreated {
+		t.Fatalf("enroll under the machine login = %d: %s", status, body)
+	}
+	auto := rig.request(t, session, "", "AUTO_TOKEN")
+	if auto.State != "granted" || auto.GrantID == nil {
+		t.Fatalf("request = %+v, want an automatic grant", auto)
+	}
+
+	if logins := rig.machineLoginsOf(t, contractApprover); len(logins) != 1 || logins[0].CredentialID != credentialID || logins[0].Host != "contract-test-host" || logins[0].Service != nil {
+		t.Fatalf("%s's machine logins = %+v, want the one approved for contract-test-host, no service", contractApprover, logins)
+	}
+	if logins := rig.machineLoginsOf(t, contractOther); len(logins) != 0 {
+		t.Fatalf("%s's machine logins = %+v, want none", contractOther, logins)
+	}
+
+	revokePath := "/api/v1/machine-logins/" + credentialID + "/revoke"
+	resp := dispatchRequest(t, rig.Dispatch, http.MethodPost, revokePath, map[string]any{"approver": contractApprover}, contractOther)
+	if resp.Code != http.StatusForbidden || decodeBody[contractError](t, resp).Code != "NOT_APPROVER" {
+		t.Fatalf("revoke as %s = %d %s, want 403 NOT_APPROVER", contractOther, resp.Code, resp.Body.String())
+	}
+	if status, released := rig.values(t, session, *auto.GrantID); status != http.StatusOK || released["AUTO_TOKEN"] != "auto-v1" {
+		t.Fatalf("values after the refused revoke = %d %v, want AUTO_TOKEN released", status, released)
+	}
+
+	resp = dispatchRequest(t, rig.Dispatch, http.MethodPost, revokePath, map[string]any{}, contractApprover)
+	if resp.Code != http.StatusOK || decodeBody[struct {
+		State string `json:"state"`
+	}](t, resp).State != "revoked" {
+		t.Fatalf("revoke as %s = %d %s, want 200 revoked", contractApprover, resp.Code, resp.Body.String())
+	}
+	if status, _ := rig.values(t, session, *auto.GrantID); status != http.StatusUnauthorized {
+		t.Fatalf("values after the revoke = %d, want 401: the session ended", status)
+	}
+	if status, body, _ := rig.enrollWithLauncher(t, machineKey, credentialID, "box-after-"+t.Name()); status != http.StatusUnauthorized || !strings.Contains(string(body), "LAUNCHER_INVALID") {
+		t.Fatalf("enroll after the revoke = %d %s, want 401 LAUNCHER_INVALID", status, body)
+	}
+	if logins := rig.machineLoginsOf(t, contractApprover); len(logins) != 0 {
+		t.Fatalf("%s's machine logins after the revoke = %+v, want none", contractApprover, logins)
+	}
+}
+
+// TestAServicesLoginIsListedAndRevokedByTheApproverAloneThroughDispatch: a service's machine
+// login (the Legion daemon's, which has no operator) is listed, named by its service, for the
+// person who approved it through Dispatch and for no one else; another person's revoke is refused
+// whatever their browser's body names, and leaves its launcher proofs working; the approver's revoke
+// ends it, after which its launcher proofs authenticate nothing.
+func TestAServicesLoginIsListedAndRevokedByTheApproverAloneThroughDispatch(t *testing.T) {
+	rig := newContractRig(t)
+	credentialID, machineKey := rig.approveMachineLogin(t, contractApprover, "legion-daemon", "cluster.example")
+
+	logins := rig.machineLoginsOf(t, contractApprover)
+	if len(logins) != 1 || logins[0].CredentialID != credentialID || logins[0].Host != "cluster.example" ||
+		logins[0].Service == nil || *logins[0].Service != "legion-daemon" {
+		t.Fatalf("%s's machine logins = %s, want legion-daemon's login on cluster.example", contractApprover, asJSON(t, logins))
+	}
+	if logins := rig.machineLoginsOf(t, contractOther); len(logins) != 0 {
+		t.Fatalf("%s's machine logins = %s, want none", contractOther, asJSON(t, logins))
+	}
+
+	revokePath := "/api/v1/machine-logins/" + credentialID + "/revoke"
+	resp := dispatchRequest(t, rig.Dispatch, http.MethodPost, revokePath, map[string]any{"approver": contractApprover}, contractOther)
+	if resp.Code != http.StatusForbidden || decodeBody[contractError](t, resp).Code != "NOT_APPROVER" {
+		t.Fatalf("revoke as %s = %d %s, want 403 NOT_APPROVER", contractOther, resp.Code, resp.Body.String())
+	}
+	// A service's credential enrolls pods only, so a box is refused; what matters is that its
+	// launcher proof still authenticates.
+	if status, body, _ := rig.enrollWithLauncher(t, machineKey, credentialID, "box-"+t.Name()); status != http.StatusForbidden || !strings.Contains(string(body), "OPERATOR_MISMATCH") {
+		t.Fatalf("enroll after the refused revoke = %d %s, want 403 OPERATOR_MISMATCH from a launcher that still authenticates", status, body)
+	}
+
+	resp = dispatchRequest(t, rig.Dispatch, http.MethodPost, revokePath, map[string]any{}, contractApprover)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("revoke as %s = %d %s, want 200", contractApprover, resp.Code, resp.Body.String())
+	}
+	if status, body, _ := rig.enrollWithLauncher(t, machineKey, credentialID, "box-after-"+t.Name()); status != http.StatusUnauthorized || !strings.Contains(string(body), "LAUNCHER_INVALID") {
+		t.Fatalf("enroll after the revoke = %d %s, want 401 LAUNCHER_INVALID", status, body)
+	}
+	if logins := rig.machineLoginsOf(t, contractApprover); len(logins) != 0 {
+		t.Fatalf("%s's machine logins after the revoke = %s, want none", contractApprover, asJSON(t, logins))
 	}
 }
 

@@ -848,9 +848,7 @@ func TestDecisionsTakeOnlyTheApproversLogin(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("deny = %d: %s", status, body)
 	}
-	denied := decode[struct {
-		State string `json:"state"`
-	}](t, body)
+	denied := decode[stateBody](t, body)
 	if denied.State != "denied" {
 		t.Fatalf("deny response = %+v, want state=denied", denied)
 	}
@@ -951,9 +949,7 @@ func TestCancelRequestThenCancelAgainIsTerminal(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("cancel = %d: %s", status, body)
 	}
-	cancelled := decode[struct {
-		State string `json:"state"`
-	}](t, body)
+	cancelled := decode[stateBody](t, body)
 	if cancelled.State != "cancelled" {
 		t.Fatalf("cancel response = %+v, want state=cancelled", cancelled)
 	}
@@ -990,9 +986,7 @@ func TestRevokeGrantBySession(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("session revoke = %d: %s", status, body)
 	}
-	revoked := decode[struct {
-		State string `json:"state"`
-	}](t, body)
+	revoked := decode[stateBody](t, body)
 	if revoked.State != "revoked" {
 		t.Fatalf("revoke response = %+v, want state=revoked", revoked)
 	}

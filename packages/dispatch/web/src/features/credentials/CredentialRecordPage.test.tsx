@@ -103,27 +103,40 @@ test("a request any signed-in person may decide says so and offers its buttons",
 });
 
 test("a machine-kind record renders the machine sentence, links to the machine page, and shows no Approve button", async () => {
-  const record = secretRecord({
-    identifiers: ["worker-7.example.com"],
-    kind: "launcher_credential",
-    reason: "",
-  });
-  const getCredentialRecord = spyOn(api, "getCredentialRecord").mockResolvedValue(record);
+  for (const { sentence, service } of [
+    {
+      sentence: "Approving lets worker-7.example.com start agent sessions as you.",
+      service: null,
+    },
+    {
+      sentence:
+        "Approving lets legion-daemon on worker-7.example.com start worker pods as legion-daemon, not as you: no secret of yours reaches its pods unless you approve the request for it.",
+      service: "legion-daemon",
+    },
+  ]) {
+    const record = secretRecord({
+      identifiers: ["worker-7.example.com"],
+      kind: "launcher_credential",
+      reason: "",
+      service,
+    });
+    const getCredentialRecord = spyOn(api, "getCredentialRecord").mockResolvedValue(record);
 
-  try {
-    renderPage();
+    try {
+      renderPage();
 
-    expect(
-      await screen.findByText("Approving lets worker-7.example.com start agent sessions as you.")
-    ).toBeDefined();
-    expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "Deny" })).toBeNull();
-    expect(
-      screen.getByRole("link", { name: "Enter the code shown on the machine" }).getAttribute("href")
-    ).toBe("/credentials/machine");
-  } finally {
-    cleanup();
-    getCredentialRecord.mockRestore();
+      expect(await screen.findByText(sentence)).toBeDefined();
+      expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "Deny" })).toBeNull();
+      expect(
+        screen
+          .getByRole("link", { name: "Enter the code shown on the machine" })
+          .getAttribute("href")
+      ).toBe("/credentials/machine");
+    } finally {
+      cleanup();
+      getCredentialRecord.mockRestore();
+    }
   }
 });
 
