@@ -1,5 +1,13 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- A Dispatch tool result's `images` (`dispatch_doc_read` of a picture, the pictures `dispatch_read`
+  shows) arrive as MCP image blocks after the JSON text, which leaves them out (LEGION-541). Channel
+  deliveries stay text: the notification channel carries text only.
+
 ## [0.6.4]
 
 ### Added

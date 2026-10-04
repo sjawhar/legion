@@ -36637,8 +36637,12 @@ function componentsArgument(z2) {
   }).describe("Attach the issue to architecture components. Attach the root before decomposing it; children inherit unless they choose.");
 }
 var SPEC_WRITING_POINTER = 'Write a spec as the "Writing a spec" section of skill://dispatch says.';
+function imagesArgument(z2, owner, cap) {
+  return z2.array(z2.string({ min: 1 }), { min: 1 }).describe(`Optional local picture files to show inline: PNG, JPEG, GIF or WebP (by their bytes, not their name), each at most 25 MiB. Each is uploaded to ${owner} and appended after a blank line as one ![<file name>](dispatch://\u2026@vN) line, in this order; those lines count toward ${cap}.`).optional();
+}
 var ASK_URGENCIES = ["low", "med", "high", "blocking"];
 var ASK_QUESTION_MAX = 800;
+var DISPATCH_BODY_MAX = 2000;
 var SEARCH_QUERY_MAX = 1000;
 var SEARCH_QUERY_HINT = "search with a short phrase of a few words, not a passage";
 var SEARCH_KIND_DEPTH = 100;
@@ -36738,7 +36742,7 @@ var dispatchToolSpecs = [
         }
       ]
     },
-    description: "Open a to-do or permission only a human can give, or a decision that has no document to " + "live in. A question about the design an issue's document records is not this tool: write " + "it into that document as a decision block (dispatch_doc_edit inserting an ask block at the " + "end of the section it concerns), at every phase, approved spec or not; the block reaches " + "the Inbox and its answer lands next to its context. Never give an ask an Approve option: a " + "document is approved through dispatch_request_approval. Do not use this tool for a status " + "update or discussion; use dispatch_message instead. " + ASK_QUESTION_CONTRACT + " " + ASK_OPTIONS_CONTRACT + " For an action only a human can perform, state what it changes and risks as constraints. " + "Anything that requires a human to do, including a credential or grant renewal, is an ask, " + "never a message. " + "Anchor a to-do about a document passage, thread reply_to/reply_to_ask, or cite a dispatch:// " + `reference \u2014 it must be answerable from its own text and anchor alone, never "see above". ` + `A quote anchor is pinned to its block. Question is at most ${ASK_QUESTION_MAX} characters ` + `and has at most 8 options. ${OWNER_REFERENCE}`,
+    description: "Open a to-do or permission only a human can give, or a decision that has no document to " + "live in. A question about the design an issue's document records is not this tool: write " + "it into that document as a decision block (dispatch_doc_edit inserting an ask block at the " + "end of the section it concerns), at every phase, approved spec or not; the block reaches " + "the Inbox and its answer lands next to its context. Never give an ask an Approve option: a " + "document is approved through dispatch_request_approval. Do not use this tool for a status " + "update or discussion; use dispatch_message instead. " + ASK_QUESTION_CONTRACT + " " + ASK_OPTIONS_CONTRACT + " For an action only a human can perform, state what it changes and risks as constraints. " + "Anything that requires a human to do, including a credential or grant renewal, is an ask, " + "never a message. " + "Anchor a to-do about a document passage, thread reply_to/reply_to_ask, or cite a dispatch:// " + `reference \u2014 it must be answerable from its own text and anchor alone, never "see above". ` + `A quote anchor is pinned to its block. Question is at most ${ASK_QUESTION_MAX} characters, ` + `the lines images appends included, and has at most 8 options. ${OWNER_REFERENCE}`,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE).optional(),
       project: z2.string().describe("Project key owning the document.").optional(),
@@ -36755,7 +36759,8 @@ var dispatchToolSpecs = [
         artifact: z2.string().describe("Artifact slug or id containing the quoted text."),
         quote: z2.string().describe("Exact text the decision concerns."),
         occurrence: z2.number({ int: true, min: 0 }).describe("Zero-based occurrence of the quote.").optional()
-      }).describe("Optional document location for the question.").optional()
+      }).describe("Optional document location for the question.").optional(),
+      images: imagesArgument(z2, "the issue (or the project document's project)", `the ${ASK_QUESTION_MAX}-character question limit`)
     }),
     validation: documentOwnerValidation(true)
   },
@@ -36830,7 +36835,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_comment",
     example: { issue: "DSP-1", body: "Looks good." },
-    description: "Add review feedback to an issue or project document quote, or reply to a question asked with dispatch_ask. " + "Do not use it for an exact replacement; use " + `dispatch_suggest instead. A quote anchor is pinned to its block. Body is at most 2,000 characters. ${OWNER_REFERENCE}`,
+    description: "Add review feedback to an issue or project document quote, or reply to a question asked with dispatch_ask. " + "Do not use it for an exact replacement; use " + `dispatch_suggest instead. A quote anchor is pinned to its block. Body is at most 2,000 characters, the lines images appends included. ${OWNER_REFERENCE}`,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE).optional(),
       project: z2.string().describe("Project key owning the document.").optional(),
@@ -36838,10 +36843,11 @@ var dispatchToolSpecs = [
       ref: z2.string().describe("Optional dispatch:// issue or document reference.").optional(),
       quote: z2.string().describe("Optional exact quoted document text.").optional(),
       occurrence: z2.number({ int: true, min: 0 }).describe("Optional zero-based occurrence of quote.").optional(),
-      body: z2.string({ max: 2000 }).describe("Review comment, at most 2,000 characters."),
+      body: z2.string({ max: DISPATCH_BODY_MAX }).describe("Review comment, at most 2,000 characters."),
       reply_to: z2.string().describe("A comment id (uuid); replying to any comment in a thread continues that thread (an " + "ask's clarification thread included). To reply to an ask, use reply_to_ask with the " + "ask id instead.").optional(),
       reply_to_ask: z2.string().describe("Optional ask id to reply to, threading this comment under that question. Mutually " + "exclusive with reply_to.").optional(),
-      turn: z2.enum(["agent", "human"]).describe("Only with reply_to_ask: who holds the turn after this reply. agent: a progress note - " + "you keep the turn and the ask stays 'Waiting on agents' for the human; human (default): " + "you need the human to act - the ask returns to 'Waiting on you'.").optional()
+      turn: z2.enum(["agent", "human"]).describe("Only with reply_to_ask: who holds the turn after this reply. agent: a progress note - " + "you keep the turn and the ask stays 'Waiting on agents' for the human; human (default): " + "you need the human to act - the ask returns to 'Waiting on you'.").optional(),
+      images: imagesArgument(z2, "the issue (or the project document's project)", "the 2,000-character body limit")
     }),
     validation: commentValidation
   },
@@ -36869,11 +36875,12 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_message",
     example: { issue: "DSP-1", body: "Implementation started." },
-    description: "Post a note humans must read now: a reply to a human's message or a deliverable that landed. A to-do only a human can " + "complete is an ask (dispatch_ask), so it reaches their inbox. Never progress or status updates - Dispatch is a high-signal " + "record, not a log. Not a design decision (write it as a decision block in the document) or document feedback (dispatch_comment). " + "To answer a human's direct message to this session - one sent from the Agents page, which names no issue - pass that message's bare id as " + "in_reply_to and no issue; the reply lands in that conversation. Another call with the same in_reply_to and new text posts a follow-up, " + "threaded under this session's first reply; the same text again posts nothing. dispatch_read({message}) reads " + "that conversation back. Every other message names its issue. " + `Body is at most 2,000 characters. ${ISSUE_REFERENCE}`,
+    description: "Post a note humans must read now: a reply to a human's message or a deliverable that landed. A to-do only a human can " + "complete is an ask (dispatch_ask), so it reaches their inbox. Never progress or status updates - Dispatch is a high-signal " + "record, not a log. Not a design decision (write it as a decision block in the document) or document feedback (dispatch_comment). " + "To answer a human's direct message to this session - one sent from the Agents page, which names no issue - pass that message's bare id as " + "in_reply_to and no issue; the reply lands in that conversation. Another call with the same in_reply_to and new text posts a follow-up, " + "threaded under this session's first reply; the same text again posts nothing. dispatch_read({message}) reads " + "that conversation back. Every other message names its issue. " + `Body is at most 2,000 characters, the lines images appends included. ${ISSUE_REFERENCE}`,
     arguments: (z2) => ({
       issue: z2.string().describe(`${ISSUE_REFERENCE} Omit it only when in_reply_to answers a human's direct message to this session.`).optional(),
-      body: z2.string({ max: 2000 }).describe("Update text, at most 2,000 characters."),
-      in_reply_to: z2.string().describe("Optional message id or dispatch://KEY/message/<id> reference to reply to, threading " + "this message under it so the reply stays with the original in the Conversation. " + "A bare id with no issue answers a human's direct message to this session; a " + "dispatch://KEY/message/<id> names the issue its message lives on, so that form is a " + "reply on that issue.").optional()
+      body: z2.string({ max: DISPATCH_BODY_MAX }).describe("Update text, at most 2,000 characters."),
+      in_reply_to: z2.string().describe("Optional message id or dispatch://KEY/message/<id> reference to reply to, threading " + "this message under it so the reply stays with the original in the Conversation. " + "A bare id with no issue answers a human's direct message to this session; a " + "dispatch://KEY/message/<id> names the issue its message lives on, so that form is a " + "reply on that issue.").optional(),
+      images: imagesArgument(z2, "the issue (a reply to a direct message: your own conversation, dispatch://agent/<your session id>)", "the 2,000-character body limit")
     }),
     validation: messageValidation
   },
@@ -36918,13 +36925,13 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_doc_read",
     example: { issue: "DSP-1" },
-    description: "Read a live document or a named document version, or the text of an uploaded file at its latest or named version. " + "Do not use it for issue status, asks, or events; " + "use dispatch_read instead. Supply ref, issue, or project plus artifact; issue plus an omitted artifact reads the primary document. " + "A live read returns its document token for an optional dispatch_doc_edit precondition; use /blocks for per-block tokens. " + "A file that is not UTF-8 text is described, with the route that serves its bytes. " + OWNER_REFERENCE,
+    description: "Read a live document or a named document version, or the text of an uploaded file at its latest or named version. " + "Do not use it for issue status, asks, or events; " + "use dispatch_read instead. Supply ref, issue, or project plus artifact; issue plus an omitted artifact reads the primary document. " + "A live read returns its document token for an optional dispatch_doc_edit precondition; use /blocks for per-block tokens. " + "A picture (an uploaded PNG, JPEG, GIF or WebP of at most 5 MiB) comes back as an image you see, with its name, type, size and version; " + "any other file that is not UTF-8 text is described, with the route that serves its bytes. " + OWNER_REFERENCE,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE).optional(),
       project: z2.string().describe("Project key owning the document.").optional(),
       artifact: z2.string().describe("Optional project document artifact id, slug, or filename; primary document by default for an issue.").optional(),
       version: z2.number({ int: true, min: 1 }).describe("Optional version number.").optional(),
-      ref: z2.string().describe("Optional dispatch:// document reference.").optional()
+      ref: z2.string().describe("Optional dispatch:// document reference; a picture in a conversation on the Agents page is dispatch://agent/<session id>/artifact/<slug>@vN.").optional()
     }),
     validation: documentOwnerValidation(true)
   },
@@ -36964,7 +36971,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_read",
     example: { issue: "DSP-1" },
-    description: "Read an issue or project-document summary, targeted ask, or targeted comment reply chain, or the conversation " + "a message belongs to. Do not use it for document contents; use dispatch_doc_read instead. Supply ref, issue, " + "or project plus artifact; or message alone, which reads a human's direct message to this session and every " + "reply to it (they belong to no issue). " + "An anchored comment or ask also says where its quote sits, as `Position:`: the block's path from the top, " + "and in a table the row (0 is the header), the cells before the anchored one, and the column's header; " + "`Position: unavailable (<code>)` when Dispatch could not read the document: `DOC_SERVICE_UNAVAILABLE` " + "(try again shortly), `DOC_SCHEMA` (the document needs repair), `DOCUMENT_UNLOADABLE` (the document " + "needs a rebuild) or `INTERNAL`. " + "An issue read carries a `Progress:` line, `tasks 3/7, children 2/5`: its spec's task-list items " + "(`- [ ]` / `- [x]`, nested lists included) and its direct children, each done of total and each only " + "when it has any (`Progress: none` otherwise). " + "Every read ends with `Referenced by:` (what cites or hangs off this node, each with its dispatch:// address, " + "an excerpt, and when) and `Links:` (what it cites), so tracing provenance is one call. " + OWNER_REFERENCE,
+    description: "Read an issue or project-document summary, targeted ask, or targeted comment reply chain, or the conversation " + "a message belongs to. Do not use it for document contents; use dispatch_doc_read instead. Supply ref, issue, " + "or project plus artifact; or message alone, which reads a human's direct message to this session and every " + "reply to it (they belong to no issue). " + "An anchored comment or ask also says where its quote sits, as `Position:`: the block's path from the top, " + "and in a table the row (0 is the header), the cells before the anchored one, and the column's header; " + "`Position: unavailable (<code>)` when Dispatch could not read the document: `DOC_SERVICE_UNAVAILABLE` " + "(try again shortly), `DOC_SCHEMA` (the document needs repair), `DOCUMENT_UNLOADABLE` (the document " + "needs a rebuild) or `INTERNAL`. " + "An issue read carries a `Progress:` line, `tasks 3/7, children 2/5`: its spec's task-list items " + "(`- [ ]` / `- [x]`, nested lists included) and its direct children, each done of total and each only " + "when it has any (`Progress: none` otherwise). " + "Every read ends with `Referenced by:` (what cites or hangs off this node, each with its dispatch:// address, " + "an excerpt, and when) and `Links:` (what it cites), so tracing provenance is one call. " + "The pictures the shown messages, asks and comments embed come back as images you see, newest first, at most 8 " + "and 10 MiB of them per read, each a PNG, JPEG, GIF or WebP of at most 5 MiB; a `Pictures:` section names each " + "one shown, in order, and the rest by reference, for dispatch_doc_read. " + OWNER_REFERENCE,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE).optional(),
       project: z2.string().describe("Project key owning the document.").optional(),
@@ -37747,6 +37754,66 @@ function dispatchChildRef(ownerRef, kind, id) {
   return `${ownerRef}/${kind}/${id}`;
 }
 
+// ../envoy-client/src/dispatch-pictures.ts
+var PICTURE_UPLOAD_MAX_BYTES = 25 * 1024 * 1024;
+var PICTURE_SHOWN_MAX_BYTES = 5 * 1024 * 1024;
+var PICTURES_SHOWN_MAX = 8;
+var PICTURES_SHOWN_MAX_BYTES = 10 * 1024 * 1024;
+var PICTURE_TYPES = {
+  "image/png": true,
+  "image/jpeg": true,
+  "image/gif": true,
+  "image/webp": true
+};
+function isPictureType(mime) {
+  return PICTURE_TYPES[mime] === true;
+}
+var PICTURE_SNIFF_BYTES = 12;
+function bytesAt(bytes, offset, expected) {
+  return expected.every((byte, index) => bytes[offset + index] === byte);
+}
+function sniffPictureType(bytes) {
+  if (bytesAt(bytes, 0, [137, 80, 78, 71, 13, 10, 26, 10]))
+    return "image/png";
+  if (bytesAt(bytes, 0, [255, 216, 255]))
+    return "image/jpeg";
+  if (bytesAt(bytes, 0, [71, 73, 70, 56]) && (bytes[4] === 55 || bytes[4] === 57) && bytes[5] === 97) {
+    return "image/gif";
+  }
+  if (bytesAt(bytes, 0, [82, 73, 70, 70]) && bytesAt(bytes, 8, [87, 69, 66, 80])) {
+    return "image/webp";
+  }
+  return;
+}
+function toolImage(bytes) {
+  const mimeType = sniffPictureType(bytes);
+  if (mimeType === undefined || bytes.length > PICTURE_SHOWN_MAX_BYTES)
+    return;
+  return { data: Buffer.from(bytes).toString("base64"), mimeType };
+}
+function pictureLine(name, address) {
+  const caption = name.replace(/[\\[\]]/g, "\\$&").replace(/[\r\n]+/g, " ");
+  return `![${caption}](${address})`;
+}
+function withPictureLines(text, lines) {
+  if (lines.length === 0)
+    return text;
+  const head = text.trimEnd();
+  return head === "" ? lines.join(`
+`) : `${head}
+
+${lines.join(`
+`)}`;
+}
+var PICTURE_SYNTAX = /!\[(?:\\.|[^\\\]])*\]\((dispatch:\/\/[^\s()]+@v[1-9][0-9]*)(?:\s+"(?:\\.|[^\\"])*")?\)/g;
+function pictureAddresses(text) {
+  return [...text.matchAll(PICTURE_SYNTAX)].map((match) => match[1]);
+}
+function picturesNewestFirst(texts) {
+  const ordered = texts.map((item, index) => ({ item, index, at: Date.parse(item.at) })).sort((left, right) => (Number.isNaN(right.at) ? 0 : right.at) - (Number.isNaN(left.at) ? 0 : left.at) || left.index - right.index);
+  return [...new Set(ordered.flatMap(({ item }) => pictureAddresses(item.text)))];
+}
+
 // ../envoy-client/src/delivery.ts
 var KNOWN_SOURCES = EnvelopeSchema.shape.source.enum;
 var FOREIGN_SESSION_ID = /\b01a0[0-9a-f]{4}-[0-9a-f]{4}-7[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}\b/g;
@@ -37900,6 +37967,19 @@ var RecoverableDispatchDeliveryFailureSchema = exports_external.object({
   }).passthrough(),
   delivery: DispatchTargetedDeliverySchema
 }).refine(({ event, delivery }) => event.type === "comment.created" ? isCommentTargetedDelivery(delivery) : !isCommentTargetedDelivery(delivery) && DispatchTargetedResourceIDSchema.safeParse(event.payload.id).success, { message: "delivery resource must match its event type" });
+function eventPictures(event) {
+  let text;
+  if (event.type.startsWith("message.") || event.type.startsWith("comment.")) {
+    const parsed = CommentEventPayloadSchema.safeParse(event.payload);
+    text = parsed.success ? parsed.data.body : undefined;
+  } else if (event.type.startsWith("ask.")) {
+    const parsed = (event.type === "ask.edited" ? AskEditedEventPayloadSchema : AskEventPayloadSchema).safeParse(event.payload);
+    if (parsed.success) {
+      text = event.type === "ask.answered" ? parsed.data.answer?.text : event.type === "ask.resolved" ? parsed.data.resolution?.reason : event.type === "ask.opened" || event.type === "ask.edited" ? parsed.data.question : undefined;
+    }
+  }
+  return typeof text === "string" ? pictureAddresses(text) : [];
+}
 function senderLabel(envelope2) {
   const sender = envelope2.source_session ?? envelope2.source ?? "unknown";
   return envelope2.sender?.title === undefined ? sender : `${sender} (${envelope2.sender.title})`;
@@ -38176,6 +38256,7 @@ function renderInbound(raw, sessionID, subject2) {
   let delivery;
   let rejectedDelivery;
   let malformedDelivery = false;
+  let pictures = [];
   let inReplyTo = envelope2.in_reply_to;
   let askAuthor;
   const dispatchRendered = envelope2.source === "dispatch" && envelope2.payload !== undefined;
@@ -38282,6 +38363,7 @@ function renderInbound(raw, sessionID, subject2) {
           ...compactRecord ?? { payload: dispatchPayloadForReader(frame.event, sessionID) }
         };
         dispatchActor = frame.event.actor;
+        pictures = eventPictures(frame.event);
       } else {
         dispatchEvent = frame.raw;
         rejectedDelivery = frame.rejectedDelivery;
@@ -38352,7 +38434,8 @@ function renderInbound(raw, sessionID, subject2) {
     ...dispatchActor === undefined ? {} : { dispatchActor },
     ...delivery === undefined ? {} : { delivery },
     ...rejectedDelivery === undefined ? {} : { rejectedDelivery },
-    ...malformedDelivery ? { malformedDelivery: true } : {}
+    ...malformedDelivery ? { malformedDelivery: true } : {},
+    ...pictures.length === 0 ? {} : { pictures }
   };
 }
 
@@ -38497,7 +38580,7 @@ function resolveDispatchConfig(env, options = {}) {
 }
 
 // ../envoy-client/src/dispatch-execute.ts
-import { resolve as resolvePath } from "path";
+import { basename, resolve as resolvePath } from "path";
 
 // ../envoy-client/src/dispatch-cwd.ts
 import { execFile } from "child_process";
@@ -38725,20 +38808,26 @@ class DispatchClient {
     return this.#json("GET", ["api", "v1", "projects", project, "artifacts"], undefined, unlinked ? { unlinked: "true" } : undefined);
   }
   async projectArtifact(project, input) {
-    const artifactPath = ["api", "v1", "projects", project, "artifacts"];
-    if ("content" in input)
-      return this.#json("POST", artifactPath, input);
-    const form = new FormData;
-    form.set("name", input.name);
-    if (input.summary !== undefined)
-      form.set("summary", input.summary);
-    if (input.actor !== undefined)
-      form.set("actor", JSON.stringify(input.actor));
-    form.set("file", input.file, input.name);
-    return this.#form("POST", artifactPath, form);
+    return this.#upload(["api", "v1", "projects", project, "artifacts"], input);
   }
   async getProjectArtifact(project, slug) {
     return this.#json("GET", ["api", "v1", "projects", project, "artifacts", slug]);
+  }
+  async agentArtifact(sessionId, input) {
+    return this.#upload(["api", "v1", "agents", sessionId, "artifacts"], input);
+  }
+  async getAgentArtifact(sessionId, slug) {
+    return this.#json("GET", ["api", "v1", "agents", sessionId, "artifacts", slug]);
+  }
+  async getIssueArtifact(issue2, slug) {
+    return this.#json("GET", [
+      "api",
+      "v1",
+      "issues",
+      await this.#resolveIssue(issue2),
+      "artifacts",
+      slug
+    ]);
   }
   async search(query, options = {}) {
     return this.#json("GET", ["api", "v1", "search"], undefined, { q: query, ...options });
@@ -38860,17 +38949,7 @@ class DispatchClient {
     return this.#json("POST", ["api", "v1", "messages", id, "deliveries", String(attempt), "accept"], input);
   }
   async artifact(issue2, input) {
-    const artifactPath = ["api", "v1", "issues", await this.#resolveIssue(issue2), "artifacts"];
-    if ("content" in input)
-      return this.#json("POST", artifactPath, input);
-    const form = new FormData;
-    form.set("name", input.name);
-    if (input.summary !== undefined)
-      form.set("summary", input.summary);
-    if (input.actor !== undefined)
-      form.set("actor", JSON.stringify(input.actor));
-    form.set("file", input.file, input.name);
-    return this.#form("POST", artifactPath, form);
+    return this.#upload(["api", "v1", "issues", await this.#resolveIssue(issue2), "artifacts"], input);
   }
   async getArtifact(id) {
     return this.#json("GET", ["api", "v1", "artifacts", id]);
@@ -38976,6 +39055,18 @@ class DispatchClient {
       ...body === undefined ? {} : { body: JSON.stringify(body) }
     });
     return { status: response.status, payload: await this.#response(method, url2, response) };
+  }
+  async#upload(path2, input) {
+    if ("content" in input)
+      return this.#json("POST", path2, input);
+    const form = new FormData;
+    form.set("name", input.name);
+    if (input.summary !== undefined)
+      form.set("summary", input.summary);
+    if (input.actor !== undefined)
+      form.set("actor", JSON.stringify(input.actor));
+    form.set("file", input.file, input.name);
+    return this.#form("POST", path2, form);
   }
   async#form(method, path2, body) {
     const url2 = this.#url(path2);
@@ -39424,6 +39515,91 @@ function askQuestionWithRef(args) {
 function askQuestionProblem(withRef) {
   return withRef.length > ASK_QUESTION_MAX ? `question plus ref ${overCapMessage(withRef.length, ASK_QUESTION_MAX)}; shorten the question or drop the ref` : undefined;
 }
+var pictureSendingTools = {
+  dispatch_ask: true,
+  dispatch_comment: true,
+  dispatch_message: true
+};
+async function localPictures(args, cwd, problems) {
+  if (!Array.isArray(args.images))
+    return [];
+  const pictures = [];
+  for (const path2 of args.images) {
+    if (typeof path2 !== "string" || path2 === "")
+      continue;
+    const absolute = resolvePath(cwd, path2);
+    let size;
+    let head;
+    try {
+      const stats = await Bun.file(absolute).stat();
+      if (!stats.isFile()) {
+        problems.push(`images: ${path2} is not a file`);
+        continue;
+      }
+      size = stats.size;
+      head = new Uint8Array(await Bun.file(absolute).slice(0, PICTURE_SNIFF_BYTES).arrayBuffer());
+    } catch (error48) {
+      problems.push(`images: ${path2} cannot be read: ${messageFor(error48)}`);
+      continue;
+    }
+    if (size > PICTURE_UPLOAD_MAX_BYTES) {
+      problems.push(`images: ${path2} is ${size.toLocaleString("en-US")} bytes, over the ${PICTURE_UPLOAD_MAX_BYTES / 1024 / 1024} MiB one Dispatch upload takes`);
+      continue;
+    }
+    const type = sniffPictureType(head);
+    if (type === undefined) {
+      problems.push(`images: ${path2} is not a PNG, JPEG, GIF or WebP picture (judged by its bytes, not its name)`);
+      continue;
+    }
+    pictures.push({ path: path2, name: basename(absolute), file: Bun.file(absolute, { type }) });
+  }
+  return pictures;
+}
+function uploadSlug(name) {
+  const slug = name.toLowerCase().replace(/[^\p{L}\p{Nd}]+/gu, "-").replace(/^-|-$/g, "");
+  return slug === "" ? "artifact" : slug;
+}
+async function textWithPictures(tool, text, pictures, limit, owner, upload, actor) {
+  if (pictures.length === 0)
+    return text;
+  const counted = `${limit.text} plus ${pictures.length} ${pictures.length === 1 ? "picture" : "pictures"}`;
+  const fix = `${limit.shorten} or send fewer pictures`;
+  const predicted = withPictureLines(text, pictures.map((picture) => pictureLine(picture.name, `dispatch://${owner}/artifact/${uploadSlug(picture.name)}@v1`)));
+  if (predicted.length > limit.cap) {
+    throw new ToolInputError(tool, [
+      `${counted} ${overCapMessage(predicted.length, limit.cap)}; ${fix}`
+    ]);
+  }
+  const lines = [];
+  const addresses = [];
+  for (const picture of pictures) {
+    let uploaded;
+    try {
+      uploaded = await upload({ name: picture.name, file: picture.file, actor });
+    } catch (error48) {
+      const earlier = addresses.length === 0 ? "" : `; the pictures before it are uploaded (${addresses.join(", ")})`;
+      throw new Error(`images: ${picture.path} was not uploaded: ${messageFor(error48)}. Nothing was posted${earlier}.`);
+    }
+    const address = `dispatch://${owner}/artifact/${uploaded.artifact.slug}@v${uploaded.version.number}`;
+    addresses.push(address);
+    lines.push(pictureLine(picture.name, address));
+  }
+  const posted = withPictureLines(text, lines);
+  if (posted.length > limit.cap) {
+    throw new Error(`${counted} ${overCapMessage(posted.length, limit.cap)} with the addresses Dispatch gave ` + `the uploads (${addresses.join(", ")}), so nothing was posted; ${fix}.`);
+  }
+  return posted;
+}
+function parseAgentArtifactRef(ref) {
+  const match = ref.match(/^dispatch:\/\/agent\/([^/?#\s\p{Cc}]+)\/artifact\/([^/@]+)(?:@v(\d+))?$/u);
+  if (match === null)
+    return null;
+  const [, session, slug, version2] = match;
+  if (session === undefined || slug === undefined || version2 !== undefined && Number(version2) < 1) {
+    return null;
+  }
+  return { session, slug, ...version2 === undefined ? {} : { version: Number(version2) } };
+}
 function parseDispatchRef(ref) {
   const projectDocument = ref.match(/^dispatch:\/\/([A-Z][A-Z0-9]{1,9})\/artifact\/([^/@]+)(?:@v(\d+))?(?:\/(ask|comment)\/([^/]+))?$/);
   if (projectDocument) {
@@ -39656,6 +39832,15 @@ function dispatchRefFromUrl(value, serverUrl) {
       return `dispatch://${key}/message/${message}`;
     return `dispatch://${key}`;
   }
+  const agentArtifactPage = url2.pathname.match(/^\/agents\/([^/]+)\/artifacts\/([^/]+)\/?$/);
+  if (agentArtifactPage) {
+    const [, session, slug2] = agentArtifactPage;
+    try {
+      return `dispatch://agent/${decodeURIComponent(session ?? "")}/artifact/${decodeURIComponent(slug2 ?? "")}${versionOf("v")}`;
+    } catch {
+      return;
+    }
+  }
   const documentPage = url2.pathname.match(/^\/projects\/([A-Z][A-Z0-9]{1,9})\/documents\/([^/]+)\/?$/);
   if (!documentPage)
     return;
@@ -39666,7 +39851,7 @@ function dispatchRefFromUrl(value, serverUrl) {
     return;
   return item === undefined ? document : `${document}/${item.kind}/${item.id}`;
 }
-var refGrammarProblem = "ref must be a valid dispatch:// reference such as dispatch://KEY-1, " + "dispatch://KEY-1/ask/<uuid>, dispatch://KEY-1/comment/<uuid>, " + "dispatch://KEY-1/message/<uuid>, dispatch://KEY-1/artifact/<slug>, or " + "dispatch://PROJECT/artifact/<document-ref> (an artifact id, slug, or filename); " + "a dashboard URL on this Dispatch server is accepted too";
+var refGrammarProblem = "ref must be a valid dispatch:// reference such as dispatch://KEY-1, " + "dispatch://KEY-1/ask/<uuid>, dispatch://KEY-1/comment/<uuid>, " + "dispatch://KEY-1/message/<uuid>, dispatch://KEY-1/artifact/<slug>, " + "dispatch://PROJECT/artifact/<document-ref> (an artifact id, slug, or filename), or " + "dispatch://agent/<session id>/artifact/<slug> (a picture in a conversation on the Agents page, " + "for dispatch_doc_read); a dashboard URL on this Dispatch server is accepted too";
 var ownerRequiredProblem = "issue is required; supply issue or set LEGION_ISSUE";
 var toolSchemas = new Map;
 function toolSchema(tool) {
@@ -39690,6 +39875,16 @@ async function resolveOwnerArguments(tool, input, cwd, env, exec, serverUrl, pro
     const refText = dispatchRefFromUrl(refArgument, serverUrl) ?? refArgument;
     if (refText !== refArgument)
       args = { ...input, ref: refText };
+    const agentArtifact = parseAgentArtifactRef(refText);
+    if (agentArtifact !== null) {
+      if (tool !== "dispatch_doc_read") {
+        problems.push(`ref ${refText} names a picture in a conversation on the Agents page; only dispatch_doc_read reads one`);
+      }
+      if (args.issue !== undefined || args.project !== undefined || args.artifact !== undefined) {
+        problems.push("a dispatch://agent/... ref names its upload alone: name no issue, project, or artifact with it");
+      }
+      return { args, ref: null, owner: null, agentArtifact };
+    }
     ref = parseDispatchRef(refText);
     if (ref === null) {
       problems.push(tool === "dispatch_ask" && !refText.startsWith("dispatch://") ? "ref must be a dispatch:// reference" : refGrammarProblem);
@@ -40196,6 +40391,48 @@ function messageSummary({ message, replies }, graph) {
   ].join(`
 `);
 }
+function datedBodies(records) {
+  return records.map((record2) => ({ text: record2.body, at: record2.created_at }));
+}
+function askTexts({ ask, replies }) {
+  return [
+    { text: ask.question, at: ask.created_at },
+    ...ask.answer?.text ? [{ text: ask.answer.text, at: ask.answer.at }] : [],
+    ...ask.resolution === undefined ? [] : [{ text: ask.resolution.reason, at: ask.resolution.at }],
+    ...datedBodies(replies)
+  ];
+}
+function eventTexts(event) {
+  let texts;
+  switch (event.type) {
+    case "ask.opened":
+    case "ask.anchor_refreshed":
+    case "ask.edited":
+    case "ask.handed_back":
+    case "ask.answered":
+    case "ask.resolved":
+      texts = [
+        event.payload.question,
+        event.payload.answer?.text,
+        event.payload.resolution?.reason
+      ];
+      break;
+    case "comment.created":
+    case "comment.anchor_refreshed":
+    case "comment.edited":
+    case "comment.resolved":
+    case "comment.reopened":
+    case "suggestion.accepted":
+    case "suggestion.rejected":
+    case "message.created":
+    case "message.answered":
+      texts = [event.payload.body];
+      break;
+    default:
+      texts = [];
+  }
+  return texts.filter((text) => typeof text === "string" && text !== "").map((text) => ({ text, at: event.created_at }));
+}
 async function openArtifactMarks(client, resolved) {
   const asksPromise = resolved.owner.kind === "project" ? client.getArtifactAsks(resolved.artifact.id) : Promise.resolve(resolved.issue?.open_asks ?? []);
   const commentsPromise = resolved.owner.kind === "project" ? client.getArtifactComments(resolved.artifact.id) : client.getComments(resolved.issue?.key ?? "", resolved.artifact.id);
@@ -40217,20 +40454,39 @@ async function blockAsks(client, resolved, state) {
   const asks = await (resolved.issue === undefined ? client.getArtifactAsks(resolved.artifact.id, state) : client.listIssueAsks(resolved.issue.key, state));
   return asks.filter((ask) => typeof ask.block_id === "string" && ask.block_artifact?.id === resolved.artifact.id);
 }
-async function readUploadedFile(client, resolved, requested) {
-  const { artifact } = resolved;
+async function readUploadedFile(client, artifact, details, requested) {
   const latest = Math.max(0, ...artifact.versions.map((version2) => version2.number));
   const number4 = requested ?? latest;
-  const file2 = await client.fileVersion(artifact.id, number4);
   const of = number4 === latest ? "" : ` of ${latest}`;
+  const bytesRoute = `GET /api/v1/artifacts/${artifact.id}/versions/${number4} serves its bytes.`;
+  const tooLarge = (mime, bytes) => ({
+    text: `${artifact.name} is an uploaded ${mime} picture (version ${number4}${of}, ` + `${bytes.toLocaleString("en-US")} bytes), over the ${PICTURE_SHOWN_MAX_BYTES / 1024 / 1024} MiB ` + `a model is shown, so dispatch_doc_read cannot show it. ${bytesRoute}`,
+    details
+  });
+  const stated = artifact.versions.find((version2) => version2.number === number4);
+  if (artifact.kind === "image" && stated?.size !== undefined && stated.size > PICTURE_SHOWN_MAX_BYTES) {
+    return tooLarge(stated.mime ?? "image", stated.size);
+  }
+  const file2 = await client.fileVersion(artifact.id, number4);
   const size = `${file2.bytes.length.toLocaleString("en-US")} bytes`;
-  const details = resolved.owner.kind === "project" ? { project: artifact.project, document: documentLabel(artifact.project, artifact.slug) } : { issue: resolved.issue?.key };
+  if (artifact.kind === "image") {
+    const image = toolImage(file2.bytes);
+    if (image !== undefined) {
+      return {
+        text: `Picture ${artifact.name}: ${image.mimeType}, version ${number4}${of}, ${size}.`,
+        details,
+        images: [image]
+      };
+    }
+    if (sniffPictureType(file2.bytes) !== undefined)
+      return tooLarge(file2.mime, file2.bytes.length);
+  }
   let text;
   try {
     text = new TextDecoder("utf-8", { fatal: true }).decode(file2.bytes);
   } catch {
     return {
-      text: `${artifact.name} is an uploaded ${file2.mime} file (version ${number4}${of}, ${size}) that is not ` + `UTF-8 text, so dispatch_doc_read cannot show it. GET /api/v1/artifacts/${artifact.id}/versions/${number4} serves its bytes.`,
+      text: `${artifact.name} is an uploaded ${file2.mime} file (version ${number4}${of}, ${size}) that is not ` + `UTF-8 text, so dispatch_doc_read cannot show it. ${bytesRoute}`,
       details
     };
   }
@@ -40240,6 +40496,100 @@ async function readUploadedFile(client, resolved, requested) {
 ${text}`,
     details
   };
+}
+function pictureTarget(address) {
+  const agent = parseAgentArtifactRef(address);
+  if (agent !== null) {
+    if (agent.version === undefined)
+      return;
+    return {
+      key: `agent/${agent.session}/${agent.slug}`,
+      read: (client) => client.getAgentArtifact(agent.session, agent.slug),
+      version: agent.version
+    };
+  }
+  const ref = parseDispatchRef(address);
+  if (ref?.kind !== "artifact" || ref.version === undefined)
+    return;
+  const { owner, id: slug } = ref;
+  return owner.kind === "issue" ? {
+    key: `${owner.issue}/${slug}`,
+    read: (client) => client.getIssueArtifact(owner.issue, slug),
+    version: ref.version
+  } : {
+    key: `${owner.project}/${slug}`,
+    read: (client) => client.getProjectArtifact(owner.project, slug),
+    version: ref.version
+  };
+}
+var PICTURE_TYPE_NAMES = "a PNG, JPEG, GIF or WebP";
+async function readPictures(client, addresses) {
+  if (addresses.length === 0)
+    return { lines: [], images: [] };
+  const artifacts = new Map;
+  const images = [];
+  const lines = ["Pictures:"];
+  let shownBytes = 0;
+  const overBudget = `past this read's ${PICTURES_SHOWN_MAX_BYTES / 1024 / 1024} MiB of pictures; dispatch_doc_read shows it`;
+  const tooLarge = (name, bytes) => `${name} is ${bytes.toLocaleString("en-US")} bytes, over the ${PICTURE_SHOWN_MAX_BYTES / 1024 / 1024} MiB a model is shown`;
+  for (const address of addresses) {
+    const skip = (reason) => lines.push(`- not shown: ${address} (${reason})`);
+    if (images.length === PICTURES_SHOWN_MAX) {
+      skip(`past this read's ${PICTURES_SHOWN_MAX} pictures; dispatch_doc_read shows it`);
+      continue;
+    }
+    const target = pictureTarget(address);
+    if (target === undefined) {
+      skip("names no versioned Dispatch artifact");
+      continue;
+    }
+    try {
+      let read = artifacts.get(target.key);
+      if (read === undefined) {
+        read = target.read(client);
+        artifacts.set(target.key, read);
+      }
+      const artifact = await read;
+      const version2 = artifact.versions.find((candidate) => candidate.number === target.version);
+      if (version2 === undefined) {
+        skip(`${artifact.name} has no version ${target.version}`);
+        continue;
+      }
+      if (artifact.kind !== "image") {
+        skip(`${artifact.name} is a ${artifact.kind}, not a picture`);
+        continue;
+      }
+      const mime = version2.mime?.split(";")[0]?.trim();
+      if (mime !== undefined && !isPictureType(mime)) {
+        skip(`${artifact.name} is ${mime}, not ${PICTURE_TYPE_NAMES} a model is shown`);
+        continue;
+      }
+      if (version2.size !== undefined && version2.size > PICTURE_SHOWN_MAX_BYTES) {
+        skip(tooLarge(artifact.name, version2.size));
+        continue;
+      }
+      if (version2.size !== undefined && shownBytes + version2.size > PICTURES_SHOWN_MAX_BYTES) {
+        skip(overBudget);
+        continue;
+      }
+      const file2 = await client.fileVersion(artifact.id, target.version);
+      const image = toolImage(file2.bytes);
+      if (image === undefined) {
+        skip(sniffPictureType(file2.bytes) === undefined ? `${artifact.name} is not ${PICTURE_TYPE_NAMES} a model is shown` : tooLarge(artifact.name, file2.bytes.length));
+        continue;
+      }
+      if (shownBytes + file2.bytes.length > PICTURES_SHOWN_MAX_BYTES) {
+        skip(overBudget);
+        continue;
+      }
+      shownBytes += file2.bytes.length;
+      images.push(image);
+      lines.push(`- image ${images.length}: ${address} (${artifact.name}, ${image.mimeType}, ${file2.bytes.length.toLocaleString("en-US")} bytes)`);
+    } catch (error48) {
+      skip(`unavailable: ${messageFor(error48)}`);
+    }
+  }
+  return { lines, images };
 }
 async function refuseOpenDecisionBlocks(client, tool, resolved) {
   const artifact = resolved.artifact;
@@ -40371,6 +40721,7 @@ async function executeDispatchTool(input) {
     problems.push(...formatZodIssues(issues, schema));
   }
   problems.push(...argumentProblems(input.tool, ownerArguments.args));
+  const pictures = pictureSendingTools[input.tool] === true ? await localPictures(ownerArguments.args, input.cwd, problems) : [];
   if (problems.length > 0)
     throw new ToolInputError(input.tool, problems);
   const dispatchClient = () => new DispatchClient(configUrl, configToken, fetchImpl, input.signal);
@@ -40421,6 +40772,13 @@ async function executeDispatchTool(input) {
     if (owner === null)
       throw new Error("issue or project is required");
     return owner;
+  };
+  const writePictures = (resolved, text, limit) => {
+    if (resolved?.owner.kind === "project") {
+      const { project } = resolved.owner;
+      return textWithPictures(input.tool, text, pictures, limit, project, (upload) => client.projectArtifact(project, upload), actor);
+    }
+    return textWithPictures(input.tool, text, pictures, limit, issue2(), (upload) => client.artifact(issue2(), upload), actor);
   };
   switch (input.tool) {
     case "dispatch_issue": {
@@ -40723,8 +41081,15 @@ async function executeDispatchTool(input) {
       const multiple = optionalBoolean(args, "multiple");
       const urgency = askUrgency(args);
       const anchored = anchorArgs && resolved ? anchor(resolved.artifact, anchorArgs) : undefined;
+      const withRef = askQuestionWithRef(args);
+      const refAppended = withRef !== stringArg(args, "question");
+      const question = await writePictures(resolved, withRef, {
+        cap: ASK_QUESTION_MAX,
+        text: refAppended ? "question plus ref" : "question",
+        shorten: refAppended ? "shorten the question, drop the ref" : "shorten the question"
+      });
       const askInput = {
-        question: askQuestionWithRef(args),
+        question,
         ...Array.isArray(options) ? { options } : {},
         ...multiple === undefined ? {} : { multiple },
         ...urgency === undefined ? {} : { urgency },
@@ -40779,8 +41144,13 @@ ${followsAsk(askOwner)}`,
         ]);
       }
       const requestedTurn = optionalString(args, "turn");
+      const body = await writePictures(resolved, stringArg(args, "body"), {
+        cap: DISPATCH_BODY_MAX,
+        text: "body",
+        shorten: "shorten the body"
+      });
       const commentInput = {
-        body: stringArg(args, "body"),
+        body,
         ...anchored === undefined ? {} : { anchor: anchored },
         ...replyTo === undefined ? {} : { reply_to: replyTo },
         ...replyToAsk === undefined ? {} : { ask_id: replyToAsk },
@@ -40840,16 +41210,26 @@ ${followsAsk(askOwner)}`,
     }
     case "dispatch_message": {
       const inReplyTo = messageInReplyTo(args);
-      const body = stringArg(args, "body");
+      const written = stringArg(args, "body");
+      const bodyLimit = {
+        cap: DISPATCH_BODY_MAX,
+        text: "body",
+        shorten: "shorten the body"
+      };
       if (owner === null && inReplyTo !== undefined) {
-        const reply = await client.messageReply(inReplyTo, { body, attempt: 1, actor }, { followUp: true });
-        if (reply.duplicate === true && reply.body === body) {
+        const sessionId = input.sessionId?.trim();
+        if (pictures.length > 0 && !sessionId) {
+          throw new Error("host session id is required to send pictures in a direct-message reply");
+        }
+        const body2 = await textWithPictures(input.tool, written, pictures, bodyLimit, `agent/${sessionId}`, (upload) => client.agentArtifact(sessionId, upload), actor);
+        const reply = await client.messageReply(inReplyTo, { body: body2, attempt: 1, actor }, { followUp: true });
+        if (reply.duplicate === true && reply.body === body2) {
           return {
             text: `Dispatch already has this exact text in the conversation (message ${reply.id}); ` + "nothing new was posted. Send different text if you have more to say.",
             details: { message: reply.id, in_reply_to: inReplyTo, posted: false, duplicate: true }
           };
         }
-        if (reply.body !== body) {
+        if (reply.body !== body2) {
           return {
             text: `Message ${inReplyTo} was already answered by message ${reply.id}; Dispatch kept ` + "that reply and posted nothing. Wait for their next message rather than answering " + "this one again.",
             details: { message: reply.id, in_reply_to: inReplyTo, posted: false }
@@ -40869,6 +41249,7 @@ ${followsAsk(askOwner)}`,
         };
       }
       const issueKey = issue2();
+      const body = await textWithPictures(input.tool, written, pictures, bodyLimit, issueKey, (upload) => client.artifact(issueKey, upload), actor);
       const message = await client.message(issueKey, {
         body,
         ...inReplyTo === undefined ? {} : { in_reply_to: inReplyTo },
@@ -40932,11 +41313,20 @@ ${followsAsk(askOwner)}`,
       };
     }
     case "dispatch_doc_read": {
+      const { agentArtifact } = ownerArguments;
+      if (agentArtifact !== undefined) {
+        const artifact = await client.getAgentArtifact(agentArtifact.session, agentArtifact.slug);
+        return readUploadedFile(client, artifact, { session: agentArtifact.session, artifact: artifact.slug }, optionalNumber(args, "version") ?? agentArtifact.version);
+      }
       const artifactReference = optionalString(args, "artifact") ?? (ownerArguments.ref?.kind === "spec" || ownerArguments.ref?.kind === "artifact" ? ownerArguments.ref.id : undefined);
       const resolved = await resolveDocument(documentOwner(), artifactReference);
       const version2 = optionalNumber(args, "version") ?? ownerArguments.ref?.version;
       if (resolved.artifact.kind === "file" || resolved.artifact.kind === "image") {
-        return readUploadedFile(client, resolved, version2);
+        const { artifact } = resolved;
+        return readUploadedFile(client, artifact, resolved.owner.kind === "project" ? {
+          project: artifact.project,
+          document: documentLabel(artifact.project, artifact.slug)
+        } : { issue: resolved.issue?.key }, version2);
       }
       const documentPromise = client.docRead(resolved.artifact.id, version2);
       const marksPromise = openArtifactMarks(client, resolved);
@@ -41047,18 +41437,25 @@ ${trailer.join(`
     }
     case "dispatch_read": {
       const message = optionalString(args, "message");
+      const picturesOf = (texts) => readPictures(client, picturesNewestFirst(texts));
+      const shownImages = ({ images }) => images.length === 0 ? {} : { images };
       if (message !== undefined) {
         const sessionId = input.sessionId?.trim();
         if (!sessionId)
           throw new Error("host session id is required for dispatch_read({message})");
         const thread = await client.getMessageThread(messageIdOf(message), sessionId);
         const issueKey2 = thread.message.issue_key;
+        const [pictures3, graph2] = await Promise.all([
+          picturesOf(datedBodies([thread.message, ...thread.replies])),
+          issueKey2 === null ? [] : graphSections(client, dispatchChildRef(dispatchIssueRef(issueKey2), "message", thread.message.id))
+        ]);
         return {
-          text: messageSummary(thread, issueKey2 === null ? [] : await graphSections(client, dispatchChildRef(dispatchIssueRef(issueKey2), "message", thread.message.id))),
+          text: messageSummary(thread, [...pictures3.lines, ...graph2]),
           details: {
             message: thread.message.id,
             ...issueKey2 === null ? {} : { issue: issueKey2 }
-          }
+          },
+          ...shownImages(pictures3)
         };
       }
       if (ownerArguments.ref?.kind === "ask") {
@@ -41066,9 +41463,14 @@ ${trailer.join(`
         const id = await resolveIdPrefix(input.tool, "ask", ref.id, refOwnerName(ref), async () => ref.owner.kind === "issue" ? client.listIssueAsks(ref.owner.issue) : client.getArtifactAsks((await resolveDocument(ref.owner, ref.artifact)).artifact.id, "all"));
         const askRead = await client.getAsk(id);
         const askRef = refTarget(ref, "ask", id);
+        const [pictures3, graph2] = await Promise.all([
+          picturesOf(askTexts(askRead)),
+          graphSections(client, askRef)
+        ]);
         return {
-          text: askSummary(askRead, await graphSections(client, askRef)),
-          details: ref.owner.kind === "project" ? { project: ref.owner.project } : { issue: ref.owner.issue }
+          text: askSummary(askRead, [...pictures3.lines, ...graph2]),
+          details: ref.owner.kind === "project" ? { project: ref.owner.project } : { issue: ref.owner.issue },
+          ...shownImages(pictures3)
         };
       }
       if (ownerArguments.ref?.kind === "comment") {
@@ -41076,9 +41478,14 @@ ${trailer.join(`
         const id = await resolveIdPrefix(input.tool, "comment", ref.id, refOwnerName(ref), async () => ref.owner.kind === "issue" ? client.getComments(ref.owner.issue) : client.getArtifactComments((await resolveDocument(ref.owner, ref.artifact)).artifact.id));
         const comment = await client.getComment(id);
         const commentRef = refTarget(ref, "comment", id);
+        const [pictures3, graph2] = await Promise.all([
+          picturesOf(datedBodies([comment.comment, ...comment.replies])),
+          graphSections(client, commentRef)
+        ]);
         return {
-          text: commentSummary(comment, await graphSections(client, commentRef)),
-          details: ref.owner.kind === "project" ? { project: ref.owner.project } : { issue: comment.comment.issue_key }
+          text: commentSummary(comment, [...pictures3.lines, ...graph2]),
+          details: ref.owner.kind === "project" ? { project: ref.owner.project } : { issue: comment.comment.issue_key },
+          ...shownImages(pictures3)
         };
       }
       if (ownerArguments.ref?.kind === "message") {
@@ -41087,9 +41494,14 @@ ${trailer.join(`
         }
         const messageRead = await client.getMessage(ownerArguments.ref.owner.issue, ownerArguments.ref.id);
         const messageRef = dispatchChildRef(dispatchIssueRef(ownerArguments.ref.owner.issue), "message", ownerArguments.ref.id);
+        const [pictures3, graph2] = await Promise.all([
+          picturesOf(datedBodies([messageRead.message, ...messageRead.replies])),
+          graphSections(client, messageRef)
+        ]);
         return {
-          text: messageSummary(messageRead, await graphSections(client, messageRef)),
-          details: { issue: messageRead.message.issue_key }
+          text: messageSummary(messageRead, [...pictures3.lines, ...graph2]),
+          details: { issue: messageRead.message.issue_key },
+          ...shownImages(pictures3)
         };
       }
       if (documentOwner().kind === "project") {
@@ -41113,9 +41525,12 @@ ${trailer.join(`
       const issueKey = issue2();
       if (ownerArguments.ref?.kind === "log") {
         const read2 = await client.read(issueKey);
+        const pictures3 = await picturesOf(read2.events.flatMap(eventTexts));
         return {
-          text: logSummary(read2.issue, read2.events),
-          details: { issue: read2.issue.key }
+          text: [logSummary(read2.issue, read2.events), ...pictures3.lines].join(`
+`),
+          details: { issue: read2.issue.key },
+          ...shownImages(pictures3)
         };
       }
       if (ownerArguments.ref?.kind === "children") {
@@ -41128,14 +41543,19 @@ ${trailer.join(`
       const readPromise = client.read(issueKey);
       const referencesPromise = issueReferencesOrUnavailable(client, issueKey);
       const read = await readPromise;
-      const [references, graph, titles] = await Promise.all([
+      const [references, graph, titles, pictures2] = await Promise.all([
         referencesPromise,
         graphSections(client, dispatchIssueRef(read.issue.key)),
-        liveSessionTitles(client, holdsSession(read.issue.claim) || routeHeldBySession(read.issue))
+        liveSessionTitles(client, holdsSession(read.issue.claim) || routeHeldBySession(read.issue)),
+        picturesOf([
+          ...read.issue.open_asks.map((ask) => ({ text: ask.question, at: ask.created_at })),
+          ...read.events.flatMap(eventTexts)
+        ])
       ]);
       return {
-        text: issueSummary(read.issue, read.events, references, graph, titles),
-        details: { issue: read.issue.key }
+        text: issueSummary(read.issue, read.events, references, [...pictures2.lines, ...graph], titles),
+        details: { issue: read.issue.key },
+        ...shownImages(pictures2)
       };
     }
     default:
@@ -44207,7 +44627,20 @@ function parseArguments(spec, input) {
   return argumentsSchema(spec).parse(input);
 }
 function mcpResult(value) {
-  return { content: [{ type: "text", text: JSON.stringify(value) }] };
+  const images = value?.images;
+  if (!Array.isArray(images))
+    return { content: [{ type: "text", text: JSON.stringify(value) }] };
+  const { images: _shown, ...rest } = value;
+  return {
+    content: [
+      { type: "text", text: JSON.stringify(rest) },
+      ...images.map(({ data, mimeType }) => ({
+        type: "image",
+        data,
+        mimeType
+      }))
+    ]
+  };
 }
 function projectDirectory() {
   return claudeProjectDirectory({ CLAUDE_PROJECT_DIR: process.env["CLAUDE_PROJECT_DIR"] }, process.cwd());

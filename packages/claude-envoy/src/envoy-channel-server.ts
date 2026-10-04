@@ -16,7 +16,8 @@ import {
   renderInbound,
 } from "@legion/envoy-client/delivery"
 import { resolveDispatchConfig } from "@legion/envoy-client/dispatch-config"
-import { executeDispatchTool } from "@legion/envoy-client/dispatch-execute"
+import { type DispatchToolResult, executeDispatchTool } from "@legion/envoy-client/dispatch-execute"
+import type { ToolImage } from "@legion/envoy-client/dispatch-pictures"
 import {
   createFollowAnnouncer,
   subscriptionRemovedTopics,
@@ -187,10 +188,26 @@ function parseArguments<Operation extends EnvoyToolOperation>(
   return argumentsSchema(spec).parse(input) as ToolArgumentsByOperation[Operation]
 }
 
-function mcpResult(value: unknown): {
-  readonly content: readonly [{ readonly type: "text"; readonly text: string }]
-} {
-  return { content: [{ type: "text", text: JSON.stringify(value) }] }
+type McpContent =
+  | { readonly type: "text"; readonly text: string }
+  | { readonly type: "image"; readonly data: string; readonly mimeType: string }
+
+/** A tool's answer as MCP content: the value as JSON text, then the pictures a Dispatch result
+ *  carries (`images`) as image blocks, which the JSON leaves out. */
+export function mcpResult(value: unknown): { readonly content: readonly McpContent[] } {
+  const images = (value as { readonly images?: unknown } | null)?.images
+  if (!Array.isArray(images)) return { content: [{ type: "text", text: JSON.stringify(value) }] }
+  const { images: _shown, ...rest } = value as DispatchToolResult
+  return {
+    content: [
+      { type: "text", text: JSON.stringify(rest) },
+      ...(images as ToolImage[]).map(({ data, mimeType }) => ({
+        type: "image" as const,
+        data,
+        mimeType,
+      })),
+    ],
+  }
 }
 
 function projectDirectory(): string {
