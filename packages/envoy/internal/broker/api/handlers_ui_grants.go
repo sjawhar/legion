@@ -10,7 +10,6 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/requests"
 )
 
@@ -57,12 +56,8 @@ func (s *server) listGrantsForApprover(w http.ResponseWriter, r *http.Request) {
 		if names == nil {
 			names = []string{}
 		}
-		granted := policy.Approval
-		if g.Approver == "" {
-			granted = policy.Automatic
-		}
 		out[i] = approverGrantResp{
-			GrantID: g.GrantID, Granted: granted, RecordID: g.RecordID, Enrollment: enrollmentResp(g.Enrollment),
+			GrantID: g.GrantID, Granted: g.Granted, RecordID: g.RecordID, Enrollment: enrollmentResp(g.Enrollment),
 			Names: names, Approver: strPtr(g.Approver), ExpiresAt: g.ExpiresAt, CreatedAt: g.CreatedAt,
 		}
 	}
@@ -80,8 +75,9 @@ type revokeByApproverBody struct {
 
 // revokeByApprover ends a grant on a human's Dispatch login: the login must be the grant's
 // approver or its enrollment's operator (requests.Machine.RevokeByApprover's own mayRevoke
-// check). Revoking a grant the session got without asking also withholds its secrets from that
-// session, whose later requests for them ask their owner.
+// check). When the operator revokes a grant the session got without asking, its secrets are
+// withheld from that session: its other grants that got them without asking end too, and its
+// later requests for them ask their owner.
 func (s *server) revokeByApprover(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathUUID(w, r, "id", "GRANT_ID_INPUT", "grant")
 	if !ok {

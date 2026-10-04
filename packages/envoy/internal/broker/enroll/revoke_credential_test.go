@@ -6,10 +6,10 @@ import (
 	"slices"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
+
+	"github.com/sjawhar/envoy/internal/broker/store/storetest"
 )
 
 // insertRecord writes a credential-request record of kind naming approver, and returns its id.
@@ -334,34 +334,6 @@ func TestOnlyALaunchersOwnRecordNamesWhoMayListAndRevokeIt(t *testing.T) {
 	}
 }
 
-// awaitLockWaiters waits until n backends of svc's server wait on a lock behind tx's backend:
-// blocked by it, or queued behind a backend that is.
-func awaitLockWaiters(t *testing.T, svc *Service, tx pgx.Tx, n int) {
-	t.Helper()
-	ctx := context.Background()
-	var holder int
-	if err := tx.QueryRow(ctx, `select pg_backend_pid()`).Scan(&holder); err != nil {
-		t.Fatalf("read the holder's backend: %v", err)
-	}
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		var waiting int
-		if err := svc.Store.Pool.QueryRow(ctx, `with recursive waiters(pid) as (
-				select pid from pg_stat_activity where $1 = any(pg_blocking_pids(pid))
-				union select a.pid from pg_stat_activity a join waiters w on w.pid = any(pg_blocking_pids(a.pid)))
-			select count(*) from waiters join pg_stat_activity using (pid) where wait_event_type = 'Lock'`, holder).Scan(&waiting); err != nil {
-			t.Fatalf("read lock waiters: %v", err)
-		}
-		if waiting >= n {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("%d backends waited on the lock, want %d", waiting, n)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-}
-
 // TestAnEnrollmentRacingARevokeCannotLand pins the lock Create takes on the credential: a revoke
 // committing while Create is enrolling under that credential (here a transaction holding the
 // credential's row as RevokeCredential does, with revoked_at set) leaves Create refused
@@ -386,7 +358,7 @@ func TestAnEnrollmentRacingARevokeCannotLand(t *testing.T) {
 		_, err := svc.Create(ctx, cred, Enrollment{Kind: "host", RuntimeID: "host-racing", Thumbprint: "tp-racing"})
 		done <- err
 	}()
-	awaitLockWaiters(t, svc, tx, 1)
+	storetest.AwaitLockWaiters(t, svc.Store.Pool, tx, 1)
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatalf("commit the revoke: %v", err)
 	}
@@ -422,7 +394,7 @@ func TestARevokeEndsAnEnrollmentCreatedWhileItWaited(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	go func() { done <- svc.RevokeCredential(ctx, cred.ID.String(), "ada@example.com") }()
-	awaitLockWaiters(t, svc, tx, 1)
+	storetest.AwaitLockWaiters(t, svc.Store.Pool, tx, 1)
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatalf("commit the enrollment: %v", err)
 	}
@@ -457,7 +429,7 @@ func TestTwoRevokesOfOneLoginEndItOnce(t *testing.T) {
 	for range 2 {
 		go func() { done <- svc.RevokeCredential(ctx, cred.ID.String(), "ada@example.com") }()
 	}
-	awaitLockWaiters(t, svc, tx, 2)
+	storetest.AwaitLockWaiters(t, svc.Store.Pool, tx, 2)
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatalf("release the credential: %v", err)
 	}
@@ -502,7 +474,7 @@ func TestARevokeRacingTheLaunchersOwnRevokeEndsTheSessionOnce(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	go func() { done <- svc.RevokeCredential(ctx, cred.ID.String(), "ada@example.com") }()
-	awaitLockWaiters(t, svc, tx, 1)
+	storetest.AwaitLockWaiters(t, svc.Store.Pool, tx, 1)
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatalf("commit the launcher's revoke: %v", err)
 	}

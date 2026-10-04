@@ -249,10 +249,12 @@ broker message (a `403 NOT_APPROVER` among them) shows under the table, never si
 `GrantsSection.tsx` renders on `/settings` only where the pending list is not `null`: every live
 grant of a session the viewer operates, automatic or approved by anyone, and every grant the viewer
 approved (`grants.ts`'s `credentialGrantsQuery`, `?approver=me`). Each row names how it was
-granted (the broker's `granted`: "Automatically", or "Approved by" its `approver`), a pod
-enrollment's slot under its enrollment, and has a Revoke button that POSTs `{}` to
-`/api/v1/credential-grants/{id}/revoke`; revoking an automatic grant makes that session ask before
-it gets those secrets again.
+granted (the broker's `granted`: "Automatically", or "Approved by" its `approver`; `CredentialGrant`
+is a union on `granted`, so an automatic grant has a null approver and record and an approved one
+has both), a pod enrollment's slot under its enrollment, and has a Revoke button that POSTs `{}` to
+`/api/v1/credential-grants/{id}/revoke`. Only its operator sees an automatic grant, and revoking
+one makes that session ask before it gets those secrets again: its other automatic grants of them
+end with it.
 
 `MachineLoginsSection.tsx` renders under the code entry on `/credentials/machine`: the machine
 logins the viewer approved that can still reach a secret (`GET /api/v1/machine-logins`,
@@ -299,10 +301,12 @@ against a fake broker, and `internal/dispatch/api/contract_test.go` round-trips 
 whatever login its body names, and the value released; a shared secret's request in two people's
 lists and approved by the second; an automatic grant listed as automatic, revoked, and the same
 session's next request for it waiting on its owner while another session still gets it at once;
-a machine login listed for the person who approved it alone, another person's revoke refused
-`403 NOT_APPROVER` whatever their body names, and the approver's revoke ending the session it
-enrolled and its launcher proofs; and a service's login listed with its service for its approver
-alone, and revocable by them alone.
+once the operator has withheld AUTO_TOKEN, another person's approval of the session's request that
+was waiting on anyone for it refused `403 NOT_APPROVER` and the operator's accepted; a machine login
+listed for the person who approved it alone, another person's revoke refused `403 NOT_APPROVER`
+whatever their body names, and the approver's revoke ending the session it enrolled and its
+launcher proofs; and a service's login listed with its service for its approver alone, and
+revocable by them alone.
 
 ## Dark mode
 

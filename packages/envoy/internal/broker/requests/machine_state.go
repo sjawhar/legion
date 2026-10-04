@@ -111,21 +111,34 @@ type enrollmentRow struct {
 	RuntimeID, Slot      string
 }
 
-// requester is the enrollment as the policy sees it: the person it acts for, none for a pod.
-func (e enrollmentRow) requester() policy.Requester {
-	return policy.Requester{Operator: deref(e.Operator)}
+// requester is the enrollment as the policy sees it, read through q: the person it acts for (none
+// for a pod) and the names that person withheld from it (RevokeByApprover's withhold). A caller that
+// decides for the session reads it after locking the session's row, which RevokeByApprover holds
+// while it withholds, so a withhold either committed before the read or waits for the caller.
+func (e enrollmentRow) requester(ctx context.Context, q querier) (policy.Requester, error) {
+	rows, err := q.Query(ctx, `select name from withheld_secrets where enrollment_id=$1`, e.ID)
+	if err != nil {
+		return policy.Requester{}, err
+	}
+	withheld, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return policy.Requester{}, err
+	}
+	return policy.Requester{Operator: deref(e.Operator), Withheld: withheld}, nil
 }
 
 // Create verifies the request object (record.VerifyRequestObject, jti replay through the Replay
 // seam), requires iss to be this enrollment's own key and no login_hint (session requests never
-// name their own approver — that's the policy's job), evaluates the policy, and for a request that
-// needs approval writes the request row and its credential-request record in one transaction, the
-// same advisory-lock coalescing createPending has always used to serialize identical requests
-// from one enrollment. A name a person withheld from this session (withheldNames) is evaluated by
-// policy.Set.EvaluateWithheld, so it asks where it would have been granted at once. Each write
-// transaction first locks the enrollment live (lockLiveEnrollment), so no request or grant it
-// writes lands on an enrollment that ended after Create first read it; such an enrollment is
-// pgx.ErrNoRows, as one that had ended before.
+// name their own approver — that's the policy's job), and hands back a live grant for exactly these
+// names when one may be reused (reuseLiveGrant). Otherwise it decides and writes the request in one
+// transaction: it takes the advisory lock that serializes identical requests from one enrollment
+// (lockIdenticalPending), then locks the enrollment live (lockLiveEnrollment), so no request or
+// grant lands on an enrollment that ended after Create first read it (such an enrollment is
+// pgx.ErrNoRows, as one that had ended before), and no withhold (RevokeByApprover, which takes the
+// same row) lands between the read of what is withheld from the session and the write. It then
+// evaluates the policy for the session (a withheld name is human tier to it) and writes a granted
+// or denied request, with a granted one's grant, or a pending request and its credential-request
+// record, which a pending identical request already waiting coalesces onto instead.
 func (m *Machine) Create(ctx context.Context, enrollmentID, compactRequest, sessionID string) (Request, error) {
 	enr, err := m.enrollment(ctx, enrollmentID)
 	if err != nil {
@@ -157,96 +170,68 @@ func (m *Machine) Create(ctx context.Context, enrollmentID, compactRequest, sess
 	}
 
 	set := m.Policy.Get()
-	requester := enr.requester()
-	for pass := 1; ; pass++ {
-		if existing, ok, err := m.reuseLiveGrant(ctx, enrollmentID, names, set, requester); err != nil {
-			return Request{}, err
-		} else if ok {
-			return existing, nil
-		}
-		withheld, err := withheldNames(ctx, m.Store.Pool, enrollmentID, names)
-		if err != nil {
-			return Request{}, err
-		}
-		e, err := evaluate(set, names, requester, withheld)
-		if err != nil {
-			return Request{}, err
-		}
-		r := newRequest{
-			id: uuid.NewString(), enrollmentID: enrollmentID, reason: obj.Reason, state: e.state,
-			approver: e.approver, rulesVersion: set.Version, sessionID: sessionID, lifetime: m.MaxGrant, decisions: e.decisions,
-		}
-		if e.state == "pending" {
-			r.pendingExpiresAt = time.Now().Add(m.PendingTTL)
-			return m.createPending(ctx, enr, r, obj)
-		}
-		req, err := m.createDecided(ctx, r)
-		if errors.Is(err, errWithheldMeanwhile) && pass == 1 {
-			continue
-		}
-		return req, err
+	if existing, ok, err := m.reuseLiveGrant(ctx, enr, names, set); err != nil {
+		return Request{}, err
+	} else if ok {
+		return existing, nil
 	}
-}
-
-// errWithheldMeanwhile is createDecided's refusal to grant a name a person withheld from the
-// session after Create read what was withheld. Create decides once more, and that pass reads the
-// name as withheld and asks for it, since nothing removes a withheld name; a second refusal could
-// come only from a policy that grants a withheld name at once, so Create returns it as an error.
-var errWithheldMeanwhile = errors.New("a requested secret was withheld from this session while the request was decided")
-
-// createDecided writes a request the policy decided at once, granted or denied, and a granted one's
-// grant, in one transaction. A granted request is written only while none of its names is withheld
-// from the session: the enrollment's row lock it takes (lockLiveEnrollment) is the one
-// RevokeByApprover takes before it withholds, so a withholding either committed before this read
-// sees it, answered errWithheldMeanwhile, or waits until this request is written.
-func (m *Machine) createDecided(ctx context.Context, r newRequest) (Request, error) {
-	req := Request{ID: r.id, State: r.state, Secrets: r.decisions}
 	tx, err := m.Store.Pool.Begin(ctx)
 	if err != nil {
 		return Request{}, err
 	}
 	defer tx.Rollback(ctx)
-	if err := lockLiveEnrollment(ctx, tx, r.enrollmentID); err != nil {
+	sorted := sortedCopy(names)
+	if err := lockIdenticalPending(ctx, tx, enrollmentID, sorted); err != nil {
 		return Request{}, err
 	}
-	if r.state == "granted" {
-		withheld, err := withheldNames(ctx, tx, r.enrollmentID, r.names())
-		if err != nil {
-			return Request{}, err
-		}
-		if len(withheld) > 0 {
-			return Request{}, errWithheldMeanwhile
-		}
-	}
-	if err := m.insertRequest(ctx, tx, r); err != nil {
+	if err := lockLiveEnrollment(ctx, tx, enrollmentID); err != nil {
 		return Request{}, err
 	}
-	if r.state == "granted" {
-		grantID, err := insertGrant(ctx, tx, r.id, r.enrollmentID, "", r.lifetime)
-		if err != nil {
+	requester, err := enr.requester(ctx, tx)
+	if err != nil {
+		return Request{}, err
+	}
+	e, err := evaluate(set, names, requester)
+	if err != nil {
+		return Request{}, err
+	}
+	r := newRequest{
+		id: uuid.NewString(), enrollmentID: enrollmentID, reason: obj.Reason, state: e.state,
+		approver: e.approver, rulesVersion: set.Version, sessionID: sessionID, lifetime: m.MaxGrant, decisions: e.decisions,
+	}
+	if e.state != "pending" {
+		req := Request{ID: r.id, State: r.state, Secrets: r.decisions}
+		if err := m.insertRequest(ctx, tx, r); err != nil {
 			return Request{}, err
 		}
-		req.GrantID = &grantID
+		if r.state == "granted" {
+			grantID, err := insertGrant(ctx, tx, r.id, enrollmentID, "", r.lifetime)
+			if err != nil {
+				return Request{}, err
+			}
+			req.GrantID = &grantID
+		}
+		return req, tx.Commit(ctx)
+	}
+	existingID, err := matchingRequest(ctx, tx, `select r.id, array_agg(s.name) from requests r join request_secrets s on s.request_id=r.id
+		where r.enrollment_id=$1 and r.state='pending' group by r.id`, enrollmentID, sorted)
+	if err != nil {
+		return Request{}, err
+	}
+	if existingID != "" {
+		if err := tx.Commit(ctx); err != nil {
+			return Request{}, err
+		}
+		existing, err := m.Get(ctx, existingID)
+		existing.Coalesced = true
+		return existing, err
+	}
+	r.pendingExpiresAt = time.Now().Add(m.PendingTTL)
+	req, err := m.createPending(ctx, tx, enr, r, obj)
+	if err != nil {
+		return Request{}, err
 	}
 	return req, tx.Commit(ctx)
-}
-
-// withheldNames answers which of names a person has withheld from enrollment enrollmentID
-// (RevokeByApprover's withhold).
-func withheldNames(ctx context.Context, q querier, enrollmentID string, names []string) (map[string]bool, error) {
-	rows, err := q.Query(ctx, `select name from withheld_secrets where enrollment_id=$1 and name = any($2)`, enrollmentID, names)
-	if err != nil {
-		return nil, err
-	}
-	withheld, err := pgx.CollectRows(rows, pgx.RowTo[string])
-	if err != nil {
-		return nil, err
-	}
-	out := make(map[string]bool, len(withheld))
-	for _, name := range withheld {
-		out[name] = true
-	}
-	return out, nil
 }
 
 // evaluation is one pass of the policy over a request's names. approver is set when a name needs
@@ -257,17 +242,12 @@ type evaluation struct {
 	approver  string
 }
 
-// evaluate is the policy's answer for each of names to requester, a withheld name's by
-// policy.Set.EvaluateWithheld.
-func evaluate(set *policy.Set, names []string, requester policy.Requester, withheld map[string]bool) (evaluation, error) {
+// evaluate is the policy's answer for each of names to requester.
+func evaluate(set *policy.Set, names []string, requester policy.Requester) (evaluation, error) {
 	e := evaluation{decisions: make([]SecretDecision, 0, len(names)), state: "granted"}
 	denied := false
 	for _, name := range names {
-		decide := set.Evaluate
-		if withheld[name] {
-			decide = set.EvaluateWithheld
-		}
-		d, err := decide(name, requester)
+		d, err := set.Evaluate(name, requester)
 		if err != nil {
 			return evaluation{}, err
 		}
@@ -335,36 +315,9 @@ func (m *Machine) insertRequest(ctx context.Context, tx pgx.Tx, r newRequest) er
 		auditDetail{"state": r.state, "secrets": r.names()})
 }
 
-// createPending records a pending request and its credential-request record together, in one
-// transaction that serializes identical requests from one enrollment on an advisory lock, so a
-// concurrent twin coalesces onto it instead of writing a second record.
-func (m *Machine) createPending(ctx context.Context, enr enrollmentRow, r newRequest, obj record.RequestObject) (Request, error) {
-	sorted := sortedCopy(r.names())
-	tx, err := m.Store.Pool.Begin(ctx)
-	if err != nil {
-		return Request{}, err
-	}
-	defer tx.Rollback(ctx)
-	if err := lockIdenticalPending(ctx, tx, r.enrollmentID, sorted); err != nil {
-		return Request{}, err
-	}
-	if err := lockLiveEnrollment(ctx, tx, r.enrollmentID); err != nil {
-		return Request{}, err
-	}
-	existingID, err := matchingRequest(ctx, tx, `select r.id, array_agg(s.name) from requests r join request_secrets s on s.request_id=r.id
-		where r.enrollment_id=$1 and r.state='pending' group by r.id`, r.enrollmentID, sorted)
-	if err != nil {
-		return Request{}, err
-	}
-	if existingID != "" {
-		if err := tx.Commit(ctx); err != nil {
-			return Request{}, err
-		}
-		existing, err := m.Get(ctx, existingID)
-		existing.Coalesced = true
-		return existing, err
-	}
-
+// createPending writes, in Create's transaction, a pending request and its credential-request
+// record.
+func (m *Machine) createPending(ctx context.Context, tx pgx.Tx, enr enrollmentRow, r newRequest, obj record.RequestObject) (Request, error) {
 	body := record.Body{
 		Request:         obj.Compact,
 		Approver:        r.approver,
@@ -382,15 +335,12 @@ func (m *Machine) createPending(ctx context.Context, enr enrollmentRow, r newReq
 	if err := m.insertRequest(ctx, tx, r); err != nil {
 		return Request{}, err
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return Request{}, err
-	}
-	rid := recordID
-	return Request{ID: r.id, State: "pending", Secrets: r.decisions, RecordID: &rid}, nil
+	return Request{ID: r.id, State: "pending", Secrets: r.decisions, RecordID: &recordID}, nil
 }
 
-// lockIdenticalPending takes the advisory lock createPending serializes identical pending requests
-// from one enrollment on, keyed by the enrollment and its sorted names, until tx ends.
+// lockIdenticalPending takes the advisory lock Create serializes identical requests from one
+// enrollment on, keyed by the enrollment and its sorted names, until tx ends: a twin of a request
+// that is still pending finds it and coalesces onto it instead of writing a second record.
 func lockIdenticalPending(ctx context.Context, tx pgx.Tx, enrollmentID string, sorted []string) error {
 	key, err := json.Marshal([]any{enrollmentID, sorted})
 	if err != nil {
@@ -485,7 +435,7 @@ func (m *Machine) ApplyDecision(ctx context.Context, recordID string, approve bo
 		return Decision{}, err
 	}
 	var live bool
-	var enr enrollmentRow
+	enr := enrollmentRow{ID: enrollmentID}
 	if err := tx.QueryRow(ctx, `select revoked_at is null and lease_expires_at > now(), operator from enrollments where id=$1 for share`, enrollmentID).
 		Scan(&live, &enr.Operator); err != nil {
 		return Decision{}, err
@@ -506,7 +456,11 @@ func (m *Machine) ApplyDecision(ctx context.Context, recordID string, approve bo
 		return Decision{}, err
 	}
 	if approve {
-		if err := m.currentPolicyAdmits(ctx, tx, requestID, enr.requester(), login); err != nil {
+		requester, err := enr.requester(ctx, tx)
+		if err != nil {
+			return Decision{}, err
+		}
+		if err := m.currentPolicyAdmits(ctx, tx, requestID, requester, login); err != nil {
 			return Decision{}, err
 		}
 	}
@@ -559,10 +513,13 @@ func (m *Machine) ApplyDecision(ctx context.Context, recordID string, approve bo
 // request was made moves who may approve it: a request waiting on anyone for a secret that is now
 // a person's is that person's alone to approve, and one waiting on a person for a secret another
 // person must now approve is no one's to approve (its record's approver may still deny it;
-// otherwise it expires, or its session cancels it and asks again). A denial releases nothing, so
-// ApplyDecision does not ask. A name the current policy grants at once, denies or no longer serves
-// names no approver, so it leaves the approval to the record's approver; Values refuses a grant of
-// the last two at its first read.
+// otherwise it expires, or its session cancels it and asks again). requester carries the names the
+// session's operator withheld from it, each human tier to the session, so a withheld name that the
+// request got automatically before the withhold is its owner's to approve (anyone's, for a shared
+// secret), whoever the record waits on. A denial releases nothing, so ApplyDecision does
+// not ask. A name the current policy grants at once, denies or no longer serves names no
+// approver, so it leaves the approval to the record's approver; Values refuses a grant of the last
+// two at its first read.
 func (m *Machine) currentPolicyAdmits(ctx context.Context, tx pgx.Tx, requestID string, requester policy.Requester, login string) error {
 	names, err := requestedSecrets(ctx, tx, requestID)
 	if err != nil {
@@ -655,30 +612,26 @@ func (m *Machine) RevokeGrant(ctx context.Context, grantID, enrollmentID string)
 }
 
 // RevokeByApprover ends a grant on a human's Dispatch login. The login must be the grant's
-// approver or its enrollment's operator (mayRevoke). Every name the grant's request was granted
-// automatically is withheld from the grant's session from then on (withhold), so the session's
-// later requests for it ask the owner (Create) rather than getting it again at once. It takes the
-// session's row before the grant's, the order every writer that locks both takes them in, and the
-// one lock createDecided reads the withheld names under, so a request deciding on the session as
-// this runs either is written first or sees what this withheld. Revoking an already-revoked grant
-// succeeds and changes nothing.
+// approver or its enrollment's operator (mayRevoke). When the operator revokes, every name the
+// grant's request got automatically is withheld from the grant's session from then on, and every
+// other live grant of the session that got one of those names automatically ends with it
+// (withhold), so the session asks before it gets the name again (Create). Another person's revoke
+// (an approver's of the grant) ends the grant alone and withholds nothing: the session is not
+// theirs. It locks the session's row in the statement that reads the grant, before it writes the
+// grant: the order every writer that locks both takes them in, and the one lock Create and
+// ApplyDecision read the withheld names under, so a request deciding on the session as this runs
+// either is written first, and then ended here if it got a withheld name, or decides with the
+// name withheld. Revoking an already-revoked grant succeeds and changes nothing.
 func (m *Machine) RevokeByApprover(ctx context.Context, grantID, login string) error {
 	tx, err := m.Store.Pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
-	var session string
-	if err := tx.QueryRow(ctx, `select enrollment_id from grants where id=$1`, grantID).Scan(&session); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(ctx, `select 1 from enrollments where id=$1 for no key update`, session); err != nil {
-		return err
-	}
-	var owner, requestID string
+	var session, requestID string
 	var approver, operator *string
 	if err := tx.QueryRow(ctx, `select g.enrollment_id, g.request_id, g.approver, e.operator
-		from grants g join enrollments e on e.id=g.enrollment_id where g.id=$1 for update of g`, grantID).Scan(&owner, &requestID, &approver, &operator); err != nil {
+		from grants g join enrollments e on e.id=g.enrollment_id where g.id=$1 for no key update of e`, grantID).Scan(&session, &requestID, &approver, &operator); err != nil {
 		return err
 	}
 	if !mayRevoke(login, approver, operator) {
@@ -692,28 +645,47 @@ func (m *Machine) RevokeByApprover(ctx context.Context, grantID, login string) e
 	if tag.RowsAffected() == 0 {
 		return nil
 	}
-	withheld, err := withhold(ctx, tx, owner, grantID, requestID)
-	if err != nil {
-		return err
-	}
 	detail := auditDetail{}
-	if len(withheld) > 0 {
-		detail["withheld"] = withheld
+	if operator != nil && record.CanonicalLogin(*operator) == record.CanonicalLogin(login) {
+		withheld, err := withhold(ctx, tx, session, requestID, actor)
+		if err != nil {
+			return err
+		}
+		if len(withheld) > 0 {
+			detail["withheld"] = withheld
+		}
 	}
-	if err := audit(ctx, tx, "grant.revoked", owner, requestID, &grantID, actor, detail); err != nil {
+	if err := audit(ctx, tx, "grant.revoked", session, requestID, &grantID, actor, detail); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
 }
 
-// withhold withholds from enrollmentID every name request requestID, whose grant grantID a person
-// just revoked, was granted automatically, and answers the names it had not withheld before.
-func withhold(ctx context.Context, tx pgx.Tx, enrollmentID, grantID, requestID string) ([]string, error) {
-	rows, err := tx.Query(ctx, `insert into withheld_secrets (enrollment_id, name, grant_id)
-		select $1, name, $2 from request_secrets where request_id=$3 and decision=$4
-		order by name
-		on conflict do nothing
-		returning name`, enrollmentID, grantID, requestID, policy.Automatic)
+// withhold withholds from enrollmentID every name request requestID, whose grant its operator just
+// revoked, got automatically, and in the same statement ends every other live grant of the session
+// whose request got one of those names automatically, each with a grant.revoked audit row by actor
+// naming those of its names under "withheld". So no grant the session holds goes on releasing a
+// withheld name without someone having approved it there. It answers the names it had not withheld
+// before.
+func withhold(ctx context.Context, tx pgx.Tx, enrollmentID, requestID, actor string) ([]string, error) {
+	rows, err := tx.Query(ctx, `with names as (
+			select name from request_secrets where request_id=$2 and decision=$4
+		), withheld as (
+			insert into withheld_secrets (enrollment_id, name) select $1, name from names
+			on conflict do nothing
+			returning name
+		), ended as (
+			update grants g set revoked_at=now(), revoked_by=$3
+			where g.enrollment_id=$1 and g.revoked_at is null and g.expires_at > now()
+			and exists (select 1 from request_secrets a where a.request_id=g.request_id and a.decision=$4 and a.name in (select name from names))
+			returning g.id, g.request_id
+		), audited as (
+			insert into audit (kind, enrollment_id, request_id, grant_id, actor, detail)
+			select 'grant.revoked', $1, e.request_id, e.id, $3, jsonb_build_object('withheld', (select jsonb_agg(a.name order by a.name)
+				from request_secrets a where a.request_id=e.request_id and a.decision=$4 and a.name in (select name from names)))
+			from ended e
+		)
+		select name from withheld order by name`, enrollmentID, requestID, actor, policy.Automatic)
 	if err != nil {
 		return nil, err
 	}
@@ -788,21 +760,18 @@ func matchingRequest(ctx context.Context, q querier, query, enrollmentID string,
 // name-set match (never a subset or superset — the same matching rule coalescing uses for pending
 // requests) against a still-live grant (not revoked, not expired) under this enrollment is
 // returned as-is, with no new request row and no new record, as long as the policy it was
-// decided under is still current or the current policy still allows it (stillAllowed, the check
-// Values makes) and its whole approval chain still verifies (VerifyChain, the same check Values
-// makes). A caller that already holds a live grant for these exact names never re-asks a human
-// who already approved it, a policy tightened since then is never bypassed by reuse, and neither
-// is a chain that no longer verifies. A grant that holds a name withheld from the session without
-// anyone having approved it there (its decision was automatic) is never handed back, so revoking
-// one automatic grant of a secret cannot be undone by reusing another.
-func (m *Machine) reuseLiveGrant(ctx context.Context, enrollmentID string, names []string, set *policy.Set, requester policy.Requester) (Request, bool, error) {
+// decided under is still current or the current policy still allows it to the session
+// (stillAllowed, the check Values makes) and its whole approval chain still verifies (VerifyChain,
+// the same check Values makes). A caller that already holds a live grant for these exact names
+// never re-asks a human who already approved it, a policy tightened since then is never bypassed
+// by reuse, and neither is a chain that no longer verifies. No live grant holds a withheld name
+// nobody approved: the withhold ended each one (withhold).
+func (m *Machine) reuseLiveGrant(ctx context.Context, enr enrollmentRow, names []string, set *policy.Set) (Request, bool, error) {
 	id, err := matchingRequest(ctx, m.Store.Pool, `select r.id, array_agg(s.name) from requests r
 		join request_secrets s on s.request_id=r.id
 		join grants g on g.request_id=r.id
 		where r.enrollment_id=$1 and r.state='granted' and g.revoked_at is null and g.expires_at > now()
-		and not exists (select 1 from request_secrets a join withheld_secrets w on w.enrollment_id=r.enrollment_id and w.name=a.name
-			where a.request_id=r.id and a.decision='automatic')
-		group by r.id`, enrollmentID, sortedCopy(names))
+		group by r.id`, enr.ID, sortedCopy(names))
 	if err != nil || id == "" {
 		return Request{}, false, err
 	}
@@ -811,6 +780,10 @@ func (m *Machine) reuseLiveGrant(ctx context.Context, enrollmentID string, names
 		return Request{}, false, err
 	}
 	if rulesVersion != set.Version {
+		requester, err := enr.requester(ctx, m.Store.Pool)
+		if err != nil {
+			return Request{}, false, err
+		}
 		granted, err := requestedSecrets(ctx, m.Store.Pool, id)
 		if err != nil {
 			return Request{}, false, err

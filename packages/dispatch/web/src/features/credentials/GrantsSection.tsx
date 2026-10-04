@@ -10,7 +10,7 @@ import { type RevocableColumn, RevocableList } from "./RevocableList";
 
 /** How a grant came to be, for its Live grants row: the policy's, or the person who approved it. */
 function grantedBy(grant: CredentialGrant): string {
-  return grant.granted === "automatic" ? "Automatically" : `Approved by ${grant.approver ?? "—"}`;
+  return grant.granted === "automatic" ? "Automatically" : `Approved by ${grant.approver}`;
 }
 
 const columns: readonly RevocableColumn<CredentialGrant>[] = [
@@ -38,9 +38,10 @@ const columns: readonly RevocableColumn<CredentialGrant>[] = [
  * policy gave it without asking or someone approved it, and every grant the viewer approved on
  * anyone's session. Each row names how it was granted and is revocable with one click: Dispatch
  * sends the broker the viewer's own login, and the broker allows the revoke only when that login
- * is the grant's approver or its enrollment's operator. Revoking an automatic grant also makes
- * that session ask before it gets those secrets again. A pod enrollment's slot shows under its
- * enrollment, so the grants of two roles in one pod read apart. Rendered on the Settings page.
+ * is the grant's approver or its enrollment's operator. Only the operator sees an automatic grant,
+ * and revoking one also ends that session's other automatic grants of those secrets and makes it
+ * ask before it gets them again. A pod enrollment's slot shows under its enrollment, so the grants
+ * of two roles in one pod read apart. Rendered on the Settings page.
  */
 export function GrantsSection(): ReactNode {
   const queryClient = useQueryClient();

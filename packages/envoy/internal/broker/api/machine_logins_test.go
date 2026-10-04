@@ -19,6 +19,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/sjawhar/envoy/internal/broker/proof"
+	"github.com/sjawhar/envoy/internal/broker/store/storetest"
 )
 
 // wireLauncherCredential is one machine login in GET /v1/launcher-credentials's answer.
@@ -280,10 +281,6 @@ func TestAnEnrollmentRacingItsMachineLoginsRevokeIsLauncherInvalid(t *testing.T)
 	if _, err := tx.Exec(ctx, `update launcher_credentials set revoked_at=now() where id=$1`, credentialID); err != nil {
 		t.Fatalf("revoke the credential: %v", err)
 	}
-	var holder int
-	if err := tx.QueryRow(ctx, `select pg_backend_pid()`).Scan(&holder); err != nil {
-		t.Fatalf("read the holder's backend: %v", err)
-	}
 
 	sessionKey := newSigningKey(t)
 	thumbprint, err := proof.Thumbprint(&sessionKey.PublicKey)
@@ -322,20 +319,7 @@ func TestAnEnrollmentRacingItsMachineLoginsRevokeIsLauncherInvalid(t *testing.T)
 		done <- answer{response.StatusCode, body, err}
 	}()
 
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		var waiting int
-		if err := ts.Store.Pool.QueryRow(ctx, `select count(*) from pg_stat_activity where $1 = any(pg_blocking_pids(pid))`, holder).Scan(&waiting); err != nil {
-			t.Fatalf("read lock waiters: %v", err)
-		}
-		if waiting > 0 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("the enrollment never waited on the credential's row")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	storetest.AwaitLockWaiters(t, ts.Store.Pool, tx, 1)
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatalf("commit the revoke: %v", err)
 	}
