@@ -161,7 +161,7 @@ func TestSuspendTakesTheClaimOutOfTheWatch(t *testing.T) {
 		t.Fatalf("Suspend returned with the claim still in the watch, at %s", recorded.Incarnation)
 	}
 	g.eventually("the launcher to report the child gone", func() bool {
-		state, connected := g.r.launchers.state(workerToken)
+		state, connected := g.r.launchers.state(workerToken, loc.Sandbox.PodUID)
 		return connected && state.Child == nil
 	})
 	if g.pod(loc.Sandbox.Name) == nil {

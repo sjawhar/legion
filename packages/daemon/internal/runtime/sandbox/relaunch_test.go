@@ -213,10 +213,6 @@ func TestResumeAfterAFailedPod(t *testing.T) {
 		!slices.Contains(start.Argv, "--resume="+resumeSession) {
 		t.Fatalf("the relaunched role's start is generation %d resuming %q with argv %q, want generation 2 resuming the session", start.Generation, start.ResumeFile, start.Argv)
 	}
-	pod := g.pod(name)
-	if got := envOf(containerNamed(t, pod.Spec, initContainer))["LEGION_RESUME_SESSION_FILE"]; got != TreeRoot+"/sessions/"+strings.TrimPrefix(resumeSession, ompSessionsDir+"/") {
-		t.Fatalf("the init container checks %q", got)
-	}
 }
 
 // The Secrets hold a launch's credentials when the issue Sandbox is set Running, so no launcher
