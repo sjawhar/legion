@@ -1,9 +1,17 @@
 import { existsSync } from "node:fs";
+import { writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import starlight from "@astrojs/starlight";
 import { defineConfig } from "astro/config";
 import mermaid from "astro-mermaid";
 import starlightAutoSidebar from "starlight-auto-sidebar";
 import starlightLinksValidator from "starlight-links-validator";
+import {
+  thirdPartyNotices as notices,
+  packageRoot,
+  viteBundleInputs,
+} from "../../scripts/third-party-notices.ts";
 
 // A section's sidebar: its written pages, ordered by `sidebar.order` and then by slug, followed by
 // its generated Reference group when scripts/generate.ts has written one. Reference is a group of
@@ -17,6 +25,79 @@ function section(label, directory) {
     items.push({ label: "Reference", items: [{ autogenerate: { directory: reference } }] });
   }
   return { label, items };
+}
+
+/**
+ * Writes dist/THIRD_PARTY_NOTICES.txt, served at /legion/THIRD_PARTY_NOTICES.txt: the license of
+ * every third-party package whose code the site sends to a browser. Those are the client build's
+ * modules and assets (the server build only renders pages to HTML), the packages that generate the
+ * client code no source file records (GENERATED_CODE below), and Pagefind, whose search script
+ * Starlight writes into dist/pagefind once the build is done.
+ */
+function thirdPartyNotices() {
+  const site = fileURLToPath(new URL(".", import.meta.url));
+  const astro = packageRoot("astro", site);
+  const vite = packageRoot("vite", astro);
+  const starlightRoot = packageRoot("@astrojs/starlight", site);
+  const expressiveCode = packageRoot(
+    "expressive-code",
+    packageRoot("rehype-expressive-code", packageRoot("astro-expressive-code", starlightRoot))
+  );
+  // The client code no source file records: Astro's page script (its prefetch code, and the
+  // scripts integrations inject, which here is astro-mermaid's) and adapter config, Starlight's
+  // search config, Vite's and Rolldown's runtime helpers, and Expressive Code's script and
+  // stylesheet, which its core and plugins contribute to.
+  const GENERATED_CODE = [
+    { id: /^astro:scripts\/page\.js$/, packages: [astro, packageRoot("astro-mermaid", site)] },
+    { id: /^\0virtual:astro:/, packages: [astro] },
+    { id: /^\0virtual:starlight\//, packages: [starlightRoot] },
+    { id: /^\0vite\//, packages: [vite] },
+    { id: /^\0rolldown\/runtime\.js$/, packages: [packageRoot("rolldown", vite)] },
+    {
+      id: /^_astro\/ec\.[^/]+\.(js|css)$/,
+      packages: [
+        "@expressive-code/core",
+        "@expressive-code/plugin-frames",
+        "@expressive-code/plugin-shiki",
+        "@expressive-code/plugin-text-markers",
+      ].map((name) => packageRoot(name, expressiveCode)),
+    },
+  ];
+  const inputs = new Set();
+  let root = "";
+  return {
+    name: "third-party-notices",
+    hooks: {
+      "astro:config:setup": ({ command, updateConfig }) => {
+        if (command !== "build") return;
+        updateConfig({
+          vite: {
+            plugins: [
+              {
+                name: "third-party-notices-inputs",
+                apply: "build",
+                configResolved(config) {
+                  root = config.root;
+                },
+                async generateBundle(_options, bundle) {
+                  if (this.environment.name !== "client") return;
+                  for (const input of await viteBundleInputs(this, bundle, root, GENERATED_CODE)) {
+                    inputs.add(input);
+                  }
+                },
+              },
+            ],
+          },
+        });
+      },
+      "astro:build:done": async ({ dir }) => {
+        if (existsSync(new URL("pagefind", dir))) {
+          inputs.add(join(packageRoot("pagefind", starlightRoot), "package.json"));
+        }
+        await writeFile(new URL("THIRD_PARTY_NOTICES.txt", dir), await notices(inputs, root));
+      },
+    },
+  };
 }
 
 // Published by .github/workflows/docs.yaml to GitHub Pages at https://sjawhar.github.io/legion/.
@@ -41,5 +122,6 @@ export default defineConfig({
       ],
       plugins: [starlightLinksValidator(), starlightAutoSidebar()],
     }),
+    thirdPartyNotices(),
   ],
 });

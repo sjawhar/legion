@@ -2,7 +2,8 @@ name: Docs
 
 # Builds the documentation site (docs/site) on every pull request that could change it, and
 # publishes it to GitHub Pages (https://sjawhar.github.io/legion/) on every push to main. The site's
-# reference pages are generated from packages/ and skills/ at build time, so those paths rebuild it.
+# reference pages are generated from packages/ and skills/ at build time, so those paths rebuild it,
+# and scripts/third-party-notices.ts writes the THIRD_PARTY_NOTICES.txt it publishes.
 on:
   push:
     branches: [main]
@@ -10,12 +11,14 @@ on:
       - "docs/site/**"
       - "packages/**"
       - "skills/**"
+      - "scripts/third-party-notices.ts"
       - ".github/workflows/docs.yaml"
   pull_request:
     paths:
       - "docs/site/**"
       - "packages/**"
       - "skills/**"
+      - "scripts/third-party-notices.ts"
       - ".github/workflows/docs.yaml"
 
 concurrency:
@@ -93,9 +96,12 @@ jobs:
             docs/site/media/.work/harness
           if-no-files-found: ignore
       # Generates the reference pages, then builds the site; starlight-links-validator fails it on a
-      # broken internal link.
+      # broken internal link. The build writes dist/THIRD_PARTY_NOTICES.txt (docs/site/astro.config.mjs),
+      # failing on a package whose license cannot be determined; the listing shows the site ships it.
       - name: Build the docs site
-        run: bun run docs:build
+        run: |
+          bun run docs:build
+          ls -l docs/site/dist/THIRD_PARTY_NOTICES.txt
       - if: github.event_name == 'push'
         uses: actions/upload-pages-artifact@v5
         with:
