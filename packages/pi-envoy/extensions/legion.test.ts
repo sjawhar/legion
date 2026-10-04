@@ -1204,7 +1204,7 @@ describe("Legion OMP extension", () => {
       role === "merger"
         ? "the merger only verifies and reports"
         : role === "reviewer"
-          ? "the reviewer edits nothing except the final .legion/ cleanup commit via bash"
+          ? "the reviewer edits no code; its only commits are its review handoffs, made via bash"
           : "the architect delegates all code work to phase workers";
 
     for (const role of ["architect", "reviewer", "merger"] as const) {

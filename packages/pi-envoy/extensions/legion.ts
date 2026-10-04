@@ -359,7 +359,7 @@ const CODE_MUTATION_TOOLS = ["edit", "write", "apply_patch"];
  * is held to the same refusal (every command but a single `legion` one). */
 export const CODE_TOOL_REFUSAL: Readonly<Partial<Record<LegionRole, string>>> = {
   architect: "the architect delegates all code work to phase workers",
-  reviewer: "the reviewer edits nothing except the final .legion/ cleanup commit via bash",
+  reviewer: "the reviewer edits no code; its only commits are its review handoffs, made via bash",
   merger: "the merger only verifies and reports",
 };
 

@@ -477,7 +477,7 @@ func TestHandoffCompleteResolvesTheCommitWithTheJJBootResolved(t *testing.T) {
 	}
 }
 
-// The merger verifies and publishes READY and writes no handoff (internal/prompts/roles/merger.md:
+// The merger verifies and sends READY and writes no handoff (internal/prompts/roles/merger.md:
 // "merger is not a file-backed phase"), so its completion needs no .legion file and reports the
 // commit its workspace sits on.
 func TestHandoffCompleteReadyForTheMergerNeedsNoHandoffFile(t *testing.T) {
