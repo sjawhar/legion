@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"io"
 	"log/slog"
@@ -12,6 +13,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/config"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
+	"github.com/sjawhar/envoy/internal/dispatch/files"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
@@ -40,6 +42,9 @@ var subcommands = []subcommand{
 	}},
 	{"census", func(ctx context.Context, _ []string, env settingValues, stdout, stderr io.Writer) int {
 		return census(ctx, env.get("DATABASE_URL"), stdout, stderr)
+	}},
+	{"backfill-files", func(ctx context.Context, args []string, env settingValues, stdout, _ io.Writer) int {
+		return backfillFiles(ctx, args, env.get("DATABASE_URL"), strings.TrimSpace(env.get("DISPATCH_FILE_STORE_BUCKET")), stdout)
 	}},
 	{"settings", func(_ context.Context, _ []string, _ settingValues, stdout, stderr io.Writer) int {
 		if err := writeSettings(stdout); err != nil {
@@ -142,6 +147,66 @@ func backfillAnchorBlocks(ctx context.Context, databaseURL string, out io.Writer
 		return 1
 	}
 	writeAnchorBlockBackfillReport(out, result)
+	return 0
+}
+
+// backfillFiles moves every uploaded file's bytes from Postgres into the bucket
+// DISPATCH_FILE_STORE_BUCKET names (files.BackfillRows); with --verify-only it reads back every
+// file already moved and checks it against its row's hash, moving nothing (files.VerifyRows); with
+// --restore, the rollback, it writes every moved file's bytes back into its row from the bucket
+// (files.RestoreRows). Each pass names the rows it could not do and goes on past them, exits 1
+// when any failed, and can be run again at any time; the server serves a row from its bytes
+// whenever it holds them.
+func backfillFiles(ctx context.Context, args []string, databaseURL, bucket string, out io.Writer) int {
+	flags := flag.NewFlagSet("backfill-files", flag.ContinueOnError)
+	flags.SetOutput(out)
+	verifyOnly := flags.Bool("verify-only", false, "read back every file already moved and check it against its row's hash, moving nothing")
+	restore := flags.Bool("restore", false, "write every moved file's bytes back into its row from the bucket: the rollback")
+	if err := flags.Parse(args); err != nil {
+		return 2
+	}
+	if flags.NArg() > 0 {
+		fmt.Fprintf(out, "backfill-files: unexpected argument %q; the flags are --verify-only and --restore\n", flags.Arg(0))
+		return 2
+	}
+	if *verifyOnly && *restore {
+		fmt.Fprintln(out, "backfill-files: --verify-only and --restore cannot both be set")
+		return 2
+	}
+	if bucket == "" {
+		fmt.Fprintln(out, "backfill-files: DISPATCH_FILE_STORE_BUCKET is required")
+		return 1
+	}
+	database, ok := openMigrated(ctx, "backfill-files", databaseURL, out)
+	if !ok {
+		return 1
+	}
+	defer database.Pool.Close()
+	fileStore, err := files.NewS3(ctx, bucket)
+	if err != nil {
+		fmt.Fprintf(out, "backfill-files: %v\n", err)
+		return 1
+	}
+	if err := fileStore.Healthy(ctx); err != nil {
+		fmt.Fprintf(out, "backfill-files: the bucket is not reachable: %v\n", err)
+		return 1
+	}
+	pass, verb := files.BackfillRows, "moved"
+	switch {
+	case *verifyOnly:
+		pass, verb = files.VerifyRows, "verified"
+	case *restore:
+		pass, verb = files.RestoreRows, "restored"
+	}
+	report, err := pass(ctx, database.Pool, fileStore, out)
+	fmt.Fprintf(out, "backfill-files: %s=%d bytes=%d failed=%d\n", verb, report.Done, report.Bytes, len(report.Failed))
+	if err != nil {
+		fmt.Fprintf(out, "backfill-files: stopped: %v\n", err)
+		return 1
+	}
+	if len(report.Failed) > 0 {
+		return 1
+	}
 	return 0
 }
 
