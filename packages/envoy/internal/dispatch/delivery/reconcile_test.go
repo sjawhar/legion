@@ -125,7 +125,7 @@ func TestReconcileCatchesAMissedDeployRun(t *testing.T) {
 }
 
 // TestReconcileRecordsAMissingPermissionByNameAndDoesNotAdvanceLastReconcileAt proves LEGION-567's
-// Open Item 1: a missing GitHub App permission (Actions here) is reported by name in
+// acceptance bar: a missing GitHub App permission (Actions here) is reported by name in
 // delivery_settings.last_error, and last_reconcile_at is left exactly as it was -- never advanced
 // as if the pass had actually done something. Blocking per the acceptance gate.
 func TestReconcileRecordsAMissingPermissionByNameAndDoesNotAdvanceLastReconcileAt(t *testing.T) {

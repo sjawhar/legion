@@ -143,6 +143,21 @@ func RateLimit(status int, header http.Header, body []byte) *RateLimitError {
 	return limited
 }
 
+// CheckResponse turns a response's status/header/body into an error only when status is not 200:
+// RateLimit's own *RateLimitError when the response is a GitHub rate limit, else a generic
+// "status %d: %s" error carrying the raw body. Factors the identical "check rate limit, then
+// check status" three lines delivery's GitHub fetchers (github_prs.go, github_runs.go,
+// client.go's own ListInstallationRepositories) all repeated at every call site.
+func CheckResponse(status int, header http.Header, body []byte) error {
+	if status == http.StatusOK {
+		return nil
+	}
+	if limited := RateLimit(status, header, body); limited != nil {
+		return limited
+	}
+	return fmt.Errorf("status %d: %s", status, body)
+}
+
 // nextLink returns the rel="next" target of an RFC 8288 Link header, refusing one outside the
 // client's API origin: the next page is fetched with the App's JWT.
 func nextLink(header, base string) (string, error) {

@@ -2444,5 +2444,8 @@ export interface DeliveryTimelineResponse {
   readonly freshness: {
     readonly last_event_at: string | null;
     readonly last_reconcile_at: string | null;
+    /** The most recent reconcile pass's failure (a missing permission, a rate limit, any other
+     *  error), named rather than a generic staleness indicator; null once a pass has succeeded. */
+    readonly last_error: string | null;
   };
 }

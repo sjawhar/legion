@@ -32,7 +32,25 @@ export function formatAge(seconds: number): string {
   return `${Math.floor(seconds / 3600)} h ago`;
 }
 
-function reconcileRow(lastReconcileAt: string | null, nowMs: number): FreshnessRow {
+function reconcileRow(
+  lastReconcileAt: string | null,
+  lastError: string | null,
+  nowMs: number
+): FreshnessRow {
+  // A named failure always wins over the age-based staleness text: last_reconcile_at not
+  // advancing on a failed pass (reconcile.go's RecordReconcileError/RecordReconcileSuccess
+  // contract) means the age alone can't tell "stale because nothing's happened" apart from
+  // "stale because every pass has been failing the same way" -- last_error is exactly that
+  // distinction, so a stale-but-healthy row must look different from a failing one.
+  if (lastError !== null) {
+    const last = lastReconcileAt === null ? "never" : new Date(lastReconcileAt).toLocaleString();
+    return {
+      name: "reconcile",
+      red: true,
+      text: `Reconcile failing: ${lastError}`,
+      detail: `Reconcile: failing (${lastError}); last successful pass ${last}`,
+    };
+  }
   if (lastReconcileAt === null) {
     return {
       name: "reconcile",
@@ -79,7 +97,7 @@ function eventRow(lastEventAt: string | null, nowMs: number): FreshnessRow {
 
 export function sourceFreshness(freshness: DeliveryFreshness, nowMs: number): FreshnessRow[] {
   return [
-    reconcileRow(freshness.last_reconcile_at, nowMs),
+    reconcileRow(freshness.last_reconcile_at, freshness.last_error, nowMs),
     eventRow(freshness.last_event_at, nowMs),
   ];
 }

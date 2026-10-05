@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -171,5 +172,35 @@ func TestGetDeliveryTimelineComputesDeployedStatusAndFacets(t *testing.T) {
 	}
 	if len(otherBody.Runs) != 1 || otherBody.Runs[0].PRs == nil || len(otherBody.Runs[0].PRs) != 0 {
 		t.Fatalf("repo=acme/other filter: runs[0].prs = %+v, want a non-nil empty slice (the shipped PR is excluded by the active repo facet)", otherBody.Runs)
+	}
+}
+
+// TestGetDeliveryTimelineSurfacesReconcileErrorOnFreshness proves a recorded reconcile failure
+// (delivery_settings.last_error) reaches the API's freshness object by name, not just the
+// database -- a stale-but-healthy pass and a failing one must be distinguishable on the wire.
+func TestGetDeliveryTimelineSurfacesReconcileErrorOnFreshness(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	ctx := context.Background()
+	if _, err := delivery.PutSettings(ctx, database.Pool, delivery.DeliverySettings{
+		DeployRepo: "acme/widgets", DeployWorkflowPath: ".github/workflows/deploy.yml",
+		ProductionJobName: "widgets-release / widgets-release", PRChecksWorkflowPath: ".github/workflows/pr-checks.yml",
+		PopulationAuthors: []string{"octocat"},
+	}, model.Actor{Kind: "system", ID: "test"}); err != nil {
+		t.Fatalf("seed settings: %v", err)
+	}
+	if err := delivery.RecordReconcileError(ctx, database.Pool, "the installation lacks Actions: read on acme/widgets"); err != nil {
+		t.Fatalf("seed reconcile error: %v", err)
+	}
+
+	response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/delivery/timeline", nil, "alice")
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	var body delivery.DeliveryTimelineResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body.Freshness.LastError == nil || *body.Freshness.LastError != "the installation lacks Actions: read on acme/widgets" {
+		t.Fatalf("freshness.last_error = %v, want the recorded permission failure by name", body.Freshness.LastError)
 	}
 }

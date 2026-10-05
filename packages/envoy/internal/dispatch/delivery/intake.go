@@ -13,7 +13,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"net/url"
 	"path"
 	"regexp"
@@ -409,11 +408,8 @@ func fetchSessionTrailers(ctx context.Context, client *githubapp.Client, owner, 
 		if err != nil {
 			return sessions, fmt.Errorf("fetch commits of PR #%d page %d: %w", number, page, err)
 		}
-		if limited := githubapp.RateLimit(status, header, body); limited != nil {
-			return sessions, fmt.Errorf("fetch commits of PR #%d page %d: %w", number, page, limited)
-		}
-		if status != http.StatusOK {
-			return sessions, fmt.Errorf("fetch commits of PR #%d page %d: status %d", number, page, status)
+		if err := githubapp.CheckResponse(status, header, body); err != nil {
+			return sessions, fmt.Errorf("fetch commits of PR #%d page %d: %w", number, page, err)
 		}
 		var commits []commitMessagePayload
 		if err := json.Unmarshal(body, &commits); err != nil {

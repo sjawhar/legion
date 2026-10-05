@@ -57,18 +57,14 @@ func GetSettings(ctx context.Context, pool *store.Pool) (DeliverySettings, error
 	return settings, nil
 }
 
-// Queryer is the subset of *store.Pool and pgx.Tx PutSettings needs, so a caller can run it
-// inside its own transaction (to append an event and publish it the same way every sibling
-// settings route does) or directly against the pool when no event is needed (tests, the
-// throwaway backfill-verification harness).
-type Queryer interface {
-	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
-}
-
 // PutSettings upserts the one delivery_settings row, clearing the freshness columns: a settings
 // change (a different repository, a different population) makes the previous freshness
-// meaningless, and the next reconcile sets it again from scratch.
-func PutSettings(ctx context.Context, q Queryer, settings DeliverySettings, actor model.Actor) (DeliverySettings, error) {
+// meaningless, and the next reconcile sets it again from scratch. Takes the pool directly, not a
+// transaction: putDeliverySettings (api/settings_delivery.go) deliberately does not wrap this in
+// a transaction+event+publish the way sibling settings routes do, since delivery_settings is a
+// true singleton with no project/issue/artifact to own an event against (see that handler's own
+// doc comment and events/broker.go's eventOwnerKey).
+func PutSettings(ctx context.Context, pool *store.Pool, settings DeliverySettings, actor model.Actor) (DeliverySettings, error) {
 	actorJSON, err := json.Marshal(actor)
 	if err != nil {
 		return DeliverySettings{}, fmt.Errorf("encode delivery settings author: %w", err)
@@ -83,7 +79,7 @@ func PutSettings(ctx context.Context, q Queryer, settings DeliverySettings, acto
 	if excludedRepos == nil {
 		excludedRepos = []string{}
 	}
-	return ScanSettings(q.QueryRow(ctx, `
+	return ScanSettings(pool.QueryRow(ctx, `
 		insert into delivery_settings (
 			singleton, deploy_repo, deploy_workflow_path, production_job_name,
 			pr_checks_workflow_path, population_authors, excluded_repos, updated_by

@@ -267,27 +267,24 @@ func SearchMergedPullRequestsAcrossInstallation(ctx context.Context, client *git
 }
 
 // searchMergedPullRequests pages a GraphQL search query over [since, until) through fetchWindowed
-// (windowed.go), rebuilding the query (and resetting the GraphQL cursor) whenever fetchWindowed
-// calls fetchPage with a different [since, until) than the previous call -- which happens exactly
-// once per recursive half, never within one half's own pagination loop.
+// (windowed.go). newFetcher builds a fresh query string and a fresh (nil) cursor for every
+// window fetchWindowed asks for -- the original call and each recursive half -- so GitHub's
+// own cursor, not a REST page number, is this fetcher's only pagination state.
 func searchMergedPullRequests(ctx context.Context, client *githubapp.Client, token string, repos, authors []string, since, until time.Time) ([]FetchedPullRequest, error) {
 	scope := searchScopeLabel(repos)
-	var cursor string
-	var windowSince, windowUntil time.Time
-	fetchPage := func(page int, since, until time.Time) ([]FetchedPullRequest, int, error) {
-		if !since.Equal(windowSince) || !until.Equal(windowUntil) {
-			cursor = ""
-			windowSince, windowUntil = since, until
-		}
+	newFetcher := func(since, until time.Time) func() ([]FetchedPullRequest, int, error) {
 		query := mergedPullRequestQuery(repos, authors, since, until)
-		result, err := fetchSearchPage(ctx, client, token, query, cursor)
-		if err != nil {
-			return nil, 0, err
+		var cursor string
+		return func() ([]FetchedPullRequest, int, error) {
+			result, err := fetchSearchPage(ctx, client, token, query, cursor)
+			if err != nil {
+				return nil, 0, err
+			}
+			cursor = result.endCursor
+			return result.items, result.issueCount, nil
 		}
-		cursor = result.endCursor
-		return result.items, result.issueCount, nil
 	}
-	return fetchWindowed(since, until, "search merged PRs for "+scope, fetchPage)
+	return fetchWindowed(since, until, "search merged PRs for "+scope, newFetcher)
 }
 
 // searchScopeLabel is what an error message calls the search scope.
@@ -331,10 +328,9 @@ const searchPullRequestsQuery = `query($q: String!, $after: String) {
 }`
 
 type searchPage struct {
-	items       []FetchedPullRequest
-	hasNextPage bool
-	endCursor   string
-	issueCount  int
+	items      []FetchedPullRequest
+	endCursor  string
+	issueCount int
 }
 
 // fetchSearchPage runs one page of query, after cursor ("" for the first page), returning the
@@ -351,11 +347,8 @@ func fetchSearchPage(ctx context.Context, client *githubapp.Client, token, query
 	if err != nil {
 		return searchPage{}, fmt.Errorf("page after %q: %w", after, err)
 	}
-	if limited := githubapp.RateLimit(status, header, body); limited != nil {
-		return searchPage{}, fmt.Errorf("page after %q: %w", after, limited)
-	}
-	if status != http.StatusOK {
-		return searchPage{}, fmt.Errorf("page after %q: status %d: %s", after, status, body)
+	if err := githubapp.CheckResponse(status, header, body); err != nil {
+		return searchPage{}, fmt.Errorf("page after %q: %w", after, err)
 	}
 	var response searchPullRequestsResponse
 	if err := json.Unmarshal(body, &response); err != nil {
@@ -375,9 +368,8 @@ func fetchSearchPage(ctx context.Context, client *githubapp.Client, token, query
 		items = append(items, fetchedPullRequestFromSearchNode(node))
 	}
 	return searchPage{
-		items:       items,
-		hasNextPage: response.Data.Search.PageInfo.HasNextPage,
-		endCursor:   response.Data.Search.PageInfo.EndCursor,
-		issueCount:  response.Data.Search.IssueCount,
+		items:      items,
+		endCursor:  response.Data.Search.PageInfo.EndCursor,
+		issueCount: response.Data.Search.IssueCount,
 	}, nil
 }

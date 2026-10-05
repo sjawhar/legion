@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"net/url"
 	"time"
 
@@ -113,10 +112,14 @@ func ListWorkflowRuns(ctx context.Context, client *githubapp.Client, owner, repo
 		return nil, fmt.Errorf("mint installation token for %s/%s workflow runs: %w", owner, repo, err)
 	}
 	scope := fmt.Sprintf("%s workflow runs for %s/%s", workflowPath, owner, repo)
-	fetchPage := func(page int, since, until time.Time) ([]FetchedRun, int, error) {
-		return fetchWorkflowRunsPage(ctx, client, token, owner, repo, workflowPath, since, until, page)
+	newFetcher := func(since, until time.Time) func() ([]FetchedRun, int, error) {
+		page := 0
+		return func() ([]FetchedRun, int, error) {
+			page++
+			return fetchWorkflowRunsPage(ctx, client, token, owner, repo, workflowPath, since, until, page)
+		}
 	}
-	return fetchWindowed(since, until, scope, fetchPage)
+	return fetchWindowed(since, until, scope, newFetcher)
 }
 
 func fetchWorkflowRunsPage(ctx context.Context, client *githubapp.Client, token, owner, repo, workflowPath string, since, until time.Time, page int) ([]FetchedRun, int, error) {
@@ -127,11 +130,8 @@ func fetchWorkflowRunsPage(ctx context.Context, client *githubapp.Client, token,
 	if err != nil {
 		return nil, 0, fmt.Errorf("page %d: %w", page, err)
 	}
-	if limited := githubapp.RateLimit(status, header, body); limited != nil {
-		return nil, 0, fmt.Errorf("page %d: %w", page, limited)
-	}
-	if status != http.StatusOK {
-		return nil, 0, fmt.Errorf("page %d: status %d: %s", page, status, body)
+	if err := githubapp.CheckResponse(status, header, body); err != nil {
+		return nil, 0, fmt.Errorf("page %d: %w", page, err)
 	}
 	var payload workflowRunsPayload
 	if err := json.Unmarshal(body, &payload); err != nil {
@@ -160,11 +160,8 @@ func FetchWorkflowRun(ctx context.Context, client *githubapp.Client, owner, repo
 	if err != nil {
 		return FetchedRun{}, fmt.Errorf("fetch %s/%s run %d: %w", owner, repo, runID, err)
 	}
-	if limited := githubapp.RateLimit(status, header, body); limited != nil {
-		return FetchedRun{}, fmt.Errorf("fetch %s/%s run %d: %w", owner, repo, runID, limited)
-	}
-	if status != http.StatusOK {
-		return FetchedRun{}, fmt.Errorf("fetch %s/%s run %d: status %d: %s", owner, repo, runID, status, body)
+	if err := githubapp.CheckResponse(status, header, body); err != nil {
+		return FetchedRun{}, fmt.Errorf("fetch %s/%s run %d: %w", owner, repo, runID, err)
 	}
 	var item workflowRunItem
 	if err := json.Unmarshal(body, &item); err != nil {
@@ -206,11 +203,8 @@ func ListWorkflowRunJobs(ctx context.Context, client *githubapp.Client, owner, r
 		if err != nil {
 			return nil, fmt.Errorf("list jobs of %s/%s run %d (page %d): %w", owner, repo, runID, page, err)
 		}
-		if limited := githubapp.RateLimit(status, header, body); limited != nil {
-			return nil, fmt.Errorf("list jobs of %s/%s run %d (page %d): %w", owner, repo, runID, page, limited)
-		}
-		if status != http.StatusOK {
-			return nil, fmt.Errorf("list jobs of %s/%s run %d (page %d): status %d: %s", owner, repo, runID, page, status, body)
+		if err := githubapp.CheckResponse(status, header, body); err != nil {
+			return nil, fmt.Errorf("list jobs of %s/%s run %d (page %d): %w", owner, repo, runID, page, err)
 		}
 		var payload jobsPayload
 		if err := json.Unmarshal(body, &payload); err != nil {

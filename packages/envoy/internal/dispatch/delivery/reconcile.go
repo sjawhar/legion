@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/duty"
@@ -90,8 +91,8 @@ func (r *Reconcile) runOnce(ctx context.Context) {
 
 	// Checked first and named distinctly from every other failure below: a missing Actions or
 	// Pull-requests permission would otherwise fail every GitHub call this pass makes in exactly
-	// the same shape as a transient 5xx, which is the one failure mode the plan calls out by name
-	// as needing loud, distinct surfacing (Open Item 1).
+	// the same shape as a transient 5xx, which this slice's acceptance bar (LEGION-567) requires
+	// surfacing loudly and by name, not folding into a generic fetch failure.
 	if _, err := r.github.DeliveryPermissions(ctx, owner, repo); err != nil {
 		slog.Error("dispatch delivery: GitHub App permission check", "error", err)
 		r.fail(ctx, err)
@@ -212,43 +213,72 @@ func (r *Reconcile) reconcilePullRequest(ctx context.Context, settings DeliveryS
 	})
 }
 
+// reconcilePartialConcurrency bounds how many partial pull requests reconcilePartialPullRequests
+// completes at once. Each one makes two sequential GitHub calls (FetchPullRequest, then
+// fetchSessionTrailers once merged); run one at a time, a 3,500-PR backfill (CONTRACT.md's own
+// measured population size) serializes thousands of round trips end to end. 8 is GitHub's own
+// commonly-cited guidance for a single App installation's concurrent request budget before
+// secondary rate limiting becomes likely -- enough to meaningfully parallelize a backfill without
+// treating a single reconcile pass as free to hammer the API as hard as it can.
+const reconcilePartialConcurrency = 8
+
 // reconcilePartialPullRequests completes every stored partial row (written by intake when its
 // completing fetch failed, or by this reconcile's own merged-PR search, which never carries the
-// completing fields) with a single-pull-request fetch.
+// completing fields) with a single-pull-request fetch, up to reconcilePartialConcurrency at once.
+// Each partial row is a distinct (repo, number) key, so concurrent upserts never race each other;
+// a rate-limit hit on one still lets every already-in-flight completion finish (the 429/403 is
+// logged and that one row tried again next pass, not retried in-loop or treated as fatal to the
+// rest of this pass).
 func (r *Reconcile) reconcilePartialPullRequests(ctx context.Context) error {
 	partials, err := ListPartialPullRequests(ctx, r.pool)
 	if err != nil {
 		return fmt.Errorf("list partial pull requests: %w", err)
 	}
+	semaphore := make(chan struct{}, reconcilePartialConcurrency)
+	var wg sync.WaitGroup
 	for _, pr := range partials {
-		owner, repo, err := splitRepo(pr.Repo)
-		if err != nil {
-			slog.Warn("dispatch delivery: partial pull request", "repo", pr.Repo, "number", pr.Number, "error", err)
-			continue
-		}
-		fetched, err := FetchPullRequest(ctx, r.github, owner, repo, pr.Number)
-		if err != nil {
-			slog.Warn("dispatch delivery: complete partial pull request", "repo", pr.Repo, "number", pr.Number, "error", err)
-			continue
-		}
-		if fetched.MergedAt == nil {
-			continue
-		}
-		sessions, err := fetchSessionTrailers(ctx, r.github, owner, repo, pr.Number)
-		if err != nil {
-			slog.Warn("dispatch delivery: fetch session trailers", "repo", pr.Repo, "number", pr.Number, "error", err)
-		}
-		issueKey := resolveIssueKey(ctx, r.pool, fetched.Title, fetched.Body)
-		if err := UpsertPullRequest(ctx, r.pool, DeliveryPullRequest{
-			Repo: pr.Repo, Number: pr.Number, Title: fetched.Title, URL: fetched.URL, Author: fetched.Author,
-			CreatedAt: &fetched.CreatedAt, MergedAt: fetched.MergedAt, FirstCommitAt: fetched.FirstCommitAt,
-			MergeCommitSHA: fetched.MergeCommitSHA, Additions: fetched.Additions, Deletions: fetched.Deletions,
-			Rework: IsRework(fetched.Title), IssueKey: issueKey, Sessions: sessions, Partial: false,
-		}); err != nil {
-			slog.Warn("dispatch delivery: upsert completed pull request", "repo", pr.Repo, "number", pr.Number, "error", err)
-		}
+		wg.Add(1)
+		semaphore <- struct{}{}
+		go func(pr DeliveryPullRequest) {
+			defer wg.Done()
+			defer func() { <-semaphore }()
+			r.completePartialPullRequest(ctx, pr)
+		}(pr)
 	}
+	wg.Wait()
 	return nil
+}
+
+// completePartialPullRequest is reconcilePartialPullRequests' per-row body, split out so it can
+// run as its own goroutine: every error is logged and swallowed here, never returned, since one
+// row's failure must not stop any other row's completion already in flight.
+func (r *Reconcile) completePartialPullRequest(ctx context.Context, pr DeliveryPullRequest) {
+	owner, repo, err := splitRepo(pr.Repo)
+	if err != nil {
+		slog.Warn("dispatch delivery: partial pull request", "repo", pr.Repo, "number", pr.Number, "error", err)
+		return
+	}
+	fetched, err := FetchPullRequest(ctx, r.github, owner, repo, pr.Number)
+	if err != nil {
+		slog.Warn("dispatch delivery: complete partial pull request", "repo", pr.Repo, "number", pr.Number, "error", err)
+		return
+	}
+	if fetched.MergedAt == nil {
+		return
+	}
+	sessions, err := fetchSessionTrailers(ctx, r.github, owner, repo, pr.Number)
+	if err != nil {
+		slog.Warn("dispatch delivery: fetch session trailers", "repo", pr.Repo, "number", pr.Number, "error", err)
+	}
+	issueKey := resolveIssueKey(ctx, r.pool, fetched.Title, fetched.Body)
+	if err := UpsertPullRequest(ctx, r.pool, DeliveryPullRequest{
+		Repo: pr.Repo, Number: pr.Number, Title: fetched.Title, URL: fetched.URL, Author: fetched.Author,
+		CreatedAt: &fetched.CreatedAt, MergedAt: fetched.MergedAt, FirstCommitAt: fetched.FirstCommitAt,
+		MergeCommitSHA: fetched.MergeCommitSHA, Additions: fetched.Additions, Deletions: fetched.Deletions,
+		Rework: IsRework(fetched.Title), IssueKey: issueKey, Sessions: sessions, Partial: false,
+	}); err != nil {
+		slog.Warn("dispatch delivery: upsert completed pull request", "repo", pr.Repo, "number", pr.Number, "error", err)
+	}
 }
 
 // reconcileWorkflow lists kind's workflow runs created in [since, until) and upserts each one

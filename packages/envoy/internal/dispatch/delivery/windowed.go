@@ -11,13 +11,19 @@ import (
 // rather than recursing forever.
 const minimumSearchWindow = time.Second
 
-// fetchWindowed lists every result fetchPage answers over [since, until), splitting the window in
-// half and recursing whenever a page's own reported total exceeds 1,000 -- the one implementation
+// fetchWindowed lists every result over [since, until), splitting the window in half and
+// recursing whenever a window's own reported total exceeds 1,000 -- the one implementation
 // behind SearchMergedPullRequests's and ListWorkflowRuns's identical "page fully, halve on
 // overflow" logic (previously duplicated between github_prs.go and github_runs.go), so the two
-// cannot drift from each other. fetchPage(page, since, until) returns that page's items and the
-// window's total result count (GitHub repeats the same total on every page of one query);
-// fetchWindowed stops paging once it has read total items or an empty page.
+// cannot drift from each other.
+//
+// newFetcher is called once per window (the original call, and once per recursive half) and
+// returns a closure that pages that window from scratch: each call to the closure returns the
+// next page's items and the window's total result count (GitHub repeats the same total on every
+// page of one query), until an empty page or len(results) == total ends it. The page-advancing
+// mechanism is entirely the fetcher's own business -- a REST caller's own page-number counter, a
+// GraphQL caller's own cursor -- and never crosses into this shared bisection logic, so a REST
+// page number is never something a GraphQL caller has to carry.
 //
 // The two halves are NOT split at a bare midpoint on both sides: GitHub's date-range query
 // qualifiers (merged:A..B, created:A..B) are inclusive on BOTH ends, so searching [since, mid)
@@ -25,8 +31,9 @@ const minimumSearchWindow = time.Second
 // merged/created exactly at mid. The second half instead starts one second after the midpoint
 // (GitHub's own query granularity is one second), so the two halves partition the window with
 // neither a gap nor an overlap.
-func fetchWindowed[T any](since, until time.Time, scope string, fetchPage func(page int, since, until time.Time) ([]T, int, error)) ([]T, error) {
-	first, total, err := fetchPage(1, since, until)
+func fetchWindowed[T any](since, until time.Time, scope string, newFetcher func(since, until time.Time) func() ([]T, int, error)) ([]T, error) {
+	fetch := newFetcher(since, until)
+	first, total, err := fetch()
 	if err != nil {
 		return nil, fmt.Errorf("%s in [%s, %s): %w", scope, since, until, err)
 	}
@@ -36,11 +43,11 @@ func fetchWindowed[T any](since, until time.Time, scope string, fetchPage func(p
 			return nil, fmt.Errorf("%s: %d results in the window [%s, %s), which cannot be narrowed further", scope, total, since, until)
 		}
 		mid := since.Add(until.Sub(since) / 2)
-		before, err := fetchWindowed(since, mid, scope, fetchPage)
+		before, err := fetchWindowed(since, mid, scope, newFetcher)
 		if err != nil {
 			return nil, err
 		}
-		after, err := fetchWindowed(mid.Add(time.Second), until, scope, fetchPage)
+		after, err := fetchWindowed(mid.Add(time.Second), until, scope, newFetcher)
 		if err != nil {
 			return nil, err
 		}
@@ -48,8 +55,8 @@ func fetchWindowed[T any](since, until time.Time, scope string, fetchPage func(p
 	}
 
 	results := first
-	for page := 2; len(results) < total; page++ {
-		items, _, err := fetchPage(page, since, until)
+	for len(results) < total {
+		items, _, err := fetch()
 		if err != nil {
 			return nil, fmt.Errorf("%s in [%s, %s): %w", scope, since, until, err)
 		}

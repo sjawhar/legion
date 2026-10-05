@@ -193,7 +193,15 @@ func (c *Client) appJWT() (string, error) {
 
 // Installation resolves the App installation covering owner/repo and checks
 // its Contents permission. A GitHub 404 is ErrNoInstallation; a missing or
-// "none" Contents permission is ErrNoContentsRead.
+// "none" Contents permission is ErrNoContentsRead. Does not consult
+// RepositoryToken's installationID cache (c.repositories): that cache exists
+// so RepositoryToken can skip resolving owner/repo again before minting a
+// token by ID, but GitHub's installation-lookup endpoint already takes
+// owner/repo directly in one GET -- there is no separate "resolve the ID"
+// round trip here to skip, and a permissions check must read GitHub's
+// current answer every call regardless (that is this function's whole job;
+// a cached ID doesn't carry cached permissions with it, and an org admin can
+// revoke a permission between calls).
 func (c *Client) Installation(ctx context.Context, owner, repo string) (Installation, error) {
 	installation, err := c.installation(ctx, owner, repo)
 	if err != nil {
@@ -289,6 +297,12 @@ func (c *Client) RepositoryToken(ctx context.Context, owner, repo string) (strin
 // installationRepositoriesPerPage is GitHub's own page size for GET /installation/repositories.
 const installationRepositoriesPerPage = 100
 
+// maxInstallationRepositories bounds ListInstallationRepositories the same way
+// delivery.maxDeliveryWindow/maxRunsPerWindow/maxPullRequestsPerWindow bound their own queries:
+// an installation covering a very large org should fail loudly past this rather than build an
+// ever-growing, unbounded `repo:` qualifier list on every 5-minute reconcile pass.
+const maxInstallationRepositories = 2000
+
 // ListInstallationRepositories lists every repository ("owner/name") the App installation
 // covering owner/repo can see, via GET /installation/repositories (an installation-token
 // endpoint, paginated). LEGION-567's merged-PR search needs this to scope its query to exactly
@@ -308,11 +322,8 @@ func (c *Client) ListInstallationRepositories(ctx context.Context, owner, repo s
 		if err != nil {
 			return nil, fmt.Errorf("list installation repositories (page %d): %w", page, err)
 		}
-		if limited := RateLimit(status, header, body); limited != nil {
-			return nil, fmt.Errorf("list installation repositories (page %d): %w", page, limited)
-		}
-		if status != http.StatusOK {
-			return nil, fmt.Errorf("list installation repositories (page %d): status %d: %s", page, status, body)
+		if err := CheckResponse(status, header, body); err != nil {
+			return nil, fmt.Errorf("list installation repositories (page %d): %w", page, err)
 		}
 		var payload struct {
 			Repositories []struct {
@@ -327,6 +338,9 @@ func (c *Client) ListInstallationRepositories(ctx context.Context, owner, repo s
 		}
 		for _, repository := range payload.Repositories {
 			names = append(names, repository.FullName)
+		}
+		if len(names) > maxInstallationRepositories {
+			return nil, fmt.Errorf("list installation repositories: installation covers more than %d repositories", maxInstallationRepositories)
 		}
 		if len(payload.Repositories) < installationRepositoriesPerPage {
 			break

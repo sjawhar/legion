@@ -50,15 +50,22 @@ test("the Delivery sidebar nav entry opens the delivery timeline", async ({ brow
   // rather than only the route itself. Below `xl` (a phone viewport) the sidebar is a sheet
   // behind its own "Menu" control (app.tsx) -- that button's accessible name is its
   // `aria-label` ("Open navigation"), not its visible "Menu" text, since an aria-label
-  // overrides text content for accessible-name computation. Open it first when present, a
-  // no-op wait on a desktop viewport where it never renders.
+  // overrides text content for accessible-name computation. A one-shot `isVisible()` check here
+  // races the SPA's first render under load (CI's iphone project flaked on exactly this): wait
+  // for either the Menu button or the link itself to actually appear before deciding, rather
+  // than reading visibility once before the page has necessarily finished mounting.
   await page.goto("/");
   const menuButton = page.getByRole("button", { name: "Open navigation" });
-  if (await menuButton.isVisible().catch(() => false)) {
+  const deliveryLink = page.getByRole("link", { name: "Delivery" });
+  await Promise.race([
+    menuButton.waitFor({ state: "visible" }),
+    deliveryLink.waitFor({ state: "visible" }),
+  ]);
+  if (await menuButton.isVisible()) {
     await menuButton.click();
   }
-  await expect(page.getByRole("link", { name: "Delivery" })).toBeVisible();
-  await page.getByRole("link", { name: "Delivery" }).click();
+  await expect(deliveryLink).toBeVisible();
+  await deliveryLink.click();
 
   await expect(page).toHaveURL(/\/delivery$/);
   await expect(page.getByRole("heading", { name: "Delivery" })).toBeVisible();
