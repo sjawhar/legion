@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
@@ -28,6 +29,21 @@ func TestAWSReadReturnsErrNotFoundOnResourceNotFoundException(t *testing.T) {
 	_, err := r.Read(context.Background(), "arn:aws:secretsmanager:us-east-1:1:secret:missing")
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+}
+
+// TestAWSReadReturnsErrNotFoundForASecretScheduledForDeletion pins that a secret deleted with a
+// recovery window, which GetSecretValue refuses as InvalidRequestException rather than
+// ResourceNotFoundException, reads as not in the store, both from Secrets Manager's own answer
+// and from a Local holding such a secret.
+func TestAWSReadReturnsErrNotFoundForASecretScheduledForDeletion(t *testing.T) {
+	scheduled := &types.InvalidRequestException{Message: aws.String("You can't perform this operation on the secret because it was marked for deletion.")}
+	if _, err := (AWS{Client: stubSMAPI{err: scheduled}}).Read(context.Background(), "arn:aws:secretsmanager:us-east-1:1:secret:deleting"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Read(InvalidRequestException) = %v, want ErrNotFound", err)
+	}
+	deleting := LocalSecret{Name: "dev/agent-secrets/deleting", Value: "v", DeletedAt: new(time.Date(2026, 10, 12, 0, 0, 0, 0, time.UTC))}
+	if v, err := (AWS{Client: NewLocal(deleting)}).Read(context.Background(), deleting.Name); !errors.Is(err, ErrNotFound) || v != "" {
+		t.Fatalf("Read(a Local secret scheduled for deletion) = %q, %v; want ErrNotFound and no value", v, err)
 	}
 }
 

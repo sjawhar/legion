@@ -245,7 +245,8 @@ func matchesNameFilters(name string, filters []types.Filter) bool {
 }
 
 // GetSecretValue answers the AWSCURRENT value of the secret SecretId names, by name or by
-// LocalARN, and ResourceNotFoundException for one it does not hold or that has no value.
+// LocalARN; ResourceNotFoundException for one it does not hold or that has no value, and
+// InvalidRequestException for one scheduled for deletion, as Secrets Manager refuses that one.
 func (l *Local) GetSecretValue(_ context.Context, in *secretsmanager.GetSecretValueInput, _ ...func(*secretsmanager.Options)) (*secretsmanager.GetSecretValueOutput, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -256,6 +257,9 @@ func (l *Local) GetSecretValue(_ context.Context, in *secretsmanager.GetSecretVa
 	s, ok := l.secrets[strings.TrimPrefix(id, LocalARN(""))]
 	if !ok {
 		return nil, &types.ResourceNotFoundException{Message: aws.String("Secrets Manager can't find the specified secret.")}
+	}
+	if s.DeletedAt != nil {
+		return nil, &types.InvalidRequestException{Message: aws.String("You can't perform this operation on the secret because it was marked for deletion.")}
 	}
 	if s.Value == "" {
 		return nil, &types.ResourceNotFoundException{Message: aws.String("Secrets Manager can't find the specified secret value for staging label: AWSCURRENT")}

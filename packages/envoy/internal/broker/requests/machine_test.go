@@ -984,17 +984,33 @@ func TestUnchangedPermissionSurvivesAPolicyChange(t *testing.T) {
 
 // TestValuesNamesASecretDeletedBeforeTheNextRefresh pins that a granted secret deleted from Secrets
 // Manager before the policy's next refresh is refused as ErrSecretNotInStore naming the secret, not
-// an opaque failure.
+// an opaque failure: deleted at once, or scheduled for deletion with a recovery window (the
+// console's and the CLI's default), whose value Secrets Manager refuses to read as an invalid
+// request rather than a missing secret.
 func TestValuesNamesASecretDeletedBeforeTheNextRefresh(t *testing.T) {
-	m, enr, key, _ := newFixture(t)
-	ctx := context.Background()
-	granted, err := m.Create(ctx, enr, signRequest(t, m, key, "need it", "AUTO_TOKEN"), "")
-	if err != nil || granted.GrantID == nil {
-		t.Fatalf("Create = %+v, %v", granted, err)
-	}
-	fixtureStore(m).Delete(policytest.ID("AUTO_TOKEN"))
-	if _, _, err := m.Values(ctx, *granted.GrantID, enr); !errors.Is(err, ErrSecretNotInStore) || !strings.Contains(err.Error(), "AUTO_TOKEN") {
-		t.Fatalf("Values = %v, want ErrSecretNotInStore naming AUTO_TOKEN", err)
+	for shape, remove := range map[string]func(*secrets.Local){
+		"deleted at once": func(store *secrets.Local) { store.Delete(policytest.ID("AUTO_TOKEN")) },
+		"scheduled for deletion": func(store *secrets.Local) {
+			for _, s := range fixtureSecrets() {
+				if s.Name == policytest.ID("AUTO_TOKEN") {
+					s.DeletedAt = new(time.Now().Add(7 * 24 * time.Hour))
+					store.Put(s)
+				}
+			}
+		},
+	} {
+		t.Run(shape, func(t *testing.T) {
+			m, enr, key, _ := newFixture(t)
+			ctx := context.Background()
+			granted, err := m.Create(ctx, enr, signRequest(t, m, key, "need it", "AUTO_TOKEN"), "")
+			if err != nil || granted.GrantID == nil {
+				t.Fatalf("Create = %+v, %v", granted, err)
+			}
+			remove(fixtureStore(m))
+			if _, _, err := m.Values(ctx, *granted.GrantID, enr); !errors.Is(err, ErrSecretNotInStore) || !strings.Contains(err.Error(), "AUTO_TOKEN") {
+				t.Fatalf("Values = %v, want ErrSecretNotInStore naming AUTO_TOKEN", err)
+			}
+		})
 	}
 }
 

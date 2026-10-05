@@ -2167,7 +2167,10 @@ all refuse, so an approved grant outlives an owner change only while its approve
 approve the secret, or once the new tags give its session the secret without asking; a name
 withheld from the session that its request got automatically is judged as an approval by
 `decided_by`, since a live grant of it was approved after the withhold by someone the withheld name
-let approve it); a source missing from the secrets store is `404 SECRET_NOT_IN_STORE`.
+let approve it); a source missing from the secrets store is `404 SECRET_NOT_IN_STORE`, and so is one
+scheduled for deletion, which Secrets Manager keeps until its recovery window passes and answers
+`GetSecretValue` for with `InvalidRequestException` rather than `ResourceNotFoundException`
+(`secrets.AWS.Read` reads both as `ErrNotFound`, and `secrets.Local` answers each as it does).
 Migration 0009 defaults `request_secrets.delivery` to `inject`, which this broker neither writes nor
 reads, so a binary from before it can still be rolled back to.
 `RevokeGrant` lets a session end only its own grant (session proof); `RevokeByApprover` ends a grant
