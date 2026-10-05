@@ -413,7 +413,7 @@ it stays valid at the pool until it expires in any backup that holds it. So if a
 was taken between `0068`'s deploy and the post-roll restart, either delete those backups or sign
 out at the pool everyone whose `people.signed_in_at` is after `0068`'s deploy.
 
-Migration `0070_agent_artifacts` gives an artifact a third owner, an agent's conversation: the
+Migration `0071_agent_artifacts` gives an artifact a third owner, an agent's conversation: the
 nullable `artifacts.session_id`, a check that every artifact has exactly one owner (an issue,
 `issue_key` with its `project_key`; a project, `project_key` alone; or a session, a non-empty
 `session_id` alone), and `project_key` made nullable for the session's rows. `ref_key`, 0009's

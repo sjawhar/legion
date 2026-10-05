@@ -120,7 +120,7 @@ the bucket" has its rules and the task role's grant. `/healthz` reports the buck
 and never fails on it. The bucket and its policies live in the deployment repository
 (LEGION-520).
 
-An artifact has one of three owners (migration `0070`, `artifacts_one_owner`): an issue, a
+An artifact has one of three owners (migration `0071`, `artifacts_one_owner`): an issue, a
 project, or an agent's conversation (`session_id` alone, `ref_key` `agent/<session id>/<slug>`,
 addressed `dispatch://agent/<session id>/artifact/<slug>[@vN]`; `text.IsSessionID` is the one
 rule a session id is held to, by the grammar and by `api/agent_artifacts.go`'s routes, which

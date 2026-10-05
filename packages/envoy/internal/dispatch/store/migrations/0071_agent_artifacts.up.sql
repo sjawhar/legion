@@ -1,4 +1,4 @@
--- 0070_agent_artifacts.up.sql
+-- 0071_agent_artifacts.up.sql
 -- LEGION-541: an agent's conversation owns the files and images sent in it, a third artifact owner
 -- beside an issue and a project. Every artifact has exactly one owner (artifacts_one_owner):
 --   an issue    issue_key and project_key (the issue's project), session_id null;

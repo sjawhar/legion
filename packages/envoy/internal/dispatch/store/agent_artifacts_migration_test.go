@@ -8,13 +8,13 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-// 0070 makes an agent's session a third artifact owner. Every artifact written before it keeps its
+// 0071 makes an agent's session a third artifact owner. Every artifact written before it keeps its
 // ref_key; a session's artifact is addressed agent/<session>/<slug>; ref_key is the trigger's to
 // write, as it was the generated column's; and a row with no owner, or two, is refused.
-func TestMigrate0070AddressesAnAgentsArtifactsAndKeepsEveryOtherRefKey(t *testing.T) {
+func TestMigrate0071AddressesAnAgentsArtifactsAndKeepsEveryOtherRefKey(t *testing.T) {
 	ctx := context.Background()
 	store := openEmptyTestStore(t)
-	migrateThrough(t, store, 69)
+	migrateThrough(t, store, 70)
 	if _, err := store.Pool.Exec(ctx, `
 		insert into projects (key, name) values ('CORE', 'Core');
 		insert into issues (key, project_key, number, title, created_by, rank)
@@ -23,10 +23,10 @@ func TestMigrate0070AddressesAnAgentsArtifactsAndKeepsEveryOtherRefKey(t *testin
 			('CORE-1', 'CORE', 'spec', 'spec.md', 'doc', true, '{"kind":"user","id":"alice"}'),
 			(null, 'CORE', 'notes', 'notes.md', 'doc', false, '{"kind":"user","id":"alice"}');
 	`); err != nil {
-		t.Fatalf("seed artifacts at 0069: %v", err)
+		t.Fatalf("seed artifacts at 0070: %v", err)
 	}
 	if err := store.Migrate(ctx); err != nil {
-		t.Fatalf("migrate through 0070: %v", err)
+		t.Fatalf("migrate through 0071: %v", err)
 	}
 
 	refKeys := func() map[string]string {
@@ -47,7 +47,7 @@ func TestMigrate0070AddressesAnAgentsArtifactsAndKeepsEveryOtherRefKey(t *testin
 		return keys
 	}
 	if keys := refKeys(); keys["spec.md"] != "CORE-1/spec" || keys["notes.md"] != "CORE/notes" {
-		t.Fatalf("ref keys after 0070 = %v, want CORE-1/spec and CORE/notes kept", keys)
+		t.Fatalf("ref keys after 0071 = %v, want CORE-1/spec and CORE/notes kept", keys)
 	}
 
 	var refKey string

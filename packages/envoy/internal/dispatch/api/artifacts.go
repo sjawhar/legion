@@ -1222,7 +1222,7 @@ func scanArtifact(row pgx.Row) (model.Artifact, error) {
 	return artifact, nil
 }
 
-// artifactOwnerKey is the owner part of ref_key (artifactTarget.refPrefix), which the 0070
+// artifactOwnerKey is the owner part of ref_key (artifactTarget.refPrefix), which the 0071
 // trigger fills ref_key from, so a lookup by owner compares what ref_key was built from.
 const artifactOwnerKey = `coalesce(issue_key, project_key, 'agent/' || session_id)`
 
