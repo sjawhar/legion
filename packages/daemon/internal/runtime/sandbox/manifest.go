@@ -600,10 +600,13 @@ func (r *Runtime) initEnvironment(l launch) []corev1.EnvVar {
 
 // InitWaitSeconds bounds workspace-init provision's own wait to acquire another pod's lock on the
 // shared clone (`flock --timeout`, LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS): ceil(boot timeout) ×
-// (intervals + 1). A pod holding that lock is already past its own workspace-fetch clone — the
-// lock is provision's alone, taken after fetch finishes — so what remains of its own registration
-// deadline is this same budget, one interval of headroom included, and this wait outlasts it.
-// awaitTreeInitialized (relaunch.go) and the daemon's registration-deadline grace
+// (intervals + 1). In practice this almost never contends: lockTree (relaunch.go) already
+// serializes a tree's pods through their whole init phase one at a time, so two pods are never
+// both inside workspace-init's own provisioning step together. This wait is the lock's own
+// safety-net timeout for whatever can still race around that serialization (a pod recreated
+// outside the normal relaunch flow), not a budget matched against another pod's own remaining
+// registration deadline, which can still hold anywhere from none of its grace left to nearly all
+// of it. awaitTreeInitialized (relaunch.go) and the daemon's registration-deadline grace
 // (internal/daemon/kubernetes.go's registrationGrace) both need a wider bound than this alone,
 // since each waits out (or tolerates) a sibling pod's whole init phase, its own workspace-fetch
 // clone included: both add workspace.FetchTimeout on top of this same value, rather than using it

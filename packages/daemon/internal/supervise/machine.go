@@ -363,8 +363,14 @@ func NewMachine(ctx context.Context, deps Deps, c Claim) (*Machine, error) {
 	}
 	m.idle = sync.NewCond(&m.mu)
 	switch c.State {
-	case StateLaunching, StateShimConnected:
+	case StateLaunching:
 		m.armBoot()
+	case StateShimConnected:
+		// The hello that reached StateShimConnected already re-armed the registration deadline at
+		// its base bound before this restart (helloed, table.go): restoring must not bring the
+		// grace back, or a pod whose agent already said hello once would get it twice.
+		m.armBoot()
+		m.arm(TimerRegistration, m.deps.Timeouts.Boot*time.Duration(m.deps.Timeouts.RegistrationIntervals), "")
 	case StateReady, StateIdle:
 		m.askFirst = c.Pending != nil && c.Pending.ConfirmedAt.IsZero()
 	case StateWorking:

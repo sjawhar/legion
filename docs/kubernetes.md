@@ -1167,18 +1167,24 @@ The daemon probes a pod by reading it and consulting the worker stream's live re
   `internal/daemon/kubernetes.go`'s `registrationGrace`) until the shim's first hello, which can only
   arrive once both init containers have finished: from there the daemon re-arms the base deadline
   alone, the same one a tmux pane always ran under, since the grace has already done its job. A pod
-  that never says hello is retired at launch plus the full grace; one that says hello and never
-  registers is retired at hello plus the base deadline alone. A tmux pane carries no grace to begin
-  with, since it starts the agent at once with no init phase. The runtime's own wait for a tree's
-  other pods to finish initializing before this one provisions (`awaitTreeInitialized`) carries a
-  matching bound — `workspace.FetchTimeout` plus the same lock-wait budget — so it never gives up on
-  a sibling before the daemon's own registration-deadline grace for that sibling would (LEGION-585):
-  giving up early would fail this pod's own launch instead of waiting out the slow one. The lock
-  wait itself (`LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS`, the `flock --timeout` `workspace-init`
-  passes when contending for another pod's hold on the shared clone) stays `sandbox.InitWaitSeconds`
-  alone, with no added `FetchTimeout`: that lock is taken only in `workspace-init`'s own step, after
-  its pod's `workspace-fetch` has already finished, so what remains of that pod's own registration
-  deadline by the time it holds the lock is this same budget, one interval of headroom included
+  that never says hello is retired at launch plus the base deadline plus the full grace, armed as
+  one bound; one that says hello and never registers is retired at hello plus the base deadline
+  alone. A tmux pane carries no grace to begin with, since it starts the agent at once with no
+  init phase. The runtime's own wait for a tree's other pods to finish initializing before this
+  one provisions (`awaitTreeInitialized`) is `workspace.FetchTimeout` plus the same lock-wait
+  budget: the same total the daemon tolerates an unhelloed sibling for, before its own hello ever
+  arrives, so a launch waiting on one is bounded the same way the daemon bounds that sibling up to
+  its own hello (giving up early would fail this pod's own launch instead of waiting out the slow
+  one) — not a guarantee against a sibling whose own deadline has since re-armed past hello, which
+  this wait does not separately track; in practice it does not need to, since a sibling still
+  counted as initializing here has by definition not reached its hello yet. The lock wait itself
+  (`LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS`, the `flock --timeout` `workspace-init` passes when
+  contending for another pod's hold on the shared clone) stays `sandbox.InitWaitSeconds` alone,
+  with no added `FetchTimeout`: in practice it almost never contends, since the runtime's own
+  `lockTree` already serializes a tree's pods through their whole init phase one at a time, so two
+  pods are never both inside `workspace-init`'s own provisioning step together; this wait is the
+  lock's own safety-net timeout for whatever can still race around that serialization, not a
+  budget matched against another pod's own remaining registration deadline
   (a manual `legion workspace-init` without the variable waits 900 s);
 - `Pending` with the init container **terminated non-zero** → **dead (gone)**, its log tail quoted
   (`restartPolicy: Never` turns the pod `Failed` moments later);

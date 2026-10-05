@@ -304,9 +304,15 @@ func TestTheRegistrationDeadlineReArmsAtTheBaseBoundFromTheFirstHello(t *testing
 	h.wantState(StateShimConnected)
 	h.wantCalls("Suspend", 0)
 
-	// hello + base (2×testBoot + deadline = 5×testBoot total), nowhere near launch + base + grace
-	// (13×testBoot): still retired, since the re-arm dropped the grace rather than adding to it.
-	h.advance(deadline)
+	// Just short of hello + base: not yet retired — a too-short re-arm (Boot alone, or one Probe
+	// interval) would already have fired by here.
+	h.advance(deadline - time.Nanosecond)
+	h.wantCalls("Suspend", 0)
+
+	// hello + base exactly (2×testBoot + deadline = 5×testBoot total), nowhere near launch + base
+	// + grace (13×testBoot): still retired, since the re-arm dropped the grace rather than adding
+	// to it.
+	h.advance(time.Nanosecond)
 	if suspends := h.wantCalls("Suspend", 1); suspends[0].Locator != alive {
 		t.Errorf("suspended %+v, want the live process", suspends[0].Locator)
 	}
@@ -360,6 +366,33 @@ func TestABootingClaimIsWatchedAgainAfterARestart(t *testing.T) {
 		t.Errorf("suspended %+v, want the process that never registered", suspend.Locator)
 	}
 	h.wantBudgets(Budgets{LaunchFailures: 1})
+	h.wantState(StateLaunching)
+}
+
+// A daemon restart must not bring the grace back for a claim already past its hello: NewMachine's
+// restore path (machine.go) re-arms a restored StateShimConnected claim at the base deadline
+// alone, exactly as helloed already did before the restart, never at armBoot's base+grace — the
+// in-memory timer that re-arm left behind does not survive the restart, so without this the
+// restore would otherwise re-grant the grace to a claim that no longer needs it (LEGION-585 round
+// 4).
+func TestARestartDoesNotReArmTheGraceForAClaimAlreadyPastItsHello(t *testing.T) {
+	h := newBareHarness(t)
+	h.deps.Timeouts.RegistrationGrace = 10 * testBoot
+	h.start(queuedClaim())
+	h.reach(StateShimConnected)
+	alive := h.locator()
+
+	h.restart()
+
+	// Just short of the base deadline alone: not yet retired.
+	h.advance(deadline - time.Nanosecond)
+	h.wantCalls("Suspend", 0)
+
+	// At the base deadline alone, nowhere near base+grace (11×testBoot here): retired.
+	h.advance(time.Nanosecond)
+	if suspend := h.wantCalls("Suspend", 1)[0]; suspend.Locator != alive {
+		t.Errorf("suspended %+v, want the process that never registered", suspend.Locator)
+	}
 	h.wantState(StateLaunching)
 }
 

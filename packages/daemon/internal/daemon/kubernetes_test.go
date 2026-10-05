@@ -462,6 +462,28 @@ func TestEveryDurationKeyReachesTheRuntimeOptionThatTakesIt(t *testing.T) {
 	}
 }
 
+// The pure-function test above proves registrationGrace computes the right value; it does not
+// prove daemon.go's openSupervision actually passes that value into the supervisor it builds —
+// deleting `RegistrationGrace: registrationGrace(cfg)` from its Timeouts literal would still pass
+// that test. Go through openSupervision itself (via startDaemon's supervised hook) for both
+// runtimes (LEGION-585 round 4).
+func TestASupervisorsRegistrationGraceReachesItThroughOpenSupervision(t *testing.T) {
+	var got time.Duration
+	o := fakeRuntime(fake.NewRuntime(), &built{})
+	o.supervised = func(s *supervision) { got = s.supervisor.deps.Timeouts.RegistrationGrace }
+
+	kcfg := kubernetesConfig(t, "https://127.0.0.1:1")
+	startDaemon(t, kcfg, o)
+	if want := registrationGrace(kcfg); got != want {
+		t.Errorf("a Kubernetes daemon's supervisor got RegistrationGrace %s, want %s", got, want)
+	}
+
+	startDaemon(t, testConfig(t), o)
+	if got != 0 {
+		t.Errorf("a tmux daemon's supervisor got RegistrationGrace %s, want 0", got)
+	}
+}
+
 // sandboxOptions carries runtime.kubernetes.agent_secrets straight into the runtime's Options,
 // nil when the configuration sets no block, and the worker image's agent-secrets binary is
 // always the tools path (Task 11 mounts it there whether or not the deployment enrolls).

@@ -21,6 +21,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
+	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
 // steps names each write as the relaunch sequence reads: "create sandbox", "suspend", "run",
@@ -294,6 +295,19 @@ func TestATreesLaunchWaitOutlastsInitWaitSecondsForAWorkspaceFetchStillCloning(t
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("the worker never launched after the root's workspace-init finished")
+	}
+}
+
+// The real-time test above proves the wait outlasts the old 8 s bound; it cannot wait out the
+// full 30-minute+8 s bound to prove the new one is exact (neither initWaitSeconds+3s nor
+// workspace.FetchTimeout alone would fail it — both still outlast the old bound by the 10 s it
+// sleeps). Assert treeInitBound's computed value directly instead, against this rig's own
+// testOptions (BootTimeout 2 s, BootIntervals 3).
+func TestTheTreeInitBoundIsFetchTimeoutPlusTheLockWaitBudgetExactly(t *testing.T) {
+	g := newRig(t, nil)
+	want := workspace.FetchTimeout + InitWaitSeconds(2*time.Second, 3)
+	if got := g.r.treeInitBound(); got != want {
+		t.Fatalf("treeInitBound = %s, want %s", got, want)
 	}
 }
 
