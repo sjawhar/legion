@@ -665,7 +665,7 @@ func TestProcessBatchNeverDeadLettersAUniformNonThrottledFailureHoweverManyTimes
 
 // cancelAfterNCallsEmbedder fails every call non-throttled, cancelling its own context exactly
 // once, on call number cancelOn, to stand in for a context ending mid-bisection (as
-// embed.RateLimitedEmbedder.pace() returning false does in production) without needing real
+// embed.RateLimitedEmbedder's pacing wait ending early does in production) without needing real
 // timing or concurrency.
 type cancelAfterNCallsEmbedder struct {
 	cancelOn int
@@ -914,8 +914,9 @@ func (e *countingGroupEmbedder) Embed(_ context.Context, texts []string, _ embed
 // group once a batch's combined estimated tokens exceed tokenRateCeiling (25 rows at
 // maxInputChars, each truncated to exactly 8,000 estimated tokens, fill one 200,000-token group
 // exactly; a 26th, poisoned row starts a second), and a later group's failure never re-embeds an
-// earlier group's already-committed rows: Embed is called exactly twice (once per group, not
-// once per row or once per bisection level), carrying exactly 26 rows total across both calls.
+// earlier group's already-committed rows: Embed is called exactly three times (once for each
+// group, plus confirmSoloFailure's own canary probe once the poisoned row is isolated to one -
+// never once per row or once per bisection level), carrying 26 real rows plus the one canary.
 func TestChunkForBudgetSplitsAnOverCeilingBatchAndEmbedRowsCommitsEachGroupOnlyOnce(t *testing.T) {
 	database := storetest.Open(t)
 	const healthyCount = 25                    // 25 * 8,000 = 200,000 = tokenRateCeiling exactly
@@ -943,26 +944,36 @@ func TestChunkForBudgetSplitsAnOverCeilingBatchAndEmbedRowsCommitsEachGroupOnlyO
 	if throttled {
 		t.Error("throttled = true, want false - this is a non-throttled failure")
 	}
-	if embedder.calls != 2 {
-		t.Errorf("Embed was called %d times, want exactly 2 - chunkForBudget should produce exactly two groups (the 25 healthy rows filling one 200,000-token group, the poisoned row starting a second), and the healthy group's success must never trigger a re-embed of it", embedder.calls)
+	if embedder.calls != 3 {
+		t.Errorf("Embed was called %d times, want exactly 3 - chunkForBudget should produce exactly two groups (the 25 healthy rows filling one 200,000-token group, the poisoned row starting a second) plus confirmSoloFailure's one canary probe, and the healthy group's success must never trigger a re-embed of it", embedder.calls)
 	}
-	if embedder.rowsSent != healthyCount+1 {
-		t.Errorf("rows sent across all Embed calls = %d, want %d (no row re-sent)", embedder.rowsSent, healthyCount+1)
+	if embedder.rowsSent != healthyCount+2 {
+		t.Errorf("rows sent across all Embed calls = %d, want %d (26 real rows, no row re-sent, plus the one-row canary probe)", embedder.rowsSent, healthyCount+2)
 	}
 }
 
-// countingFailThenSucceedEmbedder fails its first failCalls calls non-throttled, regardless of
-// content, then succeeds - standing in for an outage that clears partway through a single
-// ProcessBatch call's own bisection.
-type countingFailThenSucceedEmbedder struct {
-	failCalls int
-	calls     int
+// canaryAwareEmbedder shares one success path (oneVector(), for both a real row's embed and
+// embedCanary's own) across every round-9 test: rowOK decides a non-canary call's own outcome
+// (nil means always succeed), canaryOK decides embedCanary's own outcome (nil means always
+// succeed) - so a test only ever supplies the one or two closures it actually needs to vary.
+type canaryAwareEmbedder struct {
+	rowOK    func(texts []string) bool
+	canaryOK func() bool
+	calls    int
 }
 
-func (e *countingFailThenSucceedEmbedder) Embed(_ context.Context, texts []string, _ embed.InputType) ([][]float32, error) {
+func (e *canaryAwareEmbedder) Embed(_ context.Context, texts []string, _ embed.InputType) ([][]float32, error) {
 	e.calls++
-	if e.calls <= e.failCalls {
-		return nil, errors.New("simulated: a non-throttled embed failure (outage)")
+	ok := true
+	if len(texts) == 1 && texts[0] == embedCanary {
+		if e.canaryOK != nil {
+			ok = e.canaryOK()
+		}
+	} else if e.rowOK != nil {
+		ok = e.rowOK(texts)
+	}
+	if !ok {
+		return nil, errors.New("simulated: a non-throttled embed failure")
 	}
 	vectors := make([][]float32, len(texts))
 	for i := range vectors {
@@ -971,28 +982,109 @@ func (e *countingFailThenSucceedEmbedder) Embed(_ context.Context, texts []strin
 	return vectors, nil
 }
 
-// TestProcessBatchDoesNotDeadLetterARowIsolatedDuringAnOutageThatClearsLaterInTheSameCall is
-// Rev's exact repro: 8 rows already primed to attempt_count=9 by earlier uniform-outage cycles
-// (confirmed_failures stays 0 through all of them, since a demoted retry never advances it), then
-// one more cycle whose embedder fails non-throttled for the first 4 calls (the outage still
-// active) and succeeds from the 5th call on (the outage clearing mid-bisection). Before this
-// round's fix, the row bisection isolated during one of the first 4 calls was wrongly confirmed
-// permanent - because ProcessBatch's old confirmation check looked at whether *any* row in the
-// whole call ever succeeded, regardless of when - and crossed the dead-letter threshold on this
-// single cycle, even though it failed while the outage was still active and no sibling had yet
-// proven the service was up.
-func TestProcessBatchDoesNotDeadLetterARowIsolatedDuringAnOutageThatClearsLaterInTheSameCall(t *testing.T) {
+// sequencedEmbedder scripts outcomes by call index alone, regardless of content or whether a
+// call is a row's own or embedCanary's - Deep's and Qual's own probes are both specified this
+// way ("call 1 fails, call 2 succeeds, ...").
+type sequencedEmbedder struct {
+	results   []bool // results[i] is call i's outcome (0-indexed)
+	afterward bool   // every call past len(results)
+	calls     int
+}
+
+func (e *sequencedEmbedder) Embed(_ context.Context, texts []string, _ embed.InputType) ([][]float32, error) {
+	idx := e.calls
+	e.calls++
+	ok := e.afterward
+	if idx < len(e.results) {
+		ok = e.results[idx]
+	}
+	if !ok {
+		return nil, errors.New("simulated: a non-throttled embed failure")
+	}
+	vectors := make([][]float32, len(texts))
+	for i := range vectors {
+		vectors[i] = oneVector()
+	}
+	return vectors, nil
+}
+
+// TestProcessBatchANewOutageAfterAnEarlierSuccessNeverConfirmsAnything is Acceptance's own probe
+// against round 8's provenUp (a one-way latch): an earlier success anywhere in the call let a
+// later, unrelated recurrence of a systemic outage - never this row's own content - get wrongly
+// confirmed, since the latch never turned back off. The canary redesign replaces the latch with
+// a fresh, local probe run at the instant of each solo failure, so a later failure's own canary -
+// not an earlier row's unrelated success - decides it.
+func TestProcessBatchANewOutageAfterAnEarlierSuccessNeverConfirmsAnything(t *testing.T) {
 	database := storetest.Open(t)
-	ids := []string{"OUT-1", "OUT-2", "OUT-3", "OUT-4", "OUT-5", "OUT-6", "OUT-7", "OUT-8"}
+	healthyIDs := []string{"FLAP-1", "FLAP-2", "FLAP-3", "FLAP-4"}
+	outageIDs := []string{"FLAP-5", "FLAP-6", "FLAP-7", "FLAP-8"}
+	for i, id := range healthyIDs {
+		seedIssue(t, database, "FLAP", id, fmt.Sprintf("Healthy title %d", i))
+	}
+	for i, id := range outageIDs {
+		seedIssue(t, database, "FLAP", id, fmt.Sprintf("Outage title %d", i))
+	}
+	embedder := &canaryAwareEmbedder{
+		rowOK: func(texts []string) bool {
+			for _, text := range texts {
+				if strings.HasPrefix(text, "Outage title") {
+					return false
+				}
+			}
+			return true
+		},
+		canaryOK: func() bool { return false }, // the new outage breaks the canary too - nothing it probes is ever confirmed
+	}
+	deps := Deps{Store: database, Embedder: embedder}
+
+	succeeded, failed, _, _, err := ProcessBatch(context.Background(), deps)
+	if err != nil {
+		t.Fatalf("ProcessBatch: %v", err)
+	}
+	if succeeded != 4 {
+		t.Errorf("succeeded = %d, want 4", succeeded)
+	}
+	if failed != 4 {
+		t.Errorf("failed = %d, want 4", failed)
+	}
+	rows, qErr := database.Pool.Query(context.Background(),
+		`select id, dead from embeddings where kind = 'issue' and id = any($1::text[])`, outageIDs)
+	if qErr != nil {
+		t.Fatalf("read embeddings: %v", qErr)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		var dead bool
+		if err := rows.Scan(&id, &dead); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if dead {
+			t.Errorf("%s dead = true, want false - every failure against it was the new outage, never its own content, and its own canary also failed every time", id)
+		}
+	}
+}
+
+// TestProcessBatchRevRound6ProbeStillGreen replays round 6's own scenario (an outage that clears
+// mid-bisection) against the canary redesign: realCalls counts only rows' own embed attempts (not
+// embedCanary's), so confirmSoloFailure's canary probe reads the condition "right now" without
+// itself advancing it - the row isolated while the outage is still active sees a failing canary
+// and is never confirmed; the outage clearing from the 5th real call on lets everything else
+// through.
+func TestProcessBatchRevRound6ProbeStillGreen(t *testing.T) {
+	database := storetest.Open(t)
+	ids := []string{"REV6-1", "REV6-2", "REV6-3", "REV6-4", "REV6-5", "REV6-6", "REV6-7", "REV6-8"}
 	for i, id := range ids {
-		seedIssue(t, database, "OUT", id, fmt.Sprintf("Title %d", i))
+		seedIssue(t, database, "REV6", id, fmt.Sprintf("Title %d", i))
 	}
-	if _, err := database.Pool.Exec(context.Background(),
-		`update embeddings set attempt_count = 9 where kind = 'issue' and id = any($1::text[])`, ids,
-	); err != nil {
-		t.Fatalf("prime attempt_count: %v", err)
+	realCalls := 0
+	embedder := &canaryAwareEmbedder{
+		rowOK: func(_ []string) bool {
+			realCalls++
+			return realCalls > 4
+		},
+		canaryOK: func() bool { return realCalls > 4 },
 	}
-	embedder := &countingFailThenSucceedEmbedder{failCalls: 4}
 	deps := Deps{Store: database, Embedder: embedder}
 
 	succeeded, failed, _, throttled, err := ProcessBatch(context.Background(), deps)
@@ -1009,66 +1101,127 @@ func TestProcessBatchDoesNotDeadLetterARowIsolatedDuringAnOutageThatClearsLaterI
 		t.Error("throttled = true, want false")
 	}
 	rows, qErr := database.Pool.Query(context.Background(),
-		`select id, dead, confirmed_failures, attempt_count, embedded_hash is not null as embedded
-		   from embeddings where kind = 'issue' and id = any($1::text[])`, ids)
+		`select id, dead from embeddings where kind = 'issue' and id = any($1::text[])`, ids)
 	if qErr != nil {
 		t.Fatalf("read embeddings: %v", qErr)
 	}
 	defer rows.Close()
-	pendingCount, embeddedCount := 0, 0
 	for rows.Next() {
 		var id string
-		var dead, embedded bool
-		var confirmedFailures, attemptCount int
-		if err := rows.Scan(&id, &dead, &confirmedFailures, &attemptCount, &embedded); err != nil {
+		var dead bool
+		if err := rows.Scan(&id, &dead); err != nil {
 			t.Fatalf("scan: %v", err)
 		}
 		if dead {
-			t.Errorf("%s dead = true, want false - it failed while the outage (the first 4 calls) was still ongoing, before any sibling had proven the service was up", id)
+			t.Errorf("%s dead = true, want false", id)
 		}
-		if embedded {
-			embeddedCount++
-			continue
-		}
-		pendingCount++
-		if confirmedFailures != 0 {
-			t.Errorf("%s (still pending, never confirmed) confirmed_failures = %d, want 0 - it failed only during the outage, never once the service was proven up", id, confirmedFailures)
-		}
-		if attemptCount != 10 {
-			t.Errorf("%s attempt_count = %d, want 10 - it still advances every cycle, confirmed or not", id, attemptCount)
-		}
-	}
-	if pendingCount != 1 {
-		t.Errorf("rows still pending = %d, want exactly 1 (the one isolated during the outage)", pendingCount)
-	}
-	if embeddedCount != 7 {
-		t.Errorf("rows embedded = %d, want 7", embeddedCount)
 	}
 }
 
-// countingPoisonEmbedder fails non-throttled whenever any text in a call equals poison, and
-// succeeds otherwise.
-type countingPoisonEmbedder struct {
-	poison string
-}
+// TestProcessBatchDeepsFlappingProbeNeverWronglyConfirms is Deep's own probe: 2 rows, the
+// embedder fails, succeeds, fails (by call index alone, regardless of content) - every call past
+// that third one keeps failing. Neither row's own content is ever at fault; a genuine flap must
+// never be mistaken for one.
+func TestProcessBatchDeepsFlappingProbeNeverWronglyConfirms(t *testing.T) {
+	database := storetest.Open(t)
+	ids := []string{"DEEP-1", "DEEP-2"}
+	for i, id := range ids {
+		seedIssue(t, database, "DEEP", id, fmt.Sprintf("Title %d", i))
+	}
+	embedder := &sequencedEmbedder{results: []bool{false, true, false}, afterward: false}
+	deps := Deps{Store: database, Embedder: embedder}
 
-func (e *countingPoisonEmbedder) Embed(_ context.Context, texts []string, _ embed.InputType) ([][]float32, error) {
-	for _, text := range texts {
-		if text == e.poison {
-			return nil, errors.New("simulated: a non-throttled embed failure (poisoned content)")
+	if _, _, _, _, err := ProcessBatch(context.Background(), deps); err != nil {
+		t.Fatalf("ProcessBatch: %v", err)
+	}
+	rows, qErr := database.Pool.Query(context.Background(),
+		`select id, dead from embeddings where kind = 'issue' and id = any($1::text[])`, ids)
+	if qErr != nil {
+		t.Fatalf("read embeddings: %v", qErr)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		var dead bool
+		if err := rows.Scan(&id, &dead); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if dead {
+			t.Errorf("%s dead = true, want false - a flapping embedder is never evidence against any row's own content", id)
 		}
 	}
-	vectors := make([][]float32, len(texts))
-	for i := range vectors {
-		vectors[i] = oneVector()
-	}
-	return vectors, nil
 }
 
-// TestProcessBatchStillDeadLettersAGenuinelyPoisonedRowAmongHealthyOnes proves the fix is not
-// overcorrected into never dead-lettering anything: once healthy siblings have already
-// committed - proving the service works - a row whose own content genuinely, repeatedly breaks
-// the embed call still crosses the dead-letter threshold on a confirmed failure.
+// TestProcessBatchQualsFlappingProbeNeverWronglyConfirms is Qual's own probe: call 1 fails, call
+// 2 succeeds, every later call fails.
+func TestProcessBatchQualsFlappingProbeNeverWronglyConfirms(t *testing.T) {
+	database := storetest.Open(t)
+	ids := []string{"QUAL-1", "QUAL-2"}
+	for i, id := range ids {
+		seedIssue(t, database, "QUAL", id, fmt.Sprintf("Title %d", i))
+	}
+	embedder := &sequencedEmbedder{results: []bool{false, true}, afterward: false}
+	deps := Deps{Store: database, Embedder: embedder}
+
+	if _, _, _, _, err := ProcessBatch(context.Background(), deps); err != nil {
+		t.Fatalf("ProcessBatch: %v", err)
+	}
+	rows, qErr := database.Pool.Query(context.Background(),
+		`select id, dead from embeddings where kind = 'issue' and id = any($1::text[])`, ids)
+	if qErr != nil {
+		t.Fatalf("read embeddings: %v", qErr)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		var dead bool
+		if err := rows.Scan(&id, &dead); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if dead {
+			t.Errorf("%s dead = true, want false - a flapping embedder is never evidence against any row's own content", id)
+		}
+	}
+}
+
+// TestProcessBatchACanaryThatFailsMarksNothing isolates confirmSoloFailure's own two outcomes
+// directly: a single row whose own call fails, and whose canary also fails, must never be
+// confirmed permanent - it goes back to retry, exactly like any other systemic failure.
+func TestProcessBatchACanaryThatFailsMarksNothing(t *testing.T) {
+	database := storetest.Open(t)
+	seedIssue(t, database, "CNRY", "CNRY-1", "A title")
+	embedder := &canaryAwareEmbedder{
+		rowOK:    func(_ []string) bool { return false },
+		canaryOK: func() bool { return false },
+	}
+	deps := Deps{Store: database, Embedder: embedder}
+
+	succeeded, failed, _, throttled, err := ProcessBatch(context.Background(), deps)
+	if err != nil {
+		t.Fatalf("ProcessBatch: %v", err)
+	}
+	if succeeded != 0 || failed != 1 || throttled {
+		t.Errorf("succeeded, failed, throttled = %d, %d, %v, want 0, 1, false", succeeded, failed, throttled)
+	}
+	var dead bool
+	var confirmedFailures int
+	if err := database.Pool.QueryRow(context.Background(),
+		`select dead, confirmed_failures from embeddings where kind = 'issue' and id = 'CNRY-1'`,
+	).Scan(&dead, &confirmedFailures); err != nil {
+		t.Fatalf("read CNRY-1: %v", err)
+	}
+	if dead {
+		t.Error("CNRY-1 dead = true, want false - its canary also failed, so nothing about it was confirmed")
+	}
+	if confirmedFailures != 0 {
+		t.Errorf("CNRY-1 confirmed_failures = %d, want 0", confirmedFailures)
+	}
+}
+
+// TestProcessBatchStillDeadLettersAGenuinelyPoisonedRowAmongHealthyOnes proves the canary
+// redesign is not overcorrected into never dead-lettering anything: a row whose own content
+// genuinely, repeatedly breaks the embed call, confirmed each time by a successful canary probe
+// proving the service itself works, still crosses the dead-letter threshold.
 func TestProcessBatchStillDeadLettersAGenuinelyPoisonedRowAmongHealthyOnes(t *testing.T) {
 	database := storetest.Open(t)
 	healthyIDs := []string{"POIS-1", "POIS-2", "POIS-3"}
@@ -1081,7 +1234,17 @@ func TestProcessBatchStillDeadLettersAGenuinelyPoisonedRowAmongHealthyOnes(t *te
 	); err != nil {
 		t.Fatalf("prime confirmed_failures: %v", err)
 	}
-	embedder := &countingPoisonEmbedder{poison: "the poisoned title"}
+	embedder := &canaryAwareEmbedder{
+		rowOK: func(texts []string) bool {
+			for _, text := range texts {
+				if text == "the poisoned title" {
+					return false
+				}
+			}
+			return true
+		},
+		canaryOK: func() bool { return true },
+	}
 	deps := Deps{Store: database, Embedder: embedder}
 
 	succeeded, failed, _, throttled, err := ProcessBatch(context.Background(), deps)
@@ -1104,7 +1267,7 @@ func TestProcessBatchStillDeadLettersAGenuinelyPoisonedRowAmongHealthyOnes(t *te
 		t.Fatalf("read POIS-4: %v", err)
 	}
 	if !dead {
-		t.Error("POIS-4 dead = false, want true - 3 healthy siblings proved the service works before this row's own failure, so this confirmed failure should cross the dead-letter threshold")
+		t.Error("POIS-4 dead = false, want true - its canary succeeded every time, proving the service works, so its own repeated failure should cross the dead-letter threshold")
 	}
 }
 

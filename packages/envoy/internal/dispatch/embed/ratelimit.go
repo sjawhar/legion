@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/retry"
+	"golang.org/x/time/rate"
 )
 
 const (
@@ -52,61 +53,52 @@ type RateLimitedEmbedder struct {
 
 	mu       sync.Mutex
 	interval time.Duration
-	last     time.Time
+	limiter  *rate.Limiter
 }
 
 // NewRateLimitedEmbedder wraps inner for background callers; see RateLimitedEmbedder's own
 // doc comment for who should (embedqueue) and should not (search.go's live query path) hold one.
 func NewRateLimitedEmbedder(inner Embedder) *RateLimitedEmbedder {
-	return &RateLimitedEmbedder{inner: inner, interval: rateLimitFloor}
+	return &RateLimitedEmbedder{
+		inner:    inner,
+		interval: rateLimitFloor,
+		limiter:  rate.NewLimiter(rate.Every(rateLimitFloor), 1),
+	}
 }
 
-// Embed paces itself to the limiter's current interval, then calls the inner Embedder and
+// Embed paces itself to the limiter's current interval via golang.org/x/time/rate's own
+// reservation bookkeeping (burst 1, so every call waits out the full interval since the last
+// one) rather than a hand-rolled elapsed-time computation, then calls the inner Embedder and
 // adjusts that interval from the result: longer (multiplicative) on a throttled error, shorter
 // (additive, floored at rateLimitFloor) on anything else - an ordinary success or a non-throttled
-// failure both count as "Bedrock was not signalling capacity pressure this time."
+// failure both count as "Bedrock was not signalling capacity pressure this time." It reserves
+// with Reserve rather than calling the package's own ctx-aware Wait, because Wait fails fast with
+// its own error the moment it can tell the reservation's delay would outlast ctx's deadline,
+// without ever waiting for ctx to actually end - and embedqueue's callers (ProcessBatch,
+// bisectBatch) depend on ctx.Err() being set by the time this call returns, to tell a cancelled
+// wait apart from every other failure. Reserve, by contrast, hands back a delay to wait out
+// ourselves, so the select below only ever returns once ctx.Done() has genuinely fired.
 func (r *RateLimitedEmbedder) Embed(ctx context.Context, texts []string, inputType InputType) ([][]float32, error) {
-	if !r.pace(ctx) {
-		return nil, ctx.Err()
+	reservation := r.limiter.Reserve()
+	if delay := reservation.Delay(); delay > 0 {
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			reservation.Cancel()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
 	}
 	vectors, err := r.inner.Embed(ctx, texts, inputType)
 	r.adjust(err)
 	return vectors, err
 }
 
-// pace blocks until this call is at least Interval() after the previous one started, or returns
-// false without waiting out the rest of it if ctx ends first. It reserves its own slot under the
-// lock - advancing last by interval (not to time.Now()) when a wait is owed, so a second caller
-// computing its own wait immediately after sees the reservation already made - then releases the
-// lock before actually sleeping: holding the lock across the sleep would mean one caller's
-// cancellation (ctx.Done() firing) still has to wait for the mutex a completely unrelated
-// caller's own, unexpired sleep is holding, which defeats ctx ending this call promptly. A caller
-// the way embedqueue uses this (one poller goroutine, one backfill goroutine, never both against
-// the same limiter at once today) never contends it, but correctness here does not depend on
-// that - two concurrent callers reserving distinct, evenly-spaced slots up front is correct
-// regardless of how many goroutines ever call Embed concurrently.
-func (r *RateLimitedEmbedder) pace(ctx context.Context) bool {
-	r.mu.Lock()
-	wait := r.interval - time.Since(r.last)
-	if wait > 0 {
-		r.last = r.last.Add(r.interval)
-	} else {
-		r.last = time.Now()
-	}
-	r.mu.Unlock()
-	if wait <= 0 {
-		return true
-	}
-	timer := time.NewTimer(wait)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return false
-	case <-timer.C:
-		return true
-	}
-}
-
+// adjust moves interval (additive recovery, multiplicative backoff, as RateLimitedEmbedder's own
+// doc comment describes) and pushes the new value onto the rate.Limiter that Embed actually waits
+// on; interval itself stays the authoritative, exact state (Interval and the tests read it
+// directly) rather than being derived back out of the limiter's floating-point Limit.
 func (r *RateLimitedEmbedder) adjust(err error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -115,12 +107,13 @@ func (r *RateLimitedEmbedder) adjust(err error) {
 		if r.interval > retry.MaxDelay {
 			r.interval = retry.MaxDelay
 		}
-		return
+	} else {
+		r.interval -= rateLimitRecoveryStep
+		if r.interval < rateLimitFloor {
+			r.interval = rateLimitFloor
+		}
 	}
-	r.interval -= rateLimitRecoveryStep
-	if r.interval < rateLimitFloor {
-		r.interval = rateLimitFloor
-	}
+	r.limiter.SetLimit(rate.Every(r.interval))
 }
 
 // Interval reports the limiter's current pacing interval, for logging and tests.
@@ -128,4 +121,14 @@ func (r *RateLimitedEmbedder) Interval() time.Duration {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.interval
+}
+
+// setInterval forces the limiter's interval (and the rate.Limiter that actually paces Embed) to
+// d, bypassing the floor/ceiling and AIMD step adjust applies - test-only, for scaling the floor
+// down to something a test can wait out in milliseconds rather than rateLimitFloor's 750ms.
+func (r *RateLimitedEmbedder) setInterval(d time.Duration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.interval = d
+	r.limiter.SetLimit(rate.Every(d))
 }

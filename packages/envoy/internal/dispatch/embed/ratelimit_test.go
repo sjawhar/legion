@@ -33,7 +33,7 @@ func (c *countingEmbedder) Embed(_ context.Context, texts []string, _ InputType)
 func TestRateLimitedEmbedderPacesSuccessiveCallsAtLeastTheFloorApart(t *testing.T) {
 	inner := &countingEmbedder{}
 	limiter := NewRateLimitedEmbedder(inner)
-	limiter.interval = 20 * time.Millisecond // scaled down from rateLimitFloor for a fast test
+	limiter.setInterval(20 * time.Millisecond) // scaled down from rateLimitFloor for a fast test
 
 	ctx := context.Background()
 	for range 3 {
@@ -56,7 +56,7 @@ func TestRateLimitedEmbedderBacksOffImmediatelyOnThrottle(t *testing.T) {
 	throttleErr := embedtest.FakeThrottleError{Code: "ThrottlingException"}
 	inner := &countingEmbedder{errs: []error{throttleErr}}
 	limiter := NewRateLimitedEmbedder(inner)
-	limiter.interval = 10 * time.Millisecond
+	limiter.setInterval(10 * time.Millisecond)
 
 	ctx := context.Background()
 	if _, err := limiter.Embed(ctx, []string{"x"}, InputDocument); !errors.Is(err, throttleErr) {
@@ -70,7 +70,7 @@ func TestRateLimitedEmbedderBacksOffImmediatelyOnThrottle(t *testing.T) {
 func TestRateLimitedEmbedderRecoversGraduallyAfterSuccess(t *testing.T) {
 	inner := &countingEmbedder{}
 	limiter := NewRateLimitedEmbedder(inner)
-	limiter.interval = rateLimitFloor + time.Second // above rateLimitFloor, as if recovering from backoff
+	limiter.setInterval(rateLimitFloor + time.Second) // above rateLimitFloor, as if recovering from backoff
 
 	ctx := context.Background()
 	if _, err := limiter.Embed(ctx, []string{"x"}, InputDocument); err != nil {
@@ -100,7 +100,7 @@ func TestRateLimitedEmbedderNeverBacksOffPastTheCeiling(t *testing.T) {
 	throttleErr := embedtest.FakeThrottleError{Code: "ThrottlingException"}
 	inner := &countingEmbedder{}
 	limiter := NewRateLimitedEmbedder(inner)
-	limiter.interval = retry.MaxDelay / 2
+	limiter.setInterval(retry.MaxDelay / 2)
 
 	ctx := context.Background()
 	inner.errs = []error{throttleErr}
@@ -121,7 +121,7 @@ func TestRateLimitedEmbedderNeverBacksOffPastTheCeiling(t *testing.T) {
 func TestRateLimitedEmbedderNeverGatesAnUnwrappedSiblingCall(t *testing.T) {
 	inner := &countingEmbedder{}
 	limiter := NewRateLimitedEmbedder(inner)
-	limiter.interval = time.Hour // as deep into backoff as this limiter can ever go, exaggerated
+	limiter.setInterval(time.Hour) // as deep into backoff as this limiter can ever go, exaggerated
 
 	ctx := context.Background()
 	started := time.Now()
@@ -139,8 +139,8 @@ func TestRateLimitedEmbedderNeverGatesAnUnwrappedSiblingCall(t *testing.T) {
 func TestRateLimitedEmbedderStopsWaitingWhenContextEnds(t *testing.T) {
 	inner := &countingEmbedder{}
 	limiter := NewRateLimitedEmbedder(inner)
-	limiter.interval = time.Hour
-	limiter.last = time.Now() // so the next call must wait almost the whole hour
+	limiter.setInterval(time.Hour)
+	_ = limiter.limiter.Wait(context.Background()) // consume the burst token, as if a previous call had just happened, so the next wait is forced to the full interval
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
