@@ -43,6 +43,41 @@ func TestTheLauncherResolverAcceptsOnlyTheBoundRoleOfTheCurrentPod(t *testing.T)
 	}
 }
 
+// A launcher's own hello is accepted even when the runtime's configured project
+// (Options.Project, the legion.dev/project label's value) carries characters a claim token
+// drops: ProjectToken strips everything outside [a-z0-9] (LEGION-565's claim.ProjectToken), and
+// a project naming a claim or a Sandbox must go through it first. A deployment's own project
+// name may carry such characters (claim.ProjectToken's doc: "sjawhar/legion" names the same role
+// topics under either daemon), and Stage 4a's root-ready configures Options.Project with the
+// run's own dashed label while its claim tokens use the stripped form the same way, which is
+// this test's scenario (LEGION-462 e2e: scripts/e2e/stage4a-sandbox-runtime.sh's root-ready).
+func TestALauncherHelloIsAcceptedWhenTheConfiguredProjectCarriesCharactersAClaimTokenDrops(t *testing.T) {
+	dashed := "s4a-dashed-project"
+	normalized, err := claim.ProjectToken(dashed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := newRig(t, nil, withOptions(func(o *Options) { o.Project = dashed }))
+	token, err := claim.NewToken(normalized, testTree, claim.RoleArchitect)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := testSpec(t, token, claim.RoleArchitect, testTree)
+	spec.Project = normalized
+	loc := g.spawn(spec)
+	name := loc.Sandbox.Name
+	hello := shimwire.LauncherHello{
+		Token:      string(g.secret(roleSecretName(name, claim.RoleArchitect)).Data[LauncherTokenFile]),
+		Sandbox:    name,
+		Role:       string(claim.RoleArchitect),
+		PodUID:     loc.Sandbox.PodUID,
+		LauncherID: "l-1",
+	}
+	if handler, reason := g.r.LauncherResolver()(hello); handler == nil {
+		t.Fatalf("the architect's own launcher, of a project whose label carries characters its claim token drops, was refused: %s", reason)
+	}
+}
+
 // A start of a new generation while the role's launcher still runs an earlier one stops the
 // earlier one first: two generations of one role never run side by side in the issue pod.
 func TestANewGenerationStopsTheEarlierOneFirst(t *testing.T) {

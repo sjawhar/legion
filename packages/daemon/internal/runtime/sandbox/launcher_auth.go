@@ -55,7 +55,15 @@ func (r *Runtime) LauncherResolver() stream.LauncherResolver {
 		if credential.podUID != hello.PodUID {
 			return nil, "launcher pod UID is not bound to its Secret epoch"
 		}
-		token, err := claim.NewToken(r.project, credential.issue, role)
+		// Options.Project is the legion.dev/project label's value (its own doc comment), not
+		// necessarily already a claim.ProjectToken: a deployment's own project name may carry
+		// characters ProjectToken drops (its doc: "sjawhar/legion" names the same role topics
+		// under either daemon), and go through it before naming a claim.
+		project, err := claim.ProjectToken(r.project)
+		if err != nil {
+			return nil, "launcher credential does not name this issue role"
+		}
+		token, err := claim.NewToken(project, credential.issue, role)
 		if err != nil || SandboxName(token) != hello.Sandbox {
 			return nil, "launcher credential does not name this issue role"
 		}

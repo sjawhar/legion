@@ -106,9 +106,16 @@ func SandboxName(t claim.Token) string {
 	return dnsName(issue, maxNameLength)
 }
 
-// issueSandboxName is SandboxName of issue's role claims, from the issue key.
+// issueSandboxName is SandboxName of issue's role claims, from the issue key. project need not
+// already be a claim.ProjectToken (the caller's own Options.Project, the legion.dev/project
+// label's value, may carry characters one drops); it goes through ProjectToken here before
+// naming a claim.
 func issueSandboxName(project, issue string) (string, error) {
-	token, err := claim.NewToken(project, issue, claim.RoleArchitect)
+	normalized, err := claim.ProjectToken(project)
+	if err != nil {
+		return "", err
+	}
+	token, err := claim.NewToken(normalized, issue, claim.RoleArchitect)
 	if err != nil {
 		return "", err
 	}
