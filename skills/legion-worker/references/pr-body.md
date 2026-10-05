@@ -36,7 +36,7 @@ left open <thread URL> — newest reply by <login> is not an acceptance
 left open <thread URL> — newest reply by <login> is an unsubmitted draft in a pending review
 left open <thread URL> — newest reply by <login> is not its opener's or the Legion reviewer's acceptance
 
-**Thermo:** `ce-simplify-code` once at <head-sha>: <0 applied | applied → new head <sha>>; thermonuclear pair at the final head <sha>:
+**Thermo:** `ce-simplify-code` once at <head-sha>: <0 applied | applied → new head <sha>>; thermonuclear pair at the reviewed head <sha>:
 <verdict>. (omitted entirely on a docs-only PR — there is no code for either pass, so neither runs)
 
 **E2E (implementer):** <surface> — ran `<command or run id>`, observed <result>, at head <sha>.
@@ -66,7 +66,7 @@ repos/{owner}/{repo}/pulls/{number} --jq .body`, edit, then `--method PATCH ... 
 `Not proven / risk` copies every claim recorded as unproven before READY — the tester's
 `failures`, the reviewer's own review, any proof-check comment already on the pull request —
 word for word, and `none` is a finding while one stands. The merger quotes `Outcome` and
-`Not proven / risk` from the body at the published head in the READY packet
+`Not proven / risk` from the body at the head its READY packet names
 (*The READY packet* in `skill://legion-worker/references/merge-gate.md`); a stale `Outcome` that no
 longer describes the diff is a finding against the implementer, not a line the merger rewrites.
 
@@ -95,8 +95,8 @@ and the tester's proof below are both this proof.
   the implementer's command or drives the same surface independently, and records the verdict in
   `.legion/test.json` as `implementerProof` (`{verdict, how}`).
   A test handoff whose predecessor carried no proof is a test failure, not a gap for the tester to fill:
-  record it in `failures` with `implementerProof.verdict: "rejected"`, complete the phase, and let
-  the architect return the issue to the implementer — the agent that developed the change owns
+  record it in `failures` with `implementerProof.verdict: "rejected"`, complete the phase with
+  `verdict: "fail"`, and the daemon returns the issue to the implementer — the agent that developed the change owns
   proving it (`handoff_write` for phase `test` refuses a rejected verdict, or `failed > 0`,
   with no recorded failure). Otherwise, add your own proof before completing — a proof as defined
   above — as the `E2E (tester)` line and the `proof` array `handoff_write` for
@@ -114,18 +114,17 @@ and the tester's proof below are both this proof.
   `E2E` line's head to the new SHA with
   `rebase re-check <old-sha> → <new-sha>: fingerprint unchanged, bare gates only`; the
   real-surface verification is not repeated. Different: a full test round.
-- **The implementer runs `skill://ce-simplify-code` once per pull request, after the last review round
-  closes and before the reviewer's final pass, when the diff touches runtime code; a docs-only
-  diff gets none.** It is scoped to the pull request's own diff, at the head where the last review
-  round closed: nothing applied leaves that head final; applied → the applied head is the final
-  head: CI runs on it, the pair runs once on it, and the E2E proof re-runs on it for the surface
-  the simplify diff touched, since a refactor that "preserves behaviour" is a claim until it is
-  executed. That cost is
-  why 0-applied is the expected outcome and a pass that applies is spent sparingly. At the applied
-  head the implementer re-cites the `CI` line and re-runs its own proof into `E2E (implementer)`,
-  and the tester re-runs its proof for the touched surface into `E2E (tester)`, before the
-  reviewer's final pass. Simplify is the last code change; the pair is the last review. Record it
-  in the `Thermo` line.
+- **The implementer runs `skill://ce-simplify-code` once per pull request, in its first
+  implementing round, after its own proof and before it completes that round, when the diff
+  touches runtime code; a docs-only diff gets none.** The daemon starts no implementing round
+  between a clean review and the approval, so this is the one slot before the tester and the
+  reviewer read the head; a later round answering a review runs no second pass. It is scoped to
+  the pull request's own diff at that head: nothing applied leaves the head as it is; applied →
+  the implementer re-runs the repository's checks and its own proof on the applied head for the
+  surface the simplify diff touched, since a refactor that "preserves behaviour" is a claim until
+  it is executed, and re-cites the `CI` line and `E2E (implementer)` there before it completes.
+  That cost is why 0-applied is the expected outcome and a pass that applies is spent sparingly.
+  The reviewer's pair runs at the head each round reviews. Record both in the `Thermo` line.
 - **No deferrals** is the body's rule (*PR body, review, and the merge gate* in
   `skill://legion-worker`): the `Fast-follow:` line holds naming, duplication, or wording cleanup
   only. A base frozen for others to stack on is never rewritten (*Rewriting pushed commits* in

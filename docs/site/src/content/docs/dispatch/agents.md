@@ -36,7 +36,12 @@ A pinned agent stays in the main list whatever its state.
 
 ### Filters
 
-Above the list, three filters narrow it: **Machine**, **Role**, and **Directory contains**.
+Above the list, three filters narrow it: **Machine**, **Role**, and a search box. Typing in the
+search box keeps the sessions whose title, directory, machine, session id, or the key of an issue
+one of its open asks names, together hold every word typed, in any order and case; pressing `/`
+anywhere on the page focuses the box. A non-empty search also opens the two folded groups below,
+so a match hidden in one of them still shows; clearing the search returns each fold to the state
+you left it in. The search survives a reload through the page's address.
 
 ## Sending to one agent
 
