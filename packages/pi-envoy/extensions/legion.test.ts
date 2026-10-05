@@ -286,6 +286,11 @@ function createPi(options: { readonly bindEnvoy?: boolean } = {}): {
     },
     sendMessage: (message) => sentMessages.push(message),
     sendUserMessage: (content) => {
+      if (typeof content !== "string") {
+        throw new Error(
+          "createPi's sendUserMessage stub tracks string content only; no legion.test.ts fixture call sends ContentBlock[] (images)"
+        );
+      }
       sentUserMessages.push(content);
       eventOrder.push("sendUserMessage");
     },
