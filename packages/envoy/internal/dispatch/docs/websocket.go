@@ -104,7 +104,7 @@ func (a *servicePersistenceAdapter) StoreUpdate(room string, update []byte) erro
 		if encodeErr != nil {
 			return fmt.Errorf("encode document settlement authors: %w", encodeErr)
 		}
-		_, err = store.AppendUpdateWithSettlementCredit(context.Background(), room, update, class.contentChanged, encodedCredit, class.creditVersion)
+		_, err = store.AppendUpdateWithSettlementCredit(context.Background(), room, update, class.contentChanged, encodedCredit, class.creditSeq)
 		creditStored = true
 	} else if store, ok := a.store.(classifiedUpdateStore); ok {
 		_, err = store.AppendUpdateWithClass(context.Background(), room, update, class.contentChanged)
@@ -116,7 +116,7 @@ func (a *servicePersistenceAdapter) StoreUpdate(room string, update []byte) erro
 		return err
 	}
 	if found && creditStored {
-		a.service.settlementCreditPersisted(room, class.creditVersion)
+		a.service.settlementCreditPersisted(room, class.creditSeq)
 	}
 	if found && class.durable && class.contentChanged {
 		a.service.scheduleSettleAfterAppend(room)
@@ -142,7 +142,7 @@ func (a *servicePersistenceAdapter) StoreUpdateContext(ctx context.Context, room
 		if encodeErr != nil {
 			return fmt.Errorf("encode document settlement authors: %w", encodeErr)
 		}
-		_, err = store.AppendUpdateWithSettlementCredit(ctx, room, update, class.contentChanged, encodedCredit, class.creditVersion)
+		_, err = store.AppendUpdateWithSettlementCredit(ctx, room, update, class.contentChanged, encodedCredit, class.creditSeq)
 		creditStored = true
 	} else if store, ok := a.store.(classifiedUpdateStore); ok {
 		_, err = store.AppendUpdateWithClass(ctx, room, update, class.contentChanged)
@@ -154,7 +154,7 @@ func (a *servicePersistenceAdapter) StoreUpdateContext(ctx context.Context, room
 		return err
 	}
 	if found && creditStored {
-		a.service.settlementCreditPersisted(room, class.creditVersion)
+		a.service.settlementCreditPersisted(room, class.creditSeq)
 	}
 	if found && class.durable && class.contentChanged {
 		a.service.scheduleSettleAfterAppend(room)
@@ -451,6 +451,15 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	if err != nil {
 		return err
 	}
+	if owed {
+		// This room's fresh roomState restarts creditSeq at zero regardless of what the row's
+		// released_through watermark and each pending entry's own sequence say from before this
+		// load, so both are reset to the same zero point here, before anything can credit or
+		// release against them under the new counter (LEGION-513).
+		if err := s.resetSettlementCreditSequence(ctx, rooms, room); err != nil {
+			return err
+		}
+	}
 	// The room is still loading: ygo hands its document to no peer or caller until this hook
 	// returns (sjawhar/ygo v1.50.1-sami.2, provider/websocket/server.go:1753-1842: loadRoom closes
 	// the room's ready barrier after it), so nothing writes the tree while this walks it.
@@ -515,7 +524,7 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 		})
 		class := documentUpdateClass{contentChanged: contentChanged, durable: true}
 		if contentChanged {
-			class.credit, class.creditVersion = s.creditContentChange(room, origin)
+			class.credit, class.creditSeq = s.creditContentChange(room, origin)
 			if s.afterCreditUpdate != nil {
 				s.afterCreditUpdate(room)
 			}
@@ -588,12 +597,15 @@ func (s *Service) creditContentChange(room string, origin any) (settlementCredit
 	state.creditSeq.Add(1)
 	creditSeq := state.creditSeq.Load()
 	pending := make(map[string]model.Actor, len(state.connected))
+	pendingSeq := make(map[string]uint64, len(state.connected))
 	var sole *model.Actor
 	ambiguous := false
 	for _, actor := range state.connected {
 		key := actorKey(actor)
 		state.creditPendingLocked(key, actor, creditSeq)
-		pending[settlementCreditKey(actor)] = actor
+		creditKey := settlementCreditKey(actor)
+		pending[creditKey] = actor
+		pendingSeq[creditKey] = creditSeq
 		if sole == nil {
 			sole = new(actor)
 		} else if key != actorKey(*sole) {
@@ -605,7 +617,7 @@ func (s *Service) creditContentChange(room string, origin any) (settlementCredit
 	}
 	state.lastActor = sole
 	state.unsettled = true
-	return settlementCredit{Pending: pending, LastActor: sole}, creditSeq
+	return settlementCredit{Pending: pending, PendingSeq: pendingSeq, LastActor: sole}, creditSeq
 }
 
 // addConnection registers a browser connected to room. It is credited only with browser edits

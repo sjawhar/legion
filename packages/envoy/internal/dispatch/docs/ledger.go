@@ -48,15 +48,12 @@ type Ledger struct {
 type ledgerVersion struct {
 	artifactID string
 	version    model.Version
-	// creditSeq is the room's creditSeq as of this version's author capture
-	// (captureAuthors), the point recordSettlementCredit's release must record as consumed.
-	creditSeq uint64
-	// fullRelease marks an upload's version (Ledger.WroteVersion, versionPending.fullRelease's
-	// durable counterpart): its write may have changed or removed any pending edit visible as of
-	// its last read of the room, so recordSettlementCredit's release must clear the row's whole
-	// pending map at or before creditSeq, not just the version's named authors (releaseAllSettlementCredit),
-	// the same split commitVersionLocked makes for the room.
-	fullRelease bool
+	// capture is the whole capture rememberPendingVersion also stored for the room's own release
+	// (commitVersionLocked), rather than copies of its creditSeq and fullRelease fields: recordVersion
+	// and WroteVersion each already hold one capture of their own by the time they call
+	// recordSettlementCredit's release, and this is that same value, not a second copy of two of
+	// its fields.
+	capture versionPending
 }
 
 // ledgerSeed is a document SeedText wrote in this transaction: the actor who wrote its first
@@ -223,12 +220,12 @@ func (l *Ledger) endRebuilds() {
 // recordVersion records a version this transaction wrote, which its commit releases
 // (commitVersionLocked). The version holds every change the transaction's write to the document
 // has made so far and credits their authors, so the commit does not credit them again
-// (creditLocked) unless the write changes the document after it (creditLiveWrite). fullRelease
-// carries through to the durable release (recordSettlementCredit) the same way it does to the
-// room's (commitVersionLocked): an upload's version credits its uploader alone, but clears every
-// pending author, not just the ones it names.
-func (l *Ledger) recordVersion(artifactID string, version model.Version, creditSeq uint64, fullRelease bool) {
-	l.versions = append(l.versions, ledgerVersion{artifactID: artifactID, version: version, creditSeq: creditSeq, fullRelease: fullRelease})
+// (creditLocked) unless the write changes the document after it (creditLiveWrite). capture's
+// fullRelease carries through to the durable release (recordSettlementCredit) the same way it
+// does to the room's (commitVersionLocked): an upload's version credits its uploader alone, but
+// clears every pending author, not just the ones it names.
+func (l *Ledger) recordVersion(artifactID string, version model.Version, capture versionPending) {
+	l.versions = append(l.versions, ledgerVersion{artifactID: artifactID, version: version, capture: capture})
 	if write := l.liveWriteFor(artifactID); write != nil {
 		write.versioned = true
 	}
@@ -246,8 +243,9 @@ func (l *Ledger) WroteVersion(artifactID string, version model.Version) {
 	if write == nil || len(write.updates) == 0 {
 		return
 	}
-	l.service.rememberPendingVersion(artifactID, version, versionPending{creditSeq: write.forkSeq, fullRelease: true})
-	l.recordVersion(artifactID, version, write.forkSeq, true)
+	capture := versionPending{creditSeq: write.forkSeq, fullRelease: true}
+	l.service.rememberPendingVersion(artifactID, version, capture)
+	l.recordVersion(artifactID, version, capture)
 }
 
 func (l *Ledger) liveWriteFor(artifactID string) *liveWrite {
@@ -279,23 +277,41 @@ func (l *Ledger) addLiveWrite(write *liveWrite) {
 	l.order = append(l.order, write.artifactID)
 }
 
-// recordSettlementCredit adds each committed transaction's credit to the pending-settlement row in
-// the transaction that wrote the document, then takes out the authors each version it wrote
-// credited, as commitVersionLocked takes them out of the room once the transaction commits. The
-// durable row therefore commits or rolls back with its content, before the request context can be
-// canceled after commit, and owes no author a version already credited. An author the same
-// transaction's own version immediately releases is never upserted at all: the version already
-// records it durably, so paying an upsert the release loop below would undo is wasted work. Every
-// upsert here leaves CreditSeq at its zero value: this transaction's own credit and its own
+// recordSettlementCredit releases, in the transaction that wrote the document, the authors each
+// version this transaction wrote credited, as commitVersionLocked releases them from the room
+// once the transaction commits, then adds each committed transaction's own credit to the
+// pending-settlement row. Releasing first, before this transaction's own credit upserts run,
+// means a full release's blanket per-entry sweep (releaseSettlementCredit) can never read an
+// entry this same statement sequence is about to add below: it does not exist in the row yet.
+// Each such entry's own persisted pending_seq is zero regardless - the sentinel
+// settlementCreditFor's callers below already pass, which a release's own per-entry filter
+// treats as exempt rather than literally "earliest" - so the order is a second guard here, not
+// the only one: it is what protects a different, unrelated, later transaction's own release
+// against an entry this transaction adds, after this transaction has already committed and
+// released. The durable row therefore commits or rolls back with its content, before the request
+// context can be canceled after commit, and owes no author a version already credited. An author
+// the same transaction's own version immediately releases is never upserted at all: the version
+// already records it durably, so paying an upsert the release above already undid is wasted
+// work. Every upsert here leaves CreditSeq (settlementCredit's own aggregate field, distinct from
+// each entry's own PendingSeq) at its zero value: this transaction's own credit and its own
 // version's release are already ordered by the same transaction, so neither needs the watermark
 // gate a concurrent reader's stale credit does (upsertSettlementCredit).
 func (l *Ledger) recordSettlementCredit(ctx context.Context) error {
+	for _, written := range l.versions {
+		var authors []model.Actor
+		if !written.capture.fullRelease {
+			authors = written.version.Authors
+		}
+		if err := releaseSettlementCredit(ctx, l.tx, written.artifactID, authors, written.capture.creditSeq, written.capture.fullRelease); err != nil {
+			return err
+		}
+	}
 	released := l.releasedAuthors()
 	for artifactID, seed := range l.seeds {
 		if _, consumed := released[artifactID][actorKey(seed.actor)]; consumed {
 			continue
 		}
-		if err := upsertSettlementCredit(ctx, l.tx, artifactID, settlementCreditFor(nil, &seed.actor), false); err != nil {
+		if err := upsertSettlementCredit(ctx, l.tx, artifactID, settlementCreditFor(nil, &seed.actor, 0), false); err != nil {
 			return err
 		}
 	}
@@ -323,18 +339,7 @@ func (l *Ledger) recordSettlementCredit(ctx context.Context) error {
 		if len(pending) == 0 && lastActor == nil {
 			continue
 		}
-		if err := upsertSettlementCredit(ctx, l.tx, artifactID, settlementCreditFor(pending, lastActor), false); err != nil {
-			return err
-		}
-	}
-	for _, written := range l.versions {
-		if written.fullRelease {
-			if err := releaseAllSettlementCredit(ctx, l.tx, written.artifactID, written.creditSeq); err != nil {
-				return err
-			}
-			continue
-		}
-		if err := releaseSettlementCredit(ctx, l.tx, written.artifactID, written.version.Authors, written.creditSeq); err != nil {
+		if err := upsertSettlementCredit(ctx, l.tx, artifactID, settlementCreditFor(pending, lastActor, 0), false); err != nil {
 			return err
 		}
 	}

@@ -310,7 +310,7 @@
   nothing still holds it. Before, every document opened since a restart kept its state and counted
   against the cap, so editors were refused with 503 after about 1,000 (LEGION-513).
 - A document's pending settlement keeps the authors it will credit (`doc_settlements_pending.settlement_authors`,
-  migration `0071`): an API edit writes them in the transaction that writes its content and takes
+  migration `0072`): an API edit writes them in the transaction that writes its content and takes
   out the authors any version it wrote credited, so closing the issue, releasing the room or
   restarting the service no longer drops who wrote the version, ask or event the settlement
   produces, nor credits an author again whose own edit's version already did. A version's release
@@ -326,10 +326,21 @@
   in the room, as it already did in the row, instead of the room forgetting that later edit while
   the row kept it. An upload's full release of the room's pending map (an upload's write can
   change or remove any edit pending at its own last read, so its version credits the uploader
-  alone but clears every pending author, not just its own) now has a durable counterpart: the row
-  loses every pending author at or before the release's `creditSeq` too
-  (`releaseAllSettlementCredit`), instead of only the uploader - otherwise a browser's credit the
-  room had already released stayed in the row and came back into the room on its next load
+  alone but clears every pending author, not just its own) now has a durable counterpart
+  (`releaseSettlementCredit`'s `fullRelease` branch): each pending entry in the row carries its
+  own `credit_seq` (`settlementCredit.PendingSeq`), the row's durable twin of
+  `roomState.pendingAuthor.creditSeq`, and the row loses only an entry whose own sequence is at
+  or before the release's point - never one credited after, which the row cannot otherwise tell
+  from one the release's own write already accounted for - the same per-entry filter the room's
+  own full release already uses (`releaseAllPendingLocked`). Otherwise a browser's credit the
+  room had already released stayed in the row and came back into the room on its next load, or,
+  the opposite way, a browser's credit the room still owed - landed in the race window between
+  an upload's own early, unlocked read of the room and its eventual commit - was wiped from the
+  row while the room kept it owed. A fresh room's `creditSeq` restarts at zero on every load, so
+  the row's own sequence bookkeeping from before the load - `released_through` and every entry's
+  `credit_seq` - is reset to zero the moment the document loads
+  (`resetSettlementCreditSequence`), or a credit genuinely new to the fresh counter could be
+  discarded as already consumed by a stale, large watermark left over from before
   (LEGION-513).
 - Every read of an artifact's `project_key` tolerates a null: `scanArtifact` (every artifact read
   by id, ref key, owner or name, and both anchor locks), an ask's anchor artifact, a comment

@@ -75,12 +75,26 @@ route writes its version itself, records it (`Ledger.WroteVersion`): when its wr
 document, it clears every credit pending at the write's room read, whether its replacement removed
 that edit or kept it, and its version credits the uploader alone; an edit credited after that read
 stays pending for the next version. An upload that changed nothing clears nothing. This full
-release carries through to the durable row the same way: `ledgerVersion.fullRelease`
-(`Ledger.recordVersion`) marks an upload's version, and `recordSettlementCredit` releases it with
-`releaseAllSettlementCredit`, which clears the row's whole pending map at or before the version's
-`creditSeq` instead of the version's named authors alone (`releaseSettlementCredit`'s ordinary
-case) - otherwise a browser's credit the room had already released stayed in the row and
-resurrected into the room on its next load (LEGION-513).
+release carries through to the durable row the same way: `ledgerVersion.capture.fullRelease`
+(`Ledger.recordVersion`) marks an upload's version, and `releaseSettlementCredit` - which every
+version's release goes through, an upload's and an ordinary one's alike, `fullRelease` choosing
+whether it ignores keys and sweeps every eligible entry or takes out only the named authors' -
+releases it. Each pending entry in the row carries its own `credit_seq`
+(`settlementCredit.PendingSeq`), the row's durable twin of `roomState.pendingAuthor.creditSeq`:
+a release takes out only an entry whose own sequence is positive and at or before the version's
+`creditSeq`, so a browser's entry credited after the upload's last room read - which the row
+cannot otherwise tell from one the upload's own write already accounted for - survives a full
+release the same way the room's own does (`releaseAllPendingLocked`), instead of resurrecting
+into the room on its next load once it should have stayed released (LEGION-513). An entry with no
+sequence of its own (zero) is never swept by any release: `recordSettlementCredit`'s own upserts
+leave it that way, since the room has not yet assigned theirs when the row is written (the room's
+own bump runs only after commit, in `Ledger.creditLocked`), and releasing before crediting in that
+method's own order means a release never even reads such an entry, this transaction's own
+included. A fresh `roomState` restarts `creditSeq` at zero on every load, so the row's own
+sequence bookkeeping from before the load - `released_through` and every entry's `credit_seq` -
+is reset to zero the moment the document loads (`resetSettlementCreditSequence`), or a credit
+genuinely new to the fresh counter could be discarded as already consumed by a stale, large
+watermark left over from before.
 A settlement that wrote into the room commits what it wrote even when the document moved after its
 read, since the room and its browsers hold it; one that wrote nothing leaves a moved document to
 the settlement the move scheduled. A repair is written only into the document the settlement read
@@ -586,11 +600,11 @@ is the one list of those holders. Every lookup takes a state through `lockState`
 forgets a state that holds nothing once its room has gone, so whatever ends last - ygo's
 `OnUnloadDocument` when the room goes, or a holder's own end - releases it. The durable row that
 says a document's settlement is owed (`doc_settlements_pending`, migration 0063) also carries the
-authors that settlement needs (0071): a browser update records them in the update's own
+authors that settlement needs (0072): a browser update records them in the update's own
 transaction, and a joined write records them in the transaction that commits its content, which
 also takes out the authors any version it wrote credited, as the room does once it commits. A
 browser update's credit names only the peers connected for it - never the room's whole accumulated
-`state.pending` - and carries the room's `creditVersion` as of that moment (`creditContentChange`'s
+`state.pending` - and carries the room's `creditSeq` as of that moment (`creditContentChange`'s
 returned sequence, `settlementCredit.CreditSeq`); a service repair is credited to no one.
 A version's release raises the row's `released_through` watermark to its own captured sequence
 and takes its authors out of the row; `upsertSettlementCredit` discards, rather than merges, a

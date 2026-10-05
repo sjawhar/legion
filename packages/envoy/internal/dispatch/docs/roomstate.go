@@ -90,7 +90,7 @@ type documentUpdateClass struct {
 	contentChanged bool
 	durable        bool
 	credit         settlementCredit
-	creditVersion  uint64
+	creditSeq      uint64
 }
 
 // lockState returns room's state locked, creating it when the service holds none.

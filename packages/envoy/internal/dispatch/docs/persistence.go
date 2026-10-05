@@ -97,7 +97,7 @@ func (p *PgVersioned) AppendUpdateWithClass(ctx context.Context, room string, up
 
 // AppendUpdateWithSettlementCredit validates and stores one incremental V1 update with the authors
 // its pending settlement must retain if the room goes before it runs. creditSeq is the room's
-// creditVersion when encodedCredit was captured (settlementCredit.CreditSeq, upsertSettlementCredit);
+// creditSeq when encodedCredit was captured (settlementCredit.CreditSeq, upsertSettlementCredit);
 // it travels as its own parameter here because encodedCredit crosses this interface as a JSON
 // blob, where CreditSeq (json:"-") would not survive the round trip.
 func (p *PgVersioned) AppendUpdateWithSettlementCredit(ctx context.Context, room string, update []byte, contentChanged bool, encodedCredit []byte, creditSeq uint64) (persistence.Version, error) {

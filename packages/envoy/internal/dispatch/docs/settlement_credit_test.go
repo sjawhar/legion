@@ -726,6 +726,187 @@ func TestAnUploadsFullReleaseClearsTheDurableRowOfAPendingAuthorItWasNeverCredit
 	}
 }
 
+// releaseSettlementCredit's full release takes out only an entry whose own pending_seq is at or
+// before the release's point: one credited earlier survives if it is swept, one credited later
+// does not survive if it is kept. A controlled, direct probe of the SQL itself, with no room or
+// ledger involved - Rev's finding named this scenario exactly (LEGION-513).
+func TestReleaseSettlementCreditKeepsAnEntryCreditedAfterItsOwnCapture(t *testing.T) {
+	database := storetest.Open(t)
+	artifactID := createDocuments(t, database, 1)[0]
+	early := model.Actor{Kind: "session", ID: "early-writer"}
+	late := model.Actor{Kind: "user", ID: "late-writer"}
+
+	appendSettlementCredit(t, database, artifactID, creditAt(10, early), 0)
+	appendSettlementCredit(t, database, artifactID, creditAt(50, late), 0)
+
+	setup := readSettlementCredit(t, database, artifactID)
+	if _, got := setup.Pending[settlementCreditKey(early)]; !got {
+		t.Fatalf("setup: early missing before the release, pending = %+v", setup.Pending)
+	}
+	if _, got := setup.Pending[settlementCreditKey(late)]; !got {
+		t.Fatalf("setup: late missing before the release, pending = %+v", setup.Pending)
+	}
+
+	ctx := context.Background()
+	tx, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the release transaction: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	if err := releaseSettlementCredit(ctx, tx, artifactID, nil, 20, true); err != nil {
+		t.Fatalf("release every entry at or before sequence 20: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit the release: %v", err)
+	}
+
+	after := readSettlementCredit(t, database, artifactID)
+	if _, kept := after.Pending[settlementCreditKey(early)]; kept {
+		t.Fatalf("early (credited at 10) survived a full release at 20, pending = %+v, want it swept", after.Pending)
+	}
+	if _, kept := after.Pending[settlementCreditKey(late)]; !kept {
+		t.Fatalf("late (credited at 50) was swept by a full release at 20, pending = %+v, want it kept", after.Pending)
+	}
+}
+
+// creditAt builds a credit naming one pending author at creditSeq, the entry's own PendingSeq
+// (not the credit's aggregate CreditSeq, which appendSettlementCredit sets separately).
+func creditAt(creditSeq uint64, actor model.Actor) settlementCredit {
+	return settlementCreditFor(map[string]model.Actor{actorKey(actor): actor}, nil, creditSeq)
+}
+
+// An upload's forkLive reads the room's forkSeq without state.mu, well before its transaction
+// commits and releases (livewrite.go's forkLive against Ledger.commit): a browser edit credited,
+// and durably committed, inside that window is credited at a sequence the upload's own capture
+// never saw. The upload's full release must not sweep it - the room's own release
+// (releaseAllPendingLocked) already does not, since the entry's own creditSeq is newer than the
+// upload's forkSeq - or the row diverges from the room in the opposite direction from round 15's
+// bug: the room keeps the edit owed, but the row has wiped it (LEGION-513).
+func TestAnUploadsFullReleaseKeepsABrowserEditCreditedWhileItsTransactionWasOpen(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour // no settlement runs during the race window
+	ctx := context.Background()
+	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
+	httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
+	t.Cleanup(httpServer.Close)
+	bob := model.Actor{Kind: "user", ID: "bob"}
+	uploader := model.Actor{Kind: "session", ID: "uploader-session"}
+
+	tx, err := service.store.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the upload transaction: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	joined, ledger := service.Join(ctx, tx)
+	defer ledger.Discard()
+	if _, err := service.ReplaceText(joined, artifactID, "First.\n\nSecond, uploaded.\n", uploader); err != nil {
+		t.Fatalf("upload the replacement text: %v", err)
+	}
+
+	// The upload's forkLive has already read a low forkSeq; its transaction is still open,
+	// uncommitted. A real browser edit lands here: ygo applies it to the live room, which
+	// credits it in-memory (creditContentChange) at a newer sequence the upload's forkSeq never
+	// saw - editAsBrowser itself waits for that credit to land before it returns (round 12's own
+	// fix). Its durable append cannot complete yet: it needs the document's advisory lock the
+	// upload's own transaction already holds, so it queues behind this transaction's eventual
+	// commit rather than racing it - waiting for it here would deadlock against the open
+	// transaction below, so the only wait is the final one, after that commit.
+	browser := connectBrowser(t, httpServer.URL, artifactID, bob.ID)
+	t.Cleanup(browser.Close)
+	editAsBrowser(t, service, artifactID, browser, "First.\n\nSecond, bob.\n")
+
+	var nextNumber int
+	if err := tx.QueryRow(ctx, `select coalesce(max(number), 0) + 1 from artifact_versions where artifact_id = $1`, artifactID).Scan(&nextNumber); err != nil {
+		t.Fatalf("read the next version number: %v", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		insert into artifact_versions (artifact_id, number, markdown, authors)
+		values ($1, $2, $3, $4)
+	`, artifactID, nextNumber, "First.\n\nSecond, uploaded.\n", []model.Actor{uploader}); err != nil {
+		t.Fatalf("insert the upload's version row: %v", err)
+	}
+	ledger.WroteVersion(artifactID, model.Version{Number: nextNumber, Authors: []model.Actor{uploader}})
+	if err := ledger.Commit(ctx); err != nil {
+		t.Fatalf("commit the upload transaction: %v", err)
+	}
+
+	ctx2, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := service.waitForDurableAppends(ctx2, artifactID); err != nil {
+		t.Fatalf("wait for the room's updates to become durable: %v", err)
+	}
+	room := map[string]model.Actor{}
+	if state := service.lockExistingState(artifactID); state != nil {
+		for _, entry := range state.pending {
+			room[settlementCreditKey(entry.actor)] = entry.actor
+		}
+		service.unlockState(artifactID, state)
+	}
+	_, credit, err := pendingSettlementCredit(ctx2, service.store.Pool, artifactID)
+	if err != nil {
+		t.Fatalf("read the pending-settlement row: %v", err)
+	}
+	row := credit.Pending
+	if row == nil {
+		row = map[string]model.Actor{}
+	}
+	if _, owed := room[settlementCreditKey(bob)]; !owed {
+		t.Fatalf("room pending = %+v after the race, want bob still owed - the upload's forkSeq never saw his edit", room)
+	}
+	if _, owed := row[settlementCreditKey(bob)]; !owed {
+		t.Fatalf("durable row pending = %+v after the race, want bob still owed: the upload's full release wiped an entry credited after its own forkSeq", row)
+	}
+}
+
+// A room's creditSeq restarts at zero on every load (a fresh roomState's fresh atomic.Uint64),
+// but the row's released_through watermark and each pending entry's own credit_seq, from before
+// the load, do not - unless resetSettlementCreditSequence resets them. Without that reset, a
+// released_through left over from several versions' releases before the reload would make
+// upsertSettlementCredit's gate discard a genuinely new, low-sequence credit as already consumed
+// (LEGION-513).
+func TestANewCreditAfterARoomReloadIsNotDiscardedByAStaleWatermark(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
+	httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
+	t.Cleanup(httpServer.Close)
+	alice := model.Actor{Kind: "user", ID: "alice"}
+
+	// Drive several versioned releases, each raising the row's released_through, well past
+	// what a freshly-restarted counter would reach right after a reload.
+	for round := range 5 {
+		agent := model.Actor{Kind: "session", ID: fmt.Sprintf("agent-%d", round)}
+		writeThroughLedger(t, service, artifactID, agent, fmt.Sprintf("Round %d.\n", round), withSnapshotVersion)
+	}
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	if err := service.waitForDurableAppends(waitCtx, artifactID); err != nil {
+		waitCancel()
+		t.Fatalf("wait for the setup rounds to become durable: %v", err)
+	}
+	waitCancel()
+
+	if err := service.srv.CloseRoom(artifactID, true); err != nil {
+		t.Fatalf("close the room: %v", err)
+	}
+	waitForNoLiveDocument(t, service, artifactID)
+
+	browser := connectBrowser(t, httpServer.URL, artifactID, alice.ID)
+	t.Cleanup(browser.Close)
+	editAsBrowser(t, service, artifactID, browser, "First.\n\nSecond, alice.\n")
+	ctx2, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := service.waitForDurableAppends(ctx2, artifactID); err != nil {
+		t.Fatalf("wait for alice's post-reload edit to become durable: %v", err)
+	}
+	_, credit, err := pendingSettlementCredit(ctx2, service.store.Pool, artifactID)
+	if err != nil {
+		t.Fatalf("read the pending-settlement row after reload: %v", err)
+	}
+	if _, owed := credit.Pending[settlementCreditKey(alice)]; !owed {
+		t.Fatalf("pending settlement credit after a post-reload edit = %+v, want alice owed: a stale released_through from before the reload discarded her genuinely new credit", credit.Pending)
+	}
+}
+
 // requireOwedInRoomAndRow requires the room's pending authors and its pending-settlement row's to
 // be want alone, once every update the room has queued is durable.
 func requireOwedInRoomAndRow(t *testing.T, service *Service, artifactID string, want model.Actor) {
@@ -906,11 +1087,11 @@ func creditOf(lastActor *model.Actor, pending ...model.Actor) settlementCredit {
 	for _, actor := range pending {
 		authors[actorKey(actor)] = actor
 	}
-	return settlementCreditFor(authors, lastActor)
+	return settlementCreditFor(authors, lastActor, 0)
 }
 
 // appendSettlementCredit records credit as a document update's own transaction does. creditSeq is
-// the room's creditVersion the credit was captured at (0 when the test does not exercise the
+// the room's creditSeq the credit was captured at (0 when the test does not exercise the
 // release-gating watermark).
 func appendSettlementCredit(t *testing.T, database *store.Store, artifactID string, credit settlementCredit, creditSeq uint64) {
 	t.Helper()
