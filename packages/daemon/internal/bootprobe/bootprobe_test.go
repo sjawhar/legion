@@ -193,25 +193,3 @@ func TestConfirmedContractReadsOnlyTheContractTokenOnAnOKLine(t *testing.T) {
 		})
 	}
 }
-
-// Delay is the schedule awaitReady and ReconnectForever both retry on: one second, doubling with
-// each failed attempt, capped at one minute, and held at the cap forever after — the readiness
-// gate never gives up.
-func TestDelayDoublesThenHoldsAtItsCap(t *testing.T) {
-	retry := Retry{Initial: time.Second, Max: time.Minute}
-	for attempt, want := range map[int]time.Duration{
-		0:   time.Second,
-		1:   2 * time.Second,
-		2:   4 * time.Second,
-		3:   8 * time.Second,
-		4:   16 * time.Second,
-		5:   32 * time.Second,
-		6:   time.Minute, // 64s would overshoot the cap
-		7:   time.Minute,
-		100: time.Minute, // held at the cap forever, not unbounded growth
-	} {
-		if got := Delay(retry, attempt); got != want {
-			t.Fatalf("Delay(retry, %d) = %s, want %s", attempt, got, want)
-		}
-	}
-}

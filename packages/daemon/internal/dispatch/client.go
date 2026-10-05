@@ -3,7 +3,10 @@ package dispatch
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -200,12 +203,12 @@ func (c *HTTPClient) request(ctx context.Context, method, path string, body, int
 
 	response, err := c.httpClient.Do(request)
 	if err != nil {
-		return fmt.Errorf("call Dispatch %s %s: %w", method, path, err)
+		return fmt.Errorf("call Dispatch %s %s: %w", method, path, transportFailure(err))
 	}
 	defer response.Body.Close()
 	payload, err := io.ReadAll(response.Body)
 	if err != nil {
-		return fmt.Errorf("read Dispatch %s %s: %w", method, path, err)
+		return fmt.Errorf("read Dispatch %s %s: %w", method, path, transportFailure(err))
 	}
 	if response.StatusCode/100 != 2 {
 		return dispatchError(response.StatusCode, response.Status, payload)
@@ -217,6 +220,31 @@ func (c *HTTPClient) request(ctx context.Context, method, path string, body, int
 		return fmt.Errorf("decode Dispatch %s %s response: %w", method, path, err)
 	}
 	return nil
+}
+
+// transportFailure wraps err as a TransientError unless it is a certificate Go's client refuses
+// to trust — a wrong or missing CA, a hostname mismatch, an expired or otherwise invalid
+// certificate — which is a misconfiguration no wait fixes, never an outage: left wrapped, it
+// would satisfy Unreachable exactly like a dial refused or reset would, and a boot gate would
+// retry a certificate problem forever instead of refusing loud.
+func transportFailure(err error) error {
+	var certErr *tls.CertificateVerificationError
+	if errors.As(err, &certErr) {
+		return err
+	}
+	var unknownAuth x509.UnknownAuthorityError
+	if errors.As(err, &unknownAuth) {
+		return err
+	}
+	var hostErr x509.HostnameError
+	if errors.As(err, &hostErr) {
+		return err
+	}
+	var certInvalid x509.CertificateInvalidError
+	if errors.As(err, &certInvalid) {
+		return err
+	}
+	return &TransientError{Err: err}
 }
 
 // DaemonSession is the session the daemon writes every Dispatch status and message of the issue key

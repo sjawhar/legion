@@ -210,11 +210,16 @@ func (w *workflowRuntime) bind(url, token string) {
 // connects as nc, the user readBoot chose (natsConnection), after logging it, and logs what the
 // server reports about the connection: every permission it refuses at error, every disconnect at
 // warn and every reconnect at info (natsauth.LogEvents), under natsauth.ReconnectForever so a
-// reconnect never gives up and turns an outage mid-run into the crash daemon.go's run used to let
-// through (LEGION-580). An unreachable NATS here is the boot's own readiness gate's to retry
-// (daemon.go's awaitReady calls this under its capped backoff, forever): a failed attempt closes
-// whatever it opened and clears it, so a later attempt starts clean rather than leaking the
-// connection this one could not finish setting up.
+// reconnect never gives up: a NATS outage mid-run never closes the connection for good. An
+// unreachable NATS here is the boot's own readiness gate's to retry (daemon.go's run, under
+// bootprobe.Run and natsauth.Unreachable, forever): a failed attempt closes whatever it opened
+// and clears it, so a later attempt starts clean rather than leaking the connection this one
+// could not finish setting up. A refused JetStream API call — a publish or subscribe grant this
+// connection's user lacks — is reported asynchronously and never closes the connection, so the
+// failure OpenConsumers returns synchronously is only ever its own deadline, with the refusal
+// itself visible only on the connection's own LastError; natsauth.JoinLastError folds that in
+// before Close so natsauth.Unreachable can tell the refusal from NATS merely being slow
+// (LEGION-580).
 func (w *workflowRuntime) connect(ctx context.Context, cfg config.Config, nc natsConnection) error {
 	nc.log(w.log)
 	conn, err := natsauth.Connect(cfg.NatsURLs, nc.seed, natsauth.LogEvents(w.log), natsauth.ReconnectForever())
@@ -224,9 +229,10 @@ func (w *workflowRuntime) connect(ctx context.Context, cfg config.Config, nc nat
 	w.conn = conn
 	js, err := jetstream.New(conn)
 	if err != nil {
+		err = fmt.Errorf("open Envoy JetStream: %w", natsauth.JoinLastError(err, conn))
 		conn.Close()
 		w.conn = nil
-		return fmt.Errorf("open Envoy JetStream: %w", err)
+		return err
 	}
 	w.log.Info("legion workflow boot stage", "stage", "intake")
 	w.consumers, err = intake.OpenConsumers(ctx, js, intake.ConsumerSpec{
@@ -234,6 +240,7 @@ func (w *workflowRuntime) connect(ctx context.Context, cfg config.Config, nc nat
 		ReviewPermission: w.reviewerCanWrite,
 	})
 	if err != nil {
+		err = natsauth.JoinLastError(err, conn)
 		conn.Close()
 		w.conn = nil
 		return err
@@ -315,9 +322,12 @@ func (w *workflowRuntime) recordedIssue(ctx context.Context, key string) (*recor
 // client-side, at no extra request cost), and a key currently out of that window — moved to
 // backlog, or never past triage — while the daemon was down still needs to be held exactly like
 // one still in it, so a replayed event that predates the move it fell out on cannot be admitted
-// before the move's own event ever arrives. An unreachable Dispatch — the listing's 503, the
-// stream's own calls failing the same way — is the boot's readiness gate's to retry (daemon.go's
-// awaitReady calls this under its capped backoff, forever), not a boot refusal.
+// before the move's own event ever arrives. An unreachable Dispatch (the listing's 5xx included)
+// or NATS (the stream's own dial-level failures) is the boot's readiness gate's to retry
+// (daemon.go's run, under bootprobe.Run, judges every failure here with dispatch.Unreachable or
+// natsauth.Unreachable, forever), not a boot refusal; a genuine refusal from either — a Dispatch
+// application error with its own code, a NATS permission or authorization violation — still
+// exits loud.
 func (w *workflowRuntime) reconcile(ctx context.Context) error {
 	issues, err := w.dispatch.ListIssues(ctx, w.dispatchProject, nil)
 	if err != nil {

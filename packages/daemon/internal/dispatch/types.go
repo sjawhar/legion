@@ -132,6 +132,40 @@ func PermanentRefusal(err error) (*Error, bool) {
 	return refusal, true
 }
 
+// TransientError wraps a Dispatch request failure that is a transport problem — no response at
+// all (a dial refused or reset, a lookup that resolved nothing yet, the request's own bounded
+// timeout firing before an answer came back) or the response cut off before its body was fully
+// read — rather than anything Dispatch itself answered. request wraps every such failure in it
+// (client.go), the way appauth.TransientError wraps GitHub's, so a caller can tell "Dispatch
+// never answered" from "Dispatch answered and refused" without inspecting the wrapped error's
+// own type. A certificate the client does not trust is deliberately not wrapped: request types
+// that shape out on purpose, since no wait fixes a bad certificate.
+type TransientError struct{ Err error }
+
+func (e *TransientError) Error() string { return e.Err.Error() }
+func (e *TransientError) Unwrap() error { return e.Err }
+
+// Unreachable reports whether err means Dispatch is not reachable yet, the same outage
+// PermanentRefusal already rides out rather than drops a queued write over: a TransientError (no
+// answer came back at all), or an *Error whose refusal PermanentRefusal does not call permanent —
+// every 5xx, a codeless 4xx, 408, 429, and a credential answer (401, 403; the boot token is read
+// once, so a corrected file takes a restart to take effect, same as a queued write already
+// accepts). Anything else — a genuine coded refusal PermanentRefusal does call permanent, or an
+// error that is neither a TransientError nor a Dispatch *Error at all, such as a 200 response
+// whose body is not the JSON it promised — is not an outage this waits out.
+func Unreachable(err error) bool {
+	var transient *TransientError
+	if errors.As(err, &transient) {
+		return true
+	}
+	var refusal *Error
+	if !errors.As(err, &refusal) {
+		return false
+	}
+	_, permanent := PermanentRefusal(err)
+	return !permanent
+}
+
 func (e *Error) Error() string {
 	if e.Code == "" {
 		return e.Message

@@ -6,14 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"regexp"
 	"strings"
-	"time"
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nkeys"
 
-	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 	"github.com/sjawhar/legion/daemon/internal/config"
 )
 
@@ -163,31 +162,16 @@ func Connect(urls []string, seed string, options ...nats.Option) (*nats.Conn, er
 	return nats.Connect(strings.Join(urls, ","), options...)
 }
 
-// reconnectRetry is ReconnectForever's schedule: one second, doubling, capped at one minute,
-// matching the daemon's boot readiness gate (internal/daemon's readinessRetry) — a dependency
-// outage costs the same wait before the main loop starts and after it.
-var reconnectRetry = bootprobe.Retry{Initial: time.Second, Max: time.Minute}
-
 // ReconnectForever is the connection option that never gives up reconnecting: the default 60
-// attempts (nats.DefaultMaxReconnect, about two minutes at nats.DefaultReconnectWait) end in a
-// permanently closed connection no retry revives — exactly the "workflow intake stopped: durable
-// consumer … stopped unexpectedly" crash daemon.go turns into a boot refusal (LEGION-580). With
-// it, the wait between whole-server-list passes is capped exponential, reconnectRetry's schedule,
-// forever, so a NATS outage mid-run costs degraded minutes rather than a crash the supervisor
-// restarts straight into the same dial.
+// attempts (nats.DefaultMaxReconnect) give up after about two minutes (at
+// nats.DefaultReconnectWait) and close the connection for good — exactly the "workflow intake
+// stopped: durable consumer … stopped unexpectedly" crash daemon.go turns into a boot refusal
+// (LEGION-580). With MaxReconnect negative, nats.go's own server-pool logic never drops a server
+// for having failed too many times (selectNextServer) and doReconnect loops until Close, so a
+// NATS outage mid-run costs degraded minutes of nats.go's own default 2 s reconnect wait rather
+// than a crash the supervisor restarts straight into the same dial.
 func ReconnectForever() nats.Option {
-	return func(o *nats.Options) error {
-		o.MaxReconnect = -1
-		o.CustomReconnectDelayCB = reconnectDelay
-		return nil
-	}
-}
-
-// reconnectDelay is ReconnectForever's CustomReconnectDelayCB. nats.go counts attempts from 1 (how
-// many times the whole server list has now failed), so the first call gets reconnectRetry's own
-// Initial wait rather than one doubling already applied.
-func reconnectDelay(attempts int) time.Duration {
-	return bootprobe.Delay(reconnectRetry, attempts-1)
+	return nats.MaxReconnects(-1)
 }
 
 // permissionRefusal is the operation and subject a server's permissions violation names
@@ -254,6 +238,41 @@ func WithLastError(err error, conn *nats.Conn) error {
 		return fmt.Errorf("%w (the NATS connection's last error: %v)", err, last)
 	}
 	return err
+}
+
+// JoinLastError folds conn's own last error into err when the connection recorded one, whether or
+// not the connection is still up — unlike WithLastError, which only looks once conn is closed. A
+// refused JetStream API call (a publish or subscribe grant the connection's user lacks) is
+// reported to nats.go asynchronously and never closes the connection (processTransientError), so
+// the synchronous error a blocked API call returns is only ever its own deadline — "context
+// deadline exceeded" — with no sign of the permission violation that caused it. A caller whose
+// own call can fail that way joins LastError before judging the error with Unreachable, so a
+// permission refusal is not mistaken for NATS merely being slow to answer.
+func JoinLastError(err error, conn *nats.Conn) error {
+	if last := conn.LastError(); last != nil {
+		return fmt.Errorf("%w (NATS: %w)", err, last)
+	}
+	return err
+}
+
+// Unreachable reports whether err means NATS is not reachable yet, as against a misconfiguration
+// — a permission or an authorization violation the server itself refuses, a malformed seed
+// (userKey, before any dial is attempted), a protocol or certificate failure — that no wait
+// fixes. Matched by concrete, named shapes only, never the net.Error interface: two unrelated
+// standard library types satisfy that interface without being network failures at all —
+// context.DeadlineExceeded, which a refused JetStream API call produces with nothing in its own
+// text to tell a permission refusal from NATS merely being slow (JoinLastError is what makes that
+// refusal visible here, in time for the first check below), and *url.Error — so a caller must
+// never classify by the interface alone.
+func Unreachable(err error) bool {
+	if errors.Is(err, nats.ErrPermissionViolation) || errors.Is(err, nats.ErrAuthorization) {
+		return false
+	}
+	if errors.Is(err, nats.ErrNoServers) || errors.Is(err, nats.ErrTimeout) {
+		return true
+	}
+	var opErr *net.OpError
+	return errors.As(err, &opErr)
 }
 
 // PublicKey is the public key of the nkey user seed is the seed of, a seed Seed answered: what a

@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -27,6 +28,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/appauth"
+	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
@@ -933,6 +935,69 @@ func TestRunStopsWithTheErrorWhenItsIntakeEnds(t *testing.T) {
 		}
 	case <-time.After(15 * time.Second):
 		t.Fatal("the daemon kept running after its intake ended")
+	}
+}
+
+// RED (LEGION-580, correctness review finding 3): dispatchReconcileOutcome and bootprobe.Run are
+// only useful if run() actually wires them together. Here a real daemon.Run() boots against a
+// Dispatch stand-in that answers 503 twice before listing no issues, under a fast readinessRetry,
+// and reaches /healthz — proving the wiring itself rides out the outage, not just the extracted
+// pieces TestDispatchReconcileOutcomeRidesOutA503TwiceThenSucceeds (readiness_test.go) already
+// cover in isolation. Reverting daemon.go's wiring to main while keeping dispatchReconcileOutcome
+// and natsConnectOutcome is exactly the gap this closes: that revert leaves every other new test
+// passing.
+func TestRunWaitsThroughADispatch503BeforeServing(t *testing.T) {
+	fastReadiness(t, bootprobe.Retry{Initial: time.Millisecond, Max: 4 * time.Millisecond})
+	natsURL := workflowNATS(t)
+	var requests atomic.Int64
+	dispatchServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/issues" {
+			t.Errorf("Dispatch request = %s %s", r.Method, r.URL.Path)
+			return
+		}
+		if requests.Add(1) <= 2 {
+			http.Error(w, "unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode([]any{}); err != nil {
+			t.Errorf("write Dispatch issues: %v", err)
+		}
+	}))
+	t.Cleanup(dispatchServer.Close)
+
+	cfg := testConfig(t)
+	cfg.DispatchURL = dispatchServer.URL
+	cfg.DispatchTokenFile = filepath.Join(t.TempDir(), "dispatch-token")
+	if err := os.WriteFile(cfg.DispatchTokenFile, []byte("dispatch-test-token\n"), 0o600); err != nil {
+		t.Fatalf("write Dispatch token: %v", err)
+	}
+	cfg.Projects = map[string]config.Project{cfg.Project: {Repo: ghrepo.MustParse("acme/widgets")}}
+	cfg.NatsURLs = []string{natsURL}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- run(ctx, cfg, quietLogger(), overrides{
+			listen:  heldListen,
+			runtime: fakeRuntime(fake.NewRuntime(), &built{}).runtime, clock: stillClock{}, workflowTokens: &workflowTokenRecorder{},
+		})
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("run: %v", err)
+			}
+		case <-time.After(15 * time.Second):
+			t.Error("daemon did not stop")
+		}
+	})
+
+	awaitHealthz(t, cfg, done)
+	if got := requests.Load(); got < 3 {
+		t.Fatalf("Dispatch saw %d requests, want at least 3 (two 503s then the 200 the daemon booted on)", got)
 	}
 }
 
