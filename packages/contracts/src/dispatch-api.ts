@@ -221,6 +221,31 @@ export interface IssueClaim {
   readonly at: string;
 }
 
+/** Done of total: the task items of a spec, or the direct children of an issue; `done` ≤ `total`. */
+export interface ProgressCount {
+  readonly done: number;
+  readonly total: number;
+}
+
+/**
+ * An issue's progress, counted as GitHub counts an issue's. `tasks` is the task-list items
+ * (`- [ ]` / `- [x]`, nested lists and callouts included) of the issue's primary document as its
+ * latest version renders, stored on the issue whenever a version of that document is written and
+ * `null` when it holds none. It is also `null` for a spec the server has not counted yet, which
+ * the reconciliation the server runs at start and every five minutes closes, so an uncounted
+ * window lasts at most that long after a deploy. Counts follow the document's versions: a browser
+ * edit shows once it settles, within seconds. `children` is the issue's direct children, every
+ * status (icebox included), `done` being those whose status is `done`, computed from the
+ * children's statuses on each read and `null` when it has none; it is a count, where
+ * `IssueDetails.children` beside it on the same object is the list of child issues. It is on
+ * every issue of the read, the list and the pinned list, never on an event payload. The check-in
+ * collector reads `tasks` and `children` here, so the shape is a contract.
+ */
+export interface IssueProgress {
+  readonly tasks: ProgressCount | null;
+  readonly children: ProgressCount | null;
+}
+
 export interface Issue {
   readonly key: string;
   readonly project: string;
@@ -285,6 +310,7 @@ export interface IssueSummary
     IssueRouteReach {
   readonly labels?: string[];
   readonly open_asks: number;
+  readonly progress: IssueProgress;
 }
 
 /**
@@ -1145,14 +1171,40 @@ export interface SearchResult {
   readonly artifact?: SearchArtifactRef;
   readonly id: string;
   readonly snippet: string;
+  /** The hit's fused score: 1/(60 + its position in its kind's ranked list). */
   readonly rank: number;
   readonly href: string;
 }
 
-export interface SearchResponse {
+/** The four paging fields a Dispatch that supports search paging always answers together. */
+export interface SearchResultsPage {
+  /** Every match of every kind. */
+  readonly total: number;
+  /**
+   * How many of `total` the pages can return: each kind lists only its best `SEARCH_KIND_DEPTH`
+   * (`dispatch-tools.ts`), so an offset at or past this returns no results.
+   */
+  readonly reachable: number;
+  readonly limit: number;
+  readonly offset: number;
+}
+
+/** `SearchResultsPage` with every field retyped to `V`, always optional: the shape of "none of
+ * these fields" for a sentinel `V` (`undefined` for the wire type below, `never` for
+ * `fake-search-response.ts`'s stricter test-only override, which forbids supplying a concrete
+ * value without forbidding an explicit `undefined` — TypeScript widens every optional property to
+ * admit one regardless of its declared type unless the whole project turns on
+ * `exactOptionalPropertyTypes`). */
+export type SearchResultsPageAbsentAs<V> = { readonly [K in keyof SearchResultsPage]?: V };
+
+/** One page of `GET /api/v1/search`'s fused order, cut at `offset` and `limit`. `total`,
+ * `reachable`, `limit`, and `offset` answer together or not at all: a Dispatch that predates
+ * search paging omits all four and always answers its first page regardless of any offset
+ * requested; one that supports it always answers all four together (`SearchResultsPage`). */
+export type SearchResponse = {
   readonly results: SearchResult[];
   readonly took_ms: number;
-}
+} & (SearchResultsPage | SearchResultsPageAbsentAs<undefined>);
 
 export interface DuplicateCandidate {
   readonly key: string;
@@ -1828,6 +1880,7 @@ export interface EditArtifactInput {
 }
 
 export interface IssueDetails extends Issue, IssueRouteReach {
+  readonly progress: IssueProgress;
   readonly artifacts: Artifact[];
   readonly open_asks: Ask[];
   readonly children: IssueChild[];

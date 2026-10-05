@@ -2,7 +2,8 @@
 
 Part of `skill://legion-worker`. Read it when you reply to, accept, or resolve a review thread,
 or run `legion threads resolve`: the implementer after every push that answers a review, the
-merger before READY, and the reviewer, who answers threads on every re-review and runs nothing.
+merger before READY, and the reviewer, who answers threads on every re-review and runs the command
+only when a review workflow the project declares is red on a bot's findings.
 Every path it cites is in sjawhar/legion.
 
 - **Threads are dispositioned individually, never resolved in bulk.** Every open review
@@ -15,14 +16,26 @@ Every path it cites is in sjawhar/legion.
   considers only the newest comment). The review App can reply on a thread but cannot resolve it:
   GitHub grants resolving a review thread to the pull request's author, and the implementer opens
   every Legion pull request (`docs/site/src/content/docs/legion/running-legion.md`, "The two
-  GitHub Apps").
+  GitHub Apps"). In the reviewer's pane (`LEGION_ROLE=reviewer`), `legion threads resolve` asks
+  the daemon instead (`POST /legion/v1/threads/resolve`), which resolves as the implementer's App
+  only the threads a bot outside Legion's role Apps opened whose newest submitted comment is the
+  reviewer's `Accepted:`, on the pull request of the reviewer's own issue, and prints the same
+  lines; the reviewer never holds the implementer's token. A thread whose newest comment is a
+  draft in the implement App's pending review (the implementer's or the merger's: GitHub shows it
+  to that App alone, as which the daemon reads) is left open and never named: the command prints
+  only how many there are (`<n> unresolved threads hold the implement App's pending draft and
+  were left open`) and exits 1, as it does on a refusal. Report that count to the architect before
+  you spend your one re-run of the failed workflow; the architect sends the issue back so the
+  implementer submits or discards its pending review. Once the review is submitted, the
+  implementer's reply is the thread's newest comment, which leaves it open: answer the thread
+  again, then run the command again. Once the review is discarded, your `Accepted:` is the newest
+  comment again, and running the command again closes the thread.
   When `LEGION_GRANT_FILE` or `LEGION_GRANT` is set, use `legion threads resolve --pr <number> --repo <owner>/<repo>`.
   When neither is set, add `--gh` to that command, which applies the fallback's rule below through
   your own `gh`; where no `legion` command is installed, use `gh api graphql` with the session's
   GitHub credential and the fallback below.
   In a Legion pane, the **implementer** runs the command after every push that answers a review
-  (the corrective push, and the final `.legion/` deletion push where the daemon has one) and
-  before its `handoff_complete`, and pastes its output, stamped with the head it just pushed, into
+  and before its `handoff_complete`, and pastes its output, stamped with the head it just pushed, into
   the `Threads` section. The output is then recorded against the head the reviewer will read, and
   nothing reads thread state before the implementer's completion. The command resolves each
   unresolved thread whose newest submitted comment is the opener's own `Accepted:` reply. On a
@@ -66,8 +79,8 @@ Every path it cites is in sjawhar/legion.
 
   Re-read `reviewThreads` and confirm that thread's `isResolved` is true. In either route, report
   a refused resolution to the architect, which opens an ask for a human to resolve the thread by
-  hand — never skip it silently. The merger runs the command once more before publishing READY
-  and does not publish while any `left open` line remains. That run is where every accepted
+  hand — never skip it silently. The merger runs the command once more before its READY
+  completion and does not complete while any `left open` line remains. That run is where every accepted
   thread's resolution is guaranteed, since the merge queue's gate counts the unresolved threads at
   the head. Acceptances posted after the implementer's last run are resolved here.
 
@@ -80,5 +93,9 @@ Every path it cites is in sjawhar/legion.
   opener's (read the newest comments with `gh api graphql`, never from the PR body). Another
   opener's thread that a person resolved with GitHub's button, with no `Accepted:`, gates nothing:
   neither `legion threads resolve` nor the merge queue's gate counts a resolved thread. Resolution
-  is the pull request author's App's, so your approval never waits on it. The merger resolves
-  accepted threads that remain open before publishing READY.
+  is the pull request author's App's, so your approval never waits on it, except when a review
+  workflow the project declares (`projects.<KEY>.review_workflows`) is red on its findings: such a
+  workflow passes on a re-run only once its threads are resolved, so you run `legion threads
+  resolve` (the daemon resolves the bot threads you accepted) and re-run the failed run before you
+  approve, as your role prompt says.
+  The merger resolves accepted threads that remain open before its READY completion.

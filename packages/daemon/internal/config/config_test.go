@@ -232,7 +232,8 @@ func TestLoadReadsEveryStage3Key(t *testing.T) {
 dispatch_token_file: tokens/DISPATCH_TOKEN
 projects:
   DEMO: { repo: acme/widgets }
-  OTHER: { repo: acme/other, merge_queue_role: merge-queue }
+  OTHER: { repo: acme/other, merge_queue_role: merge-queue, review_workflows: [.github/workflows/review.yml, .github/workflows/bot.yaml] }
+  EMPTY: { repo: acme/empty, review_workflows: [] }
 gates:
   design: off
 github_apps:
@@ -259,8 +260,10 @@ max_fix_attempts: 4
 		t.Errorf("DispatchTokenFile = %q, want %q", cfg.DispatchTokenFile, want)
 	}
 	if !reflect.DeepEqual(cfg.Projects, map[string]Project{
-		"DEMO":  {Repo: ghrepo.MustParse("acme/widgets")},
-		"OTHER": {Repo: ghrepo.MustParse("acme/other"), MergeQueueRole: "merge-queue"},
+		"DEMO": {Repo: ghrepo.MustParse("acme/widgets")},
+		"OTHER": {Repo: ghrepo.MustParse("acme/other"), MergeQueueRole: "merge-queue",
+			ReviewWorkflows: []string{".github/workflows/review.yml", ".github/workflows/bot.yaml"}},
+		"EMPTY": {Repo: ghrepo.MustParse("acme/empty")},
 	}) {
 		t.Errorf("Projects = %#v", cfg.Projects)
 	}
@@ -392,6 +395,26 @@ func TestLoadRefusesEveryStage3Key(t *testing.T) {
 			name: "projects entry has no repo",
 			body: minimalFile + "projects: {DEMO: {}}\n",
 			want: `projects.DEMO.repo must be "owner/name" (got "undefined")`,
+		},
+		{
+			name: "review_workflows is not a list",
+			body: strings.Replace(minimalFile, "{ repo: acme/widgets }", "{ repo: acme/widgets, review_workflows: .github/workflows/review.yml }", 1),
+			want: "projects.DEMO.review_workflows must be an array of non-empty strings",
+		},
+		{
+			name: "a review workflow outside .github/workflows",
+			body: strings.Replace(minimalFile, "{ repo: acme/widgets }", "{ repo: acme/widgets, review_workflows: [review.yml] }", 1),
+			want: `projects.DEMO.review_workflows entry "review.yml" must be a workflow file's path, .github/workflows/<name>.yml or .yaml`,
+		},
+		{
+			name: "a review workflow in a subdirectory of .github/workflows",
+			body: strings.Replace(minimalFile, "{ repo: acme/widgets }", "{ repo: acme/widgets, review_workflows: [.github/workflows/bots/review.yml] }", 1),
+			want: `projects.DEMO.review_workflows entry ".github/workflows/bots/review.yml" must be a workflow file's path, .github/workflows/<name>.yml or .yaml`,
+		},
+		{
+			name: "a review workflow named twice",
+			body: strings.Replace(minimalFile, "{ repo: acme/widgets }", "{ repo: acme/widgets, review_workflows: [.github/workflows/review.yml, .github/workflows/review.yml] }", 1),
+			want: `projects.DEMO.review_workflows names ".github/workflows/review.yml" twice`,
 		},
 		{
 			name: "gates is not a mapping",

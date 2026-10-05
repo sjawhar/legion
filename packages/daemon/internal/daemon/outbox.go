@@ -393,8 +393,8 @@ func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload recor
 // project's merge queue role, keyed by the row so a retried row is one delivery. A role with no
 // live holder refuses every attempt until someone claims it, so waiting would retry forever; the
 // Dispatch message the same READY posted already carries the packet, and the issue's status shows
-// a withdrawal, so the issue is told the role had no holder, as the shared merger prompt has the
-// merger say (internal/prompts/roles/merger.md step 4), and the row is done.
+// a withdrawal, so the issue is told the role had no holder, as the merger's prompt says the
+// daemon does (internal/prompts/go/merger.md), and the row is done.
 func (r *outbox) mergeQueue(ctx context.Context, row record.OutboxRow, payload record.MergeQueuePublish) error {
 	if r.notices == nil {
 		return errors.New("merge queue executor has no Envoy publisher")
@@ -404,7 +404,7 @@ func (r *outbox) mergeQueue(ctx context.Context, row record.OutboxRow, payload r
 		return r.message(ctx, row, record.MessagePost{Body: fmt.Sprintf("merge queue role %s had no live holder at %s", payload.Role, r.now().UTC().Format(time.RFC3339))})
 	}
 	if err != nil {
-		return fmt.Errorf("publish READY for %s to merge queue role %s: %w", row.Issue, payload.Role, err)
+		return fmt.Errorf("publish %s's READY packet or its withdrawal to merge queue role %s: %w", row.Issue, payload.Role, err)
 	}
 	return nil
 }

@@ -182,16 +182,24 @@ export const ASK_QUESTION_MAX = 800;
 
 /**
  * Longest `dispatch_search` query (`GET /api/v1/search`'s `q`, trimmed), in UTF-16 units. The
- * query rides in the URL beside `project` and `limit`, so this refusal and `project`'s key rule
- * are what keep the tool's URL under the load balancer's limit; `packages/contracts/AGENTS.md`
- * "Search limits" owns that budget. Generated into Go as `contracts.SearchQueryMax`, which the
- * server enforces.
+ * query rides in the URL beside `project`, `limit` and `offset`, so this refusal and `project`'s
+ * key rule are what keep the tool's URL under the load balancer's limit;
+ * `packages/contracts/AGENTS.md` "Search limits" owns that budget. Generated into Go as
+ * `contracts.SearchQueryMax`, which the server enforces.
  */
 export const SEARCH_QUERY_MAX = 1000;
 
 /** What a refusal over `SEARCH_QUERY_MAX` tells the caller to send instead; generated into Go
  *  as `contracts.SearchQueryHint`, so the tool and the server word it once. */
 export const SEARCH_QUERY_HINT = "search with a short phrase of a few words, not a passage";
+
+/**
+ * How many of its best matches each kind of content (issues, documents, asks, comments and
+ * messages) lists before `GET /api/v1/search` merges the kinds into one order. A kind's later
+ * matches count in the answer's `total` and no offset returns them. Generated into Go as
+ * `contracts.SearchKindDepth`, where the server cuts each kind's list.
+ */
+export const SEARCH_KIND_DEPTH = 100;
 
 /** A whole project key, as the Dispatch server creates them (`projectKeyPattern`, and the
  *  `projects.key` check constraint). */
@@ -737,7 +745,7 @@ export const dispatchToolSpecs = [
     description:
       "Apply deterministic document edits: replace or delete quoted text, insert markdown at an anchor, retype an identified paragraph or typed block into a schema-declared typed block, delete or move a whole block by its id, or delete a table row or column in place. " +
       "Do not use it for review feedback or for reading; use dispatch_comment, dispatch_suggest, or dispatch_doc_read instead. " +
-      "For replace, delete, and quote anchors, find text as rendered: inline Markdown (**bold**, `code`) is tolerated and must be balanced; a leading '# ' matches a heading at any level. replace is inline: with is the new text of the matched span, so a marker of a different kind from the block's own stays literal text ('4. Design' written into a heading). A with that opens with a marker of the same kind as the matched block's own would write it twice and is INVALID_OP - including prose that merely looks like one ('1999. was a year' into an ordered item), which you write as text by escaping it ('1999\\. was a year'). The exception is a heading rename whose find carried a heading marker: replace(find=\"## Old\", with=\"## New\") gives '## New', and a different level applies only when find named the heading's actual level (find \"## Old\" with \"### New\" makes it an h3), since '# ' selects a heading without naming its level. Any non-empty with that renders to no text - a line indented four spaces or a tab, which markdown reads as a code block, or whitespace alone - is INVALID_OP rather than a silent deletion; pass an empty with to delete the matched text on purpose - a list item, quote, typed block or footnote definition left holding only the emptied paragraph keeps it. " +
+      "For replace, delete, and quote anchors, find text as rendered: inline Markdown (**bold**, `code`) is tolerated and must be balanced; a leading '# ' matches a heading at any level. replace is inline: with is the new text of the matched span, so a marker of a different kind from the block's own stays literal text ('4. Design' written into a heading). A with that opens with a marker of the same kind as the matched block's own would write it twice and is INVALID_OP - including prose that merely looks like one ('1999. was a year' into an ordered item), which you write as text by escaping it ('1999\\. was a year'). The exception is a heading rename whose find carried a heading marker: replace(find=\"## Old\", with=\"## New\") gives '## New', and a different level applies only when find named the heading's actual level (find \"## Old\" with \"### New\" makes it an h3), since '# ' selects a heading without naming its level. A task item (`- [ ]` / `- [x]`) is ticked the same way: when find matches from the start of the item's text and with opens with '[x] ' or '[ ] ', the opening sets the item's box and the rest is its new text (replace(find=\"Write it\", with=\"[x] Write it\") ticks it); the same opening over a plain list item or a paragraph stays literal text. Any non-empty with that renders to no text - a line indented four spaces or a tab, which markdown reads as a code block, or whitespace alone - is INVALID_OP rather than a silent deletion; pass an empty with to delete the matched text on purpose - a list item, quote, typed block or footnote definition left holding only the emptied paragraph keeps it. " +
       "with cannot open a new block: after a hard line break inside with (two trailing spaces, or a backslash, before the newline) a heading, bullet, '1.'/'1)' ordered, or '>' blockquote marker is INVALID_OP too, since that line would stay escaped text inside the matched block - use insert, plus delete for what it replaces, to add the block. A hard break in with is itself INVALID_OP when the matched text is in a heading or a table cell, which are written on one line. " +
       "A delete whose find is a block's entire text removes the block (a list emptied of its items goes too); delete with block removes any block by id, and move with block relocates one. A delete or retype that would take an ask block out of the document while its ask is open is refused, with nothing sent. delete_row and delete_column take a table block and a zero-based index, preserving the table block id and refusing to remove cells with open asks or unresolved comments. " +
       'Insert and move anchors also accept "start", "end", "heading:<exact heading text>", and "block:<id>"; block ids and their tokens come from GET /api/v1/artifacts/{artifact UUID}/blocks (the route takes the artifact UUID, not its slug). ' +
@@ -771,7 +779,7 @@ export const dispatchToolSpecs = [
               with: z
                 .string()
                 .describe(
-                  "Replacement text for replace: inside a code block, the code's literal text as sent (line breaks at its end do not survive a read); text that would read as block syntax at a line start, such as '---' over a paragraph, is stored escaped and reads back as those characters, so a rule is added with insert beside the paragraph; elsewhere parsed as inline markdown within the matched block; a marker of a different kind from the block's own is literal text, one of the same kind is refused unless it is a heading rename (where a level named by find is what lets with change it), a backslash escape keeps prose that merely looks like a marker, a block marker after a hard line break is refused because replace cannot open a new block, and any non-empty value that renders to no text is refused - only an empty value deletes the match. A CR LF or a lone carriage return in it is written as a line feed."
+                  "Replacement text for replace: inside a code block, the code's literal text as sent (line breaks at its end do not survive a read); text that would read as block syntax at a line start, such as '---' over a paragraph, is stored escaped and reads back as those characters, so a rule is added with insert beside the paragraph; elsewhere parsed as inline markdown within the matched block; a marker of a different kind from the block's own is literal text, one of the same kind is refused unless it is a heading rename (where a level named by find is what lets with change it), a backslash escape keeps prose that merely looks like a marker, a leading '[x] ' or '[ ] ' over a task item's text matched from its start sets the item's checkbox, a block marker after a hard line break is refused because replace cannot open a new block, and any non-empty value that renders to no text is refused - only an empty value deletes the match. A CR LF or a lone carriage return in it is written as a line feed."
                 )
                 .optional(),
               occurrence: z
@@ -971,6 +979,9 @@ export const dispatchToolSpecs = [
       "`Position: unavailable (<code>)` when Dispatch could not read the document: `DOC_SERVICE_UNAVAILABLE` " +
       "(try again shortly), `DOC_SCHEMA` (the document needs repair), `DOCUMENT_UNLOADABLE` (the document " +
       "needs a rebuild) or `INTERNAL`. " +
+      "An issue read carries a `Progress:` line, `tasks 3/7, children 2/5`: its spec's task-list items " +
+      "(`- [ ]` / `- [x]`, nested lists included) and its direct children, each done of total and each only " +
+      "when it has any (`Progress: none` otherwise). " +
       "Every read ends with `Referenced by:` (what cites or hangs off this node, each with its dispatch:// address, " +
       "an excerpt, and when) and `Links:` (what it cites), so tracing provenance is one call. " +
       OWNER_REFERENCE,
@@ -995,7 +1006,13 @@ export const dispatchToolSpecs = [
     description:
       "Search every issue, document, comment, ask, and message for a keyword or phrase and get deep links. " +
       "Use it before creating an issue or a design document, and to find where a word was written. " +
-      'Websearch syntax: "quoted phrase", -excluded, OR.',
+      'Websearch syntax: "quoted phrase", -excluded, OR. ' +
+      "Each kind of content is ranked on its own and the lists are merged, so the top holds the best " +
+      "issue, document, ask, comment and message; an issue key searched alone lists that issue first. " +
+      `The answer names how many results match; offset pages through them, and each kind lists at most its best ${SEARCH_KIND_DEPTH}, ` +
+      "so narrow the query or name a project to reach the rest. Paging is exact only while the " +
+      "corpus holds still: content added, changed, or removed between two offsets can shift rows " +
+      "across a page boundary, so one hit can come back twice and another never.",
     arguments: (z) => ({
       query: z
         .string({
@@ -1008,6 +1025,10 @@ export const dispatchToolSpecs = [
       limit: z
         .number({ int: true, min: 1, max: 50 })
         .describe("Maximum results, 1-50; default 20.")
+        .optional(),
+      offset: z
+        .number({ int: true, min: 0 })
+        .describe("Results to skip before the page; nonnegative integer; default 0.")
         .optional(),
     }),
     // An empty project searches every project, as the server reads it.
@@ -1024,7 +1045,9 @@ export const dispatchToolSpecs = [
     example: { project: "PROJ", limit: 250, offset: 250 },
     description:
       "List a project's issues for a roadmap or backlog pass: every issue in one project, each carrying " +
-      "its status, priority, parent, labels, open-ask count, and route with whether it reaches anyone, " +
+      "its status, priority, parent, labels, open-ask count, progress (its spec's task-list items and " +
+      "its direct children, each done of total, as `tasks 3/7 · children 2/5`, each only when it has " +
+      "any), and route with whether it reaches anyone, " +
       "so you can see backlog shape without opening every issue. Optionally filter by status, parent, " +
       "label, priority, route status, or how recently it changed; priority takes one or more of 0-3 " +
       "(P0-P3) and null for an issue with no priority, so an owner's P0/P1 audit is priority [0, 1]. " +

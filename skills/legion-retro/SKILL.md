@@ -5,9 +5,9 @@ description: Use when an issue has passed review and its parked implementer is r
 
 # Legion Retro
 
-Retro is mandatory for every issue that passed review. The architect revives the parked
-implementer so the person with implementation context performs the retrospective, and the
-skill obtains a separate fresh-eyes perspective. Retro runs before merge.
+Retro is mandatory for every issue that passed review. The daemon starts the implementer on it
+once the reviewer approves, so the person with implementation context performs the retrospective,
+and the skill obtains a separate fresh-eyes perspective. Retro runs before merge.
 
 Every path this skill cites (`packages/...`, `docs/...`) is in sjawhar/legion, the Legion
 repository, which need not be the repository you are working in.
@@ -18,20 +18,20 @@ Follow this ordering exactly. It keeps the reviewed branch clean while preservin
 retrospective's durable output.
 
 1. Tester green and all code-review cycles finish.
-2. The implementer pushes the `.legion/` deletion at the reviewer's direction, and the reviewer
-   approves that head.
+2. The reviewer approves the head. It still carries `.legion/`: no role removes it before the
+   merge, and the operator removes it from the default branch after the merge.
 3. Run this retro: commit durable learnings to `docs/solutions/` and post the retro message on
    the Dispatch issue.
-   Retro writes **no `.legion` file**, so it never re-dirties the cleaned handoff tree.
+   Retro writes **no `.legion` file**, so it never changes the approved head's handoffs.
 4. The merger verifies the tip is the approved head plus commits that change only
    `docs/solutions/` — `jj diff --from <approved-sha> --to <tip-sha> --summary`, quoted in READY —
-   posts `READY` on the Dispatch issue, and publishes the same packet to the project's merge-queue
-   role when configured. A human merges under the repository's GitHub branch-protection and
-   CODEOWNERS requirements; GitHub's merge queue participates only when the repository enables it.
+   and sends the READY packet with its completion; the daemon posts it on the Dispatch issue and
+   publishes it to the project's merge-queue role when one is configured. A human merges under the
+   repository's GitHub branch-protection and CODEOWNERS requirements; GitHub's merge queue
+   participates only when the repository enables it.
 5. After that merge, the implementer — not the reviewer or merger — verifies the change in production
-   and records it on the PR and the issue (Sami, 2026-09-13, verbatim:
-   "the agent that developed it should be responsible for testing in production"). The
-   architect's sign-off waits for that record.
+   and records it on the PR and the issue: the agent that developed it is responsible for testing
+   in production. The architect's sign-off waits for that record.
    The record is the pull request's `Production:` line, one pull-request comment, and a
    `dispatch_message` on the issue, each naming what was driven, how, what was observed, and the
    merge commit. A defect the production check finds becomes a corrective child issue of the same tree,
@@ -42,14 +42,14 @@ changes only `docs/solutions/` does not void it, and the tree goes from retro to
 never back to the tester or reviewer. A conflict-forced rebase after retro moves these documents
 with the branch; retro does not re-run.
 
-Do not start retro before step 2, skip it because the change seems mechanical, or publish `READY`
-before step 3. The design gate is not a substitute for review and retro.
+Do not start retro before step 2 or skip it because the change seems mechanical; the merger's
+`READY` comes only after step 3. The design gate is not a substitute for review and retro.
 
 ## Two perspectives
 
 1. Re-read the issue, its acceptance criteria, the PR, test evidence, and review evidence.
    Confirm the PR carries both proofs: the implementer's own `E2E (implementer)` line and the tester's `E2E (tester)` line,
-   each naming a production-like surface (the daemon's test harness (`packages/daemon/src/daemon/__tests__/`) and real-process fixtures; a live check at the operator's next daemon restart, recorded on the PR; a sandbox repository, a devN
+   each naming a production-like surface (the daemon's real-process tests and the live proofs under `scripts/e2e/`; a live check at the operator's next daemon restart, recorded on the PR; a sandbox repository, a devN
    stack, staging, or a local stack with real migrations), a command or run id, an observation, a head
    SHA, and a negative control. If either is missing, or links only a unit suite, the retro's first
    durable learning is that gap and the issue goes back — to the implementer for its own proof, to the
@@ -88,8 +88,8 @@ related_issues:
 ---
 ```
 
-Commit the documentation on the existing issue branch, advance its existing bookmark, and push
-that branch. Do not create a replacement branch or bookmark. Then post one Dispatch message on
+Commit the documentation on the existing issue branch and push it with `legion push`. Do not
+create a replacement branch or bookmark. Then post one Dispatch message on
 the issue — `issue` is your `LEGION_ISSUE`; Legion issues live on Dispatch, never on a GitHub
 issue, and the `gh` shim refuses every GitHub-issue write — naming the documents, the
 one-to-three most useful takeaways, the two proofs you read, and the production check that
@@ -116,16 +116,16 @@ dispatch_message({
 ```
 
 The Dispatch message and the `docs/solutions/` commit are the only retro outputs. Never write a
-handoff, phase artifact, local feedback log, or completion label; `.legion/` was deleted before
-retro and nothing recreates it. Report completion with the `legion` tool's `handoff_complete` alone (its
+handoff, phase artifact, local feedback log, or completion label, and add or change nothing under
+`.legion/`. Report completion with the `legion` tool's `handoff_complete` alone (its
 summary: two sentences for the architect) — no `handoff_write`.
 
 ## Completion check
 
 Before returning, verify all of the following:
 
-- The reviewer cleanup commit remains below the retro documentation commit, and the reviewer's
-  approval of that cleanup head stands: the merger accepts the approved head plus this commit.
+- The reviewer-approved head remains below the retro documentation commit, and the reviewer's
+  approval of that head stands: the merger accepts the approved head plus this commit.
 - The learning documents and the Dispatch message both exist (never a GitHub issue comment).
 - Both proofs were read, and any gap in either is recorded as a learning.
 - No `.legion` file was created or modified by retro.

@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/rank"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
@@ -301,6 +302,11 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		insert into artifact_versions (artifact_id, number, markdown, authors, doc_update_version)
 		values ($1, 1, $2, $3, coalesce((select max(version) from doc_updates where artifact_id = $1), 0))
 	`, artifactID, markdown, authors); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	// The version row exists now, so the count names it (LEGION-542).
+	if err := docs.RecordTaskProgressMarkdown(r.Context(), tx, artifactID, markdown); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # LEGION-394's live proof: a person's direct Send or Aside from Dispatch's conversation page reaches
 # a real Oh My Pi session as that person's own user turn, and everything else keeps its Envoy card.
-# One real session — the operator's pinned Oh My Pi (the `github:sjawhar/oh-my-pi` mise tool) with
+# One real session — the pinned Oh My Pi (`.omp-pin`, run as a mise tool spec) with
 # this checkout's plugin in an isolated profile, its cwd under /tmp — registers with a real Envoy
 # listener and NATS, and a real Dispatch built from the checkout, with NATS on and its trusted
 # identity header, serves the page this checkout's SPA builds. A browser signed in by that header
@@ -154,7 +154,7 @@ launch_session() {
 
 # ---- setup -----------------------------------------------------------------------------------------
 for tool in go docker jq curl tmux bun mise; do command -v "$tool" >/dev/null || fail "$tool is required"; done
-omp_tool=${DISPATCH_USER_TURNS_OMP:-github:sjawhar/oh-my-pi@$(mise current github:sjawhar/oh-my-pi)}
+omp_tool=${DISPATCH_USER_TURNS_OMP:-$(<"$root/.omp-pin")}
 mkdir -p "$session_cwd"
 refuse_leftovers legion-e2e-user-turns
 make_omp_home "$omp_home"

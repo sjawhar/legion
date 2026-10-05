@@ -176,12 +176,14 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 
 // engineConfig is the workflow engine's configuration from the daemon's and the review App's bot
 // login from its boot lease: its own project's merge_queue_role is the role the merger's READY is
-// published to.
+// published to, and its own project's review_workflows the required workflows whose red alone the
+// reviewer's round decides.
 func engineConfig(cfg config.Config, reviewAppLogin string) workflow.Config {
+	project := cfg.Projects[cfg.Project]
 	return workflow.Config{
 		Project: cfg.Project, DesignGate: cfg.Gates.Design, ReviewRoundCap: cfg.ReviewRoundCap,
 		MaxFixAttempts: cfg.MaxFixAttempts, Linger: cfg.Linger, ReviewAppLogin: reviewAppLogin,
-		MergeQueueRole: cfg.Projects[cfg.Project].MergeQueueRole,
+		MergeQueueRole: project.MergeQueueRole, ReviewWorkflows: project.ReviewWorkflows,
 	}
 }
 

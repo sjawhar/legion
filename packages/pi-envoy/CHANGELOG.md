@@ -16,6 +16,20 @@
 
 ### Changed
 
+- Each Legion role gets one set of instructions (LEGION-414). The skills and role prompts drop the
+  steps the daemon no longer runs: no role pushes a `.legion/` deletion, the reviewer approves the
+  clean head that still carries `.legion/`, the merger hands its READY packet to the daemon, which
+  posts it, and every push is `legion push`. A sub-architect ends with `sign_off` rather than a
+  phase completion the daemon refuses, a `gates.design: off` root still registers its spec, and
+  the controller skill names only the wakes the daemon sends. The `legion` tool's description says
+  the merger's `summary` is its READY packet and that the daemon accepts no architect's completion.
+- The `dispatch`, `legion-architect`, `legion-controller` and `legion-retro` skills, and the
+  dispatch issues reference, name no one by first name: every literal `Sami` reference becomes
+  `the human` or `the operator`, matching each file's own existing convention for the person an
+  agent asks for a decision or finds at the controller's tmux pane, and the two provenance-quoted
+  rulings keep their rule stated plainly, with the quote and attribution dropped. The shipped
+  skill reaches every installed user of this package, not only its author.
+
 - The architect and worker skills and the daemon's role prompts say what the daemon does: it
   starts and orders every phase from its fixed workflow table (LEGION-223). Nothing tells an agent
   to call `spawn_worker`, `release_wave` or `set_status`, which the `legion` tool no longer has.
@@ -140,6 +154,30 @@
   subagent check asks the host's agent roster first, which needs no publish; where the roster
   gives no opinion and the publish fails, it answers from the transcript on disk, logs a warning,
   and asks again at the next check instead of keeping the failure.
+- Every Legion role may launch `task` subagents (LEGION-551). The `tool_call` hook refused the
+  `task` tool to a root architect, a sub-architect and the merger; a subagent shares its parent's
+  identity and claims no role, so nothing it does clashes with its parent's claim. The architect
+  keeps its `edit`, `write`, `apply_patch` and general `bash` refusals and the merger its `edit`,
+  `write` and `apply_patch` refusals. Both architect role prompts say an architect may dispatch
+  subagents, for example to measure or investigate before the design gate opens, and the
+  interactive mechanics fragment no longer tells a coordinator's subagent to dispatch none of its
+  own. A root architect's pane now carries the operation-log rule its subagent's `bash` was
+  missing: every issue workspace, a root architect's included, is a jj workspace of one shared
+  clone, so `jj undo`/`jj op restore`/`jj abandon` there would rewrite other trees' commits too.
+  The same rule now also refuses the root architect's own `eval` and `hub` calls that spell out a
+  rewrite, which were never gated by the architect's `bash`-only rule.
+- Oh My Pi 18.3 replaced the `hub` tool with `wait`, `proc://` and `agent://`, and Legion's pinned
+  build is 18.6.0 (LEGION-555). The pane rules now hold the stdin a `write` sends to a supervised
+  service (`proc://<id>`) to the plain-text rule `eval` code is held to, so `legion handoff complete`
+  or a jj operation-log rewrite typed into a service's shell is refused as it was through a `hub`
+  send; a service starts as a `bash` command and is tokenised like any other. An architect,
+  reviewer or merger may `write` to `agent://` (a message to an agent of its own process) and to
+  `proc://` (job and service control), which the mutation gate refused as file writes. Both
+  checks read the target as Oh My Pi's `write` routes it: a path pasted as a `read` header
+  (`[proc://shell]`, `[proc://shell#ABCD]`) is the same target, and `<prefix>:conflict://N` is the
+  `conflict://N` file write it routes to, which the gate refuses whatever the prefix.
+- The Envoy tool results for a `task` subagent and the `envoy`, `legion-worker` and `dispatch`
+  skills name a `write` to `agent://` where they named `hub`, which Oh My Pi 18.3 removed.
 
 ### Added
 
@@ -446,3 +484,7 @@
   every turn. It reads open asks only to arm the run-end self-check, while an agent reads its own
   open asks with `dispatch_open_asks`.
 - Removed the NATS-based `{type:"shutdown"}` Legion control directive (`LegionControlDirective`, `requestShutdown`) — the daemon now gracefully stops every process, including the root architect, over its own `legion worker-shim` unix socket instead of publishing a control-subject directive.
+- The `pi.askEphemeral` fallback for fork releases before Oh My Pi 18.3 (LEGION-555). A targeted
+  Dispatch BTW and the stop-time self-check run on the extension context's `runEphemeralTurn`,
+  which Legion's pinned build and the fork's releases from 18.3 serve; the fork no longer ships
+  `pi.askEphemeral`. A host without `runEphemeralTurn` advertises `aside` and `steer` only.

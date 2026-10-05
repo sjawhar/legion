@@ -24,13 +24,13 @@ import type {
   IssueComponentsMode,
   IssueDetails,
   IssuePriority,
+  IssueProgress,
   IssueReferences,
   IssueRouteReach,
   IssueRouteStatus,
   MessageRead,
   OpenAsk,
   OpenAsksResponse,
-  SearchResult,
   WriteAdvice,
 } from "@legion/contracts";
 import {
@@ -45,7 +45,6 @@ import {
   overCapMessage,
   PROJECT_KEY_PATTERN,
   serviceSubjectLabel,
-  snippetText,
   zodSchemaApi,
 } from "@legion/contracts";
 import { canonicalRepo } from "@legion/contracts/repo";
@@ -76,6 +75,7 @@ import {
   type OwnerTopic,
 } from "./dispatch-owner";
 import { messageFor } from "./errors";
+import { pageSummaryText, searchAnswer } from "./search-answer";
 import { formatZodIssues, ToolInputError } from "./tool-input-errors";
 
 /**
@@ -469,18 +469,6 @@ function isDuplicateCandidate(value: unknown): value is DuplicateCandidate {
 function duplicateCandidates(error: DispatchServiceError): DuplicateCandidate[] {
   if (error.candidates === undefined || !error.candidates.every(isDuplicateCandidate)) throw error;
   return error.candidates;
-}
-
-function searchResultLine(result: SearchResult, baseUrl: string): string {
-  const href = new URL(result.href, baseUrl).toString();
-  const { owner } = result;
-  if (owner.kind === "document") {
-    const reference = dispatchDocumentRef(owner.project, owner.slug);
-    return `${reference} [document] ${owner.name} - ${result.kind}: ${snippetText(result.snippet)} -> ${href}`;
-  }
-  const artifactName = result.artifact ? ` ${result.artifact.name}` : "";
-  const label = `${owner.key} [${owner.status}] ${owner.title} - ${result.kind}${artifactName}`;
-  return `${label}: ${snippetText(result.snippet)} -> ${href}`;
 }
 
 function askUrgency(args: ToolArguments): AskUrgency | undefined {
@@ -1270,6 +1258,21 @@ function routeText(issue: RoutedIssue, titles?: ReadonlyMap<string, string>): st
   return issue.route + (issue.route_status == null ? "" : reach[issue.route_status]);
 }
 
+/**
+ * One issue's progress as the tools print it: `tasks 3/7, children 2/5`, each part only when the
+ * server counted it (`null` is a spec with no task list, an issue with no child), joined by sep.
+ * Empty when neither counted.
+ */
+function progressText(progress: IssueProgress | undefined, sep: string): string {
+  if (progress === undefined) return "";
+  const parts: string[] = [];
+  if (progress.tasks !== null) parts.push(`tasks ${progress.tasks.done}/${progress.tasks.total}`);
+  if (progress.children !== null) {
+    parts.push(`children ${progress.children.done}/${progress.children.total}`);
+  }
+  return parts.join(sep);
+}
+
 function issueSummary(
   issue: IssueDetails,
   events: readonly Event[],
@@ -1297,6 +1300,7 @@ function issueSummary(
     `Labels: ${issue.labels.length === 0 ? "none" : issue.labels.join(", ")}`,
     componentsLine(issue.components),
     `Route: ${routeText(issue, titles)}`,
+    `Progress: ${progressText(issue.progress, ", ") || "none"}`,
     ...(specApproval === undefined
       ? []
       : [`Spec ${specApproval.replace(/^Approval/, "approval")}`]),
@@ -2258,22 +2262,13 @@ export async function executeDispatchTool(
       const query = stringArg(args, "query");
       const project = optionalString(args, "project");
       const limit = optionalNumber(args, "limit");
+      const offset = optionalNumber(args, "offset");
       const search = await client.search(query, {
         ...(project === undefined ? {} : { project }),
         ...(limit === undefined ? {} : { limit }),
+        ...(offset === undefined ? {} : { offset }),
       });
-      const results = search.results;
-      const count = results.length;
-      return {
-        text:
-          count === 0
-            ? `No results for "${query}".`
-            : [
-                `${count} ${count === 1 ? "result" : "results"} for "${query}" (${search.took_ms} ms)`,
-                ...results.map((result) => searchResultLine(result, configUrl)),
-              ].join("\n"),
-        details: { query, results },
-      };
+      return searchAnswer(search, query, offset, configUrl);
     }
     case "dispatch_issues": {
       const project = stringArg(args, "project");
@@ -2315,6 +2310,7 @@ export async function executeDispatchTool(
         route_status: row.route_status ?? null,
         route_holder: row.route_holder ?? null,
         updated_at: row.updated_at,
+        progress: row.progress,
       }));
       const titles = await liveSessionTitles(
         client,
@@ -2325,7 +2321,7 @@ export async function executeDispatchTool(
         ? ""
         : rows.length === 0
           ? `showing 0-0 of ${total}`
-          : `showing ${offset + 1}-${offset + rows.length} of ${total}`;
+          : pageSummaryText(offset, rows.length, total);
       return {
         text:
           rows.length === 0
@@ -2333,19 +2329,22 @@ export async function executeDispatchTool(
             : [
                 `${rows.length} ${rows.length === 1 ? "issue" : "issues"} in ${project}` +
                   (isPartial ? ` (${showing})` : ""),
-                ...rows.map(
-                  (row) =>
+                ...rows.map((row) => {
+                  const progress = progressText(row.progress, " · ");
+                  return (
                     `${row.key} [${row.status}]${row.priority === null ? "" : ` P${row.priority}`} ${row.title}` +
                     (row.open_asks === 0
                       ? ""
                       : ` · ${row.open_asks} open ${row.open_asks === 1 ? "ask" : "asks"}`) +
                     (row.claim === null ? "" : ` · claimed by ${claimText(row.claim, titles)}`) +
+                    (progress === "" ? "" : ` · ${progress}`) +
                     // A route that reaches a live session changes nothing about the row; one
                     // that reaches nobody, or cannot be judged, is what the owner audit reads.
                     (row.route === null || row.route_status === "live" || row.route_status === null
                       ? ""
                       : ` · route ${routeText(row)}`)
-                ),
+                  );
+                }),
               ].join("\n"),
         details: { issues: rows, total, offset, limit },
       };

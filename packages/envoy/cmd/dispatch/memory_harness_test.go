@@ -102,8 +102,8 @@ func (h *memoryHarness) waitForSettled(t *testing.T, artifactID string) {
 	}
 }
 
-// dispatchProcess is a Dispatch server: this test binary running main.
-type dispatchProcess struct {
+// memoryServer is a Dispatch server: this test binary running main.
+type memoryServer struct {
 	command *exec.Cmd
 	base    string
 	output  *lockedBuffer
@@ -111,7 +111,7 @@ type dispatchProcess struct {
 	idle    int64
 }
 
-func (h *memoryHarness) start(t *testing.T) *dispatchProcess {
+func (h *memoryHarness) start(t *testing.T) *memoryServer {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -136,7 +136,7 @@ func (h *memoryHarness) start(t *testing.T) *dispatchProcess {
 		"DISPATCH_WEB_DIST=" + t.TempDir(),
 		"DISPATCH_SERVER_URL=http://127.0.0.1:" + port,
 	}
-	server := &dispatchProcess{command: command, base: "http://127.0.0.1:" + port, output: &lockedBuffer{}, exited: make(chan struct{})}
+	server := &memoryServer{command: command, base: "http://127.0.0.1:" + port, output: &lockedBuffer{}, exited: make(chan struct{})}
 	command.Stdout, command.Stderr = server.output, server.output
 	if err := command.Start(); err != nil {
 		t.Fatalf("start a Dispatch server: %v", err)
@@ -168,7 +168,7 @@ func (h *memoryHarness) start(t *testing.T) *dispatchProcess {
 	return server
 }
 
-func (p *dispatchProcess) stop(t *testing.T) {
+func (p *memoryServer) stop(t *testing.T) {
 	t.Helper()
 	select {
 	case <-p.exited:
@@ -185,7 +185,7 @@ func (p *dispatchProcess) stop(t *testing.T) {
 }
 
 // resident is the server's resident memory in bytes, VmRSS now or VmHWM its peak.
-func (p *dispatchProcess) resident(t *testing.T, field string) int64 {
+func (p *memoryServer) resident(t *testing.T, field string) int64 {
 	t.Helper()
 	status, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", p.command.Process.Pid))
 	if err != nil {
@@ -206,7 +206,7 @@ func (p *dispatchProcess) resident(t *testing.T, field string) int64 {
 
 // peakAboveIdle runs during and reports the most the server's resident memory rose above what it
 // held idle, freshly started, while it ran.
-func (p *dispatchProcess) peakAboveIdle(t *testing.T, during func()) int64 {
+func (p *memoryServer) peakAboveIdle(t *testing.T, during func()) int64 {
 	t.Helper()
 	// Writing 5 to clear_refs resets the peak (VmHWM) to the memory resident now.
 	if err := os.WriteFile(fmt.Sprintf("/proc/%d/clear_refs", p.command.Process.Pid), []byte("5"), 0); err != nil {
@@ -221,7 +221,7 @@ type response struct {
 	body   []byte
 }
 
-func (p *dispatchProcess) send(t *testing.T, method, path, contentType string, body io.Reader, header http.Header) response {
+func (p *memoryServer) send(t *testing.T, method, path, contentType string, body io.Reader, header http.Header) response {
 	t.Helper()
 	answer, err := p.trySend(method, path, contentType, body, header)
 	if err != nil {
@@ -231,7 +231,7 @@ func (p *dispatchProcess) send(t *testing.T, method, path, contentType string, b
 }
 
 // trySend is send for a goroutine other than the test's, which may not end the test.
-func (p *dispatchProcess) trySend(method, path, contentType string, body io.Reader, header http.Header) (response, error) {
+func (p *memoryServer) trySend(method, path, contentType string, body io.Reader, header http.Header) (response, error) {
 	request, err := http.NewRequest(method, p.base+path, body)
 	if err != nil {
 		return response{}, fmt.Errorf("build %s %s: %w", method, path, err)
@@ -252,7 +252,7 @@ func (p *dispatchProcess) trySend(method, path, contentType string, body io.Read
 	return response{status: answer.StatusCode, body: read}, nil
 }
 
-func (p *dispatchProcess) get(t *testing.T, path string) {
+func (p *memoryServer) get(t *testing.T, path string) {
 	t.Helper()
 	if answer := p.send(t, http.MethodGet, path, "", nil, http.Header{"X-Dispatch-User": {"alice"}}); answer.status != http.StatusOK {
 		t.Fatalf("GET %s: status %d body %.300s", path, answer.status, answer.body)
@@ -268,7 +268,7 @@ type uploadResult struct {
 
 // upload sends markdown as a new document of issue through POST /api/v1/issues/{key}/artifacts,
 // as a JSON body or a multipart file, with an agent's bearer token as production's checks do.
-func (p *dispatchProcess) upload(t *testing.T, mode, issue, markdown string) uploadResult {
+func (p *memoryServer) upload(t *testing.T, mode, issue, markdown string) uploadResult {
 	t.Helper()
 	result, err := p.tryUpload(mode, issue, markdown)
 	if err != nil {
@@ -278,13 +278,13 @@ func (p *dispatchProcess) upload(t *testing.T, mode, issue, markdown string) upl
 }
 
 // tryUpload is upload for a goroutine other than the test's.
-func (p *dispatchProcess) tryUpload(mode, issue, markdown string) (uploadResult, error) {
+func (p *memoryServer) tryUpload(mode, issue, markdown string) (uploadResult, error) {
 	return p.tryUploadNamed(mode, issue, fmt.Sprintf("memory-%d.md", time.Now().UnixNano()), markdown)
 }
 
 // tryUploadNamed is tryUpload of a document named name: a new version of the issue's document of
 // that name where it has one.
-func (p *dispatchProcess) tryUploadNamed(mode, issue, name, markdown string) (uploadResult, error) {
+func (p *memoryServer) tryUploadNamed(mode, issue, name, markdown string) (uploadResult, error) {
 	actor := map[string]string{"kind": "session", "id": "memory-test"}
 	var body *bytes.Buffer
 	var contentType string
@@ -340,7 +340,7 @@ func requireAnswered(t *testing.T, upload uploadResult) {
 
 // loadOverWebsocket opens the document's room as a browser does - it connects and asks for the
 // whole document - and closes once the room has sent it.
-func (p *dispatchProcess) loadOverWebsocket(t *testing.T, artifactID string) {
+func (p *memoryServer) loadOverWebsocket(t *testing.T, artifactID string) {
 	t.Helper()
 	address := "ws" + strings.TrimPrefix(p.base, "http") + "/ws/doc/" + artifactID + "?schema_version=" + strconv.Itoa(pmdoc.SchemaVersion())
 	connection, answer, err := gws.DefaultDialer.Dial(address, http.Header{"X-Dispatch-User": {"alice"}})
@@ -423,10 +423,10 @@ func (h *memoryHarness) coldReads(t *testing.T, name, artifactID string) {
 	t.Helper()
 	for _, cold := range []struct {
 		name string
-		run  func(server *dispatchProcess)
+		run  func(server *memoryServer)
 	}{
-		{"text read", func(server *dispatchProcess) { server.get(t, "/api/v1/artifacts/"+artifactID+"/text") }},
-		{"websocket load", func(server *dispatchProcess) { server.loadOverWebsocket(t, artifactID) }},
+		{"text read", func(server *memoryServer) { server.get(t, "/api/v1/artifacts/"+artifactID+"/text") }},
+		{"websocket load", func(server *memoryServer) { server.loadOverWebsocket(t, artifactID) }},
 	} {
 		server := h.start(t)
 		peak := server.peakAboveIdle(t, func() { cold.run(server) })
@@ -444,7 +444,7 @@ func (h *memoryHarness) coldReads(t *testing.T, name, artifactID string) {
 
 // coldTextReads reads a document's text readers times at once, failing unless every read answers
 // 200. Its caller measures the fresh server's peak around it.
-func (p *dispatchProcess) coldTextReads(t *testing.T, artifactID string, readers int) {
+func (p *memoryServer) coldTextReads(t *testing.T, artifactID string, readers int) {
 	t.Helper()
 	failures := make([]error, readers)
 	var group sync.WaitGroup
@@ -480,7 +480,7 @@ func (h *memoryHarness) coldEdit(t *testing.T, name, artifactID string, edit map
 
 // blockAsks are the ids of the asks settlement indexes from the blocks ask-0 to ask-<count-1> of
 // the issue's spec, in that order, once it has indexed every one.
-func (p *dispatchProcess) blockAsks(t *testing.T, issueKey string, count int) []string {
+func (p *memoryServer) blockAsks(t *testing.T, issueKey string, count int) []string {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Minute)
 	for {
@@ -522,7 +522,7 @@ type createdIssue struct {
 
 // createIssue creates an issue of the memory harness's project whose spec is spec, past the
 // near-duplicate check its title would meet beside the others a test creates.
-func (p *dispatchProcess) createIssue(t *testing.T, title, spec string) createdIssue {
+func (p *memoryServer) createIssue(t *testing.T, title, spec string) createdIssue {
 	t.Helper()
 	body, err := json.Marshal(map[string]any{"project": "MEM", "title": title, "spec": spec, "force": true})
 	if err != nil {
@@ -537,7 +537,7 @@ func (p *dispatchProcess) createIssue(t *testing.T, title, spec string) createdI
 }
 
 // edit sends one edit operation to a document as a person does.
-func (p *dispatchProcess) edit(t *testing.T, artifactID string, op map[string]any) response {
+func (p *memoryServer) edit(t *testing.T, artifactID string, op map[string]any) response {
 	t.Helper()
 	body, err := json.Marshal(map[string]any{"ops": []map[string]any{op}})
 	if err != nil {
@@ -547,7 +547,7 @@ func (p *dispatchProcess) edit(t *testing.T, artifactID string, op map[string]an
 }
 
 // text is a document's markdown, as GET .../text answers it.
-func (p *dispatchProcess) text(t *testing.T, artifactID string) string {
+func (p *memoryServer) text(t *testing.T, artifactID string) string {
 	t.Helper()
 	answer := p.send(t, http.MethodGet, "/api/v1/artifacts/"+artifactID+"/text", "", nil, http.Header{"X-Dispatch-User": {"alice"}})
 	var text struct{ Markdown string }
