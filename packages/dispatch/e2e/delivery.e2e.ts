@@ -47,8 +47,14 @@ test("the Delivery sidebar nav entry opens the delivery timeline", async ({ brow
 
   // Start from another page (the Inbox, at "/") rather than navigating to /delivery directly,
   // so this exercises the Sidebar's own "Delivery" rail link (`features/sidebar/Sidebar.tsx`)
-  // rather than only the route itself.
+  // rather than only the route itself. Below `xl` (a phone viewport) the sidebar is a sheet
+  // behind its own "Menu" control (app.tsx), not rendered inline -- open it first when present,
+  // which is a no-op wait on a desktop viewport where "Menu" never renders.
   await page.goto("/");
+  const menuButton = page.getByRole("button", { name: "Menu" });
+  if (await menuButton.isVisible().catch(() => false)) {
+    await menuButton.click();
+  }
   await expect(page.getByRole("link", { name: "Delivery" })).toBeVisible();
   await page.getByRole("link", { name: "Delivery" }).click();
 
