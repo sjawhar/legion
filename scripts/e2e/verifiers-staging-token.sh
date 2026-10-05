@@ -126,7 +126,7 @@ echo "  issuer=$issuer"
 # An issuer of the same shape that answers 404: what a misconfigured deployment looks like.
 absent_issuer="${issuer%/*}/00000000000000000000000000000000"
 
-echo "== postgres:16 and nats:2.10 on ephemeral loopback ports"
+echo "== pgvector/pgvector (pinned digest) and nats:2.10 on ephemeral loopback ports"
 docker rm -f "$pg_name" "$nats_name" >/dev/null 2>&1 || docker ps >/dev/null # a missing container is fine; a broken docker is not
 trap cleanup EXIT
 docker run -d --name "$pg_name" -e POSTGRES_USER=dispatch -e POSTGRES_PASSWORD=dispatch \

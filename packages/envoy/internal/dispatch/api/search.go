@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"html"
 	"log/slog"
 	"math"
@@ -29,10 +30,6 @@ const (
 	// Past it, or any other embedder failure, search answers keyword-only and says so (LEGION-549)
 	// rather than making every search wait indefinitely on a degraded embedder.
 	searchEmbedTimeout = 3 * time.Second
-	// degradedEmbedderUnavailable is SearchResponse.Degraded's value when meaning search could not
-	// run for this request - the embedder is unconfigured, timed out, or Bedrock answered an
-	// error - and search fell back to keyword-only ranking.
-	degradedEmbedderUnavailable = "embedder_unavailable"
 	// searchMeaningFloor is the lowest cosine similarity a meaning-leg row may score to reach legs
 	// at all: below it, a row is noise, not a weak match, and letting it through would rank it by
 	// position exactly as the strongest match in an empty kind, worth 1/(searchFusionK+1) - as
@@ -428,28 +425,43 @@ func (s *server) search(w http.ResponseWriter, r *http.Request) {
 
 // runSearch is the search handler's own entry point (unlike runFusedSearch, LEGION-550's
 // write-time suggestions never call this - suggestions never try meaning search, so they never
-// pay for an embedder call or its timeout). It tries meaning search first when an embedder is
-// configured, falling back to keyword-only (runFusedSearch) only when the query's own embedding
-// could not be had - never when the meaning query itself then fails, which is a real error the
-// caller should see as a 500, not something to paper over as a degraded answer.
+// pay for an embedder call or its timeout). The numnode check runs here, before anything else -
+// including before the one Bedrock call this function ever makes - so a stopword-only or
+// operator-only query (the same shape runFusedSearch's and runMeaningSearch's own checks catch)
+// never pays for an embedding it would throw away; runFusedSearch repeats the same check for its
+// other caller, LEGION-550's write-time suggestions, which never reaches this function at all.
+// It tries meaning search first when an embedder is configured, falling back to keyword-only
+// (runFusedSearch) only when the query's own embedding could not be had - never when the meaning
+// query itself then fails, which is a real error the caller should see as a 500, not something to
+// paper over as a degraded answer.
 func (s *server) runSearch(ctx context.Context, q, project string, limit, offset int) (model.SearchResponse, error) {
+	var nodes int
+	if err := s.deps.Store.Pool.QueryRow(ctx, "select numnode(websearch_to_tsquery('english', $1))", q).Scan(&nodes); err != nil {
+		return model.SearchResponse{}, err
+	}
+	if nodes == 0 {
+		return model.SearchResponse{Results: []model.SearchResult{}, Limit: limit, Offset: offset}, nil
+	}
 	if s.deps.Embedder == nil {
-		response, err := s.runFusedSearch(ctx, q, project, limit, offset)
-		if err == nil {
-			response.Degraded = degradedEmbedderUnavailable
-		}
-		return response, err
+		return s.runKeywordOnlyDegraded(ctx, q, project, limit, offset)
 	}
 	vector, err := s.embedQuery(ctx, q)
 	if err != nil {
 		slog.Warn("dispatch search: query embedding unavailable, answering keyword-only", "error", err)
-		response, err := s.runFusedSearch(ctx, q, project, limit, offset)
-		if err == nil {
-			response.Degraded = degradedEmbedderUnavailable
-		}
-		return response, err
+		return s.runKeywordOnlyDegraded(ctx, q, project, limit, offset)
 	}
 	return s.runMeaningSearch(ctx, q, project, limit, offset, vector)
+}
+
+// runKeywordOnlyDegraded runs the keyword-only fallback and stamps the response Degraded on
+// success: the one thing both of runSearch's fallback branches (no embedder configured, or the
+// query's own embedding failing) do identically.
+func (s *server) runKeywordOnlyDegraded(ctx context.Context, q, project string, limit, offset int) (model.SearchResponse, error) {
+	response, err := s.runFusedSearch(ctx, q, project, limit, offset)
+	if err == nil {
+		response.Degraded = contracts.SearchDegradedEmbedderUnavailable
+	}
+	return response, err
 }
 
 // runFusedSearch is the search handler's query, SQL and row-scanning shared with LEGION-550's
@@ -482,16 +494,12 @@ func (s *server) runFusedSearch(ctx context.Context, q, project string, limit, o
 	return response, nil
 }
 
-// runMeaningSearch is runFusedSearch's counterpart once a query embedding exists: same
-// validation, same row shape, searchQueryMeaning in place of searchQuery.
+// runMeaningSearch is runFusedSearch's counterpart once a query embedding exists: same row
+// shape, searchQueryMeaning in place of searchQuery. Its only caller, runSearch, has already run
+// the numnode check before ever reaching here (so it never pays for an embedding it would throw
+// away); this function assumes nodes > 0, unlike runFusedSearch, which repeats that check for
+// its other caller, LEGION-550's write-time suggestions.
 func (s *server) runMeaningSearch(ctx context.Context, q, project string, limit, offset int, vector []float32) (model.SearchResponse, error) {
-	var nodes int
-	if err := s.deps.Store.Pool.QueryRow(ctx, "select numnode(websearch_to_tsquery('english', $1))", q).Scan(&nodes); err != nil {
-		return model.SearchResponse{}, err
-	}
-	if nodes == 0 {
-		return model.SearchResponse{Results: []model.SearchResult{}, Limit: limit, Offset: offset}, nil
-	}
 
 	started := time.Now()
 	rows, err := s.deps.Store.Pool.Query(ctx, searchQueryMeaning, q, project, limit, firstTerm(q), headlineOptions,
@@ -573,9 +581,9 @@ func scanSearchRows(rows pgx.Rows, q string, limit, offset int) (model.SearchRes
 	return response, nil
 }
 
-// embedQuery embeds q for meaning search (embed.InputQuery - Cohere's asymmetric mode embeds a
-// query differently from a stored document), bounded by searchEmbedTimeout so one degraded
-// request never holds the whole search handler open on a slow or wedged Bedrock call.
+// embedQuery embeds q for meaning search (embed.InputQuery - Cohere's embed-v4 asymmetric mode
+// embeds a query differently from a stored document), bounded by searchEmbedTimeout so one
+// degraded request never holds the whole search handler open on a slow or wedged Bedrock call.
 func (s *server) embedQuery(ctx context.Context, q string) ([]float32, error) {
 	ctx, cancel := context.WithTimeout(ctx, searchEmbedTimeout)
 	defer cancel()
@@ -584,7 +592,12 @@ func (s *server) embedQuery(ctx context.Context, q string) ([]float32, error) {
 		return nil, err
 	}
 	if len(vectors) != 1 {
-		return nil, context.DeadlineExceeded
+		// Not a timeout: the Embedder interface promises one vector per input text, and this is
+		// a contract violation by whatever implementation answered, never something an actual
+		// deadline produces. runSearch logs this exactly like a real timeout and falls back to
+		// keyword-only, which is still the right behavior for callers - the distinct message
+		// matters only to whoever reads the log.
+		return nil, fmt.Errorf("embed: embedder returned %d vectors for 1 query text", len(vectors))
 	}
 	return vectors[0], nil
 }

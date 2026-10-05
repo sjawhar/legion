@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"testing"
 
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/embed"
 	"github.com/sjawhar/envoy/internal/dispatch/embedqueue"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -147,8 +148,8 @@ func TestSearchAnswersKeywordOnlyWhenTheEmbedderFails(t *testing.T) {
 	issue := createInteractionIssue(t, handler, "DEGR", "Astrolabe calibration guide", "Keyword body text.")
 
 	response := searchResponse(t, handler, "q=astrolabe")
-	if response.Degraded != degradedEmbedderUnavailable {
-		t.Fatalf("Degraded = %q, want %q", response.Degraded, degradedEmbedderUnavailable)
+	if response.Degraded != contracts.SearchDegradedEmbedderUnavailable {
+		t.Fatalf("Degraded = %q, want %q", response.Degraded, contracts.SearchDegradedEmbedderUnavailable)
 	}
 	if len(response.Results) != 1 || response.Results[0].ID != issue.Key {
 		t.Fatalf("Results = %+v, want the one keyword match for %q", response.Results, issue.Key)
@@ -167,11 +168,34 @@ func TestSearchAnswersKeywordOnlyWithNoEmbedderConfigured(t *testing.T) {
 	issue := createInteractionIssue(t, handler, "NOEM", "Astrolabe calibration guide", "Keyword body text.")
 
 	response := searchResponse(t, handler, "q=astrolabe")
-	if response.Degraded != degradedEmbedderUnavailable {
-		t.Fatalf("Degraded = %q, want %q", response.Degraded, degradedEmbedderUnavailable)
+	if response.Degraded != contracts.SearchDegradedEmbedderUnavailable {
+		t.Fatalf("Degraded = %q, want %q", response.Degraded, contracts.SearchDegradedEmbedderUnavailable)
 	}
 	if len(response.Results) != 1 || response.Results[0].ID != issue.Key {
 		t.Fatalf("Results = %+v, want the one keyword match for %q", response.Results, issue.Key)
+	}
+}
+
+// TestSearchSkipsTheEmbedderForAStopWordOnlyQuery proves runSearch's numnode check runs before
+// the one Bedrock call it ever makes: a query whose websearch_to_tsquery is empty (pure
+// stopwords) answers with no results without ever paying for a query embedding, configured
+// embedder and all - the performance finding round 3's simplify pass raised against the
+// now-fixed ordering (runSearch used to call embedQuery unconditionally, discovering the empty
+// query only after a wasted Bedrock round trip).
+func TestSearchSkipsTheEmbedderForAStopWordOnlyQuery(t *testing.T) {
+	embedder := &fakeEmbedder{}
+	handler, _, _ := newTestServer(t, testServerOptions{embedder: embedder})
+	createInteractionIssue(t, handler, "SKIP", "Astrolabe calibration guide", "Keyword body text.")
+
+	response := searchResponse(t, handler, "q=the")
+	if len(response.Results) != 0 {
+		t.Fatalf("Results = %+v, want none for a stopword-only query", response.Results)
+	}
+	if response.Degraded != "" {
+		t.Fatalf("Degraded = %q, want empty - a stopword-only query never reaches the embedder at all", response.Degraded)
+	}
+	if embedder.calls != 0 {
+		t.Errorf("embedder.calls = %d, want 0 - the numnode check must short-circuit before embedQuery", embedder.calls)
 	}
 }
 

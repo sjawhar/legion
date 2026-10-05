@@ -1,4 +1,5 @@
 import {
+  SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE,
   SEARCH_KIND_DEPTH,
   type SearchResponse,
   type SearchResult,
@@ -41,11 +42,11 @@ export function searchAnswer(
   const lines = results.map((result) => searchResultLine(result, configUrl));
   const noun = count === 1 ? "result" : "results";
   const noResults = `No results for "${query}".`;
-  // Meaning search is off for this request (no Cohere key, a timed-out or failing query
+  // Meaning search is off for this request (no Bedrock credentials, a timed-out or failing query
   // embedding): the ranking below is keyword-only, and the caller is told so rather than
   // silently reading a hybrid ranking that did not run.
   const degraded =
-    search.degraded === "embedder_unavailable"
+    search.degraded === SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE
       ? "Searched by keyword only: meaning search was unavailable for this request."
       : undefined;
   // A Dispatch from before search paging answers no total and serves its first page whatever
