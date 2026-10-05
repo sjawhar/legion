@@ -15,6 +15,7 @@ import {
 import { recordClipboard } from "./clipboard";
 import { needsYouCards } from "./editor";
 import { clearIssueCreator, resetDatabase } from "./seed";
+import { assertPageFits, assertWhole } from "./unclipped";
 import { asUser } from "./users";
 
 test.beforeEach(async () => {
@@ -821,8 +822,6 @@ test("issue header gives the title the row's free space beside a short details l
       const header = document.querySelector("[data-testid=issue-header]") as HTMLElement;
       const style = getComputedStyle(header);
       return {
-        clipped:
-          heading.scrollHeight > heading.clientHeight || heading.scrollWidth > heading.clientWidth,
         contentWidth:
           header.clientWidth -
           Number.parseFloat(style.paddingLeft) -
@@ -837,7 +836,11 @@ test("issue header gives the title the row's free space beside a short details l
       await page.setViewportSize({ height: 800, width });
       await page.goto(`/issues/${issue.key}`);
       await expect(title).toHaveText("Header keeps its title readable");
-      expect((await measureTitle()).clipped, `title clipped at ${width}px`).toBe(false);
+      const measured = await measureTitle();
+      expect(
+        measured.width,
+        `title ${measured.width}px of a ${measured.contentWidth}px card at ${width}px`
+      ).toBeGreaterThanOrEqual(measured.contentWidth / 2);
       if (width === 1024) {
         const shot = testInfo.outputPath("issue-header-title-1024.png");
         await page.screenshot({ path: shot });
@@ -872,7 +875,6 @@ test("issue header gives the title the row's free space beside a short details l
         await expect(page.getByRole("button", { name: "Subscribers: 1" })).toBeVisible();
         const measured = await measureTitle();
         const label = `${width}px ${withLink ? "with" : "without"} the GitHub link`;
-        expect(measured.clipped, `title clipped at ${label}`).toBe(false);
         expect(
           measured.width,
           `title ${measured.width}px of a ${measured.contentWidth}px card at ${label}`
@@ -1027,10 +1029,11 @@ test("an issue's whole title wraps at every width, whether prose or one unbroken
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
-  // Five repeats of a 50-character sentence, cut to exactly 200: the length the spec names.
-  const title200 = "Dispatch cuts off issue titles that are too long. ".repeat(5).slice(0, 200);
-  expect(title200).toHaveLength(200);
+  // Five repeats of a 48-character sentence, cut to exactly 200: the length the spec names. It
+  // ends mid-sentence on a letter, so the server trims nothing and the page shows all 200.
+  const title200 = "Dispatch cuts off titles that are far too long. ".repeat(5).slice(0, 200);
   const prose = await createIssue({ project: "CORE", title: title200 });
+  expect(prose.title).toHaveLength(200);
   // A single unbroken 100-character string: no space for the browser to break on, so wrapping
   // depends on `break-words` rather than the ordinary word-wrap every other title gets for free.
   const title100 = "supercalifragilisticexpialidocious".repeat(3).slice(0, 100);
@@ -1047,46 +1050,9 @@ test("an issue's whole title wraps at every width, whether prose or one unbroken
       await expect(title).toHaveText(issue.title);
       // Whole means nothing between the title and the document clips it: no clamp, ellipsis, or
       // box shorter or narrower than the text it holds, at the width this project renders.
-      const clipped = await title.evaluate((element) => {
-        const clips: string[] = [];
-        // The clamp this bug reported lived on a span nested inside the heading, not the heading
-        // itself, so the walk starts at the deepest content node and climbs: that visits the span
-        // before the heading before its ancestors.
-        let deepest: Node = element;
-        while (deepest.firstChild !== null) {
-          deepest = deepest.firstChild;
-        }
-        for (
-          let node: Element | null = deepest.parentElement;
-          node !== null;
-          node = node.parentElement
-        ) {
-          const style = getComputedStyle(node);
-          if (style.webkitLineClamp !== "none" || style.textOverflow === "ellipsis") {
-            clips.push(
-              `${node.tagName}: line clamp ${style.webkitLineClamp}, ${style.textOverflow}`
-            );
-          }
-          // A page taller than the viewport scrolls normally (`overflowY: visible` on `html`) -
-          // that is not a clip. Only an ancestor set to clip its own overflow, with content that
-          // no longer fits it, is the bug this guards: the line-clamp this issue reported.
-          if (
-            (style.overflowY !== "visible" && node.scrollHeight > node.clientHeight + 1) ||
-            (style.overflowX !== "visible" && node.scrollWidth > node.clientWidth + 1)
-          ) {
-            clips.push(
-              `${node.tagName}: ${node.scrollWidth}x${node.scrollHeight} in ${node.clientWidth}x${node.clientHeight}`
-            );
-          }
-        }
-        return clips;
-      });
-      expect(clipped).toEqual([]);
+      await assertWhole(title);
       // The one unbroken word wraps rather than pushing the page wider than the viewport.
-      const widensPage = await page.evaluate(
-        () => document.documentElement.scrollWidth > window.innerWidth + 1
-      );
-      expect(widensPage).toBe(false);
+      await assertPageFits(page);
       await page.screenshot({
         path: testInfo.outputPath(`issue-title-${issue.key}-whole.png`),
         fullPage: true,

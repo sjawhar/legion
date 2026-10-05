@@ -104,11 +104,14 @@ export function ArtifactHeader({
               Project {artifact.project}
             </Link>
           ) : null}
+          {/* `items-start` keeps the copy button beside the first line of a title that wraps. The
+              button (44 px, 32 px from `md`) is taller than one `text-lg` line (28 px), so a
+              negative margin of half the difference centres its icon on that first line. */}
           <div className="flex min-w-0 items-start gap-1">
             <h2 className={`min-w-0 break-words text-lg font-semibold ${textPrimaryOnSurface}`}>
               {artifact.name}
             </h2>
-            <CopyRefButton route={documentRoute(artifact, version)} />
+            <CopyRefButton className="-my-2 md:-my-0.5" route={documentRoute(artifact, version)} />
           </div>
           {artifact.approval === undefined ? null : (
             <div className="mt-1">

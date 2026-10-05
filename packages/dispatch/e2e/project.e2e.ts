@@ -1,4 +1,4 @@
-import { expect, type Locator, type Page, test } from "@playwright/test";
+import { expect, type Locator, test } from "@playwright/test";
 
 import {
   createAsk,
@@ -13,6 +13,7 @@ import {
 } from "./api";
 import { filterPicker, pickFilterOption } from "./filters";
 import { resetDatabase } from "./seed";
+import { assertPageFits } from "./unclipped";
 import { asUser } from "./users";
 
 const session = { actor: { id: "e2e-project", kind: "session" as const }, as: "agent" as const };
@@ -20,14 +21,6 @@ const session = { actor: { id: "e2e-project", kind: "session" as const }, as: "a
 async function expectTouchTarget(locator: Locator): Promise<void> {
   const box = await locator.boundingBox();
   expect(box?.height ?? 0).toBeGreaterThanOrEqual(44);
-}
-
-async function expectNoHorizontalOverflow(page: Page): Promise<void> {
-  expect(
-    await page.evaluate(
-      () => document.documentElement.scrollWidth <= document.documentElement.clientWidth
-    )
-  ).toBe(true);
 }
 
 test.beforeEach(async () => {
@@ -169,7 +162,7 @@ test("project page groups issues by status in board order; filters narrow issues
     await expect(page.getByText("Issue-only document", { exact: true })).toHaveCount(0);
 
     if (testInfo.project.name === "iphone") {
-      await expectNoHorizontalOverflow(page);
+      await assertPageFits(page);
       await expectTouchTarget(page.getByRole("tab", { name: "Issues" }));
       await expectTouchTarget(page.getByRole("button", { name: "New document" }));
       await expectTouchTarget(page.getByRole("button", { name: /Drop a file here/ }));
@@ -182,7 +175,7 @@ test("project page groups issues by status in board order; filters narrow issues
       await filterPicker(page, "Status").click();
       await expectTouchTarget(page.getByRole("option", { exact: true, name: "Todo" }));
       await page.keyboard.press("Escape");
-      await expectNoHorizontalOverflow(page);
+      await assertPageFits(page);
     }
   } finally {
     await context.close();
@@ -209,16 +202,7 @@ test("a 1,000-character search filter's chip ends in an ellipsis inside its row"
     await page.goto(`/projects/CORE/issues?q=${query}`);
     const chip = page.getByRole("button", { name: `Remove ${label} filter` });
     await expect(chip).toBeVisible();
-    const layout = await page.evaluate(() => ({
-      clientWidth: document.documentElement.clientWidth,
-      innerWidth: window.innerWidth,
-      scrollWidth: document.documentElement.scrollWidth,
-    }));
-    // A phone zooms out to fit a page wider than the device, which widens the layout viewport
-    // with it, so there `innerWidth` is the measure: `scrollWidth` alone compares against the
-    // zoomed-out width and passes.
-    expect(layout.innerWidth).toBe(page.viewportSize()?.width);
-    expect(layout.scrollWidth).toBeLessThanOrEqual(layout.clientWidth);
+    await assertPageFits(page);
     const text = await chip.getByTitle(label).evaluate((node) => ({
       clipped: node.scrollWidth > node.clientWidth,
       textOverflow: getComputedStyle(node).textOverflow,
@@ -440,7 +424,7 @@ test("a list row keeps its key whole and gives the title the row's width", async
     expect(layout.titleOverlapsTime).toBe(false);
     // The title wraps across the row, not in a column beside the key and the timestamp.
     expect(layout.titleWidth).toBeGreaterThanOrEqual(layout.rowWidth * 0.8);
-    await expectNoHorizontalOverflow(page);
+    await assertPageFits(page);
   } finally {
     await alice.close();
   }
