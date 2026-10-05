@@ -169,10 +169,9 @@ export default defineConfig({
       use: { ...devices["Desktop Safari"] },
     },
     // The live view's phone layout (its keyboard cap, gutter and scroll locks), its model
-    // pill's ellipsis (text-overflow never applies to a flex container's own text, and the two
-    // engines lay out a flex child's min-width differently), and what the Conversation's floating
-    // pills cover on a phone, also run in WebKit, the engine iOS Safari uses; only those rows,
-    // since the rest of each spec is engine-agnostic.
+    // pill's ellipsis (the two engines lay out a flex child's min-width differently), and what
+    // the Conversation's floating pills cover on a phone, also run in WebKit, the engine iOS
+    // Safari uses; only those rows, since the rest of each spec is engine-agnostic.
     {
       name: "webkit-iphone",
       testMatch: /(agent-view|phone-conversation)\.e2e\.ts/,

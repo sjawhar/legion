@@ -141,10 +141,12 @@ function AssistantMessage(): ReactNode {
       data-testid="agent-message-assistant"
     >
       {model === undefined ? null : (
-        <p className="mb-1 flex" data-testid="agent-message-model">
-          <TruncatedText className={`min-w-0 text-xs ${textMutedOnCanvas}`} title={model}>
-            {model}
-          </TruncatedText>
+        <p
+          className={`mb-1 truncate text-xs ${textMutedOnCanvas}`}
+          data-testid="agent-message-model"
+          title={model}
+        >
+          <TruncatedText>{model}</TruncatedText>
         </p>
       )}
       <MessagePrimitive.Parts components={{ Reasoning, tools: { Fallback: ToolCall } }} />
