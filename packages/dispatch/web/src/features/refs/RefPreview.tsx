@@ -16,8 +16,9 @@ import {
 } from "../../theme/classes";
 import { type IssueStatus, statusLabel } from "../project/board-model";
 import { actorLabel } from "./actor";
-import { shortForm } from "./RefLink";
+import { MarkdownPreview } from "./MarkdownPreview";
 import { REF_PREVIEW_CLOSE_DELAY_MS, REF_PREVIEW_OPEN_DELAY_MS } from "./ref-preview-timing";
+import { artifactTextQuery, prefetchReference, useReferenceData } from "./reference-target";
 import {
   buildDispatchReference,
   buildReferencePath,
@@ -25,14 +26,8 @@ import {
   isProjectRoute,
   parseDispatchReference,
   referenceTargetKind,
+  shortForm,
 } from "./routes";
-import {
-  artifactTextQuery,
-  excerpt,
-  firstLine,
-  prefetchReference,
-  useReferenceData,
-} from "./Unfurl";
 
 const CARD_ID = "ref-preview";
 /** Every hover-card trigger: a Markdown anchor `collectReferenceAnchors` tagged, a Proof link
@@ -239,8 +234,11 @@ function Heading({ children }: { children: ReactNode }): ReactNode {
   return <span className={`block font-semibold ${linkText}`}>{children}</span>;
 }
 
-function Body({ children }: { children: ReactNode }): ReactNode {
-  return <span className={`mt-1 block ${textSecondaryOnSurface}`}>{children}</span>;
+/** The card's body: three rendered lines of what the target says, formatted, then cut. */
+function Body({ markdown }: { markdown: string }): ReactNode {
+  return (
+    <MarkdownPreview className={`mt-1 ${textSecondaryOnSurface}`} lines={3} markdown={markdown} />
+  );
 }
 
 function IssuePreview({ route }: { route: DispatchReferenceRoute }): ReactNode {
@@ -253,10 +251,8 @@ function IssuePreview({ route }: { route: DispatchReferenceRoute }): ReactNode {
   if (issue === undefined) {
     return <Heading>{shortForm(route)}</Heading>;
   }
-  const specExcerpt =
-    specText.data !== undefined && "markdown" in specText.data
-      ? excerpt(specText.data.markdown, 200)
-      : undefined;
+  const specMarkdown =
+    specText.data !== undefined && "markdown" in specText.data ? specText.data.markdown : undefined;
   return (
     <>
       <Heading>
@@ -284,7 +280,9 @@ function IssuePreview({ route }: { route: DispatchReferenceRoute }): ReactNode {
           </span>
         )}
       </span>
-      {specExcerpt === undefined ? null : <Body>{specExcerpt}</Body>}
+      {specMarkdown === undefined || specMarkdown.trim() === "" ? null : (
+        <Body markdown={specMarkdown} />
+      )}
     </>
   );
 }
@@ -296,7 +294,6 @@ function DocumentPreview({ route }: { route: DispatchReferenceRoute }): ReactNod
   }
   const owner = isProjectRoute(route) ? route.project : route.key;
   const latest = artifact.versions.at(-1)?.number;
-  const text = excerpt(markdown, 200);
   return (
     <>
       <Heading>
@@ -306,7 +303,7 @@ function DocumentPreview({ route }: { route: DispatchReferenceRoute }): ReactNod
       {latest === undefined ? null : (
         <span className={`mt-1 block text-xs ${textMutedOnSurface}`}>v{latest}</span>
       )}
-      {text === undefined ? null : <Body>{text}</Body>}
+      {markdown === undefined || markdown.trim() === "" ? null : <Body markdown={markdown} />}
     </>
   );
 }
@@ -319,7 +316,9 @@ function AskPreview({ route }: { route: DispatchReferenceRoute }): ReactNode {
   const options = ask.ask.options.length;
   return (
     <>
-      <Heading>{ask.ask.question}</Heading>
+      <Heading>
+        <MarkdownPreview lines={2} markdown={ask.ask.question} />
+      </Heading>
       <span className={`mt-1 block text-xs ${textMutedOnSurface}`}>
         {ask.ask.state}
         {options === 0 ? null : ` · ${options} ${options === 1 ? "option" : "options"}`}
@@ -336,7 +335,7 @@ function CommentPreview({ route }: { route: DispatchReferenceRoute }): ReactNode
   return (
     <>
       <Heading>{actorLabel(comment.comment.author)}</Heading>
-      <Body>{firstLine(comment.comment.body)}</Body>
+      <Body markdown={comment.comment.body} />
     </>
   );
 }
@@ -349,7 +348,7 @@ function MessagePreview({ route }: { route: DispatchReferenceRoute }): ReactNode
   return (
     <>
       <Heading>{actorLabel(message.message.author)}</Heading>
-      <Body>{firstLine(message.message.body)}</Body>
+      <Body markdown={message.message.body} />
     </>
   );
 }

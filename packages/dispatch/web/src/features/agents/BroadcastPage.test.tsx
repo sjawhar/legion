@@ -319,3 +319,47 @@ test("a delivered recipient offers nothing", async () => {
     page.restore();
   }
 });
+
+// LEGION-540. The broadcast's body and each recipient's answer are Markdown their authors wrote,
+// shown whole on this page: a numbered list reads as a list, not as one run-on line with its
+// numbers dropped (the `inline` rendering this page used before), and no syntax shows.
+test("the broadcast's body and a recipient's answer render as Markdown blocks, lists included", async () => {
+  const read = answeredBroadcast();
+  const session = { id: "planner-session", kind: "session" } as const;
+  const listed: BroadcastRead = {
+    ...read,
+    body: "Three things:\n\n1. **Stop** the deploy\n2. Check `deploy.yml`",
+    recipients: read.recipients.map((recipient) => ({
+      ...recipient,
+      replies: [threadMessage("answer-1", session, "Done:\n\n- stopped\n- *green*")],
+    })),
+  };
+  const page = renderBroadcast(listed);
+  try {
+    const heading = await screen.findByRole("heading", { name: "Broadcast to 1 agent" });
+    const header = heading.closest("header");
+    if (header === null) throw new Error("the broadcast has no header");
+    await waitFor(() =>
+      expect(Array.from(header.querySelectorAll("ol > li"), (item) => item.textContent)).toEqual([
+        "Stop the deploy",
+        "Check deploy.yml",
+      ])
+    );
+    expect(header.querySelector("ol > li > strong")?.textContent).toBe("Stop");
+    expect(header.querySelector("ol > li > code")?.textContent).toBe("deploy.yml");
+    expect(header.textContent).not.toContain("**");
+
+    const row = await screen.findByRole("article", { name: "Planner" });
+    await waitFor(() =>
+      expect(Array.from(row.querySelectorAll("ul > li"), (item) => item.textContent)).toEqual([
+        "stopped",
+        "green",
+      ])
+    );
+    expect(row.querySelector("ul > li > em")?.textContent).toBe("green");
+    expect(row.textContent).not.toContain("- stopped");
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});

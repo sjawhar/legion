@@ -206,6 +206,42 @@ func equalStrings(got, want []string) bool {
 	return true
 }
 
+// LEGION-540. A broadcast's body is the text its author wrote, line breaks and Markdown
+// included, in the broadcast read, in each recipient's stored message and on the listener's
+// wire: a numbered list that reads as one line on the dashboard is the dashboard's rendering,
+// never a body the server collapsed, and every recipient was sent the list.
+func TestBroadcastBodyReachesStorageAndTheWireUnchanged(t *testing.T) {
+	listener, sends := newBroadcastListener(t, broadcastSessions)
+	handler, _ := newTargetedMessageHandler(t, listener.URL)
+
+	body := "Three things:\n\n1. **Stop** the deploy\n2. Check `dispatch-deploy.yml`\n3. Report on dispatch://CORE-1\n"
+	created := decodeBody[broadcastResponse](t, postBroadcast(t, handler, map[string]any{
+		"body": body, "delivery": "steer", "session_ids": []string{"planner", "tester"},
+	}, "alice"))
+	if created.Body != body {
+		t.Fatalf("created body = %q, want the input unchanged", created.Body)
+	}
+	delivered := awaitBroadcastDeliveries(t, handler, created.ID)
+	if delivered.Body != body {
+		t.Fatalf("stored broadcast body = %q, want the input unchanged", delivered.Body)
+	}
+	for _, recipient := range delivered.Recipients {
+		if recipient.Message.Body != body {
+			t.Fatalf("%s stored message body = %q, want the input unchanged", recipient.SessionID, recipient.Message.Body)
+		}
+	}
+	sends.Lock()
+	defer sends.Unlock()
+	if len(sends.sends) != 2 {
+		t.Fatalf("listener sends = %d, want one per recipient", len(sends.sends))
+	}
+	for _, send := range sends.sends {
+		if send.body != body {
+			t.Fatalf("wire body to %s = %q, want the input unchanged", send.target, send.body)
+		}
+	}
+}
+
 // Each recipient answers its own delivery, and the broadcast view is where every answer is
 // read back together.
 func TestBroadcastRecipientRepliesAppearInTheBroadcastAndItsSummary(t *testing.T) {

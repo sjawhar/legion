@@ -86,7 +86,7 @@ The issue's primary document **is** the root specification. Extend it in place: 
 that adds only the evidence each decision needs and what the human decides, each as a
 decision block (`skill://dispatch`, "Decision blocks"). The decomposition and its waves, how each
 outcome is proven, and the integration test are your own calls: they go in the child issues and
-the planner's `.legion/plan.json`, not the root spec. Never post a second "spec" artifact beside
+the planner's `.legion/<issue>/plan.json`, not the root spec. Never post a second "spec" artifact beside
 it (`dispatch_artifact` with the primary document's name replaces the human's document; do not do
 that).
 The design gate's approval step runs only when the `Design gate policy` sentence of your
@@ -161,7 +161,7 @@ evidence the human did not weigh that would change the decision, such as a measu
 settled choice cannot meet the Acceptance; then that decision block names the decision and that
 evidence. A plan never overturns a settled decision on its own. A design change that leaves all
 four intact, such as a planner's measurement that finds a better way to build the same outcome,
-goes in the plan (the issue's `plan.md` document and `.legion/plan.json`), never into the approved
+goes in the plan (the issue's `plan.md` document and `.legion/<issue>/plan.json`), never into the approved
 spec, even where the spec's text describes the older design; the reviewer reads the plan beside the
 spec. When a planner's phase-finished notice names a departure from the spec's design, defer to
 this section's full condition: only when the approved Summary, Acceptance, scope and settled
@@ -251,8 +251,10 @@ The daemon keeps this order from its fixed table; you start none of its steps:
 
 1. tester green and review cycles complete;
 2. on a clean review, the reviewer approves the head by SHA, and the daemon moves the issue to
-   `retro`. No role pushes a `.legion/` deletion: the approved head still carries `.legion/`, and
-   the operator removes it from the default branch in a follow-up pull request after the merge;
+   `retro`. No role pushes a `.legion/` deletion: the approved head still carries `.legion/`. The
+   daemon strips whatever `.legion/` main still carries from the next issue's branch before any of
+   its roles start, so that tree's own merge carries the removal onto the default branch; no
+   operator sweep follows;
 3. retro commits its learnings under `docs/solutions/` on top of the approved head; that
    commit does not void the approval and never returns the tree to the tester or reviewer;
 4. the merger verifies the current head is the reviewer-approved head plus only commits that

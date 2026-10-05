@@ -243,6 +243,35 @@ function cssEscapeAttrValue(value: string): string {
   return value.replace(/["\\]/g, '\\$&');
 }
 
+/**
+ * Replaces `parserCtx`'s value with a self-healing wrapper (LEGION-566). Milkdown's own `parser`
+ * plugin builds `parserCtx`'s `ParserState` once, at boot, and never rebuilds it
+ * (`@milkdown/core`: `ctx.set(parserCtx, ParserState.create(schema, remark))`); a parse it
+ * refuses - a mark span of a kind this schema has no parser for, the same throw
+ * `markdown-engine.ts`'s headless parser guards against for the display surfaces - leaves that
+ * `ParserState`'s stack open, so every later call through it throws too, for the editor's whole
+ * life. `@milkdown/plugin-clipboard` reads `ctx.get(parserCtx)` fresh on every text/plain paste
+ * (uncaught), so one refused paste broke every later paste in the same document until a reload;
+ * `defaultMarkdownParser` (`proof-sdk-upstream`'s marks plugin) holds whatever function this call
+ * passes it, so it heals the same way. The wrapper itself never changes once installed: it
+ * rebuilds its own closed-over parser from the schema and remark processor the broken one used,
+ * keeps the fresh one for the next call, and rethrows the original error, so the one refused
+ * parse still fails exactly as it did before and only the shared state is what recovers.
+ */
+function installSelfHealingParser(ctx: Ctx): void {
+  const schema = ctx.get(schemaCtx);
+  const remark = ctx.get(remarkCtx);
+  let parse = ctx.get(parserCtx);
+  ctx.set(parserCtx, (markdown) => {
+    try {
+      return parse(markdown);
+    } catch (error) {
+      parse = ParserState.create(schema, remark);
+      throw error;
+    }
+  });
+}
+
 export async function createProofEditor(
   root: HTMLElement,
   opts: CreateProofEditorOptions,
@@ -332,6 +361,7 @@ export async function createProofEditor(
     .create();
 
   editor.action((ctx) => {
+    installSelfHealingParser(ctx);
     setDefaultMarkdownParser(ctx.get(parserCtx));
   });
 
@@ -388,8 +418,10 @@ export async function createProofEditor(
     setMarkdown(markdown: string): void {
       // Markdown import only: soft line breaks become spaces here and in the headless parser,
       // never in the shared parserCtx, which the clipboard plugin also runs text/plain pastes
-      // through - a pasted "alpha\nbeta" must keep its line break.
-      // remarkCtx holds a frozen processor; calling it yields an unfrozen copy to extend.
+      // through - a pasted "alpha\nbeta" must keep its line break. The commonmark preset's own
+      // remark-inline-links resolves reference-style links here already, as it does in the
+      // headless parser for the display surfaces; remarkCtx holds a frozen processor, so calling
+      // it yields an unfrozen copy to extend.
       const importParser = ParserState.create(
         editor.ctx.get(schemaCtx),
         editor.ctx.get(remarkCtx)().use(remarkSoftBreakAsSpace),

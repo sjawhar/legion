@@ -388,6 +388,13 @@ jobs:
           go-version-file: packages/envoy/go.mod
       - uses: ./.github/actions/setup-bun
       - run: bun install --frozen-lockfile
+      - name: Build contracts for dispatch e2e
+        # e2e/agent-view.e2e.ts imports AGENT_STREAM_LIMITS and capAgentStreamText as values
+        # (LEGION-548), which Playwright's own Node resolution reads from contracts' built
+        # dist/, unlike a type-only import or the dashboard's own Vite build (which bundles the
+        # TS source directly through the workspace's "bun" export condition).
+        run: bun run build
+        working-directory: packages/contracts
       - name: Lint proof editor
         run: bun run lint
         working-directory: packages/proof-editor

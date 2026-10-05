@@ -22,7 +22,7 @@ is that runtime's live proof).
   sub-architect for a child issue runs only when the operator starts one. The controller is an
   interactive OMP session the operator starts on their own machine with `legion controller start`
   (no `--mode rpc`, no shim); the daemon launches none.
-- **Skills** — guide the architect and sequential phase workers. Durable `.legion/<phase>.json`
+- **Skills** — guide the architect and sequential phase workers. Durable `.legion/<issue>/<phase>.json`
   handoffs are the recovery source of truth.
 
 ## Tech Stack
@@ -187,7 +187,7 @@ the phase-verdict artifacts. No lifecycle labels carry worker state.
 
 ## Documentation
 
-- Plans: `docs/plans/YYYY-MM-DD-<slug>.md` — human-authored design history, not a Legion artifact. A Legion planner's plan lives in `.legion/plan.json` and the issue's `plan.md` document on Dispatch; no Legion role commits a plan or spec file here.
+- Plans: `docs/plans/YYYY-MM-DD-<slug>.md` — human-authored design history, not a Legion artifact. A Legion planner's plan lives in `.legion/<issue>/plan.json` and the issue's `plan.md` document on Dispatch; no Legion role commits a plan or spec file here.
 - Learnings: `docs/solutions/<category>/<slug>.md`
 
 > Many docs in `docs/plans/` and `docs/solutions/` predate the TypeScript rewrite and contain Python-era references. These are marked with `[HISTORICAL]` headers.

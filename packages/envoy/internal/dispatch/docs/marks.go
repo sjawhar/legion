@@ -617,7 +617,7 @@ func loadAnchorRefreshedCommentPayload(ctx context.Context, tx pgx.Tx, id string
 	}
 	var payload model.CommentEventPayload
 	if err := tx.QueryRow(ctx, `
-		select name, project_key, slug
+		select name, coalesce(project_key, ''), slug
 		from artifacts where id = $1
 	`, comment.Anchor.ArtifactID).Scan(&payload.ArtifactName, &payload.ProjectKey, &payload.ArtifactSlug); err != nil {
 		return model.CommentEventPayload{}, fmt.Errorf("load refreshed comment %q artifact: %w", id, err)
