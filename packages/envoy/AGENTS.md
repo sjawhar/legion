@@ -600,7 +600,7 @@ is the one list of those holders. Every lookup takes a state through `lockState`
 forgets a state that holds nothing once its room has gone, so whatever ends last - ygo's
 `OnUnloadDocument` when the room goes, or a holder's own end - releases it. The durable row that
 says a document's settlement is owed (`doc_settlements_pending`, migration 0063) also carries the
-authors that settlement needs (0082): a browser update records them in the update's own
+authors that settlement needs (0072): a browser update records them in the update's own
 transaction, and a joined write records them in the transaction that commits its content, which
 also takes out the authors any version it wrote credited, as the room does once it commits. A
 browser update's credit names only the peers connected for it - never the room's whole accumulated
