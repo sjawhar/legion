@@ -269,7 +269,7 @@ type artifactOwner struct {
 func lockArtifactOwner(ctx context.Context, tx pgx.Tx, artifactID string) (artifactOwner, bool, error) {
 	var owner artifactOwner
 	if err := tx.QueryRow(ctx, `
-		select issue_key, project_key, slug, name
+		select issue_key, coalesce(project_key, ''), slug, name
 		from artifacts where id = $1
 	`, artifactID).Scan(&owner.IssueKey, &owner.Project, &owner.Slug, &owner.Name); err != nil {
 		return artifactOwner{}, false, fmt.Errorf("load document owner: %w", err)
