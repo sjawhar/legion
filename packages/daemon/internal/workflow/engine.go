@@ -103,6 +103,8 @@ func (e *Engine) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake
 		return e.checks(ctx, tx, fact)
 	case intake.RequiredChecks:
 		return e.requiredChecks(ctx, tx, fact)
+	case intake.PullRequestMergeability:
+		return e.mergeability(ctx, tx, fact)
 	case intake.PullRequestReview:
 		return e.review(ctx, tx, fact)
 	case intake.PullRequestMerged:

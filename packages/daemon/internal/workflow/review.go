@@ -60,6 +60,33 @@ func (e *Engine) requiredChecks(ctx context.Context, tx pgx.Tx, fact intake.Requ
 	return intake.Result{}, e.decideChecks(ctx, tx, pr, prior, byRequired)
 }
 
+// mergeability records what GitHub's last read found for whether the pull request's head can be
+// merged into its base (intake.PullRequestMergeability), read alongside RequiredChecks on the same
+// GitHub answer. A read that says what is recorded changes nothing. In awaiting_merge, a head that
+// has started conflicting with its base (classify.ConflictWithdrawsReady) is withdrawn exactly as
+// a red CI verdict is (decideChecks's AwaitingMerge case): GitHub computes no merge ref for a
+// conflicting head, so it runs no checks on it at all, and no CI settlement or required-checks read
+// would ever tell the daemon the READY cannot be merged. Outside awaiting_merge the read is kept
+// and nothing moves: no round is open to decide a conflict the way RedSendsBack decides a red, and
+// the implementer already at work in implementing will see the conflict on GitHub when it pushes.
+func (e *Engine) mergeability(ctx context.Context, tx pgx.Tx, fact intake.PullRequestMergeability) (intake.Result, error) {
+	pr, err := e.pullRequest(ctx, tx, fact.Repo, fact.Number)
+	if err != nil || pr == nil || (pr.Mergeability == fact.Mergeable && pr.Base == fact.Base) {
+		return intake.Result{}, err
+	}
+	pr.Mergeability = fact.Mergeable
+	pr.Base = fact.Base
+	if err := e.store.PutPullRequest(ctx, tx, *pr); err != nil {
+		return intake.Result{}, err
+	}
+	issue, err := e.store.Issue(ctx, tx, pr.Issue)
+	if err != nil || issue == nil || issue.Phase != phase.AwaitingMerge || !classify.ConflictWithdrawsReady(*pr) {
+		return intake.Result{}, err
+	}
+	reason := fmt.Sprintf("the head conflicts with %s: GitHub runs no checks on it; merge %s forward", pr.Base, pr.Base)
+	return intake.Result{}, e.transition(ctx, tx, *issue, TriggerChecksRed, "", record.PhaseRow{}, pr, reason)
+}
+
 // decideChecks records pr, its checks verdict changed from prior's by a CI settlement or a new
 // read of what the base branch requires (the fact by names), and decides, with the issue's phase
 // in hand, what it moves. An exhausted fix-attempt count is posted and told to the architect. In

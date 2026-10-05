@@ -79,7 +79,7 @@ func (w *workflowRuntime) readRequiredChecks(ctx context.Context) {
 	}
 	read := map[string]requiredchecks.Set{}
 	for _, pr := range open {
-		fact, err := w.requiredFor(ctx, pr, read)
+		checks, mergeability, err := w.requiredFor(ctx, pr, read)
 		if err != nil {
 			if ctx.Err() != nil {
 				return
@@ -96,12 +96,17 @@ func (w *workflowRuntime) readRequiredChecks(ctx context.Context) {
 			w.log.Error("read the checks a pull request's base branch requires; its checks verdict stays as the set last read decides it, and undecided when none was", attributes...)
 			continue
 		}
-		if pr.RequiredReadUnchanged(fact.Names, fact.Workflows, fact.WorkflowsHead) {
-			continue
+		if !pr.RequiredReadUnchanged(checks.Names, checks.Workflows, checks.WorkflowsHead) {
+			eventID := fmt.Sprintf("required-checks:%s:%s:%s#%d:%d", w.dispatchProject, w.bootID, pr.Repo, pr.Number, time.Now().UnixNano())
+			if _, err := intake.ApplyFact(ctx, w.pool, "github", eventID, checks, w.handlers...); err != nil {
+				w.log.Warn("apply the checks a pull request's base branch requires", "repo", pr.Repo, "pullRequest", pr.Number, "error", err)
+			}
 		}
-		eventID := fmt.Sprintf("required-checks:%s:%s:%s#%d:%d", w.dispatchProject, w.bootID, pr.Repo, pr.Number, time.Now().UnixNano())
-		if _, err := intake.ApplyFact(ctx, w.pool, "github", eventID, fact, w.handlers...); err != nil {
-			w.log.Warn("apply the checks a pull request's base branch requires", "repo", pr.Repo, "pullRequest", pr.Number, "error", err)
+		if pr.Mergeability != mergeability.Mergeable || pr.Base != mergeability.Base {
+			eventID := fmt.Sprintf("mergeability:%s:%s:%s#%d:%d", w.dispatchProject, w.bootID, pr.Repo, pr.Number, time.Now().UnixNano())
+			if _, err := intake.ApplyFact(ctx, w.pool, "github", eventID, mergeability, w.handlers...); err != nil {
+				w.log.Warn("apply whether a pull request's head can be merged into its base", "repo", pr.Repo, "pullRequest", pr.Number, "error", err)
+			}
 		}
 	}
 }
@@ -109,46 +114,62 @@ func (w *workflowRuntime) readRequiredChecks(ctx context.Context) {
 // requiredFor reads what pr's base branch requires: the pull request, for its base, then the
 // base's rulesets and protection, which read keeps for the rest of the pass by repository and
 // base, so pull requests on one base read them once, and then, when the base requires a workflow,
-// pr's own workflow runs on the head whose settlement stands for its head.
-func (w *workflowRuntime) requiredFor(ctx context.Context, pr record.PullRequest, read map[string]requiredchecks.Set) (intake.RequiredChecks, error) {
+// pr's own workflow runs on the head whose settlement stands for its head. The one GitHub read of
+// the pull request itself also carries its base branch and GitHub's nullable `mergeable` field, so
+// the mergeability fact costs the pass no further read: a null mergeable is
+// record.MergeabilityUnknown, GitHub not having computed it yet; true is
+// record.MergeabilityMergeable; false is record.MergeabilityConflicting, the state that, in
+// awaiting_merge, withdraws a READY GitHub can run no checks on and merge (workflow's
+// mergeability).
+func (w *workflowRuntime) requiredFor(ctx context.Context, pr record.PullRequest, read map[string]requiredchecks.Set) (intake.RequiredChecks, intake.PullRequestMergeability, error) {
 	ctx, cancel := context.WithTimeout(ctx, requiredChecksRead)
 	defer cancel()
 	repository, err := ghrepo.Parse("the pull request's repository", pr.Repo)
 	if err != nil {
-		return intake.RequiredChecks{}, err
+		return intake.RequiredChecks{}, intake.PullRequestMergeability{}, err
 	}
 	lease, err := w.tokens.Token(ctx, appauth.Implement, repository.Owner())
 	if err != nil {
-		return intake.RequiredChecks{}, fmt.Errorf("mint the implement App token for %s: %w", repository.Owner(), err)
+		return intake.RequiredChecks{}, intake.PullRequestMergeability{}, fmt.Errorf("mint the implement App token for %s: %w", repository.Owner(), err)
 	}
 	github := githubrest.Client{Token: lease.Token, API: githubrest.RepositoryAPI(w.githubAPI, repository)}
 	var pull struct {
 		Base struct {
 			Ref string `json:"ref"`
 		} `json:"base"`
+		Mergeable *bool `json:"mergeable"`
 	}
 	if err := github.Get(ctx, fmt.Sprintf("/pulls/%d", pr.Number), &pull); err != nil {
-		return intake.RequiredChecks{}, err
+		return intake.RequiredChecks{}, intake.PullRequestMergeability{}, err
 	}
+	mergeable := record.MergeabilityUnknown
+	if pull.Mergeable != nil {
+		if *pull.Mergeable {
+			mergeable = record.MergeabilityMergeable
+		} else {
+			mergeable = record.MergeabilityConflicting
+		}
+	}
+	mergeability := intake.PullRequestMergeability{Repo: pr.Repo, Number: pr.Number, Base: pull.Base.Ref, Mergeable: mergeable}
 	key := pr.Repo + "@" + pull.Base.Ref
 	set, ok := read[key]
 	if !ok {
 		if set, err = requiredchecks.Required(ctx, github, pull.Base.Ref); err != nil {
-			return intake.RequiredChecks{}, fmt.Errorf("read the checks %s requires: %w", pull.Base.Ref, err)
+			return intake.RequiredChecks{}, intake.PullRequestMergeability{}, fmt.Errorf("read the checks %s requires: %w", pull.Base.Ref, err)
 		}
 		read[key] = set
 	}
 	fact := intake.RequiredChecks{Repo: pr.Repo, Number: pr.Number, Names: set.Checks, Workflows: []record.RequiredWorkflow{}}
 	if len(set.Workflows) == 0 {
-		return fact, nil
+		return fact, mergeability, nil
 	}
 	fact.WorkflowsHead = classify.WorkflowHead(pr)
 	runs, err := requiredchecks.Workflows(ctx, github, fact.WorkflowsHead, set.Workflows)
 	if err != nil {
-		return intake.RequiredChecks{}, fmt.Errorf("read the workflow runs on %s: %w", fact.WorkflowsHead, err)
+		return intake.RequiredChecks{}, intake.PullRequestMergeability{}, fmt.Errorf("read the workflow runs on %s: %w", fact.WorkflowsHead, err)
 	}
 	for _, run := range runs {
 		fact.Workflows = append(fact.Workflows, record.RequiredWorkflow{Path: run.Path, Result: run.Result, Run: run.Run, Attempt: run.Attempt})
 	}
-	return fact, nil
+	return fact, mergeability, nil
 }

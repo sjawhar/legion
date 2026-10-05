@@ -275,3 +275,72 @@ func TestASettlementLeavesARedOnlyRequiredWorkflowsMakeToTheNextRead(t *testing.
 		})
 	}
 }
+
+// A READY pull request that starts conflicting with its base while awaiting_merge is in the same
+// bind as one whose own CI turned red: GitHub computes no merge ref for a conflicting head, so it
+// runs no checks on it at all, and nothing - not a CI settlement, not a required-checks read -
+// would ever tell the daemon the READY cannot be merged. The daemon's own read of GitHub's
+// mergeability (workflow's mergeability) is the only path to it, and a conflicting read sends the
+// tree back to implementing exactly as RedWithdrawsReady does, naming the base the implementer
+// must merge forward. GitHub reports mergeability UNKNOWN until it has computed it - that is "not
+// yet known", never a conflict - so an unknown or a mergeable read moves nothing. Outside
+// awaiting_merge a conflict moves nothing either: in testing the implementer is already at work
+// and will see the conflict on its own next push, and in reviewing no round is open to decide a
+// conflict the way a red CI verdict is (RedSendsBack decides a red only where a round is open).
+func TestAConflictingMergeabilityInAwaitingMergeSendsTheTreeBackToImplementing(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		from      phase.Phase
+		status    string
+		mergeable record.Mergeability
+		want      phase.Phase
+	}{
+		{"conflicting in awaiting_merge", phase.AwaitingMerge, "retro", record.MergeabilityConflicting, phase.Implementing},
+		{"unknown in awaiting_merge: GitHub has not computed it yet", phase.AwaitingMerge, "retro", record.MergeabilityUnknown, phase.AwaitingMerge},
+		{"mergeable in awaiting_merge", phase.AwaitingMerge, "retro", record.MergeabilityMergeable, phase.AwaitingMerge},
+		{"conflicting in testing: the implementer is already at work", phase.Testing, "testing", record.MergeabilityConflicting, phase.Testing},
+		{"conflicting in reviewing: no round is open to decide it", phase.Reviewing, "needs_review", record.MergeabilityConflicting, phase.Reviewing},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root",
+				Phase: tc.from, Generation: 1, Status: tc.status, Rank: "U"})
+			seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
+				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head"})
+			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
+			if tc.from == phase.Reviewing {
+				seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", HandoffCommit: "head", Summary: "reviewed"})
+			}
+			if tc.from == phase.AwaitingMerge {
+				seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merge-claim", HandoffCommit: "head", Summary: "READY #42 at head"})
+			}
+			applyRefusingNothing(t, pool, readyEngine("merge-queue"),
+				intake.PullRequestMergeability{Repo: "sjawhar/legion", Number: 42, Base: "main", Mergeable: tc.mergeable})
+			if got := issuePhase(t, pool); got != tc.want {
+				t.Fatalf("after the mergeability read the issue is in %s, want %s", got, tc.want)
+			}
+			published := mergeQueuePublishes(t, pool)
+			if tc.want != phase.Implementing {
+				if len(published) != 0 {
+					t.Fatalf("merge queue publishes %v, want none: nothing moved", published)
+				}
+				assertOutboxCount(t, pool, "supervise", 0)
+				return
+			}
+			want := "the head conflicts with main: GitHub runs no checks on it; merge main forward"
+			var reason, from, status string
+			if err := pool.QueryRow(context.Background(), "select payload->>'reason', payload->>'phase' from outbox where kind = 'notice' and payload->>'kind' = 'checks-red'").Scan(&reason, &from); err != nil {
+				t.Fatalf("read the architect's checks-red notice: %v", err)
+			}
+			if err := pool.QueryRow(context.Background(), "select payload->>'status' from outbox where kind = 'dispatch_status'").Scan(&status); err != nil {
+				t.Fatalf("read the status write: %v", err)
+			}
+			if task := implementerTask(t, pool); !strings.Contains(task, want) || !strings.Contains(reason, want) || from != string(phase.AwaitingMerge) || status != "in_progress" {
+				t.Fatalf("task %q, notice %q from %q, status %q; want both to say %q, from awaiting_merge, and the issue in_progress", task, reason, from, status, want)
+			}
+			if len(published) != 1 || published[0].Role != "merge-queue" || !strings.Contains(published[0].Packet, "READY withdrawn") || !strings.Contains(published[0].Packet, want) {
+				t.Fatalf("merge queue publishes %v, want one to merge-queue withdrawing the READY and saying %q", published, want)
+			}
+		})
+	}
+}
