@@ -75,29 +75,36 @@ func (r *RateLimitedEmbedder) Embed(ctx context.Context, texts []string, inputTy
 }
 
 // pace blocks until this call is at least Interval() after the previous one started, or returns
-// false without waiting out the rest of it if ctx ends first. It holds the lock for its whole
-// body, wait and update included, rather than releasing it between computing wait and setting
-// last: a caller the way embedqueue uses this (one poller goroutine, one backfill goroutine, but
-// never both against the same limiter at once today) never contends it, but correctness here
-// does not depend on that - two concurrent callers would otherwise both read last before either
-// wrote it back and could both wait the same, shorter-than-intended interval before the lock-less
-// window closed. Holding one lock is cheap and makes the pacing correct regardless of how many
-// goroutines ever call Embed concurrently.
+// false without waiting out the rest of it if ctx ends first. It reserves its own slot under the
+// lock - advancing last by interval (not to time.Now()) when a wait is owed, so a second caller
+// computing its own wait immediately after sees the reservation already made - then releases the
+// lock before actually sleeping: holding the lock across the sleep would mean one caller's
+// cancellation (ctx.Done() firing) still has to wait for the mutex a completely unrelated
+// caller's own, unexpired sleep is holding, which defeats ctx ending this call promptly. A caller
+// the way embedqueue uses this (one poller goroutine, one backfill goroutine, never both against
+// the same limiter at once today) never contends it, but correctness here does not depend on
+// that - two concurrent callers reserving distinct, evenly-spaced slots up front is correct
+// regardless of how many goroutines ever call Embed concurrently.
 func (r *RateLimitedEmbedder) pace(ctx context.Context) bool {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	wait := r.interval - time.Since(r.last)
 	if wait > 0 {
-		timer := time.NewTimer(wait)
-		defer timer.Stop()
-		select {
-		case <-ctx.Done():
-			return false
-		case <-timer.C:
-		}
+		r.last = r.last.Add(r.interval)
+	} else {
+		r.last = time.Now()
 	}
-	r.last = time.Now()
-	return true
+	r.mu.Unlock()
+	if wait <= 0 {
+		return true
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
 }
 
 func (r *RateLimitedEmbedder) adjust(err error) {

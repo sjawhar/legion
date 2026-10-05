@@ -30,14 +30,14 @@ func explainPlan(t *testing.T, tx pgx.Tx, ctx context.Context, sql string) strin
 	return string(pretty)
 }
 
-// TestPendingStatusMinQueryUsesTheIndexOnlyMinMaxRewrite proves pendingStatus's min(next_attempt_at)
-// query (run on its own, not paired with count(*) in the same statement - see pendingStatus's own
-// doc comment for why the pairing matters) gets Postgres's min/max-via-index-scan rewrite
-// (preprocess_minmax_aggregates): an Index Only Scan on embeddings_pending bounded by a Limit,
-// rather than a scan of every row the predicate matches followed by an aggregate. The negative
-// control proves the rewrite genuinely depends on the split: the old combined
-// count(*) + min(...) shape this replaced loses it, which is the whole reason pendingStatus runs
-// two queries now instead of one.
+// TestPendingStatusMinQueryUsesTheIndexOnlyMinMaxRewrite proves pendingStatus's own
+// pendingStatusQuery - the exact two-subquery statement it runs, not a hand-copied stand-in -
+// still gets Postgres's min/max-via-index-scan rewrite (preprocess_minmax_aggregates) for its
+// min(next_attempt_at) half: an Index Only Scan on embeddings_pending bounded by a Limit, rather
+// than a scan of every row the predicate matches followed by an aggregate. The negative control
+// proves the rewrite genuinely depends on the split: the old combined count(*) + min(...) shape
+// this replaced loses it, which is the whole reason pendingStatus runs two subqueries instead of
+// one combined aggregate list.
 func TestPendingStatusMinQueryUsesTheIndexOnlyMinMaxRewrite(t *testing.T) {
 	database := storetest.Open(t)
 	seedIssue(t, database, "IDXP", "IDXP-1", "A title")
@@ -49,15 +49,12 @@ func TestPendingStatusMinQueryUsesTheIndexOnlyMinMaxRewrite(t *testing.T) {
 	}
 	defer tx.Rollback(ctx)
 
-	plan := explainPlan(t, tx, ctx, `
-		select min(next_attempt_at) from embeddings
-		where embedded_hash is distinct from content_hash and not dead
-	`)
+	plan := explainPlan(t, tx, ctx, pendingStatusQuery)
 	if !strings.Contains(plan, `"Index Only Scan"`) {
-		t.Errorf("pendingStatus's min query plan has no Index Only Scan, want the min/max rewrite to apply:\n%s", plan)
+		t.Errorf("pendingStatusQuery's plan has no Index Only Scan, want the min/max rewrite to apply to its min(next_attempt_at) subquery:\n%s", plan)
 	}
 	if !strings.Contains(plan, "embeddings_pending") {
-		t.Errorf("pendingStatus's min query plan never names embeddings_pending, want it to use that index:\n%s", plan)
+		t.Errorf("pendingStatusQuery's plan never names embeddings_pending, want it to use that index:\n%s", plan)
 	}
 }
 

@@ -88,6 +88,21 @@ func seedIssue(t *testing.T, database *store.Store, projectKey, issueKey, title 
 	}
 }
 
+// contentHashOf reads a row's real content_hash: claimRenewal.renew matches on it (Rev's own
+// should: a renewal must never touch a row a concurrent write already changed), so a test
+// constructing a pendingRow by hand for renewal, rather than through scanPending, needs the real
+// value - the zero-value empty string never matches what embeddings_enqueue's trigger wrote.
+func contentHashOf(t *testing.T, database *store.Store, kind, id string) string {
+	t.Helper()
+	var hash string
+	if err := database.Pool.QueryRow(context.Background(),
+		`select content_hash from embeddings where kind = $1 and id = $2`, kind, id,
+	).Scan(&hash); err != nil {
+		t.Fatalf("read content_hash for %s %s: %v", kind, id, err)
+	}
+	return hash
+}
+
 func pendingCount(t *testing.T, database *store.Store) int {
 	t.Helper()
 	var count int
@@ -429,7 +444,7 @@ func TestRetryRowsMarksARowDeadAfterRepeatedPermanentFailuresAndStopsRetrying(t 
 	if err := database.Pool.QueryRow(ctx, `select content_hash from embeddings where kind = 'issue' and id = 'DEAD-1'`).Scan(&row.contentHash); err != nil {
 		t.Fatalf("read content_hash: %v", err)
 	}
-	for row.attempts = 0; row.attempts < retry.DeadLetterAttempts; row.attempts++ {
+	for row.attempts, row.confirmedFailures = 0, 0; row.confirmedFailures < retry.DeadLetterAttempts; row.attempts, row.confirmedFailures = row.attempts+1, row.confirmedFailures+1 {
 		retryRows(ctx, deps, []pendingRow{row}, true)
 	}
 
@@ -715,7 +730,7 @@ func TestClaimRenewalExtendsNextAttemptAtPastClaimWindow(t *testing.T) {
 	database := storetest.Open(t)
 	seedIssue(t, database, "RNWL", "RNWL-1", "A title")
 	ctx := context.Background()
-	renewal := newClaimRenewal(Deps{Store: database}, []pendingRow{{kind: "issue", id: "RNWL-1"}})
+	renewal := newClaimRenewal(Deps{Store: database}, []pendingRow{{kind: "issue", id: "RNWL-1", contentHash: contentHashOf(t, database, "issue", "RNWL-1")}})
 	renewal.last = time.Now().Add(-renewClaimInterval - time.Second)
 	before := time.Now()
 	renewal.renew(ctx)
@@ -769,7 +784,7 @@ func TestWaitOutDebtRenewsTheClaimMidWaitSoNoSecondWorkerClaimsIt(t *testing.T) 
 	database := storetest.Open(t)
 	seedIssue(t, database, "LONG", "LONG-1", "A title")
 	ctx := context.Background()
-	renewal := newClaimRenewal(Deps{Store: database}, []pendingRow{{kind: "issue", id: "LONG-1"}})
+	renewal := newClaimRenewal(Deps{Store: database}, []pendingRow{{kind: "issue", id: "LONG-1", contentHash: contentHashOf(t, database, "issue", "LONG-1")}})
 	// Looks stale from the start, so the very first segment's renew() call actually renews
 	// rather than being skipped as "too soon since the last one".
 	renewal.last = time.Now().Add(-time.Hour)
@@ -809,7 +824,8 @@ func TestClaimRenewalResolveStopsRenewingACommittedRow(t *testing.T) {
 	}
 
 	renewal := newClaimRenewal(Deps{Store: database}, []pendingRow{
-		{kind: "issue", id: "RSLV-1"}, {kind: "issue", id: "RSLV-2"},
+		{kind: "issue", id: "RSLV-1", contentHash: contentHashOf(t, database, "issue", "RSLV-1")},
+		{kind: "issue", id: "RSLV-2", contentHash: contentHashOf(t, database, "issue", "RSLV-2")},
 	})
 	renewal.resolve([]pendingRow{{kind: "issue", id: "RSLV-1"}})
 	renewal.last = time.Now().Add(-renewClaimInterval - time.Second)
@@ -932,5 +948,272 @@ func TestChunkForBudgetSplitsAnOverCeilingBatchAndEmbedRowsCommitsEachGroupOnlyO
 	}
 	if embedder.rowsSent != healthyCount+1 {
 		t.Errorf("rows sent across all Embed calls = %d, want %d (no row re-sent)", embedder.rowsSent, healthyCount+1)
+	}
+}
+
+// countingFailThenSucceedEmbedder fails its first failCalls calls non-throttled, regardless of
+// content, then succeeds - standing in for an outage that clears partway through a single
+// ProcessBatch call's own bisection.
+type countingFailThenSucceedEmbedder struct {
+	failCalls int
+	calls     int
+}
+
+func (e *countingFailThenSucceedEmbedder) Embed(_ context.Context, texts []string, _ embed.InputType) ([][]float32, error) {
+	e.calls++
+	if e.calls <= e.failCalls {
+		return nil, errors.New("simulated: a non-throttled embed failure (outage)")
+	}
+	vectors := make([][]float32, len(texts))
+	for i := range vectors {
+		vectors[i] = oneVector()
+	}
+	return vectors, nil
+}
+
+// TestProcessBatchDoesNotDeadLetterARowIsolatedDuringAnOutageThatClearsLaterInTheSameCall is
+// Rev's exact repro: 8 rows already primed to attempt_count=9 by earlier uniform-outage cycles
+// (confirmed_failures stays 0 through all of them, since a demoted retry never advances it), then
+// one more cycle whose embedder fails non-throttled for the first 4 calls (the outage still
+// active) and succeeds from the 5th call on (the outage clearing mid-bisection). Before this
+// round's fix, the row bisection isolated during one of the first 4 calls was wrongly confirmed
+// permanent - because ProcessBatch's old confirmation check looked at whether *any* row in the
+// whole call ever succeeded, regardless of when - and crossed the dead-letter threshold on this
+// single cycle, even though it failed while the outage was still active and no sibling had yet
+// proven the service was up.
+func TestProcessBatchDoesNotDeadLetterARowIsolatedDuringAnOutageThatClearsLaterInTheSameCall(t *testing.T) {
+	database := storetest.Open(t)
+	ids := []string{"OUT-1", "OUT-2", "OUT-3", "OUT-4", "OUT-5", "OUT-6", "OUT-7", "OUT-8"}
+	for i, id := range ids {
+		seedIssue(t, database, "OUT", id, fmt.Sprintf("Title %d", i))
+	}
+	if _, err := database.Pool.Exec(context.Background(),
+		`update embeddings set attempt_count = 9 where kind = 'issue' and id = any($1::text[])`, ids,
+	); err != nil {
+		t.Fatalf("prime attempt_count: %v", err)
+	}
+	embedder := &countingFailThenSucceedEmbedder{failCalls: 4}
+	deps := Deps{Store: database, Embedder: embedder}
+
+	succeeded, failed, _, throttled, err := ProcessBatch(context.Background(), deps)
+	if err != nil {
+		t.Fatalf("ProcessBatch: %v", err)
+	}
+	if succeeded != 7 {
+		t.Errorf("succeeded = %d, want 7", succeeded)
+	}
+	if failed != 1 {
+		t.Errorf("failed = %d, want 1", failed)
+	}
+	if throttled {
+		t.Error("throttled = true, want false")
+	}
+	rows, qErr := database.Pool.Query(context.Background(),
+		`select id, dead, confirmed_failures, attempt_count, embedded_hash is not null as embedded
+		   from embeddings where kind = 'issue' and id = any($1::text[])`, ids)
+	if qErr != nil {
+		t.Fatalf("read embeddings: %v", qErr)
+	}
+	defer rows.Close()
+	pendingCount, embeddedCount := 0, 0
+	for rows.Next() {
+		var id string
+		var dead, embedded bool
+		var confirmedFailures, attemptCount int
+		if err := rows.Scan(&id, &dead, &confirmedFailures, &attemptCount, &embedded); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if dead {
+			t.Errorf("%s dead = true, want false - it failed while the outage (the first 4 calls) was still ongoing, before any sibling had proven the service was up", id)
+		}
+		if embedded {
+			embeddedCount++
+			continue
+		}
+		pendingCount++
+		if confirmedFailures != 0 {
+			t.Errorf("%s (still pending, never confirmed) confirmed_failures = %d, want 0 - it failed only during the outage, never once the service was proven up", id, confirmedFailures)
+		}
+		if attemptCount != 10 {
+			t.Errorf("%s attempt_count = %d, want 10 - it still advances every cycle, confirmed or not", id, attemptCount)
+		}
+	}
+	if pendingCount != 1 {
+		t.Errorf("rows still pending = %d, want exactly 1 (the one isolated during the outage)", pendingCount)
+	}
+	if embeddedCount != 7 {
+		t.Errorf("rows embedded = %d, want 7", embeddedCount)
+	}
+}
+
+// countingPoisonEmbedder fails non-throttled whenever any text in a call equals poison, and
+// succeeds otherwise.
+type countingPoisonEmbedder struct {
+	poison string
+}
+
+func (e *countingPoisonEmbedder) Embed(_ context.Context, texts []string, _ embed.InputType) ([][]float32, error) {
+	for _, text := range texts {
+		if text == e.poison {
+			return nil, errors.New("simulated: a non-throttled embed failure (poisoned content)")
+		}
+	}
+	vectors := make([][]float32, len(texts))
+	for i := range vectors {
+		vectors[i] = oneVector()
+	}
+	return vectors, nil
+}
+
+// TestProcessBatchStillDeadLettersAGenuinelyPoisonedRowAmongHealthyOnes proves the fix is not
+// overcorrected into never dead-lettering anything: once healthy siblings have already
+// committed - proving the service works - a row whose own content genuinely, repeatedly breaks
+// the embed call still crosses the dead-letter threshold on a confirmed failure.
+func TestProcessBatchStillDeadLettersAGenuinelyPoisonedRowAmongHealthyOnes(t *testing.T) {
+	database := storetest.Open(t)
+	healthyIDs := []string{"POIS-1", "POIS-2", "POIS-3"}
+	for i, id := range healthyIDs {
+		seedIssue(t, database, "POIS", id, fmt.Sprintf("Healthy title %d", i))
+	}
+	seedIssue(t, database, "POIS", "POIS-4", "the poisoned title")
+	if _, err := database.Pool.Exec(context.Background(),
+		`update embeddings set confirmed_failures = 9 where kind = 'issue' and id = 'POIS-4'`,
+	); err != nil {
+		t.Fatalf("prime confirmed_failures: %v", err)
+	}
+	embedder := &countingPoisonEmbedder{poison: "the poisoned title"}
+	deps := Deps{Store: database, Embedder: embedder}
+
+	succeeded, failed, _, throttled, err := ProcessBatch(context.Background(), deps)
+	if err != nil {
+		t.Fatalf("ProcessBatch: %v", err)
+	}
+	if succeeded != 3 {
+		t.Errorf("succeeded = %d, want 3", succeeded)
+	}
+	if failed != 1 {
+		t.Errorf("failed = %d, want 1", failed)
+	}
+	if throttled {
+		t.Error("throttled = true, want false")
+	}
+	var dead bool
+	if err := database.Pool.QueryRow(context.Background(),
+		`select dead from embeddings where kind = 'issue' and id = 'POIS-4'`,
+	).Scan(&dead); err != nil {
+		t.Fatalf("read POIS-4: %v", err)
+	}
+	if !dead {
+		t.Error("POIS-4 dead = false, want true - 3 healthy siblings proved the service works before this row's own failure, so this confirmed failure should cross the dead-letter threshold")
+	}
+}
+
+// TestProcessBatchActuallyCallsRenewalAndReservesTokens is the first of Rev's two named test
+// gaps: no test proved renewal.renew or reserveBackgroundTokens were actually wired into the
+// embed path, as opposed to merely existing and passing their own isolated unit tests - deleting
+// either call site left the full suite green. This test shrinks renewClaimInterval to make a
+// renewal observable in milliseconds, forces real wall-clock time to pass between two embed
+// calls (an artificial sleep in the fake embedder, standing in for real network latency), and has
+// the second call read the database directly to prove a renewal already ran before it - the one
+// signal that survives retryRows' own final overwrite of next_attempt_at at the end of the call,
+// which would otherwise hide an intermediate renewal from a check made after ProcessBatch
+// returns. The token budget is checked the ordinary way: it must be measurably drawn down.
+type wiringCheckEmbedder struct {
+	t          *testing.T
+	database   *store.Store
+	ids        []string
+	before     time.Time
+	calls      int
+	sawRenewal bool
+}
+
+func (e *wiringCheckEmbedder) Embed(ctx context.Context, texts []string, _ embed.InputType) ([][]float32, error) {
+	e.calls++
+	if e.calls == 1 {
+		time.Sleep(30 * time.Millisecond)
+		return nil, errors.New("simulated: a non-throttled embed failure")
+	}
+	var minNext time.Time
+	if err := e.database.Pool.QueryRow(ctx,
+		`select min(next_attempt_at) from embeddings where kind = 'issue' and id = any($1::text[])`, e.ids,
+	).Scan(&minNext); err != nil {
+		e.t.Fatalf("read next_attempt_at mid-call: %v", err)
+	}
+	if minNext.After(e.before.Add(claimWindow - time.Second)) {
+		e.sawRenewal = true
+	}
+	vectors := make([][]float32, len(texts))
+	for i := range vectors {
+		vectors[i] = oneVector()
+	}
+	return vectors, nil
+}
+
+func TestProcessBatchActuallyCallsRenewalAndReservesTokens(t *testing.T) {
+	database := storetest.Open(t)
+	ids := []string{"WIRE-1", "WIRE-2"}
+	for i, id := range ids {
+		seedIssue(t, database, "WIRE", id, fmt.Sprintf("Title %d", i))
+	}
+	oldInterval := renewClaimInterval
+	renewClaimInterval = 10 * time.Millisecond
+	t.Cleanup(func() { renewClaimInterval = oldInterval })
+
+	var tokensBefore float64
+	if err := database.Pool.QueryRow(context.Background(),
+		`select tokens_available from embeddings_rate_limit`,
+	).Scan(&tokensBefore); err != nil {
+		t.Fatalf("read tokens_available before: %v", err)
+	}
+	embedder := &wiringCheckEmbedder{t: t, database: database, ids: ids, before: time.Now()}
+	deps := Deps{Store: database, Embedder: embedder}
+
+	if _, _, _, _, err := ProcessBatch(context.Background(), deps); err != nil {
+		t.Fatalf("ProcessBatch: %v", err)
+	}
+	if !embedder.sawRenewal {
+		t.Error("the second embed call never observed a prior renewal - renewal.renew does not appear to be wired into the embed path")
+	}
+	var tokensAfter float64
+	if err := database.Pool.QueryRow(context.Background(),
+		`select tokens_available from embeddings_rate_limit`,
+	).Scan(&tokensAfter); err != nil {
+		t.Fatalf("read tokens_available after: %v", err)
+	}
+	if tokensAfter >= tokensBefore {
+		t.Errorf("tokens_available = %v after ProcessBatch, want less than %v before it - reserveBackgroundTokens does not appear to be wired into the embed path", tokensAfter, tokensBefore)
+	}
+}
+
+// TestMergeBisectResultsCopiesIntoFreshSlicesNotTheSharedBackingArray is the second of Rev's two
+// named test gaps: reverting mergeBisectResults back to append(left.X, right.X...) left the
+// whole suite green, because no test manufactured the exact shape that corrupts - a result built
+// straight from a slice of the original rows (handleGroupFailure's own size-1 and
+// throttled/cancelled returns both are) that has spare capacity extending into a part of the
+// backing array neither side's result actually names. rows[:1] (left's slice here) always has
+// spare capacity through the rest of a larger backing array; appending onto it in place would
+// write into backing[1], which belongs to neither left's nor right's result (right's own slice is
+// backing[2:3]) - detectable only by reading the shared backing array again afterward, exactly
+// what claimRenewal.rows does for as long as a bisection runs.
+func TestMergeBisectResultsCopiesIntoFreshSlicesNotTheSharedBackingArray(t *testing.T) {
+	backing := make([]pendingRow, 4, 8)
+	for i := range backing {
+		backing[i] = pendingRow{kind: "issue", id: fmt.Sprintf("ALIAS-%d", i)}
+	}
+	left := bisectResult{permanent: backing[0:1]}
+	right := bisectResult{permanent: backing[2:3]}
+
+	merged := mergeBisectResults(left, right)
+
+	if got := backing[1].id; got != "ALIAS-1" {
+		t.Fatalf("backing[1].id = %q after merge, want unchanged %q - the merge wrote into memory that belongs to a row neither result named", got, "ALIAS-1")
+	}
+	gotIDs := make([]string, len(merged.permanent))
+	for i, row := range merged.permanent {
+		gotIDs[i] = row.id
+	}
+	wantIDs := []string{"ALIAS-0", "ALIAS-2"}
+	if len(gotIDs) != len(wantIDs) || gotIDs[0] != wantIDs[0] || gotIDs[1] != wantIDs[1] {
+		t.Errorf("merged.permanent ids = %v, want %v", gotIDs, wantIDs)
 	}
 }

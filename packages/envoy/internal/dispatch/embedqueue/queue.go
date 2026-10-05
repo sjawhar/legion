@@ -40,11 +40,6 @@ const (
 	// claimRenewal is what keeps that case's claim from lapsing mid-bisection; a crashed claimer's
 	// rows become eligible again once it passes unrenewed, not stuck forever.
 	claimWindow = 2 * time.Minute
-	// renewClaimInterval is how often a claimRenewal re-extends its claim on every row it still
-	// protects - between bisection's own embed attempts, and during a single reservation's wait
-	// longer than this - comfortably inside claimWindow so a renewal always lands before the
-	// claim it is refreshing could lapse.
-	renewClaimInterval = claimWindow / 2
 	// batchPause separates one embed call from the next when neither is throttled, in both Run's
 	// poller and Backfill's drain loop: pending rows arrive in bursts (a bulk import, a backfill's
 	// own enqueue pass), and nothing upstream paces how fast this package reads them back out and
@@ -65,6 +60,14 @@ const (
 	// production corpus (tens of thousands of chunks) in about an hour.
 	tokenRateCeiling = 200_000
 )
+
+// renewClaimInterval is how often a claimRenewal re-extends its claim on every row it still
+// protects - between bisection's own embed attempts, and during a single reservation's wait
+// longer than this - comfortably inside claimWindow so a renewal always lands before the claim
+// it is refreshing could lapse. A var, not a const alongside claimWindow above, so a test can
+// shrink it well below claimWindow's own 2 minutes and observe a renewal firing in milliseconds
+// rather than needing to wait out the real interval.
+var renewClaimInterval = claimWindow / 2
 
 // Deps are the durable state and embedding dependencies for the queue.
 type Deps struct {
@@ -147,7 +150,7 @@ func pauseFor(ctx context.Context, d time.Duration) bool {
 
 type pendingRow struct {
 	kind, id, text, contentHash string
-	attempts                    int
+	attempts, confirmedFailures int
 }
 
 // ProcessBatch embeds up to one embedder batch of pending rows and reports how many of them it
@@ -192,20 +195,25 @@ func ProcessBatch(ctx context.Context, deps Deps) (succeeded, failed int, blocke
 	if len(rows) == 0 {
 		return 0, 0, false, false, nil
 	}
+	if ctx.Err() != nil {
+		blocked = retryRows(ctx, deps, rows, false)
+		return 0, len(rows), blocked, false, nil
+	}
 	// renewal is created before this call's very first reservation, not only once bisection is
 	// known to be needed: a single reservation for a full batch of maximum-length documents can
 	// itself wait close to claimWindow (chunkForBudget's and reserveTokens' own doc comments), so
-	// a renewer must be in scope for every embed attempt this call makes.
+	// a renewer must be in scope for every embed attempt this call makes. provenUp starts false
+	// and is set true the instant any row in this call commits - checked, not set, by a group's
+	// own failure (see handleGroupFailure): it is the one piece of state shared across this
+	// call's whole recursion tree, in call order, not aggregated after the fact.
 	renewal := newClaimRenewal(deps, rows)
-	result := embedRows(ctx, deps, rows, renewal)
+	provenUp := new(bool)
+	result := embedRows(ctx, deps, rows, renewal, provenUp)
 	if result.err != nil {
 		return 0, 0, false, false, result.err
 	}
-	if result.succeeded == 0 && len(result.permanent) > 0 {
-		// Nothing in this batch ever proved the service works, so every row embedRows isolated
-		// as permanent is systemic, not content-specific - see embedRows' own doc comment.
-		result.retry = append(result.retry, result.permanent...)
-		result.permanent = nil
+	if len(result.permanentTentative) > 0 {
+		result.retry = append(result.retry, result.permanentTentative...)
 	}
 	if len(result.permanent) > 0 {
 		blocked = retryRows(ctx, deps, result.permanent, true)
@@ -217,31 +225,39 @@ func ProcessBatch(ctx context.Context, deps Deps) (succeeded, failed int, blocke
 }
 
 // bisectResult is embedRows' own report (and handleGroupFailure's, and bisectSplit's): every row
-// given to one of them ends up in exactly one of succeeded (committed), permanent (isolated as
-// the specific content a non-throttled failure attributes to - tentative until ProcessBatch
-// confirms some other row of the same original batch succeeded; see ProcessBatch's own doc
-// comment), or retry (not yet proven guilty - interrupted by a throttle or a cancellation, or
-// still batched with others pending further bisection that a database error cut short). err is a
-// genuine infrastructure failure (commitEmbeddings' own), never a reason to call any row
-// permanent.
+// given to one of them ends up in exactly one of succeeded (committed), permanent (confirmed:
+// isolated by a non-throttled failure that happened after some other row of the same original
+// batch had already committed, proof the service was up at the time this row's own attempt
+// failed), permanentTentative (isolated the same way, but with no such proof yet at that moment -
+// ProcessBatch treats it exactly like retry, never counting it toward dead-lettering: an outage
+// that fails every row identically, cleared later by a success elsewhere in the same call, must
+// never be mistaken for evidence against whichever row happened to fail first), or retry (not
+// proven guilty at all - interrupted by a throttle or a cancellation, or still batched with
+// others pending further bisection that a database error cut short). err is a genuine
+// infrastructure failure (commitEmbeddings' own), never a reason to call any row permanent.
 type bisectResult struct {
-	succeeded int
-	permanent []pendingRow
-	retry     []pendingRow
-	throttled bool
-	err       error
+	succeeded          int
+	permanent          []pendingRow
+	permanentTentative []pendingRow
+	retry              []pendingRow
+	throttled          bool
+	err                error
 }
 
 // embedRows embeds and commits rows group by group (chunkForBudget splits rows so no single
 // reservation ever exceeds tokenRateCeiling), committing each group's vectors to the database as
 // soon as that group's own Embed call succeeds: a later group's failure never re-embeds an
 // earlier group's already-committed rows, and a group that itself fails non-throttled is handed
-// to handleGroupFailure, which isolates it without ever re-embedding that exact group again. The
-// returned bisectResult accumulates every group's own outcome across the whole call. A genuine
-// infrastructure error (commitEmbeddings' own) stops the loop immediately and propagates as-is,
-// abandoning whatever groups were not yet attempted - ProcessBatch and bisectSplit both treat it
-// as a hard failure, never a reason to retry row by row.
-func embedRows(ctx context.Context, deps Deps, rows []pendingRow, renewal *claimRenewal) bisectResult {
+// to handleGroupFailure, which isolates it without ever re-embedding that exact group again.
+// provenUp is set true the moment any group here commits at least one row - checked by
+// handleGroupFailure at the instant a later group's own failure isolates a row, never revisited
+// afterward, so a success several groups later in this same call can never retroactively turn an
+// earlier, outage-era failure into evidence against that row's content. The returned bisectResult
+// accumulates every group's own outcome across the whole call. A genuine infrastructure error
+// (commitEmbeddings' own) stops the loop immediately and propagates as-is, abandoning whatever
+// groups were not yet attempted - ProcessBatch and bisectSplit both treat it as a hard failure,
+// never a reason to retry row by row.
+func embedRows(ctx context.Context, deps Deps, rows []pendingRow, renewal *claimRenewal, provenUp *bool) bisectResult {
 	var result bisectResult
 	for _, group := range chunkForBudget(rows) {
 		if ctx.Err() != nil {
@@ -256,12 +272,13 @@ func embedRows(ctx context.Context, deps Deps, rows []pendingRow, renewal *claim
 		reserveBackgroundTokens(ctx, deps, texts, renewal)
 		vectors, err := deps.Embedder.Embed(ctx, texts, embed.InputDocument)
 		if err != nil {
-			groupResult := handleGroupFailure(ctx, deps, group, err, renewal)
+			groupResult := handleGroupFailure(ctx, deps, group, err, renewal, provenUp)
 			if groupResult.err != nil {
 				return groupResult
 			}
 			result.succeeded += groupResult.succeeded
 			result.permanent = append(result.permanent, groupResult.permanent...)
+			result.permanentTentative = append(result.permanentTentative, groupResult.permanentTentative...)
 			result.retry = append(result.retry, groupResult.retry...)
 			result.throttled = result.throttled || groupResult.throttled
 			continue
@@ -269,6 +286,9 @@ func embedRows(ctx context.Context, deps Deps, rows []pendingRow, renewal *claim
 		committed, permanent, cErr := commitEmbeddings(ctx, deps, group, vectors)
 		if cErr != nil {
 			return bisectResult{err: cErr}
+		}
+		if committed > 0 {
+			*provenUp = true
 		}
 		result.succeeded += committed
 		result.permanent = append(result.permanent, permanent...)
@@ -283,11 +303,13 @@ func embedRows(ctx context.Context, deps Deps, rows []pendingRow, renewal *claim
 // pacing between calls, returns ctx.Err() exactly this way), retries the whole group - neither is
 // evidence about any row's content, and isolating "which row triggered it" would be meaningless
 // (and would cost far more calls against a provider that has already said to slow down). A single
-// row is tentatively isolated as permanent, confirmed only once the caller sees some other row of
-// the same original batch actually succeed (this function alone cannot tell a content-specific
-// failure from an outage that fails every row identically). More than one row splits via
+// row is isolated as permanent only if *provenUp is already true at this exact instant - some
+// other row of the same original batch has already committed, proving the service was up when
+// this row's own attempt failed - and as permanentTentative otherwise (an outage still in
+// progress is indistinguishable, from here alone, from this one row's content being the problem;
+// ProcessBatch treats permanentTentative exactly like retry). More than one row splits via
 // bisectSplit, which re-embeds only the two halves, never the group that already failed.
-func handleGroupFailure(ctx context.Context, deps Deps, group []pendingRow, err error, renewal *claimRenewal) bisectResult {
+func handleGroupFailure(ctx context.Context, deps Deps, group []pendingRow, err error, renewal *claimRenewal, provenUp *bool) bisectResult {
 	if embed.IsThrottled(err) {
 		return bisectResult{retry: group, throttled: true}
 	}
@@ -295,11 +317,16 @@ func handleGroupFailure(ctx context.Context, deps Deps, group []pendingRow, err 
 		return bisectResult{retry: group}
 	}
 	if len(group) == 1 {
-		slog.Error("dispatch embedqueue: bisection isolated the row a non-throttled batch failure attributes to, pending confirmation some other row of the batch embedded",
+		if *provenUp {
+			slog.Error("dispatch embedqueue: bisection isolated the row a non-throttled batch failure attributes to, confirmed by an earlier success in the same batch",
+				"kind", group[0].kind, "id", group[0].id, "error", err)
+			return bisectResult{permanent: group}
+		}
+		slog.Error("dispatch embedqueue: bisection isolated a row failing non-throttled with no proof yet the service is up - treating it as systemic for now, not this row's fault",
 			"kind", group[0].kind, "id", group[0].id, "error", err)
-		return bisectResult{permanent: group}
+		return bisectResult{permanentTentative: group}
 	}
-	return bisectSplit(ctx, deps, group, renewal)
+	return bisectSplit(ctx, deps, group, renewal, provenUp)
 }
 
 // bisectSplit isolates which row(s) in rows actually broke a non-throttled embed failure
@@ -307,33 +334,46 @@ func handleGroupFailure(ctx context.Context, deps Deps, group []pendingRow, err 
 // half and embed each half independently via embedRows, recursively - a half that embeds cleanly
 // commits; a half that still fails non-throttled and holds more than one row is split again by
 // embedRows calling handleGroupFailure calling this function again; a half that fails down to one
-// row is isolated by handleGroupFailure's own size check. The merge copies left's and right's
-// permanent/retry rows into freshly allocated slices rather than appending onto one of them in
-// place: rows[:mid] and rows[mid:] share rows' own backing array, so a bisectResult built
-// straight from one of those slices (handleGroupFailure's size-1 and throttled/cancelled returns
-// both are) still aliases it, and appending onto one with spare capacity - exactly what
-// rows[:mid] has when mid < len(rows) - would silently overwrite the other half's rows.
-func bisectSplit(ctx context.Context, deps Deps, rows []pendingRow, renewal *claimRenewal) bisectResult {
+// row is isolated by handleGroupFailure's own size check and provenUp read. left is always
+// attempted before right, so a success in left can confirm a later failure in right, but a
+// success in right (reached only after left has already returned) never reaches back to change
+// how left's own failures were already classified - provenUp is a one-way latch, never unset.
+func bisectSplit(ctx context.Context, deps Deps, rows []pendingRow, renewal *claimRenewal, provenUp *bool) bisectResult {
 	mid := len(rows) / 2
-	left := embedRows(ctx, deps, rows[:mid], renewal)
+	left := embedRows(ctx, deps, rows[:mid], renewal, provenUp)
 	if left.err != nil {
 		return left
 	}
-	right := embedRows(ctx, deps, rows[mid:], renewal)
+	right := embedRows(ctx, deps, rows[mid:], renewal, provenUp)
 	if right.err != nil {
 		return right
 	}
+	return mergeBisectResults(left, right)
+}
+
+// mergeBisectResults combines left's and right's reports into one, copying each into freshly
+// allocated slices rather than appending onto one of them in place: rows[:mid] and rows[mid:]
+// share rows' own backing array, so a bisectResult built straight from one of those slices
+// (handleGroupFailure's size-1 and throttled/cancelled returns both are) still aliases it, and
+// appending onto one with spare capacity - exactly what rows[:mid] has when mid < len(rows) -
+// would silently overwrite whatever row happens to sit at the index append writes to next, which
+// is never guaranteed to be one of the rows actually being merged.
+func mergeBisectResults(left, right bisectResult) bisectResult {
 	permanent := make([]pendingRow, 0, len(left.permanent)+len(right.permanent))
 	permanent = append(permanent, left.permanent...)
 	permanent = append(permanent, right.permanent...)
+	tentative := make([]pendingRow, 0, len(left.permanentTentative)+len(right.permanentTentative))
+	tentative = append(tentative, left.permanentTentative...)
+	tentative = append(tentative, right.permanentTentative...)
 	toRetry := make([]pendingRow, 0, len(left.retry)+len(right.retry))
 	toRetry = append(toRetry, left.retry...)
 	toRetry = append(toRetry, right.retry...)
 	return bisectResult{
-		succeeded: left.succeeded + right.succeeded,
-		permanent: permanent,
-		retry:     toRetry,
-		throttled: left.throttled || right.throttled,
+		succeeded:          left.succeeded + right.succeeded,
+		permanent:          permanent,
+		permanentTentative: tentative,
+		retry:              toRetry,
+		throttled:          left.throttled || right.throttled,
 	}
 }
 
@@ -389,14 +429,19 @@ func (c *claimRenewal) renew(ctx context.Context) {
 	c.last = time.Now()
 	kinds := make([]string, len(c.rows))
 	ids := make([]string, len(c.rows))
+	hashes := make([]string, len(c.rows))
 	for i, row := range c.rows {
-		kinds[i], ids[i] = row.kind, row.id
+		kinds[i], ids[i], hashes[i] = row.kind, row.id, row.contentHash
 	}
+	// content_hash-matched, exactly as commitEmbeddings and retryRows both are: a row a
+	// concurrent write already changed is no longer this claim's to protect, and touching it
+	// anyway would delay that write's own, fresher embeddings_enqueue up to claimWindow for no
+	// reason - the row's new content_hash makes it eligible again immediately otherwise.
 	if _, err := c.deps.Store.Pool.Exec(ctx, `
-		update embeddings e set next_attempt_at = now() + $3
-		from unnest($1::text[], $2::text[]) as v(kind, id)
-		where e.kind = v.kind and e.id = v.id
-	`, kinds, ids, claimWindow); err != nil {
+		update embeddings e set next_attempt_at = now() + $4
+		from unnest($1::text[], $2::text[], $3::text[]) as v(kind, id, content_hash)
+		where e.kind = v.kind and e.id = v.id and e.content_hash = v.content_hash
+	`, kinds, ids, hashes, claimWindow); err != nil {
 		slog.Error("dispatch embedqueue: bisection claim renewal failed", "error", err)
 	}
 }
@@ -522,7 +567,7 @@ func scanPending(ctx context.Context, deps Deps) ([]pendingRow, error) {
 			limit $1
 			for update skip locked
 		)
-		returning kind, id, text_snapshot, content_hash, attempt_count
+		returning kind, id, text_snapshot, content_hash, attempt_count, confirmed_failures
 	`, batchSize, claimWindow)
 	if err != nil {
 		return nil, fmt.Errorf("scan pending embeddings: %w", err)
@@ -531,7 +576,7 @@ func scanPending(ctx context.Context, deps Deps) ([]pendingRow, error) {
 	var pending []pendingRow
 	for rows.Next() {
 		var row pendingRow
-		if err := rows.Scan(&row.kind, &row.id, &row.text, &row.contentHash, &row.attempts); err != nil {
+		if err := rows.Scan(&row.kind, &row.id, &row.text, &row.contentHash, &row.attempts, &row.confirmedFailures); err != nil {
 			return nil, fmt.Errorf("scan pending embeddings: %w", err)
 		}
 		pending = append(pending, row)
@@ -578,7 +623,7 @@ func commitEmbeddings(ctx context.Context, deps Deps, rows []pendingRow, vectors
 	queryRows, err := deps.Store.Pool.Query(ctx, `
 		update embeddings e
 		set embedding = v.embedding::vector, embedded_hash = e.content_hash, model = $5,
-		    embedded_at = now(), attempt_count = 0, next_attempt_at = now()
+		    embedded_at = now(), attempt_count = 0, confirmed_failures = 0, next_attempt_at = now()
 		from unnest($1::text[], $2::text[], $3::text[], $4::text[]) as v(kind, id, content_hash, embedding)
 		where e.kind = v.kind and e.id = v.id and e.content_hash = v.content_hash
 		returning e.kind
@@ -604,40 +649,54 @@ func commitEmbeddings(ctx context.Context, deps Deps, rows []pendingRow, vectors
 }
 
 // retryRows schedules every row in rows for another attempt in one bulk statement (unnest), or -
-// only when permanent is true - marks a row dead once its own attempts reach
-// retry.DeadLetterAttempts. permanent distinguishes a row's own content failing
-// (commitEmbeddings' non-finite-vector case) from a whole-batch embed failure (infrastructure,
-// never evidence about any specific row) - the latter is retried indefinitely, however many times
-// it recurs. A dead row is still visible (`select * from embeddings where dead`) and still
-// recoverable: a future write to the same content (embeddings_enqueue clears dead the moment
-// content_hash changes) or a manual `update embeddings set dead = false, attempt_count = 0`
-// re-admits it to the next scan. It reports whether the batch is blocked, exactly as outbox's own
-// scheduleRetry does.
+// only when permanent is true - marks a row dead once its own confirmed failures reach
+// retry.DeadLetterAttempts. permanent distinguishes a row's own content failing (confirmed: a
+// commitEmbeddings non-finite-vector row, or a bisection row handleGroupFailure confirmed via
+// provenUp) from everything else a batch failure can mean - a whole-batch infrastructure failure,
+// a throttle, a cancellation, or a bisection row isolated with no proof yet the service is up
+// (permanentTentative) - none of which is ever evidence about a specific row's content.
+// attempt_count advances on every call regardless, exactly as it always has (it paces
+// next_attempt_at's own backoff and is the general "how many times has this been tried" count);
+// confirmed_failures - a separate column, never conflated with attempt_count - advances only
+// when permanent is true, so however many outage-era or throttled cycles a row passes through,
+// none of them can push it toward dead on their own; only a cycle that genuinely confirms this
+// row's own content is at fault ever can. A dead row is still visible
+// (`select * from embeddings where dead`) and still recoverable: a future write to the same
+// content (embeddings_enqueue clears both counters and dead the moment content_hash changes) or a
+// manual `update embeddings set dead = false, confirmed_failures = 0` re-admits it to the next
+// scan. It reports whether the batch is blocked, exactly as outbox's own scheduleRetry does.
 func retryRows(ctx context.Context, deps Deps, rows []pendingRow, permanent bool) bool {
 	kinds := make([]string, len(rows))
 	ids := make([]string, len(rows))
 	hashes := make([]string, len(rows))
 	attempts := make([]int32, len(rows))
+	confirmedFailures := make([]int32, len(rows))
 	nextAttempts := make([]time.Time, len(rows))
 	deads := make([]bool, len(rows))
 	for i, row := range rows {
 		n := row.attempts + 1
-		dead := permanent && n >= retry.DeadLetterAttempts
+		confirmed := row.confirmedFailures
+		if permanent {
+			confirmed++
+		}
+		dead := permanent && confirmed >= retry.DeadLetterAttempts
 		if dead {
-			slog.Error("dispatch embedqueue: row reached the dead-letter threshold, no further automatic retry", "kind", row.kind, "id", row.id, "attempts", n)
+			slog.Error("dispatch embedqueue: row reached the dead-letter threshold, no further automatic retry", "kind", row.kind, "id", row.id, "confirmedFailures", confirmed)
 		}
 		kinds[i], ids[i], hashes[i] = row.kind, row.id, row.contentHash
 		attempts[i] = int32(n)
+		confirmedFailures[i] = int32(confirmed)
 		nextAttempts[i] = time.Now().Add(retry.Delay(n))
 		deads[i] = dead
 	}
 	_, err := deps.Store.Pool.Exec(ctx, `
 		update embeddings e
-		set attempt_count = v.attempts, next_attempt_at = v.next_attempt_at, dead = v.dead
-		from unnest($1::text[], $2::text[], $3::text[], $4::int[], $5::timestamptz[], $6::bool[])
-		  as v(kind, id, content_hash, attempts, next_attempt_at, dead)
+		set attempt_count = v.attempts, confirmed_failures = v.confirmed_failures,
+		    next_attempt_at = v.next_attempt_at, dead = v.dead
+		from unnest($1::text[], $2::text[], $3::text[], $4::int[], $5::int[], $6::timestamptz[], $7::bool[])
+		  as v(kind, id, content_hash, attempts, confirmed_failures, next_attempt_at, dead)
 		where e.kind = v.kind and e.id = v.id and e.content_hash = v.content_hash
-	`, kinds, ids, hashes, attempts, nextAttempts, deads)
+	`, kinds, ids, hashes, attempts, confirmedFailures, nextAttempts, deads)
 	if err != nil {
 		slog.Error("dispatch embedqueue: schedule retry", "rows", len(rows), "error", err)
 		return true
@@ -816,13 +875,18 @@ func Backfill(ctx context.Context, deps Deps, out io.Writer) (BackfillReport, er
 // (preprocess_minmax_aggregates) over the embeddings_pending index - which a single statement
 // naming both aggregates together loses, since that rewrite only fires when every aggregate in
 // one query's target list is a bare MIN/MAX.
+// pendingStatusQuery is pendingStatus's own SQL, a package-level const so
+// TestPendingStatusMinQueryUsesTheIndexOnlyMinMaxRewrite can EXPLAIN the exact statement this
+// function runs, not a hand-copied stand-in that could drift from it.
+const pendingStatusQuery = `
+	select
+	  (select count(*) from embeddings where embedded_hash is distinct from content_hash and not dead),
+	  (select min(next_attempt_at) from embeddings where embedded_hash is distinct from content_hash and not dead)
+`
+
 func pendingStatus(ctx context.Context, deps Deps) (count int64, nextDue time.Time, hasPending bool, err error) {
 	var nextDuePtr *time.Time
-	if err := deps.Store.Pool.QueryRow(ctx, `
-		select
-		  (select count(*) from embeddings where embedded_hash is distinct from content_hash and not dead),
-		  (select min(next_attempt_at) from embeddings where embedded_hash is distinct from content_hash and not dead)
-	`).Scan(&count, &nextDuePtr); err != nil {
+	if err := deps.Store.Pool.QueryRow(ctx, pendingStatusQuery).Scan(&count, &nextDuePtr); err != nil {
 		return 0, time.Time{}, false, err
 	}
 	if count == 0 {

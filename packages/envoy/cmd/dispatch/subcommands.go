@@ -286,7 +286,7 @@ func backfillEmbeddings(ctx context.Context, databaseURL string, out io.Writer) 
 	fmt.Fprintf(out, "backfill-embeddings: done - enqueued=%v embedded=%d failed=%d dead=%d pending=%d\n",
 		report.Enqueued, report.Embedded, report.Failed, report.Dead, report.Pending)
 	if report.Dead > 0 {
-		fmt.Fprintf(out, "backfill-embeddings: %d row(s) dead-lettered after repeated permanent failures; a future write to the same content revives it, or reset manually: update embeddings set dead = false, attempt_count = 0 where dead\n", report.Dead)
+		fmt.Fprintf(out, "backfill-embeddings: %d row(s) dead-lettered after repeated permanent failures; a future write to the same content revives it, or reset manually: update embeddings set dead = false, confirmed_failures = 0 where dead\n", report.Dead)
 	}
 	if report.Pending > 0 {
 		fmt.Fprintf(out, "backfill-embeddings: %d row(s) still pending (interrupted before finishing); rerun to continue\n", report.Pending)
