@@ -871,7 +871,10 @@ test("a pending credential request alone is listed, counted, and keeps the empty
 // credential list's own poll (`CREDENTIAL_POLL_INTERVAL_MS`, `features/credentials/pending.ts`).
 // `page.clock` fast-forwards past that interval without disturbing the event stream: its watchdog
 // is 45 s (`WATCHDOG_MS`, `api/sse.ts`), well past the 15.5 s advanced here, so the stream never
-// reconnects and the poll is the only thing that could have surfaced the change.
+// reconnects and the poll is the only thing that could have surfaced the change. This repeats the
+// test above's setup rather than sharing a helper: this file's own convention is self-contained
+// tests, and the two prove different mechanisms (an initial load via reload vs. a live poll that
+// both shows and clears a request with no reload at all).
 test("a credential request seeded after the Inbox loads appears, and counts, without a reload; clearing it leaves the same way", async ({
   browser,
 }) => {
