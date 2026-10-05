@@ -426,8 +426,13 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	// The room is still loading: ygo hands its document to no peer or caller until this hook
 	// returns (sjawhar/ygo v1.50.1-sami.2, provider/websocket/server.go:1753-1842: loadRoom closes
 	// the room's ready barrier after it), so nothing writes the tree while this walks it.
-	markdown, err := renderDocument(doc)
+	tree, err := treeOf(doc)
+	var markdown string
+	if err == nil {
+		markdown, err = documentMarkdown(tree)
+	}
 	var contentMarkdown *string
+	var askBlocks map[string]struct{}
 	switch {
 	case errors.Is(err, ErrDocOutsideSchema):
 		slog.Warn("dispatch: loaded document outside Proof schema; a replacement from markdown repairs it", "room", room, "error", err)
@@ -435,10 +440,18 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 		return err
 	default:
 		contentMarkdown = &markdown
+		askBlocks = askBlockIDs(tree)
 	}
 	state := s.room(room)
 	state.mu.Lock()
 	state.closed = !open
+	// The ask blocks the room loaded with are the baseline its update observer tells new ones by.
+	// They were not introduced by any update the observer sees, so none gains an author here.
+	if askBlocks == nil {
+		state.askBlocks = nil
+	} else {
+		state.observeAskBlocks(askBlocks, nil)
+	}
 	// The document owes a settlement no settlement committed: one a shutdown's budget cut short,
 	// or one a room failure dropped (failRoomLocked). Its timer lived in the process or the room
 	// that is gone, so this load settles once rather than waiting for an edit to arm one - unless
@@ -461,25 +474,69 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 			s.recordSuppressedCommit(repair.slot, update)
 			return
 		}
-		contentChanged := replica.observe(room, doc)
+		if s.beforeObserveUpdate != nil {
+			s.beforeObserveUpdate(room)
+		}
+		contentChanged := replica.observe(room, doc, func(tree *pmdoc.Node) {
+			s.observeAskBlocksForUpdate(room, tree)
+		})
 		s.recordUpdateClass(room, update, contentChanged, true)
 		if contentChanged {
 			s.creditContentChange(room, origin)
+			if s.afterCreditUpdate != nil {
+				s.afterCreditUpdate(room)
+			}
 		}
 		s.scheduleSettle(room)
 	})
 	return nil
 }
 
-// creditContentChange credits an observed content change to its authors. A service mutation
-// (origin registered by serviceTransact) is its actor's alone, who joins `pending` and
-// becomes `lastActor`; a browser that was only connected while it happened is not credited. A
-// committed transaction's live write, which Ledger.Commit applies, was credited when the
-// transaction committed and is not credited again. Any other update is a browser edit by one of
-// the peers, which ygo applies while that peer's connection is registered. ygo does not say which
-// connection sent it, so every connected peer joins `pending`: when exactly one is connected it is
-// the latest edit source and replaces `lastActor`, and otherwise the edit cannot be pinned on a
-// single peer and no older actor may stand in for it.
+// soleConnectedActor is the one actor connected to a room, and whether more than one distinct
+// actor is: an update made while exactly one of them is connected can be pinned on that actor; one
+// made while several are cannot be pinned on any single one of them.
+func soleConnectedActor(connected map[uint64]model.Actor) (sole *model.Actor, ambiguous bool) {
+	for _, actor := range connected {
+		if sole == nil {
+			sole = new(actor)
+		} else if actorKey(actor) != actorKey(*sole) {
+			ambiguous = true
+		}
+	}
+	if ambiguous {
+		sole = nil
+	}
+	return sole, ambiguous
+}
+
+// observeAskBlocksForUpdate records the ask blocks an update left in room's document and
+// attributes each one not already recorded (observeAskBlocks), in the same critical section the
+// update observer renders tree in (renderedReplica.observe): the observer renders each update in
+// the order the replica took them, so the room's record of its ask blocks moves forward only. The
+// tree walk that lists those ask blocks runs only once the cheap markdown comparison inside
+// observe already showed a real change, so the no-op path, the common one, pays for neither.
+func (s *Service) observeAskBlocksForUpdate(room string, tree *pmdoc.Node) {
+	askBlocks := askBlockIDs(tree)
+	state := s.room(room)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	var author *model.Actor
+	if sole, ambiguous := soleConnectedActor(state.connected); ambiguous {
+		author = new(SettlementActor)
+	} else {
+		author = sole
+	}
+	state.observeAskBlocks(askBlocks, author)
+}
+
+// creditContentChange credits an observed content change to its authors. A service repair (origin
+// registered by serviceTransact) is credited to no one; a browser that was only connected while it
+// happened is not credited either. A committed transaction's live write, which Ledger.Commit
+// applies, was credited when the transaction committed and is not credited again. Any other update
+// is a browser edit by one of the peers, which ygo applies while that peer's connection is
+// registered. ygo does not say which connection sent it, so every connected peer joins `pending`:
+// when exactly one is connected it is the latest edit source and replaces `lastActor`, and
+// otherwise the edit cannot be pinned on a single peer and no older actor may stand in for it.
 func (s *Service) creditContentChange(room string, origin any) {
 	if _, published := origin.(*liveWriteOrigin); published {
 		return
@@ -490,20 +547,10 @@ func (s *Service) creditContentChange(room string, origin any) {
 	state := s.room(room)
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	var sole *model.Actor
-	ambiguous := false
 	for _, actor := range state.connected {
-		key := actorKey(actor)
-		state.pending[key] = actor
-		if sole == nil {
-			sole = new(actor)
-		} else if key != actorKey(*sole) {
-			ambiguous = true
-		}
+		state.creditAuthor(actor)
 	}
-	if ambiguous {
-		sole = nil
-	}
+	sole, _ := soleConnectedActor(state.connected)
 	state.lastActor = sole
 }
 

@@ -500,6 +500,53 @@
   edit that reached the room's persistence just ahead of a settlement's repair is no longer dropped
   in the repair's place when the settlement discards the repair because the issue closed or the
   server began stopping.
+- A document version no longer drops the credit of an edit it does not hold (LEGION-503). A
+  version's commit released its authors by key, so an author already pending when the version
+  took its authors who edited again before it committed lost the second edit's credit too, and the
+  version holding that edit credited nobody for it: a settlement's commit did so when the edit
+  landed while its update observer was between crediting and arming its settlement, and a named
+  version's or snapshot's commit whenever the edit landed while the transaction held the writer
+  slot. A named version or snapshot over a transaction's own write also took its authors after it
+  read its tree, so an edit made in between was credited on that version, which lacked it, and on
+  no other. An edit a version's tree held before its update observer had credited it (ygo runs the
+  observer once the edit's transaction has released the document, and observers wait for each
+  other's renders) was credited on no version: the edit's own settlement found the document
+  versioned, wrote none, and released the author. Each pending author now carries the change it
+  credits, every version takes its authors no later than it reads the tree it records, a version's
+  commit releases only entries credited through that take, and a settlement that writes no
+  version releases nothing, so the next version credits such an author. That includes an author
+  whose edits came to nothing, typed and undone before a settlement. An upload that changes the
+  document clears every credit pending at its write's room read, whether its replacement removed
+  that edit or kept it, and its version credits its uploader alone; an edit credited after that
+  read stays pending for the next version, and an upload that changes nothing clears nothing. A new
+  ask is attributed to whoever introduced its block: a service edit's, an upload's or a committed
+  transaction's own before/after trees name the ids it adds, staged on the write and registered
+  into the room's bookkeeping only once the write commits, never before - discarding the
+  transaction, or refusing the write for any other reason, leaves no trace, so a later, separately
+  committed write of the same author-chosen literal id is never outranked by one that never reached
+  the room. Registration happens before the update can reach any observer, rather than
+  whichever update's observer happens to render a merged catch-up first; an id no write registered
+  this way is a browser's, named for the one browser connected when its update arrived, or the
+  document-settlement actor when several were. A settlement's or the block-id backfill's own id
+  repair, and an edit's repair of an existing, unrelated block, each carry forward the author
+  recorded for the id a rename replaces, unless it is a copy of the block that keeps that id - on a
+  write joined to a transaction too, where the write's own generic before/after diff would
+  otherwise count the renamed id as newly added and claim it for the write's own actor instead. A
+  copy's previous id stays live in the room's own bookkeeping, since another block still carries
+  it; any other rename's does not, closing a window where a later block reusing that literal id
+  could be mistaken for the one just retired. A rename whose own update's observer had not yet
+  recorded an author is named after the settlement's own actor instead. Before, a settlement named
+  its own actor - the latest editor, or the first pending author - so a browser edit elsewhere
+  could take an agent's ask, and a block that arrived while the settlement ran could take the name
+  of an earlier editor; later, two updates landing while one's own observer renders a catch-up that
+  includes both still let whichever ran first claim both blocks; later still, a discarded write's
+  registration could outrank a later write's legitimate one, and a conditional edit's own repair
+  of a copied or unrecorded rename could still be claimed by the write's own actor instead of
+  falling through correctly. A block whose update the observer has not rendered yet waits for the
+  settlement that observer arms; a block the room held when it loaded is still named as the
+  settlement's other events are. Approval moves name the actor whose edit moved the version, even
+  when it credits several authors, so a stale pending author does not make a human's move appear as
+  the document settlement or suppress its notification.
 - A GitHub App response over 1 MiB now fails whole instead of returning a truncated body. The
   dashboard proxy answers `502 GITHUB_UPSTREAM` and names the 1 MiB limit.
 - Saving a document, comment, ask, or message with a long run of underscore-joined characters
