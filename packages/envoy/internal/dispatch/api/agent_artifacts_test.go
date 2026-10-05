@@ -2,6 +2,8 @@ package api
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -23,7 +25,7 @@ const agentSession = "01a1058e-f14f-7684-87eb-3dc885955551"
 // cache header, and cited from a message as any artifact is.
 func TestAnAgentsConversationOwnsTheFilesUploadedToIt(t *testing.T) {
 	handler, _, _ := newTestServer(t, testServerOptions{files: filestest.NewMemory()})
-	image := bytes.Repeat([]byte{0x89, 'P', 'N', 'G'}, 1024)
+	image := pngBytes(strings.Repeat("pixels", 1024))
 	base := "/api/v1/agents/" + agentSession + "/artifacts"
 
 	response := multipartRequest(t, handler, base, map[string]string{"name": "shot.png"}, "shot.png", "image/png", image, "alice")
@@ -59,7 +61,7 @@ func TestAnAgentsConversationOwnsTheFilesUploadedToIt(t *testing.T) {
 	}
 
 	// The same name again is the next version, as on an issue; another name is another artifact.
-	if again := multipartRequest(t, handler, base, map[string]string{"name": "shot.png"}, "shot.png", "image/png", []byte("second"), "alice"); again.Code != http.StatusCreated {
+	if again := multipartRequest(t, handler, base, map[string]string{"name": "shot.png"}, "shot.png", "image/png", pngBytes("second"), "alice"); again.Code != http.StatusCreated {
 		t.Fatalf("second version: status=%d body=%s", again.Code, again.Body.String())
 	}
 	if other := multipartRequest(t, handler, base, map[string]string{"name": "notes.txt"}, "notes.txt", "text/plain", []byte("plain"), "alice"); other.Code != http.StatusCreated {
@@ -176,6 +178,87 @@ func TestConcurrentUploadsOfOneNameToAnAgentsConversationBecomeItsVersions(t *te
 	if len(artifacts) != 1 || !slices.Equal(numbers, []int{1, 2, 3, 4, 5, 6}) {
 		t.Fatalf("concurrent uploads made artifacts %v with versions %v, want one artifact with versions 1-6", artifacts, numbers)
 	}
+}
+
+// The two lookups every upload to an agent's conversation makes under the conversation's lock -
+// its artifact by name, and whether a slug is taken - read the partial index artifacts_session_id
+// (0071), never a scan of every owner's artifacts. The handler's own SQL is explained with
+// sequential scans off, since a table this small is cheapest to scan whatever its indexes: the
+// assertion is that the index can serve the query. Each is explained twice, as the custom plan a
+// statement's first runs get and as the generic plan Postgres may cache for it afterwards, which
+// knows no session id and must still prove the index's `session_id is not null` from the query.
+func TestAnAgentsArtifactLookupsReadTheSessionIndex(t *testing.T) {
+	handler, database, _ := newTestServer(t, testServerOptions{files: filestest.NewMemory()})
+	if response := multipartRequest(t, handler, "/api/v1/agents/"+agentSession+"/artifacts", map[string]string{"name": "shot.png"}, "shot.png", "image/png", pngBytes("pixels"), "alice"); response.Code != http.StatusCreated {
+		t.Fatalf("upload: status=%d body=%s", response.Code, response.Body.String())
+	}
+	ctx := context.Background()
+	tx, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin explain transaction: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, "set local enable_seqscan = off"); err != nil {
+		t.Fatalf("disable sequential scans: %v", err)
+	}
+	explain := func(query string, args ...any) json.RawMessage {
+		t.Helper()
+		var planJSON []byte
+		if err := tx.QueryRow(ctx, "explain (format json) "+query, args...).Scan(&planJSON); err != nil {
+			t.Fatalf("explain %s: %v", query, err)
+		}
+		var plans []struct {
+			Plan json.RawMessage `json:"Plan"`
+		}
+		if err := json.Unmarshal(planJSON, &plans); err != nil || len(plans) != 1 {
+			t.Fatalf("explain output %s: %v, want one plan", planJSON, err)
+		}
+		return plans[0].Plan
+	}
+
+	for _, lookup := range []struct{ statement, query, second string }{
+		{"agent_artifact_by_name", agentArtifactByNameSQL, "shot.png"},
+		{"agent_artifact_slug_taken", agentArtifactSlugTakenSQL, "shot-png"},
+	} {
+		if custom := explain(lookup.query, agentSession, lookup.second); !planReadsIndex(t, custom, "artifacts_session_id") {
+			t.Errorf("%s's custom plan reads no artifacts_session_id:\n%s", lookup.statement, custom)
+		}
+		if _, err := tx.Exec(ctx, "prepare "+lookup.statement+" (text, text) as "+lookup.query); err != nil {
+			t.Fatalf("prepare %s: %v", lookup.statement, err)
+		}
+		if _, err := tx.Exec(ctx, "set local plan_cache_mode = force_generic_plan"); err != nil {
+			t.Fatalf("force generic plans: %v", err)
+		}
+		generic := explain("execute " + lookup.statement + "('" + agentSession + "', '" + lookup.second + "')")
+		if !planReadsIndex(t, generic, "artifacts_session_id") {
+			t.Errorf("%s's generic plan reads no artifacts_session_id:\n%s", lookup.statement, generic)
+		}
+		if _, err := tx.Exec(ctx, "set local plan_cache_mode = auto"); err != nil {
+			t.Fatalf("restore plan cache mode: %v", err)
+		}
+	}
+}
+
+// planReadsIndex reports whether an EXPLAIN (FORMAT JSON) plan node, or any node under it, reads
+// the named index.
+func planReadsIndex(t *testing.T, planJSON json.RawMessage, index string) bool {
+	t.Helper()
+	var node struct {
+		IndexName string            `json:"Index Name"`
+		Plans     []json.RawMessage `json:"Plans"`
+	}
+	if err := json.Unmarshal(planJSON, &node); err != nil {
+		t.Fatalf("decode plan node: %v", err)
+	}
+	if node.IndexName == index {
+		return true
+	}
+	for _, child := range node.Plans {
+		if planReadsIndex(t, child, index) {
+			return true
+		}
+	}
+	return false
 }
 
 // An agent's conversation holds files and images: a document is refused with the reason, before

@@ -4,7 +4,7 @@
 
 ### Added
 
-- An agent's conversation owns the files and images sent in it, a third artifact owner beside an issue and a project: `POST /api/v1/agents/{session_id}/artifacts` takes a multipart upload with an issue upload's caps, errors and file-store write, `GET` lists them newest first, and `.../artifacts/{slug}` and `.../artifacts/{slug}/versions/{n}` read one and its bytes. Such an artifact carries `session_id` (null on every other artifact), `ref_key` `agent/<session_id>/<slug>`, and is addressed `dispatch://agent/<session_id>/artifact/<slug>[@vN]`, which the reference graph indexes inside a picture's `![name](…)` as anywhere else, as it does the dashboard page `/agents/<session_id>/artifacts/<slug>[?v=N]`. It holds files and images only: a markdown document is `400 ARTIFACT_INPUT`, its file takes no comment, ask or subscriber (`400 ARTIFACT_AGENT_OWNED`), its upload appends no event, and a session id holding `/`, `?`, `#`, whitespace or a control character is `400 INVALID_SESSION_ID`. Every file or image version is now served with `Cache-Control: private, max-age=31536000, immutable`, since its bytes never change; a document version is not. Migration `0069` adds the column and the one-owner check and turns `ref_key` into a trigger-filled column without rewriting the table; its census answers `0` (LEGION-541).
+- An agent's conversation owns the files and images sent in it, a third artifact owner beside an issue and a project: `POST /api/v1/agents/{session_id}/artifacts` takes a multipart upload with an issue upload's caps, errors and file-store write, and `.../artifacts/{slug}` and `.../artifacts/{slug}/versions/{n}` read one and its bytes; there is no list route. Such an artifact carries `session_id` (null on every other artifact), `ref_key` `agent/<session_id>/<slug>`, and is addressed `dispatch://agent/<session_id>/artifact/<slug>[@vN]`, which the reference graph indexes inside a picture's `![name](…)` as anywhere else, as it does the dashboard page `/agents/<session_id>/artifacts/<slug>[?v=N]`. It holds files and images only: a markdown document is `400 ARTIFACT_INPUT`, its file takes no comment, ask or subscriber (`400 ARTIFACT_AGENT_OWNED`), its upload appends no event, and a session id holding `/`, `?`, `#`, whitespace or a control character is `400 INVALID_SESSION_ID`. Every file or image version is now served with `Cache-Control: private, max-age=31536000, immutable`, since its bytes never change; a document version is not. Migration `0071` adds the column, the one-owner check and the partial index `artifacts_session_id`, which the upload's lookups of a conversation's artifact by name and by slug read, and turns `ref_key` into a trigger-filled column without rewriting the table; its census answers `0` (LEGION-541).
 - `POST /api/v1/issues`, `POST /api/v1/issues/{key}/asks` and `POST /api/v1/artifacts/{id}/asks`
   now return `advice.suggestions`: the three fused search hits (sjawhar/legion#1764) most like
   what was just filed, and, for an ask, any already-answered ask that settles the same question,
@@ -103,6 +103,15 @@
 
 ### Changed
 
+- An upload's kind is read from its bytes, never from the type its client declares: it is an
+  `image` only when `http.DetectContentType` reads its bytes as a PNG, JPEG, GIF or WebP, the
+  pictures a model is shown, and its `mime` is then the type its bytes are, whatever was declared
+  (a JPEG declared `image/png` is stored and served as `image/jpeg`; a PNG declared
+  `application/octet-stream` is an image). Any other upload but a `text/markdown` document is a
+  `file` under its declared type, an SVG among them, so a client can no longer store arbitrary
+  bytes as an image. This holds for an issue's, a project's and an agent's conversation's uploads
+  alike. Stored artifacts keep their kind, so a new version of an `image` whose bytes are no
+  picture is `400 ARTIFACT_KIND_MISMATCH` (LEGION-541).
 - A new upload's slug keeps only the ASCII letters and digits of its lowercased name, each other
   run one dash (`café.png` is `caf-png`, `スクリーンショット.png` is `png`, a name with neither is
   `artifact`), for an issue's, a project's and an agent's conversation's uploads alike: every

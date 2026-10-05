@@ -62,7 +62,8 @@ type artifactUploadInput struct {
 
 // artifactTarget is the owner an upload or a slug lookup names: an issue (IssueKey), a project
 // (Project alone), or an agent's conversation (Session alone), which holds files and images only.
-// Exactly one of the three is set; refPrefix and storeArtifact read Session first, then IssueKey.
+// Exactly one of the three is set; every reader tests Session first, then IssueKey, and
+// agent_artifacts.go holds what a conversation does differently.
 type artifactTarget struct {
 	IssueKey *string
 	Project  string
@@ -72,7 +73,7 @@ type artifactTarget struct {
 // refPrefix is what the target's artifacts' ref_key holds before `/<slug>`.
 func (target artifactTarget) refPrefix() string {
 	if target.Session != "" {
-		return "agent/" + target.Session
+		return agentOwnerKey(target.Session)
 	}
 	if target.IssueKey != nil {
 		return *target.IssueKey
@@ -136,7 +137,7 @@ func (s *server) uploadArtifactFor(w http.ResponseWriter, r *http.Request, targe
 		writeError(w, "INVALID_ARTIFACT", http.StatusBadRequest, "invalid artifact content type")
 		return
 	}
-	kind := artifactKind(mediaType)
+	kind, storedType := artifactKind(mediaType, input.contentType, input.content)
 	if kind == "doc" && target.Session != "" {
 		writeError(w, "ARTIFACT_INPUT", http.StatusBadRequest, agentOwnsFilesOnly)
 		return
@@ -159,6 +160,7 @@ func (s *server) uploadArtifactFor(w http.ResponseWriter, r *http.Request, targe
 			return
 		}
 	}
+	input.contentType = storedType
 	s.storeArtifact(w, r, input, actor, kind, target)
 }
 
@@ -329,11 +331,9 @@ func (s *server) storeArtifact(
 	var project, session *string
 	switch {
 	case target.Session != "":
-		// An agent's conversation has no row to lock, so its uploads take their slugs and version
-		// numbers one after another under this lock instead, as an issue's do under the issue's row.
 		session = &target.Session
-		if _, err := tx.Exec(r.Context(), `select pg_advisory_xact_lock(hashtext('agent-artifacts:' || $1))`, target.Session); err != nil {
-			s.writeHandlerError(w, fmt.Errorf("lock the agent's artifacts: %w", err))
+		if err := lockAgentArtifacts(r.Context(), tx, target.Session); err != nil {
+			s.writeHandlerError(w, err)
 			return
 		}
 	case target.IssueKey != nil:
@@ -497,11 +497,8 @@ func (s *server) storeArtifact(
 		artifact.Versions = []model.Version{version}
 		payload = artifactCreatedEventPayload(artifact, documentChanges)
 	}
-	// An agent's conversation owns no event: the event log, the outbox's topics and the event
-	// stream each address an issue, a document or a project, so a session's upload appends none,
-	// and the message that carries the file is the conversation's record of it.
 	published := movedEvents
-	if target.Session == "" {
+	if target.ownsEvents() {
 		event, err := s.appendEvent(r.Context(), tx, ownerForArtifact(artifact).event(eventType, actor, payload))
 		if err != nil {
 			s.writeHandlerError(w, err)
@@ -1046,11 +1043,7 @@ func parseArtifactID(id string) (string, error) {
 
 func (s *server) loadArtifactForRequest(ctx context.Context, q queryer, r *http.Request) (model.Artifact, error) {
 	if r.PathValue("session_id") != "" {
-		session, err := requestSessionID(r)
-		if err != nil {
-			return model.Artifact{}, err
-		}
-		return s.loadArtifactByDocumentReference(ctx, q, artifactTarget{Session: session}, r.PathValue("slug"))
+		return s.loadAgentArtifact(ctx, q, r)
 	}
 	if key := r.PathValue("key"); key != "" {
 		target := artifactTarget{Project: key}
@@ -1064,12 +1057,11 @@ func (s *server) loadArtifactForRequest(ctx context.Context, q queryer, r *http.
 
 const documentHintLimit = 8
 
-// loadArtifactByDocumentReference reads the target's artifact at slug reference, or the one
-// document whose filename it is. An agent's conversation holds no document, so its artifacts are
-// read by slug alone.
+// loadArtifactByDocumentReference reads an issue's or a project's artifact at slug reference, or
+// the one document whose filename it is.
 func (s *server) loadArtifactByDocumentReference(ctx context.Context, q queryer, target artifactTarget, reference string) (model.Artifact, error) {
 	artifact, err := s.loadArtifactByRefKey(ctx, q, target.refPrefix()+"/"+reference)
-	if err == nil || !isArtifactNotFound(err) || target.Session != "" {
+	if err == nil || !isArtifactNotFound(err) {
 		return artifact, err
 	}
 	documents, listErr := s.loadDocumentReferences(ctx, q, target)
@@ -1223,14 +1215,23 @@ func scanArtifact(row pgx.Row) (model.Artifact, error) {
 }
 
 // artifactOwnerKey is the owner part of ref_key (artifactTarget.refPrefix), which the 0071
-// trigger fills ref_key from, so a lookup by owner compares what ref_key was built from.
+// trigger fills ref_key from, so a lookup by owner compares what ref_key was built from. Its
+// session arm, 'agent/' || session_id, has a second reader: an agent's conversation's lookups
+// (agentArtifactByNameSQL, agentArtifactSlugTakenSQL in agent_artifacts.go) compare session_id
+// itself, so a change to ref_key's owner part changes both.
 const artifactOwnerKey = `coalesce(issue_key, project_key, 'agent/' || session_id)`
 
+// artifactByNameSQL and artifactSlugTakenSQL are an upload's two lookups by owner, $1 the owner
+// key and $2 the name or the slug; an agent's conversation runs its own pair
+// (artifactTarget.ownerLookup).
+const (
+	artifactByNameSQL    = `select ` + artifactColumns + ` from artifacts where ` + artifactOwnerKey + ` = $1 and name = $2`
+	artifactSlugTakenSQL = `select exists(select 1 from artifacts where ` + artifactOwnerKey + ` = $1 and slug = $2)`
+)
+
 func (s *server) findArtifactByName(ctx context.Context, q queryer, target artifactTarget, name string) (model.Artifact, error) {
-	artifact, err := scanArtifact(q.QueryRow(ctx, `
-		select `+artifactColumns+`
-		from artifacts where `+artifactOwnerKey+` = $1 and name = $2
-	`, target.refPrefix(), name))
+	query, owner := target.ownerLookup(artifactByNameSQL, agentArtifactByNameSQL)
+	artifact, err := scanArtifact(q.QueryRow(ctx, query, owner, name))
 	if err != nil {
 		return model.Artifact{}, err
 	}
@@ -1284,14 +1285,21 @@ func (s *server) loadVersion(ctx context.Context, q queryer, artifactID string, 
 	return version, nil
 }
 
-func artifactKind(contentType string) string {
-	if contentType == "text/markdown" {
-		return "doc"
+// artifactKind is what an upload is stored as - doc, image or file - and the type a file or an
+// image is stored and served under. A declared text/markdown is a document. Any other upload is an
+// image when, and only when, its bytes are one of the pictures a model is shown (PNG, JPEG, GIF,
+// WebP), read from the bytes rather than the declared type, which a client sets at will; an image
+// is stored under the type its bytes are. Anything else, an SVG for one, is a file under the
+// declared type, so no client stores other bytes as an image.
+func artifactKind(mediaType, declared string, content []byte) (kind, storedType string) {
+	if mediaType == "text/markdown" {
+		return "doc", declared
 	}
-	if strings.HasPrefix(contentType, "image/") {
-		return "image"
+	switch sniffed := http.DetectContentType(content); sniffed {
+	case "image/png", "image/jpeg", "image/gif", "image/webp":
+		return "image", sniffed
 	}
-	return "file"
+	return "file", declared
 }
 
 func artifactSlug(name string) string {
@@ -1322,13 +1330,14 @@ func artifactSlug(name string) string {
 
 func (s *server) nextArtifactSlug(ctx context.Context, q queryer, target artifactTarget, name string) (string, error) {
 	base := artifactSlug(name)
+	query, owner := target.ownerLookup(artifactSlugTakenSQL, agentArtifactSlugTakenSQL)
 	for suffix := 1; ; suffix++ {
 		candidate := base
 		if suffix > 1 {
 			candidate = fmt.Sprintf("%s-%d", base, suffix)
 		}
 		var inUse bool
-		if err := q.QueryRow(ctx, `select exists(select 1 from artifacts where `+artifactOwnerKey+` = $1 and slug = $2)`, target.refPrefix(), candidate).Scan(&inUse); err != nil {
+		if err := q.QueryRow(ctx, query, owner, candidate).Scan(&inUse); err != nil {
 			return "", err
 		}
 		if !inUse {

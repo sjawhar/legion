@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/textproto"
+	"strings"
 	"sync"
 	"testing"
 
@@ -61,7 +62,7 @@ func TestUploadsGoToTheFileStoreAndAreServedFromIt(t *testing.T) {
 	memory := filestest.NewMemory()
 	handler, database, _ := newTestServer(t, testServerOptions{files: memory})
 	issue := fileIssue(t, handler)
-	image := bytes.Repeat([]byte{0x89, 'P', 'N', 'G'}, 4096)
+	image := pngBytes(strings.Repeat("pixels", 4096))
 	sha := files.SHA256(image)
 
 	first := multipartRequest(t, handler, "/api/v1/issues/"+issue+"/artifacts", map[string]string{"name": "shot.png"}, "shot.png", "image/png", image, "alice")

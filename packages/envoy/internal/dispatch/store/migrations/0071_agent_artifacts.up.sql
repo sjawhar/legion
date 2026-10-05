@@ -18,7 +18,8 @@
 -- session_id is null in every existing row and project_key is set in every one, so the check
 -- refuses none (the census); adding it reads artifacts, metadata rows that hold no file's bytes,
 -- under the ACCESS EXCLUSIVE lock the new column takes for milliseconds anyway. The partial index
--- is an agent's artifact list, newest first, and holds no existing row. It locks artifacts alone.
+-- serves the two lookups an upload to an agent's conversation makes by session_id - its artifact
+-- by name, and whether a slug is taken - and holds no existing row. It locks artifacts alone.
 alter table artifacts add column session_id text;
 alter table artifacts alter column project_key drop not null;
 alter table artifacts alter column ref_key drop expression;
