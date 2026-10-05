@@ -202,10 +202,7 @@ type PullRequest struct {
 	// nullable `mergeable` field: MergeabilityUnknown while GitHub is still computing it (never a
 	// transient conflict - GitHub reports no checks run on a mergeability GitHub has not computed
 	// yet, either), MergeabilityMergeable once GitHub can merge the head automatically, and
-	// MergeabilityConflicting once it cannot. "" means the read has never run. The base branch
-	// itself is not kept here: the one reader that names it, the checks-red withdrawal reason
-	// (workflow's mergeability), reads it off the same intake.PullRequestMergeability fact that
-	// set this field, never a stored copy.
+	// MergeabilityConflicting once it cannot. "" means the read has never run.
 	Mergeability Mergeability
 }
 

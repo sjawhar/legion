@@ -61,21 +61,18 @@ func (e *Engine) requiredChecks(ctx context.Context, tx pgx.Tx, fact intake.Requ
 }
 
 // mergeability records what GitHub's last read found for whether the pull request's head can be
-// merged into its base (intake.PullRequestMergeability), read alongside RequiredChecks on the same
-// GitHub answer, and decides what it moves on every read, not only a changed one: a conflict the
-// poll records before the issue reaches awaiting_merge (in testing, reviewing, retro or merging,
-// where nothing moves yet) would otherwise never be acted on, since the merger's READY check posts
-// a conflicting head whose required checks all succeeded - GitHub runs no checks on a conflicting
-// head to fail - so the stored CONFLICTING would equal every later read and decide nothing. In
-// awaiting_merge, a head that has started conflicting with its base
-// (classify.ConflictWithdrawsReady) is withdrawn exactly as a red CI verdict is (decideChecks's
-// AwaitingMerge case): GitHub computes no merge ref for a conflicting head, so it runs no checks on
-// it at all, and no CI settlement or required-checks read would ever tell the daemon the READY
-// cannot be merged. Outside awaiting_merge the read is recorded and nothing moves: no round is open
-// to decide a conflict the way RedSendsBack decides a red, and the tester or implementer already
-// at work will see the conflict on GitHub when its own pass runs or it pushes. The transition
-// itself leaves awaiting_merge, so a repeated CONFLICTING read after the first withdrawal decides
-// nothing further.
+// merged into its base (intake.PullRequestMergeability, pullRequestMergeability's own GitHub
+// answer). In awaiting_merge it withdraws a conflicting head the way decideChecks's AwaitingMerge
+// case withdraws a red one (classify.ConflictWithdrawsReady, the same TriggerChecksRed
+// transition), since GitHub computes no merge ref for a conflicting head and no CI result will
+// ever arrive for it. It decides on every read, not only a changed one: a conflict recorded
+// before the issue reaches awaiting_merge - in testing, reviewing, retro or merging, where
+// nothing moves yet, since the merger's READY check posts a conflicting head whose required
+// checks all succeeded - must still withdraw the READY once the issue gets there. Outside
+// awaiting_merge the read is recorded and nothing moves: no round is open to decide a conflict
+// the way RedSendsBack decides a red, and the tester or implementer already at work will see it
+// on its own pass or push. Leaving awaiting_merge is what stops a repeated CONFLICTING read from
+// withdrawing twice.
 func (e *Engine) mergeability(ctx context.Context, tx pgx.Tx, fact intake.PullRequestMergeability) (intake.Result, error) {
 	pr, err := e.pullRequest(ctx, tx, fact.Repo, fact.Number)
 	if err != nil || pr == nil {

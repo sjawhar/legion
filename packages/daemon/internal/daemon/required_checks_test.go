@@ -403,22 +403,33 @@ func TestARerunThatEndsRedBetweenTwoPassesIsToldAgain(t *testing.T) {
 // in awaiting_merge the daemon sends the tree back to implementing exactly as a red CI verdict
 // does, naming the base to merge forward, since GitHub computes no merge ref for a conflicting
 // head and runs no checks on it at all. A read that finds `mergeable` still null - GitHub has not
-// computed it yet - or true moves nothing.
+// computed it yet - or true moves nothing. The pass must apply the fact and decide even when the
+// read only confirms what is already stored: a conflict can be recorded while the issue is still
+// in testing, reviewing, retro or merging, where nothing moves yet, and the first read after the
+// issue reaches awaiting_merge has to catch it then, with no change in the GitHub answer to key
+// off.
 func TestTheRequiredChecksPassCatchesAHeadThatStartsConflictingWithItsBase(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
 		state        string
+		stored       record.Mergeability
 		mergeability record.Mergeability
 		want         phase.Phase
 	}{
-		{"conflicting", "false", record.MergeabilityConflicting, phase.Implementing},
-		{"not yet computed", "null", record.MergeabilityUnknown, phase.AwaitingMerge},
-		{"mergeable", "true", record.MergeabilityMergeable, phase.AwaitingMerge},
+		{"conflicting", "false", "", record.MergeabilityConflicting, phase.Implementing},
+		{"not yet computed", "null", "", record.MergeabilityUnknown, phase.AwaitingMerge},
+		{"mergeable", "true", "", record.MergeabilityMergeable, phase.AwaitingMerge},
+		{"conflict already recorded", "false", record.MergeabilityConflicting, record.MergeabilityConflicting, phase.Implementing},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := isolatedOutboxPool(t)
 			seedCapture(t, pool, phase.AwaitingMerge, "retro",
 				record.PhaseRow{Issue: "CAPTURE-1", Role: claim.RoleMerger, Claim: "merge-claim", HandoffCommit: "code", Summary: "READY #86 at code"})
+			if tc.stored != "" {
+				if _, err := pool.Exec(context.Background(), "update pull_requests set mergeability = $1 where issue = 'CAPTURE-1'", string(tc.stored)); err != nil {
+					t.Fatalf("seed the stored mergeability: %v", err)
+				}
+			}
 			w := requiredRuntime(pool, mergeableStandIn(t, tc.state).URL, quietLogger())
 			w.readRequiredChecks(context.Background())
 			got, pr := capturePhase(t, pool)
