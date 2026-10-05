@@ -170,6 +170,20 @@ and request approval again as this section says. Later waves, re-scoping open ch
 same Acceptance, and integration-failure children need no spec edit and no new approval, and a
 child issue's spec is never gated: the root approval covers the tree.
 
+**A decision block for a read no pod can make.** An acceptance criterion sometimes needs
+evidence from a production or external system before a human can approve it: a measurement, a
+current count, a stored record. Check first whether the evidence is already reachable through a
+credential this tree's own pods carry — the model route every pod already has, and any further
+identity the operator's deployment configuration grants pods (read the pod's own environment,
+for example `AWS_CONFIG_FILE` or `AGENT_SECRETS_URL`, rather than assuming there is none; a
+credential can exist without any skill having told you so). When the evidence genuinely is not
+reachable, do not have a different running session perform the read on this tree's behalf and
+fold the result into the spec as if it were routine: write the missing capability as its own
+decision block — which external system, which read or write, why the spec needs it — addressed
+to the human, in the same spirit as the implementer reports a production-check gap (section 6) and leave it
+open until the human resolves it. A workaround substituted for that record only hides the gap
+from the next tree that hits it.
+
 ## 2. Children in flight
 
 Release only the next useful wave. A release is an explicit lifecycle write:
@@ -327,7 +341,7 @@ active phase worker.
 | A reply on an ask you follow | Interpret the reply in the issue's design context. Answer in its thread (`dispatch_comment` with `reply_to`; under an open ask whose next move is yours, such as the approval request you must revise or hand back, `reply_to_ask` with `turn: "agent"`, since a default-turn reply hands that request back to the human and a corrected `summary` is then refused), then adjust the plan or relay it via `envoy_publish` to the responsible worker's role token; scope and product decisions remain with you. |
 | `worker-died` | Its `role` and `phase`. That role's claim failed: its launches or prompts ran out. For a phase worker the daemon holds the issue (phase `held`) and starts nothing more on it. Reassess the work, then decide with `retry_or_escalate`: `retry` when the failure looks agent-specific or transient, `escalate` to hand the held issue to the controller when it looks environmental. |
 | `held` | Its `role` and `phase` (the phase the issue left), or `phase` with `reason: "escalated"`. Without `reason`, that phase's worker ran out of launches or prompts: the issue is held (phase `held`), the `worker-died` that comes with it is yours to answer with `retry_or_escalate` as that row says, and the controller hears of the hold too. With `reason: "escalated"`, it records your own `escalate`: the controller has the issue now, and you start nothing for it. |
-| `ready-refused` | Its `version` and `reason`. The merger's READY was refused. A `reason` of `READY refused: approve design version <N> before requesting READY.` (or, with `version` 0, `no design version is approved`) means the design gate is closed: get that version approved (section 1), and the daemon advances the merge and posts the packet the merger sent once it is; nothing else is needed. A `reason` starting `READY_PACKET_MISSING` names a READY refused before the daemon kept packets: that READY is void and the issue stays in merging, so start it over (`park_child` then `rerun_child`, for a child) or end it. |
+| `ready-refused` | Its `version` and `reason`. The merger's READY was refused, and its packet is kept with the completion so no second READY is ever needed. With `version` greater than 0, `reason` reads `READY refused: approve design version <N> before requesting READY.`: the root's spec is already registered at that version, so get it approved (section 1), and the daemon advances the merge and posts the kept packet the moment it is. With `version` 0, `reason` reads `READY refused: no design version is approved; register and approve the tree's spec before requesting READY.`: the root has no spec registered yet, so register it and get it approved (section 1) exactly as above; the daemon releases the kept packet the same way — at registration itself when that opens the gate (`gates.design: off`, or Dispatch already shows the version approved), otherwise the moment a human approves the version you registered. Either way, nothing else is needed once the gate opens. A `reason` starting `READY_PACKET_MISSING` names a READY refused before the daemon kept packets: that READY is void and the issue stays in merging, so start it over (`park_child` then `rerun_child`, for a child) or end it. |
 
 ## Escalation judgment
 

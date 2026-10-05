@@ -165,12 +165,15 @@ func TestARateLimitAnswerEndsTheRequiredChecksPass(t *testing.T) {
 		name    string
 		status  int
 		headers map[string]string
+		body    string
 		reads   int64
 	}{
-		{"429", http.StatusTooManyRequests, nil, 1},
-		{"403 out of rate limit", http.StatusForbidden, map[string]string{"X-RateLimit-Remaining": "0"}, 1},
-		{"403 with retry-after", http.StatusForbidden, map[string]string{"Retry-After": "60"}, 1},
-		{"403 that is not a rate limit", http.StatusForbidden, map[string]string{"X-RateLimit-Remaining": "4999"}, 2},
+		{"429", http.StatusTooManyRequests, nil, "", 1},
+		{"403 out of rate limit", http.StatusForbidden, map[string]string{"X-RateLimit-Remaining": "0"}, "", 1},
+		{"403 with retry-after", http.StatusForbidden, map[string]string{"Retry-After": "60"}, "", 1},
+		{"403 for a secondary rate limit named only by its message", http.StatusForbidden, map[string]string{"X-RateLimit-Remaining": "4321"},
+			`{"message":"You have exceeded a secondary rate limit. Please wait a few minutes before you try again."}`, 1},
+		{"403 that is not a rate limit", http.StatusForbidden, map[string]string{"X-RateLimit-Remaining": "4999"}, "", 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := isolatedOutboxPool(t)
@@ -192,7 +195,11 @@ func TestARateLimitAnswerEndsTheRequiredChecksPass(t *testing.T) {
 				for name, value := range tc.headers {
 					w.Header().Set(name, value)
 				}
-				http.Error(w, `{"message":"refused"}`, tc.status)
+				body := tc.body
+				if body == "" {
+					body = `{"message":"refused"}`
+				}
+				http.Error(w, body, tc.status)
 			}))
 			defer server.Close()
 			requiredRuntime(pool, server.URL, quietLogger()).readRequiredChecks(context.Background())

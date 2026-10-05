@@ -31,7 +31,9 @@ import type {
   MessageRead,
   OpenAsk,
   OpenAsksResponse,
+  Suggestions,
   WriteAdvice,
+  WriteSuggestion,
 } from "@legion/contracts";
 import {
   ASK_QUESTION_MAX,
@@ -259,6 +261,39 @@ function renderAdvice(
   }
 
   return lines;
+}
+
+// renderSuggestions turns LEGION-550's write-time feedback into lines dispatch_issue and
+// dispatch_ask append to their result: the related items first, then any past decision,
+// so the agent sees both without a second search. Nothing here ever changes whether the write
+// already succeeded; a missing search says why instead of listing anything.
+function renderSuggestions(suggestions: Suggestions | undefined, configUrl: string): string[] {
+  if (suggestions === undefined) return [];
+  if (suggestions.missing !== undefined) {
+    return [`Related-item search was skipped: ${suggestions.missing}.`];
+  }
+  const lines: string[] = [];
+  if (suggestions.related.length > 0) {
+    lines.push("Possibly related, found by search:");
+    for (const item of suggestions.related) {
+      lines.push(`- ${suggestionLabel(item)} → ${new URL(item.href, configUrl).toString()}`);
+    }
+  }
+  if (suggestions.decision !== undefined) {
+    const item = suggestions.decision;
+    const when = item.answered_at === undefined ? "" : ` on ${item.answered_at}`;
+    lines.push(
+      `A past decision may already answer this: ${suggestionLabel(item)}, answered by ${item.answered_by}${when} → ${new URL(item.href, configUrl).toString()}`
+    );
+  }
+  return lines;
+}
+
+function suggestionLabel(item: WriteSuggestion): string {
+  if (item.owner.kind === "issue") {
+    return `${item.owner.key} [${item.owner.status}] ${item.owner.title}`;
+  }
+  return `${item.owner.name} (${item.owner.project}/${item.owner.slug})`;
 }
 
 function documentResultDetails(artifact: Artifact): Record<string, unknown> {
@@ -2069,6 +2104,7 @@ export async function executeDispatchTool(
             isPrimarySpec: spec !== undefined,
           }),
           ...(componentGuidance === undefined ? [] : [componentGuidance]),
+          ...renderSuggestions(created.advice?.suggestions, configUrl),
         ];
         return {
           text: [
@@ -2446,7 +2482,10 @@ export async function executeDispatchTool(
           : resolved === undefined
             ? issueTopic(issue())
             : documentTopic(resolved.artifact);
-      const adviceLines = renderAdvice(input.tool, askOwner.label, ask.advice, {});
+      const adviceLines = [
+        ...renderAdvice(input.tool, askOwner.label, ask.advice, {}),
+        ...renderSuggestions(ask.advice?.suggestions, configUrl),
+      ];
       return {
         text: [
           `Asked ${ask.id} on ${askOwner.label} (urgency ${ask.urgency}): ${ask.question}\n${followsAsk(askOwner)}`,
