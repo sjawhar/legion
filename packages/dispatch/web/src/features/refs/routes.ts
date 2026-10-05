@@ -681,6 +681,11 @@ export function routeHasMargin(pathname: string, search = ""): boolean {
   );
 }
 
+/** Whether this route is the Inbox page itself, the one place a peek at it has nothing to add. */
+export function routeIsInbox(pathname: string): boolean {
+  return pathname === "/";
+}
+
 /** The live agent view's route pattern, shared by the router and `routeFillsViewport`. */
 export const AGENT_LIVE_PATH = "/agents/:sessionId/live";
 

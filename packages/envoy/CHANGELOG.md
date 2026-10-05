@@ -4,6 +4,21 @@
 
 ### Added
 
+- `POST /api/v1/issues`, `POST /api/v1/issues/{key}/asks` and `POST /api/v1/artifacts/{id}/asks`
+  now return `advice.suggestions`: the three fused search hits (sjawhar/legion#1764) most like
+  what was just filed, and, for an ask, any already-answered ask that settles the same question,
+  with who answered and when. Search runs after the write has already committed, scoped to the
+  write's own project and bounded by `writeSuggestionTimeout` (300ms), so a slow or down search
+  never holds up or refuses a write; `suggestions.missing` says why instead. Everything the
+  write's owner holds is left out (the new issue and its spec; the issue or project document an
+  ask sits on and everything inside it), and a hit on an issue that is `done` ranks below every
+  hit on an open owner, so an issue already closed as a duplicate never displaces the open issue
+  it was closed into. Every offered suggestion is recorded in a new `write_suggestions` table,
+  whose `outcome` the new `api.RunSuggestionOutcomeSweep` background loop (every
+  `SuggestionSweepInterval`, a minute) advances from `ignored` to `acted_on` (the suggested item
+  was cited from the source, or the suggested issue was updated directly) or `overridden` (the
+  source instead got further activity), so how often the suggestion was right can be counted
+  later (LEGION-550).
 - `DISPATCH_FILE_STORE_BUCKET` moves uploaded files (images, attachments; never a document's markdown) out of Postgres into an S3 bucket, under `files/sha256/<hash>`, one object however often a file is uploaded, through the AWS SDK's default credential chain (a configuration naming no region refuses the boot). An upload writes its object before its row and before it takes any lock or connection, within 30 seconds; the row keeps the file's name, type, size and hash and no bytes, and a store that refuses answers 502 `FILE_STORE_UNAVAILABLE` and writes no version. The version route serves a row still holding bytes from the row and any other from the bucket: it opens the object within 30 seconds, sends its headers and `Content-Length` only then, streams the body at the client's pace while checking it against the row's hash, and cuts a body that fails or hashes wrong mid-stream rather than ending it as if whole; a bucket that does not answer is 502, an object the bucket does not hold is 500 `FILE_MISSING`, and a cleared row on a server with the setting unset is 503. `/healthz` reports the bucket as `files` (null when unset, else whether a two-second `HeadBucket` answered, probed beside the database probe) and never fails on it, since one task's probe decides whether Dispatch is up at all. `envoy-dispatch backfill-files` moves the files uploaded before the bucket, oldest first and one row at a time, writing each object, reading it back against its hash and only then clearing the row; a row it cannot move is printed `FAILED version <id>` and passed over, the run exits 1 when any failed and can be run again at any time, the server serves each row until it is cleared, and a second run at once is refused by an advisory lock. `--verify-only` reads back every cleared row and exits 1 naming any whose object is missing or wrong; `--restore` is the rollback, writing every cleared row's bytes back from the bucket so a server without the setting, or an image from before it, serves every file from its row. Unset, every upload stays in Postgres as before. The store's tests run the real client against a loopback fake and against an S3-compatible server in a container (`internal/tests3`, SeaweedFS, since MinIO's image left Docker Hub) (LEGION-520).
 - `DISPATCH_ASSET_STORE_BUCKET` lets Dispatch serve a missing, content-hashed `/assets/*` file from the same key (`assets/<file>`) in a retained-assets bucket, so a tab left open across a deploy keeps loading its build's chunks. Dispatch reads the whole object, at most 8 MiB, within three seconds before it answers, keeps the immutable cache contract on a hit, and never serves a page or non-asset path from the bucket. An absent object is still a 404; any other store failure, a short body or an object over the limit included, is a 502 with no cache header, logged at ERROR with its key. At most 64 MiB of retained objects are held at once, since a client that stops reading keeps its object in memory: a request waits within its three seconds for room, so a stale tab's burst of chunks is served in turn, and one that cannot get room in time, or whose admitted fetch then runs out of that same bound before the bucket answers, is a 503 with `Cache-Control: no-store` and `Retry-After: 1`, logged at WARN with its key — the shared bound expiring is never presented as a store failure, since the store was only asked too late to answer in time — and a room refusal asks the bucket nothing. A client that disconnects while still queued for room logs no more than a debug line and gets no response. The task role needs `s3:GetObject` on `assets/*` and `s3:ListBucket` on the bucket, without which S3 answers a missing key with 403 and Dispatch with 502. Leaving the setting unset preserves local-only static serving.
 - `DISPATCH_AGENT_TOKEN` takes several values separated by whitespace, the first the current one, so the shared agent token can rotate with an overlap: the HTTP API and the document websocket accept every value, comparing a bearer with each in constant time. Startup refuses an empty entry (two whitespace characters in a row) or a repeated one, naming its position and never its value; one value behaves as before. A request that authenticates with a value after the first logs `dispatch: request authenticated with a previous shared agent token` at WARN, with the value's position, the rightmost `X-Forwarded-For` address (the connection's own without one), the User-Agent and the path, at most once per address and User-Agent every 10 minutes (LEGION-538).
@@ -485,6 +500,53 @@
   edit that reached the room's persistence just ahead of a settlement's repair is no longer dropped
   in the repair's place when the settlement discards the repair because the issue closed or the
   server began stopping.
+- A document version no longer drops the credit of an edit it does not hold (LEGION-503). A
+  version's commit released its authors by key, so an author already pending when the version
+  took its authors who edited again before it committed lost the second edit's credit too, and the
+  version holding that edit credited nobody for it: a settlement's commit did so when the edit
+  landed while its update observer was between crediting and arming its settlement, and a named
+  version's or snapshot's commit whenever the edit landed while the transaction held the writer
+  slot. A named version or snapshot over a transaction's own write also took its authors after it
+  read its tree, so an edit made in between was credited on that version, which lacked it, and on
+  no other. An edit a version's tree held before its update observer had credited it (ygo runs the
+  observer once the edit's transaction has released the document, and observers wait for each
+  other's renders) was credited on no version: the edit's own settlement found the document
+  versioned, wrote none, and released the author. Each pending author now carries the change it
+  credits, every version takes its authors no later than it reads the tree it records, a version's
+  commit releases only entries credited through that take, and a settlement that writes no
+  version releases nothing, so the next version credits such an author. That includes an author
+  whose edits came to nothing, typed and undone before a settlement. An upload that changes the
+  document clears every credit pending at its write's room read, whether its replacement removed
+  that edit or kept it, and its version credits its uploader alone; an edit credited after that
+  read stays pending for the next version, and an upload that changes nothing clears nothing. A new
+  ask is attributed to whoever introduced its block: a service edit's, an upload's or a committed
+  transaction's own before/after trees name the ids it adds, staged on the write and registered
+  into the room's bookkeeping only once the write commits, never before - discarding the
+  transaction, or refusing the write for any other reason, leaves no trace, so a later, separately
+  committed write of the same author-chosen literal id is never outranked by one that never reached
+  the room. Registration happens before the update can reach any observer, rather than
+  whichever update's observer happens to render a merged catch-up first; an id no write registered
+  this way is a browser's, named for the one browser connected when its update arrived, or the
+  document-settlement actor when several were. A settlement's or the block-id backfill's own id
+  repair, and an edit's repair of an existing, unrelated block, each carry forward the author
+  recorded for the id a rename replaces, unless it is a copy of the block that keeps that id - on a
+  write joined to a transaction too, where the write's own generic before/after diff would
+  otherwise count the renamed id as newly added and claim it for the write's own actor instead. A
+  copy's previous id stays live in the room's own bookkeeping, since another block still carries
+  it; any other rename's does not, closing a window where a later block reusing that literal id
+  could be mistaken for the one just retired. A rename whose own update's observer had not yet
+  recorded an author is named after the settlement's own actor instead. Before, a settlement named
+  its own actor - the latest editor, or the first pending author - so a browser edit elsewhere
+  could take an agent's ask, and a block that arrived while the settlement ran could take the name
+  of an earlier editor; later, two updates landing while one's own observer renders a catch-up that
+  includes both still let whichever ran first claim both blocks; later still, a discarded write's
+  registration could outrank a later write's legitimate one, and a conditional edit's own repair
+  of a copied or unrecorded rename could still be claimed by the write's own actor instead of
+  falling through correctly. A block whose update the observer has not rendered yet waits for the
+  settlement that observer arms; a block the room held when it loaded is still named as the
+  settlement's other events are. Approval moves name the actor whose edit moved the version, even
+  when it credits several authors, so a stale pending author does not make a human's move appear as
+  the document settlement or suppress its notification.
 - A GitHub App response over 1 MiB now fails whole instead of returning a truncated body. The
   dashboard proxy answers `502 GITHUB_UPSTREAM` and names the 1 MiB limit.
 - Saving a document, comment, ask, or message with a long run of underscore-joined characters

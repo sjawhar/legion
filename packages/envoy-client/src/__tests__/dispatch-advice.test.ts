@@ -551,4 +551,74 @@ describe("Dispatch write advice", () => {
     expect(result.details).toEqual(details);
     expect(result.details).not.toHaveProperty("advice");
   });
+
+  test("dispatch_issue renders related suggestions with status and a link", async () => {
+    const rawAdvice = advice({
+      suggestions: {
+        related: [
+          {
+            kind: "issue",
+            owner: { kind: "issue", key: "DSP-7", title: "Existing issue", status: "triage" },
+            id: "DSP-7",
+            snippet: "an existing issue",
+            href: "/issues/DSP-7",
+          },
+        ],
+      },
+    });
+    const result = await executeWrite(
+      "dispatch_issue",
+      { project: "DSP", title: "Created issue" },
+      rawAdvice
+    );
+
+    expect(result.text).toContain("Possibly related, found by search:");
+    expect(result.text).toContain(
+      "- DSP-7 [triage] Existing issue → http://dispatch.test/issues/DSP-7"
+    );
+    expect(result.details.advice).toEqual(rawAdvice);
+  });
+
+  test("dispatch_ask renders a past decision with who answered and when", async () => {
+    const rawAdvice = advice({
+      suggestions: {
+        related: [],
+        decision: {
+          kind: "ask",
+          owner: { kind: "issue", key: "DSP-9", title: "Transport choice", status: "done" },
+          id: "ask-old",
+          snippet: "Should we use REST or GraphQL?",
+          href: "/issues/DSP-9#ask-ask-old",
+          answered_by: "alice",
+          answered_at: "2026-09-12T13:20:00Z",
+        },
+      },
+    });
+    const result = await executeWrite(
+      "dispatch_ask",
+      { issue: "DSP-42", question: "Should the billing service use REST or GraphQL?" },
+      rawAdvice
+    );
+
+    expect(result.text).toContain(
+      "A past decision may already answer this: DSP-9 [done] Transport choice, answered by alice on 2026-09-12T13:20:00Z → http://dispatch.test/issues/DSP-9#ask-ask-old"
+    );
+    expect(result.details.advice).toEqual(rawAdvice);
+  });
+
+  test("dispatch_issue reports why suggestions are missing instead of blocking the write", async () => {
+    const rawAdvice = advice({
+      suggestions: { related: [], missing: "the search behind it did not answer within 300ms" },
+    });
+    const result = await executeWrite(
+      "dispatch_issue",
+      { project: "DSP", title: "Created issue" },
+      rawAdvice
+    );
+
+    expect(result.text).toContain(
+      "Related-item search was skipped: the search behind it did not answer within 300ms."
+    );
+    expect(result.details.advice).toEqual(rawAdvice);
+  });
 });
