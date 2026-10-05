@@ -9,7 +9,7 @@ import {
   primaryButtonHoverBg,
   textSecondaryOnSurface,
 } from "../../theme/classes";
-import * as MarkdownBody from "../refs/MarkdownBody";
+import * as markdownEngine from "../refs/markdown-engine";
 
 // The session's one reload for a chunk that failed to download. `web/index.html`'s inline script
 // spends the same key for an entry chunk that failed before any of this bundle ran, so a page
@@ -200,7 +200,7 @@ export function DeploymentResilience(): ReactNode {
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
-      void MarkdownBody.warmMarkdownRenderer().catch(() => undefined);
+      void markdownEngine.warmMarkdownRenderer().catch(() => undefined);
     }, 0);
     return () => window.clearTimeout(timer);
   }, []);

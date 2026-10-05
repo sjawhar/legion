@@ -68,7 +68,7 @@ import type {
   ReplyTarget,
 } from "./composer-model";
 import { MODE_LABELS } from "./delivery";
-import { ReplyQuote, replyQuoteText } from "./ReplyQuote";
+import { ReplyQuote } from "./ReplyQuote";
 import {
   DELIVERY_COMMANDS,
   type DeliveryPlan,
@@ -942,9 +942,12 @@ export function MentionComposer({
       )}
       {replyTo === null ? null : (
         <div className="flex items-center gap-1">
-          <ReplyQuote className="min-w-0 flex-1" to={replyTo.to}>
-            {replyQuoteText(replyTo.author, replyTo.excerpt)}
-          </ReplyQuote>
+          <ReplyQuote
+            author={replyTo.author}
+            className="min-w-0 flex-1"
+            excerpt={replyTo.excerpt}
+            to={replyTo.to}
+          />
           {/* The reply is part of the message's address, fixed once the send is out, so the
               composer's control fieldset holds it with every other draft control. */}
           <button

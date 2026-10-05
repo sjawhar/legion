@@ -18,7 +18,7 @@ related_issues:
   - "LEGION-62"
   - "sjawhar/legion#1088"
 symptoms:
-  - "a heading beside other controls is clamped to a few characters at one window width and shown in full a few pixels wider or narrower"
+  - "a heading beside other controls is squeezed to a sliver of its needed width at one window width and reads at full width a few pixels wider or narrower"
   - "the first click on any control after finishing an inline edit does nothing; the second click works"
   - "a `flex-wrap` row puts a long item beside its neighbours although the item is visibly wider than the space left"
   - "a Tailwind `grow` on one child halves the width of a sibling that used to take the whole remainder"
@@ -39,8 +39,8 @@ have after growing or shrinking. So:
 
 - `flex-1` (`flex: 1 1 0%`) with `min-w-[12rem]` tells the algorithm the item is **12rem wide**.
   Neighbours whose own widths fit beside 12rem join the line, the item then grows only into what
-  is left, and a title that needed 600px gets 70px and clamps. Main had this at 1279 (title 62px);
-  the PR reproduced it at 1260–1279 with a badge, one label, Route and Subscribers (70–104px).
+  is left, and a title that needed 600px gets 70px. Main had this at 1279 (title 62px); the PR
+  reproduced it at 1260–1279 with a badge, one label, Route and Subscribers (70–104px).
 - `flex-auto` (`flex: 1 1 auto`) makes the basis the item's content width, so neighbours join the
   line only when they fit beside the *whole* title. That is the right default for a heading that
   must never be squeezed by siblings.
@@ -49,10 +49,13 @@ have after growing or shrinking. So:
   half of what it had. `grow` was not needed for the sibling to scroll (see below); it was
   removed in round two.
 
-Recognise it: measure `getBoundingClientRect().width` of the heading and check
-`scrollHeight > clientHeight` (a `line-clamp` overflow) at a sweep of widths just below each
-breakpoint (1200–1279 here). The band where a shared row barely fits is where it shows; a single
-width such as 1024 can pass while 1265 fails. The regression lock in `e2e/issue.e2e.ts`
+Recognise it: measure `getBoundingClientRect().width` of the heading against the card's
+available content width (`clientWidth` minus its padding) at a sweep of widths just below each
+breakpoint (1200–1279 here); a squeeze shows as the heading's width dropping to a fraction of
+that content width instead of taking nearly all of it — the title itself never clamps (LEGION-559),
+so `scrollHeight > clientHeight` no longer signals anything here. The band where a shared row
+barely fits is where it shows; a single width such as 1024 can pass while 1265 fails. The
+regression lock in `e2e/issue.e2e.ts`
 ("gives the title the row's free space beside a short details line") sweeps 1024/1200/1279 with
 a bare issue and 1265/1279 with a busy details line, with and without the GitHub link — the
 link makes the line too wide to share a row, so the *no-link* case is the one that detects a

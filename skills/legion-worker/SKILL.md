@@ -397,9 +397,11 @@ pushes nothing.
 
 Do not report phase completion until the write, existence check, handoff commit, and push
 succeed. This is the committed copy the next phase reads after revival. No phase removes
-`.legion/`: the reviewer approves a head that carries it, and the operator removes it from the
-default branch after the merge. Retro and the post-merge production check write no
-`.legion/<phase>.json`, commit no handoff, and report with `handoff_complete` alone (below).
+`.legion/`: the reviewer approves a head that carries it. The daemon strips any `.legion/` still on
+main from the next issue's branch before any of its roles start (dispatch://LEGION-565), so that
+tree's own merge carries the removal onto the default branch; no operator sweep follows. Retro and
+the post-merge production check write no `.legion/<phase>.json`, commit no handoff, and report with
+`handoff_complete` alone (below).
 
 ## Completion: report to the architect, then stay
 

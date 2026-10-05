@@ -16,6 +16,7 @@ import {
 } from "./api";
 import { documentEditor, needsYouCards, openSpecAndAwaitHeadingIds } from "./editor";
 import { resetDatabase } from "./seed";
+import { assertWhole } from "./unclipped";
 import { asUser } from "./users";
 
 const session = {
@@ -414,25 +415,7 @@ test("an approval ask's Inbox card shows a question carrying a long summary whol
     await expect(question).toHaveText(requested.ask.question);
     // Whole means nothing between the question and its card clips it: no clamp, ellipsis or box
     // shorter or narrower than the text it holds.
-    const clipped = await question.evaluate((element) => {
-      const clips: string[] = [];
-      for (let node: Element | null = element; node !== null; node = node.parentElement) {
-        const style = getComputedStyle(node);
-        if (style.webkitLineClamp !== "none" || style.textOverflow === "ellipsis") {
-          clips.push(`${node.tagName}: line clamp ${style.webkitLineClamp}, ${style.textOverflow}`);
-        }
-        if (node.scrollHeight > node.clientHeight + 1 || node.scrollWidth > node.clientWidth + 1) {
-          clips.push(
-            `${node.tagName}: ${node.scrollWidth}x${node.scrollHeight} in ${node.clientWidth}x${node.clientHeight}`
-          );
-        }
-        if (node.tagName === "ARTICLE") {
-          break;
-        }
-      }
-      return clips;
-    });
-    expect(clipped).toEqual([]);
+    await assertWhole(question);
     await card.screenshot({ path: testInfo.outputPath("approval-long-question.png") });
   } finally {
     await alice.close();
