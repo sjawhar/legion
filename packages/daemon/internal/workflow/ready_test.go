@@ -246,17 +246,17 @@ func TestNoFactMovesAMemberOfALingeringTree(t *testing.T) {
 		{name: "a merge at awaiting_merge", at: phase.AwaitingMerge, want: phase.ProductionCheck,
 			fact: intake.PullRequestMerged{Repo: "sjawhar/legion", Number: 42, MergeSHA: "merge"}},
 		{name: "an approval of a green head", at: phase.Reviewing, pr: record.PullRequest{CheckedHead: "head", CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}},
-			fact: intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "approved", CommitID: "head", HeadSHA: "head"}},
+			fact: intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "approved", CommitID: "head", HeadSHA: "head", Author: testReviewApp}},
 		{name: "green checks on an approved head", at: phase.Reviewing, decision: &record.ReviewDecision{State: "approved", Head: "head"},
 			fact: intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: "head", CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, Snapshot: "green-1", Failing: []string{}}},
 		{name: "green checks on an approval the head does not carry", at: phase.Reviewing, decision: &record.ReviewDecision{State: "approved", Head: "older"},
 			fact: intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: "head", CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, Snapshot: "green-1", Failing: []string{}}},
 		{name: "the reviewer's comment on a round no review decided", at: phase.Reviewing, pr: record.PullRequest{CheckedHead: "head", CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}},
-			fact: intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "commented", CommitID: "head", HeadSHA: "head", Author: "legion-reviewer[bot]", Body: "a thought"}},
+			fact: intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "commented", CommitID: "head", HeadSHA: "head", Author: testReviewApp, Body: "a thought"}},
 		{name: "red checks at max_fix_attempts", at: phase.Testing, pr: record.PullRequest{FixAttempts: 3},
 			fact: intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: "head", CheckRuns: []record.AttemptRun{{Name: "ci", ID: 2}}, Generation: 1, Snapshot: "red-1", Failing: []string{"ci"}}},
 		{name: "changes requested at the round cap", at: phase.Reviewing,
-			fact: intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "changes_requested", CommitID: "head", HeadSHA: "head", Body: "fix it"}},
+			fact: intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "changes_requested", CommitID: "head", HeadSHA: "head", Author: testReviewApp, Body: "fix it"}},
 		{name: "the worker's backward move", at: phase.Testing, refusal: "TREE_LINGERING",
 			fact: intake.BackwardMove{Issue: "LEGION-209", Requester: claim.RoleTester, To: phase.Implementing, Reason: "the head changed"}},
 		{name: "the architect's retry of a held phase", at: phase.Held, hold: &hold,
@@ -287,9 +287,7 @@ func TestNoFactMovesAMemberOfALingeringTree(t *testing.T) {
 				row.Issue, row.Claim = "LEGION-209", claim.Token(string(row.Role)+"-claim")
 				seedPhase(t, pool, row)
 			}
-			engine := readyEngine("")
-			engine.cfg.ReviewAppLogin = "legion-reviewer[bot]"
-			apply := applyFacts(t, pool, engine)
+			apply := applyFacts(t, pool, readyEngine(""))
 
 			apply("close-root", intake.DispatchIssue{Key: "LEGION-208", Seq: 2, Type: "issue.closed", Status: "done", Title: "root", Rank: "U"})
 			result := apply("fact", tc.fact)
@@ -323,7 +321,7 @@ func refusalCode(result intake.Result) string {
 
 func readyEngine(mergeQueue string) *Engine {
 	return New(record.NewStore(), Config{
-		Project: "LEGION", DesignGate: config.DesignGateRootIssues, MergeQueueRole: mergeQueue, Linger: time.Hour,
+		Project: "LEGION", DesignGate: config.DesignGateRootIssues, MergeQueueRole: mergeQueue, Linger: time.Hour, ReviewAppLogin: testReviewApp,
 		Clock: func() time.Time { return time.Date(2026, 9, 25, 0, 0, 0, 0, time.UTC) },
 	}, nil)
 }

@@ -732,10 +732,8 @@ func parseList(list *ast.List, source []byte, footnotes map[int]string, depth in
 
 func parseListItem(item *ast.ListItem, source []byte, footnotes map[int]string, depth int) (*Node, error) {
 	attrs := Attrs{"label": "•", "listType": "bullet", "checked": nil, "spread": false}
-	if firstBlock := item.FirstChild(); firstBlock != nil {
-		if checkbox, ok := firstBlock.FirstChild().(*extensionast.TaskCheckBox); ok {
-			attrs["checked"] = checkbox.IsChecked
-		}
+	if checkbox := taskCheckbox(item); checkbox != nil {
+		attrs["checked"] = checkbox.IsChecked
 	}
 	children, err := parseBlocks(item, source, footnotes, depth)
 	if err != nil {

@@ -26,11 +26,14 @@ export default async function probeLegionPluginLoaded(pi) {
   }
   await resolve("LEGION_PROMPT_SKILLS", async () => {
     const { loadSkills } = await import("@oh-my-pi/pi-coding-agent/extensibility/skills");
+    const { cfgDisabledExtensions, cfgSkills } = await import(
+      "@oh-my-pi/pi-coding-agent/extensibility/settings"
+    );
     const { settings } = await import("@oh-my-pi/pi-coding-agent/config/settings");
     const options = {
-      ...settings.getGroup("skills"),
+      ...cfgSkills.get(settings),
       cwd,
-      disabledExtensions: settings.get("disabledExtensions") ?? [],
+      disabledExtensions: cfgDisabledExtensions.get(settings),
       extensionRoots: roots,
     };
     return (await loadSkills(options)).skills;
@@ -72,7 +75,8 @@ async function agentModels(agents, ctx) {
       "@oh-my-pi/pi-coding-agent/config/model-registry"
     );
     const { settings } = await import("@oh-my-pi/pi-coding-agent/config/settings");
-    const overrides = settings.get("task.agentModelOverrides") ?? {};
+    const { cfgTaskAgentModelOverrides } = await import("@oh-my-pi/pi-coding-agent/task/settings");
+    const overrides = cfgTaskAgentModelOverrides.get(settings);
     const parent = settings.getModelRole("default");
 
     // problem is why the task tool would not run an agent on the model it declares, or undefined.

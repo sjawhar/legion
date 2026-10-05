@@ -1171,14 +1171,40 @@ export interface SearchResult {
   readonly artifact?: SearchArtifactRef;
   readonly id: string;
   readonly snippet: string;
+  /** The hit's fused score: 1/(60 + its position in its kind's ranked list). */
   readonly rank: number;
   readonly href: string;
 }
 
-export interface SearchResponse {
+/** The four paging fields a Dispatch that supports search paging always answers together. */
+export interface SearchResultsPage {
+  /** Every match of every kind. */
+  readonly total: number;
+  /**
+   * How many of `total` the pages can return: each kind lists only its best `SEARCH_KIND_DEPTH`
+   * (`dispatch-tools.ts`), so an offset at or past this returns no results.
+   */
+  readonly reachable: number;
+  readonly limit: number;
+  readonly offset: number;
+}
+
+/** `SearchResultsPage` with every field retyped to `V`, always optional: the shape of "none of
+ * these fields" for a sentinel `V` (`undefined` for the wire type below, `never` for
+ * `fake-search-response.ts`'s stricter test-only override, which forbids supplying a concrete
+ * value without forbidding an explicit `undefined` — TypeScript widens every optional property to
+ * admit one regardless of its declared type unless the whole project turns on
+ * `exactOptionalPropertyTypes`). */
+export type SearchResultsPageAbsentAs<V> = { readonly [K in keyof SearchResultsPage]?: V };
+
+/** One page of `GET /api/v1/search`'s fused order, cut at `offset` and `limit`. `total`,
+ * `reachable`, `limit`, and `offset` answer together or not at all: a Dispatch that predates
+ * search paging omits all four and always answers its first page regardless of any offset
+ * requested; one that supports it always answers all four together (`SearchResultsPage`). */
+export type SearchResponse = {
   readonly results: SearchResult[];
   readonly took_ms: number;
-}
+} & (SearchResultsPage | SearchResultsPageAbsentAs<undefined>);
 
 export interface DuplicateCandidate {
   readonly key: string;
