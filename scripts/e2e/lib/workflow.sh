@@ -353,7 +353,12 @@ smoke_main_leftovers() {
 # checks ordinarily settle within seconds of the pull request's head existing, and a timeout names
 # the actual mergeStateStatus and every check that is not a completed success, not only that time
 # ran out. --match-head-commit holds the merge to the head this call last read, so a push between
-# the poll and the merge is refused by its own sha instead of silently merging a later one.
+# the poll and the merge is refused by its own sha instead of silently merging a later one. Each
+# gh call carries its own timeout (rig.sh's until_true house rule: a poll that never returns would
+# hold the wait past its bound), and a failed read counts as not yet clean rather than ending the
+# whole run through the caller's ERR trap — `read` on an empty or truncated process substitution
+# (a gh call that failed or was killed by its own timeout) itself returns non-zero, which `set -e`
+# does not exempt here, so the read is followed by its own `|| state=""`.
 merge_when_clean() {
   local repo_name=$1 pr=$2
   shift 2
@@ -361,7 +366,7 @@ merge_when_clean() {
   note "waiting up to 300s for $repo_name#$pr's merge state to read CLEAN under its ruleset"
   while ((SECONDS - started < 300)); do
     polls=$((polls + 1))
-    read -r state head_sha < <(gh -R "$repo_name" pr view "$pr" --json mergeStateStatus,headRefOid --jq '[.mergeStateStatus, .headRefOid] | @tsv')
+    read -r state head_sha < <(timeout 60 gh -R "$repo_name" pr view "$pr" --json mergeStateStatus,headRefOid --jq '[.mergeStateStatus, .headRefOid] | @tsv') || state=""
     [ "$state" = CLEAN ] && break
     if ((SECONDS - beat >= 60)); then
       beat=$SECONDS
@@ -369,7 +374,7 @@ merge_when_clean() {
     fi
     sleep 0.5
   done
-  [ "$state" = CLEAN ] || fail "timed out after $((SECONDS - started))s ($polls polls) waiting for $repo_name#$pr to clear its ruleset: mergeStateStatus is ${state:-unknown}; unsettled checks: $(gh -R "$repo_name" pr view "$pr" --json statusCheckRollup --jq '[.statusCheckRollup[]? | select(.conclusion != "SUCCESS" or .status != "COMPLETED") | {name: (.name // .context), workflow: .workflowName, status, conclusion}]')"
+  [ "$state" = CLEAN ] || fail "timed out after $((SECONDS - started))s ($polls polls) waiting for $repo_name#$pr to clear its ruleset: mergeStateStatus is ${state:-unknown}; unsettled checks: $(timeout 60 gh -R "$repo_name" pr view "$pr" --json statusCheckRollup --jq '[.statusCheckRollup[]? | select(.conclusion != "SUCCESS" or .status != "COMPLETED") | {name: (.name // .context), workflow: .workflowName, status, conclusion}]' || echo "(could not be read)")"
   gh -R "$repo_name" pr merge "$pr" --match-head-commit "$head_sha" "$@"
 }
 # clean_smoke_main removes every leftover from the smoke main through the proof human's ordinary

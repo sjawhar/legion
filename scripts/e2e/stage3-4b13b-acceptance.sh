@@ -1107,10 +1107,12 @@ pass
 # ---- 6. an early merge: pr-merged, and no READY for a merged PR ----------------------------------------
 begin early-merge-skips-ready
 # "Early" is $root2's own workflow phase (merging, its merger held since retros above, never
-# released here), not GitHub's merge-readiness: merge_when_clean's wait is only for the ruleset's
-# required checks to settle on this head, and nothing but the merger's own handoff_complete moves
-# $root2 toward a READY, which stays impossible for as long as it is held. The merge still lands
-# before any READY exists.
+# released here), not GitHub's own merge computation: $root2's pull request targets
+# $scratch_base, which carries no ruleset, so merge_when_clean's wait here is only for GitHub to
+# finish computing this head's own mergeability (mergeStateStatus settles off its own UNKNOWN
+# moments after a push; nothing here is gated on a required check). Nothing but the merger's own
+# handoff_complete moves $root2 toward a READY, which stays impossible for as long as it is held.
+# The merge still lands before any READY exists.
 merge_when_clean "$repo" "${pr_of[$root2]}" --squash --delete-branch
 until_true 300 "the pr-merged notice on $root2's architect" notice_delivered "$root2" architect "$(notice_needle pr-merged "$root2")"
 issue_phase "$root2" merging >/dev/null || soft "$root2 left merging on the early merge"
