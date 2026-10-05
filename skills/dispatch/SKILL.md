@@ -104,6 +104,11 @@ a new version that keeps the human's own text, never a second "spec" artifact be
 - **No commentary.** The spec talks about the design, never about the spec or the conversation: no
   sentence calls it a draft, a conversation, a version or a turn; says what a later version will
   add; describes an earlier version or correction; or narrates the exchange that produced it.
+- **A fresh reader checks it before the human does.** Before a spec's first version and before each
+  approval request, give a `plan-gap-analyst` subagent the draft and the human's own words. It reads
+  the code and names each claim about how a system works today that nothing it read supports, and
+  each requirement that traces to neither the human's words nor a cited fact. Fix each one, or mark
+  it an inference.
 
 Before a new version goes out, read it as the human will: no two passages conflict, each point has
 one reading, and every decision block passes the phone test above. A worked example is

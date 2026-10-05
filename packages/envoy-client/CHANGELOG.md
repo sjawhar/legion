@@ -4,6 +4,11 @@
 
 ### Changed
 
+- `dispatch_issue` with a spec, and `dispatch_request_approval` when it opens or hands back a
+  request, add a line to their result asking whether a fresh reader checked the spec, naming the
+  `plan-gap-analyst` subagent and the `dispatch` skill's "Writing a spec" (LEGION-577). It never
+  blocks the write; an issue created without a spec, or a repeat request that changed nothing, has
+  no such line.
 - `dispatch_issue` and `dispatch_ask` append LEGION-550's write-time feedback to their result,
   from the new `WriteAdvice.suggestions`: up to three related items found by search (`Possibly
   related, found by search:`, each with its status or owner and a link), and, for an ask, any

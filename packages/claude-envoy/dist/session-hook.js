@@ -15442,6 +15442,7 @@ function followsAsk(owner) {
   return `You follow this ask: its answer and replies reach you directly. For every event on ${owner.label}: envoy_subscribe ${owner.topic}`;
 }
 var triageAdviceShown = new Set;
+var SPEC_CHECK_REMINDER = 'Has a fresh reader checked this spec? Each claim about how a system works today should trace to code read or a command run, and each requirement to the human\'s words or a cited fact; a `plan-gap-analyst` subagent does this check. See the `dispatch` skill, "Writing a spec".';
 function renderAdvice(tool, key, advice, opts) {
   if (advice === undefined)
     return [];
@@ -16686,6 +16687,7 @@ async function executeDispatchTool(input) {
         return {
           text: [
             `Created ${created.key}: ${created.title} ${notSubscribed(issueTopic(created.key))}`,
+            ...spec === undefined ? [] : [SPEC_CHECK_REMINDER],
             ...adviceLines
           ].join(`
 `),
@@ -17215,7 +17217,8 @@ ${trailer.join(`
       const details = await followedAskDetails(client, result.ask, resolved.artifact);
       const outcome = result.recorded ? `Approval requested for ${resolved.artifact.name} (document id ${resolved.artifact.id}) at version ${result.version} (ask ${result.ask.id}).` : `The approval request for ${resolved.artifact.name} (document id ${resolved.artifact.id}) at version ${result.version} (ask ${result.ask.id}) already waits on the human, so this call changed nothing: nothing since it last reached the human (a newer version, a human's reply in its thread, or your progress note) left it waiting on you.`;
       return {
-        text: `${outcome} The human's Inbox asks: ${JSON.stringify(result.ask.question)}. The answer arrives as artifact.approved or artifact.changes_requested. An edit before the answer moves this request to the new version and leaves it waiting on you, and an edit after approval makes the approval stale: either way, request again for the new version once the human has agreed to every point in it, which hands this request back or opens a new one.`,
+        text: `${outcome} The human's Inbox asks: ${JSON.stringify(result.ask.question)}. The answer arrives as artifact.approved or artifact.changes_requested. An edit before the answer moves this request to the new version and leaves it waiting on you, and an edit after approval makes the approval stale: either way, request again for the new version once the human has agreed to every point in it, which hands this request back or opens a new one.${result.recorded ? `
+${SPEC_CHECK_REMINDER}` : ""}`,
         details: { ...details, artifact: resolved.artifact.id, version: result.version }
       };
     }
