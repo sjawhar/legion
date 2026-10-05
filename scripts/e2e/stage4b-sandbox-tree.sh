@@ -379,26 +379,35 @@ pod_commands() {
 pod_runs() { pod_commands "$1" "$2" | grep -qF -- "$3"; }
 pod_file() { pod_exec "$1" "$2" test -s "$3"; }
 # takeover_lines ROW TESTER prints the daemon log's lines of a CI-red takeover, one JSON object a
-# line: the implementer's start, outbox row ROW, held and going on, and the tester's claim TESTER
-# interrupted for it and its turn over.
-takeover_held="outbox start is held for the turn of the role it takes the phase from"
+# line: the implementer's start held and going on, and the tester's claim TESTER interrupted for
+# it and its turn over. The hold is the outbox's shared retry log (outbox.go's RunOnce), logged
+# "outbox row waits" for every reason a row waits, not only this one (a held notice, a
+# suspension, a pending delivery, a tree's cleanup reservation, a close waiting for its stops); a
+# start Quiesce holds for the outgoing worker's turn is this one row's kind supervise and
+# Quiesce's own error text (ErrQuiesceHeld, supervise/quiesce.go), never a message of its own.
+takeover_held_error="the start waits for the outgoing worker's interrupted turn to end"
 takeover_goes_on="outbox start goes on: the claim it takes the phase from is out of its turn"
 takeover_interrupted="supervise: interrupted the agent's turn: a start takes over its issue's phase"
 takeover_over="supervise: the interrupted turn is over"
 takeover_lines() {
-  jq -R -c --argjson row "$1" --arg tester "$2" --arg held "$takeover_held" --arg on "$takeover_goes_on" \
+  jq -R -c --argjson row "$1" --arg tester "$2" --arg err "$takeover_held_error" --arg on "$takeover_goes_on" \
     --arg interrupted "$takeover_interrupted" --arg over "$takeover_over" \
-    'fromjson? | select(.row == $row and ((.msg == $held or .msg == $on) or ((.msg == $interrupted or .msg == $over) and .claim == $tester)))' "$daemon_log"
+    'fromjson? | select(.row == $row and (
+        (.msg == "outbox row waits" and .kind == "supervise" and (.error // "" | contains($err))) or
+        .msg == $on or
+        ((.msg == $interrupted or .msg == $over) and .claim == $tester)
+      ))' "$daemon_log"
 }
 # takeover_ordered FILE TASK_AT: the takeover's lines FILE (takeover_lines) hold the start held and
 # the tester's turn interrupted, both before that turn was over, the start going on only after it,
 # and the implementer's task, which reached its session at TASK_AT, after it too.
 takeover_ordered() {
-  jq -s -e --arg task "$2" --arg held "$takeover_held" --arg on "$takeover_goes_on" \
+  jq -s -e --arg task "$2" --arg err "$takeover_held_error" --arg on "$takeover_goes_on" \
     --arg interrupted "$takeover_interrupted" --arg over "$takeover_over" '
     def secs: (.[0:19] + "Z" | fromdateiso8601) + (.[19:] | rtrimstr("Z") | if . == "" then 0 else "0" + . | tonumber end);
     def at($m): map(select(.msg == $m) | .time | secs) | first;
-    at($held) as $h | at($interrupted) as $i | at($over) as $o | at($on) as $g
+    def at_held: map(select(.msg == "outbox row waits" and .kind == "supervise" and (.error // "" | contains($err))) | .time | secs) | first;
+    at_held as $h | at($interrupted) as $i | at($over) as $o | at($on) as $g
     | $h != null and $i != null and $o != null and $g != null
       and $h <= $o and $i <= $o and $o <= $g and $o <= ($task | secs)' "$1" >/dev/null
 }
@@ -2159,7 +2168,9 @@ on_tree "$tree1" wait_for_phase "$tree1" implementing 900
 on_tree "$tree1" until_true 120 "tree 1's interrupted tester to go idle on its session in its first pod" resident_idle "$tree1" tester
 ! pod_runs "$tester_pod" tester "/usr/bin/sleep 1207" || fail "the tester's witness command still runs after its turn was interrupted"
 ! pod_file "$tester_pod" tester "$witness" || fail "the tester's interrupted witness command wrote $witness"
-takeover_row=$(log_lines "$takeover_held" | jq -s -r --arg issue "$tree1" 'map(select(.issue == $issue)) | last | .row // empty')
+takeover_row=$(jq -R -c --arg issue "$tree1" --arg err "$takeover_held_error" \
+  'fromjson? | select(.msg == "outbox row waits" and .kind == "supervise" and .issue == $issue and (.error // "" | contains($err)))' "$daemon_log" |
+  jq -s -r 'last | .row // empty')
 [ -n "$takeover_row" ] || fail "the daemon log holds no implementer start of $tree1 held for the tester's turn"
 on_tree "$tree1" until_true 300 "the implementer's CI-red task to reach its session" session_contains "$tree1" implementer "Reason: CI is red at"
 task_at=$(claim_session_text "$tree1" implementer | jq -R -s -r '[split("\n")[] | fromjson? |
