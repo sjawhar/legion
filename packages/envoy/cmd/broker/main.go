@@ -62,9 +62,10 @@ func main() {
 	fatal(err)
 	// BROKER_FAKE_SECRETS_FILE: for local development only, a JSON file standing in for Secrets
 	// Manager, {"secrets": [{"name", "kms_key_id", "tags", "value", "deleted_at"}]}: the broker lists
-	// the agent secrets and reads their values from it instead of from AWS. A secret with no "value"
-	// is one created without a value, which the broker refuses as no-current-value; one with a
-	// "deleted_at" (RFC 3339) is scheduled for deletion, which the broker no longer lists.
+	// the agent secrets and reads their values from it instead of from AWS, reading the file again
+	// on each of those calls, so an edit to it is a write as Secrets Manager would see one. A secret
+	// with no "value" is one created without a value, which the broker refuses as no-current-value;
+	// one with a "deleted_at" (RFC 3339) is scheduled for deletion, which the broker no longer lists.
 	fakeSecrets := os.Getenv("BROKER_FAKE_SECRETS_FILE")
 	fatal(refusePortZeroPublicURLInProduction(cfg.PublicURL, fakeSecrets))
 	st, err := store.Open(ctx, cfg.DatabaseURL)

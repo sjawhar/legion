@@ -25,6 +25,10 @@ type Local struct {
 	mu      sync.Mutex
 	secrets map[string]LocalSecret
 	aliases map[string][]string
+	// path is the file a LocalFromFile Local follows, and file the bytes its secrets were last
+	// read from; empty for a NewLocal one.
+	path string
+	file []byte
 }
 
 // LocalSecret is one secret a Local holds.
@@ -65,14 +69,27 @@ func NewLocal(secrets ...LocalSecret) *Local {
 }
 
 // LocalFromFile reads path, a local-development-only JSON file {"secrets": [LocalSecret, ...]},
-// into a Local. An error names path and, for a file that does not parse, only the byte offset and
-// field it failed at, never the file's content: no secret value reaches an error message, local
-// development included.
+// into a Local that follows it: each ListSecrets, DescribeSecret and GetSecretValue reads the file
+// again and, when its bytes have changed, answers from it, so an edit to the file is a write as
+// Secrets Manager sees one. A value Put directly stands until the file next changes. An error names
+// path and, for a file that does not parse, only the byte offset and field it failed at, never the
+// file's content: no secret value reaches an error message, local development included.
 func LocalFromFile(path string) (*Local, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
+	secrets, err := parseLocalFile(path, data)
+	if err != nil {
+		return nil, err
+	}
+	l := NewLocal(secrets...)
+	l.path, l.file = path, data
+	return l, nil
+}
+
+// parseLocalFile reads data, the content of path, as BROKER_FAKE_SECRETS_FILE's shape.
+func parseLocalFile(path string, data []byte) ([]LocalSecret, error) {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
 	var f localFile
@@ -95,7 +112,33 @@ func LocalFromFile(path string) (*Local, error) {
 			return nil, fmt.Errorf("%s: secrets[%d] has no name", path, i)
 		}
 	}
-	return NewLocal(f.Secrets...), nil
+	return f.Secrets, nil
+}
+
+// follow reads a LocalFromFile Local's file again and, when its bytes have changed since they were
+// last read, takes its secrets from it. A file it cannot read or parse fails the call. The caller
+// holds l.mu.
+func (l *Local) follow() error {
+	if l.path == "" {
+		return nil
+	}
+	data, err := os.ReadFile(l.path)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", l.path, err)
+	}
+	if bytes.Equal(data, l.file) {
+		return nil
+	}
+	secrets, err := parseLocalFile(l.path, data)
+	if err != nil {
+		return err
+	}
+	l.secrets = make(map[string]LocalSecret, len(secrets))
+	for _, s := range secrets {
+		l.secrets[s.Name] = s
+	}
+	l.file = data
+	return nil
 }
 
 // Put adds secret, or replaces the one of its name.
@@ -126,6 +169,9 @@ func (l *Local) Alias(keyARN, alias string) {
 func (l *Local) ListSecrets(_ context.Context, in *secretsmanager.ListSecretsInput, _ ...func(*secretsmanager.Options)) (*secretsmanager.ListSecretsOutput, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if err := l.follow(); err != nil {
+		return nil, err
+	}
 	out := &secretsmanager.ListSecretsOutput{}
 	for _, s := range l.secrets {
 		if s.DeletedAt != nil || !matchesNameFilters(s.Name, in.Filters) {
@@ -145,6 +191,9 @@ func (l *Local) ListSecrets(_ context.Context, in *secretsmanager.ListSecretsInp
 func (l *Local) DescribeSecret(_ context.Context, in *secretsmanager.DescribeSecretInput, _ ...func(*secretsmanager.Options)) (*secretsmanager.DescribeSecretOutput, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if err := l.follow(); err != nil {
+		return nil, err
+	}
 	s, ok := l.secrets[strings.TrimPrefix(aws.ToString(in.SecretId), LocalARN(""))]
 	if !ok {
 		return nil, &types.ResourceNotFoundException{Message: aws.String("Secrets Manager can't find the specified secret.")}
@@ -200,6 +249,9 @@ func matchesNameFilters(name string, filters []types.Filter) bool {
 func (l *Local) GetSecretValue(_ context.Context, in *secretsmanager.GetSecretValueInput, _ ...func(*secretsmanager.Options)) (*secretsmanager.GetSecretValueOutput, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if err := l.follow(); err != nil {
+		return nil, err
+	}
 	id := aws.ToString(in.SecretId)
 	s, ok := l.secrets[strings.TrimPrefix(id, LocalARN(""))]
 	if !ok {
