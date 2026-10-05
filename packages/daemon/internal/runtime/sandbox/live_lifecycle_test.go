@@ -619,7 +619,12 @@ func (r *liveRig) checkConcurrentProvision() error {
 }
 
 // re-adopt: a fresh runtime and listener take over every live claim, with nothing relaunched; a
-// separate issue pod killed while no runtime ran is reported Gone with its recorded incarnation.
+// separate issue pod killed while no runtime ran is reported dead with its recorded incarnation.
+// The Agent Sandbox controller (sandbox_controller.go's reconcilePod, v1.0.3) recreates a Running
+// Sandbox's pod under the identical name the moment the old one is gone — the name is
+// deterministic (resolvePodName) and the Pod is Owns()-watched — so only the killed pod's own uid
+// ever actually ends; the daemon's own evaluate() reports a differently-uid'd pod at that name as
+// NotRecordedProcess, never Gone, and the supervisor treats the two identically (machine.go).
 func (r *liveRig) checkReAdopt() error {
 	victim := r.claim("orphan")
 	for _, name := range []string{"root", "worker", "fresh", "root2", "child2", "orphan"} {
@@ -641,16 +646,23 @@ func (r *liveRig) checkReAdopt() error {
 	r.stopRuntime()
 	note("runtime", "listener and runtime closed")
 	name := SandboxName(victim.token)
+	oldUID := victim.loc.Sandbox.PodUID
 	if _, err := r.kubectl("delete", "pod", name, "--wait=false"); err != nil {
 		return err
 	}
-	if err := r.poll(liveGoneLimit, "orphan issue pod "+name+" to end", func() (bool, error) {
-		_, err := r.getPod(name)
-		return apierrors.IsNotFound(err), ignoreNotFound(err)
+	if err := r.poll(liveGoneLimit, "orphan issue pod "+name+"'s killed uid "+short(oldUID)+" to end", func() (bool, error) {
+		pod, err := r.getPod(name)
+		if apierrors.IsNotFound(err) {
+			return true, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		return string(pod.UID) != oldUID, nil
 	}); err != nil {
 		return err
 	}
-	note("operator", "deleted pod %s while no runtime ran", name)
+	note("operator", "deleted pod %s (uid %s) while no runtime ran; the controller may already have replaced it under the same name before anything watched", name, short(oldUID))
 
 	restarted := time.Now()
 	mark := r.obs.mark()
@@ -666,10 +678,10 @@ func (r *liveRig) checkReAdopt() error {
 	gone, ok := r.obs.await(mark, liveGoneLimit, func(o runtime.Observation) bool {
 		return o.Locator.Claim == victim.token && o.Kind != runtime.Alive
 	})
-	if !ok || gone.Kind != runtime.Gone || !sameLocator(gone.Locator, *victim.loc) {
-		return fmt.Errorf("the killed claim was not reported gone with its recorded %s: %+v", victim.loc.Incarnation, gone)
+	if !ok || (gone.Kind != runtime.Gone && gone.Kind != runtime.NotRecordedProcess) || !sameLocator(gone.Locator, *victim.loc) {
+		return fmt.Errorf("the killed claim was not reported dead with its recorded %s: %+v", victim.loc.Incarnation, gone)
 	}
-	note("runtime", "killed claim: gone, stamped %s — %s", short(gone.Locator.Incarnation), oneLine(firstLine(gone.Detail)))
+	note("runtime", "killed claim: %s, stamped %s — %s", gone.Kind, short(gone.Locator.Incarnation), oneLine(firstLine(gone.Detail)))
 	victim.loc, victim.state = nil, stateDead
 
 	for _, c := range r.live() {
@@ -698,7 +710,7 @@ func (r *liveRig) checkReAdopt() error {
 		note("operator", "%s: pod uid %s", c.name, short(uid))
 	}
 	for _, o := range r.obs.since(mark) {
-		if o.Kind == runtime.NotRecordedProcess || (o.Kind == runtime.Gone && o.Locator.Claim != victim.token) {
+		if o.Locator.Claim != victim.token && (o.Kind == runtime.Gone || o.Kind == runtime.NotRecordedProcess) {
 			return fmt.Errorf("re-adoption observed %s for %s: %s", o.Kind, o.Locator.Claim, o.Detail)
 		}
 	}
