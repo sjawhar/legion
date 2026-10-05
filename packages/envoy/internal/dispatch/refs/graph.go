@@ -270,7 +270,7 @@ func loadArtifactNodes(ctx context.Context, q Queryer, byRefKey bool, ids []stri
 		predicate = `ref_key = any($1)`
 	}
 	rows, err := q.Query(ctx, `
-		select id::text, ref_key, issue_key, project_key, slug, name, kind, is_primary
+		select id::text, ref_key, issue_key, coalesce(project_key, ''), slug, name, kind, is_primary
 		from artifacts where `+predicate, ids)
 	if err != nil {
 		return fmt.Errorf("load artifact nodes: %w", err)
