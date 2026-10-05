@@ -26,6 +26,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/architecture"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/config"
+	"github.com/sjawhar/envoy/internal/dispatch/delivery"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/files"
@@ -326,6 +327,16 @@ func main() {
 	}
 
 	go architecture.Run(ctx, appCtx.Architecture())
+
+	// LEGION-567: the delivery timeline's 5-minute GitHub-App reconcile runs regardless of NATS
+	// (it never touches it); the NATS consumer that catches events between reconcile passes needs
+	// a connected client, exactly like the outbox above.
+	go delivery.NewReconcile(database.Pool, appCtx.GitHub()).Run(ctx)
+	if natsClient != nil {
+		go delivery.NewIntake(natsClient, database.Pool, appCtx.GitHub()).Run(ctx)
+	} else {
+		slog.Info("dispatch delivery: no NATS client — intake is idle; the reconcile alone still runs")
+	}
 
 	handler := dispatchHandler(routes.New(appCtx), database, natsClient, fileStore, buildCommit)
 	server := &http.Server{
