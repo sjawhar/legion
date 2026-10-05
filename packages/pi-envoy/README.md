@@ -73,10 +73,11 @@ package ships skills at `dist/skills` (not the plugin root itself), so the field
 for every session — including a headless Legion controller — to see the Legion skills at all.
 The tarball also ships `agents/`, the task agents Legion's prompts dispatch (`oracle`; the
 reviewer's pair `thermonuclear-deep-review` and `thermonuclear-code-quality`; `deep-worker`,
-which writes the implementer's code; and the planner's checks, `plan-gap-analyst` before it drafts
-and `plan-reviewer` after), which Oh My Pi discovers under any extension package root:
-an installed plugin in a pane, the explicit `--extension` root in a Sandbox pod. Each declares its
-model as a role the operator maps (`docs/kubernetes.md`, "Model roles"). The skills those agents and the
+which writes the implementer's code; and the planner's checks, `plan-gap-analyst` before it drafts,
+which also reads a spec before a human does, and `plan-reviewer` after), which Oh My Pi discovers
+under any extension package root: an installed plugin in a pane, the explicit `--extension` root in
+a Sandbox pod. Each declares its model as a role the operator maps (`docs/kubernetes.md`,
+"Model roles"). The skills those agents and the
 role prompts load (the pair's rubrics, the implementer's `ce-simplify-code`) ship in
 `dist/skills` with the rest. The Go daemon's boot gate and `legion probe-image` resolve every
 `task(agent="…")` and every `skill://<name>` those prompts name through the same launch, and

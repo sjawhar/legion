@@ -281,6 +281,21 @@ test("API client reaches project artifact and owner-scoped document endpoints", 
     name: "Design notes",
   });
 });
+test("API client reaches an agent conversation's artifacts under the agent's session", async () => {
+  const stub = stubFetch(() => Response.json({}));
+  const api = createApiClient(stub.fetch);
+
+  await api.uploadArtifact(
+    { session: "ses/1" },
+    { file: new File(["png"], "shot.png", { type: "image/png" }), name: "shot.png" }
+  );
+  await api.getAgentArtifact("ses/1", "shot-png");
+
+  expect(stub.requests.map(({ init, path }) => [init?.method ?? "GET", path])).toEqual([
+    ["POST", "/api/v1/agents/ses%2F1/artifacts"],
+    ["GET", "/api/v1/agents/ses%2F1/artifacts/shot-png"],
+  ]);
+});
 
 test("API client exposes response status and server error code on failure", async () => {
   const stub = stubFetch(() =>

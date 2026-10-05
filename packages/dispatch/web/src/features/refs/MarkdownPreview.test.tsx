@@ -1,6 +1,7 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, render, waitFor } from "@testing-library/react";
+import type { Window as HappyDOMWindow } from "happy-dom";
 import type { ComponentProps, ReactNode } from "react";
 
 import { api } from "../../api/client";
@@ -172,6 +173,40 @@ test("a lead with no body shows the lead alone", async () => {
     expect(preview().getAttribute("data-markdown-fallback")).toBeNull();
   } finally {
     view.unmount();
+  }
+});
+
+test("a Dispatch picture shows as its thumbnail beside its caption, a link only where links stay live", async () => {
+  // The dashboard is served from an origin, where a picture's same-origin bytes route resolves;
+  // at happy-dom's `about:blank` every picture would fail at once (`MarkdownBody.test.tsx`).
+  const testWindow = window as unknown as HappyDOMWindow;
+  const pageBefore = window.location.href;
+  testWindow.happyDOM.setURL("https://dispatch.test/issues/CORE-1/conversation");
+  const markdown = "The broken layout: ![shot.png](dispatch://CORE-1/artifact/shot-png@v1)";
+  const { preview, rerender, view } = renderPreview({ lines: 2, markdown });
+  try {
+    await waitFor(() => expect(preview().querySelector("img")).not.toBeNull());
+    const thumbnail = preview().querySelector("img");
+    expect(thumbnail?.getAttribute("src")).toBe(
+      "/api/v1/issues/CORE-1/artifacts/shot-png/versions/1"
+    );
+    expect(thumbnail?.className.split(" ")).toEqual(
+      expect.arrayContaining(["h-10", "w-10", "object-cover"])
+    );
+    expect(words(preview())).toBe("The broken layout: shot.png");
+    // Inert by default: the host is the one link, so the picture sits in link-styled text.
+    expect(preview().querySelector("a")).toBeNull();
+    expect(thumbnail?.closest("[data-dispatch-picture]")?.tagName).toBe("SPAN");
+
+    // A host whose own control is a toggle keeps the picture's link to its page.
+    rerender({ lines: 2, links: "live", markdown });
+    await waitFor(() => expect(preview().querySelector("a img")).not.toBeNull());
+    expect(preview().querySelector("a")?.getAttribute("href")).toBe(
+      "/issues/CORE-1/artifacts/shot-png?v=1"
+    );
+  } finally {
+    view.unmount();
+    testWindow.happyDOM.setURL(pageBefore);
   }
 });
 

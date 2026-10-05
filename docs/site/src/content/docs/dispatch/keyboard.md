@@ -42,6 +42,7 @@ These work on every page.
 | `?` | Keyboard shortcuts |
 | `c` | Create issue |
 | `g i` | Go to Inbox |
+| `i` | Open the Inbox as a drawer over the current page (not offered on the Inbox page itself) |
 | `g a` | Go to Agents |
 | `g s` | Go to Settings |
 | `g d` | Go to the current project's Documents (on a project or issue page) |

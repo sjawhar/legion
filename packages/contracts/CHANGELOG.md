@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- `images` on `dispatch_message`, `dispatch_comment` and `dispatch_ask`, and `DISPATCH_BODY_MAX`;
+  `Artifact.session_id` (optional: a Dispatch older than conversation-owned artifacts omits it) for
+  an upload an agent's conversation owns; `dispatch_doc_read` and `dispatch_read` describe the
+  pictures they return; the reference table pins `dispatch://agent/<session id>/artifact/<slug>`
+  and the picture syntax; `SESSION_ID_PATTERN` and `isSessionId`, the one session-id rule the
+  dashboard and envoy-client read a reference by (the server's `text.IsSessionID`), and
+  `pictureCaption`, the one caption a picture line carries (LEGION-541).
+
 ### Changed
 
 - Added `WriteAdvice.suggestions`, `Suggestions` and `WriteSuggestion`: `POST /api/v1/issues` and

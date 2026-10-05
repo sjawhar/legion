@@ -43,7 +43,7 @@ func TestCreateProjectDocumentJSONAndMultipart(t *testing.T) {
 		t.Fatalf("project document = %#v version=%#v", first.Artifact, first.Version)
 	}
 
-	image := multipartRequest(t, handler, "/api/v1/projects/CORE/artifacts", map[string]string{"name": "diagram.png"}, "diagram.png", "image/png", []byte("PNG"), "alice")
+	image := multipartRequest(t, handler, "/api/v1/projects/CORE/artifacts", map[string]string{"name": "diagram.png"}, "diagram.png", "image/png", pngBytes("diagram"), "alice")
 	if image.Code != http.StatusCreated {
 		t.Fatalf("create project image: status=%d body=%s", image.Code, image.Body.String())
 	}

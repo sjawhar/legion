@@ -146,10 +146,12 @@ function RequestChangesDialog({
               id={reasonId}
               onChange={(event) => setReason(event.target.value)}
               onKeyDown={(event) =>
-                submitOnModifiedEnter(event, () => {
-                  if (trimmed !== "" && !saving) {
-                    onSubmit(trimmed);
-                  }
+                submitOnModifiedEnter(event, {
+                  onFormlessSubmit: () => {
+                    if (trimmed !== "" && !saving) {
+                      onSubmit(trimmed);
+                    }
+                  },
                 })
               }
               ref={textareaRef}

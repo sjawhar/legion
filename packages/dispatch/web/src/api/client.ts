@@ -184,7 +184,9 @@ export interface ListEventsOptions {
   order?: "desc";
 }
 
-export type ArtifactOwner = { issue: string } | { project: string };
+/** Who an uploaded file belongs to: an issue, a project (its documents), or an agent's
+ *  conversation, named by the agent's session id (direct messages on the Agents page). */
+export type ArtifactOwner = { issue: string } | { project: string } | { session: string };
 
 export interface CreateArtifactReviewInput {
   state: ArtifactReviewState;
@@ -193,6 +195,20 @@ export interface CreateArtifactReviewInput {
 
 function pathSegment(value: string): string {
   return encodeURIComponent(value);
+}
+
+/** The owner's artifact list, the route an upload posts to. */
+function artifactsPath(owner: ArtifactOwner): string {
+  if ("issue" in owner) return `/api/v1/issues/${pathSegment(owner.issue)}/artifacts`;
+  if ("project" in owner) return `/api/v1/projects/${pathSegment(owner.project)}/artifacts`;
+  return `/api/v1/agents/${pathSegment(owner.session)}/artifacts`;
+}
+
+/** The same-origin route of one stored version's bytes, addressed by the owner and the artifact's
+ *  slug as a picture's `dispatch://` reference names it, so an `<img>` loads it with the reader's
+ *  own cookie. A version never changes, so the server lets the browser keep it. */
+export function artifactVersionPath(owner: ArtifactOwner, slug: string, version: number): string {
+  return `${artifactsPath(owner)}/${pathSegment(slug)}/versions/${version}`;
 }
 
 function repoPath(repo: string): string {
@@ -522,10 +538,7 @@ export class DispatchApiClient {
     owner: ArtifactOwner,
     input: CreateArtifactInput
   ): Promise<ArtifactUploadResponse> {
-    const path =
-      "issue" in owner
-        ? `/api/v1/issues/${pathSegment(owner.issue)}/artifacts`
-        : `/api/v1/projects/${pathSegment(owner.project)}/artifacts`;
+    const path = artifactsPath(owner);
     if ("content" in input) {
       return this.post<ArtifactUploadResponse>(path, {
         actor: input.actor,
@@ -557,6 +570,13 @@ export class DispatchApiClient {
   getProjectArtifact(key: string, slug: string): Promise<Artifact> {
     return this.json<Artifact>(
       `/api/v1/projects/${pathSegment(key)}/artifacts/${pathSegment(slug)}`
+    );
+  }
+
+  /** An artifact of an agent's conversation, with its versions. */
+  getAgentArtifact(sessionId: string, slug: string): Promise<Artifact> {
+    return this.json<Artifact>(
+      `/api/v1/agents/${pathSegment(sessionId)}/artifacts/${pathSegment(slug)}`
     );
   }
 

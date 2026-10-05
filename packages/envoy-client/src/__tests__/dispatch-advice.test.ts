@@ -241,6 +241,19 @@ describe("Dispatch write advice", () => {
     expect(result.details.advice).toEqual(rawAdvice);
   });
 
+  // A new spec is followed by the fresh-reader reminder, ahead of any server advice; an issue
+  // created without a spec keeps its one-line result (the absent-advice cases below).
+  test("dispatch_issue with a spec asks whether a fresh reader checked it", async () => {
+    const result = await executeWrite(
+      "dispatch_issue",
+      { project: "DSP", title: "Created issue", spec: "# Spec\n" },
+      advice({ decision_blocks: 0 })
+    );
+
+    expect(result.text.split("\n")[1]).toContain("`plan-gap-analyst`");
+    expect(result.text).toEndWith(zeroBlocks);
+  });
+
   test("renders only decision-block advice for a project document", async () => {
     const rawAdvice: WriteAdvice = { decision_blocks: 0 };
     const result = await executeWrite(
