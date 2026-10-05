@@ -9,6 +9,7 @@
  */
 
 import { classifyCharacter } from "micromark-util-classify-character";
+import { constants } from "micromark-util-symbol";
 
 /** How many runes of a parent's body a reply's event carries (`messageReplyPreview` in
  *  packages/envoy/internal/dispatch/api/messages.go: `HeadRunes(body, 160)`). A preview shorter
@@ -51,25 +52,25 @@ interface DelimiterRun {
   readonly canClose: boolean;
 }
 
-/** What `classifyCharacter` answers for a whitespace and for a punctuation character; anything
- *  else is `undefined`. Its own caller-facing constants are not exported. */
-const WHITESPACE = 1;
-const PUNCTUATION = 2;
+/** The two groups `classifyCharacter` names; anything else is `undefined`. */
+const WHITESPACE = constants.characterGroupWhitespace;
+const PUNCTUATION = constants.characterGroupPunctuation;
 
 /** The code point ending at `end`, or `null` at the fragment's start, which is what the
  *  tokenizer classifies there. Taken whole, so an astral character is the character CommonMark
  *  reads rather than the trailing surrogate of it: a `**` after an emoji follows punctuation
- *  (every emoji is `\p{S}`), which decides whether that run can open emphasis. */
+ *  (every emoji is `\p{S}`), which decides whether that run can open emphasis. The string
+ *  iterator pairs surrogates itself, so the last code point of the two code units before `end`
+ *  is that character whether it is one unit or two. */
 function codePointBefore(text: string, end: number): number | null {
   if (end <= 0) {
     return null;
   }
-  const previous = text.charCodeAt(end - 1);
-  const isTrailingSurrogate = previous >= 0xdc00 && previous <= 0xdfff;
-  const leading = isTrailingSurrogate && end >= 2 ? text.charCodeAt(end - 2) : undefined;
-  return leading !== undefined && leading >= 0xd800 && leading <= 0xdbff
-    ? (text.codePointAt(end - 2) ?? null)
-    : previous;
+  return (
+    Array.from(text.slice(Math.max(0, end - 2), end))
+      .pop()
+      ?.codePointAt(0) ?? null
+  );
 }
 
 /** The spans of `text` that are code spans, as CommonMark reads them: a backtick run and the

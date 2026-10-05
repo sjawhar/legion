@@ -37,7 +37,7 @@ import { frontmatterSchema } from 'proof-sdk-upstream/src/editor/schema/frontmat
 import { proofMarkPlugins } from 'proof-sdk-upstream/src/editor/schema/proof-marks.js';
 import { remarkProofMarks, proofMarkHandler } from 'proof-sdk-upstream/src/formats/remark-proof-marks.js';
 import { dispatchMarkPlugins, remarkDispatchMarks, dispatchMarkHandler } from './dispatch-marks.js';
-import { remarkResolveReferenceLinks } from './dispatch-reference-links.js';
+import remarkInlineLinks from 'remark-inline-links';
 import { remarkSoftBreakAsLine, remarkSoftBreakAsSpace } from './dispatch-soft-breaks.js';
 import { remarkContainerDirectives } from './lib-remark-directive-plugin.js';
 
@@ -135,7 +135,12 @@ export async function createHeadlessProof(options: HeadlessProofOptions = {}): P
       .use(remarkContainerDirectives)
       .use(remarkProofMarks)
       .use(remarkDispatchMarks)
-      .use(remarkResolveReferenceLinks);
+      // Reference-style links and images (`[text][id]` with `[id]: url` elsewhere in the body)
+      // become the inline link or image their definition describes, and the definitions render
+      // as nothing, as CommonMark reads them; the schema has no node for an unresolved reference,
+      // so without this the parse throws and the whole body falls back to its literal source.
+      // The live editor's commonmark preset installs the same plugin on its own import parser.
+      .use(remarkInlineLinks);
     // remark leaves a soft break as a "\n" inside its text node; the policy either joins the
     // lines with a space or splits them around a `break` node, which the commonmark preset's
     // hardbreak parser takes.
@@ -149,8 +154,11 @@ export async function createHeadlessProof(options: HeadlessProofOptions = {}): P
   const parsers = new Map<SoftBreaks, (markdown: string) => ProseMirrorNode>();
   const mint = options.blockId ?? mintBlockId;
   const parseMarkdown = (markdown: string, softBreaks: SoftBreaks = 'space'): ProseMirrorNode => {
-    const parse = parsers.get(softBreaks) ?? buildParser(softBreaks);
-    parsers.set(softBreaks, parse);
+    let parse = parsers.get(softBreaks);
+    if (parse === undefined) {
+      parse = buildParser(softBreaks);
+      parsers.set(softBreaks, parse);
+    }
     try {
       return withBlockIds(parse(markdown), mint);
     } catch (error) {
