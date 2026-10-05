@@ -748,3 +748,42 @@ func TestASettlementThatAbandonsAfterWritingItsVersionReleasesWhatItRemembered(t
 	settleCurrentGeneration(t, service, artifactID)
 	requireLatestVersionMarkdown(t, service, artifactID, "First, edited.\n\nSecond.\n")
 }
+
+// evictRoom's forced path (unlike releaseIfUnusedLocked's normal one) forgets a state regardless
+// of unusedLocked - an unrelated room failure or Quiesce can run while a settlement's version
+// write has just remembered a capture (rememberPendingVersion) and not yet committed. That
+// capture must not be lost with the forgotten state: the next lockState for the same room, which
+// creates a fresh one, carries it forward (forgetLocked, lookUpState), so a version number this
+// settlement's own commit will still try to release (commitVersionLocked) is not orphaned
+// (LEGION-513).
+func TestAnEvictedStatesOrphanedVersionCaptureSurvivesIntoTheNextFreshState(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
+	settleCurrentGeneration(t, service, artifactID)
+	editAsPeer(t, service, artifactID, replaceRun("First.", "First, edited."))
+
+	injectedEviction := false
+	service.afterSettleVersionWrite = func(room string) error {
+		if room == artifactID && !injectedEviction {
+			injectedEviction = true
+			if err := service.Evict(context.Background(), artifactID); err != nil {
+				t.Errorf("force the concurrent eviction: %v", err)
+			}
+		}
+		return nil
+	}
+	settleCurrentGeneration(t, service, artifactID)
+	if !injectedEviction {
+		t.Fatal("settlement never reached the window after its version write")
+	}
+	service.afterSettleVersionWrite = nil
+
+	fresh := service.room(artifactID)
+	fresh.mu.Lock()
+	carried := len(fresh.pendingVersions)
+	fresh.mu.Unlock()
+	if carried == 0 {
+		t.Fatalf("the fresh state after the forced eviction holds no pendingVersions, want the orphaned capture carried forward from the evicted state")
+	}
+}

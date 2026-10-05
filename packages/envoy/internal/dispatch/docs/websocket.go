@@ -451,6 +451,23 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	if err != nil {
 		return err
 	}
+	// Every load gets its own generation, the per-room-load instance id a durable release
+	// compares against each row entry's own (releaseSettlementCredit): creditSeq alone is not a
+	// total order across two processes' own rooms for the same document, so a release must never
+	// trust a seq comparison against an entry some other room credited (LEGION-513). This also
+	// durably adopts every entry the row already held into the new generation
+	// (bumpSettlementCreditGeneration), the same way mergeSettlementCreditLocked adopts them into
+	// the room below, so an entry a stopped task's generation can never release again is not lost
+	// and not stuck forever: the next room to load the document, in whichever process, adopts it
+	// into a generation that process's own releases can reach. It needs no advisory lock (a room
+	// load never waits on one - a durable writer can hold it, and the load would then hang, the
+	// deadlock round 17 fixed): it is one plain, atomic single-row UPDATE whose correctness
+	// Postgres's own row-level locking already guarantees against a concurrent writer's equally
+	// brief transaction.
+	generation, err := bumpSettlementCreditGeneration(ctx, rooms, room)
+	if err != nil {
+		return err
+	}
 	// The room is still loading: ygo hands its document to no peer or caller until this hook
 	// returns (sjawhar/ygo v1.50.1-sami.2, provider/websocket/server.go:1753-1842: loadRoom closes
 	// the room's ready barrier after it), so nothing writes the tree while this walks it.
@@ -474,29 +491,11 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	// (releaseIfUnusedLocked).
 	state := s.lockState(room)
 	state.closed = !open
-	// A room load never waits on the document's advisory lock (the pool-choice comment at this
-	// function's top names the wedge that follows if it does): a durable writer can hold it, and
-	// the load would then hang. So this seeds state.creditSeq from the row's own high-water mark
-	// (released_through, and every pending entry's own credit_seq) instead of durably resetting
-	// the row under that lock - the read already happened above, with no lock, as
-	// pendingSettlementCredit always has. That seed is still safe against a previous instance of
-	// this same room concurrently settling or appending: unusedLocked keeps a state from being
-	// forgotten while anything unsettled, settling, or durably in flight still holds it
-	// (releaseIfUnusedLocked), so a load only ever creates a fresh roomState, with its own fresh
-	// creditSeq, once every previous instance's own write has already committed - never
-	// concurrently with one. It never regresses an existing, still-live state's own counter
-	// either (lockState attaches to one already running rather than creating fresh, and that
-	// counter already exceeds anything in the row by the same argument): the seed only raises
-	// state.creditSeq, and only when the row's high-water mark is actually higher.
-	highWater := credit.ReleasedThrough
-	for _, seq := range credit.PendingSeq {
-		if seq > highWater {
-			highWater = seq
-		}
-	}
-	if current := state.creditSeq.Load(); highWater > current {
-		state.creditSeq.Store(highWater)
-	}
+	// onLoadDocument fires exactly when ygo genuinely reloads this room's content - never while
+	// an existing, still-live roomState is merely attached to again (that never reaches this
+	// hook) - so the generation this load just bumped durably is this room's own from here on,
+	// whatever the service's own bookkeeping struct happens to be.
+	state.creditGeneration.Store(generation)
 	// The ask blocks the room loaded with are the baseline its update observer tells new ones by.
 	// They were not introduced by any update the observer sees, so none gains an author here.
 	if askBlocks == nil {
@@ -610,8 +609,10 @@ func (s *Service) creditContentChange(room string, origin any) (settlementCredit
 	defer s.unlockState(room, state)
 	state.creditSeq.Add(1)
 	creditSeq := state.creditSeq.Load()
+	generation := state.creditGeneration.Load()
 	pending := make(map[string]model.Actor, len(state.connected))
 	pendingSeq := make(map[string]uint64, len(state.connected))
+	pendingGeneration := make(map[string]uint64, len(state.connected))
 	var sole *model.Actor
 	ambiguous := false
 	for _, actor := range state.connected {
@@ -620,6 +621,7 @@ func (s *Service) creditContentChange(room string, origin any) (settlementCredit
 		creditKey := settlementCreditKey(actor)
 		pending[creditKey] = actor
 		pendingSeq[creditKey] = creditSeq
+		pendingGeneration[creditKey] = generation
 		if sole == nil {
 			sole = new(actor)
 		} else if key != actorKey(*sole) {
@@ -631,7 +633,7 @@ func (s *Service) creditContentChange(room string, origin any) (settlementCredit
 	}
 	state.lastActor = sole
 	state.unsettled = true
-	return settlementCredit{Pending: pending, PendingSeq: pendingSeq, LastActor: sole}, creditSeq
+	return settlementCredit{Pending: pending, PendingSeq: pendingSeq, PendingGeneration: pendingGeneration, LastActor: sole, Generation: generation}, creditSeq
 }
 
 // addConnection registers a browser connected to room. It is credited only with browser edits

@@ -243,7 +243,7 @@ func (l *Ledger) WroteVersion(artifactID string, version model.Version) {
 	if write == nil || len(write.updates) == 0 {
 		return
 	}
-	capture := versionPending{creditSeq: write.forkSeq, fullRelease: true}
+	capture := versionPending{creditSeq: write.forkSeq, creditGeneration: write.forkGeneration, fullRelease: true}
 	l.service.rememberPendingVersion(artifactID, version, capture)
 	l.recordVersion(artifactID, version, capture)
 }
@@ -302,7 +302,7 @@ func (l *Ledger) recordSettlementCredit(ctx context.Context) error {
 		if !written.capture.fullRelease {
 			authors = written.version.Authors
 		}
-		if err := releaseSettlementCredit(ctx, l.tx, written.artifactID, authors, written.capture.creditSeq, written.capture.fullRelease); err != nil {
+		if err := releaseSettlementCredit(ctx, l.tx, written.artifactID, authors, written.capture.creditSeq, written.capture.creditGeneration, written.capture.fullRelease); err != nil {
 			return err
 		}
 	}
@@ -311,7 +311,11 @@ func (l *Ledger) recordSettlementCredit(ctx context.Context) error {
 		if _, consumed := released[artifactID][actorKey(seed.actor)]; consumed {
 			continue
 		}
-		if err := upsertSettlementCredit(ctx, l.tx, artifactID, settlementCreditFor(nil, &seed.actor, 0), false); err != nil {
+		var generation uint64
+		if write := l.liveWriteFor(artifactID); write != nil {
+			generation = write.state.creditGeneration.Load()
+		}
+		if err := upsertSettlementCredit(ctx, l.tx, artifactID, settlementCreditFor(nil, &seed.actor, 0, generation), false); err != nil {
 			return err
 		}
 	}
@@ -339,7 +343,7 @@ func (l *Ledger) recordSettlementCredit(ctx context.Context) error {
 		if len(pending) == 0 && lastActor == nil {
 			continue
 		}
-		if err := upsertSettlementCredit(ctx, l.tx, artifactID, settlementCreditFor(pending, lastActor, 0), false); err != nil {
+		if err := upsertSettlementCredit(ctx, l.tx, artifactID, settlementCreditFor(pending, lastActor, 0, write.state.creditGeneration.Load()), false); err != nil {
 			return err
 		}
 	}

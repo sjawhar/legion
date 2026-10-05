@@ -90,16 +90,30 @@ sequence of its own (zero) is never swept by any release: `recordSettlementCredi
 leave it that way, since the room has not yet assigned theirs when the row is written (the room's
 own bump runs only after commit, in `Ledger.creditLocked`), and releasing before crediting in that
 method's own order means a release never even reads such an entry, this transaction's own
-included. A fresh `roomState` restarts `creditSeq` at zero on every load, which a room load must
-never make safe by taking the document's advisory lock to durably fix (a durable writer can hold
-it, and the load would then hang forever - the exact wedge `onLoadDocument`'s own pool choice
-guards against elsewhere). Instead the load seeds `state.creditSeq` in memory, no lock needed,
-from the row's own high-water mark it already read without one (`released_through`, and every
-entry's own `credit_seq`): a credit this room makes next is then never mistaken for one the row's
-watermark already consumed. The seed never regresses an existing, still-live state's own counter
-(`unusedLocked` keeps a state from being forgotten while anything unsettled, settling, or
-durably in flight still holds it, so a load only ever creates fresh once every previous
-instance's own write has already committed - never concurrently with one).
+included. Each entry also carries the room's own `generation` (`settlementCredit.PendingGeneration`,
+`roomState.creditGeneration`), the per-room-load instance id a release compares before it ever
+reads an entry's sequence: `creditSeq` alone is not a total order across two processes' own rooms
+for the same document - a rolling deploy can hold two Dispatch tasks' own live rooms for one
+document at once, each with its own in-process `creditSeq` counter no release may compare across
+- so a release takes out only an entry whose own generation matches its own, whatever their
+sequences say (`releaseSettlementCredit`, LEGION-513). A fresh `roomState` gets its own fresh
+generation the moment it loads (`bumpSettlementCreditGeneration`), which a room load must never
+make safe by taking the document's advisory lock to assign durably (a durable writer can hold it,
+and the load would then hang forever - the exact wedge `onLoadDocument`'s own pool choice guards
+against elsewhere): one plain, atomic single-row `UPDATE` needs no lock of its own, since
+PostgreSQL's row-level locking already serializes it against any concurrent writer's equally
+brief transaction. That same load durably adopts every pending entry the row already held into
+the new generation (`mergeSettlementCreditLocked` performs the matching adoption in memory), so
+an entry whose own generation can never be released again - the task that credited it stopped
+before releasing it - is neither lost nor stuck forever: the next room to load the document, in
+whichever process, adopts it into a generation that process's own releases can reach.
+
+A version's capture that a forced eviction (`evictRoom`, which bypasses `unusedLocked`'s own check
+unlike the ordinary release path) orphans along with its room state is not lost either:
+`forgetLocked` stashes a forgotten state's outstanding `pendingVersions` in `orphanedVersions`,
+and the next `lockState` for the same room adopts them into the fresh state it creates, so the
+version number the original transaction's own commit still tries to release
+(`commitVersionLocked`) is not orphaned.
 A settlement that wrote into the room commits what it wrote even when the document moved after its
 read, since the room and its browsers hold it; one that wrote nothing leaves a moved document to
 the settlement the move scheduled. A repair is written only into the document the settlement read

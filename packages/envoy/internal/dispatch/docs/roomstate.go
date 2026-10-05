@@ -36,6 +36,15 @@ type roomState struct {
 	// route is its only consumer of.
 	pending   map[string]pendingAuthor
 	creditSeq atomic.Uint64
+	// creditGeneration is this room instance's own per-room-load id, set once when the room
+	// loads (onLoadDocument, bumpSettlementCreditGeneration) and never changed again for this
+	// roomState's lifetime: a release durably compares it against each pending row entry's own
+	// generation, since creditSeq alone is not a total order across two processes' own rooms for
+	// the same document - a rolling deploy's two Dispatch tasks each hold their own live room for
+	// one document at once, each with its own in-process creditSeq counter no release may
+	// compare across (LEGION-513). Atomic for the same reason creditSeq is: forkLive reads both
+	// without the state lock.
+	creditGeneration atomic.Uint64
 	// askBlocks are the ask blocks the room's document held when its update observer last
 	// rendered it, or when it loaded; nil when neither could read it. askAuthors names the author
 	// of the update that introduced each one no settlement has indexed yet (observeAskBlocks).
@@ -112,7 +121,7 @@ func (s *Service) lookUpState(room string, create bool) *roomState {
 			if !create {
 				return nil
 			}
-			value, _ = s.rooms.LoadOrStore(room, &roomState{
+			fresh := &roomState{
 				connected:         make(map[uint64]model.Actor),
 				pending:           make(map[string]pendingAuthor),
 				askBlocks:         make(map[string]struct{}),
@@ -120,7 +129,20 @@ func (s *Service) lookUpState(room string, create bool) *roomState {
 				pendingAskAuthors: make(map[string]model.Actor),
 				pendingVersions:   make(map[int]versionPending),
 				unrecorded:        make(map[pmdoc.MarkRef]time.Time),
-			})
+			}
+			var loaded bool
+			value, loaded = s.rooms.LoadOrStore(room, fresh)
+			// This call created the state LoadOrStore stored (a concurrent creation would have
+			// returned loaded true, finding this one first): carry forward whatever capture a
+			// forced eviction orphaned for this room (forgetLocked), or it is lost with no
+			// in-memory release left to find it (LEGION-513).
+			if !loaded {
+				if orphaned, ok := s.orphanedVersions.LoadAndDelete(room); ok {
+					for number, capture := range orphaned.(map[int]versionPending) {
+						fresh.pendingVersions[number] = capture
+					}
+				}
+			}
 		}
 		state := value.(*roomState)
 		if s.afterStateLookup != nil {
@@ -169,8 +191,14 @@ func (s *Service) releaseIfUnusedLocked(room string, state *roomState) {
 }
 
 // forgetLocked takes state, room's, out of the service: a lookup that already found it skips it
-// (lookUpState). Its caller holds state.mu.
+// (lookUpState). A version's capture (rememberPendingVersion) that is still outstanding - the
+// normal path never forgets a state that holds one (unusedLocked), but evictRoom's forced path
+// does not check - is stashed in orphanedVersions first, so lookUpState's next fresh state for
+// this room carries it forward instead of losing it (LEGION-513). Its caller holds state.mu.
 func (s *Service) forgetLocked(room string, state *roomState) {
+	if len(state.pendingVersions) > 0 {
+		s.orphanedVersions.Store(room, state.pendingVersions)
+	}
 	state.released = true
 	s.rooms.CompareAndDelete(room, state)
 }

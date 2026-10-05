@@ -727,24 +727,28 @@ func TestAnUploadsFullReleaseClearsTheDurableRowOfAPendingAuthorItWasNeverCredit
 }
 
 // releaseSettlementCredit's full release takes out only an entry whose own pending_seq is at or
-// before the release's point: one credited earlier survives if it is swept, one credited later
-// does not survive if it is kept. A controlled, direct probe of the SQL itself, with no room or
-// ledger involved - Rev's finding named this scenario exactly (LEGION-513).
+// before the release's point and whose own pending_generation matches the release's: one
+// credited earlier in the same generation survives if it is swept, one credited later in the
+// same generation does not survive if it is kept, and one from a different generation entirely
+// survives a release whose seq would otherwise sweep it - Rev's finding named this scenario
+// exactly, two Dispatch tasks each holding their own live room for one document at once
+// (LEGION-513). A controlled, direct probe of the SQL itself, with no room or ledger involved.
 func TestReleaseSettlementCreditKeepsAnEntryCreditedAfterItsOwnCapture(t *testing.T) {
 	database := storetest.Open(t)
 	artifactID := createDocuments(t, database, 1)[0]
 	early := model.Actor{Kind: "session", ID: "early-writer"}
 	late := model.Actor{Kind: "user", ID: "late-writer"}
+	other := model.Actor{Kind: "session", ID: "other-generation-writer"}
 
-	appendSettlementCredit(t, database, artifactID, creditAt(10, early), 0)
-	appendSettlementCredit(t, database, artifactID, creditAt(50, late), 0)
+	appendSettlementCredit(t, database, artifactID, creditAt(10, 1, early), 0)
+	appendSettlementCredit(t, database, artifactID, creditAt(50, 1, late), 0)
+	appendSettlementCredit(t, database, artifactID, creditAt(5, 2, other), 0)
 
 	setup := readSettlementCredit(t, database, artifactID)
-	if _, got := setup.Pending[settlementCreditKey(early)]; !got {
-		t.Fatalf("setup: early missing before the release, pending = %+v", setup.Pending)
-	}
-	if _, got := setup.Pending[settlementCreditKey(late)]; !got {
-		t.Fatalf("setup: late missing before the release, pending = %+v", setup.Pending)
+	for _, actor := range []model.Actor{early, late, other} {
+		if _, got := setup.Pending[settlementCreditKey(actor)]; !got {
+			t.Fatalf("setup: %+v missing before the release, pending = %+v", actor, setup.Pending)
+		}
 	}
 
 	ctx := context.Background()
@@ -753,8 +757,8 @@ func TestReleaseSettlementCreditKeepsAnEntryCreditedAfterItsOwnCapture(t *testin
 		t.Fatalf("begin the release transaction: %v", err)
 	}
 	defer tx.Rollback(ctx)
-	if err := releaseSettlementCredit(ctx, tx, artifactID, nil, 20, true); err != nil {
-		t.Fatalf("release every entry at or before sequence 20: %v", err)
+	if err := releaseSettlementCredit(ctx, tx, artifactID, nil, 20, 1, true); err != nil {
+		t.Fatalf("release generation 1's every entry at or before sequence 20: %v", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatalf("commit the release: %v", err)
@@ -762,17 +766,21 @@ func TestReleaseSettlementCreditKeepsAnEntryCreditedAfterItsOwnCapture(t *testin
 
 	after := readSettlementCredit(t, database, artifactID)
 	if _, kept := after.Pending[settlementCreditKey(early)]; kept {
-		t.Fatalf("early (credited at 10) survived a full release at 20, pending = %+v, want it swept", after.Pending)
+		t.Fatalf("early (generation 1, credited at 10) survived a same-generation release at 20, pending = %+v, want it swept", after.Pending)
 	}
 	if _, kept := after.Pending[settlementCreditKey(late)]; !kept {
-		t.Fatalf("late (credited at 50) was swept by a full release at 20, pending = %+v, want it kept", after.Pending)
+		t.Fatalf("late (generation 1, credited at 50) was swept by a release at 20, pending = %+v, want it kept", after.Pending)
+	}
+	if _, kept := after.Pending[settlementCreditKey(other)]; !kept {
+		t.Fatalf("other (generation 2, credited at 5) was swept by generation 1's release at 20, pending = %+v, want it kept: a release must never cross a generation boundary", after.Pending)
 	}
 }
 
-// creditAt builds a credit naming one pending author at creditSeq, the entry's own PendingSeq
-// (not the credit's aggregate CreditSeq, which appendSettlementCredit sets separately).
-func creditAt(creditSeq uint64, actor model.Actor) settlementCredit {
-	return settlementCreditFor(map[string]model.Actor{actorKey(actor): actor}, nil, creditSeq)
+// creditAt builds a credit naming one pending author at creditSeq and generation, the entry's
+// own PendingSeq and PendingGeneration (not the credit's aggregate CreditSeq, which
+// appendSettlementCredit sets separately).
+func creditAt(creditSeq, generation uint64, actor model.Actor) settlementCredit {
+	return settlementCreditFor(map[string]model.Actor{actorKey(actor): actor}, nil, creditSeq, generation)
 }
 
 // An upload's forkLive reads the room's forkSeq without state.mu, well before its transaction
@@ -858,12 +866,125 @@ func TestAnUploadsFullReleaseKeepsABrowserEditCreditedWhileItsTransactionWasOpen
 	}
 }
 
+// Two Dispatch tasks, each its own process in production, can each hold their own live room for
+// one document at once during a rolling deploy's overlap: each process's roomState.creditSeq
+// counts independently, so a seq comparison alone cannot tell one process's entry from another's
+// (LEGION-513). A full release on one process's room must take out only that process's own
+// generation's entries, never the other's, however their seqs happen to compare - modeled here as
+// two separate *Service instances sharing one Postgres, each with its own browser connected to
+// its own copy of the room.
+func TestAnUploadsFullReleaseOnOneProcessNeverTakesAnotherProcessesOwnedEntry(t *testing.T) {
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "# First")
+	newInstance := func() (*Service, *httptest.Server) {
+		service := New(Deps{
+			Store:     database,
+			Events:    events.NewBroker(),
+			Identity:  headerIdentity(database),
+			ServerURL: "https://dispatch.example",
+			Settle:    time.Hour,
+		})
+		t.Cleanup(func() {
+			if err := service.Shutdown(context.Background()); err != nil {
+				t.Errorf("shutdown document service: %v", err)
+			}
+		})
+		server := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
+		t.Cleanup(server.Close)
+		return service, server
+	}
+	taskA, serverA := newInstance()
+	seedServiceText(t, taskA, artifactID, "First.\n\nSecond.\n")
+
+	taskB, serverB := newInstance()
+	alice := model.Actor{Kind: "user", ID: "alice-on-task-a"}
+	bob := model.Actor{Kind: "user", ID: "bob-on-task-b"}
+	uploader := model.Actor{Kind: "session", ID: "uploader-on-task-a"}
+
+	// Both browsers connect - loading each task's own room - before either edits, so both
+	// tasks' creditSeq counters start from the same point: alice's edit lands, and is credited,
+	// on task A; bob's on task B - a different process, a different roomState, a different
+	// creditGeneration, each counting independently from the same baseline, so their own
+	// sequence numbers collide rather than merely differing.
+	browserA := connectBrowser(t, serverA.URL, artifactID, alice.ID)
+	t.Cleanup(browserA.Close)
+	browserB := connectBrowser(t, serverB.URL, artifactID, bob.ID)
+	t.Cleanup(browserB.Close)
+	editAsBrowser(t, taskA, artifactID, browserA, "First.\n\nSecond, alice.\n")
+	editAsBrowser(t, taskB, artifactID, browserB, "First.\n\nThird, bob.\n")
+
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	if err := taskB.waitForDurableAppends(waitCtx, artifactID); err != nil {
+		waitCancel()
+		t.Fatalf("wait for bob's edit, on task B, to become durable: %v", err)
+	}
+	waitCancel()
+	if _, credit, err := pendingSettlementCredit(context.Background(), database.Pool, artifactID); err != nil {
+		t.Fatalf("read the pending-settlement row before task A's upload: %v", err)
+	} else if _, owed := credit.Pending[settlementCreditKey(bob)]; !owed {
+		t.Fatalf("the row does not yet owe bob (pending=%+v); the test's premise needs his credit durable first", credit.Pending)
+	}
+
+	// Task A uploads a full replacement - it never saw bob's edit (that happened on task B's own
+	// copy of the room), so its full release must take out only its own task's entries.
+	ctx := context.Background()
+	tx, err := taskA.store.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin task A's upload transaction: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	joined, ledger := taskA.Join(ctx, tx)
+	defer ledger.Discard()
+	if _, err := taskA.ReplaceText(joined, artifactID, "First.\n\nSecond, uploaded by task A.\n", uploader); err != nil {
+		t.Fatalf("upload the replacement text on task A: %v", err)
+	}
+	var nextNumber int
+	if err := tx.QueryRow(ctx, `select coalesce(max(number), 0) + 1 from artifact_versions where artifact_id = $1`, artifactID).Scan(&nextNumber); err != nil {
+		t.Fatalf("read the next version number: %v", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		insert into artifact_versions (artifact_id, number, markdown, authors)
+		values ($1, $2, $3, $4)
+	`, artifactID, nextNumber, "First.\n\nSecond, uploaded by task A.\n", []model.Actor{uploader}); err != nil {
+		t.Fatalf("insert task A's upload version row: %v", err)
+	}
+	ledger.WroteVersion(artifactID, model.Version{Number: nextNumber, Authors: []model.Actor{uploader}})
+	if err := ledger.Commit(ctx); err != nil {
+		t.Fatalf("commit task A's upload transaction: %v", err)
+	}
+
+	ctx2, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := taskA.waitForDurableAppends(ctx2, artifactID); err != nil {
+		t.Fatalf("wait for task A's upload to become durable: %v", err)
+	}
+	_, credit, err := pendingSettlementCredit(ctx2, database.Pool, artifactID)
+	if err != nil {
+		t.Fatalf("read the pending-settlement row after task A's upload: %v", err)
+	}
+	if _, owed := credit.Pending[settlementCreditKey(bob)]; !owed {
+		t.Fatalf("pending settlement credit after task A's full release = %+v, want bob (task B's own) still owed: a release must never cross a generation boundary (LEGION-513)", credit.Pending)
+	}
+	taskBState := taskB.lockExistingState(artifactID)
+	if taskBState == nil {
+		t.Fatalf("task B holds no state for the document after task A's release")
+	}
+	_, bobOwedOnB := taskBState.pending[actorKey(bob)]
+	taskB.unlockState(artifactID, taskBState)
+	if !bobOwedOnB {
+		t.Fatalf("task B's own room no longer owes bob after task A's release; its in-memory state and the row must agree")
+	}
+}
+
 // A room's creditSeq restarts at zero on every load (a fresh roomState's fresh atomic.Uint64),
-// but the row's released_through watermark and each pending entry's own credit_seq, from before
-// the load, do not - unless resetSettlementCreditSequence resets them. Without that reset, a
-// released_through left over from several versions' releases before the reload would make
-// upsertSettlementCredit's gate discard a genuinely new, low-sequence credit as already consumed
-// (LEGION-513).
+// and the row's released_through watermark and each pending entry's own credit_seq, from before
+// the load, do not restart with it - a load must never durably reset them under the document's
+// advisory lock to fix that (a durable writer can hold it, and the load would hang forever, the
+// deadlock round 17 fixed). Instead every load bumps the row's generation
+// (bumpSettlementCreditGeneration) and adopts every existing pending entry into it, so a release
+// gated on the old, unreset released_through never applies to this fresh room's own, newly
+// generationed credits at all - a genuinely new, low-sequence credit is never discarded as
+// already consumed by a stale watermark from a generation it does not belong to (LEGION-513).
 func TestANewCreditAfterARoomReloadIsNotDiscardedByAStaleWatermark(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
@@ -1087,7 +1208,7 @@ func creditOf(lastActor *model.Actor, pending ...model.Actor) settlementCredit {
 	for _, actor := range pending {
 		authors[actorKey(actor)] = actor
 	}
-	return settlementCreditFor(authors, lastActor, 0)
+	return settlementCreditFor(authors, lastActor, 0, 0)
 }
 
 // appendSettlementCredit records credit as a document update's own transaction does. creditSeq is

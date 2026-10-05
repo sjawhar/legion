@@ -336,13 +336,24 @@
   room had already released stayed in the row and came back into the room on its next load, or,
   the opposite way, a browser's credit the room still owed - landed in the race window between
   an upload's own early, unlocked read of the room and its eventual commit - was wiped from the
-  row while the room kept it owed. A fresh room's `creditSeq` restarts at zero on every load; a
-  load never takes the document's advisory lock to fix that durably (a durable writer can hold
-  it, and the load would hang), so it instead seeds `creditSeq` in memory from the row's own
-  high-water mark - `released_through`, and every entry's `credit_seq` - which it already reads
-  without that lock, never regressing an existing, still-live room's own counter. Otherwise a
-  credit genuinely new to the fresh counter could be discarded as already consumed by a stale,
-  large watermark left over from before (LEGION-513).
+  row while the room kept it owed. A rolling deploy can hold two Dispatch tasks' own live rooms
+  for one document at once, each with its own in-process `creditSeq` counter: a release
+  comparing sequence numbers alone could take another process's own, genuinely unsettled entry
+  if the numbers happened to collide. Each pending entry now also carries the room's own
+  `generation` (`settlementCredit.PendingGeneration`, `roomState.creditGeneration`), a
+  per-room-load instance id a release compares before it ever reads an entry's sequence, so a
+  release only ever takes out an entry from its own room's generation. A fresh room gets its own
+  fresh generation, and adopts every pending entry the row already held into it, the moment it
+  loads (`bumpSettlementCreditGeneration`, `mergeSettlementCreditLocked`) - needing no lock of
+  its own, a durable writer could hold and hang the load against (the wedge a load must never
+  risk) - so an entry whose own generation can never release it again (the task that credited it
+  stopped first) is adopted forward rather than lost or stuck forever, and a fresh room's
+  `creditSeq` restarting at zero no longer needs a watermark seed to stay safe: a different
+  generation's watermark never applies to it at all (LEGION-513). A forced eviction
+  (`evictRoom`, unlike the ordinary release path) can also orphan a version's capture along with
+  its room state; `forgetLocked` now carries a forgotten state's outstanding `pendingVersions`
+  forward to the next state the same room's next load creates, so the version number that
+  capture's own transaction still tries to release is not left behind.
 - Every read of an artifact's `project_key` tolerates a null: `scanArtifact` (every artifact read
   by id, ref key, owner or name, and both anchor locks), an ask's anchor artifact, a comment
   event's and an anchor refresh's payload, a suggestion's project, a document write's owner lock,

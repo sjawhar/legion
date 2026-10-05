@@ -87,8 +87,18 @@ type Service struct {
 	unrecordedMarkTTL time.Duration
 	rooms             sync.Map
 	shutdownRooms     sync.Map
-	nextConnection    atomic.Uint64
-	stopping          atomic.Bool
+	// orphanedVersions carries a forgotten state's pendingVersions forward to the next state
+	// lookUpState creates for the same room, when evictRoom forgot it with the check
+	// releaseIfUnusedLocked makes (unusedLocked) unmet - a version's capture
+	// (rememberPendingVersion) still outstanding when an unrelated room failure or Quiesce
+	// forces the eviction through regardless. Without this, that capture is lost with the old
+	// state: the transaction that stored it already durably released its row (recordSettlementCredit,
+	// inside the same commit, before it), but its room-side release (commitVersionLocked) finds
+	// nothing for its version number on the fresh room lockState creates next, and does nothing
+	// (LEGION-513).
+	orphanedVersions sync.Map
+	nextConnection   atomic.Uint64
+	stopping         atomic.Bool
 	// quiescing holds off every settlement while Quiesce empties the rooms, so a timer that
 	// fires mid-quiesce cannot re-arm the room Quiesce just closed.
 	quiescing atomic.Bool

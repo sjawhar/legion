@@ -8,6 +8,7 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
@@ -19,34 +20,49 @@ import (
 // entry's own capture against, so an author credited again under the same key after that point -
 // a different, newer entry - survives a release that names or sweeps the key (LEGION-513). A key
 // Pending holds but PendingSeq does not - this transaction's own upsert (recordSettlementCredit),
-// whose room-side sequence is not yet assigned when the row is written, since the room's own bump
-// happens only after commit (Ledger.creditLocked) - reads as zero: a release's own filter treats
-// zero as exempt, never satisfying its "at or before" comparison, so an entry with no sequence of
-// its own is never swept until something gives it a real one. LastActor is the latest edit source
+// whose room-side sequence is not yet assigned when the row is written - reads as zero: a
+// release's own filter treats zero as exempt, never satisfying its "at or before" comparison, so
+// an entry with no sequence of its own is never swept until something gives it a real one.
+//
+// PendingGeneration is each entry's own per-room-load instance id, the row's twin of
+// roomState.creditGeneration: a release only ever takes out an entry whose generation matches
+// the releasing room's own, never one from a different generation. roomSeq alone is not a total
+// order across processes - a rolling deploy can hold two Dispatch tasks' own live rooms for one
+// document at once, each with its own in-process roomSeq counter, so a release comparing roomSeq
+// alone could discard another task's genuinely unsettled, lower-numbered entry. generation makes
+// that comparison meaningless across rooms: two different rooms never share one, so a release
+// never reaches across the boundary a cross-process roomSeq comparison could not see. An entry
+// from an abandoned generation - the task that credited it stopped before releasing it - is never
+// lost and never stuck forever: the next room to load this document adopts every row entry into
+// its own generation (bumpSettlementCreditGeneration), after which that room's own release can
+// take it out normally, or a further load adopts it again. LastActor is the latest edit source
 // used by ask reconciliation and events when no version is written. It lives beside the pending
 // settlement so closing a document's issue, a room release or a restart cannot lose its
-// attribution before that settlement commits. CreditSeq is the room's creditSeq when this credit
-// was captured (creditContentChange); it never reaches storage (json:"-") - it rides along only
-// as far as upsertSettlementCredit's own gate check, which discards a credit whose CreditSeq is at
-// or before the row's released_through watermark (a version's release already consumed everything
-// visible as of that point). Its zero value means "not subject to the watermark":
-// recordSettlementCredit's own upserts never set it, since a write's own credit and its own
-// version's release are already ordered by the same transaction.
+// attribution before that settlement commits. Generation is the row's own current generation,
+// read back (unlike CreditSeq, which only ever travels toward storage): a release compares its
+// own room's generation against it before trusting any PendingGeneration entry at all, so a
+// release whose room has since been superseded (adopted by a later load while the release was in
+// flight) touches nothing. CreditSeq is the room's creditSeq when this credit was captured
+// (creditContentChange); it never reaches storage (json:"-") - it rides along only as far as
+// upsertSettlementCredit's own gate check, which discards a credit whose CreditSeq is at or
+// before the row's released_through watermark and whose Generation matches the row's (a version's
+// release already consumed everything visible as of that point, within that generation). Its zero
+// value means "not subject to the watermark": recordSettlementCredit's own upserts never set it,
+// since a write's own credit and its own version's release are already ordered by the same
+// transaction.
 type settlementCredit struct {
-	Pending    map[string]model.Actor `json:"pending"`
-	PendingSeq map[string]uint64      `json:"pending_seq"`
-	LastActor  *model.Actor           `json:"last_actor,omitempty"`
-	// ReleasedThrough is the row's own released_through watermark, read back (unlike CreditSeq,
-	// which only ever travels toward storage): a fresh room's load seeds its own creditSeq
-	// counter from it, and from every entry's own PendingSeq, so a credit this room makes next is
-	// never mistaken for one the watermark already consumed (onLoadDocument, LEGION-513).
-	ReleasedThrough uint64 `json:"released_through"`
-	CreditSeq       uint64 `json:"-"`
+	Pending           map[string]model.Actor `json:"pending"`
+	PendingSeq        map[string]uint64      `json:"pending_seq"`
+	PendingGeneration map[string]uint64      `json:"pending_generation"`
+	LastActor         *model.Actor           `json:"last_actor,omitempty"`
+	ReleasedThrough   uint64                 `json:"released_through"`
+	Generation        uint64                 `json:"generation"`
+	CreditSeq         uint64                 `json:"-"`
 }
 
-// MarshalJSON writes Pending and PendingSeq as objects even when nil, so every encoded credit
-// carries an object for the pending-settlement row's merge (upsertSettlementCredit) to
-// concatenate.
+// MarshalJSON writes Pending, PendingSeq and PendingGeneration as objects even when nil, so every
+// encoded credit carries an object for the pending-settlement row's merge (upsertSettlementCredit)
+// to concatenate.
 func (credit settlementCredit) MarshalJSON() ([]byte, error) {
 	type wire settlementCredit
 	if credit.Pending == nil {
@@ -55,25 +71,31 @@ func (credit settlementCredit) MarshalJSON() ([]byte, error) {
 	if credit.PendingSeq == nil {
 		credit.PendingSeq = map[string]uint64{}
 	}
+	if credit.PendingGeneration == nil {
+		credit.PendingGeneration = map[string]uint64{}
+	}
 	return json.Marshal(wire(credit))
 }
 
-// settlementCreditFor builds a credit whose every pending author shares creditSeq: the point
-// this one call captured them at (creditContentChange), or zero for an upsert this same
-// transaction's own commit will immediately release (recordSettlementCredit, whose release
-// already runs first in its own order and so never reads these entries at all, and whose zero
-// tag keeps any later, unrelated release from reading them as "at or before" its own point
-// either). settlementCreditLocked, whose entries keep their own individually-captured sequences
-// from state.pending, builds its credit directly instead of through this helper.
-func settlementCreditFor(pending map[string]model.Actor, lastActor *model.Actor, creditSeq uint64) settlementCredit {
+// settlementCreditFor builds a credit whose every pending author shares creditSeq and generation:
+// the point and the room instance this one call captured them at (creditContentChange), or zero
+// creditSeq for an upsert this same transaction's own commit will immediately release
+// (recordSettlementCredit, whose release already runs first in its own order and so never reads
+// these entries at all, and whose zero tag keeps any later, unrelated release from reading them
+// as "at or before" its own point either) tagged with the writing room's own generation regardless.
+// settlementCreditLocked, whose entries keep their own individually-captured sequences from
+// state.pending, builds its credit directly instead of through this helper.
+func settlementCreditFor(pending map[string]model.Actor, lastActor *model.Actor, creditSeq, generation uint64) settlementCredit {
 	credit := settlementCredit{
-		Pending:    make(map[string]model.Actor, len(pending)),
-		PendingSeq: make(map[string]uint64, len(pending)),
+		Pending:           make(map[string]model.Actor, len(pending)),
+		PendingSeq:        make(map[string]uint64, len(pending)),
+		PendingGeneration: make(map[string]uint64, len(pending)),
 	}
 	for _, actor := range pending {
 		key := settlementCreditKey(actor)
 		credit.Pending[key] = actor
 		credit.PendingSeq[key] = creditSeq
+		credit.PendingGeneration[key] = generation
 	}
 	if lastActor != nil {
 		actor := *lastActor
@@ -87,18 +109,22 @@ func settlementCreditKey(actor model.Actor) string {
 }
 
 // settlementCreditLocked is the room's whole pending credit, each author at its own creditSeq
-// (pendingAuthor.creditSeq) rather than one shared point: unlike settlementCreditFor's callers,
-// its entries were captured at however many different sequences the room credited them at. The
-// caller holds state.mu.
+// (pendingAuthor.creditSeq) rather than one shared point, all under this one room's own
+// generation (pendingAuthor.generation is always state.creditGeneration, since every entry a
+// live room credits is this room's own). The caller holds state.mu.
 func (state *roomState) settlementCreditLocked() settlementCredit {
+	generation := state.creditGeneration.Load()
 	credit := settlementCredit{
-		Pending:    make(map[string]model.Actor, len(state.pending)),
-		PendingSeq: make(map[string]uint64, len(state.pending)),
+		Pending:           make(map[string]model.Actor, len(state.pending)),
+		PendingSeq:        make(map[string]uint64, len(state.pending)),
+		PendingGeneration: make(map[string]uint64, len(state.pending)),
+		Generation:        generation,
 	}
 	for _, entry := range state.pending {
 		key := settlementCreditKey(entry.actor)
 		credit.Pending[key] = entry.actor
 		credit.PendingSeq[key] = entry.creditSeq
+		credit.PendingGeneration[key] = generation
 	}
 	if state.lastActor != nil {
 		actor := *state.lastActor
@@ -112,11 +138,14 @@ func (credit settlementCredit) empty() bool {
 }
 
 // mergeSettlementCreditLocked merges a durable credit into the room, each author at the room's
-// current creditSeq rather than whatever credit.PendingSeq recorded for it: that sequence was
-// this room's own, now-reset counter from before the load that reads this credit in
-// (resetSettlementCreditSequence), which no longer means what it did, so a merged entry is
-// stamped fresh instead, exactly as one this fresh room first credits itself is. The caller holds
-// state.mu.
+// own current creditSeq and creditGeneration rather than whatever credit.PendingSeq/
+// PendingGeneration recorded: those were some room's own, possibly a different process's or an
+// earlier instance's, which this room's release can never compare against directly
+// (releaseSettlementCredit's whole reason for existing) - this is the adoption that keeps a
+// merged entry from staying stuck under a generation nothing will ever release again, since it
+// is restamped under this room's own generation as surely as one this room credits itself is.
+// bumpSettlementCreditGeneration performs the same adoption durably, in the same load, so the
+// row and the room agree. The caller holds state.mu.
 func (state *roomState) mergeSettlementCreditLocked(credit settlementCredit) {
 	creditSeq := state.creditSeq.Load()
 	for _, actor := range credit.Pending {
@@ -193,26 +222,31 @@ func pendingSettlementCredit(ctx context.Context, q Queryer, room string) (bool,
 }
 
 // upsertSettlementCredit merges credit into room's pending-settlement row: its pending authors
-// and their own PendingSeq both join the row's, a later credit for an actor replacing the
-// earlier one's authors and sequence together. A credit naming a last actor or pending authors
-// sets the row's last actor to its own, none included: the room clears its last actor for an edit
-// no one actor can be credited with (creditContentChange), and that credit names the edit's
-// authors without one. An append with no credit keeps the row's. Every operand is parenthesized:
-// PostgreSQL gives `->` and `||` the same precedence. A stored or encoded pending or pending_seq
-// that is not an object - a legacy or defensive row a write never produced - counts as empty,
-// since concatenating an object with anything else raises "cannot concatenate jsonb object".
-// updateMarkedAt is true only for a newly appended document update; recording authors after its
-// transaction committed or while closing an issue must not make an old row wait another
-// resumption age.
+// and their own PendingSeq/PendingGeneration all join the row's, a later credit for an actor
+// replacing the earlier one's authors, sequence and generation together. A credit naming a last
+// actor or pending authors sets the row's last actor to its own, none included: the room clears
+// its last actor for an edit no one actor can be credited with (creditContentChange), and that
+// credit names the edit's authors without one. An append with no credit keeps the row's. Every
+// operand is parenthesized: PostgreSQL gives `->` and `||` the same precedence. A stored or
+// encoded pending, pending_seq or pending_generation that is not an object - a legacy or
+// defensive row a write never produced - counts as empty, since concatenating an object with
+// anything else raises "cannot concatenate jsonb object". updateMarkedAt is true only for a newly
+// appended document update; recording authors after its transaction committed or while closing an
+// issue must not make an old row wait another resumption age.
 //
-// CreditSeq (settlementCredit's own field) is the room's creditSeq when credit was captured (0
-// for a credit this same transaction's own version will immediately release, which never races a
-// concurrent reader - see Ledger.recordSettlementCredit). A credit captured at or before the
-// row's released_through watermark - set by a version's release (releaseSettlementCredit) that
-// ran while this write's own durable append waited behind the document's advisory lock - is
-// strictly older than what that release already consumed from the room's pending, so merging it
-// would resurrect an author a version already credited; the row is left exactly as it stood
-// instead.
+// The gate below discards credit.CreditSeq wholesale when it is both positive and at or before
+// the row's released_through, provided credit.Generation still matches the row's own current
+// generation: a credit whose generation has since been superseded (bumpSettlementCreditGeneration
+// ran a load between this write's capture and this upsert reaching the row) is never gated by a
+// watermark from a generation it no longer belongs to, and is merged as any other new credit
+// would be - the merge's own per-key authority, not this gate, is what keeps it correct, since an
+// adopting load has already restamped the row's own entries under the new generation by the time
+// this upsert can run. CreditSeq (settlementCredit's own aggregate field) is the room's creditSeq
+// when credit was captured (0 for a credit this same transaction's own version will immediately
+// release, which never races a concurrent reader - see Ledger.recordSettlementCredit). A credit
+// captured at or before the row's released_through watermark, in the same generation, was already
+// consumed by the version's own release; merging it would resurrect an author that version already
+// credited durably, so the row is left exactly as it stood instead.
 func upsertSettlementCredit(ctx context.Context, tx pgx.Tx, room string, credit settlementCredit, updateMarkedAt bool) error {
 	encoded, err := json.Marshal(credit)
 	if err != nil {
@@ -224,6 +258,7 @@ func upsertSettlementCredit(ctx context.Context, tx pgx.Tx, room string, credit 
 			settlement_authors = case
 				when $3::bigint > 0
 					and $3::bigint <= coalesce((doc_settlements_pending.settlement_authors->>'released_through')::bigint, 0)
+					and $4::bigint = coalesce((doc_settlements_pending.settlement_authors->>'generation')::bigint, 0)
 				then doc_settlements_pending.settlement_authors
 				else jsonb_strip_nulls(jsonb_build_object(
 					'pending',
@@ -236,6 +271,11 @@ func upsertSettlementCredit(ctx context.Context, tx pgx.Tx, room string, credit 
 						then doc_settlements_pending.settlement_authors->'pending_seq' else '{}'::jsonb end) ||
 					(case when jsonb_typeof(excluded.settlement_authors->'pending_seq') = 'object'
 						then excluded.settlement_authors->'pending_seq' else '{}'::jsonb end),
+					'pending_generation',
+					(case when jsonb_typeof(doc_settlements_pending.settlement_authors->'pending_generation') = 'object'
+						then doc_settlements_pending.settlement_authors->'pending_generation' else '{}'::jsonb end) ||
+					(case when jsonb_typeof(excluded.settlement_authors->'pending_generation') = 'object'
+						then excluded.settlement_authors->'pending_generation' else '{}'::jsonb end),
 					'last_actor',
 					coalesce(
 						excluded.settlement_authors->'last_actor',
@@ -243,42 +283,48 @@ func upsertSettlementCredit(ctx context.Context, tx pgx.Tx, room string, credit 
 							then doc_settlements_pending.settlement_authors->'last_actor' end
 					),
 					'released_through',
-					coalesce((doc_settlements_pending.settlement_authors->>'released_through')::bigint, 0)
+					coalesce((doc_settlements_pending.settlement_authors->>'released_through')::bigint, 0),
+					'generation',
+					coalesce((doc_settlements_pending.settlement_authors->>'generation')::bigint, 0)
 				))
 			end,
-			marked_at = case when $4 then now() else doc_settlements_pending.marked_at end
-	`, room, string(encoded), int64(credit.CreditSeq), updateMarkedAt); err != nil {
+			marked_at = case when $5 then now() else doc_settlements_pending.marked_at end
+	`, room, string(encoded), int64(credit.CreditSeq), int64(credit.Generation), updateMarkedAt); err != nil {
 		return fmt.Errorf("record the document's pending settlement: %w", err)
 	}
 	return nil
 }
 
 // releaseSettlementCredit takes authors out of room's pending-settlement row, in the transaction
-// that wrote the version, releasing only an entry whose own pending_seq is positive and at or
-// before creditSeq - the point the version's capture read state.pending at (captureAuthors or,
-// for an upload, the write's last read, Ledger.WroteVersion) - never a zero entry, which marks
-// one this same transaction's own upsert is about to add below (recordSettlementCredit): zero can
-// never be "at or before" anything, so such an entry survives whatever release runs against the
-// row next, this one included - recordSettlementCredit also runs its own release first, before
-// its own upserts, so this is a second guard, not the only one, protecting a different,
-// unrelated transaction's zero-tagged entry it has not yet gotten around to replacing with a real
-// sequence.
+// that wrote the version, releasing only an entry whose own pending_generation matches generation
+// - the releasing room's own, which a different room's entry, however its pending_seq compares,
+// can never match (LEGION-513: a rolling deploy's two Dispatch tasks each hold their own live room
+// for one document, each with its own in-process roomSeq counter no release may compare across) -
+// and whose pending_seq is positive and at or before creditSeq - the point the version's capture
+// read state.pending at (captureAuthors or, for an upload, the write's last read,
+// Ledger.WroteVersion) - never a zero entry, which marks one this same transaction's own upsert is
+// about to add below (recordSettlementCredit): zero can never be "at or before" anything, so such
+// an entry survives whatever release runs against the row next, this one included -
+// recordSettlementCredit also runs its own release first, before its own upserts, so this is a
+// second guard, not the only one, protecting a different, unrelated transaction's zero-tagged
+// entry it has not yet gotten around to replacing with a real sequence.
 //
 // fullRelease, an upload's own full release (Ledger.WroteVersion, versionPending.fullRelease),
-// takes out every eligible entry regardless of key, ignoring authors entirely: an upload's
-// version credits its uploader alone, but its write may have changed or removed any pending edit
-// visible as of its last read of the room, so its release must reach every one of them
-// (releaseAllPendingLocked's durable counterpart) - or a browser's already-released credit
-// survives in the row and resurrects into the room on its next load (onLoadDocument,
-// mergeSettlementCreditLocked, LEGION-513). An ordinary, non-full release takes out only the
-// named authors' entries and is a no-op when none are named.
+// takes out every eligible entry of this room's own generation regardless of key, ignoring
+// authors entirely: an upload's version credits its uploader alone, but its write may have
+// changed or removed any pending edit visible as of its last read of the room, so its release
+// must reach every one of them (releaseAllPendingLocked's durable counterpart) - or a browser's
+// already-released credit survives in the row and resurrects into the room on its next load
+// (onLoadDocument, mergeSettlementCreditLocked, LEGION-513). An ordinary, non-full release takes
+// out only the named authors' entries and is a no-op when none are named.
 //
 // Either way the row's last actor stays (ask reconciliation reads it once no pending author
-// remains), and released_through rises to creditSeq: a credit captured at or before that point is
-// already accounted for by this release, so a later upsertSettlementCredit call carrying it - an
-// append that was queued behind this same transaction's advisory lock when the version ran -
-// discards it instead of resurrecting an author this version already credited durably.
-func releaseSettlementCredit(ctx context.Context, tx pgx.Tx, room string, authors []model.Actor, creditSeq uint64, fullRelease bool) error {
+// remains), and released_through rises to creditSeq: a credit of this same generation captured at
+// or before that point is already accounted for by this release, so a later upsertSettlementCredit
+// call carrying it - an append that was queued behind this same transaction's advisory lock when
+// the version ran - discards it instead of resurrecting an author this version already credited
+// durably.
+func releaseSettlementCredit(ctx context.Context, tx pgx.Tx, room string, authors []model.Actor, creditSeq, generation uint64, fullRelease bool) error {
 	if !fullRelease && len(authors) == 0 {
 		return nil
 	}
@@ -291,15 +337,31 @@ func releaseSettlementCredit(ctx context.Context, tx pgx.Tx, room string, author
 	// entirely and leaving a later append's gate check comparing against zero.
 	if _, err := tx.Exec(ctx, `
 		insert into doc_settlements_pending (artifact_id, settlement_authors)
-			values ($1, jsonb_build_object('pending', '{}'::jsonb, 'pending_seq', '{}'::jsonb, 'released_through', $4::bigint))
+			values ($1, jsonb_build_object('pending', '{}'::jsonb, 'pending_seq', '{}'::jsonb, 'pending_generation', '{}'::jsonb, 'released_through', $4::bigint, 'generation', $5::bigint))
 		on conflict (artifact_id) do update set
 			settlement_authors = jsonb_set(
 				jsonb_set(
 					jsonb_set(
-						doc_settlements_pending.settlement_authors,
-						'{pending}',
-						(case when jsonb_typeof(doc_settlements_pending.settlement_authors->'pending') = 'object'
-							then doc_settlements_pending.settlement_authors->'pending' else '{}'::jsonb end)
+						jsonb_set(
+							doc_settlements_pending.settlement_authors,
+							'{pending}',
+							(case when jsonb_typeof(doc_settlements_pending.settlement_authors->'pending') = 'object'
+								then doc_settlements_pending.settlement_authors->'pending' else '{}'::jsonb end)
+							- (
+								select coalesce(array_agg(k), '{}'::text[])
+								from jsonb_object_keys(
+									case when jsonb_typeof(doc_settlements_pending.settlement_authors->'pending') = 'object'
+										then doc_settlements_pending.settlement_authors->'pending' else '{}'::jsonb end
+								) as k
+								where ($3::bool or k = any($2::text[]))
+									and coalesce((doc_settlements_pending.settlement_authors->'pending_seq'->>k)::bigint, 0) > 0
+									and (doc_settlements_pending.settlement_authors->'pending_seq'->>k)::bigint <= $4::bigint
+									and coalesce((doc_settlements_pending.settlement_authors->'pending_generation'->>k)::bigint, -1) = $5::bigint
+							)
+						),
+						'{pending_seq}',
+						(case when jsonb_typeof(doc_settlements_pending.settlement_authors->'pending_seq') = 'object'
+							then doc_settlements_pending.settlement_authors->'pending_seq' else '{}'::jsonb end)
 						- (
 							select coalesce(array_agg(k), '{}'::text[])
 							from jsonb_object_keys(
@@ -309,11 +371,12 @@ func releaseSettlementCredit(ctx context.Context, tx pgx.Tx, room string, author
 							where ($3::bool or k = any($2::text[]))
 								and coalesce((doc_settlements_pending.settlement_authors->'pending_seq'->>k)::bigint, 0) > 0
 								and (doc_settlements_pending.settlement_authors->'pending_seq'->>k)::bigint <= $4::bigint
+								and coalesce((doc_settlements_pending.settlement_authors->'pending_generation'->>k)::bigint, -1) = $5::bigint
 						)
 					),
-					'{pending_seq}',
-					(case when jsonb_typeof(doc_settlements_pending.settlement_authors->'pending_seq') = 'object'
-						then doc_settlements_pending.settlement_authors->'pending_seq' else '{}'::jsonb end)
+					'{pending_generation}',
+					(case when jsonb_typeof(doc_settlements_pending.settlement_authors->'pending_generation') = 'object'
+						then doc_settlements_pending.settlement_authors->'pending_generation' else '{}'::jsonb end)
 					- (
 						select coalesce(array_agg(k), '{}'::text[])
 						from jsonb_object_keys(
@@ -323,13 +386,72 @@ func releaseSettlementCredit(ctx context.Context, tx pgx.Tx, room string, author
 						where ($3::bool or k = any($2::text[]))
 							and coalesce((doc_settlements_pending.settlement_authors->'pending_seq'->>k)::bigint, 0) > 0
 							and (doc_settlements_pending.settlement_authors->'pending_seq'->>k)::bigint <= $4::bigint
+							and coalesce((doc_settlements_pending.settlement_authors->'pending_generation'->>k)::bigint, -1) = $5::bigint
 					)
 				),
 				'{released_through}',
-				to_jsonb(greatest(coalesce((doc_settlements_pending.settlement_authors->>'released_through')::bigint, 0), $4::bigint))
+				to_jsonb(
+					case when coalesce((doc_settlements_pending.settlement_authors->>'generation')::bigint, 0) = $5::bigint
+						then greatest(coalesce((doc_settlements_pending.settlement_authors->>'released_through')::bigint, 0), $4::bigint)
+						else coalesce((doc_settlements_pending.settlement_authors->>'released_through')::bigint, 0)
+					end
+				)
 			)
-	`, room, keys, fullRelease, int64(creditSeq)); err != nil {
+	`, room, keys, fullRelease, int64(creditSeq), int64(generation)); err != nil {
 		return fmt.Errorf("release the version's authors from the document's pending settlement: %w", err)
 	}
 	return nil
+}
+
+// bumpSettlementCreditGeneration gives room a new generation - its own per-room-load instance id
+// - the moment a fresh roomState loads it (onLoadDocument), and durably adopts every pending entry
+// the row already holds into that new generation, with its own pending_seq reset to zero (the
+// same sentinel recordSettlementCredit's own fresh upserts use): this room has not yet given any
+// of them a sequence of its own, so none is eligible for release until something re-credits it or
+// this room's own future capture reads it from state.pending (mergeSettlementCreditLocked performs
+// the same adoption in memory, in the same load). This is what keeps an entry a stopped task's
+// generation can never release again from staying stuck forever: the next room to load the
+// document, whichever process it runs in, adopts it into a generation that process's own releases
+// can reach. Takes rooms, the pool reserved for document loads, rather than the general pool a
+// load must not draw a second connection from (onLoadDocument's own comment on the wedge that
+// risks); needs no advisory lock, since it is one plain, atomic single-row UPDATE whose
+// correctness Postgres's own row-level locking already guarantees against a concurrent writer's
+// equally brief transaction - never an indefinite wait on a lock a long-lived document writer
+// could hold (LEGION-513, the deadlock round 17 fixed by removing exactly that kind of wait from
+// a room load). A document with no row yet starts at generation 1.
+func bumpSettlementCreditGeneration(ctx context.Context, rooms *pgxpool.Pool, room string) (uint64, error) {
+	var generation int64
+	err := rooms.QueryRow(ctx, `
+		insert into doc_settlements_pending (artifact_id, settlement_authors)
+			values ($1, jsonb_build_object('pending', '{}'::jsonb, 'pending_seq', '{}'::jsonb, 'pending_generation', '{}'::jsonb, 'released_through', 0, 'generation', 1))
+		on conflict (artifact_id) do update set
+			settlement_authors = jsonb_set(
+				jsonb_set(
+					doc_settlements_pending.settlement_authors,
+					'{generation}',
+					to_jsonb(coalesce((doc_settlements_pending.settlement_authors->>'generation')::bigint, 0) + 1)
+				),
+				'{pending_generation}',
+				(select coalesce(jsonb_object_agg(
+						k,
+						coalesce((doc_settlements_pending.settlement_authors->>'generation')::bigint, 0) + 1
+					), '{}'::jsonb)
+					from jsonb_object_keys(
+						case when jsonb_typeof(doc_settlements_pending.settlement_authors->'pending') = 'object'
+							then doc_settlements_pending.settlement_authors->'pending' else '{}'::jsonb end
+					) as k)
+			) || jsonb_build_object(
+				'pending_seq',
+				(select coalesce(jsonb_object_agg(k, 0), '{}'::jsonb)
+					from jsonb_object_keys(
+						case when jsonb_typeof(doc_settlements_pending.settlement_authors->'pending') = 'object'
+							then doc_settlements_pending.settlement_authors->'pending' else '{}'::jsonb end
+					) as k)
+			)
+		returning (settlement_authors->>'generation')::bigint
+	`, room).Scan(&generation)
+	if err != nil {
+		return 0, fmt.Errorf("adopt the document's pending settlement into a new generation: %w", err)
+	}
+	return uint64(generation), nil
 }

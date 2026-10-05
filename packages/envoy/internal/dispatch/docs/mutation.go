@@ -46,6 +46,13 @@ type versionPending struct {
 	// commitVersionLocked can tell a capture a room failure or reload invalidated (state.gen
 	// moved since) from one still good to release.
 	generation uint64
+	// creditGeneration is the room's own creditGeneration (roomState.creditGeneration) when this
+	// capture read state.pending: the per-room-load instance id the durable release
+	// (releaseSettlementCredit) compares against each row entry's own, since creditSeq alone is
+	// not a total order across two processes' own rooms for the same document (LEGION-513). Not
+	// to be confused with generation above (state.gen), which is this room's own, in-process
+	// staleness counter for a reload or failure since this capture, not a cross-process concern.
+	creditGeneration uint64
 }
 
 type versionWrite struct {
@@ -1244,7 +1251,7 @@ func captureAuthors(state *roomState, write *liveWrite, actor *model.Actor) (ver
 	if actor != nil {
 		authors[actorKey(*actor)] = *actor
 	}
-	capture := versionPending{authors: authors, creditSeq: state.creditSeq.Load()}
+	capture := versionPending{authors: authors, creditSeq: state.creditSeq.Load(), creditGeneration: state.creditGeneration.Load()}
 	return capture, actorSlice(authors)
 }
 
