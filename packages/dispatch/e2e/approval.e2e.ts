@@ -1,12 +1,15 @@
-import { expect, test } from "@playwright/test";
+import { expect, type Page, test } from "@playwright/test";
 import type { Artifact } from "../web/src/api/types";
 
 import {
+  answerAsk,
+  createAsk,
   createComment,
   createIssue,
   createIssueArtifact,
   createNamedVersion,
   createProject,
+  createProjectDocument,
   editArtifact,
   getArtifact,
   getArtifactText,
@@ -18,6 +21,10 @@ import { documentEditor, needsYouCards, openSpecAndAwaitHeadingIds } from "./edi
 import { resetDatabase } from "./seed";
 import { assertWhole } from "./unclipped";
 import { asUser } from "./users";
+
+function drawer(page: Page) {
+  return page.getByRole("dialog", { name: "Inbox" });
+}
 
 const session = {
   actor: { kind: "session" as const, id: "e2e-session", origin: { session_title: "architect" } },
@@ -627,6 +634,186 @@ test("an approval request for an unassigned issue's non-primary document remains
       contentType: "image/png",
       path: issueShot,
     });
+  } finally {
+    await alice.close();
+  }
+});
+
+test("an approval ask's Inbox row, drawer link and bare ask route land on the spec with the approve control in view, while an anchored ask and an unanchored question still land where they do today", async ({
+  browser,
+}) => {
+  await createProject({ key: "GATE", name: "Gate" });
+  const issue = await createIssue(
+    { project: "GATE", spec: "The plan.", title: "Design gate" },
+    session
+  );
+  const requested = await requestApproval(issue.primary_artifact_id, {}, session);
+  const specPath = `/issues/${issue.key}/spec?ask=${requested.ask.id}`;
+
+  const anchoredAsk = await createAsk(
+    issue.key,
+    { anchor: { artifact: "spec", quote: "The plan" }, question: "Which plan?" },
+    session
+  );
+  const unanchoredAsk = await createAsk(
+    issue.key,
+    { options: [{ label: "Yes" }, { label: "No" }], question: "Ship it?" },
+    session
+  );
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+
+    // The Inbox row's title link lands on the spec, approve control in view — not the
+    // Conversation turn `useItemLanding` fell through to before this fix.
+    await page.goto("/");
+    await page
+      .locator(`[data-inbox-row="${requested.ask.id}"]`)
+      .locator("[data-inbox-owner]")
+      .click();
+    await expect(page).toHaveURL(specPath);
+    await expect(page.getByRole("tab", { name: "Spec" })).toHaveAttribute("aria-selected", "true");
+    await expect(page.getByRole("button", { name: "Approve", exact: true })).toBeVisible();
+
+    // The drawer's card names the document and version it asks about, as a link; following it
+    // opens the spec and closes the drawer.
+    await page.goto("/agents");
+    await page.locator("body").focus();
+    await page.keyboard.press("i");
+    await expect(drawer(page)).toBeVisible();
+    const drawerCard = drawer(page).getByTestId(`ask-${requested.ask.id}`);
+    await expect(drawerCard).toBeVisible();
+    const documentLink = drawerCard.getByRole("link", { name: "spec.md, version 1" });
+    await expect(documentLink).toBeVisible();
+    await documentLink.click();
+    await expect(page).toHaveURL(specPath);
+    await expect(drawer(page)).toHaveCount(0);
+
+    // An anchored ask still lands beside its document, and an unanchored question still lands
+    // on its Conversation turn: the approval fallback only fires when neither applies.
+    await page.goto(`/issues/${issue.key}/asks/${anchoredAsk.id}`);
+    await expect(page).toHaveURL(`/issues/${issue.key}/spec?ask=${anchoredAsk.id}`);
+
+    await page.goto(`/issues/${issue.key}/asks/${unanchoredAsk.id}`);
+    await expect(page).toHaveURL(`/issues/${issue.key}/asks/${unanchoredAsk.id}`);
+    await expect(page.getByRole("tab", { name: "Conversation" })).toHaveAttribute(
+      "aria-selected",
+      "true"
+    );
+    await expect(
+      page.locator("#issue-conversation-panel").getByTestId(`ask-${unanchoredAsk.id}`)
+    ).toContainText("Ship it?");
+  } finally {
+    await alice.close();
+  }
+});
+
+test("an open approval ask's document link reaches the issue's Conversation, and a project document's own approval link reaches its document, while the margin omits the link on both", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "GATE", name: "Gate" });
+  const issue = await createIssue(
+    { project: "GATE", spec: "The plan.", title: "Design gate" },
+    session
+  );
+  const requested = await requestApproval(issue.primary_artifact_id, {}, session);
+
+  const doc = await createProjectDocument(
+    "GATE",
+    { content: "# Runbook\n", name: "runbook.md" },
+    session
+  );
+  const docApproval = await requestApproval(doc.artifact.id, {}, session);
+  const docPath = `/projects/GATE/documents/${doc.artifact.slug}?ask=${docApproval.ask.id}`;
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+
+    // The issue's Conversation names the document the open request is about.
+    await page.goto(`/issues/${issue.key}`);
+    await page.getByRole("tab", { name: "Conversation" }).click();
+    const conversationCard = page
+      .locator("#issue-conversation-panel")
+      .getByTestId(`ask-${requested.ask.id}`);
+    const conversationLink = conversationCard.getByRole("link", { name: "spec.md, version 1" });
+    await expect(conversationLink).toBeVisible();
+    await conversationLink.click();
+    await expect(page).toHaveURL(`/issues/${issue.key}/spec?ask=${requested.ask.id}`);
+
+    // The issue margin lists the same ask (it is already on that document), without the link.
+    if (testInfo.project.name === "iphone") {
+      await page.getByRole("button", { name: "Open review panel (1 open ask)" }).click();
+    }
+    const marginCard = needsYouCards(page).getByTestId(`ask-${requested.ask.id}`);
+    await expect(marginCard).toBeVisible();
+    await expect(marginCard.getByRole("link", { name: /spec\.md, version/ })).toHaveCount(0);
+    if (testInfo.project.name === "iphone") {
+      await page.getByRole("button", { name: "Close review panel (1 open ask)" }).click();
+    }
+
+    // A project-level document's approval request links its own document the same way.
+    await page.goto("/");
+    const inboxCard = page.getByTestId(`ask-${docApproval.ask.id}`);
+    await expect(inboxCard.getByRole("link", { name: "runbook.md, version 1" })).toHaveAttribute(
+      "href",
+      docPath
+    );
+
+    await page.goto(`/projects/GATE/documents/${doc.artifact.slug}`);
+    if (testInfo.project.name === "iphone") {
+      await page.getByRole("button", { name: "Open review panel (1 open ask)" }).click();
+    }
+    const docMarginCard = needsYouCards(page).getByTestId(`ask-${docApproval.ask.id}`);
+    await expect(docMarginCard).toBeVisible();
+    await expect(docMarginCard.getByRole("link", { name: /runbook\.md, version/ })).toHaveCount(0);
+  } finally {
+    await alice.close();
+  }
+});
+
+test("an approval ask keeps its document link and the version it asked about once it is answered, even after the document moves further", async ({
+  browser,
+}) => {
+  await createProject({ key: "GATE", name: "Gate" });
+  const issue = await createIssue(
+    { project: "GATE", spec: "The plan.", title: "Design gate" },
+    session
+  );
+  const requested = await requestApproval(issue.primary_artifact_id, {}, session);
+  await answerAsk(
+    requested.ask.id,
+    { expected_edited_at: null, selected: ["Approve"] },
+    { login: "alice" }
+  );
+
+  // The document moves to a later version after the approval; the completed card still names
+  // the version this request approved, and its link still opens the current document.
+  await editArtifact(
+    issue.primary_artifact_id,
+    { ops: [{ op: "replace", find: "The plan.", with: "The revised plan." }] },
+    session
+  );
+  await expect
+    .poll(
+      async () => (await getArtifact(issue.primary_artifact_id, { login: "alice" })).versions.length
+    )
+    .toBeGreaterThan(1);
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}`);
+    await page.getByRole("tab", { name: "Conversation" }).click();
+    const conversationCard = page
+      .locator("#issue-conversation-panel")
+      .getByTestId(`ask-${requested.ask.id}`);
+    await expect(conversationCard).toContainText("Answered by");
+    const link = conversationCard.getByRole("link", { name: "spec.md, version 1" });
+    await expect(link).toBeVisible();
+    await link.click();
+    await expect(page).toHaveURL(`/issues/${issue.key}/spec?ask=${requested.ask.id}`);
   } finally {
     await alice.close();
   }

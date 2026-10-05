@@ -616,6 +616,11 @@ type Ask struct {
 	EditedAt          *string `json:"edited_at"`
 	// Approval names the document an approval ask is about; nil for questions.
 	Approval *AskApproval `json:"approval,omitempty"`
+	// ApprovalArtifact is the document Approval.ArtifactID names, hydrated the same way
+	// AnchorArtifact and BlockArtifact are: live, by its current slug and primary flag, not a
+	// snapshot from when the request opened. nil for questions, and for an approval ask whose
+	// document has since been deleted.
+	ApprovalArtifact *AskAnchorArtifact `json:"approval_artifact,omitempty"`
 	// WaitingOn is whose reply an open ask needs next: a moved approval request stays with its
 	// agent while RequestedVersion is below Version, and a hand-back returns it to the human until
 	// a reply newer than the one it answered decides it. Set on ask reads only (inbox rows, ask lists,
