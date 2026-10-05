@@ -902,7 +902,7 @@ export const dispatchToolSpecs = [
       "Do not use it for issue status, asks, or events; " +
       "use dispatch_read instead. Supply ref, issue, or project plus artifact; issue plus an omitted artifact reads the primary document. " +
       "A live read returns its document token for an optional dispatch_doc_edit precondition; use /blocks for per-block tokens. " +
-      "A picture (an uploaded PNG, JPEG, GIF or WebP of at most 5 MiB) comes back as an image you see, with its name, type, size and version; " +
+      "A picture (an uploaded PNG, JPEG, GIF or WebP of at most 3,750,000 bytes, 5 MB once base64-encoded) comes back as an image you see, with its name, type, size and version, every time you ask, including one a read already showed this session; " +
       "any other file that is not UTF-8 text is described, with the route that serves its bytes. " +
       OWNER_REFERENCE,
     arguments: (z) => ({
@@ -1026,8 +1026,9 @@ export const dispatchToolSpecs = [
       "Every read ends with `Referenced by:` (what cites or hangs off this node, each with its dispatch:// address, " +
       "an excerpt, and when) and `Links:` (what it cites), so tracing provenance is one call. " +
       "The pictures the shown messages, asks and comments embed come back as images you see, newest first, at most 8 " +
-      "and 10 MiB of them per read, each a PNG, JPEG, GIF or WebP of at most 5 MiB; a `Pictures:` section names each " +
-      "one shown, in order, and the rest by reference, for dispatch_doc_read. " +
+      "and 10 MiB of them per read, each a PNG, JPEG, GIF or WebP of at most 3,750,000 bytes (5 MB of base64); a `Pictures:` section names each " +
+      "one shown, in order, and the rest by reference, for dispatch_doc_read. A picture this session was already shown is named, not sent again " +
+      "(every request carries the session's history, and the provider refuses one over 32 MB); dispatch_doc_read shows it again. " +
       OWNER_REFERENCE,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),

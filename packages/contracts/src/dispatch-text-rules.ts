@@ -1,8 +1,9 @@
 /**
- * Two rules every TypeScript reader and writer of Dispatch text shares, so no copy drifts: the
- * session id an agent's conversation is addressed by, and the caption a picture line carries. The
- * Go server holds the same session-id rule (`text.IsSessionID`), pinned against the TypeScript
- * readers by `DISPATCH_TEXT_REFERENCES`.
+ * Three rules every TypeScript reader and writer of Dispatch text shares, so no copy drifts: the
+ * session id an agent's conversation is addressed by, the caption a picture line carries, and
+ * which uploads are pictures. The Go server holds the same session-id rule (`text.IsSessionID`),
+ * pinned against the TypeScript readers by `DISPATCH_TEXT_REFERENCES`, and classifies an upload
+ * as a picture by the same four types, read from its bytes.
  */
 
 /**
@@ -29,4 +30,20 @@ export function isSessionId(value: string): boolean {
  */
 export function pictureCaption(name: string): string {
   return name.replace(/[\\[\]`]/g, "\\$&").replace(/\s+/g, " ");
+}
+
+/** The picture types a model is shown and the server stores as `kind: image`: what their bytes
+ *  say, never a name or a header. Everything else, an SVG included, is a file. */
+export type PictureType = "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+
+const PICTURE_TYPES: Readonly<Record<string, true>> = {
+  "image/png": true,
+  "image/jpeg": true,
+  "image/gif": true,
+  "image/webp": true,
+};
+
+/** Whether a stated MIME type (no parameters) is one of the picture types. */
+export function isPictureType(mime: string): mime is PictureType {
+  return PICTURE_TYPES[mime] === true;
 }

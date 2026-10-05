@@ -8,7 +8,9 @@
   `Artifact.session_id` (optional: a Dispatch older than conversation-owned artifacts omits it) for
   an upload an agent's conversation owns; `dispatch_doc_read` and `dispatch_read` describe the
   pictures they return; the reference table pins `dispatch://agent/<session id>/artifact/<slug>`
-  and the picture syntax (LEGION-541).
+  and the picture syntax; `SESSION_ID_PATTERN` and `isSessionId`, the one session-id rule the
+  dashboard and envoy-client read a reference by (the server's `text.IsSessionID`), and
+  `pictureCaption`, the one caption a picture line carries (LEGION-541).
 
 ### Changed
 
