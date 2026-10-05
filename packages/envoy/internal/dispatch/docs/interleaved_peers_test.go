@@ -56,8 +56,8 @@ func TestARoomWhosePeersUpdatesAreStoredOutOfOrderSettlesBoth(t *testing.T) {
 	seedServiceText(t, service, artifactID, "before")
 	server := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
 	t.Cleanup(server.Close)
-	alpha := connectPeer(t, server.URL, artifactID)
-	beta := connectPeer(t, server.URL, artifactID)
+	alpha := connectPeer(t, server.URL, artifactID, "alice")
+	beta := connectPeer(t, server.URL, artifactID, "alice")
 	first.Store(uint64(alpha.Doc.ClientID()))
 	// A peer holds the room's document once it has applied the room's sync step 2, which comes
 	// after the step 1 it answers, so each peer's answer reaches the room ahead of its keystroke

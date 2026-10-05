@@ -22,13 +22,13 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
-// connectPeer connects alice's browser to artifactID's room through the document server at
+// connectPeer connects login's browser to artifactID's room through the document server at
 // serverURL, at the schema version the dashboard presents, so the room takes its edits.
-func connectPeer(t *testing.T, serverURL, artifactID string) *docstest.Peer {
+func connectPeer(t *testing.T, serverURL, artifactID, login string) *docstest.Peer {
 	t.Helper()
 	url := "ws" + strings.TrimPrefix(serverURL, "http") + "/ws/doc/" + artifactID +
 		"?schema_version=" + strconv.Itoa(pmdoc.SchemaVersion())
-	return docstest.Dial(t, url, http.Header{"X-Dispatch-User": []string{"alice"}}, artifactID, crdt.New())
+	return docstest.Dial(t, url, http.Header{"X-Dispatch-User": []string{login}}, artifactID, crdt.New())
 }
 
 func TestIssueCloseClosesOpenDocumentConnection(t *testing.T) {

@@ -2436,10 +2436,10 @@ func (s *Service) room(name string) *roomState {
 // room's update observer does (creditContentChange).
 func (s *Service) recordActor(room string, actor model.Actor) {
 	state := s.lockState(room)
-	state.pending[actorKey(actor)] = actor
+	state.creditVersion++
+	state.creditPendingLocked(actorKey(actor), actor)
 	state.lastActor = new(actor)
 	state.unsettled = true
-	state.creditVersion++
 	s.unlockState(room, state)
 }
 

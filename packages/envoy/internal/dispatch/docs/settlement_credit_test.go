@@ -8,8 +8,6 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"runtime"
-	"strconv"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -433,55 +431,43 @@ func TestABrowserEditQueuedBehindAnOpenVersionIsNotCreditedAgainAfterAReopen(t *
 	}
 }
 
-// connectBrowser connects login's browser to artifactID's room as the dashboard does - a websocket
-// at the schema version it presents - and returns once the browser holds the room's document. The
-// browser stays connected until the caller closes it or the room closes it. A room's last browser
-// leaving settles what the room is owed at once (settleLastPeer), so a test that needs credit left
-// pending keeps a browser connected until the issue's close, which stops that settlement first.
+// connectBrowser connects login's browser to artifactID's room (connectPeer) and returns once the
+// browser holds the room's document. The browser stays connected until the caller closes it or the
+// room closes it. A room's last browser leaving settles what the room is owed at once
+// (settleLastPeer), so a test that needs credit left pending keeps a browser connected until the
+// issue's close, which stops that settlement first.
 func connectBrowser(t *testing.T, serverURL, artifactID, login string) *docstest.Peer {
 	t.Helper()
-	url := "ws" + strings.TrimPrefix(serverURL, "http") + "/ws/doc/" + artifactID +
-		"?schema_version=" + strconv.Itoa(pmdoc.SchemaVersion())
-	browser := docstest.Dial(t, url, http.Header{"X-Dispatch-User": []string{login}}, artifactID, crdt.New())
+	browser := connectPeer(t, serverURL, artifactID, login)
 	if err := browser.AskForDocument(); err != nil {
 		t.Fatalf("ask the room for its document: %v", err)
 	}
-	<-browser.Answers
+	select {
+	case <-browser.Answers:
+	case <-browser.Ended:
+		t.Fatalf("%s's connection closed before the room sent the document", login)
+	case <-time.After(untilTestDeadline(t)):
+		t.Fatalf("the room did not send %s the document before the test's deadline", login)
+	}
 	return browser
 }
 
 // editAsBrowser replaces the document's text from browser's own copy and sends the room the update,
-// as a keystroke does: ygo applies it to the room in its own transaction, under the document's
-// lock - the path every browser edit takes. It returns once the room's update observer has run for
-// that update - creditContentChange credited it and recordUpdateClass counted its durable append -
-// whether or not the append has reached storage. The signal is an observer this helper registers
-// on the room after the service's own: ygo fires a transaction's update observers in the order they
-// were registered (reearth/ygo crdt/doc.go, the onUpdate snapshot loop), so this one runs after the
-// service's has finished with the same update. It waits as long as the test binary's deadline
-// allows rather than a fixed bound, which a loaded machine outruns.
+// as a keystroke does: the copy's tree is read and rewritten in the one transaction that makes the
+// update, under the copy's own lock, which the browser's reader applies the room's updates under.
+// ygo applies the update to the room in its own transaction, under the room's lock - the path every
+// browser edit takes. It returns once the room's update observer has run for that update -
+// creditContentChange credited it and recordUpdateClass counted its durable append - whether or not
+// the append has reached storage. The signal is an observer this helper registers on the room after
+// the service's own: ygo fires a transaction's update observers in the order they were registered
+// (reearth/ygo crdt/doc.go, the onUpdate snapshot loop), so this one runs after the service's has
+// finished with the same update.
 func editAsBrowser(t *testing.T, service *Service, artifactID string, browser *docstest.Peer, markdown string) {
 	t.Helper()
-	var target *pmdoc.Node
-	var fragment *crdt.YXmlFragment
-	var client crdt.ClientID
-	var sentFrom uint64
-	var readErr error
-	browser.WithDoc(func(doc *crdt.Doc) {
-		client = doc.ClientID()
-		sentFrom = doc.StateVector().Clock(client)
-		current, err := treeOf(doc)
-		if err != nil {
-			readErr = fmt.Errorf("read the browser's copy of the document: %w", err)
-			return
-		}
-		fragment = doc.GetXmlFragment(fragmentName)
-		if target, readErr = parseReplacing(current, markdown); readErr != nil {
-			readErr = fmt.Errorf("parse the browser's edit: %w", readErr)
-		}
-	})
-	if readErr != nil {
-		t.Fatal(readErr)
-	}
+	// These take the copy's lock themselves, so they are read before the transaction that holds it.
+	fragment := browser.Doc.GetXmlFragment(fragmentName)
+	client := browser.Doc.ClientID()
+	sentFrom := browser.Doc.StateVector().Clock(client)
 	room := service.srv.GetDoc(artifactID)
 	if room == nil {
 		t.Fatal("the room is not resident while its browser is connected")
@@ -494,50 +480,36 @@ func editAsBrowser(t *testing.T, service *Service, artifactID string, browser *d
 		}
 	})
 	defer unsubscribe()
+	var changeErr error
 	if _, err := browser.Send(func(txn *crdt.Transaction) {
-		if err := pmdoc.Update(txn, fragment, target); err != nil {
-			t.Errorf("apply the browser's edit: %v", err)
+		current, err := treeOfTransaction(txn, fragment)
+		if err != nil {
+			changeErr = fmt.Errorf("read the browser's copy of the document: %w", err)
+			return
 		}
-	}); err != nil {
-		t.Fatalf("send the browser's edit: %v", err)
-	}
-	timeout := time.Minute
-	if deadline, bounded := t.Deadline(); bounded {
-		timeout = time.Until(deadline) - 2*time.Second
+		target, err := parseReplacing(current, markdown)
+		if err != nil {
+			changeErr = fmt.Errorf("parse the browser's edit: %w", err)
+			return
+		}
+		changeErr = pmdoc.Update(txn, fragment, target)
+	}); err != nil || changeErr != nil {
+		t.Fatalf("send the browser's edit: %v %v", err, changeErr)
 	}
 	select {
 	case <-recorded:
-	case <-time.After(timeout):
-		t.Fatalf("the room did not record the browser's edit before the test's deadline")
+	case <-time.After(untilTestDeadline(t)):
+		t.Fatal("the room did not record the browser's edit before the test's deadline")
 	}
 }
 
-// Three browsers editing one document at once each read and transact their own copy while that
-// copy's reader applies the others' updates, and its own echoed back, on another goroutine. A read
-// of the copy's tree takes no lock of crdt.Doc's own, so docstest.Peer serializes it against the
-// reader (WithDoc); each browser edits several times, so its reads overlap the others' updates.
-func TestConcurrentBrowserEditsDoNotRaceAPeersOwnDocument(t *testing.T) {
-	service, artifactID := newTestService(t)
-	service.settle = time.Hour
-	seedServiceText(t, service, artifactID, "# Decision\n\nContext.\n")
-	httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
-	t.Cleanup(httpServer.Close)
-
-	logins := []string{"ann", "bo", "cy"}
-	browsers := make([]*docstest.Peer, len(logins))
-	for index, login := range logins {
-		browsers[index] = connectBrowser(t, httpServer.URL, artifactID, login)
+// untilTestDeadline is how long a wait may run: up to the test binary's deadline, less a margin
+// to fail by name, rather than a fixed bound a loaded machine outruns.
+func untilTestDeadline(t *testing.T) time.Duration {
+	if deadline, bounded := t.Deadline(); bounded {
+		return time.Until(deadline) - 2*time.Second
 	}
-	var wg sync.WaitGroup
-	for index, browser := range browsers {
-		wg.Go(func() {
-			for edit := range 10 {
-				editAsBrowser(t, service, artifactID, browser,
-					fmt.Sprintf("# Decision\n\nContext.\n\n%s's edit %d.\n", logins[index], edit))
-			}
-		})
-	}
-	wg.Wait()
+	return time.Minute
 }
 
 // connectedBrowsers is how many browsers the room has registered (state.connected).
@@ -622,6 +594,75 @@ func TestATwoPeerBrowserEditQueuedBehindAnOpenVersionIsNotCreditedAgainAfterAReo
 	want := []model.Actor{delta, dave}
 	if authors := latestVersionAuthors(t, service, artifactID); !reflect.DeepEqual(authors, want) {
 		t.Fatalf("the reopened document's next version credits %+v, want %+v (dave's own pending credit, not carol's)", authors, want)
+	}
+}
+
+// A browser edit made after an open version captured its authors, and before that version
+// commits, stays owed in the room and in the pending-settlement row alike. The version's release
+// takes out only the credit its capture read: carol credited again since is a later edit the
+// version does not hold, which the row keeps (its release watermark lets the later credit through)
+// and so must the room.
+func TestABrowserEditAfterAVersionsCaptureStaysOwedInTheRoomAndTheRow(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour // no settlement runs between the edits
+	ctx := context.Background()
+	seedServiceText(t, service, artifactID, "# Decision\n\nContext.\n")
+	httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
+	t.Cleanup(httpServer.Close)
+	carol := model.Actor{Kind: "user", ID: "carol"}
+	agent := model.Actor{Kind: "session", ID: "agent-session"}
+
+	browser := connectBrowser(t, httpServer.URL, artifactID, carol.ID)
+	editAsBrowser(t, service, artifactID, browser, "# Decision\n\nContext.\n\nCarol's first paragraph.\n")
+
+	tx, err := service.store.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the agent's transaction: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	joined, ledger := service.Join(ctx, tx)
+	defer ledger.Discard()
+	if _, err := service.ApplyOps(joined, artifactID, []model.EditOp{{Op: "insert", After: "end", Markdown: "Agent's paragraph.\n"}}, agent, nil); err != nil {
+		t.Fatalf("apply the agent's edit: %v", err)
+	}
+	if _, err := service.SnapshotVersion(joined, artifactID, agent); err != nil {
+		t.Fatalf("snapshot the agent's version: %v", err)
+	}
+	editAsBrowser(t, service, artifactID, browser, "# Decision\n\nContext.\n\nCarol's first paragraph.\n\nCarol's second paragraph.\n")
+	if err := ledger.Commit(ctx); err != nil {
+		t.Fatalf("commit the agent's transaction: %v", err)
+	}
+
+	requireOwedInRoomAndRow(t, service, artifactID, carol)
+}
+
+// requireOwedInRoomAndRow requires the room's pending authors and its pending-settlement row's to
+// be want alone, once every update the room has queued is durable.
+func requireOwedInRoomAndRow(t *testing.T, service *Service, artifactID string, want model.Actor) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := service.waitForDurableAppends(ctx, artifactID); err != nil {
+		t.Fatalf("wait for the room's updates to become durable: %v", err)
+	}
+	room := map[string]model.Actor{}
+	if state := service.lockExistingState(artifactID); state != nil {
+		for _, actor := range state.pending {
+			room[settlementCreditKey(actor)] = actor
+		}
+		service.unlockState(artifactID, state)
+	}
+	_, credit, err := pendingSettlementCredit(ctx, service.store.Pool, artifactID)
+	if err != nil {
+		t.Fatalf("read the pending-settlement row: %v", err)
+	}
+	row := credit.Pending
+	if row == nil {
+		row = map[string]model.Actor{}
+	}
+	wantKeyed := map[string]model.Actor{settlementCreditKey(want): want}
+	if !reflect.DeepEqual(room, wantKeyed) || !reflect.DeepEqual(row, wantKeyed) {
+		t.Fatalf("room owes %v and the row owes %v, want both to owe %v alone", room, row, wantKeyed)
 	}
 }
 

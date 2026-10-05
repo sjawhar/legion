@@ -29,6 +29,13 @@ type roomState struct {
 	mu        sync.Mutex
 	connected map[uint64]model.Actor
 	pending   map[string]model.Actor
+	// pendingSeq is the creditVersion at which each pending author was last credited. A version or
+	// settlement takes out only the authors it read - credited at or before the creditVersion it
+	// read them at - so an author credited again since stays owed for that later edit, as the
+	// pending-settlement row keeps the later credit past its release watermark
+	// (upsertSettlementCredit). Every write of `pending` goes through creditPendingLocked and
+	// releasePendingLocked, which keep the two maps alike.
+	pendingSeq map[string]uint64
 	// lastActor is the most recent edit's source: the actor of a service mutation, or the sole
 	// connected peer of a browser edit. Version writes clear `pending`, so a settlement that
 	// runs after an edit's own version was committed would otherwise attribute the block asks
@@ -99,6 +106,7 @@ func (s *Service) lookUpState(room string, create bool) *roomState {
 			value, _ = s.rooms.LoadOrStore(room, &roomState{
 				connected:       make(map[uint64]model.Actor),
 				pending:         make(map[string]model.Actor),
+				pendingSeq:      make(map[string]uint64),
 				pendingVersions: make(map[int]versionPending),
 				unrecorded:      make(map[pmdoc.MarkRef]time.Time),
 			})
@@ -292,4 +300,24 @@ func (s *Service) canAddConnection() bool {
 		return count < maxRoomConnections
 	})
 	return count < maxRoomConnections
+}
+
+// creditPendingLocked makes actor owed at the room's current creditVersion, which the caller has
+// already advanced for this credit. The caller holds state.mu.
+func (state *roomState) creditPendingLocked(key string, actor model.Actor) {
+	state.pending[key] = actor
+	state.pendingSeq[key] = state.creditVersion
+}
+
+// releasePendingLocked takes keys out of the room's pending authors where their credit was given
+// at or before through: the creditVersion a version captured them at, or a settlement read them
+// at. An author credited again after that point owes a later edit the reader did not hold, and
+// stays. The caller holds state.mu.
+func (state *roomState) releasePendingLocked(keys map[string]model.Actor, through uint64) {
+	for key := range keys {
+		if seq, owed := state.pendingSeq[key]; owed && seq <= through {
+			delete(state.pending, key)
+			delete(state.pendingSeq, key)
+		}
+	}
 }

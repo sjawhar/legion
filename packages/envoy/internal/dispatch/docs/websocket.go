@@ -528,12 +528,13 @@ func (s *Service) creditContentChange(room string, origin any) (settlementCredit
 	}
 	state := s.lockState(room)
 	defer s.unlockState(room, state)
+	state.creditVersion++
 	pending := make(map[string]model.Actor, len(state.connected))
 	var sole *model.Actor
 	ambiguous := false
 	for _, actor := range state.connected {
 		key := actorKey(actor)
-		state.pending[key] = actor
+		state.creditPendingLocked(key, actor)
 		pending[settlementCreditKey(actor)] = actor
 		if sole == nil {
 			sole = new(actor)
@@ -546,7 +547,6 @@ func (s *Service) creditContentChange(room string, origin any) (settlementCredit
 	}
 	state.lastActor = sole
 	state.unsettled = true
-	state.creditVersion++
 	return settlementCredit{Pending: pending, LastActor: sole}, state.creditVersion
 }
 

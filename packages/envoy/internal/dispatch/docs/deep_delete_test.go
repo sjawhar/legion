@@ -38,7 +38,7 @@ func TestDeletingADeeplyNestedLiveTreeNeedsNoStackPerLevel(t *testing.T) {
 		httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
 		t.Cleanup(httpServer.Close)
 
-		peer := connectPeer(t, httpServer.URL, artifactID)
+		peer := connectPeer(t, httpServer.URL, artifactID, "alice")
 		fragment := peer.Doc.GetXmlFragment(fragmentName)
 		root := crdt.NewYXmlElement("blockquote")
 		opening, err := peer.Send(func(txn *crdt.Transaction) { fragment.InsertElement(txn, 0, root) })

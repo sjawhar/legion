@@ -65,7 +65,7 @@ func (credit settlementCredit) empty() bool {
 
 func (state *roomState) mergeSettlementCreditLocked(credit settlementCredit) {
 	for _, actor := range credit.Pending {
-		state.pending[actorKey(actor)] = actor
+		state.creditPendingLocked(actorKey(actor), actor)
 	}
 	if credit.LastActor != nil {
 		actor := *credit.LastActor
@@ -111,6 +111,7 @@ func (s *Service) settlementCreditPersisted(room string, creditVersion uint64) {
 	}
 	if state.closed && state.creditVersion == creditVersion {
 		clear(state.pending)
+		clear(state.pendingSeq)
 		state.lastActor = nil
 		state.unsettled = false
 	}

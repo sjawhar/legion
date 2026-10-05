@@ -972,10 +972,11 @@ func stampBlockIDs(doc *crdt.Doc, origin any) (*pmdoc.Node, int, error) {
 	return stamped, minted, err
 }
 
-// settlementAuthors copies state's pending authors, which a settlement's version credits, and names
-// the actor its events carry: the first of those authors, or else the room's latest editor. The
-// caller holds state.mu.
-func settlementAuthors(state *roomState) (map[string]model.Actor, []model.Actor, model.Actor) {
+// settlementAuthors copies state's pending authors, which a settlement's version credits, names the
+// actor its events carry - the first of those authors, or else the room's latest editor - and
+// returns the creditVersion they were read at, the point the settlement's release takes out
+// authors credited at or before (releasePendingLocked). The caller holds state.mu.
+func settlementAuthors(state *roomState) (map[string]model.Actor, []model.Actor, model.Actor, uint64) {
 	pending := make(map[string]model.Actor, len(state.pending))
 	for key, actor := range state.pending {
 		pending[key] = actor
@@ -987,7 +988,7 @@ func settlementAuthors(state *roomState) (map[string]model.Actor, []model.Actor,
 	} else if state.lastActor != nil {
 		actor = *state.lastActor
 	}
-	return pending, authors, actor
+	return pending, authors, actor, state.creditVersion
 }
 
 func (s *Service) settleRoom(room string, generation uint64) {
@@ -1247,7 +1248,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		finishSlots()
 		return
 	}
-	pending, authors, eventActor := settlementAuthors(state)
+	pending, authors, eventActor, readSeq := settlementAuthors(state)
 	s.unlockState(room, state)
 	reconciliation, err := s.reconcileAskBlocks(ctx, tx, room, owner, reconciled, beforeMarkdown, eventActor)
 	if err != nil {
@@ -1307,7 +1308,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		// releases the document, so an edit this tree holds that its observer has not yet credited
 		// is not credited here; its author stays pending for a later version.
 		state.mu.Lock()
-		pending, authors, eventActor = settlementAuthors(state)
+		pending, authors, eventActor, readSeq = settlementAuthors(state)
 		s.unlockState(room, state)
 		if s.afterSettleVersionRead != nil {
 			s.afterSettleVersionRead(room)
@@ -1428,10 +1429,9 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	state.mu.Lock()
 	if state.gen == generation {
 		state.settleFailures = 0
-		for key := range pending {
-			delete(state.pending, key)
-		}
-		// An author credited after this settlement read the room's still waits for the next.
+		// An author credited after this settlement read the room's, the same author credited again
+		// included, still waits for the next.
+		state.releasePendingLocked(pending, readSeq)
 		state.unsettled = len(state.pending) > 0
 		if !state.unsettled {
 			state.lastActor = nil

@@ -248,17 +248,7 @@ func (l *Ledger) addLiveWrite(write *liveWrite) {
 // version's release are already ordered by the same transaction, so neither needs the watermark
 // gate a concurrent reader's stale credit does (upsertSettlementCredit).
 func (l *Ledger) recordSettlementCredit(ctx context.Context) error {
-	released := make(map[string]map[string]struct{}, len(l.versions))
-	for _, written := range l.versions {
-		keys := released[written.artifactID]
-		if keys == nil {
-			keys = make(map[string]struct{}, len(written.version.Authors))
-			released[written.artifactID] = keys
-		}
-		for _, actor := range written.version.Authors {
-			keys[actorKey(actor)] = struct{}{}
-		}
-	}
+	released := l.releasedAuthors()
 	for artifactID, actor := range l.seeds {
 		if _, consumed := released[artifactID][actorKey(actor)]; consumed {
 			continue
@@ -319,11 +309,31 @@ func (l *Ledger) withState(locked map[string]*roomState, artifactID string, fn f
 	}
 }
 
+// releasedAuthors is, per artifact, the keys of the authors this transaction's own versions
+// credited: what their release takes out of the room and the pending-settlement row, so neither
+// the row nor the room is credited them again by the same transaction's own write.
+func (l *Ledger) releasedAuthors() map[string]map[string]struct{} {
+	released := make(map[string]map[string]struct{}, len(l.versions))
+	for _, written := range l.versions {
+		keys := released[written.artifactID]
+		if keys == nil {
+			keys = make(map[string]struct{}, len(written.version.Authors))
+			released[written.artifactID] = keys
+		}
+		for _, actor := range written.version.Authors {
+			keys[actorKey(actor)] = struct{}{}
+		}
+	}
+	return released
+}
+
 // creditLocked mirrors committed settlement credit into each room before the transaction's
 // versions release their captured authors and before its live writes publish. locked holds the
 // states commit already locked for this transaction's own versions, keyed by artifact id; an
 // artifact this loop touches that is not among them is locked and unlocked here as before
-// (withState).
+// (withState). An author this transaction's own version credits is not made owed, as
+// recordSettlementCredit does not upsert it: the version holds that credit, and a credit made here
+// would carry a creditVersion past the version's own capture, which its release then leaves owed.
 func (l *Ledger) creditLocked(locked map[string]*roomState) {
 	for artifactID, actor := range l.seeds {
 		l.withState(locked, artifactID, func(state *roomState) {
@@ -332,18 +342,21 @@ func (l *Ledger) creditLocked(locked map[string]*roomState) {
 			state.creditVersion++
 		})
 	}
+	released := l.releasedAuthors()
 	for _, artifactID := range l.order {
 		write := l.live[artifactID]
 		if len(write.credits) == 0 {
 			continue
 		}
 		l.withState(locked, artifactID, func(state *roomState) {
+			state.creditVersion++
 			for key, actor := range write.credits {
-				state.pending[key] = actor
+				if _, consumed := released[artifactID][key]; !consumed {
+					state.creditPendingLocked(key, actor)
+				}
 			}
 			state.lastActor = write.actor
 			state.unsettled = true
-			state.creditVersion++
 		})
 	}
 }
@@ -363,9 +376,7 @@ func commitVersionLocked(state *roomState, version model.Version) {
 	if state.gen != capture.generation {
 		return
 	}
-	for key := range capture.authors {
-		delete(state.pending, key)
-	}
+	state.releasePendingLocked(capture.authors, capture.creditSeq)
 }
 
 // seeded records that this transaction seeded artifactID's first text as actor (SeedText).

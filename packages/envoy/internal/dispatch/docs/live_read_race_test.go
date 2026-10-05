@@ -311,7 +311,7 @@ var typists sync.Map
 // resident, the peer's client id.
 func typeIntoDocument(t *testing.T, service *Service, serverURL, artifactID string, gap time.Duration) crdt.ClientID {
 	t.Helper()
-	peer := connectPeer(t, serverURL, artifactID)
+	peer := connectPeer(t, serverURL, artifactID, "alice")
 	fragment := peer.Doc.GetXmlFragment(fragmentName)
 	stopped := make(chan struct{})
 	first := make(chan struct{})
