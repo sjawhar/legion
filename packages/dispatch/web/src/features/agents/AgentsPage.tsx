@@ -57,7 +57,6 @@ import { resolveAuthor } from "../conversation/authors";
 import type { ReplyTarget } from "../conversation/composer-model";
 import { capabilityLabel, MODE_LABELS } from "../conversation/delivery";
 import { useHeldSends } from "../conversation/held-sends";
-import { firstLine, replyQuoteText } from "../conversation/ReplyQuote";
 import { ReplyTurn, ThreadReplies } from "../conversation/ReplyTurn";
 import { capabilitiesForTarget, TargetedMessageCard } from "../conversation/TargetedMessageCard";
 import { useAgents } from "../conversation/useAgents";
@@ -214,7 +213,7 @@ function agentReplyTo(agent: Agent, read: MessageRead, node: Message, author: st
     issueKey: read.message.issue_key,
     target: {
       author,
-      excerpt: firstLine(node.body),
+      excerpt: node.body,
       id: node.id,
       parentKind: "message",
       thread: exchangeDelivery(agent, read),
@@ -288,10 +287,8 @@ function AgentExchangeReply({
         parent === undefined
           ? undefined
           : {
-              text: replyQuoteText(
-                resolveAuthor(parent.author, titles).label,
-                firstLine(parent.body)
-              ),
+              author: resolveAuthor(parent.author, titles).label,
+              excerpt: parent.body,
               ...(parent.issue_key === null
                 ? {}
                 : {

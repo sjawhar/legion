@@ -445,6 +445,15 @@ a {
   font-weight: 600;
 }
 
+/* A `MarkdownPreview` sits inside a control (a link, a search option, a card's toggle), so its
+   links are inert spans (`data-markdown-link`) rather than nested `<a>`s; they keep Typography's
+   own `a` look so a reference still reads as one. */
+.dispatch-markdown [data-markdown-link] {
+  color: var(--tw-prose-links);
+  font-weight: 500;
+  text-decoration: underline;
+}
+
 /* The block's slots are `not-prose` (`AskBlockView`): the editor root is `prose`, and the card
    hosted in the slots must not be typeset as document text. Tailwind Typography cannot re-enter
    `prose` inside `not-prose`, so a `MarkdownBody` in the footer (a reply, the answer note, an

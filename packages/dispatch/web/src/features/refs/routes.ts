@@ -8,6 +8,7 @@ import { matchPath } from "react-router-dom";
 
 import type { ArtifactOwner } from "../../api/client";
 import type { Artifact } from "../../api/types";
+import { shortSessionId } from "./actor";
 
 export type IssueRoute =
   | { key: string; kind: "issue" }
@@ -669,6 +670,40 @@ export function referenceTargetKind(route: DispatchReferenceRoute): ReferenceTar
       return "document";
     default:
       return "issue";
+  }
+}
+
+/** A reference's compact plain-text form: what its link shows until the target's title
+ * resolves (or if it never does, e.g. a deleted ask), and what a plain-text headline
+ * (`useMarkdownHeadline`) writes in its place. Mirrors `buildDispatchReference`'s shape without
+ * the `dispatch://` scheme, so it reads like a second, shorter reference. */
+export function shortForm(route: DispatchReferenceRoute): string {
+  if (route.kind === "agent-artifact") {
+    return `agent/${shortSessionId(route.session)}/${route.slug}`;
+  }
+  if (isProjectRoute(route)) {
+    const base = `${route.project}/${route.slug}`;
+    return route.item === undefined ? base : `${base} ${route.item.kind}`;
+  }
+  switch (route.kind) {
+    case "issue":
+      return route.key;
+    case "spec":
+      return `${route.key} spec`;
+    case "conversation":
+      return `${route.key} log`;
+    case "children":
+      return `${route.key} children`;
+    case "artifacts":
+      return `${route.key} artifacts`;
+    case "artifact":
+      return `${route.key} ${route.slug}`;
+    case "ask":
+      return `${route.key} ask`;
+    case "comment":
+      return `${route.key} comment`;
+    case "message":
+      return `${route.key} message`;
   }
 }
 

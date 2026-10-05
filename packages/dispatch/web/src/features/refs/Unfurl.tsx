@@ -1,17 +1,7 @@
-import { type QueryClient, queryOptions, useQuery } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 
-import { api, artifactVersionPath } from "../../api/client";
-import { primarySpec } from "../../api/issue-cache";
-import type {
-  Artifact,
-  ArtifactText,
-  ArtifactVersionContent,
-  AskRead,
-  CommentRead,
-  IssueDetails,
-  MessageRead,
-} from "../../api/types";
+import { api } from "../../api/client";
 import {
   borderDefault,
   cardHoverBorder,
@@ -20,15 +10,13 @@ import {
   textSecondaryOnSurface,
 } from "../../theme/classes";
 
+import { MarkdownPreview } from "./MarkdownPreview";
+import { useReferenceTarget } from "./reference-target";
 import {
   type ComposerReference,
   composerReferences,
-  type DispatchReferenceRoute,
-  isProjectRoute,
   parseDispatchReference,
-  referencedArtifact,
   referenceSpans,
-  referenceTargetKind,
 } from "./routes";
 
 interface UnfurlProps {
@@ -40,250 +28,11 @@ interface GitHubIssue {
   title?: string;
 }
 
-export interface ReferenceTarget {
-  readonly title: string | undefined;
-  readonly description: string | undefined;
-  /** The bytes route of the picture a reference to an image artifact names - the version it pins,
-   *  else the latest - for a thumbnail beside the title; undefined for anything else. */
-  readonly picture: string | undefined;
-}
-
-export function excerpt(markdown: string | null | undefined, max = 160): string | undefined {
-  const text = markdown?.replace(/\s+/g, " ").trim();
-  return text === undefined || text.length === 0 ? undefined : text.slice(0, max);
-}
-
-function truncate(text: string, max: number): string | undefined {
-  const trimmed = text.trim();
-  if (trimmed === "") {
-    return undefined;
-  }
-  return trimmed.length > max ? `${trimmed.slice(0, max)}…` : trimmed;
-}
-
-export function firstLine(text: string): string | undefined {
-  const trimmed = text.trim();
-  if (trimmed === "") {
-    return undefined;
-  }
-  const newline = trimmed.indexOf("\n");
-  return newline === -1 ? trimmed : trimmed.slice(0, newline).trim();
-}
-
-const issueQuery = (key: string | undefined) =>
-  queryOptions({
-    queryKey: ["issue", key],
-    queryFn: () => api.getIssue(key ?? ""),
-  });
-
-/** One issue message and its replies, as the Conversation and the hover card read it. */
-export const messageQuery = (key: string | undefined, id: string | undefined) =>
-  queryOptions({
-    queryKey: ["issue", key, "message", id],
-    queryFn: () => api.getMessage(key ?? "", id ?? ""),
-  });
-
-const projectArtifactQuery = (project: string | undefined, slug: string | undefined) =>
-  queryOptions({
-    queryKey: ["project", project, "artifacts", slug],
-    queryFn: () => api.getProjectArtifact(project ?? "", slug ?? ""),
-  });
-
-/** An artifact of an agent's conversation, by its session and slug. */
-export const agentArtifactQuery = (session: string | undefined, slug: string | undefined) =>
-  queryOptions({
-    queryKey: ["agent-artifacts", session, slug],
-    queryFn: () => api.getAgentArtifact(session ?? "", slug ?? ""),
-  });
-
-/** A document's live text, or one immutable version of it when the reference pins a version. */
-export const artifactTextQuery = (id: string | undefined, version: number | undefined) =>
-  queryOptions<ArtifactText | ArtifactVersionContent>({
-    queryKey: ["artifact", id, version ?? "text"],
-    queryFn: () =>
-      version === undefined
-        ? api.getArtifactText(id ?? "")
-        : api.getArtifactVersion(id ?? "", version),
-  });
-
-/** One ask with its thread, followers, and edits. */
-export const askQuery = (id: string | undefined) =>
-  queryOptions({
-    queryKey: ["ask", id],
-    queryFn: () => api.getAsk(id ?? ""),
-  });
-
-/** One comment with its replies. */
-export const commentQuery = (id: string | undefined) =>
-  queryOptions({
-    queryKey: ["comment", id],
-    queryFn: () => api.getComment(id ?? ""),
-  });
-
-/** The reference's target records, each present once its query resolved. `artifact` is the
- * document a document/artifact reference names (never the owning issue's primary spec);
- * `markdown` is that document's text at the referenced version. */
-export interface ReferenceData {
-  readonly issue: IssueDetails | undefined;
-  readonly artifact: Artifact | undefined;
-  readonly markdown: string | undefined;
-  readonly ask: AskRead | undefined;
-  readonly comment: CommentRead | undefined;
-  readonly message: MessageRead | undefined;
-}
-
-/** Warms every query the hover card will read for route, so a card mounted after the hover
- * delay renders populated instead of in its loading form: `useReferenceData`'s first hop, then
- * the document text behind a document/artifact reference once its artifact id is known, and —
- * for an issue reference — the issue's primary spec text, which only the card's issue view reads
- * (`useReferenceTarget` never fetches it). Every key comes from the query builders above. */
-export function prefetchReference(queryClient: QueryClient, route: DispatchReferenceRoute): void {
-  if (route.kind === "agent-artifact") {
-    void queryClient.prefetchQuery(agentArtifactQuery(route.session, route.slug));
-    return;
-  }
-  if (route.kind === "message") {
-    void queryClient.prefetchQuery(messageQuery(route.key, route.id));
-    return;
-  }
-  if (route.kind === "ask") {
-    void queryClient.prefetchQuery(askQuery(route.id));
-  } else if (route.kind === "comment") {
-    void queryClient.prefetchQuery(commentQuery(route.id));
-  }
-  if (route.kind === "document") {
-    if (route.item?.kind === "ask") {
-      void queryClient.prefetchQuery(askQuery(route.item.id));
-    } else if (route.item?.kind === "comment") {
-      void queryClient.prefetchQuery(commentQuery(route.item.id));
-    }
-    void queryClient.prefetchQuery(projectArtifactQuery(route.project, route.slug)).then(() => {
-      const artifact = queryClient.getQueryData(
-        projectArtifactQuery(route.project, route.slug).queryKey
-      );
-      if (artifact?.kind === "doc") {
-        void queryClient.prefetchQuery(artifactTextQuery(artifact.id, route.version));
-      }
-    });
-    return;
-  }
-  void queryClient.prefetchQuery(issueQuery(route.key)).then(() => {
-    const issue = queryClient.getQueryData(issueQuery(route.key).queryKey);
-    const artifact =
-      route.kind === "artifact"
-        ? issue?.artifacts.find((candidate) => candidate.slug === route.slug)
-        : primarySpec(issue);
-    if (artifact?.kind === "doc") {
-      void queryClient.prefetchQuery(
-        artifactTextQuery(artifact.id, route.kind === "artifact" ? route.version : undefined)
-      );
-    }
-  });
-}
-
-export function useReferenceData(route: DispatchReferenceRoute | undefined): ReferenceData {
-  const issueKey =
-    route === undefined || route.kind === "agent-artifact" || isProjectRoute(route)
-      ? undefined
-      : route.key;
-  const document = route?.kind === "document" ? route : undefined;
-  const agentArtifact = route?.kind === "agent-artifact" ? route : undefined;
-  const message = route?.kind === "message" ? route : undefined;
-  const version =
-    route?.kind === "artifact" || route?.kind === "document" || route?.kind === "agent-artifact"
-      ? route.version
-      : undefined;
-  const askId =
-    route?.kind === "ask"
-      ? route.id
-      : route?.kind === "document" && route.item?.kind === "ask"
-        ? route.item.id
-        : undefined;
-  const commentId =
-    route?.kind === "comment"
-      ? route.id
-      : route?.kind === "document" && route.item?.kind === "comment"
-        ? route.item.id
-        : undefined;
-  const issue = useQuery({
-    ...issueQuery(issueKey),
-    enabled: issueKey !== undefined && message === undefined,
-  });
-  const messageQueryResult = useQuery({
-    ...messageQuery(message?.key, message?.id),
-    enabled: message !== undefined,
-  });
-  const projectArtifact = useQuery({
-    ...projectArtifactQuery(document?.project, document?.slug),
-    enabled: document !== undefined,
-  });
-  const sessionArtifact = useQuery({
-    ...agentArtifactQuery(agentArtifact?.session, agentArtifact?.slug),
-    enabled: agentArtifact !== undefined,
-  });
-  const artifact =
-    document !== undefined
-      ? projectArtifact.data
-      : agentArtifact !== undefined
-        ? sessionArtifact.data
-        : issue.data?.artifacts.find(
-            (candidate) => route?.kind === "artifact" && candidate.slug === route.slug
-          );
-  const text = useQuery({
-    ...artifactTextQuery(artifact?.id, version),
-    enabled: artifact?.kind === "doc",
-  });
-  const ask = useQuery({ ...askQuery(askId), enabled: askId !== undefined });
-  const comment = useQuery({ ...commentQuery(commentId), enabled: commentId !== undefined });
-  return {
-    issue: issue.data,
-    artifact,
-    markdown: text.data !== undefined && "markdown" in text.data ? text.data.markdown : undefined,
-    ask: ask.data,
-    comment: comment.data,
-    message: messageQueryResult.data,
-  };
-}
-
-/**
- * Every query behind a resolved reference title, shared by the Unfurl card and the inline
- * `RefLink` markdown/document rendering so both draw from one fetch path. An ask or comment
- * (whether issue-scoped or nested under a project document's `item`) resolves to its own
- * question/first line rather than the owning issue's title; everything else falls back to the
- * artifact name (a document reference) or the issue title.
- */
-export function useReferenceTarget(route: DispatchReferenceRoute | undefined): ReferenceTarget {
-  const { artifact, ask, comment, issue, markdown, message } = useReferenceData(route);
-  const kind = route === undefined ? undefined : referenceTargetKind(route);
-  const title =
-    kind === "message"
-      ? message === undefined
-        ? undefined
-        : `${message.message.author.kind} ${message.message.author.id}`
-      : kind === "ask"
-        ? ask === undefined
-          ? undefined
-          : truncate(ask.ask.question, 60)
-        : kind === "comment"
-          ? comment === undefined
-            ? undefined
-            : firstLine(comment.comment.body)
-          : (artifact?.name ?? issue?.title);
-  const description =
-    kind === "message"
-      ? message === undefined
-        ? undefined
-        : firstLine(message.message.body)
-      : (excerpt(markdown) ?? (artifact === undefined ? issue?.status : undefined));
-  const named = route === undefined ? undefined : referencedArtifact(route);
-  const pictureVersion =
-    named?.version ?? artifact?.versions.reduce((latest, item) => Math.max(latest, item.number), 0);
-  const picture =
-    named === undefined || artifact?.kind !== "image" || !pictureVersion
-      ? undefined
-      : artifactVersionPath(named.owner, named.slug, pictureVersion);
-
-  return { title, description, picture };
+/** The card's body: two rendered lines of what the target says, formatted, then cut. */
+function Body({ markdown }: { markdown: string }): ReactNode {
+  return (
+    <MarkdownPreview className={`mt-1 ${textSecondaryOnSurface}`} lines={2} markdown={markdown} />
+  );
 }
 
 function DispatchUnfurl({ reference }: { reference: ComposerReference }): ReactNode {
@@ -296,9 +45,7 @@ function DispatchUnfurl({ reference }: { reference: ComposerReference }): ReactN
       href={reference.href}
     >
       <span className={`block font-medium ${linkText}`}>{title ?? reference.reference}</span>
-      {description === undefined ? null : (
-        <span className={`mt-1 block ${textSecondaryOnSurface}`}>{description}</span>
-      )}
+      {description === undefined ? null : <Body markdown={description} />}
     </a>
   );
 }
@@ -329,8 +76,10 @@ function GitHubUnfurl({ href, path }: { href: string; path: string }): ReactNode
       target="_blank"
     >
       <span className={`block font-medium ${linkText}`}>{issue.data?.title ?? href}</span>
-      {excerpt(issue.data?.body) === undefined ? null : (
-        <span className={`mt-1 block ${textSecondaryOnSurface}`}>{excerpt(issue.data?.body)}</span>
+      {issue.data?.body === undefined ||
+      issue.data.body === null ||
+      issue.data.body.trim() === "" ? null : (
+        <Body markdown={issue.data.body} />
       )}
     </a>
   );

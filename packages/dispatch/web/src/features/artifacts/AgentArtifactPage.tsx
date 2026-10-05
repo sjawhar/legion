@@ -2,8 +2,8 @@ import { useQuery } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { useLocation } from "react-router-dom";
 
+import { agentArtifactQuery } from "../refs/reference-target";
 import { parseAgentArtifactPath } from "../refs/routes";
-import { agentArtifactQuery } from "../refs/Unfurl";
 import { NotFoundPage } from "../shell/NotFoundPage";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { ArtifactDetails } from "./ArtifactDetails";

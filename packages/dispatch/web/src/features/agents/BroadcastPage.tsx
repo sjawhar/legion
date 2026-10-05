@@ -196,7 +196,7 @@ export function BroadcastPage(): ReactNode {
           </span>
         </p>
         <div className={`mt-2 ${textPrimaryOnCanvas}`}>
-          <MarkdownBody markdown={sent.body} variant="inline" />
+          <MarkdownBody markdown={sent.body} />
         </div>
         {excluded.length === 0 ? null : (
           <p className={`mt-2 text-sm ${dangerText}`}>

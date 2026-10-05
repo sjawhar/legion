@@ -1,55 +1,26 @@
 import { type ReactNode, useState } from "react";
 
 import { borderDefault } from "../../theme/classes";
-import { shortSessionId } from "./actor";
+import { useReferenceTarget } from "./reference-target";
 import {
   buildDispatchReference,
   buildReferencePath,
   type DispatchReferenceRoute,
-  isProjectRoute,
   parseDispatchReference,
   referenceRouteFromHref,
   referenceSpans,
+  shortForm,
 } from "./routes";
-import { useReferenceTarget } from "./Unfurl";
 
 export interface ReferenceAnchor {
-  readonly anchor: HTMLAnchorElement;
+  /** The element the `RefLink` portal renders into: the `<a>` itself, or whatever a surface put
+   *  in its place (`MarkdownPreview` keeps no link inside the link it sits in). */
+  readonly anchor: HTMLElement;
   readonly key: string;
   readonly route: DispatchReferenceRoute;
-}
-
-/** The ref's compact fallback text, shown until `useReferenceTarget` resolves a title (or if
- * resolution never finds one, e.g. a deleted ask). Mirrors `buildDispatchReference`'s shape
- * without the `dispatch://` scheme, so it reads like a second, shorter reference. */
-export function shortForm(route: DispatchReferenceRoute): string {
-  if (route.kind === "agent-artifact") {
-    return `agent/${shortSessionId(route.session)}/${route.slug}`;
-  }
-  if (isProjectRoute(route)) {
-    const base = `${route.project}/${route.slug}`;
-    return route.item === undefined ? base : `${base} ${route.item.kind}`;
-  }
-  switch (route.kind) {
-    case "issue":
-      return route.key;
-    case "spec":
-      return `${route.key} spec`;
-    case "conversation":
-      return `${route.key} log`;
-    case "children":
-      return `${route.key} children`;
-    case "artifacts":
-      return `${route.key} artifacts`;
-    case "artifact":
-      return `${route.key} ${route.slug}`;
-    case "ask":
-      return `${route.key} ask`;
-    case "comment":
-      return `${route.key} comment`;
-    case "message":
-      return `${route.key} message`;
-  }
+  /** The words the anchor showed before they were cleared for the portal: a bare reference's
+   *  `dispatch://…`, or the text a Markdown link gave it. */
+  readonly text: string;
 }
 
 /** The 40 px square a picture shows as beside its title, wherever a line holds it: the Artifacts
@@ -151,7 +122,7 @@ export function linkifyDispatchRefs(root: HTMLElement): void {
  * to the SPA route via `buildReferencePath`, and clears its text so the caller can
  * portal a `RefLink` in to render the resolved title. An external link, or an href that fails to
  * parse as a reference, is left untouched, and so is a picture's link (`data-dispatch-picture`,
- * `DispatchPicture.tsx`), whose content is the picture rather than a title.
+ * the engine's `pictureSerializer`), whose content is a `DispatchPicture` rather than a title.
  *
  * `@legion/proof-editor`'s Markdown link serializer sanitizes a `dispatch://` href to `""`
  * (Milkdown's link sanitizer only allows http/https/mailto/tel/ftp — a document strangers can
@@ -178,8 +149,9 @@ export function collectReferenceAnchors(
     anchor.setAttribute("href", buildReferencePath(route));
     const reference = buildDispatchReference(route);
     anchor.setAttribute("data-dispatch-ref", reference);
+    const text = anchor.textContent ?? "";
     anchor.replaceChildren();
-    targets.push({ anchor, key: `${reference}:${index}`, route });
+    targets.push({ anchor, key: `${reference}:${index}`, route, text });
     index += 1;
   }
   return targets;

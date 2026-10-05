@@ -1169,11 +1169,13 @@ test("Agents shows only the newest exchange and folds the rest behind Show N old
 
     fireEvent.click(older);
     expect(older.getAttribute("aria-expanded")).toBe("true");
-    // Newest first, the fold's rows beneath the newest exchange in the same list.
+    // Newest first, the fold's rows beneath the newest exchange in the same list. A body is a
+    // full Markdown block (its text in a `<p>` under the root); the reply's quote of its
+    // parent is a one-line preview with no paragraph, so only paragraphs are counted.
     await waitFor(() =>
       expect(
         within(conversation)
-          .getAllByText(/question$/, { selector: ".dispatch-markdown p" })
+          .getAllByText(/question$/, { selector: ".dispatch-markdown > p" })
           .map((node) => node.textContent)
       ).toEqual(["Third question", "Second question", "First question"])
     );
@@ -2386,6 +2388,44 @@ test("the header checkbox selects a folded row and the fold says how many of its
   }
 });
 
+// LEGION-540. A send's row in the Sends strip names the message it carries, which is Markdown
+// its author wrote: formatted on the row's one line, with all of its words on hover - the row is
+// the only copy of a refused message, so the hover keeps every word, and never shows its syntax.
+test("a refused send's row shows its message formatted on one line, with its whole text on hover", async () => {
+  const page = renderAgents();
+  page.createBroadcast.mockImplementationOnce(async () => {
+    throw new Error("Envoy listener unreachable");
+  });
+  const body = "**Stop** the deploy\n\n1. check `main`\n2. report back";
+  try {
+    const region = await screen.findByRole("region", { name: "Agents" });
+    fireEvent.click(within(region).getByRole("checkbox", { name: "Select Planner for broadcast" }));
+    fireEvent.change(
+      within(within(region).getByRole("region", { name: "Broadcast" })).getByRole("textbox", {
+        name: "Broadcast message",
+      }),
+      { target: { value: body } }
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Send to 1" }));
+    const sends = await screen.findByRole("region", { name: "Sends" });
+    await within(sends).findByText("Could not send to 1 agent: Envoy listener unreachable");
+    await waitFor(() => expect(sends.querySelector("strong")?.textContent).toBe("Stop"));
+    const preview = sends.querySelector<HTMLElement>("[data-markdown-preview]");
+    if (preview === null) throw new Error("the send's row shows no preview of its message");
+    expect(preview.querySelector("code")?.textContent).toBe("main");
+    expect(preview.textContent?.replace(/\s+/g, " ").trim()).toBe(
+      "Stop the deploy check main report back"
+    );
+    expect(preview.querySelector("ol, li, p")).toBeNull();
+    await waitFor(() =>
+      expect(preview.getAttribute("title")).toBe("Stop the deploy check main report back")
+    );
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
 // A closed fold keeps its rows mounted, hidden, so a row the reader had open is still expanded
 // in there. Nobody can see it, so a reply that arrives then must stay unread - in the navigation
 // and on the row - until the fold opens and puts the conversation back on screen.
@@ -2434,6 +2474,46 @@ test("an open row a closed fold hides marks nothing read, and opening the fold r
         read_through: "2026-09-14T01:05:00Z",
       })
     );
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+// LEGION-540. A session's answer on the Agents page is Markdown it wrote, shown whole: a list in
+// it reads as a list (the `inline` rendering this row used before ran it onto one line and
+// dropped every item's formatting after the first block).
+test("an agent's answer on its row renders as a Markdown block, lists included", async () => {
+  const page = renderAgents({
+    messages: [
+      exchange("m1", "Status?", "2026-09-14T01:00:00Z", {
+        body: "Two things:\n\n1. **Stopped** the deploy\n2. `main` is green",
+        createdAt: "2026-09-14T01:05:00Z",
+      }),
+    ],
+  });
+  try {
+    const planner = card(await screen.findByRole("region", { name: "Agents" }), "Planner");
+    expand(planner, "Planner");
+    const conversation = await within(planner).findByRole("list", {
+      name: "Conversation with Planner",
+    });
+    await waitFor(() =>
+      expect(
+        Array.from(
+          conversation.querySelectorAll(".dispatch-markdown ol > li"),
+          (item) => item.textContent
+        )
+      ).toEqual(["Stopped the deploy", "main is green"])
+    );
+    // Scoped to the rendered body: the conversation is itself a list of turns.
+    expect(conversation.querySelector(".dispatch-markdown ol > li > strong")?.textContent).toBe(
+      "Stopped"
+    );
+    expect(conversation.querySelector(".dispatch-markdown ol > li > code")?.textContent).toBe(
+      "main"
+    );
+    expect(conversation.textContent).not.toContain("**");
   } finally {
     page.view.unmount();
     page.restore();

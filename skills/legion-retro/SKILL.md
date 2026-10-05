@@ -19,7 +19,9 @@ retrospective's durable output.
 
 1. Tester green and all code-review cycles finish.
 2. The reviewer approves the head. It still carries `.legion/`: no role removes it before the
-   merge, and the operator removes it from the default branch after the merge.
+   merge. The daemon strips whatever `.legion/` main still carries from the next issue's branch
+   before any of its roles start, so that tree's own merge carries the removal onto the default
+   branch; no operator sweep follows.
 3. Run this retro: commit durable learnings to `docs/solutions/` and post the retro message on
    the Dispatch issue.
    Retro writes **no `.legion` file**, so it never changes the approved head's handoffs.

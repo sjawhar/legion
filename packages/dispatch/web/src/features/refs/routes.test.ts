@@ -19,6 +19,7 @@ import {
   referenceTargetKind,
   routeHasMargin,
   routeProjectOf,
+  shortForm,
 } from "./routes";
 
 function browserPath(path: string): string {
@@ -303,6 +304,10 @@ test("an agent conversation's artifact round-trips through its reference, its pa
     )
   ).toEqual(pinned);
   expect(referenceTargetKind(pinned)).toBe("document");
+  // Until its title resolves, a link to it reads as the session's short id and the slug.
+  expect(shortForm({ ...pinned, session: "0123456789abcdef" })).toBe(
+    "agent/session:01234567…/shot-png"
+  );
 
   const latest = { kind: "agent-artifact" as const, session: "ses-1", slug: "shot-png" };
   expect(parseDispatchReference("dispatch://agent/ses-1/artifact/shot-png")).toEqual(latest);

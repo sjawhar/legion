@@ -44,6 +44,7 @@
     "proof-sdk-upstream": "github:sjawhar/proof-sdk#340653cfaeb52866aabfd2e9d3d1e9f0ba87f2cd",
     "remark-frontmatter": "^5.0.0",
     "remark-gfm": "^4.0.1",
+    "remark-inline-links": "^7.0.0",
     "remark-parse": "^11.0.0",
     "remark-stringify": "^11.0.0",
     "unified": "^11.0.0",
