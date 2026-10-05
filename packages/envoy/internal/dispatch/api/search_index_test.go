@@ -12,12 +12,15 @@ import (
 // TestSearchMeaningLegsUseTheHNSWIndexNotASequentialScan proves each meaning candidate CTE's own
 // shape - `order by embedding <=> $qvec limit $k` against embeddings alone, with no shared window
 // spanning every kind - is what lets pgvector's planner pick an Index Scan on embeddings_cosine
-// (0070_embeddings_core.up.sql's HNSW index) rather than a Seq Scan. enable_seqscan is forced off
-// for this EXPLAIN only: a handful of test rows is too small for the planner to ever prefer the
-// index on cost alone (a sequential scan of a few rows is cheaper no matter what index exists),
-// so this proves the query's shape permits an index scan, which is the claim under test, not
-// what a real corpus's planner would choose - search_bench_test.go's latency bound is what proves
-// that at scale.
+// (0071_embeddings_core.up.sql's HNSW index) rather than a sequential scan sorted in memory.
+// enable_seqscan and enable_sort are forced off for this EXPLAIN only: a handful of test rows is
+// too small for the planner to ever prefer the index on cost alone (reading a few rows via its
+// primary key, kind = 'message', and sorting them in memory is cheaper than any index no matter
+// what exists - confirmed empirically: without enable_sort off, the planner chose exactly that
+// plan, an Index Scan on embeddings_pkey feeding a Sort node, not embeddings_cosine at all), so
+// this proves the query's shape permits an index scan, which is the claim under test, not what a
+// real corpus's planner would choose - search_bench_test.go's latency bound is what proves that
+// at scale.
 func TestSearchMeaningLegsUseTheHNSWIndexNotASequentialScan(t *testing.T) {
 	embedder := &fakeEmbedder{vectors: map[string][]float32{
 		"A title to embed for the index test": angledVector(0.9, 2),
@@ -34,6 +37,9 @@ func TestSearchMeaningLegsUseTheHNSWIndexNotASequentialScan(t *testing.T) {
 	defer tx.Rollback(ctx)
 	if _, err := tx.Exec(ctx, "set local enable_seqscan = off"); err != nil {
 		t.Fatalf("set local enable_seqscan off: %v", err)
+	}
+	if _, err := tx.Exec(ctx, "set local enable_sort = off"); err != nil {
+		t.Fatalf("set local enable_sort off: %v", err)
 	}
 
 	for _, leg := range []struct {
