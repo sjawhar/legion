@@ -152,68 +152,133 @@ func (s *relaunchingStore) RetireDelivery(ctx context.Context, c supervise.Claim
 	return s.PutClaim(ctx, c)
 }
 
-// A claim stored mid-launch across a
-// restart (generation 1, no locator) relaunches to generation 2 inside s.start — ahead of
-// close(s.restored) — while a shim's hello for generation 1's own token is already held in
-// helloResolver, resolved once before the hold started. Judging that hold by the first resolve
-// alone would accept the old generation after its claim has already moved on, taking the stream
-// slot the real generation-2 shim's own hello then finds "already bound to a live stream". The
-// fix resolves the token again once restoration ends, so the generation-1 hello comes back
-// Stale — the listener's own "stale worker generation" refusal — rather than accepted.
+// A claim stored mid-launch across a restart (generation 1, no locator) relaunches to generation
+// 2 inside s.start — ahead of close(s.restored) — while a shim's hello for generation 1's own
+// token is already held in helloResolver, resolved once before the hold started. Judging that
+// hold by the first resolve alone would accept the old generation after its claim has already
+// moved on, taking the stream slot the real generation-2 shim's own hello then finds "already
+// bound to a live stream". The fix resolves the token again once restoration ends and judges
+// generation 1's hello by that second resolve, which answers one of two ways depending on who
+// minted generation 1: this process (BootTokens.Recording wrote it, so its minted map still
+// remembers it once the store's row moves on to generation 2) comes back Stale, refused as
+// "stale worker generation"; a previous daemon process, the usual case across a real restart —
+// this process's minted map never held a write it never made — comes back known=false, refused
+// as "unknown boot token" instead. Either way generation 1's hello is refused and generation 2's
+// own, freshly minted hello is accepted.
 func TestHelloResolverResolvesAgainAfterRestorationSoARelaunchDuringTheHoldIsNotMissed(t *testing.T) {
-	store := &relaunchingStore{}
-	tokens := api.NewBootTokens(store)
-	recording := tokens.Recording(store)
-
-	const boot1, boot2 = "generation-1-token", "generation-2-token"
-	ctx := context.Background()
-	if err := recording.PutClaim(ctx, supervise.Claim{
-		Token: claim.Token("a-claim"), Generation: 1, BootTokenHash: supervise.HashBootToken(boot1),
-	}); err != nil {
-		t.Fatalf("write generation 1's claim: %v", err)
-	}
-
-	sup := newSupervisor(context.Background(), nil, "PROJECT", "", quietLogger())
-	sup.machines[claim.Token("a-claim")] = &member{}
-	const resolveTimeout = 20 * time.Millisecond
-	resolve := sup.helloResolver(tokens, resolveTimeout)
-
 	type result struct {
 		generation uint64
 		stale      bool
 		known      bool
 	}
-	done := make(chan result, 1)
-	go func() {
-		_, generation, stale, known := resolve(boot1)
-		done <- result{generation, stale, known}
-	}()
 
-	select {
-	case <-done:
-		t.Fatal("the resolver returned before restoration; generation 1's hello must be held")
-	case <-time.After(10 * resolveTimeout):
-	}
+	t.Run("this process minted generation 1: the second resolve comes back Stale", func(t *testing.T) {
+		store := &relaunchingStore{}
+		tokens := api.NewBootTokens(store)
+		recording := tokens.Recording(store)
 
-	// The relaunch restore (s.start) runs ahead of close(s.restored) in the real boot: generation
-	// 1's claim, still held nowhere (no locator persisted), relaunches to generation 2 with its
-	// own fresh token before the held hello is ever judged.
-	if err := recording.PutClaim(ctx, supervise.Claim{
-		Token: claim.Token("a-claim"), Generation: 2, BootTokenHash: supervise.HashBootToken(boot2),
-	}); err != nil {
-		t.Fatalf("write generation 2's claim: %v", err)
-	}
-	close(sup.restored)
-
-	select {
-	case got := <-done:
-		if !got.known {
-			t.Fatalf("resolve(%q) known = false, want true: the token was real when first resolved", boot1)
+		const boot1, boot2 = "generation-1-token", "generation-2-token"
+		ctx := context.Background()
+		if err := recording.PutClaim(ctx, supervise.Claim{
+			Token: claim.Token("a-claim"), Generation: 1, BootTokenHash: supervise.HashBootToken(boot1),
+		}); err != nil {
+			t.Fatalf("write generation 1's claim: %v", err)
 		}
-		if !got.stale {
-			t.Fatalf("resolve(%q) stale = false, want true: the claim relaunched to generation 2 during the hold, so generation 1's own hello must come back stale, not accepted", boot1)
+
+		sup := newSupervisor(context.Background(), nil, "PROJECT", "", quietLogger())
+		sup.machines[claim.Token("a-claim")] = &member{}
+		const resolveTimeout = 20 * time.Millisecond
+		resolve := sup.helloResolver(tokens, resolveTimeout)
+
+		done := make(chan result, 1)
+		go func() {
+			_, generation, stale, known := resolve(boot1)
+			done <- result{generation, stale, known}
+		}()
+
+		select {
+		case <-done:
+			t.Fatal("the resolver returned before restoration; generation 1's hello must be held")
+		case <-time.After(10 * resolveTimeout):
 		}
-	case <-time.After(time.Second):
-		t.Fatal("the resolver never returned after restoration closed")
-	}
+
+		// The relaunch restore (s.start) runs ahead of close(s.restored) in the real boot:
+		// generation 1's claim, still held nowhere (no locator persisted), relaunches to
+		// generation 2 with its own fresh token before the held hello is ever judged.
+		if err := recording.PutClaim(ctx, supervise.Claim{
+			Token: claim.Token("a-claim"), Generation: 2, BootTokenHash: supervise.HashBootToken(boot2),
+		}); err != nil {
+			t.Fatalf("write generation 2's claim: %v", err)
+		}
+		close(sup.restored)
+
+		select {
+		case got := <-done:
+			if !got.known {
+				t.Fatalf("resolve(%q) known = false, want true", boot1)
+			}
+			if !got.stale {
+				t.Fatalf("resolve(%q) stale = false, want true: this process minted generation 1 itself, so its BootTokens still remembers it once the store's row moves on", boot1)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("the resolver never returned after restoration closed")
+		}
+	})
+
+	t.Run("a previous daemon minted generation 1: the second resolve comes back unknown", func(t *testing.T) {
+		store := &relaunchingStore{}
+		const boot1, boot2 = "generation-1-token", "generation-2-token"
+		ctx := context.Background()
+		// A previous daemon process's own BootTokens wrote generation 1 directly to the store
+		// before it crashed; this process's own BootTokens, constructed fresh below, never saw
+		// that write and so never recorded it in its own minted map.
+		if err := store.PutClaim(ctx, supervise.Claim{
+			Token: claim.Token("a-claim"), Generation: 1, BootTokenHash: supervise.HashBootToken(boot1),
+		}); err != nil {
+			t.Fatalf("write generation 1's claim (as a previous daemon would have): %v", err)
+		}
+
+		tokens := api.NewBootTokens(store)
+		recording := tokens.Recording(store)
+
+		sup := newSupervisor(context.Background(), nil, "PROJECT", "", quietLogger())
+		sup.machines[claim.Token("a-claim")] = &member{}
+		const resolveTimeout = 20 * time.Millisecond
+		resolve := sup.helloResolver(tokens, resolveTimeout)
+
+		done := make(chan result, 1)
+		go func() {
+			_, generation, stale, known := resolve(boot1)
+			done <- result{generation, stale, known}
+		}()
+
+		select {
+		case <-done:
+			t.Fatal("the resolver returned before restoration; generation 1's hello must be held")
+		case <-time.After(10 * resolveTimeout):
+		}
+
+		if err := recording.PutClaim(ctx, supervise.Claim{
+			Token: claim.Token("a-claim"), Generation: 2, BootTokenHash: supervise.HashBootToken(boot2),
+		}); err != nil {
+			t.Fatalf("write generation 2's claim: %v", err)
+		}
+		close(sup.restored)
+
+		select {
+		case got := <-done:
+			if got.known {
+				t.Fatalf("resolve(%q) known = true, want false: this process never minted generation 1, so it has no record of it once the store's row moves on to generation 2", boot1)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("the resolver never returned after restoration closed")
+		}
+
+		// Generation 2's own, freshly minted hello is accepted once restoration has already
+		// closed.
+		launched, generation, stale, known := resolve(boot2)
+		if !known || stale || generation != 2 || launched != claim.Token("a-claim") {
+			t.Fatalf("resolve(%q) = (%q, %d, stale=%t, known=%t), want (a-claim, 2, false, true)", boot2, launched, generation, stale, known)
+		}
+	})
 }

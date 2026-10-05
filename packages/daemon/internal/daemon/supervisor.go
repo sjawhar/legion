@@ -234,7 +234,7 @@ func (s *supervisor) wait() {
 // helloResolver maps a shim's hello to the launch its boot token was minted for, once every stored
 // claim is supervised. A token of a claim this daemon does not supervise — another project's row
 // in a shared database — is unknown: its connection would have no machine to report to. The token
-// is resolved first, bounded by timeout as it always was: the worker-stream port is plaintext and
+// is resolved first, bounded by timeout: the worker-stream port is plaintext and
 // reachable from any pod, Hello2 requires only a non-empty string, and holding an unresolved
 // connection with no deadline would let any client pin a goroutine and a file descriptor for the
 // whole boot wait by sending a garbage token, with no cap on how many could. Only a token

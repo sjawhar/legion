@@ -479,13 +479,18 @@ open. At boot an unreachable NATS or Dispatch delays the boot instead of exiting
 second doubling to one minute, forever, logged at warn as `boot probe failed transiently;
 waiting to run it again` with its `probe` (naming which), `attempt`, `retryIn` and `detail`.
 
-A malformed seed (refused in `prepare`, before any dial) and a NATS authorization violation at
-connect time exit loud at once — the server said no synchronously. A NATS permission violation (a
-refused JetStream grant) gives no synchronous answer: nats.go reports it asynchronously, so the
-blocked call's own error is a bare `context.DeadlineExceeded`, and the boot refuses it only once
-that attempt's own 30-second bound runs out — the same shape a NATS call that genuinely never
-answers takes, since nothing here can tell the two apart. An EOF during the NATS handshake is the
-same: ambiguous, not evidenced, refused by default.
+A malformed seed refuses the boot immediately at startup, before any network connection is
+attempted. A NATS authorization violation at connect time is the same: the server said no
+synchronously, and the boot refuses it at once. An EOF during the NATS handshake also refuses at
+once — the connection simply closed, and nats.go returns that synchronously too — though no crash
+in the audited journal took this shape; refusing it, rather than waiting, is a judgment call for a
+shape nobody has yet seen in practice.
+
+A NATS permission violation (a refused JetStream grant) gives no synchronous answer: nats.go
+reports it asynchronously, so the blocked call's own error carries nothing but a plain timeout,
+with no sign of the refusal in its own text, and the boot refuses it only once that attempt's own
+30-second bound runs out — the same shape a NATS call that genuinely never answers takes, since
+nothing here can tell the two apart.
 
 A Postgres failure while reconciling admission is not covered by either wait: an error Postgres
 itself returns exits as soon as it comes back, and only Postgres accepting a connection and then
@@ -506,9 +511,9 @@ does not exit on one, so nothing re-reads `dispatch_token_file` until an operato
 hand to pick up a corrected or renewed token.
 
 With several `nats_urls`, or a clustered NATS whose advertised addresses this daemon cannot reach,
-an authorization violation on one server can surface as a dial failure or `nats.ErrNoServers` from
-a different server nats.go tries next, so the boot waits and the logged `detail` may never name
-the authorization error at all (LEGION-580).
+an authorization violation on one server can surface as a dial failure, or the generic "nats: no
+servers available for connection" answer, from a different server nats.go tries next, so the boot
+waits and the logged `detail` may never name the authorization error at all (LEGION-580).
 
 Rollout order for the server's `legion-daemon` user: the server admits
 `legion-daemon` (its public key applied) with the daemon's grants first; then its seed is stored,

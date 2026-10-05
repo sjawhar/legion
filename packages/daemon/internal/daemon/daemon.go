@@ -246,9 +246,9 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 		// an unreachable dependency on ctx, not the bounded boot budget just spent on everything
 		// before them, through the same bootprobe.Run mechanism mintAtBoot already uses — here
 		// with Attempts left at its unbounded zero, where mintAtBoot bounds its own at 5.
-		// natsauth.Unreachable and dispatch.Unreachable each judge their own dependency;
-		// docs/kubernetes.md names every shape each one waits on and every one it still refuses
-		// loud. reconcile's own Postgres transaction is judged by neither: a design choice, not an
+		// natsauth.Unreachable and dispatch.Unreachable each judge their own dependency; their own
+		// docs are the record of what each one waits on and what it still refuses loud.
+		// reconcile's own Postgres transaction is judged by neither: a design choice, not an
 		// inability to tell its failures apart from NATS's or Dispatch's.
 		// TestRunRefusesAnUnreachablePostgresByHostAndNotByPassword and
 		// scripts/e2e/stage1-skeleton.sh prove an unreachable Postgres refuses store.Open, earlier
