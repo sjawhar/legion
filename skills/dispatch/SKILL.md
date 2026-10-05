@@ -84,7 +84,8 @@ a new version that keeps the human's own text, never a second "spec" artifact be
   it for your inference; an answer that is only a chosen option is recorded in the form
   `<name> chose "Commit author" on the question below (<date>)`, naming them from `dispatch_whoami`
   or the conversation, or "the person" when the token names no owner — never a name you were not
-  given. A point you inferred says so, with the reasoning; during a live brainstorming
+  given. A point you inferred says so, with the reasoning — a security concern, a restriction, or
+  a cost nobody measured is exactly this, not a settled constraint; during a live brainstorming
   conversation, `skill://dispatch-brainstorming` is stricter and keeps an inference out of the spec
   until the human has agreed to it. One carried in from another document keeps its provenance: an
   agent's inference there is marked one here, or stays out until the human raises it.
