@@ -24,6 +24,10 @@ later phase keeps it current rather than replacing it:
 
 ## Verification
 
+GitHub refuses a pull request body over 65,536 characters, so each verification round links its
+evidence (the run, the comment) rather than inlining it once the body passes about 48,000
+characters; the `Production` line's record always links.
+
 **CI:** `Tests` run <run-id> — jobs lint, typecheck, test all success at <head-sha>; `PR Title` run <run-id> — job pr-title success at <head-sha>.
 
 **Threads:** <n> resolved, 0 unresolved. Each disposed individually, never in bulk:

@@ -379,11 +379,16 @@ cd -- "$LEGION_WORKSPACE" && legion push
 
 It pushes `@-` through the provisioned credential helper, which authenticates as your role's App
 (`appauth.AppRoleFor` in `packages/daemon/internal/appauth/identity.go`). Your system prompt says
-which pushes skip CI and which commit-message keywords it refuses. Its ancestry check refuses
+which pushes skip CI and which commit-message keywords it refuses. A pull-request body edit alone
+starts no GitHub workflow run, so on a head whose commit carries `skip-checks: true` a check that
+re-judges the body (the deployment's `checklist-affirmation`) re-runs only after a later push,
+where on a code head the same body edit re-runs it at once. Its ancestry check refuses
 unless `@-` descends from `legion/<KEY>@origin` (or the branch is not on GitHub yet): every issue
 workspace shares one clone, so another role's push moves `legion/<KEY>@origin` here at once, and
 a push that did not descend from it would move the remote branch sideways onto your commit and
-drop theirs.
+drop theirs. A handoff commit never sits on an implementer's unpushed chain: when the issue moves
+back to planning, the implementer's unpushed commits stay off the bookmark until the implementer
+returns, and the planner writes its handoff on the remote tip.
 
 Before any rewrite of a commit you already pushed — a `jj squash --into` one, or any other
 rewrite — read *Rewriting pushed commits* in
