@@ -60,6 +60,38 @@ func (e *Engine) requiredChecks(ctx context.Context, tx pgx.Tx, fact intake.Requ
 	return intake.Result{}, e.decideChecks(ctx, tx, pr, prior, byRequired)
 }
 
+// mergeability records what GitHub's last read found for whether the pull request's head can be
+// merged into its base (intake.PullRequestMergeability, pullRequestMergeability's own GitHub
+// answer). In awaiting_merge it withdraws a conflicting head the way decideChecks's AwaitingMerge
+// case withdraws a red one (classify.ConflictWithdrawsReady, the same TriggerChecksRed
+// transition), since GitHub computes no merge ref for a conflicting head and no CI result will
+// ever arrive for it. It decides on every read, not only a changed one: a conflict recorded
+// before the issue reaches awaiting_merge - in testing, reviewing, retro or merging, where
+// nothing moves yet, since the merger's READY check posts a conflicting head whose required
+// checks all succeeded - must still withdraw the READY once the issue gets there. Outside
+// awaiting_merge the read is recorded and nothing moves: no round is open to decide a conflict
+// the way RedSendsBack decides a red, and the tester or implementer already at work will see it
+// on its own pass or push. Leaving awaiting_merge is what stops a repeated CONFLICTING read from
+// withdrawing twice.
+func (e *Engine) mergeability(ctx context.Context, tx pgx.Tx, fact intake.PullRequestMergeability) (intake.Result, error) {
+	pr, err := e.pullRequest(ctx, tx, fact.Repo, fact.Number)
+	if err != nil || pr == nil {
+		return intake.Result{}, err
+	}
+	if pr.Mergeability != fact.Mergeable {
+		pr.Mergeability = fact.Mergeable
+		if err := e.store.PutPullRequest(ctx, tx, *pr); err != nil {
+			return intake.Result{}, err
+		}
+	}
+	issue, err := e.store.Issue(ctx, tx, pr.Issue)
+	if err != nil || issue == nil || issue.Phase != phase.AwaitingMerge || !classify.ConflictWithdrawsReady(*pr) {
+		return intake.Result{}, err
+	}
+	reason := fmt.Sprintf("the head conflicts with %s: GitHub runs no checks on it; merge %s forward", fact.Base, fact.Base)
+	return intake.Result{}, e.transition(ctx, tx, *issue, TriggerChecksRed, "", record.PhaseRow{}, pr, reason)
+}
+
 // decideChecks records pr, its checks verdict changed from prior's by a CI settlement or a new
 // read of what the base branch requires (the fact by names), and decides, with the issue's phase
 // in hand, what it moves. An exhausted fix-attempt count is posted and told to the architect. In

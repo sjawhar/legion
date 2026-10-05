@@ -196,6 +196,14 @@ type PullRequest struct {
 	// request is open; a new generation deletes one that is not.
 	ReviewSeen ReviewOrder
 	State      PullRequestState
+	// Mergeability is GitHub's lazily computed verdict for whether this head can be merged into
+	// its base branch without a conflict, as the daemon's periodic required-checks read of
+	// GitHub's /pulls/{number} last found it (daemon.readRequiredChecks), decoding GitHub's
+	// nullable `mergeable` field: MergeabilityUnknown while GitHub is still computing it (never a
+	// transient conflict - GitHub reports no checks run on a mergeability GitHub has not computed
+	// yet, either), MergeabilityMergeable once GitHub can merge the head automatically, and
+	// MergeabilityConflicting once it cannot. "" means the read has never run.
+	Mergeability Mergeability
 }
 
 // RequiredWorkflow is one workflow the base branch requires, named by its path, and the result of
@@ -224,6 +232,17 @@ const (
 	PullRequestOpen   PullRequestState = "open"
 	PullRequestMerged PullRequestState = "merged"
 	PullRequestClosed PullRequestState = "closed"
+)
+
+// Mergeability is GitHub's lazily computed verdict for whether a pull request's head can be
+// merged into its base without a conflict, decoded from GitHub's nullable `mergeable` field
+// (daemon.readRequiredChecks). "" (the zero value) means the daemon has never read it.
+type Mergeability string
+
+const (
+	MergeabilityUnknown     Mergeability = "UNKNOWN"
+	MergeabilityMergeable   Mergeability = "MERGEABLE"
+	MergeabilityConflicting Mergeability = "CONFLICTING"
 )
 
 // DesignGate records the current document version and the version a human approved, if any.
