@@ -513,9 +513,9 @@ export default function envoyExtension(pi: PiApi): void {
     pi.appendEntry(LEGION_MANAGED_ENTRY, { session_id: targetSessionID });
   };
 
-  // The pictures the session `shown` belongs to has now, which later reads and deliveries name
-  // instead of sending again (`shownPictures`): those a delivery showed once the host took it,
-  // and those the transcript the session moved onto already shows.
+  // Adds `addresses` to `shown`, a session's set of pictures it was shown (`shownPictures`),
+  // which later reads and deliveries name instead of sending again: the pictures a delivery
+  // showed once the host took it, and those the transcript the session moved onto already shows.
   const markPicturesShown = (shown: Set<string>, addresses: readonly string[]): void => {
     for (const address of addresses) shown.add(address);
   };
@@ -1566,8 +1566,9 @@ export default function envoyExtension(pi: PiApi): void {
       // This process serves the session no longer, so what it was shown goes with it: the id this
       // instance registered, and the host's live one, which a task subagent's tool calls carried
       // (its instance never ran restoreLocalSessionState, so its `sessionID` stayed empty).
+      const liveSessionID = context.sessionManager.getSessionId();
       forgetShownPictures(sessionID);
-      forgetShownPictures(context.sessionManager.getSessionId());
+      if (liveSessionID !== sessionID) forgetShownPictures(liveSessionID);
     }
   });
 
