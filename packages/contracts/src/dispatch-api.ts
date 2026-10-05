@@ -205,6 +205,12 @@ export interface WriteAdvice {
    * little of the text before each. Omitted when there are none.
    */
   readonly unparsed_openers?: { readonly count: number; readonly examples: readonly string[] };
+  /**
+   * LEGION-550's write-time feedback, set only on an issue or ask creation: the items most like
+   * what was just filed, and any past decision that matches. Never refuses or delays the write;
+   * `suggestions.missing` explains why search did not answer in time instead.
+   */
+  readonly suggestions?: Suggestions;
 }
 /** Response-only; never on an event payload. */
 export type Advised<T> = T & { readonly advice?: WriteAdvice };
@@ -1213,6 +1219,35 @@ export interface DuplicateCandidate {
   readonly snippet: string;
   readonly shared_terms: number;
   readonly href: string;
+}
+
+/**
+ * One item LEGION-550's write-time feedback judges similar to what was just filed: a fused-search
+ * hit (`SearchResult`) over the same project. `answered_by`/`answered_at` are set only when this
+ * is `Suggestions.decision` — the "past decision" case, where the agent needs who answered and
+ * when, not just a link.
+ */
+export interface WriteSuggestion {
+  readonly kind: SearchResultKind;
+  readonly owner: SearchOwner;
+  readonly artifact?: SearchArtifactRef;
+  readonly id: string;
+  readonly snippet: string;
+  readonly href: string;
+  readonly answered_by?: string;
+  readonly answered_at?: string;
+}
+
+/**
+ * LEGION-550's write-time feedback on a newly created issue or ask: the three items most like
+ * it (`related`) and, when an answered ask already settles the same question, that decision
+ * (`decision`). `missing` explains why search did not answer within the write's bounded budget,
+ * instead of refusing or delaying the write itself.
+ */
+export interface Suggestions {
+  readonly related: WriteSuggestion[];
+  readonly decision?: WriteSuggestion;
+  readonly missing?: string;
 }
 
 export interface Agent {
