@@ -243,9 +243,9 @@ func WithLastError(err error, conn *nats.Conn) error {
 }
 
 // Unreachable reports whether err means NATS is not reachable yet, as against a misconfiguration
-// — a permission or an authorization violation the server itself refuses, a malformed seed
-// (userKey, before any dial is attempted), a protocol or certificate failure — that no wait
-// fixes. Matched by concrete, named shapes only, never the net.Error interface: two unrelated
+// — a permission or an authorization violation the server itself refuses, or a malformed seed
+// (userKey, before any dial is attempted) — that no wait fixes.
+// Matched by concrete, named shapes only, never the net.Error interface: two unrelated
 // standard library types satisfy that interface without being network failures at all —
 // context.DeadlineExceeded and *url.Error — so a caller must never classify by the interface
 // alone. A bare context.DeadlineExceeded is refused rather than waited out: nats.go wraps a

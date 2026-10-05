@@ -44,7 +44,7 @@ func TestHelloResolverRejectsAnUnknownTokenAtOnceDuringTheBootWait(t *testing.T)
 	case <-done:
 		// Rejected without ever waiting on restoration, which never closes in this test.
 	case <-time.After(time.Second):
-		t.Fatal("an unknown token was held rather than rejected at once; this is the resource-pinning gap security found")
+		t.Fatal("an unknown token was held rather than rejected at once: a garbage token must not pin a goroutine and a file descriptor for the whole boot wait")
 	}
 }
 
@@ -152,7 +152,7 @@ func (s *relaunchingStore) RetireDelivery(ctx context.Context, c supervise.Claim
 	return s.PutClaim(ctx, c)
 }
 
-// RED (the race correctness and the oracle both found): a claim stored mid-launch across a
+// A claim stored mid-launch across a
 // restart (generation 1, no locator) relaunches to generation 2 inside s.start — ahead of
 // close(s.restored) — while a shim's hello for generation 1's own token is already held in
 // helloResolver, resolved once before the hold started. Judging that hold by the first resolve

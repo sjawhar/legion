@@ -479,29 +479,31 @@ open. At boot an unreachable NATS or Dispatch delays the boot instead of exiting
 second doubling to one minute, forever, logged at warn as `boot probe failed transiently;
 waiting to run it again` with its `probe` (naming which), `attempt`, `retryIn` and `detail`.
 
-A misconfiguration still exits loud at once: a malformed seed (refused in `prepare`, before any
-dial) and a NATS permission or authorization violation the server itself refuses are never
-ambiguous — the server said no. Two shapes exit only once the gate's own 30-second bound on that
-attempt runs out, since this wait genuinely cannot tell them from an outage: a NATS call that does
-not answer within that bound, and a failure in reconciling admission's own Postgres transaction
-(judged by neither predicate on purpose, a design choice — Postgres is a third dependency neither
-NATS's nor Dispatch's predicate was built to judge, not a case of this same ambiguity). An EOF
-during the NATS handshake is the same: ambiguous, not evidenced, refused by default.
+A malformed seed (refused in `prepare`, before any dial) and a NATS authorization violation at
+connect time exit loud at once — the server said no synchronously. A NATS permission violation (a
+refused JetStream grant) gives no synchronous answer: nats.go reports it asynchronously, so the
+blocked call's own error is a bare `context.DeadlineExceeded`, and the boot refuses it only once
+that attempt's own 30-second bound runs out — the same shape a NATS call that genuinely never
+answers takes, since nothing here can tell the two apart. An EOF during the NATS handshake is the
+same: ambiguous, not evidenced, refused by default.
+
+A Postgres failure while reconciling admission is not covered by either wait: an error Postgres
+itself returns exits as soon as it comes back, and only Postgres accepting a connection and then
+never answering waits out the same 30-second bound before the boot gives up.
 
 Several shapes an operator should know wait forever rather than exit, none of them obviously
 "network trouble" on their face: a Dispatch 401 or 403 (a bad or revoked bearer token); a NATS or
 Dispatch host that does not resolve (a typo in `nats_urls` or `dispatch_url`'s hostname); a
 non-Dispatch 4xx, such as an HTML 404 from a `dispatch_url` whose path is wrong but whose host
 answers; and a TLS failure that is not certificate verification (a protocol mismatch, a stalled
-handshake). Each of these waits silently, logging only the generic `boot probe failed transiently`
-line above, with no line naming a credential or a configuration problem.
+handshake). Each of these waits silently: no line is logged beyond the generic `boot probe failed
+transiently` warn above, though its own `detail` carries the error's own text (`UNAUTHORIZED:
+...`, `no such host`), not a separate line calling out the credential or configuration problem by
+name.
 
-A Dispatch 401 or 403 is the one with an operational consequence worth naming plainly: at main,
-the daemon exited and the supervisor's restart re-read `dispatch_token_file` fresh, so a human
-fixing the file on disk was picked up by the very next crash-restart. Now the daemon does not
-crash, so it does not restart, so it does not re-read the file: an operator who corrects a rotated
-or revoked Dispatch token must restart the daemon by hand for the fix to take effect — waiting no
-longer self-heals a credential fix the crash loop used to pick up for free.
+A Dispatch 401 or 403 is the one with an operational consequence worth naming plainly: the daemon
+does not exit on one, so nothing re-reads `dispatch_token_file` until an operator restarts it by
+hand to pick up a corrected or renewed token.
 
 With several `nats_urls`, or a clustered NATS whose advertised addresses this daemon cannot reach,
 an authorization violation on one server can surface as a dial failure or `nats.ErrNoServers` from
