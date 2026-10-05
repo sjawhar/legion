@@ -310,10 +310,10 @@
   event's and an anchor refresh's payload, a suggestion's project, a document write's owner lock,
   and search's owner project (a nil dereference there, not a scan error) answer an empty project
   instead of `cannot scan NULL into *string`; the reference graph gives such an artifact, and an
-  item on it, no address rather than `dispatch:///artifact/<slug>`. No row on this schema has one
-  (`project_key` is `not null`); a later migration gives an artifact a third owner with none
-  (LEGION-541), and this is what a revert of it, or an instance still serving during its rollout,
-  reads those rows with.
+  item on it, no address rather than `dispatch:///artifact/<slug>`. Landed on `main` ahead of
+  migration `0071_agent_artifacts`, which gives an artifact a third owner with no project
+  (LEGION-541), so a binary from before that migration, serving beside it during its rollout or
+  after a revert, reads those rows.
 - A published edit's check of whether a browser's concurrent change removed its text (`lost_ops`, and an accepted suggestion's `lost`) walked the room's live tree without its lock while the room's browsers wrote it, so it could read a keystroke halfway. Every read of a resident room outside a write now reads the room as of one moment under its lock: the replica the room's update observer keeps, brought up to date, or, while the observer or another read holds that replica, a copy as before. A read only tries the replica, so reads never queue behind each other or ahead of a keystroke's observer, but a keystroke can still wait for one read already walking it (about 100 ms on a 524 KiB document). A read through the replica takes about a third of a copy's time (86 ms rather than 283 ms for a 524 KiB document's tree). A tree a read returns shares nothing with the document it was read from, so editing it changes no later read (LEGION-499).
 - A deploy with someone on the Dispatch dashboard no longer spends the whole shutdown waiting and
   then leaves the documents it owed unsettled (LEGION-501). An open event stream or agent
