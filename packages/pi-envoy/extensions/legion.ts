@@ -131,9 +131,9 @@ const JJ_LOG_REWRITE_MENTION = new RegExp(
 );
 
 /** The plain-text rule for text the extension does not tokenise as a shell command -- `eval`
- * code, a `hub` process start, each word of a tokenised `bash` command (`sh -c "jj undo"`), and
- * a `bash` command with unbalanced quoting: the jj command `text` mentions with a blocked word
- * (e.g. `jj undo`, `jj op restore`), or undefined. */
+ * code, stdin written to a supervised service (`proc://<id>`), each word of a tokenised `bash`
+ * command (`sh -c "jj undo"`), and a `bash` command with unbalanced quoting: the jj command `text`
+ * mentions with a blocked word (e.g. `jj undo`, `jj op restore`), or undefined. */
 function jjLogRewriteMention(text: string): string | undefined {
   if (!JJ_MENTION.test(text)) return undefined;
   const match = JJ_LOG_REWRITE_MENTION.exec(text);
@@ -313,10 +313,49 @@ function refusedCommand(
   return undefined;
 }
 
+/** The `write` targets that are not files, each scheme in any case, as Oh My Pi routes it: a tool
+ * device (`xd://<tool>` carrying the tool's JSON args as `content`, e.g. the Dispatch tools), a
+ * message to an agent of this process (`agent://<id>`), or job and service control (`proc://<id>`:
+ * `content` goes to a supervised service's stdin; `/kill` stops a job, `/mode` sets its lifetime). */
+const NON_FILE_WRITE_URL = /^(xd|agent|proc):\/\//iu;
+
+/** The 4-hex tag that may end a `read` header, `#XXXX`. */
+const READ_HEADER_TAG = /#[0-9A-Fa-f]{4}$/u;
+
+/** A `conflict://` URL behind a prefix, `<prefix>:conflict://N`; the last `:conflict://` wins. */
+const PREFIXED_CONFLICT_URL = /^(.+):(conflict:\/\/.+)$/u;
+
+/** The path a pasted `read` header names (`unwrapHashlineHeaderPath`): `[path]` or `[path#XXXX]`
+ * names `path` (a valid tag lets `path` hold a `#` of its own); any other shape is left as
+ * written. */
+function unwrapReadHeader(path: string): string {
+  const trimmed = path.trimEnd();
+  if (trimmed.length < 2 || !trimmed.startsWith("[") || !trimmed.endsWith("]")) return path;
+  const inner = trimmed.slice(1, -1);
+  const tag = READ_HEADER_TAG.exec(inner);
+  const target = tag === null ? inner : inner.slice(0, tag.index);
+  if (target.length === 0 || (tag === null && target.includes("#"))) return path;
+  return target;
+}
+
+/** The target a `write` path names, as Oh My Pi's `write` tool reads it before it routes: the
+ * path inside a pasted `read` header, and then the `conflict://` URL alone when a prefix stands
+ * before it (`recoverConflictUriPrefix`), which writes a workspace file whatever the prefix. */
+function writeTarget(path: string): string {
+  const unwrapped = unwrapReadHeader(path);
+  return PREFIXED_CONFLICT_URL.exec(unwrapped)?.[2] ?? unwrapped;
+}
+
+/** The scheme, lowercased, of a `write` into Oh My Pi rather than to a file, or undefined. */
+function nonFileWriteScheme(toolCall: ToolCallEvent): string | undefined {
+  if (toolCall.toolName !== "write" || typeof toolCall.input.path !== "string") return undefined;
+  return NON_FILE_WRITE_URL.exec(writeTarget(toolCall.input.path))?.[1]?.toLowerCase();
+}
+
 /** The refusal for the first of `rules` a tool call breaks, or undefined. A `bash` command is
- * tokenised; `eval` code and a `hub` call's `application`, `args`, and `text` (a process start's
- * program and arguments, and stdin sent to a supervised process) are held to the plain-text rule,
- * since each runs a shell from the pane exactly as `bash` does. */
+ * tokenised, a supervised service's start included (a `bash` call with a `name`); `eval` code and
+ * the content a `write` sends to a `proc://` target (stdin for a supervised service) are held to
+ * the plain-text rule, since each runs a shell from the pane exactly as `bash` does. */
 function paneRuleRefusal(toolCall: ToolCallEvent, rules: readonly PaneRule[]): string | undefined {
   if (rules.length === 0) return undefined;
   const { toolName, input } = toolCall;
@@ -331,10 +370,8 @@ function paneRuleRefusal(toolCall: ToolCallEvent, rules: readonly PaneRule[]): s
   }
   let text: string;
   if (toolName === "eval" && typeof input.code === "string") text = input.code;
-  else if (toolName === "hub") {
-    text = [input.application, ...(Array.isArray(input.args) ? input.args : []), input.text]
-      .filter((part): part is string => typeof part === "string")
-      .join(" ");
+  else if (nonFileWriteScheme(toolCall) === "proc" && typeof input.content === "string") {
+    text = input.content;
   } else return undefined;
   for (const rule of rules) {
     const mention = rule.mention(text);
@@ -350,7 +387,8 @@ function paneRuleRefusal(toolCall: ToolCallEvent, rules: readonly PaneRule[]): s
 const LEGION_LOADED_MARKER = Symbol.for("legion.pi-envoy.legion-loaded");
 
 /** Code-mutation tools, blocked for each role `CODE_TOOL_REFUSAL` names. `write` here means a real
- * filesystem write; see `isToolDeviceInvocation` for the `xd://` tool-device carve-out. `task` is
+ * filesystem write: a `write` into Oh My Pi (`nonFileWriteScheme`) passes the gate for every role,
+ * since a gated role messages and cancels the subagents it launches this way. `task` is
  * deliberately absent: every Legion role may launch `task` subagents. */
 const CODE_MUTATION_TOOLS = ["edit", "write", "apply_patch"];
 
@@ -359,25 +397,9 @@ const CODE_MUTATION_TOOLS = ["edit", "write", "apply_patch"];
  * is held to the same refusal (every command but a single `legion` one). */
 export const CODE_TOOL_REFUSAL: Readonly<Partial<Record<LegionRole, string>>> = {
   architect: "the architect delegates all code work to phase workers",
-  reviewer: "the reviewer edits nothing except the final .legion/ cleanup commit via bash",
+  reviewer: "the reviewer edits no code; its only commits are its review handoffs, made via bash",
   merger: "the merger only verifies and reports",
 };
-
-/** An `xd://` URL, its scheme in any case. */
-const TOOL_DEVICE_URL = /^xd:\/\//iu;
-
-/** OMP's "tool device" convention invokes extension-registered tools (e.g. the Dispatch tools) as
- * a `write` whose `path` is an `xd://<tool>` URI carrying the tool's JSON args as
- * `content`. That `write` is a tool invocation, not a file mutation -- it must never trip the
- * `CODE_MUTATION_TOOLS` gate below for any role. Oh My Pi routes the scheme in any case
- * (`XD://dispatch_doc_edit` runs the device), so the check does too. */
-function isToolDeviceInvocation(toolCall: ToolCallEvent): boolean {
-  return (
-    toolCall.toolName === "write" &&
-    typeof toolCall.input.path === "string" &&
-    TOOL_DEVICE_URL.test(toolCall.input.path)
-  );
-}
 
 export default function legionExtension(pi: PiApi): void {
   // One instance per session (a `task` subagent gets its own). The id ties every hook log line
@@ -507,10 +529,14 @@ export default function legionExtension(pi: PiApi): void {
       (active?.role === "architect" &&
         toolCall.toolName === "bash" &&
         !isSingleLegionCommand(toolCall.input.command));
-    // A `write` to an `xd://<tool>` path is OMP's tool-device invocation convention (e.g. the
-    // Dispatch tools), not a file mutation. Short-circuit it out of the mutation gate so the
-    // architect/reviewer/merger role checks apply only to real file writes.
-    if (codeToolRefusal !== undefined && mutatesCode && !isToolDeviceInvocation(toolCall)) {
+    // A `write` into Oh My Pi (a tool device, an agent message, job control) is not a file
+    // mutation. Short-circuit it out of the mutation gate so the architect/reviewer/merger role
+    // checks apply only to real file writes.
+    if (
+      codeToolRefusal !== undefined &&
+      mutatesCode &&
+      nonFileWriteScheme(toolCall) === undefined
+    ) {
       return { block: true, reason: codeToolRefusal };
     }
     if (!needsGrant(toolCall)) return undefined;

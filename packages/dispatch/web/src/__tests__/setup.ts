@@ -1,8 +1,10 @@
+import { afterEach } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { notifyManager } from "@tanstack/react-query";
 import serverBlockSchema from "../../../../envoy/internal/dispatch/pmdoc/schema/blocks.json";
 import type { BlockSchema } from "../api/types";
 import { blockSchemaCache } from "../features/doc/schema";
+import { resetReplyDrafts } from "../features/inbox/reply-drafts";
 
 GlobalRegistrator.register();
 
@@ -53,3 +55,7 @@ Object.defineProperty(Node.prototype, Bun.inspect.custom, {
 // drive promptly; flushing synchronously keeps query updates inside React's act() scope
 // so assertions after setQueryData do not wait on a stalled timer.
 notifyManager.setScheduler((callback) => callback());
+
+// Ask-reply drafts live in a module-level store that outlives every render, so a draft one test
+// leaves behind would pre-fill the next test's composer for the same ask id.
+afterEach(resetReplyDrafts);

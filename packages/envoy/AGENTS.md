@@ -136,11 +136,16 @@ back what they held open; with nothing in flight over HTTP that is about 21 s af
 
 An issue's task counts (`issues.tasks_done`, `tasks_total`, `tasks_version`, added by the
 `issue_task_progress` migration; LEGION-542) are the `- [ ]` / `- [x]` items of its primary
-document as its latest version renders (`pmdoc.CountTasks`, which skips an item emptied of its
-text, since the renderer writes one as a plain `- `), and the number of the version they were
-counted from. Every version write records them in its own transaction (`docs.RecordTaskProgress`
-from `writeVersionTx`; issue creation and an upload call `docs.RecordTaskProgressMarkdown` after
-they insert their version row, so the count names it). The row the API reads
+document's latest version, and the number of that version. A writer holding the parsed tree counts
+it (`pmdoc.CountTasks`); one holding the stored markdown counts that alone
+(`pmdoc.CountTasksMarkdown`: goldmark's tree before the Proof schema's refusals, so a spec holding a
+table row wider than its header, an html block or an unknown typed block is still counted, where
+reading it as a document reports nothing).
+Both skip an item emptied of its text, since the renderer writes one as a plain `- `, and both read
+front matter as Parse does, so they agree on every document both can read. Every version write
+records the count in its own transaction (`docs.RecordTaskProgress` from `writeVersionTx`; issue
+creation and an upload call `docs.RecordTaskProgressMarkdown` after they insert their version row,
+so the count names it). The row the API reads
 (`model.IssueProgress`, on `IssueSummary` and the issue read, never on an event payload) can lag
 its document - every row the migration found, any the task a deploy replaces versions while both
 run (its code records no count), a row another writer held - so `cmd/dispatch` runs
@@ -462,6 +467,17 @@ instance's replica or none, never its successor's. `TestReadsOfALiveDocumentRunB
 each of these reads while a websocket peer types, until 50 of its runs have overlapped one of the
 peer's updates, and CI's `envoy-go-race` job runs the `docs` and `api` packages under `-race`, which
 reports a walk of the live tree beside a write; the unit tests' own step runs without it.
+
+Writes to one room never meet each other unlocked. A browser's update reaches the room as ygo
+applies it, inside one Yjs transaction under the document's lock (`sync.ApplySyncMessage`,
+`crdt.ApplyUpdateV1`), so two browsers' updates take turns. `Server.Apply` holds no lock across
+its callback, so the service never walks the room's tree there: a write reads and writes its
+transaction's fork, and builds the fork from an encode taken under the lock (`forkLive`); the room
+has one writer slot (`openLiveWrite`); and a committed write reaches the room in a transaction and
+is read back through `readLive`. A helper that walks the room inside `Server.Apply` outside a
+transaction, as an unjoined write once did, races every peer's update; no production path does.
+`TestThreeBrowsersAndTheAPIEditOneRoomAtOnce` has three websocket peers type while the API edits the
+document, until 50 of its edits have overlapped their typing.
 
 Every decode of document bytes takes the pending queue `maxUpdateItems`, whose comment
 (`internal/dispatch/docs/persistence.go`) states the rule and its reason: whether the service builds

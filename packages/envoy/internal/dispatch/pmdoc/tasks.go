@@ -5,6 +5,9 @@ import (
 	"maps"
 	"regexp"
 	"slices"
+
+	"github.com/yuin/goldmark/ast"
+	extensionast "github.com/yuin/goldmark/extension/ast"
 )
 
 // TaskProgress is a document's task-list items counted: Total every list item that carries a
@@ -12,6 +15,61 @@ import (
 type TaskProgress struct {
 	Done  int
 	Total int
+}
+
+// CountTasksMarkdown is CountTasks of a stored rendering read as markdown alone: the task items
+// goldmark's tree holds, counted before the Proof schema's refusals (refuseBlocks, Validate) and
+// without converting the tree. A document the schema refuses still has its checkboxes read as
+// Parse reads them, since the task-list extension sets each item's checkbox on the goldmark tree
+// and conversion only copies it (taskCheckbox, which parseListItem reads too). Front matter is
+// read as Parse reads it, an unclosed opener included, so the two agree on every document both
+// can read; a task item emptied of its text is skipped as CountTasks skips it. What is still an
+// error is what the reader itself refuses: markdown nested past its bounds (parseSource). A
+// read-back's budget counts no elements and this read checks no table padding, so neither refuses.
+func CountTasksMarkdown(markdown string) (progress TaskProgress, err error) {
+	defer recoverPanic(&progress, &err, "counting task items")
+	source := []byte(LineFeeds(markdown))
+	_, rest, unclosed := parseFrontmatterBlock(source)
+	root, _, _, err := blockReader.read(source[rest:], unclosed, readBackBudget(), 0)
+	if err != nil {
+		return TaskProgress{}, err
+	}
+	err = ast.Walk(root, func(node ast.Node, entering bool) (ast.WalkStatus, error) {
+		if !entering {
+			return ast.WalkContinue, nil
+		}
+		item, ok := node.(*ast.ListItem)
+		if !ok {
+			return ast.WalkContinue, nil
+		}
+		checkbox := taskCheckbox(item)
+		if checkbox == nil {
+			return ast.WalkContinue, nil
+		}
+		// The checkbox is the paragraph's first inline; an item whose paragraph holds nothing
+		// else is the empty item CountTasks skips, which the renderer writes as a plain `- `.
+		if checkbox.NextSibling() == nil && item.FirstChild().NextSibling() == nil {
+			return ast.WalkContinue, nil
+		}
+		progress.Total++
+		if checkbox.IsChecked {
+			progress.Done++
+		}
+		return ast.WalkContinue, nil
+	})
+	return progress, err
+}
+
+// taskCheckbox is the checkbox a goldmark list item opens with - the task-list extension's node,
+// the first inline of the item's first block - or nil for a plain item. It is the one reading of a
+// task item's box, for conversion (parseListItem) and for counting (CountTasksMarkdown) alike.
+func taskCheckbox(item *ast.ListItem) *extensionast.TaskCheckBox {
+	first := item.FirstChild()
+	if first == nil {
+		return nil
+	}
+	checkbox, _ := first.FirstChild().(*extensionast.TaskCheckBox)
+	return checkbox
 }
 
 // CountTasks counts the document's task items as its rendering carries them, nested lists and
