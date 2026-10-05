@@ -39385,6 +39385,32 @@ function renderAdvice(tool, key, advice, opts) {
   }
   return lines;
 }
+function renderSuggestions(suggestions, configUrl) {
+  if (suggestions === undefined)
+    return [];
+  if (suggestions.missing !== undefined) {
+    return [`Related-item search was skipped: ${suggestions.missing}.`];
+  }
+  const lines = [];
+  if (suggestions.related.length > 0) {
+    lines.push("Possibly related, found by search:");
+    for (const item of suggestions.related) {
+      lines.push(`- ${suggestionLabel(item)} \u2192 ${new URL(item.href, configUrl).toString()}`);
+    }
+  }
+  if (suggestions.decision !== undefined) {
+    const item = suggestions.decision;
+    const when = item.answered_at === undefined ? "" : ` on ${item.answered_at}`;
+    lines.push(`A past decision may already answer this: ${suggestionLabel(item)}, answered by ${item.answered_by}${when} \u2192 ${new URL(item.href, configUrl).toString()}`);
+  }
+  return lines;
+}
+function suggestionLabel(item) {
+  if (item.owner.kind === "issue") {
+    return `${item.owner.key} [${item.owner.status}] ${item.owner.title}`;
+  }
+  return `${item.owner.name} (${item.owner.project}/${item.owner.slug})`;
+}
 function documentResultDetails(artifact) {
   return {
     project: artifact.project,
@@ -40834,7 +40860,8 @@ async function executeDispatchTool(input) {
           ...renderAdvice(input.tool, created.key, created.advice, {
             isPrimarySpec: spec !== undefined
           }),
-          ...componentGuidance === undefined ? [] : [componentGuidance]
+          ...componentGuidance === undefined ? [] : [componentGuidance],
+          ...renderSuggestions(created.advice?.suggestions, configUrl)
         ];
         return {
           text: [
@@ -41121,7 +41148,10 @@ async function executeDispatchTool(input) {
       };
       const ask = resolved?.owner.kind === "project" ? await client.artifactAsk(resolved.artifact.id, askInput) : await client.ask(issue2(), askInput);
       const askOwner = ask.issue_key !== null ? issueTopic(ask.issue_key) : resolved === undefined ? issueTopic(issue2()) : documentTopic(resolved.artifact);
-      const adviceLines = renderAdvice(input.tool, askOwner.label, ask.advice, {});
+      const adviceLines = [
+        ...renderAdvice(input.tool, askOwner.label, ask.advice, {}),
+        ...renderSuggestions(ask.advice?.suggestions, configUrl)
+      ];
       return {
         text: [
           `Asked ${ask.id} on ${askOwner.label} (urgency ${ask.urgency}): ${ask.question}

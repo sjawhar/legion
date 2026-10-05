@@ -96,7 +96,22 @@ Check, in order:
    ```
 
    `active` lists the running roots, `waiting` the ones in line, `cap` the slots (`admission_cap`).
-5. **Someone else holds it.** The architect's first act is to claim the issue in Dispatch. When a
+5. **GitHub refuses its branch.** Before the architect starts, the daemon creates the issue's
+   branch, `legion/<KEY>`, on GitHub at `main` as the implement App, and again before each tree
+   member's planner starts, so no agent's push is the one that creates it (GitHub can refuse that
+   push on a large repository). A branch GitHub already has is kept as it is. While GitHub refuses
+   the create, the architect or planner waiting for it does not start. The daemon retries the
+   create, backing off to about a minute, and logs each refusal as an error whose `msg` is
+   `outbox row failed`, with `kind` `issue_branch` and an `error` naming the repository, the ref,
+   GitHub's status and its body:
+
+   ```text
+   {"level":"ERROR","msg":"outbox row failed","row":81,"kind":"issue_branch","error":"create the branch of WIDGETS-12, which its roles' starts wait for: create refs/heads/legion/WIDGETS-12 on acme/widgets at <main's commit>: GitHub answered POST /git/refs with 403: {\"message\":\"Resource not accessible by integration\",…}"}
+   ```
+
+   Fix what GitHub names, such as the implement App's permissions or a ruleset on `legion/*`
+   branches. The next attempt then creates the branch, and the tree starts.
+6. **Someone else holds it.** The architect's first act is to claim the issue in Dispatch. When a
    person or another session already holds the claim, the architect starts nothing and asks the
    holder, on the issue, to release it or take the issue back; the tree keeps its slot meanwhile.
 
@@ -185,7 +200,19 @@ These arrive as messages on the Dispatch issue, and the architect is told:
   stayed red through three fix attempts.
 - **A review round that no review decides.** Legion's reviewer must approve the head or request
   changes; a plain comment leaves the issue in `needs_review`, and the architect asks the reviewer
-  for the decision.
+  for the decision. Only the review App or an account with write access to the repository decides a
+  round, so an approval or request for changes from anyone else leaves it undecided too. The daemon
+  reads the author's permission from GitHub before it applies the review: an account GitHub answers
+  `404` for, or a `403` that is not its rate limit, has no write access, and stands so for five
+  minutes; write access is read again for every review. Any other failed read is retried, a rate
+  limit once the wait GitHub names has passed, and while that wait stands the daemon reads nothing
+  from GitHub. The daemon logs each review that decides nothing as `workflow: a review decides nothing:
+  its author is neither the review App nor an account with write access to the repository`, with
+  the author's login, and logs a permission it read as no write access with GitHub's own answer. A
+  `403` that is not a rate limit is logged at error as `workflow: GitHub refuses the review App's
+  installation a review author's repository permission`, naming the installation's owner: the
+  review App's installation cannot read the repository's collaborators, so until it can, no review
+  but the review App's decides a round.
 - **`READY` refused.** The merger's `READY` is refused until every check the base branch requires
   has succeeded on the pull request's head, and every workflow its rulesets require has a run on
   the head that succeeded, and while the design gate is closed. The refusal names the head and the

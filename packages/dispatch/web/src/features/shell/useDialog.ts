@@ -57,14 +57,23 @@ const scrollLock = {
 
 // Every open dialog's container. Escape is a `dialog`-scope keymap binding so it works before
 // the deferred initial focus has moved into the dialog (the key then lands on whatever was
-// focused before, such as the document editor); only the innermost open dialog closes -
-// innermost by DOM containment, since a picker nested in a sheet runs its effect first.
+// focused before, such as the document editor); only the innermost open dialog closes. Two
+// dialogs nested by DOM containment (a picker opened inside an already-open sheet) resolve by
+// containment, the nested one winning regardless of which mounted its effect first. Two dialogs
+// that are siblings - neither containing the other, such as the phone navigation sheet and a
+// second dialog a control inside it opens without closing the sheet first - have no containment
+// relationship to resolve by, so the most recently opened of the two wins instead.
 const openDialogs = new Set<HTMLElement | null>();
 
 function innermostOpenDialog(): HTMLElement | null | undefined {
   let innermost: HTMLElement | null | undefined;
   for (const container of openDialogs) {
-    if (innermost === undefined || (container !== null && innermost?.contains(container))) {
+    const containerIsAncestorOfInnermost =
+      container !== null &&
+      innermost !== null &&
+      innermost !== undefined &&
+      container.contains(innermost);
+    if (innermost === undefined || !containerIsAncestorOfInnermost) {
       innermost = container;
     }
   }

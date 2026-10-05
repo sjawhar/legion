@@ -74,9 +74,22 @@ type workflowRuntime struct {
 	// means the production defaults. A test shortens both to bound how long the warning takes to
 	// observe.
 	holdWarnAfter, holdWarnEvery time.Duration
-	// githubAPI is the GitHub REST root watchRequiredChecks reads under; empty, in production, is
+	// githubAPI is the GitHub REST root the workflow calls: watchRequiredChecks reads under it, and
+	// the outbox's issue_branch rows create branches under it. Empty, in production, is
 	// https://api.github.com, and a test points it at a stand-in.
 	githubAPI string
+	// reviewAppLogin is the review App's bot login from its boot lease, as the engine holds it: a
+	// review it submits decides a round by that login alone, so reviewerCanWrite asks GitHub
+	// nothing about it.
+	reviewAppLogin string
+	// permissions holds, by repository and login, until when reviewerCanWrite's read of GitHub
+	// stands as no write access; permissionTTL is how long one stands, zero, in production, being
+	// reviewPermissionTTL, and a test shortens it. limitedUntil is when GitHub's last rate limit
+	// stops asking to be left alone: while it stands, no read is made.
+	permissionsMu sync.Mutex
+	permissions   map[permissionKey]time.Time
+	permissionTTL time.Duration
+	limitedUntil  time.Time
 	// failed carries the first supervision terminal fact that could not be applied. serve stops
 	// the daemon with it: the claim's terminal state is durable, so the next boot's replay applies
 	// the fact the failed callback lost.
@@ -142,7 +155,7 @@ func mintAtBoot(ctx context.Context, tokens appauth.Tokens, owner string, log *s
 	return logins[appauth.Review], nil
 }
 
-func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, projectID string, log *slog.Logger, suppliedTokens appauth.Tokens) (*workflowRuntime, error) {
+func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, projectID string, log *slog.Logger, suppliedTokens appauth.Tokens, githubAPI string) (*workflowRuntime, error) {
 	if cfg.DispatchURL == "" {
 		return nil, nil
 	}
@@ -166,10 +179,10 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 	admission := admit.New(records, engine, cfg.AdmissionCap, cfg.Project, log)
 	return &workflowRuntime{
 		pool: st.Pool(), records: records, engine: engine, admission: admission,
-		handlers: []intake.Handler{engine, admission}, tokens: tokens, owner: owner,
+		handlers: []intake.Handler{engine, admission}, tokens: tokens, owner: owner, reviewAppLogin: reviewAppLogin,
 		grants: credential.New(nil), project: project, projectID: projectID, dispatchProject: cfg.Project, stateDir: cfg.StateDir, log: log,
 		failed: make(chan error, 1), readied: map[claim.Token]bool{}, readyWake: make(chan struct{}, 1),
-		controllerWake: cfg.ControllerWakeInterval,
+		controllerWake: cfg.ControllerWakeInterval, githubAPI: githubAPI,
 	}, nil
 }
 
@@ -211,6 +224,7 @@ func (w *workflowRuntime) connect(ctx context.Context, cfg config.Config, nc nat
 	w.log.Info("legion workflow boot stage", "stage", "intake")
 	w.consumers, err = intake.OpenConsumers(ctx, js, intake.ConsumerSpec{
 		Project: cfg.Project, Repositories: []ghrepo.Repository{w.project.Repo}, AckWait: cfg.WorkerRPCTimeout, NakDelay: time.Second, Logger: w.log,
+		ReviewPermission: w.reviewerCanWrite,
 	})
 	if err != nil {
 		return err
@@ -331,7 +345,7 @@ func (w *workflowRuntime) identity(ctx context.Context, role claim.Role) (runtim
 func (w *workflowRuntime) attach(supervision *supervision) {
 	w.log.Info("legion workflow boot stage", "stage", "outbox")
 	w.outbox = newOutbox(w.pool, w.records, w.dispatch, notify.New(supervision.cfg.EnvoyURL, supervision.plan.secrets["ENVOY_TOKEN"]), supervision.supervisor,
-		w.tokens, w.handlers, w.projectID, w.dispatchProject, w.stateDir, w.project, supervision.plan.tools, w.log)
+		w.tokens, w.handlers, w.projectID, w.dispatchProject, w.stateDir, w.project, w.githubAPI, supervision.plan.tools, w.log)
 	supervision.supervisor.OnTerminal(w.terminal)
 }
 

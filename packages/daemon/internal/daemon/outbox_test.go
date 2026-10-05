@@ -1001,7 +1001,8 @@ func TestAResumedWorkerIsHandedItsNewPhaseNotATaskLeftPendingFromTheLast(t *test
 				t.Fatalf("put the pull request: %v", err)
 			}
 			sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
-			engine := workflow.New(records, workflow.Config{Project: "legion", ReviewRoundCap: 10}, quietLogger())
+			const reviewApp = "legion-reviewer[bot]"
+			engine := workflow.New(records, workflow.Config{Project: "legion", ReviewRoundCap: 10, ReviewAppLogin: reviewApp}, quietLogger())
 			clock := time.Now()
 			runner := &outbox{
 				dispatchProject: "LEGION",
@@ -1038,7 +1039,7 @@ func TestAResumedWorkerIsHandedItsNewPhaseNotATaskLeftPendingFromTheLast(t *test
 			sup.deps.Conns.(*fake.Conns).Register(implementer, conn)
 
 			// The reviewer asks for round 2, and the implementer starts on its task.
-			apply("review:round-2", intake.PullRequestReview{Repo: "acme/widgets", Number: 118, State: "CHANGES_REQUESTED", CommitID: head, HeadSHA: head, Body: "scripted changes requested, round 2"})
+			apply("review:round-2", intake.PullRequestReview{Repo: "acme/widgets", Number: 118, State: "CHANGES_REQUESTED", CommitID: head, HeadSHA: head, Author: reviewApp, Body: "scripted changes requested, round 2"})
 			// A review ends when its reviewer completes it: its handoff is part of the phase.
 			apply("handoff:reviewer:reviewing:1", intake.HandoffComplete{Generation: 1, Issue: issue.Key, Role: claim.RoleReviewer,
 				Claim: "reviewer", Commit: "review-round-1"})
@@ -1091,7 +1092,7 @@ func TestAResumedWorkerIsHandedItsNewPhaseNotATaskLeftPendingFromTheLast(t *test
 			apply("handoff:tester:testing:2", intake.HandoffComplete{Generation: 1, Issue: issue.Key, Role: claim.RoleTester, Claim: tester, Commit: "test-round-2", Verdict: "pass"})
 			due("the move to reviewing")
 			review := tc.review
-			review.Repo, review.Number, review.CommitID, review.HeadSHA = "acme/widgets", 118, head, head
+			review.Repo, review.Number, review.CommitID, review.HeadSHA, review.Author = "acme/widgets", 118, head, head, reviewApp
 			apply("review:after-round-2", review)
 			apply("handoff:reviewer:reviewing:2", intake.HandoffComplete{Generation: 1, Issue: issue.Key, Role: claim.RoleReviewer,
 				Claim: "reviewer", Commit: "review-round-2"})
@@ -1449,7 +1450,8 @@ func TestAClosedTreeSetBackToTodoRelaunchesItsArchitect(t *testing.T) {
 	runner := &outbox{
 		dispatchProject: "LEGION",
 		pool:            pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"),
-		dispatch: &outboxDispatch{issue: dispatch.Issue{Key: root.Key, Status: "todo"}}, handlers: []intake.Handler{engine, admission},
+		githubAPI: newBranchGitHub(t, nil, branchExists).url,
+		dispatch:  &outboxDispatch{issue: dispatch.Issue{Key: root.Key, Status: "todo"}}, handlers: []intake.Handler{engine, admission},
 		now: func() time.Time { return time.Now().Add(time.Hour) }, log: quietLogger(),
 		provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
 			provisioned++
@@ -1489,8 +1491,12 @@ func TestAClosedTreeSetBackToTodoRelaunchesItsArchitect(t *testing.T) {
 	if _, err := intake.ApplyFact(ctx, pool, "dispatch", "todo-again", intake.DispatchIssue{Key: root.Key, Seq: 6, Type: "issue.updated", Status: "todo", Title: root.Title, Rank: root.Rank, HandedOver: true}, engine, admission); err != nil {
 		t.Fatalf("apply the todo: %v", err)
 	}
-	if err := runner.RunOnce(ctx); err != nil {
-		t.Fatalf("run the re-admission effects: %v", err)
+	// The first run creates the re-admitted root's branch, which its architect's start waits for;
+	// the second runs that start.
+	for range 2 {
+		if err := runner.RunOnce(ctx); err != nil {
+			t.Fatalf("run the re-admission effects: %v", err)
+		}
 	}
 	got := machine.Claim()
 	if got.State != supervise.StateLaunching || provisioned != 2 {

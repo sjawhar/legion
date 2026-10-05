@@ -37,8 +37,10 @@ type Config struct {
 	ReviewWorkflows []string
 	Clock           func() time.Time
 	// ReviewAppLogin is the review App's bot login (<slug>[bot]) from its boot token lease. A push
-	// by it is never a fix attempt, and a red on its red tests is planned; a review it submits can be
-	// the reviewer's answer to a round it left undecided (reviewersAnswer). Empty matches no one.
+	// by it is never a fix attempt, and a red on its red tests is planned; a review it submits decides
+	// a round whatever GitHub gives its bot account (decidesRound) and can be the reviewer's answer
+	// to a round it left undecided (reviewersAnswer). Empty matches no one. A workflow boot never
+	// leaves it empty: it refuses a review lease that names no login (daemon.mintAtBoot).
 	ReviewAppLogin string
 }
 
@@ -303,7 +305,7 @@ func (e *Engine) enterChild(ctx context.Context, tx pgx.Tx, root record.Issue, f
 		return err
 	}
 	if gate != nil && classify.DesignGateOpen(*gate) {
-		return e.transition(ctx, tx, child, TriggerGateOpened, "", record.PhaseRow{}, nil, "")
+		return e.gateOpened(ctx, tx, child)
 	}
 	return nil
 }
@@ -819,12 +821,24 @@ func (e *Engine) advanceAdmittedTree(ctx context.Context, tx pgx.Tx, root record
 	}
 	for _, issue := range members {
 		if issue.Phase == phase.Admitted {
-			if err := e.transition(ctx, tx, issue, TriggerGateOpened, "", record.PhaseRow{}, nil, ""); err != nil {
+			if err := e.gateOpened(ctx, tx, issue); err != nil {
 				return err
 			}
 		}
 	}
 	return nil
+}
+
+// gateOpened moves an admitted member of a tree whose gate is open into planning, behind a row
+// creating its branch (record.IssueBranch): its planner's start, the first worker start of every
+// member, waits for that row, so no planner's push is the one that creates the branch. A member
+// whose earlier row a linger dropped, or one admitted before the daemon queued such rows, gets its
+// row here.
+func (e *Engine) gateOpened(ctx context.Context, tx pgx.Tx, issue record.Issue) error {
+	if err := e.enqueue(ctx, tx, issue.Key, record.IssueBranch{Generation: issue.Generation}); err != nil {
+		return err
+	}
+	return e.transition(ctx, tx, issue, TriggerGateOpened, "", record.PhaseRow{}, nil, "")
 }
 
 // everyClaim enqueues op for every claim an issue can hold: its architect, which admission or the

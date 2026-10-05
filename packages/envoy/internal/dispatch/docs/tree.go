@@ -246,16 +246,19 @@ func renderDocument(doc *crdt.Doc) (string, error) {
 // renderDocumentForUpdate is renderDocument without pmdoc.Read's deep copy
 // (pmdoc.ReadForRendering): for the update observer's render, which runs the render and discards
 // the tree before releasing the replica's lock (renderedReplica.updateChangesMarkdown), so
-// nothing retains the tree past this call to alias a later reader.
-func renderDocumentForUpdate(doc *crdt.Doc) (string, error) {
+// nothing retains the tree past this call to alias a later reader - a caller that reads tree past
+// the call (updateChangesMarkdown's own onChanged, called before the lock is released) aliases
+// none of it by doing so, since tree itself, not a copy of it, is what the caller walks.
+func renderDocumentForUpdate(doc *crdt.Doc) (string, *pmdoc.Node, error) {
 	if doc == nil {
-		return "", errDocUnloaded
+		return "", nil, errDocUnloaded
 	}
 	tree, err := pmdoc.ReadForRendering(doc.GetXmlFragment(fragmentName))
 	if err != nil {
-		return "", documentSchemaError(err)
+		return "", nil, documentSchemaError(err)
 	}
-	return documentMarkdown(tree)
+	markdown, err := documentMarkdown(tree)
+	return markdown, tree, err
 }
 
 // snapshotDocument copies doc's state as of one moment. Encoding it takes the document's lock, which
@@ -316,12 +319,14 @@ func (r *renderedReplica) lockForUpdate() {
 
 // observe is the update observer's turn with the replica: it waits for mu (lockForUpdate), brings
 // the replica up to date with live, and reports whether the update changed the room's rendered
-// markdown (updateChangesMarkdown). The observer is the one holder of mu that waits for it.
-func (r *renderedReplica) observe(room string, live *crdt.Doc) bool {
+// markdown (updateChangesMarkdown), calling onChanged with the tree it rendered when it did -
+// still holding mu, so the room's own record of what each update introduced moves forward in the
+// same order the replica's catch-up does. The observer is the one holder of mu that waits for it.
+func (r *renderedReplica) observe(room string, live *crdt.Doc, onChanged func(tree *pmdoc.Node)) bool {
 	r.lockForUpdate()
 	defer r.mu.Unlock()
 	r.catchUp(room, live)
-	return r.updateChangesMarkdown(room)
+	return r.updateChangesMarkdown(room, onChanged)
 }
 
 // keepReplica makes the replica live's update observer keeps, starting from markdown, live's
@@ -436,9 +441,11 @@ func (r *renderedReplica) catchUp(room string, live *crdt.Doc) {
 // replica, the room's document as of that update, so its caller holds mu, through
 // renderDocumentForUpdate: the tree it reads never outlives this call, so it carries none of
 // pmdoc.Read's copy. An update that changes only what no rendering carries - an anchor mark, or a
-// heading id or list item label the browser editor derives - is no content change.
-func (r *renderedReplica) updateChangesMarkdown(room string) bool {
-	markdown, err := renderDocumentForUpdate(r.doc)
+// heading id or list item label the browser editor derives - is no content change. onChanged, when
+// given, is called with the tree only once a real change is found, still holding mu, so a caller
+// that also needs the tree a real change introduced pays the tree walk's cost only then.
+func (r *renderedReplica) updateChangesMarkdown(room string, onChanged func(tree *pmdoc.Node)) bool {
+	markdown, tree, err := renderDocumentForUpdate(r.doc)
 	if err != nil {
 		r.markdown = nil
 		if errors.Is(err, ErrDocOutsideSchema) {
@@ -452,6 +459,9 @@ func (r *renderedReplica) updateChangesMarkdown(room string) bool {
 		return false
 	}
 	r.markdown = &markdown
+	if onChanged != nil {
+		onChanged(tree)
+	}
 	return true
 }
 

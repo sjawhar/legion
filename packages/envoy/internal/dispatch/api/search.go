@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"html"
 	"math"
 	"net/http"
@@ -178,22 +179,33 @@ func (s *server) search(w http.ResponseWriter, r *http.Request) {
 		offset = parsed
 	}
 
-	var nodes int
-	if err := s.deps.Store.Pool.QueryRow(r.Context(), "select numnode(websearch_to_tsquery('english', $1))", searchText).Scan(&nodes); err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	if nodes == 0 {
-		WriteJSON(w, http.StatusOK, model.SearchResponse{Results: []model.SearchResult{}, Limit: limit, Offset: offset})
-		return
-	}
-
-	started := time.Now()
-	rows, err := s.deps.Store.Pool.Query(r.Context(), searchQuery, searchText, project, limit, firstTerm(searchText), headlineOptions,
-		offset, contracts.SearchKindDepth, searchFusionK)
+	response, err := s.runFusedSearch(r.Context(), searchText, project, limit, offset)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
+	}
+	WriteJSON(w, http.StatusOK, response)
+}
+
+// runFusedSearch is the search handler's query, SQL and row-scanning shared with LEGION-550's
+// write-time suggestions (suggestions.go): both read the same fused ranking
+// (sjawhar/legion#1764), the handler bound by its request context and the suggestions call
+// bound by writeSuggestionTimeout instead. q is assumed already validated (length, non-empty
+// after trimming); project empty searches every project.
+func (s *server) runFusedSearch(ctx context.Context, q, project string, limit, offset int) (model.SearchResponse, error) {
+	var nodes int
+	if err := s.deps.Store.Pool.QueryRow(ctx, "select numnode(websearch_to_tsquery('english', $1))", q).Scan(&nodes); err != nil {
+		return model.SearchResponse{}, err
+	}
+	if nodes == 0 {
+		return model.SearchResponse{Results: []model.SearchResult{}, Limit: limit, Offset: offset}, nil
+	}
+
+	started := time.Now()
+	rows, err := s.deps.Store.Pool.Query(ctx, searchQuery, q, project, limit, firstTerm(q), headlineOptions,
+		offset, contracts.SearchKindDepth, searchFusionK)
+	if err != nil {
+		return model.SearchResponse{}, err
 	}
 	defer rows.Close()
 
@@ -225,8 +237,7 @@ func (s *server) search(w http.ResponseWriter, r *http.Request) {
 			&rank,
 			&headline,
 		); err != nil {
-			s.writeHandlerError(w, err)
-			return
+			return model.SearchResponse{}, err
 		}
 		// A page past the last reachable row is one row of totals and no hit.
 		if kind == nil {
@@ -249,16 +260,15 @@ func (s *server) search(w http.ResponseWriter, r *http.Request) {
 			result.Artifact = &model.SearchArtifact{Slug: *slug, Name: *name}
 		}
 		result.Snippet = markSnippet(*headline)
-		result.Href = searchHref(result.Kind, result.Owner, result.Artifact, primary, result.ID, blockID, searchText)
+		result.Href = searchHref(result.Kind, result.Owner, result.Artifact, primary, result.ID, blockID, q)
 		response.Results = append(response.Results, result)
 	}
 	if err := rows.Err(); err != nil {
-		s.writeHandlerError(w, err)
-		return
+		return model.SearchResponse{}, err
 	}
 
 	response.TookMS = time.Since(started).Milliseconds()
-	WriteJSON(w, http.StatusOK, response)
+	return response, nil
 }
 
 func firstTerm(query string) string {

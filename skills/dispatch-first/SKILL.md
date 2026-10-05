@@ -27,6 +27,10 @@ parent's children and the issue's `Components:` line show where the rest of that
 
 ## What to do with what you find
 
+Filing an issue or opening an ask also searches for you: the result's `advice.suggestions` names
+likely duplicates or a decision that may already settle it. Treat a hit there the same as one you
+found yourself.
+
 - **The work is already tracked: extend that issue.** Put the finding on it (a comment, a message,
   or an edit to its spec) instead of filing another. File a new issue only when no hit covers the
   work, and cite the nearest one you ruled out (`dispatch://KEY`).

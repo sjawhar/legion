@@ -280,6 +280,31 @@ func (s *server) multipartArtifactUpload(w http.ResponseWriter, r *http.Request)
 	}, true
 }
 
+// writeDocumentVersion stores the document-version row uploads write directly, returning the same
+// decoded version the route returns to its caller. Uploads keep this separate from
+// docs.writeVersionTx because they own their artifact event and approval move.
+func writeDocumentVersion(ctx context.Context, tx pgx.Tx, artifactID string, number int, markdown string, authors []model.Actor, summary *string) (model.Version, error) {
+	encodedAuthors, err := json.Marshal(authors)
+	if err != nil {
+		return model.Version{}, fmt.Errorf("encode document version authors: %w", err)
+	}
+	var version model.Version
+	var authorsRaw []byte
+	if err := tx.QueryRow(ctx, `
+		insert into artifact_versions (artifact_id, number, markdown, authors, named, summary, doc_update_version)
+		values ($1, $2, $3, $4, $5, $6, coalesce((select max(version) from doc_updates where artifact_id = $1), 0))
+		returning number, named, summary, authors, created_at
+	`, artifactID, number, markdown, encodedAuthors, summary != nil, summary).Scan(
+		&version.Number, &version.Named, &version.Summary, &authorsRaw, &version.CreatedAt,
+	); err != nil {
+		return model.Version{}, fmt.Errorf("write document version: %w", err)
+	}
+	if err := json.Unmarshal(authorsRaw, &version.Authors); err != nil {
+		return model.Version{}, fmt.Errorf("decode document version authors: %w", err)
+	}
+	return version, nil
+}
+
 func (s *server) storeArtifact(
 	w http.ResponseWriter,
 	r *http.Request,
@@ -378,16 +403,12 @@ func (s *server) storeArtifact(
 		s.writeHandlerError(w, err)
 		return
 	}
-	authors, err := encodeJSON([]model.Actor{actor})
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
 	var version model.Version
-	var versionAuthors []byte
 	var summaryValue any
+	var documentSummary *string
 	if input.summary != "" {
 		summaryValue = input.summary
+		documentSummary = &input.summary
 	}
 	documentCtx, ledger := s.deps.Docs.Join(r.Context(), tx)
 	defer ledger.Discard()
@@ -404,16 +425,14 @@ func (s *server) storeArtifact(
 			s.writeHandlerError(w, err)
 			return
 		}
-		if err := tx.QueryRow(r.Context(), `
-			insert into artifact_versions (artifact_id, number, markdown, authors, named, summary, doc_update_version)
-			values ($1, $2, $3, $4, $5, $6, coalesce((select max(version) from doc_updates where artifact_id = $1), 0))
-			returning number, named, summary, authors, created_at
-		`, artifact.ID, nextNumber, documentMarkdown, authors, input.summary != "", summaryValue).Scan(
-			&version.Number, &version.Named, &version.Summary, &versionAuthors, &version.CreatedAt,
-		); err != nil {
+		version, err = writeDocumentVersion(r.Context(), tx, artifact.ID, nextNumber, documentMarkdown, []model.Actor{actor}, documentSummary)
+		if err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
+		// The version credits the uploader alone, and holds the upload's write to the document,
+		// which clears the credit of every edit that write read when it changed the document.
+		ledger.WroteVersion(artifact.ID, version)
 		// The version row exists now, so the count names it (LEGION-542).
 		if err := docs.RecordTaskProgressMarkdown(r.Context(), tx, artifact.ID, documentMarkdown); err != nil {
 			s.writeHandlerError(w, err)
@@ -425,11 +444,17 @@ func (s *server) storeArtifact(
 			return
 		}
 	} else {
+		authors, err := encodeJSON([]model.Actor{actor})
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
 		size := len(input.content)
 		content := input.content
 		if s.deps.Files != nil {
 			content = nil
 		}
+		var versionAuthors []byte
 		if err := tx.QueryRow(r.Context(), `
 			insert into artifact_versions (artifact_id, number, content, mime, size, sha256, authors, named, summary)
 			values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
@@ -441,17 +466,17 @@ func (s *server) storeArtifact(
 			s.writeHandlerError(w, err)
 			return
 		}
-	}
-	if err := json.Unmarshal(versionAuthors, &version.Authors); err != nil {
-		s.writeHandlerError(w, err)
-		return
+		if err := json.Unmarshal(versionAuthors, &version.Authors); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
 	}
 	var diff *string
 	if !created && kind == "doc" {
 		// This route writes its version itself rather than through the document service, so its
 		// open approval request follows that version just as every other version write does.
 		movedEvents, err = docs.MoveApprovalAsk(
-			r.Context(), tx, s.deps.Events, artifact.ID, version, s.deps.ServerURL,
+			r.Context(), tx, s.deps.Events, artifact.ID, version, actor, s.deps.ServerURL,
 		)
 		if err != nil {
 			s.writeHandlerError(w, err)
@@ -518,7 +543,7 @@ func (s *server) storeArtifact(
 	if target.IssueKey != nil {
 		WriteJSON(w, http.StatusCreated, withAdvice(responsePayload, advice))
 	} else if blocks != nil {
-		WriteJSON(w, http.StatusCreated, withDocumentBlockAdvice(responsePayload, blocks))
+		WriteJSON(w, http.StatusCreated, withRawAdvice(responsePayload, blocks))
 	} else {
 		WriteJSON(w, http.StatusCreated, responsePayload)
 	}
@@ -944,7 +969,7 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 	// code and containers, which a caller's own reading of that markdown would only approximate.
 	blocks := &editBlocks{DecisionBlocksAdded: edit.AskBlocksAdded}
 	if artifact.IssueKey == nil || advice == nil {
-		WriteJSON(w, http.StatusOK, withDocumentBlockAdvice(responsePayload, blocks))
+		WriteJSON(w, http.StatusOK, withRawAdvice(responsePayload, blocks))
 		return
 	}
 	advice.editBlocks = blocks
