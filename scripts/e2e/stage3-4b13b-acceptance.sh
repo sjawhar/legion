@@ -1106,7 +1106,12 @@ pass
 
 # ---- 6. an early merge: pr-merged, and no READY for a merged PR ----------------------------------------
 begin early-merge-skips-ready
-gh -R "$repo" pr merge "${pr_of[$root2]}" --squash --delete-branch
+# "Early" is $root2's own workflow phase (merging, its merger held since retros above, never
+# released here), not GitHub's merge-readiness: merge_when_clean's wait is only for the ruleset's
+# required checks to settle on this head, and nothing but the merger's own handoff_complete moves
+# $root2 toward a READY, which stays impossible for as long as it is held. The merge still lands
+# before any READY exists.
+merge_when_clean "$repo" "${pr_of[$root2]}" --squash --delete-branch
 until_true 300 "the pr-merged notice on $root2's architect" notice_delivered "$root2" architect "$(notice_needle pr-merged "$root2")"
 issue_phase "$root2" merging >/dev/null || soft "$root2 left merging on the early merge"
 notice_line "$root2" architect "$(notice_needle pr-merged "$root2")" | head -1 >"$evidence/notice-pr-merged.jsonl"
@@ -1211,7 +1216,7 @@ begin merge-at-awaiting-merge-gives-no-pr-merged
 gh api "repos/$repo/git/refs" -f ref="refs/heads/$merge_base" -f sha="$main_sha" >/dev/null
 gh -R "$repo" pr edit "${pr_of[$root1]}" --base "$merge_base" >/dev/null
 note "$repo#${pr_of[$root1]} retargeted to its own base $merge_base at main $main_sha"
-gh -R "$repo" pr merge "${pr_of[$root1]}" --squash --delete-branch
+merge_when_clean "$repo" "${pr_of[$root1]}" --squash --delete-branch
 wait_for_phase "$root1" production_check 600
 sleep 60
 n=$(notice_deliveries "$root1" architect "$(notice_needle pr-merged "$root1")")

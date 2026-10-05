@@ -886,7 +886,7 @@ primary_issue() {
   # no background child before release_smoke_main, or it inherits the descriptor and holds the smoke
   # main past this run's window.
   hold_smoke_main
-  gh -R "$repo" pr merge "$pr_number" --squash --delete-branch
+  merge_when_clean "$repo" "$pr_number" --squash --delete-branch
   wait_for_phase "$root_issue" production_check 300
   # The resumed implementer's task names production_check, and it may record the check before the
   # proof's instruction reaches it; its completion is observed, not its instruction.

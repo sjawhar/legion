@@ -2878,7 +2878,7 @@ note "READY #$pr_number was posted at $ready_head with $(jq length "$evidence/re
 # release_smoke_main below, or it inherits the descriptor and holds the smoke main past this run's
 # window. `9>&- 7>&-` does not close it: its number is allocated at runtime, not fixed.
 hold_smoke_main
-gh -R "$repo" pr merge "$pr_number" --squash --delete-branch
+merge_when_clean "$repo" "$pr_number" --squash --delete-branch
 on_tree "$tree1" wait_for_phase "$tree1" production_check 600
 if ! production_check_reported "$tree1" >/dev/null 2>&1; then
   on_tree "$tree1" wait_for_worker "$tree1" implementer
