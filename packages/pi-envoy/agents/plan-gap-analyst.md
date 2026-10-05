@@ -30,7 +30,7 @@ owns the document.
 4. **Claims and requirements with no source.** A statement about how a system works today that the
    code, its documentation or command output you were given does not show; and, when the caller
    gave you the owner's words to check the document against, a requirement that traces to neither
-   them nor a cited fact. A requirement in a spec a human approved has its source. Say what you
+   them nor a cited fact. A requirement in a version a human approved has its source. Say what you
    checked. You cannot run commands, so a claim about live state you cannot read is reported as
    unverified, not as false.
 

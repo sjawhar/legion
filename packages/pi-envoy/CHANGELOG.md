@@ -26,10 +26,10 @@
   kind: a claim about how a system works today that the code, its documentation or command output
   it was given does not show (a claim about live state it cannot read is reported as unverified),
   and, when the caller gave it the owner's words to check against, a requirement that traces to
-  neither them nor a cited fact; a requirement in a spec a human approved has its source. The
-  `dispatch` skill's "Writing a spec" has an author give it the draft, the human's words and any
-  command output a claim rests on, before the first version and before each approval request
-  (LEGION-577).
+  neither them nor a cited fact; a requirement in a version a human approved has its source. The
+  `dispatch-first` skill, which every session with Dispatch carries, says in "Design in the spec" to
+  have it check a spec against the code, the human's words and any command output a claim rests on,
+  before the first version and each approval request, and to resolve what it flags (LEGION-577).
 - A `dispatch-brainstorming` skill ships beside `dispatch` and `dispatch-first` (LEGION-475). In a
   session with Dispatch it replaces superpowers' `brainstorming` and `writing-plans`: the design
   conversation runs in the issue's spec, the first version holds only established facts and every
