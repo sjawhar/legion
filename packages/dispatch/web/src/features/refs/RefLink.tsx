@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { type ReactNode, useState } from "react";
 
 import { borderDefault } from "../../theme/classes";
 import { shortSessionId } from "./actor";
@@ -58,14 +58,23 @@ export const pictureThumbnailClassName = `not-prose inline-block h-10 w-10 shrin
 
 /** Portal content for an inline reference anchor: the resolved title once
  * `useReferenceTarget` has it, the ref's short form until then, and beside it the picture's
- * thumbnail when the reference names an image artifact. */
+ * thumbnail when the reference names an image artifact. A thumbnail the browser cannot draw (a
+ * pinned version the server does not serve) is dropped, leaving the title alone, so a stale or
+ * hand-written reference never shows a broken-image glyph. */
 export function RefLink({ route }: { route: DispatchReferenceRoute }): ReactNode {
   const { picture, title } = useReferenceTarget(route);
+  const [failed, setFailed] = useState(false);
   return (
     <>
-      {picture === undefined ? null : (
+      {picture === undefined || failed ? null : (
         <>
-          <img alt="" className={pictureThumbnailClassName} loading="lazy" src={picture} />{" "}
+          <img
+            alt=""
+            className={pictureThumbnailClassName}
+            loading="lazy"
+            onError={() => setFailed(true)}
+            src={picture}
+          />{" "}
         </>
       )}
       {title ?? shortForm(route)}

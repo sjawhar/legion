@@ -136,6 +136,37 @@ describe("Dispatch pictures", () => {
     }
   });
 
+  test("a plain reference whose thumbnail cannot load drops it and keeps the title", async () => {
+    const getIssue = spyOn(api, "getIssue").mockResolvedValue({
+      artifacts: [picture],
+      key: "CORE-1",
+      title: "Core one",
+    } as never);
+    // A hand-written or stale reference can pin a version the server does not serve; the
+    // thumbnail's load then fails, and the reference reads as its title with no broken glyph.
+    const view = render(
+      withQueries(<MarkdownBody markdown="See dispatch://CORE-1/artifact/shot-png@v99" />)
+    );
+
+    try {
+      const link = await within(view.container).findByRole("link", { name: "shot.png" });
+      const thumbnail = await waitFor(() => {
+        const image = link.querySelector("img");
+        expect(image?.getAttribute("src")).toBe(
+          "/api/v1/issues/CORE-1/artifacts/shot-png/versions/99"
+        );
+        return image as HTMLImageElement;
+      });
+      fireEvent.error(thumbnail);
+      await waitFor(() => expect(link.querySelector("img")).toBeNull());
+      expect(link.textContent).toBe("shot.png");
+      expect(link.getAttribute("href")).toBe("/issues/CORE-1/artifacts/shot-png?v=99");
+    } finally {
+      getIssue.mockRestore();
+      view.unmount();
+    }
+  });
+
   test("a plain reference to a non-image artifact shows no thumbnail", async () => {
     const getIssue = spyOn(api, "getIssue").mockResolvedValue({
       artifacts: [{ ...picture, kind: "file", name: "notes.pdf", slug: "notes-pdf" }],
