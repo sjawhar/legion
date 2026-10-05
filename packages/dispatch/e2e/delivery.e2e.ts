@@ -125,3 +125,33 @@ test("the delivery timeline shows seeded merges and deploys, filters by facet, a
   await page.screenshot({ path: testInfo.outputPath("delivery-drilldown.png"), fullPage: true });
   await context.close();
 });
+
+test("the freshness row shows a named reconcile failure, distinct from mere staleness", async ({
+  browser,
+}) => {
+  await seedDeliveryFixture();
+  // A reconcile pass that failed (a missing GitHub App permission here) still advances nothing
+  // happy: last_reconcile_at is set (a prior pass did succeed once) but last_error now names the
+  // most recent failure, exactly as reconcile.go's RecordReconcileError leaves it -- the
+  // freshness row must show this failure by name, not the generic "Reconcile X ago"/"never ran"
+  // wording a merely-stale-but-healthy row gets (lib/freshness.ts's reconcileRow).
+  await sql(
+    `UPDATE delivery_settings
+       SET last_reconcile_at = '2024-06-01T01:00:00Z',
+           last_error = 'the installation lacks Actions: read on acme/widgets'
+       WHERE singleton`
+  );
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+
+  await page.goto(`/delivery?from=2024-06-01T00%3A00%3A00Z&to=2024-06-02T00%3A00%3A00Z`);
+
+  await expect(page.getByRole("heading", { name: "Delivery" })).toBeVisible();
+  await expect(
+    page.getByText(/reconcile failing: the installation lacks actions: read on acme\/widgets/i)
+  ).toBeVisible();
+  // Never the generic staleness wording once a named failure is present.
+  await expect(page.getByText(/reconcile never ran/i)).toHaveCount(0);
+
+  await context.close();
+});
