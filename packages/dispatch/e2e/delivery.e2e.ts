@@ -1,0 +1,84 @@
+import { expect, test } from "@playwright/test";
+import { sql } from "./psql";
+import { resetDatabase } from "./seed";
+import { asUser } from "./users";
+
+test.beforeEach(async () => {
+  await resetDatabase();
+});
+
+/** Seeds one delivery_settings row plus two population pull requests (one shipped by a deploy
+ * run, one still waiting) and the deploy run itself, directly in Postgres -- the delivery
+ * timeline's GET route reads only stored facts, so this is the same shape intake/reconcile would
+ * have written, without needing a live GitHub App for this page-level e2e. acme/widgets-shaped
+ * placeholders throughout, per AGENTS.md ("This repository is public"). */
+async function seedDeliveryFixture(): Promise<void> {
+  await sql(
+    `INSERT INTO delivery_settings (
+       singleton, deploy_repo, deploy_workflow_path, production_job_name,
+       pr_checks_workflow_path, population_authors, excluded_repos, updated_by
+     ) VALUES (
+       true, 'acme/widgets', '.github/workflows/deploy.yml', 'production-apply / production-apply',
+       '.github/workflows/pr-checks.yml', ARRAY['octocat'], ARRAY[]::text[], '{"kind":"system","id":"e2e-seed"}'
+     )`,
+    `INSERT INTO delivery_pull_requests (
+       repo, number, title, url, author, created_at, merged_at, additions, deletions, rework, sessions, partial
+     ) VALUES
+       ('acme/widgets', 1, 'feat: a shipped widget', 'https://github.com/acme/widgets/pull/1', 'octocat',
+        '2024-06-01T00:00:00Z', '2024-06-01T01:00:00Z', 12, 3, false, ARRAY[]::text[], false),
+       ('acme/widgets', 2, 'feat: a waiting widget', 'https://github.com/acme/widgets/pull/2', 'octocat',
+        '2024-06-01T02:00:00Z', '2024-06-01T03:00:00Z', 4, 1, false, ARRAY[]::text[], false)`,
+    `INSERT INTO delivery_runs (
+       repo, run_id, kind, head_sha, head_commit_at, started_at, completed_at, conclusion, url
+     ) VALUES (
+       'acme/widgets', 500, 'deploy', 'deadbeef', '2024-06-01T01:00:00Z',
+       '2024-06-01T01:30:00Z', '2024-06-01T01:40:00Z', 'success',
+       'https://github.com/acme/widgets/actions/runs/500'
+     )`,
+    `INSERT INTO delivery_run_jobs (repo, run_id, name, started_at, completed_at, conclusion)
+     VALUES ('acme/widgets', 500, 'production-apply / production-apply', '2024-06-01T01:30:00Z', '2024-06-01T01:40:00Z', 'success')`
+  );
+}
+
+test("the delivery timeline shows seeded merges and deploys, filters by facet, and drills into a PR", async ({
+  browser,
+}, testInfo) => {
+  await seedDeliveryFixture();
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+
+  await page.goto(`/delivery?from=2024-06-01T00%3A00%3A00Z&to=2024-06-02T00%3A00%3A00Z`);
+
+  await expect(page.getByRole("heading", { name: "Delivery" })).toBeVisible();
+  // The source-freshness row renders once the window's data has loaded: reconcile/events never
+  // ran in this seeded-only fixture, so lib/freshness.ts's never-happened wording appears.
+  await expect(page.getByText(/reconcile never ran/i)).toBeVisible();
+  await expect(page.getByText(/events never received/i)).toBeVisible();
+
+  // Switch to the list view, where both seeded PRs show as rows.
+  await page.getByRole("button", { name: "Show list" }).click();
+  await expect(page.getByText("feat: a shipped widget")).toBeVisible();
+  await expect(page.getByText("feat: a waiting widget")).toBeVisible();
+
+  // The Repository facet narrows the list; acme/widgets is the only repository seeded, so
+  // selecting it is a no-op on the count but proves the picker and the client-side filter run.
+  // MultiSelect's trigger is a button named for the facet (plus an optional " · N" selection
+  // count); its popover exposes each option with role "option" (lib/filters.ts's shared pattern
+  // for this same component elsewhere in the SPA).
+  await page.getByRole("button", { name: /^Repository( · \d+)?$/ }).click();
+  await page.getByRole("option", { exact: true, name: "acme/widgets" }).click();
+  await page.keyboard.press("Escape");
+  await expect(page.getByText("feat: a shipped widget")).toBeVisible();
+  await expect(page.getByText("feat: a waiting widget")).toBeVisible();
+
+  // A row click opens the drill-down with the GitHub link.
+  await page.getByRole("cell", { name: "feat: a shipped widget" }).click();
+  await expect(page.getByRole("link", { name: "acme/widgets#1 on GitHub" })).toHaveAttribute(
+    "href",
+    "https://github.com/acme/widgets/pull/1"
+  );
+  await expect(page.getByText(/deployed · deploy run 500/i)).toBeVisible();
+
+  await page.screenshot({ path: testInfo.outputPath("delivery-drilldown.png"), fullPage: true });
+  await context.close();
+});
