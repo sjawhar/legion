@@ -127,7 +127,7 @@ func TestSearchFindsAMeaningOnlyMatch(t *testing.T) {
 	}
 }
 
-// TestSearchStaysNonDegradedWhileEmbedqueueIsThrottled is Main's round-5 proof for giving a live
+// TestSearchStaysNonDegradedWhileEmbedqueueIsThrottled proves a live
 // query embedding priority over background work: cmd/dispatch wires embedqueue's own Embedder
 // behind embed.RateLimitedEmbedder and never wraps the one api.Deps holds, so a live search
 // request's own query embedding is never paced or blocked by that limiter, however deep into

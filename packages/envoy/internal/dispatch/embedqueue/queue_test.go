@@ -487,8 +487,8 @@ func (p *poisonTextEmbedder) Embed(_ context.Context, texts []string, _ embed.In
 	return vectors, nil
 }
 
-// TestProcessBatchBisectsANonThrottledFailureToIsolateTheOffendingRow is Main's round-5 ask of
-// Rev's "should": a non-throttled whole-batch failure must not retry every row in the batch
+// TestProcessBatchBisectsANonThrottledFailureToIsolateTheOffendingRow proves
+// a non-throttled whole-batch failure must not retry every row in the batch
 // forever just because one row's content is what the API actually refuses. Three issues share one
 // batch; one's title is content the embedder refuses outright (non-throttled); bisection must
 // isolate that one row, embed the other two normally in the same ProcessBatch call, and leave only
@@ -600,8 +600,8 @@ func TestProcessBatchBisectionAbortsOnAThrottleMidway(t *testing.T) {
 	}
 }
 
-// TestProcessBatchNeverDeadLettersAUniformNonThrottledFailureHoweverManyTimesItRecurs is Main's
-// round-6 fix for the bug Qual and Deep both reproduced: an outage embed.IsThrottled does not
+// TestProcessBatchNeverDeadLettersAUniformNonThrottledFailureHoweverManyTimesItRecurs proves an
+// outage embed.IsThrottled does not
 // recognize (expired credentials, a retired model id, an uncoded 5xx) fails every row the same
 // way, non-throttled, all the way down to size 1 - and nothing in the whole batch ever embeds,
 // so none of it is evidence about any row's content. Before this fix, bisectBatch's size-1 case
@@ -665,7 +665,7 @@ func (e *cancelAfterNCallsEmbedder) Embed(_ context.Context, _ []string, _ embed
 	return nil, errors.New("simulated: a non-throttled embed failure")
 }
 
-// TestProcessBatchNeverMarksARowPermanentWhenItsContextEndsMidBisection is Main's round-6
+// TestProcessBatchNeverMarksARowPermanentWhenItsContextEndsMidBisection proves a
 // cancellation case: whatever error text comes back, a call that failed because its own context
 // ended while it was in flight is never evidence about any row's content, independent of whether
 // some other row already succeeded.
@@ -706,10 +706,10 @@ func TestProcessBatchNeverMarksARowPermanentWhenItsContextEndsMidBisection(t *te
 	}
 }
 
-// TestClaimRenewalExtendsNextAttemptAtPastClaimWindow is Main's round-6 fix for Deep's
-// measurement (2m22.8s to fully bisect a 96-row batch every one of whose rows failed, longer
-// than claimWindow's 2 minutes): a renewal due (its own last renewal older than
-// renewClaimInterval) pushes next_attempt_at at least claimWindow past the moment it runs.
+// TestClaimRenewalExtendsNextAttemptAtPastClaimWindow proves a renewal due (its own last renewal
+// older than renewClaimInterval) pushes next_attempt_at at least claimWindow past the moment it
+// runs - needed since bisecting a batch every one of whose rows fails can itself take minutes,
+// longer than claimWindow.
 func TestClaimRenewalExtendsNextAttemptAtPastClaimWindow(t *testing.T) {
 	database := storetest.Open(t)
 	seedIssue(t, database, "RNWL", "RNWL-1", "A title")
@@ -729,8 +729,8 @@ func TestClaimRenewalExtendsNextAttemptAtPastClaimWindow(t *testing.T) {
 	}
 }
 
-// TestReserveTokensSharesItsBudgetAcrossConnections is Main's round-6 cross-process fix (item 3
-// and item 7 share this root): embeddings_rate_limit (migration 0077) is one row in the shared
+// TestReserveTokensSharesItsBudgetAcrossConnections proves the cross-process design:
+// embeddings_rate_limit (migration 0077) is one row in the shared
 // database, not in-process memory, so two distinct Deps values - standing in for the server's
 // poller and a separately run `backfill-embeddings`, two OS processes that share nothing else -
 // draw from, and wait out debt against, the very same budget.
@@ -759,10 +759,9 @@ func TestReserveTokensSharesItsBudgetAcrossConnections(t *testing.T) {
 	}
 }
 
-// TestWaitOutDebtRenewsTheClaimMidWaitSoNoSecondWorkerClaimsIt is Main's round-7 fix: a single
-// reservation's own wait can run past claimWindow (a full batchSize batch of maximum-length
-// documents needs far more than one minute's token ceiling - Deep measured close to 4 minutes of
-// actual wait), so waitOutDebt must renew the claim partway through a long wait, not only before
+// TestWaitOutDebtRenewsTheClaimMidWaitSoNoSecondWorkerClaimsIt proves a single reservation's own
+// wait can run past claimWindow (a full batchSize batch of maximum-length documents can need far
+// more than one minute's token ceiling to wait out), so waitOutDebt must renew the claim partway through a long wait, not only before
 // or after it. A tiny segment stands in for renewClaimInterval's real one minute so the test
 // itself takes a little over a second, not several minutes, while exercising the identical loop.
 func TestWaitOutDebtRenewsTheClaimMidWaitSoNoSecondWorkerClaimsIt(t *testing.T) {
@@ -789,5 +788,48 @@ func TestWaitOutDebtRenewsTheClaimMidWaitSoNoSecondWorkerClaimsIt(t *testing.T) 
 	}
 	if !nextAttempt.After(before.Add(claimWindow - time.Second)) {
 		t.Errorf("next_attempt_at = %v, want at least claimWindow (%v) past %v - the mid-wait renewal should have pushed it out, so a concurrent scanner never reclaims LONG-1 while this reservation is still waiting", nextAttempt, claimWindow, before)
+	}
+}
+
+// TestClaimRenewalResolveStopsRenewingACommittedRow proves resolve removes a row from the set a
+// claimRenewal still protects: a resolved row's next_attempt_at is untouched by a later renewal,
+// while an unresolved sibling's is still pushed out.
+func TestClaimRenewalResolveStopsRenewingACommittedRow(t *testing.T) {
+	database := storetest.Open(t)
+	seedIssue(t, database, "RSLV", "RSLV-1", "A good title")
+	seedIssue(t, database, "RSLV", "RSLV-2", "A pending title")
+	ctx := context.Background()
+
+	sentinel := time.Now().Add(-time.Hour).Truncate(time.Microsecond)
+	if _, err := database.Pool.Exec(ctx,
+		`update embeddings set next_attempt_at = $1 where kind = 'issue' and id = 'RSLV-1'`, sentinel,
+	); err != nil {
+		t.Fatalf("seed a stale sentinel on RSLV-1: %v", err)
+	}
+
+	renewal := newClaimRenewal(Deps{Store: database}, []pendingRow{
+		{kind: "issue", id: "RSLV-1"}, {kind: "issue", id: "RSLV-2"},
+	})
+	renewal.resolve([]pendingRow{{kind: "issue", id: "RSLV-1"}})
+	renewal.last = time.Now().Add(-renewClaimInterval - time.Second)
+	before := time.Now()
+	renewal.renew(ctx)
+
+	var rslv1Next, rslv2Next time.Time
+	if err := database.Pool.QueryRow(ctx,
+		`select next_attempt_at from embeddings where kind = 'issue' and id = 'RSLV-1'`,
+	).Scan(&rslv1Next); err != nil {
+		t.Fatalf("read RSLV-1: %v", err)
+	}
+	if err := database.Pool.QueryRow(ctx,
+		`select next_attempt_at from embeddings where kind = 'issue' and id = 'RSLV-2'`,
+	).Scan(&rslv2Next); err != nil {
+		t.Fatalf("read RSLV-2: %v", err)
+	}
+	if !rslv1Next.Equal(sentinel) {
+		t.Errorf("RSLV-1 next_attempt_at = %v, want unchanged (%v) - it was resolved, so this renewal should never have touched it", rslv1Next, sentinel)
+	}
+	if !rslv2Next.After(before.Add(claimWindow - time.Second)) {
+		t.Errorf("RSLV-2 next_attempt_at = %v, want at least claimWindow past %v - it was never resolved, so this renewal should still protect it", rslv2Next, before)
 	}
 }

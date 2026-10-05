@@ -1,5 +1,5 @@
 -- 0077_embeddings_rate_limit.up.sql
--- LEGION-549 round 6: a token-bucket budget shared by every process that calls Bedrock for
+-- A token-bucket budget shared by every process that calls Bedrock for
 -- background embedding work (the server's own write-time poller, and a separately run
 -- `envoy-dispatch backfill-embeddings` - two independent OS processes in production, each with
 -- its own in-memory embed.RateLimitedEmbedder unaware of the other's traffic), so one ceiling

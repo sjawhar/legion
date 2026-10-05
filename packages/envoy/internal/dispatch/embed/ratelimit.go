@@ -11,15 +11,12 @@ import (
 const (
 	// rateLimitFloor is the fastest RateLimitedEmbedder ever paces calls: the steady-state ceiling
 	// it climbs back to after a run of successful batches. Chosen to leave headroom below the
-	// account's measured sustainable rate for a live search's own query embedding, which never
-	// goes through this limiter at all (cmd/dispatch wires the unwrapped *Client there) - the
-	// measurement behind this number is in this PR's own body, "Bedrock capacity" (LEGION-549
-	// round 5): the account's per-minute token quota for Cohere Embed v4 on Bedrock, and the
-	// sustained batch rate a live run against it actually held before throttling. The slowest this
-	// limiter ever paces calls to, reached only after several consecutive throttled batches in a
-	// row, is retry.MaxDelay (not a duplicate constant of its own): the same ceiling embedqueue's
-	// own batchBackoff already uses, so the two mechanisms agree on how bad "sustained throttling"
-	// gets before both are maxed out.
+	// account's sustainable rate for a live search's own query embedding, which never goes
+	// through this limiter at all (cmd/dispatch wires the unwrapped *Client there). The slowest
+	// this limiter ever paces calls to, reached only after several consecutive throttled batches
+	// in a row, is retry.MaxDelay (not a duplicate constant of its own): the same ceiling
+	// embedqueue's own batchBackoff already uses, so the two mechanisms agree on how bad
+	// "sustained throttling" gets before both are maxed out.
 	rateLimitFloor = 750 * time.Millisecond
 	// rateLimitRecoveryStep is how much one successful (non-throttled) call shortens the interval
 	// by - additive increase, the slow half of AIMD: recovering one small step at a time, rather
@@ -46,7 +43,7 @@ const (
 // immediate backoff on the first sign of shared-resource pressure), and shortens it by
 // rateLimitRecoveryStep on every call that was not throttled (slow, incremental recovery, so a
 // provider that is only barely keeping up is not immediately hit with a burst back at full rate).
-// rateLimitFloor is deliberately below the account's measured sustainable rate, which is what
+// rateLimitFloor is deliberately below the account's sustainable rate, which is what
 // "leaves headroom" means in practice: background work's own steady-state ceiling stops short of
 // the full quota, leaving room for a live query's call - never gated by this limiter at all - to
 // get through even while background work is actively pacing itself near that ceiling.

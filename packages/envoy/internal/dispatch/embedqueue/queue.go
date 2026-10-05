@@ -35,16 +35,15 @@ const (
 	// one of the pool's four connections across all of it") - a lock held across a network call
 	// is exactly what that rule exists to avoid. Advancing next_attempt_at instead costs one
 	// short statement and lets the poller and a concurrent `backfill-embeddings` run claim
-	// disjoint batches without either blocking on the other's embed call. Comfortably longer than
-	// one ordinary batch of Bedrock calls should ever take, but not longer than bisecting a
-	// batch that fails row by row can take (round 6: Deep measured 2m22.8s to fully bisect a
-	// 96-row batch every one of whose rows failed) - claimRenewal is what keeps that case's claim
-	// from lapsing mid-bisection; a crashed claimer's rows become eligible again once it passes
-	// unrenewed, not stuck forever.
+	// disjoint batches without either blocking on the other's embed call. Bisecting a batch every
+	// one of whose rows fails can itself take minutes, so claimWindow alone is not always enough;
+	// claimRenewal is what keeps that case's claim from lapsing mid-bisection; a crashed claimer's
+	// rows become eligible again once it passes unrenewed, not stuck forever.
 	claimWindow = 2 * time.Minute
-	// renewClaimInterval is how often an in-flight bisection re-extends its own claim on every
-	// row of the original batch (claimRenewal), comfortably inside claimWindow so a renewal
-	// always lands before the claim it is refreshing could lapse.
+	// renewClaimInterval is how often a claimRenewal re-extends its claim on every row it still
+	// protects - between bisection's own embed attempts, and during a single reservation's wait
+	// longer than this - comfortably inside claimWindow so a renewal always lands before the
+	// claim it is refreshing could lapse.
 	renewClaimInterval = claimWindow / 2
 	// batchPause separates one embed call from the next when neither is throttled, in both Run's
 	// poller and Backfill's drain loop: pending rows arrive in bursts (a bulk import, a backfill's
@@ -56,15 +55,14 @@ const (
 	// (or any other process sharing the same embeddings_rate_limit row - the server's poller and
 	// a separately run `backfill-embeddings` are two independent OS processes in production,
 	// each otherwise unaware of the other's traffic) send to Bedrock for background work
-	// combined (round 6, Rev's reproduction): Bedrock throttles the whole account, not a
-	// specific caller, so embed.RateLimitedEmbedder's own in-process, reactive AIMD pacing alone
-	// left live search exposed to throttling an unconstrained background process caused by
-	// itself, in a different process the reactive limiter never saw. 200,000 is chosen well
-	// below the account's measured 300,000 tokens/minute Bedrock quota ("Bedrock quota" in this
-	// PR's own body) - 100,000 tokens/minute of headroom, nowhere near what a live query (tens
-	// of tokens) could ever need - and against this PR's own measured average of 488
-	// tokens/chunk ("Bedrock capacity"), projects to about 410 chunks/minute, backfilling the
-	// measured 24,862-chunk production corpus in about an hour.
+	// combined: Bedrock throttles the whole account, not a specific caller, so
+	// embed.RateLimitedEmbedder's own in-process, reactive AIMD pacing alone cannot keep a live
+	// search request safe from throttling an unconstrained background process causes in a
+	// different process the reactive limiter never sees. 200,000 sits well below the account's
+	// own Cohere Embed v4 Bedrock quota (300,000 tokens/minute) - 100,000 tokens/minute of
+	// headroom, nowhere near what a live query (tens of tokens) could ever need - and against
+	// this package's own average chunk size projects to about 410 chunks/minute, backfilling the
+	// production corpus (tens of thousands of chunks) in about an hour.
 	tokenRateCeiling = 200_000
 )
 
@@ -177,9 +175,9 @@ type pendingRow struct {
 // failure, however many rows deep, is systemic (an outage embed.IsThrottled does not recognize -
 // expired credentials, a retired model id, an uncoded 5xx) rather than evidence against any
 // specific row, and ProcessBatch demotes every row bisection tentatively isolated back to an
-// ordinary retry rather than dead-lettering any of them (round 6: before this, such an outage
-// dead-lettered the whole pending queue in about 13-14 minutes, bringing back for every error
-// class outside IsThrottled's allowlist the uniform dead-lettering rounds 1-3 removed). A context
+// ordinary retry rather than dead-lettering any of them: an outage outside IsThrottled's
+// allowlist is never evidence against any one row's content just because every row happened to
+// fail the same way. A context
 // cancellation - this call's own ctx ending mid-request, including embed.RateLimitedEmbedder's
 // own pace() returning early - is never evidence about any row either, whatever error text came
 // back, regardless of whether some other row already succeeded: bisectBatch checks for it
@@ -293,6 +291,7 @@ func bisectBatch(ctx context.Context, deps Deps, rows []pendingRow, renewal *cla
 		if err != nil {
 			return bisectResult{err: err}
 		}
+		renewal.resolve(excludingRows(rows, permanent))
 		return bisectResult{succeeded: committed, permanent: permanent}
 	}
 	if embed.IsThrottled(embedErr) {
@@ -349,10 +348,10 @@ func bisectSplit(ctx context.Context, deps Deps, rows []pendingRow, renewal *cla
 // bisectBatch's recursive attempts alike, reserving tokens from the shared budget before each
 // underlying Bedrock call it makes and renewing renewal's claim around it. A single reservation
 // for every row in rows at once could ask for far more than tokenRateCeiling allows in one
-// minute (round 7: a full batchSize batch of maximum-length documents needs up to roughly
-// 768,000 estimated tokens against a 200,000/minute ceiling - a reservation Simplify computed at
-// about 230s and Deep measured close to 4 minutes of actual wait, well past claimWindow's 2
-// minutes), so chunkForBudget splits rows into groups that each fit within one minute's ceiling,
+// minute: a full batchSize batch of maximum-length documents needs up to roughly 768,000
+// estimated tokens against a 200,000/minute ceiling, which can wait several minutes by itself -
+// well past claimWindow - so chunkForBudget splits rows into groups that each fit within one
+// minute's ceiling,
 // and every group is reserved and embedded on its own, with the claim renewed before each one.
 // Every group must succeed for embedRows to report success: the first group's failure is the
 // whole call's failure, exactly as a single, unsplit Embed call's failure would be - a caller
@@ -437,6 +436,50 @@ func (c *claimRenewal) renew(ctx context.Context) {
 	`, kinds, ids, claimWindow); err != nil {
 		slog.Error("dispatch embedqueue: bisection claim renewal failed", "error", err)
 	}
+}
+
+// resolve removes committed rows from the set a claimRenewal still protects: once a row commits
+// (embedded_hash = content_hash), scanPending's own predicate no longer selects it, so renewing
+// its claim further touches nothing a concurrent scanner could ever reclaim.
+func (c *claimRenewal) resolve(committed []pendingRow) {
+	if c == nil || len(committed) == 0 {
+		return
+	}
+	done := make(map[string]struct{}, len(committed))
+	for _, row := range committed {
+		done[row.kind+"\x00"+row.id] = struct{}{}
+	}
+	// A fresh slice, not c.rows[:0]: c.rows is the original top-level batch, which bisectSplit's
+	// own recursion is still actively slicing into (rows[:mid], rows[mid:]) elsewhere in this
+	// same call tree - overwriting its backing array in place would corrupt whatever sibling
+	// subtree is reading from it concurrently with this resolve call.
+	remaining := make([]pendingRow, 0, len(c.rows))
+	for _, row := range c.rows {
+		if _, ok := done[row.kind+"\x00"+row.id]; !ok {
+			remaining = append(remaining, row)
+		}
+	}
+	c.rows = remaining
+}
+
+// excludingRows returns rows with every row also present in exclude removed, matched by (kind,
+// id) - bisectBatch's own way of turning commitEmbeddings' rows/permanent pair into the set that
+// actually committed, for claimRenewal.resolve.
+func excludingRows(rows, exclude []pendingRow) []pendingRow {
+	if len(exclude) == 0 {
+		return rows
+	}
+	skip := make(map[string]struct{}, len(exclude))
+	for _, row := range exclude {
+		skip[row.kind+"\x00"+row.id] = struct{}{}
+	}
+	kept := make([]pendingRow, 0, len(rows))
+	for _, row := range rows {
+		if _, ok := skip[row.kind+"\x00"+row.id]; !ok {
+			kept = append(kept, row)
+		}
+	}
+	return kept
 }
 
 // reserveBackgroundTokens is the one gate every background embed call in this package passes

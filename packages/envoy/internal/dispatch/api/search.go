@@ -48,9 +48,8 @@ const (
 // searchKeywordLegsSQL is the five-kind keyword-ranked union - issue, document, comment, ask,
 // message, each matched via ts_rank_cd against websearch_to_tsquery - shared verbatim by
 // searchQuery's own "kinds" CTE and searchQueryMeaning's "kinds" CTE, where it is unioned with
-// the five meaning_* CTEs below it (LEGION-549 round 5: this and searchPageAndTailSQL were the
-// one piece of duplication carried across every earlier round of this PR's review, declined each
-// time before now as correctness-critical SQL not worth reworking under time pressure). Every
+// the five meaning_* CTEs below it - this and searchPageAndTailSQL are the one piece of
+// duplication between the two queries. Every
 // arm carries 'keyword' as its own list column even here, where searchQuery's own
 // ranked/legs/fused/page CTEs never select list by name, so it rides through unused rather than
 // needing two near-identical copies of this text, one with the column and one without.

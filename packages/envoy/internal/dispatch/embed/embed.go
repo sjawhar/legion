@@ -200,12 +200,12 @@ func (c *Client) Embed(ctx context.Context, texts []string, inputType InputType)
 
 // bedrockThrottleErrorCodes extends the AWS SDK's own retry.DefaultThrottleErrorCodes with two
 // Bedrock-specific codes the SDK's generic set does not classify as throttles (confirmed against
-// the pinned aws-sdk-go-v2's retry/standard.go: neither is in DefaultThrottleErrorCodes), on
-// Main's decision (round 5 of LEGION-549's review): ServiceUnavailableException (Bedrock's own
-// capacity temporarily unavailable, nothing to do with the text being embedded) and
-// ModelNotReadyException (an on-demand model still scaling up - the AWS SDK's own retry-behavior
-// guide recommends backing off on it) are both transient conditions about Bedrock's capacity,
-// never evidence about a specific row's content, exactly like ThrottlingException already is.
+// the pinned aws-sdk-go-v2's retry/standard.go: neither is in DefaultThrottleErrorCodes):
+// ServiceUnavailableException (Bedrock's own capacity temporarily unavailable, nothing to do
+// with the text being embedded) and ModelNotReadyException (an on-demand model still scaling up
+// - the AWS SDK's own retry-behavior guide recommends backing off on it) are both transient
+// conditions about Bedrock's capacity, never evidence about a specific row's content, exactly
+// like ThrottlingException already is.
 var bedrockThrottleErrorCodes = func() map[string]struct{} {
 	codes := make(map[string]struct{}, len(retry.DefaultThrottleErrorCodes)+2)
 	for code := range retry.DefaultThrottleErrorCodes {
