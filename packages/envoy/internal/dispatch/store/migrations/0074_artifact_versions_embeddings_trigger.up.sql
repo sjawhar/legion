@@ -1,4 +1,4 @@
--- 0073_artifact_versions_embeddings_trigger.up.sql
+-- 0074_artifact_versions_embeddings_trigger.up.sql
 -- Its own migration, so the transaction holds artifact_versions' ACCESS EXCLUSIVE lock alone, for
 -- milliseconds, and never while waiting for another table's.
 --

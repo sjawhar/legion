@@ -195,63 +195,35 @@ func ProcessBatch(ctx context.Context, deps Deps) (succeeded, failed int, blocke
 	// renewal is created before this call's very first reservation, not only once bisection is
 	// known to be needed: a single reservation for a full batch of maximum-length documents can
 	// itself wait close to claimWindow (chunkForBudget's and reserveTokens' own doc comments), so
-	// a renewer must be in scope for every embed attempt this call makes, not only the ones
-	// inside bisectSplit.
+	// a renewer must be in scope for every embed attempt this call makes.
 	renewal := newClaimRenewal(deps, rows)
-	vectors, embedErr := embedRows(ctx, deps, rows, renewal)
-	if embedErr != nil {
-		// A single-row batch has no sibling to compare against, so a non-throttled failure here
-		// is exactly as ambiguous as it always was - bisection's isolation only has evidentiary
-		// value once there is more than one row to split and compare (see bisectBatch's own doc
-		// comment): a genuine transient infrastructure failure (not one of IsThrottled's codes,
-		// but not evidence about this one row's content either) must keep retrying indefinitely,
-		// exactly like a throttle, rather than being dead-lettered the moment attempts run out.
-		if embed.IsThrottled(embedErr) || len(rows) == 1 {
-			slog.Error("dispatch embedqueue: embed batch", "rows", len(rows), "error", embedErr)
-			blocked = retryRows(ctx, deps, rows, false)
-			return 0, len(rows), blocked, embed.IsThrottled(embedErr), nil
-		}
-		slog.Error("dispatch embedqueue: embed batch failed, not throttled - bisecting to isolate the offending row(s)",
-			"rows", len(rows), "error", embedErr)
-		// rows as a whole is already known to fail non-throttled (embedErr above), so splitting
-		// starts directly from its two halves (bisectSplit) rather than calling bisectBatch on
-		// the full, already-failed set again, which would re-embed every row at once a second
-		// time for no new information before ever splitting.
-		result := bisectSplit(ctx, deps, rows, renewal)
-		if result.err != nil {
-			return 0, 0, false, false, result.err
-		}
-		if result.succeeded == 0 && len(result.permanent) > 0 {
-			// Nothing in this batch ever proved the service works, so every row bisection
-			// isolated is systemic, not content-specific - see this function's own doc comment.
-			result.retry = append(result.retry, result.permanent...)
-			result.permanent = nil
-		}
-		if len(result.permanent) > 0 {
-			blocked = retryRows(ctx, deps, result.permanent, true)
-		}
-		if len(result.retry) > 0 {
-			blocked = retryRows(ctx, deps, result.retry, false) || blocked
-		}
-		return result.succeeded, len(rows) - result.succeeded, blocked, result.throttled, nil
+	result := embedRows(ctx, deps, rows, renewal)
+	if result.err != nil {
+		return 0, 0, false, false, result.err
 	}
-	committed, permanent, err := commitEmbeddings(ctx, deps, rows, vectors)
-	if err != nil {
-		return 0, 0, false, false, err
+	if result.succeeded == 0 && len(result.permanent) > 0 {
+		// Nothing in this batch ever proved the service works, so every row embedRows isolated
+		// as permanent is systemic, not content-specific - see embedRows' own doc comment.
+		result.retry = append(result.retry, result.permanent...)
+		result.permanent = nil
 	}
-	if len(permanent) > 0 {
-		blocked = retryRows(ctx, deps, permanent, true)
+	if len(result.permanent) > 0 {
+		blocked = retryRows(ctx, deps, result.permanent, true)
 	}
-	return committed, len(permanent), blocked, false, nil
+	if len(result.retry) > 0 {
+		blocked = retryRows(ctx, deps, result.retry, false) || blocked
+	}
+	return result.succeeded, len(rows) - result.succeeded, blocked, result.throttled, nil
 }
 
-// bisectResult is bisectBatch's own report: every row it was given ends up in exactly one of
-// succeeded (committed), permanent (isolated as the specific content a non-throttled failure
-// attributes to - tentative until ProcessBatch confirms some other row of the same batch
-// succeeded during this bisection; see ProcessBatch's own doc comment), or retry (not yet proven
-// guilty - interrupted by a throttle or a cancellation, or still batched with others pending
-// further bisection that a database error cut short). err is a genuine infrastructure failure
-// (commitEmbeddings' own), never a reason to call any row permanent.
+// bisectResult is embedRows' own report (and handleGroupFailure's, and bisectSplit's): every row
+// given to one of them ends up in exactly one of succeeded (committed), permanent (isolated as
+// the specific content a non-throttled failure attributes to - tentative until ProcessBatch
+// confirms some other row of the same original batch succeeded; see ProcessBatch's own doc
+// comment), or retry (not yet proven guilty - interrupted by a throttle or a cancellation, or
+// still batched with others pending further bisection that a database error cut short). err is a
+// genuine infrastructure failure (commitEmbeddings' own), never a reason to call any row
+// permanent.
 type bisectResult struct {
 	succeeded int
 	permanent []pendingRow
@@ -260,73 +232,94 @@ type bisectResult struct {
 	err       error
 }
 
-// bisectBatch isolates which row(s) in rows actually broke a non-throttled whole-batch embed
-// failure, rather than retrying the entire batch - including rows that would embed fine on
-// their own - forever. It splits rows in half and re-embeds each half independently, recursively,
-// down to one row at a time: a half that embeds cleanly is committed; a half that still fails
-// non-throttled and holds more than one row is split again; a single row that still fails
-// non-throttled is tentatively isolated as permanent, confirmed only once ProcessBatch sees some
-// other row of the same original batch actually succeed (this function alone cannot tell a
-// content-specific failure from an outage that fails every row identically). A throttled failure
-// at any point aborts bisection for that subtree immediately - throttling is a shared-capacity
-// signal, never evidence about specific content, and isolating "which row triggered it" would be
-// meaningless (and would cost far more calls against a provider that has already said to slow
-// down) - so every row in that subtree is reported for an ordinary retry instead, and throttled
-// propagates up so ProcessBatch's caller still backs off its own cadence exactly as an
-// outright-throttled whole batch would. A context cancellation reaching this call - its own ctx
-// already done before it starts, or ending while its embed call was in flight (embed's own
-// RateLimitedEmbedder.pace(), waiting out this package's pacing between calls, returns ctx.Err()
-// exactly this way) - is likewise never evidence about content: every row in that subtree goes to
-// retry, whatever the error otherwise reads like.
-func bisectBatch(ctx context.Context, deps Deps, rows []pendingRow, renewal *claimRenewal) bisectResult {
-	if len(rows) == 0 {
-		return bisectResult{}
-	}
-	if ctx.Err() != nil {
-		return bisectResult{retry: rows}
-	}
-	vectors, embedErr := embedRows(ctx, deps, rows, renewal)
-	if embedErr == nil {
-		committed, permanent, err := commitEmbeddings(ctx, deps, rows, vectors)
-		if err != nil {
-			return bisectResult{err: err}
+// embedRows embeds and commits rows group by group (chunkForBudget splits rows so no single
+// reservation ever exceeds tokenRateCeiling), committing each group's vectors to the database as
+// soon as that group's own Embed call succeeds: a later group's failure never re-embeds an
+// earlier group's already-committed rows, and a group that itself fails non-throttled is handed
+// to handleGroupFailure, which isolates it without ever re-embedding that exact group again. The
+// returned bisectResult accumulates every group's own outcome across the whole call. A genuine
+// infrastructure error (commitEmbeddings' own) stops the loop immediately and propagates as-is,
+// abandoning whatever groups were not yet attempted - ProcessBatch and bisectSplit both treat it
+// as a hard failure, never a reason to retry row by row.
+func embedRows(ctx context.Context, deps Deps, rows []pendingRow, renewal *claimRenewal) bisectResult {
+	var result bisectResult
+	for _, group := range chunkForBudget(rows) {
+		if ctx.Err() != nil {
+			result.retry = append(result.retry, group...)
+			continue
 		}
-		renewal.resolve(excludingRows(rows, permanent))
-		return bisectResult{succeeded: committed, permanent: permanent}
+		texts := make([]string, len(group))
+		for i, row := range group {
+			texts[i] = row.text
+		}
+		renewal.renew(ctx)
+		reserveBackgroundTokens(ctx, deps, texts, renewal)
+		vectors, err := deps.Embedder.Embed(ctx, texts, embed.InputDocument)
+		if err != nil {
+			groupResult := handleGroupFailure(ctx, deps, group, err, renewal)
+			if groupResult.err != nil {
+				return groupResult
+			}
+			result.succeeded += groupResult.succeeded
+			result.permanent = append(result.permanent, groupResult.permanent...)
+			result.retry = append(result.retry, groupResult.retry...)
+			result.throttled = result.throttled || groupResult.throttled
+			continue
+		}
+		committed, permanent, cErr := commitEmbeddings(ctx, deps, group, vectors)
+		if cErr != nil {
+			return bisectResult{err: cErr}
+		}
+		result.succeeded += committed
+		result.permanent = append(result.permanent, permanent...)
+		renewal.resolve(excludingRows(group, permanent))
 	}
-	if embed.IsThrottled(embedErr) {
-		return bisectResult{retry: rows, throttled: true}
-	}
-	if ctx.Err() != nil {
-		return bisectResult{retry: rows}
-	}
-	if len(rows) == 1 {
-		slog.Error("dispatch embedqueue: bisection isolated the row a non-throttled batch failure attributes to, pending confirmation some other row of the batch embedded",
-			"kind", rows[0].kind, "id", rows[0].id, "error", embedErr)
-		return bisectResult{permanent: rows}
-	}
-	return bisectSplit(ctx, deps, rows, renewal)
+	return result
 }
 
-// bisectSplit is bisectBatch's own split-and-merge step: split rows (already known to need
-// isolating - every caller reaches it only after an embed of this exact set failed non-throttled)
-// into halves, bisect each independently, and merge their reports. ProcessBatch calls it directly
-// for the top-level batch rather than calling bisectBatch there, since bisectBatch would embed
-// the same unsplit rows a second time - which ProcessBatch has already done and already knows
-// fails - before ever splitting; bisectBatch's own recursion calls it once it has made that same
-// determination for a half it was actually given to embed. The merge copies left's and right's
+// handleGroupFailure decides what a group whose own embed call already failed with err needs,
+// without ever re-embedding that exact group: a throttled failure, or a context cancelled while
+// the call was in flight (embed.RateLimitedEmbedder's own pace(), waiting out this package's
+// pacing between calls, returns ctx.Err() exactly this way), retries the whole group - neither is
+// evidence about any row's content, and isolating "which row triggered it" would be meaningless
+// (and would cost far more calls against a provider that has already said to slow down). A single
+// row is tentatively isolated as permanent, confirmed only once the caller sees some other row of
+// the same original batch actually succeed (this function alone cannot tell a content-specific
+// failure from an outage that fails every row identically). More than one row splits via
+// bisectSplit, which re-embeds only the two halves, never the group that already failed.
+func handleGroupFailure(ctx context.Context, deps Deps, group []pendingRow, err error, renewal *claimRenewal) bisectResult {
+	if embed.IsThrottled(err) {
+		return bisectResult{retry: group, throttled: true}
+	}
+	if ctx.Err() != nil {
+		return bisectResult{retry: group}
+	}
+	if len(group) == 1 {
+		slog.Error("dispatch embedqueue: bisection isolated the row a non-throttled batch failure attributes to, pending confirmation some other row of the batch embedded",
+			"kind", group[0].kind, "id", group[0].id, "error", err)
+		return bisectResult{permanent: group}
+	}
+	return bisectSplit(ctx, deps, group, renewal)
+}
+
+// bisectSplit isolates which row(s) in rows actually broke a non-throttled embed failure
+// (handleGroupFailure calls it once a group fails and holds more than one row): split rows in
+// half and embed each half independently via embedRows, recursively - a half that embeds cleanly
+// commits; a half that still fails non-throttled and holds more than one row is split again by
+// embedRows calling handleGroupFailure calling this function again; a half that fails down to one
+// row is isolated by handleGroupFailure's own size check. The merge copies left's and right's
 // permanent/retry rows into freshly allocated slices rather than appending onto one of them in
 // place: rows[:mid] and rows[mid:] share rows' own backing array, so a bisectResult built
-// straight from one of those slices (bisectBatch's size-1 and throttled/cancelled returns both
-// are) still aliases it, and appending onto one with spare capacity - exactly what rows[:mid] has
-// when mid < len(rows) - would silently overwrite the other half's rows.
+// straight from one of those slices (handleGroupFailure's size-1 and throttled/cancelled returns
+// both are) still aliases it, and appending onto one with spare capacity - exactly what
+// rows[:mid] has when mid < len(rows) - would silently overwrite the other half's rows.
 func bisectSplit(ctx context.Context, deps Deps, rows []pendingRow, renewal *claimRenewal) bisectResult {
 	mid := len(rows) / 2
-	left := bisectBatch(ctx, deps, rows[:mid], renewal)
+	left := embedRows(ctx, deps, rows[:mid], renewal)
 	if left.err != nil {
 		return left
 	}
-	right := bisectBatch(ctx, deps, rows[mid:], renewal)
+	right := embedRows(ctx, deps, rows[mid:], renewal)
 	if right.err != nil {
 		return right
 	}
@@ -342,36 +335,6 @@ func bisectSplit(ctx context.Context, deps Deps, rows []pendingRow, renewal *cla
 		retry:     toRetry,
 		throttled: left.throttled || right.throttled,
 	}
-}
-
-// embedRows embeds rows' texts for ProcessBatch's own top-level attempt and every one of
-// bisectBatch's recursive attempts alike, reserving tokens from the shared budget before each
-// underlying Bedrock call it makes and renewing renewal's claim around it. A single reservation
-// for every row in rows at once could ask for far more than tokenRateCeiling allows in one
-// minute: a full batchSize batch of maximum-length documents needs up to roughly 768,000
-// estimated tokens against a 200,000/minute ceiling, which can wait several minutes by itself -
-// well past claimWindow - so chunkForBudget splits rows into groups that each fit within one
-// minute's ceiling,
-// and every group is reserved and embedded on its own, with the claim renewed before each one.
-// Every group must succeed for embedRows to report success: the first group's failure is the
-// whole call's failure, exactly as a single, unsplit Embed call's failure would be - a caller
-// never sees that this happened in more than one underlying Bedrock request.
-func embedRows(ctx context.Context, deps Deps, rows []pendingRow, renewal *claimRenewal) ([][]float32, error) {
-	vectors := make([][]float32, 0, len(rows))
-	for _, group := range chunkForBudget(rows) {
-		texts := make([]string, len(group))
-		for i, row := range group {
-			texts[i] = row.text
-		}
-		renewal.renew(ctx)
-		reserveBackgroundTokens(ctx, deps, texts, renewal)
-		groupVectors, err := deps.Embedder.Embed(ctx, texts, embed.InputDocument)
-		if err != nil {
-			return nil, err
-		}
-		vectors = append(vectors, groupVectors...)
-	}
-	return vectors, nil
 }
 
 // chunkForBudget splits rows into the fewest groups whose own estimated tokens

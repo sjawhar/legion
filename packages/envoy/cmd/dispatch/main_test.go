@@ -1340,7 +1340,7 @@ func TestBackfillFilesExitsNonZeroUntilEveryFileReadsBackFromTheBucket(t *testin
 
 func TestExplainMigrateErrorNamesTheDeploymentBootstrapOnAVectorPermissionDenial(t *testing.T) {
 	pgErr := &pgconn.PgError{Code: "42501", Message: `permission denied to create extension "vector"`}
-	original := fmt.Errorf("apply migration 71: execute migration: migration 0071_embeddings_core.up.sql: %w", pgErr)
+	original := fmt.Errorf("apply migration 72: execute migration: migration 0072_embeddings_core.up.sql: %w", pgErr)
 	explained := explainMigrateError(original)
 	if !errors.Is(explained, original) {
 		t.Fatalf("explainMigrateError does not wrap the original error (errors.Is fails)")
@@ -1361,7 +1361,7 @@ func TestExplainMigrateErrorPassesThroughAnUnrelatedMigrationFailure(t *testing.
 			&pgconn.PgError{Code: "42501", Message: `permission denied for table widgets`},
 		),
 		"no PgError in the chain at all": errors.New(
-			`apply migration 71: execute migration: migration 0071_embeddings_core.up.sql: ERROR: permission denied to create extension "vector"`,
+			`apply migration 72: execute migration: migration 0072_embeddings_core.up.sql: ERROR: permission denied to create extension "vector"`,
 		),
 	}
 	for name, original := range cases {

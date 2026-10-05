@@ -1,9 +1,9 @@
--- 0071_embeddings_core.up.sql
+-- 0072_embeddings_core.up.sql
 -- Meaning search (LEGION-549): one vector per (kind, id) searchable unit - the same grain
 -- search.go's keyword legs already key hits by (issue by key, document by artifact id, comment /
 -- ask / message by id) - embedded by Cohere after commit through a durable retry queue that
 -- mirrors the events outbox (0020_outbox_retry.up.sql): an AFTER INSERT OR UPDATE trigger on
--- each content table (0072-0076, one table and one ACCESS EXCLUSIVE lock per migration, exactly
+-- each content table (0073-0077, one table and one ACCESS EXCLUSIVE lock per migration, exactly
 -- as 0057-0061's search triggers are) upserts this row's current text and a hash of it in the
 -- same transaction as the write, so a write never fails because the embedder did. The embedding
 -- itself is filled in afterward, out of process, by internal/dispatch/embedqueue, which never
@@ -58,7 +58,7 @@ create table embeddings_backfill_progress (
   updated_at timestamptz not null default now()
 );
 
--- embeddings_enqueue is the one write path onto embeddings: a trigger in each of 0072-0076 for
+-- embeddings_enqueue is the one write path onto embeddings: a trigger in each of 0073-0077 for
 -- each content table, and internal/dispatch/embedqueue.Backfill for content that predates this
 -- migration. content_hash uses sha256(), built into Postgres core since 11 - no pgcrypto
 -- dependency. The WHERE on the conflict update means an UPDATE that leaves the tracked text

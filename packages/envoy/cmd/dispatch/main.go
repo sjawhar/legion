@@ -676,7 +676,7 @@ func loopbackDatabase(databaseURL string) error {
 }
 
 // explainMigrateError wraps a migration failure Postgres attributes to a missing CREATE
-// permission on the vector extension (0071_embeddings_core.up.sql's `create extension if not
+// permission on the vector extension (0072_embeddings_core.up.sql's `create extension if not
 // exists vector`) with what that actually means operationally: the deployment's own bootstrap
 // (the cluster's master role, which this application's migration role is not) must create the
 // extension before this Dispatch ever boots against this database - a one-time ops dependency,

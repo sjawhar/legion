@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -108,7 +109,7 @@ func forceEligible(t *testing.T, database *store.Store, kind, id string) {
 }
 
 // TestProcessBatchEmbedsAPendingRowTheWriteTimeTriggerEnqueued proves the end-to-end path a real
-// write exercises: inserting an issue (0072_issues_embeddings_trigger.up.sql's trigger) leaves a
+// write exercises: inserting an issue (0073_issues_embeddings_trigger.up.sql's trigger) leaves a
 // pending embeddings row with no vector, and ProcessBatch fills it in from the Embedder, without
 // any application code calling embeddings_enqueue directly.
 func TestProcessBatchEmbedsAPendingRowTheWriteTimeTriggerEnqueued(t *testing.T) {
@@ -831,5 +832,105 @@ func TestClaimRenewalResolveStopsRenewingACommittedRow(t *testing.T) {
 	}
 	if !rslv2Next.After(before.Add(claimWindow - time.Second)) {
 		t.Errorf("RSLV-2 next_attempt_at = %v, want at least claimWindow past %v - it was never resolved, so this renewal should still protect it", rslv2Next, before)
+	}
+}
+
+// seedManyIssues bulk-inserts count issues under projectKey (created first if needed), numbered
+// sequentially from the project's current max, each titled by titleFor(i) for i in [0, count) -
+// one round trip, not one per row, for a test that needs many rows at once.
+func seedManyIssues(t *testing.T, database *store.Store, projectKey string, count int, titleFor func(i int) string) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := database.Pool.Exec(ctx, `
+		insert into projects (key, name) values ($1, 'Test') on conflict (key) do nothing
+	`, projectKey); err != nil {
+		t.Fatalf("seed project: %v", err)
+	}
+	var base int
+	if err := database.Pool.QueryRow(ctx,
+		`select coalesce(max(number), 0) from issues where project_key = $1`, projectKey,
+	).Scan(&base); err != nil {
+		t.Fatalf("read current max issue number: %v", err)
+	}
+	keys := make([]string, count)
+	numbers := make([]int, count)
+	titles := make([]string, count)
+	for i := range count {
+		numbers[i] = base + i + 1
+		keys[i] = fmt.Sprintf("%s-%d", projectKey, numbers[i])
+		titles[i] = titleFor(i)
+	}
+	if _, err := database.Pool.Exec(ctx, `
+		insert into issues (key, project_key, number, title, created_by, rank)
+		select k, $1, n, t, '{"kind":"user","id":"alice"}', 'A'
+		from unnest($2::text[], $3::int[], $4::text[]) as v(k, n, t)
+	`, projectKey, keys, numbers, titles); err != nil {
+		t.Fatalf("bulk seed issues: %v", err)
+	}
+}
+
+// countingGroupEmbedder fails any call whose texts include poison (simulating one bad row's
+// group) and otherwise succeeds, recording every call's own size so a test can prove exactly how
+// many Embed calls ran and how many total rows they carried.
+type countingGroupEmbedder struct {
+	poison   string
+	calls    int
+	rowsSent int
+}
+
+func (e *countingGroupEmbedder) Embed(_ context.Context, texts []string, _ embed.InputType) ([][]float32, error) {
+	e.calls++
+	e.rowsSent += len(texts)
+	for _, text := range texts {
+		if text == e.poison {
+			return nil, errors.New("simulated: a non-throttled embed failure")
+		}
+	}
+	vectors := make([][]float32, len(texts))
+	for i := range vectors {
+		vectors[i] = oneVector()
+	}
+	return vectors, nil
+}
+
+// TestChunkForBudgetSplitsAnOverCeilingBatchAndEmbedRowsCommitsEachGroupOnlyOnce proves both
+// halves of embedRows' own contract at once: chunkForBudget actually produces more than one
+// group once a batch's combined estimated tokens exceed tokenRateCeiling (25 rows at
+// maxInputChars, each truncated to exactly 8,000 estimated tokens, fill one 200,000-token group
+// exactly; a 26th, poisoned row starts a second), and a later group's failure never re-embeds an
+// earlier group's already-committed rows: Embed is called exactly twice (once per group, not
+// once per row or once per bisection level), carrying exactly 26 rows total across both calls.
+func TestChunkForBudgetSplitsAnOverCeilingBatchAndEmbedRowsCommitsEachGroupOnlyOnce(t *testing.T) {
+	database := storetest.Open(t)
+	const healthyCount = 25                    // 25 * 8,000 = 200,000 = tokenRateCeiling exactly
+	healthyTitle := strings.Repeat("h", 32000) // embed.maxInputChars (unexported): truncates to exactly 8,000 estimated tokens
+	poisonTitle := "poisoned"
+	seedManyIssues(t, database, "CHNK", healthyCount+1, func(i int) string {
+		if i == healthyCount {
+			return poisonTitle
+		}
+		return healthyTitle
+	})
+	embedder := &countingGroupEmbedder{poison: poisonTitle}
+	deps := Deps{Store: database, Embedder: embedder}
+
+	succeeded, failed, _, throttled, err := ProcessBatch(context.Background(), deps)
+	if err != nil {
+		t.Fatalf("ProcessBatch: %v", err)
+	}
+	if succeeded != healthyCount {
+		t.Errorf("succeeded = %d, want %d", succeeded, healthyCount)
+	}
+	if failed != 1 {
+		t.Errorf("failed = %d, want 1", failed)
+	}
+	if throttled {
+		t.Error("throttled = true, want false - this is a non-throttled failure")
+	}
+	if embedder.calls != 2 {
+		t.Errorf("Embed was called %d times, want exactly 2 - chunkForBudget should produce exactly two groups (the 25 healthy rows filling one 200,000-token group, the poisoned row starting a second), and the healthy group's success must never trigger a re-embed of it", embedder.calls)
+	}
+	if embedder.rowsSent != healthyCount+1 {
+		t.Errorf("rows sent across all Embed calls = %d, want %d (no row re-sent)", embedder.rowsSent, healthyCount+1)
 	}
 }

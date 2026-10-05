@@ -12,7 +12,7 @@ import (
 // TestSearchMeaningLegsUseTheHNSWIndexNotASequentialScan proves each meaning candidate CTE's own
 // shape - `order by embedding <=> $qvec limit $k` against embeddings alone, with no shared window
 // spanning every kind - is what lets pgvector's planner pick an Index Scan on embeddings_cosine
-// (0071_embeddings_core.up.sql's HNSW index) rather than a sequential scan sorted in memory.
+// (0072_embeddings_core.up.sql's HNSW index) rather than a sequential scan sorted in memory.
 // enable_seqscan and enable_sort are forced off for this EXPLAIN only: a handful of test rows is
 // too small for the planner to ever prefer the index on cost alone (reading a few rows via its
 // primary key, kind = 'message', and sorting them in memory is cheaper than any index no matter

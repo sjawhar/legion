@@ -183,7 +183,7 @@ totals as (
 
 // searchQueryMeaning extends searchQuery with a second list per kind, ranked by cosine distance
 // to the query's own embedding ($9, a pgvector literal) against embeddings.embedding
-// (0071_embeddings_core.up.sql), rather than ts_rank_cd. Each kind's meaning candidates are their
+// (0072_embeddings_core.up.sql), rather than ts_rank_cd. Each kind's meaning candidates are their
 // own CTE (meaning_issue_candidates and so on) doing plainly `order by embedding <=> $9 limit $7`
 // - pgvector's HNSW index serves that shape directly (confirmed by
 // TestSearchMeaningLegsUseTheHNSWIndexNotASequentialScan) - rather than joining meaning rows into

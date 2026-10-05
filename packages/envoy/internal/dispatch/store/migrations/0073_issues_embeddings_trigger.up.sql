@@ -1,4 +1,4 @@
--- 0072_issues_embeddings_trigger.up.sql
+-- 0073_issues_embeddings_trigger.up.sql
 -- Its own migration, so the transaction holds issues' ACCESS EXCLUSIVE lock alone, for
 -- milliseconds, and never while waiting for another table's (0057-0061's search triggers made
 -- the same choice, for the same reason).

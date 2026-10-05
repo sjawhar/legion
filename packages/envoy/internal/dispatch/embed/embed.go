@@ -24,7 +24,7 @@ import (
 
 const (
 	// Dimension is the embedding width every embeddings.embedding column and HNSW index
-	// (0071_embeddings_core.up.sql) is sized for. Changing it means a new migration and a full
+	// (0072_embeddings_core.up.sql) is sized for. Changing it means a new migration and a full
 	// re-embed; this package does not detect a Dispatch already carrying vectors at another width.
 	Dimension = 1536
 	// Model is the Bedrock model this package calls: Cohere Embed v4 through the US cross-region
