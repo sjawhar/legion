@@ -122,15 +122,14 @@ func newFixture(t *testing.T) (m *Machine, enrollmentID string, requesterKey *ec
 	enrollmentID, requesterKey = newEnrollment(t, st, "box", "box-a-"+t.Name(), new(fixtureOperator), nil)
 
 	m = &Machine{
-		Store:       st,
-		Policy:      policytest.Current(t, local, fixtureService),
-		Secrets:     secrets.AWS{Client: local},
-		MaxGrant:    time.Hour,
-		PendingTTL:  12 * time.Hour,
-		Audience:    testAudience,
-		Skew:        time.Minute,
-		Replay:      replayer(st),
-		MissRereads: ratelimit.NewKeyed(DefaultMissRereads),
+		Store:      st,
+		Policy:     policytest.Current(t, local, fixtureService),
+		Secrets:    secrets.AWS{Client: local},
+		MaxGrant:   time.Hour,
+		PendingTTL: 12 * time.Hour,
+		Audience:   testAudience,
+		Skew:       time.Minute,
+		Replay:     replayer(st),
 	}
 	m.Chain = NewChainVerifier(st, testAudience, time.Minute)
 	return m, enrollmentID, requesterKey, fixtureOperator
@@ -385,7 +384,7 @@ func TestCreateServesASecretCreatedAfterTheLastReload(t *testing.T) {
 // without one.
 func TestMissRereadsAreBoundedPerEnrollment(t *testing.T) {
 	m, enr, key, _ := newFixture(t)
-	m.MissRereads = ratelimit.NewKeyed(ratelimit.Limit{Every: time.Hour, Burst: 2})
+	m.MissRereads = &ratelimit.Limit{Every: time.Hour, Burst: 2}
 	count := &countingDescriber{DescribeSecretAPIClient: fixtureStore(m)}
 	loader := policytest.Loader(fixtureStore(m), fixtureService) // the fixture's services, as newFixture registers them
 	loader.Describer = count
@@ -410,7 +409,7 @@ func TestMissRereadsAreBoundedPerEnrollment(t *testing.T) {
 // the last reload is still served by the enrollment's one reread.
 func TestANameNoSecretCanCarrySpendsNoMissReread(t *testing.T) {
 	m, enr, key, _ := newFixture(t)
-	m.MissRereads = ratelimit.NewKeyed(ratelimit.Limit{Every: time.Hour, Burst: 1})
+	m.MissRereads = &ratelimit.Limit{Every: time.Hour, Burst: 1}
 	ctx := context.Background()
 	tooLong := "A" + strings.Repeat("B", 512-len(policytest.Prefix))
 	if _, err := m.Create(ctx, enr, signRequest(t, m, key, "free text", "not a secret name", tooLong), ""); !errors.Is(err, policy.ErrUnknownSecret) {

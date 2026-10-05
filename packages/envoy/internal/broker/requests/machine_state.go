@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"slices"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -104,9 +105,23 @@ type Machine struct {
 	// credentials, built by NewChainVerifier against agent_secret records instead.
 	Chain *record.ChainVerifier
 	// MissRereads bounds, per enrollment, the single-name policy rereads Create makes for names the
-	// live policy does not serve (rereadMissing). Required: constructors set
-	// ratelimit.NewKeyed(DefaultMissRereads).
-	MissRereads *ratelimit.Keyed
+	// live policy does not serve (rereadMissing); nil means DefaultMissRereads.
+	MissRereads *ratelimit.Limit
+	// missRereads is MissRereads' per-enrollment buckets, built on first use (missRereadLimiter).
+	missRereads     *ratelimit.Keyed
+	missRereadsOnce sync.Once
+}
+
+// missRereadLimiter is the per-enrollment buckets MissRereads names, built on the first miss.
+func (m *Machine) missRereadLimiter() *ratelimit.Keyed {
+	m.missRereadsOnce.Do(func() {
+		limit := DefaultMissRereads
+		if m.MissRereads != nil {
+			limit = *m.MissRereads
+		}
+		m.missRereads = ratelimit.NewKeyed(limit)
+	})
+	return m.missRereads
 }
 
 // NewChainVerifier builds the record.ChainVerifier VerifyChain uses, scoped to agent_secret
@@ -266,7 +281,7 @@ func (m *Machine) rereadMissing(ctx context.Context, enrollmentID string, names 
 		if m.Policy.CheckName(name) != nil {
 			continue
 		}
-		if !m.MissRereads.Allow(enrollmentID) {
+		if !m.missRereadLimiter().Allow(enrollmentID) {
 			return set, nil
 		}
 		if _, err := m.Policy.RefreshOne(ctx, name); err != nil {
