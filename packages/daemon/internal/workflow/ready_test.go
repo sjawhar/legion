@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
@@ -122,6 +123,146 @@ func TestAnApprovalVoidsAREADYTheGateRefusedWithNoPacketAndTellsTheArchitect(t *
 				t.Fatalf("architect notices = %+v, want one ready-refused naming READY_PACKET_MISSING", got)
 			}
 		})
+	}
+}
+
+// A READY refused with no design gate registered at all names no pending version — the issues
+// table takes only a positive one — but the merger's phase row still carries the refused
+// completion's packet. Registering the gate is what the root architect does next; when that
+// registration itself opens the gate (gates.design: off, or Dispatch already shows the version
+// approved), the kept READY is released the moment it is registered, with no second READY from
+// the merger.
+func TestAREADYRefusedAtVersionZeroIsPostedWhenRegistrationOpensTheGate(t *testing.T) {
+	pool := migratedPool(t)
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Merging, Generation: 1, Status: "retro", Rank: "U"})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim"})
+	engine := testEngine(config.DesignGateOff, nil)
+	apply := applyFacts(t, pool, engine)
+
+	result := apply("ready", intake.HandoffComplete{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim", Generation: 1, Ready: true, Summary: readyPacket, Commit: "head"})
+	if result.Refusal == nil || result.Refusal.Code != "DESIGN_GATE_CLOSED" {
+		t.Fatalf("ApplyFact READY = %#v, want the version-0 refusal", result)
+	}
+	var pending *int
+	if err := pool.QueryRow(t.Context(), "select ready_pending_version from issues where key = 'LEGION-208'").Scan(&pending); err != nil || pending != nil {
+		t.Fatalf("ready_pending_version after the refusal = %v, %v; want none: the issues table takes only a positive version", pending, err)
+	}
+	if got := messageBodies(t, pool); len(got) != 0 {
+		t.Fatalf("Dispatch messages after the refusal = %q, want none", got)
+	}
+
+	apply("register", intake.GateRegistered{Issue: "LEGION-208", ArtifactID: "artifact-208", Version: 1})
+	assertPhase(t, pool, phase.AwaitingMerge)
+	if got := messageBodies(t, pool); len(got) != 1 || got[0] != readyPacket {
+		t.Fatalf("Dispatch messages after registration = %q, want the kept READY packet once", got)
+	}
+}
+
+// The same READY refused at version 0, but under an armed gate: registering the spec closes the
+// gate at its own version (nobody has approved it yet), so the kept READY still waits. Approving
+// that registered version is what releases it, the same way an approval releases a refusal that
+// named a known version.
+func TestAREADYRefusedAtVersionZeroIsPostedWhenTheRegisteredVersionIsApproved(t *testing.T) {
+	pool := migratedPool(t)
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Merging, Generation: 1, Status: "retro", Rank: "U"})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim"})
+	apply := applyFacts(t, pool, readyEngine("merge-queue"))
+
+	result := apply("ready", intake.HandoffComplete{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim", Generation: 1, Ready: true, Summary: readyPacket, Commit: "head"})
+	if result.Refusal == nil || result.Refusal.Code != "DESIGN_GATE_CLOSED" {
+		t.Fatalf("ApplyFact READY = %#v, want the version-0 refusal", result)
+	}
+
+	apply("register", intake.GateRegistered{Issue: "LEGION-208", ArtifactID: "artifact-208", Version: 1})
+	assertPhase(t, pool, phase.Merging)
+	if got := messageBodies(t, pool); len(got) != 0 {
+		t.Fatalf("Dispatch messages after registration = %q, want none: version 1 is not approved yet", got)
+	}
+
+	apply("approval", intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "artifact-208", Kind: intake.DispatchArtifactApproved, Version: 1})
+	assertPhase(t, pool, phase.AwaitingMerge)
+	if got := messageBodies(t, pool); len(got) != 1 || got[0] != readyPacket {
+		t.Fatalf("Dispatch messages after the approval = %q, want the kept READY packet once", got)
+	}
+	if got := mergeQueuePublishes(t, pool); len(got) != 1 || got[0].Packet != readyPacket {
+		t.Fatalf("merge queue publishes = %v, want the kept packet once", got)
+	}
+}
+
+// The real-world trigger for a version-0 refusal: a tree is re-admitted after it finished or
+// lingered (admit.Admission.readmit), which clears the tree's one design-gate row with
+// record.ClearTreeGeneration while a member a previous run left in phase.Merging keeps its own
+// generation and phase. A merger that completes a READY before the new architect registers the
+// gate again is refused at version 0. Registering the gate this time does not open it — nobody has
+// approved the newly registered version yet — but the human already approved it before, so the
+// gate-seed outbox's read of Dispatch (daemon/outbox.go's seedGate) reports that approval as an
+// ordinary DispatchArtifact approval event, not registration opening the gate inline, and that
+// approval event is what releases the kept READY.
+func TestAREADYRefusedAtVersionZeroAfterReAdmissionIsPostedWhenDispatchReportsTheAlreadyApprovedVersion(t *testing.T) {
+	pool := migratedPool(t)
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Merging, Generation: 1, Status: "retro", Rank: "U"})
+	seedGate(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 1, ApprovedVersion: new(1)})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim"})
+	apply := applyFacts(t, pool, readyEngine("merge-queue"))
+
+	// The root is re-admitted (set back to todo after it finished or lingered): the tree's gate
+	// is cleared exactly as admit.Admission.readmit clears it, leaving the merger's own phase and
+	// generation untouched.
+	seedRecord(t, pool, func(tx pgx.Tx) error {
+		return record.NewStore().ClearTreeGeneration(context.Background(), tx, "LEGION-208")
+	})
+	var gateGone bool
+	if err := pool.QueryRow(t.Context(), "select not exists(select 1 from design_gates where issue = 'LEGION-208')").Scan(&gateGone); err != nil || !gateGone {
+		t.Fatalf("design_gates row after re-admission = gone:%v, %v; want it cleared", gateGone, err)
+	}
+
+	result := apply("ready", intake.HandoffComplete{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim", Generation: 1, Ready: true, Summary: readyPacket, Commit: "head"})
+	if result.Refusal == nil || result.Refusal.Code != "DESIGN_GATE_CLOSED" {
+		t.Fatalf("ApplyFact READY after re-admission = %#v, want the version-0 refusal", result)
+	}
+
+	apply("register", intake.GateRegistered{Issue: "LEGION-208", ArtifactID: "artifact-208", Version: 2})
+	assertPhase(t, pool, phase.Merging)
+	if got := messageBodies(t, pool); len(got) != 0 {
+		t.Fatalf("Dispatch messages after registration = %q, want none: version 2 is not approved yet", got)
+	}
+
+	apply("gate-seed-approval", intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "artifact-208", Kind: intake.DispatchArtifactApproved, Version: 2})
+	assertPhase(t, pool, phase.AwaitingMerge)
+	if got := messageBodies(t, pool); len(got) != 1 || got[0] != readyPacket {
+		t.Fatalf("Dispatch messages after the already-approved version is reported = %q, want the kept READY packet once", got)
+	}
+}
+
+// A refusal that names a known version still releases exactly as before: registering a later
+// document version at the root changes nothing for it until that later version is itself
+// approved, and only the approval of the version the refusal is waiting on (or later) releases it.
+func TestAREADYRefusedAtAKnownVersionStillReleasesOnlyOnItsApproval(t *testing.T) {
+	pool := migratedPool(t)
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Merging, Generation: 1, Status: "retro", Rank: "U"})
+	seedGate(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 4})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim"})
+	apply := applyFacts(t, pool, readyEngine("merge-queue"))
+
+	result := apply("ready", intake.HandoffComplete{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim", Generation: 1, Ready: true, Summary: readyPacket, Commit: "head"})
+	if result.Refusal == nil || result.Refusal.Code != "DESIGN_GATE_CLOSED" {
+		t.Fatalf("ApplyFact READY = %#v, want the refusal naming version 4", result)
+	}
+	var pending *int
+	if err := pool.QueryRow(t.Context(), "select ready_pending_version from issues where key = 'LEGION-208'").Scan(&pending); err != nil || pending == nil || *pending != 4 {
+		t.Fatalf("ready_pending_version after the refusal = %v, %v; want 4", pending, err)
+	}
+
+	apply("version-5", intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "artifact-208", Kind: intake.DispatchArtifactVersion, Version: 5})
+	assertPhase(t, pool, phase.Merging)
+	if got := messageBodies(t, pool); len(got) != 0 {
+		t.Fatalf("Dispatch messages after a newer unapproved version = %q, want none", got)
+	}
+
+	apply("approval-5", intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "artifact-208", Kind: intake.DispatchArtifactApproved, Version: 5})
+	assertPhase(t, pool, phase.AwaitingMerge)
+	if got := messageBodies(t, pool); len(got) != 1 || got[0] != readyPacket {
+		t.Fatalf("Dispatch messages after the approval = %q, want the kept READY packet once", got)
 	}
 }
 

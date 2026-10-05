@@ -47,7 +47,14 @@ func (e *Engine) tellReadyAudience(ctx context.Context, tx pgx.Tx, issue record.
 // advancePendingReady advances every merger in the tree whose READY was refused while the gate was
 // closed, now that a human approved the gate's current version. That version may be later than
 // the one the refusal named: the READY stands until the gate reopens, whatever the human revised
-// in between.
+// in between. A READY refused while the tree had no design gate at all names no version — the
+// issues table takes only a positive `ready_pending_version` — so it is found the same way a
+// known-version refusal is found once there is a packet to release: the merger's phase row still
+// carries the READY completion's summary. A non-empty summary while in merging can only be a
+// refused READY's: handoff()'s READY_REQUIRED guard (engine.go:334) refuses a non-READY merger
+// completion before it ever writes the summary (engine.go:347), and clearHandoff empties it again
+// on every fresh entry into merging (engine.go:757), so neither leaves one behind for this to
+// mistake — even though the issue itself records no pending version for it.
 func (e *Engine) advancePendingReady(ctx context.Context, tx pgx.Tx, rootKey string, gate record.DesignGate) error {
 	if !classify.DesignGateOpen(gate) {
 		return nil
@@ -55,23 +62,30 @@ func (e *Engine) advancePendingReady(ctx context.Context, tx pgx.Tx, rootKey str
 	if lingers, err := record.TreeLingers(ctx, e.store, tx, rootKey); err != nil || lingers {
 		return err
 	}
-	issues, err := e.store.Issues(ctx, tx)
+	issues, err := e.store.TreeIssues(ctx, tx, rootKey)
 	if err != nil {
 		return err
 	}
 	for _, issue := range issues {
-		if issue.Tree != rootKey || issue.Phase != phase.Merging || issue.ReadyPendingVersion == nil || *issue.ReadyPendingVersion > gate.LatestVersion {
+		if issue.Phase != phase.Merging {
+			continue
+		}
+		if issue.ReadyPendingVersion != nil && *issue.ReadyPendingVersion > gate.LatestVersion {
 			continue
 		}
 		row, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleMerger)
 		if err != nil {
 			return err
 		}
-		// A READY the gate refused before migration 0016 kept the merger's packet has none: it
-		// would post a message of the outbox marker alone, and a merge queue publish without a
-		// packet fails the whole approval. That READY cannot tell anyone to merge, so it is void,
-		// the issue stays in merging, and the architect that owns the issue is told why.
+		// An empty summary means this merging stint's merger reported no completion yet (there is
+		// no refusal to release) or reported one before migration 0016 kept the packet (that READY
+		// is void: posting it would leave a message of the outbox marker alone, and a merge queue
+		// publish without a packet would fail the whole approval). A pending version distinguishes
+		// the two: only the void case names one, since it is set only when a gate exists.
 		if row.Summary == "" {
+			if issue.ReadyPendingVersion == nil {
+				continue
+			}
 			issue.ReadyPendingVersion = nil
 			if err := e.store.PutIssue(ctx, tx, issue); err != nil {
 				return err

@@ -11,6 +11,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/embed"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
@@ -19,56 +21,54 @@ import (
 const (
 	searchDefaultLimit = 20
 	searchMaxLimit     = 50
-	// searchFusionK is reciprocal rank fusion's constant: a row at position p of one of its
-	// kind's lists scores 1/(searchFusionK+p). 60 is the value of the paper that introduced the
-	// method (Cormack, Clarke and Buettcher, 2009) and Elasticsearch's and OpenSearch's default;
-	// nothing tunes it.
+	// searchFusionK is reciprocal rank fusion's constant: a row at position p of its kind's list
+	// scores 1/(searchFusionK+p). 60 is the value of the paper that introduced the method (Cormack,
+	// Clarke and Buettcher, 2009) and Elasticsearch's and OpenSearch's default; nothing tunes it.
 	searchFusionK = 60
-	// searchEmbedTimeout bounds the one Cohere call search makes (the query's own embedding).
+	// searchEmbedTimeout bounds the one Bedrock call search makes (the query's own embedding).
 	// Past it, or any other embedder failure, search answers keyword-only and says so (LEGION-549)
 	// rather than making every search wait indefinitely on a degraded embedder.
 	searchEmbedTimeout = 3 * time.Second
 	// degradedEmbedderUnavailable is SearchResponse.Degraded's value when meaning search could not
-	// run for this request - the embedder is unconfigured, timed out, or Cohere answered an
+	// run for this request - the embedder is unconfigured, timed out, or Bedrock answered an
 	// error - and search fell back to keyword-only ranking.
 	degradedEmbedderUnavailable = "embedder_unavailable"
-	// searchMeaningFloor is the lowest cosine similarity a meaning-leg row may score to reach
-	// legs at all: below it, a row is noise, not a weak match, and letting it through would rank
-	// it by position exactly as the strongest match in an empty kind, worth 1/(searchFusionK+1) -
-	// as much as a real hit, zero floor (today) gives nothing. Chosen from embed-v4.0 pairs on
+	// searchMeaningFloor is the lowest cosine similarity a meaning-leg row may score to reach legs
+	// at all: below it, a row is noise, not a weak match, and letting it through would rank it by
+	// position exactly as the strongest match in an empty kind, worth 1/(searchFusionK+1) - as
+	// much as a real hit, zero floor (before this) gives nothing. Chosen from embed-v4 pairs on
 	// this corpus: true paraphrase matches scored 0.45-0.50, same-domain-different-issue
-	// near-misses 0.34-0.40, and unrelated content topped out at 0.18 (one query, eight
-	// unrelated documents) - 0.25 sits with a wide margin on both sides of that gap. It is not
-	// re-derived per request or per corpus; a corpus whose true matches cluster lower would need
-	// a new floor chosen the same way.
+	// near-misses 0.34-0.40, and unrelated content topped out at 0.18 (one query, eight unrelated
+	// documents) - 0.25 sits with a wide margin on both sides of that gap. It is not re-derived
+	// per request or per corpus; a corpus whose true matches cluster lower would need a new floor
+	// chosen the same way.
 	searchMeaningFloor = 0.25
 	markStart          = "\uE000" // private-use sentinels: ts_headline writes them, markSnippet turns them into <mark>
 	markEnd            = "\uE001"
 	headlineOptions    = "StartSel=" + markStart + ", StopSel=" + markEnd + ", MaxWords=24, MinWords=12, MaxFragments=1"
 )
 
-// searchQueryKeyword ranks each kind of content on one keyword list (ts_rank_cd, then recency,
-// then id) and merges the lists by reciprocal rank fusion, exactly as search ran before meaning
-// search existed (LEGION-386). It is the keyword-only fallback: Dispatch runs it whenever the
-// embedder is unconfigured or a request's query embedding failed, so a degraded Cohere never
-// turns search into no search. kinds unions the five kinds' matches with no per-kind limit or
-// order of its own; one window over it, partitioned by kind, orders each kind's matches by
-// ts_rank_cd, then recency, then id, and numbers them (pos), and the same partition's count(*),
-// taken before any cut, is that kind's every match (matches). Filtering to pos <= $7
-// (contracts.SearchKindDepth) then keeps each kind's best $7 as legs, the one place the kind's
-// total order is written. An issue whose key is the whole query heads the issue list, since
-// ts_rank_cd scores its own key no higher than another issue's title citing it. Rows that score
-// alike (every kind's first row scores 1/61) are ordered issue, document, ask, comment, message
-// (the thing before what is inside it), then recency, then id, which makes the order total, so
-// consecutive offsets cover the reachable rows once while the corpus holds still. legs and fused
-// carry no row's text, so the union, the window and the fused score cost nothing per kind's full
-// body; only the page's own rows pay for one lateral fetch of their text and, after that, a
-// snippet. totals is joined outside the page, so a page past the end still answers how many rows
-// the query matches.
+// searchQuery ranks each kind of content on its own list, then merges the lists by reciprocal
+// rank fusion, so a page takes each kind's best in turn: its top holds the best issue, document,
+// ask, comment and message. kinds unions the five kinds' matches with no per-kind limit or order
+// of its own; one window over it, partitioned by kind, orders each kind's matches by ts_rank_cd,
+// then recency, then id, and numbers them (pos), and the same partition's count(*), taken before
+// any cut, is that kind's every match (matches). Filtering to pos <= $7 (contracts.SearchKindDepth)
+// then keeps each kind's best $7 as legs, the one place the kind's total order is written. An
+// issue whose key is the whole query heads the issue list, since ts_rank_cd scores its own key no
+// higher than another issue's title citing it. Rows that score alike (every kind's first row
+// scores 1/61) are ordered issue, document, ask, comment, message (the thing before what is
+// inside it), then recency, then id, which makes the order total, so consecutive offsets cover
+// the reachable rows once while the corpus holds still. legs and fused carry no row's text, so
+// the union, the window and the fused score cost nothing per kind's full body; only the page's
+// own rows pay for one lateral fetch of their text and, after that, a snippet. totals is joined
+// outside the page, so a page past the end still answers how many rows the query matches. This is
+// the keyword-only fallback (LEGION-549 degraded mode) and the query runFusedSearch runs for
+// LEGION-550's write-time suggestions, which never calls the embedder at all.
 //
 // Parameters: $1 q, $2 project (empty for every project), $3 limit, $4 firstTerm,
 // $5 headlineOptions, $6 offset, $7 contracts.SearchKindDepth, $8 searchFusionK.
-const searchQueryKeyword = `
+const searchQuery = `
 with q as (select websearch_to_tsquery('english', $1) as tsq, $4::text as term, upper(btrim($1)) as own_key),
 kinds as (
   select 'issue' as kind, i.key as issue_key, null::uuid as owner_artifact_id, null::uuid as artifact_id, i.key as id, null::text as block_id,
@@ -140,16 +140,19 @@ select t.total, t.reachable, r.kind, case when r.owner_artifact_id is null then 
        r.owner_project, r.owner_slug, r.owner_artifact_id::text, r.owner_name,
        ar.slug, ar.name, coalesce(ar.is_primary, false), r.id, r.block_id, r.score::float8,
        ts_headline('english',
-         case when q.term <> '' and strpos(lower(txt.text), lower(q.term)) > 0
+         search_text(case when q.term <> '' and strpos(lower(txt.text), lower(q.term)) > 0
               then substr(txt.text, greatest(1, strpos(lower(txt.text), lower(q.term)) - 1500), 4000)
-              else left(txt.text, 4000) end,
+              else left(txt.text, 4000) end),
          q.tsq, $5) as headline
   from totals t cross join q
   left join (page r left join artifacts ar on ar.id = r.artifact_id) on true
+  -- Mirrors the kind arms in kinds above (issue/document/comment/ask/message -> table and
+  -- text column); the two must stay in sync. issue reuses r.issue_title, already carried from
+  -- the same issues row by kinds, rather than re-reading it.
   left join lateral (
     select case r.kind
       when 'issue' then r.issue_title
-      when 'document' then (select v.markdown from artifact_versions v where v.artifact_id = r.artifact_id order by v.number desc limit 1)
+      when 'document' then (select v.markdown from artifact_versions v where v.artifact_id = r.artifact_id order by v.number desc limit 1) -- re-resolves the latest version kinds already found once; accepted, bounded by the page size
       when 'comment' then (select c.body from comments c where c.id = r.id::uuid)
       when 'ask' then (select k.question || ' ' || coalesce(k.options::text, '') || ' ' || coalesce(k.answer->>'text', '') from asks k where k.id = r.id::uuid)
       when 'message' then (select m.body from messages m where m.id = r.id::uuid)
@@ -158,8 +161,8 @@ select t.total, t.reachable, r.kind, case when r.owner_artifact_id is null then 
  order by r.score desc, r.kind_order, r.updated_at desc, r.id
 `
 
-// searchQueryMeaning extends searchQueryKeyword with a second list per kind, ranked by cosine
-// distance to the query's own embedding ($9, a pgvector literal) against embeddings.embedding
+// searchQueryMeaning extends searchQuery with a second list per kind, ranked by cosine distance
+// to the query's own embedding ($9, a pgvector literal) against embeddings.embedding
 // (0071_embeddings_core.up.sql), rather than ts_rank_cd. Each kind's meaning candidates are their
 // own CTE (meaning_issue_candidates and so on) doing plainly `order by embedding <=> $9 limit $7`
 // - pgvector's HNSW index serves that shape directly (confirmed by
@@ -353,12 +356,14 @@ select t.total, t.reachable, r.kind, case when r.owner_artifact_id is null then 
        r.owner_project, r.owner_slug, r.owner_artifact_id::text, r.owner_name,
        ar.slug, ar.name, coalesce(ar.is_primary, false), r.id, r.block_id, r.score::float8,
        ts_headline('english',
-         case when q.term <> '' and strpos(lower(txt.text), lower(q.term)) > 0
+         search_text(case when q.term <> '' and strpos(lower(txt.text), lower(q.term)) > 0
               then substr(txt.text, greatest(1, strpos(lower(txt.text), lower(q.term)) - 1500), 4000)
-              else left(txt.text, 4000) end,
+              else left(txt.text, 4000) end),
          q.tsq, $5) as headline
   from totals t cross join q
   left join (page r left join artifacts ar on ar.id = r.artifact_id) on true
+  -- Mirrors the kind arms above (issue/document/comment/ask/message -> table and text column),
+  -- exactly as searchQuery's own tail does; the two must stay in sync.
   left join lateral (
     select case r.kind
       when 'issue' then r.issue_title
@@ -413,40 +418,102 @@ func (s *server) search(w http.ResponseWriter, r *http.Request) {
 		offset = parsed
 	}
 
-	var nodes int
-	if err := s.deps.Store.Pool.QueryRow(r.Context(), "select numnode(websearch_to_tsquery('english', $1))", searchText).Scan(&nodes); err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	if nodes == 0 {
-		WriteJSON(w, http.StatusOK, model.SearchResponse{Results: []model.SearchResult{}, Limit: limit, Offset: offset})
-		return
-	}
-
-	sqlText := searchQueryKeyword
-	args := []any{searchText, project, limit, firstTerm(searchText), headlineOptions, offset, contracts.SearchKindDepth, searchFusionK}
-	degraded := ""
-	if s.deps.Embedder != nil {
-		if vector, err := s.embedQuery(r.Context(), searchText); err != nil {
-			slog.Warn("dispatch search: query embedding unavailable, answering keyword-only", "error", err)
-			degraded = degradedEmbedderUnavailable
-		} else {
-			sqlText = searchQueryMeaning
-			args = append(args, embed.Literal(vector), searchMeaningFloor)
-		}
-	} else {
-		degraded = degradedEmbedderUnavailable
-	}
-
-	started := time.Now()
-	rows, err := s.deps.Store.Pool.Query(r.Context(), sqlText, args...)
+	response, err := s.runSearch(r.Context(), searchText, project, limit, offset)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
+	WriteJSON(w, http.StatusOK, response)
+}
+
+// runSearch is the search handler's own entry point (unlike runFusedSearch, LEGION-550's
+// write-time suggestions never call this - suggestions never try meaning search, so they never
+// pay for an embedder call or its timeout). It tries meaning search first when an embedder is
+// configured, falling back to keyword-only (runFusedSearch) only when the query's own embedding
+// could not be had - never when the meaning query itself then fails, which is a real error the
+// caller should see as a 500, not something to paper over as a degraded answer.
+func (s *server) runSearch(ctx context.Context, q, project string, limit, offset int) (model.SearchResponse, error) {
+	if s.deps.Embedder == nil {
+		response, err := s.runFusedSearch(ctx, q, project, limit, offset)
+		if err == nil {
+			response.Degraded = degradedEmbedderUnavailable
+		}
+		return response, err
+	}
+	vector, err := s.embedQuery(ctx, q)
+	if err != nil {
+		slog.Warn("dispatch search: query embedding unavailable, answering keyword-only", "error", err)
+		response, err := s.runFusedSearch(ctx, q, project, limit, offset)
+		if err == nil {
+			response.Degraded = degradedEmbedderUnavailable
+		}
+		return response, err
+	}
+	return s.runMeaningSearch(ctx, q, project, limit, offset, vector)
+}
+
+// runFusedSearch is the search handler's query, SQL and row-scanning shared with LEGION-550's
+// write-time suggestions (suggestions.go): both read the same fused ranking
+// (sjawhar/legion#1764), the handler bound by its request context and the suggestions call bound
+// by writeSuggestionTimeout instead. q is assumed already validated (length, non-empty after
+// trimming); project empty searches every project.
+func (s *server) runFusedSearch(ctx context.Context, q, project string, limit, offset int) (model.SearchResponse, error) {
+	var nodes int
+	if err := s.deps.Store.Pool.QueryRow(ctx, "select numnode(websearch_to_tsquery('english', $1))", q).Scan(&nodes); err != nil {
+		return model.SearchResponse{}, err
+	}
+	if nodes == 0 {
+		return model.SearchResponse{Results: []model.SearchResult{}, Limit: limit, Offset: offset}, nil
+	}
+
+	started := time.Now()
+	rows, err := s.deps.Store.Pool.Query(ctx, searchQuery, q, project, limit, firstTerm(q), headlineOptions,
+		offset, contracts.SearchKindDepth, searchFusionK)
+	if err != nil {
+		return model.SearchResponse{}, err
+	}
 	defer rows.Close()
 
-	response := model.SearchResponse{Results: []model.SearchResult{}, Limit: limit, Offset: offset, Degraded: degraded}
+	response, err := scanSearchRows(rows, q, limit, offset)
+	if err != nil {
+		return model.SearchResponse{}, err
+	}
+	response.TookMS = time.Since(started).Milliseconds()
+	return response, nil
+}
+
+// runMeaningSearch is runFusedSearch's counterpart once a query embedding exists: same
+// validation, same row shape, searchQueryMeaning in place of searchQuery.
+func (s *server) runMeaningSearch(ctx context.Context, q, project string, limit, offset int, vector []float32) (model.SearchResponse, error) {
+	var nodes int
+	if err := s.deps.Store.Pool.QueryRow(ctx, "select numnode(websearch_to_tsquery('english', $1))", q).Scan(&nodes); err != nil {
+		return model.SearchResponse{}, err
+	}
+	if nodes == 0 {
+		return model.SearchResponse{Results: []model.SearchResult{}, Limit: limit, Offset: offset}, nil
+	}
+
+	started := time.Now()
+	rows, err := s.deps.Store.Pool.Query(ctx, searchQueryMeaning, q, project, limit, firstTerm(q), headlineOptions,
+		offset, contracts.SearchKindDepth, searchFusionK, embed.Literal(vector), searchMeaningFloor)
+	if err != nil {
+		return model.SearchResponse{}, err
+	}
+	defer rows.Close()
+
+	response, err := scanSearchRows(rows, q, limit, offset)
+	if err != nil {
+		return model.SearchResponse{}, err
+	}
+	response.TookMS = time.Since(started).Milliseconds()
+	return response, nil
+}
+
+// scanSearchRows reads searchQuery's and searchQueryMeaning's shared column shape - every column
+// through the headline - into a SearchResponse. q is the original query text, for each result's
+// href (searchHref's own query-string echo).
+func scanSearchRows(rows pgx.Rows, q string, limit, offset int) (model.SearchResponse, error) {
+	response := model.SearchResponse{Results: []model.SearchResult{}, Limit: limit, Offset: offset}
 	for rows.Next() {
 		var result model.SearchResult
 		var kind, ownerKind, id, headline *string
@@ -474,8 +541,7 @@ func (s *server) search(w http.ResponseWriter, r *http.Request) {
 			&rank,
 			&headline,
 		); err != nil {
-			s.writeHandlerError(w, err)
-			return
+			return model.SearchResponse{}, err
 		}
 		// A page past the last reachable row is one row of totals and no hit.
 		if kind == nil {
@@ -498,25 +564,22 @@ func (s *server) search(w http.ResponseWriter, r *http.Request) {
 			result.Artifact = &model.SearchArtifact{Slug: *slug, Name: *name}
 		}
 		result.Snippet = markSnippet(*headline)
-		result.Href = searchHref(result.Kind, result.Owner, result.Artifact, primary, result.ID, blockID, searchText)
+		result.Href = searchHref(result.Kind, result.Owner, result.Artifact, primary, result.ID, blockID, q)
 		response.Results = append(response.Results, result)
 	}
 	if err := rows.Err(); err != nil {
-		s.writeHandlerError(w, err)
-		return
+		return model.SearchResponse{}, err
 	}
-
-	response.TookMS = time.Since(started).Milliseconds()
-	WriteJSON(w, http.StatusOK, response)
+	return response, nil
 }
 
-// embedQuery embeds searchText for meaning search (embed.InputQuery - Cohere's asymmetric mode
-// embeds a query differently from a stored document), bounded by searchEmbedTimeout so one
-// degraded request never holds the whole search handler open on a slow or wedged Cohere call.
-func (s *server) embedQuery(ctx context.Context, searchText string) ([]float32, error) {
+// embedQuery embeds q for meaning search (embed.InputQuery - Cohere's asymmetric mode embeds a
+// query differently from a stored document), bounded by searchEmbedTimeout so one degraded
+// request never holds the whole search handler open on a slow or wedged Bedrock call.
+func (s *server) embedQuery(ctx context.Context, q string) ([]float32, error) {
 	ctx, cancel := context.WithTimeout(ctx, searchEmbedTimeout)
 	defer cancel()
-	vectors, err := s.deps.Embedder.Embed(ctx, []string{searchText}, embed.InputQuery)
+	vectors, err := s.deps.Embedder.Embed(ctx, []string{q}, embed.InputQuery)
 	if err != nil {
 		return nil, err
 	}

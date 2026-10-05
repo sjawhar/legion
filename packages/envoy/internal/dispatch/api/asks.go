@@ -273,7 +273,32 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 		return
 	}
 	s.publish(events...)
-	WriteJSON(w, http.StatusCreated, withAdvice(ask, advice))
+	// LEGION-550. An ask on an issue searches that issue's project and, normally, rides its
+	// suggestions on the issue's own advice; one on an unlinked project document searches the
+	// document's and has no issue state to report, so its advice carries the suggestions alone.
+	// computeAndPersistSuggestions resolves the project itself (empty here) under its own
+	// deadline, so that lookup can no longer block this response past writeSuggestionTimeout the
+	// way it did when it ran here, before the call, on the request's unbounded context.
+	source := suggestionSource{kind: "ask", askID: ask.ID, actor: actor}
+	if owner.IssueKey != nil {
+		source.issueKey = *owner.IssueKey
+	} else if owner.ArtifactID != nil {
+		source.artifactID = *owner.ArtifactID
+	}
+	suggestions := s.computeAndPersistSuggestions(r.Context(), "", ask.Question, source)
+	// advice is nil both for a document owner and for an issue owner whose write-advice query
+	// itself failed (writeAdvice swallows that); either way, suggestions already computed and
+	// persisted ride along as suggestionsOnlyAdvice rather than being dropped on the floor.
+	if advice != nil {
+		advice.Suggestions = suggestions
+		WriteJSON(w, http.StatusCreated, withAdvice(ask, advice))
+		return
+	}
+	if suggestions != nil {
+		WriteJSON(w, http.StatusCreated, withRawAdvice(ask, suggestionsOnlyAdvice{Suggestions: suggestions}))
+		return
+	}
+	WriteJSON(w, http.StatusCreated, ask)
 }
 
 func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {

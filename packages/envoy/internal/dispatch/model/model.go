@@ -309,6 +309,31 @@ type DuplicateCandidate struct {
 	Href        string `json:"href"`
 }
 
+// WriteSuggestion is one item LEGION-550's write-time feedback judges similar to what was just
+// filed: a fused-search hit (sjawhar/legion#1764) over the same project. AnsweredBy and
+// AnsweredAt are set only when this is the ask Suggestions.Decision names — the "past decision"
+// case, where the agent needs who answered and when, not just a link.
+type WriteSuggestion struct {
+	Kind       string          `json:"kind"`
+	Owner      SearchOwner     `json:"owner"`
+	Artifact   *SearchArtifact `json:"artifact,omitempty"`
+	ID         string          `json:"id"`
+	Snippet    string          `json:"snippet"`
+	Href       string          `json:"href"`
+	AnsweredBy string          `json:"answered_by,omitempty"`
+	AnsweredAt *time.Time      `json:"answered_at,omitempty"`
+}
+
+// Suggestions is LEGION-550's write-time feedback on a newly created issue or ask: the three
+// items most like it (Related) and, when an answered ask already settles the same question,
+// that decision (Decision). Neither ever refuses or delays the write past
+// writeSuggestionTimeout; Missing explains why search did not answer in time instead.
+type Suggestions struct {
+	Related  []WriteSuggestion `json:"related"`
+	Decision *WriteSuggestion  `json:"decision,omitempty"`
+	Missing  string            `json:"missing,omitempty"`
+}
+
 // IssueChild is a child item embedded in an issue detail response. The subtree counts
 // include the child itself, every status (icebox included); done is `status = 'done'`.
 // ActiveAt is the newest updated_at anywhere in the child's subtree.
