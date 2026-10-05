@@ -866,6 +866,50 @@ test("a pending credential request alone is listed, counted, and keeps the empty
   }
 });
 
+// No Dispatch event names a credential request (the broker holds no Dispatch credential by
+// design), so an Inbox already open can only learn of one, or that one is gone, from the
+// credential list's own poll (`CREDENTIAL_POLL_INTERVAL_MS`, `features/credentials/pending.ts`).
+// `page.clock` fast-forwards past that interval without disturbing the event stream: its watchdog
+// is 45 s (`WATCHDOG_MS`, `api/sse.ts`), well past the 15.5 s advanced here, so the stream never
+// reconnects and the poll is the only thing that could have surfaced the change.
+test("a credential request seeded after the Inbox loads appears, and counts, without a reload; clearing it leaves the same way", async ({
+  browser,
+}) => {
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.clock.install();
+    const empty = page.getByText("Nothing needs you");
+    await page.goto("/");
+    await expect(empty).toBeVisible();
+    await expect(page.getByText(/^Needs you \d+$/)).toHaveCount(0);
+
+    await setPendingCredentialRequests([
+      {
+        approver: "alice",
+        identifiers: ["DEMO_API_KEY"],
+        kind: "agent_secret",
+        record_id: "record-alice",
+        requested_at: new Date().toISOString(),
+      },
+    ]);
+    await page.clock.fastForward(15_500);
+    const requests = page.getByRole("region", { name: "Credential requests" });
+    await expect(requests.getByRole("link")).toHaveCount(1);
+    await expect(requests.getByRole("link")).toContainText("DEMO_API_KEY");
+    await expect(empty).toHaveCount(0);
+    await expect(page.getByText(/^Needs you 1$/).first()).toBeVisible();
+
+    await setPendingCredentialRequests([]);
+    await page.clock.fastForward(15_500);
+    await expect(requests).toHaveCount(0);
+    await expect(empty).toBeVisible();
+    await expect(page.getByText(/^Needs you \d+$/)).toHaveCount(0);
+  } finally {
+    await alice.close();
+  }
+});
+
 // With nothing waiting, "Nothing needs you" stays on screen through a window focus, which refetches
 // what has gone stale and reopens the event stream, whose reconnect refreshes every query, and
 // through leaving the Inbox and coming back. Every credential-list call after the page's first is
