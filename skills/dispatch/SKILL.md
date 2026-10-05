@@ -108,8 +108,8 @@ a new version that keeps the human's own text, never a second "spec" artifact be
   approval request, give a fresh read-only subagent (on Oh My Pi, `task(agent="plan-gap-analyst")`)
   the draft, the human's words and any command output a claim rests on. It reports each claim about
   a system today that nothing it read supports, and each requirement with neither the human's words
-  nor a cited fact behind it. Cite, ask about or remove each one; before approval, an inference
-  marked with its reasoning may stand.
+  nor a cited fact behind it. Cite, ask about or remove each one; until you request approval, an
+  inference marked with its reasoning may stand.
 
 Before a new version goes out, read it as the human will: no two passages conflict, each point has
 one reading, and every decision block passes the phone test above. A worked example is
