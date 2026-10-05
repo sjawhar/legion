@@ -158,7 +158,8 @@ with a thumbnail.
 
 `dispatch_read` hands you the pictures the messages, asks and comments it shows embed, newest first, at most 8 and
 10 MiB per read, and its `Pictures:` section names each one shown, in order, and the rest by reference for
-`dispatch_doc_read`, which shows one picture (at most 5 MiB; a larger one or an SVG is described). A picture in a
+`dispatch_doc_read`, which shows one picture (at most 3,750,000 bytes, the 5 MB of base64 a model provider takes; a
+larger one or an SVG is described). A picture in a
 conversation on the Agents page belongs to that conversation, `dispatch://agent/<session id>/artifact/<slug>@vN`, and
 `dispatch_doc_read` reads it by that reference alone. On Oh My Pi an Inbox delivery carries its pictures the same way; in
 Claude Code it stays text with the reference.

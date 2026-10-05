@@ -86,6 +86,7 @@ import {
   PICTURES_SHOWN_MAX,
   PICTURES_SHOWN_MAX_BYTES,
   pictureLine,
+  pictureShownMaxText,
   picturesNewestFirst,
   sniffPictureType,
   type ToolImage,
@@ -1968,8 +1969,8 @@ async function readUploadedFile(
   const tooLarge = (mime: string, bytes: number): DispatchToolResult => ({
     text:
       `${artifact.name} is an uploaded ${mime} picture (version ${number}${of}, ` +
-      `${bytes.toLocaleString("en-US")} bytes), over the ${PICTURE_SHOWN_MAX_BYTES / 1024 / 1024} MiB ` +
-      `a model is shown, so dispatch_doc_read cannot show it. ${bytesRoute}`,
+      `${bytes.toLocaleString("en-US")} bytes), over the ${pictureShownMaxText} a model is shown, ` +
+      `so dispatch_doc_read cannot show it. ${bytesRoute}`,
     details,
   });
   const stated = artifact.versions.find((version) => version.number === number);
@@ -2076,7 +2077,7 @@ export async function readPictures(
   let shownBytes = 0;
   const overBudget = `past this read's ${PICTURES_SHOWN_MAX_BYTES / 1024 / 1024} MiB of pictures; dispatch_doc_read shows it`;
   const tooLarge = (name: string, bytes: number) =>
-    `${name} is ${bytes.toLocaleString("en-US")} bytes, over the ${PICTURE_SHOWN_MAX_BYTES / 1024 / 1024} MiB a model is shown`;
+    `${name} is ${bytes.toLocaleString("en-US")} bytes, over the ${pictureShownMaxText} a model is shown`;
   for (const address of addresses) {
     const skip = (reason: string) => lines.push(`- not shown: ${address} (${reason})`);
     if (images.length === PICTURES_SHOWN_MAX) {

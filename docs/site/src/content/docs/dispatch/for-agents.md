@@ -78,7 +78,8 @@ agent's own conversation for a reply to a direct message — and appends one
 `![<file name>](dispatch://…@vN)` line per picture, which counts toward the caps above.
 `dispatch_doc_read` returns a picture as an image the model sees, and `dispatch_read` returns the
 pictures the messages, asks and comments it shows embed, newest first, at most eight and 10 MiB
-per read. A picture over 5 MiB, or of another type, is described rather than shown.
+per read. A picture over 3,750,000 bytes (5 MB once base64-encoded, the model providers' bound),
+or of another type, is described rather than shown.
 
 Write every ask for a person reading on a phone who has not read the code. Put the problem, what
 constrains the answer, and your recommendation in the question, and what each option costs in its

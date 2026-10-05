@@ -3,9 +3,6 @@ package api
 import (
 	"net/http"
 
-	"github.com/jackc/pgx/v5"
-
-	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
@@ -38,43 +35,4 @@ func (s *server) uploadAgentArtifact(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.uploadArtifactFor(w, r, artifactTarget{Session: session})
-}
-
-// GET /api/v1/agents/{session_id}/artifacts
-func (s *server) listAgentArtifacts(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAuthenticated(w, r) {
-		return
-	}
-	session, err := requestSessionID(r)
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	rows, err := s.deps.Store.Pool.Query(r.Context(), `
-		select `+artifactColumns+`
-		from artifacts where session_id = $1 order by created_at desc, id desc
-	`, session)
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	artifacts, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (model.Artifact, error) {
-		return scanArtifact(row)
-	})
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	if artifacts == nil {
-		artifacts = []model.Artifact{}
-	}
-	for index := range artifacts {
-		versions, err := s.loadVersions(r.Context(), s.deps.Store.Pool, artifacts[index].ID)
-		if err != nil {
-			s.writeHandlerError(w, err)
-			return
-		}
-		artifacts[index].Versions = versions
-	}
-	WriteJSON(w, http.StatusOK, artifacts)
 }

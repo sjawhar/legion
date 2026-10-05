@@ -20,7 +20,7 @@ const agentSession = "01a1058e-f14f-7684-87eb-3dc885955551"
 
 // A picture pasted into a direct message is stored with the agent's conversation: it belongs to no
 // issue or project, is addressed under the session, served by slug with the bytes' long-lived
-// cache header, listed newest first, and cited from a message as any artifact is.
+// cache header, and cited from a message as any artifact is.
 func TestAnAgentsConversationOwnsTheFilesUploadedToIt(t *testing.T) {
 	handler, _, _ := newTestServer(t, testServerOptions{files: filestest.NewMemory()})
 	image := bytes.Repeat([]byte{0x89, 'P', 'N', 'G'}, 1024)
@@ -58,8 +58,7 @@ func TestAnAgentsConversationOwnsTheFilesUploadedToIt(t *testing.T) {
 		t.Fatalf("serve by id: status=%d, %d body bytes", byID.Code, byID.Body.Len())
 	}
 
-	// The same name again is the next version, as on an issue; another name is another artifact,
-	// listed first.
+	// The same name again is the next version, as on an issue; another name is another artifact.
 	if again := multipartRequest(t, handler, base, map[string]string{"name": "shot.png"}, "shot.png", "image/png", []byte("second"), "alice"); again.Code != http.StatusCreated {
 		t.Fatalf("second version: status=%d body=%s", again.Code, again.Body.String())
 	}
@@ -69,10 +68,6 @@ func TestAnAgentsConversationOwnsTheFilesUploadedToIt(t *testing.T) {
 	read := decodeBody[model.Artifact](t, dispatchRequest(t, handler, http.MethodGet, base+"/shot-png", nil, "alice"))
 	if read.ID != artifact.ID || len(read.Versions) != 2 {
 		t.Fatalf("read by slug = %+v, want %s with two versions", read, artifact.ID)
-	}
-	listed := decodeBody[[]model.Artifact](t, dispatchRequest(t, handler, http.MethodGet, base, nil, "alice"))
-	if len(listed) != 2 || listed[0].Slug != "notes-txt" || listed[1].Slug != "shot-png" || len(listed[1].Versions) != 2 {
-		t.Fatalf("list = %+v, want notes-txt then shot-png with two versions", listed)
 	}
 	if missing := dispatchRequest(t, handler, http.MethodGet, base+"/absent-png", nil, "alice"); missing.Code != http.StatusNotFound {
 		t.Fatalf("an absent slug: status=%d body=%s, want 404", missing.Code, missing.Body.String())
@@ -121,7 +116,7 @@ func TestEveryArtifactSlugReadsBackAsItsArtifact(t *testing.T) {
 }
 
 // Each conversation owns what was sent in it: the same file name sent to two agents is two
-// artifacts, each at version 1, and neither conversation's list, slug or bytes are the other's.
+// artifacts, each at version 1, and neither conversation's slug or bytes are the other's.
 func TestEachAgentsConversationKeepsItsFilesApartFromAnothers(t *testing.T) {
 	handler, _, _ := newTestServer(t, testServerOptions{files: filestest.NewMemory()})
 	const other = "01a1058e-f14f-7684-87eb-3dc885955552"
@@ -141,10 +136,6 @@ func TestEachAgentsConversationKeepsItsFilesApartFromAnothers(t *testing.T) {
 		t.Fatalf("shot.png to two conversations = %+v and %+v, want two artifacts each at version 1", mine, theirs)
 	}
 
-	listed := decodeBody[[]model.Artifact](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/agents/"+other+"/artifacts", nil, "alice"))
-	if len(listed) != 1 || listed[0].ID != theirs.Artifact.ID || listed[0].RefKey != "agent/"+other+"/shot-png" {
-		t.Fatalf("the other conversation's list = %+v, want its own shot-png alone", listed)
-	}
 	if read := dispatchRequest(t, handler, http.MethodGet, "/api/v1/agents/"+other+"/artifacts/only-mine-png", nil, "alice"); read.Code != http.StatusNotFound {
 		t.Fatalf("another conversation's slug: status=%d body=%s, want 404", read.Code, read.Body.String())
 	}
@@ -209,7 +200,7 @@ func TestAnAgentsConversationRefusesADocumentAndAnInvalidSessionID(t *testing.T)
 		if upload.Code != http.StatusBadRequest || responseCode(t, upload) != "INVALID_SESSION_ID" {
 			t.Errorf("upload to %s: status=%d body=%s, want 400 INVALID_SESSION_ID", session, upload.Code, upload.Body.String())
 		}
-		for _, path := range []string{"", "/shot-png", "/shot-png/versions/1"} {
+		for _, path := range []string{"/shot-png", "/shot-png/versions/1"} {
 			read := dispatchRequest(t, handler, http.MethodGet, "/api/v1/agents/"+session+"/artifacts"+path, nil, "alice")
 			if read.Code != http.StatusBadRequest || responseCode(t, read) != "INVALID_SESSION_ID" {
 				t.Errorf("GET %s%s: status=%d body=%s, want 400 INVALID_SESSION_ID", session, path, read.Code, read.Body.String())

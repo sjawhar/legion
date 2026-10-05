@@ -37756,7 +37756,8 @@ function dispatchChildRef(ownerRef, kind, id) {
 
 // ../envoy-client/src/dispatch-pictures.ts
 var PICTURE_UPLOAD_MAX_BYTES = 25 * 1024 * 1024;
-var PICTURE_SHOWN_MAX_BYTES = 5 * 1024 * 1024;
+var PICTURE_SHOWN_MAX_BYTES = 3750000;
+var pictureShownMaxText = `${PICTURE_SHOWN_MAX_BYTES.toLocaleString("en-US")} bytes (5 MB of base64)`;
 var PICTURES_SHOWN_MAX = 8;
 var PICTURES_SHOWN_MAX_BYTES = 10 * 1024 * 1024;
 var PICTURE_TYPES = {
@@ -40480,7 +40481,7 @@ async function readUploadedFile(client, artifact, details, requested) {
   const of = number4 === latest ? "" : ` of ${latest}`;
   const bytesRoute = `GET /api/v1/artifacts/${artifact.id}/versions/${number4} serves its bytes.`;
   const tooLarge = (mime, bytes) => ({
-    text: `${artifact.name} is an uploaded ${mime} picture (version ${number4}${of}, ` + `${bytes.toLocaleString("en-US")} bytes), over the ${PICTURE_SHOWN_MAX_BYTES / 1024 / 1024} MiB ` + `a model is shown, so dispatch_doc_read cannot show it. ${bytesRoute}`,
+    text: `${artifact.name} is an uploaded ${mime} picture (version ${number4}${of}, ` + `${bytes.toLocaleString("en-US")} bytes), over the ${pictureShownMaxText} a model is shown, ` + `so dispatch_doc_read cannot show it. ${bytesRoute}`,
     details
   });
   const stated = artifact.versions.find((version2) => version2.number === number4);
@@ -40551,7 +40552,7 @@ async function readPictures(client, addresses) {
   const lines = ["Pictures:"];
   let shownBytes = 0;
   const overBudget = `past this read's ${PICTURES_SHOWN_MAX_BYTES / 1024 / 1024} MiB of pictures; dispatch_doc_read shows it`;
-  const tooLarge = (name, bytes) => `${name} is ${bytes.toLocaleString("en-US")} bytes, over the ${PICTURE_SHOWN_MAX_BYTES / 1024 / 1024} MiB a model is shown`;
+  const tooLarge = (name, bytes) => `${name} is ${bytes.toLocaleString("en-US")} bytes, over the ${pictureShownMaxText} a model is shown`;
   for (const address of addresses) {
     const skip = (reason) => lines.push(`- not shown: ${address} (${reason})`);
     if (images.length === PICTURES_SHOWN_MAX) {

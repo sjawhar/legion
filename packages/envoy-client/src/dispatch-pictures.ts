@@ -10,9 +10,14 @@
 /** The most bytes one upload carries: Dispatch refuses a larger file. */
 export const PICTURE_UPLOAD_MAX_BYTES = 25 * 1024 * 1024;
 
-/** The largest picture a model is shown; the model providers refuse a larger one, so it is
- *  described instead. */
-export const PICTURE_SHOWN_MAX_BYTES = 5 * 1024 * 1024;
+/** The largest picture a model is shown, as raw bytes. The providers bound an image by its
+ *  base64 encoding (Anthropic refuses one over 5 MB of base64, and the refused block stays in the
+ *  session's history, so every later request fails the same way); 3,750,000 raw bytes encode to
+ *  5,000,000. A larger picture is described instead of shown. */
+export const PICTURE_SHOWN_MAX_BYTES = 3_750_000;
+
+/** How a refusal names that cap: the raw bytes, and the rule they come from. */
+export const pictureShownMaxText = `${PICTURE_SHOWN_MAX_BYTES.toLocaleString("en-US")} bytes (5 MB of base64)`;
 
 /** How many pictures one read or one delivery shows at most. */
 export const PICTURES_SHOWN_MAX = 8;

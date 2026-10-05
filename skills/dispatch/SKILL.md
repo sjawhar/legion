@@ -416,8 +416,8 @@ It returns live or versioned markdown with open marks. A live read ends with a d
 `artifact` reads the issue specification; a project needs `artifact`; and a `dispatch://PROJECT/artifact/<document-ref>`
 ref supplies both, where `document-ref` is the slug (an id or a filename resolves when no document has that slug). A file
 `dispatch_artifact` uploaded reads its text at the latest or named version, or a description when it is not UTF-8 text.
-A picture (PNG, JPEG, GIF or WebP of at most 5 MiB) comes back as an image you see, with its name, type, size and
-version; that includes `dispatch://agent/<session id>/artifact/<slug>@vN`, a picture a person sent you on the Agents page.
+A picture (PNG, JPEG, GIF or WebP under 3,750,000 bytes, 5 MB of base64) comes back as an image you see, with its name,
+type, size and version; that includes `dispatch://agent/<session id>/artifact/<slug>@vN`, one a person sent you on the Agents page.
 
 Editing one is [Editing a document](skill://dispatch/references/document-edits.md): the shape of `dispatch_doc_edit`,
 how to quote the text you mean, one `replace` per paragraph, preconditions against a stale edit, and

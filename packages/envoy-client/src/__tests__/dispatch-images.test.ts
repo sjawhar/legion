@@ -474,7 +474,7 @@ describe("reading pictures", () => {
     ]);
   });
 
-  test("dispatch_doc_read describes a picture over 5 MiB without fetching its bytes", async () => {
+  test("dispatch_doc_read describes a picture over 3,750,000 bytes (5 MB of base64) without fetching its bytes", async () => {
     const server = pictureServer([image("pic-2", "big.png", 5 * MiB + 1)], {});
 
     const result = await run(
@@ -485,7 +485,7 @@ describe("reading pictures", () => {
 
     expect(result.images).toBeUndefined();
     expect(result.text).toBe(
-      "big.png is an uploaded image/png picture (version 1, 5,242,881 bytes), over the 5 MiB a " +
+      "big.png is an uploaded image/png picture (version 1, 5,242,881 bytes), over the 3,750,000 bytes (5 MB of base64) a " +
         "model is shown, so dispatch_doc_read cannot show it. GET /api/v1/artifacts/pic-2/versions/1 serves its bytes."
     );
     expect(server.requests).toEqual([`/api/v1/agents/${session}/artifacts/big-png`]);
@@ -551,15 +551,15 @@ describe("reading pictures", () => {
     expect(server.requests.filter((pathname) => pathname.includes("p0-png"))).toEqual([]);
   });
 
-  test("dispatch_read keeps to 10 MiB of pictures and describes one over 5 MiB, fetching neither", async () => {
+  test("dispatch_read keeps to 10 MiB of pictures and describes one over 3,750,000 bytes, fetching neither", async () => {
     const artifacts = [
-      { ...image("a", "a.png", 4 * MiB), slug: "a-png" },
-      { ...image("b", "b.png", 4 * MiB), slug: "b-png" },
-      { ...image("c", "c.png", 4 * MiB), slug: "c-png" },
+      { ...image("a", "a.png", 3_600_000), slug: "a-png" },
+      { ...image("b", "b.png", 3_600_000), slug: "b-png" },
+      { ...image("c", "c.png", 3_600_000), slug: "c-png" },
       { ...image("d", "d.png", 5 * MiB + 1), slug: "d-png" },
       { ...image("e", "e.svg", 900, "image/svg+xml"), slug: "e-svg" },
     ];
-    const bytes = { a: png(4 * MiB), b: png(4 * MiB), c: png(4 * MiB) };
+    const bytes = { a: png(3_600_000), b: png(3_600_000), c: png(3_600_000) };
     const thread = conversation([["e-svg"], ["d-png"], ["c-png"], ["b-png"], ["a-png"]]);
     const server = pictureServer(artifacts, bytes, (pathname) =>
       pathname === `/api/v1/messages/${conversationId}` ? json(thread) : undefined
@@ -574,10 +574,10 @@ describe("reading pictures", () => {
     expect(result.text).toContain(
       [
         "Pictures:",
-        `- image 1: dispatch://agent/${session}/artifact/a-png@v1 (a.png, image/png, 4,194,304 bytes)`,
-        `- image 2: dispatch://agent/${session}/artifact/b-png@v1 (b.png, image/png, 4,194,304 bytes)`,
+        `- image 1: dispatch://agent/${session}/artifact/a-png@v1 (a.png, image/png, 3,600,000 bytes)`,
+        `- image 2: dispatch://agent/${session}/artifact/b-png@v1 (b.png, image/png, 3,600,000 bytes)`,
         `- not shown: dispatch://agent/${session}/artifact/c-png@v1 (past this read's 10 MiB of pictures; dispatch_doc_read shows it)`,
-        `- not shown: dispatch://agent/${session}/artifact/d-png@v1 (d.png is 5,242,881 bytes, over the 5 MiB a model is shown)`,
+        `- not shown: dispatch://agent/${session}/artifact/d-png@v1 (d.png is 5,242,881 bytes, over the 3,750,000 bytes (5 MB of base64) a model is shown)`,
         `- not shown: dispatch://agent/${session}/artifact/e-svg@v1 (e.svg is image/svg+xml, not a PNG, JPEG, GIF or WebP a model is shown)`,
       ].join("\n")
     );

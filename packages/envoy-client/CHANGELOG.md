@@ -15,7 +15,7 @@
   `dispatch://agent/<session id>/artifact/<slug>@vN` reference included) returns it, and
   `dispatch_read` returns the pictures the messages, asks and comments it shows embed, newest
   first, at most 8 and 10 MiB per read, with a `Pictures:` section naming each and the rest; a
-  picture over 5 MiB or of another type is described. `readPictures`,
+  picture over 3,750,000 bytes (5 MB of base64, the providers' bound) or of another type is described. `readPictures`,
   `@legion/envoy-client/dispatch-pictures` and `RenderInboundResult.pictures` serve the hosts'
   deliveries.
 
