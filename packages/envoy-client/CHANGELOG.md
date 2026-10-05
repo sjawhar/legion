@@ -34,6 +34,11 @@
 
 ### Changed
 
+- `dispatch_issue` with a spec, and `dispatch_request_approval` when it opens, rewords or hands
+  back a request, add a line to their result asking whether a fresh reader checked the spec, naming
+  a read-only subagent (`plan-gap-analyst` on Oh My Pi) and the `dispatch-first` skill's "Design in
+  the spec" (LEGION-577). It never blocks the write; an issue created without a spec, a repeat
+  request that changed nothing, or a document already approved at its version has no such line.
 - `dispatch_issue` and `dispatch_ask` append LEGION-550's write-time feedback to their result,
   from the new `WriteAdvice.suggestions`: up to three related items found by search (`Possibly
   related, found by search:`, each with its status or owner and a link), and, for an ask, any

@@ -50,7 +50,7 @@ found yourself.
 A design conversation with a person, or the implementation plan that follows one, uses
 `skill://dispatch-brainstorming`: read it before your first design question on a change, the spec,
 or that plan. It replaces superpowers' `brainstorming` and `writing-plans` here, even when the user
-invokes one by name. A Legion architect's own issue spec follows `skill://legion-architect`.
+invokes one by name. A Legion architect's own issue spec follows `skill://legion-architect`. Before a spec's first version and each approval request, have a fresh read-only subagent (on Oh My Pi, `task(agent="plan-gap-analyst")`) check it against the code, the human's words and any command output a claim rests on, and resolve what it flags.
 
 ## Load the full skill before you write
 

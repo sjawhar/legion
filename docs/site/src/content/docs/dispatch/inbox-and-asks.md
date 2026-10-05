@@ -37,7 +37,8 @@ A credential request is an agent asking you to let it use a secret, or a machine
 agent sessions as you. Pending ones are listed under **Credential requests**, above the sections,
 and each links to the page where you approve or deny it. They count toward **Needs you** and the
 banner like an ask that waits on you. The Inbox says `Nothing needs you` only when it lists no ask
-and no credential request.
+and no credential request. An open Inbox picks up a new request, or one that is no longer pending,
+within moments on its own - no reload needed.
 
 ### Mine and Everyone
 
