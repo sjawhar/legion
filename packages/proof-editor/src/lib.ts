@@ -243,6 +243,35 @@ function cssEscapeAttrValue(value: string): string {
   return value.replace(/["\\]/g, '\\$&');
 }
 
+/**
+ * Replaces `parserCtx`'s value with a self-healing wrapper (LEGION-566). Milkdown's own `parser`
+ * plugin builds `parserCtx`'s `ParserState` once, at boot, and never rebuilds it
+ * (`@milkdown/core`: `ctx.set(parserCtx, ParserState.create(schema, remark))`); a parse it
+ * refuses - a mark span of a kind this schema has no parser for, the same throw
+ * `markdown-engine.ts`'s headless parser guards against for the display surfaces - leaves that
+ * `ParserState`'s stack open, so every later call through it throws too, for the editor's whole
+ * life. `@milkdown/plugin-clipboard` reads `ctx.get(parserCtx)` fresh on every text/plain paste
+ * (uncaught), so one refused paste broke every later paste in the same document until a reload;
+ * `defaultMarkdownParser` (`proof-sdk-upstream`'s marks plugin) holds whatever function this call
+ * passes it, so it heals the same way. The wrapper itself never changes once installed: it
+ * rebuilds its own closed-over parser from the schema and remark processor the broken one used,
+ * keeps the fresh one for the next call, and rethrows the original error, so the one refused
+ * parse still fails exactly as it did before and only the shared state is what recovers.
+ */
+function installSelfHealingParser(ctx: Ctx): void {
+  const schema = ctx.get(schemaCtx);
+  const remark = ctx.get(remarkCtx);
+  let parse = ctx.get(parserCtx);
+  ctx.set(parserCtx, (markdown) => {
+    try {
+      return parse(markdown);
+    } catch (error) {
+      parse = ParserState.create(schema, remark);
+      throw error;
+    }
+  });
+}
+
 export async function createProofEditor(
   root: HTMLElement,
   opts: CreateProofEditorOptions,
@@ -332,6 +361,7 @@ export async function createProofEditor(
     .create();
 
   editor.action((ctx) => {
+    installSelfHealingParser(ctx);
     setDefaultMarkdownParser(ctx.get(parserCtx));
   });
 
