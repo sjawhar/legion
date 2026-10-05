@@ -209,16 +209,23 @@ func (w *workflowRuntime) bind(url, token string) {
 // before reconcile, whose Dispatch listing covers only what precedes a consumer created now. It
 // connects as nc, the user readBoot chose (natsConnection), after logging it, and logs what the
 // server reports about the connection: every permission it refuses at error, every disconnect at
-// warn and every reconnect at info (natsauth.LogEvents).
+// warn and every reconnect at info (natsauth.LogEvents), under natsauth.ReconnectForever so a
+// reconnect never gives up and turns an outage mid-run into the crash daemon.go's run used to let
+// through (LEGION-580). An unreachable NATS here is the boot's own readiness gate's to retry
+// (daemon.go's awaitReady calls this under its capped backoff, forever): a failed attempt closes
+// whatever it opened and clears it, so a later attempt starts clean rather than leaking the
+// connection this one could not finish setting up.
 func (w *workflowRuntime) connect(ctx context.Context, cfg config.Config, nc natsConnection) error {
 	nc.log(w.log)
-	conn, err := natsauth.Connect(cfg.NatsURLs, nc.seed, natsauth.LogEvents(w.log))
+	conn, err := natsauth.Connect(cfg.NatsURLs, nc.seed, natsauth.LogEvents(w.log), natsauth.ReconnectForever())
 	if err != nil {
 		return fmt.Errorf("connect Envoy NATS: %w", err)
 	}
 	w.conn = conn
 	js, err := jetstream.New(conn)
 	if err != nil {
+		conn.Close()
+		w.conn = nil
 		return fmt.Errorf("open Envoy JetStream: %w", err)
 	}
 	w.log.Info("legion workflow boot stage", "stage", "intake")
@@ -227,6 +234,8 @@ func (w *workflowRuntime) connect(ctx context.Context, cfg config.Config, nc nat
 		ReviewPermission: w.reviewerCanWrite,
 	})
 	if err != nil {
+		conn.Close()
+		w.conn = nil
 		return err
 	}
 	w.bootID = fmt.Sprintf("%d", time.Now().UnixNano())
@@ -306,7 +315,9 @@ func (w *workflowRuntime) recordedIssue(ctx context.Context, key string) (*recor
 // client-side, at no extra request cost), and a key currently out of that window — moved to
 // backlog, or never past triage — while the daemon was down still needs to be held exactly like
 // one still in it, so a replayed event that predates the move it fell out on cannot be admitted
-// before the move's own event ever arrives.
+// before the move's own event ever arrives. An unreachable Dispatch — the listing's 503, the
+// stream's own calls failing the same way — is the boot's readiness gate's to retry (daemon.go's
+// awaitReady calls this under its capped backoff, forever), not a boot refusal.
 func (w *workflowRuntime) reconcile(ctx context.Context) error {
 	issues, err := w.dispatch.ListIssues(ctx, w.dispatchProject, nil)
 	if err != nil {

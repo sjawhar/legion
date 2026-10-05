@@ -241,23 +241,44 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 	if workflow != nil {
 		// The durable consumers exist before the listing is read: a consumer created now delivers
 		// only what is published after it, so everything earlier is the listing's, and what the
-		// listing misses (a move published while it is read) the consumer delivers.
-		if err := workflow.connect(boot, cfg, plan.nats); err != nil {
+		// listing misses (a move published while it is read) the consumer delivers. Both wait out
+		// an unreachable NATS or Dispatch on ctx, not the bounded boot budget just spent on
+		// everything before them, the same as the plugin gate, the App mint and the image probe:
+		// only a misconfiguration (dependencyUnavailable) is still a loud refusal.
+		if err := awaitReady(ctx, "connect Envoy NATS", log, dependencyUnavailable, func(attempt context.Context) error {
+			return workflow.connect(attempt, cfg, plan.nats)
+		}); err != nil {
 			s.stop()
 			listener.Close()
 			workflow.stop()
 			st.Close()
+			if ctx.Err() != nil {
+				log.Info("legion daemon stopped before Envoy NATS was reachable", "project", cfg.Project)
+				return nil
+			}
 			return err
 		}
-		if err := workflow.reconcile(boot); err != nil {
+		if err := awaitReady(ctx, "list Dispatch issues for admission", log, dependencyUnavailable, func(attempt context.Context) error {
+			return workflow.reconcile(attempt)
+		}); err != nil {
 			s.stop()
 			listener.Close()
 			workflow.stop()
 			st.Close()
+			if ctx.Err() != nil {
+				log.Info("legion daemon stopped before Dispatch was reachable", "project", cfg.Project)
+				return nil
+			}
 			return err
 		}
 		log.Info("legion workflow boot stage", "stage", "admission")
 		workflow.attach(s)
+		// Both waited out whatever they waited out on ctx, which the boot budget does not bound:
+		// what follows gets a budget of its own, as the App mint and the image probe's callers
+		// already do.
+		var cancelAfterReady context.CancelFunc
+		boot, cancelAfterReady = context.WithTimeout(context.WithoutCancel(ctx), bootTimeout)
+		defer cancelAfterReady()
 	}
 
 	startedAt := time.Now().UTC()

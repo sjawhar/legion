@@ -8,10 +8,12 @@ import (
 	"log/slog"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nkeys"
 
+	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 	"github.com/sjawhar/legion/daemon/internal/config"
 )
 
@@ -159,6 +161,33 @@ func Connect(urls []string, seed string, options ...nats.Option) (*nats.Conn, er
 		options = append(options, nats.Nkey(public, user.Sign))
 	}
 	return nats.Connect(strings.Join(urls, ","), options...)
+}
+
+// reconnectRetry is ReconnectForever's schedule: one second, doubling, capped at one minute,
+// matching the daemon's boot readiness gate (internal/daemon's readinessRetry) — a dependency
+// outage costs the same wait before the main loop starts and after it.
+var reconnectRetry = bootprobe.Retry{Initial: time.Second, Max: time.Minute}
+
+// ReconnectForever is the connection option that never gives up reconnecting: the default 60
+// attempts (nats.DefaultMaxReconnect, about two minutes at nats.DefaultReconnectWait) end in a
+// permanently closed connection no retry revives — exactly the "workflow intake stopped: durable
+// consumer … stopped unexpectedly" crash daemon.go turns into a boot refusal (LEGION-580). With
+// it, the wait between whole-server-list passes is capped exponential, reconnectRetry's schedule,
+// forever, so a NATS outage mid-run costs degraded minutes rather than a crash the supervisor
+// restarts straight into the same dial.
+func ReconnectForever() nats.Option {
+	return func(o *nats.Options) error {
+		o.MaxReconnect = -1
+		o.CustomReconnectDelayCB = reconnectDelay
+		return nil
+	}
+}
+
+// reconnectDelay is ReconnectForever's CustomReconnectDelayCB. nats.go counts attempts from 1 (how
+// many times the whole server list has now failed), so the first call gets reconnectRetry's own
+// Initial wait rather than one doubling already applied.
+func reconnectDelay(attempts int) time.Duration {
+	return bootprobe.Delay(reconnectRetry, attempts-1)
 }
 
 // permissionRefusal is the operation and subject a server's permissions violation names

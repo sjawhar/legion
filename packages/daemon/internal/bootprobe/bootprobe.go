@@ -68,11 +68,7 @@ func Run(ctx context.Context, name string, retry Retry, log *slog.Logger, attemp
 			}
 			return errors.New(message)
 		}
-		delay := retry.Initial
-		for n := 0; n < i && delay < retry.Max; n++ {
-			delay *= 2
-		}
-		delay = min(delay, retry.Max)
+		delay := Delay(retry, i)
 		label := strconv.Itoa(i + 1)
 		if retry.Attempts > 0 {
 			label += "/" + strconv.Itoa(retry.Attempts)
@@ -87,6 +83,18 @@ func Run(ctx context.Context, name string, retry Retry, log *slog.Logger, attemp
 		case <-wait.C:
 		}
 	}
+}
+
+// Delay is the wait before attempt i+1 under retry: min(Initial·2^i, Max). Run uses it for its
+// own attempts; a caller that retries the same way outside Run — natsauth.ReconnectForever, the
+// daemon's boot readiness gate (internal/daemon's awaitReady) — shares it too, so a dependency
+// outage costs the same wait wherever it is retried.
+func Delay(retry Retry, attempt int) time.Duration {
+	delay := retry.Initial
+	for n := 0; n < attempt && delay < retry.Max; n++ {
+		delay *= 2
+	}
+	return min(delay, retry.Max)
 }
 
 func abandoned(name string, err error) error {

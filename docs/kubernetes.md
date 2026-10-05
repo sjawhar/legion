@@ -466,9 +466,18 @@ at error as `NATS refused the daemon a permission: its NATS user lacks that gran
 handler would only write it to stderr, outside the daemon's log. Every other asynchronous error is
 logged at warn with the `subject` of the subscription it names, a dropped connection at warn as
 `NATS connection lost` with its `error`, the reconnect at info as `NATS connection restored`
-with its `server`, and a terminal close (a fatal server `-ERR`, or reconnects run out) at error,
-once, as `NATS connection closed` with its `error`; the workflow's `workflow intake stopped` error
-then names the same cause as the connection's last error.
+with its `server`, and a terminal close (a fatal server `-ERR`) at error, once, as `NATS
+connection closed` with its `error`. Reconnects never run out: the connection is opened under
+`natsauth.ReconnectForever`, whose capped exponential backoff — one second doubling to one
+minute — replaces nats.go's default 60 attempts (about two minutes) with an unbounded wait, so a
+NATS outage mid-run costs degraded minutes of retrying rather than the connection closing for
+good; only a fatal server `-ERR` (a permission the server itself refuses, never an outage) still
+closes it, and the workflow's `workflow intake stopped` error then names that cause from the
+connection's last error (LEGION-580). The boot's own first connect and its Dispatch admission
+listing wait the same way, under the same capped backoff, forever, instead of the daemon exiting
+into a dial the systemd unit supervising it would otherwise restart straight back into
+(`daemon.go`'s `awaitReady`); only a misconfiguration — a malformed seed, a NATS permission the
+server itself refuses — is still a loud boot refusal.
 
 Rollout order for the server's `legion-daemon` user: the server admits
 `legion-daemon` (its public key applied) with the daemon's grants first; then its seed is stored,
