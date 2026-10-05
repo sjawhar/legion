@@ -27,7 +27,7 @@ published worker image per process under `runtime: kubernetes` (`docs/kubernetes
 ## Tech Stack
 
 - **TypeScript** on **Bun** runtime — the version `.bun-version` pins. Every job installs it through `.github/actions/setup-bun`, and the two Dockerfile `ARG BUN_VERSION` defaults (`packages/envoy/docker/Dockerfile`, `packages/daemon/docker/worker.Dockerfile`) must equal it, since no build passes `--build-arg`. Raising Bun is those three edits together; `.github/scripts/check-bun-version.sh` fails the build until they agree
-- **Go** for the Legion daemon and its `legion` CLI (`packages/daemon`, the module the root `go.work` binds)
+- **Go** for the Legion daemon and its `legion` CLI (`packages/daemon`) and for Envoy (`packages/envoy`), the two modules the root `go.work` binds
 - **Oh My Pi extension** for Legion tools, role delivery, workspace provisioning, and phase workers
 - **Zod 4** at one exact version in every manifest that declares it: `@legion/contracts` hands its schemas to other packages, and two zod 4 copies meeting in one call fail the typecheck or the load. Raising zod edits every manifest together; `.github/scripts/check-zod-version.sh` fails the build until they agree
 - **Biome** for lint/format, **tsc** for type checking, **Bun test** for tests
