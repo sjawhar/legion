@@ -5,6 +5,7 @@ export * from "./dispatch-api";
 export * from "./dispatch-href";
 export * from "./dispatch-snippet";
 export * from "./dispatch-text-references";
+export * from "./dispatch-text-rules";
 export * from "./dispatch-tools";
 export * from "./envelope";
 export * from "./handoff-schema";
