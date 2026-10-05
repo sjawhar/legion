@@ -12,7 +12,12 @@
   session is shown each picture once: a later delivery or `dispatch_read` that embeds one it was
   already shown names it as shown earlier instead of sending it again, because every request
   carries the session's history and Anthropic refuses one over 32 MB; `dispatch_doc_read` shows it
-  again.
+  again. A delivery's pictures count as shown once the host took the message that carries them, so
+  the delivery Dispatch retries after a send that failed shows them again. A session that moves
+  onto a transcript (`/fork`, `/handoff`, `/resume`, a restart) counts the pictures that transcript
+  already shows: those a `dispatch_read` or `dispatch_doc_read` result or a card names as shown,
+  and a person's own turn whose every picture was shown beside it. The session id the extension
+  leaves or shuts down is forgotten.
 - The live agent conversation stream names the `provider/model` that produced each assistant turn
   (LEGION-548), read off the host's own assistant message: the Dispatch live view shows it next to
   the session's title and on the turn itself, and it switches within one turn of `/model`. Absent

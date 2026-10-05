@@ -273,6 +273,37 @@ export interface PicturesRead {
   readonly lines: readonly string[];
   /** The pictures shown, in the order `lines` numbers them. */
   readonly images: readonly ToolImage[];
+  /** The addresses of the pictures shown, in `images` order: what joins the session's
+   *  `shownPictures` once the model has them. */
+  readonly shown: readonly string[];
+}
+
+/** The line naming the picture a result shows as its `index`th image: the one shape
+ *  `shownPictureAddresses` reads back from a transcript. */
+export function shownPictureLine(
+  index: number,
+  address: string,
+  name: string,
+  mimeType: string,
+  bytes: number
+): string {
+  return `- image ${index}: ${address} (${name}, ${mimeType}, ${bytes.toLocaleString("en-US")} bytes)`;
+}
+
+// `shownPictureLine` as it starts a line, its address a versioned Dispatch address.
+const SHOWN_PICTURE_LINE = /^- image [1-9][0-9]*: (dispatch:\/\/[^\s()]+@v[1-9][0-9]*) \(/gm;
+
+/**
+ * The addresses of the pictures `texts` name as shown (`shownPictureLine`), each once, in the order
+ * they first appear. A host reads them from the transcript a session starts on, a fork's or a
+ * resumed one's, to seed `shownPictures`: those are the pictures that history already carries.
+ */
+export function shownPictureAddresses(texts: Iterable<string>): string[] {
+  const addresses = new Set<string>();
+  for (const text of texts) {
+    for (const match of text.matchAll(SHOWN_PICTURE_LINE)) addresses.add(match[1] as string);
+  }
+  return [...addresses];
 }
 
 /** The artifact a picture address names: an issue's, a project's or a conversation's upload, by
@@ -311,7 +342,12 @@ function pictureTarget(address: string): PictureTarget | undefined {
       };
 }
 
-// The addresses of the pictures each host session was shown, by session id.
+/** How many host sessions' pictures one process keeps. It serves one session, a few more while a
+ *  fork or a subagent comes and goes; past this the one used longest ago is forgotten. */
+const SESSIONS_SHOWN_MAX = 64;
+
+// The addresses of the pictures each host session was shown, by session id, the session used
+// most recently last.
 const picturesShown = new Map<string, Set<string>>();
 
 /**
@@ -321,14 +357,29 @@ const picturesShown = new Map<string, Set<string>>();
  * request (Anthropic's limit is 32 MB) and the session can make no progress. dispatch_doc_read
  * shows a picture whatever this holds, so a session whose history no longer has one, after
  * compaction, asks for it there.
+ *
+ * A picture joins this once the model has it: a tool result once it is returned, a delivery once
+ * the host took the message (`readPictures` only reads it). A host that moves a session onto a
+ * transcript seeds it with what that transcript shows (`shownPictureAddresses`), and forgets a
+ * session it stops serving (`forgetShownPictures`); past `SESSIONS_SHOWN_MAX` sessions the one
+ * used longest ago is forgotten. A host that cannot read its transcript starts a resumed session
+ * empty, so that session is shown each picture once more (Claude Code's `--resume`).
  */
 export function shownPictures(sessionId: string): Set<string> {
-  let shown = picturesShown.get(sessionId);
-  if (shown === undefined) {
-    shown = new Set();
-    picturesShown.set(sessionId, shown);
+  const shown = picturesShown.get(sessionId) ?? new Set<string>();
+  // Re-inserted, so the map's first entry is always the session used longest ago.
+  picturesShown.delete(sessionId);
+  picturesShown.set(sessionId, shown);
+  const oldest = picturesShown.keys().next();
+  if (picturesShown.size > SESSIONS_SHOWN_MAX && oldest.done !== true) {
+    picturesShown.delete(oldest.value);
   }
   return shown;
+}
+
+/** Forgets the pictures the host session `sessionId` was shown: the host no longer serves it. */
+export function forgetShownPictures(sessionId: string): void {
+  picturesShown.delete(sessionId);
 }
 
 /**
@@ -339,16 +390,18 @@ export function shownPictures(sessionId: string): Set<string> {
  * Dispatch cannot serve is named with the failure; it never fails the read or the delivery around
  * it. Dispatch's stated size and type rule a picture out before its bytes are fetched. An address
  * in `shown`, the pictures this session was already shown, is named as shown earlier, read
- * nothing and counts toward neither limit; each picture shown here joins `shown`.
+ * nothing and counts toward neither limit. `shown` is only read: the result's `shown` names the
+ * pictures shown here, which the caller adds once the model has them.
  */
 export async function readPictures(
   client: DispatchClient,
   addresses: readonly string[],
-  shown?: Set<string>
+  shown?: ReadonlySet<string>
 ): Promise<PicturesRead> {
-  if (addresses.length === 0) return { lines: [], images: [] };
+  if (addresses.length === 0) return { lines: [], images: [], shown: [] };
   const artifacts = new Map<string, Promise<Artifact>>();
   const images: ToolImage[] = [];
+  const showing: string[] = [];
   const lines = ["Pictures:"];
   let shownBytes = 0;
   const overBudget = `past this read's ${PICTURES_SHOWN_MAX_BYTES / 1024 / 1024} MiB of pictures; dispatch_doc_read shows it`;
@@ -412,13 +465,13 @@ export async function readPictures(
       }
       shownBytes += file.bytes.length;
       images.push(image);
-      shown?.add(address);
+      showing.push(address);
       lines.push(
-        `- image ${images.length}: ${address} (${artifact.name}, ${image.mimeType}, ${file.bytes.length.toLocaleString("en-US")} bytes)`
+        shownPictureLine(images.length, address, artifact.name, image.mimeType, file.bytes.length)
       );
     } catch (error) {
       skip(`unavailable: ${messageFor(error)}`);
     }
   }
-  return { lines, images };
+  return { lines, images, shown: showing };
 }

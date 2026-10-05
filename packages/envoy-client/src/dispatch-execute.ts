@@ -92,6 +92,7 @@ import {
   type PictureTextLimit,
   parseAgentArtifactRef,
   readPictures,
+  shownPictureLine,
   shownPictures,
   textWithPictures,
 } from "./dispatch-picture-tools";
@@ -1700,12 +1701,14 @@ async function blockAsks(
  * bytes of one of its versions (its `/text` route answers a file 400 NOT_DOCUMENT), so this reads
  * the version asked for, or the latest. A picture a model takes (an image artifact whose bytes are
  * a PNG, JPEG, GIF or WebP of at most `PICTURE_SHOWN_MAX_BYTES`) comes back as an image block with
- * its name, type, version and size as the text; a larger picture is described without its bytes
- * being fetched when Dispatch states its size. Any other file comes back as text when it is UTF-8,
- * and is described with the route that serves its bytes when it is not. A file carries no token,
- * anchors or approval, so nothing else is read. A picture is shown whatever `shown` holds, and
- * joins it under its address (`dispatch://<owner>/artifact/<slug>@v<N>`, `owner` an issue key, a
- * project key or `agent/<session id>`), so the session's later reads name it instead of sending it.
+ * its name, type, version and size as the text, then the line naming it by its address
+ * (`dispatch://<owner>/artifact/<slug>@v<N>`, `owner` an issue key, a project key or
+ * `agent/<session id>`) as `dispatch_read` does, which a host reads back from a transcript; a
+ * larger picture is described without its bytes being fetched when Dispatch states its size. Any
+ * other file comes back as text when it is UTF-8, and is described with the route that serves its
+ * bytes when it is not. A file carries no token, anchors or approval, so nothing else is read. A
+ * picture is shown whatever `shown` holds, and joins it under its address, so the session's later
+ * reads name it instead of sending it.
  */
 async function readUploadedFile(
   client: DispatchClient,
@@ -1738,9 +1741,12 @@ async function readUploadedFile(
   if (artifact.kind === "image") {
     const image = toolImage(file.bytes);
     if (image !== undefined) {
-      shown?.add(`dispatch://${owner}/artifact/${artifact.slug}@v${number}`);
+      const address = `dispatch://${owner}/artifact/${artifact.slug}@v${number}`;
+      shown?.add(address);
       return {
-        text: `Picture ${artifact.name}: ${image.mimeType}, version ${number}${of}, ${size}.`,
+        text:
+          `Picture ${artifact.name}: ${image.mimeType}, version ${number}${of}, ${size}.\n` +
+          shownPictureLine(1, address, artifact.name, image.mimeType, file.bytes.length),
         details,
         images: [image],
       };
@@ -2122,7 +2128,7 @@ export async function executeDispatchTool(
     return postWithPictures(text, limit, issueKey, (upload) => client.artifact(issueKey, upload));
   };
   // The pictures this host session was already shown: dispatch_read names them instead of sending
-  // them again, and dispatch_doc_read adds the one it shows.
+  // them again, and it and dispatch_doc_read add the ones their result shows.
   const hostSession = input.sessionId?.trim();
   const shown = hostSession ? shownPictures(hostSession) : undefined;
 
@@ -3039,7 +3045,12 @@ export async function executeDispatchTool(
       // goes before `Referenced by:`, and the images it numbers.
       const picturesOf = (texts: readonly DatedText[]) =>
         readPictures(client, picturesNewestFirst(texts), shown);
-      const shownImages = ({ images }: PicturesRead) => (images.length === 0 ? {} : { images });
+      // The result's images. A tool result is the model's once it is returned, so they join
+      // `shown` here, the last part of the result built, after every read that could fail it.
+      const showImages = (pictures: PicturesRead) => {
+        for (const address of pictures.shown) shown?.add(address);
+        return pictures.images.length === 0 ? {} : { images: pictures.images };
+      };
       if (message !== undefined) {
         const sessionId = input.sessionId?.trim();
         if (!sessionId) throw new Error("host session id is required for dispatch_read({message})");
@@ -3060,7 +3071,7 @@ export async function executeDispatchTool(
             message: thread.message.id,
             ...(issueKey === null ? {} : { issue: issueKey }),
           },
-          ...shownImages(pictures),
+          ...showImages(pictures),
         };
       }
       if (ownerArguments.ref?.kind === "ask") {
@@ -3085,7 +3096,7 @@ export async function executeDispatchTool(
             ref.owner.kind === "project"
               ? { project: ref.owner.project }
               : { issue: ref.owner.issue },
-          ...shownImages(pictures),
+          ...showImages(pictures),
         };
       }
       if (ownerArguments.ref?.kind === "comment") {
@@ -3114,7 +3125,7 @@ export async function executeDispatchTool(
             ref.owner.kind === "project"
               ? { project: ref.owner.project }
               : { issue: comment.comment.issue_key },
-          ...shownImages(pictures),
+          ...showImages(pictures),
         };
       }
       if (ownerArguments.ref?.kind === "message") {
@@ -3137,7 +3148,7 @@ export async function executeDispatchTool(
         return {
           text: messageSummary(messageRead, [...pictures.lines, ...graph]),
           details: { issue: messageRead.message.issue_key },
-          ...shownImages(pictures),
+          ...showImages(pictures),
         };
       }
       if (documentOwner().kind === "project") {
@@ -3166,7 +3177,7 @@ export async function executeDispatchTool(
         return {
           text: [logSummary(read.issue, read.events), ...pictures.lines].join("\n"),
           details: { issue: read.issue.key },
-          ...shownImages(pictures),
+          ...showImages(pictures),
         };
       }
       if (ownerArguments.ref?.kind === "children") {
@@ -3201,7 +3212,7 @@ export async function executeDispatchTool(
           titles
         ),
         details: { issue: read.issue.key },
-        ...shownImages(pictures),
+        ...showImages(pictures),
       };
     }
     default:

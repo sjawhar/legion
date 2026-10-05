@@ -4,6 +4,13 @@ import { mkdtempSync, rmSync, truncateSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { type DispatchToolResult, executeDispatchTool } from "../dispatch-execute";
+import { DispatchClient } from "../dispatch-http";
+import {
+  forgetShownPictures,
+  readPictures,
+  shownPictureAddresses,
+  shownPictures,
+} from "../dispatch-picture-tools";
 import { pictureAddresses } from "../dispatch-pictures";
 import { ToolInputError } from "../tool-input-errors";
 
@@ -484,21 +491,20 @@ function png(size: number): Uint8Array<ArrayBuffer> {
 const base64 = (bytes: Uint8Array) => Buffer.from(bytes).toString("base64");
 
 describe("reading pictures", () => {
-  test("dispatch_doc_read returns a conversation's picture as an image block with its name, type, size and version", async () => {
+  test("dispatch_doc_read returns a conversation's picture as an image block with its name, type, size, version and address", async () => {
     const bytes = png(64);
     const server = pictureServer([image("pic-1", "shot.png", 64)], { "pic-1": bytes });
+    const address = `dispatch://agent/${session}/artifact/shot-png@v1`;
 
-    const result = await run(
-      "dispatch_doc_read",
-      { ref: `dispatch://agent/${session}/artifact/shot-png@v1` },
-      server.fetchImpl
-    );
+    const result = await run("dispatch_doc_read", { ref: address }, server.fetchImpl);
 
     expect(result).toEqual({
-      text: "Picture shot.png: image/png, version 1, 64 bytes.",
+      text: `Picture shot.png: image/png, version 1, 64 bytes.\n- image 1: ${address} (shot.png, image/png, 64 bytes)`,
       details: { session, artifact: "shot-png" },
       images: [{ data: base64(bytes), mimeType: "image/png" }],
     });
+    // The line every read names a shown picture with, so a transcript holding it is read back.
+    expect(shownPictureAddresses([result.text])).toEqual([address]);
     expect(server.requests).toEqual([
       `/api/v1/agents/${session}/artifacts/shot-png`,
       "/api/v1/artifacts/pic-1/versions/1",
@@ -954,6 +960,78 @@ describe("reading pictures", () => {
       expect(again.text).toContain(earlier(address));
       expect(elsewhere.images).toHaveLength(1);
       expect(elsewhere.text).toContain(`- image 1: ${address} (shot.png, image/png, 16 bytes)`);
+    });
+
+    test("readPictures reads the session's pictures without adding to them and returns the ones it shows", async () => {
+      const artifacts = [0, 1, 2].map((n) => image(`pic-${n}`, `p${n}.png`, 16));
+      const server = pictureServer(
+        artifacts,
+        Object.fromEntries(artifacts.map((artifact) => [artifact.id, png(16)]))
+      );
+      const client = new DispatchClient("http://dispatch.test", "secret", server.fetchImpl);
+      const address = (n: number) => `dispatch://agent/${session}/artifact/p${n}-png@v1`;
+      const shown = new Set([address(1)]);
+
+      const read = await readPictures(client, [address(2), address(1), address(0)], shown);
+
+      expect(read.images).toHaveLength(2);
+      expect(read.shown).toEqual([address(2), address(0)]);
+      expect(read.lines).toContain(earlier(address(1)));
+      // The caller adds them once the model has them: a tool result once returned, a delivery
+      // once the host took it.
+      expect([...shown]).toEqual([address(1)]);
+      expect(await readPictures(client, [], shown)).toEqual({ lines: [], images: [], shown: [] });
+    });
+
+    test("a transcript's shown pictures are the addresses its picture lines start with", () => {
+      const address = (n: number) => `dispatch://DSP-41/artifact/p${n}-png@v1`;
+      const texts = [
+        [
+          "Pictures:",
+          `- image 1: ${address(1)} (p1.png, image/png, 16 bytes)`,
+          earlier(address(2)),
+          `- not shown: ${address(3)} (past this read's 8 pictures; dispatch_doc_read shows it)`,
+          `- image 2: ${address(4)} (p4.png, image/png, 16 bytes)`,
+        ].join("\n"),
+        `envoy: card\n\nPictures:\n- image 1: ${address(1)} (p1.png, image/png, 16 bytes)`,
+        // Quoted inside a line, or naming no versioned Dispatch address: not a picture shown.
+        `as the read said, - image 1: ${address(5)} (p5.png)`,
+        "- image 1: https://example.com/p6.png (p6.png, image/png, 16 bytes)",
+        "- image 1: dispatch://DSP-41/artifact/p7-png (p7.png, image/png, 16 bytes)",
+      ];
+
+      expect(shownPictureAddresses(texts)).toEqual([address(1), address(4)]);
+    });
+
+    test("the pictures of 64 sessions are kept, the session used longest ago forgotten first", () => {
+      const address = "dispatch://DSP-41/artifact/kept-png@v1";
+      const sessions = Array.from({ length: 66 }, () => randomUUID());
+      const id = (n: number) => sessions[n] as string;
+      for (let n = 0; n < 64; n++) shownPictures(id(n)).add(address);
+      // A 65th session forgets the first.
+      shownPictures(id(64)).add(address);
+      // The second is used again, so a 66th forgets the third, now the one used longest ago.
+      shownPictures(id(1));
+      shownPictures(id(65)).add(address);
+
+      // Survivors first: asking for a forgotten session starts it again, which forgets another.
+      expect(shownPictures(id(1)).has(address)).toBe(true);
+      expect(shownPictures(id(3)).has(address)).toBe(true);
+      expect(shownPictures(id(64)).has(address)).toBe(true);
+      expect(shownPictures(id(0)).size).toBe(0);
+      expect(shownPictures(id(2)).size).toBe(0);
+    });
+
+    test("a session forgotten is shown its pictures again", () => {
+      const [gone, kept] = [randomUUID(), randomUUID()];
+      const address = "dispatch://DSP-41/artifact/forgotten-png@v1";
+      shownPictures(gone).add(address);
+      shownPictures(kept).add(address);
+
+      forgetShownPictures(gone);
+
+      expect(shownPictures(gone).size).toBe(0);
+      expect(shownPictures(kept).has(address)).toBe(true);
     });
   });
 });

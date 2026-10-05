@@ -38,7 +38,7 @@ import {
   readDispatchFirstContext,
 } from "@legion/envoy-client/dispatch-first";
 import { DispatchClient } from "@legion/envoy-client/dispatch-http";
-import { shownPictures } from "@legion/envoy-client/dispatch-picture-tools";
+import { forgetShownPictures, shownPictures } from "@legion/envoy-client/dispatch-picture-tools";
 import { pictureAddresses } from "@legion/envoy-client/dispatch-pictures";
 import {
   createFollowAnnouncer,
@@ -65,7 +65,7 @@ import { logger } from "@oh-my-pi/pi-utils";
 import { encode } from "@toon-format/toon";
 import { connect, type NatsConnection, StringCodec, type Subscription } from "nats";
 import { AgentStreamPublisher } from "../src/agent-stream";
-import { withDeliveredPictures } from "../src/delivery-pictures";
+import { transcriptPictures, withDeliveredPictures } from "../src/delivery-pictures";
 import { withDispatchFirst } from "../src/dispatch-first";
 import {
   type AcceptedUserTurn,
@@ -513,7 +513,17 @@ export default function envoyExtension(pi: PiApi): void {
     pi.appendEntry(LEGION_MANAGED_ENTRY, { session_id: targetSessionID });
   };
 
+  // The pictures this session has now, which later reads and deliveries name instead of sending
+  // again (`shownPictures`): those a delivery showed once the host took it, and those the
+  // transcript the session moved onto already shows.
+  const markPicturesShown = (addresses: readonly string[]): void => {
+    if (sessionID === "") return;
+    const shown = shownPictures(sessionID);
+    for (const address of addresses) shown.add(address);
+  };
+
   const restoreLocalSessionState = (context: SessionContext): void => {
+    const previousSessionID = sessionID;
     sessionDirectory = context.cwd;
     sessionID = context.sessionManager.getSessionId();
     // Only a top-level instance reaches here — a subagent's session_start and switch events
@@ -546,6 +556,11 @@ export default function envoyExtension(pi: PiApi): void {
     }
     legionManagedTranscript = branch.some(isLegionManagedEntry);
     handledDispatchAttempts = handledAttempts(context.sessionManager.getEntries());
+    // The pictures the transcript the session is now on already shows (a fork's, a handoff's, a
+    // resume's, a restart's) are in the history every request sends, so they count as shown. The
+    // id the session left is no longer served, so what it was shown is forgotten.
+    markPicturesShown(transcriptPictures(branch));
+    if (previousSessionID !== sessionID) forgetShownPictures(previousSessionID);
   };
 
   pi.on("resources_discover", async () => ({ skillPaths: [SKILLS_DIRECTORY] }));
@@ -712,29 +727,29 @@ export default function envoyExtension(pi: PiApi): void {
         } else {
           const turn = await acceptedUserTurn(rendered);
           // The pictures the delivered text embeds reach the model beside it, read with this
-          // session's own Dispatch bearer, each picture once in this session.
+          // session's own Dispatch bearer, each picture once in this session. They count as shown
+          // only once the host took the send: one that throws releases the claim, and the delivery
+          // Dispatch retries must carry them again.
           if (turn === undefined) {
+            const card = await withDeliveredPictures(
+              rendered.content,
+              rendered.pictures ?? [],
+              () => timedDispatchClient(DELIVERY_PICTURES_TIMEOUT_MS),
+              true,
+              shownPictures(sessionID)
+            );
             pi.sendMessage(
-              {
-                customType: "envoy-message",
-                content: await withDeliveredPictures(
-                  rendered.content,
-                  rendered.pictures ?? [],
-                  () => timedDispatchClient(DELIVERY_PICTURES_TIMEOUT_MS),
-                  true,
-                  shownPictures(sessionID)
-                ),
-                display: true,
-              },
+              { customType: "envoy-message", content: card.content, display: true },
               {
                 deliverAs: rendered.delivery?.mode === "aside" ? "aside" : "steer",
                 triggerTurn: true,
               }
             );
+            markPicturesShown(card.shown);
           } else {
             // Sent exactly as Enter, or an aside, at the terminal sends it, the person's pictures
             // beside their text.
-            const content = await withDeliveredPictures(
+            const delivery = await withDeliveredPictures(
               turn.body,
               pictureAddresses(turn.body),
               () => timedDispatchClient(DELIVERY_PICTURES_TIMEOUT_MS),
@@ -744,7 +759,11 @@ export default function envoyExtension(pi: PiApi): void {
             // Noted right before the send, after the pictures load: a run that ends while they
             // load clears every note (endInjectedUserTurns), and this turn must still be found.
             noteInjectedUserTurn(sessionID, turn.body, turn.messageId);
-            pi.sendUserMessage(content, turn.mode === "aside" ? { deliverAs: "aside" } : undefined);
+            pi.sendUserMessage(
+              delivery.content,
+              turn.mode === "aside" ? { deliverAs: "aside" } : undefined
+            );
+            markPicturesShown(delivery.shown);
           }
         }
       } catch (error) {
@@ -1543,6 +1562,8 @@ export default function envoyExtension(pi: PiApi): void {
       awaitingRetry.clear();
       agentStreamControl = undefined;
       agentStreamControlSession = "";
+      // This process serves the session no longer, so what it was shown goes with it.
+      forgetShownPictures(sessionID);
     }
   });
 

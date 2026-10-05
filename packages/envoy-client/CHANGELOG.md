@@ -19,9 +19,16 @@
   A host session is shown each picture once: a later `dispatch_read` names one it was already shown
   as `shown earlier this session; dispatch_doc_read shows it again` instead of sending its bytes,
   counting toward neither per-read cap, because every request carries the session's history and
-  Anthropic refuses one over 32 MB; `dispatch_doc_read` always shows the picture. A
-  `dispatch://agent/<session id>/...` reference reads its session id by `SESSION_ID_PATTERN`.
-  `readPictures` and `shownPictures` (`@legion/envoy-client/dispatch-picture-tools`),
+  Anthropic refuses one over 32 MB; `dispatch_doc_read` always shows the picture. A picture counts
+  as shown once the model has it, a tool result once it is returned and a host's delivery once the
+  host took it, so `readPictures` only reads the session's pictures and returns the ones it shows
+  (`PicturesRead.shown`). `dispatch_doc_read` names its picture on the `- image 1: <address> (...)`
+  line `dispatch_read` uses, and `shownPictureAddresses` reads those lines back from a transcript,
+  so a host counts the pictures a session it moves onto already carries. A host forgets a session
+  it stops serving (`forgetShownPictures`), and past 64 sessions the one used longest ago is
+  forgotten. A `dispatch://agent/<session id>/...` reference reads its session id by
+  `SESSION_ID_PATTERN`. `readPictures`, `shownPictures`, `shownPictureAddresses` and
+  `forgetShownPictures` (`@legion/envoy-client/dispatch-picture-tools`),
   `@legion/envoy-client/dispatch-pictures` and `RenderInboundResult.pictures` serve the hosts'
   deliveries.
 

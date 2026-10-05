@@ -39461,6 +39461,9 @@ function eventTexts(event) {
   }
   return texts.filter((text) => typeof text === "string" && text !== "").map((text) => ({ text, at: event.created_at }));
 }
+function shownPictureLine(index, address, name, mimeType, bytes) {
+  return `- image ${index}: ${address} (${name}, ${mimeType}, ${bytes.toLocaleString("en-US")} bytes)`;
+}
 function pictureTarget(address) {
   const agent = parseAgentArtifactRef(address);
   if (agent !== null) {
@@ -39486,20 +39489,27 @@ function pictureTarget(address) {
     version: ref.version
   };
 }
+var SESSIONS_SHOWN_MAX = 64;
 var picturesShown = new Map;
 function shownPictures(sessionId) {
-  let shown = picturesShown.get(sessionId);
-  if (shown === undefined) {
-    shown = new Set;
-    picturesShown.set(sessionId, shown);
+  const shown = picturesShown.get(sessionId) ?? new Set;
+  picturesShown.delete(sessionId);
+  picturesShown.set(sessionId, shown);
+  const oldest = picturesShown.keys().next();
+  if (picturesShown.size > SESSIONS_SHOWN_MAX && oldest.done !== true) {
+    picturesShown.delete(oldest.value);
   }
   return shown;
 }
+function forgetShownPictures(sessionId) {
+  picturesShown.delete(sessionId);
+}
 async function readPictures(client, addresses, shown) {
   if (addresses.length === 0)
-    return { lines: [], images: [] };
+    return { lines: [], images: [], shown: [] };
   const artifacts = new Map;
   const images = [];
+  const showing = [];
   const lines = ["Pictures:"];
   let shownBytes = 0;
   const overBudget = `past this read's ${PICTURES_SHOWN_MAX_BYTES / 1024 / 1024} MiB of pictures; dispatch_doc_read shows it`;
@@ -39559,13 +39569,13 @@ async function readPictures(client, addresses, shown) {
       }
       shownBytes += file2.bytes.length;
       images.push(image);
-      shown?.add(address);
-      lines.push(`- image ${images.length}: ${address} (${artifact.name}, ${image.mimeType}, ${file2.bytes.length.toLocaleString("en-US")} bytes)`);
+      showing.push(address);
+      lines.push(shownPictureLine(images.length, address, artifact.name, image.mimeType, file2.bytes.length));
     } catch (error48) {
       skip(`unavailable: ${messageFor(error48)}`);
     }
   }
-  return { lines, images };
+  return { lines, images, shown: showing };
 }
 
 // ../envoy-client/src/search-answer.ts
@@ -40643,9 +40653,11 @@ async function readUploadedFile(client, artifact, details, requested, owner, sho
   if (artifact.kind === "image") {
     const image = toolImage(file2.bytes);
     if (image !== undefined) {
-      shown?.add(`dispatch://${owner}/artifact/${artifact.slug}@v${number4}`);
+      const address = `dispatch://${owner}/artifact/${artifact.slug}@v${number4}`;
+      shown?.add(address);
       return {
-        text: `Picture ${artifact.name}: ${image.mimeType}, version ${number4}${of}, ${size}.`,
+        text: `Picture ${artifact.name}: ${image.mimeType}, version ${number4}${of}, ${size}.
+` + shownPictureLine(1, address, artifact.name, image.mimeType, file2.bytes.length),
         details,
         images: [image]
       };
@@ -41527,7 +41539,11 @@ ${trailer.join(`
     case "dispatch_read": {
       const message = optionalString(args, "message");
       const picturesOf = (texts) => readPictures(client, picturesNewestFirst(texts), shown);
-      const shownImages = ({ images }) => images.length === 0 ? {} : { images };
+      const showImages = (pictures3) => {
+        for (const address of pictures3.shown)
+          shown?.add(address);
+        return pictures3.images.length === 0 ? {} : { images: pictures3.images };
+      };
       if (message !== undefined) {
         const sessionId = input.sessionId?.trim();
         if (!sessionId)
@@ -41544,7 +41560,7 @@ ${trailer.join(`
             message: thread.message.id,
             ...issueKey2 === null ? {} : { issue: issueKey2 }
           },
-          ...shownImages(pictures3)
+          ...showImages(pictures3)
         };
       }
       if (ownerArguments.ref?.kind === "ask") {
@@ -41559,7 +41575,7 @@ ${trailer.join(`
         return {
           text: askSummary(askRead, [...pictures3.lines, ...graph2]),
           details: ref.owner.kind === "project" ? { project: ref.owner.project } : { issue: ref.owner.issue },
-          ...shownImages(pictures3)
+          ...showImages(pictures3)
         };
       }
       if (ownerArguments.ref?.kind === "comment") {
@@ -41574,7 +41590,7 @@ ${trailer.join(`
         return {
           text: commentSummary(comment, [...pictures3.lines, ...graph2]),
           details: ref.owner.kind === "project" ? { project: ref.owner.project } : { issue: comment.comment.issue_key },
-          ...shownImages(pictures3)
+          ...showImages(pictures3)
         };
       }
       if (ownerArguments.ref?.kind === "message") {
@@ -41590,7 +41606,7 @@ ${trailer.join(`
         return {
           text: messageSummary(messageRead, [...pictures3.lines, ...graph2]),
           details: { issue: messageRead.message.issue_key },
-          ...shownImages(pictures3)
+          ...showImages(pictures3)
         };
       }
       if (documentOwner().kind === "project") {
@@ -41619,7 +41635,7 @@ ${trailer.join(`
           text: [logSummary(read2.issue, read2.events), ...pictures3.lines].join(`
 `),
           details: { issue: read2.issue.key },
-          ...shownImages(pictures3)
+          ...showImages(pictures3)
         };
       }
       if (ownerArguments.ref?.kind === "children") {
@@ -41644,7 +41660,7 @@ ${trailer.join(`
       return {
         text: issueSummary(read.issue, read.events, references, [...pictures2.lines, ...graph], titles),
         details: { issue: read.issue.key },
-        ...shownImages(pictures2)
+        ...showImages(pictures2)
       };
     }
     default:
@@ -44991,6 +45007,7 @@ async function startChannelSession(options) {
     }
     identity.set(next);
     directSubject = nextSubject;
+    forgetShownPictures(previous);
     forwarder.unfollow([previousSubject]);
     roleTransferFrom ??= previous;
     await register();

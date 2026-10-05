@@ -17,6 +17,7 @@ import {
 } from "@legion/envoy-client/delivery"
 import { resolveDispatchConfig } from "@legion/envoy-client/dispatch-config"
 import { executeDispatchTool } from "@legion/envoy-client/dispatch-execute"
+import { forgetShownPictures } from "@legion/envoy-client/dispatch-picture-tools"
 import { imageBlocks, isPictureType, type ToolImage } from "@legion/envoy-client/dispatch-pictures"
 import {
   createFollowAnnouncer,
@@ -602,6 +603,9 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
     }
     identity.set(next)
     directSubject = nextSubject
+    // `/clear` empties the conversation, so the new id starts with no pictures shown, and what
+    // the old id was shown goes with it.
+    forgetShownPictures(previous)
     // `unfollow` removes the subject from the topic list before it first awaits.
     // What it then awaits is the drain of deliveries already in flight, and the
     // handoff does not wait for it: a stuck notification would otherwise hold
