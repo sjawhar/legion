@@ -200,11 +200,11 @@ func (RequiredChecks) isFact() {}
 
 // PullRequestMergeability is GitHub's lazily computed verdict for whether a pull request's head
 // can be merged into Base without a conflict, decoded from GitHub's nullable `mergeable` field on
-// the same /pulls/{number} read that names the base branch (requiredchecks' pull request read):
-// never decoded from an event, applied as a synthetic fact by the daemon's own read of each open
-// pull request (workflowRuntime.readRequiredChecks), alongside RequiredChecks. Mergeable is
-// record.MergeabilityUnknown while GitHub is still computing it, record.MergeabilityMergeable or
-// record.MergeabilityConflicting once it has.
+// pullRequestMergeability's own /pulls/{number} read, which also names the base branch: never
+// decoded from an event, applied as a synthetic fact by the daemon's own read of each open pull
+// request (workflowRuntime.readRequiredChecks), before requiredFor's own rulesets and workflow
+// reads run. Mergeable is record.MergeabilityUnknown while GitHub is still computing it,
+// record.MergeabilityMergeable or record.MergeabilityConflicting once it has.
 type PullRequestMergeability struct {
 	Repo      string
 	Number    int
