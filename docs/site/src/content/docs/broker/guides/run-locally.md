@@ -103,6 +103,39 @@ A request has two ids: the request id `agent-secrets` prints, and the record id 
 shows and `agent-secrets-devrelay` takes. `agent-secrets request NAME --json` prints both, and
 `agent-secrets-devrelay deny --record <record id>` denies a request.
 
+## Write a secret and see it served
+
+The broker reads the fake secrets file again each time it lists the secrets, describes one or
+reads a value, so an edit to the file is what a write to Secrets Manager is in production. Add a
+secret of `ada@example.com`'s to it, here with `jq`:
+
+```sh
+jq '.secrets += [{"name": "example/agent-secrets/demo-new-token",
+  "kms_key_id": "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab",
+  "tags": {"owner": "ada@example.com", "tier": "agent"}, "value": "demo-new-token-value"}]' \
+  "$DEV_BROKER_DIR/fake-secrets.json" >"$DEV_BROKER_DIR/fake-secrets.json.new"
+mv "$DEV_BROKER_DIR/fake-secrets.json.new" "$DEV_BROKER_DIR/fake-secrets.json"
+```
+
+and ask the broker to reread it, as whoever writes a secret does right after the write
+([Concepts](/legion/broker/concepts/#owner-and-tier-who-may-have-which-secret)). The same call
+answered `{"name":"DEMO_NEW_TOKEN","served":false,"reason":"absent"}` before the edit:
+
+```console
+$ curl -s -X POST "$AGENT_SECRETS_URL/v1/secrets/DEMO_NEW_TOKEN/reread"
+{"name":"DEMO_NEW_TOKEN","served":true}
+```
+
+The registered session gets it at once:
+
+```console
+$ agent-secrets DEMO_NEW_TOKEN -- printenv DEMO_NEW_TOKEN
+demo-new-token-value
+```
+
+Writing the file whole, as the `mv` does, keeps it readable throughout: while it does not parse,
+each of those calls fails, naming the file.
+
 ## Stop
 
 1. In the first shell, press Ctrl-C: the script stops the broker, drops its database, and prints
@@ -116,4 +149,5 @@ shows and `agent-secrets-devrelay` takes. `agent-secrets request NAME --json` pr
 The broker, its database, its policy and every client are the real ones. Two things stand in for
 production: `agent-secrets-devrelay` plays Dispatch's server (it holds the UI token and names the
 approver itself), and the fake secrets file (`BROKER_FAKE_SECRETS_FILE`: each secret's name, key,
-tags and value, as JSON) plays Secrets Manager and KMS.
+tags and value, as JSON) plays Secrets Manager and KMS. The broker reads that file again on every
+call it makes to it, so editing it is how you write a secret here.
