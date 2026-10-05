@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"runtime/debug"
 	"sort"
 	"strings"
@@ -22,12 +23,29 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
 
+// versionPending is the window a version's commit releases its pending authors over. authors is
+// the version's own author list as of the capture, the DB row's value.
 type versionPending struct {
-	generation uint64
-	authors    map[string]model.Actor
-	// creditSeq is the room's creditVersion when this capture read state.pending, the point a
-	// later credit must be at or before to count as already captured here (releaseSettlementCredit).
+	authors map[string]model.Actor
+	// creditSeq is the room's creditSeq when this capture read state.pending, the point a
+	// release (commitVersionLocked) compares an entry's own creditSeq against - not the specific
+	// keys authors names, since a key authors captured can hold a newer, later-credited entry by
+	// the time the release runs, which must survive it (LEGION-513).
 	creditSeq uint64
+	// fullRelease marks an upload's capture (Ledger.WroteVersion), which names no specific
+	// authors to release: an upload's version credits the uploader alone, but its write may have
+	// changed or removed any pending edit visible as of its last read of the room, so its release
+	// takes every pending entry at or before creditSeq rather than a specific author set
+	// (releaseAllPendingLocked). An ordinary version's or settlement's capture leaves this false
+	// and releases only the authors it named (releasePendingLocked), so an edit under a key
+	// outside that capture - one credited between this capture and a later, non-versioning
+	// settlement's own capture of a later creditSeq - is never swept by a release it was never
+	// part of.
+	fullRelease bool
+	// generation is the room's gen as of rememberPendingVersion's own storage of this capture, so
+	// commitVersionLocked can tell a capture a room failure or reload invalidated (state.gen
+	// moved since) from one still good to release.
+	generation uint64
 }
 
 type versionWrite struct {
@@ -36,6 +54,18 @@ type versionWrite struct {
 	authors          []model.Actor
 	capture          *versionPending
 	docUpdateVersion *int64
+}
+
+// mergeInto copies src into *dst, allocating *dst if it is nil and src holds anything; a nil or
+// empty src leaves *dst exactly as it was, nil included.
+func mergeInto[K comparable, V any](dst *map[K]V, src map[K]V) {
+	if len(src) == 0 {
+		return
+	}
+	if *dst == nil {
+		*dst = make(map[K]V, len(src))
+	}
+	maps.Copy(*dst, src)
 }
 
 // recoverMutation, deferred around a document mutation, turns its panic into *err and logs it.
@@ -91,6 +121,10 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 			// it too; keeping the two lines that abandon a fork together is what covers an
 			// operation that recorded the rendering and then failed to version.
 			write.dropRendering()
+			// A stamp this failed operation ran (stampAskBlockIDs, registerStampedAskBlocks)
+			// staged its renamed ids and any carried-forward authors on these before refusal -
+			// a later operation of the same transaction must not inherit them as its own.
+			write.addedAskBlockIDs, write.renamedAskBlockIDs, write.carriedAskAuthors = nil, nil, nil
 		}
 	}()
 	// The tree the operation starts from. One outside the Proof schema - the reader refuses it, or
@@ -187,6 +221,12 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 	recorded = true
 	if contentChanged {
 		s.creditLiveWrite(write, actor)
+		added := addedAskBlockIDs(before, tree)
+		maps.DeleteFunc(added, func(id string, _ struct{}) bool {
+			_, excluded := write.renamedAskBlockIDs[id]
+			return excluded
+		})
+		mergeInto(&write.addedAskBlockIDs, added)
 	}
 	return nil
 }
@@ -254,9 +294,9 @@ func (s *Service) SeedText(ctx context.Context, artifactID, markdown string, act
 	// The seeding actor is the caller's own first version author (written directly by the
 	// caller, never through writeVersionTx), so it must not join `pending` - only the
 	// settlement that indexes the seeded ask blocks needs to know who wrote them. The ledger
-	// records it once the transaction commits (Ledger.credit), so a seed that never commits
+	// records it once the transaction commits (Ledger.creditLocked), so a seed that never commits
 	// leaves the document no state.
-	ledgerFrom(ctx).seeded(artifactID, actor)
+	ledgerFrom(ctx).seeded(artifactID, tree, actor)
 	return canonical, nil
 }
 
@@ -832,7 +872,7 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 			// Block addressing (delete/move by id, whole-text delete) needs every block
 			// identified; a browser-authored block the closer has not yet stamped gets its id
 			// here, and the same ids persist through the update below.
-			pmdoc.EnsureBlockIDs(tree)
+			stamped := stampAskBlockIDs(tree)
 			batch, err := applyOperations(tree, ops)
 			if err != nil {
 				mutationErr = err
@@ -852,7 +892,11 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 				return
 			}
 			mutationErr = recordInsertedText(ctx, artifactID, "", fragment, since, batch.writes, func() error {
-				return pmdoc.Update(transaction, fragment, next)
+				if err := pmdoc.Update(transaction, fragment, next); err != nil {
+					return err
+				}
+				s.registerStampedAskBlocks(ctx, artifactID, stamped)
+				return nil
 			})
 		})
 		if mutationErr != nil {
@@ -896,7 +940,7 @@ func (s *Service) applyOpsUnconditional(ctx context.Context, artifactID string, 
 		if err != nil {
 			return err
 		}
-		pmdoc.EnsureBlockIDs(tree)
+		stamped := stampAskBlockIDs(tree)
 		batch, err := s.applyOperations(ctx, artifactID, tree, ops)
 		if err != nil {
 			return err
@@ -912,7 +956,10 @@ func (s *Service) applyOpsUnconditional(ctx context.Context, artifactID string, 
 		return recordInsertedText(ctx, artifactID, "", fragment, since, batch.writes, func() error {
 			var updateErr error
 			transact(func(transaction *crdt.Transaction) {
-				updateErr = pmdoc.Update(transaction, fragment, next)
+				if updateErr = pmdoc.Update(transaction, fragment, next); updateErr != nil {
+					return
+				}
+				s.registerStampedAskBlocks(ctx, artifactID, stamped)
 			})
 			return updateErr
 		})
@@ -1054,68 +1101,114 @@ func (s *Service) serviceTransact(transact func(func(*crdt.Transaction))) (wrapp
 	return wrapped, release
 }
 
-func (s *Service) recordLastActor(room string, actor model.Actor) {
-	state := s.lockState(room)
-	state.lastActor = new(actor)
-	s.unlockState(room, state)
+// stampAskBlockIDs stamps tree's block ids (EnsureBlockIDs) and returns each ask whose id it
+// renamed, pairing the tree's ask-block order before and after. It runs eagerly, since the stamp
+// must happen before the edit's own operations read tree's ids, but registering the rename into
+// the room's bookkeeping waits until the write that ran it is certain to land
+// (registerStampedAskBlocks): an earlier-looking success here does not mean the edit's later
+// operations, validation or outcome will not still fail before the stamp's rename ever reaches
+// the document.
+func stampAskBlockIDs(tree *pmdoc.Node) []stampedAsk {
+	before := askBlockOrder(tree)
+	pmdoc.EnsureBlockIDs(tree)
+	if len(before) == 0 {
+		return nil
+	}
+	return stampedAskBlocks(before, askBlockOrder(tree))
 }
 
-// captureLiveTextAndAuthors is the tree a version records and whom it credits. joinRead brings
-// the calling transaction's fork up to date with the room, which is where a browser change made
-// while the transaction's write was in flight merges with it - and where a write whose text that
-// merge annihilated is refused rather than versioned as applied (refuseLostWrite, LEGION-269).
+// registerStampedAskBlocks stages, on the write's own liveWrite (joinedLiveWrite - every caller
+// is joined, applyLive refuses otherwise before the mutate closure this always runs inside ever
+// starts), every id the stamp (stampAskBlockIDs) renamed - for applyLive's own before/after diff
+// to exclude, via write.renamedAskBlockIDs - and the author carried forward for each one that has
+// a recorded author to carry (carriedAskAuthors, the same rule a settlement's or the backfill's
+// own suppressed stamp applies), via write.carriedAskAuthors. Neither is written into the room's
+// own bookkeeping here: Ledger.creditLocked registers both only once the write they belong to
+// actually commits, the same point it already registers write.addedAskBlockIDs, since a write
+// refused after this call returns (growth, a later validation failure) must not leave the room
+// holding a trace of it (LEGION-503). Call once stampAskBlockIDs has run.
+func (s *Service) registerStampedAskBlocks(ctx context.Context, room string, stamped []stampedAsk) {
+	if len(stamped) == 0 {
+		return
+	}
+	write := joinedLiveWrite(ctx, room)
+	renamed := make(map[string]struct{}, len(stamped))
+	for _, ask := range stamped {
+		renamed[ask.minted] = struct{}{}
+	}
+	mergeInto(&write.renamedAskBlockIDs, renamed)
+
+	state := s.lockState(room)
+	carried := state.carriedAskAuthors(stamped)
+	s.unlockState(room, state)
+	mergeInto(&write.carriedAskAuthors, carried)
+}
+
+// captureAuthorsLocked is captureAuthors under room's state lock, held for just that call.
+func (s *Service) captureAuthorsLocked(room string, write *liveWrite, actor *model.Actor) (versionPending, []model.Actor) {
+	state := s.lockState(room)
+	defer s.unlockState(room, state)
+	return captureAuthors(state, write, actor)
+}
+
+// captureLiveTextAndAuthors is the tree a version records and whom it credits, its authors taken
+// no later than it reads that tree. A transaction with a write of its own versions its fork, which
+// joinRead brings up to date with the room: that is where a browser change made while the write
+// was in flight merges with it - and where a write whose text that merge annihilated is refused
+// rather than versioned as applied (refuseLostWrite, LEGION-269). Its authors are taken before
+// that read, so each made a change the room held and the fork takes in. Without a write of its
+// own, a version reads the room as of one moment under its document lock (holdLive), after taking
+// its authors under the room's state lock. Either way an author credited after the take, for a
+// change the version holds or not, is numbered past the capture and stays pending for the next
+// version (commitVersionLocked, LEGION-503). The room is taken inside the Apply that loads and
+// as docTree reads it: a room looked up again once that Apply returned can have been evicted in
+// between.
 func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, actor *model.Actor) (*pmdoc.Node, string, versionPending, []model.Actor, error) {
-	fork, err := s.joinRead(ctx, room)
-	if err != nil {
-		return nil, "", versionPending{}, nil, err
-	}
-	if err := s.refuseLostWrite(ctx, room, fork, actor); err != nil {
-		return nil, "", versionPending{}, nil, err
-	}
-	if write := joinedLiveWrite(ctx, room); fork != nil && write != nil && write.tree != nil && write.fork == fork {
-		state := s.lockState(room)
-		capture, authors := captureAuthors(state, write, actor)
-		s.unlockState(room, state)
-		return write.tree, write.markdown, capture, authors, nil
-	}
-	// Each branch below takes the room's state lock only for captureAuthors's own read of it
-	// (state.pending, state.gen, state.creditVersion), then releases it before the tree read that
-	// follows: unlockState's releaseIfUnusedLocked cannot forget the state in that gap, since
-	// either a joined live write is still open here (state.liveWriter is set, so unusedLocked is
-	// false - the fork != nil branches below only run when joinRead found one) or ygo itself still
-	// holds the room for the Apply this read runs inside (releaseIfUnusedLocked's own first check).
-	// The room is taken under its document lock (holdLive) in the fork == nil branch, as a peer or
-	// service write holds that lock while it applies and a direct walk of the live tree takes none:
-	// its replica brought up to date, which the capture holds until it has walked it, or a copy.
 	var tree *pmdoc.Node
 	var capture versionPending
 	var authors []model.Actor
-	if fork != nil {
-		state := s.lockState(room)
-		capture, authors = captureAuthors(state, joinedLiveWrite(ctx, room), actor)
-		s.unlockState(room, state)
+	if write := joinedLiveWrite(ctx, room); write != nil {
+		capture, authors = s.captureAuthorsLocked(room, write, actor)
+		fork, err := s.joinRead(ctx, room)
+		if err != nil {
+			return nil, "", versionPending{}, nil, err
+		}
+		if err := s.refuseLostWrite(ctx, room, fork, actor); err != nil {
+			return nil, "", versionPending{}, nil, err
+		}
+		if s.afterCaptureFork != nil {
+			s.afterCaptureFork(room)
+		}
+		if write.tree != nil && write.fork == fork {
+			return write.tree, write.markdown, capture, authors, nil
+		}
 		if tree, err = treeOf(fork); err != nil {
 			return nil, "", versionPending{}, nil, err
 		}
 	} else {
+		fork, err := s.joinRead(ctx, room)
+		if err != nil {
+			return nil, "", versionPending{}, nil, err
+		}
+		if err := s.refuseLostWrite(ctx, room, fork, actor); err != nil {
+			return nil, "", versionPending{}, nil, err
+		}
 		var readErr error
-		err := s.srv.Apply(ctx, room, func(live *crdt.Doc, _ func(func(*crdt.Transaction))) {
+		err = s.srv.Apply(ctx, room, func(live *crdt.Doc, _ func(func(*crdt.Transaction))) {
 			if s.afterReadWarm != nil {
 				s.afterReadWarm(room)
 			}
-			state := s.lockState(room)
+			capture, authors = s.captureAuthorsLocked(room, nil, actor)
+			if s.afterCaptureAuthorsTake != nil {
+				s.afterCaptureAuthorsTake(room)
+			}
 			var doc *crdt.Doc
 			var release func()
 			doc, release, readErr = s.holdLive(room, live)
 			if readErr != nil {
-				s.unlockState(room, state)
 				return
 			}
 			defer release()
-			func() {
-				defer s.unlockState(room, state)
-				capture, authors = captureAuthors(state, joinedLiveWrite(ctx, room), actor)
-			}()
 			tree, readErr = treeOf(doc)
 		})
 		if readErr != nil {
@@ -1133,11 +1226,15 @@ func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, ac
 }
 
 // captureAuthors is a version's authors: the room's pending actors, those the calling
-// transaction's own write will credit once it commits, and actor.
+// transaction's own write will credit once it commits, and actor. creditSeq is the room's credit
+// sequence as of the capture: the version's commit releases every pending entry credited no
+// later, by sequence (commitVersionLocked), not the specific keys captured here - an author
+// credited again under the same key before the version commits is a different, newer entry the
+// release must not clear (LEGION-503).
 func captureAuthors(state *roomState, write *liveWrite, actor *model.Actor) (versionPending, []model.Actor) {
 	authors := make(map[string]model.Actor, len(state.pending)+1)
-	for key, pendingActor := range state.pending {
-		authors[key] = pendingActor
+	for key, entry := range state.pending {
+		authors[key] = entry.actor
 	}
 	if write != nil {
 		for key, credited := range write.credits {
@@ -1147,12 +1244,13 @@ func captureAuthors(state *roomState, write *liveWrite, actor *model.Actor) (ver
 	if actor != nil {
 		authors[actorKey(*actor)] = *actor
 	}
-	capture := versionPending{generation: state.gen, authors: authors, creditSeq: state.creditVersion}
+	capture := versionPending{authors: authors, creditSeq: state.creditSeq.Load()}
 	return capture, actorSlice(authors)
 }
 
 func (s *Service) rememberPendingVersion(room string, version model.Version, capture versionPending) {
 	state := s.lockState(room)
+	capture.generation = state.gen
 	state.pendingVersions[version.Number] = capture
 	s.unlockState(room, state)
 }
@@ -1242,7 +1340,7 @@ func (s *Service) writeVersionTx(ctx context.Context, tx pgx.Tx, artifactID, mar
 	}
 	// The open approval request follows the document version without leaving its thread or opening
 	// another Inbox row. The request remains waiting on its agent until it is handed back.
-	moved, err := MoveApprovalAsk(ctx, tx, s.events, artifactID, version, s.serverURL)
+	moved, err := MoveApprovalAsk(ctx, tx, s.events, artifactID, version, actor, s.serverURL)
 	if err != nil {
 		return versionWriteResult{}, err
 	}

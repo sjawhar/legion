@@ -128,11 +128,18 @@ func TestCloseAfterSettlementDoesNotRecreatePendingSettlementFromConsumedLastAct
 }
 
 // A pending-settlement row whose pending authors are JSON null, as an append that carried no credit
-// could store, still lets its document load and settle, crediting the row's last actor.
+// could store, still lets its document load and settle without failing on the corrupted row: the
+// ask settles to the author its own introducing write registered (registerAskAuthors), here the
+// seed, which the room tracks independently of the row's pending-credit bookkeeping and takes
+// precedence over the row's last_actor fallback - that fallback is for a block no write
+// registered (LEGION-503). The row's own null-pending shape is what this test exercises: without
+// the jsonb_typeof guard releaseSettlementCredit shares with upsertSettlementCredit, the
+// settlement's own release of this credit would roll back on "cannot delete from scalar".
 func TestADocumentLoadsAPendingSettlementRowWithNullPendingAuthors(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour // the seed's own settlement never runs
 	ctx := context.Background()
+	seed := model.Actor{Kind: "user", ID: "seed"}
 	seedServiceText(t, service, artifactID, ":::ask{#null-pending-ask urgency=\"med\" multiple=\"false\"}\nWho asked?\n:::\n")
 	writer := model.Actor{Kind: "session", ID: "null-pending-writer"}
 	if _, err := service.store.Pool.Exec(ctx, `
@@ -152,8 +159,8 @@ func TestADocumentLoadsAPendingSettlementRowWithNullPendingAuthors(t *testing.T)
 			select author from asks where block_artifact_id = $1 and block_id = 'null-pending-ask'
 		`, artifactID).Scan(&author) == nil
 	})
-	if author != writer {
-		t.Fatalf("the ask settled from a row with null pending authors is %+v's, want %+v's", author, writer)
+	if author != seed {
+		t.Fatalf("the ask settled from a row with null pending authors is %+v's, want %+v's, its seed", author, seed)
 	}
 }
 
@@ -647,8 +654,8 @@ func requireOwedInRoomAndRow(t *testing.T, service *Service, artifactID string, 
 	}
 	room := map[string]model.Actor{}
 	if state := service.lockExistingState(artifactID); state != nil {
-		for _, actor := range state.pending {
-			room[settlementCreditKey(actor)] = actor
+		for _, entry := range state.pending {
+			room[settlementCreditKey(entry.actor)] = entry.actor
 		}
 		service.unlockState(artifactID, state)
 	}
@@ -663,6 +670,70 @@ func requireOwedInRoomAndRow(t *testing.T, service *Service, artifactID string, 
 	wantKeyed := map[string]model.Actor{settlementCreditKey(want): want}
 	if !reflect.DeepEqual(room, wantKeyed) || !reflect.DeepEqual(row, wantKeyed) {
 		t.Fatalf("room owes %v and the row owes %v, want both to owe %v alone", room, row, wantKeyed)
+	}
+}
+
+// Across repeated rounds of a browser's edit and an agent's versioned edit racing each other, the
+// room's pending authors and the durable pending-settlement row agree once every round's updates
+// are durable: a version's release and a browser's credit can land in either order relative to
+// each other, but neither ever leaves the room holding a credit the row does not, or the row
+// holding one the room has already released - the exact window Deep's probe isolates for one
+// round, repeated here under -race to catch a divergence neither the room-pending state nor the
+// durable row alone would surface (LEGION-513).
+func TestConcurrentBrowserAndVersionedWritesAgreeWithTheDurableRowAfterEveryRound(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour // no settlement runs between the edits
+	seedServiceText(t, service, artifactID, "# Decision\n\nContext.\n")
+	httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
+	t.Cleanup(httpServer.Close)
+
+	const rounds = 8
+	for round := range rounds {
+		login := fmt.Sprintf("round%d-browser", round)
+		browser := connectBrowser(t, httpServer.URL, artifactID, login)
+		agent := model.Actor{Kind: "session", ID: fmt.Sprintf("round%d-agent", round)}
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			editAsBrowser(t, service, artifactID, browser, fmt.Sprintf("# Decision\n\nContext.\n\nRound %d browser.\n", round))
+		}()
+		go func() {
+			defer wg.Done()
+			writeThroughLedger(t, service, artifactID, agent, fmt.Sprintf("Round %d agent.\n", round), withSnapshotVersion)
+		}()
+		wg.Wait()
+		browser.Close()
+		waitFor(t, 10*time.Second, "the round's browser to disconnect", func() bool {
+			return connectedBrowsers(service, artifactID) == 0
+		})
+
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		err := service.waitForDurableAppends(ctx, artifactID)
+		cancel()
+		if err != nil {
+			t.Fatalf("round %d: wait for durable appends: %v", round, err)
+		}
+
+		room := map[string]model.Actor{}
+		if state := service.lockExistingState(artifactID); state != nil {
+			for _, entry := range state.pending {
+				room[settlementCreditKey(entry.actor)] = entry.actor
+			}
+			service.unlockState(artifactID, state)
+		}
+		_, credit, err := pendingSettlementCredit(context.Background(), service.store.Pool, artifactID)
+		if err != nil {
+			t.Fatalf("round %d: read the pending-settlement row: %v", round, err)
+		}
+		row := credit.Pending
+		if row == nil {
+			row = map[string]model.Actor{}
+		}
+		if !reflect.DeepEqual(room, row) {
+			t.Fatalf("round %d: room pending = %+v, durable row = %+v, want equal", round, room, row)
+		}
 	}
 }
 

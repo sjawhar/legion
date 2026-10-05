@@ -454,8 +454,13 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	// The room is still loading: ygo hands its document to no peer or caller until this hook
 	// returns (sjawhar/ygo v1.50.1-sami.2, provider/websocket/server.go:1753-1842: loadRoom closes
 	// the room's ready barrier after it), so nothing writes the tree while this walks it.
-	markdown, err := renderDocument(doc)
+	tree, err := treeOf(doc)
+	var markdown string
+	if err == nil {
+		markdown, err = documentMarkdown(tree)
+	}
 	var contentMarkdown *string
+	var askBlocks map[string]struct{}
 	switch {
 	case errors.Is(err, ErrDocOutsideSchema):
 		slog.Warn("dispatch: loaded document outside Proof schema; a replacement from markdown repairs it", "room", room, "error", err)
@@ -463,11 +468,19 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 		return err
 	default:
 		contentMarkdown = &markdown
+		askBlocks = askBlockIDs(tree)
 	}
 	// The room this load publishes holds the state it takes from here until ygo retires it
 	// (releaseIfUnusedLocked).
 	state := s.lockState(room)
 	state.closed = !open
+	// The ask blocks the room loaded with are the baseline its update observer tells new ones by.
+	// They were not introduced by any update the observer sees, so none gains an author here.
+	if askBlocks == nil {
+		state.askBlocks = nil
+	} else {
+		state.observeAskBlocks(askBlocks, nil)
+	}
 	// The document owes a settlement no settlement committed: one a shutdown's budget cut short,
 	// or one a room failure dropped (failRoomLocked). Its timer lived in the process or the room
 	// that is gone, so an open room settles once rather than waiting for an edit to arm one - unless
@@ -494,15 +507,59 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 			s.recordSuppressedCommit(repair.slot, update)
 			return
 		}
-		contentChanged := replica.observe(room, doc)
+		if s.beforeObserveUpdate != nil {
+			s.beforeObserveUpdate(room)
+		}
+		contentChanged := replica.observe(room, doc, func(tree *pmdoc.Node) {
+			s.observeAskBlocksForUpdate(room, tree)
+		})
 		class := documentUpdateClass{contentChanged: contentChanged, durable: true}
 		if contentChanged {
 			class.credit, class.creditVersion = s.creditContentChange(room, origin)
+			if s.afterCreditUpdate != nil {
+				s.afterCreditUpdate(room)
+			}
 		}
 		s.recordUpdateClass(room, update, class)
 		s.scheduleSettle(room)
 	})
 	return nil
+}
+
+// soleConnectedActor is the one actor connected to a room, and whether more than one distinct
+// actor is: an update made while exactly one of them is connected can be pinned on that actor; one
+// made while several are cannot be pinned on any single one of them.
+func soleConnectedActor(connected map[uint64]model.Actor) (sole *model.Actor, ambiguous bool) {
+	for _, actor := range connected {
+		if sole == nil {
+			sole = new(actor)
+		} else if actorKey(actor) != actorKey(*sole) {
+			ambiguous = true
+		}
+	}
+	if ambiguous {
+		sole = nil
+	}
+	return sole, ambiguous
+}
+
+// observeAskBlocksForUpdate records the ask blocks an update left in room's document and
+// attributes each one not already recorded (observeAskBlocks), in the same critical section the
+// update observer renders tree in (renderedReplica.observe): the observer renders each update in
+// the order the replica took them, so the room's record of its ask blocks moves forward only. The
+// tree walk that lists those ask blocks runs only once the cheap markdown comparison inside
+// observe already showed a real change, so the no-op path, the common one, pays for neither.
+func (s *Service) observeAskBlocksForUpdate(room string, tree *pmdoc.Node) {
+	askBlocks := askBlockIDs(tree)
+	state := s.lockState(room)
+	defer s.unlockState(room, state)
+	var author *model.Actor
+	if sole, ambiguous := soleConnectedActor(state.connected); ambiguous {
+		author = new(SettlementActor)
+	} else {
+		author = sole
+	}
+	state.observeAskBlocks(askBlocks, author)
 }
 
 // creditContentChange credits an observed content change to its authors. A service repair (origin
@@ -528,7 +585,7 @@ func (s *Service) creditContentChange(room string, origin any) (settlementCredit
 	}
 	state := s.lockState(room)
 	defer s.unlockState(room, state)
-	state.creditVersion++
+	state.creditSeq.Add(1)
 	pending := make(map[string]model.Actor, len(state.connected))
 	var sole *model.Actor
 	ambiguous := false
@@ -547,7 +604,7 @@ func (s *Service) creditContentChange(room string, origin any) (settlementCredit
 	}
 	state.lastActor = sole
 	state.unsettled = true
-	return settlementCredit{Pending: pending, LastActor: sole}, state.creditVersion
+	return settlementCredit{Pending: pending, LastActor: sole}, state.creditSeq.Load()
 }
 
 // addConnection registers a browser connected to room. It is credited only with browser edits

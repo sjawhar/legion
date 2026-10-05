@@ -168,7 +168,11 @@ func TestAStateReleasedAsALookupFindsItTakesNoWrite(t *testing.T) {
 	defer tx.Rollback(ctx)
 	_, ledger := service.Join(ctx, tx)
 	defer ledger.Discard()
-	ledger.seeded(id, actor)
+	tree, err := pmdoc.ParseForWrite("", nil)
+	if err != nil {
+		t.Fatalf("parse the seed tree: %v", err)
+	}
+	ledger.seeded(id, tree, actor)
 	if err := ledger.Commit(ctx); err != nil {
 		t.Fatalf("commit the seeding transaction: %v", err)
 	}

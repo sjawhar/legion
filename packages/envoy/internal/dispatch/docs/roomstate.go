@@ -28,14 +28,26 @@ import (
 type roomState struct {
 	mu        sync.Mutex
 	connected map[uint64]model.Actor
-	pending   map[string]model.Actor
-	// pendingSeq is the creditVersion at which each pending author was last credited. A version or
-	// settlement takes out only the authors it read - credited at or before the creditVersion it
-	// read them at - so an author credited again since stays owed for that later edit, as the
-	// pending-settlement row keeps the later credit past its release watermark
-	// (upsertSettlementCredit). Every write of `pending` goes through creditPendingLocked and
-	// releasePendingLocked, which keep the two maps alike.
-	pendingSeq map[string]uint64
+	// pending is the room's pending authors, each entry's own credit sequence number (creditSeq)
+	// marking when it was credited, so a version's or a settlement's release can tell an entry
+	// its own capture took from a newer one credited under the same key since (versionPending,
+	// commitVersionLocked, LEGION-503). creditSeq is atomic so forkLive, which every document
+	// write calls, can read it for forkSeq without taking the state lock the far rarer upload
+	// route is its only consumer of.
+	pending   map[string]pendingAuthor
+	creditSeq atomic.Uint64
+	// askBlocks are the ask blocks the room's document held when its update observer last
+	// rendered it, or when it loaded; nil when neither could read it. askAuthors names the author
+	// of the update that introduced each one no settlement has indexed yet (observeAskBlocks).
+	// pendingAskAuthors credits a committed transaction's write or a service mutation with the ask
+	// ids it introduces, registered at the write site before the update can reach any observer
+	// (registerAskAuthors, registerCarriedAskAuthors); observeAskBlocks consumes each entry into
+	// askAuthors the first time it sees the id and never prunes one it has not consumed, so
+	// attribution survives however many updates land before an observer finally renders the id
+	// (LEGION-503).
+	askBlocks         map[string]struct{}
+	askAuthors        map[string]model.Actor
+	pendingAskAuthors map[string]model.Actor
 	// lastActor is the most recent edit's source: the actor of a service mutation, or the sole
 	// connected peer of a browser edit. Version writes clear `pending`, so a settlement that
 	// runs after an edit's own version was committed would otherwise attribute the block asks
@@ -45,10 +57,7 @@ type roomState struct {
 	// the settlement they were recorded for credits them, so the state holds them until one
 	// commits (settleRoomWithin). Closing persists them on the pending-settlement row before
 	// clearing them (SetIssueClosed), so that row carries them through a room release or restart.
-	// creditVersion identifies the snapshot the row has durably received, so a late write cannot
-	// be cleared by an earlier close's flush.
 	unsettled       bool
-	creditVersion   uint64
 	pendingVersions map[int]versionPending
 	updateClasses   []documentUpdateClass
 	pendingUpdates  int
@@ -104,11 +113,13 @@ func (s *Service) lookUpState(room string, create bool) *roomState {
 				return nil
 			}
 			value, _ = s.rooms.LoadOrStore(room, &roomState{
-				connected:       make(map[uint64]model.Actor),
-				pending:         make(map[string]model.Actor),
-				pendingSeq:      make(map[string]uint64),
-				pendingVersions: make(map[int]versionPending),
-				unrecorded:      make(map[pmdoc.MarkRef]time.Time),
+				connected:         make(map[uint64]model.Actor),
+				pending:           make(map[string]pendingAuthor),
+				askBlocks:         make(map[string]struct{}),
+				askAuthors:        make(map[string]model.Actor),
+				pendingAskAuthors: make(map[string]model.Actor),
+				pendingVersions:   make(map[int]versionPending),
+				unrecorded:        make(map[pmdoc.MarkRef]time.Time),
 			})
 		}
 		state := value.(*roomState)
@@ -302,22 +313,46 @@ func (s *Service) canAddConnection() bool {
 	return count < maxRoomConnections
 }
 
-// creditPendingLocked makes actor owed at the room's current creditVersion, which the caller has
+// pendingAuthor is one pending author's credit: the actor, and the room's creditSeq as of the
+// credit that made it pending (creditPendingLocked). A version's or a settlement's release
+// takes out only an entry whose creditSeq is at or before the point it captured (through), so an
+// author credited again under the same key after that point is a different, newer entry the
+// release must not clear (releasePendingLocked, LEGION-503).
+type pendingAuthor struct {
+	actor     model.Actor
+	creditSeq uint64
+}
+
+// creditPendingLocked makes actor owed at the room's current creditSeq, which the caller has
 // already advanced for this credit. The caller holds state.mu.
 func (state *roomState) creditPendingLocked(key string, actor model.Actor) {
-	state.pending[key] = actor
-	state.pendingSeq[key] = state.creditVersion
+	state.pending[key] = pendingAuthor{actor: actor, creditSeq: state.creditSeq.Load()}
 }
 
 // releasePendingLocked takes keys out of the room's pending authors where their credit was given
-// at or before through: the creditVersion a version captured them at, or a settlement read them
-// at. An author credited again after that point owes a later edit the reader did not hold, and
-// stays. The caller holds state.mu.
+// at or before through: the creditSeq a version's or a settlement's own capture named that key at,
+// not merely read the room at. A key this capture did not name - an author credited between this
+// capture and a later, unrelated capture's own creditSeq - is never touched, however its seq
+// compares, since it was never part of what through's capture released (LEGION-513). An entry
+// under a captured key credited again after through is a newer entry the release must not clear,
+// and stays. The caller holds state.mu.
 func (state *roomState) releasePendingLocked(keys map[string]model.Actor, through uint64) {
 	for key := range keys {
-		if seq, owed := state.pendingSeq[key]; owed && seq <= through {
+		if entry, owed := state.pending[key]; owed && entry.creditSeq <= through {
 			delete(state.pending, key)
-			delete(state.pendingSeq, key)
+		}
+	}
+}
+
+// releaseAllPendingLocked takes every pending author out of the room whose credit was given at or
+// before through, whatever key it is under: an upload's capture names no specific authors (its
+// version credits the uploader alone), but its write may have changed or removed any pending edit
+// visible as of its last read of the room, so its release must reach every one of them
+// (versionPending.fullRelease, Ledger.WroteVersion). The caller holds state.mu.
+func (state *roomState) releaseAllPendingLocked(through uint64) {
+	for key, entry := range state.pending {
+		if entry.creditSeq <= through {
+			delete(state.pending, key)
 		}
 	}
 }

@@ -27,7 +27,8 @@ import (
 // project's slots count against none of this daemon's cap, its waiting root is not this daemon's
 // to promote, its stale slot is not this daemon's to release, and its outbox row, due before any of
 // this daemon's, is not this daemon's to run: none of its issues is this daemon's to touch in
-// Dispatch.
+// Dispatch, and none of them ever gets a branch created on GitHub (refs/heads/legion/<key>) by this
+// daemon.
 func TestAnotherProjectsIssuesAreNotThisDaemonsToAdmit(t *testing.T) {
 	cfg := workflowConfig(t, workflowNATS(t))
 	cfg.AdmissionCap = 2
@@ -174,5 +175,14 @@ func TestAnotherProjectsIssuesAreNotThisDaemonsToAdmit(t *testing.T) {
 	}
 	if want := []string{fmt.Sprintf("%s@%d", running, base), fmt.Sprintf("%s@%d", stale, base+1)}; !reflect.DeepEqual(slots, want) {
 		t.Errorf("another project's slots = %v, want %v, untouched", slots, want)
+	}
+	var foreign []branchCreate
+	for _, create := range github.created() {
+		if strings.HasPrefix(create.ref, "refs/heads/legion/"+other+"-") {
+			foreign = append(foreign, create)
+		}
+	}
+	if len(foreign) != 0 {
+		t.Errorf("GitHub saw %d branch create(s) for another project's issues: %+v, want none", len(foreign), foreign)
 	}
 }

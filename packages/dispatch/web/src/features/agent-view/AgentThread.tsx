@@ -2,6 +2,7 @@ import {
   ComposerPrimitive,
   MessagePrimitive,
   type ReasoningMessagePartComponent,
+  type TextMessagePartComponent,
   ThreadPrimitive,
   type ToolCallMessagePartComponent,
   useAuiState,
@@ -25,8 +26,10 @@ import {
   textPrimaryOnCanvas,
   textSecondaryOnCanvas,
 } from "../../theme/classes";
+import { MarkdownBody } from "../refs/MarkdownBody";
 import { ErrorBoundary } from "../shell/ErrorBoundary";
 import { readDispatchMarks } from "./dispatch-marks";
+import { useFrameCoalesced } from "./useFrameCoalesced";
 
 /**
  * The session's conversation, rendered with assistant-ui's primitives (MIT) over Dispatch's own
@@ -78,34 +81,49 @@ const ToolCall: ToolCallMessagePartComponent = ({ toolName, argsText, result, is
   );
 };
 
+/** A text part of a turn the session wrote, rendered as Markdown - re-parsed as the streamed
+ *  text grows, so a heading or a list formats the moment its syntax closes; until then the
+ *  partial syntax reads as the literal characters, at the surrounding text's size. A single
+ *  newline is a line break here (`softBreaks="line"`): a model's prose puts its lines on lines
+ *  rather than hard-wrapping a paragraph, and the document reading (one paragraph, joined by
+ *  spaces) made `First, check the config.\nThen, verify the credentials.` one run-on line. Each
+ *  re-parse reads the whole turn so far (about 3.6 ms per KB), so the text is read once per
+ *  animation frame (`useFrameCoalesced`) rather than once per delta: the publisher sends at most
+ *  ten snapshots a second, and a frame is the most anyone can see anyway. A module constant, as
+ *  `Reasoning` is: a component minted per render would remount every part. */
+const MarkdownText: TextMessagePartComponent = ({ text }) => (
+  <MarkdownBody markdown={useFrameCoalesced(text)} softBreaks="line" />
+);
+
 const Reasoning: ReasoningMessagePartComponent = ({ text }) => (
-  <p className={`my-1 text-xs italic ${textMutedOnCanvas}`} data-testid="agent-reasoning">
-    {text}
-  </p>
+  <div className={`my-1 text-xs italic ${textMutedOnCanvas}`} data-testid="agent-reasoning">
+    <MarkdownBody markdown={useFrameCoalesced(text)} softBreaks="line" />
+  </div>
 );
 
 function UserMessage(): ReactNode {
   // A message someone other than the viewer sent the session, stored or taken as its own turn
   // (AgentRuntimeThread names them): it sits on the session's side of the thread with its author,
-  // never styled as the viewer's own.
+  // never styled as the viewer's own. Both are text a person or an agent wrote (a broadcast, a
+  // targeted message, a reply), so both render as Markdown, as the session's own turns do.
   const author = useAuiState((state) => readDispatchMarks(state.message.metadata.custom).author);
   if (author !== undefined) {
     return (
       <div
-        className={`mt-4 max-w-[80%] rounded-xl border px-3 py-2 text-sm whitespace-pre-wrap ${borderDefault} ${textPrimaryOnCanvas}`}
+        className={`mt-4 max-w-[80%] rounded-xl border px-3 py-2 text-sm ${borderDefault} ${textPrimaryOnCanvas}`}
         data-testid="agent-message-other"
       >
         <p className={`mb-1 text-xs font-semibold ${textSecondaryOnCanvas}`}>{author}</p>
-        <MessagePrimitive.Parts />
+        <MessagePrimitive.Parts components={{ Text: MarkdownText }} />
       </div>
     );
   }
   return (
     <div className="mt-4 flex justify-end" data-testid="agent-message-user">
       <div
-        className={`max-w-[80%] rounded-xl px-3 py-2 text-sm whitespace-pre-wrap ${surfaceMutedBg} ${textPrimaryOnCanvas}`}
+        className={`max-w-[80%] rounded-xl px-3 py-2 text-sm ${surfaceMutedBg} ${textPrimaryOnCanvas}`}
       >
-        <MessagePrimitive.Parts />
+        <MessagePrimitive.Parts components={{ Text: MarkdownText }} />
       </div>
     </div>
   );
@@ -119,20 +137,19 @@ function AssistantMessage(): ReactNode {
   if (fromDispatch) {
     return (
       <div
-        className={`mt-4 rounded-xl border px-3 py-2 text-sm whitespace-pre-wrap ${card} ${borderDefault} ${textPrimaryOnCanvas}`}
+        className={`mt-4 rounded-xl border px-3 py-2 text-sm ${card} ${borderDefault} ${textPrimaryOnCanvas}`}
         data-testid="agent-dispatch-reply"
       >
         <p className={`mb-1 text-xs font-semibold ${textSecondaryOnCanvas}`}>Reply via Dispatch</p>
-        <MessagePrimitive.Parts />
+        <MessagePrimitive.Parts components={{ Text: MarkdownText }} />
       </div>
     );
   }
   return (
-    <div
-      className={`mt-4 text-sm whitespace-pre-wrap ${textPrimaryOnCanvas}`}
-      data-testid="agent-message-assistant"
-    >
-      <MessagePrimitive.Parts components={{ Reasoning, tools: { Fallback: ToolCall } }} />
+    <div className={`mt-4 text-sm ${textPrimaryOnCanvas}`} data-testid="agent-message-assistant">
+      <MessagePrimitive.Parts
+        components={{ Reasoning, Text: MarkdownText, tools: { Fallback: ToolCall } }}
+      />
     </div>
   );
 }
@@ -159,10 +176,12 @@ export function AgentThread({
     <ThreadPrimitive.Root className="flex min-h-0 flex-1 flex-col">
       <ErrorBoundary region="this conversation" resetKey={resetKey}>
         {/* `mt-3`: the scroller clips a turn at its top edge, and without a gap that clipped
-            line sat against the page's note above it and read as overlapping text. */}
+            line sat against the page's note above it and read as overlapping text. `pl-1`
+            matches `pr-1` for the same reason on the left: a turn's numbered list hangs its
+            marker outside the list's content box, and the scroller clipped its first digit. */}
         <ThreadPrimitive.Viewport
           autoScroll
-          className="mt-3 min-h-0 flex-1 overflow-y-auto pr-1"
+          className="mt-3 min-h-0 flex-1 overflow-y-auto pr-1 pl-1"
           data-testid="agent-thread"
         >
           <ThreadPrimitive.Empty>

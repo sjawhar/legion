@@ -56,7 +56,11 @@ func settlementCreditKey(actor model.Actor) string {
 }
 
 func (state *roomState) settlementCreditLocked() settlementCredit {
-	return settlementCreditFor(state.pending, state.lastActor)
+	pending := make(map[string]model.Actor, len(state.pending))
+	for key, entry := range state.pending {
+		pending[key] = entry.actor
+	}
+	return settlementCreditFor(pending, state.lastActor)
 }
 
 func (credit settlementCredit) empty() bool {
@@ -103,15 +107,14 @@ func (s *Service) persistSettlementCredit(ctx context.Context, room string, cred
 
 // settlementCreditPersisted releases authors from an already-closed document only when its state
 // still holds the exact credit snapshot that reached the pending-settlement row. A later write
-// increments creditVersion and keeps its own authors until it persists them.
-func (s *Service) settlementCreditPersisted(room string, creditVersion uint64) {
+// advances creditSeq and keeps its own authors until it persists them.
+func (s *Service) settlementCreditPersisted(room string, creditSeq uint64) {
 	state := s.lockExistingState(room)
 	if state == nil {
 		return
 	}
-	if state.closed && state.creditVersion == creditVersion {
+	if state.closed && state.creditSeq.Load() == creditSeq {
 		clear(state.pending)
-		clear(state.pendingSeq)
 		state.lastActor = nil
 		state.unsettled = false
 	}
