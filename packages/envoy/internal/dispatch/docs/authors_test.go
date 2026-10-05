@@ -709,3 +709,42 @@ func TestARefusedGrowthDoesNotLeaveACarriedAskAuthorPending(t *testing.T) {
 		t.Errorf("pendingAskAuthors holds %d entr(y/ies) after a refused write, want none: the refused edit's own id-repair stamp must not have registered its carried author", leaked)
 	}
 }
+
+// A settlement that writes its version (writeVersionTx, which remembers a pending-authors
+// capture under that version's number, rememberPendingVersion) and then fails before its own
+// commit - settlement runs no Ledger.Commit/Discard of its own to release it, since its ledger's
+// tx is nil and it is its own transaction's commit that releases the capture (commitVersion,
+// called directly once that commit succeeds) - abandons through a path that must discard what it
+// remembered rather than leave it behind (LEGION-503).
+func TestASettlementThatAbandonsAfterWritingItsVersionReleasesWhatItRemembered(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
+	settleCurrentGeneration(t, service, artifactID)
+	editAsPeer(t, service, artifactID, replaceRun("First.", "First, edited."))
+
+	injected := false
+	service.afterSettleVersionWrite = func(room string) error {
+		if room == artifactID && !injected {
+			injected = true
+			return errors.New("injected failure after the version write")
+		}
+		return nil
+	}
+	settleCurrentGeneration(t, service, artifactID)
+	if !injected {
+		t.Fatal("settlement never reached the window after its version write")
+	}
+
+	state := service.room(artifactID)
+	state.mu.Lock()
+	leaked := len(state.pendingVersions)
+	state.mu.Unlock()
+	if leaked != 0 {
+		t.Errorf("pendingVersions holds %d entr(y/ies) after an abandoned settlement, want none: its own version write must not leave a trace behind", leaked)
+	}
+
+	service.afterSettleVersionWrite = nil
+	settleCurrentGeneration(t, service, artifactID)
+	requireLatestVersionMarkdown(t, service, artifactID, "First, edited.\n\nSecond.\n")
+}

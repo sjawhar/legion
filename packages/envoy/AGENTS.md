@@ -454,10 +454,15 @@ capture takes its authors under the state lock and releases it before it takes t
 `holdLive`, which keeps the replica's lock, when it reads the replica, until the capture has walked
 it: an author the update observer credits after that take is numbered past it and stays pending
 for the next version, whether or not the copy holds the edit (`captureLiveTextAndAuthors`,
-LEGION-503). Nothing takes the locks in
-another order: the update observer keeps the rendering it compares the next one with in the
-replica, so it takes the state lock only once it has released the replica; only a Yjs
-transaction's own function holds a document's lock, and it takes neither of the others. So the
+LEGION-503). The update observer's own turn with the replica (`renderedReplica.observe`) is the
+one exception to that order: it holds the replica's lock for its whole call (`lockForUpdate`, a
+blocking acquisition, unlike every other caller's), and its `onChanged` callback
+(`observeAskBlocksForUpdate`) takes the state lock from inside it, nested the other way around
+(LEGION-503). This stays deadlock-free because every other acquisition of the replica's lock only
+tries it (`hold`, under `holdLive`/`readLive`) rather than blocking on it, and always after
+releasing the state lock first, never while holding it - so nothing can be waiting on the state
+lock while the observer waits for anyone else to release the replica's; only a Yjs transaction's
+own function holds a document's lock, and it takes neither of the others. So the
 caller of `readLive` or `holdLive` may hold the room's state lock, and must not hold the live
 document's lock - run inside a Yjs transaction on it - since the catch-up and the copy encode under
 that lock. A read that may load its room (a version's capture, `docTree`, `VerifyMark`'s

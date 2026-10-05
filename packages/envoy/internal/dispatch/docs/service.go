@@ -120,6 +120,12 @@ type Service struct {
 	// its version is rendered from, and before it renders it. Nil outside tests; tests use it to
 	// edit the room while the version renders.
 	afterSettleVersionRead func(room string)
+	// afterSettleVersionWrite runs once a settlement that is writing a version has written it
+	// (writeVersionTx), remembering its pending-authors capture (rememberPendingVersion), and
+	// before the settlement appends that version's own event. Nil outside tests; tests return an
+	// error from it to force the settlement to abandon in the window its own commit has not yet
+	// released that capture in (abandon, discardPendingVersion, LEGION-503).
+	afterSettleVersionWrite func(room string) error
 	// beforeObserveUpdate runs in a room's update observer, which ygo runs once the update's
 	// transaction has released the document, before the observer classifies the update and
 	// credits its authors. Nil outside tests; tests use it to hold an edit the room already holds
@@ -235,6 +241,12 @@ type roomState struct {
 	closed         bool
 	failed         error
 	failedDone     chan struct{}
+}
+
+// creditAuthor makes actor a pending author of the room's next version, for a content change of
+// theirs the room now holds. The caller holds state.mu.
+func (state *roomState) creditAuthor(actor model.Actor) {
+	state.pending[actorKey(actor)] = pendingAuthor{actor: actor, seq: state.creditSeq.Add(1)}
 }
 
 type documentUpdateClass struct {
@@ -1286,11 +1298,20 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 			s.finishSuppressedPersistence(slot, updates[index])
 		}
 	}
+	// rememberedVersion is the version number writeVersionTx remembered a pending-authors capture
+	// under (rememberPendingVersion), once this settlement has written one, so abandon can
+	// discard that capture if nothing commits it: writeVersionTx runs inside the settlement's own
+	// transaction, which this settlement's own tx.Commit, not Ledger.Commit, ends, so nothing else
+	// ever calls discardPendingVersion for it (LEGION-503).
+	var rememberedVersion *model.Version
 	// abandon ends a settlement that cannot finish. What it wrote is in the room and its browsers
 	// and will never reach the store through this settlement, so its slots are discarded and the
 	// room fails, which reloads the document from the store and leaves its settlement to that load.
 	// A settlement that wrote nothing is retried.
 	abandon := func(err error) {
+		if rememberedVersion != nil {
+			s.discardPendingVersion(room, *rememberedVersion)
+		}
 		if len(slots) > 0 {
 			s.discardSuppressedPersistence(room, slots...)
 			s.failRoom(room, err)
@@ -1503,6 +1524,13 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 			return
 		}
 		version = result.version
+		rememberedVersion = &version
+		if s.afterSettleVersionWrite != nil {
+			if err := s.afterSettleVersionWrite(room); err != nil {
+				abandon(err)
+				return
+			}
+		}
 		published = append(published, ledger.events...)
 		// A document body cites nodes whose rows carry a backlink count, so the version event
 		// names what this settle moved exactly as a message or comment write does.

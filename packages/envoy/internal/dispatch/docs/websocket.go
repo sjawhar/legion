@@ -548,7 +548,7 @@ func (s *Service) creditContentChange(room string, origin any) {
 	state.mu.Lock()
 	defer state.mu.Unlock()
 	for _, actor := range state.connected {
-		state.pending[actorKey(actor)] = pendingAuthor{actor: actor, seq: state.creditSeq.Add(1)}
+		state.creditAuthor(actor)
 	}
 	sole, _ := soleConnectedActor(state.connected)
 	state.lastActor = sole
