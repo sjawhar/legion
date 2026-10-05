@@ -244,10 +244,16 @@ func (s *supervisor) wait() {
 // s.ctx alone with no deadline of its own, since the shim it answers waits for hello_ack the same
 // way and supervision.stop cancels s.ctx before the stream closes, releasing every held hello
 // rather than leaving one to time out mid-boot naming a credential problem that does not exist.
+// The token is resolved again once restoration ends, under a fresh bound: restore (s.start, ahead
+// of close(s.restored)) can relaunch a claim that was mid-launch across the restart to a new
+// generation before this hello is ever judged, and the first resolve's generation and Stale flag
+// are only ever as fresh as the moment they were read. Judging the hold by that first result would
+// accept an old generation's shim after its claim has already relaunched, taking the stream slot
+// the new generation's own hello then finds "already bound to a live stream".
 func (s *supervisor) helloResolver(tokens *api.BootTokens, timeout time.Duration) stream.HelloResolver {
 	return func(bootToken string) (claim.Token, uint64, bool, bool) {
 		ctx, cancel := context.WithTimeout(s.ctx, timeout)
-		launch, known, err := tokens.Resolve(ctx, bootToken)
+		_, known, err := tokens.Resolve(ctx, bootToken)
 		cancel()
 		if err != nil {
 			s.log.Error("worker stream: resolve a hello's boot token", "error", err)
@@ -260,6 +266,16 @@ func (s *supervisor) helloResolver(tokens *api.BootTokens, timeout time.Duration
 		case <-s.restored:
 		case <-s.ctx.Done():
 			s.log.Info("worker stream: a hello's boot token was real, but the boot never became ready", "error", s.ctx.Err())
+			return "", 0, false, false
+		}
+		ctx, cancel = context.WithTimeout(s.ctx, timeout)
+		launch, known, err := tokens.Resolve(ctx, bootToken)
+		cancel()
+		if err != nil {
+			s.log.Error("worker stream: resolve a hello's boot token", "error", err)
+			return "", 0, false, false
+		}
+		if !known {
 			return "", 0, false, false
 		}
 		if _, supervised := s.Machine(launch.Claim); !supervised {

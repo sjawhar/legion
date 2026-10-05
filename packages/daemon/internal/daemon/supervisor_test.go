@@ -1,7 +1,9 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -74,6 +76,143 @@ func TestHelloResolverHoldsAKnownTokenUntilRestoredRatherThanRejectingItAfterThe
 	close(sup.restored)
 	select {
 	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("the resolver never returned after restoration closed")
+	}
+}
+
+// A hold on a known token is released, not left dangling, when the boot gives up rather than
+// becoming ready: supervision.stop cancels s.ctx before the worker stream closes
+// (daemon.go's run), so every held hello returns rather than leaking the goroutine and the
+// connection it would otherwise pin forever.
+func TestHelloResolverReleasesAKnownTokenWhenTheBootGivesUpRatherThanBecomingReady(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	sup := newSupervisor(ctx, nil, "PROJECT", "", quietLogger())
+	const resolveTimeout = 20 * time.Millisecond
+	store := fixedClaimStore{found: true, claim: supervise.Claim{Token: claim.Token("a-claim"), Generation: 1}}
+	resolve := sup.helloResolver(api.NewBootTokens(store), resolveTimeout)
+
+	done := make(chan struct{})
+	go func() {
+		resolve("a-real-boot-token")
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		t.Fatal("the resolver returned before the boot gave up; a known token must be held until then")
+	case <-time.After(10 * resolveTimeout):
+		// Comfortably longer than the resolve timeout: still blocked proves the wait is on s.ctx,
+		// not that bound.
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("the resolver never returned after the boot's context was cancelled; a held hello would pin a goroutine and a connection forever")
+	}
+}
+
+// relaunchingStore is a supervise.Store/api.BootTokenStore fake whose current row remembers only
+// its latest PutClaim, exactly as a real claim row does: ClaimByBootTokenHash finds the hash of
+// whichever generation was written last, never an earlier one.
+type relaunchingStore struct {
+	mu          sync.Mutex
+	currentHash []byte
+	current     supervise.Claim
+}
+
+func (s *relaunchingStore) ClaimByBootTokenHash(_ context.Context, hash []byte) (supervise.Claim, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if bytes.Equal(hash, s.currentHash) {
+		return s.current, true, nil
+	}
+	return supervise.Claim{}, false, nil
+}
+
+func (s *relaunchingStore) PutClaim(_ context.Context, c supervise.Claim) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.currentHash = c.BootTokenHash
+	s.current = c
+	return nil
+}
+
+func (s *relaunchingStore) PutDelivery(context.Context, claim.Token, supervise.Delivery) error {
+	return nil
+}
+
+func (s *relaunchingStore) PutClaimAndDelivery(ctx context.Context, c supervise.Claim, _ supervise.Delivery) error {
+	return s.PutClaim(ctx, c)
+}
+
+func (s *relaunchingStore) RetireDelivery(ctx context.Context, c supervise.Claim, _ string) error {
+	return s.PutClaim(ctx, c)
+}
+
+// RED (the race correctness and the oracle both found): a claim stored mid-launch across a
+// restart (generation 1, no locator) relaunches to generation 2 inside s.start — ahead of
+// close(s.restored) — while a shim's hello for generation 1's own token is already held in
+// helloResolver, resolved once before the hold started. Judging that hold by the first resolve
+// alone would accept the old generation after its claim has already moved on, taking the stream
+// slot the real generation-2 shim's own hello then finds "already bound to a live stream". The
+// fix resolves the token again once restoration ends, so the generation-1 hello comes back
+// Stale — the listener's own "stale worker generation" refusal — rather than accepted.
+func TestHelloResolverResolvesAgainAfterRestorationSoARelaunchDuringTheHoldIsNotMissed(t *testing.T) {
+	store := &relaunchingStore{}
+	tokens := api.NewBootTokens(store)
+	recording := tokens.Recording(store)
+
+	const boot1, boot2 = "generation-1-token", "generation-2-token"
+	ctx := context.Background()
+	if err := recording.PutClaim(ctx, supervise.Claim{
+		Token: claim.Token("a-claim"), Generation: 1, BootTokenHash: supervise.HashBootToken(boot1),
+	}); err != nil {
+		t.Fatalf("write generation 1's claim: %v", err)
+	}
+
+	sup := newSupervisor(context.Background(), nil, "PROJECT", "", quietLogger())
+	sup.machines[claim.Token("a-claim")] = &member{}
+	const resolveTimeout = 20 * time.Millisecond
+	resolve := sup.helloResolver(tokens, resolveTimeout)
+
+	type result struct {
+		generation uint64
+		stale      bool
+		known      bool
+	}
+	done := make(chan result, 1)
+	go func() {
+		_, generation, stale, known := resolve(boot1)
+		done <- result{generation, stale, known}
+	}()
+
+	select {
+	case <-done:
+		t.Fatal("the resolver returned before restoration; generation 1's hello must be held")
+	case <-time.After(10 * resolveTimeout):
+	}
+
+	// The relaunch restore (s.start) runs ahead of close(s.restored) in the real boot: generation
+	// 1's claim, still held nowhere (no locator persisted), relaunches to generation 2 with its
+	// own fresh token before the held hello is ever judged.
+	if err := recording.PutClaim(ctx, supervise.Claim{
+		Token: claim.Token("a-claim"), Generation: 2, BootTokenHash: supervise.HashBootToken(boot2),
+	}); err != nil {
+		t.Fatalf("write generation 2's claim: %v", err)
+	}
+	close(sup.restored)
+
+	select {
+	case got := <-done:
+		if !got.known {
+			t.Fatalf("resolve(%q) known = false, want true: the token was real when first resolved", boot1)
+		}
+		if !got.stale {
+			t.Fatalf("resolve(%q) stale = false, want true: the claim relaunched to generation 2 during the hold, so generation 1's own hello must come back stale, not accepted", boot1)
+		}
 	case <-time.After(time.Second):
 		t.Fatal("the resolver never returned after restoration closed")
 	}

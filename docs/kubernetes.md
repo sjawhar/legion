@@ -456,9 +456,11 @@ jj in a managed repository's checkout, `mise where`, a key command) runs without
 `NATS_NKEY_SEED` and `NATS_DAEMON_NKEY_SEED`, so a seed passed by value never reaches a repository's
 tooling; still, prefer the file forms (`nats_nkey_seed_file`, `nats_daemon_nkey_seed_file`, or the
 `_FILE` variables), since a value stays in the daemon's own process environment. At boot the
-daemon logs, once, `legion daemon connects to NATS` with `user=U…` (the public key, never the
-seed), `paneUser=true|false`, and `seed=daemon|pane|none`. `legion start --check-config` reads it
-as boot does and adds
+daemon logs `legion daemon connects to NATS` with `user=U…` (the public key, never the seed),
+`paneUser=true|false`, and `seed=daemon|pane|none` before every connect attempt — once before the
+first, and again before each retry while NATS stays unreachable at boot (the readiness gate
+below), always with the same `user` and `seed`. `legion start --check-config` reads it as boot does
+and adds
 `nats-daemon-nkey-user=U…` to its OK line. Every permission the server refuses the daemon's
 connection, a subscription or a publish (its JetStream consumers' API requests included), is logged
 at error as `NATS refused the daemon a permission: its NATS user lacks that grant` with its
@@ -475,23 +477,44 @@ authorization error twice in a row, still closes the connection (nats.go's own t
 rules); a permission the server refuses (`NATS refused the daemon a permission`, above) leaves it
 open. At boot an unreachable NATS or Dispatch delays the boot instead of exiting, retried one
 second doubling to one minute, forever, logged at warn as `boot probe failed transiently;
-waiting to run it again` with its `probe` (naming which), `attempt`, `retryIn` and `detail`. A
-misconfiguration still exits loud at once — a malformed seed, a permission or authorization
-violation the server itself refuses, a genuine Dispatch application refusal, a NATS call that
-does not answer within its own bound, or an EOF during the NATS handshake, none of which this
-wait can reliably tell apart from an outage. A Dispatch 401 or 403 waits rather than exits: an
-operator who rotates the Dispatch token mid-outage sees the daemon keep retrying with the token
-it already read, rather than crash-looping — picking up the corrected value still needs a
-restart, as it always did. Reconciling admission's own Postgres transaction is judged by neither
-predicate and still exits at once on any failure: a design choice, not an inability to tell a
-Postgres failure apart from the other two (LEGION-580).
+waiting to run it again` with its `probe` (naming which), `attempt`, `retryIn` and `detail`.
+
+A misconfiguration still exits loud at once: a malformed seed (refused in `prepare`, before any
+dial) and a NATS permission or authorization violation the server itself refuses are never
+ambiguous — the server said no. Two shapes exit only once the gate's own 30-second bound on that
+attempt runs out, since this wait genuinely cannot tell them from an outage: a NATS call that does
+not answer within that bound, and a failure in reconciling admission's own Postgres transaction
+(judged by neither predicate on purpose, a design choice — Postgres is a third dependency neither
+NATS's nor Dispatch's predicate was built to judge, not a case of this same ambiguity). An EOF
+during the NATS handshake is the same: ambiguous, not evidenced, refused by default.
+
+Several shapes an operator should know wait forever rather than exit, none of them obviously
+"network trouble" on their face: a Dispatch 401 or 403 (a bad or revoked bearer token); a NATS or
+Dispatch host that does not resolve (a typo in `nats_urls` or `dispatch_url`'s hostname); a
+non-Dispatch 4xx, such as an HTML 404 from a `dispatch_url` whose path is wrong but whose host
+answers; and a TLS failure that is not certificate verification (a protocol mismatch, a stalled
+handshake). Each of these waits silently, logging only the generic `boot probe failed transiently`
+line above, with no line naming a credential or a configuration problem.
+
+A Dispatch 401 or 403 is the one with an operational consequence worth naming plainly: at main,
+the daemon exited and the supervisor's restart re-read `dispatch_token_file` fresh, so a human
+fixing the file on disk was picked up by the very next crash-restart. Now the daemon does not
+crash, so it does not restart, so it does not re-read the file: an operator who corrects a rotated
+or revoked Dispatch token must restart the daemon by hand for the fix to take effect — waiting no
+longer self-heals a credential fix the crash loop used to pick up for free.
+
+With several `nats_urls`, or a clustered NATS whose advertised addresses this daemon cannot reach,
+an authorization violation on one server can surface as a dial failure or `nats.ErrNoServers` from
+a different server nats.go tries next, so the boot waits and the logged `detail` may never name
+the authorization error at all (LEGION-580).
 
 Rollout order for the server's `legion-daemon` user: the server admits
 `legion-daemon` (its public key applied) with the daemon's grants first; then its seed is stored,
-every daemon gets it and restarts, and each boot line must name the daemon's own user: the
-daemon's `legion daemon connects to NATS` line reads `paneUser=false` (#1494). Only then is the
-`legion-pane` seed written. A clean boot line proves the user, not every grant: the check before
-the pane seed is written also has each daemon consume a Dispatch and a GitHub event with no error
+every daemon gets it and restarts, and its `legion daemon connects to NATS` line must name the
+daemon's own user: `paneUser=false` (#1494) on the first such line and on every repeat, if NATS
+was briefly unreachable at boot. Only then is the `legion-pane` seed written. A clean boot line
+proves the user, not every grant: the check before the pane seed is written also has each daemon
+consume a Dispatch and a GitHub event with no error
 line, and searches each daemon's log for `NATS refused the daemon`, since a missing grant on the
 exceptions lane (`notifications.envoy.exceptions.notifications.role.>`) still boots healthy and
 consumes both events, and that error line is its only sign. `legion-pane` is never granted the
