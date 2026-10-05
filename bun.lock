@@ -37,7 +37,7 @@
     },
     "packages/claude-envoy": {
       "name": "@sjawhar/claude-envoy",
-      "version": "0.6.2",
+      "version": "0.6.4",
       "dependencies": {
         "@legion/contracts": "workspace:*",
         "@legion/envoy-client": "workspace:*",
@@ -131,7 +131,7 @@
     },
     "packages/envoy-plugin": {
       "name": "@sjawhar/opencode-legion-envoy",
-      "version": "4.0.2",
+      "version": "5.6.3",
       "dependencies": {
         "@opencode-ai/plugin": "~1.14.46",
       },
@@ -161,7 +161,7 @@
     },
     "packages/pi-envoy": {
       "name": "@sjawhar/pi-legion-envoy",
-      "version": "6.0.3",
+      "version": "7.6.3",
       "devDependencies": {
         "@biomejs/biome": "^2.3.14",
         "@legion/contracts": "workspace:*",
