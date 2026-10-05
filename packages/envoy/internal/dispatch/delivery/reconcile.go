@@ -12,9 +12,9 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"time"
+
+	"golang.org/x/sync/errgroup"
 
 	"github.com/sjawhar/envoy/internal/dispatch/duty"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
@@ -230,52 +230,44 @@ const reconcilePartialConcurrency = 8
 // completing fetch failed, or by this reconcile's own merged-PR search, which never carries the
 // completing fields) with a single-pull-request fetch, up to reconcilePartialConcurrency at once.
 // Each partial row is a distinct (repo, number) key, so concurrent upserts never race each other.
-// Follows redeliver.Sweeper's own rate-limit pattern (sweep.go's stoppedAtLimit/rateLimited): the
-// first completion that answers a *githubapp.RateLimitError stops this loop from starting any
-// further completion (an in-flight one still finishes -- there is no cheap way to cancel a
-// request already sent, and GitHub's own rate-limit window does not care whether it finishes),
-// and the pass is reported failed so last_reconcile_at does not advance past rows this pass never
-// got to -- the next pass's overlap re-reads them rather than losing them for good. Any other
-// per-row error (a 404, a deleted repository, a malformed answer) is still only logged and
-// skipped: it is that one row's own problem, not a reason to stop the rest of the batch.
+// errgroup.WithContext(ctx)'s own semantics give the redeliver.Sweeper rate-limit pattern
+// directly: SetLimit bounds concurrency, and the first goroutine to return a non-nil error (here,
+// specifically a *githubapp.RateLimitError) cancels groupCtx -- the loop checks it before
+// starting each further completion, so nothing new launches once that happens, while every
+// completion already in flight (there is no cheap way to cancel a request already sent, and
+// GitHub's own rate-limit window does not care whether it finishes) runs to completion.
+// Wait returns that first error, so the pass is reported failed and last_reconcile_at does not
+// advance past rows this pass never got to -- the next pass's overlap re-reads them rather than
+// losing them for good. Any other per-row error (a 404, a deleted repository, a malformed answer)
+// is still only logged and skipped inside completePartialPullRequest, never returned: it is that
+// one row's own problem, not a reason to stop the rest of the batch.
 func (r *Reconcile) reconcilePartialPullRequests(ctx context.Context) error {
 	partials, err := ListPartialPullRequests(ctx, r.pool)
 	if err != nil {
 		return fmt.Errorf("list partial pull requests: %w", err)
 	}
-	semaphore := make(chan struct{}, reconcilePartialConcurrency)
-	var wg sync.WaitGroup
-	var stopped atomic.Bool
-	var limitedOnce sync.Once
-	var limitedErr error
-	started := 0
+	group, groupCtx := errgroup.WithContext(ctx)
+	group.SetLimit(reconcilePartialConcurrency)
 	for _, pr := range partials {
-		if stopped.Load() {
+		if groupCtx.Err() != nil {
 			break
 		}
-		started++
-		wg.Add(1)
-		semaphore <- struct{}{}
-		go func(pr DeliveryPullRequest) {
-			defer wg.Done()
-			defer func() { <-semaphore }()
-			if limited := r.completePartialPullRequest(ctx, pr); limited != nil {
-				stopped.Store(true)
-				limitedOnce.Do(func() { limitedErr = limited })
-			}
-		}(pr)
+		group.Go(func() error {
+			return r.completePartialPullRequest(groupCtx, pr)
+		})
 	}
-	wg.Wait()
-	if limitedErr != nil {
-		return fmt.Errorf("rate-limited completing partial pull requests, %d of %d started before stopping: %w", started, len(partials), limitedErr)
+	if err := group.Wait(); err != nil {
+		return fmt.Errorf("rate-limited completing partial pull requests: %w", err)
 	}
 	return nil
 }
 
-// completePartialPullRequest is reconcilePartialPullRequests' per-row body, split out so it can
-// run as its own goroutine. Returns non-nil only for a *githubapp.RateLimitError (the signal that
-// stops the batch); every other error is logged and swallowed here, since one row's own failure
-// must not stop any other row's completion already in flight.
+// completePartialPullRequest is reconcilePartialPullRequests' per-row body, run as its own
+// errgroup goroutine. Returns non-nil only for a *githubapp.RateLimitError from FetchPullRequest
+// (the signal that stops the batch, per reconcilePartialPullRequests' own doc comment); every
+// other error is logged and swallowed here, since one row's own failure must not stop any other
+// row's completion already in flight. A permanent 404/410 (ErrPullRequestNotFound) marks the row
+// unfetchable instead of logging a transient-looking warning every pass forever.
 func (r *Reconcile) completePartialPullRequest(ctx context.Context, pr DeliveryPullRequest) error {
 	owner, repo, err := splitRepo(pr.Repo)
 	if err != nil {
@@ -289,28 +281,19 @@ func (r *Reconcile) completePartialPullRequest(ctx context.Context, pr DeliveryP
 			slog.Warn("dispatch delivery: rate-limited completing partial pull request", "repo", pr.Repo, "number", pr.Number, "error", err)
 			return limited
 		}
+		if errors.Is(err, ErrPullRequestNotFound) {
+			if markErr := MarkPullRequestUnfetchable(ctx, r.pool, pr.Repo, pr.Number, err.Error()); markErr != nil {
+				slog.Warn("dispatch delivery: mark pull request unfetchable", "repo", pr.Repo, "number", pr.Number, "error", markErr)
+			}
+			return nil
+		}
 		slog.Warn("dispatch delivery: complete partial pull request", "repo", pr.Repo, "number", pr.Number, "error", err)
 		return nil
 	}
 	if fetched.MergedAt == nil {
 		return nil
 	}
-	sessions, err := fetchSessionTrailers(ctx, r.github, owner, repo, pr.Number)
-	if err != nil {
-		var limited *githubapp.RateLimitError
-		if errors.As(err, &limited) {
-			slog.Warn("dispatch delivery: rate-limited fetching session trailers", "repo", pr.Repo, "number", pr.Number, "error", err)
-			return limited
-		}
-		slog.Warn("dispatch delivery: fetch session trailers", "repo", pr.Repo, "number", pr.Number, "error", err)
-	}
-	issueKey := resolveIssueKey(ctx, r.pool, fetched.Title, fetched.Body)
-	if err := UpsertPullRequest(ctx, r.pool, DeliveryPullRequest{
-		Repo: pr.Repo, Number: pr.Number, Title: fetched.Title, URL: fetched.URL, Author: fetched.Author,
-		CreatedAt: &fetched.CreatedAt, MergedAt: fetched.MergedAt, FirstCommitAt: fetched.FirstCommitAt,
-		MergeCommitSHA: fetched.MergeCommitSHA, Additions: fetched.Additions, Deletions: fetched.Deletions,
-		Rework: IsRework(fetched.Title), IssueKey: issueKey, Sessions: sessions, Partial: false,
-	}); err != nil {
+	if err := completePullRequest(ctx, r.pool, r.github, owner, repo, pr.Repo, pr.Number, fetched); err != nil {
 		slog.Warn("dispatch delivery: upsert completed pull request", "repo", pr.Repo, "number", pr.Number, "error", err)
 	}
 	return nil

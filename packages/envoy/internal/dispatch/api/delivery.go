@@ -186,12 +186,19 @@ func (s *server) getDeliveryTimeline(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	unfetchableCount, err := delivery.CountUnfetchablePullRequests(ctx, pool)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+
 	WriteJSON(w, http.StatusOK, delivery.DeliveryTimelineResponse{
 		Window: delivery.DeliveryWindowView{From: from, To: to},
 		PRs:    prViews,
 		Runs:   runViews,
 		Freshness: delivery.DeliveryFreshnessView{
 			LastEventAt: settings.LastEventAt, LastReconcileAt: settings.LastReconcileAt, LastError: settings.LastError,
+			UnfetchableCount: unfetchableCount,
 		},
 	})
 }

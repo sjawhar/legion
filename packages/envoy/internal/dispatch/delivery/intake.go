@@ -299,13 +299,22 @@ func (in *Intake) handlePullRequestEnvelope(ctx context.Context, settings Delive
 		return DeletePullRequest(ctx, in.pool, repoFull, number)
 	}
 
-	sessions, err := fetchSessionTrailers(ctx, in.github, owner, repo, number)
+	return completePullRequest(ctx, in.pool, in.github, owner, repo, repoFull, number, fetched)
+}
+
+// completePullRequest finishes writing one merged pull request's complete row -- session
+// trailers, issue-key resolution, and the upsert -- once its GitHub facts (FetchPullRequest's
+// answer) are in hand. The shared tail both intake's live handlePullRequestEnvelope and
+// reconcile's completePartialPullRequest call, so "a live webhook completes a PR" and "reconcile
+// completes a partial row" write through the exact same last steps, never two copies that can
+// drift from each other.
+func completePullRequest(ctx context.Context, pool *store.Pool, github *githubapp.Client, owner, repo, repoFull string, number int, fetched FetchedPullRequest) error {
+	sessions, err := fetchSessionTrailers(ctx, github, owner, repo, number)
 	if err != nil {
 		slog.Warn("dispatch delivery: fetch session trailers", "repo", repoFull, "number", number, "error", err)
 	}
-	issueKey := resolveIssueKey(ctx, in.pool, fetched.Title, fetched.Body)
-
-	return UpsertPullRequest(ctx, in.pool, DeliveryPullRequest{
+	issueKey := resolveIssueKey(ctx, pool, fetched.Title, fetched.Body)
+	return UpsertPullRequest(ctx, pool, DeliveryPullRequest{
 		Repo: repoFull, Number: number, Title: fetched.Title, URL: fetched.URL, Author: fetched.Author,
 		CreatedAt: &fetched.CreatedAt, MergedAt: fetched.MergedAt, FirstCommitAt: fetched.FirstCommitAt,
 		MergeCommitSHA: fetched.MergeCommitSHA, Additions: fetched.Additions, Deletions: fetched.Deletions,

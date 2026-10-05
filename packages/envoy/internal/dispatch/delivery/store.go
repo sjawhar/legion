@@ -136,7 +136,7 @@ func RecordReconcileError(ctx context.Context, pool *store.Pool, message string)
 
 // PullRequestColumns is the delivery_pull_requests select list ScanPullRequest reads, in scan
 // order.
-const PullRequestColumns = `repo, number, title, url, author, created_at, merged_at, first_commit_at, merge_commit_sha, additions, deletions, rework, issue_key, sessions, partial, updated_at`
+const PullRequestColumns = `repo, number, title, url, author, created_at, merged_at, first_commit_at, merge_commit_sha, additions, deletions, rework, issue_key, sessions, partial, unfetchable_at, unfetchable_reason, updated_at`
 
 // ScanPullRequest decodes one PullRequestColumns row into a DeliveryPullRequest.
 func ScanPullRequest(row pgx.Row) (DeliveryPullRequest, error) {
@@ -144,7 +144,7 @@ func ScanPullRequest(row pgx.Row) (DeliveryPullRequest, error) {
 	if err := row.Scan(
 		&pr.Repo, &pr.Number, &pr.Title, &pr.URL, &pr.Author, &pr.CreatedAt, &pr.MergedAt,
 		&pr.FirstCommitAt, &pr.MergeCommitSHA, &pr.Additions, &pr.Deletions, &pr.Rework,
-		&pr.IssueKey, &pr.Sessions, &pr.Partial, &pr.UpdatedAt,
+		&pr.IssueKey, &pr.Sessions, &pr.Partial, &pr.UnfetchableAt, &pr.UnfetchableReason, &pr.UpdatedAt,
 	); err != nil {
 		return DeliveryPullRequest{}, err
 	}
@@ -164,7 +164,9 @@ func ScanPullRequest(row pgx.Row) (DeliveryPullRequest, error) {
 // pass overwrites that same row with the complete fields and Partial false, which the WHERE clause
 // always allows (excluded.partial = false never regresses anything). The one shared upsert both
 // paths call, so "the reconcile catches a missed event" and "the completing fetch completes a
-// partial row" are the same code path, never two implementations that can drift.
+// partial row" are the same code path, never two implementations that can drift. Every call also
+// clears unfetchable_at/unfetchable_reason to null: a successful write is itself the "it is
+// fetchable after all" signal, whichever path (a webhook retry, a later reconcile pass) made it.
 func UpsertPullRequest(ctx context.Context, pool *store.Pool, pr DeliveryPullRequest) error {
 	sessions := pr.Sessions
 	if sessions == nil {
@@ -193,6 +195,8 @@ func UpsertPullRequest(ctx context.Context, pool *store.Pool, pr DeliveryPullReq
 			issue_key = excluded.issue_key,
 			sessions = excluded.sessions,
 			partial = excluded.partial,
+			unfetchable_at = null,
+			unfetchable_reason = null,
 			updated_at = now()
 		where delivery_pull_requests.partial or not excluded.partial
 	`,
@@ -213,6 +217,28 @@ func DeletePullRequest(ctx context.Context, pool *store.Pool, repo string, numbe
 	return err
 }
 
+// MarkPullRequestUnfetchable records that repo#number's completing fetch answered a permanent
+// 404 or 410 (FetchPullRequest's ErrPullRequestNotFound): the pull request or its repository no
+// longer exists, or no longer reaches this token. ListPartialPullRequests stops returning the row
+// until a later successful UpsertPullRequest clears it (a webhook retry, or a reconcile pass once
+// the repository or PR becomes reachable again).
+func MarkPullRequestUnfetchable(ctx context.Context, pool *store.Pool, repo string, number int, reason string) error {
+	_, err := pool.Exec(ctx, `
+		update delivery_pull_requests
+		set unfetchable_at = now(), unfetchable_reason = $3
+		where repo = $1 and number = $2
+	`, repo, number, reason)
+	return err
+}
+
+// CountUnfetchablePullRequests counts every row MarkPullRequestUnfetchable has marked, for the
+// freshness row's "N pull requests can no longer be fetched from GitHub".
+func CountUnfetchablePullRequests(ctx context.Context, pool *store.Pool) (int, error) {
+	var count int
+	err := pool.QueryRow(ctx, `select count(*) from delivery_pull_requests where unfetchable_at is not null`).Scan(&count)
+	return count, err
+}
+
 // ListPartialPullRequests lists every partial=true row, oldest merge first: the reconcile's cheap
 // way to find rows a completing fetch never finished, using delivery_pull_requests_partial
 // instead of a full table scan. Not scoped to one repository: a population pull request (and so a
@@ -222,7 +248,7 @@ func ListPartialPullRequests(ctx context.Context, pool *store.Pool) ([]DeliveryP
 	rows, err := pool.Query(ctx, `
 		select `+PullRequestColumns+`
 		from delivery_pull_requests
-		where partial
+		where partial and unfetchable_at is null
 		order by repo, number
 	`)
 	if err != nil {

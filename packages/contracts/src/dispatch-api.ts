@@ -2453,5 +2453,9 @@ export interface DeliveryTimelineResponse {
     /** The most recent reconcile pass's failure (a missing permission, a rate limit, any other
      *  error), named rather than a generic staleness indicator; null once a pass has succeeded. */
     readonly last_error: string | null;
+    /** Population pull requests whose completing fetch answered a permanent 404/410 from GitHub
+     *  (the pull request or its repository no longer exists, or no longer reaches the App) --
+     *  never retried again automatically. */
+    readonly unfetchable_count: number;
   };
 }

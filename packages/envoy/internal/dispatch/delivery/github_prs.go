@@ -3,13 +3,21 @@ package delivery
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
 )
+
+// ErrPullRequestNotFound is a 404 or 410 from GitHub fetching a specific pull request: the pull
+// request or its repository no longer exists, or no longer reaches this token. A permanent
+// condition, unlike every other FetchPullRequest failure (a transient 5xx, a rate limit) --
+// reconcile.completePartialPullRequest marks the row unfetchable rather than retrying it forever.
+var ErrPullRequestNotFound = errors.New("pull request not found or gone")
 
 // FetchedPullRequest is one pull request's GitHub facts: everything RawPullRequest needs for the
 // population/task-label decision, plus everything model.DeliveryPullRequest needs once a PR is
@@ -91,6 +99,9 @@ func FetchPullRequest(ctx context.Context, client *githubapp.Client, owner, repo
 	body, status, header, err := client.Read(ctx, token, pullPath)
 	if err != nil {
 		return FetchedPullRequest{}, fmt.Errorf("fetch %s/%s PR #%d: %w", owner, repo, number, err)
+	}
+	if status == http.StatusNotFound || status == http.StatusGone {
+		return FetchedPullRequest{}, fmt.Errorf("fetch %s/%s PR #%d: %w (status %d)", owner, repo, number, ErrPullRequestNotFound, status)
 	}
 	if err := githubapp.CheckResponse(status, header, body); err != nil {
 		return FetchedPullRequest{}, fmt.Errorf("fetch %s/%s PR #%d: %w", owner, repo, number, err)
@@ -256,28 +267,56 @@ func SearchMergedPullRequests(ctx context.Context, client *githubapp.Client, own
 }
 
 // SearchMergedPullRequestsAcrossInstallation finds every pull request merged in [since, until)
-// authored by any of authors, across every repository the GitHub App installation covering
-// tokenOwner/tokenRepo can see -- LEGION-294's population rule spans "any repository", not just
-// the one configured deploy repository. An App-authenticated search query with no repo:/org:
-// qualifier is NOT scoped to the installation's repositories for public-repository content --
-// live-verified against a real installation token, it returns results from unrelated public
-// repositories the installation does not cover -- so this lists the installation's own
-// repositories (GET /installation/repositories) and builds one repo: qualifier per repository
-// instead of relying on the token alone. tokenOwner/tokenRepo (typically the configured deploy
-// repository) is used only to resolve which installation to ask.
+// authored by any of authors, across every repository every installation of the App can see.
+// LEGION-294's population rule (an author allowlist: sjawhar, sjawhar-agent, legion-implementer)
+// names no installation or org boundary -- a merge under a second installation is still
+// population, and Rev measured roughly a quarter of the real population living there -- so this
+// does not stop at the one installation covering tokenOwner/tokenRepo (typically the configured
+// deploy repository); it lists every installation (ListInstallations) and searches each one's own
+// repositories (ListInstallationRepositoriesByID), since an App-authenticated search query with
+// no repo:/org: qualifier is NOT scoped to any installation's repositories for public-repository
+// content -- live-verified against a real installation token, it returns results from unrelated
+// public repositories no installation of this App covers. Results are merged and de-duplicated by
+// URL: GitHub does not let one repository belong to two installations of the same App, so a
+// duplicate should never occur, but de-duplicating costs nothing and removes any doubt.
+// tokenOwner/tokenRepo is accepted for its error messages' context and so a caller with exactly
+// one installation configured needs nothing else; it does not otherwise narrow the search.
 func SearchMergedPullRequestsAcrossInstallation(ctx context.Context, client *githubapp.Client, tokenOwner, tokenRepo string, authors []string, since, until time.Time) ([]FetchedPullRequest, error) {
-	token, err := client.RepositoryToken(ctx, tokenOwner, tokenRepo)
+	installations, err := client.ListInstallations(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("mint installation token for %s/%s merged-PR search: %w", tokenOwner, tokenRepo, err)
+		return nil, fmt.Errorf("list installations for %s/%s merged-PR search: %w", tokenOwner, tokenRepo, err)
 	}
-	repos, err := client.ListInstallationRepositories(ctx, tokenOwner, tokenRepo)
-	if err != nil {
-		return nil, fmt.Errorf("list installation repositories for %s/%s merged-PR search: %w", tokenOwner, tokenRepo, err)
+	if len(installations) == 0 {
+		return nil, fmt.Errorf("list installations for %s/%s merged-PR search: the App has no installations", tokenOwner, tokenRepo)
 	}
-	if len(repos) == 0 {
-		return nil, fmt.Errorf("list installation repositories for %s/%s merged-PR search: installation covers no repositories", tokenOwner, tokenRepo)
+
+	seen := map[string]bool{}
+	var results []FetchedPullRequest
+	for _, installation := range installations {
+		repos, err := client.ListInstallationRepositoriesByID(ctx, installation.ID)
+		if err != nil {
+			return nil, fmt.Errorf("list repositories for installation %d (%s) merged-PR search: %w", installation.ID, installation.AccountLogin, err)
+		}
+		if len(repos) == 0 {
+			continue
+		}
+		token, err := client.Token(ctx, installation.ID)
+		if err != nil {
+			return nil, fmt.Errorf("mint token for installation %d (%s) merged-PR search: %w", installation.ID, installation.AccountLogin, err)
+		}
+		found, err := searchMergedPullRequests(ctx, client, token, repos, authors, since, until)
+		if err != nil {
+			return nil, fmt.Errorf("search installation %d (%s): %w", installation.ID, installation.AccountLogin, err)
+		}
+		for _, pr := range found {
+			if seen[pr.URL] {
+				continue
+			}
+			seen[pr.URL] = true
+			results = append(results, pr)
+		}
 	}
-	return searchMergedPullRequests(ctx, client, token, repos, authors, since, until)
+	return results, nil
 }
 
 // searchMergedPullRequests pages a GraphQL search query over [since, until) through fetchWindowed

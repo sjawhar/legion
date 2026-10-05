@@ -18,7 +18,7 @@ export const RECONCILE_INTERVAL_SECONDS = 5 * 60;
 const STALE_INTERVALS = 3;
 
 export interface FreshnessRow {
-  name: "reconcile" | "event";
+  name: "reconcile" | "event" | "unfetchable";
   red: boolean;
   /** "Reconcile 12 s ago", or "never checked"/"never received". */
   text: string;
@@ -95,9 +95,27 @@ function eventRow(lastEventAt: string | null, nowMs: number): FreshnessRow {
   };
 }
 
+/** S3: a population pull request whose completing fetch answered a permanent 404/410 from GitHub
+ *  (the pull request or its repository no longer exists, or no longer reaches the App) is marked
+ *  unfetchable rather than retried every pass forever -- surfaced here, by count, distinctly from
+ *  reconcile's own health, since it is a per-pull-request condition, not a pass-wide failure. */
+function unfetchableRow(count: number): FreshnessRow {
+  return {
+    name: "unfetchable",
+    red: true,
+    text: `${count} pull request${count === 1 ? "" : "s"} can no longer be fetched from GitHub`,
+    detail:
+      "A 404 or 410 from GitHub for this pull request (or its repository) -- see the drill-down for which one and why.",
+  };
+}
+
 export function sourceFreshness(freshness: DeliveryFreshness, nowMs: number): FreshnessRow[] {
-  return [
+  const rows = [
     reconcileRow(freshness.last_reconcile_at, freshness.last_error, nowMs),
     eventRow(freshness.last_event_at, nowMs),
   ];
+  if (freshness.unfetchable_count > 0) {
+    rows.push(unfetchableRow(freshness.unfetchable_count));
+  }
+  return rows;
 }

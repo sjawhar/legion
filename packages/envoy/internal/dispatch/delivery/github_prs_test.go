@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +17,13 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
 )
+
+// fakeInstallation is one entry fakeGitHub's installations field lists, for a test that exercises
+// more than the single default installation (ListInstallations/ListInstallationRepositoriesByID).
+type fakeInstallation struct {
+	id    int64
+	repos []string
+}
 
 // fakeGitHub is a minimal httptest stand-in for the GitHub App and REST APIs this package's
 // fetchers call: installation resolution, token minting, and whatever read handlers a test
@@ -31,6 +39,11 @@ type fakeGitHub struct {
 	tokenMints        int
 	permissions       map[string]string
 	installationRepos []string
+	// installations, when set, lists every installation GET /app/installations answers and backs
+	// GET /installation/repositories' per-installation routing; nil means the single-installation
+	// default (installID/installationRepos) everywhere, matching every test before this field
+	// existed.
+	installations []fakeInstallation
 }
 
 func newFakeGitHub(t *testing.T) *fakeGitHub {
@@ -49,24 +62,63 @@ func newFakeGitHub(t *testing.T) *fakeGitHub {
 			f.t.Errorf("encode installation: %v", err)
 		}
 	})
-	f.mux.HandleFunc("GET /installation/repositories", func(w http.ResponseWriter, r *http.Request) {
-		repos := make([]map[string]any, len(f.installationRepos))
-		for i, name := range f.installationRepos {
-			repos[i] = map[string]any{"full_name": name}
+	f.mux.HandleFunc("GET /app/installations", func(w http.ResponseWriter, r *http.Request) {
+		installations := f.installations
+		if installations == nil {
+			installations = []fakeInstallation{{id: f.installID, repos: f.installationRepos}}
 		}
-		mustEncode(t, w, map[string]any{"total_count": len(repos), "repositories": repos})
+		payload := make([]map[string]any, len(installations))
+		for i, inst := range installations {
+			payload[i] = map[string]any{
+				"id": inst.id, "app_slug": "delivery-test",
+				"account":     map[string]any{"login": fmt.Sprintf("account-%d", inst.id)},
+				"permissions": f.permissions,
+			}
+		}
+		mustEncode(t, w, payload)
+	})
+	f.mux.HandleFunc("GET /installation/repositories", func(w http.ResponseWriter, r *http.Request) {
+		repos := f.installationRepos
+		if f.installations != nil {
+			id := installationIDFromToken(r)
+			for _, inst := range f.installations {
+				if inst.id == id {
+					repos = inst.repos
+					break
+				}
+			}
+		}
+		payload := make([]map[string]any, len(repos))
+		for i, name := range repos {
+			payload[i] = map[string]any{"full_name": name}
+		}
+		mustEncode(t, w, map[string]any{"total_count": len(payload), "repositories": payload})
 	})
 	f.mux.HandleFunc("POST /app/installations/{id}/access_tokens", func(w http.ResponseWriter, r *http.Request) {
 		f.tokenMints++
 		w.WriteHeader(http.StatusCreated)
 		if err := json.NewEncoder(w).Encode(map[string]any{
-			"token":      fmt.Sprintf("ghs_fake_%d", f.tokenMints),
+			"token":      fmt.Sprintf("ghs_fake_%s_%d", r.PathValue("id"), f.tokenMints),
 			"expires_at": time.Now().Add(time.Hour).Format(time.RFC3339),
 		}); err != nil {
 			f.t.Errorf("encode token: %v", err)
 		}
 	})
 	return f
+}
+
+// installationIDFromtoken recovers the installation id POST /app/installations/{id}/access_tokens
+// encoded into its own fake token ("ghs_fake_<id>_<mint counter>"), so GET
+// /installation/repositories can answer the asking installation's own repos rather than always
+// the default one.
+func installationIDFromToken(r *http.Request) int64 {
+	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	parts := strings.Split(token, "_")
+	if len(parts) < 3 {
+		return 0
+	}
+	id, _ := strconv.ParseInt(parts[2], 10, 64)
+	return id
 }
 
 func (f *fakeGitHub) handle(pattern string, handler http.HandlerFunc) {
@@ -323,6 +375,45 @@ func TestSearchMergedPullRequestsAcrossInstallationScopesToInstallationRepos(t *
 	want := "repo:acme/widgets repo:acme/other-widgets is:pr is:merged merged:2024-01-01T00:00:00Z..2024-01-02T00:00:00Z author:alice author:bob"
 	if gotQuery != want {
 		t.Fatalf("search query = %q, want %q", gotQuery, want)
+	}
+}
+
+// TestSearchMergedPullRequestsAcrossInstallationSearchesEveryInstallation proves S4: the search
+// covers every installation the App has, not only the one tokenOwner/tokenRepo resolves to --
+// LEGION-294's population rule names no installation boundary, and Rev measured roughly a quarter
+// of the real population living outside the deploy repository's own installation.
+func TestSearchMergedPullRequestsAcrossInstallationSearchesEveryInstallation(t *testing.T) {
+	fake := newFakeGitHub(t)
+	fake.installations = []fakeInstallation{
+		{id: 1, repos: []string{"acme/widgets"}},
+		{id: 2, repos: []string{"other-org/other-repo"}},
+	}
+	var queriesSeen []string
+	fake.handle("POST /graphql", func(w http.ResponseWriter, r *http.Request) {
+		_, variables := decodeGraphQLRequest(t, r)
+		q, _ := variables["q"].(string)
+		queriesSeen = append(queriesSeen, q)
+		if strings.Contains(q, "other-org/other-repo") {
+			node := searchNodeJSON(99, "feat: from the second installation", "alice", "2024-01-01T00:00:00Z", "2024-01-01T01:00:00Z")
+			mustEncode(t, w, searchResponseJSON(1, []map[string]any{node}, false, ""))
+			return
+		}
+		mustEncode(t, w, searchResponseJSON(0, nil, false, ""))
+	})
+	client := fake.newTestClient()
+
+	since := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	until := time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC)
+	results, err := SearchMergedPullRequestsAcrossInstallation(t.Context(), client, "acme", "widgets", []string{"alice"}, since, until)
+	if err != nil {
+		t.Fatalf("SearchMergedPullRequestsAcrossInstallation: %v", err)
+	}
+
+	if len(queriesSeen) != 2 {
+		t.Fatalf("queries made = %d, want 2 (one per installation), got %v", len(queriesSeen), queriesSeen)
+	}
+	if len(results) != 1 || results[0].Number != 99 {
+		t.Fatalf("results = %+v, want exactly the PR found under the second installation", results)
 	}
 }
 

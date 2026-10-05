@@ -87,11 +87,15 @@ const defaultBase = "https://api.github.com"
 const tokenExpirySlack = 5 * time.Minute
 
 // Installation is the slice of GitHub's repository-installation response
-// dispatch inspects.
+// dispatch inspects. AccountLogin (the installation's own account -- a user or an org) is set
+// only by ListInstallations (GET /app/installations), which is account-less in its own answer
+// shape; RepositoryToken's own installation()/DeliveryPermissions() lookups never set it, since
+// they already know the account from the owner/repo they resolved.
 type Installation struct {
-	ID          int64
-	AppSlug     string
-	Permissions auth.AppPerms
+	ID           int64
+	AppSlug      string
+	Permissions  auth.AppPerms
+	AccountLogin string
 }
 
 // Source is a successful access check: the installation that covers the
@@ -119,7 +123,16 @@ type Client struct {
 	tokens map[int64]cachedToken
 	// repositories maps "owner/repo" to the installation that covers it, for RepositoryToken.
 	repositories map[string]int64
+	// installations/installationsAt cache ListInstallations' own answer: the installation list
+	// changes only when a human installs/uninstalls the App, far slower than every reconcile pass
+	// needs to re-fetch it.
+	installations   []Installation
+	installationsAt time.Time
 }
+
+// installationsCacheTTL bounds how long ListInstallations trusts its own cached answer before
+// asking GitHub again.
+const installationsCacheTTL = 10 * time.Minute
 
 // New builds a client from the loaded App credentials. It returns (nil, nil)
 // when app is nil or carries no private key — the caller keeps the nil client
@@ -263,6 +276,64 @@ func (c *Client) installation(ctx context.Context, owner, repo string) (Installa
 	return Installation{ID: payload.ID, AppSlug: payload.AppSlug, Permissions: payload.Permissions}, nil
 }
 
+// ListInstallations lists every installation of this App (GET /app/installations,
+// JWT-authenticated, paginated): LEGION-567's merged-PR search must cover every installation the
+// App has, not only the one covering the configured deploy repository, since the population rule
+// (an author allowlist) names no installation or org boundary. Cached for installationsCacheTTL
+// the same way RepositoryToken caches an owner/repo's installation ID.
+func (c *Client) ListInstallations(ctx context.Context) ([]Installation, error) {
+	if c == nil {
+		return nil, ErrNoAppKey
+	}
+	c.mu.Lock()
+	cached, cachedAt := c.installations, c.installationsAt
+	c.mu.Unlock()
+	if cached != nil && c.now().Sub(cachedAt) < installationsCacheTTL {
+		return cached, nil
+	}
+	jwt, err := c.appJWT()
+	if err != nil {
+		return nil, err
+	}
+	var installations []Installation
+	for page := 1; ; page++ {
+		target := fmt.Sprintf("%s/app/installations?per_page=100&page=%d", c.base, page)
+		body, status, err := c.do(ctx, http.MethodGet, target, "Bearer "+jwt)
+		if err != nil {
+			return nil, fmt.Errorf("list installations (page %d): %w", page, err)
+		}
+		if status != http.StatusOK {
+			return nil, fmt.Errorf("GET %s: status %d: %s", target, status, body)
+		}
+		var payload []struct {
+			ID      int64  `json:"id"`
+			AppSlug string `json:"app_slug"`
+			Account struct {
+				Login string `json:"login"`
+			} `json:"account"`
+			Permissions auth.AppPerms `json:"permissions"`
+		}
+		if err := json.Unmarshal(body, &payload); err != nil {
+			return nil, fmt.Errorf("decode installations (page %d): %w", page, err)
+		}
+		if len(payload) == 0 {
+			break
+		}
+		for _, entry := range payload {
+			installations = append(installations, Installation{
+				ID: entry.ID, AppSlug: entry.AppSlug, Permissions: entry.Permissions, AccountLogin: entry.Account.Login,
+			})
+		}
+		if len(payload) < 100 {
+			break
+		}
+	}
+	c.mu.Lock()
+	c.installations, c.installationsAt = installations, c.now()
+	c.mu.Unlock()
+	return installations, nil
+}
+
 // RepositoryToken returns an installation token of the installation covering owner/repo. The
 // installation a repository resolves to is remembered; a token that cannot be minted for it
 // forgets it, so an App moved between installations is looked up again.
@@ -315,6 +386,22 @@ func (c *Client) ListInstallationRepositories(ctx context.Context, owner, repo s
 	if err != nil {
 		return nil, fmt.Errorf("mint installation token for %s/%s: %w", owner, repo, err)
 	}
+	return listInstallationRepositories(ctx, c, token)
+}
+
+// ListInstallationRepositoriesByID is ListInstallationRepositories for an installation
+// ListInstallations already resolved by id, with no representative owner/repo to mint a token
+// through RepositoryToken's own owner/repo-keyed cache -- every installation but the one covering
+// the configured deploy repository needs this form.
+func (c *Client) ListInstallationRepositoriesByID(ctx context.Context, installationID int64) ([]string, error) {
+	token, err := c.Token(ctx, installationID)
+	if err != nil {
+		return nil, fmt.Errorf("mint token for installation %d: %w", installationID, err)
+	}
+	return listInstallationRepositories(ctx, c, token)
+}
+
+func listInstallationRepositories(ctx context.Context, c *Client, token string) ([]string, error) {
 	var names []string
 	for page := 1; ; page++ {
 		path := fmt.Sprintf("/installation/repositories?per_page=%d&page=%d", installationRepositoriesPerPage, page)

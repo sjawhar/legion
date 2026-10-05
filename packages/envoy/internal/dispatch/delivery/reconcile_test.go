@@ -1,9 +1,11 @@
 package delivery
 
 import (
+	"fmt"
 	"net/http"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -241,5 +243,208 @@ func TestReconcileClearsLastErrorOnceItSucceedsAgain(t *testing.T) {
 	}
 	if after.LastReconcileAt == nil {
 		t.Fatal("settings.LastReconcileAt is nil, want it set by the successful pass")
+	}
+}
+
+// TestReconcileMarksA404PullRequestUnfetchableAndSkipsItUntilItRecovers proves S3: a partial row
+// whose completing fetch answers a permanent 404 is marked unfetchable (not retried every pass
+// forever), and a later successful fetch of the same pull request clears it again.
+func TestReconcileMarksA404PullRequestUnfetchableAndSkipsItUntilItRecovers(t *testing.T) {
+	pool, ctx := deliveryTestPool(t)
+	seedDeliverySettings(t, ctx, pool)
+
+	merged := time.Date(2024, 1, 1, 1, 0, 0, 0, time.UTC)
+	if err := UpsertPullRequest(ctx, pool, DeliveryPullRequest{
+		Repo: "acme/widgets", Number: 70, Title: "feat: gone", URL: "https://github.com/acme/widgets/pull/70",
+		Author: "octocat", CreatedAt: &merged, Partial: true,
+	}); err != nil {
+		t.Fatalf("seed partial pull request: %v", err)
+	}
+
+	requests := 0
+	fake := newFakeGitHub(t)
+	fake.handle("GET /repos/acme/widgets/pulls/70", func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"message":"Not Found"}`))
+	})
+	fake.handle("POST /graphql", func(w http.ResponseWriter, r *http.Request) {
+		mustEncode(t, w, searchResponseJSON(0, nil, false, ""))
+	})
+	fake.handle("GET /repos/acme/widgets/actions/workflows/.github%2Fworkflows%2Fdeploy.yml/runs", func(w http.ResponseWriter, r *http.Request) {
+		mustEncode(t, w, map[string]any{"total_count": 0, "workflow_runs": []any{}})
+	})
+	fake.handle("GET /repos/acme/widgets/actions/workflows/.github%2Fworkflows%2Fpr-checks.yml/runs", func(w http.ResponseWriter, r *http.Request) {
+		mustEncode(t, w, map[string]any{"total_count": 0, "workflow_runs": []any{}})
+	})
+	client := fake.newTestClient()
+	reconcile := NewReconcile(pool, client)
+
+	reconcile.runOnce(ctx)
+	pr, err := ScanPullRequest(pool.QueryRow(ctx, `select `+PullRequestColumns+` from delivery_pull_requests where repo = $1 and number = $2`, "acme/widgets", 70))
+	if err != nil {
+		t.Fatalf("scan after first pass: %v", err)
+	}
+	if pr.UnfetchableAt == nil {
+		t.Fatal("pr.UnfetchableAt is nil after a 404, want it set")
+	}
+	if pr.UnfetchableReason == nil || !strings.Contains(*pr.UnfetchableReason, "not found or gone") {
+		t.Errorf("pr.UnfetchableReason = %v, want it to name the 404", pr.UnfetchableReason)
+	}
+	if requests != 1 {
+		t.Fatalf("requests to GET the pull request = %d, want 1", requests)
+	}
+
+	// A second pass must not retry it: ListPartialPullRequests excludes a marked row.
+	reconcile.runOnce(ctx)
+	if requests != 1 {
+		t.Fatalf("requests after a second pass = %d, want still 1 (an unfetchable row is never retried)", requests)
+	}
+
+	// A later successful fetch of the same pull request (a live webhook retry, here simulated
+	// directly through the shared upsert) clears it.
+	if err := UpsertPullRequest(ctx, pool, DeliveryPullRequest{
+		Repo: "acme/widgets", Number: 70, Title: "feat: gone", URL: "https://github.com/acme/widgets/pull/70",
+		Author: "octocat", CreatedAt: &merged, MergedAt: &merged, Partial: false,
+	}); err != nil {
+		t.Fatalf("simulate a later successful fetch: %v", err)
+	}
+	recovered, err := ScanPullRequest(pool.QueryRow(ctx, `select `+PullRequestColumns+` from delivery_pull_requests where repo = $1 and number = $2`, "acme/widgets", 70))
+	if err != nil {
+		t.Fatalf("scan after recovery: %v", err)
+	}
+	if recovered.UnfetchableAt != nil || recovered.UnfetchableReason != nil {
+		t.Errorf("recovered.UnfetchableAt = %v, UnfetchableReason = %v, want both nil after a later successful write", recovered.UnfetchableAt, recovered.UnfetchableReason)
+	}
+}
+
+// TestReconcileWorkflowFailureStopsThePassFromReportingSuccess proves S1: a per-run failure (here,
+// the jobs listing for a run the runs listing itself found successfully) must not be swallowed as
+// a healthy pass -- last_reconcile_at must not advance past a window this pass left incompletely
+// fetched.
+func TestReconcileWorkflowFailureStopsThePassFromReportingSuccess(t *testing.T) {
+	pool, ctx := deliveryTestPool(t)
+	seedDeliverySettings(t, ctx, pool)
+	before, err := GetSettings(ctx, pool)
+	if err != nil {
+		t.Fatalf("GetSettings before reconcile: %v", err)
+	}
+
+	fake := newFakeGitHub(t)
+	fake.handle("POST /graphql", func(w http.ResponseWriter, r *http.Request) {
+		mustEncode(t, w, searchResponseJSON(0, nil, false, ""))
+	})
+	fake.handle("GET /repos/acme/widgets/actions/workflows/.github%2Fworkflows%2Fdeploy.yml/runs", func(w http.ResponseWriter, r *http.Request) {
+		mustEncode(t, w, map[string]any{
+			"total_count": 1,
+			"workflow_runs": []map[string]any{
+				{
+					"id": 900, "head_sha": "cafef00d", "html_url": "https://github.com/acme/widgets/actions/runs/900",
+					"status": "completed", "conclusion": "success",
+					"run_started_at": "2024-01-01T02:00:00Z", "created_at": "2024-01-01T02:00:00Z",
+					"updated_at":    "2024-01-01T02:10:00Z",
+					"head_commit":   map[string]any{"timestamp": "2024-01-01T01:55:00Z"},
+					"pull_requests": []any{},
+				},
+			},
+		})
+	})
+	fake.handle("GET /repos/acme/widgets/actions/workflows/.github%2Fworkflows%2Fpr-checks.yml/runs", func(w http.ResponseWriter, r *http.Request) {
+		mustEncode(t, w, map[string]any{"total_count": 0, "workflow_runs": []any{}})
+	})
+	// The run listing succeeds, but its jobs listing fails: a run reconcile already knows about,
+	// upserted, yet never finished.
+	fake.handle("GET /repos/acme/widgets/actions/runs/900/jobs", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"message":"Internal Server Error"}`))
+	})
+	client := fake.newTestClient()
+
+	reconcile := NewReconcile(pool, client)
+	reconcile.runOnce(ctx)
+
+	run, err := ScanRun(pool.QueryRow(ctx, `select `+RunColumns+` from delivery_runs where repo = $1 and run_id = $2`, "acme/widgets", int64(900)))
+	if err != nil {
+		t.Fatalf("the run itself must still be upserted even though its jobs failed: %v", err)
+	}
+	if run.RunID != 900 {
+		t.Fatalf("run = %+v", run)
+	}
+
+	after, err := GetSettings(ctx, pool)
+	if err != nil {
+		t.Fatalf("GetSettings after reconcile: %v", err)
+	}
+	if after.LastError == nil {
+		t.Fatal("settings.LastError is nil, want the jobs-listing failure recorded by name")
+	}
+	if !strings.Contains(*after.LastError, "900") {
+		t.Errorf("settings.LastError = %q, want it to name run 900", *after.LastError)
+	}
+	if !reflect.DeepEqual(after.LastReconcileAt, before.LastReconcileAt) {
+		t.Fatalf("settings.LastReconcileAt changed from %v to %v on a pass with a real per-run failure", before.LastReconcileAt, after.LastReconcileAt)
+	}
+}
+
+// TestReconcilePartialPullRequestsStopsOnRateLimitInsteadOfRetryingAtFullConcurrency proves the
+// errgroup.WithContext + SetLimit(8) rate-limit stop end to end: among several partial rows, the
+// one answering a 403 secondary-rate-limit response must stop every further completion from
+// starting (never more than the ones already in flight when it happened), and the pass must be
+// reported failed, not successful.
+func TestReconcilePartialPullRequestsStopsOnRateLimitInsteadOfRetryingAtFullConcurrency(t *testing.T) {
+	pool, ctx := deliveryTestPool(t)
+	seedDeliverySettings(t, ctx, pool)
+
+	merged := time.Date(2024, 1, 1, 1, 0, 0, 0, time.UTC)
+	const total = 20
+	for i := 1; i <= total; i++ {
+		if err := UpsertPullRequest(ctx, pool, DeliveryPullRequest{
+			Repo: "acme/widgets", Number: i, Title: "feat: x", URL: fmt.Sprintf("https://github.com/acme/widgets/pull/%d", i),
+			Author: "octocat", CreatedAt: &merged, Partial: true,
+		}); err != nil {
+			t.Fatalf("seed partial pull request #%d: %v", i, err)
+		}
+	}
+
+	var attempts atomic.Int64
+	fake := newFakeGitHub(t)
+	fake.handle("GET /repos/acme/widgets/pulls/{number}", func(w http.ResponseWriter, r *http.Request) {
+		attempts.Add(1)
+		w.Header().Set("X-RateLimit-Remaining", "0")
+		w.Header().Set("Retry-After", "60")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"message":"API rate limit exceeded"}`))
+	})
+	fake.handle("POST /graphql", func(w http.ResponseWriter, r *http.Request) {
+		mustEncode(t, w, searchResponseJSON(0, nil, false, ""))
+	})
+	fake.handle("GET /repos/acme/widgets/actions/workflows/.github%2Fworkflows%2Fdeploy.yml/runs", func(w http.ResponseWriter, r *http.Request) {
+		mustEncode(t, w, map[string]any{"total_count": 0, "workflow_runs": []any{}})
+	})
+	fake.handle("GET /repos/acme/widgets/actions/workflows/.github%2Fworkflows%2Fpr-checks.yml/runs", func(w http.ResponseWriter, r *http.Request) {
+		mustEncode(t, w, map[string]any{"total_count": 0, "workflow_runs": []any{}})
+	})
+	client := fake.newTestClient()
+
+	reconcile := NewReconcile(pool, client)
+	reconcile.runOnce(ctx)
+
+	got := attempts.Load()
+	if got < 1 {
+		t.Fatal("expected at least the first batch of completions to have been attempted")
+	}
+	if got > reconcilePartialConcurrency {
+		t.Errorf("GET pulls attempts = %d, want at most reconcilePartialConcurrency (%d): the rate-limit stop must not let more than one wave start after the first limit response", got, reconcilePartialConcurrency)
+	}
+	if got >= total {
+		t.Errorf("GET pulls attempts = %d out of %d partial rows, want it to stop well short of retrying every row at full concurrency", got, total)
+	}
+
+	after, err := GetSettings(ctx, pool)
+	if err != nil {
+		t.Fatalf("GetSettings after reconcile: %v", err)
+	}
+	if after.LastError == nil {
+		t.Fatal("settings.LastError is nil, want the rate limit recorded and the pass reported failed")
 	}
 }

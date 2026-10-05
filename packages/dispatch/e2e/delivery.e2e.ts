@@ -57,9 +57,14 @@ test("the Delivery sidebar nav entry opens the delivery timeline", async ({ brow
   await page.goto("/");
   const menuButton = page.getByRole("button", { name: "Open navigation" });
   const deliveryLink = page.getByRole("link", { name: "Delivery" });
+  // Promise.race never cancels its losing branch: on a desktop-viewport run the mobile-only
+  // "Open navigation" button never renders, so that waitFor keeps polling toward its own default
+  // timeout after the race settles, risking an unhandled rejection ("Target closed") once
+  // context.close() below tears the page down while it is still pending. Each branch catches its
+  // own eventual rejection so a loser that never resolves never surfaces one.
   await Promise.race([
-    menuButton.waitFor({ state: "visible" }),
-    deliveryLink.waitFor({ state: "visible" }),
+    menuButton.waitFor({ state: "visible" }).catch(() => {}),
+    deliveryLink.waitFor({ state: "visible" }).catch(() => {}),
   ]);
   if (await menuButton.isVisible()) {
     await menuButton.click();
@@ -152,6 +157,29 @@ test("the freshness row shows a named reconcile failure, distinct from mere stal
   ).toBeVisible();
   // Never the generic staleness wording once a named failure is present.
   await expect(page.getByText(/reconcile never ran/i)).toHaveCount(0);
+
+  await context.close();
+});
+
+test("an unfetchable pull request shows on the freshness row by count", async ({ browser }) => {
+  await seedDeliveryFixture();
+  // S3: a population pull request whose completing fetch answered a permanent 404/410 from
+  // GitHub is marked unfetchable (store.go's MarkPullRequestUnfetchable) rather than retried
+  // every reconcile pass forever -- the freshness row surfaces it by count.
+  await sql(
+    `UPDATE delivery_pull_requests
+       SET unfetchable_at = '2024-06-01T05:00:00Z', unfetchable_reason = 'pull request not found or gone (status 404)'
+       WHERE repo = 'acme/widgets' AND number = 2`
+  );
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+
+  await page.goto(`/delivery?from=2024-06-01T00%3A00%3A00Z&to=2024-06-02T00%3A00%3A00Z`);
+
+  await expect(page.getByRole("heading", { name: "Delivery" })).toBeVisible();
+  await expect(
+    page.getByText(/1 pull request can no longer be fetched from GitHub/i)
+  ).toBeVisible();
 
   await context.close();
 });
