@@ -50,9 +50,11 @@ func (e *Engine) tellReadyAudience(ctx context.Context, tx pgx.Tx, issue record.
 // in between. A READY refused while the tree had no design gate at all names no version — the
 // issues table takes only a positive `ready_pending_version` — so it is found the same way a
 // known-version refusal is found once there is a packet to release: the merger's phase row still
-// carries the READY completion's summary (handoff writes it before the gate check, and a fresh
-// merging stint's clearHandoff empties it), even though the issue itself records no pending
-// version for it.
+// carries the READY completion's summary. A non-empty summary while in merging can only be a
+// refused READY's: handoff()'s READY_REQUIRED guard (engine.go:334) refuses a non-READY merger
+// completion before it ever writes the summary (engine.go:347), and clearHandoff empties it again
+// on every fresh entry into merging (engine.go:757), so neither leaves one behind for this to
+// mistake — even though the issue itself records no pending version for it.
 func (e *Engine) advancePendingReady(ctx context.Context, tx pgx.Tx, rootKey string, gate record.DesignGate) error {
 	if !classify.DesignGateOpen(gate) {
 		return nil
