@@ -56,6 +56,7 @@ import { ThreadCard } from "../margin/ThreadCard";
 import { type CommentActionFailure, useCommentActionQueue } from "../margin/useCommentActionQueue";
 import type { Thread as CommentThread } from "../margin/useMarginItems";
 import { CopyRefButton } from "../refs/CopyRefButton";
+import { replyPreviewMarkdown } from "../refs/markdown-fragment";
 import { buildIssuePath, documentItemPath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 import { PHONE_VIEWPORT_QUERY, useDialog, useMediaQuery } from "../shell/useDialog";
@@ -92,7 +93,7 @@ import {
 } from "./held-sends";
 import { MentionComposer } from "./MentionComposer";
 import { ReplyButton } from "./ReplyButton";
-import { firstLine, ReplyQuote, replyQuoteText } from "./ReplyQuote";
+import { ReplyQuote } from "./ReplyQuote";
 import { ReplyTurn, ThreadReplies, TurnActions } from "./ReplyTurn";
 import {
   capabilitiesForTarget,
@@ -180,7 +181,7 @@ function replyTargetFor(
   const thread = threadDelivery(root, agents);
   return {
     author: author.label,
-    excerpt: firstLine(node.event.payload.body),
+    excerpt: node.event.payload.body,
     id: node.event.payload.id,
     parentKind: "message",
     to: buildIssuePath({ id: node.event.payload.id, key: issueKey, kind: "message" }),
@@ -269,12 +270,13 @@ function ConversationReply({
         isClosed ? undefined : () => onReply(replyTargetFor(reply, author, root, issueKey, agents))
       }
       quote={{
-        text: replyQuoteText(
-          parent === undefined ? undefined : resolveAuthor(parent.author, titles).label,
+        author: parent === undefined ? undefined : resolveAuthor(parent.author, titles).label,
+        // Without the parent loaded, the server's 160-rune cut of it stands in; a mark the cut
+        // opened is dropped so it reads as words, not as its syntax.
+        excerpt:
           parent === undefined
-            ? (reply.event.payload.reply_body ?? "")
-            : firstLine(parent.event.payload.body)
-        ),
+            ? replyPreviewMarkdown(reply.event.payload.reply_body)
+            : parent.event.payload.body,
         to:
           parentId === null || parentId === undefined
             ? undefined
@@ -398,14 +400,13 @@ function MessageTurn({
           )}
           {replyTo === null || replyTo === undefined ? null : (
             <ReplyQuote
+              author={undefined}
               className="mb-1"
+              excerpt={
+                item.kind === "message" ? replyPreviewMarkdown(item.event.payload.reply_body) : ""
+              }
               to={buildIssuePath({ id: replyTo, key: issueKey, kind: "message" })}
-            >
-              {replyQuoteText(
-                undefined,
-                item.kind === "message" ? (item.event.payload.reply_body ?? "") : ""
-              )}
-            </ReplyQuote>
+            />
           )}
           <EventBody event={item.event} />
         </div>
@@ -455,7 +456,7 @@ function commentReplyTarget(
   return {
     author: resolveAuthor(author, new Map(agents.map((agent) => [agent.session_id, agent.title])))
       .label,
-    excerpt: firstLine(event.payload.body),
+    excerpt: event.payload.body,
     id: event.payload.id,
     mentions,
     parentKind: "comment",

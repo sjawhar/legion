@@ -71,3 +71,32 @@ export function remarkSoftBreakAsSpace() {
     visit(tree);
   };
 }
+
+/** The other reading of a soft break, for text whose author meant its lines as lines (a model's
+ *  streamed turn): every "\n" inside a "text" node becomes its own `break` node, which the
+ *  commonmark preset's hardbreak parser then takes, so the lines stay lines. Code keeps its
+ *  newlines as code, as above. */
+function splitSoftBreaks(node: MdastNode): void {
+  if (node.type === 'code' || node.type === 'inlineCode' || !node.children) return;
+  const split: MdastNode[] = [];
+  for (const child of node.children) {
+    if (child.type !== 'text' || typeof child.value !== 'string' || !child.value.includes('\n')) {
+      splitSoftBreaks(child);
+      split.push(child);
+      continue;
+    }
+    const lines = child.value.split('\n');
+    lines.forEach((line, index) => {
+      if (index > 0) split.push({ type: 'break' });
+      if (line !== '') split.push({ type: 'text', value: line });
+    });
+  }
+  node.children = split;
+}
+
+/** remark transformer — the headless parser's `softBreaks: 'line'` policy. */
+export function remarkSoftBreakAsLine() {
+  return (tree: MdastNode) => {
+    splitSoftBreaks(tree);
+  };
+}

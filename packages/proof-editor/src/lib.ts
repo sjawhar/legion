@@ -388,8 +388,10 @@ export async function createProofEditor(
     setMarkdown(markdown: string): void {
       // Markdown import only: soft line breaks become spaces here and in the headless parser,
       // never in the shared parserCtx, which the clipboard plugin also runs text/plain pastes
-      // through - a pasted "alpha\nbeta" must keep its line break.
-      // remarkCtx holds a frozen processor; calling it yields an unfrozen copy to extend.
+      // through - a pasted "alpha\nbeta" must keep its line break. The commonmark preset's own
+      // remark-inline-links resolves reference-style links here already, as it does in the
+      // headless parser for the display surfaces; remarkCtx holds a frozen processor, so calling
+      // it yields an unfrozen copy to extend.
       const importParser = ParserState.create(
         editor.ctx.get(schemaCtx),
         editor.ctx.get(remarkCtx)().use(remarkSoftBreakAsSpace),

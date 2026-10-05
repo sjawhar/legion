@@ -34,6 +34,7 @@ import { MentionComposer } from "../conversation/MentionComposer";
 import { actorLabel } from "../refs/actor";
 import { CopyRefButton } from "../refs/CopyRefButton";
 import { MarkdownBody } from "../refs/MarkdownBody";
+import { MarkdownPreview } from "../refs/MarkdownPreview";
 import { buildIssuePath, buildProjectPath, itemRoute } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 import { isBareReferenceBody, Unfurl } from "../refs/Unfurl";
@@ -468,9 +469,12 @@ export function ThreadCard({
                     <SuggestionDiff clamp quote={root.anchor.quote} suggestion={rootSuggestion} />
                   </span>
                   {root.body === "Suggested replacement." ? null : (
-                    <p className={`mt-2 line-clamp-1 text-xs ${textSecondaryOnSurface}`}>
-                      <MarkdownBody markdown={root.body} variant="inline" />
-                    </p>
+                    <MarkdownPreview
+                      className={`mt-2 text-xs ${textSecondaryOnSurface}`}
+                      lines={1}
+                      links="live"
+                      markdown={root.body}
+                    />
                   )}
                 </>
               ) : (
@@ -482,9 +486,7 @@ export function ThreadCard({
                       {root.anchor.quote}
                     </blockquote>
                   )}
-                  <p className="line-clamp-2">
-                    <MarkdownBody markdown={root.body} variant="inline" />
-                  </p>
+                  <MarkdownPreview lines={2} links="live" markdown={root.body} />
                   {isBareReferenceBody(root.body) ? <Unfurl body={root.body} /> : null}
                 </>
               )}
