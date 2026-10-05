@@ -126,7 +126,7 @@ func (s *server) computeAndPersistSuggestions(
 				reason = "the project lookup behind it did not answer within " + writeSuggestionTimeout.String()
 			}
 			slog.Warn("dispatch: write suggestions omitted", "error", err)
-			return &model.Suggestions{Missing: reason}
+			return &model.Suggestions{Related: []model.WriteSuggestion{}, Missing: reason}
 		}
 		project = resolved
 	}
@@ -170,7 +170,7 @@ func (s *server) computeSuggestions(
 			reason = "the search behind it did not answer within " + writeSuggestionTimeout.String()
 		}
 		slog.Warn("dispatch: write suggestions omitted", "error", err)
-		return &model.Suggestions{Missing: reason}
+		return &model.Suggestions{Related: []model.WriteSuggestion{}, Missing: reason}
 	}
 
 	var candidates []model.SearchResult

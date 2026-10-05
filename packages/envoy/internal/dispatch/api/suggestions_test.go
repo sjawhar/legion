@@ -184,6 +184,19 @@ func TestComputeSuggestionsReportsMissingWhenSearchTimesOut(t *testing.T) {
 	if len(suggestions.Related) != 0 || suggestions.Decision != nil {
 		t.Fatalf("suggestions = %+v, want nothing related or decided when search could not run", suggestions)
 	}
+	// The wire shape matters as much as the Go value: every other path sends `related` as an
+	// array, and a client iterating it breaks on `null`.
+	encoded, err := json.Marshal(suggestions)
+	if err != nil {
+		t.Fatalf("marshal suggestions: %v", err)
+	}
+	var decoded map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatalf("decode suggestions JSON: %v", err)
+	}
+	if string(decoded["related"]) != "[]" {
+		t.Fatalf(`suggestions JSON related = %s, want "[]" not "null"`, decoded["related"])
+	}
 }
 
 // TestSuggestionsDecisionIsNotReorderedByOwnerStatus: Decision picks the best-ranked answered ask
