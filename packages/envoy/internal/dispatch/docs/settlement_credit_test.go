@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -451,21 +452,48 @@ func connectBrowser(t *testing.T, serverURL, artifactID, login string) *docstest
 
 // editAsBrowser replaces the document's text from browser's own copy and sends the room the update,
 // as a keystroke does: ygo applies it to the room in its own transaction, under the document's
-// lock - the path every browser edit takes. It returns once the room has recorded the edit's
-// durable append (creditContentChange and recordUpdateClass run in the update observer ygo calls
-// as it applies the update), whether or not that append has reached storage.
+// lock - the path every browser edit takes. It returns once the room's update observer has run for
+// that update - creditContentChange credited it and recordUpdateClass counted its durable append -
+// whether or not the append has reached storage. The signal is an observer this helper registers
+// on the room after the service's own: ygo fires a transaction's update observers in the order they
+// were registered (reearth/ygo crdt/doc.go, the onUpdate snapshot loop), so this one runs after the
+// service's has finished with the same update. It waits as long as the test binary's deadline
+// allows rather than a fixed bound, which a loaded machine outruns.
 func editAsBrowser(t *testing.T, service *Service, artifactID string, browser *docstest.Peer, markdown string) {
 	t.Helper()
-	before := service.room(artifactID).durableAppends.Load()
-	current, err := treeOf(browser.Doc)
-	if err != nil {
-		t.Fatalf("read the browser's copy of the document: %v", err)
+	var target *pmdoc.Node
+	var fragment *crdt.YXmlFragment
+	var client crdt.ClientID
+	var sentFrom uint64
+	var readErr error
+	browser.WithDoc(func(doc *crdt.Doc) {
+		client = doc.ClientID()
+		sentFrom = doc.StateVector().Clock(client)
+		current, err := treeOf(doc)
+		if err != nil {
+			readErr = fmt.Errorf("read the browser's copy of the document: %w", err)
+			return
+		}
+		fragment = doc.GetXmlFragment(fragmentName)
+		if target, readErr = parseReplacing(current, markdown); readErr != nil {
+			readErr = fmt.Errorf("parse the browser's edit: %w", readErr)
+		}
+	})
+	if readErr != nil {
+		t.Fatal(readErr)
 	}
-	target, err := parseReplacing(current, markdown)
-	if err != nil {
-		t.Fatalf("parse the browser's edit: %v", err)
+	room := service.srv.GetDoc(artifactID)
+	if room == nil {
+		t.Fatal("the room is not resident while its browser is connected")
 	}
-	fragment := browser.Doc.GetXmlFragment(fragmentName)
+	recorded := make(chan struct{})
+	var once sync.Once
+	unsubscribe := room.OnUpdate(func([]byte, any) {
+		if room.StateVector().Clock(client) > sentFrom {
+			once.Do(func() { close(recorded) })
+		}
+	})
+	defer unsubscribe()
 	if _, err := browser.Send(func(txn *crdt.Transaction) {
 		if err := pmdoc.Update(txn, fragment, target); err != nil {
 			t.Errorf("apply the browser's edit: %v", err)
@@ -473,9 +501,43 @@ func editAsBrowser(t *testing.T, service *Service, artifactID string, browser *d
 	}); err != nil {
 		t.Fatalf("send the browser's edit: %v", err)
 	}
-	waitFor(t, 5*time.Second, "the room to record the browser's durable append", func() bool {
-		return service.room(artifactID).durableAppends.Load() > before
-	})
+	timeout := time.Minute
+	if deadline, bounded := t.Deadline(); bounded {
+		timeout = time.Until(deadline) - 2*time.Second
+	}
+	select {
+	case <-recorded:
+	case <-time.After(timeout):
+		t.Fatalf("the room did not record the browser's edit before the test's deadline")
+	}
+}
+
+// Three browsers editing one document at once each read and transact their own copy while that
+// copy's reader applies the others' updates, and its own echoed back, on another goroutine. A read
+// of the copy's tree takes no lock of crdt.Doc's own, so docstest.Peer serializes it against the
+// reader (WithDoc); each browser edits several times, so its reads overlap the others' updates.
+func TestConcurrentBrowserEditsDoNotRaceAPeersOwnDocument(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "# Decision\n\nContext.\n")
+	httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
+	t.Cleanup(httpServer.Close)
+
+	logins := []string{"ann", "bo", "cy"}
+	browsers := make([]*docstest.Peer, len(logins))
+	for index, login := range logins {
+		browsers[index] = connectBrowser(t, httpServer.URL, artifactID, login)
+	}
+	var wg sync.WaitGroup
+	for index, browser := range browsers {
+		wg.Go(func() {
+			for edit := range 10 {
+				editAsBrowser(t, service, artifactID, browser,
+					fmt.Sprintf("# Decision\n\nContext.\n\n%s's edit %d.\n", logins[index], edit))
+			}
+		})
+	}
+	wg.Wait()
 }
 
 // connectedBrowsers is how many browsers the room has registered (state.connected).

@@ -21,7 +21,9 @@ import (
 // applies every sync message the room sends to Doc, answers the room's sync step 1, and sends the
 // updates its own transactions make.
 type Peer struct {
-	// Doc is the peer's copy of the document. The peer's reader applies the room's updates to it.
+	// Doc is the peer's copy of the document. The peer's reader applies the room's updates to it
+	// on its own goroutine: a caller that reads or transacts Doc from another goroutine races that
+	// reader unless it goes through WithDoc, since crdt.Doc carries no lock of its own.
 	Doc *crdt.Doc
 	// Answers carries the content of each sync step 2 the room sends, once Doc holds it. One that
 	// arrives while sixteen are waiting to be read is dropped.
@@ -33,7 +35,10 @@ type Peer struct {
 	connection *gws.Conn
 	// writes holds one write at a time: gorilla/websocket panics on two writes at once, and the
 	// reader answers the room's sync step 1 while a test sends.
-	writes  sync.Mutex
+	writes sync.Mutex
+	// docMu serializes every access to Doc between the reader's applies and a caller's reads or
+	// transactions (WithDoc, Send).
+	docMu   sync.Mutex
 	endedAt time.Time
 }
 
@@ -70,10 +75,20 @@ func (p *Peer) Write(syncMessage []byte) error {
 	return p.connection.WriteMessage(gws.BinaryMessage, append(frame, syncMessage...))
 }
 
+// WithDoc runs use with Doc, locked against the peer's own reader: a caller on another goroutine
+// that reads or transacts Doc must do so here, never directly, since crdt.Doc has no lock of its
+// own and the reader applies the room's updates to it concurrently.
+func (p *Peer) WithDoc(use func(doc *crdt.Doc)) {
+	p.docMu.Lock()
+	defer p.docMu.Unlock()
+	use(p.Doc)
+}
+
 // Send runs change in one transaction on Doc and sends the room the update it made, as a keystroke
 // does, returning that update.
 func (p *Peer) Send(change func(*crdt.Transaction)) ([]byte, error) {
-	update := Transact(p.Doc, change)
+	var update []byte
+	p.WithDoc(func(doc *crdt.Doc) { update = Transact(doc, change) })
 	if update == nil {
 		return nil, errors.New("the peer's transaction made no update")
 	}
@@ -118,7 +133,8 @@ func (p *Peer) read(answers chan<- []byte) {
 		if err != nil {
 			return
 		}
-		reply, err := ygsync.ApplySyncMessage(p.Doc, payload, nil)
+		var reply []byte
+		p.WithDoc(func(doc *crdt.Doc) { reply, err = ygsync.ApplySyncMessage(doc, payload, nil) })
 		if err != nil {
 			return
 		}
