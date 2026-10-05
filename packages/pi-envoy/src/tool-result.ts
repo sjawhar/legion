@@ -1,4 +1,4 @@
-import type { ToolImage } from "@legion/envoy-client/dispatch-pictures";
+import { imageBlocks, type ToolImage } from "@legion/envoy-client/dispatch-pictures";
 import { messageFor } from "@legion/envoy-client/errors";
 import type { ToolResult } from "./pi-types";
 
@@ -8,13 +8,7 @@ export function toolSuccess(
   details: Readonly<Record<string, unknown>> = {},
   images: readonly ToolImage[] = []
 ): ToolResult {
-  return {
-    content: [
-      { type: "text", text },
-      ...images.map(({ data, mimeType }) => ({ type: "image" as const, data, mimeType })),
-    ],
-    details,
-  };
+  return { content: [{ type: "text", text }, ...imageBlocks(images)], details };
 }
 
 export function toolFailure(error: unknown): ToolResult {

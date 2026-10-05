@@ -37791,8 +37791,11 @@ function toolImage(bytes) {
     return;
   return { data: Buffer.from(bytes).toString("base64"), mimeType };
 }
+function imageBlocks(images) {
+  return images.map(({ data, mimeType }) => ({ type: "image", data, mimeType }));
+}
 function pictureLine(name, address) {
-  const caption = name.replace(/[\\[\]]/g, "\\$&").replace(/[\r\n]+/g, " ");
+  const caption = name.replace(/[\\[\]`]/g, "\\$&").replace(/[\r\n]+/g, " ");
   return `![${caption}](${address})`;
 }
 function withPictureLines(text, lines) {
@@ -37969,13 +37972,27 @@ var RecoverableDispatchDeliveryFailureSchema = exports_external.object({
 }).refine(({ event, delivery }) => event.type === "comment.created" ? isCommentTargetedDelivery(delivery) : !isCommentTargetedDelivery(delivery) && DispatchTargetedResourceIDSchema.safeParse(event.payload.id).success, { message: "delivery resource must match its event type" });
 function eventPictures(event) {
   let text;
-  if (event.type.startsWith("message.") || event.type.startsWith("comment.")) {
+  if (event.type.startsWith("message.")) {
+    const parsed = MessageEventPayloadSchema.safeParse(event.payload);
+    text = parsed.success ? parsed.data.body : undefined;
+  } else if (event.type.startsWith("comment.")) {
     const parsed = CommentEventPayloadSchema.safeParse(event.payload);
     text = parsed.success ? parsed.data.body : undefined;
   } else if (event.type.startsWith("ask.")) {
     const parsed = (event.type === "ask.edited" ? AskEditedEventPayloadSchema : AskEventPayloadSchema).safeParse(event.payload);
     if (parsed.success) {
-      text = event.type === "ask.answered" ? parsed.data.answer?.text : event.type === "ask.resolved" ? parsed.data.resolution?.reason : event.type === "ask.opened" || event.type === "ask.edited" ? parsed.data.question : undefined;
+      switch (event.type) {
+        case "ask.answered":
+          text = parsed.data.answer?.text;
+          break;
+        case "ask.resolved":
+          text = parsed.data.resolution?.reason;
+          break;
+        case "ask.opened":
+        case "ask.edited":
+          text = parsed.data.question;
+          break;
+      }
     }
   }
   return typeof text === "string" ? pictureAddresses(text) : [];
@@ -39528,16 +39545,17 @@ async function localPictures(args, cwd, problems) {
     if (typeof path2 !== "string" || path2 === "")
       continue;
     const absolute = resolvePath(cwd, path2);
+    const file2 = Bun.file(absolute);
     let size;
     let head;
     try {
-      const stats = await Bun.file(absolute).stat();
+      const stats = await file2.stat();
       if (!stats.isFile()) {
         problems.push(`images: ${path2} is not a file`);
         continue;
       }
       size = stats.size;
-      head = new Uint8Array(await Bun.file(absolute).slice(0, PICTURE_SNIFF_BYTES).arrayBuffer());
+      head = new Uint8Array(await file2.slice(0, PICTURE_SNIFF_BYTES).arrayBuffer());
     } catch (error48) {
       problems.push(`images: ${path2} cannot be read: ${messageFor(error48)}`);
       continue;
@@ -39556,7 +39574,7 @@ async function localPictures(args, cwd, problems) {
   return pictures;
 }
 function uploadSlug(name) {
-  const slug = name.toLowerCase().replace(/[^\p{L}\p{Nd}]+/gu, "-").replace(/^-|-$/g, "");
+  const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
   return slug === "" ? "artifact" : slug;
 }
 async function textWithPictures(tool, text, pictures, limit, owner, upload, actor) {
@@ -40227,6 +40245,7 @@ function eventHead(event) {
     case "ask.answered":
       return `${textHead(event.payload.question)} -> ${textHead(askAnswerText(event.payload.answer))}`;
     case "comment.created":
+    case "comment.answered":
     case "comment.anchor_refreshed":
     case "comment.edited":
     case "comment.resolved":
@@ -40418,6 +40437,7 @@ function eventTexts(event) {
       ];
       break;
     case "comment.created":
+    case "comment.answered":
     case "comment.anchor_refreshed":
     case "comment.edited":
     case "comment.resolved":
@@ -40773,12 +40793,14 @@ async function executeDispatchTool(input) {
       throw new Error("issue or project is required");
     return owner;
   };
+  const postWithPictures = (text, limit, owner2, upload) => textWithPictures(input.tool, text, pictures, limit, owner2, upload, actor);
   const writePictures = (resolved, text, limit) => {
     if (resolved?.owner.kind === "project") {
       const { project } = resolved.owner;
-      return textWithPictures(input.tool, text, pictures, limit, project, (upload) => client.projectArtifact(project, upload), actor);
+      return postWithPictures(text, limit, project, (upload) => client.projectArtifact(project, upload));
     }
-    return textWithPictures(input.tool, text, pictures, limit, issue2(), (upload) => client.artifact(issue2(), upload), actor);
+    const issueKey = issue2();
+    return postWithPictures(text, limit, issueKey, (upload) => client.artifact(issueKey, upload));
   };
   switch (input.tool) {
     case "dispatch_issue": {
@@ -41217,11 +41239,14 @@ ${followsAsk(askOwner)}`,
         shorten: "shorten the body"
       };
       if (owner === null && inReplyTo !== undefined) {
-        const sessionId = input.sessionId?.trim();
-        if (pictures.length > 0 && !sessionId) {
-          throw new Error("host session id is required to send pictures in a direct-message reply");
+        let body2 = written;
+        if (pictures.length > 0) {
+          const sessionId = input.sessionId?.trim();
+          if (!sessionId) {
+            throw new Error("host session id is required to send pictures in a direct-message reply");
+          }
+          body2 = await postWithPictures(written, bodyLimit, `agent/${sessionId}`, (upload) => client.agentArtifact(sessionId, upload));
         }
-        const body2 = await textWithPictures(input.tool, written, pictures, bodyLimit, `agent/${sessionId}`, (upload) => client.agentArtifact(sessionId, upload), actor);
         const reply = await client.messageReply(inReplyTo, { body: body2, attempt: 1, actor }, { followUp: true });
         if (reply.duplicate === true && reply.body === body2) {
           return {
@@ -41249,7 +41274,7 @@ ${followsAsk(askOwner)}`,
         };
       }
       const issueKey = issue2();
-      const body = await textWithPictures(input.tool, written, pictures, bodyLimit, issueKey, (upload) => client.artifact(issueKey, upload), actor);
+      const body = await postWithPictures(written, bodyLimit, issueKey, (upload) => client.artifact(issueKey, upload));
       const message = await client.message(issueKey, {
         body,
         ...inReplyTo === undefined ? {} : { in_reply_to: inReplyTo },
@@ -44626,21 +44651,22 @@ function argumentsSchema(spec) {
 function parseArguments(spec, input) {
   return argumentsSchema(spec).parse(input);
 }
+function isToolImage(value) {
+  return typeof value === "object" && value !== null && "data" in value && typeof value.data === "string" && "mimeType" in value && typeof value.mimeType === "string" && isPictureType(value.mimeType);
+}
 function mcpResult(value) {
-  const images = value?.images;
-  if (!Array.isArray(images))
-    return { content: [{ type: "text", text: JSON.stringify(value) }] };
-  const { images: _shown, ...rest } = value;
-  return {
-    content: [
-      { type: "text", text: JSON.stringify(rest) },
-      ...images.map(({ data, mimeType }) => ({
-        type: "image",
-        data,
-        mimeType
-      }))
-    ]
-  };
+  if (typeof value === "object" && value !== null && "images" in value) {
+    const { images, ...rest } = value;
+    if (Array.isArray(images)) {
+      return {
+        content: [
+          { type: "text", text: JSON.stringify(rest) },
+          ...imageBlocks(images.filter(isToolImage))
+        ]
+      };
+    }
+  }
+  return { content: [{ type: "text", text: JSON.stringify(value) }] };
 }
 function projectDirectory() {
   return claudeProjectDirectory({ CLAUDE_PROJECT_DIR: process.env["CLAUDE_PROJECT_DIR"] }, process.cwd());

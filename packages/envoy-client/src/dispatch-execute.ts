@@ -546,16 +546,17 @@ async function localPictures(
     // The schema names a value that is not a path.
     if (typeof path !== "string" || path === "") continue;
     const absolute = resolvePath(cwd, path);
+    const file = Bun.file(absolute);
     let size: number;
     let head: Uint8Array;
     try {
-      const stats = await Bun.file(absolute).stat();
+      const stats = await file.stat();
       if (!stats.isFile()) {
         problems.push(`images: ${path} is not a file`);
         continue;
       }
       size = stats.size;
-      head = new Uint8Array(await Bun.file(absolute).slice(0, PICTURE_SNIFF_BYTES).arrayBuffer());
+      head = new Uint8Array(await file.slice(0, PICTURE_SNIFF_BYTES).arrayBuffer());
     } catch (error) {
       problems.push(`images: ${path} cannot be read: ${messageFor(error)}`);
       continue;
@@ -579,11 +580,12 @@ async function localPictures(
 }
 
 /** The slug Dispatch gives a new upload named `name` that no other artifact of its owner holds
- *  (the server's `artifactSlug`): its letters and digits lowercased, each other run one dash. */
+ *  (the server's `artifactSlug`): lowercased, its ASCII letters and digits kept and each other run
+ *  one dash, the slug every reference grammar reads. */
 function uploadSlug(name: string): string {
   const slug = name
     .toLowerCase()
-    .replace(/[^\p{L}\p{Nd}]+/gu, "-")
+    .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-|-$/g, "");
   return slug === "" ? "artifact" : slug;
 }
@@ -1631,6 +1633,7 @@ function eventHead(event: Event): string | undefined {
     case "ask.answered":
       return `${textHead(event.payload.question)} -> ${textHead(askAnswerText(event.payload.answer))}`;
     case "comment.created":
+    case "comment.answered":
     case "comment.anchor_refreshed":
     case "comment.edited":
     case "comment.resolved":
@@ -1870,6 +1873,7 @@ function eventTexts(event: Event): DatedText[] {
       ];
       break;
     case "comment.created":
+    case "comment.answered":
     case "comment.anchor_refreshed":
     case "comment.edited":
     case "comment.resolved":
@@ -2016,15 +2020,16 @@ export interface PicturesRead {
 }
 
 /** The artifact a picture address names: an issue's, a project's or a conversation's upload, by
- *  its slug, and the version the address pins; undefined for an address naming no versioned
- *  artifact. */
-function pictureTarget(address: string):
-  | {
-      readonly key: string;
-      readonly read: (client: DispatchClient) => Promise<Artifact>;
-      readonly version: number;
-    }
-  | undefined {
+ *  its slug, and the version the address pins. */
+interface PictureTarget {
+  /** Dedupes concurrent reads of one artifact: `<owner>/<slug>`. */
+  readonly key: string;
+  readonly read: (client: DispatchClient) => Promise<Artifact>;
+  readonly version: number;
+}
+
+/** Undefined for an address naming no versioned artifact. */
+function pictureTarget(address: string): PictureTarget | undefined {
   const agent = parseAgentArtifactRef(address);
   if (agent !== null) {
     if (agent.version === undefined) return undefined;
@@ -2473,8 +2478,14 @@ export async function executeDispatchTool(
     if (owner === null) throw new Error("issue or project is required");
     return owner;
   };
-  // The text an ask or comment posts with its pictures, uploaded to the project of the project
-  // document it is on, else to its issue.
+  // The text a call posts with its pictures, each uploaded first to the owner the address names.
+  const postWithPictures = (
+    text: string,
+    limit: PictureTextLimit,
+    owner: string,
+    upload: (upload: CreateArtifactInput) => Promise<ArtifactUploadResponse>
+  ): Promise<string> => textWithPictures(input.tool, text, pictures, limit, owner, upload, actor);
+  // An ask or comment uploads to the project of the project document it is on, else to its issue.
   const writePictures = (
     resolved: ResolvedArtifact | undefined,
     text: string,
@@ -2482,25 +2493,12 @@ export async function executeDispatchTool(
   ): Promise<string> => {
     if (resolved?.owner.kind === "project") {
       const { project } = resolved.owner;
-      return textWithPictures(
-        input.tool,
-        text,
-        pictures,
-        limit,
-        project,
-        (upload) => client.projectArtifact(project, upload),
-        actor
+      return postWithPictures(text, limit, project, (upload) =>
+        client.projectArtifact(project, upload)
       );
     }
-    return textWithPictures(
-      input.tool,
-      text,
-      pictures,
-      limit,
-      issue(),
-      (upload) => client.artifact(issue(), upload),
-      actor
-    );
+    const issueKey = issue();
+    return postWithPictures(text, limit, issueKey, (upload) => client.artifact(issueKey, upload));
   };
 
   switch (input.tool) {
@@ -3069,19 +3067,18 @@ export async function executeDispatchTool(
       if (owner === null && inReplyTo !== undefined) {
         // A direct message's conversation belongs to no issue, so its pictures belong to this
         // session's own conversation, where the person reads the reply.
-        const sessionId = input.sessionId?.trim();
-        if (pictures.length > 0 && !sessionId) {
-          throw new Error("host session id is required to send pictures in a direct-message reply");
+        let body = written;
+        if (pictures.length > 0) {
+          const sessionId = input.sessionId?.trim();
+          if (!sessionId) {
+            throw new Error(
+              "host session id is required to send pictures in a direct-message reply"
+            );
+          }
+          body = await postWithPictures(written, bodyLimit, `agent/${sessionId}`, (upload) =>
+            client.agentArtifact(sessionId, upload)
+          );
         }
-        const body = await textWithPictures(
-          input.tool,
-          written,
-          pictures,
-          bodyLimit,
-          `agent/${sessionId}`,
-          (upload) => client.agentArtifact(sessionId as string, upload),
-          actor
-        );
         // No owner beside an `in_reply_to`: `resolveOwnerArguments` left it that way because the
         // caller named only the message it answers, which is a human's direct message to this
         // session - a conversation with no issue to post into. `POST /messages/{id}/reply` is
@@ -3141,14 +3138,8 @@ export async function executeDispatchTool(
         };
       }
       const issueKey = issue();
-      const body = await textWithPictures(
-        input.tool,
-        written,
-        pictures,
-        bodyLimit,
-        issueKey,
-        (upload) => client.artifact(issueKey, upload),
-        actor
+      const body = await postWithPictures(written, bodyLimit, issueKey, (upload) =>
+        client.artifact(issueKey, upload)
       );
       const message = await client.message(issueKey, {
         body,

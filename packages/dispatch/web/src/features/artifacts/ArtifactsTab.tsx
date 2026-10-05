@@ -18,8 +18,15 @@ import {
   textSecondaryOnSurface,
 } from "../../theme/classes";
 import { ApprovalChip } from "../doc/ApprovalChip";
+import { shortSessionId } from "../refs/actor";
 import { CopyRefButton } from "../refs/CopyRefButton";
-import { buildIssuePath, buildProjectPath, documentRoute, parseIssuePath } from "../refs/routes";
+import {
+  buildIssuePath,
+  buildProjectPath,
+  buildReferencePath,
+  documentRoute,
+  parseIssuePath,
+} from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 import { artifactVersionUrl, versionsNewestFirst } from "./ArtifactHeader";
 import { ArtifactDropZone, ArtifactUploadRow, useArtifactUpload } from "./ArtifactUpload";
@@ -70,6 +77,10 @@ function kindIcon(kind: Artifact["kind"]): ReactNode {
 }
 
 function artifactPath(artifact: Artifact): string {
+  // A conversation's picture (session_id set, issue_key null, project "") has its own page.
+  if (artifact.session_id !== undefined && artifact.session_id !== null) {
+    return buildReferencePath(documentRoute(artifact));
+  }
   return artifact.issue_key === null
     ? buildProjectPath({
         kind: "document",
@@ -81,6 +92,14 @@ function artifactPath(artifact: Artifact): string {
         kind: "artifact",
         slug: artifact.slug,
       });
+}
+
+/** Who owns an artifact, as a References row names it. */
+function artifactOwnerLabel(artifact: Artifact): string {
+  if (artifact.issue_key !== null) return artifact.issue_key;
+  return artifact.session_id === undefined || artifact.session_id === null
+    ? artifact.project
+    : `agent ${shortSessionId(artifact.session_id)}`;
 }
 
 // The issue's reference closure (every artifact reachable by following references, up to 8
@@ -110,7 +129,7 @@ function References({ references }: { references: IssueReferences }): ReactNode 
                 {artifact.name}
               </Link>
               <p className={textMutedOnSurface}>
-                {artifact.issue_key ?? artifact.project} · via {via.kind} · depth {depth}
+                {artifactOwnerLabel(artifact)} · via {via.kind} · depth {depth}
               </p>
             </li>
           ))}

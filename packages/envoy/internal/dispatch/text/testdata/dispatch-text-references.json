@@ -173,6 +173,16 @@
     "refs": []
   },
   {
+    "body": "Pasted: dispatch://agent/pi.worker_2~a:b@host/artifact/shot-png here.",
+    "refs": [
+      "dispatch://agent/pi.worker_2~a:b@host/artifact/shot-png"
+    ]
+  },
+  {
+    "body": "See https://dispatch.test/agents/a%7Cb/artifacts/shot-png here.",
+    "refs": []
+  },
+  {
     "body": "![shot.png](dispatch://LEGION-1/artifact/shot-png@v1)",
     "refs": [
       "dispatch://LEGION-1/artifact/shot-png@v1"

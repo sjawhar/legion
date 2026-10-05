@@ -94,8 +94,8 @@ export function uploadedFileText(
     return buildDispatchReference(route);
   }
   // A caption is link text: a bracket or backslash in a file name would end it or escape what
-  // follows, and a line break would end the picture.
-  const caption = (file.name || artifact.name).replace(/[\\[\]]/g, "\\$&").replace(/\s+/g, " ");
+  // follows, a backtick would open a code span across it, and a line break would end the picture.
+  const caption = (file.name || artifact.name).replace(/[\\[\]`]/g, "\\$&").replace(/\s+/g, " ");
   return `![${caption}](${buildDispatchReference({ ...route, version: pinned })})`;
 }
 

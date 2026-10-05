@@ -88,6 +88,13 @@
 
 ### Changed
 
+- A new upload's slug keeps only the ASCII letters and digits of its lowercased name, each other
+  run one dash (`café.png` is `caf-png`, `スクリーンショット.png` is `png`, a name with neither is
+  `artifact`), for an issue's, a project's and an agent's conversation's uploads alike: every
+  grammar that reads a slug back (the server's text references, the dashboard's routes, 0009's
+  cleanup) is `[a-z0-9]+(-[a-z0-9]+)*`, so a slug holding another letter was stored but named
+  nothing, and a picture pasted under such a name showed as a broken image (LEGION-541). Existing
+  slugs are kept.
 - `GET /api/v1/search` ranks each kind of content (issues, documents, asks, comments, messages) on
   a list of its own and merges the lists by reciprocal rank fusion (each hit scores 1/(60 + its
   position in its list), which is now its `rank`), so a page takes each kind's best in turn where

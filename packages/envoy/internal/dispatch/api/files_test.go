@@ -202,7 +202,8 @@ func TestAClearedRowIsAnsweredByWhatTheStoreSays(t *testing.T) {
 	if served.Code != http.StatusBadGateway || responseCode(t, served) != "FILE_STORE_UNAVAILABLE" {
 		t.Fatalf("serve a version while the store is down: status=%d body=%s, want 502 FILE_STORE_UNAVAILABLE", served.Code, served.Body.String())
 	}
-	if served.Header().Get("Content-Disposition") != "" || served.Header().Get("ETag") != "" {
+	// Nor the version's year-long cache header, which would keep the failure in place of the bytes.
+	if served.Header().Get("Content-Disposition") != "" || served.Header().Get("ETag") != "" || served.Header().Get("Cache-Control") != "" {
 		t.Fatalf("a failed read sent the success headers: %v", served.Header())
 	}
 
@@ -213,6 +214,9 @@ func TestAClearedRowIsAnsweredByWhatTheStoreSays(t *testing.T) {
 	missing := dispatchRequest(t, handler, http.MethodGet, route, nil, "alice")
 	if missing.Code != http.StatusInternalServerError || responseCode(t, missing) != "FILE_MISSING" {
 		t.Fatalf("serve a version whose object is gone: status=%d body=%s, want 500 FILE_MISSING", missing.Code, missing.Body.String())
+	}
+	if got := missing.Header().Get("Cache-Control"); got != "" {
+		t.Fatalf("a version whose object is gone: Cache-Control %q, want none", got)
 	}
 
 	// Without a store at all, a cleared row is a configuration the server names: 503.

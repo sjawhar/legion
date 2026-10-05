@@ -150,9 +150,11 @@ A picture meant to be seen inline in a message, comment or ask is not uploaded w
 path in that tool's `images` (PNG, JPEG, GIF or WebP by its bytes, at most 25 MiB each). Each is uploaded to the issue (a
 project document's project; for a reply to a direct message, your own conversation) and appended after a blank line as
 one `![<file name>](dispatch://<owner>/artifact/<slug>@vN)` line, about 60 characters that count toward the body or
-question cap; a call over the cap is refused with the count before anything uploads. The `@vN` pins the version the
-upload made (the same file name again makes the next version). A plain `dispatch://KEY/artifact/<slug>` reference to an
-image stays a link with a thumbnail.
+question cap; a call the lines would carry over the cap is refused with the count before anything uploads, and again,
+with nothing posted, in the rare case where Dispatch gives an upload a longer address than that (a later version of a
+name the owner already holds, or a slug another file took first). The `@vN` pins the version the upload made (the same
+file name again makes the next version). A plain `dispatch://KEY/artifact/<slug>` reference to an image stays a link
+with a thumbnail.
 
 `dispatch_read` hands you the pictures the messages, asks and comments it shows embed, newest first, at most 8 and
 10 MiB per read, and its `Pictures:` section names each one shown, in order, and the rest by reference for

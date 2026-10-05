@@ -5,12 +5,15 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/sjawhar/envoy/internal/dispatch/files"
 	"github.com/sjawhar/envoy/internal/dispatch/files/filestest"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
 const agentSession = "01a1058e-f14f-7684-87eb-3dc885955551"
@@ -88,6 +91,99 @@ func TestAnAgentsConversationOwnsTheFilesUploadedToIt(t *testing.T) {
 	}
 	if len(backlinks.Edges) != 1 || backlinks.Edges[0].Kind != "mentions" || backlinks.Edges[0].Node.Kind != "message" {
 		t.Fatalf("edges = %+v, want the message's one mention", backlinks.Edges)
+	}
+}
+
+// A pasted picture's line addresses it by the slug its upload was given, so every slug a file name
+// can produce is one the reference grammar reads back as that artifact, whatever the name's script:
+// otherwise the picture is stored and its line names nothing.
+func TestEveryArtifactSlugReadsBackAsItsArtifact(t *testing.T) {
+	for _, name := range []string{
+		"shot.png",
+		"café.png",
+		"ÉTÉ.PNG",
+		"スクリーンショット.png",
+		"Capture d'écran 2026-10-05 à 10.15.32.png",
+		"--.png--",
+		"日本",
+	} {
+		slug := artifactSlug(name)
+		for _, reference := range []string{
+			"![" + name + "](dispatch://CORE-1/artifact/" + slug + "@v1)",
+			"![" + name + "](dispatch://agent/" + agentSession + "/artifact/" + slug + "@v1)",
+		} {
+			refs := text.Extract(reference, "")
+			if len(refs) != 1 || refs[0].Kind != "artifact" || refs[0].ID != slug {
+				t.Errorf("artifactSlug(%q) = %q, and %s reads as %#v; want that artifact", name, slug, reference, refs)
+			}
+		}
+	}
+}
+
+// Each conversation owns what was sent in it: the same file name sent to two agents is two
+// artifacts, each at version 1, and neither conversation's list, slug or bytes are the other's.
+func TestEachAgentsConversationKeepsItsFilesApartFromAnothers(t *testing.T) {
+	handler, _, _ := newTestServer(t, testServerOptions{files: filestest.NewMemory()})
+	const other = "01a1058e-f14f-7684-87eb-3dc885955552"
+	upload := func(session, name string, content []byte) uploaded {
+		t.Helper()
+		response := multipartRequest(t, handler, "/api/v1/agents/"+session+"/artifacts", map[string]string{"name": name}, name, "image/png", content, "alice")
+		if response.Code != http.StatusCreated {
+			t.Fatalf("upload %s to %s: status=%d body=%s", name, session, response.Code, response.Body.String())
+		}
+		return decodeBody[uploaded](t, response)
+	}
+
+	mine := upload(agentSession, "shot.png", []byte("mine"))
+	theirs := upload(other, "shot.png", []byte("theirs"))
+	upload(agentSession, "only-mine.png", []byte("only mine"))
+	if mine.Artifact.ID == theirs.Artifact.ID || mine.Version.Number != 1 || theirs.Version.Number != 1 {
+		t.Fatalf("shot.png to two conversations = %+v and %+v, want two artifacts each at version 1", mine, theirs)
+	}
+
+	listed := decodeBody[[]model.Artifact](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/agents/"+other+"/artifacts", nil, "alice"))
+	if len(listed) != 1 || listed[0].ID != theirs.Artifact.ID || listed[0].RefKey != "agent/"+other+"/shot-png" {
+		t.Fatalf("the other conversation's list = %+v, want its own shot-png alone", listed)
+	}
+	if read := dispatchRequest(t, handler, http.MethodGet, "/api/v1/agents/"+other+"/artifacts/only-mine-png", nil, "alice"); read.Code != http.StatusNotFound {
+		t.Fatalf("another conversation's slug: status=%d body=%s, want 404", read.Code, read.Body.String())
+	}
+	served := dispatchRequest(t, handler, http.MethodGet, "/api/v1/agents/"+other+"/artifacts/shot-png/versions/1", nil, "alice")
+	if served.Code != http.StatusOK || served.Body.String() != "theirs" {
+		t.Fatalf("the other conversation's shot-png: status=%d body=%q, want 200 with its own bytes", served.Code, served.Body.String())
+	}
+}
+
+// Uploads of one name to one conversation at once - the same clipboard picture pasted twice, both
+// named image.png - become that artifact's versions one after another, none refused, though the
+// conversation has no row to lock as an issue does.
+func TestConcurrentUploadsOfOneNameToAnAgentsConversationBecomeItsVersions(t *testing.T) {
+	handler, _, _ := newTestServer(t, testServerOptions{files: filestest.NewMemory()})
+	const uploads = 6
+	start := make(chan struct{})
+	responses := make(chan *httptest.ResponseRecorder, uploads)
+	for index := range uploads {
+		go func() {
+			<-start
+			responses <- multipartRequest(t, handler, "/api/v1/agents/"+agentSession+"/artifacts", map[string]string{"name": "image.png"}, "image.png", "image/png", []byte("paste "+strconv.Itoa(index)), "alice")
+		}()
+	}
+	close(start)
+
+	artifacts := map[string]bool{}
+	numbers := []int{}
+	for range uploads {
+		response := awaitResponse(t, responses)
+		if response.Code != http.StatusCreated {
+			t.Fatalf("concurrent upload: status=%d body=%s, want 201", response.Code, response.Body.String())
+		}
+		created := decodeBody[uploaded](t, response)
+		artifacts[created.Artifact.ID] = true
+		numbers = append(numbers, created.Version.Number)
+	}
+	slices.Sort(numbers)
+	if len(artifacts) != 1 || !slices.Equal(numbers, []int{1, 2, 3, 4, 5, 6}) {
+		t.Fatalf("concurrent uploads made artifacts %v with versions %v, want one artifact with versions 1-6", artifacts, numbers)
 	}
 }
 

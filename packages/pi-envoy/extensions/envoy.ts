@@ -741,16 +741,16 @@ export default function envoyExtension(pi: PiApi): void {
           } else {
             // Sent exactly as Enter, or an aside, at the terminal sends it, the person's pictures
             // beside their text.
-            noteInjectedUserTurn(sessionID, turn.body, turn.messageId);
-            pi.sendUserMessage(
-              await withDeliveredPictures(
-                turn.body,
-                pictureAddresses(turn.body),
-                pictureClient,
-                false
-              ),
-              turn.mode === "aside" ? { deliverAs: "aside" } : undefined
+            const content = await withDeliveredPictures(
+              turn.body,
+              pictureAddresses(turn.body),
+              pictureClient,
+              false
             );
+            // Noted right before the send, after the pictures load: a run that ends while they
+            // load clears every note (endInjectedUserTurns), and this turn must still be found.
+            noteInjectedUserTurn(sessionID, turn.body, turn.messageId);
+            pi.sendUserMessage(content, turn.mode === "aside" ? { deliverAs: "aside" } : undefined);
           }
         }
       } catch (error) {

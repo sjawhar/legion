@@ -1084,8 +1084,10 @@ type ArtifactReferences struct {
 	ReferencedBy []ReferencedBy      `json:"referenced_by"`
 }
 
-// GraphNode is one end of a reference-graph edge. IssueKey and Project locate it; Ref is its
-// dispatch:// address and is empty for session nodes, which have none.
+// GraphNode is one end of a reference-graph edge. IssueKey and Project locate it; an artifact an
+// agent's conversation owns has neither and is located by Ref alone
+// (`dispatch://agent/<session id>/artifact/<slug>`). Ref is its dispatch:// address and is empty
+// for session nodes, which have none.
 type GraphNode struct {
 	Kind     string  `json:"kind"`
 	ID       string  `json:"id"`

@@ -365,7 +365,10 @@ export type RenderInboundResult = {
  *  or reworded ask's question, an answer's typed text, a resolution's reason. */
 function eventPictures(event: DispatchEvent): string[] {
   let text: string | null | undefined;
-  if (event.type.startsWith("message.") || event.type.startsWith("comment.")) {
+  if (event.type.startsWith("message.")) {
+    const parsed = MessagePayloadSchema.safeParse(event.payload);
+    text = parsed.success ? parsed.data.body : undefined;
+  } else if (event.type.startsWith("comment.")) {
     const parsed = CommentPayloadSchema.safeParse(event.payload);
     text = parsed.success ? parsed.data.body : undefined;
   } else if (event.type.startsWith("ask.")) {
@@ -373,14 +376,18 @@ function eventPictures(event: DispatchEvent): string[] {
       event.type === "ask.edited" ? AskEditedPayloadSchema : AskPayloadSchema
     ).safeParse(event.payload);
     if (parsed.success) {
-      text =
-        event.type === "ask.answered"
-          ? parsed.data.answer?.text
-          : event.type === "ask.resolved"
-            ? parsed.data.resolution?.reason
-            : event.type === "ask.opened" || event.type === "ask.edited"
-              ? parsed.data.question
-              : undefined;
+      switch (event.type) {
+        case "ask.answered":
+          text = parsed.data.answer?.text;
+          break;
+        case "ask.resolved":
+          text = parsed.data.resolution?.reason;
+          break;
+        case "ask.opened":
+        case "ask.edited":
+          text = parsed.data.question;
+          break;
+      }
     }
   }
   return typeof text === "string" ? pictureAddresses(text) : [];

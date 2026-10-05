@@ -16,7 +16,6 @@ import (
 	"path"
 	"strconv"
 	"strings"
-	"unicode"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -63,6 +62,7 @@ type artifactUploadInput struct {
 
 // artifactTarget is the owner an upload or a slug lookup names: an issue (IssueKey), a project
 // (Project alone), or an agent's conversation (Session alone), which holds files and images only.
+// Exactly one of the three is set; refPrefix and storeArtifact read Session first, then IssueKey.
 type artifactTarget struct {
 	IssueKey *string
 	Project  string
@@ -1273,7 +1273,12 @@ func artifactSlug(name string) string {
 	var slug strings.Builder
 	previousDash := false
 	for _, r := range strings.ToLower(name) {
-		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+		// ASCII only: every grammar that reads a slug back - text.artifactSlugPattern, the
+		// dashboard's own artifactSlugPattern, 0009's cleanup of malformed references - spells it
+		// [a-z0-9]+(-[a-z0-9]+)*, so a slug holding another letter would be stored and then name
+		// nothing, and the picture a `![name](dispatch://.../artifact/<slug>@vN)` line shows would
+		// never load (LEGION-541).
+		if ('a' <= r && r <= 'z') || ('0' <= r && r <= '9') {
 			slug.WriteRune(r)
 			previousDash = false
 			continue

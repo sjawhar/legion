@@ -64,11 +64,14 @@ func TestMigrate0070AddressesAnAgentsArtifactsAndKeepsEveryOtherRefKey(t *testin
 	if _, err := store.Pool.Exec(ctx, `update artifacts set ref_key = 'CORE/other' where name = 'notes.md'`); err != nil {
 		t.Fatalf("write ref_key directly: %v", err)
 	}
+	if keys := refKeys(); keys["notes.md"] != "CORE/notes" {
+		t.Fatalf("ref_key after a direct write = %q, want CORE/notes from the row", keys["notes.md"])
+	}
 	if _, err := store.Pool.Exec(ctx, `update artifacts set slug = 'notes-2' where name = 'notes.md'`); err != nil {
 		t.Fatalf("rename a slug: %v", err)
 	}
 	if keys := refKeys(); keys["notes.md"] != "CORE/notes-2" {
-		t.Fatalf("ref_key after a direct write and a slug change = %q, want CORE/notes-2 from the row", keys["notes.md"])
+		t.Fatalf("ref_key after a slug change = %q, want CORE/notes-2 from the row", keys["notes.md"])
 	}
 
 	for name, insert := range map[string]string{

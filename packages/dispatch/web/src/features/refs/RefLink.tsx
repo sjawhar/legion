@@ -63,16 +63,18 @@ export const pictureThumbnailClassName = `not-prose inline-block h-10 w-10 shrin
  * hand-written reference never shows a broken-image glyph. */
 export function RefLink({ route }: { route: DispatchReferenceRoute }): ReactNode {
   const { picture, title } = useReferenceTarget(route);
-  const [failed, setFailed] = useState(false);
+  // The address that failed, not a flag: a plain reference names the latest version, so a version
+  // uploaded since gets its own load instead of inheriting the last one's failure.
+  const [failedPicture, setFailedPicture] = useState<string>();
   return (
     <>
-      {picture === undefined || failed ? null : (
+      {picture === undefined || picture === failedPicture ? null : (
         <>
           <img
             alt=""
             className={pictureThumbnailClassName}
             loading="lazy"
-            onError={() => setFailed(true)}
+            onError={() => setFailedPicture(picture)}
             src={picture}
           />{" "}
         </>

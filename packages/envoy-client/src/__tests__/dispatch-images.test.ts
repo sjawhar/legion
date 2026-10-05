@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, truncateSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { type DispatchToolResult, executeDispatchTool } from "../dispatch-execute";
+import { pictureAddresses } from "../dispatch-pictures";
 import { ToolInputError } from "../tool-input-errors";
 
 const config = { enabled: true, url: "http://dispatch.test", token: "secret", error: null };
@@ -215,6 +216,77 @@ describe("sending pictures", () => {
       `images: ${huge} is 26,214,401 bytes, over the 25 MiB one Dispatch upload takes`
     );
     expect(server.requests).toEqual([]);
+  });
+
+  test("a GIF or a WebP is sent typed by its bytes, and another RIFF file is no picture", async () => {
+    const server = dispatch();
+    const RIFF = [0x52, 0x49, 0x46, 0x46, 0x24, 0x00, 0x00, 0x00];
+    const gif = file("moving.gif", [0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x01, 0x00]);
+    const webp = file("photo.webp", [...RIFF, 0x57, 0x45, 0x42, 0x50]);
+    const wave = file("sound.webp", [...RIFF, 0x57, 0x41, 0x56, 0x45]);
+
+    await run(
+      "dispatch_message",
+      { issue: "DSP-41", body: "Both.", images: [gif, webp] },
+      server.fetchImpl
+    );
+    const failure = await refusal(
+      run("dispatch_message", { issue: "DSP-41", body: "Hear.", images: [wave] }, server.fetchImpl)
+    );
+
+    expect(server.uploads.map((upload) => upload.type)).toEqual(["image/gif", "image/webp"]);
+    expect((failure as ToolInputError).problems).toEqual([
+      `images: ${wave} is not a PNG, JPEG, GIF or WebP picture (judged by its bytes, not its name)`,
+    ]);
+  });
+
+  // The cap is judged before the upload on the slug Dispatch will give the name, so a name holding
+  // a letter outside a-z must be predicted as the server slugs it, or a body that fits is refused.
+  test("a body that fits the cap exactly with a non-ASCII file name's picture is posted", async () => {
+    const server = dispatch();
+    const line = "![café.png](dispatch://DSP-41/artifact/caf-png@v1)";
+    const body = "x".repeat(2000 - 2 - line.length);
+
+    await run(
+      "dispatch_message",
+      { issue: "DSP-41", body, images: [file("café.png", PNG)] },
+      server.fetchImpl
+    );
+
+    expect(server.posted.map((posted) => posted.body)).toEqual([`${body}\n\n${line}`]);
+  });
+
+  test("a picture of exactly 25 MiB, the most one Dispatch upload takes, is uploaded and posted", async () => {
+    const server = dispatch();
+    const largest = file("largest.png", PNG, 25 * MiB);
+
+    await run(
+      "dispatch_message",
+      { issue: "DSP-41", body: "Full size.", images: [largest] },
+      server.fetchImpl
+    );
+
+    expect(server.uploads.map((upload) => upload.size)).toEqual([25 * MiB]);
+    expect(server.posted.map((body) => body.body)).toEqual([
+      "Full size.\n\n![largest.png](dispatch://DSP-41/artifact/largest-png@v1)",
+    ]);
+  });
+
+  test("a file name holding brackets or a backslash still reads back as its picture", async () => {
+    const server = dispatch();
+    const names = ["shot [1].png", "half].png", "back\\slash.png"];
+
+    await run(
+      "dispatch_message",
+      { issue: "DSP-41", body: "Odd names.", images: names.map((name) => file(name, PNG)) },
+      server.fetchImpl
+    );
+
+    expect(server.posted.flatMap((body) => pictureAddresses(String(body.body)))).toEqual([
+      "dispatch://DSP-41/artifact/shot-1-png@v1",
+      "dispatch://DSP-41/artifact/half-png@v1",
+      "dispatch://DSP-41/artifact/back-slash-png@v1",
+    ]);
   });
 
   test("a reply to a direct message uploads its pictures to this session's own conversation", async () => {
@@ -575,5 +647,74 @@ describe("reading pictures", () => {
       "Pictures:\n- image 1: dispatch://DSP-42/artifact/chart-png@v2 (chart.png, image/png, 32 bytes)\nReferenced by:"
     );
     expect(requests).toContain("/api/v1/artifacts/chart-1/versions/2");
+  });
+
+  test("dispatch_read of an issue's log shows the pictures every kind of text in it embeds, newest first", async () => {
+    const address = (n: number) => `dispatch://DSP-41/artifact/p${n}-png@v1`;
+    const shows = (n: number) => `Number ${n}:\n\n![p${n}.png](${address(n)})`;
+    const event = (seq: number, type: string, payload: Record<string, unknown>) => ({
+      seq,
+      type,
+      actor: { kind: "user", id: "sami" },
+      created_at: `2026-10-04T10:0${seq}:00Z`,
+      payload,
+    });
+    const events = [
+      event(1, "message.created", { body: shows(1) }),
+      event(2, "comment.created", { body: shows(2) }),
+      event(3, "comment.answered", { body: shows(3) }),
+      event(4, "ask.opened", { question: shows(4) }),
+      event(5, "ask.answered", { question: "Which?", answer: { selected: [], text: shows(5) } }),
+      event(6, "ask.resolved", {
+        question: "Which other?",
+        resolution: { kind: "resolved", reason: shows(6) },
+      }),
+      event(7, "message.answered", { body: shows(7) }),
+    ];
+    const bytes = png(16);
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const { pathname } = new URL(String(url));
+      if (pathname === "/api/v1/issues/DSP-41") {
+        return json({
+          key: "DSP-41",
+          title: "Pictures",
+          status: "in_progress",
+          route: null,
+          open_asks: [],
+          children: [],
+          last_seq: events.length,
+        });
+      }
+      if (pathname === "/api/v1/issues/DSP-41/events") return json(events);
+      const slug = pathname.match(/^\/api\/v1\/issues\/DSP-41\/artifacts\/(p\d-png)$/)?.[1];
+      if (slug !== undefined) {
+        return json({
+          id: slug,
+          issue_key: "DSP-41",
+          project: "DSP",
+          slug,
+          name: slug.replace("-png", ".png"),
+          kind: "image",
+          versions: [{ number: 1, mime: "image/png", size: bytes.length }],
+        });
+      }
+      if (/^\/api\/v1\/artifacts\/p\d-png\/versions\/1$/.test(pathname)) {
+        return new Response(bytes, { headers: { "Content-Type": "image/png" } });
+      }
+      throw new Error(`unexpected request: ${pathname}`);
+    };
+
+    const result = await run(
+      "dispatch_read",
+      { ref: "dispatch://DSP-41/log" },
+      fetchImpl as typeof fetch
+    );
+
+    const shown = result.text
+      .split("\n")
+      .filter((line) => line.startsWith("- image "))
+      .map((line) => line.split(" ")[3]);
+    expect(shown).toEqual([7, 6, 5, 4, 3, 2, 1].map(address));
+    expect(result.images).toHaveLength(7);
   });
 });

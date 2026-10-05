@@ -38,7 +38,7 @@ export function isPictureType(mime: string): mime is PictureType {
 /** A picture as the hosts hand it to a model: base64 bytes and their type. */
 export interface ToolImage {
   readonly data: string;
-  readonly mimeType: string;
+  readonly mimeType: PictureType;
 }
 
 /** How many leading bytes `sniffPictureType` reads. */
@@ -74,10 +74,22 @@ export function toolImage(bytes: Uint8Array): ToolImage | undefined {
   return { data: Buffer.from(bytes).toString("base64"), mimeType };
 }
 
+/** A picture as a host's content block: the shape Oh My Pi's `ImageContent` and MCP's image
+ *  content share, so a result's pictures spread into either after its text. */
+export interface ImageBlock extends ToolImage {
+  readonly type: "image";
+}
+
+/** `images` as the image blocks that follow a result's text, in order. */
+export function imageBlocks(images: readonly ToolImage[]): ImageBlock[] {
+  return images.map(({ data, mimeType }) => ({ type: "image", data, mimeType }));
+}
+
 /** The line a sent picture is written as. The file name is its caption, with the characters that
- *  would end CommonMark's image text escaped and a line break read as a space. */
+ *  would end CommonMark's image text or open a code span across it (bracket, backslash or
+ *  backtick) escaped and a line break read as a space. */
 export function pictureLine(name: string, address: string): string {
-  const caption = name.replace(/[\\[\]]/g, "\\$&").replace(/[\r\n]+/g, " ");
+  const caption = name.replace(/[\\[\]`]/g, "\\$&").replace(/[\r\n]+/g, " ");
   return `![${caption}](${address})`;
 }
 

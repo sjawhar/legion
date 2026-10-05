@@ -70,8 +70,9 @@ const projectArtifactReferencePattern = new RegExp(
   `^artifact/(${artifactSlugPattern})(?:@v([1-9]\\d*))?(?:/(ask|comment)/([^/?#\\s]+))?$`
 );
 /** A session id as a reference names it: no `/`, `?` or `#`, no whitespace (Unicode spaces and
- *  U+FEFF among it) and, checked on the whole reference, no control character - the server's rule. */
-const sessionIdPattern = "[^/?#\\s\\p{Z}]+";
+ *  U+FEFF among it), none of the characters that end a reference in text (<>"'`[]|) and, checked
+ *  on the whole reference, no control character - the server's rule (`text.IsSessionID`). */
+const sessionIdPattern = "[^/?#\\s\\p{Z}<>\"'`\\[\\]|]+";
 const sessionIdOnlyPattern = new RegExp(`^${sessionIdPattern}$`, "u");
 const agentArtifactReferencePattern = new RegExp(
   `^(${sessionIdPattern})/artifact/(${artifactSlugPattern})(?:@v([1-9]\\d*))?$`,
@@ -567,12 +568,18 @@ export function documentRoute(
     : { key: artifact.issue_key, kind: "artifact", slug: artifact.slug, version };
 }
 
+/** The artifact a reference names: its owner, its slug, and the version it pins when it pins
+ *  one. */
+export interface ReferencedArtifact {
+  readonly owner: ArtifactOwner;
+  readonly slug: string;
+  readonly version: number | undefined;
+}
+
 /** The artifact a reference names, as its owner, its slug and the version it pins: an issue's
  *  artifact, a project document (not an ask or comment on one), or an agent conversation's
  *  artifact. Undefined for a reference to anything else. */
-export function referencedArtifact(
-  route: DispatchReferenceRoute
-): { owner: ArtifactOwner; slug: string; version: number | undefined } | undefined {
+export function referencedArtifact(route: DispatchReferenceRoute): ReferencedArtifact | undefined {
   switch (route.kind) {
     case "artifact":
       return { owner: { issue: route.key }, slug: route.slug, version: route.version };

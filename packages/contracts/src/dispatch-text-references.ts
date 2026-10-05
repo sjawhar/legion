@@ -129,6 +129,14 @@ export const DISPATCH_TEXT_REFERENCES: readonly {
     refs: ["dispatch://agent/01a1058e-f14f-7684-87eb-3dc885955551/artifact/shot-png@v3"],
   },
   { body: "Not an owner: dispatch://agent/a/b/artifact/shot-png here.", refs: [] },
+  // Any other character is part of the id, punctuation included.
+  {
+    body: "Pasted: dispatch://agent/pi.worker_2~a:b@host/artifact/shot-png here.",
+    refs: ["dispatch://agent/pi.worker_2~a:b@host/artifact/shot-png"],
+  },
+  // A page whose session id decodes to a character that ends a reference names nothing: no
+  // reference could carry that id, and Dispatch refuses it as an owner.
+  { body: "See https://dispatch.test/agents/a%7Cb/artifacts/shot-png here.", refs: [] },
   // A picture's address is read through the image syntax that shows it.
   {
     body: "![shot.png](dispatch://LEGION-1/artifact/shot-png@v1)",

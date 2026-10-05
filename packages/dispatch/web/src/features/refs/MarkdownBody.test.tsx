@@ -84,6 +84,29 @@ describe("Dispatch pictures", () => {
     }
   });
 
+  // The composer escapes a file name's brackets and backslashes so the caption stays one; a reader
+  // and a screen reader still get the file's own name.
+  test("an escaped caption names the picture by its file name", async () => {
+    const view = render(
+      withQueries(
+        <MarkdownBody
+          markdown={
+            "![face \\[1\\] back\\\\slash.png](dispatch://agent/ses-1/artifact/face-png@v1)"
+          }
+        />
+      )
+    );
+
+    try {
+      const face = await within(view.container).findByRole("img", {
+        name: "face [1] back\\slash.png",
+      });
+      expect(face.getAttribute("src")).toBe("/api/v1/agents/ses-1/artifacts/face-png/versions/1");
+    } finally {
+      view.unmount();
+    }
+  });
+
   test("the inline variant shows a Dispatch picture as a thumbnail beside its caption", async () => {
     const view = render(
       withQueries(
