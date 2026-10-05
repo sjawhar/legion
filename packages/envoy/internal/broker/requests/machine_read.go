@@ -243,6 +243,32 @@ type PendingSummary struct {
 	RequestedAt time.Time
 }
 
+// pendingForApproverQuery is PendingForApprover's whole SQL text, pulled out so
+// TestPendingForApproverAvoidsSequentialScans (same package) can PREPARE and EXPLAIN the exact
+// statement the pool runs rather than a copy that could drift from it.
+//
+// The launcher_credential branch's NOT EXISTS spells its terminal-event predicate literally
+// (event in ('approved','denied','expired','cancelled')) rather than binding
+// record.TerminalEventNames() as a parameter: credential_request_events' partial unique index
+// (credential_request_decision, on (record_id) where event in (...),
+// store/migrations/0005_credential_requests.up.sql) only serves this probe when Postgres can
+// prove the query's own predicate implies the index's at plan time, and a bound array parameter
+// proves nothing once the statement's plan goes generic — the shape a pooled connection settles
+// into after a few executions of the same prepared statement (Postgres's own cost-based
+// custom/generic switch; this query, run on a poll every 15 s per open Dispatch tab, settles into
+// exactly that shape). machine.ExpirePending's ON CONFLICT target gives the identical reasoning
+// for the same index. Bound as a parameter, this NOT EXISTS falls back to a full sequential scan
+// of credential_request_events on every call once the plan is generic; written literally, every
+// plan shape reaches the index instead. A later change to the terminal event list must change
+// this literal too, which TestPendingForApproverTerminalEventsLiteralMatchesTheList pins against
+// record.TerminalEventNames().
+const pendingForApproverQuery = `select cr.id, cr.kind, cr.body, cr.created_at from credential_requests cr
+	where (
+		cr.approver in ($1, $2) and cr.kind='agent_secret' and cr.id in (select r.record_id from requests r where r.state='pending')
+		or cr.approver=$1 and cr.kind='launcher_credential' and not exists (
+			select 1 from credential_request_events ev where ev.record_id=cr.id and ev.event in ('approved','denied','expired','cancelled'))
+	) order by cr.created_at desc`
+
 // PendingForApprover lists every still-pending credential-request record — of either kind — that
 // approver may decide, newest first: GET /v1/pending's exact contract. That is every record naming
 // approver, and every agent_secret record whose approver is record.AnyoneApprover. The rule for
@@ -251,14 +277,14 @@ type PendingSummary struct {
 // (store.EndPendingRequests, ApplyDecision), but a request an ended enrollment cancelled before
 // endEnrollment wrote that event carries none, so the request row is the truth. A machine login
 // has no request row and is pending while it carries no terminal decision event, matching
-// credential_request_decision's own partial index.
+// credential_request_decision's own partial index — see pendingForApproverQuery's own comment for
+// why that match requires a literal predicate, not record.TerminalEventNames() bound as a
+// parameter. The approver scan itself is credential_requests_approver
+// (store/migrations/0011_credential_requests_approver.up.sql): with 300,000 historical rows and
+// no index, this was one sequential scan of the whole table on every 15 s poll tick of every open
+// Dispatch tab (336 ms; LEGION-575's review).
 func (m *Machine) PendingForApprover(ctx context.Context, approver string) ([]PendingSummary, error) {
-	rows, err := m.Store.Pool.Query(ctx, `select cr.id, cr.kind, cr.body, cr.created_at from credential_requests cr
-		where (
-			cr.approver in ($1, $2) and cr.kind='agent_secret' and cr.id in (select r.record_id from requests r where r.state='pending')
-			or cr.approver=$1 and cr.kind='launcher_credential' and not exists (
-				select 1 from credential_request_events ev where ev.record_id=cr.id and ev.event = any($3))
-		) order by cr.created_at desc`, record.CanonicalLogin(approver), record.AnyoneApprover, record.TerminalEventNames())
+	rows, err := m.Store.Pool.Query(ctx, pendingForApproverQuery, record.CanonicalLogin(approver), record.AnyoneApprover)
 	if err != nil {
 		return nil, err
 	}
