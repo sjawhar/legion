@@ -177,7 +177,7 @@ test("project page groups issues by status in board order; filters narrow issues
       await page.getByRole("button", { name: "Filters · 0 active" }).click();
       await expectTouchTarget(filterPicker(page, "Status"));
       await expectTouchTarget(filterPicker(page, "Labels"));
-      await expectTouchTarget(page.getByRole("button", { name: "Needs you" }));
+      await expectTouchTarget(page.getByRole("button", { exact: true, name: "Needs you" }));
       await expectTouchTarget(page.getByRole("button", { name: "Unread" }));
       await filterPicker(page, "Status").click();
       await expectTouchTarget(page.getByRole("option", { exact: true, name: "Todo" }));
