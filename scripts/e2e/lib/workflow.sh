@@ -356,9 +356,15 @@ smoke_main_leftovers() {
 # the poll and the merge is refused by its own sha instead of silently merging a later one. Each
 # gh call carries its own timeout (rig.sh's until_true house rule: a poll that never returns would
 # hold the wait past its bound), and a failed read counts as not yet clean rather than ending the
-# whole run through the caller's ERR trap — `read` on an empty or truncated process substitution
-# (a gh call that failed or was killed by its own timeout) itself returns non-zero, which `set -e`
-# does not exempt here, so the read is followed by its own `|| state=""`.
+# whole run through the caller's ERR trap. Two separate things to keep failing quietly: `read` on
+# an empty or truncated process substitution (the poll's gh call failed or was killed by its own
+# timeout) itself returns non-zero, which `set -e` does not exempt, so the read is followed by its
+# own `|| state=""`; and under `set -E` the process substitution's subshell inherits the caller's
+# ERR trap too, which would otherwise print a false "CHECK ... FAIL: line N exited ..." line for
+# every failed or timed-out poll even though the run carries on (and may still pass) — the `|| true`
+# inside the substitution keeps that subshell's own exit status 0, so nothing fires there. The
+# `|| echo` inside the timeout failure message's diagnostic read needs no such guard: it is already
+# the left side of a `||`, which is exempt whether or not it is in a process substitution.
 merge_when_clean() {
   local repo_name=$1 pr=$2
   shift 2
@@ -366,7 +372,7 @@ merge_when_clean() {
   note "waiting up to 300s for $repo_name#$pr's merge state to read CLEAN under its ruleset"
   while ((SECONDS - started < 300)); do
     polls=$((polls + 1))
-    read -r state head_sha < <(timeout 60 gh -R "$repo_name" pr view "$pr" --json mergeStateStatus,headRefOid --jq '[.mergeStateStatus, .headRefOid] | @tsv') || state=""
+    read -r state head_sha < <(timeout 60 gh -R "$repo_name" pr view "$pr" --json mergeStateStatus,headRefOid --jq '[.mergeStateStatus, .headRefOid] | @tsv' || true) || state=""
     [ "$state" = CLEAN ] && break
     if ((SECONDS - beat >= 60)); then
       beat=$SECONDS

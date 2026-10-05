@@ -1110,9 +1110,13 @@ begin early-merge-skips-ready
 # released here), not GitHub's own merge computation: $root2's pull request targets
 # $scratch_base, which carries no ruleset, so merge_when_clean's wait here is only for GitHub to
 # finish computing this head's own mergeability (mergeStateStatus settles off its own UNKNOWN
-# moments after a push; nothing here is gated on a required check). Nothing but the merger's own
-# handoff_complete moves $root2 toward a READY, which stays impossible for as long as it is held.
-# The merge still lands before any READY exists.
+# moments after a push; nothing here is gated on a required check). CLEAN still means more than
+# "no ruleset is blocking it": GitHub's UNSTABLE is "mergeable despite a non-passing commit
+# status", so waiting for CLEAN rather than settling for UNSTABLE also confirms every check on
+# this head actually passed — which matters here, since $root2's retro push (this check's own
+# last push to it) runs the project's full CI. Nothing but the merger's own handoff_complete moves
+# $root2 toward a READY, which stays impossible for as long as it is held. The merge still lands
+# before any READY exists.
 merge_when_clean "$repo" "${pr_of[$root2]}" --squash --delete-branch
 until_true 300 "the pr-merged notice on $root2's architect" notice_delivered "$root2" architect "$(notice_needle pr-merged "$root2")"
 issue_phase "$root2" merging >/dev/null || soft "$root2 left merging on the early merge"
