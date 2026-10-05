@@ -293,7 +293,7 @@ func TestPushRefusesAHeadWhoseMessageCarriesACIKeyword(t *testing.T) {
 		{"chore: release the widget [skip ci]", "widget: fix the line", map[string]string{"widget.txt": "two\n"}},
 		{"widget: fix the line\n\n[ci skip] while the sandbox is down", "widget: fix the line", map[string]string{"widget.txt": "three\n"}},
 		{"widget: fix the line\n\nNo CI needed [NO CI]", "widget: fix the line", map[string]string{"widget.txt": "four\n"}},
-		{"test: record handoff [skip ci]", "test: record handoff", map[string]string{".legion/test.json": "{}\n"}},
+		{"test: record handoff [skip ci]", "test: record handoff", map[string]string{".legion/LEGION-7/test.json": "{}\n"}},
 	} {
 		r.commit(step.message, step.files)
 		code, output := r.push()
@@ -305,5 +305,31 @@ func TestPushRefusesAHeadWhoseMessageCarriesACIKeyword(t *testing.T) {
 			t.Fatalf("the push of %q after the keyword was taken out = %d %q", step.message, code, output)
 		}
 		first = r.pushed()
+	}
+}
+
+// LEGION_ISSUE names the branch legion push moves and the handoff paths it lets skip CI, and a
+// worker sets its own environment: a value that is not a Dispatch issue key - a traversal, an
+// absolute path, a nested path, nothing - is refused before anything is read or pushed, and the
+// remote branch does not move.
+func TestPushRefusesAnIssueThatIsNotAnIssueKey(t *testing.T) {
+	r := newPushRig(t)
+	r.commit("widget: add the line", map[string]string{"widget.txt": "one\n"})
+	if code, output := r.push(); code != 0 {
+		t.Fatalf("the code push = %d %q", code, output)
+	}
+	first := r.pushed()
+	r.commit("test: record handoff", map[string]string{".legion/LEGION-7/test.json": "{}\n"})
+	for _, tc := range []struct{ issue, refusal string }{
+		{"../../escape", "is not a Dispatch issue key"},
+		{"/abs", "is not a Dispatch issue key"},
+		{"A/B", "is not a Dispatch issue key"},
+		{"", "LEGION_ISSUE is not set"},
+	} {
+		t.Setenv("LEGION_ISSUE", tc.issue)
+		code, output := r.push()
+		if code != 1 || !strings.Contains(output, tc.refusal) || r.pushed() != first {
+			t.Fatalf("legion push with LEGION_ISSUE=%q = %d %q, remote %q; want a refusal saying %q leaving %q", tc.issue, code, output, r.pushed(), tc.refusal, first)
+		}
 	}
 }

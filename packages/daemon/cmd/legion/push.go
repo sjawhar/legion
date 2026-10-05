@@ -134,9 +134,11 @@ func runPush(_ context.Context, args []string, stdout, stderr io.Writer) int {
 }
 
 func push(workspaceFlag string, stdout, stderr io.Writer) error {
-	issue := os.Getenv("LEGION_ISSUE")
-	if issue == "" {
-		return errors.New("LEGION_ISSUE is not set")
+	// Validated before anything is built from it: the branch, the recorded tip's file name and
+	// skipsCI's permitted paths all name the issue.
+	issue, err := resolveIssue()
+	if err != nil {
+		return err
 	}
 	jj := os.Getenv("LEGION_JJ_PATH")
 	if jj == "" || !filepath.IsAbs(jj) {
@@ -146,7 +148,7 @@ func push(workspaceFlag string, stdout, stderr io.Writer) error {
 	if dir == "" {
 		dir = os.Getenv("LEGION_WORKSPACE")
 	}
-	dir, err := resolveWorkspace(dir)
+	dir, err = resolveWorkspace(dir)
 	if err != nil {
 		return err
 	}
@@ -234,9 +236,9 @@ func skipsCI(jj, dir, issue, pushed, rewritten string) (bool, error) {
 	if base == "" {
 		base = "heads(::@- & ::trunk())"
 	}
-	planPath := filepath.ToSlash(filepath.Join(".legion", issue, "plan.json"))
-	testPath := filepath.ToSlash(filepath.Join(".legion", issue, "test.json"))
-	reviewPath := filepath.ToSlash(filepath.Join(".legion", issue, "review.json"))
+	planPath := filepath.ToSlash(handoffFile(issue, "plan.json"))
+	testPath := filepath.ToSlash(handoffFile(issue, "test.json"))
+	reviewPath := filepath.ToSlash(handoffFile(issue, "review.json"))
 	permitted := fmt.Sprintf("files(~%q & ~%q & ~%q)", planPath, testPath, reviewPath)
 	touching, err := pushJJ(jj, dir, "log", "--no-graph", "-T", `commit_id ++ "\n"`, "-r", base+"..@- & "+permitted)
 	if err != nil || touching != "" {

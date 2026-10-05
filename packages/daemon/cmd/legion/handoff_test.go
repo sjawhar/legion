@@ -152,6 +152,90 @@ func TestHandoffReadNeverFallsBackToAnotherTreesLegacyHandoff(t *testing.T) {
 	}
 }
 
+// LEGION_ISSUE names the tree's own handoff directory, .legion/<issue>/, and a worker sets its own
+// environment. A value that is not a Dispatch issue key - a traversal, an absolute path, a nested
+// path, nothing - is refused before any path is built from it, by write, read and complete alike,
+// and nothing is written outside the workspace's .legion/<issue>/.
+func TestHandoffCommandsRefuseAnIssueThatIsNotAnIssueKey(t *testing.T) {
+	for _, tc := range []struct{ name, issue, refusal string }{
+		{"a traversal", "../../escape", "is not a Dispatch issue key"},
+		{"an absolute path", "/abs", "is not a Dispatch issue key"},
+		{"a nested path", "A/B", "is not a Dispatch issue key"},
+		{"nothing", "", "LEGION_ISSUE is not set"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			parent := t.TempDir()
+			workspace := filepath.Join(parent, "workspace")
+			if err := os.MkdirAll(workspace, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("LEGION_ISSUE", tc.issue)
+			for _, args := range [][]string{
+				{"write", "--workspace", workspace, "--phase", "test", "--data", writableHandoffs["test"]},
+				{"read", "--workspace", workspace, "--phase", "test"},
+				{"read", "--workspace", workspace},
+			} {
+				var out, errb bytes.Buffer
+				if code := run(context.Background(), append([]string{"legion", "handoff"}, args...), &out, &errb); code != 1 || !strings.Contains(errb.String(), tc.refusal) {
+					t.Fatalf("legion handoff %v with LEGION_ISSUE=%q = %d, stderr %q; want a refusal saying %q", args, tc.issue, code, errb.String(), tc.refusal)
+				}
+			}
+			if entries, err := os.ReadDir(parent); err != nil || len(entries) != 1 {
+				t.Fatalf("%s holds %v (%v), want the workspace alone", parent, entries, err)
+			}
+			if _, err := os.Stat(filepath.Join(workspace, ".legion")); !os.IsNotExist(err) {
+				t.Fatalf(".legion after the refused write: %v, want none", err)
+			}
+
+			t.Setenv("LEGION_ROLE", "tester")
+			t.Setenv("LEGION_JJ_PATH", fakeHandoffJJ(t, "c0ffee"))
+			bodies := handoffDaemonFor(t, tc.issue, phase.Testing)
+			var out, errb bytes.Buffer
+			code := run(context.Background(), []string{"legion", "handoff", "complete", "--workspace", workspace, "--summary", "tests passed", "--verdict", "pass"}, &out, &errb)
+			if code != 1 || len(*bodies) != 0 || !strings.Contains(errb.String(), tc.refusal) {
+				t.Fatalf("handoff complete with LEGION_ISSUE=%q = %d, daemon read %v, stderr %q; want a refusal saying %q before any request", tc.issue, code, *bodies, errb.String(), tc.refusal)
+			}
+		})
+	}
+}
+
+// A role that wrote its handoff at the flat .legion/<phase>.json under the binary before
+// dispatch://LEGION-565 and completes under this one is not refused at the rollout: the completion
+// falls back to the flat file when the per-issue one is absent and the flat file's stamped issue is
+// the tree's own, and reports the commit that carries it. Another tree's flat handoff is never
+// this tree's.
+func TestHandoffCompleteFallsBackToItsOwnLegacyHandoff(t *testing.T) {
+	for _, tc := range []struct {
+		name, stamp string
+		ok          bool
+	}{
+		{name: "stamped by this tree", stamp: "THIS-1", ok: true},
+		{name: "stamped by another tree", stamp: "EARLIER-1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			workspace, jj := handoffRepo(t)
+			t.Chdir(workspace)
+			writeLegacyHandoffFile(t, workspace, "implement.json", `{"issue":"`+tc.stamp+`"}`+"\n")
+			handoffJJ(t, jj, workspace, "commit", "-m", "implement: record handoff")
+			carrying := handoffJJ(t, jj, workspace, "log", "-r", "@-", "--no-graph", "-T", "commit_id")
+			t.Setenv("LEGION_ROLE", "implementer")
+			t.Setenv("LEGION_JJ_PATH", jj)
+			bodies := handoffDaemon(t, phase.Implementing)
+			var out, errb bytes.Buffer
+			code := run(context.Background(), []string{"legion", "handoff", "complete", "--summary", "implemented"}, &out, &errb)
+			if tc.ok {
+				if code != 0 || len(*bodies) != 1 || (*bodies)[0]["commit"] != carrying {
+					t.Fatalf("handoff complete on this tree's flat handoff = %d, daemon read %v, stderr %q; want one completion naming %s", code, *bodies, errb.String(), carrying)
+				}
+				return
+			}
+			if code != 1 || len(*bodies) != 0 || !strings.Contains(errb.String(), filepath.Join(".legion", "THIS-1", "implement.json")) {
+				t.Fatalf("handoff complete on another tree's flat handoff = %d, daemon read %v, stderr %q; want a refusal naming .legion/THIS-1/implement.json before any request", code, *bodies, errb.String())
+			}
+		})
+	}
+}
+
 // A handoff past one argv string's 128 KiB cap (MAX_ARG_STRLEN) can only arrive on stdin: the
 // legion tool sends every handoff_write payload that way.
 func TestHandoffWriteReadsAPayloadOverTheArgvCapFromStdin(t *testing.T) {
@@ -469,9 +553,16 @@ esac
 // answers /legion/v1/handoff/complete, and hands back the completion bodies it read.
 func handoffDaemon(t *testing.T, p phase.Phase) *[]map[string]any {
 	t.Helper()
+	return handoffDaemonFor(t, "THIS-1", p)
+}
+
+// handoffDaemonFor is handoffDaemon with the pane's issue, as LEGION_ISSUE names it and the state
+// records it, set to issue.
+func handoffDaemonFor(t *testing.T, issue string, p phase.Phase) *[]map[string]any {
+	t.Helper()
 	bodies := &[]map[string]any{}
 	state := api.State{Issues: map[string]api.Issue{
-		"THIS-1":  {Key: "THIS-1", Generation: 1, Phase: p, PullRequest: &api.PullRequestView{Number: 42, Head: "c0de"}},
+		issue:     {Key: issue, Generation: 1, Phase: p, PullRequest: &api.PullRequestView{Number: 42, Head: "c0de"}},
 		"OTHER-2": {Key: "OTHER-2", Generation: 1, Phase: phase.Merging},
 	}}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -495,7 +586,7 @@ func handoffDaemon(t *testing.T, p phase.Phase) *[]map[string]any {
 	}))
 	t.Cleanup(server.Close)
 	t.Setenv("LEGION_DAEMON_URL", server.URL)
-	t.Setenv("LEGION_ISSUE", "THIS-1")
+	t.Setenv("LEGION_ISSUE", issue)
 	t.Setenv("LEGION_GRANT_FILE", "")
 	if err := os.Unsetenv("LEGION_GRANT_FILE"); err != nil {
 		t.Fatalf("unset LEGION_GRANT_FILE: %v", err)

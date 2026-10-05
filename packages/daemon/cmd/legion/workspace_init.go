@@ -314,11 +314,11 @@ func writeRecoveryMarker(ctx context.Context, run workspace.Runner, dir, issue, 
 	if err != nil {
 		return err
 	}
-	markerDir := filepath.Join(dir, ".legion", issue)
-	if err := os.MkdirAll(markerDir, 0o755); err != nil {
-		return fmt.Errorf("create %s: %w", markerDir, err)
+	marker := filepath.Join(dir, handoffFile(issue, "workspace-recovered.json"))
+	if err := os.MkdirAll(filepath.Dir(marker), 0o755); err != nil {
+		return fmt.Errorf("create %s: %w", filepath.Dir(marker), err)
 	}
-	if err := os.WriteFile(filepath.Join(markerDir, "workspace-recovered.json"), body, 0o644); err != nil {
+	if err := os.WriteFile(marker, body, 0o644); err != nil {
 		return fmt.Errorf("write the recovery marker: %w", err)
 	}
 	return nil
