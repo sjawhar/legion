@@ -6,7 +6,10 @@
 
 - A Dispatch tool result's `images` (`dispatch_doc_read` of a picture, the pictures `dispatch_read`
   shows) arrive as MCP image blocks after the JSON text, which leaves them out (LEGION-541). Channel
-  deliveries stay text: the notification channel carries text only.
+  deliveries stay text: the notification channel carries text only. Through `executeDispatchTool`
+  the MCP `dispatch_read` shows a session each picture once: a later read names one it was already
+  shown, and `dispatch_doc_read` shows it again, because every request carries the session's
+  history and Anthropic refuses one over 32 MB.
 
 ## [0.6.4]
 

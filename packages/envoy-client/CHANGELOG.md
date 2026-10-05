@@ -15,7 +15,13 @@
   `dispatch://agent/<session id>/artifact/<slug>@vN` reference included) returns it, and
   `dispatch_read` returns the pictures the messages, asks and comments it shows embed, newest
   first, at most 8 and 10 MiB per read, with a `Pictures:` section naming each and the rest; a
-  picture over 3,750,000 bytes (5 MB of base64, the providers' bound) or of another type is described. `readPictures`,
+  picture over 3,750,000 bytes (5 MB of base64, the providers' bound) or of another type is described.
+  A host session is shown each picture once: a later `dispatch_read` names one it was already shown
+  as `shown earlier this session; dispatch_doc_read shows it again` instead of sending its bytes,
+  counting toward neither per-read cap, because every request carries the session's history and
+  Anthropic refuses one over 32 MB; `dispatch_doc_read` always shows the picture. A
+  `dispatch://agent/<session id>/...` reference reads its session id by `SESSION_ID_PATTERN`.
+  `readPictures` and `shownPictures` (`@legion/envoy-client/dispatch-picture-tools`),
   `@legion/envoy-client/dispatch-pictures` and `RenderInboundResult.pictures` serve the hosts'
   deliveries.
 

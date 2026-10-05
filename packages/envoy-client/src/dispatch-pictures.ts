@@ -7,6 +7,8 @@
  * names to the model as image blocks within the limits below.
  */
 
+import { type PictureType, pictureCaption } from "@legion/contracts";
+
 /** The most bytes one upload carries: Dispatch refuses a larger file. */
 export const PICTURE_UPLOAD_MAX_BYTES = 25 * 1024 * 1024;
 
@@ -17,7 +19,12 @@ export const PICTURE_UPLOAD_MAX_BYTES = 25 * 1024 * 1024;
 export const PICTURE_SHOWN_MAX_BYTES = 3_750_000;
 
 /** How a refusal names that cap: the raw bytes, and the rule they come from. */
-export const pictureShownMaxText = `${PICTURE_SHOWN_MAX_BYTES.toLocaleString("en-US")} bytes (5 MB of base64)`;
+const pictureShownMaxText = `${PICTURE_SHOWN_MAX_BYTES.toLocaleString("en-US")} bytes (5 MB of base64)`;
+
+/** Why a picture of `bytes` named `name` is described instead of shown: it is over that cap. */
+export function oversizePictureText(name: string, bytes: number): string {
+  return `${name} is ${bytes.toLocaleString("en-US")} bytes, over the ${pictureShownMaxText} a model is shown`;
+}
 
 /** How many pictures one read or one delivery shows at most. */
 export const PICTURES_SHOWN_MAX = 8;
@@ -25,20 +32,7 @@ export const PICTURES_SHOWN_MAX = 8;
 /** How many bytes of pictures one read or one delivery shows at most. */
 export const PICTURES_SHOWN_MAX_BYTES = 10 * 1024 * 1024;
 
-/** The picture types a model is shown, as their bytes say rather than as a name or header does. */
-export type PictureType = "image/png" | "image/jpeg" | "image/gif" | "image/webp";
-
-const PICTURE_TYPES: Readonly<Record<string, true>> = {
-  "image/png": true,
-  "image/jpeg": true,
-  "image/gif": true,
-  "image/webp": true,
-};
-
-/** Whether a stated MIME type (no parameters) is one of the picture types a model is shown. */
-export function isPictureType(mime: string): mime is PictureType {
-  return PICTURE_TYPES[mime] === true;
-}
+export { isPictureType, type PictureType } from "@legion/contracts";
 
 /** A picture as the hosts hand it to a model: base64 bytes and their type. */
 export interface ToolImage {
@@ -90,12 +84,9 @@ export function imageBlocks(images: readonly ToolImage[]): ImageBlock[] {
   return images.map(({ data, mimeType }) => ({ type: "image", data, mimeType }));
 }
 
-/** The line a sent picture is written as. The file name is its caption, with the characters that
- *  would end CommonMark's image text or open a code span across it (bracket, backslash or
- *  backtick) escaped and a line break read as a space. */
+/** The line a sent picture is written as, its file name the caption (`pictureCaption`). */
 export function pictureLine(name: string, address: string): string {
-  const caption = name.replace(/[\\[\]`]/g, "\\$&").replace(/[\r\n]+/g, " ");
-  return `![${caption}](${address})`;
+  return `![${pictureCaption(name)}](${address})`;
 }
 
 /** `text` with the picture lines appended: one blank line, then one line per picture. Text that is

@@ -42,7 +42,9 @@ const image = {
 };
 
 test("a delivered card carries its pictures as image blocks after the text that names them", async () => {
-  expect(await withDeliveredPictures("envoy: card", [address, address], client, true)).toEqual([
+  expect(
+    await withDeliveredPictures("envoy: card", [address, address], client, true, new Set())
+  ).toEqual([
     {
       type: "text",
       text: `envoy: card\n\nPictures:\n- image 1: ${address} (shot.png, image/png, 10 bytes)`,
@@ -53,7 +55,7 @@ test("a delivered card carries its pictures as image blocks after the text that 
 
 test("a person's own turn keeps their text exactly, with their pictures beside it", async () => {
   const body = `Look:\n\n![shot.png](${address})`;
-  expect(await withDeliveredPictures(body, [address], client, false)).toEqual([
+  expect(await withDeliveredPictures(body, [address], client, false, new Set())).toEqual([
     { type: "text", text: body },
     image,
   ]);
@@ -64,7 +66,8 @@ test("a picture Dispatch cannot serve is named and costs the delivery neither it
     "envoy: card",
     [address, gone, unreachable],
     client,
-    true
+    true,
+    new Set()
   );
 
   const [card, ...pictures] = Array.isArray(content) ? content : [];
@@ -81,17 +84,44 @@ test("a picture Dispatch cannot serve is named and costs the delivery neither it
     `- not shown: ${unreachable}`,
   ]);
   // Every picture unavailable: the delivery goes out as its text alone.
-  expect(await withDeliveredPictures("plain", [gone, unreachable], client, true)).toBe("plain");
+  expect(await withDeliveredPictures("plain", [gone, unreachable], client, true, new Set())).toBe(
+    "plain"
+  );
 });
 
 test("a Dispatch configuration that cannot be read leaves the delivery its text", async () => {
   const broken = (): DispatchClient | undefined => {
     throw new Error("dispatch config: DISPATCH_TOKEN_FILE cannot be read");
   };
-  expect(await withDeliveredPictures("envoy: card", [address], broken, true)).toBe("envoy: card");
+  expect(await withDeliveredPictures("envoy: card", [address], broken, true, new Set())).toBe(
+    "envoy: card"
+  );
 });
 
 test("a delivery with no pictures, or no Dispatch to read them from, stays text", async () => {
-  expect(await withDeliveredPictures("plain", [], client, true)).toBe("plain");
-  expect(await withDeliveredPictures("plain", [address], () => undefined, true)).toBe("plain");
+  expect(await withDeliveredPictures("plain", [], client, true, new Set())).toBe("plain");
+  expect(await withDeliveredPictures("plain", [address], () => undefined, true, new Set())).toBe(
+    "plain"
+  );
+});
+
+test("a picture this session was already shown is named in a later delivery, not sent again", async () => {
+  const shown = new Set<string>();
+  const first = await withDeliveredPictures("envoy: first", [address], client, true, shown);
+  const second = await withDeliveredPictures("envoy: second", [address], client, true, shown);
+  const body = `Again:\n\n![shot.png](${address})`;
+  const turn = await withDeliveredPictures(body, [address], client, false, shown);
+
+  expect(first).toEqual([
+    {
+      type: "text",
+      text: `envoy: first\n\nPictures:\n- image 1: ${address} (shot.png, image/png, 10 bytes)`,
+    },
+    image,
+  ]);
+  expect(second).toBe(
+    `envoy: second\n\nPictures:\n- not shown: ${address} (shown earlier this session; dispatch_doc_read shows it again)`
+  );
+  // A person's own turn keeps their text exactly as they sent it.
+  expect(turn).toBe(body);
 });

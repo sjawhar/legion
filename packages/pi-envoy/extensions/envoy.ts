@@ -38,6 +38,7 @@ import {
   readDispatchFirstContext,
 } from "@legion/envoy-client/dispatch-first";
 import { DispatchClient } from "@legion/envoy-client/dispatch-http";
+import { shownPictures } from "@legion/envoy-client/dispatch-picture-tools";
 import { pictureAddresses } from "@legion/envoy-client/dispatch-pictures";
 import {
   createFollowAnnouncer,
@@ -104,6 +105,18 @@ const codec = StringCodec();
 const NATS_RETRY_INTERVAL_MS = 15_000;
 /** How long a delivery waits for the pictures it embeds before it goes out as text alone. */
 const DELIVERY_PICTURES_TIMEOUT_MS = 20_000;
+
+/**
+ * A Dispatch client on the configuration as it stands now, every request of it ending after
+ * `timeoutMs`, or undefined when Dispatch is not configured. A configuration that cannot be read
+ * throws, as `activeDispatchConfig` does.
+ */
+function timedDispatchClient(timeoutMs: number): DispatchClient | undefined {
+  const config = activeDispatchConfig(process.env, { cwd: process.cwd() });
+  return config === null
+    ? undefined
+    : new DispatchClient(config.url, config.token, fetch, AbortSignal.timeout(timeoutMs));
+}
 
 /**
  * Aside and Steer go through `pi.sendMessage` on every OMP build; BTW only where the host has a
@@ -485,17 +498,12 @@ export default function envoyExtension(pi: PiApi): void {
   const queryOpenAsks = async (
     requestedSessionID: string,
     since?: string
-  ): Promise<{ readonly snapshot: OpenAsksResponse; readonly url: string } | null> => {
-    const config = activeDispatchConfig(process.env, { cwd: process.cwd() });
-    if (config === null) return null;
-    const snapshot = await new DispatchClient(
-      config.url,
-      config.token,
-      fetch,
-      AbortSignal.timeout(OPEN_ASKS_TIMEOUT_MS)
-    ).openAsks(requestedSessionID, since);
+  ): Promise<OpenAsksResponse | null> => {
+    const dispatch = timedDispatchClient(OPEN_ASKS_TIMEOUT_MS);
+    if (dispatch === undefined) return null;
+    const snapshot = await dispatch.openAsks(requestedSessionID, since);
     availabilityWarningSessionIDs.delete(requestedSessionID);
-    return { snapshot, url: config.url };
+    return snapshot;
   };
 
   const markLegionManagedSession = (targetSessionID: string): void => {
@@ -594,14 +602,9 @@ export default function envoyExtension(pi: PiApi): void {
     handledDispatchAttempts.add(key);
     pi.appendEntry(HANDLED_ATTEMPT_ENTRY, { attempt: delivery.attempt, message_id: delivery.id });
     try {
-      const config = activeDispatchConfig(process.env, { cwd: process.cwd() });
-      if (config === null) return undefined;
-      const accepted = await new DispatchClient(
-        config.url,
-        config.token,
-        fetch,
-        AbortSignal.timeout(USER_TURN_ACCEPT_TIMEOUT_MS)
-      ).acceptMessageDelivery(delivery.id, delivery.attempt, {
+      const dispatch = timedDispatchClient(USER_TURN_ACCEPT_TIMEOUT_MS);
+      if (dispatch === undefined) return undefined;
+      const accepted = await dispatch.acceptMessageDelivery(delivery.id, delivery.attempt, {
         actor: { id: sessionID, kind: "session" },
       });
       const turn = turnFromAccept(accepted);
@@ -709,18 +712,7 @@ export default function envoyExtension(pi: PiApi): void {
         } else {
           const turn = await acceptedUserTurn(rendered);
           // The pictures the delivered text embeds reach the model beside it, read with this
-          // session's own Dispatch bearer.
-          const pictureClient = (): DispatchClient | undefined => {
-            const config = activeDispatchConfig(process.env, { cwd: process.cwd() });
-            return config === null
-              ? undefined
-              : new DispatchClient(
-                  config.url,
-                  config.token,
-                  fetch,
-                  AbortSignal.timeout(DELIVERY_PICTURES_TIMEOUT_MS)
-                );
-          };
+          // session's own Dispatch bearer, each picture once in this session.
           if (turn === undefined) {
             pi.sendMessage(
               {
@@ -728,8 +720,9 @@ export default function envoyExtension(pi: PiApi): void {
                 content: await withDeliveredPictures(
                   rendered.content,
                   rendered.pictures ?? [],
-                  pictureClient,
-                  true
+                  () => timedDispatchClient(DELIVERY_PICTURES_TIMEOUT_MS),
+                  true,
+                  shownPictures(sessionID)
                 ),
                 display: true,
               },
@@ -744,8 +737,9 @@ export default function envoyExtension(pi: PiApi): void {
             const content = await withDeliveredPictures(
               turn.body,
               pictureAddresses(turn.body),
-              pictureClient,
-              false
+              () => timedDispatchClient(DELIVERY_PICTURES_TIMEOUT_MS),
+              false,
+              shownPictures(sessionID)
             );
             // Noted right before the send, after the pictures load: a run that ends while they
             // load clears every note (endInjectedUserTurns), and this turn must still be found.
@@ -1639,7 +1633,7 @@ export default function envoyExtension(pi: PiApi): void {
     abortSelfCheck("a new user turn superseded the self-check");
     try {
       const open = await queryOpenAsks(id);
-      if (open !== null) armAskAwareness(id, open.snapshot.as_of);
+      if (open !== null) armAskAwareness(id, open.as_of);
     } catch (error) {
       warnAskAvailability(context, error);
     }
@@ -1782,7 +1776,7 @@ export default function envoyExtension(pi: PiApi): void {
     // check: a run, a user turn, or a session change can have overtaken either meanwhile.
     // `baseline` is restated so the compiler sees it here.
     if (baseline === null || !checkOwed(id) || stale() || runSeq !== seenRun) return;
-    let open: { readonly snapshot: OpenAsksResponse; readonly url: string } | null;
+    let open: OpenAsksResponse | null;
     try {
       open = await queryOpenAsks(id, baseline);
     } catch (error) {
@@ -1812,7 +1806,7 @@ export default function envoyExtension(pi: PiApi): void {
     const abort = new AbortController();
     askCheckAbort = abort;
     const answered = ask({
-      prompt: ASK_SELF_CHECK_PROMPT(open.snapshot.asks),
+      prompt: ASK_SELF_CHECK_PROMPT(open.asks),
       signal: abort.signal,
     }).then(
       (reply): string | undefined => reply.replyText,
@@ -1853,7 +1847,7 @@ export default function envoyExtension(pi: PiApi): void {
       ...askAwareness,
       check_due: superseded,
       checks: askAwareness.checks + 1,
-      baseline_as_of: open.snapshot.as_of,
+      baseline_as_of: open.as_of,
     };
     // A verdict about a run the session has moved past is not steered into the one it is in:
     // "you just said you are waiting on a human" would describe a reply it has left behind.

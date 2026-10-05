@@ -8,7 +8,11 @@
   blocks after the text, and an Inbox delivery of a message, comment, ask or answer that embeds
   pictures carries them beside its text (a card with a `Pictures:` section, a person's own turn
   with its text unchanged), at most 8 and 10 MiB of them, each read with the session's own
-  Dispatch bearer within 20 s; a picture Dispatch cannot serve leaves the delivery its text.
+  Dispatch bearer within 20 s; a picture Dispatch cannot serve leaves the delivery its text. A
+  session is shown each picture once: a later delivery or `dispatch_read` that embeds one it was
+  already shown names it as shown earlier instead of sending it again, because every request
+  carries the session's history and Anthropic refuses one over 32 MB; `dispatch_doc_read` shows it
+  again.
 - A `dispatch-brainstorming` skill ships beside `dispatch` and `dispatch-first` (LEGION-475). In a
   session with Dispatch it replaces superpowers' `brainstorming` and `writing-plans`: the design
   conversation runs in the issue's spec, the first version holds only established facts and every

@@ -1,4 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test";
+import { randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync, truncateSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -74,17 +75,19 @@ function dispatch(
   return { requests, uploads, posted, fetchImpl: fetchImpl as typeof fetch };
 }
 
+/** The call as the host session `sessionId` makes it: the session reads and posts as itself. */
 function run(
   tool: string,
   args: Record<string, unknown>,
-  fetchImpl: typeof fetch
+  fetchImpl: typeof fetch,
+  sessionId = session
 ): Promise<DispatchToolResult> {
   return executeDispatchTool({
     tool,
     args,
     cwd: directory,
     host: "omp",
-    sessionId: session,
+    sessionId,
     config,
     env: {},
     exec: async () => {
@@ -289,6 +292,34 @@ describe("sending pictures", () => {
     ]);
   });
 
+  // A backtick opens a code span that runs to the next backtick, which can sit in the next picture
+  // line: unescaped, the two lines render as one picture and the second vanishes.
+  test("a file name holding a backtick still renders as its own picture beside the next", async () => {
+    const server = dispatch();
+
+    await run(
+      "dispatch_message",
+      { issue: "DSP-41", body: "Two.", images: [file("a`b.png", PNG), file("c`d.png", PNG)] },
+      server.fetchImpl
+    );
+
+    const posted = String(server.posted[0]?.body);
+    expect(posted).toBe(
+      "Two.\n\n" +
+        "![a\\`b.png](dispatch://DSP-41/artifact/a-b-png@v1)\n" +
+        "![c\\`d.png](dispatch://DSP-41/artifact/c-d-png@v1)"
+    );
+    expect(pictureAddresses(posted)).toEqual([
+      "dispatch://DSP-41/artifact/a-b-png@v1",
+      "dispatch://DSP-41/artifact/c-d-png@v1",
+    ]);
+    // CommonMark, as a reader renders it: two pictures, each captioned with its file's name.
+    expect([...Bun.markdown.html(posted).matchAll(/<img src="([^"]+)" alt="([^"]*)"/g)]).toEqual([
+      expect.arrayContaining(["dispatch://DSP-41/artifact/a-b-png@v1", "a`b.png"]),
+      expect.arrayContaining(["dispatch://DSP-41/artifact/c-d-png@v1", "c`d.png"]),
+    ]);
+  });
+
   test("a reply to a direct message uploads its pictures to this session's own conversation", async () => {
     const message = "6f1f4bb8-8d3c-4a35-9a0e-3b9e7c1d2f40";
     const server = dispatch((pathname, init) => {
@@ -485,8 +516,9 @@ describe("reading pictures", () => {
 
     expect(result.images).toBeUndefined();
     expect(result.text).toBe(
-      "big.png is an uploaded image/png picture (version 1, 5,242,881 bytes), over the 3,750,000 bytes (5 MB of base64) a " +
-        "model is shown, so dispatch_doc_read cannot show it. GET /api/v1/artifacts/pic-2/versions/1 serves its bytes."
+      "big.png is 5,242,881 bytes, over the 3,750,000 bytes (5 MB of base64) a model is shown, so " +
+        "dispatch_doc_read cannot show this uploaded image/png picture (version 1). " +
+        "GET /api/v1/artifacts/pic-2/versions/1 serves its bytes."
     );
     expect(server.requests).toEqual([`/api/v1/agents/${session}/artifacts/big-png`]);
   });
@@ -716,5 +748,212 @@ describe("reading pictures", () => {
       .map((line) => line.split(" ")[3]);
     expect(shown).toEqual([7, 6, 5, 4, 3, 2, 1].map(address));
     expect(result.images).toHaveLength(7);
+  });
+
+  test("dispatch_doc_read refuses an agent ref whose session id holds a bracket or a backtick", async () => {
+    for (const ref of [
+      "dispatch://agent/abc[1]/artifact/shot-png@v1",
+      "dispatch://agent/abc`x/artifact/shot-png@v1",
+    ]) {
+      const server = dispatch();
+      const failure = await refusal(run("dispatch_doc_read", { ref }, server.fetchImpl));
+      expect(failure).toBeInstanceOf(ToolInputError);
+      expect(
+        (failure as ToolInputError).problems.some((problem) =>
+          problem.startsWith("ref must be a valid dispatch:// reference such as dispatch://KEY-1,")
+        )
+      ).toBe(true);
+      expect(server.requests).toEqual([]);
+    }
+    const server = pictureServer([image("pic-1", "shot.png", 16)], { "pic-1": png(16) });
+    const opened = await run(
+      "dispatch_doc_read",
+      { ref: `dispatch://agent/${session}/artifact/shot-png@v1` },
+      server.fetchImpl
+    );
+    expect(opened.images).toHaveLength(1);
+  });
+
+  describe("a picture is shown to a session once", () => {
+    const earlier = (address: string) =>
+      `- not shown: ${address} (shown earlier this session; dispatch_doc_read shows it again)`;
+    const sent = (result: DispatchToolResult) =>
+      (result.images ?? []).reduce((total, shown) => total + shown.data.length, 0);
+
+    test("three reads of one issue send its eight pictures once and name them shown earlier after", async () => {
+      const reader = randomUUID();
+      const size = 1_200_000;
+      const address = (n: number) => `dispatch://DSP-41/artifact/p${n}-png@v1`;
+      const events = Array.from({ length: 8 }, (_, n) => ({
+        seq: n + 1,
+        type: "message.created",
+        actor: { kind: "user", id: "sami" },
+        created_at: `2026-10-04T10:0${n}:00Z`,
+        payload: { body: `Number ${n}:\n\n![p${n}.png](${address(n)})` },
+      }));
+      const bytes = png(size);
+      const fetched: string[] = [];
+      const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+        const { pathname } = new URL(String(url));
+        if (pathname === "/api/v1/issues/DSP-41") {
+          return json({
+            key: "DSP-41",
+            title: "Pictures",
+            status: "in_progress",
+            priority: null,
+            assignee: null,
+            claim: null,
+            components: {
+              mode: "inherit",
+              ids: [],
+              unknown: [],
+              reason: null,
+              inherited_from: null,
+            },
+            route: null,
+            open_asks: [],
+            last_seq: events.length,
+            external_links: [],
+            labels: [],
+          });
+        }
+        if (pathname === "/api/v1/issues/DSP-41/events") return json(events);
+        if (pathname === "/api/v1/issues/DSP-41/references" || pathname === "/api/v1/references") {
+          return json({ code: "NOT_FOUND", error: "missing" }, 404);
+        }
+        const slug = pathname.match(/^\/api\/v1\/issues\/DSP-41\/artifacts\/(p\d-png)$/)?.[1];
+        if (slug !== undefined) {
+          return json({
+            id: slug,
+            issue_key: "DSP-41",
+            project: "DSP",
+            slug,
+            name: slug.replace("-png", ".png"),
+            kind: "image",
+            versions: [{ number: 1, mime: "image/png", size }],
+          });
+        }
+        if (/^\/api\/v1\/artifacts\/p\d-png\/versions\/1$/.test(pathname)) {
+          fetched.push(pathname);
+          return new Response(bytes, { headers: { "Content-Type": "image/png" } });
+        }
+        throw new Error(`unexpected request: ${pathname}`);
+      };
+
+      const reads: DispatchToolResult[] = [];
+      for (let read = 0; read < 3; read++) {
+        reads.push(
+          await run("dispatch_read", { issue: "DSP-41" }, fetchImpl as typeof fetch, reader)
+        );
+      }
+
+      const [first, ...later] = reads as [DispatchToolResult, ...DispatchToolResult[]];
+      expect(first.images).toHaveLength(8);
+      for (const read of later) {
+        expect(read.images).toBeUndefined();
+        expect(read.text).toContain(
+          ["Pictures:", ...[7, 6, 5, 4, 3, 2, 1, 0].map((n) => earlier(address(n)))].join("\n")
+        );
+      }
+      // Three reads cost what one does: the later two fetch no picture and send none.
+      expect(reads.reduce((total, read) => total + sent(read), 0)).toBe(sent(first));
+      expect(fetched).toHaveLength(8);
+    });
+
+    test("a read after dispatch_doc_read showed one of its pictures names that one and shows the rest", async () => {
+      const reader = randomUUID();
+      const artifacts = [0, 1, 2].map((n) => image(`pic-${n}`, `p${n}.png`, 16));
+      const bytes = Object.fromEntries(artifacts.map((artifact) => [artifact.id, png(16)]));
+      const server = pictureServer(artifacts, bytes, (pathname) =>
+        pathname === `/api/v1/messages/${conversationId}`
+          ? json(conversation([["p0-png"], ["p1-png"], ["p2-png"]]))
+          : undefined
+      );
+      const address = (n: number) => `dispatch://agent/${session}/artifact/p${n}-png@v1`;
+
+      const opened = await run("dispatch_doc_read", { ref: address(1) }, server.fetchImpl, reader);
+      const result = await run(
+        "dispatch_read",
+        { message: conversationId },
+        server.fetchImpl,
+        reader
+      );
+
+      expect(opened.images).toHaveLength(1);
+      expect(result.images).toHaveLength(2);
+      expect(result.text).toContain(
+        [
+          "Pictures:",
+          `- image 1: ${address(2)} (p2.png, image/png, 16 bytes)`,
+          earlier(address(1)),
+          `- image 2: ${address(0)} (p0.png, image/png, 16 bytes)`,
+        ].join("\n")
+      );
+    });
+
+    test("dispatch_doc_read shows a picture again that reads already withhold as shown", async () => {
+      const reader = randomUUID();
+      const bytes = png(16);
+      const server = pictureServer(
+        [image("pic-1", "shot.png", 16)],
+        { "pic-1": bytes },
+        (pathname) =>
+          pathname === `/api/v1/messages/${conversationId}`
+            ? json(conversation([["shot-png"]]))
+            : undefined
+      );
+      const address = `dispatch://agent/${session}/artifact/shot-png@v1`;
+
+      const first = await run(
+        "dispatch_read",
+        { message: conversationId },
+        server.fetchImpl,
+        reader
+      );
+      const again = await run(
+        "dispatch_read",
+        { message: conversationId },
+        server.fetchImpl,
+        reader
+      );
+      const opened = await run("dispatch_doc_read", { ref: address }, server.fetchImpl, reader);
+
+      expect(first.images).toHaveLength(1);
+      expect(again.images).toBeUndefined();
+      expect(again.text).toContain(earlier(address));
+      expect(opened.images).toEqual([{ data: base64(bytes), mimeType: "image/png" }]);
+    });
+
+    test("another session is shown a picture this session was already shown", async () => {
+      const [reader, other] = [randomUUID(), randomUUID()];
+      const server = pictureServer(
+        [image("pic-1", "shot.png", 16)],
+        { "pic-1": png(16) },
+        (pathname) =>
+          pathname === `/api/v1/messages/${conversationId}`
+            ? json(conversation([["shot-png"]]))
+            : undefined
+      );
+      const address = `dispatch://agent/${session}/artifact/shot-png@v1`;
+
+      await run("dispatch_read", { message: conversationId }, server.fetchImpl, reader);
+      const again = await run(
+        "dispatch_read",
+        { message: conversationId },
+        server.fetchImpl,
+        reader
+      );
+      const elsewhere = await run(
+        "dispatch_read",
+        { message: conversationId },
+        server.fetchImpl,
+        other
+      );
+
+      expect(again.images).toBeUndefined();
+      expect(again.text).toContain(earlier(address));
+      expect(elsewhere.images).toHaveLength(1);
+      expect(elsewhere.text).toContain(`- image 1: ${address} (shot.png, image/png, 16 bytes)`);
+    });
   });
 });

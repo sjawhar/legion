@@ -13721,7 +13721,7 @@ function resolveDispatchConfig(env, options = {}) {
 }
 
 // ../envoy-client/src/dispatch-execute.ts
-import { basename, resolve as resolvePath } from "path";
+import { resolve as resolvePath2 } from "path";
 
 // ../contracts/src/dispatch-api.ts
 function serviceSubjectLabel(subject) {
@@ -14056,6 +14056,21 @@ function snippetSegments(snippet) {
 }
 function snippetText(snippet) {
   return snippetSegments(snippet).map(({ text, mark }) => mark ? `**${text}**` : text).join("");
+}
+// ../contracts/src/dispatch-text-rules.ts
+var SESSION_ID_PATTERN = "[^/?#\\s\\p{Z}\\p{Cc}<>\"'`\\[\\]|]+";
+var sessionIdOnly = new RegExp(`^${SESSION_ID_PATTERN}$`, "u");
+function pictureCaption(name) {
+  return name.replace(/[\\[\]`]/g, "\\$&").replace(/\s+/g, " ");
+}
+var PICTURE_TYPES = {
+  "image/png": true,
+  "image/jpeg": true,
+  "image/gif": true,
+  "image/webp": true
+};
+function isPictureType(mime) {
+  return PICTURE_TYPES[mime] === true;
 }
 // ../contracts/src/dispatch-tools.ts
 function dispatchToolSchema(spec, z2, opts) {
@@ -14418,7 +14433,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_doc_read",
     example: { issue: "DSP-1" },
-    description: "Read a live document or a named document version, or the text of an uploaded file at its latest or named version. " + "Do not use it for issue status, asks, or events; " + "use dispatch_read instead. Supply ref, issue, or project plus artifact; issue plus an omitted artifact reads the primary document. " + "A live read returns its document token for an optional dispatch_doc_edit precondition; use /blocks for per-block tokens. " + "A picture (an uploaded PNG, JPEG, GIF or WebP of at most 5 MiB) comes back as an image you see, with its name, type, size and version; " + "any other file that is not UTF-8 text is described, with the route that serves its bytes. " + OWNER_REFERENCE,
+    description: "Read a live document or a named document version, or the text of an uploaded file at its latest or named version. " + "Do not use it for issue status, asks, or events; " + "use dispatch_read instead. Supply ref, issue, or project plus artifact; issue plus an omitted artifact reads the primary document. " + "A live read returns its document token for an optional dispatch_doc_edit precondition; use /blocks for per-block tokens. " + "A picture (an uploaded PNG, JPEG, GIF or WebP of at most 3,750,000 bytes, 5 MB once base64-encoded) comes back as an image you see, with its name, type, size and version, every time you ask, including one a read already showed this session; " + "any other file that is not UTF-8 text is described, with the route that serves its bytes. " + OWNER_REFERENCE,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE).optional(),
       project: z2.string().describe("Project key owning the document.").optional(),
@@ -14464,7 +14479,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_read",
     example: { issue: "DSP-1" },
-    description: "Read an issue or project-document summary, targeted ask, or targeted comment reply chain, or the conversation " + "a message belongs to. Do not use it for document contents; use dispatch_doc_read instead. Supply ref, issue, " + "or project plus artifact; or message alone, which reads a human's direct message to this session and every " + "reply to it (they belong to no issue). " + "An anchored comment or ask also says where its quote sits, as `Position:`: the block's path from the top, " + "and in a table the row (0 is the header), the cells before the anchored one, and the column's header; " + "`Position: unavailable (<code>)` when Dispatch could not read the document: `DOC_SERVICE_UNAVAILABLE` " + "(try again shortly), `DOC_SCHEMA` (the document needs repair), `DOCUMENT_UNLOADABLE` (the document " + "needs a rebuild) or `INTERNAL`. " + "An issue read carries a `Progress:` line, `tasks 3/7, children 2/5`: its spec's task-list items " + "(`- [ ]` / `- [x]`, nested lists included) and its direct children, each done of total and each only " + "when it has any (`Progress: none` otherwise). " + "Every read ends with `Referenced by:` (what cites or hangs off this node, each with its dispatch:// address, " + "an excerpt, and when) and `Links:` (what it cites), so tracing provenance is one call. " + "The pictures the shown messages, asks and comments embed come back as images you see, newest first, at most 8 " + "and 10 MiB of them per read, each a PNG, JPEG, GIF or WebP of at most 5 MiB; a `Pictures:` section names each " + "one shown, in order, and the rest by reference, for dispatch_doc_read. " + OWNER_REFERENCE,
+    description: "Read an issue or project-document summary, targeted ask, or targeted comment reply chain, or the conversation " + "a message belongs to. Do not use it for document contents; use dispatch_doc_read instead. Supply ref, issue, " + "or project plus artifact; or message alone, which reads a human's direct message to this session and every " + "reply to it (they belong to no issue). " + "An anchored comment or ask also says where its quote sits, as `Position:`: the block's path from the top, " + "and in a table the row (0 is the header), the cells before the anchored one, and the column's header; " + "`Position: unavailable (<code>)` when Dispatch could not read the document: `DOC_SERVICE_UNAVAILABLE` " + "(try again shortly), `DOC_SCHEMA` (the document needs repair), `DOCUMENT_UNLOADABLE` (the document " + "needs a rebuild) or `INTERNAL`. " + "An issue read carries a `Progress:` line, `tasks 3/7, children 2/5`: its spec's task-list items " + "(`- [ ]` / `- [x]`, nested lists included) and its direct children, each done of total and each only " + "when it has any (`Progress: none` otherwise). " + "Every read ends with `Referenced by:` (what cites or hangs off this node, each with its dispatch:// address, " + "an excerpt, and when) and `Links:` (what it cites), so tracing provenance is one call. " + "The pictures the shown messages, asks and comments embed come back as images you see, newest first, at most 8 " + "and 10 MiB of them per read, each a PNG, JPEG, GIF or WebP of at most 3,750,000 bytes (5 MB of base64); a `Pictures:` section names each " + "one shown, in order, and the rest by reference, for dispatch_doc_read. A picture this session was already shown is named, not sent again " + "(every request carries the session's history, and the provider refuses one over 32 MB); dispatch_doc_read shows it again. " + OWNER_REFERENCE,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE).optional(),
       project: z2.string().describe("Project key owning the document.").optional(),
@@ -15249,22 +15264,72 @@ function dispatchDocumentRef(owner, slug) {
 function dispatchChildRef(ownerRef, kind, id) {
   return `${ownerRef}/${kind}/${id}`;
 }
+function parseDispatchRef(ref) {
+  const projectDocument = ref.match(/^dispatch:\/\/([A-Z][A-Z0-9]{1,9})\/artifact\/([^/@]+)(?:@v(\d+))?(?:\/(ask|comment)\/([^/]+))?$/);
+  if (projectDocument) {
+    const [, project, artifact2, version3, targetKind, targetID] = projectDocument;
+    if (project === undefined || artifact2 === undefined || version3 !== undefined && Number(version3) < 1) {
+      return null;
+    }
+    if (targetKind === undefined) {
+      return {
+        owner: { kind: "project", project },
+        kind: "artifact",
+        id: artifact2,
+        ...version3 === undefined ? {} : { version: Number(version3) }
+      };
+    }
+    if (targetID === undefined || targetKind !== "ask" && targetKind !== "comment")
+      return null;
+    return {
+      owner: { kind: "project", project },
+      kind: targetKind,
+      id: targetID,
+      artifact: artifact2
+    };
+  }
+  const issueReference = ref.match(/^dispatch:\/\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)(?:\/(spec)|\/(log)|\/(children)|\/artifact\/([^/@]+)(?:@v(\d+))?|\/ask\/([^/]+)|\/comment\/([^/]+)|\/message\/([^/]+))?$/);
+  if (!issueReference)
+    return null;
+  const [, issue2, spec, log, children, artifact, version2, ask, comment, message] = issueReference;
+  if (!issue2 || version2 !== undefined && Number(version2) < 1)
+    return null;
+  const owner = { kind: "issue", issue: issue2 };
+  if (spec)
+    return { owner, kind: "spec", id: spec };
+  if (log)
+    return { owner, kind: "log", id: log };
+  if (children)
+    return { owner, kind: "children", id: children };
+  if (artifact) {
+    return {
+      owner,
+      kind: "artifact",
+      id: artifact,
+      ...version2 === undefined ? {} : { version: Number(version2) }
+    };
+  }
+  if (ask)
+    return { owner, kind: "ask", id: ask };
+  if (comment)
+    return { owner, kind: "comment", id: comment };
+  if (message)
+    return { owner, kind: "message", id: message };
+  return { owner, kind: "issue", id: issue2 };
+}
+
+// ../envoy-client/src/dispatch-picture-tools.ts
+import { basename, resolve as resolvePath } from "path";
 
 // ../envoy-client/src/dispatch-pictures.ts
 var PICTURE_UPLOAD_MAX_BYTES = 25 * 1024 * 1024;
 var PICTURE_SHOWN_MAX_BYTES = 3750000;
 var pictureShownMaxText = `${PICTURE_SHOWN_MAX_BYTES.toLocaleString("en-US")} bytes (5 MB of base64)`;
+function oversizePictureText(name, bytes) {
+  return `${name} is ${bytes.toLocaleString("en-US")} bytes, over the ${pictureShownMaxText} a model is shown`;
+}
 var PICTURES_SHOWN_MAX = 8;
 var PICTURES_SHOWN_MAX_BYTES = 10 * 1024 * 1024;
-var PICTURE_TYPES = {
-  "image/png": true,
-  "image/jpeg": true,
-  "image/gif": true,
-  "image/webp": true
-};
-function isPictureType(mime) {
-  return PICTURE_TYPES[mime] === true;
-}
 var PICTURE_SNIFF_BYTES = 12;
 function bytesAt(bytes, offset, expected) {
   return expected.every((byte, index) => bytes[offset + index] === byte);
@@ -15292,8 +15357,7 @@ function imageBlocks(images) {
   return images.map(({ data, mimeType }) => ({ type: "image", data, mimeType }));
 }
 function pictureLine(name, address) {
-  const caption = name.replace(/[\\[\]`]/g, "\\$&").replace(/[\r\n]+/g, " ");
-  return `![${caption}](${address})`;
+  return `![${pictureCaption(name)}](${address})`;
 }
 function withPictureLines(text, lines) {
   if (lines.length === 0)
@@ -15312,71 +15376,6 @@ function pictureAddresses(text) {
 function picturesNewestFirst(texts) {
   const ordered = texts.map((item, index) => ({ item, index, at: Date.parse(item.at) })).sort((left, right) => (Number.isNaN(right.at) ? 0 : right.at) - (Number.isNaN(left.at) ? 0 : left.at) || left.index - right.index);
   return [...new Set(ordered.flatMap(({ item }) => pictureAddresses(item.text)))];
-}
-
-// ../envoy-client/src/search-answer.ts
-function pageSummaryText(offset, count, total) {
-  return `showing ${offset + 1}-${offset + count} of ${total}`;
-}
-function searchResultLine(result, baseUrl) {
-  const href = new URL(result.href, baseUrl).toString();
-  const { owner } = result;
-  if (owner.kind === "document") {
-    const reference = dispatchDocumentRef(owner.project, owner.slug);
-    return `${reference} [document] ${owner.name} - ${result.kind}: ${snippetText(result.snippet)} -> ${href}`;
-  }
-  const artifactName = result.artifact ? ` ${result.artifact.name}` : "";
-  const label = `${owner.key} [${owner.status}] ${owner.title} - ${result.kind}${artifactName}`;
-  return `${label}: ${snippetText(result.snippet)} -> ${href}`;
-}
-function searchAnswer(search, query, offset, configUrl) {
-  const results = search.results;
-  const count = results.length;
-  const lines = results.map((result) => searchResultLine(result, configUrl));
-  const noun = count === 1 ? "result" : "results";
-  const noResults = `No results for "${query}".`;
-  if (typeof search.total !== "number") {
-    if (offset !== undefined && offset > 0) {
-      throw new Error(`Dispatch answered without a total: it predates search paging and ignored offset ${offset}, so this would be its first page again.`);
-    }
-    return {
-      text: count === 0 ? noResults : [`${count} ${noun} for "${query}" (${search.took_ms} ms)`, ...lines].join(`
-`),
-      details: { query, results }
-    };
-  }
-  const { total, reachable, offset: pageOffset } = search;
-  const end = pageOffset + count;
-  const cut = reachable < total ? `Each kind lists only its best ${SEARCH_KIND_DEPTH} matches, so ${reachable} of the ${total} can be paged to; narrow the query or name a project to reach the rest.` : undefined;
-  const details = {
-    query,
-    results,
-    total,
-    reachable,
-    offset: pageOffset,
-    limit: search.limit
-  };
-  if (count === 0) {
-    return {
-      text: total === 0 ? noResults : [
-        `No results for "${query}" at offset ${pageOffset}: it matches ${total}, and the pages reach the first ${reachable}.`,
-        ...cut === undefined ? [] : [cut]
-      ].join(`
-`),
-      details
-    };
-  }
-  const showing = pageOffset === 0 && count === total ? "" : `${pageSummaryText(pageOffset, count, total)}, `;
-  return {
-    text: [
-      `${count} ${noun} for "${query}" (${showing}${search.took_ms} ms)`,
-      ...cut === undefined ? [] : [cut],
-      ...lines,
-      ...end < reachable ? [`Next page: offset ${end}.`] : []
-    ].join(`
-`),
-    details
-  };
 }
 
 // ../envoy-client/src/tool-input-errors.ts
@@ -15500,6 +15499,307 @@ function formatZodIssues(issues, schema) {
         return [path2 === "" ? issue2.message : `${path2}: ${issue2.message}`];
     }
   });
+}
+
+// ../envoy-client/src/dispatch-picture-tools.ts
+var PICTURE_TYPE_NAMES = "a PNG, JPEG, GIF or WebP";
+async function localPictures(images, cwd, problems) {
+  if (!Array.isArray(images))
+    return [];
+  const checked = await Promise.all(images.map((path2) => localPicture(path2, cwd)));
+  const pictures = [];
+  for (const outcome of checked) {
+    if (typeof outcome === "string")
+      problems.push(outcome);
+    else if (outcome !== undefined)
+      pictures.push(outcome);
+  }
+  return pictures;
+}
+async function localPicture(path2, cwd) {
+  if (typeof path2 !== "string" || path2 === "")
+    return;
+  const absolute = resolvePath(cwd, path2);
+  const file2 = Bun.file(absolute);
+  let size;
+  let head;
+  try {
+    const stats = await file2.stat();
+    if (!stats.isFile())
+      return `images: ${path2} is not a file`;
+    size = stats.size;
+    head = new Uint8Array(await file2.slice(0, PICTURE_SNIFF_BYTES).arrayBuffer());
+  } catch (error48) {
+    return `images: ${path2} cannot be read: ${messageFor(error48)}`;
+  }
+  if (size > PICTURE_UPLOAD_MAX_BYTES) {
+    return `images: ${path2} is ${size.toLocaleString("en-US")} bytes, over the ${PICTURE_UPLOAD_MAX_BYTES / 1024 / 1024} MiB one Dispatch upload takes`;
+  }
+  const type = sniffPictureType(head);
+  if (type === undefined) {
+    return `images: ${path2} is not ${PICTURE_TYPE_NAMES} picture (judged by its bytes, not its name)`;
+  }
+  return { path: path2, name: basename(absolute), file: Bun.file(absolute, { type }) };
+}
+function uploadSlug(name) {
+  const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+  return slug === "" ? "artifact" : slug;
+}
+async function textWithPictures(tool, text, pictures, limit, owner, upload, actor) {
+  if (pictures.length === 0)
+    return text;
+  const counted = `${limit.text} plus ${pictures.length} ${pictures.length === 1 ? "picture" : "pictures"}`;
+  const fix = `${limit.shorten} or send fewer pictures`;
+  const predicted = withPictureLines(text, pictures.map((picture) => pictureLine(picture.name, `dispatch://${owner}/artifact/${uploadSlug(picture.name)}@v1`)));
+  if (predicted.length > limit.cap) {
+    throw new ToolInputError(tool, [
+      `${counted} ${overCapMessage(predicted.length, limit.cap)}; ${fix}`
+    ]);
+  }
+  const lines = [];
+  const addresses = [];
+  for (const picture of pictures) {
+    let uploaded;
+    try {
+      uploaded = await upload({ name: picture.name, file: picture.file, actor });
+    } catch (error48) {
+      const earlier = addresses.length === 0 ? "" : `; the pictures before it are uploaded (${addresses.join(", ")})`;
+      throw new Error(`images: ${picture.path} was not uploaded: ${messageFor(error48)}. Nothing was posted${earlier}.`);
+    }
+    const address = `dispatch://${owner}/artifact/${uploaded.artifact.slug}@v${uploaded.version.number}`;
+    addresses.push(address);
+    lines.push(pictureLine(picture.name, address));
+  }
+  const posted = withPictureLines(text, lines);
+  if (posted.length > limit.cap) {
+    throw new Error(`${counted} ${overCapMessage(posted.length, limit.cap)} with the addresses Dispatch gave ` + `the uploads (${addresses.join(", ")}), so nothing was posted; ${fix}.`);
+  }
+  return posted;
+}
+var AGENT_ARTIFACT_REF = new RegExp(`^dispatch://agent/(${SESSION_ID_PATTERN})/artifact/([^/@]+)(?:@v(\\d+))?$`, "u");
+function parseAgentArtifactRef(ref) {
+  const match = ref.match(AGENT_ARTIFACT_REF);
+  if (match === null)
+    return null;
+  const [, session, slug, version2] = match;
+  if (session === undefined || slug === undefined || version2 !== undefined && Number(version2) < 1) {
+    return null;
+  }
+  return { session, slug, ...version2 === undefined ? {} : { version: Number(version2) } };
+}
+function datedBodies(records) {
+  return records.map((record2) => ({ text: record2.body, at: record2.created_at }));
+}
+function askTexts({ ask, replies }) {
+  return [
+    { text: ask.question, at: ask.created_at },
+    ...ask.answer?.text ? [{ text: ask.answer.text, at: ask.answer.at }] : [],
+    ...ask.resolution === undefined ? [] : [{ text: ask.resolution.reason, at: ask.resolution.at }],
+    ...datedBodies(replies)
+  ];
+}
+function eventTexts(event) {
+  let texts;
+  switch (event.type) {
+    case "ask.opened":
+    case "ask.anchor_refreshed":
+    case "ask.edited":
+    case "ask.handed_back":
+    case "ask.answered":
+    case "ask.resolved":
+      texts = [
+        event.payload.question,
+        event.payload.answer?.text,
+        event.payload.resolution?.reason
+      ];
+      break;
+    case "comment.created":
+    case "comment.answered":
+    case "comment.anchor_refreshed":
+    case "comment.edited":
+    case "comment.resolved":
+    case "comment.reopened":
+    case "suggestion.accepted":
+    case "suggestion.rejected":
+    case "message.created":
+    case "message.answered":
+      texts = [event.payload.body];
+      break;
+    default:
+      texts = [];
+  }
+  return texts.filter((text) => typeof text === "string" && text !== "").map((text) => ({ text, at: event.created_at }));
+}
+function pictureTarget(address) {
+  const agent = parseAgentArtifactRef(address);
+  if (agent !== null) {
+    if (agent.version === undefined)
+      return;
+    return {
+      key: `agent/${agent.session}/${agent.slug}`,
+      read: (client) => client.getAgentArtifact(agent.session, agent.slug),
+      version: agent.version
+    };
+  }
+  const ref = parseDispatchRef(address);
+  if (ref?.kind !== "artifact" || ref.version === undefined)
+    return;
+  const { owner, id: slug } = ref;
+  return owner.kind === "issue" ? {
+    key: `${owner.issue}/${slug}`,
+    read: (client) => client.getIssueArtifact(owner.issue, slug),
+    version: ref.version
+  } : {
+    key: `${owner.project}/${slug}`,
+    read: (client) => client.getProjectArtifact(owner.project, slug),
+    version: ref.version
+  };
+}
+var picturesShown = new Map;
+function shownPictures(sessionId) {
+  let shown = picturesShown.get(sessionId);
+  if (shown === undefined) {
+    shown = new Set;
+    picturesShown.set(sessionId, shown);
+  }
+  return shown;
+}
+async function readPictures(client, addresses, shown) {
+  if (addresses.length === 0)
+    return { lines: [], images: [] };
+  const artifacts = new Map;
+  const images = [];
+  const lines = ["Pictures:"];
+  let shownBytes = 0;
+  const overBudget = `past this read's ${PICTURES_SHOWN_MAX_BYTES / 1024 / 1024} MiB of pictures; dispatch_doc_read shows it`;
+  for (const address of addresses) {
+    const skip = (reason) => lines.push(`- not shown: ${address} (${reason})`);
+    if (shown?.has(address)) {
+      skip("shown earlier this session; dispatch_doc_read shows it again");
+      continue;
+    }
+    if (images.length === PICTURES_SHOWN_MAX) {
+      skip(`past this read's ${PICTURES_SHOWN_MAX} pictures; dispatch_doc_read shows it`);
+      continue;
+    }
+    const target = pictureTarget(address);
+    if (target === undefined) {
+      skip("names no versioned Dispatch artifact");
+      continue;
+    }
+    try {
+      let read = artifacts.get(target.key);
+      if (read === undefined) {
+        read = target.read(client);
+        artifacts.set(target.key, read);
+      }
+      const artifact = await read;
+      const version2 = artifact.versions.find((candidate) => candidate.number === target.version);
+      if (version2 === undefined) {
+        skip(`${artifact.name} has no version ${target.version}`);
+        continue;
+      }
+      if (artifact.kind !== "image") {
+        skip(`${artifact.name} is a ${artifact.kind}, not a picture`);
+        continue;
+      }
+      const mime = version2.mime?.split(";")[0]?.trim();
+      if (mime !== undefined && !isPictureType(mime)) {
+        skip(`${artifact.name} is ${mime}, not ${PICTURE_TYPE_NAMES} a model is shown`);
+        continue;
+      }
+      if (version2.size !== undefined && version2.size > PICTURE_SHOWN_MAX_BYTES) {
+        skip(oversizePictureText(artifact.name, version2.size));
+        continue;
+      }
+      if (version2.size !== undefined && shownBytes + version2.size > PICTURES_SHOWN_MAX_BYTES) {
+        skip(overBudget);
+        continue;
+      }
+      const file2 = await client.fileVersion(artifact.id, target.version);
+      const image = toolImage(file2.bytes);
+      if (image === undefined) {
+        skip(sniffPictureType(file2.bytes) === undefined ? `${artifact.name} is not ${PICTURE_TYPE_NAMES} a model is shown` : oversizePictureText(artifact.name, file2.bytes.length));
+        continue;
+      }
+      if (shownBytes + file2.bytes.length > PICTURES_SHOWN_MAX_BYTES) {
+        skip(overBudget);
+        continue;
+      }
+      shownBytes += file2.bytes.length;
+      images.push(image);
+      shown?.add(address);
+      lines.push(`- image ${images.length}: ${address} (${artifact.name}, ${image.mimeType}, ${file2.bytes.length.toLocaleString("en-US")} bytes)`);
+    } catch (error48) {
+      skip(`unavailable: ${messageFor(error48)}`);
+    }
+  }
+  return { lines, images };
+}
+
+// ../envoy-client/src/search-answer.ts
+function pageSummaryText(offset, count, total) {
+  return `showing ${offset + 1}-${offset + count} of ${total}`;
+}
+function searchResultLine(result, baseUrl) {
+  const href = new URL(result.href, baseUrl).toString();
+  const { owner } = result;
+  if (owner.kind === "document") {
+    const reference = dispatchDocumentRef(owner.project, owner.slug);
+    return `${reference} [document] ${owner.name} - ${result.kind}: ${snippetText(result.snippet)} -> ${href}`;
+  }
+  const artifactName = result.artifact ? ` ${result.artifact.name}` : "";
+  const label = `${owner.key} [${owner.status}] ${owner.title} - ${result.kind}${artifactName}`;
+  return `${label}: ${snippetText(result.snippet)} -> ${href}`;
+}
+function searchAnswer(search, query, offset, configUrl) {
+  const results = search.results;
+  const count = results.length;
+  const lines = results.map((result) => searchResultLine(result, configUrl));
+  const noun = count === 1 ? "result" : "results";
+  const noResults = `No results for "${query}".`;
+  if (typeof search.total !== "number") {
+    if (offset !== undefined && offset > 0) {
+      throw new Error(`Dispatch answered without a total: it predates search paging and ignored offset ${offset}, so this would be its first page again.`);
+    }
+    return {
+      text: count === 0 ? noResults : [`${count} ${noun} for "${query}" (${search.took_ms} ms)`, ...lines].join(`
+`),
+      details: { query, results }
+    };
+  }
+  const { total, reachable, offset: pageOffset } = search;
+  const end = pageOffset + count;
+  const cut = reachable < total ? `Each kind lists only its best ${SEARCH_KIND_DEPTH} matches, so ${reachable} of the ${total} can be paged to; narrow the query or name a project to reach the rest.` : undefined;
+  const details = {
+    query,
+    results,
+    total,
+    reachable,
+    offset: pageOffset,
+    limit: search.limit
+  };
+  if (count === 0) {
+    return {
+      text: total === 0 ? noResults : [
+        `No results for "${query}" at offset ${pageOffset}: it matches ${total}, and the pages reach the first ${reachable}.`,
+        ...cut === undefined ? [] : [cut]
+      ].join(`
+`),
+      details
+    };
+  }
+  const showing = pageOffset === 0 && count === total ? "" : `${pageSummaryText(pageOffset, count, total)}, `;
+  return {
+    text: [
+      `${count} ${noun} for "${query}" (${showing}${search.took_ms} ms)`,
+      ...cut === undefined ? [] : [cut],
+      ...lines,
+      ...end < reachable ? [`Next page: offset ${end}.`] : []
+    ].join(`
+`),
+    details
+  };
 }
 
 // ../envoy-client/src/dispatch-execute.ts
@@ -15734,140 +16034,6 @@ var pictureSendingTools = {
   dispatch_comment: true,
   dispatch_message: true
 };
-async function localPictures(args, cwd, problems) {
-  if (!Array.isArray(args.images))
-    return [];
-  const pictures = [];
-  for (const path2 of args.images) {
-    if (typeof path2 !== "string" || path2 === "")
-      continue;
-    const absolute = resolvePath(cwd, path2);
-    const file2 = Bun.file(absolute);
-    let size;
-    let head;
-    try {
-      const stats = await file2.stat();
-      if (!stats.isFile()) {
-        problems.push(`images: ${path2} is not a file`);
-        continue;
-      }
-      size = stats.size;
-      head = new Uint8Array(await file2.slice(0, PICTURE_SNIFF_BYTES).arrayBuffer());
-    } catch (error48) {
-      problems.push(`images: ${path2} cannot be read: ${messageFor(error48)}`);
-      continue;
-    }
-    if (size > PICTURE_UPLOAD_MAX_BYTES) {
-      problems.push(`images: ${path2} is ${size.toLocaleString("en-US")} bytes, over the ${PICTURE_UPLOAD_MAX_BYTES / 1024 / 1024} MiB one Dispatch upload takes`);
-      continue;
-    }
-    const type = sniffPictureType(head);
-    if (type === undefined) {
-      problems.push(`images: ${path2} is not a PNG, JPEG, GIF or WebP picture (judged by its bytes, not its name)`);
-      continue;
-    }
-    pictures.push({ path: path2, name: basename(absolute), file: Bun.file(absolute, { type }) });
-  }
-  return pictures;
-}
-function uploadSlug(name) {
-  const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
-  return slug === "" ? "artifact" : slug;
-}
-async function textWithPictures(tool, text, pictures, limit, owner, upload, actor) {
-  if (pictures.length === 0)
-    return text;
-  const counted = `${limit.text} plus ${pictures.length} ${pictures.length === 1 ? "picture" : "pictures"}`;
-  const fix = `${limit.shorten} or send fewer pictures`;
-  const predicted = withPictureLines(text, pictures.map((picture) => pictureLine(picture.name, `dispatch://${owner}/artifact/${uploadSlug(picture.name)}@v1`)));
-  if (predicted.length > limit.cap) {
-    throw new ToolInputError(tool, [
-      `${counted} ${overCapMessage(predicted.length, limit.cap)}; ${fix}`
-    ]);
-  }
-  const lines = [];
-  const addresses = [];
-  for (const picture of pictures) {
-    let uploaded;
-    try {
-      uploaded = await upload({ name: picture.name, file: picture.file, actor });
-    } catch (error48) {
-      const earlier = addresses.length === 0 ? "" : `; the pictures before it are uploaded (${addresses.join(", ")})`;
-      throw new Error(`images: ${picture.path} was not uploaded: ${messageFor(error48)}. Nothing was posted${earlier}.`);
-    }
-    const address = `dispatch://${owner}/artifact/${uploaded.artifact.slug}@v${uploaded.version.number}`;
-    addresses.push(address);
-    lines.push(pictureLine(picture.name, address));
-  }
-  const posted = withPictureLines(text, lines);
-  if (posted.length > limit.cap) {
-    throw new Error(`${counted} ${overCapMessage(posted.length, limit.cap)} with the addresses Dispatch gave ` + `the uploads (${addresses.join(", ")}), so nothing was posted; ${fix}.`);
-  }
-  return posted;
-}
-function parseAgentArtifactRef(ref) {
-  const match = ref.match(/^dispatch:\/\/agent\/([^/?#\s\p{Cc}]+)\/artifact\/([^/@]+)(?:@v(\d+))?$/u);
-  if (match === null)
-    return null;
-  const [, session, slug, version2] = match;
-  if (session === undefined || slug === undefined || version2 !== undefined && Number(version2) < 1) {
-    return null;
-  }
-  return { session, slug, ...version2 === undefined ? {} : { version: Number(version2) } };
-}
-function parseDispatchRef(ref) {
-  const projectDocument = ref.match(/^dispatch:\/\/([A-Z][A-Z0-9]{1,9})\/artifact\/([^/@]+)(?:@v(\d+))?(?:\/(ask|comment)\/([^/]+))?$/);
-  if (projectDocument) {
-    const [, project, artifact2, version3, targetKind, targetID] = projectDocument;
-    if (project === undefined || artifact2 === undefined || version3 !== undefined && Number(version3) < 1) {
-      return null;
-    }
-    if (targetKind === undefined) {
-      return {
-        owner: { kind: "project", project },
-        kind: "artifact",
-        id: artifact2,
-        ...version3 === undefined ? {} : { version: Number(version3) }
-      };
-    }
-    if (targetID === undefined || targetKind !== "ask" && targetKind !== "comment")
-      return null;
-    return {
-      owner: { kind: "project", project },
-      kind: targetKind,
-      id: targetID,
-      artifact: artifact2
-    };
-  }
-  const issueReference = ref.match(/^dispatch:\/\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)(?:\/(spec)|\/(log)|\/(children)|\/artifact\/([^/@]+)(?:@v(\d+))?|\/ask\/([^/]+)|\/comment\/([^/]+)|\/message\/([^/]+))?$/);
-  if (!issueReference)
-    return null;
-  const [, issue2, spec, log, children, artifact, version2, ask, comment, message] = issueReference;
-  if (!issue2 || version2 !== undefined && Number(version2) < 1)
-    return null;
-  const owner = { kind: "issue", issue: issue2 };
-  if (spec)
-    return { owner, kind: "spec", id: spec };
-  if (log)
-    return { owner, kind: "log", id: log };
-  if (children)
-    return { owner, kind: "children", id: children };
-  if (artifact) {
-    return {
-      owner,
-      kind: "artifact",
-      id: artifact,
-      ...version2 === undefined ? {} : { version: Number(version2) }
-    };
-  }
-  if (ask)
-    return { owner, kind: "ask", id: ask };
-  if (comment)
-    return { owner, kind: "comment", id: comment };
-  if (message)
-    return { owner, kind: "message", id: message };
-  return { owner, kind: "issue", id: issue2 };
-}
 function refTarget(ref, kind, id) {
   const ownerRef = ref.owner.kind === "issue" ? dispatchIssueRef(ref.owner.issue) : dispatchDocumentRef(ref.owner.project, `${ref.artifact}`);
   return dispatchChildRef(ownerRef, kind, id);
@@ -16607,49 +16773,6 @@ function messageSummary({ message, replies }, graph) {
   ].join(`
 `);
 }
-function datedBodies(records) {
-  return records.map((record2) => ({ text: record2.body, at: record2.created_at }));
-}
-function askTexts({ ask, replies }) {
-  return [
-    { text: ask.question, at: ask.created_at },
-    ...ask.answer?.text ? [{ text: ask.answer.text, at: ask.answer.at }] : [],
-    ...ask.resolution === undefined ? [] : [{ text: ask.resolution.reason, at: ask.resolution.at }],
-    ...datedBodies(replies)
-  ];
-}
-function eventTexts(event) {
-  let texts;
-  switch (event.type) {
-    case "ask.opened":
-    case "ask.anchor_refreshed":
-    case "ask.edited":
-    case "ask.handed_back":
-    case "ask.answered":
-    case "ask.resolved":
-      texts = [
-        event.payload.question,
-        event.payload.answer?.text,
-        event.payload.resolution?.reason
-      ];
-      break;
-    case "comment.created":
-    case "comment.answered":
-    case "comment.anchor_refreshed":
-    case "comment.edited":
-    case "comment.resolved":
-    case "comment.reopened":
-    case "suggestion.accepted":
-    case "suggestion.rejected":
-    case "message.created":
-    case "message.answered":
-      texts = [event.payload.body];
-      break;
-    default:
-      texts = [];
-  }
-  return texts.filter((text) => typeof text === "string" && text !== "").map((text) => ({ text, at: event.created_at }));
-}
 async function openArtifactMarks(client, resolved) {
   const asksPromise = resolved.owner.kind === "project" ? client.getArtifactAsks(resolved.artifact.id) : Promise.resolve(resolved.issue?.open_asks ?? []);
   const commentsPromise = resolved.owner.kind === "project" ? client.getArtifactComments(resolved.artifact.id) : client.getComments(resolved.issue?.key ?? "", resolved.artifact.id);
@@ -16671,13 +16794,13 @@ async function blockAsks(client, resolved, state) {
   const asks = await (resolved.issue === undefined ? client.getArtifactAsks(resolved.artifact.id, state) : client.listIssueAsks(resolved.issue.key, state));
   return asks.filter((ask) => typeof ask.block_id === "string" && ask.block_artifact?.id === resolved.artifact.id);
 }
-async function readUploadedFile(client, artifact, details, requested) {
+async function readUploadedFile(client, artifact, details, requested, owner, shown) {
   const latest = Math.max(0, ...artifact.versions.map((version2) => version2.number));
   const number4 = requested ?? latest;
   const of = number4 === latest ? "" : ` of ${latest}`;
   const bytesRoute = `GET /api/v1/artifacts/${artifact.id}/versions/${number4} serves its bytes.`;
   const tooLarge = (mime, bytes) => ({
-    text: `${artifact.name} is an uploaded ${mime} picture (version ${number4}${of}, ` + `${bytes.toLocaleString("en-US")} bytes), over the ${pictureShownMaxText} a model is shown, ` + `so dispatch_doc_read cannot show it. ${bytesRoute}`,
+    text: `${oversizePictureText(artifact.name, bytes)}, so dispatch_doc_read cannot show this ` + `uploaded ${mime} picture (version ${number4}${of}). ${bytesRoute}`,
     details
   });
   const stated = artifact.versions.find((version2) => version2.number === number4);
@@ -16689,6 +16812,7 @@ async function readUploadedFile(client, artifact, details, requested) {
   if (artifact.kind === "image") {
     const image = toolImage(file2.bytes);
     if (image !== undefined) {
+      shown?.add(`dispatch://${owner}/artifact/${artifact.slug}@v${number4}`);
       return {
         text: `Picture ${artifact.name}: ${image.mimeType}, version ${number4}${of}, ${size}.`,
         details,
@@ -16713,100 +16837,6 @@ async function readUploadedFile(client, artifact, details, requested) {
 ${text}`,
     details
   };
-}
-function pictureTarget(address) {
-  const agent = parseAgentArtifactRef(address);
-  if (agent !== null) {
-    if (agent.version === undefined)
-      return;
-    return {
-      key: `agent/${agent.session}/${agent.slug}`,
-      read: (client) => client.getAgentArtifact(agent.session, agent.slug),
-      version: agent.version
-    };
-  }
-  const ref = parseDispatchRef(address);
-  if (ref?.kind !== "artifact" || ref.version === undefined)
-    return;
-  const { owner, id: slug } = ref;
-  return owner.kind === "issue" ? {
-    key: `${owner.issue}/${slug}`,
-    read: (client) => client.getIssueArtifact(owner.issue, slug),
-    version: ref.version
-  } : {
-    key: `${owner.project}/${slug}`,
-    read: (client) => client.getProjectArtifact(owner.project, slug),
-    version: ref.version
-  };
-}
-var PICTURE_TYPE_NAMES = "a PNG, JPEG, GIF or WebP";
-async function readPictures(client, addresses) {
-  if (addresses.length === 0)
-    return { lines: [], images: [] };
-  const artifacts = new Map;
-  const images = [];
-  const lines = ["Pictures:"];
-  let shownBytes = 0;
-  const overBudget = `past this read's ${PICTURES_SHOWN_MAX_BYTES / 1024 / 1024} MiB of pictures; dispatch_doc_read shows it`;
-  const tooLarge = (name, bytes) => `${name} is ${bytes.toLocaleString("en-US")} bytes, over the ${pictureShownMaxText} a model is shown`;
-  for (const address of addresses) {
-    const skip = (reason) => lines.push(`- not shown: ${address} (${reason})`);
-    if (images.length === PICTURES_SHOWN_MAX) {
-      skip(`past this read's ${PICTURES_SHOWN_MAX} pictures; dispatch_doc_read shows it`);
-      continue;
-    }
-    const target = pictureTarget(address);
-    if (target === undefined) {
-      skip("names no versioned Dispatch artifact");
-      continue;
-    }
-    try {
-      let read = artifacts.get(target.key);
-      if (read === undefined) {
-        read = target.read(client);
-        artifacts.set(target.key, read);
-      }
-      const artifact = await read;
-      const version2 = artifact.versions.find((candidate) => candidate.number === target.version);
-      if (version2 === undefined) {
-        skip(`${artifact.name} has no version ${target.version}`);
-        continue;
-      }
-      if (artifact.kind !== "image") {
-        skip(`${artifact.name} is a ${artifact.kind}, not a picture`);
-        continue;
-      }
-      const mime = version2.mime?.split(";")[0]?.trim();
-      if (mime !== undefined && !isPictureType(mime)) {
-        skip(`${artifact.name} is ${mime}, not ${PICTURE_TYPE_NAMES} a model is shown`);
-        continue;
-      }
-      if (version2.size !== undefined && version2.size > PICTURE_SHOWN_MAX_BYTES) {
-        skip(tooLarge(artifact.name, version2.size));
-        continue;
-      }
-      if (version2.size !== undefined && shownBytes + version2.size > PICTURES_SHOWN_MAX_BYTES) {
-        skip(overBudget);
-        continue;
-      }
-      const file2 = await client.fileVersion(artifact.id, target.version);
-      const image = toolImage(file2.bytes);
-      if (image === undefined) {
-        skip(sniffPictureType(file2.bytes) === undefined ? `${artifact.name} is not ${PICTURE_TYPE_NAMES} a model is shown` : tooLarge(artifact.name, file2.bytes.length));
-        continue;
-      }
-      if (shownBytes + file2.bytes.length > PICTURES_SHOWN_MAX_BYTES) {
-        skip(overBudget);
-        continue;
-      }
-      shownBytes += file2.bytes.length;
-      images.push(image);
-      lines.push(`- image ${images.length}: ${address} (${artifact.name}, ${image.mimeType}, ${file2.bytes.length.toLocaleString("en-US")} bytes)`);
-    } catch (error48) {
-      skip(`unavailable: ${messageFor(error48)}`);
-    }
-  }
-  return { lines, images };
 }
 async function refuseOpenDecisionBlocks(client, tool, resolved) {
   const artifact = resolved.artifact;
@@ -16938,7 +16968,7 @@ async function executeDispatchTool(input) {
     problems.push(...formatZodIssues(issues, schema));
   }
   problems.push(...argumentProblems(input.tool, ownerArguments.args));
-  const pictures = pictureSendingTools[input.tool] === true ? await localPictures(ownerArguments.args, input.cwd, problems) : [];
+  const pictures = pictureSendingTools[input.tool] === true ? await localPictures(ownerArguments.args.images, input.cwd, problems) : [];
   if (problems.length > 0)
     throw new ToolInputError(input.tool, problems);
   const dispatchClient = () => new DispatchClient(configUrl, configToken, fetchImpl, input.signal);
@@ -16999,6 +17029,8 @@ async function executeDispatchTool(input) {
     const issueKey = issue2();
     return postWithPictures(text, limit, issueKey, (upload) => client.artifact(issueKey, upload));
   };
+  const hostSession = input.sessionId?.trim();
+  const shown = hostSession ? shownPictures(hostSession) : undefined;
   switch (input.tool) {
     case "dispatch_issue": {
       const project = stringArg(args, "project");
@@ -17542,7 +17574,7 @@ ${followsAsk(askOwner)}`,
       const { agentArtifact } = ownerArguments;
       if (agentArtifact !== undefined) {
         const artifact = await client.getAgentArtifact(agentArtifact.session, agentArtifact.slug);
-        return readUploadedFile(client, artifact, { session: agentArtifact.session, artifact: artifact.slug }, optionalNumber(args, "version") ?? agentArtifact.version);
+        return readUploadedFile(client, artifact, { session: agentArtifact.session, artifact: artifact.slug }, optionalNumber(args, "version") ?? agentArtifact.version, `agent/${agentArtifact.session}`, shown);
       }
       const artifactReference = optionalString(args, "artifact") ?? (ownerArguments.ref?.kind === "spec" || ownerArguments.ref?.kind === "artifact" ? ownerArguments.ref.id : undefined);
       const resolved = await resolveDocument(documentOwner(), artifactReference);
@@ -17552,7 +17584,7 @@ ${followsAsk(askOwner)}`,
         return readUploadedFile(client, artifact, resolved.owner.kind === "project" ? {
           project: artifact.project,
           document: documentLabel(artifact.project, artifact.slug)
-        } : { issue: resolved.issue?.key }, version2);
+        } : { issue: resolved.issue?.key }, version2, resolved.owner.kind === "project" ? resolved.owner.project : resolved.owner.issue, shown);
       }
       const documentPromise = client.docRead(resolved.artifact.id, version2);
       const marksPromise = openArtifactMarks(client, resolved);
@@ -17610,7 +17642,7 @@ ${trailer.join(`
       const content = optionalString(args, "content");
       const artifactInput = content === undefined ? {
         name,
-        file: Bun.file(resolvePath(input.cwd, stringArg(args, "path"))),
+        file: Bun.file(resolvePath2(input.cwd, stringArg(args, "path"))),
         ...summary === undefined ? {} : { summary },
         actor
       } : {
@@ -17663,7 +17695,7 @@ ${trailer.join(`
     }
     case "dispatch_read": {
       const message = optionalString(args, "message");
-      const picturesOf = (texts) => readPictures(client, picturesNewestFirst(texts));
+      const picturesOf = (texts) => readPictures(client, picturesNewestFirst(texts), shown);
       const shownImages = ({ images }) => images.length === 0 ? {} : { images };
       if (message !== undefined) {
         const sessionId = input.sessionId?.trim();
