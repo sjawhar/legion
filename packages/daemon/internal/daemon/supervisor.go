@@ -233,16 +233,22 @@ func (s *supervisor) wait() {
 
 // helloResolver maps a shim's hello to the launch its boot token was minted for, once every stored
 // claim is supervised. A token of a claim this daemon does not supervise — another project's row
-// in a shared database — is unknown: its connection would have no machine to report to.
+// in a shared database — is unknown: its connection would have no machine to report to. A hello
+// that arrives before restoration — a live pane reconnecting while the boot's readiness gate
+// still waits out an unreachable NATS or Dispatch (daemon.go's run, LEGION-580) — is held, not
+// rejected: the wait for s.restored runs on s.ctx alone, with no deadline of its own, since the
+// shim it answers waits for hello_ack the same way and supervision.stop cancels s.ctx before the
+// stream closes, releasing every held hello rather than leaving one to time out mid-boot naming a
+// credential problem that does not exist. timeout bounds only the resolve that follows.
 func (s *supervisor) helloResolver(tokens *api.BootTokens, timeout time.Duration) stream.HelloResolver {
 	return func(bootToken string) (claim.Token, uint64, bool, bool) {
-		ctx, cancel := context.WithTimeout(s.ctx, timeout)
-		defer cancel()
 		select {
 		case <-s.restored:
-		case <-ctx.Done():
+		case <-s.ctx.Done():
 			return "", 0, false, false
 		}
+		ctx, cancel := context.WithTimeout(s.ctx, timeout)
+		defer cancel()
 		launch, known, err := tokens.Resolve(ctx, bootToken)
 		if err != nil {
 			s.log.Error("worker stream: resolve a hello's boot token", "error", err)

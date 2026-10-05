@@ -164,12 +164,13 @@ func Connect(urls []string, seed string, options ...nats.Option) (*nats.Conn, er
 
 // ReconnectForever is the connection option that never gives up reconnecting: the default 60
 // attempts (nats.DefaultMaxReconnect) give up after about two minutes (at
-// nats.DefaultReconnectWait) and close the connection for good — exactly the "workflow intake
-// stopped: durable consumer … stopped unexpectedly" crash daemon.go turns into a boot refusal
-// (LEGION-580). With MaxReconnect negative, nats.go's own server-pool logic never drops a server
-// for having failed too many times (selectNextServer) and doReconnect loops until Close, so a
-// NATS outage mid-run costs degraded minutes of nats.go's own default 2 s reconnect wait rather
-// than a crash the supervisor restarts straight into the same dial.
+// nats.DefaultReconnectWait) and close the connection for good — exactly what turned the
+// "workflow intake stopped: durable consumer … stopped unexpectedly" crash into a runtime exit
+// daemon.go had no gate for (LEGION-580). With MaxReconnect negative, nats.go's own server-pool
+// logic never drops a server for having failed too many times (selectNextServer) and
+// doReconnect loops until Close, so a NATS outage mid-run costs degraded minutes of nats.go's own
+// default 2 s reconnect wait rather than a crash the supervisor restarts straight into the same
+// dial.
 func ReconnectForever() nats.Option {
 	return nats.MaxReconnects(-1)
 }
@@ -181,12 +182,13 @@ var permissionRefusal = regexp.MustCompile(`(?i)(publish|subscription) to "([^"]
 // LogEvents is the connection option that logs what the server reports about the connection
 // asynchronously: at error, every permission the server refuses it, a subscription or a publish,
 // the JetStream API requests a consumer makes included, and a terminal close (a fatal server -ERR,
-// reconnects exhausted), once, with its cause; at warn, every other asynchronous error, with the
-// subject of the subscription it names, and every disconnect, with its cause; at info, every
-// reconnect, with the server. nats.go's default handler writes a refusal to stderr unlabelled and
-// nothing for the rest. It owns the connection's AsyncErrorCB, DisconnectedErrCB, ReconnectedCB and
-// ClosedCB: an option after it that sets one replaces its handler. It also sets
-// NoCallbacksAfterClientClose, so the daemon's own Close runs neither of the last two.
+// or — for a caller that has not also set ReconnectForever — reconnects exhausted), once, with
+// its cause; at warn, every other asynchronous error, with the subject of the subscription it
+// names, and every disconnect, with its cause; at info, every reconnect, with the server. nats.go's
+// default handler writes a refusal to stderr unlabelled and nothing for the rest. It owns the
+// connection's AsyncErrorCB, DisconnectedErrCB, ReconnectedCB and ClosedCB: an option after it
+// that sets one replaces its handler. It also sets NoCallbacksAfterClientClose, so the daemon's
+// own Close runs neither of the last two.
 func LogEvents(log *slog.Logger) nats.Option {
 	return func(o *nats.Options) error {
 		o.AsyncErrorCB = func(_ *nats.Conn, sub *nats.Subscription, err error) {
@@ -227,30 +229,18 @@ func LogEvents(log *slog.Logger) nats.Option {
 }
 
 // WithLastError is err naming the last error of conn, when conn is closed: the cause of a terminal
-// close (a fatal server -ERR, reconnects exhausted) that nats.go hands no handler. It is err itself
-// while conn is up, whose LastError may be an earlier asynchronous error (a permission refusal, a
-// slow consumer) that caused nothing, and when a closed conn has none.
+// close (a fatal server -ERR, or — for a caller that has not also set ReconnectForever —
+// reconnects exhausted) that nats.go hands no handler. It is err itself while conn is up, whose
+// LastError may be an earlier asynchronous error (a permission refusal, a slow consumer) that
+// caused nothing, and when a closed conn has none. The join is %w, not %v: a caller that closes
+// conn right after a failed call and then wraps with WithLastError can still match the refusal
+// with errors.Is (nats.ErrPermissionViolation, say), since Close does not clear LastError.
 func WithLastError(err error, conn *nats.Conn) error {
 	if !conn.IsClosed() {
 		return err
 	}
 	if last := conn.LastError(); last != nil {
-		return fmt.Errorf("%w (the NATS connection's last error: %v)", err, last)
-	}
-	return err
-}
-
-// JoinLastError folds conn's own last error into err when the connection recorded one, whether or
-// not the connection is still up — unlike WithLastError, which only looks once conn is closed. A
-// refused JetStream API call (a publish or subscribe grant the connection's user lacks) is
-// reported to nats.go asynchronously and never closes the connection (processTransientError), so
-// the synchronous error a blocked API call returns is only ever its own deadline — "context
-// deadline exceeded" — with no sign of the permission violation that caused it. A caller whose
-// own call can fail that way joins LastError before judging the error with Unreachable, so a
-// permission refusal is not mistaken for NATS merely being slow to answer.
-func JoinLastError(err error, conn *nats.Conn) error {
-	if last := conn.LastError(); last != nil {
-		return fmt.Errorf("%w (NATS: %w)", err, last)
+		return fmt.Errorf("%w (the NATS connection's last error: %w)", err, last)
 	}
 	return err
 }
@@ -260,15 +250,19 @@ func JoinLastError(err error, conn *nats.Conn) error {
 // (userKey, before any dial is attempted), a protocol or certificate failure — that no wait
 // fixes. Matched by concrete, named shapes only, never the net.Error interface: two unrelated
 // standard library types satisfy that interface without being network failures at all —
-// context.DeadlineExceeded, which a refused JetStream API call produces with nothing in its own
-// text to tell a permission refusal from NATS merely being slow (JoinLastError is what makes that
-// refusal visible here, in time for the first check below), and *url.Error — so a caller must
-// never classify by the interface alone.
+// context.DeadlineExceeded and *url.Error — so a caller must never classify by the interface
+// alone. A bare context.DeadlineExceeded is refused rather than waited out: every NATS call this
+// package's callers make is a JetStream call on a bounded context (readinessAttempt's bootTimeout,
+// internal/daemon), and jetstream wraps a context's own expiry in exactly this shape whether the
+// call was merely slow or silently refused (a permission violation reports its cause
+// asynchronously and never closes the connection, so the blocked call's own synchronous error
+// never names it) — refusing is the loud, visible choice between two answers this package cannot
+// tell apart synchronously.
 func Unreachable(err error) bool {
 	if errors.Is(err, nats.ErrPermissionViolation) || errors.Is(err, nats.ErrAuthorization) {
 		return false
 	}
-	if errors.Is(err, nats.ErrNoServers) || errors.Is(err, nats.ErrTimeout) {
+	if errors.Is(err, nats.ErrNoServers) {
 		return true
 	}
 	var opErr *net.OpError

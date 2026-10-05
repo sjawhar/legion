@@ -30,6 +30,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/credential"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/intake"
+	"github.com/sjawhar/legion/daemon/internal/natsauth"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/projection"
 	"github.com/sjawhar/legion/daemon/internal/promptrefs"
@@ -243,19 +244,19 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 		// only what is published after it, so everything earlier is the listing's, and what the
 		// listing misses (a move published while it is read) the consumer delivers. Both wait out
 		// an unreachable dependency on ctx, not the bounded boot budget just spent on everything
-		// before them, the same way mintAtBoot already waits out GitHub's transient failures
-		// (bootprobe.Run, whose zero Attempts is unbounded): only a misconfiguration
-		// (natsauth.Unreachable, dispatch.Unreachable both answer false for one) is still a loud
-		// refusal.
-		err := bootprobe.Run(ctx, "connect Envoy NATS", readinessRetry, log, func(ctx context.Context) bootprobe.Outcome {
-			return natsConnectOutcome(boundedAttempt(ctx, bootTimeout, func(attempt context.Context) error {
+		// before them, through the same bootprobe.Run mechanism mintAtBoot already uses — here
+		// with Attempts left at its unbounded zero, where mintAtBoot bounds its own at 5 — so only
+		// a misconfiguration (natsauth.Unreachable, dispatch.Unreachable both answer false for
+		// one) is still a loud refusal. reconcile's own Postgres transaction is judged by neither:
+		// a Postgres failure there still exits at once, exactly as it did before this gate existed
+		// (TestRunRefusesAnUnreachablePostgresByHostAndNotByPassword, scripts/e2e/stage1-skeleton.sh).
+		err := bootprobe.Run(ctx, "connect Envoy NATS", readinessRetry, log,
+			readinessAttempt(func(attempt context.Context) error {
 				return workflow.connect(attempt, cfg, plan.nats)
-			}))
-		})
+			}, natsauth.Unreachable))
 		if err == nil {
-			err = bootprobe.Run(ctx, "list Dispatch issues for admission", readinessRetry, log, func(ctx context.Context) bootprobe.Outcome {
-				return dispatchReconcileOutcome(boundedAttempt(ctx, bootTimeout, workflow.reconcile))
-			})
+			err = bootprobe.Run(ctx, "list Dispatch issues for admission", readinessRetry, log,
+				readinessAttempt(workflow.reconcile, dispatch.Unreachable))
 		}
 		if err != nil {
 			s.stop()

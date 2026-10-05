@@ -474,12 +474,14 @@ at nats.go's own default 2 s reconnect wait. Only an unrecognized server `-ERR`,
 authorization error twice in a row, still closes the connection (nats.go's own terminal-close
 rules); a permission the server refuses (`NATS refused the daemon a permission`, above) leaves it
 open. At boot an unreachable NATS or Dispatch delays the boot instead of exiting, retried one
-second doubling to one minute, forever (`daemon.go`'s `run()`, under `bootprobe.Run` and the
-per-dependency `natsauth.Unreachable`/`dispatch.Unreachable`), logged at warn as `boot probe
-failed transiently; waiting to run it again` with its `probe` (naming which), `attempt`,
-`retryIn` and `detail`; only a misconfiguration — a malformed seed, a permission or authorization
-violation the server itself refuses, a genuine Dispatch application refusal — is still a loud
-boot refusal (LEGION-580).
+second doubling to one minute, forever, logged at warn as `boot probe failed transiently;
+waiting to run it again` with its `probe` (naming which), `attempt`, `retryIn` and `detail`. A
+misconfiguration still exits loud at once — a malformed seed, a permission or authorization
+violation the server itself refuses, a genuine Dispatch application refusal — and so does
+anything this wait cannot reliably tell apart from one: a NATS call that does not answer within
+its own bound, an EOF during the NATS handshake, and a Postgres failure while reconciling
+admission all exit rather than wait, since none of those is the audited outage this gate was
+built to ride out (LEGION-580).
 
 Rollout order for the server's `legion-daemon` user: the server admits
 `legion-daemon` (its public key applied) with the daemon's grants first; then its seed is stored,

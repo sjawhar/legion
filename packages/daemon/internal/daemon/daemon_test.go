@@ -938,14 +938,11 @@ func TestRunStopsWithTheErrorWhenItsIntakeEnds(t *testing.T) {
 	}
 }
 
-// RED (LEGION-580, correctness review finding 3): dispatchReconcileOutcome and bootprobe.Run are
-// only useful if run() actually wires them together. Here a real daemon.Run() boots against a
-// Dispatch stand-in that answers 503 twice before listing no issues, under a fast readinessRetry,
-// and reaches /healthz — proving the wiring itself rides out the outage, not just the extracted
-// pieces TestDispatchReconcileOutcomeRidesOutA503TwiceThenSucceeds (readiness_test.go) already
-// cover in isolation. Reverting daemon.go's wiring to main while keeping dispatchReconcileOutcome
-// and natsConnectOutcome is exactly the gap this closes: that revert leaves every other new test
-// passing.
+// readinessAttempt and bootprobe.Run are only useful if run() actually wires them together. Here
+// a real daemon.Run() boots against a Dispatch stand-in that answers 503 twice before listing no
+// issues, under a fast readinessRetry, and reaches /healthz — proving the wiring itself rides out
+// the outage, not just the adapter TestReadinessAttempt (readiness_test.go) already covers in
+// isolation.
 func TestRunWaitsThroughADispatch503BeforeServing(t *testing.T) {
 	fastReadiness(t, bootprobe.Retry{Initial: time.Millisecond, Max: 4 * time.Millisecond})
 	natsURL := workflowNATS(t)

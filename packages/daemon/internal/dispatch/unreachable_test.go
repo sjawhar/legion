@@ -6,20 +6,20 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
 
-// RED (LEGION-580, correctness review): a boot reading Dispatch for admission must wait out an
-// outage and refuse a misconfiguration loud. Unreachable is the predicate daemon.go's boot gate
-// judges every reconcile failure with.
+// Unreachable is the predicate daemon.go's boot gate judges every reconcile failure with: a boot
+// reading Dispatch for admission must wait out an outage and refuse a misconfiguration loud.
 func TestUnreachableClassifiesEachErrorShape(t *testing.T) {
 	for _, testCase := range []struct {
 		name string
 		err  error
 		want bool
 	}{
-		{"a 503 with no JSON body, exactly the raw HTML episode 3 crashed on",
+		{"a 503 with no JSON body, the shape a raw HTML error page from in front of Dispatch takes",
 			&Error{Status: 503, Message: "<html>503 Service Temporarily Unavailable</html>"}, true},
 		{"a codeless 4xx from whatever sits in front of Dispatch, such as a wrong host's own 404 page",
 			&Error{Status: 404, Message: "not found"}, true},
@@ -34,6 +34,8 @@ func TestUnreachableClassifiesEachErrorShape(t *testing.T) {
 		{"a TransientError wrapping a dial refusal", &TransientError{Err: &net.OpError{Op: "dial", Err: errors.New("connection refused")}}, true},
 		{"a decode error on a 2xx response: not Dispatch answering, not a transport failure — a schema mismatch",
 			errors.New("decode Dispatch GET /api/v1/issues response: unexpected end of JSON input"), false},
+		{"an https:// dispatch_url pointed at a plain-HTTP port (http.ErrSchemeMismatch), left unwrapped by transportFailure",
+			http.ErrSchemeMismatch, false},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			if got := Unreachable(testCase.err); got != testCase.want {
@@ -43,10 +45,9 @@ func TestUnreachableClassifiesEachErrorShape(t *testing.T) {
 	}
 }
 
-// RED (correctness review, finding 1): a certificate the client does not trust must stay a loud
-// refusal, never ride out forever as "the server merely isn't up yet." Reproduced against a real
-// TLS server whose certificate the client's pool does not trust, exactly as the review did with
-// httptest.NewTLSServer.
+// A certificate the client does not trust must stay a loud refusal, never ride out forever as
+// "the server merely isn't up yet." Reproduced against a real TLS server whose certificate the
+// client's pool does not trust.
 func TestTransportFailureExcludesACertificateTheClientDoesNotTrust(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -68,6 +69,33 @@ func TestTransportFailureExcludesACertificateTheClientDoesNotTrust(t *testing.T)
 	}
 	if Unreachable(err) {
 		t.Fatalf("Unreachable(%v) = true for an untrusted certificate; it must classify false so the boot exits loud", err)
+	}
+}
+
+// An https:// dispatch_url pointed at a plain-HTTP port must stay a loud refusal the same way:
+// dispatchBase's scheme check (internal/config) catches a scheme that is not http or https at
+// load time, but not a correct https:// whose port serves plain HTTP, which only a real
+// connection attempt reveals. Reproduced against a real plain-HTTP server dialed with an
+// https:// URL.
+func TestTransportFailureExcludesAnHTTPSURLPointedAtAPlainHTTPPort(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client := New("https://"+strings.TrimPrefix(server.URL, "http://"), "test-token")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := client.ListIssues(ctx, "ACME", nil)
+	if err == nil {
+		t.Fatal("ListIssues against an https:// URL pointed at a plain HTTP port must fail")
+	}
+	var transient *TransientError
+	if errors.As(err, &transient) {
+		t.Fatalf("a scheme mismatch was wrapped as a TransientError: %v; it must stay a loud refusal, not an outage a boot gate rides out forever", err)
+	}
+	if Unreachable(err) {
+		t.Fatalf("Unreachable(%v) = true for a scheme mismatch; it must classify false so the boot exits loud", err)
 	}
 }
 

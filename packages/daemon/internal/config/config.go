@@ -545,11 +545,17 @@ func readNatsURLs(value *yaml.Node, key string) ([]string, error) {
 
 // dispatchBase is `dispatch_url`: a base URL, never its clients' `/mcp` endpoint, which the clients
 // append themselves (the shipped `requireNoMcpSuffix`, config.ts). A trailing slash is gone
-// by then, so `/mcp/` is caught too.
+// by then, so `/mcp/` is caught too. Its scheme must be http or https: anything else — a typo such
+// as `htp` — is a misconfiguration `--check-config` should catch now, rather than reaching the
+// daemon's HTTP client as "unsupported protocol scheme", which the boot's readiness gate would
+// otherwise wait out forever as if Dispatch were merely unreachable (LEGION-580).
 func dispatchBase(value, key string) (string, error) {
 	base, err := baseURL(value, key)
 	if err != nil {
 		return "", err
+	}
+	if scheme, _, ok := strings.Cut(base, "://"); !ok || (scheme != "http" && scheme != "https") {
+		return "", fmt.Errorf("%s must be http or https, not %q", key, scheme)
 	}
 	if strings.HasSuffix(base, "/mcp") {
 		return "", fmt.Errorf("%s must be the dispatch service base URL, not the /mcp endpoint", key)

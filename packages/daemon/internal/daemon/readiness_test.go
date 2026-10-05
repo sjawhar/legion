@@ -2,15 +2,10 @@ package daemon
 
 import (
 	"context"
-	"fmt"
-	"net/http"
-	"net/http/httptest"
-	"sync/atomic"
+	"errors"
 	"testing"
-	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
-	"github.com/sjawhar/legion/daemon/internal/dispatch"
 )
 
 // fastReadiness overrides readinessRetry for a test's lifetime, restored on cleanup, so a gate
@@ -22,105 +17,58 @@ func fastReadiness(t *testing.T, retry bootprobe.Retry) {
 	t.Cleanup(func() { readinessRetry = previous })
 }
 
-// RED (LEGION-580): before this fix, a boot against Dispatch answering 503 exited at once
-// ("legion start: list Dispatch issues for admission: <html>…503 Service Temporarily
-// Unavailable…</html>"), the shape 25 of the 96 audited crashes share. Here bootprobe.Run,
-// readinessRetry and dispatchReconcileOutcome — the exact pieces daemon.go's run() wires
-// together — drive a real dispatch.HTTPClient against an httptest.Server that answers 503 twice
-// with the same raw-HTML body the journal shows, then 200: the gate rides out both 503s and
-// completes the call. TestRunWaitsThroughADispatch503BeforeServing (daemon_test.go) proves the
-// same thing through the actual daemon.Run() wiring, not just these pieces in isolation.
-func TestDispatchReconcileOutcomeRidesOutA503TwiceThenSucceeds(t *testing.T) {
-	fastReadiness(t, bootprobe.Retry{Initial: time.Millisecond, Max: 4 * time.Millisecond})
-
-	var requests atomic.Int64
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if requests.Add(1) <= 2 {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			fmt.Fprint(w, "<html><head><title>503 Service Temporarily Unavailable</title></head>"+
-				"<body><center><h1>503 Service Temporarily Unavailable</h1></center></body></html>")
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte("[]"))
-	}))
-	defer server.Close()
-
-	client := dispatch.New(server.URL, "test-token")
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	err := bootprobe.Run(ctx, "list Dispatch issues for admission", readinessRetry, quietLogger(), func(ctx context.Context) bootprobe.Outcome {
-		_, err := client.ListIssues(ctx, "ACME", nil)
-		return dispatchReconcileOutcome(err)
-	})
-	if err != nil {
-		t.Fatalf("bootprobe.Run returned %v; two 503s must be ridden out, not a boot refusal", err)
-	}
-	if got := requests.Load(); got != 3 {
-		t.Fatalf("Dispatch saw %d requests, want exactly 3 (two 503s then the 200 that completed the call)", got)
-	}
-}
-
-// A genuine Dispatch refusal — a 404 with its own error code, the project or route named is not
-// there — is returned as a refusal at once, never retried: dispatchReconcileOutcome's two
-// predicates (dispatch.Unreachable, natsauth.Unreachable) both answer false for it, and
-// bootprobe.Run returns on the first Outcome.Refusal.
-func TestDispatchReconcileOutcomeRefusesAtOnceOnAGenuineRefusal(t *testing.T) {
-	fastReadiness(t, bootprobe.Retry{Initial: time.Minute, Max: time.Minute}) // a retry here would hang the test.
-
-	var requests atomic.Int64
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests.Add(1)
-		w.WriteHeader(http.StatusNotFound)
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"code":"NOT_FOUND","error":"no such project"}`)
-	}))
-	defer server.Close()
-
-	client := dispatch.New(server.URL, "test-token")
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	err := bootprobe.Run(ctx, "list Dispatch issues for admission", readinessRetry, quietLogger(), func(ctx context.Context) bootprobe.Outcome {
-		_, err := client.ListIssues(ctx, "ACME", nil)
-		return dispatchReconcileOutcome(err)
-	})
-	if err == nil {
-		t.Fatal("bootprobe.Run passed on a genuine 404; it must refuse at once")
-	}
-	if n := requests.Load(); n != 1 {
-		t.Fatalf("Dispatch saw %d requests, want exactly 1: a genuine refusal is never retried", n)
-	}
-}
-
-// boundedAttempt gives each attempt its own deadline inside the daemon's unbounded ctx (LEGION-580,
-// correctness review finding 2): a Postgres that accepts a connection and then never answers must
-// not hang the whole boot, only the one attempt, which then counts as a failed attempt under
-// readinessRetry like any other.
-func TestBoundedAttemptCutsOffAnAttemptThatNeverReturnsAtItsOwnDeadlineNotTheOuterOne(t *testing.T) {
-	never := make(chan struct{})
-	t.Cleanup(func() { close(never) })
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second) // the outer, daemon-lifetime ctx.
-	defer cancel()
-
-	deadline := 20 * time.Millisecond
-	start := time.Now()
-	err := boundedAttempt(ctx, deadline, func(attempt context.Context) error {
-		select {
-		case <-attempt.Done():
-			return attempt.Err()
-		case <-never:
-			return nil
-		}
-	})
-	elapsed := time.Since(start)
-	if err == nil {
-		t.Fatal("an attempt that never returns on its own must be cut off by its own deadline")
-	}
-	if elapsed > deadline+time.Second {
-		t.Fatalf("the attempt ran for %s, want well under its %s deadline", elapsed, deadline)
-	}
-	if ctx.Err() != nil {
-		t.Fatalf("the outer ctx ended (%v); only the attempt's own deadline should have fired", ctx.Err())
+// readinessAttempt's three outcomes: passed, retried (bootprobe.Run's retry branch) when any of
+// its judges recognizes the failure, and refused when none does, including with no judges at all
+// (connect's own call, which judges with exactly one). TestRunWaitsThroughADispatch503BeforeServing
+// (daemon_test.go) proves the real wiring end to end, through a real dispatch.HTTPClient and a
+// real daemon.Run(); this proves the adapter's own three-way logic in isolation.
+func TestReadinessAttempt(t *testing.T) {
+	for _, testCase := range []struct {
+		name        string
+		unreachable []func(error) bool
+		wantPassed  bool
+		wantDetail  string
+		wantRefusal bool
+	}{
+		{name: "passed", wantPassed: true},
+		{
+			name:        "retried when its one judge recognizes the failure",
+			unreachable: []func(error) bool{func(error) bool { return true }},
+			wantDetail:  "unavailable",
+		},
+		{
+			name: "retried when the second of two judges recognizes it, the first does not",
+			unreachable: []func(error) bool{
+				func(error) bool { return false },
+				func(error) bool { return true },
+			},
+			wantDetail: "unavailable",
+		},
+		{
+			name:        "refused when its one judge does not recognize the failure",
+			unreachable: []func(error) bool{func(error) bool { return false }},
+			wantRefusal: true,
+		},
+		{
+			name:        "refused with no judges at all",
+			wantRefusal: true,
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			attemptErr := error(nil)
+			if !testCase.wantPassed {
+				attemptErr = errors.New("unavailable")
+			}
+			got := readinessAttempt(func(context.Context) error { return attemptErr }, testCase.unreachable...)(context.Background())
+			if got.Passed != testCase.wantPassed {
+				t.Fatalf("Outcome.Passed = %t, want %t", got.Passed, testCase.wantPassed)
+			}
+			if got.Detail != testCase.wantDetail {
+				t.Fatalf("Outcome.Detail = %q, want %q", got.Detail, testCase.wantDetail)
+			}
+			if (got.Refusal != nil) != testCase.wantRefusal {
+				t.Fatalf("Outcome.Refusal = %v, want non-nil = %t", got.Refusal, testCase.wantRefusal)
+			}
+		})
 	}
 }
