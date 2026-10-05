@@ -14,7 +14,6 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
-	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
 // Spawn starts a fresh agent for spec's claim, over whatever the claim's Sandbox already holds
@@ -365,13 +364,12 @@ func (r *Runtime) lockTree(ctx context.Context, tree string) (func(), error) {
 	}
 }
 
-// treeInitBound is awaitTreeInitialized's budget: the worst legitimate total of a sibling's init
-// phase, workspace.FetchTimeout (the fetch's own clone bound) plus the same lock-wait budget
-// workspace-init's own `flock --timeout` is sized by (initWaitSeconds) — never workspace-init's
-// lock wait alone, which a sibling's fetch can still be running well past. A named function so a
-// test can assert its exact value without waiting it out.
+// treeInitBound is awaitTreeInitialized's budget: GraceBound, the worst legitimate total of a
+// sibling's init phase — never workspace-init's lock wait alone, which a sibling's fetch can
+// still be running well past. A named function so a test can assert its exact value without
+// waiting it out.
 func (r *Runtime) treeInitBound() time.Duration {
-	return workspace.FetchTimeout + time.Duration(r.initWaitSeconds())*time.Second
+	return GraceBound(r.bootTimeout, r.bootIntervals)
 }
 
 // awaitTreeInitialized waits until no other pod of l's tree is initializing: every tree pod's

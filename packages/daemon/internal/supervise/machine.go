@@ -369,8 +369,8 @@ func NewMachine(ctx context.Context, deps Deps, c Claim) (*Machine, error) {
 		// The hello that reached StateShimConnected already re-armed the registration deadline at
 		// its base bound before this restart (helloed, table.go): restoring must not bring the
 		// grace back, or a pod whose agent already said hello once would get it twice.
-		m.armBoot()
-		m.arm(TimerRegistration, m.deps.Timeouts.Boot*time.Duration(m.deps.Timeouts.RegistrationIntervals), "")
+		m.arm(TimerBoot, m.deps.Timeouts.Boot, "")
+		m.armRegistration(0)
 	case StateReady, StateIdle:
 		m.askFirst = c.Pending != nil && c.Pending.ConfirmedAt.IsZero()
 	case StateWorking:
@@ -844,7 +844,15 @@ func nothing(context.Context) error { return nil }
 
 func (m *Machine) armBoot() {
 	m.arm(TimerBoot, m.deps.Timeouts.Boot, "")
-	m.arm(TimerRegistration, m.deps.Timeouts.Boot*time.Duration(m.deps.Timeouts.RegistrationIntervals)+m.deps.Timeouts.RegistrationGrace, "")
+	m.armRegistration(m.deps.Timeouts.RegistrationGrace)
+}
+
+// armRegistration arms the registration deadline at its base Boot×RegistrationIntervals bound
+// plus grace: armBoot's own call (the launch's own RegistrationGrace) and every re-arm that drops
+// the grace once it is no longer needed (helloed's hello, and NewMachine's restore of a claim
+// already past its hello) share this one formula, rather than each writing it out separately.
+func (m *Machine) armRegistration(grace time.Duration) {
+	m.arm(TimerRegistration, m.deps.Timeouts.Boot*time.Duration(m.deps.Timeouts.RegistrationIntervals)+grace, "")
 }
 
 // arm schedules one timer of a kind, replacing any of that kind already armed. Its event carries

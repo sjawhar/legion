@@ -240,7 +240,19 @@ func tomlString(value string) string {
 	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(value) + `"`
 }
 
-func runCommand(ctx context.Context, run Runner, argv []string, env []string, dir string, timeout time.Duration) (Result, error) {
+// runCommand runs argv with the runner's own slow-command budget: run is nil-checked before
+// run.Timeout() is ever read, so a nil Runner always returns the error below rather than a panic.
+func runCommand(ctx context.Context, run Runner, argv []string, env []string, dir string) (Result, error) {
+	if run == nil {
+		return Result{}, errors.New("workspace runner is required")
+	}
+	return runCommandTimeout(ctx, run, argv, env, dir, run.Timeout())
+}
+
+// runCommandTimeout is runCommand, but for timeout instead of the runner's own slow-command
+// budget: the fetch's clone needs a bound that follows the transfer's progress rather than
+// CommandTimeout's fixed wall clock (RunCheckedTimeout, FetchTimeout).
+func runCommandTimeout(ctx context.Context, run Runner, argv []string, env []string, dir string, timeout time.Duration) (Result, error) {
 	if run == nil {
 		return Result{}, errors.New("workspace runner is required")
 	}
@@ -254,11 +266,8 @@ func runCommand(ctx context.Context, run Runner, argv []string, env []string, di
 // process that could not start, exited non-zero, or outlived the budget is an error naming the
 // command.
 func RunChecked(ctx context.Context, run Runner, argv []string, env []string, dir string) (Result, error) {
-	var timeout time.Duration
-	if run != nil {
-		timeout = run.Timeout()
-	}
-	return runChecked(ctx, run, argv, env, dir, timeout)
+	result, err := runCommand(ctx, run, argv, env, dir)
+	return checkedResult(argv, result, err)
 }
 
 // RunCheckedTimeout runs argv like RunChecked, but bounds it with timeout instead of the runner's
@@ -267,11 +276,13 @@ func RunChecked(ctx context.Context, run Runner, argv []string, env []string, di
 // fetchLowSpeedEnvironment in its env so a stalled transfer dies within about a minute regardless
 // of how wide this bound is.
 func RunCheckedTimeout(ctx context.Context, run Runner, argv []string, env []string, dir string, timeout time.Duration) (Result, error) {
-	return runChecked(ctx, run, argv, env, dir, timeout)
+	result, err := runCommandTimeout(ctx, run, argv, env, dir, timeout)
+	return checkedResult(argv, result, err)
 }
 
-func runChecked(ctx context.Context, run Runner, argv []string, env []string, dir string, timeout time.Duration) (Result, error) {
-	result, err := runCommand(ctx, run, argv, env, dir, timeout)
+// checkedResult is RunChecked's and RunCheckedTimeout's shared answer: a process that could not
+// start, exited non-zero, or outlived its budget is an error naming the command.
+func checkedResult(argv []string, result Result, err error) (Result, error) {
 	if err != nil {
 		return Result{}, fmt.Errorf("run %s: %w", strings.Join(argv, " "), err)
 	}
@@ -351,7 +362,7 @@ func removeRepositoryIdentity(ctx context.Context, run Runner, cloneDir string) 
 			continue
 		}
 		unset := onClone(cloneDir, "config", "unset", "--repo", key)
-		removed, err := runCommand(ctx, run, unset, nil, "", run.Timeout())
+		removed, err := runCommand(ctx, run, unset, nil, "")
 		if err != nil {
 			return fmt.Errorf("run %s: %w", strings.Join(unset, " "), err)
 		}

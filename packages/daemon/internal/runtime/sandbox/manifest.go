@@ -606,13 +606,21 @@ func (r *Runtime) initEnvironment(l launch) []corev1.EnvVar {
 // safety-net timeout for whatever can still race around that serialization (a pod recreated
 // outside the normal relaunch flow), not a budget matched against another pod's own remaining
 // registration deadline, which can still hold anywhere from none of its grace left to nearly all
-// of it. awaitTreeInitialized (relaunch.go) and the daemon's registration-deadline grace
-// (internal/daemon/kubernetes.go's registrationGrace) both need a wider bound than this alone,
-// since each waits out (or tolerates) a sibling pod's whole init phase, its own workspace-fetch
-// clone included: both add workspace.FetchTimeout on top of this same value, rather than using it
-// by itself.
+// of it. awaitTreeInitialized (relaunch.go, treeInitBound) and the daemon's registration-deadline
+// grace (internal/daemon/kubernetes.go's registrationGrace) both need a wider bound than this
+// alone, since each waits out (or tolerates) a sibling pod's whole init phase, its own
+// workspace-fetch clone included: both call GraceBound, which adds workspace.FetchTimeout on top
+// of this same value, rather than each computing that sum separately.
 func InitWaitSeconds(bootTimeout time.Duration, intervals int) time.Duration {
 	return time.Duration(math.Ceil(bootTimeout.Seconds())) * time.Duration(intervals+1) * time.Second
+}
+
+// GraceBound is the worst legitimate total of a sibling pod's whole init phase: InitWaitSeconds's
+// lock-wait budget plus workspace.FetchTimeout, the fetch's own clone bound. The one place this
+// sum is computed, so treeInitBound and registrationGrace can never silently desync from each
+// other.
+func GraceBound(bootTimeout time.Duration, intervals int) time.Duration {
+	return workspace.FetchTimeout + InitWaitSeconds(bootTimeout, intervals)
 }
 
 func (r *Runtime) initWaitSeconds() int64 {

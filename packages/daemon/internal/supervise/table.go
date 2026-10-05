@@ -575,7 +575,7 @@ func observe(m *Machine, ctx context.Context, ev Event) error {
 // always was, counted from the moment it said hello rather than from the launch.
 func helloed(m *Machine, ctx context.Context, _ Event) error {
 	m.claim.State = StateShimConnected
-	m.arm(TimerRegistration, m.deps.Timeouts.Boot*time.Duration(m.deps.Timeouts.RegistrationIntervals), "")
+	m.armRegistration(0)
 	if err := m.persist(ctx); err != nil {
 		return err
 	}
