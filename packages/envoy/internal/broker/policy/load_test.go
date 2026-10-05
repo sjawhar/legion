@@ -384,3 +384,103 @@ func TestVersionNamesThePolicyNotItsListingOrder(t *testing.T) {
 		}
 	}
 }
+
+// goldenFixture is a fixed namespace whose Version a full Load produced at legion main 7544b767,
+// before NewSet existed. A change to the digest's bytes or order fails TestGoldenDigest, and the
+// production digests (requests.rules_version rows) would shift with it.
+func goldenFixture() *secrets.Local {
+	return secrets.NewLocal(
+		policytest.Secret("A0", "ada@example.com", policy.TierAgent, "v1"),
+		policytest.Secret("A_B", "ada@example.com", policy.TierHuman, "v1"),
+		policytest.Secret("DEEL_API_KEY", policy.OwnerShared, policy.TierHuman, "v1"),
+	)
+}
+
+func TestGoldenDigest(t *testing.T) {
+	const want = "252a3be479774f1163b99a7fbeeec17d523eb5e7048d54f90b8cb5e702fc16ca"
+	set, err := policytest.Loader(goldenFixture()).Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if set.Version != want {
+		t.Fatalf("Version = %s, want the pre-change golden %s: the digest bytes or order changed", set.Version, want)
+	}
+}
+
+// TestMergedSetVersionEqualsAFullLoads pins the digest contract: building the same contents by a
+// full Load and by single-name merges gives byte-equal Versions — including names whose slug order
+// differs from their Name order ("A_B" vs "A0": '-' < '0' but '_' > '0').
+func TestMergedSetVersionEqualsAFullLoads(t *testing.T) {
+	store := secrets.NewLocal(policytest.Secret("A0", "ada@example.com", policy.TierAgent, "v1"))
+	cur := policytest.Current(t, store)
+	store.Put(policytest.Secret("A_B", "ada@example.com", policy.TierAgent, "v1"))
+	if lk, err := cur.RefreshOne(context.Background(), "A_B"); err != nil || !lk.Served {
+		t.Fatalf("RefreshOne(A_B) = %+v, %v", lk, err)
+	}
+	merged := cur.Get().Version
+	full, err := policytest.Loader(store).Load(context.Background())
+	if err != nil || full.Version != merged {
+		t.Fatalf("merged Version %s != full load's %s (%v)", merged, full.Version, err)
+	}
+}
+
+// TestLoadOneAnswersOneNameByLoadsRules pins LoadOne against Load for the same secret: served, or
+// refused with Load's exact RefusedMessage line, or absent - none exists, or it is scheduled for
+// deletion - which is no refusal and logs nothing. A name no secret can carry is ErrNameInvalid.
+func TestLoadOneAnswersOneNameByLoadsRules(t *testing.T) {
+	deleting := policytest.Secret("DELETING", owner, policy.TierAgent, "v")
+	deleting.DeletedAt = new(time.Date(2026, 10, 11, 0, 0, 0, 0, time.UTC))
+	store := secrets.NewLocal(
+		policytest.Secret("SERVED", owner, policy.TierHuman, "v"),
+		policytest.Secret("ADMIN_TIER", owner, "admin", "v"),
+		deleting,
+	)
+	loader := policytest.Loader(store)
+	logged := policytest.CaptureLog(t)
+	ctx := context.Background()
+
+	lk, err := loader.LoadOne(ctx, "SERVED")
+	if s := lk.Secret; err != nil || !lk.Served || lk.Reason != "" || s.Name != "SERVED" || s.Owner != owner || s.Tier != policy.TierHuman || s.ARN != secrets.LocalARN(policytest.ID("SERVED")) {
+		t.Fatalf("LoadOne(SERVED) = %+v, %v; want it served, %s's, human, read by its ARN", lk, err, owner)
+	}
+	for name, reason := range map[string]string{
+		"ADMIN_TIER": policy.ReasonTierTagMalformed,
+		"MISSING":    policy.ReasonAbsent,
+		"DELETING":   policy.ReasonAbsent,
+	} {
+		if lk, err := loader.LoadOne(ctx, name); err != nil || lk.Served || lk.Reason != reason {
+			t.Errorf("LoadOne(%s) = %+v, %v; want unserved for %s", name, lk, err, reason)
+		}
+	}
+	if want := refusedLine("ADMIN_TIER", policy.ReasonTierTagMalformed); logged.String() != want {
+		t.Errorf("logged %q, want only the refusal %q", logged.String(), want)
+	}
+	if _, err := loader.LoadOne(ctx, "serv-ed"); !errors.Is(err, policy.ErrNameInvalid) {
+		t.Errorf("LoadOne(serv-ed) = %v, want ErrNameInvalid", err)
+	}
+
+	set, err := loader.Load(ctx)
+	if _, listed := set.Secrets["DELETING"]; err != nil || listed {
+		t.Fatalf("Load served a secret scheduled for deletion (%v): %+v", err, set.Secrets)
+	}
+}
+
+// TestLoadOneMakesNoCallForAnIDPastSecretsManagersNameLimit pins the 512-character limit on a
+// secret's name: a request name whose id under the prefix is exactly that long is described as any
+// other, and one a character longer is ErrNameInvalid with no DescribeSecret made, since Secrets
+// Manager refuses a longer SecretId as invalid input rather than answering it not found.
+func TestLoadOneMakesNoCallForAnIDPastSecretsManagersNameLimit(t *testing.T) {
+	store := secrets.NewLocal()
+	count := &countingDescriber{DescribeSecretAPIClient: store}
+	loader := policytest.Loader(store)
+	loader.Describer = count
+	ctx := context.Background()
+
+	atLimit := "A" + strings.Repeat("B", 512-len(policytest.Prefix)-1)
+	if lk, err := loader.LoadOne(ctx, atLimit); err != nil || lk.Served || lk.Reason != policy.ReasonAbsent || count.calls.Load() != 1 {
+		t.Fatalf("LoadOne(a name whose id is 512 characters) = %+v, %v after %d DescribeSecret calls; want absent after one", lk, err, count.calls.Load())
+	}
+	if lk, err := loader.LoadOne(ctx, atLimit+"C"); !errors.Is(err, policy.ErrNameInvalid) || count.calls.Load() != 1 {
+		t.Fatalf("LoadOne(a name whose id is 513 characters) = %+v, %v after %d DescribeSecret calls; want ErrNameInvalid with no further call", lk, err, count.calls.Load())
+	}
+}

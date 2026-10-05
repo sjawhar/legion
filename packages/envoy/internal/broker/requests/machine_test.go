@@ -6,16 +6,20 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 	"github.com/google/uuid"
 
 	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/policy/policytest"
 	"github.com/sjawhar/envoy/internal/broker/proof"
+	"github.com/sjawhar/envoy/internal/broker/ratelimit"
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
 	"github.com/sjawhar/envoy/internal/broker/store"
@@ -360,6 +364,151 @@ func TestCreateRefusesAnUnknownSecretNameWithNoRecordWritten(t *testing.T) {
 	if err := m.Store.Pool.QueryRow(ctx, `select count(*) from requests where enrollment_id=$1`, enr).Scan(&count); err != nil || count != 0 {
 		t.Fatalf("requests rows for enrollment = %d, %v, want 0 (an unknown secret name aborts the whole Create call)", count, err)
 	}
+}
+
+// TestCreateServesASecretCreatedAfterTheLastReload pins the miss path: a request naming a secret
+// the policy's listing has not seen yet is served on its first request, not refused until the
+// five-minute reload.
+func TestCreateServesASecretCreatedAfterTheLastReload(t *testing.T) {
+	m, enr, key, _ := newFixture(t)
+	fixtureStore(m).Put(policytest.Secret("BRAND_NEW_KEY", fixtureOperator, policy.TierAgent, "v1"))
+	// No Policy.Refresh: the cached Set predates the Put, as production's does for up to 5 minutes.
+	req, err := m.Create(context.Background(), enr, signRequest(t, m, key, "need it", "BRAND_NEW_KEY"), "")
+	if err != nil || req.State != "granted" || req.GrantID == nil {
+		t.Fatalf("Create(BRAND_NEW_KEY) = %+v, %v; want an automatic grant via the miss-path reread", req, err)
+	}
+}
+
+// TestMissRereadsAreBoundedPerEnrollment pins the miss path's bound: a session inventing names
+// costs at most its enrollment's burst of DescribeSecret calls, and a miss past it is refused
+// without one.
+func TestMissRereadsAreBoundedPerEnrollment(t *testing.T) {
+	m, enr, key, _ := newFixture(t)
+	m.MissRereads = &ratelimit.Limit{Every: time.Hour, Burst: 2}
+	count := &countingDescriber{DescribeSecretAPIClient: fixtureStore(m)}
+	loader := policytest.Loader(fixtureStore(m), fixtureService) // the fixture's services, as newFixture registers them
+	loader.Describer = count
+	cur, err := policy.NewCurrent(t.Context(), loader, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Policy = cur
+	for i := range 3 {
+		if _, err := m.Create(context.Background(), enr, signRequest(t, m, key, "miss", fmt.Sprintf("NO_SUCH_KEY_%d", i)), ""); !errors.Is(err, policy.ErrUnknownSecret) {
+			t.Fatalf("miss %d: %v", i, err)
+		}
+	}
+	if got := count.calls.Load(); got != 2 {
+		t.Fatalf("DescribeSecret calls = %d, want 2 (the burst); the third miss must skip the reread", got)
+	}
+}
+
+// TestANameNoSecretCanCarrySpendsNoMissReread pins that a requested name no secret can carry -
+// free text, or one past Secrets Manager's name limit - is refused before it costs the
+// enrollment a miss-path token: after a request naming only such names, a secret created since
+// the last reload is still served by the enrollment's one reread.
+func TestANameNoSecretCanCarrySpendsNoMissReread(t *testing.T) {
+	m, enr, key, _ := newFixture(t)
+	m.MissRereads = &ratelimit.Limit{Every: time.Hour, Burst: 1}
+	ctx := context.Background()
+	tooLong := "A" + strings.Repeat("B", 512-len(policytest.Prefix))
+	if _, err := m.Create(ctx, enr, signRequest(t, m, key, "free text", "not a secret name", tooLong), ""); !errors.Is(err, policy.ErrUnknownSecret) {
+		t.Fatalf("Create(names no secret can carry) = %v, want policy.ErrUnknownSecret", err)
+	}
+	fixtureStore(m).Put(policytest.Secret("BRAND_NEW_KEY", fixtureOperator, policy.TierAgent, "v1"))
+	req, err := m.Create(ctx, enr, signRequest(t, m, key, "need it", "BRAND_NEW_KEY"), "")
+	if err != nil || req.State != "granted" {
+		t.Fatalf("Create(BRAND_NEW_KEY) after the invalid names = %+v, %v; want granted through the reread they must not have spent", req, err)
+	}
+}
+
+// countingDescriber counts the DescribeSecret calls a policy reread makes.
+type countingDescriber struct {
+	policy.DescribeSecretAPIClient
+	calls atomic.Int64
+}
+
+func (c *countingDescriber) DescribeSecret(ctx context.Context, in *secretsmanager.DescribeSecretInput, opts ...func(*secretsmanager.Options)) (*secretsmanager.DescribeSecretOutput, error) {
+	c.calls.Add(1)
+	return c.DescribeSecretAPIClient.DescribeSecret(ctx, in, opts...)
+}
+
+// TestARereadItsCallerAbandonedRaisesNoAlarm pins that a miss-path reread cut short by its own
+// request's end is that request's failure, not Secrets Manager's: the broker logs no
+// LoadFailedMessage, the line the policy alarm filters on, and answers the request with its
+// context's error, writing no request and so no grant.
+func TestARereadItsCallerAbandonedRaisesNoAlarm(t *testing.T) {
+	m, enr, key, _ := newFixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	loader := policytest.Loader(fixtureStore(m), fixtureService)
+	loader.Describer = abandoningDescriber{cancel: cancel}
+	cur, err := policy.NewCurrent(t.Context(), loader, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Policy = cur
+	fixtureStore(m).Put(policytest.Secret("BRAND_NEW_KEY", fixtureOperator, policy.TierAgent, "v1"))
+	logged := policytest.CaptureLog(t)
+	req, err := m.Create(ctx, enr, signRequest(t, m, key, "need it", "BRAND_NEW_KEY"), "")
+	if !errors.Is(err, context.Canceled) || req.GrantID != nil {
+		t.Fatalf("Create whose request ended during the reread = %+v, %v; want context.Canceled and no grant", req, err)
+	}
+	if strings.Contains(logged.String(), policy.LoadFailedMessage) {
+		t.Fatalf("an abandoned reread logged the alarm's line:\n%s", logged.String())
+	}
+	var written int
+	if err := m.Store.Pool.QueryRow(context.Background(), `select count(*) from requests where enrollment_id=$1`, enr).Scan(&written); err != nil || written != 0 {
+		t.Fatalf("requests rows for the enrollment = %d, %v; want 0", written, err)
+	}
+}
+
+// abandoningDescriber is a client that goes away while the reread's DescribeSecret is in flight:
+// it ends the request's context and fails as the AWS SDK does once its context has ended.
+type abandoningDescriber struct{ cancel context.CancelFunc }
+
+func (d abandoningDescriber) DescribeSecret(ctx context.Context, _ *secretsmanager.DescribeSecretInput, _ ...func(*secretsmanager.Options)) (*secretsmanager.DescribeSecretOutput, error) {
+	d.cancel()
+	return nil, fmt.Errorf("operation error Secrets Manager: DescribeSecret, %w", ctx.Err())
+}
+
+// TestAnOrdinaryRereadFailureRaisesThePolicyAlarm pins the other half of that rule: a reread
+// Secrets Manager itself fails, while the request is still live, logs LoadFailedMessage once,
+// naming the requested secret, and the name stays unknown with no request written.
+func TestAnOrdinaryRereadFailureRaisesThePolicyAlarm(t *testing.T) {
+	m, enr, key, _ := newFixture(t)
+	loader := policytest.Loader(fixtureStore(m), fixtureService)
+	loader.Describer = failingDescriber{err: errors.New("throttled")}
+	cur, err := policy.NewCurrent(t.Context(), loader, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Policy = cur
+	fixtureStore(m).Put(policytest.Secret("BRAND_NEW_KEY", fixtureOperator, policy.TierAgent, "v1"))
+	logged := policytest.CaptureLog(t)
+	if _, err := m.Create(context.Background(), enr, signRequest(t, m, key, "need it", "BRAND_NEW_KEY"), ""); !errors.Is(err, policy.ErrUnknownSecret) {
+		t.Fatalf("Create whose reread Secrets Manager failed = %v; want policy.ErrUnknownSecret", err)
+	}
+	var alarms []string
+	for _, line := range strings.Split(logged.String(), "\n") {
+		if strings.Contains(line, policy.LoadFailedMessage) {
+			alarms = append(alarms, line)
+		}
+	}
+	if len(alarms) != 1 || !strings.Contains(alarms[0], "name=BRAND_NEW_KEY") {
+		t.Fatalf("alarm lines = %q; want exactly one naming BRAND_NEW_KEY\n%s", alarms, logged.String())
+	}
+	var written int
+	if err := m.Store.Pool.QueryRow(context.Background(), `select count(*) from requests where enrollment_id=$1`, enr).Scan(&written); err != nil || written != 0 {
+		t.Fatalf("requests rows for the enrollment = %d, %v; want 0", written, err)
+	}
+}
+
+// failingDescriber is a Secrets Manager that answers every DescribeSecret with err.
+type failingDescriber struct{ err error }
+
+func (d failingDescriber) DescribeSecret(context.Context, *secretsmanager.DescribeSecretInput, ...func(*secretsmanager.Options)) (*secretsmanager.DescribeSecretOutput, error) {
+	return nil, d.err
 }
 
 func TestCoalescesIdenticalPendingAndReturnsTheFirstRecordID(t *testing.T) {
@@ -835,17 +984,33 @@ func TestUnchangedPermissionSurvivesAPolicyChange(t *testing.T) {
 
 // TestValuesNamesASecretDeletedBeforeTheNextRefresh pins that a granted secret deleted from Secrets
 // Manager before the policy's next refresh is refused as ErrSecretNotInStore naming the secret, not
-// an opaque failure.
+// an opaque failure: deleted at once, or scheduled for deletion with a recovery window (the
+// console's and the CLI's default), whose value Secrets Manager refuses to read as an invalid
+// request rather than a missing secret.
 func TestValuesNamesASecretDeletedBeforeTheNextRefresh(t *testing.T) {
-	m, enr, key, _ := newFixture(t)
-	ctx := context.Background()
-	granted, err := m.Create(ctx, enr, signRequest(t, m, key, "need it", "AUTO_TOKEN"), "")
-	if err != nil || granted.GrantID == nil {
-		t.Fatalf("Create = %+v, %v", granted, err)
-	}
-	fixtureStore(m).Delete(policytest.ID("AUTO_TOKEN"))
-	if _, _, err := m.Values(ctx, *granted.GrantID, enr); !errors.Is(err, ErrSecretNotInStore) || !strings.Contains(err.Error(), "AUTO_TOKEN") {
-		t.Fatalf("Values = %v, want ErrSecretNotInStore naming AUTO_TOKEN", err)
+	for shape, remove := range map[string]func(*secrets.Local){
+		"deleted at once": func(store *secrets.Local) { store.Delete(policytest.ID("AUTO_TOKEN")) },
+		"scheduled for deletion": func(store *secrets.Local) {
+			for _, s := range fixtureSecrets() {
+				if s.Name == policytest.ID("AUTO_TOKEN") {
+					s.DeletedAt = new(time.Now().Add(7 * 24 * time.Hour))
+					store.Put(s)
+				}
+			}
+		},
+	} {
+		t.Run(shape, func(t *testing.T) {
+			m, enr, key, _ := newFixture(t)
+			ctx := context.Background()
+			granted, err := m.Create(ctx, enr, signRequest(t, m, key, "need it", "AUTO_TOKEN"), "")
+			if err != nil || granted.GrantID == nil {
+				t.Fatalf("Create = %+v, %v", granted, err)
+			}
+			remove(fixtureStore(m))
+			if _, _, err := m.Values(ctx, *granted.GrantID, enr); !errors.Is(err, ErrSecretNotInStore) || !strings.Contains(err.Error(), "AUTO_TOKEN") {
+				t.Fatalf("Values = %v, want ErrSecretNotInStore naming AUTO_TOKEN", err)
+			}
+		})
 	}
 }
 

@@ -255,7 +255,7 @@ func (s *server) loadArtifactsByRefKey(ctx context.Context, q queryer, refKeys [
 		return artifacts, nil
 	}
 	rows, err := q.Query(ctx, `
-		select a.id::text, a.issue_key, a.project_key, a.ref_key, a.slug, a.name, a.kind, a.is_primary,
+		select a.id::text, a.issue_key, coalesce(a.project_key, ''), a.ref_key, a.slug, a.name, a.kind, a.is_primary,
 		       a.created_by, a.created_at,
 		       v.number, v.named, v.summary, v.authors, v.created_at, v.size, v.mime, v.sha256
 		from artifacts a

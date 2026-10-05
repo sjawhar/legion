@@ -88,7 +88,7 @@ func (s *server) commentEventPayload(ctx context.Context, tx pgx.Tx, comment mod
 	if comment.ArtifactID == nil {
 		return payload, nil
 	}
-	if err := tx.QueryRow(ctx, `select project_key, slug from artifacts where id = $1`, *comment.ArtifactID).Scan(&payload.ProjectKey, &payload.ArtifactSlug); err != nil {
+	if err := tx.QueryRow(ctx, `select coalesce(project_key, ''), slug from artifacts where id = $1`, *comment.ArtifactID).Scan(&payload.ProjectKey, &payload.ArtifactSlug); err != nil {
 		return model.CommentEventPayload{}, fmt.Errorf("load artifact comment event owner: %w", err)
 	}
 	return payload, nil
