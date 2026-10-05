@@ -35,6 +35,9 @@ const natsConnections: {
   /** The connection dies: every subscription's iterator ends, as nats.js ends them. */
   readonly drop: () => void;
 }[] = [];
+/** One ordered log of two kinds of event a test cares about seeing in order: `sendUserMessage`
+ * (createPi's stub pushes here too) and `subscribe:<subject>` (below). Reset in beforeEach. */
+const eventOrder: string[] = [];
 /** A connect for a connection name calls its gate, when a test sets one, and waits on it. */
 const natsConnectGates = new Map<string, () => Promise<void>>();
 // @legion/envoy-client/nats-auth resolves the NATS credential with the real nkey exports.
@@ -62,6 +65,7 @@ mock.module("nats", () => ({
       isClosed: () => connection.closed,
       publish: () => undefined,
       subscribe: (subject: string) => {
+        eventOrder.push(`subscribe:${subject}`);
         connection.subjects.push(subject);
         const ended = Promise.withResolvers<void>();
         endings.push(ended.resolve);
@@ -206,6 +210,7 @@ afterEach(async () => {
   // bound to a previous test's fetch stub) would capture a later test's claim.
   resetLegionRoleClaimBridgeForTests();
   natsConnections.splice(0);
+  eventOrder.length = 0;
   natsConnectGates.clear();
   setLegionBootstrapExitForTests((code) => process.exit(code) as never);
   resetLegionBootstrappedSessionForTests();
@@ -282,6 +287,7 @@ function createPi(options: { readonly bindEnvoy?: boolean } = {}): {
     sendMessage: (message) => sentMessages.push(message),
     sendUserMessage: (content) => {
       sentUserMessages.push(content);
+      eventOrder.push("sendUserMessage");
     },
     appendEntry: (customType, data) => {
       entries.push({ type: "custom", customType, data });
@@ -2864,7 +2870,8 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
   // controller-session.ts: claimEnvoyRole, then pi.sendUserMessage, then subscribeLegionNotice —
   // no await between the send and the claim it follows, so nothing scheduled after the claim can
   // run first), so nothing can race it.
-  test("sends LEGION_CONTROLLER_START_MESSAGE as the session's first turn once its claim succeeds", async () => {
+  test("sends LEGION_CONTROLLER_START_MESSAGE as the session's first turn once its claim succeeds, before the controller-topic subscribe opens", async () => {
+    const topic = "notifications.legion.omp.controller";
     const controller = await launchedController({
       sessionId: "ses_controller_start",
       startMessage: "Legion controller start: follow skill://legion-controller's start procedure",
@@ -2877,6 +2884,32 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     expect(controller.sentUserMessages).toEqual([
       "Legion controller start: follow skill://legion-controller's start procedure",
     ]);
+    // The real ordering guarantee: the send precedes the subscribe that opens the live wake
+    // channel a notice could otherwise race it on.
+    expect(eventOrder.indexOf("sendUserMessage")).toBeGreaterThanOrEqual(0);
+    expect(eventOrder.indexOf(`subscribe:${topic}`)).toBeGreaterThan(
+      eventOrder.indexOf("sendUserMessage")
+    );
+  });
+
+  // Reading LEGION_CONTROLLER_START_MESSAGE is gated on `launched` (a `legion controller start`
+  // launch, never a hand-started takeover), checked on a process that has made no prior claim at
+  // all: `startMessageSent` alone would not catch a dropped `launched &&` here, since it starts
+  // `false` the same way a genuine first launch does.
+  test("a hand-started takeover with no prior claim in this process sends no start message of its own", async () => {
+    const controller = await launchedController({ sessionId: "ses_controller_takeover_only" });
+    // No session_start: this process's controllerSession has made no claim yet. A hand-started
+    // takeover carries no controller marker.
+    delete process.env.LEGION_CONTROLLER;
+    delete process.env.LEGION_ROLE;
+    delete process.env.LEGION_CONTROLLER_START_MESSAGE;
+    const claimCommand = controller.commands.find(
+      (command) => command.name === "legion-claim-controller"
+    );
+    if (claimCommand === undefined) throw new Error("controller claim command was not registered");
+    await claimCommand.handler("", controller.context("ses_controller_takeover_only"));
+
+    expect(controller.sentUserMessages).toEqual([]);
   });
 
   test("a hand-started takeover sends no start message of its own: the operator's own session speaks for itself", async () => {

@@ -1365,10 +1365,13 @@ keeping nothing until the daemon has answered, the command:
    deployment instructions;
 5. runs Oh My Pi interactive in the foreground (`omp_launch_prefix` and `omp_invocation`, one joined
    `--append-system-prompt` holding the controller prompt, the daemon's `Design gate policy:` line
-   and the deployment instructions, a start message as Oh My Pi's first prompt so the controller's first turn runs its start
-   procedure with nothing typed, no `--resume`, no `--mode rpc`) with the controller's environment
-   (`LEGION_CONTROLLER=1`, `LEGION_ROLE=controller`, `LEGION_DAEMON_URL`,
-   `LEGION_PROJECT`, `LEGION_STATE_DIR`, its grant and secret files, the Envoy and Dispatch
+   and the deployment instructions, no `--resume`, no `--mode rpc`) with the controller's
+   environment (`LEGION_CONTROLLER=1`, `LEGION_ROLE=controller`, `LEGION_DAEMON_URL`,
+   `LEGION_PROJECT`, `LEGION_STATE_DIR`, `LEGION_CONTROLLER_START_MESSAGE` (the pi-legion-envoy
+   extension sends it as the session's first turn right after its role claim succeeds and before
+   it opens the live wake subscription, so the controller's first turn runs its start procedure
+   deterministically, with nothing typed, rather than racing a wake for the session's one
+   first-turn slot — LEGION-392), its grant and secret files, the Envoy and Dispatch
    endpoints, and `NATS_NKEY_SEED_FILE` naming `nats_nkey_seed_file` when the file sets it) on top
    of the operator's own environment, less `NATS_DAEMON_NKEY_SEED` and `NATS_DAEMON_NKEY_SEED_FILE`
    (the controller is pane-side, and never gets the daemon's seed), and exits with Oh My Pi's exit

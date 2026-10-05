@@ -219,7 +219,10 @@ and paths; without it the title is `Legion controller`, so no daemon contract nu
 call or Envoy role claim, so the claim's registration already carries the title the Envoy listener
 lists, and every Dispatch write stamps it as `origin.session_title` (`getSessionName`, read at
 call time). Oh My Pi titles a session itself from the first message typed at its terminal or given
-on its command line, so a headless `omp --mode rpc` session the daemon prompts otherwise has none.
+on its command line, so a headless `omp --mode rpc` session the daemon prompts otherwise has none;
+the controller's own first message is neither (LEGION_CONTROLLER_START_MESSAGE, sent at claim time
+by `controller-session.ts`'s `claim`, never a CLI word), and its title is always this extension's
+own, set before that send.
 The controller also titles the session a `/new`, `/resume`, `/fork`, branch or tree navigation
 leaves it on, before it re-claims.
 

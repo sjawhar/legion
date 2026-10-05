@@ -38,6 +38,10 @@ export function createControllerSession(deps: {
   let controllerSessionID: string | undefined;
   let controllerCapability: string | undefined;
   let mintControllerGrant: (() => Promise<LegionGrant>) | undefined;
+  // Whether this process has ever sent LEGION_CONTROLLER_START_MESSAGE: the gate is its own flag
+  // rather than `controllerSessionID`, which a claim that throws after the send (the subscription
+  // below, say) never reaches setting, so a retry would otherwise send it again.
+  let startMessageSent = false;
   // The controller's own transcript as of the last successful claim, which a session navigation
   // compares to decide whether to claim again; a hand-started takeover records none.
   let controllerTranscript: string | undefined;
@@ -55,13 +59,18 @@ export function createControllerSession(deps: {
    * `LEGION_PROJECT` stops the claim, and so does one whose controller role is not that of the
    * project `GET /legion/v1/state` names (`legionProjectToken`, the rule the daemon applies to its
    * own). The registration's claim token is compared once more after it, the daemon's own answer.
-   * A session `legion controller start` launched (never a hand-started takeover, which carries no
-   * LEGION_CONTROLLER_START_MESSAGE) gets its first turn right here, right after the role claim
-   * and before the subscription below opens: `pi.sendUserMessage` runs the skill's start
-   * procedure deterministically, with nothing typed, rather than leaving it to race a wake for
-   * the session's one first-turn slot (LEGION-392 found that race — Oh My Pi's own
-   * positional-argument first message can lose it to an Envoy notice delivered during this same
-   * async claim).
+   * A session `legion controller start` launched (`launched`, never a hand-started takeover) reads
+   * its LEGION_CONTROLLER_START_MESSAGE before any of that — a missing value refuses here, before
+   * registering replaces the running controller's session and claims its role, rather than
+   * leaving a half-claimed controller behind a refusal found only after. It is sent as this
+   * session's first turn right after the role claim and before the subscription below opens:
+   * `pi.sendUserMessage` runs the skill's start procedure deterministically, with nothing typed,
+   * rather than leaving it to race a wake for the session's one first-turn slot (LEGION-392 found
+   * that race — Oh My Pi's own positional-argument first message can lose it to an Envoy notice
+   * delivered during this same async claim). `startMessageSent` — not `controllerSessionID`, which
+   * a claim that throws after the send (the subscription below, say) never reaches setting — keeps
+   * this process from sending it twice: a retried claim after such a failure, and a later
+   * `/legion-claim-controller` in the same session, send nothing more.
    * The subscription is a live wake only: an Oh My Pi session subscribes over core NATS, so a
    * notice published while no controller runs never reaches one, and the controller skill reads
    * `legion state` and Dispatch's triage listing at boot for what it missed. Its grants are minted
@@ -76,11 +85,17 @@ export function createControllerSession(deps: {
     const sessionID = context.sessionManager.getSessionId();
     const capability = controllerCapability ?? requiredControllerCapability(process.env);
     controllerCapability = capability;
+    const launched = classifySession(process.env).kind === "controller";
+    // Read and validate before anything below mutates daemon-side state (the registration that
+    // replaces the running controller, the role claim): a missing value refuses here, leaving the
+    // previous controller, if any, still running and still registered.
+    const startMessage = launched
+      ? requiredEnvironment(process.env, "LEGION_CONTROLLER_START_MESSAGE")
+      : undefined;
     // The controller's own transcript, which persistedTranscript puts on disk, is recorded so the
     // controller's own `task` subagents are recognised even when the transcript is not a file on
     // disk; a hand-started takeover records nothing.
     const { sessionFile, agentId } = await persistedTranscript(context);
-    const launched = classifySession(process.env).kind === "controller";
     if (launched) recordBootstrappedSession(sessionFile);
 
     const project = requiredEnvironment(process.env, "LEGION_PROJECT");
@@ -115,14 +130,13 @@ export function createControllerSession(deps: {
     }
     const envoyContext = "setInterval" in context ? context : undefined;
     await claimEnvoyRole(sessionID, registration.claimToken, envoyContext);
-    // The very first claim this process ever makes, for a session `legion controller start`
-    // launched: send the start message as this session's first turn now, before the subscription
-    // below can deliver an external wake that would otherwise race it for the one first-turn slot
-    // (LEGION-392). A hand-started takeover (`launched` false) and a reclaim after `/new`/`/resume`
-    // (`controllerSessionID` already set) send nothing: the operator's own session speaks for
+    // Send once per process, ever: before the subscription below can deliver an external wake
+    // that would otherwise race it for the one first-turn slot (LEGION-392). A hand-started
+    // takeover (`startMessage` undefined) sends nothing: the operator's own session speaks for
     // itself.
-    if (launched && controllerSessionID === undefined) {
-      pi.sendUserMessage(requiredEnvironment(process.env, "LEGION_CONTROLLER_START_MESSAGE"));
+    if (startMessage !== undefined && !startMessageSent) {
+      pi.sendUserMessage(startMessage);
+      startMessageSent = true;
     }
     await subscribeLegionNotice(
       sessionID,
