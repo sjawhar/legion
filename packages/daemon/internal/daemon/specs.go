@@ -41,6 +41,11 @@ type specs struct {
 	// identity is the role's App bot identity every pane commits as; nil for a daemon with no
 	// GitHub Apps.
 	identity func(ctx context.Context, role claim.Role) (runtime.GitIdentity, error)
+	// removable computes the tree's removable-workspace candidates for a launch (dispatch://LEGION-583):
+	// every member but exclude and the tree's own root whose every role's claim is gone. nil for a
+	// runtime that does not provision workspaces in its own pods (ProvisionsWorkspaces false), and
+	// in a narrow test that does not exercise it.
+	removable func(ctx context.Context, tree, exclude string) ([]runtime.RemovableWorkspace, error)
 }
 
 // rolePromptPath is where a claim's role prompt is kept for every launch of it.
@@ -87,6 +92,13 @@ func (s specs) SpawnSpec(ctx context.Context, c supervise.Claim) (runtime.SpawnS
 	}
 	if c.WorkspaceLost {
 		spec.WorkspaceRecoveredFrom = workspace.Bookmark(c.Issue)
+	}
+	if s.removable != nil {
+		removable, err := s.removable(ctx, c.Tree, c.Issue)
+		if err != nil {
+			return runtime.SpawnSpec{}, fmt.Errorf("compute the removable workspaces of %s: %w", c.Tree, err)
+		}
+		spec.RemovableWorkspaces = removable
 	}
 	return spec, nil
 }

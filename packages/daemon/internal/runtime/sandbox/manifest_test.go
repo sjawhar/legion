@@ -650,6 +650,40 @@ func TestTheRecoveredRefReachesTheInitContainerAlone(t *testing.T) {
 	}
 }
 
+// The daemon's removable-workspace candidates (dispatch://LEGION-583) reach the workspace-init
+// container alone, JSON-encoded, never the agent; a launch with none names none.
+func TestTheRemovableWorkspacesReachTheInitContainerAlone(t *testing.T) {
+	r, err := configure(goldenOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	withCandidates := workerSpec(t)
+	withCandidates.RemovableWorkspaces = []runtime.RemovableWorkspace{
+		{Issue: "LEGION-100"},
+		{Issue: "LEGION-101", MergedHead: "abc123"},
+	}
+	for name, tc := range map[string]struct {
+		spec runtime.SpawnSpec
+		want string
+	}{
+		"candidates": {withCandidates, `[{"issue":"LEGION-100"},{"issue":"LEGION-101","mergedHead":"abc123"}]`},
+		"none":       {workerSpec(t), ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			pod := podOf(t, r, tc.spec, false)
+			got, set := envOf(containerNamed(t, pod, initContainer))["LEGION_REMOVABLE_WORKSPACES"]
+			if got != tc.want || set != (tc.want != "") {
+				t.Errorf("the init container's LEGION_REMOVABLE_WORKSPACES = %q (set: %t), want %q", got, set, tc.want)
+			}
+			for _, name := range []string{fetchContainer, mainContainer} {
+				if _, set := envOf(containerNamed(t, pod, name))["LEGION_REMOVABLE_WORKSPACES"]; set {
+					t.Errorf("%s carries LEGION_REMOVABLE_WORKSPACES", name)
+				}
+			}
+		})
+	}
+}
+
 // Without agent_secrets a pod carries no projected token of Legion's (the one token a pod carries,
 // if any, is the operator's own); with it, exactly one — alone in its volume, for the configured
 // audience and lifetime, mounted read-only in the worker container alone — beside a memory-backed

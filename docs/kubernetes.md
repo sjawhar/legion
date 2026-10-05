@@ -1016,6 +1016,41 @@ Containers, in order:
    (`LEGION_WORKSPACE`/`LEGION_ROOT_WORKSPACE`) and answers `adopt-working-copy-result`; `ok: false`
    fails the delivery exactly as a failed `metaedit` does on tmux.
 
+### Finished siblings' workspaces, and `legion push`'s grant lifetime
+
+The tree volume otherwise only grows: every issue's jj workspace stays on it even once that issue is
+done, so a long-running tree slowly fills `tree_volume`. On every `workspace-init provision`, the Go
+daemon computes which of the tree's *other* issues (never the one this pod provisions, and never the
+tree's own root) are safe to remove by lifecycle alone — a candidate is one whose phase is `done`, or
+one that is *parked*: its Dispatch status is `backlog` or `icebox` and every one of its role claims is
+either never made or sits in `suspended`, `failed`, or `retired` — never a live state, and never
+`queued`, which means the daemon still means to launch it. A child merely between phases
+(`awaiting_merge`, a review round the architect has not yet decided) is neither: removing its
+workspace would force its next phase into a multi-minute re-clone on its own tree volume, the cost this
+rule exists to avoid. Each candidate is paired with its pull request's merged head when the daemon
+recorded one merging it, since GitHub deletes a squash merge's branch and that commit then carries no
+remote bookmark of its own.
+
+The daemon passes that candidate list as JSON in `LEGION_REMOVABLE_WORKSPACES` on the
+`workspace-init provision` container alone — never on `workspace-fetch` or the main `worker`
+container, and the daemon never execs into a pod to remove anything itself. `workspace-init` is the
+one process that actually decides, and removes, each candidate: it snapshots the candidate's own
+working copy first (a plain `jj status` in its workspace directory, not the shared clone's
+`--ignore-working-copy` reads), so an edit a parked agent left uncommitted is not invisible to the
+check that follows, then asks whether every non-empty commit the workspace holds is reachable from a
+remote bookmark or from the recorded merged head. A workspace that fails that check — it holds a
+commit neither reached — is kept, and `workspace-init`'s log names the commit and why; one that passes
+is removed. A candidate the daemon named that already has no workspace on this volume (already
+removed, or never provisioned here) is left alone without error. One candidate's failure is logged and
+never stops the ones after it or the provisioning this pod already finished.
+
+A `legion push` invocation's grant lives `credential.pushTTL` (5 minutes) rather than the ordinary 60
+second `ttl`: jj's own working-copy snapshot before the network push can run past the ordinary grant
+on a near-full tree volume (measured 63–100 s worst case). The pi-envoy extension requests the longer
+lifetime only for a bash command its tokenizer judges to invoke `legion push` — alone, as a compound
+command's one segment (`cd ws && legion push`), or a pipeline's last stage — never a blanket increase
+for every command a pane runs.
+
 Volumes and mounts:
 
 | volume | source | mounted at | in |

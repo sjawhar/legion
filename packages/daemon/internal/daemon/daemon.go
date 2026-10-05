@@ -553,6 +553,7 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 		Specs: specs{
 			stateDir: cfg.StateDir, project: p.project, instructions: p.instructions, secrets: p.secrets, repo: repo, prompts: p.prompts,
 			identity: p.identity, designGate: cfg.Gates.Design, reviewWorkflows: cfg.Projects[cfg.Project].ReviewWorkflows,
+			removable: removableWorkspaces(st.Pool(), record.NewStore(), sup, p.project),
 		},
 		Identity:     p.identity,
 		Secrets:      p.secretsEnroller,

@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"encoding/json"
 	"fmt"
 	"maps"
 	"math"
@@ -123,6 +124,10 @@ type launch struct {
 	// resumeFile is the recorded session in the main container's path, and initResumeFile the same
 	// file in the workspace-init container's; both "" for a Spawn.
 	resumeFile, initResumeFile string
+	// removableWorkspacesJSON is spec.RemovableWorkspaces JSON-encoded as
+	// []workspace.RemovalCandidate, computed once here since the encoding cannot fail (plain
+	// strings) and initEnvironment has no error to return; "" when the daemon found none.
+	removableWorkspacesJSON string
 }
 
 // prepare checks spec and resolves everything a launch needs from it, reading the prompt files on
@@ -177,6 +182,17 @@ func (r *Runtime) prepare(spec runtime.SpawnSpec) (launch, error) {
 			return launch{}, refuse("%v", err)
 		}
 		l.resumeFile = spec.ResumeSessionFile
+	}
+	if len(spec.RemovableWorkspaces) > 0 {
+		candidates := make([]workspace.RemovalCandidate, len(spec.RemovableWorkspaces))
+		for i, removable := range spec.RemovableWorkspaces {
+			candidates[i] = workspace.RemovalCandidate{Issue: removable.Issue, MergedHead: removable.MergedHead}
+		}
+		encoded, err := json.Marshal(candidates)
+		if err != nil {
+			return launch{}, refuse("encode LEGION_REMOVABLE_WORKSPACES: %v", err)
+		}
+		l.removableWorkspacesJSON = string(encoded)
 	}
 	argv := l.agentArgv(r.agent)
 	for i, arg := range argv {
@@ -582,7 +598,9 @@ func fetchEnvironment() []corev1.EnvVar {
 // PATH are never ones an agent put there; it carries no tool-path variables, and it is never
 // pointed at the provisioning token. A resume names the recorded session the command must find on
 // the volume, and a relaunch after the volume was lost names the ref the recreated workspace is
-// recovered from; both are workspace-init's alone, never the agent's.
+// recovered from; both are workspace-init's alone, never the agent's. LEGION_REMOVABLE_WORKSPACES
+// is l.removableWorkspacesJSON, prepare's JSON encoding of the daemon's candidate list
+// (dispatch://LEGION-583); absent when the daemon found none.
 func (r *Runtime) initEnvironment(l launch) []corev1.EnvVar {
 	env := []corev1.EnvVar{
 		{Name: "PATH", Value: imagePath},
@@ -593,6 +611,9 @@ func (r *Runtime) initEnvironment(l launch) []corev1.EnvVar {
 	}
 	if l.spec.WorkspaceRecoveredFrom != "" {
 		env = append(env, corev1.EnvVar{Name: "LEGION_WORKSPACE_RECOVERED_FROM", Value: l.spec.WorkspaceRecoveredFrom})
+	}
+	if l.removableWorkspacesJSON != "" {
+		env = append(env, corev1.EnvVar{Name: "LEGION_REMOVABLE_WORKSPACES", Value: l.removableWorkspacesJSON})
 	}
 	return append(env, xdgEnvironment()...)
 }

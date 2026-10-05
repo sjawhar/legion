@@ -37,6 +37,11 @@ const (
 	lockWaitEnv = "LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS"
 	// provisionTokenFileEnv points `workspace-init fetch` at the mounted provisioning token.
 	provisionTokenFileEnv = "LEGION_PROVISION_TOKEN_FILE"
+	// removableWorkspacesEnv names the daemon's candidate list of sibling workspaces this pod's
+	// workspace-init may remove from the tree volume: JSON, workspace.RemovalCandidate's shape,
+	// every member of the tree whose every role's claim is gone (dispatch://LEGION-583); unset or
+	// empty removes none.
+	removableWorkspacesEnv = "LEGION_REMOVABLE_WORKSPACES"
 	// defaultLockWaitSeconds is for an invocation no daemon sized: three slow-command budgets, a
 	// live holder's clone and fetch at full budget plus its local commands
 	// (DEFAULT_WORKSPACE_INIT_LOCK_WAIT_SECONDS, workspace-init.ts).
@@ -198,10 +203,47 @@ func workspaceInit(ctx context.Context, issue, repo, root, credentialHelper, fee
 		return err
 	}
 	fmt.Fprintf(stdout, "workspace-init: %s on %s\n", provisioned.Dir, provisioned.Bookmark)
+	// Removal runs after this pod's own provisioning, whose fetch just brought the shared clone's
+	// remote bookmarks current: a candidate's push-safety check (workspace.RemoveFinished) reads
+	// them, and a stale view would risk nothing worse than a workspace kept one launch too long,
+	// never one removed too early (dispatch://LEGION-583).
+	removeFinishedWorkspaces(ctx, run, root, repository, issue, stdout)
 	if fromRef, set := os.LookupEnv("LEGION_WORKSPACE_RECOVERED_FROM"); set {
 		return writeRecoveryMarker(ctx, run, provisioned.Dir, issue, fromRef)
 	}
 	return nil
+}
+
+// removeFinishedWorkspaces reads removableWorkspacesEnv's candidate list and calls
+// workspace.RemoveFinished for each sibling that still has a workspace on the volume, other than
+// issue — the one this pod provisions, never the daemon's to name but skipped here too, in case it
+// ever is — and the tree's own root, which Location names for no issue so it is never a
+// candidate in the first place. One candidate's failure is logged and never stops the ones after
+// it or the provisioning this pod already finished; a malformed env var removes nothing.
+func removeFinishedWorkspaces(ctx context.Context, run workspace.Runner, root string, repository ghrepo.Repository, issue string, stdout io.Writer) {
+	raw := os.Getenv(removableWorkspacesEnv)
+	if raw == "" {
+		return
+	}
+	var candidates []workspace.RemovalCandidate
+	if err := json.Unmarshal([]byte(raw), &candidates); err != nil {
+		fmt.Fprintf(stdout, "workspace-init: %s is not valid JSON, removing nothing: %v\n", removableWorkspacesEnv, err)
+		return
+	}
+	log := func(line string) { fmt.Fprintln(stdout, "workspace-init: "+line) }
+	for _, candidate := range candidates {
+		if candidate.Issue == "" || candidate.Issue == issue {
+			continue
+		}
+		located, err := workspace.Location(root, repository, candidate.Issue)
+		if err != nil {
+			fmt.Fprintf(stdout, "workspace-init: cannot locate %s's workspace, keeping it: %v\n", candidate.Issue, err)
+			continue
+		}
+		if err := workspace.RemoveFinished(ctx, run, located, candidate.Issue, candidate.MergedHead, log); err != nil {
+			fmt.Fprintf(stdout, "workspace-init: removing %s's workspace failed, keeping it: %v\n", candidate.Issue, err)
+		}
+	}
 }
 
 // workspaceInitLockWait is LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS: a positive whole number of

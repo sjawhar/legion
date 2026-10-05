@@ -125,6 +125,20 @@ func (k Known) Validate() error {
 // like the Dispatch bearer, is a runtime option. ResumeSessionFile is set only by `Resume`, and it
 // names the transcript the same agent continues from. WorkspaceRecoveredFrom names the ref a
 // workspace recreated after its volume was lost is recovered from; "" for every other launch.
+// RemovableWorkspaces is every sibling of Tree the daemon has judged safe to remove by lifecycle
+// alone, for a runtime that provisions each claim's workspace in its own pod to remove from the
+// tree volume before this launch's own provisioning (dispatch://LEGION-583); nil for a runtime
+// that does not (ProvisionsWorkspaces false).
+//
+// RemovableWorkspace, the element of RemovableWorkspaces, mirrors workspace.RemovalCandidate
+// (internal/runtime cannot import internal/workspace: workspace imports runtime's GitIdentity for
+// its credential helper). The sandbox runtime converts one to the other when it builds
+// workspace-init's env.
+type RemovableWorkspace struct {
+	Issue      string
+	MergedHead string
+}
+
 type SpawnSpec struct {
 	Claim                  claim.Token
 	Project                string
@@ -139,6 +153,7 @@ type SpawnSpec struct {
 	Repository             ghrepo.Repository
 	ResumeSessionFile      string
 	WorkspaceRecoveredFrom string
+	RemovableWorkspaces    []RemovableWorkspace
 }
 
 // PromptParts are the pieces of the agent's system prompt: its role prompt files, the sentence

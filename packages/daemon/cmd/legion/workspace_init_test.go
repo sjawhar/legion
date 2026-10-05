@@ -166,7 +166,7 @@ func (v *treeVolume) args(issue string) []string {
 
 // runtimeOptionalEnv are the variables a runtime sets on an init container only for some
 // launches; no run in these tests inherits them from whoever runs the tests.
-var runtimeOptionalEnv = []string{"LEGION_PROVISION_TOKEN_FILE", "LEGION_RESUME_SESSION_FILE", "LEGION_WORKSPACE_RECOVERED_FROM", "LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS"}
+var runtimeOptionalEnv = []string{"LEGION_PROVISION_TOKEN_FILE", "LEGION_RESUME_SESSION_FILE", "LEGION_WORKSPACE_RECOVERED_FROM", "LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS", "LEGION_REMOVABLE_WORKSPACES"}
 
 // setenv is the volume's environment for an in-process run of `provision`.
 func (v *treeVolume) setenv(t *testing.T) {
@@ -236,6 +236,27 @@ func (v *treeVolume) jj(t *testing.T, args ...string) string {
 		t.Fatalf("jj %s: %v", strings.Join(args, " "), err)
 	}
 	return strings.TrimSpace(string(output))
+}
+
+// jjPush pushes bookmark from dir's workspace to origin, whose https://github.com/acme/widgets
+// URL is redirected to the volume's local bare remote (withRemote's WINIT_REMOTE) for the one
+// invocation, the same insteadOf override the production runner's recordingRunner applies to
+// provisioning's own clone and fetch: a shared clone's origin is left at the real GitHub URL for
+// ordinary operation, so a test driving jj directly (not through the PATH stub, which never
+// rewrites a push's URL) must redirect it itself.
+func (v *treeVolume) jjPush(t *testing.T, dir, bookmark string) {
+	t.Helper()
+	command := exec.Command(v.realJJ, "git", "push", "--remote", "origin", "--bookmark", bookmark, "--allow-empty-description", "-R", dir)
+	command.Env = append(os.Environ(),
+		"JJ_USER=Legion test", "JJ_EMAIL=legion-test@example.invalid",
+		"GIT_ALLOW_PROTOCOL=https:file",
+		"GIT_CONFIG_COUNT=1",
+		"GIT_CONFIG_KEY_0=url."+v.env["WINIT_REMOTE"]+".insteadOf",
+		"GIT_CONFIG_VALUE_0=https://github.com/acme/widgets",
+	)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("jj git push --bookmark %s: %v\n%s", bookmark, err, output)
+	}
 }
 
 func (v *treeVolume) git(t *testing.T, args ...string) string {
@@ -597,6 +618,127 @@ func TestWorkspaceInitRecordsTheRecoveryMarker(t *testing.T) {
 	at, err := time.Parse("2006-01-02T15:04:05.000Z", marker["recoveredAt"])
 	if err != nil || at.Before(before) || at.After(after) {
 		t.Fatalf("recoveredAt %q (%v), want an ISO instant in milliseconds, UTC, during the run", marker["recoveredAt"], err)
+	}
+}
+
+// removableEnv JSON-encodes candidates into LEGION_REMOVABLE_WORKSPACES's shape.
+func removableEnv(t *testing.T, candidates []workspace.RemovalCandidate) string {
+	t.Helper()
+	encoded, err := json.Marshal(candidates)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(encoded)
+}
+
+// A done child with every commit pushed — parked after its own push — is removed at the next pod
+// launch of its tree: the daemon names it in LEGION_REMOVABLE_WORKSPACES, and workspace-init,
+// provisioning a different issue's pod, removes it.
+func TestWorkspaceInitRemovesAFinishedChildWithEveryCommitPushed(t *testing.T) {
+	v := newTreeVolume(t).withRemote(t)
+	v.fetch(t)
+	if code, _, stderr := runWorkspaceInitHere(v.args("LEGION-100")); code != 0 {
+		t.Fatalf("provision the finished child: exit %d, stderr %q", code, stderr)
+	}
+	finished := v.workspace("LEGION-100")
+	if err := os.WriteFile(filepath.Join(finished, "feature.txt"), []byte("finished work\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	v.jj(t, "status", "-R", finished)
+	bookmark := "legion/LEGION-100"
+	v.jj(t, "bookmark", "set", bookmark, "-r", "@", "--allow-backwards", "-R", finished)
+	v.jjPush(t, finished, bookmark)
+
+	t.Setenv("LEGION_REMOVABLE_WORKSPACES", removableEnv(t, []workspace.RemovalCandidate{{Issue: "LEGION-100"}}))
+	code, stdout, stderr := runWorkspaceInitHere(v.args("LEGION-200"))
+	if code != 0 {
+		t.Fatalf("provision LEGION-200: exit %d, stderr %q", code, stderr)
+	}
+	if _, err := os.Stat(finished); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("LEGION-100's workspace remains: %v", err)
+	}
+	if want := "removed LEGION-100's workspace"; !strings.Contains(stdout, want) {
+		t.Errorf("stdout %q, want it to contain %q", stdout, want)
+	}
+}
+
+// A done child whose last commit is only the merged pull request's head — GitHub deletes a squash
+// merge's branch, leaving that commit with no remote bookmark of its own — is removed: the
+// daemon's recorded merged head tells it from a commit that was never pushed at all.
+func TestWorkspaceInitRemovesADoneChildWhoseLastCommitIsTheMergedHead(t *testing.T) {
+	v := newTreeVolume(t).withRemote(t)
+	v.fetch(t)
+	if code, _, stderr := runWorkspaceInitHere(v.args("LEGION-100")); code != 0 {
+		t.Fatalf("provision the merged child: exit %d, stderr %q", code, stderr)
+	}
+	merged := v.workspace("LEGION-100")
+	if err := os.WriteFile(filepath.Join(merged, "feature.txt"), []byte("merged work\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	v.jj(t, "status", "-R", merged)
+	bookmark := "legion/LEGION-100"
+	v.jj(t, "bookmark", "set", bookmark, "-r", "@", "--allow-backwards", "-R", merged)
+	mergedHead := v.jj(t, "log", "-r", bookmark, "--no-graph", "-T", "commit_id", "--ignore-working-copy", "--color=never", "-R", merged)
+	v.jjPush(t, merged, bookmark)
+	v.git(t, "--git-dir="+v.env["WINIT_REMOTE"], "branch", "-D", bookmark)
+
+	t.Setenv("LEGION_REMOVABLE_WORKSPACES", removableEnv(t, []workspace.RemovalCandidate{{Issue: "LEGION-100", MergedHead: mergedHead}}))
+	code, stdout, stderr := runWorkspaceInitHere(v.args("LEGION-200"))
+	if code != 0 {
+		t.Fatalf("provision LEGION-200: exit %d, stderr %q", code, stderr)
+	}
+	if _, err := os.Stat(merged); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("LEGION-100's workspace remains: %v", err)
+	}
+	if want := "removed LEGION-100's workspace"; !strings.Contains(stdout, want) {
+		t.Errorf("stdout %q, want it to contain %q", stdout, want)
+	}
+}
+
+// A child with a commit that reached neither a remote bookmark nor a recorded merged head — local
+// work no push ever carried — is kept and named, never deleted.
+func TestWorkspaceInitKeepsAChildWithAnUnpushedCommit(t *testing.T) {
+	v := newTreeVolume(t).withRemote(t)
+	v.fetch(t)
+	if code, _, stderr := runWorkspaceInitHere(v.args("LEGION-100")); code != 0 {
+		t.Fatalf("provision the unpushed child: exit %d, stderr %q", code, stderr)
+	}
+	unpushed := v.workspace("LEGION-100")
+	if err := os.WriteFile(filepath.Join(unpushed, "unpushed.txt"), []byte("never pushed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	v.jj(t, "status", "-R", unpushed)
+	commit := v.jj(t, "log", "-r", "@", "--no-graph", "-T", "commit_id", "--ignore-working-copy", "--color=never", "-R", unpushed)
+
+	t.Setenv("LEGION_REMOVABLE_WORKSPACES", removableEnv(t, []workspace.RemovalCandidate{{Issue: "LEGION-100"}}))
+	code, stdout, stderr := runWorkspaceInitHere(v.args("LEGION-200"))
+	if code != 0 {
+		t.Fatalf("provision LEGION-200: exit %d, stderr %q", code, stderr)
+	}
+	if _, err := os.Stat(unpushed); err != nil {
+		t.Fatalf("LEGION-100's workspace was removed, want it kept: %v", err)
+	}
+	if !strings.Contains(stdout, "kept LEGION-100's workspace") || !strings.Contains(stdout, commit) {
+		t.Errorf("stdout %q, want it to name LEGION-100 kept and commit %s", stdout, commit)
+	}
+}
+
+// The issue this pod provisions is live by definition and is never touched even if the daemon's
+// candidate list names it — a defensive floor workspace-init holds on its own, never trusting the
+// list alone to keep a live child's workspace untouched.
+func TestWorkspaceInitNeverRemovesTheIssueItIsProvisioning(t *testing.T) {
+	v := newTreeVolume(t).withRemote(t)
+	v.fetch(t)
+	t.Setenv("LEGION_REMOVABLE_WORKSPACES", removableEnv(t, []workspace.RemovalCandidate{{Issue: "LEGION-100"}}))
+	code, stdout, stderr := runWorkspaceInitHere(v.args("LEGION-100"))
+	if code != 0 {
+		t.Fatalf("provision LEGION-100: exit %d, stderr %q", code, stderr)
+	}
+	if _, err := os.Stat(v.workspace("LEGION-100")); err != nil {
+		t.Fatalf("the pod's own workspace is gone: %v", err)
+	}
+	if strings.Contains(stdout, "LEGION-100's workspace") {
+		t.Errorf("stdout %q named LEGION-100's own workspace for removal", stdout)
 	}
 }
 

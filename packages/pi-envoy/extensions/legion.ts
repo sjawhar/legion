@@ -210,6 +210,29 @@ function splitShellCommands(command: string): string[][] | undefined {
   return commands;
 }
 
+/** A simple command (one of splitShellCommands's entries) is a `legion push` invocation: its
+ * first word is `legion` or ends `/legion` (the worker-bin shim's absolute path, as jjLogRewriteInvocation
+ * matches `jj`), and its second is `push`. */
+function isPushInvocation(words: readonly string[]): boolean {
+  const first = words[0];
+  return (
+    (first === "legion" || (first !== undefined && first.endsWith("/legion"))) &&
+    words[1] === "push"
+  );
+}
+
+/** Whether a bash command's tokenised simple commands include a `legion push` invocation --
+ * `legion push`, `cd … && legion push`, a pipeline's last segment -- so the tool_call hook mints
+ * its grant with the longer pushTTL (dispatch://LEGION-583): jj's own working-copy snapshot before
+ * the network push can outrun the ordinary sixty seconds on a near-full tree volume. Undefined (an
+ * unterminated quote) is judged not a push: the ordinary grant is the safe default, since missing
+ * a genuine push here costs only the grant expiring before it, which `legion push` already fails
+ * loudly on. */
+function commandRunsPush(command: string): boolean {
+  const commands = splitShellCommands(command);
+  return commands !== undefined && commands.some(isPushInvocation);
+}
+
 /** A rule the tool_call hook holds a pane's shell-running tool calls to. */
 interface PaneRule {
   /** The plain-text rule: what `text` names that the rule refuses, or undefined. */
@@ -573,6 +596,7 @@ export default function legionExtension(pi: PiApi): void {
         issue: active.issue,
         sessionId: sessionID,
         secret: active.secret,
+        push: toolCall.toolName === "bash" && commandRunsPush(String(toolCall.input.command ?? "")),
       })
     );
   });

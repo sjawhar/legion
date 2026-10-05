@@ -14,6 +14,13 @@ import (
 
 const ttl = 60 * time.Second
 
+// pushTTL is the grant `legion push` redeems: long enough to cover jj's own working-copy snapshot
+// before the network push, measured at 63 to 100 seconds on a near-full tree volume
+// (dispatch://LEGION-583), with margin. Every other command keeps ttl; the extension
+// requests this only for a bash command that runs `legion push` (pi-envoy's commandRunsPush), so
+// no grant is any longer than its command needs.
+const pushTTL = 5 * time.Minute
+
 // expiredRetention is how long an expired grant's record is kept, so a command that outran its
 // grant still learns it expired; after it, Mint prunes the record and the id is unavailable.
 const expiredRetention = time.Hour
@@ -60,16 +67,21 @@ func New(now func() time.Time) *Grants {
 	return &Grants{now: now, issued: make(map[string]Grant)}
 }
 
-// Mint records a 60-second grant for the authenticated claim a route already proved with the exact
-// same capability comparison as /claims/ready and /claims/exit. The capability hash is copied so a
+// Mint records a grant for the authenticated claim a route already proved with the exact same
+// capability comparison as /claims/ready and /claims/exit: ttl, unless forPush asks for pushTTL
+// (a bash command the extension judged to run `legion push`). The capability hash is copied so a
 // later registration replacement cannot retain the old session's authority.
-func (g *Grants) Mint(c supervise.Claim) (Grant, error) {
+func (g *Grants) Mint(c supervise.Claim, forPush bool) (Grant, error) {
 	if c.Token == "" || c.Project == "" || c.Tree == "" || c.Issue == "" || c.Role == "" || len(c.CapabilityHash) == 0 {
 		return Grant{}, ErrUnauthenticated
 	}
 	id, err := grantID()
 	if err != nil {
 		return Grant{}, err
+	}
+	lifetime := ttl
+	if forPush {
+		lifetime = pushTTL
 	}
 	grant := Grant{
 		ID:             id,
@@ -78,7 +90,7 @@ func (g *Grants) Mint(c supervise.Claim) (Grant, error) {
 		Tree:           c.Tree,
 		Role:           c.Role,
 		Claim:          c.Token,
-		ExpiresAt:      g.now().Add(ttl),
+		ExpiresAt:      g.now().Add(lifetime),
 		capabilityHash: append([]byte(nil), c.CapabilityHash...),
 	}
 	g.record(grant)
