@@ -27,6 +27,7 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/policy/policytest"
 	"github.com/sjawhar/envoy/internal/broker/proof"
+	"github.com/sjawhar/envoy/internal/broker/ratelimit"
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/requests"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
@@ -45,11 +46,13 @@ const (
 
 // testServer is a live broker HTTP server (real handlers, real Postgres) plus a direct handle to
 // its store — needed to seed fixtures (an enrollment, a launcher credential) the API itself has
-// no route to create directly — and the local OIDC issuer its pod verifier trusts, which mints the
+// no route to create directly — the secrets.Local standing in for Secrets Manager, which a test
+// writes to as a person would, and the local OIDC issuer its pod verifier trusts, which mints the
 // projected service-account tokens a pod enrollment presents.
 type testServer struct {
 	URL       string
 	Store     *store.Store
+	Secrets   *secrets.Local
 	podIssuer *oidctest.Issuer
 	podKey    *oidctest.Key
 }
@@ -64,6 +67,13 @@ const podAudience = "legion-broker-pod"
 // BROKER_K8S_OIDC_ISSUER is set, and mounts api.Register on an httptest.Server so every proof's
 // htu and every request object's aud have one real, consistent PublicURL to check against.
 func newTestServer(t *testing.T) *testServer {
+	t.Helper()
+	return newTestServerWith(t, func(*api.Deps) {})
+}
+
+// newTestServerWith is newTestServer with adjust applied to the api.Deps it registers, for a test
+// that needs one dependency wired otherwise, such as a tighter rate limit.
+func newTestServerWith(t *testing.T, adjust func(*api.Deps)) *testServer {
 	t.Helper()
 	st := storetest.Open(t)
 
@@ -99,13 +109,16 @@ func newTestServer(t *testing.T) *testServer {
 		Replay: enr.Replay,
 	}
 
-	api.Register(mux, api.Deps{
+	deps := api.Deps{
 		PublicURL: srv.URL, UIToken: testUIToken,
 		Enroll: enr, Machine: reqMachine, MachineLogin: mach,
-		Proof: &proof.Verifier{Skew: time.Minute, Lookup: enr.Lookup, LookupLauncher: enr.AuthenticateLauncher, Replay: enr.Replay},
-	})
+		Proof:  &proof.Verifier{Skew: time.Minute, Lookup: enr.Lookup, LookupLauncher: enr.AuthenticateLauncher, Replay: enr.Replay},
+		Policy: cur, SecretsPrefix: policytest.Prefix, SecretsKMSKeyARN: policytest.KeyARN,
+	}
+	adjust(&deps)
+	api.Register(mux, deps)
 
-	return &testServer{URL: srv.URL, Store: st, podIssuer: issuer, podKey: podKey}
+	return &testServer{URL: srv.URL, Store: st, Secrets: local, podIssuer: issuer, podKey: podKey}
 }
 
 // newSessionEnrollment inserts a live box enrollment (and its backing launcher_credentials row)
@@ -1049,5 +1062,36 @@ func TestPathValidation(t *testing.T) {
 	werr = decode[wireError](t, body)
 	if werr.Code != "GRANT_ID_INPUT" {
 		t.Fatalf("code = %q, want GRANT_ID_INPUT", werr.Code)
+	}
+}
+
+// TestALauncherCredentialRefusalRoundsRetryAfterUp pins that the machine-login route names its
+// Retry-After by the rule the reread route does: whole seconds rounded up, so a caller told to
+// wait does not come back before a token has returned.
+func TestALauncherCredentialRefusalRoundsRetryAfterUp(t *testing.T) {
+	ts := newTestServerWith(t, func(d *api.Deps) {
+		d.LauncherLimits = &api.LauncherLimits{
+			PerAddress:  ratelimit.Limit{Every: 1500 * time.Millisecond, Burst: 1},
+			PerOperator: ratelimit.Limit{Every: 1500 * time.Millisecond, Burst: 1},
+		}
+	})
+	login := func() (int, string) {
+		t.Helper()
+		body, err := json.Marshal(map[string]any{"request": signMachineLoginRequest(t, newSigningKey(t), ts.URL, testApprover, "example-host-devbox")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := http.Post(ts.URL+"/v1/launcher-credentials", "application/json", bytes.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		return resp.StatusCode, resp.Header.Get("Retry-After")
+	}
+	if status, _ := login(); status != http.StatusAccepted {
+		t.Fatalf("first machine login = %d, want 202", status)
+	}
+	if status, retryAfter := login(); status != http.StatusTooManyRequests || retryAfter != "2" {
+		t.Fatalf("second machine login = %d Retry-After=%q, want 429 with Retry-After 2 (1.5 s rounded up)", status, retryAfter)
 	}
 }

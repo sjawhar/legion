@@ -126,7 +126,8 @@ func newE2EServer(t *testing.T) *e2eServer {
 	api.Register(mux, api.Deps{
 		PublicURL: srv.URL, UIToken: testUIToken,
 		Enroll: enr, Machine: reqMachine, MachineLogin: mach,
-		Proof: &proof.Verifier{Skew: time.Minute, Lookup: enr.Lookup, LookupLauncher: enr.AuthenticateLauncher, Replay: enr.Replay},
+		Proof:  &proof.Verifier{Skew: time.Minute, Lookup: enr.Lookup, LookupLauncher: enr.AuthenticateLauncher, Replay: enr.Replay},
+		Policy: current, SecretsPrefix: policytest.Prefix, SecretsKMSKeyARN: policytest.KeyARN,
 	})
 
 	return &e2eServer{URL: srv.URL, Store: st, Secrets: local, Log: logged}

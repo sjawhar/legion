@@ -61,9 +61,11 @@ func main() {
 	cfg, err := config.Load(os.Getenv)
 	fatal(err)
 	// BROKER_FAKE_SECRETS_FILE: for local development only, a JSON file standing in for Secrets
-	// Manager, {"secrets": [{"name", "kms_key_id", "tags", "value"}]}: the broker lists the agent
-	// secrets and reads their values from it instead of from AWS. A secret with no "value" is one
-	// created without a value, which the broker refuses as no-current-value.
+	// Manager, {"secrets": [{"name", "kms_key_id", "tags", "value", "deleted_at"}]}: the broker lists
+	// the agent secrets and reads their values from it instead of from AWS, reading the file again
+	// on each of those calls, so an edit to it is a write as Secrets Manager would see one. A secret
+	// with no "value" is one created without a value, which the broker refuses as no-current-value;
+	// one with a "deleted_at" (RFC 3339) is scheduled for deletion, which the broker no longer lists.
 	fakeSecrets := os.Getenv("BROKER_FAKE_SECRETS_FILE")
 	fatal(refusePortZeroPublicURLInProduction(cfg.PublicURL, fakeSecrets))
 	st, err := store.Open(ctx, cfg.DatabaseURL)
@@ -74,12 +76,12 @@ func main() {
 	if fakeSecrets != "" {
 		local, err := secrets.LocalFromFile(fakeSecrets)
 		fatal(err)
-		loader.Secrets, loader.Aliases, reader = local, local, secrets.AWS{Client: local}
+		loader.Secrets, loader.Describer, loader.Aliases, reader = local, local, local, secrets.AWS{Client: local}
 	} else {
 		awsCfg, err := awsconfig.LoadDefaultConfig(ctx)
 		fatal(err)
 		sm := secretsmanager.NewFromConfig(awsCfg)
-		loader.Secrets, loader.Aliases, reader = sm, kms.NewFromConfig(awsCfg), secrets.AWS{Client: sm}
+		loader.Secrets, loader.Describer, loader.Aliases, reader = sm, sm, kms.NewFromConfig(awsCfg), secrets.AWS{Client: sm}
 	}
 	var pod enroll.PodVerifier
 	// Discovery is bounded: an issuer that accepts the connection and never answers refuses the
@@ -156,7 +158,8 @@ func main() {
 	mux := http.NewServeMux()
 	api.Register(mux, api.Deps{PublicURL: cfg.PublicURL, UIToken: cfg.UIToken,
 		Enroll: enr, Machine: reqMachine, MachineLogin: mach,
-		Proof:              &proof.Verifier{Skew: time.Duration(cfg.ProofSkewSeconds) * time.Second, Lookup: enr.Lookup, LookupLauncher: enr.AuthenticateLauncher, Replay: enr.Replay},
+		Proof:  &proof.Verifier{Skew: time.Duration(cfg.ProofSkewSeconds) * time.Second, Lookup: enr.Lookup, LookupLauncher: enr.AuthenticateLauncher, Replay: enr.Replay},
+		Policy: current, SecretsPrefix: cfg.SecretsPrefix, SecretsKMSKeyARN: cfg.SecretsKMSKeyARN,
 		TrustedProxyHeader: cfg.TrustedProxyHeader})
 	srv := &http.Server{
 		Handler:           withRequestDeadline(mux, requestDeadline),
