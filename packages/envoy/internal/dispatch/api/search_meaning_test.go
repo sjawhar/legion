@@ -5,7 +5,9 @@ import (
 	"errors"
 	"math"
 	"net/url"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/embed"
@@ -22,13 +24,28 @@ import (
 type fakeEmbedder struct {
 	vectors map[string][]float32
 	err     error
+	// errFor, when set, returns err only for a call of the matching InputType and succeeds for
+	// every other type - models a backfill's own bulk document traffic throttling while
+	// unrelated, low-volume query traffic still gets through
+	// (TestSearchStaysNonDegradedWhileEmbedqueueIsThrottled). vectors/err/errFor are set up
+	// before a test's concurrent goroutines start and never mutated after, so they need no lock;
+	// callsMu guards calls, the one field tests mutate concurrently.
+	errFor map[embed.InputType]error
+
+	callsMu sync.Mutex
 	calls   int
 }
 
-func (f *fakeEmbedder) Embed(_ context.Context, texts []string, _ embed.InputType) ([][]float32, error) {
+func (f *fakeEmbedder) Embed(_ context.Context, texts []string, inputType embed.InputType) ([][]float32, error) {
+	f.callsMu.Lock()
 	f.calls++
-	if f.err != nil {
-		return nil, f.err
+	f.callsMu.Unlock()
+	err := f.err
+	if e, ok := f.errFor[inputType]; ok {
+		err = e
+	}
+	if err != nil {
+		return nil, err
 	}
 	out := make([][]float32, len(texts))
 	for i, text := range texts {
@@ -106,6 +123,70 @@ func TestSearchFindsAMeaningOnlyMatch(t *testing.T) {
 	// the query - below searchMeaningFloor, and does not appear at all.
 	if len(response.Results) != 1 || response.Results[0].ID != issue.Key {
 		t.Fatalf("Results = %+v, want exactly one result: the issue %q", response.Results, issue.Key)
+	}
+}
+
+// TestSearchStaysNonDegradedWhileEmbedqueueIsThrottled is Main's round-5 proof for giving a live
+// query embedding priority over background work: cmd/dispatch wires embedqueue's own Embedder
+// behind embed.RateLimitedEmbedder and never wraps the one api.Deps holds, so a live search
+// request's own query embedding is never paced or blocked by that limiter, however deep into
+// backoff it currently is. This drives that exact scenario with one shared fake embedder whose
+// errFor discriminates by InputType, matching how the two callers actually differ in production
+// (embedqueue always calls with InputDocument, search's embedQuery always calls with
+// InputQuery): a background goroutine keeps embedqueue's own ProcessBatch throttled and backing
+// off for the whole test, simulating a backfill saturating the account's Bedrock quota for bulk
+// document traffic, while concurrent live search requests keep succeeding non-degraded, because
+// their InputQuery calls go straight to the unwrapped fake embedder and are never subject to
+// that backoff at all.
+func TestSearchStaysNonDegradedWhileEmbedqueueIsThrottled(t *testing.T) {
+	embedder := &fakeEmbedder{vectors: map[string][]float32{
+		"Celestial navigation device maintenance": angledVector(0.9, 2),
+		"wibbleflorp": queryVector(),
+	}}
+	handler, database, _ := newTestServer(t, testServerOptions{embedder: embedder})
+	createInteractionIssue(t, handler, "PRIO", "Celestial navigation device maintenance", "Routine upkeep notes.")
+	// Embeds while nothing is throttled yet: this is the content a later query below must still
+	// find - already embedded, before the saturating bulk traffic simulated next ever starts.
+	processAllPending(t, database, embedder)
+
+	// Simulate an unrelated bulk backfill now saturating the account: every further
+	// InputDocument call throttles, forever; InputQuery (a live query's own embedding) keeps
+	// succeeding. A second issue, created only now, gives embedqueue perpetual pending work to
+	// retry and back off on for the rest of the test - exactly a saturating backfill in progress.
+	throttleErr := errors.New("bedrock: simulated sustained throttle (document batches)")
+	embedder.errFor = map[embed.InputType]error{embed.InputDocument: throttleErr}
+	createInteractionIssue(t, handler, "SAT", "Other bulk content that never finishes embedding", "Body.")
+
+	bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	backgroundDeps := embedqueue.Deps{Store: database, Embedder: embed.NewRateLimitedEmbedder(embedder)}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for bgCtx.Err() == nil {
+			if _, _, _, _, err := embedqueue.ProcessBatch(bgCtx, backgroundDeps); err != nil {
+				return
+			}
+		}
+	}()
+	defer func() { <-done }()
+
+	// Give the background goroutine a moment to actually hit a throttle and start backing off
+	// (its very first call is unpaced, at RateLimitedEmbedder's own floor interval).
+	time.Sleep(50 * time.Millisecond)
+
+	for i := range 5 {
+		started := time.Now()
+		response := searchResponse(t, handler, "q=wibbleflorp")
+		if elapsed := time.Since(started); elapsed > time.Second {
+			t.Errorf("search request %d took %v while embedqueue was throttled/backing off, want well under 1s - it must never wait behind background work", i, elapsed)
+		}
+		if response.Degraded != "" {
+			t.Errorf("search request %d: Degraded = %q, want empty - a live query must stay non-degraded while only background document traffic is throttled", i, response.Degraded)
+		}
+		if len(response.Results) != 1 {
+			t.Errorf("search request %d: Results = %+v, want the one meaning match (proves the query embedding actually ran, not just that nothing errored)", i, response.Results)
+		}
 	}
 }
 
