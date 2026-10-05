@@ -318,8 +318,7 @@ export function AskCard({
           onDrop={
             uploadOwner === undefined ? undefined : (event) => upload.drop(event, uploadOwner)
           }
-          // An answer sent while a picture is still uploading would go without it.
-          onKeyDown={(event) => (uploading ? undefined : submitOnModifiedEnter(event))}
+          onKeyDown={(event) => submitOnModifiedEnter(event, { disabled: uploading })}
           onPaste={
             uploadOwner === undefined ? undefined : (event) => upload.paste(event, uploadOwner)
           }

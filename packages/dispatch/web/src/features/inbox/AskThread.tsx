@@ -115,7 +115,7 @@ export function AskReplyComposer({
           onDrop={
             uploadOwner === undefined ? undefined : (event) => upload.drop(event, uploadOwner)
           }
-          onKeyDown={(event) => (uploading ? undefined : submitOnModifiedEnter(event))}
+          onKeyDown={(event) => submitOnModifiedEnter(event, { disabled: uploading })}
           onPaste={
             uploadOwner === undefined ? undefined : (event) => upload.paste(event, uploadOwner)
           }

@@ -25,6 +25,7 @@ import {
   buildProjectPath,
   buildReferencePath,
   documentRoute,
+  isAgentArtifact,
   parseIssuePath,
 } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
@@ -77,8 +78,8 @@ function kindIcon(kind: Artifact["kind"]): ReactNode {
 }
 
 function artifactPath(artifact: Artifact): string {
-  // A conversation's picture (session_id set, issue_key null, project "") has its own page.
-  if (artifact.session_id !== undefined && artifact.session_id !== null) {
+  // A conversation's picture has its own page, under its agent's session.
+  if (isAgentArtifact(artifact)) {
     return buildReferencePath(documentRoute(artifact));
   }
   return artifact.issue_key === null
@@ -97,9 +98,9 @@ function artifactPath(artifact: Artifact): string {
 /** Who owns an artifact, as a References row names it. */
 function artifactOwnerLabel(artifact: Artifact): string {
   if (artifact.issue_key !== null) return artifact.issue_key;
-  return artifact.session_id === undefined || artifact.session_id === null
-    ? artifact.project
-    : `agent ${shortSessionId(artifact.session_id)}`;
+  return isAgentArtifact(artifact)
+    ? `agent ${shortSessionId(artifact.session_id)}`
+    : artifact.project;
 }
 
 // The issue's reference closure (every artifact reachable by following references, up to 8

@@ -1030,7 +1030,7 @@ export function MentionComposer({
               setReferencePickerOpen(true);
               return;
             }
-            submitOnModifiedEnter(event);
+            submitOnModifiedEnter(event, { disabled: upload.pending > 0 });
           }}
           onPaste={
             uploadOwner === undefined

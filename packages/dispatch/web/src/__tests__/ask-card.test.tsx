@@ -643,6 +643,12 @@ test("AskCard writes a picture pasted into its answer as an inline picture, and 
     fireEvent.paste(answer, { clipboardData: { files: [png("shot.png")] } });
     await view.findByText("Uploading file…");
     expect(view.getByRole("button", { name: "Answer" }).hasAttribute("disabled")).toBe(true);
+    // Ctrl+Enter is Answer's other way in, and the form's submit does not itself wait for uploads.
+    fireEvent.keyDown(answer, { ctrlKey: true, key: "Enter" });
+    const { promise: settled, resolve: settle } = Promise.withResolvers<void>();
+    setTimeout(settle, 20);
+    await settled;
+    expect(submitted).toEqual([]);
     expect(uploadArtifact.mock.calls[0]?.[0]).toEqual({ issue: "CORE-1" });
 
     land();

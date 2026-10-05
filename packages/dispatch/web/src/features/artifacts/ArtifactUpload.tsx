@@ -1,3 +1,4 @@
+import { isPictureType, pictureCaption } from "@legion/contracts";
 import { type QueryClient, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   type ChangeEvent,
@@ -72,18 +73,19 @@ export function appendToDraft(draft: string, text: string): string {
 }
 
 /**
- * What an uploaded file adds to the draft it was pasted or dropped into. A picture (a file whose
- * type is `image/*`) is Markdown's image syntax captioned with the file's name and addressed by
+ * What an uploaded file adds to the draft it was pasted or dropped into. A picture (a PNG, JPEG,
+ * GIF or WebP by the browser's reading of its type, the four kinds the server stores as a picture
+ * and a model is shown) is Markdown's image syntax captioned with the file's name and addressed by
  * its own reference at the version the upload created -
  * `![shot.png](dispatch://CORE-1/artifact/shot-png@v1)` - so the picture is part of what is sent
- * and shows wherever the text renders. Any other file is its plain reference.
+ * and shows wherever the text renders. Any other file, an SVG included, is its plain reference.
  */
 export function uploadedFileText(
   owner: ArtifactOwner,
   file: File,
   { artifact, version }: UploadResult
 ): string {
-  const pinned = file.type.startsWith("image/") ? version.number : undefined;
+  const pinned = isPictureType(file.type) ? version.number : undefined;
   const route: DispatchReferenceRoute =
     "issue" in owner
       ? { key: owner.issue, kind: "artifact", slug: artifact.slug }
@@ -93,9 +95,7 @@ export function uploadedFileText(
   if (pinned === undefined) {
     return buildDispatchReference(route);
   }
-  // A caption is link text: a bracket or backslash in a file name would end it or escape what
-  // follows, a backtick would open a code span across it, and a line break would end the picture.
-  const caption = (file.name || artifact.name).replace(/[\\[\]`]/g, "\\$&").replace(/\s+/g, " ");
+  const caption = pictureCaption(file.name || artifact.name);
   return `![${caption}](${buildDispatchReference({ ...route, version: pinned })})`;
 }
 

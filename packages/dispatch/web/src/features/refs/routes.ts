@@ -1,4 +1,9 @@
-import { hasControlCharacter, itemFromSearch } from "@legion/contracts";
+import {
+  hasControlCharacter,
+  isSessionId,
+  itemFromSearch,
+  SESSION_ID_PATTERN,
+} from "@legion/contracts";
 import { matchPath } from "react-router-dom";
 
 import type { ArtifactOwner } from "../../api/client";
@@ -69,13 +74,10 @@ const issueArtifactReferencePattern = new RegExp(
 const projectArtifactReferencePattern = new RegExp(
   `^artifact/(${artifactSlugPattern})(?:@v([1-9]\\d*))?(?:/(ask|comment)/([^/?#\\s]+))?$`
 );
-/** A session id as a reference names it: no `/`, `?` or `#`, no whitespace (Unicode spaces and
- *  U+FEFF among it), none of the characters that end a reference in text (<>"'`[]|) and, checked
- *  on the whole reference, no control character - the server's rule (`text.IsSessionID`). */
-const sessionIdPattern = "[^/?#\\s\\p{Z}<>\"'`\\[\\]|]+";
-const sessionIdOnlyPattern = new RegExp(`^${sessionIdPattern}$`, "u");
+/** An agent artifact's reference after `dispatch://agent/`: the session id by the server's rule
+ *  (`SESSION_ID_PATTERN`), then the artifact's slug and the version it pins. */
 const agentArtifactReferencePattern = new RegExp(
-  `^(${sessionIdPattern})/artifact/(${artifactSlugPattern})(?:@v([1-9]\\d*))?$`,
+  `^(${SESSION_ID_PATTERN})/artifact/(${artifactSlugPattern})(?:@v([1-9]\\d*))?$`,
   "u"
 );
 const agentArtifactPathPattern = /^\/agents\/([^/]+)\/artifacts\/([^/]+)$/;
@@ -140,19 +142,30 @@ function version(value: string | null | undefined): number | undefined | null {
   return /^[1-9]\d*$/.test(value) ? Number(value) : null;
 }
 
+/** A route's slug percent-decoded and its version parsed; `undefined` when either names nothing. */
+function decodedSlugAndVersion(
+  slug: string,
+  versionValue: string | null | undefined
+): { slug: string; version: number | undefined } | undefined {
+  const decodedSlug = decodedSegment(slug);
+  const parsedVersion = version(versionValue);
+  return decodedSlug === undefined || parsedVersion === null
+    ? undefined
+    : { slug: decodedSlug, version: parsedVersion };
+}
+
 function artifactRoute(
   key: string,
   slug: string,
   versionValue?: string | null
 ): IssueRoute | undefined {
-  const decodedSlug = decodedSegment(slug);
-  const parsedVersion = version(versionValue);
-  if (decodedSlug === undefined || parsedVersion === null) {
+  const parsed = decodedSlugAndVersion(slug, versionValue);
+  if (parsed === undefined) {
     return undefined;
   }
-  return parsedVersion === undefined
-    ? { key, kind: "artifact", slug: decodedSlug }
-    : { key, kind: "artifact", slug: decodedSlug, version: parsedVersion };
+  return parsed.version === undefined
+    ? { key, kind: "artifact", slug: parsed.slug }
+    : { key, kind: "artifact", slug: parsed.slug, version: parsed.version };
 }
 
 function projectDocumentRoute(
@@ -161,17 +174,16 @@ function projectDocumentRoute(
   versionValue: string | null | undefined,
   item?: { kind: "ask" | "comment"; id: string }
 ): ProjectDocumentRoute | undefined {
-  const decodedSlug = decodedSegment(slug);
-  const parsedVersion = version(versionValue);
-  if (decodedSlug === undefined || parsedVersion === null) {
+  const parsed = decodedSlugAndVersion(slug, versionValue);
+  if (parsed === undefined) {
     return undefined;
   }
   return {
     ...(item === undefined ? {} : { item }),
     kind: "document",
     project,
-    slug: decodedSlug,
-    ...(parsedVersion === undefined ? {} : { version: parsedVersion }),
+    slug: parsed.slug,
+    ...(parsed.version === undefined ? {} : { version: parsed.version }),
   };
 }
 
@@ -182,14 +194,13 @@ function agentArtifactRoute(
   slug: string,
   versionValue: string | null | undefined
 ): AgentArtifactRoute | undefined {
-  const decodedSlug = decodedSegment(slug);
-  const parsedVersion = version(versionValue);
-  if (!sessionIdOnlyPattern.test(session) || decodedSlug === undefined || parsedVersion === null) {
+  const parsed = decodedSlugAndVersion(slug, versionValue);
+  if (!isSessionId(session) || parsed === undefined) {
     return undefined;
   }
-  return parsedVersion === undefined
-    ? { kind: "agent-artifact", session, slug: decodedSlug }
-    : { kind: "agent-artifact", session, slug: decodedSlug, version: parsedVersion };
+  return parsed.version === undefined
+    ? { kind: "agent-artifact", session, slug: parsed.slug }
+    : { kind: "agent-artifact", session, slug: parsed.slug, version: parsed.version };
 }
 
 function parseIssueReference(key: string, target: string | undefined): IssueRoute | undefined {
@@ -541,6 +552,15 @@ export function buildDispatchReference(route: DispatchReferenceRoute): string {
   return `${issue}/${route.kind}/${encodeURIComponent(route.id)}`;
 }
 
+/** Whether `artifact` belongs to an agent's conversation (its `session_id` is set, its
+ *  `issue_key` null and its `project` empty), so its page and reference sit under that agent's
+ *  session rather than an issue or a project. */
+export function isAgentArtifact<T extends Pick<Artifact, "session_id">>(
+  artifact: T
+): artifact is T & { readonly session_id: string } {
+  return artifact.session_id !== undefined && artifact.session_id !== null;
+}
+
 /** The route a document is referenced and linked by: an issue's primary document is its `spec`,
  *  any other issue artifact is `artifact/<slug>`, a project document sits under its project, and
  *  an artifact of an agent's conversation under that agent's session. `version` pins a historical
@@ -550,7 +570,7 @@ export function documentRoute(
   artifact: Pick<Artifact, "issue_key" | "kind" | "primary" | "project" | "session_id" | "slug">,
   version?: number
 ): DispatchReferenceRoute {
-  if (artifact.session_id !== undefined && artifact.session_id !== null) {
+  if (isAgentArtifact(artifact)) {
     return version === undefined
       ? { kind: "agent-artifact", session: artifact.session_id, slug: artifact.slug }
       : { kind: "agent-artifact", session: artifact.session_id, slug: artifact.slug, version };
