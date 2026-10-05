@@ -20,4 +20,7 @@ create table embeddings_rate_limit (
   last_refill_at timestamptz not null default now()
 );
 
-insert into embeddings_rate_limit (tokens_available) values (0);
+-- Seeded at the ceiling itself (embedqueue.tokenRateCeiling, 200,000), not 0: a deploy's first
+-- reservation should pace itself against real load from that point on, not wait out a debt
+-- nothing ever actually drew down just because the row was new.
+insert into embeddings_rate_limit (tokens_available) values (200000);

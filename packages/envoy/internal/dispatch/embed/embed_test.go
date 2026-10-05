@@ -12,6 +12,8 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
+
+	"github.com/sjawhar/envoy/internal/dispatch/embed/embedtest"
 )
 
 // testClient builds a Client against server, with static fake credentials and a fake region:
@@ -162,20 +164,11 @@ func TestLiteralRendersAPgvectorTextForm(t *testing.T) {
 	}
 }
 
-// throttleError stands in for a real Bedrock ThrottlingException: it carries the
-// `ErrorCode() string` method IsThrottled's classifier (and the AWS SDK's own
-// retry.ThrottleErrorCode beneath it) looks for, without needing a live Bedrock call or a
-// hand-built smithy type.
-type throttleError struct{ code string }
-
-func (e throttleError) Error() string     { return "simulated: " + e.code }
-func (e throttleError) ErrorCode() string { return e.code }
-
 func TestIsThrottledRecognizesBedrockThrottleCodesThroughAWrappedError(t *testing.T) {
 	for _, code := range []string{
 		"ThrottlingException", "ServiceUnavailableException", "SlowDown", "ModelNotReadyException",
 	} {
-		wrapped := fmt.Errorf("embed: bedrock invoke model: %w", throttleError{code: code})
+		wrapped := fmt.Errorf("embed: bedrock invoke model: %w", embedtest.FakeThrottleError{Code: code})
 		if !IsThrottled(wrapped) {
 			t.Errorf("IsThrottled(%q wrapped) = false, want true", code)
 		}
@@ -186,7 +179,7 @@ func TestIsThrottledDoesNotMisclassifyAnOrdinaryError(t *testing.T) {
 	if IsThrottled(errors.New("embed: bedrock invoke model: connection refused")) {
 		t.Error("IsThrottled(a plain connection error) = true, want false")
 	}
-	if IsThrottled(throttleError{code: "ValidationException"}) {
+	if IsThrottled(embedtest.FakeThrottleError{Code: "ValidationException"}) {
 		t.Error("IsThrottled(ValidationException) = true, want false - a bad request is not a throttle")
 	}
 }

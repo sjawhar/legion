@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/dispatch/embed/embedtest"
 	"github.com/sjawhar/envoy/internal/dispatch/retry"
 )
 
@@ -52,7 +53,7 @@ func TestRateLimitedEmbedderPacesSuccessiveCallsAtLeastTheFloorApart(t *testing.
 }
 
 func TestRateLimitedEmbedderBacksOffImmediatelyOnThrottle(t *testing.T) {
-	throttleErr := throttleError{code: "ThrottlingException"}
+	throttleErr := embedtest.FakeThrottleError{Code: "ThrottlingException"}
 	inner := &countingEmbedder{errs: []error{throttleErr}}
 	limiter := NewRateLimitedEmbedder(inner)
 	limiter.interval = 10 * time.Millisecond
@@ -96,7 +97,7 @@ func TestRateLimitedEmbedderNeverRecoversBelowTheFloor(t *testing.T) {
 }
 
 func TestRateLimitedEmbedderNeverBacksOffPastTheCeiling(t *testing.T) {
-	throttleErr := throttleError{code: "ThrottlingException"}
+	throttleErr := embedtest.FakeThrottleError{Code: "ThrottlingException"}
 	inner := &countingEmbedder{}
 	limiter := NewRateLimitedEmbedder(inner)
 	limiter.interval = retry.MaxDelay / 2

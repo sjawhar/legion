@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/embed"
+	"github.com/sjawhar/envoy/internal/dispatch/embed/embedtest"
 	"github.com/sjawhar/envoy/internal/dispatch/retry"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
@@ -49,15 +50,6 @@ func oneVector() []float32 {
 	return v
 }
 
-// fakeThrottleError stands in for a Bedrock ThrottlingException: it implements the
-// `ErrorCode() string` interface embed.IsThrottled (and the AWS SDK's own retry.ThrottleErrorCode
-// classifier underneath it) checks for, without needing a real smithy-generated type or a live
-// Bedrock call.
-type fakeThrottleError struct{}
-
-func (fakeThrottleError) Error() string     { return "simulated Bedrock throttle: too many requests" }
-func (fakeThrottleError) ErrorCode() string { return "ThrottlingException" }
-
 // throttleThenSucceedEmbedder throttles its first throttleFor calls, then delegates to inner -
 // standing in for a provider that recovers partway through an unattended run.
 type throttleThenSucceedEmbedder struct {
@@ -69,7 +61,7 @@ type throttleThenSucceedEmbedder struct {
 func (e *throttleThenSucceedEmbedder) Embed(ctx context.Context, texts []string, inputType embed.InputType) ([][]float32, error) {
 	e.calls++
 	if e.calls <= e.throttleFor {
-		return nil, fakeThrottleError{}
+		return nil, embedtest.FakeThrottleError{Code: "ThrottlingException"}
 	}
 	return e.inner.Embed(ctx, texts, inputType)
 }
@@ -197,7 +189,7 @@ func TestProcessBatchRetriesWithBackoffOnEmbedFailure(t *testing.T) {
 func TestProcessBatchNeverDeadLettersAThrottledBatchHoweverManyTimesItRecurs(t *testing.T) {
 	database := storetest.Open(t)
 	seedIssue(t, database, "THRO", "THRO-1", "A title")
-	embedder := &fakeEmbedder{err: fakeThrottleError{}}
+	embedder := &fakeEmbedder{err: embedtest.FakeThrottleError{Code: "ThrottlingException"}}
 	deps := Deps{Store: database, Embedder: embedder}
 	ctx := context.Background()
 
@@ -760,9 +752,42 @@ func TestReserveTokensSharesItsBudgetAcrossConnections(t *testing.T) {
 	// deficit, standing in for a second OS process - reserves 2 more tokens and must wait out
 	// the existing deficit plus its own: 4 tokens at 2/second, about 2 seconds.
 	started := time.Now()
-	reserveTokens(ctx, Deps{Store: database}, 2, ceiling)
+	reserveTokens(ctx, Deps{Store: database}, 2, ceiling, nil)
 	elapsed := time.Since(started)
 	if elapsed < 1500*time.Millisecond {
 		t.Errorf("reservation waited %v, want at least ~2s (the pre-existing 2-token deficit plus its own 2-token request, at 2 tokens/sec) - it should have read the shared row's existing debt from a separate writer, not started fresh", elapsed)
+	}
+}
+
+// TestWaitOutDebtRenewsTheClaimMidWaitSoNoSecondWorkerClaimsIt is Main's round-7 fix: a single
+// reservation's own wait can run past claimWindow (a full batchSize batch of maximum-length
+// documents needs far more than one minute's token ceiling - Deep measured close to 4 minutes of
+// actual wait), so waitOutDebt must renew the claim partway through a long wait, not only before
+// or after it. A tiny segment stands in for renewClaimInterval's real one minute so the test
+// itself takes a little over a second, not several minutes, while exercising the identical loop.
+func TestWaitOutDebtRenewsTheClaimMidWaitSoNoSecondWorkerClaimsIt(t *testing.T) {
+	database := storetest.Open(t)
+	seedIssue(t, database, "LONG", "LONG-1", "A title")
+	ctx := context.Background()
+	renewal := newClaimRenewal(Deps{Store: database}, []pendingRow{{kind: "issue", id: "LONG-1"}})
+	// Looks stale from the start, so the very first segment's renew() call actually renews
+	// rather than being skipped as "too soon since the last one".
+	renewal.last = time.Now().Add(-time.Hour)
+
+	const segment = 300 * time.Millisecond
+	before := time.Now()
+	waitOutDebt(ctx, 4*segment, renewal, segment)
+
+	if !renewal.last.After(before) {
+		t.Error("renewal.last was never updated - waitOutDebt never actually renewed during its wait")
+	}
+	var nextAttempt time.Time
+	if err := database.Pool.QueryRow(ctx,
+		`select next_attempt_at from embeddings where kind = 'issue' and id = 'LONG-1'`,
+	).Scan(&nextAttempt); err != nil {
+		t.Fatalf("read next_attempt_at: %v", err)
+	}
+	if !nextAttempt.After(before.Add(claimWindow - time.Second)) {
+		t.Errorf("next_attempt_at = %v, want at least claimWindow (%v) past %v - the mid-wait renewal should have pushed it out, so a concurrent scanner never reclaims LONG-1 while this reservation is still waiting", nextAttempt, claimWindow, before)
 	}
 }

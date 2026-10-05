@@ -194,12 +194,13 @@ func ProcessBatch(ctx context.Context, deps Deps) (succeeded, failed int, blocke
 	if len(rows) == 0 {
 		return 0, 0, false, false, nil
 	}
-	texts := make([]string, len(rows))
-	for i, row := range rows {
-		texts[i] = row.text
-	}
-	reserveBackgroundTokens(ctx, deps, texts)
-	vectors, embedErr := deps.Embedder.Embed(ctx, texts, embed.InputDocument)
+	// renewal is created before this call's very first reservation, not only once bisection is
+	// known to be needed: a single reservation for a full batch of maximum-length documents can
+	// itself wait close to claimWindow (chunkForBudget's and reserveTokens' own doc comments), so
+	// a renewer must be in scope for every embed attempt this call makes, not only the ones
+	// inside bisectSplit.
+	renewal := newClaimRenewal(deps, rows)
+	vectors, embedErr := embedRows(ctx, deps, rows, renewal)
 	if embedErr != nil {
 		// A single-row batch has no sibling to compare against, so a non-throttled failure here
 		// is exactly as ambiguous as it always was - bisection's isolation only has evidentiary
@@ -217,12 +218,7 @@ func ProcessBatch(ctx context.Context, deps Deps) (succeeded, failed int, blocke
 		// rows as a whole is already known to fail non-throttled (embedErr above), so splitting
 		// starts directly from its two halves (bisectSplit) rather than calling bisectBatch on
 		// the full, already-failed set again, which would re-embed every row at once a second
-		// time for no new information before ever splitting. renewal re-extends scanPending's
-		// claim on every one of rows (not just whatever subtree bisection is currently in) every
-		// renewClaimInterval, so a bisection slower than claimWindow - round 6: Deep measured
-		// 2m22.8s to fully bisect a 96-row batch every one of whose rows failed, longer than
-		// claimWindow's 2 minutes - never loses its claim to a concurrent scanner mid-bisection.
-		renewal := newClaimRenewal(deps, rows)
+		// time for no new information before ever splitting.
 		result := bisectSplit(ctx, deps, rows, renewal)
 		if result.err != nil {
 			return 0, 0, false, false, result.err
@@ -291,13 +287,7 @@ func bisectBatch(ctx context.Context, deps Deps, rows []pendingRow, renewal *cla
 	if ctx.Err() != nil {
 		return bisectResult{retry: rows}
 	}
-	texts := make([]string, len(rows))
-	for i, row := range rows {
-		texts[i] = row.text
-	}
-	renewal.renew(ctx)
-	reserveBackgroundTokens(ctx, deps, texts)
-	vectors, embedErr := deps.Embedder.Embed(ctx, texts, embed.InputDocument)
+	vectors, embedErr := embedRows(ctx, deps, rows, renewal)
 	if embedErr == nil {
 		committed, permanent, err := commitEmbeddings(ctx, deps, rows, vectors)
 		if err != nil {
@@ -355,14 +345,71 @@ func bisectSplit(ctx context.Context, deps Deps, rows []pendingRow, renewal *cla
 	}
 }
 
+// embedRows embeds rows' texts for ProcessBatch's own top-level attempt and every one of
+// bisectBatch's recursive attempts alike, reserving tokens from the shared budget before each
+// underlying Bedrock call it makes and renewing renewal's claim around it. A single reservation
+// for every row in rows at once could ask for far more than tokenRateCeiling allows in one
+// minute (round 7: a full batchSize batch of maximum-length documents needs up to roughly
+// 768,000 estimated tokens against a 200,000/minute ceiling - a reservation Simplify computed at
+// about 230s and Deep measured close to 4 minutes of actual wait, well past claimWindow's 2
+// minutes), so chunkForBudget splits rows into groups that each fit within one minute's ceiling,
+// and every group is reserved and embedded on its own, with the claim renewed before each one.
+// Every group must succeed for embedRows to report success: the first group's failure is the
+// whole call's failure, exactly as a single, unsplit Embed call's failure would be - a caller
+// never sees that this happened in more than one underlying Bedrock request.
+func embedRows(ctx context.Context, deps Deps, rows []pendingRow, renewal *claimRenewal) ([][]float32, error) {
+	vectors := make([][]float32, 0, len(rows))
+	for _, group := range chunkForBudget(rows) {
+		texts := make([]string, len(group))
+		for i, row := range group {
+			texts[i] = row.text
+		}
+		renewal.renew(ctx)
+		reserveBackgroundTokens(ctx, deps, texts, renewal)
+		groupVectors, err := deps.Embedder.Embed(ctx, texts, embed.InputDocument)
+		if err != nil {
+			return nil, err
+		}
+		vectors = append(vectors, groupVectors...)
+	}
+	return vectors, nil
+}
+
+// chunkForBudget splits rows into the fewest groups whose own estimated tokens
+// (embed.EstimateTokens) each stay at or under tokenRateCeiling, in original order, so
+// reserveTokens never has to reserve more than one minute's worth of budget for a single group.
+// A row whose own estimate alone meets or exceeds the ceiling - an unusually dense
+// maxInputChars-length document - still gets a group of its own rather than being split
+// further: EstimateTokens already truncates at maxInputChars, so even that worst case is a
+// known, bounded size, and one such row is the smallest unit this package ever embeds.
+func chunkForBudget(rows []pendingRow) [][]pendingRow {
+	if len(rows) == 0 {
+		return nil
+	}
+	groups := make([][]pendingRow, 0, 1)
+	start, tokens := 0, 0
+	for i, row := range rows {
+		rowTokens := embed.EstimateTokens([]string{row.text})
+		if i > start && tokens+rowTokens > tokenRateCeiling {
+			groups = append(groups, rows[start:i])
+			start, tokens = i, 0
+		}
+		tokens += rowTokens
+	}
+	return append(groups, rows[start:])
+}
+
 // claimRenewal re-extends scanPending's claim on every row of the original top-level batch a
-// bisection is working through - not just whatever subtree it is currently in, since every row
-// not yet committed or confirmed permanent is still this ProcessBatch call's responsibility until
-// it returns - once renewClaimInterval has passed since the last renewal, so a bisection slower
-// than claimWindow never loses its claim to a concurrent scanner partway through. Best-effort: a
-// failed renewal is logged and never aborts bisection, since a row a concurrent scanner reclaims
-// is merely processed twice, not corrupted - commitEmbeddings' own content_hash-matched update
-// already makes a doubly-claimed row safe, just not free.
+// ProcessBatch call is working through - not just whatever subtree bisection is currently in,
+// since every row not yet committed or confirmed permanent is still this call's responsibility
+// until it returns - once renewClaimInterval has passed since the last renewal, so work slower
+// than claimWindow (a long bisection, or a single reservation's own wait; see renewClaimInterval
+// and reserveTokens' own doc comments) never loses its claim to a concurrent scanner partway
+// through. Best-effort: a failed renewal is logged and never aborts anything, since a row a
+// concurrent scanner reclaims is merely processed twice, not corrupted - commitEmbeddings' own
+// content_hash-matched update already makes a doubly-claimed row safe, just not free. A nil
+// *claimRenewal (a caller with no claim to protect, such as a test exercising reserveTokens
+// alone) is a safe no-op.
 type claimRenewal struct {
 	deps Deps
 	rows []pendingRow
@@ -374,7 +421,7 @@ func newClaimRenewal(deps Deps, rows []pendingRow) *claimRenewal {
 }
 
 func (c *claimRenewal) renew(ctx context.Context) {
-	if ctx.Err() != nil || time.Since(c.last) < renewClaimInterval {
+	if c == nil || ctx.Err() != nil || time.Since(c.last) < renewClaimInterval {
 		return
 	}
 	c.last = time.Now()
@@ -393,25 +440,31 @@ func (c *claimRenewal) renew(ctx context.Context) {
 }
 
 // reserveBackgroundTokens is the one gate every background embed call in this package passes
-// through - ProcessBatch's own top-level attempt, and every one of bisectBatch's recursive
-// attempts - before it reaches deps.Embedder.Embed: it estimates texts' tokens
-// (embed.EstimateTokens) and reserves them against tokenRateCeiling's shared, database-backed
-// budget (reserveTokens), waiting out whatever debt that reservation leaves. Best-effort: a
-// reservation that fails to read or write (a transient database error) is logged and never
-// blocks or fails the batch - embed.RateLimitedEmbedder's own in-process, reactive AIMD backoff
-// is the backstop if this proactive ceiling is ever skipped or under-estimates a call.
-func reserveBackgroundTokens(ctx context.Context, deps Deps, texts []string) {
-	reserveTokens(ctx, deps, embed.EstimateTokens(texts), tokenRateCeiling)
+// through (embedRows calls it once per chunkForBudget group) before it reaches
+// deps.Embedder.Embed: it estimates texts' tokens (embed.EstimateTokens) and reserves them
+// against tokenRateCeiling's shared, database-backed budget (reserveTokens), waiting out whatever
+// debt that reservation leaves - renewing renewal's claim during a wait longer than
+// renewClaimInterval, not only before or after it. Best-effort: a reservation that fails to read
+// or write (a transient database error) is logged and never blocks or fails the batch -
+// embed.RateLimitedEmbedder's own in-process, reactive AIMD backoff is the backstop if this
+// proactive ceiling is ever skipped or under-estimates a call.
+func reserveBackgroundTokens(ctx context.Context, deps Deps, texts []string, renewal *claimRenewal) {
+	reserveTokens(ctx, deps, embed.EstimateTokens(texts), tokenRateCeiling, renewal)
 }
 
 // reserveTokens draws tokens from embeddings_rate_limit's one shared row (migration 0077),
 // refilling it continuously at ceilingPerMinute/60 tokens per second and capping it at
 // ceilingPerMinute (one statement does both: a plain token bucket), then waits out whatever
 // negative balance - debt - that reservation leaves before returning, so the caller's real
-// Bedrock call never races ahead of the budget it just drew down. ceilingPerMinute is a
-// parameter rather than always tokenRateCeiling so a test can use a tiny ceiling and observe a
-// real, short wait instead of needing to simulate a whole minute.
-func reserveTokens(ctx context.Context, deps Deps, tokens, ceilingPerMinute int) {
+// Bedrock call never races ahead of the budget it just drew down. chunkForBudget already keeps
+// one reservation's own tokens at or under ceilingPerMinute, but the wait can still run past
+// renewClaimInterval when other debt was already on the row (another process's, or this one's
+// own earlier groups) - renewal is woken (renew) at every renewClaimInterval-sized slice of the
+// wait, not only before or after it, so a claim never lapses mid-wait; renewal.renew is a safe
+// no-op on nil (a caller with no claim to protect, such as a test exercising the budget alone).
+// ceilingPerMinute is a parameter rather than always tokenRateCeiling so a test can use a tiny
+// ceiling and observe a real, short wait instead of needing to simulate a whole minute.
+func reserveTokens(ctx context.Context, deps Deps, tokens, ceilingPerMinute int, renewal *claimRenewal) {
 	var available float64
 	if err := deps.Store.Pool.QueryRow(ctx, `
 		update embeddings_rate_limit
@@ -426,7 +479,25 @@ func reserveTokens(ctx context.Context, deps Deps, tokens, ceilingPerMinute int)
 		return
 	}
 	wait := time.Duration(-available / (float64(ceilingPerMinute) / 60.0) * float64(time.Second))
-	pauseFor(ctx, wait)
+	waitOutDebt(ctx, wait, renewal, renewClaimInterval)
+}
+
+// waitOutDebt is reserveTokens' own wait loop, pulled out so a test can drive it with a tiny
+// segment instead of renewClaimInterval's real one minute: it sleeps out wait in slices of at
+// most segment, calling renewal.renew between every slice (not only before or after the whole
+// wait), so a wait longer than segment still renews partway through rather than only at the end.
+func waitOutDebt(ctx context.Context, wait time.Duration, renewal *claimRenewal, segment time.Duration) {
+	for wait > 0 {
+		s := wait
+		if s > segment {
+			s = segment
+		}
+		if !pauseFor(ctx, s) {
+			return
+		}
+		wait -= s
+		renewal.renew(ctx)
+	}
 }
 
 // scanPending claims at most batchSize pending rows, oldest-eligible first, atomically advancing
