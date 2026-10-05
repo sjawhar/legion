@@ -36243,6 +36243,7 @@ var DEFAULT_ISSUE_PAGE_LIMIT = 50;
 var ASK_TURNS = ["human", "agent"];
 var DELIVERY_CAPABILITIES = ["aside", "btw", "steer"];
 var DELIVERY_DUPLICATE_WINDOW_MS = 72 * 60 * 60 * 1000;
+var SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE = "embedder_unavailable";
 var DispatchEventSchema = exports_external.object({
   issue_key: exports_external.string().nullable(),
   artifact_id: exports_external.string().nullish(),
@@ -39057,7 +39058,7 @@ function searchAnswer(search, query, offset, configUrl) {
   const lines = results.map((result) => searchResultLine(result, configUrl));
   const noun = count === 1 ? "result" : "results";
   const noResults = `No results for "${query}".`;
-  const degraded = search.degraded === "embedder_unavailable" ? "Searched by keyword only: meaning search was unavailable for this request." : undefined;
+  const degraded = search.degraded === SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE ? "Searched by keyword only: meaning search was unavailable for this request." : undefined;
   if (typeof search.total !== "number") {
     if (offset !== undefined && offset > 0) {
       throw new Error(`Dispatch answered without a total: it predates search paging and ignored offset ${offset}, so this would be its first page again.`);
