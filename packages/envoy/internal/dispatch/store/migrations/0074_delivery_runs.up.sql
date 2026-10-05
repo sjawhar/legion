@@ -1,4 +1,4 @@
--- 0081_delivery_runs.up.sql
+-- 0074_delivery_runs.up.sql
 -- LEGION-567: deploy-workflow and PR-checks workflow runs, with their jobs, on the configured
 -- deploy repository. One shape covers both kinds (kind = 'deploy' | 'pr_checks') since the
 -- containment algorithm reads only deploy-kind rows' jobs by name, and the later Pipeline page
