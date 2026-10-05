@@ -119,7 +119,7 @@ func (s *Service) settlementCreditPersisted(room string, creditVersion uint64) {
 }
 
 // pendingSettlementCredit reads the durable settlement credit with the row that says a document
-// owes a settlement. A row from before migration 0070 carries the empty default credit.
+// owes a settlement. A row from before migration 0071 carries the empty default credit.
 func pendingSettlementCredit(ctx context.Context, q Queryer, room string) (bool, settlementCredit, error) {
 	var encoded []byte
 	err := q.QueryRow(ctx, `

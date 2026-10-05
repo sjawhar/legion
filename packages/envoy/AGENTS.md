@@ -532,7 +532,7 @@ is the one list of those holders. Every lookup takes a state through `lockState`
 forgets a state that holds nothing once its room has gone, so whatever ends last - ygo's
 `OnUnloadDocument` when the room goes, or a holder's own end - releases it. The durable row that
 says a document's settlement is owed (`doc_settlements_pending`, migration 0063) also carries the
-authors that settlement needs (0070): a browser update records them in the update's own
+authors that settlement needs (0071): a browser update records them in the update's own
 transaction, and a joined write records them in the transaction that commits its content, which
 also takes out the authors any version it wrote credited, as the room does once it commits. A
 browser update's credit names only the peers connected for it - never the room's whole accumulated
@@ -541,7 +541,11 @@ returned sequence, `settlementCredit.CreditSeq`); a service repair is credited t
 A version's release raises the row's `released_through` watermark to its own captured sequence
 and takes its authors out of the row; `upsertSettlementCredit` discards, rather than merges, a
 later credit whose own sequence is at or before that watermark, since everything in it was
-already visible to the release. `Ledger.commit` locks (`state.mu`) every artifact its own versions
+already visible to the release. The room keeps the same rule: each pending author carries the
+`creditVersion` it was last credited at (`roomState.pendingSeq`), and a version's in-memory release
+(`commitVersionLocked`) or a settlement's takes out only the authors credited at or before the
+point it read them (`releasePendingLocked`), so an author credited again since stays owed in the
+room as the row keeps them. `Ledger.commit` locks (`state.mu`) every artifact its own versions
 name from before the transaction commits through that version's in-memory release
 (`commitVersionLocked`), so no `creditContentChange`/`captureAuthors` call for that artifact can
 interleave between the durable release and the room forgetting the author (LEGION-513). Closing an
