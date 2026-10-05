@@ -43,7 +43,7 @@ var subcommands = []subcommand{
 		return redeliverWebhooks(ctx, args, env, stdout)
 	}},
 	{"backfill-embeddings", func(ctx context.Context, _ []string, env settingValues, stdout, _ io.Writer) int {
-		return backfillEmbeddings(ctx, env.get("DATABASE_URL"), env.get("COHERE_API_KEY"), stdout)
+		return backfillEmbeddings(ctx, env.get("DATABASE_URL"), stdout)
 	}},
 	{"census", func(ctx context.Context, _ []string, env settingValues, stdout, stderr io.Writer) int {
 		return census(ctx, env.get("DATABASE_URL"), stdout, stderr)
@@ -259,27 +259,29 @@ func rebuildRefs(ctx context.Context, databaseURL, serverURL string, out io.Writ
 
 // backfillEmbeddings enqueues and embeds meaning-search vectors for content this Dispatch was
 // already carrying before LEGION-549 (embedqueue.Backfill); a fresh write is covered by its own
-// table's trigger (0054_embeddings.up.sql) the moment COHERE_API_KEY is set, so this is a one-time
-// catch-up, not something the server runs itself. Resumable: rerunning it (after an interrupt, or
-// to pick up a kind this Dispatch grew after an earlier run finished) continues from each kind's
-// own checkpoint rather than rescanning rows it already enqueued.
-func backfillEmbeddings(ctx context.Context, databaseURL, cohereAPIKey string, out io.Writer) int {
+// table's trigger (0072-0076) the moment Bedrock credentials reach the process, so this is a
+// one-time catch-up, not something the server runs itself. Resumable: rerunning it (after an
+// interrupt, or to pick up a kind this Dispatch grew after an earlier run finished) continues
+// from each kind's own checkpoint rather than rescanning rows it already enqueued.
+func backfillEmbeddings(ctx context.Context, databaseURL string, out io.Writer) int {
 	database, ok := openMigrated(ctx, "backfill-embeddings", databaseURL, out)
 	if !ok {
 		return 1
 	}
 	defer database.Pool.Close()
-	if strings.TrimSpace(cohereAPIKey) == "" {
-		fmt.Fprintln(out, "backfill-embeddings: COHERE_API_KEY is required")
+	embedder, err := embed.New(ctx)
+	if err != nil {
+		fmt.Fprintf(out, "backfill-embeddings: %v\n", err)
 		return 1
 	}
-	report, err := embedqueue.Backfill(ctx, embedqueue.Deps{Store: database, Embedder: embed.New(cohereAPIKey)}, out)
+	report, err := embedqueue.Backfill(ctx, embedqueue.Deps{Store: database, Embedder: embedder}, out)
 	if err != nil {
 		fmt.Fprintf(out, "backfill-embeddings: %v\n", err)
 		return 1
 	}
 	fmt.Fprintf(out, "backfill-embeddings: done - enqueued=%v embedded=%d failed=%d\n", report.Enqueued, report.Embedded, report.Failed)
-	if report.Failed > 0 {
+	if report.Failed > 0 || report.Pending > 0 {
+		fmt.Fprintf(out, "backfill-embeddings: %d row(s) still pending after this run; rerun to continue\n", report.Pending)
 		return 1
 	}
 	return 0

@@ -14,9 +14,10 @@ import (
 
 // fakeEmbedder is a deterministic, text-keyed stand-in for Cohere (LEGION-549's tests use a fake
 // embedder, never the real API): Embed looks every text up in vectors and answers its mapped
-// vector, or background() for a text it does not recognize, so a test controls exactly which
-// pairs of texts cosine-match without depending on any real model. err, when set, is returned
-// instead, for the keyword-only fallback tests.
+// vector, or defaultVector() (cosine 0 with every query this file embeds, well below
+// searchMeaningFloor) for a text it does not recognize, so a test controls exactly which pairs of
+// texts cosine-match without depending on any real model. err, when set, is returned instead, for
+// the keyword-only fallback tests.
 type fakeEmbedder struct {
 	vectors map[string][]float32
 	err     error
@@ -33,40 +34,43 @@ func (f *fakeEmbedder) Embed(_ context.Context, texts []string, _ embed.InputTyp
 		if v, ok := f.vectors[text]; ok {
 			out[i] = v
 		} else {
-			out[i] = backgroundVector()
+			out[i] = defaultVector()
 		}
 	}
 	return out, nil
 }
 
-// backgroundVector is a fixed non-zero vector with no particular direction (pgvector's cosine
-// distance is undefined for an all-zero vector), standing in for "unrelated content" in a test:
-// every topicVector's cosine similarity to it is small but defined.
-func backgroundVector() []float32 {
+// angledVector returns a unit vector in the plane spanned by dimension 0 and axis, whose cosine
+// similarity with queryVector() (dimension 0's own unit vector) is exactly similarity - computed
+// from the angle, not approximated from noisy components, so a test's expected fused score (which
+// depends on exact rank position, and now also on searchMeaningFloor) is exact rather than a
+// vector-math guess. axis must differ across every vector a test embeds in the same query's
+// results, or two "unrelated" vectors would accidentally correlate with each other (never with
+// the query itself, which only ever compares against dimension 0).
+func angledVector(similarity float64, axis int) []float32 {
 	v := make([]float32, embed.Dimension)
-	for i := range v {
-		v[i] = 0.001
-	}
+	v[0] = float32(similarity)
+	v[axis] = float32(math.Sqrt(1 - similarity*similarity))
 	return v
 }
 
-// topicVector is backgroundVector with one dimension boosted, so two texts mapped to the same
-// topic cosine-match near 1.0, and texts of different topics cosine-match near 0.
-func topicVector(dimension int) []float32 {
-	v := backgroundVector()
-	v[dimension] = 5.0
-	return v
-}
+// queryVector is every test query's own embedding: the pure dimension-0 unit vector, so
+// angledVector(similarity, axis)'s cosine similarity with it is similarity by construction.
+func queryVector() []float32 { return angledVector(1, 1) }
+
+// defaultVector stands in for unrelated content this file never explicitly maps: cosine 0 with
+// queryVector(), comfortably below searchMeaningFloor.
+func defaultVector() []float32 { return angledVector(0, 1) }
 
 func processAllPending(t *testing.T, database *store.Store, embedder embed.Embedder) {
 	t.Helper()
 	deps := embedqueue.Deps{Store: database, Embedder: embedder}
 	for {
-		count, blocked, err := embedqueue.ProcessBatch(context.Background(), deps)
+		succeeded, failed, blocked, err := embedqueue.ProcessBatch(context.Background(), deps)
 		if err != nil {
 			t.Fatalf("process pending embeddings: %v", err)
 		}
-		if count == 0 || blocked {
+		if succeeded+failed == 0 || blocked {
 			return
 		}
 	}
@@ -74,13 +78,12 @@ func processAllPending(t *testing.T, database *store.Store, embedder embed.Embed
 
 // TestSearchFindsAMeaningOnlyMatch is LEGION-549's acceptance criterion: a query sharing no word
 // with the right issue, that means the same thing, finds it - here via a fake embedder's
-// deterministic topic match, since keyword search (websearch_to_tsquery) cannot match a query
+// deterministic cosine match, since keyword search (websearch_to_tsquery) cannot match a query
 // term absent from the corpus at all.
 func TestSearchFindsAMeaningOnlyMatch(t *testing.T) {
-	const topic = 7
 	embedder := &fakeEmbedder{vectors: map[string][]float32{
-		"Celestial navigation device maintenance": topicVector(topic),
-		"wibbleflorp": topicVector(topic),
+		"Celestial navigation device maintenance": angledVector(0.9, 2),
+		"wibbleflorp": queryVector(),
 	}}
 	handler, database, _ := newTestServer(t, testServerOptions{embedder: embedder})
 	issue := createInteractionIssue(t, handler, "MEAN", "Celestial navigation device maintenance", "Routine upkeep notes.")
@@ -97,13 +100,41 @@ func TestSearchFindsAMeaningOnlyMatch(t *testing.T) {
 	if response.Degraded != "" {
 		t.Fatalf("Degraded = %q, want empty: the embedder is configured and did not fail", response.Degraded)
 	}
-	// The acceptance bar (LEGION-549) is "finds it in the top five", not "finds only it": meaning
-	// search ranks every embedded row of a kind that has one (no similarity floor, matching
-	// keyword search's own "every matching row, ranked" shape), so the issue's own auto-created
-	// spec document - the only other row this tiny corpus holds - legitimately also appears, far
-	// behind the issue itself on the same topic.
-	if len(response.Results) == 0 || response.Results[0].ID != issue.Key {
-		t.Fatalf("Results[0] = %+v, want the issue %q ranked first", response.Results, issue.Key)
+	// Exactly one result: the issue, at 0.9 cosine similarity. Its own auto-created spec
+	// document's body ("Routine upkeep notes.") is never mapped, so it defaults to cosine 0 with
+	// the query - below searchMeaningFloor, and does not appear at all.
+	if len(response.Results) != 1 || response.Results[0].ID != issue.Key {
+		t.Fatalf("Results = %+v, want exactly one result: the issue %q", response.Results, issue.Key)
+	}
+}
+
+// TestSearchMeaningFloorExcludesWeakMatches is the regression the floor exists for: a result
+// Cohere ranks closest to the query, in a kind otherwise empty of better candidates, is not the
+// same thing as a relevant result. Below searchMeaningFloor the content never reaches legs at
+// all; at or above it, it does.
+func TestSearchMeaningFloorExcludesWeakMatches(t *testing.T) {
+	const belowFloor = 0.1 // < searchMeaningFloor (0.25)
+	const atFloor = 0.25
+	embedder := &fakeEmbedder{vectors: map[string][]float32{
+		"Unrelated quarterly budget notes": angledVector(belowFloor, 2),
+		"Right at the line":                angledVector(atFloor, 3),
+		"wibbleflorp":                      queryVector(),
+	}}
+	handler, database, _ := newTestServer(t, testServerOptions{embedder: embedder})
+	weak := createInteractionIssue(t, handler, "WEAK", "Unrelated quarterly budget notes", "Body text.")
+	line := createInteractionIssue(t, handler, "LINE", "Right at the line", "Body text.")
+	processAllPending(t, database, embedder)
+
+	response := searchResponse(t, handler, "q=wibbleflorp")
+	ids := make(map[string]bool, len(response.Results))
+	for _, result := range response.Results {
+		ids[result.ID] = true
+	}
+	if ids[weak.Key] {
+		t.Errorf("a %.2f-similarity match appeared in results; want it excluded below searchMeaningFloor (0.25)", belowFloor)
+	}
+	if !ids[line.Key] {
+		t.Errorf("a %.2f-similarity match (at the floor) did not appear; want >= searchMeaningFloor included", atFloor)
 	}
 }
 
@@ -128,9 +159,9 @@ func TestSearchAnswersKeywordOnlyWhenTheEmbedderFails(t *testing.T) {
 }
 
 // TestSearchAnswersKeywordOnlyWithNoEmbedderConfigured covers the other half of "a Dispatch
-// without a Cohere key": Deps.Embedder is nil, exactly the production boot state when
-// COHERE_API_KEY is unset (cmd/dispatch's bootConfig), and search still answers, keyword-only,
-// saying so.
+// without Bedrock credentials": Deps.Embedder is nil, exactly the production boot state when
+// embed.New's AWS config load fails (cmd/dispatch's bootConfig), and search still answers,
+// keyword-only, saying so.
 func TestSearchAnswersKeywordOnlyWithNoEmbedderConfigured(t *testing.T) {
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "NOEM", "Astrolabe calibration guide", "Keyword body text.")
@@ -147,17 +178,17 @@ func TestSearchAnswersKeywordOnlyWithNoEmbedderConfigured(t *testing.T) {
 // TestSearchFusesAnItemFoundByBothListsAboveOneFoundOnlyByMeaning exercises the two-list
 // reciprocal rank fusion search.go's "fused" CTE now sums (grouped by (kind, id), the invariant
 // Round 3's review of PR #1764 flagged a second per-kind list must preserve): an issue the query
-// both keyword-matches and whose embedding is the query's own topic sits at position 1 of each
-// list, scoring the sum of two 1/(60+1) terms; an issue the query shares no word with (so it never
-// enters the keyword list at all) and whose embedding is an unrelated topic sits at position 2 of
-// the meaning list alone, scoring one 1/(60+2) term - under half as much. Fusion summing, not
-// taking the better list's score alone, is what makes that gap as large as it is.
+// both keyword-matches and whose embedding cosine-matches at 0.9 sits at position 1 of each list,
+// scoring the sum of two 1/(60+1) terms; an issue the query shares no word with (so it never
+// enters the keyword list at all) and whose embedding cosine-matches at a weaker 0.4 (above
+// searchMeaningFloor, so it still reaches legs) sits at position 2 of the meaning list alone,
+// scoring one 1/(60+2) term - under half as much. Fusion summing, not taking the better list's
+// score alone, is what makes that gap as large as it is.
 func TestSearchFusesAnItemFoundByBothListsAboveOneFoundOnlyByMeaning(t *testing.T) {
-	const queryTopic, otherTopic = 11, 99
 	embedder := &fakeEmbedder{vectors: map[string][]float32{
-		"Harbor lantern inspection report":     topicVector(queryTopic), // keyword match and the query's own topic: both lists
-		"Unrelated maintenance budget request": topicVector(otherTopic), // no shared word with the query, and a different topic: meaning list only, weakly
-		"lantern inspection":                   topicVector(queryTopic),
+		"Harbor lantern inspection report":     angledVector(0.9, 2), // keyword match and a strong cosine match: both lists
+		"Unrelated maintenance budget request": angledVector(0.4, 3), // no shared word with the query, a weaker cosine match: meaning list only
+		"lantern inspection":                   queryVector(),
 	}}
 	handler, database, _ := newTestServer(t, testServerOptions{embedder: embedder})
 	both := createInteractionIssue(t, handler, "FUSE", "Harbor lantern inspection report", "Body text one.")

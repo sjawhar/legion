@@ -1,45 +1,44 @@
-// Package embed calls Cohere's embeddings API for Dispatch's meaning search: one vector per
-// (kind, id) searchable unit, embedded after commit through embedqueue's durable retry queue, and
-// one query vector per search request that asks for it.
+// Package embed calls Cohere Embed v4 through AWS Bedrock for Dispatch's meaning search: one
+// vector per (kind, id) searchable unit, embedded after commit through embedqueue's durable retry
+// queue, and one query vector per search request that asks for it.
 package embed
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"strconv"
 	"strings"
-	"time"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime"
+	"github.com/aws/smithy-go/logging"
+
+	"github.com/sjawhar/envoy/internal/dispatch/files"
 )
 
 const (
 	// Dimension is the embedding width every embeddings.embedding column and HNSW index
-	// (0054_embeddings.up.sql) is sized for. Changing it means a new migration and a full
+	// (0071_embeddings_core.up.sql) is sized for. Changing it means a new migration and a full
 	// re-embed; this package does not detect a Dispatch already carrying vectors at another width.
 	Dimension = 1536
-	// Model is the Cohere embedding model Dispatch calls through Cohere's own API, on the
-	// company's existing key - LEGION-386's "Which models" names Cohere, and embed-v4.0 is the
-	// model that section's benchmark exercised through Cohere's direct API (not a Bedrock
-	// permission) at this Dimension.
-	Model = "embed-v4.0"
-	// MaxBatchTexts is the most texts one call sends: Cohere's v2 embed endpoint accepts up to 96.
+	// Model is the Bedrock model this package calls: Cohere Embed v4 through the US cross-region
+	// inference profile - the exact model and region LEGION-386's benchmark measured
+	// (searchbench-results.md, linear-parity-plan.md "Who we call") - reached through the AWS
+	// SDK's default credential chain (Dispatch's task role in production, the devbox's instance
+	// role locally) and bedrock:InvokeModel, never Cohere's own API or a shared API key
+	// (LEGION-549 ask 649cdaf2: Sami ruled out a hand-seeded secret and any one-off admin apply).
+	Model = "us.cohere.embed-v4:0"
+	// MaxBatchTexts is the most texts one call sends: Cohere Embed v4's texts input accepts up to
+	// 96, on Bedrock as through Cohere's own API.
 	MaxBatchTexts = 96
-
-	defaultBaseURL = "https://api.cohere.com"
-	defaultTimeout = 30 * time.Second
-	// maxInputChars bounds one text's length before it is sent. Cohere's context is generous
+	// maxInputChars bounds one text's length before it is sent. The model's context is generous
 	// (128k tokens) but an unbounded document would pay to embed far more than a search result
 	// ever shows; this is a generous multiple of the 4,000-character snippet window search.go
 	// already uses, not a tight limit.
 	maxInputChars = 32000
-	// maxResponseBytes bounds one call's response. A full MaxBatchTexts batch at Dimension floats
-	// each, JSON-encoded, runs to a couple of megabytes before the texts and metadata the response
-	// also echoes back; 16 MiB leaves a wide margin rather than silently truncating one (which
-	// produces invalid JSON - "unexpected end of JSON input" - not a clean size-limit error).
-	maxResponseBytes = 16 << 20
 )
 
 // InputType is Cohere's asymmetric embedding mode: a stored document is embedded differently
@@ -51,82 +50,92 @@ const (
 	InputQuery    InputType = "search_query"
 )
 
-// Embedder embeds text for meaning search. A nil Embedder (Dispatch configured without a Cohere
-// key) means meaning search is off everywhere: search.go answers keyword-only and says so, and
-// embedqueue.Run never starts.
+// Embedder embeds text for meaning search. A nil Embedder (no AWS credentials or region reached
+// Dispatch at boot) means meaning search is off everywhere: search.go answers keyword-only and
+// says so, and embedqueue.Run never starts.
 type Embedder interface {
 	// Embed returns one vector per text, in the same order, embedded as inputType. It returns one
-	// error for the whole batch: Cohere's embed endpoint either embeds every text in a call or
-	// answers an error, so there is no partial result to salvage from a failed call.
+	// error for the whole batch: Bedrock either embeds every text in a call or answers an error,
+	// so there is no partial result to salvage from a failed call.
 	Embed(ctx context.Context, texts []string, inputType InputType) ([][]float32, error)
 }
 
-// Client calls Cohere's v2 embed endpoint directly.
+// Client calls Cohere Embed v4 on AWS Bedrock (InvokeModel).
 type Client struct {
-	apiKey  string
-	baseURL string
-	model   string
-	http    *http.Client
+	bedrock  *bedrockruntime.Client
+	model    string
+	endpoint string
 }
 
-// Option configures a Client beyond its API key.
+// Option configures a Client beyond its AWS configuration.
 type Option func(*Client)
 
-// WithBaseURL overrides Cohere's API origin; a test points it at a fake server.
-func WithBaseURL(url string) Option {
-	return func(c *Client) { c.baseURL = strings.TrimSuffix(url, "/") }
-}
-
-// WithModel overrides the embedding model.
+// WithModel overrides the Bedrock model id; a test points it at a fake endpoint's model id.
 func WithModel(model string) Option {
 	return func(c *Client) { c.model = model }
 }
 
-// WithHTTPClient overrides the HTTP client, for a test's timeout or transport.
-func WithHTTPClient(h *http.Client) Option {
-	return func(c *Client) { c.http = h }
+// WithBaseEndpoint overrides Bedrock's regional endpoint; a test points it at a local server
+// that stands in for Bedrock's InvokeModel API (the AWS SDK still signs every request against
+// whatever credentials the Client's config carries, which a test's static, fake credentials
+// satisfy - nothing before Bedrock's own side verifies the signature).
+func WithBaseEndpoint(url string) Option {
+	return func(c *Client) { c.endpoint = url }
 }
 
-// New returns a Client. apiKey must be non-empty: a caller decides whether Dispatch runs meaning
-// search at all (an empty COHERE_API_KEY) before ever constructing one, so an empty key reaching
-// here is a programmer error, not a runtime condition - New panics rather than returning a Client
-// that would fail every call.
-func New(apiKey string, opts ...Option) *Client {
-	if strings.TrimSpace(apiKey) == "" {
-		panic("embed: apiKey is required")
+// New loads the AWS SDK's default configuration (the environment, the shared config files, and
+// the instance/task credential chain - nothing this package reads directly) and returns a Client.
+// It returns an error if no region is configured - the one failure LoadDefaultConfig would
+// otherwise accept silently and only fail on the first call - or if loading the configuration
+// itself fails. Either is meaning search unavailable (LEGION-549's degraded mode): a caller logs
+// it and runs with a nil Embedder, not a reason to refuse to boot - a CI job or a devbox with no
+// AWS_REGION set must still start Dispatch and answer search, keyword-only.
+func New(ctx context.Context, opts ...Option) (*Client, error) {
+	cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithLogger(logging.LoggerFunc(files.LogSDK)))
+	if err != nil {
+		return nil, fmt.Errorf("embed: load AWS configuration: %w", err)
 	}
-	c := &Client{
-		apiKey:  apiKey,
-		baseURL: defaultBaseURL,
-		model:   Model,
-		http:    &http.Client{Timeout: defaultTimeout},
+	if cfg.Region == "" {
+		return nil, errors.New("embed: needs an AWS region: set AWS_REGION, or a region in the shared AWS config")
 	}
+	return NewWithConfig(cfg, opts...), nil
+}
+
+// NewWithConfig builds a Client directly from an already-loaded AWS configuration, skipping
+// New's region check and credential-chain loading - a test supplies its own static, fake
+// credentials and WithBaseEndpoint rather than touching the real AWS SDK default chain.
+func NewWithConfig(cfg aws.Config, opts ...Option) *Client {
+	c := &Client{model: Model}
 	for _, opt := range opts {
 		opt(c)
 	}
+	c.bedrock = bedrockruntime.NewFromConfig(cfg, func(o *bedrockruntime.Options) {
+		if c.endpoint != "" {
+			o.BaseEndpoint = aws.String(c.endpoint)
+		}
+	})
 	return c
 }
 
 type embedRequest struct {
-	Model           string    `json:"model"`
-	Texts           []string  `json:"texts"`
 	InputType       InputType `json:"input_type"`
+	Texts           []string  `json:"texts"`
 	EmbeddingTypes  []string  `json:"embedding_types"`
 	OutputDimension int       `json:"output_dimension"`
 }
 
+// embedResponse is Bedrock's actual response shape, confirmed by a live call (2026-10-05): the
+// vectors nest under embeddings.float regardless of how many embedding_types were requested -
+// the AWS documentation's claim of a flat array for a single requested type does not match what
+// Bedrock answers.
 type embedResponse struct {
 	Embeddings struct {
 		Float [][]float32 `json:"float"`
 	} `json:"embeddings"`
 }
 
-type embedErrorResponse struct {
-	Message string `json:"message"`
-}
-
-// Embed calls Cohere's v2 embed endpoint once for up to MaxBatchTexts texts; a caller with more
-// batches it itself (embedqueue does, one batch at a time).
+// Embed calls Bedrock once for up to MaxBatchTexts texts; a caller with more batches it itself
+// (embedqueue does, one batch at a time).
 func (c *Client) Embed(ctx context.Context, texts []string, inputType InputType) ([][]float32, error) {
 	if len(texts) == 0 {
 		return nil, nil
@@ -139,45 +148,30 @@ func (c *Client) Embed(ctx context.Context, texts []string, inputType InputType)
 		bounded[i] = truncateRunes(text, maxInputChars)
 	}
 	body, err := json.Marshal(embedRequest{
-		Model:           c.model,
-		Texts:           bounded,
 		InputType:       inputType,
+		Texts:           bounded,
 		EmbeddingTypes:  []string{"float"},
 		OutputDimension: Dimension,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("embed: encode request: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v2/embed", bytes.NewReader(body))
+	contentType := aws.String("application/json")
+	out, err := c.bedrock.InvokeModel(ctx, &bedrockruntime.InvokeModelInput{
+		ModelId:     aws.String(c.model),
+		Body:        body,
+		ContentType: contentType,
+		Accept:      contentType,
+	})
 	if err != nil {
-		return nil, fmt.Errorf("embed: build request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+c.apiKey)
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("embed: request: %w", err)
-	}
-	defer resp.Body.Close()
-	payload, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
-	if err != nil {
-		return nil, fmt.Errorf("embed: read response: %w", err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		var errBody embedErrorResponse
-		_ = json.Unmarshal(payload, &errBody)
-		message := errBody.Message
-		if message == "" {
-			message = string(payload)
-		}
-		return nil, fmt.Errorf("embed: cohere answered %d: %s", resp.StatusCode, message)
+		return nil, fmt.Errorf("embed: bedrock invoke model: %w", err)
 	}
 	var decoded embedResponse
-	if err := json.Unmarshal(payload, &decoded); err != nil {
+	if err := json.Unmarshal(out.Body, &decoded); err != nil {
 		return nil, fmt.Errorf("embed: decode response: %w", err)
 	}
 	if len(decoded.Embeddings.Float) != len(texts) {
-		return nil, fmt.Errorf("embed: cohere returned %d embeddings for %d texts", len(decoded.Embeddings.Float), len(texts))
+		return nil, fmt.Errorf("embed: bedrock returned %d embeddings for %d texts", len(decoded.Embeddings.Float), len(texts))
 	}
 	return decoded.Embeddings.Float, nil
 }

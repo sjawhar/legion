@@ -9,8 +9,9 @@
 # LEGION-549's acceptance bar, meaning search's share of the result).
 #
 # Run it once per build (main, a keyword-fusion head, a meaning-search head) against the same
-# corpus copy and compare the printed MRR; COHERE_API_KEY (env or `secrets COHERE_API_KEY --`)
-# only matters to a build whose server reads it.
+# corpus copy and compare the printed MRR; a build whose server calls Bedrock needs the usual AWS
+# credentials (AWS_REGION and the default credential chain) in its own environment, not this
+# script'''s.
 set -euo pipefail
 
 usage() {

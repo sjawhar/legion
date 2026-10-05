@@ -7,35 +7,58 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/credentials"
 )
 
-func TestEmbedSendsCohereV2RequestShapeAndParsesTheResponse(t *testing.T) {
-	var gotPath, gotAuth string
+// testClient builds a Client against server, with static fake credentials and a fake region:
+// the AWS SDK still signs every request (SigV4), but nothing on server's side verifies the
+// signature, so a test server only needs to receive a well-formed InvokeModel call and answer
+// Bedrock's documented response shape.
+func testClient(server *httptest.Server) *Client {
+	cfg := aws.Config{
+		Region:      "us-west-2",
+		Credentials: credentials.NewStaticCredentialsProvider("test-access-key", "test-secret-key", ""),
+	}
+	return NewWithConfig(cfg, WithBaseEndpoint(server.URL))
+}
+
+func TestEmbedSendsBedrockInvokeModelRequestShapeAndParsesTheResponse(t *testing.T) {
+	var gotPath, gotModel, gotContentType string
 	var gotBody embedRequest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
-		gotAuth = r.Header.Get("Authorization")
+		gotContentType = r.Header.Get("Content-Type")
 		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
 			t.Fatalf("decode request body: %v", err)
 		}
+		// Bedrock's InvokeModel carries the model id in the request path, not the JSON body.
+		gotModel = r.URL.Path
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"embeddings":{"float":[[0.1,0.2,0.3]]}}`))
+		_, _ = w.Write([]byte(`{"id":"test","response_type":"embeddings_by_type","embeddings":{"float":[[0.1,0.2,0.3]]}}`))
 	}))
 	defer server.Close()
 
-	client := New("test-key", WithBaseURL(server.URL))
+	client := testClient(server)
 	vectors, err := client.Embed(context.Background(), []string{"hello world"}, InputQuery)
 	if err != nil {
 		t.Fatalf("Embed: %v", err)
 	}
-	if gotPath != "/v2/embed" {
-		t.Errorf("path = %q, want /v2/embed", gotPath)
+	if !strings.Contains(gotPath, Model) {
+		t.Errorf("request path = %q, want it to name the model %q", gotModel, Model)
 	}
-	if gotAuth != "Bearer test-key" {
-		t.Errorf("Authorization = %q, want Bearer test-key", gotAuth)
+	if !strings.HasPrefix(gotPath, "/model/") || !strings.HasSuffix(gotPath, "/invoke") {
+		t.Errorf("path = %q, want Bedrock's /model/<id>/invoke shape", gotPath)
 	}
-	if gotBody.Model != Model || gotBody.InputType != InputQuery || gotBody.OutputDimension != Dimension {
-		t.Errorf("request body = %+v, want model=%s input_type=%s output_dimension=%d", gotBody, Model, InputQuery, Dimension)
+	if gotContentType != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", gotContentType)
+	}
+	if gotBody.InputType != InputQuery || gotBody.OutputDimension != Dimension {
+		t.Errorf("request body = %+v, want input_type=%s output_dimension=%d", gotBody, InputQuery, Dimension)
+	}
+	if len(gotBody.EmbeddingTypes) != 1 || gotBody.EmbeddingTypes[0] != "float" {
+		t.Errorf("embedding_types = %v, want [float]", gotBody.EmbeddingTypes)
 	}
 	if len(gotBody.Texts) != 1 || gotBody.Texts[0] != "hello world" {
 		t.Errorf("request texts = %v, want [hello world]", gotBody.Texts)
@@ -51,7 +74,7 @@ func TestEmbedOfZeroTextsAnswersNilWithoutACall(t *testing.T) {
 		called = true
 	}))
 	defer server.Close()
-	client := New("test-key", WithBaseURL(server.URL))
+	client := testClient(server)
 	vectors, err := client.Embed(context.Background(), nil, InputDocument)
 	if err != nil || vectors != nil {
 		t.Fatalf("Embed(nil) = %v, %v, want nil, nil", vectors, err)
@@ -62,7 +85,7 @@ func TestEmbedOfZeroTextsAnswersNilWithoutACall(t *testing.T) {
 }
 
 func TestEmbedRefusesMoreThanTheBatchLimit(t *testing.T) {
-	client := New("test-key")
+	client := NewWithConfig(aws.Config{Region: "us-west-2", Credentials: credentials.NewStaticCredentialsProvider("k", "s", "")})
 	texts := make([]string, MaxBatchTexts+1)
 	for i := range texts {
 		texts[i] = "x"
@@ -72,25 +95,25 @@ func TestEmbedRefusesMoreThanTheBatchLimit(t *testing.T) {
 	}
 }
 
-func TestEmbedReturnsCohereErrorBody(t *testing.T) {
+func TestEmbedReturnsBedrockErrorBody(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusTooManyRequests)
 		_, _ = w.Write([]byte(`{"message":"rate limited"}`))
 	}))
 	defer server.Close()
-	client := New("test-key", WithBaseURL(server.URL))
+	client := testClient(server)
 	_, err := client.Embed(context.Background(), []string{"x"}, InputDocument)
-	if err == nil || !strings.Contains(err.Error(), "rate limited") {
-		t.Fatalf("Embed error = %v, want it to mention %q", err, "rate limited")
+	if err == nil || !strings.Contains(err.Error(), "bedrock invoke model") {
+		t.Fatalf("Embed error = %v, want it to mention the Bedrock call failing", err)
 	}
 }
 
 func TestEmbedRefusesAMismatchedEmbeddingCount(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"embeddings":{"float":[[0.1]]}}`))
+		_, _ = w.Write([]byte(`{"response_type":"embeddings_by_type","embeddings":{"float":[[0.1]]}}`))
 	}))
 	defer server.Close()
-	client := New("test-key", WithBaseURL(server.URL))
+	client := testClient(server)
 	_, err := client.Embed(context.Background(), []string{"a", "b"}, InputDocument)
 	if err == nil || !strings.Contains(err.Error(), "1 embeddings for 2 texts") {
 		t.Fatalf("Embed error = %v, want it to name the count mismatch", err)
@@ -103,13 +126,13 @@ func TestEmbedTruncatesAnOverlongTextByRunesNotBytes(t *testing.T) {
 		var body embedRequest
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		gotText = body.Texts[0]
-		_, _ = w.Write([]byte(`{"embeddings":{"float":[[0.1]]}}`))
+		_, _ = w.Write([]byte(`{"response_type":"embeddings_by_type","embeddings":{"float":[[0.1]]}}`))
 	}))
 	defer server.Close()
 	// A multi-byte rune ("é", 2 bytes in UTF-8) repeated past the char cap: truncating by byte
 	// count would split a rune and produce invalid UTF-8; this must not panic or corrupt it.
 	overlong := strings.Repeat("é", maxInputChars+100)
-	client := New("test-key", WithBaseURL(server.URL))
+	client := testClient(server)
 	if _, err := client.Embed(context.Background(), []string{overlong}, InputDocument); err != nil {
 		t.Fatalf("Embed: %v", err)
 	}
@@ -118,13 +141,15 @@ func TestEmbedTruncatesAnOverlongTextByRunesNotBytes(t *testing.T) {
 	}
 }
 
-func TestNewPanicsOnAnEmptyAPIKey(t *testing.T) {
-	defer func() {
-		if recover() == nil {
-			t.Fatal("New(\"\") did not panic")
-		}
-	}()
-	New("")
+func TestNewRefusesAnEmptyRegion(t *testing.T) {
+	t.Setenv("AWS_REGION", "")
+	t.Setenv("AWS_DEFAULT_REGION", "")
+	t.Setenv("AWS_PROFILE", "does-not-exist-so-nothing-else-supplies-a-region")
+	t.Setenv("AWS_CONFIG_FILE", "/dev/null")
+	t.Setenv("AWS_SHARED_CREDENTIALS_FILE", "/dev/null")
+	if _, err := New(context.Background()); err == nil {
+		t.Fatal("New with no region configured anywhere: want an error, got nil")
+	}
 }
 
 func TestLiteralRendersAPgvectorTextForm(t *testing.T) {

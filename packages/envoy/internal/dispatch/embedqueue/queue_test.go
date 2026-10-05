@@ -78,7 +78,7 @@ func pendingCount(t *testing.T, database *store.Store) int {
 }
 
 // TestProcessBatchEmbedsAPendingRowTheWriteTimeTriggerEnqueued proves the end-to-end path a real
-// write exercises: inserting an issue (0069_embeddings.up.sql's trigger) leaves a pending
+// write exercises: inserting an issue (0072_issues_embeddings_trigger.up.sql's trigger) leaves a pending
 // embeddings row with no vector, and ProcessBatch fills it in from the Embedder, without any
 // application code calling embeddings_enqueue directly.
 func TestProcessBatchEmbedsAPendingRowTheWriteTimeTriggerEnqueued(t *testing.T) {
@@ -89,12 +89,12 @@ func TestProcessBatchEmbedsAPendingRowTheWriteTimeTriggerEnqueued(t *testing.T) 
 	}
 
 	embedder := &fakeEmbedder{}
-	count, blocked, err := ProcessBatch(context.Background(), Deps{Store: database, Embedder: embedder})
+	succeeded, failed, blocked, err := ProcessBatch(context.Background(), Deps{Store: database, Embedder: embedder})
 	if err != nil || blocked {
-		t.Fatalf("ProcessBatch = %d, %v, %v", count, blocked, err)
+		t.Fatalf("ProcessBatch = %d, %d, %v, %v", succeeded, failed, blocked, err)
 	}
-	if count != 1 {
-		t.Fatalf("ProcessBatch count = %d, want 1", count)
+	if succeeded != 1 || failed != 0 {
+		t.Fatalf("ProcessBatch succeeded, failed = %d, %d, want 1, 0", succeeded, failed)
 	}
 	if len(embedder.calls) != 1 || embedder.calls[0][0] != "A title to embed" {
 		t.Fatalf("embedder calls = %v, want one call embedding the issue's title", embedder.calls)
@@ -121,12 +121,12 @@ func TestProcessBatchRetriesWithBackoffOnEmbedFailure(t *testing.T) {
 	database := storetest.Open(t)
 	seedIssue(t, database, "RETR", "RETR-1", "A title")
 	embedder := &fakeEmbedder{err: errors.New("cohere: simulated outage")}
-	count, blocked, err := ProcessBatch(context.Background(), Deps{Store: database, Embedder: embedder})
+	succeeded, failed, blocked, err := ProcessBatch(context.Background(), Deps{Store: database, Embedder: embedder})
 	if err != nil {
 		t.Fatalf("ProcessBatch: %v", err)
 	}
-	if count != 1 || blocked {
-		t.Fatalf("ProcessBatch = %d, %v, want 1, false", count, blocked)
+	if succeeded != 0 || failed != 1 || blocked {
+		t.Fatalf("ProcessBatch succeeded, failed, blocked = %d, %d, %v, want 0, 1, false", succeeded, failed, blocked)
 	}
 	if got := pendingCount(t, database); got != 1 {
 		t.Fatalf("pending after a failed attempt = %d, want 1 (still pending, not lost)", got)
@@ -145,9 +145,9 @@ func TestProcessBatchRetriesWithBackoffOnEmbedFailure(t *testing.T) {
 		t.Errorf("next_attempt_at = %v, want it backed off into the future", nextAttemptAt)
 	}
 	// Immediately re-processing finds nothing: the row is backed off, not eligible yet.
-	count, _, err = ProcessBatch(context.Background(), Deps{Store: database, Embedder: embedder})
-	if err != nil || count != 0 {
-		t.Fatalf("ProcessBatch immediately after backoff = %d, %v, want 0, nil", count, err)
+	succeeded, failed, _, err = ProcessBatch(context.Background(), Deps{Store: database, Embedder: embedder})
+	if err != nil || succeeded != 0 || failed != 0 {
+		t.Fatalf("ProcessBatch immediately after backoff = %d, %d, %v, want 0, 0, nil", succeeded, failed, err)
 	}
 }
 
@@ -258,6 +258,92 @@ func TestBackfillResumesFromItsCheckpointRatherThanRescanning(t *testing.T) {
 	}
 	if !done {
 		t.Error("embeddings_backfill_progress.done = false after a full pass, want true")
+	}
+}
+
+// TestBackfillDoesNotOverwriteAConcurrentWritesFresherEmbedding is the regression Round 2's
+// review found: Backfill used to ON CONFLICT DO UPDATE with its own page's snapshot, which could
+// clobber a trigger's fresher enqueue of the same row with stale text. ON CONFLICT DO NOTHING
+// means an existing row - whichever wrote it, and whenever - is never touched by Backfill at all.
+func TestBackfillDoesNotOverwriteAConcurrentWritesFresherEmbedding(t *testing.T) {
+	database := storetest.Open(t)
+	ctx := context.Background()
+	seedIssue(t, database, "RACE", "RACE-1", "Original title")
+	// A write lands after the issue exists - exactly the kind of row a real Backfill run (content
+	// this Dispatch was already carrying) would otherwise see as stale, since the issue already
+	// has an embeddings row from its own insert trigger.
+	if _, err := database.Pool.Exec(ctx, `update issues set title = $1 where key = 'RACE-1'`, "Changed title"); err != nil {
+		t.Fatalf("update title: %v", err)
+	}
+	var wantHash string
+	if err := database.Pool.QueryRow(ctx, `select content_hash from embeddings where kind = 'issue' and id = 'RACE-1'`).Scan(&wantHash); err != nil {
+		t.Fatalf("read content_hash before backfill: %v", err)
+	}
+
+	var out bytes.Buffer
+	embedder := &fakeEmbedder{}
+	if _, err := Backfill(ctx, Deps{Store: database, Embedder: embedder}, &out); err != nil {
+		t.Fatalf("Backfill: %v", err)
+	}
+
+	var snapshot, gotHash string
+	if err := database.Pool.QueryRow(ctx, `
+		select text_snapshot, content_hash from embeddings where kind = 'issue' and id = 'RACE-1'
+	`).Scan(&snapshot, &gotHash); err != nil {
+		t.Fatalf("read row after backfill: %v", err)
+	}
+	if snapshot != "Changed title" {
+		t.Errorf("text_snapshot after Backfill = %q, want the write's own %q (Backfill must not revert it)", snapshot, "Changed title")
+	}
+	if gotHash != wantHash {
+		t.Errorf("content_hash after Backfill = %q, want unchanged from before Backfill ran (%q)", gotHash, wantHash)
+	}
+}
+
+// TestRetryRowMarksARowDeadAfterRepeatedFailuresAndStopsRetrying is the dead-letter acceptance
+// criterion: past deadLetterAttempts, a row stops consuming poller cycles rather than retrying
+// with a five-minute ceiling forever, but is still visible and still recoverable.
+func TestRetryRowMarksARowDeadAfterRepeatedFailuresAndStopsRetrying(t *testing.T) {
+	database := storetest.Open(t)
+	seedIssue(t, database, "DEAD", "DEAD-1", "A title")
+	ctx := context.Background()
+	deps := Deps{Store: database}
+	row := pendingRow{kind: "issue", id: "DEAD-1"}
+	if err := database.Pool.QueryRow(ctx, `select content_hash from embeddings where kind = 'issue' and id = 'DEAD-1'`).Scan(&row.contentHash); err != nil {
+		t.Fatalf("read content_hash: %v", err)
+	}
+	for row.attempts = 0; row.attempts < deadLetterAttempts; row.attempts++ {
+		retryRow(ctx, deps, row, "test", errors.New("simulated failure"))
+	}
+
+	var dead bool
+	var attempts int
+	if err := database.Pool.QueryRow(ctx, `select dead, attempt_count from embeddings where kind = 'issue' and id = 'DEAD-1'`).Scan(&dead, &attempts); err != nil {
+		t.Fatalf("read row: %v", err)
+	}
+	if !dead {
+		t.Fatalf("dead = false after %d attempts (deadLetterAttempts=%d), want true", attempts, deadLetterAttempts)
+	}
+
+	rows, err := scanPending(ctx, deps)
+	if err != nil {
+		t.Fatalf("scanPending: %v", err)
+	}
+	for _, r := range rows {
+		if r.kind == "issue" && r.id == "DEAD-1" {
+			t.Error("scanPending returned a dead row; dead rows must not be retried automatically")
+		}
+	}
+
+	// Recoverable: a fresh write (a title change) clears dead and re-admits the row.
+	if _, err := database.Pool.Exec(ctx, `update issues set title = $1 where key = 'DEAD-1'`, "Recovered title"); err != nil {
+		t.Fatalf("update title: %v", err)
+	}
+	if err := database.Pool.QueryRow(ctx, `select dead from embeddings where kind = 'issue' and id = 'DEAD-1'`).Scan(&dead); err != nil {
+		t.Fatalf("read dead after recovery write: %v", err)
+	}
+	if dead {
+		t.Error("dead is still true after the row's own text changed; embeddings_enqueue should have cleared it")
 	}
 }
 

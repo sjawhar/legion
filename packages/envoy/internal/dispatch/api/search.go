@@ -32,9 +32,19 @@ const (
 	// run for this request - the embedder is unconfigured, timed out, or Cohere answered an
 	// error - and search fell back to keyword-only ranking.
 	degradedEmbedderUnavailable = "embedder_unavailable"
-	markStart                   = "\uE000" // private-use sentinels: ts_headline writes them, markSnippet turns them into <mark>
-	markEnd                     = "\uE001"
-	headlineOptions             = "StartSel=" + markStart + ", StopSel=" + markEnd + ", MaxWords=24, MinWords=12, MaxFragments=1"
+	// searchMeaningFloor is the lowest cosine similarity a meaning-leg row may score to reach
+	// legs at all: below it, a row is noise, not a weak match, and letting it through would rank
+	// it by position exactly as the strongest match in an empty kind, worth 1/(searchFusionK+1) -
+	// as much as a real hit, zero floor (today) gives nothing. Chosen from embed-v4.0 pairs on
+	// this corpus: true paraphrase matches scored 0.45-0.50, same-domain-different-issue
+	// near-misses 0.34-0.40, and unrelated content topped out at 0.18 (one query, eight
+	// unrelated documents) - 0.25 sits with a wide margin on both sides of that gap. It is not
+	// re-derived per request or per corpus; a corpus whose true matches cluster lower would need
+	// a new floor chosen the same way.
+	searchMeaningFloor = 0.25
+	markStart          = "\uE000" // private-use sentinels: ts_headline writes them, markSnippet turns them into <mark>
+	markEnd            = "\uE001"
+	headlineOptions    = "StartSel=" + markStart + ", StopSel=" + markEnd + ", MaxWords=24, MinWords=12, MaxFragments=1"
 )
 
 // searchQueryKeyword ranks each kind of content on one keyword list (ts_rank_cd, then recency,
@@ -150,22 +160,121 @@ select t.total, t.reachable, r.kind, case when r.owner_artifact_id is null then 
 
 // searchQueryMeaning extends searchQueryKeyword with a second list per kind, ranked by cosine
 // distance to the query's own embedding ($9, a pgvector literal) against embeddings.embedding
-// (0054_embeddings.up.sql), rather than ts_rank_cd. Every leg now carries which list it belongs
-// to (list), and ranked's window partitions by (kind, list): each list keeps its own top $7 and
-// its own position numbering, so a row that matches both lists for the same (kind, id) occupies
-// two rows of legs - one per list - each contributing its own 1/($8+pos) term. fused sums those
-// terms grouped by (kind, id), which is reciprocal rank fusion of the two lists exactly as it
-// fuses the five kinds: an item only the keyword list reached, only the meaning list reached, or
-// both, is ranked once, at the sum of whichever lists found it. legs_unique picks one
-// representative row's owner/text-location columns per (kind, id) - both lists' rows carry the
-// same ones, read from the same underlying issue/document/comment/ask/message - before the page
-// is cut and joined back to fused's score. total is every distinct (kind, id) either list
-// matched, not a sum of list sizes, so an id both lists reach is counted once.
+// (0071_embeddings_core.up.sql), rather than ts_rank_cd. Each kind's meaning candidates are their
+// own CTE (meaning_issue_candidates and so on) doing plainly `order by embedding <=> $9 limit $7`
+// - pgvector's HNSW index serves that shape directly (confirmed by
+// TestSearchMeaningLegsUseTheHNSWIndexNotASequentialScan) - rather than joining meaning rows into
+// one shared window spanning every kind, which would force a sequential scan of embeddings once
+// per leg. Each candidate set is then floor-filtered (searchMeaningFloor) before kinds ever sees
+// it: a candidate below the floor is noise, not a weak match, and reaching legs at all would rank
+// it by position exactly as the strongest real match in an empty kind.
+//
+// Every leg now carries which list it belongs to (list), and ranked's window partitions by
+// (kind, list): each list keeps its own top $7 and its own position numbering, so a row that
+// matches both lists for the same (kind, id) occupies two rows of legs - one per list - each
+// contributing its own 1/($8+pos) term. fused sums those terms grouped by (kind, id), which is
+// reciprocal rank fusion of the two lists exactly as it fuses the five kinds: an item only the
+// keyword list reached, only the meaning list reached, or both, is ranked once, at the sum of
+// whichever lists found it. legs_unique picks one representative row's owner/text-location
+// columns per (kind, id) - both lists' rows carry the same ones, read from the same underlying
+// issue/document/comment/ask/message - before the page is cut and joined back to fused's score.
+// total is every distinct (kind, id) either list matched, not a sum of list sizes, so an id both
+// lists reach is counted once.
 //
 // Parameters: $1 q, $2 project, $3 limit, $4 firstTerm, $5 headlineOptions, $6 offset,
-// $7 contracts.SearchKindDepth, $8 searchFusionK, $9 the query's embedding (a vector literal).
+// $7 contracts.SearchKindDepth, $8 searchFusionK, $9 the query's embedding (a vector literal),
+// $10 searchMeaningFloor.
 const searchQueryMeaning = `
 with q as (select websearch_to_tsquery('english', $1) as tsq, $4::text as term, upper(btrim($1)) as own_key, $9::vector as qvec),
+meaning_issue_candidates as (
+  select i.key as issue_key, i.key as id, i.title as issue_title, i.status as issue_status, i.updated_at,
+         1 - (e.embedding <=> q.qvec) as r
+    from embeddings e
+    join issues i on i.key = e.id, q
+   where e.kind = 'issue' and e.embedding is not null and ($2 = '' or i.project_key = $2)
+   order by e.embedding <=> q.qvec
+   limit $7
+),
+meaning_issue as (
+  select 'issue' as kind, 'meaning' as list, issue_key, null::uuid as owner_artifact_id, null::uuid as artifact_id, id, null::text as block_id,
+         issue_title, issue_status, null::text as owner_project, null::text as owner_slug, null::text as owner_name, updated_at,
+         false as own, r
+    from meaning_issue_candidates where r >= $10
+),
+meaning_document_candidates as (
+  select a.issue_key, a.id, i.title as issue_title, i.status as issue_status, p.key as owner_project, a.slug as owner_slug, a.name as owner_name,
+         coalesce(i.updated_at, v.created_at) as updated_at,
+         1 - (e.embedding <=> q.qvec) as r
+    from embeddings e
+    join artifacts a on a.id::text = e.id
+    left join issues i on i.key = a.issue_key
+    join projects p on p.key = a.project_key
+    join lateral (select created_at from artifact_versions v where v.artifact_id = a.id order by v.number desc limit 1) v on true, q
+   where e.kind = 'document' and a.kind = 'doc' and e.embedding is not null and ($2 = '' or p.key = $2)
+   order by e.embedding <=> q.qvec
+   limit $7
+),
+meaning_document as (
+  select 'document' as kind, 'meaning' as list, issue_key, case when issue_key is null then id else null::uuid end, id, id::text, null::text,
+         issue_title, issue_status, owner_project, owner_slug, owner_name, updated_at,
+         false, r
+    from meaning_document_candidates where r >= $10
+),
+meaning_comment_candidates as (
+  select c.issue_key, c.artifact_id, c.anchor, c.id, i.title as issue_title, i.status as issue_status, p.key as owner_project, a.slug as owner_slug, a.name as owner_name,
+         coalesce(i.updated_at, c.created_at) as updated_at,
+         1 - (e.embedding <=> q.qvec) as r
+    from embeddings e
+    join comments c on c.id::text = e.id
+    left join issues i on i.key = c.issue_key
+    left join artifacts a on a.id = c.artifact_id
+    left join projects p on p.key = a.project_key, q
+   where e.kind = 'comment' and e.embedding is not null and ($2 = '' or coalesce(i.project_key, p.key) = $2)
+   order by e.embedding <=> q.qvec
+   limit $7
+),
+meaning_comment as (
+  select 'comment' as kind, 'meaning' as list, issue_key, artifact_id, coalesce(artifact_id, (anchor->>'artifact_id')::uuid), id::text, null::text,
+         issue_title, issue_status, owner_project, owner_slug, owner_name, updated_at,
+         false, r
+    from meaning_comment_candidates where r >= $10
+),
+meaning_ask_candidates as (
+  select k.issue_key, k.artifact_id, k.block_artifact_id, k.anchor, k.id, k.block_id, i.title as issue_title, i.status as issue_status,
+         p.key as owner_project, a.slug as owner_slug, a.name as owner_name, coalesce(i.updated_at, k.created_at) as updated_at,
+         1 - (e.embedding <=> q.qvec) as r
+    from embeddings e
+    join asks k on k.id::text = e.id
+    left join issues i on i.key = k.issue_key
+    left join artifacts a on a.id = coalesce(k.artifact_id, k.block_artifact_id)
+    left join projects p on p.key = a.project_key, q
+   where e.kind = 'ask' and e.embedding is not null and ($2 = '' or coalesce(i.project_key, p.key) = $2)
+   order by e.embedding <=> q.qvec
+   limit $7
+),
+meaning_ask as (
+  select 'ask' as kind, 'meaning' as list, issue_key, case when issue_key is null then coalesce(artifact_id, block_artifact_id) else null::uuid end,
+         coalesce(artifact_id, block_artifact_id, (anchor->>'artifact_id')::uuid), id::text, block_id,
+         issue_title, issue_status, owner_project, owner_slug, owner_name, updated_at,
+         false, r
+    from meaning_ask_candidates where r >= $10
+),
+meaning_message_candidates as (
+  select m.issue_key, m.id, i.title as issue_title, i.status as issue_status, i.updated_at,
+         1 - (e.embedding <=> q.qvec) as r
+    from embeddings e
+    join messages m on m.id::text = e.id
+    join issues i on i.key = m.issue_key, q
+   where e.kind = 'message' and e.embedding is not null and ($2 = '' or i.project_key = $2)
+   order by e.embedding <=> q.qvec
+   limit $7
+),
+meaning_message as (
+  select 'message' as kind, 'meaning' as list, issue_key, null::uuid, null::uuid, id::text, null::text,
+         issue_title, issue_status, null::text, null::text, null::text, updated_at,
+         false, r
+    from meaning_message_candidates where r >= $10
+),
 kinds as (
   select 'issue' as kind, 'keyword' as list, i.key as issue_key, null::uuid as owner_artifact_id, null::uuid as artifact_id, i.key as id, null::text as block_id,
          i.title as issue_title, i.status as issue_status,
@@ -209,54 +318,11 @@ kinds as (
          false, ts_rank_cd(m.search, q.tsq)
     from messages m join issues i on i.key = m.issue_key, q
    where m.search @@ q.tsq and ($2 = '' or i.project_key = $2)
-  union all
-  select 'issue' as kind, 'meaning', i.key, null::uuid, null::uuid, i.key, null::text,
-         i.title, i.status, null::text, null::text, null::text, i.updated_at,
-         false, 1 - (e.embedding <=> q.qvec)
-    from issues i
-    join embeddings e on e.kind = 'issue' and e.id = i.key, q
-   where e.embedding is not null and ($2 = '' or i.project_key = $2)
-  union all
-  select 'document' as kind, 'meaning', a.issue_key, case when a.issue_key is null then a.id else null::uuid end, a.id, a.id::text, null::text,
-         i.title, i.status, p.key, a.slug, a.name,
-         coalesce(i.updated_at, v.created_at),
-         false, 1 - (e.embedding <=> q.qvec)
-    from artifacts a
-    left join issues i on i.key = a.issue_key
-    join projects p on p.key = a.project_key
-    join embeddings e on e.kind = 'document' and e.id = a.id::text
-    join lateral (select created_at from artifact_versions v where v.artifact_id = a.id order by v.number desc limit 1) v on true, q
-   where a.kind = 'doc' and e.embedding is not null and ($2 = '' or p.key = $2)
-  union all
-  select 'comment' as kind, 'meaning', c.issue_key, c.artifact_id, coalesce(c.artifact_id, (c.anchor->>'artifact_id')::uuid), c.id::text, null::text,
-         i.title, i.status, p.key, a.slug, a.name,
-         coalesce(i.updated_at, c.created_at),
-         false, 1 - (e.embedding <=> q.qvec)
-    from comments c
-    left join issues i on i.key = c.issue_key
-    left join artifacts a on a.id = c.artifact_id
-    left join projects p on p.key = a.project_key
-    join embeddings e on e.kind = 'comment' and e.id = c.id::text, q
-   where e.embedding is not null and ($2 = '' or coalesce(i.project_key, p.key) = $2)
-  union all
-  select 'ask' as kind, 'meaning', k.issue_key, case when k.issue_key is null then coalesce(k.artifact_id, k.block_artifact_id) else null::uuid end,
-         coalesce(k.artifact_id, k.block_artifact_id, (k.anchor->>'artifact_id')::uuid), k.id::text, k.block_id,
-         i.title, i.status, p.key, a.slug, a.name, coalesce(i.updated_at, k.created_at),
-         false, 1 - (e.embedding <=> q.qvec)
-    from asks k
-    left join issues i on i.key = k.issue_key
-    left join artifacts a on a.id = coalesce(k.artifact_id, k.block_artifact_id)
-    left join projects p on p.key = a.project_key
-    join embeddings e on e.kind = 'ask' and e.id = k.id::text, q
-   where e.embedding is not null and ($2 = '' or coalesce(i.project_key, p.key) = $2)
-  union all
-  select 'message' as kind, 'meaning', m.issue_key, null::uuid, null::uuid, m.id::text, null::text,
-         i.title, i.status, null::text, null::text, null::text, i.updated_at,
-         false, 1 - (e.embedding <=> q.qvec)
-    from messages m
-    join issues i on i.key = m.issue_key
-    join embeddings e on e.kind = 'message' and e.id = m.id::text, q
-   where e.embedding is not null and ($2 = '' or i.project_key = $2)
+  union all select * from meaning_issue
+  union all select * from meaning_document
+  union all select * from meaning_comment
+  union all select * from meaning_ask
+  union all select * from meaning_message
 ),
 ranked as (
   select *, row_number() over (partition by kind, list order by own desc, r desc, updated_at desc, id) as pos
@@ -366,7 +432,7 @@ func (s *server) search(w http.ResponseWriter, r *http.Request) {
 			degraded = degradedEmbedderUnavailable
 		} else {
 			sqlText = searchQueryMeaning
-			args = append(args, embed.Literal(vector))
+			args = append(args, embed.Literal(vector), searchMeaningFloor)
 		}
 	} else {
 		degraded = degradedEmbedderUnavailable

@@ -1,9 +1,9 @@
-// Package embedqueue durably retries Cohere embedding calls for Dispatch's meaning search. A
-// write's AFTER INSERT/UPDATE trigger (0054_embeddings.up.sql) upserts a pending row into
-// embeddings with the latest text and a hash of it in the same transaction as the write, and this
-// package's poller embeds whatever that enqueue left pending, with the same scan-then-retry
-// shape as the event outbox (internal/dispatch/outbox): a write never fails because Cohere did,
-// since Cohere is never called inside the enqueueing transaction.
+// Package embedqueue durably retries Bedrock embedding calls for Dispatch's meaning search. A
+// write's AFTER INSERT/UPDATE trigger (0072-0076) upserts a pending row into embeddings with the
+// latest text and a hash of it in the same transaction as the write, and this package's poller
+// embeds whatever that enqueue left pending, with the same scan-then-retry shape as the event
+// outbox (internal/dispatch/outbox): a write never fails because the embedder did, since Bedrock
+// is never called inside the enqueueing transaction.
 package embedqueue
 
 import (
@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -27,6 +28,26 @@ const (
 	retryMaxDelay      = 5 * time.Minute
 	deadLetterAttempts = 10
 	backfillPageSize   = 500
+	// claimWindow is how long scanPending's claim keeps a row off every other scanner's list.
+	// It is a plain UPDATE ... RETURNING, not a transaction held open across the embed call: this
+	// package follows the event outbox's own rule (internal/dispatch/outbox: "an open cursor
+	// holds its pooled connection until it closes, so publishing ... inside the loop would hold
+	// one of the pool's four connections across all of it") - a lock held across a network call
+	// is exactly what that rule exists to avoid. Advancing next_attempt_at instead costs one
+	// short statement and lets the poller and a concurrent `backfill-embeddings` run claim
+	// disjoint batches without either blocking on the other's embed call. Comfortably longer than
+	// one real batch of Bedrock calls should ever take; a crashed claimer's rows become eligible
+	// again once it passes, not stuck forever.
+	claimWindow = 2 * time.Minute
+	// batchPause separates one embed call from the next, in both Run's poller and Backfill's
+	// drain loop: pending rows arrive in bursts (a bulk import, a backfill's own enqueue pass),
+	// and nothing upstream paces how fast this package reads them back out and calls the embedder
+	// - without this, draining a large burst would fire batch after batch back to back, which is
+	// how a well-behaved client still trips a provider's rate limit. It is not a response to a
+	// throttling signal (the AWS SDK's own retry middleware already backs off and retries a
+	// Bedrock ThrottlingException), just a floor under how fast this package asks in the first
+	// place.
+	batchPause = 200 * time.Millisecond
 )
 
 // Deps are the durable state and embedding dependencies for the queue.
@@ -37,8 +58,9 @@ type Deps struct {
 
 // Run drains pending embeddings at startup and periodically, so a dropped in-process
 // notification cannot strand a row. It returns when ctx is cancelled. Run does nothing when
-// deps.Embedder is nil: Dispatch configured without a Cohere key never starts this poller, and
-// every row stays pending until one is configured and a write or a backfill re-enqueues it.
+// deps.Embedder is nil: Dispatch with no Bedrock credentials at boot never starts this poller,
+// and every row stays pending until credentials are available and a write or a backfill
+// re-enqueues it.
 func Run(ctx context.Context, deps Deps) {
 	if deps.Embedder == nil {
 		return
@@ -59,14 +81,30 @@ func Run(ctx context.Context, deps Deps) {
 
 func scan(ctx context.Context, deps Deps) {
 	for {
-		count, blocked, err := ProcessBatch(ctx, deps)
+		succeeded, failed, blocked, err := ProcessBatch(ctx, deps)
 		if err != nil {
 			slog.Error("dispatch embedqueue: scan", "error", err)
 			return
 		}
-		if count < batchSize || blocked {
+		if succeeded+failed < batchSize || blocked {
 			return
 		}
+		if !pause(ctx) {
+			return
+		}
+	}
+}
+
+// pause waits batchPause, or returns false without waiting out the rest of it if ctx ends first -
+// a cancelled Run should stop promptly, not finish out its pacing delay.
+func pause(ctx context.Context) bool {
+	timer := time.NewTimer(batchPause)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
 	}
 }
 
@@ -75,52 +113,66 @@ type pendingRow struct {
 	attempts                    int
 }
 
-// ProcessBatch embeds up to one Cohere batch of pending rows and reports how many it read, and
-// whether the batch is blocked: a row whose retry could not be scheduled stays eligible
-// immediately, and a caller that looped on a blocked batch would select the same stuck row
-// forever. Both the poller and Backfill drive the queue through this one function.
-func ProcessBatch(ctx context.Context, deps Deps) (int, bool, error) {
+// ProcessBatch embeds up to one embedder batch of pending rows and reports how many of them it
+// actually committed (succeeded) versus sent back for retry (failed) - not the same as how many
+// it read, which outbox-style callers used to conflate with "done" - and whether the batch is
+// blocked: a row whose retry could not be scheduled stays eligible immediately, and a caller that
+// looped on a blocked batch would select the same stuck row forever. Both the poller and Backfill
+// drive the queue through this one function; scanPending's claim is what lets the poller and a
+// concurrent `backfill-embeddings` run safely at once, each claiming a different set of pending
+// rows rather than racing to embed the same ones twice.
+func ProcessBatch(ctx context.Context, deps Deps) (succeeded, failed int, blocked bool, err error) {
 	rows, err := scanPending(ctx, deps)
 	if err != nil {
-		return 0, false, err
+		return 0, 0, false, err
 	}
 	if len(rows) == 0 {
-		return 0, false, nil
+		return 0, 0, false, nil
 	}
 	texts := make([]string, len(rows))
 	for i, row := range rows {
 		texts[i] = row.text
 	}
-	vectors, err := deps.Embedder.Embed(ctx, texts, embed.InputDocument)
-	if err != nil {
-		blocked := false
+	vectors, embedErr := deps.Embedder.Embed(ctx, texts, embed.InputDocument)
+	if embedErr != nil {
 		for _, row := range rows {
-			if retryRow(ctx, deps, row, "dispatch embedqueue: embed batch", err) {
+			if retryRow(ctx, deps, row, "dispatch embedqueue: embed batch", embedErr) {
 				blocked = true
 			}
 		}
-		return len(rows), blocked, nil
+		return 0, len(rows), blocked, nil
 	}
-	blocked := false
 	for i, row := range rows {
 		if err := commitEmbedding(ctx, deps, row, vectors[i]); err != nil {
 			if retryRow(ctx, deps, row, "dispatch embedqueue: commit embedding", err) {
 				blocked = true
 			}
+			failed++
+			continue
 		}
+		succeeded++
 	}
-	return len(rows), blocked, nil
+	return succeeded, failed, blocked, nil
 }
 
+// scanPending claims at most batchSize pending rows, oldest-eligible first, atomically advancing
+// their next_attempt_at by claimWindow so a concurrent scanner (the poller and a manually run
+// `backfill-embeddings` can run at once) does not also claim them - without holding a lock across
+// the embed call that follows; see claimWindow's own comment for why not.
 func scanPending(ctx context.Context, deps Deps) ([]pendingRow, error) {
 	rows, err := deps.Store.Pool.Query(ctx, `
-		select kind, id, text_snapshot, content_hash, attempt_count
-		from embeddings
-		where embedded_hash is distinct from content_hash
-		  and next_attempt_at <= now()
-		order by next_attempt_at, kind, id
-		limit $1
-	`, batchSize)
+		update embeddings set next_attempt_at = now() + $2
+		where (kind, id) in (
+			select kind, id from embeddings
+			where embedded_hash is distinct from content_hash
+			  and next_attempt_at <= now()
+			  and not dead
+			order by next_attempt_at, kind, id
+			limit $1
+			for update skip locked
+		)
+		returning kind, id, text_snapshot, content_hash, attempt_count
+	`, batchSize, claimWindow)
 	if err != nil {
 		return nil, fmt.Errorf("scan pending embeddings: %w", err)
 	}
@@ -143,8 +195,15 @@ func scanPending(ctx context.Context, deps Deps) ([]pendingRow, error) {
 // scan time: a write that changed the row's text between the scan and this call already reset
 // attempt_count and next_attempt_at (embeddings_enqueue), so the guard just means this call
 // updates zero rows instead of marking the new text embedded under the old vector - the row stays
-// pending and the next scan embeds it at its current text.
+// pending and the next scan embeds it at its current text. It refuses a non-finite vector (NaN or
+// +/-Inf, which a model should never answer but pgvector's own input parser would otherwise accept
+// or reject with a much less specific error) before ever reaching Postgres.
 func commitEmbedding(ctx context.Context, deps Deps, row pendingRow, vector []float32) error {
+	for _, f := range vector {
+		if math.IsNaN(float64(f)) || math.IsInf(float64(f), 0) {
+			return fmt.Errorf("commit embedding: the model answered a non-finite value (%v)", f)
+		}
+	}
 	_, err := deps.Store.Pool.Exec(ctx, `
 		update embeddings
 		set embedding = $4::vector, embedded_hash = content_hash, model = $5,
@@ -158,13 +217,25 @@ func commitEmbedding(ctx context.Context, deps Deps, row pendingRow, vector []fl
 }
 
 // retryRow reports a failed row under what and backs it off, so rows queued behind one that
-// cannot be embedded are not stuck behind it. It reports whether the batch is blocked, exactly as
-// outbox.retryEvent does.
+// cannot be embedded are not stuck behind it. Past deadLetterAttempts it marks the row dead
+// instead of scheduling another retry: scanPending's own WHERE excludes dead rows, so a row this
+// consistently unembeddable (a vector the model keeps answering as non-finite, an id commitEmbedding
+// can never match) stops consuming poller cycles rather than retrying with a five-minute
+// ceiling forever. A dead row is still visible (`select * from embeddings where dead`) and still
+// recoverable: clearing attempt_count and dead re-admits it to the next scan. It reports whether
+// the batch is blocked, exactly as outbox.retryEvent does.
 func retryRow(ctx context.Context, deps Deps, row pendingRow, what string, cause error) bool {
 	slog.Error(what, "kind", row.kind, "id", row.id, "error", cause)
 	attempts := row.attempts + 1
-	if attempts == deadLetterAttempts {
-		slog.Error("dispatch embedqueue: row reached dead-letter threshold", "kind", row.kind, "id", row.id, "attempts", attempts)
+	if attempts >= deadLetterAttempts {
+		slog.Error("dispatch embedqueue: row reached the dead-letter threshold, no further automatic retry", "kind", row.kind, "id", row.id, "attempts", attempts)
+		if _, err := deps.Store.Pool.Exec(ctx, `
+			update embeddings set attempt_count = $3, dead = true where kind = $1 and id = $2 and content_hash = $4
+		`, row.kind, row.id, attempts, row.contentHash); err != nil {
+			slog.Error("dispatch embedqueue: mark row dead", "kind", row.kind, "id", row.id, "error", err)
+			return true
+		}
+		return false
 	}
 	_, err := deps.Store.Pool.Exec(ctx, `
 		update embeddings set attempt_count = $3, next_attempt_at = $4
@@ -188,23 +259,34 @@ func retryDelay(attempts int) time.Duration {
 	return delay
 }
 
-// BackfillReport is what one Backfill call enqueued and embedded, per kind and in total.
+// BackfillReport is what one Backfill call enqueued and embedded, per kind and in total. Embedded
+// and Failed count only rows ProcessBatch actually tried to commit, never rows it merely read;
+// Pending is whatever is left needing an embedding - still retrying, or dead - once the drain
+// loop stops, so a caller (backfill-embeddings) can tell a clean finish from a run that quit with
+// work still outstanding.
 type BackfillReport struct {
 	Enqueued map[string]int64
 	Embedded int64
 	Failed   int64
+	Pending  int64
 }
 
 // backfillKinds' SQL selects at most backfillPageSize rows with a primary key greater than the
 // kind's checkpoint (embeddings_backfill_progress.last_id, ” before any row has run), ordered by
-// that key, in a "page" CTE; a sibling writable CTE upserts each into embeddings exactly as the
-// kind's write-time trigger does (embeddings_enqueue's own logic, inlined so the whole page is one
-// statement rather than one round trip per row). Postgres always executes every data-modifying CTE
-// in a WITH list to completion, whether or not the main query reads its output (the documented
-// writable-CTE behavior), so the upsert runs in full even though the final SELECT reads only the
-// plain "page" rows - which it must: a conflicting row whose text has not changed satisfies the
-// upsert's WHERE-guard as a no-op and would be absent from a RETURNING list, but the checkpoint
-// still needs to advance past it.
+// that key, in a "page" CTE; a sibling writable CTE inserts each into embeddings exactly as the
+// kind's write-time trigger's enqueue would, but ON CONFLICT DO NOTHING rather than DO UPDATE: an
+// embeddings row already existing - whether a trigger wrote it after this migration shipped, or
+// an earlier Backfill page already did - means Backfill has nothing to add, and must never
+// overwrite it. A DO UPDATE here raced a concurrent write: if a trigger's own enqueue (fresher
+// text, reset attempt_count) committed between this page's read and this statement's own commit,
+// DO UPDATE would have clobbered it with this page's stale snapshot, silently reverting a live
+// write back to the text backfill saw moments earlier. DO NOTHING cannot do that - whichever
+// inserts first wins, and Backfill is content to have lost that race, since the trigger's version
+// is always at least as fresh. Postgres always executes every data-modifying CTE in a WITH list to
+// completion, whether or not the main query reads its output (the documented writable-CTE
+// behavior), so the insert runs in full even though the final SELECT reads only the plain "page"
+// rows - which it must: a conflicting row is absent from a RETURNING list by construction (ON
+// CONFLICT DO NOTHING returns nothing for it), but the checkpoint still needs to advance past it.
 const (
 	backfillIssueSQL = `
 		with page as (
@@ -212,10 +294,7 @@ const (
 		), upsert as (
 			insert into embeddings (kind, id, text_snapshot, content_hash)
 			select 'issue', id, text, encode(sha256(convert_to(text, 'UTF8')), 'hex') from page
-			on conflict (kind, id) do update
-				set text_snapshot = excluded.text_snapshot, content_hash = excluded.content_hash,
-				    attempt_count = 0, next_attempt_at = now()
-				where embeddings.content_hash is distinct from excluded.content_hash
+			on conflict (kind, id) do nothing
 		)
 		select id from page order by id`
 	backfillDocumentSQL = `
@@ -230,10 +309,7 @@ const (
 		), upsert as (
 			insert into embeddings (kind, id, text_snapshot, content_hash)
 			select 'document', id, text, encode(sha256(convert_to(text, 'UTF8')), 'hex') from page
-			on conflict (kind, id) do update
-				set text_snapshot = excluded.text_snapshot, content_hash = excluded.content_hash,
-				    attempt_count = 0, next_attempt_at = now()
-				where embeddings.content_hash is distinct from excluded.content_hash
+			on conflict (kind, id) do nothing
 		)
 		select id from page order by id`
 	backfillCommentSQL = `
@@ -242,10 +318,7 @@ const (
 		), upsert as (
 			insert into embeddings (kind, id, text_snapshot, content_hash)
 			select 'comment', id, text, encode(sha256(convert_to(text, 'UTF8')), 'hex') from page
-			on conflict (kind, id) do update
-				set text_snapshot = excluded.text_snapshot, content_hash = excluded.content_hash,
-				    attempt_count = 0, next_attempt_at = now()
-				where embeddings.content_hash is distinct from excluded.content_hash
+			on conflict (kind, id) do nothing
 		)
 		select id from page order by id`
 	backfillAskSQL = `
@@ -255,10 +328,7 @@ const (
 		), upsert as (
 			insert into embeddings (kind, id, text_snapshot, content_hash)
 			select 'ask', id, text, encode(sha256(convert_to(text, 'UTF8')), 'hex') from page
-			on conflict (kind, id) do update
-				set text_snapshot = excluded.text_snapshot, content_hash = excluded.content_hash,
-				    attempt_count = 0, next_attempt_at = now()
-				where embeddings.content_hash is distinct from excluded.content_hash
+			on conflict (kind, id) do nothing
 		)
 		select id from page order by id`
 	backfillMessageSQL = `
@@ -267,10 +337,7 @@ const (
 		), upsert as (
 			insert into embeddings (kind, id, text_snapshot, content_hash)
 			select 'message', id, text, encode(sha256(convert_to(text, 'UTF8')), 'hex') from page
-			on conflict (kind, id) do update
-				set text_snapshot = excluded.text_snapshot, content_hash = excluded.content_hash,
-				    attempt_count = 0, next_attempt_at = now()
-				where embeddings.content_hash is distinct from excluded.content_hash
+			on conflict (kind, id) do nothing
 		)
 		select id from page order by id`
 )
@@ -292,11 +359,11 @@ var backfillKinds = []struct {
 //
 // It is resumable across restarts: each kind's checkpoint (embeddings_backfill_progress) commits
 // after every page, so an interrupted run picks up at the next key rather than rescanning rows it
-// already enqueued; enqueueing itself is also idempotent (embeddings_enqueue is a no-op update
-// when the text has not changed), so running a finished kind again does no further work beyond
-// one cheap scan that finds nothing past its checkpoint. It runs in small, short transactions
-// (backfillPageSize rows at a time, one transaction per page) rather than one long scan, so it
-// does not hold locks a concurrent write would wait behind.
+// already enqueued; enqueueing itself is idempotent (ON CONFLICT DO NOTHING), so running a
+// finished kind again does no further work beyond one cheap scan that finds nothing past its
+// checkpoint. It runs in small, short transactions (backfillPageSize rows at a time, one
+// transaction per page) rather than one long scan, so it does not hold locks a concurrent write
+// would wait behind.
 func Backfill(ctx context.Context, deps Deps, out io.Writer) (BackfillReport, error) {
 	report := BackfillReport{Enqueued: map[string]int64{}}
 	for _, source := range backfillKinds {
@@ -307,20 +374,26 @@ func Backfill(ctx context.Context, deps Deps, out io.Writer) (BackfillReport, er
 		report.Enqueued[source.kind] = count
 	}
 	for {
-		count, blocked, err := ProcessBatch(ctx, deps)
+		succeeded, failed, blocked, err := ProcessBatch(ctx, deps)
 		if err != nil {
 			return report, fmt.Errorf("backfill: embed queue: %w", err)
 		}
-		report.Embedded += int64(count)
-		if count > 0 {
-			fmt.Fprintf(out, "backfill-embeddings: embedded %d so far\n", report.Embedded)
+		report.Embedded += int64(succeeded)
+		report.Failed += int64(failed)
+		if succeeded+failed > 0 {
+			fmt.Fprintf(out, "backfill-embeddings: embedded %d, failed %d so far\n", report.Embedded, report.Failed)
 		}
-		if count < batchSize || blocked {
-			if blocked {
-				report.Failed++
-			}
+		if succeeded+failed < batchSize || blocked {
 			break
 		}
+		if !pause(ctx) {
+			break
+		}
+	}
+	if err := deps.Store.Pool.QueryRow(ctx, `
+		select count(*) from embeddings where embedded_hash is distinct from content_hash
+	`).Scan(&report.Pending); err != nil {
+		return report, fmt.Errorf("backfill: count pending: %w", err)
 	}
 	return report, nil
 }

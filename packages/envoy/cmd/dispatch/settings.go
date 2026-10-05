@@ -110,8 +110,6 @@ var settings = []setting{
 		Description: "Set to `1` on a loopback-only local server to sign anyone in by email at `/auth/_dev/signin` without the sign-in pool; refused alongside any `DISPATCH_SIGNIN_*` setting."},
 	{Name: "DISPATCH_TEST_HOOKS", Required: "no",
 		Description: "Set to `1` to mount the end-to-end tests' hook routes; never in a real deployment."},
-	{Name: "COHERE_API_KEY", Required: "no",
-		Description: "The company's Cohere key: embeds a write's text after commit and a search request's query, for meaning search (LEGION-549). Unset, search answers keyword-only and says so, and `backfill-embeddings` refuses to run."},
 	{Name: "DISPATCH_TEST_SETTLE_DELAY", Default: "`2s`", Required: "no",
 		Description: "Document settlement delay for an end-to-end test process; a positive Go duration. Set only with `DISPATCH_TEST_HOOKS=1`."},
 }
@@ -123,6 +121,7 @@ var settings = []setting{
 var removedSettings = []struct{ Name, Replacement string }{
 	{"DISPATCH_ALLOWED_LOGINS", "people sign in with Google Workspace; DISPATCH_SIGNIN_GROUP names the group they must be in"},
 	{"DISPATCH_APP_CLIENT_SECRET", "nobody signs in through the GitHub App; its JWT needs only DISPATCH_APP_CLIENT_ID and DISPATCH_APP_PEM_B64"},
+	{"COHERE_API_KEY", "meaning search (LEGION-549) calls Cohere Embed v4 through AWS Bedrock on the AWS SDK's default credential chain (the task role in production), never a Cohere API key"},
 }
 
 // refuseRemovedSettings names the first removed setting env still sets, and what replaced it.
