@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
@@ -256,6 +257,25 @@ func (v *treeVolume) jjPush(t *testing.T, dir, bookmark string) {
 	)
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("jj git push --bookmark %s: %v\n%s", bookmark, err, output)
+	}
+}
+
+// jjFetchBranch fetches exactly bookmark from the real remote (jjPush's own redirect) into dir, a
+// workspace of the shared clone: a targeted, unrestricted-by-feed fetch that asks the real remote
+// whether bookmark still exists, so jj prunes its local remote-tracking record of it when the
+// remote answers that it no longer does (as a squash merge's branch deletion leaves it).
+func (v *treeVolume) jjFetchBranch(t *testing.T, dir, bookmark string) {
+	t.Helper()
+	command := exec.Command(v.realJJ, "git", "fetch", "--remote", "origin", "--branch", "exact:"+bookmark, "--ignore-working-copy", "-R", dir)
+	command.Env = append(os.Environ(),
+		"JJ_USER=Legion test", "JJ_EMAIL=legion-test@example.invalid",
+		"GIT_ALLOW_PROTOCOL=https:file",
+		"GIT_CONFIG_COUNT=1",
+		"GIT_CONFIG_KEY_0=url."+v.env["WINIT_REMOTE"]+".insteadOf",
+		"GIT_CONFIG_VALUE_0=https://github.com/acme/widgets",
+	)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("jj git fetch --branch exact:%s: %v\n%s", bookmark, err, output)
 	}
 }
 
@@ -631,6 +651,64 @@ func removableEnv(t *testing.T, candidates []workspace.RemovalCandidate) string 
 	return string(encoded)
 }
 
+// panicRunner fails the test if ever asked to run a command: a candidate this test names has no
+// workspace on this volume, so RemoveFinished's "nothing to remove" path never reaches the
+// runner at all, budgeted out or not.
+type panicRunner struct{ t *testing.T }
+
+func (p panicRunner) Timeout() time.Duration { return winitWait }
+func (p panicRunner) Run(context.Context, workspace.Command) (workspace.Result, error) {
+	p.t.Fatal("a candidate with no workspace on this volume ran a command")
+	return workspace.Result{}, nil
+}
+
+// removeFinishedWorkspacesBudgeted stops starting new candidates once its budget is spent,
+// measured from its own first check, and logs the rest as deferred to the tree's next launch,
+// rather than run a long candidate list past the registration deadline this init container
+// shares with the provisioning it still has to report done. It never interrupts a candidate
+// already started (the first two here, named before the fake clock crosses the budget, both
+// still run; only the third, and everything after it, is deferred).
+func TestRemoveFinishedWorkspacesBudgetedDefersCandidatesPastItsBudget(t *testing.T) {
+	root := t.TempDir()
+	repository, err := ghrepo.Parse("--repo", winitRepo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t0 := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
+	const budget = 30 * time.Second
+	calls := 0
+	now := func() time.Time {
+		calls++
+		// The budget-establishing call and the first two in-loop checks (one per candidate
+		// started) land before the budget is spent; every later call is well past it, as if
+		// the first two candidates together had spent the whole budget.
+		if calls <= 3 {
+			return t0
+		}
+		return t0.Add(budget + time.Second)
+	}
+	candidates := []workspace.RemovalCandidate{{Issue: "LEGION-100"}, {Issue: "LEGION-101"}, {Issue: "LEGION-102"}, {Issue: "LEGION-103"}}
+	t.Setenv(removableWorkspacesEnv, removableEnv(t, candidates))
+
+	var stdout bytes.Buffer
+	removeFinishedWorkspacesBudgeted(context.Background(), panicRunner{t}, root, repository, "LEGION-200", &stdout, now, budget)
+
+	output := stdout.String()
+	for _, started := range []string{"LEGION-100", "LEGION-101"} {
+		if want := started + " has no workspace on this volume; nothing to remove"; !strings.Contains(output, want) {
+			t.Errorf("stdout %q, want it to contain %q", output, want)
+		}
+	}
+	for _, deferred := range []string{"LEGION-102", "LEGION-103"} {
+		if strings.Contains(output, deferred+" has no workspace") {
+			t.Errorf("stdout %q, want %s deferred rather than started", output, deferred)
+		}
+	}
+	if want := "removal budget (30s) spent; deferring 2 candidate(s) to the tree's next launch: LEGION-102, LEGION-103"; !strings.Contains(output, want) {
+		t.Errorf("stdout %q, want it to contain %q", output, want)
+	}
+}
+
 // A done child with every commit pushed — parked after its own push — is removed at the next pod
 // launch of its tree: the daemon names it in LEGION_REMOVABLE_WORKSPACES, and workspace-init,
 // provisioning a different issue's pod, removes it.
@@ -681,6 +759,14 @@ func TestWorkspaceInitRemovesADoneChildWhoseLastCommitIsTheMergedHead(t *testing
 	mergedHead := v.jj(t, "log", "-r", bookmark, "--no-graph", "-T", "commit_id", "--ignore-working-copy", "--color=never", "-R", merged)
 	v.jjPush(t, merged, bookmark)
 	v.git(t, "--git-dir="+v.env["WINIT_REMOTE"], "branch", "-D", bookmark)
+	// LEGION-200's own provisioning fetch never asks about legion/LEGION-100 (ensureFetchConfiguration
+	// restricts every fetch to main plus the issue's own bookmark), so the shared clone's record of
+	// legion/LEGION-100@origin, set by the push above, would otherwise stay frozen at the merged
+	// head forever and satisfy the push-safety check by a live remote bookmark alone, never
+	// exercising MergedHead. A direct, targeted fetch of that one bookmark against the real remote
+	// (jjPush's own redirect, restricted to just it) is what a daemon-driven resync would also do,
+	// and is what makes jj prune the now-deleted branch from the shared clone's local view.
+	v.jjFetchBranch(t, v.clone(), bookmark)
 
 	t.Setenv("LEGION_REMOVABLE_WORKSPACES", removableEnv(t, []workspace.RemovalCandidate{{Issue: "LEGION-100", MergedHead: mergedHead}}))
 	code, stdout, stderr := runWorkspaceInitHere(v.args("LEGION-200"))

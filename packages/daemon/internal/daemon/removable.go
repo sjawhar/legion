@@ -17,18 +17,24 @@ import (
 
 // removableWorkspaces is specs.removable's production body (dispatch://LEGION-583): every member
 // of tree but exclude — the issue this launch is for — and the root itself, whose own state makes
-// it safe to re-clone without costing a child mid-work a multi-minute wait: its phase is done, or
-// it is parked — its Dispatch status is backlog or icebox, with every role's claim either never
-// made or one of suspended, failed, or retired, never a live state. A child between phases
-// (awaiting_merge, a parked review round holding todo or in_progress) is neither, and is never a
-// candidate even though every claim of it may be idle between tasks: its own next phase can
-// resume it without a re-clone, and taking the volume out from under it would force one. Each
-// candidate is paired with the merged pull request's head the daemon recorded, when it merged:
-// GitHub deletes a squash merge's branch, so that commit carries no remote bookmark of its own,
-// and workspace-init's push-safety check needs the head to tell that commit from one that was
-// never pushed at all. The actual push-safety check — whether a candidate's workspace in fact
-// holds no commit that is not on GitHub — is workspace-init's alone, on the tree volume this
-// daemon cannot read; this function names only who is lifecycle-safe to ask it about.
+// it safe to re-clone without costing a child mid-work a multi-minute wait: its phase is done, and
+// every role's claim on it is either never made or one of suspended, failed, or retired — never a
+// live state, and never StateQueued, which is a claim the daemon still means to launch. The claim
+// check applies even to a done phase: leave (workflow/linger.go) sets a left child's phase to done
+// in the same transaction as the status write that takes it out of the workflow (done, backlog,
+// icebox, or triage alike — every one of them forces phase done, so phase done already covers the
+// spec's "done, or parked" without a separate Dispatch-status branch), but only *enqueues* the
+// claim suspends; the outbox applies them later, so a probe in that window can see phase done on
+// an issue whose claim is still working. A child merely between phases (awaiting_merge, a review
+// round the architect has not yet decided) never reaches phase done at all, and is never a
+// candidate even though every claim of it may be idle between tasks: its own next phase can resume
+// it without a re-clone, and taking the volume out from under it would force one. Each candidate is
+// paired with the merged pull request's head the daemon recorded, when it merged: GitHub deletes a
+// squash merge's branch, so that commit carries no remote bookmark of its own, and
+// workspace-init's push-safety check needs the head to tell that commit from one that was never
+// pushed at all. The actual push-safety check — whether a candidate's workspace in fact holds no
+// commit that is not on GitHub — is workspace-init's alone, on the tree volume this daemon cannot
+// read; this function names only who is lifecycle-safe to ask it about.
 func removableWorkspaces(pool *pgxpool.Pool, records record.Store, sup *supervisor, project string) func(ctx context.Context, tree, exclude string) ([]runtime.RemovableWorkspace, error) {
 	return func(ctx context.Context, tree, exclude string) ([]runtime.RemovableWorkspace, error) {
 		var candidates []runtime.RemovableWorkspace
@@ -38,14 +44,14 @@ func removableWorkspaces(pool *pgxpool.Pool, records record.Store, sup *supervis
 				return fmt.Errorf("list the issues of tree %s: %w", tree, err)
 			}
 			for _, issue := range issues {
-				if issue.Key == tree || issue.Key == exclude {
+				if issue.Key == tree || issue.Key == exclude || issue.Phase != phase.Done {
 					continue
 				}
-				parked, err := issueIsParked(sup, project, issue)
+				live, err := issueHasALiveClaim(sup, project, issue)
 				if err != nil {
 					return err
 				}
-				if issue.Phase != phase.Done && !parked {
+				if live {
 					continue
 				}
 				candidate := runtime.RemovableWorkspace{Issue: issue.Key}
@@ -67,24 +73,17 @@ func removableWorkspaces(pool *pgxpool.Pool, records record.Store, sup *supervis
 	}
 }
 
-// parkedStatuses are the Dispatch lifecycle statuses issueIsParked treats as parked: out of the
-// workflow and not waiting to be admitted, so a claim idle in either one is not mid-phase work the
-// daemon will resume on its own.
-var parkedStatuses = []string{"backlog", "icebox"}
-
-// parkedClaimStates are the only states issueIsParked lets a parked issue's claim hold: suspended,
+// parkedClaimStates are the only states issueHasALiveClaim lets a done issue's claim hold: suspended,
 // failed, or retired — never a live state (supervise.LiveStates), and never StateQueued, which is
 // a claim the daemon still means to launch.
 var parkedClaimStates = []supervise.ClaimState{supervise.StateSuspended, supervise.StateFailed, supervise.StateRetired}
 
-// issueIsParked says whether issue is parked: its Dispatch status is one of parkedStatuses, and
-// every role's claim is either never made (empty) or sits in one of parkedClaimStates. A claim in
-// any other state — StateQueued included — means the daemon still has work queued for this issue,
-// so it is not parked however its Dispatch status reads.
-func issueIsParked(sup *supervisor, project string, issue record.Issue) (bool, error) {
-	if !slices.Contains(parkedStatuses, issue.Status) {
-		return false, nil
-	}
+// issueHasALiveClaim says whether any of issue's role claims sits outside parkedClaimStates: a
+// claim never made (empty) is not live. leave's phase-done write and its claim suspends are not
+// one transaction (workflow/linger.go enqueues the suspends for the outbox to run), so a done
+// issue can still show a live claim in the window before the outbox catches up; this is what
+// keeps such an issue off the candidate list until it does.
+func issueHasALiveClaim(sup *supervisor, project string, issue record.Issue) (bool, error) {
 	for _, role := range claim.Roles {
 		token, err := claim.NewToken(project, issue.Key, role)
 		if err != nil {
@@ -95,8 +94,8 @@ func issueIsParked(sup *supervisor, project string, issue record.Issue) (bool, e
 			continue
 		}
 		if !slices.Contains(parkedClaimStates, machine.Claim().State) {
-			return false, nil
+			return true, nil
 		}
 	}
-	return true, nil
+	return false, nil
 }

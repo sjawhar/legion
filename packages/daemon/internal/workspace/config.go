@@ -254,6 +254,46 @@ func onClone(cloneDir string, args ...string) []string {
 	return append(append([]string{"jj"}, args...), "--ignore-working-copy", "--color=never", "-R", cloneDir)
 }
 
+// snapshotOverrides are the command-line `--config` overrides the one command in this package that
+// snapshots a workspace's own working copy for real (RemoveFinished's push-safety check) adds, so
+// they outrank whatever a tree agent set in the one jj repo config every workspace of the shared
+// clone reads: `jj config set --repo` (config.go's own ensureFetchConfiguration sets
+// git.abandon-unreachable-commits this way) writes the repository's own config wherever it is run
+// from, so a tree agent's own pane, in its own issue's workspace, reaches every later
+// provisioning's snapshot of any workspace of the tree — confirmed directly: a `jj config set
+// --repo` run against one jj workspace of a repo is read by a plain `jj status` run against a
+// different workspace of the same repo. Three settings let an agent act on a snapshot, each
+// confirmed against the pinned jj (0.45.1-sami): `git.filter.enabled` (false by default) turns on
+// the working-copy filter `onClone`'s own doc comment already names — a
+// `git.filter.drivers.<name>.clean`/`.smudge` program the snapshot runs over every tracked file
+// its `.gitattributes` names, exactly as isolation_test.go's
+// TestTheCredentialedFetchRunsNoWorkingCopyFilter proves for the clone — and `signing.backend`
+// (none by default) runs `signing.backends.<backend>.program` to (re-)sign the commit a snapshot
+// creates, when `signing.behavior` asks for it; verified directly (a repo configured with
+// `signing.backend = "ssh"`, `signing.behavior = "own"`, a key, and a `signing.backends.ssh.program`
+// pointed at a marker-writing script runs that script on a plain `jj status` over an uncommitted
+// change). `fsmonitor.backend` names no program at all — its one non-`"none"` value, `"watchman"`,
+// is a fixed binary name jj resolves on the process's own `PATH`, not a path or command a repo
+// config can choose — but this snapshot needs no file watching either, so it is forced off too
+// rather than ever touch a watchman daemon on the tree volume. `snapshot.max-new-file-size`
+// (1MiB by default) is not a program, but a size over it is left untracked with exit 0 and a
+// warning on stderr rather than refused loudly — a worker's own large uncommitted file would
+// silently satisfy RemoveFinished's push-safety check (@ unchanged, read as clean) and the
+// workspace would be removed with that file never on GitHub; `0` disables the limit for this
+// command alone, so every new file, whatever its size, is captured into the commit the check
+// reads. Every override here is last on the argv jj builds (RemoveFinished's), which is what
+// makes a command-line `--config` win: jj reads its layers in the fixed order (built-in defaults,
+// user, repo, command line), the command line last, so this slice's position in the argv does not
+// matter, only that each flag is present.
+func snapshotOverrides() []string {
+	return []string{
+		"--config", "git.filter.enabled=false",
+		"--config", "signing.backend=none",
+		"--config", "fsmonitor.backend=none",
+		"--config", "snapshot.max-new-file-size=0",
+	}
+}
+
 func ensureFetchConfiguration(ctx context.Context, run Runner, cloneDir string, source remote) error {
 	setting, err := RunChecked(ctx, run, onClone(cloneDir, "config", "get", "git.abandon-unreachable-commits"), nil, "")
 	if err != nil {

@@ -394,6 +394,17 @@ func ownCommitsRevset(workspaceName string) string {
 	return "::" + workspaceName + "@ ~ ::(working_copies() ~ " + workspaceName + "@) ~ ::(bookmarks() | remote_bookmarks() | tags())"
 }
 
+// removingSuffix marks a workspace directory Remove has renamed aside, about to delete: a sibling
+// name in the same parent directory, so the rename is one atomic same-filesystem operation
+// regardless of how large the directory is, unlike the `os.RemoveAll` that follows it, which a
+// kill can interrupt partway through a large tree. RemoveFinished recognizes the name on its next
+// run and finishes the delete rather than re-judging (or mis-judging, against a half-deleted
+// tree) a workspace already found safe to remove.
+const removingSuffix = ".removing"
+
+// removingPath is where Remove renames workspace.Dir to before deleting it.
+func removingPath(dir string) string { return dir + removingSuffix }
+
 // Remove ports workspace.ts's removeIssueWorkspace. The workspace directory goes first so a crash
 // leaves the registered-but-missing state that Provision repairs with forget and add. jj's forget
 // leaves the colocated worktree of a directory already gone, so Remove deletes that entry itself,
@@ -429,7 +440,21 @@ func Remove(ctx context.Context, run Runner, workspace Workspace) error {
 		}
 		commits = nonEmptyLines(own.Stdout)
 	}
-	if err := os.RemoveAll(workspace.Dir); err != nil {
+	aside := removingPath(workspace.Dir)
+	if present, err := pathExists(workspace.Dir); err != nil {
+		return err
+	} else if present {
+		// A stale aside from an interrupted removal of this same directory name, never cleared
+		// (named again later, or a previous pass's finish step itself never ran): cleared before
+		// the rename so it never refuses with "already exists".
+		if err := os.RemoveAll(aside); err != nil {
+			return fmt.Errorf("clear a stale removal-in-progress directory: %w", err)
+		}
+		if err := os.Rename(workspace.Dir, aside); err != nil {
+			return fmt.Errorf("rename workspace directory aside before removing it: %w", err)
+		}
+	}
+	if err := os.RemoveAll(aside); err != nil {
 		return fmt.Errorf("remove workspace directory: %w", err)
 	}
 	if registered {

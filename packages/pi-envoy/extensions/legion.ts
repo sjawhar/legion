@@ -210,15 +210,16 @@ function splitShellCommands(command: string): string[][] | undefined {
   return commands;
 }
 
-/** A simple command (one of splitShellCommands's entries) is a `legion push` invocation: its
- * first word is `legion` or ends `/legion` (the worker-bin shim's absolute path, as jjLogRewriteInvocation
- * matches `jj`), and its second is `push`. */
+/** A simple command (one of splitShellCommands's entries) is a `legion push` invocation: `legion`
+ * (or a path ending `/legion`, the worker-bin shim's absolute path) appears anywhere in words --
+ * never only as the first word, the same tradeoff jjLogRewriteInvocation makes for `jj` -- so a
+ * prefix before it (`time legion push`, `timeout 600 legion push`, an env assignment word such as
+ * `FOO=1 legion push`, a leading `!` or `if`, which splitShellCommands's naive split leaves as a
+ * word of the same simple command ahead of a `;`) still counts, and the word immediately after
+ * that first mention is `push`. */
 function isPushInvocation(words: readonly string[]): boolean {
-  const first = words[0];
-  return (
-    (first === "legion" || (first !== undefined && first.endsWith("/legion"))) &&
-    words[1] === "push"
-  );
+  const legion = words.findIndex((word) => word === "legion" || word.endsWith("/legion"));
+  return legion !== -1 && words[legion + 1] === "push";
 }
 
 /** Whether a bash command's tokenised simple commands include a `legion push` invocation --

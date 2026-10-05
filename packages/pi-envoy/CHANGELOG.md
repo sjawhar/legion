@@ -42,6 +42,15 @@
 
 ### Changed
 
+- `legion.daemonApiVersion` is 13 (LEGION-583). Contract 13 adds an optional `push` bool to the
+  claim form of `POST /legion/v1/grants`: the extension sends `push: true` only for a bash command
+  it judges to invoke `legion push` (alone, as a compound command's one segment, or a pipeline's
+  last stage), so the daemon mints that one grant with the longer `credential.pushTTL` (5 minutes)
+  rather than the ordinary 60-second `ttl` — jj's own working-copy snapshot before the network
+  push can outrun the ordinary grant on a near-full tree volume. Install this release together
+  with a Go `legion` built from the same commit: a daemon at 12 refuses the unknown field, and this
+  release against a daemon at 12 fails every grant mint, blocking every bash command in every pane.
+
 - Each Legion role gets one set of instructions (LEGION-414). The skills and role prompts drop the
   steps the daemon no longer runs: no role pushes a `.legion/` deletion, the reviewer approves the
   clean head that still carries `.legion/`, the merger hands its READY packet to the daemon, which

@@ -79,16 +79,17 @@ func TestRemovableWorkspacesIncludesADoneChildWithItsMergedHead(t *testing.T) {
 	}
 }
 
-// A parked child — a Dispatch status of backlog or icebox with every role's claim suspended,
-// failed, retired, or never made — is a candidate even though it never reached the done phase: a
-// human shelved it, and nothing of its role is coming back on its own.
-func TestRemovableWorkspacesIncludesAParkedChild(t *testing.T) {
+// A done child whose every role's claim is suspended, failed, retired, or never made is a
+// candidate, whatever Dispatch status brought it there (done, backlog, icebox, and triage all
+// force phase done on the same leave, workflow/linger.go): a human shelved it, or its work is
+// genuinely finished, and nothing of its role is coming back on its own.
+func TestRemovableWorkspacesIncludesADoneChildWithEveryClaimParkedOrAbsent(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		status string
 		states map[claim.Role]supervise.ClaimState
 	}{
-		{"backlog, every claim suspended or empty", "backlog", map[claim.Role]supervise.ClaimState{
+		{"backlog, a suspended claim", "backlog", map[claim.Role]supervise.ClaimState{
 			claim.RoleImplementer: supervise.StateSuspended,
 		}},
 		{"icebox, a failed and a retired claim", "icebox", map[claim.Role]supervise.ClaimState{
@@ -102,7 +103,7 @@ func TestRemovableWorkspacesIncludesAParkedChild(t *testing.T) {
 			records := record.NewStore()
 			sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
 			putRemovableIssue(t, pool, records, record.Issue{Key: "LEGION-1", Project: "LEGION", Tree: "LEGION-1", Title: "Root", Phase: phase.Implementing, Generation: 1, Status: "in_progress"})
-			putRemovableIssue(t, pool, records, record.Issue{Key: "LEGION-2", Project: "LEGION", Tree: "LEGION-1", Title: "Parked child", Phase: phase.Implementing, Generation: 1, Status: tc.status})
+			putRemovableIssue(t, pool, records, record.Issue{Key: "LEGION-2", Project: "LEGION", Tree: "LEGION-1", Title: "Done child", Phase: phase.Done, Generation: 1, Status: tc.status})
 			for role, state := range tc.states {
 				claimOn(t, sup, "LEGION-2", role, state)
 			}
@@ -115,10 +116,10 @@ func TestRemovableWorkspacesIncludesAParkedChild(t *testing.T) {
 	}
 }
 
-// A child between phases — awaiting_merge, or a parked review round holding todo or in_progress —
-// is not a candidate: its Dispatch status is neither backlog nor icebox, so it is never asked
-// about its claims at all. Removing its workspace here would force its next phase into a
-// multi-minute re-clone, the shape this correction exists to stop.
+// A child merely between phases — awaiting_merge, a review round the architect has not yet
+// decided, or plain todo waiting on the workflow — never reaches phase done, so it is never a
+// candidate whatever its claims or Dispatch status: removing its workspace here would force its
+// next phase into a multi-minute re-clone, the shape this correction exists to stop.
 func TestRemovableWorkspacesExcludesAChildBetweenPhases(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -126,7 +127,7 @@ func TestRemovableWorkspacesExcludesAChildBetweenPhases(t *testing.T) {
 		status string
 	}{
 		{"awaiting_merge", phase.AwaitingMerge, "in_progress"},
-		{"a parked review round still in_progress", phase.Reviewing, "in_progress"},
+		{"a review round still in_progress", phase.Reviewing, "in_progress"},
 		{"todo, waiting on the workflow", phase.Admitted, "todo"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -135,8 +136,9 @@ func TestRemovableWorkspacesExcludesAChildBetweenPhases(t *testing.T) {
 			sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
 			putRemovableIssue(t, pool, records, record.Issue{Key: "LEGION-1", Project: "LEGION", Tree: "LEGION-1", Title: "Root", Phase: phase.Implementing, Generation: 1, Status: "in_progress"})
 			putRemovableIssue(t, pool, records, record.Issue{Key: "LEGION-2", Project: "LEGION", Tree: "LEGION-1", Title: "Mid-phase child", Phase: tc.phase, Generation: 1, Status: tc.status})
-			// Every claim suspended: with the old lifecycle-only rule this alone made it a
-			// candidate. The correction must still exclude it by its Dispatch status.
+			// Every claim suspended: the predicate excludes this issue by its phase alone, never
+			// reaching the claim check, so a suspended claim here proves nothing about claims and
+			// everything about phase.
 			claimOn(t, sup, "LEGION-2", claim.RoleImplementer, supervise.StateSuspended)
 
 			got := callRemovable(t, pool, records, sup, "LEGION-1", "")
@@ -147,19 +149,32 @@ func TestRemovableWorkspacesExcludesAChildBetweenPhases(t *testing.T) {
 	}
 }
 
-// A live child — a role claim working, idle, or otherwise up — is never a candidate, whatever its
-// phase or Dispatch status: its workspace may still be read or written.
+// A live claim excludes its issue whatever its phase: an ordinary mid-phase child with a working
+// claim, and the race leave (workflow/linger.go) opens — its phase-done write and its claim
+// suspends are not one transaction, so a probe between them can see phase done on an issue whose
+// implementer claim the outbox has not yet suspended. Without the claim check on the done branch
+// this second case was a candidate on phase alone; both must be excluded.
 func TestRemovableWorkspacesExcludesALiveChild(t *testing.T) {
-	pool := isolatedOutboxPool(t)
-	records := record.NewStore()
-	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
-	putRemovableIssue(t, pool, records, record.Issue{Key: "LEGION-1", Project: "LEGION", Tree: "LEGION-1", Title: "Root", Phase: phase.Implementing, Generation: 1, Status: "in_progress"})
-	putRemovableIssue(t, pool, records, record.Issue{Key: "LEGION-2", Project: "LEGION", Tree: "LEGION-1", Title: "Live child", Phase: phase.Implementing, Generation: 1, Status: "backlog"})
-	claimOn(t, sup, "LEGION-2", claim.RoleImplementer, supervise.StateWorking)
+	for _, tc := range []struct {
+		name  string
+		phase phase.Phase
+	}{
+		{"mid-phase, a working claim", phase.Implementing},
+		{"phase done, a claim the outbox has not yet suspended", phase.Done},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := isolatedOutboxPool(t)
+			records := record.NewStore()
+			sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
+			putRemovableIssue(t, pool, records, record.Issue{Key: "LEGION-1", Project: "LEGION", Tree: "LEGION-1", Title: "Root", Phase: phase.Implementing, Generation: 1, Status: "in_progress"})
+			putRemovableIssue(t, pool, records, record.Issue{Key: "LEGION-2", Project: "LEGION", Tree: "LEGION-1", Title: "Live child", Phase: tc.phase, Generation: 1, Status: "backlog"})
+			claimOn(t, sup, "LEGION-2", claim.RoleImplementer, supervise.StateWorking)
 
-	got := callRemovable(t, pool, records, sup, "LEGION-1", "")
-	if len(got) != 0 {
-		t.Fatalf("candidates = %+v, want none", got)
+			got := callRemovable(t, pool, records, sup, "LEGION-1", "")
+			if len(got) != 0 {
+				t.Fatalf("candidates = %+v, want none", got)
+			}
+		})
 	}
 }
 

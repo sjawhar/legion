@@ -2520,10 +2520,17 @@ describe("Legion OMP extension", () => {
       return body.push;
     };
     // The command itself: `legion push` alone, and as a compound command's one segment that
-    // requests a push (a `cd` ahead of it, a trailing pipeline stage).
+    // requests a push (a `cd` ahead of it, a trailing pipeline stage), and `legion` preceded by a
+    // word that is not itself part of the invocation (a timing wrapper, an env assignment, a
+    // negation, or the naive splitter's own leftover `if`/`then` words ahead of a `;`).
     expect(await pushOf("legion push")).toBe(true);
     expect(await pushOf("cd ws && legion push")).toBe(true);
     expect(await pushOf("legion push | cat")).toBe(true);
+    expect(await pushOf("time legion push")).toBe(true);
+    expect(await pushOf("timeout 600 legion push")).toBe(true);
+    expect(await pushOf("FOO=1 legion push")).toBe(true);
+    expect(await pushOf("! legion push")).toBe(true);
+    expect(await pushOf("if legion push; then echo ok; fi")).toBe(true);
     // Anything else: a different `legion` command, a compound command with no push segment, and
     // an ordinary shell command.
     expect(await pushOf("legion state")).toBe(false);

@@ -30,4 +30,12 @@ package api
 // pane or pod carries the variable that chose between two daemons' clients. `POST
 // /legion/v1/controller/secret` takes the contract `legion controller start` held the controller's
 // plugin to (`pluginContract`) and refuses another before it mints.
-const DaemonAPIVersion = 12
+//
+// 13: LEGION-583 -- the claim form of `POST /legion/v1/grants` takes an optional `push` bool,
+// true only for a bash command the plugin judges to run `legion push`: such a grant lives
+// `credential.pushTTL` (5 minutes) rather than the ordinary `ttl` (60 seconds), since jj's own
+// working-copy snapshot before the network push can outrun the ordinary grant on a near-full tree
+// volume. `readBody` refuses an unknown field, so a plugin built from this commit sending `push`
+// against a daemon older than 13 fails every grant mint, blocking every bash command in every
+// pane; the bump is why that never ships paired with an older daemon.
+const DaemonAPIVersion = 13

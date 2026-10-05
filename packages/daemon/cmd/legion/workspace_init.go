@@ -214,6 +214,18 @@ func workspaceInit(ctx context.Context, issue, repo, root, credentialHelper, fee
 	return nil
 }
 
+// removalBudget is how long removeFinishedWorkspaces spends starting new candidates, measured
+// from its own first candidate: once spent, it stops before starting the next one (never
+// interrupts one already running) and logs the rest as deferred to the tree's next launch,
+// rather than let a long candidate list run past the registration deadline this whole init
+// container shares with the provisioning it still has to report done (360s default:
+// worker_boot_timeout_seconds × worker_boot_registration_deadline_intervals) or the 480s default
+// LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS a sibling pod's own provisioning waits behind this
+// pod's repository lock. A near-full tree volume measured 63-100s per snapshot
+// (dispatch://LEGION-583), so 90s leaves room for one such candidate comfortably and a second
+// partway, never the whole list a first launch after deploy can name at once.
+const removalBudget = 90 * time.Second
+
 // removeFinishedWorkspaces reads removableWorkspacesEnv's candidate list and calls
 // workspace.RemoveFinished for each sibling that still has a workspace on the volume, other than
 // issue — the one this pod provisions, never the daemon's to name but skipped here too, in case it
@@ -221,6 +233,12 @@ func workspaceInit(ctx context.Context, issue, repo, root, credentialHelper, fee
 // candidate in the first place. One candidate's failure is logged and never stops the ones after
 // it or the provisioning this pod already finished; a malformed env var removes nothing.
 func removeFinishedWorkspaces(ctx context.Context, run workspace.Runner, root string, repository ghrepo.Repository, issue string, stdout io.Writer) {
+	removeFinishedWorkspacesBudgeted(ctx, run, root, repository, issue, stdout, time.Now, removalBudget)
+}
+
+// removeFinishedWorkspacesBudgeted is removeFinishedWorkspaces with its clock and budget exposed
+// for a test.
+func removeFinishedWorkspacesBudgeted(ctx context.Context, run workspace.Runner, root string, repository ghrepo.Repository, issue string, stdout io.Writer, now func() time.Time, budget time.Duration) {
 	raw := os.Getenv(removableWorkspacesEnv)
 	if raw == "" {
 		return
@@ -231,9 +249,23 @@ func removeFinishedWorkspaces(ctx context.Context, run workspace.Runner, root st
 		return
 	}
 	log := func(line string) { fmt.Fprintln(stdout, "workspace-init: "+line) }
-	for _, candidate := range candidates {
+	deadline := now().Add(budget)
+	for i, candidate := range candidates {
 		if candidate.Issue == "" || candidate.Issue == issue {
 			continue
+		}
+		if now().After(deadline) {
+			var deferred []string
+			for _, remaining := range candidates[i:] {
+				if remaining.Issue != "" && remaining.Issue != issue {
+					deferred = append(deferred, remaining.Issue)
+				}
+			}
+			if len(deferred) > 0 {
+				log(fmt.Sprintf("removal budget (%s) spent; deferring %d candidate(s) to the tree's next launch: %s",
+					budget, len(deferred), strings.Join(deferred, ", ")))
+			}
+			return
 		}
 		located, err := workspace.Location(root, repository, candidate.Issue)
 		if err != nil {
