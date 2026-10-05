@@ -189,17 +189,69 @@ func runHandoffRead(_ context.Context, args []string, stdout, stderr io.Writer) 
 }
 
 // readOwnHandoff reads issue's handoff of phaseWord at handoffFile, falling back to the flat
-// legacyHandoffFile only when that read fails and the flat file is stampedBy issue. Without either,
-// the per-issue read's error is returned, naming the path the handoff belongs at.
+// legacyHandoffFile only when that read fails and legacyHandoffOwnedByThisTree. Without either, the
+// per-issue read's error is returned, naming the path the handoff belongs at.
 func readOwnHandoff(workspace, issue, phaseWord string) (any, error) {
 	value, err := readHandoff(filepath.Join(workspace, handoffFile(issue, phaseWord+".json")))
 	if err == nil {
 		return value, nil
 	}
-	if legacy, legacyErr := readHandoff(filepath.Join(workspace, legacyHandoffFile(phaseWord+".json"))); legacyErr == nil && stampedBy(legacy, issue) {
+	legacy, legacyErr := readHandoff(filepath.Join(workspace, legacyHandoffFile(phaseWord+".json")))
+	if legacyErr == nil && legacyHandoffOwnedByThisTree(legacy, issue, workspace, phaseWord+".json") {
 		return legacy, nil
 	}
 	return nil, err
+}
+
+// legacyHandoffOwnedByThisTree is whether the flat legacy handoff value, read from name under
+// workspace's .legion/, belongs to this tree: stampedBy issue (every write since
+// dispatch://LEGION-565's first round), or, for a handoff a role wrote before that round ever
+// stamped one, unstamped and unchanged since the newest non-merge commit on this tree's own branch
+// (outside ::trunk()) that wrote it. A value stamped for a different issue is never this tree's. An
+// unstamped value the branch never itself wrote - inherited unchanged from main, or carried in by a
+// forward merge whose conflict resolved to main's side - is never this tree's either: in the first
+// case this branch has no non-merge commit touching the path at all; in the second its own commit
+// does, but the merge replaced what that commit wrote, so the content at @ no longer matches it.
+func legacyHandoffOwnedByThisTree(value any, issue, workspace, name string) bool {
+	if stampedBy(value, issue) {
+		return true
+	}
+	fields, ok := value.(map[string]any)
+	if !ok {
+		return false
+	}
+	if _, stamped := fields["issue"]; stamped {
+		return false
+	}
+	jj := os.Getenv("LEGION_JJ_PATH")
+	if jj == "" || !filepath.IsAbs(jj) {
+		return false
+	}
+	return unchangedSinceOwnNonMergeWrite(jj, workspace, legacyHandoffFile(name))
+}
+
+// unchangedSinceOwnNonMergeWrite is whether relPath's content at @ is byte-identical to its content
+// at the newest non-merge commit in this tree's own history, (::@ ~ ::trunk()) (the one-call pattern
+// handoffCommit already uses to find a commit outside the base), that touched it. No such commit -
+// this branch never itself wrote relPath, only inherited it from main - answers false. A commit that
+// did, whose content a later forward merge's conflict resolution then replaced with main's side,
+// also answers false: content, not merely a touched path, decides. Any jj error, or
+// LEGION_JJ_PATH unset or relative, fails closed to false.
+func unchangedSinceOwnNonMergeWrite(jj, workspace, relPath string) bool {
+	fileset := fmt.Sprintf("root:%q", filepath.ToSlash(relPath))
+	written, err := jjOutput(jj, workspace, relPath, "log", "-r", "latest((::@ ~ ::trunk()) & ~merges() & files("+fileset+"))", "--no-graph", "-T", "commit_id")
+	if err != nil || written == "" {
+		return false
+	}
+	atHead, err := jjOutput(jj, workspace, relPath, "file", "show", "-r", "@", fileset)
+	if err != nil {
+		return false
+	}
+	atWritten, err := jjOutput(jj, workspace, relPath, "file", "show", "-r", written, fileset)
+	if err != nil {
+		return false
+	}
+	return atHead == atWritten
 }
 
 func runHandoffComplete(ctx context.Context, args []string, stdout, stderr io.Writer) int {
@@ -273,10 +325,12 @@ func runHandoffComplete(ctx context.Context, args []string, stdout, stderr io.Wr
 // the role. A phase phase.HandoffFile names ends with its role's handoff, and the completion reports
 // the commit that carries it: the last commit on the issue branch that changed
 // .legion/<issue>/<phase>.json (handoffFile), a commit that deleted it included. While that file is
-// absent from the workspace, a flat legacyHandoffFile stampedBy the tree's issue stands in for it:
-// a role that wrote its handoff under the binary before dispatch://LEGION-565 still completes after
-// the rollout. That handoff must be committed — none of
-// it only in the working copy — and committed on this branch, never inherited from the base: a pane
+// absent from the workspace, a flat legacyHandoffFile standing in for it when
+// legacyHandoffOwnedByThisTree - stamped by the tree's issue, or unstamped and unchanged since this
+// tree's own non-merge write: a role that wrote its handoff flat before dispatch://LEGION-565 still
+// completes after the rollout, and a forward merge that replaced it with main's own stale content
+// does not. That handoff must be committed — none of it only in the working copy — and committed on
+// this branch, never inherited from the base: a pane
 // whose handoff is still uncommitted would otherwise report a commit that carries another issue's
 // file. The daemon refuses a carrying commit the role already reported in its previous phase. Every
 // other completion reports the commit the workspace stands on: retro, the production check (which
@@ -299,7 +353,7 @@ func handoffCommit(workspace string, role legionclaim.Role, current phase.Phase)
 	file := handoffFile(issue, word+".json")
 	if _, err := os.Stat(filepath.Join(workspace, file)); errors.Is(err, os.ErrNotExist) {
 		legacy := legacyHandoffFile(word + ".json")
-		if value, err := readHandoff(filepath.Join(workspace, legacy)); err == nil && stampedBy(value, issue) {
+		if value, err := readHandoff(filepath.Join(workspace, legacy)); err == nil && legacyHandoffOwnedByThisTree(value, issue, workspace, word+".json") {
 			file = legacy
 		}
 	}
