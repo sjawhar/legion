@@ -294,8 +294,12 @@ func (r *liveRig) checkResume() error {
 		return err
 	}
 	note("operator", "exec cat %s: %v", worker.marker, lines)
-	if len(lines) != 2 || lines[0] != old.Incarnation || lines[1] != loc.Incarnation {
-		return fmt.Errorf("the marker holds %v, want exactly [%s %s]", lines, old.Incarnation, loc.Incarnation)
+	// The marker is the issue pod's (SandboxName), shared by every resident role that started in
+	// it — the architect's own root-ready launch and any sibling role's first launch are also in
+	// there — so only worker's own "implementer:" lines are its to check.
+	own := roleIncarnations(lines, worker.role)
+	if len(own) != 2 || own[0] != old.Incarnation || own[1] != loc.Incarnation {
+		return fmt.Errorf("the marker's %s lines are %v (of %v shared by the issue pod's resident roles), want exactly [%s %s]", worker.role, own, lines, old.Incarnation, loc.Incarnation)
 	}
 	return nil
 }
@@ -346,8 +350,11 @@ func (r *liveRig) checkSameAgentNegative() error {
 		return err
 	}
 	note("operator", "resumed correctly as %s; exec cat %s: %v", short(fixed.Incarnation), second.marker, lines)
-	if len(lines) != 2 || lines[1] != fixed.Incarnation || slices.Contains(lines, loc.Incarnation) {
-		return fmt.Errorf("the marker holds %v: want two agents, the last %s, and never the refused %s", lines, fixed.Incarnation, loc.Incarnation)
+	// The marker is the issue pod's (SandboxName), shared by every resident role that started in
+	// it, so only second's own "tester:" lines are its to check.
+	own := roleIncarnations(lines, second.role)
+	if len(own) != 2 || own[1] != fixed.Incarnation || slices.Contains(own, loc.Incarnation) {
+		return fmt.Errorf("the marker's %s lines are %v (of %v shared by the issue pod's resident roles): want two agents, the last %s, and never the refused %s", second.role, own, lines, fixed.Incarnation, loc.Incarnation)
 	}
 	if err := r.suspend(second); err != nil {
 		return err

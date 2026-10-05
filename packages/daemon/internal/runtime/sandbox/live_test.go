@@ -9,8 +9,11 @@
 // Each check prints what it observed, each line naming the identity that observed it, and then
 // `CHECK <name>: PASS`. The first check that does not hold prints `CHECK <name>: FAIL: <why>` and
 // ends the run. The agent every pod runs is a stub (decision 7): the Go shim bridges it as it would
-// Oh My Pi, and it appends its pod's uid to a marker file on the tree volume — the session file a
-// resume names — and sleeps.
+// Oh My Pi, and it appends its own role, pod uid and generation to a marker file on the tree volume
+// — the session file a resume names — and sleeps. The marker is the issue pod's: SandboxName (see
+// names.go) is shared by all six of an issue's role claims, so one issue pod's resident roles each
+// append their own launches to the same file, and a check reads only its own claim's lines back out
+// of it (roleIncarnations).
 //
 // This file is the rig: the run's inputs, the boot-token registry, the observation and log
 // records, the runtime's lifecycle, and the launches and reads every check shares. The checks
@@ -132,8 +135,10 @@ const (
 const fixtureConfigMap = "legion-operator-route"
 
 // The marker is the runtime locator's process incarnation: an unchanged pod UID plus the launch
-// generation. A role restart keeps the pod UID but must append a new incarnation.
-var stubAgent = []string{"/bin/sh", "-c", `printf '%s/%s\n' "$POD_UID" "$LEGION_GENERATION" >>"$LEGION_E2E_MARKER" && exec sleep infinity`, "stage4a-stub"}
+// generation, prefixed with the role that launched it since the marker is one issue pod's, shared
+// by every resident role (SandboxName). A role restart keeps the pod UID but must append a new
+// incarnation.
+var stubAgent = []string{"/bin/sh", "-c", `printf '%s:%s/%s\n' "$LEGION_ROLE" "$POD_UID" "$LEGION_GENERATION" >>"$LEGION_E2E_MARKER" && exec sleep infinity`, "stage4a-stub"}
 
 // liveEnv is what the script hands the harness.
 type liveEnv struct {
@@ -818,6 +823,21 @@ func (r *liveRig) markerLines(c *liveClaim) ([]string, error) {
 		return nil, err
 	}
 	return strings.Fields(out), nil
+}
+
+// roleIncarnations is markerLines filtered to one role's own "role:incarnation" entries, with the
+// role prefix stripped back to the bare incarnation: the marker is the issue pod's (SandboxName),
+// shared by every resident role that has started in it, so its raw lines also hold every sibling
+// role's own launches.
+func roleIncarnations(lines []string, role claim.Role) []string {
+	prefix := string(role) + ":"
+	var own []string
+	for _, line := range lines {
+		if rest, ok := strings.CutPrefix(line, prefix); ok {
+			own = append(own, rest)
+		}
+	}
+	return own
 }
 
 // ---- reads under the runtime identity ----------------------------------------------------------
