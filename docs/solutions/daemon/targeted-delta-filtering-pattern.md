@@ -138,3 +138,10 @@ git rebase --continue
 ```
 
 The branch's `.legion/` files are the correct per-issue handoff data. Main's versions belong to other issues.
+
+**Superseded 2026-10-05 (dispatch://LEGION-565):** every tree now writes its handoffs under its
+own per-issue subdirectory, `.legion/<issue>/<phase>.json`, instead of the flat `.legion/<phase>.json`
+paths this section assumes, so the same-path conflict described below is structurally impossible
+for a tree's own handoffs going forward. The `git checkout --theirs` recipe no longer applies to
+fresh trees; main may still carry pre-existing flat-path residue from before this change.
+

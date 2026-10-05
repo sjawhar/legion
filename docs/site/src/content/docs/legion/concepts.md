@@ -128,9 +128,18 @@ architect has written its spec.
 ## Handoffs on the issue branch
 
 Each phase ends by writing a **handoff**, a small JSON file committed to the issue's branch under
-`.legion/`: `architect.json`, `plan.json`, `implement.json`, `test.json`, and `review.json`. The next
-phase reads the ones before it. A handoff is the copy that survives: when a worker comes back after
-a restart, or a memory disagrees with a file, the committed handoff wins. The merger writes none.
+its own `.legion/<issue>/` directory: `architect.json`, `plan.json`, `implement.json`, `test.json`,
+and `review.json`. The next phase reads the ones before it. A handoff is the copy that survives:
+when a worker comes back after a restart, or a memory disagrees with a file, the committed handoff
+wins. The merger writes none.
+
+Each tree writes only under its own directory, so trees running at the same time never touch the
+same file, and one tree's merge never leaves another tree's pull request conflicting over a
+handoff (GitHub runs no checks on a conflicting pull request). Before any role of a new issue
+starts, the daemon creates its branch from the default branch with all of `.legion/` removed, and
+that removal rides along in the tree's own merge. After a merge, the default branch therefore
+holds that tree's handoff directory and those of trees merged after its branch was cut, and no
+operator removes them by hand.
 
 ## Review signalling
 

@@ -184,7 +184,7 @@ kubectl -n legion describe pod <pod>     # scheduling, image pulls, mounts
   (`kubectl -n legion exec -it <pod> -c worker -- sh`).
 - **The tree volume was lost.** The daemon logs
   `supervise: the tree volume was lost with the session; relaunching a fresh session`. The agent
-  comes back as a new session in a new workspace, which holds `.legion/workspace-recovered.json`
+  comes back as a new session in a new workspace, which holds `.legion/<issue>/workspace-recovered.json`
   naming the issue's branch to reconcile from.
 - **`worker-stream: rejected hello (stale worker generation)`** in the daemon's log is the fence
   working: a pod from an older generation of a claim tried to connect after a newer one replaced it.

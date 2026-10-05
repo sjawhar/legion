@@ -87,13 +87,13 @@ and the tester's proof below are both this proof.
 ## The rules every phase's evidence follows
 
 - **The implementer proves the change before its phase completes, and writes the `E2E (implementer)` line when the pull request opens.**
-  The proof is the one defined above. It goes into `.legion/implement.json` as the required `proof`
+  The proof is the one defined above. It goes into `.legion/<issue>/implement.json` as the required `proof`
   array (`handoff_write` for phase `implement` refuses a payload without one, or with a blank or
   whitespace-only field, and names the field), and into the PR body, because the reviewer and the
   merger verify facts on GitHub and never from a handoff.
 - **The tester verifies the implementer's proof and adds its own `E2E (tester)` line.** It re-runs
   the implementer's command or drives the same surface independently, and records the verdict in
-  `.legion/test.json` as `implementerProof` (`{verdict, how}`).
+  `.legion/<issue>/test.json` as `implementerProof` (`{verdict, how}`).
   A test handoff whose predecessor carried no proof is a test failure, not a gap for the tester to fill:
   record it in `failures` with `implementerProof.verdict: "rejected"`, complete the phase with
   `verdict: "fail"`, and the daemon returns the issue to the implementer — the agent that developed the change owns
@@ -105,7 +105,7 @@ and the tester's proof below are both this proof.
   until the implementer has executed it against a devN stack; if no surface can reach it, the
   tester names that missing surface as the blocker instead of passing the phase. Environment or
   secret-scrub evidence (e.g. "`LEGION_*`/`DISPATCH_*`/`ENVOY_*` unset") is recorded once, in
-  `.legion/test.json`, and only when the issue's acceptance criteria call for it — never
+  `.legion/<issue>/test.json`, and only when the issue's acceptance criteria call for it — never
   re-pasted into the PR body each round. After a conflict-forced rebase, compute the
   fingerprint (*The unchanged-diff check* in
   `skill://legion-worker/references/conflicts-and-rewrites.md`) at the head your `E2E` line
