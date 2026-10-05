@@ -770,7 +770,7 @@ func TestCheckedHeadMigrationKeepsARecordedVerdictStandingForItsHead(t *testing.
 	})
 }
 
-// Migration 0031 ends phase-end suspension. A transition's suspend queued before it named the phase
+// Migration 0034 ends phase-end suspension. A transition's suspend queued before it named the phase
 // it ended ("leaves"); the field is gone, and the outbox decodes rows strictly, so each such row is
 // deleted rather than left to fail on every attempt or, read without the field, stop a role its
 // issue still needs. Every other supervise row stays queued and decodes: a close's suspend, a start
@@ -781,7 +781,7 @@ func TestResidentRolesMigrationDropsOnlyTheQueuedPhaseEndSuspends(t *testing.T) 
 	all, err := migrations.All()
 	must(t, err)
 	for _, migration := range all {
-		if migration.Version >= 31 {
+		if migration.Version >= 34 {
 			break
 		}
 		inTx(t, st, func(tx pgx.Tx) {
