@@ -1360,7 +1360,7 @@ func (s *Service) writeVersionTx(ctx context.Context, tx pgx.Tx, artifactID, mar
 	if write.capture != nil {
 		s.rememberPendingVersion(artifactID, version, *write.capture)
 		if ledger := ledgerFrom(ctx); ledger != nil && ledger.tx == tx {
-			ledger.recordVersion(artifactID, version, write.capture.creditSeq)
+			ledger.recordVersion(artifactID, version, write.capture.creditSeq, write.capture.fullRelease)
 		}
 	}
 	return versionWriteResult{version: version, changes: changes}, nil

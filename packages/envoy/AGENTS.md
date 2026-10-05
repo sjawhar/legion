@@ -74,7 +74,13 @@ own write does not credit that write again at commit (`liveWrite.versioned`). An
 route writes its version itself, records it (`Ledger.WroteVersion`): when its write changed the
 document, it clears every credit pending at the write's room read, whether its replacement removed
 that edit or kept it, and its version credits the uploader alone; an edit credited after that read
-stays pending for the next version. An upload that changed nothing clears nothing.
+stays pending for the next version. An upload that changed nothing clears nothing. This full
+release carries through to the durable row the same way: `ledgerVersion.fullRelease`
+(`Ledger.recordVersion`) marks an upload's version, and `recordSettlementCredit` releases it with
+`releaseAllSettlementCredit`, which clears the row's whole pending map at or before the version's
+`creditSeq` instead of the version's named authors alone (`releaseSettlementCredit`'s ordinary
+case) - otherwise a browser's credit the room had already released stayed in the row and
+resurrected into the room on its next load (LEGION-513).
 A settlement that wrote into the room commits what it wrote even when the document moved after its
 read, since the room and its browsers hold it; one that wrote nothing leaves a moved document to
 the settlement the move scheduled. A repair is written only into the document the settlement read

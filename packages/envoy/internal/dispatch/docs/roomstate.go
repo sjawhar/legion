@@ -323,10 +323,11 @@ type pendingAuthor struct {
 	creditSeq uint64
 }
 
-// creditPendingLocked makes actor owed at the room's current creditSeq, which the caller has
-// already advanced for this credit. The caller holds state.mu.
-func (state *roomState) creditPendingLocked(key string, actor model.Actor) {
-	state.pending[key] = pendingAuthor{actor: actor, creditSeq: state.creditSeq.Load()}
+// creditPendingLocked makes actor owed at creditSeq, the room's current creditSeq the caller has
+// already advanced for this credit and read once outside any per-actor loop, since state.mu keeps
+// it from changing mid-loop. The caller holds state.mu.
+func (state *roomState) creditPendingLocked(key string, actor model.Actor, creditSeq uint64) {
+	state.pending[key] = pendingAuthor{actor: actor, creditSeq: creditSeq}
 }
 
 // releasePendingLocked takes keys out of the room's pending authors where their credit was given

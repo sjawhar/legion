@@ -68,8 +68,9 @@ func (credit settlementCredit) empty() bool {
 }
 
 func (state *roomState) mergeSettlementCreditLocked(credit settlementCredit) {
+	creditSeq := state.creditSeq.Load()
 	for _, actor := range credit.Pending {
-		state.creditPendingLocked(actorKey(actor), actor)
+		state.creditPendingLocked(actorKey(actor), actor, creditSeq)
 	}
 	if credit.LastActor != nil {
 		actor := *credit.LastActor
@@ -114,7 +115,7 @@ func (s *Service) settlementCreditPersisted(room string, creditSeq uint64) {
 		return
 	}
 	if state.closed && state.creditSeq.Load() == creditSeq {
-		clear(state.pending)
+		state.releaseAllPendingLocked(creditSeq)
 		state.lastActor = nil
 		state.unsettled = false
 	}
@@ -198,7 +199,7 @@ func upsertSettlementCredit(ctx context.Context, tx pgx.Tx, room string, credit 
 // releaseSettlementCredit takes the authors a version credited out of room's pending-settlement
 // row, in the transaction that wrote the version. The row's last actor stays: ask reconciliation
 // reads it once no pending author remains. It also raises the row's released_through watermark to
-// creditSeq, the room's creditVersion when the version captured its authors from state.pending
+// creditSeq, the room's creditSeq when the version captured its authors from state.pending
 // (captureAuthors): a credit captured at or before that point is already accounted for by this
 // version, so a later upsertSettlementCredit call carrying it - an append that was queued behind
 // this same transaction's advisory lock when the version ran - discards it instead of resurrecting
@@ -230,6 +231,33 @@ func releaseSettlementCredit(ctx context.Context, tx pgx.Tx, room string, author
 			)
 	`, room, keys, int64(creditSeq)); err != nil {
 		return fmt.Errorf("release the version's authors from the document's pending settlement: %w", err)
+	}
+	return nil
+}
+
+// releaseAllSettlementCredit is releaseSettlementCredit's full-release counterpart
+// (releaseAllPendingLocked's, durably): an upload's version credits its uploader alone, but its
+// write may have changed or removed any pending edit visible as of its last read of the room, so
+// the row must lose every pending author at or before creditSeq, not just the version's named
+// ones, or a browser's already-released credit survives in the row and resurrects into the room
+// on its next load (onLoadDocument, mergeSettlementCreditLocked, LEGION-513). It raises
+// released_through the same way releaseSettlementCredit does.
+func releaseAllSettlementCredit(ctx context.Context, tx pgx.Tx, room string, creditSeq uint64) error {
+	if _, err := tx.Exec(ctx, `
+		insert into doc_settlements_pending (artifact_id, settlement_authors)
+			values ($1, jsonb_build_object('pending', '{}'::jsonb, 'released_through', $2::bigint))
+		on conflict (artifact_id) do update set
+			settlement_authors = jsonb_set(
+				jsonb_set(
+					doc_settlements_pending.settlement_authors,
+					'{pending}',
+					'{}'::jsonb
+				),
+				'{released_through}',
+				to_jsonb(greatest(coalesce((doc_settlements_pending.settlement_authors->>'released_through')::bigint, 0), $2::bigint))
+			)
+	`, room, int64(creditSeq)); err != nil {
+		return fmt.Errorf("release every author from the document's pending settlement: %w", err)
 	}
 	return nil
 }

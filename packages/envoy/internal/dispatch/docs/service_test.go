@@ -2570,7 +2570,7 @@ func (s *Service) room(name string) *roomState {
 func (s *Service) recordActor(room string, actor model.Actor) {
 	state := s.lockState(room)
 	state.creditSeq.Add(1)
-	state.creditPendingLocked(actorKey(actor), actor)
+	state.creditPendingLocked(actorKey(actor), actor, state.creditSeq.Load())
 	state.lastActor = new(actor)
 	state.unsettled = true
 	s.unlockState(room, state)

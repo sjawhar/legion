@@ -51,6 +51,12 @@ type ledgerVersion struct {
 	// creditSeq is the room's creditSeq as of this version's author capture
 	// (captureAuthors), the point recordSettlementCredit's release must record as consumed.
 	creditSeq uint64
+	// fullRelease marks an upload's version (Ledger.WroteVersion, versionPending.fullRelease's
+	// durable counterpart): its write may have changed or removed any pending edit visible as of
+	// its last read of the room, so recordSettlementCredit's release must clear the row's whole
+	// pending map at or before creditSeq, not just the version's named authors (releaseAllSettlementCredit),
+	// the same split commitVersionLocked makes for the room.
+	fullRelease bool
 }
 
 // ledgerSeed is a document SeedText wrote in this transaction: the actor who wrote its first
@@ -217,9 +223,12 @@ func (l *Ledger) endRebuilds() {
 // recordVersion records a version this transaction wrote, which its commit releases
 // (commitVersionLocked). The version holds every change the transaction's write to the document
 // has made so far and credits their authors, so the commit does not credit them again
-// (creditLocked) unless the write changes the document after it (creditLiveWrite).
-func (l *Ledger) recordVersion(artifactID string, version model.Version, creditSeq uint64) {
-	l.versions = append(l.versions, ledgerVersion{artifactID: artifactID, version: version, creditSeq: creditSeq})
+// (creditLocked) unless the write changes the document after it (creditLiveWrite). fullRelease
+// carries through to the durable release (recordSettlementCredit) the same way it does to the
+// room's (commitVersionLocked): an upload's version credits its uploader alone, but clears every
+// pending author, not just the ones it names.
+func (l *Ledger) recordVersion(artifactID string, version model.Version, creditSeq uint64, fullRelease bool) {
+	l.versions = append(l.versions, ledgerVersion{artifactID: artifactID, version: version, creditSeq: creditSeq, fullRelease: fullRelease})
 	if write := l.liveWriteFor(artifactID); write != nil {
 		write.versioned = true
 	}
@@ -230,15 +239,15 @@ func (l *Ledger) recordVersion(artifactID string, version model.Version, creditS
 // whose version credits its uploader alone. Once this transaction commits, it clears every author
 // credited no later than the write's last read of the room (liveWrite.forkSeq), whether its
 // replacement removed that edit or kept it; an edit credited after that read stays pending for
-// the next version (commitVersionLocked). An upload that changed nothing has no write to hold and
-// nothing to clear.
+// the next version (commitVersionLocked, recordSettlementCredit). An upload that changed nothing
+// has no write to hold and nothing to clear.
 func (l *Ledger) WroteVersion(artifactID string, version model.Version) {
 	write := l.liveWriteFor(artifactID)
 	if write == nil || len(write.updates) == 0 {
 		return
 	}
 	l.service.rememberPendingVersion(artifactID, version, versionPending{creditSeq: write.forkSeq, fullRelease: true})
-	l.recordVersion(artifactID, version, write.forkSeq)
+	l.recordVersion(artifactID, version, write.forkSeq, true)
 }
 
 func (l *Ledger) liveWriteFor(artifactID string) *liveWrite {
@@ -319,6 +328,12 @@ func (l *Ledger) recordSettlementCredit(ctx context.Context) error {
 		}
 	}
 	for _, written := range l.versions {
+		if written.fullRelease {
+			if err := releaseAllSettlementCredit(ctx, l.tx, written.artifactID, written.creditSeq); err != nil {
+				return err
+			}
+			continue
+		}
 		if err := releaseSettlementCredit(ctx, l.tx, written.artifactID, written.version.Authors, written.creditSeq); err != nil {
 			return err
 		}
@@ -384,9 +399,10 @@ func (l *Ledger) creditLocked(locked map[string]*roomState) {
 		}
 		l.withState(locked, artifactID, func(state *roomState) {
 			state.creditSeq.Add(1)
+			creditSeq := state.creditSeq.Load()
 			for key, actor := range write.credits {
 				if _, consumed := released[artifactID][key]; !consumed {
-					state.creditPendingLocked(key, actor)
+					state.creditPendingLocked(key, actor, creditSeq)
 				}
 			}
 			state.lastActor = write.actor

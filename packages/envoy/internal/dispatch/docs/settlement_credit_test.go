@@ -643,6 +643,89 @@ func TestABrowserEditAfterAVersionsCaptureStaysOwedInTheRoomAndTheRow(t *testing
 	requireOwedInRoomAndRow(t, service, artifactID, carol)
 }
 
+// An upload's version credits its uploader alone, but its write may have changed or removed any
+// edit visible as of its last read of the room, so its release clears every pending author the
+// room held at that point, not just the uploader - and the durable row must agree, not keep a
+// browser's credit the room has already let go: a stale row entry resurrects into the room on its
+// next load (onLoadDocument, mergeSettlementCreditLocked). LEGION-513.
+func TestAnUploadsFullReleaseClearsTheDurableRowOfAPendingAuthorItWasNeverCreditedWith(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour // no settlement runs between the edit and the upload
+	ctx := context.Background()
+	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
+	httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
+	t.Cleanup(httpServer.Close)
+	bob := model.Actor{Kind: "user", ID: "bob"}
+	uploader := model.Actor{Kind: "session", ID: "uploader-session"}
+
+	browser := connectBrowser(t, httpServer.URL, artifactID, bob.ID)
+	editAsBrowser(t, service, artifactID, browser, "First.\n\nSecond, bob.\n")
+	t.Cleanup(browser.Close)
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	if err := service.waitForDurableAppends(waitCtx, artifactID); err != nil {
+		waitCancel()
+		t.Fatalf("wait for bob's edit to become durable: %v", err)
+	}
+	waitCancel()
+	if owed, credit, err := pendingSettlementCredit(context.Background(), service.store.Pool, artifactID); err != nil {
+		t.Fatalf("read the pending-settlement row before the upload: %v", err)
+	} else if !owed || len(credit.Pending) == 0 {
+		t.Fatalf("the row owes nothing after bob's edit (owed=%v, pending=%+v); the test's premise needs his credit durable first", owed, credit.Pending)
+	}
+
+	tx, err := service.store.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the upload transaction: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	joined, ledger := service.Join(ctx, tx)
+	defer ledger.Discard()
+	if _, err := service.ReplaceText(joined, artifactID, "First.\n\nSecond, uploaded.\n", uploader); err != nil {
+		t.Fatalf("upload the replacement text: %v", err)
+	}
+	var nextNumber int
+	if err := tx.QueryRow(ctx, `select coalesce(max(number), 0) + 1 from artifact_versions where artifact_id = $1`, artifactID).Scan(&nextNumber); err != nil {
+		t.Fatalf("read the next version number: %v", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		insert into artifact_versions (artifact_id, number, markdown, authors)
+		values ($1, $2, $3, $4)
+	`, artifactID, nextNumber, "First.\n\nSecond, uploaded.\n", []model.Actor{uploader}); err != nil {
+		t.Fatalf("insert the upload's version row: %v", err)
+	}
+	ledger.WroteVersion(artifactID, model.Version{Number: nextNumber, Authors: []model.Actor{uploader}})
+	if err := ledger.Commit(ctx); err != nil {
+		t.Fatalf("commit the upload transaction: %v", err)
+	}
+
+	ctx2, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := service.waitForDurableAppends(ctx2, artifactID); err != nil {
+		t.Fatalf("wait for the room's updates to become durable: %v", err)
+	}
+	room := map[string]model.Actor{}
+	if state := service.lockExistingState(artifactID); state != nil {
+		for _, entry := range state.pending {
+			room[settlementCreditKey(entry.actor)] = entry.actor
+		}
+		service.unlockState(artifactID, state)
+	}
+	_, credit, err := pendingSettlementCredit(ctx2, service.store.Pool, artifactID)
+	if err != nil {
+		t.Fatalf("read the pending-settlement row: %v", err)
+	}
+	row := credit.Pending
+	if row == nil {
+		row = map[string]model.Actor{}
+	}
+	if len(room) != 0 {
+		t.Fatalf("room pending = %+v after the upload's full release, want empty", room)
+	}
+	if len(row) != 0 {
+		t.Fatalf("durable row pending = %+v after the upload's full release, want empty: bob's credit survived although the room released it", row)
+	}
+}
+
 // requireOwedInRoomAndRow requires the room's pending authors and its pending-settlement row's to
 // be want alone, once every update the room has queued is durable.
 func requireOwedInRoomAndRow(t *testing.T, service *Service, artifactID string, want model.Actor) {

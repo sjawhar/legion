@@ -586,12 +586,13 @@ func (s *Service) creditContentChange(room string, origin any) (settlementCredit
 	state := s.lockState(room)
 	defer s.unlockState(room, state)
 	state.creditSeq.Add(1)
+	creditSeq := state.creditSeq.Load()
 	pending := make(map[string]model.Actor, len(state.connected))
 	var sole *model.Actor
 	ambiguous := false
 	for _, actor := range state.connected {
 		key := actorKey(actor)
-		state.creditPendingLocked(key, actor)
+		state.creditPendingLocked(key, actor, creditSeq)
 		pending[settlementCreditKey(actor)] = actor
 		if sole == nil {
 			sole = new(actor)
@@ -604,7 +605,7 @@ func (s *Service) creditContentChange(room string, origin any) (settlementCredit
 	}
 	state.lastActor = sole
 	state.unsettled = true
-	return settlementCredit{Pending: pending, LastActor: sole}, state.creditSeq.Load()
+	return settlementCredit{Pending: pending, LastActor: sole}, creditSeq
 }
 
 // addConnection registers a browser connected to room. It is credited only with browser edits

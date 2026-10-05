@@ -307,7 +307,13 @@
   later, unrelated credit. The room drops only what a version or settlement read, too: a browser
   that edits again after a version captured its authors and before that version commits stays owed
   in the room, as it already did in the row, instead of the room forgetting that later edit while
-  the row kept it (LEGION-513).
+  the row kept it. An upload's full release of the room's pending map (an upload's write can
+  change or remove any edit pending at its own last read, so its version credits the uploader
+  alone but clears every pending author, not just its own) now has a durable counterpart: the row
+  loses every pending author at or before the release's `creditSeq` too
+  (`releaseAllSettlementCredit`), instead of only the uploader - otherwise a browser's credit the
+  room had already released stayed in the row and came back into the room on its next load
+  (LEGION-513).
 - Every read of an artifact's `project_key` tolerates a null: `scanArtifact` (every artifact read
   by id, ref key, owner or name, and both anchor locks), an ask's anchor artifact, a comment
   event's and an anchor refresh's payload, a suggestion's project, a document write's owner lock,
