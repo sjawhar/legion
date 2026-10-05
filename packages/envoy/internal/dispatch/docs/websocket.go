@@ -547,21 +547,10 @@ func (s *Service) creditContentChange(room string, origin any) {
 	state := s.room(room)
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	var sole *model.Actor
-	ambiguous := false
 	for _, actor := range state.connected {
-		key := actorKey(actor)
-		state.creditSeq++
-		state.pending[key] = pendingAuthor{actor: actor, seq: state.creditSeq}
-		if sole == nil {
-			sole = new(actor)
-		} else if key != actorKey(*sole) {
-			ambiguous = true
-		}
+		state.pending[actorKey(actor)] = pendingAuthor{actor: actor, seq: state.creditSeq.Add(1)}
 	}
-	if ambiguous {
-		sole = nil
-	}
+	sole, _ := soleConnectedActor(state.connected)
 	state.lastActor = sole
 }
 

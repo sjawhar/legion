@@ -2561,8 +2561,7 @@ func (s *blockingFirstAppendStore) AppendUpdateWithClass(ctx context.Context, ro
 func (s *Service) recordActor(room string, actor model.Actor) {
 	state := s.room(room)
 	state.mu.Lock()
-	state.creditSeq++
-	state.pending[actorKey(actor)] = pendingAuthor{actor: actor, seq: state.creditSeq}
+	state.pending[actorKey(actor)] = pendingAuthor{actor: actor, seq: state.creditSeq.Add(1)}
 	state.lastActor = new(actor)
 	state.mu.Unlock()
 }

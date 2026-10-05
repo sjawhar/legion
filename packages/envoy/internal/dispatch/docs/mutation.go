@@ -1267,7 +1267,7 @@ func captureAuthors(state *roomState, write *liveWrite, actor *model.Actor) (ver
 	if actor != nil {
 		authors[actorKey(*actor)] = *actor
 	}
-	capture := versionPending{through: state.creditSeq, authors: authors}
+	capture := versionPending{through: state.creditSeq.Load(), authors: authors}
 	return capture, actorSlice(authors)
 }
 

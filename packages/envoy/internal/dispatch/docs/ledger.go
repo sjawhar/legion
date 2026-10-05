@@ -229,8 +229,7 @@ func (l *Ledger) credit() {
 		state.mu.Lock()
 		if !write.versioned {
 			for key, actor := range write.credits {
-				state.creditSeq++
-				state.pending[key] = pendingAuthor{actor: actor, seq: state.creditSeq}
+				state.pending[key] = pendingAuthor{actor: actor, seq: state.creditSeq.Add(1)}
 			}
 		}
 		state.lastActor = write.actor

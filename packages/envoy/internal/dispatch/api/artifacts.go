@@ -387,7 +387,6 @@ func (s *server) storeArtifact(
 		return
 	}
 	var version model.Version
-	var versionAuthors []byte
 	var summaryValue any
 	var documentSummary *string
 	if input.summary != "" {
@@ -438,6 +437,7 @@ func (s *server) storeArtifact(
 		if s.deps.Files != nil {
 			content = nil
 		}
+		var versionAuthors []byte
 		if err := tx.QueryRow(r.Context(), `
 			insert into artifact_versions (artifact_id, number, content, mime, size, sha256, authors, named, summary)
 			values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
@@ -449,8 +449,6 @@ func (s *server) storeArtifact(
 			s.writeHandlerError(w, err)
 			return
 		}
-	}
-	if kind != "doc" {
 		if err := json.Unmarshal(versionAuthors, &version.Authors); err != nil {
 			s.writeHandlerError(w, err)
 			return

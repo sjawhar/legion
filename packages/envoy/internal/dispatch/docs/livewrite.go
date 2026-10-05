@@ -198,9 +198,7 @@ func (s *Service) awaitLiveWriter(ctx context.Context, artifactID string) error 
 // may lack state the kept fork still holds (a browser update whose append failed), so the fork is
 // then rebuilt from the reloaded room and the transaction's writes.
 func (s *Service) forkLive(ctx context.Context, write *liveWrite) (*crdt.Doc, error) {
-	write.state.mu.Lock()
-	seq := write.state.creditSeq
-	write.state.mu.Unlock()
+	seq := write.state.creditSeq.Load()
 	var gained []byte
 	var room *crdt.Doc
 	var incremental bool
@@ -355,7 +353,8 @@ func (s *Service) docTree(ctx context.Context, artifactID string) (*pmdoc.Node, 
 
 // creditLiveWrite records whom a joined content change is credited to once its transaction
 // commits: its actor alone, as a service mutation that reaches the room directly is credited
-// (creditContentChange). A browser connected to the room made none of it.
+// (creditContentChange). A browser connected to the room made none of it. No version the
+// transaction wrote before holds this change.
 func (s *Service) creditLiveWrite(write *liveWrite, actor model.Actor) {
 	if write.credits == nil {
 		write.credits = make(map[string]model.Actor)

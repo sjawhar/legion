@@ -194,9 +194,11 @@ type roomState struct {
 	// pending is the room's pending authors, each entry's own credit sequence number
 	// (creditSeq) marking when it was credited, so a version's release can tell an entry its
 	// own capture took from a newer one credited under the same key since (versionPending,
-	// commitVersion, LEGION-503).
+	// commitVersion, LEGION-503). creditSeq is atomic so forkLive, which every document write
+	// calls, can read it for forkSeq without taking the state lock the far rarer upload route is
+	// its only consumer of.
 	pending   map[string]pendingAuthor
-	creditSeq uint64
+	creditSeq atomic.Uint64
 	// askBlocks are the ask blocks the room's document held when its update observer last
 	// rendered it, or when it loaded; nil when neither could read it. askAuthors names the author
 	// of the update that introduced each one no settlement has indexed yet (observeAskBlocks).
