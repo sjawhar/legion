@@ -325,3 +325,41 @@ func TestStartsAreIdempotentAndRefusedBeforeWriting(t *testing.T) {
 		t.Fatalf("a refused stale start wrote its directory: %v", err)
 	}
 }
+
+// A resume naming a session file the tree volume no longer holds is refused before anything
+// starts: no child runs and no generation directory is written, so a missing retained session
+// never becomes a fresh agent (LEGION-462). A later generation naming a session file that exists
+// starts normally in the same launcher.
+func TestStartRefusesAMissingResumeFile(t *testing.T) {
+	g := newRig(t)
+	marker := filepath.Join(t.TempDir(), "marker")
+	absent := filepath.Join(t.TempDir(), "sessions", "absent.marker")
+	refused := g.childStart(7, marker, nil)
+	refused.ResumeFile = absent
+	got := g.start(refused)
+	if got.OK {
+		t.Fatalf("start result = %#v, want a refusal: a missing resume file must never become a fresh agent", got)
+	}
+	want := "resume session file " + absent + ": stat " + absent
+	if !strings.Contains(got.Error, want) {
+		t.Fatalf("refusal = %q, want it to quote the missing session file %q", got.Error, want)
+	}
+	if _, err := os.Lstat(filepath.Join(g.private, "g7")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a refused resume wrote its generation directory: %v", err)
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("a refused resume started the child: its marker was published")
+	}
+
+	resumeFile := filepath.Join(t.TempDir(), "session")
+	if err := os.WriteFile(resumeFile, []byte("session"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fixed := g.childStart(8, marker, nil)
+	fixed.ResumeFile = resumeFile
+	if got := g.start(fixed); !got.OK || got.RunningGeneration != 8 {
+		t.Fatalf("start with an existing resume file = %#v, want generation 8 to run", got)
+	}
+	published(t, marker)
+	g.stop(8)
+}

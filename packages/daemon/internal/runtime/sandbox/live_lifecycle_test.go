@@ -305,37 +305,30 @@ func (r *liveRig) checkResume() error {
 }
 
 // same-agent-negative: a resume naming a session the tree volume does not hold never starts a
-// fresh agent. The role launcher reports the refusal; the shared pod stays available to peers.
+// fresh agent. The role launcher's start refuses before any child runs (manager.start's stat of
+// ResumeFile, packages/daemon/internal/launcher/launcher.go), so Resume fails synchronously —
+// there is no process to observe Gone — and the shared pod stays available to peers.
 func (r *liveRig) checkSameAgentNegative() error {
-	second := r.claim("second")
+	root, second := r.claim("root"), r.claim("second")
 	if err := r.ensureSuspended(second); err != nil {
 		return err
 	}
-	if err := r.ensureRunning(r.claim("root")); err != nil {
+	if err := r.ensureRunning(root); err != nil {
 		return err
 	}
 	absent := ompSessionsDir + "/absent-" + SandboxName(second.token) + ".marker"
-	mark := r.obs.mark()
-	loc, err := r.resume(second, absent)
-	if err != nil {
-		return err
+	_, err := r.resume(second, absent)
+	if err == nil {
+		return fmt.Errorf("Resume naming %s started a fresh agent, want the role launcher's refusal before any child runs", absent)
 	}
-	note("runtime", "Resume naming %s returned %s", absent, short(loc.Incarnation))
-	gone, ok := r.obs.await(mark, liveRunningLimit, func(o runtime.Observation) bool {
-		return sameLocator(o.Locator, loc) && o.Kind != runtime.Alive && o.Kind != runtime.Uncertain
-	})
-	if !ok {
-		return fmt.Errorf("no final observation of %s within %s", loc.Incarnation, liveRunningLimit)
+	want := "resume session file " + absent + ": stat " + absent + ": no such file or directory"
+	if !strings.Contains(err.Error(), want) {
+		return fmt.Errorf("Resume naming %s failed with %q, want it to quote the missing session file %q", absent, err, want)
 	}
-	want := "Refusing to start " + second.issue + " fresh"
-	if gone.Kind != runtime.Gone || !strings.Contains(gone.Detail, want) || !strings.Contains(gone.Detail, "role container "+string(second.role)) {
-		return fmt.Errorf("observed %s, want gone quoting the role container's refusal %q: %s", gone.Kind, want, gone.Detail)
-	}
-	note("runtime", "Observe: gone for %s — %s", short(loc.Incarnation), oneLine(gone.Detail))
+	note("runtime", "Resume naming %s refused before any child started: %s", absent, oneLine(err.Error()))
 	if regs := r.reg.registrations(second.token); len(regs) > 0 && regs[len(regs)-1].gen == second.gen {
-		return errors.New("the refused incarnation registered a hello")
+		return errors.New("the refused generation registered a hello")
 	}
-	second.loc, second.state = nil, stateDead
 
 	since := time.Now()
 	fixed, err := r.resume(second, second.marker)
@@ -345,16 +338,20 @@ func (r *liveRig) checkSameAgentNegative() error {
 	if _, err := r.awaitRunning(second, since); err != nil {
 		return err
 	}
+	if fixed.Sandbox.PodUID != root.loc.Sandbox.PodUID {
+		return fmt.Errorf("the fixed resume runs in pod %s, not the root's unchanged issue pod %s: the refusal must have disturbed the shared pod", fixed.Sandbox.PodUID, root.loc.Sandbox.PodUID)
+	}
 	lines, err := r.markerLines(second)
 	if err != nil {
 		return err
 	}
 	note("operator", "resumed correctly as %s; exec cat %s: %v", short(fixed.Incarnation), second.marker, lines)
 	// The marker is the issue pod's (SandboxName), shared by every resident role that started in
-	// it, so only second's own "tester:" lines are its to check.
+	// it, so only second's own "tester:" lines are its to check; the refused generation above
+	// never started a child, so it never wrote one.
 	own := roleIncarnations(lines, second.role)
-	if len(own) != 2 || own[1] != fixed.Incarnation || slices.Contains(own, loc.Incarnation) {
-		return fmt.Errorf("the marker's %s lines are %v (of %v shared by the issue pod's resident roles): want two agents, the last %s, and never the refused %s", second.role, own, lines, fixed.Incarnation, loc.Incarnation)
+	if len(own) != 2 || own[1] != fixed.Incarnation {
+		return fmt.Errorf("the marker's %s lines are %v (of %v shared by the issue pod's resident roles): want two agents, the last %s", second.role, own, lines, fixed.Incarnation)
 	}
 	if err := r.suspend(second); err != nil {
 		return err
