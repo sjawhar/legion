@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -227,6 +228,51 @@ func TestAReviewersPermissionIsReadOncePerWindow(t *testing.T) {
 			t.Fatalf("GitHub was asked %d times once the wait had passed, want twice", calls)
 		}
 	})
+}
+
+// Minting the review App's token can itself meet GitHub's rate limit, answered as GitHub's own
+// trouble rather than a permission (appauth.TransientError) rather than an answer about the
+// account. That is retried in a minute, same as a rate-limited permission read, and holds the
+// limit the same way, so the next uncached review inside the hold is answered without minting
+// again: minting on through the App's own limit risks the ban GitHub warns a repeated call does.
+func TestAReviewMintThatFailsTransientlyHoldsTheLimitWithoutMintingAgain(t *testing.T) {
+	pool := reviewPermissionPool(t)
+	tokens := &transientOnceTokens{}
+	w := reviewPermissionRuntime(pool, "http://unused.invalid", quietLogger())
+	w.tokens = tokens
+
+	review := func(author string) intake.PullRequestReview {
+		return intake.PullRequestReview{Repo: "acme/widgets", Number: 42, State: "approved", Author: author}
+	}
+
+	_, err := w.reviewerCanWrite(context.Background(), review("a-writer"))
+	var later *intake.RetryLater
+	if !errors.As(err, &later) || later.After != time.Minute {
+		t.Fatalf("a transient mint failure = %v; want a one-minute RetryLater", err)
+	}
+	if left := w.rateLimitLeft(); left <= 0 {
+		t.Fatalf("rate limit left = %v after a transient mint failure; want the hold set", left)
+	}
+
+	_, err = w.reviewerCanWrite(context.Background(), review("another-writer"))
+	if !errors.As(err, &later) || later.After <= 0 {
+		t.Fatalf("a review inside the hold = %v; want a RetryLater naming the wait left", err)
+	}
+	if tokens.calls != 1 {
+		t.Fatalf("the review App was minted %d times while the hold stood, want once", tokens.calls)
+	}
+}
+
+// transientOnceTokens answers its first mint with appauth.TransientError and every one after with
+// a lease, so a test can tell a retried mint from one the hold should have skipped.
+type transientOnceTokens struct{ calls int }
+
+func (t *transientOnceTokens) Token(context.Context, appauth.AppRole, string) (appauth.Lease, error) {
+	t.calls++
+	if t.calls == 1 {
+		return appauth.Lease{}, &appauth.TransientError{Err: errors.New("mint refused: GitHub's rate limit")}
+	}
+	return appauth.Lease{Token: "token", ExpiresAt: time.Now().Add(time.Hour)}, nil
 }
 
 // reviewPermissionPool is a store recording acme/widgets#42 for LEGION-208, and no other pull

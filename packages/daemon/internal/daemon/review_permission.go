@@ -98,10 +98,19 @@ func (w *workflowRuntime) reviewerCanWrite(ctx context.Context, review intake.Pu
 	return canWrite, nil
 }
 
-// readPermission reads login's permission on repository from GitHub, as reviewerCanWrite says.
+// readPermission reads login's permission on repository from GitHub, as reviewerCanWrite says. A
+// mint that fails as GitHub's trouble rather than an answer (appauth.TransientError) is returned as
+// an intake.RetryLater naming a minute's wait, the same hold a rate-limited permission read sets
+// (reviewerCanWrite's errors.As), since minting on through the App's own rate limit risks the same
+// ban GitHub warns a repeated call does. A mint that fails for any other reason is returned as is.
 func (w *workflowRuntime) readPermission(ctx context.Context, repository ghrepo.Repository, login string) (bool, error) {
 	lease, err := w.tokens.Token(ctx, appauth.Review, repository.Owner())
 	if err != nil {
+		var transient *appauth.TransientError
+		if errors.As(err, &transient) {
+			return false, &intake.RetryLater{After: time.Minute,
+				Err: fmt.Errorf("mint the review App token for %s: GitHub's rate limit stands, retry in %s: %w", repository.Owner(), time.Minute, err)}
+		}
 		return false, fmt.Errorf("mint the review App token for %s: %w", repository.Owner(), err)
 	}
 	client := githubrest.Client{Token: lease.Token, API: githubrest.RepositoryAPI(w.githubAPI, repository)}

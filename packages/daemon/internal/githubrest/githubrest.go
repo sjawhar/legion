@@ -140,8 +140,7 @@ var secondaryLimitMessages = []string{"secondary rate limit", "abuse detection m
 
 // RateLimited says whether response, whose body is body, is GitHub's rate limit: a 429, or a 403
 // carrying x-ratelimit-remaining: 0 or a retry-after, or one whose body says it is the secondary
-// limit, which GitHub's REST documentation allows with neither header set. A caller with no body
-// read passes nil, and reads only the status and the headers.
+// limit, which GitHub's REST documentation allows with neither header set.
 func RateLimited(response *http.Response, body []byte) bool {
 	if response.StatusCode == http.StatusTooManyRequests {
 		return true
