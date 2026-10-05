@@ -22,7 +22,8 @@ import (
 // Config supplies the project-scoped workflow limits and the clock used only to stamp durable
 // outbox deadlines. Zero limits take their shipped defaults. MergeQueueRole is the project's
 // `merge_queue_role`, the role the merger's READY is published to, and its withdrawal when the
-// head's own CI turns red before the merge; empty, the READY is posted only.
+// head's own CI turns red or it starts conflicting with its base before the merge; empty, the
+// READY is posted only.
 type Config struct {
 	Project        string
 	DesignGate     config.DesignGate
@@ -103,6 +104,8 @@ func (e *Engine) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake
 		return e.checks(ctx, tx, fact)
 	case intake.RequiredChecks:
 		return e.requiredChecks(ctx, tx, fact)
+	case intake.PullRequestMergeability:
+		return e.mergeability(ctx, tx, fact)
 	case intake.PullRequestReview:
 		return e.review(ctx, tx, fact)
 	case intake.PullRequestMerged:
@@ -794,7 +797,8 @@ func (e *Engine) transition(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 }
 
 // noticeFor is what a transition on trigger out of from tells the architect: that from finished,
-// with its worker's handoff, or, when CI stopped the phase (TriggerChecksRed), why.
+// with its worker's handoff, or, when CI stopped the phase or the head started conflicting with
+// its base (TriggerChecksRed), why.
 func noticeFor(trigger TriggerKind, from phase.Phase, handoff record.PhaseRow, reason string) record.Notice {
 	if trigger == TriggerChecksRed {
 		return record.Notice{Kind: "checks-red", Role: claim.RoleArchitect, Phase: from, Reason: reason}

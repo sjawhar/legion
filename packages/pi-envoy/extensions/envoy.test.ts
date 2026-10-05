@@ -8,6 +8,7 @@ import {
   dispatchIssueSubject,
   dispatchToolSpecs,
 } from "@legion/contracts";
+import { shownPictures } from "@legion/envoy-client/dispatch-picture-tools";
 import { envoyToolSpecs } from "@legion/envoy-client/tool-contract";
 import { logger } from "@oh-my-pi/pi-utils";
 import { decode } from "@toon-format/toon";
@@ -627,6 +628,12 @@ async function bootDirectSession(
     readonly accept?: (count: number) => AcceptAnswer;
     readonly entries?: readonly unknown[];
     readonly branch?: readonly unknown[];
+    /** Answers a Dispatch request outside `/api/v1/messages/`, such as the pictures a delivery
+     *  reads; undefined leaves it to the registration echo. */
+    readonly dispatch?: (url: URL) => Response | undefined;
+    /** Runs as the host is handed each delivery, before it takes it: a throw is the host refusing
+     *  the send. */
+    readonly beforeSend?: () => void;
   } = {}
 ) {
   process.env.DISPATCH_URL = "http://dispatch.test";
@@ -657,6 +664,8 @@ async function bootDirectSession(
       posts.push(`${init?.method ?? "GET"} ${url.pathname}`);
       return new Response(JSON.stringify({ code: "NOT_FOUND" }), { status: 404 });
     }
+    const answered = options.dispatch?.(url);
+    if (answered !== undefined) return answered;
     return responseWithRegistration(input, init, {});
   };
   // Query-string isolation gives each caller its own instance of this stateful extension, and a
@@ -675,11 +684,13 @@ async function bootDirectSession(
   envoyExtension({
     ...fixture.pi,
     sendMessage: (message: never, sendOptions: unknown) => {
+      options.beforeSend?.();
       recordedWhenDelivered.push(fixture.entries.length);
       fixture.pi.sendMessage(message, sendOptions);
       taken();
     },
     sendUserMessage: (content: string, sendOptions?: unknown) => {
+      options.beforeSend?.();
       recordedWhenDelivered.push(fixture.entries.length);
       fixture.pi.sendUserMessage(content, sendOptions);
       taken();
@@ -5228,6 +5239,226 @@ describe("envoy OMP extension", () => {
         ]);
       });
     }
+  });
+
+  // A session is shown each picture once (`shownPictures`). A delivery's pictures count as shown
+  // once the host took the message that carries them, a session that moves onto a transcript (a
+  // fork, a resume, a restart) counts the pictures that transcript already shows, and the id a
+  // session leaves is forgotten.
+  describe("a session's pictures", () => {
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2]);
+    const image = {
+      type: "image",
+      data: Buffer.from(png).toString("base64"),
+      mimeType: "image/png",
+    };
+
+    /** Dispatch serving LEGION-1's upload `slug`, a 10-byte PNG named shot.png. */
+    const pictureRoutes =
+      (slug: string) =>
+      (url: URL): Response | undefined => {
+        if (url.pathname === `/api/v1/issues/LEGION-1/artifacts/${slug}`) {
+          return Response.json({
+            id: `${slug}-id`,
+            name: "shot.png",
+            kind: "image",
+            versions: [{ number: 1, mime: "image/png", size: png.length }],
+          });
+        }
+        if (url.pathname === `/api/v1/artifacts/${slug}-id/versions/1`) {
+          return new Response(png, { headers: { "Content-Type": "image/png" } });
+        }
+        return undefined;
+      };
+
+    for (const [name, turn] of [
+      ["a card", false],
+      ["a person's own turn", true],
+    ] as const) {
+      test(`${name} whose send the host refused leaves its picture unshown, and Dispatch's retry shows it`, async () => {
+        const slug = turn ? "refused-turn-png" : "refused-card-png";
+        const address = `dispatch://LEGION-1/artifact/${slug}@v1`;
+        const body = `Look:\n\n![shot.png](${address})`;
+        let refusing = true;
+        const refused = Promise.withResolvers<void>();
+        const { agent, delivered, fixture } = await bootDirectSession(`pictures-${slug}`, {
+          // Dispatch's 200 makes the person's turn; a refused accept keeps the card.
+          accept: () => (turn ? { accepted: true, body } : { code: "UNAUTHORIZED", status: 401 }),
+          dispatch: pictureRoutes(slug),
+          beforeSend: () => {
+            if (!refusing) return;
+            refusing = false;
+            refused.resolve();
+            throw new Error("the host refused the message");
+          },
+        });
+        const warn = spyOn(console, "warn").mockImplementation(() => undefined);
+        try {
+          agent.push(directDispatchEnvelope("steer", `${slug}-1`, { body }));
+          await refused.promise;
+          // The model never saw it, so Dispatch's retry must carry it again.
+          expect(shownPictures("ses_delivery").has(address)).toBe(false);
+
+          agent.push(directDispatchEnvelope("steer", `${slug}-2`, { attempt: 2, body }));
+          await delivered(1);
+        } finally {
+          warn.mockRestore();
+        }
+
+        const sent: readonly { readonly content: unknown }[] = turn
+          ? fixture.userMessages
+          : fixture.deliveries;
+        expect(sent).toHaveLength(1);
+        expect(sent[0]?.content).toEqual([
+          {
+            type: "text",
+            text: turn
+              ? body
+              : expect.stringContaining(`- image 1: ${address} (shot.png, image/png, 10 bytes)`),
+          },
+          image,
+        ]);
+        expect(shownPictures("ses_delivery").has(address)).toBe(true);
+      });
+    }
+
+    /**
+     * A transcript as Oh My Pi keeps it, showing a picture each way a session is shown one: a
+     * `dispatch_read` result (`read`), a delivered card (`card`) and a person's own turn (`turn`),
+     * beside one the read named without showing (`named`).
+     */
+    const transcript = (addresses: {
+      readonly read: string;
+      readonly card: string;
+      readonly turn: string;
+      readonly named: string;
+    }) => [
+      {
+        type: "message",
+        message: {
+          role: "toolResult",
+          toolCallId: "call-1",
+          toolName: "dispatch_read",
+          content: [
+            {
+              type: "text",
+              text: [
+                "LEGION-1: Pictures",
+                "Pictures:",
+                `- image 1: ${addresses.read} (a.png, image/png, 10 bytes)`,
+                `- not shown: ${addresses.named} (unavailable: Dispatch answered 404)`,
+              ].join("\n"),
+            },
+            image,
+          ],
+        },
+      },
+      {
+        type: "custom_message",
+        customType: "envoy-message",
+        content: [
+          {
+            type: "text",
+            text: `envoy: card\n\nPictures:\n- image 1: ${addresses.card} (b.png, image/png, 10 bytes)`,
+          },
+          image,
+        ],
+        display: true,
+      },
+      {
+        type: "message",
+        message: {
+          role: "user",
+          content: [{ type: "text", text: `Look:\n\n![c.png](${addresses.turn})` }, image],
+        },
+      },
+    ];
+
+    const transcriptAddresses = (prefix: string) => {
+      const address = (slug: string) => `dispatch://LEGION-1/artifact/${prefix}-${slug}-png@v1`;
+      return {
+        read: address("read"),
+        card: address("card"),
+        turn: address("turn"),
+        named: address("named"),
+      };
+    };
+
+    for (const reason of ["fork", "resume"] as const) {
+      test(`a ${reason} counts the pictures its transcript shows as shown and forgets the id it left`, async () => {
+        const [from, to] = [`ses_pictures_${reason}_from`, `ses_pictures_${reason}_to`];
+        const addresses = transcriptAddresses(reason);
+        globalThis.fetch = async (input, init) => responseWithRegistration(input, init, []);
+        const { default: envoyExtension } = await import(`./envoy.ts?pictures-${reason}`);
+        const fixture = createPi();
+        envoyExtension(fixture.pi);
+        await fixture.handlers.get("session_start")?.({}, sessionContext(from));
+        shownPictures(from).add(`dispatch://LEGION-1/artifact/${reason}-earlier-png@v1`);
+
+        const moved = sessionContext(to);
+        await fixture.handlers.get("session_switch")?.(
+          { reason },
+          {
+            ...moved,
+            sessionManager: { ...moved.sessionManager, getBranch: () => transcript(addresses) },
+          }
+        );
+
+        expect([...shownPictures(to)].sort()).toEqual(
+          [addresses.card, addresses.read, addresses.turn].sort()
+        );
+        expect(shownPictures(from).size).toBe(0);
+      });
+    }
+
+    test("a session started on its transcript counts the pictures that transcript shows as shown", async () => {
+      const addresses = transcriptAddresses("restart");
+      globalThis.fetch = async (input, init) => responseWithRegistration(input, init, []);
+      const { default: envoyExtension } = await import("./envoy.ts?pictures-restart");
+      const fixture = createPi();
+      envoyExtension(fixture.pi);
+
+      const started = sessionContext("ses_pictures_restarted");
+      await fixture.handlers.get("session_start")?.(
+        {},
+        {
+          ...started,
+          sessionManager: { ...started.sessionManager, getBranch: () => transcript(addresses) },
+        }
+      );
+
+      expect([...shownPictures("ses_pictures_restarted")].sort()).toEqual(
+        [addresses.card, addresses.read, addresses.turn].sort()
+      );
+    });
+
+    test("a session that shuts down forgets the pictures it was shown", async () => {
+      globalThis.fetch = async (input, init) => responseWithRegistration(input, init, {});
+      const { default: envoyExtension } = await import("./envoy.ts?pictures-shutdown");
+      const fixture = createPi();
+      envoyExtension(fixture.pi);
+      await fixture.handlers.get("session_start")?.({}, sessionContext("ses_pictures_shutdown"));
+      shownPictures("ses_pictures_shutdown").add("dispatch://LEGION-1/artifact/shut-png@v1");
+
+      await fixture.handlers.get("session_shutdown")?.({}, sessionContext("ses_pictures_shutdown"));
+
+      expect(shownPictures("ses_pictures_shutdown").size).toBe(0);
+    });
+
+    // A task subagent's instance never runs restoreLocalSessionState (its session_start returns
+    // early), so its closure's id stays empty while its tool calls carry the host's live id into
+    // the registry; its shutdown forgets that id, not the empty one.
+    test("a subagent instance that shuts down forgets the id its tool calls carried", async () => {
+      globalThis.fetch = async (input, init) => responseWithRegistration(input, init, {});
+      const { default: envoyExtension } = await import("./envoy.ts?pictures-subagent-shutdown");
+      const fixture = createPi();
+      envoyExtension(fixture.pi);
+      shownPictures("ses_pictures_subagent").add("dispatch://LEGION-1/artifact/sub-png@v1");
+
+      await fixture.handlers.get("session_shutdown")?.({}, sessionContext("ses_pictures_subagent"));
+
+      expect(shownPictures("ses_pictures_subagent").size).toBe(0);
+    });
   });
 
   test("deduplicates targeted Dispatch frames by dedupe key", async () => {

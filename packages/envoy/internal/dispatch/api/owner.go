@@ -61,6 +61,14 @@ func (s *server) documentOwnerFromRequest(ctx context.Context, q queryer, r *htt
 			*artifact.IssueKey,
 		)
 	}
+	if artifact.SessionID != nil {
+		return model.Artifact{}, owner{}, errorf(
+			http.StatusBadRequest,
+			"ARTIFACT_AGENT_OWNED",
+			"artifact belongs to agent %s's conversation, which holds files and images only: it has no comments, asks, events or subscribers, which belong to an issue's or a project's documents",
+			*artifact.SessionID,
+		)
+	}
 	return artifact, documentOwner(artifact.ID), nil
 }
 

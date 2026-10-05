@@ -23,7 +23,7 @@ describe("ToolInputError", () => {
       [
         "dispatch_message was not called: 1 problem",
         "- body is required (string)",
-        "- Allowed keys: issue, body, in_reply_to",
+        "- Allowed keys: issue, body, in_reply_to, images",
         '- Example: dispatch_message({"issue":"DSP-1","body":"Implementation started."})',
       ].join("\n")
     );
@@ -35,7 +35,7 @@ describe("ToolInputError", () => {
         "dispatch_ask was not called: 2 problems",
         "- a",
         "- b",
-        "- Allowed keys: issue, project, artifact, ref, question, options, multiple, urgency, anchor",
+        "- Allowed keys: issue, project, artifact, ref, question, options, multiple, urgency, anchor, images",
         `- Example: dispatch_ask(${JSON.stringify(specFor("dispatch_ask").example)})`,
       ].join("\n")
     );
@@ -64,8 +64,8 @@ describe("formatZodIssues", () => {
       problemsFor("dispatch_message", { issue: "DSP-42", message: "x", urgency: "no" })
     ).toEqual([
       "body is required (string)",
-      'unknown field "message"; allowed: issue, body, in_reply_to',
-      'unknown field "urgency"; allowed: issue, body, in_reply_to',
+      'unknown field "message"; allowed: issue, body, in_reply_to, images',
+      'unknown field "urgency"; allowed: issue, body, in_reply_to, images',
     ]);
     expect(problemsFor("dispatch_resolve_ask", { ask: "a", kind: "no", reason: "r" })).toEqual([
       'kind must be one of retracted|resolved; got "no"',

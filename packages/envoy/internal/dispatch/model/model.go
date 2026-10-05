@@ -440,11 +440,14 @@ type ArchitectureTreeRetired struct {
 	IDs    []string `json:"ids"`
 }
 
-// Artifact is an issue-attached document or binary blob, or an unlinked project document.
+// Artifact is an issue-attached document or binary blob, an unlinked project document, or a
+// file an agent's conversation owns (SessionID set; IssueKey nil and Project empty, its RefKey
+// `agent/<session id>/<slug>`).
 type Artifact struct {
 	ID        string    `json:"id"`
 	IssueKey  *string   `json:"issue_key"`
 	Project   string    `json:"project"`
+	SessionID *string   `json:"session_id"`
 	RefKey    string    `json:"ref_key"`
 	Slug      string    `json:"slug"`
 	Name      string    `json:"name"`
@@ -1106,8 +1109,10 @@ type ArtifactReferences struct {
 	ReferencedBy []ReferencedBy      `json:"referenced_by"`
 }
 
-// GraphNode is one end of a reference-graph edge. IssueKey and Project locate it; Ref is its
-// dispatch:// address and is empty for session nodes, which have none.
+// GraphNode is one end of a reference-graph edge. IssueKey and Project locate it; an artifact an
+// agent's conversation owns has neither and is located by Ref alone
+// (`dispatch://agent/<session id>/artifact/<slug>`). Ref is its dispatch:// address and is empty
+// for session nodes, which have none.
 type GraphNode struct {
 	Kind     string  `json:"kind"`
 	ID       string  `json:"id"`
