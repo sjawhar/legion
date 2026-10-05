@@ -141,6 +141,18 @@ ask's answer and replies. Open it to see two groups:
 
 Each row shows whether the session is live. The list updates as sessions follow and leave.
 
+## Opening the Inbox as a drawer
+
+You don't have to leave a page to answer an ask. A header button showing the live count of open
+asks, or the `i` key, opens the Inbox as a drawer over whatever page you're on. It's the same
+list, cards, and actions as the Inbox page: answer, ask back, snooze, or open an ask without
+losing your place. The page underneath keeps its state, a half-typed message included, so a reply
+you were drafting is still there when you close the drawer.
+
+`Escape` closes the drawer before it closes anything else behind it, and returns focus to the
+button that opened it. Clicking outside the drawer closes it too. The button isn't offered on the
+Inbox page itself, since the page already shows everything the drawer would.
+
 ## On a phone
 
 The Inbox works the same on a phone. Each row keeps its shape: the issue on the left, and its
