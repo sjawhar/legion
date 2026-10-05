@@ -28,10 +28,11 @@ owns the document.
 3. **Acceptance a machine cannot check.** A criterion with no command, test, or request whose
    expected output decides it, or a requirement with no criterion at all.
 4. **Claims and requirements with no source.** A statement about how a system works today that the
-   code, its documentation or command output you were given does not show; and, when you were
-   given the owner's words, a requirement that traces to neither them nor a cited fact. Say what
-   you checked. You cannot run commands, so a claim about live state you cannot read is reported
-   as unverified, not as false.
+   code, its documentation or command output you were given does not show; and, when the caller
+   gave you the owner's words to check the document against, a requirement that traces to neither
+   them nor a cited fact. A requirement in a spec a human approved has its source. Say what you
+   checked. You cannot run commands, so a claim about live state you cannot read is reported as
+   unverified, not as false.
 
 Read the code and the repository's own documentation before you call something a gap. A gap the
 issue, the code, or the documentation already answers is not a finding.

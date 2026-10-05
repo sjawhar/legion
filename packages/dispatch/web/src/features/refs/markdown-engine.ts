@@ -1,10 +1,17 @@
 import type { HeadlessProofEditor, SoftBreaks } from "@legion/proof-editor/headless";
-import { DOMSerializer, type Node as ProseMirrorNode } from "prosemirror-model";
+import { DOMSerializer, type Node as ProseMirrorNode, type Schema } from "prosemirror-model";
 import { useLayoutEffect, useState } from "react";
 
 import type { BlockSchema } from "../../api/types";
 import { loadBlockSchema } from "../doc/schema";
-import { parseDispatchReference, referenceSpans, shortForm } from "./routes";
+import {
+  buildDispatchReference,
+  buildReferencePath,
+  parseDispatchReference,
+  referencedArtifact,
+  referenceSpans,
+  shortForm,
+} from "./routes";
 
 /** What a single newline inside a paragraph becomes, chosen per parse: `"space"` (the document
  *  default, hard-wrapped Markdown is one paragraph) or `"line"` (text whose author meant its
@@ -15,8 +22,8 @@ export type { SoftBreaks };
  * The one headless Proof engine every Markdown-bearing surface parses with - `MarkdownBody` for a
  * whole body, `MarkdownPreview` for the clamped line of one - so a question, a comment, a hover
  * card and a search hit all read their source the way the document editor does. Its
- * `DOMSerializer` is built once with it: the schema is fixed for the engine's life, and every
- * render on the page would otherwise rebuild the same serializer.
+ * `DOMSerializer` (`pictureSerializer`) is built once with it: the schema is fixed for the
+ * engine's life, and every render on the page would otherwise rebuild the same serializer.
  */
 export interface MarkdownEngine {
   readonly serializer: DOMSerializer;
@@ -47,9 +54,53 @@ const engines = new Map<number, Promise<MarkdownEngine>>();
  *  throws no longer evicts it - the headless editor drops only its own refused parser. */
 let readyEngine: MarkdownEngine | undefined;
 
+/**
+ * Proof's DOM serializer, except for a picture whose address is a Dispatch reference: the browser
+ * cannot fetch `dispatch://`, so an `image` node naming an artifact at a version
+ * (`![shot.png](dispatch://KEY/artifact/shot-png@v1)`, the syntax a pasted picture is written in)
+ * becomes an empty link to the artifact's page, marked `data-dispatch-picture`, for
+ * `collectPictureAnchors` to hand to a `DispatchPicture` (`useRenderedMarkdown`). One that pins no
+ * version, or names something other than an artifact, is a reference like any other and becomes a
+ * link `collectReferenceAnchors` titles. A picture on another website, or an address that is no
+ * reference, is serialized as Proof serializes it.
+ */
+function pictureSerializer(schema: Schema): DOMSerializer {
+  const base = DOMSerializer.fromSchema(schema);
+  const image = base.nodes.image;
+  if (image === undefined) {
+    return base;
+  }
+  return new DOMSerializer(
+    {
+      ...base.nodes,
+      image: (node) => {
+        const src = String(node.attrs.src ?? "");
+        const route = src.startsWith("dispatch://") ? parseDispatchReference(src) : undefined;
+        if (route === undefined) {
+          return image(node);
+        }
+        const named = referencedArtifact(route);
+        if (named?.version === undefined) {
+          return ["a", { href: src }];
+        }
+        const alt = String(node.attrs.alt ?? "").trim();
+        return [
+          "a",
+          {
+            "data-dispatch-picture": buildDispatchReference(route),
+            "data-picture-caption": alt === "" ? named.slug : alt,
+            href: buildReferencePath(route),
+          },
+        ];
+      },
+    },
+    base.marks
+  );
+}
+
 function buildEngine(proof: HeadlessProofEditor): MarkdownEngine {
   return {
-    serializer: DOMSerializer.fromSchema(proof.schema),
+    serializer: pictureSerializer(proof.schema),
     parse(markdown, softBreaks = "space") {
       try {
         return proof.parseMarkdown(markdown, softBreaks);

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/textproto"
+	"strings"
 	"sync"
 	"testing"
 
@@ -61,7 +62,7 @@ func TestUploadsGoToTheFileStoreAndAreServedFromIt(t *testing.T) {
 	memory := filestest.NewMemory()
 	handler, database, _ := newTestServer(t, testServerOptions{files: memory})
 	issue := fileIssue(t, handler)
-	image := bytes.Repeat([]byte{0x89, 'P', 'N', 'G'}, 4096)
+	image := pngBytes(strings.Repeat("pixels", 4096))
 	sha := files.SHA256(image)
 
 	first := multipartRequest(t, handler, "/api/v1/issues/"+issue+"/artifacts", map[string]string{"name": "shot.png"}, "shot.png", "image/png", image, "alice")
@@ -104,6 +105,29 @@ func TestUploadsGoToTheFileStoreAndAreServedFromIt(t *testing.T) {
 	bySlug := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue+"/artifacts/shot-png/versions/2", nil, "alice")
 	if bySlug.Code != http.StatusOK || !bytes.Equal(bySlug.Body.Bytes(), image) {
 		t.Fatalf("serve version by slug: status=%d, %d body bytes", bySlug.Code, bySlug.Body.Len())
+	}
+}
+
+// A file version's bytes never change, so its download says a browser may keep it for a year
+// without asking again, privately since the route is authenticated; a document version is the
+// document's JSON read and says nothing of the kind.
+func TestAFileVersionIsCachedForeverAndADocumentVersionIsNot(t *testing.T) {
+	handler, _, _ := newTestServer(t, testServerOptions{files: filestest.NewMemory()})
+	issue := fileIssue(t, handler)
+	if upload := multipartRequest(t, handler, "/api/v1/issues/"+issue+"/artifacts", map[string]string{"name": "shot.png"}, "shot.png", "image/png", []byte("png bytes"), "alice"); upload.Code != http.StatusCreated {
+		t.Fatalf("upload: status=%d body=%s", upload.Code, upload.Body.String())
+	}
+	for target, want := range map[string]string{
+		"/api/v1/issues/" + issue + "/artifacts/shot-png/versions/1": "private, max-age=31536000, immutable",
+		"/api/v1/issues/" + issue + "/artifacts/spec/versions/1":     "",
+	} {
+		response := dispatchRequest(t, handler, http.MethodGet, target, nil, "alice")
+		if response.Code != http.StatusOK {
+			t.Fatalf("GET %s: status=%d body=%s", target, response.Code, response.Body.String())
+		}
+		if got := response.Header().Get("Cache-Control"); got != want {
+			t.Errorf("GET %s: Cache-Control %q, want %q", target, got, want)
+		}
 	}
 }
 
@@ -179,7 +203,8 @@ func TestAClearedRowIsAnsweredByWhatTheStoreSays(t *testing.T) {
 	if served.Code != http.StatusBadGateway || responseCode(t, served) != "FILE_STORE_UNAVAILABLE" {
 		t.Fatalf("serve a version while the store is down: status=%d body=%s, want 502 FILE_STORE_UNAVAILABLE", served.Code, served.Body.String())
 	}
-	if served.Header().Get("Content-Disposition") != "" || served.Header().Get("ETag") != "" {
+	// Nor the version's year-long cache header, which would keep the failure in place of the bytes.
+	if served.Header().Get("Content-Disposition") != "" || served.Header().Get("ETag") != "" || served.Header().Get("Cache-Control") != "" {
 		t.Fatalf("a failed read sent the success headers: %v", served.Header())
 	}
 
@@ -190,6 +215,9 @@ func TestAClearedRowIsAnsweredByWhatTheStoreSays(t *testing.T) {
 	missing := dispatchRequest(t, handler, http.MethodGet, route, nil, "alice")
 	if missing.Code != http.StatusInternalServerError || responseCode(t, missing) != "FILE_MISSING" {
 		t.Fatalf("serve a version whose object is gone: status=%d body=%s, want 500 FILE_MISSING", missing.Code, missing.Body.String())
+	}
+	if got := missing.Header().Get("Cache-Control"); got != "" {
+		t.Fatalf("a version whose object is gone: Cache-Control %q, want none", got)
 	}
 
 	// Without a store at all, a cleared row is a configuration the server names: 503.
