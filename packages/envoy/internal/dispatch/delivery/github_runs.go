@@ -18,9 +18,9 @@ import (
 // "stale". A workflow run and a job draw from different GitHub conclusion vocabularies, and the
 // delivery_runs schema's check constraint accepts only "success", "failure", and "cancelled" for
 // a run (delivery_run_jobs accepts a wider set for a job). This package filters nothing: it is
-// the caller's job to map a run's Conclusion to model.DeliveryRunConclusion and drop or ignore a
-// value the schema's constraint would refuse, so an unrecognized or future GitHub conclusion
-// value is handled by that documented policy rather than causing this package to panic or guess.
+// the caller's job to map a run's Conclusion to DeliveryRunConclusion and drop or ignore a value
+// the schema's constraint would refuse, so an unrecognized or future GitHub conclusion value is
+// handled by that documented policy rather than causing this package to panic or guess.
 type FetchedRun struct {
 	RunID        int64
 	HeadSHA      string
@@ -39,6 +39,14 @@ type FetchedJob struct {
 	CompletedAt *time.Time
 	Conclusion  *string
 }
+
+// githubListPageSize bounds every Actions-API list page this file requests. GitHub's own
+// per_page cap is 100, but a page of 100 full workflow-run objects measures roughly 1.3 MB live
+// (githubapp.Client's own 1 MiB response-size cap, meant to guard against abuse, would then
+// refuse the read at around 75-80 results per page -- an order of magnitude below the 1,000-
+// result cap the windowed-bisection logic is built for) -- so pages here are sized well under
+// that measured ceiling instead of raising the shared security-relevant response limit.
+const githubListPageSize = 40
 
 // workflowRunsPayload is GET /repos/{owner}/{repo}/actions/workflows/{workflow_path}/runs's
 // answer, limited to the fields ListWorkflowRuns reads.
@@ -93,67 +101,34 @@ func fetchedRunFromItem(item workflowRunItem) FetchedRun {
 	return run
 }
 
-// minimumRunWindow mirrors minimumSearchWindow for ListWorkflowRuns' halving recursion.
-const minimumRunWindow = time.Second
-
 // ListWorkflowRuns lists every run of the workflow at workflowPath in owner/repo created in
 // [since, until), via GET
 // /repos/{owner}/{repo}/actions/workflows/{workflow_path}/runs?created=ISO..ISO (GitHub accepts
-// the workflow file's path, URL-encoded, in place of its numeric id). Paginated fully (per_page
-// 100) and, exactly like SearchMergedPullRequests, recursively halved at the window's midpoint
-// when a query's total_count exceeds 1,000 -- the Actions API shares the same per-query cap, and
-// the two halves are a half-open partition of the original window.
+// the workflow file's path, URL-encoded, in place of its numeric id). Paginated fully and halved
+// on overflow through the same fetchWindowed (windowed.go) SearchMergedPullRequests uses -- the
+// Actions API shares the same 1,000-result-per-query cap.
 func ListWorkflowRuns(ctx context.Context, client *githubapp.Client, owner, repo, workflowPath string, since, until time.Time) ([]FetchedRun, error) {
 	token, err := client.RepositoryToken(ctx, owner, repo)
 	if err != nil {
 		return nil, fmt.Errorf("mint installation token for %s/%s workflow runs: %w", owner, repo, err)
 	}
-	return listWorkflowRuns(ctx, client, token, owner, repo, workflowPath, since, until)
-}
-
-func listWorkflowRuns(ctx context.Context, client *githubapp.Client, token, owner, repo, workflowPath string, since, until time.Time) ([]FetchedRun, error) {
-	first, totalCount, err := fetchWorkflowRunsPage(ctx, client, token, owner, repo, workflowPath, since, until, 1)
-	if err != nil {
-		return nil, fmt.Errorf("list %s workflow runs for %s/%s in [%s, %s): %w", workflowPath, owner, repo, since, until, err)
+	scope := fmt.Sprintf("%s workflow runs for %s/%s", workflowPath, owner, repo)
+	fetchPage := func(page int, since, until time.Time) ([]FetchedRun, int, error) {
+		return fetchWorkflowRunsPage(ctx, client, token, owner, repo, workflowPath, since, until, page)
 	}
-
-	if totalCount > 1000 {
-		if until.Sub(since) <= minimumRunWindow {
-			return nil, fmt.Errorf("list %s workflow runs for %s/%s: %d results in the window [%s, %s), which cannot be narrowed further", workflowPath, owner, repo, totalCount, since, until)
-		}
-		mid := since.Add(until.Sub(since) / 2)
-		before, err := listWorkflowRuns(ctx, client, token, owner, repo, workflowPath, since, mid)
-		if err != nil {
-			return nil, err
-		}
-		after, err := listWorkflowRuns(ctx, client, token, owner, repo, workflowPath, mid, until)
-		if err != nil {
-			return nil, err
-		}
-		return append(before, after...), nil
-	}
-
-	results := first
-	for page := 2; len(results) < totalCount; page++ {
-		items, _, err := fetchWorkflowRunsPage(ctx, client, token, owner, repo, workflowPath, since, until, page)
-		if err != nil {
-			return nil, fmt.Errorf("list %s workflow runs for %s/%s in [%s, %s): %w", workflowPath, owner, repo, since, until, err)
-		}
-		if len(items) == 0 {
-			break
-		}
-		results = append(results, items...)
-	}
-	return results, nil
+	return fetchWindowed(since, until, scope, fetchPage)
 }
 
 func fetchWorkflowRunsPage(ctx context.Context, client *githubapp.Client, token, owner, repo, workflowPath string, since, until time.Time, page int) ([]FetchedRun, int, error) {
 	created := since.UTC().Format(time.RFC3339) + ".." + until.UTC().Format(time.RFC3339)
-	path := fmt.Sprintf("/repos/%s/%s/actions/workflows/%s/runs?created=%s&per_page=100&page=%d",
-		url.PathEscape(owner), url.PathEscape(repo), url.PathEscape(workflowPath), url.QueryEscape(created), page)
-	body, status, _, err := client.Read(ctx, token, path)
+	path := fmt.Sprintf("/repos/%s/%s/actions/workflows/%s/runs?created=%s&per_page=%d&page=%d",
+		url.PathEscape(owner), url.PathEscape(repo), url.PathEscape(workflowPath), url.QueryEscape(created), githubListPageSize, page)
+	body, status, header, err := client.Read(ctx, token, path)
 	if err != nil {
 		return nil, 0, fmt.Errorf("page %d: %w", page, err)
+	}
+	if limited := githubapp.RateLimit(status, header, body); limited != nil {
+		return nil, 0, fmt.Errorf("page %d: %w", page, limited)
 	}
 	if status != http.StatusOK {
 		return nil, 0, fmt.Errorf("page %d: status %d: %s", page, status, body)
@@ -167,6 +142,35 @@ func fetchWorkflowRunsPage(ctx context.Context, client *githubapp.Client, token,
 		runs[i] = fetchedRunFromItem(item)
 	}
 	return runs, payload.TotalCount, nil
+}
+
+// FetchWorkflowRun fetches one run by id via GET /repos/{owner}/{repo}/actions/runs/{run_id} --
+// the same object shape as one element of ListWorkflowRuns' workflow_runs array, decoded with the
+// same workflowRunItem/fetchedRunFromItem. Used by intake.go to re-verify a live NATS
+// workflow-run envelope's run_id against GitHub's own answer before trusting anything about it:
+// an Envoy /v1 bearer can publish an arbitrary envelope naming any repo/run_id/conclusion, so the
+// envelope is only ever used to know which run to look up, never to supply the facts stored.
+func FetchWorkflowRun(ctx context.Context, client *githubapp.Client, owner, repo string, runID int64) (FetchedRun, error) {
+	token, err := client.RepositoryToken(ctx, owner, repo)
+	if err != nil {
+		return FetchedRun{}, fmt.Errorf("mint installation token for %s/%s run %d: %w", owner, repo, runID, err)
+	}
+	path := fmt.Sprintf("/repos/%s/%s/actions/runs/%d", url.PathEscape(owner), url.PathEscape(repo), runID)
+	body, status, header, err := client.Read(ctx, token, path)
+	if err != nil {
+		return FetchedRun{}, fmt.Errorf("fetch %s/%s run %d: %w", owner, repo, runID, err)
+	}
+	if limited := githubapp.RateLimit(status, header, body); limited != nil {
+		return FetchedRun{}, fmt.Errorf("fetch %s/%s run %d: %w", owner, repo, runID, limited)
+	}
+	if status != http.StatusOK {
+		return FetchedRun{}, fmt.Errorf("fetch %s/%s run %d: status %d: %s", owner, repo, runID, status, body)
+	}
+	var item workflowRunItem
+	if err := json.Unmarshal(body, &item); err != nil {
+		return FetchedRun{}, fmt.Errorf("decode %s/%s run %d: %w", owner, repo, runID, err)
+	}
+	return fetchedRunFromItem(item), nil
 }
 
 // jobsPayload is GET /repos/{owner}/{repo}/actions/runs/{run_id}/jobs's answer, limited to the
@@ -196,11 +200,14 @@ func ListWorkflowRunJobs(ctx context.Context, client *githubapp.Client, owner, r
 	var jobs []FetchedJob
 	total := -1
 	for page := 1; total < 0 || len(jobs) < total; page++ {
-		path := fmt.Sprintf("/repos/%s/%s/actions/runs/%d/jobs?filter=latest&per_page=100&page=%d",
-			url.PathEscape(owner), url.PathEscape(repo), runID, page)
-		body, status, _, err := client.Read(ctx, token, path)
+		path := fmt.Sprintf("/repos/%s/%s/actions/runs/%d/jobs?filter=latest&per_page=%d&page=%d",
+			url.PathEscape(owner), url.PathEscape(repo), runID, githubListPageSize, page)
+		body, status, header, err := client.Read(ctx, token, path)
 		if err != nil {
 			return nil, fmt.Errorf("list jobs of %s/%s run %d (page %d): %w", owner, repo, runID, page, err)
+		}
+		if limited := githubapp.RateLimit(status, header, body); limited != nil {
+			return nil, fmt.Errorf("list jobs of %s/%s run %d (page %d): %w", owner, repo, runID, page, limited)
 		}
 		if status != http.StatusOK {
 			return nil, fmt.Errorf("list jobs of %s/%s run %d (page %d): status %d: %s", owner, repo, runID, page, status, body)

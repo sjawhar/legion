@@ -27,7 +27,6 @@ import (
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
-	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
@@ -64,14 +63,17 @@ func (in *Intake) HasApp() bool {
 // Run subscribes to the GitHub events this slice needs and processes them until ctx is
 // cancelled. Idle (logged once) without GitHub App credentials or a configured delivery_settings
 // row, mirroring architecture.Run's shape. Subject resolution (which repository, which workflow
-// filenames) reads delivery_settings once at startup: a later settings change takes effect on
-// the next restart, not live -- the five-minute reconcile reads settings fresh on every tick, so
-// facts stay correct even if intake's own subjects lag a restart behind a settings edit.
+// filenames) reads delivery_settings on every settingsPollInterval tick (not once at startup): a
+// settings change rebinds the durable consumer's filter subjects in place (bind's UpdateConsumer
+// path) within one poll interval, with no restart needed.
 //
-// This slice does not subscribe to default-branch push events (the plan's "defense against a
-// dropped workflow_run delivery" is a cheap nice-to-have, not a correctness requirement): the
-// reconcile's five-minute cycle is the documented backstop for a missed event, and
-// delivery_settings carries no default-branch field to build that subject from.
+// The PR-checks workflow subscription is live-reachable only for a fork-originated pull request:
+// Envoy's own webhook normalizer (internal/contracts/normalize.go, untouched by this package)
+// drops a workflow_run envelope whose pull_requests array is non-empty, which GitHub populates
+// for a same-repo PR's run but reports empty for a cross-fork one. For the common same-repo case
+// this subscription never fires at all; the five-minute reconcile is the only path that ever
+// records those runs. Kept rather than removed because it is the only live-update path for the
+// fork case, which does reach it.
 //
 // bus.Client holds only one JetStream subscription at a time (a later Subscribe call
 // unsubscribes an earlier one, per its own doc comment) -- so this is one durable consumer with
@@ -82,53 +84,84 @@ func (in *Intake) Run(ctx context.Context) {
 		slog.Info("dispatch delivery: no GitHub App key — intake is idle")
 		return
 	}
-	settings, err := GetSettings(ctx, in.pool)
-	if err != nil {
-		if errors.Is(err, ErrNoSettings) {
-			slog.Info("dispatch delivery: delivery is not configured — intake is idle")
+
+	var sub *natsgo.Subscription
+	var boundSubjects []string
+	defer func() {
+		if sub != nil {
+			_ = sub.Unsubscribe()
+		}
+	}()
+
+	rebind := func() {
+		settings, err := GetSettings(ctx, in.pool)
+		if err != nil {
+			if errors.Is(err, ErrNoSettings) {
+				return
+			}
+			slog.Error("dispatch delivery: read settings for intake", "error", err)
 			return
 		}
-		slog.Error("dispatch delivery: read settings for intake", "error", err)
-		return
-	}
-	owner, repo, err := splitRepo(settings.DeployRepo)
-	if err != nil {
-		slog.Error("dispatch delivery: deploy_repo setting", "error", err)
-		return
+		owner, repo, err := splitRepo(settings.DeployRepo)
+		if err != nil {
+			slog.Error("dispatch delivery: deploy_repo setting", "error", err)
+			return
+		}
+
+		subjects := []string{
+			"notifications.github.*.*.pr.*",
+			contracts.GithubWorkflowSubject(owner, repo, path.Base(settings.DeployWorkflowPath), ">"),
+		}
+		if settings.PRChecksWorkflowPath != settings.DeployWorkflowPath {
+			subjects = append(subjects, contracts.GithubWorkflowSubject(owner, repo, path.Base(settings.PRChecksWorkflowPath), ">"))
+		}
+		if sub != nil && slices.Equal(subjects, boundSubjects) {
+			return
+		}
+		if sub != nil {
+			_ = sub.Unsubscribe()
+			sub = nil
+		}
+		newSub, ok := in.bind(subjects, func(ctx context.Context, payload map[string]string) error {
+			return in.route(ctx, settings, owner, repo, payload)
+		})
+		if !ok {
+			return
+		}
+		sub, boundSubjects = newSub, subjects
 	}
 
-	subjects := []string{
-		"notifications.github.*.*.pr.*",
-		contracts.GithubWorkflowSubject(owner, repo, path.Base(settings.DeployWorkflowPath), ">"),
+	rebind()
+	ticker := time.NewTicker(settingsPollInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			rebind()
+		}
 	}
-	if settings.PRChecksWorkflowPath != settings.DeployWorkflowPath {
-		subjects = append(subjects, contracts.GithubWorkflowSubject(owner, repo, path.Base(settings.PRChecksWorkflowPath), ">"))
-	}
-
-	sub, ok := in.bind(subjects, func(ctx context.Context, payload map[string]string) error {
-		return in.route(ctx, settings, owner, repo, payload)
-	})
-	if !ok {
-		return
-	}
-	defer func() { _ = sub.Unsubscribe() }()
-
-	<-ctx.Done()
 }
+
+// settingsPollInterval is how often Run re-reads delivery_settings to notice a changed deploy
+// repository or workflow path and rebind the NATS consumer's filter subjects -- short enough that
+// a settings PUT takes effect in practice without an operator restarting the server.
+const settingsPollInterval = 30 * time.Second
 
 // route dispatches one decoded payload to the PR or workflow handler by its kind field, and to
 // the right workflow kind (deploy or PR-checks) by comparing the payload's own workflow path
 // against the two configured ones.
-func (in *Intake) route(ctx context.Context, settings model.DeliverySettings, owner, repo string, payload map[string]string) error {
+func (in *Intake) route(ctx context.Context, settings DeliverySettings, owner, repo string, payload map[string]string) error {
 	switch payload["kind"] {
 	case "pr":
 		return in.handlePullRequestEnvelope(ctx, settings, payload)
 	case "workflow":
 		switch payload["path"] {
 		case settings.DeployWorkflowPath:
-			return in.handleWorkflowEnvelope(ctx, settings, model.DeliveryRunKindDeploy, payload)
+			return in.handleWorkflowEnvelope(ctx, settings, DeliveryRunKindDeploy, payload)
 		case settings.PRChecksWorkflowPath:
-			return in.handleWorkflowEnvelope(ctx, settings, model.DeliveryRunKindPRChecks, payload)
+			return in.handleWorkflowEnvelope(ctx, settings, DeliveryRunKindPRChecks, payload)
 		default:
 			// Neither configured workflow: the filter subjects above are already scoped to
 			// owner/repo and the two configured workflow filenames, so this should not happen in
@@ -169,12 +202,17 @@ func (in *Intake) bind(subjects []string, handle func(context.Context, map[strin
 		slog.Error("dispatch delivery: look up NATS consumer", "name", deliveryConsumerName, "error", err)
 		return nil, false
 	case !slices.Equal(info.Config.FilterSubjects, subjects):
-		// A settings change moved these subjects (e.g. a different deploy repository): slice 1
-		// does not reconcile a drifted filter live, matching the documented "takes effect on next
-		// restart" limitation in Run's doc comment. Refusing loudly here, rather than silently
-		// binding to the stale subjects, is more honest than pretending they still match.
-		slog.Error("dispatch delivery: NATS consumer subjects have drifted from settings; restart the server to pick it up", "name", deliveryConsumerName, "configured_subjects", info.Config.FilterSubjects, "wanted_subjects", subjects)
-		return nil, false
+		// A settings change (a different deploy repository, a different workflow path) moved
+		// these subjects: update the existing durable's filter in place, preserving its
+		// DeliverSubject and delivery cursor, so a settings PUT takes effect on its own --
+		// without an operator having to notice a log line and restart the server.
+		config := info.Config
+		config.FilterSubjects = subjects
+		if _, err := in.nats.JS().UpdateConsumer(bus.Stream, &config); err != nil {
+			slog.Error("dispatch delivery: update NATS consumer subjects after a settings change", "name", deliveryConsumerName, "configured_subjects", info.Config.FilterSubjects, "wanted_subjects", subjects, "error", err)
+			return nil, false
+		}
+		slog.Info("dispatch delivery: NATS consumer subjects updated after a settings change", "name", deliveryConsumerName, "subjects", subjects)
 	}
 	sub, err := in.nats.Subscribe("", func(msg *natsgo.Msg) {
 		in.deliver(msg, handle)
@@ -215,7 +253,7 @@ func (in *Intake) deliver(msg *natsgo.Msg, handle func(context.Context, map[stri
 // handlePullRequestEnvelope processes one `kind:"pr"` envelope. Only a merge (action "closed",
 // merged "true") does anything; author and excluded-repository checks run on the envelope's own
 // fields first, with no GitHub call, so a merge by anyone outside the population costs nothing.
-func (in *Intake) handlePullRequestEnvelope(ctx context.Context, settings model.DeliverySettings, payload map[string]string) error {
+func (in *Intake) handlePullRequestEnvelope(ctx context.Context, settings DeliverySettings, payload map[string]string) error {
 	if payload["kind"] != "pr" || payload["action"] != "closed" || payload["merged"] != "true" {
 		return nil
 	}
@@ -262,13 +300,13 @@ func (in *Intake) handlePullRequestEnvelope(ctx context.Context, settings model.
 		return DeletePullRequest(ctx, in.pool, repoFull, number)
 	}
 
-	sessions, err := in.fetchSessionTrailers(ctx, owner, repo, number)
+	sessions, err := fetchSessionTrailers(ctx, in.github, owner, repo, number)
 	if err != nil {
 		slog.Warn("dispatch delivery: fetch session trailers", "repo", repoFull, "number", number, "error", err)
 	}
-	issueKey := in.resolveIssueKey(ctx, fetched.Title, fetched.Body)
+	issueKey := resolveIssueKey(ctx, in.pool, fetched.Title, fetched.Body)
 
-	return UpsertPullRequest(ctx, in.pool, model.DeliveryPullRequest{
+	return UpsertPullRequest(ctx, in.pool, DeliveryPullRequest{
 		Repo: repoFull, Number: number, Title: fetched.Title, URL: fetched.URL, Author: fetched.Author,
 		CreatedAt: &fetched.CreatedAt, MergedAt: fetched.MergedAt, FirstCommitAt: fetched.FirstCommitAt,
 		MergeCommitSHA: fetched.MergeCommitSHA, Additions: fetched.Additions, Deletions: fetched.Deletions,
@@ -286,9 +324,14 @@ func liveIntakeWindow() TimeWindow {
 
 // handleWorkflowEnvelope processes one `kind:"workflow"` envelope for the workflow bound to kind
 // (the deploy workflow or the PR-checks workflow, whichever subject this consumer was bound to).
-// A run row is written for every action (so an in-progress run appears before it concludes, per
-// CONTRACT.md); jobs are fetched and written only once the run has actually completed.
-func (in *Intake) handleWorkflowEnvelope(ctx context.Context, settings model.DeliverySettings, kind model.DeliveryRunKind, payload map[string]string) error {
+// The envelope's repo/run_id are used only to know which run to ask GitHub about: every stored
+// field (head SHA, timing, conclusion, URL, PR number) comes from FetchWorkflowRun's own answer,
+// never trusted from the envelope directly -- an Envoy /v1 bearer (any agent session) can publish
+// an arbitrary envelope naming any repo/run_id/conclusion/timing, and this is the one place a
+// forged value could otherwise rewrite a real run's stored facts. A run row is written whatever
+// its current state (so an in-progress run appears before it concludes, per CONTRACT.md); jobs
+// are fetched and written only once GitHub reports the run concluded.
+func (in *Intake) handleWorkflowEnvelope(ctx context.Context, settings DeliverySettings, kind DeliveryRunKind, payload map[string]string) error {
 	if payload["kind"] != "workflow" {
 		return nil
 	}
@@ -301,45 +344,21 @@ func (in *Intake) handleWorkflowEnvelope(ctx context.Context, settings model.Del
 	if err != nil {
 		return fmt.Errorf("workflow envelope: malformed run_id %q: %w", payload["run_id"], err)
 	}
-	headSHA := payload["head_sha"]
-	headCommitAt, err := in.headCommitTime(ctx, owner, repo, headSHA)
+
+	fetched, err := FetchWorkflowRun(ctx, in.github, owner, repo, runID)
 	if err != nil {
-		// Without the head commit's timestamp the row would violate head_commit_at's not-null
-		// constraint and containment would have nothing correct to compare a PR's merge time
-		// against; skip this event and let the reconcile's own run listing (which fetches the
-		// commit timestamp the same way) fill it in.
-		return fmt.Errorf("resolve head commit %s of run %d: %w", headSHA, runID, err)
-	}
-	startedAt, err := time.Parse(time.RFC3339, payload["run_started_at"])
-	if err != nil {
-		return fmt.Errorf("workflow envelope: malformed run_started_at %q: %w", payload["run_started_at"], err)
+		return fmt.Errorf("verify run %d against GitHub: %w", runID, err)
 	}
 
-	var prNumber *int
-	if numbers := strings.Split(payload["pr_numbers"], ","); len(numbers) == 1 && numbers[0] != "" {
-		if n, err := strconv.Atoi(strings.TrimSpace(numbers[0])); err == nil {
-			prNumber = &n
-		}
-	}
-
-	var completedAt *time.Time
-	var conclusion *model.DeliveryRunConclusion
-	if payload["action"] == "completed" {
-		if updatedAt, err := time.Parse(time.RFC3339, payload["updated_at"]); err == nil {
-			completedAt = &updatedAt
-		}
-		conclusion = mapRunConclusion(payload["conclusion"])
-	}
-
-	if err := UpsertRun(ctx, in.pool, model.DeliveryRun{
-		Repo: repoFull, RunID: runID, Kind: kind, PRNumber: prNumber, HeadSHA: headSHA,
-		HeadCommitAt: headCommitAt, StartedAt: startedAt, CompletedAt: completedAt, Conclusion: conclusion,
-		URL: payload["url"],
+	if err := UpsertRun(ctx, in.pool, DeliveryRun{
+		Repo: repoFull, RunID: runID, Kind: kind, PRNumber: fetched.PRNumber, HeadSHA: fetched.HeadSHA,
+		HeadCommitAt: fetched.HeadCommitAt, StartedAt: fetched.StartedAt, CompletedAt: fetched.CompletedAt,
+		Conclusion: mapRunConclusionPtr(fetched.Conclusion), URL: fetched.URL,
 	}); err != nil {
 		return fmt.Errorf("upsert run %d: %w", runID, err)
 	}
 
-	if payload["action"] != "completed" {
+	if fetched.CompletedAt == nil {
 		return nil
 	}
 	fetchedJobs, err := ListWorkflowRunJobs(ctx, in.github, owner, repo, runID)
@@ -348,45 +367,14 @@ func (in *Intake) handleWorkflowEnvelope(ctx context.Context, settings model.Del
 		// jobs too and will complete them.
 		return fmt.Errorf("fetch jobs of run %d: %w", runID, err)
 	}
-	jobs := make([]model.DeliveryRunJob, len(fetchedJobs))
+	jobs := make([]DeliveryRunJob, len(fetchedJobs))
 	for i, job := range fetchedJobs {
-		jobs[i] = model.DeliveryRunJob{
+		jobs[i] = DeliveryRunJob{
 			Repo: repoFull, RunID: runID, Name: job.Name, StartedAt: job.StartedAt,
 			CompletedAt: job.CompletedAt, Conclusion: mapJobConclusion(job.Conclusion),
 		}
 	}
 	return UpsertRunJobs(ctx, in.pool, repoFull, runID, jobs)
-}
-
-// headCommitTime resolves a commit's authored (or committed) time via GET
-// /repos/{owner}/{repo}/commits/{sha}, reusing github_prs.go's commitPayload/commitDate (the
-// response is exactly one such object, not a list).
-func (in *Intake) headCommitTime(ctx context.Context, owner, repo, sha string) (time.Time, error) {
-	token, err := in.github.RepositoryToken(ctx, owner, repo)
-	if err != nil {
-		return time.Time{}, fmt.Errorf("mint installation token for %s/%s: %w", owner, repo, err)
-	}
-	return fetchCommitDate(ctx, in.github, token, owner, repo, sha)
-}
-
-// fetchCommitDate fetches one commit via GET /repos/{owner}/{repo}/commits/{sha} and reads its
-// authored (or committed) time, reusing github_prs.go's commitPayload/commitDate -- that
-// endpoint's response is exactly one such object, not a list. Shared by Intake.headCommitTime and
-// Reconcile.headCommitTime, both of which already hold a minted token.
-func fetchCommitDate(ctx context.Context, client *githubapp.Client, token, owner, repo, sha string) (time.Time, error) {
-	commitPath := fmt.Sprintf("/repos/%s/%s/commits/%s", url.PathEscape(owner), url.PathEscape(repo), url.PathEscape(sha))
-	body, status, _, err := client.Read(ctx, token, commitPath)
-	if err != nil {
-		return time.Time{}, fmt.Errorf("fetch commit %s: %w", sha, err)
-	}
-	if status != http.StatusOK {
-		return time.Time{}, fmt.Errorf("fetch commit %s: status %d: %s", sha, status, body)
-	}
-	var payload commitPayload
-	if err := json.Unmarshal(body, &payload); err != nil {
-		return time.Time{}, fmt.Errorf("decode commit %s: %w", sha, err)
-	}
-	return commitDate(payload)
 }
 
 // commitMessagePayload is one element of GET /repos/{owner}/{repo}/pulls/{number}/commits,
@@ -404,8 +392,12 @@ const maxCommitPages = 5
 
 // fetchSessionTrailers reads every `Omp-Session:` commit trailer across a pull request's commits
 // (LEGION-294's rule, ported from the prototype's `session_ids`), first-seen order, no repeats.
-func (in *Intake) fetchSessionTrailers(ctx context.Context, owner, repo string, number int) ([]string, error) {
-	token, err := in.github.RepositoryToken(ctx, owner, repo)
+// Shared by Intake and Reconcile.reconcilePartialPullRequests (both complete a PR's session
+// attribution the same way; reconcile must resolve this itself rather than carrying forward
+// whatever a stale row already had, see store.go's UpsertPullRequest doc comment on why a partial
+// row is never allowed to regress a complete one's attribution).
+func fetchSessionTrailers(ctx context.Context, client *githubapp.Client, owner, repo string, number int) ([]string, error) {
+	token, err := client.RepositoryToken(ctx, owner, repo)
 	if err != nil {
 		return nil, fmt.Errorf("mint installation token for %s/%s PR #%d: %w", owner, repo, number, err)
 	}
@@ -413,9 +405,12 @@ func (in *Intake) fetchSessionTrailers(ctx context.Context, owner, repo string, 
 	seen := map[string]bool{}
 	for page := 1; page <= maxCommitPages; page++ {
 		commitsPath := fmt.Sprintf("/repos/%s/%s/pulls/%d/commits?per_page=100&page=%d", url.PathEscape(owner), url.PathEscape(repo), number, page)
-		body, status, _, err := in.github.Read(ctx, token, commitsPath)
+		body, status, header, err := client.Read(ctx, token, commitsPath)
 		if err != nil {
 			return sessions, fmt.Errorf("fetch commits of PR #%d page %d: %w", number, page, err)
+		}
+		if limited := githubapp.RateLimit(status, header, body); limited != nil {
+			return sessions, fmt.Errorf("fetch commits of PR #%d page %d: %w", number, page, limited)
 		}
 		if status != http.StatusOK {
 			return sessions, fmt.Errorf("fetch commits of PR #%d page %d: status %d", number, page, status)
@@ -444,11 +439,12 @@ func (in *Intake) fetchSessionTrailers(ctx context.Context, owner, repo string, 
 // external-links/branch/commit fallback chain is not ported -- see the plan's Risks section): the
 // first bare Dispatch issue key title or body names, title scanned before body, that Dispatch
 // actually has. A key nothing stored names is never accepted ("never point at an issue that
-// doesn't exist").
-func (in *Intake) resolveIssueKey(ctx context.Context, title, body string) *string {
+// doesn't exist"). A package-level function (not a method) so Intake and Reconcile, two otherwise
+// unrelated structs that both need it, share one implementation instead of two identical copies.
+func resolveIssueKey(ctx context.Context, pool *store.Pool, title, body string) *string {
 	for _, candidate := range issueKeyCandidate.FindAllString(title+"\n"+body, -1) {
 		var key string
-		if err := in.pool.QueryRow(ctx, "select key from issues where key = $1", candidate).Scan(&key); err == nil {
+		if err := pool.QueryRow(ctx, "select key from issues where key = $1", candidate).Scan(&key); err == nil {
 			return &key
 		}
 	}
@@ -458,16 +454,16 @@ func (in *Intake) resolveIssueKey(ctx context.Context, title, body string) *stri
 // mapRunConclusion maps GitHub's raw run conclusion to this schema's narrower check constraint
 // (success, failure, cancelled only); any other value (including an empty string for a run still
 // in progress) is nil, matching FetchedRun's documented policy.
-func mapRunConclusion(raw string) *model.DeliveryRunConclusion {
+func mapRunConclusion(raw string) *DeliveryRunConclusion {
 	switch raw {
 	case "success":
-		c := model.DeliveryConclusionSuccess
+		c := DeliveryRunConclusionSuccess
 		return &c
 	case "failure":
-		c := model.DeliveryConclusionFailure
+		c := DeliveryRunConclusionFailure
 		return &c
 	case "cancelled":
-		c := model.DeliveryConclusionCancelled
+		c := DeliveryRunConclusionCancelled
 		return &c
 	default:
 		return nil
@@ -476,25 +472,25 @@ func mapRunConclusion(raw string) *model.DeliveryRunConclusion {
 
 // mapJobConclusion is mapRunConclusion's job-level counterpart: a job's schema accepts a wider
 // set (skipped, timed_out in addition to the three a run accepts).
-func mapJobConclusion(raw *string) *model.DeliveryRunConclusion {
+func mapJobConclusion(raw *string) *DeliveryJobConclusion {
 	if raw == nil {
 		return nil
 	}
 	switch *raw {
 	case "success":
-		c := model.DeliveryConclusionSuccess
+		c := DeliveryJobConclusionSuccess
 		return &c
 	case "failure":
-		c := model.DeliveryConclusionFailure
+		c := DeliveryJobConclusionFailure
 		return &c
 	case "cancelled":
-		c := model.DeliveryConclusionCancelled
+		c := DeliveryJobConclusionCancelled
 		return &c
 	case "skipped":
-		c := model.DeliveryConclusionSkipped
+		c := DeliveryJobConclusionSkipped
 		return &c
 	case "timed_out":
-		c := model.DeliveryConclusionTimedOut
+		c := DeliveryJobConclusionTimedOut
 		return &c
 	default:
 		return nil

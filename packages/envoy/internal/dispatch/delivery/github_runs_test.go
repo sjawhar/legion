@@ -166,16 +166,17 @@ func TestListWorkflowRunsHalvesOnOverflowWithoutGapOrOverlap(t *testing.T) {
 	if len(windows) != 3 {
 		t.Fatalf("requests made = %d, want 3 (original + two halves)", len(windows))
 	}
-	mid := since.Add(until.Sub(since) / 2).UTC().Format(time.RFC3339)
+	// GitHub's created:A..B qualifier is inclusive on BOTH ends, so the second half must start
+	// one second after the midpoint (GitHub's own query granularity), not at the midpoint itself
+	// -- otherwise a run created exactly at the midpoint would be counted in both halves.
+	mid := since.Add(until.Sub(since) / 2)
 	first, second := windows[1], windows[2]
-	if first.since != since.UTC().Format(time.RFC3339) || first.until != mid {
-		t.Fatalf("first half = %+v, want [%s, %s)", first, since.UTC().Format(time.RFC3339), mid)
+	if first.since != since.UTC().Format(time.RFC3339) || first.until != mid.UTC().Format(time.RFC3339) {
+		t.Fatalf("first half = %+v, want [%s, %s]", first, since.UTC().Format(time.RFC3339), mid.UTC().Format(time.RFC3339))
 	}
-	if second.since != mid || second.until != until.UTC().Format(time.RFC3339) {
-		t.Fatalf("second half = %+v, want [%s, %s)", second, mid, until.UTC().Format(time.RFC3339))
-	}
-	if first.until != second.since {
-		t.Fatalf("halves do not meet at the midpoint: first ends %s, second starts %s", first.until, second.since)
+	wantSecondSince := mid.Add(time.Second).UTC().Format(time.RFC3339)
+	if second.since != wantSecondSince || second.until != until.UTC().Format(time.RFC3339) {
+		t.Fatalf("second half = %+v, want [%s, %s]", second, wantSecondSince, until.UTC().Format(time.RFC3339))
 	}
 }
 

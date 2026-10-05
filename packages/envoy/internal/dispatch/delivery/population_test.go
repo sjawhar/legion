@@ -3,12 +3,10 @@ package delivery
 import (
 	"testing"
 	"time"
-
-	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
-func testSettings() model.DeliverySettings {
-	return model.DeliverySettings{
+func testSettings() DeliverySettings {
+	return DeliverySettings{
 		DeployRepo:        "acme/widgets",
 		PopulationAuthors: []string{"octocat", "octocat-agent", "octocat-agent[bot]"},
 		ExcludedRepos:     []string{"acme/dojo", "acme/widgets-smoke"},

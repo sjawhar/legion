@@ -18,7 +18,7 @@ async function seedDeliveryFixture(): Promise<void> {
        singleton, deploy_repo, deploy_workflow_path, production_job_name,
        pr_checks_workflow_path, population_authors, excluded_repos, updated_by
      ) VALUES (
-       true, 'acme/widgets', '.github/workflows/deploy.yml', 'production-apply / production-apply',
+       true, 'acme/widgets', '.github/workflows/deploy.yml', 'widgets-release / widgets-release',
        '.github/workflows/pr-checks.yml', ARRAY['octocat'], ARRAY[]::text[], '{"kind":"system","id":"e2e-seed"}'
      )`,
     `INSERT INTO delivery_pull_requests (
@@ -36,9 +36,27 @@ async function seedDeliveryFixture(): Promise<void> {
        'https://github.com/acme/widgets/actions/runs/500'
      )`,
     `INSERT INTO delivery_run_jobs (repo, run_id, name, started_at, completed_at, conclusion)
-     VALUES ('acme/widgets', 500, 'production-apply / production-apply', '2024-06-01T01:30:00Z', '2024-06-01T01:40:00Z', 'success')`
+     VALUES ('acme/widgets', 500, 'widgets-release / widgets-release', '2024-06-01T01:30:00Z', '2024-06-01T01:40:00Z', 'success')`
   );
 }
+
+test("the Delivery sidebar nav entry opens the delivery timeline", async ({ browser }) => {
+  await seedDeliveryFixture();
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+
+  // Start from another page (the Inbox, at "/") rather than navigating to /delivery directly,
+  // so this exercises the Sidebar's own "Delivery" rail link (`features/sidebar/Sidebar.tsx`)
+  // rather than only the route itself.
+  await page.goto("/");
+  await expect(page.getByRole("link", { name: "Delivery" })).toBeVisible();
+  await page.getByRole("link", { name: "Delivery" }).click();
+
+  await expect(page).toHaveURL(/\/delivery$/);
+  await expect(page.getByRole("heading", { name: "Delivery" })).toBeVisible();
+
+  await context.close();
+});
 
 test("the delivery timeline shows seeded merges and deploys, filters by facet, and drills into a PR", async ({
   browser,
@@ -55,16 +73,26 @@ test("the delivery timeline shows seeded merges and deploys, filters by facet, a
   await expect(page.getByText(/reconcile never ran/i)).toBeVisible();
   await expect(page.getByText(/events never received/i)).toBeVisible();
 
+  // The default view is the timeline chart (ECharts, canvas renderer): assert it has actually
+  // mounted and painted before switching to the list, so a regression of the chart's async-init
+  // race (it used to stay blank whenever the data effect ran before `echarts.init` resolved) is
+  // caught here instead of going unnoticed, since every other assertion below runs after the
+  // list view replaces it.
+  const chartCanvas = page.locator("canvas").first();
+  await expect(chartCanvas).toBeVisible();
+  const chartBox = await chartCanvas.boundingBox();
+  expect(chartBox?.width).toBeGreaterThan(0);
+  expect(chartBox?.height).toBeGreaterThan(0);
+
   // Switch to the list view, where both seeded PRs show as rows.
   await page.getByRole("button", { name: "Show list" }).click();
   await expect(page.getByText("feat: a shipped widget")).toBeVisible();
   await expect(page.getByText("feat: a waiting widget")).toBeVisible();
 
-  // The Repository facet narrows the list; acme/widgets is the only repository seeded, so
-  // selecting it is a no-op on the count but proves the picker and the client-side filter run.
-  // MultiSelect's trigger is a button named for the facet (plus an optional " · N" selection
-  // count); its popover exposes each option with role "option" (lib/filters.ts's shared pattern
-  // for this same component elsewhere in the SPA).
+  // The Repository facet narrows the list server-side; acme/widgets is the only repository
+  // seeded, so selecting it is a no-op on the result but proves the picker and the facet
+  // round-trip to the server run. MultiSelect's trigger is a button named for the facet (plus an
+  // optional " · N" selection count); its popover exposes each option with role "option".
   await page.getByRole("button", { name: /^Repository( · \d+)?$/ }).click();
   await page.getByRole("option", { exact: true, name: "acme/widgets" }).click();
   await page.keyboard.press("Escape");

@@ -8,9 +8,13 @@
 -- none of that fits a value nothing else owns.
 --
 -- last_event_at and last_reconcile_at are the Delivery page's freshness row: the last GitHub
--- event the intake consumer processed, and the last time the five-minute reconcile completed.
--- They live here rather than a fourth table because they are exactly one row of operational
--- state with no identity of their own.
+-- event the intake consumer processed, and the last time the five-minute reconcile *completed
+-- successfully*. They live here rather than a fourth table because they are exactly one row of
+-- operational state with no identity of their own. last_reconcile_at does not advance on a failed
+-- pass (a missing permission, a rate limit, any other GitHub or store error): last_error carries
+-- that pass's failure instead, cleared the next time a pass succeeds, so the freshness row can
+-- distinguish "stale because nothing's happened" from "stale because something's broken" instead
+-- of reporting a healthy timestamp for a reconcile that silently stopped doing anything.
 create table delivery_settings (
   singleton boolean primary key default true check (singleton),
   deploy_repo text not null,
@@ -21,6 +25,7 @@ create table delivery_settings (
   excluded_repos text[] not null default '{}',
   last_event_at timestamptz,
   last_reconcile_at timestamptz,
+  last_error text,
   updated_by jsonb not null,
   updated_at timestamptz not null default now()
 );

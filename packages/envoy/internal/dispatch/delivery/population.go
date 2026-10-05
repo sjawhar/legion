@@ -8,8 +8,6 @@ import (
 	"regexp"
 	"strings"
 	"time"
-
-	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
 // TimeWindow is a half-open [Start, End) interval.
@@ -46,7 +44,7 @@ var revertTitle = regexp.MustCompile(`(?i)^revert\b`)
 // the caller is responsible for passing author strings in GitHub's own form, [bot] suffix
 // included where GitHub adds one, matching settings.PopulationAuthors entries exactly), pr.MergedAt
 // is inside window, and pr is not a task PR per IsTaskPR for the configured deploy repo.
-func IsPopulationPR(pr RawPullRequest, settings model.DeliverySettings, window TimeWindow) (bool, error) {
+func IsPopulationPR(pr RawPullRequest, settings DeliverySettings, window TimeWindow) (bool, error) {
 	for _, excluded := range settings.ExcludedRepos {
 		if pr.Repo == excluded {
 			return false, nil
@@ -68,20 +66,25 @@ func IsPopulationPR(pr RawPullRequest, settings model.DeliverySettings, window T
 		return false, nil
 	}
 
-	isTask, err := IsTaskPR(pr.Repo, pr.Labels, settings)
+	isTask, err := IsTaskPR(pr.Repo, pr.Number, pr.Labels, settings)
 	if err != nil {
 		return false, err
 	}
 	return !isTask, nil
 }
 
-// IsTaskPR reports LEGION-294's task-PR rule, scoped to the configured deploy repository (the
-// only repository in this system with a task/non-task labelling workflow): true when "task" is
-// among pr's labels, false when "non-task" is, and an error naming the PR when it is a deploy-repo
-// PR with NEITHER label (an unclassified PR -- surfacing this loudly is the point: the Python
-// reference's is_task_pr raises for exactly this case rather than guessing). A PR outside the
-// deploy repository is never a task PR (there is no such workflow anywhere else) and never errors.
-func IsTaskPR(repo string, labels []string, settings model.DeliverySettings) (bool, error) {
+// IsTaskPR reports LEGION-294's task-PR rule, scoped to the configured deploy repository: true
+// when "task" is among pr's labels, false when "non-task" is, and an error naming the PR when it
+// is a deploy-repo PR with NEITHER label (an unclassified PR -- surfacing this loudly is the
+// point: the Python reference's is_task_pr raises for exactly this case rather than guessing). A
+// PR outside the deploy repository is never a task PR and never errors.
+//
+// The Python reference this is ported from (the weekly-review skill's common.is_task_pr) has a
+// second branch for a different, file-path-based task rule on a second repository; LEGION-294's
+// own population rule defines "task PR" only for the configured deploy repository, so that second
+// branch is not ported here -- naming the gap rather than silently porting an unrequested second
+// repository's rule or silently dropping it without a trace.
+func IsTaskPR(repo string, number int, labels []string, settings DeliverySettings) (bool, error) {
 	if repo != settings.DeployRepo {
 		return false, nil
 	}
@@ -104,7 +107,7 @@ func IsTaskPR(repo string, labels []string, settings model.DeliverySettings) (bo
 		return false, nil
 	}
 
-	return false, fmt.Errorf("delivery: unclassified pull request %s has neither task nor non-task label", repo)
+	return false, fmt.Errorf("delivery: unclassified pull request %s#%d has neither task nor non-task label", repo, number)
 }
 
 // IsRework reports the rework (fix/revert/hotfix) title rule: title starts with fix, revert or

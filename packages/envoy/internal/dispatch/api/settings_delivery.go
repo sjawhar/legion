@@ -7,7 +7,6 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/delivery"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
-	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
 // getDeliverySettings answers GET /api/v1/settings/delivery with the one delivery_settings row,
@@ -30,7 +29,14 @@ func (s *server) getDeliverySettings(w http.ResponseWriter, r *http.Request) {
 
 // putDeliverySettings answers PUT /api/v1/settings/delivery: set (or replace) the one
 // delivery_settings row after proving the GitHub App can read the deploy repository, the same
-// access-check-before-write shape putArchitectureSource uses.
+// access-check-before-write shape putArchitectureSource uses. Unlike putArchitectureSource and
+// putRepoProject, this is a bare pool write with no appended event: every sibling settings route
+// scopes its event to the project it changes (projectOwner), but delivery_settings is a true
+// singleton with no project, issue, or artifact to own it, and events/broker.go's
+// eventOwnerKey refuses an event with none of those unless its payload names a specific session
+// target (the ownerless-event path exists for session-addressed messages, not settings) -- there
+// is no project-scoped equivalent for a cross-project configuration table, so this intentionally
+// does not force one.
 func (s *server) putDeliverySettings(w http.ResponseWriter, r *http.Request) {
 	actor, ok := s.requireHuman(w, r)
 	if !ok {
@@ -48,7 +54,7 @@ func (s *server) putDeliverySettings(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	owner, repoName, err := parseSourceRepo(input.DeployRepo)
+	repoOwner, repoName, err := parseSourceRepo(input.DeployRepo)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -70,7 +76,7 @@ func (s *server) putDeliverySettings(w http.ResponseWriter, r *http.Request) {
 
 	// The access check runs before any write: a failed re-PUT leaves the stored settings
 	// untouched, matching putArchitectureSource's own ordering.
-	if _, err := s.deps.GitHub.CheckSource(r.Context(), owner, repoName); err != nil {
+	if _, err := s.deps.GitHub.CheckSource(r.Context(), repoOwner, repoName); err != nil {
 		if errors.Is(err, githubapp.ErrNoAppKey) || errors.Is(err, githubapp.ErrNoInstallation) || errors.Is(err, githubapp.ErrNoContentsRead) {
 			writeError(w, "DELIVERY_SETTINGS_ACCESS", http.StatusConflict, err.Error())
 			return
@@ -79,8 +85,8 @@ func (s *server) putDeliverySettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	settings, err := delivery.PutSettings(r.Context(), s.deps.Store.Pool, model.DeliverySettings{
-		DeployRepo: owner + "/" + repoName, DeployWorkflowPath: input.DeployWorkflowPath,
+	settings, err := delivery.PutSettings(r.Context(), s.deps.Store.Pool, delivery.DeliverySettings{
+		DeployRepo: repoOwner + "/" + repoName, DeployWorkflowPath: input.DeployWorkflowPath,
 		ProductionJobName: input.ProductionJobName, PRChecksWorkflowPath: input.PRChecksWorkflowPath,
 		PopulationAuthors: input.PopulationAuthors, ExcludedRepos: input.ExcludedRepos,
 	}, actor)

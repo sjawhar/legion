@@ -22,7 +22,9 @@ create table delivery_runs (
   primary key (repo, run_id)
 );
 
-create index delivery_runs_kind_started on delivery_runs (repo, kind, started_at);
+-- Indexed on head_commit_at, not started_at: store.go's ListRuns (containment's input and the
+-- timeline handler's lookback query) filters and orders by head_commit_at, never started_at.
+create index delivery_runs_kind_started on delivery_runs (repo, kind, head_commit_at);
 
 -- A job's own identity within a run is its name: GitHub does not number jobs, and a run never
 -- repeats a job name within one attempt (the latest attempt is what intake and reconcile keep).

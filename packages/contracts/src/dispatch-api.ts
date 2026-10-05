@@ -2402,7 +2402,7 @@ export interface DeliveryPR {
   readonly sessions: readonly string[];
   /**
    * `parent_agent` and `session` (this field's `sessions` above) resolve to the same set of
-   * sessions today (LEGION-567's Open Item 2: no grouping link exists); `parent_agent` is the
+   * sessions today (LEGION-567: no grouping link exists); `parent_agent` is the
    * resolved Dispatch session title (or the bare id if none was ever recorded), `session` is the
    * raw id — kept as two fields for the SPA's existing facet vocabulary and so a real grouping
    * link, if one is added later, needs no API shape change.

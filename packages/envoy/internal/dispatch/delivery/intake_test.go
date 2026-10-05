@@ -53,12 +53,12 @@ func deliveryTestPool(t *testing.T) (*store.Pool, context.Context) {
 }
 
 // seedDeliverySettings writes a delivery_settings row with acme/widgets-shaped placeholders.
-func seedDeliverySettings(t *testing.T, ctx context.Context, pool *store.Pool) model.DeliverySettings {
+func seedDeliverySettings(t *testing.T, ctx context.Context, pool *store.Pool) DeliverySettings {
 	t.Helper()
-	settings, err := PutSettings(ctx, pool, model.DeliverySettings{
+	settings, err := PutSettings(ctx, pool, DeliverySettings{
 		DeployRepo:           "acme/widgets",
 		DeployWorkflowPath:   ".github/workflows/deploy.yml",
-		ProductionJobName:    "production-apply / production-apply",
+		ProductionJobName:    "widgets-release / widgets-release",
 		PRChecksWorkflowPath: ".github/workflows/pr-checks.yml",
 		PopulationAuthors:    []string{"octocat"},
 		ExcludedRepos:        []string{"acme/playground"},

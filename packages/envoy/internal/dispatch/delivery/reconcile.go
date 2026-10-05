@@ -1,9 +1,9 @@
 // Reconcile (LEGION-567): the five-minute GitHub-App pass that backfills 28 days on first run and
 // catches whatever intake's NATS consumer missed, through the same upserts intake uses -- so
 // "reconcile catches a missed event" is provable as "reconcile and intake write through the same
-// store functions", never two implementations that can drift. Mirrors
-// architecture.Run/Importer's shape (ticker, per-pass idempotent work, idle without GitHub App
-// credentials).
+// store functions", never two implementations that can drift. Shares its jittered-ticker loop
+// with architecture.Run via duty.RunJittered (idle without GitHub App credentials, same shape as
+// architecture.Importer and Intake).
 package delivery
 
 import (
@@ -11,11 +11,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"math/rand/v2"
+	"strings"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/dispatch/duty"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
-	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
@@ -54,31 +54,22 @@ func (r *Reconcile) HasApp() bool {
 // jittered so a restart does not stampede GitHub, and a server without App credentials logs once
 // and stops: no import can be signed.
 func (r *Reconcile) Run(ctx context.Context) {
-	if !r.HasApp() {
-		slog.Info("dispatch delivery: no GitHub App key — the reconcile is idle")
-		return
-	}
-	// #nosec G404 — jitter, not a secret.
-	start := time.Duration(rand.Int64N(int64(ReconcileInterval)))
-	select {
-	case <-ctx.Done():
-		return
-	case <-time.After(start):
-	}
-	for {
-		r.runOnce(ctx)
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(ReconcileInterval):
+	duty.RunJittered(ctx, ReconcileInterval, func() bool {
+		if r.HasApp() {
+			return false
 		}
-	}
+		slog.Info("dispatch delivery: no GitHub App key — the reconcile is idle")
+		return true
+	}, r.runOnce)
 }
 
-// runOnce performs one reconcile pass: settings, the population pull-request search, the deploy
-// and PR-checks workflows' runs and jobs, and any partial row left over from a completing fetch
-// that failed earlier -- always recording last_reconcile_at at the end, successful or not, since
-// a failed pass still proves the attempt the freshness row promises.
+// runOnce performs one reconcile pass: a permission check (so a missing Actions or Pull-requests
+// grant is named, never confused with a transient failure), the population pull-request search,
+// the deploy and PR-checks workflows' runs and jobs, and any partial row left over from a
+// completing fetch that failed earlier. last_reconcile_at advances ONLY when every step that ran
+// succeeded; any failure (a missing permission, a rate limit, any other GitHub or store error) is
+// recorded by name in last_error instead, and the previous last_reconcile_at is left untouched --
+// so the freshness row can never report a healthy timestamp for a pass that silently did nothing.
 func (r *Reconcile) runOnce(ctx context.Context) {
 	now := time.Now()
 	settings, err := GetSettings(ctx, r.pool)
@@ -93,34 +84,58 @@ func (r *Reconcile) runOnce(ctx context.Context) {
 	owner, repo, err := splitRepo(settings.DeployRepo)
 	if err != nil {
 		slog.Error("dispatch delivery: deploy_repo setting", "error", err)
+		r.fail(ctx, err)
+		return
+	}
+
+	// Checked first and named distinctly from every other failure below: a missing Actions or
+	// Pull-requests permission would otherwise fail every GitHub call this pass makes in exactly
+	// the same shape as a transient 5xx, which is the one failure mode the plan calls out by name
+	// as needing loud, distinct surfacing (Open Item 1).
+	if _, err := r.github.DeliveryPermissions(ctx, owner, repo); err != nil {
+		slog.Error("dispatch delivery: GitHub App permission check", "error", err)
+		r.fail(ctx, err)
 		return
 	}
 
 	since := r.windowStart(settings, now)
 
-	if err := r.reconcileMergedPullRequests(ctx, settings, owner, repo, since, now); err != nil {
-		slog.Error("dispatch delivery: reconcile merged pull requests", "error", err)
-	}
-	if err := r.reconcilePartialPullRequests(ctx); err != nil {
-		slog.Error("dispatch delivery: reconcile partial pull requests", "error", err)
-	}
-	if err := r.reconcileWorkflow(ctx, owner, repo, settings.DeployRepo, settings.DeployWorkflowPath, model.DeliveryRunKindDeploy, settings.ProductionJobName, since, now); err != nil {
-		slog.Error("dispatch delivery: reconcile deploy workflow runs", "error", err)
-	}
-	if settings.PRChecksWorkflowPath != settings.DeployWorkflowPath {
-		if err := r.reconcileWorkflow(ctx, owner, repo, settings.DeployRepo, settings.PRChecksWorkflowPath, model.DeliveryRunKindPRChecks, "", since, now); err != nil {
-			slog.Error("dispatch delivery: reconcile PR-checks workflow runs", "error", err)
+	var failures []string
+	record := func(step string, err error) {
+		if err == nil {
+			return
 		}
+		slog.Error("dispatch delivery: "+step, "error", err)
+		failures = append(failures, fmt.Sprintf("%s: %s", step, err))
 	}
 
-	if err := RecordReconcileAt(ctx, r.pool, now); err != nil {
-		slog.Error("dispatch delivery: record reconcile freshness", "error", err)
+	record("reconcile merged pull requests", r.reconcileMergedPullRequests(ctx, settings, owner, repo, since, now))
+	record("reconcile partial pull requests", r.reconcilePartialPullRequests(ctx))
+	record("reconcile deploy workflow runs", r.reconcileWorkflow(ctx, owner, repo, settings.DeployRepo, settings.DeployWorkflowPath, DeliveryRunKindDeploy, since, now))
+	if settings.PRChecksWorkflowPath != settings.DeployWorkflowPath {
+		record("reconcile PR-checks workflow runs", r.reconcileWorkflow(ctx, owner, repo, settings.DeployRepo, settings.PRChecksWorkflowPath, DeliveryRunKindPRChecks, since, now))
+	}
+
+	if len(failures) > 0 {
+		r.fail(ctx, errors.New(strings.Join(failures, "; ")))
+		return
+	}
+	if err := RecordReconcileSuccess(ctx, r.pool, now); err != nil {
+		slog.Error("dispatch delivery: record reconcile success", "error", err)
+	}
+}
+
+// fail records a reconcile pass's failure reason in delivery_settings.last_error without
+// advancing last_reconcile_at (RecordReconcileError's own contract).
+func (r *Reconcile) fail(ctx context.Context, cause error) {
+	if err := RecordReconcileError(ctx, r.pool, cause.Error()); err != nil {
+		slog.Error("dispatch delivery: record reconcile error", "error", err)
 	}
 }
 
 // windowStart is the 28-day backfill on the first pass (no recorded last_reconcile_at), else the
 // last pass's own time minus reconcileOverlap.
-func (r *Reconcile) windowStart(settings model.DeliverySettings, now time.Time) time.Time {
+func (r *Reconcile) windowStart(settings DeliverySettings, now time.Time) time.Time {
 	if settings.LastReconcileAt == nil {
 		return now.Add(-BackfillWindow)
 	}
@@ -134,7 +149,7 @@ func (r *Reconcile) windowStart(settings model.DeliverySettings, now time.Time) 
 // Additions, Deletions and FirstCommitAt, which the search response never carries (the
 // per-repository tokenOwner/tokenRepo pair -- the configured deploy repository -- only resolves
 // which installation to search as).
-func (r *Reconcile) reconcileMergedPullRequests(ctx context.Context, settings model.DeliverySettings, tokenOwner, tokenRepo string, since, until time.Time) error {
+func (r *Reconcile) reconcileMergedPullRequests(ctx context.Context, settings DeliverySettings, tokenOwner, tokenRepo string, since, until time.Time) error {
 	found, err := SearchMergedPullRequestsAcrossInstallation(ctx, r.github, tokenOwner, tokenRepo, settings.PopulationAuthors, since, until)
 	if err != nil {
 		return fmt.Errorf("search merged pull requests: %w", err)
@@ -169,21 +184,11 @@ func (r *Reconcile) searchResultRepo(pr FetchedPullRequest) (string, error) {
 		return "", fmt.Errorf("pull request URL %q: %w", pr.URL, err)
 	}
 	// repoTail is "repo/pull/N"; keep only the repo segment.
-	repoName, _, found := cutFirst(repoTail, "/")
+	repoName, _, found := strings.Cut(repoTail, "/")
 	if !found {
 		return "", fmt.Errorf("pull request URL %q: no /pull/ segment", pr.URL)
 	}
 	return owner + "/" + repoName, nil
-}
-
-// cutFirst is strings.Cut, spelled out so this file needs no extra import for one call site.
-func cutFirst(s, sep string) (before, after string, found bool) {
-	for i := 0; i+len(sep) <= len(s); i++ {
-		if s[i:i+len(sep)] == sep {
-			return s[:i], s[i+len(sep):], true
-		}
-	}
-	return s, "", false
 }
 
 // reconcilePullRequest classifies and upserts one merged pull request the search found, the same
@@ -191,7 +196,7 @@ func cutFirst(s, sep string) (before, after string, found bool) {
 // since the search itself filtered on it)/repository/task-label, then the row. A deploy-repo PR
 // the label rule cannot classify yet (IsTaskPR's "neither label" error) is logged and left for a
 // later pass, exactly as intake does.
-func (r *Reconcile) reconcilePullRequest(ctx context.Context, settings model.DeliverySettings, repoFull string, pr FetchedPullRequest) error {
+func (r *Reconcile) reconcilePullRequest(ctx context.Context, settings DeliverySettings, repoFull string, pr FetchedPullRequest) error {
 	raw := RawPullRequest{Repo: repoFull, Number: pr.Number, Title: pr.Title, Author: pr.Author, Labels: pr.Labels, MergedAt: *pr.MergedAt}
 	isPopulation, err := IsPopulationPR(raw, settings, TimeWindow{Start: time.Unix(0, 0), End: time.Now().Add(time.Hour)})
 	if err != nil {
@@ -200,7 +205,7 @@ func (r *Reconcile) reconcilePullRequest(ctx context.Context, settings model.Del
 	if !isPopulation {
 		return DeletePullRequest(ctx, r.pool, repoFull, pr.Number)
 	}
-	return UpsertPullRequest(ctx, r.pool, model.DeliveryPullRequest{
+	return UpsertPullRequest(ctx, r.pool, DeliveryPullRequest{
 		Repo: repoFull, Number: pr.Number, Title: pr.Title, URL: pr.URL, Author: pr.Author,
 		CreatedAt: &pr.CreatedAt, MergedAt: pr.MergedAt, Rework: IsRework(pr.Title),
 		Partial: true, // the search response never carries MergeCommitSHA/Additions/Deletions/FirstCommitAt
@@ -229,12 +234,16 @@ func (r *Reconcile) reconcilePartialPullRequests(ctx context.Context) error {
 		if fetched.MergedAt == nil {
 			continue
 		}
-		issueKey := r.resolveIssueKey(ctx, fetched.Title, fetched.Body)
-		if err := UpsertPullRequest(ctx, r.pool, model.DeliveryPullRequest{
+		sessions, err := fetchSessionTrailers(ctx, r.github, owner, repo, pr.Number)
+		if err != nil {
+			slog.Warn("dispatch delivery: fetch session trailers", "repo", pr.Repo, "number", pr.Number, "error", err)
+		}
+		issueKey := resolveIssueKey(ctx, r.pool, fetched.Title, fetched.Body)
+		if err := UpsertPullRequest(ctx, r.pool, DeliveryPullRequest{
 			Repo: pr.Repo, Number: pr.Number, Title: fetched.Title, URL: fetched.URL, Author: fetched.Author,
 			CreatedAt: &fetched.CreatedAt, MergedAt: fetched.MergedAt, FirstCommitAt: fetched.FirstCommitAt,
 			MergeCommitSHA: fetched.MergeCommitSHA, Additions: fetched.Additions, Deletions: fetched.Deletions,
-			Rework: IsRework(fetched.Title), IssueKey: issueKey, Sessions: pr.Sessions, Partial: false,
+			Rework: IsRework(fetched.Title), IssueKey: issueKey, Sessions: sessions, Partial: false,
 		}); err != nil {
 			slog.Warn("dispatch delivery: upsert completed pull request", "repo", pr.Repo, "number", pr.Number, "error", err)
 		}
@@ -242,25 +251,9 @@ func (r *Reconcile) reconcilePartialPullRequests(ctx context.Context) error {
 	return nil
 }
 
-// resolveIssueKey mirrors Intake.resolveIssueKey (duplicated rather than shared through a method
-// on a common embedded type, since the two owning structs are otherwise unrelated and the
-// function is three lines of pure logic over the same package-level regex and pool).
-func (r *Reconcile) resolveIssueKey(ctx context.Context, title, body string) *string {
-	for _, candidate := range issueKeyCandidate.FindAllString(title+"\n"+body, -1) {
-		var key string
-		if err := r.pool.QueryRow(ctx, "select key from issues where key = $1", candidate).Scan(&key); err == nil {
-			return &key
-		}
-	}
-	return nil
-}
-
 // reconcileWorkflow lists kind's workflow runs created in [since, until) and upserts each one
-// plus (for a concluded run) its jobs. productionJobName is read from delivery_settings only to
-// log which job failed to match on a deploy run that never shipped anything; it does not
-// otherwise affect what reconcile stores (containment.go, not reconcile, is what reads it to
-// compute deploys at read time).
-func (r *Reconcile) reconcileWorkflow(ctx context.Context, owner, repo, repoFull, workflowPath string, kind model.DeliveryRunKind, productionJobName string, since, until time.Time) error {
+// plus (for a concluded run) its jobs.
+func (r *Reconcile) reconcileWorkflow(ctx context.Context, owner, repo, repoFull, workflowPath string, kind DeliveryRunKind, since, until time.Time) error {
 	runs, err := ListWorkflowRuns(ctx, r.github, owner, repo, workflowPath, since, until)
 	if err != nil {
 		return fmt.Errorf("list %s workflow runs: %w", kind, err)
@@ -276,10 +269,10 @@ func (r *Reconcile) reconcileWorkflow(ctx context.Context, owner, repo, repoFull
 // reconcileRun upserts one run -- GitHub's workflow-runs listing already carries the head
 // commit's timestamp (head_commit.timestamp, read into FetchedRun.HeadCommitAt by
 // github_runs.go's fetchedRunFromItem), unlike the live webhook envelope intake.go handles, which
-// carries only the head SHA and needs a separate commit fetch -- and, once it has concluded, its
-// jobs.
-func (r *Reconcile) reconcileRun(ctx context.Context, owner, repo, repoFull string, kind model.DeliveryRunKind, run FetchedRun) error {
-	if err := UpsertRun(ctx, r.pool, model.DeliveryRun{
+// re-verifies the whole run against GitHub rather than trusting the envelope -- and, once it has
+// concluded, its jobs.
+func (r *Reconcile) reconcileRun(ctx context.Context, owner, repo, repoFull string, kind DeliveryRunKind, run FetchedRun) error {
+	if err := UpsertRun(ctx, r.pool, DeliveryRun{
 		Repo: repoFull, RunID: run.RunID, Kind: kind, PRNumber: run.PRNumber, HeadSHA: run.HeadSHA,
 		HeadCommitAt: run.HeadCommitAt, StartedAt: run.StartedAt, CompletedAt: run.CompletedAt,
 		Conclusion: mapRunConclusionPtr(run.Conclusion), URL: run.URL,
@@ -293,9 +286,9 @@ func (r *Reconcile) reconcileRun(ctx context.Context, owner, repo, repoFull stri
 	if err != nil {
 		return fmt.Errorf("list jobs: %w", err)
 	}
-	jobs := make([]model.DeliveryRunJob, len(fetchedJobs))
+	jobs := make([]DeliveryRunJob, len(fetchedJobs))
 	for i, job := range fetchedJobs {
-		jobs[i] = model.DeliveryRunJob{
+		jobs[i] = DeliveryRunJob{
 			Repo: repoFull, RunID: run.RunID, Name: job.Name, StartedAt: job.StartedAt,
 			CompletedAt: job.CompletedAt, Conclusion: mapJobConclusion(job.Conclusion),
 		}
@@ -306,7 +299,7 @@ func (r *Reconcile) reconcileRun(ctx context.Context, owner, repo, repoFull stri
 // mapRunConclusionPtr adapts mapRunConclusion (which intake.go calls with the envelope's raw
 // string, always present) to FetchedRun.Conclusion's pointer (nil while a run is still in
 // progress).
-func mapRunConclusionPtr(raw *string) *model.DeliveryRunConclusion {
+func mapRunConclusionPtr(raw *string) *DeliveryRunConclusion {
 	if raw == nil {
 		return nil
 	}

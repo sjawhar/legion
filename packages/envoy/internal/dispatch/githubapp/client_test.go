@@ -65,24 +65,42 @@ type fakeGitHub struct {
 	missingBlobs map[string]bool
 	// treeReads counts tree reads, by "sha:dir".
 	treeReads []string
+	// graphQLResponse is served verbatim (as JSON) to every POST /graphql request.
+	graphQLResponse any
+	// lastGraphQLQuery/lastGraphQLVariables record the most recent GraphQL request's body, for a
+	// test to assert against.
+	lastGraphQLQuery     string
+	lastGraphQLVariables map[string]any
+	// actionsPermissions/pullRequestsPermissions map "owner/repo" to that permission, for
+	// DeliveryPermissions' tests; a repo absent from one of these maps gets "" (no permission).
+	actionsPermissions      map[string]string
+	pullRequestsPermissions map[string]string
 }
 
 func (f *fakeGitHub) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /repos/{owner}/{repo}/installation", func(w http.ResponseWriter, r *http.Request) {
 		f.verifyAppJWT(r)
-		contents, ok := f.installations[r.PathValue("owner")+"/"+r.PathValue("repo")]
+		name := r.PathValue("owner") + "/" + r.PathValue("repo")
+		contents, ok := f.installations[name]
 		if !ok {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
+		permissions := map[string]string{}
+		if contents != "" {
+			permissions["contents"] = contents
+		}
+		if actions := f.actionsPermissions[name]; actions != "" {
+			permissions["actions"] = actions
+		}
+		if pullRequests := f.pullRequestsPermissions[name]; pullRequests != "" {
+			permissions["pull_requests"] = pullRequests
+		}
 		response := map[string]any{
 			"id":          f.installationID,
 			"app_slug":    "dispatch-test",
-			"permissions": map[string]string{"contents": contents},
-		}
-		if contents == "" {
-			response["permissions"] = map[string]string{}
+			"permissions": permissions,
 		}
 		if err := json.NewEncoder(w).Encode(response); err != nil {
 			f.t.Errorf("encode installation: %v", err)
@@ -218,6 +236,24 @@ func (f *fakeGitHub) handler() http.Handler {
 			f.t.Errorf("encode blob: %v", err)
 		}
 	})
+	mux.HandleFunc("POST /graphql", func(w http.ResponseWriter, r *http.Request) {
+		requireInstallationToken(r)
+		if ct := r.Header.Get("Content-Type"); ct != "application/json" {
+			f.t.Errorf("GraphQL request Content-Type = %q, want application/json", ct)
+		}
+		var decoded struct {
+			Query     string         `json:"query"`
+			Variables map[string]any `json:"variables"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&decoded); err != nil {
+			f.t.Errorf("decode GraphQL request body: %v", err)
+		}
+		f.lastGraphQLQuery = decoded.Query
+		f.lastGraphQLVariables = decoded.Variables
+		if err := json.NewEncoder(w).Encode(f.graphQLResponse); err != nil {
+			f.t.Errorf("encode GraphQL response: %v", err)
+		}
+	})
 	return mux
 }
 
@@ -345,6 +381,41 @@ func TestReadAcceptsAResponseAtTheLimit(t *testing.T) {
 	}
 }
 
+func TestGraphQLPostsQueryAndVariablesWithAnInstallationToken(t *testing.T) {
+	fake := &fakeGitHub{t: t}
+	fake.graphQLResponse = map[string]any{"data": map[string]any{"ok": true}}
+	client, token := newReaderFixture(t, fake)
+
+	body, status, _, err := client.GraphQL(context.Background(), token, "query($q: String!) { search(query: $q, type: ISSUE, first: 1) { issueCount } }", map[string]any{"q": "repo:acme/widgets is:pr"})
+	if err != nil {
+		t.Fatalf("GraphQL: %v", err)
+	}
+	if status != http.StatusOK {
+		t.Fatalf("GraphQL: status = %d, want 200", status)
+	}
+	var decoded struct {
+		Data struct {
+			OK bool `json:"ok"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &decoded); err != nil || !decoded.Data.OK {
+		t.Fatalf("GraphQL response = %s, want {\"data\":{\"ok\":true}}: %v", body, err)
+	}
+	if !strings.Contains(fake.lastGraphQLQuery, "search(query: $q") {
+		t.Errorf("fake received query = %q, want it to carry the search() call", fake.lastGraphQLQuery)
+	}
+	if fake.lastGraphQLVariables["q"] != "repo:acme/widgets is:pr" {
+		t.Errorf("fake received variables = %v, want q = %q", fake.lastGraphQLVariables, "repo:acme/widgets is:pr")
+	}
+}
+
+func TestGraphQLWithoutAnAppKeyIsErrNoAppKey(t *testing.T) {
+	var client *Client
+	if _, _, _, err := client.GraphQL(context.Background(), "token", "query { viewer { login } }", nil); !errors.Is(err, ErrNoAppKey) {
+		t.Fatalf("GraphQL on a nil client: err = %v, want ErrNoAppKey", err)
+	}
+}
+
 func TestCheckSourceVerifiesJWTAndResolvesInstallation(t *testing.T) {
 	fake := &fakeGitHub{
 		t:              t,
@@ -401,6 +472,44 @@ func TestContentsPermissionGatesTheCheck(t *testing.T) {
 			}
 			if err != nil {
 				t.Fatalf("contents %q: %v", test.contents, err)
+			}
+		})
+	}
+}
+
+func TestDeliveryPermissionsGatesActionsAndPullRequests(t *testing.T) {
+	for _, test := range []struct {
+		name                   string
+		actionsPermission      string
+		pullRequestsPermission string
+		wantErr                error
+	}{
+		{name: "both granted", actionsPermission: "read", pullRequestsPermission: "read"},
+		{name: "write satisfies read", actionsPermission: "write", pullRequestsPermission: "write"},
+		{name: "actions missing", actionsPermission: "", pullRequestsPermission: "read", wantErr: ErrNoActionsRead},
+		{name: "actions none", actionsPermission: "none", pullRequestsPermission: "read", wantErr: ErrNoActionsRead},
+		{name: "neither granted, actions checked first", actionsPermission: "", pullRequestsPermission: "", wantErr: ErrNoActionsRead},
+		{name: "pull requests missing", actionsPermission: "read", pullRequestsPermission: "", wantErr: ErrNoPullRequestsRead},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fake := &fakeGitHub{
+				t:                       t,
+				installations:           map[string]string{"legion/delivery": "read"},
+				actionsPermissions:      map[string]string{"legion/delivery": test.actionsPermission},
+				pullRequestsPermissions: map[string]string{"legion/delivery": test.pullRequestsPermission},
+				installationID:          11,
+				tokenExpiresAt:          time.Now().Add(time.Hour),
+			}
+			client := newTestClient(t, fake)
+			_, err := client.DeliveryPermissions(context.Background(), "legion", "delivery")
+			if test.wantErr != nil {
+				if !errors.Is(err, test.wantErr) {
+					t.Fatalf("got %v, want %v", err, test.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
 			}
 		})
 	}

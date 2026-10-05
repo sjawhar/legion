@@ -160,141 +160,150 @@ func labelNames(labels []githubLabel) []string {
 	return names
 }
 
-// searchIssuesPayload is GET /search/issues's answer, limited to the fields
-// SearchMergedPullRequests reads.
-type searchIssuesPayload struct {
-	TotalCount int               `json:"total_count"`
-	Items      []searchIssueItem `json:"items"`
+// searchPullRequestsResponse is the GraphQL search query's answer, limited to the fields
+// searchMergedPullRequests reads. GitHub's REST `/search/issues` endpoint refuses some App
+// installation tokens on a private repository ("cannot be searched... do not have permission")
+// even though the same token reads that repository's pulls/commits/actions endpoints directly;
+// GraphQL's `search` connection does not share that restriction (confirmed against a real
+// installation token during this slice's acceptance verification), so this is GraphQL, not REST,
+// despite otherwise mirroring REST search's query string syntax (`repo:`/`is:pr`/`is:merged`/
+// `merged:`/`author:`, built by mergedPullRequestQuery below) and its 1,000-result cap.
+type searchPullRequestsResponse struct {
+	Data struct {
+		Search struct {
+			IssueCount int                     `json:"issueCount"`
+			PageInfo   searchPullRequestsPage  `json:"pageInfo"`
+			Nodes      []searchPullRequestNode `json:"nodes"`
+		} `json:"search"`
+	} `json:"data"`
+	Errors []struct {
+		Message string `json:"message"`
+	} `json:"errors"`
 }
 
-type searchIssueItem struct {
-	Number      int           `json:"number"`
-	Title       string        `json:"title"`
-	HTMLURL     string        `json:"html_url"`
-	User        githubUser    `json:"user"`
-	Labels      []githubLabel `json:"labels"`
-	Body        string        `json:"body"`
-	CreatedAt   time.Time     `json:"created_at"`
-	PullRequest struct {
-		MergedAt *time.Time `json:"merged_at"`
-	} `json:"pull_request"`
+type searchPullRequestsPage struct {
+	HasNextPage bool   `json:"hasNextPage"`
+	EndCursor   string `json:"endCursor"`
 }
 
-func fetchedPullRequestFromSearchItem(item searchIssueItem) FetchedPullRequest {
-	return FetchedPullRequest{
-		Number:    item.Number,
-		Title:     item.Title,
-		URL:       item.HTMLURL,
-		Author:    item.User.Login,
-		Labels:    labelNames(item.Labels),
-		CreatedAt: item.CreatedAt,
-		MergedAt:  item.PullRequest.MergedAt,
-		Body:      item.Body,
-		// MergeCommitSHA, Additions, Deletions and FirstCommitAt stay nil: GitHub's search-issues
-		// response never carries them.
+// searchPullRequestNode is one `... on PullRequest` search result, limited to the fields
+// searchMergedPullRequests reads. A search result that is not a pull request (the query's `is:pr`
+// qualifier should prevent this, but GraphQL's inline fragment simply omits every field when the
+// node is some other type) decodes as its zero value and is skipped by requiring a non-zero Number.
+// Carries no `body`: the field is large enough on its own (a long PR description, times up to 100
+// results per page) to push a page over the 1 MiB response limit on its own, and nothing in this
+// path reads it -- reconcile's search-found PRs are stored Partial until a later per-PR
+// FetchPullRequest completes them, which is also where their issue-reference body text is read.
+type searchPullRequestNode struct {
+	Number int         `json:"number"`
+	Title  string      `json:"title"`
+	URL    string      `json:"url"`
+	Author *githubUser `json:"author"`
+	Labels *struct {
+		Nodes []githubLabel `json:"nodes"`
+	} `json:"labels"`
+	CreatedAt time.Time  `json:"createdAt"`
+	MergedAt  *time.Time `json:"mergedAt"`
+}
+
+func fetchedPullRequestFromSearchNode(node searchPullRequestNode) FetchedPullRequest {
+	pr := FetchedPullRequest{
+		Number: node.Number, Title: node.Title, URL: node.URL,
+		CreatedAt: node.CreatedAt, MergedAt: node.MergedAt,
+		// Body, MergeCommitSHA, Additions, Deletions and FirstCommitAt stay nil/empty: this
+		// search response never carries them.
 	}
+	if node.Author != nil {
+		pr.Author = node.Author.Login
+	}
+	if node.Labels != nil {
+		pr.Labels = labelNames(node.Labels.Nodes)
+	}
+	return pr
 }
 
 // SearchMergedPullRequests finds every pull request merged in [since, until) authored by any of
-// authors, in owner/repo, via GitHub's REST search (GET
-// /search/issues?q=repo:owner/repo+is:pr+is:merged+merged:ISO..ISO+author:A+author:A2...).
-// GitHub's search caps every query at 1,000 results: when a query's total_count exceeds 1,000,
-// the window is split into two halves at its midpoint and each half is searched recursively,
-// whose results are concatenated -- the halves are a half-open partition of the original window,
-// so nothing merged exactly at the midpoint is counted twice and nothing is skipped. The
-// prototype's own measured rule is that a single day can hold on the order of 700-1,000 merges
-// for the busiest repository it watched, so a caller backfilling several weeks should expect this
-// function to recurse into day-sized or finer windows on its own, not pass one already that fine;
-// the halving handles whatever slice the caller hands in. Each query is paginated fully (GitHub
-// serves up to 100 results per page; every page up to the 1,000-result cap is read). Each
-// result item carries enough to build a FetchedPullRequest-shaped result except
-// MergeCommitSHA, Additions, Deletions and FirstCommitAt (search results carry none of them) --
-// those fields are left nil, and a caller that needs them calls FetchPullRequest per pull request
-// afterward (reconcile's backfill path does this; a caller that only needs population-membership
-// facts does not).
+// authors, in owner/repo, via GitHub's GraphQL search. GitHub's search caps every query at 1,000
+// results: fetchWindowed (windowed.go) halves the window and recurses when a query's total
+// exceeds that cap, shared with ListWorkflowRuns's identical logic. The prototype's own measured
+// rule is that a single day can hold on the order of 700-1,000 merges for the busiest repository
+// it watched, so a caller backfilling several weeks should expect this function to recurse into
+// day-sized or finer windows on its own, not pass one already that fine. Each result item carries
+// enough to build a FetchedPullRequest-shaped result except MergeCommitSHA, Additions, Deletions
+// and FirstCommitAt (search results carry none of them) -- those fields are left nil, and a
+// caller that needs them calls FetchPullRequest per pull request afterward (reconcile's backfill
+// path does this; a caller that only needs population-membership facts does not).
 func SearchMergedPullRequests(ctx context.Context, client *githubapp.Client, owner, repo string, authors []string, since, until time.Time) ([]FetchedPullRequest, error) {
 	token, err := client.RepositoryToken(ctx, owner, repo)
 	if err != nil {
 		return nil, fmt.Errorf("mint installation token for %s/%s merged-PR search: %w", owner, repo, err)
 	}
-	return searchMergedPullRequests(ctx, client, token, owner, repo, authors, since, until)
+	return searchMergedPullRequests(ctx, client, token, []string{owner + "/" + repo}, authors, since, until)
 }
 
 // SearchMergedPullRequestsAcrossInstallation finds every pull request merged in [since, until)
 // authored by any of authors, across every repository the GitHub App installation covering
 // tokenOwner/tokenRepo can see -- LEGION-294's population rule spans "any repository", not just
-// the one configured deploy repository, and GitHub's search API scopes an App-authenticated
-// query with no `repo:`/`org:` qualifier to exactly the repositories that installation's token
-// can read. tokenOwner/tokenRepo (typically the configured deploy repository) is used only to
-// resolve which installation's token to mint; the search itself is not scoped to that repository.
+// the one configured deploy repository. An App-authenticated search query with no repo:/org:
+// qualifier is NOT scoped to the installation's repositories for public-repository content --
+// live-verified against a real installation token, it returns results from unrelated public
+// repositories the installation does not cover -- so this lists the installation's own
+// repositories (GET /installation/repositories) and builds one repo: qualifier per repository
+// instead of relying on the token alone. tokenOwner/tokenRepo (typically the configured deploy
+// repository) is used only to resolve which installation to ask.
 func SearchMergedPullRequestsAcrossInstallation(ctx context.Context, client *githubapp.Client, tokenOwner, tokenRepo string, authors []string, since, until time.Time) ([]FetchedPullRequest, error) {
 	token, err := client.RepositoryToken(ctx, tokenOwner, tokenRepo)
 	if err != nil {
 		return nil, fmt.Errorf("mint installation token for %s/%s merged-PR search: %w", tokenOwner, tokenRepo, err)
 	}
-	return searchMergedPullRequests(ctx, client, token, "", "", authors, since, until)
-}
-
-// minimumSearchWindow bounds the halving recursion: a query answering more than 1,000 results in
-// a window this narrow cannot be split further, and is reported as an error rather than recursing
-// forever.
-const minimumSearchWindow = time.Second
-
-func searchMergedPullRequests(ctx context.Context, client *githubapp.Client, token, owner, repo string, authors []string, since, until time.Time) ([]FetchedPullRequest, error) {
-	query := mergedPullRequestQuery(owner, repo, authors, since, until)
-	scope := searchScopeLabel(owner, repo)
-
-	first, totalCount, err := fetchSearchPage(ctx, client, token, query, 1)
+	repos, err := client.ListInstallationRepositories(ctx, tokenOwner, tokenRepo)
 	if err != nil {
-		return nil, fmt.Errorf("search merged PRs for %s in [%s, %s): %w", scope, since, until, err)
+		return nil, fmt.Errorf("list installation repositories for %s/%s merged-PR search: %w", tokenOwner, tokenRepo, err)
 	}
-
-	if totalCount > 1000 {
-		if until.Sub(since) <= minimumSearchWindow {
-			return nil, fmt.Errorf("search merged PRs for %s: %d results in the window [%s, %s), which cannot be narrowed further", scope, totalCount, since, until)
-		}
-		mid := since.Add(until.Sub(since) / 2)
-		before, err := searchMergedPullRequests(ctx, client, token, owner, repo, authors, since, mid)
-		if err != nil {
-			return nil, err
-		}
-		after, err := searchMergedPullRequests(ctx, client, token, owner, repo, authors, mid, until)
-		if err != nil {
-			return nil, err
-		}
-		return append(before, after...), nil
+	if len(repos) == 0 {
+		return nil, fmt.Errorf("list installation repositories for %s/%s merged-PR search: installation covers no repositories", tokenOwner, tokenRepo)
 	}
-
-	results := first
-	for page := 2; len(results) < totalCount; page++ {
-		items, _, err := fetchSearchPage(ctx, client, token, query, page)
-		if err != nil {
-			return nil, fmt.Errorf("search merged PRs for %s in [%s, %s): %w", scope, since, until, err)
-		}
-		if len(items) == 0 {
-			break
-		}
-		results = append(results, items...)
-	}
-	return results, nil
+	return searchMergedPullRequests(ctx, client, token, repos, authors, since, until)
 }
 
-// searchScopeLabel is what an error message calls the search scope: the repository, or "the
-// installation" when repo is empty (SearchMergedPullRequestsAcrossInstallation's no-repo-qualifier
-// search).
-func searchScopeLabel(owner, repo string) string {
-	if repo == "" {
-		return "the installation"
+// searchMergedPullRequests pages a GraphQL search query over [since, until) through fetchWindowed
+// (windowed.go), rebuilding the query (and resetting the GraphQL cursor) whenever fetchWindowed
+// calls fetchPage with a different [since, until) than the previous call -- which happens exactly
+// once per recursive half, never within one half's own pagination loop.
+func searchMergedPullRequests(ctx context.Context, client *githubapp.Client, token string, repos, authors []string, since, until time.Time) ([]FetchedPullRequest, error) {
+	scope := searchScopeLabel(repos)
+	var cursor string
+	var windowSince, windowUntil time.Time
+	fetchPage := func(page int, since, until time.Time) ([]FetchedPullRequest, int, error) {
+		if !since.Equal(windowSince) || !until.Equal(windowUntil) {
+			cursor = ""
+			windowSince, windowUntil = since, until
+		}
+		query := mergedPullRequestQuery(repos, authors, since, until)
+		result, err := fetchSearchPage(ctx, client, token, query, cursor)
+		if err != nil {
+			return nil, 0, err
+		}
+		cursor = result.endCursor
+		return result.items, result.issueCount, nil
 	}
-	return owner + "/" + repo
+	return fetchWindowed(since, until, "search merged PRs for "+scope, fetchPage)
 }
 
-// mergedPullRequestQuery omits the repo: qualifier when repo is empty, scoping the search to
-// every repository the authenticating installation token can see instead of one repository.
-func mergedPullRequestQuery(owner, repo string, authors []string, since, until time.Time) string {
+// searchScopeLabel is what an error message calls the search scope.
+func searchScopeLabel(repos []string) string {
+	if len(repos) == 1 {
+		return repos[0]
+	}
+	return fmt.Sprintf("%d installation repositories", len(repos))
+}
+
+// mergedPullRequestQuery builds one repo: qualifier per entry in repos. The query string syntax
+// is GitHub's search syntax (GitHub ORs repeated repo:/author: qualifiers of the same kind).
+func mergedPullRequestQuery(repos, authors []string, since, until time.Time) string {
 	var b strings.Builder
-	if repo != "" {
-		fmt.Fprintf(&b, "repo:%s/%s ", owner, repo)
+	for _, repo := range repos {
+		fmt.Fprintf(&b, "repo:%s ", repo)
 	}
 	fmt.Fprintf(&b, "is:pr is:merged merged:%s..%s", since.UTC().Format(time.RFC3339), until.UTC().Format(time.RFC3339))
 	for _, author := range authors {
@@ -303,22 +312,72 @@ func mergedPullRequestQuery(owner, repo string, authors []string, since, until t
 	return b.String()
 }
 
-func fetchSearchPage(ctx context.Context, client *githubapp.Client, token, query string, page int) ([]FetchedPullRequest, int, error) {
-	path := fmt.Sprintf("/search/issues?q=%s&per_page=100&page=%d", url.QueryEscape(query), page)
-	body, status, _, err := client.Read(ctx, token, path)
+const searchPullRequestsQuery = `query($q: String!, $after: String) {
+  search(query: $q, type: ISSUE, first: 100, after: $after) {
+    issueCount
+    pageInfo { hasNextPage endCursor }
+    nodes {
+      ... on PullRequest {
+        number
+        title
+        url
+        author { login }
+        createdAt
+        mergedAt
+        labels(first: 20) { nodes { name } }
+      }
+    }
+  }
+}`
+
+type searchPage struct {
+	items       []FetchedPullRequest
+	hasNextPage bool
+	endCursor   string
+	issueCount  int
+}
+
+// fetchSearchPage runs one page of query, after cursor ("" for the first page), returning the
+// page's pull requests, its own pagination cursor, and the connection's total issueCount (the
+// 1,000-result cap fetchWindowed checks).
+func fetchSearchPage(ctx context.Context, client *githubapp.Client, token, query, after string) (searchPage, error) {
+	var variables map[string]any
+	if after == "" {
+		variables = map[string]any{"q": query, "after": nil}
+	} else {
+		variables = map[string]any{"q": query, "after": after}
+	}
+	body, status, header, err := client.GraphQL(ctx, token, searchPullRequestsQuery, variables)
 	if err != nil {
-		return nil, 0, fmt.Errorf("page %d: %w", page, err)
+		return searchPage{}, fmt.Errorf("page after %q: %w", after, err)
+	}
+	if limited := githubapp.RateLimit(status, header, body); limited != nil {
+		return searchPage{}, fmt.Errorf("page after %q: %w", after, limited)
 	}
 	if status != http.StatusOK {
-		return nil, 0, fmt.Errorf("page %d: status %d: %s", page, status, body)
+		return searchPage{}, fmt.Errorf("page after %q: status %d: %s", after, status, body)
 	}
-	var payload searchIssuesPayload
-	if err := json.Unmarshal(body, &payload); err != nil {
-		return nil, 0, fmt.Errorf("decode page %d: %w", page, err)
+	var response searchPullRequestsResponse
+	if err := json.Unmarshal(body, &response); err != nil {
+		return searchPage{}, fmt.Errorf("decode page after %q: %w", after, err)
 	}
-	items := make([]FetchedPullRequest, len(payload.Items))
-	for i, item := range payload.Items {
-		items[i] = fetchedPullRequestFromSearchItem(item)
+	if len(response.Errors) > 0 {
+		return searchPage{}, fmt.Errorf("page after %q: %s", after, response.Errors[0].Message)
 	}
-	return items, payload.TotalCount, nil
+	items := make([]FetchedPullRequest, 0, len(response.Data.Search.Nodes))
+	for _, node := range response.Data.Search.Nodes {
+		if node.Number == 0 {
+			// A search result GitHub's own is:pr qualifier should have excluded (not a pull
+			// request): the inline fragment decodes every field to its zero value instead of
+			// erroring, so this is the one way to detect and skip it.
+			continue
+		}
+		items = append(items, fetchedPullRequestFromSearchNode(node))
+	}
+	return searchPage{
+		items:       items,
+		hasNextPage: response.Data.Search.PageInfo.HasNextPage,
+		endCursor:   response.Data.Search.PageInfo.EndCursor,
+		issueCount:  response.Data.Search.IssueCount,
+	}, nil
 }

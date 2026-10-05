@@ -1,5 +1,5 @@
 import type { ECElementEvent, ECharts, EChartsOption } from "echarts";
-import { type ReactNode, useEffect, useRef } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 
 import type { DeliveryPR, DeliveryRun } from "../../api/types";
 import { buildColorScale, type ColorFacet, colorKeyFor } from "./lib/colorScale";
@@ -130,7 +130,13 @@ function buildOption(
  *  pipeline failures each in their own row above the lanes, zoomable/pannable via `dataZoom`. */
 export function Timeline({ prs, runs, colorBy, onSelect, onBrush }: Props): ReactNode {
   const containerRef = useRef<HTMLDivElement>(null);
-  const chartRef = useRef<ECharts | undefined>(undefined);
+  // The chart instance is state, not a ref: the data effect below depends on it, so the first
+  // render after `echarts.init` resolves (asynchronously, in the mount effect) always runs the
+  // data effect at least once with a ready chart, even when the data effect's own deps (prs,
+  // runs, colorBy) happened not to change between mount and that resolution. A ref here left the
+  // data effect with no signal that the chart had become ready, so a data effect that ran once
+  // before init resolved never ran again and the chart stayed blank.
+  const [chart, setChart] = useState<ECharts | undefined>(undefined);
   // The chart mounts exactly once (below); onSelect/onBrush are read through these refs, kept
   // current every render, rather than closed over directly, so a parent passing a new callback
   // identity each render (DeliveryPage's onBrush closes over its own current filter state) never
@@ -142,16 +148,16 @@ export function Timeline({ prs, runs, colorBy, onSelect, onBrush }: Props): Reac
 
   useEffect(() => {
     let disposed = false;
-    let chart: ECharts | undefined;
+    let chartInstance: ECharts | undefined;
     let resize: (() => void) | undefined;
     let debounce: number | undefined;
 
     void import("echarts").then((echarts) => {
       if (disposed || containerRef.current === null) return;
-      chart = echarts.init(containerRef.current);
-      chartRef.current = chart;
+      chartInstance = echarts.init(containerRef.current);
+      setChart(chartInstance);
 
-      chart.on("click", (params: ECElementEvent) => {
+      chartInstance.on("click", (params: ECElementEvent) => {
         const { name, seriesName } = params;
         if (name === undefined || seriesName === undefined) return;
         if (seriesName === "merges") onSelectRef.current({ kind: "pr", id: name });
@@ -161,10 +167,10 @@ export function Timeline({ prs, runs, colorBy, onSelect, onBrush }: Props): Reac
           onSelectRef.current({ kind: "failure", id: Number(name) });
       });
 
-      chart.on("datazoom", () => {
+      chartInstance.on("datazoom", () => {
         clearTimeout(debounce);
         debounce = window.setTimeout(() => {
-          const option = chart?.getOption();
+          const option = chartInstance?.getOption();
           const configured = option?.dataZoom;
           const zoom = Array.isArray(configured) ? configured[0] : configured;
           if (zoom?.startValue === undefined || zoom.endValue === undefined) return;
@@ -175,7 +181,7 @@ export function Timeline({ prs, runs, colorBy, onSelect, onBrush }: Props): Reac
         }, DATAZOOM_DEBOUNCE_MS);
       });
 
-      resize = () => chart?.resize();
+      resize = () => chartInstance?.resize();
       window.addEventListener("resize", resize);
     });
 
@@ -183,17 +189,17 @@ export function Timeline({ prs, runs, colorBy, onSelect, onBrush }: Props): Reac
       disposed = true;
       clearTimeout(debounce);
       if (resize !== undefined) window.removeEventListener("resize", resize);
-      chart?.dispose();
+      chartInstance?.dispose();
+      setChart(undefined);
     };
   }, []);
 
   useEffect(() => {
-    const chart = chartRef.current;
     if (chart === undefined) return;
     const lanes = buildLanes(prs, colorBy);
     const colorScale = buildColorScale(prs, colorBy);
     chart.setOption(buildOption(prs, runs, colorBy, lanes, colorScale), { notMerge: true });
-  }, [prs, runs, colorBy]);
+  }, [chart, prs, runs, colorBy]);
 
   return <div className="h-[420px] w-full" ref={containerRef} />;
 }

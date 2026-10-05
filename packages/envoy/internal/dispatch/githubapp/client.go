@@ -7,6 +7,7 @@
 package githubapp
 
 import (
+	"bytes"
 	"context"
 	"crypto"
 	"crypto/rand"
@@ -40,6 +41,12 @@ var (
 	// ErrNoContentsRead is an installation whose Contents permission is missing
 	// or "none". Read and write both satisfy read.
 	ErrNoContentsRead = errors.New("the installation lacks Contents: read")
+	// ErrNoActionsRead is an installation whose Actions permission is missing or
+	// "none" (LEGION-567's reconcile needs it to list workflow runs and jobs).
+	ErrNoActionsRead = errors.New("the installation lacks Actions: read")
+	// ErrNoPullRequestsRead is an installation whose Pull requests permission is
+	// missing or "none" (LEGION-567's reconcile needs it to read merged PRs).
+	ErrNoPullRequestsRead = errors.New("the installation lacks Pull requests: read")
 	// ErrNoBranch is GitHub's 404/422 for the configured branch: the branch does
 	// not exist (or the repository vanished under the installation token).
 	ErrNoBranch = errors.New("the branch does not exist")
@@ -198,6 +205,26 @@ func (c *Client) Installation(ctx context.Context, owner, repo string) (Installa
 	return installation, nil
 }
 
+// DeliveryPermissions resolves the App installation covering owner/repo and checks its Actions
+// and Pull-requests permissions (LEGION-567's delivery timeline: the reconcile lists workflow
+// runs/jobs and merged pull requests, never Contents). A GitHub 404 is ErrNoInstallation; a
+// missing or "none" Actions permission is ErrNoActionsRead; a missing or "none" Pull-requests
+// permission is ErrNoPullRequestsRead -- checked in that order, so a caller showing one error at
+// a time names Actions first.
+func (c *Client) DeliveryPermissions(ctx context.Context, owner, repo string) (Installation, error) {
+	installation, err := c.installation(ctx, owner, repo)
+	if err != nil {
+		return Installation{}, err
+	}
+	if installation.Permissions.Actions != "read" && installation.Permissions.Actions != "write" {
+		return Installation{}, fmt.Errorf("%w on %s/%s", ErrNoActionsRead, owner, repo)
+	}
+	if installation.Permissions.PullRequests != "read" && installation.Permissions.PullRequests != "write" {
+		return Installation{}, fmt.Errorf("%w on %s/%s", ErrNoPullRequestsRead, owner, repo)
+	}
+	return installation, nil
+}
+
 func (c *Client) installation(ctx context.Context, owner, repo string) (Installation, error) {
 	if c == nil {
 		return Installation{}, ErrNoAppKey
@@ -259,13 +286,80 @@ func (c *Client) RepositoryToken(ctx context.Context, owner, repo string) (strin
 	return token, nil
 }
 
+// installationRepositoriesPerPage is GitHub's own page size for GET /installation/repositories.
+const installationRepositoriesPerPage = 100
+
+// ListInstallationRepositories lists every repository ("owner/name") the App installation
+// covering owner/repo can see, via GET /installation/repositories (an installation-token
+// endpoint, paginated). LEGION-567's merged-PR search needs this to scope its query to exactly
+// the installation's own repositories: an unqualified GitHub search query is NOT scoped by the
+// authenticating token for public-repository content -- it searches all of public GitHub
+// (confirmed live against a real installation token) -- so the caller must supply an explicit
+// repo: qualifier per repository instead of relying on the token alone.
+func (c *Client) ListInstallationRepositories(ctx context.Context, owner, repo string) ([]string, error) {
+	token, err := c.RepositoryToken(ctx, owner, repo)
+	if err != nil {
+		return nil, fmt.Errorf("mint installation token for %s/%s: %w", owner, repo, err)
+	}
+	var names []string
+	for page := 1; ; page++ {
+		path := fmt.Sprintf("/installation/repositories?per_page=%d&page=%d", installationRepositoriesPerPage, page)
+		body, status, header, err := c.Read(ctx, token, path)
+		if err != nil {
+			return nil, fmt.Errorf("list installation repositories (page %d): %w", page, err)
+		}
+		if limited := RateLimit(status, header, body); limited != nil {
+			return nil, fmt.Errorf("list installation repositories (page %d): %w", page, limited)
+		}
+		if status != http.StatusOK {
+			return nil, fmt.Errorf("list installation repositories (page %d): status %d: %s", page, status, body)
+		}
+		var payload struct {
+			Repositories []struct {
+				FullName string `json:"full_name"`
+			} `json:"repositories"`
+		}
+		if err := json.Unmarshal(body, &payload); err != nil {
+			return nil, fmt.Errorf("decode installation repositories (page %d): %w", page, err)
+		}
+		if len(payload.Repositories) == 0 {
+			break
+		}
+		for _, repository := range payload.Repositories {
+			names = append(names, repository.FullName)
+		}
+		if len(payload.Repositories) < installationRepositoriesPerPage {
+			break
+		}
+	}
+	return names, nil
+}
+
 // Read performs GET path (an API path with its query, under the API origin) with an
 // installation token, returning GitHub's complete answer when it fits within the response limit.
 func (c *Client) Read(ctx context.Context, token, path string) ([]byte, int, http.Header, error) {
 	if c == nil {
 		return nil, 0, nil, ErrNoAppKey
 	}
-	return c.request(ctx, http.MethodGet, c.base+path, "Bearer "+token, responseLimit)
+	return c.request(ctx, http.MethodGet, c.base+path, "Bearer "+token, nil, responseLimit)
+}
+
+// GraphQL posts query/variables to the API origin's /graphql endpoint with an installation token,
+// returning GitHub's complete JSON response body (an `{data, errors}` envelope the caller
+// decodes) when it fits within the response limit. Some GitHub Apps' installation tokens can read
+// a repository's REST endpoints but are refused by the REST `/search/issues` endpoint for a
+// private repository ("cannot be searched... do not have permission") -- GraphQL's `search`
+// connection does not share that restriction, which is why delivery/github_prs.go's merged-PR
+// search uses this instead of REST search.
+func (c *Client) GraphQL(ctx context.Context, token string, query string, variables map[string]any) ([]byte, int, http.Header, error) {
+	if c == nil {
+		return nil, 0, nil, ErrNoAppKey
+	}
+	payload, err := json.Marshal(map[string]any{"query": query, "variables": variables})
+	if err != nil {
+		return nil, 0, nil, fmt.Errorf("encode GraphQL request: %w", err)
+	}
+	return c.request(ctx, http.MethodPost, c.base+"/graphql", "Bearer "+token, bytes.NewReader(payload), responseLimit)
 }
 
 // Token returns an installation access token, minting one only when the
@@ -340,31 +434,35 @@ func (c *Client) do(ctx context.Context, method, target, authorization string) (
 }
 
 func (c *Client) doLimited(ctx context.Context, method, target, authorization string, limit int64) ([]byte, int, error) {
-	body, status, _, err := c.request(ctx, method, target, authorization, limit)
+	body, status, _, err := c.request(ctx, method, target, authorization, nil, limit)
 	return body, status, err
 }
 
-// request performs one API call and returns its complete body when it fits within limit, status and headers.
-func (c *Client) request(ctx context.Context, method, target, authorization string, limit int64) ([]byte, int, http.Header, error) {
-	request, err := http.NewRequestWithContext(ctx, method, target, nil)
+// request performs one API call and returns its complete body when it fits within limit, status
+// and headers. body is nil for every GET call; GraphQL is this package's only POST with a body.
+func (c *Client) request(ctx context.Context, method, target, authorization string, body io.Reader, limit int64) ([]byte, int, http.Header, error) {
+	request, err := http.NewRequestWithContext(ctx, method, target, body)
 	if err != nil {
 		return nil, 0, nil, fmt.Errorf("build %s %s: %w", method, target, err)
 	}
 	request.Header.Set("Authorization", authorization)
 	request.Header.Set("Accept", "application/vnd.github+json")
+	if body != nil {
+		request.Header.Set("Content-Type", "application/json")
+	}
 	response, err := c.http.Do(request)
 	if err != nil {
 		return nil, 0, nil, fmt.Errorf("%s %s: %w", method, target, err)
 	}
 	defer response.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(response.Body, limit+1))
+	responseBody, err := io.ReadAll(io.LimitReader(response.Body, limit+1))
 	if err != nil {
 		return nil, 0, nil, fmt.Errorf("read %s %s response: %w", method, target, err)
 	}
-	if int64(len(body)) > limit {
+	if int64(len(responseBody)) > limit {
 		return nil, 0, nil, fmt.Errorf("%s %s: %w", method, target, &ResponseTooLargeError{Limit: limit})
 	}
-	return body, response.StatusCode, response.Header, nil
+	return responseBody, response.StatusCode, response.Header, nil
 }
 
 // Ref resolves branch to its commit SHA under an installation token

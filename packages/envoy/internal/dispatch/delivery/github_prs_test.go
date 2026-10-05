@@ -20,25 +20,42 @@ import (
 
 // fakeGitHub is a minimal httptest stand-in for the GitHub App and REST APIs this package's
 // fetchers call: installation resolution, token minting, and whatever read handlers a test
-// installs on mux. Shared by github_prs_test.go and github_runs_test.go.
+// installs on mux. Shared by github_prs_test.go and github_runs_test.go. Defaults to a full
+// permission set (contents/actions/pull_requests all "read") and a single-repository
+// installation ("acme/widgets") so an ordinary test needs no boilerplate; a test exercising a
+// missing permission or a multi-repository installation overrides permissions/installationRepos
+// before calling newTestClient.
 type fakeGitHub struct {
-	t          *testing.T
-	mux        *http.ServeMux
-	installID  int64
-	tokenMints int
+	t                 *testing.T
+	mux               *http.ServeMux
+	installID         int64
+	tokenMints        int
+	permissions       map[string]string
+	installationRepos []string
 }
 
 func newFakeGitHub(t *testing.T) *fakeGitHub {
 	t.Helper()
-	f := &fakeGitHub{t: t, mux: http.NewServeMux(), installID: 1}
+	f := &fakeGitHub{
+		t: t, mux: http.NewServeMux(), installID: 1,
+		permissions:       map[string]string{"contents": "read", "actions": "read", "pull_requests": "read"},
+		installationRepos: []string{"acme/widgets"},
+	}
 	f.mux.HandleFunc("GET /repos/{owner}/{repo}/installation", func(w http.ResponseWriter, r *http.Request) {
 		if err := json.NewEncoder(w).Encode(map[string]any{
 			"id":          f.installID,
 			"app_slug":    "delivery-test",
-			"permissions": map[string]string{"contents": "read"},
+			"permissions": f.permissions,
 		}); err != nil {
 			f.t.Errorf("encode installation: %v", err)
 		}
+	})
+	f.mux.HandleFunc("GET /installation/repositories", func(w http.ResponseWriter, r *http.Request) {
+		repos := make([]map[string]any, len(f.installationRepos))
+		for i, name := range f.installationRepos {
+			repos[i] = map[string]any{"full_name": name}
+		}
+		mustEncode(t, w, map[string]any{"total_count": len(repos), "repositories": repos})
 	})
 	f.mux.HandleFunc("POST /app/installations/{id}/access_tokens", func(w http.ResponseWriter, r *http.Request) {
 		f.tokenMints++
@@ -220,16 +237,42 @@ func TestFetchPullRequestUpstream500IsWrapped(t *testing.T) {
 	}
 }
 
-func searchIssueItemJSON(number int, title, author string, createdAt, mergedAt string) map[string]any {
+// decodeGraphQLRequest reads a POST /graphql request's {query, variables} body, the shape every
+// search test below asserts against instead of REST search's URL query parameters.
+func decodeGraphQLRequest(t *testing.T, r *http.Request) (query string, variables map[string]any) {
+	t.Helper()
+	var decoded struct {
+		Query     string         `json:"query"`
+		Variables map[string]any `json:"variables"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&decoded); err != nil {
+		t.Fatalf("decode GraphQL request body: %v", err)
+	}
+	return decoded.Query, decoded.Variables
+}
+
+func searchNodeJSON(number int, title, author string, createdAt, mergedAt string) map[string]any {
 	return map[string]any{
-		"number":     number,
-		"title":      title,
-		"html_url":   fmt.Sprintf("https://github.com/acme/widgets/pull/%d", number),
-		"user":       map[string]any{"login": author},
-		"created_at": createdAt,
-		"body":       "",
-		"pull_request": map[string]any{
-			"merged_at": mergedAt,
+		"number":    number,
+		"title":     title,
+		"url":       fmt.Sprintf("https://github.com/acme/widgets/pull/%d", number),
+		"author":    map[string]any{"login": author},
+		"createdAt": createdAt,
+		"mergedAt":  mergedAt,
+		"body":      "",
+		"labels":    map[string]any{"nodes": []any{}},
+	}
+}
+
+// searchResponseJSON wraps nodes in the GraphQL `data.search` envelope fetchSearchPage decodes.
+func searchResponseJSON(issueCount int, nodes []map[string]any, hasNextPage bool, endCursor string) map[string]any {
+	return map[string]any{
+		"data": map[string]any{
+			"search": map[string]any{
+				"issueCount": issueCount,
+				"pageInfo":   map[string]any{"hasNextPage": hasNextPage, "endCursor": endCursor},
+				"nodes":      nodes,
+			},
 		},
 	}
 }
@@ -237,9 +280,11 @@ func searchIssueItemJSON(number int, title, author string, createdAt, mergedAt s
 func TestSearchMergedPullRequestsBuildsTheQuery(t *testing.T) {
 	fake := newFakeGitHub(t)
 	var gotQuery string
-	fake.handle("GET /search/issues", func(w http.ResponseWriter, r *http.Request) {
-		gotQuery = r.URL.Query().Get("q")
-		mustEncode(t, w, map[string]any{"total_count": 0, "items": []any{}})
+	fake.handle("POST /graphql", func(w http.ResponseWriter, r *http.Request) {
+		var variables map[string]any
+		_, variables = decodeGraphQLRequest(t, r)
+		gotQuery, _ = variables["q"].(string)
+		mustEncode(t, w, searchResponseJSON(0, nil, false, ""))
 	})
 	client := fake.newTestClient()
 
@@ -255,28 +300,28 @@ func TestSearchMergedPullRequestsBuildsTheQuery(t *testing.T) {
 	}
 }
 
-func TestSearchMergedPullRequestsAcrossInstallationOmitsRepoQualifier(t *testing.T) {
+func TestSearchMergedPullRequestsAcrossInstallationScopesToInstallationRepos(t *testing.T) {
 	fake := newFakeGitHub(t)
+	fake.installationRepos = []string{"acme/widgets", "acme/other-widgets"}
 	var gotQuery string
-	fake.handle("GET /search/issues", func(w http.ResponseWriter, r *http.Request) {
-		gotQuery = r.URL.Query().Get("q")
-		mustEncode(t, w, map[string]any{"total_count": 0, "items": []any{}})
+	fake.handle("POST /graphql", func(w http.ResponseWriter, r *http.Request) {
+		_, variables := decodeGraphQLRequest(t, r)
+		gotQuery, _ = variables["q"].(string)
+		mustEncode(t, w, searchResponseJSON(0, nil, false, ""))
 	})
 	client := fake.newTestClient()
 
 	since := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
 	until := time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC)
-	// tokenOwner/tokenRepo (acme/widgets) only resolves which installation to mint a token
-	// from -- LEGION-294's population spans every repository that installation covers, so the
-	// query itself must carry no repo: qualifier.
+	// tokenOwner/tokenRepo (acme/widgets) only resolves which installation to ask about -- the
+	// query itself must carry an explicit repo: qualifier for every repository the installation's
+	// GET /installation/repositories lists, since an unqualified query is NOT scoped by the
+	// authenticating token for public-repository content (it searches all of public GitHub).
 	if _, err := SearchMergedPullRequestsAcrossInstallation(context.Background(), client, "acme", "widgets", []string{"alice", "bob"}, since, until); err != nil {
 		t.Fatalf("SearchMergedPullRequestsAcrossInstallation: %v", err)
 	}
 
-	if strings.Contains(gotQuery, "repo:") {
-		t.Fatalf("search query = %q, want no repo: qualifier", gotQuery)
-	}
-	want := "is:pr is:merged merged:2024-01-01T00:00:00Z..2024-01-02T00:00:00Z author:alice author:bob"
+	want := "repo:acme/widgets repo:acme/other-widgets is:pr is:merged merged:2024-01-01T00:00:00Z..2024-01-02T00:00:00Z author:alice author:bob"
 	if gotQuery != want {
 		t.Fatalf("search query = %q, want %q", gotQuery, want)
 	}
@@ -284,23 +329,18 @@ func TestSearchMergedPullRequestsAcrossInstallationOmitsRepoQualifier(t *testing
 
 func TestSearchMergedPullRequestsPaginatesAcrossPages(t *testing.T) {
 	fake := newFakeGitHub(t)
-	var pagesSeen []string
-	fake.handle("GET /search/issues", func(w http.ResponseWriter, r *http.Request) {
-		page := r.URL.Query().Get("page")
-		pagesSeen = append(pagesSeen, page)
-		switch page {
-		case "1":
-			mustEncode(t, w, map[string]any{
-				"total_count": 150,
-				"items":       repeatSearchItems(100, 1),
-			})
-		case "2":
-			mustEncode(t, w, map[string]any{
-				"total_count": 150,
-				"items":       repeatSearchItems(50, 101),
-			})
+	var cursorsSeen []string
+	fake.handle("POST /graphql", func(w http.ResponseWriter, r *http.Request) {
+		_, variables := decodeGraphQLRequest(t, r)
+		after, _ := variables["after"].(string)
+		cursorsSeen = append(cursorsSeen, after)
+		switch after {
+		case "":
+			mustEncode(t, w, searchResponseJSON(150, repeatSearchNodes(100, 1), true, "cursor-100"))
+		case "cursor-100":
+			mustEncode(t, w, searchResponseJSON(150, repeatSearchNodes(50, 101), false, ""))
 		default:
-			t.Fatalf("unexpected page %q", page)
+			t.Fatalf("unexpected cursor %q", after)
 		}
 	})
 	client := fake.newTestClient()
@@ -313,29 +353,30 @@ func TestSearchMergedPullRequestsPaginatesAcrossPages(t *testing.T) {
 	if len(results) != 150 {
 		t.Fatalf("len(results) = %d, want 150", len(results))
 	}
-	if len(pagesSeen) != 2 || pagesSeen[0] != "1" || pagesSeen[1] != "2" {
-		t.Fatalf("pages fetched = %v, want [1 2]", pagesSeen)
+	if len(cursorsSeen) != 2 || cursorsSeen[0] != "" || cursorsSeen[1] != "cursor-100" {
+		t.Fatalf("cursors fetched = %v, want [\"\" cursor-100]", cursorsSeen)
 	}
 	if results[0].Number != 1 || results[149].Number != 150 {
 		t.Fatalf("results not in page order: first=%d last=%d", results[0].Number, results[149].Number)
 	}
 }
 
-func repeatSearchItems(n, startNumber int) []map[string]any {
-	items := make([]map[string]any, n)
+func repeatSearchNodes(n, startNumber int) []map[string]any {
+	nodes := make([]map[string]any, n)
 	for i := range n {
 		number := startNumber + i
-		items[i] = searchIssueItemJSON(number, "t", "alice", "2024-01-01T00:00:00Z", "2024-01-01T01:00:00Z")
+		nodes[i] = searchNodeJSON(number, "t", "alice", "2024-01-01T00:00:00Z", "2024-01-01T01:00:00Z")
 	}
-	return items
+	return nodes
 }
 
 func TestSearchMergedPullRequestsHalvesOnOverflowWithoutGapOrOverlap(t *testing.T) {
 	fake := newFakeGitHub(t)
 	type window struct{ since, until string }
 	var windows []window
-	fake.handle("GET /search/issues", func(w http.ResponseWriter, r *http.Request) {
-		q := r.URL.Query().Get("q")
+	fake.handle("POST /graphql", func(w http.ResponseWriter, r *http.Request) {
+		_, variables := decodeGraphQLRequest(t, r)
+		q, _ := variables["q"].(string)
 		// q contains "merged:<since>..<until>"; extract it for the window assertion.
 		const marker = "merged:"
 		idx := strings.Index(q, marker)
@@ -350,13 +391,13 @@ func TestSearchMergedPullRequestsHalvesOnOverflowWithoutGapOrOverlap(t *testing.
 		windows = append(windows, window{parts[0], parts[1]})
 
 		if rangeText == "2024-01-01T00:00:00Z..2024-01-02T00:00:00Z" {
-			// The original, full window: answer with an overflowing total_count so the caller
+			// The original, full window: answer with an overflowing issueCount so the caller
 			// halves and recurses instead of paginating past 1,000.
-			mustEncode(t, w, map[string]any{"total_count": 1001, "items": repeatSearchItems(100, 1)})
+			mustEncode(t, w, searchResponseJSON(1001, repeatSearchNodes(100, 1), false, ""))
 			return
 		}
 		// Either half answers a small, final result.
-		mustEncode(t, w, map[string]any{"total_count": 1, "items": repeatSearchItems(1, 1)})
+		mustEncode(t, w, searchResponseJSON(1, repeatSearchNodes(1, 1), false, ""))
 	})
 	client := fake.newTestClient()
 
@@ -372,16 +413,17 @@ func TestSearchMergedPullRequestsHalvesOnOverflowWithoutGapOrOverlap(t *testing.
 	if len(windows) != 3 {
 		t.Fatalf("requests made = %d, want 3 (original + two halves)", len(windows))
 	}
-	mid := since.Add(until.Sub(since) / 2).UTC().Format(time.RFC3339)
+	// GitHub's merged:A..B qualifier is inclusive on BOTH ends, so the second half must start one
+	// second after the midpoint (GitHub's own query granularity), not at the midpoint itself --
+	// otherwise a PR merged exactly at the midpoint would be counted in both halves.
+	mid := since.Add(until.Sub(since) / 2)
 	first, second := windows[1], windows[2]
-	if first.since != since.UTC().Format(time.RFC3339) || first.until != mid {
-		t.Fatalf("first half = %+v, want [%s, %s)", first, since.UTC().Format(time.RFC3339), mid)
+	if first.since != since.UTC().Format(time.RFC3339) || first.until != mid.UTC().Format(time.RFC3339) {
+		t.Fatalf("first half = %+v, want [%s, %s]", first, since.UTC().Format(time.RFC3339), mid.UTC().Format(time.RFC3339))
 	}
-	if second.since != mid || second.until != until.UTC().Format(time.RFC3339) {
-		t.Fatalf("second half = %+v, want [%s, %s)", second, mid, until.UTC().Format(time.RFC3339))
-	}
-	if first.until != second.since {
-		t.Fatalf("halves do not meet at the midpoint: first ends %s, second starts %s", first.until, second.since)
+	wantSecondSince := mid.Add(time.Second).UTC().Format(time.RFC3339)
+	if second.since != wantSecondSince || second.until != until.UTC().Format(time.RFC3339) {
+		t.Fatalf("second half = %+v, want [%s, %s]", second, wantSecondSince, until.UTC().Format(time.RFC3339))
 	}
 }
 
@@ -418,11 +460,8 @@ func assertPullRequestsEqual(t *testing.T, got, want FetchedPullRequest) {
 
 func TestSearchMergedPullRequestsLeavesCompletingFieldsNil(t *testing.T) {
 	fake := newFakeGitHub(t)
-	fake.handle("GET /search/issues", func(w http.ResponseWriter, r *http.Request) {
-		mustEncode(t, w, map[string]any{
-			"total_count": 1,
-			"items":       []map[string]any{searchIssueItemJSON(5, "t", "alice", "2024-01-01T00:00:00Z", "2024-01-01T01:00:00Z")},
-		})
+	fake.handle("POST /graphql", func(w http.ResponseWriter, r *http.Request) {
+		mustEncode(t, w, searchResponseJSON(1, []map[string]any{searchNodeJSON(5, "t", "alice", "2024-01-01T00:00:00Z", "2024-01-01T01:00:00Z")}, false, ""))
 	})
 	client := fake.newTestClient()
 
