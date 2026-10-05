@@ -51,13 +51,22 @@ type TransientError struct{ Err error }
 func (e *TransientError) Error() string { return e.Err.Error() }
 func (e *TransientError) Unwrap() error { return e.Err }
 
-// transient marks a response that is GitHub's trouble rather than an answer: a 5xx, or a rate
-// limit (githubrest.RateLimited).
-func transient(response *http.Response, err error) error {
-	if response.StatusCode >= http.StatusInternalServerError || githubrest.RateLimited(response) {
+// transient marks a response, whose body is body, as GitHub's trouble rather than an answer: a
+// 5xx, or a rate limit (githubrest.RateLimited, which reads the body for a secondary limit GitHub
+// names there alone).
+func transient(response *http.Response, body []byte, err error) error {
+	if response.StatusCode >= http.StatusInternalServerError || githubrest.RateLimited(response, body) {
 		return &TransientError{Err: err}
 	}
 	return err
+}
+
+// refusalBody is the body GitHub sent with a refusal, read whole, and the response closed. One
+// that cannot be read is empty: the status and the headers still say what the answer is.
+func refusalBody(response *http.Response) []byte {
+	body, _ := io.ReadAll(response.Body)
+	response.Body.Close()
+	return body
 }
 
 // readBody reads a successful response's body whole: a read that fails is a transport failure,
@@ -277,8 +286,7 @@ func (m *Manager) discoverInstallations(ctx context.Context, app config.GitHubAp
 			return nil, &TransientError{Err: fmt.Errorf("GitHub App installation discovery: %w", err)}
 		}
 		if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-			response.Body.Close()
-			return nil, transient(response, fmt.Errorf("GitHub App installation discovery failed (%d)", response.StatusCode))
+			return nil, transient(response, refusalBody(response), fmt.Errorf("GitHub App installation discovery failed (%d)", response.StatusCode))
 		}
 		body, err := readBody(response, "GitHub App installation discovery")
 		if err != nil {
@@ -330,9 +338,8 @@ func (m *Manager) exchange(ctx context.Context, jwt, installation string) (Lease
 		return Lease{}, &TransientError{Err: fmt.Errorf("GitHub App token exchange: %w", err)}
 	}
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		body, _ := io.ReadAll(response.Body)
-		response.Body.Close()
-		return Lease{}, transient(response, fmt.Errorf("GitHub App token exchange failed (%d): %s", response.StatusCode, strings.TrimSpace(string(body))))
+		body := refusalBody(response)
+		return Lease{}, transient(response, body, fmt.Errorf("GitHub App token exchange failed (%d): %s", response.StatusCode, strings.TrimSpace(string(body))))
 	}
 	body, err := readBody(response, "GitHub App token exchange")
 	if err != nil {
@@ -394,8 +401,7 @@ func (m *Manager) fetchIdentity(ctx context.Context, jwt, installationToken stri
 		return GitIdentity{}, &TransientError{Err: fmt.Errorf("GitHub App identity lookup: %w", err)}
 	}
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		response.Body.Close()
-		return GitIdentity{}, transient(response, fmt.Errorf("GitHub App identity lookup failed (%d)", response.StatusCode))
+		return GitIdentity{}, transient(response, refusalBody(response), fmt.Errorf("GitHub App identity lookup failed (%d)", response.StatusCode))
 	}
 	body, err := readBody(response, "GitHub App identity lookup")
 	if err != nil {
@@ -421,8 +427,7 @@ func (m *Manager) fetchIdentity(ctx context.Context, jwt, installationToken stri
 		return GitIdentity{}, &TransientError{Err: fmt.Errorf("GitHub App bot identity lookup: %w", err)}
 	}
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		response.Body.Close()
-		return GitIdentity{}, transient(response, fmt.Errorf("GitHub App bot identity lookup failed (%d)", response.StatusCode))
+		return GitIdentity{}, transient(response, refusalBody(response), fmt.Errorf("GitHub App bot identity lookup failed (%d)", response.StatusCode))
 	}
 	body, err = readBody(response, "GitHub App bot identity lookup")
 	if err != nil {
