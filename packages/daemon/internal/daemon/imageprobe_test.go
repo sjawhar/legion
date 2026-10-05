@@ -35,7 +35,7 @@ case "$*" in
 "models --no-extensions --extension "*" --extension "*" --json") kind=load ;;
 "models --no-extensions --extension "*" --json") kind=agents ;;
 "models --extension "*" --json") kind=load ;;
-"--no-session --no-extensions --no-skills --no-rules --no-lsp --no-tools") kind=session ;;
+"--mode rpc --no-session --no-extensions --no-skills --no-rules --no-lsp --no-tools") kind=session ;;
 *) echo "fake omp: unexpected argv: $*" >&2; exit 64 ;;
 esac
 n=$(( $(cat "$dir/$kind.count" 2>/dev/null || echo 0) + 1 ))
@@ -60,7 +60,7 @@ load:yes) printf 'LEGION_PLUGIN_LOADED=yes\nLEGION_PLUGIN_LOADED_FROM=file://%s/
 load:no) echo LEGION_PLUGIN_LOADED=no >&2; exit 0 ;;
 load:elsewhere) printf 'LEGION_PLUGIN_LOADED=yes\nLEGION_PLUGIN_LOADED_FROM=file://%s/elsewhere/pi-legion-envoy/dist/legion.js\n' "$dir" >&2; exit 0 ;;
 session:refuses) echo "Invalid OMP_SESSION_STORAGE: legion-launch-probe (expected file or sql)" >&2; exit 1 ;;
-session:accepts) echo "startup timings: settings 3ms" >&2; exit 0 ;;
+session:accepts) exit 0 ;;
 session:dies) echo "database is locked" >&2; exit 1 ;;
 *:denied) echo "secrets: ANTHROPIC_API_KEY was denied" >&2; exit 3 ;;
 *:hang) exec sleep 30 ;;
@@ -300,11 +300,8 @@ func TestProbeImageRunsTheThreeProbesUnderTheImagesEnvironment(t *testing.T) {
 			}
 		}
 	}
-	sessionEnv := f.read(t, "session.env.1")
-	for _, want := range []string{"OMP_SESSION_STORAGE=legion-launch-probe\n", "PI_TIMING=x\n"} {
-		if !strings.Contains(sessionEnv, want) {
-			t.Errorf("the session-storage probe ran without %q", strings.TrimSpace(want))
-		}
+	if sessionEnv := f.read(t, "session.env.1"); !strings.Contains(sessionEnv, "OMP_SESSION_STORAGE=legion-launch-probe\n") {
+		t.Error("the session-storage probe ran without OMP_SESSION_STORAGE=legion-launch-probe")
 	}
 	if strings.Contains(f.read(t, "agents.env.1"), "OMP_SESSION_STORAGE=") {
 		t.Error("the pi.agents probe ran with the session-storage probe's variable")

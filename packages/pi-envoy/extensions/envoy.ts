@@ -688,7 +688,7 @@ export default function envoyExtension(pi: PiApi): void {
             "[envoy] dropping malformed Dispatch targeted delivery without a reply address"
           );
         } else if (rendered.delivery?.mode === "btw") {
-          const answer = sideTurn(pi, activeSessionContext);
+          const answer = sideTurn(activeSessionContext);
           if (shuttingDown) {
             // A session that is shutting down starts no model call, but a frame can still drain in.
             await refuse(rendered.delivery, "This OMP session is shutting down");
@@ -980,7 +980,7 @@ export default function envoyExtension(pi: PiApi): void {
       // titles assigned after session_start and later renames.
       title: activeSessionContext?.sessionManager.getSessionName?.() ?? "",
       capabilities:
-        sideTurn(pi, activeSessionContext) === undefined
+        sideTurn(activeSessionContext) === undefined
           ? CAPABILITIES_WITHOUT_BTW
           : DELIVERY_CAPABILITIES,
       driving: false,
@@ -1592,7 +1592,7 @@ export default function envoyExtension(pi: PiApi): void {
       id === "" ||
       event.prompt.trim() === "" ||
       !context.hasUI ||
-      sideTurn(pi, context) === undefined ||
+      sideTurn(context) === undefined ||
       legionManaged(id)
     ) {
       return undefined;
@@ -1666,7 +1666,7 @@ export default function envoyExtension(pi: PiApi): void {
     // failure (`error`), a truncation, or a run with no reply of its own answers the user's cancel,
     // or a failure, with a turn nobody asked for.
     const lastReply = event.messages?.findLast((message) => message.role === "assistant");
-    const ask = sideTurn(pi, context);
+    const ask = sideTurn(context);
     if (
       event.willContinue === true ||
       lastReply?.stopReason !== "stop" ||
@@ -1779,29 +1779,19 @@ export default function envoyExtension(pi: PiApi): void {
     // never surface as an unhandled one.
     const abort = new AbortController();
     askCheckAbort = abort;
-    let answered: Promise<string | undefined>;
-    try {
-      answered = ask({
-        prompt: ASK_SELF_CHECK_PROMPT(open.snapshot.asks),
-        signal: abort.signal,
-      }).then(
-        (reply): string | undefined => reply.replyText,
-        (error: unknown): string | undefined => {
-          // An abort this extension made — a superseded check, or its own timeout, which logs
-          // itself — is not a failure. Logging it would spend the once-per-session warning on
-          // an ordinary event, such as the user typing, and silence the real failure after it.
-          if (!abort.signal.aborted) logSelfCheckFailure(id, error);
-          return undefined;
-        }
-      );
-    } catch (error) {
-      // A host initialised without the capability installs a stub that throws synchronously
-      // rather than rejecting, so `.then(onRejected)` never sees it. Left to escape, the
-      // throw would leave the check unspent and every later settle would pay another Dispatch
-      // round trip and throw again, with the cap never engaging.
-      logSelfCheckFailure(id, error);
-      answered = Promise.resolve(undefined);
-    }
+    const answered = ask({
+      prompt: ASK_SELF_CHECK_PROMPT(open.snapshot.asks),
+      signal: abort.signal,
+    }).then(
+      (reply): string | undefined => reply.replyText,
+      (error: unknown): string | undefined => {
+        // An abort this extension made — a superseded check, or its own timeout, which logs
+        // itself — is not a failure. Logging it would spend the once-per-session warning on
+        // an ordinary event, such as the user typing, and silence the real failure after it.
+        if (!abort.signal.aborted) logSelfCheckFailure(id, error);
+        return undefined;
+      }
+    );
     const expiry = Promise.withResolvers<undefined>();
     const expire = setTimeout(() => {
       const timedOut = new Error(`self-check timed out after ${selfCheckTimeoutMs} ms`);
@@ -2000,7 +1990,7 @@ export default function envoyExtension(pi: PiApi): void {
               : `published ${result.envelope.event_id}; holder ${result.holder}`;
           return toolSuccess(
             undelivered
-              ? `${published}\nNot delivered: that holder is the session this subagent sends as, and the listener drops a message whose source session is its recipient, so the agent that spawned you did not receive it. Reach it over hub instead.`
+              ? `${published}\nNot delivered: that holder is the session this subagent sends as, and the listener drops a message whose source session is its recipient, so the agent that spawned you did not receive it. Reach it with a write to its agent:// address instead.`
               : published,
             {
               event_id: result.envelope.event_id,
@@ -2030,8 +2020,8 @@ export default function envoyExtension(pi: PiApi): void {
                 session_id: context.sessionManager.getSessionId(),
                 note:
                   address === ""
-                    ? "This session is a task subagent and registers no Envoy session of its own, and this process records no top-level session its transcript traces back to, so it has no reply address at all: say who you are in the message body, and reach the agent that spawned you over hub."
-                    : "This session is a task subagent and registers no Envoy session of its own; a reply to session_id reaches the agent that spawned it, which relays over hub. Your own envoy_publish never reaches that agent — use hub for that hop.",
+                    ? "This session is a task subagent and registers no Envoy session of its own, and this process records no top-level session its transcript traces back to, so it has no reply address at all: say who you are in the message body, and reach the agent that spawned you with a write to its agent:// address."
+                    : "This session is a task subagent and registers no Envoy session of its own; a reply to session_id reaches the agent that spawned it, which relays it with a write to your agent:// address. Your own envoy_publish never reaches that agent — use a write to its agent:// address for that hop.",
               }
             : undefined;
           return toolSuccess(

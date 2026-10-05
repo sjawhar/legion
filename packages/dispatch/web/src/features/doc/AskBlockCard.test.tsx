@@ -387,11 +387,8 @@ test("Ask back on an issue document's decision posts a clarification on the issu
       { ask_id: "ask-1", body: "Ship to which environment?" },
     ]);
     expect(answerAsk).not.toHaveBeenCalled();
-    // The composer clears for the next turn and the exchange shows, folded, under the block.
+    // The composer clears for the next turn and the exchange stays visible under the block.
     await waitFor(() => expect(field.value).toBe(""));
-    const disclosure = await card.footer.findByRole("button", { name: "1 reply" });
-    expect(disclosure.getAttribute("aria-expanded")).toBe("false");
-    fireEvent.click(disclosure);
     await waitFor(() => expect(card.footer.getByText("Ship to which environment?")).toBeDefined());
     // A clarification is not an answer: the composer is still here.
     expect(card.footer.getByRole("button", { name: "Answer" })).toBeDefined();
@@ -456,17 +453,15 @@ test("a question-shaped answer with no option chosen offers Ask back instead, as
   }
 });
 
-test("an existing exchange shows folded under an open decision with its count", async () => {
+test("an existing exchange shows its newest replies under an open decision", async () => {
   const card = renderCard({
     node: askNode({ urgency: "med" }),
     thread: threadRead(ask, [reply("Ship where?"), reply("To staging first.")]),
   });
   try {
-    const disclosure = await card.footer.findByRole("button", { name: "2 replies" });
-    expect(card.footer.queryByText("Ship where?")).toBeNull();
-    fireEvent.click(disclosure);
-    expect(card.footer.getByText("Ship where?")).toBeDefined();
+    await waitFor(() => expect(card.footer.getByText("Ship where?")).toBeDefined());
     expect(card.footer.getByText("To staging first.")).toBeDefined();
+    expect(card.footer.queryByRole("button", { name: /Show .* more/ })).toBeNull();
   } finally {
     card.unmount();
   }
@@ -492,7 +487,7 @@ test("an answered decision hosts the shared record: who answered and when, the c
     await waitFor(() =>
       expect(within(record).getByText("Ship it after the fix lands.")).toBeDefined()
     );
-    expect(await card.footer.findByRole("button", { name: "1 reply" })).toBeDefined();
+    expect(await card.footer.findByText("Ship where?")).toBeDefined();
     // The record has no metadata line, so the block header keeps the reference copy control.
     expect(card.header.getByRole("button", { name: /^Copy reference/ })).toBeDefined();
   } finally {
@@ -521,7 +516,6 @@ test("a reply written in Markdown keeps its paragraphs and list inside the block
     thread: threadRead(ask, [reply("Two things first:\n\n- the branch\n- the tag\n\nThen ship.")]),
   });
   try {
-    fireEvent.click(await card.footer.findByRole("button", { name: "1 reply" }));
     const body = await waitFor(() => {
       const found = card.footer.getByText("Then ship.").closest(".dispatch-markdown");
       if (found === null) throw new Error("the reply body is not a MarkdownBody");

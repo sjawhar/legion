@@ -84,7 +84,8 @@ a new version that keeps the human's own text, never a second "spec" artifact be
   it for your inference; an answer that is only a chosen option is recorded in the form
   `<name> chose "Commit author" on the question below (<date>)`, naming them from `dispatch_whoami`
   or the conversation, or "the person" when the token names no owner — never a name you were not
-  given. A point you inferred says so, with the reasoning; during a live brainstorming
+  given. A point you inferred says so, with the reasoning — a security concern, a restriction, or
+  a cost nobody measured is exactly this, not a settled constraint; during a live brainstorming
   conversation, `skill://dispatch-brainstorming` is stricter and keeps an inference out of the spec
   until the human has agreed to it. One carried in from another document keeps its provenance: an
   agent's inference there is marked one here, or stays out until the human raises it.
@@ -160,15 +161,14 @@ follow [Writing a spec](#writing-a-spec).
 you plan, start a design document, file an issue, ask, post a finding or start work, and what to
 do with each hit. What it leaves out:
 ```ts
-dispatch_search({ query, project?, limit? })
+dispatch_search({ query, project?, limit?, offset? })
 ```
-Websearch syntax applies: `"merge queue"`, `-daemon`, `OR`. It returns the best `limit` hits (20
-by default, 50 at most) across issues, documents, comments, asks, and messages. A query over
-1,000 characters is refused before it is sent: search with the few words `skill://dispatch-first`
-describes, never a pasted passage. Issue-owned hit lines start with the issue key; standalone
-project-document hit lines start with `dispatch://PROJECT/artifact/<slug>`, followed by the
-absolute link. Cite the hit you build on (`dispatch://KEY` or the document reference), or state
-"no prior issue" in the spec.
+Websearch syntax applies: `"merge queue"`, `-daemon`, `OR`. Issues, documents, asks, comments, and messages rank separately; the
+merged page orders each kind's best in turn — issue, document, ask, comment, message — and a bare issue key ranks first. A page
+holds `limit` hits (20 default, 50 max); the first line gives the total (`showing 1-20 of 312`); see
+[Search paging](skill://dispatch/references/issues.md#search-paging) for more. Queries over 1,000 characters are refused: use the
+few words `skill://dispatch-first` names, never a pasted passage. Issue hits start with the issue key; document hits start with
+`dispatch://PROJECT/artifact/<slug>`, then the link. Cite the hit (`dispatch://KEY` or the doc ref) or say "no prior issue".
 
 `dispatch_issue` refuses a title that near-duplicates an issue in the same project and returns the candidates (`POSSIBLE_DUPLICATE`).
 Read them; reference the existing issue, or repeat the call with `force: true` when it is genuinely new work.
