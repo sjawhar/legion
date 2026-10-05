@@ -1105,17 +1105,23 @@ func TestEnrollHelperFlagValidation(t *testing.T) {
 	}
 }
 
-// TestRequestAndExecFormSendOMPSessionIDAsSessionID is the regression for the review's finding
+// TestRequestAndExecFormSendSessionIDWithFallbackOrder is the regression for the review's finding
 // I3: POST /v1/requests carries session_id so the broker can wake this host session directly
 // once its request is decided (host enrollments carry no session_id of their own) — both call
-// sites, cmdRequest and cmdExec, must forward OMP_SESSION_ID rather than leaving it "".
-func TestRequestAndExecFormSendOMPSessionIDAsSessionID(t *testing.T) {
+// sites, cmdRequest and cmdExec, must forward requestSessionID()'s answer rather than leaving it
+// "" — and for LEGION-587's fallback order: with OMP_SESSION_ID unset, the request form still
+// sends ENVOY_SESSION_ID. requestSessionID's own three-way fallback order is pinned at the unit
+// level by TestRequestSessionIDFallbackOrder, below; this test is the proof that both real call
+// sites actually call it rather than os.Getenv("OMP_SESSION_ID") directly.
+func TestRequestAndExecFormSendSessionIDWithFallbackOrder(t *testing.T) {
 	binary := buildAgentSecrets(t)
 	broker, counters := fakeBroker(t)
 	defer broker.Close()
 	keyDir := newKeyDir(t)
+	clearFallbacks := []string{"ENVOY_SESSION_ID=", "CLAUDE_CODE_SESSION_ID="}
 
-	stdout, stderr, exit := runAgentSecrets(t, binary, broker.URL, keyDir, []string{"OMP_SESSION_ID=sess-request-123"}, "request", "GRANT_ME")
+	stdout, stderr, exit := runAgentSecrets(t, binary, broker.URL, keyDir,
+		append([]string{"OMP_SESSION_ID=sess-request-123"}, clearFallbacks...), "request", "GRANT_ME")
 	if exit != 0 {
 		t.Fatalf("exit = %d, want 0: stdout=%q stderr=%q", exit, stdout, stderr)
 	}
@@ -1123,11 +1129,52 @@ func TestRequestAndExecFormSendOMPSessionIDAsSessionID(t *testing.T) {
 		t.Fatalf("request form session_id = %q, want %q", got, "sess-request-123")
 	}
 
-	stdout, stderr, exit = runAgentSecrets(t, binary, broker.URL, keyDir, []string{"OMP_SESSION_ID=sess-exec-456"}, "GRANT_ME", "--", "true")
+	stdout, stderr, exit = runAgentSecrets(t, binary, broker.URL, keyDir,
+		append([]string{"OMP_SESSION_ID=sess-exec-456"}, clearFallbacks...), "GRANT_ME", "--", "true")
 	if exit != 0 {
 		t.Fatalf("exit = %d, want 0: stdout=%q stderr=%q", exit, stdout, stderr)
 	}
 	if got := counters.sessionID(); got != "sess-exec-456" {
 		t.Fatalf("exec form session_id = %q, want %q", got, "sess-exec-456")
+	}
+
+	// OMP_SESSION_ID unset: the request form falls back to ENVOY_SESSION_ID.
+	stdout, stderr, exit = runAgentSecrets(t, binary, broker.URL, keyDir,
+		[]string{"OMP_SESSION_ID=", "ENVOY_SESSION_ID=sess-envoy-789", "CLAUDE_CODE_SESSION_ID="},
+		"request", "GRANT_ME")
+	if exit != 0 {
+		t.Fatalf("exit = %d, want 0: stdout=%q stderr=%q", exit, stdout, stderr)
+	}
+	if got := counters.sessionID(); got != "sess-envoy-789" {
+		t.Fatalf("request form fallback session_id = %q, want %q", got, "sess-envoy-789")
+	}
+}
+
+// TestRequestSessionIDFallbackOrder pins requestSessionID's own fallback order (LEGION-587):
+// OMP_SESSION_ID first, then ENVOY_SESSION_ID, then CLAUDE_CODE_SESSION_ID, empty when none is
+// set. This process's own environment may already carry one of the three (a Pi session sets its
+// own OMP_SESSION_ID), so every case sets all three explicitly rather than relying on any being
+// unset already.
+func TestRequestSessionIDFallbackOrder(t *testing.T) {
+	cases := []struct {
+		name               string
+		omp, envoy, claude string
+		want               string
+	}{
+		{"OMP_SESSION_ID alone", "sess-omp", "", "", "sess-omp"},
+		{"OMP_SESSION_ID wins over the others", "sess-omp", "sess-envoy", "sess-claude", "sess-omp"},
+		{"ENVOY_SESSION_ID when OMP_SESSION_ID is unset", "", "sess-envoy", "sess-claude", "sess-envoy"},
+		{"CLAUDE_CODE_SESSION_ID when the first two are unset", "", "", "sess-claude", "sess-claude"},
+		{"empty when none is set", "", "", "", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv("OMP_SESSION_ID", c.omp)
+			t.Setenv("ENVOY_SESSION_ID", c.envoy)
+			t.Setenv("CLAUDE_CODE_SESSION_ID", c.claude)
+			if got := requestSessionID(); got != c.want {
+				t.Fatalf("requestSessionID() = %q, want %q", got, c.want)
+			}
+		})
 	}
 }
