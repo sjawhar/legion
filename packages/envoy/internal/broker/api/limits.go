@@ -103,29 +103,19 @@ func (l *launcherLimiter) refuse(w http.ResponseWriter, r *http.Request, operato
 	return true
 }
 
-// rereadOverallKey is the one bucket every reread shares: ratelimit.Keyed gives each key a bucket
-// of its own, so one constant key is one bucket for the whole broker.
-const rereadOverallKey = "all"
-
 // refuseReread writes 429 RATE_LIMITED and reports true when r's source address, or the broker as
-// a whole, has no reread left in its bucket, naming the refusing bucket's Retry-After. The
-// per-address bucket is taken first, as the launcher limiter takes its own: a bucket spends a
-// token whenever it allows, so taking the broker-wide one first would let one address flooding
-// past its own limit spend shared tokens on rereads its own bucket then refuses, and refuse every
-// other caller. Taken second, the broker-wide bucket spends only on rereads that run, so after
-// its burst one address costs it no more than its own refill. The cap on the policy's writer lock
-// holds in either order, since a reread runs only when both buckets allow it.
+// a whole, has no reread left in its bucket, naming the refusing bucket's Retry-After. A reread
+// spends a token in each bucket only when both allow it (ratelimit.Keyed.AllowBothAt): one address
+// flooding past its own limit spends nothing of the broker-wide bucket, so it refuses no other
+// caller, and a reread the broker-wide bucket refuses spends nothing of its address's own, so a
+// caller retrying through a flood is not then refused by its own limit after the flood stops.
 func (s *server) refuseReread(w http.ResponseWriter, r *http.Request) bool {
-	now := time.Now()
-	if !s.rereadLimiter.AllowAt(clientAddress(r, s.deps.TrustedProxyHeader), now) {
-		refuseWithRetryAfter(w, s.rereadEvery, "too many secret rereads; try again later")
-		return true
+	refused, ok := s.rereadLimiter.AllowBothAt(clientAddress(r, s.deps.TrustedProxyHeader), s.rereadOverall, time.Now())
+	if ok {
+		return false
 	}
-	if !s.rereadOverall.AllowAt(rereadOverallKey, now) {
-		refuseWithRetryAfter(w, s.rereadOverallEvery, "too many secret rereads; try again later")
-		return true
-	}
-	return false
+	refuseWithRetryAfter(w, refused.Every, "too many secret rereads; try again later")
+	return true
 }
 
 // refuseWithRetryAfter answers 429 RATE_LIMITED with the Retry-After a bucket refilled one every

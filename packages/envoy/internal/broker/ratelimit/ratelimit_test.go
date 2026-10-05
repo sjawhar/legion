@@ -51,3 +51,41 @@ func TestKeyedDropsOnlyFullBucketsAtItsBound(t *testing.T) {
 		t.Fatalf("kept %d buckets past the bound, want the 2 that are not full", n)
 	}
 }
+
+// TestAKeyFloodingItsOwnLimitSpendsNothingShared pins AllowBothAt's first property: a request its
+// key's bucket refuses takes nothing from the shared bucket, so one key flooding past its own
+// limit leaves the shared bucket to every other key.
+func TestAKeyFloodingItsOwnLimitSpendsNothingShared(t *testing.T) {
+	perKey := Limit{Every: time.Hour, Burst: 1}
+	k, shared := NewKeyed(perKey), NewBucket(Limit{Every: time.Hour, Burst: 2})
+	if _, ok := k.AllowBothAt("flood", shared, t0); !ok {
+		t.Fatal("flood's first request was refused")
+	}
+	for i := range 5 {
+		if refused, ok := k.AllowBothAt("flood", shared, t0); ok || refused != perKey {
+			t.Fatalf("flood's request %d = %+v, %v; want refused by its own limit", i+2, refused, ok)
+		}
+	}
+	if _, ok := k.AllowBothAt("other", shared, t0); !ok {
+		t.Fatal("another key's first request was refused: the flood spent the shared bucket")
+	}
+}
+
+// TestASharedRefusalSpendsNothingOfTheKeys pins AllowBothAt's second property: a request the
+// shared bucket refuses takes nothing from its key's bucket, so a caller retrying through a flood
+// of others is not refused by its own limit once the shared bucket refills.
+func TestASharedRefusalSpendsNothingOfTheKeys(t *testing.T) {
+	all := Limit{Every: time.Second, Burst: 1}
+	k, shared := NewKeyed(Limit{Every: time.Hour, Burst: 1}), NewBucket(all)
+	if _, ok := k.AllowBothAt("other", shared, t0); !ok {
+		t.Fatal("other's first request was refused")
+	}
+	for i := range 3 {
+		if refused, ok := k.AllowBothAt("caller", shared, t0); ok || refused != all {
+			t.Fatalf("caller's request %d = %+v, %v; want refused by the shared limit", i+1, refused, ok)
+		}
+	}
+	if _, ok := k.AllowBothAt("caller", shared, t0.Add(time.Second)); !ok {
+		t.Fatal("caller was refused once the shared bucket refilled: the shared refusals spent its own bucket")
+	}
+}

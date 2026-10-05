@@ -77,8 +77,9 @@ and also while a variable it no longer reads is still set.
   address gets a burst of 30, refilled one every 2 seconds, and the broker as a whole takes 4 a
   second, burst 10, however many addresses the rereads come from — each one takes the policy's
   writer lock while it reads the secret, so that lock, not the caller, is what the second limit
-  bounds. Past either, the broker answers `429 RATE_LIMITED` with a `Retry-After` header naming
-  the limit that refused.
+  bounds. A reread counts against either limit only when both let it run, so one address flooding
+  past its own limit leaves the broker-wide one to everyone else. Past either, the broker answers
+  `429 RATE_LIMITED` with a `Retry-After` header naming the limit that refused.
 - Agents never see the broker's database or the secret store; whoever can write the database can
   forge a record, so its access control is part of the broker's. Whoever can tag a secret under the
   namespace decides who gets it, so the tags' write access is part of the broker's too.

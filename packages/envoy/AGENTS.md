@@ -2063,8 +2063,10 @@ against its own lowercase-hex-sha256 shape rather than a UUID's (`pathRecordID`)
 unauthenticated `POST /v1/secrets/{name}/reread` is rate limited both per source address and over
 every caller at once (`DefaultRereadLimit` and `DefaultRereadOverallLimit`, since each reread holds
 the policy's writer lock for one `DescribeSecret`, so a flood spread over addresses cannot hold up a
-reload; the per-address bucket is taken first, so one address flooding past its own limit spends
-none of the shared one; `429 RATE_LIMITED` with the refusing limit's `Retry-After`), and the
+reload; a reread spends a token from either bucket only when both allow it
+(`ratelimit.Keyed.AllowBothAt`), so one address flooding past its own limit spends none of the
+shared one and a reread the shared one refuses spends none of its address's; `429 RATE_LIMITED`
+with the refusing limit's `Retry-After`), and the
 unauthenticated `POST /v1/launcher-credentials` is rate limited per source address (see
 `BROKER_TRUSTED_PROXY_HEADER` above) and per named operator — the per-operator bucket keys on the
 request body's own `operator` field, so an attacker naming a specific victim operator repeatedly

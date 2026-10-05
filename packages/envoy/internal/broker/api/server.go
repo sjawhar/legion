@@ -59,13 +59,11 @@ type Deps struct {
 type server struct {
 	deps            Deps
 	launcherLimiter *launcherLimiter
-	// rereadLimiter is RereadLimit applied per source address (clientAddress) and rereadOverall
-	// RereadOverallLimit over one bucket every caller shares (rereadOverallKey); rereadEvery and
-	// rereadOverallEvery are their refill intervals, the Retry-After each one's refusal names.
-	rereadLimiter      *ratelimit.Keyed
-	rereadEvery        time.Duration
-	rereadOverall      *ratelimit.Keyed
-	rereadOverallEvery time.Duration
+	// rereadLimiter is RereadLimit applied per source address (clientAddress), and rereadOverall
+	// RereadOverallLimit over one bucket every caller shares; refuseReread takes from both or
+	// neither.
+	rereadLimiter *ratelimit.Keyed
+	rereadOverall *ratelimit.Bucket
 }
 
 func Register(mux *http.ServeMux, deps Deps) {
@@ -82,12 +80,10 @@ func Register(mux *http.ServeMux, deps Deps) {
 		rereadOverall = *deps.RereadOverallLimit
 	}
 	s := &server{
-		deps:               deps,
-		launcherLimiter:    newLauncherLimiter(limits, deps.TrustedProxyHeader),
-		rereadLimiter:      ratelimit.NewKeyed(reread),
-		rereadEvery:        reread.Every,
-		rereadOverall:      ratelimit.NewKeyed(rereadOverall),
-		rereadOverallEvery: rereadOverall.Every,
+		deps:            deps,
+		launcherLimiter: newLauncherLimiter(limits, deps.TrustedProxyHeader),
+		rereadLimiter:   ratelimit.NewKeyed(reread),
+		rereadOverall:   ratelimit.NewBucket(rereadOverall),
 	}
 	for _, route := range routes() {
 		mux.HandleFunc(route.Method+" "+route.Pattern, func(w http.ResponseWriter, r *http.Request) {

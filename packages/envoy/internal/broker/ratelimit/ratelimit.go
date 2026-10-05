@@ -1,5 +1,5 @@
-// Package ratelimit is the broker's per-key token buckets: every key (a source address, a named
-// operator) has a bucket of its own, so a flood under one key never spends another's.
+// Package ratelimit is the broker's token buckets: per key (a source address, a named operator),
+// so a flood under one key never spends another's, and one every caller shares.
 package ratelimit
 
 import (
@@ -40,6 +40,31 @@ func (k *Keyed) Allow(key string) bool {
 func (k *Keyed) AllowAt(key string, now time.Time) bool {
 	k.mu.Lock()
 	defer k.mu.Unlock()
+	return k.bucket(key, now).AllowN(now, 1)
+}
+
+// AllowBothAt takes one request from key's bucket and one from shared at now when each has one
+// left, reporting true. Otherwise it takes from neither and answers false with the limit that
+// refused, key's bucket's first: a request one bucket refuses spends nothing of the other, so a
+// key flooding past its own limit leaves shared to everyone else, and a request shared refuses
+// leaves its key's bucket as it was. Key's bucket is taken from only under k's lock, so a request
+// shared allows always finds it as it was checked.
+func (k *Keyed) AllowBothAt(key string, shared *Bucket, now time.Time) (refused Limit, ok bool) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	bucket := k.bucket(key, now)
+	if bucket.TokensAt(now) < 1 {
+		return k.limit, false
+	}
+	if !shared.bucket.AllowN(now, 1) {
+		return shared.limit, false
+	}
+	bucket.AllowN(now, 1)
+	return Limit{}, true
+}
+
+// bucket is key's bucket, made full when key has none. The caller holds k.mu.
+func (k *Keyed) bucket(key string, now time.Time) *rate.Limiter {
 	bucket, ok := k.buckets[key]
 	if !ok {
 		if len(k.buckets) >= maxBuckets {
@@ -52,5 +77,16 @@ func (k *Keyed) AllowAt(key string, now time.Time) bool {
 		bucket = rate.NewLimiter(rate.Every(k.limit.Every), k.limit.Burst)
 		k.buckets[key] = bucket
 	}
-	return bucket.AllowN(now, 1)
+	return bucket
+}
+
+// Bucket is one Limit every caller shares: a bound on the work all of them together can cause.
+type Bucket struct {
+	limit  Limit
+	bucket *rate.Limiter
+}
+
+// NewBucket is one bucket of limit, full.
+func NewBucket(limit Limit) *Bucket {
+	return &Bucket{limit: limit, bucket: rate.NewLimiter(rate.Every(limit.Every), limit.Burst)}
 }
