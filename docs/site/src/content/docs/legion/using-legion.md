@@ -86,8 +86,10 @@ repository, submitted on GitHub while the issue is in `needs_review`, counts the
 **Request changes** sends the work back to the implementer with your comments, and an approval of
 the head can end the round. A review from an account without write access decides nothing, since
 any GitHub account can review a public repository's pull request, and a plain comment moves
-nothing. The pull request also carries a `.legion/` directory of handoff files; the operator
-removes it from the default branch after the merge.
+nothing. The pull request also carries a `.legion/` directory of handoff files. Any such directory
+left on the default branch by an earlier merged issue is removed from this tree's branch before any
+of its roles start, so this pull request's own merge carries that removal onto the default branch
+too.
 
 ## Merge
 

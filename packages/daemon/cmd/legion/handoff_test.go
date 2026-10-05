@@ -55,6 +55,80 @@ func TestHandoffWriteAndReadPersistInWorkspace(t *testing.T) {
 	}
 }
 
+// legion handoff write stamps "issue" from LEGION_ISSUE itself (never a caller's: refused among the
+// reserved fields below), and legion handoff read of the same issue returns it untouched.
+func TestHandoffWriteStampsItsOwnIssueAndReadsItBack(t *testing.T) {
+	workspace := t.TempDir()
+	t.Setenv("LEGION_ISSUE", "ACME-601")
+	var out, errb bytes.Buffer
+	if code := run(context.Background(), []string{"legion", "handoff", "write", "--workspace", workspace, "--phase", "implement", "--data", writableHandoffs["implement"]}, &out, &errb); code != 0 {
+		t.Fatalf("handoff write = %d: %s", code, errb.String())
+	}
+	out.Reset()
+	if code := run(context.Background(), []string{"legion", "handoff", "read", "--workspace", workspace, "--phase", "implement"}, &out, &errb); code != 0 || !strings.Contains(out.String(), `"issue": "ACME-601"`) {
+		t.Fatalf("handoff read = %d: stdout %s stderr %s; want the stamped issue in its own tree's read", code, out.String(), errb.String())
+	}
+}
+
+// A tree provisioned from a main that still carries another issue's merged .legion/ file
+// (dispatch://LEGION-565) must never read it as its own: legion handoff read, finding a phase
+// word's file stamped with an issue that is not LEGION_ISSUE's, refuses it by name instead of
+// returning its content, for an explicit --phase and for an unfiltered read alike.
+func TestHandoffReadRefusesAHandoffAnotherIssueWrote(t *testing.T) {
+	workspace := t.TempDir()
+	t.Setenv("LEGION_ISSUE", "ACME-1086")
+	var out, errb bytes.Buffer
+	if code := run(context.Background(), []string{"legion", "handoff", "write", "--workspace", workspace, "--phase", "test", "--data", writableHandoffs["test"]}, &out, &errb); code != 0 {
+		t.Fatalf("handoff write as ACME-1086 = %d: %s", code, errb.String())
+	}
+
+	t.Setenv("LEGION_ISSUE", "ACME-601")
+	out.Reset()
+	errb.Reset()
+	code := run(context.Background(), []string{"legion", "handoff", "read", "--workspace", workspace, "--phase", "test"}, &out, &errb)
+	if code != 1 || out.String() != "" || !strings.Contains(errb.String(), "test.json") || !strings.Contains(errb.String(), "ACME-1086") || !strings.Contains(errb.String(), "ACME-601") {
+		t.Fatalf("handoff read --phase test as ACME-601 of ACME-1086's file = %d, stdout %q, stderr %q; want a refusal naming both issues", code, out.String(), errb.String())
+	}
+
+	// An unfiltered read skips the foreign phase and still returns every phase that is its own.
+	out.Reset()
+	if code := run(context.Background(), []string{"legion", "handoff", "write", "--workspace", workspace, "--phase", "implement", "--data", writableHandoffs["implement"]}, &out, &errb); code != 0 {
+		t.Fatalf("handoff write as ACME-601 = %d: %s", code, errb.String())
+	}
+	out.Reset()
+	errb.Reset()
+	if code := run(context.Background(), []string{"legion", "handoff", "read", "--workspace", workspace}, &out, &errb); code != 0 {
+		t.Fatalf("handoff read (all) = %d: stderr %s", code, errb.String())
+	}
+	var all map[string]json.RawMessage
+	if err := json.Unmarshal(out.Bytes(), &all); err != nil {
+		t.Fatalf("decode handoff read (all) output %q: %v", out.String(), err)
+	}
+	if _, present := all["test"]; present {
+		t.Fatalf("handoff read (all) = %v, want the foreign test.json left out", all)
+	}
+	if _, present := all["implement"]; !present {
+		t.Fatalf("handoff read (all) = %v, want this tree's own implement.json kept", all)
+	}
+	if !strings.Contains(errb.String(), "test.json") || !strings.Contains(errb.String(), "ACME-1086") {
+		t.Fatalf("handoff read (all) stderr = %q, want it to say which file it skipped and whose it was", errb.String())
+	}
+}
+
+// A handoff from before this change stamps no "issue" at all. legion handoff read cannot tell whose
+// it is from its content, so it is never refused as foreign: dispatch://LEGION-565's branch-creation
+// fix is what keeps such a file out of a fresh tree's workspace in the first place; this is the
+// pre-existing file's backward-compatible path, not a second guarantee.
+func TestHandoffReadReturnsAnUnstampedHandoffUnchanged(t *testing.T) {
+	workspace := t.TempDir()
+	writeHandoffFile(t, workspace, "review.json", `{"verdict":"approved","critical":0}`+"\n")
+	t.Setenv("LEGION_ISSUE", "ACME-601")
+	var out, errb bytes.Buffer
+	if code := run(context.Background(), []string{"legion", "handoff", "read", "--workspace", workspace, "--phase", "review"}, &out, &errb); code != 0 || !strings.Contains(out.String(), `"verdict": "approved"`) {
+		t.Fatalf("handoff read of an unstamped file = %d: stdout %s stderr %s; want it returned, not refused", code, out.String(), errb.String())
+	}
+}
+
 // A handoff past one argv string's 128 KiB cap (MAX_ARG_STRLEN) can only arrive on stdin: the
 // legion tool sends every handoff_write payload that way.
 func TestHandoffWriteReadsAPayloadOverTheArgvCapFromStdin(t *testing.T) {
