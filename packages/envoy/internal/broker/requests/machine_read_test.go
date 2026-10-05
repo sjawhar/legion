@@ -3,11 +3,13 @@ package requests
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/store/storetest"
+	"github.com/sjawhar/envoy/internal/explaintest"
 )
 
 // TestGrantsForApproverNamesWhoApproved pins that the approver list names each grant's approver:
@@ -103,7 +105,7 @@ func TestPendingForApproverTerminalEventsLiteralMatchesTheList(t *testing.T) {
 	names := record.TerminalEventNames()
 	quoted := make([]string, len(names))
 	for i, name := range names {
-		quoted[i] = "'" + name + "'"
+		quoted[i] = fmt.Sprintf("'%s'", name)
 	}
 	want := "event in (" + strings.Join(quoted, ",") + ")"
 	if !strings.Contains(pendingForApproverQuery, want) {
@@ -112,15 +114,16 @@ func TestPendingForApproverTerminalEventsLiteralMatchesTheList(t *testing.T) {
 }
 
 // TestPendingForApproverAvoidsSequentialScans pins PendingForApprover's query plan the way
-// Dispatch's api.TestListIssueAsksOpenQueryUsesAsksOpenIndex pins queryOwnerAsks's:
-// force_generic_plan moves straight to the plan shape a pooled connection settles into after a
-// few executions of the same prepared statement (Postgres's own cost-based custom/generic switch,
-// which an empty-table test cannot trigger organically), and enable_seqscan = off makes a
-// sequential scan of either table the query touches show up as the planner's last resort rather
-// than its ordinary first choice for a near-empty table, so this test fails the moment either
-// index path the query depends on stops applying: credential_requests_approver (migration 0011)
-// for the approver filter, or credential_request_decision (migration 0005) for the
-// launcher_credential branch's NOT EXISTS.
+// Dispatch's api.TestListIssueAsksOpenQueryUsesAsksOpenIndex pins queryOwnerAsks's: Postgres
+// automatically switches a prepared statement from a per-execution custom plan (built for that
+// call's actual bound values) to a cached generic plan starting on its 6th execution, which an
+// empty test table cannot trigger organically, so force_generic_plan pins every execution
+// (including the first) to that shape instead of relying on the cost-based switch.
+// enable_seqscan = off then makes a sequential scan of either table the query touches the
+// planner's last resort rather than an ordinary choice it might make anyway for a near-empty
+// table: with both set, this test fails the moment either index path the query depends on stops
+// applying — credential_requests_approver (migration 0011) for the approver filter, or
+// credential_request_decision (migration 0005) for the launcher_credential branch's NOT EXISTS.
 func TestPendingForApproverAvoidsSequentialScans(t *testing.T) {
 	st := storetest.Open(t)
 	ctx := context.Background()
@@ -138,13 +141,14 @@ func TestPendingForApproverAvoidsSequentialScans(t *testing.T) {
 	if _, err := tx.Exec(ctx, "prepare pending_query (text, text) as "+pendingForApproverQuery); err != nil {
 		t.Fatalf("prepare pending query: %v", err)
 	}
+	execute := fmt.Sprintf("execute pending_query('nobody@example.com', '%s')", record.AnyoneApprover)
 	for i := range 6 {
-		if _, err := tx.Exec(ctx, "execute pending_query('nobody@example.com', 'anyone')"); err != nil {
+		if _, err := tx.Exec(ctx, execute); err != nil {
 			t.Fatalf("execute pending query %d: %v", i, err)
 		}
 	}
 	var planJSON []byte
-	if err := tx.QueryRow(ctx, "explain (format json) execute pending_query('nobody@example.com', 'anyone')").Scan(&planJSON); err != nil {
+	if err := tx.QueryRow(ctx, "explain (format json) "+execute).Scan(&planJSON); err != nil {
 		t.Fatalf("explain execute pending query: %v", err)
 	}
 	var plans []struct {
@@ -157,29 +161,8 @@ func TestPendingForApproverAvoidsSequentialScans(t *testing.T) {
 		t.Fatalf("explain plans = %#v, want one plan", plans)
 	}
 	for _, relation := range []string{"credential_requests", "credential_request_events"} {
-		if planNodeSeqScansRelation(t, plans[0].Plan, relation) {
+		if explaintest.SeqScansRelation(t, plans[0].Plan, relation) {
 			t.Fatalf("pending query generic plan sequentially scans %s; want an index scan:\n%s", relation, planJSON)
 		}
 	}
-}
-
-func planNodeSeqScansRelation(t *testing.T, planJSON json.RawMessage, relation string) bool {
-	t.Helper()
-	var node struct {
-		NodeType     string            `json:"Node Type"`
-		RelationName string            `json:"Relation Name"`
-		Plans        []json.RawMessage `json:"Plans"`
-	}
-	if err := json.Unmarshal(planJSON, &node); err != nil {
-		t.Fatalf("decode plan node: %v", err)
-	}
-	if node.NodeType == "Seq Scan" && node.RelationName == relation {
-		return true
-	}
-	for _, child := range node.Plans {
-		if planNodeSeqScansRelation(t, child, relation) {
-			return true
-		}
-	}
-	return false
 }

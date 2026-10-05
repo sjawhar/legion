@@ -249,19 +249,17 @@ type PendingSummary struct {
 //
 // The launcher_credential branch's NOT EXISTS spells its terminal-event predicate literally
 // (event in ('approved','denied','expired','cancelled')) rather than binding
-// record.TerminalEventNames() as a parameter: credential_request_events' partial unique index
-// (credential_request_decision, on (record_id) where event in (...),
-// store/migrations/0005_credential_requests.up.sql) only serves this probe when Postgres can
-// prove the query's own predicate implies the index's at plan time, and a bound array parameter
-// proves nothing once the statement's plan goes generic — the shape a pooled connection settles
-// into after a few executions of the same prepared statement (Postgres's own cost-based
-// custom/generic switch; this query, run on a poll every 15 s per open Dispatch tab, settles into
-// exactly that shape). machine.ExpirePending's ON CONFLICT target gives the identical reasoning
-// for the same index. Bound as a parameter, this NOT EXISTS falls back to a full sequential scan
-// of credential_request_events on every call once the plan is generic; written literally, every
-// plan shape reaches the index instead. A later change to the terminal event list must change
-// this literal too, which TestPendingForApproverTerminalEventsLiteralMatchesTheList pins against
-// record.TerminalEventNames().
+// record.TerminalEventNames() as a parameter, for the same reason machine.ExpirePending's ON
+// CONFLICT target already does for the same index (credential_request_decision,
+// store/migrations/0005_credential_requests.up.sql): Postgres can only recognize a partial index
+// from a predicate it can prove implies the index's at plan time, which a bound parameter never
+// does once the plan goes generic. The literal makes the index provably reachable in every plan
+// shape; whether an unforced planner actually prefers it over hashing the far smaller matching set
+// in one pass is then an ordinary cost comparison, which is why
+// TestPendingForApproverAvoidsSequentialScans also sets enable_seqscan = off — that is what
+// guarantees the index path, not the literal alone. A later change to the terminal event list must
+// change this literal too, which TestPendingForApproverTerminalEventsLiteralMatchesTheList pins
+// against record.TerminalEventNames().
 const pendingForApproverQuery = `select cr.id, cr.kind, cr.body, cr.created_at from credential_requests cr
 	where (
 		cr.approver in ($1, $2) and cr.kind='agent_secret' and cr.id in (select r.record_id from requests r where r.state='pending')
