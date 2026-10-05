@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -64,21 +65,26 @@ func GetListPages[T any](ctx context.Context, c Client, path, field string) ([]T
 }
 
 // getPages is GetPages, reading each page's items from the field of the object it answers when
-// field is not empty.
+// field is not empty. A next page on another scheme or host than the REST base's is refused, so the
+// token goes nowhere but the API it was configured for.
 func getPages[T any](ctx context.Context, c Client, path, field string) ([]T, error) {
+	base, err := url.Parse(c.API)
+	if err != nil {
+		return nil, fmt.Errorf("parse the REST base %q: %w", c.API, err)
+	}
 	separator := "?"
 	if strings.Contains(path, "?") {
 		separator = "&"
 	}
 	var all []T
-	for url := c.API + path + separator + "per_page=100"; url != ""; {
+	for target := c.API + path + separator + "per_page=100"; target != ""; {
 		var page []T
 		var object map[string]json.RawMessage
 		var into any = &page
 		if field != "" {
 			into = &object
 		}
-		next, err := c.call(ctx, http.MethodGet, url, nil, into)
+		next, err := c.call(ctx, http.MethodGet, target, nil, into)
 		if err != nil {
 			return nil, err
 		}
@@ -92,19 +98,25 @@ func getPages[T any](ctx context.Context, c Client, path, field string) ([]T, er
 			}
 		}
 		all = append(all, page...)
-		url = next
+		if next != "" {
+			nextURL, err := url.Parse(next)
+			if err != nil || nextURL.Scheme != base.Scheme || !strings.EqualFold(nextURL.Host, base.Host) {
+				return nil, fmt.Errorf("GET %s: GitHub's next page %q is not on %s://%s, the only origin sent the token", path, next, base.Scheme, base.Host)
+			}
+		}
+		target = next
 	}
 	return all, nil
 }
 
-// call sends method to url, with body as JSON when it is not nil, reads a 2xx answer into into
+// call sends method to target, with body as JSON when it is not nil, reads a 2xx answer into into
 // when into is not nil, and returns the next page's URL its Link header names, "" for none.
-func (c Client) call(ctx context.Context, method, url string, body []byte, into any) (string, error) {
+func (c Client) call(ctx context.Context, method, target string, body []byte, into any) (string, error) {
 	var payload io.Reader
 	if body != nil {
 		payload = bytes.NewReader(body)
 	}
-	request, err := http.NewRequestWithContext(ctx, method, url, payload)
+	request, err := http.NewRequestWithContext(ctx, method, target, payload)
 	if err != nil {
 		return "", err
 	}
@@ -123,7 +135,7 @@ func (c Client) call(ctx context.Context, method, url string, body []byte, into 
 		return "", err
 	}
 	if response.StatusCode < 200 || response.StatusCode > 299 {
-		path, _, _ := strings.Cut(strings.TrimPrefix(url, c.API), "?")
+		path := c.answerPath(request.URL)
 		return "", &Answer{Method: method, Path: path, Status: response.StatusCode, Body: strings.TrimSpace(string(answer)),
 			RateLimited: RateLimited(response, answer), RetryAfter: retryAfter(response, answer, time.Now())}
 	}
@@ -131,6 +143,18 @@ func (c Client) call(ctx context.Context, method, url string, body []byte, into 
 		return nextPage(response.Header.Get("Link")), nil
 	}
 	return nextPage(response.Header.Get("Link")), json.Unmarshal(answer, into)
+}
+
+// answerPath is the path an Answer names for target, its query left out: the path under the
+// repository's REST base, or GitHub's whole path for a URL outside it, such as a later page GitHub
+// names under /repositories/<id>/.
+func (c Client) answerPath(target *url.URL) string {
+	if base, err := url.Parse(c.API); err == nil {
+		if rest, found := strings.CutPrefix(target.Path, base.Path); found && (rest == "" || strings.HasPrefix(rest, "/")) {
+			return rest
+		}
+	}
+	return target.Path
 }
 
 // secondaryLimitMessages are what GitHub's secondary rate limit says in the body of the 403 it can

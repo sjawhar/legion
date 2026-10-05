@@ -4,6 +4,11 @@
 
 ### Changed
 
+- Added `WriteAdvice.suggestions`, `Suggestions` and `WriteSuggestion`: `POST /api/v1/issues` and
+  `POST /api/v1/issues/{key}/asks` now return, without ever refusing or delaying the write, the
+  three fused-search hits (sjawhar/legion#1764) most like what was just filed and, for an ask,
+  any already-answered ask that settles the same question, with who answered and when
+  (LEGION-550).
 - `SearchResponse` carries `total`, `reachable`, `limit` and `offset`, and `dispatch_search` takes
   `offset`; its description says each kind of content is ranked on its own and the lists merged,
   that an issue key searched alone lists that issue first, and that each kind lists at most its

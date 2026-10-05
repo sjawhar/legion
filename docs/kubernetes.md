@@ -492,7 +492,8 @@ main container:
 1. `workspace-fetch` clones the repository into the pod's feed. It is the only process that holds
    the provisioning token ([Trust model](#trust-model-the-provisioning-token)).
 2. `workspace-init` provisions the tree volume's shared clone and the issue's jj workspace from the
-   read-only feed.
+   read-only feed. The workspace starts at the issue's branch, `legion/<KEY>`, which the daemon
+   created on GitHub at `main` before the issue's architect or planner started.
 3. `worker` runs `legion worker-shim --connect tcp://<bind>:<worker_stream_port>
    --boot-token-file …` with Oh My Pi under it.
 

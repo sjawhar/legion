@@ -768,6 +768,7 @@ func TestWorkflowBootLogsItsDependencyOrder(t *testing.T) {
 // An issue moved to todo while boot reads its Dispatch listing, and missing from that listing, is
 // still admitted. A durable consumer created now delivers only what is published after it exists,
 // so boot creates the consumers before it lists: what the listing missed, the consumer delivers.
+// The admitted issue's branch is then created under the GitHub root the daemon was given.
 func TestAnIssueMovedWhileBootListsIsStillAdmitted(t *testing.T) {
 	natsURL := workflowNATS(t)
 	js := workflowJetStream(t, natsURL)
@@ -806,12 +807,14 @@ func TestAnIssueMovedWhileBootListsIsStillAdmitted(t *testing.T) {
 	}))
 	t.Cleanup(dispatchServer.Close)
 	cfg.DispatchURL = dispatchServer.URL
+	github := newBranchGitHub(t, nil, branchCreated)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
 		done <- run(ctx, cfg, quietLogger(), overrides{
 			listen:  heldListen,
 			runtime: fakeRuntime(fake.NewRuntime(), &built{}).runtime, clock: stillClock{}, workflowTokens: &workflowTokenRecorder{},
+			githubAPI: github.url,
 		})
 	}()
 	t.Cleanup(func() {
@@ -843,12 +846,24 @@ func TestAnIssueMovedWhileBootListsIsStillAdmitted(t *testing.T) {
 			if err == nil && response.StatusCode == http.StatusOK {
 				active = state.Admission.Active
 				if slices.Contains(active, key) {
-					return
+					break
 				}
 			}
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("admission is %v, want %s, moved to todo while boot listed Dispatch", active, key)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	for deadline := time.Now().Add(60 * time.Second); ; {
+		if creates := github.created(); len(creates) > 0 {
+			if want := "refs/heads/legion/" + key; creates[0].ref != want {
+				t.Fatalf("the GitHub stand-in's first create is of %s, want %s", creates[0].ref, want)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the GitHub stand-in saw no create of %s's branch", key)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
