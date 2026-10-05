@@ -5,6 +5,8 @@ import { Link, useParams } from "react-router-dom";
 
 import { api } from "../../api/client";
 import { agentMessagesQuery, whoAmIQuery } from "../../api/queries";
+import { pillClassName } from "../../components/Pill";
+import { TruncatedText } from "../../components/TruncatedText";
 import {
   connectionDotConnecting,
   connectionDotFailed,
@@ -23,6 +25,7 @@ import { sessionLabel } from "../refs/actor";
 import { ErrorBoundary } from "../shell/ErrorBoundary";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { AgentRuntimeThread } from "./AgentRuntimeThread";
+import { currentModel } from "./conversation";
 import { type AgentStreamStatus, useAgentStream } from "./useAgentStream";
 
 /** What the live dot says about the relay, and how it reads to a screen reader. */
@@ -72,6 +75,9 @@ export function AgentConversationPage(): ReactNode {
   useDocumentTitle(label);
 
   const { conversation, responding, status } = useAgentStream(sessionId);
+  // The model the session is currently running (LEGION-548), next to its title: the most recent
+  // assistant turn's own report, nothing guessed for a client that never sends one.
+  const model = currentModel(conversation);
   const modes = deliveryModes(agent?.capabilities ?? []);
   // The human's pick holds only while the session still offers it: the session list loads after
   // the page, and a pick the session does not advertise would be refused.
@@ -125,6 +131,13 @@ export function AgentConversationPage(): ReactNode {
           ← Agents
         </Link>
         <h1 className={`min-w-0 truncate text-lg font-semibold ${textPrimaryOnCanvas}`}>{label}</h1>
+        {model === undefined ? null : (
+          <span className={`${pillClassName("label")} max-w-56`} data-testid="agent-session-model">
+            <TruncatedText className="min-w-0" title={model}>
+              {model}
+            </TruncatedText>
+          </span>
+        )}
         <span className="flex items-center gap-1.5">
           <span
             aria-hidden="true"
