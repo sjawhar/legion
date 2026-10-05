@@ -13,6 +13,10 @@ import { thirdPartyNotices } from "../../../scripts/third-party-notices"
 
 const packageRoot = resolve(import.meta.dir, "..")
 const repoRoot = resolve(packageRoot, "..", "..")
+/** Read once, here, rather than wherever it is needed: every caller below compares against the
+ *  same string for the same process, and `assertPinnedBun`'s test already covers the comparison
+ *  itself without needing a real file on disk. */
+const pinnedBunVersion = (await readFile(join(repoRoot, ".bun-version"), "utf8")).trim()
 
 /** Output name -> source entrypoint, relative to the package root. */
 export const BUNDLE_ENTRYPOINTS = {
@@ -42,7 +46,7 @@ export function assertPinnedBun(running: string, pinned: string): void {
 }
 
 export async function buildBundles(outdir: string): Promise<void> {
-  assertPinnedBun(Bun.version, (await readFile(join(repoRoot, ".bun-version"), "utf8")).trim())
+  assertPinnedBun(Bun.version, pinnedBunVersion)
   const result = await Bun.build({
     entrypoints: Object.values(BUNDLE_ENTRYPOINTS).map((entry) => join(packageRoot, entry)),
     outdir,
@@ -57,6 +61,12 @@ export async function buildBundles(outdir: string): Promise<void> {
     // this. A plain `false` bypasses that whole path and reproducible across repeated builds was
     // the same ten rebuilds, now agreeing every time. Whitespace stays readable as a side effect,
     // so unrelated source changes still retain distinct bundle lines and merge cleanly.
+    //
+    // This is a separate, compounding cause from `assertPinnedBun` above: that guard stops a
+    // wrong Bun *version* from running at all, on the identical pinned version this fixes a
+    // non-determinism *within* one Bun build's own bundler. Either one alone could make
+    // `check-dist` fail unpredictably; both were real, and the prior investigation (LEGION-548's
+    // round 5) attributed the second to the build machine before finding the first.
     minify: false,
     sourcemap: "none",
     naming: "[name].[ext]",
@@ -100,13 +110,13 @@ if (import.meta.main) {
   // Checked before anything else touches the filesystem: --check's scratch build and a plain
   // build's `rm` of the committed dist/ both cost real work or a real deletion for a build this
   // process was always going to refuse.
-  assertPinnedBun(Bun.version, (await readFile(join(repoRoot, ".bun-version"), "utf8")).trim())
+  assertPinnedBun(Bun.version, pinnedBunVersion)
   const distDirectory = join(packageRoot, "dist")
   if (process.argv.includes("--check")) {
     const differences = await checkBundles(distDirectory)
     if (differences.length > 0) {
       process.stderr.write(
-        `dist/ is stale (${differences.join(", ")}); run \`bun run build\` on Bun ${await readFile(join(repoRoot, ".bun-version"), "utf8").then((version) => version.trim())} and commit the result\n`,
+        `dist/ is stale (${differences.join(", ")}); run \`bun run build\` on Bun ${pinnedBunVersion} and commit the result\n`,
       )
       process.exit(1)
     }

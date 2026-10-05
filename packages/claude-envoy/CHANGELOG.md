@@ -9,14 +9,18 @@
   `bun run check-dist` spawn a new "bun" process to run the script — package.json's script text is
   a shell command, and Bun's own `run` resolves the "bun" in it from PATH rather than reusing
   whichever binary the caller invoked `bun run` with — so a devbox whose default Bun (a version
-  manager's active version) differs from the pin silently bundled with that other build instead.
-  The bundler's own output depends on the exact Bun build, confirmed directly between two Bun
-  releases on one machine and between a devbox and the CI runner on the identical pinned version:
-  the prior investigation (LEGION-548, `dist/`'s round-5 note) attributed the latter to the
-  machine itself and was wrong — it was this same version mismatch. `buildBundles()` now checks
-  `Bun.version` against `.bun-version` before building, and the CLI entry point checks before
-  touching the filesystem at all, so a refusal never deletes the committed `dist/` it was about
-  to replace.
+  manager's active version) differs from the pin silently bundled with that *other Bun version*
+  instead. This is a separate, compounding cause from `0.6.5`'s `minify: false` fix, not the same
+  bug restated: that one was a non-determinism *within* one Bun build's own bundler, on the
+  identical pinned version; this one is an entirely different Bun version running in the first
+  place. Either alone could make `check-dist` fail unpredictably, and the prior investigation
+  (LEGION-548, `dist/`'s round-5 note) found the first and mistakenly attributed a failure the
+  second actually caused to the build machine itself — confirmed directly: the identical pinned
+  Bun, same source, same lockfile, disagreed between a devbox and the CI runner, because the
+  devbox's `bun run` reached a different Bun than the pin, not because the machines differ.
+  `buildBundles()` now checks `Bun.version` against `.bun-version` before building, and the CLI
+  entry point checks before touching the filesystem at all, so a refusal never deletes the
+  committed `dist/` it was about to replace.
 
 ## [0.6.5]
 
