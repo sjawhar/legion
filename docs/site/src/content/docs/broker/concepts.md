@@ -123,17 +123,33 @@ the person's own included, still get the secrets at once.
 
 The broker reads the namespace when it starts, and refuses to start when it cannot, then again every
 five minutes, a fixed time rather than a setting (`policyRefresh` in
-`packages/envoy/cmd/broker/main.go`). A tag change, or a value put into a secret that had none,
-takes effect within about ten minutes: at the next read, or the one after, since Secrets Manager's
-listing can lag a change by up to five minutes. A read that fails (Secrets Manager or KMS out of
-reach) is logged, and the policy from the last good read stays in force. The broker leaves out a
-secret it cannot serve, and logs it by name on every read ([Operating
-the broker](/legion/broker/operate/#health-and-logs)): a missing or malformed `owner` or `tier`
-tag (an email with a capital letter is malformed), a name that is not in the form above, a secret
-encrypted with any key but the agent-secrets key, the AWS-managed key included, or a secret with no
-current value (created without one, so none of its versions carries the `AWSCURRENT` label). A
-request for a secret left out is refused `UNKNOWN_SECRET` before anyone is asked to approve it, and
-a live grant of it releases nothing until the broker serves the secret again.
+`packages/envoy/cmd/broker/main.go`). A change is served at once when something asks the broker to
+reread it: `POST /v1/secrets/{name}/reread`, which any caller may send right after writing a
+secret, and a request naming a secret the broker does not serve yet, which makes it reread that one
+name before refusing it (up to ten such rereads at once per session, refilled one every ten
+seconds: `DefaultMissRereads` in `packages/envoy/internal/broker/requests/machine_state.go`), so a
+secret created a moment ago is served on its first request. A reread reads the one secret from
+Secrets Manager (`DescribeSecret`, which shows a write at once) and serves it, or stops serving it,
+as it finds it; a read of the whole namespace in the five minutes after reads that secret again
+alone, so a listing that has not caught up never undoes it (`Current.Refresh` in
+`packages/envoy/internal/broker/policy/current.go`). A reread that finds no secret under a name
+the broker was not serving changed nothing, and is not read again — which is the one case that
+promise does not cover: a secret created and then deleted before any read served it is anchored by
+nothing, so the next read of the namespace can serve it from a listing that shows the creation and
+not the deletion, for up to five minutes after the delete, and a request for it is granted while a
+grant's read of its value is refused `SECRET_NOT_IN_STORE`. A change nothing rereads, such
+as a tag edited in the AWS console, takes effect within about ten minutes: at the next read of the
+namespace, or the one after, since Secrets Manager's listing can lag a change by up to five
+minutes. A read that fails (Secrets Manager or KMS out of reach) is logged, and the policy from the
+last good read stays in force. The broker leaves out a secret it cannot serve, and logs it by name
+on every read
+([Operating the broker](/legion/broker/operate/#health-and-logs)): a missing or malformed `owner`
+or `tier` tag (an email with a capital letter is malformed), a name that is not in the form above,
+a secret encrypted with any key but the agent-secrets key, the AWS-managed key included, or a
+secret with no current value (created without one, so none of its versions carries the
+`AWSCURRENT` label). A request for a secret left out is refused `UNKNOWN_SECRET` before anyone is
+asked to approve it, and a live grant of it releases nothing until the broker serves the secret
+again.
 
 The policy's **version** is the SHA-256 of every served secret's name, owner, tier and ARN, recorded
 on every request.
@@ -144,8 +160,8 @@ A session asks for one or more secrets by name in a **request**, signed with its
 reason of at most 400 characters. The broker evaluates every name
 (`packages/envoy/internal/broker/requests/machine_state.go`):
 
-- A name the policy does not serve refuses the whole request with `UNKNOWN_SECRET`, and nothing is
-  recorded.
+- A name the policy does not serve, even after the reread above, refuses the whole request with
+  `UNKNOWN_SECRET`, and nothing is recorded.
 - A name the policy denies denies the whole request; nothing is ever half-granted. Only a service's
   secret, asked for by anyone but that service, is denied.
 - Names that need approval must all need the same approver, else the request is refused

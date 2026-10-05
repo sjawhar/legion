@@ -1943,7 +1943,32 @@ the alarm, and a failed reload keeps the last set. `Set.Version`, the SHA-256 of
 secret's name, owner, tier and ARN, is recorded on every request, and a live grant is re-checked
 only once it has moved (`stillAllowed`); the record line, the column and the API field that carry
 it keep the name `rules_version`, since records are content-addressed and stored bodies must still
-parse.
+parse. `policy.NewSet` is the one place a `Version` is computed, ascending by slug (not by request
+name, which orders `A0` and `A_B` the other way), for a full load and a single-name merge alike, so
+an unchanged namespace keeps its version (`TestGoldenDigest` pins the bytes). `Loader.LoadOne`
+reads one name with `DescribeSecret` under the same rules and the same refusal line, and
+`Current.RefreshOne` merges it into the live set; `Refresh` and `RefreshOne` hold one writer lock
+from their read to their store, a one-slot channel a waiter gives up on once its own context ends,
+so a reload stuck on a Secrets Manager that does not answer blocks no reread past its caller's
+deadline, and each ticker reload is given the refresh interval before it fails. Each full reload
+that begins (its clock read before its listing is fetched) within five minutes of an anchor
+(`listLag`, how far AWS documents `ListSecrets` may lag) reads that name again alone, so a lagging
+listing neither drops a secret the reread served nor brings back one it found gone; a name is
+anchored by a reread whose answer `RefreshOne` kept and by a reload's own re-describe that found
+the answer differed from what the live set held, so a change no reread caught (a console delete, a
+tag that now refuses the secret) is kept for `listLag` from the reload that caught it rather than
+flipping back when the first anchor runs out. `RefreshOne` keeps no record of an absent answer for
+a name the live set did not serve: that changed nothing, and anyone can ask for a reread, so
+invented names would otherwise each cost every reload a `DescribeSecret` under the lock. A name no
+secret under the prefix can carry - not `namePattern`'s form, or one whose name under the prefix
+would pass Secrets Manager's 512-character limit - is `policy.ErrNameInvalid` before any AWS call,
+before the writer lock and before a miss-path reread token (`Loader.secretName`, which
+`Current.CheckName` answers from and both `LoadOne` and its callers' pre-checks ask). The public
+`POST /v1/secrets/{name}/reread` (`rereadSecret`, which any caller may send right after a write) is
+`RefreshOne` over HTTP, answering `{name, served, reason}`, `400 SECRET_NAME_INVALID` for such a
+name and `503 REQUEST_ENDED`, with no `broker: reread secret failed` line, for a reread whose own
+request ended first; the public `GET /v1/settings`
+answers the prefix, the key ARN and its region and account (`policy.KeyARNParts`).
 
 The client finds its session in `AGENT_SECRETS_KEY_DIR` (a box's or pod's `key.pem` and
 `enrollment`) or `AGENT_SECRETS_HELPER_SOCK` (a host session's helper), beside `AGENT_SECRETS_URL`.
@@ -2048,12 +2073,13 @@ set, and not itself required at startup), `BROKER_LEASE_SECONDS` (default 900, m
 (default 604800, max 2592000 — a minted launcher credential's own lifetime; past it the holder
 re-runs login, new key, new code, new human approval), `BROKER_SWEEP_SECONDS` (default 5, max 60 —
 `requests.Sweeper`'s tick interval, the poller's replacement), and `BROKER_TRUSTED_PROXY_HEADER`
-(optional; names a request header, e.g. `X-Forwarded-For`, the launcher-credential rate limiter's
-per-address bucket trusts for the caller's real address — its last comma-separated entry, the hop
-your own reverse proxy appended, never an earlier client-supplied one. Unset, the default, keys on
+(optional; names a request header, e.g. `X-Forwarded-For`, the launcher-credential and reread rate
+limiters' per-address buckets trust for the caller's real address (`clientAddress`) — its last
+comma-separated entry, the hop your own reverse proxy appended, never an earlier client-supplied
+one. Unset, the default, keys on
 `r.RemoteAddr` directly, correct only when the broker is reached without a proxy in front of it;
 behind one — this broker's documented production shape, the shared internal ALB — `r.RemoteAddr`
-is the proxy's own address for every caller, collapsing the per-address bucket into one shared by
+is the proxy's own address for every caller, collapsing each per-address bucket into one shared by
 everyone unless this variable is set). `BROKER_UI_TOKEN` and `BROKER_ENVOY_TOKEN` follow the
 broker's `_FILE` secret-loading convention: `<NAME>_FILE`, when set, names a file whose trimmed
 contents win over a bare `<NAME>` — with both set, the file wins silently, nothing is refused — and
@@ -2095,7 +2121,7 @@ literal that is not
 a documented `exit*` constant or another such function's result. The CLI reference is the built
 binaries' own `--help`, so every form must answer `-h` with exit 0.
 
-`internal/broker/api/routes_table.go`'s `routes()` is the one list of the broker's 21 HTTP routes —
+`internal/broker/api/routes_table.go`'s `routes()` is the one list of the broker's 23 HTTP routes —
 a new route is a new row there, never a bare `mux.HandleFunc` — and its own comment says the
 contract for every row is the broker's design overview. Each row's handler is
 wrapped by the adapter for its authentication (`public`, `launcherAuth`, `sessionAuth`, `uiAuth`),
@@ -2109,7 +2135,14 @@ credential is a 401 (`LAUNCHER_INVALID`, `PROOF_INVALID`, or `UI_INVALID`); a st
 answer while authenticating is a 503 naming it. Every 500 is logged with its cause
 (`writeInternal`), every JSON body is capped at 1 MiB with unknown fields refused (`readJSON`),
 non-UUID path ids are 400 naming the kind (`pathUUID`), a content-addressed record id is checked
-against its own lowercase-hex-sha256 shape rather than a UUID's (`pathRecordID`), and the
+against its own lowercase-hex-sha256 shape rather than a UUID's (`pathRecordID`), the
+unauthenticated `POST /v1/secrets/{name}/reread` is rate limited both per source address and over
+every caller at once (`DefaultRereadLimit` and `DefaultRereadOverallLimit`, since each reread holds
+the policy's writer lock for one `DescribeSecret`, so a flood spread over addresses cannot hold up a
+reload; a reread spends a token from either bucket only when both allow it
+(`ratelimit.Keyed.AllowBothAt`), so one address flooding past its own limit spends none of the
+shared one and a reread the shared one refuses spends none of its address's; `429 RATE_LIMITED`
+with the refusing limit's `Retry-After`), and the
 unauthenticated `POST /v1/launcher-credentials` is rate limited per source address (see
 `BROKER_TRUSTED_PROXY_HEADER` above) and per named operator — the per-operator bucket keys on the
 request body's own `operator` field, so an attacker naming a specific victim operator repeatedly
@@ -2210,7 +2243,10 @@ all refuse, so an approved grant outlives an owner change only while its approve
 approve the secret, or once the new tags give its session the secret without asking; a name
 withheld from the session that its request got automatically is judged as an approval by
 `decided_by`, since a live grant of it was approved after the withhold by someone the withheld name
-let approve it); a source missing from the secrets store is `404 SECRET_NOT_IN_STORE`.
+let approve it); a source missing from the secrets store is `404 SECRET_NOT_IN_STORE`, and so is one
+scheduled for deletion, which Secrets Manager keeps until its recovery window passes and answers
+`GetSecretValue` for with `InvalidRequestException` rather than `ResourceNotFoundException`
+(`secrets.AWS.Read` reads both as `ErrNotFound`, and `secrets.Local` answers each as it does).
 Migration 0009 defaults `request_secrets.delivery` to `inject`, which this broker neither writes nor
 reads, so a binary from before it can still be rolled back to.
 `RevokeGrant` lets a session end only its own grant (session proof); `RevokeByApprover` ends a grant

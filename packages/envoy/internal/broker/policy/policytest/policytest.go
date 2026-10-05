@@ -6,7 +6,6 @@ import (
 	"bytes"
 	"fmt"
 	"log"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -36,12 +35,21 @@ func Secret(name, owner, tier, value string) secrets.LocalSecret {
 
 // ID is the Secrets Manager name of the secret a session asks for as name.
 func ID(name string) string {
-	return Prefix + strings.ReplaceAll(strings.ToLower(name), "_", "-")
+	return Prefix + mustSlug(name)
+}
+
+// mustSlug is name's slug under the prefix; a fixture naming no valid secret name is a test bug.
+func mustSlug(name string) string {
+	slug, err := policy.NameToSlug(name)
+	if err != nil {
+		panic(fmt.Sprintf("policytest: %q: %v", name, err))
+	}
+	return slug
 }
 
 // Loader is the policy.Loader over store, with services registered.
 func Loader(store *secrets.Local, services ...string) policy.Loader {
-	return policy.Loader{Secrets: store, Aliases: store, Prefix: Prefix, KeyARN: KeyARN, Services: services}
+	return policy.Loader{Secrets: store, Aliases: store, Describer: store, Prefix: Prefix, KeyARN: KeyARN, Services: services}
 }
 
 // Current loads store's policy, as the broker does at boot; Refresh rereads it after store
