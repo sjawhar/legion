@@ -450,3 +450,42 @@ func TestTheRequiredChecksPassCatchesAHeadThatStartsConflictingWithItsBase(t *te
 		})
 	}
 }
+
+// The pull request's mergeability is applied before requiredFor ever runs (required_checks.go's
+// split of pullRequestMergeability from requiredFor), so a later failure reading what the base
+// requires - here the rulesets answer a 502 - never discards the conflict already decoded: the
+// issue still goes back to implementing on the conflict alone, with CONFLICTING recorded, even
+// though the required set is never read that pass.
+func TestAFailedRulesetsReadNeverDiscardsAnAlreadyDecodedConflict(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	seedCapture(t, pool, phase.AwaitingMerge, "retro",
+		record.PhaseRow{Issue: "CAPTURE-1", Role: claim.RoleMerger, Claim: "merge-claim", HandoffCommit: "code", Summary: "READY #86 at code"})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer outbox-token" {
+			http.Error(w, `{"message":"Bad credentials"}`, http.StatusUnauthorized)
+			return
+		}
+		switch r.URL.Path {
+		case "/repos/acme/widgets/pulls/86":
+			w.Write([]byte(`{"number":86,"base":{"ref":"main"},"mergeable":false}`))
+		case "/repos/acme/widgets/rules/branches/main":
+			http.Error(w, `{"message":"Server Error"}`, http.StatusBadGateway)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	requiredRuntime(pool, server.URL, quietLogger()).readRequiredChecks(context.Background())
+	got, pr := capturePhase(t, pool)
+	if got != phase.Implementing {
+		t.Fatalf("after the pass the issue is in %s, want implementing: the conflict must withdraw the READY whether or not the rulesets read succeeds", got)
+	}
+	if pr.Mergeability != record.MergeabilityConflicting {
+		t.Fatalf("recorded mergeability = %q, want CONFLICTING", pr.Mergeability)
+	}
+	want := "the head conflicts with main: GitHub runs no checks on it; merge main forward"
+	reasons := noticeReasons(t, pool, "checks-red")
+	if len(reasons) != 1 || !strings.Contains(reasons[0], want) {
+		t.Fatalf("checks-red notices %q, want one saying %q", reasons, want)
+	}
+}
