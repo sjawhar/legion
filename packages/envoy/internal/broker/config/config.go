@@ -73,10 +73,10 @@ type Config struct {
 	// the pending requests and machine logins nobody decided in time.
 	SweepSeconds int
 	// BROKER_TRUSTED_PROXY_HEADER: the request header (e.g. X-Forwarded-For) whose last entry the
-	// machine-login rate limiter takes as the caller's address. Unset, it uses the connection's
-	// own address, which is right only when nothing proxies the broker. Set it only when every
-	// request passes through your own reverse proxy, which appends that entry; otherwise a caller
-	// can forge the header and pick its own rate-limit bucket.
+	// machine-login and secret-reread rate limiters take as the caller's address. Unset, they use
+	// the connection's own address, which is right only when nothing proxies the broker. Set it
+	// only when every request passes through your own reverse proxy, which appends that entry;
+	// otherwise a caller can forge the header and pick its own rate-limit bucket.
 	TrustedProxyHeader string
 }
 

@@ -173,9 +173,10 @@ approve a pull request before it merges is the repository's own branch-protectio
 rule: Legion neither reads nor writes it. The merger sends its `READY` packet with its completion;
 the daemon posts it on the Dispatch issue and, when the project's `projects.<KEY>.merge_queue_role`
 names one, publishes it to that role; a human merges
-under the repository's code-owner rule. When the head's own CI turns red before the merge, the
-daemon sends the issue back to `implementing`, posts the READY's withdrawal on the Dispatch issue,
-and publishes it to that role.
+under the repository's code-owner rule. When the head's own CI turns red before the merge, or the
+head starts conflicting with its base (GitHub computes no merge ref for a conflicting head and
+runs no checks on it at all), the daemon sends the issue back to `implementing`, posts the READY's
+withdrawal on the Dispatch issue, and publishes it to that role.
 GitHub's own merge queue (the `merge_group` trigger) is a
 repository setting Legion neither reads nor writes. No lifecycle labels exist; GitHub issues are
 never read or written by Legion.

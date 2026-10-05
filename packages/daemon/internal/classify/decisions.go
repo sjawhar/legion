@@ -295,6 +295,19 @@ func RedWithdrawsReady(pr record.PullRequest) bool {
 	return pr.State == record.PullRequestOpen && pr.CheckedHead == pr.HeadSHA && HeadVerdict(pr) == "red"
 }
 
+// ConflictWithdrawsReady says whether a READY pull request, in awaiting_merge, has started
+// conflicting with its base: the pull request is open, and the daemon's last read of GitHub's
+// mergeability found MergeabilityConflicting. Unlike RedWithdrawsReady, a conflict is not a
+// settlement's to carry across a handoff-only push (SettlementFor) or a read ever to go stale on:
+// Mergeability stands for whatever head GitHub last computed it on, and the daemon's own read is
+// the only path to it, so there is no older read to prefer. GitHub runs no checks at all on a
+// conflicting head - there is no merge ref to run them against - so no verdict of HeadVerdict's
+// ever stands beside this one; the two are checked independently (workflow's decideChecks and its
+// own mergeability handler).
+func ConflictWithdrawsReady(pr record.PullRequest) bool {
+	return pr.State == record.PullRequestOpen && pr.Mergeability == record.MergeabilityConflicting
+}
+
 // BlockFixAttempt marks and reports one exhausted fix-attempt count when the verdict that stands
 // for the head is red after a settlement or a new required set, as the shipped reducer decides
 // pr-blocked on ci-settled-red alone: a green head at an exhausted count is the fix that worked. A

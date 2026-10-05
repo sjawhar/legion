@@ -1,6 +1,6 @@
 {
   "name": "claude-envoy",
-  "version": "0.6.5",
+  "version": "0.6.6",
   "description": "Deliver Envoy events as Claude Code channel notifications and expose Envoy MCP tools.",
   "mcpServers": "./.mcp.json"
 }

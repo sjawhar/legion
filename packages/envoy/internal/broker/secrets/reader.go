@@ -26,10 +26,19 @@ type smAPI interface {
 // in local development and tests.
 type AWS struct{ Client smAPI }
 
+// Read answers the secret's current value. A secret Secrets Manager does not hold
+// (ResourceNotFoundException) and one scheduled for deletion are both ErrNotFound: a secret
+// deleted with a recovery window, the console's and the CLI's default, stays there until the
+// window passes and GetSecretValue refuses to read it with InvalidRequestException ("marked for
+// deletion") rather than answering it absent, which is the same answer to its caller - the secret
+// is no longer readable - and must not be the broker's own 500. InvalidRequestException is that
+// state: GetSecretValue's other refusals name the request itself (InvalidParameterException) or the
+// key (DecryptionFailure), and this one is the only request state a caller can reach.
 func (a AWS) Read(ctx context.Context, source string) (string, error) {
 	out, err := a.Client.GetSecretValue(ctx, &secretsmanager.GetSecretValueInput{SecretId: aws.String(source)})
 	var notFound *types.ResourceNotFoundException
-	if errors.As(err, &notFound) {
+	var deleting *types.InvalidRequestException
+	if errors.As(err, &notFound) || errors.As(err, &deleting) {
 		return "", ErrNotFound
 	}
 	if err != nil {

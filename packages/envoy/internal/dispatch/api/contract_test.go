@@ -93,7 +93,8 @@ func newContractRig(t *testing.T) *contractRig {
 	brokerapi.Register(brokerMux, brokerapi.Deps{
 		PublicURL: brokerServer.URL, UIToken: contractUIToken,
 		Enroll: enr, Machine: reqMachine, MachineLogin: mach,
-		Proof: &proof.Verifier{Skew: time.Minute, Lookup: enr.Lookup, LookupLauncher: enr.AuthenticateLauncher, Replay: enr.Replay},
+		Proof:  &proof.Verifier{Skew: time.Minute, Lookup: enr.Lookup, LookupLauncher: enr.AuthenticateLauncher, Replay: enr.Replay},
+		Policy: cur, SecretsPrefix: policytest.Prefix, SecretsKMSKeyARN: policytest.KeyARN,
 	})
 
 	dispatchDB := storetest.Open(t)
