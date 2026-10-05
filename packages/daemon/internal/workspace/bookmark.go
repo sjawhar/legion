@@ -42,14 +42,15 @@ var (
 //     branch yet.
 //   - With no local bookmark, a conflicted origin row is refused: only concurrent fetches leave
 //     one, and the next provisioning's fetch sets the row to origin's branch as it is then.
-//   - With no local bookmark, an untracked origin row is the issue's own branch, pushed from another
-//     clone before this workspace existed: a repository's fixture, or the branch a tree pushed
-//     before its volume was lost. A fresh clone tracks main alone, so such a branch is only a remote
-//     row. It is tracked, which creates the local bookmark at its commit, and the workspace starts
-//     there, so its commits are there and the issue's next push moves it. The bookmark is read
-//     again after the track: a fetch between the read and the track leaves it on a newer commit,
-//     where a workspace at the listed one could never move it, so that provisioning is refused and
-//     the next one starts at the bookmark.
+//   - With no local bookmark, an untracked origin row is the issue's own branch, made on GitHub
+//     before this workspace existed: the branch the daemon creates at main before any role of the
+//     issue starts (the daemon's issue_branch outbox row), a repository's fixture, or the branch a
+//     tree pushed before its volume was lost. A fresh clone tracks main alone, so such a branch is
+//     only a remote row. It is tracked, which creates the local bookmark at its commit, and the
+//     workspace starts there, so its commits are there and the issue's next push moves it. The
+//     bookmark is read again after the track: a fetch between the read and the track leaves it on a
+//     newer commit, where a workspace at the listed one could never move it, so that provisioning is
+//     refused and the next one starts at the bookmark.
 //   - With no local bookmark, a tracked origin row is a local deletion (`jj bookmark delete` in the
 //     shared clone) never pushed, where tracking changes nothing. It is refused by name, with the
 //     operator's three ways out: restore the bookmark (`jj bookmark set`); cancel the deletion
@@ -60,8 +61,9 @@ var (
 //     authenticates only through `legion credential`, which needs a tree's grant that no operator
 //     shell holds, and `jj git push --deleted` would push every pending deletion in the shared
 //     clone, other issues' branches with it.
-//   - No row at all is a brand-new issue, or a merged branch GitHub deleted. The workspace starts
-//     at main, resolved to one commit first (mainCommit), with the bookmark created on it.
+//   - No row at all is an issue whose branch GitHub does not have, such as a merged branch GitHub
+//     deleted. The workspace starts at main, resolved to one commit first (mainCommit), with the
+//     bookmark created on it.
 func createWorkspace(ctx context.Context, run Runner, workspace Workspace, log func(string)) error {
 	cloneDir := workspace.Clone
 	workspaceName := filepath.Base(workspace.Dir)

@@ -349,6 +349,15 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 	if advice != nil && input.Spec != nil && strings.TrimSpace(*input.Spec) != "" {
 		advice.documentBlocks = readDocumentBlocks(markdown)
 	}
+	// LEGION-550: offered after the write committed and bounded by writeSuggestionTimeout, so a
+	// slow or down search never holds up an issue creation that already succeeded. Tied to
+	// advice's own success since both ride the same response field; a write-advice failure is
+	// already rare and logged, and losing suggestions alongside it is an accepted trade (see the
+	// PR's hardening ledger).
+	if advice != nil {
+		source := suggestionSource{kind: "issue", issueKey: key, actor: actor}
+		advice.Suggestions = s.computeAndPersistSuggestions(r.Context(), input.Project, input.Title+"\n"+markdown, source)
+	}
 	WriteJSON(w, http.StatusCreated, withAdvice(issue, advice))
 }
 

@@ -243,6 +243,17 @@ artifact, not a broken credential. Run credentialed commands from your own bash 
 run that may outlast a minute with `gh run watch` in bash, which redeems once and then runs on the
 token it got.
 
+**Other credentials your pod may already carry.** Before reporting that a read is unreachable,
+check for them rather than assuming none exist: `AGENT_SECRETS_URL` and `AGENT_SECRETS_KEY_DIR`
+are set when the deployment enrolls pods with the agent-secrets broker (`docs/kubernetes.md`,
+"Operator configuration"), in which case `agent-secrets <SECRET> -- <command>` runs `<command>`
+with only the secrets this pod generation's grant allows — refuses closed, naming the secret, if
+the rule does not allow it. `AWS_CONFIG_FILE` is set when the deployment's `pod.volumes` carries a
+further projected token beyond the model route's own; read the file it names for what profiles it
+configures before assuming the AWS CLI has nothing to reach. Neither variable existing is a
+guarantee the read you need is covered — a refusal from either still means what it says — but
+neither should be assumed absent without checking.
+
 ## GitHub PR comment attribution
 
 Append this exact structured footer to **every** pull-request comment and review that this

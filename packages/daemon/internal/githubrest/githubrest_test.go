@@ -6,7 +6,10 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -44,6 +47,77 @@ func TestPostSendsJSONAndAnswersWithTheStatus(t *testing.T) {
 	var answer *Answer
 	if !errors.As(err, &answer) || answer.Method != http.MethodPost || answer.Path != "/git/refs" || answer.Status != http.StatusUnprocessableEntity {
 		t.Fatalf("Post of a taken ref = %v, want an *Answer for POST /git/refs with 422", err)
+	}
+}
+
+// GetPages and GetListPages follow GitHub's next pages wherever GitHub names them on the API's own
+// origin, its /repositories/<id>/ form included, and an answer on such a page names that page's
+// path. A next page on another host is refused before the token is sent there.
+func TestGetPagesFollowsNextPagesOnTheAPIsOriginOnly(t *testing.T) {
+	var elsewhere atomic.Int32
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		elsewhere.Add(1)
+		if strings.HasSuffix(r.URL.Path, "/check-runs") {
+			w.Write([]byte(`{"total_count":1,"check_runs":["leaked"]}`))
+			return
+		}
+		w.Write([]byte(`["leaked"]`))
+	}))
+	defer other.Close()
+	var nextHost atomic.Pointer[string]
+	var pageTwo atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/acme/widgets/rules/branches/main":
+			next := *nextHost.Load() + "/repositories/42/rules/branches/main?per_page=100&page=2"
+			w.Header().Set("Link", "<"+next+`>; rel="next", <`+next+`>; rel="last"`)
+			w.Write([]byte(`["first"]`))
+		case "/repositories/42/rules/branches/main":
+			if status := int(pageTwo.Load()); status != http.StatusOK {
+				http.Error(w, `{"message":"Resource not accessible by integration"}`, status)
+				return
+			}
+			w.Write([]byte(`["second"]`))
+		case "/repos/acme/widgets/commits/head/check-runs":
+			next := *nextHost.Load() + "/repositories/42/commits/head/check-runs?per_page=100&page=2"
+			w.Header().Set("Link", "<"+next+`>; rel="next"`)
+			w.Write([]byte(`{"total_count":2,"check_runs":["first"]}`))
+		case "/repositories/42/commits/head/check-runs":
+			w.Write([]byte(`{"total_count":2,"check_runs":["second"]}`))
+		default:
+			http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	client := Client{Token: "token", API: server.URL + "/repos/acme/widgets"}
+
+	nextHost.Store(&server.URL)
+	pageTwo.Store(http.StatusOK)
+	if got, err := GetPages[string](context.Background(), client, "/rules/branches/main"); err != nil || !slices.Equal(got, []string{"first", "second"}) {
+		t.Fatalf("GetPages = %v, %v; want both pages", got, err)
+	}
+	if got, err := GetListPages[string](context.Background(), client, "/commits/head/check-runs", "check_runs"); err != nil || !slices.Equal(got, []string{"first", "second"}) {
+		t.Fatalf("GetListPages = %v, %v; want both pages' check runs", got, err)
+	}
+
+	pageTwo.Store(http.StatusForbidden)
+	_, err := GetPages[string](context.Background(), client, "/rules/branches/main")
+	var answer *Answer
+	if !errors.As(err, &answer) || answer.Path != "/repositories/42/rules/branches/main" || answer.Status != http.StatusForbidden {
+		t.Fatalf("GetPages with page 2 refused = %v, want an *Answer naming /repositories/42/rules/branches/main with 403", err)
+	}
+
+	nextHost.Store(&other.URL)
+	got, err := GetPages[string](context.Background(), client, "/rules/branches/main")
+	if err == nil || !strings.Contains(err.Error(), other.URL) || got != nil {
+		t.Fatalf("GetPages with a next page on another host = %v, %v; want an error naming it and no items", got, err)
+	}
+	list, err := GetListPages[string](context.Background(), client, "/commits/head/check-runs", "check_runs")
+	if err == nil || !strings.Contains(err.Error(), other.URL) || list != nil {
+		t.Fatalf("GetListPages with a next page on another host = %v, %v; want an error naming it and no items", list, err)
+	}
+	if n := elsewhere.Load(); n != 0 {
+		t.Fatalf("the other host saw %d requests, want none", n)
 	}
 }
 

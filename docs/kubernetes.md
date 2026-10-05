@@ -576,7 +576,8 @@ tester, reviewer, merger), named for its role:
 1. `workspace-fetch` clones the repository into the pod's feed. It is the only process that holds
    the provisioning token ([Trust model](#trust-model-the-provisioning-token)).
 2. `workspace-init` provisions the tree volume's shared clone and the issue's jj workspace from the
-   read-only feed.
+   read-only feed. The workspace starts at the issue's branch, `legion/<KEY>`, which the daemon
+   created on GitHub at `main` before the issue's architect or planner started.
 3. Each role container runs `legion launcher --connect tcp://<bind>:<worker_stream_port>
    --token-file … --sandbox <name> --role <role> --private-dir …`: PID 1 of that role, starting and
    stopping the role's `legion worker-shim` (Oh My Pi) child on the daemon's command, never a worker
