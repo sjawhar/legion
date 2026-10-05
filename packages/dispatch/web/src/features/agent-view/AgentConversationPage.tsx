@@ -6,6 +6,7 @@ import { Link, useParams } from "react-router-dom";
 import { api } from "../../api/client";
 import { agentMessagesQuery, whoAmIQuery } from "../../api/queries";
 import { pillClassName } from "../../components/Pill";
+import { TruncatedText } from "../../components/TruncatedText";
 import {
   connectionDotConnecting,
   connectionDotFailed,
@@ -131,12 +132,10 @@ export function AgentConversationPage(): ReactNode {
         </Link>
         <h1 className={`min-w-0 truncate text-lg font-semibold ${textPrimaryOnCanvas}`}>{label}</h1>
         {model === undefined ? null : (
-          <span
-            className={`${pillClassName("label")} max-w-56 min-w-0 truncate`}
-            data-testid="agent-session-model"
-            title={model}
-          >
-            {model}
+          <span className={`${pillClassName("label")} max-w-56`} data-testid="agent-session-model">
+            <TruncatedText className="min-w-0" title={model}>
+              {model}
+            </TruncatedText>
           </span>
         )}
         <span className="flex items-center gap-1.5">

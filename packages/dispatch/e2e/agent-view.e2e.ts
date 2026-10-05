@@ -1,3 +1,4 @@
+import { AGENT_STREAM_LIMITS, capAgentStreamText } from "@legion/contracts";
 import { expect, type Page, test } from "@playwright/test";
 
 import { agentRow, type FakeSession, getSentMessages, setLiveSessions } from "./agents";
@@ -83,7 +84,7 @@ const replay = {
   v: 1,
 };
 
-function assistantFrame(seq: number, text: string, streaming: boolean): object {
+function assistantFrame(seq: number, text: string, streaming: boolean, model?: string): object {
   return {
     kind: "message",
     message: {
@@ -92,6 +93,7 @@ function assistantFrame(seq: number, text: string, streaming: boolean): object {
       parts: [{ text, type: "text" }],
       role: "assistant",
       streaming,
+      ...(model === undefined ? {} : { model }),
     },
     seq,
     v: 1,
@@ -569,6 +571,57 @@ test("on a phone the live view never scrolls the page, keeps its header and comp
     // and the gutter follow the visual viewport's bottom in page coordinates, offsetTop included.
     await raiseKeyboard(page, 500, 120);
     await lowerKeyboard(page);
+  } finally {
+    await context.close();
+  }
+});
+
+// A session's reported model, capped at AGENT_STREAM_LIMITS.modelChars before it ever leaves
+// pi-envoy (packages/pi-envoy/src/agent-stream.ts), is still an unbroken identifier with no
+// spaces: on a 390 px phone it does not fit the header pill or the turn's own label, and without
+// an ellipsis it forced the whole page to scroll sideways rather than wrapping.
+test("a capped model name ends in an ellipsis on a phone, in the header and on the turn, and never forces the page to scroll sideways", async ({
+  browser,
+}, testInfo) => {
+  test.skip(
+    !PHONE_PROJECTS.includes(testInfo.project.name),
+    "the phone layout runs on the phone projects"
+  );
+  const longModel = capAgentStreamText(
+    `anthropic/${"x".repeat(300)}`,
+    AGENT_STREAM_LIMITS.modelChars
+  );
+  await publishAgentStreamFrame(
+    planner.session_id,
+    {
+      frames: [assistantFrame(1, "Switching models.", false, longModel)],
+      session_id: planner.session_id,
+      v: 1,
+    },
+    "replay"
+  );
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  try {
+    await page.setViewportSize({ height: 844, width: 390 });
+    await page.goto(`/agents/${planner.session_id}/live`);
+    const pill = page.getByTestId("agent-session-model");
+    const label = page.getByTestId("agent-message-model");
+    await expect(pill).toBeVisible();
+    await expect(label).toBeVisible();
+    // The `title` that lets a pointer reader see the whole value sits on the inner span
+    // TruncatedText renders, not on the outer element the test id names.
+    await expect(pill.locator("span")).toHaveAttribute("title", longModel);
+    await expect(label.locator("span")).toHaveAttribute("title", longModel);
+    const pillBox = await pill.boundingBox();
+    const labelBox = await label.boundingBox();
+    expect(pillBox?.width).toBeLessThanOrEqual(390);
+    expect(labelBox?.width).toBeLessThanOrEqual(390);
+    const widths = await page.evaluate(() => ({
+      clientWidth: document.documentElement.clientWidth,
+      scrollWidth: document.documentElement.scrollWidth,
+    }));
+    expect(widths.scrollWidth).toBe(widths.clientWidth);
   } finally {
     await context.close();
   }
