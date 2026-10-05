@@ -162,9 +162,11 @@ func RateLimited(response *http.Response, body []byte) bool {
 
 // retryAfter is how long GitHub asks a caller its rate limit answered to wait before calling again,
 // as its REST documentation's "Exceeding the rate limit" says: the retry-after header's seconds,
-// else, when x-ratelimit-remaining is 0, until the x-ratelimit-reset epoch second, else at least a
-// minute, which is what a secondary limit named by its message alone is waited. A reset this host's
-// clock already reads as past is waited the minute too. Zero for an answer that is not a rate limit.
+// else, when x-ratelimit-remaining is 0, until the x-ratelimit-reset epoch second, capped at an
+// hour, GitHub's primary rate limit's window, so a host clock behind GitHub's never stretches the
+// wait past it; else at least a minute, which is what a secondary limit named by its message alone
+// is waited. A reset this host's clock already reads as past is waited the minute too. Zero for an
+// answer that is not a rate limit.
 func retryAfter(response *http.Response, body []byte, now time.Time) time.Duration {
 	if !RateLimited(response, body) {
 		return 0
@@ -175,6 +177,9 @@ func retryAfter(response *http.Response, body []byte, now time.Time) time.Durati
 	if response.Header.Get("X-RateLimit-Remaining") == "0" {
 		if reset, err := strconv.ParseInt(response.Header.Get("X-RateLimit-Reset"), 10, 64); err == nil {
 			if wait := time.Unix(reset, 0).Sub(now); wait > 0 {
+				if wait > time.Hour {
+					return time.Hour
+				}
 				return wait
 			}
 		}

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -100,5 +101,27 @@ func TestASecondaryRateLimitNamedOnlyByItsMessageIsARateLimit(t *testing.T) {
 				t.Fatalf("the 403 = rate limited %v, retry after %s; want %v, %s", answer.RateLimited, answer.RetryAfter, tc.limited, tc.wantAfter)
 			}
 		})
+	}
+}
+
+// A 403 naming x-ratelimit-reset far in the future - a host clock behind GitHub's, or a limit
+// GitHub's documentation allows up to an hour out - waits no longer than an hour, GitHub's primary
+// rate limit's window, rather than stretching the nak delay and the held limit out past it.
+func TestARateLimitsResetFarInTheFutureWaitsNoLongerThanAnHour(t *testing.T) {
+	reset := strconv.FormatInt(time.Now().Add(6*time.Hour).Unix(), 10)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-RateLimit-Remaining", "0")
+		w.Header().Set("X-RateLimit-Reset", reset)
+		http.Error(w, `{"message":"rate limited"}`, http.StatusForbidden)
+	}))
+	defer server.Close()
+	client := Client{Token: "token", API: server.URL + "/repos/acme/widgets"}
+
+	var answer *Answer
+	if err := client.Get(context.Background(), "/collaborators/a-writer/permission", nil); !errors.As(err, &answer) {
+		t.Fatalf("Get = %v, want an *Answer", err)
+	}
+	if !answer.RateLimited || answer.RetryAfter != time.Hour {
+		t.Fatalf("a reset six hours out = rate limited %v, retry after %s; want true and an hour's cap", answer.RateLimited, answer.RetryAfter)
 	}
 }

@@ -109,7 +109,7 @@ func (w *workflowRuntime) readPermission(ctx context.Context, repository ghrepo.
 		var transient *appauth.TransientError
 		if errors.As(err, &transient) {
 			return false, &intake.RetryLater{After: time.Minute,
-				Err: fmt.Errorf("mint the review App token for %s: GitHub's rate limit stands, retry in %s: %w", repository.Owner(), time.Minute, err)}
+				Err: fmt.Errorf("mint the review App token for %s: a transient failure minting it, retry in %s: %w", repository.Owner(), time.Minute, err)}
 		}
 		return false, fmt.Errorf("mint the review App token for %s: %w", repository.Owner(), err)
 	}
