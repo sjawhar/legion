@@ -13964,6 +13964,7 @@ function actorLabel(actor, titles) {
 var AGENT_STREAM_LIMITS = {
   partChars: 16000,
   toolChars: 8000,
+  modelChars: 200,
   historyMessages: 200,
   historyBytes: 512 * 1024,
   snapshotIntervalMs: 100

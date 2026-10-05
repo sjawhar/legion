@@ -143,6 +143,11 @@
   accept route's answer: the attempt with the message's stored `body`), the `message.accepted`
   event (`MessageAcceptedEventPayload`), and `broadcast_id` on
   `DispatchTargetedMessagePayloadSchema` (LEGION-394).
+- Added optional `AgentStreamMessage.model`, the `provider/model` that produced an assistant turn
+  (e.g. `anthropic/claude-opus-5`), read off the host's own assistant message; absent on a user
+  message and on an assistant turn whose host carries no model identity. Added
+  `AGENT_STREAM_LIMITS.modelChars`, the cap the publisher applies to it before the frame leaves
+  the session (LEGION-548).
 - Added `IssueSummaryPage` (`{issues, total, limit, offset}`), the answer of
   `GET /api/v1/issues?limit=&offset=`, and `MAX_ISSUE_PAGE_LIMIT` (250) and
   `DEFAULT_ISSUE_PAGE_LIMIT` (50), generated into Go as `contracts.MaxIssuePageLimit` and

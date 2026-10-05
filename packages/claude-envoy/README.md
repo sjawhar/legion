@@ -132,7 +132,7 @@ is inlined from `package.json`, so the MCP server, `plugin.json`, and `package.j
 version). `dist/THIRD_PARTY_NOTICES` beside them carries the license of every third-party package
 they inline, written from Bun's metafile by `scripts/third-party-notices.ts` at the repository root.
 
-- `bun run build` rebuilds `dist/` (`Bun.build`, target `bun`, minification disabled: whitespace and identifiers stay readable so independent changes merge at line level; syntax stays off because Bun 1.3.14's constant folding can truncate concatenated string literals in CI builds; no sourcemap), notices included.
+- `bun run build` rebuilds `dist/` (`Bun.build`, target `bun`, `minify: false`, no sourcemap), notices included. Minification is off entirely, not case by case: the partial-disable form (`{whitespace: false, identifiers: false, syntax: false}`) still routes through Bun 1.3.14's minifying code-generation path, which picks a non-deterministic CJS/ESM interop check on repeated builds of this exact module graph — on top of the syntax minifier's own separate bug, truncating constant-folded multi-operand string concatenation in CI builds, that made the partial form necessary before this. A plain `false` bypasses that whole path; whitespace and identifiers stay readable as a side effect, so independent changes still merge at line level.
 - `bun run check-dist` rebuilds into a scratch directory and fails when it differs from the
   committed files. CI runs it on the Bun version pinned in the repo-root `.bun-version`, because
   bundler output differs across Bun releases; rebuild on that version before committing.

@@ -36471,6 +36471,7 @@ function actorLabel(actor, titles) {
 var AGENT_STREAM_LIMITS = {
   partChars: 16000,
   toolChars: 8000,
+  modelChars: 200,
   historyMessages: 200,
   historyBytes: 512 * 1024,
   snapshotIntervalMs: 100
@@ -44014,7 +44015,7 @@ class StdioServerTransport {
 // src/envoy-channel-server.ts
 var import_nats2 = __toESM(require_mod4(), 1);
 // package.json
-var version2 = "0.6.4";
+var version2 = "0.6.5";
 
 // src/channel-forwarder.ts
 var DeliveryIdentity = DedupeIdentitySchema.extend({

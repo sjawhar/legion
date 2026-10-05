@@ -364,3 +364,61 @@ test("the live view sends as Send by default where the session takes it, and as 
       .map((option) => option.textContent)
   ).toEqual(["Aside"]);
 });
+
+/** An assistant message the session streamed, optionally naming the model that produced it
+ *  (LEGION-548). */
+function assistantFrame(seq: number, at: number, text: string, model?: string) {
+  return {
+    kind: "message",
+    message: {
+      at,
+      id: `a${at}`,
+      parts: [{ text, type: "text" }],
+      role: "assistant",
+      streaming: false,
+      ...(model === undefined ? {} : { model }),
+    },
+    seq,
+    v: 1,
+  } as const satisfies AgentStreamFrame;
+}
+
+// The live view names the model next to the session's title, from its most recent turn, and
+// marks the turn itself in the transcript (LEGION-548).
+test("the live view shows the session's model next to its title and on the turn that produced it", async () => {
+  renderLiveView({
+    agentState: {},
+    messages: [],
+    putAgentState: spyOn(api, "putAgentState").mockResolvedValue({ unread_replies: 0 }),
+    replay: [
+      assistantFrame(
+        1,
+        Date.parse("2026-09-27T21:16:16Z"),
+        "Switching to it now.",
+        "anthropic/claude-opus-5"
+      ),
+    ],
+  });
+
+  const header = await screen.findByTestId("agent-session-model");
+  expect(header.textContent).toBe("anthropic/claude-opus-5");
+  const thread = await screen.findByTestId("agent-thread");
+  const turnModel = await within(thread).findByTestId("agent-message-model");
+  expect(turnModel.textContent).toBe("anthropic/claude-opus-5");
+});
+
+// A session whose client never reports a model (Claude Code, OpenCode, or a build too old) shows
+// nothing, in the header or on the turn, rather than a guess.
+test("the live view shows nothing for a session whose client reports no model", async () => {
+  renderLiveView({
+    agentState: {},
+    messages: [],
+    putAgentState: spyOn(api, "putAgentState").mockResolvedValue({ unread_replies: 0 }),
+    replay: [assistantFrame(1, Date.parse("2026-09-27T21:16:16Z"), "Switching to it now.")],
+  });
+
+  const thread = await screen.findByTestId("agent-thread");
+  await within(thread).findByText("Switching to it now.");
+  expect(screen.queryByTestId("agent-session-model")).toBeNull();
+  expect(within(thread).queryByTestId("agent-message-model")).toBeNull();
+});

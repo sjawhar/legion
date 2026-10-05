@@ -45,6 +45,8 @@ interface HostMessage {
   readonly toolCallId?: unknown;
   readonly toolName?: unknown;
   readonly isError?: unknown;
+  readonly model?: unknown;
+  readonly provider?: unknown;
 }
 
 interface HostPart {
@@ -68,6 +70,10 @@ interface ReadableMessage {
   readonly toolCallId: string | undefined;
   readonly toolName: string | undefined;
   readonly isError: boolean;
+  /** `provider/model` combined (e.g. `anthropic/claude-opus-5`), when the host message named
+   *  both as strings; undefined for a user message, a tool result, and an assistant message
+   *  whose host object names neither (an adapter with no access to its own model identity). */
+  readonly model: string | undefined;
   readonly host: HostMessage;
 }
 
@@ -92,6 +98,15 @@ export interface AgentStreamPublisherDeps {
 
 const encoder = new TextEncoder();
 
+/** `provider/model` combined and capped (e.g. `anthropic/claude-opus-5`), or undefined when
+ *  either is missing or empty — an empty string still satisfies `typeof x === "string"`, and
+ *  combining one anyway would publish a malformed `/claude-opus-5` or `anthropic/`. */
+function readModel(message: HostMessage): string | undefined {
+  if (typeof message.model !== "string" || message.model === "") return undefined;
+  if (typeof message.provider !== "string" || message.provider === "") return undefined;
+  return capAgentStreamText(`${message.provider}/${message.model}`, AGENT_STREAM_LIMITS.modelChars);
+}
+
 function readMessage(raw: unknown): ReadableMessage | null {
   if (typeof raw !== "object" || raw === null) return null;
   const message = raw as HostMessage;
@@ -101,6 +116,7 @@ function readMessage(raw: unknown): ReadableMessage | null {
   return {
     host: message,
     isError: message.isError === true,
+    model: readModel(message),
     role: message.role,
     timestamp: message.timestamp,
     toolCallId: typeof message.toolCallId === "string" ? message.toolCallId : undefined,
@@ -209,6 +225,12 @@ function frameFor(entry: RingEntry): AgentStreamFrame {
       role: message.role === "assistant" ? "assistant" : "user",
       streaming: entry.streaming,
       ...(dispatchMessageId === undefined ? {} : { dispatchMessageId }),
+      // Only an assistant turn ever carries one: the host's own UserMessage has no model or
+      // provider field to read, but a forged frame on the bus could still claim one, and the
+      // contract promises "absent on a user message".
+      ...(message.role === "assistant" && message.model !== undefined
+        ? { model: message.model }
+        : {}),
     },
     seq: entry.seq,
     v: AGENT_STREAM_PROTOCOL,
