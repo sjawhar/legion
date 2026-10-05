@@ -117,6 +117,10 @@ at the end of the page, so you can still read what it said.
 **Open** on an agent's row shows its conversation as it happens, at `/agents/<session>/live`.
 
 - The header shows whether the session is connected, and its machine and directory.
+- When the session reports which model it's running, the header shows it, and each assistant turn
+  shows the model that produced it. It updates as the session switches models, and a label too
+  long for its space truncates, showing the full name on hover. Claude Code and OpenCode sessions
+  don't publish this today, so their view is unchanged.
 - The agent's turns stream in while the page is open. They are relayed, not stored.
 - Your messages to the agent, and its replies through Dispatch, are stored and shown in the same
   thread. A reply through Dispatch is labelled **Reply via Dispatch**.
