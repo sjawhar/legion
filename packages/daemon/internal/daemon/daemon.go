@@ -248,8 +248,11 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 		// with Attempts left at its unbounded zero, where mintAtBoot bounds its own at 5 — so only
 		// a misconfiguration (natsauth.Unreachable, dispatch.Unreachable both answer false for
 		// one) is still a loud refusal. reconcile's own Postgres transaction is judged by neither:
-		// a Postgres failure there still exits at once, exactly as it did before this gate existed
-		// (TestRunRefusesAnUnreachablePostgresByHostAndNotByPassword, scripts/e2e/stage1-skeleton.sh).
+		// a design choice, not an inability to tell its failures apart from NATS's or Dispatch's.
+		// TestRunRefusesAnUnreachablePostgresByHostAndNotByPassword and
+		// scripts/e2e/stage1-skeleton.sh prove an unreachable Postgres refuses store.Open, earlier
+		// in boot than this gate runs; neither reaches reconcile's own Postgres transaction
+		// through the gate, which remains unverified by a dedicated test.
 		err := bootprobe.Run(ctx, "connect Envoy NATS", readinessRetry, log,
 			readinessAttempt(func(attempt context.Context) error {
 				return workflow.connect(attempt, cfg, plan.nats)

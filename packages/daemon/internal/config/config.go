@@ -550,13 +550,17 @@ func readNatsURLs(value *yaml.Node, key string) ([]string, error) {
 // daemon's HTTP client as "unsupported protocol scheme", which the boot's readiness gate would
 // otherwise wait out forever as if Dispatch were merely unreachable (LEGION-580).
 func dispatchBase(value, key string) (string, error) {
-	base, err := baseURL(value, key)
+	parsed, err := validURL(value, key)
 	if err != nil {
 		return "", err
 	}
-	if scheme, _, ok := strings.Cut(base, "://"); !ok || (scheme != "http" && scheme != "https") {
-		return "", fmt.Errorf("%s must be http or https, not %q", key, scheme)
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return "", fmt.Errorf("%s must be http or https, not %q", key, parsed.Scheme)
 	}
+	if parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
+		return "", fmt.Errorf("%s must not include a query string or fragment", key)
+	}
+	base := strings.TrimRight(parsed.String(), "/")
 	if strings.HasSuffix(base, "/mcp") {
 		return "", fmt.Errorf("%s must be the dispatch service base URL, not the /mcp endpoint", key)
 	}

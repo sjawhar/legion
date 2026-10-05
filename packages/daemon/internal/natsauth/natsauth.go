@@ -162,15 +162,12 @@ func Connect(urls []string, seed string, options ...nats.Option) (*nats.Conn, er
 	return nats.Connect(strings.Join(urls, ","), options...)
 }
 
-// ReconnectForever is the connection option that never gives up reconnecting: the default 60
-// attempts (nats.DefaultMaxReconnect) give up after about two minutes (at
-// nats.DefaultReconnectWait) and close the connection for good — exactly what turned the
-// "workflow intake stopped: durable consumer … stopped unexpectedly" crash into a runtime exit
-// daemon.go had no gate for (LEGION-580). With MaxReconnect negative, nats.go's own server-pool
-// logic never drops a server for having failed too many times (selectNextServer) and
-// doReconnect loops until Close, so a NATS outage mid-run costs degraded minutes of nats.go's own
-// default 2 s reconnect wait rather than a crash the supervisor restarts straight into the same
-// dial.
+// ReconnectForever is the connection option that never gives up reconnecting. nats.go's own
+// default policy (60 attempts, nats.DefaultMaxReconnect, about two minutes at
+// nats.DefaultReconnectWait) closes the connection for good once it gives up; with MaxReconnect
+// negative, nats.go's own server-pool logic never drops a server for having failed too many times
+// (selectNextServer) and doReconnect loops until Close, so a NATS outage mid-run costs degraded
+// minutes of nats.go's own default 2 s reconnect wait rather than a closed connection (LEGION-580).
 func ReconnectForever() nats.Option {
 	return nats.MaxReconnects(-1)
 }
@@ -252,12 +249,11 @@ func WithLastError(err error, conn *nats.Conn) error {
 // standard library types satisfy that interface without being network failures at all —
 // context.DeadlineExceeded and *url.Error — so a caller must never classify by the interface
 // alone. A bare context.DeadlineExceeded is refused rather than waited out: every NATS call this
-// package's callers make is a JetStream call on a bounded context (readinessAttempt's bootTimeout,
-// internal/daemon), and jetstream wraps a context's own expiry in exactly this shape whether the
-// call was merely slow or silently refused (a permission violation reports its cause
-// asynchronously and never closes the connection, so the blocked call's own synchronous error
-// never names it) — refusing is the loud, visible choice between two answers this package cannot
-// tell apart synchronously.
+// package's callers make is a JetStream call on a bounded context, and jetstream wraps a context's
+// own expiry in exactly this shape whether the call was merely slow or silently refused (a
+// permission violation reports its cause asynchronously and never closes the connection, so the
+// blocked call's own synchronous error never names it) — refusing is the loud, visible choice
+// between two answers this package cannot tell apart synchronously.
 func Unreachable(err error) bool {
 	if errors.Is(err, nats.ErrPermissionViolation) || errors.Is(err, nats.ErrAuthorization) {
 		return false

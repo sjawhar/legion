@@ -17,40 +17,28 @@ func fastReadiness(t *testing.T, retry bootprobe.Retry) {
 	t.Cleanup(func() { readinessRetry = previous })
 }
 
-// readinessAttempt's three outcomes: passed, retried (bootprobe.Run's retry branch) when any of
-// its judges recognizes the failure, and refused when none does, including with no judges at all
-// (connect's own call, which judges with exactly one). TestRunWaitsThroughADispatch503BeforeServing
-// (daemon_test.go) proves the real wiring end to end, through a real dispatch.HTTPClient and a
-// real daemon.Run(); this proves the adapter's own three-way logic in isolation.
+// readinessAttempt's three outcomes: passed, retried (bootprobe.Run's retry branch) when its
+// judge recognizes the failure, and refused when it does not.
+// TestRunWaitsThroughADispatch503BeforeServing (daemon_test.go) proves the real wiring end to
+// end, through a real dispatch.HTTPClient and a real daemon.Run(); this proves the adapter's own
+// three-way logic in isolation.
 func TestReadinessAttempt(t *testing.T) {
 	for _, testCase := range []struct {
 		name        string
-		unreachable []func(error) bool
+		unreachable func(error) bool
 		wantPassed  bool
 		wantDetail  string
 		wantRefusal bool
 	}{
 		{name: "passed", wantPassed: true},
 		{
-			name:        "retried when its one judge recognizes the failure",
-			unreachable: []func(error) bool{func(error) bool { return true }},
+			name:        "retried when its judge recognizes the failure",
+			unreachable: func(error) bool { return true },
 			wantDetail:  "unavailable",
 		},
 		{
-			name: "retried when the second of two judges recognizes it, the first does not",
-			unreachable: []func(error) bool{
-				func(error) bool { return false },
-				func(error) bool { return true },
-			},
-			wantDetail: "unavailable",
-		},
-		{
-			name:        "refused when its one judge does not recognize the failure",
-			unreachable: []func(error) bool{func(error) bool { return false }},
-			wantRefusal: true,
-		},
-		{
-			name:        "refused with no judges at all",
+			name:        "refused when its judge does not recognize the failure",
+			unreachable: func(error) bool { return false },
 			wantRefusal: true,
 		},
 	} {
@@ -59,7 +47,7 @@ func TestReadinessAttempt(t *testing.T) {
 			if !testCase.wantPassed {
 				attemptErr = errors.New("unavailable")
 			}
-			got := readinessAttempt(func(context.Context) error { return attemptErr }, testCase.unreachable...)(context.Background())
+			got := readinessAttempt(func(context.Context) error { return attemptErr }, testCase.unreachable)(context.Background())
 			if got.Passed != testCase.wantPassed {
 				t.Fatalf("Outcome.Passed = %t, want %t", got.Passed, testCase.wantPassed)
 			}

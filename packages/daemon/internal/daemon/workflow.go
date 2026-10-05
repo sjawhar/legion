@@ -210,13 +210,12 @@ func (w *workflowRuntime) bind(url, token string) {
 // connects as nc, the user readBoot chose (natsConnection), after logging it, and logs what the
 // server reports about the connection: every permission it refuses at error, every disconnect at
 // warn and every reconnect at info (natsauth.LogEvents), under natsauth.ReconnectForever so a
-// reconnect never gives up: a NATS outage mid-run never closes the connection for good. An
-// unreachable NATS here is the boot's own readiness gate's to retry (daemon.go's run, under
-// bootprobe.Run and natsauth.Unreachable, forever): a failed attempt closes whatever it opened
-// and clears it, so a later attempt starts clean rather than leaking the connection this one
-// could not finish setting up. Close comes before natsauth.WithLastError on both failure paths,
-// never after: WithLastError only looks once the connection reports itself closed, and Close
-// does not clear what the connection last recorded.
+// reconnect never gives up: a NATS outage mid-run never closes the connection for good. A failed
+// attempt here closes whatever it opened and clears it, so a later call — this one retried after
+// an unreachable NATS — starts clean rather than leaking the connection this one could not finish
+// setting up. Close comes before natsauth.WithLastError on both failure paths, never after:
+// WithLastError only looks once the connection reports itself closed, and Close does not clear
+// what the connection last recorded.
 func (w *workflowRuntime) connect(ctx context.Context, cfg config.Config, nc natsConnection) error {
 	nc.log(w.log)
 	conn, err := natsauth.Connect(cfg.NatsURLs, nc.seed, natsauth.LogEvents(w.log), natsauth.ReconnectForever())
@@ -317,10 +316,7 @@ func (w *workflowRuntime) recordedIssue(ctx context.Context, key string) (*recor
 // client-side, at no extra request cost), and a key currently out of that window — moved to
 // backlog, or never past triage — while the daemon was down still needs to be held exactly like
 // one still in it, so a replayed event that predates the move it fell out on cannot be admitted
-// before the move's own event ever arrives. The boot's readiness gate retries an unreachable
-// Dispatch here (daemon.go's run); a genuine Dispatch refusal, and any failure reading the
-// notification stream's own position or committing the Postgres transaction below, still exits
-// loud.
+// before the move's own event ever arrives.
 func (w *workflowRuntime) reconcile(ctx context.Context) error {
 	issues, err := w.dispatch.ListIssues(ctx, w.dispatchProject, nil)
 	if err != nil {

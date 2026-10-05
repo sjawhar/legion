@@ -467,8 +467,8 @@ handler would only write it to stderr, outside the daemon's log. Every other asy
 logged at warn with the `subject` of the subscription it names, a dropped connection at warn as
 `NATS connection lost` with its `error`, the reconnect at info as `NATS connection restored`
 with its `server`, and a terminal close (a fatal server `-ERR`) at error, once, as `NATS
-connection closed` with its `error`. Reconnects never run out: the connection is opened under
-`natsauth.ReconnectForever` (`nats.MaxReconnects(-1)`), so an outage mid-run shows as `NATS
+connection closed` with its `error`. Reconnects never run out: the connection never drops a
+server from its pool for having failed too many times, so an outage mid-run shows as `NATS
 connection lost` and then, once NATS answers again, `NATS connection restored` — never a close —
 at nats.go's own default 2 s reconnect wait. Only an unrecognized server `-ERR`, or the same
 authorization error twice in a row, still closes the connection (nats.go's own terminal-close
@@ -477,11 +477,14 @@ open. At boot an unreachable NATS or Dispatch delays the boot instead of exiting
 second doubling to one minute, forever, logged at warn as `boot probe failed transiently;
 waiting to run it again` with its `probe` (naming which), `attempt`, `retryIn` and `detail`. A
 misconfiguration still exits loud at once — a malformed seed, a permission or authorization
-violation the server itself refuses, a genuine Dispatch application refusal — and so does
-anything this wait cannot reliably tell apart from one: a NATS call that does not answer within
-its own bound, an EOF during the NATS handshake, and a Postgres failure while reconciling
-admission all exit rather than wait, since none of those is the audited outage this gate was
-built to ride out (LEGION-580).
+violation the server itself refuses, a genuine Dispatch application refusal, a NATS call that
+does not answer within its own bound, or an EOF during the NATS handshake, none of which this
+wait can reliably tell apart from an outage. A Dispatch 401 or 403 waits rather than exits: an
+operator who rotates the Dispatch token mid-outage sees the daemon keep retrying with the token
+it already read, rather than crash-looping — picking up the corrected value still needs a
+restart, as it always did. Reconciling admission's own Postgres transaction is judged by neither
+predicate and still exits at once on any failure: a design choice, not an inability to tell a
+Postgres failure apart from the other two (LEGION-580).
 
 Rollout order for the server's `legion-daemon` user: the server admits
 `legion-daemon` (its public key applied) with the daemon's grants first; then its seed is stored,
