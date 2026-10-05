@@ -97,12 +97,16 @@ func (r *RateLimitedEmbedder) Embed(ctx context.Context, texts []string, inputTy
 }
 
 // adjust moves interval (additive recovery, multiplicative backoff, as RateLimitedEmbedder's own
-// doc comment describes) and pushes the new value onto the rate.Limiter that Embed actually waits
-// on; interval itself stays the authoritative, exact state (Interval and the tests read it
+// doc comment describes) and pushes a changed value onto the rate.Limiter that Embed actually
+// waits on; interval itself stays the authoritative, exact state (Interval and the tests read it
 // directly) rather than being derived back out of the limiter's floating-point Limit.
+// SetLimit takes the limiter's own internal mutex and re-derives its token-bucket state even
+// when the value is identical, so adjust skips it at the floor and ceiling - the two steady
+// states a run of consecutive successes or throttles settles into and stays at call after call.
 func (r *RateLimitedEmbedder) adjust(err error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	before := r.interval
 	if IsThrottled(err) {
 		r.interval *= rateLimitBackoffFactor
 		if r.interval > retry.MaxDelay {
@@ -114,7 +118,9 @@ func (r *RateLimitedEmbedder) adjust(err error) {
 			r.interval = rateLimitFloor
 		}
 	}
-	r.limiter.SetLimit(rate.Every(r.interval))
+	if r.interval != before {
+		r.limiter.SetLimit(rate.Every(r.interval))
+	}
 }
 
 // Interval reports the limiter's current pacing interval, for logging and tests.

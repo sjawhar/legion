@@ -51,6 +51,16 @@ func oneVector() []float32 {
 	return v
 }
 
+// fakeVectors returns n healthy, identical vectors - the success path every fake embedder in
+// this file shares once it has decided a call succeeds.
+func fakeVectors(n int) [][]float32 {
+	vectors := make([][]float32, n)
+	for i := range vectors {
+		vectors[i] = oneVector()
+	}
+	return vectors
+}
+
 // throttleThenSucceedEmbedder throttles its first throttleFor calls, then delegates to inner -
 // standing in for a provider that recovers partway through an unattended run.
 type throttleThenSucceedEmbedder struct {
@@ -496,11 +506,7 @@ func (p *poisonTextEmbedder) Embed(_ context.Context, texts []string, _ embed.In
 			return nil, errors.New("ValidationException: the model refuses this input")
 		}
 	}
-	vectors := make([][]float32, len(texts))
-	for i := range texts {
-		vectors[i] = oneVector()
-	}
-	return vectors, nil
+	return fakeVectors(len(texts)), nil
 }
 
 // TestProcessBatchBisectsANonThrottledFailureToIsolateTheOffendingRow proves
@@ -901,11 +907,7 @@ func (e *countingGroupEmbedder) Embed(_ context.Context, texts []string, _ embed
 			return nil, errors.New("simulated: a non-throttled embed failure")
 		}
 	}
-	vectors := make([][]float32, len(texts))
-	for i := range vectors {
-		vectors[i] = oneVector()
-	}
-	return vectors, nil
+	return fakeVectors(len(texts)), nil
 }
 
 // TestChunkForBudgetSplitsAnOverCeilingBatchAndEmbedRowsCommitsEachGroupOnlyOnce proves both
@@ -974,11 +976,7 @@ func (e *canaryAwareEmbedder) Embed(_ context.Context, texts []string, _ embed.I
 	if !ok {
 		return nil, errors.New("simulated: a non-throttled embed failure")
 	}
-	vectors := make([][]float32, len(texts))
-	for i := range vectors {
-		vectors[i] = oneVector()
-	}
-	return vectors, nil
+	return fakeVectors(len(texts)), nil
 }
 
 // sequencedEmbedder scripts outcomes by call index alone, regardless of content or whether a
@@ -1000,11 +998,7 @@ func (e *sequencedEmbedder) Embed(_ context.Context, texts []string, _ embed.Inp
 	if !ok {
 		return nil, errors.New("simulated: a non-throttled embed failure")
 	}
-	vectors := make([][]float32, len(texts))
-	for i := range vectors {
-		vectors[i] = oneVector()
-	}
-	return vectors, nil
+	return fakeVectors(len(texts)), nil
 }
 
 // TestProcessBatchANewOutageAfterAnEarlierSuccessNeverConfirmsAnything proves confirmSoloFailure
@@ -1302,11 +1296,7 @@ func (e *wiringCheckEmbedder) Embed(ctx context.Context, texts []string, _ embed
 	if minNext.After(e.before.Add(claimWindow - time.Second)) {
 		e.sawRenewal = true
 	}
-	vectors := make([][]float32, len(texts))
-	for i := range vectors {
-		vectors[i] = oneVector()
-	}
-	return vectors, nil
+	return fakeVectors(len(texts)), nil
 }
 
 func TestProcessBatchActuallyCallsRenewalAndReservesTokens(t *testing.T) {
