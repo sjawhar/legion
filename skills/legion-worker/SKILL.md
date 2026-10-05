@@ -387,9 +387,10 @@ which pushes skip CI and which commit-message keywords it refuses. While the hea
 `skip-checks: true`, a pull-request body edit alone starts no GitHub workflow run, so a check that
 re-judges the body re-runs on that head only after a later push; on a code head the same edit
 re-runs it at once. While the pull request conflicts with its base (GitHub shows it
-CONFLICTING), GitHub dispatches no pull-request workflow of any type, so a body edit re-judges
-nothing there either; a push cures both, but only once the pull request is mergeable, so a
-conflicting one is forward-merged first. Its ancestry check refuses
+`CONFLICTING`), no workflow triggered `on: pull_request` runs for any of its activity types, so
+a body edit re-judges nothing there either; a push cures both, but only once the pull request is
+mergeable, so the implementer forward-merges a conflicting one first (*Reintegrating the base* in
+`skill://legion-worker/references/conflicts-and-rewrites.md`). Its ancestry check refuses
 unless `@-` descends from `legion/<KEY>@origin` (or the branch is not on GitHub yet): every issue
 workspace shares one clone, so another role's push moves `legion/<KEY>@origin` here at once, and
 a push that did not descend from it would move the remote branch sideways onto your commit and
