@@ -1,7 +1,6 @@
 package delivery
 
 import (
-	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
@@ -148,7 +147,7 @@ func TestFetchPullRequestMapsEveryField(t *testing.T) {
 	})
 	client := fake.newTestClient()
 
-	pr, err := FetchPullRequest(context.Background(), client, "acme", "widgets", 42)
+	pr, err := FetchPullRequest(t.Context(), client, "acme", "widgets", 42)
 	if err != nil {
 		t.Fatalf("FetchPullRequest: %v", err)
 	}
@@ -184,7 +183,7 @@ func TestFetchPullRequestUsesCommitterDateWhenAuthorIsAbsent(t *testing.T) {
 	})
 	client := fake.newTestClient()
 
-	pr, err := FetchPullRequest(context.Background(), client, "acme", "widgets", 7)
+	pr, err := FetchPullRequest(t.Context(), client, "acme", "widgets", 7)
 	if err != nil {
 		t.Fatalf("FetchPullRequest: %v", err)
 	}
@@ -203,7 +202,7 @@ func TestFetchPullRequestNoCommitsIsAnError(t *testing.T) {
 	})
 	client := fake.newTestClient()
 
-	_, err := FetchPullRequest(context.Background(), client, "acme", "widgets", 9)
+	_, err := FetchPullRequest(t.Context(), client, "acme", "widgets", 9)
 	if err == nil {
 		t.Fatal("FetchPullRequest: err = nil, want a malformed-commits error")
 	}
@@ -217,7 +216,7 @@ func TestFetchPullRequestUpstream404IsWrappedNotPanic(t *testing.T) {
 	})
 	client := fake.newTestClient()
 
-	_, err := FetchPullRequest(context.Background(), client, "acme", "widgets", 404)
+	_, err := FetchPullRequest(t.Context(), client, "acme", "widgets", 404)
 	if err == nil || !strings.Contains(err.Error(), "404") {
 		t.Fatalf("FetchPullRequest: err = %v, want an error naming the 404 status", err)
 	}
@@ -231,7 +230,7 @@ func TestFetchPullRequestUpstream500IsWrapped(t *testing.T) {
 	})
 	client := fake.newTestClient()
 
-	_, err := FetchPullRequest(context.Background(), client, "acme", "widgets", 500)
+	_, err := FetchPullRequest(t.Context(), client, "acme", "widgets", 500)
 	if err == nil || !strings.Contains(err.Error(), "500") {
 		t.Fatalf("FetchPullRequest: err = %v, want an error naming the 500 status", err)
 	}
@@ -290,7 +289,7 @@ func TestSearchMergedPullRequestsBuildsTheQuery(t *testing.T) {
 
 	since := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
 	until := time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC)
-	if _, err := SearchMergedPullRequests(context.Background(), client, "acme", "widgets", []string{"alice", "bob"}, since, until); err != nil {
+	if _, err := SearchMergedPullRequests(t.Context(), client, "acme", "widgets", []string{"alice", "bob"}, since, until); err != nil {
 		t.Fatalf("SearchMergedPullRequests: %v", err)
 	}
 
@@ -317,7 +316,7 @@ func TestSearchMergedPullRequestsAcrossInstallationScopesToInstallationRepos(t *
 	// query itself must carry an explicit repo: qualifier for every repository the installation's
 	// GET /installation/repositories lists, since an unqualified query is NOT scoped by the
 	// authenticating token for public-repository content (it searches all of public GitHub).
-	if _, err := SearchMergedPullRequestsAcrossInstallation(context.Background(), client, "acme", "widgets", []string{"alice", "bob"}, since, until); err != nil {
+	if _, err := SearchMergedPullRequestsAcrossInstallation(t.Context(), client, "acme", "widgets", []string{"alice", "bob"}, since, until); err != nil {
 		t.Fatalf("SearchMergedPullRequestsAcrossInstallation: %v", err)
 	}
 
@@ -345,7 +344,7 @@ func TestSearchMergedPullRequestsPaginatesAcrossPages(t *testing.T) {
 	})
 	client := fake.newTestClient()
 
-	results, err := SearchMergedPullRequests(context.Background(), client, "acme", "widgets", []string{"alice"},
+	results, err := SearchMergedPullRequests(t.Context(), client, "acme", "widgets", []string{"alice"},
 		time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC), time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC))
 	if err != nil {
 		t.Fatalf("SearchMergedPullRequests: %v", err)
@@ -403,7 +402,7 @@ func TestSearchMergedPullRequestsHalvesOnOverflowWithoutGapOrOverlap(t *testing.
 
 	since := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
 	until := time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC)
-	results, err := SearchMergedPullRequests(context.Background(), client, "acme", "widgets", []string{"alice"}, since, until)
+	results, err := SearchMergedPullRequests(t.Context(), client, "acme", "widgets", []string{"alice"}, since, until)
 	if err != nil {
 		t.Fatalf("SearchMergedPullRequests: %v", err)
 	}
@@ -465,7 +464,7 @@ func TestSearchMergedPullRequestsLeavesCompletingFieldsNil(t *testing.T) {
 	})
 	client := fake.newTestClient()
 
-	results, err := SearchMergedPullRequests(context.Background(), client, "acme", "widgets", []string{"alice"},
+	results, err := SearchMergedPullRequests(t.Context(), client, "acme", "widgets", []string{"alice"},
 		time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC), time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC))
 	if err != nil {
 		t.Fatalf("SearchMergedPullRequests: %v", err)
@@ -479,5 +478,41 @@ func TestSearchMergedPullRequestsLeavesCompletingFieldsNil(t *testing.T) {
 	}
 	if pr.MergedAt == nil {
 		t.Fatal("search result MergedAt is nil, want the pull_request.merged_at value")
+	}
+}
+
+// TestSearchMergedPullRequestsNormalizesABotAuthorToRESTForm proves the fix for a bot-authored
+// population PR reconcile was deleting on every pass: GraphQL's author.login for a bot-created
+// pull request is the bare account name ("sjawhar-agent"), carrying no "[bot]" suffix, while
+// REST's identical pull_request.user.login for the same account is "sjawhar-agent[bot]" --
+// IsPopulationPR and delivery_settings.population_authors are both written and compared in
+// REST's form, so an un-normalized GraphQL result never matches and reconcile.reconcilePullRequest
+// calls DeletePullRequest on every bot-authored population PR the search finds.
+func TestSearchMergedPullRequestsNormalizesABotAuthorToRESTForm(t *testing.T) {
+	fake := newFakeGitHub(t)
+	fake.handle("POST /graphql", func(w http.ResponseWriter, r *http.Request) {
+		node := map[string]any{
+			"number":    60,
+			"title":     "feat: agent-authored change",
+			"url":       "https://github.com/acme/widgets/pull/60",
+			"author":    map[string]any{"login": "acme-agent", "__typename": "Bot"},
+			"createdAt": "2024-01-01T00:00:00Z",
+			"mergedAt":  "2024-01-01T01:00:00Z",
+			"labels":    map[string]any{"nodes": []any{}},
+		}
+		mustEncode(t, w, searchResponseJSON(1, []map[string]any{node}, false, ""))
+	})
+	client := fake.newTestClient()
+
+	results, err := SearchMergedPullRequests(t.Context(), client, "acme", "widgets", []string{"acme-agent[bot]"},
+		time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC), time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("SearchMergedPullRequests: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("len(results) = %d, want 1", len(results))
+	}
+	if results[0].Author != "acme-agent[bot]" {
+		t.Fatalf("Author = %q, want the REST form %q (GitHub's GraphQL login carries no [bot] suffix)", results[0].Author, "acme-agent[bot]")
 	}
 }

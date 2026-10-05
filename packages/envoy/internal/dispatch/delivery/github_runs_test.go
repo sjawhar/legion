@@ -1,7 +1,6 @@
 package delivery
 
 import (
-	"context"
 	"net/http"
 	"strings"
 	"testing"
@@ -47,7 +46,7 @@ func TestListWorkflowRunsMapsRunShapes(t *testing.T) {
 	})
 	client := fake.newTestClient()
 
-	runs, err := ListWorkflowRuns(context.Background(), client, "acme", "widgets", ".github/workflows/deploy.yml",
+	runs, err := ListWorkflowRuns(t.Context(), client, "acme", "widgets", ".github/workflows/deploy.yml",
 		time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC), time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC))
 	if err != nil {
 		t.Fatalf("ListWorkflowRuns: %v", err)
@@ -107,7 +106,7 @@ func TestListWorkflowRunsPaginatesAcrossPages(t *testing.T) {
 	})
 	client := fake.newTestClient()
 
-	runs, err := ListWorkflowRuns(context.Background(), client, "acme", "widgets", "deploy.yml",
+	runs, err := ListWorkflowRuns(t.Context(), client, "acme", "widgets", "deploy.yml",
 		time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC), time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC))
 	if err != nil {
 		t.Fatalf("ListWorkflowRuns: %v", err)
@@ -156,7 +155,7 @@ func TestListWorkflowRunsHalvesOnOverflowWithoutGapOrOverlap(t *testing.T) {
 
 	since := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
 	until := time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC)
-	runs, err := ListWorkflowRuns(context.Background(), client, "acme", "widgets", "deploy.yml", since, until)
+	runs, err := ListWorkflowRuns(t.Context(), client, "acme", "widgets", "deploy.yml", since, until)
 	if err != nil {
 		t.Fatalf("ListWorkflowRuns: %v", err)
 	}
@@ -187,7 +186,7 @@ func TestListWorkflowRunsUpstream404IsWrapped(t *testing.T) {
 	})
 	client := fake.newTestClient()
 
-	_, err := ListWorkflowRuns(context.Background(), client, "acme", "widgets", "deploy.yml",
+	_, err := ListWorkflowRuns(t.Context(), client, "acme", "widgets", "deploy.yml",
 		time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC), time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC))
 	if err == nil || !strings.Contains(err.Error(), "404") {
 		t.Fatalf("ListWorkflowRuns: err = %v, want an error naming the 404 status", err)
@@ -201,7 +200,7 @@ func TestListWorkflowRunsUpstream500IsWrapped(t *testing.T) {
 	})
 	client := fake.newTestClient()
 
-	_, err := ListWorkflowRuns(context.Background(), client, "acme", "widgets", "deploy.yml",
+	_, err := ListWorkflowRuns(t.Context(), client, "acme", "widgets", "deploy.yml",
 		time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC), time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC))
 	if err == nil || !strings.Contains(err.Error(), "500") {
 		t.Fatalf("ListWorkflowRuns: err = %v, want an error naming the 500 status", err)
@@ -224,7 +223,7 @@ func TestListWorkflowRunJobsMapsEveryField(t *testing.T) {
 	})
 	client := fake.newTestClient()
 
-	jobs, err := ListWorkflowRunJobs(context.Background(), client, "acme", "widgets", 42)
+	jobs, err := ListWorkflowRunJobs(t.Context(), client, "acme", "widgets", 42)
 	if err != nil {
 		t.Fatalf("ListWorkflowRunJobs: %v", err)
 	}
@@ -262,7 +261,7 @@ func TestListWorkflowRunJobsPaginatesAcrossPages(t *testing.T) {
 	})
 	client := fake.newTestClient()
 
-	jobs, err := ListWorkflowRunJobs(context.Background(), client, "acme", "widgets", 7)
+	jobs, err := ListWorkflowRunJobs(t.Context(), client, "acme", "widgets", 7)
 	if err != nil {
 		t.Fatalf("ListWorkflowRunJobs: %v", err)
 	}
@@ -289,7 +288,7 @@ func TestListWorkflowRunJobsUpstream404IsWrapped(t *testing.T) {
 	})
 	client := fake.newTestClient()
 
-	_, err := ListWorkflowRunJobs(context.Background(), client, "acme", "widgets", 404)
+	_, err := ListWorkflowRunJobs(t.Context(), client, "acme", "widgets", 404)
 	if err == nil || !strings.Contains(err.Error(), "404") {
 		t.Fatalf("ListWorkflowRunJobs: err = %v, want an error naming the 404 status", err)
 	}
@@ -302,7 +301,7 @@ func TestListWorkflowRunJobsUpstream500IsWrapped(t *testing.T) {
 	})
 	client := fake.newTestClient()
 
-	_, err := ListWorkflowRunJobs(context.Background(), client, "acme", "widgets", 500)
+	_, err := ListWorkflowRunJobs(t.Context(), client, "acme", "widgets", 500)
 	if err == nil || !strings.Contains(err.Error(), "500") {
 		t.Fatalf("ListWorkflowRunJobs: err = %v, want an error naming the 500 status", err)
 	}

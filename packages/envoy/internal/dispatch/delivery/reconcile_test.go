@@ -205,3 +205,41 @@ func TestReconcileNeverWipesACompletePullRequestsAttribution(t *testing.T) {
 		t.Fatalf("pr.Sessions = %v, want [01a1-real-session] (attribution wiped by reconcile's re-discovery)", pr.Sessions)
 	}
 }
+
+// TestReconcileClearsLastErrorOnceItSucceedsAgain proves the freshness row recovers: a prior
+// failing pass's named error must not linger once a later pass actually succeeds --
+// RecordReconcileSuccess's own "last_error = null" is exercised here through the real reconcile
+// path, not just the bare SQL statement.
+func TestReconcileClearsLastErrorOnceItSucceedsAgain(t *testing.T) {
+	pool, ctx := deliveryTestPool(t)
+	seedDeliverySettings(t, ctx, pool)
+	if err := RecordReconcileError(ctx, pool, "the installation lacks Actions: read on acme/widgets"); err != nil {
+		t.Fatalf("seed a prior failure: %v", err)
+	}
+
+	fake := newFakeGitHub(t)
+	fake.handle("POST /graphql", func(w http.ResponseWriter, r *http.Request) {
+		mustEncode(t, w, searchResponseJSON(0, nil, false, ""))
+	})
+	fake.handle("GET /repos/acme/widgets/actions/workflows/.github%2Fworkflows%2Fdeploy.yml/runs", func(w http.ResponseWriter, r *http.Request) {
+		mustEncode(t, w, map[string]any{"total_count": 0, "workflow_runs": []any{}})
+	})
+	fake.handle("GET /repos/acme/widgets/actions/workflows/.github%2Fworkflows%2Fpr-checks.yml/runs", func(w http.ResponseWriter, r *http.Request) {
+		mustEncode(t, w, map[string]any{"total_count": 0, "workflow_runs": []any{}})
+	})
+	client := fake.newTestClient()
+
+	reconcile := NewReconcile(pool, client)
+	reconcile.runOnce(ctx)
+
+	after, err := GetSettings(ctx, pool)
+	if err != nil {
+		t.Fatalf("GetSettings after reconcile: %v", err)
+	}
+	if after.LastError != nil {
+		t.Fatalf("settings.LastError = %v, want nil once a pass has actually succeeded", *after.LastError)
+	}
+	if after.LastReconcileAt == nil {
+		t.Fatal("settings.LastReconcileAt is nil, want it set by the successful pass")
+	}
+}

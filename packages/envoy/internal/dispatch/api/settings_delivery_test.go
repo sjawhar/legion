@@ -1,7 +1,6 @@
 package api
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -56,7 +55,7 @@ func TestPutDeliverySettingsWritesSettings(t *testing.T) {
 		t.Errorf("settings.DeployRepo = %q, want acme/widgets", settings.DeployRepo)
 	}
 
-	stored, err := delivery.GetSettings(context.Background(), database.Pool)
+	stored, err := delivery.GetSettings(t.Context(), database.Pool)
 	if err != nil {
 		t.Fatalf("GetSettings: %v", err)
 	}

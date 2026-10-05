@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"net/url"
 	"strings"
 	"time"
@@ -89,12 +88,12 @@ func FetchPullRequest(ctx context.Context, client *githubapp.Client, owner, repo
 	}
 
 	pullPath := fmt.Sprintf("/repos/%s/%s/pulls/%d", url.PathEscape(owner), url.PathEscape(repo), number)
-	body, status, _, err := client.Read(ctx, token, pullPath)
+	body, status, header, err := client.Read(ctx, token, pullPath)
 	if err != nil {
 		return FetchedPullRequest{}, fmt.Errorf("fetch %s/%s PR #%d: %w", owner, repo, number, err)
 	}
-	if status != http.StatusOK {
-		return FetchedPullRequest{}, fmt.Errorf("fetch %s/%s PR #%d: status %d: %s", owner, repo, number, status, body)
+	if err := githubapp.CheckResponse(status, header, body); err != nil {
+		return FetchedPullRequest{}, fmt.Errorf("fetch %s/%s PR #%d: %w", owner, repo, number, err)
 	}
 	var payload pullRequestPayload
 	if err := json.Unmarshal(body, &payload); err != nil {
@@ -102,12 +101,12 @@ func FetchPullRequest(ctx context.Context, client *githubapp.Client, owner, repo
 	}
 
 	commitsPath := fmt.Sprintf("/repos/%s/%s/pulls/%d/commits?per_page=1", url.PathEscape(owner), url.PathEscape(repo), number)
-	commitsBody, commitsStatus, _, err := client.Read(ctx, token, commitsPath)
+	commitsBody, commitsStatus, commitsHeader, err := client.Read(ctx, token, commitsPath)
 	if err != nil {
 		return FetchedPullRequest{}, fmt.Errorf("fetch first commit of %s/%s PR #%d: %w", owner, repo, number, err)
 	}
-	if commitsStatus != http.StatusOK {
-		return FetchedPullRequest{}, fmt.Errorf("fetch first commit of %s/%s PR #%d: status %d: %s", owner, repo, number, commitsStatus, commitsBody)
+	if err := githubapp.CheckResponse(commitsStatus, commitsHeader, commitsBody); err != nil {
+		return FetchedPullRequest{}, fmt.Errorf("fetch first commit of %s/%s PR #%d: %w", owner, repo, number, err)
 	}
 	var commits []commitPayload
 	if err := json.Unmarshal(commitsBody, &commits); err != nil {
@@ -194,11 +193,23 @@ type searchPullRequestsPage struct {
 // results per page) to push a page over the 1 MiB response limit on its own, and nothing in this
 // path reads it -- reconcile's search-found PRs are stored Partial until a later per-PR
 // FetchPullRequest completes them, which is also where their issue-reference body text is read.
+//
+// Author.Typename is GraphQL's own discriminator ("User", "Bot", "Organization", ...) for the
+// `Actor` interface `author` resolves to. GitHub's GraphQL login for a bot-authored pull request
+// is the bare account name ("sjawhar-agent"); its REST `user.login` for the identical account
+// carries the "[bot]" suffix ("sjawhar-agent[bot]") REST adds for every App-created identity.
+// IsPopulationPR (population.go) and delivery_settings.population_authors are both written and
+// compared in REST's form -- Dispatch's own intake and every other fetcher in this package read
+// REST -- so a GraphQL result normalizes to that same form here, at decode time, rather than
+// teaching every consumer to recognize two spellings of one account.
 type searchPullRequestNode struct {
-	Number int         `json:"number"`
-	Title  string      `json:"title"`
-	URL    string      `json:"url"`
-	Author *githubUser `json:"author"`
+	Number int    `json:"number"`
+	Title  string `json:"title"`
+	URL    string `json:"url"`
+	Author *struct {
+		Login    string `json:"login"`
+		Typename string `json:"__typename"`
+	} `json:"author"`
 	Labels *struct {
 		Nodes []githubLabel `json:"nodes"`
 	} `json:"labels"`
@@ -215,6 +226,9 @@ func fetchedPullRequestFromSearchNode(node searchPullRequestNode) FetchedPullReq
 	}
 	if node.Author != nil {
 		pr.Author = node.Author.Login
+		if node.Author.Typename == "Bot" {
+			pr.Author += "[bot]"
+		}
 	}
 	if node.Labels != nil {
 		pr.Labels = labelNames(node.Labels.Nodes)
@@ -318,7 +332,7 @@ const searchPullRequestsQuery = `query($q: String!, $after: String) {
         number
         title
         url
-        author { login }
+        author { login __typename }
         createdAt
         mergedAt
         labels(first: 20) { nodes { name } }

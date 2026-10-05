@@ -30,7 +30,7 @@ func deliveryTestPool(t *testing.T) (*store.Pool, context.Context) {
 	if url == "" {
 		t.Skip("DISPATCH_TEST_DATABASE_URL must be set to run Postgres-backed delivery tests")
 	}
-	ctx := context.Background()
+	ctx := t.Context()
 	pgxPool, err := pgxpool.New(ctx, url)
 	if err != nil {
 		t.Fatalf("pgxpool.New: %v", err)
@@ -124,7 +124,7 @@ func TestIntakeDedupesAMergedPullRequestEnvelope(t *testing.T) {
 	t.Cleanup(natsClient.Close)
 
 	intake := NewIntake(natsClient, pool, client)
-	runCtx, cancel := context.WithCancel(context.Background())
+	runCtx, cancel := context.WithCancel(t.Context())
 	t.Cleanup(cancel)
 	go intake.Run(runCtx)
 

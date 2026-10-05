@@ -1,7 +1,6 @@
 package api
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -180,7 +179,7 @@ func TestGetDeliveryTimelineComputesDeployedStatusAndFacets(t *testing.T) {
 // database -- a stale-but-healthy pass and a failing one must be distinguishable on the wire.
 func TestGetDeliveryTimelineSurfacesReconcileErrorOnFreshness(t *testing.T) {
 	handler, database := newTestHandlerWithStore(t)
-	ctx := context.Background()
+	ctx := t.Context()
 	if _, err := delivery.PutSettings(ctx, database.Pool, delivery.DeliverySettings{
 		DeployRepo: "acme/widgets", DeployWorkflowPath: ".github/workflows/deploy.yml",
 		ProductionJobName: "widgets-release / widgets-release", PRChecksWorkflowPath: ".github/workflows/pr-checks.yml",
