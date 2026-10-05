@@ -562,7 +562,7 @@ func scanSearchRows(rows pgx.Rows, q string, limit, offset int) (model.SearchRes
 		} else {
 			result.Owner = model.SearchOwner{
 				Kind:       *ownerKind,
-				Project:    *ownerProject,
+				Project:    deref(ownerProject),
 				Slug:       *ownerSlug,
 				ArtifactID: *ownerArtifactID,
 				Name:       *ownerName,
