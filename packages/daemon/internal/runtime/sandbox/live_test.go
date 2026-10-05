@@ -666,8 +666,12 @@ func newLiveRig(t *testing.T, env liveEnv) *liveRig {
 		{"second", "S4A-1", "S4A-1", claim.RoleTester},
 		{"fresh", "S4A-1", "S4A-1", claim.RoleReviewer},
 		// orphan is a separate issue pod: its unrecorded Sandbox can be swept or deleted without
-		// taking the root issue's resident roles with it.
-		{"orphan", "S4A-4", "S4A-4", claim.RoleMerger},
+		// taking the root issue's resident roles with it. Its role is its own tree's architect,
+		// not a worker role: a brand-new tree's Sandbox carries the tree volume claim template
+		// only when its first launch is the architect (isRoot, manifest.go sandboxManifest); any
+		// other role launched first for a tree with no prior claim would reference a tree
+		// PersistentVolumeClaim nothing ever created, and its pod would never schedule.
+		{"orphan", "S4A-4", "S4A-4", claim.RoleArchitect},
 		{"root2", "S4A-2", "S4A-2", claim.RoleArchitect},
 		{"child2", "S4A-2", "S4A-3", claim.RolePlanner},
 	} {
