@@ -42,11 +42,12 @@ var writableHandoffs = map[string]string{
 
 func TestHandoffWriteAndReadPersistInWorkspace(t *testing.T) {
 	workspace := t.TempDir()
+	t.Setenv("LEGION_ISSUE", "THIS-1")
 	var out, errb bytes.Buffer
 	if code := run(context.Background(), []string{"legion", "handoff", "write", "--workspace", workspace, "--phase", "implement", "--data", writableHandoffs["implement"]}, &out, &errb); code != 0 {
 		t.Fatalf("handoff write = %d: %s", code, errb.String())
 	}
-	if _, err := os.Stat(filepath.Join(workspace, ".legion", "implement.json")); err != nil {
+	if _, err := os.Stat(filepath.Join(workspace, ".legion", "THIS-1", "implement.json")); err != nil {
 		t.Fatalf("handoff file: %v", err)
 	}
 	out.Reset()
@@ -70,62 +71,84 @@ func TestHandoffWriteStampsItsOwnIssueAndReadsItBack(t *testing.T) {
 	}
 }
 
-// A tree provisioned from a main that still carries another issue's merged .legion/ file
-// (dispatch://LEGION-565) must never read it as its own: legion handoff read, finding a phase
-// word's file stamped with an issue that is not LEGION_ISSUE's, refuses it by name instead of
-// returning its content, for an explicit --phase and for an unfiltered read alike.
-func TestHandoffReadRefusesAHandoffAnotherIssueWrote(t *testing.T) {
-	workspace := t.TempDir()
-	t.Setenv("LEGION_ISSUE", "ACME-1086")
-	var out, errb bytes.Buffer
-	if code := run(context.Background(), []string{"legion", "handoff", "write", "--workspace", workspace, "--phase", "test", "--data", writableHandoffs["test"]}, &out, &errb); code != 0 {
-		t.Fatalf("handoff write as ACME-1086 = %d: %s", code, errb.String())
+// Two trees running at once each write their plan handoff on a branch cut from the same main
+// (dispatch://LEGION-565). Under one flat .legion/plan.json the second tree's pull request conflicts
+// with main the moment the first merges, and GitHub builds no merge ref for a conflicting pull
+// request, so it runs no CI at all until main is merged forward. Each tree's handoffs live under its
+// own .legion/<issue>/, so merging both trees leaves no conflict.
+func TestConcurrentTreesHandoffsMergeWithoutConflict(t *testing.T) {
+	workspace, jj := handoffRepo(t)
+	if err := os.WriteFile(filepath.Join(workspace, "README.md"), []byte("smoke\n"), 0o644); err != nil {
+		t.Fatal(err)
 	}
-
-	t.Setenv("LEGION_ISSUE", "ACME-601")
-	out.Reset()
-	errb.Reset()
-	code := run(context.Background(), []string{"legion", "handoff", "read", "--workspace", workspace, "--phase", "test"}, &out, &errb)
-	if code != 1 || out.String() != "" || !strings.Contains(errb.String(), "test.json") || !strings.Contains(errb.String(), "ACME-1086") || !strings.Contains(errb.String(), "ACME-601") {
-		t.Fatalf("handoff read --phase test as ACME-601 of ACME-1086's file = %d, stdout %q, stderr %q; want a refusal naming both issues", code, out.String(), errb.String())
+	handoffJJ(t, jj, workspace, "commit", "-m", "main")
+	main := handoffJJ(t, jj, workspace, "log", "-r", "@-", "--no-graph", "-T", "commit_id")
+	tree := func(issue string) string {
+		t.Helper()
+		handoffJJ(t, jj, workspace, "new", main)
+		t.Setenv("LEGION_ISSUE", issue)
+		var out, errb bytes.Buffer
+		if code := run(context.Background(), []string{"legion", "handoff", "write", "--workspace", workspace, "--phase", "plan", "--data", writableHandoffs["plan"]}, &out, &errb); code != 0 {
+			t.Fatalf("handoff write as %s = %d: %s", issue, code, errb.String())
+		}
+		handoffJJ(t, jj, workspace, "commit", "-m", "plan: record handoff")
+		return handoffJJ(t, jj, workspace, "log", "-r", "@-", "--no-graph", "-T", "commit_id")
 	}
-
-	// An unfiltered read skips the foreign phase and still returns every phase that is its own.
-	out.Reset()
-	if code := run(context.Background(), []string{"legion", "handoff", "write", "--workspace", workspace, "--phase", "implement", "--data", writableHandoffs["implement"]}, &out, &errb); code != 0 {
-		t.Fatalf("handoff write as ACME-601 = %d: %s", code, errb.String())
-	}
-	out.Reset()
-	errb.Reset()
-	if code := run(context.Background(), []string{"legion", "handoff", "read", "--workspace", workspace}, &out, &errb); code != 0 {
-		t.Fatalf("handoff read (all) = %d: stderr %s", code, errb.String())
-	}
-	var all map[string]json.RawMessage
-	if err := json.Unmarshal(out.Bytes(), &all); err != nil {
-		t.Fatalf("decode handoff read (all) output %q: %v", out.String(), err)
-	}
-	if _, present := all["test"]; present {
-		t.Fatalf("handoff read (all) = %v, want the foreign test.json left out", all)
-	}
-	if _, present := all["implement"]; !present {
-		t.Fatalf("handoff read (all) = %v, want this tree's own implement.json kept", all)
-	}
-	if !strings.Contains(errb.String(), "test.json") || !strings.Contains(errb.String(), "ACME-1086") {
-		t.Fatalf("handoff read (all) stderr = %q, want it to say which file it skipped and whose it was", errb.String())
+	first, second := tree("ACME-1"), tree("ACME-2")
+	handoffJJ(t, jj, workspace, "new", first, second)
+	if merged := handoffJJ(t, jj, workspace, "log", "-r", "@", "--no-graph", "-T", `if(conflict, "conflicted", "clean")`); merged != "clean" {
+		t.Fatalf("merging two trees' plan handoffs is %s, conflicting on %q; want clean", merged, handoffJJ(t, jj, workspace, "resolve", "--list"))
 	}
 }
 
-// A handoff from before this change stamps no "issue" at all. legion handoff read cannot tell whose
-// it is from its content, so it is never refused as foreign: dispatch://LEGION-565's branch-creation
-// fix is what keeps such a file out of a fresh tree's workspace in the first place; this is the
-// pre-existing file's backward-compatible path, not a second guarantee.
-func TestHandoffReadReturnsAnUnstampedHandoffUnchanged(t *testing.T) {
+// Outside a pane LEGION_ISSUE is unset, so a write has no tree directory to go to: it is refused,
+// never written at a flat path every tree would share.
+func TestHandoffWriteRefusesWithoutItsIssue(t *testing.T) {
 	workspace := t.TempDir()
-	writeHandoffFile(t, workspace, "review.json", `{"verdict":"approved","critical":0}`+"\n")
+	t.Setenv("LEGION_ISSUE", "")
+	var out, errb bytes.Buffer
+	code := run(context.Background(), []string{"legion", "handoff", "write", "--workspace", workspace, "--phase", "implement", "--data", writableHandoffs["implement"]}, &out, &errb)
+	if code != 1 || !strings.Contains(errb.String(), "LEGION_ISSUE is not set") {
+		t.Fatalf("handoff write without LEGION_ISSUE = %d, stderr %q; want a refusal naming LEGION_ISSUE", code, errb.String())
+	}
+	if _, err := os.Stat(filepath.Join(workspace, ".legion")); !os.IsNotExist(err) {
+		t.Fatalf(".legion after the refused write: %v, want none", err)
+	}
+}
+
+// A tree still mid-flight when this change replaced an older binary may hold its predecessor's
+// handoff at the flat .legion/<phase>.json every write used before. legion handoff read falls back
+// to it only when its stamped issue is this tree's own.
+func TestHandoffReadFallsBackToItsOwnLegacyHandoff(t *testing.T) {
+	workspace := t.TempDir()
+	writeLegacyHandoffFile(t, workspace, "review.json", `{"issue":"ACME-601","verdict":"approved","critical":0}`+"\n")
 	t.Setenv("LEGION_ISSUE", "ACME-601")
 	var out, errb bytes.Buffer
 	if code := run(context.Background(), []string{"legion", "handoff", "read", "--workspace", workspace, "--phase", "review"}, &out, &errb); code != 0 || !strings.Contains(out.String(), `"verdict": "approved"`) {
-		t.Fatalf("handoff read of an unstamped file = %d: stdout %s stderr %s; want it returned, not refused", code, out.String(), errb.String())
+		t.Fatalf("handoff read --phase review of this tree's flat handoff = %d: stdout %s stderr %s; want it returned", code, out.String(), errb.String())
+	}
+	out.Reset()
+	if code := run(context.Background(), []string{"legion", "handoff", "read", "--workspace", workspace}, &out, &errb); code != 0 || !strings.Contains(out.String(), `"review"`) {
+		t.Fatalf("handoff read (all) = %d: stdout %s stderr %s; want this tree's flat review handoff in it", code, out.String(), errb.String())
+	}
+}
+
+// Another tree's merged handoff at the flat path, or one from before handoffs carried their issue,
+// is never read as this tree's, by an explicit --phase read or an unfiltered one.
+func TestHandoffReadNeverFallsBackToAnotherTreesLegacyHandoff(t *testing.T) {
+	workspace := t.TempDir()
+	writeLegacyHandoffFile(t, workspace, "test.json", `{"issue":"ACME-1086","passed":3}`+"\n")
+	writeLegacyHandoffFile(t, workspace, "review.json", `{"verdict":"approved","critical":0}`+"\n")
+	t.Setenv("LEGION_ISSUE", "ACME-601")
+	for _, word := range []string{"test", "review"} {
+		var out, errb bytes.Buffer
+		if code := run(context.Background(), []string{"legion", "handoff", "read", "--workspace", workspace, "--phase", word}, &out, &errb); code != 1 || out.String() != "" {
+			t.Fatalf("handoff read --phase %s as ACME-601 = %d, stdout %q; want no handoff", word, code, out.String())
+		}
+	}
+	var out, errb bytes.Buffer
+	if code := run(context.Background(), []string{"legion", "handoff", "read", "--workspace", workspace}, &out, &errb); code != 0 || strings.TrimSpace(out.String()) != "{}" {
+		t.Fatalf("handoff read (all) as ACME-601 = %d, stdout %q; want no handoff", code, out.String())
 	}
 }
 
@@ -133,6 +156,7 @@ func TestHandoffReadReturnsAnUnstampedHandoffUnchanged(t *testing.T) {
 // legion tool sends every handoff_write payload that way.
 func TestHandoffWriteReadsAPayloadOverTheArgvCapFromStdin(t *testing.T) {
 	workspace := t.TempDir()
+	t.Setenv("LEGION_ISSUE", "THIS-1")
 	records := make([]string, 0, 2000)
 	for i := range 2000 {
 		records = append(records, fmt.Sprintf(`{"round":%d,"note":"%s"}`, i, strings.Repeat("r", 80)))
@@ -158,7 +182,7 @@ func TestHandoffWriteReadsAPayloadOverTheArgvCapFromStdin(t *testing.T) {
 	if code := run(context.Background(), []string{"legion", "handoff", "write", "--workspace", workspace, "--phase", "test"}, &out, &errb); code != 0 {
 		t.Fatalf("handoff write from stdin = %d: %s", code, errb.String())
 	}
-	written, err := os.ReadFile(filepath.Join(workspace, ".legion", "test.json"))
+	written, err := os.ReadFile(filepath.Join(workspace, ".legion", "THIS-1", "test.json"))
 	if err != nil {
 		t.Fatalf("handoff file: %v", err)
 	}
@@ -292,6 +316,7 @@ func TestHandoffWriteRefusesWhatItsPhasesRulesRefuseNamingEachField(t *testing.T
 // and record a failed check as its error, and a rejection after the last round is recorded with
 // its issues.
 func TestHandoffWriteWritesWhatItsPhasesRulesAllow(t *testing.T) {
+	t.Setenv("LEGION_ISSUE", "THIS-1")
 	cases := map[string][2]string{}
 	for phase, data := range writableHandoffs {
 		cases[phase] = [2]string{phase, data}
@@ -313,7 +338,7 @@ func TestHandoffWriteWritesWhatItsPhasesRulesAllow(t *testing.T) {
 			if code := run(context.Background(), []string{"legion", "handoff", "write", "--workspace", workspace, "--phase", tc[0], "--data", tc[1]}, &out, &errb); code != 0 {
 				t.Fatalf("handoff write --phase %s %s = %d: %s", tc[0], tc[1], code, errb.String())
 			}
-			written, err := os.ReadFile(filepath.Join(workspace, ".legion", tc[0]+".json"))
+			written, err := os.ReadFile(filepath.Join(workspace, ".legion", "THIS-1", tc[0]+".json"))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -340,6 +365,7 @@ func TestHandoffWriteWritesWhatItsPhasesRulesAllow(t *testing.T) {
 // spec as JSON (internal/prompts/roles/planner.md, "Plan handoff"); a planner that records them as
 // shown is not refused.
 func TestHandoffWriteAcceptsEveryPlanHandoffShapeThePlannerPromptShows(t *testing.T) {
+	t.Setenv("LEGION_ISSUE", "THIS-1")
 	prompt, err := os.ReadFile(filepath.Join("..", "..", "internal", "prompts", "roles", "planner.md"))
 	if err != nil {
 		t.Fatal(err)
@@ -400,7 +426,7 @@ func TestHandoffWriteAcceptsEveryPlanHandoffShapeThePlannerPromptShows(t *testin
 }
 
 // A tester whose handoff is missing is refused before any request, and the refusal names the file
-// its phase ends with, .legion/test.json.
+// its phase ends with, .legion/<issue>/test.json.
 func TestHandoffCompleteRefusesAMissingPhaseFileBeforeTheRequest(t *testing.T) {
 	workspace, jj := handoffRepo(t)
 	t.Setenv("LEGION_ROLE", "tester")
@@ -408,8 +434,8 @@ func TestHandoffCompleteRefusesAMissingPhaseFileBeforeTheRequest(t *testing.T) {
 	bodies := handoffDaemon(t, phase.Testing)
 	var out, errb bytes.Buffer
 	code := run(context.Background(), []string{"legion", "handoff", "complete", "--workspace", workspace, "--summary", "tests passed", "--verdict", "pass"}, &out, &errb)
-	if code != 1 || len(*bodies) != 0 || !strings.Contains(errb.String(), filepath.Join(".legion", "test.json")) {
-		t.Fatalf("handoff complete = %d, daemon read %v, stderr %q; want a refusal naming the tester's handoff file, .legion/test.json, before any request", code, *bodies, errb.String())
+	if code != 1 || len(*bodies) != 0 || !strings.Contains(errb.String(), filepath.Join(".legion", "THIS-1", "test.json")) {
+		t.Fatalf("handoff complete = %d, daemon read %v, stderr %q; want a refusal naming the tester's handoff file, .legion/THIS-1/test.json, before any request", code, *bodies, errb.String())
 	}
 }
 
@@ -524,12 +550,7 @@ func readyGitHub(t *testing.T, checkRun, status, mergeableState string) {
 // (LEGION_JJ_PATH, set on every pane) and refuses without it: never a PATH lookup.
 func TestHandoffCompleteResolvesTheCommitWithTheJJBootResolved(t *testing.T) {
 	workspace := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(workspace, ".legion"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(workspace, ".legion", "test.json"), []byte("{}\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	writeHandoffFile(t, workspace, "THIS-1", "test.json", "{}\n")
 	t.Setenv("LEGION_ROLE", "tester")
 	jj := fakeHandoffJJ(t, "c0ffee")
 	bodies := handoffDaemon(t, phase.Testing)
@@ -618,7 +639,20 @@ func handoffJJ(t *testing.T, jj, dir string, args ...string) string {
 	return strings.TrimSpace(string(output))
 }
 
-func writeHandoffFile(t *testing.T, workspace, name, content string) {
+// writeHandoffFile writes name under issue's own handoff directory, .legion/<issue>/.
+func writeHandoffFile(t *testing.T, workspace, issue, name, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(workspace, ".legion", issue), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, ".legion", issue, name), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// writeLegacyHandoffFile writes name at the flat .legion/<name> every handoff used before
+// dispatch://LEGION-565 gave each tree its own directory.
+func writeLegacyHandoffFile(t *testing.T, workspace, name, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Join(workspace, ".legion"), 0o755); err != nil {
 		t.Fatal(err)
@@ -646,6 +680,7 @@ func TestHandoffCompleteAcceptsTheHandoffItsRolePromptWrites(t *testing.T) {
 		t.Run(tc.role, func(t *testing.T) {
 			workspace, jj := handoffRepo(t)
 			t.Chdir(workspace)
+			t.Setenv("LEGION_ISSUE", "THIS-1")
 			var out, errb bytes.Buffer
 			if code := run(context.Background(), []string{"legion", "handoff", "write", "--phase", tc.phase, "--data", writableHandoffs[tc.phase]}, &out, &errb); code != 0 {
 				t.Fatalf("handoff write --phase %s = %d: %s", tc.phase, code, errb.String())
@@ -661,26 +696,27 @@ func TestHandoffCompleteAcceptsTheHandoffItsRolePromptWrites(t *testing.T) {
 			}
 			errb.Reset()
 			if code := run(context.Background(), args, &out, &errb); code != 0 {
-				t.Fatalf("%s handoff complete after committing .legion/%s.json = %d, stderr %q", tc.role, tc.phase, code, errb.String())
+				t.Fatalf("%s handoff complete after committing .legion/THIS-1/%s.json = %d, stderr %q", tc.role, tc.phase, code, errb.String())
 			}
 			if len(*bodies) != 1 || (*bodies)[0]["commit"] != carrying {
-				t.Fatalf("daemon read %v, want one completion naming %s, the commit carrying .legion/%s.json", *bodies, carrying, tc.phase)
+				t.Fatalf("daemon read %v, want one completion naming %s, the commit carrying .legion/THIS-1/%s.json", *bodies, carrying, tc.phase)
 			}
 		})
 	}
 }
 
-// The Stage 3 proof's primary issue, reduced: the base branch already carries .legion handoffs from
-// an earlier merged pull request (sjawhar/legion-smoke main holds .legion/implementer.json from #89
-// and .legion/implement.json from a later merge), the implementer commits its product change, and
-// its fresh handoff is still uncommitted in @. Run from the workspace, as a pane runs it, the
-// completion must refuse: the commit it would report carries another issue's handoff, not this
-// phase's.
+// The Stage 3 proof's primary issue, reduced: the base branch already carries flat .legion handoffs
+// from an earlier merged pull request (sjawhar/legion-smoke main holds .legion/implementer.json from
+// #89 and .legion/implement.json from a later merge), the implementer commits its product change,
+// and its fresh handoff, now under .legion/<issue>/, is still uncommitted in @. Run from the
+// workspace, as a pane runs it, the completion must refuse: no commit on this branch carries this
+// phase's handoff.
 func TestHandoffCompleteRefusesWhenOnlyAStaleBaseHandoffIsCommitted(t *testing.T) {
 	workspace, jj := handoffRepo(t)
 	t.Chdir(workspace)
-	writeHandoffFile(t, workspace, "implementer.json", `{"issue":"EARLIER-1"}`+"\n")
-	writeHandoffFile(t, workspace, "implement.json", `{"issue":"EARLIER-1"}`+"\n")
+	t.Setenv("LEGION_ISSUE", "THIS-1")
+	writeLegacyHandoffFile(t, workspace, "implementer.json", `{"issue":"EARLIER-1"}`+"\n")
+	writeLegacyHandoffFile(t, workspace, "implement.json", `{"issue":"EARLIER-1"}`+"\n")
 	handoffJJ(t, jj, workspace, "commit", "-m", "an earlier merged pull request")
 	if err := os.WriteFile(filepath.Join(workspace, "README.md"), []byte("smoke\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -705,7 +741,7 @@ func TestHandoffCompleteRefusesWhenOnlyAStaleBaseHandoffIsCommitted(t *testing.T
 // handoff path against the caller's directory.
 func TestHandoffCompleteWithWorkspaceFlagIgnoresTheCallersDirectory(t *testing.T) {
 	workspace, jj := handoffRepo(t)
-	writeHandoffFile(t, workspace, "implement.json", `{"issue":"THIS-1"}`+"\n")
+	writeHandoffFile(t, workspace, "THIS-1", "implement.json", `{"issue":"THIS-1"}`+"\n")
 	handoffJJ(t, jj, workspace, "commit", "-m", "implement: record handoff")
 	carrying := handoffJJ(t, jj, workspace, "log", "-r", "@-", "--no-graph", "-T", "commit_id")
 	t.Chdir(t.TempDir())
@@ -722,12 +758,13 @@ func TestHandoffCompleteWithWorkspaceFlagIgnoresTheCallersDirectory(t *testing.T
 }
 
 // A pane's workspace is cloned from the repository, so the base branch is its origin's main
-// (trunk()). A handoff that only the base carries — main already holds .legion/implement.json from
-// an earlier merged pull request, and this phase wrote none — is inherited, never this phase's: the
-// completion refuses before any request, even with nothing uncommitted in the workspace.
+// (trunk()). A handoff that only the base carries — main already holds .legion/THIS-1/implement.json
+// from an earlier merged pull request of this issue, and this phase wrote none — is inherited, never
+// this phase's: the completion refuses before any request, even with nothing uncommitted in the
+// workspace.
 func TestHandoffCompleteRefusesAHandoffOnlyTheOriginsMainCarries(t *testing.T) {
 	seed, jj := handoffRepo(t)
-	writeHandoffFile(t, seed, "implement.json", `{"issue":"EARLIER-1"}`+"\n")
+	writeHandoffFile(t, seed, "THIS-1", "implement.json", `{"issue":"THIS-1"}`+"\n")
 	handoffJJ(t, jj, seed, "commit", "-m", "an earlier merged pull request")
 	handoffJJ(t, jj, seed, "bookmark", "set", "main", "-r", "@-")
 	workspace := filepath.Join(t.TempDir(), "workspace")
@@ -747,7 +784,7 @@ func TestHandoffCompleteRefusesAHandoffOnlyTheOriginsMainCarries(t *testing.T) {
 	var out, errb bytes.Buffer
 	code := run(context.Background(), []string{"legion", "handoff", "complete", "--summary", "implemented"}, &out, &errb)
 	if code != 1 || len(*bodies) != 0 || !strings.Contains(errb.String(), "only the base branch carries it") {
-		t.Fatalf("handoff complete with only origin's main carrying .legion/implement.json = %d, daemon read %v, stderr %q; want the inherited-handoff refusal before any request", code, *bodies, errb.String())
+		t.Fatalf("handoff complete with only origin's main carrying .legion/THIS-1/implement.json = %d, daemon read %v, stderr %q; want the inherited-handoff refusal before any request", code, *bodies, errb.String())
 	}
 }
 
@@ -763,7 +800,7 @@ func TestHandoffCompleteRefusesAHandoffOnlyTheOriginsMainCarries(t *testing.T) {
 // with `jj new <its old head>`.
 func TestHandoffCompleteReportsTheProductionCheckOnTheMergedMain(t *testing.T) {
 	seed, jj := handoffRepo(t)
-	writeHandoffFile(t, seed, "implement.json", `{"issue":"THIS-1"}`+"\n")
+	writeHandoffFile(t, seed, "THIS-1", "implement.json", `{"issue":"THIS-1"}`+"\n")
 	if err := os.WriteFile(filepath.Join(seed, "README.md"), []byte("smoke\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -805,7 +842,7 @@ func TestHandoffCompleteReadsThePhaseBeforeTheHandoff(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			workspace, jj := handoffRepo(t)
 			t.Chdir(workspace)
-			writeHandoffFile(t, workspace, "implement.json", `{"issue":"THIS-1"}`+"\n")
+			writeHandoffFile(t, workspace, "THIS-1", "implement.json", `{"issue":"THIS-1"}`+"\n")
 			handoffJJ(t, jj, workspace, "commit", "-m", "implement: record handoff")
 			if err := os.WriteFile(filepath.Join(workspace, "docs.md"), []byte("learning\n"), 0o644); err != nil {
 				t.Fatal(err)
@@ -876,9 +913,9 @@ func TestHandoffCompleteAfterTheLegionDeletionRecreatesNothing(t *testing.T) {
 				t.Fatal(err)
 			}
 			handoffJJ(t, jj, workspace, "commit", "-m", "feat: the product change")
-			writeHandoffFile(t, workspace, "implement.json", `{"issue":"THIS-1"}`+"\n")
+			writeHandoffFile(t, workspace, "THIS-1", "implement.json", `{"issue":"THIS-1"}`+"\n")
 			handoffJJ(t, jj, workspace, "commit", "-m", "implement: record handoff")
-			writeHandoffFile(t, workspace, "test.json", `{"issue":"THIS-1"}`+"\n")
+			writeHandoffFile(t, workspace, "THIS-1", "test.json", `{"issue":"THIS-1"}`+"\n")
 			handoffJJ(t, jj, workspace, "commit", "-m", "test: record handoff")
 			if err := os.RemoveAll(filepath.Join(workspace, ".legion")); err != nil {
 				t.Fatal(err)
@@ -934,7 +971,7 @@ func TestHandoffCompleteRefusesAHandoffCommitAnotherAppAuthored(t *testing.T) {
 			// The commit the handoff lands in is authored by tc.author, as a role's own fresh
 			// working copy is.
 			as("new")
-			writeHandoffFile(t, workspace, "test.json", `{"issue":"THIS-1"}`+"\n")
+			writeHandoffFile(t, workspace, "THIS-1", "test.json", `{"issue":"THIS-1"}`+"\n")
 			as("commit", "-m", "test: record handoff")
 			t.Setenv("LEGION_ROLE", "tester")
 			t.Setenv("LEGION_JJ_PATH", jj)

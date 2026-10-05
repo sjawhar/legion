@@ -43,6 +43,29 @@ func resolveWorkspace(value string) (string, error) {
 	return os.Getwd()
 }
 
+// resolveIssue reads LEGION_ISSUE, which places a handoff under this tree's own directory,
+// .legion/<issue>/, so two trees running at once never touch the same path on their own branches
+// and so can never conflict merging onto main (dispatch://LEGION-565).
+func resolveIssue() (string, error) {
+	issue := os.Getenv("LEGION_ISSUE")
+	if issue == "" {
+		return "", errors.New("LEGION_ISSUE is not set")
+	}
+	return issue, nil
+}
+
+// handoffPath is phase's handoff file under issue's own directory, .legion/<issue>/<phase>.json.
+func handoffPath(workspace, issue, phaseWord string) string {
+	return filepath.Join(workspace, ".legion", issue, phaseWord+".json")
+}
+
+// legacyHandoffPath is the flat path every handoff used before dispatch://LEGION-565 gave each
+// tree its own directory, read only as a fallback for a tree whose workspace still holds a
+// predecessor's handoff from an older binary.
+func legacyHandoffPath(workspace, phaseWord string) string {
+	return filepath.Join(workspace, ".legion", phaseWord+".json")
+}
+
 func validHandoffPhase(value string) bool {
 	_, ok := handoffPhases[value]
 	return ok
@@ -90,13 +113,18 @@ func runHandoffWrite(_ context.Context, args []string, stdout, stderr io.Writer)
 		fmt.Fprintf(stderr, "legion handoff write: Invalid %s handoff: %s\n", *phase, strings.Join(problems, "; "))
 		return 1
 	}
+	issue, err := resolveIssue()
+	if err != nil {
+		fmt.Fprintf(stderr, "legion handoff write: %v\n", err)
+		return 1
+	}
 	workspace, err := resolveWorkspace(*workspaceFlag)
 	if err != nil {
 		fmt.Fprintf(stderr, "legion handoff write: %v\n", err)
 		return 1
 	}
-	payload["schemaVersion"], payload["phase"], payload["completed"], payload["issue"] = 1, *phase, time.Now().UTC().Format(time.RFC3339Nano), os.Getenv("LEGION_ISSUE")
-	path := filepath.Join(workspace, ".legion", *phase+".json")
+	payload["schemaVersion"], payload["phase"], payload["completed"], payload["issue"] = 1, *phase, time.Now().UTC().Format(time.RFC3339Nano), issue
+	path := handoffPath(workspace, issue, *phase)
 	if err := atomicJSON(path, payload); err != nil {
 		fmt.Fprintf(stderr, "legion handoff write: %v\n", err)
 		return 1
@@ -120,57 +148,49 @@ func runHandoffRead(_ context.Context, args []string, stdout, stderr io.Writer) 
 		fmt.Fprintf(stderr, "legion handoff read: %v\n", err)
 		return 1
 	}
+	issue, err := resolveIssue()
+	if err != nil {
+		fmt.Fprintf(stderr, "legion handoff read: %v\n", err)
+		return 1
+	}
 	if *phase != "" {
-		path := filepath.Join(workspace, ".legion", *phase+".json")
-		value, err := readHandoff(path)
+		value, err := readOwnHandoff(workspace, issue, *phase)
 		if err != nil {
 			fmt.Fprintf(stderr, "legion handoff read: %v\n", err)
-			return 1
-		}
-		if foreign, owner := foreignHandoff(value); foreign {
-			fmt.Fprintf(stderr, "legion handoff read: %s was written by %s, not this tree (%s); treating it as absent\n", path, owner, os.Getenv("LEGION_ISSUE"))
 			return 1
 		}
 		writeIndentedJSON(stdout, value)
 		return 0
 	}
 	all := map[string]any{}
-	for phase := range handoffPhases {
-		path := filepath.Join(workspace, ".legion", phase+".json")
-		value, err := readHandoff(path)
-		if err != nil {
-			continue
+	for word := range handoffPhases {
+		if value, err := readOwnHandoff(workspace, issue, word); err == nil {
+			all[word] = value
 		}
-		if foreign, owner := foreignHandoff(value); foreign {
-			fmt.Fprintf(stderr, "legion handoff read: %s was written by %s, not this tree (%s); skipped\n", path, owner, os.Getenv("LEGION_ISSUE"))
-			continue
-		}
-		all[phase] = value
 	}
 	writeIndentedJSON(stdout, all)
 	return 0
 }
 
-// foreignHandoff is whether value's stamped "issue" field (legion handoff write's own, never a
-// caller's: runHandoffWrite refuses one supplied in --data) differs from this pane's own
-// (LEGION_ISSUE), with the stamped issue for the message. Only a handoff legion handoff write
-// wrote after it started stamping "issue" can be foreign: a handoff from before this change, or any
-// read with LEGION_ISSUE unset (a scratch run outside a pane), is never foreign — dispatch://LEGION-565
-// 's branch-creation fix is what keeps those out of a fresh tree's workspace in the first place.
-func foreignHandoff(value any) (bool, string) {
-	current := os.Getenv("LEGION_ISSUE")
-	if current == "" {
-		return false, ""
+// readOwnHandoff reads issue's handoff of phaseWord from .legion/<issue>/<phaseWord>.json, the path
+// every write now uses. Only when that read fails does it fall back to the flat
+// .legion/<phaseWord>.json every write used before dispatch://LEGION-565 gave each tree its own
+// directory, and only when that file's stamped "issue" (legion handoff write's own, never a
+// caller's: runHandoffWrite refuses one supplied in --data) is issue: an unstamped file, from
+// before handoffs carried their issue, or one stamped for another tree, whose merged handoff sits at
+// the flat path, is never read as this tree's. The fallback exists for a tree still mid-flight when
+// this change's binary replaced an older one. Without either, the per-issue read's error is
+// returned, naming the path the handoff belongs at.
+func readOwnHandoff(workspace, issue, phaseWord string) (any, error) {
+	value, err := readHandoff(handoffPath(workspace, issue, phaseWord))
+	if err == nil {
+		return value, nil
 	}
-	fields, ok := value.(map[string]any)
-	if !ok {
-		return false, ""
+	legacy, legacyErr := readHandoff(legacyHandoffPath(workspace, phaseWord))
+	if fields, ok := legacy.(map[string]any); legacyErr == nil && ok && fields["issue"] == issue {
+		return legacy, nil
 	}
-	owner, _ := fields["issue"].(string)
-	if owner == "" || owner == current {
-		return false, ""
-	}
-	return true, owner
+	return nil, err
 }
 
 func runHandoffComplete(ctx context.Context, args []string, stdout, stderr io.Writer) int {
@@ -260,7 +280,11 @@ func handoffCommit(workspace string, role legionclaim.Role, current phase.Phase)
 	if !fileBacked || workflow.RoleFor(current) != role {
 		return standingCommit(jj, workspace)
 	}
-	file := filepath.Join(".legion", word+".json")
+	issue, err := resolveIssue()
+	if err != nil {
+		return "", err
+	}
+	file := filepath.Join(".legion", issue, word+".json")
 	fileset := fmt.Sprintf("root:%q", filepath.ToSlash(file))
 	uncommitted, err := jjOutput(jj, workspace, file, "diff", "-r", "@", "--name-only", fileset)
 	if err != nil {

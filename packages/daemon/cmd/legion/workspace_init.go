@@ -199,7 +199,7 @@ func workspaceInit(ctx context.Context, issue, repo, root, credentialHelper, fee
 	}
 	fmt.Fprintf(stdout, "workspace-init: %s on %s\n", provisioned.Dir, provisioned.Bookmark)
 	if fromRef, set := os.LookupEnv("LEGION_WORKSPACE_RECOVERED_FROM"); set {
-		return writeRecoveryMarker(ctx, run, provisioned.Dir, fromRef)
+		return writeRecoveryMarker(ctx, run, provisioned.Dir, issue, fromRef)
 	}
 	return nil
 }
@@ -295,10 +295,12 @@ func flock(fd, how int) error {
 
 // writeRecoveryMarker is the command side of workspace recovery: a relaunch after a lost volume
 // names the ref it recovers from, and the recreated workspace records it with the commit it was
-// recreated at in .legion/workspace-recovered.json (cmdWorkspaceInit's
-// LEGION_WORKSPACE_RECOVERED_FROM branch, workspace-init.ts). recoveredAt is an ISO instant in
-// milliseconds, UTC, as JavaScript's toISOString writes it.
-func writeRecoveryMarker(ctx context.Context, run workspace.Runner, dir, fromRef string) error {
+// recreated at in .legion/<issue>/workspace-recovered.json (cmdWorkspaceInit's
+// LEGION_WORKSPACE_RECOVERED_FROM branch, workspace-init.ts), under issue's own directory like
+// every other handoff (dispatch://LEGION-565), so two trees recovering at once never touch the
+// same path either. recoveredAt is an ISO instant in milliseconds, UTC, as JavaScript's
+// toISOString writes it.
+func writeRecoveryMarker(ctx context.Context, run workspace.Runner, dir, issue, fromRef string) error {
 	result, err := workspace.RunChecked(ctx, run, []string{"jj", "log", "-r", "@", "--no-graph", "-T", "commit_id", "--color=never"}, nil, dir)
 	if err != nil {
 		return err
@@ -312,7 +314,7 @@ func writeRecoveryMarker(ctx context.Context, run workspace.Runner, dir, fromRef
 	if err != nil {
 		return err
 	}
-	markerDir := filepath.Join(dir, ".legion")
+	markerDir := filepath.Join(dir, ".legion", issue)
 	if err := os.MkdirAll(markerDir, 0o755); err != nil {
 		return fmt.Errorf("create %s: %w", markerDir, err)
 	}
