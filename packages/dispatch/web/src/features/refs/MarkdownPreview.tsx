@@ -199,7 +199,8 @@ function inertLinks(root: HTMLElement): Map<HTMLElement, HTMLElement> {
  * `MarkdownBody`'s `inline` variant does. The clamp is CSS on the rendered element, after the
  * parse, so a cut never leaves half a mark: the reader sees `**held**` as bold "held" cut by
  * an ellipsis where it overflows, never a stray `**`. The source itself is never truncated
- * before the parse, which would do exactly that.
+ * before the parse, which would do exactly that. A Dispatch picture shows as its thumbnail beside
+ * its caption (`DispatchPicture`'s `inline`), as `MarkdownBody`'s `inline` variant shows it.
  *
  * Every surface a preview sits in is one control already, so its links and references read as
  * links but are not ones (`inertLinks`): the host is what a click follows. A host whose own
@@ -275,13 +276,10 @@ export function MarkdownPreview({
     },
     [highlightClassName, highlightKey, lead, links]
   );
-  const { isFallback, portals } = useRenderedMarkdown(
-    root,
-    markdown,
-    paintOneLine,
+  const { isFallback, portals } = useRenderedMarkdown(root, markdown, paintOneLine, {
+    pictures: "inline",
     decorate,
-    undefined
-  );
+  });
   const title = useMarkdownHeadline(fullTitle ? markdown : undefined, Number.POSITIVE_INFINITY);
 
   return (

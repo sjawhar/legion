@@ -44,12 +44,18 @@ func (s *server) putUploadedFile(w http.ResponseWriter, r *http.Request, kind, s
 // The headers wait for the object to open, so a store that fails answers 502 and never a 200 cut
 // short; a body that fails after that, or does not hash to the row's hash, aborts the response
 // mid-stream rather than ending it as if whole.
+//
+// A version's bytes never change, so a browser keeps them for a year without asking again: the
+// pictures a conversation shows inline are fetched once. `private`, since the route is
+// authenticated and no shared cache may hold them. A document version is not served here and
+// keeps its headers.
 func (s *server) serveFileVersion(w http.ResponseWriter, r *http.Request, artifactID string, number int, content []byte, contentType, sha *string, size *int64) {
 	headers := func(length int64) {
 		w.Header().Set("Content-Type", cmp.Or(deref(contentType), "application/octet-stream"))
 		if sha != nil {
 			w.Header().Set("ETag", *sha)
 		}
+		w.Header().Set("Cache-Control", "private, max-age=31536000, immutable")
 		w.Header().Set("Content-Disposition", "attachment")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Content-Length", strconv.FormatInt(length, 10))

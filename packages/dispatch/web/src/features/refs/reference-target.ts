@@ -1,6 +1,6 @@
 import { type QueryClient, queryOptions, useQuery } from "@tanstack/react-query";
 
-import { api } from "../../api/client";
+import { api, artifactVersionPath } from "../../api/client";
 import { primarySpec } from "../../api/issue-cache";
 import type {
   Artifact,
@@ -12,7 +12,12 @@ import type {
   MessageRead,
 } from "../../api/types";
 import { useMarkdownHeadline } from "./markdown-engine";
-import { type DispatchReferenceRoute, isProjectRoute, referenceTargetKind } from "./routes";
+import {
+  type DispatchReferenceRoute,
+  isProjectRoute,
+  referencedArtifact,
+  referenceTargetKind,
+} from "./routes";
 
 /**
  * The queries behind a `dispatch://` reference's target, shared by every surface that resolves
@@ -26,6 +31,9 @@ export interface ReferenceTarget {
   /** What the target says, as its author wrote it (Markdown): a message's body, a document's
    *  text. `undefined` while loading or for a target with nothing to say. */
   readonly description: string | undefined;
+  /** The bytes route of the picture a reference to an image artifact names - the version it pins,
+   *  else the latest - for a thumbnail beside the title; undefined for anything else. */
+  readonly picture: string | undefined;
 }
 
 /** How much of a target's own text becomes a reference link's title: an ask's question, a
@@ -49,6 +57,13 @@ const projectArtifactQuery = (project: string | undefined, slug: string | undefi
   queryOptions({
     queryKey: ["project", project, "artifacts", slug],
     queryFn: () => api.getProjectArtifact(project ?? "", slug ?? ""),
+  });
+
+/** An artifact of an agent's conversation, by its session and slug. */
+export const agentArtifactQuery = (session: string | undefined, slug: string | undefined) =>
+  queryOptions({
+    queryKey: ["agent-artifacts", session, slug],
+    queryFn: () => api.getAgentArtifact(session ?? "", slug ?? ""),
   });
 
 /** A document's live text, or one immutable version of it when the reference pins a version. */
@@ -93,6 +108,10 @@ export interface ReferenceData {
  * for an issue reference — the issue's primary spec text, which only the card's issue view reads
  * (`useReferenceTarget` never fetches it). Every key comes from the query builders above. */
 export function prefetchReference(queryClient: QueryClient, route: DispatchReferenceRoute): void {
+  if (route.kind === "agent-artifact") {
+    void queryClient.prefetchQuery(agentArtifactQuery(route.session, route.slug));
+    return;
+  }
   if (route.kind === "message") {
     void queryClient.prefetchQuery(messageQuery(route.key, route.id));
     return;
@@ -133,11 +152,17 @@ export function prefetchReference(queryClient: QueryClient, route: DispatchRefer
 }
 
 export function useReferenceData(route: DispatchReferenceRoute | undefined): ReferenceData {
-  const issueKey = route === undefined || isProjectRoute(route) ? undefined : route.key;
+  const issueKey =
+    route === undefined || route.kind === "agent-artifact" || isProjectRoute(route)
+      ? undefined
+      : route.key;
   const document = route?.kind === "document" ? route : undefined;
+  const agentArtifact = route?.kind === "agent-artifact" ? route : undefined;
   const message = route?.kind === "message" ? route : undefined;
   const version =
-    route?.kind === "artifact" || route?.kind === "document" ? route.version : undefined;
+    route?.kind === "artifact" || route?.kind === "document" || route?.kind === "agent-artifact"
+      ? route.version
+      : undefined;
   const askId =
     route?.kind === "ask"
       ? route.id
@@ -162,12 +187,18 @@ export function useReferenceData(route: DispatchReferenceRoute | undefined): Ref
     ...projectArtifactQuery(document?.project, document?.slug),
     enabled: document !== undefined,
   });
+  const sessionArtifact = useQuery({
+    ...agentArtifactQuery(agentArtifact?.session, agentArtifact?.slug),
+    enabled: agentArtifact !== undefined,
+  });
   const artifact =
-    document === undefined
-      ? issue.data?.artifacts.find(
-          (candidate) => route?.kind === "artifact" && candidate.slug === route.slug
-        )
-      : projectArtifact.data;
+    document !== undefined
+      ? projectArtifact.data
+      : agentArtifact !== undefined
+        ? sessionArtifact.data
+        : issue.data?.artifacts.find(
+            (candidate) => route?.kind === "artifact" && candidate.slug === route.slug
+          );
   const text = useQuery({
     ...artifactTextQuery(artifact?.id, version),
     enabled: artifact?.kind === "doc",
@@ -196,7 +227,9 @@ export function useReferenceData(route: DispatchReferenceRoute | undefined): Ref
  * Markdown, for the caller to render formatted: a message's body, a document's text, and an
  * ask's or comment's text where the title had to cut it (a title that holds the whole text
  * needs no second copy under it); an issue with no document falls back to its status. An ask or
- * comment never borrows its issue's status or its document's text, while it loads or after.
+ * comment never borrows its issue's status or its document's text, while it loads or after. A
+ * reference to an image artifact, of an issue, a project or an agent's conversation, also
+ * answers its picture: the bytes route of the version it pins, else of the latest.
  */
 export function useReferenceTarget(route: DispatchReferenceRoute | undefined): ReferenceTarget {
   const { artifact, ask, comment, issue, markdown, message } = useReferenceData(route);
@@ -212,14 +245,26 @@ export function useReferenceTarget(route: DispatchReferenceRoute | undefined): R
           ? undefined
           : `${message.message.author.kind} ${message.message.author.id}`,
       description: message?.message.body,
+      picture: undefined,
     };
   }
   if (kind === "ask" || kind === "comment") {
-    return { title: headline?.text, description: headline?.cut === true ? authored : undefined };
+    return {
+      title: headline?.text,
+      description: headline?.cut === true ? authored : undefined,
+      picture: undefined,
+    };
   }
   const text = markdown !== undefined && markdown.trim() !== "" ? markdown : undefined;
+  const named = route === undefined ? undefined : referencedArtifact(route);
+  const pictureVersion =
+    named?.version ?? artifact?.versions.reduce((latest, item) => Math.max(latest, item.number), 0);
   return {
     title: artifact?.name ?? issue?.title,
     description: text ?? (artifact === undefined ? issue?.status : undefined),
+    picture:
+      named === undefined || artifact?.kind !== "image" || !pictureVersion
+        ? undefined
+        : artifactVersionPath(named.owner, named.slug, pictureVersion),
   };
 }

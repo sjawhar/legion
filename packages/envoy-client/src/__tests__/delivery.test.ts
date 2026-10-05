@@ -1564,3 +1564,130 @@ describe("renderInbound non-dispatch envelopes", () => {
     );
   });
 });
+
+describe("renderInbound pictures", () => {
+  const shot = "dispatch://DSP-1/artifact/shot-png@v1";
+  const chart = "dispatch://DSP-1/artifact/chart-png@v2";
+  const asked = "dispatch://DSP-1/artifact/asked-png@v1";
+  const shown = (...addresses: string[]) =>
+    addresses.map((address, index) => `![picture ${index + 1}](${address})`).join("\n");
+
+  // An answer or a resolution delivers what moved, so the question's own picture, delivered when
+  // the ask opened, does not come again with it.
+  test.each([
+    ["comment.created", { ...comment, body: `Before and after:\n\n${shown(shot, chart)}` }],
+    ["comment.answered", { ...comment, body: `In reply:\n\n${shown(shot, chart)}` }],
+    ["ask.opened", { ...openAsk, question: `${apiQuestion}\n\n${shown(shot, chart)}` }],
+    [
+      "ask.edited",
+      {
+        ...openAsk,
+        question: `${transportQuestion}\n\n${shown(shot, chart)}`,
+        multiple: false,
+        urgency: "med",
+        edited_at: "2026-09-11T03:26:00Z",
+        previous: {
+          question: apiQuestion,
+          options: openAsk.options,
+          multiple: false,
+          urgency: "med",
+        },
+        edited_by: actor,
+      },
+    ],
+    [
+      "ask.answered",
+      {
+        ...answeredAsk,
+        question: `${apiQuestion}\n\n${shown(asked)}`,
+        answer: { ...answeredAsk.answer, text: `Like this:\n\n${shown(shot, chart)}` },
+      },
+    ],
+    [
+      "ask.resolved",
+      {
+        ...openAsk,
+        question: `${apiQuestion}\n\n${shown(asked)}`,
+        state: "resolved",
+        resolution: {
+          actor,
+          at: "2026-09-10T00:01:00Z",
+          kind: "resolved",
+          reason: shown(shot, chart),
+        },
+      },
+    ],
+  ] as const)("%s carries the pictures its new text embeds, in writing order", (type, payload) => {
+    expect(renderInbound(dispatchEvent(type, payload), reader).pictures).toEqual([shot, chart]);
+  });
+
+  // A broadcast's frame carries its message with the recipient's pending attempt already listed,
+  // where a direct message's lists none yet; both are the same message to the agent.
+  test("a targeted message carries its pictures whether or not its attempt is listed", () => {
+    const messageID = "44444444-4444-4444-8444-444444444444";
+    const attempt = {
+      message_id: messageID,
+      attempt: 1,
+      delivery: "btw",
+      session_id: reader,
+      envelope_id: null,
+      duplicate: false,
+      state: "pending",
+      error: null,
+      reply_id: null,
+      created_at: "2026-10-04T10:00:00Z",
+      requested_by: { kind: "user", id: "alice" },
+      accepted_at: null,
+      accepted_as: null,
+    };
+    for (const deliveries of [[], [attempt]]) {
+      const rendered = renderInbound(
+        JSON.stringify(
+          envelope({
+            source: "dispatch",
+            topic: `notifications.agent.${reader}`,
+            payload: JSON.stringify({
+              event: {
+                id: 9,
+                issue_key: null,
+                seq: 9,
+                type: "message.created",
+                actor: { kind: "user", id: "alice" },
+                notify: false,
+                created_at: "2026-10-04T10:00:00Z",
+                payload: {
+                  id: messageID,
+                  issue_key: null,
+                  author: { kind: "user", id: "alice" },
+                  body: `Look:\n\n${shown(shot)}`,
+                  target: `session:${reader}`,
+                  in_reply_to: null,
+                  broadcast_id:
+                    deliveries.length === 0 ? null : "55555555-5555-4555-8555-555555555555",
+                  created_at: "2026-10-04T10:00:00Z",
+                  deliveries,
+                },
+              },
+              delivery: { attempt: 1, mode: "btw" },
+            }),
+          })
+        ),
+        reader,
+        `notifications.agent.${reader}`
+      );
+      expect(rendered.delivery?.resource).toBe("message");
+      expect(rendered.pictures).toEqual([shot]);
+    }
+  });
+
+  test("a text that only names a picture, or shows one from another website, carries none", () => {
+    const rendered = renderInbound(
+      dispatchEvent("comment.created", {
+        ...comment,
+        body: `See ${shot} and ![logo](https://example.com/logo.png).`,
+      }),
+      reader
+    );
+    expect(rendered.pictures).toBeUndefined();
+  });
+});
