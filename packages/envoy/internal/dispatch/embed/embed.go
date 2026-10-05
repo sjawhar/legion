@@ -178,13 +178,33 @@ func (c *Client) Embed(ctx context.Context, texts []string, inputType InputType)
 	return decoded.Embeddings.Float, nil
 }
 
-// IsThrottled reports whether err is Bedrock signaling "too many requests, back off" (or a
-// closely related infrastructure condition - "ServiceUnavailableException", "SlowDown" and
-// similar codes all end up here too), rather than something wrong with the specific text that was
-// being embedded. It uses the AWS SDK's own classification (retry.DefaultThrottles, the exact
-// codes the SDK's own internal retries already judged this error against, 3 attempts deep, before
-// giving up and returning it here) instead of matching one named exception type, so a related
-// condition this package has not written a case for is still recognized correctly.
+// bedrockThrottleErrorCodes extends the AWS SDK's own retry.DefaultThrottleErrorCodes with two
+// Bedrock-specific codes the SDK's generic set does not classify as throttles (confirmed against
+// the pinned aws-sdk-go-v2's retry/standard.go: neither is in DefaultThrottleErrorCodes), on
+// Main's decision (round 5 of LEGION-549's review): ServiceUnavailableException (Bedrock's own
+// capacity temporarily unavailable, nothing to do with the text being embedded) and
+// ModelNotReadyException (an on-demand model still scaling up - the AWS SDK's own retry-behavior
+// guide recommends backing off on it) are both transient conditions about Bedrock's capacity,
+// never evidence about a specific row's content, exactly like ThrottlingException already is.
+var bedrockThrottleErrorCodes = func() map[string]struct{} {
+	codes := make(map[string]struct{}, len(retry.DefaultThrottleErrorCodes)+2)
+	for code := range retry.DefaultThrottleErrorCodes {
+		codes[code] = struct{}{}
+	}
+	codes["ServiceUnavailableException"] = struct{}{}
+	codes["ModelNotReadyException"] = struct{}{}
+	return codes
+}()
+
+var bedrockThrottles = retry.IsErrorThrottles{retry.ThrottleErrorCode{Codes: bedrockThrottleErrorCodes}}
+
+// IsThrottled reports whether err is Bedrock signaling "too many requests, back off" or one of
+// the two closely related capacity conditions bedrockThrottleErrorCodes adds, rather than
+// something wrong with the specific text that was being embedded. It uses the AWS SDK's own
+// throttle-classification machinery (retry.IsErrorThrottles/ThrottleErrorCode - the same checker
+// retry.DefaultThrottles uses, over an extended code set) instead of matching one named exception
+// type by hand, so a related condition this package has not written a case for is still
+// recognized correctly.
 //
 // embedqueue relies on this to decide what a failure means: a throttled batch is retried
 // indefinitely (the provider will recover; the content was never the problem), while a non-
@@ -192,7 +212,7 @@ func (c *Client) Embed(ctx context.Context, texts []string, inputType InputType)
 // commitEmbedding's own failure (today, a non-finite vector) is specific enough to a row's
 // content to ever count toward embedqueue's dead-letter threshold.
 func IsThrottled(err error) bool {
-	return retry.IsErrorThrottles(retry.DefaultThrottles).IsErrorThrottle(err) == aws.TrueTernary
+	return bedrockThrottles.IsErrorThrottle(err) == aws.TrueTernary
 }
 
 // Literal renders a vector as pgvector's text input form ("[0.1,0.2,...]"), the form a query

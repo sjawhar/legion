@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/dispatch/agentstream"
@@ -315,10 +316,22 @@ func main() {
 			Docs:      documentService,
 		})
 	}
-	// embedqueue.Run no-ops when embedder is nil (its own Deps.Embedder), so this always starts:
-	// a later deploy that grants Bedrock credentials needs no other wiring change to pick up
-	// meaning search for existing content once a backfill (envoy-dispatch backfill-embeddings) runs.
-	go embedqueue.Run(ctx, embedqueue.Deps{Store: database, Embedder: embedder})
+	// embedqueue.Run no-ops when its own Deps.Embedder is nil, so this always starts: a later
+	// deploy that grants Bedrock credentials needs no other wiring change to pick up meaning
+	// search for existing content once a backfill (envoy-dispatch backfill-embeddings) runs.
+	// It gets a rate-limited wrapper around the same client api.Deps holds unwrapped above
+	// (embedder, line 296's Embedder field): the write-time queue's poller and a backfill run are
+	// the only two embedqueue callers, and pacing only their calls - never a live search
+	// request's own query embedding, which always goes straight through the unwrapped client -
+	// is what keeps a saturating backfill from taking live search down with it (LEGION-549 round
+	// 5; embed.RateLimitedEmbedder's own doc comment has the AIMD mechanism and the headroom
+	// this leaves). A nil embedder (meaning search off) stays nil rather than becoming a non-nil
+	// wrapper around nothing, which embedqueue.Run's own nil check depends on.
+	var backgroundEmbedder embed.Embedder
+	if embedder != nil {
+		backgroundEmbedder = embed.NewRateLimitedEmbedder(embedder)
+	}
+	go embedqueue.Run(ctx, embedqueue.Deps{Store: database, Embedder: backgroundEmbedder})
 	// A settlement a shutdown cut short, here or in the task this one replaces, runs without
 	// anyone opening its document.
 	go documentService.RunSettlementResumption(ctx)
@@ -668,12 +681,20 @@ func loopbackDatabase(databaseURL string) error {
 // (the cluster's master role, which this application's migration role is not) must create the
 // extension before this Dispatch ever boots against this database - a one-time ops dependency,
 // not a bug in the migration retried. Every other migration failure passes through unchanged.
+// Classified the same way the rest of this codebase classifies a specific Postgres failure
+// (api/issue_create.go's isUniqueViolation, internal/pgmigrate/lock.go and census.go's own
+// errors.As(..., &pgErr) checks): by the stable SQLSTATE code (42501, insufficient_privilege),
+// not by matching the fully wrapped error's text, which a locale or Postgres version could
+// change; pgErr.Message is Postgres's own unwrapped message, so the extension-name check still
+// narrows to this specific failure rather than every insufficient-privilege error any migration
+// could ever raise.
 func explainMigrateError(err error) error {
 	if err == nil {
 		return nil
 	}
-	message := err.Error()
-	if !strings.Contains(message, `extension "vector"`) || !strings.Contains(strings.ToLower(message), "permission denied") {
+	var pgErr *pgconn.PgError
+	const insufficientPrivilege = "42501"
+	if !errors.As(err, &pgErr) || pgErr.Code != insufficientPrivilege || !strings.Contains(pgErr.Message, `extension "vector"`) {
 		return err
 	}
 	return fmt.Errorf(

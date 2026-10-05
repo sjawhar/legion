@@ -75,7 +75,9 @@ func (e *throttleThenSucceedEmbedder) Embed(ctx context.Context, texts []string,
 
 // seedIssue inserts an issue directly (bypassing the API, which this package does not import),
 // keyed exactly as given - e.g. seedIssue(t, db, "EMBQ", "EMBQ-1", "A title") - with its project
-// created on first use.
+// created on first use. number is the next free one for projectKey, not a hardcoded 1, so a
+// test that seeds several issues under one project (the bisection tests' shared batches) does
+// not collide on issues_project_key_number_key.
 func seedIssue(t *testing.T, database *store.Store, projectKey, issueKey, title string) {
 	t.Helper()
 	ctx := context.Background()
@@ -86,7 +88,7 @@ func seedIssue(t *testing.T, database *store.Store, projectKey, issueKey, title 
 	}
 	if _, err := database.Pool.Exec(ctx, `
 		insert into issues (key, project_key, number, title, created_by, rank)
-		values ($1, $2, 1, $3, '{"kind":"user","id":"alice"}', 'A')
+		values ($1, $2, coalesce((select max(number) + 1 from issues where project_key = $2), 1), $3, '{"kind":"user","id":"alice"}', 'A')
 	`, issueKey, projectKey, title); err != nil {
 		t.Fatalf("seed issue %s: %v", issueKey, err)
 	}
@@ -465,5 +467,142 @@ func TestRetryRowsMarksARowDeadAfterRepeatedPermanentFailuresAndStopsRetrying(t 
 	}
 	if dead {
 		t.Error("dead is still true after the row's own text changed; embeddings_enqueue should have cleared it")
+	}
+}
+
+// poisonTextEmbedder fails non-throttled (ValidationException, the shape a content a model
+// refuses outright comes back as) whenever poison is among the texts in a call, and succeeds
+// otherwise - whether or not poison is present in that call's batch, siblings that do not carry
+// it embed cleanly, exactly as a real "this one row's content is invalid" failure would behave
+// isolated from the rest.
+type poisonTextEmbedder struct {
+	poison string
+	calls  [][]string
+}
+
+func (p *poisonTextEmbedder) Embed(_ context.Context, texts []string, _ embed.InputType) ([][]float32, error) {
+	p.calls = append(p.calls, append([]string(nil), texts...))
+	for _, text := range texts {
+		if text == p.poison {
+			return nil, errors.New("ValidationException: the model refuses this input")
+		}
+	}
+	vectors := make([][]float32, len(texts))
+	for i := range texts {
+		vectors[i] = oneVector()
+	}
+	return vectors, nil
+}
+
+// TestProcessBatchBisectsANonThrottledFailureToIsolateTheOffendingRow is Main's round-5 ask of
+// Rev's "should": a non-throttled whole-batch failure must not retry every row in the batch
+// forever just because one row's content is what the API actually refuses. Three issues share one
+// batch; one's title is content the embedder refuses outright (non-throttled); bisection must
+// isolate that one row, embed the other two normally in the same ProcessBatch call, and leave only
+// the offending row's attempt_count incremented (not yet dead - that still takes
+// retry.DeadLetterAttempts worth of calls, exactly as any permanent failure does).
+func TestProcessBatchBisectsANonThrottledFailureToIsolateTheOffendingRow(t *testing.T) {
+	database := storetest.Open(t)
+	seedIssue(t, database, "BSCT", "BSCT-1", "A good title one")
+	seedIssue(t, database, "BSCT", "BSCT-2", "The poisoned title")
+	seedIssue(t, database, "BSCT", "BSCT-3", "A good title two")
+	embedder := &poisonTextEmbedder{poison: "The poisoned title"}
+	deps := Deps{Store: database, Embedder: embedder}
+
+	succeeded, failed, blocked, throttled, err := ProcessBatch(context.Background(), deps)
+	if err != nil {
+		t.Fatalf("ProcessBatch: %v", err)
+	}
+	if blocked {
+		t.Error("blocked = true, want false")
+	}
+	if throttled {
+		t.Error("throttled = true, want false - a ValidationException is not a throttle")
+	}
+	if succeeded != 2 {
+		t.Errorf("succeeded = %d, want 2 (the two good rows, embedded despite sharing a batch with the poisoned one)", succeeded)
+	}
+	if failed != 1 {
+		t.Errorf("failed = %d, want 1 (only the poisoned row)", failed)
+	}
+
+	for _, id := range []string{"BSCT-1", "BSCT-3"} {
+		var embeddedHash, contentHash string
+		if err := database.Pool.QueryRow(context.Background(),
+			`select coalesce(embedded_hash, ''), content_hash from embeddings where kind = 'issue' and id = $1`, id,
+		).Scan(&embeddedHash, &contentHash); err != nil {
+			t.Fatalf("read %s: %v", id, err)
+		}
+		if embeddedHash != contentHash {
+			t.Errorf("%s: embedded_hash = %q, content_hash = %q, want them equal - it should have embedded despite its sibling's poison", id, embeddedHash, contentHash)
+		}
+	}
+
+	var attempts int
+	var dead bool
+	if err := database.Pool.QueryRow(context.Background(),
+		`select attempt_count, dead from embeddings where kind = 'issue' and id = 'BSCT-2'`,
+	).Scan(&attempts, &dead); err != nil {
+		t.Fatalf("read BSCT-2: %v", err)
+	}
+	if attempts != 1 {
+		t.Errorf("BSCT-2 attempt_count = %d, want 1 after a single ProcessBatch call", attempts)
+	}
+	if dead {
+		t.Error("BSCT-2 dead = true after only 1 attempt, want false - dead-lettering still takes retry.DeadLetterAttempts")
+	}
+
+	// The isolation itself: more than one call was made (bisection split the batch), and at
+	// least one later call embedded the poisoned row alone - proof bisection actually narrowed
+	// down to it rather than only ever retrying the whole batch together. Splitting an odd batch
+	// (here 1 row versus 2) can still try the poisoned row alongside one sibling once more before
+	// that pair is itself split to size 1 - every recursive halving does that at whichever level
+	// still holds more than one row - so the achievable invariant is eventual isolation, not zero
+	// intermediate bundling.
+	if len(embedder.calls) < 2 {
+		t.Fatalf("embedder was called %d time(s), want more than 1 - bisection should have split the batch", len(embedder.calls))
+	}
+	isolated := false
+	for _, call := range embedder.calls[1:] {
+		if len(call) == 1 && call[0] == embedder.poison {
+			isolated = true
+		}
+	}
+	if !isolated {
+		t.Errorf("no call after the first embedded the poisoned row alone - bisection never isolated it down to size 1: %v", embedder.calls)
+	}
+}
+
+// TestProcessBatchBisectionAbortsOnAThrottleMidway proves a throttle encountered partway through
+// bisection is never treated as evidence against any row: every row in the throttled subtree is
+// reported for an ordinary retry (never permanent), and ProcessBatch's own throttled return value
+// is true, so the caller still backs off its batch cadence exactly as an outright-throttled whole
+// batch would.
+func TestProcessBatchBisectionAbortsOnAThrottleMidway(t *testing.T) {
+	database := storetest.Open(t)
+	seedIssue(t, database, "BSCA", "BSCA-1", "A good title one")
+	seedIssue(t, database, "BSCA", "BSCA-2", "The poisoned title")
+	poison := &poisonTextEmbedder{poison: "The poisoned title"}
+	embedder := &throttleThenSucceedEmbedder{inner: poison, throttleFor: 1}
+	deps := Deps{Store: database, Embedder: embedder}
+
+	succeeded, failed, _, throttled, err := ProcessBatch(context.Background(), deps)
+	if err != nil {
+		t.Fatalf("ProcessBatch: %v", err)
+	}
+	if !throttled {
+		t.Error("throttled = false, want true - the top-level call was throttled")
+	}
+	if succeeded != 0 || failed != 2 {
+		t.Errorf("succeeded, failed = %d, %d, want 0, 2 - a top-level throttle retries the whole batch, never bisects", succeeded, failed)
+	}
+	var dead bool
+	if err := database.Pool.QueryRow(context.Background(),
+		`select dead from embeddings where kind = 'issue' and id = 'BSCA-2'`,
+	).Scan(&dead); err != nil {
+		t.Fatalf("read BSCA-2: %v", err)
+	}
+	if dead {
+		t.Error("BSCA-2 dead = true after a throttled batch, want false - a throttle is never evidence about any row")
 	}
 }

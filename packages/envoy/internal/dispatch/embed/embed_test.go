@@ -172,14 +172,10 @@ func (e throttleError) Error() string     { return "simulated: " + e.code }
 func (e throttleError) ErrorCode() string { return e.code }
 
 func TestIsThrottledRecognizesBedrockThrottleCodesThroughAWrappedError(t *testing.T) {
-	for _, code := range []string{"ThrottlingException", "ServiceUnavailableException", "SlowDown"} {
+	for _, code := range []string{
+		"ThrottlingException", "ServiceUnavailableException", "SlowDown", "ModelNotReadyException",
+	} {
 		wrapped := fmt.Errorf("embed: bedrock invoke model: %w", throttleError{code: code})
-		if code == "ServiceUnavailableException" {
-			// Not itself a default throttle code (it is a server error, not specifically a rate
-			// limit) - included here to document that IsThrottled does not claim it, not to
-			// assert it does.
-			continue
-		}
 		if !IsThrottled(wrapped) {
 			t.Errorf("IsThrottled(%q wrapped) = false, want true", code)
 		}

@@ -274,7 +274,11 @@ func backfillEmbeddings(ctx context.Context, databaseURL string, out io.Writer) 
 		fmt.Fprintf(out, "backfill-embeddings: %v\n", err)
 		return 1
 	}
-	report, err := embedqueue.Backfill(ctx, embedqueue.Deps{Store: database, Embedder: embedder}, out)
+	// Rate-limited exactly as the server's own embedqueue poller is (LEGION-549 round 5): this
+	// command is background catch-up work, and a standalone run of it must leave the account's
+	// Bedrock quota the same headroom for a concurrently running server's live search as the
+	// poller itself does, not saturate it as a raw, unpaced client would.
+	report, err := embedqueue.Backfill(ctx, embedqueue.Deps{Store: database, Embedder: embed.NewRateLimitedEmbedder(embedder)}, out)
 	if err != nil {
 		fmt.Fprintf(out, "backfill-embeddings: %v\n", err)
 		return 1

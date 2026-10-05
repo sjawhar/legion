@@ -143,11 +143,18 @@ type pendingRow struct {
 // poller and a concurrent `backfill-embeddings` run safely at once, each claiming a different set
 // of pending rows rather than racing to embed the same ones twice.
 //
-// A whole-batch embed failure never counts toward any row's dead-letter threshold, however many
-// times it recurs: it is infrastructure (the provider is down, overloaded, or rate-limiting this
-// account), never evidence about a specific row's content. Only commitEmbeddings' own per-row
-// failure (today, a non-finite vector - the one failure this package can attribute to the row
-// itself) ever dead-letters a row.
+// A throttled whole-batch failure never counts toward any row's dead-letter threshold, however
+// many times it recurs: it is infrastructure (the provider is rate-limiting this account), never
+// evidence about a specific row's content - every row in the batch is retried as a whole, not
+// dead-lettered. A non-throttled whole-batch failure of two or more rows is different: something
+// about this batch's own content broke the request (a text the API refuses outright, say), and
+// bisectBatch isolates which row(s) by splitting the batch and re-embedding each half,
+// recursively - a row isolated down to one that still fails, non-throttled, is specific enough
+// to dead-letter (exactly like commitEmbeddings' own non-finite-vector case), while every row
+// not yet proven guilty (still batched with others, or interrupted by a throttle partway through
+// bisection) is retried normally rather than dead-lettered on another row's account. A batch that
+// was already exactly one row has no sibling to compare against, so bisection has nothing to
+// isolate: it is retried like a throttled batch, never dead-lettered, exactly as before.
 func ProcessBatch(ctx context.Context, deps Deps) (succeeded, failed int, blocked, throttled bool, err error) {
 	rows, err := scanPending(ctx, deps)
 	if err != nil {
@@ -162,9 +169,34 @@ func ProcessBatch(ctx context.Context, deps Deps) (succeeded, failed int, blocke
 	}
 	vectors, embedErr := deps.Embedder.Embed(ctx, texts, embed.InputDocument)
 	if embedErr != nil {
-		slog.Error("dispatch embedqueue: embed batch", "rows", len(rows), "error", embedErr)
-		blocked = retryRows(ctx, deps, rows, false)
-		return 0, len(rows), blocked, embed.IsThrottled(embedErr), nil
+		// A single-row batch has no sibling to compare against, so a non-throttled failure here
+		// is exactly as ambiguous as it always was - bisection's isolation only has evidentiary
+		// value once there is more than one row to split and compare (see bisectBatch's own doc
+		// comment): a genuine transient infrastructure failure (not one of IsThrottled's codes,
+		// but not evidence about this one row's content either) must keep retrying indefinitely,
+		// exactly like a throttle, rather than being dead-lettered the moment attempts run out.
+		if embed.IsThrottled(embedErr) || len(rows) == 1 {
+			slog.Error("dispatch embedqueue: embed batch", "rows", len(rows), "error", embedErr)
+			blocked = retryRows(ctx, deps, rows, false)
+			return 0, len(rows), blocked, embed.IsThrottled(embedErr), nil
+		}
+		slog.Error("dispatch embedqueue: embed batch failed, not throttled - bisecting to isolate the offending row(s)",
+			"rows", len(rows), "error", embedErr)
+		// rows as a whole is already known to fail non-throttled (embedErr above), so splitting
+		// starts directly from its two halves (bisectSplit) rather than calling bisectBatch on
+		// the full, already-failed set again, which would re-embed every row at once a second
+		// time for no new information before ever splitting.
+		result := bisectSplit(ctx, deps, rows)
+		if result.err != nil {
+			return 0, 0, false, false, result.err
+		}
+		if len(result.permanent) > 0 {
+			blocked = retryRows(ctx, deps, result.permanent, true)
+		}
+		if len(result.retry) > 0 {
+			blocked = retryRows(ctx, deps, result.retry, false) || blocked
+		}
+		return result.succeeded, len(rows) - result.succeeded, blocked, result.throttled, nil
 	}
 	committed, permanent, err := commitEmbeddings(ctx, deps, rows, vectors)
 	if err != nil {
@@ -174,6 +206,86 @@ func ProcessBatch(ctx context.Context, deps Deps) (succeeded, failed int, blocke
 		blocked = retryRows(ctx, deps, permanent, true)
 	}
 	return committed, len(permanent), blocked, false, nil
+}
+
+// bisectResult is bisectBatch's own report: every row it was given ends up in exactly one of
+// succeeded (committed), permanent (isolated as the specific content a non-throttled failure
+// attributes to), or retry (not yet proven guilty - interrupted by a throttle, or still batched
+// with others pending further bisection that a database error cut short). err is a genuine
+// infrastructure failure (commitEmbeddings' own), never a reason to call any row permanent.
+type bisectResult struct {
+	succeeded int
+	permanent []pendingRow
+	retry     []pendingRow
+	throttled bool
+	err       error
+}
+
+// bisectBatch isolates which row(s) in rows actually broke a non-throttled whole-batch embed
+// failure, rather than retrying the entire batch - including rows that would embed fine on
+// their own - forever. It splits rows in half and re-embeds each half independently, recursively,
+// down to one row at a time: a half that embeds cleanly is committed; a half that still fails
+// non-throttled and holds more than one row is split again; a single row that still fails
+// non-throttled is the one bisection isolates as permanent. A throttled failure at any point
+// aborts bisection for that subtree immediately - throttling is a shared-capacity signal, never
+// evidence about specific content, and isolating "which row triggered it" would be meaningless
+// (and would cost far more calls against a provider that has already said to slow down) - so
+// every row in that subtree is reported for an ordinary retry instead, and throttled propagates
+// up so ProcessBatch's caller still backs off its own cadence exactly as an outright-throttled
+// whole batch would.
+func bisectBatch(ctx context.Context, deps Deps, rows []pendingRow) bisectResult {
+	if len(rows) == 0 {
+		return bisectResult{}
+	}
+	if ctx.Err() != nil {
+		return bisectResult{retry: rows}
+	}
+	texts := make([]string, len(rows))
+	for i, row := range rows {
+		texts[i] = row.text
+	}
+	vectors, embedErr := deps.Embedder.Embed(ctx, texts, embed.InputDocument)
+	if embedErr == nil {
+		committed, permanent, err := commitEmbeddings(ctx, deps, rows, vectors)
+		if err != nil {
+			return bisectResult{err: err}
+		}
+		return bisectResult{succeeded: committed, permanent: permanent}
+	}
+	if embed.IsThrottled(embedErr) {
+		return bisectResult{retry: rows, throttled: true}
+	}
+	if len(rows) == 1 {
+		slog.Error("dispatch embedqueue: bisection isolated the row a non-throttled batch failure attributes to",
+			"kind", rows[0].kind, "id", rows[0].id, "error", embedErr)
+		return bisectResult{permanent: rows}
+	}
+	return bisectSplit(ctx, deps, rows)
+}
+
+// bisectSplit is bisectBatch's own split-and-merge step: split rows (already known to need
+// isolating - every caller reaches it only after an embed of this exact set failed non-throttled)
+// into halves, bisect each independently, and merge their reports. ProcessBatch calls it directly
+// for the top-level batch rather than calling bisectBatch there, since bisectBatch would embed
+// the same unsplit rows a second time - which ProcessBatch has already done and already knows
+// fails - before ever splitting; bisectBatch's own recursion calls it once it has made that same
+// determination for a half it was actually given to embed.
+func bisectSplit(ctx context.Context, deps Deps, rows []pendingRow) bisectResult {
+	mid := len(rows) / 2
+	left := bisectBatch(ctx, deps, rows[:mid])
+	if left.err != nil {
+		return left
+	}
+	right := bisectBatch(ctx, deps, rows[mid:])
+	if right.err != nil {
+		return right
+	}
+	return bisectResult{
+		succeeded: left.succeeded + right.succeeded,
+		permanent: append(left.permanent, right.permanent...),
+		retry:     append(left.retry, right.retry...),
+		throttled: left.throttled || right.throttled,
+	}
 }
 
 // scanPending claims at most batchSize pending rows, oldest-eligible first, atomically advancing
@@ -480,19 +592,29 @@ func Backfill(ctx context.Context, deps Deps, out io.Writer) (BackfillReport, er
 // pendingStatus reports how many rows still need an embedding and are still eligible for
 // automatic retry (excludes dead), and the earliest of their next_attempt_at - what Backfill's
 // drain loop waits until before trying again, rather than treating "nothing eligible this
-// instant" as "nothing left to do."
+// instant" as "nothing left to do." Two queries, not one combined count(*)+min(...): Postgres's
+// own min/max-via-index-scan rewrite (preprocess_minmax_aggregates) only fires when every
+// aggregate in the target list is a bare MIN/MAX, so pairing it with count(*) - which the
+// embeddings_pending index (next_attempt_at, kind, id) cannot itself answer, its leading column
+// being next_attempt_at - forces the whole query back to scanning every matching row for both.
+// Run separately, min(next_attempt_at) alone gets the index-only rewrite's O(log n) lookup.
 func pendingStatus(ctx context.Context, deps Deps) (count int64, nextDue time.Time, hasPending bool, err error) {
-	var nextDuePtr *time.Time
 	if err := deps.Store.Pool.QueryRow(ctx, `
-		select count(*), min(next_attempt_at) from embeddings
+		select count(*) from embeddings
 		where embedded_hash is distinct from content_hash and not dead
-	`).Scan(&count, &nextDuePtr); err != nil {
+	`).Scan(&count); err != nil {
 		return 0, time.Time{}, false, err
 	}
 	if count == 0 {
 		return 0, time.Time{}, false, nil
 	}
-	return count, *nextDuePtr, true, nil
+	if err := deps.Store.Pool.QueryRow(ctx, `
+		select min(next_attempt_at) from embeddings
+		where embedded_hash is distinct from content_hash and not dead
+	`).Scan(&nextDue); err != nil {
+		return 0, time.Time{}, false, err
+	}
+	return count, nextDue, true, nil
 }
 
 // finalCounts is Backfill's own closing tally: pending (still retrying automatically, excludes
