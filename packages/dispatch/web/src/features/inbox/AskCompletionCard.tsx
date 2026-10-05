@@ -124,7 +124,7 @@ function AnsweredAsk({
       )}
       <p className={`mt-1 text-xs ${calloutSuccessTimestampText}`}>{actorLabel(ask.author)}</p>
       {ask.kind === "approval" && documentLink ? (
-        <p className={`mt-1 text-sm ${linkText} ${linkHoverText}`}>
+        <p className={`mt-1 text-sm font-medium ${textPrimaryOnSuccessCallout}`}>
           <AskApprovalLink ask={ask} />
         </p>
       ) : null}
