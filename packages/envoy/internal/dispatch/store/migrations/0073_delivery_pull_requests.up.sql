@@ -1,4 +1,4 @@
--- 0072_delivery_pull_requests.up.sql
+-- 0073_delivery_pull_requests.up.sql
 -- LEGION-567: one row per population pull request (LEGION-294's rule: authored by one of
 -- delivery_settings.population_authors, merged, not in an excluded repository, not a task PR).
 -- (repo, number) is the PR's identity, matching "owner/repo#N" everywhere else in Dispatch.

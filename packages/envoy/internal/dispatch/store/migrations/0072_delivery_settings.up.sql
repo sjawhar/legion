@@ -1,4 +1,4 @@
--- 0071_delivery_settings.up.sql
+-- 0072_delivery_settings.up.sql
 -- LEGION-567: the one configuration record the delivery timeline's intake, reconcile and API
 -- read: which repository deploys, its deploy and PR-checks workflow paths, the production job
 -- name, and the population rule's authors and excluded repositories (LEGION-294's rule, kept out
