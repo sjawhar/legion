@@ -253,7 +253,7 @@ The daemon keeps this order from its fixed table; you start none of its steps:
    `retro`. No role pushes a `.legion/` deletion: the approved head still carries `.legion/`. The
    daemon strips whatever `.legion/` main still carries from the next issue's branch before any of
    its roles start, so that tree's own merge carries the removal onto the default branch; no
-   operator follow-up pull request is needed;
+   operator sweep follows;
 3. retro commits its learnings under `docs/solutions/` on top of the approved head; that
    commit does not void the approval and never returns the tree to the tester or reviewer;
 4. the merger verifies the current head is the reviewer-approved head plus only commits that
