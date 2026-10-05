@@ -26,18 +26,51 @@ function pastePlainText(view: EditorView, text: string): void {
   );
 }
 
+/** `@milkdown/preset-gfm`'s `table_header_row.parseDOM` checks `dom instanceof HTMLElement` at
+ *  runtime (a plain paste's DOM round-trip parses a table's own serialized DOM back into a
+ *  slice), and `withDomWindow` exposes only `document` and `window` from happy-dom's window onto
+ *  `globalThis`, not its `HTMLElement` - so a table paste throws `HTMLElement is not defined`
+ *  without it. Scoped to the one call that needs it, restored after, the same save/restore shape
+ *  `withDomWindow` itself uses. */
+function withHTMLElementGlobal<T>(run: () => T): T {
+  const scope = globalThis as { HTMLElement?: unknown; window: { HTMLElement: unknown } };
+  const previous = scope.HTMLElement;
+  scope.HTMLElement = scope.window.HTMLElement;
+  try {
+    return run();
+  } finally {
+    if (previous === undefined) delete scope.HTMLElement;
+    else scope.HTMLElement = previous;
+  }
+}
+
 test("a refused paste leaves the next paste's text intact instead of poisoning every later one", async () => {
   await withMarksEditor("", async ({ view }) => {
     // A mark span of a kind this schema has no parser for (only `dispatch: "ask"` matches):
     // throws inside the clipboard plugin's own `parsePlainText`, uncaught.
     expect(() => pastePlainText(view, 'see <span data-dispatch="bogus">this</span> now')).toThrow();
 
-    // Before the fix: the single `parserCtx` ParserState stays corrupted, so perfectly ordinary
-    // text pasted next throws too (and never reaches the document) for the rest of the session.
-    expect(() => pastePlainText(view, "Fixed two bugs")).not.toThrow();
-    expect(view.state.doc.textContent).toContain("Fixed two bugs");
+    // The heal costs no editor feature: the fresh parser built after the throw still handles a
+    // GFM table, a bold span inside a cell, and this library's own `dispatchAsk` span (the only
+    // mark the schema has, needing no backend record to parse) exactly as the first, uncorrupted
+    // parser would have.
+    const table =
+      '| a | b |\n| --- | --- |\n| **bold** | <span data-dispatch="ask" data-id="a1" data-by="human:alice">q</span> |\n';
+    expect(() => withHTMLElementGlobal(() => pastePlainText(view, table))).not.toThrow();
+    expect(view.state.doc.textContent).toContain("q");
+    expect(view.state.doc.textContent).toContain("bold");
+    const types: string[] = [];
+    let sawTable = false;
+    view.state.doc.descendants((node) => {
+      if (node.type.name === "table") sawTable = true;
+      for (const mark of node.marks) types.push(mark.type.name);
+      return true;
+    });
+    expect(sawTable).toBe(true);
+    expect(types).toContain("strong");
+    expect(types).toContain("dispatchAsk");
 
-    // The engine recovers for good, not just once: a second ordinary paste still works.
+    // The recovery is permanent, not one-shot: a further ordinary paste still works.
     expect(() => pastePlainText(view, "and another")).not.toThrow();
     expect(view.state.doc.textContent).toContain("and another");
   });
