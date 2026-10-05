@@ -339,8 +339,8 @@ func TestBackfillResumesFromItsCheckpointRatherThanRescanning(t *testing.T) {
 	}
 }
 
-// TestBackfillDoesNotOverwriteAConcurrentWritesFresherEmbedding is the regression round 2's
-// review found: Backfill used to ON CONFLICT DO UPDATE with its own page's snapshot, which could
+// TestBackfillDoesNotOverwriteAConcurrentWritesFresherEmbedding proves
+// Backfill used to ON CONFLICT DO UPDATE with its own page's snapshot, which could
 // clobber a trigger's fresher enqueue of the same row with stale text. ON CONFLICT DO NOTHING
 // means an existing row - whichever wrote it, and whenever - is never touched by Backfill at all.
 func TestBackfillDoesNotOverwriteAConcurrentWritesFresherEmbedding(t *testing.T) {

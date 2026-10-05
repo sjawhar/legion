@@ -261,9 +261,7 @@ func TestSearchAnswersKeywordOnlyWithNoEmbedderConfigured(t *testing.T) {
 // TestSearchSkipsTheEmbedderForAStopWordOnlyQuery proves runSearch's numnode check runs before
 // the one Bedrock call it ever makes: a query whose websearch_to_tsquery is empty (pure
 // stopwords) answers with no results without ever paying for a query embedding, configured
-// embedder and all - the performance finding round 3's simplify pass raised against the
-// now-fixed ordering (runSearch used to call embedQuery unconditionally, discovering the empty
-// query only after a wasted Bedrock round trip).
+// embedder and all.
 func TestSearchSkipsTheEmbedderForAStopWordOnlyQuery(t *testing.T) {
 	embedder := &fakeEmbedder{}
 	handler, _, _ := newTestServer(t, testServerOptions{embedder: embedder})
