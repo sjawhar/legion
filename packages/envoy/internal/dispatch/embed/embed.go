@@ -17,6 +17,7 @@ import (
 	"github.com/aws/smithy-go/logging"
 
 	"github.com/sjawhar/envoy/internal/dispatch/files"
+	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
 const (
@@ -144,8 +145,8 @@ func (c *Client) Embed(ctx context.Context, texts []string, inputType InputType)
 		return nil, fmt.Errorf("embed: %d texts exceeds the %d-text batch limit", len(texts), MaxBatchTexts)
 	}
 	bounded := make([]string, len(texts))
-	for i, text := range texts {
-		bounded[i] = truncateRunes(text, maxInputChars)
+	for i, t := range texts {
+		bounded[i] = text.HeadRunes(t, maxInputChars)
 	}
 	body, err := json.Marshal(embedRequest{
 		InputType:       inputType,
@@ -174,17 +175,6 @@ func (c *Client) Embed(ctx context.Context, texts []string, inputType InputType)
 		return nil, fmt.Errorf("embed: bedrock returned %d embeddings for %d texts", len(decoded.Embeddings.Float), len(texts))
 	}
 	return decoded.Embeddings.Float, nil
-}
-
-func truncateRunes(text string, maxRunes int) string {
-	count := 0
-	for i := range text {
-		count++
-		if count > maxRunes {
-			return text[:i]
-		}
-	}
-	return text
 }
 
 // Literal renders a vector as pgvector's text input form ("[0.1,0.2,...]"), the form a query
