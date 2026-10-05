@@ -109,6 +109,9 @@ func (l Loader) Load(ctx context.Context) (*Set, error) {
 		}
 		entries = append(entries, page.SecretList...)
 	}
+	// Secrets Manager promises no listing order, and the RefusedMessage lines below are read in
+	// the order they are logged: this sort is theirs alone. NewSet sorts the served secrets by slug
+	// itself, so the Version's bytes do not rest on it.
 	slices.SortFunc(entries, func(a, b smtypes.SecretListEntry) int {
 		return strings.Compare(aws.ToString(a.Name), aws.ToString(b.Name))
 	})

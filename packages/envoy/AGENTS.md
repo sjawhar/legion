@@ -1883,15 +1883,27 @@ parse. `policy.NewSet` is the one place a `Version` is computed, ascending by sl
 name, which orders `A0` and `A_B` the other way), for a full load and a single-name merge alike, so
 an unchanged namespace keeps its version (`TestGoldenDigest` pins the bytes). `Loader.LoadOne`
 reads one name with `DescribeSecret` under the same rules and the same refusal line, and
-`Current.RefreshOne` merges it into the live set; `Refresh` and `RefreshOne` hold one lock from
-their read to their store, and each full reload that begins (its clock read before its listing is
-fetched) within five minutes of a name's reread (`listLag`, how far AWS documents `ListSecrets` may
-lag) reads that name again alone, so a lagging listing neither drops a secret the reread served nor
-brings back one it found gone. `RefreshOne` keeps no record of an absent answer for a name the live
-set did not serve: that changed nothing, and anyone can ask for a reread, so invented names would
-otherwise each cost every reload a `DescribeSecret` under the lock. The public
+`Current.RefreshOne` merges it into the live set; `Refresh` and `RefreshOne` hold one writer lock
+from their read to their store, a one-slot channel a waiter gives up on once its own context ends,
+so a reload stuck on a Secrets Manager that does not answer blocks no reread past its caller's
+deadline, and each ticker reload is given the refresh interval before it fails. Each full reload
+that begins (its clock read before its listing is fetched) within five minutes of an anchor
+(`listLag`, how far AWS documents `ListSecrets` may lag) reads that name again alone, so a lagging
+listing neither drops a secret the reread served nor brings back one it found gone; a name is
+anchored by a reread whose answer `RefreshOne` kept and by a reload's own re-describe that found
+the answer differed from what the live set held, so a change no reread caught (a console delete, a
+tag that now refuses the secret) is kept for `listLag` from the reload that caught it rather than
+flipping back when the first anchor runs out. `RefreshOne` keeps no record of an absent answer for
+a name the live set did not serve: that changed nothing, and anyone can ask for a reread, so
+invented names would otherwise each cost every reload a `DescribeSecret` under the lock. A name no
+secret under the prefix can carry - not `namePattern`'s form, or one whose name under the prefix
+would pass Secrets Manager's 512-character limit - is `policy.ErrNameInvalid` before any AWS call,
+before the writer lock and before a miss-path reread token (`Loader.secretName`, which
+`Current.CheckName` answers from and both `LoadOne` and its callers' pre-checks ask). The public
 `POST /v1/secrets/{name}/reread` (`rereadSecret`, which any caller may send right after a write) is
-`RefreshOne` over HTTP, answering `{name, served, reason}`, and the public `GET /v1/settings`
+`RefreshOne` over HTTP, answering `{name, served, reason}`, `400 SECRET_NAME_INVALID` for such a
+name and `503 REQUEST_ENDED`, with no `broker: reread secret failed` line, for a reread whose own
+request ended first; the public `GET /v1/settings`
 answers the prefix, the key ARN and its region and account (`policy.KeyARNParts`).
 
 The client finds its session in `AGENT_SECRETS_KEY_DIR` (a box's or pod's `key.pem` and

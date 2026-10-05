@@ -69,9 +69,13 @@ and also while a variable it no longer reads is still set.
 - The settings and reread routes take no credential. `GET /v1/settings` answers the namespace
   prefix, the agent-secrets key's ARN, and that key's AWS account and region.
   `POST /v1/secrets/{name}/reread` makes the broker read one secret from Secrets Manager at once,
-  and answers whether it now serves it and, if not, why. Neither releases a value: a reread tells
-  its caller what an enrolled session already learns from `UNKNOWN_SECRET`, and what anyone allowed
-  to list the namespace reads from its tags.
+  and answers whether it now serves it and, if not, why. Neither releases a value. What a reread
+  does tell any caller who can reach the broker is whether a name under the namespace exists and,
+  when the broker leaves it out, which of its reasons applies — `absent`, or a refusal such as
+  `owner-tag-missing` or `not-on-agent-secrets-key`. That is more than `UNKNOWN_SECRET`, which says
+  only that no agent secret has the name, says it only to an enrolled session, and never separates a
+  secret that does not exist from one the broker refuses; it is what anyone allowed to list the
+  namespace reads from the secrets' own names and tags.
   Rereads are limited twice, by fixed limits rather than settings (`DefaultRereadLimit` and
   `DefaultRereadOverallLimit` in `packages/envoy/internal/broker/api/limits.go`): each source
   address gets a burst of 30, refilled one every 2 seconds, and the broker as a whole takes 4 a
@@ -95,9 +99,9 @@ The broker logs text lines to stderr. The ones worth alerting or searching on:
 | --- | --- |
 | `broker listening addr=<host:port>` | Startup finished: configuration, migrations and the first read of the namespace all succeeded, and the address is bound. |
 | `broker: fatal error=…` | Startup refused; the error names the variable or dependency. The process exits 1. |
-| `agent secret policy refused name=<secret name> reason=<reason>` | At ERROR, on every read of the namespace, once for each secret the broker leaves out, and on a reread of one secret it leaves out: `owner-tag-missing`, `owner-tag-malformed`, `tier-tag-missing`, `tier-tag-malformed`, `name-malformed`, `service-owner-human-tier`, `not-on-agent-secrets-key` or `no-current-value` (no version carries `AWSCURRENT`: the secret was created without a value; once its value is put it is served at its next reread, or within about ten minutes, as the broker rereads the namespace every five and Secrets Manager's listing can lag a change by up to five more). A secret with no value and another fault is logged for the other fault. `name` is the secret's whole Secrets Manager name. Every other secret is still served. |
+| `agent secret policy refused name=<secret name> reason=<reason>` | At ERROR, on every read of the namespace, once for each secret the broker leaves out, and on every reread of one secret it leaves out: `owner-tag-missing`, `owner-tag-malformed`, `tier-tag-missing`, `tier-tag-malformed`, `name-malformed`, `service-owner-human-tier`, `not-on-agent-secrets-key` or `no-current-value` (no version carries `AWSCURRENT`: the secret was created without a value; once its value is put it is served at its next reread, or within about ten minutes, as the broker rereads the namespace every five and Secrets Manager's listing can lag a change by up to five more). A secret with no value and another fault is logged for the other fault. `name` is the secret's whole Secrets Manager name. Every other secret is still served. Two things make this line more frequent than one per refused secret per five minutes, and an alarm on it has to allow for both: a refused secret that was reread in the last five minutes is logged twice by each read of the namespace, once from the listing and once from the reread of that one name the read makes; and any caller who can reach the broker writes one by asking for a reread of a refused name, at up to the rate the reread route allows (above). |
 | `agent secret policy load failed; previous policy kept error=…` | At ERROR: a reread of the namespace failed (Secrets Manager or KMS out of reach, or refusing the broker), and the broker keeps serving the policy from its last good read; or, with `name=<NAME>` (the name a request asked for), the request named a secret the broker did not serve and the broker's reread of that one secret failed, so the request is refused `UNKNOWN_SECRET`. |
-| `broker: <operation> failed error=…` | A request failed with a 500 or 503; the line carries the cause the response does not. |
+| `broker: <operation> failed error=…` | A request failed with a 500 or 503; the line carries the cause the response does not. A reread whose own request ended before it finished - its caller went away, or it reached the 45-second bound - is not one of these: it answers `503 REQUEST_ENDED` and logs nothing, since anyone can end a request. |
 | `broker sweeper: ended an enrollment whose lease lapsed enrollment_id=… kind=… runtime_id=… slot=… lease_expired_at=… grants_revoked=… requests_cancelled=…` | A session stopped renewing (a pod that is gone, a box whose `agent-secrets renew` stopped); the sweep ended it, revoking its grants and cancelling its pending requests. |
 | `broker shutting down` | SIGTERM or SIGINT: in-flight requests get 10 seconds to finish. |
 

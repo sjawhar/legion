@@ -9,8 +9,9 @@ import (
 )
 
 // listLag is how stale ListSecrets may be: AWS documents "might not reflect changes from the last
-// five minutes" (ListSecrets API reference). Refresh re-describes every name RefreshOne touched
-// within it, so a lagging listing never overwrites what a single-name read settled.
+// five minutes" (ListSecrets API reference). Refresh re-describes each name it holds an anchor for
+// (recent), so a lagging listing neither undoes what a single-name read settled nor undoes a
+// change that reload's own re-describe caught.
 const listLag = 5 * time.Minute
 
 // Current is the live policy. The first load must succeed; a later load that fails logs
@@ -24,7 +25,11 @@ type Current struct {
 	// guards recent. It is a one-slot channel so a writer waiting for it gives up when its context
 	// ends (lock).
 	mu chan struct{}
-	// recent is when RefreshOne last reread each name, until listLag has passed.
+	// recent is, for each name a reread or a reload's own re-describe last settled something for,
+	// when it did: RefreshOne's reread of a name whose answer it kept (not an absent answer for a
+	// name the live set did not serve, which it records nothing for, so a repeated absent reread
+	// leaves the first such anchor in place), and Refresh's own re-describe of such a name when the
+	// answer differed from what the live set held. Each anchor lives until listLag has passed.
 	recent map[string]time.Time
 	now    func() time.Time
 }
@@ -117,12 +122,14 @@ func (c *Current) Refresh(ctx context.Context) error {
 
 // RefreshOne rereads name alone (Loader.LoadOne) and merges the answer into the live policy: a
 // served secret replaces or adds name, and a refused or absent one takes name out. Every other
-// name stays as the live policy had it. A failed read leaves the live policy as it was. Refresh
-// keeps the answer for listLag, except an absent answer for a name the live policy did not serve:
-// that changed nothing, and anyone may ask for a reread, so keeping it would let invented names
-// each cost every reload in the next listLag a DescribeSecret under mu. A served name found absent
-// is kept, so a lagging listing cannot bring back a deleted secret; a secret created and deleted
-// before any read served it can still show from a lagging listing until listLag has passed.
+// name stays as the live policy had it. A failed read leaves the live policy as it was, and a name
+// no secret can carry is ErrNameInvalid before the writer lock (CheckName). Every reread Refresh
+// keeps for listLag, except an absent answer for a name the live policy did not serve: that
+// changed nothing, and anyone may ask for a reread, so keeping it would let invented names each
+// cost every reload in the next listLag a DescribeSecret under the writer lock. A served name
+// found absent is kept, so a lagging listing cannot bring back a deleted secret; a secret created
+// and deleted before any read served it can still show from a lagging listing until listLag has
+// passed.
 func (c *Current) RefreshOne(ctx context.Context, name string) (Lookup, error) {
 	if err := c.CheckName(name); err != nil {
 		return Lookup{}, err
