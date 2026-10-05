@@ -5,13 +5,14 @@
 // license of every third-party package they inline. `--check` rebuilds into a
 // scratch directory and fails when the result differs from the committed
 // files; CI runs it on the Bun version pinned in the repo-root `.bun-version`,
-// because bundler output differs across Bun releases.
+// because bundler output depends on the exact Bun build (LEGION-568).
 import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { thirdPartyNotices } from "../../../scripts/third-party-notices"
 
 const packageRoot = resolve(import.meta.dir, "..")
+const repoRoot = resolve(packageRoot, "..", "..")
 
 /** Output name -> source entrypoint, relative to the package root. */
 export const BUNDLE_ENTRYPOINTS = {
@@ -19,7 +20,29 @@ export const BUNDLE_ENTRYPOINTS = {
   "session-hook": "hooks/session-hook.ts",
 } as const
 
+/**
+ * `bun run build` and `bun run check-dist` spawn a new "bun" process to run this file:
+ * package.json's script text is a shell command, and Bun's own `run` resolves the "bun" in it from
+ * PATH rather than reusing whichever binary the caller invoked `bun run` with. A devbox whose
+ * default Bun (a version manager's active version, distinct from the one the caller meant to
+ * invoke) differs from the repository's pin then silently bundles with that other build instead —
+ * and the bundler's literal output depends on the exact Bun build (LEGION-568): confirmed directly
+ * between a devbox and the CI runner, and between two Bun releases on one machine, same source,
+ * same lockfile. This refuses rather than commit whatever that other build produced. Exported so
+ * the test can check the message without installing a second real Bun.
+ */
+export function assertPinnedBun(running: string, pinned: string): void {
+  if (running === pinned) return
+  throw new Error(
+    `refusing to build under Bun ${running}: .bun-version pins ${pinned}, and the bundler's ` +
+      `output depends on the exact Bun build (LEGION-568). Invoke the pinned binary's own path ` +
+      `directly — not "bun run", which resolves "bun" from PATH — when a version manager's ` +
+      "default differs from the pin.",
+  )
+}
+
 export async function buildBundles(outdir: string): Promise<void> {
+  assertPinnedBun(Bun.version, (await readFile(join(repoRoot, ".bun-version"), "utf8")).trim())
   const result = await Bun.build({
     entrypoints: Object.values(BUNDLE_ENTRYPOINTS).map((entry) => join(packageRoot, entry)),
     outdir,
@@ -67,12 +90,16 @@ async function checkBundles(distDirectory: string): Promise<string[]> {
 }
 
 if (import.meta.main) {
+  // Checked before anything else touches the filesystem: --check's scratch build and a plain
+  // build's `rm` of the committed dist/ both cost real work or a real deletion for a build this
+  // process was always going to refuse.
+  assertPinnedBun(Bun.version, (await readFile(join(repoRoot, ".bun-version"), "utf8")).trim())
   const distDirectory = join(packageRoot, "dist")
   if (process.argv.includes("--check")) {
     const differences = await checkBundles(distDirectory)
     if (differences.length > 0) {
       process.stderr.write(
-        `dist/ is stale (${differences.join(", ")}); run \`bun run build\` on Bun ${await readFile(join(packageRoot, "..", "..", ".bun-version"), "utf8").then((version) => version.trim())} and commit the result\n`,
+        `dist/ is stale (${differences.join(", ")}); run \`bun run build\` on Bun ${await readFile(join(repoRoot, ".bun-version"), "utf8").then((version) => version.trim())} and commit the result\n`,
       )
       process.exit(1)
     }

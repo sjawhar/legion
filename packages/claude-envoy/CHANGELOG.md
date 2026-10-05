@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.6.5]
+
+### Fixed
+
+- `scripts/build.ts` refuses to build under a Bun other than the one `.bun-version` pins, instead
+  of silently bundling with whatever `bun` resolves from PATH (LEGION-568). `bun run build` and
+  `bun run check-dist` spawn a new "bun" process to run the script — package.json's script text is
+  a shell command, and Bun's own `run` resolves the "bun" in it from PATH rather than reusing
+  whichever binary the caller invoked `bun run` with — so a devbox whose default Bun (a version
+  manager's active version) differs from the pin silently bundled with that other build instead.
+  The bundler's own output depends on the exact Bun build, confirmed directly between two Bun
+  releases on one machine and between a devbox and the CI runner on the identical pinned version:
+  the prior investigation (LEGION-548, `dist/`'s round-5 note) attributed the latter to the
+  machine itself and was wrong — it was this same version mismatch. `buildBundles()` now checks
+  `Bun.version` against `.bun-version` before building, and the CLI entry point checks before
+  touching the filesystem at all, so a refusal never deletes the committed `dist/` it was about
+  to replace.
+
 ## [0.6.4]
 
 ### Added
