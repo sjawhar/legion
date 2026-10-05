@@ -416,8 +416,9 @@ It returns live or versioned markdown with open marks. A live read ends with a d
 `artifact` reads the issue specification; a project needs `artifact`; and a `dispatch://PROJECT/artifact/<document-ref>`
 ref supplies both, where `document-ref` is the slug (an id or a filename resolves when no document has that slug). A file
 `dispatch_artifact` uploaded reads its text at the latest or named version, or a description when it is not UTF-8 text.
-A picture (PNG, JPEG, GIF or WebP under 3,750,000 bytes, 5 MB of base64) comes back as an image you see, with its name,
-type, size and version; that includes `dispatch://agent/<session id>/artifact/<slug>@vN`, one a person sent you on the Agents page.
+A picture (PNG, JPEG, GIF or WebP under 3,750,000 bytes, 5 MB of base64) comes back as an image you see, with its name, type, size and version;
+that includes `dispatch://agent/<session id>/artifact/<slug>@vN`, one a person sent you on the Agents page. A session is shown each picture once,
+since the provider refuses a request over 32 MB: later reads and deliveries name it, and `dispatch_doc_read` shows it again (after compaction too).
 
 Editing one is [Editing a document](skill://dispatch/references/document-edits.md): the shape of `dispatch_doc_edit`,
 how to quote the text you mean, one `replace` per paragraph, preconditions against a stale edit, and
@@ -476,9 +477,8 @@ dispatch_message({ issue, body })
 It returns `details` `{ issue, message }`. `body` is capped at 2,000 characters. A message is not a decision
 (a decision block, or `dispatch_ask` for a human to-do) or document feedback (`dispatch_comment`), and it does not wake anyone unless the issue is routed.
 
-**Pictures.** To show a screenshot inline, pass its path in `images` (`dispatch_message`, `dispatch_comment`,
-`dispatch_ask`); `dispatch_read` hands you the pictures what it shows embeds. Both are in
-[Documents](skill://dispatch/references/documents.md), "Artifacts".
+**Pictures.** To show a screenshot inline, pass its path in `images` (`dispatch_message`, `dispatch_comment`, `dispatch_ask`);
+`dispatch_read` hands you the pictures what it shows embeds. Both are in [Documents](skill://dispatch/references/documents.md), "Artifacts".
 
 A BTW, Aside or Steer frame, or a message from the Agents page, is answered as
 [Targeted and direct messages](skill://dispatch/references/messages.md) says.

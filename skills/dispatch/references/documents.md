@@ -164,6 +164,11 @@ conversation on the Agents page belongs to that conversation, `dispatch://agent/
 `dispatch_doc_read` reads it by that reference alone. On Oh My Pi an Inbox delivery carries its pictures the same way; in
 Claude Code it stays text with the reference.
 
+A session is shown each picture once. A later read or delivery that embeds a picture you were already shown names it in
+`Pictures:` as `shown earlier this session` and sends no bytes, since every request carries the session's whole history
+and a model provider refuses one over 32 MB; `dispatch_doc_read` always shows the picture, so ask it for one you need
+again, after compaction too.
+
 Documents are CommonMark. A bare `<https://example.com|text>` is a CommonMark autolink and is normalised: the angle brackets are
 dropped and the URL keeps `|text`. A backslash-escaped `\<https://example.com|text>` displays as `<https://example.com|text>` in the
 document but comes back re-escaped (`\<`) from `dispatch_doc_read`. A Slack mrkdwn draft, or any other payload that is not Markdown,

@@ -79,7 +79,11 @@ agent's own conversation for a reply to a direct message — and appends one
 `dispatch_doc_read` returns a picture as an image the model sees, and `dispatch_read` returns the
 pictures the messages, asks and comments it shows embed, newest first, at most eight and 10 MiB
 per read. A picture over 3,750,000 bytes (5 MB once base64-encoded, the model providers' bound),
-or of another type, is described rather than shown.
+or of another type, is described rather than shown. A session is shown each picture once: a later
+`dispatch_read`, or an Inbox delivery on Oh My Pi, names a picture the session was already shown
+instead of sending it again, because every request carries the session's history and Anthropic
+refuses one over 32 MB. `dispatch_doc_read` always shows the picture, which is how an agent gets
+one back after compaction.
 
 Write every ask for a person reading on a phone who has not read the code. Put the problem, what
 constrains the answer, and your recommendation in the question, and what each option costs in its
