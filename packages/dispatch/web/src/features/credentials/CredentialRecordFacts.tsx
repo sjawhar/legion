@@ -8,7 +8,9 @@ import {
   textPrimaryOnCanvas,
 } from "../../theme/classes";
 import { Timestamp } from "../refs/Timestamp";
+import { CredentialSessionLineText, noSessionNamed } from "./CredentialSessionLine";
 import { machineName } from "./machineLogins";
+import { useCredentialSessionLines } from "./useCredentialSessionLines";
 
 const LIFETIME_UNITS: ReadonlyArray<{ seconds: number; unit: string }> = [
   { seconds: 86400, unit: "day" },
@@ -52,6 +54,7 @@ function Fact({ children, label }: { children: ReactNode; label: string }): Reac
  * this same layout before their own (page-specific) decision/action controls.
  */
 export function CredentialRecordFacts({ record }: { record: CredentialRecord }): ReactNode {
+  const sessionLines = useCredentialSessionLines(record.session);
   return (
     <div className="space-y-4">
       <dl className="grid grid-cols-2 gap-3 text-sm">
@@ -65,6 +68,17 @@ export function CredentialRecordFacts({ record }: { record: CredentialRecord }):
             : `${record.enrollment.kind} · ${record.enrollment.runtime_id} · ${record.enrollment.operator || "—"}`}
         </Fact>
         {record.enrollment?.slot ? <Fact label="Worker slot">{record.enrollment.slot}</Fact> : null}
+        <Fact label="Session">
+          {sessionLines.length === 0 ? (
+            noSessionNamed
+          ) : (
+            <div className="flex flex-col gap-1">
+              {sessionLines.map((line) => (
+                <CredentialSessionLineText key={line.source ?? line.status.id} line={line} />
+              ))}
+            </div>
+          )}
+        </Fact>
         <Fact label="Lifetime">{formatLifetime(record.lifetime_seconds)}</Fact>
         <Fact label="Requested">
           <Timestamp at={record.requested_at} />
