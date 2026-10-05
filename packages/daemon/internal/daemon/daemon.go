@@ -569,6 +569,7 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 		Timeouts: supervise.Timeouts{
 			Boot:                  cfg.WorkerBootTimeout,
 			RegistrationIntervals: cfg.WorkerBootRegistrationDeadlineIntervals,
+			RegistrationGrace:     registrationGrace(cfg),
 			RPC:                   cfg.WorkerRPCTimeout,
 			Probe:                 cfg.ProbeInterval,
 			Stop:                  cfg.WorkerStopTimeout,

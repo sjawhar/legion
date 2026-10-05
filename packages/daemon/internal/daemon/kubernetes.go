@@ -24,6 +24,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/sandbox"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
 // agentSandbox is the Agent Sandbox a cluster must have installed for the runtime (LEGION-206
@@ -324,4 +325,21 @@ func (t implementTokens) Token(ctx context.Context, owner string) (string, error
 		return "", err
 	}
 	return lease.Token, nil
+}
+
+// registrationGrace is added atop the registration deadline's own Boot×RegistrationIntervals bound
+// for a Kubernetes launch: workspace.FetchTimeout, the fetch's clone's own bound, plus
+// sandbox.InitWaitSeconds (the same ceil(boot timeout) × (intervals + 1) budget
+// LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS is sized by) for whatever time a provisioning pod can
+// still spend waiting on another pod's flock before it even starts its own clone. A pod's init
+// containers (workspace-fetch, workspace-init) are bounded by their own commands — the fetch's
+// stall detector and FetchTimeout, the per-command CommandTimeout, and the lock wait — never by
+// the registration deadline, which starts counting the moment the launch returns and would
+// otherwise also have to cover all of that before the agent's own container has even started. A
+// tmux launch's pane starts the agent at once, with no init phase, so it adds none.
+func registrationGrace(cfg config.Config) time.Duration {
+	if cfg.Runtime.Name != "kubernetes" {
+		return 0
+	}
+	return workspace.FetchTimeout + sandbox.InitWaitSeconds(cfg.WorkerBootTimeout, cfg.WorkerBootRegistrationDeadlineIntervals)
 }

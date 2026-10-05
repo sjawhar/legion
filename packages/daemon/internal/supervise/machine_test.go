@@ -257,6 +257,34 @@ func TestTheRegistrationDeadlineRetiresALiveUnregisteredProcess(t *testing.T) {
 	}
 }
 
+// RegistrationGrace (internal/daemon/kubernetes.go's registrationGrace, for a Kubernetes launch
+// whose pod runs init containers before its agent's own container starts) adds onto the base
+// Boot×RegistrationIntervals deadline: a live, unregistered process is left alone through the
+// base deadline and the grace both, but once the whole extended deadline passes it is retired
+// exactly as TestTheRegistrationDeadlineRetiresALiveUnregisteredProcess expects with no grace at
+// all (the registration deadline still fires — it is only sized wider, never disabled).
+func TestTheRegistrationDeadlineWithGraceWaitsOutProvisioningThenStillRetires(t *testing.T) {
+	h := newBareHarness(t)
+	h.deps.Timeouts.RegistrationGrace = testBoot
+	h.start(queuedClaim())
+	h.launch()
+	alive := h.locator()
+
+	h.advance(deadline)
+	h.wantCalls("Suspend", 0)
+	h.wantState(StateLaunching)
+	if h.locator() != alive {
+		t.Fatalf("locator changed to %+v before the grace ran out, want the same process still live", h.locator())
+	}
+
+	h.advance(testBoot)
+	if suspends := h.wantCalls("Suspend", 1); suspends[0].Locator != alive {
+		t.Errorf("suspended %+v, want the live process", suspends[0].Locator)
+	}
+	h.wantCalls("Spawn", 2)
+	h.wantState(StateLaunching)
+}
+
 func TestTheRegistrationDeadlineWithADeadProcessCountsOneFailureWithoutASuspension(t *testing.T) {
 	h := newHarness(t)
 	h.launch()

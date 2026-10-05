@@ -649,7 +649,9 @@ so no process that can read the token may touch the tree volume. The Go coordina
   `workspace.FetchTimeout` (30 minutes) instead, with git's own stall detector
   (`GIT_HTTP_LOW_SPEED_LIMIT`/`GIT_HTTP_LOW_SPEED_TIME`, `workspace.FetchLowSpeedLimit`/
   `FetchLowSpeedTime`) set so a connection that goes quiet still dies within about a minute of
-  stalling, rather than surviving on the wider bound.
+  stalling, rather than surviving on the wider bound. The daemon's own registration deadline (below,
+  "Liveness rules") carries a matching grace under Kubernetes, so this wider bound has room to run
+  before the daemon would otherwise retire the pod for an agent that never registered.
 - **`workspace-init`** mounts the tree volume, the feed read-only, and the config home — never the
   Secret — and runs `legion workspace-init provision`: the shared clone's clone and fetch reach
   `https://github.com/<owner>/<repo>`, the remote its origin names, at the feed over git's file
@@ -1152,12 +1154,21 @@ The daemon probes a pod by reading it and consulting the worker stream's live re
 - pod carrying a `deletionTimestamp`, or in phase `Succeeded` or `Failed` → **dead (gone)**; for a
   `Failed` pod the last 20 log lines of the failing container (the init container when it exited
   non-zero, else the main one) are quoted in the daemon log;
-- `Pending` with the `workspace-init` init container **running** → **alive**, whatever the pod's age: the
-  pod is provisioning its working copy (a clone or fetch of up to `slow_command_timeout_seconds` each, or
-  a wait behind another pod's lock on the shared clone), and a live initialiser is a live process — as
-  the tmux runtime's own in-process provisioning is. The boot watchdog re-arms on it, bounded by its
-  registration deadline (`worker_boot_timeout_seconds × worker_boot_registration_deadline_intervals`,
-  default 360 s), after which it retires the pod and spawns the next generation. The pod's own lock wait
+- `Pending` with the `workspace-fetch` or `workspace-init` init container **running** → **alive**,
+  whatever the pod's age: the pod is provisioning its working copy (`workspace-fetch`'s one clone,
+  bounded by its own `workspace.FetchTimeout` and git's own stall detector rather than
+  `slow_command_timeout_seconds`; `workspace-init`'s own commands, each up to
+  `slow_command_timeout_seconds`; or a wait behind another pod's lock on the shared clone), and a
+  live initialiser is a live process — as the tmux runtime's own in-process provisioning is. The
+  boot watchdog re-arms on it, bounded by its registration deadline
+  (`worker_boot_timeout_seconds × worker_boot_registration_deadline_intervals`, default 360 s),
+  after which it retires the pod and spawns the next generation — except under Kubernetes, where the
+  deadline carries an added grace of `workspace.FetchTimeout` plus the same lock-wait budget
+  `LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS` is sized by (`sandbox.InitWaitSeconds`,
+  `internal/daemon/kubernetes.go`'s `registrationGrace`), so the one deadline that watches for the
+  agent's own registration is never also the deadline the init containers' commands have to finish
+  inside: those stay bounded by their own commands, never by this one. A tmux pane adds no grace,
+  since it starts the agent at once with no init phase. The pod's own lock wait
   is sized from that same deadline: the runtime sets `LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS` on the init
   container to the deadline plus one more interval (default 480 s), and `workspace-init` passes it to
   `flock --timeout`, so the init container never gives up on a wait the daemon would still tolerate,

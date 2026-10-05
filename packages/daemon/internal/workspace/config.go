@@ -32,21 +32,19 @@ const (
 	FetchLowSpeedTime  = 60 * time.Second
 )
 
-// fetchLowSpeedEnvironment is the environment that makes git itself abort a stalled transfer:
-// GIT_HTTP_LOW_SPEED_LIMIT/TIME apply to every protocol git's http transport is told to use, so
-// they bound the fetch's clone (over https) the same way they would bound any later fetch that
-// reads the same feed over a network transport.
+// fetchLowSpeedEnvironment is the environment that makes git itself abort the fetch's clone if it
+// stalls: GIT_HTTP_LOW_SPEED_LIMIT/TIME are git's own http-transport stall detector.
 var fetchLowSpeedEnvironment = []string{
 	"GIT_HTTP_LOW_SPEED_LIMIT=" + strconv.Itoa(FetchLowSpeedLimit),
 	"GIT_HTTP_LOW_SPEED_TIME=" + strconv.Itoa(int(FetchLowSpeedTime.Seconds())),
 }
 
-// FetchTimeout is the outer bound for the fetch's clone (and any later fetch of the same feed):
-// long enough for a large repository's slow but steadily progressing transfer to finish, while
-// FetchLowSpeedLimit and FetchLowSpeedTime (fetchLowSpeedEnvironment) kill a stalled transfer
-// within about a minute of stalling, long before this bound is ever reached. Every other
-// provisioning command keeps CommandTimeout: this widens the one command whose duration follows
-// the repository's size and the network's speed, not a fixed step in provisioning.
+// FetchTimeout is the outer bound for the fetch's clone: long enough for a large repository's slow
+// but steadily progressing transfer to finish, while FetchLowSpeedLimit and FetchLowSpeedTime
+// (fetchLowSpeedEnvironment) kill a stalled transfer within about a minute of stalling, long
+// before this bound is ever reached. Every other provisioning command keeps CommandTimeout: this
+// widens the one command whose duration follows the repository's size and the network's speed,
+// not a fixed step in provisioning.
 const FetchTimeout = 30 * time.Minute
 
 // Command is one process the provisioner runs. Every command holds the runner's slow-command
@@ -262,10 +260,10 @@ func RunChecked(ctx context.Context, run Runner, argv []string, env []string, di
 }
 
 // RunCheckedTimeout runs argv like RunChecked, but bounds it with timeout instead of the runner's
-// own slow-command budget: the fetch's clone (and any later fetch of the same feed) needs a bound
-// that follows the transfer's progress rather than CommandTimeout's fixed wall clock — FetchTimeout,
-// paired with fetchLowSpeedEnvironment in its env so a stalled transfer dies within about a
-// minute regardless of how wide this bound is.
+// own slow-command budget: the fetch's clone needs a bound that follows the transfer's progress
+// rather than CommandTimeout's fixed wall clock — FetchTimeout, paired with
+// fetchLowSpeedEnvironment in its env so a stalled transfer dies within about a minute regardless
+// of how wide this bound is.
 func RunCheckedTimeout(ctx context.Context, run Runner, argv []string, env []string, dir string, timeout time.Duration) (Result, error) {
 	return runChecked(ctx, run, argv, env, dir, timeout)
 }

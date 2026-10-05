@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -597,12 +598,18 @@ func (r *Runtime) initEnvironment(l launch) []corev1.EnvVar {
 	return append(env, xdgEnvironment()...)
 }
 
-// initWaitSeconds bounds a wait on another pod's workspace-init: ceil(boot timeout) × (intervals
+// InitWaitSeconds bounds a wait on another pod's workspace-init: ceil(boot timeout) × (intervals
 // + 1), the whole time the daemon tolerates a pod that is alive but unregistered, plus one
 // interval, so no wait gives up while the daemon would still allow the pod it waits on
-// (KubernetesRuntime.workspaceInitLockWaitSeconds, runtime-kubernetes.ts).
+// (KubernetesRuntime.workspaceInitLockWaitSeconds, runtime-kubernetes.ts). Exported so the
+// daemon's registration-deadline grace (internal/daemon/kubernetes.go's registrationGrace) is
+// sized the same way, from the same configured boot timeout and interval count.
+func InitWaitSeconds(bootTimeout time.Duration, intervals int) time.Duration {
+	return time.Duration(math.Ceil(bootTimeout.Seconds())) * time.Duration(intervals+1) * time.Second
+}
+
 func (r *Runtime) initWaitSeconds() int64 {
-	return int64(math.Ceil(r.bootTimeout.Seconds())) * int64(r.bootIntervals+1)
+	return int64(InitWaitSeconds(r.bootTimeout, r.bootIntervals).Seconds())
 }
 
 // mainEnvironment is the pane contract with a pod's values (decision 10): the variables every

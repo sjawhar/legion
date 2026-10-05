@@ -468,11 +468,10 @@ func TestFetchClonesBareReadingNoConfigurationButItsOwn(t *testing.T) {
 	}
 }
 
-// The fetch's clone (and any later fetch of the same feed) is bounded by FetchTimeout rather than
-// the runner's own slow-command budget, and carries git's own stall detector
-// (GIT_HTTP_LOW_SPEED_LIMIT/TIME): a transfer that keeps progressing can run far longer than
-// CommandTimeout, but one that goes quiet dies within about a minute of stalling, not at the
-// outer bound.
+// The fetch's clone is bounded by FetchTimeout rather than the runner's own slow-command budget,
+// and carries git's own stall detector (GIT_HTTP_LOW_SPEED_LIMIT/TIME): a transfer that keeps
+// progressing can run far longer than CommandTimeout, but one that goes quiet dies within about a
+// minute of stalling, not at the outer bound.
 func TestFetchBoundsItsCloneByTransferProgressNotWallClock(t *testing.T) {
 	run := newLocalRunner(t)
 	req := fetchRequest(t)

@@ -166,6 +166,13 @@ type Timeouts struct {
 	// RegistrationIntervals is how many boot intervals a live process gets to register before it
 	// is retired (worker_boot_registration_deadline_intervals).
 	RegistrationIntervals int
+	// RegistrationGrace is added atop Boot×RegistrationIntervals before the registration deadline
+	// retires a live, unregistered process: zero for a launch whose process starts its agent at
+	// once (a tmux pane), and the Kubernetes runtime's init-container budget for a launch whose
+	// pod runs provisioning before its agent's own container ever starts, so the deadline sized for
+	// watching the agent register never also has to cover the clone and the shared clone's own
+	// setup ahead of it (internal/daemon/kubernetes.go's registrationGrace).
+	RegistrationGrace time.Duration
 	// RPC bounds a prompt's acknowledgement and, after it, the wait for the turn it should start
 	// (worker_rpc_timeout_seconds).
 	RPC time.Duration
@@ -829,7 +836,7 @@ func nothing(context.Context) error { return nil }
 
 func (m *Machine) armBoot() {
 	m.arm(TimerBoot, m.deps.Timeouts.Boot, "")
-	m.arm(TimerRegistration, m.deps.Timeouts.Boot*time.Duration(m.deps.Timeouts.RegistrationIntervals), "")
+	m.arm(TimerRegistration, m.deps.Timeouts.Boot*time.Duration(m.deps.Timeouts.RegistrationIntervals)+m.deps.Timeouts.RegistrationGrace, "")
 }
 
 // arm schedules one timer of a kind, replacing any of that kind already armed. Its event carries
