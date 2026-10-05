@@ -1262,6 +1262,129 @@ func TestProcessBatchStillDeadLettersAGenuinelyPoisonedRowAmongHealthyOnes(t *te
 	}
 }
 
+// TestProcessBatchALonePoisonedRowWithNoBatchSiblingsStillDeadLetters proves confirmSoloFailure
+// needs no sibling at all: a row that is the entire batch, every cycle, with no other row ever
+// pending beside it, is confirmed by its own canary exactly as a row bisection isolated to one
+// would be, and dead-letters once confirmed_failures reaches retry.DeadLetterAttempts.
+func TestProcessBatchALonePoisonedRowWithNoBatchSiblingsStillDeadLetters(t *testing.T) {
+	database := storetest.Open(t)
+	seedIssue(t, database, "LONE", "LONE-1", "the poisoned title")
+	embedder := &canaryAwareEmbedder{
+		rowOK:    func(_ []string) bool { return false },
+		canaryOK: func() bool { return true },
+	}
+	deps := Deps{Store: database, Embedder: embedder}
+
+	for i := 0; i < retry.DeadLetterAttempts; i++ {
+		succeeded, failed, _, throttled, err := ProcessBatch(context.Background(), deps)
+		if err != nil {
+			t.Fatalf("cycle %d: ProcessBatch: %v", i, err)
+		}
+		if succeeded != 0 || failed != 1 || throttled {
+			t.Fatalf("cycle %d: succeeded, failed, throttled = %d, %d, %v, want 0, 1, false", i, succeeded, failed, throttled)
+		}
+		forceEligible(t, database, "issue", "LONE-1")
+	}
+	var dead bool
+	var confirmedFailures int
+	if err := database.Pool.QueryRow(context.Background(),
+		`select dead, confirmed_failures from embeddings where kind = 'issue' and id = 'LONE-1'`,
+	).Scan(&dead, &confirmedFailures); err != nil {
+		t.Fatalf("read LONE-1: %v", err)
+	}
+	if !dead {
+		t.Error("LONE-1 dead = false, want true - its canary succeeded every cycle, proving the service works, and it was never bisected (it is the whole batch every time)")
+	}
+	if confirmedFailures != retry.DeadLetterAttempts {
+		t.Errorf("LONE-1 confirmed_failures = %d, want %d", confirmedFailures, retry.DeadLetterAttempts)
+	}
+}
+
+// TestProcessBatchALoneHealthyRowDuringAnOutageNeverDeadLetters is the mirror of the test above:
+// a row that is the entire batch every cycle, whose own content is fine, but whose canary also
+// fails every cycle (a genuine outage, not this row's fault) is never confirmed and never
+// dead-letters, however many cycles it runs for - run here for more cycles than
+// retry.DeadLetterAttempts would take to confirm a genuinely poisoned row.
+func TestProcessBatchALoneHealthyRowDuringAnOutageNeverDeadLetters(t *testing.T) {
+	database := storetest.Open(t)
+	seedIssue(t, database, "LONE", "LONE-2", "a perfectly good title")
+	embedder := &canaryAwareEmbedder{
+		rowOK:    func(_ []string) bool { return false },
+		canaryOK: func() bool { return false },
+	}
+	deps := Deps{Store: database, Embedder: embedder}
+
+	for i := 0; i < retry.DeadLetterAttempts+5; i++ {
+		succeeded, failed, _, throttled, err := ProcessBatch(context.Background(), deps)
+		if err != nil {
+			t.Fatalf("cycle %d: ProcessBatch: %v", i, err)
+		}
+		if succeeded != 0 || failed != 1 || throttled {
+			t.Fatalf("cycle %d: succeeded, failed, throttled = %d, %d, %v, want 0, 1, false", i, succeeded, failed, throttled)
+		}
+		forceEligible(t, database, "issue", "LONE-2")
+	}
+	var dead bool
+	var confirmedFailures int
+	if err := database.Pool.QueryRow(context.Background(),
+		`select dead, confirmed_failures from embeddings where kind = 'issue' and id = 'LONE-2'`,
+	).Scan(&dead, &confirmedFailures); err != nil {
+		t.Fatalf("read LONE-2: %v", err)
+	}
+	if dead {
+		t.Error("LONE-2 dead = true, want false - its canary failed every cycle too, so nothing about its own content was ever confirmed")
+	}
+	if confirmedFailures != 0 {
+		t.Errorf("LONE-2 confirmed_failures = %d, want 0", confirmedFailures)
+	}
+}
+
+// TestProcessBatchACanaryThatIsItselfThrottledNeverConfirmsAndPropagatesThrottled exercises
+// confirmSoloFailure's one remaining branch no other committed test reaches: the canary probe
+// itself throttles (rather than failing outright). Nothing is confirmed - a throttled canary is
+// exactly as systemic as a throttled row - and ProcessBatch reports throttled so the caller backs
+// off its own cadence exactly as an outright-throttled call would.
+func TestProcessBatchACanaryThatIsItselfThrottledNeverConfirmsAndPropagatesThrottled(t *testing.T) {
+	database := storetest.Open(t)
+	seedIssue(t, database, "CNRY", "CNRY-2", "a title")
+	deps := Deps{Store: database, Embedder: canaryThrottledEmbedder{}}
+
+	succeeded, failed, _, throttled, err := ProcessBatch(context.Background(), deps)
+	if err != nil {
+		t.Fatalf("ProcessBatch: %v", err)
+	}
+	if succeeded != 0 || failed != 1 {
+		t.Errorf("succeeded, failed = %d, %d, want 0, 1", succeeded, failed)
+	}
+	if !throttled {
+		t.Error("throttled = false, want true - the canary itself was throttled, so the caller should back off exactly as an outright-throttled call would")
+	}
+	var dead bool
+	var confirmedFailures int
+	if err := database.Pool.QueryRow(context.Background(),
+		`select dead, confirmed_failures from embeddings where kind = 'issue' and id = 'CNRY-2'`,
+	).Scan(&dead, &confirmedFailures); err != nil {
+		t.Fatalf("read CNRY-2: %v", err)
+	}
+	if dead {
+		t.Error("CNRY-2 dead = true, want false - a throttled canary confirms nothing")
+	}
+	if confirmedFailures != 0 {
+		t.Errorf("CNRY-2 confirmed_failures = %d, want 0", confirmedFailures)
+	}
+}
+
+// canaryThrottledEmbedder fails every row's own call non-throttled, and throttles embedCanary's
+// call specifically - confirmSoloFailure's one branch no other committed test exercises.
+type canaryThrottledEmbedder struct{}
+
+func (canaryThrottledEmbedder) Embed(_ context.Context, texts []string, _ embed.InputType) ([][]float32, error) {
+	if len(texts) == 1 && texts[0] == embedCanary {
+		return nil, embedtest.FakeThrottleError{Code: "ThrottlingException"}
+	}
+	return nil, errors.New("simulated: a non-throttled embed failure")
+}
+
 // TestProcessBatchActuallyCallsRenewalAndReservesTokens is the first of Rev's two named test
 // gaps: no test proved renewal.renew or reserveBackgroundTokens were actually wired into the
 // embed path, as opposed to merely existing and passing their own isolated unit tests - deleting
