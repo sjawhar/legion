@@ -725,7 +725,7 @@ primary_issue() {
   pass
 
   begin primary-planner-handoff
-  send_agent "$root_issue" planner "Stage 3 proof planning operation: write the required .legion/plan.json handoff for the one-file smoke change, then call the legion tool's handoff_complete with a concise summary. Do not start another role."
+  send_agent "$root_issue" planner "Stage 3 proof planning operation: write the required plan handoff for the one-file smoke change, then call the legion tool's handoff_complete with a concise summary. Do not start another role."
   wait_for_phase "$root_issue" implementing
   assert_handoff_committer "$root_issue" planner planning 0
   wait_for_worker "$root_issue" implementer

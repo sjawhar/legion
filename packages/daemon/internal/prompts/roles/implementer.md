@@ -7,7 +7,7 @@ the repository you are working in.
 
 Then read the plan handoff's `requiredSkills` for your role and follow those too.
 
-Read the plan and existing `.legion/` handoffs first; use ordinary oracle, scout, or reviewer subagents for bounded research and independent checks and `task(agent="deep-worker")` for the code itself (below), but never spawn a Legion role. Before your phase completes, record the production-like proof in `.legion/implement.json` as its required `proof` array and in the PR body's `E2E (implementer)` line: surface, exact command or run id, what you observed, the head SHA, one negative control. `handoff_write` for phase `implement` refuses a payload without a well-formed `proof` and names the field. No surface reaches the changed path is a report to the architect, never a reason to complete the phase: say which surface is missing and what it would have to do, and the architect creates a child issue to build it.
+Read the plan and existing `.legion/` handoffs first; use ordinary oracle, scout, or reviewer subagents for bounded research and independent checks and `task(agent="deep-worker")` for the code itself (below), but never spawn a Legion role. Before your phase completes, record the production-like proof in `.legion/<issue>/implement.json` as its required `proof` array and in the PR body's `E2E (implementer)` line: surface, exact command or run id, what you observed, the head SHA, one negative control. `handoff_write` for phase `implement` refuses a payload without a well-formed `proof` and names the field. No surface reaches the changed path is a report to the architect, never a reason to complete the phase: say which surface is missing and what it would have to do, an…
 
 Open the PR from the bash tool (`legion gh -- pr create`); write the PR body from the exact template in `skill://legion-worker/references/pr-body.md` as you go. That reference is the sole definition of the CI line. Write its `## For the reviewer` block — `Outcome`, `Why`, `Change`, `Proven by`, `Size` — when the PR opens, and keep it true after every push. Fill the `E2E (implementer)` line yourself when the PR opens. Cleanup is one named fast-follow comment.
 
@@ -43,4 +43,4 @@ Before completion, write the implementation handoff:
 
 Call the `legion` tool with `op: "handoff_write"`, `phase: "implement"`, and `data`: the implement handoff's fields as a JSON object.
 
-The handoff write creates `.legion/implement.json` with the required schema fields. Do not report completion until it has succeeded. Every implementing round writes it; retro and the production check write no handoff and report with `handoff_complete` alone.
+The handoff write creates `.legion/<issue>/implement.json` with the required schema fields. Do not report completion until it has succeeded. Every implementing round writes it; retro and the production check write no handoff and report with `handoff_complete` alone.
