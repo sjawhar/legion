@@ -35,7 +35,7 @@ import (
 // LEGION-294's own collector reads).
 var ompSessionTrailer = regexp.MustCompile(`(?m)^Omp-Session:\s*(\S+)\s*$`)
 
-// issueKeyCandidate matches a bare Dispatch issue key mention (e.g. AGENTC-1072), the same shape
+// issueKeyCandidate matches a bare Dispatch issue key mention (e.g. ACME-1072), the same shape
 // this codebase's own issueKeyPattern uses elsewhere (packages/envoy/internal/dispatch/api/server.go,
 // packages/envoy/internal/dispatch/text/refs.go) -- duplicated here rather than imported because
 // both are unexported in their own packages and this package does not depend on either.
