@@ -409,7 +409,16 @@ func TestShutdownReturnsAtItsDeadlineWithAnEditorConnectedAndAnAppendLocked(t *t
 	if err := locker.Commit(context.Background()); err != nil {
 		t.Fatalf("release append lock: %v", err)
 	}
-	waitForPersistedUpdates(t, service, artifactID, 2)
+	// Not waitForPersistedUpdates: Shutdown's CloseRoom evicts this room once the append lands
+	// (room.connected), and ygo compacts an evicted room's history to one row (compactKeep),
+	// so a row-count check here races the compaction that normally follows eviction. The
+	// durable-append signal alone proves the locked write reached the store; the content check
+	// below proves what it reached the store as.
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), time.Minute)
+	defer waitCancel()
+	if err := service.waitForDurableAppends(waitCtx, artifactID); err != nil {
+		t.Fatalf("wait for the locked append to be stored: %v", err)
+	}
 	reloaded := New(Deps{Store: database, Events: events.NewBroker(), Settle: time.Hour})
 	defer reloaded.Shutdown(context.Background())
 	if got, err := reloaded.Text(context.Background(), artifactID); err != nil || got != "after\n" {

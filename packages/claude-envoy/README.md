@@ -135,7 +135,19 @@ they inline, written from Bun's metafile by `scripts/third-party-notices.ts` at 
 - `bun run build` rebuilds `dist/` (`Bun.build`, target `bun`, `minify: false`, no sourcemap), notices included. Minification is off entirely, not case by case: the partial-disable form (`{whitespace: false, identifiers: false, syntax: false}`) still routes through Bun 1.3.14's minifying code-generation path, which picks a non-deterministic CJS/ESM interop check on repeated builds of this exact module graph — on top of the syntax minifier's own separate bug, truncating constant-folded multi-operand string concatenation in CI builds, that made the partial form necessary before this. A plain `false` bypasses that whole path; whitespace and identifiers stay readable as a side effect, so independent changes still merge at line level.
 - `bun run check-dist` rebuilds into a scratch directory and fails when it differs from the
   committed files. CI runs it on the Bun version pinned in the repo-root `.bun-version`, because
-  bundler output differs across Bun releases; rebuild on that version before committing.
+  the bundler's own output depends on the exact Bun build, not only the declared version. Two
+  separate, compounding causes made that check fail unpredictably: the minify setting above (a
+  non-determinism *within* one Bun build's own bundler) and a second, independent bug
+  (LEGION-568) — `bun run build`/`bun run check-dist` spawn a new "bun" process to run
+  `scripts/build.ts`, and that spawn resolves "bun" from PATH rather than reusing whichever binary
+  the caller invoked `bun run` with, so a devbox whose default Bun (a version manager's active
+  version) differs from the pin would otherwise silently bundle with that *other Bun version*
+  instead — confirmed directly between a devbox and the CI runner, same source, same lockfile,
+  same `.bun-version`. Either alone could produce this symptom; the first investigation (LEGION-548
+  round 5) found the first and mistakenly attributed a failure actually caused by the second to
+  the build machine itself. Both scripts now refuse outright when the running Bun does not match
+  the pin, rather than commit whatever that other build produced: invoke the pinned binary's own
+  path directly — not `bun run` — when a version manager's default differs from it.
 - pi-envoy solves the same problem with `prepack.sh` for npm; this plugin's distribution channel is
   the git repository, so its bundle lives in-tree. An npm-published plugin and a `dist` release
   branch were considered and rejected as more moving parts for the same result.
