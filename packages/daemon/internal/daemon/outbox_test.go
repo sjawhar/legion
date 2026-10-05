@@ -1018,7 +1018,8 @@ func TestAResidentWorkerIsHandedItsNewPhaseNotATaskLeftPendingFromTheLast(t *tes
 			}
 			sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
 			sup.deps.PhaseHolds = (&workflowRuntime{pool: pool, records: records}).phaseHolds // exactly what the daemon wires
-			engine := workflow.New(records, workflow.Config{Project: "legion", ReviewRoundCap: 10}, quietLogger())
+			const reviewApp = "legion-reviewer[bot]"
+			engine := workflow.New(records, workflow.Config{Project: "legion", ReviewRoundCap: 10, ReviewAppLogin: reviewApp}, quietLogger())
 			clock := time.Now()
 			runner := &outbox{
 				dispatchProject: "LEGION",
@@ -1055,7 +1056,7 @@ func TestAResidentWorkerIsHandedItsNewPhaseNotATaskLeftPendingFromTheLast(t *tes
 			sup.deps.Conns.(*fake.Conns).Register(implementer, conn)
 
 			// The reviewer asks for round 2, and the implementer starts on its task.
-			apply("review:round-2", intake.PullRequestReview{Repo: "acme/widgets", Number: 118, State: "CHANGES_REQUESTED", CommitID: head, HeadSHA: head, Body: "scripted changes requested, round 2"})
+			apply("review:round-2", intake.PullRequestReview{Repo: "acme/widgets", Number: 118, State: "CHANGES_REQUESTED", CommitID: head, HeadSHA: head, Author: reviewApp, Body: "scripted changes requested, round 2"})
 			// A review ends when its reviewer completes it: its handoff is part of the phase.
 			apply("handoff:reviewer:reviewing:1", intake.HandoffComplete{Generation: 1, Issue: issue.Key, Role: claim.RoleReviewer,
 				Claim: "reviewer", Commit: "review-round-1"})
@@ -1109,7 +1110,7 @@ func TestAResidentWorkerIsHandedItsNewPhaseNotATaskLeftPendingFromTheLast(t *tes
 			apply("handoff:tester:testing:2", intake.HandoffComplete{Generation: 1, Issue: issue.Key, Role: claim.RoleTester, Claim: tester, Commit: "test-round-2", Verdict: "pass"})
 			due("the move to reviewing")
 			review := tc.review
-			review.Repo, review.Number, review.CommitID, review.HeadSHA = "acme/widgets", 118, head, head
+			review.Repo, review.Number, review.CommitID, review.HeadSHA, review.Author = "acme/widgets", 118, head, head, reviewApp
 			apply("review:after-round-2", review)
 			apply("handoff:reviewer:reviewing:2", intake.HandoffComplete{Generation: 1, Issue: issue.Key, Role: claim.RoleReviewer,
 				Claim: "reviewer", Commit: "review-round-2"})
