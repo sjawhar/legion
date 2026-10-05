@@ -3,7 +3,7 @@ import { cp, mkdtemp, readdir, readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { isAbsolute, join, resolve } from "node:path"
 import ts from "typescript"
-import { BUNDLE_ENTRYPOINTS, buildBundles } from "../scripts/build"
+import { assertPinnedBun, BUNDLE_ENTRYPOINTS, buildBundles } from "../scripts/build"
 
 const packageRoot = resolve(import.meta.dir, "..")
 const distDirectory = join(packageRoot, "dist")
@@ -223,3 +223,19 @@ test("rebuilding reproduces the committed bundle byte for byte", async () => {
     await rm(scratch, { recursive: true, force: true })
   }
 }, 30_000)
+
+// `bun run build`/`bun run check-dist` spawn a new "bun" to run scripts/build.ts, and that spawn
+// resolves "bun" from PATH rather than reusing whichever binary the caller invoked `bun run` with
+// (LEGION-568): a devbox whose default Bun (a version manager's active version) differs from the
+// pin would otherwise silently bundle with it instead, and the bundler's output depends on the
+// exact Bun build. buildBundles refuses before it ever calls Bun.build(); these check the pure
+// comparison a real mismatch would hit, without needing a second real Bun installed to prove it.
+test("buildBundles refuses a Bun other than .bun-version pins", () => {
+  expect(() => assertPinnedBun("1.4.2", "1.3.14")).toThrow(
+    /refusing to build under Bun 1\.4\.2.*\.bun-version pins 1\.3\.14/s,
+  )
+})
+
+test("a Bun matching .bun-version proceeds", () => {
+  expect(() => assertPinnedBun("1.3.14", "1.3.14")).not.toThrow()
+})
