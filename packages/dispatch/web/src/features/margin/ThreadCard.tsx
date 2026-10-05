@@ -66,6 +66,10 @@ function SuggestionDiff({
   quote: string;
   suggestion: Suggestion;
 }): ReactNode {
+  // The clamp sits on the padded `<del>`/`<ins>` itself: `overflow: hidden` clips at the padding
+  // edge, not the content edge, so a clamped element with vertical padding can show the top of
+  // the line it cut - a fragment of a third line under the ellipsis. Moving the clamp onto an
+  // inner span (leaving the padding on the outer element) avoids that.
   const clampClass = clamp ? "line-clamp-2" : "";
   return (
     <>
