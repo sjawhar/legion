@@ -10,6 +10,7 @@ import {
 import { type ReactNode, useState } from "react";
 
 import { ChevronIcon } from "../../components/DisclosureToggle";
+import { TruncatedText } from "../../components/TruncatedText";
 import {
   borderDefault,
   calloutDangerBorder,
@@ -130,10 +131,17 @@ function UserMessage(): ReactNode {
 }
 
 function AssistantMessage(): ReactNode {
+  // Two selectors, not one combined object read: `useAuiState` compares a selector's return by
+  // `Object.is` and documents that returning a new object literal (as reading both marks into one
+  // object here would) re-renders on every store update rather than only when the selected slice
+  // changes (@assistant-ui/store's useAuiState.d.ts).
   // A reply the session sent through Dispatch (AgentRuntimeThread marks it), not a streamed turn.
   const fromDispatch = useAuiState(
     (state) => readDispatchMarks(state.message.metadata.custom).dispatch === true
   );
+  // The provider/model that produced this streamed turn (LEGION-548): absent for a reply sent
+  // through Dispatch, and for a turn whose publishing host reported none.
+  const model = useAuiState((state) => readDispatchMarks(state.message.metadata.custom).model);
   if (fromDispatch) {
     return (
       <div
@@ -147,6 +155,15 @@ function AssistantMessage(): ReactNode {
   }
   return (
     <div className={`mt-4 text-sm ${textPrimaryOnCanvas}`} data-testid="agent-message-assistant">
+      {model === undefined ? null : (
+        <p
+          className={`mb-1 truncate text-xs ${textMutedOnCanvas}`}
+          data-testid="agent-message-model"
+          title={model}
+        >
+          <TruncatedText>{model}</TruncatedText>
+        </p>
+      )}
       <MessagePrimitive.Parts
         components={{ Reasoning, Text: MarkdownText, tools: { Fallback: ToolCall } }}
       />

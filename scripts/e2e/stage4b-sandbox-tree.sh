@@ -1737,7 +1737,7 @@ pass
 
 begin tree-separation
 wait_for_worker "$tree1" planner
-send_agent "$tree1" planner "Stage 4b proof planning operation: write the required .legion/plan.json handoff for the one-file smoke change, then call the legion tool's handoff_complete with a concise summary. Do not start another role."
+send_agent "$tree1" planner "Stage 4b proof planning operation: write the required plan handoff for the one-file smoke change, then call the legion tool's handoff_complete with a concise summary. Do not start another role."
 wait_for_phase "$tree1" implementing 900
 wait_for_worker "$tree1" implementer
 # Tree 2's planner holds for the driver, which has sent it nothing yet, and the checkpoints below
@@ -1783,7 +1783,7 @@ printf '%s\n' "$markers" >"$evidence/fixture-markers.txt"
 argv=$(op get pod "$pod" -o json | jq -c '[.spec.containers[] | select(.name == "worker") | .command[]?]')
 note "tree 2 pod $pod: fixture markers [${markers:-none}]; agent argv $argv"
 if grep -q -- '--no-extensions' <<<"$argv"; then note "the pod's agent runs with --no-extensions"; else note "the pod's agent runs without --no-extensions"; fi
-send_agent "$tree2" planner "Stage 4b proof planning operation: write the required .legion/plan.json handoff for the one-file smoke change, then call the legion tool's handoff_complete with a concise summary."
+send_agent "$tree2" planner "Stage 4b proof planning operation: write the required plan handoff for the one-file smoke change, then call the legion tool's handoff_complete with a concise summary."
 wait_for_phase "$tree2" implementing 900
 pass
 
@@ -2210,7 +2210,7 @@ wait_for_worker "$tree3" planner
 # is fresh: the planner is told to plan, and each implementer launch is killed once its agent is
 # ready or in a turn with its task outstanding. Every such death is charged; the check below accepts
 # either budget.
-send_agent "$tree3" planner "Stage 4b proof planning operation: write the required .legion/plan.json handoff for the one-file smoke change, then call the legion tool's handoff_complete with a concise summary. Do not start another role."
+send_agent "$tree3" planner "Stage 4b proof planning operation: write the required plan handoff for the one-file smoke change, then call the legion tool's handoff_complete with a concise summary. Do not start another role."
 wait_for_phase "$tree3" implementing 900
 wait_for_worker "$tree3" implementer
 killed=" "
@@ -2419,7 +2419,7 @@ note "killed $tree4's planner mid-turn (uid $planner_killed)"
 interrupted_needle="Your previous turn on this task was interrupted when your process died."
 planner_resent() { claim_session_text "$tree4" planner | grep -qF "$interrupted_needle"; }
 until_true 600 "$tree4's planner to be sent its task again, told its turn was interrupted" planner_resent
-send_agent "$tree4" planner "Stage 4b proof planning operation: write the required .legion/plan.json handoff for the one-file smoke change, then call the legion tool's handoff_complete with a concise summary. Do not start another role."
+send_agent "$tree4" planner "Stage 4b proof planning operation: write the required plan handoff for the one-file smoke change, then call the legion tool's handoff_complete with a concise summary. Do not start another role."
 wait_for_phase "$tree4" implementing 900
 note "$tree4's planner was sent its task again after the kill, told the turn was interrupted, and finished planning"
 # (b) Kills after each ready, the task outstanding, until the claim fails.
@@ -2575,11 +2575,11 @@ lost_seen() { [ "$(log_lines "$lost_msg" | wc -l)" -ge 1 ]; }
 until_true 900 "the re-admitted tree 1 to report its tree volume lost and relaunch a fresh architect" lost_seen
 wait_for_worker "$tree1" architect
 pod=$(tree_pod "$tree1")
-recovered=$(pod_exec "$pod" cat "/legion/workspaces/$repo/${tree1,,}/.legion/workspace-recovered.json")
+recovered=$(pod_exec "$pod" cat "/legion/workspaces/$repo/${tree1,,}/.legion/$tree1/workspace-recovered.json")
 jq -e --arg b "legion/$tree1" 'tostring | contains($b)' <<<"$recovered" >/dev/null || fail "the recovery marker does not name legion/$tree1: $recovered"
 lost=$(log_lines "$lost_msg" | wc -l)
 [ "$lost" = 1 ] || fail "the daemon reported the tree volume lost $lost times, want exactly once"
-note "the tree volume reported lost once, then a fresh session whose workspace holds .legion/workspace-recovered.json naming legion/$tree1"
+note "the tree volume reported lost once, then a fresh session whose workspace holds .legion/$tree1/workspace-recovered.json naming legion/$tree1"
 pass
 
 begin operator-close

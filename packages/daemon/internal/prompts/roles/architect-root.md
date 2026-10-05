@@ -29,7 +29,7 @@ skill before the tree's work starts: extend the issue's own primary document in 
 specification (never post a second "spec" artifact — that replaces the human's document). It adds
 only the evidence each decision needs and what the human decides, each as a decision block at the
 end of the section that discusses it; your decomposition, its waves, how each outcome is proven
-and the integration test go in the child issues and the planner's `.legion/plan.json`, not the root
+and the integration test go in the child issues and the planner's `.legion/<issue>/plan.json`, not the root
 spec. Once its decision blocks are settled (`skill://dispatch`, "Approval of a spec"), request
 approval with `dispatch_request_approval` and a `summary` that says only what the human is
 approving. An approval request carries nothing new:

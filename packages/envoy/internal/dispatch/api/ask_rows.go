@@ -149,7 +149,7 @@ func (s *server) loadAskAnchorArtifact(
 ) (*model.AskAnchorArtifact, error) {
 	var artifact model.AskAnchorArtifact
 	if err := q.QueryRow(ctx, `
-		select project_key, slug, name, is_primary
+		select coalesce(project_key, ''), slug, name, is_primary
 		from artifacts
 		where id = $1
 	`, artifactID).Scan(&artifact.Project, &artifact.Slug, &artifact.Name, &artifact.Primary); err != nil {

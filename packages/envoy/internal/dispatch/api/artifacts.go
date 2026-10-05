@@ -1174,13 +1174,15 @@ func (s *server) loadArtifactRow(ctx context.Context, q queryer, row pgx.Row) (m
 // id::text, issue_key, project_key, ref_key, slug, name, kind, is_primary, created_by, created_at.
 func scanArtifact(row pgx.Row) (model.Artifact, error) {
 	var artifact model.Artifact
+	var project *string
 	var createdBy []byte
 	if err := row.Scan(
-		&artifact.ID, &artifact.IssueKey, &artifact.Project, &artifact.RefKey, &artifact.Slug, &artifact.Name,
+		&artifact.ID, &artifact.IssueKey, &project, &artifact.RefKey, &artifact.Slug, &artifact.Name,
 		&artifact.Kind, &artifact.Primary, &createdBy, &artifact.CreatedAt,
 	); err != nil {
 		return model.Artifact{}, err
 	}
+	artifact.Project = deref(project)
 	if err := json.Unmarshal(createdBy, &artifact.CreatedBy); err != nil {
 		return model.Artifact{}, fmt.Errorf("decode artifact author: %w", err)
 	}

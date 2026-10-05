@@ -270,7 +270,7 @@ func loadArtifactNodes(ctx context.Context, q Queryer, byRefKey bool, ids []stri
 		predicate = `ref_key = any($1)`
 	}
 	rows, err := q.Query(ctx, `
-		select id::text, ref_key, issue_key, project_key, slug, name, kind, is_primary
+		select id::text, ref_key, issue_key, coalesce(project_key, ''), slug, name, kind, is_primary
 		from artifacts where `+predicate, ids)
 	if err != nil {
 		return fmt.Errorf("load artifact nodes: %w", err)
@@ -379,6 +379,10 @@ func loadComponentNodes(ctx context.Context, q Queryer, ids []string, nodes map[
 // its project.
 func artifactRef(issueKey *string, project, slug, kind string, primary bool) string {
 	if issueKey == nil {
+		if project == "" {
+			// The row's owner is one a later schema adds (LEGION-541); main names no address for it.
+			return ""
+		}
 		return "dispatch://" + project + "/artifact/" + slug
 	}
 	if primary && kind == "doc" {
@@ -388,12 +392,13 @@ func artifactRef(issueKey *string, project, slug, kind string, primary bool) str
 }
 
 // itemRef addresses an ask, comment, or message: under its issue, or under the project document
-// that owns it. An issue-less message has no address.
+// that owns it. An issue-less message has no address, nor has an item on an artifact with no
+// project, whose owner is one a later schema adds (LEGION-541).
 func itemRef(kind string, issueKey *string, project, slug, id string) string {
 	if issueKey != nil {
 		return "dispatch://" + *issueKey + "/" + kind + "/" + id
 	}
-	if slug == "" {
+	if slug == "" || project == "" {
 		return ""
 	}
 	return "dispatch://" + project + "/artifact/" + slug + "/" + kind + "/" + id
