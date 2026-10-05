@@ -250,3 +250,26 @@ test("a hand-authored Markdown link to a dispatch:// target resolves through dat
     view.unmount();
   }
 });
+
+// The live view hands each streamed delta to the same body as a longer `markdown`: the body
+// re-parses it, so syntax that has closed since the last delta formats, and nothing stays frozen
+// at the first delta's text.
+test("a body re-renders when its text grows, formatting what has closed since", async () => {
+  const view = render(<MarkdownBody markdown="**Bo" />);
+  try {
+    await waitFor(() => expect(view.container.textContent).toBe("**Bo"));
+    view.rerender(<MarkdownBody markdown={"**Bold** so far\n\n- first\n- sec"} />);
+    await waitFor(() => expect(view.container.querySelector("strong")?.textContent).toBe("Bold"));
+    expect(Array.from(view.container.querySelectorAll("li"), (item) => item.textContent)).toEqual([
+      "first",
+      "sec",
+    ]);
+    expect(view.container.textContent).not.toContain("**");
+    view.rerender(<MarkdownBody markdown={"**Bold** so far\n\n- first\n- second"} />);
+    await waitFor(() =>
+      expect(view.container.querySelectorAll("li")[1]?.textContent).toBe("second")
+    );
+  } finally {
+    view.unmount();
+  }
+});

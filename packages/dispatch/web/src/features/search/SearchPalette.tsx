@@ -36,6 +36,8 @@ import {
   textSecondaryOnSurfaceMuted,
 } from "../../theme/classes";
 import { statusText } from "../project/board-model";
+import { MarkdownPreview } from "../refs/MarkdownPreview";
+import { searchSnippetMarkdown } from "../refs/markdown-fragment";
 import { referenceTriggerProps } from "../refs/RefPreview";
 import {
   buildProjectPath,
@@ -192,8 +194,17 @@ function ResultOption({
   onSelect: () => void;
   result: SearchResult;
 }): ReactNode {
+  // The server marks the matched words in the snippet's source text. The snippet renders as
+  // Markdown (the text someone wrote, with its bold and code and references), which cannot
+  // carry those marks through the parse, so the preview puts them back on the rendered text.
+  // `ts_headline` returns a body whole when it fits its 24-word window, and cuts a longer one
+  // to that window around the match; a cut can open a mark at either end, and the delimiter it
+  // left goes before the parse (`balanceCutMarkdown`, which leaves a run CommonMark reads as
+  // literal alone). The hits are matched by their words, so the display text can change.
   const segments = snippetSegments(result.snippet);
-  let segmentStart = 0;
+  const source = segments.map((segment) => segment.text).join("");
+  const snippet = searchSnippetMarkdown(source);
+  const hits = segments.flatMap((segment) => (segment.mark ? [segment.text] : []));
 
   return (
     <PaletteOption
@@ -215,23 +226,13 @@ function ResultOption({
           <span className="truncate">{result.artifact.name}</span>
         )}
       </div>
-      <p
-        className={`mt-1 line-clamp-2 text-sm ${
-          muted ? textMutedOnSelectedCard : textPrimaryOnSurface
-        }`}
-      >
-        {segments.map((segment) => {
-          const key = `${segmentStart}-${segment.mark}`;
-          segmentStart += segment.text.length;
-          return segment.mark ? (
-            <mark className={`rounded px-0.5 ${searchHitBg} ${searchHitText}`} key={key}>
-              {segment.text}
-            </mark>
-          ) : (
-            <Fragment key={key}>{segment.text}</Fragment>
-          );
-        })}
-      </p>
+      <MarkdownPreview
+        className={`mt-1 text-sm ${muted ? textMutedOnSelectedCard : textPrimaryOnSurface}`}
+        highlight={hits}
+        highlightClassName={`rounded px-0.5 ${searchHitBg} ${searchHitText}`}
+        lines={2}
+        markdown={snippet}
+      />
     </PaletteOption>
   );
 }

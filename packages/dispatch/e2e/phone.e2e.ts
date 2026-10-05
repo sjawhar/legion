@@ -538,22 +538,30 @@ test("an inline link keeps its line and grows its hit box without covering its n
  *  An inline box clips nothing (`overflow` does not apply to it), so it is not counted: from
  *  1280 px a link is a block and the `TruncatedText` span inside it stays inline, and Firefox
  *  reports that span's `scrollWidth` as its text's width beside a `clientWidth` of 0, where
- *  Chromium and WebKit report 0 for both. */
+ *  Chromium and WebKit report 0 for both. A `MarkdownPreview` clips with a line clamp instead
+ *  (`-webkit-line-clamp`, which draws its own ellipsis at the last line and overflows
+ *  vertically rather than horizontally); Chromium reports the clamped box's display as
+ *  `flow-root`, so the clamp is read from its own property. */
 async function expectEllipsis(link: Locator): Promise<void> {
   const state = await link.evaluate((node) => {
     const clippers = [node, ...node.querySelectorAll("*")].filter((element) => {
       const style = getComputedStyle(element);
+      const clamped = style.webkitLineClamp !== "none";
       return (
         style.display !== "inline" &&
-        element.scrollWidth > element.clientWidth &&
-        style.overflowX === "hidden"
+        (clamped
+          ? element.scrollHeight > element.clientHeight
+          : element.scrollWidth > element.clientWidth) &&
+        (clamped ? style.overflow === "hidden" : style.overflowX === "hidden")
       );
     });
     const container = node.parentElement?.getBoundingClientRect();
     return {
       clipperStyles: clippers.map((element) => {
         const style = getComputedStyle(element);
-        return `${style.display}/${style.textOverflow}`;
+        return style.webkitLineClamp === "none"
+          ? `${style.display}/${style.textOverflow}`
+          : `clamp/${style.webkitLineClamp}`;
       }),
       overflowsContainer:
         container === undefined || node.getBoundingClientRect().right > container.right + 0.5,
@@ -562,7 +570,7 @@ async function expectEllipsis(link: Locator): Promise<void> {
   expect.soft(state.overflowsContainer).toBe(false);
   expect.soft(state.clipperStyles.length).toBeGreaterThan(0);
   for (const style of state.clipperStyles) {
-    expect.soft(style).toMatch(/^(block|inline-block)\/ellipsis$/);
+    expect.soft(style).toMatch(/^((block|inline-block)\/ellipsis|clamp\/\d+)$/);
   }
 }
 
@@ -726,7 +734,9 @@ test("a long name ends in an ellipsis wherever a link or control truncates it", 
     await expectEllipsis(agentName);
     await expect.soft(agentName).toHaveAttribute("title", longTitle);
 
-    // A sent broadcast's row: the metadata line, then the message's first line under it.
+    // A sent broadcast's row: the metadata line, then the message's first line under it, cut
+    // by a one-line clamp. Its hover title is the message as plain words (the preview renders
+    // the Markdown, so the source's syntax is never what the reader hovers over).
     await page.goto("/agents/broadcasts");
     const broadcastRow = page
       .getByRole("region", { name: "Broadcasts" })
@@ -735,7 +745,7 @@ test("a long name ends in an ellipsis wherever a link or control truncates it", 
     await expectEllipsis(broadcastRow);
     await expectStacked(broadcastRow);
     await expect
-      .soft(broadcastRow.getByText(longBroadcast, { exact: true }))
+      .soft(broadcastRow.locator("[data-markdown-preview]"))
       .toHaveAttribute("title", longBroadcast);
   } finally {
     await context.close();

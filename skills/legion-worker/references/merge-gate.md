@@ -6,11 +6,13 @@ path it cites is in sjawhar/legion.
 
 The order, in full: the tester's evidence green → the reviewer's approval of the head →
 retro → the merger's READY → the human merge → the implementer's production check. No role
-removes `.legion/` before the merge: the approved head carries it, and the operator removes it
-from the default branch after the merge. After the approval, only retro's `docs/solutions/`
-commit leaves it standing on its own (*Retro*, below). A conflict-forced merge goes back to the
-reviewer for a confirmation or a new round, as the fingerprint decides (*The reviewer*, below,
-and `skill://legion-worker/references/conflicts-and-rewrites.md`), and any other change voids it.
+removes `.legion/` before the merge: the approved head carries it. The daemon strips whatever
+`.legion/` main still carries from the next issue's branch before any of its roles start
+(dispatch://LEGION-565), so that tree's own merge carries the removal onto the default branch; no
+operator sweep follows. After the approval, only retro's `docs/solutions/` commit leaves it
+standing on its own (*Retro*, below). A conflict-forced merge goes back to the reviewer for a
+confirmation or a new round, as the fingerprint decides (*The reviewer*, below, and
+`skill://legion-worker/references/conflicts-and-rewrites.md`), and any other change voids it.
 
 ## The reviewer
 

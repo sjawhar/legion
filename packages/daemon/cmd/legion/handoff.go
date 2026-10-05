@@ -77,13 +77,13 @@ func runHandoffWrite(_ context.Context, args []string, stdout, stderr io.Writer)
 		return 1
 	}
 	var carried []string
-	for _, reserved := range []string{"schemaVersion", "phase", "completed"} {
+	for _, reserved := range []string{"schemaVersion", "phase", "completed", "issue"} {
 		if _, present := payload[reserved]; present {
 			carried = append(carried, reserved)
 		}
 	}
 	if len(carried) > 0 {
-		fmt.Fprintf(stderr, "legion handoff write: data carries %s, which this command writes itself (schemaVersion, phase and completed); send only the phase's own fields\n", strings.Join(carried, ", "))
+		fmt.Fprintf(stderr, "legion handoff write: data carries %s, which this command writes itself (schemaVersion, phase, completed and issue); send only the phase's own fields\n", strings.Join(carried, ", "))
 		return 1
 	}
 	if problems := handoffWriteProblems(*phase, payload); len(problems) > 0 {
@@ -95,7 +95,7 @@ func runHandoffWrite(_ context.Context, args []string, stdout, stderr io.Writer)
 		fmt.Fprintf(stderr, "legion handoff write: %v\n", err)
 		return 1
 	}
-	payload["schemaVersion"], payload["phase"], payload["completed"] = 1, *phase, time.Now().UTC().Format(time.RFC3339Nano)
+	payload["schemaVersion"], payload["phase"], payload["completed"], payload["issue"] = 1, *phase, time.Now().UTC().Format(time.RFC3339Nano), os.Getenv("LEGION_ISSUE")
 	path := filepath.Join(workspace, ".legion", *phase+".json")
 	if err := atomicJSON(path, payload); err != nil {
 		fmt.Fprintf(stderr, "legion handoff write: %v\n", err)
@@ -121,9 +121,14 @@ func runHandoffRead(_ context.Context, args []string, stdout, stderr io.Writer) 
 		return 1
 	}
 	if *phase != "" {
-		value, err := readHandoff(filepath.Join(workspace, ".legion", *phase+".json"))
+		path := filepath.Join(workspace, ".legion", *phase+".json")
+		value, err := readHandoff(path)
 		if err != nil {
 			fmt.Fprintf(stderr, "legion handoff read: %v\n", err)
+			return 1
+		}
+		if foreign, owner := foreignHandoff(value); foreign {
+			fmt.Fprintf(stderr, "legion handoff read: %s was written by %s, not this tree (%s); treating it as absent\n", path, owner, os.Getenv("LEGION_ISSUE"))
 			return 1
 		}
 		writeIndentedJSON(stdout, value)
@@ -132,12 +137,40 @@ func runHandoffRead(_ context.Context, args []string, stdout, stderr io.Writer) 
 	all := map[string]any{}
 	for phase := range handoffPhases {
 		path := filepath.Join(workspace, ".legion", phase+".json")
-		if value, err := readHandoff(path); err == nil {
-			all[phase] = value
+		value, err := readHandoff(path)
+		if err != nil {
+			continue
 		}
+		if foreign, owner := foreignHandoff(value); foreign {
+			fmt.Fprintf(stderr, "legion handoff read: %s was written by %s, not this tree (%s); skipped\n", path, owner, os.Getenv("LEGION_ISSUE"))
+			continue
+		}
+		all[phase] = value
 	}
 	writeIndentedJSON(stdout, all)
 	return 0
+}
+
+// foreignHandoff is whether value's stamped "issue" field (legion handoff write's own, never a
+// caller's: runHandoffWrite refuses one supplied in --data) differs from this pane's own
+// (LEGION_ISSUE), with the stamped issue for the message. Only a handoff legion handoff write
+// wrote after it started stamping "issue" can be foreign: a handoff from before this change, or any
+// read with LEGION_ISSUE unset (a scratch run outside a pane), is never foreign — dispatch://LEGION-565
+// 's branch-creation fix is what keeps those out of a fresh tree's workspace in the first place.
+func foreignHandoff(value any) (bool, string) {
+	current := os.Getenv("LEGION_ISSUE")
+	if current == "" {
+		return false, ""
+	}
+	fields, ok := value.(map[string]any)
+	if !ok {
+		return false, ""
+	}
+	owner, _ := fields["issue"].(string)
+	if owner == "" || owner == current {
+		return false, ""
+	}
+	return true, owner
 }
 
 func runHandoffComplete(ctx context.Context, args []string, stdout, stderr io.Writer) int {
