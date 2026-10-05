@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/sjawhar/envoy/internal/dispatch/retry"
 )
 
 // countingEmbedder answers errs in order (one per call, the last repeats once exhausted) and
@@ -97,15 +99,15 @@ func TestRateLimitedEmbedderNeverBacksOffPastTheCeiling(t *testing.T) {
 	throttleErr := throttleError{code: "ThrottlingException"}
 	inner := &countingEmbedder{}
 	limiter := NewRateLimitedEmbedder(inner)
-	limiter.interval = rateLimitCeiling / 2
+	limiter.interval = retry.MaxDelay / 2
 
 	ctx := context.Background()
 	inner.errs = []error{throttleErr}
 	if _, err := limiter.Embed(ctx, []string{"x"}, InputDocument); !errors.Is(err, throttleErr) {
 		t.Fatalf("Embed error = %v, want the throttle error", err)
 	}
-	if got := limiter.Interval(); got != rateLimitCeiling {
-		t.Errorf("Interval() after doubling past the ceiling = %v, want %v (capped)", got, rateLimitCeiling)
+	if got := limiter.Interval(); got != retry.MaxDelay {
+		t.Errorf("Interval() after doubling past the ceiling = %v, want %v (capped)", got, retry.MaxDelay)
 	}
 }
 

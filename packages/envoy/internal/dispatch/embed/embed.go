@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/aws/retry"
@@ -42,6 +43,25 @@ const (
 	// already uses, not a tight limit.
 	maxInputChars = 32000
 )
+
+// EstimateTokens estimates how many tokens texts will cost one Bedrock InvokeModel call, at the
+// same truncation this package applies before sending (maxInputChars, by rune count exactly as
+// text.HeadRunes truncates) and the same rough characters-per-token ratio this PR's own "Bedrock
+// capacity" measurement used (4 characters/token, a standard order-of-magnitude estimate for
+// English prose - not Cohere's own tokenizer, which only Bedrock itself has). Good enough to
+// pace a shared token-rate budget (embedqueue's reserveTokens); never exact.
+func EstimateTokens(texts []string) int {
+	const charsPerToken = 4
+	total := 0
+	for _, t := range texts {
+		n := utf8.RuneCountInString(t)
+		if n > maxInputChars {
+			n = maxInputChars
+		}
+		total += n
+	}
+	return total / charsPerToken
+}
 
 // InputType is Cohere's asymmetric embedding mode: a stored document is embedded differently
 // from the query that will later search for it.

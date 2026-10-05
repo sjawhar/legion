@@ -4,6 +4,8 @@ import (
 	"context"
 	"sync"
 	"time"
+
+	"github.com/sjawhar/envoy/internal/dispatch/retry"
 )
 
 const (
@@ -13,13 +15,12 @@ const (
 	// goes through this limiter at all (cmd/dispatch wires the unwrapped *Client there) - the
 	// measurement behind this number is in this PR's own body, "Bedrock capacity" (LEGION-549
 	// round 5): the account's per-minute token quota for Cohere Embed v4 on Bedrock, and the
-	// sustained batch rate a live run against it actually held before throttling.
-	rateLimitFloor = 750 * time.Millisecond
-	// rateLimitCeiling is the slowest this limiter ever paces calls to, reached only after
-	// several consecutive throttled batches in a row; matches embedqueue's own batchBackoff
-	// ceiling order of magnitude so the two mechanisms agree on how bad "sustained throttling"
+	// sustained batch rate a live run against it actually held before throttling. The slowest this
+	// limiter ever paces calls to, reached only after several consecutive throttled batches in a
+	// row, is retry.MaxDelay (not a duplicate constant of its own): the same ceiling embedqueue's
+	// own batchBackoff already uses, so the two mechanisms agree on how bad "sustained throttling"
 	// gets before both are maxed out.
-	rateLimitCeiling = 5 * time.Minute
+	rateLimitFloor = 750 * time.Millisecond
 	// rateLimitRecoveryStep is how much one successful (non-throttled) call shortens the interval
 	// by - additive increase, the slow half of AIMD: recovering one small step at a time, rather
 	// than snapping back to rateLimitFloor the moment Bedrock answers once, means a provider that
@@ -77,11 +78,18 @@ func (r *RateLimitedEmbedder) Embed(ctx context.Context, texts []string, inputTy
 }
 
 // pace blocks until this call is at least Interval() after the previous one started, or returns
-// false without waiting out the rest of it if ctx ends first.
+// false without waiting out the rest of it if ctx ends first. It holds the lock for its whole
+// body, wait and update included, rather than releasing it between computing wait and setting
+// last: a caller the way embedqueue uses this (one poller goroutine, one backfill goroutine, but
+// never both against the same limiter at once today) never contends it, but correctness here
+// does not depend on that - two concurrent callers would otherwise both read last before either
+// wrote it back and could both wait the same, shorter-than-intended interval before the lock-less
+// window closed. Holding one lock is cheap and makes the pacing correct regardless of how many
+// goroutines ever call Embed concurrently.
 func (r *RateLimitedEmbedder) pace(ctx context.Context) bool {
 	r.mu.Lock()
+	defer r.mu.Unlock()
 	wait := r.interval - time.Since(r.last)
-	r.mu.Unlock()
 	if wait > 0 {
 		timer := time.NewTimer(wait)
 		defer timer.Stop()
@@ -91,9 +99,7 @@ func (r *RateLimitedEmbedder) pace(ctx context.Context) bool {
 		case <-timer.C:
 		}
 	}
-	r.mu.Lock()
 	r.last = time.Now()
-	r.mu.Unlock()
 	return true
 }
 
@@ -102,8 +108,8 @@ func (r *RateLimitedEmbedder) adjust(err error) {
 	defer r.mu.Unlock()
 	if IsThrottled(err) {
 		r.interval *= rateLimitBackoffFactor
-		if r.interval > rateLimitCeiling {
-			r.interval = rateLimitCeiling
+		if r.interval > retry.MaxDelay {
+			r.interval = retry.MaxDelay
 		}
 		return
 	}

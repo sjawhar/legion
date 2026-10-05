@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -604,5 +605,164 @@ func TestProcessBatchBisectionAbortsOnAThrottleMidway(t *testing.T) {
 	}
 	if dead {
 		t.Error("BSCA-2 dead = true after a throttled batch, want false - a throttle is never evidence about any row")
+	}
+}
+
+// TestProcessBatchNeverDeadLettersAUniformNonThrottledFailureHoweverManyTimesItRecurs is Main's
+// round-6 fix for the bug Qual and Deep both reproduced: an outage embed.IsThrottled does not
+// recognize (expired credentials, a retired model id, an uncoded 5xx) fails every row the same
+// way, non-throttled, all the way down to size 1 - and nothing in the whole batch ever embeds,
+// so none of it is evidence about any row's content. Before this fix, bisectBatch's size-1 case
+// marked every such row permanent on the spot, dead-lettering the whole pending queue in about
+// retry.DeadLetterAttempts cycles. Driven for more cycles than that, after which nothing is dead.
+func TestProcessBatchNeverDeadLettersAUniformNonThrottledFailureHoweverManyTimesItRecurs(t *testing.T) {
+	database := storetest.Open(t)
+	ids := []string{"UNIF-1", "UNIF-2", "UNIF-3", "UNIF-4", "UNIF-5", "UNIF-6", "UNIF-7", "UNIF-8"}
+	for _, id := range ids {
+		seedIssue(t, database, "UNIF", id, "Title for "+id)
+	}
+	embedder := &fakeEmbedder{err: errors.New("embed: expired credentials (simulated systemic outage)")}
+	deps := Deps{Store: database, Embedder: embedder}
+
+	for i := range retry.DeadLetterAttempts + 5 {
+		for _, id := range ids {
+			forceEligible(t, database, "issue", id)
+		}
+		succeeded, failed, _, throttled, err := ProcessBatch(context.Background(), deps)
+		if err != nil {
+			t.Fatalf("ProcessBatch cycle %d: %v", i, err)
+		}
+		if succeeded != 0 {
+			t.Errorf("cycle %d: succeeded = %d, want 0 - the embedder never succeeds", i, succeeded)
+		}
+		if failed != len(ids) {
+			t.Errorf("cycle %d: failed = %d, want %d", i, failed, len(ids))
+		}
+		if throttled {
+			t.Errorf("cycle %d: throttled = true, want false - this error is not one of IsThrottled's codes", i)
+		}
+	}
+	for _, id := range ids {
+		var dead bool
+		if err := database.Pool.QueryRow(context.Background(),
+			`select dead from embeddings where kind = 'issue' and id = $1`, id,
+		).Scan(&dead); err != nil {
+			t.Fatalf("read %s: %v", id, err)
+		}
+		if dead {
+			t.Errorf("%s dead = true after %d uniform-failure cycles, want false - nothing in the batch ever embedded, so this is never evidence about any row's content", id, retry.DeadLetterAttempts+5)
+		}
+	}
+}
+
+// cancelAfterNCallsEmbedder fails every call non-throttled, cancelling its own context exactly
+// once, on call number cancelOn, to stand in for a context ending mid-bisection (as
+// embed.RateLimitedEmbedder.pace() returning false does in production) without needing real
+// timing or concurrency.
+type cancelAfterNCallsEmbedder struct {
+	cancelOn int
+	cancel   context.CancelFunc
+	calls    int
+}
+
+func (e *cancelAfterNCallsEmbedder) Embed(_ context.Context, _ []string, _ embed.InputType) ([][]float32, error) {
+	e.calls++
+	if e.calls == e.cancelOn {
+		e.cancel()
+	}
+	return nil, errors.New("simulated: a non-throttled embed failure")
+}
+
+// TestProcessBatchNeverMarksARowPermanentWhenItsContextEndsMidBisection is Main's round-6
+// cancellation case: whatever error text comes back, a call that failed because its own context
+// ended while it was in flight is never evidence about any row's content, independent of whether
+// some other row already succeeded.
+func TestProcessBatchNeverMarksARowPermanentWhenItsContextEndsMidBisection(t *testing.T) {
+	database := storetest.Open(t)
+	ids := []string{"CNCL-1", "CNCL-2", "CNCL-3", "CNCL-4"}
+	for i, id := range ids {
+		seedIssue(t, database, "CNCL", id, fmt.Sprintf("A title %d", i))
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	embedder := &cancelAfterNCallsEmbedder{cancelOn: 2, cancel: cancel}
+	deps := Deps{Store: database, Embedder: embedder}
+
+	succeeded, failed, _, throttled, err := ProcessBatch(ctx, deps)
+	if err != nil {
+		t.Fatalf("ProcessBatch: %v", err)
+	}
+	if succeeded != 0 {
+		t.Errorf("succeeded = %d, want 0", succeeded)
+	}
+	if failed != len(ids) {
+		t.Errorf("failed = %d, want %d", failed, len(ids))
+	}
+	if throttled {
+		t.Error("throttled = true, want false - this is a cancellation, not a throttle")
+	}
+	for _, id := range ids {
+		var dead bool
+		if err := database.Pool.QueryRow(context.Background(),
+			`select dead from embeddings where kind = 'issue' and id = $1`, id,
+		).Scan(&dead); err != nil {
+			t.Fatalf("read %s: %v", id, err)
+		}
+		if dead {
+			t.Errorf("%s dead = true after a context cancellation mid-bisection, want false - a cancellation is never evidence about any row's content", id)
+		}
+	}
+}
+
+// TestClaimRenewalExtendsNextAttemptAtPastClaimWindow is Main's round-6 fix for Deep's
+// measurement (2m22.8s to fully bisect a 96-row batch every one of whose rows failed, longer
+// than claimWindow's 2 minutes): a renewal due (its own last renewal older than
+// renewClaimInterval) pushes next_attempt_at at least claimWindow past the moment it runs.
+func TestClaimRenewalExtendsNextAttemptAtPastClaimWindow(t *testing.T) {
+	database := storetest.Open(t)
+	seedIssue(t, database, "RNWL", "RNWL-1", "A title")
+	ctx := context.Background()
+	renewal := newClaimRenewal(Deps{Store: database}, []pendingRow{{kind: "issue", id: "RNWL-1"}})
+	renewal.last = time.Now().Add(-renewClaimInterval - time.Second)
+	before := time.Now()
+	renewal.renew(ctx)
+	var nextAttempt time.Time
+	if err := database.Pool.QueryRow(ctx,
+		`select next_attempt_at from embeddings where kind = 'issue' and id = 'RNWL-1'`,
+	).Scan(&nextAttempt); err != nil {
+		t.Fatalf("read next_attempt_at: %v", err)
+	}
+	if !nextAttempt.After(before.Add(claimWindow - time.Second)) {
+		t.Errorf("next_attempt_at = %v, want at least claimWindow (%v) past %v", nextAttempt, claimWindow, before)
+	}
+}
+
+// TestReserveTokensSharesItsBudgetAcrossConnections is Main's round-6 cross-process fix (item 3
+// and item 7 share this root): embeddings_rate_limit (migration 0077) is one row in the shared
+// database, not in-process memory, so two distinct Deps values - standing in for the server's
+// poller and a separately run `backfill-embeddings`, two OS processes that share nothing else -
+// draw from, and wait out debt against, the very same budget.
+func TestReserveTokensSharesItsBudgetAcrossConnections(t *testing.T) {
+	database := storetest.Open(t)
+	ctx := context.Background()
+	const ceiling = 120 // tokens/minute = 2 tokens/second, so a small deficit waits a short, deterministic time
+
+	// A direct write stands in for a first process's own reservation having already returned,
+	// leaving the shared row at a 2-token deficit - deliberately not reserveTokens' own blocking
+	// call, which would wait out exactly the debt it created and read back near zero by the time
+	// a second reservation ran right after it, proving nothing about whether the row's state is
+	// actually shared.
+	if _, err := database.Pool.Exec(ctx, `update embeddings_rate_limit set tokens_available = -2, last_refill_at = now()`); err != nil {
+		t.Fatalf("seed an existing deficit: %v", err)
+	}
+
+	// A second, distinct Deps value - sharing no in-memory state with whatever wrote that
+	// deficit, standing in for a second OS process - reserves 2 more tokens and must wait out
+	// the existing deficit plus its own: 4 tokens at 2/second, about 2 seconds.
+	started := time.Now()
+	reserveTokens(ctx, Deps{Store: database}, 2, ceiling)
+	elapsed := time.Since(started)
+	if elapsed < 1500*time.Millisecond {
+		t.Errorf("reservation waited %v, want at least ~2s (the pre-existing 2-token deficit plus its own 2-token request, at 2 tokens/sec) - it should have read the shared row's existing debt from a separate writer, not started fresh", elapsed)
 	}
 }

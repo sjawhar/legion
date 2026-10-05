@@ -15,6 +15,17 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
+// fakeThrottleError stands in for a genuine Bedrock ThrottlingException well enough for
+// embed.IsThrottled to actually classify it as one (round-6 fix: a plain errors.New here never
+// drove TestSearchStaysNonDegradedWhileEmbedqueueIsThrottled's embed.RateLimitedEmbedder through
+// its AIMD backoff path at all, since IsThrottled requires the AWS SDK's own ErrorCode() check to
+// recognize it - the test looked like it proved the limiter backs off under throttling without
+// ever actually exercising that code path).
+type fakeThrottleError struct{}
+
+func (fakeThrottleError) Error() string     { return "simulated: ThrottlingException" }
+func (fakeThrottleError) ErrorCode() string { return "ThrottlingException" }
+
 // fakeEmbedder is a deterministic, text-keyed stand-in for Cohere (LEGION-549's tests use a fake
 // embedder, never the real API): Embed looks every text up in vectors and answers its mapped
 // vector, or defaultVector() (cosine 0 with every query this file embeds, well below
@@ -153,7 +164,7 @@ func TestSearchStaysNonDegradedWhileEmbedqueueIsThrottled(t *testing.T) {
 	// InputDocument call throttles, forever; InputQuery (a live query's own embedding) keeps
 	// succeeding. A second issue, created only now, gives embedqueue perpetual pending work to
 	// retry and back off on for the rest of the test - exactly a saturating backfill in progress.
-	throttleErr := errors.New("bedrock: simulated sustained throttle (document batches)")
+	throttleErr := fakeThrottleError{}
 	embedder.errFor = map[embed.InputType]error{embed.InputDocument: throttleErr}
 	createInteractionIssue(t, handler, "SAT", "Other bulk content that never finishes embedding", "Body.")
 

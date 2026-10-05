@@ -190,3 +190,21 @@ func TestIsThrottledDoesNotMisclassifyAnOrdinaryError(t *testing.T) {
 		t.Error("IsThrottled(ValidationException) = true, want false - a bad request is not a throttle")
 	}
 }
+
+// TestEstimateTokensTruncatesAndDividesByFourCharsPerToken proves EstimateTokens matches the
+// same truncation Embed itself applies (maxInputChars, by rune count) and the 4-chars/token
+// ratio this PR's own "Bedrock capacity" measurement used - the basis for embedqueue's shared
+// token-rate budget (reserveTokens).
+func TestEstimateTokensTruncatesAndDividesByFourCharsPerToken(t *testing.T) {
+	short := strings.Repeat("x", 40)
+	if got, want := EstimateTokens([]string{short}), 10; got != want {
+		t.Errorf("EstimateTokens(%d chars) = %d, want %d", len(short), got, want)
+	}
+	long := strings.Repeat("y", maxInputChars+8000)
+	if got, want := EstimateTokens([]string{long}), maxInputChars/4; got != want {
+		t.Errorf("EstimateTokens(a text over maxInputChars) = %d, want %d (truncated to maxInputChars first)", got, want)
+	}
+	if got, want := EstimateTokens([]string{short, short}), 20; got != want {
+		t.Errorf("EstimateTokens(two short texts) = %d, want %d (summed across the batch)", got, want)
+	}
+}

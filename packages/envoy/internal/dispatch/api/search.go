@@ -126,9 +126,9 @@ select t.total, t.reachable, r.kind, case when r.owner_artifact_id is null then 
          q.tsq, $5) as headline
   from totals t cross join q
   left join (page r left join artifacts ar on ar.id = r.artifact_id) on true
-  -- Mirrors the kind arms in searchKeywordLegsSQL above (issue/document/comment/ask/message ->
-  -- table and text column); the two must stay in sync. issue reuses r.issue_title, already
-  -- carried from the same issues row by kinds, rather than re-reading it.
+  -- Mirrors the kind arms in kinds above (issue/document/comment/ask/message -> table and text
+  -- column); the two must stay in sync. issue reuses r.issue_title, already carried from the
+  -- same issues row by kinds, rather than re-reading it.
   left join lateral (
     select case r.kind
       when 'issue' then r.issue_title
