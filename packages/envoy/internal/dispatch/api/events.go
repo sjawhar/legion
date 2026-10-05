@@ -344,7 +344,7 @@ func (s *server) attachAskEventFields(ctx context.Context, events []model.Event)
 		payloads[index].payload["opened_event_id"] = *asks[index].OpenedEventID
 		payloads[index].payload[model.ReferencedByCountKey] = *asks[index].ReferencedByCount
 	}
-	if err := s.attachAskAnchorArtifacts(ctx, payloads); err != nil {
+	if err := s.attachAskDocumentArtifacts(ctx, payloads); err != nil {
 		return err
 	}
 	for _, payload := range payloads {
@@ -357,15 +357,21 @@ func (s *server) attachAskEventFields(ctx context.Context, events []model.Event)
 	return nil
 }
 
-func (s *server) attachAskAnchorArtifacts(ctx context.Context, eventPayloads []decodedAskEventPayload) error {
+// attachAskDocumentArtifacts hydrates anchor_artifact and approval_artifact on every ask event
+// payload that names one, the same live lookup ask_rows.go's scanAskRow does for a read: an
+// anchored ask's quoted document, or an approval request's document, both resolved by their
+// current slug and primary flag rather than a value frozen at write time.
+func (s *server) attachAskDocumentArtifacts(ctx context.Context, eventPayloads []decodedAskEventPayload) error {
 	payloads := map[string][]decodedAskEventPayload{}
 	for _, eventPayload := range eventPayloads {
 		payload := eventPayload.payload
-		if payload["anchor"] == nil {
+		_, hasAnchor := payload["anchor"].(map[string]any)
+		_, hasApproval := payload["approval"].(map[string]any)
+		if !hasAnchor && !hasApproval {
+			if payload["anchor"] != nil {
+				return fmt.Errorf("decode %s payload: anchor must be an object", eventPayload.event.Type)
+			}
 			continue
-		}
-		if _, ok := payload["anchor"].(map[string]any); !ok {
-			return fmt.Errorf("decode %s payload: anchor must be an object", eventPayload.event.Type)
 		}
 		askID, ok := payload["id"].(string)
 		if !ok || askID == "" {
@@ -381,41 +387,50 @@ func (s *server) attachAskAnchorArtifacts(ctx context.Context, eventPayloads []d
 		askIDs = append(askIDs, askID)
 	}
 	rows, err := s.deps.Store.Pool.Query(ctx, `
-		select a.id::text, aa.project_key, aa.slug, aa.name, aa.is_primary
+		select a.id::text, aa.project_key, aa.slug, aa.name, aa.is_primary,
+			pa.project_key, pa.slug, pa.name, pa.is_primary
 		from asks a
 		left join artifacts aa on aa.id = (a.anchor->>'artifact_id')::uuid
+		left join artifacts pa on pa.id = (a.approval->>'artifact_id')::uuid
 		where a.id::text = any($1)
 	`, askIDs)
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
-	artifacts := make(map[string]model.AskAnchorArtifact, len(payloads))
+	anchorArtifacts := make(map[string]model.AskAnchorArtifact, len(payloads))
+	approvalArtifacts := make(map[string]model.AskAnchorArtifact, len(payloads))
 	for rows.Next() {
 		var askID string
-		var project, slug, name *string
-		var primary *bool
-		if err := rows.Scan(&askID, &project, &slug, &name, &primary); err != nil {
+		var anchor, approval nullableAskArtifactRef
+		if err := rows.Scan(
+			&askID,
+			&anchor.project, &anchor.slug, &anchor.name, &anchor.primary,
+			&approval.project, &approval.slug, &approval.name, &approval.primary,
+		); err != nil {
 			return err
 		}
-		if project != nil {
-			artifacts[askID] = model.AskAnchorArtifact{
-				Project: *project,
-				Slug:    *slug,
-				Name:    *name,
-				Primary: *primary,
-			}
+		if artifact := anchor.artifact(); artifact != nil {
+			anchorArtifacts[askID] = *artifact
+		}
+		if artifact := approval.artifact(); artifact != nil {
+			approvalArtifacts[askID] = *artifact
 		}
 	}
 	if err := rows.Err(); err != nil {
 		return err
 	}
 	for askID, asks := range payloads {
-		artifact, found := artifacts[askID]
+		anchorArtifact, anchorFound := anchorArtifacts[askID]
+		approvalArtifact, approvalFound := approvalArtifacts[askID]
 		for _, ask := range asks {
 			delete(ask.payload, "anchor_artifact")
-			if found {
-				ask.payload["anchor_artifact"] = artifact
+			delete(ask.payload, "approval_artifact")
+			if anchorFound {
+				ask.payload["anchor_artifact"] = anchorArtifact
+			}
+			if approvalFound {
+				ask.payload["approval_artifact"] = approvalArtifact
 			}
 		}
 	}
