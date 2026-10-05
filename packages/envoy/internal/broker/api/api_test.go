@@ -1065,3 +1065,34 @@ func TestPathValidation(t *testing.T) {
 		t.Fatalf("code = %q, want GRANT_ID_INPUT", werr.Code)
 	}
 }
+
+// TestALauncherCredentialRefusalRoundsRetryAfterUp pins that the machine-login route names its
+// Retry-After by the rule the reread route does: whole seconds rounded up, so a caller told to
+// wait does not come back before a token has returned.
+func TestALauncherCredentialRefusalRoundsRetryAfterUp(t *testing.T) {
+	ts := newTestServerWith(t, func(d *api.Deps) {
+		d.LauncherLimits = &api.LauncherLimits{
+			PerAddress:  ratelimit.Limit{Every: 1500 * time.Millisecond, Burst: 1},
+			PerOperator: ratelimit.Limit{Every: 1500 * time.Millisecond, Burst: 1},
+		}
+	})
+	login := func() (int, string) {
+		t.Helper()
+		body, err := json.Marshal(map[string]any{"request": signMachineLoginRequest(t, newSigningKey(t), ts.URL, testApprover, "example-host-devbox")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := http.Post(ts.URL+"/v1/launcher-credentials", "application/json", bytes.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		return resp.StatusCode, resp.Header.Get("Retry-After")
+	}
+	if status, _ := login(); status != http.StatusAccepted {
+		t.Fatalf("first machine login = %d, want 202", status)
+	}
+	if status, retryAfter := login(); status != http.StatusTooManyRequests || retryAfter != "2" {
+		t.Fatalf("second machine login = %d Retry-After=%q, want 429 with Retry-After 2 (1.5 s rounded up)", status, retryAfter)
+	}
+}

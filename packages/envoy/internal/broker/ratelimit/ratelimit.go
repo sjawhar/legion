@@ -31,6 +31,9 @@ func NewKeyed(limit Limit) *Keyed {
 	return &Keyed{limit: limit, buckets: map[string]*rate.Limiter{}}
 }
 
+// Every is how often each of k's buckets gains a request back: how long a refused caller waits.
+func (k *Keyed) Every() time.Duration { return k.limit.Every }
+
 // Allow takes one request from key's bucket now, reporting false when it has none left.
 func (k *Keyed) Allow(key string) bool {
 	return k.AllowAt(key, time.Now())

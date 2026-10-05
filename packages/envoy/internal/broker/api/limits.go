@@ -43,7 +43,6 @@ var DefaultRereadOverallLimit = ratelimit.Limit{Every: 250 * time.Millisecond, B
 
 type launcherLimiter struct {
 	perAddress, perOperator *ratelimit.Keyed
-	retryAfter              time.Duration
 	// trustedProxyHeader is BROKER_TRUSTED_PROXY_HEADER: empty means every caller reaches the
 	// broker directly, so perAddress keys on r.RemoteAddr. Set only behind a trusted reverse
 	// proxy that itself sets this header on every forwarded request (see clientAddress).
@@ -54,7 +53,6 @@ func newLauncherLimiter(limits LauncherLimits, trustedProxyHeader string) *launc
 	return &launcherLimiter{
 		perAddress:         ratelimit.NewKeyed(limits.PerAddress),
 		perOperator:        ratelimit.NewKeyed(limits.PerOperator),
-		retryAfter:         max(limits.PerAddress.Every, limits.PerOperator.Every),
 		trustedProxyHeader: trustedProxyHeader,
 	}
 }
@@ -85,7 +83,7 @@ func clientAddress(r *http.Request, trustedProxyHeader string) string {
 }
 
 // refuse writes 429 RATE_LIMITED and reports true when r's source address, or the operator it
-// names, has no request left in its bucket.
+// names, has no request left in its bucket, with the Retry-After of the slower of the two buckets.
 //
 // The per-operator bucket, keyed on the request body's own "operator" field rather than the
 // caller's address, is unaffected by trustedProxyHeader and remains a smaller, accepted risk: an
@@ -98,8 +96,7 @@ func (l *launcherLimiter) refuse(w http.ResponseWriter, r *http.Request, operato
 	if l.perAddress.AllowAt(address, now) && l.perOperator.AllowAt(operator, now) {
 		return false
 	}
-	w.Header().Set("Retry-After", strconv.Itoa(int(l.retryAfter.Seconds())))
-	writeError(w, http.StatusTooManyRequests, "RATE_LIMITED", "too many launcher credential requests; try again later")
+	refuseWithRetryAfter(w, max(l.perAddress.Every(), l.perOperator.Every()), "too many launcher credential requests; try again later")
 	return true
 }
 
