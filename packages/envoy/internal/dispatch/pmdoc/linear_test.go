@@ -8,33 +8,77 @@ import (
 )
 
 // Parse and Render finish in time linear in the text on the shapes that cost quadratic time
-// before LEGION-465. Each bound is at least ten times the time measured after the fix on a
-// development machine (parse: `a_` 0.3 s, `a_b*` 2 s, `a~b_` 1 s per MiB; render of 4 MiB: `[a`
-// 1.4 s, `a_b&` 0.4 s, `<a` 1.3 s, `[^a` 1.0 s) and well under the time before it (parse of 1 MiB
-// of `a_`: about 4 minutes; of `a_b*`: 12 minutes; render of 4 MiB of `[a`: minutes). A caller's
-// write of a mebibyte of these is refused for the elements it makes (MaxDocumentElements), so the
-// parse here is a read-back's, which counts none and reads all of it.
+// before LEGION-465. Each shape runs at half its target size first, in the same process under
+// whatever the box's current conditions are, and the target size's time is checked against a
+// budget scaled off that - not a fixed wall-clock bound - so -race's per-access overhead and box
+// load, which inflate both measurements by roughly the same factor, cannot flake this
+// (LEGION-569: a loaded box pushed `a_`'s fixed 30 s bound past the worst case this margin was
+// sized for). A write of a mebibyte of these is refused for the elements it makes
+// (MaxDocumentElements), so the parse here is a read-back's, which counts none and reads all of
+// it.
 func TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText(t *testing.T) {
 	for _, shape := range []string{"a_", "a_b*", "a~b_"} {
-		markdown := strings.Repeat(shape, (1<<20)/len(shape))
-		started := time.Now()
-		if _, err := ParseRendering(markdown); err != nil {
-			t.Fatalf("parse 1 MiB of %q: %v", shape, err)
-		}
-		if elapsed := time.Since(started); elapsed > 30*time.Second {
-			t.Errorf("parse of 1 MiB of %q took %s, want under 30 s", shape, elapsed)
+		full := (1 << 20) / len(shape)
+		small := full / 2
+		smallElapsed := timeIt(t, "parse", shape, small*len(shape), func() error {
+			_, err := ParseRendering(strings.Repeat(shape, small))
+			return err
+		})
+		budget := linearBudget(smallElapsed)
+		if elapsed := timeIt(t, "parse", shape, full*len(shape), func() error {
+			_, err := ParseRendering(strings.Repeat(shape, full))
+			return err
+		}); elapsed > budget {
+			t.Errorf("parse of 1 MiB of %q took %s (half of it took %s), want at most %s", shape, elapsed, smallElapsed, budget)
 		}
 	}
 	for _, shape := range []string{"[a", "a_b&", "<a", "[^a"} {
-		doc := &Node{Type: "doc", Children: []*Node{{Type: "paragraph", Children: []*Node{{Type: "text", Text: strings.Repeat(shape, (4<<20)/len(shape))}}}}}
-		started := time.Now()
-		if _, err := Render(doc); err != nil {
-			t.Fatalf("render 4 MiB of %q: %v", shape, err)
+		full := (4 << 20) / len(shape)
+		small := full / 2
+		doc := func(repeats int) *Node {
+			return &Node{Type: "doc", Children: []*Node{{Type: "paragraph", Children: []*Node{{Type: "text", Text: strings.Repeat(shape, repeats)}}}}}
 		}
-		if elapsed := time.Since(started); elapsed > 30*time.Second {
-			t.Errorf("render of 4 MiB of %q took %s, want under 30 s", shape, elapsed)
+		smallElapsed := timeIt(t, "render", shape, small*len(shape), func() error {
+			_, err := Render(doc(small))
+			return err
+		})
+		budget := linearBudget(smallElapsed)
+		if elapsed := timeIt(t, "render", shape, full*len(shape), func() error {
+			_, err := Render(doc(full))
+			return err
+		}); elapsed > budget {
+			t.Errorf("render of 4 MiB of %q took %s (half of it took %s), want at most %s", shape, elapsed, smallElapsed, budget)
 		}
 	}
+}
+
+// timeIt runs op, the size of the input it was given, and fails the test if op errors; op's own
+// error names the shape and size, so this only times it.
+func timeIt(t *testing.T, verb, shape string, bytes int, op func() error) time.Duration {
+	t.Helper()
+	started := time.Now()
+	if err := op(); err != nil {
+		t.Fatalf("%s %d bytes of %q: %v", verb, bytes, shape, err)
+	}
+	return time.Since(started)
+}
+
+// linearSlack is how much more than 2x - the size ratio between the two measurements
+// linearBudget compares (full is double small) - a linear operation's time may grow before this
+// calls it quadratic: 2x the size at true linear cost, so 2x time; at the quadratic cost
+// LEGION-465 fixed it would be 4x, which 3x still catches with room to spare for ordinary
+// run-to-run noise. minLinearBudget floors the budget so a near-zero small measurement (GC noise,
+// timer resolution) cannot make it tighter than is reasonable on a loaded box; it is well under
+// the smallest small measurement observed here (14 ms, render of half of 4 MiB of `[a`) so the
+// ratio, not the floor, is what actually bounds the full measurement in the common case.
+const linearSlack = 3
+const minLinearBudget = 100 * time.Millisecond
+
+func linearBudget(small time.Duration) time.Duration {
+	if budget := small * linearSlack; budget > minLinearBudget {
+		return budget
+	}
+	return minLinearBudget
 }
 
 // The shapes a sweep found after the ones above, each quadratic before LEGION-465 finished: a

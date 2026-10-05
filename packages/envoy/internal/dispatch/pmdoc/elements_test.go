@@ -74,24 +74,47 @@ func TestMarkdownPastTheElementLimitIsRefusedBeforeItIsBuilt(t *testing.T) {
 	} {
 		for _, reader := range []struct {
 			name  string
-			parse func(string) error
+			parse func(string, *WriteBudget) error
 		}{
-			{"document", func(markdown string) error { _, err := ParseForWrite(markdown, nil); return err }},
-			{"fragment", func(markdown string) error {
-				_, err := ParseFragment(markdown, false, NewWriteBudget())
+			{"document", func(markdown string, budget *WriteBudget) error {
+				_, err := parseForWrite(markdown, nil, true, budget)
+				return err
+			}},
+			{"fragment", func(markdown string, budget *WriteBudget) error {
+				_, err := ParseFragment(markdown, false, budget)
 				return err
 			}},
 		} {
 			t.Run(shape.name+"/"+reader.name, func(t *testing.T) {
+				budget := NewWriteBudget()
 				var before, after runtime.MemStats
 				runtime.ReadMemStats(&before)
-				err := reader.parse(shape.markdown)
+				err := reader.parse(shape.markdown, budget)
 				runtime.ReadMemStats(&after)
 				if !errors.Is(err, shape.want) {
 					t.Fatalf("a mebibyte of %s: %v, want %v", shape.name, err, shape.want)
 				}
-				if allocated := after.TotalAlloc - before.TotalAlloc; allocated > 160<<20 {
-					t.Errorf("refusing a mebibyte of %s allocated %d MiB, want at most 160 MiB", shape.name, allocated>>20)
+				if shape.want != ErrTooManyElements {
+					// ErrSchema (the nesting guard) stops before the element guard ever counts a
+					// node (nestingRefusal), so there is no node count to check here; its own
+					// allocation stays far under budget regardless of -race or load.
+					if allocated := after.TotalAlloc - before.TotalAlloc; allocated > 160<<20 {
+						t.Errorf("refusing a mebibyte of %s allocated %d MiB, want at most 160 MiB", shape.name, allocated>>20)
+					}
+					return
+				}
+				// The element guard stops goldmark at nodeGuard*MaxDocumentElements nodes however
+				// much markdown is left (elementCount.charge) - a structural cap the parse's own
+				// budget carries, so checking it directly holds under -race's allocator overhead
+				// and under load, where the allocated-bytes check this replaced did not
+				// (LEGION-569): -race alone made refusing a mebibyte of some shapes here allocate
+				// 8-10x what it allocates without it. nodes == 0 would mean the guard never
+				// counted anything - the regression this test exists to catch, a reader that
+				// skips the guard and builds the whole document instead. The upper bound is
+				// generous slack over the guard's own cap for however many nodes one charge call
+				// may add past it.
+				if nodes := budget.elements.nodes; nodes == 0 || nodes > 4*MaxDocumentElements {
+					t.Errorf("refusing a mebibyte of %s counted %d nodes, want >0 and at most %d (nodeGuard's own cap, with slack)", shape.name, nodes, 4*MaxDocumentElements)
 				}
 			})
 		}
