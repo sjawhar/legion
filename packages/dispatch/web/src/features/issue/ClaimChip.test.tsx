@@ -55,6 +55,7 @@ function header(issue: Issue): { unmount: () => void } {
     artifacts: [],
     children: [],
     open_asks: [],
+    progress: { tasks: null, children: null },
     referenced_by_count: 0,
   };
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });

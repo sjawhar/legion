@@ -1,35 +1,32 @@
 # The merge gate: review, retro, READY, and the production check
 
 Part of `skill://legion-worker`. Read it when you are the reviewer submitting a review or an
-approval, the implementer pushing the `.legion/` deletion or recording the production check, or
-the merger publishing READY. Every path it cites is in sjawhar/legion.
+approval, the implementer recording the production check, or the merger building READY. Every
+path it cites is in sjawhar/legion.
 
-The order, in full: the tester's evidence green → the implementer's `.legion/` deletion push →
-the reviewer's approval of that head → retro → the merger's READY → the human merge → the
-implementer's production check. After the approval, only retro's `docs/solutions/` commit leaves
-it standing on its own (*Retro*, below). A conflict-forced merge goes back to the reviewer for a
-confirmation or a new round, as the fingerprint decides (*The reviewer*, below, and
-`skill://legion-worker/references/conflicts-and-rewrites.md`), and any other change voids it.
+The order, in full: the tester's evidence green → the reviewer's approval of the head →
+retro → the merger's READY → the human merge → the implementer's production check. No role
+removes `.legion/` before the merge: the approved head carries it, and the operator removes it
+from the default branch after the merge. After the approval, only retro's `docs/solutions/`
+commit leaves it standing on its own (*Retro*, below). A conflict-forced merge goes back to the
+reviewer for a confirmation or a new round, as the fingerprint decides (*The reviewer*, below,
+and `skill://legion-worker/references/conflicts-and-rewrites.md`), and any other change voids it.
 
 ## The reviewer
 
 - The reviewer verifies the `CI`, `Threads`, and `E2E` facts against GitHub directly —
   never from a handoff — then runs `task(agent="thermonuclear-deep-review")` and
-  `task(agent="thermonuclear-code-quality")` once at that head — the head the implementer's
-  simplify pass left final — and records the verdict.
+  `task(agent="thermonuclear-code-quality")` once at that head — the head the round reviews —
+  and records the verdict.
   Approval is refused while either `E2E (implementer)` or `E2E (tester)` is missing: `REQUEST_CHANGES` naming the missing line.
   Skip the `Thermo` line entirely on a docs-only PR. Submit **one review per round** —
-  `REQUEST_CHANGES` when any correctness finding stands, otherwise `COMMENT` while the head
-  still carries `.legion/`; `APPROVE` only for a head that carries no `.legion/` — the head
-  that differs from the reviewed one by the `.legion/` deletion alone, or, after a
-  conflict-forced rebase, the new head whose fingerprint equals the approved head's — always
-  named by SHA — carrying every inline comment in that single
+  `REQUEST_CHANGES` when any correctness finding stands, otherwise `APPROVE` of the head you
+  reviewed — always named by SHA — carrying every inline comment in that single
   call: `legion gh -- api --method POST repos/{owner}/{repo}/pulls/{number}/reviews --input body.json`
-  with `commit_id`, `event` (`REQUEST_CHANGES`, `COMMENT`, or `APPROVE`), `body` (with the
+  with `commit_id`, `event` (`REQUEST_CHANGES` or `APPROVE`), `body` (with the
   Legion footer), and a `comments[]` array of `{path, line, side, body}`, one entry per
   finding — never one `pr review` call per finding (each submission fires a `pr-review` wake).
-  Then return the issue to the architect; when clean, have the architect send the implementer
-  back to push the `.legion/` deletion, then review **that** head and approve it by name. After a
+  A `COMMENT` decides nothing. After a
   conflict-forced rebase, compute the fingerprint (*The unchanged-diff check* in
   `skill://legion-worker/references/conflicts-and-rewrites.md`) at the
   `commit_id` of your last submitted review and at the new head. Equal and that review was
@@ -41,52 +38,55 @@ confirmation or a new round, as the fingerprint decides (*The reviewer*, below, 
   Apps, as `skill://legion-worker/references/review-threads.md` says; the same reference says
   when every thread is settled enough to approve, and resolving one never gates your approval.
 
-A reviewer's phase ends with its completion, not with its review. A round that writes a handoff
-takes this order: write, commit and push the handoff; submit the review of the head that push
+A reviewer's phase ends with its completion, not with its review. Every round writes a handoff
+and takes this order: write, commit and push the handoff; submit the review of the head that push
 made, by its SHA; then complete. An approval waits for the CI verdict to settle green at that head
 before you submit it, since an approval stands only on green checks and GitHub can dismiss one
 once the head moves, and a verdict that settles red there makes the round's decision a request for
-changes naming the failing checks; a request for changes does not wait, since it stands whatever
-CI says and the issue leaves reviewing with it. The verdict is of the checks and workflows the
-base branch requires, the set READY checks: red when one of them failed, and never red for a check
-the base branch does not require. A required check that was cancelled, or that the head's checks
+changes naming the failing checks, unless only review workflows the project declares
+(`projects.<KEY>.review_workflows`) are red on their own findings: then you answer their threads,
+have them resolved with `legion threads resolve` and re-run the failed run, as your role prompt
+says, and approve once it passes. Any other red required workflow is a failing check like any
+other. A request for changes does not wait, since it stands whatever CI says and the issue leaves
+reviewing with it. The verdict is of the checks and workflows the base branch requires, the set
+READY checks: red when one of them failed, and never red for a check the base branch does not
+require. A required check that was cancelled, or that the head's checks
 settled without, leaves no verdict until a later settlement decides it, since a run can be
 cancelled or not yet queued when the head settles; a required workflow's run on the head that is
 still going or has not happened leaves none either. A review of a head the handoff push
-then replaces names a head the pull request no longer has. A round that writes none (the final
-approval of the `.legion/` deletion head) reviews the head as it is. The daemon moves the issue
+then replaces names a head the pull request no longer has. The daemon moves the issue
 once both are in — the decision GitHub reports and your completion, in either order — so a
 review posted without a completion leaves the issue in reviewing until you finish.
 
 ## Retro
 
 - **Retro's commit does not void the reviewer's approval.** After the reviewer approves the
-  cleaned head, retro commits its learnings under `docs/solutions/` on top of it; that commit
+  head, retro commits its learnings under `docs/solutions/` on top of it; that commit
   stays, the approval stands, and the tree goes to the merger — never back to the tester or
   reviewer. Anything else above the approved head does void it, and the merger tells the
-  architect the head must return to review instead of publishing. A conflict-forced rebase
+  architect the head must return to review instead of completing. A conflict-forced rebase
   after retro moves those documents with the branch; retro never re-runs.
 
 ## The merger
 
 - The merger runs `legion threads resolve --pr <n> --repo <owner>/<repo>` (it acts as the same
   code-writing App as the implementer; resolving a thread changes no commit, so this run never
-  invalidates the approval), does not publish while any `left open` line remains or the command
+  invalidates the approval), does not complete while any `left open` line remains or the command
   exits 1 (report the thread to the architect instead), then proves that rule with two commands.
   First `cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" git fetch && jj -R
   "$LEGION_WORKSPACE" diff --from <approved-sha> --to <tip-sha> --summary`, whose output is quoted
   in READY (an empty output is quoted as `no file changes above the approved head`); then the same
-  with `'~docs/solutions'` appended, which must print nothing. *The READY packet*: the merger
-  always posts `READY #<n> at <current sha> (approved at <approved sha>) for <KEY> (<pr url>)`
+  with `'~docs/solutions'` appended, which must print nothing. *The READY packet* is
+  `READY #<n> at <current sha> (approved at <approved sha>) for <KEY> (<pr url>)`
   (the shape `packages/daemon/internal/prompts/roles/merger.md` defines), then the PR body's
   `Outcome:` line and its `Not proven / risk:` value — every bullet under that label joined with
   `; ` on the one READY line, or `none` — quoted from the `## For the reviewer` block at that same
-  head (or one line saying the body carries no brief — the packet still publishes), then the
-  `--summary` output and the PR body's gate facts, as a `dispatch_message` on the issue. When the
-  `Legion addressing` line names a merge queue, it also publishes the same packet there with
-  `envoy_publish`; a 404 means the Dispatch message remains the durable notice and the merger
-  stays idle. The READY packet names both the implementer's and tester's `E2E` lines; a missing
-  one is reported to the architect instead of published. Legion never merges.
+  head (or one line saying the body carries no brief — the packet still goes out), then the
+  `--summary` output and the PR body's gate facts. The merger sends it as the `summary` of its
+  `handoff_complete` with `ready: true`; the daemon posts it as a `dispatch_message` on the issue,
+  publishes it to the project's merge queue role when one is set, and says on the issue when that
+  role has no live holder. The READY packet names both the implementer's and tester's `E2E` lines;
+  a missing one is reported to the architect instead of completing. Legion never merges.
 
 ## After the human merge
 

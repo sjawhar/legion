@@ -1,6 +1,6 @@
 ---
 name: legion-worker
-description: Use when dispatched as a per-process Legion phase worker — architect (on a child issue), planner, implementer, tester, reviewer, or merger — booted from the daemon's LEGION_* environment.
+description: Use when dispatched as a per-process Legion phase worker — planner, implementer, tester, reviewer, or merger — booted from the daemon's LEGION_* environment.
 ---
 
 # Legion Phase Worker
@@ -24,26 +24,26 @@ with the `read` tool: a read by filesystem path stops at 300 lines.
 | You write or edit the PR body, record a proof (an `E2E` line or a handoff `proof` array), verify another phase's proof, or run the simplify pass | `skill://legion-worker/references/pr-body.md` |
 | You reply to, accept, or resolve a review thread, or run `legion threads resolve` | `skill://legion-worker/references/review-threads.md` |
 | GitHub reports a conflict, the pull request is retargeted, you compare heads after a conflict merge, or you would rewrite a pushed commit | `skill://legion-worker/references/conflicts-and-rewrites.md` |
-| You review or approve, push the `.legion/` deletion, publish READY, or check the merge in production | `skill://legion-worker/references/merge-gate.md` |
+| You review or approve, build the READY packet, or check the merge in production | `skill://legion-worker/references/merge-gate.md` |
 | The issue renames a repository, package, or URL across the codebase | `skill://legion-worker/references/systematic-rename.md` |
 | The issue deletes code, a command, or documentation | `skill://legion-worker/references/cleanup-deletion.md` |
 
 ## Identity, scope, and role
 
 The daemon spawns you as a separate `omp --mode rpc` process (behind `legion worker-shim`,
-in a tmux pane) with `LEGION_TREE`, `LEGION_ISSUE`, `LEGION_ROLE`, `LEGION_GENERATION`,
-`LEGION_BOOT_TOKEN_FILE` (a 0600 file under `$LEGION_STATE_DIR/secrets` holding your boot token;
-the extension reads it for you), `LEGION_DAEMON_URL`, `LEGION_STATE_DIR`, and `LEGION_WORKSPACE`
-in your environment (`LEGION_PROJECT` is also supplied, but nothing reads it). The extension
+in a tmux pane or an Agent Sandbox pod) with `LEGION_TREE`, `LEGION_ISSUE`, `LEGION_ROLE`,
+`LEGION_GENERATION`, `LEGION_PROJECT`, `LEGION_BOOT_TOKEN_FILE` (the file holding your boot
+token; the extension reads it for you), `LEGION_DAEMON_URL`, `LEGION_STATE_DIR`, and
+`LEGION_WORKSPACE` in your environment. The extension
 completes the boot handshake for you at session start — it registers with the daemon, claims
 your role, and signals readiness. You never call `envoy_role_set` yourself.
 
 Your role token is not the issue key spelled out literally. The daemon encodes it as
 `legion-<project>-<key>-<role>` with the issue key lower-cased. For example, project `acme`, issue
 `LEGION-41`, role `architect` encodes to `legion-acme-legion-41-architect`. Never hand-format one for another role: your own role
-topic and the topic of the architect that owns your issue are stated at the end of your system
-prompt (a "Legion addressing" line the daemon appends: on a child issue that is the child's
-sub-architect when one is claimed, else the root's), a sibling role's topic is yours with the
+topic and the topic of the architect that owns your issue are in the `Legion addressing` line of
+your system prompt (the daemon appends it; it names the tree root's architect, also on a child
+issue), a sibling role's topic is yours with the
 trailing `-<role>` replaced, and the `roleToken` helper in `@legion/contracts` computes any other
 one exactly the way the daemon does — prefer a topic you've already been given before recomputing
 one.
@@ -62,11 +62,11 @@ workflow table. You may still use ordinary `task` subagents for your own phase w
 is a Legion role.
 Escalate a product, scope, design, cross-phase, or lifecycle decision to the owning architect with
 `envoy_publish` to its role topic (`notifications.role.` followed by its encoded token, see
-above), carrying the verified facts and the decision needed. `hub` only reaches subagents
-inside your own process, not the architect's separate one. Never write a decision block into a
-spec yourself: the architect decides whether the human must answer it and writes the block, since
-a new version of an approved root spec closes the tree's design gate. A standalone to-do only a
-human can do is a `dispatch_ask`, and its replies return to your own session.
+above), carrying the verified facts and the decision needed. A `write` to `agent://` only reaches
+agents inside your own process, not the architect's separate one. Never write a decision block
+into a spec yourself: the architect decides whether the human must answer it and writes the block,
+since a new version of an approved root spec closes the tree's design gate. A standalone to-do
+only a human can do is a `dispatch_ask`, and its replies return to your own session.
 
 Because the same agent works its role until the issue closes, you may receive more than one
 assignment across your lifetime: your session stays live after your phase ends, and when a later
@@ -156,9 +156,10 @@ new work.
 clone, so they all share one operation log: `jj undo`, `jj abandon`, and
 `jj op restore|revert|abandon|undo` rewrite it for every tree at once. The extension refuses them in every
 phase-worker pane before they run — a `bash` command in any position of a pipeline or `&&`
-chain, with or without `-R`, judged on the whole argument list; `eval` code; and a `hub`
-process start — from your own tool calls and from any `task` subagent you spawn (it runs in
-your pane, against the same log), and a `bash` command whose quoted text merely mentions `jj`
+chain, with or without `-R`, judged on the whole argument list (a supervised service's start
+included); `eval` code; and stdin written to a service (a `write` to `proc://<id>`) — from your
+own tool calls and from any `task` subagent you spawn (it runs in your pane, against the same
+log), and a `bash` command whose quoted text merely mentions `jj`
 with one of those words (a heredoc, an echo, a commit message) is refused too: write such text
 with the `write` tool or say "operation-log rollback" instead. `jj restore <paths>`,
 `jj op log`, and `jj op show` stay allowed. Recover forward only: a new commit
@@ -169,7 +170,7 @@ other tree paused.
 
 ## Phase work
 
-Specifications written into Dispatch follow `skill://dispatch`'s [Writing a spec](../dispatch/SKILL.md#writing-a-spec), except that a phase worker writes no decision block: it sends an open product, scope or design decision to its architect, which writes the block.
+Specifications written into Dispatch follow `skill://dispatch`'s "Writing a spec" section, except that a phase worker writes no decision block: it sends an open product, scope or design decision to its architect, which writes the block.
 
 Follow the repository's normal engineering workflow and the assigned issue's acceptance
 criteria. Your phase's own charter and the predecessor handoffs you read define the phase
@@ -217,7 +218,7 @@ legion gh -- <gh args…>
 ```
 
 Four facts about `gh` in a worker pane. The `gh` on your `PATH` is a shim
-(`<state_dir>/worker-bin/gh`, installed by the daemon at startup — `packages/daemon/src/daemon/worker-bin.ts`)
+(`<state_dir>/worker-bin/gh`, installed by the daemon at startup — `packages/daemon/internal/runtime/workerbin/workerbin.go`)
 that execs `legion gh -- "$@"`, so `gh …` and `legion gh -- …` are the same call, and each call
 redeems a fresh token from your session's grant — identity is supplied per call, never stored.
 Never run `gh auth login` or `gh auth setup-git`; there is no login state to create. The shim
@@ -285,8 +286,8 @@ pushes the issue branch under this exact name with the one push procedure every 
 (*Every role pushes its own commits*, below).
 
 The provisioned issue workspace configures `credential.helper` with the daemon's absolute
-credential command, so `jj -R "$LEGION_WORKSPACE" git push` authenticates transparently
-through the same session capability. Never handle a token.
+credential command, so `legion push` authenticates transparently through the same session
+capability. Never handle a token.
 
 Then open the pull request with `legion gh -- pr create`. The PR body **must** contain the
 line `Dispatch: <KEY>` — the daemon's fallback link from a PR to its Dispatch issue when the
@@ -317,9 +318,9 @@ line), the full definition of a proof, what the tester verifies, and the simplif
 - **A conflict or a retarget** is the only reason to bring the base into the branch, always as a
   forward merge and never `jj rebase`; the unchanged-diff fingerprint each role compares
   afterwards is in the same reference: `skill://legion-worker/references/conflicts-and-rewrites.md`.
-- **The merge gate**, in order: the tester's evidence green → the implementer's `.legion/`
-  deletion push → the reviewer's approval of that head → retro → the merger's READY → the human
-  merge → the implementer's production check. Legion never merges. The reviewer's submissions,
+- **The merge gate**, in order: the tester's evidence green → the reviewer's approval of the head
+  → retro → the merger's READY → the human merge → the implementer's production check. Legion
+  never merges. The reviewer's submissions,
   retro's commit, the merger's READY, and the production check follow
   `skill://legion-worker/references/merge-gate.md`.
 - **No surface reaches the changed path** is a report to the architect, never a reason to
@@ -362,35 +363,25 @@ cd -- "$LEGION_WORKSPACE" && \
 ```
 
 **Every role pushes its own commits.** After the handoff commit — and, for the tester, the red
-tests it wrote — advance the issue bookmark and push it with the provisioned credential helper,
-which authenticates as your role's App (`appauth.AppRoleFor` in
-`packages/daemon/internal/appauth/identity.go`).
-
-**Every push is `legion push`,** run from bash in your workspace. It pushes `@-`: first the
-ancestry check against the remote branch or the tip you recorded before rewriting pushed commits
-(below), then the bookmark and the
-push. It also decides whether the push skips CI. A push skips CI only when none of its commits
-touches anything but handoffs whose phase guarantees a later push: the planner's
-`.legion/plan.json`, the tester's `.legion/test.json`, and a reviewer's `.legion/review.json` whose
-`verdict` is `"changes_requested"`. Its head then ends with GitHub's `skip-checks: true` trailer,
-and the daemon carries the code head's verdict to it. Every other push runs CI in full. Never
-add or remove that trailer yourself, never write one of GitHub's bracket keywords (`[skip ci]`,
-`[ci skip]`, `[no ci]`, `[skip actions]`, `[actions skip]`) into a commit message, and never
-hand-push the issue branch: that bypasses the daemon's decision about which head may skip checks.
-`legion push` refuses a head whose message carries a keyword and pushes nothing until you remove it.
+tests it wrote — push the issue branch with `legion push`, run from bash in your workspace:
 
 ```bash
 cd -- "$LEGION_WORKSPACE" && legion push
 ```
 
-The ancestry check protects another role's commits in the shared clone: a push must descend from
-the remote issue branch unless it names the tip recorded for an authorized rewrite below.
+It pushes `@-` through the provisioned credential helper, which authenticates as your role's App
+(`appauth.AppRoleFor` in `packages/daemon/internal/appauth/identity.go`). Your system prompt says
+which pushes skip CI and which commit-message keywords it refuses. Its ancestry check refuses
+unless `@-` descends from `legion/<KEY>@origin` (or the branch is not on GitHub yet): every issue
+workspace shares one clone, so another role's push moves `legion/<KEY>@origin` here at once, and
+a push that did not descend from it would move the remote branch sideways onto your commit and
+drop theirs.
 
 Before any rewrite of a commit you already pushed — a `jj squash --into` one, or any other
 rewrite — read *Rewriting pushed commits* in
 `skill://legion-worker/references/conflicts-and-rewrites.md`: it checks that no other tree's work
-is built on that commit and records the pushed tip `$tip_file` above reads, the only case in which
-the push above lets the remote branch move off its current tip.
+is built on that commit and records the pushed tip `legion push` reads, the only case in which a
+push lets the remote branch move off its current tip.
 
 Before the push, check ancestry and identity as above: the chain carries every earlier phase's
 commits, and pushing them with yours is expected. A refusal, and a push the remote rejects, is a
@@ -398,14 +389,10 @@ report to the architect with the output, never a force-push. The merger makes no
 pushes nothing.
 
 Do not report phase completion until the write, existence check, handoff commit, and push
-succeed. This is the committed copy the next phase
-reads after revival. It is removed once, at the end of a clean review: the implementer pushes
-that deletion at the reviewer's direction. No other phase removes it — and once it is gone
-(`jj -R "$LEGION_WORKSPACE" file list -r @- .legion` prints nothing on stdout; jj warns on
-stderr), this gate no longer applies: a later rebase, bare-gate re-check, confirmation, retro, or
-the post-merge production check writes no `.legion/<phase>.json`, commits no handoff, and reports
-with `handoff_complete` alone (below). Recreating `.legion/` after its deletion changes the
-approved head and restarts the review loop this rule exists to end.
+succeed. This is the committed copy the next phase reads after revival. No phase removes
+`.legion/`: the reviewer approves a head that carries it, and the operator removes it from the
+default branch after the merge. Retro and the post-merge production check write no
+`.legion/<phase>.json`, commit no handoff, and report with `handoff_complete` alone (below).
 
 ## Completion: report to the architect, then stay
 

@@ -96,7 +96,11 @@ mock.module("@oh-my-pi/pi-coding-agent", () => ({
 const { default: envoyExtension } = await import("./envoy");
 const { resetLegionRoleClaimBridgeForTests } = await import("../src/legion/role-claim-bridge");
 const { resetLegionBootstrappedSessionForTests } = await import("../src/subagent-session");
-const { default: legionExtension, setLegionBootstrapExitForTests } = await import("./legion");
+const {
+  default: legionExtension,
+  setLegionBootstrapExitForTests,
+  CODE_TOOL_REFUSAL,
+} = await import("./legion");
 
 type RegisteredCommand = {
   readonly name: string;
@@ -247,7 +251,7 @@ function createPi(options: { readonly bindEnvoy?: boolean } = {}): {
   const sentMessages: SentMessage[] = [];
   const entries: AppendedEntry[] = [];
   const title: HostTitle = { set: [] };
-  const activeTools = ["read", "task", "hub"];
+  const activeTools = ["read", "task", "wait"];
   const property = (): ZodNumberProperty => ({
     optional: property,
     nullable: property,
@@ -887,22 +891,27 @@ describe("Legion OMP extension", () => {
       )
     ).resolves.toBeUndefined();
   });
-  test("refuses a subagent's operation-log rewrite and `legion handoff complete` in a phase-worker pane while its other calls stay ungated", async () => {
+  test.each([
+    ["implementer", "REPO-43"],
+    ["architect", "REPO-42"],
+  ] as const)("refuses a subagent's operation-log rewrite and `legion handoff complete` in the %s pane while its other calls stay ungated", async (role, issue) => {
     const { childFile } = await createSubagentTranscriptPaths();
     const pane = await bootPane({
-      role: "implementer",
-      sessionId: "ses_sub_worker_jj",
+      role,
+      issue,
+      sessionId: `ses_sub_${role}_jj`,
       sessionFile: childFile,
     });
     const { toolCall, context } = pane;
 
     // LEGION-45: the subagent's bash runs in the same pane, against the same shared operation
-    // log, as the phase worker that spawned it -- the one gate that binds a subagent.
+    // log, as the parent that spawned it (a root architect's included) -- the one gate that
+    // binds a subagent.
     await expect(
       toolCall(
         {
           toolName: "bash",
-          toolCallId: "call-sub-worker-jj-log",
+          toolCallId: `call-sub-${role}-jj-log`,
           input: { command: 'jj -R "$LEGION_WORKSPACE" undo' },
         },
         context
@@ -911,13 +920,14 @@ describe("Legion OMP extension", () => {
       block: true,
       reason: expect.stringContaining("every Legion issue workspace shares"),
     });
-    // A subagent has no legion tool, and a handoff from its bash would complete the worker's phase
-    // where the phase stall cannot see it.
+    // A subagent has no legion tool, and a handoff from its bash would complete the parent's
+    // phase where the phase stall cannot see it (a root architect has no phase to complete, but
+    // the rule binds its pane the same way).
     await expect(
       toolCall(
         {
           toolName: "bash",
-          toolCallId: "call-sub-worker-handoff",
+          toolCallId: `call-sub-${role}-handoff`,
           input: { command: "legion handoff complete --summary done" },
         },
         context
@@ -928,7 +938,7 @@ describe("Legion OMP extension", () => {
       toolCall(
         {
           toolName: "bash",
-          toolCallId: "call-sub-worker-legion-state",
+          toolCallId: `call-sub-${role}-legion-state`,
           input: { command: "legion state" },
         },
         context
@@ -1159,105 +1169,91 @@ describe("Legion OMP extension", () => {
     expect(await jjRepoConfig(workspace, "user.name")).toBe('user.name = "Sentinel Before Boot"');
     expect(await jjRepoConfig(workspace, "user.email")).toBe("");
   });
-  test("restricts phase-worker tool access per LEGION_ROLE", async () => {
-    const blockedReason = (role: LegionRole, toolName: string): string | undefined => {
-      if (role === "architect" && ["edit", "write", "apply_patch"].includes(toolName)) {
-        return "the architect delegates all code work to phase workers";
-      }
-      if (role === "architect" && toolName === "task") {
-        return "the architect delegates only through child issues and the daemon's phase workers; Legion runs one agent per process";
-      }
-      if (role === "reviewer" && ["edit", "write", "apply_patch"].includes(toolName)) {
-        return "the reviewer edits nothing except the final .legion/ cleanup commit via bash";
-      }
-      if (role === "merger" && ["edit", "write", "apply_patch", "task"].includes(toolName)) {
-        return "the merger only verifies and reports";
-      }
-      return undefined;
-    };
-    const roles: readonly LegionRole[] = [
-      "planner",
-      "implementer",
-      "tester",
-      "reviewer",
-      "merger",
-      "architect",
-    ];
-    const toolNames = ["edit", "write", "apply_patch", "task", "hub"];
-
-    for (const role of roles) {
-      const { toolCall, context } = await bootPane({ role, sessionId: `ses_${role}` });
-      for (const toolName of toolNames) {
-        const reason = blockedReason(role, toolName);
-        const result = await toolCall(
-          { toolName, toolCallId: `call-${role}-${toolName}`, input: {} },
-          context
-        );
-        if (reason === undefined) expect(result).toBeUndefined();
-        else expect(result).toEqual({ block: true, reason });
-      }
+  test("gates code-mutation tools for architect, merger, and reviewer only", () => {
+    expect(Object.keys(CODE_TOOL_REFUSAL).sort()).toEqual(["architect", "merger", "reviewer"]);
+  });
+  // Every pane but the root architect's is on a child issue, a sub-architect's included; the root
+  // architect's issue is its tree's.
+  test.each([
+    ["planner", "REPO-43"],
+    ["implementer", "REPO-43"],
+    ["tester", "REPO-43"],
+    ["reviewer", "REPO-43"],
+    ["merger", "REPO-43"],
+    ["architect", "REPO-43"],
+    ["architect", "REPO-42"],
+  ] as const)("lets the %s on %s launch a `task` subagent and refuses code tools only where its role does", async (role, issue) => {
+    const { toolCall, context } = await bootPane({
+      role,
+      issue,
+      sessionId: `ses_${role}_${issue}`,
+    });
+    const codeTools = ["edit", "write", "apply_patch"];
+    for (const toolName of [...codeTools, "task", "wait"]) {
+      const reason = codeTools.includes(toolName) ? CODE_TOOL_REFUSAL[role] : undefined;
+      const result = await toolCall(
+        { toolName, toolCallId: `call-${role}-${issue}-${toolName}`, input: {} },
+        context
+      );
+      if (reason === undefined) expect(result).toBeUndefined();
+      else expect(result).toEqual({ block: true, reason });
     }
   });
-  test("blocks the architect's task tool but allows an implementer's, per the one-agent-per-process rule", async () => {
-    const { toolCall: architectToolCall, context: architectContext } = await bootPane({
-      role: "architect",
-      sessionId: "ses_architect_task",
-    });
-    await expect(
-      architectToolCall(
-        { toolName: "task", toolCallId: "call-architect-task", input: {} },
-        architectContext
-      )
-    ).resolves.toEqual({
-      block: true,
-      reason:
-        "the architect delegates only through child issues and the daemon's phase workers; Legion runs one agent per process",
-    });
-
-    const { toolCall: implementerToolCall, context: implementerContext } = await bootPane({
-      role: "implementer",
-      sessionId: "ses_implementer_task",
-    });
-    await expect(
-      implementerToolCall(
-        { toolName: "task", toolCallId: "call-implementer-task", input: {} },
-        implementerContext
-      )
-    ).resolves.toBeUndefined();
-  });
-  test("allows xd:// tool-device writes through the mutation gate but still blocks real file writes", async () => {
+  test("allows writes into Oh My Pi through the mutation gate but still blocks real file writes", async () => {
     const blockedReason = (role: LegionRole): string =>
       role === "merger"
         ? "the merger only verifies and reports"
         : role === "reviewer"
-          ? "the reviewer edits nothing except the final .legion/ cleanup commit via bash"
+          ? "the reviewer edits no code; its only commits are its review handoffs, made via bash"
           : "the architect delegates all code work to phase workers";
+    const passedByMistake: string[] = [];
 
     for (const role of ["architect", "reviewer", "merger"] as const) {
       const { toolCall, context } = await bootPane({ role, sessionId: `ses_${role}_xd` });
 
-      // A tool-device invocation (write to an `xd://` path, the scheme in any case, as Oh My Pi
-      // routes it) is a tool call, not a file mutation, and must pass for every gated role.
-      for (const path of ["xd://dispatch_ask", "XD://dispatch_doc_edit"]) {
+      // A write into Oh My Pi -- a tool device (`xd://`), a message to an agent of the process
+      // (`agent://`), job and service control (`proc://`) -- is a tool call, not a file mutation,
+      // and must pass for every gated role, the scheme in any case, as Oh My Pi routes it, a
+      // pasted `read` header wrapper (`[path]`, `[path#XXXX]`) included.
+      for (const path of [
+        "xd://dispatch_ask",
+        "XD://dispatch_doc_edit",
+        "agent://ReviewLens",
+        "[agent://ReviewLens]",
+        "proc://task-3/kill",
+        "Proc://web",
+      ]) {
         await expect(
           toolCall(
-            { toolName: "write", toolCallId: `call-${role}-xd-ok`, input: { path, content: "{}" } },
+            {
+              toolName: "write",
+              toolCallId: `call-${role}-omp-ok`,
+              input: { path, content: "{}" },
+            },
             context
           )
         ).resolves.toBeUndefined();
       }
 
-      // A real filesystem write is still blocked.
-      await expect(
-        toolCall(
-          {
-            toolName: "write",
-            toolCallId: `call-${role}-fs`,
-            input: { path: "/tmp/whatever.ts", content: "x" },
-          },
+      // A file write is still blocked: a real path, in the `read` header wrapper too, and a
+      // `conflict://` write (it splices its content into a workspace file), bare or behind the
+      // prefix Oh My Pi strips from `<prefix>:conflict://N` before it routes.
+      for (const path of [
+        "/tmp/whatever.ts",
+        "[/tmp/whatever.ts#ABCD]",
+        "conflict://1",
+        "agent://x:conflict://1",
+        "[proc://shell:conflict://2#ABCD]",
+        "XD://y:conflict://3",
+      ]) {
+        const result = await toolCall(
+          { toolName: "write", toolCallId: `call-${role}-fs`, input: { path, content: "x" } },
           context
-        )
-      ).resolves.toEqual({ block: true, reason: blockedReason(role) });
+        );
+        if (!Bun.deepEquals(result, { block: true, reason: blockedReason(role) })) {
+          passedByMistake.push(`${role} ${path} -> ${JSON.stringify(result)}`);
+        }
+      }
 
       // A malformed/missing `path` never qualifies as a tool-device invocation: it is still
       // treated as a mutation and blocked.
@@ -1271,6 +1267,7 @@ describe("Legion OMP extension", () => {
         toolCall({ toolName: "write", toolCallId: `call-${role}-no-path`, input: {} }, context)
       ).resolves.toEqual({ block: true, reason: blockedReason(role) });
     }
+    expect(passedByMistake).toEqual([]);
   });
   test("refuses a phase worker's bash command that would rewrite the shared jj operation log", async () => {
     const { toolCall, context, requests } = await bootPane({
@@ -1414,9 +1411,11 @@ describe("Legion OMP extension", () => {
         },
         context
       );
-      // A sub-architect's pane classifies as a phase worker's, so the operation-log guard (judged
-      // from the environment, ahead of every role gate so that it also binds a subagent) answers
-      // before its blanket bash gate; the root architect's pane, by contrast, never reaches it.
+      // Every pane this loop boots classifies as a phase worker's, a sub-architect's "architect"
+      // case included (its issue REPO-43 differs from its tree REPO-42), so the operation-log
+      // guard (judged from the environment, ahead of every role gate) answers before any role
+      // gate. A root architect's pane gets the same guard; see "blocks code tools in a root
+      // architect session" for its precedence against the architect's own bash gate.
       expect(undo).toEqual({
         block: true,
         reason: expect.stringContaining("every Legion issue workspace shares"),
@@ -1433,10 +1432,10 @@ describe("Legion OMP extension", () => {
       ).resolves.toBeUndefined();
     }
   });
-  test("refuses eval code and hub input that mention jj with an operation-log rewrite, by the plain-text rule", async () => {
+  test("refuses eval code and a supervised service's stdin that mention jj with an operation-log rewrite, by the plain-text rule", async () => {
     const { toolCall, context } = await bootPane({
       role: "tester",
-      sessionId: "ses_tester_jj_eval_hub",
+      sessionId: "ses_tester_jj_eval_proc",
     });
     const refused: { readonly toolName: string; readonly input: Record<string, unknown> }[] = [
       {
@@ -1449,15 +1448,14 @@ describe("Legion OMP extension", () => {
       { toolName: "eval", input: { language: "js", code: `await Bun.$\`jj op restore \${id}\`` } },
       // An argv literal separates the words with `", "`; the rule allows any non-word run.
       { toolName: "eval", input: { language: "py", code: 'run(["jj", "op", "restore", op_id])' } },
-      {
-        toolName: "hub",
-        input: { op: "start", name: "x", application: "jj", args: ["-R", "/ws", "undo"] },
-      },
-      {
-        toolName: "hub",
-        input: { op: "start", name: "x", application: "bash", args: ["-c", "jj op restore 1"] },
-      },
-      { toolName: "hub", input: { op: "send", name: "shell", text: "jj undo" } },
+      // A supervised service starts as a `bash` command, tokenised like any other.
+      { toolName: "bash", input: { command: "bash -c 'jj op restore 1'", name: "x" } },
+      // Its stdin is a `write` to `proc://<id>`, the scheme in any case, and in the `[path]` or
+      // `[path#XXXX]` wrapper Oh My Pi strips before it routes.
+      { toolName: "write", input: { path: "proc://shell", content: "jj undo" } },
+      { toolName: "write", input: { path: "PROC://shell", content: "jj -R /ws op restore 1" } },
+      { toolName: "write", input: { path: "[proc://shell]", content: "jj undo" } },
+      { toolName: "write", input: { path: "[proc://shell#ABCD]", content: "jj undo" } },
     ];
     const allowed: { readonly toolName: string; readonly input: Record<string, unknown> }[] = [
       {
@@ -1465,12 +1463,11 @@ describe("Legion OMP extension", () => {
         input: { language: "py", code: 'run(["jj", "op", "log"]); run(["jj", "restore", "f"])' },
       },
       { toolName: "eval", input: { language: "py", code: 'print(read("jj-notes.md"))' } },
-      {
-        toolName: "hub",
-        input: { op: "start", name: "web", application: "bun", args: ["run", "dev"] },
-      },
-      { toolName: "hub", input: { op: "logs", name: "web" } },
-      { toolName: "hub", input: {} },
+      { toolName: "bash", input: { command: "bun run dev", name: "web" } },
+      { toolName: "write", input: { path: "proc://shell", content: "jj op log" } },
+      { toolName: "write", input: { path: "proc://web/kill" } },
+      // A file's content is not run, so the plain-text rule leaves it alone.
+      { toolName: "write", input: { path: "notes.md", content: "never run jj undo here" } },
     ];
     const allowedByMistake: string[] = [];
     for (const [index, call] of refused.entries()) {
@@ -1489,17 +1486,17 @@ describe("Legion OMP extension", () => {
     // Same message shape as the bash refusal, naming the tool and the words it found.
     const named = await toolCall(
       {
-        toolName: "hub",
+        toolName: "write",
         toolCallId: "call-jj-text-named",
-        input: { op: "start", name: "x", application: "jj", args: ["undo"] },
+        input: { path: "proc://shell", content: "jj undo" },
       },
       context
     );
-    for (const phrase of ["hub: jj undo", "every Legion issue workspace shares"]) {
+    for (const phrase of ["write: jj undo", "every Legion issue workspace shares"]) {
       expect(named).toEqual({ block: true, reason: expect.stringContaining(phrase) });
     }
   });
-  test("refuses `legion handoff complete` in a phase worker's bash, eval code, and hub input, and leaves the shell's write and read alone", async () => {
+  test("refuses `legion handoff complete` in a phase worker's bash, eval code, and service stdin, and leaves the shell's write and read alone", async () => {
     // The phase stall closes only on the tool's handoff_complete; a completion run from bash
     // would leave it open and draw a follow-up asking the worker to complete again. Writes and
     // reads leave no phase open, and stdin is the shell's route for a payload past argv's cap.
@@ -1523,13 +1520,8 @@ describe("Legion OMP extension", () => {
         },
       },
       {
-        toolName: "hub",
-        input: {
-          op: "start",
-          name: "x",
-          application: "legion",
-          args: ["handoff", "complete", "--summary", "done"],
-        },
+        toolName: "write",
+        input: { path: "proc://shell", content: "legion handoff complete --summary done" },
       },
     ];
     const allowed: { readonly toolName: string; readonly input: Record<string, unknown> }[] = [
@@ -1547,6 +1539,7 @@ describe("Legion OMP extension", () => {
       bash("cat packages/pi-envoy/src/legion/handoff-actions.ts"),
       bash('jj -R "$LEGION_WORKSPACE" split -m "implement: record handoff" .legion/implement.json'),
       { toolName: "eval", input: { language: "py", code: 'print(read(".legion/plan.json"))' } },
+      { toolName: "write", input: { path: "proc://shell", content: "legion handoff read" } },
     ];
     const mintsBefore = mints();
     const allowedByMistake: string[] = [];
@@ -1819,8 +1812,9 @@ describe("Legion OMP extension", () => {
       block: true,
       reason: "the architect delegates all code work to phase workers",
     });
-    // LEGION-45: the root architect's blanket bash gate answers first; the phase-worker
-    // operation-log guard never reaches it (its behaviour is unchanged by that guard).
+    // LEGION-45: the root architect's pane carries the operation-log guard too (judged ahead of
+    // every role gate), so `jj undo` is refused by the shared-log reason, not the architect's
+    // bash gate.
     await expect(
       toolCall(
         { toolName: "bash", toolCallId: "architect-bash-jj", input: { command: "jj undo" } },
@@ -1828,7 +1822,41 @@ describe("Legion OMP extension", () => {
       )
     ).resolves.toEqual({
       block: true,
-      reason: "the architect delegates all code work to phase workers",
+      reason: expect.stringContaining("every Legion issue workspace shares"),
+    });
+  });
+  test("refuses a root architect's own eval or service stdin that spells out an operation-log rewrite", async () => {
+    // Neither `eval` nor a `write` to `proc://` is in the architect's bash-only gate (a `proc://`
+    // write passes the code-tool gate as job control), so the operation-log rule bound to the root
+    // architect's pane is what refuses the architect's own (non-subagent) call.
+    const { toolCall, context } = await bootPane({
+      role: "architect",
+      issue: "REPO-42",
+      sessionId: "ses_root_architect_eval_proc",
+    });
+    const evalResult = await toolCall(
+      {
+        toolName: "eval",
+        toolCallId: "architect-eval-jj",
+        input: { language: "py", code: 'run(["jj", "undo"])' },
+      },
+      context
+    );
+    expect(evalResult).toEqual({
+      block: true,
+      reason: expect.stringContaining("every Legion issue workspace shares"),
+    });
+    const stdinResult = await toolCall(
+      {
+        toolName: "write",
+        toolCallId: "architect-proc-jj",
+        input: { path: "proc://shell", content: "jj undo" },
+      },
+      context
+    );
+    expect(stdinResult).toEqual({
+      block: true,
+      reason: expect.stringContaining("every Legion issue workspace shares"),
     });
   });
   test("admits a root architect's single `legion` bash command, `legion handoff read` included, except `legion handoff complete`", async () => {
@@ -2937,7 +2965,7 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
         }
       );
 
-      // Sami types /new into the pane.
+      // The operator types /new into the pane.
       pane.switchTo("ses_pane_second", "/tmp/second.jsonl");
       await controller.handlers.get("session_switch")?.({ reason: "new" }, pane.context);
       expect(controller.holder()).toBe("ses_pane_second");

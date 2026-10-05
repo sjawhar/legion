@@ -22,6 +22,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/files"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
@@ -29,7 +30,9 @@ import (
 )
 
 const (
-	maxArtifactBlobSize      = 25 << 20
+	// maxArtifactBlobSize is the file store's own bound, so an upload this route takes is one
+	// the store accepts and serves back.
+	maxArtifactBlobSize      = files.MaxObjectSize
 	maxDocumentMarkdownBytes = pmdoc.MaxDocumentBytes // A Markdown document, and what a write may grow one to (docs' refuseGrowth); maxJSONRequestBytes bounds an issue's spec and every edit the same way (LEGION-465).
 )
 
@@ -271,6 +274,12 @@ func (s *server) storeArtifact(
 	kind string,
 	target artifactTarget,
 ) {
+	checksum := sha256.Sum256(input.content)
+	sha := hex.EncodeToString(checksum[:])
+	// A file's object is written before the transaction opens (putUploadedFile, artifact_files.go).
+	if !s.putUploadedFile(w, r, kind, sha, input) {
+		return
+	}
 	tx, err := s.begin(r.Context())
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -359,8 +368,6 @@ func (s *server) storeArtifact(
 	}
 	var version model.Version
 	var versionAuthors []byte
-	checksum := sha256.Sum256(input.content)
-	sha := hex.EncodeToString(checksum[:])
 	var summaryValue any
 	if input.summary != "" {
 		summaryValue = input.summary
@@ -390,6 +397,11 @@ func (s *server) storeArtifact(
 			s.writeHandlerError(w, err)
 			return
 		}
+		// The version row exists now, so the count names it (LEGION-542).
+		if err := docs.RecordTaskProgressMarkdown(r.Context(), tx, artifact.ID, documentMarkdown); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
 		documentChanges, err = s.replaceReferences(r.Context(), tx, "artifact", artifact.ID, documentMarkdown)
 		if err != nil {
 			s.writeHandlerError(w, err)
@@ -397,11 +409,15 @@ func (s *server) storeArtifact(
 		}
 	} else {
 		size := len(input.content)
+		content := input.content
+		if s.deps.Files != nil {
+			content = nil
+		}
 		if err := tx.QueryRow(r.Context(), `
 			insert into artifact_versions (artifact_id, number, content, mime, size, sha256, authors, named, summary)
 			values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 			returning number, named, summary, authors, created_at, size, mime, sha256
-		`, artifact.ID, nextNumber, input.content, input.contentType, size, sha, authors, input.summary != "", summaryValue).Scan(
+		`, artifact.ID, nextNumber, content, input.contentType, size, sha, authors, input.summary != "", summaryValue).Scan(
 			&version.Number, &version.Named, &version.Summary, &versionAuthors, &version.CreatedAt,
 			&version.Size, &version.MIME, &version.SHA256,
 		); err != nil {
@@ -654,20 +670,23 @@ func (s *server) getArtifactVersion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var content []byte
-	var contentType string
-	var sha string
+	var contentType, sha *string
+	var size *int64
 	if err := s.deps.Store.Pool.QueryRow(r.Context(), `
-		select content, mime, sha256 from artifact_versions where artifact_id = $1 and number = $2
-	`, artifact.ID, number).Scan(&content, &contentType, &sha); err != nil {
+		select content, mime, sha256, size from artifact_versions where artifact_id = $1 and number = $2
+	`, artifact.ID, number).Scan(&content, &contentType, &sha, &size); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	w.Header().Set("Content-Type", contentType)
-	w.Header().Set("ETag", sha)
-	w.Header().Set("Content-Disposition", "attachment")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(content)
+	s.serveFileVersion(w, r, artifact.ID, number, content, contentType, sha, size)
+}
+
+// deref is the string a nullable column holds, or "".
+func deref(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
 }
 
 // commitArtifactVersionEvent appends the artifact.version event of a version the transaction wrote

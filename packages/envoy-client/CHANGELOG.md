@@ -4,6 +4,13 @@
 
 ### Changed
 
+- `dispatch_search` takes `offset` and says how far a page reaches: its first line reads
+  `20 results for "merge queue" (showing 1-20 of 1328, 78 ms)` when the query matches more than the
+  page, a line says when some matches cannot be paged to (each kind lists only its best 100) and to
+  narrow the query or name a project, and the last line names the next offset while more can be
+  reached. `details` carries `total`, `reachable`, `offset` and `limit`. A Dispatch from before
+  search paging answers no total and ignores `offset`, so a later page from it is refused rather
+  than shown as its first page again (LEGION-386, LEGION-382). `SearchOptions` takes `offset`.
 - Every text that says to request approval again says to do so only once the human has agreed to
   every point in the new version (LEGION-475): a stale approval's line in a document read;
   `dispatch_request_approval`'s refusal while a decision block is open, after an answer is folded

@@ -62,6 +62,10 @@ type Options struct {
 	// Trees is the store's durable tree barrier, which the operator routes open a root's tree
 	// through and reserve and finish a closed tree's cleanup through.
 	Trees TreeLifecycles
+	// GitHubGraphQL is GitHub's GraphQL endpoint, which the threads route resolves the reviewer's
+	// accepted bot threads through; empty, in production, is https://api.github.com/graphql, and a
+	// test points it at a stand-in.
+	GitHubGraphQL string
 	// Grants mints and redeems the daemon-local one-command credential handles.
 	Grants   *credential.Grants
 	Pool     *pgxpool.Pool
@@ -96,18 +100,19 @@ type server struct {
 	designGate        config.DesignGate
 	// controllerMu orders a capability mint against a registration and a controller grant, so a
 	// grant the replaced registration authorised is never recorded after the mint revoked them.
-	controllerMu sync.Mutex
-	tokens       appauth.Tokens
-	githubOwner  string
-	grants       *credential.Grants
-	releaser     store.TreeReleaser
-	trees        TreeLifecycles
-	pool         *pgxpool.Pool
-	handlers     []intake.Handler
-	records      record.Store
-	dispatch     dispatch.Client
-	claimReady   func(c supervise.Claim)
-	log          *slog.Logger
+	controllerMu  sync.Mutex
+	tokens        appauth.Tokens
+	githubOwner   string
+	githubGraphQL string
+	grants        *credential.Grants
+	releaser      store.TreeReleaser
+	trees         TreeLifecycles
+	pool          *pgxpool.Pool
+	handlers      []intake.Handler
+	records       record.Store
+	dispatch      dispatch.Client
+	claimReady    func(c supervise.Claim)
+	log           *slog.Logger
 	// loginsWarned is when the daemon last logged that it could not read a Legion App's login
 	// (legionAppLogins), which it does at most once a minute.
 	loginsWarnedMu sync.Mutex
@@ -132,6 +137,7 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		designGate:        opts.DesignGate,
 		tokens:            opts.Tokens,
 		githubOwner:       opts.GitHubOwner,
+		githubGraphQL:     opts.GitHubGraphQL,
 		releaser:          opts.Releaser,
 		trees:             opts.Trees,
 		grants:            opts.Grants,
@@ -166,6 +172,7 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 	mux.HandleFunc("POST /legion/v1/gh-token", s.githubToken)
 	mux.HandleFunc("POST /legion/v1/git-credential", s.gitCredential)
 	mux.HandleFunc("POST /legion/v1/provisioning-credential", s.provisioningCredential)
+	mux.HandleFunc("POST /legion/v1/threads/resolve", s.resolveThreads)
 	mux.HandleFunc("POST /legion/v1/handoff/complete", s.handoffComplete)
 	mux.HandleFunc("POST /legion/v1/issues/status", s.issueStatus)
 	mux.HandleFunc("POST /legion/v1/gates/register", s.gateRegister)

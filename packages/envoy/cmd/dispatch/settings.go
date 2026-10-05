@@ -14,7 +14,8 @@ import (
 // takes its value from that read through settingValues, which refuses a name the table does not
 // list. The libraries Dispatch links read a few variables for themselves, outside the table:
 // `HOME` (os.UserHomeDir), libpq's `PG*` (pgx), `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY`
-// (net/http), `SSL_CERT_FILE` and `SSL_CERT_DIR` (crypto/x509), and the Go runtime's `GO*` and
+// (net/http), `SSL_CERT_FILE` and `SSL_CERT_DIR` (crypto/x509), the AWS SDK's `AWS_*` and its
+// shared config files (the file store's region and credentials), and the Go runtime's `GO*` and
 // `TZ`. `envoy-dispatch settings` prints the table, and the docs site's configuration reference is
 // generated from that output. A new setting is a new row here, never an os.Getenv;
 // TestNoReaderBypassesTheSettingsTable holds cmd/dispatch and internal/dispatch to that.
@@ -38,7 +39,9 @@ type setting struct {
 // service-account tokens, the secrets broker, the dashboard, and local and test runs.
 var settings = []setting{
 	{Name: "DATABASE_URL", Required: "yes",
-		Description: "Postgres connection string. The server migrates the database before serving; `census`, `backfill-block-ids`, `backfill-anchor-blocks` and `rebuild-refs` read it too. A `pool_max_conns` parameter is refused."},
+		Description: "Postgres connection string. The server migrates the database before serving; `census`, `backfill-block-ids`, `backfill-anchor-blocks`, `backfill-files` and `rebuild-refs` read it too. A `pool_max_conns` parameter is refused."},
+	{Name: "DISPATCH_FILE_STORE_BUCKET", Required: "no",
+		Description: "S3 bucket uploaded files (images, attachments) are stored in, keyed by their SHA-256; the AWS SDK finds its region and credentials itself (`AWS_*`, the shared config files, the task role). `backfill-files` reads it too. Unset, every upload's bytes stay in Postgres, as before the bucket existed."},
 	{Name: "DISPATCH_AGENT_TOKEN", Required: "yes",
 		Description: "Shared bearer token an agent may authenticate with: one value, or several separated by whitespace while it rotates, the first the current one, all accepted. Personal tokens minted in Settings are the usual agent credential."},
 	{Name: "DISPATCH_IDENTITY", Default: "`cookie`", Required: "no",
@@ -107,6 +110,8 @@ var settings = []setting{
 		Description: "Set to `1` on a loopback-only local server to sign anyone in by email at `/auth/_dev/signin` without the sign-in pool; refused alongside any `DISPATCH_SIGNIN_*` setting."},
 	{Name: "DISPATCH_TEST_HOOKS", Required: "no",
 		Description: "Set to `1` to mount the end-to-end tests' hook routes; never in a real deployment."},
+	{Name: "DISPATCH_TEST_SETTLE_DELAY", Default: "`2s`", Required: "no",
+		Description: "Document settlement delay for an end-to-end test process; a positive Go duration. Set only with `DISPATCH_TEST_HOOKS=1`."},
 }
 
 // removedSettings are the variables a release stopped reading, each with what replaced it. None is

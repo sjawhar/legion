@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -211,6 +212,77 @@ func TestARedVerdictInAwaitingMergeSendsTheTreeBackToImplementing(t *testing.T) 
 			}
 			if len(published) != 1 || published[0].Role != "merge-queue" || !strings.Contains(published[0].Packet, "READY withdrawn") || !strings.Contains(published[0].Packet, want) {
 				t.Fatalf("merge queue publishes %v, want one to merge-queue withdrawing the READY and saying %q", published, want)
+			}
+		})
+	}
+}
+
+// A READY is posted on the Dispatch issue whether or not the project names a merge queue role, so
+// its withdrawal is too: with no role, the issue's own record would otherwise keep telling a human
+// to merge a head GitHub will not merge. With a role, the role is told as well.
+func TestAREADYWithdrawalIsPostedOnTheIssueWithOrWithoutAMergeQueueRole(t *testing.T) {
+	const required = "pr-checks-result"
+	for _, role := range []string{"", "merge-queue"} {
+		t.Run("merge queue role "+strconv.Quote(role), func(t *testing.T) {
+			pool := migratedPool(t)
+			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root",
+				Phase: phase.AwaitingMerge, Generation: 1, Status: "retro", Rank: "U"})
+			seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
+				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", Required: []string{required}})
+			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
+			applyRefusingNothing(t, pool, readyEngine(role), intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42,
+				HeadSHA: "head", CheckRuns: []record.AttemptRun{{Name: required, ID: 1}}, Generation: 1, Snapshot: "red", Failing: []string{required}})
+			want := "READY withdrawn for LEGION-208, pull request #42: CI is red at head: " + required
+			if posted := messageBodies(t, pool); len(posted) != 1 || !strings.Contains(posted[0], want) {
+				t.Fatalf("Dispatch messages %q, want one saying %q", posted, want)
+			}
+			if published := mergeQueuePublishes(t, pool); (role == "") != (len(published) == 0) {
+				t.Fatalf("merge queue publishes %v with role %q, want one exactly when a role is named", published, role)
+			}
+		})
+	}
+}
+
+// A settlement reads no workflow run, and the run result it would judge a READY head by is as old
+// as the pass's last read of the runs: a short re-run can turn the run green on GitHub, and READY
+// pass on it, before the next read. So a settlement that finds the READY head red only by a
+// required workflow withdraws nothing, and the pass's next read of the runs decides: a run still
+// red withdraws the READY then, and one that passed leaves it standing.
+func TestASettlementLeavesARedOnlyRequiredWorkflowsMakeToTheNextRead(t *testing.T) {
+	const required, workflow = "pr-checks-result", ".github/workflows/claude-pr-review.yml"
+	for _, tc := range []struct {
+		name string
+		read string
+		want phase.Phase
+	}{
+		{"the next read finds the re-run passed", classify.Success, phase.AwaitingMerge},
+		{"the next read finds the run still red", "failure", phase.Implementing},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			engine := readyEngine("merge-queue")
+			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root",
+				Phase: phase.AwaitingMerge, Generation: 1, Status: "retro", Rank: "U"})
+			// The pass last read the run failed at the READY head; it has been re-run since.
+			seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
+				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", Required: []string{required},
+				Workflows: []record.RequiredWorkflow{{Path: workflow, Result: "failure"}}, WorkflowsHead: "head"})
+			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
+			applyRefusingNothing(t, pool, engine, intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: "head",
+				CheckRuns: []record.AttemptRun{{Name: required, ID: 1}}, Generation: 1, Snapshot: "re-run", Failing: []string{}})
+			if got := issuePhase(t, pool); got != phase.AwaitingMerge {
+				t.Fatalf("after the settlement the issue is in %s, want awaiting_merge", got)
+			}
+			if published, posted := mergeQueuePublishes(t, pool), messageBodies(t, pool); len(published) != 0 || len(posted) != 0 {
+				t.Fatalf("after the settlement: publishes %v, messages %q; want the READY standing", published, posted)
+			}
+			applyRefusingNothing(t, pool, engine, intake.RequiredChecks{Repo: "sjawhar/legion", Number: 42, Names: []string{required},
+				Workflows: []record.RequiredWorkflow{{Path: workflow, Result: tc.read}}, WorkflowsHead: "head"})
+			if got := issuePhase(t, pool); got != tc.want {
+				t.Fatalf("after the next read the issue is in %s, want %s", got, tc.want)
+			}
+			if published := mergeQueuePublishes(t, pool); (tc.want == phase.Implementing) != (len(published) == 1) {
+				t.Fatalf("merge queue publishes %v, want a withdrawal exactly when the read found the run red", published)
 			}
 		})
 	}

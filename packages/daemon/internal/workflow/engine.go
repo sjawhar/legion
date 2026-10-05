@@ -30,7 +30,12 @@ type Config struct {
 	MaxFixAttempts int
 	Linger         time.Duration
 	MergeQueueRole string
-	Clock          func() time.Time
+	// ReviewWorkflows is the project's `review_workflows`: the paths of the required workflows it
+	// declares as review workflows, which fail on their own findings. A red that only they make is
+	// the reviewer's round's to decide in testing and reviewing (classify.RedOnlyByReviewWorkflows);
+	// any other red required workflow sends the work back. Empty declares none.
+	ReviewWorkflows []string
+	Clock           func() time.Time
 	// ReviewAppLogin is the review App's bot login (<slug>[bot]) from its boot token lease. A push
 	// by it is never a fix attempt, and a red on its red tests is planned; a review it submits can be
 	// the reviewer's answer to a round it left undecided (reviewersAnswer). Empty matches no one.
@@ -360,7 +365,13 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 			return intake.Result{}, e.transition(ctx, tx, *issue, TriggerTesterFailed, "", row, pr, "")
 		}
 		if fact.Verdict == "pass" {
-			return intake.Result{}, e.transition(ctx, tx, *issue, TriggerTesterPassed, "", row, pr, "")
+			// A red only declared review workflows make stayed with the round (classify.RedSendsBack),
+			// so the reviewer it now starts is told it, and what the round owes it.
+			reason := ""
+			if pr != nil && classify.RedOnlyByReviewWorkflows(*pr, e.cfg.ReviewWorkflows) {
+				reason = redAt(*pr) + reviewWorkflowsToAdjudicate
+			}
+			return intake.Result{}, e.transition(ctx, tx, *issue, TriggerTesterPassed, "", row, pr, reason)
 		}
 	case phase.Reviewing:
 		_, err := e.settleRound(ctx, tx, *issue, row, pr, round{}, byCompletion)
@@ -504,7 +515,7 @@ func (e *Engine) push(ctx context.Context, tx pgx.Tx, fact intake.Push) (intake.
 	if err != nil {
 		return intake.Result{}, err
 	}
-	_, err = e.settleRound(ctx, tx, *issue, reviewer, pr, reviewRound(*issue, reviewer, &prior), byPush)
+	_, err = e.settleRound(ctx, tx, *issue, reviewer, pr, e.reviewRound(*issue, reviewer, &prior), byPush)
 	return intake.Result{}, err
 }
 
@@ -682,7 +693,7 @@ func (e *Engine) retryOrEscalate(ctx context.Context, tx pgx.Tx, fact intake.Ret
 			return intake.Result{}, err
 		}
 		// The retry tells nothing of a stuck round: passed as its own before, it is stuck the same way.
-		r := reviewRound(*issue, reviewer, pr)
+		r := e.reviewRound(*issue, reviewer, pr)
 		if moved, err := e.settleRound(ctx, tx, *issue, reviewer, pr, r, ""); err != nil || moved {
 			return intake.Result{}, err
 		}

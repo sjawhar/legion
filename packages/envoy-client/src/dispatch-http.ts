@@ -141,6 +141,7 @@ export interface IssuePageRequest {
 export interface SearchOptions {
   readonly project?: string;
   readonly limit?: number;
+  readonly offset?: number;
 }
 
 /** One node's edges: `to` reads what points at it, `from` what it points to; exactly one. */

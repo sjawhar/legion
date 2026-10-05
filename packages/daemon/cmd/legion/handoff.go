@@ -7,7 +7,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -197,28 +196,12 @@ func runHandoffComplete(ctx context.Context, args []string, stdout, stderr io.Wr
 		fmt.Fprintf(stderr, "legion handoff complete: %v\n", err)
 		return 1
 	}
-	body, err := json.Marshal(map[string]any{"grantId": grant, "summary": *summary, "verdict": *verdict, "ready": *ready, "commit": commit})
+	response, err := postDaemon(ctx, "/legion/v1/handoff/complete", map[string]any{"grantId": grant, "summary": *summary, "verdict": *verdict, "ready": *ready, "commit": commit})
 	if err != nil {
 		fmt.Fprintf(stderr, "legion handoff complete: %v\n", err)
 		return 1
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, daemonURL()+"/legion/v1/handoff/complete", strings.NewReader(string(body)))
-	if err != nil {
-		fmt.Fprintf(stderr, "legion handoff complete: %v\n", err)
-		return 1
-	}
-	request.Header.Set("Content-Type", "application/json")
-	response, err := http.DefaultClient.Do(request)
-	if err != nil {
-		fmt.Fprintf(stderr, "legion handoff complete: %v\n", err)
-		return 1
-	}
-	defer response.Body.Close()
-	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		answer, _ := io.ReadAll(response.Body)
-		fmt.Fprintf(stderr, "legion handoff complete: daemon returned %d: %s\n", response.StatusCode, strings.TrimSpace(string(answer)))
-		return 1
-	}
+	response.Body.Close()
 	fmt.Fprintln(stdout, "[handoff] Reported phase completion")
 	return 0
 }
@@ -227,7 +210,7 @@ func runHandoffComplete(ctx context.Context, args []string, stdout, stderr io.Wr
 // daemon resolved at boot, which it names on every pane as LEGION_JJ_PATH. The phase decides, not
 // the role. A phase phase.HandoffFile names ends with its role's handoff, and the completion reports
 // the commit that carries it: the last commit on the issue branch that changed .legion/<phase>.json,
-// which in the end game is the committed .legion/ deletion. That handoff must be committed — none of
+// a commit that deleted it included. That handoff must be committed — none of
 // it only in the working copy — and committed on this branch, never inherited from the base: a pane
 // whose handoff is still uncommitted would otherwise report a commit that carries another issue's
 // file. The daemon refuses a carrying commit the role already reported in its previous phase. Every
@@ -259,8 +242,8 @@ func handoffCommit(workspace string, role legionclaim.Role, current phase.Phase)
 	}
 	_, missing := os.Stat(filepath.Join(workspace, file))
 	if carrying != "" {
-		// A committed deletion is not a handoff this role wrote: the implementer's end-game
-		// .legion/ deletion carries every role's file away.
+		// A committed deletion is not a handoff this role wrote: a commit that deletes .legion/
+		// carries every role's file away.
 		if missing == nil {
 			if err := ownHandoff(jj, workspace, file, carrying); err != nil {
 				return "", err

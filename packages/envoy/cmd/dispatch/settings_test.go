@@ -1058,6 +1058,21 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 				t.Errorf("web dist = %q, %v", dir, err)
 			}
 		},
+		"DISPATCH_FILE_STORE_BUCKET": func(t *testing.T) {
+			if boot := resolveWith(t, map[string]string{"DISPATCH_FILE_STORE_BUCKET": " example-files-bucket "}); boot.FileStoreBucket != "example-files-bucket" {
+				t.Errorf("FileStoreBucket = %q, want the trimmed bucket name", boot.FileStoreBucket)
+			}
+			// Unset, the store is a nil interface: every upload keeps its bytes in Postgres.
+			if store, err := openFileStore(context.Background(), resolveWith(t, map[string]string{"DISPATCH_FILE_STORE_BUCKET": ""})); err != nil || store != nil {
+				t.Errorf("openFileStore with no bucket = %v, %v, want nil, nil", store, err)
+			}
+			// backfill-files reads it too, trimmed, and refuses to run without it before it opens the
+			// database.
+			var stdout, stderr bytes.Buffer
+			if code := runSubcommand(context.Background(), []string{"backfill-files"}, envGetter(map[string]string{"DISPATCH_FILE_STORE_BUCKET": " "}), &stdout, &stderr); code != 1 || !strings.Contains(stdout.String()+stderr.String(), "DISPATCH_FILE_STORE_BUCKET") {
+				t.Errorf("backfill-files with no bucket: exit %d, output %q, want a refusal naming DISPATCH_FILE_STORE_BUCKET", code, stdout.String()+stderr.String())
+			}
+		},
 		"DISPATCH_DEV_SIGNIN": func(t *testing.T) {
 			if boot, err := resolveBootConfig(devSignInEnvironment(nil)); err != nil || !boot.DevSignIn {
 				t.Errorf("DISPATCH_DEV_SIGNIN=1: DevSignIn %t, %v", boot.DevSignIn, err)
@@ -1098,6 +1113,21 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 					}
 				}
 			})
+		},
+		"DISPATCH_TEST_SETTLE_DELAY": func(t *testing.T) {
+			const longDelay = 30 * time.Second
+			boot := resolveWith(t, map[string]string{
+				"DISPATCH_TEST_HOOKS":        "1",
+				"DISPATCH_TEST_SETTLE_DELAY": longDelay.String(),
+			})
+			if boot.SettleDelay != longDelay {
+				t.Errorf("DISPATCH_TEST_SETTLE_DELAY: SettleDelay = %v, want %v", boot.SettleDelay, longDelay)
+			}
+			for _, invalid := range []string{"not-a-duration", "-1s", "0s"} {
+				refusedWith(t, map[string]string{"DISPATCH_TEST_HOOKS": "1", "DISPATCH_TEST_SETTLE_DELAY": invalid},
+					fmt.Sprintf("DISPATCH_TEST_SETTLE_DELAY=%q (expected a positive Go duration)", invalid))
+			}
+			refusedWith(t, map[string]string{"DISPATCH_TEST_SETTLE_DELAY": "1s"}, "DISPATCH_TEST_HOOKS=1 required")
 		},
 	}
 	for _, row := range settings {

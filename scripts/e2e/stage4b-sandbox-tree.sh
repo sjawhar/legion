@@ -450,14 +450,17 @@ pair_agents="thermonuclear-deep-review thermonuclear-code-quality"
 # pair_dispatch AGENT reads a reviewer session on stdin and prints what the session holds for AGENT:
 # every task call naming it, the tool result of each call (text, isError, details), the ids its
 # results name for AGENT (details.progress), and every task-result block naming AGENT the session
-# received, however it arrived: an async-result delivery, or a hub wait or jobs snapshot that
-# recovered it first. A delivery is that block alone, never the rest of a snapshot, which carries
-# other jobs' output. Nothing else is summarised, so the evidence keeps each failure's text.
+# received, however it arrived: an async-result delivery, or a `wait` result or a `read` of a
+# `proc://` job that recovered it first. A delivery is that block alone, never the rest of a
+# snapshot, which carries other jobs' output. Nothing else is summarised, so the evidence keeps each
+# failure's text.
 pair_dispatch() {
   jq -R -s -c --arg agent "$1" '[split("\n")[] | fromjson?] as $e
     | [$e[] | select(.type == "message" and .message.role == "assistant") | .message.content[]?
-        | select(.type == "toolCall" and .name == "task" and (.arguments | tostring | contains($agent)))] as $calls
+        | select(.type == "toolCall")] as $toolCalls
+    | [$toolCalls[] | select(.name == "task" and (.arguments | tostring | contains($agent)))] as $calls
     | ($calls | map(.id)) as $ids
+    | [$toolCalls[] | select(.name == "read" and ((.arguments.path? // "") | tostring | test("^proc://"; "i"))) | .id] as $procReads
     | [$e[] | select(.type == "message" and .message.role == "toolResult" and (.message.toolCallId as $i | $ids | index($i)))
         | .message | {toolCallId, isError, text: ([.content[]? | select(.type == "text") | .text] | join("\n")), details}] as $results
     | {agent: $agent,
@@ -466,8 +469,9 @@ pair_dispatch() {
        ids: ([$results[].details.progress[]? | select(.agent == $agent) | .id] | unique),
        deliveries: [$e[]
          | (if .type == "custom_message" and .customType == "async-result" then {timestamp, via: "async-result", text: (.content | tostring)}
-            elif .type == "message" and .message.role == "toolResult" and .message.toolName == "hub"
-              then {timestamp, via: "hub", text: ([.message.content[]? | select(.type == "text") | .text] | join("\n"))}
+            elif .type == "message" and .message.role == "toolResult"
+              and (.message.toolName == "wait" or (.message.toolName == "read" and (.message.toolCallId as $i | $procReads | index($i))))
+              then {timestamp, via: .message.toolName, text: ([.message.content[]? | select(.type == "text") | .text] | join("\n"))}
             else empty end)
          | . as $d
          | ($d.text | [scan("<task-result [^>]*agent=\"" + $agent + "\"[^>]*>[\\s\\S]*?</task-result>")])[]
@@ -2329,10 +2333,10 @@ pass
 begin review-pair
 # The reviewer's two review passes are the image's thermonuclear agents, dispatched by name, and each
 # must have run: one of its runs completed, by the task-result block the reviewer received (a
-# delivery or a hub snapshot) or, with none, by its own session, which beside the reviewer's ends in
-# an accepted yield, every turn on the review target. A missing agent is refused to the model
-# as "Unknown agent", an agent whose declared model the pod cannot resolve fails "No model
-# selected", and a model that substitutes the bundled reviewer still posts a verdict, which looks
+# delivery, a `wait`, or a `proc://` read) or, with none, by its own session, which beside the
+# reviewer's ends in an accepted yield, every turn on the review target. A missing agent is refused
+# to the model as "Unknown agent", an agent whose declared model the pod cannot resolve fails "No
+# model selected", and a model that substitutes the bundled reviewer still posts a verdict, which looks
 # the same from outside. tree-reviewed recorded the dispatches (record_pair); each failure below
 # quotes them.
 stem=$(cat "$evidence/review-pair/session-stem")

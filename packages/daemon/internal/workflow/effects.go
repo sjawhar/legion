@@ -173,16 +173,47 @@ func (e *Engine) suspend(ctx context.Context, tx pgx.Tx, issue record.Issue, rol
 	return e.enqueue(ctx, tx, issue.Key, record.SuperviseRequest{Op: "suspend", Tree: issue.Tree, Role: role, Generation: issue.Generation, Reason: reason})
 }
 
+// approvedHeadLabel labels the head a merger's task carries. The merger's prompt reads its task by
+// this label (prompts/roles/merger.md, step 2), which a test ties to it.
+const approvedHeadLabel = "Approved head"
+
 // start starts the phase worker of the issue's current phase, a start stamped with that phase. A
 // start that takes the phase over from a role still at work in it names that role, quiesce, so it
 // waits for that role's turn to end (record.SuperviseRequest's Quiesce); every other start names
-// none.
+// none. A merger is told the head the review round approved (approvedHead), the one head its READY
+// may name, so it never chooses among the pull request's reviews itself.
 func (e *Engine) start(ctx context.Context, tx pgx.Tx, issue record.Issue, role claim.Role, task string, quiesce claim.Role) error {
 	if role == "" {
 		return nil
 	}
+	if role == claim.RoleMerger {
+		head, err := e.approvedHead(ctx, tx, issue.Key)
+		if err != nil {
+			return err
+		}
+		if head != "" {
+			task += " " + approvedHeadLabel + ": " + head + "."
+		}
+	}
 	return e.enqueue(ctx, tx, issue.Key, record.SuperviseRequest{Op: "start", Tree: issue.Tree, Role: role, Task: task,
 		Generation: issue.Generation, Phase: issue.Phase, Quiesce: quiesce})
+}
+
+// approvedHead is the head the issue's review round approved: the reviewer row's recorded decision
+// (the review that ended the round, review.go), "" when the round recorded no approval. The
+// reviewer's row keeps that decision until the reviewer starts again (clearHandoff), or until a
+// re-admission of the tree clears the generation's handoffs with it (record.ClearTreeGeneration):
+// a merger resumed into a new generation is told no head and refuses, so the round is reviewed
+// again rather than merged on the last generation's approval.
+func (e *Engine) approvedHead(ctx context.Context, tx pgx.Tx, issue string) (string, error) {
+	reviewer, err := e.phaseRow(ctx, tx, issue, claim.RoleReviewer)
+	if err != nil {
+		return "", err
+	}
+	if reviewer.Decision == nil || reviewer.Decision.State != "approved" {
+		return "", nil
+	}
+	return reviewer.Decision.Head, nil
 }
 
 // task is what a started worker is told. It names the phase the worker starts, which the issue
@@ -216,7 +247,10 @@ func continueLine(issue record.Issue) string {
 // begins that phase — the run that did is over — so the task names the phase and says to carry
 // the work on, which is what a resumed session needs to tell this phase from its last. Admission
 // sends it to the mid-phase children of a tree it re-admits, whose workers the tree's close
-// retired and whose phase rows the new generation cleared.
+// retired. Their phase rows stand, since a row is keyed by issue and role, but the re-admission
+// empties each row's handoff and the review round's decision with the generation
+// (record.ClearTreeGeneration), so nothing of the last generation's work is carried into the new
+// one: a merger resumed this way is told no approved head and sends the round back for review.
 func ResumePhaseTask(issue record.Issue) string {
 	return continueLine(issue) + " Resume the existing phase work."
 }

@@ -11,7 +11,9 @@ import (
 	"log/slog"
 	"mime"
 	"net/http"
+	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -25,6 +27,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/envoy"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
+	"github.com/sjawhar/envoy/internal/dispatch/files"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
@@ -73,10 +76,16 @@ type Deps struct {
 	// is unconfigured) means the feature is off: the pending list answers null, and every other
 	// handler that needs it answers 404 FEATURE_OFF.
 	AgentSecrets *agentsecrets.Client
-	// Lifetime bounds work a handler starts and does not wait for: it is the process's own
-	// context, cancelled when the server is shutting down, so a deploy stops a broadcast's
-	// remaining deliveries instead of leaving goroutines behind. Nil means unbounded, which
-	// is what a test gets.
+	// Files holds uploaded files' bytes outside Postgres (cmd/dispatch: DISPATCH_FILE_STORE_BUCKET);
+	// nil keeps them in each version's row, and a row that still holds bytes is served from the
+	// row either way (files.BackfillRows moves them).
+	Files files.Store
+	// Lifetime bounds work a handler starts and does not wait for, and every event stream: it is
+	// the process's own context, cancelled when the server is shutting down, so a deploy stops a
+	// broadcast's remaining deliveries instead of leaving goroutines behind, and ends each open
+	// stream (streamEvents, streamAgentConversation) so http.Server.Shutdown is not held for its
+	// whole budget by a connection that never goes idle. Nil means unbounded, which is what a
+	// test gets.
 	Lifetime         context.Context
 	TestHooksEnabled bool
 	// StreamHeartbeat is how often a server-sent event stream writes a heartbeat and resolves
@@ -117,7 +126,9 @@ type DepsInput struct {
 	// empty means the feature is off. AgentSecretsToken is the resolved UI bearer.
 	AgentSecretsURL   string
 	AgentSecretsToken string
-	TestHooksEnabled  bool
+	// Files is the uploaded-file store; nil keeps files in Postgres. See Deps.Files.
+	Files            files.Store
+	TestHooksEnabled bool
 	// StreamHeartbeat replaces the heartbeat of the event streams and the document socket
 	// (Deps.StreamHeartbeat). Zero keeps fifteen seconds; a test proving a connection closes
 	// sets a short one.
@@ -176,6 +187,7 @@ func NewDeps(input DepsInput) (Deps, error) {
 		OIDC:             input.OIDC,
 		AgentStream:      input.AgentStream,
 		AgentSecrets:     agentSecretsClient,
+		Files:            input.Files,
 		Lifetime:         input.Lifetime,
 		TestHooksEnabled: input.TestHooksEnabled,
 		StreamHeartbeat:  heartbeat,
@@ -292,6 +304,23 @@ func (e *apiError) Error() string { return e.message }
 
 func errorf(status int, code, format string, args ...any) *apiError {
 	return &apiError{status: status, code: code, message: fmt.Sprintf(format, args...)}
+}
+
+// parseQueryInt reads one query parameter as an integer within [min, max]. present is false
+// when the caller did not supply the parameter at all; a parameter repeated, not an integer, or
+// outside the bound is present with valid false. issue_page.go's parseIssuePage and search.go's
+// handler each format their own code and message around a false valid, since the two routes
+// disagree on them.
+func parseQueryInt(query url.Values, field string, min, max int) (value int, present, valid bool) {
+	values, ok := query[field]
+	if !ok {
+		return 0, false, false
+	}
+	parsed, err := strconv.Atoi(values[0])
+	if len(values) != 1 || err != nil || parsed < min || parsed > max {
+		return 0, true, false
+	}
+	return parsed, true, true
 }
 
 // The codes writeHandlerError answers a document it cannot read or serve and an unclassified

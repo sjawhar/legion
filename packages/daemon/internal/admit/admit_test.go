@@ -251,6 +251,48 @@ func TestReadmissionStartsTheTreesMidPhaseChildren(t *testing.T) {
 	})
 }
 
+// A re-admitted tree's merging child is resumed with no approved head: the re-admission clears the
+// generation, which empties the review round's decision with the rest of the tree's handoffs
+// (record.ClearTreeGeneration), so the merger refuses for want of one and the round is reviewed
+// again rather than merged on the last generation's approval.
+func TestAResumedMergerIsToldNoApprovedHeadAcrossGenerations(t *testing.T) {
+	pool := migratedPool(t)
+	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+	root := record.Issue{Key: "LEGION-208", Project: "LEGION", Title: "root", Tree: "LEGION-208", Phase: phase.Done, Generation: 1, Status: "done", Rank: "A", LastDispatchSeq: 1}
+	putIssue(t, pool, root)
+	parentKey := root.Key
+	putIssue(t, pool, record.Issue{Key: "LEGION-209", Project: "LEGION", Title: "merging child", Tree: root.Key, Parent: &parentKey,
+		Phase: phase.Merging, Generation: 1, Status: "in_progress", Rank: "B", LastDispatchSeq: 1})
+	inTx(t, pool, func(tx pgx.Tx) {
+		if err := record.NewStore().PutPhase(context.Background(), tx, record.PhaseRow{Issue: "LEGION-209", Role: claim.RoleReviewer, Claim: "review-claim",
+			HandoffCommit: "approved-head", Decision: &record.ReviewDecision{State: "approved", Head: "approved-head"}}); err != nil {
+			t.Fatalf("seed the reviewer's row: %v", err)
+		}
+	})
+
+	apply(t, pool, admission, "readmit", intake.DispatchIssue{Key: root.Key, Seq: 2, Type: "issue.updated", Status: "todo", Title: root.Title, Rank: root.Rank, HandedOver: handed}, engine)
+
+	assertEffects(t, pool, []effect{
+		{kind: record.OutboxKindDispatchStatus, issue: root.Key, payload: record.StatusWrite{Status: "in_progress", ObservedStatus: "todo"}},
+		{kind: record.OutboxKindSupervise, issue: root.Key, payload: record.SuperviseRequest{Op: "start", Tree: root.Key, Role: claim.RoleArchitect, Generation: 2}},
+		{kind: record.OutboxKindSupervise, issue: "LEGION-209", payload: record.SuperviseRequest{Op: "start", Tree: root.Key, Role: claim.RoleMerger, Generation: 1, Phase: phase.Merging,
+			Task: "Continue merging child. Issue: LEGION-209. Phase: merging. Resume the existing phase work.", ResumeTask: true}},
+	})
+	inTx(t, pool, func(tx pgx.Tx) {
+		rows, err := record.NewStore().Phases(context.Background(), tx, "LEGION-209")
+		if err != nil {
+			t.Fatalf("read the child's phase rows: %v", err)
+		}
+		if len(rows) != 1 || rows[0].Role != claim.RoleReviewer {
+			t.Fatalf("phase rows = %#v, want the reviewer's row still standing", rows)
+		}
+		if rows[0].Decision != nil || rows[0].HandoffCommit != "" {
+			t.Fatalf("reviewer row = %#v, want its decision and handoff cleared with the generation", rows[0])
+		}
+	})
+}
+
 // A merge is the one fact GitHub never sends again, and a child whose READY was posted can be
 // merged after its root closed. The lingering tree starts no worker, but the child moves on to its
 // production check, so re-admission, which keeps no merged pull request, starts its implementer
