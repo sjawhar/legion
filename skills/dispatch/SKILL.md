@@ -165,15 +165,13 @@ dispatch_search({ query, project?, limit?, offset? })
 ```
 Websearch syntax applies: `"merge queue"`, `-daemon`, `OR`. Issues, documents, asks, comments, and messages rank separately; the
 merged page orders each kind's best in turn — issue, document, ask, comment, message — and a bare issue key ranks first. Each
-kind's list is a query embedding's meaning match merged with keyword hits (LEGION-549), so a paraphrase with no shared word can
-still find the right hit; when the embedder is unavailable, the answer says so and ranks by keyword alone. A page
-holds `limit` hits (20 default, 50 max); the first line gives the total (`showing 1-20 of 312`); see
-[Search paging](skill://dispatch/references/issues.md#search-paging) for more. Queries over 1,000 characters are refused: use the
-few words `skill://dispatch-first` names, never a pasted passage. Issue hits start with the issue key; document hits start with
-`dispatch://PROJECT/artifact/<slug>`, then the link. Cite the hit (`dispatch://KEY` or the doc ref) or say "no prior issue".
+kind's list also merges a query embedding's meaning match with keyword hits (LEGION-549): a paraphrase with no shared word can
+still match; without an embedder, it says so and ranks by keyword alone. A page holds `limit` hits (20 default, 50 max); the first
+line gives the total (`showing 1-20 of 312`); see [Search paging](skill://dispatch/references/issues.md#search-paging) for more.
+Queries over 1,000 characters are refused: use the few words `skill://dispatch-first` names, never a pasted passage. Issue hits
+start with the issue key; document hits start with `dispatch://PROJECT/artifact/<slug>`, then the link. Cite the hit (`dispatch://KEY` or the doc ref) or say "no prior issue".
 
-`dispatch_issue` refuses a title that near-duplicates an issue in the same project and returns the candidates (`POSSIBLE_DUPLICATE`).
-Read them; reference the existing issue, or repeat the call with `force: true` when it is genuinely new work.
+`dispatch_issue` refuses a title that near-duplicates an issue in the same project and returns the candidates (`POSSIBLE_DUPLICATE`). Read them; reference the existing issue, or repeat the call with `force: true` when it is genuinely new work.
 The check compares title words only (shared stemmed terms), never meaning: "four tests that fail a
 merge" pairs with "four CI gates that cannot fail a merge". So when you force past a candidate, give
 the new issue a title that names what differs where you can, and open its spec with the
