@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/embed"
+	"github.com/sjawhar/envoy/internal/dispatch/retry"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
@@ -47,6 +48,31 @@ func oneVector() []float32 {
 	return v
 }
 
+// fakeThrottleError stands in for a Bedrock ThrottlingException: it implements the
+// `ErrorCode() string` interface embed.IsThrottled (and the AWS SDK's own retry.ThrottleErrorCode
+// classifier underneath it) checks for, without needing a real smithy-generated type or a live
+// Bedrock call.
+type fakeThrottleError struct{}
+
+func (fakeThrottleError) Error() string     { return "simulated Bedrock throttle: too many requests" }
+func (fakeThrottleError) ErrorCode() string { return "ThrottlingException" }
+
+// throttleThenSucceedEmbedder throttles its first throttleFor calls, then delegates to inner -
+// standing in for a provider that recovers partway through an unattended run.
+type throttleThenSucceedEmbedder struct {
+	inner       embed.Embedder
+	throttleFor int
+	calls       int
+}
+
+func (e *throttleThenSucceedEmbedder) Embed(ctx context.Context, texts []string, inputType embed.InputType) ([][]float32, error) {
+	e.calls++
+	if e.calls <= e.throttleFor {
+		return nil, fakeThrottleError{}
+	}
+	return e.inner.Embed(ctx, texts, inputType)
+}
+
 // seedIssue inserts an issue directly (bypassing the API, which this package does not import),
 // keyed exactly as given - e.g. seedIssue(t, db, "EMBQ", "EMBQ-1", "A title") - with its project
 // created on first use.
@@ -77,10 +103,19 @@ func pendingCount(t *testing.T, database *store.Store) int {
 	return count
 }
 
+func forceEligible(t *testing.T, database *store.Store, kind, id string) {
+	t.Helper()
+	if _, err := database.Pool.Exec(context.Background(), `
+		update embeddings set next_attempt_at = now() - interval '1 second' where kind = $1 and id = $2
+	`, kind, id); err != nil {
+		t.Fatalf("force %s/%s eligible: %v", kind, id, err)
+	}
+}
+
 // TestProcessBatchEmbedsAPendingRowTheWriteTimeTriggerEnqueued proves the end-to-end path a real
-// write exercises: inserting an issue (0072_issues_embeddings_trigger.up.sql's trigger) leaves a pending
-// embeddings row with no vector, and ProcessBatch fills it in from the Embedder, without any
-// application code calling embeddings_enqueue directly.
+// write exercises: inserting an issue (0072_issues_embeddings_trigger.up.sql's trigger) leaves a
+// pending embeddings row with no vector, and ProcessBatch fills it in from the Embedder, without
+// any application code calling embeddings_enqueue directly.
 func TestProcessBatchEmbedsAPendingRowTheWriteTimeTriggerEnqueued(t *testing.T) {
 	database := storetest.Open(t)
 	seedIssue(t, database, "EMBQ", "EMBQ-1", "A title to embed")
@@ -89,9 +124,9 @@ func TestProcessBatchEmbedsAPendingRowTheWriteTimeTriggerEnqueued(t *testing.T) 
 	}
 
 	embedder := &fakeEmbedder{}
-	succeeded, failed, blocked, err := ProcessBatch(context.Background(), Deps{Store: database, Embedder: embedder})
-	if err != nil || blocked {
-		t.Fatalf("ProcessBatch = %d, %d, %v, %v", succeeded, failed, blocked, err)
+	succeeded, failed, blocked, throttled, err := ProcessBatch(context.Background(), Deps{Store: database, Embedder: embedder})
+	if err != nil || blocked || throttled {
+		t.Fatalf("ProcessBatch = %d, %d, %v, %v, %v", succeeded, failed, blocked, throttled, err)
 	}
 	if succeeded != 1 || failed != 0 {
 		t.Fatalf("ProcessBatch succeeded, failed = %d, %d, want 1, 0", succeeded, failed)
@@ -120,13 +155,13 @@ func TestProcessBatchEmbedsAPendingRowTheWriteTimeTriggerEnqueued(t *testing.T) 
 func TestProcessBatchRetriesWithBackoffOnEmbedFailure(t *testing.T) {
 	database := storetest.Open(t)
 	seedIssue(t, database, "RETR", "RETR-1", "A title")
-	embedder := &fakeEmbedder{err: errors.New("cohere: simulated outage")}
-	succeeded, failed, blocked, err := ProcessBatch(context.Background(), Deps{Store: database, Embedder: embedder})
+	embedder := &fakeEmbedder{err: errors.New("bedrock: simulated outage")}
+	succeeded, failed, blocked, throttled, err := ProcessBatch(context.Background(), Deps{Store: database, Embedder: embedder})
 	if err != nil {
 		t.Fatalf("ProcessBatch: %v", err)
 	}
-	if succeeded != 0 || failed != 1 || blocked {
-		t.Fatalf("ProcessBatch succeeded, failed, blocked = %d, %d, %v, want 0, 1, false", succeeded, failed, blocked)
+	if succeeded != 0 || failed != 1 || blocked || throttled {
+		t.Fatalf("ProcessBatch succeeded, failed, blocked, throttled = %d, %d, %v, %v, want 0, 1, false, false", succeeded, failed, blocked, throttled)
 	}
 	if got := pendingCount(t, database); got != 1 {
 		t.Fatalf("pending after a failed attempt = %d, want 1 (still pending, not lost)", got)
@@ -145,13 +180,54 @@ func TestProcessBatchRetriesWithBackoffOnEmbedFailure(t *testing.T) {
 		t.Errorf("next_attempt_at = %v, want it backed off into the future", nextAttemptAt)
 	}
 	// Immediately re-processing finds nothing: the row is backed off, not eligible yet.
-	succeeded, failed, _, err = ProcessBatch(context.Background(), Deps{Store: database, Embedder: embedder})
+	succeeded, failed, _, _, err = ProcessBatch(context.Background(), Deps{Store: database, Embedder: embedder})
 	if err != nil || succeeded != 0 || failed != 0 {
 		t.Fatalf("ProcessBatch immediately after backoff = %d, %d, %v, want 0, 0, nil", succeeded, failed, err)
 	}
 }
 
-// TestProcessBatchRefusesToMarkStaleContentEmbedded guards commitEmbedding's content_hash
+// TestProcessBatchNeverDeadLettersAThrottledBatchHoweverManyTimesItRecurs is the round-3
+// blocking finding: a whole-batch Bedrock failure is infrastructure, never evidence about a
+// row's content, so it must never count toward the dead-letter threshold - a sustained throttle
+// episode outlasting retry.DeadLetterAttempts cycles must still be retrying afterward, not
+// permanently abandoned.
+func TestProcessBatchNeverDeadLettersAThrottledBatchHoweverManyTimesItRecurs(t *testing.T) {
+	database := storetest.Open(t)
+	seedIssue(t, database, "THRO", "THRO-1", "A title")
+	embedder := &fakeEmbedder{err: fakeThrottleError{}}
+	deps := Deps{Store: database, Embedder: embedder}
+	ctx := context.Background()
+
+	for i := range retry.DeadLetterAttempts + 5 {
+		forceEligible(t, database, "issue", "THRO-1")
+		succeeded, failed, blocked, throttled, err := ProcessBatch(ctx, deps)
+		if err != nil || blocked {
+			t.Fatalf("ProcessBatch attempt %d = %d, %d, %v, %v", i, succeeded, failed, blocked, err)
+		}
+		if !throttled {
+			t.Fatalf("ProcessBatch attempt %d: throttled = false, want true", i)
+		}
+	}
+
+	var dead bool
+	var attempts int
+	if err := database.Pool.QueryRow(ctx, `select dead, attempt_count from embeddings where kind = 'issue' and id = 'THRO-1'`).Scan(&dead, &attempts); err != nil {
+		t.Fatalf("read row: %v", err)
+	}
+	if dead {
+		t.Errorf("dead = true after %d throttled attempts (more than retry.DeadLetterAttempts=%d), want false: throttling is never permanent", attempts, retry.DeadLetterAttempts)
+	}
+
+	// Bedrock recovers: the very next attempt, once eligible, succeeds normally.
+	embedder.err = nil
+	forceEligible(t, database, "issue", "THRO-1")
+	succeeded, failed, blocked, throttled, err := ProcessBatch(ctx, deps)
+	if err != nil || blocked || throttled || succeeded != 1 || failed != 0 {
+		t.Fatalf("ProcessBatch after recovery = %d, %d, %v, %v, %v, want 1, 0, false, false, nil", succeeded, failed, blocked, throttled, err)
+	}
+}
+
+// TestProcessBatchRefusesToMarkStaleContentEmbedded guards commitEmbeddings' content_hash
 // guard: if the row's text changes between the scan and the commit (another write re-enqueued
 // it), the stale embedding must not be recorded as current.
 func TestProcessBatchRefusesToMarkStaleContentEmbedded(t *testing.T) {
@@ -168,8 +244,12 @@ func TestProcessBatchRefusesToMarkStaleContentEmbedded(t *testing.T) {
 	if _, err := database.Pool.Exec(ctx, `update issues set title = $1 where key = 'STAL-1'`, "Changed title"); err != nil {
 		t.Fatalf("update title: %v", err)
 	}
-	if err := commitEmbedding(ctx, Deps{Store: database}, stale, oneVector()); err != nil {
-		t.Fatalf("commitEmbedding: %v", err)
+	succeeded, permanent, err := commitEmbeddings(ctx, Deps{Store: database}, []pendingRow{stale}, [][]float32{oneVector()})
+	if err != nil {
+		t.Fatalf("commitEmbeddings: %v", err)
+	}
+	if succeeded != 0 || len(permanent) != 0 {
+		t.Fatalf("commitEmbeddings = %d succeeded, %d permanent, want 0, 0 (silently skipped, not retried)", succeeded, len(permanent))
 	}
 	if got := pendingCount(t, database); got != 1 {
 		t.Errorf("pending after a stale commit = %d, want 1 (the new text is still unembedded)", got)
@@ -212,6 +292,9 @@ func TestBackfillEnqueuesAndEmbedsContentNoTriggerEverSaw(t *testing.T) {
 	}
 	if report.Embedded != 1 {
 		t.Errorf("Embedded = %d, want 1", report.Embedded)
+	}
+	if report.Dead != 0 || report.Pending != 0 {
+		t.Errorf("Dead=%d Pending=%d, want 0, 0", report.Dead, report.Pending)
 	}
 	if got := pendingCount(t, database); got != 0 {
 		t.Errorf("pending after Backfill = %d, want 0", got)
@@ -261,7 +344,7 @@ func TestBackfillResumesFromItsCheckpointRatherThanRescanning(t *testing.T) {
 	}
 }
 
-// TestBackfillDoesNotOverwriteAConcurrentWritesFresherEmbedding is the regression Round 2's
+// TestBackfillDoesNotOverwriteAConcurrentWritesFresherEmbedding is the regression round 2's
 // review found: Backfill used to ON CONFLICT DO UPDATE with its own page's snapshot, which could
 // clobber a trigger's fresher enqueue of the same row with stale text. ON CONFLICT DO NOTHING
 // means an existing row - whichever wrote it, and whenever - is never touched by Backfill at all.
@@ -300,10 +383,48 @@ func TestBackfillDoesNotOverwriteAConcurrentWritesFresherEmbedding(t *testing.T)
 	}
 }
 
-// TestRetryRowMarksARowDeadAfterRepeatedFailuresAndStopsRetrying is the dead-letter acceptance
-// criterion: past deadLetterAttempts, a row stops consuming poller cycles rather than retrying
-// with a five-minute ceiling forever, but is still visible and still recoverable.
-func TestRetryRowMarksARowDeadAfterRepeatedFailuresAndStopsRetrying(t *testing.T) {
+// TestBackfillWaitsOutASustainedThrottleAndFinishesWithZeroDeadRows is the round-3 acceptance
+// criterion in full, against Backfill itself rather than one ProcessBatch call: a sustained
+// Bedrock throttle - outlasting more attempts than the old dead-letter threshold would have
+// tolerated for a permanent failure - must still finish unattended, with the row embedded and
+// nothing dead-lettered, once the provider recovers.
+func TestBackfillWaitsOutASustainedThrottleAndFinishesWithZeroDeadRows(t *testing.T) {
+	database := storetest.Open(t)
+	seedIssue(t, database, "SUST", "SUST-1", "A title")
+	inner := &fakeEmbedder{}
+	// 3 throttled batches: the per-row test above already proves the dead-letter threshold itself
+	// is never crossed by throttling (forcing each row eligible immediately, bypassing real wait
+	// time); this test's job is proving the drain loop waits out *real* backoff across *multiple*
+	// throttled batches rather than giving up - a small, fast number of them is enough for that.
+	embedder := &throttleThenSucceedEmbedder{inner: inner, throttleFor: 3}
+
+	var out bytes.Buffer
+	report, err := Backfill(context.Background(), Deps{Store: database, Embedder: embedder}, &out)
+	if err != nil {
+		t.Fatalf("Backfill: %v", err)
+	}
+	if report.Dead != 0 {
+		t.Errorf("Dead = %d, want 0: a sustained throttle must never dead-letter", report.Dead)
+	}
+	if report.Pending != 0 {
+		t.Errorf("Pending = %d, want 0: Backfill should wait out the throttle and finish", report.Pending)
+	}
+	if report.Embedded != 1 {
+		t.Errorf("Embedded = %d, want 1", report.Embedded)
+	}
+	if embedder.calls <= embedder.throttleFor {
+		t.Errorf("embedder was called %d times, want more than throttleFor=%d (at least one call must have succeeded)", embedder.calls, embedder.throttleFor)
+	}
+	if pendingCount(t, database) != 0 {
+		t.Errorf("pending embeddings after Backfill = %d, want 0", pendingCount(t, database))
+	}
+}
+
+// TestRetryRowsMarksARowDeadAfterRepeatedPermanentFailuresAndStopsRetrying is the dead-letter
+// acceptance criterion for the one failure class that does dead-letter: past
+// retry.DeadLetterAttempts *permanent* failures, a row stops consuming poller cycles rather than
+// retrying with a five-minute ceiling forever, but is still visible and still recoverable.
+func TestRetryRowsMarksARowDeadAfterRepeatedPermanentFailuresAndStopsRetrying(t *testing.T) {
 	database := storetest.Open(t)
 	seedIssue(t, database, "DEAD", "DEAD-1", "A title")
 	ctx := context.Background()
@@ -312,8 +433,8 @@ func TestRetryRowMarksARowDeadAfterRepeatedFailuresAndStopsRetrying(t *testing.T
 	if err := database.Pool.QueryRow(ctx, `select content_hash from embeddings where kind = 'issue' and id = 'DEAD-1'`).Scan(&row.contentHash); err != nil {
 		t.Fatalf("read content_hash: %v", err)
 	}
-	for row.attempts = 0; row.attempts < deadLetterAttempts; row.attempts++ {
-		retryRow(ctx, deps, row, "test", errors.New("simulated failure"))
+	for row.attempts = 0; row.attempts < retry.DeadLetterAttempts; row.attempts++ {
+		retryRows(ctx, deps, []pendingRow{row}, true)
 	}
 
 	var dead bool
@@ -322,7 +443,7 @@ func TestRetryRowMarksARowDeadAfterRepeatedFailuresAndStopsRetrying(t *testing.T
 		t.Fatalf("read row: %v", err)
 	}
 	if !dead {
-		t.Fatalf("dead = false after %d attempts (deadLetterAttempts=%d), want true", attempts, deadLetterAttempts)
+		t.Fatalf("dead = false after %d permanent attempts (retry.DeadLetterAttempts=%d), want true", attempts, retry.DeadLetterAttempts)
 	}
 
 	rows, err := scanPending(ctx, deps)
@@ -344,23 +465,5 @@ func TestRetryRowMarksARowDeadAfterRepeatedFailuresAndStopsRetrying(t *testing.T
 	}
 	if dead {
 		t.Error("dead is still true after the row's own text changed; embeddings_enqueue should have cleared it")
-	}
-}
-
-func TestRetryDelayDoublesUpToTheMax(t *testing.T) {
-	cases := []struct {
-		attempts int
-		want     time.Duration
-	}{
-		{1, time.Second},
-		{2, 2 * time.Second},
-		{3, 4 * time.Second},
-		{10, retryMaxDelay},
-		{100, retryMaxDelay},
-	}
-	for _, tc := range cases {
-		if got := retryDelay(tc.attempts); got != tc.want {
-			t.Errorf("retryDelay(%d) = %v, want %v", tc.attempts, got, tc.want)
-		}
 	}
 }

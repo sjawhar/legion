@@ -66,7 +66,7 @@ func processAllPending(t *testing.T, database *store.Store, embedder embed.Embed
 	t.Helper()
 	deps := embedqueue.Deps{Store: database, Embedder: embedder}
 	for {
-		succeeded, failed, blocked, err := embedqueue.ProcessBatch(context.Background(), deps)
+		succeeded, failed, blocked, _, err := embedqueue.ProcessBatch(context.Background(), deps)
 		if err != nil {
 			t.Fatalf("process pending embeddings: %v", err)
 		}
@@ -142,7 +142,7 @@ func TestSearchMeaningFloorExcludesWeakMatches(t *testing.T) {
 // down, search answers with keyword results and says it did": a request whose query embedding
 // fails still returns the ordinary keyword hit, with Degraded naming why.
 func TestSearchAnswersKeywordOnlyWhenTheEmbedderFails(t *testing.T) {
-	embedder := &fakeEmbedder{err: errors.New("cohere: simulated outage")}
+	embedder := &fakeEmbedder{err: errors.New("bedrock: simulated outage")}
 	handler, _, _ := newTestServer(t, testServerOptions{embedder: embedder})
 	issue := createInteractionIssue(t, handler, "DEGR", "Astrolabe calibration guide", "Keyword body text.")
 

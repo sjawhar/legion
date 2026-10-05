@@ -1,4 +1,4 @@
--- 0076_asks_embeddings_trigger.up.sql
+-- 0075_asks_embeddings_trigger.up.sql
 -- Its own migration, so the transaction holds asks' ACCESS EXCLUSIVE lock alone, for
 -- milliseconds, and never while waiting for another table's.
 --

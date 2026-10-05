@@ -1,4 +1,4 @@
--- 0077_messages_embeddings_trigger.up.sql
+-- 0076_messages_embeddings_trigger.up.sql
 -- Its own migration, so the transaction holds messages' ACCESS EXCLUSIVE lock alone, for
 -- milliseconds, and never while waiting for another table's.
 --

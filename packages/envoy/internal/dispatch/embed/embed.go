@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/aws/retry"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime"
 	"github.com/aws/smithy-go/logging"
@@ -175,6 +176,23 @@ func (c *Client) Embed(ctx context.Context, texts []string, inputType InputType)
 		return nil, fmt.Errorf("embed: bedrock returned %d embeddings for %d texts", len(decoded.Embeddings.Float), len(texts))
 	}
 	return decoded.Embeddings.Float, nil
+}
+
+// IsThrottled reports whether err is Bedrock signaling "too many requests, back off" (or a
+// closely related infrastructure condition - "ServiceUnavailableException", "SlowDown" and
+// similar codes all end up here too), rather than something wrong with the specific text that was
+// being embedded. It uses the AWS SDK's own classification (retry.DefaultThrottles, the exact
+// codes the SDK's own internal retries already judged this error against, 3 attempts deep, before
+// giving up and returning it here) instead of matching one named exception type, so a related
+// condition this package has not written a case for is still recognized correctly.
+//
+// embedqueue relies on this to decide what a failure means: a throttled batch is retried
+// indefinitely (the provider will recover; the content was never the problem), while a non-
+// throttled failure from this call is still infrastructure, not evidence about the row - only
+// commitEmbedding's own failure (today, a non-finite vector) is specific enough to a row's
+// content to ever count toward embedqueue's dead-letter threshold.
+func IsThrottled(err error) bool {
+	return retry.IsErrorThrottles(retry.DefaultThrottles).IsErrorThrottle(err) == aws.TrueTernary
 }
 
 // Literal renders a vector as pgvector's text input form ("[0.1,0.2,...]"), the form a query

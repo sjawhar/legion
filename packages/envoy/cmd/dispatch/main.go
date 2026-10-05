@@ -195,7 +195,7 @@ func main() {
 		os.Exit(1)
 	}
 	if err := database.Migrate(ctx); err != nil {
-		slog.Error("dispatch: migrate database", "error", err)
+		slog.Error("dispatch: migrate database", "error", explainMigrateError(err))
 		os.Exit(1)
 	}
 
@@ -660,6 +660,28 @@ func loopbackDatabase(databaseURL string) error {
 		}
 	}
 	return nil
+}
+
+// explainMigrateError wraps a migration failure Postgres attributes to a missing CREATE
+// permission on the vector extension (0071_embeddings_core.up.sql's `create extension if not
+// exists vector`) with what that actually means operationally: the deployment's own bootstrap
+// (the cluster's master role, which this application's migration role is not) must create the
+// extension before this Dispatch ever boots against this database - a one-time ops dependency,
+// not a bug in the migration retried. Every other migration failure passes through unchanged.
+func explainMigrateError(err error) error {
+	if err == nil {
+		return nil
+	}
+	message := err.Error()
+	if !strings.Contains(message, `extension "vector"`) || !strings.Contains(strings.ToLower(message), "permission denied") {
+		return err
+	}
+	return fmt.Errorf(
+		"%w (this database's own migration role cannot CREATE EXTENSION; the deployment's bootstrap, "+
+			"run as the cluster's master role, must install the vector extension before Dispatch boots "+
+			"against this database for the first time - not something retrying the migration fixes)",
+		err,
+	)
 }
 
 // sessionSigningKey is the key session cookies are signed with: one generated for this process

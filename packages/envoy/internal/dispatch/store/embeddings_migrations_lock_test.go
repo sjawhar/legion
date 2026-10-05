@@ -11,9 +11,9 @@ import (
 
 // The embeddings trigger migrations (0072-0076) take one table's lock at a time, each in its
 // own transaction, exactly as the search migrations (0056-0061) do and for the same reason:
-// while a transaction holds `messages` (the last table, 0077) with a lock CREATE TRIGGER's own
-// SHARE ROW EXCLUSIVE conflicts with, the runner applies 0073-0076 and commits each, gives up on
-// 0077 at pgmigrate.LockTimeout, and meanwhile a read of `issues` - whose lock a single-file
+// while a transaction holds `messages` (the last table, 0076) with a lock CREATE TRIGGER's own
+// SHARE ROW EXCLUSIVE conflicts with, the runner applies 0073-0075 and commits each, gives up on
+// 0076 at pgmigrate.LockTimeout, and meanwhile a read of `issues` - whose lock a single-file
 // migration would still be holding - answers at once. Once the holder ends, the runner finishes.
 // The holder must take at least ROW EXCLUSIVE: a plain SELECT's ACCESS SHARE is compatible with
 // CREATE TRIGGER's own lock (unlike the search migrations, which also ALTER TABLE ADD COLUMN and

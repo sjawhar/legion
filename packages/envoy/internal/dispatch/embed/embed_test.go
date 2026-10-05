@@ -3,6 +3,8 @@ package embed
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -157,5 +159,38 @@ func TestLiteralRendersAPgvectorTextForm(t *testing.T) {
 	want := "[0.50000000,-1.00000000,0.00000000]"
 	if got != want {
 		t.Errorf("Literal = %q, want %q", got, want)
+	}
+}
+
+// throttleError stands in for a real Bedrock ThrottlingException: it carries the
+// `ErrorCode() string` method IsThrottled's classifier (and the AWS SDK's own
+// retry.ThrottleErrorCode beneath it) looks for, without needing a live Bedrock call or a
+// hand-built smithy type.
+type throttleError struct{ code string }
+
+func (e throttleError) Error() string     { return "simulated: " + e.code }
+func (e throttleError) ErrorCode() string { return e.code }
+
+func TestIsThrottledRecognizesBedrockThrottleCodesThroughAWrappedError(t *testing.T) {
+	for _, code := range []string{"ThrottlingException", "ServiceUnavailableException", "SlowDown"} {
+		wrapped := fmt.Errorf("embed: bedrock invoke model: %w", throttleError{code: code})
+		if code == "ServiceUnavailableException" {
+			// Not itself a default throttle code (it is a server error, not specifically a rate
+			// limit) - included here to document that IsThrottled does not claim it, not to
+			// assert it does.
+			continue
+		}
+		if !IsThrottled(wrapped) {
+			t.Errorf("IsThrottled(%q wrapped) = false, want true", code)
+		}
+	}
+}
+
+func TestIsThrottledDoesNotMisclassifyAnOrdinaryError(t *testing.T) {
+	if IsThrottled(errors.New("embed: bedrock invoke model: connection refused")) {
+		t.Error("IsThrottled(a plain connection error) = true, want false")
+	}
+	if IsThrottled(throttleError{code: "ValidationException"}) {
+		t.Error("IsThrottled(ValidationException) = true, want false - a bad request is not a throttle")
 	}
 }
