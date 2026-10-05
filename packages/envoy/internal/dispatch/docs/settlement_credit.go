@@ -8,7 +8,6 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
@@ -37,7 +36,12 @@ type settlementCredit struct {
 	Pending    map[string]model.Actor `json:"pending"`
 	PendingSeq map[string]uint64      `json:"pending_seq"`
 	LastActor  *model.Actor           `json:"last_actor,omitempty"`
-	CreditSeq  uint64                 `json:"-"`
+	// ReleasedThrough is the row's own released_through watermark, read back (unlike CreditSeq,
+	// which only ever travels toward storage): a fresh room's load seeds its own creditSeq
+	// counter from it, and from every entry's own PendingSeq, so a credit this room makes next is
+	// never mistaken for one the watermark already consumed (onLoadDocument, LEGION-513).
+	ReleasedThrough uint64 `json:"released_through"`
+	CreditSeq       uint64 `json:"-"`
 }
 
 // MarshalJSON writes Pending and PendingSeq as objects even when nil, so every encoded credit
@@ -326,53 +330,6 @@ func releaseSettlementCredit(ctx context.Context, tx pgx.Tx, room string, author
 			)
 	`, room, keys, fullRelease, int64(creditSeq)); err != nil {
 		return fmt.Errorf("release the version's authors from the document's pending settlement: %w", err)
-	}
-	return nil
-}
-
-// resetSettlementCreditSequence zeroes the row's released_through watermark and every pending
-// entry's own pending_seq back to the sentinel a release's own filter treats as exempt
-// (releaseSettlementCredit), the moment the document loads (onLoadDocument): a fresh roomState's
-// creditSeq is a fresh atomic.Uint64, restarting at zero regardless of what the row's sequence
-// bookkeeping from before the load says, so a stale, large released_through could silently
-// discard a genuinely new credit the gate check never should (upsertSettlementCredit), and a
-// stale, large pending_seq could make a future release skip an entry the room's own,
-// freshly-restarted release would take - both sides must restart from the same point together
-// (LEGION-513). It takes rooms, the pool reserved for document loads, rather than the general
-// pool a load must not draw a second connection from (onLoadDocument's own comment on the wedge
-// that risks), and holds the advisory lock that orders document updates and settlements, same as
-// persistSettlementCredit, so no concurrent append or release reads a half-reset row. A document
-// with no row yet needs no reset.
-func (s *Service) resetSettlementCreditSequence(ctx context.Context, rooms *pgxpool.Pool, room string) error {
-	tx, err := rooms.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("begin settlement-credit reset transaction: %w", err)
-	}
-	defer tx.Rollback(ctx)
-	if err := lockDocumentRoom(ctx, tx, room); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(ctx, `
-		update doc_settlements_pending
-		set settlement_authors = jsonb_set(
-			jsonb_set(
-				settlement_authors,
-				'{pending_seq}',
-				(select coalesce(jsonb_object_agg(k, '0'::jsonb), '{}'::jsonb)
-					from jsonb_object_keys(
-						case when jsonb_typeof(settlement_authors->'pending') = 'object'
-							then settlement_authors->'pending' else '{}'::jsonb end
-					) as k)
-			),
-			'{released_through}',
-			'0'::jsonb
-		)
-		where artifact_id = $1
-	`, room); err != nil {
-		return fmt.Errorf("reset the document's pending-settlement sequence: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit settlement-credit reset: %w", err)
 	}
 	return nil
 }

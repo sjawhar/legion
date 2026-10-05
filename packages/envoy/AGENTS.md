@@ -90,11 +90,16 @@ sequence of its own (zero) is never swept by any release: `recordSettlementCredi
 leave it that way, since the room has not yet assigned theirs when the row is written (the room's
 own bump runs only after commit, in `Ledger.creditLocked`), and releasing before crediting in that
 method's own order means a release never even reads such an entry, this transaction's own
-included. A fresh `roomState` restarts `creditSeq` at zero on every load, so the row's own
-sequence bookkeeping from before the load - `released_through` and every entry's `credit_seq` -
-is reset to zero the moment the document loads (`resetSettlementCreditSequence`), or a credit
-genuinely new to the fresh counter could be discarded as already consumed by a stale, large
-watermark left over from before.
+included. A fresh `roomState` restarts `creditSeq` at zero on every load, which a room load must
+never make safe by taking the document's advisory lock to durably fix (a durable writer can hold
+it, and the load would then hang forever - the exact wedge `onLoadDocument`'s own pool choice
+guards against elsewhere). Instead the load seeds `state.creditSeq` in memory, no lock needed,
+from the row's own high-water mark it already read without one (`released_through`, and every
+entry's own `credit_seq`): a credit this room makes next is then never mistaken for one the row's
+watermark already consumed. The seed never regresses an existing, still-live state's own counter
+(`unusedLocked` keeps a state from being forgotten while anything unsettled, settling, or
+durably in flight still holds it, so a load only ever creates fresh once every previous
+instance's own write has already committed - never concurrently with one).
 A settlement that wrote into the room commits what it wrote even when the document moved after its
 read, since the room and its browsers hold it; one that wrote nothing leaves a moved document to
 the settlement the move scheduled. A repair is written only into the document the settlement read

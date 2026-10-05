@@ -336,12 +336,13 @@
   room had already released stayed in the row and came back into the room on its next load, or,
   the opposite way, a browser's credit the room still owed - landed in the race window between
   an upload's own early, unlocked read of the room and its eventual commit - was wiped from the
-  row while the room kept it owed. A fresh room's `creditSeq` restarts at zero on every load, so
-  the row's own sequence bookkeeping from before the load - `released_through` and every entry's
-  `credit_seq` - is reset to zero the moment the document loads
-  (`resetSettlementCreditSequence`), or a credit genuinely new to the fresh counter could be
-  discarded as already consumed by a stale, large watermark left over from before
-  (LEGION-513).
+  row while the room kept it owed. A fresh room's `creditSeq` restarts at zero on every load; a
+  load never takes the document's advisory lock to fix that durably (a durable writer can hold
+  it, and the load would hang), so it instead seeds `creditSeq` in memory from the row's own
+  high-water mark - `released_through`, and every entry's `credit_seq` - which it already reads
+  without that lock, never regressing an existing, still-live room's own counter. Otherwise a
+  credit genuinely new to the fresh counter could be discarded as already consumed by a stale,
+  large watermark left over from before (LEGION-513).
 - Every read of an artifact's `project_key` tolerates a null: `scanArtifact` (every artifact read
   by id, ref key, owner or name, and both anchor locks), an ask's anchor artifact, a comment
   event's and an anchor refresh's payload, a suggestion's project, a document write's owner lock,

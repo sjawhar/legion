@@ -451,15 +451,6 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	if err != nil {
 		return err
 	}
-	if owed {
-		// This room's fresh roomState restarts creditSeq at zero regardless of what the row's
-		// released_through watermark and each pending entry's own sequence say from before this
-		// load, so both are reset to the same zero point here, before anything can credit or
-		// release against them under the new counter (LEGION-513).
-		if err := s.resetSettlementCreditSequence(ctx, rooms, room); err != nil {
-			return err
-		}
-	}
 	// The room is still loading: ygo hands its document to no peer or caller until this hook
 	// returns (sjawhar/ygo v1.50.1-sami.2, provider/websocket/server.go:1753-1842: loadRoom closes
 	// the room's ready barrier after it), so nothing writes the tree while this walks it.
@@ -483,6 +474,29 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	// (releaseIfUnusedLocked).
 	state := s.lockState(room)
 	state.closed = !open
+	// A room load never waits on the document's advisory lock (the pool-choice comment at this
+	// function's top names the wedge that follows if it does): a durable writer can hold it, and
+	// the load would then hang. So this seeds state.creditSeq from the row's own high-water mark
+	// (released_through, and every pending entry's own credit_seq) instead of durably resetting
+	// the row under that lock - the read already happened above, with no lock, as
+	// pendingSettlementCredit always has. That seed is still safe against a previous instance of
+	// this same room concurrently settling or appending: unusedLocked keeps a state from being
+	// forgotten while anything unsettled, settling, or durably in flight still holds it
+	// (releaseIfUnusedLocked), so a load only ever creates a fresh roomState, with its own fresh
+	// creditSeq, once every previous instance's own write has already committed - never
+	// concurrently with one. It never regresses an existing, still-live state's own counter
+	// either (lockState attaches to one already running rather than creating fresh, and that
+	// counter already exceeds anything in the row by the same argument): the seed only raises
+	// state.creditSeq, and only when the row's high-water mark is actually higher.
+	highWater := credit.ReleasedThrough
+	for _, seq := range credit.PendingSeq {
+		if seq > highWater {
+			highWater = seq
+		}
+	}
+	if current := state.creditSeq.Load(); highWater > current {
+		state.creditSeq.Store(highWater)
+	}
 	// The ask blocks the room loaded with are the baseline its update observer tells new ones by.
 	// They were not introduced by any update the observer sees, so none gains an author here.
 	if askBlocks == nil {
