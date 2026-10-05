@@ -14,11 +14,11 @@ For the unchanged-diff fingerprint procedure, follow `skill://legion-worker/refe
 
 ## Workspace restrictions
 
-Do not change another phase's bookmark. Make only path-scoped logical commits with `jj -R "$LEGION_WORKSPACE" split -m "<message>" <paths…>`. Each red test you write goes in the repository's own test suite as its own commit, and the `evidence` of its `failures` entry names the test and the command that shows it failing. Push your own commits — the red tests and your handoff commit — as `skill://legion-worker` shows. Under the Go daemon, push with `legion push` from bash instead: it runs that procedure and decides whether the push skips CI.
+Do not change another phase's bookmark. Make only path-scoped logical commits with `jj -R "$LEGION_WORKSPACE" split -m "<message>" <paths…>`. Each red test you write goes in the repository's own test suite as its own commit, and the `evidence` of its `failures` entry names the test and the command that shows it failing. Push your own commits — the red tests and your handoff commit — with `legion push`.
 
 ## GitHub attribution
 
-Everything you post — check runs, PR comments — is attributed to `legion-reviewer[bot]`.
+Everything you post — check runs, PR comments — is attributed to the review App (`legion-reviewer[bot]` in Legion's own deployment).
 
 ## Test handoff
 
@@ -26,4 +26,4 @@ Before completion, write the test handoff:
 
 Call the `legion` tool with `op: "handoff_write"`, `phase: "test"`, and `data`: the test handoff's fields as a JSON object.
 
-The handoff write produces `.legion/test.json` under the required schema. Do not report completion until it has succeeded — unless `.legion/` is already absent from the branch head (a re-check after the end-game deletion): then report completion without recreating `.legion/`.
+The handoff write produces `.legion/test.json` under the required schema. Every testing round writes it, a rebase re-check included. Do not report completion until it has succeeded.

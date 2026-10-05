@@ -25,11 +25,11 @@ reply. A human may reply to your message in turn — the follow-up arrives as a 
 `in_reply_to` names your message and whose `reply_body` quotes it; answer it the same way,
 `dispatch_message({ issue, in_reply_to: "<their reply id>", body })`, so the exchange reads as one
 thread. `dispatch_message` itself never carries `target` or `delivery`: agent-to-agent traffic goes
-through Envoy or the hub. A bearer that targets over HTTP names its own session in `actor`
-(`{kind: "session", id}`), and the card shows that session as the author. `GET /api/v1/agents`
-(any authenticated caller) lists live sessions with their capabilities (`aside`, `btw`, `steer`);
-target only a session that advertises the mode you want. Sending to a session with no issue
-(`POST /api/v1/agents/{session_id}/messages`) stays human-only.
+through Envoy or Oh My Pi's `agent://` messages. A bearer that targets over HTTP names its own
+session in `actor` (`{kind: "session", id}`), and the card shows that session as the author.
+`GET /api/v1/agents` (any authenticated caller) lists live sessions with their capabilities
+(`aside`, `btw`, `steer`); target only a session that advertises the mode you want. Sending to a
+session with no issue (`POST /api/v1/agents/{session_id}/messages`) stays human-only.
 
 ## Answering a direct message
 

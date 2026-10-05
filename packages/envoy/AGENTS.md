@@ -465,6 +465,17 @@ each of these reads while a websocket peer types, until 50 of its runs have over
 peer's updates, and CI's `envoy-go-race` job runs the `docs` and `api` packages under `-race`, which
 reports a walk of the live tree beside a write; the unit tests' own step runs without it.
 
+Writes to one room never meet each other unlocked. A browser's update reaches the room as ygo
+applies it, inside one Yjs transaction under the document's lock (`sync.ApplySyncMessage`,
+`crdt.ApplyUpdateV1`), so two browsers' updates take turns. `Server.Apply` holds no lock across
+its callback, so the service never walks the room's tree there: a write reads and writes its
+transaction's fork, and builds the fork from an encode taken under the lock (`forkLive`); the room
+has one writer slot (`openLiveWrite`); and a committed write reaches the room in a transaction and
+is read back through `readLive`. A helper that walks the room inside `Server.Apply` outside a
+transaction, as an unjoined write once did, races every peer's update; no production path does.
+`TestThreeBrowsersAndTheAPIEditOneRoomAtOnce` has three websocket peers type while the API edits the
+document, until 50 of its edits have overlapped their typing.
+
 Every decode of document bytes takes the pending queue `maxUpdateItems`, whose comment
 (`internal/dispatch/docs/persistence.go`) states the rule and its reason: whether the service builds
 the decoder (`newDocumentCopy`: the copy, a write's fork, every decode of the stored history,

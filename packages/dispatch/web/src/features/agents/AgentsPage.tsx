@@ -1,7 +1,9 @@
 import { DELIVERY_CAPABILITIES } from "@legion/contracts";
+import { SEARCH_QUERY_MAX } from "@legion/contracts/dispatch-tools";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   type ReactNode,
+  type RefObject,
   useCallback,
   useId,
   useLayoutEffect,
@@ -68,6 +70,14 @@ import { closestMatching, focusOnDocument } from "../shell/roving";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { useUserPreference } from "../shell/userPreference";
 import { AgentMessageComposer, type AgentReply, agentSendKey } from "./AgentMessageComposer";
+import {
+  type AgentFilters,
+  filterOptions,
+  matchesFilters,
+  searchWords,
+  sessionIssueKeys,
+  useAgentSearch,
+} from "./agent-search";
 import { deliveryAttempts } from "./attempts";
 import { type BroadcastSend, BroadcastSends, useBroadcastQueue } from "./BroadcastSends";
 import { useBroadcastComposition } from "./broadcast-composition";
@@ -815,47 +825,16 @@ function FoldToggle({
   );
 }
 
-/**
- * What narrows the agent list, mirroring the `envoy broadcast` script's own selectors: one
- * machine, one role, and a directory substring. An empty field matches everything.
- */
-export interface AgentFilters {
-  readonly dir: string;
-  readonly machine: string;
-  readonly role: string;
-}
-
-export const NO_AGENT_FILTERS: AgentFilters = { dir: "", machine: "", role: "" };
-
-function matchesFilters(agent: Agent, filters: AgentFilters): boolean {
-  const dir = filters.dir.trim().toLowerCase();
-  return (
-    (filters.machine === "" || agent.machine_id === filters.machine) &&
-    (filters.role === "" || agent.roles.includes(filters.role)) &&
-    (dir === "" || agent.dir.toLowerCase().includes(dir))
-  );
-}
-
-/** The machines, roles and directories the live sessions actually occupy: a filter can only
- *  offer what is there, so a stale option can never hide every agent. */
-function filterOptions(agents: readonly Agent[]): { machines: string[]; roles: string[] } {
-  const machines = new Set<string>();
-  const roles = new Set<string>();
-  for (const agent of agents) {
-    if (agent.machine_id !== "") machines.add(agent.machine_id);
-    for (const role of agent.roles) roles.add(role);
-  }
-  return { machines: [...machines].sort(), roles: [...roles].sort() };
-}
-
 function AgentFilterBar({
   agents,
   filters,
   onFilters,
+  searchInputRef,
 }: {
   agents: readonly Agent[];
   filters: AgentFilters;
   onFilters: (filters: AgentFilters) => void;
+  searchInputRef: RefObject<HTMLInputElement | null>;
 }): ReactNode {
   const { machines, roles } = filterOptions(agents);
   const field = `min-h-11 rounded-lg border px-3 py-2 text-sm ${inputClasses(true)}`;
@@ -888,13 +867,18 @@ function AgentFilterBar({
           </option>
         ))}
       </select>
+      {/* It takes the rest of the row, and a row of its own on a phone, so the fields it searches
+          stay readable in the placeholder. */}
       <input
-        aria-label="Directory contains"
-        className={field}
-        onChange={(event) => onFilters({ ...filters, dir: event.target.value })}
-        placeholder="Directory contains"
+        aria-label="Search agents"
+        className={`${field} min-w-0 flex-1 basis-64`}
+        maxLength={SEARCH_QUERY_MAX}
+        onChange={(event) => onFilters({ ...filters, search: event.target.value })}
+        placeholder="Title, directory, machine, session or open issue"
+        ref={searchInputRef}
+        title={`At most ${SEARCH_QUERY_MAX} characters`}
         type="search"
-        value={filters.dir}
+        value={filters.search}
       />
     </fieldset>
   );
@@ -1102,7 +1086,22 @@ export function AgentsPage(): ReactNode {
     }
     return counts;
   }, [inbox.data]);
-  const [filters, setFilters] = useState<AgentFilters>(NO_AGENT_FILTERS);
+  // Every issue key an OPEN ask by each session names (`sessionIssueKeys`), for the search box's
+  // "issue key" field.
+  const issueKeysBySession = useMemo(() => sessionIssueKeys(inbox.data ?? []), [inbox.data]);
+  // The free-text query is the page's own `?q=`; `machine` and `role` stay plain state, as they
+  // were before this box.
+  const [search, setSearch] = useAgentSearch();
+  const [fieldFilters, setFieldFilters] = useState<Omit<AgentFilters, "search">>({
+    machine: "",
+    role: "",
+  });
+  const filters: AgentFilters = { ...fieldFilters, search };
+  const setFilters = (next: AgentFilters) => {
+    setFieldFilters({ machine: next.machine, role: next.role });
+    if (next.search !== search) setSearch(next.search);
+  };
+  const searchInputRef = useRef<HTMLInputElement>(null);
   // Selection is what the human ticked, not what the filters currently show: narrowing the
   // list after ticking a row must not quietly drop that row from the send. Every selected
   // session is named in the composer, so nothing is hidden either way.
@@ -1128,7 +1127,9 @@ export function AgentsPage(): ReactNode {
     needsYouBySession,
     Date.now()
   );
-  const matches = (agent: Agent) => matchesFilters(agent, filters);
+  const words = searchWords(filters.search);
+  const matches = (agent: Agent) =>
+    matchesFilters(agent, filters, words, issueKeysBySession.get(agent.session_id) ?? []);
   // The rows the filters match, in the order the page shows them - the open list, then each fold.
   // Select-all ticks this set in order and the composer names the selection in tick order, so a
   // set ordered any other way (the registry's own, say) would name the recipients in an order the
@@ -1162,11 +1163,28 @@ export function AgentsPage(): ReactNode {
       return updated;
     });
   };
-  // Each fold is closed on every load and open only while this page stays mounted.
+  // Each fold is closed on every load and open only while this page stays mounted. A search opens
+  // both, since searching is how a reader finds a session they cannot see: while a query is
+  // present the folds read `searchFolds`, reset to open each time a search starts, and clearing
+  // the query hands them back to the reader's own state, untouched by the search.
   const [quietOpen, setQuietOpen] = useState(false);
   const [inactiveOpen, setInactiveOpen] = useState(false);
+  const searching = search.trim() !== "";
+  const [searchFolds, setSearchFolds] = useState({ inactive: true, quiet: true });
+  const [wasSearching, setWasSearching] = useState(searching);
+  if (searching !== wasSearching) {
+    setWasSearching(searching);
+    if (searching) setSearchFolds({ inactive: true, quiet: true });
+  }
+  const quietShown = searching ? searchFolds.quiet : quietOpen;
+  const inactiveShown = searching ? searchFolds.inactive : inactiveOpen;
+  const toggleFold = (fold: "inactive" | "quiet") => {
+    if (searching) setSearchFolds((open) => ({ ...open, [fold]: !open[fold] }));
+    else if (fold === "quiet") setQuietOpen((open) => !open);
+    else setInactiveOpen((open) => !open);
+  };
   const listRef = useRef<HTMLElement>(null);
-  useAgentsKeymap(listRef);
+  useAgentsKeymap(listRef, searchInputRef);
   // A layout effect, so the frame the move paints already has focus where the row went.
   // biome-ignore lint/correctness/useExhaustiveDependencies: `pinned` is the trigger, not a read
   useLayoutEffect(() => {
@@ -1211,24 +1229,24 @@ export function AgentsPage(): ReactNode {
     ...active.map(rowIn("active", true)),
     <FoldToggle
       agents={matchingQuiet}
-      expanded={quietOpen}
+      expanded={quietShown}
       fold="quiet"
       key="fold:quiet"
       label="No Dispatch activity"
-      onToggle={() => setQuietOpen((open) => !open)}
+      onToggle={() => toggleFold("quiet")}
       selected={selected}
     />,
-    ...quiet.map(rowIn("quiet", quietOpen)),
+    ...quiet.map(rowIn("quiet", quietShown)),
     <FoldToggle
       agents={matchingInactive}
-      expanded={inactiveOpen}
+      expanded={inactiveShown}
       fold="inactive"
       key="fold:inactive"
       label="Inactive"
-      onToggle={() => setInactiveOpen((open) => !open)}
+      onToggle={() => toggleFold("inactive")}
       selected={selected}
     />,
-    ...inactive.map(rowIn("inactive", inactiveOpen)),
+    ...inactive.map(rowIn("inactive", inactiveShown)),
   ];
 
   if (isPending) return <LoadingSkeleton label="Loading agents" />;
@@ -1260,7 +1278,12 @@ export function AgentsPage(): ReactNode {
         <EmptyState label="Agents empty state" message="No agents are connected." />
       ) : (
         <>
-          <AgentFilterBar agents={agents} filters={filters} onFilters={setFilters} />
+          <AgentFilterBar
+            agents={agents}
+            filters={filters}
+            onFilters={setFilters}
+            searchInputRef={searchInputRef}
+          />
           <SelectionHeader
             listed={agents}
             matching={matching}

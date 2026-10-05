@@ -100,8 +100,9 @@ stale-working-copy error. The only content of that commit was the daemon-provisi
 stopped writing; nothing depended on it). Nothing tracked was touched; the chain and the bookmark
 were exactly where the push had left them.
 
-Since LEGION-45 (#1020) the extension refuses these commands in every phase-worker pane — bash,
-eval, hub, and a worker's `task` subagents — once the pi-envoy release carrying the guard is
+Since LEGION-45 (#1020) the extension refuses these commands in every phase-worker pane — bash (a
+supervised service's start included), eval, the stdin a `write` sends to a supervised service
+(`proc://<id>`), and a worker's `task` subagents — once the pi-envoy release carrying the guard is
 installed into the profile. How the matcher is built and proven, and why it binds subagents:
 `shell-command-gates-derive-from-bash-word-splitting-not-example-forms.md`.
 
