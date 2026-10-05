@@ -11,7 +11,11 @@
   committed bundle is fresh" step fail unpredictably on any change to `@legion/contracts`, this
   package's own source untouched (LEGION-548). Confirmed directly: ten rebuilds of one unmodified
   checkout, same pinned Bun, same lockfile, disagreed with each other eight times out of ten
-  before the fix, and agreed every time after it.
+  before the fix, and agreed every time after it, on one machine. A separate, still-open finding
+  from the same investigation: the identical pinned Bun binary can print a different interop
+  helper on a different machine even with `minify: false` (a devbox's rebuild disagreed with the
+  CI runner's own), so the committed `dist/` here was taken from a CI run's own build, not a local
+  one — see the README's "The bundle" section for what to do when this recurs.
 
 ## [0.6.4]
 

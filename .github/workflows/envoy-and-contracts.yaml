@@ -488,18 +488,7 @@ jobs:
       - name: Check the committed bundle is fresh
         run: bun run check-dist
         working-directory: packages/claude-envoy
-      - name: TEMP DEBUG - rebuild dist on this runner for inspection
-        if: always()
-        run: bun run build
-        working-directory: packages/claude-envoy
-      - name: TEMP DEBUG - upload the runner-native build
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: claude-envoy-dist-debug
-          path: packages/claude-envoy/dist
       - name: Test Claude Envoy plugin
-        if: ${{ false }}
         run: bun run test
         working-directory: packages/claude-envoy
       - name: Pack Claude Envoy plugin
