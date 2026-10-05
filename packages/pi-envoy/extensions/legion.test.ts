@@ -2892,6 +2892,75 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     );
   });
 
+  // The start message is read and validated before anything that mutates daemon-side state
+  // (registerController, which replaces the running controller's session; claimEnvoyRole, which
+  // takes its role): a missing value refuses here, leaving the previous controller, if any, still
+  // running and still registered.
+  test("a launched claim with LEGION_CONTROLLER_START_MESSAGE unset refuses and makes no /legion/v1/claims/register request", async () => {
+    const controller = await launchedController({ sessionId: "ses_controller_no_start_message" });
+    delete process.env.LEGION_CONTROLLER_START_MESSAGE;
+
+    await expect(
+      controller.handlers.get("session_start")?.(
+        {},
+        controller.context("ses_controller_no_start_message")
+      )
+    ).rejects.toThrow("LEGION_CONTROLLER_START_MESSAGE is required for Legion");
+
+    expect(
+      controller.requests.filter((request) => request.path === "/legion/v1/claims/register")
+    ).toEqual([]);
+    expect(controller.sentUserMessages).toEqual([]);
+  });
+
+  // startMessageSent, not controllerSessionID, gates the send: a claim that throws after sending
+  // (here, the controller-topic subscribe) never reaches the controllerSessionID assignment at
+  // the end of claim(), so a guard keyed on controllerSessionID would send a second time on retry.
+  // Forcing the subscribe itself to throw (rather than a connect envoy.ts's own session_start
+  // handler retries quietly in the background) needs the same technique the subscription-opening
+  // tests below use: close the connection envoy.ts already opened eagerly, from the
+  // registration's own callback, so ensureConnection() inside subscribe() dials again — only then
+  // does a rejected dial reach subscribeNotice uncaught.
+  test("a claim whose controller-topic subscribe throws, then retried, sends one start message in total", async () => {
+    let subscribeAttempts = 0;
+    const controller = await launchedController({
+      sessionId: "ses_controller_subscribe_retry",
+      register: () => {
+        const live = natsConnections.find(
+          (candidate) => candidate.name === "omp-ses_controller_subscribe_retry"
+        );
+        if (live !== undefined) live.closed = true;
+        natsConnectGates.set("omp-ses_controller_subscribe_retry", async () => {
+          subscribeAttempts += 1;
+          if (subscribeAttempts === 1) throw new Error("nats: connection refused");
+        });
+        return undefined;
+      },
+    });
+
+    await expect(
+      controller.handlers.get("session_start")?.(
+        {},
+        controller.context("ses_controller_subscribe_retry")
+      )
+    ).rejects.toThrow("nats: connection refused");
+    expect(controller.sentUserMessages).toEqual([
+      "Legion controller start: follow skill://legion-controller",
+    ]);
+
+    // Retried in the same session and process: /legion-claim-controller re-enters claim()
+    // directly, as a lost-claim recovery would.
+    const claimCommand = controller.commands.find(
+      (command) => command.name === "legion-claim-controller"
+    );
+    if (claimCommand === undefined) throw new Error("controller claim command was not registered");
+    await claimCommand.handler("", controller.context("ses_controller_subscribe_retry"));
+
+    expect(controller.sentUserMessages).toEqual([
+      "Legion controller start: follow skill://legion-controller",
+    ]);
+  });
+
   // Reading LEGION_CONTROLLER_START_MESSAGE is gated on `launched` (a `legion controller start`
   // launch, never a hand-started takeover), checked on a process that has made no prior claim at
   // all: `startMessageSent` alone would not catch a dropped `launched &&` here, since it starts

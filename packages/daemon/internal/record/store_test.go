@@ -816,7 +816,7 @@ func TestResidentRolesMigrationDropsOnlyTheQueuedPhaseEndSuspends(t *testing.T) 
 		for _, row := range rows {
 			payload, err := DecodeOutboxPayload(row)
 			if err != nil {
-				t.Fatalf("the %s row after 0031 does not decode: %v", row.LastError, err)
+				t.Fatalf("the %s row after 0034 does not decode: %v", row.LastError, err)
 			}
 			kept[row.LastError] = payload.(SuperviseRequest)
 		}
@@ -826,7 +826,7 @@ func TestResidentRolesMigrationDropsOnlyTheQueuedPhaseEndSuspends(t *testing.T) 
 			"tree close":    {Op: "tree_close", Tree: "LEGION-208", Role: claim.RoleTester, Generation: 1, Linger: 1},
 		}
 		if !reflect.DeepEqual(kept, want) {
-			t.Fatalf("supervise rows after 0031 = %+v, want %+v: the phase-end suspend deleted and every other row kept", kept, want)
+			t.Fatalf("supervise rows after 0034 = %+v, want %+v: the phase-end suspend deleted and every other row kept", kept, want)
 		}
 	})
 }
