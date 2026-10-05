@@ -8,6 +8,7 @@ import {
   dispatchToolSpecs,
   type IssueComponents,
   SEARCH_QUERY_MAX,
+  type SearchResult,
   type TablePosition,
   zodSchemaApi,
 } from "@legion/contracts";
@@ -22,6 +23,7 @@ import {
 import { DispatchClient } from "../dispatch-http";
 import { dispatchFollowNotice } from "../dispatch-subscribe";
 import { ToolInputError } from "../tool-input-errors";
+import { fakeSearchResponse } from "./fake-search-response";
 
 function response(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -29,6 +31,7 @@ function response(body: unknown, status = 200): Response {
     headers: { "Content-Type": "application/json" },
   });
 }
+
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
   const promise = new Promise<T>((resolvePromise) => {
@@ -1148,7 +1151,7 @@ describe("executeDispatchTool", () => {
   });
 
   test("dispatch_search renders results with absolute links", async () => {
-    const results = [
+    const results: SearchResult[] = [
       {
         kind: "document",
         owner: { kind: "issue", key: "LEGION-2", title: "Astrolabe", status: "triage" },
@@ -1188,7 +1191,7 @@ describe("executeDispatchTool", () => {
       requests.push(target.pathname + target.search);
       if (target.pathname !== "/api/v1/search")
         throw new Error(`unexpected request: ${target.pathname}`);
-      return response({ results, took_ms: 12 });
+      return response(fakeSearchResponse(results, { took_ms: 12 }));
     };
 
     const result = await executeDispatchTool({
@@ -1210,9 +1213,96 @@ describe("executeDispatchTool", () => {
         "dispatch://CORE/artifact/navigation-design [document] Navigation design - comment: Comment on **astrolabe** -> http://dispatch.test/projects/CORE/documents/navigation-design?comment=comment-3",
       ].join("\n")
     );
-    expect(result.details).toEqual({ query: "astrolabe", results });
+    expect(result.details).toEqual({
+      query: "astrolabe",
+      results,
+      total: 3,
+      reachable: 3,
+      offset: 0,
+      limit: 20,
+    });
     expect(dispatchFollowNotice(result.details)).toBeNull();
     expect(requests).toEqual(["/api/v1/search?q=astrolabe"]);
+  });
+
+  test("dispatch_search names the page, the next offset and the rows no offset reaches", async () => {
+    const hit = (id: string): SearchResult => ({
+      kind: "comment",
+      owner: { kind: "issue", key: "LEGION-2", title: "Astrolabe", status: "triage" },
+      id,
+      snippet: "<mark>astrolabe</mark>",
+      rank: 0.01,
+      href: `/issues/LEGION-2/comments/${id}`,
+    });
+    const requests: string[] = [];
+    const answers = [
+      fakeSearchResponse([hit("c-21"), hit("c-22")], {
+        total: 250,
+        reachable: 120,
+        limit: 2,
+        offset: 20,
+        took_ms: 9,
+      }),
+      fakeSearchResponse([], { total: 250, reachable: 120, limit: 2, offset: 120, took_ms: 4 }),
+    ];
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      requests.push(target.pathname + target.search);
+      return response(answers[requests.length - 1]);
+    };
+    const search = (args: Record<string, unknown>) =>
+      executeDispatchTool({
+        tool: "dispatch_search",
+        args,
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      });
+    const cut =
+      "Each kind lists only its best 100 matches, so 120 of the 250 can be paged to; narrow the query or name a project to reach the rest.";
+
+    const page = await search({ query: "astrolabe", limit: 2, offset: 20 });
+    expect(page.text).toBe(
+      [
+        '2 results for "astrolabe" (showing 21-22 of 250, 9 ms)',
+        cut,
+        "LEGION-2 [triage] Astrolabe - comment: **astrolabe** -> http://dispatch.test/issues/LEGION-2/comments/c-21",
+        "LEGION-2 [triage] Astrolabe - comment: **astrolabe** -> http://dispatch.test/issues/LEGION-2/comments/c-22",
+        "Next page: offset 22.",
+      ].join("\n")
+    );
+    const past = await search({ query: "astrolabe", limit: 2, offset: 120 });
+    expect(past.text).toBe(
+      [
+        'No results for "astrolabe" at offset 120: it matches 250, and the pages reach the first 120.',
+        cut,
+      ].join("\n")
+    );
+    expect(requests).toEqual([
+      "/api/v1/search?q=astrolabe&limit=2&offset=20",
+      "/api/v1/search?q=astrolabe&limit=2&offset=120",
+    ]);
+  });
+
+  test("dispatch_search refuses a later page from a Dispatch that predates paging", async () => {
+    const fetchImpl = async (_url: RequestInfo | URL): Promise<Response> =>
+      response({ results: [], took_ms: 3 });
+
+    await expect(
+      executeDispatchTool({
+        tool: "dispatch_search",
+        args: { query: "astrolabe", offset: 20 },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      })
+    ).rejects.toThrow("it predates search paging and ignored offset 20");
   });
 
   test("dispatch_search reports no results for an accepted stop-word query", async () => {
@@ -1220,7 +1310,7 @@ describe("executeDispatchTool", () => {
     const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
       const target = new URL(String(url));
       requests.push(target.pathname + target.search);
-      return response({ results: [], took_ms: 0 });
+      return response(fakeSearchResponse([]));
     };
 
     const result = await executeDispatchTool({
@@ -1235,7 +1325,14 @@ describe("executeDispatchTool", () => {
     });
 
     expect(result.text).toBe('No results for "the".');
-    expect(result.details).toEqual({ query: "the", results: [] });
+    expect(result.details).toEqual({
+      query: "the",
+      results: [],
+      total: 0,
+      reachable: 0,
+      offset: 0,
+      limit: 20,
+    });
     expect(requests).toEqual(["/api/v1/search?q=the"]);
   });
 

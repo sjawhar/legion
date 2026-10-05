@@ -765,7 +765,7 @@ event is dated by Dispatch's `created_at`; one without it stops the audit, never
 | `tree-moved` | tree 1 runs planner, implementer, tester, reviewer and retro to merging with real agents; the tester's adoption leaves a new empty change and keeps the implementer's author. Once both thermonuclear dispatches have an outcome, the reviewer's session, its subagents' sessions and each dispatch are kept under `review-pair/`. The reviewer first submits `COMMENT` and completes without a decision: there is no approval, the issue stays in `reviewing`, and the architect receives a completion-written `review-stuck` notice naming a commit of the pull request (`notice-review-stuck.jsonl`). The driver tells the architect only to handle that notice, naming no topic, head or decision. A message in the reviewer's session must carry the architect's `reply_role` and arrive after completion; earlier round reports cannot count. These messages are kept as `architect-ask.jsonl`; an ask before the driver's steer is noted as the stronger pass. Once asked, the reviewer requests changes with exactly one inline thread and a review naming its handoff head. The implementer appends the requested line and the tester verifies it. The re-review's decision is the reviewer's own; a second request for changes fails the proof. The thread is recorded after correction and at approval, then the issue leaves `reviewing` for retro or merging |
 | `review-thread` | when the approval landed, the reviewer's thread read `isResolved: false` with the reviewer's own `Accepted:` as its newest submitted comment: the approval did not wait on a resolution only the pull request author's App can make, and that nothing makes before the merger's run (LEGION-316). Controls: the same record resolved, and with the implementer's reply as its newest comment, both fail |
 | `completion-closed` | each phase worker of tree 1 — planner, implementer, tester, reviewer — is suspended once its phase ends, and its saved session answers every `handoff_complete` call of the legion tool, holds one success for each assignment it completed, and records the phase stall `closed` after that call, with no phase-stall follow-up after its last success: the 4b.13b acceptance's stall check (`stage3-4b13b-acceptance.sh`'s `pane-rule-phase-worker-and-stall`), which a suspension that stops the worker inside the call fails (LEGION-283). The sessions and each verdict are kept as `completion-<role>.jsonl` and `completion-<role>-verdict.json`. Its control: the planner's session cut at its `handoff_complete` call, the transcript such a suspension leaves, is refused |
-| `review-pair` | the reviewer dispatched `thermonuclear-deep-review` and `thermonuclear-code-quality` by name, and one run of each completed. A run completes by the task-result block the reviewer received, whether by async delivery or a hub wait or jobs snapshot, saying `completed`. With no block, the subagent's own session beside the reviewer's must end in an accepted yield. Every turn of that session runs on the fixture overlay's `review` target: the task executor runs a subagent on its parent's model, silently, when the subagent's own does not resolve. A refusal (`Unknown agent`, `No model selected`) in a task result or in a run that did not complete fails with its text. tree-moved keeps the reviewer's session and the subagents' sessions as the pair settles, reading the tree volume, not the daemon |
+| `review-pair` | the reviewer dispatched `thermonuclear-deep-review` and `thermonuclear-code-quality` by name, and one run of each completed. A run completes by the task-result block the reviewer received, whether by async delivery, a `wait`, or a `read` of its `proc://` job, saying `completed`. With no block, the subagent's own session beside the reviewer's must end in an accepted yield. Every turn of that session runs on the fixture overlay's `review` target: the task executor runs a subagent on its parent's model, silently, when the subagent's own does not resolve. A refusal (`Unknown agent`, `No model selected`) in a task result or in a run that did not complete fails with its text. tree-moved keeps the reviewer's session and the subagents' sessions as the pair settles, reading the tree volume, not the daemon |
 | `first-turns` | every role on tree 1 completed a first turn in its pod |
 | `token-rotation` | a pod's projected operator token (`/var/run/operator/token`, 3600 s, renewed by the kubelet at 80 %) is renewed: the token in the file was issued (its `iat`) after the pod started, in the same pod by uid. An exec that does not answer is never a token. A model turn after the renewal still runs on a model the operator fixture's `overlay.yml` gives a role |
 | `idle-suspend` | a finished worker's Sandbox is Suspended with its pod gone and the tree volume bound |
@@ -831,7 +831,7 @@ is written there.
 
 LEGION-394's acceptance: a person's direct Send or Aside from Dispatch's conversation page is the
 session's own user turn, and everything else keeps its Envoy card. One real session — the pinned
-Oh My Pi (the `github:sjawhar/oh-my-pi` mise tool) with this checkout's plugin in an isolated
+Oh My Pi (`.omp-pin`, run as a mise tool spec) with this checkout's plugin in an isolated
 profile, launched with `controller-start-tmux.sh`'s `operator_env` line, its cwd under `/tmp` —
 registers with a real Envoy listener and NATS. Dispatch, built from the checkout with NATS on and
 its trusted identity header, serves the SPA this checkout builds, and Playwright drives the
@@ -845,7 +845,7 @@ LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic bash scripts/e2e/dispatch-user-
 | input | default | meaning |
 | :--- | :--- | :--- |
 | `LEGION_E2E_MODEL_GATEWAY_URL` | required | the model gateway's Anthropic endpoint; checked by [`lib/model-gateway-url.sh`](#libmodel-gateway-urlsh) |
-| `DISPATCH_USER_TURNS_OMP` | the pinned build, `github:sjawhar/oh-my-pi@$(mise current github:sjawhar/oh-my-pi)` | another Oh My Pi, as a mise tool spec |
+| `DISPATCH_USER_TURNS_OMP` | the pinned build, `.omp-pin`'s mise tool spec (`github:sjawhar/oh-my-pi@<version>`) | another Oh My Pi, as a mise tool spec |
 | `DISPATCH_USER_TURNS_EVIDENCE_DIR` | a fresh `/tmp/legion-e2e-user-turns-evidence.XXXXXXXX` | kept on every outcome and printed at exit: `logs/` (the listener, Dispatch and the SPA build), `checks/` (the page's screenshots and the session's pane at exit) and `session.jsonl`, the session's transcript |
 
 Each check prints `== <name>`, what it observed, and `ok <name>`. The first check that fails ends the
@@ -1303,9 +1303,9 @@ have failed the check for want of a key: when it last got none, from where, and 
   came, marked when it came before the check began: it had no key when the check asked it.
 - **An agent served again after its last starve recovered.** It is listed, with when it was first
   served again, when that starve came at or after `<since>` less 30 s. The 30 s is the wait Oh My
-  Pi 18.2.9 keeps before it runs a failed key command again: a request inside it fails with no key
-  and runs no command, so it leaves no line, and a check's first calls can fail on a starve from
-  just before the check began.
+  Pi keeps before it runs a failed key command again (`COMMAND_FAILURE_RETRY_MS`, 30 s at 18.2.9
+  and at the pinned 18.6.0): a request inside it fails with no key and runs no command, so it leaves
+  no line, and a check's first calls can fail on a starve from just before the check began.
 - **An agent served again before that window** held a key through the whole check, and is left out.
 
 A person then sees whether starvation could explain the failure. A run-wide "not scored" would not

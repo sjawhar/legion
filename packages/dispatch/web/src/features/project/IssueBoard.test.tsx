@@ -57,7 +57,8 @@ function renderBoard(
   state: UserState = {},
   showEdges?: boolean,
   list: IssueSummary[] = issues,
-  initialEntry = "/projects/CORE"
+  initialEntry = "/projects/CORE",
+  lanes?: boolean
 ) {
   const listIssues = spyOn(api, "listIssues").mockImplementation(async (options = {}) => {
     const labels = options.labels ?? [];
@@ -72,7 +73,7 @@ function renderBoard(
       <QueryClientProvider client={queryClient}>
         <KeymapProvider>
           <CurrentRoute />
-          <IssueBoard project="CORE" showEdges={showEdges} />
+          <IssueBoard lanes={lanes} project="CORE" showEdges={showEdges} />
         </KeymapProvider>
       </QueryClientProvider>
     </MemoryRouter>
@@ -399,6 +400,106 @@ test("Shift+L moves the focused card to the top of the next status and focus fol
   } finally {
     cleanup();
     patchIssue.mockRestore();
+  }
+});
+
+const laneIssues: IssueSummary[] = [
+  issue({ key: "CORE-1", priority: 0, rank: "a", status: "todo", title: "P0 card" }),
+  issue({ key: "CORE-2", priority: 3, rank: "b", status: "todo", title: "P3 card" }),
+  issue({
+    key: "CORE-3",
+    priority: null,
+    rank: "c",
+    status: "in_progress",
+    title: "No priority card",
+  }),
+];
+
+test("lanes group the board into priority bands, each with its own set of columns", async () => {
+  const { cleanup } = renderBoard({}, undefined, laneIssues, "/projects/CORE", true);
+  try {
+    const p0Lane = await screen.findByRole("region", { name: "P0 lane" });
+    expect(within(p0Lane).getAllByTestId("board-column-header")).toHaveLength(7);
+    expect(within(p0Lane).getAllByTestId("board-column-rail")).toHaveLength(2);
+    expect(
+      within(within(p0Lane).getByRole("region", { name: "Todo" })).getByRole("article", {
+        name: "CORE-1 P0 card",
+      })
+    ).toBeDefined();
+
+    const p3Lane = screen.getByRole("region", { name: "P3 lane" });
+    expect(
+      within(within(p3Lane).getByRole("region", { name: "Todo" })).getByRole("article", {
+        name: "CORE-2 P3 card",
+      })
+    ).toBeDefined();
+    // The P0 lane's Todo column holds only the P0 card, not the P3 one.
+    expect(within(p0Lane).getByRole("region", { name: "Todo" }).textContent).not.toContain(
+      "P3 card"
+    );
+
+    const noPriorityLane = screen.getByRole("region", { name: "No priority lane" });
+    expect(
+      within(within(noPriorityLane).getByRole("region", { name: "In progress" })).getByRole(
+        "article",
+        { name: "CORE-3 No priority card" }
+      )
+    ).toBeDefined();
+  } finally {
+    cleanup();
+  }
+});
+
+test("without the lanes prop the board renders the flat columns, no lane headings", async () => {
+  const { cleanup } = renderBoard({}, undefined, laneIssues);
+  try {
+    const board = await screen.findByRole("region", { name: "Project board" });
+    expect(within(board).queryByRole("region", { name: "P0 lane" })).toBeNull();
+    expect(
+      within(within(board).getByRole("region", { name: "Todo" })).getAllByRole("article")
+    ).toHaveLength(2);
+  } finally {
+    cleanup();
+  }
+});
+
+test("within a lane, Shift+L moves a card to the next status in the same lane without touching priority", async () => {
+  const patchIssue = patchInFlight();
+  const { cleanup } = renderBoard({}, undefined, laneIssues, "/projects/CORE", true);
+  try {
+    const p0Lane = await screen.findByRole("region", { name: "P0 lane" });
+    const p0Card = within(p0Lane).getByRole("article", { name: "CORE-1 P0 card" });
+    act(() => p0Card.focus());
+    await act(async () => {
+      fireEvent.keyDown(p0Card, { key: "L", shiftKey: true });
+    });
+    // Same lane, so only status and rank move - priority is not part of this PATCH.
+    expect(patchIssue).toHaveBeenCalledWith("CORE-1", { rank: {}, status: "in_progress" });
+    const movedInProgress = within(p0Lane).getByRole("region", { name: "In progress" });
+    await waitFor(() =>
+      expect(within(movedInProgress).getByRole("article", { name: "CORE-1 P0 card" })).toBeDefined()
+    );
+  } finally {
+    cleanup();
+    patchIssue.mockRestore();
+  }
+});
+
+test("with lanes on, the first roving key before anything is focused lands in the first lane's first cell, not flat cross-lane order", async () => {
+  // CORE-1 (P3) sorts first by rank in the merged Todo column a flat board would use; the fix
+  // lands in the first swimlane (P0) instead, on CORE-2.
+  const firstLaneIssues: IssueSummary[] = [
+    issue({ key: "CORE-1", priority: 3, rank: "a", status: "todo", title: "P3 card" }),
+    issue({ key: "CORE-2", priority: 0, rank: "b", status: "todo", title: "P0 card" }),
+  ];
+  const { cleanup } = renderBoard({}, undefined, firstLaneIssues, "/projects/CORE", true);
+  try {
+    const p0Lane = await screen.findByRole("region", { name: "P0 lane" });
+    const p0Card = within(p0Lane).getByRole("article", { name: "CORE-2 P0 card" });
+    fireEvent.keyDown(document.body, { key: "j" });
+    expect(document.activeElement).toBe(p0Card);
+  } finally {
+    cleanup();
   }
 });
 
