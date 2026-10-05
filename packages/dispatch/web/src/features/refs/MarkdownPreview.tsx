@@ -276,14 +276,10 @@ export function MarkdownPreview({
     },
     [highlightClassName, highlightKey, lead, links]
   );
-  const { isFallback, portals } = useRenderedMarkdown(
-    root,
-    markdown,
-    paintOneLine,
-    "inline",
+  const { isFallback, portals } = useRenderedMarkdown(root, markdown, paintOneLine, {
+    pictures: "inline",
     decorate,
-    undefined
-  );
+  });
   const title = useMarkdownHeadline(fullTitle ? markdown : undefined, Number.POSITIVE_INFINITY);
 
   return (

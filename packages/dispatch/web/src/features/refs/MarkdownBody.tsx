@@ -126,10 +126,7 @@ export function MarkdownBody({
     inline ? inlineRoot : blockRoot,
     markdown,
     inline ? paintInline : paintBlock,
-    variant,
-    undefined,
-    onRendered,
-    softBreaks
+    { pictures: variant, onRendered, softBreaks }
   );
 
   return inline ? (

@@ -43,6 +43,20 @@ export type DecorateMarkdown = (
   anchors: readonly ReferenceAnchor[]
 ) => readonly ReferenceAnchor[];
 
+/** What a surface tells `useRenderedMarkdown` beyond its element, source and paint; each has a
+ *  default, so a surface names only what it changes. */
+export interface RenderedMarkdownOptions {
+  /** The shape each Dispatch picture's `DispatchPicture` takes: `block` (the default) at the
+   *  column's width, `inline` as a thumbnail beside its caption. */
+  pictures?: "block" | "inline";
+  /** The surface's last pass over its rendered element (`DecorateMarkdown`); none by default. */
+  decorate?: DecorateMarkdown;
+  /** Called after each render lands; none by default. */
+  onRendered?: () => void;
+  /** The parse policy (`SoftBreaks`): `space`, the default, or `line`. */
+  softBreaks?: SoftBreaks;
+}
+
 /**
  * What every Markdown-bearing element does once mounted, in the layout phase of the commit
  * (`renderWithEngine`, which says why that phase): the source is parsed and handed to
@@ -56,20 +70,17 @@ export type DecorateMarkdown = (
  * the link pass sees it, and a plain lead it prepends is never read as a reference; it answers the
  * anchors the portals mount into, so it may replace an anchor's element. Each Dispatch picture's
  * placeholder is found after it, wherever it left one (`MarkdownPreview` puts an inert span in a
- * link's place), and gets a portal-mounted `DispatchPicture` in the shape `pictures` names:
- * `block` at the column's width, `inline` as a thumbnail beside its caption. `onRendered` fires
- * after each render lands; the newest callback is the one called, and a new callback alone
- * re-renders nothing. `paint` and `decorate` are dependencies: a caller passes a module-level
- * function or memoises one on what it reads. `softBreaks` is the parse policy (`SoftBreaks`).
+ * link's place), and gets a portal-mounted `DispatchPicture` in the shape `pictures` names.
+ * `onRendered` fires after each render lands; the newest callback is the one called, and a new
+ * callback alone re-renders nothing. `paint` and `decorate` are dependencies: a caller passes a
+ * module-level function or memoises one on what it reads. The options object itself is not one,
+ * so a caller builds it inline on every render.
  */
 export function useRenderedMarkdown(
   root: RefObject<HTMLElement | null>,
   markdown: string,
   paint: PaintMarkdown,
-  pictures: "block" | "inline",
-  decorate: DecorateMarkdown | undefined,
-  onRendered: (() => void) | undefined,
-  softBreaks: SoftBreaks = "space"
+  { pictures = "block", decorate, onRendered, softBreaks = "space" }: RenderedMarkdownOptions = {}
 ): RenderedMarkdown {
   const onRenderedRef = useRef(onRendered);
   onRenderedRef.current = onRendered;
