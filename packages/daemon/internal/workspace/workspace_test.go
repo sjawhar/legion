@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -269,6 +270,14 @@ func findCall(t *testing.T, calls []Command, prefix ...string) Command {
 // pointer, never as a value in its environment, under the slow-command budget.
 func assertCredentialedEnvironment(t *testing.T, command Command) {
 	t.Helper()
+	assertCredentialedEnvironmentBounded(t, command, testTimeout)
+}
+
+// assertCredentialedEnvironmentBounded is assertCredentialedEnvironment, but for a command bounded
+// by timeout instead of the runner's slow-command budget (the fetch's clone, bounded by
+// FetchTimeout).
+func assertCredentialedEnvironmentBounded(t *testing.T, command Command, timeout time.Duration) {
+	t.Helper()
 	if commandEnv(command, "LEGION_PROVISIONING_TOKEN_FILE") == "" {
 		t.Errorf("%q has no token file pointer", command.Argv)
 	}
@@ -277,8 +286,8 @@ func assertCredentialedEnvironment(t *testing.T, command Command) {
 			t.Errorf("%q carries the token value in its environment: %s", command.Argv, entry)
 		}
 	}
-	if command.Timeout != testTimeout {
-		t.Errorf("command timeout = %s, want slow-command budget %s", command.Timeout, testTimeout)
+	if command.Timeout != timeout {
+		t.Errorf("command timeout = %s, want %s", command.Timeout, timeout)
 	}
 }
 
@@ -453,9 +462,36 @@ func TestFetchClonesBareReadingNoConfigurationButItsOwn(t *testing.T) {
 	if want := []string{"git", "clone", "--bare", "--quiet", "https://github.com/acme/widgets", feed}; !slices.Equal(clone.Argv, want) {
 		t.Errorf("Fetch ran %q, want %q", clone.Argv, want)
 	}
-	assertCredentialedEnvironment(t, clone)
+	assertCredentialedEnvironmentBounded(t, clone, FetchTimeout)
 	if entries, err := os.ReadDir(req.CredentialDir); err != nil || len(entries) != 0 {
 		t.Errorf("the one-shot credential outlived Fetch: %v (%v)", entries, err)
+	}
+}
+
+// The fetch's clone (and any later fetch of the same feed) is bounded by FetchTimeout rather than
+// the runner's own slow-command budget, and carries git's own stall detector
+// (GIT_HTTP_LOW_SPEED_LIMIT/TIME): a transfer that keeps progressing can run far longer than
+// CommandTimeout, but one that goes quiet dies within about a minute of stalling, not at the
+// outer bound.
+func TestFetchBoundsItsCloneByTransferProgressNotWallClock(t *testing.T) {
+	run := newLocalRunner(t)
+	req := fetchRequest(t)
+
+	if _, err := Fetch(context.Background(), run, req); err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	clone := findCall(t, run.Calls(), "git", "clone")
+	if clone.Timeout != FetchTimeout {
+		t.Errorf("clone timeout = %s, want FetchTimeout %s (not the runner's slow-command budget)", clone.Timeout, FetchTimeout)
+	}
+	if clone.Timeout == run.Timeout() {
+		t.Errorf("clone timeout %s equals the runner's own budget %s, want a bound that follows transfer progress instead", clone.Timeout, run.Timeout())
+	}
+	if want := strconv.Itoa(FetchLowSpeedLimit); commandEnv(clone, "GIT_HTTP_LOW_SPEED_LIMIT") != want {
+		t.Errorf("GIT_HTTP_LOW_SPEED_LIMIT = %q, want %q", commandEnv(clone, "GIT_HTTP_LOW_SPEED_LIMIT"), want)
+	}
+	if want := strconv.Itoa(int(FetchLowSpeedTime.Seconds())); commandEnv(clone, "GIT_HTTP_LOW_SPEED_TIME") != want {
+		t.Errorf("GIT_HTTP_LOW_SPEED_TIME = %q, want %q", commandEnv(clone, "GIT_HTTP_LOW_SPEED_TIME"), want)
 	}
 }
 

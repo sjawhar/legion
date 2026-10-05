@@ -150,7 +150,7 @@ func createWorkspace(ctx context.Context, run Runner, workspace Workspace, log f
 	add := []string{
 		"jj", "workspace", "add", workspace.Dir, "--name", workspaceName, "--revision", revision, "-R", cloneDir,
 	}
-	result, err := runCommand(ctx, run, add, nil, "")
+	result, err := runCommand(ctx, run, add, nil, "", run.Timeout())
 	if err != nil {
 		return fmt.Errorf("run %s: %w", strings.Join(add, " "), err)
 	}
@@ -306,7 +306,7 @@ const bookmarkRowTemplate = `if(remote, remote, "local") ++ "|" ++ if(present, "
 // prints an error value where its id goes, which a workspace add would take as a revision.
 func readBookmark(ctx context.Context, run Runner, workspace Workspace, name string) (bookmarkRows, error) {
 	list := onClone(workspace.Clone, "bookmark", "list", "--all-remotes", "exact:"+name, "-T", bookmarkRowTemplate)
-	result, err := runCommand(ctx, run, list, nil, "")
+	result, err := runCommand(ctx, run, list, nil, "", run.Timeout())
 	if err != nil {
 		return bookmarkRows{}, fmt.Errorf("run %s: %w", strings.Join(list, " "), err)
 	}

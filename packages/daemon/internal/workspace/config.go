@@ -22,6 +22,33 @@ import (
 // independently.
 const CommandTimeout = 5 * time.Minute
 
+// FetchLowSpeedLimit and FetchLowSpeedTime bound the fetch's clone's transfer rate through git's
+// own stall detector (GIT_HTTP_LOW_SPEED_LIMIT/GIT_HTTP_LOW_SPEED_TIME): git aborts a transfer
+// that stays below FetchLowSpeedLimit bytes/second for FetchLowSpeedTime straight, so a connection
+// that goes quiet dies within about a minute of stalling, independent of how long the transfer has
+// run.
+const (
+	FetchLowSpeedLimit = 100 * 1024 // 100 KiB/s
+	FetchLowSpeedTime  = 60 * time.Second
+)
+
+// fetchLowSpeedEnvironment is the environment that makes git itself abort a stalled transfer:
+// GIT_HTTP_LOW_SPEED_LIMIT/TIME apply to every protocol git's http transport is told to use, so
+// they bound the fetch's clone (over https) the same way they would bound any later fetch that
+// reads the same feed over a network transport.
+var fetchLowSpeedEnvironment = []string{
+	"GIT_HTTP_LOW_SPEED_LIMIT=" + strconv.Itoa(FetchLowSpeedLimit),
+	"GIT_HTTP_LOW_SPEED_TIME=" + strconv.Itoa(int(FetchLowSpeedTime.Seconds())),
+}
+
+// FetchTimeout is the outer bound for the fetch's clone (and any later fetch of the same feed):
+// long enough for a large repository's slow but steadily progressing transfer to finish, while
+// FetchLowSpeedLimit and FetchLowSpeedTime (fetchLowSpeedEnvironment) kill a stalled transfer
+// within about a minute of stalling, long before this bound is ever reached. Every other
+// provisioning command keeps CommandTimeout: this widens the one command whose duration follows
+// the repository's size and the network's speed, not a fixed step in provisioning.
+const FetchTimeout = 30 * time.Minute
+
 // Command is one process the provisioner runs. Every command holds the runner's slow-command
 // budget so a clone, fetch, jj operation, or git configuration edit is bounded independently.
 type Command struct {
@@ -213,11 +240,10 @@ func tomlString(value string) string {
 	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(value) + `"`
 }
 
-func runCommand(ctx context.Context, run Runner, argv []string, env []string, dir string) (Result, error) {
+func runCommand(ctx context.Context, run Runner, argv []string, env []string, dir string, timeout time.Duration) (Result, error) {
 	if run == nil {
 		return Result{}, errors.New("workspace runner is required")
 	}
-	timeout := run.Timeout()
 	if timeout <= 0 {
 		return Result{}, errors.New("workspace runner timeout must be positive")
 	}
@@ -228,7 +254,24 @@ func runCommand(ctx context.Context, run Runner, argv []string, env []string, di
 // process that could not start, exited non-zero, or outlived the budget is an error naming the
 // command.
 func RunChecked(ctx context.Context, run Runner, argv []string, env []string, dir string) (Result, error) {
-	result, err := runCommand(ctx, run, argv, env, dir)
+	var timeout time.Duration
+	if run != nil {
+		timeout = run.Timeout()
+	}
+	return runChecked(ctx, run, argv, env, dir, timeout)
+}
+
+// RunCheckedTimeout runs argv like RunChecked, but bounds it with timeout instead of the runner's
+// own slow-command budget: the fetch's clone (and any later fetch of the same feed) needs a bound
+// that follows the transfer's progress rather than CommandTimeout's fixed wall clock — FetchTimeout,
+// paired with fetchLowSpeedEnvironment in its env so a stalled transfer dies within about a
+// minute regardless of how wide this bound is.
+func RunCheckedTimeout(ctx context.Context, run Runner, argv []string, env []string, dir string, timeout time.Duration) (Result, error) {
+	return runChecked(ctx, run, argv, env, dir, timeout)
+}
+
+func runChecked(ctx context.Context, run Runner, argv []string, env []string, dir string, timeout time.Duration) (Result, error) {
+	result, err := runCommand(ctx, run, argv, env, dir, timeout)
 	if err != nil {
 		return Result{}, fmt.Errorf("run %s: %w", strings.Join(argv, " "), err)
 	}
@@ -308,7 +351,7 @@ func removeRepositoryIdentity(ctx context.Context, run Runner, cloneDir string) 
 			continue
 		}
 		unset := onClone(cloneDir, "config", "unset", "--repo", key)
-		removed, err := runCommand(ctx, run, unset, nil, "")
+		removed, err := runCommand(ctx, run, unset, nil, "", run.Timeout())
 		if err != nil {
 			return fmt.Errorf("run %s: %w", strings.Join(unset, " "), err)
 		}

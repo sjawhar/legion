@@ -224,7 +224,8 @@ func Fetch(ctx context.Context, run Runner, request FetchRequest) (string, error
 		return "", fmt.Errorf("create feed parent: %w", err)
 	}
 	clone := []string{"git", "clone", "--bare", "--quiet", GitHubURL(request.Repo), feed}
-	if _, err := RunChecked(ctx, run, clone, merge(credential.env, isolatedGitConfig), ""); err != nil {
+	cloneEnv := merge(merge(credential.env, isolatedGitConfig), fetchLowSpeedEnvironment)
+	if _, err := RunCheckedTimeout(ctx, run, clone, cloneEnv, "", FetchTimeout); err != nil {
 		return "", err
 	}
 	return feed, credential.remove()

@@ -643,7 +643,13 @@ so no process that can read the token may touch the tree volume. The Go coordina
   /var/run/legion/feed`: one `git clone --bare` of `https://github.com/<owner>/<repo>` into the feed,
   reading no git configuration but its own (`GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`,
   `GIT_CONFIG_PARAMETERS` unset), with a one-shot credential git asks for `https://github.com` alone.
-  It mounts neither the tree volume nor the config home.
+  It mounts neither the tree volume nor the config home. Every other provisioning command is bounded
+  by `workspace.CommandTimeout` (5 minutes, fixed), but this one clone's duration follows the
+  repository's size and the network's speed, not a fixed step in provisioning: it runs under
+  `workspace.FetchTimeout` (30 minutes) instead, with git's own stall detector
+  (`GIT_HTTP_LOW_SPEED_LIMIT`/`GIT_HTTP_LOW_SPEED_TIME`, `workspace.FetchLowSpeedLimit`/
+  `FetchLowSpeedTime`) set so a connection that goes quiet still dies within about a minute of
+  stalling, rather than surviving on the wider bound.
 - **`workspace-init`** mounts the tree volume, the feed read-only, and the config home — never the
   Secret — and runs `legion workspace-init provision`: the shared clone's clone and fetch reach
   `https://github.com/<owner>/<repo>`, the remote its origin names, at the feed over git's file
