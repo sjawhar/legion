@@ -620,9 +620,8 @@ func TestProcessBatchBisectionAbortsOnAThrottleMidway(t *testing.T) {
 // outage embed.IsThrottled does not
 // recognize (expired credentials, a retired model id, an uncoded 5xx) fails every row the same
 // way, non-throttled, all the way down to size 1 - and nothing in the whole batch ever embeds,
-// so none of it is evidence about any row's content. Before this fix, bisectBatch's size-1 case
-// marked every such row permanent on the spot, dead-lettering the whole pending queue in about
-// retry.DeadLetterAttempts cycles. Driven for more cycles than that, after which nothing is dead.
+// including every confirmSoloFailure canary probe, so none of it is ever confirmed as any row's
+// own content. Driven for more cycles than retry.DeadLetterAttempts, after which nothing is dead.
 func TestProcessBatchNeverDeadLettersAUniformNonThrottledFailureHoweverManyTimesItRecurs(t *testing.T) {
 	database := storetest.Open(t)
 	ids := []string{"UNIF-1", "UNIF-2", "UNIF-3", "UNIF-4", "UNIF-5", "UNIF-6", "UNIF-7", "UNIF-8"}
@@ -1008,12 +1007,10 @@ func (e *sequencedEmbedder) Embed(_ context.Context, texts []string, _ embed.Inp
 	return vectors, nil
 }
 
-// TestProcessBatchANewOutageAfterAnEarlierSuccessNeverConfirmsAnything is Acceptance's own probe
-// against round 8's provenUp (a one-way latch): an earlier success anywhere in the call let a
-// later, unrelated recurrence of a systemic outage - never this row's own content - get wrongly
-// confirmed, since the latch never turned back off. The canary redesign replaces the latch with
-// a fresh, local probe run at the instant of each solo failure, so a later failure's own canary -
-// not an earlier row's unrelated success - decides it.
+// TestProcessBatchANewOutageAfterAnEarlierSuccessNeverConfirmsAnything proves confirmSoloFailure
+// never lets an earlier row's unrelated success confirm a later, unrelated recurrence of a
+// systemic outage: each solo failure is decided by its own fresh canary probe, run at the
+// instant of that failure, never by anything an earlier row in the same call did.
 func TestProcessBatchANewOutageAfterAnEarlierSuccessNeverConfirmsAnything(t *testing.T) {
 	database := storetest.Open(t)
 	healthyIDs := []string{"FLAP-1", "FLAP-2", "FLAP-3", "FLAP-4"}

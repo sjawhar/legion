@@ -74,10 +74,11 @@ func NewRateLimitedEmbedder(inner Embedder) *RateLimitedEmbedder {
 // failure both count as "Bedrock was not signalling capacity pressure this time." It reserves
 // with Reserve rather than calling the package's own ctx-aware Wait, because Wait fails fast with
 // its own error the moment it can tell the reservation's delay would outlast ctx's deadline,
-// without ever waiting for ctx to actually end - and embedqueue's callers (ProcessBatch,
-// bisectBatch) depend on ctx.Err() being set by the time this call returns, to tell a cancelled
-// wait apart from every other failure. Reserve, by contrast, hands back a delay to wait out
-// ourselves, so the select below only ever returns once ctx.Done() has genuinely fired.
+// without ever waiting for ctx to actually end - and embedqueue's callers depend on ctx.Err()
+// being set by the time this call returns (handleGroupFailure's own ctx.Err() check, which every
+// embedRows loop iteration relies on), to tell a cancelled wait apart from every other failure.
+// Reserve, by contrast, hands back a delay to wait out ourselves, so the select below only ever
+// returns once ctx.Done() has genuinely fired.
 func (r *RateLimitedEmbedder) Embed(ctx context.Context, texts []string, inputType InputType) ([][]float32, error) {
 	reservation := r.limiter.Reserve()
 	if delay := reservation.Delay(); delay > 0 {

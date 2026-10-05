@@ -170,23 +170,20 @@ type pendingRow struct {
 // evidence about a specific row's content - every row in the batch is retried as a whole, not
 // dead-lettered. A non-throttled whole-batch failure of two or more rows is different: something
 // about this batch's own content *might* have broken the request (a text the API refuses
-// outright, say), and bisectBatch isolates which row(s) by splitting the batch and re-embedding
-// each half, recursively. But a row isolated down to one that still fails non-throttled is only
-// evidence about that row's own content once some *other* row of the same original batch has
-// actually embedded during this same bisection - proof the service itself works, not just that
-// this one request failed. When nothing in the whole batch ever succeeds, every non-throttled
-// failure, however many rows deep, is systemic (an outage embed.IsThrottled does not recognize -
-// expired credentials, a retired model id, an uncoded 5xx) rather than evidence against any
-// specific row, and ProcessBatch demotes every row bisection tentatively isolated back to an
-// ordinary retry rather than dead-lettering any of them: an outage outside IsThrottled's
-// allowlist is never evidence against any one row's content just because every row happened to
-// fail the same way. A context
+// outright, say), and handleGroupFailure isolates which row(s) via bisectSplit, splitting the
+// batch and re-embedding each half, recursively. A failure isolated down to a single row is
+// decided by confirmSoloFailure: a fixed, known-good embedCanary probe sent immediately after
+// that row's own failed call. Canary success proves the service, credentials and model were all
+// working at that exact moment, so the row's own failure is confirmed permanent (dead-lettered
+// once confirmed often enough); canary failure - including a throttle - means the condition is
+// systemic, not this row's fault, and the row goes back to retry instead. This confirmation is
+// local to the one row and its own canary call: it never depends on any other row in the batch,
+// so a batch that was already exactly one row with no siblings at all is confirmed and
+// dead-lettered exactly the same way as one isolated down to size one by bisection. A context
 // cancellation - this call's own ctx ending mid-request, including embed.RateLimitedEmbedder's
-// own pacing wait ending early - is never evidence about any row either, whatever error text came
-// back, regardless of whether some other row already succeeded: bisectBatch checks for it
-// explicitly and never marks a row permanent because of it. A batch that was already exactly one
-// row has no sibling to compare against, so bisection has nothing to isolate: it is retried like
-// a throttled batch, never dead-lettered, exactly as before.
+// own pacing wait ending early - is never evidence about any row either, whatever error text
+// came back: handleGroupFailure checks for it before confirmSoloFailure or bisectSplit ever run,
+// and retries the whole group instead.
 func ProcessBatch(ctx context.Context, deps Deps) (succeeded, failed int, blocked, throttled bool, err error) {
 	rows, err := scanPending(ctx, deps)
 	if err != nil {
@@ -316,10 +313,8 @@ func handleGroupFailure(ctx context.Context, deps Deps, group []pendingRow, err 
 // is confirmed permanent. A canary failure - including a throttle - means the condition is
 // systemic, not this row's fault: nothing is confirmed, the row goes back to retry, and if the
 // canary itself was throttled, throttled is reported too, so the caller backs off exactly as an
-// outright-throttled call would. This replaces every order-based inference (round 8's provenUp,
-// and before it, the whole-batch succeeded-count check) with a direct, local test run at the
-// moment it matters, rather than reasoning about which other row happened to succeed earlier or
-// later in the same bisection.
+// outright-throttled call would. The confirmation is local to this one row and its own fresh
+// canary call, never reasoning about any other row's result in the same batch or bisection.
 func confirmSoloFailure(ctx context.Context, deps Deps, group []pendingRow, rowErr error, renewal *claimRenewal) bisectResult {
 	renewal.renew(ctx)
 	reserveBackgroundTokens(ctx, deps, []string{embedCanary}, renewal)

@@ -18,10 +18,11 @@
 -- also embeddings_pending's predicate. A failed embed attempt never touches either hash - only
 -- attempt_count, confirmed_failures and next_attempt_at move - so a row stays pending until it
 -- succeeds. attempt_count counts every retry, confirmed or not, and paces next_attempt_at's own
--- backoff; confirmed_failures counts only the attempts internal/dispatch/embedqueue's bisection
--- confirmed as this row's own content failing (some other row of the same batch had already
--- embedded, proving the service was up) - a demoted or throttled retry, which proves nothing
--- about this row specifically, advances attempt_count but never confirmed_failures. dead marks a
+-- backoff; confirmed_failures counts only the attempts internal/dispatch/embedqueue confirmed as
+-- this row's own content failing - a fixed known-good probe text embedded successfully
+-- immediately after this row's own failed call, proving the service was up at that exact moment
+-- - a retried or throttled attempt, which proves nothing about this row specifically, advances
+-- attempt_count but never confirmed_failures. dead marks a
 -- row that reached deadLetterAttempts confirmed failures, never merely attempt_count ones;
 -- embeddings_enqueue clears both counters and dead the moment the row's own text next changes,
 -- since a dead row whose content moved on deserves a fresh set of attempts, not to stay excluded
