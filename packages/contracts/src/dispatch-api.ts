@@ -655,6 +655,10 @@ export interface Ask extends AnchorPosition {
   readonly edited_at: string | null;
   /** Present only on a server-created approval ask. */
   readonly approval?: AskApproval;
+  /** The document `approval.artifact_id` names, hydrated live like `anchor_artifact` and
+   *  `block_artifact`: its current slug and primary flag, not a snapshot from when the request
+   *  opened. Present only alongside `approval`. */
+  readonly approval_artifact?: AskAnchorArtifact;
 }
 
 /** Who holds the turn on an open ask after a reply: `human` when the human needs to act,

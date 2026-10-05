@@ -13,15 +13,17 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
 
-// askRowColumns are docs.AskColumns plus the documents a block ask or quoted anchor names;
-// every ask read carries either document when it applies. Queries selecting them read from
-// askRowFrom.
+// askRowColumns are docs.AskColumns plus the documents a block ask, a quoted anchor or an
+// approval request names; every ask read carries whichever document applies. Queries selecting
+// them read from askRowFrom.
 const askRowColumns = docs.AskColumns + `, ba.id::text, ba.slug, ba.is_primary,
-	aa.project_key, aa.slug, aa.name, aa.is_primary`
+	aa.project_key, aa.slug, aa.name, aa.is_primary,
+	pa.project_key, pa.slug, pa.name, pa.is_primary`
 
 const askRowFrom = `from asks a
 	left join artifacts ba on ba.id = a.block_artifact_id
-	left join artifacts aa on aa.id = (a.anchor->>'artifact_id')::uuid`
+	left join artifacts aa on aa.id = (a.anchor->>'artifact_id')::uuid
+	left join artifacts pa on pa.id = (a.approval->>'artifact_id')::uuid`
 
 // newestReply selects the newest comment in the thread of the ask aliased a: the one that
 // committed last, since a comment's created_at is when its insert ran (migration 0065) and every
@@ -78,12 +80,28 @@ const askReadColumns = askRowColumns + `, lr.author, lr.created_at, ` + waitingO
 
 const askReadFrom = askRowFrom + lastReplyJoin
 
+// nullableAskArtifactRef holds the nullable columns of one optional document an ask names - a
+// quoted anchor's or an approval request's artifact_id, both resolved through a left join that
+// may find no row. artifact is nil exactly when the join found none.
+type nullableAskArtifactRef struct {
+	project, slug, name *string
+	primary             *bool
+}
+
+func (ref nullableAskArtifactRef) artifact() *model.AskAnchorArtifact {
+	if ref.project == nil {
+		return nil
+	}
+	return &model.AskAnchorArtifact{
+		Project: *ref.project, Slug: *ref.slug, Name: *ref.name, Primary: *ref.primary,
+	}
+}
+
 // scanAskRow decodes one askRowColumns row; extra receives the columns after them.
 func scanAskRow(row pgx.Row, extra ...any) (model.Ask, error) {
 	var blockArtifactID, blockArtifactSlug *string
 	var blockArtifactPrimary *bool
-	var anchorProject, anchorSlug, anchorName *string
-	var anchorPrimary *bool
+	var anchor, approval nullableAskArtifactRef
 	ask, err := docs.ScanAsk(
 		row,
 		append(
@@ -91,10 +109,14 @@ func scanAskRow(row pgx.Row, extra ...any) (model.Ask, error) {
 				&blockArtifactID,
 				&blockArtifactSlug,
 				&blockArtifactPrimary,
-				&anchorProject,
-				&anchorSlug,
-				&anchorName,
-				&anchorPrimary,
+				&anchor.project,
+				&anchor.slug,
+				&anchor.name,
+				&anchor.primary,
+				&approval.project,
+				&approval.slug,
+				&approval.name,
+				&approval.primary,
 			},
 			extra...,
 		)...,
@@ -107,14 +129,8 @@ func scanAskRow(row pgx.Row, extra ...any) (model.Ask, error) {
 			ID: *blockArtifactID, Slug: *blockArtifactSlug, Primary: *blockArtifactPrimary,
 		}
 	}
-	if anchorProject != nil {
-		ask.AnchorArtifact = &model.AskAnchorArtifact{
-			Project: *anchorProject,
-			Slug:    *anchorSlug,
-			Name:    *anchorName,
-			Primary: *anchorPrimary,
-		}
-	}
+	ask.AnchorArtifact = anchor.artifact()
+	ask.ApprovalArtifact = approval.artifact()
 	return ask, nil
 }
 
