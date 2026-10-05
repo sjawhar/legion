@@ -158,16 +158,14 @@ func (s *relaunchingStore) RetireDelivery(ctx context.Context, c supervise.Claim
 // hold by the first resolve alone would accept the old generation after its claim has already
 // moved on, taking the stream slot the real generation-2 shim's own hello then finds "already
 // bound to a live stream". The fix resolves the token again once restoration ends and judges
-// generation 1's hello by that second resolve, which answers one of two ways depending on the
-// claim's own stored state when this restore ran: supervisor.restore rewrites a claim it finds
-// StateLaunching with no locator to StateLaunchUncertain through the same Recording-wrapped store
-// a relaunch's own mint goes through, so this process records generation 1's hash even without
-// minting it itself, and the second resolve comes back Stale, refused as "stale worker
-// generation". A claim already stored as StateLaunchUncertain before this restore ran — a
-// still-earlier restore marked it so and then crashed again before ever relaunching it — skips
-// that rewrite, so this process never records its hash at all, and the second resolve comes back
-// known=false, refused as "unknown boot token" instead. Either way generation 1's hello is
-// refused and generation 2's own, freshly minted hello is accepted.
+// generation 1's hello by that second resolve, which comes back Stale either way a claim reaches
+// this restart: supervisor.restore rewrites a claim it finds StateLaunching with no locator to
+// StateLaunchUncertain through the Recording-wrapped store, and launchUnfinished's
+// ReleaseUncertainLaunch — the one path a StateLaunchUncertain claim is actually relaunched
+// through — persists it again, still holding generation 1's hash, through that same store before
+// the relaunch mints generation 2's. Both writes record generation 1's hash in this process's own
+// BootTokens even though neither minted it, so the second resolve always comes back Stale,
+// refused as "stale worker generation", and generation 2's own, freshly minted hello is accepted.
 func TestHelloResolverResolvesAgainAfterRestorationSoARelaunchDuringTheHoldIsNotMissed(t *testing.T) {
 	type result struct {
 		generation uint64
@@ -228,24 +226,19 @@ func TestHelloResolverResolvesAgainAfterRestorationSoARelaunchDuringTheHoldIsNot
 		}
 	})
 
-	t.Run("generation 1 already stored as StateLaunchUncertain: restore skips the rewrite, so the second resolve comes back unknown", func(t *testing.T) {
+	t.Run("generation 1 stored as StateLaunchUncertain: launchUnfinished's ReleaseUncertainLaunch records it before relaunching, so the second resolve also comes back Stale", func(t *testing.T) {
 		store := &relaunchingStore{}
-		const boot1, boot2 = "generation-1-token", "generation-2-token"
-		ctx := context.Background()
-		// A claim already StateLaunchUncertain from a still-earlier restore that crashed again
-		// before ever relaunching it never passes back through supervisor.restore's
-		// StateLaunching-to-StateLaunchUncertain rewrite — the one path that would have recorded
-		// this hash through Recording — so this process's own BootTokens never records it at
-		// all; written here directly to the bare store, bypassing Recording, to model exactly
-		// that gap.
-		if err := store.PutClaim(ctx, supervise.Claim{
-			Token: claim.Token("a-claim"), Generation: 1, BootTokenHash: supervise.HashBootToken(boot1),
-		}); err != nil {
-			t.Fatalf("write generation 1's claim (already StateLaunchUncertain, as a still-earlier restore would have left it): %v", err)
-		}
-
 		tokens := api.NewBootTokens(store)
 		recording := tokens.Recording(store)
+
+		const boot1, boot2 = "generation-1-token", "generation-2-token"
+		ctx := context.Background()
+		if err := recording.PutClaim(ctx, supervise.Claim{
+			Token: claim.Token("a-claim"), Generation: 1, BootTokenHash: supervise.HashBootToken(boot1),
+			State: supervise.StateLaunchUncertain,
+		}); err != nil {
+			t.Fatalf("write generation 1's claim: %v", err)
+		}
 
 		sup := newSupervisor(context.Background(), nil, "PROJECT", "", quietLogger())
 		sup.machines[claim.Token("a-claim")] = &member{}
@@ -264,6 +257,16 @@ func TestHelloResolverResolvesAgainAfterRestorationSoARelaunchDuringTheHoldIsNot
 		case <-time.After(10 * resolveTimeout):
 		}
 
+		// launchUnfinished calls ReleaseUncertainLaunch, which moves the claim to StateQueued and
+		// persists it — generation 1's hash unchanged — before the relaunch it then starts mints
+		// generation 2's own hash and persists that. Both writes go through the same
+		// Recording-wrapped store.
+		if err := recording.PutClaim(ctx, supervise.Claim{
+			Token: claim.Token("a-claim"), Generation: 1, BootTokenHash: supervise.HashBootToken(boot1),
+			State: supervise.StateQueued,
+		}); err != nil {
+			t.Fatalf("write generation 1's claim as released to StateQueued: %v", err)
+		}
 		if err := recording.PutClaim(ctx, supervise.Claim{
 			Token: claim.Token("a-claim"), Generation: 2, BootTokenHash: supervise.HashBootToken(boot2),
 		}); err != nil {
@@ -273,8 +276,11 @@ func TestHelloResolverResolvesAgainAfterRestorationSoARelaunchDuringTheHoldIsNot
 
 		select {
 		case got := <-done:
-			if got.known {
-				t.Fatalf("resolve(%q) known = true, want false: a claim already StateLaunchUncertain skips restore's rewrite, so this process never records its hash and the second resolve must come back unknown", boot1)
+			if !got.known {
+				t.Fatalf("resolve(%q) known = false, want true", boot1)
+			}
+			if !got.stale {
+				t.Fatalf("resolve(%q) stale = false, want true: ReleaseUncertainLaunch's own persist runs through the Recording store too, still holding generation 1's hash, so this process records it even without minting it itself", boot1)
 			}
 		case <-time.After(time.Second):
 			t.Fatal("the resolver never returned after restoration closed")
