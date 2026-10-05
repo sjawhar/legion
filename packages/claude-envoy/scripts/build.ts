@@ -65,8 +65,7 @@ export async function buildBundles(outdir: string): Promise<void> {
     // This is a separate, compounding cause from `assertPinnedBun` above: that guard stops a
     // wrong Bun *version* from running at all, on the identical pinned version this fixes a
     // non-determinism *within* one Bun build's own bundler. Either one alone could make
-    // `check-dist` fail unpredictably; both were real, and the prior investigation (LEGION-548's
-    // round 5) attributed the second to the build machine before finding the first.
+    // `check-dist` fail unpredictably; both were real.
     minify: false,
     sourcemap: "none",
     naming: "[name].[ext]",
