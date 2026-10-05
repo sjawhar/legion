@@ -342,6 +342,36 @@ smoke_main_leftovers() {
   gh api "repos/$repo/git/trees/main?recursive=1" \
     --jq '.tree[] | select(.type == "blob") | .path | select(startswith(".legion/") or startswith("docs/solutions/"))'
 }
+# merge_when_clean REPO PR MERGE_FLAG... merges a pull request only once GitHub's own
+# mergeStateStatus reads CLEAN under the repository's rulesets, rather than racing a required
+# status check that can still be queued well after review and CI otherwise read ready: GitHub
+# refuses the merge outright ("Repository rule violations found... Required status check \"gate\"
+# is queued.") when a required check (this project's `gate`, fail-on-demand.yml, which runs on
+# both push and pull_request) is still queued — the pull_request run can settle while the
+# push-event run it also requires stays queued through an Actions outage and is cancelled, which
+# the merge call itself is the wrong place to discover. Bounded at 300s: the project's own required
+# checks ordinarily settle within seconds of the pull request's head existing, and a timeout names
+# the actual mergeStateStatus and every check that is not a completed success, not only that time
+# ran out. --match-head-commit holds the merge to the head this call last read, so a push between
+# the poll and the merge is refused by its own sha instead of silently merging a later one.
+merge_when_clean() {
+  local repo_name=$1 pr=$2
+  shift 2
+  local started=$SECONDS beat=$SECONDS polls=0 state="" head_sha=""
+  note "waiting up to 300s for $repo_name#$pr's merge state to read CLEAN under its ruleset"
+  while ((SECONDS - started < 300)); do
+    polls=$((polls + 1))
+    read -r state head_sha < <(gh -R "$repo_name" pr view "$pr" --json mergeStateStatus,headRefOid --jq '[.mergeStateStatus, .headRefOid] | @tsv')
+    [ "$state" = CLEAN ] && break
+    if ((SECONDS - beat >= 60)); then
+      beat=$SECONDS
+      note "still waiting for $repo_name#$pr's merge state to read CLEAN: poll $polls, $((SECONDS - started))s of 300s, now ${state:-unknown}"
+    fi
+    sleep 0.5
+  done
+  [ "$state" = CLEAN ] || fail "timed out after $((SECONDS - started))s ($polls polls) waiting for $repo_name#$pr to clear its ruleset: mergeStateStatus is ${state:-unknown}; unsettled checks: $(gh -R "$repo_name" pr view "$pr" --json statusCheckRollup --jq '[.statusCheckRollup[]? | select(.conclusion != "SUCCESS" or .status != "COMPLETED") | {name: (.name // .context), workflow: .workflowName, status, conclusion}]')"
+  gh -R "$repo_name" pr merge "$pr" --match-head-commit "$head_sha" "$@"
+}
 # clean_smoke_main removes every leftover from the smoke main through the proof human's ordinary
 # merge (the smoke main takes changes only through pull requests), so the next run starts from a
 # fixture whose base carries no other issue's handoff. See approve_as_reviewer for why a merge
@@ -359,7 +389,7 @@ clean_smoke_main() {
   done <<<"$paths"
   url=$(gh -R "$repo" pr create --base main --head "$branch" --title "proof fixture: remove the handoffs and learnings Stage 3 runs merged ($project)" \
     --body "The Stage 3 proof run $project removes what merged proof pull requests left on main: .legion/ handoffs and docs/solutions/ retro learnings. The Go daemon has no clean-head loop before Stage 7, so each proof merge carries them. This is a proof fixture change by the proof's human-merge identity; it changes no product.")
-  gh -R "$repo" pr merge "${url##*/}" --squash --delete-branch
+  merge_when_clean "$repo" "${url##*/}" --squash --delete-branch
   note "the proof human removed $(wc -l <<<"$paths") leftover paths from $repo main through $url"
 }
 
