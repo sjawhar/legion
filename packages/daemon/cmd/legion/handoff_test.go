@@ -195,6 +195,79 @@ func TestHandoffReadNeverFallsBackToAnUnstampedHandoffInheritedFromMain(t *testi
 	}
 }
 
+// A commit on this tree's own branch touched the flat path, so it is tempting to call that enough -
+// but a forward merge can replace what that commit wrote with main's own stale content, and the
+// path being touched proves nothing about which side's content is standing at @ afterward. Here
+// main independently gained its own differently-shaped plan.json before this tree merged it
+// forward, the merge conflicts on .legion/plan.json, and the conflict resolves to main's side: the
+// result at @ is content this tree's own branch never wrote. legion handoff read must never return
+// it as this tree's own.
+func TestHandoffReadNeverFallsBackToAnUnstampedHandoffAForwardMergeReplacedWithMains(t *testing.T) {
+	seed, jj := handoffRepo(t)
+	if err := os.WriteFile(filepath.Join(seed, "README.md"), []byte("smoke\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	handoffJJ(t, jj, seed, "commit", "-m", "base")
+	handoffJJ(t, jj, seed, "bookmark", "set", "main", "-r", "@-")
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	handoffJJ(t, jj, filepath.Dir(workspace), "git", "clone", seed, workspace)
+	writeLegacyHandoffFile(t, workspace, "plan.json", `{"scope":"small","subIssues":[]}`+"\n")
+	handoffJJ(t, jj, workspace, "commit", "-m", "plan: record handoff")
+
+	handoffJJ(t, jj, seed, "new", "main")
+	writeLegacyHandoffFile(t, seed, "plan.json", `{"scope":"huge","subIssues":["OTHER-1"]}`+"\n")
+	handoffJJ(t, jj, seed, "commit", "-m", "an unrelated tree's own plan handoff")
+	handoffJJ(t, jj, seed, "bookmark", "set", "main", "-r", "@-")
+	handoffJJ(t, jj, workspace, "git", "fetch")
+	handoffJJ(t, jj, workspace, "new", "@", "main@origin", "-m", "merge: resolve conflict against main@origin")
+	if conflicted := handoffJJ(t, jj, workspace, "log", "-r", "@", "--no-graph", "-T", `if(conflict, "conflicted", "clean")`); conflicted != "conflicted" {
+		t.Fatalf("merging main forward over this tree's own plan.json is %s, want a conflict the test resolves to main's side", conflicted)
+	}
+	writeLegacyHandoffFile(t, workspace, "plan.json", `{"scope":"huge","subIssues":["OTHER-1"]}`+"\n")
+
+	t.Setenv("LEGION_ISSUE", "THIS-1")
+	t.Setenv("LEGION_JJ_PATH", jj)
+	var out, errb bytes.Buffer
+	code := run(context.Background(), []string{"legion", "handoff", "read", "--workspace", workspace, "--phase", "plan"}, &out, &errb)
+	if code != 1 || out.String() != "" {
+		t.Fatalf("handoff read --phase plan after a forward merge resolved to main's own stale plan.json = %d, stdout %q; want it refused", code, out.String())
+	}
+}
+
+// This tree's own unstamped plan.json survives a forward merge that never touches the path at all:
+// its content at @ is exactly what this tree's own commit wrote, so it is still this tree's own.
+func TestHandoffReadFallsBackToItsOwnUnstampedLegacyHandoffAfterAForwardMerge(t *testing.T) {
+	seed, jj := handoffRepo(t)
+	if err := os.WriteFile(filepath.Join(seed, "README.md"), []byte("smoke\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	handoffJJ(t, jj, seed, "commit", "-m", "base")
+	handoffJJ(t, jj, seed, "bookmark", "set", "main", "-r", "@-")
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	handoffJJ(t, jj, filepath.Dir(workspace), "git", "clone", seed, workspace)
+	writeLegacyHandoffFile(t, workspace, "plan.json", `{"scope":"small","subIssues":[]}`+"\n")
+	handoffJJ(t, jj, workspace, "commit", "-m", "plan: record handoff")
+
+	handoffJJ(t, jj, seed, "new", "main")
+	if err := os.WriteFile(filepath.Join(seed, "OTHER.md"), []byte("unrelated\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	handoffJJ(t, jj, seed, "commit", "-m", "an unrelated change")
+	handoffJJ(t, jj, seed, "bookmark", "set", "main", "-r", "@-")
+	handoffJJ(t, jj, workspace, "git", "fetch")
+	handoffJJ(t, jj, workspace, "new", "@", "main@origin", "-m", "merge: resolve conflict against main@origin")
+	if conflicted := handoffJJ(t, jj, workspace, "log", "-r", "@", "--no-graph", "-T", `if(conflict, "conflicted", "clean")`); conflicted != "clean" {
+		t.Fatalf("merging an unrelated main change forward is %s, want clean", conflicted)
+	}
+
+	t.Setenv("LEGION_ISSUE", "THIS-1")
+	t.Setenv("LEGION_JJ_PATH", jj)
+	var out, errb bytes.Buffer
+	if code := run(context.Background(), []string{"legion", "handoff", "read", "--workspace", workspace, "--phase", "plan"}, &out, &errb); code != 0 || !strings.Contains(out.String(), `"scope": "small"`) {
+		t.Fatalf("handoff read --phase plan of this tree's own unstamped handoff after an unrelated forward merge = %d: stdout %s stderr %s; want it returned", code, out.String(), errb.String())
+	}
+}
+
 // LEGION_ISSUE names the tree's own handoff directory, .legion/<issue>/, and a worker sets its own
 // environment. A value that is not a Dispatch issue key - a traversal, an absolute path, a nested
 // path, nothing - is refused before any path is built from it, by write, read and complete alike,
