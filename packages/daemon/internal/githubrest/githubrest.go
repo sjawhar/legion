@@ -10,7 +10,9 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 )
@@ -133,7 +135,9 @@ func (c Client) call(ctx context.Context, method, target string, body []byte, in
 		return "", err
 	}
 	if response.StatusCode < 200 || response.StatusCode > 299 {
-		return "", &Answer{Method: method, Path: c.answerPath(request.URL), Status: response.StatusCode, Body: strings.TrimSpace(string(answer)), RateLimited: RateLimited(response)}
+		path := c.answerPath(request.URL)
+		return "", &Answer{Method: method, Path: path, Status: response.StatusCode, Body: strings.TrimSpace(string(answer)),
+			RateLimited: RateLimited(response, answer), RetryAfter: retryAfter(response, answer, time.Now())}
 	}
 	if into == nil {
 		return nextPage(response.Header.Get("Link")), nil
@@ -153,11 +157,58 @@ func (c Client) answerPath(target *url.URL) string {
 	return target.Path
 }
 
-// RateLimited says whether response is GitHub's rate limit: a 429, or a 403 carrying
-// x-ratelimit-remaining: 0 or a retry-after.
-func RateLimited(response *http.Response) bool {
-	return response.StatusCode == http.StatusTooManyRequests || response.StatusCode == http.StatusForbidden &&
-		(response.Header.Get("X-RateLimit-Remaining") == "0" || response.Header.Get("Retry-After") != "")
+// secondaryLimitMessages are what GitHub's secondary rate limit says in the body of the 403 it can
+// answer with instead of a 429: "You have exceeded a secondary rate limit", with the older wording
+// of the same limit, "You have triggered an abuse detection mechanism", beside it.
+var secondaryLimitMessages = []string{"secondary rate limit", "abuse detection mechanism"}
+
+// RateLimited says whether response, whose body is body, is GitHub's rate limit: a 429, or a 403
+// carrying x-ratelimit-remaining: 0 or a retry-after, or one whose body says it is the secondary
+// limit, which GitHub's REST documentation allows with neither header set.
+func RateLimited(response *http.Response, body []byte) bool {
+	if response.StatusCode == http.StatusTooManyRequests {
+		return true
+	}
+	if response.StatusCode != http.StatusForbidden {
+		return false
+	}
+	if response.Header.Get("X-RateLimit-Remaining") == "0" || response.Header.Get("Retry-After") != "" {
+		return true
+	}
+	message := strings.ToLower(string(body))
+	for _, named := range secondaryLimitMessages {
+		if strings.Contains(message, named) {
+			return true
+		}
+	}
+	return false
+}
+
+// retryAfter is how long GitHub asks a caller its rate limit answered to wait before calling again,
+// as its REST documentation's "Exceeding the rate limit" says: the retry-after header's seconds,
+// else, when x-ratelimit-remaining is 0, until the x-ratelimit-reset epoch second, capped at an
+// hour, GitHub's primary rate limit's window, so a host clock behind GitHub's never stretches the
+// wait past it; else at least a minute, which is what a secondary limit named by its message alone
+// is waited. A reset this host's clock already reads as past is waited the minute too. Zero for an
+// answer that is not a rate limit.
+func retryAfter(response *http.Response, body []byte, now time.Time) time.Duration {
+	if !RateLimited(response, body) {
+		return 0
+	}
+	if seconds, err := strconv.Atoi(response.Header.Get("Retry-After")); err == nil && seconds > 0 {
+		return time.Duration(seconds) * time.Second
+	}
+	if response.Header.Get("X-RateLimit-Remaining") == "0" {
+		if reset, err := strconv.ParseInt(response.Header.Get("X-RateLimit-Reset"), 10, 64); err == nil {
+			if wait := time.Unix(reset, 0).Sub(now); wait > 0 {
+				if wait > time.Hour {
+					return time.Hour
+				}
+				return wait
+			}
+		}
+	}
+	return time.Minute
 }
 
 // nextPage is the URL a Link header names rel="next", "" when it names none.
@@ -173,13 +224,15 @@ func nextPage(link string) string {
 
 // Answer is a GitHub REST answer other than 2xx: the request's method and path (its query left
 // out), GitHub's HTTP status, the body GitHub sent with it, and whether it is a rate limit, which
-// every further call on the same token meets until the limit resets.
+// every further call on the same token meets until the limit resets, with how long GitHub asks the
+// caller to wait before its next call (retryAfter; zero when it is not one).
 type Answer struct {
 	Method      string
 	Path        string
 	Status      int
 	Body        string
 	RateLimited bool
+	RetryAfter  time.Duration
 }
 
 func (a *Answer) Error() string {

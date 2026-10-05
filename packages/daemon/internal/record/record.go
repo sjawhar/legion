@@ -98,9 +98,10 @@ type PhaseRow struct {
 	// HandoffCommit it survives the next phase's start, so a completion reporting it again is known
 	// to carry no handoff written since.
 	LastHandoff string
-	// Decision is the review round's decision, on the reviewer's row: the newest review GitHub
-	// reported for the round that carried one, kept until the round ends, since the reviewer's
-	// completion can come after the review it posted. Nil until a review decides.
+	// Decision is the review round's decision, on the reviewer's row: the newest review the review
+	// App or an account with write access to the repository submitted for the round that carried one
+	// (workflow's decidesRound), kept until the round ends, since the reviewer's completion can come
+	// after the review it posted. Nil until a review decides.
 	Decision *ReviewDecision
 	// CompletedAt is when the workflow applied the role's completion of its current phase, zero until
 	// then. The reviewer's orders the reviews its round receives against the completion (workflow's
@@ -187,11 +188,12 @@ type PullRequest struct {
 	// head whose settlement is recorded (classify.HeadChecks). A reopen keeps both, with Required.
 	Workflows     []RequiredWorkflow
 	WorkflowsHead string
-	// ReviewSeen is the newest deciding review (changes requested or approved) GitHub reported for
-	// the pull request: a deciding review not after it was submitted before one already processed,
-	// and records nothing. A comment decides nothing and leaves it as it is. It lasts as long as the
-	// pull request's record: across rounds, a reopen, and a new generation while the pull request
-	// is open; a new generation deletes one that is not.
+	// ReviewSeen is the newest deciding review (changes requested or approved, from the review App
+	// or an account with write access to the repository) GitHub reported for the pull request: a
+	// deciding review not after it was submitted before one already processed, and records nothing.
+	// A comment, or anyone else's review, decides nothing and leaves it as it is. It lasts as long
+	// as the pull request's record: across rounds, a reopen, and a new generation while the pull
+	// request is open; a new generation deletes one that is not.
 	ReviewSeen ReviewOrder
 	State      PullRequestState
 }

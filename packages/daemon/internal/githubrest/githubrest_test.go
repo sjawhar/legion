@@ -7,9 +7,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // Post sends its body as JSON with the installation token, reads a 2xx answer such as GitHub's
@@ -140,5 +142,60 @@ func TestGetListPagesRefusesAnAnswerWithoutTheField(t *testing.T) {
 	runs, err := GetListPages[run](context.Background(), client, "/commits/head/check-runs", "check_runs")
 	if err == nil || runs != nil || err.Error() != `GitHub answered GET /commits/head/check-runs with no "check_runs" list` {
 		t.Fatalf("GetListPages of an answer without the field = %+v, %v; want an error naming check_runs", runs, err)
+	}
+}
+
+// GitHub's secondary rate limit can answer a 403 with only its message to say so: no retry-after,
+// and x-ratelimit-remaining well above 0. That answer is a rate limit, waited the minute GitHub's
+// documentation names for a limit that names no wait. A 403 whose message is anything else is not.
+func TestASecondaryRateLimitNamedOnlyByItsMessageIsARateLimit(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		body      string
+		limited   bool
+		wantAfter time.Duration
+	}{
+		{name: "a secondary rate limit", body: `{"message":"You have exceeded a secondary rate limit. Please wait a few minutes before you try again."}`,
+			limited: true, wantAfter: time.Minute},
+		{name: "an installation refused", body: `{"message":"Resource not accessible by integration"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("X-RateLimit-Remaining", "4321")
+				http.Error(w, tc.body, http.StatusForbidden)
+			}))
+			defer server.Close()
+			client := Client{Token: "token", API: server.URL + "/repos/acme/widgets"}
+
+			var answer *Answer
+			if err := client.Get(context.Background(), "/collaborators/a-writer/permission", nil); !errors.As(err, &answer) {
+				t.Fatalf("Get = %v, want an *Answer", err)
+			}
+			if answer.RateLimited != tc.limited || answer.RetryAfter != tc.wantAfter {
+				t.Fatalf("the 403 = rate limited %v, retry after %s; want %v, %s", answer.RateLimited, answer.RetryAfter, tc.limited, tc.wantAfter)
+			}
+		})
+	}
+}
+
+// A 403 naming x-ratelimit-reset far in the future - a host clock behind GitHub's, or a limit
+// GitHub's documentation allows up to an hour out - waits no longer than an hour, GitHub's primary
+// rate limit's window, rather than stretching the nak delay and the held limit out past it.
+func TestARateLimitsResetFarInTheFutureWaitsNoLongerThanAnHour(t *testing.T) {
+	reset := strconv.FormatInt(time.Now().Add(6*time.Hour).Unix(), 10)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-RateLimit-Remaining", "0")
+		w.Header().Set("X-RateLimit-Reset", reset)
+		http.Error(w, `{"message":"rate limited"}`, http.StatusForbidden)
+	}))
+	defer server.Close()
+	client := Client{Token: "token", API: server.URL + "/repos/acme/widgets"}
+
+	var answer *Answer
+	if err := client.Get(context.Background(), "/collaborators/a-writer/permission", nil); !errors.As(err, &answer) {
+		t.Fatalf("Get = %v, want an *Answer", err)
+	}
+	if !answer.RateLimited || answer.RetryAfter != time.Hour {
+		t.Fatalf("a reset six hours out = rate limited %v, retry after %s; want true and an hour's cap", answer.RateLimited, answer.RetryAfter)
 	}
 }
