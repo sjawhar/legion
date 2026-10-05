@@ -129,6 +129,9 @@ and the tester's proof below are both this proof.
   `skill://legion-worker`): the `Fast-follow:` line holds naming, duplication, or wording cleanup
   only. A base frozen for others to stack on is never rewritten (*Rewriting pushed commits* in
   `skill://legion-worker/references/conflicts-and-rewrites.md`); the `Chain` line records it.
+- **GitHub refuses a pull request body over 65,536 characters.** Each verification round links its
+  evidence (the run, the comment) rather than inlining it once the body passes about 48,000
+  characters; the `Production` line's record always links.
 
 ## When no surface reaches the changed path
 
