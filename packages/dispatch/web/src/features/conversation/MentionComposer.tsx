@@ -1,4 +1,4 @@
-import { type MutationKey, useMutation, useQueryClient } from "@tanstack/react-query";
+import type { MutationKey } from "@tanstack/react-query";
 import {
   type ClipboardEvent,
   type DragEvent,
@@ -15,7 +15,7 @@ import {
   useState,
 } from "react";
 
-import { ApiError, api, apiErrorMessage } from "../../api/client";
+import { ApiError, type ArtifactOwner, api, apiErrorMessage } from "../../api/client";
 import type { Agent, AskOption, AskUrgency } from "../../api/types";
 import { Chip } from "../../components/Chip";
 import { QueryError } from "../../components/QueryError";
@@ -23,7 +23,6 @@ import { RefusableButton } from "../../components/RefusableButton";
 import { TruncatedText } from "../../components/TruncatedText";
 import { submitOnModifiedEnter } from "../../hooks/submitOnModifiedEnter";
 import { useFootInset } from "../../hooks/useFootInset";
-import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import {
   badgeMed,
   borderDefault,
@@ -56,10 +55,10 @@ import {
   textPrimaryOnSurface,
   textSecondaryOnSurface,
 } from "../../theme/classes";
-import { uploadErrorMessage, uploadFile } from "../artifacts/ArtifactUpload";
+import { appendToDraft, DraftUploadStatus, useDraftUpload } from "../artifacts/ArtifactUpload";
 import { ASK_URGENCIES_ASCENDING, URGENCY_LABELS } from "../inbox/ask-urgency";
 import { ReferencePicker } from "../refs/ReferencePicker";
-import { buildDispatchReference, composerReferences } from "../refs/routes";
+import { composerReferences } from "../refs/routes";
 import type {
   AcceptedMention,
   ComposerAnchor,
@@ -163,10 +162,6 @@ export function mentionOptions(agents: readonly Agent[]): MentionOption[] {
         title: agent.title === "" ? agent.session_id : agent.title,
       })),
   ];
-}
-
-function appendReference(body: string, reference: string): string {
-  return `${body}${body.length === 0 || /\s$/.test(body) ? "" : " "}${reference}`;
 }
 
 /** Reconcile accepted mentions against the actual textarea edit range. */
@@ -470,7 +465,6 @@ export function MentionComposer({
   const previousReply = useRef<string | undefined>(undefined);
   // Whether this mount took a held send's draft, which the reply prefill must not replace.
   const mountedHeld = useRef(outgoing.held !== undefined);
-  const queryClient = useQueryClient();
   const [body, setBody] = useState(initial.body);
   const [replacement, setReplacement] = useState(initial.replacement);
   const [mentions, setMentions] = useState<AcceptedMention[]>(initial.mentions);
@@ -496,7 +490,6 @@ export function MentionComposer({
   const [urgency, setUrgency] = useState<AskUrgency>(initial.ask?.urgency ?? "med");
   const [referencePickerOpen, setReferencePickerOpen] = useState(false);
   const [autocomplete, setAutocomplete] = useState<{ query: string; start: number }>();
-  const [pendingUploads, setPendingUploads] = useState(0);
   const [confirmingDiscard, setConfirmingDiscard] = useState(false);
   // Why the last kind pick was refused, kept with the mark it answered: the composer stays mounted
   // when a newer compose replaces the anchor, and a refusal about the old mark says nothing about
@@ -533,7 +526,6 @@ export function MentionComposer({
     setAskOptions([emptyAskOption()]);
   };
   const references = useMemo(() => composerReferences(body), [body]);
-  const uploadRetryGuard = useSubmitGuard();
   const editBody = edit?.body;
 
   // The seed belongs to the channel the host addresses. When it changes - an Agents row's issue
@@ -697,48 +689,23 @@ export function MentionComposer({
     frame === undefined ? formRef : frameRef,
     !dormant && (docked || frame !== undefined)
   );
-  const upload = useMutation({
-    // An upload carries where it goes as its own variable, taken by the paste or drop that starts
-    // it, as a send carries its `SentRequest`: TanStack gives a pending mutation each new render's
-    // options before `mutationFn` runs, so an owner read from the closure would follow a pick made
-    // in that task. Everything after - the reference, the refreshed caches, a Retry - reads the same
-    // target, so the reference names the issue or document that holds the artifact.
-    mutationFn: async ({ file, target }: { file: File; target: ComposerOwner }) => {
-      if (target.kind === "session")
-        throw new Error("The direct session channel does not support uploads.");
-      const { artifact } = await uploadFile(
-        target.kind === "issue" ? { issue: target.issueKey } : { project: target.project },
-        file
-      );
-      return { artifact, target };
-    },
-    onMutate: () => setPendingUploads((count) => count + 1),
-    onSuccess: ({ artifact, target }) => {
-      const reference =
-        target.kind === "issue"
-          ? buildDispatchReference({ key: target.issueKey, kind: "artifact", slug: artifact.slug })
-          : buildDispatchReference({
-              kind: "document",
-              project: target.project,
-              slug: artifact.slug,
-            });
-      setBody((current) => {
-        const next = appendReference(current, reference);
-        previousBody.current = next;
-        return next;
-      });
-      if (target.kind === "issue") {
-        void queryClient.invalidateQueries({ queryKey: ["artifacts", target.issueKey] });
-        void queryClient.invalidateQueries({ queryKey: ["issue", target.issueKey] });
-      } else {
-        void queryClient.invalidateQueries({ queryKey: ["project", target.project, "artifacts"] });
-      }
-    },
-    onSettled: () => {
-      setPendingUploads((count) => count - 1);
-      uploadRetryGuard.release();
-    },
+  const upload = useDraftUpload((text) => {
+    setBody((current) => {
+      const next = appendToDraft(current, text);
+      previousBody.current = next;
+      return next;
+    });
   });
+  // Where a pasted or dropped file goes: the issue or the project document the draft is for, or,
+  // for a direct message, the agent's conversation. An edit takes no files.
+  const uploadOwner: ArtifactOwner | undefined =
+    edit !== undefined
+      ? undefined
+      : owner.kind === "issue"
+        ? { issue: owner.issueKey }
+        : owner.kind === "artifact"
+          ? { project: owner.project }
+          : { session: owner.sessionId };
 
   const addMention = (option: MentionOption) => {
     const current = textarea.current?.value ?? body;
@@ -842,7 +809,7 @@ export function MentionComposer({
     ? "This issue is closed. Reopen it to send."
     : draftRefusal(kind, body, replacement, outbound);
   const footId = useId();
-  const canSubmit = canSubmitComposer(submitReason, sending, pendingUploads);
+  const canSubmit = canSubmitComposer(submitReason, sending, upload.pending);
   /** Sends the draft as it stands, its whole request frozen here (`sentRequest`), so nothing done
    *  after this call can change where it goes. Until the server answers, one fieldset holds every
    *  control that could change or discard the draft; the held send covers that hold in this task
@@ -1043,13 +1010,9 @@ export function MentionComposer({
           onBeforeInput={onBeforeBodyInput}
           onChange={(event) => onBodyChange(event.target.value, event.target.selectionStart)}
           onDrop={
-            compact || owner.kind === "session"
+            uploadOwner === undefined
               ? undefined
-              : (event: DragEvent<HTMLTextAreaElement>) => {
-                  event.preventDefault();
-                  for (const file of event.dataTransfer.files)
-                    upload.mutate({ file, target: owner });
-                }
+              : (event: DragEvent<HTMLTextAreaElement>) => upload.drop(event, uploadOwner)
           }
           onInput={
             inline
@@ -1070,18 +1033,12 @@ export function MentionComposer({
               setReferencePickerOpen(true);
               return;
             }
-            submitOnModifiedEnter(event);
+            submitOnModifiedEnter(event, { disabled: upload.pending > 0 });
           }}
           onPaste={
-            compact || owner.kind === "session"
+            uploadOwner === undefined
               ? undefined
-              : (event: ClipboardEvent<HTMLTextAreaElement>) => {
-                  const files = [...event.clipboardData.files];
-                  if (files.length > 0) {
-                    event.preventDefault();
-                    for (const file of files) upload.mutate({ file, target: owner });
-                  }
-                }
+              : (event: ClipboardEvent<HTMLTextAreaElement>) => upload.paste(event, uploadOwner)
           }
           ref={textarea}
           rows={1}
@@ -1231,10 +1188,10 @@ export function MentionComposer({
           </section>
         </>
       ) : null}
-      {compact || owner.kind === "session" ? null : (
+      {compact ? null : (
         <>
           <p className={`text-xs ${textMutedOnSurfaceMuted}`}>
-            Paste or drop a file to add it as an artifact.
+            Paste or drop a picture to show it inline, or any other file to attach it.
             {owner.kind === "issue" ? " Ctrl+K inserts a reference." : ""}
           </p>
           {references.length === 0 ? null : (
@@ -1258,7 +1215,7 @@ export function MentionComposer({
               onClose={() => setReferencePickerOpen(false)}
               onSelect={(reference) => {
                 setBody((current) => {
-                  const next = appendReference(current, reference);
+                  const next = appendToDraft(current, reference);
                   previousBody.current = next;
                   return next;
                 });
@@ -1267,20 +1224,9 @@ export function MentionComposer({
               }}
             />
           ) : null}
-          {pendingUploads > 0 ? (
-            <p className={`text-sm ${textMutedOnSurfaceMuted}`} role="status">
-              Uploading file…
-            </p>
-          ) : null}
-          {upload.isError ? (
-            <QueryError
-              message={uploadErrorMessage(upload.error)}
-              onRetry={() => uploadRetryGuard.retryLast(upload)}
-              retrying={upload.isPending}
-            />
-          ) : null}
         </>
       )}
+      {uploadOwner === undefined ? null : <DraftUploadStatus upload={upload} />}
       {/* Past its deadline a send is still the server's: no Retry, which would post it twice. */}
       {late ? (
         <p className={`text-sm ${textMutedOnSurfaceMuted}`} role="status">
@@ -1316,7 +1262,7 @@ export function MentionComposer({
         </div>
       )}
       <RefusableButton
-        busy={sending ? "Sending…" : pendingUploads > 0 ? "Uploading file…" : undefined}
+        busy={sending ? "Sending…" : upload.pending > 0 ? "Uploading file…" : undefined}
         refusal={submitReason ?? null}
         refusalShownBy={footId}
         type="submit"

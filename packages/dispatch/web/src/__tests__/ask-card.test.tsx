@@ -611,6 +611,94 @@ test("AskCard submits the selected single option with the revision the human rev
   }
 });
 
+/** A PNG as a clipboard or a drop hands it over. */
+function png(name: string): File {
+  return new File([new Uint8Array([137, 80, 78, 71])], name, { type: "image/png" });
+}
+
+// A picture pasted into an answer is part of the answer: the field takes the picture syntax once
+// the upload lands, and Answer waits for it, since an answer sent before would go without it.
+test("AskCard writes a picture pasted into its answer as an inline picture, and waits for it", async () => {
+  const submitted: AnswerAskInput[] = [];
+  const { promise: landed, resolve: land } = Promise.withResolvers<void>();
+  const uploadArtifact = spyOn(api, "uploadArtifact").mockImplementation(async () => {
+    await landed;
+    return { artifact: { name: "shot.png", slug: "shot-png" }, version: { number: 1 } } as never;
+  });
+  const input = ask();
+  const { view } = renderCard(
+    <AskCard
+      ask={input}
+      answerAsk={async (_id, submission) => {
+        submitted.push(submission);
+        return answered(input, submission.selected, submission.text ?? null);
+      }}
+      getAskThread={emptyThread(input)}
+    />
+  );
+
+  try {
+    const answer = view.getByLabelText("Your answer") as HTMLTextAreaElement;
+    fireEvent.change(answer, { target: { value: "This one" } });
+    fireEvent.paste(answer, { clipboardData: { files: [png("shot.png")] } });
+    await view.findByText("Uploading file…");
+    expect(view.getByRole("button", { name: "Answer" }).hasAttribute("disabled")).toBe(true);
+    // Ctrl+Enter is Answer's other way in, and the form's submit does not itself wait for uploads.
+    fireEvent.keyDown(answer, { ctrlKey: true, key: "Enter" });
+    const { promise: settled, resolve: settle } = Promise.withResolvers<void>();
+    setTimeout(settle, 20);
+    await settled;
+    expect(submitted).toEqual([]);
+    expect(uploadArtifact.mock.calls[0]?.[0]).toEqual({ issue: "CORE-1" });
+
+    land();
+    await waitFor(() =>
+      expect(answer.value).toBe("This one ![shot.png](dispatch://CORE-1/artifact/shot-png@v1)")
+    );
+    fireEvent.click(view.getByRole("button", { name: "Answer" }));
+    await waitFor(() =>
+      expect(submitted).toEqual([
+        {
+          expected_edited_at: null,
+          selected: [],
+          text: "This one ![shot.png](dispatch://CORE-1/artifact/shot-png@v1)",
+        },
+      ])
+    );
+  } finally {
+    view.unmount();
+    uploadArtifact.mockRestore();
+  }
+});
+
+// A document's ask belongs to no issue: a picture in its reply is the document's project's.
+test("AskCard uploads a picture dropped into a document ask's reply to the document's project", async () => {
+  const uploadArtifact = spyOn(api, "uploadArtifact").mockResolvedValue({
+    artifact: { name: "shot.png", slug: "shot-png" },
+    version: { number: 2 },
+  } as never);
+  const input = answered(ask({ artifact_id: "artifact-design", issue_key: null }), [], "Yes");
+  const { view } = renderCard(
+    <AskCard
+      ask={input}
+      getAskThread={emptyThread(input)}
+      owner={{ project: "CORE", slug: "design-notes" }}
+    />
+  );
+
+  try {
+    const reply = (await view.findByLabelText("Reply")) as HTMLTextAreaElement;
+    fireEvent.drop(reply, { dataTransfer: { files: [png("shot.png")] } });
+    await waitFor(() =>
+      expect(reply.value).toBe("![shot.png](dispatch://CORE/artifact/shot-png@v2)")
+    );
+    expect(uploadArtifact.mock.calls[0]?.[0]).toEqual({ project: "CORE" });
+  } finally {
+    view.unmount();
+    uploadArtifact.mockRestore();
+  }
+});
+
 test("AskCard submits every checked multiple option", async () => {
   const submitted: AnswerAskInput[] = [];
   const input = ask({ multiple: true, options: [{ label: "Docs" }, { label: "Tests" }] });
@@ -1836,6 +1924,51 @@ test("two reply composers for one ask share its draft and its send", async () =>
     expect(bodies).toEqual(["One draft"]);
   } finally {
     view.unmount();
+  }
+});
+
+// The reply under an ask takes a picture as the answer does: it uploads to the ask's issue, Reply
+// waits for it, and its text joins the ask's shared draft as it stands when the upload lands.
+test("a picture pasted into a reply composer joins its draft and holds the send until it lands", async () => {
+  const { promise: landed, resolve: land } = Promise.withResolvers<void>();
+  const uploadArtifact = spyOn(api, "uploadArtifact").mockImplementation(async () => {
+    await landed;
+    return { artifact: { name: "shot.png", slug: "shot-png" }, version: { number: 1 } } as never;
+  });
+  const input = answered(ask(), []);
+  const bodies: string[] = [];
+  const createReply = async (_issueKey: string, body: CreateCommentInput) => {
+    bodies.push(body.body);
+    return reply({ body: body.body });
+  };
+  const { view } = renderCard(
+    <AskReplyComposer ask={input} createReply={createReply} uploadOwner={{ issue: "CORE-1" }} />
+  );
+  try {
+    const field = view.getByRole("textbox", { name: "Reply" }) as HTMLTextAreaElement;
+    fireEvent.change(field, { target: { value: "Looks right" } });
+    fireEvent.paste(field, { clipboardData: { files: [png("shot.png")] } });
+    await view.findByText("Uploading file…");
+    expect((view.getByRole("button", { name: "Reply" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(uploadArtifact.mock.calls[0]?.[0]).toEqual({ issue: "CORE-1" });
+    // Typed while the upload is out: the picture lands after it, not over it.
+    fireEvent.change(field, { target: { value: "Looks right to me" } });
+
+    land();
+    await waitFor(() =>
+      expect(field.value).toBe(
+        "Looks right to me ![shot.png](dispatch://CORE-1/artifact/shot-png@v1)"
+      )
+    );
+    fireEvent.click(view.getByRole("button", { name: "Reply" }));
+    await waitFor(() =>
+      expect(bodies).toEqual([
+        "Looks right to me ![shot.png](dispatch://CORE-1/artifact/shot-png@v1)",
+      ])
+    );
+  } finally {
+    view.unmount();
+    uploadArtifact.mockRestore();
   }
 });
 

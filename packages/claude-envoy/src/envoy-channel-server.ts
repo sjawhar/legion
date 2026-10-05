@@ -17,6 +17,8 @@ import {
 } from "@legion/envoy-client/delivery"
 import { resolveDispatchConfig } from "@legion/envoy-client/dispatch-config"
 import { executeDispatchTool } from "@legion/envoy-client/dispatch-execute"
+import { forgetShownPictures } from "@legion/envoy-client/dispatch-picture-tools"
+import { imageBlocks, isPictureType, type ToolImage } from "@legion/envoy-client/dispatch-pictures"
 import {
   createFollowAnnouncer,
   subscriptionRemovedTopics,
@@ -187,9 +189,38 @@ function parseArguments<Operation extends EnvoyToolOperation>(
   return argumentsSchema(spec).parse(input) as ToolArgumentsByOperation[Operation]
 }
 
-function mcpResult(value: unknown): {
-  readonly content: readonly [{ readonly type: "text"; readonly text: string }]
-} {
+type McpContent =
+  | { readonly type: "text"; readonly text: string }
+  | { readonly type: "image"; readonly data: string; readonly mimeType: string }
+
+/** Whether a value a tool answered is a picture: base64 `data` and a picture type a model is
+ *  shown. `mcpResult` reads a result as `unknown`, so each element is checked, never cast. */
+function isToolImage(value: unknown): value is ToolImage {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "data" in value &&
+    typeof value.data === "string" &&
+    "mimeType" in value &&
+    typeof value.mimeType === "string" &&
+    isPictureType(value.mimeType)
+  )
+}
+
+/** A tool's answer as MCP content: the value as JSON text, then the pictures a Dispatch result
+ *  carries (`images`) as image blocks, which the JSON leaves out. */
+export function mcpResult(value: unknown): { readonly content: readonly McpContent[] } {
+  if (typeof value === "object" && value !== null && "images" in value) {
+    const { images, ...rest } = value
+    if (Array.isArray(images)) {
+      return {
+        content: [
+          { type: "text", text: JSON.stringify(rest) },
+          ...imageBlocks(images.filter(isToolImage)),
+        ],
+      }
+    }
+  }
   return { content: [{ type: "text", text: JSON.stringify(value) }] }
 }
 
@@ -572,6 +603,9 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
     }
     identity.set(next)
     directSubject = nextSubject
+    // `/clear` empties the conversation, so the new id starts with no pictures shown, and what
+    // the old id was shown goes with it.
+    forgetShownPictures(previous)
     // `unfollow` removes the subject from the topic list before it first awaits.
     // What it then awaits is the drain of deliveries already in flight, and the
     // handoff does not wait for it: a stuck notification would otherwise hold

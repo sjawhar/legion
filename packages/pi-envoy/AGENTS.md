@@ -19,6 +19,10 @@ posts its body or error to the correlated delivery attempt; **Aside** and **Stee
 (below). A BTW side turn still running when the handler that subscribed the agent subject
 (`session_start`, a session switch, or a Legion handler re-establishing through the claim bridge)
 reaches the host's 30 s handler budget is aborted, and Dispatch gets the abort as the reply's error.
+A card or a person's turn whose text embeds Dispatch pictures (`RenderInboundResult.pictures`, the
+turn's body) carries them as image blocks after the text (`src/delivery-pictures.ts`, the same
+bounds as `dispatch_read`); the host's custom-message and `sendUserMessage` content takes those
+blocks.
 
 A person's direct Send or Aside from Dispatch's Agents page (Send is the dashboard's name for a
 steer) becomes the user's own turn (`src/dispatch-user-turn.ts`). A frame is only a candidate

@@ -1,5 +1,6 @@
 import { type ReactNode, useId, useState } from "react";
 
+import type { ArtifactOwner } from "../../api/client";
 import type { Ask } from "../../api/types";
 import { linkHoverText, linkText } from "../../theme/classes";
 import { AskReplyComposer, AskThread, type AskThreadQuery, type CreateReply } from "./AskThread";
@@ -9,6 +10,8 @@ interface AskThreadDisclosureProps {
   thread: AskThreadQuery;
   createReply?: CreateReply;
   embedded?: boolean;
+  /** Where a file pasted or dropped into the reply goes (`AskReplyComposer`). */
+  uploadOwner?: ArtifactOwner;
 }
 
 export function AskThreadDisclosure({
@@ -16,6 +19,7 @@ export function AskThreadDisclosure({
   thread,
   createReply,
   embedded = false,
+  uploadOwner,
 }: AskThreadDisclosureProps): ReactNode {
   const [composerOpen, setComposerOpen] = useState(false);
   const composerId = useId();
@@ -62,7 +66,7 @@ export function AskThreadDisclosure({
           </button>
           {composerOpen ? (
             <div className="mt-2" id={composerId}>
-              <AskReplyComposer ask={ask} createReply={createReply} />
+              <AskReplyComposer ask={ask} createReply={createReply} uploadOwner={uploadOwner} />
             </div>
           ) : null}
         </>

@@ -2,7 +2,7 @@ import type { UseQueryResult } from "@tanstack/react-query";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, type ReactNode, useId, useState } from "react";
 
-import { api } from "../../api/client";
+import { type ArtifactOwner, api } from "../../api/client";
 import type { Ask, AskRead, Comment, CreateCommentInput } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
 import { submitOnModifiedEnter } from "../../hooks/submitOnModifiedEnter";
@@ -20,6 +20,7 @@ import {
   textSecondaryOnCanvas,
   textSecondaryOnSurface,
 } from "../../theme/classes";
+import { appendToDraft, DraftUploadStatus, useDraftUpload } from "../artifacts/ArtifactUpload";
 import { actorLabel } from "../refs/actor";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { Timestamp } from "../refs/Timestamp";
@@ -50,14 +51,19 @@ export type AskThreadQuery = UseQueryResult<AskRead, Error>;
  * The reply form under an answered ask. It posts to the ask's issue, or to its document for a
  * project-document ask, then invalidates the shared thread so the reply shows first. Its draft is
  * the ask's (`reply-drafts.ts`), and its send is the ask's too: while any composer's reply to this
- * ask is out, every composer for it, including one mounted since, shows the draft disabled.
+ * ask is out, every composer for it, including one mounted since, shows the draft disabled. A file
+ * pasted or dropped into the field uploads to `uploadOwner` and its text joins the draft.
  */
 export function AskReplyComposer({
   ask,
   createReply: reply = createReply,
+  uploadOwner,
 }: {
   ask: Ask;
   createReply?: CreateReply;
+  /** Where a file pasted or dropped into the reply goes: the ask's issue, or its document's
+   *  project. Without one the field takes a paste as text. */
+  uploadOwner?: ArtifactOwner;
 }): ReactNode {
   const queryClient = useQueryClient();
   // Each composer owns its field id so transient duplicate mounts during a responsive
@@ -68,6 +74,8 @@ export function AskReplyComposer({
   // ask sees it in flight.
   const mutationKey = ["ask-reply", ask.id];
   const { sending } = useSending(mutationKey);
+  const upload = useDraftUpload((text) => setBody((current) => appendToDraft(current, text)));
+  const uploading = upload.pending > 0;
   const submit = useMutation({
     mutationKey,
     mutationFn: (text: string) => {
@@ -88,7 +96,8 @@ export function AskReplyComposer({
   const submitReply = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const text = body.trim();
-    if (text === "" || sending) {
+    // A reply sent while a picture is still uploading would go without it.
+    if (text === "" || sending || uploading) {
       return;
     }
     submit.mutate(text);
@@ -103,13 +112,20 @@ export function AskReplyComposer({
           disabled={sending}
           id={fieldId}
           onChange={(event) => setBody(event.target.value)}
-          onKeyDown={(event) => submitOnModifiedEnter(event)}
+          onDrop={
+            uploadOwner === undefined ? undefined : (event) => upload.drop(event, uploadOwner)
+          }
+          onKeyDown={(event) => submitOnModifiedEnter(event, { disabled: uploading })}
+          onPaste={
+            uploadOwner === undefined ? undefined : (event) => upload.paste(event, uploadOwner)
+          }
           value={body}
         />
       </label>
+      <DraftUploadStatus upload={upload} />
       <button
         className={`self-start rounded-lg border px-3 py-1.5 text-sm font-medium ${borderStrong} ${textSecondaryOnSurface} ${enabledCardHoverBorder} disabled:cursor-not-allowed disabled:opacity-50`}
-        disabled={body.trim() === "" || sending}
+        disabled={body.trim() === "" || sending || uploading}
         type="submit"
       >
         {sending ? "Replying…" : "Reply"}
@@ -139,6 +155,8 @@ export interface AskThreadProps {
   showComposer?: boolean;
   /** A thread inside an open ask card inherits the card's compact flow. */
   embedded?: boolean;
+  /** Where a file pasted or dropped into the reply goes (`AskReplyComposer`). */
+  uploadOwner?: ArtifactOwner;
 }
 
 /**
@@ -154,6 +172,7 @@ export function AskThread({
   createReply: reply = createReply,
   showComposer = true,
   embedded = false,
+  uploadOwner,
 }: AskThreadProps): ReactNode {
   const olderRepliesId = useId();
   const replies = thread.data?.replies ?? [];
@@ -196,7 +215,7 @@ export function AskThread({
         </ul>
       )}
       {showComposer && ask.state === "answered" ? (
-        <AskReplyComposer ask={ask} createReply={reply} />
+        <AskReplyComposer ask={ask} createReply={reply} uploadOwner={uploadOwner} />
       ) : null}
     </section>
   );

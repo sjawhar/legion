@@ -93,6 +93,11 @@ const paintBlock: PaintMarkdown = (element, parsed, serializer) => {
  * inside, say, an ask question reads as bold text at the card's own size rather than a
  * page-size h1, and a resolution reason inline in a `text-xs` line stays that size.
  *
+ * A picture whose address is a Dispatch artifact at a version (`![shot.png](dispatch://…@v1)`,
+ * what a pasted picture is written as) shows through `DispatchPicture`: at the column's width,
+ * capped in height, in `block`; as a thumbnail beside its caption in `inline`. A picture on
+ * another website renders as Proof renders it.
+ *
  * Once the schema and Proof's headless engine are loaded (the first body on the page loads
  * them), a body renders synchronously in the layout phase of the commit that mounts it
  * (`useRenderedMarkdown`); only the very first render on a page, or a schema that failed to
@@ -121,9 +126,7 @@ export function MarkdownBody({
     inline ? inlineRoot : blockRoot,
     markdown,
     inline ? paintInline : paintBlock,
-    undefined,
-    onRendered,
-    softBreaks
+    { pictures: variant, onRendered, softBreaks }
   );
 
   return inline ? (

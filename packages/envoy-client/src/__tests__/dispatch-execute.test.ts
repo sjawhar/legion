@@ -491,16 +491,16 @@ describe("executeDispatchTool", () => {
     if (!(replying instanceof ToolInputError)) throw new Error("expected ToolInputError");
     expect(replying.problems).toEqual([
       "body is required (string)",
-      'unknown field "message"; allowed: issue, body, in_reply_to',
+      'unknown field "message"; allowed: issue, body, in_reply_to, images',
       "in_reply_to must be a full message id (uuid) or a dispatch://KEY/message/<id> reference",
     ]);
     expect(replying.message).toBe(
       [
         "dispatch_message was not called: 3 problems",
         "- body is required (string)",
-        '- unknown field "message"; allowed: issue, body, in_reply_to',
+        '- unknown field "message"; allowed: issue, body, in_reply_to, images',
         "- in_reply_to must be a full message id (uuid) or a dispatch://KEY/message/<id> reference",
-        "- Allowed keys: issue, body, in_reply_to",
+        "- Allowed keys: issue, body, in_reply_to, images",
         '- Example: dispatch_message({"issue":"DSP-1","body":"Implementation started."})',
       ].join("\n")
     );
@@ -512,7 +512,7 @@ describe("executeDispatchTool", () => {
     expect(posting.problems).toEqual([
       "issue is required; supply issue or set LEGION_ISSUE",
       "body is required (string)",
-      'unknown field "message"; allowed: issue, body, in_reply_to',
+      'unknown field "message"; allowed: issue, body, in_reply_to, images',
     ]);
   });
 
@@ -532,7 +532,7 @@ describe("executeDispatchTool", () => {
     expect(failure.problems).toEqual([
       "options.0 must be an object {label, description?}, not a string",
       "options.1 must be an object {label, description?}, not a string",
-      'unknown field "custom"; allowed: issue, project, artifact, ref, question, options, multiple, urgency, anchor',
+      'unknown field "custom"; allowed: issue, project, artifact, ref, question, options, multiple, urgency, anchor, images',
     ]);
   });
 
@@ -618,7 +618,11 @@ describe("executeDispatchTool", () => {
       "multiple",
       "urgency",
       "anchor",
+      "images",
     ] as const;
+    const pictureDirectory = mkdtempSync(path.join(os.tmpdir(), "dispatch-ask-images-"));
+    const picture = path.join(pictureDirectory, "shot.png");
+    writeFileSync(picture, new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0]));
     type Field = (typeof fields)[number];
     interface ArgumentCase {
       readonly args: Record<string, unknown>;
@@ -681,6 +685,13 @@ describe("executeDispatchTool", () => {
             quote: "The passage",
           }),
       },
+      images: {
+        args: { issue: "DSP-41", question: "Look at this", images: [picture] },
+        assert: ({ body }) =>
+          expect(body.question).toBe(
+            "Look at this\n\n![shot.png](dispatch://DSP-41/artifact/shot-png@v1)"
+          ),
+      },
     };
     const askSpec = dispatchToolSpecs.find((spec) => spec.name === "dispatch_ask");
     if (askSpec === undefined) throw new Error("dispatch_ask spec is missing");
@@ -709,6 +720,9 @@ describe("executeDispatchTool", () => {
           });
         }
         if (/^\/api\/v1\/projects\/[^/]+\/artifacts$/.test(target.pathname)) return response([]);
+        if (target.pathname === "/api/v1/issues/DSP-41/artifacts" && init?.method === "POST") {
+          return response({ artifact: { slug: "shot-png" }, version: { number: 1 } });
+        }
         if (target.pathname.endsWith("/asks")) {
           const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
           request = { body, path: target.pathname };
@@ -726,6 +740,7 @@ describe("executeDispatchTool", () => {
       if (request === undefined) throw new Error(`dispatch_ask did not create an ask for ${field}`);
       testCase.assert(request);
     }
+    rmSync(pictureDirectory, { recursive: true, force: true });
   });
   test("prefills an omitted issue from a native LEGION_ISSUE without resolving cwd repo", async () => {
     const requests: string[] = [];
@@ -3676,8 +3691,10 @@ describe("executeDispatchTool", () => {
     ).rejects.toThrow(
       "ref must be a valid dispatch:// reference such as dispatch://KEY-1, " +
         "dispatch://KEY-1/ask/<uuid>, dispatch://KEY-1/comment/<uuid>, " +
-        "dispatch://KEY-1/message/<uuid>, dispatch://KEY-1/artifact/<slug>, or " +
-        "dispatch://PROJECT/artifact/<document-ref> (an artifact id, slug, or filename)"
+        "dispatch://KEY-1/message/<uuid>, dispatch://KEY-1/artifact/<slug>, " +
+        "dispatch://PROJECT/artifact/<document-ref> (an artifact id, slug, or filename), or " +
+        "dispatch://agent/<session id>/artifact/<slug> (a picture in a conversation on the Agents page, " +
+        "for dispatch_doc_read)"
     );
   });
 
@@ -3820,6 +3837,7 @@ describe("executeDispatchTool", () => {
     expect(result.text).toContain(
       '"Approve spec.md (version 3)? Proposes a live sync in place of the nightly export."'
     );
+    expect(result.text).toContain("`plan-gap-analyst`");
     expect(result.details).toMatchObject({ issue: "DSP-42", ask: "ask-9", version: 3 });
     expect(result.details).toMatchObject({ follows: { ask: "ask-9" } });
     expect(result.details).not.toHaveProperty("topic");
@@ -3884,6 +3902,7 @@ describe("executeDispatchTool", () => {
     expect(result.text).toContain(
       '"Approve spec.md (version 3)? Proposes a nightly export to the archive."'
     );
+    expect(result.text).not.toContain("plan-gap-analyst");
   });
 
   test("dispatch_request_approval on a document approved at its current version opens nothing", async () => {
@@ -3936,6 +3955,7 @@ describe("executeDispatchTool", () => {
       "(document id artifact-42) is already approved at version 3 by sjawhar"
     );
     expect(result.text).not.toContain("ask ");
+    expect(result.text).not.toContain("plan-gap-analyst");
     expect(result.details).toMatchObject({ issue: "DSP-42", artifact: "artifact-42", version: 3 });
     expect(dispatchFollowNotice(result.details)).toBeNull();
   });

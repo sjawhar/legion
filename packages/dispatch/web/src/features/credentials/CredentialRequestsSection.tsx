@@ -25,7 +25,8 @@ function pendingRowPath(row: CredentialPendingRow): string {
 /** The Inbox's supplementary credential-requests section, mounted above the ask sections, from the
  *  Inbox's own reading of the list (`useCredentialRequests`), which its banner and empty state read
  *  too. A Dispatch with no secrets broker lists none, so the whole section hides silently - the one
- *  deliberate quiet path; a failure to load the list is surfaced instead. */
+ *  deliberate quiet path; a failure is surfaced only when no list has ever loaded (a later poll
+ *  failing keeps showing the last list it held, `useCredentialRequests`'s `status` stays `listed`). */
 export function CredentialRequestsSection({
   credentials: { requests, status },
 }: {
