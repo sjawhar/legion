@@ -1921,6 +1921,51 @@ test("two reply composers for one ask share its draft and its send", async () =>
   }
 });
 
+// The reply under an ask takes a picture as the answer does: it uploads to the ask's issue, Reply
+// waits for it, and its text joins the ask's shared draft as it stands when the upload lands.
+test("a picture pasted into a reply composer joins its draft and holds the send until it lands", async () => {
+  const { promise: landed, resolve: land } = Promise.withResolvers<void>();
+  const uploadArtifact = spyOn(api, "uploadArtifact").mockImplementation(async () => {
+    await landed;
+    return { artifact: { name: "shot.png", slug: "shot-png" }, version: { number: 1 } } as never;
+  });
+  const input = answered(ask(), []);
+  const bodies: string[] = [];
+  const createReply = async (_issueKey: string, body: CreateCommentInput) => {
+    bodies.push(body.body);
+    return reply({ body: body.body });
+  };
+  const { view } = renderCard(
+    <AskReplyComposer ask={input} createReply={createReply} uploadOwner={{ issue: "CORE-1" }} />
+  );
+  try {
+    const field = view.getByRole("textbox", { name: "Reply" }) as HTMLTextAreaElement;
+    fireEvent.change(field, { target: { value: "Looks right" } });
+    fireEvent.paste(field, { clipboardData: { files: [png("shot.png")] } });
+    await view.findByText("Uploading file…");
+    expect((view.getByRole("button", { name: "Reply" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(uploadArtifact.mock.calls[0]?.[0]).toEqual({ issue: "CORE-1" });
+    // Typed while the upload is out: the picture lands after it, not over it.
+    fireEvent.change(field, { target: { value: "Looks right to me" } });
+
+    land();
+    await waitFor(() =>
+      expect(field.value).toBe(
+        "Looks right to me ![shot.png](dispatch://CORE-1/artifact/shot-png@v1)"
+      )
+    );
+    fireEvent.click(view.getByRole("button", { name: "Reply" }));
+    await waitFor(() =>
+      expect(bodies).toEqual([
+        "Looks right to me ![shot.png](dispatch://CORE-1/artifact/shot-png@v1)",
+      ])
+    );
+  } finally {
+    view.unmount();
+    uploadArtifact.mockRestore();
+  }
+});
+
 test("a document ask links its project and document page", async () => {
   const input = ask({
     artifact_id: "artifact-1",
