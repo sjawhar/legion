@@ -78,10 +78,11 @@ func (c *Current) lock(ctx context.Context) error {
 // unlock releases the writer lock lock took.
 func (c *Current) unlock() { <-c.mu }
 
-// Refresh loads the policy now and, when the load succeeds, makes it the live one. A name
-// RefreshOne reread within listLag of the moment this reload began - before its listing was
-// fetched - is read again alone and kept as that read finds it, since the full listing may not
-// show the change yet; any failed read fails the refresh.
+// Refresh loads the policy now and, when the load succeeds, makes it the live one. A name recent
+// anchors within listLag of the moment this reload began - before its listing was fetched - is
+// read again alone and kept as that read finds it, since the full listing may not show the change
+// yet. recent anchors a name a reread settled, and one an earlier reload's own re-describe caught
+// a change to. Any failed read fails the refresh.
 func (c *Current) Refresh(ctx context.Context) error {
 	if err := c.lock(ctx); err != nil {
 		return err
@@ -123,8 +124,8 @@ func (c *Current) Refresh(ctx context.Context) error {
 // RefreshOne rereads name alone (Loader.LoadOne) and merges the answer into the live policy: a
 // served secret replaces or adds name, and a refused or absent one takes name out. Every other
 // name stays as the live policy had it. A failed read leaves the live policy as it was, and a name
-// no secret can carry is ErrNameInvalid before the writer lock (CheckName). Every reread Refresh
-// keeps for listLag, except an absent answer for a name the live policy did not serve: that
+// no secret can carry is ErrNameInvalid before the writer lock (CheckName). Refresh keeps every
+// reread for listLag, except an absent answer for a name the live policy did not serve: that
 // changed nothing, and anyone may ask for a reread, so keeping it would let invented names each
 // cost every reload in the next listLag a DescribeSecret under the writer lock. A served name
 // found absent is kept, so a lagging listing cannot bring back a deleted secret; a secret created
