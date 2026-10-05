@@ -50,6 +50,31 @@ func rulesetsStandIn(t *testing.T, failing *atomic.Bool) *httptest.Server {
 	return server
 }
 
+// mergeableStandIn is GitHub's REST API for acme/widgets as the required-checks read sees it: pull
+// request 86 on base main, whose GitHub `mergeable` field is the literal JSON state, whose
+// rulesets require pr-checks-result and whose branch protection requires nothing.
+func mergeableStandIn(t *testing.T, state string) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer outbox-token" {
+			http.Error(w, `{"message":"Bad credentials"}`, http.StatusUnauthorized)
+			return
+		}
+		switch r.URL.Path {
+		case "/repos/acme/widgets/pulls/86":
+			w.Write([]byte(`{"number":86,"base":{"ref":"main"},"mergeable":` + state + `}`))
+		case "/repos/acme/widgets/rules/branches/main":
+			w.Write([]byte(`[{"type":"pull_request"},{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"pr-checks-result"}]}}]`))
+		case "/repos/acme/widgets/branches/main":
+			w.Write([]byte(`{"name":"main","protected":false}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
 // seedStuckRound records the round a live tree got stuck in before the daemon read required sets:
 // the reviewer approved its own handoff head and completed, and the code head's settlement that
 // stands for it is red only on two workflow_dispatch lanes and an advisory review check, beside a
@@ -370,5 +395,97 @@ func TestARerunThatEndsRedBetweenTwoPassesIsToldAgain(t *testing.T) {
 	}
 	if got, _ := capturePhase(t, pool); got != phase.Reviewing {
 		t.Fatalf("the issue is in %s, want reviewing", got)
+	}
+}
+
+// The required-checks pass's one read of a pull request already carries GitHub's `mergeable`
+// field, so a head that starts conflicting with its base is caught without a further GitHub call:
+// in awaiting_merge the daemon sends the tree back to implementing exactly as a red CI verdict
+// does, naming the base to merge forward, since GitHub computes no merge ref for a conflicting
+// head and runs no checks on it at all. A read that finds `mergeable` still null - GitHub has not
+// computed it yet - or true moves nothing. The pass must apply the fact and decide even when the
+// read only confirms what is already stored: a conflict can be recorded while the issue is still
+// in testing, reviewing, retro or merging, where nothing moves yet, and the first read after the
+// issue reaches awaiting_merge has to catch it then, with no change in the GitHub answer to key
+// off.
+func TestTheRequiredChecksPassCatchesAHeadThatStartsConflictingWithItsBase(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		state        string
+		stored       record.Mergeability
+		mergeability record.Mergeability
+		want         phase.Phase
+	}{
+		{"conflicting", "false", "", record.MergeabilityConflicting, phase.Implementing},
+		{"not yet computed", "null", "", record.MergeabilityUnknown, phase.AwaitingMerge},
+		{"mergeable", "true", "", record.MergeabilityMergeable, phase.AwaitingMerge},
+		{"conflict already recorded", "false", record.MergeabilityConflicting, record.MergeabilityConflicting, phase.Implementing},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := isolatedOutboxPool(t)
+			seedCapture(t, pool, phase.AwaitingMerge, "retro",
+				record.PhaseRow{Issue: "CAPTURE-1", Role: claim.RoleMerger, Claim: "merge-claim", HandoffCommit: "code", Summary: "READY #86 at code"})
+			if tc.stored != "" {
+				if _, err := pool.Exec(context.Background(), "update pull_requests set mergeability = $1 where issue = 'CAPTURE-1'", string(tc.stored)); err != nil {
+					t.Fatalf("seed the stored mergeability: %v", err)
+				}
+			}
+			w := requiredRuntime(pool, mergeableStandIn(t, tc.state).URL, quietLogger())
+			w.readRequiredChecks(context.Background())
+			got, pr := capturePhase(t, pool)
+			if got != tc.want {
+				t.Fatalf("after the pass the issue is in %s, want %s", got, tc.want)
+			}
+			if pr.Mergeability != tc.mergeability {
+				t.Fatalf("recorded mergeability = %q, want %q", pr.Mergeability, tc.mergeability)
+			}
+			if tc.want != phase.Implementing {
+				return
+			}
+			want := "the head conflicts with main: GitHub runs no checks on it; merge main forward"
+			reasons := noticeReasons(t, pool, "checks-red")
+			if len(reasons) != 1 || !strings.Contains(reasons[0], want) {
+				t.Fatalf("checks-red notices %q, want one saying %q", reasons, want)
+			}
+		})
+	}
+}
+
+// The pull request's mergeability is applied before requiredFor ever runs (required_checks.go's
+// split of pullRequestMergeability from requiredFor), so a later failure reading what the base
+// requires - here the rulesets answer a 502 - never discards the conflict already decoded: the
+// issue still goes back to implementing on the conflict alone, with CONFLICTING recorded, even
+// though the required set is never read that pass.
+func TestAFailedRulesetsReadNeverDiscardsAnAlreadyDecodedConflict(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	seedCapture(t, pool, phase.AwaitingMerge, "retro",
+		record.PhaseRow{Issue: "CAPTURE-1", Role: claim.RoleMerger, Claim: "merge-claim", HandoffCommit: "code", Summary: "READY #86 at code"})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer outbox-token" {
+			http.Error(w, `{"message":"Bad credentials"}`, http.StatusUnauthorized)
+			return
+		}
+		switch r.URL.Path {
+		case "/repos/acme/widgets/pulls/86":
+			w.Write([]byte(`{"number":86,"base":{"ref":"main"},"mergeable":false}`))
+		case "/repos/acme/widgets/rules/branches/main":
+			http.Error(w, `{"message":"Server Error"}`, http.StatusBadGateway)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	requiredRuntime(pool, server.URL, quietLogger()).readRequiredChecks(context.Background())
+	got, pr := capturePhase(t, pool)
+	if got != phase.Implementing {
+		t.Fatalf("after the pass the issue is in %s, want implementing: the conflict must withdraw the READY whether or not the rulesets read succeeds", got)
+	}
+	if pr.Mergeability != record.MergeabilityConflicting {
+		t.Fatalf("recorded mergeability = %q, want CONFLICTING", pr.Mergeability)
+	}
+	want := "the head conflicts with main: GitHub runs no checks on it; merge main forward"
+	reasons := noticeReasons(t, pool, "checks-red")
+	if len(reasons) != 1 || !strings.Contains(reasons[0], want) {
+		t.Fatalf("checks-red notices %q, want one saying %q", reasons, want)
 	}
 }

@@ -339,6 +339,10 @@ line), the full definition of a proof, what the tester verifies, and the simplif
 The merger writes no handoff and pushes nothing, so this gate does not apply to it
 (`packages/daemon/internal/prompts/roles/merger.md`).
 
+A planner picking up after the issue moves back from implementing starts fresh on the remote
+tip — `jj -R "$LEGION_WORKSPACE" new legion/<KEY>@origin` — since the implementer's unpushed
+commits are no longer in the chain (*Every role pushes its own commits*, below).
+
 Write the phase-specific handoff: call the `legion` tool with `op: "handoff_write"`, `phase: "<p>"`,
 and `data`: a JSON object of the phase-specific fields only. It runs `legion handoff write` in
 `$LEGION_WORKSPACE` and returns its output.
@@ -379,11 +383,16 @@ cd -- "$LEGION_WORKSPACE" && legion push
 
 It pushes `@-` through the provisioned credential helper, which authenticates as your role's App
 (`appauth.AppRoleFor` in `packages/daemon/internal/appauth/identity.go`). Your system prompt says
-which pushes skip CI and which commit-message keywords it refuses. Its ancestry check refuses
+which pushes skip CI and which commit-message keywords it refuses. While the head commit carries
+`skip-checks: true`, a pull-request body edit alone starts no GitHub workflow run, so a check that
+re-judges the body re-runs on that head only after a later push; on a code head the same edit
+re-runs it at once. Its ancestry check refuses
 unless `@-` descends from `legion/<KEY>@origin` (or the branch is not on GitHub yet): every issue
 workspace shares one clone, so another role's push moves `legion/<KEY>@origin` here at once, and
 a push that did not descend from it would move the remote branch sideways onto your commit and
-drop theirs.
+drop theirs. A handoff commit never sits on an implementer's unpushed chain: when the issue moves
+back to planning, the implementer's unpushed commits stay off the bookmark until the implementer
+returns, and the planner writes its handoff on the remote tip.
 
 Before any rewrite of a commit you already pushed — a `jj squash --into` one, or any other
 rewrite — read *Rewriting pushed commits* in
@@ -392,7 +401,7 @@ is built on that commit and records the pushed tip `legion push` reads, the only
 push lets the remote branch move off its current tip.
 
 Before the push, check ancestry and identity as above: the chain carries every earlier phase's
-commits, and pushing them with yours is expected. A refusal, and a push the remote rejects, is a
+pushed commits, and pushing them with yours is expected. A refusal, and a push the remote rejects, is a
 report to the architect with the output, never a force-push. The merger makes no commit and
 pushes nothing.
 

@@ -16,6 +16,7 @@ import { DEFAULT_MARGIN_WIDTH, Margin } from "./features/margin/Margin";
 import { MarginProvider } from "./features/margin/margin-context";
 import { RefPreviewHost } from "./features/refs/RefPreview";
 import {
+  AGENT_ARTIFACT_PATH,
   AGENT_LIVE_PATH,
   buildProjectPath,
   parseIssuePath,
@@ -91,6 +92,12 @@ const AgentsPage = lazy(() =>
 const AgentConversationPage = lazy(() =>
   import("./features/agent-view/AgentConversationPage").then((module) => ({
     default: module.AgentConversationPage,
+  }))
+);
+
+const AgentArtifactPage = lazy(() =>
+  import("./features/artifacts/AgentArtifactPage").then((module) => ({
+    default: module.AgentArtifactPage,
   }))
 );
 
@@ -665,6 +672,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
                 <Route element={<BroadcastsPage />} path="/agents/broadcasts" />
                 <Route element={<BroadcastPage />} path="/agents/broadcasts/:id" />
                 <Route element={<AgentConversationPage />} path={AGENT_LIVE_PATH} />
+                <Route element={<AgentArtifactPage />} path={AGENT_ARTIFACT_PATH} />
                 <Route element={<IssuePage />} path="/issues/:key/*" />
                 <Route element={<ProjectPage />} path="/projects/:key" />
                 <Route element={<ProjectPage />} path="/projects/:key/architecture" />

@@ -370,19 +370,36 @@ export class DispatchClient {
     project: string,
     input: CreateArtifactInput
   ): Promise<ArtifactUploadResponse> {
-    const artifactPath = ["api", "v1", "projects", project, "artifacts"];
-    if ("content" in input) return this.#json("POST", artifactPath, input);
-
-    const form = new FormData();
-    form.set("name", input.name);
-    if (input.summary !== undefined) form.set("summary", input.summary);
-    if (input.actor !== undefined) form.set("actor", JSON.stringify(input.actor));
-    form.set("file", input.file, input.name);
-    return this.#form("POST", artifactPath, form);
+    return this.#upload(["api", "v1", "projects", project, "artifacts"], input);
   }
 
   async getProjectArtifact(project: string, slug: string): Promise<Artifact> {
     return this.#json("GET", ["api", "v1", "projects", project, "artifacts", slug]);
+  }
+
+  /** `POST /api/v1/agents/{session_id}/artifacts`: an upload owned by an agent's conversation on
+   *  the Agents page, addressed `dispatch://agent/<session id>/artifact/<slug>`. That owner takes
+   *  files and pictures only; Dispatch refuses a Markdown document there. */
+  async agentArtifact(
+    sessionId: string,
+    input: CreateArtifactInput
+  ): Promise<ArtifactUploadResponse> {
+    return this.#upload(["api", "v1", "agents", sessionId, "artifacts"], input);
+  }
+
+  async getAgentArtifact(sessionId: string, slug: string): Promise<Artifact> {
+    return this.#json("GET", ["api", "v1", "agents", sessionId, "artifacts", slug]);
+  }
+
+  async getIssueArtifact(issue: string, slug: string): Promise<Artifact> {
+    return this.#json("GET", [
+      "api",
+      "v1",
+      "issues",
+      await this.#resolveIssue(issue),
+      "artifacts",
+      slug,
+    ]);
   }
 
   async search(query: string, options: SearchOptions = {}): Promise<SearchResponse> {
@@ -664,15 +681,10 @@ export class DispatchClient {
   ): Promise<
     ArtifactUploadResponse & { readonly artifact: Artifact & { readonly issue_key: string } }
   > {
-    const artifactPath = ["api", "v1", "issues", await this.#resolveIssue(issue), "artifacts"];
-    if ("content" in input) return this.#json("POST", artifactPath, input);
-
-    const form = new FormData();
-    form.set("name", input.name);
-    if (input.summary !== undefined) form.set("summary", input.summary);
-    if (input.actor !== undefined) form.set("actor", JSON.stringify(input.actor));
-    form.set("file", input.file, input.name);
-    return this.#form("POST", artifactPath, form);
+    return this.#upload(
+      ["api", "v1", "issues", await this.#resolveIssue(issue), "artifacts"],
+      input
+    );
   }
 
   async getArtifact(id: string): Promise<Artifact> {
@@ -820,6 +832,17 @@ export class DispatchClient {
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
     return { status: response.status, payload: await this.#response<T>(method, url, response) };
+  }
+
+  /** An upload to an owner's artifact route: inline content as JSON, a file as multipart. */
+  async #upload<T>(path: readonly string[], input: CreateArtifactInput): Promise<T> {
+    if ("content" in input) return this.#json("POST", path, input);
+    const form = new FormData();
+    form.set("name", input.name);
+    if (input.summary !== undefined) form.set("summary", input.summary);
+    if (input.actor !== undefined) form.set("actor", JSON.stringify(input.actor));
+    form.set("file", input.file, input.name);
+    return this.#form("POST", path, form);
   }
 
   async #form<T>(method: string, path: readonly string[], body: FormData): Promise<T> {

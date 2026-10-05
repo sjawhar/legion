@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test"
 import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
+import { shownPictures } from "@legion/envoy-client/dispatch-picture-tools"
 import type { EnvoyClient } from "@legion/envoy-client/transport"
 import {
   type ChannelNotifier,
@@ -62,6 +63,8 @@ test("follows the session id its Claude process hands off: new subject first, th
   )
 
   try {
+    const picture = "dispatch://LEGION-1/artifact/shot-png@v1"
+    shownPictures("ses_old").add(picture)
     calls.length = 0
     await writeSessionHandoff(handoff, "ses_new")
     const newRoleFile = roleStateFile(stateDirectory, "ses_new")
@@ -92,6 +95,9 @@ test("follows the session id its Claude process hands off: new subject first, th
     // Whatever followed is a later tick doing nothing but re-registering.
     expect(handoffCalls.slice(6).filter((call) => call !== reregister)).toEqual([])
     expect(identity.id).toBe("ses_new")
+    // `/clear` empties the conversation: the new id was shown nothing, and the old id is forgotten.
+    expect(shownPictures("ses_new").has(picture)).toBe(false)
+    expect(shownPictures("ses_old").size).toBe(0)
     expect(await readdir(join(stateDirectory, "roles"))).toEqual(["ses_new.json"])
     expect(
       await executeEnvoyTool(

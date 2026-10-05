@@ -103,12 +103,12 @@ What each part is for:
 - **`project`** is the Dispatch project key, and it must also be a key of `projects`, which maps
   each Dispatch project the daemon runs to its GitHub repository. A project may name a
   `merge_queue_role`, a role that receives a copy of every `READY`, and a notice withdrawing it
-  when the head's own CI turns red before the merge. It may also list `review_workflows`, the
-  paths (`.github/workflows/<name>.yml`, each once) of the workflows its base branch requires that
-  review the code and fail on their own findings, such as a review bot's. A red only they make, in
-  testing or review, goes to the reviewer, who adjudicates their findings and re-runs them, rather
-  than back to the implementer; any other red required workflow sends the work back, as a red
-  required check does. None is declared unless you list it.
+  when the head's own CI turns red before the merge, or the head starts conflicting with its base.
+  It may also list `review_workflows`, the paths (`.github/workflows/<name>.yml`, each once) of the
+  workflows its base branch requires that review the code and fail on their own findings, such as a
+  review bot's. A red only they make, in testing or review, goes to the reviewer, who adjudicates
+  their findings and re-runs them, rather than back to the implementer; any other red required
+  workflow sends the work back, as a red required check does. None is declared unless you list it.
 - **`bind`**, **`daemon_url`**, **`envoy_url`**, **`dispatch_url`** and every **`nats_urls`** entry
   are handed to pods, so none of them may be a loopback or unspecified address.
 - **`github_apps`**: each App takes exactly one of `private_key` (the PEM itself),

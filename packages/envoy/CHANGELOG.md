@@ -4,6 +4,7 @@
 
 ### Added
 
+- An agent's conversation owns the files and images sent in it, a third artifact owner beside an issue and a project: `POST /api/v1/agents/{session_id}/artifacts` takes a multipart upload with an issue upload's caps, errors and file-store write, and `.../artifacts/{slug}` and `.../artifacts/{slug}/versions/{n}` read one and its bytes; there is no list route. Such an artifact carries `session_id` (null on every other artifact), `ref_key` `agent/<session_id>/<slug>`, and is addressed `dispatch://agent/<session_id>/artifact/<slug>[@vN]`, which the reference graph indexes inside a picture's `![name](…)` as anywhere else, as it does the dashboard page `/agents/<session_id>/artifacts/<slug>[?v=N]`. It holds files and images only: a markdown document is `400 ARTIFACT_INPUT`, its file takes no comment, ask or subscriber (`400 ARTIFACT_AGENT_OWNED`), its upload appends no event, and a session id holding `/`, `?`, `#`, whitespace or a control character is `400 INVALID_SESSION_ID`. Every file or image version is now served with `Cache-Control: private, max-age=31536000, immutable`, since its bytes never change; a document version is not. Migration `0071` adds the column, the one-owner check and the partial index `artifacts_session_id`, which the upload's lookups of a conversation's artifact by name and by slug read, and turns `ref_key` into a trigger-filled column without rewriting the table; its census answers `0` (LEGION-541).
 - `POST /api/v1/issues`, `POST /api/v1/issues/{key}/asks` and `POST /api/v1/artifacts/{id}/asks`
   now return `advice.suggestions`: the three fused search hits (sjawhar/legion#1764) most like
   what was just filed, and, for an ask, any already-answered ask that settles the same question,
@@ -102,6 +103,22 @@
 
 ### Changed
 
+- An upload's kind is read from its bytes, never from the type its client declares: it is an
+  `image` only when `http.DetectContentType` reads its bytes as a PNG, JPEG, GIF or WebP, the
+  pictures a model is shown, and its `mime` is then the type its bytes are, whatever was declared
+  (a JPEG declared `image/png` is stored and served as `image/jpeg`; a PNG declared
+  `application/octet-stream` is an image). Any other upload but a `text/markdown` document is a
+  `file` under its declared type, an SVG among them, so a client can no longer store arbitrary
+  bytes as an image. This holds for an issue's, a project's and an agent's conversation's uploads
+  alike. Stored artifacts keep their kind, so a new version of an `image` whose bytes are no
+  picture is `400 ARTIFACT_KIND_MISMATCH` (LEGION-541).
+- A new upload's slug keeps only the ASCII letters and digits of its lowercased name, each other
+  run one dash (`café.png` is `caf-png`, `スクリーンショット.png` is `png`, a name with neither is
+  `artifact`), for an issue's, a project's and an agent's conversation's uploads alike: every
+  grammar that reads a slug back (the server's text references, the dashboard's routes, 0009's
+  cleanup) is `[a-z0-9]+(-[a-z0-9]+)*`, so a slug holding another letter was stored but named
+  nothing, and a picture pasted under such a name showed as a broken image (LEGION-541). Existing
+  slugs are kept.
 - `GET /api/v1/search` ranks each kind of content (issues, documents, asks, comments, messages) on
   a list of its own and merges the lists by reciprocal rank fusion (each hit scores 1/(60 + its
   position in its list), which is now its `rank`), so a page takes each kind's best in turn where
@@ -319,10 +336,10 @@
   event's and an anchor refresh's payload, a suggestion's project, a document write's owner lock,
   and search's owner project (a nil dereference there, not a scan error) answer an empty project
   instead of `cannot scan NULL into *string`; the reference graph gives such an artifact, and an
-  item on it, no address rather than `dispatch:///artifact/<slug>`. No row on this schema has one
-  (`project_key` is `not null`); a later migration gives an artifact a third owner with none
-  (LEGION-541), and this is what a revert of it, or an instance still serving during its rollout,
-  reads those rows with.
+  item on it, no address rather than `dispatch:///artifact/<slug>`. Landed on `main` ahead of
+  migration `0071_agent_artifacts`, which gives an artifact a third owner with no project
+  (LEGION-541), so a binary from before that migration, serving beside it during its rollout or
+  after a revert, reads those rows.
 - A published edit's check of whether a browser's concurrent change removed its text (`lost_ops`, and an accepted suggestion's `lost`) walked the room's live tree without its lock while the room's browsers wrote it, so it could read a keystroke halfway. Every read of a resident room outside a write now reads the room as of one moment under its lock: the replica the room's update observer keeps, brought up to date, or, while the observer or another read holds that replica, a copy as before. A read only tries the replica, so reads never queue behind each other or ahead of a keystroke's observer, but a keystroke can still wait for one read already walking it (about 100 ms on a 524 KiB document). A read through the replica takes about a third of a copy's time (86 ms rather than 283 ms for a 524 KiB document's tree). A tree a read returns shares nothing with the document it was read from, so editing it changes no later read (LEGION-499).
 - A deploy with someone on the Dispatch dashboard no longer spends the whole shutdown waiting and
   then leaves the documents it owed unsettled (LEGION-501). An open event stream or agent

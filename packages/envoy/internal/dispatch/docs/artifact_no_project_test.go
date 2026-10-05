@@ -3,62 +3,48 @@ package docs
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
-// LEGION-541 stores an artifact an agent's conversation owns with issue_key and project_key both
-// null and ref_key agent/<session id>/<slug>; a Dispatch reverted past that change still meets such
-// rows. Neither read here can reach one today: lockArtifactOwner serves document writes and
-// settlement, which no write path on main runs on an artifact with no project, and LEGION-541
-// refuses a markdown document on a conversation (ARTIFACT_INPUT), so none of its rows is a document
-// either; and the anchor-refresh payload follows a comment's anchor, which only a document carries.
-// Both read artifacts.project_key into a Go string all the same, so this gives the test's own database
-// (storetest.Open's clone) the schema that change brings and holds both to a row with no project:
-// an issue's document whose project is nulled, and a project document turned into the conversation
-// shape.
+// Migration 0071 stores an artifact an agent's conversation owns with issue_key and project_key both
+// null and ref_key agent/<session id>/<slug>. Neither read here can reach one: lockArtifactOwner
+// serves document writes and settlement, and a conversation holds no document (ARTIFACT_INPUT); the
+// anchor-refresh payload follows a comment's anchor, which only a document carries. Both read
+// artifacts.project_key into a Go string all the same, so both are held to the row as 0071 stores it
+// (the shape a Dispatch from before 0071 meets, sjawhar/legion#1802); a document with its project
+// nulled, the other no-project shape, is one artifacts_one_owner refuses.
 func TestDocumentOwnerReadsServeARowWithNoProject(t *testing.T) {
 	database := storetest.Open(t)
 	ctx := context.Background()
 	issueDocument := createDocument(t, database, "# Notes\n\nThe plan stands.\n")
-	conversationFile := createProjectDocument(t, database, "# Shared\n")
-	for _, statement := range []string{
-		`alter table artifacts alter column project_key drop not null`,
-		`alter table artifacts alter column ref_key drop expression`,
-	} {
-		if _, err := database.Pool.Exec(ctx, statement); err != nil {
-			t.Fatalf("simulate artifacts with no project (%s): %v", statement, err)
-		}
+	var pgErr *pgconn.PgError
+	if _, err := database.Pool.Exec(ctx, `update artifacts set project_key = null where id = $1`, issueDocument); !errors.As(err, &pgErr) || pgErr.ConstraintName != "artifacts_one_owner" {
+		t.Fatalf("nulling an issue document's project = %v, want artifacts_one_owner to refuse it", err)
 	}
-	if _, err := database.Pool.Exec(ctx, `update artifacts set project_key = null where id = $1`, issueDocument); err != nil {
-		t.Fatalf("null the issue document's project: %v", err)
+	const session = "session-0123456789abcdef"
+	var conversationFile string
+	if err := database.Pool.QueryRow(ctx, `
+		insert into artifacts (session_id, slug, name, kind, created_by)
+		values ($1, 'photo-png', 'document.md', 'image', jsonb_build_object('kind', 'session', 'id', $1::text))
+		returning id::text
+	`, session).Scan(&conversationFile); err != nil {
+		t.Fatalf("store a conversation's file: %v", err)
+	}
+	const commentID = "00000000-0000-4000-8000-000000000542"
+	anchor, err := json.Marshal(model.Anchor{ArtifactID: conversationFile, MarkID: commentID, Version: 1, Quote: "plan"})
+	if err != nil {
+		t.Fatalf("encode anchor: %v", err)
 	}
 	if _, err := database.Pool.Exec(ctx, `
-		update artifacts set project_key = null, ref_key = 'agent/session-0123456789abcdef/' || slug where id = $1
-	`, conversationFile); err != nil {
-		t.Fatalf("give the project document the conversation shape: %v", err)
-	}
-	commentIDs := map[string]string{
-		issueDocument:    "00000000-0000-4000-8000-000000000541",
-		conversationFile: "00000000-0000-4000-8000-000000000542",
-	}
-	for artifactID, commentID := range commentIDs {
-		anchor, err := json.Marshal(model.Anchor{ArtifactID: artifactID, MarkID: commentID, Version: 1, Quote: "plan"})
-		if err != nil {
-			t.Fatalf("encode anchor: %v", err)
-		}
-		issueKey, ownerArtifact := new("DOC-1"), (*string)(nil)
-		if artifactID == conversationFile {
-			issueKey, ownerArtifact = nil, &artifactID
-		}
-		if _, err := database.Pool.Exec(ctx, `
-			insert into comments (id, issue_key, artifact_id, author, body, anchor)
-			values ($1, $2, $3, '{"kind":"user","id":"alice"}', 'Anchored comment', $4)
-		`, commentID, issueKey, ownerArtifact, anchor); err != nil {
-			t.Fatalf("insert anchored comment: %v", err)
-		}
+		insert into comments (id, artifact_id, author, body, anchor)
+		values ($1, $2, '{"kind":"user","id":"alice"}', 'Anchored comment', $3)
+	`, commentID, conversationFile, anchor); err != nil {
+		t.Fatalf("insert anchored comment: %v", err)
 	}
 
 	tx, err := database.Pool.Begin(ctx)
@@ -66,24 +52,18 @@ func TestDocumentOwnerReadsServeARowWithNoProject(t *testing.T) {
 		t.Fatalf("begin: %v", err)
 	}
 	defer tx.Rollback(ctx)
-	for artifactID, wantIssue := range map[string]bool{issueDocument: true, conversationFile: false} {
-		owner, open, err := lockArtifactOwner(ctx, tx, artifactID)
-		if err != nil {
-			t.Errorf("lockArtifactOwner(%s): %v", artifactID, err)
-			continue
-		}
-		if owner.Project != "" || (owner.IssueKey != nil) != wantIssue || !open {
-			t.Errorf("lockArtifactOwner(%s) = %#v open %t, want no project, issue owned %t, open", artifactID, owner, open, wantIssue)
-		}
+	owner, open, err := lockArtifactOwner(ctx, tx, conversationFile)
+	if err != nil {
+		t.Fatalf("lockArtifactOwner: %v", err)
 	}
-	for artifactID, commentID := range commentIDs {
-		payload, err := loadAnchorRefreshedCommentPayload(ctx, tx, commentID)
-		if err != nil {
-			t.Errorf("loadAnchorRefreshedCommentPayload on %s: %v", artifactID, err)
-			continue
-		}
-		if payload.ProjectKey != "" || payload.ArtifactName != "document.md" || payload.ID != commentID {
-			t.Errorf("loadAnchorRefreshedCommentPayload on %s = project %q name %q comment %q, want no project", artifactID, payload.ProjectKey, payload.ArtifactName, payload.ID)
-		}
+	if owner.Project != "" || owner.IssueKey != nil || !open {
+		t.Errorf("lockArtifactOwner = %#v open %t, want no project, no issue, open", owner, open)
+	}
+	payload, err := loadAnchorRefreshedCommentPayload(ctx, tx, commentID)
+	if err != nil {
+		t.Fatalf("loadAnchorRefreshedCommentPayload: %v", err)
+	}
+	if payload.ProjectKey != "" || payload.ArtifactName != "document.md" || payload.ID != commentID {
+		t.Errorf("loadAnchorRefreshedCommentPayload = project %q name %q comment %q, want no project", payload.ProjectKey, payload.ArtifactName, payload.ID)
 	}
 }
