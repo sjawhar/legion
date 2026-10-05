@@ -170,6 +170,20 @@ and request approval again as this section says. Later waves, re-scoping open ch
 same Acceptance, and integration-failure children need no spec edit and no new approval, and a
 child issue's spec is never gated: the root approval covers the tree.
 
+**A decision block for a read no pod can make.** An acceptance criterion sometimes needs
+evidence from a production or external system before a human can approve it: a measurement, a
+current count, a stored record. Check first whether the evidence is already reachable through a
+credential this tree's own pods carry — the model route every pod already has, and any further
+identity the operator's deployment configuration grants pods (read the pod's own environment,
+for example `AWS_CONFIG_FILE` or `AGENT_SECRETS_URL`, rather than assuming there is none; a
+credential can exist without any skill having told you so). When the evidence genuinely is not
+reachable, do not have a different running session perform the read on this tree's behalf and
+fold the result into the spec as if it were routine: write the missing capability as its own
+decision block — which external system, which read or write, why the spec needs it — addressed
+to the human, in the same spirit as the implementer reports a production-check gap (section 6) and leave it
+open until the human resolves it. A workaround substituted for that record only hides the gap
+from the next tree that hits it.
+
 ## 2. Children in flight
 
 Release only the next useful wave. A release is an explicit lifecycle write:
