@@ -11,6 +11,19 @@
   shown, and `dispatch_doc_read` shows it again, because every request carries the session's
   history and Anthropic refuses one over 32 MB.
 
+## [0.6.5]
+
+### Fixed
+
+- `scripts/build.ts` disables minification entirely (`minify: false`) rather than disabling
+  `whitespace`, `identifiers` and `syntax` individually: the partial-disable form still routed
+  through Bun 1.3.14's minifying code-generation path, which picked a non-deterministic CJS/ESM
+  interop check on repeated builds of this package's module graph and made CI's "Check the
+  committed bundle is fresh" step fail unpredictably on any change to `@legion/contracts`, this
+  package's own source untouched (LEGION-548). Confirmed directly: ten rebuilds of one unmodified
+  checkout, same pinned Bun, same lockfile, disagreed with each other eight times out of ten
+  before the fix, and agreed every time after it.
+
 ## [0.6.4]
 
 ### Added

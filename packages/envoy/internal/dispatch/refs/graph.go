@@ -382,6 +382,10 @@ func artifactRef(issueKey *string, project string, session *string, slug, kind s
 		return "dispatch://agent/" + *session + "/artifact/" + slug
 	}
 	if issueKey == nil {
+		if project == "" {
+			// The row's owner is one a later schema adds (LEGION-541); main names no address for it.
+			return ""
+		}
 		return "dispatch://" + project + "/artifact/" + slug
 	}
 	if primary && kind == "doc" {
@@ -391,12 +395,13 @@ func artifactRef(issueKey *string, project string, session *string, slug, kind s
 }
 
 // itemRef addresses an ask, comment, or message: under its issue, or under the project document
-// that owns it. An issue-less message has no address.
+// that owns it. An issue-less message has no address, nor has an item on an artifact with no
+// project, whose owner is one a later schema adds (LEGION-541).
 func itemRef(kind string, issueKey *string, project, slug, id string) string {
 	if issueKey != nil {
 		return "dispatch://" + *issueKey + "/" + kind + "/" + id
 	}
-	if slug == "" {
+	if slug == "" || project == "" {
 		return ""
 	}
 	return "dispatch://" + project + "/artifact/" + slug + "/" + kind + "/" + id

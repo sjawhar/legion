@@ -250,7 +250,7 @@ func (s *server) runFusedSearch(ctx context.Context, q, project string, limit, o
 		} else {
 			result.Owner = model.SearchOwner{
 				Kind:       *ownerKind,
-				Project:    *ownerProject,
+				Project:    deref(ownerProject),
 				Slug:       *ownerSlug,
 				ArtifactID: *ownerArtifactID,
 				Name:       *ownerName,

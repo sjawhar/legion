@@ -146,7 +146,7 @@ func (s *server) resolveSuggestionProject(ctx context.Context, source suggestion
 	case source.issueKey != "":
 		err = s.deps.Store.Pool.QueryRow(ctx, `select project_key from issues where key = $1`, source.issueKey).Scan(&project)
 	case source.artifactID != "":
-		err = s.deps.Store.Pool.QueryRow(ctx, `select project_key from artifacts where id = $1`, source.artifactID).Scan(&project)
+		err = s.deps.Store.Pool.QueryRow(ctx, `select coalesce(project_key, '') from artifacts where id = $1`, source.artifactID).Scan(&project)
 	}
 	return project, err
 }

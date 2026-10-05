@@ -117,7 +117,8 @@ answer questions or to keep editing. Do not create new commits, run
 (and, for the implementer, pushed) — a code change belongs to whichever phase is active now.
 
 On every start, and especially after revival or re-creation, read the issue and then the
-committed predecessor handoffs in lifecycle order from `$LEGION_WORKSPACE/.legion/`:
+committed predecessor handoffs in lifecycle order from
+`$LEGION_WORKSPACE/.legion/<issue>/`:
 
 1. `architect.json`
 2. `plan.json`
@@ -131,11 +132,11 @@ untouched and reach the next worker. The `legion` tool's `handoff_read` returns 
 stands in the workspace.
 Write the phase-specific fields the next phase and the architect need, consistent with what
 predecessor phases already wrote. The durable copy lives in
-`$LEGION_WORKSPACE/.legion/<phase>.json`. If a committed handoff conflicts with memory or a prior
+`$LEGION_WORKSPACE/.legion/<issue>/<phase>.json`. If a committed handoff conflicts with memory or a prior
 transcript, the committed file wins: it is the copy that survived.
 
 If your system prompt begins with `Your workspace was recreated…`, read
-`.legion/workspace-recovered.json`, then your phase's committed handoff, and reconcile before any
+`.legion/<issue>/workspace-recovered.json`, then your phase's committed handoff, and reconcile before any
 new work.
 
 ## jj Safety Rules
@@ -272,7 +273,7 @@ legion gh -- pr comment <pr-number> \
 
 ## Planner artifact
 
-The plan lives in `.legion/plan.json` and the issue's `plan.md` document, never in the issue's
+The plan lives in `.legion/<issue>/plan.json` and the issue's `plan.md` document, never in the issue's
 primary document, which is its spec; never commit a plan or spec file to the repository.
 No `docs/plans/*`, `docs/superpowers/plans/*`, or spec markdown goes into the pull request: plan
 and spec content goes into the issue, never into a PR (the root `AGENTS.md`
@@ -281,7 +282,7 @@ to a file" is satisfied by the handoff write in the completion gate below; the p
 commit is `plan: record handoff`.
 
 A plan that departs from the spec's design records the departure in `plan.md` and in the required
-`.legion/plan.json` `specDepartures`: `[]` means no departure; otherwise each bounded record names
+`.legion/<issue>/plan.json` `specDepartures`: `[]` means no departure; otherwise each bounded record names
 the spec, plan, evidence and outcome. The planner's role prompt defines that record. The planner
 never edits the spec. Whether the spec changes is the architect's decision
 (`skill://legion-architect`, section 1), and the reviewer reads the plan beside the spec.
@@ -344,7 +345,7 @@ and `data`: a JSON object of the phase-specific fields only. It runs `legion han
 
 A handoff built from the one already on disk (a test handoff that accumulates review rounds can
 pass 128 KiB) can instead be piped from bash, so you never re-emit the whole payload:
-`cd -- "$LEGION_WORKSPACE" && bun -e 'const h = await Bun.file(".legion/<phase>.json").json(); delete h.schemaVersion; delete h.phase; delete h.completed; <your edit to h>; console.log(JSON.stringify(h))' | legion handoff write --phase <phase>`.
+`cd -- "$LEGION_WORKSPACE" && bun -e 'const h = await Bun.file(".legion/<issue>/<phase>.json").json(); delete h.schemaVersion; delete h.phase; delete h.completed; <your edit to h>; console.log(JSON.stringify(h))' | legion handoff write --phase <phase>`.
 The program is single-quoted, so strings in your edit take double quotes. It is `bun` because the
 worker image a pod runs ships `bun` and not `jq`, and a devbox pane has the `bun` Legion builds
 with. With `--data` omitted, `legion handoff write` reads the JSON object from stdin. The CLI adds
@@ -359,14 +360,14 @@ either phase, is an object of six non-empty strings: `criterion` (the acceptance
 Then verify the durable artifact exists:
 
 ```bash
-test -f "$LEGION_WORKSPACE/.legion/<phase>.json"
+test -f "$LEGION_WORKSPACE/.legion/<issue>/<phase>.json"
 ```
 
 Then commit that exact handoff file onto the issue branch:
 
 ```bash
 cd -- "$LEGION_WORKSPACE" && \
-  jj -R "$LEGION_WORKSPACE" split -m "<phase>: record handoff" .legion/<phase>.json
+  jj -R "$LEGION_WORKSPACE" split -m "<phase>: record handoff" .legion/<issue>/<phase>.json
 ```
 
 **Every role pushes its own commits.** After the handoff commit — and, for the tester, the red
@@ -400,8 +401,8 @@ succeed. This is the committed copy the next phase reads after revival. No phase
 `.legion/`: the reviewer approves a head that carries it. The daemon strips any `.legion/` still on
 main from the next issue's branch before any of its roles start (dispatch://LEGION-565), so that
 tree's own merge carries the removal onto the default branch; no operator sweep follows. Retro and
-the post-merge production check write no `.legion/<phase>.json`, commit no handoff, and report with
-`handoff_complete` alone (below).
+the post-merge production check write no `.legion/<issue>/<phase>.json`, commit no handoff, and
+report with `handoff_complete` alone (below).
 
 ## Completion: report to the architect, then stay
 
