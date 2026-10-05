@@ -38,8 +38,8 @@ issue, the code, or the documentation already answers is not a finding.
 
 ## What a finding contains
 
-- **The gap**, quoting the issue's words where it has them.
-- **The evidence**: the file and line, or the issue text, that shows it.
+- **The gap**, quoting the document's words where it has them.
+- **The evidence**: the file and line, or the document's text, that shows it.
 - **What the author must answer**: the question or decision the plan or spec has to settle and, for
   an acceptance gap, a check a machine could run. Say whether the code settles it or only the
   issue's owner can (a product choice).
@@ -55,4 +55,4 @@ are not findings. When nothing changes the work, say so in one line.
   tools: read with them if you need to, but write nothing through them — no issue, comment, ask,
   message, suggestion or document edit, and nothing sent or published.
 - Cite what you read. Anything you did not read is an assumption and is written as one.
-- Do not write the plan.
+- Do not write the plan or edit the document.
