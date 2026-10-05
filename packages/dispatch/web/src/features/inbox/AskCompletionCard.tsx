@@ -21,6 +21,7 @@ import { MarkdownBody } from "../refs/MarkdownBody";
 import { buildIssuePath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 import { AskAnchorHeader } from "./AskAnchorLink";
+import { AskApprovalLink } from "./AskApprovalLink";
 import { AskOptionList } from "./AskOptionList";
 
 export function AskEditHistory({ ask, edits }: { ask: Ask; edits: AskEdit[] }): ReactNode {
@@ -92,11 +93,13 @@ export function OrphanedAnchorNotice({
 function AnsweredAsk({
   artifactSlug,
   ask,
+  documentLink,
   edits,
   frame,
 }: {
   artifactSlug: string | undefined;
   ask: Ask;
+  documentLink: boolean;
   edits: AskEdit[];
   frame: AskFrame;
 }): ReactNode {
@@ -120,6 +123,11 @@ function AnsweredAsk({
         </div>
       )}
       <p className={`mt-1 text-xs ${calloutSuccessTimestampText}`}>{actorLabel(ask.author)}</p>
+      {ask.kind === "approval" && documentLink ? (
+        <p className={`mt-1 text-sm ${linkText} ${linkHoverText}`}>
+          <AskApprovalLink ask={ask} />
+        </p>
+      ) : null}
       <AskEditHistory ask={ask} edits={edits} />
       <AskOptionList options={ask.options} selected={answer?.selected ?? []} />
       {otherText !== null && otherText !== "" ? (
@@ -150,10 +158,12 @@ function AnsweredAsk({
 
 function ResolvedAsk({
   ask,
+  documentLink,
   edits,
   frame,
 }: {
   ask: Ask & { resolution: AskResolution };
+  documentLink: boolean;
   edits: AskEdit[];
   frame: AskFrame;
 }): ReactNode {
@@ -176,6 +186,11 @@ function ResolvedAsk({
         {resolution.kind === "retracted" ? "Retracted" : "Resolved"}
       </span>
       <p className={`mt-1 text-xs ${textMutedOnSurface}`}>{actorLabel(ask.author)}</p>
+      {ask.kind === "approval" && documentLink ? (
+        <p className={`mt-1 text-sm ${linkText} ${linkHoverText}`}>
+          <AskApprovalLink ask={ask} />
+        </p>
+      ) : null}
       <AskOptionList options={ask.options} selected={[]} />
       <AskEditHistory ask={ask} edits={edits} />
       <p className={`mt-2 text-xs ${textMutedOnSurface}`}>
@@ -192,6 +207,9 @@ export type AskFrame = "card" | "block";
 interface AskCompletionCardProps {
   artifactSlug: string | undefined;
   ask: Ask;
+  /** Whether an approval ask's completed record also links its document and version; mirrors
+   *  `AskCardProps.documentLink`. */
+  documentLink?: boolean;
   edits: AskEdit[];
   frame?: AskFrame;
 }
@@ -199,6 +217,7 @@ interface AskCompletionCardProps {
 export function AskCompletionCard({
   artifactSlug,
   ask,
+  documentLink = true,
   edits,
   frame = "card",
 }: AskCompletionCardProps): ReactNode {
@@ -206,12 +225,20 @@ export function AskCompletionCard({
     if (ask.resolution === undefined) {
       throw new Error("resolved ask is missing its resolution");
     }
-    return <ResolvedAsk ask={{ ...ask, resolution: ask.resolution }} edits={edits} frame={frame} />;
+    return (
+      <ResolvedAsk
+        ask={{ ...ask, resolution: ask.resolution }}
+        documentLink={documentLink}
+        edits={edits}
+        frame={frame}
+      />
+    );
   }
   return (
     <AnsweredAsk
       artifactSlug={artifactSlug}
       ask={{ ...ask, answer: ask.answer }}
+      documentLink={documentLink}
       edits={edits}
       frame={frame}
     />

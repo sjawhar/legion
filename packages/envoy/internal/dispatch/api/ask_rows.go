@@ -80,14 +80,28 @@ const askReadColumns = askRowColumns + `, lr.author, lr.created_at, ` + waitingO
 
 const askReadFrom = askRowFrom + lastReplyJoin
 
+// nullableAskArtifactRef holds the nullable columns of one optional document an ask names - a
+// quoted anchor's or an approval request's artifact_id, both resolved through a left join that
+// may find no row. artifact is nil exactly when the join found none.
+type nullableAskArtifactRef struct {
+	project, slug, name *string
+	primary             *bool
+}
+
+func (ref nullableAskArtifactRef) artifact() *model.AskAnchorArtifact {
+	if ref.project == nil {
+		return nil
+	}
+	return &model.AskAnchorArtifact{
+		Project: *ref.project, Slug: *ref.slug, Name: *ref.name, Primary: *ref.primary,
+	}
+}
+
 // scanAskRow decodes one askRowColumns row; extra receives the columns after them.
 func scanAskRow(row pgx.Row, extra ...any) (model.Ask, error) {
 	var blockArtifactID, blockArtifactSlug *string
 	var blockArtifactPrimary *bool
-	var anchorProject, anchorSlug, anchorName *string
-	var anchorPrimary *bool
-	var approvalProject, approvalSlug, approvalName *string
-	var approvalPrimary *bool
+	var anchor, approval nullableAskArtifactRef
 	ask, err := docs.ScanAsk(
 		row,
 		append(
@@ -95,14 +109,14 @@ func scanAskRow(row pgx.Row, extra ...any) (model.Ask, error) {
 				&blockArtifactID,
 				&blockArtifactSlug,
 				&blockArtifactPrimary,
-				&anchorProject,
-				&anchorSlug,
-				&anchorName,
-				&anchorPrimary,
-				&approvalProject,
-				&approvalSlug,
-				&approvalName,
-				&approvalPrimary,
+				&anchor.project,
+				&anchor.slug,
+				&anchor.name,
+				&anchor.primary,
+				&approval.project,
+				&approval.slug,
+				&approval.name,
+				&approval.primary,
 			},
 			extra...,
 		)...,
@@ -115,22 +129,8 @@ func scanAskRow(row pgx.Row, extra ...any) (model.Ask, error) {
 			ID: *blockArtifactID, Slug: *blockArtifactSlug, Primary: *blockArtifactPrimary,
 		}
 	}
-	if anchorProject != nil {
-		ask.AnchorArtifact = &model.AskAnchorArtifact{
-			Project: *anchorProject,
-			Slug:    *anchorSlug,
-			Name:    *anchorName,
-			Primary: *anchorPrimary,
-		}
-	}
-	if approvalProject != nil {
-		ask.ApprovalArtifact = &model.AskAnchorArtifact{
-			Project: *approvalProject,
-			Slug:    *approvalSlug,
-			Name:    *approvalName,
-			Primary: *approvalPrimary,
-		}
-	}
+	ask.AnchorArtifact = anchor.artifact()
+	ask.ApprovalArtifact = approval.artifact()
 	return ask, nil
 }
 

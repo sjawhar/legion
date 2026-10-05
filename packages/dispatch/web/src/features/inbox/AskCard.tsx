@@ -397,6 +397,7 @@ export function AskCard({
         <AskCompletionCard
           artifactSlug={artifactSlug}
           ask={completed}
+          documentLink={documentLink}
           edits={edits}
           frame={frame}
         />
