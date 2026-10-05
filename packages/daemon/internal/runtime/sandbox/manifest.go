@@ -598,12 +598,16 @@ func (r *Runtime) initEnvironment(l launch) []corev1.EnvVar {
 	return append(env, xdgEnvironment()...)
 }
 
-// InitWaitSeconds bounds a wait on another pod's workspace-init: ceil(boot timeout) × (intervals
-// + 1), the whole time the daemon tolerates a pod that is alive but unregistered, plus one
-// interval, so no wait gives up while the daemon would still allow the pod it waits on
-// (KubernetesRuntime.workspaceInitLockWaitSeconds, runtime-kubernetes.ts). Exported so the
-// daemon's registration-deadline grace (internal/daemon/kubernetes.go's registrationGrace) is
-// sized the same way, from the same configured boot timeout and interval count.
+// InitWaitSeconds bounds workspace-init provision's own wait to acquire another pod's lock on the
+// shared clone (`flock --timeout`, LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS): ceil(boot timeout) ×
+// (intervals + 1). A pod holding that lock is already past its own workspace-fetch clone — the
+// lock is provision's alone, taken after fetch finishes — so what remains of its own registration
+// deadline is this same budget, one interval of headroom included, and this wait outlasts it.
+// awaitTreeInitialized (relaunch.go) and the daemon's registration-deadline grace
+// (internal/daemon/kubernetes.go's registrationGrace) both need a wider bound than this alone,
+// since each waits out (or tolerates) a sibling pod's whole init phase, its own workspace-fetch
+// clone included: both add workspace.FetchTimeout on top of this same value, rather than using it
+// by itself.
 func InitWaitSeconds(bootTimeout time.Duration, intervals int) time.Duration {
 	return time.Duration(math.Ceil(bootTimeout.Seconds())) * time.Duration(intervals+1) * time.Second
 }

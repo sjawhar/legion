@@ -27,6 +27,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/stream"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
+	"github.com/sjawhar/legion/daemon/internal/workspace"
 	corev1 "k8s.io/api/core/v1"
 )
 
@@ -452,6 +453,12 @@ func TestEveryDurationKeyReachesTheRuntimeOptionThatTakesIt(t *testing.T) {
 	}
 	if opts.BootIntervals != cfg.WorkerBootRegistrationDeadlineIntervals {
 		t.Errorf("sandbox BootIntervals = %d, want %d", opts.BootIntervals, cfg.WorkerBootRegistrationDeadlineIntervals)
+	}
+	if want := workspace.FetchTimeout + sandbox.InitWaitSeconds(cfg.WorkerBootTimeout, cfg.WorkerBootRegistrationDeadlineIntervals); registrationGrace(cfg) != want {
+		t.Errorf("registrationGrace(kubernetes) = %s, want %s", registrationGrace(cfg), want)
+	}
+	if got := registrationGrace(testConfig(t)); got != 0 {
+		t.Errorf("registrationGrace(tmux) = %s, want 0: a tmux pane starts its agent at once, with no init phase to wait out", got)
 	}
 }
 

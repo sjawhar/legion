@@ -328,10 +328,12 @@ func (t implementTokens) Token(ctx context.Context, owner string) (string, error
 }
 
 // registrationGrace is added atop the registration deadline's own Boot×RegistrationIntervals bound
-// for a Kubernetes launch: workspace.FetchTimeout, the fetch's clone's own bound, plus
-// sandbox.InitWaitSeconds (the same ceil(boot timeout) × (intervals + 1) budget
-// LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS is sized by) for whatever time a provisioning pod can
-// still spend waiting on another pod's flock before it even starts its own clone. A pod's init
+// for a Kubernetes launch, covering only the window before the shim's first hello (supervise's
+// helloed re-arms the deadline at Boot×RegistrationIntervals alone from there, since a pod can only
+// dial its hello once both init containers have finished): workspace.FetchTimeout, the fetch's
+// clone's own bound, plus sandbox.InitWaitSeconds (the same ceil(boot timeout) × (intervals + 1)
+// budget LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS is sized by) for whatever time a provisioning pod
+// can still spend waiting on another pod's flock before it even starts its own clone. A pod's init
 // containers (workspace-fetch, workspace-init) are bounded by their own commands — the fetch's
 // stall detector and FetchTimeout, the per-command CommandTimeout, and the lock wait — never by
 // the registration deadline, which starts counting the moment the launch returns and would

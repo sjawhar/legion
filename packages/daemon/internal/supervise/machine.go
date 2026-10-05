@@ -166,12 +166,14 @@ type Timeouts struct {
 	// RegistrationIntervals is how many boot intervals a live process gets to register before it
 	// is retired (worker_boot_registration_deadline_intervals).
 	RegistrationIntervals int
-	// RegistrationGrace is added atop Boot×RegistrationIntervals before the registration deadline
-	// retires a live, unregistered process: zero for a launch whose process starts its agent at
-	// once (a tmux pane), and the Kubernetes runtime's init-container budget for a launch whose
-	// pod runs provisioning before its agent's own container ever starts, so the deadline sized for
-	// watching the agent register never also has to cover the clone and the shared clone's own
-	// setup ahead of it (internal/daemon/kubernetes.go's registrationGrace).
+	// RegistrationGrace is added atop Boot×RegistrationIntervals for the registration deadline
+	// armBoot sets at launch, covering only the window before the shim's first hello: zero for a
+	// launch whose process starts its agent at once (a tmux pane), and the Kubernetes runtime's
+	// init-container budget for a launch whose pod runs provisioning before its agent's own
+	// container ever starts (internal/daemon/kubernetes.go's registrationGrace). The first hello
+	// (helloed) re-arms the deadline at Boot×RegistrationIntervals alone, with no grace: a pod can
+	// only dial it once both init containers have finished, so from there the deadline that
+	// watches for the agent's own registration is the same one a tmux pane always ran under.
 	RegistrationGrace time.Duration
 	// RPC bounds a prompt's acknowledgement and, after it, the wait for the turn it should start
 	// (worker_rpc_timeout_seconds).

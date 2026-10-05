@@ -566,8 +566,16 @@ func observe(m *Machine, ctx context.Context, ev Event) error {
 	}, TimerProbe, m.deps.Timeouts.Probe)
 }
 
+// helloed is the shim's first connection: StateLaunching to StateShimConnected, and the only path
+// where the process is known to hold a running agent process (OMP's own, not whatever the pod ran
+// before it under init), so the registration deadline is re-armed from here at its base
+// Boot×RegistrationIntervals, with no RegistrationGrace: a Kubernetes pod can only dial its hello
+// once both init containers have finished, so the grace that covered them has already done its
+// job, and an Oh My Pi that boots and never registers is retired on the same deadline a tmux pane
+// always was, counted from the moment it said hello rather than from the launch.
 func helloed(m *Machine, ctx context.Context, _ Event) error {
 	m.claim.State = StateShimConnected
+	m.arm(TimerRegistration, m.deps.Timeouts.Boot*time.Duration(m.deps.Timeouts.RegistrationIntervals), "")
 	if err := m.persist(ctx); err != nil {
 		return err
 	}

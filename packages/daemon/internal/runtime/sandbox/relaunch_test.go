@@ -257,6 +257,46 @@ func TestAPodOfATreeRunsOnlyOnceNoOtherIsInitializing(t *testing.T) {
 	}
 }
 
+// awaitTreeInitialized used to give up at initWaitSeconds alone (8 s in this rig's testOptions:
+// BootTimeout 2 s × (BootIntervals 3 + 1)) even though a sibling's workspace-fetch can legitimately
+// still be cloning well past that: the wait now runs workspace.FetchTimeout longer too, so a
+// sibling whose init outlasts the old 8 s bound, but finishes well inside the new one, is still
+// waited out rather than given up on (LEGION-585 round 3: the registration-deadline grace this
+// package's registrationGrace-sized bound gives a slow pod is worthless if every sibling launch
+// behind it fails first).
+func TestATreesLaunchWaitOutlastsInitWaitSecondsForAWorkspaceFetchStillCloning(t *testing.T) {
+	g := newRig(t, nil)
+	g.autoStart.Store(false)
+	g.spawn(rootSpec(t))
+	root := SandboxName(rootToken)
+	done := make(chan error, 1)
+	go func() {
+		_, err := g.r.Spawn(g.ctx, workerSpec(t))
+		done <- err
+	}()
+	worker := SandboxName(workerToken)
+	g.eventually("the worker's sandbox", func() bool { return g.sandbox(worker) != nil })
+
+	// Past the old 8 s bound, with the root's workspace-init still running: the worker's launch
+	// must not have given up early.
+	time.Sleep(10 * time.Second)
+	select {
+	case err := <-done:
+		t.Fatalf("the worker's launch finished (%v) before the root's workspace-init did, past the old 8s bound alone — it gave up early", err)
+	default:
+	}
+
+	g.update(g.pod(root), func(p *corev1.Pod) { p.Spec.NodeName, p.Status = "ip-192-0-2-7", runningStatus() })
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the worker never launched after the root's workspace-init finished")
+	}
+}
+
 // Every pod of a tree, the root included, gets the tree's pod affinity exactly when another pod of
 // the tree is scheduled at its launch: the tree volume attaches to one node (P2, R1).
 func TestTheTreeAffinityFollowsTheTreesScheduledPods(t *testing.T) {

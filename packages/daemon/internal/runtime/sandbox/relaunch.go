@@ -14,6 +14,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
+	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
 // Spawn starts a fresh agent for spec's claim, over whatever the claim's Sandbox already holds
@@ -369,9 +370,13 @@ func (r *Runtime) lockTree(ctx context.Context, tree string) (func(), error) {
 // gVisor its flock does not reach past its own pod (each sandbox keeps gofer file locks to
 // itself), so the runtime, through which every launch goes, is what keeps two of them from
 // provisioning at once. A pod counts as initializing from its start until workspace-init ends, its
-// workspace-fetch included. The wait is bounded as workspace-init's own lock wait is.
+// workspace-fetch included. The wait is bounded by the worst legitimate total of a sibling's init
+// phase: workspace.FetchTimeout, the fetch's own clone bound, plus the same lock-wait budget
+// workspace-init's own `flock --timeout` is sized by (initWaitSeconds) — never workspace-init's
+// lock wait alone, which a sibling's fetch can still be running well past.
 func (r *Runtime) awaitTreeInitialized(ctx context.Context, l launch) error {
-	return r.await(ctx, time.Duration(r.initWaitSeconds())*time.Second, "the other pods of tree "+l.spec.Tree+" to finish workspace-init", func() (bool, error) {
+	bound := workspace.FetchTimeout + time.Duration(r.initWaitSeconds())*time.Second
+	return r.await(ctx, bound, "the other pods of tree "+l.spec.Tree+" to finish workspace-init", func() (bool, error) {
 		for _, pod := range r.treePods(l) {
 			if initializing(pod) {
 				return false, nil

@@ -47,8 +47,10 @@ var fetchLowSpeedEnvironment = []string{
 // not a fixed step in provisioning.
 const FetchTimeout = 30 * time.Minute
 
-// Command is one process the provisioner runs. Every command holds the runner's slow-command
-// budget so a clone, fetch, jj operation, or git configuration edit is bounded independently.
+// Command is one process the provisioner runs, each bounded independently of every other: most
+// hold the runner's own slow-command budget (RunChecked), and the fetch's clone holds a wider
+// bound of its own instead (RunCheckedTimeout, FetchTimeout) — never a budget shared across the
+// whole provisioning sequence.
 type Command struct {
 	Argv    []string
 	Env     []string

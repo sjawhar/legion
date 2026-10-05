@@ -285,6 +285,34 @@ func TestTheRegistrationDeadlineWithGraceWaitsOutProvisioningThenStillRetires(t 
 	h.wantState(StateLaunching)
 }
 
+// The shim's first hello (helloed, table.go) re-arms the registration deadline at the base
+// Boot×RegistrationIntervals alone, dropping whatever RegistrationGrace the launch carried: a pod
+// can only dial its hello once both init containers have finished, so the grace that covered them
+// has already done its job, and a claim that hellos and never registers is retired counted from
+// the hello, not from launch + base + grace (LEGION-585 round 3).
+func TestTheRegistrationDeadlineReArmsAtTheBaseBoundFromTheFirstHello(t *testing.T) {
+	h := newBareHarness(t)
+	h.deps.Timeouts.RegistrationGrace = 10 * testBoot
+	h.start(queuedClaim())
+	h.launch()
+	alive := h.locator()
+
+	// Well inside the grace (launch + base + grace is 13×testBoot here): the hello arrives, and
+	// the deadline re-arms from it rather than continuing to count toward the wider bound.
+	h.advance(2 * testBoot)
+	h.connect()
+	h.wantState(StateShimConnected)
+	h.wantCalls("Suspend", 0)
+
+	// hello + base (2×testBoot + deadline = 5×testBoot total), nowhere near launch + base + grace
+	// (13×testBoot): still retired, since the re-arm dropped the grace rather than adding to it.
+	h.advance(deadline)
+	if suspends := h.wantCalls("Suspend", 1); suspends[0].Locator != alive {
+		t.Errorf("suspended %+v, want the live process", suspends[0].Locator)
+	}
+	h.wantCalls("Spawn", 2)
+}
+
 func TestTheRegistrationDeadlineWithADeadProcessCountsOneFailureWithoutASuspension(t *testing.T) {
 	h := newHarness(t)
 	h.launch()
