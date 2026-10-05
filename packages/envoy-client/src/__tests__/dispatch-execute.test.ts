@@ -3837,6 +3837,7 @@ describe("executeDispatchTool", () => {
     expect(result.text).toContain(
       '"Approve spec.md (version 3)? Proposes a live sync in place of the nightly export."'
     );
+    expect(result.text).toContain("`plan-gap-analyst`");
     expect(result.details).toMatchObject({ issue: "DSP-42", ask: "ask-9", version: 3 });
     expect(result.details).toMatchObject({ follows: { ask: "ask-9" } });
     expect(result.details).not.toHaveProperty("topic");
@@ -3901,6 +3902,7 @@ describe("executeDispatchTool", () => {
     expect(result.text).toContain(
       '"Approve spec.md (version 3)? Proposes a nightly export to the archive."'
     );
+    expect(result.text).not.toContain("plan-gap-analyst");
   });
 
   test("dispatch_request_approval on a document approved at its current version opens nothing", async () => {
@@ -3953,6 +3955,7 @@ describe("executeDispatchTool", () => {
       "(document id artifact-42) is already approved at version 3 by sjawhar"
     );
     expect(result.text).not.toContain("ask ");
+    expect(result.text).not.toContain("plan-gap-analyst");
     expect(result.details).toMatchObject({ issue: "DSP-42", artifact: "artifact-42", version: 3 });
     expect(dispatchFollowNotice(result.details)).toBeNull();
   });
