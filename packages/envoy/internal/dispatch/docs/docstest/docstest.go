@@ -22,8 +22,9 @@ import (
 // updates its own transactions make.
 type Peer struct {
 	// Doc is the peer's copy of the document. The peer's reader applies the room's updates to it
-	// on its own goroutine: a caller that reads or transacts Doc from another goroutine races that
-	// reader unless it goes through WithDoc, since crdt.Doc carries no lock of its own.
+	// on its own goroutine. crdt.Doc's methods take the document's own lock, but a walk of its
+	// types outside a transaction - a tree read such as pmdoc.Read - takes none, so a caller on
+	// another goroutine makes that walk inside WithDoc.
 	Doc *crdt.Doc
 	// Answers carries the content of each sync step 2 the room sends, once Doc holds it. One that
 	// arrives while sixteen are waiting to be read is dropped.
@@ -36,8 +37,8 @@ type Peer struct {
 	// writes holds one write at a time: gorilla/websocket panics on two writes at once, and the
 	// reader answers the room's sync step 1 while a test sends.
 	writes sync.Mutex
-	// docMu serializes every access to Doc between the reader's applies and a caller's reads or
-	// transactions (WithDoc, Send).
+	// docMu holds the reader's applies off a caller's walk of Doc (WithDoc) and Send's
+	// transactions.
 	docMu   sync.Mutex
 	endedAt time.Time
 }
@@ -75,9 +76,9 @@ func (p *Peer) Write(syncMessage []byte) error {
 	return p.connection.WriteMessage(gws.BinaryMessage, append(frame, syncMessage...))
 }
 
-// WithDoc runs use with Doc, locked against the peer's own reader: a caller on another goroutine
-// that reads or transacts Doc must do so here, never directly, since crdt.Doc has no lock of its
-// own and the reader applies the room's updates to it concurrently.
+// WithDoc runs use with Doc held against the peer's reader, which applies the room's updates
+// under the same lock. A caller that walks Doc's types outside a transaction does it here; a
+// transaction of Doc's own already holds the document's lock.
 func (p *Peer) WithDoc(use func(doc *crdt.Doc)) {
 	p.docMu.Lock()
 	defer p.docMu.Unlock()
