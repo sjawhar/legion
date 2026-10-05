@@ -406,13 +406,14 @@ func TestARerunThatEndsRedBetweenTwoPassesIsToldAgain(t *testing.T) {
 // computed it yet - or true moves nothing.
 func TestTheRequiredChecksPassCatchesAHeadThatStartsConflictingWithItsBase(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
-		state string
-		want  phase.Phase
+		name         string
+		state        string
+		mergeability record.Mergeability
+		want         phase.Phase
 	}{
-		{"conflicting", "false", phase.Implementing},
-		{"not yet computed", "null", phase.AwaitingMerge},
-		{"mergeable", "true", phase.AwaitingMerge},
+		{"conflicting", "false", record.MergeabilityConflicting, phase.Implementing},
+		{"not yet computed", "null", record.MergeabilityUnknown, phase.AwaitingMerge},
+		{"mergeable", "true", record.MergeabilityMergeable, phase.AwaitingMerge},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := isolatedOutboxPool(t)
@@ -424,8 +425,8 @@ func TestTheRequiredChecksPassCatchesAHeadThatStartsConflictingWithItsBase(t *te
 			if got != tc.want {
 				t.Fatalf("after the pass the issue is in %s, want %s", got, tc.want)
 			}
-			if pr.Base != "main" {
-				t.Fatalf("recorded base = %q, want main", pr.Base)
+			if pr.Mergeability != tc.mergeability {
+				t.Fatalf("recorded mergeability = %q, want %q", pr.Mergeability, tc.mergeability)
 			}
 			if tc.want != phase.Implementing {
 				return

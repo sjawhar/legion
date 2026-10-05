@@ -196,19 +196,16 @@ type PullRequest struct {
 	// request is open; a new generation deletes one that is not.
 	ReviewSeen ReviewOrder
 	State      PullRequestState
-	// Base is the pull request's base branch, as the daemon's periodic required-checks read of
-	// GitHub's /pulls/{number} last named it (daemon.readRequiredChecks): "" until that read runs.
-	// It is what the checks-red path names when a conflicting Mergeability sends the tree back
-	// (classify.ConflictWithdrawsReady), and what a push to it would need to match to wake an
-	// immediate re-read, which the daemon does not do; the periodic read reaches it within one
-	// requiredChecksInterval.
-	Base string
 	// Mergeability is GitHub's lazily computed verdict for whether this head can be merged into
-	// Base without a conflict, as the same read last found it, decoding GitHub's nullable
-	// `mergeable` field: MergeabilityUnknown while GitHub is still computing it (never a transient
-	// conflict - GitHub reports no checks run on a mergeability GitHub has not computed yet,
-	// either), MergeabilityMergeable once GitHub can merge the head automatically, and
-	// MergeabilityConflicting once it cannot. "" means the read has never run.
+	// its base branch without a conflict, as the daemon's periodic required-checks read of
+	// GitHub's /pulls/{number} last found it (daemon.readRequiredChecks), decoding GitHub's
+	// nullable `mergeable` field: MergeabilityUnknown while GitHub is still computing it (never a
+	// transient conflict - GitHub reports no checks run on a mergeability GitHub has not computed
+	// yet, either), MergeabilityMergeable once GitHub can merge the head automatically, and
+	// MergeabilityConflicting once it cannot. "" means the read has never run. The base branch
+	// itself is not kept here: the one reader that names it, the checks-red withdrawal reason
+	// (workflow's mergeability), reads it off the same intake.PullRequestMergeability fact that
+	// set this field, never a stored copy.
 	Mergeability Mergeability
 }
 

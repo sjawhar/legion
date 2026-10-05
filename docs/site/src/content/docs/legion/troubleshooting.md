@@ -218,11 +218,12 @@ These arrive as messages on the Dispatch issue, and the architect is told:
   the head that succeeded, and while the design gate is closed. The refusal names the head and the
   check or workflow, or the spec version that needs approval.
 
-An issue back in `in_progress` after its `READY` had a required check or workflow turn red on the
-head itself while it awaited its merge: the daemon sent it back to the implementer, told the
-architect which checks, and posted on the issue, and told the project's `merge_queue_role` when one
-is set, that the `READY` is withdrawn; the work comes back through testing, review and a new
-`READY`.
+An issue back in `in_progress` after its `READY`, while it awaited its merge, had a required check
+or workflow turn red on the head itself, or the head started conflicting with its base (GitHub
+computes no merge ref for a conflicting head and runs no checks on it at all): the daemon sent it
+back to the implementer, told the architect which checks or that the head conflicts, and posted on
+the issue, and told the project's `merge_queue_role` when one is set, that the `READY` is
+withdrawn; the work comes back through testing, review and a new `READY`.
 
 An issue that stays in `needs_review` while a review workflow the project declares
 (`projects.<KEY>.review_workflows`) is red: only declared review workflows are red, so the reviewer
