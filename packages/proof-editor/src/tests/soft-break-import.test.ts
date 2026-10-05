@@ -20,8 +20,8 @@ await test('a CommonMark soft break imports as a single text node with a space',
 });
 
 await test("with softBreaks 'line', a soft break imports as a hardbreak node between the lines", async () => {
-  const { parseMarkdown } = await createHeadlessProof({ softBreaks: 'line' });
-  const doc = parseMarkdown('First line\nsecond line\n\nNext paragraph').toJSON();
+  const { parseMarkdown } = await createHeadlessProof();
+  const doc = parseMarkdown('First line\nsecond line\n\nNext paragraph', 'line').toJSON();
   const paragraph = doc.content[0];
   assert(paragraph.type === 'paragraph', 'Expected a paragraph first');
   const types = paragraph.content.map((node: { type: string }) => node.type);

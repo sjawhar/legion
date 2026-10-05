@@ -51,7 +51,7 @@ export type DecorateMarkdown = (
  * anchors the portals mount into, so it may replace an anchor's element. `onRendered` fires after
  * each render lands; the newest callback is the one called, and a new callback alone re-renders
  * nothing. `paint` and `decorate` are dependencies: a caller passes a module-level function or
- * memoises one on what it reads. `softBreaks` picks the engine (`SoftBreaks`).
+ * memoises one on what it reads. `softBreaks` is the parse policy (`SoftBreaks`).
  */
 export function useRenderedMarkdown(
   root: RefObject<HTMLElement | null>,
@@ -73,7 +73,7 @@ export function useRenderedMarkdown(
     }
     setIsFallback(false);
     return renderWithEngine((engine) => {
-      const parsed = engine?.parse(markdown);
+      const parsed = engine?.parse(markdown, softBreaks);
       if (engine === undefined || parsed === undefined) {
         setIsFallback(true);
         element.replaceChildren(document.createTextNode(markdown));
@@ -85,7 +85,7 @@ export function useRenderedMarkdown(
       const anchors = decorate === undefined ? found : decorate(element, found);
       setReferenceAnchors(anchors.length === 0 ? NO_ANCHORS : anchors);
       onRenderedRef.current?.();
-    }, softBreaks);
+    });
   }, [decorate, markdown, paint, root, softBreaks]);
 
   return {

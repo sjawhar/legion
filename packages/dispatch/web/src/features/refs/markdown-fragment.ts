@@ -8,6 +8,8 @@
  * code span is ever a delimiter.
  */
 
+import { classifyCharacter } from "micromark-util-classify-character";
+
 /** How many runes of a parent's body a reply's event carries (`messageReplyPreview` in
  *  packages/envoy/internal/dispatch/api/messages.go: `HeadRunes(body, 160)`). A preview shorter
  *  than this is the whole body; one exactly this long is, or may be, cut. */
@@ -49,15 +51,25 @@ interface DelimiterRun {
   readonly canClose: boolean;
 }
 
-const UNICODE_WHITESPACE = /\s/u;
-const UNICODE_PUNCTUATION = /[\p{P}\p{S}]/u;
+/** What `classifyCharacter` answers for a whitespace and for a punctuation character; anything
+ *  else is `undefined`. Its own caller-facing constants are not exported. */
+const WHITESPACE = 1;
+const PUNCTUATION = 2;
 
-function isWhitespace(char: string | undefined): boolean {
-  return char === undefined || UNICODE_WHITESPACE.test(char);
-}
-
-function isPunctuation(char: string | undefined): boolean {
-  return char !== undefined && UNICODE_PUNCTUATION.test(char);
+/** The code point ending at `end`, or `null` at the fragment's start, which is what the
+ *  tokenizer classifies there. Taken whole, so an astral character is the character CommonMark
+ *  reads rather than the trailing surrogate of it: a `**` after an emoji follows punctuation
+ *  (every emoji is `\p{S}`), which decides whether that run can open emphasis. */
+function codePointBefore(text: string, end: number): number | null {
+  if (end <= 0) {
+    return null;
+  }
+  const previous = text.charCodeAt(end - 1);
+  const isTrailingSurrogate = previous >= 0xdc00 && previous <= 0xdfff;
+  const leading = isTrailingSurrogate && end >= 2 ? text.charCodeAt(end - 2) : undefined;
+  return leading !== undefined && leading >= 0xd800 && leading <= 0xdbff
+    ? (text.codePointAt(end - 2) ?? null)
+    : previous;
 }
 
 /** The spans of `text` that are code spans, as CommonMark reads them: a backtick run and the
@@ -115,19 +127,25 @@ function delimiterRuns(text: string, code: Array<[number, number]>): DelimiterRu
     while (text[end] === char) {
       end += 1;
     }
-    const before = text[i - 1];
-    const after = text[end];
+    // GFM ends the strikethrough sequence at a third marker, so `~~~` is literal text rather
+    // than a delimiter of any length.
+    if (char === "~" && end - i > 2) {
+      i = end;
+      continue;
+    }
+    const before = classifyCharacter(codePointBefore(text, i));
+    const after = classifyCharacter(text.codePointAt(end) ?? null);
     const leftFlanking =
-      !isWhitespace(after) &&
-      (!isPunctuation(after) || isWhitespace(before) || isPunctuation(before));
+      after !== WHITESPACE &&
+      (after !== PUNCTUATION || before === WHITESPACE || before === PUNCTUATION);
     const rightFlanking =
-      !isWhitespace(before) &&
-      (!isPunctuation(before) || isWhitespace(after) || isPunctuation(after));
+      before !== WHITESPACE &&
+      (before !== PUNCTUATION || after === WHITESPACE || after === PUNCTUATION);
     let canOpen = leftFlanking;
     let canClose = rightFlanking;
     if (char === "_") {
-      canOpen = leftFlanking && (!rightFlanking || isPunctuation(before));
-      canClose = rightFlanking && (!leftFlanking || isPunctuation(after));
+      canOpen = leftFlanking && (!rightFlanking || before === PUNCTUATION);
+      canClose = rightFlanking && (!leftFlanking || after === PUNCTUATION);
     }
     if (canOpen || canClose) {
       runs.push({ canClose, canOpen, char, end, start: i });
@@ -162,8 +180,17 @@ export function balanceCutMarkdown(fragment: string): string {
         if (opener.char !== run.char || remaining[openers[o]] === 0) {
           continue;
         }
-        // `~~` pairs only two at a time; `*` and `_` pair one or two.
-        const take = Math.min(remaining[openers[o]], remaining[index], run.char === "~" ? 2 : 2);
+        // GFM pairs a tilde run only with a closer of its own length (`~~a~` is plain text);
+        // CommonMark's emphasis pairs one or two characters of a `*` or `_` run at a time.
+        let take: number;
+        if (run.char === "~") {
+          take = remaining[openers[o]] === remaining[index] ? remaining[index] : 0;
+        } else {
+          take = Math.min(remaining[openers[o]], remaining[index], 2);
+        }
+        if (take === 0) {
+          continue;
+        }
         remaining[openers[o]] -= take;
         remaining[index] -= take;
         if (remaining[openers[o]] === 0) {

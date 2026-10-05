@@ -37,6 +37,19 @@ test("a delimiter the author typed on purpose stays: one that CommonMark would r
   expect(balanceCutMarkdown("snake_case and __init__")).toBe("snake_case and __init__");
 });
 
+test("a tilde run pairs only with a closer its own length, as GFM's strikethrough does", () => {
+  // remark-gfm reads `~~a~` as plain text, since a `~~` opener pairs only with a `~~` closer.
+  // Leaving `~a~` would be strikethrough: formatting over text the author never struck out.
+  expect(balanceCutMarkdown("keep ~~a~ here")).toBe("keep a here");
+  // A run of three or more is literal text to GFM (the third marker ends the sequence), so the
+  // `~~` closer is the only delimiter here, and the cut is what took its opener.
+  expect(balanceCutMarkdown("x ~~~a~~ y")).toBe("x ~~~a y");
+  // Runs that do pair are the author's, at either length.
+  expect(balanceCutMarkdown("a ~~struck~~ and ~one~ here")).toBe("a ~~struck~~ and ~one~ here");
+  // A cut that took the closer leaves the opener to drop, as it does for `**`.
+  expect(balanceCutMarkdown("report ~~struck text the cut")).toBe("report struck text the cut");
+});
+
 test("delimiters inside a code span are code, never counted", () => {
   expect(balanceCutMarkdown("`code with ** inside` and **bold**")).toBe(
     "`code with ** inside` and **bold**"

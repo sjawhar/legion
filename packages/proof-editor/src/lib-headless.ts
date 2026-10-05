@@ -41,10 +41,29 @@ import { remarkResolveReferenceLinks } from './dispatch-reference-links.js';
 import { remarkSoftBreakAsLine, remarkSoftBreakAsSpace } from './dispatch-soft-breaks.js';
 import { remarkContainerDirectives } from './lib-remark-directive-plugin.js';
 
+/**
+ * What a single newline inside a paragraph (a CommonMark soft break) becomes. `'space'`, the
+ * default, is what a document means by it: agents hard-wrap Markdown at a column, and the
+ * lines are one paragraph (`remarkSoftBreakAsSpace`). `'line'` keeps it as a line break, for
+ * text whose author meant the lines as lines: a model's streamed turn in the live view, where
+ * `First, check the config.\nThen, verify the credentials.` is two lines, and joining them
+ * reads as the one run-on line the document default would make of it.
+ */
+export type SoftBreaks = 'space' | 'line';
+
 export interface HeadlessProofEditor {
   schema: Schema;
-  /** Parses markdown into a document whose every block carries a `blockId`. */
-  parseMarkdown(markdown: string): ProseMirrorNode;
+  /**
+   * Parses markdown into a document whose every block carries a `blockId`, reading a soft
+   * break as `softBreaks` says (`'space'` by default).
+   *
+   * Throws for a source the schema has no node for: a raw-HTML block or span (a bare
+   * tag-shaped substring outside a code span or fence, e.g. `<img src=x>`) and a mark span of
+   * a kind this schema does not carry. A throw leaves the parser's own stack mid-document,
+   * which would make the next parses of unrelated text throw too, so the parser of that
+   * policy is dropped and the next parse through it starts on a fresh one.
+   */
+  parseMarkdown(markdown: string, softBreaks?: SoftBreaks): ProseMirrorNode;
   serializeMarkdown(doc: ProseMirrorNode): string;
 }
 
@@ -54,15 +73,6 @@ export interface HeadlessProofOptions {
   blockId?: BlockIdGenerator;
   /** Typed block schema fetched from the document service before construction. */
   blockSchema?: BlockSchema;
-  /**
-   * What a single newline inside a paragraph (a CommonMark soft break) becomes. `'space'`, the
-   * default, is what a document means by it: agents hard-wrap Markdown at a column, and the
-   * lines are one paragraph (`remarkSoftBreakAsSpace`). `'line'` keeps it as a line break, for
-   * text whose author meant the lines as lines: a model's streamed turn in the live view, where
-   * `First, check the config.\nThen, verify the credentials.` is two lines, and joining them
-   * reads as the one run-on line the document default would make of it.
-   */
-  softBreaks?: 'space' | 'line';
 }
 
 export async function createHeadlessProof(options: HeadlessProofOptions = {}): Promise<HeadlessProofEditor> {
@@ -114,25 +124,42 @@ export async function createHeadlessProof(options: HeadlessProofOptions = {}): P
   const schema = new Schema({ nodes, marks });
 
   // Match the browser editor's GFM features (tables, task lists, strikethrough,
-  // autolinks, ...), plus proof span and dispatchAsk span parsing.
-  const parseProcessor = unified()
-    .use(remarkParse)
-    .use(remarkFrontmatter, ['yaml'])
-    .use(remarkGfm)
-    .use(remarkContainerDirectives)
-    .use(remarkProofMarks)
-    .use(remarkDispatchMarks)
-    .use(remarkResolveReferenceLinks);
-  // remark leaves a soft break as a "\n" inside its text node; the policy either joins the
-  // lines with a space or splits them around a `break` node, which the commonmark preset's
-  // hardbreak parser takes.
-  parseProcessor.use(options.softBreaks === 'line' ? remarkSoftBreakAsLine : remarkSoftBreakAsSpace);
-  if (options.blockSchema) parseProcessor.use(remarkTypedBlocks, options.blockSchema);
-  const parse = ParserState.create(schema as never, parseProcessor as never) as unknown as (
-    markdown: string,
-  ) => ProseMirrorNode;
+  // autolinks, ...), plus proof span and dispatchAsk span parsing. The schema and plugin list
+  // above are policy-independent and built once; only the soft-break transform differs, so a
+  // parser per policy is built the first time that policy is parsed with and reused.
+  const buildParser = (softBreaks: SoftBreaks): ((markdown: string) => ProseMirrorNode) => {
+    const parseProcessor = unified()
+      .use(remarkParse)
+      .use(remarkFrontmatter, ['yaml'])
+      .use(remarkGfm)
+      .use(remarkContainerDirectives)
+      .use(remarkProofMarks)
+      .use(remarkDispatchMarks)
+      .use(remarkResolveReferenceLinks);
+    // remark leaves a soft break as a "\n" inside its text node; the policy either joins the
+    // lines with a space or splits them around a `break` node, which the commonmark preset's
+    // hardbreak parser takes.
+    parseProcessor.use(softBreaks === 'line' ? remarkSoftBreakAsLine : remarkSoftBreakAsSpace);
+    if (options.blockSchema) parseProcessor.use(remarkTypedBlocks, options.blockSchema);
+    return ParserState.create(schema as never, parseProcessor as never) as unknown as (
+      markdown: string,
+    ) => ProseMirrorNode;
+  };
+
+  const parsers = new Map<SoftBreaks, (markdown: string) => ProseMirrorNode>();
   const mint = options.blockId ?? mintBlockId;
-  const parseMarkdown = (markdown: string): ProseMirrorNode => withBlockIds(parse(markdown), mint);
+  const parseMarkdown = (markdown: string, softBreaks: SoftBreaks = 'space'): ProseMirrorNode => {
+    const parse = parsers.get(softBreaks) ?? buildParser(softBreaks);
+    parsers.set(softBreaks, parse);
+    try {
+      return withBlockIds(parse(markdown), mint);
+    } catch (error) {
+      // A throw leaves this ParserState's stack open, so its next parses would throw too. Drop
+      // it; the next parse of this policy builds a fresh one (about 0.03 ms).
+      parsers.delete(softBreaks);
+      throw error;
+    }
+  };
 
   const serializeProcessor = unified()
     .use(remarkGfm)

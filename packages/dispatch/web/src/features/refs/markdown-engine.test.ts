@@ -18,17 +18,22 @@ function parseThroughSharedEngine(markdown: string): Promise<string | undefined>
   return promise;
 }
 
-// LEGION-540 round 2. A body the parser cannot take (a reference-style link, `[x][d]` with its
-// `[d]: url` definition) throws, and that body falls back to its literal text. The throw must
-// stop there: the next bodies through the same engine, on the same page, are unrelated text
-// someone else wrote, and they render formatted. Before the fix, the one or two parses after a
-// throw threw too, so a numbered list under a reference-link turn in the live transcript read
-// as `1. **Stop** …`.
+// LEGION-540. A body the schema has no node for throws, and that body falls back to its literal
+// text. The throw must stop there: the next bodies through the same engine, on the same page,
+// are unrelated text someone else wrote, and they render formatted. Before the headless editor
+// dropped its refused parser, the one or two parses after a throw threw too, so a numbered list
+// under a raw-HTML or mark-span turn in the live transcript read as `1. **Stop** …`. A span of a
+// mark kind this schema does not carry still throws (reference-style links now resolve, so they
+// no longer do), so it drives the recovery this test guards; removing the drop-on-throw in
+// `@legion/proof-editor`'s headless parser fails the two assertions after the refused parse.
 test("a parse the engine refuses leaves the next parses of unrelated text intact", async () => {
   const load = spyOn(schemaModule, "loadBlockSchema").mockResolvedValue(blockSchema);
   try {
     expect(await parseThroughSharedEngine("warm **up**")).toBe("warm up");
-    await parseThroughSharedEngine("see [the docs][d] now\n\n[d]: https://docs.example");
+    // A span of a mark kind this schema has no parser for: the parser throws mid-paragraph.
+    expect(
+      await parseThroughSharedEngine('see <span data-dispatch="bogus">this</span> now')
+    ).toBeUndefined();
     expect(await parseThroughSharedEngine("Fixed **two** bugs")).toBe("Fixed two bugs");
     expect(await parseThroughSharedEngine("1. one\n2. two")).toBe("one two");
     expect(await parseThroughSharedEngine("שלום **עולם** and مرحبا `code`")).toBe(

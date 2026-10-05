@@ -38,6 +38,7 @@
     "@milkdown/prose": "^7.5.0",
     "@milkdown/theme-nord": "^7.5.0",
     "@milkdown/transformer": "^7.5.0",
+    "mdast-util-definitions": "^6.0.0",
     "mdast-util-directive": "^3.1.0",
     "micromark-extension-directive": "^4.0.0",
     "micromark-util-types": "^2.0.2",

@@ -1,10 +1,15 @@
-import type { HeadlessProofEditor } from "@legion/proof-editor/headless";
+import type { HeadlessProofEditor, SoftBreaks } from "@legion/proof-editor/headless";
 import { DOMSerializer, type Node as ProseMirrorNode } from "prosemirror-model";
 import { useLayoutEffect, useState } from "react";
 
 import type { BlockSchema } from "../../api/types";
 import { loadBlockSchema } from "../doc/schema";
 import { parseDispatchReference, referenceSpans, shortForm } from "./routes";
+
+/** What a single newline inside a paragraph becomes, chosen per parse: `"space"` (the document
+ *  default, hard-wrapped Markdown is one paragraph) or `"line"` (text whose author meant its
+ *  lines as lines, a model's streamed turn in the live view). The engine's own type. */
+export type { SoftBreaks };
 
 /**
  * The one headless Proof engine every Markdown-bearing surface parses with - `MarkdownBody` for a
@@ -18,113 +23,86 @@ export interface MarkdownEngine {
   /**
    * The parsed document, or `undefined` for a source the parser refuses, which the caller shows
    * as one plain-text node. Proof's schema has no node for CommonMark's raw-HTML spans (a bare
-   * tag-shaped substring outside a code span or fence, e.g. `<img src=x>`), nor for a
-   * reference-style link or image (`[text][id]` with its `[id]: url` definition), so the parser
-   * throws for them. HTML-like text inside a code span or fence parses safely as literal text,
-   * so nothing is escaped beforehand: escaping the whole source regardless of context would
-   * print literal backslashes around any code span or fence containing something tag-shaped.
+   * tag-shaped substring outside a code span or fence, e.g. `<img src=x>`) or a mark span of a
+   * kind this schema does not carry, so the parser throws for them. HTML-like text inside a code
+   * span or fence parses safely as literal text, so nothing is escaped beforehand: escaping the
+   * whole source regardless of context would print literal backslashes around any code span or
+   * fence containing something tag-shaped. Reference-style links and images (`[text][id]` with
+   * their `[id]: url` definition) resolve to the link or image they name, so they do not throw.
    *
-   * A throw leaves Proof's parser state mid-document, and the next one or two parses through the
-   * same engine throw too, whatever their text (measured: `Fixed **two** bugs` and `1. one\n2.
-   * two` both failed after a reference link), so a refused body would blank the formatting of
-   * the next turn or card someone else is reading. The engine therefore retires itself on a
-   * throw: this parse answers `undefined`, and the next render builds a fresh engine from the
-   * module already loaded (about a millisecond) before parsing.
+   * A throw leaves the parser's own stack mid-document, so the headless editor drops that
+   * parser and the next parse builds a fresh one (about 0.03 ms): one refused body answers
+   * `undefined` here and falls back to literal text, and the next turn or card someone else is
+   * reading still formats.
    */
-  parse(markdown: string): ProseMirrorNode | undefined;
+  parse(markdown: string, softBreaks?: SoftBreaks): ProseMirrorNode | undefined;
 }
 
 type HeadlessModule = typeof import("@legion/proof-editor/headless");
 
-/**
- * What a single newline inside a paragraph becomes: `"space"` (the document default: hard-wrapped
- * Markdown is one paragraph) or `"line"` (text whose author meant its lines as lines: a model's
- * streamed turn in the live view). Each policy is its own engine, since the parser is built with
- * it; both can be ready at once.
- */
-export type SoftBreaks = "space" | "line";
-
 let headlessModule: Promise<HeadlessModule> | undefined;
-const engines = new Map<string, Promise<MarkdownEngine>>();
-/** The engine of each policy the newest resolved load produced: what a body renders with
- *  synchronously. An entry is cleared by a parse that threw, so the next render loads (and
- *  caches) a replacement. */
-const readyEngines = new Map<SoftBreaks, MarkdownEngine>();
+const engines = new Map<number, Promise<MarkdownEngine>>();
+/** The engine the newest resolved load produced: what a body renders with synchronously. The
+ *  engine serves every soft-break policy (the policy is a parse argument), and a parse that
+ *  throws no longer evicts it - the headless editor drops only its own refused parser. */
+let readyEngine: MarkdownEngine | undefined;
 
-function engineKey(blockSchema: BlockSchema, softBreaks: SoftBreaks): string {
-  return `${blockSchema.version}:${softBreaks}`;
-}
-
-function buildEngine(
-  proof: HeadlessProofEditor,
-  blockSchema: BlockSchema,
-  softBreaks: SoftBreaks
-): MarkdownEngine {
-  const engine: MarkdownEngine = {
+function buildEngine(proof: HeadlessProofEditor): MarkdownEngine {
+  return {
     serializer: DOMSerializer.fromSchema(proof.schema),
-    parse(markdown) {
+    parse(markdown, softBreaks = "space") {
       try {
-        return proof.parseMarkdown(markdown);
+        return proof.parseMarkdown(markdown, softBreaks);
       } catch {
-        if (readyEngines.get(softBreaks) === engine) {
-          readyEngines.delete(softBreaks);
-          engines.delete(engineKey(blockSchema, softBreaks));
-        }
         return undefined;
       }
     },
   };
-  return engine;
 }
 
-function loadEngine(blockSchema: BlockSchema, softBreaks: SoftBreaks): Promise<MarkdownEngine> {
-  const key = engineKey(blockSchema, softBreaks);
-  const cached = engines.get(key);
+function loadEngine(blockSchema: BlockSchema): Promise<MarkdownEngine> {
+  const cached = engines.get(blockSchema.version);
   if (cached !== undefined) {
     return cached;
   }
   headlessModule ??= import("@legion/proof-editor/headless");
   const created = headlessModule
-    .then(({ createHeadlessProof }) => createHeadlessProof({ blockSchema, softBreaks }))
+    .then(({ createHeadlessProof }) => createHeadlessProof({ blockSchema }))
     .then((proof) => {
-      const engine = buildEngine(proof, blockSchema, softBreaks);
-      readyEngines.set(softBreaks, engine);
+      const engine = buildEngine(proof);
+      readyEngine = engine;
       return engine;
     });
-  engines.set(key, created);
+  engines.set(blockSchema.version, created);
   return created;
 }
 
 /** Loads the schema and headless Proof chunk before Markdown-bearing UI needs to render. */
 export async function warmMarkdownRenderer(): Promise<void> {
-  await loadEngine(await loadBlockSchema(), "space");
+  await loadEngine(await loadBlockSchema());
 }
 
 /**
- * Calls `render` with the engine of `softBreaks`: synchronously when a load has already
- * resolved, so a body renders in the layout phase of the commit that mounts it (a list that
- * inserts a turn sees the turn's full height in that same commit, and `ViewportAnchor`
- * compensates in one measurement); otherwise once the schema and the engine chunk arrive. Only
- * the very first render of a policy on a page, or a schema that failed to load, takes the
- * asynchronous path. Without the server schema (or Proof's headless engine) `render` gets
- * `undefined` and shows the literal text instead: readable, never lost. The cause is reported
- * and the schema cache does not retain the failure, so the next render tries the fetch again.
- * Returns the cancel for the asynchronous path; a cancelled `render` never runs.
+ * Calls `render` with the shared engine: synchronously when a load has already resolved, so a
+ * body renders in the layout phase of the commit that mounts it (a list that inserts a turn sees
+ * the turn's full height in that same commit, and `ViewportAnchor` compensates in one
+ * measurement); otherwise once the schema and the engine chunk arrive. Only the very first
+ * render on a page, or a schema that failed to load, takes the asynchronous path. Without the
+ * server schema (or Proof's headless engine) `render` gets `undefined` and shows the literal
+ * text instead: readable, never lost. The cause is reported and the schema cache does not retain
+ * the failure, so the next render tries the fetch again. Returns the cancel for the asynchronous
+ * path; a cancelled `render` never runs.
  */
-export function renderWithEngine(
-  render: (engine: MarkdownEngine | undefined) => void,
-  softBreaks: SoftBreaks = "space"
-): () => void {
-  const ready = readyEngines.get(softBreaks);
-  if (ready !== undefined) {
-    render(ready);
+export function renderWithEngine(render: (engine: MarkdownEngine | undefined) => void): () => void {
+  if (readyEngine !== undefined) {
+    render(readyEngine);
     return () => undefined;
   }
   let cancelled = false;
   void (async () => {
     let engine: MarkdownEngine | undefined;
     try {
-      engine = await loadEngine(await loadBlockSchema(), softBreaks);
+      engine = await loadEngine(await loadBlockSchema());
     } catch (error) {
       console.error("Rendering literal Markdown, the block schema is unavailable", error);
       engine = undefined;

@@ -10,17 +10,16 @@ import { useEffect, useState } from "react";
  * test runtime without a document), the value passes straight through.
  */
 export function useFrameCoalesced<T>(value: T): T {
+  const hasFrames = typeof requestAnimationFrame === "function";
   const [settled, setSettled] = useState(value);
   useEffect(() => {
-    if (Object.is(settled, value)) {
-      return;
-    }
-    if (typeof requestAnimationFrame !== "function") {
-      setSettled(value);
+    // Where `requestAnimationFrame` does not exist (a test runtime without a document) the value
+    // passes straight through, so there is nothing to settle and no re-render to force.
+    if (!hasFrames || Object.is(settled, value)) {
       return;
     }
     const frame = requestAnimationFrame(() => setSettled(value));
     return () => cancelAnimationFrame(frame);
-  }, [settled, value]);
-  return typeof requestAnimationFrame === "function" ? settled : value;
+  }, [hasFrames, settled, value]);
+  return hasFrames ? settled : value;
 }
