@@ -123,6 +123,13 @@ agent's summary of what that version proposes. It has two fixed choices and no O
 - **Approve** approves that version.
 - **Request changes** needs a reason, which goes back to the agent.
 
+The card also names the document and the version it asks about as a link (everywhere except the
+document's own margin, where you're already on it): opening the ask from the Inbox, the drawer, or
+its `dispatch://.../ask/<id>` reference takes you to that document with the approve controls in
+view, instead of the issue's Conversation turn. If the document has moved past the version the
+request named, the link still opens the current document, and the card keeps saying which version
+the request was for.
+
 Answering this card is the same review as the **Approve** and **Request changes** buttons on the
 document itself. [Documents](/legion/dispatch/documents/#approvals) covers approval states and what
 a later version does to an approval.

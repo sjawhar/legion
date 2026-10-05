@@ -45,6 +45,7 @@ import { ReferencedBy, ReferencedByToggle } from "../refs/ReferencedBy";
 import { buildDispatchReference, itemRoute } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 import { AskAnchorHeader } from "./AskAnchorLink";
+import { AskApprovalLink } from "./AskApprovalLink";
 import { AskBlockLink } from "./AskBlockLink";
 import {
   AskCompletionCard,
@@ -94,6 +95,10 @@ export interface AskCardProps {
   /** Timestamp of the Inbox snapshot that supplied initialThread. */
   initialThreadUpdatedAt?: number;
   createReply?: (issueKey: string, input: CreateCommentInput) => Promise<Comment>;
+  /** Whether an approval ask's label also links its document and version. Default `true`: the
+   *  Inbox, the drawer and the Conversation name it. The margin passes `false` — the reader is
+   *  already on that document, so the link would point at the page under it. */
+  documentLink?: boolean;
   /** Called once the server has recorded the reader's answer from this card. */
   onAnswered?: (id: string) => void;
 }
@@ -149,6 +154,7 @@ export function AskCard({
   getAskThread: getThread = getAskThread,
   initialThread,
   initialThreadUpdatedAt,
+  documentLink = true,
   onAnswered,
 }: AskCardProps): ReactNode {
   const {
@@ -436,6 +442,11 @@ export function AskCard({
         {isApproval ? (
           <p className={`text-[10px] font-semibold uppercase tracking-wide ${textMutedOnSurface}`}>
             Approval requested
+          </p>
+        ) : null}
+        {isApproval && documentLink ? (
+          <p className={`mt-1 text-sm ${linkText} ${linkHoverText}`}>
+            <AskApprovalLink ask={displayedAsk} />
           </p>
         ) : null}
         {inBlock ? null : (

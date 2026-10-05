@@ -1,7 +1,8 @@
-import { expect, test } from "@playwright/test";
+import { expect, type Page, test } from "@playwright/test";
 import type { Artifact } from "../web/src/api/types";
 
 import {
+  createAsk,
   createComment,
   createIssue,
   createIssueArtifact,
@@ -18,6 +19,10 @@ import { documentEditor, needsYouCards, openSpecAndAwaitHeadingIds } from "./edi
 import { resetDatabase } from "./seed";
 import { assertWhole } from "./unclipped";
 import { asUser } from "./users";
+
+function drawer(page: Page) {
+  return page.getByRole("dialog", { name: "Inbox" });
+}
 
 const session = {
   actor: { kind: "session" as const, id: "e2e-session", origin: { session_title: "architect" } },
@@ -627,6 +632,76 @@ test("an approval request for an unassigned issue's non-primary document remains
       contentType: "image/png",
       path: issueShot,
     });
+  } finally {
+    await alice.close();
+  }
+});
+
+test("an approval ask's Inbox row, drawer link and bare ask route land on the spec with the approve control in view, while an anchored ask and an unanchored question still land where they do today", async ({
+  browser,
+}) => {
+  await createProject({ key: "GATE", name: "Gate" });
+  const issue = await createIssue(
+    { project: "GATE", spec: "The plan.", title: "Design gate" },
+    session
+  );
+  const requested = await requestApproval(issue.primary_artifact_id, {}, session);
+  const specPath = `/issues/${issue.key}/spec?ask=${requested.ask.id}`;
+
+  const anchoredAsk = await createAsk(
+    issue.key,
+    { anchor: { artifact: "spec", quote: "The plan" }, question: "Which plan?" },
+    session
+  );
+  const unanchoredAsk = await createAsk(
+    issue.key,
+    { options: [{ label: "Yes" }, { label: "No" }], question: "Ship it?" },
+    session
+  );
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+
+    // The Inbox row's title link lands on the spec, approve control in view — not the
+    // Conversation turn `useItemLanding` fell through to before this fix.
+    await page.goto("/");
+    await page
+      .locator(`[data-inbox-row="${requested.ask.id}"]`)
+      .locator("[data-inbox-owner]")
+      .click();
+    await expect(page).toHaveURL(specPath);
+    await expect(page.getByRole("tab", { name: "Spec" })).toHaveAttribute("aria-selected", "true");
+    await expect(page.getByRole("button", { name: "Approve", exact: true })).toBeVisible();
+
+    // The drawer's card names the document and version it asks about, as a link; following it
+    // opens the spec and closes the drawer.
+    await page.goto("/agents");
+    await page.locator("body").focus();
+    await page.keyboard.press("i");
+    await expect(drawer(page)).toBeVisible();
+    const drawerCard = drawer(page).getByTestId(`ask-${requested.ask.id}`);
+    await expect(drawerCard).toBeVisible();
+    const documentLink = drawerCard.getByRole("link", { name: "spec.md, version 1" });
+    await expect(documentLink).toBeVisible();
+    await documentLink.click();
+    await expect(page).toHaveURL(specPath);
+    await expect(drawer(page)).toHaveCount(0);
+
+    // An anchored ask still lands beside its document, and an unanchored question still lands
+    // on its Conversation turn: the approval fallback only fires when neither applies.
+    await page.goto(`/issues/${issue.key}/asks/${anchoredAsk.id}`);
+    await expect(page).toHaveURL(`/issues/${issue.key}/spec?ask=${anchoredAsk.id}`);
+
+    await page.goto(`/issues/${issue.key}/asks/${unanchoredAsk.id}`);
+    await expect(page).toHaveURL(`/issues/${issue.key}/asks/${unanchoredAsk.id}`);
+    await expect(page.getByRole("tab", { name: "Conversation" })).toHaveAttribute(
+      "aria-selected",
+      "true"
+    );
+    await expect(
+      page.locator("#issue-conversation-panel").getByTestId(`ask-${unanchoredAsk.id}`)
+    ).toContainText("Ship it?");
   } finally {
     await alice.close();
   }
