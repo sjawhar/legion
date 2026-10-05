@@ -5444,6 +5444,21 @@ describe("envoy OMP extension", () => {
 
       expect(shownPictures("ses_pictures_shutdown").size).toBe(0);
     });
+
+    // A task subagent's instance never runs restoreLocalSessionState (its session_start returns
+    // early), so its closure's id stays empty while its tool calls carry the host's live id into
+    // the registry; its shutdown forgets that id, not the empty one.
+    test("a subagent instance that shuts down forgets the id its tool calls carried", async () => {
+      globalThis.fetch = async (input, init) => responseWithRegistration(input, init, {});
+      const { default: envoyExtension } = await import("./envoy.ts?pictures-subagent-shutdown");
+      const fixture = createPi();
+      envoyExtension(fixture.pi);
+      shownPictures("ses_pictures_subagent").add("dispatch://LEGION-1/artifact/sub-png@v1");
+
+      await fixture.handlers.get("session_shutdown")?.({}, sessionContext("ses_pictures_subagent"));
+
+      expect(shownPictures("ses_pictures_subagent").size).toBe(0);
+    });
   });
 
   test("deduplicates targeted Dispatch frames by dedupe key", async () => {

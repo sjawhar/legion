@@ -513,12 +513,10 @@ export default function envoyExtension(pi: PiApi): void {
     pi.appendEntry(LEGION_MANAGED_ENTRY, { session_id: targetSessionID });
   };
 
-  // The pictures this session has now, which later reads and deliveries name instead of sending
-  // again (`shownPictures`): those a delivery showed once the host took it, and those the
-  // transcript the session moved onto already shows.
-  const markPicturesShown = (addresses: readonly string[]): void => {
-    if (sessionID === "") return;
-    const shown = shownPictures(sessionID);
+  // The pictures the session `shown` belongs to has now, which later reads and deliveries name
+  // instead of sending again (`shownPictures`): those a delivery showed once the host took it,
+  // and those the transcript the session moved onto already shows.
+  const markPicturesShown = (shown: Set<string>, addresses: readonly string[]): void => {
     for (const address of addresses) shown.add(address);
   };
 
@@ -559,7 +557,7 @@ export default function envoyExtension(pi: PiApi): void {
     // The pictures the transcript the session is now on already shows (a fork's, a handoff's, a
     // resume's, a restart's) are in the history every request sends, so they count as shown. The
     // id the session left is no longer served, so what it was shown is forgotten.
-    markPicturesShown(transcriptPictures(branch));
+    markPicturesShown(shownPictures(sessionID), transcriptPictures(branch));
     if (previousSessionID !== sessionID) forgetShownPictures(previousSessionID);
   };
 
@@ -730,13 +728,16 @@ export default function envoyExtension(pi: PiApi): void {
           // session's own Dispatch bearer, each picture once in this session. They count as shown
           // only once the host took the send: one that throws releases the claim, and the delivery
           // Dispatch retries must carry them again.
+          // Fetched once for the delivery: the same set is read for what to name and, once the
+          // host took the send, written with what it showed.
+          const shown = shownPictures(sessionID);
           if (turn === undefined) {
             const card = await withDeliveredPictures(
               rendered.content,
               rendered.pictures ?? [],
               () => timedDispatchClient(DELIVERY_PICTURES_TIMEOUT_MS),
               true,
-              shownPictures(sessionID)
+              shown
             );
             pi.sendMessage(
               { customType: "envoy-message", content: card.content, display: true },
@@ -745,7 +746,7 @@ export default function envoyExtension(pi: PiApi): void {
                 triggerTurn: true,
               }
             );
-            markPicturesShown(card.shown);
+            markPicturesShown(shown, card.shown);
           } else {
             // Sent exactly as Enter, or an aside, at the terminal sends it, the person's pictures
             // beside their text.
@@ -754,7 +755,7 @@ export default function envoyExtension(pi: PiApi): void {
               pictureAddresses(turn.body),
               () => timedDispatchClient(DELIVERY_PICTURES_TIMEOUT_MS),
               false,
-              shownPictures(sessionID)
+              shown
             );
             // Noted right before the send, after the pictures load: a run that ends while they
             // load clears every note (endInjectedUserTurns), and this turn must still be found.
@@ -763,7 +764,7 @@ export default function envoyExtension(pi: PiApi): void {
               delivery.content,
               turn.mode === "aside" ? { deliverAs: "aside" } : undefined
             );
-            markPicturesShown(delivery.shown);
+            markPicturesShown(shown, delivery.shown);
           }
         }
       } catch (error) {
@@ -1529,7 +1530,7 @@ export default function envoyExtension(pi: PiApi): void {
   pi.on("session_branch", (_event, context) => rebind(undefined, context));
   pi.on("session_tree", (_event, context) => rebind(undefined, context));
 
-  pi.on("session_shutdown", async () => {
+  pi.on("session_shutdown", async (_event, context) => {
     shuttingDown = true;
     const bound = bridge.instances.indexOf(claimInstance);
     if (bound !== -1) bridge.instances.splice(bound, 1);
@@ -1562,8 +1563,11 @@ export default function envoyExtension(pi: PiApi): void {
       awaitingRetry.clear();
       agentStreamControl = undefined;
       agentStreamControlSession = "";
-      // This process serves the session no longer, so what it was shown goes with it.
+      // This process serves the session no longer, so what it was shown goes with it: the id this
+      // instance registered, and the host's live one, which a task subagent's tool calls carried
+      // (its instance never ran restoreLocalSessionState, so its `sessionID` stayed empty).
       forgetShownPictures(sessionID);
+      forgetShownPictures(context.sessionManager.getSessionId());
     }
   });
 
