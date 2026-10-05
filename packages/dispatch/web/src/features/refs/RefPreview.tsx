@@ -15,7 +15,7 @@ import {
   textSecondaryOnSurface,
 } from "../../theme/classes";
 import { type IssueStatus, statusLabel } from "../project/board-model";
-import { actorLabel } from "./actor";
+import { actorLabel, shortSessionId } from "./actor";
 import { MarkdownPreview } from "./MarkdownPreview";
 import { REF_PREVIEW_CLOSE_DELAY_MS, REF_PREVIEW_OPEN_DELAY_MS } from "./ref-preview-timing";
 import { artifactTextQuery, prefetchReference, useReferenceData } from "./reference-target";
@@ -292,7 +292,12 @@ function DocumentPreview({ route }: { route: DispatchReferenceRoute }): ReactNod
   if (artifact === undefined) {
     return <Heading>{shortForm(route)}</Heading>;
   }
-  const owner = isProjectRoute(route) ? route.project : route.key;
+  const owner =
+    route.kind === "agent-artifact"
+      ? `agent ${shortSessionId(route.session)}`
+      : isProjectRoute(route)
+        ? route.project
+        : route.key;
   const latest = artifact.versions.at(-1)?.number;
   return (
     <>

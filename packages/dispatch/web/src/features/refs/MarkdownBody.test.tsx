@@ -1,10 +1,251 @@
-import { expect, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, waitFor, within } from "@testing-library/react";
+import type { Window as HappyDOMWindow } from "happy-dom";
+import type { ReactNode } from "react";
 
 import { api } from "../../api/client";
 import type { Artifact, AskRead } from "../../api/types";
 import { MarkdownBody } from "./MarkdownBody";
+
+function withQueries(children: ReactNode): ReactNode {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;
+}
+
+/** An image artifact of CORE-1 with two versions, as the issue read lists it. */
+const picture: Artifact = {
+  created_at: "2026-10-04T00:00:00Z",
+  created_by: { id: "alice", kind: "user" },
+  id: "artifact-shot",
+  issue_key: "CORE-1",
+  kind: "image",
+  name: "shot.png",
+  primary: false,
+  project: "CORE",
+  slug: "shot-png",
+  versions: [1, 2].map((number) => ({
+    authors: [{ id: "alice", kind: "user" as const }],
+    created_at: "2026-10-04T00:00:00Z",
+    named: false,
+    number,
+    summary: null,
+  })),
+};
+
+// The dashboard is served from an origin, where a picture's same-origin bytes route resolves.
+// happy-dom's page starts at `about:blank`, where no relative `src` resolves and every picture
+// would fail at once, so these tests put the page on one. The test DOM is happy-dom's window
+// (`__tests__/setup.ts` registers it), which TypeScript knows only as the DOM's.
+const testWindow = window as unknown as HappyDOMWindow;
+let pageBefore = "about:blank";
+
+describe("Dispatch pictures", () => {
+  beforeEach(() => {
+    pageBefore = window.location.href;
+    testWindow.happyDOM.setURL("https://dispatch.test/issues/CORE-1/conversation");
+  });
+
+  afterEach(() => {
+    testWindow.happyDOM.setURL(pageBefore);
+  });
+
+  test("a Dispatch picture at a version shows inline from its version's bytes, linked to its page", async () => {
+    const view = render(
+      withQueries(
+        <MarkdownBody
+          markdown={
+            "Look: ![shot.png](dispatch://CORE-1/artifact/shot-png@v1)\n\n![](dispatch://CORE/artifact/plan-png@v3)\n\n![face.png](dispatch://agent/ses-1/artifact/face-png@v2)"
+          }
+        />
+      )
+    );
+
+    try {
+      const shot = await within(view.container).findByRole("img", { name: "shot.png" });
+      expect(shot.getAttribute("src")).toBe("/api/v1/issues/CORE-1/artifacts/shot-png/versions/1");
+      expect(shot.getAttribute("loading")).toBe("lazy");
+      // Scaled to the column, never taller than 24rem.
+      expect(shot.className.split(" ")).toEqual(
+        expect.arrayContaining(["max-h-96", "max-w-full", "w-auto", "object-contain"])
+      );
+      expect(shot.closest("a")?.getAttribute("href")).toBe("/issues/CORE-1/artifacts/shot-png?v=1");
+      // A picture with no caption is named by its slug.
+      const plan = within(view.container).getByRole("img", { name: "plan-png" });
+      expect(plan.getAttribute("src")).toBe("/api/v1/projects/CORE/artifacts/plan-png/versions/3");
+      expect(plan.closest("a")?.getAttribute("href")).toBe(
+        "/projects/CORE/documents/plan-png?version=3"
+      );
+      const face = within(view.container).getByRole("img", { name: "face.png" });
+      expect(face.getAttribute("src")).toBe("/api/v1/agents/ses-1/artifacts/face-png/versions/2");
+      expect(face.closest("a")?.getAttribute("href")).toBe("/agents/ses-1/artifacts/face-png?v=2");
+    } finally {
+      view.unmount();
+    }
+  });
+
+  // The composer escapes a file name's brackets and backslashes so the caption stays one; a reader
+  // and a screen reader still get the file's own name.
+  test("an escaped caption names the picture by its file name", async () => {
+    const view = render(
+      withQueries(
+        <MarkdownBody
+          markdown={
+            "![face \\[1\\] back\\\\slash.png](dispatch://agent/ses-1/artifact/face-png@v1)"
+          }
+        />
+      )
+    );
+
+    try {
+      const face = await within(view.container).findByRole("img", {
+        name: "face [1] back\\slash.png",
+      });
+      expect(face.getAttribute("src")).toBe("/api/v1/agents/ses-1/artifacts/face-png/versions/1");
+    } finally {
+      view.unmount();
+    }
+  });
+
+  test("the inline variant shows a Dispatch picture as a thumbnail beside its caption", async () => {
+    const view = render(
+      withQueries(
+        <MarkdownBody
+          markdown="See ![shot.png](dispatch://CORE-1/artifact/shot-png@v1)"
+          variant="inline"
+        />
+      )
+    );
+
+    try {
+      const link = await within(view.container).findByRole("link", { name: "shot.png" });
+      const thumbnail = link.querySelector("img");
+      expect(thumbnail?.getAttribute("src")).toBe(
+        "/api/v1/issues/CORE-1/artifacts/shot-png/versions/1"
+      );
+      expect(thumbnail?.className.split(" ")).toEqual(
+        expect.arrayContaining(["h-10", "w-10", "object-cover"])
+      );
+      expect(view.container.querySelector("div")).toBeNull();
+    } finally {
+      view.unmount();
+    }
+  });
+
+  test("a Dispatch picture that pins no version reads as its reference, with the image's thumbnail", async () => {
+    const getIssue = spyOn(api, "getIssue").mockResolvedValue({
+      artifacts: [picture],
+      key: "CORE-1",
+      title: "Core one",
+    } as never);
+    const view = render(
+      withQueries(<MarkdownBody markdown="![shot.png](dispatch://CORE-1/artifact/shot-png)" />)
+    );
+
+    try {
+      const link = await within(view.container).findByRole("link", { name: "shot.png" });
+      expect(link.getAttribute("href")).toBe("/issues/CORE-1/artifacts/shot-png");
+      expect(link.getAttribute("data-dispatch-ref")).toBe("dispatch://CORE-1/artifact/shot-png");
+      // The plain reference's thumbnail is the latest version, in the 40 px shape.
+      await waitFor(() =>
+        expect(link.querySelector("img")?.getAttribute("src")).toBe(
+          "/api/v1/issues/CORE-1/artifacts/shot-png/versions/2"
+        )
+      );
+      expect(link.querySelector("img")?.className.split(" ")).toContain("h-10");
+    } finally {
+      getIssue.mockRestore();
+      view.unmount();
+    }
+  });
+
+  test("a plain reference whose thumbnail cannot load drops it and keeps the title", async () => {
+    const getIssue = spyOn(api, "getIssue").mockResolvedValue({
+      artifacts: [picture],
+      key: "CORE-1",
+      title: "Core one",
+    } as never);
+    // A hand-written or stale reference can pin a version the server does not serve; the
+    // thumbnail's load then fails, and the reference reads as its title with no broken glyph.
+    const view = render(
+      withQueries(<MarkdownBody markdown="See dispatch://CORE-1/artifact/shot-png@v99" />)
+    );
+
+    try {
+      const link = await within(view.container).findByRole("link", { name: "shot.png" });
+      const thumbnail = await waitFor(() => {
+        const image = link.querySelector("img");
+        expect(image?.getAttribute("src")).toBe(
+          "/api/v1/issues/CORE-1/artifacts/shot-png/versions/99"
+        );
+        return image as HTMLImageElement;
+      });
+      fireEvent.error(thumbnail);
+      await waitFor(() => expect(link.querySelector("img")).toBeNull());
+      expect(link.textContent).toBe("shot.png");
+      expect(link.getAttribute("href")).toBe("/issues/CORE-1/artifacts/shot-png?v=99");
+    } finally {
+      getIssue.mockRestore();
+      view.unmount();
+    }
+  });
+
+  test("a plain reference to a non-image artifact shows no thumbnail", async () => {
+    const getIssue = spyOn(api, "getIssue").mockResolvedValue({
+      artifacts: [{ ...picture, kind: "file", name: "notes.pdf", slug: "notes-pdf" }],
+      key: "CORE-1",
+      title: "Core one",
+    } as never);
+    const view = render(
+      withQueries(<MarkdownBody markdown="See dispatch://CORE-1/artifact/notes-pdf" />)
+    );
+
+    try {
+      const link = await within(view.container).findByRole("link", { name: "notes.pdf" });
+      expect(link.querySelector("img")).toBeNull();
+    } finally {
+      getIssue.mockRestore();
+      view.unmount();
+    }
+  });
+
+  test("a version that is no picture falls back to the reference's title", async () => {
+    const getIssue = spyOn(api, "getIssue").mockResolvedValue({
+      artifacts: [{ ...picture, kind: "file", name: "notes.pdf", slug: "notes-pdf" }],
+      key: "CORE-1",
+      title: "Core one",
+    } as never);
+    const view = render(
+      withQueries(<MarkdownBody markdown="![notes](dispatch://CORE-1/artifact/notes-pdf@v1)" />)
+    );
+
+    try {
+      const image = await within(view.container).findByRole("img", { name: "notes" });
+      fireEvent.error(image);
+      const link = await within(view.container).findByRole("link", { name: "notes.pdf" });
+      expect(link.getAttribute("href")).toBe("/issues/CORE-1/artifacts/notes-pdf?v=1");
+      expect(within(view.container).queryByRole("img")).toBeNull();
+    } finally {
+      getIssue.mockRestore();
+      view.unmount();
+    }
+  });
+
+  test("a picture on another website renders as it always has", async () => {
+    const view = render(
+      withQueries(<MarkdownBody markdown="![chart](https://example.com/a.png)" />)
+    );
+
+    try {
+      const image = await within(view.container).findByRole("img", { name: "chart" });
+      expect(image.getAttribute("src")).toBe("https://example.com/a.png");
+      expect(image.closest("a")).toBeNull();
+      expect(image.getAttribute("loading")).toBeNull();
+    } finally {
+      view.unmount();
+    }
+  });
+});
 
 test("renders a typed callout body through the server schema", async () => {
   const view = render(

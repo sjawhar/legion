@@ -1,4 +1,4 @@
-import { useCallback, useSyncExternalStore } from "react";
+import { type Dispatch, type SetStateAction, useCallback, useSyncExternalStore } from "react";
 
 /**
  * Unsent ask-reply drafts, by ask id. A draft belongs to the ask, not to the composer showing it:
@@ -24,8 +24,10 @@ export function clearReplyDraft(askId: string, sent?: string): void {
   setReplyDraft(askId, "");
 }
 
-/** The ask's draft and its setter; the component re-renders whenever any composer changes it. */
-export function useReplyDraft(askId: string): [string, (text: string) => void] {
+/** The ask's draft and its setter; the component re-renders whenever any composer changes it. An
+ *  updater reads the draft as it is now, so a text added when an upload lands never overwrites
+ *  what another upload or a keystroke put there since the render that started it. */
+export function useReplyDraft(askId: string): [string, Dispatch<SetStateAction<string>>] {
   const subscribe = useCallback(
     (listener: () => void) => {
       const askListeners = listeners.get(askId) ?? new Set<() => void>();
@@ -39,7 +41,11 @@ export function useReplyDraft(askId: string): [string, (text: string) => void] {
     [askId]
   );
   const draft = useSyncExternalStore(subscribe, () => drafts.get(askId) ?? "");
-  const setDraft = useCallback((text: string) => setReplyDraft(askId, text), [askId]);
+  const setDraft = useCallback(
+    (next: SetStateAction<string>) =>
+      setReplyDraft(askId, typeof next === "function" ? next(drafts.get(askId) ?? "") : next),
+    [askId]
+  );
   return [draft, setDraft];
 }
 

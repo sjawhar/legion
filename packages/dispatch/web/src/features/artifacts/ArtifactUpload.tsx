@@ -1,6 +1,8 @@
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { isPictureType, pictureCaption } from "@legion/contracts";
+import { type QueryClient, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   type ChangeEvent,
+  type ClipboardEvent,
   type DragEvent,
   type ReactNode,
   type RefObject,
@@ -10,6 +12,8 @@ import {
 
 import { ApiError, type ArtifactOwner, api } from "../../api/client";
 import type { Artifact, Version } from "../../api/types";
+import { QueryError } from "../../components/QueryError";
+import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import {
   calloutInfoBg,
   calloutInfoBorder,
@@ -21,7 +25,9 @@ import {
   secondaryButtonHoverBorder,
   secondaryButtonText,
   textMutedOnSurface,
+  textMutedOnSurfaceMuted,
 } from "../../theme/classes";
+import { buildDispatchReference, type DispatchReferenceRoute } from "../refs/routes";
 
 export interface UploadResult {
   artifact: Artifact;
@@ -47,6 +53,136 @@ export function uploadErrorMessage(error: unknown): string {
     return error.message;
   }
   return "Could not upload the artifact.";
+}
+
+/** Refreshes the lists an upload to `owner` adds a row to. */
+function refreshOwnerArtifacts(queryClient: QueryClient, owner: ArtifactOwner): void {
+  if ("issue" in owner) {
+    void queryClient.invalidateQueries({ queryKey: ["artifacts", owner.issue] });
+    void queryClient.invalidateQueries({ queryKey: ["issue", owner.issue] });
+  } else if ("project" in owner) {
+    void queryClient.invalidateQueries({ queryKey: ["project", owner.project, "artifacts"] });
+  } else {
+    void queryClient.invalidateQueries({ queryKey: ["agent-artifacts", owner.session] });
+  }
+}
+
+/** `text` added to the end of a draft, a space apart from what is already there. */
+export function appendToDraft(draft: string, text: string): string {
+  return `${draft}${draft.length === 0 || /\s$/.test(draft) ? "" : " "}${text}`;
+}
+
+/**
+ * What an uploaded file adds to the draft it was pasted or dropped into. A picture (a PNG, JPEG,
+ * GIF or WebP by the browser's reading of its type, the four kinds the server stores as a picture
+ * and a model is shown) is Markdown's image syntax captioned with the file's name and addressed by
+ * its own reference at the version the upload created -
+ * `![shot.png](dispatch://CORE-1/artifact/shot-png@v1)` - so the picture is part of what is sent
+ * and shows wherever the text renders. Any other file, an SVG included, is its plain reference.
+ */
+export function uploadedFileText(
+  owner: ArtifactOwner,
+  file: File,
+  { artifact, version }: UploadResult
+): string {
+  const pinned = isPictureType(file.type) ? version.number : undefined;
+  const route: DispatchReferenceRoute =
+    "issue" in owner
+      ? { key: owner.issue, kind: "artifact", slug: artifact.slug }
+      : "project" in owner
+        ? { kind: "document", project: owner.project, slug: artifact.slug }
+        : { kind: "agent-artifact", session: owner.session, slug: artifact.slug };
+  if (pinned === undefined) {
+    return buildDispatchReference(route);
+  }
+  const caption = pictureCaption(file.name || artifact.name);
+  return `![${caption}](${buildDispatchReference({ ...route, version: pinned })})`;
+}
+
+/** Files pasted or dropped into a draft's field, each uploaded and its text added to the draft. */
+export interface DraftUpload {
+  /** Uploads the files a paste holds to `owner`, in place of the paste; a paste of text alone is
+   *  left to the field. */
+  paste(event: ClipboardEvent<HTMLElement>, owner: ArtifactOwner): void;
+  /** Uploads the files a drop holds to `owner`, in place of the drop. */
+  drop(event: DragEvent<HTMLElement>, owner: ArtifactOwner): void;
+  /** Uploads still out. */
+  pending: number;
+  error: unknown;
+  isError: boolean;
+  isPending: boolean;
+  /** Uploads the last refused file again, to the owner it was sent to. */
+  retry(): void;
+}
+
+/**
+ * The one upload behind a draft's field - a composer's, an ask's answer, a reply under an ask:
+ * every file pasted or dropped into it uploads to the owner the paste or drop named, and once the
+ * server has it, `insert` receives the text to add (`uploadedFileText`). The owner rides the
+ * upload as its own mutation variable, as a send carries its request: TanStack gives a pending
+ * mutation each new render's options before `mutationFn` runs, so an owner read from the closure
+ * would follow a pick made in the paste's own task. The text, the refreshed lists and a Retry all
+ * read that same owner.
+ */
+export function useDraftUpload(insert: (text: string) => void): DraftUpload {
+  const queryClient = useQueryClient();
+  const [pending, setPending] = useState(0);
+  const retryGuard = useSubmitGuard();
+  const upload = useMutation({
+    mutationFn: async ({ file, owner }: { file: File; owner: ArtifactOwner }) => ({
+      file,
+      owner,
+      result: await uploadFile(owner, file),
+    }),
+    onMutate: () => setPending((count) => count + 1),
+    onSuccess: ({ file, owner, result }) => {
+      insert(uploadedFileText(owner, file, result));
+      refreshOwnerArtifacts(queryClient, owner);
+    },
+    onSettled: () => {
+      setPending((count) => count - 1);
+      retryGuard.release();
+    },
+  });
+  const receive = (files: FileList, owner: ArtifactOwner, event: { preventDefault(): void }) => {
+    if (files.length === 0) {
+      return;
+    }
+    event.preventDefault();
+    for (const file of [...files]) upload.mutate({ file, owner });
+  };
+  return {
+    drop: (event, owner) => receive(event.dataTransfer.files, owner, event),
+    error: upload.error,
+    isError: upload.isError,
+    isPending: upload.isPending,
+    paste: (event, owner) => receive(event.clipboardData.files, owner, event),
+    pending,
+    retry: () => {
+      retryGuard.retryLast(upload);
+    },
+  };
+}
+
+/** `Uploading file…` while any of a draft's uploads is out, and a refused one's reason with its
+ *  Retry. */
+export function DraftUploadStatus({ upload }: { upload: DraftUpload }): ReactNode {
+  return (
+    <>
+      {upload.pending > 0 ? (
+        <p className={`text-sm ${textMutedOnSurfaceMuted}`} role="status">
+          Uploading file…
+        </p>
+      ) : null}
+      {upload.isError ? (
+        <QueryError
+          message={uploadErrorMessage(upload.error)}
+          onRetry={upload.retry}
+          retrying={upload.isPending}
+        />
+      ) : null}
+    </>
+  );
 }
 
 interface ArtifactDropTarget {
@@ -98,12 +234,7 @@ export function useArtifactUpload(
       setPendingFile(null);
       setSummary("");
       void queryClient.invalidateQueries({ queryKey: ["artifact", result.artifact.id] });
-      if ("issue" in owner) {
-        void queryClient.invalidateQueries({ queryKey: ["artifacts", owner.issue] });
-        void queryClient.invalidateQueries({ queryKey: ["issue", owner.issue] });
-        return;
-      }
-      void queryClient.invalidateQueries({ queryKey: ["project", owner.project, "artifacts"] });
+      refreshOwnerArtifacts(queryClient, owner);
     },
   });
   const receive = (file: File | undefined) => {

@@ -1,4 +1,4 @@
-import { afterEach, expect, jest, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, jest, type Mock, spyOn, test } from "bun:test";
 import {
   AssistantRuntimeProvider,
   type ThreadMessageLike,
@@ -6,6 +6,7 @@ import {
 } from "@assistant-ui/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import type { Window as HappyDOMWindow } from "happy-dom";
 import type { ReactNode } from "react";
 import { Link, MemoryRouter } from "react-router-dom";
 
@@ -549,4 +550,359 @@ test("the broadcasts list shows each broadcast's first line formatted", async ()
     listAgents.mockRestore();
     getIssue.mockRestore();
   }
+});
+
+/**
+ * A picture someone pasted, as the composer writes it (`uploadedFileText`): an artifact at a
+ * version, captioned with its file name. A surface that renders through `MarkdownBody` shows it at
+ * the column's width, named by its caption; one that renders through `MarkdownPreview` shows its
+ * 40 px thumbnail beside the caption on the preview's one line. `DispatchPicture` builds the
+ * address from the reference alone, so the issue read lists no such artifact: a picture that fell
+ * back to its reference (`RefLink`) draws no `<img>` at all and fails every assertion below.
+ */
+const PICTURE = "The broken layout: ![shot.png](dispatch://CORE-1/artifact/shot-png@v1)";
+
+/** The version's bytes route the picture loads from (`artifactVersionPath`). */
+const PICTURE_SRC = "/api/v1/issues/CORE-1/artifacts/shot-png/versions/1";
+
+/** What a preview of `PICTURE` reads as: its words, then the caption beside the thumbnail. */
+const PICTURE_WORDS = "The broken layout: shot.png";
+
+/** The picture's syntax, none of which a surface that formats it shows. */
+const PICTURE_SYNTAX = ["![", "](", "dispatch://"];
+
+function words(element: HTMLElement): string {
+  return (element.textContent ?? "").replace(/\s+/g, " ").trim();
+}
+
+/** A full body's picture: an `<img>` named by its caption, at the column's width and capped in
+ *  height (`DispatchPicture`'s `block`), never the preview's thumbnail. */
+async function expectBlockPicture(element: HTMLElement): Promise<void> {
+  const picture = await within(element).findByRole("img", { name: "shot.png" });
+  expect(picture.getAttribute("src")).toBe(PICTURE_SRC);
+  const classes = picture.className.split(" ");
+  expect(classes).toEqual(expect.arrayContaining(["max-h-96", "max-w-full", "object-contain"]));
+  expect(classes).not.toContain("h-10");
+  for (const syntax of PICTURE_SYNTAX) {
+    expect(element.textContent).not.toContain(syntax);
+  }
+}
+
+/** A one-line preview's picture: the 40 px thumbnail (`DispatchPicture`'s `inline`), unnamed
+ *  since its caption is the text beside it, in the placeholder the preview leaves for it -
+ *  link-styled text where the host is the one link, a link to the picture's page where the
+ *  preview's links stay live - and the preview reading `text`, its syntax gone. */
+async function expectThumbnail(
+  element: HTMLElement,
+  links: "inert" | "live",
+  text = PICTURE_WORDS
+): Promise<void> {
+  const thumbnail = await waitFor(() => {
+    const image = element.querySelector("img");
+    if (image === null) throw new Error("the preview shows no picture");
+    return image;
+  });
+  expect(thumbnail.getAttribute("src")).toBe(PICTURE_SRC);
+  expect(thumbnail.getAttribute("alt")).toBe("");
+  expect(thumbnail.className.split(" ")).toEqual(
+    expect.arrayContaining(["h-10", "w-10", "object-cover"])
+  );
+  const placeholder = thumbnail.closest<HTMLElement>("[data-dispatch-picture]");
+  if (placeholder === null) throw new Error("the thumbnail is not in the picture's placeholder");
+  expect(words(placeholder)).toBe("shot.png");
+  expect(words(element)).toBe(text);
+  if (links === "inert") {
+    expect(placeholder.tagName).toBe("SPAN");
+    expect(element.querySelector("a")).toBeNull();
+  } else {
+    expect(placeholder.tagName).toBe("A");
+    expect(placeholder.getAttribute("href")).toBe("/issues/CORE-1/artifacts/shot-png?v=1");
+  }
+}
+
+describe("a Dispatch picture on every surface", () => {
+  // The dashboard is served from an origin, where the picture's same-origin bytes route resolves;
+  // at happy-dom's `about:blank` every picture would fail at once and fall back to its reference
+  // (`MarkdownBody.test.tsx`). The test DOM is happy-dom's window (`__tests__/setup.ts`).
+  const testWindow = window as unknown as HappyDOMWindow;
+  let pageBefore = "about:blank";
+  let getIssue: Mock<typeof api.getIssue>;
+
+  beforeEach(() => {
+    pageBefore = window.location.href;
+    testWindow.happyDOM.setURL("https://dispatch.test/issues/CORE-1/conversation");
+    // A picture that fell back to its reference resolves it against this issue, which lists no
+    // artifact, rather than reaching the network.
+    getIssue = spyOn(api, "getIssue").mockResolvedValue(issue);
+  });
+
+  afterEach(() => {
+    getIssue.mockRestore();
+    testWindow.happyDOM.setURL(pageBefore);
+  });
+
+  test("every kind of transcript turn shows it at the column's width", async () => {
+    const messages: ThreadMessageLike[] = [
+      {
+        content: [
+          { text: PICTURE, type: "reasoning" },
+          { text: PICTURE, type: "text" },
+        ],
+        createdAt: new Date("2026-09-10T00:00:00Z"),
+        id: "a1",
+        role: "assistant",
+        status: { reason: "stop", type: "complete" },
+      },
+      {
+        content: [{ text: PICTURE, type: "text" }],
+        createdAt: new Date("2026-09-10T00:00:01Z"),
+        id: "u1",
+        role: "user",
+      },
+      {
+        content: [{ text: PICTURE, type: "text" }],
+        createdAt: new Date("2026-09-10T00:00:02Z"),
+        id: "u2",
+        metadata: dispatchMetadata({ author: "Planner" }),
+        role: "user",
+      },
+      {
+        content: [{ text: PICTURE, type: "text" }],
+        createdAt: new Date("2026-09-10T00:00:03Z"),
+        id: "a2",
+        metadata: dispatchMetadata({ dispatch: true }),
+        role: "assistant",
+        status: { reason: "stop", type: "complete" },
+      },
+    ];
+    const view = render(
+      <Providers>
+        <Transcript messages={messages} />
+      </Providers>
+    );
+    try {
+      const assistant = await within(view.container).findByTestId("agent-message-assistant");
+      await expectBlockPicture(within(assistant).getByTestId("agent-reasoning"));
+      expect(within(assistant).getAllByRole("img", { name: "shot.png" })).toHaveLength(2);
+      for (const testId of ["agent-message-user", "agent-message-other", "agent-dispatch-reply"]) {
+        await expectBlockPicture(await within(view.container).findByTestId(testId));
+      }
+    } finally {
+      view.unmount();
+    }
+  });
+
+  test("a streaming assistant turn shows it at the column's width", async () => {
+    const partial: ThreadMessageLike[] = [
+      {
+        content: [{ text: `${PICTURE}\n\n- first\n- sec`, type: "text" }],
+        createdAt: new Date("2026-09-10T00:00:00Z"),
+        id: "a1",
+        role: "assistant",
+        status: { type: "running" },
+      },
+    ];
+    const view = render(
+      <Providers>
+        <Transcript messages={partial} />
+      </Providers>
+    );
+    try {
+      await expectBlockPicture(
+        await within(view.container).findByTestId("agent-message-assistant")
+      );
+    } finally {
+      view.unmount();
+    }
+  });
+
+  test("the reference hover card shows it in a comment's body as a thumbnail beside its caption", async () => {
+    const getComment = spyOn(api, "getComment").mockResolvedValue({
+      comment: { ...comment, body: PICTURE },
+      replies: [],
+    });
+    jest.useFakeTimers();
+    const view = render(
+      <Providers>
+        <Link
+          to="/issues/CORE-1/comments/comment-1"
+          {...referenceTriggerProps({ id: "comment-1", key: "CORE-1", kind: "comment" })}
+        >
+          the comment
+        </Link>
+        <RefPreviewHost />
+      </Providers>
+    );
+    try {
+      fireEvent.pointerOver(screen.getByRole("link", { name: "the comment" }), {
+        pointerType: "mouse",
+      });
+      act(() => {
+        jest.advanceTimersByTime(REF_PREVIEW_OPEN_DELAY_MS);
+      });
+      const card = screen.getByRole("tooltip");
+      jest.useRealTimers();
+      const body = await waitFor(() => {
+        const preview = card.querySelector<HTMLElement>("[data-markdown-preview]");
+        if (preview === null) throw new Error("the hover card body is not a MarkdownPreview");
+        return preview;
+      });
+      await expectThumbnail(body, "inert");
+      expectOneLine(body);
+    } finally {
+      view.unmount();
+      getComment.mockRestore();
+    }
+  });
+
+  test("the unfurl card shows it in the target's text as a thumbnail beside its caption", async () => {
+    // Long enough that the title has to cut it, so the card shows the whole text under the title.
+    const prose = "After the deploy every column on the board was drawn twice.";
+    const long = `${prose} ${PICTURE}`;
+    const getComment = spyOn(api, "getComment").mockResolvedValue({
+      comment: { ...comment, body: long },
+      replies: [],
+    });
+    const view = render(
+      <Providers>
+        <Unfurl body="dispatch://CORE-1/comment/comment-1" />
+      </Providers>
+    );
+    try {
+      const card = await within(view.container).findByRole("link", { name: /^After the deploy/ });
+      const body = card.querySelector<HTMLElement>("[data-markdown-preview]");
+      if (body === null) throw new Error("the unfurl body is not a MarkdownPreview");
+      await expectThumbnail(body, "inert", `${prose} ${PICTURE_WORDS}`);
+      expectOneLine(body);
+    } finally {
+      view.unmount();
+      getComment.mockRestore();
+    }
+  });
+
+  test("a reply quote shows it in the quoted parent as a thumbnail beside its caption", async () => {
+    const view = render(
+      <Providers>
+        <ReplyQuote author="Planner" excerpt={PICTURE} to="/issues/CORE-1/messages/message-1" />
+      </Providers>
+    );
+    try {
+      const quote = await within(view.container).findByRole("link", {
+        name: /^Replying to Planner/,
+      });
+      const body = quote.querySelector<HTMLElement>("[data-markdown-preview]");
+      if (body === null) throw new Error("the quote is not a MarkdownPreview");
+      await expectThumbnail(body, "inert", `Replying to Planner — ${PICTURE_WORDS}`);
+      expectOneLine(body);
+    } finally {
+      view.unmount();
+    }
+  });
+
+  test("the margin's collapsed thread preview shows it as a thumbnail linked to the picture's page", async () => {
+    const thread: Thread = {
+      anchor: null,
+      key: comment.id,
+      lastReplyAt: undefined,
+      replies: [],
+      resolved: false,
+      root: { comment: { ...comment, body: PICTURE }, kind: "comment" },
+    };
+    const view = render(
+      <Providers>
+        <ThreadCard
+          actionFailure={undefined}
+          artifactSlug="spec"
+          editingCommentId={undefined}
+          expanded={false}
+          hovered={false}
+          isClosed={false}
+          onAction={() => {}}
+          onEdit={async () => undefined}
+          onEditingChange={() => {}}
+          onRetryAction={() => {}}
+          onToggle={() => {}}
+          owner={{ key: "CORE-1", kind: "issue" }}
+          pendingAction={false}
+          savingCommentEditId={undefined}
+          thread={thread}
+          viewerLogin="alice"
+        />
+      </Providers>
+    );
+    try {
+      const card = await within(view.container).findByTestId(`margin-comment-${comment.id}`);
+      const body = card.querySelector<HTMLElement>("[data-markdown-preview]");
+      if (body === null) throw new Error("the collapsed preview is not a MarkdownPreview");
+      await expectThumbnail(body, "live");
+      expectOneLine(body);
+    } finally {
+      view.unmount();
+    }
+  });
+
+  test("a search hit's snippet shows it as a thumbnail beside its caption, the matched word still highlighted", async () => {
+    const hit: SearchResult = {
+      href: "/issues/CORE-1/comments/comment-1",
+      id: "comment-1",
+      kind: "comment",
+      owner: { key: "CORE-1", kind: "issue", status: "in_progress", title: "Design decision" },
+      rank: 1,
+      snippet: PICTURE.replace("layout", "<mark>layout</mark>"),
+    };
+    const search = spyOn(api, "search").mockResolvedValue({ results: [hit], took_ms: 1 });
+    const view = render(
+      <Providers>
+        <KeymapProvider>
+          <SearchPalette mode="search" onClose={() => {}} />
+        </KeymapProvider>
+      </Providers>
+    );
+    try {
+      fireEvent.change(screen.getByRole("combobox", { name: "Search" }), {
+        target: { value: "layout" },
+      });
+      const option = await screen.findByRole("option");
+      const body = option.querySelector<HTMLElement>("[data-markdown-preview]");
+      if (body === null) throw new Error("the search snippet is not a MarkdownPreview");
+      await expectThumbnail(body, "inert");
+      expectOneLine(body);
+      expect(Array.from(body.querySelectorAll("mark"), (mark) => mark.textContent)).toEqual([
+        "layout",
+      ]);
+    } finally {
+      view.unmount();
+      search.mockRestore();
+    }
+  });
+
+  test("the broadcasts list shows it in a broadcast's first line as a thumbnail beside its caption", async () => {
+    const sent: BroadcastSummary = {
+      author: { id: "alice", kind: "user" },
+      body: PICTURE,
+      created_at: "2026-09-10T00:00:00Z",
+      delivery: "steer",
+      id: "broadcast-1",
+      recipients: 2,
+      replies: 1,
+    };
+    const listBroadcasts = spyOn(api, "listBroadcasts").mockResolvedValue([sent]);
+    const listAgents = spyOn(api, "listAgents").mockResolvedValue([]);
+    const view = render(
+      <Providers>
+        <BroadcastsPage />
+      </Providers>
+    );
+    try {
+      const row = await within(view.container).findByRole("link", { name: /answered/ });
+      const body = row.querySelector<HTMLElement>("[data-markdown-preview]");
+      if (body === null) throw new Error("the broadcast row is not a MarkdownPreview");
+      await expectThumbnail(body, "inert");
+      expectOneLine(body);
+    } finally {
+      view.unmount();
+      listBroadcasts.mockRestore();
+      listAgents.mockRestore();
+    }
+  });
 });
