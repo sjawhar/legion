@@ -6,7 +6,7 @@ import {
 import type { LegionGrant } from "@legion/contracts/legion-api";
 import { messageFor } from "@legion/envoy-client/errors";
 import pkg from "../../package.json";
-import type { CommandContext, SessionContext } from "../pi-types";
+import type { CommandContext, PiApi, SessionContext } from "../pi-types";
 import { recordBootstrappedSession } from "../subagent-session";
 import { classifySession, requiredControllerCapability, requiredEnvironment } from "./classify";
 import { LegionDaemonApiError, type LegionDaemonClient } from "./daemon-client";
@@ -32,8 +32,9 @@ export interface ControllerSession {
 export function createControllerSession(deps: {
   readonly daemon: () => LegionDaemonClient;
   readonly persistedTranscript: PersistedTranscript;
+  readonly pi: PiApi;
 }): ControllerSession {
-  const { daemon, persistedTranscript } = deps;
+  const { daemon, persistedTranscript, pi } = deps;
   let controllerSessionID: string | undefined;
   let controllerCapability: string | undefined;
   let mintControllerGrant: (() => Promise<LegionGrant>) | undefined;
@@ -54,6 +55,13 @@ export function createControllerSession(deps: {
    * `LEGION_PROJECT` stops the claim, and so does one whose controller role is not that of the
    * project `GET /legion/v1/state` names (`legionProjectToken`, the rule the daemon applies to its
    * own). The registration's claim token is compared once more after it, the daemon's own answer.
+   * A session `legion controller start` launched (never a hand-started takeover, which carries no
+   * LEGION_CONTROLLER_START_MESSAGE) gets its first turn right here, right after the role claim
+   * and before the subscription below opens: `pi.sendUserMessage` runs the skill's start
+   * procedure deterministically, with nothing typed, rather than leaving it to race a wake for
+   * the session's one first-turn slot (LEGION-392 found that race — Oh My Pi's own
+   * positional-argument first message can lose it to an Envoy notice delivered during this same
+   * async claim).
    * The subscription is a live wake only: an Oh My Pi session subscribes over core NATS, so a
    * notice published while no controller runs never reaches one, and the controller skill reads
    * `legion state` and Dispatch's triage listing at boot for what it missed. Its grants are minted
@@ -107,6 +115,15 @@ export function createControllerSession(deps: {
     }
     const envoyContext = "setInterval" in context ? context : undefined;
     await claimEnvoyRole(sessionID, registration.claimToken, envoyContext);
+    // The very first claim this process ever makes, for a session `legion controller start`
+    // launched: send the start message as this session's first turn now, before the subscription
+    // below can deliver an external wake that would otherwise race it for the one first-turn slot
+    // (LEGION-392). A hand-started takeover (`launched` false) and a reclaim after `/new`/`/resume`
+    // (`controllerSessionID` already set) send nothing: the operator's own session speaks for
+    // itself.
+    if (launched && controllerSessionID === undefined) {
+      pi.sendUserMessage(requiredEnvironment(process.env, "LEGION_CONTROLLER_START_MESSAGE"));
+    }
     await subscribeLegionNotice(
       sessionID,
       legionControllerNoticeSubject(project),

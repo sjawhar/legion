@@ -2573,8 +2573,10 @@ until_true 300 "controllerLocator in the state" sh -c "'$work/legion' state --js
 controller_session=$(daemon_state | jq -r .controllerLocator.sessionId)
 note "controllerLocator $(daemon_state | jq -c .controllerLocator)"
 # The controller's first turn starts itself (LEGION-392): nothing is ever typed into its pane, so
-# its session's first user message is the start message `legion controller start` launches Oh My
-# Pi with (controllerStartMessage, cmd/legion/controller.go), and the model answers it.
+# its session's first user message is the start message `legion controller start` carries as
+# LEGION_CONTROLLER_START_MESSAGE (cmd/legion/controller.go) and the pi-legion-envoy extension
+# sends right after its role claim, before it opens the live wake subscription a tick could race
+# it on (controller-session.ts `claim`); the model answers it.
 controller_started_itself() {
   local file
   for file in "$profile_agent/sessions"/*/*.jsonl; do

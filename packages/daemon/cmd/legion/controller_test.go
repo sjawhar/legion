@@ -442,9 +442,9 @@ func TestControllerStartWritesTheSecretAndTheControllersFilesUnderTheStateDirect
 
 // Oh My Pi runs through the launch prefix, interactive (no --mode rpc, no --resume), with one
 // --append-system-prompt holding the controller prompt, the daemon's design gate policy, and the
-// deployment instructions, and the start message as its first prompt, so the controller's first
-// turn runs with nothing typed; under the operator's own environment plus exactly the shared
-// controller environment — the secrets as file pointers, never values.
+// deployment instructions; under the operator's own environment plus exactly the shared
+// controller environment — the secrets as file pointers, never values — including
+// LEGION_CONTROLLER_START_MESSAGE, which the extension sends as the session's first turn.
 func TestControllerStartLaunchesOhMyPiWithTheSharedControllerEnvironment(t *testing.T) {
 	d := newControllerDaemon(t)
 	c := newControllerStart(t, d, controllerOptions{})
@@ -466,11 +466,11 @@ func TestControllerStartLaunchesOhMyPiWithTheSharedControllerEnvironment(t *test
 	if err != nil {
 		t.Fatalf("read the deployment instructions: %v", err)
 	}
-	// `$(cat …)` drops each file's trailing newlines, as a shell does.
+	// `$(cat …)` drops each file's trailing newlines, as a shell does. The start message travels
+	// as LEGION_CONTROLLER_START_MESSAGE, not a CLI word: argv carries only the system prompt.
 	wantArgv := []string{"--append-system-prompt",
 		strings.TrimRight(string(controllerPrompt), "\n") + "\n\nDesign gate policy: `gates.design: root-issues`.\n\n" +
-			strings.TrimRight(string(instructions), "\n"),
-		controllerStartMessage}
+			strings.TrimRight(string(instructions), "\n")}
 	if got := c.argv(); !slices.Equal(got, wantArgv) {
 		t.Fatalf("Oh My Pi's argv = %q\nwant %q", got, wantArgv)
 	}
@@ -489,26 +489,27 @@ func TestControllerStartLaunchesOhMyPiWithTheSharedControllerEnvironment(t *test
 	secrets := filepath.Join(c.defaultDir, "secrets")
 	workerBin, bin := filepath.Join(c.defaultDir, "worker-bin"), filepath.Join(c.defaultDir, "bin")
 	want := map[string]string{
-		"LEGION_TEST_PREFIX_RAN":        "1",
-		"LEGION_CONTROLLER":             "1",
-		"LEGION_ROLE":                   "controller",
-		"LEGION_DAEMON_URL":             d.url,
-		"LEGION_PROJECT":                "demo",
-		"LEGION_STATE_DIR":              c.defaultDir,
-		"ENVOY_NATS_URL":                "nats://a:4222,nats://b:4222",
-		"ENVOY_URL":                     "http://envoy.test:9020",
-		"PATH":                          workerBin + ":" + bin + ":/usr/bin:/bin",
-		"PI_SHELL_PREFIX":               shellprefix.For(workerBin, bin),
-		"GH_CONFIG_DIR":                 filepath.Join(c.defaultDir, "gh"),
-		"GH_TOKEN":                      "",
-		"GITHUB_TOKEN":                  "",
-		"GH_HOST":                       "",
-		"LEGION_GRANT_FILE":             filepath.Join(secrets, "legion-demo-controller-grant"),
-		"DISPATCH_URL":                  "https://dispatch.test",
-		"DISPATCH_TOKEN_FILE":           filepath.Join(c.dir, "dispatch-token"),
-		"LEGION_CONTROLLER_SECRET_FILE": filepath.Join(secrets, "legion-demo-controller"),
-		"ENVOY_TOKEN_FILE":              filepath.Join(c.dir, "envoy-token"),
-		"NATS_NKEY_SEED_FILE":           filepath.Join(c.dir, "nats-seed"),
+		"LEGION_TEST_PREFIX_RAN":          "1",
+		"LEGION_CONTROLLER":               "1",
+		"LEGION_ROLE":                     "controller",
+		"LEGION_DAEMON_URL":               d.url,
+		"LEGION_PROJECT":                  "demo",
+		"LEGION_STATE_DIR":                c.defaultDir,
+		"ENVOY_NATS_URL":                  "nats://a:4222,nats://b:4222",
+		"ENVOY_URL":                       "http://envoy.test:9020",
+		"PATH":                            workerBin + ":" + bin + ":/usr/bin:/bin",
+		"PI_SHELL_PREFIX":                 shellprefix.For(workerBin, bin),
+		"GH_CONFIG_DIR":                   filepath.Join(c.defaultDir, "gh"),
+		"GH_TOKEN":                        "",
+		"GITHUB_TOKEN":                    "",
+		"GH_HOST":                         "",
+		"LEGION_GRANT_FILE":               filepath.Join(secrets, "legion-demo-controller-grant"),
+		"LEGION_CONTROLLER_START_MESSAGE": controllerStartMessage,
+		"DISPATCH_URL":                    "https://dispatch.test",
+		"DISPATCH_TOKEN_FILE":             filepath.Join(c.dir, "dispatch-token"),
+		"LEGION_CONTROLLER_SECRET_FILE":   filepath.Join(secrets, "legion-demo-controller"),
+		"ENVOY_TOKEN_FILE":                filepath.Join(c.dir, "envoy-token"),
+		"NATS_NKEY_SEED_FILE":             filepath.Join(c.dir, "nats-seed"),
 	}
 	for name := range want {
 		if old, ok := baseline[name]; ok && old == want[name] {
@@ -557,7 +558,7 @@ func TestControllerStartTellsTheControllerTheDaemonsDesignGatePolicy(t *testing.
 		t.Fatalf("legion controller start = %d, stderr %q", code, errb)
 	}
 	argv := c.argv()
-	if len(argv) != 3 || !strings.Contains(argv[1], "\n\nDesign gate policy: `gates.design: off`.\n\n") {
+	if len(argv) != 2 || !strings.Contains(argv[1], "\n\nDesign gate policy: `gates.design: off`.\n\n") {
 		t.Fatalf("Oh My Pi's argv = %q; want the system prompt to carry the off policy line", argv)
 	}
 }
