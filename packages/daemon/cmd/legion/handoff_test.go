@@ -152,6 +152,49 @@ func TestHandoffReadNeverFallsBackToAnotherTreesLegacyHandoff(t *testing.T) {
 	}
 }
 
+// A tree still mid-flight when dispatch://LEGION-565's first round started stamping handoffs wrote
+// its own at the flat .legion/<phase>.json, unstamped, and a commit on its own branch, after its
+// fork point from main, is what carries it. legion handoff read trusts that: it falls back to the
+// flat file when the unstamped file's own branch history, not just a matching stamp, shows it is
+// this tree's.
+func TestHandoffReadFallsBackToItsOwnUnstampedLegacyHandoff(t *testing.T) {
+	seed, jj := handoffRepo(t)
+	if err := os.WriteFile(filepath.Join(seed, "README.md"), []byte("smoke\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	handoffJJ(t, jj, seed, "commit", "-m", "base")
+	handoffJJ(t, jj, seed, "bookmark", "set", "main", "-r", "@-")
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	handoffJJ(t, jj, filepath.Dir(workspace), "git", "clone", seed, workspace)
+	writeLegacyHandoffFile(t, workspace, "plan.json", `{"scope":"small","subIssues":[]}`+"\n")
+	handoffJJ(t, jj, workspace, "commit", "-m", "plan: record handoff")
+	t.Setenv("LEGION_ISSUE", "THIS-1")
+	t.Setenv("LEGION_JJ_PATH", jj)
+	var out, errb bytes.Buffer
+	if code := run(context.Background(), []string{"legion", "handoff", "read", "--workspace", workspace, "--phase", "plan"}, &out, &errb); code != 0 || !strings.Contains(out.String(), `"scope": "small"`) {
+		t.Fatalf("handoff read --phase plan of this tree's own unstamped flat handoff = %d: stdout %s stderr %s; want it returned", code, out.String(), errb.String())
+	}
+}
+
+// An unstamped flat .legion/<phase>.json the branch inherited unchanged from main at its fork
+// point - another issue's stale handoff, never recommitted - is never read as this tree's, even
+// with its own branch history available to check: no commit after the fork point touched it.
+func TestHandoffReadNeverFallsBackToAnUnstampedHandoffInheritedFromMain(t *testing.T) {
+	seed, jj := handoffRepo(t)
+	writeLegacyHandoffFile(t, seed, "plan.json", `{"scope":"small","subIssues":[]}`+"\n")
+	handoffJJ(t, jj, seed, "commit", "-m", "an earlier merged pull request")
+	handoffJJ(t, jj, seed, "bookmark", "set", "main", "-r", "@-")
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	handoffJJ(t, jj, filepath.Dir(workspace), "git", "clone", seed, workspace)
+	t.Setenv("LEGION_ISSUE", "THIS-1")
+	t.Setenv("LEGION_JJ_PATH", jj)
+	var out, errb bytes.Buffer
+	code := run(context.Background(), []string{"legion", "handoff", "read", "--workspace", workspace, "--phase", "plan"}, &out, &errb)
+	if code != 1 || out.String() != "" {
+		t.Fatalf("handoff read --phase plan of an unstamped handoff inherited from main = %d, stdout %q; want it refused", code, out.String())
+	}
+}
+
 // LEGION_ISSUE names the tree's own handoff directory, .legion/<issue>/, and a worker sets its own
 // environment. A value that is not a Dispatch issue key - a traversal, an absolute path, a nested
 // path, nothing - is refused before any path is built from it, by write, read and complete alike,

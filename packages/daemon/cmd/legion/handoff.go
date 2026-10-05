@@ -189,17 +189,68 @@ func runHandoffRead(_ context.Context, args []string, stdout, stderr io.Writer) 
 }
 
 // readOwnHandoff reads issue's handoff of phaseWord at handoffFile, falling back to the flat
-// legacyHandoffFile only when that read fails and the flat file is stampedBy issue. Without either,
-// the per-issue read's error is returned, naming the path the handoff belongs at.
+// legacyHandoffFile only when that read fails and legacyHandoffOwnedByThisTree. Without either, the
+// per-issue read's error is returned, naming the path the handoff belongs at.
 func readOwnHandoff(workspace, issue, phaseWord string) (any, error) {
 	value, err := readHandoff(filepath.Join(workspace, handoffFile(issue, phaseWord+".json")))
 	if err == nil {
 		return value, nil
 	}
-	if legacy, legacyErr := readHandoff(filepath.Join(workspace, legacyHandoffFile(phaseWord+".json"))); legacyErr == nil && stampedBy(legacy, issue) {
+	legacy, legacyErr := readHandoff(filepath.Join(workspace, legacyHandoffFile(phaseWord+".json")))
+	if legacyErr == nil && legacyHandoffOwnedByThisTree(legacy, issue, workspace, phaseWord+".json") {
 		return legacy, nil
 	}
 	return nil, err
+}
+
+// legacyHandoffOwnedByThisTree is whether the flat legacy handoff value, read from name under
+// workspace's .legion/, belongs to this tree: stampedBy issue (every write since
+// dispatch://LEGION-565's first round), or, for a handoff a role wrote before that round ever
+// stamped one, unstamped and written by a commit on this tree's own branch after its fork point
+// from main - never a handoff the branch inherited unchanged from main at the fork point, which is
+// another issue's stale one that happens to carry no stamp either. A value stamped for a different
+// issue is never this tree's, fork point or not.
+func legacyHandoffOwnedByThisTree(value any, issue, workspace, name string) bool {
+	if stampedBy(value, issue) {
+		return true
+	}
+	fields, ok := value.(map[string]any)
+	if !ok {
+		return false
+	}
+	if _, stamped := fields["issue"]; stamped {
+		return false
+	}
+	jj := os.Getenv("LEGION_JJ_PATH")
+	if jj == "" || !filepath.IsAbs(jj) {
+		return false
+	}
+	return writtenSinceForkPoint(jj, workspace, legacyHandoffFile(name))
+}
+
+// writtenSinceForkPoint is whether a commit after this branch's fork point from main - the
+// daemon's own notion of it: the commit the branch was created at (dispatch://LEGION-539,
+// dispatch://LEGION-565's main-strip the first commit on top of it when main carried one) - touched
+// relPath, up to and including the working copy (@). trunk() is read first, since it is already how
+// this command and legion push locate main; main@origin is tried only when trunk() resolves to
+// nothing, for a workspace with no local trunk-matching bookmark. Neither resolving, or neither
+// sharing history with @, answers false: the file's provenance cannot be shown, so it is not
+// trusted.
+func writtenSinceForkPoint(jj, workspace, relPath string) bool {
+	var forkPoint string
+	for _, main := range []string{"trunk()", "main@origin"} {
+		point, err := jjOutput(jj, workspace, relPath, "log", "-r", "heads(::@ & ::"+main+")", "--no-graph", "-T", "commit_id")
+		if err == nil && point != "" && !strings.Contains(point, "\n") {
+			forkPoint = point
+			break
+		}
+	}
+	if forkPoint == "" {
+		return false
+	}
+	fileset := fmt.Sprintf("root:%q", filepath.ToSlash(relPath))
+	touched, err := jjOutput(jj, workspace, relPath, "log", "-r", forkPoint+"..@ & files("+fileset+")", "--no-graph", "-T", `commit_id ++ "\n"`)
+	return err == nil && touched != ""
 }
 
 func runHandoffComplete(ctx context.Context, args []string, stdout, stderr io.Writer) int {
@@ -299,7 +350,7 @@ func handoffCommit(workspace string, role legionclaim.Role, current phase.Phase)
 	file := handoffFile(issue, word+".json")
 	if _, err := os.Stat(filepath.Join(workspace, file)); errors.Is(err, os.ErrNotExist) {
 		legacy := legacyHandoffFile(word + ".json")
-		if value, err := readHandoff(filepath.Join(workspace, legacy)); err == nil && stampedBy(value, issue) {
+		if value, err := readHandoff(filepath.Join(workspace, legacy)); err == nil && legacyHandoffOwnedByThisTree(value, issue, workspace, word+".json") {
 			file = legacy
 		}
 	}
