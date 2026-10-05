@@ -1241,3 +1241,169 @@ func ParseRoute(s string) (Route, error) {
 	}
 	return Route{}, fmt.Errorf("invalid route %q", s)
 }
+
+// DeliverySettings is LEGION-567's one configuration record: which repository deploys, its
+// workflow paths and production job name, and the population rule's authors and excluded
+// repositories (LEGION-294). At most one row ever exists. LastEventAt and LastReconcileAt are
+// the Delivery page's freshness: the last GitHub event the intake consumer processed, and the
+// last time the five-minute reconcile completed.
+type DeliverySettings struct {
+	DeployRepo           string     `json:"deploy_repo"`
+	DeployWorkflowPath   string     `json:"deploy_workflow_path"`
+	ProductionJobName    string     `json:"production_job_name"`
+	PRChecksWorkflowPath string     `json:"pr_checks_workflow_path"`
+	PopulationAuthors    []string   `json:"population_authors"`
+	ExcludedRepos        []string   `json:"excluded_repos"`
+	LastEventAt          *time.Time `json:"last_event_at"`
+	LastReconcileAt      *time.Time `json:"last_reconcile_at"`
+	UpdatedBy            Actor      `json:"updated_by"`
+	UpdatedAt            time.Time  `json:"updated_at"`
+}
+
+// DeliveryPullRequest is one population pull request (LEGION-294's rule): authored by one of
+// DeliverySettings.PopulationAuthors, merged, not in an excluded repository, not a task PR.
+// CreatedAt, MergedAt, Additions and Deletions are nil until the completing GitHub fetch (or a
+// reconcile pass) fills them in — GitHub's webhook payload alone never carries them — and
+// Partial is true for exactly as long as that is so. IssueKey is resolved by the title/body rule
+// only (LEGION-567 slice 1); Sessions are the raw `Omp-Session` commit trailer values.
+type DeliveryPullRequest struct {
+	Repo           string     `json:"repo"`
+	Number         int        `json:"number"`
+	Title          string     `json:"title"`
+	URL            string     `json:"url"`
+	Author         string     `json:"author"`
+	CreatedAt      *time.Time `json:"created_at"`
+	MergedAt       *time.Time `json:"merged_at"`
+	FirstCommitAt  *time.Time `json:"first_commit_at"`
+	MergeCommitSHA *string    `json:"merge_commit_sha"`
+	Additions      *int       `json:"additions"`
+	Deletions      *int       `json:"deletions"`
+	Rework         bool       `json:"rework"`
+	IssueKey       *string    `json:"issue"`
+	Sessions       []string   `json:"sessions"`
+	Partial        bool       `json:"partial"`
+	UpdatedAt      time.Time  `json:"updated_at"`
+}
+
+// DeliveryRunKind distinguishes a deploy-workflow run (on pushes to the configured repository's
+// main) from a PR-checks run (on a pull request); PRNumber is set only for the latter.
+type DeliveryRunKind string
+
+const (
+	DeliveryRunKindDeploy   DeliveryRunKind = "deploy"
+	DeliveryRunKindPRChecks DeliveryRunKind = "pr_checks"
+)
+
+// DeliveryRunConclusion is a concluded run or job's result. A still-running run or job has a nil
+// conclusion; "cancelled" is never a deploy attempt but is still recorded.
+type DeliveryRunConclusion string
+
+const (
+	DeliveryConclusionSuccess   DeliveryRunConclusion = "success"
+	DeliveryConclusionFailure   DeliveryRunConclusion = "failure"
+	DeliveryConclusionCancelled DeliveryRunConclusion = "cancelled"
+	DeliveryConclusionSkipped   DeliveryRunConclusion = "skipped"
+	DeliveryConclusionTimedOut  DeliveryRunConclusion = "timed_out"
+)
+
+// DeliveryRun is one run of the deploy workflow or the PR-checks workflow on the configured
+// deploy repository, identified by (Repo, RunID). CompletedAt and Conclusion are nil while the
+// run is still in progress.
+type DeliveryRun struct {
+	Repo         string                 `json:"repo"`
+	RunID        int64                  `json:"run_id"`
+	Kind         DeliveryRunKind        `json:"kind"`
+	PRNumber     *int                   `json:"pr_number"`
+	HeadSHA      string                 `json:"head_sha"`
+	HeadCommitAt time.Time              `json:"head_commit_at"`
+	StartedAt    time.Time              `json:"started_at"`
+	CompletedAt  *time.Time             `json:"completed_at"`
+	Conclusion   *DeliveryRunConclusion `json:"conclusion"`
+	URL          string                 `json:"url"`
+}
+
+// DeliveryRunJob is one job of a DeliveryRun, identified within it by Name (GitHub does not
+// number jobs, and a run never repeats a job name within the attempt intake and reconcile keep).
+type DeliveryRunJob struct {
+	Repo        string                 `json:"repo"`
+	RunID       int64                  `json:"run_id"`
+	Name        string                 `json:"name"`
+	StartedAt   *time.Time             `json:"started_at"`
+	CompletedAt *time.Time             `json:"completed_at"`
+	Conclusion  *DeliveryRunConclusion `json:"conclusion"`
+}
+
+// DeliveryRunJobView is one job of a DeliveryRunView, the shape `GET /api/v1/delivery/timeline`
+// answers in a run's failed_jobs and root_failing_job -- mirrors packages/contracts/src/dispatch-api.ts's
+// DeliveryRunJob exactly.
+type DeliveryRunJobView struct {
+	Name        string     `json:"name"`
+	CompletedAt *time.Time `json:"completed_at"`
+}
+
+// DeliveryPRView is one population pull request on `GET /api/v1/delivery/timeline` -- LEGION-294's
+// facts plus the two fields the server derives at read time from the stored facts,
+// DeployedStatus and (on DeliveryRunView) RootFailingJob. Mirrors
+// packages/contracts/src/dispatch-api.ts's DeliveryPR exactly; ParentAgent and Sessions resolve to
+// the same set of sessions today (LEGION-567's Open Item 2: no grouping link exists) -- see that
+// file's comment on the pair for why both still exist.
+type DeliveryPRView struct {
+	ID             string     `json:"id"`
+	Repo           string     `json:"repo"`
+	Number         int        `json:"number"`
+	Title          string     `json:"title"`
+	URL            string     `json:"url"`
+	Author         string     `json:"author"`
+	CreatedAt      *time.Time `json:"created_at"`
+	MergedAt       *time.Time `json:"merged_at"`
+	FirstCommitAt  *time.Time `json:"first_commit_at"`
+	Additions      *int       `json:"additions"`
+	Deletions      *int       `json:"deletions"`
+	Partial        bool       `json:"partial"`
+	Rework         bool       `json:"rework"`
+	Issue          *string    `json:"issue"`
+	Sessions       []string   `json:"sessions"`
+	ParentAgent    *string    `json:"parent_agent"`
+	DeployRun      *int64     `json:"deploy_run"`
+	DeployedAt     *time.Time `json:"deployed_at"`
+	DeployedStatus string     `json:"deployed_status"`
+}
+
+// DeliveryRunView is one `kind: "deploy"` run on `GET /api/v1/delivery/timeline`: a successful
+// production deploy (sized by PRs, the PRs it shipped first) or a pipeline failure (FailedJobs,
+// RootFailingJob). Mirrors packages/contracts/src/dispatch-api.ts's DeliveryRun exactly.
+type DeliveryRunView struct {
+	ID             int64                  `json:"id"`
+	URL            string                 `json:"url"`
+	HeadSHA        string                 `json:"head_sha"`
+	HeadAt         time.Time              `json:"head_at"`
+	StartedAt      time.Time              `json:"started_at"`
+	CompletedAt    *time.Time             `json:"completed_at"`
+	Conclusion     *DeliveryRunConclusion `json:"conclusion"`
+	FailedJobs     []DeliveryRunJobView   `json:"failed_jobs"`
+	RootFailingJob *DeliveryRunJobView    `json:"root_failing_job"`
+	PRs            []string               `json:"prs"`
+}
+
+// DeliveryFreshnessView is `GET /api/v1/delivery/timeline`'s freshness object: when intake last
+// processed a GitHub event, and when the five-minute reconcile last completed a pass.
+type DeliveryFreshnessView struct {
+	LastEventAt     *time.Time `json:"last_event_at"`
+	LastReconcileAt *time.Time `json:"last_reconcile_at"`
+}
+
+// DeliveryWindowView is the [from, to) window a DeliveryTimelineResponse answers for.
+type DeliveryWindowView struct {
+	From time.Time `json:"from"`
+	To   time.Time `json:"to"`
+}
+
+// DeliveryTimelineResponse is `GET /api/v1/delivery/timeline?from&to&<facets>`: merges, deploys,
+// pipeline failures and waiting-to-deploy PRs within [from, to) and the given facets. Runs holds
+// kind: "deploy" runs only; a deploy's shipped PRs are on each PR's DeployRun field.
+type DeliveryTimelineResponse struct {
+	Window    DeliveryWindowView    `json:"window"`
+	PRs       []DeliveryPRView      `json:"prs"`
+	Runs      []DeliveryRunView     `json:"runs"`
+	Freshness DeliveryFreshnessView `json:"freshness"`
+}
