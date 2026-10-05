@@ -38,6 +38,7 @@ import type {
   CredentialGrantsResponse,
   CredentialPendingResponse,
   CredentialRecord,
+  DeliveryTimelineResponse,
   DispatchUser,
   EditCommentInput,
   Event,
@@ -189,6 +190,22 @@ export type ArtifactOwner = { issue: string } | { project: string };
 export interface CreateArtifactReviewInput {
   state: ArtifactReviewState;
   reason?: string;
+}
+
+/** `GET /api/v1/delivery/timeline?from&to&<facets>`'s query: the window plus the same
+ *  repeatable facets the delivery page's URL carries (LEGION-567's plan, "API"). */
+export interface DeliveryTimelineOptions {
+  from: string;
+  to: string;
+  repo?: readonly string[];
+  parent_agent?: readonly string[];
+  session?: readonly string[];
+  issue?: readonly string[];
+  priority?: readonly string[];
+  component?: readonly string[];
+  author?: readonly string[];
+  rework?: readonly string[];
+  deployed?: readonly string[];
 }
 
 function pathSegment(value: string): string {
@@ -631,6 +648,12 @@ export class DispatchApiClient {
   }
   getReferences(reference: string): Promise<GraphReferences> {
     return this.json<GraphReferences>(pathWithQuery("/api/v1/references", { to: reference }));
+  }
+
+  /** The delivery timeline's one read: merges, deploys, pipeline failures and waiting-to-deploy
+   *  PRs within `[from, to)` and the given facets, all applied server-side. */
+  getDeliveryTimeline(options: DeliveryTimelineOptions): Promise<DeliveryTimelineResponse> {
+    return this.json<DeliveryTimelineResponse>(pathWithQuery("/api/v1/delivery/timeline", options));
   }
 
   getIssueSubscribers(key: string): Promise<Subscriber[]> {

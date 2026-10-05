@@ -107,6 +107,10 @@ const CredentialRecordPage = lazy(() =>
     default: module.CredentialRecordPage,
   }))
 );
+
+const DeliveryPage = lazy(() =>
+  import("./features/delivery/DeliveryPage").then((module) => ({ default: module.DeliveryPage }))
+);
 const MachineLoginPage = lazy(() =>
   import("./features/credentials/MachineLoginPage").then((module) => ({
     default: module.MachineLoginPage,
@@ -674,6 +678,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
                 <Route element={<CredentialRecordPage />} path="/credentials/:recordId" />
                 <Route element={<MachineLoginPage />} path="/credentials/machine" />
                 <Route element={<SettingsPage />} path="/settings" />
+                <Route element={<DeliveryPage />} path="/delivery" />
                 <Route element={<NotFoundPage />} path="*" />
               </Routes>
             </Suspense>
