@@ -110,11 +110,14 @@ func TestMarkdownPastTheElementLimitIsRefusedBeforeItIsBuilt(t *testing.T) {
 				// (LEGION-569): -race alone made refusing a mebibyte of some shapes here allocate
 				// 8-10x what it allocates without it. nodes == 0 would mean the guard never
 				// counted anything - the regression this test exists to catch, a reader that
-				// skips the guard and builds the whole document instead. The upper bound is
-				// generous slack over the guard's own cap for however many nodes one charge call
-				// may add past it.
+				// skips the guard and builds the whole document instead. The upper bound is a
+				// fixed 4*MaxDocumentElements, not derived from nodeGuard, so it still catches a
+				// regression in nodeGuard itself (a looser guard lets through far more nodes than
+				// this ceiling, not fewer) - double the guard's own current cap
+				// (nodeGuard*MaxDocumentElements), slack for however many nodes one charge call may
+				// add past it.
 				if nodes := budget.elements.nodes; nodes == 0 || nodes > 4*MaxDocumentElements {
-					t.Errorf("refusing a mebibyte of %s counted %d nodes, want >0 and at most %d (nodeGuard's own cap, with slack)", shape.name, nodes, 4*MaxDocumentElements)
+					t.Errorf("refusing a mebibyte of %s counted %d nodes, want >0 and at most %d (2x nodeGuard's cap of %d, for slack)", shape.name, nodes, 4*MaxDocumentElements, nodeGuard*MaxDocumentElements)
 				}
 			})
 		}

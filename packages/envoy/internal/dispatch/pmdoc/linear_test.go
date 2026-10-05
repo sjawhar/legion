@@ -8,29 +8,25 @@ import (
 )
 
 // Parse and Render finish in time linear in the text on the shapes that cost quadratic time
-// before LEGION-465. Each shape runs at half its target size first, in the same process under
-// whatever the box's current conditions are, and the target size's time is checked against a
-// budget scaled off that - not a fixed wall-clock bound - so -race's per-access overhead and box
-// load, which inflate both measurements by roughly the same factor, cannot flake this
-// (LEGION-569: a loaded box pushed `a_`'s fixed 30 s bound past the worst case this margin was
-// sized for). A write of a mebibyte of these is refused for the elements it makes
-// (MaxDocumentElements), so the parse here is a read-back's, which counts none and reads all of
-// it.
+// before LEGION-465. Each shape is timed at half its target size and then at the full size,
+// through growsLinearly (below), which keeps the fastest of several same-size samples before
+// comparing growth, so -race's per-access overhead and box load - whose bursts can land on only
+// one of the two measurements rather than inflating both alike - cannot flake this (LEGION-569: a
+// loaded box pushed `a_`'s fixed 30 s bound past the worst case a single sample each way was sized
+// for). A write of a mebibyte of these is refused for the elements it makes (MaxDocumentElements),
+// so the parse here is a read-back's, which counts none and reads all of it.
 func TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText(t *testing.T) {
 	for _, shape := range []string{"a_", "a_b*", "a~b_"} {
 		full := (1 << 20) / len(shape)
 		small := full / 2
-		smallElapsed := timeIt(t, "parse", shape, small*len(shape), func() error {
-			_, err := ParseRendering(strings.Repeat(shape, small))
-			return err
+		growsLinearly(t, fmt.Sprintf("parsing %q", shape), []int{small * len(shape), full * len(shape)}, linearSlack, func(size int) time.Duration {
+			repeats := size / len(shape)
+			started := time.Now()
+			if _, err := ParseRendering(strings.Repeat(shape, repeats)); err != nil {
+				t.Fatalf("parse %d bytes of %q: %v", size, shape, err)
+			}
+			return time.Since(started)
 		})
-		budget := linearBudget(smallElapsed)
-		if elapsed := timeIt(t, "parse", shape, full*len(shape), func() error {
-			_, err := ParseRendering(strings.Repeat(shape, full))
-			return err
-		}); elapsed > budget {
-			t.Errorf("parse of 1 MiB of %q took %s (half of it took %s), want at most %s", shape, elapsed, smallElapsed, budget)
-		}
 	}
 	for _, shape := range []string{"[a", "a_b&", "<a", "[^a"} {
 		full := (4 << 20) / len(shape)
@@ -38,48 +34,23 @@ func TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText(t *testing.T) {
 		doc := func(repeats int) *Node {
 			return &Node{Type: "doc", Children: []*Node{{Type: "paragraph", Children: []*Node{{Type: "text", Text: strings.Repeat(shape, repeats)}}}}}
 		}
-		smallElapsed := timeIt(t, "render", shape, small*len(shape), func() error {
-			_, err := Render(doc(small))
-			return err
+		growsLinearly(t, fmt.Sprintf("rendering %q", shape), []int{small * len(shape), full * len(shape)}, linearSlack, func(size int) time.Duration {
+			repeats := size / len(shape)
+			started := time.Now()
+			if _, err := Render(doc(repeats)); err != nil {
+				t.Fatalf("render %d bytes of %q: %v", size, shape, err)
+			}
+			return time.Since(started)
 		})
-		budget := linearBudget(smallElapsed)
-		if elapsed := timeIt(t, "render", shape, full*len(shape), func() error {
-			_, err := Render(doc(full))
-			return err
-		}); elapsed > budget {
-			t.Errorf("render of 4 MiB of %q took %s (half of it took %s), want at most %s", shape, elapsed, smallElapsed, budget)
-		}
 	}
 }
 
-// timeIt runs op, the size of the input it was given, and fails the test if op errors; op's own
-// error names the shape and size, so this only times it.
-func timeIt(t *testing.T, verb, shape string, bytes int, op func() error) time.Duration {
-	t.Helper()
-	started := time.Now()
-	if err := op(); err != nil {
-		t.Fatalf("%s %d bytes of %q: %v", verb, bytes, shape, err)
-	}
-	return time.Since(started)
-}
-
-// linearSlack is how much more than 2x - the size ratio between the two measurements
-// linearBudget compares (full is double small) - a linear operation's time may grow before this
+// linearSlack is how much more than 2x - the size ratio between the two sizes growsLinearly
+// compares here (full is double small) - a linear operation's time may grow before growsLinearly
 // calls it quadratic: 2x the size at true linear cost, so 2x time; at the quadratic cost
 // LEGION-465 fixed it would be 4x, which 3x still catches with room to spare for ordinary
-// run-to-run noise. minLinearBudget floors the budget so a near-zero small measurement (GC noise,
-// timer resolution) cannot make it tighter than is reasonable on a loaded box; it is well under
-// the smallest small measurement observed here (14 ms, render of half of 4 MiB of `[a`) so the
-// ratio, not the floor, is what actually bounds the full measurement in the common case.
+// run-to-run noise.
 const linearSlack = 3
-const minLinearBudget = 100 * time.Millisecond
-
-func linearBudget(small time.Duration) time.Duration {
-	if budget := small * linearSlack; budget > minLinearBudget {
-		return budget
-	}
-	return minLinearBudget
-}
 
 // The shapes a sweep found after the ones above, each quadratic before LEGION-465 finished: a
 // text of one delimiter character, whose every character was escaped by a scan of its whole run;
@@ -135,7 +106,7 @@ func TestRenderIsLinearOnRunsFootnoteLabelsAndLineFeeds(t *testing.T) {
 // refused, so it is read as a rendering is, whose parse no element limit stops.
 func TestParseIsLinearInATableOfEscapedPipes(t *testing.T) {
 	const header, row = "| a |\n| --- |\n", "`\\|`\n"
-	growsLinearly(t, "parsing a table of `\\|` cells", []int{16 << 10, 256 << 10, 1 << 20}, func(size int) time.Duration {
+	growsLinearly(t, "parsing a table of `\\|` cells", []int{16 << 10, 256 << 10, 1 << 20}, growthAllowance, func(size int) time.Duration {
 		markdown := header + strings.Repeat(row, (size-len(header))/len(row))
 		started := time.Now()
 		if _, err := ParseRendering(markdown); err != nil {
@@ -152,13 +123,13 @@ func TestParseIsLinearInATableOfEscapedPipes(t *testing.T) {
 const growthAllowance = 4
 
 // growsLinearly times what at each of sizes in turn and fails t at the first size whose time grew
-// more than growthAllowance times faster than the size did. The first size is timed three times
-// before the second and three times after it, and the fastest of the six kept, so neither a first
-// run's warm-up nor a load spike shorter than the second size's run reads as growth. A step over
-// the bound times the larger size again and keeps the faster time, and after the first step also
+// more than allowance times faster than the size did. The first size is timed three times before
+// the second and three times after it, and the fastest of the six kept, so neither a first run's
+// warm-up nor a load spike shorter than the second size's run reads as growth. A step over the
+// bound times the larger size again and keeps the faster time, and after the first step also
 // times the smaller size again and keeps the slower, so load that rose between two runs does not
 // read as growth either.
-func growsLinearly(t *testing.T, what string, sizes []int, timed func(size int) time.Duration) {
+func growsLinearly(t *testing.T, what string, sizes []int, allowance int, timed func(size int) time.Duration) {
 	t.Helper()
 	first := func() time.Duration { return min(timed(sizes[0]), timed(sizes[0]), timed(sizes[0])) }
 	before := first()
@@ -169,18 +140,18 @@ func growsLinearly(t *testing.T, what string, sizes []int, timed func(size int) 
 		if i == 1 {
 			before = min(before, first())
 		}
-		if took > time.Duration(growthAllowance*growth)*before {
+		if took > time.Duration(allowance*growth)*before {
 			took = min(took, timed(size))
 			if i > 1 {
 				before = max(before, timed(smaller))
 			}
 		}
 		ratio := float64(took) / float64(before)
-		if took > time.Duration(growthAllowance*growth)*before {
-			t.Fatalf("%s took %s at %s, %.0f times the %s it took at %s: the input grew %d times, and a parse linear in it may grow %d times at most (growthAllowance)",
-				what, took.Round(time.Millisecond), sizeText(size), ratio, before.Round(time.Millisecond), sizeText(smaller), growth, growthAllowance*growth)
+		if took > time.Duration(allowance*growth)*before {
+			t.Fatalf("%s took %s at %s, %.0f times the %s it took at %s: the input grew %d times, and a parse linear in it may grow %d times at most",
+				what, took.Round(time.Millisecond), sizeText(size), ratio, before.Round(time.Millisecond), sizeText(smaller), growth, allowance*growth)
 		}
-		t.Logf("%s: %s at %s, %s at %s, %.1f times for an input %d times larger (at most %d)", what, before.Round(time.Millisecond), sizeText(smaller), took.Round(time.Millisecond), sizeText(size), ratio, growth, growthAllowance*growth)
+		t.Logf("%s: %s at %s, %s at %s, %.1f times for an input %d times larger (at most %d)", what, before.Round(time.Millisecond), sizeText(smaller), took.Round(time.Millisecond), sizeText(size), ratio, growth, allowance*growth)
 		before = took
 	}
 }
