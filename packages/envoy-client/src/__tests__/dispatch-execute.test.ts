@@ -3938,6 +3938,7 @@ describe("executeDispatchTool", () => {
       "(document id artifact-42) is already approved at version 3 by sjawhar"
     );
     expect(result.text).not.toContain("ask ");
+    expect(result.text).not.toContain("plan-gap-analyst");
     expect(result.details).toMatchObject({ issue: "DSP-42", artifact: "artifact-42", version: 3 });
     expect(dispatchFollowNotice(result.details)).toBeNull();
   });

@@ -15442,7 +15442,7 @@ function followsAsk(owner) {
   return `You follow this ask: its answer and replies reach you directly. For every event on ${owner.label}: envoy_subscribe ${owner.topic}`;
 }
 var triageAdviceShown = new Set;
-var SPEC_CHECK_REMINDER = 'Has a fresh reader checked this spec? Each claim about how a system works today should trace to code read or a command run, and each requirement to the human\'s words or a cited fact; a `plan-gap-analyst` subagent does this check. See the `dispatch` skill, "Writing a spec".';
+var SPEC_CHECK_REMINDER = 'Has a fresh reader checked this spec? Each claim about how a system works today should trace to code read or a command run, and each requirement to the human\'s words or a cited fact; a fresh read-only subagent (`plan-gap-analyst` on Oh My Pi) does this check. See the `dispatch` skill, "Writing a spec".';
 function renderAdvice(tool, key, advice, opts) {
   if (advice === undefined)
     return [];

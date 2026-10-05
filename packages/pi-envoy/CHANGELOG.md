@@ -9,11 +9,13 @@
   the session's title and on the turn itself, and it switches within one turn of `/model`. Absent
   for a client whose assistant message carries no model identity.
 
-- `plan-gap-analyst` also reads a spec before a human does, and reports a fourth kind of finding:
-  a claim about how a system works today that the code, its documentation or a command's output
-  does not show, or a requirement that traces to neither the owner's words nor a cited fact. The
-  `dispatch` skill's "Writing a spec" has an author give it the draft and the human's words before
-  the first version and before each approval request (LEGION-577).
+- `plan-gap-analyst` also reads a spec before a human does, and reports every finding of a fourth
+  kind: a claim about how a system works today that the code, its documentation or command output
+  it was given does not show (a claim about live state it cannot read is reported as unverified),
+  and, when it was given the owner's words, a requirement that traces to neither them nor a cited
+  fact. The `dispatch` skill's "Writing a spec" has an author give it the draft, the human's words
+  and any command output a claim rests on, before the first version and before each approval
+  request (LEGION-577).
 
 - A `dispatch-brainstorming` skill ships beside `dispatch` and `dispatch-first` (LEGION-475). In a
   session with Dispatch it replaces superpowers' `brainstorming` and `writing-plans`: the design
