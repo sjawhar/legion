@@ -452,6 +452,7 @@ export default function legionExtension(pi: PiApi): void {
   const controllerSession = createControllerSession({
     daemon: roleDaemon,
     persistedTranscript,
+    exitProcess: (code) => exitProcess(code),
   });
 
   /**

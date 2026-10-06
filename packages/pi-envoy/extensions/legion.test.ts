@@ -2728,6 +2728,7 @@ async function launchedController(options: {
       });
     }
     if (url.pathname === "/legion/v1/state") return Response.json(daemonState);
+    if (url.pathname === "/legion/v1/claims/ready") return new Response(null, { status: 204 });
     if (url.pathname.startsWith("/legion/")) {
       return Response.json({ error: "no route" }, { status: 404 });
     }
@@ -2834,6 +2835,78 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     expect(controller.exits).toEqual([]);
     // The `legion` tool is an architect's and a worker's; the controller does not get it.
     expect(controller.tools.map((tool) => tool.name)).not.toContain("legion");
+  });
+
+  // `controller: daemon`: the pod carries its launch's boot token, never a capability fetched over
+  // the operator's bearer. The session registers with that token and, holding the role and the
+  // topic, reports ready, which is when the daemon hands it the start message.
+  test("a controller the daemon launched registers with its boot token, then reports ready once it holds the role", async () => {
+    const controller = await launchedController({ sessionId: "ses_controller_pod" });
+    const bootFile = path.join(path.dirname(controller.grantFile), "LEGION_BOOT_TOKEN");
+    await writeFile(bootFile, "launch-boot-token\n", { mode: 0o600 });
+    delete process.env.LEGION_CONTROLLER_SECRET_FILE;
+    process.env.LEGION_BOOT_TOKEN_FILE = bootFile;
+    try {
+      await controller.handlers.get("session_start")?.(
+        {},
+        controller.context("ses_controller_pod")
+      );
+    } finally {
+      delete process.env.LEGION_BOOT_TOKEN_FILE;
+    }
+    expect(daemonRequests(controller.requests)).toEqual([
+      { path: "/legion/v1/state", body: undefined },
+      {
+        path: "/legion/v1/claims/register",
+        body: {
+          bootToken: "launch-boot-token",
+          sessionId: "ses_controller_pod",
+          ompSessionFile: "/tmp/ses_controller_pod.jsonl",
+          agentId: "ses_controller_pod",
+          pluginContract: pkg.legion.daemonApiVersion,
+        },
+      },
+      {
+        path: "/legion/v1/claims/ready",
+        body: {
+          claimToken: controller.token,
+          sessionId: "ses_controller_pod",
+          secret: controller.registration.secret,
+          generation: controller.registration.generation,
+        },
+      },
+    ]);
+    const paths = controller.requests.map((request) => request.path);
+    expect(paths.indexOf("/v1/roles/set")).toBeLessThan(paths.indexOf("/legion/v1/claims/ready"));
+    expect(controller.exits).toEqual([]);
+  });
+
+  // Nobody reads a daemon-launched controller's session, so a claim it cannot complete exits Oh My
+  // Pi and the daemon relaunches it, as a pane's failed boot does.
+  test("a daemon-launched controller whose registration is refused exits", async () => {
+    const controller = await launchedController({
+      sessionId: "ses_controller_pod",
+      register: () => Response.json({ error: "invalid boot token" }, { status: 403 }),
+    });
+    const bootFile = path.join(path.dirname(controller.grantFile), "LEGION_BOOT_TOKEN");
+    await writeFile(bootFile, "stale-boot-token\n", { mode: 0o600 });
+    delete process.env.LEGION_CONTROLLER_SECRET_FILE;
+    process.env.LEGION_BOOT_TOKEN_FILE = bootFile;
+    try {
+      // The test's exit hook throws in place of exiting; the throw ends the handler.
+      await controller.handlers.get("session_start")?.(
+        {},
+        controller.context("ses_controller_pod")
+      );
+    } catch {
+      // process would exit
+    } finally {
+      delete process.env.LEGION_BOOT_TOKEN_FILE;
+    }
+    expect(controller.exits).toEqual([1]);
+    expect(controller.requests.map((request) => request.path)).not.toContain(
+      "/legion/v1/claims/ready"
+    );
   });
 
   test("claims with the capability LEGION_CONTROLLER_SECRET_FILE names over LEGION_CONTROLLER_SECRET, and /legion-claim-controller moves the role to a hand-started session", async () => {
