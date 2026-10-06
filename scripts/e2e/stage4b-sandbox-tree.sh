@@ -2191,8 +2191,8 @@ on_tree "$tree1" until_true 120 "tree 1's interrupted tester to go idle on its s
 # outbox's "outbox row waits" line (which this same event can log only at DEBUG) nor
 # takeover_interrupted (which can be absent entirely — see the comment above takeover_lines).
 takeover_row=$(jq -R -c --arg tester "$(claim_token "$tree1" tester)" --arg over "$takeover_over" \
-  'fromjson? | select(.msg == $over and .claim == $tester)' "$daemon_log" |
-  jq -s -r 'last | .row // empty')
+  'fromjson? | select(.msg == $over and .claim == $tester) | .row' "$daemon_log" |
+  jq -s -r 'last // empty')
 [ -n "$takeover_row" ] || fail "the daemon log holds no implementer start of $tree1 held for the tester's turn"
 on_tree "$tree1" until_true 300 "the implementer's CI-red task to reach its session" session_contains "$tree1" implementer "Reason: CI is red at"
 task_at=$(claim_session_text "$tree1" implementer | jq -R -s -r '[split("\n")[] | fromjson? |
@@ -2201,10 +2201,14 @@ task_at=$(claim_session_text "$tree1" implementer | jq -R -s -r '[split("\n")[] 
 takeover_lines "$takeover_row" "$(claim_token "$tree1" tester)" >"$evidence/ci-red-takeover-log.jsonl"
 takeover_ordered "$evidence/ci-red-takeover-log.jsonl" "$task_at" ||
   fail "the takeover's order does not hold: the tester's turn interrupted and over before the implementer's start went on and its task arrived at $task_at ($evidence/ci-red-takeover-log.jsonl)"
-# The control: the implementer's task arriving before the tester's turn was even interrupted (the
-# .fail-me commit, which is what starts the takeover) fails the order. fail_me_at, not a log line,
-# so the control exercises a real violation even on a run whose takeover_interrupted never logged.
-expect_failure takeover-task-before-turn-over takeover_ordered "$evidence/ci-red-takeover-log.jsonl" "$fail_me_at"
+# The control: the implementer's task arriving before the tester's turn was interrupted (or, where
+# that never logged — the comment above takeover_lines names the race — before the .fail-me commit
+# that starts the takeover) fails the order. The interrupt time is the tighter control (real runs
+# put it 0.1 to 1.4ms before the turn being over, fail_me_at seconds before); fail_me_at only
+# stands in when the row has no interrupt line to read, so the control never reads a null.
+control_at=$(jq -s -r --arg m "$takeover_interrupted" '[.[] | select(.msg == $m) | .time] | first // empty' "$evidence/ci-red-takeover-log.jsonl")
+[ -n "$control_at" ] || control_at=$fail_me_at
+expect_failure takeover-task-before-turn-over takeover_ordered "$evidence/ci-red-takeover-log.jsonl" "$control_at"
 note "start row $takeover_row was held, the tester's turn interrupted and over, and only then did the start go on; the implementer's task reached it at $task_at ($evidence/ci-red-takeover-log.jsonl); no witness, the tester idle in its first pod"
 send_agent "$tree1" implementer "Stage 4b proof CI-red operation: CI on pull request #$pr_number is red because the proof committed the file .fail-me to legion/$tree1, which the smoke repository's fail-on-demand check fails on. Fetch the branch, start a new change on top of legion/$tree1@origin, delete .fail-me and change nothing else, commit it and push it with legion push, record the required implementation handoff, then call the legion tool's handoff_complete. Do not merge."
 on_tree "$tree1" wait_for_phase "$tree1" testing 1800
