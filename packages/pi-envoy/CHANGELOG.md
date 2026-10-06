@@ -164,6 +164,21 @@
 
 ### Fixed
 
+- The `legion-retro` skill brings the pull request body's path-derived content up to date before
+  the retro pushes its `docs/solutions/` commit (LEGION-592). A repository can require body content
+  that follows from the paths a diff touches, read by a required check; the retro commit can add a
+  path the approved body never accounted for, so that check failed at the retro head and the
+  merger, which reports a stale body rather than rewriting it, stopped before READY. The retro now
+  computes that content the way the repository's instructions say, for the files the pull request
+  changes at its commit, does the work any line of it affirms (inside `docs/solutions/` only, so
+  the approval stands), and writes only those lines into the live body before `legion push`, so
+  the push's checks read it. When it cannot, it pushes nothing and tells the architect, whose
+  skill says how to answer; a push refused after the body edit puts the body back. The
+  implementer's daemon prompt names `skill://legion-retro` for `Phase: retro`, and the merge-gate
+  reference, the architect skill, `skills/AGENTS.md` and the docs site name the body edit among
+  retro's outputs. The retro skill's opening no longer says its `docs/...` paths are in
+  sjawhar/legion: `docs/solutions/` and `.legion/` are on the issue branch of the repository being
+  worked in.
 - The run-end nudge no longer counts a tool-device `write` to a Dispatch device (`xd://dispatch_*`)
   as work. Oh My Pi reports the tool such a `write` ran first, and that report alone spends or owes
   the check; before, the `write` counted as work, so a `dispatch_ask` or a decision block made
