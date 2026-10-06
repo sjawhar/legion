@@ -54,8 +54,9 @@ const (
 	// long-lived root architect pod that list can by then be hours old (dispatch://LEGION-583).
 	// Comparing the fetch's own start, not wall-clock time at removal, is what keeps this bound
 	// independent of how long the clone itself then takes (LEGION-585 raised that to 30 minutes);
-	// unset or empty removes none, and a JSON object missing either field removes none, logged as
-	// malformed input the same as any other.
+	// unset or empty removes none, and a JSON object missing either field, naming a field this
+	// build does not know, or followed by anything removes none, logged as malformed input the
+	// same as any other.
 	removableWorkspacesEnv = "LEGION_REMOVABLE_WORKSPACES"
 	// fetchStartedFile is the file `workspace-init fetch` (workspace_fetch.go) writes into the
 	// pod's own feed directory, RFC 3339, before its clone starts: the evidence `workspace-init
@@ -305,13 +306,14 @@ const nestedRepositoryWalkTimeout = 30 * time.Second
 // below, since it means this pod's whole candidate list is untrustworthy rather than one
 // candidate being malformed — comparing the fetch's own start, not wall-clock time at removal, is
 // what keeps this bound independent of how long the clone itself then takes. Decoded strictly
-// (runtime.RemovableWorkspacesPayload, an unknown field refused): invalid JSON, an unknown field,
-// a zero NotAfter, or an empty Workspaces is the same malformed input, logged and removing
-// nothing. Each candidate's shape is then checked before it ever reaches a revset or a path: Issue
-// against the key form workspace.Location accepts (legionclaim.IsIssueKey), and MergedHead, when
-// not empty, against workspace.IsCommitID; either refusal is logged and the candidate is skipped
-// rather than acted on. One candidate's failure is logged and never stops the ones after it or
-// the provisioning this pod already finished; a malformed env var removes nothing.
+// (runtime.RemovableWorkspacesPayload, an unknown field refused): invalid JSON, another shape, an
+// unknown field, anything after the one JSON object, a zero NotAfter, or an empty Workspaces is
+// the same malformed input, logged and removing nothing. Each candidate's shape is then checked
+// before it ever reaches a revset or a path: Issue against the key form workspace.Location
+// accepts (legionclaim.IsIssueKey), and MergedHead, when not empty, against workspace.IsCommitID;
+// either refusal is logged and the candidate is skipped rather than acted on. One candidate's
+// failure is logged and never stops the ones after it or the provisioning this pod already
+// finished; a malformed env var removes nothing.
 //
 // The filtered candidates are rotated (rotateCandidates below) by this pod's own issue, role, and
 // LEGION_GENERATION together before the loop: a candidate that always sorts first in the
@@ -333,7 +335,12 @@ func removeFinishedWorkspaces(ctx context.Context, run workspace.Runner, root st
 	decoder := json.NewDecoder(strings.NewReader(raw))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&payload); err != nil {
-		fmt.Fprintf(stdout, "workspace-init: %s is not valid JSON, removing nothing: %v\n", removableWorkspacesEnv, err)
+		fmt.Fprintf(stdout, "workspace-init: %s does not decode as runtime.RemovableWorkspacesPayload, removing nothing: %v\n", removableWorkspacesEnv, err)
+		return
+	}
+	// Token, not More: More reports false for a stray `}` or `]`, letting it through.
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		fmt.Fprintf(stdout, "workspace-init: %s holds data after its JSON object, removing nothing: a malformed payload\n", removableWorkspacesEnv)
 		return
 	}
 	if payload.NotAfter.IsZero() {

@@ -50,6 +50,9 @@
   push can outrun the ordinary grant on a near-full tree volume. Install this release together
   with a Go `legion` built from the same commit: a daemon at 12 refuses the unknown field, and this
   release against a daemon at 12 fails every grant mint, blocking every bash command in every pane.
+  Contract 13 also covers the worker image's `LEGION_REMOVABLE_WORKSPACES` payload, which the
+  image's own `legion` decodes strictly, so the daemon's image probe refuses an image that would
+  read a later shape of it the old way.
 
 - Each Legion role gets one set of instructions (LEGION-414). The skills and role prompts drop the
   steps the daemon no longer runs: no role pushes a `.legion/` deletion, the reviewer approves the

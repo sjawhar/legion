@@ -176,6 +176,48 @@ func TestRemoveFinishedWorkspacesRemovesNothingWithNoNotAfter(t *testing.T) {
 	}
 }
 
+// A payload this decoder cannot read in full removes nothing and names why, before reaching any
+// candidate: a field this build does not know (a later daemon's, at the top level or inside a
+// candidate), anything after the one JSON object (a second object naming another issue, or a
+// stray closing brace, which json.Decoder.More alone would let through), the bare array this
+// PR's earlier heads wrote, and an empty candidate list. Acting on the part it can read would
+// judge siblings on a list this pod was never sent whole.
+func TestRemoveFinishedWorkspacesRemovesNothingForAPayloadItCannotFullyRead(t *testing.T) {
+	future := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+	valid := fmt.Sprintf(`{"notAfter":%q,"workspaces":[{"issue":"LEGION-100"}]}`, future)
+	for _, tc := range []struct {
+		name, payload, says string
+	}{
+		{"an unknown top-level field", fmt.Sprintf(`{"notAfter":%q,"workspaces":[{"issue":"LEGION-100"}],"reason":"a later daemon's"}`, future), `does not decode as runtime.RemovableWorkspacesPayload, removing nothing: json: unknown field "reason"`},
+		{"an unknown field inside a candidate", fmt.Sprintf(`{"notAfter":%q,"workspaces":[{"issue":"LEGION-100","pinned":true}]}`, future), `does not decode as runtime.RemovableWorkspacesPayload, removing nothing: json: unknown field "pinned"`},
+		{"a bare array", `[{"issue":"LEGION-100"}]`, "does not decode as runtime.RemovableWorkspacesPayload, removing nothing: json: cannot unmarshal array"},
+		{"text after the object", valid + "xyz", "holds data after its JSON object, removing nothing"},
+		{"a second object after the first", valid + fmt.Sprintf(`{"notAfter":%q,"workspaces":[{"issue":"LEGION-101"}]}`, future), "holds data after its JSON object, removing nothing"},
+		{"a stray closing brace after the object", valid + "}", "holds data after its JSON object, removing nothing"},
+		{"an empty candidate list", fmt.Sprintf(`{"notAfter":%q,"workspaces":[]}`, future), "has no workspaces, removing nothing"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			repository, err := ghrepo.Parse("--repo", winitRepo)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv(removableWorkspacesEnv, tc.payload)
+
+			var stdout bytes.Buffer
+			removeFinishedWorkspaces(context.Background(), panicRunner{t}, root, repository, "LEGION-200", &stdout, time.Now, removalBudget, time.Now())
+
+			output := stdout.String()
+			if !strings.Contains(output, tc.says) {
+				t.Errorf("stdout %q, want it to contain %q", output, tc.says)
+			}
+			if strings.Contains(output, "LEGION-100") || strings.Contains(output, "LEGION-101") {
+				t.Errorf("stdout %q names a candidate, want the pass to stop before reaching any", output)
+			}
+		})
+	}
+}
+
 // The rotation seed changes with LEGION_GENERATION, not only the pod's own issue: ten relaunches
 // of the same issue, each spending its whole budget on the first candidate it starts, started
 // more than one of four candidates across those ten relaunches rather than always the same one —

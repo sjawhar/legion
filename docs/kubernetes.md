@@ -1193,7 +1193,7 @@ reclaim) before creating its own, exactly as it treats a same-name pod.
 The tree volume otherwise only grows: every issue's jj workspace stays on it even once that issue
 is done. On every `workspace-init provision`, the Go daemon computes which of the tree's other
 issues are safe to remove and passes that list as JSON in `LEGION_REMOVABLE_WORKSPACES` on the
-`provision` init container alone (never `workspace-fetch`, never the main `worker` container, and
+`provision` init container alone (never `workspace-fetch`, never the main `worker` container).
 `removableWorkspaces` (`packages/daemon/internal/daemon/removable.go`) states the candidate rule
 from the daemon's own claim store; `relaunch` (`internal/runtime/sandbox`) also drops any
 candidate that still has a live, non-terminal pod of its own tree, a second guarantee on
@@ -1219,7 +1219,11 @@ removes nothing at all once its own `workspace-fetch` started later than that â€
 fetch's own start, not wall-clock time at removal, is what keeps this bound independent of how
 long the clone itself then takes (`workspace.FetchTimeout`, up to 30 minutes) â€” so a pod the
 Sandbox controller recreates on its own long after the daemon last computed the list (an
-eviction, a node drain, a hand deletion) cannot act on one gone stale.
+eviction, a node drain, a hand deletion) cannot act on one gone stale. A list the pod's own
+`legion` cannot read in full (a field it does not know, anything after the JSON object, no
+`notAfter`, no candidates) likewise removes nothing, and the pass logs why; the payload is part of
+`DaemonAPIVersion`'s contract, so a change to its shape bumps that number and the daemon's image
+probe refuses an image whose `legion` would read it the old way.
 
 The worker's own jj working-copy snapshot before `legion push`'s network push can take 63-100 s
 on a near-full volume (`removalBudget`'s own doc comment, `cmd/legion/workspace_init.go`, names
