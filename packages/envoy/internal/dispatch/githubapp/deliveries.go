@@ -122,8 +122,7 @@ func (e *RateLimitError) Error() string {
 
 // AsRateLimit is errors.As(err, &limited) collapsed to one line: delivery's reconcile.go,
 // github_prs.go and intake.go each repeated the same three-line var/errors.As idiom at every
-// point a *RateLimitError must be told apart from every other per-item failure (Simplify's
-// round-5 nit).
+// point a *RateLimitError must be told apart from every other per-item failure.
 func AsRateLimit(err error) (*RateLimitError, bool) {
 	var limited *RateLimitError
 	ok := errors.As(err, &limited)

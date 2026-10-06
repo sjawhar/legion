@@ -166,8 +166,8 @@ func (r *Reconcile) windowStart(settings DeliverySettings, now time.Time) time.T
 // errors.Joined into one returned error -- not stringified into a plain errors.New, so a
 // *githubapp.RateLimitError among them still answers errors.As for a caller that needs to tell it
 // apart from an ordinary failure, the same reason reconcileWorkflow's own per-run aggregation
-// keeps its typed error with %w (Deep's and Simplify's round-5 nit) -- so the pass is reported
-// unhealthy without throwing away whatever this pass did manage to reconcile.
+// keeps its typed error with %w -- so the pass is reported unhealthy without throwing away
+// whatever this pass did manage to reconcile.
 func (r *Reconcile) reconcileMergedPullRequests(ctx context.Context, settings DeliverySettings, since, until time.Time) error {
 	found, searchErr := SearchMergedPullRequestsAcrossInstallation(ctx, r.github, settings.PopulationAuthors, since, until)
 	var failures []error
@@ -246,8 +246,8 @@ func (r *Reconcile) reconcilePullRequest(ctx context.Context, settings DeliveryS
 // swallowed inside fn, nil returned) -- this helper only runs the fan-out, never interprets fn's
 // result. reconcilePartialPullRequests and SearchMergedPullRequestsAcrossInstallation's own
 // searchOneInstallation loop each hand-rolled this identical
-// errgroup.WithContext+SetLimit+groupCtx.Err()-before-each-Go shape separately before this helper
-// existed (Simplify's round-5 finding).
+// errgroup.WithContext+SetLimit+groupCtx.Err()-before-each-Go shape separately before this
+// helper existed.
 func boundedFanOut[T any](ctx context.Context, concurrency int, items []T, fn func(ctx context.Context, item T) error) error {
 	group, groupCtx := errgroup.WithContext(ctx)
 	group.SetLimit(concurrency)
@@ -277,15 +277,16 @@ const reconcilePartialConcurrency = 8
 
 // reconcilePartialPullRequests completes every stored partial row (written by intake when its
 // completing fetch failed, or by this reconcile's own merged-PR search, which never carries the
-// completing fields) with a single-pull-request fetch, via boundedFanOut (errgroup.WithContext +
-// SetLimit(reconcilePartialConcurrency)). Each partial row is a distinct (repo, number) key, so
-// concurrent upserts never race each other. completePartialPullRequest below returns non-nil only
-// for a *githubapp.RateLimitError, which is boundedFanOut's own returned error (via
-// errgroup.Wait) here, so the pass is reported failed and last_reconcile_at does not advance past
-// rows this pass never got to -- the next pass's overlap re-reads them rather than losing them
-// for good. Any other per-row error (a 404, a deleted repository, a malformed answer) is still
-// only logged and skipped inside completePartialPullRequest, never returned: it is that one row's
-// own problem, not a reason to stop the rest of the batch.
+// completing fields) with a single-pull-request fetch, via boundedFanOut
+// (SetLimit(reconcilePartialConcurrency)) -- see boundedFanOut's own doc comment for the shared
+// fan-out/cancellation mechanics. Each partial row is a distinct (repo, number) key, so
+// concurrent upserts never race each other. completePartialPullRequest below returns non-nil
+// only for a *githubapp.RateLimitError, which stops the batch and is boundedFanOut's own
+// returned error here, so the pass is reported failed and last_reconcile_at does not advance
+// past rows this pass never got to -- the next pass's overlap re-reads them rather than losing
+// them for good. Any other per-row error (a 404, a deleted repository, a malformed answer) is
+// still only logged and skipped inside completePartialPullRequest, never returned: it is that
+// one row's own problem, not a reason to stop the rest of the batch.
 func (r *Reconcile) reconcilePartialPullRequests(ctx context.Context) error {
 	partials, err := ListPartialPullRequests(ctx, r.pool)
 	if err != nil {
@@ -351,8 +352,7 @@ func (r *Reconcile) completePartialPullRequest(ctx context.Context, pr DeliveryP
 // (ListUnfetchableRunIDs) before the loop, instead of reconcileRun running its own
 // RunJobsUnfetchable point query once per completed run on every pass -- the overwhelming
 // majority of runs were never marked, and this package already bulk-fetches this way one
-// function away (ListPartialPullRequests feeding reconcilePartialPullRequests; Simplify's
-// round-5 finding).
+// function away (ListPartialPullRequests feeding reconcilePartialPullRequests).
 func (r *Reconcile) reconcileWorkflow(ctx context.Context, owner, repo, repoFull, workflowPath string, kind DeliveryRunKind, since, until time.Time) error {
 	runs, err := ListWorkflowRuns(ctx, r.github, owner, repo, workflowPath, since, until)
 	if err != nil {

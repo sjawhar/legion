@@ -548,11 +548,11 @@ func TestReconcilePartialPullRequestsStopsOnRateLimitInsteadOfRetryingAtFullConc
 }
 
 // TestReconcileWorkflowStopsAtTheFirstRateLimitAndCapsLastError proves the per-run rate-limit
-// stop Rev's probe drove (197 of 200 requests sent after the first limit) end to end: among
-// three completed runs in one window, the second's jobs listing answering a rate limit must stop
-// the third's jobs listing from ever being requested, the returned error must still satisfy
-// errors.As for a *githubapp.RateLimitError (not stringified away into the per-run aggregate),
-// and fail()'s own maxLastErrorLength bound still caps what reaches
+// stop end to end: among three completed runs in one window, the second's jobs listing
+// answering a rate limit must stop the third's jobs listing from ever being requested (the
+// un-fixed loop would send every remaining run's request after the first limit), the returned
+// error must still satisfy errors.As for a *githubapp.RateLimitError (not stringified away into
+// the per-run aggregate), and fail()'s own maxLastErrorLength bound still caps what reaches
 // delivery_settings.last_error. Removing reconcileWorkflow's unconditional per-run stop on a
 // rate limit (reverting to "log and keep going") makes this red: the third run's jobs endpoint
 // would be called, defeating the "no further GitHub request" assertion below.

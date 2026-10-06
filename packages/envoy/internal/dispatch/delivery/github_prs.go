@@ -287,16 +287,16 @@ const installationSearchConcurrency = 8
 // GitHub does not let one repository belong to two installations of the same App, so a duplicate
 // should never occur, but de-duplicating costs nothing and removes any doubt.
 //
-// Installations are searched concurrently through boundedFanOut (reconcile.go), the same
-// errgroup.WithContext+SetLimit shape reconcile.go's reconcilePartialPullRequests uses, via
-// searchOneInstallation. One installation's own failure never discards what every other
-// installation already found: its error is collected by name (which installation, by id and
-// account) rather than aborting the whole search, and the caller still gets back every result
-// gathered so far alongside a non-nil error naming what failed -- the pass is reported unhealthy,
-// but nothing already found is thrown away. A *githubapp.RateLimitError is the one exception: it
-// stops every further installation from starting (the ones already in flight still finish),
-// since a rate limit is a global condition on this installation token budget, not one
-// installation's own problem.
+// Installations are searched concurrently through boundedFanOut (reconcile.go) via
+// searchOneInstallation -- see boundedFanOut's own doc comment for the shared
+// fan-out/cancellation mechanics. One installation's own failure never discards what every
+// other installation already found: its error is collected by name (which installation, by id
+// and account) rather than aborting the whole search, and the caller still gets back every
+// result gathered so far alongside a non-nil error naming what failed -- the pass is reported
+// unhealthy, but nothing already found is thrown away. A *githubapp.RateLimitError is the one
+// exception: it stops every further installation from starting (the ones already in flight
+// still finish), since a rate limit is a global condition on this installation token budget,
+// not one installation's own problem.
 func SearchMergedPullRequestsAcrossInstallation(ctx context.Context, client *githubapp.Client, authors []string, since, until time.Time) ([]FetchedPullRequest, error) {
 	installations, err := client.ListInstallations(ctx)
 	if err != nil {

@@ -115,10 +115,10 @@ type cachedToken struct {
 // ttlCache is a small time-bounded cache keyed by K, shared by ListInstallations (one fixed key)
 // and ListInstallationRepositoriesByID (one key per installation id) -- both independently
 // hand-rolled the identical lock/check-age/unlock-on-hit, fetch-then-lock/store/unlock shape
-// before this helper existed (Simplify's round-5 nit). A singleflight.Group collapses concurrent
-// cold-cache fetches for the same key into one network call: two goroutines racing a cold cache
-// for the same installation (plausible under the cross-installation errgroup's own concurrency,
-// Deep's round-5 note) now share one fetch's answer instead of each minting its own.
+// before this helper existed. A singleflight.Group collapses concurrent cold-cache fetches for
+// the same key into one network call: two goroutines racing a cold cache for the same
+// installation (plausible under the cross-installation errgroup's own concurrency) now share
+// one fetch's answer instead of each minting its own.
 type ttlCache[K comparable, V any] struct {
 	ttl   time.Duration
 	now   func() time.Time
@@ -374,7 +374,9 @@ const maxInstallations = 2000
 // unlike RepositoryToken's owner/repo cache (invalidated only when a mint actually fails), this is
 // a plain time-based cache, since there is no per-call signal analogous to a failed token mint to
 // invalidate it on -- the install list changes only when a human installs/uninstalls the App, far
-// slower than any reconcile pass needs a fresh answer.
+// slower than any reconcile pass needs a fresh answer. Unlike this cache's own pre-ttlCache form,
+// a zero-installations answer is now cached too (ttlCache.fresh tests presence, not a non-nil
+// slice): an App installed nowhere re-fetches at most once per TTL instead of on every call.
 func (c *Client) ListInstallations(ctx context.Context) ([]Installation, error) {
 	if c == nil {
 		return nil, ErrNoAppKey
