@@ -606,19 +606,21 @@ naming the variable and never its value.
 `LEGION_E2E_MODEL_GATEWAY_AUDIENCE` is the audience the model gateway accepts on a worker's projected
 ServiceAccount token. The run puts it in place of the placeholder in its copy of the operator route's
 `pod.yml`, which the daemon loads, and `pod-shape` holds every pod to exactly that one token.
-`LEGION_E2E_DISPATCH_TOKEN_FILE` names a file only its owner can read (mode 0600 or tighter) holding
-a bearer of the Dispatch agents' client: the one an agent session's own Dispatch configuration
-resolves, `DISPATCH_TOKEN_FILE`, then `DISPATCH_TOKEN`, then `dispatch.token` in
+`LEGION_E2E_DISPATCH_TOKEN_FILE` names a file only its owner can read (no group or other permission
+bits) holding a bearer of the Dispatch agents' client: the one an agent session's own Dispatch
+configuration resolves, `DISPATCH_TOKEN_FILE`, then `DISPATCH_TOKEN`, then `dispatch.token` in
 `~/.config/opencode/envoy.json` (`packages/envoy-client/src/dispatch-config.ts`). Dispatch answers
 that bearer as an agent session, the actor its HTTP routes and its document websocket require.
 `LEGION_E2E_ENVOY_TOKEN_SECRET_ID` is the Secrets Manager id of the production Envoy listener's API
 token, which `prerequisites` reads with the devbox admin role. Both bearers land in 0600 files under
-the run's scratch directory. `prerequisites` refuses the token file when it is unset, unreadable,
-open to its group or others, or empty, and refuses the other three when they are unset or malformed
-(the audience through [`lib/model-gateway-audience.sh`](#libmodel-gateway-audiencesh)), each time
-naming the variable and never its value. `preflight` reads Dispatch's `whoami` with the run's bearer
-and requires an agent session; the same read with an invalid bearer, its negative control, must be
-refused 401.
+the run's scratch directory. `prerequisites` refuses the token file when the variable is unset, or
+names something that is not a readable regular file, whose group or others have any permission bit
+(read through a symlink, from the file it names), or that holds only whitespace; each refusal names
+the variable and the path, never what the file holds. It refuses the other three when they are
+unset or malformed (the audience through
+[`lib/model-gateway-audience.sh`](#libmodel-gateway-audiencesh)), naming the variable and never its
+value. `preflight` reads Dispatch's `whoami` with the run's bearer and requires an agent session;
+the same read with an invalid bearer, its negative control, must be refused 401.
 
 `STAGE4B_UNTIL` must name a checkpoint below; any other value is refused. `STAGE4B_SKIP_CONTROLLER=1`,
 refused without `STAGE4B_UNTIL`, runs none of `controller`'s checks and only takes tree 3 out, printing `CHECK controller: SKIPPED (…)`,

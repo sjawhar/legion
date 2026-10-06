@@ -1432,7 +1432,8 @@ gateway_audience=$(bash "$root/scripts/e2e/lib/model-gateway-audience.sh") ||
   fail "LEGION_E2E_DISPATCH_TOKEN_FILE is unset: it names the file holding the Dispatch agents' bearer"
 [ -f "$dispatch_token_file" ] && [ -r "$dispatch_token_file" ] ||
   fail "LEGION_E2E_DISPATCH_TOKEN_FILE names $dispatch_token_file, which is not a readable file"
-dispatch_token_mode=$(stat -c %a -- "$dispatch_token_file")
+# The mode is the file tr reads below, so a symlink is followed: a link's own mode is always 777.
+dispatch_token_mode=$(stat -L -c %a -- "$dispatch_token_file")
 case $dispatch_token_mode in
   *00) ;;
   *) fail "LEGION_E2E_DISPATCH_TOKEN_FILE names $dispatch_token_file, whose group or others have access (mode $dispatch_token_mode): make it 0600" ;;
