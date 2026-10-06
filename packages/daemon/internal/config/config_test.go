@@ -1097,9 +1097,12 @@ func TestLoadClassifiesEveryShippedKey(t *testing.T) {
 	}
 }
 
-// advertise_host's shape is checked at read time, before any runtime-specific rule, since the
-// daemon adds the worker stream's port itself (shimAddress, internal/daemon/daemon.go): only an IP
-// address or a DNS name is the host part alone of a `--connect` address.
+// advertise_host is the host of every pod's `--connect tcp://<host>:<port>`, which the shim reads as
+// a URL (shim.ParseAddress, internal/shim/config.go) and refuses with anything beyond a host and a
+// port, and the daemon adds the port itself (shimAddress, internal/daemon/daemon.go). So the loader
+// refuses, by its exact message, every value that is not an IP address or a DNS name: under
+// runtime: kubernetes, the one runtime that reads advertise_host, so no other refusal can stand in
+// for this one, rather than `legion start --check-config` passing a file no pod boots on.
 func TestAdvertiseHostMustBeABareHost(t *testing.T) {
 	const refused = "advertise_host must be an IP address or a DNS name, with no scheme, port, path or brackets: the daemon adds worker_stream_port itself"
 	for _, tc := range []struct{ name, yaml, want string }{
@@ -1107,41 +1110,20 @@ func TestAdvertiseHostMustBeABareHost(t *testing.T) {
 		{"a port", "legion-daemon.legion.svc:13371", refused + " (legion-daemon.legion.svc:13371)"},
 		{"brackets", `"[::1]"`, refused + " ([::1])"},
 		{"an underscore", "legion_daemon.legion.svc", refused + " (legion_daemon.legion.svc)"},
+		{"a path", "legion-daemon.legion.svc/x", refused + " (legion-daemon.legion.svc/x)"},
 		{"a trailing slash", "legion-daemon.legion.svc/", refused + " (legion-daemon.legion.svc/)"},
 		{"a user", "legion@legion-daemon.legion.svc", refused + " (legion@legion-daemon.legion.svc)"},
 		{"a query", `"legion-daemon.legion.svc?x"`, refused + " (legion-daemon.legion.svc?x)"},
 		{"a fragment", `"legion-daemon.legion.svc#x"`, refused + " (legion-daemon.legion.svc#x)"},
 		{"a space", `"legion daemon"`, refused + " (legion daemon)"},
+		{"a space inside a DNS name", `"legion daemon.legion.svc"`, refused + " (legion daemon.legion.svc)"},
 		{"a zoned IPv6 address", `"fe80::1%eth0"`, refused + " (fe80::1%eth0)"},
 		{"blank", `""`, "advertise_host must not be empty"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := Load(writeConfigFile(t, minimalFile+"advertise_host: "+tc.yaml+"\n"), noEnv)
+			_, err := LoadForValidation(writeConfigFile(t, kubernetesFile+"advertise_host: "+tc.yaml+"\n"), noEnv)
 			if err == nil || err.Error() != tc.want {
-				t.Fatalf("Load error = %v, want %q", err, tc.want)
-			}
-		})
-	}
-}
-
-// advertise_host becomes the host of every pod's `--connect tcp://<host>:<port>`, which the shim
-// reads as a URL (shim.ParseAddress, internal/shim/config.go) and refuses with anything beyond a
-// host and a port. A value with a path, a space, a user, a query, or a fragment has no scheme, port,
-// or brackets, yet builds an address every pod's shim refuses at boot, so the loader refuses it,
-// naming advertise_host, rather than `legion start --check-config` passing a file no pod boots on.
-func TestAdvertiseHostRefusesAHostNoShimCanDial(t *testing.T) {
-	for _, tc := range []struct{ name, yaml string }{
-		{"a path", "legion-daemon.legion.svc/x"},
-		{"a trailing slash", "legion-daemon.legion.svc/"},
-		{"a space", `"legion daemon.legion.svc"`},
-		{"a user", "legion@legion-daemon.legion.svc"},
-		{"a query", `"legion-daemon.legion.svc?x"`},
-		{"a fragment", `"legion-daemon.legion.svc#x"`},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			_, err := Load(writeConfigFile(t, minimalFile+"advertise_host: "+tc.yaml+"\n"), noEnv)
-			if err == nil || !strings.HasPrefix(err.Error(), "advertise_host ") {
-				t.Fatalf("Load error = %v, want a refusal naming advertise_host", err)
+				t.Fatalf("LoadForValidation error = %v, want %q", err, tc.want)
 			}
 		})
 	}
