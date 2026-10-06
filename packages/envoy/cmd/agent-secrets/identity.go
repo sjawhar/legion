@@ -19,6 +19,7 @@
 package main
 
 import (
+	"cmp"
 	"fmt"
 	"io"
 	"net/http"
@@ -79,6 +80,23 @@ func helperSocket() (sock string, named bool) {
 // when unset.
 func approveURL() string {
 	return strings.TrimSuffix(os.Getenv("AGENT_SECRETS_APPROVE_URL"), "/")
+}
+
+// requestSessionID answers the session id every request and exec form sends with its request
+// (LEGION-587): OMP_SESSION_ID, the id Oh My Pi's session-env extension sets, when present; else
+// ENVOY_SESSION_ID, an Envoy-registered harness that does not set OMP_SESSION_ID; else
+// CLAUDE_CODE_SESSION_ID, which Claude Code's Bash tool and hooks re-read fresh at every spawn
+// and update on /clear (code.claude.com/docs/en/env-vars, "CLAUDE_CODE_SESSION_ID"), so a Claude
+// Code session names the same id it registered with Envoy under even across a /clear — only its
+// own long-lived MCP server keeps the id it was first spawned with. A Claude Code session
+// started from an Oh My Pi shell still names the outer Oh My Pi session: OMP_SESSION_ID is
+// inherited from that shell and wins over CLAUDE_CODE_SESSION_ID in the order above. Empty when
+// none of the three is set — a host session agent-secrets-helper enrolled (kind host) carries no
+// enrollment session_id of its own, so an unset result here is what the broker's requests.
+// Session answers for both Request and Enrollment, and the credential request names no session
+// at all.
+func requestSessionID() string {
+	return cmp.Or(os.Getenv("OMP_SESSION_ID"), os.Getenv("ENVOY_SESSION_ID"), os.Getenv("CLAUDE_CODE_SESSION_ID"))
 }
 
 func exists(path string) bool {
