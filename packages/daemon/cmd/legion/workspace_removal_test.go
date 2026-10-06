@@ -504,11 +504,8 @@ func TestWorkspaceInitKeepsAChildWhenTheNestedRepositoryWalkTimesOut(t *testing.
 // and removed when it is in fact clean: the walk's own fixed timeout, counted from when the walk
 // itself starts rather than from the pass's own deadline, is what removalBudget's doc comment
 // means by "never interrupts one already running" (dispatch://LEGION-583) — the budget bounds
-// only when a new candidate may start, never how much of its own already-running check it gets.
-// Before this round's fix the walk shared the pass's own deadline, so a slow snapshot alone could
-// already exhaust it before the walk even began, keeping a workspace that in fact held no
-// unpushed work at all — on the near-full volumes this piece exists for, where a snapshot
-// measures 63-100 s against a 90 s budget, that meant nothing was ever removed.
+// only when a new candidate may start, never how much of its own already-running check it gets,
+// so a slow snapshot alone cannot exhaust what the walk has left before the walk even begins.
 func TestWorkspaceInitRemovesACleanChildEvenWhenItsSnapshotOutlastsTheRemovalBudget(t *testing.T) {
 	v := newTreeVolume(t).withRemote(t)
 	v.fetch(t)

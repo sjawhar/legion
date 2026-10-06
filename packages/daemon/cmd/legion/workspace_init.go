@@ -236,12 +236,20 @@ const removalBudget = 90 * time.Second
 // slow snapshot must never eat into the walk's own time, or a near-full volume's measured
 // 63-100s snapshot would leave the walk nothing and keep every candidate regardless of whether it
 // actually holds a nested repository. Walking a real, full-size checkout of this repository
-// (every Go and TypeScript package, node_modules installed) took under 1s on this host; 30s
-// leaves well over an order of magnitude of headroom for a workspace larger or on a slower
-// volume. Worst case against the registration deadline above: removalBudget (90s), plus up to
-// ~100s for the one candidate whose snapshot is already running when the budget is spent (this
-// comment's own 63-100s range), plus this 30s walk timeout for that same candidate, is about
-// 220s — comfortably inside the 360s default even in the worst ordering.
+// (every Go and TypeScript package, node_modules installed: 70,798 filesystem entries) took under
+// 800ms on this host; 30s leaves well over an order of magnitude of headroom for a workspace
+// larger or on a slower volume.
+//
+// Removal adds up to about 220s on top of whatever workspace-fetch's clone and this pod's own
+// provisioning already spent inside the 360s registration deadline every init container shares
+// (worker_boot_timeout_seconds × worker_boot_registration_deadline_intervals): removalBudget
+// (90s) itself, plus up to ~100s for the one candidate whose snapshot is already running when the
+// budget is spent (this comment's own 63-100s range), plus this 30s walk timeout for that same
+// candidate. That figure excludes the removed candidate's own recursive delete
+// (workspace.Remove), which this budget never bounds either and which a near-full volume can
+// measure in the tens of seconds: the clone, this pod's own provisioning, that delete, and the
+// agent's own boot after the init container exits all have to fit in whatever is left of the
+// 360s.
 const nestedRepositoryWalkTimeout = 30 * time.Second
 
 // removeFinishedWorkspaces reads removableWorkspacesEnv's candidate list and calls
