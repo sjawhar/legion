@@ -343,17 +343,23 @@
   `generation` (`settlementCredit.PendingGeneration`, `roomState.creditGeneration`), a
   per-room-load instance id a release compares before it ever reads an entry's sequence, so a
   release only ever takes out an entry from its own room's generation. A fresh room gets its own
-  fresh generation, and adopts every pending entry the row already held into it, the moment it
-  loads (`bumpSettlementCreditGeneration`, `mergeSettlementCreditLocked`) - needing no lock of
+  fresh generation the moment it loads (`bumpSettlementCreditGeneration`) - needing no lock of
   its own, a durable writer could hold and hang the load against (the wedge a load must never
-  risk) - so an entry whose own generation can never release it again (the task that credited it
-  stopped first) is adopted forward rather than lost or stuck forever, and a fresh room's
-  `creditSeq` restarting at zero no longer needs a watermark seed to stay safe: a different
-  generation's watermark never applies to it at all (LEGION-513). A forced eviction
-  (`evictRoom`, unlike the ordinary release path) can also orphan a version's capture along with
-  its room state; `forgetLocked` now carries a forgotten state's outstanding `pendingVersions`
-  forward to the next state the same room's next load creates, so the version number that
-  capture's own transaction still tries to release is not left behind.
+  risk) - and adopts a pending entry into it only once that entry's own generation holds no
+  unexpired lease (`doc_settlement_generation_leases`): a live room takes and refreshes a lease
+  on its own generation (`generationLeaseRefresh`, every 30s) while it stays live, so an entry a
+  different, still-live room still owns is left alone rather than credited twice on each room's
+  own next version. A lease outlives `generationLeaseTTL` (2 minutes) without a refresh, so a
+  task that stopped without releasing (a crash, or a rolling deploy's stop grace) still lets
+  another room adopt what it owed once that lease expires - the next load, or any live room's
+  own lease-refresh tick on the same document, so a document that never reloads is not stuck
+  waiting for one; a clean unload deletes its own lease at once instead of waiting out the TTL
+  (LEGION-513). A forced eviction (`evictRoom`, unlike the ordinary release path) can also orphan
+  a version's capture along with its room state; `forgetLocked` now carries a forgotten state's
+  outstanding `pendingVersions` forward to the next state the same room's next load creates, so
+  the version number that capture's own transaction still tries to release is not left behind -
+  and does not hold it forever if that never happens: a periodic sweep drops one once it is
+  older than the settle delay.
 - Every read of an artifact's `project_key` tolerates a null: `scanArtifact` (every artifact read
   by id, ref key, owner or name, and both anchor locks), an ask's anchor artifact, a comment
   event's and an anchor refresh's payload, a suggestion's project, a document write's owner lock,

@@ -2,13 +2,16 @@ package docs
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"maps"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"runtime"
+	"slices"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -863,6 +866,228 @@ func TestAnUploadsFullReleaseKeepsABrowserEditCreditedWhileItsTransactionWasOpen
 	}
 	if _, owed := row[settlementCreditKey(bob)]; !owed {
 		t.Fatalf("durable row pending = %+v after the race, want bob still owed: the upload's full release wiped an entry credited after its own forkSeq", row)
+	}
+}
+
+// newTestServiceInstance is one more *Service sharing database with whatever other instances a
+// test already built: a second (or third) Dispatch task's own process, for tests that model a
+// rolling deploy's overlap.
+func newTestServiceInstance(t *testing.T, database *store.Store) (*Service, *httptest.Server) {
+	t.Helper()
+	service := New(Deps{
+		Store:     database,
+		Events:    events.NewBroker(),
+		Identity:  headerIdentity(database),
+		ServerURL: "https://dispatch.example",
+		Settle:    time.Hour,
+	})
+	t.Cleanup(func() {
+		if err := service.Shutdown(context.Background()); err != nil {
+			t.Errorf("shutdown document service: %v", err)
+		}
+	})
+	server := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
+	t.Cleanup(server.Close)
+	return service, server
+}
+
+// versionAuthors is the authors artifactID's version number credits.
+func versionAuthors(t *testing.T, database *store.Store, artifactID string, number int) []model.Actor {
+	t.Helper()
+	var raw []byte
+	if err := database.Pool.QueryRow(context.Background(), `
+		select authors from artifact_versions where artifact_id = $1 and number = $2
+	`, artifactID, number).Scan(&raw); err != nil {
+		t.Fatalf("read version %d's authors: %v", number, err)
+	}
+	var authors []model.Actor
+	if err := json.Unmarshal(raw, &authors); err != nil {
+		t.Fatalf("decode version %d's authors: %v", number, err)
+	}
+	return authors
+}
+
+// nextVersionNumber is the number writeThroughLedger's next call on artifactID will take.
+func nextVersionNumber(t *testing.T, database *store.Store, artifactID string) int {
+	t.Helper()
+	var number int
+	if err := database.Pool.QueryRow(context.Background(), `
+		select coalesce(max(number), 0) + 1 from artifact_versions where artifact_id = $1
+	`, artifactID).Scan(&number); err != nil {
+		t.Fatalf("read the next version number: %v", err)
+	}
+	return number
+}
+
+// A live room's pending author must never be adopted by a different process's cold load of the
+// same document: adopting it would let both processes credit it on their own next versions, a
+// genuine duplicate credit a generation tag alone does not prevent (Deep's and Accept's finding,
+// LEGION-513). Task A's own browser edits and its append durably commits (Accept's ordering);
+// task A's room stays live, holding its own lease on its own generation. Task B then makes its
+// own, first-ever load of the same document (a cold load, Deep's finding) and writes its own
+// version; task A writes its own version too. alice must be credited on exactly one of the two -
+// task A's, the room that actually holds her.
+func TestALiveRoomsPendingAuthorIsNotAdoptedByAnotherProcessesColdLoad(t *testing.T) {
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "# First")
+	taskA, serverA := newTestServiceInstance(t, database)
+	seedServiceText(t, taskA, artifactID, "First.\n\nSecond.\n")
+
+	alice := model.Actor{Kind: "user", ID: "alice"}
+	browserA := connectBrowser(t, serverA.URL, artifactID, alice.ID)
+	t.Cleanup(browserA.Close)
+	editAsBrowser(t, taskA, artifactID, browserA, "First.\n\nSecond, alice.\n")
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	if err := taskA.waitForDurableAppends(waitCtx, artifactID); err != nil {
+		waitCancel()
+		t.Fatalf("wait for alice's edit to become durable: %v", err)
+	}
+	waitCancel()
+
+	// Task A's room is still live - still holding its own lease - when task B, a different
+	// process, makes its own first-ever load of the same document and writes its own version.
+	taskB, _ := newTestServiceInstance(t, database)
+	bob := model.Actor{Kind: "session", ID: "bob-session"}
+	bNumber := nextVersionNumber(t, database, artifactID)
+	writeThroughLedger(t, taskB, artifactID, bob, "First.\n\nSecond, alice.\n\nThird, bob.\n", withNamedVersion)
+
+	versioner := model.Actor{Kind: "session", ID: "a-versioner"}
+	aNumber := nextVersionNumber(t, database, artifactID)
+	writeThroughLedger(t, taskA, artifactID, versioner, "First.\n\nSecond, alice.\n", withNamedVersion)
+
+	aliceOnA := slices.Contains(versionAuthors(t, database, artifactID, aNumber), alice)
+	aliceOnB := slices.Contains(versionAuthors(t, database, artifactID, bNumber), alice)
+	if aliceOnA == aliceOnB {
+		t.Fatalf("alice credited on task A's version = %v, on task B's version = %v, want exactly one", aliceOnA, aliceOnB)
+	}
+	if !aliceOnA {
+		t.Fatalf("alice credited on task A's version = %v, want true: she is task A's own room's pending author, not task B's", aliceOnA)
+	}
+}
+
+// An entry whose own generation's lease has expired - the task that credited it stopped without
+// releasing it, a crash or a rolling deploy's stop grace - is adopted by another, already-live
+// room's own lease-refresh tick on the same document, without waiting for that room to reload.
+func TestALiveRoomsTickAdoptsAnotherProcessesExpiredEntry(t *testing.T) {
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "# First")
+	var fakeNow atomic.Value
+	fakeNow.Store(time.Now())
+	now := func() time.Time { return fakeNow.Load().(time.Time) }
+
+	taskA, serverA := newTestServiceInstance(t, database)
+	taskA.now = now
+	seedServiceText(t, taskA, artifactID, "First.\n\nSecond.\n")
+	alice := model.Actor{Kind: "user", ID: "alice"}
+	browserA := connectBrowser(t, serverA.URL, artifactID, alice.ID)
+	t.Cleanup(browserA.Close)
+	editAsBrowser(t, taskA, artifactID, browserA, "First.\n\nSecond, alice.\n")
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	if err := taskA.waitForDurableAppends(waitCtx, artifactID); err != nil {
+		waitCancel()
+		t.Fatalf("wait for alice's edit to become durable: %v", err)
+	}
+	waitCancel()
+
+	taskB, serverB := newTestServiceInstance(t, database)
+	taskB.now = now
+	bob := model.Actor{Kind: "user", ID: "bob"}
+	browserB := connectBrowser(t, serverB.URL, artifactID, bob.ID)
+	t.Cleanup(browserB.Close)
+	editAsBrowser(t, taskB, artifactID, browserB, "First.\n\nSecond, alice.\n\nThird, bob.\n")
+	waitCtx2, waitCancel2 := context.WithTimeout(context.Background(), 10*time.Second)
+	if err := taskB.waitForDurableAppends(waitCtx2, artifactID); err != nil {
+		waitCancel2()
+		t.Fatalf("wait for bob's edit to become durable: %v", err)
+	}
+	waitCancel2()
+
+	// Task A stops without releasing: its lease, taken when it loaded, is never refreshed again
+	// (its own ticker's real wall-clock tick never fires in this test). Advance the fake clock
+	// past generationLeaseTTL and let task B's own tick, called directly rather than waiting
+	// generationLeaseRefresh for real, adopt alice.
+	fakeNow.Store(now().Add(generationLeaseTTL + time.Second))
+	bState := taskB.lockExistingState(artifactID)
+	if bState == nil {
+		t.Fatal("task B holds no state for the document")
+	}
+	bGeneration := bState.creditGeneration.Load()
+	taskB.unlockState(artifactID, bState)
+	if err := taskB.refreshGenerationLeaseAndAdopt(context.Background(), artifactID, bGeneration); err != nil {
+		t.Fatalf("task B's lease-refresh tick: %v", err)
+	}
+
+	bState = taskB.lockExistingState(artifactID)
+	if bState == nil {
+		t.Fatal("task B holds no state for the document after its tick")
+	}
+	_, aliceOwedOnB := bState.pending[actorKey(alice)]
+	taskB.unlockState(artifactID, bState)
+	if !aliceOwedOnB {
+		t.Fatalf("task B does not own alice after adopting her expired generation; its own next version would never credit her")
+	}
+
+	bNumber := nextVersionNumber(t, database, artifactID)
+	writeThroughLedger(t, taskB, artifactID, bob, "First.\n\nSecond, alice.\n\nThird, bob, again.\n", withNamedVersion)
+	if authors := versionAuthors(t, database, artifactID, bNumber); !slices.Contains(authors, alice) {
+		t.Fatalf("task B's version authors = %+v, want alice (adopted from task A's expired generation) included", authors)
+	}
+}
+
+// A clean unload (releaseUnloadedRoom) deletes a room's own generation lease at once, so the next
+// load adopts its entries immediately rather than waiting out generationLeaseTTL.
+func TestACleanUnloadsLeaseDeletionLetsTheNextLoadAdoptAtOnce(t *testing.T) {
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "# First")
+	taskA, serverA := newTestServiceInstance(t, database)
+	seedServiceText(t, taskA, artifactID, "First.\n\nSecond.\n")
+	alice := model.Actor{Kind: "user", ID: "alice"}
+	browserA := connectBrowser(t, serverA.URL, artifactID, alice.ID)
+	editAsBrowser(t, taskA, artifactID, browserA, "First.\n\nSecond, alice.\n")
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	if err := taskA.waitForDurableAppends(waitCtx, artifactID); err != nil {
+		waitCancel()
+		t.Fatalf("wait for alice's edit to become durable: %v", err)
+	}
+	waitCancel()
+	browserA.Close()
+
+	// Task A's own room, its only peer gone, settles what it owes and its issue closes: both
+	// release alice from the room, so close the issue instead of waiting out its idle timeout -
+	// the clean unload this test exercises is ygo's OnUnloadDocument, triggered by evicting the
+	// room directly instead.
+	if err := taskA.Evict(context.Background(), artifactID); err != nil {
+		t.Fatalf("evict task A's room: %v", err)
+	}
+	waitForNoLiveDocument(t, taskA, artifactID)
+
+	// releaseUnloadedRoom signals the ticker goroutine to delete the lease; it runs
+	// asynchronously, so poll briefly rather than racing it.
+	deadline := time.Now().Add(5 * time.Second)
+	var leases int
+	for {
+		if err := database.Pool.QueryRow(context.Background(), `
+			select count(*) from doc_settlement_generation_leases where artifact_id = $1
+		`, artifactID).Scan(&leases); err != nil {
+			t.Fatalf("count the document's generation leases: %v", err)
+		}
+		if leases == 0 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if leases != 0 {
+		t.Fatalf("generation leases after task A's clean unload = %d, want 0: the unload must delete its own lease at once", leases)
+	}
+
+	// A fresh load (task A's own room, reloaded) adopts alice at once - no wait needed, since no
+	// lease survived to make her look still-live.
+	taskB, _ := newTestServiceInstance(t, database)
+	bob := model.Actor{Kind: "session", ID: "bob-session"}
+	bNumber := nextVersionNumber(t, database, artifactID)
+	writeThroughLedger(t, taskB, artifactID, bob, "First.\n\nSecond, alice.\n\nThird, bob.\n", withNamedVersion)
+	if authors := versionAuthors(t, database, artifactID, bNumber); !slices.Contains(authors, alice) {
+		t.Fatalf("task B's version authors = %+v, want alice (adopted at once after task A's clean unload) included", authors)
 	}
 }
 

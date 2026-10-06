@@ -102,18 +102,29 @@ make safe by taking the document's advisory lock to assign durably (a durable wr
 and the load would then hang forever - the exact wedge `onLoadDocument`'s own pool choice guards
 against elsewhere): one plain, atomic single-row `UPDATE` needs no lock of its own, since
 PostgreSQL's row-level locking already serializes it against any concurrent writer's equally
-brief transaction. That same load durably adopts every pending entry the row already held into
-the new generation (`mergeSettlementCreditLocked` performs the matching adoption in memory), so
-an entry whose own generation can never be released again - the task that credited it stopped
-before releasing it - is neither lost nor stuck forever: the next room to load the document, in
-whichever process, adopts it into a generation that process's own releases can reach.
+brief transaction. That load adopts a pending entry into the new generation only when the
+entry's own generation currently holds no unexpired lease
+(`doc_settlement_generation_leases`): a live room takes a lease on its own generation the moment
+it loads, refreshing it on a ticker (`generationLeaseRefresh`, every 30s) while it stays live, so
+an entry still owned by another, still-live room - whose own release will reach it - is left
+entirely alone, never re-stamped or credited here too (two rooms crediting the same author on
+their own next versions is the very duplicate a generation tag alone does not prevent).
+`mergeSettlementCreditLocked` performs the matching adoption in memory. A lease survives
+`generationLeaseTTL` (2 minutes) without a refresh; a room whose task stopped without releasing
+(a crash, or a rolling deploy's stop grace) therefore still lets another room adopt what it owed,
+once that lease has expired - the next load, or any live room's own lease-refresh tick on the
+same document (`refreshGenerationLeaseAndAdopt`), so a document that never reloads is not stuck
+waiting for one. A clean unload (`releaseUnloadedRoom`) deletes its own lease at once, so this
+does not have to wait out the TTL in the ordinary case.
 
 A version's capture that a forced eviction (`evictRoom`, which bypasses `unusedLocked`'s own check
 unlike the ordinary release path) orphans along with its room state is not lost either:
 `forgetLocked` stashes a forgotten state's outstanding `pendingVersions` in `orphanedVersions`,
 and the next `lockState` for the same room adopts them into the fresh state it creates, so the
 version number the original transaction's own commit still tries to release
-(`commitVersionLocked`) is not orphaned.
+(`commitVersionLocked`) is not orphaned. An entry whose document never reloads to claim it is not
+held forever either: `sweepOrphanedVersions`, run on `RunSettlementResumption`'s own interval,
+drops one once it is older than the settle delay.
 A settlement that wrote into the room commits what it wrote even when the document moved after its
 read, since the room and its browsers hold it; one that wrote nothing leaves a moved document to
 the settlement the move scheduled. A repair is written only into the document the settlement read

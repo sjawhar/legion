@@ -1125,7 +1125,7 @@ func TestSettleCapturesOnlyItsOwnIdentityUpdate(t *testing.T) {
 	// The load armed the settlement the seeded update owes, which moved the generation.
 	state := service.room(artifactID)
 	state.mu.Lock()
-	armed := state.gen
+	armed := state.roomGeneration
 	state.mu.Unlock()
 	service.settleRoom(artifactID, armed)
 	<-foreignApplied
@@ -1152,7 +1152,7 @@ func TestSettleCapturesOnlyItsOwnIdentityUpdate(t *testing.T) {
 		t.Fatalf("identity update changed document = %q, want only identity repairs", markdown)
 	}
 	state.mu.Lock()
-	generation := state.gen
+	generation := state.roomGeneration
 	state.mu.Unlock()
 	if generation != armed+1 {
 		t.Fatalf("generation after foreign update = %d, want %d", generation, armed+1)
@@ -1177,7 +1177,7 @@ func TestSettleStampsLegacyChangeInExactlyOneVersion(t *testing.T) {
 	waitForPersistedProofText(t, database, artifactID, "after\n")
 	state := service.room(artifactID)
 	state.mu.Lock()
-	generation := state.gen
+	generation := state.roomGeneration
 	state.mu.Unlock()
 	service.settleRoom(artifactID, generation)
 
@@ -1234,7 +1234,7 @@ func TestSettleDiscardsIdentityUpdateWhenVersionTransactionFails(t *testing.T) {
 	waitForPersistedProofText(t, database, artifactID, "after\n")
 	state := service.room(artifactID)
 	state.mu.Lock()
-	generation := state.gen
+	generation := state.roomGeneration
 	state.mu.Unlock()
 	service.settleRoom(artifactID, generation)
 
@@ -1323,7 +1323,7 @@ func TestFailedSettlementDoesNotDiscardSuccessorRoomUpdate(t *testing.T) {
 	<-entered
 	state := service.room(artifactID)
 	state.mu.Lock()
-	generation := state.gen
+	generation := state.roomGeneration
 	state.mu.Unlock()
 	service.settleRoom(artifactID, generation)
 	if persistence.released.CompareAndSwap(false, true) {
@@ -1871,7 +1871,7 @@ func settleCurrentGeneration(t *testing.T, service *Service, artifactID string) 
 	}
 	state := service.room(artifactID)
 	state.mu.Lock()
-	generation := state.gen
+	generation := state.roomGeneration
 	state.mu.Unlock()
 	service.settleRoom(artifactID, generation)
 }
@@ -1948,11 +1948,11 @@ func TestSupersededSettleGenerationDoesNotWrite(t *testing.T) {
 	editLiveTree(t, service, artifactID, replaceRun("before", "after"))
 	state := service.room(artifactID)
 	state.mu.Lock()
-	stale := state.gen
+	stale := state.roomGeneration
 	state.mu.Unlock()
 	service.scheduleSettle(artifactID)
 	state.mu.Lock()
-	current := state.gen
+	current := state.roomGeneration
 	state.mu.Unlock()
 
 	service.settleRoom(artifactID, stale)
@@ -2218,7 +2218,7 @@ func TestAdversarialSettlementDoesNotMissAppendAfterClassConsume(t *testing.T) {
 		state.mu.Unlock()
 		t.Fatal("stop armed settlement")
 	}
-	generation := state.gen
+	generation := state.roomGeneration
 	service.settle = 10 * time.Millisecond
 	state.mu.Unlock()
 	service.settleRoom(artifactID, generation)
@@ -2423,7 +2423,7 @@ func TestSettleCapturesAuthorsAtSnapshotTime(t *testing.T) {
 	}
 	state := service.room(artifactID)
 	state.mu.Lock()
-	generation := state.gen
+	generation := state.roomGeneration
 	state.mu.Unlock()
 	blocker, err := service.store.Pool.Begin(context.Background())
 	if err != nil {

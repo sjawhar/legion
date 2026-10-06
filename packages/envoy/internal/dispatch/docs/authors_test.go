@@ -787,3 +787,35 @@ func TestAnEvictedStatesOrphanedVersionCaptureSurvivesIntoTheNextFreshState(t *t
 		t.Fatalf("the fresh state after the forced eviction holds no pendingVersions, want the orphaned capture carried forward from the evicted state")
 	}
 }
+
+// An orphanedVersions entry a forced eviction stashed, whose document never reloads to claim it,
+// does not survive forever: once it is older than the settle delay, sweepOrphanedVersions - run
+// on RunSettlementResumption's own interval - drops it (Simplify's finding, LEGION-513). A direct
+// probe of the sweep's own age logic: the room this models never actually reloads to consume the
+// stash itself, which a real eviction's document eventually does (TestAnEvictedStatesOrphanedVersionCaptureSurvivesIntoTheNextFreshState
+// covers that path).
+func TestOrphanedVersionsOlderThanTheSettleDelayAreSwept(t *testing.T) {
+	service, _ := newTestService(t)
+	service.settle = time.Hour
+	var fakeNow atomic.Value
+	fakeNow.Store(time.Now())
+	service.now = func() time.Time { return fakeNow.Load().(time.Time) }
+
+	room := "a-document-that-never-reloads"
+	service.orphanedVersions.Store(room, orphanedVersion{
+		versions:  map[int]versionPending{1: {}},
+		stashedAt: service.now(),
+	})
+
+	// Younger than the settle delay: the sweep must not drop it yet.
+	service.sweepOrphanedVersions()
+	if _, stashed := service.orphanedVersions.Load(room); !stashed {
+		t.Fatal("the sweep dropped an orphan younger than the settle delay")
+	}
+
+	fakeNow.Store(service.now().Add(service.settle + time.Second))
+	service.sweepOrphanedVersions()
+	if _, stashed := service.orphanedVersions.Load(room); stashed {
+		t.Fatal("the sweep kept an orphan older than the settle delay, want it dropped")
+	}
+}

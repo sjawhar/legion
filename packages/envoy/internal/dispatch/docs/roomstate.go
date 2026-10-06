@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -45,6 +46,11 @@ type roomState struct {
 	// compare across (LEGION-513). Atomic for the same reason creditSeq is: forkLive reads both
 	// without the state lock.
 	creditGeneration atomic.Uint64
+	// leaseStop stops this room's generation-lease ticker (runGenerationLeaseTicker), started in
+	// onLoadDocument once creditGeneration is set: closing it is the signal to delete the lease
+	// and exit, on a clean unload (releaseUnloadedRoom). Nil once stopped, so a repeat unload
+	// signal does not close twice.
+	leaseStop chan struct{}
 	// askBlocks are the ask blocks the room's document held when its update observer last
 	// rendered it, or when it loaded; nil when neither could read it. askAuthors names the author
 	// of the update that introduced each one no settlement has indexed yet (observeAskBlocks).
@@ -73,7 +79,12 @@ type roomState struct {
 	settle          *time.Timer
 	unrecorded      map[pmdoc.MarkRef]time.Time
 	durableAppends  atomic.Int64
-	gen             uint64
+	// roomGeneration counts this room's own in-process invalidations (a reload, a failure, a
+	// settlement's own commit) - commitVersionLocked and retrySettleLocked compare a capture's
+	// own value against the room's current one to tell a capture still good from one a change
+	// since has invalidated. Distinct from creditGeneration below, which is a per-room-load
+	// instance id two different rooms, possibly two different processes, can compare.
+	roomGeneration uint64
 	// liveWriter is the open transaction writing this document (see liveWrite), or nil. While
 	// it is set no settlement is armed; settleDeferred records one that was stopped or asked for
 	// meanwhile, which finishing the write arms.
@@ -138,7 +149,7 @@ func (s *Service) lookUpState(room string, create bool) *roomState {
 			// in-memory release left to find it (LEGION-513).
 			if !loaded {
 				if orphaned, ok := s.orphanedVersions.LoadAndDelete(room); ok {
-					for number, capture := range orphaned.(map[int]versionPending) {
+					for number, capture := range orphaned.(orphanedVersion).versions {
 						fresh.pendingVersions[number] = capture
 					}
 				}
@@ -171,8 +182,29 @@ func (s *Service) releaseIfUnused(room string) {
 }
 
 // releaseUnloadedRoom is ygo's OnUnloadDocument: the room has gone, so its state goes too unless
-// something still holds it, whose end releases it instead.
-func (s *Service) releaseUnloadedRoom(_ context.Context, room string) {
+// something still holds it, whose end releases it instead. ygo's content going means this room
+// can no longer credit anything new under its own generation, so this is also a clean unload:
+// this room's lease-refresh ticker stops, and its lease is deleted here, synchronously, before
+// this hook returns - never left to the ticker goroutine's own, asynchronous handling of the
+// stop signal, which could still be in flight when ygo turns a reload straight into the next
+// onLoadDocument call for the same room: that next load's own adoption check must never see a
+// lease this same process's own last instance only *about to* delete (LEGION-513). The next
+// load, by this process or another, or another live room's own sweep, adopts this generation's
+// still-pending entries at once instead of waiting out generationLeaseTTL.
+func (s *Service) releaseUnloadedRoom(ctx context.Context, room string) {
+	var stop chan struct{}
+	var generation uint64
+	if state := s.lockExistingState(room); state != nil {
+		stop, generation = state.leaseStop, state.creditGeneration.Load()
+		state.leaseStop = nil
+		s.unlockState(room, state)
+	}
+	if stop != nil {
+		close(stop)
+		if err := deleteGenerationLease(ctx, s.store.Pool, room, generation); err != nil {
+			slog.Error("dispatch: delete document generation lease on clean unload", "room", room, "error", err)
+		}
+	}
 	s.releaseIfUnused(room)
 }
 
@@ -190,14 +222,38 @@ func (s *Service) releaseIfUnusedLocked(room string, state *roomState) {
 	s.forgetLocked(room, state)
 }
 
+// orphanedVersion is one room's pendingVersions, stashed at the moment a forced eviction forgot
+// it, so a sweep (sweepOrphanedVersions) can tell one old enough to drop - its document will
+// never reload, or reloaded and claimed it through some other path already - from one still
+// worth keeping for the next load.
+type orphanedVersion struct {
+	versions  map[int]versionPending
+	stashedAt time.Time
+}
+
 // forgetLocked takes state, room's, out of the service: a lookup that already found it skips it
 // (lookUpState). A version's capture (rememberPendingVersion) that is still outstanding - the
 // normal path never forgets a state that holds one (unusedLocked), but evictRoom's forced path
 // does not check - is stashed in orphanedVersions first, so lookUpState's next fresh state for
-// this room carries it forward instead of losing it (LEGION-513). Its caller holds state.mu.
+// this room carries it forward instead of losing it (LEGION-513). A live lease-refresh ticker
+// stops and its lease is deleted here too, synchronously, before this call returns: this is the
+// one path every caller that forgets a state - releaseIfUnusedLocked (unlockState's own, the most
+// common: a room becomes unused the instant a write that leaves nothing pending releases it,
+// often within the same request that will reload it next, e.g. a reopen) and evictRoom's forced
+// path alike - goes through, so it is also the one place a stale lease can reliably be caught
+// before the state that held it is gone (releaseUnloadedRoom and Shutdown handle the same
+// concern for a room ygo itself unloads, or the whole service stopping, since forgetLocked is not
+// always reached from there). Its caller holds state.mu.
 func (s *Service) forgetLocked(room string, state *roomState) {
 	if len(state.pendingVersions) > 0 {
-		s.orphanedVersions.Store(room, state.pendingVersions)
+		s.orphanedVersions.Store(room, orphanedVersion{versions: state.pendingVersions, stashedAt: s.now()})
+	}
+	if state.leaseStop != nil {
+		close(state.leaseStop)
+		state.leaseStop = nil
+		if err := deleteGenerationLease(context.Background(), s.store.Pool, room, state.creditGeneration.Load()); err != nil {
+			slog.Error("dispatch: delete document generation lease on forget", "room", room, "error", err)
+		}
 	}
 	state.released = true
 	s.rooms.CompareAndDelete(room, state)

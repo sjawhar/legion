@@ -455,17 +455,19 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	// compares against each row entry's own (releaseSettlementCredit): creditSeq alone is not a
 	// total order across two processes' own rooms for the same document, so a release must never
 	// trust a seq comparison against an entry some other room credited (LEGION-513). This also
-	// durably adopts every entry the row already held into the new generation
-	// (bumpSettlementCreditGeneration), the same way mergeSettlementCreditLocked adopts them into
-	// the room below, so an entry a stopped task's generation can never release again is not lost
-	// and not stuck forever: the next room to load the document, in whichever process, adopts it
-	// into a generation that process's own releases can reach. It needs no advisory lock (a room
-	// load never waits on one - a durable writer can hold it, and the load would then hang, the
-	// deadlock round 17 fixed): it is one plain, atomic single-row UPDATE whose correctness
-	// Postgres's own row-level locking already guarantees against a concurrent writer's equally
-	// brief transaction.
-	generation, err := bumpSettlementCreditGeneration(ctx, rooms, room)
+	// durably adopts, into the new generation, every pending entry whose own generation currently
+	// holds no unexpired lease (bumpSettlementCreditGeneration): one whose lease is still live is
+	// left entirely alone, since the room holding it is live and its own release will reach it -
+	// adopting it here would let two rooms credit the same author on their own next versions. It
+	// needs no advisory lock (a room load never waits on one - a durable writer can hold it, and
+	// the load would then hang, the deadlock round 17 fixed): every statement it runs is a plain,
+	// atomic operation whose correctness Postgres's own row-level locking already guarantees
+	// against a concurrent writer's equally brief transaction.
+	generation, adopted, err := bumpSettlementCreditGeneration(ctx, rooms, room, s.now())
 	if err != nil {
+		return err
+	}
+	if err := takeOrRefreshGenerationLease(ctx, rooms, room, generation, s.now()); err != nil {
 		return err
 	}
 	// The room is still loading: ygo hands its document to no peer or caller until this hook
@@ -496,6 +498,8 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	// hook) - so the generation this load just bumped durably is this room's own from here on,
 	// whatever the service's own bookkeeping struct happens to be.
 	state.creditGeneration.Store(generation)
+	state.leaseStop = make(chan struct{})
+	go s.runGenerationLeaseTicker(room, generation, state.leaseStop)
 	// The ask blocks the room loaded with are the baseline its update observer tells new ones by.
 	// They were not introduced by any update the observer sees, so none gains an author here.
 	if askBlocks == nil {
@@ -510,7 +514,7 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	// durable on its pending-settlement row; it settles only after its issue reopens. A room that
 	// failed again while this load ran leaves the row for its own replacement.
 	if owed && open {
-		state.mergeSettlementCreditLocked(credit)
+		state.mergeSettlementCreditLocked(settlementCredit{Pending: adopted, LastActor: credit.LastActor})
 	}
 	if state.failed == nil && open && owed && !state.settleWarming {
 		s.scheduleSettleLocked(room, state)
@@ -611,17 +615,12 @@ func (s *Service) creditContentChange(room string, origin any) (settlementCredit
 	creditSeq := state.creditSeq.Load()
 	generation := state.creditGeneration.Load()
 	pending := make(map[string]model.Actor, len(state.connected))
-	pendingSeq := make(map[string]uint64, len(state.connected))
-	pendingGeneration := make(map[string]uint64, len(state.connected))
 	var sole *model.Actor
 	ambiguous := false
 	for _, actor := range state.connected {
 		key := actorKey(actor)
 		state.creditPendingLocked(key, actor, creditSeq)
-		creditKey := settlementCreditKey(actor)
-		pending[creditKey] = actor
-		pendingSeq[creditKey] = creditSeq
-		pendingGeneration[creditKey] = generation
+		pending[key] = actor
 		if sole == nil {
 			sole = new(actor)
 		} else if key != actorKey(*sole) {
@@ -633,7 +632,7 @@ func (s *Service) creditContentChange(room string, origin any) (settlementCredit
 	}
 	state.lastActor = sole
 	state.unsettled = true
-	return settlementCredit{Pending: pending, PendingSeq: pendingSeq, PendingGeneration: pendingGeneration, LastActor: sole, Generation: generation}, creditSeq
+	return settlementCreditFor(pending, sole, creditSeq, generation), creditSeq
 }
 
 // addConnection registers a browser connected to room. It is credited only with browser edits
@@ -669,7 +668,7 @@ func (s *Service) settleLastPeer(_ context.Context, room string) {
 		s.unlockState(room, state)
 		return
 	}
-	generation := state.gen
+	generation := state.roomGeneration
 	s.unlockState(room, state)
 	defer s.settleWG.Done()
 	s.settleRoom(room, generation)

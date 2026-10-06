@@ -45,6 +45,16 @@ const (
 	// last Server.Apply on a room no peer is in returns (New). A peer that returns within it
 	// rejoins the warm room rather than reloading the document.
 	roomIdleTimeout = time.Minute
+	// generationLeaseRefresh is how often a live room refreshes its own generation's lease
+	// (refreshGenerationLeaseAndAdopt), and the same sweep's own cadence for adopting another,
+	// abandoned generation's entries on the same document.
+	generationLeaseRefresh = 30 * time.Second
+	// generationLeaseTTL is how long a generation's lease survives without a refresh before
+	// another room may adopt its entries: long enough that a refresh tick slipping behind under
+	// load, or one missed cycle, does not cause a false adoption; short enough that a task that
+	// stopped without releasing (a crash, or a rolling deploy's stop grace) does not leave its
+	// authors stuck for long (LEGION-513).
+	generationLeaseTTL = 2 * time.Minute
 )
 
 // Deps configures the live document service.
@@ -610,15 +620,35 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		connected  bool
 	}
 	var loaded []loadedRoom
+	type stoppedLease struct {
+		name       string
+		generation uint64
+	}
+	var stoppedLeases []stoppedLease
 	s.rooms.Range(func(key, value any) bool {
 		name := key.(string)
 		state := value.(*roomState)
 		s.shutdownRooms.Store(name, struct{}{})
 		state.mu.Lock()
-		loaded = append(loaded, loadedRoom{name: name, generation: state.gen, connected: len(state.connected) > 0})
+		loaded = append(loaded, loadedRoom{name: name, generation: state.roomGeneration, connected: len(state.connected) > 0})
+		// Every loaded room's lease-refresh ticker stops here, not only the ones CloseRoom
+		// reaches below (connected rooms only): one with no peer connected right now still has
+		// a goroutine holding s.store.Pool, which Shutdown is about to close out from under it
+		// otherwise (LEGION-513). The delete itself waits until this Range call returns, so it
+		// never runs a database call while holding state.mu.
+		if state.leaseStop != nil {
+			close(state.leaseStop)
+			state.leaseStop = nil
+			stoppedLeases = append(stoppedLeases, stoppedLease{name: name, generation: state.creditGeneration.Load()})
+		}
 		state.mu.Unlock()
 		return true
 	})
+	for _, stopped := range stoppedLeases {
+		if err := deleteGenerationLease(ctx, s.store.Pool, stopped.name, stopped.generation); err != nil {
+			slog.Error("dispatch: delete document generation lease on shutdown", "room", stopped.name, "error", err)
+		}
+	}
 	s.stopAllSettleTimers()
 	drainCtx, cancelDrain := context.WithTimeout(ctx, ShutdownDrainBudget)
 	defer cancelDrain()
@@ -782,7 +812,7 @@ func (s *Service) Quiesce(ctx context.Context) error {
 		state.mu.Lock()
 		// A settlement whose timer already fired reads the generation it was armed with, so
 		// bumping it here ends that settlement before it opens a transaction.
-		state.gen++
+		state.roomGeneration++
 		s.stopSettleTimer(state.settle)
 		state.mu.Unlock()
 		if err := s.evictRoom(room, state); err != nil && firstErr == nil {
@@ -824,8 +854,8 @@ func (s *Service) scheduleSettleAfterLocked(room string, state *roomState, delay
 	if !s.addUnlessStopping(&s.settleWG) {
 		return
 	}
-	state.gen++
-	generation := state.gen
+	state.roomGeneration++
+	generation := state.roomGeneration
 	s.stopSettleTimer(state.settle)
 	timerID := s.nextSettleTimer.Add(1)
 	s.registerSettleTimer(timerID)
@@ -965,7 +995,7 @@ func (s *Service) retrySettleLocked(room string, state *roomState, generation ui
 	} else {
 		slog.Error("dispatch: settle document", "room", room, "error", err)
 	}
-	if state.gen != generation {
+	if state.roomGeneration != generation {
 		return
 	}
 	state.settleFailures++
@@ -1092,7 +1122,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		s.retrySettle(room, generation, err)
 	}
 	state := s.lockState(room)
-	if s.stopping.Load() || state.closed || state.failed != nil || state.gen != generation {
+	if s.stopping.Load() || state.closed || state.failed != nil || state.roomGeneration != generation {
 		s.unlockState(room, state)
 		return
 	}
@@ -1158,7 +1188,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		}
 	}
 	state.mu.Lock()
-	generation = state.gen
+	generation = state.roomGeneration
 	s.unlockState(room, state)
 
 	ledger := &Ledger{service: s, settling: true}
@@ -1311,7 +1341,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	// An open live write is not in the room yet, and since this settlement holds the owner row,
 	// the write's transaction has already committed: the cursor this settlement versions against
 	// includes its row. Write no version; finishLiveWrite arms a settlement once it is published.
-	superseded := state.gen != generation
+	superseded := state.roomGeneration != generation
 	if state.liveWriter != nil {
 		state.settleDeferred = true
 		superseded = true
@@ -1424,7 +1454,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	// included; the move's own update is appended once this transaction releases the room lock.
 	// Should that append fail, the room fails and reloads without the move's text, which the
 	// version holds, until the browser that made it resends it on reconnecting.
-	if s.stopping.Load() || state.closed || state.failed != nil || (state.gen != generation && len(slots) == 0) {
+	if s.stopping.Load() || state.closed || state.failed != nil || (state.roomGeneration != generation && len(slots) == 0) {
 		s.unlockState(room, state)
 		s.discardSuppressedPersistence(room, slots...)
 		return
@@ -1533,7 +1563,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		abandon(fmt.Errorf("commit document settlement: %w", err))
 		return
 	}
-	if state.gen == generation {
+	if state.roomGeneration == generation {
 		state.settleFailures = 0
 		// This release runs before the publish below, the order Ledger.Commit keeps for every
 		// other version write, so a subscriber acting on this version's artifact.version event
@@ -1809,7 +1839,7 @@ func (s *Service) SetIssueClosed(ctx context.Context, issueKey string, closed bo
 			changed = state.closed != closed
 			state.closed = closed
 			if closed && changed {
-				state.gen++
+				state.roomGeneration++
 				s.stopSettleTimer(state.settle)
 				// Snapshot while the state is locked, then write after unlocking: settlement holds
 				// the document's advisory lock before it takes state.mu, so taking that lock here
@@ -1836,7 +1866,7 @@ func (s *Service) SetIssueClosed(ctx context.Context, issueKey string, closed bo
 func (s *Service) Evict(_ context.Context, artifactID string) error {
 	state := s.lockExistingState(artifactID)
 	if state != nil {
-		state.gen++
+		state.roomGeneration++
 		s.stopSettleTimer(state.settle)
 		s.unlockState(artifactID, state)
 	}
@@ -1875,7 +1905,7 @@ func (s *Service) failRoomLocked(room string, state *roomState, cause error) {
 	state.failed = cause
 	state.failedDone = make(chan struct{})
 	done := state.failedDone
-	state.gen++
+	state.roomGeneration++
 	s.stopSettleTimer(state.settle)
 	s.purgeSuppressedPersistence(room)
 	// The failure drops this room's settlement: a queued one is stopped just above, one

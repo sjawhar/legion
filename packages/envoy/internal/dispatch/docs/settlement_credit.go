@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
@@ -32,10 +34,17 @@ import (
 // alone could discard another task's genuinely unsettled, lower-numbered entry. generation makes
 // that comparison meaningless across rooms: two different rooms never share one, so a release
 // never reaches across the boundary a cross-process roomSeq comparison could not see. An entry
-// from an abandoned generation - the task that credited it stopped before releasing it - is never
-// lost and never stuck forever: the next room to load this document adopts every row entry into
-// its own generation (bumpSettlementCreditGeneration), after which that room's own release can
-// take it out normally, or a further load adopts it again. LastActor is the latest edit source
+// from an abandoned generation - the task that credited it stopped before releasing it - is
+// never lost and never stuck forever, but only once that generation's lease has expired
+// (doc_settlement_generation_leases, generationLeaseTTL): the next room to load this document, or
+// any live room's own lease-refresh tick on the same document, adopts every entry whose own
+// generation currently holds no unexpired lease into its own generation
+// (bumpSettlementCreditGeneration, adoptAbandonedSettlementCredit), after which that room's own
+// release can take it out normally. An entry under a generation whose lease is still live is left
+// alone - the room holding it is live and its own release will reach it; adopting it here too
+// would let two rooms credit the same author on their own next versions, the very duplicate
+// credit a generation tag alone does not prevent on its own.
+// LastActor is the latest edit source
 // used by ask reconciliation and events when no version is written. It lives beside the pending
 // settlement so closing a document's issue, a room release or a restart cannot lose its
 // attribution before that settlement commits. Generation is the row's own current generation,
@@ -90,6 +99,7 @@ func settlementCreditFor(pending map[string]model.Actor, lastActor *model.Actor,
 		Pending:           make(map[string]model.Actor, len(pending)),
 		PendingSeq:        make(map[string]uint64, len(pending)),
 		PendingGeneration: make(map[string]uint64, len(pending)),
+		Generation:        generation,
 	}
 	for _, actor := range pending {
 		key := settlementCreditKey(actor)
@@ -110,8 +120,8 @@ func settlementCreditKey(actor model.Actor) string {
 
 // settlementCreditLocked is the room's whole pending credit, each author at its own creditSeq
 // (pendingAuthor.creditSeq) rather than one shared point, all under this one room's own
-// generation (pendingAuthor.generation is always state.creditGeneration, since every entry a
-// live room credits is this room's own). The caller holds state.mu.
+// generation (every entry a live room credits shares its one state.creditGeneration; pendingAuthor
+// has no generation field of its own). The caller holds state.mu.
 func (state *roomState) settlementCreditLocked() settlementCredit {
 	generation := state.creditGeneration.Load()
 	credit := settlementCredit{
@@ -234,19 +244,19 @@ func pendingSettlementCredit(ctx context.Context, q Queryer, room string) (bool,
 // appended document update; recording authors after its transaction committed or while closing an
 // issue must not make an old row wait another resumption age.
 //
-// The gate below discards credit.CreditSeq wholesale when it is both positive and at or before
-// the row's released_through, provided credit.Generation still matches the row's own current
-// generation: a credit whose generation has since been superseded (bumpSettlementCreditGeneration
-// ran a load between this write's capture and this upsert reaching the row) is never gated by a
-// watermark from a generation it no longer belongs to, and is merged as any other new credit
-// would be - the merge's own per-key authority, not this gate, is what keeps it correct, since an
-// adopting load has already restamped the row's own entries under the new generation by the time
-// this upsert can run. CreditSeq (settlementCredit's own aggregate field) is the room's creditSeq
-// when credit was captured (0 for a credit this same transaction's own version will immediately
-// release, which never races a concurrent reader - see Ledger.recordSettlementCredit). A credit
-// captured at or before the row's released_through watermark, in the same generation, was already
-// consumed by the version's own release; merging it would resurrect an author that version already
-// credited durably, so the row is left exactly as it stood instead.
+// The gate below discards an incoming credit two ways. A credit from a generation strictly
+// older than the row's own current generation is always stale and always discarded, whatever its
+// CreditSeq says: that generation is gone (bumpSettlementCreditGeneration already moved the row
+// past it, between this write's own capture and this upsert reaching the row - queued behind the
+// document's advisory lock, same as the ordinary, same-generation race below), and merging its
+// credit would resurrect an author under a generation nothing will ever release again. A credit
+// from the row's own current generation is discarded when its CreditSeq is both positive and at
+// or before the row's released_through: that version's own release already consumed it. CreditSeq
+// (settlementCredit's own aggregate field) is the room's creditSeq when credit was captured (0
+// for a credit this same transaction's own version will immediately release, which never races a
+// concurrent reader - see Ledger.recordSettlementCredit). Either way, merging the discarded
+// credit would resurrect an author a version already credited durably, so the row is left exactly
+// as it stood instead.
 func upsertSettlementCredit(ctx context.Context, tx pgx.Tx, room string, credit settlementCredit, updateMarkedAt bool) error {
 	encoded, err := json.Marshal(credit)
 	if err != nil {
@@ -256,9 +266,10 @@ func upsertSettlementCredit(ctx context.Context, tx pgx.Tx, room string, credit 
 		insert into doc_settlements_pending (artifact_id, settlement_authors) values ($1, $2::jsonb)
 		on conflict (artifact_id) do update set
 			settlement_authors = case
-				when $3::bigint > 0
-					and $3::bigint <= coalesce((doc_settlements_pending.settlement_authors->>'released_through')::bigint, 0)
-					and $4::bigint = coalesce((doc_settlements_pending.settlement_authors->>'generation')::bigint, 0)
+				when $4::bigint < coalesce((doc_settlements_pending.settlement_authors->>'generation')::bigint, 0)
+					or ($3::bigint > 0
+						and $3::bigint <= coalesce((doc_settlements_pending.settlement_authors->>'released_through')::bigint, 0)
+						and $4::bigint = coalesce((doc_settlements_pending.settlement_authors->>'generation')::bigint, 0))
 				then doc_settlements_pending.settlement_authors
 				else jsonb_strip_nulls(jsonb_build_object(
 					'pending',
@@ -336,6 +347,18 @@ func releaseSettlementCredit(ctx context.Context, tx pgx.Tx, room string, author
 	// has none to update, and a plain update would silently do nothing, losing this watermark
 	// entirely and leaving a later append's gate check comparing against zero.
 	if _, err := tx.Exec(ctx, `
+		with drop_keys as (
+			select coalesce(array_agg(k), '{}'::text[]) as keys
+			from doc_settlements_pending, jsonb_object_keys(
+				case when jsonb_typeof(doc_settlements_pending.settlement_authors->'pending') = 'object'
+					then doc_settlements_pending.settlement_authors->'pending' else '{}'::jsonb end
+			) as k
+			where doc_settlements_pending.artifact_id = $1
+				and ($3::bool or k = any($2::text[]))
+				and coalesce((doc_settlements_pending.settlement_authors->'pending_seq'->>k)::bigint, 0) > 0
+				and (doc_settlements_pending.settlement_authors->'pending_seq'->>k)::bigint <= $4::bigint
+				and coalesce((doc_settlements_pending.settlement_authors->'pending_generation'->>k)::bigint, -1) = $5::bigint
+		)
 		insert into doc_settlements_pending (artifact_id, settlement_authors)
 			values ($1, jsonb_build_object('pending', '{}'::jsonb, 'pending_seq', '{}'::jsonb, 'pending_generation', '{}'::jsonb, 'released_through', $4::bigint, 'generation', $5::bigint))
 		on conflict (artifact_id) do update set
@@ -347,47 +370,17 @@ func releaseSettlementCredit(ctx context.Context, tx pgx.Tx, room string, author
 							'{pending}',
 							(case when jsonb_typeof(doc_settlements_pending.settlement_authors->'pending') = 'object'
 								then doc_settlements_pending.settlement_authors->'pending' else '{}'::jsonb end)
-							- (
-								select coalesce(array_agg(k), '{}'::text[])
-								from jsonb_object_keys(
-									case when jsonb_typeof(doc_settlements_pending.settlement_authors->'pending') = 'object'
-										then doc_settlements_pending.settlement_authors->'pending' else '{}'::jsonb end
-								) as k
-								where ($3::bool or k = any($2::text[]))
-									and coalesce((doc_settlements_pending.settlement_authors->'pending_seq'->>k)::bigint, 0) > 0
-									and (doc_settlements_pending.settlement_authors->'pending_seq'->>k)::bigint <= $4::bigint
-									and coalesce((doc_settlements_pending.settlement_authors->'pending_generation'->>k)::bigint, -1) = $5::bigint
-							)
+							- (select keys from drop_keys)
 						),
 						'{pending_seq}',
 						(case when jsonb_typeof(doc_settlements_pending.settlement_authors->'pending_seq') = 'object'
 							then doc_settlements_pending.settlement_authors->'pending_seq' else '{}'::jsonb end)
-						- (
-							select coalesce(array_agg(k), '{}'::text[])
-							from jsonb_object_keys(
-								case when jsonb_typeof(doc_settlements_pending.settlement_authors->'pending') = 'object'
-									then doc_settlements_pending.settlement_authors->'pending' else '{}'::jsonb end
-							) as k
-							where ($3::bool or k = any($2::text[]))
-								and coalesce((doc_settlements_pending.settlement_authors->'pending_seq'->>k)::bigint, 0) > 0
-								and (doc_settlements_pending.settlement_authors->'pending_seq'->>k)::bigint <= $4::bigint
-								and coalesce((doc_settlements_pending.settlement_authors->'pending_generation'->>k)::bigint, -1) = $5::bigint
-						)
+						- (select keys from drop_keys)
 					),
 					'{pending_generation}',
 					(case when jsonb_typeof(doc_settlements_pending.settlement_authors->'pending_generation') = 'object'
 						then doc_settlements_pending.settlement_authors->'pending_generation' else '{}'::jsonb end)
-					- (
-						select coalesce(array_agg(k), '{}'::text[])
-						from jsonb_object_keys(
-							case when jsonb_typeof(doc_settlements_pending.settlement_authors->'pending') = 'object'
-								then doc_settlements_pending.settlement_authors->'pending' else '{}'::jsonb end
-						) as k
-						where ($3::bool or k = any($2::text[]))
-							and coalesce((doc_settlements_pending.settlement_authors->'pending_seq'->>k)::bigint, 0) > 0
-							and (doc_settlements_pending.settlement_authors->'pending_seq'->>k)::bigint <= $4::bigint
-							and coalesce((doc_settlements_pending.settlement_authors->'pending_generation'->>k)::bigint, -1) = $5::bigint
-					)
+					- (select keys from drop_keys)
 				),
 				'{released_through}',
 				to_jsonb(
@@ -403,55 +396,284 @@ func releaseSettlementCredit(ctx context.Context, tx pgx.Tx, room string, author
 	return nil
 }
 
+// execQueryer is a pool that can run a statement for effect, not only read one: the surface a
+// lease operation needs, which both *pgxpool.Pool (the pool reserved for loads) and *store.Pool
+// (the general pool, which the lease-refresh ticker uses) implement, so the same lease functions
+// run on whichever pool their caller holds.
+type execQueryer interface {
+	Queryer
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
+
 // bumpSettlementCreditGeneration gives room a new generation - its own per-room-load instance id
-// - the moment a fresh roomState loads it (onLoadDocument), and durably adopts every pending entry
-// the row already holds into that new generation, with its own pending_seq reset to zero (the
-// same sentinel recordSettlementCredit's own fresh upserts use): this room has not yet given any
-// of them a sequence of its own, so none is eligible for release until something re-credits it or
-// this room's own future capture reads it from state.pending (mergeSettlementCreditLocked performs
-// the same adoption in memory, in the same load). This is what keeps an entry a stopped task's
-// generation can never release again from staying stuck forever: the next room to load the
-// document, whichever process it runs in, adopts it into a generation that process's own releases
-// can reach. Takes rooms, the pool reserved for document loads, rather than the general pool a
-// load must not draw a second connection from (onLoadDocument's own comment on the wedge that
-// risks); needs no advisory lock, since it is one plain, atomic single-row UPDATE whose
-// correctness Postgres's own row-level locking already guarantees against a concurrent writer's
-// equally brief transaction - never an indefinite wait on a lock a long-lived document writer
-// could hold (LEGION-513, the deadlock round 17 fixed by removing exactly that kind of wait from
-// a room load). A document with no row yet starts at generation 1.
-func bumpSettlementCreditGeneration(ctx context.Context, rooms *pgxpool.Pool, room string) (uint64, error) {
+// - the moment a fresh roomState loads it (onLoadDocument), and durably adopts every pending
+// entry whose own generation currently holds no unexpired lease (generationLeases) into the new
+// one, with its own pending_seq reset to zero (the same sentinel recordSettlementCredit's own
+// fresh upserts use): this room has not yet given any of them a sequence of its own, so none is
+// eligible for release until something re-credits it or this room's own future capture reads it
+// from state.pending. An entry under a generation whose lease has not expired is left entirely
+// alone - neither restamped nor returned - since the room still holding that lease is live and
+// its own release will reach it; adopting it here would let two rooms credit the same author on
+// their own next versions (LEGION-513). Returns the generation and exactly the entries this call
+// adopted, so the caller's in-memory merge (mergeSettlementCreditLocked) touches only what the
+// row actually took: bumping the generation, checking leases, adopting and reporting what was
+// adopted all happen in this one statement, so no credit landing between separate steps could be
+// adopted durably here yet missed by that merge, or vice versa.
+//
+// This is what keeps an entry a stopped task's generation can never release again from staying
+// stuck forever: once its lease expires, the next room to load the document, whichever process
+// it runs in, adopts it into a generation that process's own releases can reach - and a live
+// room's own lease-refresh tick performs the same adoption on its own document
+// (refreshGenerationLeaseAndAdopt), so a document that never reloads is not stuck waiting for one
+// either. Takes rooms, the pool reserved for document loads, rather than the general pool a load
+// must not draw a second connection from (onLoadDocument's own comment on the wedge that risks);
+// needs no advisory lock, since every statement here is a plain, atomic single-row operation
+// whose correctness Postgres's own row-level locking already guarantees against a concurrent
+// writer's equally brief transaction - never an indefinite wait on a lock a long-lived document
+// writer could hold (LEGION-513, the deadlock round 17 fixed by removing exactly that kind of
+// wait from a room load). A document with no row yet is given one, at generation 1, before the
+// same call retries once against it: landing on generation 2, since the retry's own update
+// always increments, not 1 - harmless, since nothing is ever adopted from a row that was just
+// created, and every generation after this one still increments by exactly one from there.
+func bumpSettlementCreditGeneration(ctx context.Context, rooms execQueryer, room string, now time.Time) (uint64, map[string]model.Actor, error) {
 	var generation int64
+	var adopted []byte
 	err := rooms.QueryRow(ctx, `
-		insert into doc_settlements_pending (artifact_id, settlement_authors)
-			values ($1, jsonb_build_object('pending', '{}'::jsonb, 'pending_seq', '{}'::jsonb, 'pending_generation', '{}'::jsonb, 'released_through', 0, 'generation', 1))
-		on conflict (artifact_id) do update set
-			settlement_authors = jsonb_set(
+		with live as (
+			select l.generation from doc_settlement_generation_leases l
+				where l.artifact_id = $1 and l.expires_at > $2
+		),
+		next_generation as (
+			select coalesce((settlement_authors->>'generation')::bigint, 0) + 1 as value
+			from doc_settlements_pending where artifact_id = $1
+		),
+		adoptable as (
+			select kv.key
+			from doc_settlements_pending, jsonb_each_text(
+				case when jsonb_typeof(settlement_authors->'pending_generation') = 'object'
+					then settlement_authors->'pending_generation' else '{}'::jsonb end
+			) as kv(key, value)
+			where artifact_id = $1
+				and kv.value::bigint != (select value from next_generation)
+				and not exists (select 1 from live where live.generation = kv.value::bigint)
+		)
+		update doc_settlements_pending
+		set settlement_authors = jsonb_set(
+			jsonb_set(
 				jsonb_set(
-					doc_settlements_pending.settlement_authors,
+					settlement_authors,
 					'{generation}',
-					to_jsonb(coalesce((doc_settlements_pending.settlement_authors->>'generation')::bigint, 0) + 1)
+					to_jsonb((select value from next_generation))
 				),
 				'{pending_generation}',
 				(select coalesce(jsonb_object_agg(
-						k,
-						coalesce((doc_settlements_pending.settlement_authors->>'generation')::bigint, 0) + 1
+						kv.key,
+						case when kv.key in (select key from adoptable) then to_jsonb((select value from next_generation)) else kv.value end
 					), '{}'::jsonb)
-					from jsonb_object_keys(
-						case when jsonb_typeof(doc_settlements_pending.settlement_authors->'pending') = 'object'
-							then doc_settlements_pending.settlement_authors->'pending' else '{}'::jsonb end
-					) as k)
-			) || jsonb_build_object(
-				'pending_seq',
-				(select coalesce(jsonb_object_agg(k, 0), '{}'::jsonb)
-					from jsonb_object_keys(
-						case when jsonb_typeof(doc_settlements_pending.settlement_authors->'pending') = 'object'
-							then doc_settlements_pending.settlement_authors->'pending' else '{}'::jsonb end
-					) as k)
-			)
-		returning (settlement_authors->>'generation')::bigint
-	`, room).Scan(&generation)
-	if err != nil {
-		return 0, fmt.Errorf("adopt the document's pending settlement into a new generation: %w", err)
+					from jsonb_each(
+						case when jsonb_typeof(settlement_authors->'pending_generation') = 'object'
+							then settlement_authors->'pending_generation' else '{}'::jsonb end
+					) as kv(key, value))
+			),
+			'{pending_seq}',
+			(select coalesce(jsonb_object_agg(
+					kv.key,
+					case when kv.key in (select key from adoptable) then '0'::jsonb else kv.value end
+				), '{}'::jsonb)
+				from jsonb_each(
+					case when jsonb_typeof(settlement_authors->'pending_seq') = 'object'
+						then settlement_authors->'pending_seq' else '{}'::jsonb end
+				) as kv(key, value))
+		)
+		where artifact_id = $1
+		returning
+			(select value from next_generation),
+			(select coalesce(jsonb_object_agg(kv.key, kv.value), '{}'::jsonb)
+				from jsonb_each(
+					case when jsonb_typeof(settlement_authors->'pending') = 'object'
+						then settlement_authors->'pending' else '{}'::jsonb end
+				) as kv(key, value)
+				where kv.key in (select key from adoptable))
+	`, room, now).Scan(&generation, &adopted)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// No row yet: a document this is the first credit-related event for ever. Nothing to
+		// adopt, since nothing has ever been pending; the row starts at generation 1.
+		if _, insertErr := rooms.Exec(ctx, `
+			insert into doc_settlements_pending (artifact_id, settlement_authors)
+				values ($1, jsonb_build_object('pending', '{}'::jsonb, 'pending_seq', '{}'::jsonb, 'pending_generation', '{}'::jsonb, 'released_through', 0, 'generation', 1))
+			on conflict (artifact_id) do nothing
+		`, room); insertErr != nil {
+			return 0, nil, fmt.Errorf("start the document's pending settlement at generation 1: %w", insertErr)
+		}
+		// A concurrent first load could have raced this insert and already taken generation 1;
+		// either way, retrying the same update now finds a row and runs the ordinary path.
+		return bumpSettlementCreditGeneration(ctx, rooms, room, now)
 	}
-	return uint64(generation), nil
+	if err != nil {
+		return 0, nil, fmt.Errorf("adopt the document's pending settlement into a new generation: %w", err)
+	}
+	var pending map[string]model.Actor
+	if err := json.Unmarshal(adopted, &pending); err != nil {
+		return 0, nil, fmt.Errorf("decode the document's adopted settlement authors: %w", err)
+	}
+	return uint64(generation), pending, nil
+}
+
+// takeOrRefreshGenerationLease takes or refreshes room's lease on generation, extending its
+// expiry to generationLeaseTTL from now: a live room holds its own lease, refreshed on a ticker
+// while it stays live (refreshGenerationLeaseAndAdopt), so bumpSettlementCreditGeneration's own
+// adoption check never mistakes this room's own, still-live generation for an abandoned one.
+func takeOrRefreshGenerationLease(ctx context.Context, pool execQueryer, room string, generation uint64, now time.Time) error {
+	if _, err := pool.Exec(ctx, `
+		insert into doc_settlement_generation_leases (artifact_id, generation, expires_at)
+			values ($1, $2, $3)
+		on conflict (artifact_id, generation) do update set expires_at = excluded.expires_at
+	`, room, int64(generation), now.Add(generationLeaseTTL)); err != nil {
+		return fmt.Errorf("take the document's generation lease: %w", err)
+	}
+	return nil
+}
+
+// deleteGenerationLease deletes room's lease on generation: a clean unload (releaseUnloadedRoom)
+// calls this so the next load, or another live room's own lease-refresh tick, adopts this
+// generation's entries at once rather than waiting out generationLeaseTTL.
+func deleteGenerationLease(ctx context.Context, pool execQueryer, room string, generation uint64) error {
+	if _, err := pool.Exec(ctx, `
+		delete from doc_settlement_generation_leases where artifact_id = $1 and generation = $2
+	`, room, int64(generation)); err != nil {
+		return fmt.Errorf("delete the document's generation lease: %w", err)
+	}
+	return nil
+}
+
+// deleteGenerationLeasesForRoom deletes every one of room's generation leases, whichever
+// generation each belongs to: resumeOwedSettlements calls this before arming a document's
+// settlement, since its own age check already established that whatever generation last credited
+// this document is not coming back to refresh a lease of its own (LEGION-513).
+func deleteGenerationLeasesForRoom(ctx context.Context, pool execQueryer, room string) error {
+	if _, err := pool.Exec(ctx, `
+		delete from doc_settlement_generation_leases where artifact_id = $1
+	`, room); err != nil {
+		return fmt.Errorf("delete the document's generation leases: %w", err)
+	}
+	return nil
+}
+
+// adoptAbandonedSettlementCredit adopts, into room's own already-leased generation, every pending
+// entry on the document whose own generation currently holds no unexpired lease - the same
+// adoption bumpSettlementCreditGeneration performs at load, run again on this already-live room's
+// own lease-refresh tick (refreshGenerationLeaseAndAdopt) so a document that never reloads is not
+// stuck waiting for one before an abandoned generation's entries are picked up. Returns exactly
+// what it adopted, for the caller's in-memory merge.
+func adoptAbandonedSettlementCredit(ctx context.Context, pool execQueryer, room string, generation uint64, now time.Time) (map[string]model.Actor, error) {
+	var adopted []byte
+	err := pool.QueryRow(ctx, `
+		with live as (
+			select generation from doc_settlement_generation_leases
+				where artifact_id = $1 and expires_at > $3
+		),
+		adoptable as (
+			select kv.key
+			from doc_settlements_pending, jsonb_each_text(
+				case when jsonb_typeof(settlement_authors->'pending_generation') = 'object'
+					then settlement_authors->'pending_generation' else '{}'::jsonb end
+			) as kv(key, value)
+			where artifact_id = $1
+				and kv.value::bigint != $2
+				and not exists (select 1 from live where live.generation = kv.value::bigint)
+		)
+		update doc_settlements_pending
+		set settlement_authors = jsonb_set(
+			jsonb_set(
+				settlement_authors,
+				'{pending_generation}',
+				(select coalesce(jsonb_object_agg(
+						kv.key,
+						case when kv.key in (select key from adoptable) then to_jsonb($2::bigint) else kv.value end
+					), '{}'::jsonb)
+					from jsonb_each(
+						case when jsonb_typeof(settlement_authors->'pending_generation') = 'object'
+							then settlement_authors->'pending_generation' else '{}'::jsonb end
+					) as kv(key, value))
+			),
+			'{pending_seq}',
+			(select coalesce(jsonb_object_agg(
+					kv.key,
+					case when kv.key in (select key from adoptable) then '0'::jsonb else kv.value end
+				), '{}'::jsonb)
+				from jsonb_each(
+					case when jsonb_typeof(settlement_authors->'pending_seq') = 'object'
+						then settlement_authors->'pending_seq' else '{}'::jsonb end
+				) as kv(key, value))
+		)
+		where artifact_id = $1
+		returning (
+			select coalesce(jsonb_object_agg(kv.key, kv.value), '{}'::jsonb)
+			from jsonb_each(
+				case when jsonb_typeof(settlement_authors->'pending') = 'object'
+					then settlement_authors->'pending' else '{}'::jsonb end
+			) as kv(key, value)
+			where kv.key in (select key from adoptable)
+		)
+	`, room, int64(generation), now).Scan(&adopted)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("adopt abandoned settlement credit: %w", err)
+	}
+	var pending map[string]model.Actor
+	if err := json.Unmarshal(adopted, &pending); err != nil {
+		return nil, fmt.Errorf("decode the document's adopted settlement authors: %w", err)
+	}
+	return pending, nil
+}
+
+// runGenerationLeaseTicker refreshes room's lease on generation every generationLeaseRefresh
+// while this room stays live, and performs the same abandoned-entry adoption a load does
+// (refreshGenerationLeaseAndAdopt), so a document that never reloads is not stuck waiting for one
+// before it picks up another, abandoned generation's entries. Stops once stop closes (a clean
+// unload, releaseUnloadedRoom, or Shutdown): the lease itself is already deleted by then, by
+// whichever of those closed stop, synchronously and before it did - never left to this goroutine
+// to race asynchronously against the next load's own adoption check (LEGION-513).
+func (s *Service) runGenerationLeaseTicker(room string, generation uint64, stop chan struct{}) {
+	ticker := time.NewTicker(generationLeaseRefresh)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+			if err := s.refreshGenerationLeaseAndAdopt(context.Background(), room, generation); err != nil {
+				slog.Error("dispatch: refresh document generation lease", "room", room, "error", err)
+			}
+		}
+	}
+}
+
+// refreshGenerationLeaseAndAdopt refreshes room's lease on generation and adopts into it every
+// pending entry on the document whose own generation currently holds no unexpired lease
+// (adoptAbandonedSettlementCredit), merging what it adopted into this room's own state.pending
+// the same way onLoadDocument's own adoption does. Exported to tests as the hook that stands in
+// for the real ticker's own tick, so a test advances generation-lease expiry with a fake clock
+// instead of sleeping generationLeaseRefresh for real.
+func (s *Service) refreshGenerationLeaseAndAdopt(ctx context.Context, room string, generation uint64) error {
+	now := s.now()
+	if err := takeOrRefreshGenerationLease(ctx, s.store.Pool, room, generation, now); err != nil {
+		return err
+	}
+	adopted, err := adoptAbandonedSettlementCredit(ctx, s.store.Pool, room, generation, now)
+	if err != nil {
+		return err
+	}
+	if len(adopted) == 0 {
+		return nil
+	}
+	state := s.lockExistingState(room)
+	if state == nil {
+		return nil
+	}
+	state.mergeSettlementCreditLocked(settlementCredit{Pending: adopted})
+	s.unlockState(room, state)
+	return nil
 }

@@ -111,7 +111,7 @@ func TestARoomWhosePeersUpdatesAreStoredOutOfOrderSettlesBoth(t *testing.T) {
 
 	state := service.room(artifactID)
 	state.mu.Lock()
-	generation := state.gen
+	generation := state.roomGeneration
 	state.mu.Unlock()
 	service.settleRoom(artifactID, generation)
 	if attempts.Load() == 0 {

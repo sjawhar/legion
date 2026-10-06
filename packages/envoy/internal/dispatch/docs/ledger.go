@@ -311,11 +311,9 @@ func (l *Ledger) recordSettlementCredit(ctx context.Context) error {
 		if _, consumed := released[artifactID][actorKey(seed.actor)]; consumed {
 			continue
 		}
-		var generation uint64
-		if write := l.liveWriteFor(artifactID); write != nil {
-			generation = write.state.creditGeneration.Load()
-		}
-		if err := upsertSettlementCredit(ctx, l.tx, artifactID, settlementCreditFor(nil, &seed.actor, 0, generation), false); err != nil {
+		// A seed's credit names only its lastActor, no pending authors (settlementCreditFor's
+		// nil pending loop tags nothing), so it needs no generation of its own.
+		if err := upsertSettlementCredit(ctx, l.tx, artifactID, settlementCreditFor(nil, &seed.actor, 0, 0), false); err != nil {
 			return err
 		}
 	}
@@ -440,7 +438,7 @@ func commitVersionLocked(state *roomState, version model.Version) {
 		return
 	}
 	delete(state.pendingVersions, version.Number)
-	if state.gen != capture.generation {
+	if state.roomGeneration != capture.roomGeneration {
 		return
 	}
 	if capture.fullRelease {

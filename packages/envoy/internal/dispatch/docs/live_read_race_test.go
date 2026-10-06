@@ -214,7 +214,7 @@ func TestReadsOfALiveDocumentRunBesideItsPeers(t *testing.T) {
 		overlapping(t, func() bool {
 			state := service.room(artifactID)
 			state.mu.Lock()
-			generation := state.gen
+			generation := state.roomGeneration
 			state.mu.Unlock()
 			read.Store(0)
 			service.settleRoom(artifactID, generation)

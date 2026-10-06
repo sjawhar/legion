@@ -158,7 +158,7 @@ func (s *Service) openLiveWrite(ctx context.Context, ledger *Ledger, artifactID 
 		state := s.lockState(artifactID)
 		if state.liveWriter == nil {
 			state.liveWriter = write
-			state.gen++
+			state.roomGeneration++
 			state.settleDeferred = s.stopSettleTimer(state.settle)
 			s.unlockState(artifactID, state)
 			write.state = state
