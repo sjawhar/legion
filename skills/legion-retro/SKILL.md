@@ -67,13 +67,26 @@ Do not start retro before step 2 or skip it because the change seems mechanical;
 ## Durable outputs
 
 Write the integrated learning as one or more discoverable documents under `docs/solutions/`.
-Organize by reusable topic rather than by pull request. Search `docs/solutions/` for the topic
-first: when a document already states the rule, update it in place (sharpen the rule, add this
-issue and pull request to `related_issues`) rather than writing a sibling; when the new learning
-replaces an old document, set the old one's `status: superseded` and add
-`superseded_by: docs/solutions/<path>.md`. Open each document with the rule in a few imperative
-lines; the incident that taught it goes in an Evidence section below, never in the rule. Each
-document uses this front matter:
+Organize by reusable topic rather than by pull request, but never edit a document you did not
+write this retro — not its frontmatter, not its body. Two trees' retros can land within the same
+hour, and an in-place edit (another `related_issues` entry, a sharpened sentence, a `status`
+flip) conflicts with any other tree's edit to the same lines of the same file. Search
+`docs/solutions/` for the topic first; before relying on a hit, also search for
+`supersedes: docs/solutions/<its-path>` and `Extends docs/solutions/<its-path>` naming it —
+Legion runs no pass that reconciles these links, so a newer file that extends or supersedes the
+one you found is discoverable only by following them. Then write a new file of your own, named
+`docs/solutions/<category>/<slug>-<LEGION_ISSUE>.md` so two trees never choose the same path:
+
+- **A fresh topic:** state the rule in a few imperative lines; the incident goes in an Evidence
+  section below, never in the rule.
+- **A topic an existing document already covers:** underneath its own H1 heading, the first line
+  reads `Extends docs/solutions/<existing-path>.md.`; the rule states only the delta.
+- **A topic an existing document states wrongly:** frontmatter adds
+  `supersedes: docs/solutions/<existing-path>.md`; the first line under the H1 says why. Leave
+  the old file's frontmatter and body untouched: Legion runs no pass that reconciles it, so the
+  `supersedes:` link is the only thing that makes the correction discoverable from the old file.
+
+Each document uses this front matter:
 
 ```yaml
 ---
