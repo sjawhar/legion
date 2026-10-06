@@ -68,21 +68,24 @@ Do not start retro before step 2 or skip it because the change seems mechanical;
 
 Write the integrated learning as one or more discoverable documents under `docs/solutions/`.
 Organize by reusable topic rather than by pull request, but never edit a document you did not
-write this retro — not its frontmatter, not its body. Two trees' retros land within the same hour
-often enough that an in-place edit (another `related_issues` entry, a sharpened sentence, a
-`status` flip) conflicts with any other tree's edit to the same lines of the same file: two
-different trees each edited one shared note's `related_issues` list and body within a day on
-the deployment repository, forcing a backward move each time.
-Search `docs/solutions/` for the topic first, then always write a new, dated file of your own:
+write this retro — not its frontmatter, not its body. Two trees' retros can land within the same
+hour, and an in-place edit (another `related_issues` entry, a sharpened sentence, a `status`
+flip) conflicts with any other tree's edit to the same lines of the same file. Search
+`docs/solutions/` for the topic first; before relying on a hit, also search for
+`supersedes: docs/solutions/<its-path>` and `Extends docs/solutions/<its-path>` naming it — no
+grooming pass reconciles these links for you, in this repository or any repository Legion works
+in, so a newer file that extends or supersedes the one you found is discoverable only by
+following them. Then write a new file of your own, named
+`docs/solutions/<category>/<slug>-<LEGION_ISSUE>.md` so two trees never choose the same path:
 
-- **A fresh topic:** `docs/solutions/<category>/<slug>.md` with the rule in a few imperative
-  lines; the incident goes in an Evidence section below, never in the rule.
-- **A topic an existing document already covers:** a new file in the same category whose first
-  line reads `Extends docs/solutions/<existing-path>.md.` and whose rule states only the delta.
-- **A topic an existing document states wrongly:** a new file whose frontmatter adds
-  `supersedes: docs/solutions/<existing-path>.md` and whose first line says why; leave the old
-  file untouched — reconciling it is a later pass outside any merge path, where a conflict costs
-  nothing.
+- **A fresh topic:** state the rule in a few imperative lines; the incident goes in an Evidence
+  section below, never in the rule.
+- **A topic an existing document already covers:** underneath its own H1 heading, the first line
+  reads `Extends docs/solutions/<existing-path>.md.`; the rule states only the delta.
+- **A topic an existing document states wrongly:** frontmatter adds
+  `supersedes: docs/solutions/<existing-path>.md`; the first line under the H1 says why. Leave
+  the old file's frontmatter and body untouched: no later pass reconciles it, so the
+  `supersedes:` link is the only thing that makes the correction discoverable from the old file.
 
 Each document uses this front matter:
 
