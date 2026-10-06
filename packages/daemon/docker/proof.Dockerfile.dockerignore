@@ -1,0 +1,5 @@
+# The proof image's context (proof.Dockerfile), in place of the repository's .dockerignore: the
+# whole checkout, its .git included, since a stage proof builds and stamps its binaries from it and
+# the image's last step refuses a checkout git does not report clean. Leaving out a tracked file
+# would fail that step. The workflow checks out a fresh tree, so it holds nothing untracked.
+.jj

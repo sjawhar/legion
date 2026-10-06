@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Bun is a toolchain, and CI must run the one this repository locks. The pin lives in
-# `.bun-version`; the two Dockerfile `ARG BUN_VERSION` defaults must equal it (nothing passes
-# `--build-arg`, so those defaults are what every image build resolves), and this check fails
-# until all three agree. Raising Bun is therefore three edits, made together.
+# `.bun-version`; every Dockerfile's `ARG BUN_VERSION` default (three today: the Envoy image's, the
+# worker image's and the proof image's) must equal it (nothing passes `--build-arg`, so those
+# defaults are what every image build resolves), and this check fails until all of them agree.
+# Raising Bun is therefore four edits, made together.
 #
 # What this gate is for is accidental drift: an unpinned setup-bun step, a floating Docker tag, a
 # Bun install that never reads `.bun-version`. It does not try to stop someone who is deliberately

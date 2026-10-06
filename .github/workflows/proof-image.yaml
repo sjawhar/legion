@@ -1,0 +1,100 @@
+name: Proof Image
+
+# The image a stage proof runs from, in a pod beside the cluster it drives (packages/daemon/docker/
+# proof.Dockerfile; scripts/e2e/README.md, "From a pod"): ghcr.io/sjawhar/legion-proof:sha-<12>, for
+# every commit a proof may be asked to run at. A proof names a Legion commit, any pull request head
+# included, so the image is built for every head of a pull request against main and every main
+# commit. It holds the whole checkout, so every file of it is an input
+# (.github/scripts/check-image-trigger-paths.sh) and no trigger here filters by path.
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+  push:
+    branches: [main]
+  # A rebuild of the dispatched ref's commit.
+  workflow_dispatch:
+
+# Same-repo pull request runs get this token too (this repo takes no fork PRs). The run writes only
+# the package.
+permissions:
+  contents: read
+  packages: write # ghcr.io push
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    # Two pushes to one PR serialize on the PR number; every other event keys on its commit, so no
+    # commit is left without its image.
+    concurrency:
+      group: proof-image-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
+      cancel-in-progress: false
+    env:
+      IMAGE: ghcr.io/sjawhar/legion-proof
+      # The commit that is built and that the sha- tag names: the PR head on `pull_request` (github.sha
+      # would be the ephemeral merge commit there); the pushed or dispatched commit otherwise.
+      BUILT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ env.BUILT_SHA }}
+          # The image carries this .git, so it must hold no credential.
+          persist-credentials: false
+
+      - name: Compute tags
+        id: meta
+        run: |
+          short="${BUILT_SHA::12}"
+          {
+            echo "built_sha=$BUILT_SHA"
+            echo "tag=${IMAGE}:sha-${short}"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+        with:
+          # As worker-image.yaml: keeps the event payload out of any provenance predicate.
+          driver-opts: |
+            provenance-add-gha=false
+
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        env:
+          # As worker-image.yaml: keeps the pull request's title and body out of the logged metadata.
+          BUILDX_METADATA_PROVENANCE: disabled
+          DOCKER_BUILD_SUMMARY: "false"
+        with:
+          context: .
+          file: packages/daemon/docker/proof.Dockerfile
+          platforms: linux/amd64
+          provenance: false
+          push: true
+          # A scope of its own, so this build and the worker image's never evict each other's layers.
+          cache-from: type=gha,scope=proof-image
+          cache-to: type=gha,mode=max,scope=proof-image
+          tags: ${{ steps.meta.outputs.tag }}
+          labels: |
+            org.opencontainers.image.revision=${{ steps.meta.outputs.built_sha }}
+          # The image's last step refuses a checkout at any other commit.
+          build-args: |
+            LEGION_REVISION=${{ steps.meta.outputs.built_sha }}
+
+      - name: Record digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          test -n "$DIGEST"
+          {
+            echo "### Proof image"
+            echo
+            echo "\`${IMAGE}@${DIGEST}\`"
+            echo
+            echo "Tag: \`$TAG\`"
+          } >> "$GITHUB_STEP_SUMMARY"
