@@ -497,27 +497,47 @@ func TestSecretCreateAndSetPromptForTheValueAtATerminal(t *testing.T) {
 	}
 }
 
-// TestSecretAnEmptyValueAtATerminalIsAUsageError: Enter alone, or the end of input, at the prompt
-// is a usage error that writes nothing.
+// TestSecretAnEmptyValueAtATerminalIsAUsageError: Enter alone or Ctrl-D with nothing typed, which
+// the real reader answers as an empty line (TestPromptCtrlDEndsTheValue), is a usage error that
+// writes nothing.
 func TestSecretAnEmptyValueAtATerminalIsAUsageError(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		err  error
-	}{{"enter alone", nil}, {"end of input", io.EOF}} {
-		t.Run(tc.name, func(t *testing.T) {
-			local := secrets.NewLocal(policytest.Secret("HELD_KEY", "ada@example.com", policy.TierAgent, "v1"))
-			startSecretBroker(t, servedBy(local))
-			useAWS(t, local, testAccount, adaSignIn)
-			useTerminal(t)
-			readHidden = func(int) ([]byte, error) { return nil, tc.err }
-			_, stderr, code := runSecret("set", "HELD_KEY")
-			if code != exitUsageError || !strings.Contains(stderr, "no value was entered") {
-				t.Fatalf("exit %d, stderr %q; want %d saying no value was entered", code, stderr, exitUsageError)
-			}
-			if v := valueOf(t, local, "HELD_KEY"); v != "v1" {
-				t.Fatalf("value = %q, want v1 unchanged", v)
-			}
-		})
+	local := secrets.NewLocal(policytest.Secret("HELD_KEY", "ada@example.com", policy.TierAgent, "v1"))
+	startSecretBroker(t, servedBy(local))
+	useAWS(t, local, testAccount, adaSignIn)
+	useTerminal(t, "")
+	_, stderr, code := runSecret("set", "HELD_KEY")
+	if code != exitUsageError || !strings.Contains(stderr, "no value was entered") {
+		t.Fatalf("exit %d, stderr %q; want %d saying no value was entered", code, stderr, exitUsageError)
+	}
+	if v := valueOf(t, local, "HELD_KEY"); v != "v1" {
+		t.Fatalf("value = %q, want v1 unchanged", v)
+	}
+}
+
+// TestSecretAValueOfMoreThanOneLineAtATerminalIsRefused: when the reader answers that more than one
+// line was entered (a paste; TestPromptRefusesAPasteOfMoreThanOneLineAndLeavesNothingForTheShell),
+// create and set exit 2, write nothing, and say to pipe the value in.
+func TestSecretAValueOfMoreThanOneLineAtATerminalIsRefused(t *testing.T) {
+	for _, args := range [][]string{{"create", "NEW_KEY", "--owner", "me", "--tier", "agent"}, {"set", "HELD_KEY"}} {
+		local := secrets.NewLocal(policytest.Secret("HELD_KEY", "ada@example.com", policy.TierAgent, "v1"))
+		startSecretBroker(t, servedBy(local))
+		useAWS(t, local, testAccount, adaSignIn)
+		useTerminal(t)
+		readHidden = func(int) ([]byte, error) { return nil, errMoreThanOneLine }
+		_, stderr, code := runSecret(args...)
+		want := "a value of more than one line must be piped in: agent-secrets secret set " + args[1] + " < FILE"
+		if args[0] == "create" {
+			want = "a value of more than one line must be piped in: agent-secrets secret create " + args[1] + " --owner me --tier agent < FILE"
+		}
+		if code != exitUsageError || !strings.Contains(stderr, want) {
+			t.Fatalf("%v: exit %d, stderr %q; want %d naming %q", args, code, stderr, exitUsageError, want)
+		}
+		if v := valueOf(t, local, "HELD_KEY"); v != "v1" {
+			t.Fatalf("%v: HELD_KEY = %q, want v1 unchanged", args, v)
+		}
+		if _, err := local.DescribeSecret(context.Background(), &secretsmanager.DescribeSecretInput{SecretId: aws.String(policytest.ID("NEW_KEY"))}); err == nil {
+			t.Fatalf("%v created NEW_KEY", args)
+		}
 	}
 }
 

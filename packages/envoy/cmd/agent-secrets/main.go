@@ -74,11 +74,13 @@ import (
 // these: the broker's generated error reference (cmd/broker-refgen) prints them and refuses a code
 // without a comment or a function that returns any other.
 const (
-	exitUsageError = 2   // a usage error: an unknown flag or argument, or a required one or AGENT_SECRETS_URL missing
-	exitPending    = 75  // the request is still waiting for a person to approve it; nothing was run
-	exitDenied     = 77  // the request was denied; nothing was run
-	exitCannotRun  = 126 // the command `register --exec` was given exists but could not be run
-	exitNotFound   = 127 // the command `register --exec` was given was not found
+	exitUsageError  = 2   // a usage error: an unknown flag or argument, or a required one or AGENT_SECRETS_URL missing
+	exitPending     = 75  // the request is still waiting for a person to approve it; nothing was run
+	exitDenied      = 77  // the request was denied; nothing was run
+	exitCannotRun   = 126 // the command `register --exec` was given exists but could not be run
+	exitNotFound    = 127 // the command `register --exec` was given was not found
+	exitInterrupted = 130 // `secret create` or `secret set` was interrupted (Ctrl-C) at the value prompt; nothing was written
+	exitTerminated  = 143 // `secret create` or `secret set` was terminated (SIGTERM) at the value prompt; nothing was written
 )
 
 // command is one form of agent-secrets, as usage lists it and its own -h describes it.
@@ -160,7 +162,8 @@ environment:
                              Identity Center sign-in there
 
 exit codes: 0 done, 1 failed, 2 usage error, 75 still waiting for approval, 77 denied;
-register --exec exits 127 when COMMAND is not found and 126 when it cannot run
+register --exec exits 127 when COMMAND is not found and 126 when it cannot run;
+secret create and set exit 130 when interrupted at the value prompt and 143 when terminated there
 `
 
 func main() {

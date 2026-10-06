@@ -53,10 +53,13 @@ broker: serving DEMO_DEPLOY_TOKEN
 - **`--tier agent`** lets the owner's own sessions use it without asking, and **`--tier human`**
   sends every use to a person for approval. Both flags are required.
 - **The value.** At a terminal the CLI prompts for it and reads one line with echo off, so the
-  value never shows on the screen. Anywhere else it reads standard input to its end, less one
-  trailing newline, so a pipe or a file works too:
-  `agent-secrets secret create DEMO_DEPLOY_TOKEN --owner me --tier agent < token.txt`. An empty
-  value, or Enter alone at the prompt, is refused (exit 2) and writes nothing.
+  value never shows on the screen; Enter or Ctrl-D ends it. A value of more than one line, such
+  as a pasted key, is refused there (exit 2) and nothing of it reaches your shell: pipe it in
+  instead. Anywhere else the CLI reads standard input to its end, less one trailing newline, so a
+  pipe or a file works:
+  `agent-secrets secret create DEMO_DEPLOY_TOKEN --owner me --tier agent < key.pem`. An empty
+  value, or Enter alone at the prompt, is refused (exit 2) and writes nothing; Ctrl-C at the prompt
+  exits 130 and writes nothing.
 
 The CLI checks your sign-in before it asks for the value, so a refused sign-in never has you type a
 secret for nothing. The secret is created on the broker's key with both tags, and the broker serves
@@ -127,7 +130,8 @@ set a new value of DEMO_DEPLOY_TOKEN
 broker: serving DEMO_DEPLOY_TOKEN
 ```
 
-`set` reads the value as `create` does: at a prompt with echo off, or from standard input. The
+`set` reads the value as `create` does: one line at a prompt with echo off, or all of standard
+input, which is how a value of more than one line goes in. The
 broker never keeps a value; it reads it from Secrets Manager each time a session reads a grant, so
 the next read of a live grant gets the new one.
 
