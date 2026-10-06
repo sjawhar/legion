@@ -180,10 +180,14 @@ func TestHelloResolverResolvesAgainAfterRestorationSoARelaunchDuringTheHoldIsNot
 
 		const boot1, boot2 = "generation-1-token", "generation-2-token"
 		ctx := context.Background()
-		if err := recording.PutClaim(ctx, supervise.Claim{
+		// A previous daemon's own row: this process has done no write for it yet, so its
+		// BootTokens has recorded nothing. Seeded through the bare store, bypassing Recording, so
+		// restore's own rewrite below is the only write that can record the hash.
+		if err := store.PutClaim(ctx, supervise.Claim{
 			Token: claim.Token("a-claim"), Generation: 1, BootTokenHash: supervise.HashBootToken(boot1),
+			State: supervise.StateLaunching,
 		}); err != nil {
-			t.Fatalf("write generation 1's claim: %v", err)
+			t.Fatalf("write generation 1's claim (as a previous daemon's row): %v", err)
 		}
 
 		sup := newSupervisor(context.Background(), nil, "PROJECT", "", quietLogger())
@@ -203,9 +207,16 @@ func TestHelloResolverResolvesAgainAfterRestorationSoARelaunchDuringTheHoldIsNot
 		case <-time.After(10 * resolveTimeout):
 		}
 
-		// The relaunch restore (s.start) runs ahead of close(s.restored) in the real boot:
-		// generation 1's claim, still held nowhere (no locator persisted), relaunches to
-		// generation 2 with its own fresh token before the held hello is ever judged.
+		// supervisor.restore (s.start, ahead of close(s.restored)) finds generation 1's claim
+		// StateLaunching with no locator and rewrites it to StateLaunchUncertain — the hash
+		// unchanged — through the Recording-wrapped store. The relaunch that follows mints
+		// generation 2's own fresh token before the held hello is ever judged.
+		if err := recording.PutClaim(ctx, supervise.Claim{
+			Token: claim.Token("a-claim"), Generation: 1, BootTokenHash: supervise.HashBootToken(boot1),
+			State: supervise.StateLaunchUncertain,
+		}); err != nil {
+			t.Fatalf("write generation 1's claim as restore's own rewrite to StateLaunchUncertain: %v", err)
+		}
 		if err := recording.PutClaim(ctx, supervise.Claim{
 			Token: claim.Token("a-claim"), Generation: 2, BootTokenHash: supervise.HashBootToken(boot2),
 		}); err != nil {
@@ -233,11 +244,15 @@ func TestHelloResolverResolvesAgainAfterRestorationSoARelaunchDuringTheHoldIsNot
 
 		const boot1, boot2 = "generation-1-token", "generation-2-token"
 		ctx := context.Background()
-		if err := recording.PutClaim(ctx, supervise.Claim{
+		// A previous daemon's own row, or a still-earlier restore's rewrite: either way this
+		// process has done no write for it yet, so its BootTokens has recorded nothing. Seeded
+		// through the bare store, bypassing Recording, so ReleaseUncertainLaunch's own persist
+		// below is the only write that can record the hash.
+		if err := store.PutClaim(ctx, supervise.Claim{
 			Token: claim.Token("a-claim"), Generation: 1, BootTokenHash: supervise.HashBootToken(boot1),
 			State: supervise.StateLaunchUncertain,
 		}); err != nil {
-			t.Fatalf("write generation 1's claim: %v", err)
+			t.Fatalf("write generation 1's claim (already StateLaunchUncertain): %v", err)
 		}
 
 		sup := newSupervisor(context.Background(), nil, "PROJECT", "", quietLogger())
@@ -258,9 +273,8 @@ func TestHelloResolverResolvesAgainAfterRestorationSoARelaunchDuringTheHoldIsNot
 		}
 
 		// launchUnfinished calls ReleaseUncertainLaunch, which moves the claim to StateQueued and
-		// persists it — generation 1's hash unchanged — before the relaunch it then starts mints
-		// generation 2's own hash and persists that. Both writes go through the same
-		// Recording-wrapped store.
+		// persists it — generation 1's hash unchanged — through the Recording-wrapped store,
+		// before the relaunch it then starts mints generation 2's own hash and persists that.
 		if err := recording.PutClaim(ctx, supervise.Claim{
 			Token: claim.Token("a-claim"), Generation: 1, BootTokenHash: supervise.HashBootToken(boot1),
 			State: supervise.StateQueued,
