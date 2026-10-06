@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +18,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
@@ -1332,5 +1335,43 @@ func TestBackfillFilesExitsNonZeroUntilEveryFileReadsBackFromTheBucket(t *testin
 	addVersion(3, []byte("sound bytes"), files.SHA256([]byte("sound bytes")))
 	if code, out := run(bucket); code != 1 || !strings.Contains(out, "FAILED version") || !rowHoldsBytes(2) || rowHoldsBytes(3) {
 		t.Fatalf("backfill-files over a row it cannot move: exit %d, corrupt row holds bytes %t, sound row holds bytes %t, want exit 1 with the corrupt row untouched and the sound row moved:\n%s", code, rowHoldsBytes(2), rowHoldsBytes(3), out)
+	}
+}
+
+func TestExplainMigrateErrorNamesTheDeploymentBootstrapOnAVectorPermissionDenial(t *testing.T) {
+	pgErr := &pgconn.PgError{Code: "42501", Message: `permission denied to create extension "vector"`}
+	original := fmt.Errorf("apply migration 72: execute migration: migration 0072_embeddings_core.up.sql: %w", pgErr)
+	explained := explainMigrateError(original)
+	if !errors.Is(explained, original) {
+		t.Fatalf("explainMigrateError does not wrap the original error (errors.Is fails)")
+	}
+	if !strings.Contains(explained.Error(), "deployment's bootstrap") {
+		t.Errorf("explainMigrateError(%v) = %v, want it to name the deployment bootstrap", original, explained)
+	}
+}
+
+func TestExplainMigrateErrorPassesThroughAnUnrelatedMigrationFailure(t *testing.T) {
+	cases := map[string]error{
+		"a different SQLSTATE entirely": fmt.Errorf(
+			"apply migration 42: execute migration: migration 0042_something.up.sql: %w",
+			&pgconn.PgError{Code: "42P01", Message: `relation "widgets" does not exist`},
+		),
+		"42501 but not about the vector extension": fmt.Errorf(
+			"apply migration 43: execute migration: migration 0043_other.up.sql: %w",
+			&pgconn.PgError{Code: "42501", Message: `permission denied for table widgets`},
+		),
+		"no PgError in the chain at all": errors.New(
+			`apply migration 72: execute migration: migration 0072_embeddings_core.up.sql: ERROR: permission denied to create extension "vector"`,
+		),
+	}
+	for name, original := range cases {
+		t.Run(name, func(t *testing.T) {
+			if got := explainMigrateError(original); got != original {
+				t.Errorf("explainMigrateError(%v) = %v, want the original error unchanged", original, got)
+			}
+		})
+	}
+	if explainMigrateError(nil) != nil {
+		t.Error("explainMigrateError(nil) is not nil")
 	}
 }

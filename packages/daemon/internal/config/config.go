@@ -545,9 +545,19 @@ func readNatsURLs(value *yaml.Node, key string) ([]string, error) {
 
 // dispatchBase is `dispatch_url`: a base URL, never its clients' `/mcp` endpoint, which the clients
 // append themselves (the shipped `requireNoMcpSuffix`, config.ts). A trailing slash is gone
-// by then, so `/mcp/` is caught too.
+// by then, so `/mcp/` is caught too. Its scheme must be http or https: anything else — a typo such
+// as `htp` — is a misconfiguration `--check-config` should catch now, rather than reaching the
+// daemon's HTTP client as "unsupported protocol scheme", which the boot's readiness gate would
+// otherwise wait out forever as if Dispatch were merely unreachable (LEGION-580).
 func dispatchBase(value, key string) (string, error) {
-	base, err := baseURL(value, key)
+	parsed, err := validURL(value, key)
+	if err != nil {
+		return "", err
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return "", fmt.Errorf("%s must be http or https, not %q", key, parsed.Scheme)
+	}
+	base, err := trimmedBase(parsed, key)
 	if err != nil {
 		return "", err
 	}
@@ -703,6 +713,13 @@ func baseURL(value, key string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	return trimmedBase(parsed, key)
+}
+
+// trimmedBase is baseURL's own normalization, on an already-validated URL: a query or fragment is
+// refused and trailing slashes are dropped. dispatchBase shares it after its own scheme check,
+// which must read the parsed URL's Scheme directly rather than re-parsing a normalized string.
+func trimmedBase(parsed *url.URL, key string) (string, error) {
 	if parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
 		return "", fmt.Errorf("%s must not include a query string or fragment", key)
 	}

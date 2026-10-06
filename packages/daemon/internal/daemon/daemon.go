@@ -30,6 +30,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/credential"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/intake"
+	"github.com/sjawhar/legion/daemon/internal/natsauth"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/projection"
 	"github.com/sjawhar/legion/daemon/internal/promptrefs"
@@ -256,23 +257,43 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 	if workflow != nil {
 		// The durable consumers exist before the listing is read: a consumer created now delivers
 		// only what is published after it, so everything earlier is the listing's, and what the
-		// listing misses (a move published while it is read) the consumer delivers.
-		if err := workflow.connect(boot, cfg, plan.nats); err != nil {
-			s.stop()
-			listener.Close()
-			workflow.stop()
-			st.Close()
-			return err
+		// listing misses (a move published while it is read) the consumer delivers. Both wait out
+		// an unreachable dependency on ctx, not the bounded boot budget just spent on everything
+		// before them, through the same bootprobe.Run mechanism mintAtBoot already uses, here with
+		// Attempts left at its unbounded zero. natsauth.Unreachable and dispatch.Unreachable each
+		// judge their own dependency; their own docs are the record of what each one waits on and
+		// what it still refuses loud. reconcile's own Postgres transaction is judged by neither: a
+		// design choice, not an inability to tell its failures apart from NATS's or Dispatch's — an
+		// unreachable Postgres refuses earlier, at store.Open
+		// (TestRunRefusesAnUnreachablePostgresByHostAndNotByPassword, scripts/e2e/stage1-skeleton.sh).
+		plan.nats.log(log)
+		err := bootprobe.Run(ctx, "connect Envoy NATS", readinessRetry, log,
+			readinessAttempt(func(attempt context.Context) error {
+				return workflow.connect(attempt, cfg, plan.nats)
+			}, natsauth.Unreachable))
+		if err == nil {
+			err = bootprobe.Run(ctx, "list Dispatch issues for admission", readinessRetry, log,
+				readinessAttempt(workflow.reconcile, dispatch.Unreachable))
 		}
-		if err := workflow.reconcile(boot); err != nil {
+		if err != nil {
 			s.stop()
 			listener.Close()
 			workflow.stop()
 			st.Close()
+			if ctx.Err() != nil {
+				log.Info("legion daemon stopped before its workflow dependencies were reachable", "project", cfg.Project)
+				return nil
+			}
 			return err
 		}
 		log.Info("legion workflow boot stage", "stage", "admission")
 		workflow.attach(s)
+		// Both waited out whatever they waited out on ctx, which the boot budget does not bound:
+		// what follows gets a budget of its own, as the App mint and the image probe's callers
+		// already do.
+		var cancelAfterReady context.CancelFunc
+		boot, cancelAfterReady = context.WithTimeout(context.WithoutCancel(ctx), bootTimeout)
+		defer cancelAfterReady()
 	}
 
 	startedAt := time.Now().UTC()

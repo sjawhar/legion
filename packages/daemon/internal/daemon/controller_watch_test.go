@@ -37,6 +37,12 @@ func (b *syncBuffer) String() string {
 	return b.buf.String()
 }
 
+func (b *syncBuffer) Reset() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.buf.Reset()
+}
+
 // The daemon launches no controller under either runtime, so it says when none is registered, or
 // when the Envoy role registry says the registered one is gone, and how to start one — once per
 // worker boot timeout, and never about a controller the registry holds alive.

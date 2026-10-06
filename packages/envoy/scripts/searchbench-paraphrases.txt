@@ -1,0 +1,8 @@
+# Paraphrase queries against real production issues (LEGION-549's own acceptance bar): each
+# line is `paraphrase<TAB>target_key`, where paraphrase shares no meaningful word with
+# target_key's own title (verified programmatically; English stopwords aside) but means the same
+# thing. Keyword search cannot match these by construction; only meaning search can.
+preventing duplicate concurrent effort on one ticket	LEGION-234
+typed identifiers inside a saved file fail to generate when the site isn't served over a secure connection	LEGION-461
+write user guide pages describing the notification relay independently	LEGION-511
+clicking right after renaming a ticket doesn't register on large monitors	LEGION-157

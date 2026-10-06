@@ -655,6 +655,10 @@ export interface Ask extends AnchorPosition {
   readonly edited_at: string | null;
   /** Present only on a server-created approval ask. */
   readonly approval?: AskApproval;
+  /** The document `approval.artifact_id` names, hydrated live like `anchor_artifact` and
+   *  `block_artifact`: its current slug and primary flag, not a snapshot from when the request
+   *  opened. Present only alongside `approval`. */
+  readonly approval_artifact?: AskAnchorArtifact;
 }
 
 /** Who holds the turn on an open ask after a reply: `human` when the human needs to act,
@@ -1209,6 +1213,13 @@ export interface SearchResultsPage {
  * `exactOptionalPropertyTypes`). */
 export type SearchResultsPageAbsentAs<V> = { readonly [K in keyof SearchResultsPage]?: V };
 
+/** `SearchResponse.degraded`'s one value today: meaning search could not run for this request (no
+ * Bedrock credentials configured, the query's own embedding timed out, or Bedrock answered an
+ * error) and search fell back to keyword-only ranking. Generated into Go as
+ * `contracts.SearchDegradedEmbedderUnavailable` so the string Dispatch writes and the string
+ * `search-answer.ts` compares against cannot drift apart. */
+export const SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE = "embedder_unavailable";
+
 /** One page of `GET /api/v1/search`'s fused order, cut at `offset` and `limit`. `total`,
  * `reachable`, `limit`, and `offset` answer together or not at all: a Dispatch that predates
  * search paging omits all four and always answers its first page regardless of any offset
@@ -1216,6 +1227,13 @@ export type SearchResultsPageAbsentAs<V> = { readonly [K in keyof SearchResultsP
 export type SearchResponse = {
   readonly results: SearchResult[];
   readonly took_ms: number;
+  /**
+   * Why this search fell back to keyword-only ranking - today only
+   * `SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE` (LEGION-549: no Bedrock credentials configured, the
+   * query's own embedding timed out, or Bedrock answered an error) - absent when meaning search
+   * ran normally.
+   */
+  readonly degraded?: typeof SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE;
 } & (SearchResultsPage | SearchResultsPageAbsentAs<undefined>);
 
 export interface DuplicateCandidate {
