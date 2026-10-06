@@ -59,11 +59,14 @@ lease_expires_at: 2026-10-03T03:36:40Z
 
 ## End every session's access to a secret
 
-Retag the secret in Secrets Manager so its sessions no longer get it automatically: set its `tier`
-to `human`, so every request for it needs a person's approval, or give it another `owner`, so the
-sessions that had it are no longer the owner's own. Deleting the secret, or moving it out of
-`BROKER_SECRETS_PREFIX`, ends access altogether. Once the broker rereads the namespace, at most five
-minutes later, it refuses each read of a grant given automatically under the old tags with
+Retag the secret so its sessions no longer get it automatically: set its `tier` to `human`
+(`agent-secrets secret retag NAME --tier human`), so every request for it needs a person's
+approval, or give it another `owner`, so the sessions that had it are no longer the owner's own.
+Deleting the secret (`agent-secrets secret delete NAME`), or moving it out of
+`BROKER_SECRETS_PREFIX`, ends access altogether
+([manage a secret](/legion/broker/guides/manage-a-secret/)). Once the broker rereads the secret, at
+once after a write through `agent-secrets secret` and within about ten minutes after one made any
+other way, it refuses each read of a grant given automatically under the old tags with
 `GRANT_NOT_LIVE`, and the session's next request for the secret waits for a person's approval. The
 change applies to every session that got the secret automatically, where revoking a grant of your
 own session in Dispatch withholds it from that session alone.

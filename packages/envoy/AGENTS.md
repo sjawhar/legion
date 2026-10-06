@@ -1889,7 +1889,9 @@ and key-bound launcher credentials to enrolled agent sessions and pods; `cmd/age
 client (a box's or pod's own key, or a host session's `cmd/agent-secrets-helper`), which enrolls a
 runtime, requests grants, polls a pending decision to completion, and either prints session/grant
 state (`self`, `status --json`) or `syscall.Exec`s a command with the granted values injected into
-its environment. The broker holds no Dispatch credential and opens no Dispatch ask anywhere. Every
+its environment. Its `secret` forms are how a person manages the agent secrets themselves, in
+Secrets Manager under their own AWS sign-in (below); the broker writes no secret. The broker holds
+no Dispatch credential and opens no Dispatch ask anywhere. Every
 human decision — approving or denying a secret request, approving or denying a machine login,
 revoking a grant, ending a machine login — reaches the broker's UI routes from Dispatch's server,
 carrying the UI bearer and the deciding person's Dispatch login, their email, in the body's
@@ -1969,6 +1971,36 @@ before the writer lock and before a miss-path reread token (`Loader.secretName`,
 name and `503 REQUEST_ENDED`, with no `broker: reread secret failed` line, for a reread whose own
 request ended first; the public `GET /v1/settings`
 answers the prefix, the key ARN and its region and account (`policy.KeyARNParts`).
+
+`agent-secrets secret list|show|create|set|retag|delete|restore` (`cmd/agent-secrets/secret.go`,
+its AWS side in `secret_aws.go`) is the person's side of that reread. Each form reads the broker's
+settings from `AGENT_SECRETS_URL`, loads the person's AWS sign-in (`--profile`, else `AWS_PROFILE`,
+else the SDK's default chain) pinned to the key's region, and calls Secrets Manager itself, so IAM
+in that account, not the broker, decides what the person may read or write; it needs no session
+identity. `GetCallerIdentity` runs before anything else: every form refuses a sign-in in another
+account than the key's, naming both (`requireAccount`, so a read never lists another account's
+secrets as if they were the agent secrets), and a write also refuses any ARN but
+`assumed-role/AWSReservedSSO_*/<session>` in that account (`requireWriteSignIn`, naming the ARN),
+so a machine's role writes nothing. `--owner me` is that session name lowercased, the person's
+Identity Center user name. `create` and `set` check the sign-in before they read the value: at a
+terminal they prompt on stderr and read one line with echo off (`readHidden`, which restores the
+terminal on SIGINT or SIGTERM before re-raising it), elsewhere all of stdin less one trailing
+newline, and an empty value is a usage error. `create` writes on the settings' key with both tags
+and no `ClientRequestToken` (the SDK sets one); `retag` describes the secret and sends both tags in
+one `TagResource`, so an IAM condition on the request's tags sees both, and on `AccessDenied` for a
+secret held shared or one asked to be made shared adds that a shared secret's owner and tier are
+an administrator's to change; `delete` schedules a 30-day recovery window, never forced, and prints
+`DeleteSecret`'s own `DeletionDate`. Every write is followed by the broker's reread of that name
+(`rereadAfter`): exit 0 when it serves the secret, or no longer serves it after a delete; 1 when
+its answer contradicts the write (a refusal names its reason); and 1 when the broker cannot be
+asked (an unreachable broker, `429 RATE_LIMITED`), saying the write stands and is served only from
+the next reload. `list` (`ListSecrets` with `IncludePlannedDeletion`) and `show` never print a
+value; for a secret scheduled for deletion they print `DeletedDate` and `earliestPurge`, that date
+plus 7 days, Secrets Manager's shortest recovery window, since `DeletedDate` is when the delete ran
+and neither call answers the window it chose: a reader told that date never waits past the purge.
+`earliestPurge` is the one place `DeletedDate` is read. The forms' unit tests run in-process
+against `secrets.Local` and a fake STS and broker (`secret_test.go`), and `secret_e2e_test.go`
+runs create, delete, restore and retag against `brokertest.NewRig`'s real broker.
 
 The client finds its session in `AGENT_SECRETS_KEY_DIR` (a box's or pod's `key.pem` and
 `enrollment`) or `AGENT_SECRETS_HELPER_SOCK` (a host session's helper), beside `AGENT_SECRETS_URL`.
@@ -2191,9 +2223,16 @@ control, as it already was for grant rows.
 
 `internal/broker/requests.Machine` is the `agent_secret` request state machine. `Create` verifies
 the caller's signed request object (`iss` must be the requesting enrollment's own key, no
-`login_hint` — a session never names its own approver, only the policy does), first checks for a
-still-live grant covering the exact same name set (`reuseLiveGrant`: no new request, no new record,
-as long as the current policy still allows it and the grant's whole chain still verifies), then
+`login_hint` — a session never names its own approver, only the policy does), rereads each name
+the live policy does not serve before deciding (`rereadMissing`, the miss path: `RefreshOne` for
+that one name, bounded per enrollment by `DefaultMissRereads`, a burst of 10 refilled one every
+10 s; a name `Current.CheckName` refuses costs no token; a failed reread logs
+`policy.LoadFailedMessage` with the name and leaves it unknown, while one whose own request ended
+first logs nothing and fails the call with that request's error; it runs before the transaction,
+so no Secrets Manager call holds a row lock), so a secret created a moment ago, or one the console
+made, is served on its first request, then checks for a still-live grant covering the exact same
+name set (`reuseLiveGrant`: no new request, no new record, as long as the current policy still
+allows it and the grant's whole chain still verifies), then
 decides and writes in one transaction: it takes an advisory lock keyed on the enrollment and the
 sorted name set, then locks the requesting enrollment `for share` while it is live (that order;
 the reverse breaks `TestCreateWaitsOutTheSweepItRaces`), reads the names withheld from the session,
@@ -2385,9 +2424,11 @@ lane's own test mounts the real broker handlers (`api.Register` with real, Postg
 rather than a hand-rolled fake standing in for broker behavior — `internal/broker/api/api_test.go`,
 `internal/broker/e2e/e2e_test.go`, and `cmd/agent-secrets-devrelay/main_test.go` all wire real
 `enroll.Service`/`requests.Machine`/`machine.Service` behind an `httptest.Server`;
-`cmd/agent-secrets/main_test.go`'s own hand-rolled `fakeBroker` is the one sanctioned exception,
-since it exists to test the CLI binary's own request-building and response-parsing logic, not
-broker behavior. `packages/envoy/scripts/dev-broker.sh` and `cmd/agent-secrets-devrelay` (a stand-in
+`cmd/agent-secrets/main_test.go`'s hand-rolled `fakeBroker` and `secret_test.go`'s `secretBroker`
+(settings and reread alone) are the sanctioned exceptions, since they exist to test the CLI
+binary's own request-building and response-parsing logic, not broker behavior;
+`secret_e2e_test.go` runs the same forms against the real rig.
+`packages/envoy/scripts/dev-broker.sh` and `cmd/agent-secrets-devrelay` (a stand-in
 for Dispatch's relay: it sends the broker's UI routes the UI bearer and a login, as Dispatch does
 when a signed-in human clicks Approve) run a whole local broker stack by hand for manual smoke
 testing; neither ships in `docker/Dockerfile`, which builds exactly `envoy-listener`,
@@ -2411,15 +2452,20 @@ smoke-tests and pushes `ghcr.io/sjawhar/legion/envoy:<commit sha>`, labelled
 dispatch publishes one immutable image, for a dev slot to pin before merge, and moves no tag.
 
 `.github/workflows/release-envoy-listener.yaml`'s `legion-envoy-v*` release also ships
-`cmd/agent-secrets` and the host helper `cmd/agent-secrets-helper`: each of
-`agent-secrets-amd64.tar.gz` and `agent-secrets-arm64.tar.gz` wraps `bin/agent-secrets` and
-`bin/agent-secrets-helper` in one top-level `agent-secrets/` directory — mise's `github:`
-backend auto-strips exactly one leading directory, so the installed tree still ends up
-`bin/agent-secrets`, `bin/agent-secrets-helper`, the layout its installer expects; a bare
-`bin/...` top level would itself be the directory mise strips. The release job builds them, once
-it has decided the tag, so it can stamp that tag into both, and attests the two tarballs; the
+`cmd/agent-secrets` for Linux and macOS, and the host helper `cmd/agent-secrets-helper` for Linux
+alone, since its build constraints admit only Linux (a laptop runs the CLI, never the helper).
+For each architecture `.github/go-release-targets.json`'s `envoy` key names,
+`agent-secrets-<arch>.tar.gz` holds both binaries; for each target its `agent-secrets-client` key
+names, `agent-secrets-darwin-<arch>.tar.gz` holds `bin/agent-secrets` alone. Each wraps its
+`bin/` in one top-level `agent-secrets/` directory — mise's `github:` backend auto-strips exactly
+one leading directory, so the installed tree still ends up `bin/agent-secrets` (and
+`bin/agent-secrets-helper` on Linux), the layout its installer expects; a bare `bin/...` top level
+would itself be the directory mise strips. The release job builds them, once it has decided the
+tag, so it can stamp that tag into each binary, and attests every `agent-secrets-*.tar.gz`; the
 build job builds only `legion-envoy-<arch>.tar.gz` (envoy-listener alone, with its
 `THIRD_PARTY_NOTICES`). Each `agent-secrets` tarball also holds `agent-secrets/THIRD_PARTY_NOTICES`,
-the licenses of the Go modules both binaries compile in. This is the release a host installs both
-binaries from (through the operator's dotfiles, under the broker design's devbox-enrollment plan).
+the licenses of the Go modules its binaries compile in, and `pr-and-main.yaml` writes those
+notices for every archive and compiles the darwin client on each pull request. A host installs
+both binaries from this release (through the operator's dotfiles, under the broker design's
+devbox-enrollment plan), and a laptop the CLI.
 

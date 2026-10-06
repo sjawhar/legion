@@ -84,9 +84,38 @@ and also while a variable it no longer reads is still set.
   bounds. A reread counts against either limit only when both let it run, so one address flooding
   past its own limit leaves the broker-wide one to everyone else. Past either, the broker answers
   `429 RATE_LIMITED` with a `Retry-After` header naming the limit that refused.
+  `agent-secrets secret` sends one reread after each write it makes, from the person's own
+  address. When a limit refuses it, the write stands in Secrets Manager and the CLI exits 1 saying
+  so ([manage a secret](/legion/broker/guides/manage-a-secret/#what-the-broker-answers-after-a-write)).
 - Agents never see the broker's database or the secret store; whoever can write the database can
   forge a record, so its access control is part of the broker's. Whoever can tag a secret under the
   namespace decides who gets it, so the tags' write access is part of the broker's too.
+
+## People who manage secrets
+
+The broker writes no secret. A person creates, changes and deletes agent secrets with
+`agent-secrets secret` ([manage a secret](/legion/broker/guides/manage-a-secret/)), which calls
+Secrets Manager itself under that person's own AWS sign-in, so IAM in the broker's account is what
+decides who may change which secret, and with the tags, who gets it. The CLI asks the broker only
+for its settings (`GET /v1/settings`) and, after each write, for a reread. Before anything else it
+refuses a sign-in in another account than the agent-secrets key's, and for a write any sign-in but
+a person's own IAM Identity Center one; those checks are the CLI's, and IAM is the boundary. Each
+form makes these calls, and needs them allowed on the namespace's secrets:
+
+| Form | Calls |
+| --- | --- |
+| every form | `sts:GetCallerIdentity`, which needs no permission |
+| `list` | `secretsmanager:ListSecrets` (on `*`) |
+| `show` | `secretsmanager:DescribeSecret` |
+| `create` | `secretsmanager:CreateSecret` and `secretsmanager:TagResource` (it sets both tags), and `kms:GenerateDataKey` and `kms:Decrypt` on the agent-secrets key, to encrypt the value with it |
+| `set` | `secretsmanager:PutSecretValue`, and `kms:GenerateDataKey` on the agent-secrets key |
+| `retag` | `secretsmanager:DescribeSecret` and `secretsmanager:TagResource`, the request carrying both tags |
+| `delete` | `secretsmanager:DeleteSecret`, with a 30-day recovery window and never forced |
+| `restore` | `secretsmanager:RestoreSecret` |
+
+No form calls `GetSecretValue` or prints a value. Since `retag` sends both tags in every request,
+an IAM condition on the request's tags (one that lets a person tag only their own secret, and
+leaves a shared secret's owner and tier to administrators) sees both.
 
 ## Health and logs
 

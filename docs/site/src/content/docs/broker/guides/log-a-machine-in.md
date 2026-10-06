@@ -13,12 +13,14 @@ its log, and you approve it as below.
 
 ## 1. Install and start the helper
 
-Each `legion-envoy-v*` GitHub release ships `agent-secrets-amd64.tar.gz` and
-`agent-secrets-arm64.tar.gz`, each holding `agent-secrets/bin/agent-secrets`,
-`agent-secrets/bin/agent-secrets-helper` and their third-party licenses in
-`agent-secrets/THIRD_PARTY_NOTICES`. Put both binaries on your `PATH`, write your Dispatch login to
-the operator file, give the broker's address to the helper and to every agent you will start, and
-run the helper as yourself:
+The helper runs on Linux only. Each `legion-envoy-v*` GitHub release ships
+`agent-secrets-amd64.tar.gz` and `agent-secrets-arm64.tar.gz` for Linux, each holding
+`agent-secrets/bin/agent-secrets`, `agent-secrets/bin/agent-secrets-helper` and their third-party
+licenses in `agent-secrets/THIRD_PARTY_NOTICES`; its macOS archives,
+`agent-secrets-darwin-amd64.tar.gz` and `agent-secrets-darwin-arm64.tar.gz`, hold the CLI alone,
+for [managing secrets](/legion/broker/guides/manage-a-secret/). Put both binaries on your `PATH`,
+write your Dispatch login to the operator file, give the broker's address to the helper and to
+every agent you will start, and run the helper as yourself:
 
 ```sh
 mkdir -p ~/.config/agent-secrets
