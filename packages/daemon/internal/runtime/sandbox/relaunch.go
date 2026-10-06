@@ -484,14 +484,23 @@ func (r *Runtime) takeTurn(ctx context.Context, turns map[string]chan struct{}, 
 	}
 }
 
+// treeWaitBound is awaitTreeInitialized's budget: runtime.RegistrationDeadline, called with
+// ProvisionBound (the sibling's own pre-hello registration deadline), plus one more boot interval
+// of headroom — the same ceil(boot)×(intervals+1)-against-boot×intervals relationship
+// workspace-init's own lock wait holds to the registration deadline alone. A named function so a
+// test can assert its exact value without waiting it out.
+func (r *Runtime) treeWaitBound() time.Duration {
+	return runtime.RegistrationDeadline(r.bootTimeout, r.bootIntervals, r.ProvisionBound()) + r.bootTimeout
+}
+
 // awaitTreeInitialized waits until no other pod of l's tree is initializing: every tree pod's
 // workspace-init container provisions against the one shared clone on the tree volume, and under
 // gVisor its flock does not reach past its own pod (each sandbox keeps gofer file locks to
 // itself), so the runtime, through which every launch goes, is what keeps two of them from
 // provisioning at once. A pod counts as initializing from its start until workspace-init ends, its
-// workspace-fetch included. The wait is bounded as workspace-init's own lock wait is.
+// workspace-fetch included. The wait is bounded by treeWaitBound.
 func (r *Runtime) awaitTreeInitialized(ctx context.Context, l launch) error {
-	return r.await(ctx, time.Duration(r.initWaitSeconds())*time.Second, "the other pods of tree "+l.spec.Tree+" to finish workspace-init", func() (bool, error) {
+	return r.await(ctx, r.treeWaitBound(), "the other pods of tree "+l.spec.Tree+" to finish workspace-init", func() (bool, error) {
 		for _, pod := range r.treePods(l) {
 			if initializing(pod) {
 				return false, nil

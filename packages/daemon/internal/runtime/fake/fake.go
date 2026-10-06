@@ -57,6 +57,8 @@ type ProbeResult struct {
 type Runtime struct {
 	// InPod is what ProvisionsWorkspaces answers: false, the tmux answer, unless a test sets it.
 	InPod bool
+	// ProvisionGrace is what ProvisionBound answers: zero, the tmux answer, unless a test sets it.
+	ProvisionGrace time.Duration
 	// Now stamps the observations the fake mints. NewRuntime sets it to time.Now; a test with a
 	// clock of its own replaces it before use.
 	Now func() time.Time
@@ -334,6 +336,12 @@ func (r *Runtime) ProvisionsWorkspaces() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.InPod
+}
+
+func (r *Runtime) ProvisionBound() time.Duration {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.ProvisionGrace
 }
 
 // CleanupTree records its call and answers what FailCleanupTree set, nil by default.

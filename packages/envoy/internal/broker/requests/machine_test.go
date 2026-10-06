@@ -321,6 +321,28 @@ func TestCreateRefusesLoginHintAndForeignThumbprint(t *testing.T) {
 	}
 }
 
+// TestCreateRefusesAnInvalidSessionID pins the bound on the request's own session_id override
+// (LEGION-587's hardening): an unsigned claim any enrolled process may send, capped and
+// shape-checked before it is ever stored.
+func TestCreateRefusesAnInvalidSessionID(t *testing.T) {
+	m, enr, key, _ := newFixture(t)
+	ctx := context.Background()
+	for name, sessionID := range map[string]string{
+		"too long":          strings.Repeat("a", maxSessionIDLength+1),
+		"whitespace":        "sess with space",
+		"control character": "sess\twith\ttab",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := m.Create(ctx, enr, signRequest(t, m, key, "need it", "DEEL_API_KEY"), sessionID); !errors.Is(err, ErrSessionIDInvalid) {
+				t.Fatalf("Create(session_id=%q) = %v, want ErrSessionIDInvalid", sessionID, err)
+			}
+		})
+	}
+	if _, err := m.Create(ctx, enr, signRequest(t, m, key, "need it", "DEEL_API_KEY"), strings.Repeat("a", maxSessionIDLength)); err != nil {
+		t.Fatalf("Create(session_id at the exact limit) = %v, want no error", err)
+	}
+}
+
 func TestAutomaticAndDeniedEvaluationsWriteNoRecordRow(t *testing.T) {
 	m, enr, key, _ := newFixture(t)
 	ctx := context.Background()

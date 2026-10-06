@@ -34,6 +34,16 @@ func TestTreeName(t *testing.T) {
 	}
 }
 
+// ProvisionBound is zero: a pane starts the agent at once, with no init phase to provision first.
+// Nothing else exercises this method directly (the supervisor's own tests script a fake.Runtime's
+// independent ProvisionGrace field instead), so a changed return value here would otherwise pass
+// unnoticed.
+func TestProvisionBoundIsZero(t *testing.T) {
+	if got := (&Runtime{}).ProvisionBound(); got != 0 {
+		t.Errorf("ProvisionBound() = %s, want 0", got)
+	}
+}
+
 // A `-P -F` report is three tokens from new-window and two from split-window; anything else is a
 // launch failure naming the command and tmux's stderr, never the report (parsePaneReport, tmux.ts,
 // and tmux.test.ts's openWindow cases for a malformed report).

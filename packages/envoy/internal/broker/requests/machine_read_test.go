@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/store/storetest"
@@ -164,5 +165,83 @@ func TestPendingForApproverAvoidsSequentialScans(t *testing.T) {
 		if explaintest.SeqScansRelation(t, plans[0].Plan, relation) {
 			t.Fatalf("pending query generic plan sequentially scans %s; want an index scan:\n%s", relation, planJSON)
 		}
+	}
+}
+
+// TestReadRecordAndPendingNameBothSessionIDsWhenTheyDiffer pins LEGION-587: an agent_secret
+// record's session names the enrollment's own session_id (stated at enroll time) and the
+// request's own override (stated in its body at Create) independently, through both reads that
+// answer one (ReadRecord and PendingForApprover).
+func TestReadRecordAndPendingNameBothSessionIDsWhenTheyDiffer(t *testing.T) {
+	m, enr, key, approver := newFixture(t)
+	ctx := context.Background()
+	if _, err := m.Store.Pool.Exec(ctx, `update enrollments set session_id=$2 where id=$1`, enr, "sess-enrollment-1"); err != nil {
+		t.Fatalf("set enrollment session_id: %v", err)
+	}
+	pending, err := m.Create(ctx, enr, signRequest(t, m, key, "need it", "DEEL_API_KEY"), "sess-request-2")
+	if err != nil || pending.RecordID == nil {
+		t.Fatalf("Create = %+v, %v", pending, err)
+	}
+	want := Session{Request: "sess-request-2", Enrollment: "sess-enrollment-1"}
+
+	detail, err := m.ReadRecord(ctx, *pending.RecordID)
+	if err != nil || detail.Session != want {
+		t.Fatalf("ReadRecord.Session = %+v, %v, want %+v", detail.Session, err, want)
+	}
+
+	rows, err := m.PendingForApprover(ctx, approver)
+	if err != nil || len(rows) != 1 || rows[0].Session != want {
+		t.Fatalf("PendingForApprover = %+v, %v, want one row naming %+v", rows, err, want)
+	}
+}
+
+// TestReadRecordKeepsTheEnrollmentSessionIDAfterRevocation pins that an id outlives its
+// enrollment's revocation: enrollments.session_id is never cleared when revoked_at is set, so a
+// decided record's own read still names the session that enrolled.
+func TestReadRecordKeepsTheEnrollmentSessionIDAfterRevocation(t *testing.T) {
+	m, enr, key, approver := newFixture(t)
+	ctx := context.Background()
+	if _, err := m.Store.Pool.Exec(ctx, `update enrollments set session_id=$2 where id=$1`, enr, "sess-enrollment-revoked"); err != nil {
+		t.Fatalf("set enrollment session_id: %v", err)
+	}
+	pending, err := m.Create(ctx, enr, signRequest(t, m, key, "need it", "DEEL_API_KEY"), "")
+	if err != nil || pending.RecordID == nil {
+		t.Fatalf("Create = %+v, %v", pending, err)
+	}
+	dec, err := m.ApplyDecision(ctx, *pending.RecordID, true, approver)
+	if err != nil || dec.GrantID == "" {
+		t.Fatalf("ApplyDecision = %+v, %v", dec, err)
+	}
+	if _, err := m.Store.Pool.Exec(ctx, `update enrollments set revoked_at=now() where id=$1`, enr); err != nil {
+		t.Fatalf("revoke enrollment: %v", err)
+	}
+
+	detail, err := m.ReadRecord(ctx, *pending.RecordID)
+	if err != nil || detail.Session.Enrollment != "sess-enrollment-revoked" {
+		t.Fatalf("ReadRecord.Session after revocation = %+v, %v, want enrollment sess-enrollment-revoked", detail.Session, err)
+	}
+}
+
+// TestReadRecordNamesNoSessionForAMachineLogin pins that a launcher_credential record - which has
+// no request row and no requesting enrollment at all - always answers both session ids empty.
+func TestReadRecordNamesNoSessionForAMachineLogin(t *testing.T) {
+	m, _, key, _ := newFixture(t)
+	ctx := context.Background()
+	body := record.Body{
+		Approver:        "alice",
+		Enrollment:      record.Enrollment{Kind: "-", RuntimeID: "-"},
+		ExpiresAt:       time.Now().Add(time.Hour),
+		LifetimeSeconds: 3600,
+		Request:         signRequest(t, m, key, "login", "example-host"),
+		RulesVersion:    "rules-v1",
+	}
+	recordID := body.ID()
+	if _, err := m.Store.Pool.Exec(ctx, `insert into credential_requests (id, body, kind, approver, expires_at) values ($1,$2,'launcher_credential',$3,$4)`,
+		recordID, body.Canonical(), body.Approver, body.ExpiresAt); err != nil {
+		t.Fatalf("insert machine login record: %v", err)
+	}
+	detail, err := m.ReadRecord(ctx, recordID)
+	if err != nil || detail.Session != (Session{}) {
+		t.Fatalf("ReadRecord(machine login).Session = %+v, %v, want both empty", detail.Session, err)
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -602,12 +603,24 @@ func (r *Runtime) initEnvironment(l launch) []corev1.EnvVar {
 	return append(env, xdgEnvironment()...)
 }
 
-// initWaitSeconds bounds a wait on another pod's workspace-init: ceil(boot timeout) × (intervals
-// + 1), the whole time the daemon tolerates a pod that is alive but unregistered, plus one
-// interval, so no wait gives up while the daemon would still allow the pod it waits on
-// (KubernetesRuntime.workspaceInitLockWaitSeconds, runtime-kubernetes.ts).
+// initWaitSeconds bounds workspace-init provision's own wait to acquire another pod's lock on the
+// shared clone (`flock --timeout`, LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS): ceil(boot timeout) ×
+// (intervals + 1). Under gVisor a pod's flock never reaches another pod, so what actually keeps
+// two pods from provisioning the shared clone at once is awaitTreeInitialized (relaunch.go): a
+// new pod is never created while an existing tree pod is still initializing. lockTree itself
+// holds the launch turn only until the new pod is in the store (relaunch.go, awaitNewPod) — well
+// before that pod's own init finishes — so this wait is a safety net for whatever can still race
+// around that ordering (a pod recreated outside the normal relaunch flow), not a budget this
+// package expects to actually exhaust.
 func (r *Runtime) initWaitSeconds() int64 {
 	return int64(math.Ceil(r.bootTimeout.Seconds())) * int64(r.bootIntervals+1)
+}
+
+// ProvisionBound satisfies runtime.Runtime: workspace.FetchTimeout, the fetch's own clone bound,
+// plus this same lock-wait budget, for whatever time a provisioning pod can still spend waiting on
+// another pod's flock before it even starts its own clone.
+func (r *Runtime) ProvisionBound() time.Duration {
+	return workspace.FetchTimeout + time.Duration(r.initWaitSeconds())*time.Second
 }
 
 // mainEnvironment is the pane contract with a pod's values (decision 10): the variables every

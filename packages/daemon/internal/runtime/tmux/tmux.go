@@ -271,6 +271,10 @@ func (r *Runtime) Socket() string { return r.socket }
 // state directory before the launch.
 func (r *Runtime) ProvisionsWorkspaces() bool { return false }
 
+// ProvisionBound is zero: a pane starts the agent at once, with no init phase to provision
+// first.
+func (r *Runtime) ProvisionBound() time.Duration { return 0 }
+
 // CleanupTree holds nothing per tree: each pane is one claim's process, ended by its Release, and
 // each workspace is the outbox's to remove (workspace_remove).
 func (r *Runtime) CleanupTree(context.Context, string) error { return nil }

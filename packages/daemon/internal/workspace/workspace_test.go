@@ -269,6 +269,14 @@ func findCall(t *testing.T, calls []Command, prefix ...string) Command {
 // pointer, never as a value in its environment, under the slow-command budget.
 func assertCredentialedEnvironment(t *testing.T, command Command) {
 	t.Helper()
+	assertCredentialedEnvironmentBounded(t, command, testTimeout)
+}
+
+// assertCredentialedEnvironmentBounded is assertCredentialedEnvironment, but for a command bounded
+// by timeout instead of the runner's slow-command budget (the fetch's clone, bounded by
+// FetchTimeout).
+func assertCredentialedEnvironmentBounded(t *testing.T, command Command, timeout time.Duration) {
+	t.Helper()
 	if commandEnv(command, "LEGION_PROVISIONING_TOKEN_FILE") == "" {
 		t.Errorf("%q has no token file pointer", command.Argv)
 	}
@@ -277,8 +285,8 @@ func assertCredentialedEnvironment(t *testing.T, command Command) {
 			t.Errorf("%q carries the token value in its environment: %s", command.Argv, entry)
 		}
 	}
-	if command.Timeout != testTimeout {
-		t.Errorf("command timeout = %s, want slow-command budget %s", command.Timeout, testTimeout)
+	if command.Timeout != timeout {
+		t.Errorf("command timeout = %s, want %s", command.Timeout, timeout)
 	}
 }
 
@@ -453,7 +461,7 @@ func TestFetchClonesBareReadingNoConfigurationButItsOwn(t *testing.T) {
 	if want := []string{"git", "clone", "--bare", "--quiet", "https://github.com/acme/widgets", feed}; !slices.Equal(clone.Argv, want) {
 		t.Errorf("Fetch ran %q, want %q", clone.Argv, want)
 	}
-	assertCredentialedEnvironment(t, clone)
+	assertCredentialedEnvironmentBounded(t, clone, FetchTimeout)
 	if entries, err := os.ReadDir(req.CredentialDir); err != nil || len(entries) != 0 {
 		t.Errorf("the one-shot credential outlived Fetch: %v (%v)", entries, err)
 	}

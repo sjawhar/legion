@@ -17,6 +17,25 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/requests"
 )
 
+// recordSessionResp is a credential request's two possibly-differing session ids, read
+// independently (LEGION-587): Enrollment is the id the requesting session's own enrollment
+// stated when it enrolled, Request is the id the request itself stated as an unsigned override
+// in its body. Either is null when that id was never set; a machine login (which has no request
+// row and no requesting enrollment) always answers both null. GET /v1/pending's own
+// pendingEntry.Session carries this same shape (handlers_ui_pending.go).
+type recordSessionResp struct {
+	// The id the request itself stated as an unsigned override in its body; null when it named
+	// none.
+	Request *string `json:"request"`
+	// The id the requesting session's own enrollment stated when it enrolled; null when it named
+	// none, or for a machine login, which has no requesting enrollment at all.
+	Enrollment *string `json:"enrollment"`
+}
+
+func sessionResp(s requests.Session) recordSessionResp {
+	return recordSessionResp{Request: strPtr(s.Request), Enrollment: strPtr(s.Enrollment)}
+}
+
 // recordEnrollmentResp is a record's or a grant's requesting enrollment. Slot is a pod
 // enrollment's slot, one of several independent identities in one pod, and null for every
 // enrollment without one.
@@ -60,6 +79,9 @@ type recordResponse struct {
 	Approver string `json:"approver"`
 	// The session asking; null for a machine login.
 	Enrollment *recordEnrollmentResp `json:"enrollment"`
+	// The session this record names, read independently of each other; null fields where that id
+	// was never set (LEGION-587).
+	Session recordSessionResp `json:"session"`
 	// The secrets asked for, or the machine logging in.
 	Identifiers []string `json:"identifiers"`
 	// The service a machine login is for, when it logs a service in rather than a person's
@@ -87,6 +109,7 @@ func buildRecordResponse(detail requests.RecordDetail) recordResponse {
 		RecordID: detail.RecordID, Kind: detail.Kind, State: detail.State, Approver: detail.Approver,
 		Identifiers: detail.Identifiers, Reason: detail.Reason, LifetimeSeconds: detail.LifetimeSeconds,
 		RulesVersion: detail.RulesVersion, ExpiresAt: detail.ExpiresAt, RequestedAt: detail.RequestedAt,
+		Session: sessionResp(detail.Session),
 	}
 	if detail.Enrollment != nil {
 		enr := enrollmentResp(*detail.Enrollment)
