@@ -161,18 +161,22 @@ func hasCurrentVersion(versionsToStages map[string][]string) bool {
 	return false
 }
 
-// restoreBy is the last moment a secret scheduled for deletion can be restored, read back from the
-// DeletedDate Secrets Manager answers for it (DescribeSecret's and ListSecrets'); nil while it is
-// not scheduled. DeletedDate is the moment the delete ran, and neither call answers the recovery
-// window, so this adds the window delete schedules every deletion with, recoveryWindowDays. A
-// deletion scheduled elsewhere with a shorter window (the console) is restorable for less than it
-// shows. delete itself prints DeleteSecret's own answer, DeletionDate, which is the end of the
-// window it scheduled.
-func restoreBy(deletedDate *time.Time) *time.Time {
+// minRecoveryWindowDays is the shortest recovery window Secrets Manager allows a deletion, 7 days.
+const minRecoveryWindowDays = 7
+
+// earliestPurge is the earliest moment Secrets Manager can purge a secret scheduled for deletion,
+// read back from the DeletedDate it answers for it (DescribeSecret's and ListSecrets'); nil while
+// it is not scheduled. DeletedDate is the moment the delete ran (measured against Secrets
+// Manager), and neither call answers the recovery window the delete used, which can be anything
+// from 7 to 30 days, so the earliest the secret can be gone is DeletedDate plus the 7-day minimum:
+// a reader told this date never waits past the purge to restore it. It is the one place that reads
+// DeletedDate. delete itself prints DeleteSecret's own DeletionDate, the exact end of the window it
+// scheduled.
+func earliestPurge(deletedDate *time.Time) *time.Time {
 	if deletedDate == nil {
 		return nil
 	}
-	t := deletedDate.Add(recoveryWindowDays * 24 * time.Hour)
+	t := deletedDate.AddDate(0, 0, minRecoveryWindowDays)
 	return &t
 }
 
@@ -309,8 +313,11 @@ type secretView struct {
 	// Created and LastChanged are absent when Secrets Manager answers none.
 	Created     *time.Time `json:"created,omitempty"`
 	LastChanged *time.Time `json:"last_changed,omitempty"`
-	// RestoreBy is set while the secret is scheduled for deletion (restoreBy).
-	RestoreBy *time.Time `json:"restore_by,omitempty"`
+	// Deleted is when its deletion was scheduled, set while it is scheduled for deletion.
+	Deleted *time.Time `json:"deleted,omitempty"`
+	// EarliestPurge is the earliest Secrets Manager can purge it, set while it is scheduled for
+	// deletion (earliestPurge): restorable at least until then, perhaps longer.
+	EarliestPurge *time.Time `json:"earliest_purge,omitempty"`
 	// Versions maps each version id to its staging labels; only show answers it.
 	Versions map[string][]string `json:"versions,omitempty"`
 }
@@ -362,7 +369,7 @@ func cmdSecretList(args []string, stdout, stderr io.Writer) int {
 				Owner: tags[policy.TagOwner], Tier: tags[policy.TagTier],
 				HasValue: hasCurrentVersion(e.SecretVersionsToStages),
 				Created:  e.CreatedDate, LastChanged: e.LastChangedDate,
-				RestoreBy: restoreBy(e.DeletedDate),
+				Deleted: e.DeletedDate, EarliestPurge: earliestPurge(e.DeletedDate),
 			})
 		}
 	}
@@ -376,16 +383,20 @@ func cmdSecretList(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 	tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tOWNER\tTIER\tVALUE\tDELETION")
+	fmt.Fprintln(tw, "NAME\tOWNER\tTIER\tVALUE\tDELETED\tEARLIEST_PURGE")
 	for _, v := range views {
 		value := "no"
 		if v.HasValue {
 			value = "yes"
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", v.Name, orDash(v.Owner), orDash(v.Tier), value, formatTime(v.RestoreBy))
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", v.Name, orDash(v.Owner), orDash(v.Tier), value, formatTime(v.Deleted), formatTime(v.EarliestPurge))
 	}
 	if err := tw.Flush(); err != nil {
 		return secretFail(stderr, form, err)
+	}
+	// The legend goes to stderr, so the table on stdout stays one row per secret for a script.
+	if slices.ContainsFunc(views, func(v secretView) bool { return v.Deleted != nil }) {
+		fmt.Fprintf(stderr, "EARLIEST_PURGE is the deletion plus Secrets Manager's %d-day minimum recovery window: restore works at least until then; the window the delete chose may be longer.\n", minRecoveryWindowDays)
 	}
 	return 0
 }
@@ -420,8 +431,8 @@ func cmdSecretShow(args []string, stdout, stderr io.Writer) int {
 		Owner: tags[policy.TagOwner], Tier: tags[policy.TagTier],
 		HasValue: hasCurrentVersion(out.VersionIdsToStages),
 		Created:  out.CreatedDate, LastChanged: out.LastChangedDate,
-		RestoreBy: restoreBy(out.DeletedDate),
-		Versions:  out.VersionIdsToStages,
+		Deleted: out.DeletedDate, EarliestPurge: earliestPurge(out.DeletedDate),
+		Versions: out.VersionIdsToStages,
 	}
 	if *asJSON {
 		if err := writeIndentedJSON(stdout, view); err != nil {
@@ -431,8 +442,9 @@ func cmdSecretShow(args []string, stdout, stderr io.Writer) int {
 	}
 	fmt.Fprintf(stdout, "name: %s\nsecret_name: %s\nowner: %s\ntier: %s\ncreated: %s\nlast_changed: %s\n",
 		view.Name, view.SecretName, orDash(view.Owner), orDash(view.Tier), formatTime(view.Created), formatTime(view.LastChanged))
-	if view.RestoreBy != nil {
-		fmt.Fprintf(stdout, "deletion: scheduled; restorable until %s\n", formatTime(view.RestoreBy))
+	if view.Deleted != nil {
+		fmt.Fprintf(stdout, "deleted: %s\nearliest_purge: %s (the deletion plus Secrets Manager's %d-day minimum recovery window: restorable at least until then; the window the delete chose may be longer)\n",
+			formatTime(view.Deleted), formatTime(view.EarliestPurge), minRecoveryWindowDays)
 	}
 	versions := make([]string, 0, len(view.Versions))
 	for version := range view.Versions {

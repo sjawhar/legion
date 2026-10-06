@@ -123,7 +123,7 @@ var commands = []command{
 	{"sign", "agent-secrets sign --method M --url U [--enrollment E]",
 		"Print the proof this session would sign for one broker call, without making the call."},
 	{"secret list", "agent-secrets secret list [--json] [--profile P]",
-		"List every agent secret under your own AWS sign-in: its owner, tier, whether it has a\nvalue, and, while it is scheduled for deletion, until when it can be restored."},
+		"List every agent secret under your own AWS sign-in: its owner, tier, whether it has a\nvalue, and, while it is scheduled for deletion, when it was deleted and the earliest it\ncan be purged."},
 	{"secret show", "agent-secrets secret show NAME [--json] [--profile P]",
 		"Print the agent secret NAME's owner, tier, dates and versions, never its value."},
 	{"secret create", "agent-secrets secret create NAME --owner me|shared --tier agent|human [--profile P]",

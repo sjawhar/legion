@@ -368,8 +368,10 @@ func TestSecretRetagOfASharedSecretSaysAnAdministratorChangesIt(t *testing.T) {
 }
 
 // TestSecretListShowsValueAndDeletion: list shows every secret under the prefix, a secret
-// scheduled for deletion included with its restore-by date, whether each has a value, and a
-// missing date or tag as absent; nothing outside the prefix, and never a value.
+// scheduled for deletion included with when it was deleted and the earliest Secrets Manager can
+// purge it (DeletedDate plus AWS's 7-day minimum window, never the 30 days delete schedules, since
+// the listing does not say which window the delete used), whether each has a value, and a missing
+// date or tag as absent; nothing outside the prefix, and never a value.
 func TestSecretListShowsValueAndDeletion(t *testing.T) {
 	deletedAt := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
 	gone := policytest.Secret("GONE_KEY", "ada@example.com", policy.TierAgent, "gone-value")
@@ -390,7 +392,7 @@ func TestSecretListShowsValueAndDeletion(t *testing.T) {
 	}
 	rows := map[string][]string{}
 	lines := strings.Split(strings.TrimRight(stdout, "\n"), "\n")
-	if got := strings.Fields(lines[0]); strings.Join(got, " ") != "NAME OWNER TIER VALUE DELETION" {
+	if got := strings.Fields(lines[0]); strings.Join(got, " ") != "NAME OWNER TIER VALUE DELETED EARLIEST_PURGE" {
 		t.Fatalf("header = %q", lines[0])
 	}
 	for _, line := range lines[1:] {
@@ -398,10 +400,10 @@ func TestSecretListShowsValueAndDeletion(t *testing.T) {
 		rows[fields[0]] = fields
 	}
 	want := map[string][]string{
-		"EMPTY_KEY":    {"EMPTY_KEY", "shared", "agent", "no", "-"},
-		"GONE_KEY":     {"GONE_KEY", "ada@example.com", "agent", "yes", restoreBy(&deletedAt).Format(time.RFC3339)},
-		"LIVE_KEY":     {"LIVE_KEY", "ada@example.com", "human", "yes", "-"},
-		"UNTAGGED_KEY": {"UNTAGGED_KEY", "-", "-", "yes", "-"},
+		"EMPTY_KEY":    {"EMPTY_KEY", "shared", "agent", "no", "-", "-"},
+		"GONE_KEY":     {"GONE_KEY", "ada@example.com", "agent", "yes", "2026-10-01T12:00:00Z", "2026-10-08T12:00:00Z"},
+		"LIVE_KEY":     {"LIVE_KEY", "ada@example.com", "human", "yes", "-", "-"},
+		"UNTAGGED_KEY": {"UNTAGGED_KEY", "-", "-", "yes", "-", "-"},
 	}
 	if len(rows) != len(want) {
 		t.Fatalf("rows = %v, want exactly %v", rows, want)
@@ -411,34 +413,71 @@ func TestSecretListShowsValueAndDeletion(t *testing.T) {
 			t.Fatalf("row %s = %v, want %v", name, rows[name], fields)
 		}
 	}
-	for _, value := range []string{"live-value", "gone-value", "untagged-value", "outside"} {
-		if strings.Contains(stdout, value) {
-			t.Fatalf("list printed %q: %s", value, stdout)
+	for _, never := range []string{"live-value", "gone-value", "untagged-value", "outside", "2026-10-31"} {
+		if strings.Contains(stdout, never) {
+			t.Fatalf("list printed %q: %s", never, stdout)
 		}
+	}
+	if !strings.Contains(stderr, "EARLIEST_PURGE is the deletion plus Secrets Manager's 7-day minimum recovery window") {
+		t.Fatalf("stderr %q must say what EARLIEST_PURGE is", stderr)
 	}
 
 	stdout, stderr, code = runSecret("list", "--json")
 	if code != 0 {
 		t.Fatalf("list --json: exit %d, stderr %q", code, stderr)
 	}
-	var views []secretView
+	var views []struct {
+		Name          string     `json:"name"`
+		HasValue      bool       `json:"has_value"`
+		Created       *time.Time `json:"created"`
+		Deleted       *time.Time `json:"deleted"`
+		EarliestPurge *time.Time `json:"earliest_purge"`
+	}
 	if err := json.Unmarshal([]byte(stdout), &views); err != nil {
 		t.Fatalf("list --json is not a JSON array of secrets: %v: %s", err, stdout)
 	}
-	if len(views) != 4 || views[1].Name != "GONE_KEY" || views[1].RestoreBy == nil || !views[1].RestoreBy.Equal(*restoreBy(&deletedAt)) || views[0].HasValue || views[1].Created != nil {
-		t.Fatalf("list --json = %+v", views)
+	if len(views) != 4 || views[1].Name != "GONE_KEY" || views[0].HasValue || views[1].Created != nil ||
+		views[1].Deleted == nil || !views[1].Deleted.Equal(deletedAt) ||
+		views[1].EarliestPurge == nil || !views[1].EarliestPurge.Equal(deletedAt.AddDate(0, 0, 7)) ||
+		views[0].Deleted != nil || views[0].EarliestPurge != nil {
+		t.Fatalf("list --json = %s", stdout)
 	}
 }
 
-// TestRestoreByIsTheOnePlaceDeletedDateIsRead pins restoreBy's reading of DeletedDate: the moment
-// the delete ran (measured against Secrets Manager), plus the 30-day window delete schedules.
-func TestRestoreByIsTheOnePlaceDeletedDateIsRead(t *testing.T) {
-	if restoreBy(nil) != nil {
-		t.Fatal("restoreBy(nil) must be nil: the secret is not scheduled for deletion")
+// TestSecretShowOfADeletedSecretNamesTheEarliestPurge: show of a secret scheduled for deletion
+// prints when it was deleted and the earliest Secrets Manager can purge it, DeletedDate plus 7
+// days, labelled as the earliest rather than the exact purge, and never DeletedDate plus 30.
+func TestSecretShowOfADeletedSecretNamesTheEarliestPurge(t *testing.T) {
+	deletedAt := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	gone := policytest.Secret("GONE_KEY", "ada@example.com", policy.TierAgent, "gone-value")
+	gone.DeletedAt = &deletedAt
+	local := secrets.NewLocal(gone)
+	startSecretBroker(t, servedBy(local))
+	useAWS(t, local, testAccount, adaSignIn)
+	stdout, stderr, code := runSecret("show", "GONE_KEY")
+	if code != 0 {
+		t.Fatalf("exit %d, stderr %q; want 0", code, stderr)
+	}
+	for _, want := range []string{"deleted: 2026-10-01T12:00:00Z\n", "earliest_purge: 2026-10-08T12:00:00Z (", "at least"} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("stdout %q must contain %q", stdout, want)
+		}
+	}
+	if strings.Contains(stdout, "2026-10-31") {
+		t.Fatalf("stdout %q names DeletedDate plus 30 days, which may be after the secret is purged", stdout)
+	}
+}
+
+// TestEarliestPurgeIsTheOnePlaceDeletedDateIsRead pins earliestPurge's reading of DeletedDate: the
+// moment the delete ran (measured against Secrets Manager) plus AWS's 7-day minimum recovery
+// window, the earliest the secret can be purged whatever window its delete used; never plus 30.
+func TestEarliestPurgeIsTheOnePlaceDeletedDateIsRead(t *testing.T) {
+	if earliestPurge(nil) != nil {
+		t.Fatal("earliestPurge(nil) must be nil: the secret is not scheduled for deletion")
 	}
 	deletedAt := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
-	if got := restoreBy(&deletedAt); !got.Equal(time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)) {
-		t.Fatalf("restoreBy = %v, want the delete's time plus 30 days", got)
+	if got := earliestPurge(&deletedAt); !got.Equal(time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)) {
+		t.Fatalf("earliestPurge = %v, want the delete's time plus 7 days", got)
 	}
 }
 
@@ -462,7 +501,7 @@ func TestSecretShowNeverPrintsTheValue(t *testing.T) {
 			t.Fatalf("stdout %q must contain %q", stdout, want)
 		}
 	}
-	if strings.Contains(stdout, "deletion:") {
+	if strings.Contains(stdout, "deleted:") || strings.Contains(stdout, "earliest_purge:") {
 		t.Fatalf("stdout %q names a deletion for a secret not scheduled for one", stdout)
 	}
 	jsonOut, stderr, code := runSecret("show", "SHOWN_KEY", "--json")
@@ -494,9 +533,9 @@ func TestSecretDeleteThenRestoreRereads(t *testing.T) {
 	if held.DeletedDate == nil {
 		t.Fatal("DOOMED_KEY is not scheduled for deletion")
 	}
-	// DeleteSecret answers the end of the window as DeletionDate, which delete prints; read back
-	// later, restoreBy derives the same moment from DeletedDate.
-	want := "broker: DOOMED_KEY is deleted (restorable until " + formatTime(restoreBy(held.DeletedDate)) + ")"
+	// delete prints DeleteSecret's own DeletionDate, the exact end of the 30-day window it
+	// scheduled, which a later read back cannot know.
+	want := "broker: DOOMED_KEY is deleted (restorable until " + formatTime(aws.Time(held.DeletedDate.AddDate(0, 0, recoveryWindowDays))) + ")"
 	if !strings.Contains(stdout, want) {
 		t.Fatalf("delete stdout %q must contain %q", stdout, want)
 	}
