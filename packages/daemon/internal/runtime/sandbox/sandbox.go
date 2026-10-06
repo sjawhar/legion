@@ -128,14 +128,6 @@ func New(ctx context.Context, rc *rest.Config, opts Options) (*Runtime, error) {
 	return r, nil
 }
 
-// SetRemovable sets the runtime's removable-workspace candidate function after construction: the
-// daemon builds this value from its supervisor, which exists only after the runtime does (the
-// supervisor's own Deps name the runtime), so Options.Removable alone cannot carry it in that
-// order; a direct construction (a test) may still set Options.Removable instead.
-func (r *Runtime) SetRemovable(removable func(ctx context.Context, tree, exclude string) ([]runtime.RemovableWorkspace, error)) {
-	r.removable = removable
-}
-
 // configure checks opts and fills their defaults, touching no cluster.
 func configure(opts Options) (*Runtime, error) {
 	refuse := func(format string, args ...any) (*Runtime, error) {

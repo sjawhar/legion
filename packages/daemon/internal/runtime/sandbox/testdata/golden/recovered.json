@@ -350,6 +350,10 @@
                 "value": "480"
               },
               {
+                "name": "LEGION_GENERATION",
+                "value": "1"
+              },
+              {
                 "name": "LEGION_WORKSPACE_RECOVERED_FROM",
                 "value": "legion/LEGION-208"
               },

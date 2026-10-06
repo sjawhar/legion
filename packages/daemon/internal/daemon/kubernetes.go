@@ -300,7 +300,7 @@ func quantities(q config.Quantities, key string) (corev1.ResourceList, error) {
 // whose informers run for ctx (supervision's lifetime), over the worker stream and with the
 // workflow's implement App as every pod's provisioning token source.
 func sandboxRuntime(rc *rest.Config, opts sandbox.Options, budget time.Duration) runtimeFactory {
-	return func(ctx context.Context, conns runtime.Conns, stream string, apps appauth.Tokens) (runtime.Runtime, error) {
+	return func(ctx context.Context, conns runtime.Conns, stream string, apps appauth.Tokens, removable func(ctx context.Context, tree, exclude string) ([]runtime.RemovableWorkspace, error)) (runtime.Runtime, error) {
 		checking, cancel := context.WithTimeout(ctx, budget)
 		defer cancel()
 		if err := sandbox.CheckInstalled(checking, rc, agentSandbox); err != nil {
@@ -310,6 +310,7 @@ func sandboxRuntime(rc *rest.Config, opts sandbox.Options, budget time.Duration)
 		if apps != nil {
 			opts.Tokens = implementTokens{apps}
 		}
+		opts.Removable = removable
 		return sandbox.New(ctx, rc, opts)
 	}
 }

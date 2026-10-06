@@ -324,6 +324,174 @@ func TestRemoveFinishedKeepsAWorkspaceHoldingANestedRepositoryWithALocalCommit(t
 	}
 }
 
+// jj's own nested-repository skip (lib/src/local_working_copy.rs, the pinned fork) is
+// `disk_dir.join(name).symlink_metadata().is_ok()` for both ".git" and ".jj" — existence alone,
+// no type check at all — so a plain file or a symlink (even a dangling one) of either name hides
+// the whole directory from jj's snapshot exactly as a real nested repository's directory does:
+// not tracked, not listed as untracked, no warning anywhere. A workspace otherwise fully pushed,
+// holding one of these beside an unpushed file, is kept: without nestedRepositories matching every
+// entry type, the snapshot would read the workspace clean and RemoveFinished would delete the
+// unpushed file along with it.
+func TestRemoveFinishedKeepsAWorkspaceHoldingAFileOrSymlinkNamedGitOrJJ(t *testing.T) {
+	for name, plant := range map[string]func(t *testing.T, path string){
+		"a file named .git": func(t *testing.T, path string) {
+			if err := os.WriteFile(path, []byte("not a real git directory\n"), 0o644); err != nil {
+				t.Fatalf("plant a file named .git: %v", err)
+			}
+		},
+		"a symlink named .git": func(t *testing.T, path string) {
+			if err := os.Symlink(os.TempDir(), path); err != nil {
+				t.Fatalf("plant a symlink named .git: %v", err)
+			}
+		},
+		"a dangling symlink named .git": func(t *testing.T, path string) {
+			if err := os.Symlink(filepath.Join(path, "..", "nowhere-at-all"), path); err != nil {
+				t.Fatalf("plant a dangling symlink named .git: %v", err)
+			}
+		},
+		"a file named .jj": func(t *testing.T, path string) {
+			if err := os.WriteFile(path, []byte("not a real jj directory\n"), 0o644); err != nil {
+				t.Fatalf("plant a file named .jj: %v", err)
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			run := newLocalRunner(t)
+			req := provisionRequest(t)
+			ws, err := Provision(context.Background(), run, req)
+			if err != nil {
+				t.Fatalf("provision: %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(ws.Dir, "feature.txt"), []byte("finished work\n"), 0o644); err != nil {
+				t.Fatalf("write worker change: %v", err)
+			}
+			runSetup(t, ws.Dir, "jj", "status")
+			runSetup(t, ws.Clone, "jj", "git", "push", "--remote", "origin", "--bookmark", ws.Bookmark, "--allow-empty-description")
+
+			nested := filepath.Join(ws.Dir, "vendor", "dep")
+			if err := os.MkdirAll(nested, 0o755); err != nil {
+				t.Fatalf("make the nested directory: %v", err)
+			}
+			secret := filepath.Join(nested, "secret.txt")
+			if err := os.WriteFile(secret, []byte("unpushed, never committed anywhere\n"), 0o644); err != nil {
+				t.Fatalf("write the hidden unpushed file: %v", err)
+			}
+			entry := ".git"
+			if strings.HasSuffix(name, ".jj") {
+				entry = ".jj"
+			}
+			plant(t, filepath.Join(nested, entry))
+
+			var logged []string
+			if err := RemoveFinished(context.Background(), run, ws, "WIDGETS-42", "", func(line string) { logged = append(logged, line) }); err != nil {
+				t.Fatalf("RemoveFinished: %v", err)
+			}
+			if _, err := os.Stat(secret); err != nil {
+				t.Fatalf("the unpushed file is gone, want it (and the whole workspace) kept: %v", err)
+			}
+			if len(logged) != 1 || !strings.Contains(logged[0], "kept WIDGETS-42's workspace") || !strings.Contains(logged[0], nested) {
+				t.Errorf("logged %v, want one line naming WIDGETS-42 kept and the nested path %s", logged, nested)
+			}
+		})
+	}
+}
+
+// A git submodule's own repository lives under the workspace's git worktree admin entry
+// (<clone>/.git/worktrees/<ws>/modules/<name>), and the submodule's own checkout, inside the
+// workspace, has a `.git` *file* pointing there — exactly the shape a plain file named .git
+// produces, confirmed against the real git and jj: an unpushed commit inside a real submodule is
+// invisible to the snapshot the same way, and removeGitWorktree deletes the whole worktree admin
+// entry (modules included) along with the workspace, so without nestedRepositories matching a
+// file too, that commit would exist nowhere on the volume.
+func TestRemoveFinishedKeepsAWorkspaceHoldingASubmoduleWithAnUnpushedCommit(t *testing.T) {
+	run := newLocalRunner(t)
+	req := provisionRequest(t)
+	ws, err := Provision(context.Background(), run, req)
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(ws.Dir, "feature.txt"), []byte("finished work\n"), 0o644); err != nil {
+		t.Fatalf("write worker change: %v", err)
+	}
+	runSetup(t, ws.Dir, "jj", "status")
+	runSetup(t, ws.Clone, "jj", "git", "push", "--remote", "origin", "--bookmark", ws.Bookmark, "--allow-empty-description")
+
+	gitEnv := []string{"GIT_AUTHOR_NAME=Legion test", "GIT_AUTHOR_EMAIL=legion-test@example.invalid", "GIT_COMMITTER_NAME=Legion test", "GIT_COMMITTER_EMAIL=legion-test@example.invalid", "GIT_ALLOW_PROTOCOL=file"}
+	subSource := filepath.Join(t.TempDir(), "sub-source.git")
+	runSetupWith(t, "", gitEnv, "git", "init", "--bare", subSource)
+	subClone := t.TempDir()
+	runSetupWith(t, subClone, gitEnv, "git", "clone", subSource, ".")
+	if err := os.WriteFile(filepath.Join(subClone, "initial.txt"), []byte("initial\n"), 0o644); err != nil {
+		t.Fatalf("write the submodule's own initial file: %v", err)
+	}
+	runSetupWith(t, subClone, gitEnv, "git", "add", "initial.txt")
+	runSetupWith(t, subClone, gitEnv, "git", "commit", "-m", "initial")
+	runSetupWith(t, subClone, gitEnv, "git", "push", "origin", "HEAD")
+
+	runSetupWith(t, ws.Dir, gitEnv, "git", "-c", "protocol.file.allow=always", "submodule", "add", subSource, "vendor/dep")
+	sub := filepath.Join(ws.Dir, "vendor", "dep")
+	if err := os.WriteFile(filepath.Join(sub, "local.txt"), []byte("an unpushed local fix\n"), 0o644); err != nil {
+		t.Fatalf("write the submodule's own unpushed file: %v", err)
+	}
+	runSetupWith(t, sub, gitEnv, "git", "add", "local.txt")
+	runSetupWith(t, sub, gitEnv, "git", "commit", "-m", "an unpushed local fix")
+
+	var logged []string
+	if err := RemoveFinished(context.Background(), run, ws, "WIDGETS-42", "", func(line string) { logged = append(logged, line) }); err != nil {
+		t.Fatalf("RemoveFinished: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(sub, "local.txt")); err != nil {
+		t.Fatalf("the submodule's unpushed commit is gone, want the workspace kept: %v", err)
+	}
+	if len(logged) != 1 || !strings.Contains(logged[0], "kept WIDGETS-42's workspace") {
+		t.Errorf("logged %v, want one line naming WIDGETS-42 kept", logged)
+	}
+}
+
+// A linked git worktree's own checkout, inside the workspace, has a `.git` *file* pointing back
+// at the real repository's worktree admin entry — the same shape as the submodule case above. An
+// uncommitted edit there is kept, never deleted along with the workspace.
+func TestRemoveFinishedKeepsAWorkspaceHoldingALinkedWorktreeWithAnUncommittedEdit(t *testing.T) {
+	run := newLocalRunner(t)
+	req := provisionRequest(t)
+	ws, err := Provision(context.Background(), run, req)
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(ws.Dir, "feature.txt"), []byte("finished work\n"), 0o644); err != nil {
+		t.Fatalf("write worker change: %v", err)
+	}
+	runSetup(t, ws.Dir, "jj", "status")
+	runSetup(t, ws.Clone, "jj", "git", "push", "--remote", "origin", "--bookmark", ws.Bookmark, "--allow-empty-description")
+
+	gitEnv := []string{"GIT_AUTHOR_NAME=Legion test", "GIT_AUTHOR_EMAIL=legion-test@example.invalid", "GIT_COMMITTER_NAME=Legion test", "GIT_COMMITTER_EMAIL=legion-test@example.invalid"}
+	source := t.TempDir()
+	runSetupWith(t, source, gitEnv, "git", "init")
+	if err := os.WriteFile(filepath.Join(source, "initial.txt"), []byte("initial\n"), 0o644); err != nil {
+		t.Fatalf("write the source repo's own initial file: %v", err)
+	}
+	runSetupWith(t, source, gitEnv, "git", "add", "initial.txt")
+	runSetupWith(t, source, gitEnv, "git", "commit", "-m", "initial")
+
+	linked := filepath.Join(ws.Dir, "vendor", "dep")
+	runSetupWith(t, source, gitEnv, "git", "worktree", "add", "-b", "linked", linked)
+	uncommitted := filepath.Join(linked, "uncommitted.txt")
+	if err := os.WriteFile(uncommitted, []byte("an uncommitted edit\n"), 0o644); err != nil {
+		t.Fatalf("write the linked worktree's own uncommitted file: %v", err)
+	}
+
+	var logged []string
+	if err := RemoveFinished(context.Background(), run, ws, "WIDGETS-42", "", func(line string) { logged = append(logged, line) }); err != nil {
+		t.Fatalf("RemoveFinished: %v", err)
+	}
+	if _, err := os.Stat(uncommitted); err != nil {
+		t.Fatalf("the linked worktree's uncommitted edit is gone, want the workspace kept: %v", err)
+	}
+	if len(logged) != 1 || !strings.Contains(logged[0], "kept WIDGETS-42's workspace") {
+		t.Errorf("logged %v, want one line naming WIDGETS-42 kept", logged)
+	}
+}
+
 // jj writes "Warning: Skipped some paths because they are not valid UTF-8" to stderr only, with
 // stdout claiming "The working copy has no changes." A workspace otherwise fully pushed, holding
 // such a file, is kept: nothing about it reaches untrackedPaths (which reads only stdout), so the

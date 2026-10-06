@@ -14,35 +14,34 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
-// removableWorkspaces is specs.removable's production body (dispatch://LEGION-583): every member
-// of tree but exclude — the issue this launch is for — and the root itself, whose own state makes
-// it safe to re-clone without costing a child mid-work a multi-minute wait: its phase is done, and
-// every role's claim on it is either never made or one of suspended, failed, or retired — never a
-// live state, and never StateQueued, which is a claim the daemon still means to launch. The claim
-// check applies even to a done phase: leave (workflow/linger.go) sets a left child's phase to done
-// in the same transaction as the status write that takes it out of the workflow (done, backlog,
-// icebox, or triage alike — every one of them forces phase done, so phase done already covers the
-// spec's "done, or parked" without a separate Dispatch-status branch), but only *enqueues* the
-// claim suspends; the outbox applies them later, so a probe in that window can see phase done on
-// an issue whose claim is still working. A child merely between phases (awaiting_merge, a review
-// round the architect has not yet decided) never reaches phase done at all, and is never a
-// candidate even though every claim of it may be idle between tasks: its own next phase can resume
-// it without a re-clone, and taking the volume out from under it would force one. Each candidate is
-// paired with the merged pull request's head the daemon recorded, when it merged: GitHub deletes a
-// squash merge's branch, so that commit carries no remote bookmark of its own, and
-// workspace-init's push-safety check needs the head to tell that commit from one that was never
-// pushed at all. The actual push-safety check — whether a candidate's workspace in fact holds no
-// commit that is not on GitHub — is workspace-init's alone, on the tree volume this daemon cannot
-// read; this function names only who is lifecycle-safe to ask it about.
+// removableWorkspaces is sandbox.Options.Removable's production body (dispatch://LEGION-583):
+// every member of tree but exclude — the issue this launch is for — and the root itself, whose
+// own state makes it safe to check out again without costing a child mid-work a multi-minute
+// wait: its phase is done, and every role's claim on it is either never made or one of suspended,
+// failed, or retired — never a live state, and never StateQueued, which is a claim the daemon
+// still means to launch. The claim check applies even to a done phase: leave (workflow/linger.go)
+// sets a left child's phase to done in the same transaction as the status write that takes it out
+// of the workflow (done, backlog, icebox, or triage alike — every one of them forces phase done,
+// so phase done already covers the spec's "done, or parked" without a separate Dispatch-status
+// branch), but only *enqueues* the claim suspends; the outbox applies them later, so a probe in
+// that window can see phase done on an issue whose claim is still working. A child merely between
+// phases (awaiting_merge, a review round the architect has not yet decided) never reaches phase
+// done at all, and is never a candidate even though every claim of it may be idle between tasks:
+// its own next phase can resume it without a checkout, and taking the volume out from under it
+// would force one. Each candidate is paired with the merged pull request's head the daemon
+// recorded, when it merged: GitHub deletes a squash merge's branch, so that commit carries no
+// remote bookmark of its own, and workspace-init's push-safety check needs the head to tell that
+// commit from one that was never pushed at all. The actual push-safety check — whether a
+// candidate's workspace in fact holds no commit that is not on GitHub — is workspace-init's
+// alone, on the tree volume this daemon cannot read; this function names only who is
+// lifecycle-safe to ask it about.
 //
 // This runs inside Machine.Handle for the launching claim's own machine, which holds that
 // machine's mutex for the whole transition (supervisor.go:188-189's rule: code reached this way
 // reads no other machine). sup.Claims below reads the store directly and takes no machine's lock
-// at all, so two done siblings launching at once — each inside its own Handle, each computing this
-// same list — never wait on each other: calling sup.Machine(token) and Claim() here, as an earlier
-// version did, deadlocks exactly that way (AB-BA on the two machines' mutexes) and was fixed by
-// this function never touching a machine again.
-func removableWorkspaces(pool *pgxpool.Pool, records record.Store, sup *supervisor, project string) func(ctx context.Context, tree, exclude string) ([]runtime.RemovableWorkspace, error) {
+// at all, so two done siblings launching at once — each inside its own Handle, each computing
+// this same list — never wait on each other.
+func removableWorkspaces(pool *pgxpool.Pool, records record.Store, sup *supervisor) func(ctx context.Context, tree, exclude string) ([]runtime.RemovableWorkspace, error) {
 	return func(ctx context.Context, tree, exclude string) ([]runtime.RemovableWorkspace, error) {
 		claims, err := sup.Claims(ctx)
 		if err != nil {

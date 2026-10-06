@@ -112,7 +112,7 @@ func claimOn(t *testing.T, sup *supervisor, issue string, role claim.Role, state
 
 func callRemovable(t *testing.T, pool *pgxpool.Pool, records record.Store, sup *supervisor, tree, exclude string) []runtime.RemovableWorkspace {
 	t.Helper()
-	got, err := removableWorkspaces(pool, records, sup, "legion")(context.Background(), tree, exclude)
+	got, err := removableWorkspaces(pool, records, sup)(context.Background(), tree, exclude)
 	if err != nil {
 		t.Fatalf("removableWorkspaces: %v", err)
 	}
@@ -173,7 +173,7 @@ func TestRemovableWorkspacesIncludesADoneChildWithEveryClaimParkedOrAbsent(t *te
 // A child merely between phases — awaiting_merge, a review round the architect has not yet
 // decided, or plain todo waiting on the workflow — never reaches phase done, so it is never a
 // candidate whatever its claims or Dispatch status: removing its workspace here would force its
-// next phase into a multi-minute re-clone, the shape this correction exists to stop.
+// next phase into a multi-minute checkout, the shape this correction exists to stop.
 func TestRemovableWorkspacesExcludesAChildBetweenPhases(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -293,7 +293,7 @@ func TestRemovableWorkspacesTwoDoneSiblingsLaunchAtOnceAndBothComplete(t *testin
 	var barrier sync.WaitGroup
 	barrier.Add(2)
 	barriered := barrieredTreeIssues{Store: records, barrier: &barrier}
-	removable := removableWorkspaces(pool, barriered, sup, "legion")
+	removable := removableWorkspaces(pool, barriered, sup)
 	fakeRuntime, ok := sup.deps.Runtime.(*fake.Runtime)
 	if !ok {
 		t.Fatalf("sup.deps.Runtime is %T, want *fake.Runtime", sup.deps.Runtime)

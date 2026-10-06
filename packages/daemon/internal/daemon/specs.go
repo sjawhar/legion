@@ -51,12 +51,7 @@ func rolePromptPath(stateDir string, token claim.Token) string {
 // SpawnSpec is the launch's secrets (launchSecrets: the Envoy bearer and the NATS nkey seed, each
 // when the daemon has one), its prompt — the role prompt parts, the addressing sentence, and the
 // deployment instructions — and its repository; for a claim whose workspace was lost with its
-// session, the issue's branch the recreated workspace is recovered from. The removable-workspace
-// candidates a Sandbox-provisioning runtime removes before this launch's own provisioning are not
-// here: removableWorkspaces (removable.go) is the rule, and the sandbox runtime's own
-// Options.Removable is how it reaches that runtime, computed last, under the tree's launch turn
-// (dispatch://LEGION-583) — not this far ahead, where a relaunch's own waits could leave it stale
-// by the time a pod's manifest is actually written.
+// session, the issue's branch the recreated workspace is recovered from.
 func (s specs) SpawnSpec(ctx context.Context, c supervise.Claim) (runtime.SpawnSpec, error) {
 	promptPaths, err := s.rolePromptPaths(c)
 	if err != nil {

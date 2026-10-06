@@ -103,16 +103,18 @@ func snapshotOverrides() []string {
 // workspace a tree agent writes to directly.
 //
 // The snapshot cannot see everything on disk, though, and jj says nothing useful when it misses:
-// a directory holding its own .git or .jj (a second repository an agent cloned to patch a
-// dependency or a fork, inside the workspace) is skipped outright — not tracked, not listed as
-// untracked, no warning anywhere — and a file whose name is not valid UTF-8 gets only a warning jj
-// writes to stderr, with stdout claiming no changes at all. Both leave unpushed work this
-// workspace alone holds invisible to unpushedRevset's read of `@`. So two checks run before it, on
-// the snapshot's own result: anything at all on stderr keeps the workspace (this also makes the
-// untracked-path case below fail closed if a future jj ever changes its stdout wording rather than
-// its stderr one), and so does any nested repository (nestedRepositories below, which treats the
-// workspace's own `.jj` as not nested: every workspace has one; a colocated workspace's own `.git`
-// is a worktree *file*, not a directory, so it is never flagged either).
+// a directory holding its own .git or .jj — any filesystem entry of that name, a real nested
+// repository's directory, a plain file, or even a dangling symlink, jj's own skip condition does
+// not distinguish between them (a second repository an agent cloned to patch a dependency or a
+// fork, inside the workspace, is the real case; a bare file or symlink of that name is the same
+// hole by construction) — is skipped outright: not tracked, not listed as untracked, no warning
+// anywhere. A file whose name is not valid UTF-8 gets only a warning jj writes to stderr, with
+// stdout claiming no changes at all. Both leave unpushed work this workspace alone holds invisible
+// to unpushedRevset's read of `@`. So two checks run before it, on the snapshot's own result:
+// anything at all on stderr keeps the workspace (this also makes the untracked-path case below
+// fail closed if a future jj ever changes its stdout wording rather than its stderr one), and so
+// does any nested repository (nestedRepositories below, which treats the workspace's own `.git`
+// and `.jj` — every workspace has both — as not nested, and nothing else as exempt by type).
 //
 // Past both, the snapshot can still leave an ordinary path untracked rather than commit it (an
 // oversized new file, under snapshot.max-new-file-size, which snapshotOverrides deliberately
@@ -192,30 +194,40 @@ func RemoveFinished(ctx context.Context, run Runner, ws Workspace, issue, merged
 	return nil
 }
 
-// nestedRepositories walks ws.Dir (filepath.WalkDir, which never follows a symlink into its
-// target: a symlinked directory entry reports IsDir false, so WalkDir never recurses into one) for
-// any directory named .git or .jj below the root, excluding the workspace's own .jj (every
-// workspace has one; a colocated workspace's own .git is a worktree *file*, never a directory, so
-// it is never matched at all). jj silently skips a directory holding its own .git or .jj during a
-// snapshot — it is neither tracked, listed as untracked, nor warned about — so a nested
-// repository's own unpushed commits, cloned there to patch a dependency or a fork, are invisible
-// to every other check RemoveFinished makes. Found, the search stops descending into it: whatever
-// it holds is no longer this workspace's concern once flagged, and finding one is enough to keep
-// the whole workspace.
+// nestedRepositories walks ws.Dir (filepath.WalkDir, which reads each entry's type the way
+// os.Lstat does — never following a symlink into its target, so a symlinked directory reports
+// IsDir false and WalkDir never recurses into one) for any entry named .git or .jj below the
+// root, of any type — directory, plain file, symlink, even a dangling one — excluding only the
+// workspace's own top-level .git and .jj (every workspace has both: a colocated workspace's own
+// .git is a worktree *file*, its own .jj a real directory; neither is nested). jj's own skip rule
+// (lib/src/local_working_copy.rs, the pinned fork) is `disk_dir.join(name).symlink_metadata().is_ok()`
+// for both names — existence alone, no type check at all — so a plain file or a (possibly
+// dangling) symlink named .git or .jj hides the whole directory from jj's snapshot exactly as a
+// real nested repository does: not tracked, not listed as untracked, no warning anywhere.
+// Confirmed against the pinned jj: a plain file and a dangling symlink named .git, planted beside
+// an unpushed file, each made the snapshot report the directory as having no changes, with empty
+// stderr. Found, the search stops descending into a nested directory (a file or a symlink has
+// nothing to descend into); finding any one of them is enough to keep the whole workspace.
 func nestedRepositories(root string) ([]string, error) {
 	var found []string
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if !d.IsDir() || d.Name() != ".git" && d.Name() != ".jj" {
+		if d.Name() != ".git" && d.Name() != ".jj" {
 			return nil
 		}
-		if path == filepath.Join(root, ".jj") {
-			return filepath.SkipDir
+		if path == filepath.Join(root, ".git") || path == filepath.Join(root, ".jj") {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
 		}
 		found = append(found, path)
-		return filepath.SkipDir
+		if d.IsDir() {
+			return filepath.SkipDir
+		}
+		return nil
 	})
 	if err != nil {
 		return nil, fmt.Errorf("walk %s for a nested repository: %w", root, err)

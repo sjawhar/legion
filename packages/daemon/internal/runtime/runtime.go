@@ -138,11 +138,6 @@ type RemovableWorkspace struct {
 // like the Dispatch bearer, is a runtime option. ResumeSessionFile is set only by `Resume`, and it
 // names the transcript the same agent continues from. WorkspaceRecoveredFrom names the ref a
 // workspace recreated after its volume was lost is recovered from; "" for every other launch.
-// There is no removable-workspaces field here: the sandbox runtime's own Options.Removable
-// computes that candidate list itself, inside relaunch, after the tree's launch turn is held and
-// its other pods have finished initializing (dispatch://LEGION-583) — before that point, a spec
-// built this far ahead of when a pod's manifest is actually written could already be stale by the
-// time it was used, since a relaunch can wait minutes for the turn and the other pods.
 type SpawnSpec struct {
 	Claim                  claim.Token
 	Project                string

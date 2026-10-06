@@ -650,6 +650,30 @@ func TestTheRecoveredRefReachesTheInitContainerAlone(t *testing.T) {
 	}
 }
 
+// LEGION_GENERATION reaches workspace-init's init container too, not only the main container
+// (mainEnvironment's own): workspace-init provision's own candidate-rotation seed
+// (cmd/legion/workspace_init.go's rotateCandidates) reads it from its own container's
+// environment, and a value only the main container carries would never reach it. The fetch
+// container, which never rotates anything, carries neither.
+func TestLegionGenerationReachesTheInitContainerToo(t *testing.T) {
+	r, err := configure(goldenOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := workerSpec(t)
+	spec.Generation = 7
+	pod := podOf(t, r, spec, false)
+	for _, name := range []string{initContainer, mainContainer} {
+		got, set := envOf(containerNamed(t, pod, name))["LEGION_GENERATION"]
+		if !set || got != "7" {
+			t.Errorf("%s's LEGION_GENERATION = %q (set: %t), want \"7\"", name, got, set)
+		}
+	}
+	if _, set := envOf(containerNamed(t, pod, fetchContainer))["LEGION_GENERATION"]; set {
+		t.Errorf("%s carries LEGION_GENERATION", fetchContainer)
+	}
+}
+
 // The daemon's removable-workspace candidates (dispatch://LEGION-583) reach the workspace-init
 // container alone, JSON-encoded, never the agent; a launch with none names none. relaunch is what
 // calls setRemovable in production, after the tree's launch turn is held; this reaches directly

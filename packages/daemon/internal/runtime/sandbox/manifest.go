@@ -605,13 +605,18 @@ func fetchEnvironment() []corev1.EnvVar {
 // PATH are never ones an agent put there; it carries no tool-path variables, and it is never
 // pointed at the provisioning token. A resume names the recorded session the command must find on
 // the volume, and a relaunch after the volume was lost names the ref the recreated workspace is
-// recovered from; both are workspace-init's alone, never the agent's. LEGION_REMOVABLE_WORKSPACES
-// is l.removableWorkspacesJSON, prepare's JSON encoding of the daemon's candidate list
-// (dispatch://LEGION-583); absent when the daemon found none.
+// recovered from; both are workspace-init's alone, never the agent's. LEGION_GENERATION is
+// l.spec.Generation, read by workspace-init provision's own candidate-rotation seed
+// (cmd/legion/workspace_init.go's rotateCandidates): mainEnvironment's own LEGION_GENERATION is
+// the worker container's, a different container, so workspace-init needs its own copy of the same
+// value. LEGION_REMOVABLE_WORKSPACES is l.removableWorkspacesJSON, set by setRemovable (called
+// from relaunch, after the daemon's candidate list is read, last, under the tree's launch turn);
+// absent when the daemon found none.
 func (r *Runtime) initEnvironment(l launch) []corev1.EnvVar {
 	env := []corev1.EnvVar{
 		{Name: "PATH", Value: imagePath},
 		{Name: "LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS", Value: strconv.FormatInt(r.initWaitSeconds(), 10)},
+		{Name: "LEGION_GENERATION", Value: strconv.FormatUint(l.spec.Generation, 10)},
 	}
 	if l.initResumeFile != "" {
 		env = append(env, corev1.EnvVar{Name: "LEGION_RESUME_SESSION_FILE", Value: l.initResumeFile})

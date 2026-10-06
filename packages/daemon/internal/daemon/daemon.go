@@ -36,7 +36,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/prompts"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
-	"github.com/sjawhar/legion/daemon/internal/runtime/sandbox"
 	"github.com/sjawhar/legion/daemon/internal/runtime/tmux"
 	"github.com/sjawhar/legion/daemon/internal/runtime/workerbin"
 	"github.com/sjawhar/legion/daemon/internal/store"
@@ -351,9 +350,12 @@ type plan struct {
 }
 
 // runtimeFactory builds the runtime over the worker stream (C3): ctx is supervision's lifetime,
-// conns the stream listener, stream the address every agent's shim dials, and tokens the
-// workflow's App tokens, nil without a workflow.
-type runtimeFactory func(ctx context.Context, conns runtime.Conns, stream string, tokens appauth.Tokens) (runtime.Runtime, error)
+// conns the stream listener, stream the address every agent's shim dials, tokens the workflow's
+// App tokens, nil without a workflow, and removable the tree's candidate function
+// (removableWorkspaces), which needs sup — created before this is called (openSupervision) — so
+// it cannot be built inside the factory itself; a runtime that does not provision workspaces in
+// its own pods ignores it.
+type runtimeFactory func(ctx context.Context, conns runtime.Conns, stream string, tokens appauth.Tokens, removable func(ctx context.Context, tree, exclude string) ([]runtime.RemovableWorkspace, error)) (runtime.Runtime, error)
 
 // prepare is every refusal that needs nothing but the configuration and the machine (readBoot's,
 // then what writes or runs something: the state directory, the instructions copy, and what the
@@ -459,7 +461,7 @@ func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken
 // providerEnvDir, when set, is the `--provider-env-dir` beside it. The private server's
 // environment is scrubbed before anything is launched on it.
 func tmuxRuntime(cfg config.Config, project, invocation, providerEnvDir, dispatchTokenFile string, tools map[string]string, log *slog.Logger) runtimeFactory {
-	return func(ctx context.Context, conns runtime.Conns, streamAddress string, _ appauth.Tokens) (runtime.Runtime, error) {
+	return func(ctx context.Context, conns runtime.Conns, streamAddress string, _ appauth.Tokens, _ func(ctx context.Context, tree, exclude string) ([]runtime.RemovableWorkspace, error)) (runtime.Runtime, error) {
 		opts := tmuxOptions(cfg, project, invocation, providerEnvDir, dispatchTokenFile, tools, log)
 		opts.StreamAddress, opts.Conns = streamAddress, conns
 		rt, err := tmux.New(opts)
@@ -539,23 +541,13 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 		cancelStream()
 		return nil, err
 	}
-	rt, err := p.newRuntime(supervising, listener, listener.Addr(), apps)
+	rt, err := p.newRuntime(supervising, listener, listener.Addr(), apps, removableWorkspaces(st.Pool(), record.NewStore(), sup))
 	if err != nil {
 		cancel()
 		cancelStream()
 		return nil, fmt.Errorf("build the %s runtime: %w", cfg.Runtime.Name, err)
 	}
 	repo := cfg.Projects[cfg.Project].Repo
-	// A runtime that does not provision each claim's workspace in its own pod
-	// (ProvisionsWorkspaces false, tmux's answer) removes nothing. The sandbox runtime itself
-	// computes the candidate list, last, under each launch's tree turn (dispatch://LEGION-583);
-	// it cannot build the function itself since it needs sup, which exists only after the runtime
-	// does (sup.deps names the runtime), so this wires it in after both exist.
-	if rt.ProvisionsWorkspaces() {
-		if sandboxed, ok := rt.(*sandbox.Runtime); ok {
-			sandboxed.SetRemovable(removableWorkspaces(st.Pool(), record.NewStore(), sup, p.project))
-		}
-	}
 
 	sup.deps = supervise.Deps{
 		Runtime: rt,
