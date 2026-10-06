@@ -476,9 +476,9 @@ authorization error twice in a row (nats.go's own terminal-close rules) — neve
 connection and so never logs either of those two lines again: a repeating handshake failure, say
 a server that accepts the TCP connection but never completes the protocol handshake, retries
 silently behind the one `NATS connection lost` line. A separate warn, `NATS has not
-reconnected`, covers that gap: logged at most once every 3 minutes while the connection stays
-down, naming the downtime so far and the connection's own last-seen error — usually empty during
-a plain refused dial, since nats.go clears it on every failed attempt, and naming the failure's
+reconnected`, covers that gap: first after 3 minutes down, then every 3 minutes after that while
+the connection stays down, naming the downtime so far and the connection's own last-seen error —
+usually empty during a plain refused dial, since nats.go clears it on every failed attempt, and naming the failure's
 own cause while a handshake keeps failing, since nats.go leaves that one in place until the
 connection succeeds. At boot an unreachable NATS or Dispatch delays the boot instead of exiting,
 retried one second doubling to one minute, forever, logged at warn as `boot probe failed

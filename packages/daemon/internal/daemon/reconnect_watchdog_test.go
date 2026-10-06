@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"log/slog"
@@ -48,8 +47,8 @@ func (c *fakeConnStatus) set(connected bool, err error) {
 // signal instead: a warn every reconnectWarnEvery naming the downtime so far and the connection's
 // own LastError, and none at all while connected.
 func TestReconnectWatchdogWarnsWhileDisconnectedNotWhileConnected(t *testing.T) {
-	var logBuf bytes.Buffer
-	log := slog.New(slog.NewTextHandler(&logBuf, nil))
+	logBuf := &syncBuffer{}
+	log := slog.New(slog.NewTextHandler(logBuf, nil))
 	conn := &fakeConnStatus{connected: true}
 	w := &workflowRuntime{log: log, reconnectPollInterval: 5 * time.Millisecond, reconnectWarnEvery: 20 * time.Millisecond}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -77,14 +76,18 @@ func TestReconnectWatchdogWarnsWhileDisconnectedNotWhileConnected(t *testing.T) 
 	}
 }
 
-// Once NATS reconnects, the watchdog's downtime clock and its own throttle reset: a later
-// disconnect gets its own first warn promptly rather than waiting out whatever was left of the
-// previous disconnect's warnEvery window.
+// Once NATS reconnects, the watchdog's downtime clock and its own warn throttle both reset: a
+// later disconnect waits out its own fresh warnEvery before its first warn, rather than reusing
+// a downtime or a last-warned time left over from the previous disconnect. The connected interval
+// here outlasts warnEvery itself, so a broken reset's leftover clocks would already be overdue the
+// moment the second disconnect begins, and would warn within one poll tick of it — which the
+// no-warn check below would catch.
 func TestReconnectWatchdogResetsAfterReconnecting(t *testing.T) {
-	var logBuf bytes.Buffer
-	log := slog.New(slog.NewTextHandler(&logBuf, nil))
+	logBuf := &syncBuffer{}
+	log := slog.New(slog.NewTextHandler(logBuf, nil))
 	conn := &fakeConnStatus{connected: false, err: errors.New("first outage")}
-	w := &workflowRuntime{log: log, reconnectPollInterval: 5 * time.Millisecond, reconnectWarnEvery: 500 * time.Millisecond}
+	warnEvery := 1200 * time.Millisecond
+	w := &workflowRuntime{log: log, reconnectPollInterval: 5 * time.Millisecond, reconnectWarnEvery: warnEvery}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { w.reconnectWatchdogWith(ctx, conn); close(done) }()
@@ -93,13 +96,36 @@ func TestReconnectWatchdogResetsAfterReconnecting(t *testing.T) {
 		return strings.Contains(logBuf.String(), "first outage")
 	})
 	conn.set(true, nil)
-	time.Sleep(20 * time.Millisecond)
+	time.Sleep(3 * warnEvery / 2)
 	logBuf.Reset()
 	conn.set(false, errors.New("second outage"))
 
-	testwait.Eventually(t, "the watchdog warns about the second outage promptly, not after the first outage's own warnEvery", func() bool {
+	// With a broken reset, disconnectedSince and warnedAt would still be the first outage's —
+	// already more than warnEvery stale by now — so the very next poll tick would warn. A quarter
+	// of warnEvery is many poll ticks (poll interval is 5ms here), long enough to catch that.
+	time.Sleep(warnEvery / 4)
+	if strings.Contains(logBuf.String(), "second outage") {
+		t.Fatalf("warned about the second outage before its own fresh warnEvery elapsed (the reset is broken): %q", logBuf.String())
+	}
+
+	testwait.Eventually(t, "the watchdog warns about the second outage once its own warnEvery elapses", func() bool {
 		return strings.Contains(logBuf.String(), "second outage")
 	})
+	msg := logBuf.String()
+	match := reconnectDowntimeRe.FindStringSubmatch(msg)
+	if match == nil {
+		t.Fatalf("warn log = %q, want a parseable downtime=", msg)
+	}
+	downtime, err := time.ParseDuration(match[1])
+	if err != nil {
+		t.Fatalf("parse downtime %q: %v", match[1], err)
+	}
+	// Counted from the second disconnect alone, downtime is close to warnEvery. Counted
+	// cumulatively from the first disconnect (connected interval included, as a broken reset
+	// would), it would be well over twice that.
+	if downtime >= 2*warnEvery {
+		t.Fatalf("second outage's downtime = %v, want close to warnEvery (%v), not cumulative since the first outage began", downtime, warnEvery)
+	}
 	cancel()
 	<-done
 }
@@ -112,8 +138,8 @@ var reconnectDowntimeRe = regexp.MustCompile(`downtime=(\S+)`)
 // tripping it. The first warn must wait for the downtime itself to reach warnEvery, exactly as
 // pollHoldReleaseWith holds its own first warn for holdWarnAfter, then warn every warnEvery after.
 func TestReconnectWatchdogWarnsOnlyOnceDowntimeReachesWarnEvery(t *testing.T) {
-	var logBuf bytes.Buffer
-	log := slog.New(slog.NewTextHandler(&logBuf, nil))
+	logBuf := &syncBuffer{}
+	log := slog.New(slog.NewTextHandler(logBuf, nil))
 	conn := &fakeConnStatus{connected: true}
 	warnEvery := 1200 * time.Millisecond
 	w := &workflowRuntime{log: log, reconnectPollInterval: 50 * time.Millisecond, reconnectWarnEvery: warnEvery}
