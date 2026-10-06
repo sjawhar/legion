@@ -40,9 +40,13 @@
 #   Dispatch, the production Envoy listener and production NATS, by the operator's fully-qualified
 #   names for them: an https:// URL, an http(s):// URL and a nats://host:port, none with a path. The
 #   repository carries none of them, and the run never prints them.
-# - LEGION_E2E_DISPATCH_TOKEN_SECRET_ID and LEGION_E2E_ENVOY_TOKEN_SECRET_ID (required) are the
-#   Secrets Manager ids of the production Dispatch agents' bearer and the production Envoy listener's
-#   API token. The repository carries neither.
+# - LEGION_E2E_DISPATCH_TOKEN_FILE (required) names a file only its owner can read (no group or
+#   other permission bits) holding a bearer of the Dispatch agents' client, the one an agent
+#   session's Dispatch configuration resolves (DISPATCH_TOKEN_FILE, DISPATCH_TOKEN, or envoy.json's
+#   dispatch.token). Dispatch answers it as an agent session actor, which its HTTP routes and the
+#   document websocket require.
+# - LEGION_E2E_ENVOY_TOKEN_SECRET_ID (required) is the Secrets Manager id of the production Envoy
+#   listener's API token. The repository carries neither credential.
 # - STAGE4B_UNTIL=<checkpoint> stops after that checkpoint. A run with it set is a development run,
 #   never the proof, and never prints PASS.
 # - STAGE4B_SKIP_CONTROLLER=1, in a development run only, runs none of `controller`'s checks and only
@@ -54,12 +58,12 @@
 # - STAGE4B_EVIDENCE_DIR (default a fresh /tmp directory, kept and printed) holds the transcript, the
 #   daemon log, the pod watch, every agent transcript, and the negative controls.
 #
-# The production bearers (the two Secrets Manager ids above) are read with the devbox admin role
-# into 0600 files under the run's scratch directory. They are never printed, never in an argv (curl
-# reads them from header files), and never in the evidence. One run at a time: the project, the NATS
-# durable consumer names, ports 13372/13373 and the namespace label are shared, so the run takes a
-# lock and refuses to start while another holds it, or while LEGSMOKE has pods, Sandboxes or claims
-# it did not create.
+# The production bearers are copied, the Dispatch one from its file and the Envoy one read from
+# Secrets Manager with the devbox admin role, into 0600 files under the run's scratch directory.
+# They are never printed, never in an argv (curl reads them from header files), and never in the
+# evidence. One run at a time: the project, the NATS durable consumer names, ports 13372/13373 and
+# the namespace label are shared, so the run takes a lock and refuses to start while another holds
+# it, or while LEGSMOKE has pods, Sandboxes or claims it did not create.
 set -Eeuo pipefail
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
@@ -86,7 +90,7 @@ operator=${LEGION_E2E_OPERATOR_CONTEXT:-production}
 runtime_kubeconfig=${LEGION_E2E_RUNTIME_KUBECONFIG:-$HOME/.kube/legion-daemon-production}
 runtime_context=${LEGION_E2E_RUNTIME_CONTEXT:-}
 image=${LEGION_E2E_IMAGE:-}
-dispatch_token_secret_id=${LEGION_E2E_DISPATCH_TOKEN_SECRET_ID:-}
+dispatch_token_file=${LEGION_E2E_DISPATCH_TOKEN_FILE:-}
 envoy_token_secret_id=${LEGION_E2E_ENVOY_TOKEN_SECRET_ID:-}
 until=${STAGE4B_UNTIL:-}
 skip_controller=${STAGE4B_SKIP_CONTROLLER:-}
@@ -425,14 +429,15 @@ pod_endpoint_mismatch() {
 
 read_bearers() {
   (umask 077 &&
-    aws secretsmanager get-secret-value --secret-id "$dispatch_token_secret_id" --query SecretString --output text >"$work/dispatch-token" &&
+    tr -d '[:space:]' <"$dispatch_token_file" >"$work/dispatch-token" &&
     aws secretsmanager get-secret-value --secret-id "$envoy_token_secret_id" --query SecretString --output text >"$work/envoy-token" &&
     printf 'Authorization: Bearer %s\n' "$(cat "$work/dispatch-token")" >"$work/dispatch-auth-header" &&
     cp "$work/dispatch-auth-header" "$work/dispatch-human-header" &&
     printf 'Authorization: Bearer %s\n' "$(cat "$work/envoy-token")" >"$work/envoy-auth-header" &&
     head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' >"$work/operator-token" &&
     head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' >"$work/postgres-password")
-  [ -s "$work/dispatch-token" ] && [ -s "$work/envoy-token" ] || fail "Secrets Manager returned an empty bearer"
+  [ -s "$work/dispatch-token" ] || fail "LEGION_E2E_DISPATCH_TOKEN_FILE names $dispatch_token_file, which holds no bearer"
+  [ -s "$work/envoy-token" ] || fail "Secrets Manager returned an empty bearer for LEGION_E2E_ENVOY_TOKEN_SECRET_ID"
 }
 # scrub replaces each production service's host with the variable that names it: the run prints
 # none of them, and a tool's error (a refused connection, an unresolved name) may carry one.
@@ -1421,8 +1426,19 @@ gateway=$(bash "$root/scripts/e2e/lib/model-gateway-url.sh") ||
   fail "LEGION_E2E_MODEL_GATEWAY_URL is not a model gateway URL the operator route's models.yml can name (the reason is above)"
 gateway_audience=$(bash "$root/scripts/e2e/lib/model-gateway-audience.sh") ||
   fail "LEGION_E2E_MODEL_GATEWAY_AUDIENCE is not a token audience the operator route's pod.yml can carry (the reason is above)"
-[[ $dispatch_token_secret_id =~ ^[A-Za-z0-9/_+=.@:-]+$ ]] ||
-  fail "LEGION_E2E_DISPATCH_TOKEN_SECRET_ID is unset or not a Secrets Manager secret id or ARN"
+# The Dispatch bearer's file is named, never read into the transcript: a refusal names the variable
+# and the path, never what the file holds.
+[ -n "$dispatch_token_file" ] ||
+  fail "LEGION_E2E_DISPATCH_TOKEN_FILE is unset: it names the file holding the Dispatch agents' bearer"
+[ -f "$dispatch_token_file" ] && [ -r "$dispatch_token_file" ] ||
+  fail "LEGION_E2E_DISPATCH_TOKEN_FILE names $dispatch_token_file, which is not a readable file"
+dispatch_token_mode=$(stat -c %a -- "$dispatch_token_file")
+case $dispatch_token_mode in
+  *00) ;;
+  *) fail "LEGION_E2E_DISPATCH_TOKEN_FILE names $dispatch_token_file, whose group or others have access (mode $dispatch_token_mode): make it 0600" ;;
+esac
+[ -n "$(tr -d '[:space:]' <"$dispatch_token_file")" ] ||
+  fail "LEGION_E2E_DISPATCH_TOKEN_FILE names $dispatch_token_file, which holds no bearer"
 [[ $envoy_token_secret_id =~ ^[A-Za-z0-9/_+=.@:-]+$ ]] ||
   fail "LEGION_E2E_ENVOY_TOKEN_SECRET_ID is unset or not a Secrets Manager secret id or ARN"
 # The gateway's health endpoint is at its origin.
@@ -1488,6 +1504,16 @@ floor=$(kubectl --context "$operator" get nodepool legion -o json |
   jq -c '[.spec.template.spec.requirements[] | select(.key == "karpenter.k8s.aws/instance-cpu")]')
 jq -e 'any(.[]; .operator == "Gt" and (.values | index("3")))' <<<"$floor" >/dev/null || fail "the legion NodePool has no instance-cpu Gt 3 floor: $floor"
 note "[operator] CRD sandboxes.agents.x-k8s.io installed; NodePool legion floor $floor"
+# The run's Dispatch bearer authenticates as an agent session, the actor Dispatch's routes and its
+# document websocket require, and the read is what says so: the same read with an invalid bearer
+# is refused 401.
+whoami=$(dispatch_get whoami 2>&1) || fail "production Dispatch refused the LEGION_E2E_DISPATCH_TOKEN_FILE bearer: $(scrub <<<"$whoami" | head -c 300)"
+jq -e '.kind == "agent"' <<<"$whoami" >/dev/null ||
+  fail "the LEGION_E2E_DISPATCH_TOKEN_FILE bearer authenticates as $(jq -c '{kind}' <<<"$whoami" 2>/dev/null), not an agent session"
+refused=$(curl -sS --max-time 20 -o /dev/null -w '%{http_code}' -H "Authorization: Bearer stage4b-invalid-$RANDOM$RANDOM" "$(dispatch_url)/api/v1/whoami" 2>&1) ||
+  fail "production Dispatch did not answer the invalid-bearer control: $(scrub <<<"$refused")"
+[ "$refused" = 401 ] || fail "production Dispatch answered $refused to an invalid bearer, not 401, so the bearer's read proves nothing"
+note "[dispatch] the run's bearer reads whoami as an agent session; an invalid bearer is refused 401"
 # LEGSMOKE's stale todo roots would be admitted at boot ahead of the run's own.
 stale=$(dispatch_get "issues?project=$project&status=todo" | jq -r '.[] | select(.parent == null or .parent == "") | .key')
 for key in $stale; do

@@ -589,7 +589,7 @@ restricted identity, and its pods dial its worker stream on the devbox's private
 LEGION_E2E_RUNTIME_CONTEXT=<restricted context> LEGION_E2E_IMAGE=ghcr.io/sjawhar/legion-worker@sha256:<digest> \
   LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic LEGION_E2E_MODEL_GATEWAY_AUDIENCE=<gateway audience> \
   LEGION_E2E_DISPATCH_URL=https://<dispatch> LEGION_E2E_ENVOY_URL=http://<listener>:<port> LEGION_E2E_NATS_URL=nats://<nats>:4222 \
-  LEGION_E2E_DISPATCH_TOKEN_SECRET_ID=<secret id> LEGION_E2E_ENVOY_TOKEN_SECRET_ID=<secret id> \
+  LEGION_E2E_DISPATCH_TOKEN_FILE=<0600 file> LEGION_E2E_ENVOY_TOKEN_SECRET_ID=<secret id> \
   bash scripts/e2e/stage4b-sandbox-tree.sh        # → "stage 4b e2e: PASS", exit 0
 STAGE4B_UNTIL=<checkpoint> …                      # a development run: stops after that checkpoint, never PASS
 STAGE4B_DESIGN_GATE=root-issues STAGE4B_UNTIL=spec-posted …   # the design gate, armed, on tree 1 alone
@@ -606,12 +606,19 @@ naming the variable and never its value.
 `LEGION_E2E_MODEL_GATEWAY_AUDIENCE` is the audience the model gateway accepts on a worker's projected
 ServiceAccount token. The run puts it in place of the placeholder in its copy of the operator route's
 `pod.yml`, which the daemon loads, and `pod-shape` holds every pod to exactly that one token.
-`LEGION_E2E_DISPATCH_TOKEN_SECRET_ID` and `LEGION_E2E_ENVOY_TOKEN_SECRET_ID` are the Secrets Manager
-ids of the production Dispatch agents' bearer and the production Envoy listener's API token, which
-`prerequisites` reads with the devbox admin role into 0600 files. `prerequisites` refuses each of the
-three when it is unset or malformed (the audience through
-[`lib/model-gateway-audience.sh`](#libmodel-gateway-audiencesh)), again naming the variable and never
-its value.
+`LEGION_E2E_DISPATCH_TOKEN_FILE` names a file only its owner can read (mode 0600 or tighter) holding
+a bearer of the Dispatch agents' client: the one an agent session's own Dispatch configuration
+resolves, `DISPATCH_TOKEN_FILE`, then `DISPATCH_TOKEN`, then `dispatch.token` in
+`~/.config/opencode/envoy.json` (`packages/envoy-client/src/dispatch-config.ts`). Dispatch answers
+that bearer as an agent session, the actor its HTTP routes and its document websocket require.
+`LEGION_E2E_ENVOY_TOKEN_SECRET_ID` is the Secrets Manager id of the production Envoy listener's API
+token, which `prerequisites` reads with the devbox admin role. Both bearers land in 0600 files under
+the run's scratch directory. `prerequisites` refuses the token file when it is unset, unreadable,
+open to its group or others, or empty, and refuses the other three when they are unset or malformed
+(the audience through [`lib/model-gateway-audience.sh`](#libmodel-gateway-audiencesh)), each time
+naming the variable and never its value. `preflight` reads Dispatch's `whoami` with the run's bearer
+and requires an agent session; the same read with an invalid bearer, its negative control, must be
+refused 401.
 
 `STAGE4B_UNTIL` must name a checkpoint below; any other value is refused. `STAGE4B_SKIP_CONTROLLER=1`,
 refused without `STAGE4B_UNTIL`, runs none of `controller`'s checks and only takes tree 3 out, printing `CHECK controller: SKIPPED (…)`,
@@ -754,7 +761,7 @@ event is dated by Dispatch's `created_at`; one without it stops the audit, never
 | checkpoint | what it holds |
 | :--- | :--- |
 | `prerequisites` | the tools, the restricted context and the image by digest; the devbox `gh` acts as the proof human, `sjawhar-agent[bot]`; the lock and the two ports; nothing left in the namespace (Sandboxes, pods, PVCs, ConfigMaps) or on NATS from another run; only then does the run own the shared objects |
-| `preflight` | the runtime identity is the daemon's restricted IAM role and cannot list Secrets; the Sandbox CRD and the `legion` NodePool's instance-cpu floor; LEGSMOKE has no todo root; the stream carries both halves of intake; a throwaway pod on the Legion pool reaches Dispatch, the listener, the gateway and NATS, each within three tries 5 s apart (a fresh node's first outbound connection can fail while it settles), and a service that never answers fails the check with every try's error |
+| `preflight` | the runtime identity is the daemon's restricted IAM role and cannot list Secrets; the Sandbox CRD and the `legion` NodePool's instance-cpu floor; the run's Dispatch bearer reads `whoami` as an agent session, and an invalid bearer is refused 401; LEGSMOKE has no todo root; the stream carries both halves of intake; a throwaway pod on the Legion pool reaches Dispatch, the listener, the gateway and NATS, each within three tries 5 s apart (a fresh node's first outbound connection can fail while it settles), and a service that never answers fails the check with every try's error |
 | `pod-watch` | the namespace snapshot; the pod, node-event and node-memory watches start, and the Secret-value check (`lib/secret-leaks.ts`). The pod and node-event watches last the whole run: kubectl's own watch ends when the API server closes it at its watch timeout, so each lists, watches from that resourceVersion, resumes from the last version it saw when a watch ends, and lists again on 410 Gone, noting each in the transcript. Each watch asks the server to end it within 300 s, so a loop a killed driver left stops within five minutes; a watch that delivered nothing is resumed after a pause, and a line that does not parse ends that watch unrecorded |
 | `boot` | the build's source is the one prerequisites recorded; `legion start --check-config` passes the `runtime: kubernetes` config, whose `pod` is the operator fixture's ([`deploy/kubernetes/operator-route`](../../deploy/kubernetes/operator-route/pod.yml)) with its ConfigMap renamed to the run's copy; the operator creates that ConfigMap from the fixture's `models.yml` and `overlay.yml`; the audit window opens and the interest sampler starts; the daemon boots, and the image probe passes (its first attempt's timeline is kept) |
 | `admitted-issue-cap` | the three roots: two admitted and one waiting, in rank order |
