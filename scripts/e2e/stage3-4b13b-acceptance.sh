@@ -595,15 +595,23 @@ merger_summary() {
   jq -s -r '[.[] | select(.type == "message" and .message.role == "assistant") | .message.content[]?
     | select(.type == "toolCall" and .name == "legion" and .arguments.op == "handoff_complete") | .arguments.summary] | last // empty' "$f"
 }
-# merger_self_posted ISSUE: the merger's own tool calls that would post or publish READY itself.
+# merger_self_posted ISSUE: the merger's own tool calls that would post or publish READY itself,
+# made any of the three ways Oh My Pi gives the model to call dispatch_message and envoy_publish:
+# the tool itself, a write to its xd:// device, or eval code that calls tool.<name>(...). Any
+# publish counts; a message counts when its body starts with READY, which in eval code is a string
+# literal that starts with it.
 merger_self_posted() {
   local f
   f=$(claim_session_file "$1" merger) || return 1
   jq -s -c '[.[] | select(.type == "message" and .message.role == "assistant") | .message.content[]?
-    | select(.type == "toolCall" and (.name == "dispatch_message" or .name == "envoy_publish" or
-        (.name == "write" and ((.arguments.path // "") | test("xd://(dispatch_message|envoy_publish)")))))
+    | select(.type == "toolCall") | ((.arguments.code? // "") | tostring) as $code
+    | select(.name == "dispatch_message" or .name == "envoy_publish" or
+        (.name == "write" and ((.arguments.path // "") | test("xd://(dispatch_message|envoy_publish)"))) or
+        (.name == "eval" and ($code | test("\\btool\\.(dispatch_message|envoy_publish)\\s*\\("))))
     | select(.name == "envoy_publish" or ((.arguments.path // "") | test("envoy_publish")) or
-        ((.arguments.body // ((.arguments.content // "{}") | fromjson? // {} | .body) // "") | ltrimstr(" ") | startswith("READY")))
+        ($code | test("\\btool\\.envoy_publish\\s*\\(")) or
+        ((.arguments.body // ((.arguments.content // "{}") | fromjson? // {} | .body) // "") | ltrimstr(" ") | startswith("READY")) or
+        ($code | test("[`\"\u0027]\\s*READY")))
     | {name, arguments}]' "$f"
 }
 notices_at_least() { [ "$(notice_deliveries "$1" "$2" "$3")" -ge "$4" ]; }
