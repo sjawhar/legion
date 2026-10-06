@@ -696,9 +696,10 @@ then an `admission_cap` above 16 admits trees whose pods cannot schedule.
 
 The provisioning token, the implement App's installation token, is a credential for the whole
 repository, and every agent of a tree can write the tree volume: the shared clone's hooks, its git
-and jj configuration (a legacy `.jj/workspace-config.toml` included), its remote URL, its
-`http.proxy`. git and jj obey all of it — they run hooks, the git jj is told to run, working-copy
-filters and `ext::` transports, and send credentials through the proxy the configuration names —
+and jj configuration (a legacy `.jj/workspace-config.toml`, which jj would migrate into what it
+reads, included), its remote URL, its `http.proxy`. git and jj obey all of it — they run hooks, the
+git jj is told to run, working-copy filters and `ext::` transports, and send credentials through
+the proxy the configuration names —
 so no process that can read the token may touch the tree volume. The Go coordinator's pods
 (`packages/daemon`) keep to that with two init containers:
 
@@ -1200,8 +1201,13 @@ candidate that still has a live, non-terminal pod of its own tree, a second guar
 different evidence — it cannot tell a claim whose `fail` persisted `StateFailed` despite its own
 `suspendProcess` erroring from one truly gone, so that pod, not the daemon's own claim store, is
 checked directly for this one question. `workspace-init` is the process that judges and removes
-each candidate: it snapshots the candidate's own working copy with `--config` overrides that
-neutralize a hostile legacy `.jj/workspace-config.toml` a tree agent could leave on the volume
+each candidate. No jj configuration a tree agent writes reaches its jj commands: jj keeps a
+repository's and a workspace's configuration in the pod's own config home, and the one way a file
+on the tree volume becomes jj configuration, jj migrating a legacy `.jj/workspace-config.toml` or
+`.jj/repo/config.toml` that has no id file beside it, is closed by removing that file before each
+jj command provisioning and removal run (`disarmLegacyConfig`, `internal/workspace/config.go`;
+on the tmux runtime too). It snapshots the candidate's own working copy with `--config` overrides
+that hold the snapshot's working-copy filter and signing programs off even so
 (`snapshotOverrides`, `internal/workspace/removal.go`), keeps the workspace whenever that
 snapshot leaves anything unaccounted for — an untracked path, anything on stderr, or a nested
 repository the snapshot cannot see at all — and otherwise removes it only once every commit it

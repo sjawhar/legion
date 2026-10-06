@@ -17,18 +17,15 @@ import (
 // show that placeholder as unreachable from anything and never be judged safe.
 //
 // remote_bookmarks() is the shared clone's own ref state, writable by any role's pane on the tree
-// volume (the same legacy `.jj/workspace-config.toml` channel snapshotOverrides guards the
-// snapshot against, applied to a bookmark instead of a program): this check is what stops an
-// ordinary slip — a candidate's workspace genuinely holding a commit nothing pushed — from being
-// deleted, not a defense against a hostile role, which already has filesystem access to every
-// sibling workspace on the volume and could delete one directly.
+// volume: this check is what stops an ordinary slip — a candidate's workspace genuinely holding a
+// commit nothing pushed — from being deleted, not a defense against a hostile role, which already
+// has filesystem access to every sibling workspace on the volume and could delete one directly.
 //
-// This jj log carries none of snapshotOverrides' flags, unlike the snapshot: a repo-configured
-// `revset-aliases."empty()" = "all()"` or `"remote_bookmarks()" = "all()"` planted in the shared
-// clone's own legacy config, read here the same way, makes this check pass falsely over a
-// workspace that in fact holds an unpushed edit. This sits inside the trust model stated just
-// above (any tree agent can already delete a sibling's workspace directly) and is tracked as
-// hardening on dispatch://LEGION-583, not fixed here.
+// No configuration a tree agent writes reaches this jj log: the runner removes the legacy
+// `.jj/workspace-config.toml` and `.jj/repo/config.toml` jj would otherwise migrate into the
+// configuration it reads (disarmLegacyConfig, config.go), the one way a file on the tree volume
+// becomes jj configuration, so a planted `revset-aliases."empty()" = "all()"` cannot make this
+// check pass over a workspace that holds an unpushed edit (dispatch://LEGION-583).
 func unpushedRevset(workspaceName, mergedHead string) string {
 	revset := "::" + workspaceName + "@ ~ empty() ~ ::(remote_bookmarks())"
 	if mergedHead != "" {
@@ -39,11 +36,10 @@ func unpushedRevset(workspaceName, mergedHead string) string {
 
 // snapshotOverrides are the command-line `--config` flags RemoveFinished's one real snapshot adds
 // (every other command in this package passes --ignore-working-copy instead and never needs
-// these). They outrank whatever a tree agent wrote into the one legacy `.jj/workspace-config.toml`
-// file a workspace's own directory (or the shared clone's) can carry on the tree volume: jj
-// migrates such a file into whatever fresh config home it finds — a pod's own, which starts empty
-// every launch — so a worker that writes one into a workspace's `.jj` before it is ever parked
-// reaches every later snapshot of that same workspace. Each flag below is confirmed against the
+// these). The runner already keeps every legacy configuration file on the tree volume out of what
+// jj reads (disarmLegacyConfig, config.go); these flags hold the snapshot's programs off even
+// against one a tree agent writes in the instant between that check and jj's own read, since a
+// snapshot is the one command here that would run them. Each flag below is confirmed against the
 // pinned jj (0.45.1-sami):
 //
 //   - `git.filter.enabled=false` turns off the working-copy filter `onClone`'s own doc comment

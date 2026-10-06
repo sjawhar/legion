@@ -133,16 +133,11 @@ func TestRemoveFinishedSnapshotsTheWorkspaceBeforeJudgingAnUncommittedEdit(t *te
 
 // RemoveFinished's snapshot (unlike every other command this package runs, which pass
 // --ignore-working-copy) runs a real `jj status` over a workspace a tree agent writes to
-// directly. The channel that reaches it is not `jj config set --repo` (in this jj version,
-// `--repo` config lives under `$XDG_CONFIG_HOME/jj/repos/`, a pod's own in-memory volume that
-// starts empty every launch, so nothing an earlier pod's agent set that way survives to this
-// one — confirmed directly: a `--repo` setting made under one config home is not read back under
-// another) but a legacy `.jj/workspace-config.toml` left on the tree volume itself, in the
-// workspace's own `.jj` directory: jj migrates such a file into whatever fresh config home it
-// finds, every time, so a worker that writes one into its own workspace before being parked
-// reaches its own later snapshot the same way isolation_test.go's filter test proves it reaches
-// provisioning's. A config naming the working-copy filter and a signing backend, behavior, key and
-// program runs neither program on RemoveFinished's snapshot. A pending edit untouched by any jj
+// directly. jj configuration naming a working-copy filter and a signing backend, behavior, key
+// and program, set as that workspace's own (plantWorkspaceConfig: on the tmux runtime a pane
+// shares the config home it lives in, and in a pod it is what a legacy file written in the
+// instant after the runner's disarmLegacyConfig check would become), runs neither program on
+// RemoveFinished's snapshot: snapshotOverrides outranks it. A pending edit untouched by any jj
 // command still keeps the workspace, proving the snapshot itself still ran.
 func TestRemoveFinishedSnapshotRunsNoHostileFilterOrSigningProgram(t *testing.T) {
 	requireFilters(t)
@@ -164,8 +159,8 @@ func TestRemoveFinishedSnapshotRunsNoHostileFilterOrSigningProgram(t *testing.T)
 	if err := os.WriteFile(signKey, []byte("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnop planted\n"), 0o644); err != nil {
 		t.Fatalf("write planted signing key: %v", err)
 	}
-	// Planted in ws.Dir's own .jj, the real channel: a worker's own pane, in this same workspace,
-	// before it was ever parked.
+	// Set as ws.Dir's own configuration: a worker's own pane, in this same workspace, before it
+	// was ever parked.
 	plantWorkspaceConfig(t, ws.Dir,
 		"[git.filter]\nenabled = true\n[git.filter.drivers.planted]\nclean = ["+tomlString(filter)+"]\nsmudge = [\"cat\"]\nrequired = false\n"+
 			"[fsmonitor]\nbackend = \"watchman\"\n"+

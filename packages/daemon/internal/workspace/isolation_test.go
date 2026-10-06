@@ -129,13 +129,20 @@ func recordingScript(t *testing.T, what, sink, tail string) string {
 	return path
 }
 
-// plantWorkspaceConfig writes a legacy .jj/workspace-config.toml into the shared clone's own
-// working copy. jj migrates such a file into the configuration it reads, even under a config home
-// that starts empty in every pod, so this is jj configuration a tree agent can hand the next
-// provisioning.
-func plantWorkspaceConfig(t *testing.T, clone, toml string) {
+// plantWorkspaceConfig writes toml as the configuration jj keeps for the working copy at dir, in
+// the config home this test's runner and fixtures share (newLocalRunner's): the file `jj config
+// path --workspace` names. On the tmux runtime that is a channel a pane has, since panes share
+// the daemon's config home; a pod's config home starts empty every launch, and the one way a file
+// on the tree volume becomes jj configuration there, a legacy .jj/workspace-config.toml, is the
+// runner's to remove (disarmLegacyConfig; TestNoJJCommandReadsALegacyConfigurationTheTreePlanted).
+// Either way it is jj configuration provisioning must not obey.
+func plantWorkspaceConfig(t *testing.T, dir, toml string) {
 	t.Helper()
-	if err := os.WriteFile(filepath.Join(clone, ".jj", "workspace-config.toml"), []byte(toml), 0o644); err != nil {
+	printed := nonEmptyLines(runSetup(t, dir, "jj", "config", "path", "--workspace", "--ignore-working-copy", "-R", dir))
+	if len(printed) == 0 {
+		t.Fatalf("jj config path --workspace -R %s printed nothing", dir)
+	}
+	if err := os.WriteFile(printed[len(printed)-1], []byte(toml), 0o644); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -314,5 +321,49 @@ func TestTheProvisioningCredentialAnswersOnlyGitHub(t *testing.T) {
 				t.Errorf("useHttpPath %t, %s: password %q (%v), want no credential", useHTTPPath, tc.url, got, err)
 			}
 		}
+	}
+}
+
+// The repository's legacy configuration file, planted with its config-id gone (the one case jj
+// migrates it into the configuration it reads), reaches no jj command the runner starts, here one
+// run in a workspace whose .jj/repo names the shared clone's repository; the runner removes it.
+// A workspace's legacy file beside a workspace-config-id, which jj reads instead, is ignored by jj
+// and left in place (dispatch://LEGION-583). The cmd/legion test
+// TestWorkspaceInitKeepsAnUnpushedChildDespiteARevsetAliasPlantedInTheSharedClone covers the
+// shared clone's own workspace file end to end.
+func TestNoJJCommandReadsALegacyConfigurationTheTreePlanted(t *testing.T) {
+	run := newLocalRunner(t)
+	ws, err := Provision(context.Background(), run, provisionRequest(t))
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	planted := []byte("[revset-aliases]\n\"empty()\" = \"all()\"\n")
+	repo := filepath.Join(ws.Clone, ".jj", "repo")
+	if err := os.Remove(filepath.Join(repo, "config-id")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "config.toml"), planted, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	beside := filepath.Join(ws.Dir, ".jj", "workspace-config.toml")
+	if err := os.WriteFile(filepath.Join(ws.Dir, ".jj", "workspace-config-id"), []byte(strings.Repeat("ab", 10)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(beside, planted, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	listed, err := RunChecked(context.Background(), run, []string{"jj", "config", "list", "--include-defaults", "revset-aliases", "--ignore-working-copy", "--color=never"}, nil, ws.Dir)
+	if err != nil {
+		t.Fatalf("jj config list: %v", err)
+	}
+	if strings.Contains(listed.Stdout, "all()") {
+		t.Errorf("jj read a planted alias:\n%s", listed.Stdout)
+	}
+	if _, err := os.Lstat(filepath.Join(repo, "config.toml")); !os.IsNotExist(err) {
+		t.Errorf("the repository's legacy config.toml with no config-id remains (%v), want it removed", err)
+	}
+	if _, err := os.Stat(beside); err != nil {
+		t.Errorf("the workspace's legacy file beside its workspace-config-id was touched: %v", err)
 	}
 }

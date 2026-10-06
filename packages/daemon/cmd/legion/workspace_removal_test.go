@@ -176,12 +176,44 @@ func TestRemoveFinishedWorkspacesRemovesNothingWithNoNotAfter(t *testing.T) {
 	}
 }
 
+// A payload with anything after its one JSON object — a second object appended, or stray text —
+// is malformed input the strict decode refuses like an unknown field: removing nothing, naming
+// why, before reaching any candidate. A decode that stops after the first value acts on that
+// value's list and never looks at what follows it.
+func TestRemoveFinishedWorkspacesRemovesNothingWithTrailingData(t *testing.T) {
+	root := t.TempDir()
+	repository, err := ghrepo.Parse("--repo", winitRepo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	valid := removableEnv(t, []runtime.RemovableWorkspace{{Issue: "LEGION-100"}})
+	for _, tc := range []struct{ name, payload string }{
+		{"a second object", valid + `{"notAfter":"2000-01-01T00:00:00Z","workspaces":[]}`},
+		{"stray text", valid + " trailing garbage"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(removableWorkspacesEnv, tc.payload)
+
+			var stdout bytes.Buffer
+			removeFinishedWorkspaces(context.Background(), panicRunner{t}, root, repository, "LEGION-200", &stdout, time.Now, removalBudget, time.Now())
+
+			output := stdout.String()
+			if !strings.Contains(output, "removing nothing") {
+				t.Errorf("stdout %q, want it to refuse the payload, removing nothing and naming why", output)
+			}
+			if strings.Contains(output, "LEGION-100") {
+				t.Errorf("stdout %q names LEGION-100 at all, want the pass to stop before reaching any candidate", output)
+			}
+		})
+	}
+}
+
 // A payload this decoder cannot read in full removes nothing and names why, before reaching any
 // candidate: a field this build does not know (a later daemon's, at the top level or inside a
-// candidate), anything after the one JSON object (a second object naming another issue, or a
-// stray closing brace, which json.Decoder.More alone would let through), the bare array this
-// PR's earlier heads wrote, and an empty candidate list. Acting on the part it can read would
-// judge siblings on a list this pod was never sent whole.
+// candidate), a stray closing brace after the object (json.Decoder.More alone would let it
+// through; TestRemoveFinishedWorkspacesRemovesNothingWithTrailingData covers a second object and
+// stray text), the bare array this PR's earlier heads wrote, and an empty candidate list. Acting
+// on the part it can read would judge siblings on a list this pod was never sent whole.
 func TestRemoveFinishedWorkspacesRemovesNothingForAPayloadItCannotFullyRead(t *testing.T) {
 	future := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
 	valid := fmt.Sprintf(`{"notAfter":%q,"workspaces":[{"issue":"LEGION-100"}]}`, future)
@@ -191,8 +223,6 @@ func TestRemoveFinishedWorkspacesRemovesNothingForAPayloadItCannotFullyRead(t *t
 		{"an unknown top-level field", fmt.Sprintf(`{"notAfter":%q,"workspaces":[{"issue":"LEGION-100"}],"reason":"a later daemon's"}`, future), `does not decode as runtime.RemovableWorkspacesPayload, removing nothing: json: unknown field "reason"`},
 		{"an unknown field inside a candidate", fmt.Sprintf(`{"notAfter":%q,"workspaces":[{"issue":"LEGION-100","pinned":true}]}`, future), `does not decode as runtime.RemovableWorkspacesPayload, removing nothing: json: unknown field "pinned"`},
 		{"a bare array", `[{"issue":"LEGION-100"}]`, "does not decode as runtime.RemovableWorkspacesPayload, removing nothing: json: cannot unmarshal array"},
-		{"text after the object", valid + "xyz", "holds data after its JSON object, removing nothing"},
-		{"a second object after the first", valid + fmt.Sprintf(`{"notAfter":%q,"workspaces":[{"issue":"LEGION-101"}]}`, future), "holds data after its JSON object, removing nothing"},
 		{"a stray closing brace after the object", valid + "}", "holds data after its JSON object, removing nothing"},
 		{"an empty candidate list", fmt.Sprintf(`{"notAfter":%q,"workspaces":[]}`, future), "has no workspaces, removing nothing"},
 	} {
@@ -211,7 +241,7 @@ func TestRemoveFinishedWorkspacesRemovesNothingForAPayloadItCannotFullyRead(t *t
 			if !strings.Contains(output, tc.says) {
 				t.Errorf("stdout %q, want it to contain %q", output, tc.says)
 			}
-			if strings.Contains(output, "LEGION-100") || strings.Contains(output, "LEGION-101") {
+			if strings.Contains(output, "LEGION-100") {
 				t.Errorf("stdout %q names a candidate, want the pass to stop before reaching any", output)
 			}
 		})
@@ -676,6 +706,56 @@ func TestWorkspaceInitKeepsAChildWithAnUnpushedCommit(t *testing.T) {
 	}
 	if !strings.Contains(stdout, "kept LEGION-100's workspace") || !strings.Contains(stdout, commit) {
 		t.Errorf("stdout %q, want it to name LEGION-100 kept and commit %s", stdout, commit)
+	}
+}
+
+// No configuration a tree agent can write steers the push-safety check (dispatch://LEGION-583's
+// spec): every agent of the tree can write the shared clone, and jj migrates a legacy
+// .jj/workspace-config.toml it finds there into the config home of the next process that opens
+// the clone, the next pod's own. A revset alias planted there neither makes a child holding an
+// unpushed commit read as pushed (`empty()` = `all()` reads every commit as empty) nor fails the
+// next pod's provisioning (`remote_bookmarks()` = `all()` breaks jj's own builtin trunk(), which
+// calls it with arguments): the pod provisions, and the child is kept and named.
+func TestWorkspaceInitKeepsAnUnpushedChildDespiteARevsetAliasPlantedInTheSharedClone(t *testing.T) {
+	for _, tc := range []struct{ name, alias string }{
+		{"empty() read as every commit", `"empty()" = "all()"`},
+		{"remote_bookmarks() read as every commit", `"remote_bookmarks()" = "all()"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			v := newTreeVolume(t).withRemote(t)
+			v.fetch(t)
+			if code, _, stderr := runWorkspaceInitHere(v.args("LEGION-100")); code != 0 {
+				t.Fatalf("provision the unpushed child: exit %d, stderr %q", code, stderr)
+			}
+			unpushed := v.workspace("LEGION-100")
+			if err := os.WriteFile(filepath.Join(unpushed, "unpushed.txt"), []byte("never pushed\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			v.jj(t, "status", "-R", unpushed)
+			commit := v.jj(t, "log", "-r", "@", "--no-graph", "-T", "commit_id", "--ignore-working-copy", "--color=never", "-R", unpushed)
+
+			// A tree agent writes the legacy file; nothing opens the shared clone again before the
+			// next pod's provisioning, which starts from a config home of its own.
+			planted := filepath.Join(v.clone(), ".jj", "workspace-config.toml")
+			if err := os.WriteFile(planted, []byte("[revset-aliases]\n"+tc.alias+"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			fresh := t.TempDir()
+			t.Setenv("XDG_CONFIG_HOME", filepath.Join(fresh, "config"))
+			t.Setenv("JJ_CONFIG", filepath.Join(fresh, "no-user-config.toml"))
+
+			t.Setenv("LEGION_REMOVABLE_WORKSPACES", removableEnv(t, []runtime.RemovableWorkspace{{Issue: "LEGION-100"}}))
+			code, stdout, stderr := runWorkspaceInitHere(v.args("LEGION-200"))
+			if code != 0 {
+				t.Fatalf("provision LEGION-200 under the planted alias: exit %d, stderr %q", code, stderr)
+			}
+			if _, err := os.Stat(unpushed); err != nil {
+				t.Fatalf("LEGION-100's workspace was removed under the planted alias, want it kept: %v; stdout %q", err, stdout)
+			}
+			if !strings.Contains(stdout, "kept LEGION-100's workspace") || !strings.Contains(stdout, commit) {
+				t.Errorf("stdout %q, want it to name LEGION-100 kept and commit %s", stdout, commit)
+			}
+		})
 	}
 }
 

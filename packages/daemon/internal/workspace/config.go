@@ -6,8 +6,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -133,9 +135,13 @@ func (r execRunner) Run(ctx context.Context, command Command) (Result, error) {
 	}
 	args := command.Argv[1:]
 	if command.Argv[0] == "jj" {
-		// jj starts the git its configuration names, and a tree agent can set that: jj migrates a
-		// .jj/workspace-config.toml it finds in a working copy into the configuration it reads. A
-		// --config flag outranks every configuration file, so jj starts the git boot resolved.
+		if err := disarmLegacyConfig(jjWorkspaceRoot(command)); err != nil {
+			return Result{}, err
+		}
+		// jj starts the git its configuration names, and a tree agent can still set that where
+		// disarmLegacyConfig does not reach: on the tmux runtime a pane shares the config home jj
+		// keeps a repository's configuration in. A --config flag outranks every configuration
+		// file, so jj starts the git boot resolved.
 		git, ok := r.tools["git"]
 		if !ok {
 			return Result{}, errors.New("workspace command jj needs the git the daemon resolved at boot")
@@ -170,6 +176,94 @@ func (r execRunner) Run(ctx context.Context, command Command) (Result, error) {
 		result.TimedOut = errors.Is(bounded.Err(), context.DeadlineExceeded)
 	}
 	return result, nil
+}
+
+// disarmLegacyConfig removes each legacy configuration file jj would migrate when it opens the
+// workspace at root. jj (0.45, the worker image's) keeps a repository's and a workspace's own
+// configuration in the config home, under the id an id file inside `.jj` names, so nothing a tree
+// agent writes on the tree volume is read as configuration, with one exception: while the id
+// file cannot be read because it does not exist, jj migrates the legacy file beside it into the
+// config home and reads it from then on (lib/src/secure_config.rs, maybe_load_config and
+// maybe_migrate_legacy_config; automatic until jj 0.49). Those are a workspace's
+// `.jj/workspace-config.toml` beside `.jj/workspace-config-id`, and its repository's
+// `config.toml` beside `config-id`. Removing the legacy file in exactly that case leaves jj to
+// open the workspace as it would with no legacy file: with an empty configuration of its own,
+// never one a tree agent wrote. dispatch://LEGION-583 measured why it matters: a planted
+// `revset-aliases."empty()" = "all()"` made the removal pass read an unpushed commit as pushed,
+// and a planted `"remote_bookmarks()"` alias broke jj's own trunk() and so every provisioning
+// after it; a pod's config home is also the one the agent's own jj reads, so a migration during
+// workspace-init would hand the planted file to the agent too. The repository is resolved as
+// jj's DefaultWorkspaceLoader resolves it (repositoryDir). A root with no `.jj` directory is left
+// for jj to refuse, and a legacy file that cannot be removed fails the command, since jj would
+// read it.
+//
+// This holds against a file written at any time before the command runs. A tree agent writing
+// one in the instant between this check and jj's own read is outside what it closes, the trust
+// model RemoveFinished's push-safety check states: a hostile role already has every sibling
+// workspace on the volume to delete directly.
+func disarmLegacyConfig(root string) error {
+	if root == "" {
+		return nil
+	}
+	jjDir := filepath.Join(root, ".jj")
+	if info, err := os.Stat(jjDir); err != nil || !info.IsDir() {
+		return nil
+	}
+	legacy := map[string][2]string{jjDir: {"workspace-config-id", "workspace-config.toml"}}
+	if repo, ok := repositoryDir(jjDir); ok {
+		legacy[repo] = [2]string{"config-id", "config.toml"}
+	}
+	for dir, names := range legacy {
+		if _, err := os.Stat(filepath.Join(dir, names[0])); !errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		file := filepath.Join(dir, names[1])
+		if err := os.Remove(file); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("remove %s, which jj would migrate into the configuration it reads: %w", file, err)
+		}
+	}
+	return nil
+}
+
+// repositoryDir is the repository directory of the workspace whose `.jj` is jjDir, as jj's
+// DefaultWorkspaceLoader resolves it; false when jj could not resolve it either.
+func repositoryDir(jjDir string) (string, bool) {
+	repo := filepath.Join(jjDir, "repo")
+	info, err := os.Stat(repo)
+	if err != nil {
+		return "", false
+	}
+	if info.IsDir() {
+		return repo, true
+	}
+	pointer, err := os.ReadFile(repo)
+	if err != nil {
+		return "", false
+	}
+	target := string(pointer)
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(jjDir, target)
+	}
+	if info, err := os.Stat(target); err != nil || !info.IsDir() {
+		return "", false
+	}
+	return target, true
+}
+
+// jjWorkspaceRoot is the workspace a jj command opens: the value of its last -R (or
+// --repository) flag, else the directory it runs in, which every caller in this package names as
+// the workspace root itself.
+func jjWorkspaceRoot(command Command) string {
+	root := command.Dir
+	for i, arg := range command.Argv {
+		switch {
+		case (arg == "-R" || arg == "--repository") && i+1 < len(command.Argv):
+			root = command.Argv[i+1]
+		case strings.HasPrefix(arg, "--repository="):
+			root = strings.TrimPrefix(arg, "--repository=")
+		}
+	}
+	return root
 }
 
 // merge is base with each override entry replacing the entry of the same name, or appended.
