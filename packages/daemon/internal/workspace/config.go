@@ -22,13 +22,21 @@ import (
 // independently.
 const CommandTimeout = 5 * time.Minute
 
-// FetchLowSpeedLimit and FetchLowSpeedTime bound the fetch's clone's transfer rate through git's
-// own stall detector (GIT_HTTP_LOW_SPEED_LIMIT/GIT_HTTP_LOW_SPEED_TIME): git aborts a transfer
-// that stays below FetchLowSpeedLimit bytes/second for FetchLowSpeedTime straight, so a connection
-// that goes quiet dies within about a minute of stalling, independent of how long the transfer has
-// run.
+// FetchLowSpeedLimit and FetchLowSpeedTime bound the fetch's clone through git's own stall
+// detector (GIT_HTTP_LOW_SPEED_LIMIT/GIT_HTTP_LOW_SPEED_TIME): git aborts a transfer whose
+// throughput stays below FetchLowSpeedLimit bytes/second for FetchLowSpeedTime straight. The
+// limit is 1 B/s, as low as it goes, because a healthy clone can look exactly like a stall for
+// well over a minute before it starts: --quiet (the fetch's own clone) asks git for no progress
+// output, and while GitHub prepares a large repository's packfile it sends nothing but a 5-byte
+// keepalive every 5 seconds. Measured against a real large repository (chromium/chromium): a
+// 100 KiB/s floor aborted the clone at 63 s, before any pack byte arrived ("curl 28 Operation too
+// slow. Less than 102400 bytes/sec transferred the last 60 seconds"); the same clone with no
+// floor at all received its first pack byte at 114 s; a 1 B/s floor survived 122 s of preparation
+// across three runs. So a floor this low only ends a connection that has gone fully silent —
+// nothing at all, not even a keepalive, for a whole minute — and FetchTimeout alone bounds a
+// transfer that is merely slow.
 const (
-	FetchLowSpeedLimit = 100 * 1024 // 100 KiB/s
+	FetchLowSpeedLimit = 1 // 1 B/s
 	FetchLowSpeedTime  = 60 * time.Second
 )
 
@@ -41,10 +49,10 @@ var fetchLowSpeedEnvironment = []string{
 
 // FetchTimeout is the outer bound for the fetch's clone: long enough for a large repository's slow
 // but steadily progressing transfer to finish, while FetchLowSpeedLimit and FetchLowSpeedTime
-// (fetchLowSpeedEnvironment) kill a stalled transfer within about a minute of stalling, long
-// before this bound is ever reached. Every other provisioning command keeps CommandTimeout: this
-// widens the one command whose duration follows the repository's size and the network's speed,
-// not a fixed step in provisioning.
+// (fetchLowSpeedEnvironment) kill a connection that has gone fully silent within about a minute,
+// long before this bound is ever reached. Every other provisioning command keeps CommandTimeout:
+// this widens the one command whose duration follows the repository's size and the network's
+// speed, not a fixed step in provisioning.
 const FetchTimeout = 30 * time.Minute
 
 // Command is one process the provisioner runs, each bounded independently of every other: most

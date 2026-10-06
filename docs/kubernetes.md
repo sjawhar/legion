@@ -650,7 +650,7 @@ so no process that can read the token may touch the tree volume. The Go coordina
   (`GIT_HTTP_LOW_SPEED_LIMIT`/`GIT_HTTP_LOW_SPEED_TIME`, `workspace.FetchLowSpeedLimit`/
   `FetchLowSpeedTime`) set so a connection that goes quiet still dies within about a minute of
   stalling, rather than surviving on the wider bound. The daemon's own registration deadline (below,
-  "Liveness rules") carries a matching grace under Kubernetes, so this wider bound has room to run
+  "Liveness rules") carries a matching bound under Kubernetes, so this wider bound has room to run
   before the daemon would otherwise retire the pod for an agent that never registered.
 - **`workspace-init`** mounts the tree volume, the feed read-only, and the config home — never the
   Secret — and runs `legion workspace-init provision`: the shared clone's clone and fetch reach
@@ -1157,40 +1157,51 @@ The daemon probes a pod by reading it and consulting the worker stream's live re
 - `Pending` with the `workspace-fetch` or `workspace-init` init container **running** → **alive**,
   whatever the pod's age: the pod is provisioning its working copy (`workspace-fetch`'s one clone,
   bounded by its own `workspace.FetchTimeout` and git's own stall detector rather than
-  `slow_command_timeout_seconds`; `workspace-init`'s own commands, each up to
-  `slow_command_timeout_seconds`; or a wait behind another pod's lock on the shared clone), and a
-  live initialiser is a live process — as the tmux runtime's own in-process provisioning is. The
-  boot watchdog re-arms on it, bounded by its registration deadline
-  (`worker_boot_timeout_seconds × worker_boot_registration_deadline_intervals`, default 360 s): under
-  Kubernetes, the deadline carries an added grace of `workspace.FetchTimeout` plus the lock-wait
-  budget `LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS` is sized by (`sandbox.InitWaitSeconds`,
-  `internal/daemon/kubernetes.go`'s `registrationGrace`) until the shim's first hello, which can only
-  arrive once both init containers have finished: from there the daemon re-arms the base deadline
-  alone, the same one a tmux pane always ran under, since the grace has already done its job. A pod
-  that never says hello is retired at launch plus the base deadline plus the full grace, armed as
-  one bound; one that says hello and never registers is retired at hello plus the base deadline
-  alone. A tmux pane carries no grace to begin with, since it starts the agent at once with no
-  init phase. The runtime's own wait for a tree's other pods to finish initializing before this
-  one provisions (`awaitTreeInitialized`) is `workspace.FetchTimeout` plus the same lock-wait
-  budget: the same total the daemon tolerates an unhelloed sibling for, before its own hello ever
-  arrives, so a launch waiting on one is bounded the same way the daemon bounds that sibling up to
-  its own hello (giving up early would fail this pod's own launch instead of waiting out the slow
-  one) — not a guarantee against a sibling whose own deadline has since re-armed past hello, which
-  this wait does not separately track; in practice it does not need to, since a sibling still
-  counted as initializing here has by definition not reached its hello yet. The lock wait itself
+  `workspace.CommandTimeout`; `workspace-init`'s own commands, each up to `workspace.CommandTimeout`;
+  or a wait behind another pod's lock on the shared clone), and a live initialiser is a live
+  process — as the tmux runtime's own in-process provisioning is. The boot watchdog re-arms on it,
+  bounded by its registration deadline (`worker_boot_timeout_seconds ×
+  worker_boot_registration_deadline_intervals`, default 360 s, 6 min): under Kubernetes, the
+  deadline carries an added bound of `workspace.FetchTimeout` (30 min) plus the lock-wait budget
+  `LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS` is sized by (`sandbox.Runtime.ProvisionBound`; 8 min at
+  the defaults, so 38 min total) until the shim's first hello, which can only arrive once both
+  init containers have finished: from there the daemon re-arms the base deadline alone, the same
+  one a tmux pane always ran under, since the bound has already done its job. A pod that never
+  says hello is retired at launch plus the base deadline plus the full bound, armed as one (44 min
+  at the defaults); one that says hello and never registers is retired at hello plus the base
+  deadline alone (6 min from the hello). A tmux pane carries no bound to begin with, since it
+  starts the agent at once with no init phase.
+
+  The runtime's own wait for a tree's other pods to finish initializing before this one provisions
+  (`awaitTreeInitialized`, bounded by `treeWaitBound`) is the sibling's own full pre-hello deadline
+  — base plus `ProvisionBound`, the same sum the registration deadline above arms while a claim is
+  still launching — plus one more boot interval of headroom (46 min at the defaults): the same
+  relationship `LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS` always had to the registration deadline
+  alone (`ceil(boot) × (intervals + 1)` against `boot × intervals`), restored here against the now
+  wider bound. A launch waiting on a sibling therefore never gives up before the daemon's own
+  deadline for that sibling would, up to the sibling's own hello (this wait does not separately
+  track a sibling whose own deadline has since re-armed past hello; it does not need to, since a
+  sibling still counted as initializing here has by definition not reached its hello yet). Two
+  mechanisms together keep two pods from actually provisioning the shared clone at once: `lockTree`
+  holds the tree's launch turn only until the new pod is in the store, well before that pod's own
+  init finishes, so by itself it would let a third pod start initializing while a second one still
+  is; `awaitTreeInitialized` is what closes that gap, since no new pod is ever created while an
+  existing tree pod is still initializing. The lock wait itself
   (`LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS`, the `flock --timeout` `workspace-init` passes when
-  contending for another pod's hold on the shared clone) stays `sandbox.InitWaitSeconds` alone,
-  with no added `FetchTimeout`: in practice it almost never contends, since the runtime's own
-  `lockTree` already serializes a tree's pods through their whole init phase one at a time, so two
-  pods are never both inside `workspace-init`'s own provisioning step together; this wait is the
-  lock's own safety-net timeout for whatever can still race around that serialization, not a
-  budget matched against another pod's own remaining registration deadline
-  (a manual `legion workspace-init` without the variable waits 900 s);
+  contending for another pod's hold on the shared clone) stays sized by the same
+  `ceil(boot) × (intervals + 1)` lock-wait budget alone (`sandbox.Runtime`'s own
+  `initWaitSeconds`), with no added `FetchTimeout`: given the two mechanisms above, it almost
+  never actually contends, and is a safety net for whatever can still race around them, not a
+  budget matched against another pod's own remaining registration deadline (a manual `legion
+  workspace-init` without the variable waits 900 s);
 - `Pending` with the init container **terminated non-zero** → **dead (gone)**, its log tail quoted
   (`restartPolicy: Never` turns the pod `Failed` moments later);
-- otherwise `Pending` for longer than `worker_boot_timeout_seconds` (unscheduled, image pull, volume
-  mount) → **dead (gone)**, with the pod's events quoted; the boot watchdog's existing path retires it
-  and its stop deletes the pod;
+- `Pending`, unscheduled (`PodScheduled=False`), for longer than `worker_boot_timeout_seconds` →
+  **dead (gone)**, with the pod's events quoted; the boot watchdog's existing path retires it and
+  its stop deletes the pod. A pod already scheduled but stuck before either init container starts
+  — an image pull or a volume mount that never finishes — is not caught here: it stays **alive**
+  under the next rule, bounded only by the registration deadline above, the same as any other pod
+  still provisioning;
 - otherwise `Pending`, or `Running` — registered stream or not (a booting or redialing shim is not
   death; the boot watchdog decides) → **alive**;
 - phase `Unknown` → **unknown**;

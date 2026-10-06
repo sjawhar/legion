@@ -96,10 +96,6 @@ type overrides struct {
 	githubAPI string
 	// listen opens the API listener; nil is net.Listen.
 	listen func(network, address string) (net.Listener, error)
-	// supervised is told the supervision openSupervision built, once it has, so a test can inspect
-	// what reached its supervisor's Deps (its Timeouts, among them) without reaching into the
-	// daemon's own state over HTTP; nil does nothing.
-	supervised func(*supervision)
 }
 
 // Run is the daemon. It refuses what it cannot run on before it touches anything — the
@@ -223,9 +219,6 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 		workflow.stop()
 		st.Close()
 		return err
-	}
-	if o.supervised != nil {
-		o.supervised(s)
 	}
 	if plan.probe != nil {
 		if err := plan.probe(ctx, s.runtime); err != nil {
@@ -576,7 +569,6 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 		Timeouts: supervise.Timeouts{
 			Boot:                  cfg.WorkerBootTimeout,
 			RegistrationIntervals: cfg.WorkerBootRegistrationDeadlineIntervals,
-			RegistrationGrace:     registrationGrace(cfg),
 			RPC:                   cfg.WorkerRPCTimeout,
 			Probe:                 cfg.ProbeInterval,
 			Stop:                  cfg.WorkerStopTimeout,

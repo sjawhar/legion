@@ -325,21 +325,3 @@ func (t implementTokens) Token(ctx context.Context, owner string) (string, error
 	}
 	return lease.Token, nil
 }
-
-// registrationGrace is added atop the registration deadline's own Boot×RegistrationIntervals bound
-// for a Kubernetes launch, covering only the window before the shim's first hello (supervise's
-// helloed re-arms the deadline at Boot×RegistrationIntervals alone from there, since a pod can only
-// dial its hello once both init containers have finished): sandbox.GraceBound, the worst
-// legitimate total of this pod's own init phase, its workspace-fetch clone and whatever time it
-// can still spend waiting on another pod's flock both included. A pod's init containers
-// (workspace-fetch, workspace-init) are bounded by their own commands — the fetch's stall detector
-// and FetchTimeout, the per-command CommandTimeout, and the lock wait — never by the registration
-// deadline, which starts counting the moment the launch returns and would otherwise also have to
-// cover all of that before the agent's own container has even started. A tmux launch's pane
-// starts the agent at once, with no init phase, so it adds none.
-func registrationGrace(cfg config.Config) time.Duration {
-	if cfg.Runtime.Name != "kubernetes" {
-		return 0
-	}
-	return sandbox.GraceBound(cfg.WorkerBootTimeout, cfg.WorkerBootRegistrationDeadlineIntervals)
-}

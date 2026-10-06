@@ -21,7 +21,6 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
-	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
 // steps names each write as the relaunch sequence reads: "create sandbox", "suspend", "run",
@@ -258,15 +257,13 @@ func TestAPodOfATreeRunsOnlyOnceNoOtherIsInitializing(t *testing.T) {
 	}
 }
 
-// awaitTreeInitialized used to give up at initWaitSeconds alone (8 s in this rig's testOptions:
-// BootTimeout 2 s × (BootIntervals 3 + 1)) even though a sibling's workspace-fetch can legitimately
-// still be cloning well past that: the wait now runs workspace.FetchTimeout longer too, so a
-// sibling whose init outlasts the old 8 s bound, but finishes well inside the new one, is still
-// waited out rather than given up on (LEGION-585 round 3: the registration-deadline grace this
-// package's registrationGrace-sized bound gives a slow pod is worthless if every sibling launch
-// behind it fails first).
-func TestATreesLaunchWaitOutlastsInitWaitSecondsForAWorkspaceFetchStillCloning(t *testing.T) {
-	g := newRig(t, nil)
+// awaitTreeInitialized used to give up at the lock-wait budget alone even though a sibling's
+// workspace-fetch can legitimately still be cloning well past that: the wait now runs
+// ProvisionBound longer too, so a sibling whose init outlasts the old bound, but finishes well
+// inside the new one, is still waited out rather than given up on. Small BootTimeout/BootIntervals
+// (via withOptions) keep the old bound well under the 3 s this sleeps, so the test stays fast.
+func TestATreesLaunchWaitOutlastsTheOldLockWaitAloneForAWorkspaceFetchStillCloning(t *testing.T) {
+	g := newRig(t, nil, withOptions(func(o *Options) { o.BootTimeout = 300 * time.Millisecond; o.BootIntervals = 1 }))
 	g.autoStart.Store(false)
 	g.spawn(rootSpec(t))
 	root := SandboxName(rootToken)
@@ -278,12 +275,12 @@ func TestATreesLaunchWaitOutlastsInitWaitSecondsForAWorkspaceFetchStillCloning(t
 	worker := SandboxName(workerToken)
 	g.eventually("the worker's sandbox", func() bool { return g.sandbox(worker) != nil })
 
-	// Past the old 8 s bound, with the root's workspace-init still running: the worker's launch
-	// must not have given up early.
-	time.Sleep(10 * time.Second)
+	// Past the old lock-wait-alone bound (2 s here), with the root's workspace-init still
+	// running: the worker's launch must not have given up early.
+	time.Sleep(3 * time.Second)
 	select {
 	case err := <-done:
-		t.Fatalf("the worker's launch finished (%v) before the root's workspace-init did, past the old 8s bound alone — it gave up early", err)
+		t.Fatalf("the worker's launch finished (%v) before the root's workspace-init did, past the old lock-wait-alone bound — it gave up early", err)
 	default:
 	}
 
@@ -298,16 +295,33 @@ func TestATreesLaunchWaitOutlastsInitWaitSecondsForAWorkspaceFetchStillCloning(t
 	}
 }
 
-// The real-time test above proves the wait outlasts the old 8 s bound; it cannot wait out the
-// full 30-minute+8 s bound to prove the new one is exact (neither initWaitSeconds+3s nor
-// workspace.FetchTimeout alone would fail it — both still outlast the old bound by the 10 s it
-// sleeps). Assert treeInitBound's computed value directly instead, against this rig's own
-// testOptions (BootTimeout 2 s, BootIntervals 3).
-func TestTheTreeInitBoundIsFetchTimeoutPlusTheLockWaitBudgetExactly(t *testing.T) {
+// The real-time test above proves the wait outlasts the old lock-wait-alone bound; it cannot wait
+// out the real ~30-minute bound to prove ProvisionBound's own value is exact. Pin it against a
+// literal instead, for this rig's own testOptions (BootTimeout 2 s, BootIntervals 3): the lock
+// wait is ceil(2s)×(3+1) = 8s, plus workspace.FetchTimeout (30m).
+func TestProvisionBoundIsFetchTimeoutPlusTheLockWaitBudgetExactly(t *testing.T) {
 	g := newRig(t, nil)
-	want := workspace.FetchTimeout + InitWaitSeconds(2*time.Second, 3)
-	if got := g.r.treeInitBound(); got != want {
-		t.Fatalf("treeInitBound = %s, want %s", got, want)
+	want := 30*time.Minute + 8*time.Second
+	if got := g.r.ProvisionBound(); got != want {
+		t.Fatalf("ProvisionBound = %s, want %s", got, want)
+	}
+}
+
+// Before this PR the relation was deliberately tree-wait > registration-deadline tolerance (the
+// lock wait, ceil(boot)×(intervals+1), against the base deadline alone, boot×intervals): a tree's
+// launch wait must never give up on a sibling before the daemon's own deadline for that sibling
+// would. ProvisionBound widened the daemon's own tolerance for an unhelloed sibling; the tree wait
+// must track it, not fall behind it.
+func TestTheTreeWaitNeverGivesUpBeforeTheSiblingsOwnRegistrationDeadlineWould(t *testing.T) {
+	g := newRig(t, nil)
+	siblingDeadline := g.r.bootTimeout*time.Duration(g.r.bootIntervals) + g.r.ProvisionBound()
+	if got := g.r.treeWaitBound(); got <= siblingDeadline {
+		t.Fatalf("treeWaitBound = %s, want more than the sibling's own registration deadline %s", got, siblingDeadline)
+	}
+	// Pinned to a literal too: base (2s×3=6s) + ProvisionBound (30m8s) + one more boot interval
+	// (2s) = 30m16s.
+	if want := 30*time.Minute + 16*time.Second; g.r.treeWaitBound() != want {
+		t.Fatalf("treeWaitBound = %s, want %s", g.r.treeWaitBound(), want)
 	}
 }
 

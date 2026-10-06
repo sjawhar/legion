@@ -598,33 +598,24 @@ func (r *Runtime) initEnvironment(l launch) []corev1.EnvVar {
 	return append(env, xdgEnvironment()...)
 }
 
-// InitWaitSeconds bounds workspace-init provision's own wait to acquire another pod's lock on the
+// initWaitSeconds bounds workspace-init provision's own wait to acquire another pod's lock on the
 // shared clone (`flock --timeout`, LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS): ceil(boot timeout) ×
-// (intervals + 1). In practice this almost never contends: lockTree (relaunch.go) already
-// serializes a tree's pods through their whole init phase one at a time, so two pods are never
-// both inside workspace-init's own provisioning step together. This wait is the lock's own
-// safety-net timeout for whatever can still race around that serialization (a pod recreated
-// outside the normal relaunch flow), not a budget matched against another pod's own remaining
-// registration deadline, which can still hold anywhere from none of its grace left to nearly all
-// of it. awaitTreeInitialized (relaunch.go, treeInitBound) and the daemon's registration-deadline
-// grace (internal/daemon/kubernetes.go's registrationGrace) both need a wider bound than this
-// alone, since each waits out (or tolerates) a sibling pod's whole init phase, its own
-// workspace-fetch clone included: both call GraceBound, which adds workspace.FetchTimeout on top
-// of this same value, rather than each computing that sum separately.
-func InitWaitSeconds(bootTimeout time.Duration, intervals int) time.Duration {
-	return time.Duration(math.Ceil(bootTimeout.Seconds())) * time.Duration(intervals+1) * time.Second
-}
-
-// GraceBound is the worst legitimate total of a sibling pod's whole init phase: InitWaitSeconds's
-// lock-wait budget plus workspace.FetchTimeout, the fetch's own clone bound. The one place this
-// sum is computed, so treeInitBound and registrationGrace can never silently desync from each
-// other.
-func GraceBound(bootTimeout time.Duration, intervals int) time.Duration {
-	return workspace.FetchTimeout + InitWaitSeconds(bootTimeout, intervals)
-}
-
+// (intervals + 1). Under gVisor a pod's flock never reaches another pod, so what actually keeps
+// two pods from provisioning the shared clone at once is awaitTreeInitialized (relaunch.go): a
+// new pod is never created while an existing tree pod is still initializing. lockTree itself
+// holds the launch turn only until the new pod is in the store (relaunch.go, awaitNewPod) — well
+// before that pod's own init finishes — so this wait is a safety net for whatever can still race
+// around that ordering (a pod recreated outside the normal relaunch flow), not a budget this
+// package expects to actually exhaust.
 func (r *Runtime) initWaitSeconds() int64 {
-	return int64(InitWaitSeconds(r.bootTimeout, r.bootIntervals).Seconds())
+	return int64(math.Ceil(r.bootTimeout.Seconds())) * int64(r.bootIntervals+1)
+}
+
+// ProvisionBound satisfies runtime.Runtime: workspace.FetchTimeout, the fetch's own clone bound,
+// plus this same lock-wait budget, for whatever time a provisioning pod can still spend waiting on
+// another pod's flock before it even starts its own clone.
+func (r *Runtime) ProvisionBound() time.Duration {
+	return workspace.FetchTimeout + time.Duration(r.initWaitSeconds())*time.Second
 }
 
 // mainEnvironment is the pane contract with a pod's values (decision 10): the variables every

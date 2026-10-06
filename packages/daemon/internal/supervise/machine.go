@@ -166,15 +166,6 @@ type Timeouts struct {
 	// RegistrationIntervals is how many boot intervals a live process gets to register before it
 	// is retired (worker_boot_registration_deadline_intervals).
 	RegistrationIntervals int
-	// RegistrationGrace is added atop Boot×RegistrationIntervals for the registration deadline
-	// armBoot sets at launch, covering only the window before the shim's first hello: zero for a
-	// launch whose process starts its agent at once (a tmux pane), and the Kubernetes runtime's
-	// init-container budget for a launch whose pod runs provisioning before its agent's own
-	// container ever starts (internal/daemon/kubernetes.go's registrationGrace). The first hello
-	// (helloed) re-arms the deadline at Boot×RegistrationIntervals alone, with no grace: a pod can
-	// only dial it once both init containers have finished, so from there the deadline that
-	// watches for the agent's own registration is the same one a tmux pane always ran under.
-	RegistrationGrace time.Duration
 	// RPC bounds a prompt's acknowledgement and, after it, the wait for the turn it should start
 	// (worker_rpc_timeout_seconds).
 	RPC time.Duration
@@ -363,14 +354,8 @@ func NewMachine(ctx context.Context, deps Deps, c Claim) (*Machine, error) {
 	}
 	m.idle = sync.NewCond(&m.mu)
 	switch c.State {
-	case StateLaunching:
+	case StateLaunching, StateShimConnected:
 		m.armBoot()
-	case StateShimConnected:
-		// The hello that reached StateShimConnected already re-armed the registration deadline at
-		// its base bound before this restart (helloed, table.go): restoring must not bring the
-		// grace back, or a pod whose agent already said hello once would get it twice.
-		m.arm(TimerBoot, m.deps.Timeouts.Boot, "")
-		m.armRegistration(0)
 	case StateReady, StateIdle:
 		m.askFirst = c.Pending != nil && c.Pending.ConfirmedAt.IsZero()
 	case StateWorking:
@@ -844,14 +829,21 @@ func nothing(context.Context) error { return nil }
 
 func (m *Machine) armBoot() {
 	m.arm(TimerBoot, m.deps.Timeouts.Boot, "")
-	m.armRegistration(m.deps.Timeouts.RegistrationGrace)
+	m.armRegistration()
 }
 
-// armRegistration arms the registration deadline at its base Boot×RegistrationIntervals bound
-// plus grace: armBoot's own call (the launch's own RegistrationGrace) and every re-arm that drops
-// the grace once it is no longer needed (helloed's hello, and NewMachine's restore of a claim
-// already past its hello) share this one formula, rather than each writing it out separately.
-func (m *Machine) armRegistration(grace time.Duration) {
+// armRegistration arms the registration deadline at its base Boot×RegistrationIntervals bound,
+// plus the runtime's own ProvisionBound while the claim is still StateLaunching: a pod that has
+// not said hello yet may still be provisioning. Once the claim is StateShimConnected — the state
+// both a fresh hello (helloed) and a restored claim past its hello (NewMachine) arm this from —
+// the budget that covered provisioning has already done its job, and the deadline that watches
+// for the agent's own registration is the same one a tmux launch, which carries no provisioning
+// bound at all, always ran under.
+func (m *Machine) armRegistration() {
+	grace := time.Duration(0)
+	if m.claim.State == StateLaunching {
+		grace = m.deps.Runtime.ProvisionBound()
+	}
 	m.arm(TimerRegistration, m.deps.Timeouts.Boot*time.Duration(m.deps.Timeouts.RegistrationIntervals)+grace, "")
 }
 

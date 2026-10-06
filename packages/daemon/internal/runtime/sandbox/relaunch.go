@@ -364,12 +364,16 @@ func (r *Runtime) lockTree(ctx context.Context, tree string) (func(), error) {
 	}
 }
 
-// treeInitBound is awaitTreeInitialized's budget: GraceBound, the worst legitimate total of a
-// sibling's init phase — never workspace-init's lock wait alone, which a sibling's fetch can
-// still be running well past. A named function so a test can assert its exact value without
-// waiting it out.
-func (r *Runtime) treeInitBound() time.Duration {
-	return GraceBound(r.bootTimeout, r.bootIntervals)
+// treeWaitBound is awaitTreeInitialized's budget: the sibling's own full pre-hello registration
+// deadline — bootTimeout×bootIntervals plus ProvisionBound, the same sum the daemon's
+// registration deadline arms while a claim is still launching — plus one more boot interval of
+// headroom, the same relationship workspace-init's own lock wait always had to the registration
+// deadline alone (ceil(boot)×(intervals+1) against boot×intervals). A tree's launch wait must
+// never give up on a sibling before the daemon's own deadline for that sibling would; it is a
+// named function so a test can assert that invariant, and its exact value, without waiting it
+// out.
+func (r *Runtime) treeWaitBound() time.Duration {
+	return r.bootTimeout*time.Duration(r.bootIntervals) + r.ProvisionBound() + r.bootTimeout
 }
 
 // awaitTreeInitialized waits until no other pod of l's tree is initializing: every tree pod's
@@ -377,9 +381,9 @@ func (r *Runtime) treeInitBound() time.Duration {
 // gVisor its flock does not reach past its own pod (each sandbox keeps gofer file locks to
 // itself), so the runtime, through which every launch goes, is what keeps two of them from
 // provisioning at once. A pod counts as initializing from its start until workspace-init ends, its
-// workspace-fetch included. The wait is bounded by treeInitBound.
+// workspace-fetch included. The wait is bounded by treeWaitBound.
 func (r *Runtime) awaitTreeInitialized(ctx context.Context, l launch) error {
-	return r.await(ctx, r.treeInitBound(), "the other pods of tree "+l.spec.Tree+" to finish workspace-init", func() (bool, error) {
+	return r.await(ctx, r.treeWaitBound(), "the other pods of tree "+l.spec.Tree+" to finish workspace-init", func() (bool, error) {
 		for _, pod := range r.treePods(l) {
 			if initializing(pod) {
 				return false, nil
