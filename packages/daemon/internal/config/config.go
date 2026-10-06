@@ -42,13 +42,19 @@ type Runtime struct {
 // Config is the daemon's settled configuration: the file, the environment, and the defaults
 // resolved into the values the daemon runs on.
 type Config struct {
-	Project      string
-	Port         int
-	Bind         string
-	PostgresDSN  string
-	StateDir     string
-	Runtime      Runtime
-	AdmissionCap int
+	Project string
+	Port    int
+	Bind    string
+	// AdvertiseHost is `advertise_host`: the host every pod's shim dials the worker stream at in
+	// Bind's place, so Bind can be the unspecified address a daemon running as a pod listens on; ""
+	// (the default) has pods dial Bind. Only runtime: kubernetes accepts it, and readAdvertiseHost
+	// holds it to an IP address or a DNS name. `daemon_url` names the pod-facing API address on its
+	// own.
+	AdvertiseHost string
+	PostgresDSN   string
+	StateDir      string
+	Runtime       Runtime
+	AdmissionCap  int
 
 	// DaemonURL is the API address every pane is told (`LEGION_DAEMON_URL`), with no trailing
 	// slash; the loopback address on Port unless the file names another.
@@ -205,6 +211,7 @@ type fileConfig struct {
 	Project           *string
 	Port              *int
 	Bind              *string
+	AdvertiseHost     *string
 	PostgresDSN       *string
 	StateDir          *string
 	AdmissionCap      *int
@@ -307,6 +314,8 @@ func readKeys(root *yaml.Node) (fileConfig, error) {
 			file.Project, err = readString(value, key)
 		case "bind":
 			file.Bind, err = readString(value, key)
+		case "advertise_host":
+			file.AdvertiseHost, err = readAdvertiseHost(value, key)
 		case "postgres_dsn":
 			file.PostgresDSN, err = readString(value, key)
 		case "state_dir":
@@ -780,6 +789,12 @@ func resolve(file fileConfig, env func(string) string, configDir string) (Config
 	}
 	if strings.TrimSpace(cfg.Bind) == "" {
 		return Config{}, errors.New("bind must not be empty")
+	}
+	if file.AdvertiseHost != nil {
+		if file.Kubernetes == nil {
+			return Config{}, errors.New("advertise_host is not used when runtime is tmux: every pane dials the daemon's own unix socket; remove advertise_host")
+		}
+		cfg.AdvertiseHost = *file.AdvertiseHost
 	}
 
 	if file.Kubernetes != nil {

@@ -358,9 +358,10 @@ runtime:
       env: { PI_CONFIG_FILES: /etc/legion-operator/overlay.yml }
       volumes: [...]
       volume_mounts: [...]
-bind: <the daemon host's own address>   # pods dial tcp://<bind>:<worker_stream_port>
+bind: <the daemon host's own address, or 0.0.0.0 once advertise_host names one>
+advertise_host: <optional: a stable Service name, e.g. legion-daemon-<project>.<namespace>.svc, every pod dials instead of bind, at worker_stream_port>
 worker_stream_port: 13371
-daemon_url: http://<the daemon host's own address>:13370
+daemon_url: http://<the address pods reach the daemon at>:13370
 ```
 
 `packages/daemon/internal/config/kubernetes.go` reads the block and refuses, naming the key:
@@ -383,12 +384,21 @@ proofs run on the example, each with its own copy of its ConfigMap.
 
 Under `runtime: kubernetes` it also requires `daemon_url`, `envoy_url`, `nats_urls`,
 `envoy_token_file`, `operator_token_file`, `dispatch_url`, `github_apps` and `projects`. It refuses
-`omp_invocation` and `omp_launch_prefix`: every pod runs the worker image's Oh My Pi. Every address a pod is handed must be one a pod can reach, so
-`bind`, `daemon_url`, `envoy_url`, `dispatch_url` and each `nats_urls` entry may be neither loopback
-nor the unspecified address. `legion start --check-config` runs all of it without starting the
-daemon, writing a file or running a key command, and then every refusal boot makes from the files
-and the environment before its first write, in boot's words: the operator, Envoy and Dispatch
-bearers' files, the NATS nkey seed, the instructions file, and the runtime's own
+`omp_invocation` and `omp_launch_prefix`: every pod runs the worker image's Oh My Pi. Every
+address a pod is handed must be one a pod can reach, so `daemon_url`, `envoy_url`, `dispatch_url`
+and each `nats_urls` entry may be neither loopback nor the unspecified address, and neither may the
+worker-stream host a pod dials: `advertise_host` when the file sets one, `bind` otherwise.
+`advertise_host` is an IP address or a DNS name, the host alone, and only `runtime: kubernetes`
+accepts it. A pod's own IP changes on every restart, so a daemon running inside the cluster binds
+`0.0.0.0` and lets `advertise_host` name the Service DNS name that reaches whichever pod is live.
+Pods dial it at the port the worker stream listens on, so the Service exposes `worker_stream_port`
+as that same port number. A daemon on a fixed host (a devbox or a VM) leaves `advertise_host` unset
+and binds that host's own address, which pods then dial. A loopback `bind` is refused either way: a
+listener bound only to loopback answers no Service and no pod. `legion start --check-config` runs
+all of it without starting the daemon, writing a file or running a key command, and then every
+refusal boot makes from the files and the environment before its first write, in boot's words: the
+operator, Envoy and Dispatch bearers' files, the NATS nkey seed, the instructions file, and the
+runtime's own
 reads (the kubeconfig and every value's translation; under tmux, the OMP invocation, through `mise
 where` when it names a `mise` tool, and the host's `gh`, `git` and `jj`). What it does not do is
 what boot writes or runs: the state directory, secretsd's provider keys, the plugin gate and the
@@ -558,7 +568,7 @@ main container:
 2. `workspace-init` provisions the tree volume's shared clone and the issue's jj workspace from the
    read-only feed. The workspace starts at the issue's branch, `legion/<KEY>`, which the daemon
    created on GitHub at `main` before the issue's architect or planner started.
-3. `worker` runs `legion worker-shim --connect tcp://<bind>:<worker_stream_port>
+3. `worker` runs `legion worker-shim --connect tcp://<advertise_host, or bind with none set>:<worker_stream_port>
    --boot-token-file …` with Oh My Pi under it.
 
 The tree volume is the root Sandbox's `volumeClaimTemplates` entry, and each worker Sandbox
@@ -775,9 +785,12 @@ reads the same `runtime.kubernetes` key with different rules, and refuses the ex
 written: its runtime selects the Legion pool itself, so `scheduling.node_selector` may not set
 `legion.dev/pool`; `resources` is keyed by role, with no `role_profiles`; `storage_class` is
 required, and a `gateway` block is refused as removed (LEGION-270: a pod's model route is the
-operator's `pod` below); `bind` must be an address pods reach, never `0.0.0.0` or loopback, since every pod
-dials the worker stream at `tcp://<bind>:<worker_stream_port>`; and no Legion URL a pod is handed
-(`daemon_url`, `envoy_url`, `dispatch_url`, each `nats_urls` entry) may name a loopback or
+operator's `pod` below); every pod dials the worker stream at `tcp://<advertise_host, or bind with
+none set>:<worker_stream_port>`, so that address must be one pods reach, never `0.0.0.0` or
+loopback — `bind` itself may be `0.0.0.0` only once `advertise_host` names the address instead, so
+a daemon whose own pod restarts onto a new IP can still bind every interface and be reached through
+its Service; and no Legion URL a pod is handed (`daemon_url`, `envoy_url`, `dispatch_url`, each
+`nats_urls` entry) may name a loopback or
 unspecified host (`packages/daemon/internal/config/kubernetes.go`). It also reads
 `runtime.kubernetes.pod` — `env`, `volumes` (each one `secret`, `config_map`, or `projected`
 source), `volume_mounts` (read-only unless `read_only: false`), and `service_account` — which it
