@@ -516,27 +516,33 @@ func TestSecretAnEmptyValueAtATerminalIsAUsageError(t *testing.T) {
 
 // TestSecretAValueOfMoreThanOneLineAtATerminalIsRefused: when the reader answers that more than one
 // line was entered (a paste; TestPromptRefusesAPasteOfMoreThanOneLineAndLeavesNothingForTheShell),
-// create and set exit 2, write nothing, and say to pipe the value in.
+// create and set exit 2, write nothing, and name the command that pipes the value in: the form as
+// the person ran it, --profile included and shell-quoted, so it signs in the way they chose.
 func TestSecretAValueOfMoreThanOneLineAtATerminalIsRefused(t *testing.T) {
-	for _, args := range [][]string{{"create", "NEW_KEY", "--owner", "me", "--tier", "agent"}, {"set", "HELD_KEY"}} {
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"create", "NEW_KEY", "--owner", "me", "--tier", "agent"}, "agent-secrets secret create NEW_KEY --owner me --tier agent < FILE"},
+		{[]string{"set", "HELD_KEY"}, "agent-secrets secret set HELD_KEY < FILE"},
+		{[]string{"create", "NEW_KEY", "--owner", "shared", "--tier", "human", "--profile", "work"}, "agent-secrets secret create NEW_KEY --owner shared --tier human --profile work < FILE"},
+		{[]string{"set", "HELD_KEY", "--profile", "ada's work"}, `agent-secrets secret set HELD_KEY --profile 'ada'\''s work' < FILE`},
+	} {
 		local := secrets.NewLocal(policytest.Secret("HELD_KEY", "ada@example.com", policy.TierAgent, "v1"))
 		startSecretBroker(t, servedBy(local))
 		useAWS(t, local, testAccount, adaSignIn)
 		useTerminal(t)
 		readHidden = func(int) ([]byte, error) { return nil, errMoreThanOneLine }
-		_, stderr, code := runSecret(args...)
-		want := "a value of more than one line must be piped in: agent-secrets secret set " + args[1] + " < FILE"
-		if args[0] == "create" {
-			want = "a value of more than one line must be piped in: agent-secrets secret create " + args[1] + " --owner me --tier agent < FILE"
-		}
+		_, stderr, code := runSecret(tc.args...)
+		want := "a value of more than one line must be piped in: " + tc.want
 		if code != exitUsageError || !strings.Contains(stderr, want) {
-			t.Fatalf("%v: exit %d, stderr %q; want %d naming %q", args, code, stderr, exitUsageError, want)
+			t.Fatalf("%v: exit %d, stderr %q; want %d naming %q", tc.args, code, stderr, exitUsageError, want)
 		}
 		if v := valueOf(t, local, "HELD_KEY"); v != "v1" {
-			t.Fatalf("%v: HELD_KEY = %q, want v1 unchanged", args, v)
+			t.Fatalf("%v: HELD_KEY = %q, want v1 unchanged", tc.args, v)
 		}
 		if _, err := local.DescribeSecret(context.Background(), &secretsmanager.DescribeSecretInput{SecretId: aws.String(policytest.ID("NEW_KEY"))}); err == nil {
-			t.Fatalf("%v created NEW_KEY", args)
+			t.Fatalf("%v created NEW_KEY", tc.args)
 		}
 	}
 }

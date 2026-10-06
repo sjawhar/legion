@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -161,20 +162,45 @@ var readHidden = readHiddenAtTerminal
 // reach the shell once the form exits.
 var errMoreThanOneLine = errors.New("more than one line was entered at the prompt")
 
+// shellUnsafe is any character outside the set a POSIX shell reads literally in a bare word.
+var shellUnsafe = regexp.MustCompile(`[^A-Za-z0-9_./:@-]`)
+
+// shellWord is s as one shell word: bare when every character is literal, else single-quoted with
+// each `'` closed, escaped and reopened.
+func shellWord(s string) string {
+	if s != "" && !shellUnsafe.MatchString(s) {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// pipeCommand is the command line a form names for piping a value in: agent-secrets, then words,
+// then --profile as the person gave it, each shell-quoted, so running it signs in the same way.
+func pipeCommand(profile string, words ...string) string {
+	if profile != "" {
+		words = append(words, "--profile", profile)
+	}
+	quoted := make([]string, len(words))
+	for i, w := range words {
+		quoted[i] = shellWord(w)
+	}
+	return "agent-secrets " + strings.Join(quoted, " ")
+}
+
 // readSecretValue reads the value of the secret name for a form. At a terminal it prompts on
 // stderr and reads one line with echo off (readHidden), as `gh secret set` does, so the value never
-// shows on the screen; a value of more than one line is refused there, naming pipeCommand, the
-// form's own command line with the value piped in. Otherwise it reads all of secretStdin, less one
-// trailing newline, so `echo` and a file ending in a newline give the value without one. An empty
-// value is a usage error either way.
-func readSecretValue(name, pipeCommand string, stderr io.Writer) (string, error) {
+// shows on the screen; a value of more than one line is refused there, naming pipeTo, the form's
+// own command line (pipeCommand) with the value piped in. Otherwise it reads all of secretStdin,
+// less one trailing newline, so `echo` and a file ending in a newline give the value without one.
+// An empty value is a usage error either way.
+func readSecretValue(name, pipeTo string, stderr io.Writer) (string, error) {
 	if fd, ok := stdinTerminal(secretStdin); ok {
 		fmt.Fprintf(stderr, "Value for %s: ", name)
 		line, err := readHidden(fd)
 		// Echo is off, so the line ending the person typed never reached the screen.
 		fmt.Fprintln(stderr)
 		if errors.Is(err, errMoreThanOneLine) {
-			return "", usageErr{fmt.Errorf("a value of more than one line must be piped in: %s < FILE", pipeCommand)}
+			return "", usageErr{fmt.Errorf("a value of more than one line must be piped in: %s < FILE", pipeTo)}
 		}
 		if err != nil {
 			return "", fmt.Errorf("read the value at the terminal: %w", err)
@@ -536,7 +562,7 @@ func cmdSecretCreate(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return secretFail(stderr, form, err)
 	}
-	value, err := readSecretValue(name, fmt.Sprintf("agent-secrets secret create %s --owner %s --tier %s", name, *owner, *tier), stderr)
+	value, err := readSecretValue(name, pipeCommand(*profile, "secret", "create", name, "--owner", *owner, "--tier", *tier), stderr)
 	if err != nil {
 		return secretFail(stderr, form, err)
 	}
@@ -575,7 +601,7 @@ func cmdSecretSet(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return secretFail(stderr, form, err)
 	}
-	value, err := readSecretValue(name, "agent-secrets secret set "+name, stderr)
+	value, err := readSecretValue(name, pipeCommand(*profile, "secret", "set", name), stderr)
 	if err != nil {
 		return secretFail(stderr, form, err)
 	}
