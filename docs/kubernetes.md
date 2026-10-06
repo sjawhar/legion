@@ -466,16 +466,80 @@ at error as `NATS refused the daemon a permission: its NATS user lacks that gran
 handler would only write it to stderr, outside the daemon's log. Every other asynchronous error is
 logged at warn with the `subject` of the subscription it names, a dropped connection at warn as
 `NATS connection lost` with its `error`, the reconnect at info as `NATS connection restored`
-with its `server`, and a terminal close (a fatal server `-ERR`, or reconnects run out) at error,
-once, as `NATS connection closed` with its `error`; the workflow's `workflow intake stopped` error
-then names the same cause as the connection's last error.
+with its `server`, and a terminal close (a fatal server `-ERR`) at error, once, as `NATS
+connection closed` with its `error`. Reconnects never run out: the connection never drops a
+server from its pool for having failed too many times, so an outage mid-run shows as `NATS
+connection lost` and then, once NATS answers again, `NATS connection restored` — never a close —
+at nats.go's own default 2 s reconnect wait. A server that keeps refusing to reconnect for any
+reason short of the two shapes that do close it — an unrecognized server `-ERR`, or the same
+authorization error twice in a row (nats.go's own terminal-close rules) — never closes the
+connection and so never logs either of those two lines again: a repeating handshake failure, say
+a server that accepts the TCP connection but never completes the protocol handshake, retries
+silently behind the one `NATS connection lost` line. A separate warn, `NATS has not
+reconnected`, covers that gap: first after 3 minutes down, then every 3 minutes after that while
+the connection stays down, naming the downtime so far and the connection's own last-seen error —
+usually empty during a plain refused dial, since nats.go clears it on every failed attempt, and naming the failure's
+own cause while a handshake keeps failing, since nats.go leaves that one in place until the
+connection succeeds. At boot an unreachable NATS or Dispatch delays the boot instead of exiting,
+retried one second doubling to one minute, forever, logged at warn as `boot probe failed
+transiently; waiting to run it again` with its `probe` (naming which), `attempt`, `retryIn` and
+`detail`.
+
+A malformed seed refuses the boot immediately at startup, before any network connection is
+attempted. A NATS authorization violation at connect time is the same: the server said no
+synchronously, and the boot refuses it at once. An EOF during the NATS handshake also refuses at
+once — the connection simply closed, and nats.go returns that synchronously too — though no crash
+in the audited journal took this shape, so refusing rather than waiting here is a judgment call.
+
+A NATS permission violation on a JetStream call (a refused consumer or stream grant) is reported
+asynchronously: the server tells the connection of it well before the blocked call's own attempt
+bound runs out, but the blocked call itself does not return early on that report — it waits out
+its own bound exactly as a call that will never get an answer does. Only once that bound runs
+out, at 30 seconds, does the boot learn of the violation at all, by folding the connection's own
+last-reported error into the one the blocked call returns, so it recognizes the refusal by name
+and refuses outright. A clustered JetStream that is itself unavailable — every server reachable,
+none of them answering the API request — surfaces the exact same way at the exact same
+30-second bound: a bare request timeout, nothing in its own text to say why, nothing to fold in.
+The boot cannot tell that shape from a permission violation whose report never arrived — the two
+take the same 30 seconds either way, so timing offers no way to distinguish them — and refuses
+both rather than waiting on either.
+
+A Postgres failure while reconciling admission is not covered by either wait: an error Postgres
+itself returns exits as soon as it comes back, and only Postgres accepting a connection and then
+never answering waits out the same 30-second bound before the boot gives up.
+
+Several shapes an operator should know wait forever rather than exit, none of them obviously
+"network trouble" on their face: a Dispatch 401 or 403 (a bad or revoked bearer token); a NATS or
+Dispatch host that does not resolve (a typo in `nats_urls` or `dispatch_url`'s hostname); a
+non-Dispatch 4xx, such as an HTML 404 from a `dispatch_url` whose path is wrong but whose host
+answers; and a TLS failure that is not certificate verification (a protocol mismatch, a stalled
+handshake). Each of these waits silently: no line is logged beyond the generic `boot probe failed
+transiently` warn above, though its own `detail` carries the error's own text (`UNAUTHORIZED:
+...`, `no such host`), not a separate line calling out the credential or configuration problem by
+name.
+
+A Dispatch 401 or 403 is the one with an operational consequence worth naming plainly: the daemon
+does not exit on one, so nothing re-reads `dispatch_token_file` until an operator restarts it by
+hand to pick up a corrected or renewed token.
+
+With several `nats_urls`, or a clustered NATS whose advertised addresses this daemon cannot reach,
+an authorization violation on one server can surface as a dial failure, or the generic "nats: no
+servers available for connection" answer, from a different server nats.go tries next, so the boot
+waits and the logged `detail` may never name the authorization error at all (LEGION-580).
+
+While the readiness gate waits, callers outside the daemon see it as still booting, not as down:
+the API port is already bound by this point (the same as during the image probe, both before this
+gate), so it accepts a connection but serves nothing until the gate passes, and `legion status`
+reports the daemon's PID alive but not yet answering. A pane's own `bash` calls (each one mints
+its own grant first), `legion credential`, `gh`, `handoff complete` and `controller start` all
+wait on that same API, so none of them succeeds until the daemon actually serves.
 
 Rollout order for the server's `legion-daemon` user: the server admits
 `legion-daemon` (its public key applied) with the daemon's grants first; then its seed is stored,
-every daemon gets it and restarts, and each boot line must name the daemon's own user: the
-daemon's `legion daemon connects to NATS` line reads `paneUser=false` (#1494). Only then is the
-`legion-pane` seed written. A clean boot line proves the user, not every grant: the check before
-the pane seed is written also has each daemon consume a Dispatch and a GitHub event with no error
+every daemon gets it and restarts, and its `legion daemon connects to NATS` line must read
+`paneUser=false` (#1494). Only then is the `legion-pane` seed written. A clean boot line
+proves the user, not every grant: the check before the pane seed is written also has each daemon
+consume a Dispatch and a GitHub event with no error
 line, and searches each daemon's log for `NATS refused the daemon`, since a missing grant on the
 exceptions lane (`notifications.envoy.exceptions.notifications.role.>`) still boots healthy and
 consumes both events, and that error line is its only sign. `legion-pane` is never granted the
