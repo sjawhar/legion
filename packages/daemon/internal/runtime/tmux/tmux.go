@@ -271,6 +271,10 @@ func (r *Runtime) Socket() string { return r.socket }
 // state directory before the launch.
 func (r *Runtime) ProvisionsWorkspaces() bool { return false }
 
+// ProvisionBound is zero: a pane starts the agent at once, with no init phase to provision
+// first.
+func (r *Runtime) ProvisionBound() time.Duration { return 0 }
+
 // result is one tmux invocation's outcome. timedOut is the budget the client was killed at, zero
 // when it returned on its own.
 type result struct {
