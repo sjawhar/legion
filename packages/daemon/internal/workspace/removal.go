@@ -114,11 +114,14 @@ func snapshotOverrides() []string {
 // fail closed if a future jj ever changes its stdout wording rather than its stderr one), and so
 // does any nested repository (nestedRepositories below, which treats the workspace's own `.git`
 // and `.jj` — every workspace has both — as not nested, and nothing else as exempt by type; it
-// is also kept, not treated as a failure, when that walk runs out of time against deadline, the
-// removal pass's own budget — never the ambient ctx, which on the production path
-// (removeFinishedWorkspaces, its own caller) carries no deadline at all; wrapping only the walk,
-// not ctx itself, is what keeps an in-flight jj command unaffected: removalBudget's own doc
-// comment promises the budget never interrupts one already running).
+// is also kept, not treated as a failure, when that walk runs out of its own walkTimeout — the
+// caller's own fixed policy for this walk alone, never derived from how much of the removal
+// pass's own budget happens to be left: a slow snapshot must never eat into the walk's own time,
+// or a near-full volume's measured 63-100 s snapshot would leave the walk nothing and keep every
+// candidate regardless of whether it actually holds a nested repository. removalBudget's own doc
+// comment (workspace_init.go) is what the budget still is: purely a limit on starting new
+// candidates, never a bound on one already running — a promise this walk's own, separate timeout
+// is what keeps true.
 //
 // Past both, the snapshot can still leave an ordinary path untracked rather than commit it (an
 // oversized new file, under snapshot.max-new-file-size, which snapshotOverrides deliberately
@@ -131,7 +134,7 @@ func snapshotOverrides() []string {
 // provisioning writes `.codegraph/` into) is deleted with it: jj never snapshots it, so none of
 // the checks above ever see it, but it is also never pushed by definition, so there is nothing of
 // it for any of them to protect.
-func RemoveFinished(ctx context.Context, run Runner, ws Workspace, issue, mergedHead string, deadline time.Time, log func(string)) error {
+func RemoveFinished(ctx context.Context, run Runner, ws Workspace, issue, mergedHead string, walkTimeout time.Duration, log func(string)) error {
 	if !located(ws) {
 		return fmt.Errorf("workspace to remove (%#v) is not a workspace Location names", ws)
 	}
@@ -167,12 +170,12 @@ func RemoveFinished(ctx context.Context, run Runner, ws Workspace, issue, merged
 		log(fmt.Sprintf("kept %s's workspace: the snapshot wrote to stderr (%s)", issue, stderr))
 		return nil
 	}
-	walkCtx, cancelWalk := context.WithDeadline(ctx, deadline)
+	walkCtx, cancelWalk := context.WithTimeout(ctx, walkTimeout)
 	nested, err := nestedRepositories(walkCtx, ws.Dir)
 	cancelWalk()
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			log(fmt.Sprintf("kept %s's workspace: ran out of time walking for a nested repository (%v)", issue, err))
+			log(fmt.Sprintf("kept %s's workspace: the nested-repository walk ran out of its own %s time limit (%v)", issue, walkTimeout, err))
 			return nil
 		}
 		return err
@@ -219,11 +222,12 @@ func RemoveFinished(ctx context.Context, run Runner, ws Workspace, issue, merged
 // stderr. Found, the search stops descending into a nested directory (a file or a symlink has
 // nothing to descend into); finding any one of them is enough to keep the whole workspace. The
 // walk also checks ctx on every entry: a workspace holding a large gitignored tree jj's own
-// snapshot never descends into (the walk is never gitignore-aware) can otherwise run well past
-// the removal pass's own budget. ctx here is deadline (RemoveFinished's own parameter, the
-// removal pass's budget deadline), wrapped around this walk alone — never the wider ctx a jj
-// command still in flight runs under — so ctx.Err() bounds only this walk, and a timed-out walk
-// keeps the workspace rather than fail the whole pass.
+// snapshot never descends into (the walk is never gitignore-aware) can otherwise run well past a
+// sensible time limit. ctx here is RemoveFinished's own walkCtx, built from walkTimeout alone
+// (`context.WithTimeout`, never a deadline shared with the snapshot that ran before it) and
+// wrapped around this walk alone — never the wider ctx a jj command still in flight runs under —
+// so ctx.Err() bounds only this walk, and a timed-out walk keeps the workspace rather than fail
+// the whole pass.
 func nestedRepositories(ctx context.Context, root string) ([]string, error) {
 	var found []string
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {

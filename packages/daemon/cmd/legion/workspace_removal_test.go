@@ -458,15 +458,12 @@ func TestWorkspaceInitNeverRemovesTheIssueItIsProvisioning(t *testing.T) {
 	}
 }
 
-// nestedRepositories' walk is bounded by RemoveFinished's own deadline parameter —
-// removeFinishedWorkspaces' own removal-budget deadline, never the ambient ctx, which in
-// production (main.go's signal.NotifyContext) carries no deadline of its own at all — so a
-// workspace holding a large gitignored tree jj's own snapshot never descends into (.codegraph/,
-// which provisioning excludes on every workspace of this shared clone) is kept rather than let
-// the walk run unbounded past the pass's own budget. 150k files there measured well past 100 ms
-// to walk on this host; a 100 ms budget is comfortably past the snapshot's own cost (a few ms on
-// a clean, pushed workspace) and comfortably short of the walk's.
-func TestWorkspaceInitKeepsAChildWhenTheNestedRepositoryWalkRunsOutOfTime(t *testing.T) {
+// RemoveFinished's own nested-repository walk is bounded by its own walkTimeout parameter alone,
+// never by how much of removeFinishedWorkspaces' own removal budget happens to be left (a slow
+// snapshot must not leave the walk nothing, dispatch://LEGION-583). A walk timeout of zero keeps
+// a clean, pushed candidate deterministically — no file needed to make the walk itself slow, and
+// no dependence on how long this host's own `jj status` happens to take.
+func TestWorkspaceInitKeepsAChildWhenTheNestedRepositoryWalkTimesOut(t *testing.T) {
 	v := newTreeVolume(t).withRemote(t)
 	v.fetch(t)
 	if code, _, stderr := runWorkspaceInitHere(v.args("LEGION-100")); code != 0 {
@@ -475,15 +472,6 @@ func TestWorkspaceInitKeepsAChildWhenTheNestedRepositoryWalkRunsOutOfTime(t *tes
 	candidate := v.workspace("LEGION-100")
 	if err := os.WriteFile(filepath.Join(candidate, "feature.txt"), []byte("finished work\n"), 0o644); err != nil {
 		t.Fatal(err)
-	}
-	bulk := filepath.Join(candidate, ".codegraph", "bulk")
-	if err := os.MkdirAll(bulk, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	for i := range 150000 {
-		if err := os.WriteFile(filepath.Join(bulk, strconv.Itoa(i)), nil, 0o644); err != nil {
-			t.Fatalf("plant bulk file %d: %v", i, err)
-		}
 	}
 	v.jj(t, "status", "-R", candidate)
 	bookmark := "legion/LEGION-100"
@@ -494,17 +482,79 @@ func TestWorkspaceInitKeepsAChildWhenTheNestedRepositoryWalkRunsOutOfTime(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
+	located, err := workspace.Location(v.root, repository, "LEGION-100")
+	if err != nil {
+		t.Fatal(err)
+	}
 	run := workspace.NewRunner(workspace.CommandTimeout, map[string]string{"jj": v.realJJ, "git": v.env["WINIT_REAL_GIT"]})
-	t.Setenv(removableWorkspacesEnv, removableEnv(t, []runtime.RemovableWorkspace{{Issue: "LEGION-100"}}))
-	var stdout bytes.Buffer
-	removeFinishedWorkspaces(context.Background(), run, v.root, repository, "LEGION-200", &stdout,
-		time.Now, 100*time.Millisecond)
 
-	output := stdout.String()
+	var logged []string
+	if err := workspace.RemoveFinished(context.Background(), run, located, "LEGION-100", "", 0, func(line string) { logged = append(logged, line) }); err != nil {
+		t.Fatalf("RemoveFinished: %v", err)
+	}
 	if _, err := os.Stat(candidate); err != nil {
 		t.Fatalf("LEGION-100's workspace was removed, want it kept: %v", err)
 	}
-	if !strings.Contains(output, "kept LEGION-100's workspace") || !strings.Contains(output, "ran out of time") {
-		t.Errorf("stdout %q, want it to name LEGION-100 kept for running out of time", output)
+	if len(logged) != 1 || !strings.Contains(logged[0], "kept LEGION-100's workspace") || !strings.Contains(logged[0], "ran out of its own") {
+		t.Errorf("logged %v, want one line naming LEGION-100 kept for running out of its own time limit", logged)
 	}
+}
+
+// A candidate whose snapshot alone outlasts the removal pass's own budget is still fully judged
+// and removed when it is in fact clean: the walk's own fixed timeout, counted from when the walk
+// itself starts rather than from the pass's own deadline, is what removalBudget's doc comment
+// means by "never interrupts one already running" (dispatch://LEGION-583) — the budget bounds
+// only when a new candidate may start, never how much of its own already-running check it gets.
+// Before this round's fix the walk shared the pass's own deadline, so a slow snapshot alone could
+// already exhaust it before the walk even began, keeping a workspace that in fact held no
+// unpushed work at all — on the near-full volumes this piece exists for, where a snapshot
+// measures 63-100 s against a 90 s budget, that meant nothing was ever removed.
+func TestWorkspaceInitRemovesACleanChildEvenWhenItsSnapshotOutlastsTheRemovalBudget(t *testing.T) {
+	v := newTreeVolume(t).withRemote(t)
+	v.fetch(t)
+	if code, _, stderr := runWorkspaceInitHere(v.args("LEGION-100")); code != 0 {
+		t.Fatalf("provision the candidate: exit %d, stderr %q", code, stderr)
+	}
+	candidate := v.workspace("LEGION-100")
+	if err := os.WriteFile(filepath.Join(candidate, "feature.txt"), []byte("finished work\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	v.jj(t, "status", "-R", candidate)
+	bookmark := "legion/LEGION-100"
+	v.jj(t, "bookmark", "set", bookmark, "-r", "@", "--allow-backwards", "-R", candidate)
+	v.jjPush(t, candidate, bookmark)
+
+	repository, err := ghrepo.Parse("--repo", winitRepo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	real := workspace.NewRunner(workspace.CommandTimeout, map[string]string{"jj": v.realJJ, "git": v.env["WINIT_REAL_GIT"]})
+	run := slowSnapshotRunner{Runner: real, sleep: 2500 * time.Millisecond}
+	t.Setenv(removableWorkspacesEnv, removableEnv(t, []runtime.RemovableWorkspace{{Issue: "LEGION-100"}}))
+
+	var stdout bytes.Buffer
+	removeFinishedWorkspaces(context.Background(), run, v.root, repository, "LEGION-200", &stdout, time.Now, 2*time.Second)
+
+	output := stdout.String()
+	if _, err := os.Stat(candidate); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("LEGION-100's workspace remains (err=%v), want removed: it was clean despite its snapshot outlasting the 2s removal budget", err)
+	}
+	if want := "removed LEGION-100's workspace"; !strings.Contains(output, want) {
+		t.Errorf("stdout %q, want it to contain %q", output, want)
+	}
+}
+
+// slowSnapshotRunner sleeps after the push-safety snapshot command (`jj status`) returns,
+// simulating a snapshot that takes real wall-clock time, as a near-full tree volume's does.
+type slowSnapshotRunner struct {
+	workspace.Runner
+	sleep time.Duration
+}
+
+func (r slowSnapshotRunner) Run(ctx context.Context, command workspace.Command) (workspace.Result, error) {
+	result, err := r.Runner.Run(ctx, command)
+	if len(command.Argv) >= 2 && command.Argv[0] == "jj" && command.Argv[1] == "status" {
+		time.Sleep(r.sleep)
+	}
+	return result, err
 }

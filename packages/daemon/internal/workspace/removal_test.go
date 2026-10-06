@@ -26,7 +26,7 @@ func TestRemoveFinishedRemovesAWorkspaceWithEveryCommitPushed(t *testing.T) {
 	runSetup(t, ws.Clone, "jj", "git", "push", "--remote", "origin", "--bookmark", ws.Bookmark, "--allow-empty-description")
 
 	var logged []string
-	if err := RemoveFinished(context.Background(), run, ws, "WIDGETS-42", "", time.Now().Add(time.Hour), func(line string) { logged = append(logged, line) }); err != nil {
+	if err := RemoveFinished(context.Background(), run, ws, "WIDGETS-42", "", time.Hour, func(line string) { logged = append(logged, line) }); err != nil {
 		t.Fatalf("RemoveFinished: %v", err)
 	}
 	if _, err := os.Stat(ws.Dir); !errors.Is(err, os.ErrNotExist) {
@@ -63,7 +63,7 @@ func TestRemoveFinishedRemovesAWorkspaceWhoseLastCommitIsOnlyTheMergedHead(t *te
 	}
 
 	var logged []string
-	if err := RemoveFinished(context.Background(), run, ws, "WIDGETS-42", mergedHead, time.Now().Add(time.Hour), func(line string) { logged = append(logged, line) }); err != nil {
+	if err := RemoveFinished(context.Background(), run, ws, "WIDGETS-42", mergedHead, time.Hour, func(line string) { logged = append(logged, line) }); err != nil {
 		t.Fatalf("RemoveFinished: %v", err)
 	}
 	if _, err := os.Stat(ws.Dir); !errors.Is(err, os.ErrNotExist) {
@@ -91,7 +91,7 @@ func TestRemoveFinishedKeepsAWorkspaceWithAnUnpushedCommit(t *testing.T) {
 	commit := strings.TrimSpace(runSetup(t, ws.Dir, "jj", "log", "-r", "@", "--no-graph", "-T", "commit_id"))
 
 	var logged []string
-	if err := RemoveFinished(context.Background(), run, ws, "WIDGETS-42", "", time.Now().Add(time.Hour), func(line string) { logged = append(logged, line) }); err != nil {
+	if err := RemoveFinished(context.Background(), run, ws, "WIDGETS-42", "", time.Hour, func(line string) { logged = append(logged, line) }); err != nil {
 		t.Fatalf("RemoveFinished: %v", err)
 	}
 	if _, err := os.Stat(ws.Dir); err != nil {
@@ -120,7 +120,7 @@ func TestRemoveFinishedSnapshotsTheWorkspaceBeforeJudgingAnUncommittedEdit(t *te
 	// untracked by any jj operation, until RemoveFinished itself snapshots it.
 
 	var logged []string
-	if err := RemoveFinished(context.Background(), run, ws, "WIDGETS-42", "", time.Now().Add(time.Hour), func(line string) { logged = append(logged, line) }); err != nil {
+	if err := RemoveFinished(context.Background(), run, ws, "WIDGETS-42", "", time.Hour, func(line string) { logged = append(logged, line) }); err != nil {
 		t.Fatalf("RemoveFinished: %v", err)
 	}
 	if _, err := os.Stat(ws.Dir); err != nil {
@@ -175,7 +175,7 @@ func TestRemoveFinishedSnapshotRunsNoHostileFilterOrSigningProgram(t *testing.T)
 	}
 
 	var logged []string
-	if err := RemoveFinished(context.Background(), run, ws, "WIDGETS-42", "", time.Now().Add(time.Hour), func(line string) { logged = append(logged, line) }); err != nil {
+	if err := RemoveFinished(context.Background(), run, ws, "WIDGETS-42", "", time.Hour, func(line string) { logged = append(logged, line) }); err != nil {
 		t.Fatalf("RemoveFinished: %v", err)
 	}
 	if _, err := os.Stat(ws.Dir); err != nil {
@@ -214,7 +214,7 @@ func TestRemoveFinishedKeepsAWorkspaceWhoseSnapshotLeftALargeFileUntracked(t *te
 	}
 
 	var logged []string
-	if err := RemoveFinished(context.Background(), run, ws, "WIDGETS-42", "", time.Now().Add(time.Hour), func(line string) { logged = append(logged, line) }); err != nil {
+	if err := RemoveFinished(context.Background(), run, ws, "WIDGETS-42", "", time.Hour, func(line string) { logged = append(logged, line) }); err != nil {
 		t.Fatalf("RemoveFinished: %v", err)
 	}
 	if _, err := os.Stat(ws.Dir); err != nil {
@@ -244,7 +244,7 @@ func TestRemoveFinishedFinishesARemovalAnEarlierPassWasInterruptedMidDelete(t *t
 	}
 
 	var logged []string
-	if err := RemoveFinished(context.Background(), run, ws, "WIDGETS-42", "", time.Now().Add(time.Hour), func(line string) { logged = append(logged, line) }); err != nil {
+	if err := RemoveFinished(context.Background(), run, ws, "WIDGETS-42", "", time.Hour, func(line string) { logged = append(logged, line) }); err != nil {
 		t.Fatalf("RemoveFinished: %v", err)
 	}
 	if _, err := os.Stat(ws.Dir); !errors.Is(err, os.ErrNotExist) {
@@ -274,7 +274,7 @@ func TestRemoveFinishedOfAWorkspaceAlreadyGoneIsANoop(t *testing.T) {
 		t.Fatalf("Location: %v", err)
 	}
 	var logged []string
-	if err := RemoveFinished(context.Background(), run, ws, "WIDGETS-42", "", time.Now().Add(time.Hour), func(line string) { logged = append(logged, line) }); err != nil {
+	if err := RemoveFinished(context.Background(), run, ws, "WIDGETS-42", "", time.Hour, func(line string) { logged = append(logged, line) }); err != nil {
 		t.Fatalf("RemoveFinished: %v", err)
 	}
 	if want := "has no workspace on this volume"; len(logged) != 1 || !strings.Contains(logged[0], want) {
@@ -314,7 +314,7 @@ func TestRemoveFinishedKeepsAWorkspaceHoldingANestedRepositoryWithALocalCommit(t
 	runSetupWith(t, nested, gitEnv, "git", "commit", "-m", "a local fix")
 
 	var logged []string
-	if err := RemoveFinished(context.Background(), run, ws, "WIDGETS-42", "", time.Now().Add(time.Hour), func(line string) { logged = append(logged, line) }); err != nil {
+	if err := RemoveFinished(context.Background(), run, ws, "WIDGETS-42", "", time.Hour, func(line string) { logged = append(logged, line) }); err != nil {
 		t.Fatalf("RemoveFinished: %v", err)
 	}
 	if _, err := os.Stat(ws.Dir); err != nil {
@@ -384,7 +384,7 @@ func TestRemoveFinishedKeepsAWorkspaceHoldingAFileOrSymlinkNamedGitOrJJ(t *testi
 			plant(t, filepath.Join(nested, entry))
 
 			var logged []string
-			if err := RemoveFinished(context.Background(), run, ws, "WIDGETS-42", "", time.Now().Add(time.Hour), func(line string) { logged = append(logged, line) }); err != nil {
+			if err := RemoveFinished(context.Background(), run, ws, "WIDGETS-42", "", time.Hour, func(line string) { logged = append(logged, line) }); err != nil {
 				t.Fatalf("RemoveFinished: %v", err)
 			}
 			if _, err := os.Stat(secret); err != nil {
@@ -438,7 +438,7 @@ func TestRemoveFinishedKeepsAWorkspaceHoldingASubmoduleWithAnUnpushedCommit(t *t
 	runSetupWith(t, sub, gitEnv, "git", "commit", "-m", "an unpushed local fix")
 
 	var logged []string
-	if err := RemoveFinished(context.Background(), run, ws, "WIDGETS-42", "", time.Now().Add(time.Hour), func(line string) { logged = append(logged, line) }); err != nil {
+	if err := RemoveFinished(context.Background(), run, ws, "WIDGETS-42", "", time.Hour, func(line string) { logged = append(logged, line) }); err != nil {
 		t.Fatalf("RemoveFinished: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(sub, "local.txt")); err != nil {
@@ -482,7 +482,7 @@ func TestRemoveFinishedKeepsAWorkspaceHoldingALinkedWorktreeWithAnUncommittedEdi
 	}
 
 	var logged []string
-	if err := RemoveFinished(context.Background(), run, ws, "WIDGETS-42", "", time.Now().Add(time.Hour), func(line string) { logged = append(logged, line) }); err != nil {
+	if err := RemoveFinished(context.Background(), run, ws, "WIDGETS-42", "", time.Hour, func(line string) { logged = append(logged, line) }); err != nil {
 		t.Fatalf("RemoveFinished: %v", err)
 	}
 	if _, err := os.Stat(uncommitted); err != nil {
@@ -516,7 +516,7 @@ func TestRemoveFinishedKeepsAWorkspaceHoldingAFileWhoseNameIsNotValidUTF8(t *tes
 	}
 
 	var logged []string
-	if err := RemoveFinished(context.Background(), run, ws, "WIDGETS-42", "", time.Now().Add(time.Hour), func(line string) { logged = append(logged, line) }); err != nil {
+	if err := RemoveFinished(context.Background(), run, ws, "WIDGETS-42", "", time.Hour, func(line string) { logged = append(logged, line) }); err != nil {
 		t.Fatalf("RemoveFinished: %v", err)
 	}
 	if _, err := os.Stat(ws.Dir); err != nil {

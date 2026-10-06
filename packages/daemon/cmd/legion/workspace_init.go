@@ -231,6 +231,19 @@ func workspaceInit(ctx context.Context, issue, repo, root, credentialHelper, fee
 // partway, never the whole list a first launch after deploy can name at once.
 const removalBudget = 90 * time.Second
 
+// nestedRepositoryWalkTimeout bounds workspace.RemoveFinished's own nested-repository walk for
+// each candidate, fixed and never derived from how much of removalBudget happens to be left: a
+// slow snapshot must never eat into the walk's own time, or a near-full volume's measured
+// 63-100s snapshot would leave the walk nothing and keep every candidate regardless of whether it
+// actually holds a nested repository. Walking a real, full-size checkout of this repository
+// (every Go and TypeScript package, node_modules installed) took under 1s on this host; 30s
+// leaves well over an order of magnitude of headroom for a workspace larger or on a slower
+// volume. Worst case against the registration deadline above: removalBudget (90s), plus up to
+// ~100s for the one candidate whose snapshot is already running when the budget is spent (this
+// comment's own 63-100s range), plus this 30s walk timeout for that same candidate, is about
+// 220s — comfortably inside the 360s default even in the worst ordering.
+const nestedRepositoryWalkTimeout = 30 * time.Second
+
 // removeFinishedWorkspaces reads removableWorkspacesEnv's candidate list and calls
 // workspace.RemoveFinished for each sibling that still has a workspace on the volume, other than
 // issue — the one this pod provisions, never the daemon's to name but filtered out here too, in
@@ -296,7 +309,7 @@ func removeFinishedWorkspaces(ctx context.Context, run workspace.Runner, root st
 			fmt.Fprintf(stdout, "workspace-init: cannot locate %s's workspace, keeping it: %v\n", candidate.Issue, err)
 			continue
 		}
-		if err := workspace.RemoveFinished(ctx, run, located, candidate.Issue, candidate.MergedHead, deadline, log); err != nil {
+		if err := workspace.RemoveFinished(ctx, run, located, candidate.Issue, candidate.MergedHead, nestedRepositoryWalkTimeout, log); err != nil {
 			fmt.Fprintf(stdout, "workspace-init: removing %s's workspace failed, keeping it: %v\n", candidate.Issue, err)
 		}
 	}
