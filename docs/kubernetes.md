@@ -610,15 +610,16 @@ The image probe runs as a Sandbox of its own, `legion-probe-<project>-<digest12>
 
 A pod's addresses are fixed when the pod is created, and nothing changes a running pod's argv or
 environment. The daemon hands every pod six from its configuration: the worker stream listener the
-shim's `--connect` names, `tcp://<bind>:<worker_stream_port>` (item 3 of the anatomy list above), and,
-in the worker's environment, `LEGION_DAEMON_URL` (`daemon_url`), `ENVOY_NATS_URL` (`nats_urls`),
-`ENVOY_URL` (`envoy_url`), `DISPATCH_URL` (`dispatch_url`) and `AGENT_SECRETS_URL`
-(`runtime.kubernetes.agent_secrets.url`). Each moves when the daemon restarts with its key changed,
-and the stream also moves when the daemon restarts on another host. A daemon that restarts re-adopts
-each live claim's pod by its recorded locator (the boot orphan sweep), and re-adoption alone would
-leave that pod holding the old addresses: a stale `--connect` never reaches the new daemon, and a stale
-`LEGION_DAEMON_URL` fails every call the agent makes to the daemon's API (its credential helper,
-`legion gh`, its phase completion) while its stream still works.
+shim's `--connect` names, `tcp://<advertise_host, or bind with none set>:<worker_stream_port>` (item
+3 of the anatomy list above), and, in the worker's environment, `LEGION_DAEMON_URL` (`daemon_url`),
+`ENVOY_NATS_URL` (`nats_urls`), `ENVOY_URL` (`envoy_url`), `DISPATCH_URL` (`dispatch_url`) and
+`AGENT_SECRETS_URL` (`runtime.kubernetes.agent_secrets.url`). Each moves when the daemon restarts
+with its key changed, and with no `advertise_host` set the stream also moves when the daemon
+restarts on another host. A daemon that restarts re-adopts each live claim's pod by its recorded
+locator (the boot orphan sweep), and re-adoption alone would leave that pod holding the old
+addresses: a stale `--connect` never reaches the new daemon, and a stale `LEGION_DAEMON_URL` fails
+every call the agent makes to the daemon's API (its credential helper, `legion gh`, its phase
+completion) while its stream still works.
 
 So the runtime compares each of those six in a watched pod with what it hands a new pod now, on
 every evaluation of the pod (each watch event, the probe-interval sweep, each probe), a variable the
