@@ -13,7 +13,7 @@ through `scripts/e2e/.shellcheckrc`.
 | :--- | :--- |
 | `stage1-skeleton.sh` | `legion start` boots against a local Postgres, serves `/healthz` and `GET /legion/v1/state`, answers `legion state`, registers itself in the Go daemon's own legions registry, survives a restart against the same store with its first boot time intact, and refuses an unreachable Postgres by the host it could not reach and never by the password |
 | `stage2-tmux-supervision.sh` | the Go daemon supervises real Oh My Pi sessions — the pinned build with this checkout's plugin in an isolated profile — in its private tmux server, against a real Envoy listener and NATS: the plugin gate refuses another contract, a disabled plugin, a missing skill, a skill only the role prompts load, and a task agent whose model role no one configured; an agent registers, holds its Envoy role and is ready; a task queued before ready runs once, its model turn through the Hawk model gateway, and a retried frame starts no second turn; a killed pane resumes the same session; suspend and resume keep it; a stale hello is refused; an agent that never registers is retired at the deadline and counted; a restart re-adopts every live pane; an orphan is reaped after the grace; the OMP process's environment is the isolated one. Devbox only |
-| `stage4a-sandbox-runtime.sh` | the Agent Sandbox runtime (`internal/runtime/sandbox`) on the production cluster, driven through the Legion daemon's restricted identity and nothing more: the Agent Sandbox install check accepts and refuses by name; the image probe Sandbox passes; a root provisions its workspace, registers, runs under gVisor and adopts its working copy's author; workers join the root's node, and schedule anywhere when no tree pod is scheduled; suspend, resume, a same-agent refusal, a pod killed in place, a relaunch before registration, and two concurrent provisions each hold; a fresh runtime re-adopts every live pod; the orphan sweep honours its grace; releasing the tree leaves nothing, and the namespace matches its snapshot. Devbox only |
+| `stage4a-sandbox-runtime.sh` | the Agent Sandbox runtime (`internal/runtime/sandbox`) on a real cluster, driven through the Legion daemon's restricted identity and nothing more: the Agent Sandbox install check accepts and refuses by name; the image probe Sandbox passes; a root provisions its workspace, registers, runs under gVisor and adopts its working copy's author; workers join the root's node, and schedule anywhere when no tree pod is scheduled; suspend, resume, a same-agent refusal, a pod killed in place, a relaunch before registration, and two concurrent provisions each hold; a fresh runtime re-adopts every live pod; the orphan sweep honours its grace; releasing the tree leaves nothing, and the namespace matches its snapshot. From the devbox against the production cluster, or [from a pod](#from-a-pod) in the cluster it drives |
 | `controller-start-tmux.sh` | the operator-launched controller on the Go daemon under tmux: `legion start --check-config` passes a real config and names the key on each broken variant, running no key command; the boot gate refuses a plugin of another contract; `legion state --config` runs no key command; `legion controller start` refuses a group-readable operator token file, claims the controller role, shows in `controllerLocator`, runs Oh My Pi interactive with the controller environment and its secret only as a file, leaves Ctrl-C to Oh My Pi, and exits with its code; `legion status` from an operator shell mints its grant with the operator bearer; a second start revokes the first's capability and grants; the controller liveness probe reads the live listener. Devbox only |
 | `dispatch-user-turns.sh` | a person's direct Send or Aside from Dispatch's conversation page reaches a real Oh My Pi session — the pinned build with this checkout's plugin in an isolated profile — as that person's own user turn, the body alone, while a BTW stays a side question; a frame a session forged claiming a person wrote it, a broadcast, an issue message, a Legion role notice and a session's re-send of the person's BTW through the retry route each arrive as a card; a Send the session got as a card stays one when a frame is forged for it inside the accept's minute, while the person's retry of it is their turn; the page shows each message once; after the session restarts, a replay of the Send's own envelope and a frame forged naming a Send made while it was down, over a minute old, each inject nothing, and neither does a frame a bare bus client forges for a failed Send inside its minute; and Dispatch records only the Send, the Aside and the carded Send's retry as accepted. Devbox only |
 | `verifiers-staging-token.sh` | `dispatch` and the Envoy listener authenticate a projected service-account token the staging EKS cluster actually minted — the right audience is accepted, the other binary's audience and a missing bearer are refused, each shared token still works, half an OIDC pair and an issuer that does not answer refuse the boot, and a refused token leaves its failure class in the log and nowhere else |
@@ -428,26 +428,82 @@ evidence directory is under the scratch work directory, whose processes the tear
 so the script opens the transcript on fd 8 and calls `transcript_to /dev/fd/8`
 ([`lib/transcript.sh`](#libtranscriptsh)).
 
+## From a pod
+
+A stage proof runs from a pod in the cluster it drives when that cluster's pods cannot reach the
+host that would otherwise run it: every pod Stage 4a launches dials the worker stream the harness
+hosts, so the harness sits where they can reach it. The pod runs the proof image,
+`ghcr.io/sjawhar/legion-proof:sha-<12>`, which [`proof-image.yaml`](../../.github/workflows/proof-image.yaml)
+publishes from [`proof.Dockerfile`](../../packages/daemon/docker/proof.Dockerfile) for every head
+of a pull request against main and every main commit: that commit's checkout at `/src/legion`, its
+`.git` included and clean (the image refuses to publish otherwise), with Go at `go.work`'s version
+and both modules' dependencies downloaded, `kubectl`, the AWS CLI, `gh`, Bun, `jq`, `psql`, `git`,
+`curl`, `openssl`, `ss`, `flock`, `setpriv`, `ps`, `pgrep` and `pkill`. It runs as uid 1000, the
+checkout's owner; git refuses a repository another user owns, and the harness's Go build stamps
+from it.
+
+The pod's command, from `/src/legion`, is
+[`lib/proof-pod.sh`](#libproof-podsh)` run scripts/e2e/stage4a-sandbox-runtime.sh`, which writes the
+run's kubeconfig and sets the identity inputs before it runs the stage. What the pod carries:
+
+- **Its own ServiceAccount, the operator**, with that account's token mounted at the standard path
+  (`/var/run/secrets/kubernetes.io/serviceaccount`). The kubeconfig's `operator` context is that
+  token; its `runtime` context mints the daemon's tokens through the TokenRequest API, as the
+  operator.
+- **`LEGION_PROOF_DAEMON_SERVICE_ACCOUNT`**, `<namespace>/<name>` of the Legion daemon's
+  ServiceAccount, the one the runtime context mints for and the identity check requires.
+- **`LEGION_E2E_STREAM_HOST`** from the downward API (`status.podIP`), the address every pod dials.
+- **The App's key file** in a memory-backed volume, mode `0600` or `0400`, owned by uid 1000, which
+  `LEGION_E2E_IMPLEMENT_APP_KEY_FILE` names, and the stage's other inputs
+  ([below](#stage4a-sandbox-runtimesh)).
+
+What the cluster grants, and nothing more, since the identity check fails on a grant the plan does
+not make:
+
+- **The daemon's ServiceAccount**: the Legion daemon's own three grants, the `legion-daemon` Role in
+  `legion` (Sandboxes create, get, list, watch, patch and delete, and their status; pods get, list
+  and watch, and their logs; Secrets create, get, update and delete; events list), the read of the
+  Sandbox CRD, and the read of the Sandbox controller's Deployment.
+- **The operator's ServiceAccount**: `create` on `serviceaccounts/token` for the daemon's account
+  alone; namespaces `get` and `list` and nodes `get`, cluster-wide; and in `legion`, ConfigMaps
+  `create`, `get`, `list`, `patch` and `delete`; Secrets `create`, `get`, `list` and `delete`;
+  PersistentVolumeClaims `get`, `list` and `delete`; pods `get` and `list`, and `pods/exec`
+  `create` and `get` (a websocket exec is a `get`); Sandboxes `list` and `delete`. A run that fails
+  to see a pod's hello reads the node's EC2NodeClass to name its security groups, and names the
+  read's refusal instead when the account holds no `get` on `ec2nodeclasses`.
+- **The network**: pods in `legion` reach the proof pod's address on port 13373.
+
 ## stage4a-sandbox-runtime.sh
 
 ```sh
-LEGION_E2E_RUNTIME_CONTEXT=<restricted context> \
+# From the devbox, against the production cluster:
+LEGION_E2E_RUNTIME_KUBECONFIG=<restricted kubeconfig> LEGION_E2E_RUNTIME_CONTEXT=<restricted context> \
+LEGION_E2E_OPERATOR_CONTEXT=<admin context> \
+LEGION_E2E_STREAM_HOST=<the devbox's private address> \
+LEGION_E2E_REPO=sjawhar/legion-smoke \
+LEGION_E2E_IMPLEMENT_APP_ID=<implement App id> LEGION_E2E_IMPLEMENT_APP_KEY_FILE=<0600 PEM file> \
 LEGION_E2E_IMAGE=ghcr.io/sjawhar/legion-worker@sha256:<digest> \
 LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic \
 LEGION_E2E_MODEL_GATEWAY_AUDIENCE=<gateway audience> \
   bash scripts/e2e/stage4a-sandbox-runtime.sh     # → "stage 4a e2e: PASS", exit 0
+
+# From a pod (#from-a-pod), whose spec sets every input above but those proof-pod.sh run sets:
+bash scripts/e2e/lib/proof-pod.sh run scripts/e2e/stage4a-sandbox-runtime.sh
 ```
 
-**Devbox only, against the production cluster; CI compiles the harness (`go vet -tags e2e ./...`
-in the Tests workflow's `typecheck` job) and does not run it.** Stage 4a's gate: `internal/runtime/sandbox` drives
-Agent Sandbox pods in namespace `legion` from the devbox, the way the 4b daemon will. The script
-needs `go`, `kubectl`, `aws` (the runtime kubeconfig's `aws eks get-token`), `curl`, `ss`,
-`diff`, and the `secrets` CLI holding `LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64` (agent tier: no
-YubiKey touch). The harness runs `secrets <KEY> -- sh -c 'printf %s "$<KEY>"'`: the `secrets` CLI
-decrypts the key and puts it in the environment of that one `sh` child, which prints it to a pipe
-the harness reads into memory. The harness decodes it there and mints the implement App's
-installation token in process. The key is written to no file, appears in no argv, and reaches no
-other process; only the installation token enters each claim's Secret.
+**CI compiles the harness (`go vet -tags e2e ./...` in the Tests workflow's `typecheck` job) and
+does not run it.** Stage 4a's gate: `internal/runtime/sandbox` drives Agent Sandbox pods in
+namespace `legion`, the way the daemon does, from a host the cluster's pods can reach: the devbox
+beside the production cluster, or [a pod](#from-a-pod) in the cluster itself. The script needs
+`go`, `kubectl` (with whatever the runtime kubeconfig's credential plugin runs: the devbox's
+`aws eks get-token`, or `lib/proof-pod.sh`'s TokenRequest in a pod), `ss`, `diff`, `stat` and
+`timeout`. The implement App's key is a PEM file only its owner can read: `prerequisites` refuses
+a file its group or others can open. On the devbox, decode the key the `secrets` CLI holds into a
+0600 file on a memory-backed filesystem for the run, and remove it after:
+`(umask 077; secrets LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 -- sh -c 'printf %s "$LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64" | base64 -d' >/dev/shm/<dir>/implement.pem)`.
+The harness reads the file into memory and mints the implement App's installation token in
+process; the key appears in no argv and reaches no other process, and only the installation token
+enters each claim's Secret.
 
 Every pod carries the operator route's pod,
 [`deploy/kubernetes/operator-route/pod.yml`](../../deploy/kubernetes/operator-route/pod.yml), read through the daemon's
@@ -470,9 +526,14 @@ with the providers Secret mounted, as a deployment with `provider_keys` does.
 
 | input | default | meaning |
 | :--- | :--- | :--- |
-| `LEGION_E2E_RUNTIME_CONTEXT` | required | the kubeconfig context of the Legion daemon's restricted identity (an IAM role mapped to group `legion-daemon`) |
-| `LEGION_E2E_RUNTIME_KUBECONFIG` | `~/.kube/legion-daemon-production` | the kubeconfig file holding that context, kept apart from the devbox's own |
-| `LEGION_E2E_OPERATOR_CONTEXT` | `production` | the devbox's admin context, for operator steps only |
+| `LEGION_E2E_RUNTIME_KUBECONFIG` | required | the kubeconfig file holding the Legion daemon's restricted identity, kept apart from the operator's own |
+| `LEGION_E2E_RUNTIME_CONTEXT` | required | that identity's context in it: on the devbox, an IAM role mapped to group `legion-daemon`; in a pod, `runtime`, the daemon's ServiceAccount |
+| `LEGION_E2E_RUNTIME_SERVICE_ACCOUNT` | unset | `<namespace>/<name>`: the runtime identity is that ServiceAccount, and `identity` requires exactly its subject. Unset, `identity` requires the assumed IAM role in group `legion-daemon`. `lib/proof-pod.sh run` sets it |
+| `LEGION_E2E_OPERATOR_CONTEXT` | required | the operator's context, for operator steps only, in the kubeconfig `kubectl` reads (`KUBECONFIG`, or `~/.kube/config`) |
+| `LEGION_E2E_STREAM_HOST` | required | the address the harness binds the worker stream on and every pod dials: the devbox's private address, or the proof pod's (`status.podIP`); never loopback or `0.0.0.0` |
+| `LEGION_E2E_REPO` | required | the repository every claim's workspace clones, `<owner>/<name>` (the proofs use `sjawhar/legion-smoke`) |
+| `LEGION_E2E_IMPLEMENT_APP_ID` | required | the implement App, installed on that repository's owner, whose installation token provisions every workspace |
+| `LEGION_E2E_IMPLEMENT_APP_KEY_FILE` | required | that App's private key: a PEM file no group or other may read |
 | `LEGION_E2E_IMAGE` | required | the worker image under test, by digest: a `worker-image.yaml` run on the branch under test |
 | `LEGION_E2E_MODEL_GATEWAY_URL` | required | the model gateway's Anthropic endpoint, the `baseUrl` the run's copy of the fixture's `models.yml` names; checked by [`lib/model-gateway-url.sh`](#libmodel-gateway-urlsh) |
 | `LEGION_E2E_MODEL_GATEWAY_AUDIENCE` | required | the audience the model gateway accepts on a worker's projected ServiceAccount token, put in place of the `${MODEL_TOKEN_AUDIENCE}` placeholder in the run's copy of the operator route's `pod.yml`; checked by [`lib/model-gateway-audience.sh`](#libmodel-gateway-audiencesh) |
@@ -498,16 +559,16 @@ names no issue assignee; Sami's values seeded after Plan D's apply) —
 worker pod on a development slot" means here.
 
 Two identities, so the runtime is proven under exactly the RBAC it ships with. The runtime and
-the harness's own reads use the restricted one; the admin context only runs what an operator does
-beside the daemon — `kubectl exec`, PVC phases, the pod uid cross-checks, a Secret's boot token
+the harness's own reads use the restricted one; the operator context only runs what an operator
+does beside the daemon — `kubectl exec`, PVC phases, the pod uid cross-checks, a Secret's boot token
 (hashed in process, never printed), node and EC2NodeClass reads for a network failure, and the
 namespace list. Every evidence line names which one observed it (`[runtime]`, `[operator]`, or
 `[harness]` for the listener and its resolver).
 
-The harness hosts the worker stream itself, on the devbox's private address (from instance
-metadata, never `0.0.0.0`) and port 13373 — the rigs' worker-stream port, which the devbox's
-security group admits from Legion nodes beside the production daemon's 13370/13371 — and refuses
-to start while anything holds it, naming the holder. Its resolver accepts
+The harness hosts the worker stream itself, on `LEGION_E2E_STREAM_HOST` (never `0.0.0.0`) and port
+13373 — the rigs' worker-stream port, which on the devbox the security group admits from Legion
+nodes beside the production daemon's 13370/13371 — and refuses to start while anything holds it,
+naming the holder. Its resolver accepts
 only each claim's current generation and records every hello with the claim, the generation, and
 the hash of the token presented. The pods run a stub agent under the real Go shim: it appends its
 pod's uid to a marker file in the tree volume's sessions directory, the file a resume names, and
@@ -520,12 +581,12 @@ The checks, in order, each printing what it observed and then `CHECK <name>: PAS
 
 | check | what it does and requires |
 | :--- | :--- |
-| `identity` | refuses to start unless the runtime context is set and authenticates as someone other than the operator; a SelfSubjectReview shows the assumed `…legion-daemon` role in group `legion-daemon`; `list secrets -n legion` is 403; a SelfSubjectRulesReview (`can-i --list`) in every namespace finds no grant beyond the plan's; access reviews, which reach EKS's webhook authorizer that a rules review cannot enumerate, deny every kind of impersonation, `serviceaccounts/token`, pod create and exec, secret list and create, PVC get, nodes, RBAC create/update/patch/escalate/bind, and Sandboxes outside `legion`, beside two positive controls |
+| `identity` | refuses to start unless the runtime context is set and authenticates as someone other than the operator; a SelfSubjectReview shows the daemon's identity: with `LEGION_E2E_RUNTIME_SERVICE_ACCOUNT` set, exactly that ServiceAccount's subject, and otherwise the assumed `…legion-daemon` role in group `legion-daemon`; `list secrets -n legion` is 403; a SelfSubjectRulesReview (`can-i --list`) in every namespace finds no grant beyond the plan's; access reviews, which reach EKS's webhook authorizer that a rules review cannot enumerate, deny every kind of impersonation, `serviceaccounts/token`, pod create and exec, secret list and create, PVC get, nodes, RBAC create/update/patch/escalate/bind, and Sandboxes outside `legion`, beside two positive controls |
 | `installed` | `CheckInstalled` with production's `InstallRef` passes under the `resourceNames` grants |
 | `boot-refusal-negative` | `CheckInstalled` naming `legion-no-such-controller` refuses, naming that Deployment and the 403 the `resourceNames` grant answers, without blaming the CRD |
 | `image-probe` | `ProbeImage` on the image under test, with the daemon's own probe command (`--role-references` with the checkout's role prompts' references, and `--provider-env-dir`, the run having a provider key), its probe pod carrying the operator's pod, passes; its log confirms `daemon-api-version` equal to the daemon's contract and `agent-models=resolved` (every task agent the prompts dispatch resolved its model under the operator's pod), and the probe Sandbox is deleted |
 | `image-probe-negative` | with `modelRoles.oracle` removed from the run's ConfigMap, `ProbeImage` on the same image is refused naming `task agent oracle` and `role oracle is not configured`; the ConfigMap is restored before the check ends, so every later check boots on it |
-| `root-ready` | Spawn of the root: its Sandbox Ready, the returned incarnation the pod's uid, the init log (`pods/log`) carrying `workspace-init: /legion/workspaces/sjawhar/legion-smoke/s4a-1 on legion/S4A-1`, and a hello registered at generation 1 with that generation's token |
+| `root-ready` | Spawn of the root: its Sandbox Ready, the returned incarnation the pod's uid, the init log (`pods/log`) carrying `workspace-init: /legion/workspaces/<owner>/<repo>/s4a-1 on legion/S4A-1` for `LEGION_E2E_REPO`, and a hello registered at generation 1 with that generation's token |
 | `gvisor` | `uname -r` in the root pod is gVisor's emulated kernel (`…-gvisor`), not the node's, and the pod's `runtimeClassName` is `gvisor` |
 | `operator-token` | the root pod runs as the fixture's ServiceAccount with `automountServiceAccountToken: false` and no API server token; the fixture's one projected token, at its mount, is a JWT for the fixture's audience, subject the pod's ServiceAccount, and exactly the fixture's lifetime, read into the harness's memory and only its claims printed |
 | `pod-baseline` | the stub agent the root's shim started (read from `/proc/<pid>/environ`) has `PI_CONFIG_FILES` = the pod baseline's overlay on the state volume, then the operator's; `OTEL_SDK_DISABLED=true`, `PI_AUTO_QA=0`, `PI_CONFIG_DIR=.omp`, `OMP_SESSION_STORAGE=file`, and the operator's other variables; the shim itself (pid 1) has the operator's `PI_CONFIG_FILES` alone; the overlay is mode `444`; and the image's `omp config get compaction.remoteEndpoint`, run under the agent's environment in a repository whose `.omp/config.yml` sets it, reads `""` |
@@ -1571,6 +1632,29 @@ key), and either `label_prefix` (the prefix every run label of the proof carries
 | `snapshot FILE` | writes the namespace's Sandboxes, Secrets, PVCs, pods and ConfigMaps (`kinds`) that carry the run's project label or none, sorted |
 | `teardown` | runs once and never fails. It refuses a label without `label_prefix`, or other than `label_exact`, so a mistyped label cannot select another run's objects; deletes every recorded Sandbox by name, then the Sandboxes and ConfigMaps labelled with that exact project; then lists the project's objects every 2 s, up to 150 listings, until none is left. Secrets and PVCs the Sandboxes' own deletion has not taken by the 90th listing are deleted by that exact label once, on the first listing from then on that answers; three failed listings in a row end the wait, naming the context and its error |
 | `namespace_clean` | the check `namespace-clean`: a fresh snapshot, written to `$evidence/namespace-after.txt`, must equal `$evidence/namespace-before.txt` |
+
+## lib/proof-pod.sh
+
+What a stage proof run [from a pod](#from-a-pod) has in place of the devbox's kubeconfig, its
+`secrets` CLI and its routed `gh`: the pod's two identities, and installation tokens of GitHub Apps
+minted from their key files. Run, never sourced.
+
+```sh
+bash scripts/e2e/lib/proof-pod.sh run <stage script> [<arg>...]
+bash scripts/e2e/lib/proof-pod.sh kubeconfig <file>
+bash scripts/e2e/lib/proof-pod.sh app-token <app id> <key file> <owner/repo> [<cache file>]
+bash scripts/e2e/lib/proof-pod.sh human <dir> <app id> <key file> <owner/repo>
+```
+
+| command | does |
+| :--- | :--- |
+| `kubeconfig FILE` | writes a kubeconfig (0600) with two contexts on the pod's own cluster, at the address every pod is given (`KUBERNETES_SERVICE_HOST`, `KUBERNETES_SERVICE_PORT`) and checked against the pod's CA. `operator` is the pod's ServiceAccount, by its token file, which the client re-reads as the kubelet rotates it. `runtime` is the Legion daemon's ServiceAccount, `LEGION_PROOF_DAEMON_SERVICE_ACCOUNT` (`<namespace>/<name>`, required): an exec credential plugin asks the TokenRequest API, as the operator, for a one-hour token of that account (`kubectl create token`), and the client asks again once it expires; no token of it is written anywhere. The ServiceAccount directory is `/var/run/secrets/kubernetes.io/serviceaccount`, or `LEGION_PROOF_SERVICE_ACCOUNT_DIR` |
+| `run SCRIPT ARGS…` | writes that kubeconfig into a fresh directory and runs the stage script with `KUBECONFIG` and `LEGION_E2E_RUNTIME_KUBECONFIG` naming it, `LEGION_E2E_RUNTIME_CONTEXT=runtime`, `LEGION_E2E_OPERATOR_CONTEXT=operator`, and `LEGION_E2E_RUNTIME_SERVICE_ACCOUNT` set to the daemon's account, which the identity check then requires. It refuses to start when any of the five is already set, rather than override the caller's |
+| `app-token APP KEY REPO [CACHE]` | prints an installation token of the GitHub App `APP` for its installation on `REPO`, minted from its private key `KEY`: a PEM file no group or other may read, refused otherwise, naming the mode. With `CACHE`, a token there with more than ten minutes left is reused, and a new one is written there (0600) |
+| `human DIR APP KEY REPO` | writes the proof human's GitHub credentials into `DIR` (0700), once the key has minted a token: `gh`, which runs the `gh` first on `PATH` when it ran with `GH_TOKEN` set to a token of the human's App on `REPO`, and `gitconfig`, whose credential helper answers git for `https://github.com` with the same token. Both mint through `app-token` with `DIR/token.json` as the cache, so a run longer than a token's hour keeps working. The caller puts `DIR` first on `PATH` and sets `GIT_CONFIG_GLOBAL=DIR/gitconfig` |
+
+The key, the App's JWT and every token stay out of every argv: curl reads its bearer from stdin. A
+refusal names what it refused on stderr and exits 1.
 
 ## lib/secret-leaks.ts
 

@@ -48,11 +48,8 @@ func (r *liveRig) checkIdentity() error {
 	if user.Username == operator.Status.UserInfo.Username {
 		return fmt.Errorf("the runtime context authenticates as the operator (%s); refusing to start", user.Username)
 	}
-	if !regexp.MustCompile(`:assumed-role/[A-Za-z0-9+=,.@_-]*legion-daemon/`).MatchString(user.Username) {
-		return fmt.Errorf("the runtime identity %s is not the assumed Legion daemon role", user.Username)
-	}
-	if !slices.Contains(user.Groups, "legion-daemon") {
-		return fmt.Errorf("the runtime identity is not in group legion-daemon: %v", user.Groups)
+	if err := r.checkRuntimeUser(user); err != nil {
+		return err
 	}
 
 	_, err = r.kube.CoreV1().Secrets(r.env.namespace).List(ctx, metav1.ListOptions{Limit: 1})
@@ -151,6 +148,27 @@ func (r *liveRig) checkIdentity() error {
 		}
 	}
 	note("runtime", "access reviews: %d positive controls allowed; %d denied cluster-wide (impersonation of every kind, serviceaccounts/token, pods and pods/exec, secrets list and create, PVC get, nodes, RBAC create/update/patch/escalate/bind, sandboxes outside %s)", allowed, denied, r.env.namespace)
+	return nil
+}
+
+// checkRuntimeUser: the runtime authenticates as the Legion daemon itself. A proof pod's runtime
+// context mints tokens of the daemon's ServiceAccount (LEGION_E2E_RUNTIME_SERVICE_ACCOUNT), whose
+// subject is that account's exactly; the devbox's restricted context is an assumed IAM role that EKS
+// maps to group legion-daemon.
+func (r *liveRig) checkRuntimeUser(user authnv1.UserInfo) error {
+	if account := r.env.runtimeServiceAccount; account != "" {
+		namespace, name, _ := strings.Cut(account, "/")
+		if want := "system:serviceaccount:" + namespace + ":" + name; user.Username != want {
+			return fmt.Errorf("the runtime identity %s is not the Legion daemon's ServiceAccount %s", user.Username, want)
+		}
+		return nil
+	}
+	if !regexp.MustCompile(`:assumed-role/[A-Za-z0-9+=,.@_-]*legion-daemon/`).MatchString(user.Username) {
+		return fmt.Errorf("the runtime identity %s is not the assumed Legion daemon role", user.Username)
+	}
+	if !slices.Contains(user.Groups, "legion-daemon") {
+		return fmt.Errorf("the runtime identity is not in group legion-daemon: %v", user.Groups)
+	}
 	return nil
 }
 

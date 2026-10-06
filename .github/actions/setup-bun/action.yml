@@ -8,7 +8,7 @@ description: >-
   Bun is a toolchain, so CI runs the version this repository locks rather than whatever is
   latest: an unpinned runner moved to 1.4.2 and segfaulted `bun test` intermittently (8 crashes
   in 60 runs against 2 in 60 on the pinned version, same tree, four cores). Raising Bun means
-  editing .bun-version and the two Dockerfile ARG BUN_VERSION defaults together.
+  editing .bun-version and every Dockerfile's ARG BUN_VERSION default together.
 
 runs:
   using: composite

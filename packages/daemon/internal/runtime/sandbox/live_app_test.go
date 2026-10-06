@@ -5,18 +5,17 @@
 package sandbox
 
 import (
-	"bytes"
 	"context"
 	"fmt"
-	"os/exec"
+	"os"
 	"strings"
 
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/config"
 )
 
-// implementTokens is the harness's ProvisionTokens: the implement App's installation token,
-// minted in-process from the key the devbox's secret store holds (Sami's ruling on ask e3943412).
+// implementTokens is the harness's ProvisionTokens: the implement App's installation token, minted
+// in-process from the App's private key.
 type implementTokens struct{ apps *appauth.Manager }
 
 func (t implementTokens) Token(ctx context.Context, owner string) (string, error) {
@@ -24,19 +23,17 @@ func (t implementTokens) Token(ctx context.Context, owner string) (string, error
 	return lease.Token, err
 }
 
-// resolveApp reads the implement App's key from the secret store, handed to one child process
-// through the agent-tier `secrets <KEY> -- …` injection, and mints the App's installation token for
-// the run's repository owner; the key stays in this process's memory.
+// resolveApp reads the implement App's private key from its file, a PEM block only its owner can
+// read (the script refuses any other mode), and mints the App's installation token for the run's
+// repository owner. The key stays in this process's memory.
 func (r *liveRig) resolveApp() error {
-	var stdout, stderr bytes.Buffer
-	cmd := exec.CommandContext(r.ctx, "secrets", r.env.appKeyName, "--", "sh", "-c", `printf %s "$`+r.env.appKeyName+`"`)
-	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("reading %s from the secret store: %v: %s", r.env.appKeyName, err, strings.TrimSpace(stderr.String()))
-	}
-	pem, err := config.DecodePrivateKey(stdout.String())
+	raw, err := os.ReadFile(r.env.appKeyFile)
 	if err != nil {
-		return fmt.Errorf("%s: %w", r.env.appKeyName, err)
+		return fmt.Errorf("reading the implement App's key: %w", err)
+	}
+	pem := strings.TrimSpace(string(raw))
+	if !strings.HasPrefix(pem, "-----BEGIN") {
+		return fmt.Errorf("the implement App's key file %s holds no PEM block (-----BEGIN …)", r.env.appKeyFile)
 	}
 	apps := appauth.New(config.GitHubApps{Implement: config.GitHubApp{AppID: r.env.appID, PrivateKey: pem}}, appauth.Options{})
 	owner := r.env.repo.Owner()

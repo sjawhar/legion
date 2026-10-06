@@ -1,10 +1,10 @@
 //go:build e2e
 
 // The Stage 4a live proof (LEGION-208 Stage 4 plan, Task 4.7): this package's runtime driven on a
-// real cluster through the Legion daemon's own restricted identity, with the devbox's admin
-// identity only for what an operator does beside it — exec, PVC reads, a Secret's hash, the
-// namespace list. scripts/e2e/stage4a-sandbox-runtime.sh builds it with `-tags e2e`, runs it, and
-// owns the run's inputs, its teardown, and the namespace comparison; see scripts/e2e/README.md.
+// real cluster through the Legion daemon's own restricted identity, with the operator's identity
+// only for what an operator does beside it — exec, PVC reads, a Secret's hash, the namespace list.
+// scripts/e2e/stage4a-sandbox-runtime.sh builds it with `-tags e2e`, runs it, and owns the run's
+// inputs, its teardown, and the namespace comparison; see scripts/e2e/README.md.
 //
 // Each check prints what it observed, each line naming the identity that observed it, and then
 // `CHECK <name>: PASS`. The first check that does not hold prints `CHECK <name>: FAIL: <why>` and
@@ -138,11 +138,15 @@ var stubAgent = []string{"/bin/sh", "-c", `printf '%s\n' "$POD_UID" >>"$LEGION_E
 // liveEnv is what the script hands the harness.
 type liveEnv struct {
 	runtimeKubeconfig, runtimeContext, operatorContext string
-	namespace, project, claimProject, image            string
-	repo                                               ghrepo.Repository
-	streamHost, streamPort                             string
-	appID, appKeyName                                  string
-	record, work, from                                 string
+	// runtimeServiceAccount is the runtime identity's ServiceAccount, <namespace>/<name>, when the
+	// runtime context is one (a proof pod's, lib/proof-pod.sh); empty, the identity check requires the
+	// assumed IAM role the devbox's restricted context authenticates as.
+	runtimeServiceAccount                   string
+	namespace, project, claimProject, image string
+	repo                                    ghrepo.Repository
+	streamHost, streamPort                  string
+	appID, appKeyFile                       string
+	record, work, from                      string
 	// operatorPodFile is the run's copy of deploy/kubernetes/operator-route/pod.yml, its token
 	// audience filled in, the operator's pod every launch carries; operatorConfigMap is the run's
 	// copy of the ConfigMap it names.
@@ -167,25 +171,26 @@ func readLiveEnv(t *testing.T) liveEnv {
 		return value
 	}
 	env := liveEnv{
-		runtimeKubeconfig:    get("LEGION_E2E_RUNTIME_KUBECONFIG"),
-		runtimeContext:       get("LEGION_E2E_RUNTIME_CONTEXT"),
-		operatorContext:      get("LEGION_E2E_OPERATOR_CONTEXT"),
-		namespace:            get("LEGION_E2E_NAMESPACE"),
-		project:              get("LEGION_E2E_PROJECT"),
-		image:                get("LEGION_E2E_IMAGE"),
-		streamHost:           get("LEGION_E2E_STREAM_HOST"),
-		streamPort:           get("LEGION_E2E_STREAM_PORT"),
-		appID:                get("LEGION_E2E_IMPLEMENT_APP_ID"),
-		appKeyName:           get("LEGION_E2E_IMPLEMENT_APP_KEY"),
-		record:               get("LEGION_E2E_RECORD"),
-		work:                 get("LEGION_E2E_WORK"),
-		from:                 os.Getenv("LEGION_E2E_FROM"),
-		operatorPodFile:      get("LEGION_E2E_OPERATOR_POD"),
-		operatorConfigMap:    get("LEGION_E2E_OPERATOR_CONFIGMAP"),
-		agentSecretsURL:      os.Getenv("LEGION_E2E_AGENT_SECRETS_URL"),
-		agentSecretsOperator: os.Getenv("LEGION_E2E_AGENT_SECRETS_OPERATOR"),
-		agentSecretsAutoSHA:  os.Getenv("LEGION_E2E_AGENT_SECRETS_AUTO_SHA256"),
-		agentSecretsBin:      os.Getenv("LEGION_E2E_AGENT_SECRETS_BIN"),
+		runtimeKubeconfig:     get("LEGION_E2E_RUNTIME_KUBECONFIG"),
+		runtimeContext:        get("LEGION_E2E_RUNTIME_CONTEXT"),
+		runtimeServiceAccount: os.Getenv("LEGION_E2E_RUNTIME_SERVICE_ACCOUNT"),
+		operatorContext:       get("LEGION_E2E_OPERATOR_CONTEXT"),
+		namespace:             get("LEGION_E2E_NAMESPACE"),
+		project:               get("LEGION_E2E_PROJECT"),
+		image:                 get("LEGION_E2E_IMAGE"),
+		streamHost:            get("LEGION_E2E_STREAM_HOST"),
+		streamPort:            get("LEGION_E2E_STREAM_PORT"),
+		appID:                 get("LEGION_E2E_IMPLEMENT_APP_ID"),
+		appKeyFile:            get("LEGION_E2E_IMPLEMENT_APP_KEY_FILE"),
+		record:                get("LEGION_E2E_RECORD"),
+		work:                  get("LEGION_E2E_WORK"),
+		from:                  os.Getenv("LEGION_E2E_FROM"),
+		operatorPodFile:       get("LEGION_E2E_OPERATOR_POD"),
+		operatorConfigMap:     get("LEGION_E2E_OPERATOR_CONFIGMAP"),
+		agentSecretsURL:       os.Getenv("LEGION_E2E_AGENT_SECRETS_URL"),
+		agentSecretsOperator:  os.Getenv("LEGION_E2E_AGENT_SECRETS_OPERATOR"),
+		agentSecretsAutoSHA:   os.Getenv("LEGION_E2E_AGENT_SECRETS_AUTO_SHA256"),
+		agentSecretsBin:       os.Getenv("LEGION_E2E_AGENT_SECRETS_BIN"),
 	}
 	repo, err := ghrepo.Parse("LEGION_E2E_REPO", get("LEGION_E2E_REPO"))
 	if err != nil {
@@ -689,8 +694,8 @@ func sameLocator(a, b runtime.Locator) bool {
 		(a.Sandbox == nil) == (b.Sandbox == nil) && (a.Sandbox == nil || *a.Sandbox == *b.Sandbox)
 }
 
-// startRuntime binds a fresh listener on the devbox's private address and builds a fresh runtime
-// on it, as a daemon boot does, with an Observe feeding the run's observation record.
+// startRuntime binds a fresh listener on the stream host's address and builds a fresh runtime on it,
+// as a daemon boot does, with an Observe feeding the run's observation record.
 func (r *liveRig) startRuntime() error {
 	if r.tokens.apps == nil {
 		if err := r.resolveApp(); err != nil {
@@ -945,7 +950,7 @@ func (r *liveRig) awaitHelloAgain(c *liveClaim, since time.Time) (registration, 
 	return reg, nil
 }
 
-// networkPathFailure names what a pod that runs but never says hello points at: the devbox
+// networkPathFailure names what a pod that runs but never says hello points at: the stream host's
 // address and port it dials, and the security groups of the node it runs on (from the node's
 // EC2NodeClass, read as the operator).
 func (r *liveRig) networkPathFailure(pod *corev1.Pod) error {
@@ -958,7 +963,7 @@ func (r *liveRig) networkPathFailure(pod *corev1.Pod) error {
 			groups = "(unknown: " + err.Error() + ")"
 		}
 	}
-	return fmt.Errorf("network path: pod %s (uid %s) runs on node %s but no hello reached tcp://%s:%s within %s; the node's security groups are [%s], and the devbox's security group must admit %s from them",
+	return fmt.Errorf("network path: pod %s (uid %s) runs on node %s but no hello reached tcp://%s:%s within %s; the node's security groups are [%s], and the stream host's network must admit %s from them",
 		pod.Name, pod.UID, pod.Spec.NodeName, r.env.streamHost, r.env.streamPort, liveBootTimeout, groups, r.env.streamPort)
 }
 
