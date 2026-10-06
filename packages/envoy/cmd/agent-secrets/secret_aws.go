@@ -8,8 +8,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"io"
-	"os"
 	"regexp"
 	"strings"
 
@@ -54,9 +52,6 @@ var awsClients = func(ctx context.Context, profile, region string) (secretsAPI, 
 	}
 	return secretsmanager.NewFromConfig(cfg), sts.NewFromConfig(cfg), nil
 }
-
-// secretStdin is where create and set read a secret's value from; tests replace it.
-var secretStdin io.Reader = os.Stdin
 
 // ssoRole matches a person's Identity Center sign-in and captures (account, session name). The
 // deployment repository's Identity Center permission sets map the session name to the person's

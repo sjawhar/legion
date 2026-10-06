@@ -15,9 +15,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"slices"
 	"sort"
 	"strings"
+	"syscall"
 	"text/tabwriter"
 	"time"
 
@@ -25,6 +27,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 	smtypes "github.com/aws/aws-sdk-go-v2/service/secretsmanager/types"
 	"github.com/aws/smithy-go"
+	"golang.org/x/term"
 
 	"github.com/sjawhar/envoy/internal/broker/policy"
 )
@@ -136,10 +139,64 @@ func ownerTag(owner, email string) string {
 	return owner
 }
 
-// readSecretValue reads a secret's value from secretStdin: all of it, less one trailing newline,
-// so `echo` and a file ending in a newline give the value without one. An empty value is a usage
-// error.
-func readSecretValue() (string, error) {
+// secretStdin is where create and set read a secret's value from; tests replace it.
+var secretStdin io.Reader = os.Stdin
+
+// stdinTerminal answers r's file descriptor when r is a terminal, where create and set prompt for
+// the value instead of reading r to its end; tests replace it.
+var stdinTerminal = func(r io.Reader) (fd int, ok bool) {
+	f, isFile := r.(*os.File)
+	if !isFile || !term.IsTerminal(int(f.Fd())) {
+		return 0, false
+	}
+	return int(f.Fd()), true
+}
+
+// readHidden reads one line typed at the terminal fd with echo off, less its line ending, so the
+// value never shows on the screen; tests replace it. An interrupt or a termination while it waits
+// puts the terminal back as it was before the signal ends the process, so the shell it returns to
+// is not left without echo.
+var readHidden = func(fd int) ([]byte, error) {
+	state, err := term.GetState(fd)
+	if err != nil {
+		return nil, err
+	}
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(signals)
+	read := make(chan struct{})
+	defer close(read)
+	go func() {
+		select {
+		case sig := <-signals:
+			_ = term.Restore(fd, state)
+			fmt.Fprintln(os.Stderr)
+			signal.Reset(sig)
+			_ = syscall.Kill(syscall.Getpid(), sig.(syscall.Signal))
+		case <-read:
+		}
+	}()
+	return term.ReadPassword(fd)
+}
+
+// readSecretValue reads the value of the secret name. At a terminal it prompts on stderr and reads
+// one line with echo off (readHidden), as `gh secret set` does, so the value never shows on the
+// screen. Otherwise it reads all of secretStdin, less one trailing newline, so `echo` and a file
+// ending in a newline give the value without one. An empty value is a usage error either way.
+func readSecretValue(name string, stderr io.Writer) (string, error) {
+	if fd, ok := stdinTerminal(secretStdin); ok {
+		fmt.Fprintf(stderr, "Value for %s: ", name)
+		line, err := readHidden(fd)
+		// Echo is off, so the line ending the person typed never reached the screen.
+		fmt.Fprintln(stderr)
+		if err != nil && !errors.Is(err, io.EOF) {
+			return "", fmt.Errorf("read the value at the terminal: %w", err)
+		}
+		if len(line) == 0 {
+			return "", usageErr{errors.New("no value was entered at the prompt")}
+		}
+		return string(line), nil
+	}
 	data, err := io.ReadAll(secretStdin)
 	if err != nil {
 		return "", fmt.Errorf("read the value from standard input: %w", err)
@@ -492,7 +549,7 @@ func cmdSecretCreate(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return secretFail(stderr, form, err)
 	}
-	value, err := readSecretValue()
+	value, err := readSecretValue(name, stderr)
 	if err != nil {
 		return secretFail(stderr, form, err)
 	}
@@ -531,7 +588,7 @@ func cmdSecretSet(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return secretFail(stderr, form, err)
 	}
-	value, err := readSecretValue()
+	value, err := readSecretValue(name, stderr)
 	if err != nil {
 		return secretFail(stderr, form, err)
 	}

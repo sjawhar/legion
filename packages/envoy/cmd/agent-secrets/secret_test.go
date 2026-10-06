@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -416,6 +417,122 @@ func TestSecretWritesCheckTheSignInBeforeReadingTheValue(t *testing.T) {
 			if _, err := local.DescribeSecret(context.Background(), &secretsmanager.DescribeSecretInput{SecretId: aws.String(policytest.ID("NEW_KEY"))}); err == nil {
 				t.Fatalf("%v as %s created NEW_KEY", args, signIn.arn)
 			}
+		}
+	}
+}
+
+// terminalStdin stands for a terminal on standard input (useTerminal): it fails t if a form reads
+// it to its end instead of prompting for the value.
+type terminalStdin struct{ t *testing.T }
+
+func (s terminalStdin) Read([]byte) (int, error) {
+	s.t.Error("the form read standard input to its end at a terminal instead of prompting for the value")
+	return 0, io.EOF
+}
+
+// terminalFD is the file descriptor of useTerminal's terminal.
+const terminalFD = 7
+
+// useTerminal makes standard input a terminal for the rest of t, at which each value a form reads
+// with echo off is the next of typed; it answers the descriptor of each such read, in order.
+func useTerminal(t *testing.T, typed ...string) *[]int {
+	t.Helper()
+	restoreStdin, restoreTerminal, restoreHidden := secretStdin, stdinTerminal, readHidden
+	t.Cleanup(func() { secretStdin, stdinTerminal, readHidden = restoreStdin, restoreTerminal, restoreHidden })
+	stdin := terminalStdin{t}
+	secretStdin = stdin
+	stdinTerminal = func(r io.Reader) (int, bool) {
+		if r != io.Reader(stdin) {
+			return 0, false
+		}
+		return terminalFD, true
+	}
+	reads := &[]int{}
+	readHidden = func(fd int) ([]byte, error) {
+		*reads = append(*reads, fd)
+		if len(*reads) > len(typed) {
+			t.Fatalf("read %d values at the terminal, want %d", len(*reads), len(typed))
+		}
+		return []byte(typed[len(*reads)-1]), nil
+	}
+	return reads
+}
+
+// TestSecretCreateAndSetPromptForTheValueAtATerminal: with a terminal on standard input, create
+// and set print a prompt naming the secret on stderr and read one line with echo off, never
+// printing the value; a refused sign-in prompts for nothing.
+func TestSecretCreateAndSetPromptForTheValueAtATerminal(t *testing.T) {
+	local := secrets.NewLocal(policytest.Secret("HELD_KEY", "ada@example.com", policy.TierAgent, "v1"))
+	startSecretBroker(t, servedBy(local))
+	useAWS(t, local, testAccount, adaSignIn)
+	reads := useTerminal(t, "typed-new", "typed-held")
+	for _, tc := range []struct {
+		name, value string
+		args        []string
+	}{
+		{"NEW_KEY", "typed-new", []string{"create", "NEW_KEY", "--owner", "me", "--tier", "agent"}},
+		{"HELD_KEY", "typed-held", []string{"set", "HELD_KEY"}},
+	} {
+		stdout, stderr, code := runSecret(tc.args...)
+		if code != 0 {
+			t.Fatalf("%v: exit %d, stderr %q; want 0", tc.args, code, stderr)
+		}
+		if want := "Value for " + tc.name + ": \n"; stderr != want {
+			t.Fatalf("%v: stderr %q, want exactly the prompt %q", tc.args, stderr, want)
+		}
+		if strings.Contains(stdout+stderr, tc.value) {
+			t.Fatalf("%v printed the value: stdout %q, stderr %q", tc.args, stdout, stderr)
+		}
+		if v := valueOf(t, local, tc.name); v != tc.value {
+			t.Fatalf("%v: value = %q, want %q", tc.args, v, tc.value)
+		}
+	}
+	if len(*reads) != 2 || (*reads)[0] != terminalFD || (*reads)[1] != terminalFD {
+		t.Fatalf("hidden reads = %v, want two at the terminal's descriptor %d", *reads, terminalFD)
+	}
+	useAWS(t, local, testAccount, "arn:aws:sts::111122223333:assumed-role/example-service-role/session")
+	_, stderr, code := runSecret("set", "HELD_KEY")
+	if code != 1 || strings.Contains(stderr, "Value for") || len(*reads) != 2 {
+		t.Fatalf("set under a machine's role: exit %d, stderr %q, hidden reads %v; want 1 with no prompt and no read", code, stderr, *reads)
+	}
+}
+
+// TestSecretAnEmptyValueAtATerminalIsAUsageError: Enter alone, or the end of input, at the prompt
+// is a usage error that writes nothing.
+func TestSecretAnEmptyValueAtATerminalIsAUsageError(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{{"enter alone", nil}, {"end of input", io.EOF}} {
+		t.Run(tc.name, func(t *testing.T) {
+			local := secrets.NewLocal(policytest.Secret("HELD_KEY", "ada@example.com", policy.TierAgent, "v1"))
+			startSecretBroker(t, servedBy(local))
+			useAWS(t, local, testAccount, adaSignIn)
+			useTerminal(t)
+			readHidden = func(int) ([]byte, error) { return nil, tc.err }
+			_, stderr, code := runSecret("set", "HELD_KEY")
+			if code != exitUsageError || !strings.Contains(stderr, "no value was entered") {
+				t.Fatalf("exit %d, stderr %q; want %d saying no value was entered", code, stderr, exitUsageError)
+			}
+			if v := valueOf(t, local, "HELD_KEY"); v != "v1" {
+				t.Fatalf("value = %q, want v1 unchanged", v)
+			}
+		})
+	}
+}
+
+// TestStdinIsATerminalOnlyAtATerminal: stdinTerminal answers false for a pipe and for a reader that
+// is no file, so a value piped in is read to its end, with no prompt.
+func TestStdinIsATerminalOnlyAtATerminal(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	defer w.Close()
+	for _, in := range []io.Reader{r, strings.NewReader("v1")} {
+		if _, ok := stdinTerminal(in); ok {
+			t.Fatalf("stdinTerminal(%T) = true, want false", in)
 		}
 	}
 }
