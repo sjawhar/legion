@@ -38,7 +38,7 @@ root=${JSON.stringify(join(import.meta.dir, "..", "..", ".."))}
 work=${JSON.stringify(join(run, "work"))} evidence=${JSON.stringify(evidence)}
 check=controller check_started=2026-09-30T12:00:00Z
 ok= was_blocked= until=controller locked=1 compared= snapshotted= audited= prod_baseline=2026-09-30T11:00:00.000000000Z
-tree1= tree2= tree3= tree4= shape_pid= daemon_pid= watch_pid= events_pid= leaks_pid= sampler_pid= interests_pid= pg_container=none run_label=x
+tree1= tree2= tree3= tree4= pair_session= shape_pid= daemon_pid= watch_pid= events_pid= leaks_pid= sampler_pid= interests_pid= pg_container=none run_label=x
 mkdir -p "$work" "$evidence/model-gateway"
 # The controller starved during the checkpoint: a blocked checkpoint's notes, which must not print,
 # would list it, and a failed checkpoint's do.
