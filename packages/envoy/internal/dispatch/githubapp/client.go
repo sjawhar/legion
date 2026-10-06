@@ -7,6 +7,7 @@
 package githubapp
 
 import (
+	"bytes"
 	"context"
 	"crypto"
 	"crypto/rand"
@@ -26,6 +27,8 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/sync/singleflight"
+
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 )
 
@@ -40,6 +43,12 @@ var (
 	// ErrNoContentsRead is an installation whose Contents permission is missing
 	// or "none". Read and write both satisfy read.
 	ErrNoContentsRead = errors.New("the installation lacks Contents: read")
+	// ErrNoActionsRead is an installation whose Actions permission is missing or
+	// "none" (LEGION-567's reconcile needs it to list workflow runs and jobs).
+	ErrNoActionsRead = errors.New("the installation lacks Actions: read")
+	// ErrNoPullRequestsRead is an installation whose Pull requests permission is
+	// missing or "none" (LEGION-567's reconcile needs it to read merged PRs).
+	ErrNoPullRequestsRead = errors.New("the installation lacks Pull requests: read")
 	// ErrNoBranch is GitHub's 404/422 for the configured branch: the branch does
 	// not exist (or the repository vanished under the installation token).
 	ErrNoBranch = errors.New("the branch does not exist")
@@ -80,11 +89,15 @@ const defaultBase = "https://api.github.com"
 const tokenExpirySlack = 5 * time.Minute
 
 // Installation is the slice of GitHub's repository-installation response
-// dispatch inspects.
+// dispatch inspects. AccountLogin (the installation's own account -- a user or an org) is set
+// only by ListInstallations (GET /app/installations), which is account-less in its own answer
+// shape; RepositoryToken's own installation()/DeliveryPermissions() lookups never set it, since
+// they already know the account from the owner/repo they resolved.
 type Installation struct {
-	ID          int64
-	AppSlug     string
-	Permissions auth.AppPerms
+	ID           int64
+	AppSlug      string
+	Permissions  auth.AppPerms
+	AccountLogin string
 }
 
 // Source is a successful access check: the installation that covers the
@@ -97,6 +110,71 @@ type Source struct {
 type cachedToken struct {
 	token   string
 	expires time.Time
+}
+
+// ttlCache is a small time-bounded cache keyed by K, shared by ListInstallations (one fixed key)
+// and ListInstallationRepositoriesByID (one key per installation id) -- both independently
+// hand-rolled the identical lock/check-age/unlock-on-hit, fetch-then-lock/store/unlock shape
+// before this helper existed. A singleflight.Group collapses concurrent cold-cache fetches for
+// the same key into one network call: two goroutines racing a cold cache for the same
+// installation (plausible under the cross-installation errgroup's own concurrency) now share
+// one fetch's answer instead of each minting its own.
+type ttlCache[K comparable, V any] struct {
+	ttl   time.Duration
+	now   func() time.Time
+	mu    sync.Mutex
+	items map[K]ttlCacheEntry[V]
+	group singleflight.Group
+}
+
+type ttlCacheEntry[V any] struct {
+	value V
+	at    time.Time
+}
+
+func newTTLCache[K comparable, V any](ttl time.Duration, now func() time.Time) *ttlCache[K, V] {
+	return &ttlCache[K, V]{ttl: ttl, now: now, items: map[K]ttlCacheEntry[V]{}}
+}
+
+// fresh returns key's cached value when younger than ttl.
+func (c *ttlCache[K, V]) fresh(key K) (V, bool) {
+	c.mu.Lock()
+	entry, ok := c.items[key]
+	c.mu.Unlock()
+	if ok && c.now().Sub(entry.at) < c.ttl {
+		return entry.value, true
+	}
+	var zero V
+	return zero, false
+}
+
+// get returns key's cached value when fresh; otherwise it calls fetch exactly once across every
+// concurrent caller for this key (singleflight, keyed by key's string form) and caches the
+// result for the rest.
+func (c *ttlCache[K, V]) get(key K, fetch func() (V, error)) (V, error) {
+	if value, ok := c.fresh(key); ok {
+		return value, nil
+	}
+	value, err, _ := c.group.Do(fmt.Sprint(key), func() (any, error) {
+		// Re-check: a sibling caller may have already refreshed this key while this one waited
+		// to acquire the singleflight call.
+		if value, ok := c.fresh(key); ok {
+			return value, nil
+		}
+		fetched, err := fetch()
+		if err != nil {
+			return nil, err
+		}
+		c.mu.Lock()
+		c.items[key] = ttlCacheEntry[V]{value: fetched, at: c.now()}
+		c.mu.Unlock()
+		return fetched, nil
+	})
+	if err != nil {
+		var zero V
+		return zero, err
+	}
+	return value.(V), nil
 }
 
 // Client calls the GitHub App API as the configured App. A nil *Client is the
@@ -112,7 +190,22 @@ type Client struct {
 	tokens map[int64]cachedToken
 	// repositories maps "owner/repo" to the installation that covers it, for RepositoryToken.
 	repositories map[string]int64
+	// installations caches ListInstallations' own answer under one fixed key
+	// (installationsCacheKey): the installation list changes only when a human
+	// installs/uninstalls the App, far slower than every reconcile pass needs to re-fetch it.
+	installations *ttlCache[string, []Installation]
+	// installationRepos caches ListInstallationRepositoriesByID's own answer per installation id,
+	// for the same reason.
+	installationRepos *ttlCache[int64, []string]
 }
+
+// installationsCacheKey is the one key installations (a single answer, not per-installation)
+// caches under.
+const installationsCacheKey = "installations"
+
+// installationsCacheTTL bounds how long ListInstallations trusts its own cached answer before
+// asking GitHub again.
+const installationsCacheTTL = 10 * time.Minute
 
 // New builds a client from the loaded App credentials. It returns (nil, nil)
 // when app is nil or carries no private key — the caller keeps the nil client
@@ -130,7 +223,7 @@ func New(app *auth.AppConfig, base string) (*Client, error) {
 	if base == "" {
 		base = defaultBase
 	}
-	return &Client{
+	c := &Client{
 		app:          *app,
 		key:          key,
 		base:         strings.TrimSuffix(base, "/"),
@@ -138,7 +231,11 @@ func New(app *auth.AppConfig, base string) (*Client, error) {
 		now:          time.Now,
 		tokens:       map[int64]cachedToken{},
 		repositories: map[string]int64{},
-	}, nil
+	}
+	nowFunc := func() time.Time { return c.now() }
+	c.installations = newTTLCache[string, []Installation](installationsCacheTTL, nowFunc)
+	c.installationRepos = newTTLCache[int64, []string](installationsCacheTTL, nowFunc)
+	return c, nil
 }
 
 func parsePrivateKey(pemText string) (*rsa.PrivateKey, error) {
@@ -186,7 +283,15 @@ func (c *Client) appJWT() (string, error) {
 
 // Installation resolves the App installation covering owner/repo and checks
 // its Contents permission. A GitHub 404 is ErrNoInstallation; a missing or
-// "none" Contents permission is ErrNoContentsRead.
+// "none" Contents permission is ErrNoContentsRead. Does not consult
+// RepositoryToken's installationID cache (c.repositories): that cache exists
+// so RepositoryToken can skip resolving owner/repo again before minting a
+// token by ID, but GitHub's installation-lookup endpoint already takes
+// owner/repo directly in one GET -- there is no separate "resolve the ID"
+// round trip here to skip, and a permissions check must read GitHub's
+// current answer every call regardless (that is this function's whole job;
+// a cached ID doesn't carry cached permissions with it, and an org admin can
+// revoke a permission between calls).
 func (c *Client) Installation(ctx context.Context, owner, repo string) (Installation, error) {
 	installation, err := c.installation(ctx, owner, repo)
 	if err != nil {
@@ -194,6 +299,26 @@ func (c *Client) Installation(ctx context.Context, owner, repo string) (Installa
 	}
 	if installation.Permissions.Contents != "read" && installation.Permissions.Contents != "write" {
 		return Installation{}, fmt.Errorf("%w on %s/%s", ErrNoContentsRead, owner, repo)
+	}
+	return installation, nil
+}
+
+// DeliveryPermissions resolves the App installation covering owner/repo and checks its Actions
+// and Pull-requests permissions (LEGION-567's delivery timeline: the reconcile lists workflow
+// runs/jobs and merged pull requests, never Contents). A GitHub 404 is ErrNoInstallation; a
+// missing or "none" Actions permission is ErrNoActionsRead; a missing or "none" Pull-requests
+// permission is ErrNoPullRequestsRead -- checked in that order, so a caller showing one error at
+// a time names Actions first.
+func (c *Client) DeliveryPermissions(ctx context.Context, owner, repo string) (Installation, error) {
+	installation, err := c.installation(ctx, owner, repo)
+	if err != nil {
+		return Installation{}, err
+	}
+	if installation.Permissions.Actions != "read" && installation.Permissions.Actions != "write" {
+		return Installation{}, fmt.Errorf("%w on %s/%s", ErrNoActionsRead, owner, repo)
+	}
+	if installation.Permissions.PullRequests != "read" && installation.Permissions.PullRequests != "write" {
+		return Installation{}, fmt.Errorf("%w on %s/%s", ErrNoPullRequestsRead, owner, repo)
 	}
 	return installation, nil
 }
@@ -217,15 +342,81 @@ func (c *Client) installation(ctx context.Context, owner, repo string) (Installa
 	if status != http.StatusOK {
 		return Installation{}, fmt.Errorf("GET %s: status %d: %s", target, status, body)
 	}
-	var payload struct {
-		ID          int64         `json:"id"`
-		AppSlug     string        `json:"app_slug"`
-		Permissions auth.AppPerms `json:"permissions"`
-	}
+	var payload installationPayload
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return Installation{}, fmt.Errorf("decode installation: %w", err)
 	}
 	return Installation{ID: payload.ID, AppSlug: payload.AppSlug, Permissions: payload.Permissions}, nil
+}
+
+// installationPayload is GitHub's one object shape for an installation, shared by
+// GET /repos/{owner}/{repo}/installation (installation()) and GET /app/installations
+// (ListInstallations): identical except that only the list form's answer needs Account, since a
+// repo-scoped lookup already knows the account from its own owner/repo argument.
+type installationPayload struct {
+	ID      int64  `json:"id"`
+	AppSlug string `json:"app_slug"`
+	Account struct {
+		Login string `json:"login"`
+	} `json:"account"`
+	Permissions auth.AppPerms `json:"permissions"`
+}
+
+// maxInstallations bounds ListInstallations' pagination the same way maxInstallationRepositories
+// bounds a single installation's own repository list: a real-world App installed on far more
+// accounts than this should fail loudly rather than grow an unbounded page loop forever.
+const maxInstallations = 2000
+
+// ListInstallations lists every installation of this App (GET /app/installations,
+// JWT-authenticated, paginated): LEGION-567's merged-PR search must cover every installation the
+// App has, not only the one covering the configured deploy repository, since the population rule
+// (an author allowlist) names no installation or org boundary. Cached for installationsCacheTTL:
+// unlike RepositoryToken's owner/repo cache (invalidated only when a mint actually fails), this is
+// a plain time-based cache, since there is no per-call signal analogous to a failed token mint to
+// invalidate it on -- the install list changes only when a human installs/uninstalls the App, far
+// slower than any reconcile pass needs a fresh answer. Unlike this cache's own pre-ttlCache form,
+// a zero-installations answer is now cached too (ttlCache.fresh tests presence, not a non-nil
+// slice): an App installed nowhere re-fetches at most once per TTL instead of on every call.
+func (c *Client) ListInstallations(ctx context.Context) ([]Installation, error) {
+	if c == nil {
+		return nil, ErrNoAppKey
+	}
+	return c.installations.get(installationsCacheKey, func() ([]Installation, error) {
+		jwt, err := c.appJWT()
+		if err != nil {
+			return nil, err
+		}
+		var installations []Installation
+		for page := 1; ; page++ {
+			target := fmt.Sprintf("%s/app/installations?per_page=100&page=%d", c.base, page)
+			body, status, header, err := c.request(ctx, http.MethodGet, target, "Bearer "+jwt, nil, responseLimit)
+			if err != nil {
+				return nil, fmt.Errorf("list installations (page %d): %w", page, err)
+			}
+			if err := CheckResponse(status, header, body); err != nil {
+				return nil, fmt.Errorf("list installations (page %d): %w", page, err)
+			}
+			var payload []installationPayload
+			if err := json.Unmarshal(body, &payload); err != nil {
+				return nil, fmt.Errorf("decode installations (page %d): %w", page, err)
+			}
+			if len(payload) == 0 {
+				break
+			}
+			for _, entry := range payload {
+				installations = append(installations, Installation{
+					ID: entry.ID, AppSlug: entry.AppSlug, Permissions: entry.Permissions, AccountLogin: entry.Account.Login,
+				})
+			}
+			if len(installations) > maxInstallations {
+				return nil, fmt.Errorf("list installations: the App has more than %d installations", maxInstallations)
+			}
+			if len(payload) < 100 {
+				break
+			}
+		}
+		return installations, nil
+	})
 }
 
 // RepositoryToken returns an installation token of the installation covering owner/repo. The
@@ -259,13 +450,98 @@ func (c *Client) RepositoryToken(ctx context.Context, owner, repo string) (strin
 	return token, nil
 }
 
+// installationRepositoriesPerPage is GitHub's own page size for GET /installation/repositories.
+const installationRepositoriesPerPage = 100
+
+// maxInstallationRepositories bounds ListInstallationRepositoriesByID the same way
+// delivery.maxDeliveryWindow/maxRunsPerWindow/maxPullRequestsPerWindow bound their own queries:
+// an installation covering a very large org should fail loudly past this rather than build an
+// ever-growing, unbounded `repo:` qualifier list on every 5-minute reconcile pass.
+const maxInstallationRepositories = 2000
+
+// ListInstallationRepositoriesByID lists every repository ("owner/name") installation installs
+// -- GET /installation/repositories (an installation-token endpoint, paginated), under a token
+// minted directly by id (ListInstallations already resolved the id; there is no representative
+// owner/repo to mint one through RepositoryToken's own owner/repo-keyed cache). LEGION-567's
+// merged-PR search needs this to scope its query to exactly each installation's own repositories:
+// an unqualified GitHub search query is NOT scoped by the authenticating token for
+// public-repository content -- it searches all of public GitHub (confirmed live against a real
+// installation token) -- so the caller must supply an explicit repo: qualifier per repository
+// instead of relying on the token alone. Cached for installationsCacheTTL per installation id,
+// for the same reason ListInstallations caches its own answer: round 4's reconcile pass refetched
+// every installation's full repository list on every pass, multiplying the across-installation
+// search's own cost by the installation count for data that changes on human timescales, not
+// every five minutes.
+func (c *Client) ListInstallationRepositoriesByID(ctx context.Context, installationID int64) ([]string, error) {
+	return c.installationRepos.get(installationID, func() ([]string, error) {
+		token, err := c.Token(ctx, installationID)
+		if err != nil {
+			return nil, fmt.Errorf("mint token for installation %d: %w", installationID, err)
+		}
+		return listInstallationRepositories(ctx, c, token)
+	})
+}
+
+func listInstallationRepositories(ctx context.Context, c *Client, token string) ([]string, error) {
+	var names []string
+	for page := 1; ; page++ {
+		path := fmt.Sprintf("/installation/repositories?per_page=%d&page=%d", installationRepositoriesPerPage, page)
+		body, status, header, err := c.Read(ctx, token, path)
+		if err != nil {
+			return nil, fmt.Errorf("list installation repositories (page %d): %w", page, err)
+		}
+		if err := CheckResponse(status, header, body); err != nil {
+			return nil, fmt.Errorf("list installation repositories (page %d): %w", page, err)
+		}
+		var payload struct {
+			Repositories []struct {
+				FullName string `json:"full_name"`
+			} `json:"repositories"`
+		}
+		if err := json.Unmarshal(body, &payload); err != nil {
+			return nil, fmt.Errorf("decode installation repositories (page %d): %w", page, err)
+		}
+		if len(payload.Repositories) == 0 {
+			break
+		}
+		for _, repository := range payload.Repositories {
+			names = append(names, repository.FullName)
+		}
+		if len(names) > maxInstallationRepositories {
+			return nil, fmt.Errorf("list installation repositories: installation covers more than %d repositories", maxInstallationRepositories)
+		}
+		if len(payload.Repositories) < installationRepositoriesPerPage {
+			break
+		}
+	}
+	return names, nil
+}
+
 // Read performs GET path (an API path with its query, under the API origin) with an
 // installation token, returning GitHub's complete answer when it fits within the response limit.
 func (c *Client) Read(ctx context.Context, token, path string) ([]byte, int, http.Header, error) {
 	if c == nil {
 		return nil, 0, nil, ErrNoAppKey
 	}
-	return c.request(ctx, http.MethodGet, c.base+path, "Bearer "+token, responseLimit)
+	return c.request(ctx, http.MethodGet, c.base+path, "Bearer "+token, nil, responseLimit)
+}
+
+// GraphQL posts query/variables to the API origin's /graphql endpoint with an installation token,
+// returning GitHub's complete JSON response body (an `{data, errors}` envelope the caller
+// decodes) when it fits within the response limit. Some GitHub Apps' installation tokens can read
+// a repository's REST endpoints but are refused by the REST `/search/issues` endpoint for a
+// private repository ("cannot be searched... do not have permission") -- GraphQL's `search`
+// connection does not share that restriction, which is why delivery/github_prs.go's merged-PR
+// search uses this instead of REST search.
+func (c *Client) GraphQL(ctx context.Context, token string, query string, variables map[string]any) ([]byte, int, http.Header, error) {
+	if c == nil {
+		return nil, 0, nil, ErrNoAppKey
+	}
+	payload, err := json.Marshal(map[string]any{"query": query, "variables": variables})
+	if err != nil {
+		return nil, 0, nil, fmt.Errorf("encode GraphQL request: %w", err)
+	}
+	return c.request(ctx, http.MethodPost, c.base+"/graphql", "Bearer "+token, bytes.NewReader(payload), responseLimit)
 }
 
 // Token returns an installation access token, minting one only when the
@@ -340,31 +616,35 @@ func (c *Client) do(ctx context.Context, method, target, authorization string) (
 }
 
 func (c *Client) doLimited(ctx context.Context, method, target, authorization string, limit int64) ([]byte, int, error) {
-	body, status, _, err := c.request(ctx, method, target, authorization, limit)
+	body, status, _, err := c.request(ctx, method, target, authorization, nil, limit)
 	return body, status, err
 }
 
-// request performs one API call and returns its complete body when it fits within limit, status and headers.
-func (c *Client) request(ctx context.Context, method, target, authorization string, limit int64) ([]byte, int, http.Header, error) {
-	request, err := http.NewRequestWithContext(ctx, method, target, nil)
+// request performs one API call and returns its complete body when it fits within limit, status
+// and headers. body is nil for every GET call; GraphQL is this package's only POST with a body.
+func (c *Client) request(ctx context.Context, method, target, authorization string, body io.Reader, limit int64) ([]byte, int, http.Header, error) {
+	request, err := http.NewRequestWithContext(ctx, method, target, body)
 	if err != nil {
 		return nil, 0, nil, fmt.Errorf("build %s %s: %w", method, target, err)
 	}
 	request.Header.Set("Authorization", authorization)
 	request.Header.Set("Accept", "application/vnd.github+json")
+	if body != nil {
+		request.Header.Set("Content-Type", "application/json")
+	}
 	response, err := c.http.Do(request)
 	if err != nil {
 		return nil, 0, nil, fmt.Errorf("%s %s: %w", method, target, err)
 	}
 	defer response.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(response.Body, limit+1))
+	responseBody, err := io.ReadAll(io.LimitReader(response.Body, limit+1))
 	if err != nil {
 		return nil, 0, nil, fmt.Errorf("read %s %s response: %w", method, target, err)
 	}
-	if int64(len(body)) > limit {
+	if int64(len(responseBody)) > limit {
 		return nil, 0, nil, fmt.Errorf("%s %s: %w", method, target, &ResponseTooLargeError{Limit: limit})
 	}
-	return body, response.StatusCode, response.Header, nil
+	return responseBody, response.StatusCode, response.Header, nil
 }
 
 // Ref resolves branch to its commit SHA under an installation token
