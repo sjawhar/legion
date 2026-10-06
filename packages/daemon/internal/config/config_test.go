@@ -333,6 +333,11 @@ func TestLoadRefusesEveryStage3Key(t *testing.T) {
 			want: "dispatch_url must be a valid URL",
 		},
 		{
+			name: "dispatch_url has a scheme that is not http or https",
+			body: strings.Replace(minimalFile, "dispatch_url: http://127.0.0.1:8080\n", "dispatch_url: htp://127.0.0.1:8080\n", 1),
+			want: `dispatch_url must be http or https, not "htp"`,
+		},
+		{
 			name: "dispatch_url is the /mcp endpoint",
 			body: strings.Replace(minimalFile, "dispatch_url: http://127.0.0.1:8080\n", "dispatch_url: http://127.0.0.1:8080/mcp/\n", 1),
 			want: "dispatch_url must be the dispatch service base URL, not the /mcp endpoint",

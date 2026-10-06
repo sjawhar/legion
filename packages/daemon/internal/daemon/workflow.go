@@ -74,6 +74,10 @@ type workflowRuntime struct {
 	// means the production defaults. A test shortens both to bound how long the warning takes to
 	// observe.
 	holdWarnAfter, holdWarnEvery time.Duration
+	// reconnectPollInterval and reconnectWarnEvery bound reconnectWatchdog's ticker and how often
+	// it logs while NATS has not reconnected: zero means the production defaults. A test
+	// shortens both to bound how long the warning takes to observe.
+	reconnectPollInterval, reconnectWarnEvery time.Duration
 	// githubAPI is the GitHub REST root the workflow calls: watchRequiredChecks reads under it, and
 	// the outbox's issue_branch rows create branches under it. Empty, in production, is
 	// https://api.github.com, and a test points it at a stand-in.
@@ -207,19 +211,26 @@ func (w *workflowRuntime) bind(url, token string) {
 // connect opens Envoy's JetStream and this project's durable consumers, so a missing
 // notification stream refuses boot rather than leaving a daemon that reads no events. Boot runs it
 // before reconcile, whose Dispatch listing covers only what precedes a consumer created now. It
-// connects as nc, the user readBoot chose (natsConnection), after logging it, and logs what the
-// server reports about the connection: every permission it refuses at error, every disconnect at
-// warn and every reconnect at info (natsauth.LogEvents).
+// connects as nc, the user readBoot chose (natsConnection), and logs what the server reports about
+// the connection: every permission it refuses at error, every disconnect at warn and every
+// reconnect at info (natsauth.LogEvents), under natsauth.ReconnectForever so a reconnect never
+// gives up: a NATS outage mid-run never closes the connection for good. A failed attempt here
+// closes whatever it opened and clears it, so a later call — this one retried after an unreachable
+// NATS — starts clean rather than leaking the connection this one could not finish setting up.
+// Close comes before natsauth.WithLastError on both failure paths, never after: WithLastError only
+// looks once the connection reports itself closed, and Close does not clear what the connection
+// last recorded.
 func (w *workflowRuntime) connect(ctx context.Context, cfg config.Config, nc natsConnection) error {
-	nc.log(w.log)
-	conn, err := natsauth.Connect(cfg.NatsURLs, nc.seed, natsauth.LogEvents(w.log))
+	conn, err := natsauth.Connect(cfg.NatsURLs, nc.seed, natsauth.LogEvents(w.log), natsauth.ReconnectForever())
 	if err != nil {
 		return fmt.Errorf("connect Envoy NATS: %w", err)
 	}
 	w.conn = conn
 	js, err := jetstream.New(conn)
 	if err != nil {
-		return fmt.Errorf("open Envoy JetStream: %w", err)
+		conn.Close()
+		w.conn = nil
+		return fmt.Errorf("open Envoy JetStream: %w", natsauth.WithLastError(err, conn))
 	}
 	w.log.Info("legion workflow boot stage", "stage", "intake")
 	w.consumers, err = intake.OpenConsumers(ctx, js, intake.ConsumerSpec{
@@ -227,7 +238,9 @@ func (w *workflowRuntime) connect(ctx context.Context, cfg config.Config, nc nat
 		ReviewPermission: w.reviewerCanWrite,
 	})
 	if err != nil {
-		return err
+		conn.Close()
+		w.conn = nil
+		return natsauth.WithLastError(err, conn)
 	}
 	w.bootID = fmt.Sprintf("%d", time.Now().UnixNano())
 	return nil
@@ -409,6 +422,10 @@ func (w *workflowRuntime) run(ctx context.Context) error {
 		return nil
 	})
 	group.Go(func() error {
+		w.reconnectWatchdog(running)
+		return nil
+	})
+	group.Go(func() error {
 		w.tickController(running)
 		return nil
 	})
@@ -555,6 +572,75 @@ func (w *workflowRuntime) pollHoldReleaseWith(ctx context.Context, reader positi
 			continue
 		}
 		last, haveLast = position, true
+	}
+}
+
+// defaultReconnectPollInterval is reconnectWatchdog's ticker period.
+const defaultReconnectPollInterval = 10 * time.Second
+
+// defaultReconnectWarnEvery bounds how often reconnectWatchdog logs while NATS has not
+// reconnected. natsauth.ReconnectForever never gives up, and natsauth.LogEvents logs a
+// disconnect and a reconnect once each, so a non-auth failure that keeps repeating — a server
+// that accepts the TCP connection but never completes the protocol handshake, say — retries
+// silently behind that one "NATS connection lost" line, in RECONNECTING, with nothing further to
+// say so. A fatal server -ERR or a repeated authorization failure still closes the connection
+// and exits loud (natsauth.LogEvents' ClosedCB, workflow.connect's own failure path); this
+// watchdog covers only the case ReconnectForever otherwise leaves silent: forever retrying,
+// never closing, never reconnecting.
+const defaultReconnectWarnEvery = 3 * time.Minute
+
+// connStatus is reconnectWatchdog's only dependency on *nats.Conn: a test substitutes a fake that
+// reports disconnected, with a LastError, on demand.
+type connStatus interface {
+	IsConnected() bool
+	LastError() error
+}
+
+// reconnectWatchdog logs a warn once the downtime since conn last connected reaches
+// reconnectWarnEvery, and every reconnectWarnEvery after that while conn stays disconnected —
+// never on the first poll that merely finds it down, which would log a downtime near zero and
+// make this almost as noisy as nats.go's own reconnect wait. Each warn names the downtime so far
+// and conn's own LastError, usually empty during a plain refused dial (nats.go clears its own
+// last-seen error on every failed attempt) and naming the failure's own cause while a handshake
+// keeps failing (nats.go leaves that one in place across attempts), so an operator reading the
+// log sees that NATS has been down, for how long, and why when nats.go has anything to say,
+// instead of just the one disconnect line a reconnect that keeps failing never reaches a
+// reconnected or a closed line to follow.
+func (w *workflowRuntime) reconnectWatchdog(ctx context.Context) {
+	w.reconnectWatchdogWith(ctx, w.conn)
+}
+
+func (w *workflowRuntime) reconnectWatchdogWith(ctx context.Context, conn connStatus) {
+	interval := w.reconnectPollInterval
+	if interval <= 0 {
+		interval = defaultReconnectPollInterval
+	}
+	warnEvery := w.reconnectWarnEvery
+	if warnEvery <= 0 {
+		warnEvery = defaultReconnectWarnEvery
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	var disconnectedSince, warnedAt time.Time
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		if conn.IsConnected() {
+			disconnectedSince, warnedAt = time.Time{}, time.Time{}
+			continue
+		}
+		if disconnectedSince.IsZero() {
+			disconnectedSince = time.Now()
+		}
+		downtime := time.Since(disconnectedSince)
+		if downtime < warnEvery || (!warnedAt.IsZero() && time.Since(warnedAt) < warnEvery) {
+			continue
+		}
+		w.log.Warn("NATS has not reconnected", "downtime", downtime.Round(time.Second).String(), "error", conn.LastError())
+		warnedAt = time.Now()
 	}
 }
 
