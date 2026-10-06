@@ -142,10 +142,14 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 	// One environment, probed and then launched: the operator's own with the controller's set on
 	// top, later pairs replacing inherited values of the same name. The controller is pane-side, so
 	// the daemon's own NATS seed, which an operator shell that also runs a daemon may export, is
-	// dropped by value and by pointer; its pane seed pointer is the controller's set's.
+	// dropped by value and by pointer; its pane seed pointer is the controller's set's. A pane's boot
+	// token, which a start from inside a Legion pane inherits, is dropped too: the plugin takes a
+	// controller carrying one for a controller the daemon launched (`controller: daemon`).
 	env := processEnvironment()
 	delete(env, natsauth.DaemonSeedVariable)
 	delete(env, natsauth.DaemonSeedFileVariable)
+	delete(env, "LEGION_BOOT_TOKEN")
+	delete(env, "LEGION_BOOT_TOKEN_FILE")
 	for _, pair := range controllerEnvironment(cfg, stateDir, token, runtime.SecretFilePath(stateDir, token)) {
 		env[pair[0]] = pair[1]
 	}

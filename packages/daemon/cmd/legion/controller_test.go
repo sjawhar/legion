@@ -932,6 +932,26 @@ func TestControllerStartDropsTheDaemonSeedFromTheControllersEnvironment(t *testi
 	}
 }
 
+// A start from inside a Legion pane inherits that pane's boot token, by value or by pointer. The
+// plugin takes a controller session carrying one for a controller the daemon launched (`controller:
+// daemon`), which registers with it, so neither reaches the operator's controller or its load probe.
+func TestControllerStartDropsAnInheritedBootToken(t *testing.T) {
+	d := newControllerDaemon(t)
+	c := newControllerStart(t, d, controllerOptions{})
+	t.Setenv("LEGION_BOOT_TOKEN", "a-pane-boot-token")
+	t.Setenv("LEGION_BOOT_TOKEN_FILE", filepath.Join(c.dir, "boot-token"))
+	if code, _, errb := c.run(); code != 0 {
+		t.Fatalf("legion controller start = %d, stderr %q", code, errb)
+	}
+	for kind, env := range map[string]map[string]string{"load probe": c.probeEnv(), "controller": c.env()} {
+		for _, name := range []string{"LEGION_BOOT_TOKEN", "LEGION_BOOT_TOKEN_FILE"} {
+			if value, set := env[name]; set {
+				t.Errorf("the %s's environment carries %s=%q", kind, name, value)
+			}
+		}
+	}
+}
+
 // `project: sjawhar/Legion`, copied from the daemon's legion.yaml, names the daemon's own token in
 // the state directory, the secret file, the grant file, and LEGION_PROJECT.
 func TestControllerStartSanitizesTheProjectAsTheDaemonDoes(t *testing.T) {

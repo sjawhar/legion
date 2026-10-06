@@ -126,6 +126,9 @@ What each part is for:
 - **`runtime.kubernetes.agent_secrets`** (optional) enrolls every pod with the
   [Secrets Broker](/legion/broker/): `url` is the broker, `operator` the email of the person who
   approves the daemon's own machine login on Dispatch's credential page.
+- **`controller`** (optional) is who runs the project's controller: `operator` (the default), you,
+  with `legion controller start`, or `daemon`, a pod the daemon launches and keeps running
+  ([Start the controller](#start-the-controller)).
 - Workflow limits, all optional: `linger_hours` (72), `review_round_cap` (3), `max_fix_attempts`
   (3), `controller_wake_interval_seconds` (3600), and the supervision budgets
   `launch_failure_limit` (3), `prompt_failure_limit` (3) and `prompt_retire_limit` (2).
@@ -227,10 +230,25 @@ with Go.
 
 ## Start the controller
 
-The controller runs on your own machine, in your terminal, as an interactive Oh My Pi session. It
-reads a small file of its own, never `legion.yaml`; the repository's
-`deploy/kubernetes/daemon/controller.yaml.example` is the complete shape (rendered in the
-[configuration reference](/legion/legion/reference/config/)):
+The controller runs in one of two places, as `controller` in `legion.yaml` says: on your own
+machine, in your terminal, which is the default (`controller: operator`), or in the cluster, as a
+pod the daemon launches and keeps running (`controller: daemon`).
+
+### In the cluster
+
+Set `controller: daemon` in `legion.yaml` (it needs `runtime: kubernetes`) and restart the daemon.
+It launches the controller at boot as an Agent Sandbox pod, `legion-<project>-controller`, with the
+same model access as the workers and a volume of its own for its session, relaunches it when it
+dies, and resumes the same session. You start nothing, and `legion controller start` against this
+daemon is refused: one controller runs per project. Nobody types into the pod: reach the controller
+through Dispatch (a message to its session on the Agents page, a reply to an ask it opened, a
+mention) and read its session with `kubectl logs` on its pod. `legion claims list` shows its claim.
+
+### On your machine
+
+The controller runs in your terminal as an interactive Oh My Pi session. It reads a small file of
+its own, never `legion.yaml`; the repository's `deploy/kubernetes/daemon/controller.yaml.example` is
+the complete shape (rendered in the [configuration reference](/legion/legion/reference/config/)):
 
 1. Install Oh My Pi, then Legion's plugin from the same image as the daemon
    (`omp plugin install ./pi-legion-envoy`, copied out as above). Set `omp_invocation`, or

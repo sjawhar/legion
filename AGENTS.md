@@ -20,7 +20,9 @@ published worker image per process under `runtime: kubernetes` (`docs/kubernetes
   (planner/implementer/tester/reviewer/merger) itself, from its fixed workflow table; a
   sub-architect for a child issue runs only when the operator starts one. The controller is an
   interactive OMP session the operator starts on their own machine with `legion controller start`
-  (no `--mode rpc`, no shim); the daemon launches none.
+  (no `--mode rpc`, no shim), unless `legion.yaml` sets `controller: daemon`, where the daemon
+  launches it as an Agent Sandbox pod it supervises like a root architect (`docs/kubernetes.md`,
+  "The controller").
 - **Skills** — guide the architect and sequential phase workers. Durable `.legion/<issue>/<phase>.json`
   handoffs are the recovery source of truth.
 

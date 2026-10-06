@@ -2,9 +2,11 @@ package daemon
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/claim"
@@ -117,5 +119,71 @@ func TestTheOperatorsDaemonLaunchesNoController(t *testing.T) {
 		if call.Spec.Role == claim.RoleController {
 			t.Fatalf("the operator's daemon launched a controller: %+v", call.Spec)
 		}
+	}
+}
+
+// controllerSpawns counts the runtime's spawns of the controller's claim.
+func controllerSpawns(rt *fake.Runtime, token claim.Token) int {
+	spawns := 0
+	for _, call := range rt.CallsOf("Spawn") {
+		if call.Spec.Claim == token {
+			spawns++
+		}
+	}
+	return spawns
+}
+
+// A controller whose launches run out of their budget fails, as any claim does, and nothing in the
+// machine relaunches a failed claim. The keeper does: after its wait it retries the claim with fresh
+// budgets, so the project is never left without a controller for good.
+func TestTheKeeperRetriesAControllerWhoseLaunchesRanOut(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.ControllerLaunch = config.ControllerLaunchDaemon
+	rt := fake.NewRuntime()
+	refused := errors.New("the cluster refused the Sandbox")
+	rt.ScriptSpawn(fake.SpawnResult{Err: refused}, fake.SpawnResult{Err: refused}, fake.SpawnResult{Err: refused})
+	o := fakeRuntime(rt, &built{})
+	o.orphanSweep, o.controllerRetry = 50*time.Millisecond, 200*time.Millisecond
+	d := startDaemon(t, cfg, o)
+	project, err := claim.ProjectToken(cfg.Project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := claim.ControllerToken(project)
+	testwait.Eventually(t, "the controller's refused launches to fail its claim", func() bool {
+		return controllerSpawns(rt, token) == cfg.LaunchFailureLimit && d.claim(token).State == string(supervise.StateFailed)
+	})
+	testwait.Eventually(t, "the keeper to retry the failed controller on fresh budgets", func() bool {
+		c := d.claim(token)
+		return controllerSpawns(rt, token) == cfg.LaunchFailureLimit+1 && c.State == string(supervise.StateLaunching) &&
+			c.Budgets.LaunchFailures == 0
+	})
+}
+
+// A daemon that restarts finds its controller's claim in the store with the process it launched and
+// re-adopts it: the keeper launches no second controller over the one still running.
+func TestARestartedDaemonReadoptsItsControllerAndLaunchesNoSecond(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.ControllerLaunch = config.ControllerLaunchDaemon
+	rt := fake.NewRuntime()
+	o := fakeRuntime(rt, &built{})
+	o.orphanSweep = 50 * time.Millisecond
+	d := startDaemon(t, cfg, o)
+	project, err := claim.ProjectToken(cfg.Project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := claim.ControllerToken(project)
+	controllerLaunched(t, rt, token)
+	d.stop()
+
+	rebindHeldPorts(t, &cfg)
+	d = startDaemon(t, cfg, o)
+	testwait.Eventually(t, "the restarted daemon to supervise its controller's claim", func() bool {
+		return d.claim(token).State == string(supervise.StateLaunching)
+	})
+	time.Sleep(5 * o.orphanSweep)
+	if spawns := controllerSpawns(rt, token); spawns != 1 {
+		t.Fatalf("the controller was spawned %d times across the restart, want once", spawns)
 	}
 }

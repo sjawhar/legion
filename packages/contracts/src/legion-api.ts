@@ -191,10 +191,10 @@ const legionAdmission = z.strictObject({
   free: z.number().int().nonnegative().optional(),
 });
 
-/** `api.ControllerLocator` — the external record of the operator-launched controller: the
- * runtime the daemon runs under (`tmux` or `kubernetes`, its configured runtime), the session that
- * registered with the current controller capability, and when. The daemon has no process of it
- * to address. */
+/** `api.ControllerLocator` — the record of the session registered as the project's controller: the
+ * runtime the daemon runs under (`tmux` or `kubernetes`, its configured runtime), the session, and
+ * when it registered. `external` is `true` for the operator-launched controller and for the one the
+ * daemon launches itself under `controller: daemon`, whose process is a claim like any other. */
 const legionControllerLocator = z.strictObject({
   runtime: z.enum(["tmux", "kubernetes"]),
   external: z.literal(true),

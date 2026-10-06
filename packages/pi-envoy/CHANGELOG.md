@@ -4,6 +4,12 @@
 
 ### Added
 
+- A controller the Go daemon launches itself (`controller: daemon` in `legion.yaml`, LEGION-592)
+  runs as a controller session: a session with `LEGION_CONTROLLER=1` and `LEGION_BOOT_TOKEN_FILE`
+  registers on `/legion/v1/claims/register` with that boot token in place of a controller
+  capability, claims `legion-<project>-controller`, subscribes to the controller topic, and then
+  calls `/legion/v1/claims/ready`, when the daemon sends its start message. A claim step that fails
+  exits Oh My Pi, so the daemon relaunches it. The operator-launched controller is unchanged.
 - Pictures reach the model (LEGION-541): a Dispatch tool result carries its `images` as image
   blocks after the text, and an Inbox delivery of a message, comment, ask or answer that embeds
   pictures carries them beside its text (a card with a `Pictures:` section, a person's own turn

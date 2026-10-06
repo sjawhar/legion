@@ -61,6 +61,14 @@ legion start --config legion.yaml --check-config
 
 - **The daemon logs `controller not registered; run legion controller start`.** Nobody is running
   the controller. Start it ([Start the controller](/legion/legion/running-legion/#start-the-controller)).
+- **`legion controller start` is refused: `this daemon launches the project's controller itself
+  (controller: daemon), so legion controller start has none to start`.** The daemon runs its own
+  controller as a pod; reach it through Dispatch instead.
+- **The daemon-launched controller keeps failing.** `legion claims list` shows its claim,
+  `legion-<project>-controller`, and the daemon logs why each launch failed and when it retries a
+  failed one. `kubectl -n <namespace> describe pod legion-<project>-controller` and its logs show the
+  pod's own side; a `workspace-init` exit 3 means its volume lost the session, and the daemon starts
+  a fresh controller.
 - **`… the daemon answered 403 Forbidden: Invalid operator token — the operator token does not match
   the daemon's operator_token_file`.** Your `operator_token_file` holds a different value than the
   daemon's.

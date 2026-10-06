@@ -18,8 +18,9 @@ import (
 // idle until a wake.
 const ControllerStartMessage = "Legion controller start: follow skill://legion-controller's start procedure now (\"What happened before you started\"), then end the turn."
 
-// The waits before a failed or retired controller is retried: the first, then doubled at each retry
-// that fails again, up to the last. A controller that reaches ready resets them.
+// The waits before a failed or retired controller is retried: the first (plan.controllerRetry,
+// controllerRetryFirst unless a test replaces it), then doubled at each retry that fails again, up
+// to the last. A controller that reaches ready resets them.
 const (
 	controllerRetryFirst = time.Minute
 	controllerRetryMax   = 30 * time.Minute
@@ -41,14 +42,16 @@ type controllerKeeper struct {
 	ctx context.Context
 	log *slog.Logger
 	now func() time.Time
+	// retryFirst is the first wait before a failed or retired controller is retried.
+	retryFirst time.Duration
 	// retryAt is when a failed or retired controller is next retried, zero while none is waiting,
 	// and backoff the wait that set it.
 	retryAt time.Time
 	backoff time.Duration
 }
 
-func newControllerKeeper(ctx context.Context, sup *supervisor, project string, log *slog.Logger) *controllerKeeper {
-	return &controllerKeeper{supervisor: sup, project: project, ctx: ctx, log: log, now: time.Now}
+func newControllerKeeper(ctx context.Context, sup *supervisor, project string, retryFirst time.Duration, log *slog.Logger) *controllerKeeper {
+	return &controllerKeeper{supervisor: sup, project: project, ctx: ctx, log: log, now: time.Now, retryFirst: retryFirst}
 }
 
 func (k *controllerKeeper) token() claim.Token { return claim.ControllerToken(k.project) }
@@ -92,7 +95,7 @@ func (k *controllerKeeper) keep() error {
 	case supervise.StateFailed, supervise.StateRetired:
 		now := k.now()
 		if k.retryAt.IsZero() {
-			k.backoff = controllerRetryFirst
+			k.backoff = k.retryFirst
 			k.retryAt = now.Add(k.backoff)
 			k.log.Error("controller: the daemon's controller stopped; retrying it with fresh budgets", "claim", token,
 				"state", state, "retryAt", k.retryAt)

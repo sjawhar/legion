@@ -82,6 +82,9 @@ type overrides struct {
 	environ []string
 	// orphanSweep is how often orphans are reconciled; zero is orphanSweepInterval.
 	orphanSweep time.Duration
+	// controllerRetry is the first wait before a failed daemon-launched controller is retried; zero
+	// is controllerRetryFirst.
+	controllerRetry time.Duration
 	// gate stands in for the plugin gate when runtime is replaced: nil is none, since a replaced
 	// runtime launches no Oh My Pi to gate. With the tmux runtime, the gate is always the real one.
 	gate func(ctx context.Context) error
@@ -361,6 +364,8 @@ type plan struct {
 	probe       func(ctx context.Context, rt runtime.Runtime) error
 	clock       supervise.Clock
 	orphanSweep time.Duration
+	// controllerRetry is the controller keeper's first wait before it retries a failed controller.
+	controllerRetry time.Duration
 	// secretsEnroller is the daemon's agent-secrets machine login as the machines' Enroller
 	// (newSecretsLogin); nil when the deployment enrolls no pod.
 	secretsEnroller supervise.Enroller
@@ -412,11 +417,15 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 	if orphanSweep == 0 {
 		orphanSweep = orphanSweepInterval
 	}
+	controllerRetry := o.controllerRetry
+	if controllerRetry == 0 {
+		controllerRetry = controllerRetryFirst
+	}
 	secretsEnroller, secretsLogin := newSecretsLogin(cfg, log)
 	p := plan{
 		project: reads.project, operatorToken: reads.operatorToken, secrets: reads.secrets, nats: reads.nats, instructions: instructions,
 		dispatchToken: reads.dispatchToken, prompts: composer, roleReferences: prompts.RoleReferences(),
-		tools: reads.tmux.tools, clock: clock, orphanSweep: orphanSweep,
+		tools: reads.tmux.tools, clock: clock, orphanSweep: orphanSweep, controllerRetry: controllerRetry,
 		secretsEnroller: secretsEnroller, secretsLogin: secretsLogin,
 	}
 	if cfg.Runtime.Name == "kubernetes" {
@@ -791,7 +800,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 	// its ready; otherwise watchController says when the operator's is missing.
 	var keeper *controllerKeeper
 	if cfg.ControllerLaunch == config.ControllerLaunchDaemon {
-		keeper = newControllerKeeper(s.supervisor.ctx, s.supervisor, p.project, s.log)
+		keeper = newControllerKeeper(s.supervisor.ctx, s.supervisor, p.project, p.controllerRetry, s.log)
 	}
 	server := api.NewServer(cfg.Bind, cfg.Port, api.Options{
 		State: &source{

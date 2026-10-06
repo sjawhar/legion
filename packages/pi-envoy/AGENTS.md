@@ -165,7 +165,14 @@ close an admitted root tree (a root architect only), and read records; phase wor
 backward move and read records. No `claims/exit` report runs at shutdown, because a
 daemon-requested suspend ends the session but keeps its claim for resumption.
 
-The daemon launches no controller: the operator starts one with `legion controller start`, which
+A daemon that sets `controller: daemon` launches the controller itself, as a pod with
+`LEGION_CONTROLLER=1` and `LEGION_BOOT_TOKEN_FILE` (`controllerSession` in
+`src/legion/controller-session.ts`): the session registers on `claims/register` with that boot
+token in place of a capability, is answered with the same controller registration, claims the role,
+subscribes to the controller topic, and then calls `claims/ready`, which is when the daemon sends
+its start message. Any step of that claim that fails exits Oh My Pi, so the daemon relaunches it;
+the operator's controller logs and stays up instead. Every other daemon launches no controller: the
+operator starts one with `legion controller start`, which drops an inherited boot token,
 fetches the controller capability with the operator's bearer and runs Oh My Pi with
 `LEGION_CONTROLLER=1` and `LEGION_CONTROLLER_SECRET_FILE`. No boot gate checks the operator's
 machine, so the plugin's contract is held there three times. Before its one daemon call,

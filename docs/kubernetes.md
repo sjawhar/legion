@@ -334,7 +334,7 @@ LEGION-206), and its pod runs under gVisor on the Legion pool. The Sandbox is na
 the boot token and takes the Sandbox `Suspended` and then `Running` again
 (`packages/daemon/internal/runtime/sandbox`). The daemon runs on a host its pods can reach and
 serves the worker stream they dial. The controller is `legion controller start` on the operator's
-machine ([Operator-launched controller](#operator-launched-controller)).
+machine, or, under `controller: daemon`, a pod the daemon launches ([The controller](#the-controller)).
 
 ### Configuration
 
@@ -1294,14 +1294,72 @@ line `<role token>: worker process died (its stream closed and the one reconnect
 launch failure 1/3; relaunching the same agent with --resume and its catch-up`, then
 `respawning <issue> by resuming OMP session <path>`, within seconds.
 
-## Operator-launched controller
+## The controller
 
-The controller is the one Legion session a person talks to, and that person starts it. The Go
-daemon launches it under neither runtime, tmux included: it has no process of the controller to
-start, stop or resume. It holds the controller's record and reads the session's liveness from the
-Envoy role registry. While no session holds the current capability, or the registry says the
-session is gone, the daemon logs `controller not registered; run legion controller start` at most
-once per `worker_boot_timeout_seconds`.
+The controller is the one Legion session a person talks to. `controller` in `legion.yaml` says who
+launches it: `operator` (the default), a person running `legion controller start` on a machine of
+theirs ([Operator-launched controller](#operator-launched-controller)), or `daemon`, the daemon
+itself, as an Agent Sandbox pod it supervises ([Daemon-launched controller](#daemon-launched-controller)).
+`controller: daemon` needs `runtime: kubernetes`; the loader refuses it under tmux (`controller:
+daemon needs runtime: kubernetes, …`) and refuses any value but the two.
+
+### Daemon-launched controller
+
+Under `controller: daemon` the daemon launches the project's controller at boot and keeps it
+running, as it does a root architect. Nobody runs `legion controller start`, and
+`POST /legion/v1/controller/secret` answers 409 (`this daemon launches the project's controller
+itself (controller: daemon), so legion controller start has none to start`): one controller runs per
+project.
+
+**The claim.** The controller is one claim, `legion-<project>-controller`, on the role
+`controller` with no issue and no tree. It is supervised like any claim: a pod that dies is
+relaunched and resumes the same Oh My Pi session, within `launch_failure_limit`; a daemon that
+restarts re-adopts the running pod and launches no second one. A claim whose budget ran out fails,
+as any claim does, and the daemon retries it with fresh budgets after a minute, doubling the wait
+at each retry that fails again up to thirty minutes, and resetting it once the controller is ready.
+`legion claims list` shows the claim; the workflow never sees it.
+
+**The credential.** The daemon mints the controller's credential at every launch: the launch's
+boot token, which it writes into the pod's own Secret, as for every pod. The pod's pi-envoy
+extension sees `LEGION_BOOT_TOKEN_FILE` beside `LEGION_CONTROLLER=1` and registers on
+`POST /legion/v1/claims/register` with that token. The daemon records the registration on the claim
+and records the session as the project's controller, which ends every earlier controller grant;
+the answer is the operator's controller's registration (`{claimToken, role: "controller",
+generation, secret}`). The session then takes the controller role, subscribes to the controller
+topic, and calls `POST /legion/v1/claims/ready`; the daemon then delivers the start message
+`legion controller start` passes, so every launch runs the skill's start procedure. A claim step
+that fails exits Oh My Pi, and the daemon relaunches it. No operator token reaches the pod.
+
+**The pod.** Sandbox `legion-<project>-controller` in `runtime.kubernetes.namespace`, on the
+Legion pool under gVisor, with the operator's pod (`runtime.kubernetes.pod`) and the providers
+Secret, so it reaches models by the route every worker does, and the pod baseline
+(`--pod-safety`). Its Sandbox owns a volume of its own (`tree-legion-<project>-controller`, of
+`runtime.kubernetes.tree_volume` and `storage_class`), mounted at `/legion` with its `sessions`
+directory at Oh My Pi's sessions directory, so a relaunch resumes the session. It provisions no
+workspace and holds no repository credential: no `workspace-fetch`, no provisioning token, no gh
+shim. Its one init container, `legion workspace-init controller --root /legion`, makes the
+sessions directory; on a resume whose session file is gone it exits 3, which the daemon reads as a
+lost volume and answers with a fresh controller. The pod carries the project and role labels and no
+tree or issue label, so no tree pod's anti-affinity counts it as another tree's, and it is never
+enrolled with the secrets broker. Its agent is told `LEGION_CONTROLLER=1`, `LEGION_ROLE=controller`,
+`LEGION_PROJECT`, `LEGION_DAEMON_URL`, the Envoy, NATS and Dispatch settings and the launch
+secrets' `<NAME>_FILE` pointers, and nothing of a tree, an issue or a checkout. Its system prompt is
+the controller's role prompt, a part saying it runs headless in a pod, the daemon's `Design gate
+policy:` line and the deployment instructions.
+
+**Reaching it.** Nobody types into the pod. A person reaches the controller through Dispatch (a
+message to its session on the Agents page, a reply to its ask, a mention) or Envoy, and reads its
+session with `kubectl -n <namespace> logs` on the pod or its transcript on the volume. Wakes reach
+it as they reach the operator's controller: it subscribes to
+`notifications.legion.<project>.controller` once it holds the role.
+
+### Operator-launched controller
+
+Under `controller: operator` the daemon launches no controller, under either runtime: it has no
+process of the controller to start, stop or resume. It holds the controller's record and reads the
+session's liveness from the Envoy role registry. While no session holds the current capability, or
+the registry says the session is gone, the daemon logs `controller not registered; run legion
+controller start` at most once per `worker_boot_timeout_seconds`.
 
 **The operator token.** `operator_token_file` in `legion.yaml` names a file holding one long random
 string (`openssl rand -hex 32`). The Go daemon requires it under every runtime, because the operator
@@ -1355,7 +1413,9 @@ keeping nothing until the daemon has answered, the command:
    `LEGION_PROJECT`, `LEGION_STATE_DIR`, its grant and secret files, the Envoy and Dispatch
    endpoints, and `NATS_NKEY_SEED_FILE` naming `nats_nkey_seed_file` when the file sets it) on top
    of the operator's own environment, less `NATS_DAEMON_NKEY_SEED` and `NATS_DAEMON_NKEY_SEED_FILE`
-   (the controller is pane-side, and never gets the daemon's seed), and exits with Oh My Pi's exit
+   (the controller is pane-side, and never gets the daemon's seed) and less `LEGION_BOOT_TOKEN` and
+   `LEGION_BOOT_TOKEN_FILE` (a start from inside a Legion pane inherits that pane's, and the plugin
+   takes a controller carrying one for a daemon-launched controller), and exits with Oh My Pi's exit
    code.
 
 A refusal before the secret is written removes the directories made for the probe, so the state
