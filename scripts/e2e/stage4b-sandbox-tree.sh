@@ -471,11 +471,12 @@ pod_exec() {
 pair_agents="thermonuclear-deep-review thermonuclear-code-quality"
 # pair_dispatch AGENT reads a reviewer session on stdin and prints what the session holds for AGENT:
 # every task call naming it, the tool result of each call (text, isError, details), the ids its
-# results name for AGENT (details.progress), and every task-result block naming AGENT the session
-# received, however it arrived: an async-result delivery, or a `wait` result or a `read` of a
-# `proc://` job that recovered it first. A delivery is that block alone, never the rest of a
-# snapshot, which carries other jobs' output. Nothing else is summarised, so the evidence keeps each
-# failure's text.
+# results name for AGENT (details.results — a task call is synchronous with async.enabled off,
+# LEGION-462), and every task-result block naming AGENT the session received, however it arrived:
+# an async-result delivery, or a `wait` result or a `read` of a `proc://` job that recovered it
+# first, neither of which a synchronous call itself needs. A delivery is that block alone, never
+# the rest of a snapshot, which carries other jobs' output. Nothing else is summarised, so the
+# evidence keeps each failure's text.
 pair_dispatch() {
   jq -R -s -c --arg agent "$1" '[split("\n")[] | fromjson?] as $e
     | [$e[] | select(.type == "message" and .message.role == "assistant") | .message.content[]?
@@ -488,7 +489,7 @@ pair_dispatch() {
     | {agent: $agent,
        calls: [$calls[] | {id, arguments}],
        results: $results,
-       ids: ([$results[].details.progress[]? | select(.agent == $agent) | .id] | unique),
+       ids: ([$results[].details.results[]? | select(.agent == $agent) | .id] | unique),
        deliveries: [$e[]
          | (if .type == "custom_message" and .customType == "async-result" then {timestamp, via: "async-result", text: (.content | tostring)}
             elif .type == "message" and .message.role == "toolResult"

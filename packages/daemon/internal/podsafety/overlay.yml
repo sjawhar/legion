@@ -15,15 +15,16 @@
 # setting, and which the baseline sets to file: a pod keeps its sessions as files on the tree
 # volume, and the Sandbox runtime refuses an operator's own store (podsafety.go).
 #
-# bash.autoBackground.enabled is the other class: on by default under `--mode rpc` (every Legion
-# role runs that way), a bash call left running past its threshold moves to a background job an
-# abort no longer reaches once it has moved — only the turn asking it to finish does
+# bash.autoBackground.enabled and async.enabled are the other class, the two turn-scoping keys
+# every Legion role's Oh My Pi also gets through turnscope.yml (packages/daemon/internal/podsafety,
+# its own comment holds the full account): on by default under `--mode rpc` (every Legion role),
+# each lets some running or dispatched work move to a background job a takeover's abort no longer
+# reaches once it has moved — only the turn asking it to finish does
 # (supervise.Machine.Quiesce's own promise, "the worker never writes the shared workspace beside
-# the role the start hands it to", depends on this: a takeover's interrupt ends the claim's turn,
-# and a backgrounded command is not in it). Off, a long-running command stays the turn's own, so
-# the same abort that ends the turn ends it too (LEGION-462 found this live, legion-smoke LEGSMOKE-463,
-# at commit 80d0c82b: the proof's own long `/usr/bin/sleep` outlived the interrupt once it had been
-# running about a minute).
+# the role the start hands it to", depends on both). Off, that work stays the turn's own, so the
+# same abort that ends the turn ends it too (LEGION-462 found the bash case live, legion-smoke
+# LEGSMOKE-463, at commit 80d0c82b: the proof's own long `/usr/bin/sleep` outlived the interrupt
+# once it had been running about a minute).
 compaction:
   remoteEndpoint: ""
 memory:
@@ -36,3 +37,5 @@ dev:
 bash:
   autoBackground:
     enabled: false
+async:
+  enabled: false

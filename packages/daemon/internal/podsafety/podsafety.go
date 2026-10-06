@@ -29,6 +29,19 @@ var overlay []byte
 // OverlayFile is the overlay's file under the state directory Apply is given.
 const OverlayFile = "podsafety-overlay.yml"
 
+// TurnScopeOverlay is the two turn-scoping keys every Legion role's Oh My Pi needs regardless of
+// runtime (turnscope.yml, which says why): bash.autoBackground and async, both off, without the
+// rest of the pod baseline. The pod overlay above already carries both; a runtime with no overlay
+// mechanism of its own (runtime/tmux) writes this one directly, named first in a pane's
+// PI_CONFIG_FILES.
+//
+//go:embed turnscope.yml
+var TurnScopeOverlay []byte
+
+// TurnScopeFile is TurnScopeOverlay's file name, wherever a runtime writes it under its own state
+// directory.
+const TurnScopeFile = "podsafety-turnscope-overlay.yml"
+
 // settingsOverlays is Oh My Pi's list of settings overlays, PATH-separated: each outranks the
 // repository's .omp/config.yml, and a later one outranks an earlier one.
 const settingsOverlays = "PI_CONFIG_FILES"
@@ -79,7 +92,7 @@ func Apply(environ []string, stateDir string) ([]string, error) {
 		return nil, fmt.Errorf("pod safety: no state directory to write %s to", OverlayFile)
 	}
 	file := filepath.Join(stateDir, OverlayFile)
-	if err := writeReadOnly(file, overlay); err != nil {
+	if err := WriteReadOnly(file, overlay); err != nil {
 		return nil, fmt.Errorf("pod safety: write %s: %w", file, err)
 	}
 	overlays := file
@@ -111,9 +124,9 @@ func removed(environ []string, name string) []string {
 	return slices.DeleteFunc(environ, func(pair string) bool { return strings.HasPrefix(pair, name+"=") })
 }
 
-// writeReadOnly writes body to file at mode 0444, through a temporary file renamed into place, so
+// WriteReadOnly writes body to file at mode 0444, through a temporary file renamed into place, so
 // a file an earlier start left, read-only, is replaced rather than refusing the write.
-func writeReadOnly(file string, body []byte) error {
+func WriteReadOnly(file string, body []byte) error {
 	temporary, err := os.CreateTemp(filepath.Dir(file), filepath.Base(file)+".*.tmp")
 	if err != nil {
 		return err
