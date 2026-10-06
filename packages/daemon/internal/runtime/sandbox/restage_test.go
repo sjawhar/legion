@@ -49,9 +49,9 @@ func readopt(t *testing.T, ctx context.Context, r *Runtime, loc runtime.Locator)
 
 // A pod dialing the address the daemon moved from is reported StaleAddress the moment the
 // runtime at the new address is told of its claim (re-adoption, ReconcileOrphans), and the
-// supervisor's own replace for it — Resume over the same recorded locator, exactly what a
-// suspend-then-resume already does — lands a new pod whose shim dials the corrected address and
-// goes on to resume the claim's saved session (LEGION-592).
+// supervisor's relaunch of a registered claim — a Resume over the recorded locator — lands a new
+// pod whose shim dials the corrected address and goes on to resume the claim's saved session
+// (LEGION-592).
 func TestAPodDialingAStaleAddressIsReplacedAndResumesItsSession(t *testing.T) {
 	g := newRig(t, nil)
 	spec := workerSpec(t)

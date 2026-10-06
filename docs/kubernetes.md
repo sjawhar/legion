@@ -598,27 +598,27 @@ The image probe runs as a Sandbox of its own, `legion-probe-<project>-<digest12>
 
 ### A pod whose address moved
 
-Every pod's `--connect` is baked in at the moment the pod is created (the bullet above): once a
-pod is running, nothing changes its argv, so a pod keeps dialling the address its launch held even
-once the daemon's own address moves — its own pod replaced in the cluster, under
-`advertise_host`'s Service name reaching whichever pod is live. A daemon that restarts re-adopts
-each live claim's pod by its recorded locator (the boot orphan sweep), which only tells the runtime
-the pod is still the claim's; it does not, by itself, notice that the pod cannot reach this daemon
-any more.
+A pod's `--connect` is fixed when the pod is created (item 3 of the anatomy list above), and nothing
+changes a running pod's argv. The address it names is the daemon's worker stream listener,
+`tcp://<bind>:<worker_stream_port>`, so it moves whenever the daemon restarts on another host or with
+another `bind` or `worker_stream_port`. A daemon that restarts re-adopts each live claim's pod by its
+recorded locator (the boot orphan sweep), and re-adoption alone would leave that pod dialling the old
+address, never reaching the new daemon.
 
-So every re-adoption also checks the pod's own `--connect` against the address this runtime now
-hands every new pod. A pod that dials anywhere else is reported `stale_address` rather than `alive`
-(`ObservationKind`, `internal/runtime/runtime.go`), and the supervisor replaces it at once: the
-same session relaunched — `Resume`, never a fresh `Spawn` — onto a pod whose shim dials the
-corrected address, exactly the mechanism an ordinary suspend-then-resume already uses. This runs
-automatically at every boot, never as an operator command: a daemon only ever finds a stale address
-once it has itself moved and re-adopted what the previous one left running, so there is no moment
-an operator would reach for this on their own that a boot has not already covered. Nothing is
-charged for it and the claim cannot fail: the pod did nothing wrong, the daemon's address moved.
-A turn the stale pod was in the middle of cannot be finished — that pod can never report back to
-this daemon — so it is lost, and the relaunched agent resumes from its last saved turn, the task it
-was running sent again once it is ready, the same recovery an ordinary process death in a turn gets
-(LEGION-592).
+So the runtime compares each watched pod's `--connect` with the address it hands every new pod, on
+every evaluation of the pod (each watch event, the probe-interval sweep, each probe). A pod that
+dials anywhere else is reported `stale_address` rather than `alive` (`ObservationKind`,
+`internal/runtime/runtime.go`). A pod this runtime launched always compares equal, so only the pods a
+daemon at another address launched are ever reported, from the boot that re-adopts them; nobody runs
+a command for it. The supervisor relaunches each such claim at once, through the launch path a death
+uses: a `Resume` of its recorded session, or a `Spawn` over its existing Sandbox when it has not
+registered yet, onto a pod whose shim dials the current address. The stale observation is never
+charged, since the pod did nothing wrong; a relaunch the runtime refuses is charged as any launch
+failure is. A turn the stale pod was in cannot finish, since that pod can never report back, so the
+turn is lost: its task goes back to waiting and is sent again once the relaunched agent is ready, the
+recovery a death in a turn gets. A claim whose suspension was held for that turn's end is suspended
+instead, as it is when its process dies. Stage 4b's `address-moved` checkpoint drives this with real
+agents on the cluster ([`scripts/e2e/README.md`](../scripts/e2e/README.md#stage4b-sandbox-treesh)).
 
 ### A shell on the tree volume
 

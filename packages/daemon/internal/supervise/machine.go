@@ -722,21 +722,26 @@ func (m *Machine) loseSession() {
 }
 
 // repoint is the claim's process found alive at an address that no longer reaches this daemon
-// (runtime.StaleAddress): the worker-stream address every pod's shim is handed moved since this
-// launched, which only happens under the Sandbox runtime when the daemon's own pod — and so its
-// advertised address — was replaced. The process cannot dial the daemon from the address it
-// holds and never will while it keeps it, so there is nothing to wait out: the same session is
-// relaunched at once onto a process that dials the daemon's current address, exactly as a
-// suspend-then-resume does. A task whose turn the process was running goes back to waiting first
-// (interrupted), the same recovery a death in a turn gets, since that turn can never report back
-// either. Unlike died, nothing is charged and the claim never fails for this: the process did
-// nothing wrong, and there is no budget whose end would leave the claim stuck at a dead address
-// forever instead.
+// (runtime.StaleAddress): the worker-stream address the runtime hands every new process moved since
+// this one launched, as it does when the daemon restarts on another host, `bind` or
+// `worker_stream_port`. The process cannot dial the daemon from the address it holds and never
+// will while it keeps it, so there is nothing to wait out. A task whose turn the process was
+// running goes back to waiting first (interrupted), the same recovery a death in a turn gets, since
+// that turn can never report back either. A held suspension ends here as it does for a death
+// (endHeld): the claim is suspended, not relaunched. Otherwise the claim is relaunched at once
+// through the launch path a death uses (launch): a Resume of its recorded session, or a Spawn over
+// the claim's existing Sandbox when it has not registered yet, onto a process that dials the
+// daemon's current address. The stale observation is never charged, unlike a death (chargeDeath,
+// relaunchAfterFailure): the process did nothing wrong. A relaunch the runtime refuses is charged as
+// any launch failure is.
 func (m *Machine) repoint(ctx context.Context, observation runtime.Observation) error {
 	m.log.Warn("supervise: the process is alive at a stale address; replacing it with one at the current address",
 		"incarnation", m.claim.Locator.Incarnation, "detail", observation.Detail)
 	if err := m.interrupted(ctx); err != nil {
 		return err
+	}
+	if m.held != nil {
+		return m.endHeld(ctx)
 	}
 	return m.launch(ctx)
 }
