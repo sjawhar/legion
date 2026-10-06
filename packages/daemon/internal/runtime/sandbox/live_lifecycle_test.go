@@ -316,8 +316,19 @@ func (r *liveRig) checkSameAgentNegative() error {
 	if err := r.ensureRunning(root); err != nil {
 		return err
 	}
+	// The marker is the issue pod's (SandboxName), shared by every resident role that started in
+	// it; second's own "tester:" lines include role-container-isolation's gen-1 line only once
+	// its stub agent's write has actually landed on the tree volume — a race against how quickly
+	// that check moved on to suspend it (it waits only for the hello, never the write). Snapshot
+	// second's own lines now, before this check's own writes, so what follows asserts only what
+	// this check itself causes.
+	before, err := r.markerLines(second)
+	if err != nil {
+		return err
+	}
+	beforeOwn := len(roleIncarnations(before, second.role))
 	absent := ompSessionsDir + "/absent-" + SandboxName(second.token) + ".marker"
-	_, err := r.resume(second, absent)
+	_, err = r.resume(second, absent)
 	if err == nil {
 		return fmt.Errorf("Resume naming %s started a fresh agent, want the role launcher's refusal before any child runs", absent)
 	}
@@ -346,12 +357,13 @@ func (r *liveRig) checkSameAgentNegative() error {
 		return err
 	}
 	note("operator", "resumed correctly as %s; exec cat %s: %v", short(fixed.Incarnation), second.marker, lines)
-	// The marker is the issue pod's (SandboxName), shared by every resident role that started in
-	// it, so only second's own "tester:" lines are its to check; the refused generation above
-	// never started a child, so it never wrote one.
+	// Only second's own "tester:" lines are its to check (the marker is shared by every resident
+	// role of the issue pod); the refused generation above never started a child, so it never
+	// wrote one — this asserts only the one new line this check's own correct resume caused,
+	// never assuming role-container-isolation's earlier gen-1 line had already landed.
 	own := roleIncarnations(lines, second.role)
-	if len(own) != 2 || own[1] != fixed.Incarnation {
-		return fmt.Errorf("the marker's %s lines are %v (of %v shared by the issue pod's resident roles): want two agents, the last %s", second.role, own, lines, fixed.Incarnation)
+	if len(own) != beforeOwn+1 || own[len(own)-1] != fixed.Incarnation {
+		return fmt.Errorf("the marker's %s lines went from %v to %v (of %v shared by the issue pod's resident roles): want exactly one more, the last %s", second.role, roleIncarnations(before, second.role), own, lines, fixed.Incarnation)
 	}
 	if err := r.suspend(second); err != nil {
 		return err
