@@ -60,10 +60,19 @@ func (v *treeVolume) jjFetchBranch(t *testing.T, dir, bookmark string) {
 	}
 }
 
-// removableEnv JSON-encodes candidates into LEGION_REMOVABLE_WORKSPACES's shape.
+// removableEnv JSON-encodes candidates into LEGION_REMOVABLE_WORKSPACES's combined shape, with a
+// notAfter generous enough that no ordinary test call needs its own.
 func removableEnv(t *testing.T, candidates []runtime.RemovableWorkspace) string {
 	t.Helper()
-	encoded, err := json.Marshal(candidates)
+	return removableEnvWithNotAfter(t, candidates, time.Now().Add(time.Hour))
+}
+
+// removableEnvWithNotAfter JSON-encodes candidates and notAfter into LEGION_REMOVABLE_WORKSPACES's
+// combined shape, for a test that needs its own notAfter rather than removableEnv's generous
+// default.
+func removableEnvWithNotAfter(t *testing.T, candidates []runtime.RemovableWorkspace, notAfter time.Time) string {
+	t.Helper()
+	encoded, err := json.Marshal(removableWorkspacesPayload{NotAfter: notAfter, Workspaces: candidates})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +109,7 @@ func TestRemoveFinishedWorkspacesRefusesAMalformedCandidate(t *testing.T) {
 	t.Setenv(removableWorkspacesEnv, removableEnv(t, candidates))
 
 	var stdout bytes.Buffer
-	removeFinishedWorkspaces(context.Background(), panicRunner{t}, root, repository, "LEGION-200", &stdout, time.Now, removalBudget)
+	removeFinishedWorkspaces(context.Background(), panicRunner{t}, root, repository, "LEGION-200", &stdout, time.Now, removalBudget, time.Now())
 
 	output := stdout.String()
 	for _, want := range []string{
@@ -117,11 +126,11 @@ func TestRemoveFinishedWorkspacesRefusesAMalformedCandidate(t *testing.T) {
 	}
 }
 
-// A removal pass whose own LEGION_REMOVABLE_WORKSPACES_NOT_AFTER has already passed removes
-// nothing at all and logs why, never reaching a single candidate: a pod the Sandbox controller
-// recreated on its own may be running from a pod template the daemon stamped hours ago
-// (dispatch://LEGION-583), so the list it carries can no longer be trusted at all, not merely one
-// candidate at a time.
+// A removal pass whose own workspace-fetch started after the removable-workspaces list's notAfter
+// removes nothing at all and logs why, never reaching a single candidate: a pod the Sandbox
+// controller recreated on its own gets a fresh workspace-fetch, with its own later start time,
+// whatever its clone then takes — comparing that start, not wall-clock time at removal, is what
+// keeps this bound independent of the clone's own duration (LEGION-585).
 func TestRemoveFinishedWorkspacesRemovesNothingPastItsNotAfter(t *testing.T) {
 	root := t.TempDir()
 	repository, err := ghrepo.Parse("--repo", winitRepo)
@@ -129,37 +138,18 @@ func TestRemoveFinishedWorkspacesRemovesNothingPastItsNotAfter(t *testing.T) {
 		t.Fatal(err)
 	}
 	candidates := []runtime.RemovableWorkspace{{Issue: "LEGION-100"}}
-	t.Setenv(removableWorkspacesEnv, removableEnv(t, candidates))
-	t.Setenv(removableWorkspacesNotAfterEnv, time.Now().Add(-time.Second).Format(time.RFC3339))
+	notAfter := time.Now().Add(-time.Minute)
+	t.Setenv(removableWorkspacesEnv, removableEnvWithNotAfter(t, candidates, notAfter))
 
 	var stdout bytes.Buffer
-	removeFinishedWorkspaces(context.Background(), panicRunner{t}, root, repository, "LEGION-200", &stdout, time.Now, removalBudget)
+	removeFinishedWorkspaces(context.Background(), panicRunner{t}, root, repository, "LEGION-200", &stdout, time.Now, removalBudget, time.Now())
 
 	output := stdout.String()
-	if !strings.Contains(output, removableWorkspacesNotAfterEnv) {
-		t.Errorf("stdout %q, want it to name %s", output, removableWorkspacesNotAfterEnv)
+	if !strings.Contains(output, "past the removable-workspaces list's notAfter") {
+		t.Errorf("stdout %q, want it to name notAfter", output)
 	}
 	if strings.Contains(output, "LEGION-100") {
 		t.Errorf("stdout %q names LEGION-100 at all, want the pass to stop before reaching any candidate", output)
-	}
-}
-
-// An absent LEGION_REMOVABLE_WORKSPACES_NOT_AFTER (an older daemon or plugin) is no bound at all:
-// the pass runs normally.
-func TestRemoveFinishedWorkspacesRunsNormallyWithNoNotAfter(t *testing.T) {
-	root := t.TempDir()
-	repository, err := ghrepo.Parse("--repo", winitRepo)
-	if err != nil {
-		t.Fatal(err)
-	}
-	candidates := []runtime.RemovableWorkspace{{Issue: "LEGION-100"}}
-	t.Setenv(removableWorkspacesEnv, removableEnv(t, candidates))
-
-	var stdout bytes.Buffer
-	removeFinishedWorkspaces(context.Background(), panicRunner{t}, root, repository, "LEGION-200", &stdout, time.Now, removalBudget)
-
-	if want := "LEGION-100 has no workspace on this volume; nothing to remove"; !strings.Contains(stdout.String(), want) {
-		t.Errorf("stdout %q, want %q", stdout.String(), want)
 	}
 }
 
@@ -191,7 +181,7 @@ func TestRemoveFinishedWorkspacesRotatesByGenerationNotJustIssue(t *testing.T) {
 			return t0.Add(budget + time.Second)
 		}
 		var stdout bytes.Buffer
-		removeFinishedWorkspaces(context.Background(), panicRunner{t}, root, repository, "LEGION-200", &stdout, now, budget)
+		removeFinishedWorkspaces(context.Background(), panicRunner{t}, root, repository, "LEGION-200", &stdout, now, budget, time.Now())
 		for _, candidate := range candidates {
 			if strings.Contains(stdout.String(), candidate.Issue+" has no workspace on this volume") {
 				started[candidate.Issue] = true
@@ -230,7 +220,7 @@ func TestRemoveFinishedWorkspacesRotatesByRoleNotJustIssueAndGeneration(t *testi
 			return t0.Add(budget + time.Second)
 		}
 		var stdout bytes.Buffer
-		removeFinishedWorkspaces(context.Background(), panicRunner{t}, root, repository, "LEGION-200", &stdout, now, budget)
+		removeFinishedWorkspaces(context.Background(), panicRunner{t}, root, repository, "LEGION-200", &stdout, now, budget, time.Now())
 		for _, candidate := range candidates {
 			if strings.Contains(stdout.String(), candidate.Issue+" has no workspace on this volume") {
 				started[candidate.Issue] = true
@@ -312,7 +302,7 @@ func TestRemoveFinishedWorkspacesDefersCandidatesPastItsBudget(t *testing.T) {
 	t.Setenv(removableWorkspacesEnv, removableEnv(t, candidates))
 
 	var stdout bytes.Buffer
-	removeFinishedWorkspaces(context.Background(), panicRunner{t}, root, repository, "LEGION-200", &stdout, now, budget)
+	removeFinishedWorkspaces(context.Background(), panicRunner{t}, root, repository, "LEGION-200", &stdout, now, budget, time.Now())
 
 	output := stdout.String()
 	all := []string{"LEGION-100", "LEGION-101", "LEGION-102", "LEGION-103"}
@@ -414,6 +404,97 @@ func TestWorkspaceInitRemovesAFinishedChildEvenWithAFreshConfigHomeForTheSecondP
 	if want := "removed LEGION-100's workspace"; !strings.Contains(stdout, want) {
 		t.Errorf("stdout %q, want it to contain %q", stdout, want)
 	}
+}
+
+// A clean, pushed candidate is still removed even when this pod's own clone — workspace-fetch's,
+// which LEGION-585 bounds at up to 30 minutes rather than the 5-minute command cap — takes long
+// enough that wall-clock time at removal is already past the list's notAfter: what the fetch-start
+// comparison checks is this pod's own fetch, recorded once before the clone ever started, not how
+// long the clone (or anything after it) then took. Before this fix, comparing wall-clock time at
+// removal instead meant a slow clone on exactly the large repositories LEGION-585 exists for could
+// make every launch skip removal, never once failing safe into actually removing anything.
+func TestWorkspaceInitRemovesACleanCandidateEvenWhenItsCloneOutlastsTheWindow(t *testing.T) {
+	v := newTreeVolume(t).withRemote(t)
+	v.fetch(t)
+	if code, _, stderr := runWorkspaceInitHere(v.args("LEGION-100")); code != 0 {
+		t.Fatalf("provision the candidate: exit %d, stderr %q", code, stderr)
+	}
+	candidate := v.workspace("LEGION-100")
+	if err := os.WriteFile(filepath.Join(candidate, "feature.txt"), []byte("finished work\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	v.jj(t, "status", "-R", candidate)
+	bookmark := "legion/LEGION-100"
+	v.jj(t, "bookmark", "set", bookmark, "-r", "@", "--allow-backwards", "-R", candidate)
+	v.jjPush(t, candidate, bookmark)
+
+	fetchStart := readFetchStartedForTest(t, v.feed)
+	// notAfter just past this pod's own real fetch start: whatever the clone (simulated by the
+	// sleep below) then takes is irrelevant to the comparison this exercises.
+	notAfter := fetchStart.Add(50 * time.Millisecond)
+	t.Setenv(removableWorkspacesEnv, removableEnvWithNotAfter(t, []runtime.RemovableWorkspace{{Issue: "LEGION-100"}}, notAfter))
+	time.Sleep(150 * time.Millisecond) // wall-clock time at removal is now already past notAfter
+
+	code, stdout, stderr := runWorkspaceInitHere(v.args("LEGION-200"))
+	if code != 0 {
+		t.Fatalf("provision LEGION-200: exit %d, stderr %q", code, stderr)
+	}
+	if _, err := os.Stat(candidate); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("LEGION-100's workspace remains: %v", err)
+	}
+	if want := "removed LEGION-100's workspace"; !strings.Contains(stdout, want) {
+		t.Errorf("stdout %q, want it to contain %q", stdout, want)
+	}
+}
+
+// A pod the Sandbox controller recreates on its own gets a fresh workspace-fetch, whose own start
+// time is long after the removable-workspaces list's notAfter was stamped: removal removes
+// nothing at all, logging why, rather than act on a list that may by then be hours old.
+func TestWorkspaceInitRemovesNothingWhenThisPodsFetchStartedLongAfterTheStamp(t *testing.T) {
+	v := newTreeVolume(t).withRemote(t)
+	v.fetch(t)
+	if code, _, stderr := runWorkspaceInitHere(v.args("LEGION-100")); code != 0 {
+		t.Fatalf("provision the candidate: exit %d, stderr %q", code, stderr)
+	}
+	candidate := v.workspace("LEGION-100")
+	if err := os.WriteFile(filepath.Join(candidate, "feature.txt"), []byte("finished work\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	v.jj(t, "status", "-R", candidate)
+	bookmark := "legion/LEGION-100"
+	v.jj(t, "bookmark", "set", bookmark, "-r", "@", "--allow-backwards", "-R", candidate)
+	v.jjPush(t, candidate, bookmark)
+
+	fetchStart := readFetchStartedForTest(t, v.feed)
+	// notAfter stamped an hour before this pod's own real fetch start: as if the daemon computed
+	// the list for a pod the controller only recreated an hour later.
+	notAfter := fetchStart.Add(-time.Hour)
+	t.Setenv(removableWorkspacesEnv, removableEnvWithNotAfter(t, []runtime.RemovableWorkspace{{Issue: "LEGION-100"}}, notAfter))
+
+	code, stdout, stderr := runWorkspaceInitHere(v.args("LEGION-200"))
+	if code != 0 {
+		t.Fatalf("provision LEGION-200: exit %d, stderr %q", code, stderr)
+	}
+	if _, err := os.Stat(candidate); err != nil {
+		t.Fatalf("LEGION-100's workspace was removed, want it kept: %v", err)
+	}
+	if !strings.Contains(stdout, "past the removable-workspaces list's notAfter") {
+		t.Errorf("stdout %q, want it to name notAfter", stdout)
+	}
+	if strings.Contains(stdout, "LEGION-100 has no workspace") || strings.Contains(stdout, "removed LEGION-100") {
+		t.Errorf("stdout %q names LEGION-100 reached at all, want the pass to stop before any candidate", stdout)
+	}
+}
+
+// readFetchStartedForTest reads fetchStartedFile straight from feed, as workspace-init provision
+// itself does, for a test that needs to compute its own notAfter relative to it.
+func readFetchStartedForTest(t *testing.T, feed string) time.Time {
+	t.Helper()
+	started, err := readFetchStarted(feed)
+	if err != nil {
+		t.Fatalf("read this test's own fetch-started file: %v", err)
+	}
+	return started
 }
 
 // A done child whose last commit is only the merged pull request's head — GitHub deletes a squash
@@ -576,7 +657,7 @@ func TestWorkspaceInitRemovesACleanChildEvenWhenItsSnapshotOutlastsTheRemovalBud
 	t.Setenv(removableWorkspacesEnv, removableEnv(t, []runtime.RemovableWorkspace{{Issue: "LEGION-100"}}))
 
 	var stdout bytes.Buffer
-	removeFinishedWorkspaces(context.Background(), run, v.root, repository, "LEGION-200", &stdout, time.Now, 2*time.Second)
+	removeFinishedWorkspaces(context.Background(), run, v.root, repository, "LEGION-200", &stdout, time.Now, 2*time.Second, time.Now())
 
 	output := stdout.String()
 	if _, err := os.Stat(candidate); !errors.Is(err, os.ErrNotExist) {

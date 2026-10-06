@@ -126,31 +126,36 @@ type launch struct {
 	// file in the workspace-init container's; both "" for a Spawn.
 	resumeFile, initResumeFile string
 	// removableWorkspacesJSON is the tree's removable-workspace candidates (Options.Removable),
-	// JSON-encoded; "" when there are none. Not set by prepare: relaunch calls setRemovable with
-	// what Options.Removable returns, last, under the tree's launch turn — prepare runs long
-	// before that turn is even requested, so a list this early could already be stale by the time
-	// a pod's manifest is actually written. removableWorkspacesNotAfter is the instant past which
-	// workspace-init must treat this same list as too old to trust (dispatch://LEGION-583): set
-	// alongside it, zero when removableWorkspacesJSON is "".
-	removableWorkspacesJSON     string
-	removableWorkspacesNotAfter time.Time
+	// JSON-encoded together with their expiry, one object; "" when there are none. Not set by
+	// prepare: relaunch calls setRemovable with what Options.Removable returns, last, under the
+	// tree's launch turn — prepare runs long before that turn is even requested, so a list this
+	// early could already be stale by the time a pod's manifest is actually written.
+	removableWorkspacesJSON string
 }
 
-// setRemovable JSON-encodes candidates into l.removableWorkspacesJSON and records notAfter beside
-// it, called from relaunch with Options.Removable's result and the launch time plus the tree's
-// own initWaitSeconds, once the tree's launch turn is held. The encoding cannot fail (plain
-// strings), but initEnvironment has no error to return, so a refusal here is relaunch's own to
-// surface before it ever patches the Sandbox.
+// removableWorkspacesPayload is LEGION_REMOVABLE_WORKSPACES' own wire shape (its mirror,
+// cmd/legion's removableWorkspacesPayload, decodes it): the candidate list and the absolute
+// instant past which workspace-init must no longer trust it, one JSON object so the two can never
+// arrive apart (dispatch://LEGION-583).
+type removableWorkspacesPayload struct {
+	NotAfter   time.Time                    `json:"notAfter"`
+	Workspaces []runtime.RemovableWorkspace `json:"workspaces"`
+}
+
+// setRemovable JSON-encodes candidates and notAfter into l.removableWorkspacesJSON's combined
+// payload, called from relaunch with Options.Removable's result and the launch time plus the
+// tree's own initWaitSeconds, once the tree's launch turn is held. The encoding cannot fail (plain
+// strings and a time.Time), but initEnvironment has no error to return, so a refusal here is
+// relaunch's own to surface before it ever patches the Sandbox.
 func (l *launch) setRemovable(candidates []runtime.RemovableWorkspace, notAfter time.Time) error {
 	if len(candidates) == 0 {
 		return nil
 	}
-	encoded, err := json.Marshal(candidates)
+	encoded, err := json.Marshal(removableWorkspacesPayload{NotAfter: notAfter, Workspaces: candidates})
 	if err != nil {
 		return fmt.Errorf("sandbox launch %s: encode LEGION_REMOVABLE_WORKSPACES: %w", l.spec.Claim, err)
 	}
 	l.removableWorkspacesJSON = string(encoded)
-	l.removableWorkspacesNotAfter = notAfter
 	return nil
 }
 
@@ -618,12 +623,12 @@ func fetchEnvironment() []corev1.EnvVar {
 // generation 1 — mainEnvironment's copies of both are the worker container's, a different
 // container, so workspace-init needs its own. LEGION_REMOVABLE_WORKSPACES is
 // l.removableWorkspacesJSON, set by setRemovable (called from relaunch, after the daemon's
-// candidate list is read, last, under the tree's launch turn); absent when the daemon found none.
-// LEGION_REMOVABLE_WORKSPACES_NOT_AFTER, set only alongside it, is l.removableWorkspacesNotAfter
-// (RFC 3339): the launch time plus the tree's own initWaitSeconds, past which workspace-init
-// trusts the list no further — a pod the Sandbox controller recreates on its own runs from this
-// same template without the daemon ever retaking the tree's launch turn to refresh it
-// (dispatch://LEGION-583).
+// candidate list is read, last, under the tree's launch turn), one JSON object carrying both the
+// list and notAfter (RFC 3339: the launch time plus the tree's own initWaitSeconds) together, so
+// the two can never arrive apart; absent when the daemon found none. notAfter is what bounds how
+// long a pod the Sandbox controller recreates on its own may still trust this same list, read by
+// its own fresh workspace-fetch's start time rather than wall-clock time at removal
+// (dispatch://LEGION-583, cmd/legion/workspace_init.go's removableWorkspacesEnv doc comment).
 func (r *Runtime) initEnvironment(l launch) []corev1.EnvVar {
 	env := []corev1.EnvVar{
 		{Name: "PATH", Value: imagePath},
@@ -639,17 +644,28 @@ func (r *Runtime) initEnvironment(l launch) []corev1.EnvVar {
 	}
 	if l.removableWorkspacesJSON != "" {
 		env = append(env, corev1.EnvVar{Name: "LEGION_REMOVABLE_WORKSPACES", Value: l.removableWorkspacesJSON})
-		env = append(env, corev1.EnvVar{Name: "LEGION_REMOVABLE_WORKSPACES_NOT_AFTER", Value: l.removableWorkspacesNotAfter.Format(time.RFC3339)})
 	}
 	return append(env, xdgEnvironment()...)
 }
 
-// initWaitSeconds bounds a wait on another pod's workspace-init: ceil(boot timeout) × (intervals
-// + 1), the whole time the daemon tolerates a pod that is alive but unregistered, plus one
-// interval, so no wait gives up while the daemon would still allow the pod it waits on
-// (KubernetesRuntime.workspaceInitLockWaitSeconds, runtime-kubernetes.ts).
+// initWaitSeconds bounds workspace-init provision's own wait to acquire another pod's lock on the
+// shared clone (`flock --timeout`, LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS): ceil(boot timeout) ×
+// (intervals + 1). Under gVisor a pod's flock never reaches another pod, so what actually keeps
+// two pods from provisioning the shared clone at once is awaitTreeInitialized (relaunch.go): a
+// new pod is never created while an existing tree pod is still initializing. lockTree itself
+// holds the launch turn only until the new pod is in the store (relaunch.go, awaitNewPod) — well
+// before that pod's own init finishes — so this wait is a safety net for whatever can still race
+// around that ordering (a pod recreated outside the normal relaunch flow), not a budget this
+// package expects to actually exhaust.
 func (r *Runtime) initWaitSeconds() int64 {
 	return int64(math.Ceil(r.bootTimeout.Seconds())) * int64(r.bootIntervals+1)
+}
+
+// ProvisionBound satisfies runtime.Runtime: workspace.FetchTimeout, the fetch's own clone bound,
+// plus this same lock-wait budget, for whatever time a provisioning pod can still spend waiting on
+// another pod's flock before it even starts its own clone.
+func (r *Runtime) ProvisionBound() time.Duration {
+	return workspace.FetchTimeout + time.Duration(r.initWaitSeconds())*time.Second
 }
 
 // mainEnvironment is the pane contract with a pod's values (decision 10): the variables every

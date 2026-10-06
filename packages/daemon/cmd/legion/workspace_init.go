@@ -39,20 +39,29 @@ const (
 	lockWaitEnv = "LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS"
 	// provisionTokenFileEnv points `workspace-init fetch` at the mounted provisioning token.
 	provisionTokenFileEnv = "LEGION_PROVISION_TOKEN_FILE"
-	// removableWorkspacesEnv names the daemon's candidate list of sibling workspaces this pod's
-	// workspace-init may remove from the tree volume: JSON, runtime.RemovableWorkspace's shape.
-	// internal/daemon/removable.go's removableWorkspaces is the one place that states which
-	// issues qualify; unset or empty removes none.
+	// removableWorkspacesEnv names the daemon's own candidate list for this pod's workspace-init
+	// to judge and, where safe, remove from the tree volume: one JSON object,
+	// `{"notAfter": "<RFC 3339>", "workspaces": [...runtime.RemovableWorkspace]}`, so the list and
+	// its own expiry can never arrive apart. internal/daemon/removable.go's removableWorkspaces
+	// states the candidate rule the daemon computes from its own claim store; relaunch
+	// (internal/runtime/sandbox) also drops any candidate that still has a live pod of the tree,
+	// a second guarantee on different evidence. notAfter is the launch time plus the init-wait
+	// window (initWaitSeconds), stamped under the tree's launch turn; `workspace-init` removes
+	// nothing at all, not even one candidate, once this pod's own workspace-fetch started later
+	// than that (fetchStartedFile below) — a pod the Sandbox controller recreates on its own
+	// (eviction, node drain, a hand deletion) runs workspace-init from the same pod template, the
+	// same list, without the daemon ever retaking the tree's launch turn to refresh it, and for a
+	// long-lived root architect pod that list can by then be hours old (dispatch://LEGION-583).
+	// Comparing the fetch's own start, not wall-clock time at removal, is what keeps this bound
+	// independent of how long the clone itself then takes (LEGION-585 raised that to 30 minutes);
+	// unset or empty removes none, and a JSON object missing either field removes none, logged as
+	// malformed input the same as any other.
 	removableWorkspacesEnv = "LEGION_REMOVABLE_WORKSPACES"
-	// removableWorkspacesNotAfterEnv names the RFC 3339 instant past which this pod's own copy of
-	// removableWorkspacesEnv is too old to trust: relaunch stamps it alongside the list, under the
-	// tree's launch turn, as the launch time plus the tree's own initWaitSeconds. A pod the
-	// Sandbox controller recreates on its own (eviction, node drain, a hand deletion) runs
-	// workspace-init from the same pod template — the same stale list — without the daemon ever
-	// taking the tree's launch turn again; this is what stops it from acting on a list that may by
-	// then be hours old (dispatch://LEGION-583). Set only alongside removableWorkspacesEnv, so its
-	// absence with a non-empty list means an older daemon or plugin, read as no bound at all.
-	removableWorkspacesNotAfterEnv = "LEGION_REMOVABLE_WORKSPACES_NOT_AFTER"
+	// fetchStartedFile is the file `workspace-init fetch` (workspace_fetch.go) writes into the
+	// pod's own feed directory, RFC 3339, before its clone starts: the evidence `workspace-init
+	// provision` reads back to judge whether this pod's own copy of removableWorkspacesEnv is
+	// still fresh enough to trust (see its own doc comment above).
+	fetchStartedFile = "fetch-started"
 	// defaultLockWaitSeconds is for an invocation no daemon sized: three slow-command budgets, a
 	// live holder's clone and fetch at full budget plus its local commands
 	// (DEFAULT_WORKSPACE_INIT_LOCK_WAIT_SECONDS, workspace-init.ts).
@@ -221,19 +230,42 @@ func workspaceInit(ctx context.Context, issue, repo, root, credentialHelper, fee
 	// pass's own jj commands need no exemption for a fresh pod's empty config home: provisioning
 	// has already run jj against this shared clone by the time any candidate is snapshotted,
 	// migrating this pod's own copy of the clone's per-repo config before that snapshot runs.
-	removeFinishedWorkspaces(ctx, run, root, repository, issue, stdout, time.Now, removalBudget)
+	if fetchStart, err := readFetchStarted(feed); err != nil {
+		fmt.Fprintf(stdout, "workspace-init: %v, removing nothing\n", err)
+	} else {
+		removeFinishedWorkspaces(ctx, run, root, repository, issue, stdout, time.Now, removalBudget, fetchStart)
+	}
 	if fromRef, set := os.LookupEnv("LEGION_WORKSPACE_RECOVERED_FROM"); set {
 		return writeRecoveryMarker(ctx, run, provisioned.Dir, issue, fromRef)
 	}
 	return nil
 }
 
+// readFetchStarted reads fetchStartedFile from feed, written by workspace-init fetch before its
+// clone began: the evidence removeFinishedWorkspaces compares against removableWorkspacesEnv's
+// own notAfter (its doc comment, below, states why). A missing or malformed file is the same
+// kind of refusal as a malformed payload: the caller logs it and skips removal rather than guess
+// a value that could let a recreated pod's stale list through.
+func readFetchStarted(feed string) (time.Time, error) {
+	raw, err := os.ReadFile(filepath.Join(feed, fetchStartedFile))
+	if err != nil {
+		return time.Time{}, fmt.Errorf("read this pod's own %s: %w", fetchStartedFile, err)
+	}
+	started, err := time.Parse(time.RFC3339, strings.TrimSpace(string(raw)))
+	if err != nil {
+		return time.Time{}, fmt.Errorf("%s is not a valid timestamp: %w", fetchStartedFile, err)
+	}
+	return started, nil
+}
+
 // removalBudget is how long removeFinishedWorkspaces spends starting new candidates, measured
 // from its own first candidate: once spent, it stops before starting the next one (never
 // interrupts one already running) and logs the rest as deferred to the tree's next launch,
 // rather than let a long candidate list run past the registration deadline this whole init
-// container shares with the provisioning it still has to report done (360s default:
-// worker_boot_timeout_seconds × worker_boot_registration_deadline_intervals) or the 480s default
+// container shares with the provisioning it still has to report done: the base
+// worker_boot_timeout_seconds × worker_boot_registration_deadline_intervals bound (360s default),
+// plus the runtime's own ProvisionBound (workspace.FetchTimeout + initWaitSeconds, about 38
+// minutes by default, LEGION-585) while the claim is still launching — or the 480s default
 // LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS a sibling pod's own provisioning waits behind this
 // pod's repository lock. A near-full tree volume measured 63-100s per snapshot
 // (dispatch://LEGION-583), so 90s leaves room for one such candidate comfortably and a second
@@ -249,27 +281,38 @@ const removalBudget = 90 * time.Second
 // 800ms on this host; 30s leaves well over an order of magnitude of headroom for a workspace
 // larger or on a slower volume.
 //
-// Removal adds up to about 220s on top of whatever workspace-fetch's clone and this pod's own
-// provisioning already spent inside the 360s registration deadline every init container shares
-// (worker_boot_timeout_seconds × worker_boot_registration_deadline_intervals): removalBudget
-// (90s) itself, plus up to ~100s for the one candidate whose snapshot is already running when the
-// budget is spent (this comment's own 63-100s range), plus this 30s walk timeout for that same
-// candidate. That figure excludes the removed candidate's own recursive delete
-// (workspace.Remove), which this budget never bounds either and which a near-full volume can
-// measure in the tens of seconds: the clone, this pod's own provisioning, that delete, and the
-// agent's own boot after the init container exits all have to fit in whatever is left of the
-// 360s.
+// Removal typically adds up to about 220s on top of whatever workspace-fetch's clone and this
+// pod's own provisioning already spent inside the registration deadline every init container
+// shares while its claim is still launching (the base 360s default, plus ProvisionBound —
+// workspace.FetchTimeout plus initWaitSeconds, about 38 minutes by default, LEGION-585):
+// removalBudget (90s) itself, plus up to ~100s for the one candidate whose snapshot is already
+// running when the budget is spent (this comment's own 63-100s range), plus this 30s walk
+// timeout for that same candidate. "Typically", not a bound: each jj command is itself bounded
+// only by workspace.CommandTimeout (5 minutes), and the removed candidate's own recursive delete
+// (workspace.Remove) has no bound here at all, so the figure excludes that delete, which a
+// near-full volume can measure in the tens of seconds: the clone, this pod's own provisioning,
+// that delete, and the agent's own boot after the init container exits all have to fit in
+// whatever is left of the registration deadline.
 const nestedRepositoryWalkTimeout = 30 * time.Second
+
+// removableWorkspacesPayload is removableWorkspacesEnv's own wire shape (its doc comment above
+// states why the list and its expiry are one JSON object).
+type removableWorkspacesPayload struct {
+	NotAfter   time.Time                    `json:"notAfter"`
+	Workspaces []runtime.RemovableWorkspace `json:"workspaces"`
+}
 
 // removeFinishedWorkspaces reads removableWorkspacesEnv's candidate list and calls
 // workspace.RemoveFinished for each sibling that still has a workspace on the volume, other than
 // issue — the one this pod provisions, never the daemon's to name but filtered out here too, in
 // case it ever is — and the tree's own root, which Location names for no issue so it is never a
-// candidate in the first place. Nothing is removed once now() is past removableWorkspacesNotAfterEnv
-// (a pod the Sandbox controller recreated on its own, running from the pod template's old list
-// without the daemon ever retaking the tree's launch turn, dispatch://LEGION-583): that is logged
-// too, distinctly from every other refusal below, since it means this pod's whole candidate list
-// is untrustworthy rather than one candidate being malformed. Each candidate's shape is then
+// candidate in the first place. fetchStart, this pod's own workspace-fetch start time
+// (fetchStartedFile, read by the caller), is checked against the payload's NotAfter before
+// anything else: past it, nothing is removed at all, logged distinctly from every other refusal
+// below, since it means this pod's whole candidate list is untrustworthy rather than one
+// candidate being malformed — comparing the fetch's own start, not wall-clock time at removal, is
+// what keeps this bound independent of how long the clone itself then takes. A payload missing
+// either field, or invalid JSON, is the same kind of refusal. Each candidate's shape is then
 // checked before it ever reaches a revset or a path: Issue against the key form workspace.Location
 // accepts (legionclaim.IsIssueKey), and MergedHead, when not empty, against workspace.IsCommitID;
 // either refusal is logged and the candidate is skipped rather than acted on. One candidate's
@@ -287,27 +330,26 @@ const nestedRepositoryWalkTimeout = 30 * time.Second
 // merger, all at generation 1), which role closes. now and budget are the clock and
 // removalBudget, exposed for a test; the one production call site passes time.Now and
 // removalBudget.
-func removeFinishedWorkspaces(ctx context.Context, run workspace.Runner, root string, repository ghrepo.Repository, issue string, stdout io.Writer, now func() time.Time, budget time.Duration) {
+func removeFinishedWorkspaces(ctx context.Context, run workspace.Runner, root string, repository ghrepo.Repository, issue string, stdout io.Writer, now func() time.Time, budget time.Duration, fetchStart time.Time) {
 	raw := os.Getenv(removableWorkspacesEnv)
 	if raw == "" {
 		return
 	}
-	if rawNotAfter := os.Getenv(removableWorkspacesNotAfterEnv); rawNotAfter != "" {
-		notAfter, err := time.Parse(time.RFC3339, rawNotAfter)
-		if err != nil {
-			fmt.Fprintf(stdout, "workspace-init: %s is not a valid timestamp, removing nothing: %v\n", removableWorkspacesNotAfterEnv, err)
-			return
-		}
-		if now().After(notAfter) {
-			fmt.Fprintf(stdout, "workspace-init: %s's removable-workspaces list is past its %s (%s), removing nothing: this pod may have been recreated by the Sandbox controller long after the daemon last computed it\n", issue, removableWorkspacesNotAfterEnv, notAfter.Format(time.RFC3339))
-			return
-		}
-	}
-	var all []runtime.RemovableWorkspace
-	if err := json.Unmarshal([]byte(raw), &all); err != nil {
+	var payload removableWorkspacesPayload
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
 		fmt.Fprintf(stdout, "workspace-init: %s is not valid JSON, removing nothing: %v\n", removableWorkspacesEnv, err)
 		return
 	}
+	if payload.NotAfter.IsZero() {
+		fmt.Fprintf(stdout, "workspace-init: %s has no notAfter, removing nothing: a malformed or truncated payload\n", removableWorkspacesEnv)
+		return
+	}
+	if fetchStart.After(payload.NotAfter) {
+		fmt.Fprintf(stdout, "workspace-init: %s's own fetch started at %s, past the removable-workspaces list's notAfter (%s), removing nothing: this pod may have been recreated by the Sandbox controller long after the daemon last computed it\n", issue, fetchStart.Format(time.RFC3339), payload.NotAfter.Format(time.RFC3339))
+		return
+	}
+	all := payload.Workspaces
+
 	var candidates []runtime.RemovableWorkspace
 	for _, candidate := range all {
 		if candidate.Issue == "" || candidate.Issue == issue {
