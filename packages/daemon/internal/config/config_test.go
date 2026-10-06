@@ -1096,7 +1096,7 @@ func TestLoadClassifiesEveryShippedKey(t *testing.T) {
 }
 
 // advertise_host's shape is checked at read time, before any runtime-specific rule, since the
-// daemon combines it with worker_stream_port itself (readSandbox, internal/daemon/kubernetes.go):
+// daemon combines it with the worker stream's port itself (shimAddress, internal/daemon/daemon.go):
 // a value naming a scheme, a port, or brackets would double one of those up.
 func TestAdvertiseHostMustBeABareHost(t *testing.T) {
 	for _, tc := range []struct{ name, yaml, want string }{

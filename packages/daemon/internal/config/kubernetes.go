@@ -171,8 +171,9 @@ func isUnspecifiedHost(host string) bool {
 }
 
 // readAdvertiseHost is `advertise_host`: a bare host name or IP address. The daemon combines it
-// with worker_stream_port itself (readSandbox, internal/daemon/kubernetes.go), so a value naming a
-// scheme, a port, or brackets would double one of those up or build an address no pod could dial.
+// with the worker stream listener's port itself (shimAddress, internal/daemon/daemon.go), so a
+// value naming a scheme, a port, or brackets would double one of those up or build an address no
+// pod could dial.
 func readAdvertiseHost(value *yaml.Node, key string) (*string, error) {
 	read, err := readNonEmptyString(value, key)
 	if err != nil || read == nil {
@@ -889,7 +890,7 @@ func checkPodReachable(cfg Config) error {
 		}
 	} else {
 		if isLoopbackHost(cfg.Bind) {
-			return refuse("bind", cfg.Bind)
+			return fmt.Errorf("bind %s is loopback, where no pod reaches the worker stream, whatever advertise_host names; bind 0.0.0.0 or the daemon host's own address when runtime is kubernetes", cfg.Bind)
 		}
 		if host := cfg.AdvertiseHost; isLoopbackHost(host) || isUnspecifiedHost(host) {
 			return refuse("advertise_host", host)

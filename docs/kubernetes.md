@@ -384,16 +384,18 @@ proofs run on the example, each with its own copy of its ConfigMap.
 
 Under `runtime: kubernetes` it also requires `daemon_url`, `envoy_url`, `nats_urls`,
 `envoy_token_file`, `operator_token_file`, `dispatch_url`, `github_apps` and `projects`. It refuses
-`omp_invocation` and `omp_launch_prefix`: every pod runs the worker image's Oh My Pi. Every address a pod is handed must be one a pod can reach, so
-`daemon_url`, `envoy_url`, `dispatch_url` and each `nats_urls` entry may be neither loopback
-nor the unspecified address — and so is the worker-stream address a pod dials, `advertise_host`
-when the file sets one, `bind` otherwise: a pod's own IP changes on every restart, so a daemon
-running inside the cluster binds `0.0.0.0` and lets `advertise_host` name the Service DNS name
-that reaches whichever pod is live, while a daemon on a fixed host (a devbox or a VM) leaves
-`advertise_host` unset and keeps `bind` doing both jobs, as it always has. A loopback `bind` is refused regardless of `advertise_host`, though, since a listener bound only to loopback answers no Service and no pod either. `legion start --check-config` runs all of it without starting the
-daemon, writing a file or running a key command, and then every refusal boot makes from the files
-and the environment before its first write, in boot's words: the operator, Envoy and Dispatch
-bearers' files, the NATS nkey seed, the instructions file, and the runtime's own
+`omp_invocation` and `omp_launch_prefix`: every pod runs the worker image's Oh My Pi. Every
+address a pod is handed must be one a pod can reach, so `daemon_url`, `envoy_url`, `dispatch_url`
+and each `nats_urls` entry may be neither loopback nor the unspecified address — and so is the
+worker-stream address a pod dials, `advertise_host` when the file sets one, `bind` otherwise. A
+pod's own IP changes on every restart, so a daemon running inside the cluster binds `0.0.0.0` and
+lets `advertise_host` name the Service DNS name that reaches whichever pod is live, while a daemon
+on a fixed host (a devbox or a VM) leaves `advertise_host` unset and binds that host's own
+address, which pods then dial. A loopback `bind` is refused either way: a listener bound only to
+loopback answers no Service and no pod. `legion start --check-config` runs all of it without
+starting the daemon, writing a file or running a key command, and then every refusal boot makes
+from the files and the environment before its first write, in boot's words: the operator, Envoy
+and Dispatch bearers' files, the NATS nkey seed, the instructions file, and the runtime's own
 reads (the kubeconfig and every value's translation; under tmux, the OMP invocation, through `mise
 where` when it names a `mise` tool, and the host's `gh`, `git` and `jj`). What it does not do is
 what boot writes or runs: the state directory, secretsd's provider keys, the plugin gate and the

@@ -474,7 +474,7 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 		{
 			name: "bind on loopback, advertise_host set",
 			body: kubernetesWith("bind: 10.0.0.5", "bind: 127.0.0.1\nadvertise_host: legion-daemon-legsmoke.legion.svc"),
-			want: "bind 127.0.0.1 is not an address a pod can reach, and every pod's shim dials the worker stream at tcp://127.0.0.1:13371; bind the daemon host's own address when runtime is kubernetes",
+			want: "bind 127.0.0.1 is loopback, where no pod reaches the worker stream, whatever advertise_host names; bind 0.0.0.0 or the daemon host's own address when runtime is kubernetes",
 		},
 		{
 			name: "advertise_host with a scheme",
