@@ -362,10 +362,15 @@ direct record link can never approve a machine login) — then, below that link,
 broker's `session` field names (LEGION-587: `{request, enrollment}`, either null): a live one's
 title (or its short id, untitled), folder and machine, linked to `/agents/:id/live`; a dead one's
 bare id, "isn't running"; neither reachable (the agents list hasn't answered, or Envoy is down or
-unconfigured), "couldn't check"; and neither id ever set, "No session named." Both ids differing
-shows both lines, each naming where its id came from (`session.ts`'s `credentialSessionLines`,
-shared with the record page below; never "Requested by" - the broker verifies the enrollment
-line, not the session). `pending.ts`'s `useCredentialRequests` is
+unconfigured), "couldn't check"; and neither id ever set, "No session named." The enrollment's id
+alone, or both agreeing, shows one unlabeled line - the broker's own verified fact. The request's
+id always says where it came from, labeled even with no enrollment id present to disambiguate
+against (`session.ts`'s `credentialSessionLines`; the common host-session case, which has no
+enrollment `session_id` of its own): it is never verified by a signature, and an unlabeled line
+would read as the broker's own fact when it is not. Both ids set and differing shows both lines,
+each labeled (`CredentialSessionLines.tsx`, shared with the record page below); never "Requested
+by" - the broker verifies the enrollment line, not the request's. `pending.ts`'s
+`useCredentialRequests` is
 the one reading of that list - `listed` (empty under `null`), `loading` or `failed` - and
 the section, the Inbox's empty state, its `Blocked on you` banner and both `Needs you N` badges
 all read it, so a request one of them counts is one the section lists.

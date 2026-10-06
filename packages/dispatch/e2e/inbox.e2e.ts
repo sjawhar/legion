@@ -934,6 +934,76 @@ test("a pending credential request naming a running session links to it, in the 
   }
 });
 
+// LEGION-587's review (round 2): the common host-session case - only the request's own override
+// is set, no enrollment session_id at all - must still label the session, since the broker never
+// verifies that id.
+test("a pending credential request naming only the request's session id labels it, in the Inbox and on its record page", async ({
+  browser,
+}) => {
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await setLiveSessions([
+      {
+        dir: "/home/alice/legion",
+        machine_id: "devbox-alice",
+        session_id: "sess-request-only-587",
+        title: "Reviewing LEGION-587 request-only",
+      },
+    ]);
+    const requestedAt = new Date().toISOString();
+    await setPendingCredentialRequests([
+      {
+        approver: "alice",
+        identifiers: ["SESSION_REQUEST_ONLY_KEY"],
+        kind: "agent_secret",
+        record_id: "record-request-only-587",
+        requested_at: requestedAt,
+        session: { enrollment: null, request: "sess-request-only-587" },
+      },
+    ]);
+    await setCredentialRecords([
+      {
+        approver: "alice",
+        decided: null,
+        enrollment: {
+          kind: "host",
+          operator: "alice",
+          runtime_id: "host-alice:456:0",
+          slot: null,
+        },
+        expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+        identifiers: ["SESSION_REQUEST_ONLY_KEY"],
+        kind: "agent_secret",
+        lifetime_seconds: 3600,
+        record_id: "record-request-only-587",
+        requested_at: requestedAt,
+        reason: "need it for the fix",
+        rules_version: "rules-v1",
+        service: null,
+        session: { enrollment: null, request: "sess-request-only-587" },
+        state: "pending",
+      },
+    ]);
+
+    await page.goto("/");
+    const requests = page.getByRole("region", { name: "Credential requests" });
+    await expect(requests.getByText(/The session the request says it came from:/)).toBeVisible();
+    const inboxSessionLink = requests.getByRole("link", {
+      name: "Reviewing LEGION-587 request-only",
+    });
+    await expect(inboxSessionLink).toHaveAttribute("href", "/agents/sess-request-only-587/live");
+
+    await requests.getByRole("link", { name: /SESSION_REQUEST_ONLY_KEY/ }).click();
+    await expect(page).toHaveURL(/\/credentials\/record-request-only-587$/);
+    await expect(page.getByText(/The session the request says it came from:/)).toBeVisible();
+    const recordSessionLink = page.getByRole("link", { name: "Reviewing LEGION-587 request-only" });
+    await expect(recordSessionLink).toHaveAttribute("href", "/agents/sess-request-only-587/live");
+  } finally {
+    await alice.close();
+  }
+});
+
 // No Dispatch event names a credential request (the broker holds no Dispatch credential by
 // design), so an Inbox already open can only learn of one, or that one is gone, from the
 // credential list's own poll (`CREDENTIAL_POLL_INTERVAL_MS`, `features/credentials/pending.ts`).

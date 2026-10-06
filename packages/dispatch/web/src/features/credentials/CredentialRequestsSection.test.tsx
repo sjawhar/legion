@@ -4,7 +4,8 @@ import { cleanup, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 import { api } from "../../api/client";
-import type { Agent, CredentialPendingRow } from "../../api/types";
+import type { CredentialPendingRow } from "../../api/types";
+import { runningAgent } from "./agent-fixture";
 import { CredentialRequestsSection } from "./CredentialRequestsSection";
 import type { CredentialRequests } from "./pending";
 
@@ -16,21 +17,6 @@ function pendingSecretRow(overrides: Partial<CredentialPendingRow> = {}): Creden
     kind: "agent_secret",
     record_id: "req-1",
     requested_at: "2026-09-27T00:00:00Z",
-    ...overrides,
-  };
-}
-
-function agent(overrides: Partial<Agent> = {}): Agent {
-  return {
-    capabilities: [],
-    dir: "/home/alice/legion",
-    last_activity: null,
-    last_seen: 1,
-    machine_id: "devbox-alice",
-    open_asks: 0,
-    roles: [],
-    session_id: "sess-1",
-    title: "Reviewing LEGION-587",
     ...overrides,
   };
 }
@@ -86,7 +72,7 @@ test("surfaces a failure to load the list instead of hiding the section", () => 
 // LEGION-587: a row whose session names a live agent links to it; one whose session names an id
 // the agents list doesn't carry reads as not running, with neither mistaken for the other.
 test("a row's session reads as a running session's title, linked to its live conversation", async () => {
-  const agents = spyOn(api, "listAgents").mockResolvedValue([agent()]);
+  const agents = spyOn(api, "listAgents").mockResolvedValue([runningAgent()]);
   try {
     renderSection({
       requests: [pendingSecretRow({ session: { enrollment: "sess-1", request: null } })],
@@ -108,6 +94,24 @@ test("a row's session naming an id the agents list doesn't carry reads as not ru
       status: "listed",
     });
     expect(await screen.findByText(/sess-gone isn't running\./)).toBeDefined();
+  } finally {
+    agents.mockRestore();
+  }
+});
+
+// LEGION-587's review (round 2): a request-only session id - the common case for a host Oh My Pi
+// session, which has no enrollment session_id of its own - must still say where it came from, so
+// a reader never mistakes an unsigned claim for the broker's own verified enrollment fact.
+test("a row's request-only session id is labeled, even with no enrollment id to disambiguate against", async () => {
+  const agents = spyOn(api, "listAgents").mockResolvedValue([runningAgent()]);
+  try {
+    renderSection({
+      requests: [pendingSecretRow({ session: { enrollment: null, request: "sess-1" } })],
+      status: "listed",
+    });
+    expect(await screen.findByText(/The session the request says it came from:/)).toBeDefined();
+    const link = screen.getByRole("link", { name: "Reviewing LEGION-587" });
+    expect(link.getAttribute("href")).toBe("/agents/sess-1/live");
   } finally {
     agents.mockRestore();
   }

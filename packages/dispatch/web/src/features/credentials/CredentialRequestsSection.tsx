@@ -11,9 +11,8 @@ import {
   textMutedOnCanvas,
 } from "../../theme/classes";
 import { Timestamp } from "../refs/Timestamp";
-import { CredentialSessionLineText, noSessionNamed } from "./CredentialSessionLine";
+import { CredentialSessionLines } from "./CredentialSessionLines";
 import type { CredentialRequests } from "./pending";
-import { useCredentialSessionLines } from "./useCredentialSessionLines";
 
 /** A `launcher_credential` (machine) record is decided only through the code-lookup route: its
  *  inbox row links to the code-entry page rather than trying to deep-link the
@@ -22,34 +21,6 @@ function pendingRowPath(row: CredentialPendingRow): string {
   return row.kind === "launcher_credential"
     ? "/credentials/machine"
     : `/credentials/${row.record_id}`;
-}
-
-/** One pending request's row: its own `useCredentialSessionLines` call, so each row resolves its
- *  session independently (the hook's `useAgents` query is shared across every row through
- *  TanStack's cache, so this costs no extra network call per row). */
-function PendingRequestRow({ row }: { row: CredentialPendingRow }): ReactNode {
-  const lines = useCredentialSessionLines(row.session);
-  return (
-    <li>
-      <Link
-        className={`flex flex-wrap items-center gap-2 rounded-lg text-sm outline-none focus-visible:ring-2 ${focusVisibleRing} ${linkText} ${linkHoverText}`}
-        to={pendingRowPath(row)}
-      >
-        <LabelPill>
-          {row.kind === "launcher_credential" ? "Machine login" : "Secret request"}
-        </LabelPill>
-        <span>{row.identifiers.join(", ")}</span>
-        <Timestamp at={row.requested_at} className={textMutedOnCanvas} />
-      </Link>
-      <div className="mt-0.5 flex flex-col gap-0.5 text-xs">
-        {lines.length === 0
-          ? noSessionNamed
-          : lines.map((line) => (
-              <CredentialSessionLineText key={line.source ?? line.status.id} line={line} />
-            ))}
-      </div>
-    </li>
-  );
 }
 
 /** The Inbox's supplementary credential-requests section, mounted above the ask sections, from the
@@ -79,7 +50,21 @@ export function CredentialRequestsSection({
       </h2>
       <ul className="mt-2 space-y-2">
         {requests.map((row) => (
-          <PendingRequestRow key={row.record_id} row={row} />
+          <li key={row.record_id}>
+            <Link
+              className={`flex flex-wrap items-center gap-2 rounded-lg text-sm outline-none focus-visible:ring-2 ${focusVisibleRing} ${linkText} ${linkHoverText}`}
+              to={pendingRowPath(row)}
+            >
+              <LabelPill>
+                {row.kind === "launcher_credential" ? "Machine login" : "Secret request"}
+              </LabelPill>
+              <span>{row.identifiers.join(", ")}</span>
+              <Timestamp at={row.requested_at} className={textMutedOnCanvas} />
+            </Link>
+            <div className="mt-0.5 flex flex-col gap-0.5 text-xs">
+              <CredentialSessionLines session={row.session} />
+            </div>
+          </li>
         ))}
       </ul>
     </section>
