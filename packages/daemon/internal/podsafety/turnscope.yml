@@ -14,12 +14,11 @@
 # too (LEGION-462 found the bash case live, legion-smoke LEGSMOKE-463, at commit 80d0c82b: the
 # proof's own long `/usr/bin/sleep` outlived the interrupt once it had been running about a minute).
 #
-# tmux is unaffected by neither Sandbox's pod isolation nor its own overlay today
-# (TurnScopeFile is named first in a pane's PI_CONFIG_FILES, runtime/tmux), but Quiesce itself is
-# runtime-agnostic, and an issue's roles share one host workspace there too
-# (workspace/config.go) — the same guarantee, the same two keys, without the rest of a pod's own
-# baseline (compaction, memory, images, dev), which a pane run on the operator's own trusted machine
-# has no need of.
+# tmux has neither Sandbox's pod isolation nor an overlay of its own otherwise, so it needs this
+# one: TurnScopeFile is named first in a pane's PI_CONFIG_FILES (runtime/tmux). Quiesce itself is
+# runtime-agnostic, and an issue's roles share one host workspace there too (workspace/config.go)
+# — the same guarantee, the same two keys, without the rest of a pod's own baseline (compaction,
+# memory, images, dev), which a pane run on the operator's own trusted machine has no need of.
 bash:
   autoBackground:
     enabled: false

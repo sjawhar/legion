@@ -7,9 +7,10 @@
 // variable the pod's environment sets, and the operator may set OTEL_SDK_DISABLED and PI_AUTO_QA;
 // the Sandbox runtime refuses
 // PI_CONFIG_DIR and OMP_SESSION_STORAGE in the operator's pod, since they decide where a session
-// lives, and a pod keeps its sessions as files on the tree volume (sandbox.CheckPod). It runs only
-// in a pod (`legion worker-shim --pod-safety`, `legion probe-image --pod-safety`); a tmux pane
-// starts Oh My Pi as it always has.
+// lives, and a pod keeps its sessions as files on the tree volume (sandbox.CheckPod). Apply, the
+// full baseline, runs only in a pod (`legion worker-shim --pod-safety`, `legion probe-image
+// --pod-safety`); a pane gets the two turn-scoping keys alone, as TurnScopeOverlay, which
+// runtime/tmux writes and names itself (writeTurnScopeOverlay, panePairs).
 package podsafety
 
 import (
