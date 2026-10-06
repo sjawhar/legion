@@ -1200,9 +1200,10 @@ cannot see at all — and otherwise removes it only once every commit it holds i
 remote bookmark or the recorded merged pull-request head, renaming its directory aside before the
 slower recursive delete so a kill mid-delete is finished, not re-judged, on the next pass. The pass
 runs inside a 90 s budget, deferring the rest of the list to the tree's next launch once spent, and
-rotates the candidate order by the pod's own issue and launch generation together (issue alone
-never changes across relaunches of the same issue) so one expensive candidate does not starve the
-same candidates on every launch.
+rotates the candidate order by the pod's own issue, role, and launch generation together (issue
+alone never changes across relaunches of the same issue, and generation alone does not
+distinguish one issue's own phase workers' first launches, all at generation 1) so one expensive
+candidate does not starve the same candidates on every launch.
 
 The worker's own jj working-copy snapshot before `legion push`'s network push can take 63-100 s
 on a near-full volume (`removalBudget`'s own doc comment, `cmd/legion/workspace_init.go`, names

@@ -208,7 +208,10 @@ func workspaceInit(ctx context.Context, issue, repo, root, credentialHelper, fee
 	// Removal runs after this pod's own provisioning, whose fetch just brought the shared clone's
 	// remote bookmarks current: a candidate's push-safety check (workspace.RemoveFinished) reads
 	// them, and a stale view would risk nothing worse than a workspace kept one launch too long,
-	// never one removed too early (dispatch://LEGION-583).
+	// never one removed too early (dispatch://LEGION-583). This order is also why the removal
+	// pass's own jj commands need no exemption for a fresh pod's empty config home: provisioning
+	// has already run jj against this shared clone by the time any candidate is snapshotted,
+	// migrating this pod's own copy of the clone's per-repo config before that snapshot runs.
 	removeFinishedWorkspaces(ctx, run, root, repository, issue, stdout, time.Now, removalBudget)
 	if fromRef, set := os.LookupEnv("LEGION_WORKSPACE_RECOVERED_FROM"); set {
 		return writeRecoveryMarker(ctx, run, provisioned.Dir, issue, fromRef)
@@ -293,7 +296,7 @@ func removeFinishedWorkspaces(ctx context.Context, run workspace.Runner, root st
 			fmt.Fprintf(stdout, "workspace-init: cannot locate %s's workspace, keeping it: %v\n", candidate.Issue, err)
 			continue
 		}
-		if err := workspace.RemoveFinished(ctx, run, located, candidate.Issue, candidate.MergedHead, log); err != nil {
+		if err := workspace.RemoveFinished(ctx, run, located, candidate.Issue, candidate.MergedHead, deadline, log); err != nil {
 			fmt.Fprintf(stdout, "workspace-init: removing %s's workspace failed, keeping it: %v\n", candidate.Issue, err)
 		}
 	}

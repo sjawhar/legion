@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // A finished child whose every commit reached origin — parked after its own push — is removed.
@@ -25,7 +26,7 @@ func TestRemoveFinishedRemovesAWorkspaceWithEveryCommitPushed(t *testing.T) {
 	runSetup(t, ws.Clone, "jj", "git", "push", "--remote", "origin", "--bookmark", ws.Bookmark, "--allow-empty-description")
 
 	var logged []string
-	if err := RemoveFinished(context.Background(), run, ws, "WIDGETS-42", "", func(line string) { logged = append(logged, line) }); err != nil {
+	if err := RemoveFinished(context.Background(), run, ws, "WIDGETS-42", "", time.Now().Add(time.Hour), func(line string) { logged = append(logged, line) }); err != nil {
 		t.Fatalf("RemoveFinished: %v", err)
 	}
 	if _, err := os.Stat(ws.Dir); !errors.Is(err, os.ErrNotExist) {
@@ -62,7 +63,7 @@ func TestRemoveFinishedRemovesAWorkspaceWhoseLastCommitIsOnlyTheMergedHead(t *te
 	}
 
 	var logged []string
-	if err := RemoveFinished(context.Background(), run, ws, "WIDGETS-42", mergedHead, func(line string) { logged = append(logged, line) }); err != nil {
+	if err := RemoveFinished(context.Background(), run, ws, "WIDGETS-42", mergedHead, time.Now().Add(time.Hour), func(line string) { logged = append(logged, line) }); err != nil {
 		t.Fatalf("RemoveFinished: %v", err)
 	}
 	if _, err := os.Stat(ws.Dir); !errors.Is(err, os.ErrNotExist) {
@@ -90,7 +91,7 @@ func TestRemoveFinishedKeepsAWorkspaceWithAnUnpushedCommit(t *testing.T) {
 	commit := strings.TrimSpace(runSetup(t, ws.Dir, "jj", "log", "-r", "@", "--no-graph", "-T", "commit_id"))
 
 	var logged []string
-	if err := RemoveFinished(context.Background(), run, ws, "WIDGETS-42", "", func(line string) { logged = append(logged, line) }); err != nil {
+	if err := RemoveFinished(context.Background(), run, ws, "WIDGETS-42", "", time.Now().Add(time.Hour), func(line string) { logged = append(logged, line) }); err != nil {
 		t.Fatalf("RemoveFinished: %v", err)
 	}
 	if _, err := os.Stat(ws.Dir); err != nil {
@@ -119,7 +120,7 @@ func TestRemoveFinishedSnapshotsTheWorkspaceBeforeJudgingAnUncommittedEdit(t *te
 	// untracked by any jj operation, until RemoveFinished itself snapshots it.
 
 	var logged []string
-	if err := RemoveFinished(context.Background(), run, ws, "WIDGETS-42", "", func(line string) { logged = append(logged, line) }); err != nil {
+	if err := RemoveFinished(context.Background(), run, ws, "WIDGETS-42", "", time.Now().Add(time.Hour), func(line string) { logged = append(logged, line) }); err != nil {
 		t.Fatalf("RemoveFinished: %v", err)
 	}
 	if _, err := os.Stat(ws.Dir); err != nil {
@@ -174,7 +175,7 @@ func TestRemoveFinishedSnapshotRunsNoHostileFilterOrSigningProgram(t *testing.T)
 	}
 
 	var logged []string
-	if err := RemoveFinished(context.Background(), run, ws, "WIDGETS-42", "", func(line string) { logged = append(logged, line) }); err != nil {
+	if err := RemoveFinished(context.Background(), run, ws, "WIDGETS-42", "", time.Now().Add(time.Hour), func(line string) { logged = append(logged, line) }); err != nil {
 		t.Fatalf("RemoveFinished: %v", err)
 	}
 	if _, err := os.Stat(ws.Dir); err != nil {
@@ -213,7 +214,7 @@ func TestRemoveFinishedKeepsAWorkspaceWhoseSnapshotLeftALargeFileUntracked(t *te
 	}
 
 	var logged []string
-	if err := RemoveFinished(context.Background(), run, ws, "WIDGETS-42", "", func(line string) { logged = append(logged, line) }); err != nil {
+	if err := RemoveFinished(context.Background(), run, ws, "WIDGETS-42", "", time.Now().Add(time.Hour), func(line string) { logged = append(logged, line) }); err != nil {
 		t.Fatalf("RemoveFinished: %v", err)
 	}
 	if _, err := os.Stat(ws.Dir); err != nil {
@@ -243,7 +244,7 @@ func TestRemoveFinishedFinishesARemovalAnEarlierPassWasInterruptedMidDelete(t *t
 	}
 
 	var logged []string
-	if err := RemoveFinished(context.Background(), run, ws, "WIDGETS-42", "", func(line string) { logged = append(logged, line) }); err != nil {
+	if err := RemoveFinished(context.Background(), run, ws, "WIDGETS-42", "", time.Now().Add(time.Hour), func(line string) { logged = append(logged, line) }); err != nil {
 		t.Fatalf("RemoveFinished: %v", err)
 	}
 	if _, err := os.Stat(ws.Dir); !errors.Is(err, os.ErrNotExist) {
@@ -273,7 +274,7 @@ func TestRemoveFinishedOfAWorkspaceAlreadyGoneIsANoop(t *testing.T) {
 		t.Fatalf("Location: %v", err)
 	}
 	var logged []string
-	if err := RemoveFinished(context.Background(), run, ws, "WIDGETS-42", "", func(line string) { logged = append(logged, line) }); err != nil {
+	if err := RemoveFinished(context.Background(), run, ws, "WIDGETS-42", "", time.Now().Add(time.Hour), func(line string) { logged = append(logged, line) }); err != nil {
 		t.Fatalf("RemoveFinished: %v", err)
 	}
 	if want := "has no workspace on this volume"; len(logged) != 1 || !strings.Contains(logged[0], want) {
@@ -313,7 +314,7 @@ func TestRemoveFinishedKeepsAWorkspaceHoldingANestedRepositoryWithALocalCommit(t
 	runSetupWith(t, nested, gitEnv, "git", "commit", "-m", "a local fix")
 
 	var logged []string
-	if err := RemoveFinished(context.Background(), run, ws, "WIDGETS-42", "", func(line string) { logged = append(logged, line) }); err != nil {
+	if err := RemoveFinished(context.Background(), run, ws, "WIDGETS-42", "", time.Now().Add(time.Hour), func(line string) { logged = append(logged, line) }); err != nil {
 		t.Fatalf("RemoveFinished: %v", err)
 	}
 	if _, err := os.Stat(ws.Dir); err != nil {
@@ -383,7 +384,7 @@ func TestRemoveFinishedKeepsAWorkspaceHoldingAFileOrSymlinkNamedGitOrJJ(t *testi
 			plant(t, filepath.Join(nested, entry))
 
 			var logged []string
-			if err := RemoveFinished(context.Background(), run, ws, "WIDGETS-42", "", func(line string) { logged = append(logged, line) }); err != nil {
+			if err := RemoveFinished(context.Background(), run, ws, "WIDGETS-42", "", time.Now().Add(time.Hour), func(line string) { logged = append(logged, line) }); err != nil {
 				t.Fatalf("RemoveFinished: %v", err)
 			}
 			if _, err := os.Stat(secret); err != nil {
@@ -437,7 +438,7 @@ func TestRemoveFinishedKeepsAWorkspaceHoldingASubmoduleWithAnUnpushedCommit(t *t
 	runSetupWith(t, sub, gitEnv, "git", "commit", "-m", "an unpushed local fix")
 
 	var logged []string
-	if err := RemoveFinished(context.Background(), run, ws, "WIDGETS-42", "", func(line string) { logged = append(logged, line) }); err != nil {
+	if err := RemoveFinished(context.Background(), run, ws, "WIDGETS-42", "", time.Now().Add(time.Hour), func(line string) { logged = append(logged, line) }); err != nil {
 		t.Fatalf("RemoveFinished: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(sub, "local.txt")); err != nil {
@@ -481,7 +482,7 @@ func TestRemoveFinishedKeepsAWorkspaceHoldingALinkedWorktreeWithAnUncommittedEdi
 	}
 
 	var logged []string
-	if err := RemoveFinished(context.Background(), run, ws, "WIDGETS-42", "", func(line string) { logged = append(logged, line) }); err != nil {
+	if err := RemoveFinished(context.Background(), run, ws, "WIDGETS-42", "", time.Now().Add(time.Hour), func(line string) { logged = append(logged, line) }); err != nil {
 		t.Fatalf("RemoveFinished: %v", err)
 	}
 	if _, err := os.Stat(uncommitted); err != nil {
@@ -515,7 +516,7 @@ func TestRemoveFinishedKeepsAWorkspaceHoldingAFileWhoseNameIsNotValidUTF8(t *tes
 	}
 
 	var logged []string
-	if err := RemoveFinished(context.Background(), run, ws, "WIDGETS-42", "", func(line string) { logged = append(logged, line) }); err != nil {
+	if err := RemoveFinished(context.Background(), run, ws, "WIDGETS-42", "", time.Now().Add(time.Hour), func(line string) { logged = append(logged, line) }); err != nil {
 		t.Fatalf("RemoveFinished: %v", err)
 	}
 	if _, err := os.Stat(ws.Dir); err != nil {
@@ -524,51 +525,4 @@ func TestRemoveFinishedKeepsAWorkspaceHoldingAFileWhoseNameIsNotValidUTF8(t *tes
 	if len(logged) != 1 || !strings.Contains(logged[0], "kept WIDGETS-42's workspace") || !strings.Contains(logged[0], "stderr") {
 		t.Errorf("logged %v, want one line naming WIDGETS-42 kept for the snapshot's stderr", logged)
 	}
-}
-
-// nestedRepositories' walk can run well past the removal pass's own budget against a workspace
-// holding a large gitignored tree jj's own snapshot never descends into (an ignored
-// node_modules, say): ctx bounds it the same way every other command in this package already is.
-// A ctx that is done by the time the walk starts keeps the workspace rather than fail the whole
-// pass or hang it: a custom runner cancels ctx the instant the snapshot command returns, so the
-// walk that follows sees it already done on its very first entry.
-func TestRemoveFinishedKeepsAWorkspaceWhenTheNestedRepositoryWalkRunsOutOfTime(t *testing.T) {
-	run := newLocalRunner(t)
-	req := provisionRequest(t)
-	ws, err := Provision(context.Background(), run, req)
-	if err != nil {
-		t.Fatalf("provision: %v", err)
-	}
-	runSetup(t, ws.Clone, "jj", "git", "push", "--remote", "origin", "--bookmark", ws.Bookmark, "--allow-empty-description")
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	cancelAfterSnapshot := cancelOnSnapshot{Runner: run, cancel: cancel}
-
-	var logged []string
-	if err := RemoveFinished(ctx, cancelAfterSnapshot, ws, "WIDGETS-42", "", func(line string) { logged = append(logged, line) }); err != nil {
-		t.Fatalf("RemoveFinished: %v", err)
-	}
-	if _, err := os.Stat(ws.Dir); err != nil {
-		t.Fatalf("workspace removed, want it kept: %v", err)
-	}
-	if len(logged) != 1 || !strings.Contains(logged[0], "kept WIDGETS-42's workspace") || !strings.Contains(logged[0], "ran out of time") {
-		t.Errorf("logged %v, want one line naming WIDGETS-42 kept for running out of time", logged)
-	}
-}
-
-// cancelOnSnapshot cancels its own context the instant the push-safety snapshot command (`jj
-// status`) returns, simulating a ctx that is already done by the time nestedRepositories' walk
-// starts.
-type cancelOnSnapshot struct {
-	Runner
-	cancel context.CancelFunc
-}
-
-func (r cancelOnSnapshot) Run(ctx context.Context, command Command) (Result, error) {
-	result, err := r.Runner.Run(ctx, command)
-	if len(command.Argv) >= 2 && command.Argv[0] == "jj" && command.Argv[1] == "status" {
-		r.cancel()
-	}
-	return result, err
 }

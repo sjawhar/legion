@@ -328,6 +328,48 @@ func TestWorkspaceInitRemovesAFinishedChildWithEveryCommitPushed(t *testing.T) {
 	}
 }
 
+// A done child with every commit pushed is removed even when the pod that provisions LEGION-200
+// and runs the removal pass has never touched this repository from any config home before: every
+// committed test above shares one XDG_CONFIG_HOME across both pods (newTreeVolume's own), which
+// production never does (every init container starts with an empty one of its own). Giving
+// LEGION-200's own pod a second, genuinely empty XDG_CONFIG_HOME/JJ_CONFIG pair still removes the
+// candidate: provisioning LEGION-200 runs jj against the shared clone first (workspace_init.go's
+// own call-site comment explains why that is what this relies on), migrating this pod's own copy
+// of the clone's per-repo config before the removal pass's candidate snapshot ever runs.
+func TestWorkspaceInitRemovesAFinishedChildEvenWithAFreshConfigHomeForTheSecondPod(t *testing.T) {
+	v := newTreeVolume(t).withRemote(t)
+	v.fetch(t)
+	if code, _, stderr := runWorkspaceInitHere(v.args("LEGION-100")); code != 0 {
+		t.Fatalf("provision the finished child: exit %d, stderr %q", code, stderr)
+	}
+	finished := v.workspace("LEGION-100")
+	if err := os.WriteFile(filepath.Join(finished, "feature.txt"), []byte("finished work\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	v.jj(t, "status", "-R", finished)
+	bookmark := "legion/LEGION-100"
+	v.jj(t, "bookmark", "set", bookmark, "-r", "@", "--allow-backwards", "-R", finished)
+	v.jjPush(t, finished, bookmark)
+
+	// LEGION-200's own pod: a config home this repository's per-repo config has never been
+	// migrated into, unlike v.env's (which provisioned LEGION-100 and pushed it above).
+	fresh := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(fresh, "config"))
+	t.Setenv("JJ_CONFIG", filepath.Join(fresh, "no-user-config.toml"))
+
+	t.Setenv("LEGION_REMOVABLE_WORKSPACES", removableEnv(t, []runtime.RemovableWorkspace{{Issue: "LEGION-100"}}))
+	code, stdout, stderr := runWorkspaceInitHere(v.args("LEGION-200"))
+	if code != 0 {
+		t.Fatalf("provision LEGION-200: exit %d, stderr %q", code, stderr)
+	}
+	if _, err := os.Stat(finished); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("LEGION-100's workspace remains: %v", err)
+	}
+	if want := "removed LEGION-100's workspace"; !strings.Contains(stdout, want) {
+		t.Errorf("stdout %q, want it to contain %q", stdout, want)
+	}
+}
+
 // A done child whose last commit is only the merged pull request's head — GitHub deletes a squash
 // merge's branch, leaving that commit with no remote bookmark of its own — is removed: the
 // daemon's recorded merged head tells it from a commit that was never pushed at all.
@@ -413,5 +455,56 @@ func TestWorkspaceInitNeverRemovesTheIssueItIsProvisioning(t *testing.T) {
 	}
 	if strings.Contains(stdout, "LEGION-100's workspace") {
 		t.Errorf("stdout %q named LEGION-100's own workspace for removal", stdout)
+	}
+}
+
+// nestedRepositories' walk is bounded by RemoveFinished's own deadline parameter —
+// removeFinishedWorkspaces' own removal-budget deadline, never the ambient ctx, which in
+// production (main.go's signal.NotifyContext) carries no deadline of its own at all — so a
+// workspace holding a large gitignored tree jj's own snapshot never descends into (.codegraph/,
+// which provisioning excludes on every workspace of this shared clone) is kept rather than let
+// the walk run unbounded past the pass's own budget. 150k files there measured well past 100 ms
+// to walk on this host; a 100 ms budget is comfortably past the snapshot's own cost (a few ms on
+// a clean, pushed workspace) and comfortably short of the walk's.
+func TestWorkspaceInitKeepsAChildWhenTheNestedRepositoryWalkRunsOutOfTime(t *testing.T) {
+	v := newTreeVolume(t).withRemote(t)
+	v.fetch(t)
+	if code, _, stderr := runWorkspaceInitHere(v.args("LEGION-100")); code != 0 {
+		t.Fatalf("provision the candidate: exit %d, stderr %q", code, stderr)
+	}
+	candidate := v.workspace("LEGION-100")
+	if err := os.WriteFile(filepath.Join(candidate, "feature.txt"), []byte("finished work\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bulk := filepath.Join(candidate, ".codegraph", "bulk")
+	if err := os.MkdirAll(bulk, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for i := range 150000 {
+		if err := os.WriteFile(filepath.Join(bulk, strconv.Itoa(i)), nil, 0o644); err != nil {
+			t.Fatalf("plant bulk file %d: %v", i, err)
+		}
+	}
+	v.jj(t, "status", "-R", candidate)
+	bookmark := "legion/LEGION-100"
+	v.jj(t, "bookmark", "set", bookmark, "-r", "@", "--allow-backwards", "-R", candidate)
+	v.jjPush(t, candidate, bookmark)
+
+	repository, err := ghrepo.Parse("--repo", winitRepo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := workspace.NewRunner(workspace.CommandTimeout, map[string]string{"jj": v.realJJ, "git": v.env["WINIT_REAL_GIT"]})
+	t.Setenv(removableWorkspacesEnv, removableEnv(t, []runtime.RemovableWorkspace{{Issue: "LEGION-100"}}))
+	var stdout bytes.Buffer
+	removeFinishedWorkspaces(context.Background(), run, v.root, repository, "LEGION-200", &stdout,
+		time.Now, 100*time.Millisecond)
+
+	output := stdout.String()
+	if _, err := os.Stat(candidate); err != nil {
+		t.Fatalf("LEGION-100's workspace was removed, want it kept: %v", err)
+	}
+	if !strings.Contains(output, "kept LEGION-100's workspace") || !strings.Contains(output, "ran out of time") {
+		t.Errorf("stdout %q, want it to name LEGION-100 kept for running out of time", output)
 	}
 }
