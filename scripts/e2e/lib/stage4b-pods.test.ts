@@ -10,10 +10,21 @@ const root = join(import.meta.dir, "..", "..", "..");
 const lib = join(root, "scripts", "e2e", "lib");
 const script = readFileSync(join(root, "scripts", "e2e", "stage4b-sandbox-tree.sh"), "utf8");
 const shapeProblems = /^shape_problems\(\) \{[\s\S]*?\n\}$/m.exec(script)?.[0];
-if (shapeProblems === undefined) throw new Error("stage4b-sandbox-tree.sh defines no shape_problems()");
+if (shapeProblems === undefined)
+  throw new Error("stage4b-sandbox-tree.sh defines no shape_problems()");
 const golden = JSON.parse(
   readFileSync(
-    join(root, "packages", "daemon", "internal", "runtime", "sandbox", "testdata", "golden", "root.json"),
+    join(
+      root,
+      "packages",
+      "daemon",
+      "internal",
+      "runtime",
+      "sandbox",
+      "testdata",
+      "golden",
+      "root.json"
+    ),
     "utf8"
   )
 );
@@ -27,7 +38,9 @@ interface Container {
 function pod(argv: (command: string[]) => string[] = (command) => command) {
   const spec = structuredClone(golden.spec.podTemplate.spec);
   spec.containers = spec.containers.map((container: Container) =>
-    container.name === "worker" ? { ...container, command: argv(container.command ?? []) } : container
+    container.name === "worker"
+      ? { ...container, command: argv(container.command ?? []) }
+      : container
   );
   return { metadata: { name: "pod", uid: "uid" }, spec };
 }
@@ -81,9 +94,9 @@ describe("the pod shape's --connect rule", () => {
     expect(connectProblems(unconnected)).toEqual([
       `the worker shim dials nothing (no --connect), not advertise_host at ${goldenStream}`,
     ]);
-    expect(runJq(["-r", "-L", lib, 'include "stage4b-pods"; shim_connect'], JSON.stringify(unconnected))).toBe(
-      "null\n"
-    );
+    expect(
+      runJq(["-r", "-L", lib, 'include "stage4b-pods"; shim_connect'], JSON.stringify(unconnected))
+    ).toBe("null\n");
   });
 });
 
@@ -92,7 +105,11 @@ describe("stage4b-pods.jq's ready_pods", () => {
   function event(name: string, labels: object, ready: boolean) {
     return JSON.stringify({
       kind: "Pod",
-      object: { kind: "Pod", metadata: { name, labels }, status: { containerStatuses: [{ name: "worker", ready }] } },
+      object: {
+        kind: "Pod",
+        metadata: { name, labels },
+        status: { containerStatuses: [{ name: "worker", ready }] },
+      },
     });
   }
 
@@ -103,6 +120,8 @@ describe("stage4b-pods.jq's ready_pods", () => {
       event("control", { "legion.dev/e2e-control": "x" }, true),
       event("unready", {}, false),
     ].join("\n");
-    expect(runJq(["-r", "-L", lib, 'include "stage4b-pods"; ready_pods | .metadata.name'], watch)).toBe("kept\n");
+    expect(
+      runJq(["-r", "-L", lib, 'include "stage4b-pods"; ready_pods | .metadata.name'], watch)
+    ).toBe("kept\n");
   });
 });
