@@ -196,6 +196,31 @@ func holdPort(t *testing.T) int {
 	return listener.Addr().(*net.TCPAddr).Port
 }
 
+// hold0000Port is holdPort over every interface (0.0.0.0) rather than loopback alone, held the
+// same way, for a test whose daemon binds 0.0.0.0 (runtime.kubernetes.advertise_host configured).
+func hold0000Port(t *testing.T) int {
+	t.Helper()
+	listener, err := net.Listen("tcp", "0.0.0.0:0")
+	if err != nil {
+		t.Fatalf("hold a free port on 0.0.0.0: %v", err)
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	// Go's own "tcp" listener on 0.0.0.0 reports back [::]:<port> (the dual-stack wildcard), not
+	// 0.0.0.0:<port>; heldListen is looked up by the literal net.JoinHostPort(cfg.Bind, ...) the
+	// daemon builds, so the held key must be the configured string, not what Addr() answers.
+	address := net.JoinHostPort("0.0.0.0", strconv.Itoa(port))
+	heldPorts.Lock()
+	heldPorts.byAddress[address] = listener
+	heldPorts.Unlock()
+	t.Cleanup(func() {
+		heldPorts.Lock()
+		delete(heldPorts.byAddress, address)
+		heldPorts.Unlock()
+		_ = listener.Close()
+	})
+	return port
+}
+
 // rebindHeldPorts hands cfg a freshly held API port. A daemon that has stopped closed the
 // listener it was handed, and from then on the port it used is any process's, so a test that
 // starts a second daemon on the same config holds one again first. The worker stream needs no

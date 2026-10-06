@@ -45,11 +45,15 @@ type Config struct {
 	Project string
 	Port    int
 	Bind    string
-	// AdvertiseHost is `advertise_host`: the address every pod's shim and `LEGION_DAEMON_URL`
-	// should be read against instead of Bind, once Bind names a listen-only address (`0.0.0.0`
-	// under kubernetes) rather than one a pod can dial. "" (the default) keeps Bind as the pod's
-	// own address too, today's behaviour; a Kubernetes Service's DNS name is the expected value
-	// otherwise. Unused outside kubernetes.
+	// AdvertiseHost is `advertise_host`: the address every pod's shim dials for the worker
+	// stream (its `--connect tcp://<host>:<worker_stream_port>`) in place of Bind, once Bind names
+	// a listen-only address (`0.0.0.0` under kubernetes) rather than one a pod can dial.
+	// `daemon_url` (DaemonURL, `LEGION_DAEMON_URL`) is unaffected: it is already required and
+	// already held to the same reachability refusal, so it names the pod-facing address on its
+	// own. "" (the default) keeps Bind as the pod's own address too, today's behaviour; a
+	// Kubernetes Service's DNS name is the expected value otherwise. Unused outside kubernetes. A
+	// bare host name or IP address: no scheme, port, or brackets (readAdvertiseHost checks the
+	// file's own text; the daemon is what combines it with WorkerStreamPort).
 	AdvertiseHost string
 	PostgresDSN   string
 	StateDir      string
@@ -315,7 +319,7 @@ func readKeys(root *yaml.Node) (fileConfig, error) {
 		case "bind":
 			file.Bind, err = readString(value, key)
 		case "advertise_host":
-			file.AdvertiseHost, err = readNonEmptyString(value, key)
+			file.AdvertiseHost, err = readAdvertiseHost(value, key)
 		case "postgres_dsn":
 			file.PostgresDSN, err = readString(value, key)
 		case "state_dir":

@@ -1090,6 +1090,45 @@ func TestLoadClassifiesEveryShippedKey(t *testing.T) {
 	}
 }
 
+// advertise_host's shape is checked at read time, before any runtime-specific rule, since the
+// daemon combines it with worker_stream_port itself (readSandbox, internal/daemon/kubernetes.go):
+// a value naming a scheme, a port, or brackets would double one of those up.
+func TestAdvertiseHostMustBeABareHost(t *testing.T) {
+	for _, tc := range []struct{ name, yaml, want string }{
+		{"a scheme", "http://legion-daemon.legion.svc", "advertise_host must be a host name or IP address, not a URL (http://legion-daemon.legion.svc)"},
+		{"a port", "legion-daemon.legion.svc:13371", "advertise_host must be a host name or IP address, with no port: the daemon combines it with worker_stream_port itself (legion-daemon.legion.svc:13371)"},
+		{"brackets", `"[::1]"`, "advertise_host must be a host name or IP address, with no brackets ([::1])"},
+		{"blank", `""`, "advertise_host must not be empty"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Load(writeConfigFile(t, minimalFile+"advertise_host: "+tc.yaml+"\n"), noEnv)
+			if err == nil || err.Error() != tc.want {
+				t.Fatalf("Load error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// A bare host name and a bare IP address, IPv6 included, both pass: the shape check refuses only
+// a scheme, a port, or brackets, never a value that is otherwise a perfectly good host.
+func TestAdvertiseHostAcceptsABareHostOrIPAddress(t *testing.T) {
+	for _, tc := range []struct{ name, value string }{
+		{"a DNS name", "legion-daemon.legion.svc"},
+		{"an IPv4 address", "192.0.2.10"},
+		{"a bare IPv6 address", "2001:db8::1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := Load(writeConfigFile(t, minimalFile+"advertise_host: "+tc.value+"\n"), noEnv)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.AdvertiseHost != tc.value {
+				t.Errorf("AdvertiseHost = %q, want %q", cfg.AdvertiseHost, tc.value)
+			}
+		})
+	}
+}
+
 func TestLoadNamesAFileItCannotRead(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "absent.yaml")
 

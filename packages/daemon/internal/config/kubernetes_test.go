@@ -472,6 +472,26 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 			want: "advertise_host localhost is not an address a pod can reach, and every pod's shim dials the worker stream at tcp://localhost:13371; name the host pods reach it at when runtime is kubernetes",
 		},
 		{
+			name: "bind on loopback, advertise_host set",
+			body: kubernetesWith("bind: 10.0.0.5", "bind: 127.0.0.1\nadvertise_host: legion-daemon-legsmoke.legion.svc"),
+			want: "bind 127.0.0.1 is not an address a pod can reach, and every pod's shim dials the worker stream at tcp://127.0.0.1:13371; bind the daemon host's own address when runtime is kubernetes",
+		},
+		{
+			name: "advertise_host with a scheme",
+			body: kubernetesWith("bind: 10.0.0.5", "bind: 0.0.0.0\nadvertise_host: http://legion-daemon-legsmoke.legion.svc"),
+			want: "advertise_host must be a host name or IP address, not a URL (http://legion-daemon-legsmoke.legion.svc)",
+		},
+		{
+			name: "advertise_host with a port",
+			body: kubernetesWith("bind: 10.0.0.5", "bind: 0.0.0.0\nadvertise_host: legion-daemon-legsmoke.legion.svc:13371"),
+			want: "advertise_host must be a host name or IP address, with no port: the daemon combines it with worker_stream_port itself (legion-daemon-legsmoke.legion.svc:13371)",
+		},
+		{
+			name: "advertise_host with brackets",
+			body: kubernetesWith("bind: 10.0.0.5", "bind: 0.0.0.0\nadvertise_host: \"[::1]\""),
+			want: "advertise_host must be a host name or IP address, with no brackets ([::1])",
+		},
+		{
 			name: "daemon_url absent",
 			body: kubernetesWith("daemon_url: http://10.0.0.5:13370\n", ""),
 			want: "daemon_url is required when runtime is kubernetes: a pod cannot reach the daemon's loopback address",

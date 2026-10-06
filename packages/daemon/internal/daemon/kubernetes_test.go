@@ -228,42 +228,102 @@ func TestPrepareDerivesTheWorkerStreamAddressFromWorkerStreamPort(t *testing.T) 
 	}
 }
 
-// A pod's own IP changes on every restart, so under kubernetes the worker stream listens on bind
-// (0.0.0.0 included) while advertising advertise_host, a stable Service name, to every pod's shim:
-// readSandbox must keep the literal listen address (reads.listenAddr, what the listener actually
-// binds) and the advertised one (reads.opts.StreamURL, what prepareSandbox hands the runtime for
-// pods) apart, even though both share the same worker_stream_port.
-func TestReadSandboxDialsAdvertiseHostButListensOnBind(t *testing.T) {
-	cfg := kubernetesConfig(t, "https://127.0.0.1:1")
-	cfg.Bind = "0.0.0.0"
-	cfg.AdvertiseHost = "legion-daemon-legsmoke.legion.svc"
-	cfg.WorkerStreamPort = 13371
+// readSandbox's own placeholder opts.StreamURL is always bind-based, advertise_host included: the
+// substitution happens later, in openSupervision, once the real listener (and its real port)
+// exists — readSandbox cannot build the final address itself.
+func TestReadSandboxsPlaceholderStreamIsAlwaysBindBased(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		bind          string
+		advertiseHost string
+	}{
+		{"no advertise_host", "192.0.2.30", ""},
+		{"advertise_host set too", "0.0.0.0", "legion-daemon-legsmoke.legion.svc"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := kubernetesConfig(t, "https://127.0.0.1:1")
+			cfg.Bind, cfg.AdvertiseHost, cfg.WorkerStreamPort = tc.bind, tc.advertiseHost, 13371
 
-	reads, err := readSandbox(cfg, "legion", "", "", func(string) (string, bool) { return "", false }, quietLogger())
-	if err != nil {
-		t.Fatalf("readSandbox: %v", err)
-	}
-	if want := "tcp://0.0.0.0:13371"; reads.listenAddr != want {
-		t.Errorf("listenAddr = %q, want %q: the worker stream still listens on bind", reads.listenAddr, want)
-	}
-	if want := "tcp://legion-daemon-legsmoke.legion.svc:13371"; reads.opts.StreamURL != want {
-		t.Errorf("opts.StreamURL = %q, want %q: every pod's shim dials advertise_host, not bind", reads.opts.StreamURL, want)
+			reads, err := readSandbox(cfg, "legion", "", "", func(string) (string, bool) { return "", false }, quietLogger())
+			if err != nil {
+				t.Fatalf("readSandbox: %v", err)
+			}
+			want := "tcp://" + net.JoinHostPort(tc.bind, "13371")
+			if reads.listenAddr != want || reads.opts.StreamURL != want {
+				t.Errorf("listenAddr = %q, opts.StreamURL = %q, want both %q (bind: the advertised address is substituted later)", reads.listenAddr, reads.opts.StreamURL, want)
+			}
+		})
 	}
 }
 
-// With no advertise_host, readSandbox keeps today's single address: the listener binds it and
-// every pod's shim dials the same string, exactly as before this change.
-func TestReadSandboxFallsBackToBindWithNoAdvertiseHost(t *testing.T) {
+// prepareSandbox carries cfg.AdvertiseHost onto the plan unchanged — "" with none configured — so
+// openSupervision, which has no config.Config of its own, can substitute it for the listener's
+// bound host.
+func TestPrepareCarriesAdvertiseHostOntoThePlan(t *testing.T) {
 	cfg := kubernetesConfig(t, "https://127.0.0.1:1")
-	cfg.Bind = "192.0.2.30"
-	cfg.WorkerStreamPort = 13371
-
-	reads, err := readSandbox(cfg, "legion", "", "", func(string) (string, bool) { return "", false }, quietLogger())
-	if err != nil {
-		t.Fatalf("readSandbox: %v", err)
+	cfg.EnvoyTokenFile = filepath.Join(t.TempDir(), "envoy-token")
+	if err := os.WriteFile(cfg.EnvoyTokenFile, []byte("envoy-bearer\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	if want := "tcp://192.0.2.30:13371"; reads.listenAddr != want || reads.opts.StreamURL != want {
-		t.Errorf("listenAddr = %q, opts.StreamURL = %q, want both %q (bind, unchanged)", reads.listenAddr, reads.opts.StreamURL, want)
+	cfg.NatsNkeySeedFile = testnats.SeedFile(t, testnats.UserSeed(t))
+	cfg.Bind, cfg.AdvertiseHost = "0.0.0.0", "legion-daemon-legsmoke.legion.svc"
+
+	p, err := prepare(cfg, quietLogger(), overrides{environ: []string{}})
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	if p.advertiseHost != "legion-daemon-legsmoke.legion.svc" {
+		t.Errorf("plan.advertiseHost = %q, want cfg.AdvertiseHost carried through unchanged", p.advertiseHost)
+	}
+}
+
+// shimAddress is where advertise_host actually takes effect: the pure substitution openSupervision
+// applies to the listener's bound address before handing it to the runtime factory.
+func TestShimAddressSubstitutesAdvertiseHostsHostKeepingTheBoundPort(t *testing.T) {
+	for _, tc := range []struct{ name, bound, advertiseHost, want string }{
+		{"no advertise_host, a real bind", "tcp://192.0.2.30:13371", "", "tcp://192.0.2.30:13371"},
+		{"advertise_host over an IPv4 wildcard bind", "tcp://0.0.0.0:34353", "legion-daemon-legsmoke.legion.svc", "tcp://legion-daemon-legsmoke.legion.svc:34353"},
+		{"advertise_host over an IPv6 wildcard bind", "tcp://[::]:34353", "legion-daemon-legsmoke.legion.svc", "tcp://legion-daemon-legsmoke.legion.svc:34353"},
+		{"advertise_host over a real bind", "tcp://192.0.2.30:13371", "legion-daemon-legsmoke.legion.svc", "tcp://legion-daemon-legsmoke.legion.svc:13371"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := shimAddress(tc.bound, tc.advertiseHost); got != tc.want {
+				t.Errorf("shimAddress(%q, %q) = %q, want %q", tc.bound, tc.advertiseHost, got, tc.want)
+			}
+		})
+	}
+}
+
+// The full boot, through the real fake-runtime seam: with bind 0.0.0.0 and advertise_host
+// configured, the address the runtime factory actually receives (record.address, the one
+// prepareSandbox and openSupervision together produce) is advertise_host plus the listener's real,
+// kernel-chosen port — never listener.Addr()'s own wildcard, which no pod could dial.
+func TestOpenSupervisionAdvertisesAdvertiseHostNotTheWildcardBind(t *testing.T) {
+	cfg := workflowConfig(t, workflowNATS(t))
+	cfg.Runtime = kubernetesConfig(t, "https://127.0.0.1:1").Runtime
+	cfg.Bind, cfg.AdvertiseHost = "0.0.0.0", "legion-daemon-legsmoke.legion.svc"
+	cfg.Port = hold0000Port(t)
+	cfg.DaemonURL = "http://127.0.0.1:" + strconv.Itoa(cfg.Port)
+	record := &built{}
+	o := fakeRuntime(fake.NewRuntime(), record)
+	o.workflowTokens = &workflowTokenRecorder{}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- run(ctx, cfg, quietLogger(), o) }()
+	defer func() {
+		cancel()
+		if err := <-done; err != nil {
+			t.Errorf("run: %v", err)
+		}
+	}()
+	awaitHealthz(t, cfg, done)
+
+	record.mu.Lock()
+	address := record.address
+	record.mu.Unlock()
+	prefix := "tcp://legion-daemon-legsmoke.legion.svc:"
+	if !strings.HasPrefix(address, prefix) || strings.HasSuffix(address, ":0") {
+		t.Fatalf("the runtime was told to have shims dial %q, want %s<bound port>", address, prefix)
 	}
 }
 

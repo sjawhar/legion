@@ -163,6 +163,34 @@ func isLoopbackHost(host string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
+// isUnspecifiedHost is the unspecified address (`0.0.0.0`, `::`): no host at all, which only a
+// listener may bind.
+func isUnspecifiedHost(host string) bool {
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsUnspecified()
+}
+
+// readAdvertiseHost is `advertise_host`: a bare host name or IP address. The daemon combines it
+// with worker_stream_port itself (readSandbox, internal/daemon/kubernetes.go), so a value naming a
+// scheme, a port, or brackets would double one of those up or build an address no pod could dial.
+func readAdvertiseHost(value *yaml.Node, key string) (*string, error) {
+	read, err := readNonEmptyString(value, key)
+	if err != nil || read == nil {
+		return read, err
+	}
+	host := *read
+	switch {
+	case strings.Contains(host, "://"):
+		return nil, fmt.Errorf("%s must be a host name or IP address, not a URL (%s)", key, host)
+	case strings.ContainsAny(host, "[]"):
+		return nil, fmt.Errorf("%s must be a host name or IP address, with no brackets (%s)", key, host)
+	}
+	if _, _, err := net.SplitHostPort(host); err == nil {
+		return nil, fmt.Errorf("%s must be a host name or IP address, with no port: the daemon combines it with worker_stream_port itself (%s)", key, host)
+	}
+	return read, nil
+}
+
 // readKubernetes reads the `runtime.kubernetes` block, refusing any member it does not model and
 // any value a pod could not run with. What depends on keys outside the block is checked once the
 // whole file is read (checkKubernetesKeys).
@@ -835,34 +863,37 @@ func checkKubernetesKeys(file fileConfig) error {
 	return nil
 }
 
-// WorkerStreamHost is the host pods dial for the worker stream: AdvertiseHost when the file sets
-// one, Bind otherwise — today's behaviour, where Bind doubles as both the daemon's listen address
-// and the one pods are handed.
-func (cfg Config) WorkerStreamHost() string {
-	if cfg.AdvertiseHost != "" {
-		return cfg.AdvertiseHost
-	}
-	return cfg.Bind
-}
-
 // checkPodReachable refuses an address pods are handed that no pod can reach. Every pod's shim
 // dials the worker stream at tcp://<the pod-facing host>:<worker_stream_port> — AdvertiseHost once
-// the file sets one, so that address alone is held to the refusal below and Bind is free to be a
-// pure listen address (`0.0.0.0` included: a pod never dials Bind directly once AdvertiseHost names
-// where it does dial). With no AdvertiseHost, Bind keeps its old double duty and this refusal is
-// exactly as it was: never loopback or the unspecified address it would listen on. Every Legion URL
-// a pod is handed - daemon_url, envoy_url, dispatch_url, and each nats_urls entry - must name
-// neither either: a loopback host is, in a pod, the pod itself, and the unspecified address is no
-// host at all.
+// the file sets one, Bind otherwise. With no AdvertiseHost, Bind keeps its old double duty and this
+// refusal is exactly as it was: never loopback or the unspecified address it would listen on. With
+// one, AdvertiseHost alone is held to that refusal in Bind's place, and Bind may be the unspecified
+// address (`0.0.0.0` included: openSupervision, internal/daemon/daemon.go, never hands a pod Bind
+// directly once AdvertiseHost names where it does dial) — but a loopback Bind is refused regardless
+// of AdvertiseHost, since a listener bound only to loopback answers no Service and no pod either.
+// Every Legion URL a pod is handed - daemon_url, envoy_url, dispatch_url, and each nats_urls entry -
+// must name neither: a loopback host is, in a pod, the pod itself, and the unspecified address is
+// no host at all.
 func checkPodReachable(cfg Config) error {
-	host := cfg.Bind
-	refusal := "bind %s is not an address a pod can reach, and every pod's shim dials the worker stream at tcp://%s; bind the daemon host's own address when runtime is kubernetes"
-	if cfg.AdvertiseHost != "" {
-		host = cfg.AdvertiseHost
-		refusal = "advertise_host %s is not an address a pod can reach, and every pod's shim dials the worker stream at tcp://%s; name the host pods reach it at when runtime is kubernetes"
+	refuse := func(key, host string) error {
+		why := "bind the daemon host's own address when runtime is kubernetes"
+		if key == "advertise_host" {
+			why = "name the host pods reach it at when runtime is kubernetes"
+		}
+		return fmt.Errorf("%s %s is not an address a pod can reach, and every pod's shim dials the worker stream at tcp://%s; %s",
+			key, host, net.JoinHostPort(host, strconv.Itoa(cfg.WorkerStreamPort)), why)
 	}
-	if ip := net.ParseIP(host); strings.EqualFold(host, "localhost") || ip != nil && (ip.IsLoopback() || ip.IsUnspecified()) {
-		return fmt.Errorf(refusal, host, net.JoinHostPort(host, strconv.Itoa(cfg.WorkerStreamPort)))
+	if cfg.AdvertiseHost == "" {
+		if host := cfg.Bind; isLoopbackHost(host) || isUnspecifiedHost(host) {
+			return refuse("bind", host)
+		}
+	} else {
+		if isLoopbackHost(cfg.Bind) {
+			return refuse("bind", cfg.Bind)
+		}
+		if host := cfg.AdvertiseHost; isLoopbackHost(host) || isUnspecifiedHost(host) {
+			return refuse("advertise_host", host)
+		}
 	}
 	addresses := []struct{ key, value string }{
 		{"daemon_url", cfg.DaemonURL}, {"envoy_url", cfg.EnvoyURL}, {"dispatch_url", cfg.DispatchURL},

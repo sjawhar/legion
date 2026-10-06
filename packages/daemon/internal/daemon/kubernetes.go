@@ -54,21 +54,21 @@ type sandboxReads struct {
 	client *rest.Config
 	opts   sandbox.Options
 	// listenAddr is tcp://<bind>:<worker_stream_port>: the literal address the worker stream
-	// listener binds, which must stay the daemon's own reachable interface (0.0.0.0 included) even
-	// when opts.StreamURL, the address pods dial, names a Service DNS name advertise_host
-	// configures instead.
+	// listener binds, which must stay the daemon's own reachable interface (0.0.0.0 included) once
+	// runtime.kubernetes.advertise_host names the one pods dial instead.
 	listenAddr string
 }
 
 // readSandbox is Agent Sandbox's share of readBoot (C1's translation, C3): the cluster's client from
-// runtime.kubernetes' kubeconfig, and the Options every value of the configuration becomes. The
-// worker stream listens on tcp://<bind>:<worker_stream_port> (listenAddr) but advertises
-// tcp://<the pod-facing host>:<worker_stream_port> (opts.StreamURL, config.Config.WorkerStreamHost):
-// the same address with no advertise_host configured, bind's own Service name otherwise, since a
-// pod never dials bind directly then. paneNatsUser is the public key of the pane NATS nkey seed's
-// user ("" with none), which the image probe holds the providers Secret's seed to. None of the
-// host's own agent machinery is read: no Oh My Pi invocation or plugin gate (the image probe proves
-// the image's), no Dispatch token file (a pod reads its bearer from its claim's Secret), no
+// runtime.kubernetes' kubeconfig, and the Options every value of the configuration becomes. Options
+// here carries opts.StreamURL as listenAddr — tcp://<bind>:<worker_stream_port> — a placeholder
+// only: openSupervision (daemon.go) is what substitutes advertise_host for the host every pod's
+// shim actually dials, once the real listener (and its real, possibly kernel-chosen, port) exists;
+// sandboxRuntime's runtimeFactory closure overwrites opts.StreamURL with that corrected address
+// before this Options ever reaches a cluster call. paneNatsUser is the public key of the pane NATS
+// nkey seed's user ("" with none), which the image probe holds the providers Secret's seed to. None
+// of the host's own agent machinery is read: no Oh My Pi invocation or plugin gate (the image probe
+// proves the image's), no Dispatch token file (a pod reads its bearer from its claim's Secret), no
 // secretsd provider keys (a pod mounts its keys from the providers Secret), and no host gh, git, or
 // jj (a pod runs the image's).
 func readSandbox(cfg config.Config, project, dispatchToken, paneNatsUser string, lookup func(string) (string, bool), log *slog.Logger) (sandboxReads, error) {
@@ -78,8 +78,7 @@ func readSandbox(cfg config.Config, project, dispatchToken, paneNatsUser string,
 		return sandboxReads{}, err
 	}
 	listenAddr := "tcp://" + net.JoinHostPort(cfg.Bind, strconv.Itoa(cfg.WorkerStreamPort))
-	stream := "tcp://" + net.JoinHostPort(cfg.WorkerStreamHost(), strconv.Itoa(cfg.WorkerStreamPort))
-	opts, err := sandboxOptions(cfg, k, project, stream, dispatchToken, lookup, log)
+	opts, err := sandboxOptions(cfg, k, project, listenAddr, dispatchToken, lookup, log)
 	if err != nil {
 		return sandboxReads{}, err
 	}
@@ -90,6 +89,7 @@ func readSandbox(cfg config.Config, project, dispatchToken, paneNatsUser string,
 // prepareSandbox is the runtime over readSandbox's client and Options, and the image probe.
 func prepareSandbox(cfg config.Config, o overrides, reads sandboxReads, p *plan) error {
 	p.stream = reads.listenAddr
+	p.advertiseHost = cfg.AdvertiseHost
 
 	if o.runtime != nil {
 		p.newRuntime, p.probe = o.runtime, o.probe
