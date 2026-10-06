@@ -263,3 +263,49 @@ func (c *client) RenewEnrollment(ctx context.Context, signer Signer, enrollmentI
 	}
 	return result.LeaseExpiresAt, nil
 }
+
+// --- GET /v1/settings, POST /v1/secrets/{name}/reread (public: no proof) ---
+
+// Settings is GET /v1/settings's exact response shape: the namespace and key every agent secret
+// lives under, and the account and region they are in.
+type Settings struct {
+	SecretsPrefix string `json:"secrets_prefix"`
+	KMSKeyARN     string `json:"kms_key_arn"`
+	AWSAccountID  string `json:"aws_account_id"`
+	AWSRegion     string `json:"aws_region"`
+}
+
+func (c *client) Settings(ctx context.Context) (Settings, error) {
+	raw, err := c.do(ctx, http.MethodGet, c.baseURL+"/v1/settings", nil, nil)
+	if err != nil {
+		return Settings{}, err
+	}
+	var settings Settings
+	if err := json.Unmarshal(raw, &settings); err != nil {
+		return Settings{}, fmt.Errorf("decode settings: %w", err)
+	}
+	return settings, nil
+}
+
+// Reread is POST /v1/secrets/{name}/reread's exact response shape: whether the broker serves the
+// secret now and, when it does not, why.
+type Reread struct {
+	Name   string `json:"name"`
+	Served bool   `json:"served"`
+	Reason string `json:"reason"`
+}
+
+// RereadSecret asks the broker to read the secret name from Secrets Manager now, as whoever just
+// wrote it does, so the write is served (or gone) at once instead of at its next reload. name is a
+// validated agent secret name, so it needs no escaping in the path.
+func (c *client) RereadSecret(ctx context.Context, name string) (Reread, error) {
+	raw, err := c.do(ctx, http.MethodPost, c.baseURL+"/v1/secrets/"+name+"/reread", nil, nil)
+	if err != nil {
+		return Reread{}, err
+	}
+	var reread Reread
+	if err := json.Unmarshal(raw, &reread); err != nil {
+		return Reread{}, fmt.Errorf("decode reread: %w", err)
+	}
+	return reread, nil
+}

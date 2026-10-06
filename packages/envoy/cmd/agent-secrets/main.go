@@ -4,7 +4,9 @@
 // AGENT_SECRETS_HELPER_SOCK, to sign on its behalf (helper mode). It enrolls a runtime (box
 // enrollment only, through the local helper — see cmdEnrollHelper below), requests and reads
 // back secret grants, and — in its most common shape — requests one or more secrets and execs a
-// command with them in its environment.
+// command with them in its environment. A person manages the agent secrets themselves with the
+// secret forms (secret.go), which call AWS Secrets Manager under the person's own AWS sign-in
+// and then ask the broker to reread what they wrote.
 //
 //	agent-secrets keygen --out <dir>
 //	agent-secrets enroll --helper --kind box --runtime-id <id> --thumbprint <tp> [--session-id <id>]
@@ -21,6 +23,7 @@
 //	agent-secrets self [--json]
 //	agent-secrets whoami [--json]
 //	agent-secrets sign --method M --url U [--enrollment E]
+//	agent-secrets secret list|show|create|set|retag|delete|restore ...
 //	agent-secrets NAME... [--reason TEXT] [--wait DURATION] -- <command> [args...]
 //
 // Environment: AGENT_SECRETS_URL (the broker's base URL) and, for every session-authenticated
@@ -38,7 +41,8 @@
 // enrollment path for either; only a box enrolls through it, and only via --helper (the shared
 // broker contract has no launcher bearer token:
 // nothing on a devbox can enroll except through a helper or the Legion daemon, the two processes
-// that hold a launcher's proof-signing key).
+// that hold a launcher's proof-signing key). The secret forms read AWS_PROFILE (or --profile) for
+// the person's AWS sign-in and need no session identity at all.
 package main
 
 import (
@@ -118,6 +122,20 @@ var commands = []command{
 		"Print this session's enrollment as the broker's JSON, as self --json does."},
 	{"sign", "agent-secrets sign --method M --url U [--enrollment E]",
 		"Print the proof this session would sign for one broker call, without making the call."},
+	{"secret list", "agent-secrets secret list [--json] [--profile P]",
+		"List every agent secret under your own AWS sign-in: its owner, tier, whether it has a\nvalue, and, while it is scheduled for deletion, until when it can be restored."},
+	{"secret show", "agent-secrets secret show NAME [--json] [--profile P]",
+		"Print the agent secret NAME's owner, tier, dates and versions, never its value."},
+	{"secret create", "agent-secrets secret create NAME --owner me|shared --tier agent|human [--profile P]",
+		"Create the agent secret NAME under your own AWS sign-in, its value read from standard\ninput, then ask the broker to serve it at once."},
+	{"secret set", "agent-secrets secret set NAME [--profile P]",
+		"Give the agent secret NAME a new value, read from standard input, under your own AWS\nsign-in, then ask the broker to serve it at once."},
+	{"secret retag", "agent-secrets secret retag NAME [--owner me|shared] [--tier agent|human] [--profile P]",
+		"Change the agent secret NAME's owner, tier or both under your own AWS sign-in, then ask\nthe broker to reread it. A shared secret's owner and tier are an administrator's to\nchange."},
+	{"secret delete", "agent-secrets secret delete NAME [--profile P]",
+		"Schedule the agent secret NAME's deletion, restorable for 30 days, under your own AWS\nsign-in, then ask the broker to stop serving it at once."},
+	{"secret restore", "agent-secrets secret restore NAME [--profile P]",
+		"Cancel the agent secret NAME's scheduled deletion under your own AWS sign-in, then ask\nthe broker to serve it again at once."},
 	{"", "agent-secrets NAME... [--reason TEXT] [--wait DURATION] -- <command> [args...]",
 		"Request secrets, wait up to --wait (default 30m) for a person to decide, and run <command>\nwith each granted secret in its environment under its NAME; nothing runs unless all are\ngranted."},
 }
@@ -136,6 +154,9 @@ environment:
                              operator types the code, and the exec form the page where a person
                              approves its waiting request
   OMP_SESSION_ID             the agent session the broker notifies if a pending request expires
+  AWS_PROFILE                the AWS profile the secret forms sign in with when --profile names
+                             none (else the AWS SDK's default credential chain); a write needs
+                             your own Identity Center sign-in in the broker's account
 
 exit codes: 0 done, 1 failed, 2 usage error, 75 still waiting for approval, 77 denied;
 register --exec exits 127 when COMMAND is not found and 126 when it cannot run
@@ -189,6 +210,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return cmdSign(args[1:], stdout, stderr)
 	case "identity":
 		return cmdIdentity(args[1:], stdout, stderr)
+	case "secret":
+		return cmdSecret(args[1:], stdout, stderr)
 	default:
 		return cmdExec(args, stdout, stderr)
 	}
