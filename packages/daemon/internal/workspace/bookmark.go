@@ -175,7 +175,7 @@ func createWorkspace(ctx context.Context, run Runner, workspace Workspace, log f
 	if !fromMain {
 		return nil
 	}
-	_, err = RunChecked(ctx, run, []string{"jj", "bookmark", "set", workspace.Bookmark, "-r", "@"}, nil, workspace.Dir)
+	_, err = RunCheckedIn(ctx, run, workspace, []string{"jj", "bookmark", "set", workspace.Bookmark, "-r", "@"})
 	return err
 }
 

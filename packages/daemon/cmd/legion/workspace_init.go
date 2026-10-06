@@ -237,7 +237,7 @@ func workspaceInit(ctx context.Context, issue, repo, root, credentialHelper, fee
 		removeFinishedWorkspaces(ctx, run, root, repository, issue, stdout, time.Now, removalBudget, fetchStart)
 	}
 	if fromRef, set := os.LookupEnv("LEGION_WORKSPACE_RECOVERED_FROM"); set {
-		return writeRecoveryMarker(ctx, run, provisioned.Dir, issue, fromRef)
+		return writeRecoveryMarker(ctx, run, provisioned, issue, fromRef)
 	}
 	return nil
 }
@@ -510,8 +510,8 @@ func flock(fd, how int) error {
 // every other handoff (dispatch://LEGION-565), so two trees recovering at once never touch the
 // same path either. recoveredAt is an ISO instant in milliseconds, UTC, as JavaScript's
 // toISOString writes it.
-func writeRecoveryMarker(ctx context.Context, run workspace.Runner, dir, issue, fromRef string) error {
-	result, err := workspace.RunChecked(ctx, run, []string{"jj", "log", "-r", "@", "--no-graph", "-T", "commit_id", "--color=never"}, nil, dir)
+func writeRecoveryMarker(ctx context.Context, run workspace.Runner, ws workspace.Workspace, issue, fromRef string) error {
+	result, err := workspace.RunCheckedIn(ctx, run, ws, []string{"jj", "log", "-r", "@", "--no-graph", "-T", "commit_id", "--color=never"})
 	if err != nil {
 		return err
 	}
@@ -524,7 +524,7 @@ func writeRecoveryMarker(ctx context.Context, run workspace.Runner, dir, issue, 
 	if err != nil {
 		return err
 	}
-	marker := filepath.Join(dir, handoffFile(issue, "workspace-recovered.json"))
+	marker := filepath.Join(ws.Dir, handoffFile(issue, "workspace-recovered.json"))
 	if err := os.MkdirAll(filepath.Dir(marker), 0o755); err != nil {
 		return fmt.Errorf("create %s: %w", filepath.Dir(marker), err)
 	}

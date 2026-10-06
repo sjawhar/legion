@@ -353,7 +353,7 @@ func TestNoJJCommandReadsALegacyConfigurationTheTreePlanted(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	listed, err := RunChecked(context.Background(), run, []string{"jj", "config", "list", "--include-defaults", "revset-aliases", "--ignore-working-copy", "--color=never"}, nil, ws.Dir)
+	listed, err := RunCheckedIn(context.Background(), run, ws, []string{"jj", "config", "list", "--include-defaults", "revset-aliases", "--ignore-working-copy", "--color=never"})
 	if err != nil {
 		t.Fatalf("jj config list: %v", err)
 	}
@@ -365,5 +365,44 @@ func TestNoJJCommandReadsALegacyConfigurationTheTreePlanted(t *testing.T) {
 	}
 	if _, err := os.Stat(beside); err != nil {
 		t.Errorf("the workspace's legacy file beside its workspace-config-id was touched: %v", err)
+	}
+}
+
+// A workspace's .jj/repo is a file a tree agent can rewrite. One that names a directory other
+// than the shared clone's .jj/repo refuses the command, naming both, before jj opens that
+// directory and before anything in it is removed: here a config.toml with no config-id beside it,
+// which the runner removes only in the shared clone's own repository directory.
+func TestTheRunnerRefusesAWorkspaceWhoseRepoPointerNamesAnotherDirectory(t *testing.T) {
+	run := newLocalRunner(t)
+	ws, err := Provision(context.Background(), run, provisionRequest(t))
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	elsewhere := filepath.Join(t.TempDir(), "elsewhere")
+	if err := os.Mkdir(elsewhere, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	untouched := filepath.Join(elsewhere, "config.toml")
+	if err := os.WriteFile(untouched, []byte("[user]\nname = \"not the clone's\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ws.Dir, ".jj", "repo"), []byte(elsewhere), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	clone, err := filepath.EvalSymlinks(filepath.Join(ws.Clone, ".jj", "repo"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	named, err := filepath.EvalSymlinks(elsewhere)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = RunCheckedIn(context.Background(), run, ws, []string{"jj", "log", "-r", "@", "--no-graph", "--ignore-working-copy", "-T", "commit_id"})
+	if err == nil || !strings.Contains(err.Error(), named) || !strings.Contains(err.Error(), clone) {
+		t.Errorf("jj in a workspace whose .jj/repo names %s = %v, want a refusal naming it and the shared clone's %s", named, err, clone)
+	}
+	if _, err := os.Stat(untouched); err != nil {
+		t.Errorf("%s, outside the shared clone, was touched: %v", untouched, err)
 	}
 }

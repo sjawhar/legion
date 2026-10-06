@@ -612,7 +612,7 @@ func TestWorkspaceInitReportsATimedOutRecoveryMarkerCommand(t *testing.T) {
 		t.Fatal(err)
 	}
 	run := workspace.NewRunner(100*time.Millisecond, map[string]string{"jj": jj, "git": git})
-	err = writeRecoveryMarker(context.Background(), run, t.TempDir(), "LEGION-42", "legion/LEGION-42")
+	err = writeRecoveryMarker(context.Background(), run, workspace.Workspace{Dir: t.TempDir()}, "LEGION-42", "legion/LEGION-42")
 	if err == nil || !strings.Contains(err.Error(), "command timed out: jj log -r @ --no-graph -T commit_id") {
 		t.Fatalf("writeRecoveryMarker = %v, want the timed-out jj log named", err)
 	}

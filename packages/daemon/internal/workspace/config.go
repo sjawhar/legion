@@ -41,6 +41,11 @@ type Command struct {
 	Env     []string
 	Dir     string
 	Timeout time.Duration
+	// Clone is the shared clone whose workspace Dir is, for a jj command run in a workspace's own
+	// directory (RunCheckedIn): the runner refuses one whose `.jj/repo` names any other
+	// repository (disarmLegacyConfig). "" for a command that opens the shared clone itself (-R,
+	// onClone) or no repository.
+	Clone string
 }
 
 // Result is the process result. A non-zero ExitCode, or TimedOut, is a process failure; a
@@ -135,7 +140,7 @@ func (r execRunner) Run(ctx context.Context, command Command) (Result, error) {
 	}
 	args := command.Argv[1:]
 	if command.Argv[0] == "jj" {
-		if err := disarmLegacyConfig(jjWorkspaceRoot(command)); err != nil {
+		if err := disarmLegacyConfig(jjWorkspaceRoot(command), command.Clone); err != nil {
 			return Result{}, err
 		}
 		// jj starts the git its configuration names, and a tree agent can still set that where
@@ -179,7 +184,8 @@ func (r execRunner) Run(ctx context.Context, command Command) (Result, error) {
 }
 
 // disarmLegacyConfig removes each legacy configuration file jj would migrate when it opens the
-// workspace at root. jj (0.45, the worker image's) keeps a repository's and a workspace's own
+// workspace at root. jj 0.38 and later (the worker image's is 0.45; the tmux daemon refuses an
+// older host jj, internal/daemon's resolveTools) keep a repository's and a workspace's own
 // configuration in the config home, under the id an id file inside `.jj` names, so nothing a tree
 // agent writes on the tree volume is read as configuration, with one exception: while the id
 // file cannot be read because it does not exist, jj migrates the legacy file beside it into the
@@ -192,16 +198,16 @@ func (r execRunner) Run(ctx context.Context, command Command) (Result, error) {
 // `revset-aliases."empty()" = "all()"` made the removal pass read an unpushed commit as pushed,
 // and a planted `"remote_bookmarks()"` alias broke jj's own trunk() and so every provisioning
 // after it; a pod's config home is also the one the agent's own jj reads, so a migration during
-// workspace-init would hand the planted file to the agent too. The repository is resolved as
-// jj's DefaultWorkspaceLoader resolves it (repositoryDir). A root with no `.jj` directory is left
-// for jj to refuse, and a legacy file that cannot be removed fails the command, since jj would
-// read it.
+// workspace-init would hand the planted file to the agent too. The repository's file is removed
+// only in the shared clone's own `.jj/repo` (sharedRepository), never in a directory a workspace's
+// rewritten pointer names. A root with no `.jj` directory is left for jj to refuse, and a legacy
+// file that cannot be removed fails the command, since jj would read it.
 //
 // This holds against a file written at any time before the command runs. A tree agent writing
 // one in the instant between this check and jj's own read is outside what it closes, the trust
 // model RemoveFinished's push-safety check states: a hostile role already has every sibling
 // workspace on the volume to delete directly.
-func disarmLegacyConfig(root string) error {
+func disarmLegacyConfig(root, clone string) error {
 	if root == "" {
 		return nil
 	}
@@ -209,9 +215,13 @@ func disarmLegacyConfig(root string) error {
 	if info, err := os.Stat(jjDir); err != nil || !info.IsDir() {
 		return nil
 	}
-	legacy := map[string][2]string{jjDir: {"workspace-config-id", "workspace-config.toml"}}
-	if repo, ok := repositoryDir(jjDir); ok {
-		legacy[repo] = [2]string{"config-id", "config.toml"}
+	repo, err := sharedRepository(jjDir, clone)
+	if err != nil {
+		return err
+	}
+	legacy := map[string][2]string{
+		jjDir: {"workspace-config-id", "workspace-config.toml"},
+		repo:  {"config-id", "config.toml"},
 	}
 	for dir, names := range legacy {
 		if _, err := os.Stat(filepath.Join(dir, names[0])); !errors.Is(err, fs.ErrNotExist) {
@@ -225,29 +235,74 @@ func disarmLegacyConfig(root string) error {
 	return nil
 }
 
-// repositoryDir is the repository directory of the workspace whose `.jj` is jjDir, as jj's
-// DefaultWorkspaceLoader resolves it; false when jj could not resolve it either.
-func repositoryDir(jjDir string) (string, bool) {
-	repo := filepath.Join(jjDir, "repo")
+// sharedRepository is the repository directory jj opens for the workspace whose `.jj` is jjDir,
+// held to the shared clone's own `.jj/repo`: clone's when the command names one (a workspace of
+// it), else the root's own (the command opens the clone itself). That directory must be a real
+// directory, not a symlink or a file. A workspace names its repository in its `.jj/repo` file,
+// which a tree agent can rewrite: resolved as jj's DefaultWorkspaceLoader resolves it (relative to
+// `.jj`, symlinks followed), it must be the clone's own, or the command is refused, naming both,
+// before jj opens a repository Legion did not provision and before anything there is removed.
+func sharedRepository(jjDir, clone string) (string, error) {
+	own := filepath.Join(jjDir, "repo")
+	if clone != "" {
+		own = filepath.Join(clone, ".jj", "repo")
+	}
+	if info, err := os.Lstat(own); err != nil || !info.IsDir() {
+		return "", fmt.Errorf("refusing to run jj in %s: %s is not the shared clone's own repository directory (%v)", filepath.Dir(jjDir), own, describeEntry(info, err))
+	}
+	if clone == "" {
+		return own, nil
+	}
+	expected, err := filepath.EvalSymlinks(own)
+	if err != nil {
+		return "", fmt.Errorf("refusing to run jj in %s: resolve the shared clone's %s: %w", filepath.Dir(jjDir), own, err)
+	}
+	opened, err := workspaceRepository(jjDir)
+	if err != nil || opened != expected {
+		if err != nil {
+			opened = err.Error()
+		}
+		return "", fmt.Errorf("refusing to run jj in %s: its .jj/repo names %s, not the shared clone's %s", filepath.Dir(jjDir), opened, expected)
+	}
+	return expected, nil
+}
+
+// workspaceRepository is the directory jj opens as the repository of the workspace whose `.jj` is
+// jjDir (jj's DefaultWorkspaceLoader): `.jj/repo` itself when it is a directory, else the path the
+// `.jj/repo` file holds, relative to `.jj` unless absolute; symlinks resolved either way.
+func workspaceRepository(jjDir string) (string, error) {
+	real, err := filepath.EvalSymlinks(jjDir)
+	if err != nil {
+		return "", err
+	}
+	repo := filepath.Join(real, "repo")
 	info, err := os.Stat(repo)
 	if err != nil {
-		return "", false
+		return "", err
 	}
-	if info.IsDir() {
-		return repo, true
+	if !info.IsDir() {
+		pointer, err := os.ReadFile(repo)
+		if err != nil {
+			return "", err
+		}
+		repo = string(pointer)
+		if !filepath.IsAbs(repo) {
+			repo = filepath.Join(real, repo)
+		}
 	}
-	pointer, err := os.ReadFile(repo)
-	if err != nil {
-		return "", false
+	return filepath.EvalSymlinks(repo)
+}
+
+// describeEntry says what a path that should be a directory is instead.
+func describeEntry(info fs.FileInfo, err error) string {
+	switch {
+	case err != nil:
+		return err.Error()
+	case info.Mode()&fs.ModeSymlink != 0:
+		return "a symlink"
+	default:
+		return "not a directory"
 	}
-	target := string(pointer)
-	if !filepath.IsAbs(target) {
-		target = filepath.Join(jjDir, target)
-	}
-	if info, err := os.Stat(target); err != nil || !info.IsDir() {
-		return "", false
-	}
-	return target, true
 }
 
 // jjWorkspaceRoot is the workspace a jj command opens: the value of its last -R (or
@@ -351,6 +406,16 @@ func runCommandTimeout(ctx context.Context, run Runner, argv []string, env []str
 // command.
 func RunChecked(ctx context.Context, run Runner, argv []string, env []string, dir string) (Result, error) {
 	result, err := runCommand(ctx, run, argv, env, dir)
+	return checkedResult(argv, result, err)
+}
+
+// RunCheckedIn is RunChecked for a command run in ws's own directory, naming ws's shared clone so
+// the runner can hold the workspace's `.jj/repo` to it (Command.Clone).
+func RunCheckedIn(ctx context.Context, run Runner, ws Workspace, argv []string) (Result, error) {
+	if run == nil {
+		return Result{}, errors.New("workspace runner is required")
+	}
+	result, err := run.Run(ctx, Command{Argv: argv, Dir: ws.Dir, Clone: ws.Clone, Timeout: run.Timeout()})
 	return checkedResult(argv, result, err)
 }
 

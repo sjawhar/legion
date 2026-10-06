@@ -158,7 +158,7 @@ func RemoveFinished(ctx context.Context, run Runner, ws Workspace, issue, merged
 		return nil
 	}
 	snapshot := append([]string{"jj", "status", "--color=never"}, snapshotOverrides()...)
-	snapshotted, err := RunChecked(ctx, run, snapshot, nil, ws.Dir)
+	snapshotted, err := RunCheckedIn(ctx, run, ws, snapshot)
 	if err != nil {
 		return err
 	}
