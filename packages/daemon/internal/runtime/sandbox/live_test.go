@@ -930,8 +930,10 @@ func (r *liveRig) resume(c *liveClaim, file string) (runtime.Locator, error) {
 }
 
 // awaitRunning waits for the claim's current pod to run with its Sandbox Ready, then for its
-// shim's hello at the current generation. A pod that runs and never says hello within one boot
-// interval is a network-path failure, named as one.
+// shim's hello at the current generation, then for the stub agent's own marker line — the hello
+// only proves the shim dialed in before spawning its child (shim.go:204/317); nothing else orders
+// the child's first write against whatever a caller does next (a stop, a marker read). A pod that
+// runs and never says hello within one boot interval is a network-path failure, named as one.
 func (r *liveRig) awaitRunning(c *liveClaim, since time.Time) (registration, error) {
 	name := SandboxName(c.token)
 	var pod *corev1.Pod
@@ -964,6 +966,16 @@ func (r *liveRig) awaitRunning(c *liveClaim, since time.Time) (registration, err
 	reg, ok := r.reg.await(c.token, c.gen, since, liveBootTimeout)
 	if !ok {
 		return registration{}, r.networkPathFailure(pod)
+	}
+	wrote := string(c.role) + ":" + c.loc.Incarnation
+	if err := r.poll(liveBootTimeout, "marker "+c.marker+" to hold "+wrote, func() (bool, error) {
+		lines, err := r.markerLines(c)
+		if err != nil {
+			return false, err
+		}
+		return slices.Contains(lines, wrote), nil
+	}); err != nil {
+		return registration{}, err
 	}
 	return reg, nil
 }
