@@ -42,13 +42,19 @@ type Runtime struct {
 // Config is the daemon's settled configuration: the file, the environment, and the defaults
 // resolved into the values the daemon runs on.
 type Config struct {
-	Project      string
-	Port         int
-	Bind         string
-	PostgresDSN  string
-	StateDir     string
-	Runtime      Runtime
-	AdmissionCap int
+	Project string
+	Port    int
+	Bind    string
+	// AdvertiseHost is `advertise_host`: the address every pod's shim and `LEGION_DAEMON_URL`
+	// should be read against instead of Bind, once Bind names a listen-only address (`0.0.0.0`
+	// under kubernetes) rather than one a pod can dial. "" (the default) keeps Bind as the pod's
+	// own address too, today's behaviour; a Kubernetes Service's DNS name is the expected value
+	// otherwise. Unused outside kubernetes.
+	AdvertiseHost string
+	PostgresDSN   string
+	StateDir      string
+	Runtime       Runtime
+	AdmissionCap  int
 
 	// DaemonURL is the API address every pane is told (`LEGION_DAEMON_URL`), with no trailing
 	// slash; the loopback address on Port unless the file names another.
@@ -205,6 +211,7 @@ type fileConfig struct {
 	Project           *string
 	Port              *int
 	Bind              *string
+	AdvertiseHost     *string
 	PostgresDSN       *string
 	StateDir          *string
 	AdmissionCap      *int
@@ -307,6 +314,8 @@ func readKeys(root *yaml.Node) (fileConfig, error) {
 			file.Project, err = readString(value, key)
 		case "bind":
 			file.Bind, err = readString(value, key)
+		case "advertise_host":
+			file.AdvertiseHost, err = readNonEmptyString(value, key)
 		case "postgres_dsn":
 			file.PostgresDSN, err = readString(value, key)
 		case "state_dir":
@@ -763,6 +772,9 @@ func resolve(file fileConfig, env func(string) string, configDir string) (Config
 	}
 	if strings.TrimSpace(cfg.Bind) == "" {
 		return Config{}, errors.New("bind must not be empty")
+	}
+	if file.AdvertiseHost != nil {
+		cfg.AdvertiseHost = *file.AdvertiseHost
 	}
 
 	if file.Kubernetes != nil {

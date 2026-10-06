@@ -1010,6 +1010,7 @@ func TestLoadClassifiesEveryShippedKey(t *testing.T) {
 		{key: "postgres_dsn", class: modelled},
 		{key: "port", line: "port: 13370", class: modelled},
 		{key: "bind", line: "bind: 127.0.0.1", class: modelled},
+		{key: "advertise_host", line: "advertise_host: legion-daemon.legion.svc", class: modelled},
 		{key: "runtime", line: "runtime: tmux", class: modelled},
 		{key: "admission_cap", line: "admission_cap: 4", class: modelled},
 

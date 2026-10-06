@@ -408,6 +408,27 @@ func TestTheWorkerContainerNamesItsGrantFileInMemory(t *testing.T) {
 	t.Fatalf("the grant file %s is on volume %q, which is not an in-memory emptyDir", want, volume)
 }
 
+// A pod's own IP changes on every restart, so under kubernetes the daemon hands pods a stable
+// address instead — a Kubernetes Service's DNS name, which readSandbox (internal/daemon/kubernetes.go)
+// builds StreamURL and DaemonURL from once bind becomes a listen-only 0.0.0.0. Neither Options
+// field needs an IP: the manifest carries each exactly as configured.
+func TestTheManifestCarriesADNSNamedStreamAndDaemonURL(t *testing.T) {
+	opts := goldenOptions()
+	opts.StreamURL = "tcp://legion-daemon-widgets.legion.svc:13371"
+	opts.DaemonURL = "http://legion-daemon-widgets.legion.svc:13370"
+	r, err := configure(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	main := containerNamed(t, podOf(t, r, workerSpec(t), false), mainContainer)
+	if !slices.Contains(main.Command, "tcp://legion-daemon-widgets.legion.svc:13371") {
+		t.Errorf("the shim's argv = %v, want it to dial tcp://legion-daemon-widgets.legion.svc:13371", main.Command)
+	}
+	if got := envOf(main)["LEGION_DAEMON_URL"]; got != "http://legion-daemon-widgets.legion.svc:13370" {
+		t.Errorf("LEGION_DAEMON_URL = %q, want http://legion-daemon-widgets.legion.svc:13370", got)
+	}
+}
+
 // The provisioning token never shares a process with anything a tree agent can write (Stage 4b
 // Task 4b.6b): the claim's Secret projects it into workspace-fetch alone, the only container told
 // where it is, and no other container can write a volume workspace-fetch mounts — the feed it

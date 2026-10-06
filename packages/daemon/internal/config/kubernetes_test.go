@@ -457,6 +457,21 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 			want: "bind :: is not an address a pod can reach, and every pod's shim dials the worker stream at tcp://[::]:13371; bind the daemon host's own address when runtime is kubernetes",
 		},
 		{
+			name: "advertise_host on loopback, bind unspecified",
+			body: kubernetesWith("bind: 10.0.0.5", "bind: 0.0.0.0\nadvertise_host: 127.0.0.1"),
+			want: "advertise_host 127.0.0.1 is not an address a pod can reach, and every pod's shim dials the worker stream at tcp://127.0.0.1:13371; name the host pods reach it at when runtime is kubernetes",
+		},
+		{
+			name: "advertise_host unspecified, bind unspecified",
+			body: kubernetesWith("bind: 10.0.0.5", "bind: 0.0.0.0\nadvertise_host: 0.0.0.0"),
+			want: "advertise_host 0.0.0.0 is not an address a pod can reach, and every pod's shim dials the worker stream at tcp://0.0.0.0:13371; name the host pods reach it at when runtime is kubernetes",
+		},
+		{
+			name: "advertise_host on localhost, bind unspecified",
+			body: kubernetesWith("bind: 10.0.0.5", "bind: 0.0.0.0\nadvertise_host: localhost"),
+			want: "advertise_host localhost is not an address a pod can reach, and every pod's shim dials the worker stream at tcp://localhost:13371; name the host pods reach it at when runtime is kubernetes",
+		},
+		{
 			name: "daemon_url absent",
 			body: kubernetesWith("daemon_url: http://10.0.0.5:13370\n", ""),
 			want: "daemon_url is required when runtime is kubernetes: a pod cannot reach the daemon's loopback address",
@@ -655,6 +670,26 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 				t.Errorf("LoadForValidation error =\n%q\nwant\n%q", err.Error(), tc.want)
 			}
 		})
+	}
+}
+
+// A pod's own IP changes on every restart, so a `runtime: kubernetes` daemon's bind is allowed to
+// become a listen-only address (0.0.0.0 included) once advertise_host names the stable, pod-facing
+// address instead — a Kubernetes Service's DNS name included, since readSandbox
+// (internal/daemon/kubernetes.go) only needs a dialable host:port, never an IP bind must also be.
+func TestLoadForValidationAcceptsBindUnspecifiedWithAdvertiseHost(t *testing.T) {
+	cfg, err := LoadForValidation(writeConfigFile(t, kubernetesWith(
+		"bind: 10.0.0.5",
+		"bind: 0.0.0.0\nadvertise_host: legion-daemon-legsmoke.legion.svc",
+	)), noEnv)
+	if err != nil {
+		t.Fatalf("LoadForValidation: %v", err)
+	}
+	if cfg.Bind != "0.0.0.0" {
+		t.Errorf("Bind = %q, want 0.0.0.0: a listen-only address once advertise_host is set", cfg.Bind)
+	}
+	if cfg.AdvertiseHost != "legion-daemon-legsmoke.legion.svc" {
+		t.Errorf("AdvertiseHost = %q, want the configured Service name", cfg.AdvertiseHost)
 	}
 }
 

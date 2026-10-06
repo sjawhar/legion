@@ -228,6 +228,45 @@ func TestPrepareDerivesTheWorkerStreamAddressFromWorkerStreamPort(t *testing.T) 
 	}
 }
 
+// A pod's own IP changes on every restart, so under kubernetes the worker stream listens on bind
+// (0.0.0.0 included) while advertising advertise_host, a stable Service name, to every pod's shim:
+// readSandbox must keep the literal listen address (reads.listenAddr, what the listener actually
+// binds) and the advertised one (reads.opts.StreamURL, what prepareSandbox hands the runtime for
+// pods) apart, even though both share the same worker_stream_port.
+func TestReadSandboxDialsAdvertiseHostButListensOnBind(t *testing.T) {
+	cfg := kubernetesConfig(t, "https://127.0.0.1:1")
+	cfg.Bind = "0.0.0.0"
+	cfg.AdvertiseHost = "legion-daemon-legsmoke.legion.svc"
+	cfg.WorkerStreamPort = 13371
+
+	reads, err := readSandbox(cfg, "legion", "", "", func(string) (string, bool) { return "", false }, quietLogger())
+	if err != nil {
+		t.Fatalf("readSandbox: %v", err)
+	}
+	if want := "tcp://0.0.0.0:13371"; reads.listenAddr != want {
+		t.Errorf("listenAddr = %q, want %q: the worker stream still listens on bind", reads.listenAddr, want)
+	}
+	if want := "tcp://legion-daemon-legsmoke.legion.svc:13371"; reads.opts.StreamURL != want {
+		t.Errorf("opts.StreamURL = %q, want %q: every pod's shim dials advertise_host, not bind", reads.opts.StreamURL, want)
+	}
+}
+
+// With no advertise_host, readSandbox keeps today's single address: the listener binds it and
+// every pod's shim dials the same string, exactly as before this change.
+func TestReadSandboxFallsBackToBindWithNoAdvertiseHost(t *testing.T) {
+	cfg := kubernetesConfig(t, "https://127.0.0.1:1")
+	cfg.Bind = "192.0.2.30"
+	cfg.WorkerStreamPort = 13371
+
+	reads, err := readSandbox(cfg, "legion", "", "", func(string) (string, bool) { return "", false }, quietLogger())
+	if err != nil {
+		t.Fatalf("readSandbox: %v", err)
+	}
+	if want := "tcp://192.0.2.30:13371"; reads.listenAddr != want || reads.opts.StreamURL != want {
+		t.Errorf("listenAddr = %q, opts.StreamURL = %q, want both %q (bind, unchanged)", reads.listenAddr, reads.opts.StreamURL, want)
+	}
+}
+
 // prepare refuses what the cluster would refuse only later: a kubeconfig with no current context
 // when runtime.kubernetes.context names none, and a role's request above its limit.
 func TestAKubernetesDaemonRefusesAConfigurationTheClusterWouldRefuseLater(t *testing.T) {
