@@ -147,23 +147,6 @@ func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
 
-// requestSessionID answers the session id every request and exec form sends with its request
-// (LEGION-587): OMP_SESSION_ID, the id Oh My Pi's session-env extension sets, when present; else
-// ENVOY_SESSION_ID, an Envoy-registered harness that does not set OMP_SESSION_ID; else
-// CLAUDE_CODE_SESSION_ID, so a Claude Code session names the same id it registered with Envoy
-// under. Empty when none of the three is set — a host session agent-secrets-helper enrolled
-// (kind host) carries no enrollment session_id of its own, so an unset result here is the one
-// broker.Session.Request and broker.Session.Enrollment answer both empty, and the credential
-// request names no session at all.
-func requestSessionID() string {
-	for _, name := range []string{"OMP_SESSION_ID", "ENVOY_SESSION_ID", "CLAUDE_CODE_SESSION_ID"} {
-		if v := os.Getenv(name); v != "" {
-			return v
-		}
-	}
-	return ""
-}
-
 func run(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		fmt.Fprint(stderr, usage())

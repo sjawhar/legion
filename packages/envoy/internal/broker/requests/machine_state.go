@@ -23,6 +23,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -46,10 +48,31 @@ var (
 	// signature, one approval by the record's approver) failed — a row written by anyone but the
 	// broker releases nothing.
 	ErrGrantChainInvalid = errors.New("this grant's approval chain no longer verifies")
-	// ErrSecretNotInStore: the secret a grant reads its value from is no longer in Secrets Manager.
-	ErrSecretNotInStore = errors.New("secret is not in the secrets store")
-	ErrMixedApprovers   = errors.New("the requested secrets need different approvers; request them separately")
+	ErrSecretNotInStore  = errors.New("secret is not in the secrets store")
+	ErrMixedApprovers    = errors.New("the requested secrets need different approvers; request them separately")
+	// ErrSessionIDInvalid: the request's own session_id override (requests.session_id — an
+	// unsigned claim any enrolled process may send, never verified against a signature) is too
+	// long or carries a whitespace or control character, refused before it is ever stored or
+	// forwarded to Envoy's wake (LEGION-587).
+	ErrSessionIDInvalid = errors.New("session id must be at most 128 characters with no whitespace or control character")
 )
+
+// maxSessionIDLength bounds the request body's session_id override; see ErrSessionIDInvalid.
+const maxSessionIDLength = 128
+
+// validSessionID reports whether sessionID is acceptable to store: empty (unset) or at most
+// maxSessionIDLength runes with no whitespace or control character.
+func validSessionID(sessionID string) bool {
+	if utf8.RuneCountInString(sessionID) > maxSessionIDLength {
+		return false
+	}
+	for _, r := range sessionID {
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			return false
+		}
+	}
+	return true
+}
 
 // jtiRetentionMargin is how long past a request object's expiry its jti is remembered, mirroring
 // proof.Verifier's own retention margin.
@@ -166,6 +189,9 @@ func (e enrollmentRow) requester(ctx context.Context, q querier) (policy.Request
 // or denied request, with a granted one's grant, or a pending request and its credential-request
 // record, which a pending identical request already waiting coalesces onto instead.
 func (m *Machine) Create(ctx context.Context, enrollmentID, compactRequest, sessionID string) (Request, error) {
+	if !validSessionID(sessionID) {
+		return Request{}, ErrSessionIDInvalid
+	}
 	enr, err := m.enrollment(ctx, enrollmentID)
 	if err != nil {
 		return Request{}, err

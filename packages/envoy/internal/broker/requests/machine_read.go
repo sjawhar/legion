@@ -277,10 +277,11 @@ type PendingSummary struct {
 //
 // The two left joins read each row's session (LEGION-587): req on requests.record_id, the same
 // column requests_record (0008_lookup_indexes.up.sql) already indexes for ReadRecord, and enr on
-// credential_requests' own enrollment_id, its primary-key lookup into enrollments. Neither join
-// touches a column the approver filter or the two relations
-// TestPendingForApproverAvoidsSequentialScans checks (credential_requests,
-// credential_request_events) scan by, so it still pins the same plan.
+// credential_requests' own enrollment_id, its primary-key lookup into enrollments.
+// TestPendingForApproverAvoidsSequentialScans checks only credential_requests and
+// credential_request_events for a sequential scan; it pins nothing about how Postgres joins in
+// req and enr (a hash join over requests and enrollments, measured locally at 5,000 enrollments —
+// free to change with the planner's own cost estimates, and not this test's concern).
 const pendingForApproverQuery = `select cr.id, cr.kind, cr.body, cr.created_at, coalesce(req.session_id, ''), coalesce(enr.session_id, '')
 	from credential_requests cr
 	left join requests req on req.record_id = cr.id

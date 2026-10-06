@@ -849,10 +849,12 @@ func TestRequestSignsARequestObject(t *testing.T) {
 	audience = srv.URL
 	mu.Unlock()
 
-	// OMP_SESSION_ID is cleared: this test's own process may run inside an omp session, whose id
-	// the client would otherwise forward as session_id (the behavior
-	// TestRequestAndExecFormSendOMPSessionIDAsSessionID pins).
-	stdout, stderr, exit := runAgentSecrets(t, binary, srv.URL, keyDir, []string{"OMP_SESSION_ID="},
+	// Every one of requestSessionID's three env vars is cleared: this test's own process may run
+	// inside an omp session, whose id the client would otherwise forward as session_id (the
+	// behavior TestRequestAndExecFormSendSessionIDWithFallbackOrder pins), and a Claude Code or
+	// Envoy-registered session sets the other two the same way.
+	stdout, stderr, exit := runAgentSecrets(t, binary, srv.URL, keyDir,
+		[]string{"OMP_SESSION_ID=", "ENVOY_SESSION_ID=", "CLAUDE_CODE_SESSION_ID="},
 		"request", "GRANT_ME", "--reason", "need it for the build")
 	if exit != 0 {
 		t.Fatalf("exit = %d, want 0: stdout=%q stderr=%q", exit, stdout, stderr)
