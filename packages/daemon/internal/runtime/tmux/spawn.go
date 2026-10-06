@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/podsafety"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
 	"github.com/sjawhar/legion/daemon/internal/runtime/workerbin"
@@ -51,6 +52,7 @@ var runtimeOwned = map[string]bool{
 	"XDG_CACHE_HOME": true, "XDG_DATA_HOME": true, "XDG_STATE_HOME": true,
 	"LEGION_BOOT_TOKEN_FILE": true, "LEGION_GH_PATH": true, "LEGION_GIT_PATH": true,
 	"LEGION_JJ_PATH": true, "DISPATCH_URL": true, "DISPATCH_TOKEN_FILE": true, "PI_SHELL_PREFIX": true,
+	"PI_CONFIG_FILES": true,
 }
 
 // validateSpawnSpec refuses a spec the runtime cannot honour exactly, before anything touches the
@@ -156,11 +158,12 @@ type PaneInputs struct {
 
 // panePairs are a pane's -e pairs, in one order: the variables every Legion pane is told (the
 // identity, daemon, state, workspace, Envoy, Dispatch and tool variables, PI_SHELL_PREFIX, which
-// keeps this daemon's gh and legion first in the agent's bash tool, and LEGION_GRANT_FILE,
-// runtime.GrantFile), the four XDG base directories
-// under `<state_dir>/home`, the spec's own variables sorted, then a `<NAME>_FILE` pointer per
-// secret file. PATH is never among them — tmux would replace it (LEGION-91) — and neither is any
-// secret's value.
+// keeps this daemon's gh and legion first in the agent's bash tool, PI_CONFIG_FILES, which names
+// the turn-scoping overlay writeTurnScopeOverlay writes (podsafety.TurnScopeOverlay) — the one
+// settings overlay a pane gets at all — and LEGION_GRANT_FILE, runtime.GrantFile), the four XDG
+// base directories under `<state_dir>/home`, the spec's own variables sorted, then a `<NAME>_FILE`
+// pointer per secret file. PATH is never among them — tmux would replace it (LEGION-91) — and
+// neither is any secret's value.
 func panePairs(spec runtime.SpawnSpec, in PaneInputs, files []runtime.SecretFile) []string {
 	var pairs []string
 	add := func(name, value string) { pairs = append(pairs, "-e", name+"="+value) }
@@ -184,6 +187,7 @@ func panePairs(spec runtime.SpawnSpec, in PaneInputs, files []runtime.SecretFile
 		add(name, in.Tools[name])
 	}
 	add("PI_SHELL_PREFIX", shellprefix.For(workerbin.Dir(in.StateDir), workerbin.LauncherDir(in.StateDir)))
+	add("PI_CONFIG_FILES", filepath.Join(in.StateDir, podsafety.TurnScopeFile))
 	add("GIT_TERMINAL_PROMPT", "0")
 	add("LEGION_GRANT_FILE", runtime.GrantFile(in.StateDir, spec.Claim))
 	for _, dir := range xdgDirectories(in.StateDir) {
@@ -210,13 +214,25 @@ func makePaneHome(stateDir string) error {
 	return nil
 }
 
+// writeTurnScopeOverlay writes podsafety.TurnScopeOverlay under stateDir, read-only, so panePairs
+// can name it first in a pane's PI_CONFIG_FILES: the one settings overlay a tmux pane gets at all
+// (podsafety.go's own doc — the rest of the pod baseline is a pod's alone), and the two keys
+// supervise.Machine.Quiesce's own promise depends on regardless of runtime (LEGION-462).
+func writeTurnScopeOverlay(stateDir string) error {
+	return podsafety.WriteReadOnly(filepath.Join(stateDir, podsafety.TurnScopeFile), podsafety.TurnScopeOverlay)
+}
+
 // PaneVariables is a launch's environment without the launch, for a process this runtime does not
 // start that must be told exactly what a pane is: the rigs under packages/pi-envoy/scripts, which
-// run Oh My Pi under it. It makes the pane's home as a launch does (makePaneHome) and returns the
-// variables panePairs tells a pane for spec, NAME=value in their order, files being the secret
-// files they point at.
+// run Oh My Pi under it. It makes the pane's home as a launch does (makePaneHome) and writes the
+// turn-scoping overlay as a launch does (writeTurnScopeOverlay), then returns the variables
+// panePairs tells a pane for spec, NAME=value in their order, files being the secret files they
+// point at.
 func PaneVariables(spec runtime.SpawnSpec, in PaneInputs, files []runtime.SecretFile) ([]string, error) {
 	if err := makePaneHome(in.StateDir); err != nil {
+		return nil, err
+	}
+	if err := writeTurnScopeOverlay(in.StateDir); err != nil {
 		return nil, err
 	}
 	pairs := panePairs(spec, in, files)
@@ -354,6 +370,9 @@ func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec) (runtime.L
 		r.log.Info("tmux runtime: resuming a recorded OMP session", "claim", spec.Claim, "session", spec.ResumeSessionFile)
 	}
 	if err := makePaneHome(r.stateDir); err != nil {
+		return runtime.Locator{}, fmt.Errorf("spawn %s: %w", spec.Claim, err)
+	}
+	if err := writeTurnScopeOverlay(r.stateDir); err != nil {
 		return runtime.Locator{}, fmt.Errorf("spawn %s: %w", spec.Claim, err)
 	}
 	files := secretFiles(r.stateDir, spec)
