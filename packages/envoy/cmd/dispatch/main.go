@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/dispatch/agentstream"
@@ -28,6 +29,8 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/config"
 	"github.com/sjawhar/envoy/internal/dispatch/delivery"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/embed"
+	"github.com/sjawhar/envoy/internal/dispatch/embedqueue"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/files"
 	"github.com/sjawhar/envoy/internal/dispatch/outbox"
@@ -194,7 +197,7 @@ func main() {
 		os.Exit(1)
 	}
 	if err := database.Migrate(ctx); err != nil {
-		slog.Error("dispatch: migrate database", "error", err)
+		slog.Error("dispatch: migrate database", "error", explainMigrateError(err))
 		os.Exit(1)
 	}
 
@@ -271,6 +274,16 @@ func main() {
 		slog.Info("dispatch: verifying service-account tokens", "issuer", boot.OIDCIssuer, "audience", boot.OIDCAudience)
 	}
 
+	// embedder is nil (meaning search off, search answers keyword-only and says so) when no AWS
+	// region/credentials reach this process at boot - a CI job or a devbox with no AWS_REGION set
+	// - which embed.New reports as an error rather than a reason to refuse to boot.
+	var embedder embed.Embedder
+	if client, err := embed.New(ctx); err != nil {
+		slog.Warn("dispatch: meaning search unavailable", "error", err)
+	} else {
+		embedder = client
+	}
+
 	appCtx, err := routes.BuildAppContext(appContextOptions(boot, routes.AppContextOptions{
 		SigningKey:  signingKey,
 		WebDistDir:  webDistDir,
@@ -282,6 +295,7 @@ func main() {
 		Store:       database,
 		ServerURL:   serverURL,
 		Docs:        documentService,
+		Embedder:    embedder,
 		Events:      broker,
 		App:         appCfg,
 		OIDC:        serviceTokens,
@@ -303,6 +317,22 @@ func main() {
 			Docs:      documentService,
 		})
 	}
+	// embedqueue.Run no-ops when its own Deps.Embedder is nil, so this always starts: a later
+	// deploy that grants Bedrock credentials needs no other wiring change to pick up meaning
+	// search for existing content once a backfill (envoy-dispatch backfill-embeddings) runs.
+	// It gets a rate-limited wrapper around the same client api.Deps holds unwrapped above
+	// (embedder, line 296's Embedder field): the write-time queue's poller and a backfill run are
+	// the only two embedqueue callers, and pacing only their calls - never a live search
+	// request's own query embedding, which always goes straight through the unwrapped client -
+	// is what keeps a saturating backfill from taking live search down with it (LEGION-549 round
+	// 5; embed.RateLimitedEmbedder's own doc comment has the AIMD mechanism and the headroom
+	// this leaves). A nil embedder (meaning search off) stays nil rather than becoming a non-nil
+	// wrapper around nothing, which embedqueue.Run's own nil check depends on.
+	var backgroundEmbedder embed.Embedder
+	if embedder != nil {
+		backgroundEmbedder = embed.NewRateLimitedEmbedder(embedder)
+	}
+	go embedqueue.Run(ctx, embedqueue.Deps{Store: database, Embedder: backgroundEmbedder})
 	// A settlement a shutdown cut short, here or in the task this one replaces, runs without
 	// anyone opening its document.
 	go documentService.RunSettlementResumption(ctx)
@@ -654,6 +684,36 @@ func loopbackDatabase(databaseURL string) error {
 		}
 	}
 	return nil
+}
+
+// explainMigrateError wraps a migration failure Postgres attributes to a missing CREATE
+// permission on the vector extension (0072_embeddings_core.up.sql's `create extension if not
+// exists vector`) with what that actually means operationally: the deployment's own bootstrap
+// (the cluster's master role, which this application's migration role is not) must create the
+// extension before this Dispatch ever boots against this database - a one-time ops dependency,
+// not a bug in the migration retried. Every other migration failure passes through unchanged.
+// Classified the same way the rest of this codebase classifies a specific Postgres failure
+// (api/issue_create.go's isUniqueViolation, internal/pgmigrate/lock.go and census.go's own
+// errors.As(..., &pgErr) checks): by the stable SQLSTATE code (42501, insufficient_privilege),
+// not by matching the fully wrapped error's text, which a locale or Postgres version could
+// change; pgErr.Message is Postgres's own unwrapped message, so the extension-name check still
+// narrows to this specific failure rather than every insufficient-privilege error any migration
+// could ever raise.
+func explainMigrateError(err error) error {
+	if err == nil {
+		return nil
+	}
+	var pgErr *pgconn.PgError
+	const insufficientPrivilege = "42501"
+	if !errors.As(err, &pgErr) || pgErr.Code != insufficientPrivilege || !strings.Contains(pgErr.Message, `extension "vector"`) {
+		return err
+	}
+	return fmt.Errorf(
+		"%w (this database's own migration role cannot CREATE EXTENSION; the deployment's bootstrap, "+
+			"run as the cluster's master role, must install the vector extension before Dispatch boots "+
+			"against this database for the first time - not something retrying the migration fixes)",
+		err,
+	)
 }
 
 // sessionSigningKey is the key session cookies are signed with: one generated for this process

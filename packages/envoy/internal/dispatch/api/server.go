@@ -25,6 +25,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/architecture"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/embed"
 	"github.com/sjawhar/envoy/internal/dispatch/envoy"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/files"
@@ -56,8 +57,12 @@ type Deps struct {
 	DefaultProject string
 	ServerURL      string
 	Docs           docs.API
-	Envoy          *envoy.Client
-	Events         *events.Broker
+	// Embedder embeds a search request's query for meaning search (LEGION-549); nil means
+	// Dispatch is configured without a Cohere key, and search answers keyword-only on every
+	// request, always setting SearchResponse.Degraded.
+	Embedder embed.Embedder
+	Envoy    *envoy.Client
+	Events   *events.Broker
 	// GitHub calls the GitHub App API for architecture-source access checks and the web app's
 	// GitHub reads; nil is the "no app credentials yet" state and answers ErrNoAppKey.
 	GitHub *githubapp.Client
@@ -112,7 +117,9 @@ type DepsInput struct {
 	// a test exercising a receipt timeout sets a short one rather than waiting that out.
 	EnvoyTimeout time.Duration
 	Docs         docs.API
-	Events       *events.Broker
+	// Embedder embeds a search request's query for meaning search (LEGION-549); nil turns it off.
+	Embedder embed.Embedder
+	Events   *events.Broker
 	// Lifetime is the process context background work runs on; see Deps.Lifetime.
 	Lifetime context.Context
 	// App is the loaded GitHub App credentials (nil when unconfigured);
@@ -180,6 +187,7 @@ func NewDeps(input DepsInput) (Deps, error) {
 		DefaultProject:   defaultProject,
 		ServerURL:        strings.TrimSuffix(input.ServerURL, "/"),
 		Docs:             input.Docs,
+		Embedder:         input.Embedder,
 		Envoy:            envoyClient,
 		Events:           input.Events,
 		GitHub:           github,
