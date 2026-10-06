@@ -1534,9 +1534,11 @@ Stage 4b's `remove_run_branches`) returns without a `gh` call unless the check p
 (`bun test scripts/e2e/lib`, which CI runs).
 
 Every wait for an issue to reach one phase is `wait_for_phase ISSUE PHASE [SECONDS]`: 600 s, unless
-the phase's worker runs a whole loop (a correction round, the retro) and the caller passes its own
-bound. `round_correction_pushed ROUND` accepts the round's line only as an addition in
-`smoke_file`'s patch, never in a notes file or in a `.legion/` handoff that quotes it.
+the phase's worker runs a whole loop and the caller passes its own bound: a correction round, the
+retro, and planning, whose planner runs its gap analyst and up to three plan-review rounds before
+its handoff (Stage 4b's `plan_seconds`, 2700 s). `round_correction_pushed ROUND` accepts the round's
+line only as an addition in `smoke_file`'s patch, never in a notes file or in a `.legion/` handoff
+that quotes it.
 
 The handoff checks read the daemon's phase record (the `phases` table joined to `issues`), not the
 ids of the facts it processed, so they hold whatever format a handoff event id takes. A role's

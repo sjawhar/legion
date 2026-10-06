@@ -127,6 +127,10 @@ opchild="S4BOP-${$}1"
 port_daemon=13372
 port_worker_stream=13373
 stream=ENVOY_NOTIFICATIONS
+# How long a planner the driver has told to plan gets to finish: before its handoff it runs its two
+# model-backed plan checks, the gap analyst and up to three plan-review rounds (each a subagent
+# call), so planning takes a whole loop of its own (wait_for_phase).
+plan_seconds=2700
 # One path for every run on the devbox, whatever its environment names as its state directory.
 lock=$HOME/.local/state/legion/e2e/stage4b.lock
 record=$work/sandboxes
@@ -1779,7 +1783,7 @@ pass
 begin tree-separation
 wait_for_worker "$tree1" planner
 send_agent "$tree1" planner "Stage 4b proof planning operation: write the required plan handoff for the one-file smoke change, then call the legion tool's handoff_complete with a concise summary. Do not start another role."
-wait_for_phase "$tree1" implementing 900
+wait_for_phase "$tree1" implementing "$plan_seconds"
 wait_for_worker "$tree1" implementer
 # Tree 2's planner holds for the driver, which has sent it nothing yet, and the checkpoints below
 # read its live pod. A planner that took the daemon's task line as its go-ahead has planned and been
@@ -1825,7 +1829,7 @@ argv=$(op get pod "$pod" -o json | jq -c '[.spec.containers[] | select(.name == 
 note "tree 2 pod $pod: fixture markers [${markers:-none}]; agent argv $argv"
 if grep -q -- '--no-extensions' <<<"$argv"; then note "the pod's agent runs with --no-extensions"; else note "the pod's agent runs without --no-extensions"; fi
 send_agent "$tree2" planner "Stage 4b proof planning operation: write the required plan handoff for the one-file smoke change, then call the legion tool's handoff_complete with a concise summary."
-wait_for_phase "$tree2" implementing 900
+wait_for_phase "$tree2" implementing "$plan_seconds"
 pass
 
 begin issue-cap-moves
@@ -2359,7 +2363,7 @@ wait_for_worker "$tree3" planner
 # ready or in a turn with its task outstanding. Every such death is charged; the check below accepts
 # either budget.
 send_agent "$tree3" planner "Stage 4b proof planning operation: write the required plan handoff for the one-file smoke change, then call the legion tool's handoff_complete with a concise summary. Do not start another role."
-wait_for_phase "$tree3" implementing 900
+wait_for_phase "$tree3" implementing "$plan_seconds"
 wait_for_worker "$tree3" implementer
 killed=" "
 kills=0
@@ -2568,7 +2572,7 @@ interrupted_needle="Your previous turn on this task was interrupted when your pr
 planner_resent() { claim_session_text "$tree4" planner | grep -qF "$interrupted_needle"; }
 until_true 600 "$tree4's planner to be sent its task again, told its turn was interrupted" planner_resent
 send_agent "$tree4" planner "Stage 4b proof planning operation: write the required plan handoff for the one-file smoke change, then call the legion tool's handoff_complete with a concise summary. Do not start another role."
-wait_for_phase "$tree4" implementing 900
+wait_for_phase "$tree4" implementing "$plan_seconds"
 note "$tree4's planner was sent its task again after the kill, told the turn was interrupted, and finished planning"
 # (b) Kills after each ready, the task outstanding, until the claim fails.
 wait_for_worker "$tree4" implementer
