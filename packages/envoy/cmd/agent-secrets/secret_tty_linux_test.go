@@ -69,6 +69,13 @@ type promptRead struct {
 // seconds.
 func typeAtPrompt(t *testing.T, typed string) (*os.File, int, promptRead) {
 	t.Helper()
+	return typeAtPromptInWrites(t, 0, typed)
+}
+
+// typeAtPromptInWrites is typeAtPrompt with what the person types or pastes reaching the terminal
+// in several writes, gap apart, as a paste over a slow link does.
+func typeAtPromptInWrites(t *testing.T, gap time.Duration, writes ...string) (*os.File, int, promptRead) {
+	t.Helper()
 	controller, terminal := openPTY(t)
 	answer := make(chan promptRead, 1)
 	go func() {
@@ -80,14 +87,19 @@ func typeAtPrompt(t *testing.T, typed string) (*os.File, int, promptRead) {
 			t.Fatal("the reader never turned echo off")
 		}
 	}
-	if _, err := controller.Write([]byte(typed)); err != nil {
-		t.Fatal(err)
+	for i, w := range writes {
+		if i > 0 {
+			time.Sleep(gap)
+		}
+		if _, err := controller.Write([]byte(w)); err != nil {
+			t.Fatal(err)
+		}
 	}
 	select {
 	case got := <-answer:
 		return controller, terminal, got
 	case <-time.After(2 * time.Second):
-		t.Fatalf("the reader did not return within 2s of %q being typed", typed)
+		t.Fatalf("the reader did not return within 2s of %q being typed", writes)
 		return nil, 0, promptRead{}
 	}
 }
@@ -129,15 +141,21 @@ func shown(t *testing.T, controller *os.File) []byte {
 	}
 }
 
-// TestPromptReadsOneTypedLineWithEchoOff: Enter ends the value, which is never echoed, and the
-// terminal is left as it was, echo on.
+// TestPromptReadsOneTypedLineWithEchoOff: Enter ends the value, which is never echoed; the reader
+// asks the terminal to bracket pastes while it reads and to stop once it is done, and leaves it as
+// it was, echo on.
 func TestPromptReadsOneTypedLineWithEchoOff(t *testing.T) {
 	controller, terminal, got := typeAtPrompt(t, "typed value\r")
 	if got.err != nil || string(got.line) != "typed value" {
 		t.Fatalf("readHidden = %q, %v; want %q", got.line, got.err, "typed value")
 	}
-	if echoed := shown(t, controller); bytes.Contains(echoed, []byte("typed")) {
+	echoed := shown(t, controller)
+	if bytes.Contains(echoed, []byte("typed")) {
 		t.Fatalf("the terminal showed %q: the value was echoed", echoed)
+	}
+	on, off := bytes.Index(echoed, []byte("\x1b[?2004h")), bytes.LastIndex(echoed, []byte("\x1b[?2004l"))
+	if on < 0 || off < on {
+		t.Fatalf("the terminal was sent %q, want bracketed paste turned on and then off", echoed)
 	}
 	if flags := lflag(t, terminal); flags&unix.ECHO == 0 || flags&unix.ICANON == 0 {
 		t.Fatalf("lflag after the read = %#x, want echo and canonical mode back on", flags)
@@ -176,6 +194,42 @@ func TestPromptRefusesAPasteOfMoreThanOneLineAndLeavesNothingForTheShell(t *test
 		}
 		if echoed := shown(t, controller); bytes.Contains(echoed, []byte("line")) {
 			t.Fatalf("paste %q: the terminal showed %q", paste, echoed)
+		}
+	}
+}
+
+// TestPromptReadsABracketedPasteThroughItsEnd: a bracketed paste of more than one line is read
+// through its closing mark however long a gap splits it, as one lost packet over ssh can, so it is
+// refused whole and nothing of it is left for the shell or echoed.
+func TestPromptReadsABracketedPasteThroughItsEnd(t *testing.T) {
+	controller, terminal, got := typeAtPromptInWrites(t, 300*time.Millisecond, "\x1b[200~line1\n", "line2\x1b[201~")
+	if !errors.Is(got.err, errMoreThanOneLine) {
+		t.Fatalf("readHidden = %q, %v; want errMoreThanOneLine", got.line, got.err)
+	}
+	if n := unread(t, terminal); n != 0 {
+		t.Fatalf("the terminal holds %d bytes unread for the shell, want none", n)
+	}
+	if echoed := shown(t, controller); bytes.Contains(echoed, []byte("line")) {
+		t.Fatalf("the terminal showed %q", echoed)
+	}
+}
+
+// TestPromptAcceptsABracketedPasteOfOneLine: a bracketed paste of one line is the value, never its
+// marks: ending in a line ending, which is dropped, or followed by Enter, with its marks whole or
+// split across reads.
+func TestPromptAcceptsABracketedPasteOfOneLine(t *testing.T) {
+	for _, writes := range [][]string{
+		{"\x1b[200~value\n\x1b[201~"},
+		{"\x1b[200~value\r\n\x1b[201~"},
+		{"\x1b[200~value\x1b[201~", "\r"},
+		{"\x1b[20", "0~value\n\x1b[2", "01~"},
+	} {
+		_, terminal, got := typeAtPromptInWrites(t, 50*time.Millisecond, writes...)
+		if got.err != nil || string(got.line) != "value" {
+			t.Fatalf("%q: readHidden = %q, %v; want %q", writes, got.line, got.err, "value")
+		}
+		if n := unread(t, terminal); n != 0 {
+			t.Fatalf("%q: the terminal holds %d bytes unread, want none", writes, n)
 		}
 	}
 }

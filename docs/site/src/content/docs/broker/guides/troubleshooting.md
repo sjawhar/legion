@@ -42,7 +42,7 @@ generated from the code, lists every code.
 
 These are the messages of `agent-secrets secret`
 ([manage a secret](/legion/broker/guides/manage-a-secret/)). A usage error exits 2 and writes
-nothing, Ctrl-C at the value prompt exits 130 and a termination signal there 143, both writing
+nothing, Ctrl-C or a termination signal at the value prompt ends the CLI by that signal and writes
 nothing, and every other failure exits 1.
 
 | Message | Cause | Fix |
@@ -54,7 +54,7 @@ nothing, and every other failure exits 1.
 | `… is not a person's Identity Center sign-in: a secret is written under your own sign-in …` | A write ran under a machine's role, an assumed service role or an IAM user. | Sign in as yourself through IAM Identity Center in the broker's account. |
 | `"…": not an agent secret name: …` (exit 2) | The name is not uppercase letters, digits and single underscores starting with a letter. | Write the name as an agent asks for it: `DEMO_DEPLOY_TOKEN`, not `demo-deploy-token`. |
 | `the value is read from standard input, which was empty` or `no value was entered at the prompt` (exit 2) | `create` or `set` got an empty value: empty standard input, or Enter or Ctrl-D alone at the prompt. Nothing was written. | Pipe the value in, or type it at the prompt. |
-| `a value of more than one line must be piped in: …` (exit 2) | A value of more than one line, such as a pasted key, was entered at the prompt, which reads one line. Nothing was written, and the CLI discarded the rest of the paste, so none of it reached your shell. | Run the command the message names, with the value in a file: `agent-secrets secret set NAME < key.pem`. |
+| `a value of more than one line must be piped in: …` (exit 2) | A value of more than one line, such as a pasted key, was entered at the prompt, which reads one line. Nothing was written, and the CLI discarded the rest of the paste, so none of it reached your shell. On a terminal without bracketed paste, a paste delivered slowly can be split before the CLI sees its later lines, which then reach your shell. | Run the command the message names, with the value in a file: `agent-secrets secret set NAME < key.pem`. Pipe a value of more than one line in rather than pasting it. |
 | `… CreateSecret, … ResourceExistsException: …`, or `InvalidRequestException` from a create | A secret of that name exists, perhaps scheduled for deletion. | `secret set` gives an existing secret a new value; `secret restore` brings back a deleted one. |
 | `InvalidRequestException` from `set` or `retag` | The secret is scheduled for deletion, which Secrets Manager refuses to change. | `secret restore` it first. |
 | `… AccessDeniedException: User: … is not authorized to perform: secretsmanager:…` | IAM refuses that call to your sign-in. Two causes: the secret is another person's, and your access does not cover it; or your access does not include the permission the message names, which can happen on your own secret too. `delete` or `restore` refused on your own secret means your access is not granted `secretsmanager:DeleteSecret` or `secretsmanager:RestoreSecret`. [Operating the broker](/legion/broker/operate/#people-who-manage-secrets) lists each form's permissions. | For another person's secret, ask its owner. For your own, ask whoever administers IAM in the broker's account to grant the permission the message names. |

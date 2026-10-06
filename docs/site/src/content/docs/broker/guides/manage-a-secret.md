@@ -64,8 +64,12 @@ scheduled for deletion: [restore](#delete-and-restore) that one instead.
 
 The prompt takes one line. A value of more than one line pasted there, such as a key, is refused
 (exit 2): nothing is written, and the CLI discards the rest of the paste, so none of it reaches
-your shell. The refusal names the command that pipes the value in; put the value in a file and run
-that:
+your shell. That holds whole on a terminal that marks pastes (bracketed paste, which most terminal
+emulators and tmux support): the CLI reads such a paste through its end however slowly it
+arrives. On a terminal without it, the CLI waits for 200 ms of quiet after the line, so a paste
+delivered slowly over a bad link can be split, and its later lines reach your shell; pipe a
+value of more than one line in rather than pasting it. The refusal names the command that pipes
+the value in; put the value in a file and run that:
 
 ```console
 $ agent-secrets secret set DEMO_DEPLOY_TOKEN
@@ -76,8 +80,9 @@ set a new value of DEMO_DEPLOY_TOKEN
 broker: serving DEMO_DEPLOY_TOKEN
 ```
 
-Ctrl-C at the prompt exits 130, and a termination signal (`SIGTERM`) exits 143. Either way the CLI
-puts your terminal back as it was, echo on, and writes nothing.
+Ctrl-C or a termination signal (`SIGTERM`) at the prompt puts your terminal back as it was, echo
+on, writes nothing, and ends the CLI by that signal, so a script or a `;` list running it stops
+there too.
 
 ## Which sign-in may do what
 
