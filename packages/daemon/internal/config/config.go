@@ -39,6 +39,19 @@ type Runtime struct {
 	Kubernetes *Kubernetes
 }
 
+// ControllerLaunch is who launches the project's controller (`controller`).
+type ControllerLaunch string
+
+const (
+	// ControllerLaunchOperator is the default: the operator runs `legion controller start` on a
+	// machine of theirs, and the daemon launches no controller.
+	ControllerLaunchOperator ControllerLaunch = "operator"
+	// ControllerLaunchDaemon is the daemon launching the controller itself, as an Agent Sandbox pod
+	// it supervises like a root architect, minting its credential at every launch; the operator's
+	// controller secret route then refuses, since one controller per project runs.
+	ControllerLaunchDaemon ControllerLaunch = "daemon"
+)
+
 // Config is the daemon's settled configuration: the file, the environment, and the defaults
 // resolved into the values the daemon runs on.
 type Config struct {
@@ -127,6 +140,9 @@ type Config struct {
 	// (`controller_wake_interval_seconds`, an hour by default); when a tick wakes the controller is
 	// admission's rule (admit.Admission.wakeController and its callers).
 	ControllerWakeInterval time.Duration
+	// ControllerLaunch is who launches the project's controller (`controller`): the operator unless
+	// the file says the daemon does, which only `runtime: kubernetes` with Dispatch allows.
+	ControllerLaunch ControllerLaunch
 }
 
 const (
@@ -230,6 +246,7 @@ type fileConfig struct {
 	Linger                 *time.Duration
 	ReviewRoundCap         *int
 	MaxFixAttempts         *int
+	Controller             *string
 	Durations              map[string]int
 	Counts                 map[string]int
 }
@@ -357,6 +374,8 @@ func readKeys(root *yaml.Node) (fileConfig, error) {
 			file.ReviewRoundCap, err = readPositiveInteger(value, key, 0)
 		case "max_fix_attempts":
 			file.MaxFixAttempts, err = readPositiveInteger(value, key, 0)
+		case "controller":
+			file.Controller, err = readString(value, key)
 		default:
 			if isDurationKey(key) || isCountKey(key) {
 				err = readPositive(value, key, file)
@@ -808,12 +827,35 @@ func resolve(file fileConfig, env func(string) string, configDir string) (Config
 	if err := resolveStage3(file, configDir, &cfg); err != nil {
 		return Config{}, err
 	}
+	if err := resolveControllerLaunch(file, &cfg); err != nil {
+		return Config{}, err
+	}
 	if cfg.Runtime.Name == "kubernetes" {
 		if err := checkPodReachable(cfg); err != nil {
 			return Config{}, err
 		}
 	}
 	return cfg, nil
+}
+
+// resolveControllerLaunch settles `controller`: the operator's launch unless the file names the
+// daemon's, which needs a cluster to run the pod in (and kubernetes already requires Dispatch).
+func resolveControllerLaunch(file fileConfig, cfg *Config) error {
+	cfg.ControllerLaunch = ControllerLaunchOperator
+	if file.Controller == nil {
+		return nil
+	}
+	switch launch := ControllerLaunch(*file.Controller); launch {
+	case ControllerLaunchOperator:
+	case ControllerLaunchDaemon:
+		if cfg.Runtime.Name != "kubernetes" {
+			return fmt.Errorf("controller: daemon needs runtime: kubernetes, where the daemon launches the controller as an Agent Sandbox pod; under %s the operator runs legion controller start", cfg.Runtime.Name)
+		}
+		cfg.ControllerLaunch = launch
+	default:
+		return fmt.Errorf("controller must be 'operator' or 'daemon' (got %q)", *file.Controller)
+	}
+	return nil
 }
 
 // resolveStage2 settles the keys Stage 2 models. Each is read from the file alone: the shipped

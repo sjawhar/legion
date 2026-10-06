@@ -54,34 +54,12 @@ func ValidateSpawnSpec(spec SpawnSpec, runtimeOwned map[string]bool) error {
 	refuse := func(format string, args ...any) error {
 		return fmt.Errorf("spawn %s: "+format, append([]any{spec.Claim}, args...)...)
 	}
-	for _, field := range []struct{ name, value string }{
-		{"project", spec.Project}, {"tree", spec.Tree}, {"issue", spec.Issue},
-		{"role", string(spec.Role)}, {"boot token", spec.BootToken},
-	} {
-		if field.value == "" {
-			return refuse("no %s", field.name)
+	if spec.Role == claim.RoleController {
+		if err := validateControllerShape(spec, refuse); err != nil {
+			return err
 		}
-	}
-	// Each runtime builds the workspace's path from the issue, so the issue is the one shape a
-	// Dispatch key has, never a path.
-	for _, key := range []struct{ name, value string }{{"tree", spec.Tree}, {"issue", spec.Issue}} {
-		if !claim.IsIssueKey(key.value) {
-			return refuse("%s %q is not an issue key", key.name, key.value)
-		}
-	}
-	if !claim.IsRole(spec.Role) {
-		return refuse("%q is not a role", spec.Role)
-	}
-	// The token is what every runtime names the claim's workspace, Secret and pod after, and it is
-	// derived from the project, issue and role rather than carried beside them. A spec whose token
-	// is another claim's would run this claim's work under that claim's name, on its workspace and
-	// beside its credentials.
-	token, err := claim.NewToken(spec.Project, spec.Issue, spec.Role)
-	if err != nil {
-		return refuse("%w", err)
-	}
-	if token != spec.Claim {
-		return refuse("the claim token of %s/%s/%s is %s", spec.Project, spec.Issue, spec.Role, token)
+	} else if err := validateClaimShape(spec, refuse); err != nil {
+		return err
 	}
 	if len(spec.Prompt.RolePromptPaths) == 0 {
 		return refuse("no role prompt")
@@ -113,6 +91,65 @@ func ValidateSpawnSpec(spec SpawnSpec, runtimeOwned map[string]bool) error {
 		case spec.Env[pointer] != "":
 			return refuse("secret %s's pointer %s is also set in Env", name, pointer)
 		}
+	}
+	return nil
+}
+
+// validateClaimShape is a workflow claim's launch: on an issue of a tree, with a role, under the
+// token those derive.
+func validateClaimShape(spec SpawnSpec, refuse func(string, ...any) error) error {
+	for _, field := range []struct{ name, value string }{
+		{"project", spec.Project}, {"tree", spec.Tree}, {"issue", spec.Issue},
+		{"role", string(spec.Role)}, {"boot token", spec.BootToken},
+	} {
+		if field.value == "" {
+			return refuse("no %s", field.name)
+		}
+	}
+	// Each runtime builds the workspace's path from the issue, so the issue is the one shape a
+	// Dispatch key has, never a path.
+	for _, key := range []struct{ name, value string }{{"tree", spec.Tree}, {"issue", spec.Issue}} {
+		if !claim.IsIssueKey(key.value) {
+			return refuse("%s %q is not an issue key", key.name, key.value)
+		}
+	}
+	if !claim.IsRole(spec.Role) {
+		return refuse("%q is not a role", spec.Role)
+	}
+	// The token is what every runtime names the claim's workspace, Secret and pod after, and it is
+	// derived from the project, issue and role rather than carried beside them. A spec whose token
+	// is another claim's would run this claim's work under that claim's name, on its workspace and
+	// beside its credentials.
+	token, err := claim.NewToken(spec.Project, spec.Issue, spec.Role)
+	if err != nil {
+		return refuse("%w", err)
+	}
+	if token != spec.Claim {
+		return refuse("the claim token of %s/%s/%s is %s", spec.Project, spec.Issue, spec.Role, token)
+	}
+	return nil
+}
+
+// validateControllerShape is the project controller's launch (`controller: daemon`): no issue, no
+// tree, no repository and no workspace — the controller works Dispatch, never a checkout — under
+// the project's controller token, which every runtime names its Secret and pod after.
+func validateControllerShape(spec SpawnSpec, refuse func(string, ...any) error) error {
+	for _, field := range []struct{ name, value string }{{"project", spec.Project}, {"boot token", spec.BootToken}} {
+		if field.value == "" {
+			return refuse("no %s", field.name)
+		}
+	}
+	if !claim.IsController(spec.Role, spec.Issue, spec.Tree) {
+		return refuse("the controller's claim is on no issue and no tree (issue %q, tree %q)", spec.Issue, spec.Tree)
+	}
+	if token := claim.ControllerToken(spec.Project); token != spec.Claim {
+		return refuse("the controller's claim token of project %s is %s", spec.Project, token)
+	}
+	if !spec.Repository.IsZero() {
+		return refuse("the controller works no repository (got %s)", spec.Repository)
+	}
+	if spec.WorkspaceRecoveredFrom != "" {
+		return refuse("the controller has no workspace to recover (got %s)", spec.WorkspaceRecoveredFrom)
 	}
 	return nil
 }
