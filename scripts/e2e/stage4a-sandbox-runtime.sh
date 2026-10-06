@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # Stage 4a's gate for the Go coordinator: the Agent Sandbox runtime (packages/daemon/internal/
-# runtime/sandbox) proven on the production cluster, in namespace `legion`, from the devbox. A Go
-# harness (sandbox/live_test.go, build tag e2e) drives the runtime through the Legion daemon's own
-# restricted identity and hosts the worker stream on the devbox's private address; the pods it
-# launches run the worker image under test and dial it. Operator steps (exec, PVC reads, a Secret's
-# hash, the namespace list) use the admin context. Each check prints what it observed, naming the
-# identity, then `CHECK <name>: PASS`; the first that fails ends the run non-zero, naming it.
+# runtime/sandbox) proven on a real cluster, in namespace `legion`, from a host the cluster's pods
+# can reach: the devbox beside the production cluster, or a pod in the cluster itself (run through
+# lib/proof-pod.sh run, scripts/e2e/README.md "From a pod"). A Go harness (sandbox/live_test.go,
+# build tag e2e) drives the runtime through the Legion daemon's own restricted identity and hosts
+# the worker stream on LEGION_E2E_STREAM_HOST; the pods it launches run the worker image under test
+# and dial it. Operator steps (exec, PVC reads, a Secret's hash, the namespace list) use the
+# operator context. Each check prints what it observed, naming the identity, then
+# `CHECK <name>: PASS`; the first that fails ends the run non-zero, naming it.
 #
 # Every pod carries the operator route's pod (deploy/kubernetes/operator-route/pod.yml): its
 # model route, overlay, ServiceAccount and projected token. Legion holds none of it. The run
@@ -20,15 +22,23 @@
 # compares the namespace with the snapshot taken before the run, restricted to objects of this run
 # or of no project, so another tree's objects cannot fail it. Nothing outside `legion` is touched.
 #
-# Inputs: LEGION_E2E_RUNTIME_CONTEXT (required) and LEGION_E2E_RUNTIME_KUBECONFIG (default
-# ~/.kube/legion-daemon-production) name the restricted identity; LEGION_E2E_OPERATOR_CONTEXT
-# (default production) the admin one; LEGION_E2E_IMAGE (required) the worker image by digest;
-# LEGION_E2E_MODEL_GATEWAY_URL (required) the model gateway's Anthropic endpoint, which the run
-# substitutes for the operator route's models.yml placeholder; LEGION_E2E_MODEL_GATEWAY_AUDIENCE
-# (required) the audience that gateway accepts on a worker's projected token, which the run
-# substitutes for the operator route's pod.yml placeholder;
-# STAGE4A_FROM a development entry point, which is never the proof; STAGE4A_EVIDENCE_DIR where the
-# transcript and the runtime's log go (default a fresh /tmp directory, kept and printed).
+# Inputs, each required (none defaults to a deployment): LEGION_E2E_RUNTIME_KUBECONFIG and
+# LEGION_E2E_RUNTIME_CONTEXT name the restricted identity; LEGION_E2E_OPERATOR_CONTEXT the
+# operator's, in the kubeconfig kubectl reads (KUBECONFIG or ~/.kube/config); LEGION_E2E_IMAGE the
+# worker image by digest; LEGION_E2E_MODEL_GATEWAY_URL the model gateway's Anthropic endpoint, which
+# the run substitutes for the operator route's models.yml placeholder;
+# LEGION_E2E_MODEL_GATEWAY_AUDIENCE the audience that gateway accepts on a worker's projected token,
+# which the run substitutes for the operator route's pod.yml placeholder; LEGION_E2E_STREAM_HOST the
+# address the harness binds the worker stream on and every pod dials (the devbox's private address,
+# or the proof pod's own, from the downward API); LEGION_E2E_REPO the repository each claim's
+# workspace clones; LEGION_E2E_IMPLEMENT_APP_ID and LEGION_E2E_IMPLEMENT_APP_KEY_FILE the implement
+# App the harness mints that repository's provisioning token from, its key a PEM file only its
+# owner can read.
+# Optional: LEGION_E2E_RUNTIME_SERVICE_ACCOUNT (<namespace>/<name>, which lib/proof-pod.sh run sets)
+# makes the identity check require that ServiceAccount; unset, it requires the assumed IAM role in
+# group legion-daemon the devbox's restricted context authenticates as. STAGE4A_FROM a development
+# entry point, which is never the proof; STAGE4A_EVIDENCE_DIR where the transcript and the
+# runtime's log go (default a fresh /tmp directory, kept and printed).
 #
 # The secrets-* checks are optional and print CHECK <name>: SKIPPED-BLOCKED when
 # unconfigured: LEGION_E2E_AGENT_SECRETS_URL, LEGION_E2E_AGENT_SECRETS_OPERATOR (the email of the
@@ -44,12 +54,14 @@ namespace=legion
 # The rigs' worker-stream port, beside the production daemon's 13370/13371. Stage 4b binds the same
 # pair, and each stage refuses to start while the other holds it.
 port=13373
-repo=sjawhar/legion-smoke
-app_id=3202636
-app_key=LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64
-operator=${LEGION_E2E_OPERATOR_CONTEXT:-production}
-runtime_kubeconfig=${LEGION_E2E_RUNTIME_KUBECONFIG:-$HOME/.kube/legion-daemon-production}
+repo=${LEGION_E2E_REPO:-}
+app_id=${LEGION_E2E_IMPLEMENT_APP_ID:-}
+app_key_file=${LEGION_E2E_IMPLEMENT_APP_KEY_FILE:-}
+stream_host=${LEGION_E2E_STREAM_HOST:-}
+operator=${LEGION_E2E_OPERATOR_CONTEXT:-}
+runtime_kubeconfig=${LEGION_E2E_RUNTIME_KUBECONFIG:-}
 runtime_context=${LEGION_E2E_RUNTIME_CONTEXT:-}
+runtime_service_account=${LEGION_E2E_RUNTIME_SERVICE_ACCOUNT:-}
 image=${LEGION_E2E_IMAGE:-}
 agent_secrets_url=${LEGION_E2E_AGENT_SECRETS_URL:-}
 agent_secrets_operator=${LEGION_E2E_AGENT_SECRETS_OPERATOR:-}
@@ -97,7 +109,8 @@ cleanup() {
   trap '' HUP INT TERM PIPE
   exec >&7 2>&7
   set +e
-  teardown
+  # Nothing exists to tear down before the snapshot, and the operator context may not be known yet.
+  [ -z "$snapshotted" ] || teardown
   if [ -z "$compared" ] && [ -n "$snapshotted" ]; then (namespace_clean) || status=1; fi
   rm -rf "$work"
   [ -n "$ok" ] || echo "stage 4a e2e: FAIL (check $check)"
@@ -110,27 +123,43 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 begin prerequisites
-for tool in go kubectl aws curl ss secrets diff; do command -v "$tool" >/dev/null || fail "$tool is required"; done
+for tool in go kubectl ss diff stat timeout; do command -v "$tool" >/dev/null || fail "$tool is required"; done
 [ -n "$runtime_context" ] || fail "LEGION_E2E_RUNTIME_CONTEXT is unset: the runtime must run as the Legion daemon's restricted identity, never the operator's"
+[ -n "$runtime_kubeconfig" ] || fail "LEGION_E2E_RUNTIME_KUBECONFIG is unset: it names the kubeconfig file holding $runtime_context"
 [ -r "$runtime_kubeconfig" ] || fail "the runtime kubeconfig $runtime_kubeconfig is not readable"
+[ -n "$operator" ] || fail "LEGION_E2E_OPERATOR_CONTEXT is unset: it names the operator's context, which runs the operator steps"
 case "$image" in *@sha256:*) ;; *) fail "LEGION_E2E_IMAGE must be the worker image pinned by digest (…@sha256:…), not '$image'" ;; esac
 gateway=$(bash "$root/scripts/e2e/lib/model-gateway-url.sh") ||
   fail "LEGION_E2E_MODEL_GATEWAY_URL is not a model gateway URL the operator route's models.yml can name (the reason is above)"
 gateway_audience=$(bash "$root/scripts/e2e/lib/model-gateway-audience.sh") ||
   fail "LEGION_E2E_MODEL_GATEWAY_AUDIENCE is not a token audience the operator route's pod.yml can carry (the reason is above)"
-imds=$(curl -sf -m 5 -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 60') ||
-  fail "instance metadata is unreachable; the harness binds the devbox's private address, read from it"
-host=$(curl -sf -m 5 -H "X-aws-ec2-metadata-token: $imds" http://169.254.169.254/latest/meta-data/local-ipv4) ||
-  fail "instance metadata has no local-ipv4"
-unset imds
+# The pods dial the stream's address, so it is one they can reach: never loopback or unspecified.
+case "$stream_host" in
+  "") fail "LEGION_E2E_STREAM_HOST is unset: it is the address the harness binds the worker stream on and every pod dials" ;;
+  0.0.0.0 | 127.* | localhost | *[!A-Za-z0-9.-]*) fail "LEGION_E2E_STREAM_HOST=$stream_host is not an address the cluster's pods can dial" ;;
+esac
+[[ $repo =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || fail "LEGION_E2E_REPO='$repo' is not <owner>/<name>: it names the repository each claim's workspace clones"
+[[ $app_id =~ ^[0-9]+$ ]] || fail "LEGION_E2E_IMPLEMENT_APP_ID='$app_id' is not a GitHub App id"
+[ -n "$app_key_file" ] || fail "LEGION_E2E_IMPLEMENT_APP_KEY_FILE is unset: it names the implement App's private key, a PEM file"
+[ -f "$app_key_file" ] && [ -r "$app_key_file" ] || fail "LEGION_E2E_IMPLEMENT_APP_KEY_FILE names $app_key_file, which is not a readable file"
+# The mode is the file the harness reads, so a symlink is followed: a link's own mode is always 777.
+app_key_mode=$(stat -L -c %a -- "$app_key_file")
+case $app_key_mode in
+  *00) ;;
+  *) fail "LEGION_E2E_IMPLEMENT_APP_KEY_FILE names $app_key_file, whose group or others have access (mode $app_key_mode): make it 0600" ;;
+esac
+if [ -n "$runtime_service_account" ] && ! [[ $runtime_service_account =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?/[a-z0-9]([-.a-z0-9]*[a-z0-9])?$ ]]; then
+  fail "LEGION_E2E_RUNTIME_SERVICE_ACCOUNT=$runtime_service_account is not <namespace>/<name>"
+fi
 if [ -n "$(ss -Hltn "sport = :$port")" ]; then
-  fail "port $port is taken on the devbox: $(ss -Hltnp "sport = :$port")"
+  fail "port $port is taken on this host: $(ss -Hltnp "sport = :$port")"
 fi
 op get namespace "$namespace" -o name >/dev/null || fail "the operator context $operator cannot read namespace $namespace"
 note "run project $project (every object's legion.dev/project label)"
 note "image $image"
-note "worker stream tcp://$host:$port (the devbox's private address)"
-note "runtime identity: context $runtime_context in $runtime_kubeconfig; operator: context $operator"
+note "worker stream tcp://$stream_host:$port"
+note "runtime identity: context $runtime_context in $runtime_kubeconfig${runtime_service_account:+, ServiceAccount $runtime_service_account}; operator: context $operator"
+note "repository $repo, provisioned with the implement App $app_id's token"
 built=$(bash "$root/scripts/e2e/lib/built-from.sh" "$root") || fail "lib/built-from.sh could not read the source revision"
 while IFS= read -r line; do note "$line"; done <<<"$built"
 [ -z "$from" ] || note "STAGE4A_FROM=$from: a development run, never the proof"
@@ -179,15 +208,16 @@ harness_ok=
 if env \
   LEGION_E2E_RUNTIME_KUBECONFIG="$runtime_kubeconfig" \
   LEGION_E2E_RUNTIME_CONTEXT="$runtime_context" \
+  LEGION_E2E_RUNTIME_SERVICE_ACCOUNT="$runtime_service_account" \
   LEGION_E2E_OPERATOR_CONTEXT="$operator" \
   LEGION_E2E_NAMESPACE="$namespace" \
   LEGION_E2E_PROJECT="$project" \
   LEGION_E2E_IMAGE="$image" \
   LEGION_E2E_REPO="$repo" \
-  LEGION_E2E_STREAM_HOST="$host" \
+  LEGION_E2E_STREAM_HOST="$stream_host" \
   LEGION_E2E_STREAM_PORT="$port" \
   LEGION_E2E_IMPLEMENT_APP_ID="$app_id" \
-  LEGION_E2E_IMPLEMENT_APP_KEY="$app_key" \
+  LEGION_E2E_IMPLEMENT_APP_KEY_FILE="$app_key_file" \
   LEGION_E2E_RECORD="$record" \
   LEGION_E2E_WORK="$evidence" \
   LEGION_E2E_FROM="$from" \
