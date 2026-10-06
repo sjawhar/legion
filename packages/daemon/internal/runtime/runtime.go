@@ -90,13 +90,13 @@ type Runtime interface {
 	ProvisionBound() time.Duration
 }
 
-// PreHelloDeadline is the registration deadline's base Boot×RegistrationIntervals bound plus a
-// provisioning bound (ProvisionBound), the total a claim still StateLaunching is tolerated for
-// before its agent has even started: both the supervisor (armRegistration) and a runtime's own
-// wait for a sibling's init to finish (the Sandbox runtime's treeWaitBound) call this, so neither
-// can compute the deadline differently from the other.
-func PreHelloDeadline(boot time.Duration, intervals int, provision time.Duration) time.Duration {
-	return boot*time.Duration(intervals) + provision
+// RegistrationDeadline is the registration deadline's base Boot×RegistrationIntervals bound plus
+// grace: the supervisor's armRegistration calls it with ProvisionBound before a claim's hello and
+// with zero after, and a runtime's own wait for a sibling's init to finish (the Sandbox runtime's
+// treeWaitBound) calls it with ProvisionBound too, so none of them can compute the deadline
+// differently from the others.
+func RegistrationDeadline(boot time.Duration, intervals int, grace time.Duration) time.Duration {
+	return boot*time.Duration(intervals) + grace
 }
 
 // Known is one claim as a runtime is told of it — each entry of the orphan sweep's known set, and

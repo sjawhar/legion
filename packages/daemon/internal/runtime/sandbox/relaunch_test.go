@@ -309,10 +309,10 @@ func TestProvisionBoundIsFetchTimeoutPlusTheLockWaitBudgetExactly(t *testing.T) 
 
 // treeWaitBound's own exact value, pinned to a literal: base (2s×3=6s) + ProvisionBound (30m8s,
 // TestProvisionBoundIsFetchTimeoutPlusTheLockWaitBudgetExactly) + one more boot interval (2s) =
-// 30m16s. runtime.PreHelloDeadline is the one place armRegistration (machine.go) and
+// 30m16s. runtime.RegistrationDeadline is the one place armRegistration (machine.go) and
 // treeWaitBound compute the sibling's own pre-hello deadline, so nothing here needs to compare
 // the two independently.
-func TestTheTreeWaitBoundIsTheSiblingsPreHelloDeadlinePlusOneIntervalExactly(t *testing.T) {
+func TestTheTreeWaitBoundIsTheRegistrationDeadlinePlusOneIntervalExactly(t *testing.T) {
 	g := newRig(t, nil)
 	if want := 30*time.Minute + 16*time.Second; g.r.treeWaitBound() != want {
 		t.Fatalf("treeWaitBound = %s, want %s", g.r.treeWaitBound(), want)

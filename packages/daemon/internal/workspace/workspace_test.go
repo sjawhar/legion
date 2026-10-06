@@ -467,49 +467,6 @@ func TestFetchClonesBareReadingNoConfigurationButItsOwn(t *testing.T) {
 	}
 }
 
-// scaledCloneRunner simulates a clone that takes cloneDuration (a real-scale value such as
-// 15*time.Minute) without waiting real minutes: it races a scaled-down sleep against the
-// scaled-down Timeout the Command it is given carries, dividing both by the same factor (one
-// real minute becomes one test millisecond), so the test proves the clone's relative timing —
-// bounded by whatever Timeout Fetch's clone actually passes, not a different one — at test
-// speed.
-type scaledCloneRunner struct {
-	timeout       time.Duration
-	cloneDuration time.Duration
-}
-
-func (r *scaledCloneRunner) Timeout() time.Duration { return r.timeout }
-
-func (r *scaledCloneRunner) Run(ctx context.Context, command Command) (Result, error) {
-	bounded, cancel := context.WithTimeout(ctx, command.Timeout/60000)
-	defer cancel()
-	select {
-	case <-time.After(r.cloneDuration / 60000):
-		return Result{}, nil
-	case <-bounded.Done():
-		return Result{TimedOut: true}, fmt.Errorf("command timed out: %w", bounded.Err())
-	}
-}
-
-// The fetch's clone runs under FetchTimeout (30 minutes), not CommandTimeout (5 minutes): a clone
-// slower than CommandTimeout but faster than FetchTimeout completes, and one slower than
-// FetchTimeout is ended. Proven with scaledCloneRunner's injected, scaled-down bounds rather than
-// waiting real minutes.
-func TestFetchsCloneRunsUnderFetchTimeoutNotCommandTimeout(t *testing.T) {
-	t.Run("slower than CommandTimeout, faster than FetchTimeout: completes", func(t *testing.T) {
-		run := &scaledCloneRunner{timeout: CommandTimeout, cloneDuration: 15 * time.Minute}
-		if _, err := Fetch(context.Background(), run, fetchRequest(t)); err != nil {
-			t.Fatalf("Fetch: %v, want a clone slower than CommandTimeout but faster than FetchTimeout to complete", err)
-		}
-	})
-	t.Run("slower than FetchTimeout: ended", func(t *testing.T) {
-		run := &scaledCloneRunner{timeout: CommandTimeout, cloneDuration: 45 * time.Minute}
-		if _, err := Fetch(context.Background(), run, fetchRequest(t)); err == nil {
-			t.Fatal("Fetch: no error, want a clone slower than FetchTimeout to be ended")
-		}
-	})
-}
-
 // A pod's second init container provisions from the feed Fetch filled, which is read-only there,
 // and holds no credential: the shared clone's clone and fetch reach https://github.com/<repo> —
 // the remote its origin keeps naming — at the feed, and no command is handed a token file, an

@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
@@ -18,8 +19,9 @@ import (
 )
 
 // CommandTimeout is the slow-command budget both runtimes' provisioning gives every command it
-// runs — a clone, a fetch, a jj operation, or a git configuration edit — each bounded
-// independently.
+// runs — the shared clone's own clone, a fetch, a jj operation, or a git configuration edit —
+// each bounded independently. The fetch's one clone is the exception, under FetchTimeout instead
+// (below).
 const CommandTimeout = 5 * time.Minute
 
 // FetchTimeout is the outer bound for the fetch's clone: long enough for a large repository's
@@ -147,6 +149,15 @@ func (r execRunner) Run(ctx context.Context, command Command) (Result, error) {
 		return Result{}, err
 	}
 	child.Env = env
+	// A command that reaches a remote over https can have git spawn git-remote-https, a helper
+	// holding the same stdout/stderr pipes: exec.CommandContext alone only kills the direct child
+	// when bounded expires, and that helper, now reparented, can keep the pipe open forever,
+	// leaving Wait (and so Run) never returning. Setpgid plus a Cancel that signals the whole
+	// process group kills the helper too; WaitDelay is the backstop that force-closes the pipes if
+	// something still holds them open after that.
+	child.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	child.Cancel = func() error { return syscall.Kill(-child.Process.Pid, syscall.SIGKILL) }
+	child.WaitDelay = 5 * time.Second
 	var stdout, stderr bytes.Buffer
 	child.Stdout = &stdout
 	child.Stderr = &stderr
@@ -156,8 +167,13 @@ func (r execRunner) Run(ctx context.Context, command Command) (Result, error) {
 		return result, nil
 	}
 	var exited *exec.ExitError
-	if errors.As(err, &exited) {
+	switch {
+	case errors.As(err, &exited):
 		result.ExitCode = exited.ExitCode()
+		result.TimedOut = errors.Is(bounded.Err(), context.DeadlineExceeded)
+		return result, nil
+	case errors.Is(err, exec.ErrWaitDelay):
+		result.ExitCode = -1
 		result.TimedOut = errors.Is(bounded.Err(), context.DeadlineExceeded)
 		return result, nil
 	}
@@ -231,7 +247,9 @@ func runCommand(ctx context.Context, run Runner, argv []string, env []string, di
 }
 
 // runCommandTimeout is runCommand, but for timeout instead of the runner's own slow-command
-// budget (see FetchTimeout for why the fetch's clone, this package's one caller, needs one).
+// budget: runCommand itself calls it with run.Timeout(); runCheckedTimeout calls it with an
+// explicit value instead, for the fetch's clone, that path's one caller (see FetchTimeout for why
+// it needs one).
 func runCommandTimeout(ctx context.Context, run Runner, argv []string, env []string, dir string, timeout time.Duration) (Result, error) {
 	if run == nil {
 		return Result{}, errors.New("workspace runner is required")

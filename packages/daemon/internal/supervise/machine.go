@@ -842,7 +842,7 @@ func (m *Machine) armRegistration() {
 	if m.claim.State == StateLaunching {
 		grace = m.deps.Runtime.ProvisionBound()
 	}
-	m.arm(TimerRegistration, runtime.PreHelloDeadline(m.deps.Timeouts.Boot, m.deps.Timeouts.RegistrationIntervals, grace), "")
+	m.arm(TimerRegistration, runtime.RegistrationDeadline(m.deps.Timeouts.Boot, m.deps.Timeouts.RegistrationIntervals, grace), "")
 }
 
 // arm schedules one timer of a kind, replacing any of that kind already armed. Its event carries

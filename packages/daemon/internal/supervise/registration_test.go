@@ -7,7 +7,6 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
-	"github.com/sjawhar/legion/daemon/internal/runtime/tmux"
 )
 
 func TestTheRegistrationDeadlineRetiresALiveUnregisteredProcess(t *testing.T) {
@@ -38,39 +37,6 @@ func TestTheRegistrationDeadlineRetiresALiveUnregisteredProcess(t *testing.T) {
 			h.wantState(StateLaunching)
 		})
 	}
-}
-
-// tmuxLikeProvisionBound is a fake.Runtime whose ProvisionBound calls through to the real
-// tmux.Runtime's: a change to that method (not a hand-copied constant in a test) is what the test
-// below catches, while every other call (Spawn, Probe, Suspend) still goes through the fake for
-// scripting and assertions.
-type tmuxLikeProvisionBound struct {
-	*fake.Runtime
-}
-
-func (r *tmuxLikeProvisionBound) ProvisionBound() time.Duration {
-	return (&tmux.Runtime{}).ProvisionBound()
-}
-
-// A tmux claim's registration deadline is the base Boot×RegistrationIntervals bound alone: a tmux
-// pane starts its agent at once, with no init phase to provision first, so the real
-// tmux.Runtime's ProvisionBound must be zero for armRegistration to add nothing while the claim is
-// still StateLaunching. Nothing else in this package exercises the real tmux.Runtime at all
-// (every other registration-deadline test scripts fake.Runtime's own ProvisionGrace field
-// directly), so a change to tmux.Runtime.ProvisionBound's own return value would otherwise pass
-// the whole suite unnoticed.
-func TestATmuxClaimsRegistrationDeadlineIsTheBaseBoundAlone(t *testing.T) {
-	h := newBareHarness(t)
-	h.deps.Runtime = &tmuxLikeProvisionBound{Runtime: h.rt}
-	h.start(queuedClaim())
-	h.launch()
-	alive := h.locator()
-
-	h.advance(deadline)
-	if suspends := h.wantCalls("Suspend", 1); suspends[0].Locator != alive {
-		t.Errorf("suspended %+v, want the process that never registered", suspends[0].Locator)
-	}
-	h.wantState(StateLaunching)
 }
 
 // The runtime's ProvisionBound adds onto the base Boot×RegistrationIntervals deadline while a

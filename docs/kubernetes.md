@@ -1163,7 +1163,7 @@ The daemon probes a pod by reading it and consulting the worker stream's live re
   `LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS` is sized by (`sandbox.Runtime.ProvisionBound`; 8 min at
   the defaults, so 38 min total) until the shim's first hello, which can only arrive once both
   init containers have finished: from there the daemon re-arms the base deadline alone, the same
-  one a tmux pane always ran under, since the bound has already done its job. A pod that never
+  one a tmux pane runs under throughout. A pod that never
   says hello is retired at launch plus the base deadline plus the full bound, armed as one (44 min
   at the defaults); one that says hello and never registers is retired at hello plus the base
   deadline alone (6 min from the hello). A tmux pane carries no bound to begin with, since it
@@ -1173,23 +1173,22 @@ The daemon probes a pod by reading it and consulting the worker stream's live re
   (`awaitTreeInitialized`, bounded by `treeWaitBound`) is the sibling's own full pre-hello deadline
   — base plus `ProvisionBound`, the same sum the registration deadline above arms while a claim is
   still launching — plus one more boot interval of headroom (46 min at the defaults): the same
-  relationship `LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS` always had to the registration deadline
-  alone (`ceil(boot) × (intervals + 1)` against `boot × intervals`), restored here against the now
-  wider bound. A launch waiting on a sibling therefore never gives up before the daemon's own
-  deadline for that sibling would, up to the sibling's own hello (this wait does not separately
-  track a sibling whose own deadline has since re-armed past hello; it does not need to, since a
-  sibling still counted as initializing here has by definition not reached its hello yet). Two
+  relationship `ceil(boot) × (intervals + 1)` holds against `boot × intervals` alone for the lock
+  wait. A launch waiting on a sibling therefore never gives up before the daemon's own deadline
+  for that sibling would, up to the sibling's own hello: a sibling this wait still counts as
+  initializing has not reached its hello yet, so its own deadline has not re-armed past hello
+  either. Two
   mechanisms together keep two pods from actually provisioning the shared clone at once: `lockTree`
   holds the tree's launch turn only until the new pod is in the store, well before that pod's own
   init finishes, so by itself it would let a third pod start initializing while a second one still
   is; `awaitTreeInitialized` is what closes that gap, since no new pod is ever created while an
   existing tree pod is still initializing. The lock wait itself
   (`LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS`, the `flock --timeout` `workspace-init` passes when
-  contending for another pod's hold on the shared clone) stays sized by the same
+  contending for another pod's hold on the shared clone) is sized by the
   `ceil(boot) × (intervals + 1)` lock-wait budget alone (`sandbox.Runtime`'s own
-  `initWaitSeconds`), with no added `FetchTimeout`: given the two mechanisms above, it almost
-  never actually contends, and is a safety net for whatever can still race around them, not a
-  budget matched against another pod's own remaining registration deadline (a manual `legion
+  `initWaitSeconds`), with no added `FetchTimeout`: it is a safety net for whatever can race around
+  the two mechanisms above, not a budget matched against another pod's own remaining registration
+  deadline, so it almost never actually contends (a manual `legion
   workspace-init` without the variable waits 900 s);
 - `Pending` with the init container **terminated non-zero** → **dead (gone)**, its log tail quoted
   (`restartPolicy: Never` turns the pod `Failed` moments later);
