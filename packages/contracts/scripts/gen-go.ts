@@ -10,6 +10,7 @@ import {
   MAX_BROADCAST_RECIPIENTS,
   MAX_ISSUE_PAGE_LIMIT,
   RECEIPT_TIMEOUT_CAUSE,
+  SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE,
 } from "../src/dispatch-api";
 import { SEARCH_KIND_DEPTH, SEARCH_QUERY_HINT, SEARCH_QUERY_MAX } from "../src/dispatch-tools";
 import { MINTED_DEDUPE_KEY_PATTERN } from "../src/envelope";
@@ -117,6 +118,12 @@ const SearchQueryHint = ${JSON.stringify(SEARCH_QUERY_HINT)}
 // returns them. Generated from SEARCH_KIND_DEPTH in packages/contracts so the server's cut and the
 // dispatch_search tool's account of it cannot drift apart.
 const SearchKindDepth = ${SEARCH_KIND_DEPTH}
+
+// SearchDegradedEmbedderUnavailable is GET /api/v1/search's SearchResponse.degraded value when
+// meaning search could not run for this request and search fell back to keyword-only ranking.
+// Generated from SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE in packages/contracts so the string
+// Dispatch writes and the string search-answer.ts compares against cannot drift apart.
+const SearchDegradedEmbedderUnavailable = ${JSON.stringify(SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE)}
 
 // MaxIssuePageLimit is the most issues one page of GET /api/v1/issues holds, and
 // DefaultIssuePageLimit the page size when a caller pages with offset alone. Generated from
