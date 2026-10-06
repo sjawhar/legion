@@ -470,12 +470,20 @@ with its `server`, and a terminal close (a fatal server `-ERR`) at error, once, 
 connection closed` with its `error`. Reconnects never run out: the connection never drops a
 server from its pool for having failed too many times, so an outage mid-run shows as `NATS
 connection lost` and then, once NATS answers again, `NATS connection restored` — never a close —
-at nats.go's own default 2 s reconnect wait. Only an unrecognized server `-ERR`, or the same
-authorization error twice in a row, still closes the connection (nats.go's own terminal-close
-rules); a permission the server refuses (`NATS refused the daemon a permission`, above) leaves it
-open. At boot an unreachable NATS or Dispatch delays the boot instead of exiting, retried one
-second doubling to one minute, forever, logged at warn as `boot probe failed transiently;
-waiting to run it again` with its `probe` (naming which), `attempt`, `retryIn` and `detail`.
+at nats.go's own default 2 s reconnect wait. A server that keeps refusing to reconnect for any
+reason short of the two shapes that do close it — an unrecognized server `-ERR`, or the same
+authorization error twice in a row (nats.go's own terminal-close rules) — never closes the
+connection and so never logs either of those two lines again: a repeating handshake failure, or
+a repeating permission refusal (`NATS refused the daemon a permission`, above), both retry
+silently behind the one `NATS connection lost` line. A separate warn, `NATS has not
+reconnected`, covers that gap: logged at most once every 3 minutes while the connection stays
+down, naming the downtime so far and the connection's own last-seen error — usually empty during
+a plain refused dial, since nats.go clears it on every failed attempt, and naming the failure's
+own cause while a handshake keeps failing, since nats.go leaves that one in place until the
+connection succeeds. At boot an unreachable NATS or Dispatch delays the boot instead of exiting,
+retried one second doubling to one minute, forever, logged at warn as `boot probe failed
+transiently; waiting to run it again` with its `probe` (naming which), `attempt`, `retryIn` and
+`detail`.
 
 A malformed seed refuses the boot immediately at startup, before any network connection is
 attempted. A NATS authorization violation at connect time is the same: the server said no
@@ -483,16 +491,18 @@ synchronously, and the boot refuses it at once. An EOF during the NATS handshake
 once — the connection simply closed, and nats.go returns that synchronously too — though no crash
 in the audited journal took this shape, so refusing rather than waiting here is a judgment call.
 
-A NATS permission violation (a refused JetStream grant) is reported asynchronously: nats.go sets
-it on the connection's own `LastError` before the blocked call's own bound ever runs out, and
-`workflow.connect` folds that `LastError` into the error it returns
-(`natsauth.WithLastError`), so `natsauth.Unreachable` recognizes it by name
-(`errors.Is(err, nats.ErrPermissionViolation)`) and refuses it at once, rather than treating it as
-an anonymous timeout. A clustered JetStream that is itself unavailable — every server reachable,
-none of them answering the API request — surfaces the same way a merely slow one would: a bare
-request timeout, nothing in its own text to say why. `Unreachable` does not recognize that shape
-by name, so it refuses that too, once the same 30-second bound runs out — the same default that
-refuses anything it cannot name, not because the two could not in principle be told apart.
+A NATS permission violation on a JetStream call (a refused consumer or stream grant) is reported
+asynchronously: the server tells the connection of it well before the blocked call's own attempt
+bound runs out, but the blocked call itself does not return early on that report — it waits out
+its own bound exactly as a call that will never get an answer does. Only once that bound runs
+out, at 30 seconds, does the boot learn of the violation at all, by folding the connection's own
+last-reported error into the one the blocked call returns, so it recognizes the refusal by name
+and refuses outright. A clustered JetStream that is itself unavailable — every server reachable,
+none of them answering the API request — surfaces the exact same way at the exact same
+30-second bound: a bare request timeout, nothing in its own text to say why, nothing to fold in.
+The boot cannot tell that shape from a permission violation whose report never arrived — the two
+take the same 30 seconds either way, so timing offers no way to distinguish them — and refuses
+both rather than waiting on either.
 
 A Postgres failure while reconciling admission is not covered by either wait: an error Postgres
 itself returns exits as soon as it comes back, and only Postgres accepting a connection and then
