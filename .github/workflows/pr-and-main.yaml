@@ -123,6 +123,11 @@ jobs:
               ../../scripts/go-third-party-notices.sh "$notices/agent-secrets-$arch" \
               ./cmd/agent-secrets ./cmd/agent-secrets-helper)
           done
+          for target in $(jq -r '.["agent-secrets-client"][]' .github/go-release-targets.json); do
+            (cd packages/envoy && CGO_ENABLED=0 GOOS="${target%/*}" GOARCH="${target#*/}" \
+              ../../scripts/go-third-party-notices.sh "$notices/agent-secrets-${target%/*}-${target#*/}" \
+              ./cmd/agent-secrets)
+          done
           wc -l "$notices"/*
 
 
