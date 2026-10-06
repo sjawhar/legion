@@ -52,6 +52,13 @@ func TestTheMappingRowByRowInPrecedence(t *testing.T) {
 		}
 		return []k8sruntime.Object{sandboxObject(t, name, sandboxUID, mode, labels, conditions...), pod}
 	}
+	dialing := func(addr string) func(*corev1.Pod) {
+		return func(p *corev1.Pod) {
+			p.Spec.Containers = []corev1.Container{{Name: mainContainer, Command: []string{
+				"legion", "worker-shim", "--connect", addr, "--boot-token-file", "/boot/token",
+			}}}
+		}
+	}
 	running := corev1.PodStatus{Phase: corev1.PodRunning}
 	failed := func(statuses ...corev1.ContainerStatus) corev1.PodStatus {
 		status := corev1.PodStatus{Phase: corev1.PodFailed}
@@ -183,23 +190,15 @@ func TestTheMappingRowByRowInPrecedence(t *testing.T) {
 			want: runtime.Alive,
 		},
 		{
-			row: "8 the current --connect address is alive",
-			objects: withPod(modeRunning, nil, recorded, sandboxUID, running, func(p *corev1.Pod) {
-				p.Spec.Containers = []corev1.Container{{Name: mainContainer, Command: []string{
-					"legion", "worker-shim", "--connect", "tcp://192.0.2.250:13371", "--boot-token-file", "/boot/token",
-				}}}
-			}),
-			want: runtime.Alive,
+			row:     "8 the current --connect address is alive",
+			objects: withPod(modeRunning, nil, recorded, sandboxUID, running, dialing(testOptions().StreamURL)),
+			want:    runtime.Alive,
 		},
 		{
-			row: "9 a stale --connect address",
-			objects: withPod(modeRunning, nil, recorded, sandboxUID, running, func(p *corev1.Pod) {
-				p.Spec.Containers = []corev1.Container{{Name: mainContainer, Command: []string{
-					"legion", "worker-shim", "--connect", "tcp://192.0.2.9:13371", "--boot-token-file", "/boot/token",
-				}}}
-			}),
-			want:   runtime.Stale,
-			detail: []string{"dials tcp://192.0.2.9:13371", "current tcp://192.0.2.250:13371"},
+			row:     "9 a stale --connect address",
+			objects: withPod(modeRunning, nil, recorded, sandboxUID, running, dialing(movedStreamURL)),
+			want:    runtime.StaleAddress,
+			detail:  []string{"dials " + movedStreamURL, "current " + testOptions().StreamURL},
 		},
 		{
 			row:     "a phase the mapping has no row for is uncertain",

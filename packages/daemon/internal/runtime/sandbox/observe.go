@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"time"
 
@@ -74,7 +75,7 @@ func (r *Runtime) Probe(ctx context.Context, loc runtime.Locator) (runtime.Obser
 //  8. P Pending (any sub-state) or Running, and its shim dials this runtime's
 //     own current stream address                      → Alive
 //  9. P Pending or Running, and its shim dials a different address — this
-//     runtime's own stream address moved since the pod was launched → Stale
+//     runtime's own stream address moved since the pod was launched → StaleAddress
 //
 // Terminal state is read from the pod, whose phase and container states belong to its one uid; a
 // Sandbox condition is quoted only when written for the Sandbox's current generation, so one left
@@ -122,7 +123,7 @@ func (r *Runtime) evaluate(ctx context.Context, loc runtime.Locator) runtime.Obs
 	switch pod.Status.Phase {
 	case corev1.PodPending, corev1.PodRunning, "":
 		if dialed, ok := connectAddress(pod); ok && dialed != r.streamURL {
-			return observe(runtime.Stale, "pod %s (uid %s) dials %s, not this runtime's current %s", name, pod.UID, dialed, r.streamURL)
+			return observe(runtime.StaleAddress, "pod %s (uid %s) dials %s, not this runtime's current %s", name, pod.UID, dialed, r.streamURL)
 		}
 		return observe(runtime.Alive, "pod %s (uid %s) %s", name, pod.UID, phaseOf(pod))
 	}
@@ -138,10 +139,8 @@ func connectAddress(pod *corev1.Pod) (string, bool) {
 		if c.Name != mainContainer {
 			continue
 		}
-		for i, arg := range c.Command {
-			if arg == "--connect" && i+1 < len(c.Command) {
-				return c.Command[i+1], true
-			}
+		if i := slices.Index(c.Command, "--connect"); i >= 0 && i+1 < len(c.Command) {
+			return c.Command[i+1], true
 		}
 	}
 	return "", false

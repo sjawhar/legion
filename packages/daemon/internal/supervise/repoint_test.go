@@ -1,6 +1,6 @@
 package supervise
 
-// A process the runtime reports Stale — alive, but at an address that no longer reaches this
+// A process the runtime reports StaleAddress — alive, but at an address that no longer reaches this
 // daemon (LEGION-592: the daemon's own worker-stream address moved, as it does when its pod is
 // replaced in the cluster) — is not a death: these tests pin that the claim relaunches its
 // recorded session at once, exactly as a suspend-then-resume does, charges nothing, and can never
@@ -19,7 +19,7 @@ func TestAStaleAddressRelaunchesTheSameSessionChargingNothing(t *testing.T) {
 	h := newHarness(t)
 	h.reach(StateReady)
 
-	h.observe(runtime.Stale)
+	h.observe(runtime.StaleAddress)
 
 	h.wantState(StateLaunching)
 	h.wantBudgets(Budgets{})
@@ -42,7 +42,7 @@ func TestAStaleAddressWhileLaunchingRelaunchesAgainChargingNothing(t *testing.T)
 	h.must(RequestResume{Claim: testToken})
 	h.wantState(StateLaunching)
 
-	h.observe(runtime.Stale)
+	h.observe(runtime.StaleAddress)
 
 	h.wantState(StateLaunching)
 	h.wantBudgets(Budgets{})
@@ -53,10 +53,10 @@ func TestAStaleAddressWhileLaunchingRelaunchesAgainChargingNothing(t *testing.T)
 	h.wantState(StateReady)
 }
 
-// A process found stale mid-turn cannot finish that turn — it cannot report back to this daemon
-// at all — so the task goes back to waiting first, exactly as a death in a turn does (interrupted,
-// chargeDeath included): but unlike a death, the deaths budget stays at zero. A turn in flight is
-// lost; the agent resumes from its last saved turn once the relaunch registers.
+// A process found at a stale address mid-turn cannot finish that turn — it cannot report back to
+// this daemon at all — so the task goes back to waiting first (interrupted), but unlike a death
+// nothing is charged. A turn in flight is lost; the agent resumes from its last saved turn once
+// the relaunch registers.
 func TestAStaleAddressMidTurnInterruptsTheTaskChargingNothing(t *testing.T) {
 	h := newHarness(t)
 	h.reach(StateReady)
@@ -64,7 +64,7 @@ func TestAStaleAddressMidTurnInterruptsTheTaskChargingNothing(t *testing.T) {
 	h.must(StreamTurnStart{Claim: testToken})
 	sent := h.wantPrompts(1)[0].DeliveryID
 
-	h.observe(runtime.Stale)
+	h.observe(runtime.StaleAddress)
 
 	h.wantState(StateLaunching)
 	h.wantBudgets(Budgets{})
@@ -98,7 +98,7 @@ func TestAStaleAddressDropsAHeldSuspensionAndRelaunches(t *testing.T) {
 		t.Fatalf("claim %+v after a mid-turn suspend, want a held suspension", claim)
 	}
 
-	h.observe(runtime.Stale)
+	h.observe(runtime.StaleAddress)
 
 	h.wantState(StateLaunching)
 	h.wantBudgets(Budgets{})

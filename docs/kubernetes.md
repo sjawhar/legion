@@ -607,7 +607,7 @@ the pod is still the claim's; it does not, by itself, notice that the pod cannot
 any more.
 
 So every re-adoption also checks the pod's own `--connect` against the address this runtime now
-hands every new pod. A pod that dials anywhere else is reported `stale` rather than `alive`
+hands every new pod. A pod that dials anywhere else is reported `stale_address` rather than `alive`
 (`ObservationKind`, `internal/runtime/runtime.go`), and the supervisor replaces it at once: the
 same session relaunched — `Resume`, never a fresh `Spawn` — onto a pod whose shim dials the
 corrected address, exactly the mechanism an ordinary suspend-then-resume already uses. This runs

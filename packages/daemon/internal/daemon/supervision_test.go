@@ -1013,7 +1013,7 @@ func TestRunRelaunchesAStaleAddressChargingNothing(t *testing.T) {
 	readyClaim(t, d, rt, token)
 	loc := d.claim(token).Locator
 
-	rt.Emit(runtime.Observation{Locator: *loc, Kind: runtime.Stale, Detail: "pod dials a stale address"})
+	rt.Emit(runtime.Observation{Locator: *loc, Kind: runtime.StaleAddress, Detail: "pod dials a stale address"})
 
 	testwait.Eventually(t, "the relaunch", func() bool {
 		c := d.claim(token)

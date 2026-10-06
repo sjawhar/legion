@@ -680,9 +680,7 @@ func (m *Machine) start(ctx context.Context, token string) (runtime.Locator, err
 // is spent. A resume that found the tree volume lost is the exception (relaunchFresh). A task whose
 // turn the process was running goes back to waiting first (interrupted), for the relaunch to send,
 // and a death with work outstanding is counted as one (chargeDeath), failing the claim at the limit.
-// A process that dies while a suspension is held leaves the claim suspended instead (endHeld). A
-// process found alive but at a stale address is not a death at all (repoint): nothing is charged,
-// and the claim cannot fail for it.
+// A process that dies while a suspension is held leaves the claim suspended instead (endHeld).
 func (m *Machine) died(ctx context.Context, observation runtime.Observation) error {
 	m.log.Warn("supervise: process died", "incarnation", m.claim.Locator.Incarnation, "observed", string(observation.Kind),
 		"detail", observation.Detail)
@@ -724,7 +722,7 @@ func (m *Machine) loseSession() {
 }
 
 // repoint is the claim's process found alive at an address that no longer reaches this daemon
-// (runtime.Stale): the worker-stream address every pod's shim is handed moved since this one
+// (runtime.StaleAddress): the worker-stream address every pod's shim is handed moved since this
 // launched, which only happens under the Sandbox runtime when the daemon's own pod — and so its
 // advertised address — was replaced. The process cannot dial the daemon from the address it
 // holds and never will while it keeps it, so there is nothing to wait out: the same session is
@@ -827,7 +825,7 @@ func (m *Machine) judge(ctx context.Context, observation runtime.Observation, al
 		return alive(ctx)
 	case runtime.Gone, runtime.NotRecordedProcess:
 		return m.died(ctx, observation)
-	case runtime.Stale:
+	case runtime.StaleAddress:
 		return m.repoint(ctx, observation)
 	case runtime.Uncertain:
 		m.claim.UncertainStreak++
