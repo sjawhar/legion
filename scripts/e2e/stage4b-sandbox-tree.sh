@@ -384,7 +384,13 @@ pod_file() { pod_exec "$1" "$2" test -s "$3"; }
 # "outbox row waits" for every reason a row waits, not only this one (a held notice, a
 # suspension, a pending delivery, a tree's cleanup reservation, a close waiting for its stops); a
 # start Quiesce holds for the outgoing worker's turn is this one row's kind supervise and
-# Quiesce's own error text (ErrQuiesceHeld, supervise/quiesce.go), never a message of its own.
+# Quiesce's own error text (ErrQuiesceHeld, supervise/quiesce.go), never a message of its own. That
+# line is not load-bearing here: RunOnce logs it at INFO only for a row's first attempt or once it
+# has waited waitWarnAttempts (7) times, DEBUG every attempt between, so a row whose first attempt
+# failed for an unrelated reason (the abort RPC itself timed out, say) and reached ErrQuiesceHeld
+# only on a later, still-early attempt never logs it at a level this evidence carries. The row
+# number and the ordering below both come from `takeover_interrupted` instead, Quiesce's own INFO
+# log of the successful abort (quiesce.go), present and at INFO on every occurrence.
 takeover_held_error="the start waits for the outgoing worker's interrupted turn to end"
 takeover_goes_on="outbox start goes on: the claim it takes the phase from is out of its turn"
 takeover_interrupted="supervise: interrupted the agent's turn: a start takes over its issue's phase"
@@ -398,18 +404,17 @@ takeover_lines() {
         ((.msg == $interrupted or .msg == $over) and .claim == $tester)
       ))' "$daemon_log"
 }
-# takeover_ordered FILE TASK_AT: the takeover's lines FILE (takeover_lines) hold the start held and
-# the tester's turn interrupted, both before that turn was over, the start going on only after it,
-# and the implementer's task, which reached its session at TASK_AT, after it too.
+# takeover_ordered FILE TASK_AT: the takeover's lines FILE (takeover_lines) hold the tester's turn
+# interrupted before that turn was over, the start going on only after it, and the implementer's
+# task, which reached its session at TASK_AT, after it too.
 takeover_ordered() {
-  jq -s -e --arg task "$2" --arg err "$takeover_held_error" --arg on "$takeover_goes_on" \
+  jq -s -e --arg task "$2" --arg on "$takeover_goes_on" \
     --arg interrupted "$takeover_interrupted" --arg over "$takeover_over" '
     def secs: (.[0:19] + "Z" | fromdateiso8601) + (.[19:] | rtrimstr("Z") | if . == "" then 0 else "0" + . | tonumber end);
     def at($m): map(select(.msg == $m) | .time | secs) | first;
-    def at_held: map(select(.msg == "outbox row waits" and .kind == "supervise" and (.error // "" | contains($err))) | .time | secs) | first;
-    at_held as $h | at($interrupted) as $i | at($over) as $o | at($on) as $g
-    | $h != null and $i != null and $o != null and $g != null
-      and $h <= $o and $i <= $o and $o <= $g and $o <= ($task | secs)' "$1" >/dev/null
+    at($interrupted) as $i | at($over) as $o | at($on) as $g
+    | $i != null and $o != null and $g != null
+      and $i <= $o and $o <= $g and $o <= ($task | secs)' "$1" >/dev/null
 }
 # claims_cli ARGS... is `legion claims` from the operator shell, over the operator bearer.
 claims_cli() { "$work/legion" claims "$@" --config "$work/legion.yaml" --operator-token-file "$work/operator-token"; }
@@ -2168,8 +2173,11 @@ on_tree "$tree1" wait_for_phase "$tree1" implementing 900
 on_tree "$tree1" until_true 120 "tree 1's interrupted tester to go idle on its session in its first pod" resident_idle "$tree1" tester
 ! pod_runs "$tester_pod" tester "/usr/bin/sleep 1207" || fail "the tester's witness command still runs after its turn was interrupted"
 ! pod_file "$tester_pod" tester "$witness" || fail "the tester's interrupted witness command wrote $witness"
-takeover_row=$(jq -R -c --arg issue "$tree1" --arg err "$takeover_held_error" \
-  'fromjson? | select(.msg == "outbox row waits" and .kind == "supervise" and .issue == $issue and (.error // "" | contains($err)))' "$daemon_log" |
+# The row that held the implementer's start: Quiesce's own INFO log of the successful abort
+# (takeover_interrupted), not the outbox's "outbox row waits" line, which this same event can log
+# only at DEBUG (see takeover_lines's comment, above).
+takeover_row=$(jq -R -c --arg tester "$(claim_token "$tree1" tester)" --arg interrupted "$takeover_interrupted" \
+  'fromjson? | select(.msg == $interrupted and .claim == $tester)' "$daemon_log" |
   jq -s -r 'last | .row // empty')
 [ -n "$takeover_row" ] || fail "the daemon log holds no implementer start of $tree1 held for the tester's turn"
 on_tree "$tree1" until_true 300 "the implementer's CI-red task to reach its session" session_contains "$tree1" implementer "Reason: CI is red at"
