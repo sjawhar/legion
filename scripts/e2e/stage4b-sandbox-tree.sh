@@ -1186,7 +1186,9 @@ cleanup() {
   # so the warning names the line alone.
   trap 'printf "cleanup warning: line %s exited %s\n" "$LINENO" "$?" >&2' ERR
   stop_tree "$shape_pid"
-  [ -z "$tree1" ] || record_pair >/dev/null 2>&1
+  # The review pair exists only once tree-moved has named the reviewer's session; a run cut before
+  # that has nothing to record.
+  [ -z "$pair_session" ] || record_pair >/dev/null 2>&1
   stop_pid "$daemon_pid"
   collect_transcripts
   stop_tree "$watch_pid"
