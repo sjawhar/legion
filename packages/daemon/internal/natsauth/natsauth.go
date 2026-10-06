@@ -248,11 +248,14 @@ func WithLastError(err error, conn *nats.Conn) error {
 // Matched by concrete, named shapes only, never the net.Error interface: two unrelated
 // standard library types satisfy that interface without being network failures at all —
 // context.DeadlineExceeded and *url.Error — so a caller must never classify by the interface
-// alone. A bare context.DeadlineExceeded is refused rather than waited out: nats.go wraps a
-// context's own expiry in exactly this shape whether a request was merely slow to answer or
-// silently refused (a permission violation reports its cause asynchronously and never closes the
-// connection, so the blocked call's own synchronous error never names it) — refusing is the
-// loud, visible choice between two answers this package cannot tell apart synchronously.
+// alone. A permission violation reports its cause asynchronously and never closes the
+// connection, so the blocked call's own synchronous error is a bare context.DeadlineExceeded with
+// no sign of it, until a caller folds the connection's own LastError in first
+// (natsauth.WithLastError) — the errors.Is check above is what then recognizes it by name. A
+// bare context.DeadlineExceeded with nothing joined is refused by the same default a genuinely
+// unanswered call takes (a clustered JetStream that is itself unavailable, say): this package has
+// no way to tell that shape from an unjoined permission violation, so both are refused rather
+// than waited on.
 func Unreachable(err error) bool {
 	if errors.Is(err, nats.ErrPermissionViolation) || errors.Is(err, nats.ErrAuthorization) {
 		return false

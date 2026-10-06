@@ -483,11 +483,16 @@ synchronously, and the boot refuses it at once. An EOF during the NATS handshake
 once — the connection simply closed, and nats.go returns that synchronously too — though no crash
 in the audited journal took this shape, so refusing rather than waiting here is a judgment call.
 
-A NATS permission violation (a refused JetStream grant) gives no synchronous answer: nats.go
-reports it asynchronously, so the blocked call's own error carries nothing but a plain timeout,
-with no sign of the refusal in its own text, and the boot refuses it only once that attempt's own
-30-second bound runs out — the same shape a NATS call that genuinely never answers takes, since
-nothing here can tell the two apart.
+A NATS permission violation (a refused JetStream grant) is reported asynchronously: nats.go sets
+it on the connection's own `LastError` before the blocked call's own bound ever runs out, and
+`workflow.connect` folds that `LastError` into the error it returns
+(`natsauth.WithLastError`), so `natsauth.Unreachable` recognizes it by name
+(`errors.Is(err, nats.ErrPermissionViolation)`) and refuses it at once, rather than treating it as
+an anonymous timeout. A clustered JetStream that is itself unavailable — every server reachable,
+none of them answering the API request — surfaces the same way a merely slow one would: a bare
+request timeout, nothing in its own text to say why. `Unreachable` does not recognize that shape
+by name, so it refuses that too, once the same 30-second bound runs out — the same default that
+refuses anything it cannot name, not because the two could not in principle be told apart.
 
 A Postgres failure while reconciling admission is not covered by either wait: an error Postgres
 itself returns exits as soon as it comes back, and only Postgres accepting a connection and then
@@ -511,6 +516,13 @@ With several `nats_urls`, or a clustered NATS whose advertised addresses this da
 an authorization violation on one server can surface as a dial failure, or the generic "nats: no
 servers available for connection" answer, from a different server nats.go tries next, so the boot
 waits and the logged `detail` may never name the authorization error at all (LEGION-580).
+
+While the readiness gate waits, callers outside the daemon see it as still booting, not as down:
+the API port is already bound by this point (the same as during the image probe, both before this
+gate), so it accepts a connection but serves nothing until the gate passes, and `legion status`
+reports the daemon's PID alive but not yet answering. A pane's own `bash` calls (each one mints
+its own grant first), `legion credential`, `gh`, `handoff complete` and `controller start` all
+wait on that same API, so none of them succeeds until the daemon actually serves.
 
 Rollout order for the server's `legion-daemon` user: the server admits
 `legion-daemon` (its public key applied) with the daemon's grants first; then its seed is stored,
