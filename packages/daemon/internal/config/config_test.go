@@ -1114,6 +1114,29 @@ func TestAdvertiseHostMustBeABareHost(t *testing.T) {
 	}
 }
 
+// advertise_host becomes the host of every pod's `--connect tcp://<host>:<port>`, which the shim
+// reads as a URL (shim.ParseAddress, internal/shim/config.go) and refuses with anything beyond a
+// host and a port. A value with a path, a space, a user, a query, or a fragment has no scheme, port,
+// or brackets, yet builds an address every pod's shim refuses at boot, so the loader refuses it,
+// naming advertise_host, rather than `legion start --check-config` passing a file no pod boots on.
+func TestAdvertiseHostRefusesAHostNoShimCanDial(t *testing.T) {
+	for _, tc := range []struct{ name, yaml string }{
+		{"a path", "legion-daemon.legion.svc/x"},
+		{"a trailing slash", "legion-daemon.legion.svc/"},
+		{"a space", `"legion daemon.legion.svc"`},
+		{"a user", "legion@legion-daemon.legion.svc"},
+		{"a query", `"legion-daemon.legion.svc?x"`},
+		{"a fragment", `"legion-daemon.legion.svc#x"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Load(writeConfigFile(t, minimalFile+"advertise_host: "+tc.yaml+"\n"), noEnv)
+			if err == nil || !strings.HasPrefix(err.Error(), "advertise_host ") {
+				t.Fatalf("Load error = %v, want a refusal naming advertise_host", err)
+			}
+		})
+	}
+}
+
 // A bare host name and a bare IP address, IPv6 included, both pass: the shape check refuses only
 // a scheme, a port, or brackets, never a value that is otherwise a perfectly good host.
 func TestAdvertiseHostAcceptsABareHostOrIPAddress(t *testing.T) {
