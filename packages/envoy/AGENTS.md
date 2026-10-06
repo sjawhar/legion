@@ -1992,13 +1992,15 @@ prompt reaches the shell, and a signal exits 130 or 143), elsewhere all of stdin
 newline, and an empty value is a usage error. `create` writes on the settings' key with both tags
 and no `ClientRequestToken` (the SDK sets one); `retag` describes the secret and sends both tags in
 one `TagResource`, so an IAM condition on the request's tags sees both, and on `AccessDenied` for a
-secret held shared or one asked to be made shared adds that a shared secret's owner and tier are
-an administrator's to change; `delete` schedules a 30-day recovery window, never forced, and prints
-`DeleteSecret`'s own `DeletionDate`. Every write is followed by the broker's reread of that name
-(`rereadAfter`): exit 0 when it serves the secret, or no longer serves it after a delete; 1 when
-its answer contradicts the write (a refusal names its reason); and 1 when the broker cannot be
-asked (an unreachable broker, `429 RATE_LIMITED`), saying the write stands and is served only from
-the next reload. `list` (`ListSecrets` with `IncludePlannedDeletion`) and `show` never print a
+secret held shared, or a retag to `--owner shared`, adds that a shared secret's owner and tier are
+an administrator's to change (a person's own secret may be made shared where their access allows
+the retag; only an existing shared secret's tags are reserved); `delete` schedules a 30-day
+recovery window, never forced, and prints `DeleteSecret`'s own `DeletionDate`. Every write is
+followed by the broker's reread of that name (`rereadAfter`): exit 0 when it serves the secret, or
+no longer serves it after a delete; 1 when its answer contradicts the write (a refusal names its
+reason); and 1 when the broker cannot be asked (an unreachable broker, `429 RATE_LIMITED`), saying
+the write stands and is served only from the next reload. `list` (`ListSecrets` with
+`IncludePlannedDeletion`) and `show` never print a
 value; for a secret scheduled for deletion they print `DeletedDate` and `earliestPurge`, that date
 plus 7 days, Secrets Manager's shortest recovery window, since `DeletedDate` is when the delete ran
 and neither call answers the window it chose: a reader told that date never waits past the purge.

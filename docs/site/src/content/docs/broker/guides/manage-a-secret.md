@@ -53,18 +53,31 @@ broker: serving DEMO_DEPLOY_TOKEN
 - **`--tier agent`** lets the owner's own sessions use it without asking, and **`--tier human`**
   sends every use to a person for approval. Both flags are required.
 - **The value.** At a terminal the CLI prompts for it and reads one line with echo off, so the
-  value never shows on the screen; Enter or Ctrl-D ends it. A value of more than one line, such
-  as a pasted key, is refused there (exit 2) and nothing of it reaches your shell: pipe it in
-  instead. Anywhere else the CLI reads standard input to its end, less one trailing newline, so a
-  pipe or a file works:
-  `agent-secrets secret create DEMO_DEPLOY_TOKEN --owner me --tier agent < key.pem`. An empty
-  value, or Enter alone at the prompt, is refused (exit 2) and writes nothing; Ctrl-C at the prompt
-  exits 130 and writes nothing.
+  value never shows on the screen; Enter or Ctrl-D ends it. Anywhere else it reads standard input
+  to its end, less one trailing newline, so a pipe or a file works too. An empty value (Enter or
+  Ctrl-D alone at the prompt, or empty standard input) is refused (exit 2) and writes nothing.
 
 The CLI checks your sign-in before it asks for the value, so a refused sign-in never has you type a
 secret for nothing. The secret is created on the broker's key with both tags, and the broker serves
 it from the next request. Secrets Manager refuses a name that is already taken, including one
 scheduled for deletion: [restore](#delete-and-restore) that one instead.
+
+The prompt takes one line. A value of more than one line pasted there, such as a key, is refused
+(exit 2): nothing is written, and the CLI discards the rest of the paste, so none of it reaches
+your shell. The refusal names the command that pipes the value in; put the value in a file and run
+that:
+
+```console
+$ agent-secrets secret set DEMO_DEPLOY_TOKEN
+Value for DEMO_DEPLOY_TOKEN:
+agent-secrets secret set: a value of more than one line must be piped in: agent-secrets secret set DEMO_DEPLOY_TOKEN < FILE
+$ agent-secrets secret set DEMO_DEPLOY_TOKEN < key.pem
+set a new value of DEMO_DEPLOY_TOKEN
+broker: serving DEMO_DEPLOY_TOKEN
+```
+
+Ctrl-C at the prompt exits 130, and a termination signal (`SIGTERM`) exits 143. Either way the CLI
+puts your terminal back as it was, echo on, and writes nothing.
 
 ## Which sign-in may do what
 
@@ -114,9 +127,9 @@ name: DEMO_DEPLOY_TOKEN
 secret_name: example/agent-secrets/demo-deploy-token
 owner: ada@example.com
 tier: agent
-created: 2026-10-06T16:13:49Z
-last_changed: 2026-10-06T16:13:49Z
-version: 530245d4-a0c3-42e6-90d7-ad7cccff0c0d AWSCURRENT
+created: 2026-10-06T20:31:08Z
+last_changed: 2026-10-06T20:31:08Z
+version: 8ae2ea20-8e93-4f1a-b3d1-2e5396ecef72 AWSCURRENT
 ```
 
 Neither ever prints a value, and both take `--json`.
@@ -131,9 +144,9 @@ broker: serving DEMO_DEPLOY_TOKEN
 ```
 
 `set` reads the value as `create` does: one line at a prompt with echo off, or all of standard
-input, which is how a value of more than one line goes in. The
-broker never keeps a value; it reads it from Secrets Manager each time a session reads a grant, so
-the next read of a live grant gets the new one.
+input, which is how a value of more than one line goes in. The broker never keeps a value; it
+reads it from Secrets Manager each time a session reads a grant, so the next read of a live grant
+gets the new one.
 
 ## Change its owner or tier
 
@@ -147,9 +160,12 @@ Name `--owner`, `--tier` or both. `retag` reads the tags the secret holds and se
 request, the unchanged one as it is, so an IAM condition on the request's tags (one that lets a
 person tag only their own secret, say) sees both. For a secret missing a tag, name that one too.
 
-A shared secret's owner and tier are an administrator's to change, and so is making a secret
-shared. When AWS refuses such a retag, the CLI prints AWS's refusal, then
-`a shared secret's owner and tier are an administrator's to change`, and exits 1.
+You can retag your own secret, to `--owner shared` too. Once a secret is shared, its owner and
+tier are an administrator's to change: when AWS refuses a retag of a shared secret, the CLI prints
+AWS's refusal, then `a shared secret's owner and tier are an administrator's to change`, and exits
+1. It prints the same line when AWS refuses a retag to `--owner shared`; for your own secret, that
+refusal means your access does not include the retag
+([Troubleshooting](/legion/broker/guides/troubleshooting/#managing-a-secret)).
 
 New tags decide what sessions get from the next request, and reach some grants already given:
 [Approvals](/legion/broker/concepts/#approvals) says which.
@@ -161,7 +177,7 @@ uses a retag to end every session's automatic access to a secret.
 ```console
 $ agent-secrets secret delete DEMO_DEPLOY_TOKEN
 deleted DEMO_DEPLOY_TOKEN
-broker: DEMO_DEPLOY_TOKEN is deleted (restorable until 2026-11-05T16:13:55Z)
+broker: DEMO_DEPLOY_TOKEN is deleted (restorable until 2026-11-05T20:22:33Z)
 ```
 
 `delete` schedules the deletion with a 30-day recovery window, the longest Secrets Manager allows,
@@ -169,7 +185,9 @@ and never forces it. The date it prints is the one Secrets Manager answered for 
 end of that window. The broker stops serving the secret at once, so a grant that held it releases
 nothing (`GRANT_NOT_LIVE`). Until you restore it, Secrets Manager keeps the secret but refuses to
 read its value, to change its value or tags (`set`, `retag`), and to `create` another of the same
-name.
+name. `delete` and `restore` are permissions of their own (`secretsmanager:DeleteSecret`,
+`secretsmanager:RestoreSecret`): where your access does not include one, AWS refuses it with
+`AccessDeniedException`, your own secret included.
 
 `list` and `show` keep showing a deleted secret, with when it was deleted and the **earliest** it
 can be purged:
@@ -177,7 +195,7 @@ can be purged:
 ```console
 $ agent-secrets secret list
 NAME               OWNER            TIER   VALUE  DELETED               EARLIEST_PURGE
-DEMO_DEPLOY_TOKEN  ada@example.com  human  yes    2026-10-06T16:13:55Z  2026-10-13T16:13:55Z
+DEMO_DEPLOY_TOKEN  ada@example.com  human  yes    2026-10-06T20:22:33Z  2026-10-13T20:22:33Z
 DEMO_EMPTY_KEY     ada@example.com  human  yes    -                     -
 DEMO_SHARED_KEY    shared           human  yes    -                     -
 EARLIEST_PURGE is the deletion plus Secrets Manager's 7-day minimum recovery window: restore works at least until then; the window the delete chose may be longer.

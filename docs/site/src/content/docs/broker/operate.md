@@ -99,23 +99,29 @@ Secrets Manager itself under that person's own AWS sign-in, so IAM in the broker
 decides who may change which secret, and with the tags, who gets it. The CLI asks the broker only
 for its settings (`GET /v1/settings`) and, after each write, for a reread. Before anything else it
 refuses a sign-in in another account than the agent-secrets key's, and for a write any sign-in but
-a person's own IAM Identity Center one; those checks are the CLI's, and IAM is the boundary. Each
-form makes these calls, and needs them allowed on the namespace's secrets:
+a person's own IAM Identity Center one; those checks are the CLI's, and IAM is the boundary. A
+person's access needs each form's permissions on the namespace's secrets, and the table says what
+each request carries that a policy's conditions can match:
 
-| Form | Calls |
-| --- | --- |
-| every form | `sts:GetCallerIdentity`, which needs no permission |
-| `list` | `secretsmanager:ListSecrets` (on `*`) |
-| `show` | `secretsmanager:DescribeSecret` |
-| `create` | `secretsmanager:CreateSecret` and `secretsmanager:TagResource` (it sets both tags), and `kms:GenerateDataKey` and `kms:Decrypt` on the agent-secrets key, to encrypt the value with it |
-| `set` | `secretsmanager:PutSecretValue`, and `kms:GenerateDataKey` on the agent-secrets key |
-| `retag` | `secretsmanager:DescribeSecret` and `secretsmanager:TagResource`, the request carrying both tags |
-| `delete` | `secretsmanager:DeleteSecret`, with a 30-day recovery window and never forced |
-| `restore` | `secretsmanager:RestoreSecret` |
+| Form | Permissions | What a condition can match |
+| --- | --- | --- |
+| every form | `sts:GetCallerIdentity`, which needs no permission | |
+| `list` | `secretsmanager:ListSecrets` (on `*`: it takes no resource) | |
+| `show` | `secretsmanager:DescribeSecret` | The secret's own tags (`aws:ResourceTag/owner`, `aws:ResourceTag/tier`) |
+| `create` | `secretsmanager:CreateSecret` and `secretsmanager:TagResource`, since it tags the secret as it creates it; `kms:GenerateDataKey` and `kms:Decrypt` on the agent-secrets key | The new secret's name under the namespace (its ARN, and `secretsmanager:Name`); both request tags, `aws:RequestTag/owner` (the person's email, from `--owner me`, or `shared`) and `aws:RequestTag/tier` (`aws:TagKeys` is the two); the key, named by its ARN (`secretsmanager:KmsKeyArn`) |
+| `set` | `secretsmanager:PutSecretValue`; `kms:GenerateDataKey` on the agent-secrets key | The secret's own tags (`aws:ResourceTag/owner`) |
+| `retag` | `secretsmanager:DescribeSecret` and `secretsmanager:TagResource` | Both request tags in every request, the unchanged one re-sent as the secret holds it, and the secret's own tags, so a policy can let a person tag their own secret (`aws:ResourceTag/owner` their email) to themselves or `shared`, and reserve a shared secret's tags for administrators |
+| `delete` | `secretsmanager:DeleteSecret` | The secret's own tags; `secretsmanager:RecoveryWindowInDays` is 30, and `secretsmanager:ForceDeleteWithoutRecovery` is never set |
+| `restore` | `secretsmanager:RestoreSecret` | The secret's own tags |
 
-No form calls `GetSecretValue` or prints a value. Since `retag` sends both tags in every request,
-an IAM condition on the request's tags (one that lets a person tag only their own secret, and
-leaves a shared secret's owner and tier to administrators) sees both.
+Secrets Manager makes the KMS calls itself, on the person's behalf, so the agent-secrets key's
+policy can allow them only through Secrets Manager (`kms:ViaService` of
+`secretsmanager.<region>.amazonaws.com`, with `kms:CallerAccount`). The person's email in
+`aws:RequestTag/owner` is their Identity Center session name in lowercase, so a condition that
+compares it with a principal tag holding their email matches only where that tag is lowercase too.
+No form calls `GetSecretValue` or prints a value. `delete` and `restore` are permissions of their
+own: an access that grants a person every other form on their own secret but not these refuses
+those two with `AccessDeniedException`.
 
 ## Health and logs
 
