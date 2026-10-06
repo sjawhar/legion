@@ -14,6 +14,7 @@ import (
 	"gopkg.in/yaml.v3"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/util/validation"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -155,8 +156,9 @@ func readAgentSecrets(value *yaml.Node) (*AgentSecretsConfig, error) {
 	return block, nil
 }
 
+// isLoopbackHost is localhost, with or without the root's trailing dot, or a loopback IP address.
 func isLoopbackHost(host string) bool {
-	if strings.EqualFold(host, "localhost") {
+	if strings.EqualFold(strings.TrimSuffix(host, "."), "localhost") {
 		return true
 	}
 	ip := net.ParseIP(host)
@@ -170,24 +172,18 @@ func isUnspecifiedHost(host string) bool {
 	return ip != nil && ip.IsUnspecified()
 }
 
-// readAdvertiseHost is `advertise_host`: a bare host name or IP address. The daemon combines it
-// with the worker stream listener's port itself (shimAddress, internal/daemon/daemon.go), so a
-// value naming a scheme, a port, or brackets would double one of those up or build an address no
-// pod could dial.
+// readAdvertiseHost is `advertise_host`: an IP address or a DNS-1123 name, the host part alone of
+// every pod's `--connect tcp://<host>:<port>`. The daemon adds the worker stream's port itself
+// (shimAddress, internal/daemon/daemon.go), and the shim parses that address as a URL, so anything
+// else (a scheme, a port, brackets, a path, a user, a query, a space or an underscore) would build
+// an address no pod's shim dials.
 func readAdvertiseHost(value *yaml.Node, key string) (*string, error) {
 	read, err := readNonEmptyString(value, key)
 	if err != nil || read == nil {
 		return read, err
 	}
-	host := *read
-	switch {
-	case strings.Contains(host, "://"):
-		return nil, fmt.Errorf("%s must be a host name or IP address, not a URL (%s)", key, host)
-	case strings.ContainsAny(host, "[]"):
-		return nil, fmt.Errorf("%s must be a host name or IP address, with no brackets (%s)", key, host)
-	}
-	if _, _, err := net.SplitHostPort(host); err == nil {
-		return nil, fmt.Errorf("%s must be a host name or IP address, with no port: the daemon combines it with worker_stream_port itself (%s)", key, host)
+	if host := *read; net.ParseIP(host) == nil && len(validation.IsDNS1123Subdomain(strings.ToLower(host))) != 0 {
+		return nil, fmt.Errorf("%s must be an IP address or a DNS name, with no scheme, port, path or brackets: the daemon adds worker_stream_port itself (%s)", key, host)
 	}
 	return read, nil
 }
@@ -896,12 +892,11 @@ func checkPodReachable(cfg Config) error {
 			return fmt.Errorf("%s must be a valid URL", address.key)
 		}
 		host := parsed.Hostname()
-		ip := net.ParseIP(host)
 		var why string
 		switch {
-		case strings.EqualFold(host, "localhost") || ip != nil && ip.IsLoopback():
+		case isLoopbackHost(host):
 			why = "names a loopback host, which in a pod is the pod itself"
-		case ip != nil && ip.IsUnspecified():
+		case isUnspecifiedHost(host):
 			why = "names the unspecified address, which is no host a pod can dial"
 		default:
 			continue

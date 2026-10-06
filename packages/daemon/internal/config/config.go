@@ -45,13 +45,11 @@ type Config struct {
 	Project string
 	Port    int
 	Bind    string
-	// AdvertiseHost is `advertise_host`: the host every pod's shim dials the worker stream at
-	// (`--connect tcp://<host>:<worker_stream_port>`) in Bind's place, so Bind can be the
-	// unspecified address a daemon running as a pod listens on. "" (the default) has pods dial
-	// Bind. A Kubernetes Service's DNS name is the expected value; unused outside kubernetes. A bare
-	// host name or IP address, with no scheme, port, or brackets (readAdvertiseHost); the daemon
-	// combines it with the listener's port (shimAddress, internal/daemon/daemon.go). `daemon_url`
-	// names the pod-facing API address on its own.
+	// AdvertiseHost is `advertise_host`: the host every pod's shim dials the worker stream at in
+	// Bind's place, so Bind can be the unspecified address a daemon running as a pod listens on; ""
+	// (the default) has pods dial Bind. Only runtime: kubernetes accepts it, and readAdvertiseHost
+	// holds it to an IP address or a DNS name. `daemon_url` names the pod-facing API address on its
+	// own.
 	AdvertiseHost string
 	PostgresDSN   string
 	StateDir      string
@@ -793,6 +791,9 @@ func resolve(file fileConfig, env func(string) string, configDir string) (Config
 		return Config{}, errors.New("bind must not be empty")
 	}
 	if file.AdvertiseHost != nil {
+		if file.Kubernetes == nil {
+			return Config{}, errors.New("advertise_host is not used when runtime is tmux: every pane dials the daemon's own unix socket; remove advertise_host")
+		}
 		cfg.AdvertiseHost = *file.AdvertiseHost
 	}
 
