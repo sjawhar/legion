@@ -583,10 +583,22 @@ ports_ours() {
       fail "port $port is held by another process, not the run's daemon (pid $daemon_pid): ${holder:-nothing listens}"
   done
 }
+# record_stream notes, as a daemon is about to start, the worker stream it serves from then on: a
+# line {since, stream} in $evidence/worker-streams.jsonl, from which the pod shape holds each pod to
+# the stream served when the pod was created (shape_problems). A pod's creationTimestamp counts
+# whole seconds, so a stream that moved waits out the second the stopped daemon may have created a
+# pod in before it starts.
+record_stream() {
+  local stream=tcp://$host:$port_worker_stream last=
+  [ ! -s "$evidence/worker-streams.jsonl" ] || last=$(tail -n 1 "$evidence/worker-streams.jsonl" | jq -r .stream)
+  if [ -n "$last" ] && [ "$last" != "$stream" ]; then sleep 1; fi
+  jq -nc --arg since "$(date -u +%FT%TZ)" --arg stream "$stream" '{since: $since, stream: $stream}' >>"$evidence/worker-streams.jsonl"
+}
 start_daemon() {
   # Prerequisites found both ports free, minutes before this boot; a process that took one since
   # would answer /healthz in the run's daemon's place.
   ports_free
+  record_stream
   env -u GH_PUBLIC_REPO_PAT -u LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 -u GH_AGENT_APP_PRIVATE_KEY_B64 \
     -u GH_REVIEW_APP_PRIVATE_KEY_B64 "$work/legion" start --config "$work/legion.yaml" >>"$daemon_log" 2>&1 9>&- 7>&- &
   daemon_pid=$!
@@ -881,13 +893,17 @@ hog_oomkilled() {
 # has, or nothing, with its Secret's values as they are now: gVisor, the operator's ServiceAccount
 # and its one projected token, the run's own copy of the operator's route ConfigMap mounted where
 # the profile reads models.yml, the pool, the restricted security context, the shim dialing the
-# worker stream at advertise_host, no token value in a container's environment, command or args,
-# and 4b.6b's split provisioning (the provisioning token only in workspace-fetch, the feed read-only
-# in workspace-init, no provision directory in the worker).
+# worker stream the daemon served when the pod was created, at advertise_host, no token value in a
+# container's environment, command or args, and 4b.6b's split provisioning (the provisioning token
+# only in workspace-fetch, the feed read-only in workspace-init, no provision directory in the
+# worker).
 # shape_problems prints each way the pod object on stdin departs from that shape, or nothing. It
-# judges the object alone, so a pod the watch recorded is judged after it is gone.
+# judges the object alone, so a pod the watch recorded is judged after it is gone, and it reads the
+# streams the run's daemons served from record_stream's record each time, so the shape watcher,
+# forked before address-moved, holds each pod to the stream of its own creation as the main shell
+# does.
 shape_problems() {
-  jq -r -L "$root/scripts/e2e/lib" --arg route "$route_configmap" --arg audience "$gateway_audience" --arg stream "tcp://$host:$port_worker_stream" '
+  jq -r -L "$root/scripts/e2e/lib" --arg route "$route_configmap" --arg audience "$gateway_audience" --slurpfile streams "$evidence/worker-streams.jsonl" '
     include "stage4b-pods";
     .spec as $s
     | (if $s.runtimeClassName != "gvisor" then "runtimeClassName \($s.runtimeClassName)" else empty end),
@@ -910,10 +926,11 @@ shape_problems() {
              or ($c.securityContext.seccompProfile.type // $s.securityContext.seccompProfile.type) != "RuntimeDefault"
              or ($c.securityContext.capabilities.drop // []) != ["ALL"]
             then "container \($c.name) is not restricted: \({container: $c.securityContext, pod: $s.securityContext} | tostring)" else empty end)),
-      # The worker shim dials advertise_host at the worker stream port, never the unspecified
-      # address the daemon binds.
-      (shim_connect as $connect
-        | if $connect != $stream then "the worker shim dials \($connect // "nothing (no --connect)"), not advertise_host at \($stream)" else empty end),
+      # The worker shim dials the worker stream the daemon served when the pod was created, at
+      # advertise_host, never the unspecified address the daemon binds.
+      (shim_connect as $connect | served_stream($streams) as $stream
+        | if $stream == null then "the worker shim dials \($connect // "nothing (no --connect)"), but no worker stream was served when the pod was created (\(.metadata.creationTimestamp))"
+          elif $connect != $stream then "the worker shim dials \($connect // "nothing (no --connect)"), not advertise_host at \($stream)" else empty end),
       ([$s.initContainers[]? | select(.name != "workspace-fetch") | .volumeMounts[]? | select(.mountPath == "/var/run/legion/provision")] | if length > 0 then "the provision volume is mounted outside workspace-fetch" else empty end),
       ([$s.containers[] | select(.name == "worker") | .volumeMounts[]? | select(.mountPath == "/var/run/legion/provision")] | if length > 0 then "the worker mounts the provision volume" else empty end),
       ([$s.initContainers[]? | select(.name == "workspace-init") | .volumeMounts[]? | select(.name == "feed" and .readOnly != true)] | if length > 0 then "workspace-init mounts the feed writable" else empty end)
@@ -2375,6 +2392,22 @@ for token in $(live_claims | jq -r '.[].token'); do
   [ "$daemon_url" = "$new_daemon_url" ] || fail "$token's pod $pod is told LEGION_DAEMON_URL ${daemon_url:-<unset>}, not $new_daemon_url"
   note "$token: pod $pod dials $connect, told LEGION_DAEMON_URL $daemon_url"
 done
+# The pod shape follows the move (shape_problems): record_stream noted the new stream as the daemon
+# started, the shape watcher, forked on the old port, checks each pod the move launched against it
+# (a departure there would abort this wait), and every pod the watch has seen ready, before the
+# move and after, dials the stream the daemon served when the pod was created.
+jq -e -s --arg old "$old_stream" --arg new "$new_stream" '.[-2].stream == $old and .[-1].stream == $new' "$evidence/worker-streams.jsonl" >/dev/null ||
+  fail "record_stream's last two records are not $old_stream then $new_stream: $(tail -n 2 "$evidence/worker-streams.jsonl" | paste -sd ' ' -)"
+note "worker streams the run's daemons served: $(jq -r -s 'map("\(.stream) from \(.since)") | join(", ")' "$evidence/worker-streams.jsonl")"
+shape_checked() {
+  local uid uids
+  uids=$(live_claims | jq -r '.[].incarnation') || return 1
+  for uid in $uids; do grep -qF " $uid " "$evidence/pods-checked.txt" || return 1; done
+}
+until_true 300 "the shape watcher to check every pod the run's claims run on since the move" shape_checked
+bad=$(pod_shape_verdict "$evidence/pod-watch.json")
+[ -z "$bad" ] || fail "Sandbox pods depart from the pod shape: $(tr '\n' ' ' <<<"$bad")"
+note "the shape watcher checked the $(live_claims | jq length) pods the claims run on now, each dialing $new_stream, and each of the $(jq -r -L "$root/scripts/e2e/lib" 'include "stage4b-pods"; ready_pods | .metadata.uid' "$evidence/pod-watch.json" | sort -u | wc -l) pods seen ready so far dials the stream served when it was created"
 pass
 
 # launch_failure_limit is the daemon's default (3), which the run's legion.yaml leaves unset; it
