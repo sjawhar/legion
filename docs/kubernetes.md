@@ -398,11 +398,10 @@ listener bound only to loopback answers no Service and no pod. `legion start --c
 all of it without starting the daemon, writing a file or running a key command, and then every
 refusal boot makes from the files and the environment before its first write, in boot's words: the
 operator, Envoy and Dispatch bearers' files, the NATS nkey seed, the instructions file, and the
-runtime's own
-reads (the kubeconfig and every value's translation; under tmux, the OMP invocation, through `mise
-where` when it names a `mise` tool, and the host's `gh`, `git` and `jj`). What it does not do is
-what boot writes or runs: the state directory, secretsd's provider keys, the plugin gate and the
-image probe.
+runtime's own reads (the kubeconfig and every value's translation; under tmux, the OMP invocation,
+through `mise where` when it names a `mise` tool, and the host's `gh`, `git` and `jj`). What it
+does not do is what boot writes or runs: the state directory, secretsd's provider keys, the plugin
+gate and the image probe.
 
 The NATS nkey seed is optional, as on tmux: `nats_nkey_seed_file` (relative to `legion.yaml`'s
 directory), else `NATS_NKEY_SEED_FILE`, else `NATS_NKEY_SEED` in the daemon's environment, is the
