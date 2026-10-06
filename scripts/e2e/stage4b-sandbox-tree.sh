@@ -2801,25 +2801,45 @@ until_true 300 "the controller's report message on $report" report_posted
 # tick delivered while a turn still runs is steered into that turn (pi-envoy delivers every Envoy
 # message as a steer), and Oh My Pi keeps an errored or aborted attempt in the transcript and
 # retries in the same turn, so neither a turn's first terminal-looking message nor line order
-# marks idleness. The anchor is the tick itself: some tick delivery before the first report call
-# whose last preceding message entry is an assistant message with stopReason `stop`, a turn that
-# had genuinely finished. A start turn that ends in an unretried error fails the check.
+# marks idleness. The anchor is the tick itself: some tick delivery before the report's call whose
+# last preceding message entry is an assistant message with stopReason `stop`, a turn that had
+# genuinely finished. A start turn that ends in an unretried error fails the check. The report's
+# call is the controller's first call that posts a dispatch_message on the report issue, by any of
+# the three ways Oh My Pi gives the model to call the tool: the dispatch_message tool itself, a
+# write to its xd://dispatch_message device, or eval code that calls tool.dispatch_message(...).
+# Only the assistant's own calls count, so a tool result that quotes the tool's name (a skill
+# file) or a message on another issue is not the report's call.
+# report_after_tick succeeds when the report's call came on such a turn, and otherwise prints why.
 report_after_tick() {
-  local file
+  local file verdicts=
   for file in "$profile_agent/sessions"/*/*.jsonl; do
     [ -f "$file" ] || continue
-    jq -R -s -e --arg tick "summary: tick on $project" '
+    verdicts+=$(jq -R -s -r --arg tick "summary: tick on $project" --arg report "$report" '
+      def names_report: test("(^|[^0-9A-Za-z-])" + $report + "($|[^0-9])");
+      def posts_report:
+        any(.message.content[]? | select(.type? == "toolCall");
+          (.name == "dispatch_message" and .arguments.issue? == $report)
+          or (.name == "write" and ((.arguments.path? // "") | test("^\\s*xd://dispatch_message\\s*$"))
+            and (((.arguments.content? // "") | fromjson? // {}) | .issue?) == $report)
+          or (.name == "eval" and ((.arguments.code? // "") | test("\\btool\\.dispatch_message\\s*\\(") and names_report)));
       [split("\n") | to_entries[] | {i: .key, raw: .value, m: (.value | fromjson? // null)}] as $lines
       | [$lines[] | select(.m.type? == "message" and .m.message.role? != "custom")] as $msgs
-      | ([$lines[] | select(.raw | test("xd://dispatch_message|\"name\":\"dispatch_message\"")) | .i] | first) as $call
-      | $call != null and any($lines[]; .i < $call and (.raw | contains($tick))
+      | ([$msgs[] | select(.m.message.role == "assistant" and (.m | posts_report)) | .i] | first) as $call
+      | if $call == null then empty
+        elif any($lines[]; .i < $call and (.raw | contains($tick))
           and (.i as $t | ([$msgs[] | select(.i < $t)] | last) as $before
             | $before != null and $before.m.message.role == "assistant" and $before.m.message.stopReason == "stop"))
-    ' "$file" >/dev/null && return 0
+        then "tick" else "busy" end
+    ' "$file")
   done
+  case $verdicts in
+  *tick*) return 0 ;;
+  *busy*) echo "the controller's first report message was not posted on a turn a tick started while it was idle" ;;
+  *) echo "no session of the controller holds a call posting a dispatch_message on $report: the dispatch_message tool, a write to xd://dispatch_message, or eval code calling tool.dispatch_message" ;;
+  esac
   return 1
 }
-report_after_tick || fail "the controller's first report message was not posted on a turn a tick started while it was idle"
+why=$(report_after_tick) || fail "$why"
 note "the controller parked $report ('$report_title') in icebox and posted its daily report there on a tick's turn"
 pass
 fi # the daily report
