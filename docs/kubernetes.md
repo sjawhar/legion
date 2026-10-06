@@ -1184,10 +1184,10 @@ The daemon probes a pod by reading it and consulting the worker stream's live re
   lock wait itself (`LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS`, the `flock --timeout`
   `workspace-init` passes when contending for another pod's hold on the shared clone) almost never
   actually contends, so it is sized as a safety net for whatever can still race around them — the
-  `ceil(boot) × (intervals + 1)` lock-wait budget alone (`sandbox.Runtime`'s own
-  `initWaitSeconds`), with no added `FetchTimeout` — rather than as a budget matched against
-  another pod's own remaining registration deadline (a manual `legion workspace-init` without the
-  variable waits 900 s);
+  `ceil(boot) × (intervals + 1)` lock-wait budget alone (`sandbox.Runtime`'s own `initWaitSeconds`),
+  with no added `FetchTimeout` — rather than as a budget matched against another pod's own
+  remaining registration deadline (a manual `legion workspace-init` without the variable waits
+  900 s);
 - `Pending` with the init container **terminated non-zero** → **dead (gone)**, its log tail quoted
   (`restartPolicy: Never` turns the pod `Failed` moments later);
 - `Pending`, unscheduled (`PodScheduled=False`), for longer than `worker_boot_timeout_seconds` →

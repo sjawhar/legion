@@ -11,15 +11,19 @@ import (
 	"time"
 )
 
-// WaitDelay is the one value every Configure caller passes: how long Wait keeps waiting, once the
-// command's own leader process has exited, for whatever still holds its output pipes open to
-// close them on its own, before giving up and forcing the pipes closed itself. After the group
-// kill (Cancel's SIGKILL), that is every process in the group, already dying together, so the
-// wait is brief. After the leader's own clean exit, though, Cancel never ran: a child the leader
-// started earlier is untouched and keeps running on its own schedule, holding the pipe open for
-// as long as it likes. WaitDelay does not stop that lingering process — only Go's own wait for it
-// — so it needs no margin for slow work, only enough to not block on a descendant indefinitely;
-// one second serves a probe and a git clone alike.
+// WaitDelay is the one value Configure sets: how long Wait keeps waiting, once the command's own
+// leader process has exited, for whatever still holds its output pipes open to close them on its
+// own, before giving up and forcing the pipes closed itself. After the group kill (Cancel's
+// SIGKILL), that is every process in the group, already dying together, so the wait is usually
+// brief — except for a descendant that escaped the group itself by calling setsid (never git's or
+// jj's own background maintenance, which daemonizes with its descriptors pointed elsewhere, but
+// nothing stops another command from spawning one): the kill reaches only the group's own
+// members, so that descendant survives it too, and Run then ends only at the command's own
+// deadline plus WaitDelay. After the leader's own clean exit, Cancel never ran at all: a child the
+// leader started earlier is untouched and keeps running on its own schedule, holding the pipe
+// open for as long as it likes, the same as an escaped descendant. WaitDelay does not stop any of
+// these processes — only Go's own wait for them — so it needs no margin for slow work, only
+// enough to not block on one indefinitely; one second serves a probe and a git clone alike.
 const WaitDelay = time.Second
 
 // Configure sets cmd's own process group (SysProcAttr.Setpgid), a Cancel that signals the whole
@@ -49,4 +53,21 @@ func Configure(cmd *exec.Cmd) {
 		return err
 	}
 	cmd.WaitDelay = WaitDelay
+}
+
+// Err turns cmd.Run's error into what a caller should propagate: nil whenever cmd has its own
+// real exit to report through cmd.ProcessState.ExitCode() instead — whether that is an ordinary
+// *exec.ExitError or exec.ErrWaitDelay (a clean exit whose I/O draining outlived WaitDelay; Go
+// returns this only once the process itself already exited, Cmd.Run's doc). Any other error (the
+// command never started, or Run failed some other way) is returned unchanged, for the caller to
+// propagate as its own.
+func Err(err error) error {
+	if err == nil {
+		return nil
+	}
+	var exited *exec.ExitError
+	if errors.As(err, &exited) || errors.Is(err, exec.ErrWaitDelay) {
+		return nil
+	}
+	return err
 }

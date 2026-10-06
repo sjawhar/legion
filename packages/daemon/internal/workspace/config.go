@@ -161,27 +161,15 @@ func (r execRunner) Run(ctx context.Context, command Command) (Result, error) {
 	child.Stderr = &stderr
 	err = child.Run()
 	result := Result{Stdout: stdout.String(), Stderr: stderr.String()}
-	if err == nil {
-		return result, nil
+	if runErr := procgroup.Err(err); runErr != nil {
+		return result, runErr
 	}
+	result.ExitCode = child.ProcessState.ExitCode()
 	var exited *exec.ExitError
-	switch {
-	case errors.As(err, &exited):
-		result.ExitCode = exited.ExitCode()
+	if errors.As(err, &exited) {
 		result.TimedOut = errors.Is(bounded.Err(), context.DeadlineExceeded)
-		return result, nil
-	case errors.Is(err, exec.ErrWaitDelay):
-		// Go returns this only once the process itself already exited on its own (os/exec's doc
-		// on Cmd.Run's WaitDelay): the deadline never fired Cancel, so the group kill never ran,
-		// and a child the command started earlier is still alive, holding an output pipe open on
-		// its own schedule. The command's own exit status is still the real result — reading it
-		// from ProcessState the same way an ordinary exit does, matching Go's own semantics for
-		// this case and bootgate.pluginGate.run's choice for the same command — not a distinct
-		// failure to invent for a command that actually answered.
-		result.ExitCode = child.ProcessState.ExitCode()
-		return result, nil
 	}
-	return result, err
+	return result, nil
 }
 
 // merge is base with each override entry replacing the entry of the same name, or appended.

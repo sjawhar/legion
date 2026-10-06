@@ -715,9 +715,8 @@ func (g pluginGate) run(ctx context.Context, script string, args ...string) (ran
 	if job.interrupted(cmd.ProcessState) {
 		return ran{}, errors.New("the probe was interrupted at the terminal")
 	}
-	var exitErr *exec.ExitError
-	if err != nil && !errors.As(err, &exitErr) && !errors.Is(err, exec.ErrWaitDelay) {
-		return ran{}, err
+	if runErr := procgroup.Err(err); runErr != nil {
+		return ran{}, runErr
 	}
 	tail := strings.TrimSpace(stderr.String())
 	if len(tail) > maxProbeStderr {

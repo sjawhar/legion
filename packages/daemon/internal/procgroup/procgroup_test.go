@@ -3,6 +3,7 @@ package procgroup
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"testing"
@@ -30,12 +31,32 @@ func TestConfigureCancelMapsESRCHToErrProcessDone(t *testing.T) {
 	}
 }
 
-// Configure takes no waitDelay argument: both callers always want the same bound, so Configure
-// sets it from the package's own WaitDelay constant rather than asking each caller to pass it.
-func TestConfigureSetsThePackagesOwnWaitDelay(t *testing.T) {
-	cmd := exec.CommandContext(context.Background(), "true")
-	Configure(cmd)
-	if cmd.WaitDelay != WaitDelay {
-		t.Errorf("cmd.WaitDelay = %s, want the package's own WaitDelay (%s)", cmd.WaitDelay, WaitDelay)
+// Err is the one place both execRunner and the boot gate's probe runner read a command's real
+// exit: nil for an ordinary exit (whatever its own code) and for exec.ErrWaitDelay (a clean exit
+// whose I/O draining outlived WaitDelay), seen through a wrapped error too — a caller then reads
+// cmd.ProcessState.ExitCode() for both. Had Err instead let exec.ErrWaitDelay through unchanged,
+// a caller would propagate it as a real error and a command that actually exited 0 would be
+// reported as a failure (as "command failed (exit -1)" was, before this package existed).
+// Anything else — the command never started, or Run failed some other way — is unchanged.
+func TestErrRecognizesAnOrdinaryExitAndErrWaitDelayButNothingElse(t *testing.T) {
+	exited := exec.Command("false").Run()
+	if exited == nil {
+		t.Fatal("exec.Command(\"false\").Run() = nil, want an *exec.ExitError to test against")
+	}
+	if err := Err(nil); err != nil {
+		t.Errorf("Err(nil) = %v, want nil", err)
+	}
+	if err := Err(exited); err != nil {
+		t.Errorf("Err(%v) = %v, want nil: an ordinary exit is not an error to propagate", exited, err)
+	}
+	if err := Err(exec.ErrWaitDelay); err != nil {
+		t.Errorf("Err(exec.ErrWaitDelay) = %v, want nil", err)
+	}
+	if err := Err(fmt.Errorf("run widget: %w", exec.ErrWaitDelay)); err != nil {
+		t.Errorf("Err on a wrapped ErrWaitDelay = %v, want nil (errors.Is sees through %%w)", err)
+	}
+	other := errors.New("workspace command is not a tool the daemon resolved at boot")
+	if err := Err(other); err != other {
+		t.Errorf("Err(%v) = %v, want it unchanged", other, err)
 	}
 }

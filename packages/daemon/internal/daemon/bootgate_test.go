@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -472,10 +473,13 @@ func TestTheLoadProbeRunsWhatAPaneRunsAndPassesOnTheLoadedMarker(t *testing.T) {
 // that is still running when Oh My Pi itself exits: a process it left behind (sleep 3 &, standing
 // in for whatever a real tmux pane's launch can leave running) holds the probe's output pipe open
 // past procgroup.WaitDelay, but the probe already answered before that, and must not be retried
-// for it.
+// for it. Attempts is capped at 1 so a reintroduced regression (treating the lingering child as a
+// transient non-answer) fails fast with this test's own message, instead of retrying until go
+// test's own timeout ends the run.
 func TestTheLoadProbePassesOnTheFirstAttemptEvenWhenALingeringChildHoldsTheOutputPipe(t *testing.T) {
 	f := newFakeOmp(t, "yes-then-linger")
 	gate, _ := gateUnder(t, f, contractCurrent)
+	gate.retry.Attempts = 1
 	t.Cleanup(func() { killPIDFile(t, filepath.Join(f.dir, "lingering.pid")) })
 
 	if err := gate.verify(context.Background()); err != nil {
@@ -485,6 +489,21 @@ func TestTheLoadProbePassesOnTheFirstAttemptEvenWhenALingeringChildHoldsTheOutpu
 	if n := f.attempts(t); n != 1 {
 		t.Fatalf("Oh My Pi ran %d times, want once: a lingering descendant is not a reason to retry an answer already given", n)
 	}
+}
+
+// killPIDFile kills the process named by the PID pidFile holds, left running past a test's own
+// assertions by design (a backgrounded sleep standing in for a command's own lingering child).
+func killPIDFile(t *testing.T, pidFile string) {
+	t.Helper()
+	raw, err := os.ReadFile(pidFile)
+	if err != nil {
+		return
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil {
+		return
+	}
+	_ = syscall.Kill(pid, syscall.SIGKILL)
 }
 
 // The plugin a pane loads must be the one whose manifest the contract probe read. A launch prefix
