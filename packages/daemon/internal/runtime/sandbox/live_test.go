@@ -821,8 +821,13 @@ func (r *liveRig) exec(c *liveClaim, command ...string) (string, error) {
 	return strings.TrimSpace(out), err
 }
 
+// markerLines reads the marker with `test ! -e || cat`, not a bare `cat`: a marker a poll reads
+// before the stub agent has written to it does not exist yet, and a bare `cat`'s non-zero exit
+// would reach the caller as an error — a poll returns on the first error, never retrying — rather
+// than "not yet" (awaitRunning's own poll, the first launch of an issue: root at root-ready, root2
+// and child2 at concurrent-provision, an orphan's first launch).
 func (r *liveRig) markerLines(c *liveClaim) ([]string, error) {
-	out, err := r.exec(c, "cat", c.marker)
+	out, err := r.exec(c, "sh", "-c", `test ! -e "$1" || cat -- "$1"`, "sh", c.marker)
 	if err != nil {
 		return nil, err
 	}
