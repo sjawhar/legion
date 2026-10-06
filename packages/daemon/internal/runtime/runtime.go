@@ -182,18 +182,19 @@ const (
 	// is a fourth verdict precisely so that it is never read as either: the supervisor re-arms
 	// the probe and counts the streak, and changes no state on it.
 	Uncertain ObservationKind = "uncertain"
-	// StaleAddress: the process the locator recorded is running, but at an address that no
-	// longer reaches this daemon — the worker-stream address a runtime hands every new process
-	// moved since this one was launched (only the Sandbox runtime reports it: a pod's --connect is
-	// fixed at its launch, and the daemon restarted on another host, bind or worker_stream_port).
-	// The process cannot dial the daemon from the address it holds and never will while it keeps
-	// it, so the supervisor relaunches the claim at once, through the launch path a death uses,
-	// onto a process that dials the daemon's current address: a Resume of its recorded session,
-	// or a Spawn over its existing Sandbox when it has not registered yet. The observation is
-	// never charged, since the process did nothing wrong; a relaunch the runtime refuses is
-	// charged as any launch failure is. Distinct from a "stale" event (Handle's own fence
-	// vocabulary, an observation of an incarnation the claim no longer holds): this one names the
-	// claim's current, live incarnation.
+	// StaleAddress: the process the locator recorded is running, but holds an address a process
+	// launched now is not handed — one of the addresses a runtime hands every new process from the
+	// daemon's configuration (the worker stream it dials, the daemon's API, NATS, Envoy, Dispatch,
+	// the secrets broker) moved since this one was launched. Only the Sandbox runtime reports it: a
+	// pod's argv and environment are fixed at its launch, and the daemon restarted with another
+	// configuration, on another host for one. The detail names each address that moved. The
+	// process may never reach the daemon or a service again from what it holds, so the supervisor
+	// relaunches the claim at once, through the launch path a death uses, onto a process handed the
+	// current addresses: a Resume of its recorded session, or a Spawn over its existing Sandbox
+	// when it has not registered yet. The observation is never charged, since the process did
+	// nothing wrong; a relaunch the runtime refuses is charged as any launch failure is. Distinct
+	// from a "stale" event (Handle's own fence vocabulary, an observation of an incarnation the
+	// claim no longer holds): this one names the claim's current, live incarnation.
 	StaleAddress ObservationKind = "stale_address"
 )
 

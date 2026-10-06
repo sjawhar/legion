@@ -140,9 +140,9 @@ func (m *Machine) dropHeld() {
 	m.disarm(TimerSuspend)
 }
 
-// endHeld is the claim's process found dead, or alive at a stale address it can never report back
-// from (repoint), while a suspension is held. Nothing is left to hold the suspension for, so the
-// claim is suspended rather than relaunched, and nothing is charged: died asks before it charges
+// endHeld is the claim's process found dead, or alive holding an address a process launched now is
+// not handed (repoint), while a suspension is held. Nothing is left to hold the suspension for, so
+// the claim is suspended rather than relaunched, and nothing is charged: died asks before it charges
 // anything. A runtime that cannot stop the process is logged and the claim is suspended all the
 // same, as a failed claim is (fail).
 func (m *Machine) endHeld(ctx context.Context) error {

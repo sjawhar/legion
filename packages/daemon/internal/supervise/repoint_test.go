@@ -1,11 +1,11 @@
 package supervise
 
-// A process the runtime reports StaleAddress — alive, but at an address that no longer reaches this
-// daemon (LEGION-592: the daemon's own worker-stream address moved, as it does when the daemon
-// restarts on another host, bind or worker_stream_port) — is not a death: these tests pin that the
-// claim is relaunched at once through the launch path a death uses (a Resume of its recorded
-// session, or a Spawn when it has none), that the stale observation itself is never charged
-// though a relaunch the runtime refuses is, and that a held suspension ends in a suspension.
+// A process the runtime reports StaleAddress — alive, but holding an address a process launched now
+// is not handed (LEGION-592: an address the daemon hands its processes moved, as the worker stream
+// does when the daemon restarts on another host, bind or worker_stream_port) — is not a death: these
+// tests pin that the claim is relaunched at once through the launch path a death uses (a Resume of
+// its recorded session, or a Spawn when it has none), that the stale observation itself is never
+// charged though a relaunch the runtime refuses is, and that a held suspension ends in a suspension.
 
 import (
 	"errors"
@@ -87,10 +87,10 @@ func TestAStaleAddressWhoseRelaunchIsRefusedChargesThatLaunchFailure(t *testing.
 	h.wantCalls("Resume", 2)
 }
 
-// A process found at a stale address mid-turn cannot finish that turn — it cannot report back to
-// this daemon at all — so the task goes back to waiting first (interrupted), but unlike a death
-// nothing is charged. A turn in flight is lost; the agent resumes from its last saved turn once
-// the relaunch registers.
+// A process found at a stale address mid-turn is replaced mid-turn: that turn used the addresses
+// the process holds, and the relaunch ends it. The task goes back to waiting first (interrupted),
+// but unlike a death nothing is charged. A turn in flight is lost; the agent resumes from its last
+// saved turn once the relaunch registers.
 func TestAStaleAddressMidTurnInterruptsTheTaskChargingNothing(t *testing.T) {
 	h := newHarness(t)
 	h.reach(StateReady)
@@ -117,10 +117,11 @@ func TestAStaleAddressMidTurnInterruptsTheTaskChargingNothing(t *testing.T) {
 }
 
 // A held suspension — the workflow asked to suspend a working claim, and the machine is waiting
-// for its turn to end before it acts — cannot ever resolve for a process at a stale address: that
-// process will never report its turn ending. The stale observation ends the hold as a death does
-// (endHeld): the claim is suspended at once and charged nothing, and no pod is launched only to be
-// suspended by the suspension's retry.
+// for its turn to end before it acts — is not waited out for a process at a stale address, which
+// is replaced at once whatever it is doing (repoint), and whose turn may never report its end at
+// all when the address that moved is the worker stream's. The stale observation ends the hold as a
+// death does (endHeld): the claim is suspended at once and charged nothing, and no pod is launched
+// only to be suspended by the suspension's retry.
 func TestAStaleAddressWithAHeldSuspensionSuspendsTheClaimChargingNothing(t *testing.T) {
 	h := newHarness(t)
 	h.reach(StateReady)

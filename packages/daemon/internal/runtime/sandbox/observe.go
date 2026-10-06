@@ -72,10 +72,10 @@ func (r *Runtime) Probe(ctx context.Context, loc runtime.Locator) (runtime.Obser
 //  5. P Failed or Succeeded                          → Gone, quoting the container that ended
 //  6. P Pending, PodScheduled=False past BootTimeout → Gone, quoting the pod's events
 //  7. S's current Ready reason MultiplePods or ReconcilerError → Uncertain
-//  8. P Pending (any sub-state) or Running, and its shim dials this runtime's
-//     own current stream address                      → Alive
-//  9. P Pending or Running, and its shim dials a different address — this
-//     runtime's own stream address moved since the pod was launched → StaleAddress
+//  8. P Pending (any sub-state) or Running, and it holds every address a pod
+//     launched now is handed                          → Alive
+//  9. P Pending or Running, and it holds an address a pod launched now is not
+//     handed — the daemon's configuration moved since the pod was launched → StaleAddress
 //
 // Terminal state is read from the pod, whose phase and container states belong to its one uid; a
 // Sandbox condition is quoted only when written for the Sandbox's current generation, so one left
@@ -122,28 +122,51 @@ func (r *Runtime) evaluate(ctx context.Context, loc runtime.Locator) runtime.Obs
 	}
 	switch pod.Status.Phase {
 	case corev1.PodPending, corev1.PodRunning, "":
-		if dialed, ok := connectAddress(pod); ok && dialed != r.streamURL {
-			return observe(runtime.StaleAddress, "pod %s (uid %s) dials %s, not this runtime's current %s", name, pod.UID, dialed, r.streamURL)
+		if moved := r.movedAddresses(pod); len(moved) > 0 {
+			return observe(runtime.StaleAddress, "pod %s (uid %s) holds addresses a pod launched now is not handed: %s",
+				name, pod.UID, strings.Join(moved, "; "))
 		}
 		return observe(runtime.Alive, "pod %s (uid %s) %s", name, pod.UID, phaseOf(pod))
 	}
 	return observe(runtime.Uncertain, "pod %s (uid %s) phase %s", name, pod.UID, pod.Status.Phase)
 }
 
-// connectAddress is the worker-shim's --connect value in pod's main container command — the
-// address its shim dials for the worker stream — and whether the container carried one at all:
-// false for a pod with no main container or no such flag (never one this runtime built), which
-// row 9 above must never read as stale for want of something to compare.
-func connectAddress(pod *corev1.Pod) (string, bool) {
-	for _, c := range pod.Spec.Containers {
-		if c.Name != mainContainer {
-			continue
-		}
-		if i := slices.Index(c.Command, "--connect"); i >= 0 && i+1 < len(c.Command) {
-			return c.Command[i+1], true
+// movedAddresses are row 9's comparison: each address pod's main container holds that differs from
+// the one a pod launched now is handed (handedAddresses), as "<name> <held>, now <handed>". A pod
+// is compared only when its main container runs the shim with connectFlag, as every pod this
+// runtime builds does; one without (never one this runtime built) has nothing to compare, and row 9
+// must never read it as stale for want of it. A variable the container lacks holds "", as
+// mainEnvironment leaves unset an address the runtime hands none of. A handed value is compared as
+// the pod spec carries it, escaped against the kubelet's expansion (kubeletLiteral).
+func (r *Runtime) movedAddresses(pod *corev1.Pod) []string {
+	i := slices.IndexFunc(pod.Spec.Containers, func(c corev1.Container) bool { return c.Name == mainContainer })
+	if i < 0 {
+		return nil
+	}
+	main := pod.Spec.Containers[i]
+	flag := slices.Index(main.Command, connectFlag)
+	if flag < 0 || flag+1 >= len(main.Command) {
+		return nil
+	}
+	held := map[string]string{connectFlag: main.Command[flag+1]}
+	for _, v := range main.Env {
+		held[v.Name] = v.Value
+	}
+	var moved []string
+	for _, a := range r.handedAddresses() {
+		if handed := kubeletEscape(a.value); held[a.name] != handed {
+			moved = append(moved, fmt.Sprintf("%s %s, now %s", a.name, orUnset(held[a.name]), orUnset(handed)))
 		}
 	}
-	return "", false
+	return moved
+}
+
+// orUnset is an address as movedAddresses names it: "(unset)" for none.
+func orUnset(address string) string {
+	if address == "" {
+		return "(unset)"
+	}
+	return address
 }
 
 // podAbsent is row 3's detail: the Sandbox's mode, its Suspended condition when current, and any

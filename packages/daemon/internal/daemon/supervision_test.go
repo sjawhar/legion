@@ -1000,10 +1000,10 @@ func TestRunRelaunchesAFreshSessionWhenTheTreeVolumeIsLostAndTellsTheTree(t *tes
 	}
 }
 
-// A process the runtime reports at a stale address — alive, but dialling a worker-stream address
-// this daemon no longer listens on (LEGION-592: the daemon restarted on another host, bind or
-// worker_stream_port and re-adopted the pod) — relaunches its recorded session at once, and the
-// observation charges nothing: the daemon's own address moved, not a fault of the agent's.
+// A process the runtime reports at a stale address — alive, but holding an address the daemon no
+// longer hands its processes (LEGION-592: the daemon restarted with its worker stream, its API or a
+// service at another address and re-adopted the pod) — relaunches its recorded session at once, and
+// the observation charges nothing: the daemon's own configuration moved, not a fault of the agent's.
 func TestRunRelaunchesAStaleAddressChargingNothing(t *testing.T) {
 	cfg := testConfig(t)
 	rt := fake.NewRuntime()

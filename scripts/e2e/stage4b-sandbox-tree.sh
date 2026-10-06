@@ -238,10 +238,12 @@ live_claims() {
     | {token, tree, generation, pod: .locator.sandbox.name, incarnation: .locator.incarnation, sessionFile, state, budgets}] | sort_by(.token)'
 }
 # pod_connect POD and pod_resume POD print the worker container's --connect value and its
-# --resume=<session file> word, empty when it has none, as the operator reads pod POD.
+# --resume=<session file> word, and pod_daemon_url POD the LEGION_DAEMON_URL it is told, each empty
+# when it has none, as the operator reads pod POD.
 pod_command() { op get pod "$1" -o json | jq -c '[.spec.containers[] | select(.name == "worker") | .command[]?]'; }
 pod_connect() { pod_command "$1" | jq -r '(index("--connect")) as $i | if $i == null then "" else .[$i + 1] end'; }
 pod_resume() { pod_command "$1" | jq -r 'map(select(startswith("--resume="))) | first // ""'; }
+pod_daemon_url() { pod_env "$1" | sed -n 's/^LEGION_DAEMON_URL=//p'; }
 # take_out ISSUE moves the tree ISSUE roots to backlog from the operator shell, over the operator
 # bearer, and waits for Dispatch to show it and for the tree's pods to be gone.
 take_out() {
@@ -2191,16 +2193,18 @@ note "no stale-address replacement logged since the restart"
 pass
 
 begin address-moved
-# The daemon restarts with its worker-stream address moved: the run swaps its API and worker-stream
-# ports, the rigs' pair the devbox admits from the Legion nodes. Every pod still dials the old
-# address, so the runtime reports it stale_address, and its claim's supervisor relaunches it at once
-# through its launch path onto a pod that dials the new address (docs/kubernetes.md, "A pod whose
+# The daemon restarts with two of the addresses it hands its pods moved: the run swaps its API and
+# worker-stream ports, the rigs' pair the devbox admits from the Legion nodes, so every pod dials a
+# worker stream and is told a LEGION_DAEMON_URL the daemon no longer serves. The runtime reports each
+# pod stale_address, naming both addresses and nothing else, and its claim's supervisor relaunches it
+# at once through its launch path onto a pod handed the new ones (docs/kubernetes.md, "A pod whose
 # address moved"): the same session file resumed, registered again at the next generation, and no
 # launch charged. restart-mid-tree, at the same address, replaced no pod. The ports stay swapped for
 # the rest of the run.
 live_before=$(live_claims) || fail "legion claims could not be read"
 jq -e --arg t "$tree1" 'any(.[]; .tree == $t)' <<<"$live_before" >/dev/null || fail "no claim of tree $tree1 runs a process for the move to replace"
 old_stream=tcp://$host:$port_worker_stream
+old_daemon_url=http://$host:$port_daemon
 stale_before=$(log_lines "$stale_msg" | wc -l)
 failed_before=$(log_lines "supervise: launch failed" | wc -l)
 stop_pid "$daemon_pid"
@@ -2208,8 +2212,12 @@ daemon_pid=
 read -r port_daemon port_worker_stream <<<"$port_worker_stream $port_daemon"
 write_legion_config
 new_stream=tcp://$host:$port_worker_stream
+new_daemon_url=http://$host:$port_daemon
 start_daemon
-note "the daemon restarted with its API on port $port_daemon and its worker stream at $new_stream, moved from $old_stream"
+note "the daemon restarted with its API at $new_daemon_url and its worker stream at $new_stream, moved from $old_daemon_url and $old_stream"
+# The detail each stale observation ends with (internal/runtime/sandbox/observe.go, movedAddresses):
+# the two moved addresses in the order the runtime hands them, and no other.
+moved_detail="holds addresses a pod launched now is not handed: --connect $old_stream, now $new_stream; LEGION_DAEMON_URL $old_daemon_url, now $new_daemon_url"
 # claim_moved WAS: the claim WAS describes runs a new pod at exactly the next generation (one launch:
 # a refused one moves the generation too), and its agent is registered and ready.
 claim_moved() {
@@ -2227,6 +2235,8 @@ for token in $(jq -r --arg t "$tree1" '.[] | select(.tree == $t) | .token' <<<"$
   [ "$uid" = "$(jq -r .locator.incarnation <<<"$claim")" ] || fail "$token's pod $pod is uid $uid, not its recorded $(jq -r .locator.incarnation <<<"$claim")"
   connect=$(pod_connect "$pod")
   [ "$connect" = "$new_stream" ] || fail "$token's new pod $pod dials ${connect:-nothing}, not $new_stream"
+  daemon_url=$(pod_daemon_url "$pod")
+  [ "$daemon_url" = "$new_daemon_url" ] || fail "$token's new pod $pod is told LEGION_DAEMON_URL ${daemon_url:-<unset>}, not $new_daemon_url"
   session_file=$(jq -r .sessionFile <<<"$was")
   [ "$(jq -r .sessionFile <<<"$claim")" = "$session_file" ] || fail "$token's session file moved: $session_file → $(jq -r .sessionFile <<<"$claim")"
   resume=$(pod_resume "$pod")
@@ -2235,14 +2245,16 @@ for token in $(jq -r --arg t "$tree1" '.[] | select(.tree == $t) | .token' <<<"$
   fi
   jq -e --argjson was "$was" '.budgets.launchFailures == 0 and .budgets.deaths == $was.budgets.deaths' <<<"$claim" >/dev/null ||
     fail "$token's budgets read $(jq -c .budgets <<<"$claim"), want launchFailures 0 and deaths $(jq -r .budgets.deaths <<<"$was")"
-  stale=$(log_lines "$stale_msg" | tail -n "+$((stale_before + 1))" | jq -s --arg c "$token" '[.[] | select(.claim == $c)] | length')
-  [ "$stale" = 1 ] || fail "the daemon logged $stale stale-address replacements of $token since the restart, want one"
+  stale=$(log_lines "$stale_msg" | tail -n "+$((stale_before + 1))" | jq -s --arg c "$token" '[.[] | select(.claim == $c)]')
+  [ "$(jq length <<<"$stale")" = 1 ] || fail "the daemon logged $(jq length <<<"$stale") stale-address replacements of $token since the restart, want one"
+  jq -e --arg want "$moved_detail" '.[0].detail | endswith($want)' <<<"$stale" >/dev/null ||
+    fail "$token's stale-address replacement names other moves than --connect and LEGION_DAEMON_URL from $old_stream and $old_daemon_url"
   refused=$(log_lines "supervise: launch failed" | tail -n "+$((failed_before + 1))" | jq -s --arg c "$token" '[.[] | select(.claim == $c)] | length')
   [ "$refused" = 0 ] || fail "the daemon logged $refused failed launches of $token since the restart"
-  note "$token: pod $pod uid $(jq -r .incarnation <<<"$was") → $uid at generation $(jq -r .generation <<<"$was") → $(jq -r .generation <<<"$claim"), $(jq -r .state <<<"$claim"); --connect $connect; ${resume:-no --resume (no session recorded)}; budgets $(jq -c .budgets <<<"$claim"); one stale-address replacement logged"
+  note "$token: pod $pod uid $(jq -r .incarnation <<<"$was") → $uid at generation $(jq -r .generation <<<"$was") → $(jq -r .generation <<<"$claim"), $(jq -r .state <<<"$claim"); --connect $connect; LEGION_DAEMON_URL $daemon_url; ${resume:-no --resume (no session recorded)}; budgets $(jq -c .budgets <<<"$claim"); one stale-address replacement logged, naming --connect and LEGION_DAEMON_URL alone"
 done
 # Every other tree's claims move too, though their own workflow may end a phase meanwhile: once
-# each has left its old pod, no pod of the run dials the old address.
+# each has left its old pod, no pod of the run dials the old stream or is told the old API.
 off_old() {
   local claims
   claims=$(live_claims) || return 1
@@ -2253,7 +2265,9 @@ for token in $(live_claims | jq -r '.[].token'); do
   pod=$(live_claims | jq -r --arg t "$token" '.[] | select(.token == $t) | .pod')
   connect=$(pod_connect "$pod")
   [ "$connect" = "$new_stream" ] || fail "$token's pod $pod dials ${connect:-nothing}, not $new_stream"
-  note "$token: pod $pod dials $connect"
+  daemon_url=$(pod_daemon_url "$pod")
+  [ "$daemon_url" = "$new_daemon_url" ] || fail "$token's pod $pod is told LEGION_DAEMON_URL ${daemon_url:-<unset>}, not $new_daemon_url"
+  note "$token: pod $pod dials $connect, told LEGION_DAEMON_URL $daemon_url"
 done
 pass
 

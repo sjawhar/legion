@@ -721,19 +721,20 @@ func (m *Machine) loseSession() {
 	m.claim.Session, m.claim.SessionFile, m.claim.WorkspaceLost = "", "", true
 }
 
-// repoint is the claim's process found alive at an address that no longer reaches this daemon
-// (runtime.StaleAddress): the worker-stream address the runtime hands every new process moved since
-// this one launched, as it does when the daemon restarts on another host, `bind` or
-// `worker_stream_port`. The process cannot dial the daemon from the address it holds and never
-// will while it keeps it, so there is nothing to wait out. A task whose turn the process was
-// running goes back to waiting first (interrupted), the same recovery a death in a turn gets, since
-// that turn can never report back either. A held suspension ends here as it does for a death
-// (endHeld): the claim is suspended, not relaunched. Otherwise the claim is relaunched at once
-// through the launch path a death uses (launch): a Resume of its recorded session, or a Spawn over
-// the claim's existing Sandbox when it has not registered yet, onto a process that dials the
-// daemon's current address. The stale observation is never charged, unlike a death (chargeDeath,
-// relaunchAfterFailure): the process did nothing wrong. A relaunch the runtime refuses is charged as
-// any launch failure is.
+// repoint is the claim's process found alive holding an address a process launched now is not
+// handed (runtime.StaleAddress): one of the addresses the runtime hands every new process from the
+// daemon's configuration (the worker stream it dials, the daemon's API, NATS, Envoy, Dispatch, the
+// secrets broker) moved since this one launched, as the stream does when the daemon restarts on
+// another host, `bind` or `worker_stream_port`. The process keeps what it holds for as long as it
+// runs, and what it holds may never reach the daemon or the service again, so there is nothing to
+// wait out. A task whose turn the process was running goes back to waiting first (interrupted), the
+// same recovery a death in a turn gets: that turn used the addresses the process holds, and the
+// relaunch ends it. A held suspension ends here as it does for a death (endHeld): the claim is
+// suspended, not relaunched. Otherwise the claim is relaunched at once through the launch path a
+// death uses (launch): a Resume of its recorded session, or a Spawn over the claim's existing
+// Sandbox when it has not registered yet, onto a process handed the current addresses. The stale
+// observation is never charged, unlike a death (chargeDeath, relaunchAfterFailure): the process did
+// nothing wrong. A relaunch the runtime refuses is charged as any launch failure is.
 func (m *Machine) repoint(ctx context.Context, observation runtime.Observation) error {
 	m.log.Warn("supervise: the process is alive at a stale address; replacing it with one at the current address",
 		"incarnation", m.claim.Locator.Incarnation, "detail", observation.Detail)

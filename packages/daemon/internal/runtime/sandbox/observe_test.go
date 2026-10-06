@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"errors"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -52,12 +53,17 @@ func TestTheMappingRowByRowInPrecedence(t *testing.T) {
 		}
 		return []k8sruntime.Object{sandboxObject(t, name, sandboxUID, mode, labels, conditions...), pod}
 	}
-	dialing := func(addr string) func(*corev1.Pod) {
-		return func(p *corev1.Pod) {
-			p.Spec.Containers = []corev1.Container{{Name: mainContainer, Command: []string{
-				"legion", "worker-shim", "--connect", addr, "--boot-token-file", "/boot/token",
-			}}}
+	// launchedUnder is a pod whose containers are the ones a runtime with testOptions edited by
+	// edit launches, as a daemon under that configuration left it running.
+	launchedUnder := func(edit func(*Options)) func(*corev1.Pod) {
+		opts := testOptions()
+		edit(&opts)
+		r, err := configure(opts)
+		if err != nil {
+			t.Fatal(err)
 		}
+		containers := podOf(t, r, workerSpec(t), false).Containers
+		return func(p *corev1.Pod) { p.Spec.Containers = containers }
 	}
 	running := corev1.PodStatus{Phase: corev1.PodRunning}
 	failed := func(statuses ...corev1.ContainerStatus) corev1.PodStatus {
@@ -190,15 +196,36 @@ func TestTheMappingRowByRowInPrecedence(t *testing.T) {
 			want: runtime.Alive,
 		},
 		{
-			row:     "8 the current --connect address is alive",
-			objects: withPod(modeRunning, nil, recorded, sandboxUID, running, dialing(testOptions().StreamURL)),
+			row:     "8 a pod holding every address a pod launched now is handed is alive",
+			objects: withPod(modeRunning, nil, recorded, sandboxUID, running, launchedUnder(func(*Options) {})),
 			want:    runtime.Alive,
 		},
 		{
-			row:     "9 a stale --connect address",
-			objects: withPod(modeRunning, nil, recorded, sandboxUID, running, dialing(movedStreamURL)),
+			row:     "9 a moved worker stream",
+			objects: withPod(modeRunning, nil, recorded, sandboxUID, running, launchedUnder(moveStream)),
 			want:    runtime.StaleAddress,
-			detail:  []string{"dials " + movedStreamURL, "current " + testOptions().StreamURL},
+			detail:  []string{connectFlag + " " + movedStreamURL + ", now " + testOptions().StreamURL},
+			absent:  []string{"LEGION_DAEMON_URL"},
+		},
+		{
+			row: "9 every moved address is named",
+			objects: withPod(modeRunning, nil, recorded, sandboxUID, running, launchedUnder(func(o *Options) {
+				o.StreamURL, o.DaemonURL = movedStreamURL, movedDaemonURL
+			})),
+			want: runtime.StaleAddress,
+			detail: []string{
+				connectFlag + " " + movedStreamURL + ", now " + testOptions().StreamURL,
+				"LEGION_DAEMON_URL " + movedDaemonURL + ", now " + testOptions().DaemonURL,
+			},
+			absent: []string{"ENVOY_URL", "ENVOY_NATS_URL"},
+		},
+		{
+			row: "9 a pod without an address a pod launched now is handed",
+			objects: withPod(modeRunning, nil, recorded, sandboxUID, running, launchedUnder(func(o *Options) {
+				o.DaemonURL = ""
+			})),
+			want:   runtime.StaleAddress,
+			detail: []string{"LEGION_DAEMON_URL (unset), now " + testOptions().DaemonURL},
 		},
 		{
 			row:     "a phase the mapping has no row for is uncertain",
@@ -231,6 +258,84 @@ func TestTheMappingRowByRowInPrecedence(t *testing.T) {
 				if strings.Contains(obs.Detail, absent) {
 					t.Errorf("detail %q has %q", obs.Detail, absent)
 				}
+			}
+		})
+	}
+}
+
+// Each address the runtime hands a pod is compared on its own (row 9): a pod launched under a
+// configuration that differs in that one address alone, whether moved, configured only now or no
+// longer configured, is named for exactly that address, and a pod launched under the configuration
+// the runtime has now is named for none, a `$` the kubelet would expand included.
+func TestEachAddressAPodIsHandedIsComparedAlone(t *testing.T) {
+	const (
+		dispatch = "https://dispatch.internal.example"
+		broker   = "https://secrets.internal.example"
+	)
+	for name, tc := range map[string]struct {
+		launched, now func(*Options)
+		want          string
+	}{
+		"nothing moved": {},
+		"the worker stream moved": {
+			launched: moveStream,
+			want:     connectFlag + " " + movedStreamURL + ", now " + testOptions().StreamURL,
+		},
+		"the daemon's API moved": {
+			launched: func(o *Options) { o.DaemonURL = movedDaemonURL },
+			want:     "LEGION_DAEMON_URL " + movedDaemonURL + ", now " + testOptions().DaemonURL,
+		},
+		"NATS moved": {
+			launched: func(o *Options) { o.NATSURLs = []string{"nats://192.0.2.9:4222", "nats://192.0.2.10:4222"} },
+			want:     "ENVOY_NATS_URL nats://192.0.2.9:4222,nats://192.0.2.10:4222, now nats://192.0.2.250:4222",
+		},
+		"Envoy moved": {
+			launched: func(o *Options) { o.EnvoyURL = "http://192.0.2.9:9020" },
+			want:     "ENVOY_URL http://192.0.2.9:9020, now " + testOptions().EnvoyURL,
+		},
+		"Dispatch moved": {
+			launched: func(o *Options) { o.DispatchURL = "https://dispatch-old.internal.example" },
+			want:     "DISPATCH_URL https://dispatch-old.internal.example, now " + dispatch,
+		},
+		"the secrets broker moved": {
+			launched: func(o *Options) { o.AgentSecrets.URL = "https://secrets-old.internal.example" },
+			want:     "AGENT_SECRETS_URL https://secrets-old.internal.example, now " + broker,
+		},
+		"Dispatch configured only now": {
+			launched: func(o *Options) { o.DispatchURL, o.DispatchToken = "", "" },
+			want:     "DISPATCH_URL (unset), now " + dispatch,
+		},
+		"the secrets broker no longer configured": {
+			now:  func(o *Options) { o.AgentSecrets = nil },
+			want: "AGENT_SECRETS_URL " + broker + ", now (unset)",
+		},
+		"an address the kubelet would expand, unmoved": {
+			launched: func(o *Options) { o.EnvoyURL = "http://192.0.2.250:9020/$(HOME)" },
+			now:      func(o *Options) { o.EnvoyURL = "http://192.0.2.250:9020/$(HOME)" },
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			runtimeWith := func(edit func(*Options)) *Runtime {
+				opts := testOptions()
+				opts.DispatchURL, opts.DispatchToken = dispatch, "dispatch-bearer"
+				opts.AgentSecrets = &AgentSecrets{URL: broker, Audience: "agent-secrets", TokenExpiry: time.Hour}
+				if edit != nil {
+					edit(&opts)
+				}
+				r, err := configure(opts)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return r
+			}
+			pod := &corev1.Pod{Spec: podOf(t, runtimeWith(tc.launched), workerSpec(t), false)}
+			moved := runtimeWith(tc.now).movedAddresses(pod)
+			var want []string
+			if tc.want != "" {
+				want = []string{tc.want}
+			}
+			if !slices.Equal(moved, want) {
+				t.Fatalf("moved addresses %q, want %q", moved, want)
 			}
 		})
 	}

@@ -598,27 +598,37 @@ The image probe runs as a Sandbox of its own, `legion-probe-<project>-<digest12>
 
 ### A pod whose address moved
 
-A pod's `--connect` is fixed when the pod is created (item 3 of the anatomy list above), and nothing
-changes a running pod's argv. The address it names is the daemon's worker stream listener,
-`tcp://<bind>:<worker_stream_port>`, so it moves whenever the daemon restarts on another host or with
-another `bind` or `worker_stream_port`. A daemon that restarts re-adopts each live claim's pod by its
-recorded locator (the boot orphan sweep), and re-adoption alone would leave that pod dialling the old
-address, never reaching the new daemon.
+A pod's addresses are fixed when the pod is created, and nothing changes a running pod's argv or
+environment. The daemon hands every pod six from its configuration: the worker stream listener the
+shim's `--connect` names, `tcp://<bind>:<worker_stream_port>` (item 3 of the anatomy list above), and,
+in the worker's environment, `LEGION_DAEMON_URL` (`daemon_url`), `ENVOY_NATS_URL` (`nats_urls`),
+`ENVOY_URL` (`envoy_url`), `DISPATCH_URL` (`dispatch_url`) and `AGENT_SECRETS_URL`
+(`runtime.kubernetes.agent_secrets.url`). Each moves when the daemon restarts with its key changed,
+and the stream also moves when the daemon restarts on another host. A daemon that restarts re-adopts
+each live claim's pod by its recorded locator (the boot orphan sweep), and re-adoption alone would
+leave that pod holding the old addresses: a stale `--connect` never reaches the new daemon, and a stale
+`LEGION_DAEMON_URL` fails every call the agent makes to the daemon's API (its credential helper,
+`legion gh`, its phase completion) while its stream still works.
 
-So the runtime compares each watched pod's `--connect` with the address it hands every new pod, on
-every evaluation of the pod (each watch event, the probe-interval sweep, each probe). A pod that
-dials anywhere else is reported `stale_address` rather than `alive` (`ObservationKind`,
-`internal/runtime/runtime.go`). A pod this runtime launched always compares equal, so only the pods a
-daemon at another address launched are ever reported, from the boot that re-adopts them; nobody runs
-a command for it. The supervisor relaunches each such claim at once, through the launch path a death
+So the runtime compares each of those six in a watched pod with what it hands a new pod now, on
+every evaluation of the pod (each watch event, the probe-interval sweep, each probe), a variable the
+pod lacks counting as unset. A pod holding any other value is reported `stale_address` rather than
+`alive` (`ObservationKind`, `internal/runtime/runtime.go`), and the observation's detail names each
+address that moved, with the value the pod holds and the one a new pod is handed
+(`LEGION_DAEMON_URL http://192.0.2.5:13370, now http://192.0.2.7:13370`). A pod this runtime launched
+always compares equal, so only the pods a daemon under another configuration launched are ever
+reported, from the boot that re-adopts them; nobody runs a command for it. The operator's own
+variables (`runtime.kubernetes.pod.env`) are not compared: a change there reaches the pods launched
+after it. The supervisor relaunches each reported claim at once, through the launch path a death
 uses: a `Resume` of its recorded session, or a `Spawn` over its existing Sandbox when it has not
-registered yet, onto a pod whose shim dials the current address. The stale observation is never
-charged, since the pod did nothing wrong; a relaunch the runtime refuses is charged as any launch
-failure is. A turn the stale pod was in cannot finish, since that pod can never report back, so the
-turn is lost: its task goes back to waiting and is sent again once the relaunched agent is ready, the
+registered yet, onto a pod handed the current addresses. The stale observation is never charged,
+since the pod did nothing wrong; a relaunch the runtime refuses is charged as any launch failure is.
+A turn the stale pod was in used the addresses it holds and ends with the relaunch, so the turn is
+lost: its task goes back to waiting and is sent again once the relaunched agent is ready, the
 recovery a death in a turn gets. A claim whose suspension was held for that turn's end is suspended
 instead, as it is when its process dies. Stage 4b's `address-moved` checkpoint drives this with real
-agents on the cluster ([`scripts/e2e/README.md`](../scripts/e2e/README.md#stage4b-sandbox-treesh)).
+agents on the cluster, moving the worker stream and `daemon_url` at one restart
+([`scripts/e2e/README.md`](../scripts/e2e/README.md#stage4b-sandbox-treesh)).
 
 ### A shell on the tree volume
 
