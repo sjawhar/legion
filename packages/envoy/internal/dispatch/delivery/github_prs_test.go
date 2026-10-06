@@ -11,6 +11,8 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -36,13 +38,14 @@ type fakeGitHub struct {
 	t                 *testing.T
 	mux               *http.ServeMux
 	installID         int64
-	tokenMints        int
+	tokenMints        atomic.Int64
 	permissions       map[string]string
 	installationRepos []string
 	// installations, when set, lists every installation GET /app/installations answers and backs
 	// GET /installation/repositories' per-installation routing; nil means the single-installation
 	// default (installID/installationRepos) everywhere, matching every test before this field
-	// existed.
+	// existed. Round 5's errgroup-concurrent cross-installation search mints several
+	// installations' tokens at once, so tokenMints is atomic rather than a bare int.
 	installations []fakeInstallation
 }
 
@@ -95,10 +98,10 @@ func newFakeGitHub(t *testing.T) *fakeGitHub {
 		mustEncode(t, w, map[string]any{"total_count": len(payload), "repositories": payload})
 	})
 	f.mux.HandleFunc("POST /app/installations/{id}/access_tokens", func(w http.ResponseWriter, r *http.Request) {
-		f.tokenMints++
+		mints := f.tokenMints.Add(1)
 		w.WriteHeader(http.StatusCreated)
 		if err := json.NewEncoder(w).Encode(map[string]any{
-			"token":      fmt.Sprintf("ghs_fake_%s_%d", r.PathValue("id"), f.tokenMints),
+			"token":      fmt.Sprintf("ghs_fake_%s_%d", r.PathValue("id"), mints),
 			"expires_at": time.Now().Add(time.Hour).Format(time.RFC3339),
 		}); err != nil {
 			f.t.Errorf("encode token: %v", err)
@@ -389,11 +392,14 @@ func TestSearchMergedPullRequestsAcrossInstallationSearchesEveryInstallation(t *
 		{id: 1, repos: []string{"acme/widgets"}},
 		{id: 2, repos: []string{"other-org/other-repo"}},
 	}
+	var mu sync.Mutex
 	var queriesSeen []string
 	fake.handle("POST /graphql", func(w http.ResponseWriter, r *http.Request) {
 		_, variables := decodeGraphQLRequest(t, r)
 		q, _ := variables["q"].(string)
+		mu.Lock()
 		queriesSeen = append(queriesSeen, q)
+		mu.Unlock()
 		if strings.Contains(q, "other-org/other-repo") {
 			node := searchNodeJSON(99, "feat: from the second installation", "alice", "2024-01-01T00:00:00Z", "2024-01-01T01:00:00Z")
 			mustEncode(t, w, searchResponseJSON(1, []map[string]any{node}, false, ""))

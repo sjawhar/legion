@@ -771,7 +771,7 @@ func TestDirFilesEnforceMaxFileSize(t *testing.T) {
 // installationsCacheTTL cache (a second call within the TTL makes no further request), and a 403
 // secondary-rate-limit response surfacing as a *RateLimitError via CheckResponse.
 func TestListInstallationsPaginatesCachesAndDetectsARateLimit(t *testing.T) {
-	fake := &fakeGitHub{installationID: 1, tokenExpiresAt: time.Now().Add(time.Hour)}
+	fake := &fakeGitHub{t: t, installationID: 1, tokenExpiresAt: time.Now().Add(time.Hour)}
 	for i := range 150 {
 		fake.appInstallations = append(fake.appInstallations, map[string]any{
 			"id": int64(i + 1), "app_slug": "dispatch-test",
@@ -805,7 +805,7 @@ func TestListInstallationsPaginatesCachesAndDetectsARateLimit(t *testing.T) {
 
 	// A fresh client (so the cache starts empty) hitting a rate limit on its first call surfaces
 	// a *RateLimitError.
-	rateLimited := &fakeGitHub{installationID: 1, tokenExpiresAt: time.Now().Add(time.Hour), appInstallationsRateLimitOnCall: 1}
+	rateLimited := &fakeGitHub{t: t, installationID: 1, tokenExpiresAt: time.Now().Add(time.Hour), appInstallationsRateLimitOnCall: 1}
 	rateLimitedClient := newTestClient(t, rateLimited)
 	_, err = rateLimitedClient.ListInstallations(context.Background())
 	var limited *RateLimitError
