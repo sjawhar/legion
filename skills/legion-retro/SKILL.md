@@ -117,7 +117,7 @@ head whose required check failed, so the tree stops at the merger.
 
 1. Read what the deployment instructions in your system prompt, and the agent guide and pull
    request template of the repository you are working in, derive from the changed paths. When
-   they derive nothing, this step changes nothing: go on to the push.
+   they derive nothing, skip steps 2 to 4 and go on to the push.
 2. Compute it the way they say, for the paths the pull request changes at your commit, the files
    GitHub lists on it: after `cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" git fetch`,
    `jj -R "$LEGION_WORKSPACE" diff --from 'fork_point(<base>@origin | <commit>)' --to <commit> --name-only`
