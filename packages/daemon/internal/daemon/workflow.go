@@ -596,10 +596,16 @@ type connStatus interface {
 	LastError() error
 }
 
-// reconnectWatchdog logs a warn every reconnectWarnEvery while conn is not connected, naming the
-// downtime so far and conn's own LastError, so an operator reading the log sees that NATS has
-// been down and why, instead of just the one disconnect line a reconnect that keeps failing
-// never reaches a reconnected or a closed line to follow.
+// reconnectWatchdog logs a warn once the downtime since conn last connected reaches
+// reconnectWarnEvery, and every reconnectWarnEvery after that while conn stays disconnected —
+// never on the first poll that merely finds it down, which would log a downtime near zero and
+// make this almost as noisy as nats.go's own reconnect wait. Each warn names the downtime so far
+// and conn's own LastError, usually empty during a plain refused dial (nats.go clears its own
+// last-seen error on every failed attempt) and naming the failure's own cause while a handshake
+// keeps failing (nats.go leaves that one in place across attempts), so an operator reading the
+// log sees that NATS has been down, for how long, and why when nats.go has anything to say,
+// instead of just the one disconnect line a reconnect that keeps failing never reaches a
+// reconnected or a closed line to follow.
 func (w *workflowRuntime) reconnectWatchdog(ctx context.Context) {
 	w.reconnectWatchdogWith(ctx, w.conn)
 }
@@ -629,10 +635,11 @@ func (w *workflowRuntime) reconnectWatchdogWith(ctx context.Context, conn connSt
 		if disconnectedSince.IsZero() {
 			disconnectedSince = time.Now()
 		}
-		if !warnedAt.IsZero() && time.Since(warnedAt) < warnEvery {
+		downtime := time.Since(disconnectedSince)
+		if downtime < warnEvery || (!warnedAt.IsZero() && time.Since(warnedAt) < warnEvery) {
 			continue
 		}
-		w.log.Warn("NATS has not reconnected", "downtime", time.Since(disconnectedSince).Round(time.Second).String(), "error", conn.LastError())
+		w.log.Warn("NATS has not reconnected", "downtime", downtime.Round(time.Second).String(), "error", conn.LastError())
 		warnedAt = time.Now()
 	}
 }

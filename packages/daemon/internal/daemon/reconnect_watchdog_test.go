@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -101,4 +102,47 @@ func TestReconnectWatchdogResetsAfterReconnecting(t *testing.T) {
 	})
 	cancel()
 	<-done
+}
+
+var reconnectDowntimeRe = regexp.MustCompile(`downtime=(\S+)`)
+
+// A watchdog that warned on the very first poll after a disconnect — downtime=0s, rounded down
+// from whatever the poll interval happened to be — would be close to as noisy as nats.go's own
+// default 2s reconnect wait: the deep review measured about one ordinary reconnect in five
+// tripping it. The first warn must wait for the downtime itself to reach warnEvery, exactly as
+// pollHoldReleaseWith holds its own first warn for holdWarnAfter, then warn every warnEvery after.
+func TestReconnectWatchdogWarnsOnlyOnceDowntimeReachesWarnEvery(t *testing.T) {
+	var logBuf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logBuf, nil))
+	conn := &fakeConnStatus{connected: true}
+	warnEvery := 1200 * time.Millisecond
+	w := &workflowRuntime{log: log, reconnectPollInterval: 50 * time.Millisecond, reconnectWarnEvery: warnEvery}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { w.reconnectWatchdogWith(ctx, conn); close(done) }()
+
+	conn.set(false, errors.New("handshake failure"))
+	time.Sleep(warnEvery / 2)
+	if strings.Contains(logBuf.String(), "NATS has not reconnected") {
+		t.Fatalf("warned before downtime reached warnEvery: %q", logBuf.String())
+	}
+
+	testwait.Eventually(t, "the watchdog warns once downtime reaches warnEvery", func() bool {
+		return strings.Contains(logBuf.String(), "NATS has not reconnected")
+	})
+	cancel()
+	<-done
+
+	msg := logBuf.String()
+	match := reconnectDowntimeRe.FindStringSubmatch(msg)
+	if match == nil {
+		t.Fatalf("warn log = %q, want a parseable downtime=", msg)
+	}
+	downtime, err := time.ParseDuration(match[1])
+	if err != nil {
+		t.Fatalf("parse downtime %q: %v", match[1], err)
+	}
+	if downtime < time.Second {
+		t.Fatalf("first warn's downtime = %v (logged %q), want >= warnEvery (%v) — a downtime this low means it warned near the first poll, not once downtime reached warnEvery", downtime, match[1], warnEvery)
+	}
 }

@@ -473,8 +473,8 @@ connection lost` and then, once NATS answers again, `NATS connection restored` �
 at nats.go's own default 2 s reconnect wait. A server that keeps refusing to reconnect for any
 reason short of the two shapes that do close it — an unrecognized server `-ERR`, or the same
 authorization error twice in a row (nats.go's own terminal-close rules) — never closes the
-connection and so never logs either of those two lines again: a repeating handshake failure, or
-a repeating permission refusal (`NATS refused the daemon a permission`, above), both retry
+connection and so never logs either of those two lines again: a repeating handshake failure, say
+a server that accepts the TCP connection but never completes the protocol handshake, retries
 silently behind the one `NATS connection lost` line. A separate warn, `NATS has not
 reconnected`, covers that gap: logged at most once every 3 minutes while the connection stays
 down, naming the downtime so far and the connection's own last-seen error — usually empty during
