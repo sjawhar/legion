@@ -351,17 +351,10 @@ type plan struct {
 	// roleReferences are the task agents and skills the shared role prompts name
 	// (prompts.RoleReferences), which the gate on either runtime resolves beside the plugin's own.
 	roleReferences promptrefs.Names
-	// stream is the worker stream's address: the listener binds it, and every agent's shim dials it,
-	// unless advertiseHost overrides the host every shim is told (runtime.kubernetes's
-	// advertise_host; "" under tmux and with none configured, where the listener's own bound
-	// address is exactly what every shim dials, as it always was).
-	stream string
-	// advertiseHost is cfg.AdvertiseHost, set only under kubernetes with one configured:
-	// openSupervision builds the address every shim dials from it plus the listener's actual
-	// port, in place of the listener's own bound address — the pod-facing Service name, never the
-	// 0.0.0.0 or :: the listener itself bound to reach every interface.
-	advertiseHost string
-	newRuntime    runtimeFactory
+	// stream is the worker stream's address: the listener binds it, and every agent's shim dials
+	// it, or advertise_host at its port when the file sets one (shimAddress).
+	stream     string
+	newRuntime runtimeFactory
 	// gate is the plugin gate run before anything is opened (pluginGate); nil under a runtime with
 	// no host Oh My Pi, and for a replaced runtime without one.
 	gate func(ctx context.Context) error
@@ -546,18 +539,16 @@ type supervision struct {
 	stopOnce     sync.Once
 }
 
-// shimAddress is the address every agent's shim dials: bound verbatim, unless advertiseHost
-// replaces its host (runtime.kubernetes.advertise_host, carried onto the plan by prepareSandbox),
-// keeping bound's own port — the kernel's own choice when the configured worker_stream_port was 0,
-// the configured one otherwise. "" advertiseHost (every tmux boot, and kubernetes with none
-// configured) returns bound unchanged: the listener's own address is exactly what every shim
-// dials, as it always was. bound a form other than "tcp://host:port" (never produced by this
-// package's own listener) also returns it unchanged, rather than build a worse address.
+// shimAddress is the address every agent's shim dials: the listener's bound address, or, when
+// advertiseHost (runtime.kubernetes.advertise_host) names one, that host at the bound port, the
+// kernel's choice when worker_stream_port was 0. A bound address that is not tcp://host:port (a
+// unix socket's) is returned unchanged.
 func shimAddress(bound, advertiseHost string) string {
-	if advertiseHost == "" {
+	hostport, ok := strings.CutPrefix(bound, "tcp://")
+	if advertiseHost == "" || !ok {
 		return bound
 	}
-	_, port, err := net.SplitHostPort(strings.TrimPrefix(bound, "tcp://"))
+	_, port, err := net.SplitHostPort(hostport)
 	if err != nil {
 		return bound
 	}
@@ -586,7 +577,7 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 		cancelStream()
 		return nil, err
 	}
-	rt, err := p.newRuntime(supervising, listener, shimAddress(listener.Addr(), p.advertiseHost), apps)
+	rt, err := p.newRuntime(supervising, listener, shimAddress(listener.Addr(), cfg.AdvertiseHost), apps)
 	if err != nil {
 		cancel()
 		cancelStream()

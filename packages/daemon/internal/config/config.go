@@ -45,15 +45,13 @@ type Config struct {
 	Project string
 	Port    int
 	Bind    string
-	// AdvertiseHost is `advertise_host`: the address every pod's shim dials for the worker
-	// stream (its `--connect tcp://<host>:<worker_stream_port>`) in place of Bind, once Bind names
-	// a listen-only address (`0.0.0.0` under kubernetes) rather than one a pod can dial.
-	// `daemon_url` (DaemonURL, `LEGION_DAEMON_URL`) is unaffected: it is already required and
-	// already held to the same reachability refusal, so it names the pod-facing address on its
-	// own. "" (the default) keeps Bind as the pod's own address too, today's behaviour; a
-	// Kubernetes Service's DNS name is the expected value otherwise. Unused outside kubernetes. A
-	// bare host name or IP address: no scheme, port, or brackets (readAdvertiseHost checks the
-	// file's own text; the daemon is what combines it with WorkerStreamPort).
+	// AdvertiseHost is `advertise_host`: the host every pod's shim dials the worker stream at
+	// (`--connect tcp://<host>:<worker_stream_port>`) in Bind's place, so Bind can be the
+	// unspecified address a daemon running as a pod listens on. "" (the default) has pods dial
+	// Bind. A Kubernetes Service's DNS name is the expected value; unused outside kubernetes. A bare
+	// host name or IP address, with no scheme, port, or brackets (readAdvertiseHost); the daemon
+	// combines it with the listener's port (shimAddress, internal/daemon/daemon.go). `daemon_url`
+	// names the pod-facing API address on its own.
 	AdvertiseHost string
 	PostgresDSN   string
 	StateDir      string

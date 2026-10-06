@@ -408,10 +408,10 @@ func TestTheWorkerContainerNamesItsGrantFileInMemory(t *testing.T) {
 	t.Fatalf("the grant file %s is on volume %q, which is not an in-memory emptyDir", want, volume)
 }
 
-// A pod's own IP changes on every restart, so under kubernetes the daemon hands pods a stable
-// address instead — a Kubernetes Service's DNS name, which readSandbox (internal/daemon/kubernetes.go)
-// builds StreamURL and DaemonURL from once bind becomes a listen-only 0.0.0.0. Neither Options
-// field needs an IP: the manifest carries each exactly as configured.
+// A pod's own IP changes on every restart, so a daemon that runs as a pod hands pods a stable
+// address instead, a Kubernetes Service's DNS name: StreamURL is advertise_host at the worker
+// stream's port (shimAddress, internal/daemon/daemon.go) and DaemonURL is daemon_url. Neither
+// Options field needs an IP: the manifest carries each exactly as configured.
 func TestTheManifestCarriesADNSNamedStreamAndDaemonURL(t *testing.T) {
 	opts := goldenOptions()
 	opts.StreamURL = "tcp://legion-daemon-widgets.legion.svc:13371"

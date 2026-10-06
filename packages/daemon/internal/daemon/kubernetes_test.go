@@ -228,9 +228,9 @@ func TestPrepareDerivesTheWorkerStreamAddressFromWorkerStreamPort(t *testing.T) 
 	}
 }
 
-// readSandbox's own placeholder opts.StreamURL is always bind-based, advertise_host included: the
-// substitution happens later, in openSupervision, once the real listener (and its real port)
-// exists — readSandbox cannot build the final address itself.
+// readSandbox's opts.StreamURL is always the bind-based address the listener binds, advertise_host
+// included: openSupervision substitutes advertise_host once the real listener (and its real port)
+// exists.
 func TestReadSandboxsPlaceholderStreamIsAlwaysBindBased(t *testing.T) {
 	for _, tc := range []struct {
 		name          string
@@ -249,42 +249,22 @@ func TestReadSandboxsPlaceholderStreamIsAlwaysBindBased(t *testing.T) {
 				t.Fatalf("readSandbox: %v", err)
 			}
 			want := "tcp://" + net.JoinHostPort(tc.bind, "13371")
-			if reads.listenAddr != want || reads.opts.StreamURL != want {
-				t.Errorf("listenAddr = %q, opts.StreamURL = %q, want both %q (bind: the advertised address is substituted later)", reads.listenAddr, reads.opts.StreamURL, want)
+			if reads.opts.StreamURL != want {
+				t.Errorf("opts.StreamURL = %q, want %q (bind: the advertised address is substituted later)", reads.opts.StreamURL, want)
 			}
 		})
 	}
 }
 
-// prepareSandbox carries cfg.AdvertiseHost onto the plan unchanged — "" with none configured — so
-// openSupervision, which has no config.Config of its own, can substitute it for the listener's
-// bound host.
-func TestPrepareCarriesAdvertiseHostOntoThePlan(t *testing.T) {
-	cfg := kubernetesConfig(t, "https://127.0.0.1:1")
-	cfg.EnvoyTokenFile = filepath.Join(t.TempDir(), "envoy-token")
-	if err := os.WriteFile(cfg.EnvoyTokenFile, []byte("envoy-bearer\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	cfg.NatsNkeySeedFile = testnats.SeedFile(t, testnats.UserSeed(t))
-	cfg.Bind, cfg.AdvertiseHost = "0.0.0.0", "legion-daemon-legsmoke.legion.svc"
-
-	p, err := prepare(cfg, quietLogger(), overrides{environ: []string{}})
-	if err != nil {
-		t.Fatalf("prepare: %v", err)
-	}
-	if p.advertiseHost != "legion-daemon-legsmoke.legion.svc" {
-		t.Errorf("plan.advertiseHost = %q, want cfg.AdvertiseHost carried through unchanged", p.advertiseHost)
-	}
-}
-
-// shimAddress is where advertise_host actually takes effect: the pure substitution openSupervision
-// applies to the listener's bound address before handing it to the runtime factory.
+// shimAddress is where advertise_host takes effect: the substitution openSupervision applies to the
+// listener's bound address before handing it to the runtime factory.
 func TestShimAddressSubstitutesAdvertiseHostsHostKeepingTheBoundPort(t *testing.T) {
 	for _, tc := range []struct{ name, bound, advertiseHost, want string }{
 		{"no advertise_host, a real bind", "tcp://192.0.2.30:13371", "", "tcp://192.0.2.30:13371"},
 		{"advertise_host over an IPv4 wildcard bind", "tcp://0.0.0.0:34353", "legion-daemon-legsmoke.legion.svc", "tcp://legion-daemon-legsmoke.legion.svc:34353"},
 		{"advertise_host over an IPv6 wildcard bind", "tcp://[::]:34353", "legion-daemon-legsmoke.legion.svc", "tcp://legion-daemon-legsmoke.legion.svc:34353"},
 		{"advertise_host over a real bind", "tcp://192.0.2.30:13371", "legion-daemon-legsmoke.legion.svc", "tcp://legion-daemon-legsmoke.legion.svc:13371"},
+		{"advertise_host beside a unix socket", "unix:///run/legion/stream.sock", "legion-daemon-legsmoke.legion.svc", "unix:///run/legion/stream.sock"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := shimAddress(tc.bound, tc.advertiseHost); got != tc.want {
