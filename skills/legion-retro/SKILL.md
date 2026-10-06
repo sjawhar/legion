@@ -67,13 +67,24 @@ Do not start retro before step 2 or skip it because the change seems mechanical;
 ## Durable outputs
 
 Write the integrated learning as one or more discoverable documents under `docs/solutions/`.
-Organize by reusable topic rather than by pull request. Search `docs/solutions/` for the topic
-first: when a document already states the rule, update it in place (sharpen the rule, add this
-issue and pull request to `related_issues`) rather than writing a sibling; when the new learning
-replaces an old document, set the old one's `status: superseded` and add
-`superseded_by: docs/solutions/<path>.md`. Open each document with the rule in a few imperative
-lines; the incident that taught it goes in an Evidence section below, never in the rule. Each
-document uses this front matter:
+Organize by reusable topic rather than by pull request, but never edit a document you did not
+write this retro — not its frontmatter, not its body. Two trees' retros land within the same hour
+often enough that an in-place edit (another `related_issues` entry, a sharpened sentence, a
+`status` flip) conflicts with any other tree's edit to the same lines of the same file: two
+different trees each edited one shared note's `related_issues` list and body within a day on
+the deployment repository, forcing a backward move each time.
+Search `docs/solutions/` for the topic first, then always write a new, dated file of your own:
+
+- **A fresh topic:** `docs/solutions/<category>/<slug>.md` with the rule in a few imperative
+  lines; the incident goes in an Evidence section below, never in the rule.
+- **A topic an existing document already covers:** a new file in the same category whose first
+  line reads `Extends docs/solutions/<existing-path>.md.` and whose rule states only the delta.
+- **A topic an existing document states wrongly:** a new file whose frontmatter adds
+  `supersedes: docs/solutions/<existing-path>.md` and whose first line says why; leave the old
+  file untouched — reconciling it is a later pass outside any merge path, where a conflict costs
+  nothing.
+
+Each document uses this front matter:
 
 ```yaml
 ---
