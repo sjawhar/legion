@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -836,6 +837,27 @@ func TestCreateRequestNeedingTwoApproversIs400MixedApprovers(t *testing.T) {
 		map[string]any{"request": compact, "session_id": nil})
 	if status != http.StatusBadRequest || decode[wireError](t, body).Code != "MIXED_APPROVERS" {
 		t.Fatalf("POST /v1/requests (DEEL_API_KEY, SHARED_KEY) = %d %s, want 400 MIXED_APPROVERS", status, body)
+	}
+}
+
+// TestCreateRequestWithInvalidSessionIDIs400SessionIDInput pins, over real HTTP, that a
+// session_id override that is too long is refused 400 SESSION_ID_INPUT at record time
+// (LEGION-587's hardening). requests.TestCreateRefusesAnInvalidSessionID (machine_test.go)
+// already exercises Machine.Create's validSessionID bound directly (too-long, whitespace,
+// control-character, and the exact-128 boundary); this pins the same bound at the HTTP handler
+// boundary, the way UNKNOWN_SECRET and MIXED_APPROVERS are already covered above.
+func TestCreateRequestWithInvalidSessionIDIs400SessionIDInput(t *testing.T) {
+	ts := newTestServer(t)
+	enrollmentID, sessionKey := ts.newSessionEnrollment(t, "box", "box-"+t.Name(), "sjawhar")
+	compact := signAgentSecretRequest(t, sessionKey, ts.URL, "need it", "DEEL_API_KEY")
+	status, body := ts.session(t, sessionKey, enrollmentID, http.MethodPost, "/v1/requests",
+		map[string]any{"request": compact, "session_id": strings.Repeat("a", 129)})
+	if status != http.StatusBadRequest {
+		t.Fatalf("POST /v1/requests (session_id too long) = %d, want 400: %s", status, body)
+	}
+	werr := decode[wireError](t, body)
+	if werr.Code != "SESSION_ID_INPUT" {
+		t.Fatalf("code = %q, want SESSION_ID_INPUT", werr.Code)
 	}
 }
 
