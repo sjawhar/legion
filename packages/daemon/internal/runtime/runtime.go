@@ -139,6 +139,17 @@ type RemovableWorkspace struct {
 	MergedHead string `json:"mergedHead,omitempty"`
 }
 
+// RemovableWorkspacesPayload is LEGION_REMOVABLE_WORKSPACES' own wire shape (dispatch://LEGION-583):
+// Workspaces, the daemon's removable-workspace candidates, and NotAfter, the absolute instant past
+// which workspace-init must no longer trust them, together in one JSON object so the two can
+// never arrive apart. relaunch (internal/runtime/sandbox) encodes it; workspace-init
+// (cmd/legion/workspace_init.go) decodes it strictly — an unknown field, a zero NotAfter, or an
+// empty Workspaces is the same malformed input as invalid JSON: remove nothing, logged why.
+type RemovableWorkspacesPayload struct {
+	NotAfter   time.Time            `json:"notAfter"`
+	Workspaces []RemovableWorkspace `json:"workspaces"`
+}
+
 // SpawnSpec is everything a runtime needs to start one agent: which claim it is, what it is
 // working on, and the environment, secrets, and prompt it starts with. The claim token travels
 // with the process because the runtime addresses the agent's connection by it — `Suspend` and

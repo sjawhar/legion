@@ -98,7 +98,7 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 		// (eviction, node drain, a hand deletion) runs workspace-init from this same pod template,
 		// list included, without ever passing through here again. workspace-init closes that case
 		// itself: it refuses to act on this list unless its own fetch (fetchStartedFile) started
-		// within the init-wait window (initWaitSeconds) of the notAfter stamped below
+		// no later than the notAfter stamped below, this launch's time plus initWaitSeconds
 		// (workspace_init.go's own removableWorkspacesEnv doc comment), since a recreated pod's
 		// fetch starts hours later, whatever its own clone then takes.
 		//

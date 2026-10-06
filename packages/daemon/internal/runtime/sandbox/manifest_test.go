@@ -685,7 +685,7 @@ func TestTheRemovableWorkspacesReachTheInitContainerAlone(t *testing.T) {
 		t.Fatal(err)
 	}
 	notAfter := time.Now().Add(time.Hour)
-	wantCandidates, err := json.Marshal(removableWorkspacesPayload{
+	wantCandidates, err := json.Marshal(runtime.RemovableWorkspacesPayload{
 		NotAfter:   notAfter,
 		Workspaces: []runtime.RemovableWorkspace{{Issue: "LEGION-100"}, {Issue: "LEGION-101", MergedHead: "abc123"}},
 	})

@@ -72,7 +72,7 @@ func removableEnv(t *testing.T, candidates []runtime.RemovableWorkspace) string 
 // default.
 func removableEnvWithNotAfter(t *testing.T, candidates []runtime.RemovableWorkspace, notAfter time.Time) string {
 	t.Helper()
-	encoded, err := json.Marshal(removableWorkspacesPayload{NotAfter: notAfter, Workspaces: candidates})
+	encoded, err := json.Marshal(runtime.RemovableWorkspacesPayload{NotAfter: notAfter, Workspaces: candidates})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,6 +147,29 @@ func TestRemoveFinishedWorkspacesRemovesNothingPastItsNotAfter(t *testing.T) {
 	output := stdout.String()
 	if !strings.Contains(output, "past the removable-workspaces list's notAfter") {
 		t.Errorf("stdout %q, want it to name notAfter", output)
+	}
+	if strings.Contains(output, "LEGION-100") {
+		t.Errorf("stdout %q names LEGION-100 at all, want the pass to stop before reaching any candidate", output)
+	}
+}
+
+// A payload with no notAfter at all — a malformed or truncated LEGION_REMOVABLE_WORKSPACES — is
+// refused the same way an already-past notAfter is: removing nothing, naming why, before reaching
+// any candidate.
+func TestRemoveFinishedWorkspacesRemovesNothingWithNoNotAfter(t *testing.T) {
+	root := t.TempDir()
+	repository, err := ghrepo.Parse("--repo", winitRepo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(removableWorkspacesEnv, `{"workspaces":[{"issue":"LEGION-100"}]}`)
+
+	var stdout bytes.Buffer
+	removeFinishedWorkspaces(context.Background(), panicRunner{t}, root, repository, "LEGION-200", &stdout, time.Now, removalBudget, time.Now())
+
+	output := stdout.String()
+	if !strings.Contains(output, "has no notAfter") {
+		t.Errorf("stdout %q, want it to name the missing notAfter", output)
 	}
 	if strings.Contains(output, "LEGION-100") {
 		t.Errorf("stdout %q names LEGION-100 at all, want the pass to stop before reaching any candidate", output)
@@ -410,9 +433,7 @@ func TestWorkspaceInitRemovesAFinishedChildEvenWithAFreshConfigHomeForTheSecondP
 // which LEGION-585 bounds at up to 30 minutes rather than the 5-minute command cap — takes long
 // enough that wall-clock time at removal is already past the list's notAfter: what the fetch-start
 // comparison checks is this pod's own fetch, recorded once before the clone ever started, not how
-// long the clone (or anything after it) then took. Before this fix, comparing wall-clock time at
-// removal instead meant a slow clone on exactly the large repositories LEGION-585 exists for could
-// make every launch skip removal, never once failing safe into actually removing anything.
+// long the clone (or anything after it) then took.
 func TestWorkspaceInitRemovesACleanCandidateEvenWhenItsCloneOutlastsTheWindow(t *testing.T) {
 	v := newTreeVolume(t).withRemote(t)
 	v.fetch(t)
@@ -495,6 +516,56 @@ func readFetchStartedForTest(t *testing.T, feed string) time.Time {
 		t.Fatalf("read this test's own fetch-started file: %v", err)
 	}
 	return started
+}
+
+// runtime.RemovableWorkspacesPayload is the one wire shape both sides use: relaunch
+// (internal/runtime/sandbox's launch.setRemovable) encodes it, workspace-init
+// (removeFinishedWorkspaces) decodes it strictly. Round-tripping a payload with both fields
+// populated — NotAfter and a candidate carrying MergedHead — through exactly the same type on
+// both ends proves nothing is lost or renamed between the two, now that there is only one
+// declaration of it (dispatch://LEGION-583).
+func TestRemovableWorkspacesPayloadRoundTripsBetweenTheLaunchAndWorkspaceInitSides(t *testing.T) {
+	root := t.TempDir()
+	repository, err := ghrepo.Parse("--repo", winitRepo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	notAfter := time.Now().Add(time.Hour)
+	encoded, err := json.Marshal(runtime.RemovableWorkspacesPayload{
+		NotAfter:   notAfter,
+		Workspaces: []runtime.RemovableWorkspace{{Issue: "LEGION-100", MergedHead: strings.Repeat("a", 40)}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(removableWorkspacesEnv, string(encoded))
+
+	var stdout bytes.Buffer
+	removeFinishedWorkspaces(context.Background(), panicRunner{t}, root, repository, "LEGION-200", &stdout, time.Now, removalBudget, time.Now())
+
+	if want := "LEGION-100 has no workspace on this volume; nothing to remove"; !strings.Contains(stdout.String(), want) {
+		t.Errorf("stdout %q, want %q: the round-tripped candidate was never reached", stdout.String(), want)
+	}
+}
+
+// readFetchStarted refuses when fetchStartedFile does not exist at all: workspace-fetch never ran
+// in this feed, or ran against a different one, either way nothing this pod can trust.
+func TestReadFetchStartedFailsWhenTheFileIsMissing(t *testing.T) {
+	if _, err := readFetchStarted(t.TempDir()); err == nil {
+		t.Fatal("readFetchStarted succeeded against an empty feed with no fetch-started file, want an error")
+	}
+}
+
+// readFetchStarted refuses when fetchStartedFile exists but is not a valid RFC 3339 timestamp: a
+// truncated write, or content from something other than workspace-init fetch itself.
+func TestReadFetchStartedFailsWhenTheFileIsUnparsable(t *testing.T) {
+	feed := t.TempDir()
+	if err := os.WriteFile(filepath.Join(feed, fetchStartedFile), []byte("not a timestamp"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readFetchStarted(feed); err == nil {
+		t.Fatal("readFetchStarted succeeded against an unparsable fetch-started file, want an error")
+	}
 }
 
 // A done child whose last commit is only the merged pull request's head — GitHub deletes a squash

@@ -133,25 +133,16 @@ type launch struct {
 	removableWorkspacesJSON string
 }
 
-// removableWorkspacesPayload is LEGION_REMOVABLE_WORKSPACES' own wire shape (its mirror,
-// cmd/legion's removableWorkspacesPayload, decodes it): the candidate list and the absolute
-// instant past which workspace-init must no longer trust it, one JSON object so the two can never
-// arrive apart (dispatch://LEGION-583).
-type removableWorkspacesPayload struct {
-	NotAfter   time.Time                    `json:"notAfter"`
-	Workspaces []runtime.RemovableWorkspace `json:"workspaces"`
-}
-
-// setRemovable JSON-encodes candidates and notAfter into l.removableWorkspacesJSON's combined
-// payload, called from relaunch with Options.Removable's result and the launch time plus the
-// tree's own initWaitSeconds, once the tree's launch turn is held. The encoding cannot fail (plain
-// strings and a time.Time), but initEnvironment has no error to return, so a refusal here is
-// relaunch's own to surface before it ever patches the Sandbox.
+// setRemovable JSON-encodes candidates and notAfter into l.removableWorkspacesJSON as
+// runtime.RemovableWorkspacesPayload, called from relaunch with Options.Removable's result and
+// the launch time plus initWaitSeconds, once the tree's launch turn is held. The encoding cannot
+// fail (plain strings and a time.Time), but initEnvironment has no error to return, so a refusal
+// here is relaunch's own to surface before it ever patches the Sandbox.
 func (l *launch) setRemovable(candidates []runtime.RemovableWorkspace, notAfter time.Time) error {
 	if len(candidates) == 0 {
 		return nil
 	}
-	encoded, err := json.Marshal(removableWorkspacesPayload{NotAfter: notAfter, Workspaces: candidates})
+	encoded, err := json.Marshal(runtime.RemovableWorkspacesPayload{NotAfter: notAfter, Workspaces: candidates})
 	if err != nil {
 		return fmt.Errorf("sandbox launch %s: encode LEGION_REMOVABLE_WORKSPACES: %w", l.spec.Claim, err)
 	}
@@ -624,7 +615,7 @@ func fetchEnvironment() []corev1.EnvVar {
 // container, so workspace-init needs its own. LEGION_REMOVABLE_WORKSPACES is
 // l.removableWorkspacesJSON, set by setRemovable (called from relaunch, after the daemon's
 // candidate list is read, last, under the tree's launch turn), one JSON object carrying both the
-// list and notAfter (RFC 3339: the launch time plus the tree's own initWaitSeconds) together, so
+// list and notAfter (RFC 3339: the launch time plus initWaitSeconds) together, so
 // the two can never arrive apart; absent when the daemon found none. notAfter is what bounds how
 // long a pod the Sandbox controller recreates on its own may still trust this same list, read by
 // its own fresh workspace-fetch's start time rather than wall-clock time at removal
