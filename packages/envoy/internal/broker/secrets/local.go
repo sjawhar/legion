@@ -299,9 +299,9 @@ func (l *Local) GetSecretValue(_ context.Context, in *secretsmanager.GetSecretVa
 // answering its ARN and, when it was given a value, the version holding it; one created with no
 // SecretString has no version, as in Secrets Manager. A name Local holds is
 // ResourceExistsException, or InvalidRequestException while its secret is scheduled for deletion,
-// as Secrets Manager answers both. Local holds a name, a key, tags and a non-empty string value:
-// a request naming no secret, an empty or binary value, a description, replica regions or a type
-// is refused.
+// as Secrets Manager answers both. Local holds a name, a key, tags and a non-empty string value in
+// one version it names itself: a request naming no secret, an empty or binary value, a client
+// request token, a description, replica regions or a type is refused.
 func (l *Local) CreateSecret(_ context.Context, in *secretsmanager.CreateSecretInput, _ ...func(*secretsmanager.Options)) (*secretsmanager.CreateSecretOutput, error) {
 	name := aws.ToString(in.Name)
 	switch {
@@ -309,8 +309,8 @@ func (l *Local) CreateSecret(_ context.Context, in *secretsmanager.CreateSecretI
 		return nil, refuse("CreateSecret names no secret")
 	case in.SecretString != nil && *in.SecretString == "":
 		return nil, refuse("an empty SecretString is no value Local can hold; leave it out to create a secret with no value")
-	case in.SecretBinary != nil || in.Description != nil || len(in.AddReplicaRegions) > 0 || in.Type != nil:
-		return nil, refuse("CreateSecret holds a name, a key, tags and a string value only")
+	case in.SecretBinary != nil || in.ClientRequestToken != nil || in.Description != nil || len(in.AddReplicaRegions) > 0 || in.Type != nil:
+		return nil, refuse("CreateSecret holds a name, a key, tags and a string value only, in one version Local names itself")
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -335,10 +335,11 @@ func (l *Local) CreateSecret(_ context.Context, in *secretsmanager.CreateSecretI
 // PutSecretValue makes SecretString the AWSCURRENT value of the secret SecretId names, by name or
 // by LocalARN; ResourceNotFoundException for one Local does not hold and InvalidRequestException
 // for one scheduled for deletion, as in Secrets Manager. Local holds one string value, labelled
-// AWSCURRENT: an empty or binary value, a rotation token or another version stage is refused.
+// AWSCURRENT, in one version it names itself: an empty or binary value, a client request token, a
+// rotation token or another version stage is refused.
 func (l *Local) PutSecretValue(_ context.Context, in *secretsmanager.PutSecretValueInput, _ ...func(*secretsmanager.Options)) (*secretsmanager.PutSecretValueOutput, error) {
-	if aws.ToString(in.SecretString) == "" || in.SecretBinary != nil || in.RotationToken != nil {
-		return nil, refuse("PutSecretValue takes a non-empty SecretString only")
+	if aws.ToString(in.SecretString) == "" || in.SecretBinary != nil || in.ClientRequestToken != nil || in.RotationToken != nil {
+		return nil, refuse("PutSecretValue takes a non-empty SecretString only, into one version Local names itself")
 	}
 	for _, stage := range in.VersionStages {
 		if stage != "AWSCURRENT" {

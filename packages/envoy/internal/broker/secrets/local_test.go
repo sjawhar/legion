@@ -144,10 +144,10 @@ func TestLocalWriteLifecycle(t *testing.T) {
 // TestLocalWritesRefuseWhatSecretsManagerRefuses pins the refusals a write meets: a change to a
 // secret Local does not hold is ResourceNotFoundException, and a recovery window outside 7 to 30
 // days InvalidParameterException, as in Secrets Manager. Every other request Local cannot answer as
-// Secrets Manager would (one naming no secret or no value, an empty or binary value, a version
-// stage other than AWSCURRENT, a forced deletion) is refused with an error naming secrets.Local
-// rather than answered or stored as something else. A secret created with no value is held with no
-// version, as Secrets Manager holds one.
+// Secrets Manager would (one naming no secret or no value, an empty or binary value, a client
+// request token, a version stage other than AWSCURRENT, a forced deletion) is refused with an error
+// naming secrets.Local rather than answered or stored as something else. A secret created with no
+// value is held with no version, as Secrets Manager holds one.
 func TestLocalWritesRefuseWhatSecretsManagerRefuses(t *testing.T) {
 	ctx := context.Background()
 	held := aws.String("example/agent-secrets/held")
@@ -178,9 +178,11 @@ func TestLocalWritesRefuseWhatSecretsManagerRefuses(t *testing.T) {
 		"CreateSecret(no Name)":                    second(l.CreateSecret(ctx, &secretsmanager.CreateSecretInput{SecretString: aws.String("v")})),
 		"CreateSecret(empty SecretString)":         second(l.CreateSecret(ctx, &secretsmanager.CreateSecretInput{Name: fresh, SecretString: aws.String("")})),
 		"CreateSecret(SecretBinary)":               second(l.CreateSecret(ctx, &secretsmanager.CreateSecretInput{Name: fresh, SecretBinary: []byte("v")})),
+		"CreateSecret(ClientRequestToken)":         second(l.CreateSecret(ctx, &secretsmanager.CreateSecretInput{Name: fresh, SecretString: aws.String("v"), ClientRequestToken: aws.String("00000000-0000-4000-8000-000000000001")})),
 		"PutSecretValue(no value)":                 second(l.PutSecretValue(ctx, &secretsmanager.PutSecretValueInput{SecretId: held})),
 		"PutSecretValue(empty SecretString)":       second(l.PutSecretValue(ctx, &secretsmanager.PutSecretValueInput{SecretId: held, SecretString: aws.String("")})),
 		"PutSecretValue(SecretBinary)":             second(l.PutSecretValue(ctx, &secretsmanager.PutSecretValueInput{SecretId: held, SecretBinary: []byte("v")})),
+		"PutSecretValue(ClientRequestToken)":       second(l.PutSecretValue(ctx, &secretsmanager.PutSecretValueInput{SecretId: held, SecretString: aws.String("v2"), ClientRequestToken: aws.String("00000000-0000-4000-8000-000000000002")})),
 		"PutSecretValue(VersionStages AWSPENDING)": second(l.PutSecretValue(ctx, &secretsmanager.PutSecretValueInput{SecretId: held, SecretString: aws.String("v2"), VersionStages: []string{"AWSPENDING"}})),
 		"DeleteSecret(ForceDeleteWithoutRecovery)": second(l.DeleteSecret(ctx, &secretsmanager.DeleteSecretInput{SecretId: held, ForceDeleteWithoutRecovery: aws.Bool(true)})),
 	} {
